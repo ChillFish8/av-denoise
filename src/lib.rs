@@ -22,6 +22,13 @@ pub struct Options {
     ///
     /// By default, this will be all accelerators the binary was compiled with.
     pub accelerators: Vec<Accelerator>,
+    #[arg(long, short, default_value = "10")]
+    /// The number of frames to buffer and group into a batch before uploading
+    /// and processing on the accelerator.
+    ///
+    /// Until a certain point, the higher the batch size the better your efficiency and performance,
+    /// at the cost of increasing the memory usage of the accelerator, i.e. VRAM.
+    pub batch_size: usize,
 }
 
 /// Run denoiser on the given input.
@@ -77,11 +84,15 @@ where
     R: cubecl::Runtime + 'static,
     I: source::InputSource + Send + 'static,
 {
-    let width = input.width();
-    let height = input.height();
-    let bit_depth = input.bit_depth();
+    let _width = input.width();
+    let _height = input.height();
+    let _bit_depth = input.bit_depth();
     let device = <R::Device as Default>::default();
     let client = R::client(&device);
 
-    todo!()
+    let batcher = batcher::create_batcher(client.clone(), input, opts.batch_size);
+
+    batcher.join_worker().context("join batcher worker")?;
+
+    Ok(())
 }
