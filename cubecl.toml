@@ -1,0 +1,5 @@
+[profiling]
+# logger = { level = "basic", stdout = true }
+
+[compilation]
+logger = { level = "basic", file = "cubecl.log", append = true }
