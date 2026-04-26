@@ -1,3 +1,5 @@
+#[cfg(test)]
+pub(crate) mod mock;
 pub mod stdin;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -72,6 +74,16 @@ impl<'a> VideoFrameBuffer<'a> {
     /// Return a reference to the inner YUV slice buffer.
     pub fn as_yuv(&'a mut self) -> &'a mut [u8] {
         self.inner
+    }
+
+    /// Return the total size of the packed YUV frame in bytes.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Copy a packed YUV frame into this buffer.
+    pub fn copy_from_yuv(&mut self, src: &[u8]) {
+        self.inner.copy_from_slice(src);
     }
 
     /// Return a reference to the inner Y slice buffer.

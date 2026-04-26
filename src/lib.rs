@@ -1,3 +1,4 @@
+mod batcher;
 mod models;
 mod sniff;
 pub mod source;
@@ -30,10 +31,12 @@ where
 {
     tracing::info!("initialising with accelerators: {:?}", opts.accelerators);
 
+    run_pipeline(opts, input).context("run pipeline")?;
+
     Ok(())
 }
 
-fn run_evaluation_pipeline<I>(opts: Options, input: I) -> anyhow::Result<()>
+fn run_pipeline<I>(opts: Options, input: I) -> anyhow::Result<()>
 where
     I: source::InputSource,
 {
@@ -47,33 +50,29 @@ where
     match best_accelerator {
         #[cfg(feature = "cuda")]
         Accelerator::Cuda => {
-            dispatch_evaluation_pipeline::<cubecl::cude::CudaRuntime, I>(opts, input)
+            dispatch_pipeline::<cubecl::cude::CudaRuntime, I>(opts, input)
                 .context("dispatch pipeline on CUDA runtime")
         },
         #[cfg(feature = "rocm")]
-        Accelerator::Rocm => {
-            dispatch_evaluation_pipeline::<cubecl::hip::HipRuntime, I>(opts, input)
-                .context("dispatch pipeline on ROCM runtime")
-        },
+        Accelerator::Rocm => dispatch_pipeline::<cubecl::hip::HipRuntime, I>(opts, input)
+            .context("dispatch pipeline on ROCM runtime"),
         #[cfg(feature = "vulkan")]
         Accelerator::Vulkan => {
-            dispatch_evaluation_pipeline::<cubecl::wgpu::WgpuRuntime, I>(opts, input)
+            dispatch_pipeline::<cubecl::wgpu::WgpuRuntime, I>(opts, input)
                 .context("dispatch pipeline on VULKAN runtime")
         },
         #[cfg(feature = "metal")]
         Accelerator::Metal => {
-            dispatch_evaluation_pipeline::<cubecl::wgpu::WgpuRuntime, I>(opts, input)
+            dispatch_pipeline::<cubecl::wgpu::WgpuRuntime, I>(opts, input)
                 .context("dispatch pipeline on METAL runtime")
         },
         #[cfg(feature = "cpu")]
-        Accelerator::Cpu => {
-            dispatch_evaluation_pipeline::<cubecl::cpu::CpuRuntime, I>(opts, input)
-                .context("dispatch pipeline on CPU runtime")
-        },
+        Accelerator::Cpu => dispatch_pipeline::<cubecl::cpu::CpuRuntime, I>(opts, input)
+            .context("dispatch pipeline on CPU runtime"),
     }
 }
 
-fn dispatch_evaluation_pipeline<R, I>(opts: Options, input: I) -> anyhow::Result<()>
+fn dispatch_pipeline<R, I>(opts: Options, input: I) -> anyhow::Result<()>
 where
     R: cubecl::Runtime + 'static,
     I: source::InputSource + Send + 'static,
