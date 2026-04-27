@@ -62,7 +62,10 @@ pub(crate) fn find_similar_blocks(
         r_min = ref_r - n_s;
     }
     let r_max_upper = ref_r + n_s + 1;
+
+    // Mul by 0 for CubeCL work around.
     let valid_rows = ref_r * 0 + (img_h - k + 1);
+
     let mut r_max = valid_rows;
     if r_max_upper < valid_rows {
         r_max = r_max_upper;
@@ -73,7 +76,10 @@ pub(crate) fn find_similar_blocks(
         c_min = ref_c - n_s;
     }
     let c_max_upper = ref_c + n_s + 1;
+
+    // Mul by 0 for CubeCL work around.
     let valid_cols = ref_c * 0 + (img_w - k + 1);
+
     let mut c_max = valid_cols;
     if c_max_upper < valid_cols {
         c_max = c_max_upper;
@@ -199,8 +205,8 @@ mod tests {
         #[comptime] n_max: usize,
     ) {
         let n_actual = find_similar_blocks(
-            dcts, ref_r, ref_c, cand_dist, cand_r, cand_c, out_rows,
-            out_cols, tau_match, img_h, img_w, k, n_s, n_max,
+            dcts, ref_r, ref_c, cand_dist, cand_r, cand_c, out_rows, out_cols, tau_match,
+            img_h, img_w, k, n_s, n_max,
         );
         out_n_actual[0] = f32::cast_from(n_actual);
     }
@@ -297,7 +303,8 @@ mod tests {
         let dcts = make_ranked_dcts(img_h, img_w);
         let tau_match = 100.0;
 
-        let (out_rows, out_cols, n_actual) = run_kernel(&dcts, 1, 1, img_h, img_w, tau_match);
+        let (out_rows, out_cols, n_actual) =
+            run_kernel(&dcts, 1, 1, img_h, img_w, tau_match);
 
         assert_eq!(n_actual, N_MAX);
 
