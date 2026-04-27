@@ -61,10 +61,15 @@ pub(crate) fn kaiser<F: Float>(result: &mut Tensor<F>, k: usize, beta: F) {
 mod tests {
     use std::mem::size_of;
 
-    use cubecl::Runtime;
     use cubecl::prelude::*;
 
     use super::*;
+    use crate::kernels::test_util::{
+        assert_close,
+        cpu_client,
+        read_1d_f32_allocation,
+        tensor_arg_1d_f32,
+    };
 
     #[cube(launch)]
     fn kaiser_test_kernel(result: &mut Tensor<f32>, k: usize, beta: f32) {
@@ -118,14 +123,7 @@ mod tests {
         let client = cpu_client();
         let shape = [len];
         let allocation = client.empty_tensor(&shape, size_of::<f32>());
-        let tensor_arg = unsafe {
-            TensorArg::from_raw_parts::<f32>(
-                &allocation.handle,
-                &allocation.strides,
-                &shape,
-                1,
-            )
-        };
+        let tensor_arg = tensor_arg_1d_f32(&allocation, &shape);
 
         kaiser_test_kernel::launch(
             &client,
@@ -137,27 +135,7 @@ mod tests {
         )
         .expect("kaiser test kernel should launch");
 
-        let descriptor = allocation.handle.copy_descriptor(
-            &shape,
-            &allocation.strides,
-            size_of::<f32>(),
-        );
-
-        bytes_to_f32_vec(client.read_one_tensor(descriptor).as_ref())
-    }
-
-    fn cpu_client() -> ComputeClient<cubecl::cpu::CpuRuntime> {
-        let device = <cubecl::cpu::CpuRuntime as Runtime>::Device::default();
-        cubecl::cpu::CpuRuntime::client(&device)
-    }
-
-    fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> {
-        bytes
-            .chunks_exact(size_of::<f32>())
-            .map(|chunk| {
-                f32::from_ne_bytes(chunk.try_into().expect("chunk should be 4 bytes"))
-            })
-            .collect()
+        read_1d_f32_allocation(&client, &allocation, len)
     }
 
     fn host_kaiser(len: usize, beta: f32) -> Vec<f32> {
@@ -206,19 +184,6 @@ mod tests {
                                         + y * (-0.016_476_33 + y * 0.003_923_77)))))));
 
             ax.exp() * poly / ax.sqrt()
-        }
-    }
-
-    fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32) {
-        assert_eq!(actual.len(), expected.len(), "length mismatch");
-
-        for (index, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate()
-        {
-            let delta = (actual - expected).abs();
-            assert!(
-                delta <= tolerance,
-                "value mismatch at index {index}: actual={actual}, expected={expected}, delta={delta}, tolerance={tolerance}"
-            );
         }
     }
 }
