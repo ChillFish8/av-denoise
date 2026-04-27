@@ -1,8 +1,6 @@
-mod batcher;
-mod kernels;
 mod models;
-mod sniff;
 pub mod source;
+mod model;
 
 use anyhow::Context;
 use clap::Parser;
@@ -30,9 +28,6 @@ pub struct Options {
     /// Until a certain point, the higher the batch size the better your efficiency and performance,
     /// at the cost of increasing the memory usage of the accelerator, i.e. VRAM.
     pub batch_size: usize,
-    #[arg(long, default_value_t = false)]
-    /// Use a lower-memory denoise path that reduces GPU pressure at the cost of throughput.
-    pub low_memory: bool,
 }
 
 /// Run denoiser on the given input.
@@ -47,72 +42,10 @@ where
     Ok(())
 }
 
-fn run_pipeline<I>(opts: Options, input: I) -> anyhow::Result<()>
+fn run_pipeline<I>(_opts: Options, _input: I) -> anyhow::Result<()>
 where
     I: source::InputSource,
 {
-    let Some(best_accelerator) = sniff::sniff_best_accelerator(&opts.accelerators) else {
-        anyhow::bail!(
-            "no specified accelerator is able to run on the host hardware. \
-        Please check you have any runtime dependencies installed like NVCC for CUDA."
-        );
-    };
 
-    match best_accelerator {
-        #[cfg(feature = "cuda")]
-        Accelerator::Cuda => {
-            dispatch_pipeline::<cubecl::cude::CudaRuntime, I>(opts, input)
-                .context("dispatch pipeline on CUDA runtime")
-        },
-        #[cfg(feature = "rocm")]
-        Accelerator::Rocm => dispatch_pipeline::<cubecl::hip::HipRuntime, I>(opts, input)
-            .context("dispatch pipeline on ROCM runtime"),
-        #[cfg(feature = "vulkan")]
-        Accelerator::Vulkan => {
-            dispatch_pipeline::<cubecl::wgpu::WgpuRuntime, I>(opts, input)
-                .context("dispatch pipeline on VULKAN runtime")
-        },
-        #[cfg(feature = "metal")]
-        Accelerator::Metal => {
-            dispatch_pipeline::<cubecl::wgpu::WgpuRuntime, I>(opts, input)
-                .context("dispatch pipeline on METAL runtime")
-        },
-        #[cfg(feature = "cpu")]
-        Accelerator::Cpu => dispatch_pipeline::<cubecl::cpu::CpuRuntime, I>(opts, input)
-            .context("dispatch pipeline on CPU runtime"),
-    }
-}
-
-fn dispatch_pipeline<R, I>(opts: Options, input: I) -> anyhow::Result<()>
-where
-    R: cubecl::Runtime + 'static,
-    I: source::InputSource + Send + 'static,
-{
-    let width = input.width();
-    let height = input.height();
-    let bit_depth = input.bit_depth();
-    let device = <R::Device as Default>::default();
-    let client = R::client(&device);
-
-    let mut batcher = batcher::create_batcher(client.clone(), input, opts.batch_size);
-
-    while let Some(batch) = batcher.next_batch() {
-        eprintln!("got batch");
-        let _denoised = kernels::denoise(
-            &client,
-            batch,
-            width,
-            height,
-            bit_depth,
-            None,
-            kernels::DenoiseConfig {
-                low_memory: opts.low_memory,
-            },
-        )
-        .context("denoise frame batch")?;
-    }
-
-    batcher.join_worker().context("join batcher worker")?;
-
-    Ok(())
+    todo!()
 }

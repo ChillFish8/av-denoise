@@ -2,3 +2,4 @@
 cubecl.log
 /data
 /models/*.onnx
+/**/*.bpk
