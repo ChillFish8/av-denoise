@@ -16,17 +16,33 @@ pub(crate) fn tensor_arg_1d_f32<'a>(
     tensor_arg_f32(allocation, shape)
 }
 
+pub(crate) fn tensor_arg_atomic_1d_f32<'a>(
+    allocation: &'a Allocation,
+    shape: &'a [usize],
+) -> TensorArg<'a, cubecl::cpu::CpuRuntime> {
+    tensor_arg_atomic_f32(allocation, shape)
+}
+
 pub(crate) fn tensor_arg_f32<'a>(
     allocation: &'a Allocation,
     shape: &'a [usize],
 ) -> TensorArg<'a, cubecl::cpu::CpuRuntime> {
+    tensor_arg::<f32>(allocation, shape)
+}
+
+pub(crate) fn tensor_arg_atomic_f32<'a>(
+    allocation: &'a Allocation,
+    shape: &'a [usize],
+) -> TensorArg<'a, cubecl::cpu::CpuRuntime> {
+    tensor_arg::<Atomic<f32>>(allocation, shape)
+}
+
+fn tensor_arg<'a, T: CubePrimitive>(
+    allocation: &'a Allocation,
+    shape: &'a [usize],
+) -> TensorArg<'a, cubecl::cpu::CpuRuntime> {
     unsafe {
-        TensorArg::from_raw_parts::<f32>(
-            &allocation.handle,
-            &allocation.strides,
-            shape,
-            1,
-        )
+        TensorArg::from_raw_parts::<T>(&allocation.handle, &allocation.strides, shape, 1)
     }
 }
 
