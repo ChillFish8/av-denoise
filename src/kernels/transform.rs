@@ -187,7 +187,6 @@ mod tests {
     }
 
     fn sample_stack() -> Vec<f32> {
-        // 4×4×4 stack with varied values to exercise the full transform
         (0..(K * K * N_BLOCKS))
             .map(|i| (i as f32 + 1.0) * 0.5 - (i as f32 * 0.1).sin())
             .collect()
@@ -237,8 +236,6 @@ mod tests {
         read_f32_allocation(&client, &stack_alloc, &shape)
     }
 
-    // Host reference implementations
-
     fn host_dct1d(input: &[f32]) -> Vec<f32> {
         let n = input.len();
         let pi = core::f32::consts::PI;
@@ -285,9 +282,7 @@ mod tests {
     }
 
     fn host_transform_3d(stack: &mut [f32], k: usize, n_blocks: usize) {
-        // Step 1: 2-D DCT on each block (row-major layout: index = i*k*n_blocks + j*n_blocks + b)
         for b in 0..n_blocks {
-            // Row DCT
             for row in 0..k {
                 let mut row_vals: Vec<f32> = (0..k)
                     .map(|col| stack[row * k * n_blocks + col * n_blocks + b])
@@ -297,7 +292,6 @@ mod tests {
                     stack[row * k * n_blocks + col * n_blocks + b] = row_vals[col];
                 }
             }
-            // Column DCT
             for col in 0..k {
                 let mut col_vals: Vec<f32> = (0..k)
                     .map(|row| stack[row * k * n_blocks + col * n_blocks + b])
@@ -309,7 +303,6 @@ mod tests {
             }
         }
 
-        // Step 2: 1-D WHT on each (i, j) fibre along the n_blocks axis
         for i in 0..k {
             for j in 0..k {
                 let mut fibre: Vec<f32> = (0..n_blocks)

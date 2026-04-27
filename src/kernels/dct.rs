@@ -58,7 +58,6 @@ pub(crate) fn idct1d<F: Float>(
 
     #[unroll]
     for m in 0..n {
-        // k = 0 term
         let mut sum = scale0 * x[offset];
 
         #[unroll]
