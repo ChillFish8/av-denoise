@@ -82,7 +82,7 @@ impl<R: Read> BufferedSource<R> {
         if width == 0 || height == 0 {
             bail!("frame width and height must both be non-zero")
         }
-        if width % 2 != 0 || height % 2 != 0 {
+        if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
             bail!("YUV420 requires even frame width and height")
         }
 

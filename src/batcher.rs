@@ -73,7 +73,7 @@ where
     let bytes_per_sample = bit_depth.bytes_per_sample();
 
     ensure!(
-        width % 2 == 0 && height % 2 == 0,
+        width.is_multiple_of(2) && height.is_multiple_of(2),
         "YUV420 requires even frame width and height"
     );
 
