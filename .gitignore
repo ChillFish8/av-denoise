@@ -1,3 +1,4 @@
 /target
 cubecl.log
 /data
+/models/*.onnx

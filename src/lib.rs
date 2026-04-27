@@ -30,6 +30,9 @@ pub struct Options {
     /// Until a certain point, the higher the batch size the better your efficiency and performance,
     /// at the cost of increasing the memory usage of the accelerator, i.e. VRAM.
     pub batch_size: usize,
+    #[arg(long, default_value_t = false)]
+    /// Use a lower-memory denoise path that reduces GPU pressure at the cost of throughput.
+    pub low_memory: bool,
 }
 
 /// Run denoiser on the given input.
@@ -85,13 +88,29 @@ where
     R: cubecl::Runtime + 'static,
     I: source::InputSource + Send + 'static,
 {
-    let _width = input.width();
-    let _height = input.height();
-    let _bit_depth = input.bit_depth();
+    let width = input.width();
+    let height = input.height();
+    let bit_depth = input.bit_depth();
     let device = <R::Device as Default>::default();
     let client = R::client(&device);
 
-    let batcher = batcher::create_batcher(client.clone(), input, opts.batch_size);
+    let mut batcher = batcher::create_batcher(client.clone(), input, opts.batch_size);
+
+    while let Some(batch) = batcher.next_batch() {
+        eprintln!("got batch");
+        let _denoised = kernels::denoise(
+            &client,
+            batch,
+            width,
+            height,
+            bit_depth,
+            None,
+            kernels::DenoiseConfig {
+                low_memory: opts.low_memory,
+            },
+        )
+        .context("denoise frame batch")?;
+    }
 
     batcher.join_worker().context("join batcher worker")?;
 
