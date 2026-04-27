@@ -18,7 +18,7 @@ serde = { version = "1", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }
 mimalloc = { version = "0.1", default-features = false }
 rustix = { version = "1", features = ["pipe"] }
-burn = { version = "0.21.0-pre.4", features = ["autotune", "fusion"] }
+burn = { version = "0.21.0-pre.4", features = ["autotune", "fusion", "router"] }
 
 [build-dependencies]
 burn-onnx = { git = "https://github.com/tracel-ai/burn-onnx.git", rev = "97bad58" }
