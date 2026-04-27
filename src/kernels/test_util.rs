@@ -13,6 +13,13 @@ pub(crate) fn tensor_arg_1d_f32<'a>(
     allocation: &'a Allocation,
     shape: &'a [usize],
 ) -> TensorArg<'a, cubecl::cpu::CpuRuntime> {
+    tensor_arg_f32(allocation, shape)
+}
+
+pub(crate) fn tensor_arg_f32<'a>(
+    allocation: &'a Allocation,
+    shape: &'a [usize],
+) -> TensorArg<'a, cubecl::cpu::CpuRuntime> {
     unsafe {
         TensorArg::from_raw_parts::<f32>(
             &allocation.handle,
@@ -29,10 +36,18 @@ pub(crate) fn read_1d_f32_allocation(
     len: usize,
 ) -> Vec<f32> {
     let shape = [len];
+    read_f32_allocation(client, allocation, &shape)
+}
+
+pub(crate) fn read_f32_allocation(
+    client: &ComputeClient<cubecl::cpu::CpuRuntime>,
+    allocation: &Allocation,
+    shape: &[usize],
+) -> Vec<f32> {
     let descriptor =
         allocation
             .handle
-            .copy_descriptor(&shape, &allocation.strides, size_of::<f32>());
+            .copy_descriptor(shape, &allocation.strides, size_of::<f32>());
 
     bytes_to_f32_vec(client.read_one_tensor(descriptor).as_ref())
 }

@@ -36,9 +36,9 @@ fn bessel_i0<F: Float>(x: F) -> F {
 ///
 /// This is based on NumPy's implementation and matches the behavior.
 /// https://numpy.org/doc/stable/reference/generated/numpy.kaiser.html
-pub(crate) fn kaiser<F: Float>(result: &mut Tensor<F>, k: usize, beta: F) {
+pub(crate) fn kaiser<F: Float>(result: &mut Tensor<F>, beta: F, #[comptime] k: usize) {
     if k <= 1 {
-        for index in range(0usize, k) {
+        for index in 0..k {
             result[index] = F::new(1.0);
         }
     } else {
@@ -46,7 +46,7 @@ pub(crate) fn kaiser<F: Float>(result: &mut Tensor<F>, k: usize, beta: F) {
         let len_minus_one_f = F::cast_from(len_minus_one);
         let denominator = bessel_i0::<F>(beta);
 
-        for index in range(0usize, k) {
+        for index in 0..k {
             let index_f = F::cast_from(index);
             let ratio = (F::new(2.0) * index_f) / len_minus_one_f - F::new(1.0);
             let inside = max(F::new(0.0), F::new(1.0) - ratio * ratio);
@@ -54,6 +54,46 @@ pub(crate) fn kaiser<F: Float>(result: &mut Tensor<F>, k: usize, beta: F) {
 
             result[index] = numerator / denominator;
         }
+    }
+}
+
+#[cube]
+/// Populates a `k x k` tensor with the 2-D Kaiser window formed by the outer
+/// product of the corresponding 1-D window.
+pub(crate) fn kaiser_2d<F: Float>(result: &mut Tensor<F>, beta: F, #[comptime] k: usize) {
+    if k > 0 {
+        let row_stride = result.stride(0);
+        let col_stride = result.stride(1);
+
+        #[unroll]
+        for row in 0..k {
+            let row_weight = kaiser_value::<F>(row, beta, k);
+
+            #[unroll]
+            for col in 0..k {
+                let col_weight = kaiser_value::<F>(col, beta, k);
+                let index = row * row_stride + col * col_stride;
+
+                result[index] = row_weight * col_weight;
+            }
+        }
+    }
+}
+
+#[cube]
+fn kaiser_value<F: Float>(index: usize, beta: F, #[comptime] k: usize) -> F {
+    if k <= 1 {
+        F::new(1.0)
+    } else {
+        let len_minus_one = k - 1;
+        let len_minus_one_f = F::cast_from(len_minus_one);
+        let denominator = bessel_i0::<F>(beta);
+        let index_f = F::cast_from(index);
+        let ratio = (F::new(2.0) * index_f) / len_minus_one_f - F::new(1.0);
+        let inside = max(F::new(0.0), F::new(1.0) - ratio * ratio);
+        let numerator = bessel_i0::<F>(beta * inside.sqrt());
+
+        numerator / denominator
     }
 }
 
@@ -68,12 +108,19 @@ mod tests {
         assert_close,
         cpu_client,
         read_1d_f32_allocation,
+        read_f32_allocation,
         tensor_arg_1d_f32,
+        tensor_arg_f32,
     };
 
     #[cube(launch)]
-    fn kaiser_test_kernel(result: &mut Tensor<f32>, k: usize, beta: f32) {
-        kaiser::<f32>(result, k, beta);
+    fn kaiser_test_kernel(result: &mut Tensor<f32>, beta: f32, #[comptime] k: usize) {
+        kaiser::<f32>(result, beta, k);
+    }
+
+    #[cube(launch)]
+    fn kaiser_2d_test_kernel(result: &mut Tensor<f32>, beta: f32, #[comptime] k: usize) {
+        kaiser_2d::<f32>(result, beta, k);
     }
 
     #[test]
@@ -119,6 +166,28 @@ mod tests {
         assert_close(&values, &expected, 1.0e-5);
     }
 
+    #[test]
+    fn kaiser_2d_matches_outer_product_reference() {
+        let values = run_kaiser_2d(4, 2.0);
+        let expected = host_kaiser_2d(4, 2.0);
+
+        assert_close(&values, &expected, 1.0e-6);
+    }
+
+    #[test]
+    fn kaiser_2d_single_element_is_one() {
+        let values = run_kaiser_2d(1, 2.0);
+
+        assert_close(&values, &[1.0], 1.0e-6);
+    }
+
+    #[test]
+    fn kaiser_2d_beta_zero_is_rectangular() {
+        let values = run_kaiser_2d(3, 0.0);
+
+        assert_close(&values, &[1.0; 9], 1.0e-6);
+    }
+
     fn run_kaiser(len: usize, beta: f32) -> Vec<f32> {
         let client = cpu_client();
         let shape = [len];
@@ -130,12 +199,31 @@ mod tests {
             CubeCount::Static(1, 1, 1),
             CubeDim::new_1d(1),
             tensor_arg,
-            ScalarArg::new(len),
             ScalarArg::new(beta),
+            len,
         )
         .expect("kaiser test kernel should launch");
 
         read_1d_f32_allocation(&client, &allocation, len)
+    }
+
+    fn run_kaiser_2d(k: usize, beta: f32) -> Vec<f32> {
+        let client = cpu_client();
+        let shape = [k, k];
+        let allocation = client.empty_tensor(&shape, size_of::<f32>());
+        let tensor_arg = tensor_arg_f32(&allocation, &shape);
+
+        kaiser_2d_test_kernel::launch(
+            &client,
+            CubeCount::Static(1, 1, 1),
+            CubeDim::new_1d(1),
+            tensor_arg,
+            ScalarArg::new(beta),
+            k,
+        )
+        .expect("kaiser 2d test kernel should launch");
+
+        read_f32_allocation(&client, &allocation, &shape)
     }
 
     fn host_kaiser(len: usize, beta: f32) -> Vec<f32> {
@@ -157,6 +245,19 @@ mod tests {
                 host_bessel_i0(beta * inside.sqrt()) / denominator
             })
             .collect()
+    }
+
+    fn host_kaiser_2d(k: usize, beta: f32) -> Vec<f32> {
+        let w1d = host_kaiser(k, beta);
+        let mut window = vec![0.0; k * k];
+
+        for row in 0..k {
+            for col in 0..k {
+                window[row * k + col] = w1d[row] * w1d[col];
+            }
+        }
+
+        window
     }
 
     fn host_bessel_i0(x: f32) -> f32 {
