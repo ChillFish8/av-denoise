@@ -1,4 +1,5 @@
 mod batcher;
+mod kernels;
 mod models;
 mod sniff;
 pub mod source;
