@@ -13,11 +13,11 @@ pub(crate) fn fwht<F: Float>(x: &mut Tensor<F>) {
         terminate!();
     }
 
-    let mut h = 1usize;
+    let mut h: usize = 1;
 
     while h < n {
-        for i in range_stepped(0usize, n, 2 * h) {
-            for j in range(0usize, h) {
+        for i in range_stepped(0, n, 2 * h) {
+            for j in 0..h {
                 let left = i + j;
                 let right = left + h;
                 let a = x[left];
@@ -33,7 +33,7 @@ pub(crate) fn fwht<F: Float>(x: &mut Tensor<F>) {
 
     let scale = F::cast_from(n).sqrt();
 
-    for index in range(0usize, n) {
+    for index in 0..n {
         x[index] /= scale;
     }
 }
