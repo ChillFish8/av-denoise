@@ -13,4 +13,3 @@ fn main() {
         .out_dir("./src/model/")
         .run_from_cli();
 }
-

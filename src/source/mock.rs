@@ -76,7 +76,7 @@ impl FrameSource for MockFrameSource {
             next.len(),
             frame.len()
         );
-        frame.copy_from_yuv(&next);
+        frame.copy_from_rgb(&next);
 
         Ok(true)
     }
@@ -87,18 +87,9 @@ fn expected_frame_bytes(
     height: usize,
     bit_depth: BitDepth,
 ) -> anyhow::Result<usize> {
-    let bytes_per_sample = bit_depth.bytes_per_sample();
-    let luma_bytes = width
+    width
         .checked_mul(height)
-        .and_then(|n| n.checked_mul(bytes_per_sample))
-        .context("calculate mock luma bytes")?;
-    let chroma_bytes = (width / 2)
-        .checked_mul(height / 2)
-        .and_then(|n| n.checked_mul(bytes_per_sample))
-        .context("calculate mock chroma bytes")?;
-
-    chroma_bytes
-        .checked_mul(2)
-        .and_then(|n| luma_bytes.checked_add(n))
+        .and_then(|n| n.checked_mul(3))
+        .and_then(|n| n.checked_mul(bit_depth.bytes_per_sample()))
         .context("calculate mock frame bytes")
 }

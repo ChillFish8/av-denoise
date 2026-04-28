@@ -15,7 +15,7 @@ struct Args {
     /// The height of each source frame before stacking.
     height: usize,
     #[arg(long)]
-    /// Expect HDR input as yuv444p10le instead of 8-bit yuv444p.
+    /// Expect RGB48LE input instead of RGB24.
     hdr: bool,
 }
 

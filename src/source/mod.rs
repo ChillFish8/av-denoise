@@ -5,9 +5,9 @@ pub mod stdin;
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 /// The bit depth of the video frame.
 pub enum BitDepth {
-    /// SDR 8-bit
+    /// Packed RGB24.
     Eight,
-    /// HDR 10-bit
+    /// Packed RGB48LE with 10-bit samples stored in `u16` lanes.
     Ten,
 }
 
@@ -40,9 +40,8 @@ pub trait InputSource: Send + 'static {
 
 /// An input source providing video frames one at a time.
 ///
-/// Input frames are expected to be provided in the **YUV420p** or
-/// **YUV420p10le** formats, no other format will be handled correctly.
-/// Any pixel format conversion should be performed before passing it in.
+/// Input frames are expected to be provided in packed **RGB24** or **RGB48LE**
+/// formats, no other format will be handled correctly.
 pub trait FrameSource {
     /// Read and parse the next video frame.
     ///
@@ -50,54 +49,29 @@ pub trait FrameSource {
     fn step_next_frame(&mut self, frame: VideoFrameBuffer<'_>) -> anyhow::Result<bool>;
 }
 
-/// A slice of memory which contains a YUV420 video frame.
+/// A slice of memory which contains a packed RGB video frame.
 pub struct VideoFrameBuffer<'a> {
     inner: &'a mut [u8],
-    luma_stride: usize,
-    chroma_stride: usize,
 }
 
 impl<'a> VideoFrameBuffer<'a> {
     /// Create a new [VideoFrameBuffer].
-    pub(crate) fn new(
-        inner: &'a mut [u8],
-        luma_stride: usize,
-        chroma_stride: usize,
-    ) -> Self {
-        Self {
-            inner,
-            luma_stride,
-            chroma_stride,
-        }
+    pub(crate) fn new(inner: &'a mut [u8]) -> Self {
+        Self { inner }
     }
 
-    /// Return a reference to the inner YUV slice buffer.
-    pub fn as_yuv(&'a mut self) -> &'a mut [u8] {
+    /// Return a reference to the inner packed RGB slice buffer.
+    pub fn as_rgb(&mut self) -> &mut [u8] {
         self.inner
     }
 
-    /// Return the total size of the packed YUV frame in bytes.
+    /// Return the total size of the packed RGB frame in bytes.
     pub fn len(&self) -> usize {
         self.inner.len()
     }
 
-    /// Copy a packed YUV frame into this buffer.
-    pub fn copy_from_yuv(&mut self, src: &[u8]) {
+    /// Copy a packed RGB frame into this buffer.
+    pub fn copy_from_rgb(&mut self, src: &[u8]) {
         self.inner.copy_from_slice(src);
-    }
-
-    /// Return a reference to the inner Y slice buffer.
-    pub fn as_y(&'a mut self) -> &'a mut [u8] {
-        &mut self.inner[0..][..self.luma_stride]
-    }
-
-    /// Return a reference to the inner U slice buffer.
-    pub fn as_u(&'a mut self) -> &'a mut [u8] {
-        &mut self.inner[self.luma_stride..][..self.chroma_stride]
-    }
-
-    /// Return a reference to the inner V slice buffer.
-    pub fn as_v(&'a mut self) -> &'a mut [u8] {
-        &mut self.inner[self.luma_stride + self.chroma_stride..][..self.chroma_stride]
     }
 }
