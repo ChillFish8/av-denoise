@@ -18,15 +18,16 @@ serde = { version = "1", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }
 mimalloc = { version = "0.1", default-features = false }
 rustix = { version = "1", features = ["pipe"] }
-burn = { version = "0.21.0-pre.4", features = ["autotune", "fusion", "router"] }
+burn = { version = "0.21.0-pre.4", features = ["autotune", "fusion"] }
+cubecl = { version = "0.9", features = ["std"] }
 
 [build-dependencies]
 burn-onnx = { git = "https://github.com/tracel-ai/burn-onnx.git", rev = "97bad58" }
 
 [features]
-vulkan = ["burn/vulkan"]
-metal = ["burn/metal"]
-cuda = ["burn/cuda"]
-rocm = ["burn/rocm"]
-cpu = ["burn/cpu"]
+vulkan = ["burn/vulkan", "cubecl/wgpu", "cubecl/wgpu-spirv"]
+metal = ["burn/metal", "cubecl/wgpu", "cubecl/wgpu-msl"]
+cuda = ["burn/cuda", "cubecl/cuda"]
+rocm = ["burn/rocm", "cubecl/hip"]
+cpu = ["burn/cpu", "cubecl/cpu"]
 default = ["cpu", "vulkan"]
