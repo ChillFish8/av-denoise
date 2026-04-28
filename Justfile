@@ -61,4 +61,4 @@ docker-test-run image="localhost/av-denoise:local" input="data/test.mkv" width="
             -i "{{image}}" \
             --accelerators vulkan,cpu {{ARGS}} \
             --width "{{width}}" \
-            --height "{{height}}" 2> >(cat >&3) > /dev/null
+            --height "{{height}}"
