@@ -1,0 +1,11 @@
+[project]
+name = "av-denoise"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "click>=8.3.3",
+    "onnx>=1.21.0",
+    "onnxruntime>=1.25.1",
+]

@@ -1,0 +1,8 @@
+.git
+.venv
+target
+data
+cubecl.log
+.python-version
+pyproject.toml
+uv.lock
