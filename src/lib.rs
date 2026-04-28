@@ -1,9 +1,12 @@
 mod models;
 pub mod source;
 mod model;
+mod sniff;
 
 use anyhow::Context;
 use clap::Parser;
+use burn::prelude::*;
+use burn::backend;
 
 use crate::models::Accelerator;
 
@@ -42,10 +45,52 @@ where
     Ok(())
 }
 
-fn run_pipeline<I>(_opts: Options, _input: I) -> anyhow::Result<()>
+fn run_pipeline<I>(opts: Options, input: I) -> anyhow::Result<()>
 where
     I: source::InputSource,
 {
+    let Some(best_accelerator) = sniff::sniff_best_accelerator(&opts.accelerators) else {
+        anyhow::bail!(
+            "no specified accelerator is able to run on the host hardware. \
+        Please check you have any runtime dependencies installed like NVCC for CUDA."
+        );
+    };
 
-    todo!()
+    match best_accelerator {
+        #[cfg(feature = "cuda")]
+        Accelerator::Cuda => {
+            dispatch_pipeline::<backend::cuda::Cuda, I>(opts, input)
+                .context("dispatch pipeline on CUDA runtime")
+        },
+        #[cfg(feature = "rocm")]
+        Accelerator::Rocm => dispatch_pipeline::<backend::rocm::Rocm, I>(opts, input)
+            .context("dispatch pipeline on ROCM runtime"),
+        #[cfg(feature = "vulkan")]
+        Accelerator::Vulkan => {
+            dispatch_pipeline::<backend::wgpu::Vulkan, I>(opts, input)
+                .context("dispatch pipeline on VULKAN runtime")
+        },
+        #[cfg(feature = "metal")]
+        Accelerator::Metal => {
+            dispatch_pipeline::<backend::wgpu::Metal, I>(opts, input)
+                .context("dispatch pipeline on METAL runtime")
+        },
+        #[cfg(feature = "cpu")]
+        Accelerator::Cpu => dispatch_pipeline::<backend::cpu::Cpu, I>(opts, input)
+            .context("dispatch pipeline on CPU runtime"),
+    }
 }
+
+fn dispatch_pipeline<B, I>(opts: Options, input: I) -> anyhow::Result<()>
+where
+    B: Backend + 'static,
+    I: source::InputSource + Send + 'static,
+{
+    let _width = input.width();
+    let _height = input.height();
+    let _bit_depth = input.bit_depth();
+
+
+    Ok(())
+}
+
