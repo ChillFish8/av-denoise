@@ -39,3 +39,26 @@ denoise-video input output width height fps hdr="false" *ARGS:
 
 bench *ARGS:
     cargo bench {{ARGS}}
+
+docker-test-run image="localhost/av-denoise:local" input="data/test.mkv" width="1920" height="1080" duration="1" *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec 3>&2
+    podman build -t "{{image}}" . 2> >(cat >&3)
+    ffmpeg -hide_banner \
+        -stats \
+        -stats_period 0.5 \
+        -loglevel info \
+        -t "{{duration}}" \
+        -i "{{input}}" \
+        -f rawvideo \
+        -pix_fmt rgb24 \
+        - 2> >(cat >&3) | podman run --rm --device /dev/kfd --device /dev/dri \
+            --group-add video --group-add render \
+            --security-opt seccomp=unconfined \
+            --memory=48g \
+            --ulimit memlock=-1 --ulimit stack=67108864 --ipc=host \
+            -i "{{image}}" \
+            --accelerators vulkan,cpu {{ARGS}} \
+            --width "{{width}}" \
+            --height "{{height}}" 2> >(cat >&3) > /dev/null

@@ -19,7 +19,8 @@ FROM archlinux:latest AS runtime
 RUN pacman -Syu --noconfirm --needed \
     ffmpeg \
     gcc-libs \
-    vulkan-icd-loader
+    vulkan-icd-loader \
+    vulkan-radeon
 
 WORKDIR /app
 
