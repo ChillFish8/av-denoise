@@ -90,15 +90,13 @@ impl<R: Read> BufferedSource<R> {
         })
     }
 
-    fn step_next_frame(&mut self, mut frame: VideoFrameBuffer<'_>) -> anyhow::Result<bool> {
+    fn step_next_frame(
+        &mut self,
+        mut frame: VideoFrameBuffer<'_>,
+    ) -> anyhow::Result<bool> {
         self.validate_frame_buffer(&frame)?;
 
-        read_exact_or_eof(
-            &mut self.reader,
-            frame.as_rgb(),
-            true,
-            "packed RGB frame",
-        )
+        read_exact_or_eof(&mut self.reader, frame.as_rgb(), true, "packed RGB frame")
     }
 
     fn validate_frame_buffer(&self, frame: &VideoFrameBuffer<'_>) -> anyhow::Result<()> {
@@ -114,7 +112,11 @@ impl<R: Read> BufferedSource<R> {
     }
 }
 
-fn frame_bytes(width: usize, height: usize, bit_depth: BitDepth) -> anyhow::Result<usize> {
+fn frame_bytes(
+    width: usize,
+    height: usize,
+    bit_depth: BitDepth,
+) -> anyhow::Result<usize> {
     width
         .checked_mul(height)
         .and_then(|n| n.checked_mul(3))
@@ -208,9 +210,11 @@ mod tests {
         let mut source = source_from_bytes(2, 1, BitDepth::Eight, vec![1, 2, 3, 4, 5, 6]);
         let mut frame = vec![0u8; 6];
 
-        assert!(source
-            .step_next_frame(make_frame_buffer(&mut frame))
-            .expect("frame should parse"));
+        assert!(
+            source
+                .step_next_frame(make_frame_buffer(&mut frame))
+                .expect("frame should parse")
+        );
 
         assert_eq!(frame, vec![1, 2, 3, 4, 5, 6]);
     }
@@ -225,9 +229,11 @@ mod tests {
         );
         let mut frame = vec![0u8; 12];
 
-        assert!(source
-            .step_next_frame(make_frame_buffer(&mut frame))
-            .expect("frame should parse"));
+        assert!(
+            source
+                .step_next_frame(make_frame_buffer(&mut frame))
+                .expect("frame should parse")
+        );
 
         assert_eq!(frame, vec![1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0]);
     }
@@ -237,12 +243,16 @@ mod tests {
         let mut source = source_from_bytes(2, 1, BitDepth::Eight, vec![1, 2, 3, 4, 5, 6]);
         let mut frame = vec![0u8; 6];
 
-        assert!(source
-            .step_next_frame(make_frame_buffer(&mut frame))
-            .expect("first frame should parse"));
-        assert!(!source
-            .step_next_frame(make_frame_buffer(&mut frame))
-            .expect("second step should return eof"));
+        assert!(
+            source
+                .step_next_frame(make_frame_buffer(&mut frame))
+                .expect("first frame should parse")
+        );
+        assert!(
+            !source
+                .step_next_frame(make_frame_buffer(&mut frame))
+                .expect("second step should return eof")
+        );
     }
 
     #[test]
