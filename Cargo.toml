@@ -17,6 +17,9 @@ clap = { version = "4", features = ["derive"] }
 mimalloc = { version = "0.1", default-features = false }
 cubecl = { version = "0.9", features = ["std"] }
 
+[dev-dependencies]
+futures = "0.3"
+
 [features]
 vulkan = ["cubecl/wgpu", "cubecl/wgpu-spirv"]
 metal = ["cubecl/wgpu", "cubecl/wgpu-msl"]
@@ -24,3 +27,7 @@ cuda = ["cubecl/cuda"]
 rocm = ["cubecl/hip"]
 cpu = ["cubecl/cpu"]
 default = ["cpu", "vulkan"]
+
+[[bench]]
+name = "nlmeans"
+harness = false
