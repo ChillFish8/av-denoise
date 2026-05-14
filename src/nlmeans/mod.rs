@@ -6,13 +6,7 @@ mod tests;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use self::kernels::{
-    nlm_accumulate,
-    nlm_distance,
-    nlm_finish,
-    nlm_horizontal,
-    nlm_vertical,
-};
+use self::kernels::{gpu_zero, nlm_accumulate, nlm_dist_2d_weight, nlm_finish};
 
 const BLOCK_X: u32 = 32;
 const BLOCK_Y: u32 = 8;
@@ -94,15 +88,16 @@ pub struct NlmDenoiser<R: Runtime> {
     height: u32,
 
     frame_ring: Vec<Handle>,
+    frame_cache: Vec<Vec<f32>>,
     ring_head: usize,
     frames_loaded: usize,
 
+    input_buf: Handle,
     accum: Handle,
     weight_sum: Handle,
     max_weight: Handle,
     weight_fwd: Handle,
     dist_a: Handle,
-    dist_b: Handle,
     output: Handle,
 
     h2_inv_norm: f32,
@@ -122,13 +117,17 @@ impl<R: Runtime> NlmDenoiser<R> {
         let frame_ring = (0..num_frames)
             .map(|_| client.empty(pixels * ch as usize * size_of::<f32>()))
             .collect();
+        let frame_cache = (0..num_frames)
+            .map(|_| vec![0.0f32; pixels * ch as usize])
+            .collect();
 
+        let input_buf =
+            client.empty(pixels * ch as usize * num_frames as usize * size_of::<f32>());
         let accum = client.empty(pixels * ch as usize * size_of::<f32>());
         let weight_sum = client.empty(pixels * size_of::<f32>());
         let max_weight = client.empty(pixels * size_of::<f32>());
         let weight_fwd = client.empty(pixels * size_of::<f32>());
         let dist_a = client.empty(pixels * size_of::<f32>());
-        let dist_b = client.empty(pixels * size_of::<f32>());
         let output = client.empty(pixels * ch as usize * size_of::<f32>());
 
         let h2_inv_norm = params.h2_inv_norm();
@@ -139,14 +138,15 @@ impl<R: Runtime> NlmDenoiser<R> {
             width,
             height,
             frame_ring,
+            frame_cache,
             ring_head: 0,
             frames_loaded: 0,
+            input_buf,
             accum,
             weight_sum,
             max_weight,
             weight_fwd,
             dist_a,
-            dist_b,
             output,
             h2_inv_norm,
         }
@@ -170,6 +170,7 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         let new_handle = self.client.create_from_slice(f32::as_bytes(frame));
         self.frame_ring[slot] = new_handle;
+        self.frame_cache[slot] = frame.to_vec();
         self.ring_head += 1;
         self.frames_loaded += 1;
     }
@@ -219,12 +220,13 @@ impl<R: Runtime> NlmDenoiser<R> {
             // Duplicate the last frame into the next ring slot
             // to simulate clamped temporal boundary.
             let last_slot = (self.ring_head - 1) % self.frame_ring.len();
+            let last_frame = self.frame_cache[last_slot].clone();
 
-            let bytes = self.client.read_one(self.frame_ring[last_slot].clone());
-            let new_handle = self.client.create_from_slice(&bytes);
+            let new_handle = self.client.create_from_slice(f32::as_bytes(&last_frame));
 
             let next_slot = self.ring_head % self.frame_ring.len();
             self.frame_ring[next_slot] = new_handle;
+            self.frame_cache[next_slot] = last_frame;
             self.ring_head += 1;
             self.frames_loaded += 1;
 
@@ -248,34 +250,47 @@ impl<R: Runtime> NlmDenoiser<R> {
         let frame_size = pixels * ch as usize;
         let accum_size = pixels * ch as usize;
 
-        // Build contiguous frame buffer from ring in correct order.
-        // The oldest frame in the ring is the one that was pushed first
-        // in the current window.
-        let mut frame_data = Vec::with_capacity(frame_size * num_frames as usize);
+        // Assemble contiguous frame buffer from CPU cache (no GPU readback).
+        let total_frame_data = frame_size * num_frames as usize;
+        let mut frame_data = Vec::with_capacity(total_frame_data);
 
         for i in 0..num_frames as usize {
             let ring_idx =
                 (self.ring_head - num_frames as usize + i) % self.frame_ring.len();
-
-            let bytes = self.client.read_one(self.frame_ring[ring_idx].clone());
-            let floats = f32::from_bytes(&bytes);
-            frame_data.extend_from_slice(floats);
+            frame_data.extend_from_slice(&self.frame_cache[ring_idx]);
         }
 
-        let input_handle = self.client.create_from_slice(f32::as_bytes(&frame_data));
+        let input_bytes = f32::as_bytes(&frame_data);
+        self.input_buf = self.client.create_from_slice(input_bytes);
 
-        // Zero accum and weight_sum, init max_weight to 0
-        let zero_accum = vec![0.0f32; accum_size];
-        let zero_weights = vec![0.0f32; pixels];
+        // Zero accum, weight_sum, and max_weight on GPU.
+        let zero_block = 256u32;
+        let zero_grid_acc = div_ceil(accum_size as u32, zero_block);
+        let zero_grid_px = div_ceil(pixels as u32, zero_block);
 
-        let accum_handle = self.client.create_from_slice(f32::as_bytes(&zero_accum));
-        self.accum = accum_handle;
+        gpu_zero::launch::<R>(
+            &self.client,
+            CubeCount::new_1d(zero_grid_acc),
+            CubeDim::new_1d(zero_block),
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.accum, accum_size, 1) },
+            accum_size as u32,
+        )?;
 
-        let ws_handle = self.client.create_from_slice(f32::as_bytes(&zero_weights));
-        self.weight_sum = ws_handle;
+        gpu_zero::launch::<R>(
+            &self.client,
+            CubeCount::new_1d(zero_grid_px),
+            CubeDim::new_1d(zero_block),
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_sum, pixels, 1) },
+            pixels as u32,
+        )?;
 
-        let mw_handle = self.client.create_from_slice(f32::as_bytes(&zero_weights));
-        self.max_weight = mw_handle;
+        gpu_zero::launch::<R>(
+            &self.client,
+            CubeCount::new_1d(zero_grid_px),
+            CubeDim::new_1d(zero_block),
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.max_weight, pixels, 1) },
+            pixels as u32,
+        )?;
 
         // Dispatch dimensions
         let grid_x = div_ceil(w, BLOCK_X);
@@ -297,87 +312,53 @@ impl<R: Runtime> NlmDenoiser<R> {
                         continue;
                     }
 
-                    // Distance for offset q at center frame t
-                    nlm_distance::launch::<R>(
-                        &self.client,
-                        cube_count.clone(),
-                        cube_dim,
-                        unsafe {
-                            ArrayArg::from_raw_parts::<f32>(
-                                &input_handle,
-                                frame_data.len(),
-                                1,
-                            )
-                        },
-                        unsafe {
-                            ArrayArg::from_raw_parts::<f32>(&self.dist_a, pixels, 1)
-                        },
-                        ScalarArg::new(t),
-                        ScalarArg::new(i),
-                        ScalarArg::new(j),
-                        ScalarArg::new(k),
-                        w,
-                        h,
-                        ch,
-                        num_frames,
-                    )?;
-
-                    // Horizontal box filter
-                    nlm_horizontal::launch::<R>(
-                        &self.client,
-                        cube_count.clone(),
-                        cube_dim,
-                        unsafe {
-                            ArrayArg::from_raw_parts::<f32>(&self.dist_a, pixels, 1)
-                        },
-                        unsafe {
-                            ArrayArg::from_raw_parts::<f32>(&self.dist_b, pixels, 1)
-                        },
-                        w,
-                        h,
-                        self.params.patch_radius,
-                        BLOCK_X,
-                        BLOCK_Y,
-                    )?;
-
-                    // Vertical box filter + weight.
-                    // When k != 0, output center frame weights to weight_fwd
-                    // so the second pass doesn't overwrite them.
+                    // Fused distance + 2D box filter + weight (center frame).
+                    // When k != 0, write to weight_fwd; otherwise dist_a.
                     let fwd_output = if k != 0 {
                         &self.weight_fwd
                     } else {
                         &self.dist_a
                     };
 
-                    nlm_vertical::launch::<R>(
+                    nlm_dist_2d_weight::launch::<R>(
                         &self.client,
                         cube_count.clone(),
                         cube_dim,
                         unsafe {
-                            ArrayArg::from_raw_parts::<f32>(&self.dist_b, pixels, 1)
+                            ArrayArg::from_raw_parts::<f32>(
+                                &self.input_buf,
+                                total_frame_data,
+                                1,
+                            )
                         },
                         unsafe { ArrayArg::from_raw_parts::<f32>(fwd_output, pixels, 1) },
+                        ScalarArg::new(t),
+                        ScalarArg::new(i),
+                        ScalarArg::new(j),
+                        ScalarArg::new(k),
                         ScalarArg::new(self.h2_inv_norm),
                         w,
                         h,
+                        ch,
+                        num_frames,
                         self.params.patch_radius,
                         BLOCK_X,
                         BLOCK_Y,
                     )?;
 
-                    // For temporal offsets, compute weights from the
+                    // For temporal offsets, compute weights from
                     // mirror frame perspective into dist_a.
                     if k != 0 {
                         let t_mq = t - k;
 
-                        nlm_distance::launch::<R>(
+                        nlm_dist_2d_weight::launch::<R>(
                             &self.client,
                             cube_count.clone(),
                             cube_dim,
                             unsafe {
                                 ArrayArg::from_raw_parts::<f32>(
-                                    &input_handle,
-                                    frame_data.len(),
+                                    &self.input_buf,
+                                    total_frame_data,
                                     1,
                                 )
                             },
@@ -388,42 +369,11 @@ impl<R: Runtime> NlmDenoiser<R> {
                             ScalarArg::new(i),
                             ScalarArg::new(j),
                             ScalarArg::new(k),
+                            ScalarArg::new(self.h2_inv_norm),
                             w,
                             h,
                             ch,
                             num_frames,
-                        )?;
-
-                        nlm_horizontal::launch::<R>(
-                            &self.client,
-                            cube_count.clone(),
-                            cube_dim,
-                            unsafe {
-                                ArrayArg::from_raw_parts::<f32>(&self.dist_a, pixels, 1)
-                            },
-                            unsafe {
-                                ArrayArg::from_raw_parts::<f32>(&self.dist_b, pixels, 1)
-                            },
-                            w,
-                            h,
-                            self.params.patch_radius,
-                            BLOCK_X,
-                            BLOCK_Y,
-                        )?;
-
-                        nlm_vertical::launch::<R>(
-                            &self.client,
-                            cube_count.clone(),
-                            cube_dim,
-                            unsafe {
-                                ArrayArg::from_raw_parts::<f32>(&self.dist_b, pixels, 1)
-                            },
-                            unsafe {
-                                ArrayArg::from_raw_parts::<f32>(&self.dist_a, pixels, 1)
-                            },
-                            ScalarArg::new(self.h2_inv_norm),
-                            w,
-                            h,
                             self.params.patch_radius,
                             BLOCK_X,
                             BLOCK_Y,
@@ -431,8 +381,6 @@ impl<R: Runtime> NlmDenoiser<R> {
                     }
 
                     // Accumulate for both +q and -q.
-                    // weights_fwd: center frame weights (weight_fwd if k!=0, dist_a if k==0)
-                    // weights_bwd: mirror frame weights (dist_a always — for k==0 same as fwd)
                     let fwd_weights = if k != 0 {
                         &self.weight_fwd
                     } else {
@@ -445,8 +393,8 @@ impl<R: Runtime> NlmDenoiser<R> {
                         cube_dim,
                         unsafe {
                             ArrayArg::from_raw_parts::<f32>(
-                                &input_handle,
-                                frame_data.len(),
+                                &self.input_buf,
+                                total_frame_data,
                                 1,
                             )
                         },
@@ -484,7 +432,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             cube_count,
             cube_dim,
             unsafe {
-                ArrayArg::from_raw_parts::<f32>(&input_handle, frame_data.len(), 1)
+                ArrayArg::from_raw_parts::<f32>(&self.input_buf, total_frame_data, 1)
             },
             unsafe { ArrayArg::from_raw_parts::<f32>(&self.output, frame_size, 1) },
             unsafe { ArrayArg::from_raw_parts::<f32>(&self.accum, accum_size, 1) },

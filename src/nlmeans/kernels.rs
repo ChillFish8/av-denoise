@@ -1,6 +1,36 @@
 use cubecl::prelude::*;
 use cubecl::terminate;
 
+/// GPU-to-GPU buffer copy. Copies `length` f32s from `src` into `dst`
+/// starting at `offset` in `dst`.
+#[cube(launch)]
+pub fn gpu_copy(
+    src: &Array<f32>,
+    dst: &mut Array<f32>,
+    offset: u32,
+    #[comptime] length: u32,
+) {
+    let idx = ABSOLUTE_POS_X;
+
+    if idx >= length {
+        terminate!();
+    }
+
+    dst[(offset + idx) as usize] = src[idx as usize];
+}
+
+/// Zero-fill a GPU buffer.
+#[cube(launch)]
+pub fn gpu_zero(dst: &mut Array<f32>, #[comptime] length: u32) {
+    let idx = ABSOLUTE_POS_X;
+
+    if idx >= length {
+        terminate!();
+    }
+
+    dst[idx as usize] = 0.0f32;
+}
+
 #[cube]
 fn clamp_coord(v: i32, #[comptime] limit: u32) -> u32 {
     let mut result = v as u32;
@@ -37,41 +67,45 @@ fn read_clamped(
     buf[idx as usize]
 }
 
-/// Returns the distance scaling factor for the given channel count.
-/// Luma (1ch): 3.0, Chroma (2ch): 1.5, YUV (3ch): 1.0
-pub fn distance_scale(channels: u32) -> f32 {
-    match channels {
-        1 => 3.0,
-        2 => 1.5,
-        _ => 1.0,
-    }
-}
-
-/// Compute per-pixel squared color distance between pixel p and
-/// pixel p+q.
+/// Fused distance + 2D box filter + Welsch weight.
 ///
-/// Luma (1ch): dist = 3.0 * (a - b)^2
-/// Chroma (2ch): dist = 1.5 * ((a0-b0)^2 + (a1-b1)^2)
-/// YUV (3ch): dist = (a0-b0)^2 + (a1-b1)^2 + (a2-b2)^2
+/// Replaces the separate dist_horizontal + vertical pipeline with a
+/// single kernel. Computes per-pixel squared channel distance,
+/// loads a 2D tile into shared memory, sums the (2p+1)² patch,
+/// and applies the exponential weight function.
+///
+/// Eliminates the intermediate distance buffer and one kernel launch.
 #[cube(launch)]
-pub fn nlm_distance(
+pub fn nlm_dist_2d_weight(
     input: &Array<f32>,
     output: &mut Array<f32>,
     t: i32,
     q_x: i32,
     q_y: i32,
     q_k: i32,
+    h2_inv_norm: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
     #[comptime] num_frames: u32,
+    #[comptime] patch_radius: u32,
+    #[comptime] block_x: u32,
+    #[comptime] block_y: u32,
 ) {
-    let x = ABSOLUTE_POS_X as i32;
-    let y = ABSOLUTE_POS_Y as i32;
+    let p = patch_radius;
+    let tile_w = block_x + 2 * p;
+    let tile_h = block_y + 2 * p;
+    let num_elems = tile_w * tile_h;
+    let mut smem = SharedMemory::<f32>::new(num_elems as usize);
 
-    if x >= width as i32 || y >= height as i32 {
-        terminate!();
-    }
+    let lx = UNIT_POS_X;
+    let ly = UNIT_POS_Y;
+
+    let gx = CUBE_POS_X * block_x + lx;
+    let gy = CUBE_POS_Y * block_y + ly;
+
+    let tile_start_x = CUBE_POS_X as i32 * block_x as i32 - p as i32;
+    let tile_start_y = CUBE_POS_Y as i32 * block_y as i32 - p as i32;
 
     let frame_q = t + q_k;
     let scale = if channels == 1 {
@@ -81,71 +115,42 @@ pub fn nlm_distance(
     } else {
         1.0f32
     };
-    let mut val = 0.0f32;
 
-    for c in 0..channels {
-        let a = read_clamped(input, x, y, t, c, width, height, channels, num_frames);
-        let b = read_clamped(
-            input,
-            x + q_x,
-            y + q_y,
-            frame_q,
-            c,
-            width,
-            height,
-            channels,
-            num_frames,
-        );
-        let d = a - b;
-        val += d * d;
-    }
+    // Cooperatively load 2D distance tile into shared memory.
+    let threads = block_x * block_y;
+    let tid = ly * block_x + lx;
+    let mut idx = tid;
 
-    val *= scale;
+    while idx < num_elems {
+        let tx = idx % tile_w;
+        let ty = idx / tile_w;
+        let src_x = tile_start_x + tx as i32;
+        let src_y = tile_start_y + ty as i32;
 
-    let idx = y as u32 * width + x as u32;
-    output[idx as usize] = val;
-}
+        let mut dist = 0.0f32;
 
-/// Horizontal box filter over the distance map using shared memory.
-///
-/// Each work group loads a horizontal tile (with halo) into shared
-/// memory, then each thread sums 2*patch_radius+1 consecutive values.
-#[cube(launch)]
-pub fn nlm_horizontal(
-    input: &Array<f32>,
-    output: &mut Array<f32>,
-    #[comptime] width: u32,
-    #[comptime] height: u32,
-    #[comptime] patch_radius: u32,
-    #[comptime] block_x: u32,
-    #[comptime] block_y: u32,
-) {
-    let tile_w = block_x + 2 * patch_radius;
-    let smem_size = (tile_w * block_y) as usize;
-    let mut smem = SharedMemory::<f32>::new(smem_size);
-
-    let lx = UNIT_POS_X;
-    let ly = UNIT_POS_Y;
-
-    let gx = CUBE_POS_X * block_x + lx;
-    let gy = CUBE_POS_Y * block_y + ly;
-
-    let tile_start_x = CUBE_POS_X as i32 * block_x as i32 - patch_radius as i32;
-
-    let row_offset = ly * tile_w;
-    let mut i = lx;
-
-    while i < tile_w {
-        let src_x = tile_start_x + i as i32;
-        let src_y = gy as i32;
-
-        let mut val = 0.0f32;
-        if src_x >= 0 && src_x < width as i32 && src_y >= 0 && src_y < height as i32 {
-            val = input[(src_y as u32 * width + src_x as u32) as usize];
+        for c in 0..channels {
+            let a = read_clamped(
+                input, src_x, src_y, t, c, width, height, channels, num_frames,
+            );
+            let b = read_clamped(
+                input,
+                src_x + q_x,
+                src_y + q_y,
+                frame_q,
+                c,
+                width,
+                height,
+                channels,
+                num_frames,
+            );
+            let d = a - b;
+            dist += d * d;
         }
+        dist *= scale;
 
-        smem[(row_offset + i) as usize] = val;
-        i += block_x;
+        smem[idx as usize] = dist;
+        idx += threads;
     }
 
     sync_cube();
@@ -154,71 +159,16 @@ pub fn nlm_horizontal(
         terminate!();
     }
 
-    let center = lx + patch_radius;
+    // 2D box sum over (2p+1)² patch centered at (lx+p, ly+p) in tile.
+    let cx = lx + p;
+    let cy = ly + p;
+    let ksize = 2 * p + 1;
     let mut sum = 0.0f32;
-    let kernel_size = 2 * patch_radius + 1;
 
-    for j in 0..kernel_size {
-        sum += smem[(row_offset + center - patch_radius + j) as usize];
-    }
-
-    output[(gy * width + gx) as usize] = sum;
-}
-
-/// Vertical box filter + Welsch weight: w = exp(-sum * h2_inv_norm).
-///
-/// Uses shared memory for the vertical tile.
-#[cube(launch)]
-pub fn nlm_vertical(
-    input: &Array<f32>,
-    output: &mut Array<f32>,
-    h2_inv_norm: f32,
-    #[comptime] width: u32,
-    #[comptime] height: u32,
-    #[comptime] patch_radius: u32,
-    #[comptime] block_x: u32,
-    #[comptime] block_y: u32,
-) {
-    let tile_h = block_y + 2 * patch_radius;
-    let smem_size = (block_x * tile_h) as usize;
-    let mut smem = SharedMemory::<f32>::new(smem_size);
-
-    let lx = UNIT_POS_X;
-    let ly = UNIT_POS_Y;
-
-    let gx = CUBE_POS_X * block_x + lx;
-    let gy = CUBE_POS_Y * block_y + ly;
-
-    let tile_start_y = CUBE_POS_Y as i32 * block_y as i32 - patch_radius as i32;
-
-    let col_offset = lx;
-    let mut i = ly;
-
-    while i < tile_h {
-        let src_x = gx as i32;
-        let src_y = tile_start_y + i as i32;
-
-        let mut val = 0.0f32;
-        if src_x >= 0 && src_x < width as i32 && src_y >= 0 && src_y < height as i32 {
-            val = input[(src_y as u32 * width + src_x as u32) as usize];
+    for dy in 0..ksize {
+        for dx in 0..ksize {
+            sum += smem[((cy - p + dy) * tile_w + cx - p + dx) as usize];
         }
-
-        smem[(i * block_x + col_offset) as usize] = val;
-        i += block_y;
-    }
-
-    sync_cube();
-
-    if gx >= width || gy >= height {
-        terminate!();
-    }
-
-    let center = ly + patch_radius;
-    let mut sum = 0.0f32;
-    let kernel_size = 2 * patch_radius + 1;
-
-    for j in 0..kernel_size {
-        sum += smem[((center - patch_radius + j) * block_x + col_offset) as usize];
     }
 
     let weight = f32::exp(-sum * h2_inv_norm);
