@@ -16,6 +16,14 @@ const ITERS_PIPELINE: usize = 500;
 
 // --- Synthetic image ---
 
+fn stored_channels(ch: u32) -> u32 {
+    match ch {
+        1 => 1,
+        2 => 2,
+        _ => 4, // YUV: 3 logical, 4 stored (vec3 -> vec4 padding)
+    }
+}
+
 fn make_synthetic_frame(w: u32, h: u32, ch: u32) -> Vec<f32> {
     let mut data = Vec::with_capacity((w * h * ch) as usize);
 
@@ -34,6 +42,22 @@ fn make_synthetic_frame(w: u32, h: u32, ch: u32) -> Vec<f32> {
         }
     }
 
+    data
+}
+
+/// Pad to next-pow2 lane count (matches NlmDenoiser internal storage).
+fn make_padded_frame(w: u32, h: u32, ch: u32) -> Vec<f32> {
+    let stored = stored_channels(ch);
+    if stored == ch {
+        return make_synthetic_frame(w, h, ch);
+    }
+    let src = make_synthetic_frame(w, h, ch);
+    let mut data = vec![0.0f32; (w * h * stored) as usize];
+    for i in 0..(w * h) as usize {
+        for c in 0..ch as usize {
+            data[i * stored as usize + c] = src[i * ch as usize + c];
+        }
+    }
     data
 }
 
@@ -121,7 +145,8 @@ fn bench_dist_2d_weight<R: Runtime>(
 ) -> BenchResult {
     let pixels = (W * H) as usize;
     let num_frames = 1u32;
-    let frame = make_synthetic_frame(W, H, ch);
+    let stored_ch = stored_channels(ch);
+    let frame = make_padded_frame(W, H, ch);
     let input = client.create_from_slice(f32::as_bytes(&frame));
     let output = client.empty(pixels * size_of::<f32>());
 
@@ -148,9 +173,11 @@ fn bench_dist_2d_weight<R: Runtime>(
             client,
             cube_count.clone(),
             cube_dim,
-            unsafe { ArrayArg::from_raw_parts::<f32>(&input, frame.len(), 1) },
+            unsafe {
+                ArrayArg::from_raw_parts::<f32>(&input, frame.len(), stored_ch as usize)
+            },
             unsafe { ArrayArg::from_raw_parts::<f32>(&output, pixels, 1) },
-            ScalarArg::new(0i32),
+            ScalarArg::new(0u32),
             ScalarArg::new(1i32),
             ScalarArg::new(0i32),
             ScalarArg::new(0i32),
@@ -175,13 +202,14 @@ fn bench_accumulate<R: Runtime>(
 ) -> BenchResult {
     let pixels = (W * H) as usize;
     let num_frames = 1u32;
-    let frame = make_synthetic_frame(W, H, ch);
+    let stored_ch = stored_channels(ch);
+    let frame = make_padded_frame(W, H, ch);
     let input = client.create_from_slice(f32::as_bytes(&frame));
 
     let weights_data = vec![0.5f32; pixels];
     let weights = client.create_from_slice(f32::as_bytes(&weights_data));
 
-    let accum = client.empty(pixels * ch as usize * size_of::<f32>());
+    let accum = client.empty(pixels * stored_ch as usize * size_of::<f32>());
     let weight_sum = client.empty(pixels * size_of::<f32>());
     let max_weight = client.empty(pixels * size_of::<f32>());
 
@@ -197,13 +225,21 @@ fn bench_accumulate<R: Runtime>(
             client,
             cube_count.clone(),
             cube_dim,
-            unsafe { ArrayArg::from_raw_parts::<f32>(&input, frame.len(), 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&accum, pixels * ch as usize, 1) },
+            unsafe {
+                ArrayArg::from_raw_parts::<f32>(&input, frame.len(), stored_ch as usize)
+            },
+            unsafe {
+                ArrayArg::from_raw_parts::<f32>(
+                    &accum,
+                    pixels * stored_ch as usize,
+                    stored_ch as usize,
+                )
+            },
             unsafe { ArrayArg::from_raw_parts::<f32>(&weight_sum, pixels, 1) },
             unsafe { ArrayArg::from_raw_parts::<f32>(&weights, pixels, 1) },
             unsafe { ArrayArg::from_raw_parts::<f32>(&weights, pixels, 1) },
             unsafe { ArrayArg::from_raw_parts::<f32>(&max_weight, pixels, 1) },
-            ScalarArg::new(0i32),
+            ScalarArg::new(0u32),
             ScalarArg::new(1i32),
             ScalarArg::new(0i32),
             ScalarArg::new(0i32),
@@ -224,10 +260,11 @@ fn bench_finish<R: Runtime>(
 ) -> BenchResult {
     let pixels = (W * H) as usize;
     let num_frames = 1u32;
-    let frame = make_synthetic_frame(W, H, ch);
+    let stored_ch = stored_channels(ch);
+    let frame = make_padded_frame(W, H, ch);
     let input = client.create_from_slice(f32::as_bytes(&frame));
 
-    let accum_data = vec![0.25f32; pixels * ch as usize];
+    let accum_data = vec![0.25f32; pixels * stored_ch as usize];
     let accum = client.create_from_slice(f32::as_bytes(&accum_data));
 
     let ws_data = vec![1.0f32; pixels];
@@ -236,7 +273,7 @@ fn bench_finish<R: Runtime>(
     let mw_data = vec![0.8f32; pixels];
     let max_weight = client.create_from_slice(f32::as_bytes(&mw_data));
 
-    let output = client.empty(pixels * ch as usize * size_of::<f32>());
+    let output = client.empty(pixels * stored_ch as usize * size_of::<f32>());
 
     let grid_x = div_ceil(W, BLOCK_X);
     let grid_y = div_ceil(H, BLOCK_Y);
@@ -250,12 +287,26 @@ fn bench_finish<R: Runtime>(
             client,
             cube_count.clone(),
             cube_dim,
-            unsafe { ArrayArg::from_raw_parts::<f32>(&input, frame.len(), 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&output, pixels * ch as usize, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&accum, pixels * ch as usize, 1) },
+            unsafe {
+                ArrayArg::from_raw_parts::<f32>(&input, frame.len(), stored_ch as usize)
+            },
+            unsafe {
+                ArrayArg::from_raw_parts::<f32>(
+                    &output,
+                    pixels * stored_ch as usize,
+                    stored_ch as usize,
+                )
+            },
+            unsafe {
+                ArrayArg::from_raw_parts::<f32>(
+                    &accum,
+                    pixels * stored_ch as usize,
+                    stored_ch as usize,
+                )
+            },
             unsafe { ArrayArg::from_raw_parts::<f32>(&weight_sum, pixels, 1) },
             unsafe { ArrayArg::from_raw_parts::<f32>(&max_weight, pixels, 1) },
-            ScalarArg::new(0i32),
+            ScalarArg::new(0u32),
             ScalarArg::new(1.0f32),
             W,
             H,
