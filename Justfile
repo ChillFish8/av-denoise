@@ -53,7 +53,7 @@ docker-test-run image="localhost/av-denoise:local" input="data/test.mkv" width="
         -i "{{input}}" \
         -f rawvideo \
         -pix_fmt rgb24 \
-        - 2> >(cat >&3) | podman run --rm --device /dev/kfd --device /dev/dri \
+        - 2> >(cat >&3) | podman run --rm --name av-denoise --device /dev/kfd --device /dev/dri \
             --group-add video --group-add render \
             --security-opt seccomp=unconfined \
             --memory=48g \
