@@ -124,21 +124,20 @@ pub fn gpu_zero_buffers(
     #[comptime] weight_len: u32,
     #[comptime] total_threads: u32,
 ) {
+    // accum_len >= weight_len always holds (accum carries `stored_ch >= 1`
+    // lanes per pixel). Tight loop zeroes all three up to weight_len;
+    // tail loop continues zeroing only `accum` for the channel-padded
+    // remainder. Removes the per-iter `idx < weight_len` branch from
+    // the hot path.
     let mut idx = ABSOLUTE_POS_X;
-    let max_len = if accum_len > weight_len {
-        accum_len
-    } else {
-        weight_len
-    };
-
-    while idx < max_len {
-        if idx < accum_len {
-            accum[idx as usize] = 0.0f32;
-        }
-        if idx < weight_len {
-            weight_sum[idx as usize] = 0.0f32;
-            max_weight[idx as usize] = 0.0f32;
-        }
+    while idx < weight_len {
+        accum[idx as usize] = 0.0f32;
+        weight_sum[idx as usize] = 0.0f32;
+        max_weight[idx as usize] = 0.0f32;
+        idx += total_threads;
+    }
+    while idx < accum_len {
+        accum[idx as usize] = 0.0f32;
         idx += total_threads;
     }
 }
@@ -160,10 +159,10 @@ pub fn gpu_zero_buffers(
 pub fn nlm_dist_2d_weight(
     input: &Array<Line<f32>>,
     output: &mut Array<f32>,
-    t: u32,
+    frame_t: u32,
+    frame_q: u32,
     q_x: i32,
     q_y: i32,
-    q_k: i32,
     h2_inv_norm: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -188,8 +187,6 @@ pub fn nlm_dist_2d_weight(
     let tile_start_x = CUBE_POS_X as i32 * block_x as i32 - p as i32;
     let tile_start_y = CUBE_POS_Y as i32 * block_y as i32 - p as i32;
 
-    // frame_q is always in-range (see read_clamped_line doc).
-    let frame_q = (t as i32 + q_k) as u32;
     let scale = if channels == 1 {
         3.0f32
     } else if channels == 2 {
@@ -199,7 +196,7 @@ pub fn nlm_dist_2d_weight(
     };
 
     // Cube-uniform interior check: does the union of both tile reads
-    // (frame t at offset 0 and frame t+k at offset q) lie fully inside
+    // (frame_t at offset 0 and frame_q at offset q) lie fully inside
     // the image?
     let tile_end_x = tile_start_x + tile_w as i32;
     let tile_end_y = tile_start_y + tile_h as i32;
@@ -224,7 +221,7 @@ pub fn nlm_dist_2d_weight(
             let src_x = (tile_start_x + tx as i32) as u32;
             let src_y = (tile_start_y + ty as i32) as u32;
 
-            let a = read_line(input, src_x, src_y, t, width, height);
+            let a = read_line(input, src_x, src_y, frame_t, width, height);
             let b = read_line(
                 input,
                 (src_x as i32 + q_x) as u32,
@@ -247,7 +244,7 @@ pub fn nlm_dist_2d_weight(
             let src_x = tile_start_x + tx as i32;
             let src_y = tile_start_y + ty as i32;
 
-            let a = read_clamped_line(input, src_x, src_y, t, width, height);
+            let a = read_clamped_line(input, src_x, src_y, frame_t, width, height);
             let b = read_clamped_line(
                 input,
                 src_x + q_x,
@@ -303,10 +300,11 @@ pub fn nlm_dist_2d_weight_pair(
     input: &Array<Line<f32>>,
     out_fwd: &mut Array<f32>,
     out_bwd: &mut Array<f32>,
-    t: u32,
+    frame_t: u32,
+    frame_fwd: u32,
+    frame_bwd: u32,
     q_x: i32,
     q_y: i32,
-    q_k: i32,
     h2_inv_norm: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -332,10 +330,6 @@ pub fn nlm_dist_2d_weight_pair(
     let tile_start_x = CUBE_POS_X as i32 * block_x as i32 - p as i32;
     let tile_start_y = CUBE_POS_Y as i32 * block_y as i32 - p as i32;
 
-    // Frame indices are always in-range (see read_clamped_line doc).
-    let frame_fwd = (t as i32 + q_k) as u32;
-    let frame_bwd = (t as i32 - q_k) as u32;
-
     let scale = if channels == 1 {
         3.0f32
     } else if channels == 2 {
@@ -345,7 +339,7 @@ pub fn nlm_dist_2d_weight_pair(
     };
 
     // Cube-uniform interior check: covers union of all three reads
-    // — (t, tile), (t+k, tile+q), (t-k, tile-q).
+    // — (frame_t, tile), (frame_fwd, tile+q), (frame_bwd, tile-q).
     let tile_end_x = tile_start_x + tile_w as i32;
     let tile_end_y = tile_start_y + tile_h as i32;
     let interior = tile_start_x >= 0
@@ -372,7 +366,7 @@ pub fn nlm_dist_2d_weight_pair(
             let src_x = (tile_start_x + tx as i32) as u32;
             let src_y = (tile_start_y + ty as i32) as u32;
 
-            let a = read_line(input, src_x, src_y, t, width, height);
+            let a = read_line(input, src_x, src_y, frame_t, width, height);
             let b_fwd = read_line(
                 input,
                 (src_x as i32 + q_x) as u32,
@@ -406,7 +400,7 @@ pub fn nlm_dist_2d_weight_pair(
             let src_x = tile_start_x + tx as i32;
             let src_y = tile_start_y + ty as i32;
 
-            let a = read_clamped_line(input, src_x, src_y, t, width, height);
+            let a = read_clamped_line(input, src_x, src_y, frame_t, width, height);
             let b_fwd = read_clamped_line(
                 input,
                 src_x + q_x,
@@ -469,18 +463,19 @@ pub fn nlm_dist_2d_weight_pair(
 ///   dist_fwd[idx] = dist((t,   idx), (t+k, idx+q))
 ///   dist_bwd[idx] = dist((t-k, idx), (t,   idx+q))
 ///
-/// Each thread does 4 reads (no shared center, unlike the fused 2D
-/// path) — the win is purely launch overhead and shared scale/compile-
-/// time setup. Writes to every pixel so hsum/vsum see no holes.
+/// Frame indices are passed pre-resolved to physical ring slots by the
+/// host: `frame_t` is the center, `frame_fwd` / `frame_bwd` are the
+/// +q_k / -q_k temporal neighbours. The kernel does no modulo.
 #[cube(launch)]
 pub fn nlm_distance_pair(
     input: &Array<Line<f32>>,
     dist_fwd: &mut Array<f32>,
     dist_bwd: &mut Array<f32>,
-    t: u32,
+    frame_t: u32,
+    frame_fwd: u32,
+    frame_bwd: u32,
     q_x: i32,
     q_y: i32,
-    q_k: i32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
@@ -492,9 +487,6 @@ pub fn nlm_distance_pair(
         terminate!();
     }
 
-    let frame_fwd = (t as i32 + q_k) as u32;
-    let frame_bwd = (t as i32 - q_k) as u32;
-
     let scale = if channels == 1 {
         3.0f32
     } else if channels == 2 {
@@ -503,8 +495,9 @@ pub fn nlm_distance_pair(
         1.0f32
     };
 
-    // Centers: (t, x, y) for fwd, (t-k, x, y) for bwd. Both in-bounds.
-    let a_fwd = read_line(input, x, y, t, width, height);
+    // Centers: (frame_t, x, y) for fwd, (frame_bwd, x, y) for bwd. Both
+    // reads are at in-bounds (x, y) so no clamp needed.
+    let a_fwd = read_line(input, x, y, frame_t, width, height);
     let a_bwd = read_line(input, x, y, frame_bwd, width, height);
 
     // Hot/cold split for the offset reads (warp-uniform for most warps).
@@ -519,9 +512,9 @@ pub fn nlm_distance_pair(
         read_clamped_line(input, nx, ny, frame_fwd, width, height)
     };
     let b_bwd = if interior {
-        read_line(input, nx as u32, ny as u32, t, width, height)
+        read_line(input, nx as u32, ny as u32, frame_t, width, height)
     } else {
-        read_clamped_line(input, nx, ny, t, width, height)
+        read_clamped_line(input, nx, ny, frame_t, width, height)
     };
 
     let mut d_fwd = line_sum_sq(a_fwd - b_fwd, channels);
@@ -539,10 +532,10 @@ pub fn nlm_distance_pair(
 pub fn nlm_distance(
     input: &Array<Line<f32>>,
     dist: &mut Array<f32>,
-    t: u32,
+    frame_t: u32,
+    frame_q: u32,
     q_x: i32,
     q_y: i32,
-    q_k: i32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
@@ -554,9 +547,6 @@ pub fn nlm_distance(
         terminate!();
     }
 
-    // frame_q is always in-range (see read_clamped_line doc).
-    let frame_q = (t as i32 + q_k) as u32;
-
     let scale = if channels == 1 {
         3.0f32
     } else if channels == 2 {
@@ -566,7 +556,7 @@ pub fn nlm_distance(
     };
 
     // Center-pixel read is always in-bounds (x,y already passed bounds check).
-    let a = read_line(input, x, y, t, width, height);
+    let a = read_line(input, x, y, frame_t, width, height);
 
     // Hot/cold split: skip clamping when the offset pixel is in-range.
     // The branch is uniform across most warps — only a thin border of
@@ -660,7 +650,6 @@ pub fn nlm_vertical_weight(
     #[comptime] block_y: u32,
 ) {
     let p = patch_radius;
-    let tile_h = comptime!(block_y + 2 * patch_radius);
     let num_elems = comptime!(block_x * (block_y + 2 * patch_radius));
     let mut smem = SharedMemory::<f32>::new(comptime!(block_x * (block_y + 2 * patch_radius)) as usize);
 
@@ -729,10 +718,10 @@ pub fn nlm_accumulate(
     weights_fwd: &Array<f32>,
     weights_bwd: &Array<f32>,
     max_weight: &mut Array<f32>,
-    t: u32,
+    frame_fwd: u32,
+    frame_bwd: u32,
     q_x: i32,
     q_y: i32,
-    q_k: i32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
@@ -766,9 +755,6 @@ pub fn nlm_accumulate(
     max_weight[p_idx] = new_max;
 
     // Hot/cold split: are both the +q and -q neighbor reads in-range?
-    let frame_p = (t as i32 + q_k) as u32;
-    let frame_m = (t as i32 - q_k) as u32;
-
     let pqx = x as i32 + q_x;
     let pqy = y as i32 + q_y;
     let mqx = x as i32 - q_x;
@@ -782,15 +768,16 @@ pub fn nlm_accumulate(
         && mqy >= 0
         && mqy < height as i32;
 
-    let mut pq_val = Line::empty(input.line_size());
-    let mut mq_val = Line::empty(input.line_size());
-    if interior {
-        pq_val = read_line(input, pqx as u32, pqy as u32, frame_p, width, height);
-        mq_val = read_line(input, mqx as u32, mqy as u32, frame_m, width, height);
+    let pq_val = if interior {
+        read_line(input, pqx as u32, pqy as u32, frame_fwd, width, height)
     } else {
-        pq_val = read_clamped_line(input, pqx, pqy, frame_p, width, height);
-        mq_val = read_clamped_line(input, mqx, mqy, frame_m, width, height);
-    }
+        read_clamped_line(input, pqx, pqy, frame_fwd, width, height)
+    };
+    let mq_val = if interior {
+        read_line(input, mqx as u32, mqy as u32, frame_bwd, width, height)
+    } else {
+        read_clamped_line(input, mqx, mqy, frame_bwd, width, height)
+    };
 
     // Broadcast scalar weights to Line and accumulate via lane-wise
     // ops (no per-lane indexing — works for line_size 1 too).
@@ -822,7 +809,7 @@ pub fn nlm_finish(
     accum: &Array<Line<f32>>,
     weight_sum: &Array<f32>,
     max_weight: &Array<f32>,
-    t: u32,
+    center_frame: u32,
     wref: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -837,7 +824,7 @@ pub fn nlm_finish(
     }
 
     let p_idx = (y * width + x) as usize;
-    let frame_idx = ((t * height + y) * width + x) as usize;
+    let frame_idx = ((center_frame * height + y) * width + x) as usize;
 
     let m = wref * max_weight[p_idx];
     let den = m + weight_sum[p_idx];

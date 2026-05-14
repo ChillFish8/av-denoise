@@ -65,7 +65,7 @@ fn uniform_image_passthrough() {
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap();
+    let result = denoiser.denoise().unwrap().unwrap().to_vec();
 
     for (i, &v) in result.iter().enumerate() {
         assert!((v - 0.5).abs() < 1e-5, "pixel {i}: expected 0.5, got {v}");
@@ -91,7 +91,7 @@ fn uniform_yuv_passthrough() {
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap();
+    let result = denoiser.denoise().unwrap().unwrap().to_vec();
     assert_eq!(result.len(), (w * h * 3) as usize);
 
     for (i, &v) in result.iter().enumerate() {
@@ -118,7 +118,7 @@ fn uniform_chroma_passthrough() {
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap();
+    let result = denoiser.denoise().unwrap().unwrap().to_vec();
     assert_eq!(result.len(), (w * h * 2) as usize);
 
     for (i, &v) in result.iter().enumerate() {
@@ -146,7 +146,7 @@ fn noisy_region_suppressed() {
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap();
+    let result = denoiser.denoise().unwrap().unwrap().to_vec();
 
     let noisy_idx = (16 * w + 16) as usize;
     let denoised = result[noisy_idx];
@@ -183,7 +183,7 @@ fn high_strength_smooths_heavily() {
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap();
+    let result = denoiser.denoise().unwrap().unwrap().to_vec();
 
     let center = result[(8 * w + 8) as usize];
     assert!(
@@ -213,7 +213,7 @@ fn low_strength_preserves_original() {
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap();
+    let result = denoiser.denoise().unwrap().unwrap().to_vec();
 
     let pixel = result[(8 * w + 8) as usize];
     assert!(
@@ -242,7 +242,7 @@ fn self_weight_zero_uniform() {
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap();
+    let result = denoiser.denoise().unwrap().unwrap().to_vec();
 
     for (i, &v) in result.iter().enumerate() {
         assert!((v - 0.5).abs() < 1e-5, "pixel {i}: expected ~0.5, got {v}");
@@ -324,7 +324,7 @@ fn temporal_denoise_uniform() {
     denoiser.push_frame(&frame);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap();
+    let result = denoiser.denoise().unwrap().unwrap().to_vec();
 
     for (i, &v) in result.iter().enumerate() {
         assert!(
@@ -357,7 +357,7 @@ fn temporal_with_noisy_center_frame() {
     denoiser.push_frame(&noisy);
     denoiser.push_frame(&clean);
 
-    let result = denoiser.denoise().unwrap().unwrap();
+    let result = denoiser.denoise().unwrap().unwrap().to_vec();
 
     let center_val = result[(8 * w + 8) as usize];
     assert!(
@@ -396,7 +396,7 @@ fn temporal_asymmetric_frames_correct_weights() {
     denoiser.push_frame(&frame1);
     denoiser.push_frame(&frame2);
 
-    let result = denoiser.denoise().unwrap().unwrap();
+    let result = denoiser.denoise().unwrap().unwrap().to_vec();
 
     let center_val = result[(8 * w + 8) as usize];
     assert!(
@@ -426,7 +426,10 @@ fn flush_produces_remaining_frames() {
         let _ = denoiser.denoise().unwrap();
     }
 
-    let remaining = denoiser.flush().unwrap();
+    let mut remaining: Vec<Vec<f32>> = Vec::new();
+    denoiser
+        .flush(|frame| remaining.push(frame.to_vec()))
+        .unwrap();
     assert_eq!(
         remaining.len(),
         1,
@@ -467,7 +470,7 @@ fn symmetry_preserved() {
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap();
+    let result = denoiser.denoise().unwrap().unwrap().to_vec();
 
     for y in 0..h {
         for x in 0..(w / 2) {
@@ -501,7 +504,7 @@ fn clamp_to_edge_no_darkening() {
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap();
+    let result = denoiser.denoise().unwrap().unwrap().to_vec();
 
     let corner = result[0];
     assert!(
@@ -564,7 +567,7 @@ fn separable_uniform_passthrough() {
     );
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap();
+    let result = denoiser.denoise().unwrap().unwrap().to_vec();
 
     for (i, &v) in result.iter().enumerate() {
         assert!(
@@ -594,7 +597,7 @@ fn separable_yuv_passthrough() {
     assert!(denoiser.use_separable);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap();
+    let result = denoiser.denoise().unwrap().unwrap().to_vec();
     assert_eq!(result.len(), (w * h * 3) as usize);
 
     for (i, &v) in result.iter().enumerate() {
@@ -632,7 +635,7 @@ fn separable_symmetry_preserved() {
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap();
+    let result = denoiser.denoise().unwrap().unwrap().to_vec();
 
     for y in 0..h {
         for x in 0..(w / 2) {
