@@ -383,6 +383,73 @@ fn temporal_with_noisy_center_frame() {
 }
 
 #[test]
+fn temporal_asymmetric_frames_correct_weights() {
+    // This test catches the temporal weight overwrite bug.
+    // Frame 0 has a bright feature, frame 1 (center) is uniform,
+    // frame 2 is also uniform. The center frame's forward weight
+    // (comparing uniform center to featured past) differs from
+    // the mirror frame's weight (comparing uniform future to
+    // uniform center).
+    //
+    // With the bug: both w_pq and w_mq use mirror weights,
+    // giving equal weight to past and future neighbors.
+    // Without the bug: w_pq (center→past) is lower due to the
+    // bright feature, so the past frame's contribution is reduced.
+    let client = make_client();
+    let params = NlmParams {
+        temporal_radius: 1,
+        search_radius: 1,
+        patch_radius: 1,
+        strength: 5.0,
+        self_weight: 0.0,
+        channels: ChannelMode::Luma,
+    };
+
+    let w = 16;
+    let h = 16;
+
+    // Frame 0: bright block at center (distinctive feature)
+    let mut frame0 = vec![0.5f32; (w * h) as usize];
+    for y in 6..10 {
+        for x in 6..10 {
+            frame0[(y * w + x) as usize] = 0.9;
+        }
+    }
+
+    // Frame 1 (center): uniform 0.5
+    let frame1 = vec![0.5f32; (w * h) as usize];
+
+    // Frame 2: uniform 0.5 (same as center)
+    let frame2 = vec![0.5f32; (w * h) as usize];
+
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+    denoiser.push_frame(&frame0);
+    denoiser.push_frame(&frame1);
+    denoiser.push_frame(&frame2);
+
+    let result = denoiser.denoise().unwrap().unwrap();
+
+    // For center pixel (8,8): the center frame pixel is 0.5.
+    // The forward neighbor (frame 0) at (8,8) is 0.9.
+    // The backward neighbor (frame 2) at (8,8) is 0.5.
+    //
+    // Correct behavior: w_pq (center→past) should be LOW because
+    // the patch around (8,8) in center (all 0.5) differs from
+    // the patch around (8+i,8+j) in frame 0 (contains 0.9 values).
+    // w_mq (mirror→center) should be HIGH because frame 2 matches
+    // frame 1 well.
+    //
+    // So the result should be pulled toward frame 2's value (0.5)
+    // rather than being a simple average of 0.9 and 0.5.
+    let center_val = result[(8 * w + 8) as usize];
+    assert!(
+        (center_val - 0.5).abs() < 0.1,
+        "temporal asymmetric: center should stay near 0.5 \
+         (past frame de-weighted), got {center_val}"
+    );
+}
+
+#[test]
 fn flush_produces_remaining_frames() {
     let client = make_client();
     let params = NlmParams {

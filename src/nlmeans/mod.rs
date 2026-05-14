@@ -100,6 +100,7 @@ pub struct NlmDenoiser<R: Runtime> {
     accum: Handle,
     weight_sum: Handle,
     max_weight: Handle,
+    weight_fwd: Handle,
     dist_a: Handle,
     dist_b: Handle,
     output: Handle,
@@ -125,6 +126,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let accum = client.empty(pixels * ch as usize * size_of::<f32>());
         let weight_sum = client.empty(pixels * size_of::<f32>());
         let max_weight = client.empty(pixels * size_of::<f32>());
+        let weight_fwd = client.empty(pixels * size_of::<f32>());
         let dist_a = client.empty(pixels * size_of::<f32>());
         let dist_b = client.empty(pixels * size_of::<f32>());
         let output = client.empty(pixels * ch as usize * size_of::<f32>());
@@ -142,6 +144,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             accum,
             weight_sum,
             max_weight,
+            weight_fwd,
             dist_a,
             dist_b,
             output,
@@ -294,7 +297,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                         continue;
                     }
 
-                    // Distance for offset q at frame t
+                    // Distance for offset q at center frame t
                     nlm_distance::launch::<R>(
                         &self.client,
                         cube_count.clone(),
@@ -337,7 +340,15 @@ impl<R: Runtime> NlmDenoiser<R> {
                         BLOCK_Y,
                     )?;
 
-                    // Vertical box filter + weight
+                    // Vertical box filter + weight.
+                    // When k != 0, output center frame weights to weight_fwd
+                    // so the second pass doesn't overwrite them.
+                    let fwd_output = if k != 0 {
+                        &self.weight_fwd
+                    } else {
+                        &self.dist_a
+                    };
+
                     nlm_vertical::launch::<R>(
                         &self.client,
                         cube_count.clone(),
@@ -345,9 +356,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                         unsafe {
                             ArrayArg::from_raw_parts::<f32>(&self.dist_b, pixels, 1)
                         },
-                        unsafe {
-                            ArrayArg::from_raw_parts::<f32>(&self.dist_a, pixels, 1)
-                        },
+                        unsafe { ArrayArg::from_raw_parts::<f32>(fwd_output, pixels, 1) },
                         ScalarArg::new(self.h2_inv_norm),
                         w,
                         h,
@@ -356,8 +365,8 @@ impl<R: Runtime> NlmDenoiser<R> {
                         BLOCK_Y,
                     )?;
 
-                    // For temporal offsets, also compute distance
-                    // from the mirror frame
+                    // For temporal offsets, compute weights from the
+                    // mirror frame perspective into dist_a.
                     if k != 0 {
                         let t_mq = t - k;
 
@@ -421,7 +430,15 @@ impl<R: Runtime> NlmDenoiser<R> {
                         )?;
                     }
 
-                    // Accumulate for both +q and -q
+                    // Accumulate for both +q and -q.
+                    // weights_fwd: center frame weights (weight_fwd if k!=0, dist_a if k==0)
+                    // weights_bwd: mirror frame weights (dist_a always — for k==0 same as fwd)
+                    let fwd_weights = if k != 0 {
+                        &self.weight_fwd
+                    } else {
+                        &self.dist_a
+                    };
+
                     nlm_accumulate::launch::<R>(
                         &self.client,
                         cube_count.clone(),
@@ -438,6 +455,9 @@ impl<R: Runtime> NlmDenoiser<R> {
                         },
                         unsafe {
                             ArrayArg::from_raw_parts::<f32>(&self.weight_sum, pixels, 1)
+                        },
+                        unsafe {
+                            ArrayArg::from_raw_parts::<f32>(fwd_weights, pixels, 1)
                         },
                         unsafe {
                             ArrayArg::from_raw_parts::<f32>(&self.dist_a, pixels, 1)

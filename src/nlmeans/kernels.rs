@@ -228,6 +228,10 @@ pub fn nlm_vertical(
 /// Accumulate weighted pixel contributions for offset q, processing
 /// both +q and -q simultaneously (symmetry exploitation).
 ///
+/// weights_fwd: weight map computed from center frame perspective (for +q direction)
+/// weights_bwd: weight map computed from mirror frame perspective (for -q direction)
+/// For spatial-only (k==0), both buffers point to the same data.
+///
 /// accum layout: [pixels * channels] — weighted pixel sums.
 /// weight_sum layout: [pixels] — total weight per pixel.
 #[cube(launch)]
@@ -235,7 +239,8 @@ pub fn nlm_accumulate(
     input: &Array<f32>,
     accum: &mut Array<f32>,
     weight_sum: &mut Array<f32>,
-    weights: &Array<f32>,
+    weights_fwd: &Array<f32>,
+    weights_bwd: &Array<f32>,
     max_weight: &mut Array<f32>,
     t: i32,
     q_x: i32,
@@ -256,14 +261,16 @@ pub fn nlm_accumulate(
     let p_idx = (y * width + x) as usize;
     let acc_base = p_idx * channels as usize;
 
-    let w_pq = weights[p_idx];
+    // w_pq: weight for pixel p toward p+q (center frame perspective)
+    let w_pq = weights_fwd[p_idx];
 
+    // w_mq: weight for pixel p-q toward p (mirror frame perspective)
     let mx = x as i32 - q_x;
     let my = y as i32 - q_y;
     let cmx = clamp_coord(mx, width);
     let cmy = clamp_coord(my, height);
     let mq_idx = (cmy * width + cmx) as usize;
-    let w_mq = weights[mq_idx];
+    let w_mq = weights_bwd[mq_idx];
 
     // Update max weight
     let cur_max = max_weight[p_idx];
