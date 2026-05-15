@@ -1,8 +1,9 @@
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use av_denoise::nlmeans::kernels::{nlm_accumulate, nlm_dist_2d_weight, nlm_finish};
-use av_denoise::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, NlmParams};
+use av_denoise::nlmeans::kernels::{nlm_accumulate, nlm_bilateral, nlm_dist_2d_weight, nlm_finish};
+use av_denoise::nlmeans::prefilter::bilateral_radius;
+use av_denoise::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, NlmParams, PrefilterMode};
 use cubecl::prelude::*;
 
 const W: u32 = 1920;
@@ -72,8 +73,8 @@ struct BenchResult {
 impl BenchResult {
     fn print(&self) {
         println!(
-            "[{:<7}] {:<40} {:>3} iters  {:>8.2} fps  {:>8.2} ms/frame  \
-             (min: {:.2}, max: {:.2})",
+            "[{:<7}] {:<48} {:>4} iters  {:>9.2} fps  {:>7.2} ms/frame  \
+             (min: {:>6.2}, max: {:>6.2})",
             self.backend, self.name, self.iterations, self.fps, self.mean_ms, self.min_ms, self.max_ms,
         );
     }
@@ -273,29 +274,84 @@ fn bench_finish<R: Runtime>(client: &ComputeClient<R>, backend: &str, ch: u32, c
     })
 }
 
-fn bench_denoise_spatial<R: Runtime>(
+fn bench_bilateral<R: Runtime>(
     client: &ComputeClient<R>,
     backend: &str,
-    channels: ChannelMode,
+    ch: u32,
     ch_name: &str,
 ) -> BenchResult {
-    let ch = channels.count();
-    let params = NlmParams {
-        temporal_radius: 0,
+    let pixels = (W * H) as usize;
+    let stored_ch = stored_channels(ch);
+    let frame = make_padded_frame(W, H, ch);
+    let input = client.create_from_slice(f32::as_bytes(&frame));
+    let output = client.empty(pixels * stored_ch as usize * size_of::<f32>());
+
+    let radius = bilateral_radius(BILATERAL_SIGMA_S);
+
+    let grid_x = div_ceil(W, BLOCK_X);
+    let grid_y = div_ceil(H, BLOCK_Y);
+    let cube_count = CubeCount::new_2d(grid_x, grid_y);
+    let cube_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
+
+    let name = format!("bilateral_1080p_{ch_name}");
+
+    run_bench(&name, backend, client, WARMUP_KERNEL, ITERS_KERNEL, || {
+        nlm_bilateral::launch::<R>(
+            client,
+            cube_count.clone(),
+            cube_dim,
+            unsafe { ArrayArg::from_raw_parts::<f32>(&input, frame.len(), stored_ch as usize) },
+            unsafe {
+                ArrayArg::from_raw_parts::<f32>(&output, pixels * stored_ch as usize, stored_ch as usize)
+            },
+            ScalarArg::new(0u32),
+            ScalarArg::new(1.0 / (2.0 * BILATERAL_SIGMA_S * BILATERAL_SIGMA_S)),
+            ScalarArg::new(1.0 / (2.0 * BILATERAL_SIGMA_R * BILATERAL_SIGMA_R)),
+            W,
+            H,
+            ch,
+            stored_ch,
+            radius,
+            BLOCK_X,
+            BLOCK_Y,
+        )
+        .unwrap();
+    })
+}
+
+fn denoise_params(channels: ChannelMode, temporal_radius: u32, prefilter: PrefilterMode) -> NlmParams {
+    NlmParams {
+        temporal_radius,
         search_radius: 2,
         patch_radius: 4,
         strength: 1.2,
         self_weight: 1.0,
         channels,
-    };
+        prefilter,
+    }
+}
 
+fn bench_denoise_spatial<R: Runtime>(
+    client: &ComputeClient<R>,
+    backend: &str,
+    channels: ChannelMode,
+    ch_name: &str,
+    prefilter: PrefilterMode,
+    tag: &str,
+) -> BenchResult {
+    let ch = channels.count();
+    let params = denoise_params(channels, 0, prefilter);
     let frame = make_synthetic_frame(W, H, ch);
-
-    let name = format!("denoise_spatial_1080p_{ch_name}");
+    let supply_reference = matches!(prefilter, PrefilterMode::External);
+    let name = format!("denoise_spatial{tag}_1080p_{ch_name}");
 
     run_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
         let mut denoiser = NlmDenoiser::<R>::new(client, params.clone(), W, H);
-        denoiser.push_frame(&frame);
+        if supply_reference {
+            denoiser.push_frame_with_reference(&frame, &frame);
+        } else {
+            denoiser.push_frame(&frame);
+        }
         let result = denoiser.denoise().unwrap().unwrap();
         black_box(&result);
     })
@@ -306,36 +362,48 @@ fn bench_denoise_temporal<R: Runtime>(
     backend: &str,
     channels: ChannelMode,
     ch_name: &str,
+    prefilter: PrefilterMode,
+    tag: &str,
 ) -> BenchResult {
     let ch = channels.count();
-    let params = NlmParams {
-        temporal_radius: 1,
-        search_radius: 2,
-        patch_radius: 4,
-        strength: 1.2,
-        self_weight: 1.0,
-        channels,
-    };
-
+    let params = denoise_params(channels, 1, prefilter);
     let frame0 = make_synthetic_frame(W, H, ch);
     let frame1 = make_synthetic_frame(W, H, ch);
     let frame2 = make_synthetic_frame(W, H, ch);
-
-    let name = format!("denoise_temporal_1080p_{ch_name}");
+    let supply_reference = matches!(prefilter, PrefilterMode::External);
+    let name = format!("denoise_temporal{tag}_1080p_{ch_name}");
 
     run_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
         let mut denoiser = NlmDenoiser::<R>::new(client, params.clone(), W, H);
-        denoiser.push_frame(&frame0);
-        denoiser.push_frame(&frame1);
-        denoiser.push_frame(&frame2);
+        for f in [&frame0, &frame1, &frame2] {
+            if supply_reference {
+                denoiser.push_frame_with_reference(f, f);
+            } else {
+                denoiser.push_frame(f);
+            }
+        }
         let result = denoiser.denoise().unwrap().unwrap();
         black_box(&result);
     })
 }
 
-fn run_all_benches<R: Runtime>(backend: &str) {
-    let device = <R as Runtime>::Device::default();
-    let client = R::client(&device);
+const BILATERAL_SIGMA_S: f32 = 3.0;
+const BILATERAL_SIGMA_R: f32 = 0.02;
+
+const DENOISE_VARIANTS: &[(PrefilterMode, &str)] = &[
+    (PrefilterMode::None, ""),
+    (PrefilterMode::External, "_rclip_external"),
+    (
+        PrefilterMode::Bilateral {
+            sigma_s: BILATERAL_SIGMA_S,
+            sigma_r: BILATERAL_SIGMA_R,
+        },
+        "_rclip_bilateral",
+    ),
+];
+
+fn run_all_benches<R: Runtime>(backend: &str, device: &R::Device) {
+    let client = R::client(device);
 
     println!("--- {backend} ---");
     println!();
@@ -346,7 +414,6 @@ fn run_all_benches<R: Runtime>(backend: &str) {
         (3, "yuv", ChannelMode::Yuv),
     ];
 
-    // Individual kernel benchmarks.
     for &(ch, ch_name, _) in &channels {
         bench_dist_2d_weight::<R>(&client, backend, ch, ch_name).print();
     }
@@ -362,29 +429,112 @@ fn run_all_benches<R: Runtime>(backend: &str) {
     }
     println!();
 
-    // Full pipeline benchmarks.
+    for &(ch, ch_name, _) in &channels {
+        bench_bilateral::<R>(&client, backend, ch, ch_name).print();
+    }
+    println!();
+
+    // Group each channel mode's baseline and rclip variants together so
+    // before/after comparisons land on adjacent rows.
     for &(_, ch_name, mode) in &channels {
-        bench_denoise_spatial::<R>(&client, backend, mode, ch_name).print();
+        for &(prefilter, tag) in DENOISE_VARIANTS {
+            bench_denoise_spatial::<R>(&client, backend, mode, ch_name, prefilter, tag).print();
+        }
     }
     println!();
 
     for &(_, ch_name, mode) in &channels {
-        bench_denoise_temporal::<R>(&client, backend, mode, ch_name).print();
+        for &(prefilter, tag) in DENOISE_VARIANTS {
+            if matches!(prefilter, PrefilterMode::External) {
+                continue;
+            }
+            bench_denoise_temporal::<R>(&client, backend, mode, ch_name, prefilter, tag).print();
+        }
     }
     println!();
 }
 
+/// Bench-harness CLI. `cargo bench --bench nlmeans -- --device discrete:1`
+/// selects the second discrete GPU.
+#[derive(clap::Parser, Debug)]
+#[command(about = "NLMeans benchmarks", long_about = None)]
+struct Cli {
+    /// GPU device to bind to. Format: `default`, `discrete[:N]`,
+    /// `integrated[:N]`, `virtual[:N]`, or `cpu`.
+    #[arg(long, default_value = "default", value_parser = parse_device_spec)]
+    device: DeviceSpec,
+
+    /// Swallowed: cargo passes this when invoking the bench binary.
+    #[arg(long, hide = true)]
+    bench: bool,
+}
+
+#[derive(Clone, Debug)]
+struct DeviceSpec {
+    kind: DeviceKind,
+    index: usize,
+}
+
+#[derive(Clone, Debug)]
+enum DeviceKind {
+    Default,
+    Discrete,
+    Integrated,
+    Virtual,
+    Cpu,
+}
+
+fn parse_device_spec(s: &str) -> Result<DeviceSpec, String> {
+    let (kind_str, idx_str) = s.split_once(':').unwrap_or((s, "0"));
+    let index = idx_str
+        .parse()
+        .map_err(|_| format!("invalid device index '{idx_str}' in '{s}'"))?;
+    let kind = match kind_str {
+        "default" => DeviceKind::Default,
+        "discrete" => DeviceKind::Discrete,
+        "integrated" => DeviceKind::Integrated,
+        "virtual" => DeviceKind::Virtual,
+        "cpu" => DeviceKind::Cpu,
+        other => {
+            return Err(format!(
+                "unknown device kind '{other}'; expected default, discrete[:N], integrated[:N], virtual[:N], or cpu"
+            ));
+        },
+    };
+    Ok(DeviceSpec { kind, index })
+}
+
+#[cfg(feature = "vulkan")]
+fn device_spec_to_wgpu(spec: &DeviceSpec) -> cubecl::wgpu::WgpuDevice {
+    use cubecl::wgpu::WgpuDevice;
+    match spec.kind {
+        DeviceKind::Default => WgpuDevice::DefaultDevice,
+        DeviceKind::Discrete => WgpuDevice::DiscreteGpu(spec.index),
+        DeviceKind::Integrated => WgpuDevice::IntegratedGpu(spec.index),
+        DeviceKind::Virtual => WgpuDevice::VirtualGpu(spec.index),
+        DeviceKind::Cpu => WgpuDevice::Cpu,
+    }
+}
+
 fn main() {
+    use clap::Parser;
+    let cli = Cli::parse();
+
     println!("NLMeans Benchmarks - 1920x1080");
     println!("  kernel:   warmup={WARMUP_KERNEL}, timed={ITERS_KERNEL}");
     println!("  pipeline: warmup={WARMUP_PIPELINE}, timed={ITERS_PIPELINE}");
-    println!();
 
     #[cfg(feature = "vulkan")]
-    run_all_benches::<cubecl::wgpu::WgpuRuntime>("vulkan");
+    {
+        let device = device_spec_to_wgpu(&cli.device);
+        println!("  device:   {device:?}");
+        println!();
+        run_all_benches::<cubecl::wgpu::WgpuRuntime>("vulkan", &device);
+    }
 
     #[cfg(not(feature = "vulkan"))]
     {
+        let _ = cli;
         eprintln!("No GPU backend enabled. Run with --features vulkan");
         std::process::exit(1);
     }
