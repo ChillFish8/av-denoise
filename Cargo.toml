@@ -31,3 +31,7 @@ default = ["cpu", "vulkan"]
 [[bench]]
 name = "nlmeans"
 harness = false
+
+[[bench]]
+name = "bench_kernels"
+harness = false
