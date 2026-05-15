@@ -554,7 +554,7 @@ fn normalization_u16_roundtrip() {
 }
 
 // ==================== Separable filter tests ====================
-// These use patch_radius > 2 to trigger the separable path.
+// These use patch_radius > SEPARABLE_THRESHOLD to trigger the separable path.
 
 #[test]
 fn separable_uniform_passthrough() {
@@ -562,19 +562,19 @@ fn separable_uniform_passthrough() {
     let params = NlmParams {
         temporal_radius: 0,
         search_radius: 2,
-        patch_radius: 4, // > SEPARABLE_THRESHOLD
+        patch_radius: 9, // > SEPARABLE_THRESHOLD
         strength: 1.2,
         self_weight: 1.0,
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
     };
 
-    let w = 16;
-    let h = 16;
+    let w = 32;
+    let h = 32;
     let frame = make_uniform_frame(w, h, 1, 0.5);
 
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
-    assert!(denoiser.use_separable, "should use separable for patch_radius=4");
+    assert!(denoiser.use_separable, "should use separable for patch_radius=9");
     denoiser.push_frame(&frame);
 
     let result = denoiser.denoise().unwrap().unwrap().to_vec();
@@ -593,15 +593,15 @@ fn separable_yuv_passthrough() {
     let params = NlmParams {
         temporal_radius: 0,
         search_radius: 2,
-        patch_radius: 3, // > SEPARABLE_THRESHOLD
+        patch_radius: 9, // > SEPARABLE_THRESHOLD
         strength: 1.2,
         self_weight: 1.0,
         channels: ChannelMode::Yuv,
         prefilter: PrefilterMode::None,
     };
 
-    let w = 16;
-    let h = 16;
+    let w = 32;
+    let h = 32;
     let frame = make_uniform_frame(w, h, 3, 0.5);
 
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);

@@ -35,7 +35,7 @@ const NLM_NORM: f32 = 255.0 * 255.0;
 const NLM_LEGACY: f32 = 3.0;
 
 /// Patch radius threshold: use the separable path above this value.
-const SEPARABLE_THRESHOLD: u32 = 2;
+const SEPARABLE_THRESHOLD: u32 = 8;
 
 /// Maximum 1D grid size for GPU dispatch (WebGPU/Vulkan limit).
 const MAX_GRID_1D: u32 = 65535;
