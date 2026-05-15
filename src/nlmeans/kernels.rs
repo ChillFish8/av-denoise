@@ -453,6 +453,261 @@ pub fn nlm_dist_2d_weight_pair(
     out_bwd[(gy * width + gx) as usize] = f32::exp(-sum_bwd * h2_inv_norm);
 }
 
+/// Fully fused: distance → 2D box filter → Welsch weight → accumulate,
+/// all in one kernel. Eliminates the intermediate weight buffers and
+/// the separate accumulate launch.
+///
+/// Per thread `(gx, gy)`, the accumulate needs:
+///   - Own forward weight  w_fwd[(gx, gy)]
+///   - Neighbour backward weight w_bwd[(gx - q_x, gy - q_y)]
+///
+/// Both are computed in registers from two SMEM distance tiles:
+///   - `smem_fwd` is centred on the cube and holds `d((t, p), (t+k, p+q))`
+///     for `p` in the cube's `(p_r)`-padded neighbourhood. Each thread
+///     box-sums at its tile-local centre to get its own fwd weight.
+///   - `smem_bwd` is centred at the cube shifted by `(-q_x, -q_y)` and
+///     holds `d((t-k, p), (t, p+q))` for `p` in that shifted
+///     neighbourhood. Each thread box-sums at its tile-local centre
+///     to get the bwd weight at `(gx - q_x, gy - q_y)` — exactly the
+///     neighbour weight the accumulate needs.
+///
+/// For the spatial case (`q_k == 0`), the caller passes
+/// `frame_t == frame_fwd == frame_bwd`; the kernel still produces both
+/// tiles (mathematically equivalent contents but at different tile
+/// origins) and the result matches the legacy single-weight path.
+#[cube(launch)]
+pub fn nlm_fused_pair_accumulate(
+    input: &Array<Line<f32>>,
+    accum: &mut Array<Line<f32>>,
+    weight_sum: &mut Array<f32>,
+    max_weight: &mut Array<f32>,
+    frame_t: u32,
+    frame_fwd: u32,
+    frame_bwd: u32,
+    q_x: i32,
+    q_y: i32,
+    bwd_shift_x: i32,
+    bwd_shift_y: i32,
+    h2_inv_norm: f32,
+    #[comptime] width: u32,
+    #[comptime] height: u32,
+    #[comptime] channels: u32,
+    #[comptime] _num_frames: u32,
+    #[comptime] patch_radius: u32,
+    #[comptime] block_x: u32,
+    #[comptime] block_y: u32,
+) {
+    let p = patch_radius;
+    let tile_w = comptime!(block_x + 2 * patch_radius);
+    let tile_h = comptime!(block_y + 2 * patch_radius);
+    let num_elems = comptime!((block_x + 2 * patch_radius) * (block_y + 2 * patch_radius));
+    let mut smem_fwd = SharedMemory::<f32>::new(
+        comptime!((block_x + 2 * patch_radius) * (block_y + 2 * patch_radius)) as usize,
+    );
+    let mut smem_bwd = SharedMemory::<f32>::new(
+        comptime!((block_x + 2 * patch_radius) * (block_y + 2 * patch_radius)) as usize,
+    );
+
+    let lx = UNIT_POS_X;
+    let ly = UNIT_POS_Y;
+
+    let gx = CUBE_POS_X * block_x + lx;
+    let gy = CUBE_POS_Y * block_y + ly;
+
+    // Fwd tile origin: cube top-left minus patch radius. Each thread's
+    // tile-local centre maps to its own `(gx, gy)`.
+    let fwd_tile_x = CUBE_POS_X as i32 * block_x as i32 - p as i32;
+    let fwd_tile_y = CUBE_POS_Y as i32 * block_y as i32 - p as i32;
+    // Bwd tile origin: shifted by (-q_x, -q_y) so each thread's
+    // tile-local centre maps to `(gx - q_x, gy - q_y)`.
+    let bwd_tile_x = fwd_tile_x - q_x;
+    let bwd_tile_y = fwd_tile_y - q_y;
+
+    let scale = if channels == 1 {
+        3.0f32
+    } else if channels == 2 {
+        1.5f32
+    } else {
+        1.0f32
+    };
+
+    // Cube-uniform interior check. Reads come from four image regions:
+    //   - (frame_t,   fwd_tile)           used by fwd_a
+    //   - (frame_fwd, fwd_tile + q)       used by fwd_b
+    //   - (frame_t,   bwd_tile)           used by bwd_a
+    //   - (frame_bwd, bwd_tile − q)       used by bwd_b
+    // bwd_tile = fwd_tile − q, so bwd_tile − q = fwd_tile − 2q.
+    let fwd_end_x = fwd_tile_x + tile_w as i32;
+    let fwd_end_y = fwd_tile_y + tile_h as i32;
+    let interior = fwd_tile_x >= 0
+        && fwd_end_x <= width as i32
+        && fwd_tile_y >= 0
+        && fwd_end_y <= height as i32
+        && (fwd_tile_x + q_x) >= 0
+        && (fwd_end_x + q_x) <= width as i32
+        && (fwd_tile_y + q_y) >= 0
+        && (fwd_end_y + q_y) <= height as i32
+        && (fwd_tile_x - q_x) >= 0
+        && (fwd_end_x - q_x) <= width as i32
+        && (fwd_tile_y - q_y) >= 0
+        && (fwd_end_y - q_y) <= height as i32
+        && (fwd_tile_x - 2 * q_x) >= 0
+        && (fwd_end_x - 2 * q_x) <= width as i32
+        && (fwd_tile_y - 2 * q_y) >= 0
+        && (fwd_end_y - 2 * q_y) <= height as i32;
+
+    let threads = block_x * block_y;
+    let tid = ly * block_x + lx;
+    let mut idx = tid;
+
+    if interior {
+        while idx < num_elems {
+            let tx = idx % tile_w;
+            let ty = idx / tile_w;
+
+            let fwd_sx = (fwd_tile_x + tx as i32) as u32;
+            let fwd_sy = (fwd_tile_y + ty as i32) as u32;
+            let bwd_sx = (bwd_tile_x + tx as i32) as u32;
+            let bwd_sy = (bwd_tile_y + ty as i32) as u32;
+
+            // Fwd: d((t, fwd_pos), (t+k, fwd_pos + q)).
+            let a_fwd = read_line(input, fwd_sx, fwd_sy, frame_t, width, height);
+            let b_fwd = read_line(
+                input,
+                (fwd_sx as i32 + q_x) as u32,
+                (fwd_sy as i32 + q_y) as u32,
+                frame_fwd,
+                width,
+                height,
+            );
+            let mut d_fwd = line_sum_sq(a_fwd - b_fwd, channels);
+            d_fwd *= scale;
+            smem_fwd[idx as usize] = d_fwd;
+
+            // Bwd: `‖frame_t[Y] − frame_bwd[Y + bwd_shift]‖²`. The host
+            // picks `bwd_shift = +q` for `k = 0` (matches the legacy
+            // single-buffer `+q` convention) and `bwd_shift = −q` for
+            // `k != 0` (matches the legacy fused pair convention,
+            // including its position-shifted bwd lookup). Box-summing
+            // around the shifted tile centre reproduces legacy
+            // `out_bwd[(gx − q, gy − q)]` in either regime.
+            let a_bwd = read_line(input, bwd_sx, bwd_sy, frame_t, width, height);
+            let b_bwd = read_line(
+                input,
+                (bwd_sx as i32 + bwd_shift_x) as u32,
+                (bwd_sy as i32 + bwd_shift_y) as u32,
+                frame_bwd,
+                width,
+                height,
+            );
+            let mut d_bwd = line_sum_sq(a_bwd - b_bwd, channels);
+            d_bwd *= scale;
+            smem_bwd[idx as usize] = d_bwd;
+
+            idx += threads;
+        }
+    } else {
+        while idx < num_elems {
+            let tx = idx % tile_w;
+            let ty = idx / tile_w;
+
+            let fwd_sx = fwd_tile_x + tx as i32;
+            let fwd_sy = fwd_tile_y + ty as i32;
+            let bwd_sx = bwd_tile_x + tx as i32;
+            let bwd_sy = bwd_tile_y + ty as i32;
+
+            let a_fwd = read_clamped_line(input, fwd_sx, fwd_sy, frame_t, width, height);
+            let b_fwd = read_clamped_line(
+                input,
+                fwd_sx + q_x,
+                fwd_sy + q_y,
+                frame_fwd,
+                width,
+                height,
+            );
+            let mut d_fwd = line_sum_sq(a_fwd - b_fwd, channels);
+            d_fwd *= scale;
+            smem_fwd[idx as usize] = d_fwd;
+
+            let a_bwd = read_clamped_line(input, bwd_sx, bwd_sy, frame_t, width, height);
+            let b_bwd = read_clamped_line(
+                input,
+                bwd_sx + bwd_shift_x,
+                bwd_sy + bwd_shift_y,
+                frame_bwd,
+                width,
+                height,
+            );
+            let mut d_bwd = line_sum_sq(a_bwd - b_bwd, channels);
+            d_bwd *= scale;
+            smem_bwd[idx as usize] = d_bwd;
+
+            idx += threads;
+        }
+    }
+
+    sync_cube();
+
+    if gx >= width || gy >= height {
+        terminate!();
+    }
+
+    // Box sum over (2p+1)² at tile-local centre.
+    let cx = lx + p;
+    let cy = ly + p;
+    let ksize = 2 * p + 1;
+    let mut sum_fwd = 0.0f32;
+    let mut sum_bwd = 0.0f32;
+    for dy in 0..ksize {
+        for dx in 0..ksize {
+            let s_idx = ((cy - p + dy) * tile_w + cx - p + dx) as usize;
+            sum_fwd += smem_fwd[s_idx];
+            sum_bwd += smem_bwd[s_idx];
+        }
+    }
+
+    let w_fwd = f32::exp(-sum_fwd * h2_inv_norm);
+    let w_bwd = f32::exp(-sum_bwd * h2_inv_norm);
+
+    // Neighbour input reads (same warp-uniform-ish hot/cold split as the
+    // standalone accumulate).
+    let pqx = gx as i32 + q_x;
+    let pqy = gy as i32 + q_y;
+    let mqx = gx as i32 - q_x;
+    let mqy = gy as i32 - q_y;
+    let nb_interior = pqx >= 0
+        && pqx < width as i32
+        && pqy >= 0
+        && pqy < height as i32
+        && mqx >= 0
+        && mqx < width as i32
+        && mqy >= 0
+        && mqy < height as i32;
+
+    let pq_val = if nb_interior {
+        read_line(input, pqx as u32, pqy as u32, frame_fwd, width, height)
+    } else {
+        read_clamped_line(input, pqx, pqy, frame_fwd, width, height)
+    };
+    let mq_val = if nb_interior {
+        read_line(input, mqx as u32, mqy as u32, frame_bwd, width, height)
+    } else {
+        read_clamped_line(input, mqx, mqy, frame_bwd, width, height)
+    };
+
+    let _ = channels;
+    let p_idx = (gy * width + gx) as usize;
+    let cur_max = max_weight[p_idx];
+    max_weight[p_idx] = f32::max(f32::max(w_fwd, w_bwd), cur_max);
+
+    let line_w_fwd = Line::<f32>::empty(input.line_size()).fill(w_fwd);
+    let line_w_bwd = Line::<f32>::empty(input.line_size()).fill(w_bwd);
+    let cur = accum[p_idx];
+    accum[p_idx] = cur + pq_val * line_w_fwd + mq_val * line_w_bwd;
+
+    weight_sum[p_idx] += w_fwd + w_bwd;
+}
+
 // ==================== Separable distance + weight kernels ====================
 // Used for larger patch_radius (>2) where separable 1D passes are faster
 // than the O((2p+1)^2) fused approach.
@@ -693,6 +948,279 @@ pub fn nlm_vertical_weight(
 
     let weight = f32::exp(-sum * h2_inv_norm);
     output[(gy * width + gx) as usize] = weight;
+}
+
+/// Paired horizontal 1D box filter — runs hsum for both fwd and bwd
+/// raw-distance buffers in a single cube dispatch. Both inputs share
+/// the same cooperative tile schedule (so the per-thread index work and
+/// `sync_cube` are paid once) but write to independent SMEM tiles so
+/// the per-axis sums stay independent.
+#[cube(launch)]
+pub fn nlm_horizontal_sum_pair(
+    input_fwd: &Array<f32>,
+    input_bwd: &Array<f32>,
+    output_fwd: &mut Array<f32>,
+    output_bwd: &mut Array<f32>,
+    #[comptime] width: u32,
+    #[comptime] height: u32,
+    #[comptime] patch_radius: u32,
+    #[comptime] block_x: u32,
+    #[comptime] block_y: u32,
+) {
+    let p = patch_radius;
+    let tile_w = comptime!(block_x + 2 * patch_radius);
+    let num_elems = comptime!((block_x + 2 * patch_radius) * block_y);
+    let mut smem_fwd =
+        SharedMemory::<f32>::new(comptime!((block_x + 2 * patch_radius) * block_y) as usize);
+    let mut smem_bwd =
+        SharedMemory::<f32>::new(comptime!((block_x + 2 * patch_radius) * block_y) as usize);
+
+    let lx = UNIT_POS_X;
+    let ly = UNIT_POS_Y;
+    let gx = CUBE_POS_X * block_x + lx;
+    let gy = CUBE_POS_Y * block_y + ly;
+
+    let tile_start_x = CUBE_POS_X as i32 * block_x as i32 - p as i32;
+
+    let threads = block_x * block_y;
+    let tid = ly * block_x + lx;
+    let mut idx = tid;
+
+    while idx < num_elems {
+        let tx = idx % tile_w;
+        let ty = idx / tile_w;
+        let src_x = tile_start_x + tx as i32;
+        let src_y = CUBE_POS_Y * block_y + ty;
+
+        let cx = clamp_coord(src_x, width);
+        let cy = clamp_coord(src_y as i32, height);
+
+        let src_idx = (cy * width + cx) as usize;
+        smem_fwd[idx as usize] = input_fwd[src_idx];
+        smem_bwd[idx as usize] = input_bwd[src_idx];
+        idx += threads;
+    }
+
+    sync_cube();
+
+    if gx >= width || gy >= height {
+        terminate!();
+    }
+
+    let ksize = 2 * p + 1;
+    let smem_base = ly * tile_w + lx;
+    let mut sum_fwd = 0.0f32;
+    let mut sum_bwd = 0.0f32;
+    for dx in 0..ksize {
+        sum_fwd += smem_fwd[(smem_base + dx) as usize];
+        sum_bwd += smem_bwd[(smem_base + dx) as usize];
+    }
+
+    let out_idx = (gy * width + gx) as usize;
+    output_fwd[out_idx] = sum_fwd;
+    output_bwd[out_idx] = sum_bwd;
+}
+
+/// Paired vertical 1D box filter + Welsch weight for fwd/bwd hsum
+/// intermediates. Shares the cooperative tile load and one `sync_cube`
+/// between both directions.
+#[cube(launch)]
+pub fn nlm_vertical_weight_pair(
+    input_fwd: &Array<f32>,
+    input_bwd: &Array<f32>,
+    output_fwd: &mut Array<f32>,
+    output_bwd: &mut Array<f32>,
+    h2_inv_norm: f32,
+    #[comptime] width: u32,
+    #[comptime] height: u32,
+    #[comptime] patch_radius: u32,
+    #[comptime] block_x: u32,
+    #[comptime] block_y: u32,
+) {
+    let p = patch_radius;
+    let num_elems = comptime!(block_x * (block_y + 2 * patch_radius));
+    let mut smem_fwd =
+        SharedMemory::<f32>::new(comptime!(block_x * (block_y + 2 * patch_radius)) as usize);
+    let mut smem_bwd =
+        SharedMemory::<f32>::new(comptime!(block_x * (block_y + 2 * patch_radius)) as usize);
+
+    let lx = UNIT_POS_X;
+    let ly = UNIT_POS_Y;
+    let gx = CUBE_POS_X * block_x + lx;
+    let gy = CUBE_POS_Y * block_y + ly;
+
+    let tile_start_y = CUBE_POS_Y as i32 * block_y as i32 - p as i32;
+
+    let threads = block_x * block_y;
+    let tid = ly * block_x + lx;
+    let mut idx = tid;
+
+    while idx < num_elems {
+        let tx = idx % block_x;
+        let ty = idx / block_x;
+        let src_x = CUBE_POS_X * block_x + tx;
+        let src_y = tile_start_y + ty as i32;
+
+        let cx = clamp_coord(src_x as i32, width);
+        let cy = clamp_coord(src_y, height);
+
+        let src_idx = (cy * width + cx) as usize;
+        smem_fwd[idx as usize] = input_fwd[src_idx];
+        smem_bwd[idx as usize] = input_bwd[src_idx];
+        idx += threads;
+    }
+
+    sync_cube();
+
+    if gx >= width || gy >= height {
+        terminate!();
+    }
+
+    let ksize = 2 * p + 1;
+    let mut sum_fwd = 0.0f32;
+    let mut sum_bwd = 0.0f32;
+    for dy in 0..ksize {
+        let s_idx = ((ly + dy) * block_x + lx) as usize;
+        sum_fwd += smem_fwd[s_idx];
+        sum_bwd += smem_bwd[s_idx];
+    }
+
+    let out_idx = (gy * width + gx) as usize;
+    output_fwd[out_idx] = f32::exp(-sum_fwd * h2_inv_norm);
+    output_bwd[out_idx] = f32::exp(-sum_bwd * h2_inv_norm);
+}
+
+/// Fully-fused separable terminal pass: vertical box sum + Welsch
+/// weight + accumulate, with both weights computed from registers (no
+/// global weight buffers).
+///
+/// SMEM layout mirrors the bi-tile trick in `nlm_fused_pair_accumulate`:
+///   - `smem_fwd` holds `hsum_fwd` over the cube's vertical strip
+///     `(block_x × (block_y + 2p))` — each thread vsums at its
+///     tile-local centre to get its own forward weight.
+///   - `smem_bwd` holds `hsum_bwd` over the strip shifted by
+///     `(-q_x, -q_y)` — each thread vsums at its tile-local centre to
+///     get the backward weight at `(gx - q_x, gy - q_y)`, the
+///     neighbour weight the accumulate needs.
+#[cube(launch)]
+pub fn nlm_vweight_pair_accumulate(
+    hsum_fwd: &Array<f32>,
+    hsum_bwd: &Array<f32>,
+    input: &Array<Line<f32>>,
+    accum: &mut Array<Line<f32>>,
+    weight_sum: &mut Array<f32>,
+    max_weight: &mut Array<f32>,
+    frame_fwd: u32,
+    frame_bwd: u32,
+    q_x: i32,
+    q_y: i32,
+    h2_inv_norm: f32,
+    #[comptime] width: u32,
+    #[comptime] height: u32,
+    #[comptime] _channels: u32,
+    #[comptime] _num_frames: u32,
+    #[comptime] patch_radius: u32,
+    #[comptime] block_x: u32,
+    #[comptime] block_y: u32,
+) {
+    let p = patch_radius;
+    let num_elems = comptime!(block_x * (block_y + 2 * patch_radius));
+    let mut smem_fwd =
+        SharedMemory::<f32>::new(comptime!(block_x * (block_y + 2 * patch_radius)) as usize);
+    let mut smem_bwd =
+        SharedMemory::<f32>::new(comptime!(block_x * (block_y + 2 * patch_radius)) as usize);
+
+    let lx = UNIT_POS_X;
+    let ly = UNIT_POS_Y;
+    let gx = CUBE_POS_X * block_x + lx;
+    let gy = CUBE_POS_Y * block_y + ly;
+
+    // Fwd tile occupies the cube's vertical strip in image coords.
+    let fwd_tile_y = CUBE_POS_Y as i32 * block_y as i32 - p as i32;
+    // Bwd tile is the same strip shifted by (-q_x, -q_y).
+    let bwd_tile_y = fwd_tile_y - q_y;
+    let bwd_tile_x_origin = CUBE_POS_X as i32 * block_x as i32 - q_x;
+
+    let threads = block_x * block_y;
+    let tid = ly * block_x + lx;
+    let mut idx = tid;
+
+    while idx < num_elems {
+        let tx = idx % block_x;
+        let ty = idx / block_x;
+
+        // fwd: load hsum_fwd at column (CUBE_POS_X * block_x + tx), row
+        // (fwd_tile_y + ty). Clamp-to-edge.
+        let fwd_src_x = CUBE_POS_X * block_x + tx;
+        let fwd_src_y = fwd_tile_y + ty as i32;
+        let fcx = clamp_coord(fwd_src_x as i32, width);
+        let fcy = clamp_coord(fwd_src_y, height);
+        smem_fwd[idx as usize] = hsum_fwd[(fcy * width + fcx) as usize];
+
+        // bwd: load hsum_bwd at the shifted column / row.
+        let bwd_src_x = bwd_tile_x_origin + tx as i32;
+        let bwd_src_y = bwd_tile_y + ty as i32;
+        let bcx = clamp_coord(bwd_src_x, width);
+        let bcy = clamp_coord(bwd_src_y, height);
+        smem_bwd[idx as usize] = hsum_bwd[(bcy * width + bcx) as usize];
+
+        idx += threads;
+    }
+
+    sync_cube();
+
+    if gx >= width || gy >= height {
+        terminate!();
+    }
+
+    let ksize = 2 * p + 1;
+    let mut sum_fwd = 0.0f32;
+    let mut sum_bwd = 0.0f32;
+    for dy in 0..ksize {
+        let s_idx = ((ly + dy) * block_x + lx) as usize;
+        sum_fwd += smem_fwd[s_idx];
+        sum_bwd += smem_bwd[s_idx];
+    }
+
+    let w_fwd = f32::exp(-sum_fwd * h2_inv_norm);
+    let w_bwd = f32::exp(-sum_bwd * h2_inv_norm);
+
+    // Accumulate. Same hot/cold neighbour-read split as the standalone
+    // `nlm_accumulate`.
+    let pqx = gx as i32 + q_x;
+    let pqy = gy as i32 + q_y;
+    let mqx = gx as i32 - q_x;
+    let mqy = gy as i32 - q_y;
+    let nb_interior = pqx >= 0
+        && pqx < width as i32
+        && pqy >= 0
+        && pqy < height as i32
+        && mqx >= 0
+        && mqx < width as i32
+        && mqy >= 0
+        && mqy < height as i32;
+
+    let pq_val = if nb_interior {
+        read_line(input, pqx as u32, pqy as u32, frame_fwd, width, height)
+    } else {
+        read_clamped_line(input, pqx, pqy, frame_fwd, width, height)
+    };
+    let mq_val = if nb_interior {
+        read_line(input, mqx as u32, mqy as u32, frame_bwd, width, height)
+    } else {
+        read_clamped_line(input, mqx, mqy, frame_bwd, width, height)
+    };
+
+    let p_idx = (gy * width + gx) as usize;
+    let cur_max = max_weight[p_idx];
+    max_weight[p_idx] = f32::max(f32::max(w_fwd, w_bwd), cur_max);
+
+    let line_w_fwd = Line::<f32>::empty(input.line_size()).fill(w_fwd);
+    let line_w_bwd = Line::<f32>::empty(input.line_size()).fill(w_bwd);
+    let cur = accum[p_idx];
+    accum[p_idx] = cur + pq_val * line_w_fwd + mq_val * line_w_bwd;
+
+    weight_sum[p_idx] += w_fwd + w_bwd;
 }
 
 // ==================== Accumulate kernel ====================

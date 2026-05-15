@@ -11,12 +11,14 @@ use self::kernels::{
     gpu_zero_buffers,
     nlm_accumulate,
     nlm_dist_2d_weight,
-    nlm_dist_2d_weight_pair,
     nlm_distance,
     nlm_distance_pair,
     nlm_finish,
+    nlm_fused_pair_accumulate,
     nlm_horizontal_sum,
+    nlm_horizontal_sum_pair,
     nlm_vertical_weight,
+    nlm_vweight_pair_accumulate,
 };
 
 pub const BLOCK_X: u32 = 32;
@@ -141,17 +143,19 @@ pub struct NlmDenoiser<R: Runtime> {
     weight_sum: Handle,
     /// Max neighbor weight per pixel: [pixels].
     max_weight: Handle,
-    /// Forward weight scratch: [pixels].
-    weight_fwd: Handle,
-    /// Final weight buffer for the spatial path / backward weight in the
-    /// temporal path. Accumulate's `weights_bwd` always points here.
-    dist_a: Handle,
-    /// Raw fwd distance (separable path): [pixels].
+    /// Single-buffer weight scratch used by the spatial-only (k=0)
+    /// fast path. For k=0 both fwd and bwd accumulate lookups hit the
+    /// same buffer (symmetric weight map), so we avoid the two-tile
+    /// cost of the paired fused kernel.
+    weight_buf: Handle,
+    /// Raw fwd distance scratch (separable path): [pixels].
     raw_fwd: Handle,
-    /// Raw bwd distance (separable path): [pixels].
+    /// Raw bwd distance scratch (separable path): [pixels].
     raw_bwd: Handle,
-    /// Hsum intermediate (separable path): [pixels].
+    /// Hsum intermediate (separable path), fwd direction: [pixels].
     tmp_hsum: Handle,
+    /// Hsum intermediate (separable path), bwd direction: [pixels].
+    tmp_hsum_bwd: Handle,
     /// Denoised output: [pixels * channels].
     output: Handle,
     /// CPU scratch reused for the denoised frame returned from
@@ -183,11 +187,14 @@ impl<R: Runtime> NlmDenoiser<R> {
         let accum = client.empty(pixels * stored_ch as usize * size_of::<f32>());
         let weight_sum = client.empty(pixels * size_of::<f32>());
         let max_weight = client.empty(pixels * size_of::<f32>());
-        let weight_fwd = client.empty(pixels * size_of::<f32>());
-        let dist_a = client.empty(pixels * size_of::<f32>());
+        let weight_buf = client.empty(pixels * size_of::<f32>());
         let raw_fwd = client.empty(pixels * size_of::<f32>());
         let raw_bwd = client.empty(pixels * size_of::<f32>());
         let tmp_hsum = client.empty(pixels * size_of::<f32>());
+        // Always allocated; only used by the paired separable path
+        // when temporal_radius > 0. One extra `pixels * 4 B` per
+        // denoiser is well under the rest of the working set.
+        let tmp_hsum_bwd = client.empty(pixels * size_of::<f32>());
         let output = client.empty(pixels * stored_ch as usize * size_of::<f32>());
 
         let h2_inv_norm = params.h2_inv_norm();
@@ -206,11 +213,11 @@ impl<R: Runtime> NlmDenoiser<R> {
             accum,
             weight_sum,
             max_weight,
-            weight_fwd,
-            dist_a,
+            weight_buf,
             raw_fwd,
             raw_bwd,
             tmp_hsum,
+            tmp_hsum_bwd,
             output,
             output_scratch: Vec::with_capacity(output_scratch_cap),
             h2_inv_norm,
@@ -379,10 +386,11 @@ impl<R: Runtime> NlmDenoiser<R> {
         ((self.ring_start() as i32 + l).rem_euclid(total_frames)) as u32
     }
 
-    /// Compute distance weights using the fused 2D box filter kernel.
-    fn compute_weights_fused(
+    /// Fused-path displacement step: one launch that computes both
+    /// weights in registers and accumulates the +q / −q contributions.
+    /// Same kernel handles `k == 0` (caller passes equal frame indices).
+    fn dispatch_fused_iter(
         &self,
-        output: &Handle,
         t: u32,
         i: i32,
         j: i32,
@@ -390,14 +398,20 @@ impl<R: Runtime> NlmDenoiser<R> {
         total_frames: u32,
         total_frame_data: usize,
         pixels: usize,
+        frame_size: usize,
         cube_count: &CubeCount,
         cube_dim: CubeDim,
     ) -> Result<(), anyhow::Error> {
         let ch = self.params.channels.count();
         let stored_ch = self.params.channels.storage_count();
         let frame_t = self.phys_frame(t as i32);
-        let frame_q = self.phys_frame(t as i32 + k);
-        nlm_dist_2d_weight::launch::<R>(
+        let frame_fwd = self.phys_frame(t as i32 + k);
+        let frame_bwd = self.phys_frame(t as i32 - k);
+        // Bwd shift convention: +q for k=0 (matches legacy single-buffer
+        // path), -q for k!=0 (matches legacy fused pair path). Required
+        // to reproduce existing fused-path semantics.
+        let (bwd_shift_x, bwd_shift_y) = if k == 0 { (i, j) } else { (-i, -j) };
+        nlm_fused_pair_accumulate::launch::<R>(
             &self.client,
             cube_count.clone(),
             cube_dim,
@@ -408,11 +422,22 @@ impl<R: Runtime> NlmDenoiser<R> {
                     stored_ch as usize,
                 )
             },
-            unsafe { ArrayArg::from_raw_parts::<f32>(output, pixels, 1) },
+            unsafe {
+                ArrayArg::from_raw_parts::<f32>(
+                    &self.accum,
+                    frame_size,
+                    stored_ch as usize,
+                )
+            },
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_sum, pixels, 1) },
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.max_weight, pixels, 1) },
             ScalarArg::new(frame_t),
-            ScalarArg::new(frame_q),
+            ScalarArg::new(frame_fwd),
+            ScalarArg::new(frame_bwd),
             ScalarArg::new(i),
             ScalarArg::new(j),
+            ScalarArg::new(bwd_shift_x),
+            ScalarArg::new(bwd_shift_y),
             ScalarArg::new(self.h2_inv_norm),
             self.width,
             self.height,
@@ -425,11 +450,12 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
-    /// Compute distance weights using the separable 3-pass approach.
-    /// Flow: distance → raw_fwd → hsum → tmp_hsum → vsum+weight → output.
-    fn compute_weights_separable(
+    /// Separable-path displacement step: nlm_distance_pair →
+    /// nlm_horizontal_sum_pair → nlm_vweight_pair_accumulate. The
+    /// vweight pass is fused with the accumulate; no global weight
+    /// buffers are written.
+    fn dispatch_separable_iter(
         &self,
-        output: &Handle,
         t: u32,
         i: i32,
         j: i32,
@@ -437,53 +463,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         total_frames: u32,
         total_frame_data: usize,
         pixels: usize,
-        cube_count: &CubeCount,
-        cube_dim: CubeDim,
-    ) -> Result<(), anyhow::Error> {
-        let ch = self.params.channels.count();
-        let stored_ch = self.params.channels.storage_count();
-        let frame_t = self.phys_frame(t as i32);
-        let frame_q = self.phys_frame(t as i32 + k);
-        // Pass 1: Per-pixel squared distance (vectorized input).
-        nlm_distance::launch::<R>(
-            &self.client,
-            cube_count.clone(),
-            cube_dim,
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(
-                    &self.input_buf,
-                    total_frame_data,
-                    stored_ch as usize,
-                )
-            },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.raw_fwd, pixels, 1) },
-            ScalarArg::new(frame_t),
-            ScalarArg::new(frame_q),
-            ScalarArg::new(i),
-            ScalarArg::new(j),
-            self.width,
-            self.height,
-            ch,
-            total_frames,
-        )?;
-
-        self.run_separable_box(&self.raw_fwd, output, pixels, cube_count, cube_dim)
-    }
-
-    /// Paired separable distance + box filter for a temporal +q/-q pair.
-    /// Writes fwd weights to `out_fwd` and bwd weights to `out_bwd`,
-    /// each computed via dist→hsum→vsum sharing the `tmp_hsum` scratch.
-    fn compute_weights_separable_pair(
-        &self,
-        out_fwd: &Handle,
-        out_bwd: &Handle,
-        t: u32,
-        i: i32,
-        j: i32,
-        k: i32,
-        total_frames: u32,
-        total_frame_data: usize,
-        pixels: usize,
+        frame_size: usize,
         cube_count: &CubeCount,
         cube_dim: CubeDim,
     ) -> Result<(), anyhow::Error> {
@@ -492,7 +472,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let frame_t = self.phys_frame(t as i32);
         let frame_fwd = self.phys_frame(t as i32 + k);
         let frame_bwd = self.phys_frame(t as i32 - k);
-        // Pass 1: Per-pixel squared distance for both fwd and bwd.
+
         nlm_distance_pair::launch::<R>(
             &self.client,
             cube_count.clone(),
@@ -517,30 +497,14 @@ impl<R: Runtime> NlmDenoiser<R> {
             total_frames,
         )?;
 
-        // Box filter each independently. tmp_hsum is overwritten per pass.
-        self.run_separable_box(&self.raw_fwd, out_fwd, pixels, cube_count, cube_dim)?;
-        self.run_separable_box(&self.raw_bwd, out_bwd, pixels, cube_count, cube_dim)?;
-        Ok(())
-    }
-
-    /// Apply the 2D separable box filter (hsum then vsum+Welsch weight)
-    /// from `raw` (raw distances) into `out` (final weights), using
-    /// `self.tmp_hsum` as the intermediate.
-    fn run_separable_box(
-        &self,
-        raw: &Handle,
-        out: &Handle,
-        pixels: usize,
-        cube_count: &CubeCount,
-        cube_dim: CubeDim,
-    ) -> Result<(), anyhow::Error> {
-        // Horizontal box filter: raw → tmp_hsum.
-        nlm_horizontal_sum::launch::<R>(
+        nlm_horizontal_sum_pair::launch::<R>(
             &self.client,
             cube_count.clone(),
             cube_dim,
-            unsafe { ArrayArg::from_raw_parts::<f32>(raw, pixels, 1) },
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.raw_fwd, pixels, 1) },
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.raw_bwd, pixels, 1) },
             unsafe { ArrayArg::from_raw_parts::<f32>(&self.tmp_hsum, pixels, 1) },
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.tmp_hsum_bwd, pixels, 1) },
             self.width,
             self.height,
             self.params.patch_radius,
@@ -548,47 +512,12 @@ impl<R: Runtime> NlmDenoiser<R> {
             BLOCK_Y,
         )?;
 
-        // Vertical box filter + Welsch weight: tmp_hsum → out.
-        nlm_vertical_weight::launch::<R>(
+        nlm_vweight_pair_accumulate::launch::<R>(
             &self.client,
             cube_count.clone(),
             cube_dim,
             unsafe { ArrayArg::from_raw_parts::<f32>(&self.tmp_hsum, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(out, pixels, 1) },
-            ScalarArg::new(self.h2_inv_norm),
-            self.width,
-            self.height,
-            self.params.patch_radius,
-            BLOCK_X,
-            BLOCK_Y,
-        )?;
-        Ok(())
-    }
-
-    /// Paired fused distance + 2D box filter for a temporal +q/-q pair.
-    fn compute_weights_fused_pair(
-        &self,
-        out_fwd: &Handle,
-        out_bwd: &Handle,
-        t: u32,
-        i: i32,
-        j: i32,
-        k: i32,
-        total_frames: u32,
-        total_frame_data: usize,
-        pixels: usize,
-        cube_count: &CubeCount,
-        cube_dim: CubeDim,
-    ) -> Result<(), anyhow::Error> {
-        let ch = self.params.channels.count();
-        let stored_ch = self.params.channels.storage_count();
-        let frame_t = self.phys_frame(t as i32);
-        let frame_fwd = self.phys_frame(t as i32 + k);
-        let frame_bwd = self.phys_frame(t as i32 - k);
-        nlm_dist_2d_weight_pair::launch::<R>(
-            &self.client,
-            cube_count.clone(),
-            cube_dim,
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.tmp_hsum_bwd, pixels, 1) },
             unsafe {
                 ArrayArg::from_raw_parts::<f32>(
                     &self.input_buf,
@@ -596,9 +525,15 @@ impl<R: Runtime> NlmDenoiser<R> {
                     stored_ch as usize,
                 )
             },
-            unsafe { ArrayArg::from_raw_parts::<f32>(out_fwd, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(out_bwd, pixels, 1) },
-            ScalarArg::new(frame_t),
+            unsafe {
+                ArrayArg::from_raw_parts::<f32>(
+                    &self.accum,
+                    frame_size,
+                    stored_ch as usize,
+                )
+            },
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_sum, pixels, 1) },
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.max_weight, pixels, 1) },
             ScalarArg::new(frame_fwd),
             ScalarArg::new(frame_bwd),
             ScalarArg::new(i),
@@ -615,47 +550,187 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
-    /// Compute distance weights, dispatching to fused or separable path.
-    fn compute_weights(
+    /// Spatial (`k = 0`) fused-path step. Uses the legacy single-tile
+    /// weight kernel + accumulate combo — cheaper than `dispatch_fused_iter`
+    /// for this case because the fused-pair kernel pays for two SMEM
+    /// tiles that, for a symmetric (k=0) weight map, would carry the
+    /// same content at shifted origins.
+    fn dispatch_fused_iter_k0(
         &self,
-        output: &Handle,
         t: u32,
         i: i32,
         j: i32,
-        k: i32,
         total_frames: u32,
         total_frame_data: usize,
         pixels: usize,
+        frame_size: usize,
         cube_count: &CubeCount,
         cube_dim: CubeDim,
     ) -> Result<(), anyhow::Error> {
-        if self.use_separable {
-            self.compute_weights_separable(
-                output,
-                t,
-                i,
-                j,
-                k,
-                total_frames,
-                total_frame_data,
-                pixels,
-                cube_count,
-                cube_dim,
-            )
-        } else {
-            self.compute_weights_fused(
-                output,
-                t,
-                i,
-                j,
-                k,
-                total_frames,
-                total_frame_data,
-                pixels,
-                cube_count,
-                cube_dim,
-            )
-        }
+        let ch = self.params.channels.count();
+        let stored_ch = self.params.channels.storage_count();
+        let frame_t = self.phys_frame(t as i32);
+
+        nlm_dist_2d_weight::launch::<R>(
+            &self.client,
+            cube_count.clone(),
+            cube_dim,
+            unsafe {
+                ArrayArg::from_raw_parts::<f32>(
+                    &self.input_buf,
+                    total_frame_data,
+                    stored_ch as usize,
+                )
+            },
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_buf, pixels, 1) },
+            ScalarArg::new(frame_t),
+            ScalarArg::new(frame_t),
+            ScalarArg::new(i),
+            ScalarArg::new(j),
+            ScalarArg::new(self.h2_inv_norm),
+            self.width,
+            self.height,
+            ch,
+            total_frames,
+            self.params.patch_radius,
+            BLOCK_X,
+            BLOCK_Y,
+        )?;
+
+        nlm_accumulate::launch::<R>(
+            &self.client,
+            cube_count.clone(),
+            cube_dim,
+            unsafe {
+                ArrayArg::from_raw_parts::<f32>(
+                    &self.input_buf,
+                    total_frame_data,
+                    stored_ch as usize,
+                )
+            },
+            unsafe {
+                ArrayArg::from_raw_parts::<f32>(
+                    &self.accum,
+                    frame_size,
+                    stored_ch as usize,
+                )
+            },
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_sum, pixels, 1) },
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_buf, pixels, 1) },
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_buf, pixels, 1) },
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.max_weight, pixels, 1) },
+            ScalarArg::new(frame_t),
+            ScalarArg::new(frame_t),
+            ScalarArg::new(i),
+            ScalarArg::new(j),
+            self.width,
+            self.height,
+            ch,
+            total_frames,
+        )?;
+        Ok(())
+    }
+
+    /// Spatial (`k = 0`) separable-path step. Three weight passes plus
+    /// accumulate, all single-buffer — same reasoning as
+    /// `dispatch_fused_iter_k0`: avoid the paired-tile overhead.
+    fn dispatch_separable_iter_k0(
+        &self,
+        t: u32,
+        i: i32,
+        j: i32,
+        total_frames: u32,
+        total_frame_data: usize,
+        pixels: usize,
+        frame_size: usize,
+        cube_count: &CubeCount,
+        cube_dim: CubeDim,
+    ) -> Result<(), anyhow::Error> {
+        let ch = self.params.channels.count();
+        let stored_ch = self.params.channels.storage_count();
+        let frame_t = self.phys_frame(t as i32);
+
+        nlm_distance::launch::<R>(
+            &self.client,
+            cube_count.clone(),
+            cube_dim,
+            unsafe {
+                ArrayArg::from_raw_parts::<f32>(
+                    &self.input_buf,
+                    total_frame_data,
+                    stored_ch as usize,
+                )
+            },
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.raw_fwd, pixels, 1) },
+            ScalarArg::new(frame_t),
+            ScalarArg::new(frame_t),
+            ScalarArg::new(i),
+            ScalarArg::new(j),
+            self.width,
+            self.height,
+            ch,
+            total_frames,
+        )?;
+
+        nlm_horizontal_sum::launch::<R>(
+            &self.client,
+            cube_count.clone(),
+            cube_dim,
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.raw_fwd, pixels, 1) },
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.tmp_hsum, pixels, 1) },
+            self.width,
+            self.height,
+            self.params.patch_radius,
+            BLOCK_X,
+            BLOCK_Y,
+        )?;
+
+        nlm_vertical_weight::launch::<R>(
+            &self.client,
+            cube_count.clone(),
+            cube_dim,
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.tmp_hsum, pixels, 1) },
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_buf, pixels, 1) },
+            ScalarArg::new(self.h2_inv_norm),
+            self.width,
+            self.height,
+            self.params.patch_radius,
+            BLOCK_X,
+            BLOCK_Y,
+        )?;
+
+        nlm_accumulate::launch::<R>(
+            &self.client,
+            cube_count.clone(),
+            cube_dim,
+            unsafe {
+                ArrayArg::from_raw_parts::<f32>(
+                    &self.input_buf,
+                    total_frame_data,
+                    stored_ch as usize,
+                )
+            },
+            unsafe {
+                ArrayArg::from_raw_parts::<f32>(
+                    &self.accum,
+                    frame_size,
+                    stored_ch as usize,
+                )
+            },
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_sum, pixels, 1) },
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_buf, pixels, 1) },
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_buf, pixels, 1) },
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.max_weight, pixels, 1) },
+            ScalarArg::new(frame_t),
+            ScalarArg::new(frame_t),
+            ScalarArg::new(i),
+            ScalarArg::new(j),
+            self.width,
+            self.height,
+            ch,
+            total_frames,
+        )?;
+        Ok(())
     }
 
     /// Run all NLM kernels on the current frame, writing the result
@@ -704,7 +779,11 @@ impl<R: Runtime> NlmDenoiser<R> {
         let spt_side = 2 * a + 1;
         let spt_area = spt_side * spt_side;
 
-        // Spatio-temporal loop with symmetry exploitation.
+        // Spatio-temporal loop with symmetry exploitation. Each
+        // iteration does a single launch (fused path) or three
+        // launches (separable path) — no global weight buffers; both
+        // fwd and bwd weights live in registers inside the fused
+        // weight+accumulate kernel.
         let k_start = -(d as i32);
         for k in k_start..=0 {
             for j in -a..=a {
@@ -714,48 +793,35 @@ impl<R: Runtime> NlmDenoiser<R> {
                         continue;
                     }
 
-                    // Compute weights. For temporal pairs (k != 0) use
-                    // the paired kernel that produces both fwd and bwd
-                    // weights in a single dispatch (saving launch
-                    // overhead and, for the fused path, sharing the
-                    // central patch read).
-                    let fwd_weights = if k != 0 {
-                        if self.use_separable {
-                            self.compute_weights_separable_pair(
-                                &self.weight_fwd,
-                                &self.dist_a,
-                                t,
-                                i,
-                                j,
-                                k,
-                                total_frames,
-                                total_frame_data,
-                                pixels,
-                                &cube_count,
-                                cube_dim,
-                            )?;
-                        } else {
-                            self.compute_weights_fused_pair(
-                                &self.weight_fwd,
-                                &self.dist_a,
-                                t,
-                                i,
-                                j,
-                                k,
-                                total_frames,
-                                total_frame_data,
-                                pixels,
-                                &cube_count,
-                                cube_dim,
-                            )?;
-                        }
-
-                        &self.weight_fwd
-                    } else {
-                        // Spatial only: a single weight buffer is used
-                        // for both directions (symmetric in q).
-                        self.compute_weights(
-                            &self.dist_a,
+                    // k == 0 is symmetric in q (single weight map) — the
+                    // legacy single-tile path beats the paired fused
+                    // kernel because the latter pays for two SMEM tiles
+                    // carrying the same content at shifted origins.
+                    // For k != 0 (temporal pair) the fused path wins.
+                    match (self.use_separable, k == 0) {
+                        (true, true) => self.dispatch_separable_iter_k0(
+                            t,
+                            i,
+                            j,
+                            total_frames,
+                            total_frame_data,
+                            pixels,
+                            frame_size,
+                            &cube_count,
+                            cube_dim,
+                        )?,
+                        (false, true) => self.dispatch_fused_iter_k0(
+                            t,
+                            i,
+                            j,
+                            total_frames,
+                            total_frame_data,
+                            pixels,
+                            frame_size,
+                            &cube_count,
+                            cube_dim,
+                        )?,
+                        (true, false) => self.dispatch_separable_iter(
                             t,
                             i,
                             j,
@@ -763,53 +829,23 @@ impl<R: Runtime> NlmDenoiser<R> {
                             total_frames,
                             total_frame_data,
                             pixels,
+                            frame_size,
                             &cube_count,
                             cube_dim,
-                        )?;
-                        &self.dist_a
-                    };
-
-                    let frame_fwd = self.phys_frame(t as i32 + k);
-                    let frame_bwd = self.phys_frame(t as i32 - k);
-                    nlm_accumulate::launch::<R>(
-                        &self.client,
-                        cube_count.clone(),
-                        cube_dim,
-                        unsafe {
-                            ArrayArg::from_raw_parts::<f32>(
-                                &self.input_buf,
-                                total_frame_data,
-                                stored_ch as usize,
-                            )
-                        },
-                        unsafe {
-                            ArrayArg::from_raw_parts::<f32>(
-                                &self.accum,
-                                frame_size,
-                                stored_ch as usize,
-                            )
-                        },
-                        unsafe {
-                            ArrayArg::from_raw_parts::<f32>(&self.weight_sum, pixels, 1)
-                        },
-                        unsafe {
-                            ArrayArg::from_raw_parts::<f32>(fwd_weights, pixels, 1)
-                        },
-                        unsafe {
-                            ArrayArg::from_raw_parts::<f32>(&self.dist_a, pixels, 1)
-                        },
-                        unsafe {
-                            ArrayArg::from_raw_parts::<f32>(&self.max_weight, pixels, 1)
-                        },
-                        ScalarArg::new(frame_fwd),
-                        ScalarArg::new(frame_bwd),
-                        ScalarArg::new(i),
-                        ScalarArg::new(j),
-                        w,
-                        h,
-                        ch,
-                        total_frames,
-                    )?;
+                        )?,
+                        (false, false) => self.dispatch_fused_iter(
+                            t,
+                            i,
+                            j,
+                            k,
+                            total_frames,
+                            total_frame_data,
+                            pixels,
+                            frame_size,
+                            &cube_count,
+                            cube_dim,
+                        )?,
+                    }
                 }
             }
         }
