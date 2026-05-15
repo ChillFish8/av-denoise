@@ -1,8 +1,6 @@
 use strum_macros::{Display, EnumIter, EnumString, IntoStaticStr};
 
-#[derive(
-    Debug, Copy, Clone, Eq, PartialEq, IntoStaticStr, EnumString, EnumIter, Display,
-)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, IntoStaticStr, EnumString, EnumIter, Display)]
 #[strum(serialize_all = "snake_case")]
 /// A hardware accelerator that can be used to compute any target metrics.
 pub enum Accelerator {

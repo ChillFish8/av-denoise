@@ -27,7 +27,7 @@ pub const BLOCK_Y: u32 = 8;
 const NLM_NORM: f32 = 255.0 * 255.0;
 const NLM_LEGACY: f32 = 3.0;
 
-/// Patch radius threshold: use separable filter above this value.
+/// Patch radius threshold: use the separable path above this value.
 const SEPARABLE_THRESHOLD: u32 = 2;
 
 /// Maximum 1D grid size for GPU dispatch (WebGPU/Vulkan limit).
@@ -57,9 +57,8 @@ impl ChannelMode {
     }
 
     /// Channels-per-pixel in GPU storage. Padded up to the next supported
-    /// vectorization factor so kernels can use coalesced `Line<f32>` reads.
-    /// (Backends only support power-of-two line sizes; YUV pads to 4 with
-    /// the extra lane held at 0.)
+    /// vectorization factor so kernels can use coalesced `Line<f32>` reads
+    /// (backends only support power-of-two line sizes; YUV pads to 4).
     pub fn storage_count(self) -> u32 {
         match self {
             ChannelMode::Luma => 1,
@@ -101,7 +100,6 @@ impl Default for NlmParams {
 impl NlmParams {
     pub fn h2_inv_norm(&self) -> f32 {
         let s_size = (2 * self.patch_radius + 1) * (2 * self.patch_radius + 1);
-
         NLM_NORM / (NLM_LEGACY * self.strength * self.strength * s_size as f32)
     }
 
@@ -110,92 +108,83 @@ impl NlmParams {
     }
 }
 
-/// Stateful NLMeans denoiser with GPU-side frame assembly.
-///
-/// Maintains a ring buffer of frames on the GPU. As frames are pushed
-/// in, the denoiser processes the center frame using its temporal
-/// neighborhood.
+/// Stateful NLMeans denoiser. Maintains a ring of frames in
+/// `input_buf`; each `push_frame` uploads one frame, each `denoise`
+/// processes the current center frame using its temporal neighbourhood.
 pub struct NlmDenoiser<R: Runtime> {
     client: ComputeClient<R>,
     params: NlmParams,
     width: u32,
     height: u32,
 
-    /// Monotonic count of frames pushed; `% total_frames` gives the
-    /// physical slot of the *next* write into `input_buf`.
+    /// Monotonic count of frames pushed; `% total_frames` is the next
+    /// physical slot in `input_buf` to overwrite.
     ring_head: usize,
-    /// Number of frames loaded so far (capped at total_frames).
+    /// Frames loaded so far, capped at `total_frames`.
     frames_loaded: usize,
 
-    /// Contiguous GPU buffer used as a ring of frames. Layout:
-    /// `[total_frames * height * width * channels]`. Each `push_frame`
-    /// uploads a single frame and `gpu_copy`'s it into slot
-    /// `ring_head % total_frames`, so the per-denoise reassembly cost is
-    /// zero — kernels read directly from this buffer using physical
-    /// frame indices resolved on the host.
+    /// `[total_frames * height * width * stored_ch]` ring buffer.
     input_buf: Handle,
-    /// CPU scratch reused across pushes when channel storage requires
-    /// padding (e.g. YUV → 4 lanes). Sized for one frame.
+    /// CPU scratch for YUV-→4-lane repacking. Empty when no padding needed.
     padding_scratch: Vec<f32>,
-    /// Accumulated weighted pixel sums: [pixels * channels].
+    /// `[pixels * stored_ch]` weighted-pixel accumulator.
     accum: Handle,
-    /// Total weight per pixel: [pixels].
+    /// `[pixels]` total weight per pixel.
     weight_sum: Handle,
-    /// Max neighbor weight per pixel: [pixels].
+    /// `[pixels]` max neighbour weight per pixel.
     max_weight: Handle,
-    /// Single-buffer weight scratch used by the spatial-only (k=0)
-    /// fast path. For k=0 both fwd and bwd accumulate lookups hit the
-    /// same buffer (symmetric weight map), so we avoid the two-tile
-    /// cost of the paired fused kernel.
+    /// `[pixels]` weight scratch used by the symmetric (k=0) path.
     weight_buf: Handle,
-    /// Raw fwd distance scratch (separable path): [pixels].
+    /// `[pixels]` raw fwd distance (separable path).
     raw_fwd: Handle,
-    /// Raw bwd distance scratch (separable path): [pixels].
+    /// `[pixels]` raw bwd distance (separable path).
     raw_bwd: Handle,
-    /// Hsum intermediate (separable path), fwd direction: [pixels].
+    /// `[pixels]` hsum intermediate, fwd direction (separable path).
     tmp_hsum: Handle,
-    /// Hsum intermediate (separable path), bwd direction: [pixels].
+    /// `[pixels]` hsum intermediate, bwd direction (separable path).
     tmp_hsum_bwd: Handle,
-    /// Denoised output: [pixels * channels].
+    /// `[pixels * stored_ch]` denoised output.
     output: Handle,
-    /// CPU scratch reused for the denoised frame returned from
-    /// `denoise()`/`flush()`. Avoids a fresh `Vec<f32>` per frame.
+    /// CPU scratch reused for the readback Vec — avoids a per-frame alloc.
     output_scratch: Vec<f32>,
 
     h2_inv_norm: f32,
     use_separable: bool,
 }
 
+/// Derived sizes plus dispatch shape for the per-frame work, bundled so
+/// the dispatch helpers don't carry long parallel argument lists.
+struct LaunchCtx {
+    total_frame_data: usize,
+    frame_size: usize,
+    pixels: usize,
+    cube_count: CubeCount,
+    cube_dim: CubeDim,
+}
+
 impl<R: Runtime> NlmDenoiser<R> {
-    pub fn new(
-        client: &ComputeClient<R>,
-        params: NlmParams,
-        width: u32,
-        height: u32,
-    ) -> Self {
+    pub fn new(client: &ComputeClient<R>, params: NlmParams, width: u32, height: u32) -> Self {
         let stored_ch = params.channels.storage_count();
         let total_frames = params.total_frames();
         let pixels = (width * height) as usize;
+        let frame_bytes = pixels * stored_ch as usize * size_of::<f32>();
+        let scalar_bytes = pixels * size_of::<f32>();
 
-        let input_buf =
-            client.empty(pixels * stored_ch as usize * total_frames as usize * size_of::<f32>());
+        let input_buf = client.empty(frame_bytes * total_frames as usize);
         let padding_scratch = if params.channels.count() != stored_ch {
             vec![0.0f32; pixels * stored_ch as usize]
         } else {
             Vec::new()
         };
-        let accum = client.empty(pixels * stored_ch as usize * size_of::<f32>());
-        let weight_sum = client.empty(pixels * size_of::<f32>());
-        let max_weight = client.empty(pixels * size_of::<f32>());
-        let weight_buf = client.empty(pixels * size_of::<f32>());
-        let raw_fwd = client.empty(pixels * size_of::<f32>());
-        let raw_bwd = client.empty(pixels * size_of::<f32>());
-        let tmp_hsum = client.empty(pixels * size_of::<f32>());
-        // Always allocated; only used by the paired separable path
-        // when temporal_radius > 0. One extra `pixels * 4 B` per
-        // denoiser is well under the rest of the working set.
-        let tmp_hsum_bwd = client.empty(pixels * size_of::<f32>());
-        let output = client.empty(pixels * stored_ch as usize * size_of::<f32>());
+        let accum = client.empty(frame_bytes);
+        let weight_sum = client.empty(scalar_bytes);
+        let max_weight = client.empty(scalar_bytes);
+        let weight_buf = client.empty(scalar_bytes);
+        let raw_fwd = client.empty(scalar_bytes);
+        let raw_bwd = client.empty(scalar_bytes);
+        let tmp_hsum = client.empty(scalar_bytes);
+        let tmp_hsum_bwd = client.empty(scalar_bytes);
+        let output = client.empty(frame_bytes);
 
         let h2_inv_norm = params.h2_inv_norm();
         let use_separable = params.patch_radius > SEPARABLE_THRESHOLD;
@@ -225,18 +214,14 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
     }
 
-    /// Push a new frame into the ring buffer.
-    /// The frame data must be `width * height * channels` f32 values
-    /// normalized to [0, 1]. When the channel mode requires padding
-    /// (YUV → 4 lanes), the data is repacked into a reused CPU scratch
-    /// buffer before upload. The frame is uploaded once and copied into
-    /// the next physical slot of `input_buf` — no per-denoise
-    /// reassembly is needed.
+    /// Push a new frame into the ring buffer. `frame` must hold
+    /// `width * height * channels` f32 values normalised to [0, 1].
+    /// YUV padding (3→4 lanes) is repacked through a reused CPU scratch.
     pub fn push_frame(&mut self, frame: &[f32]) {
-        let ch = self.params.channels.count() as usize;
+        let channels = self.params.channels.count() as usize;
         let stored_ch = self.params.channels.storage_count() as usize;
         let pixels = self.width as usize * self.height as usize;
-        let expected = pixels * ch;
+        let expected = pixels * channels;
 
         assert_eq!(
             frame.len(),
@@ -247,17 +232,16 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         let total_frames = self.params.total_frames() as usize;
         let slot = self.ring_head % total_frames;
-        let staging = if ch == stored_ch {
+        let staging = if channels == stored_ch {
             self.client.create_from_slice(f32::as_bytes(frame))
         } else {
-            // Reuse padding_scratch to avoid a per-push Vec alloc.
             for i in 0..pixels {
                 let dst = i * stored_ch;
-                let src = i * ch;
-                self.padding_scratch[dst..dst + ch]
-                    .copy_from_slice(&frame[src..src + ch]);
+                let src = i * channels;
+                self.padding_scratch[dst..dst + channels].copy_from_slice(&frame[src..src + channels]);
             }
-            self.client.create_from_slice(f32::as_bytes(&self.padding_scratch))
+            self.client
+                .create_from_slice(f32::as_bytes(&self.padding_scratch))
         };
 
         self.copy_frame_into_slot(&staging, slot);
@@ -273,8 +257,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     fn copy_frame_into_slot(&self, src: &Handle, slot: usize) {
         let stored_ch = self.params.channels.storage_count();
         let frame_size = self.width * self.height * stored_ch;
-        let byte_offset =
-            (slot as u64) * (frame_size as u64) * (size_of::<f32>() as u64);
+        let byte_offset = (slot as u64) * (frame_size as u64) * (size_of::<f32>() as u64);
         let dst_handle = self.input_buf.clone().offset_start(byte_offset);
 
         let grid = frame_size.div_ceil(BLOCK_1D).min(MAX_GRID_1D);
@@ -285,9 +268,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             CubeCount::new_1d(grid),
             CubeDim::new_1d(BLOCK_1D),
             unsafe { ArrayArg::from_raw_parts::<f32>(src, frame_size as usize, 1) },
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(&dst_handle, frame_size as usize, 1)
-            },
+            unsafe { ArrayArg::from_raw_parts::<f32>(&dst_handle, frame_size as usize, 1) },
             frame_size,
             total_threads,
         )
@@ -295,8 +276,9 @@ impl<R: Runtime> NlmDenoiser<R> {
     }
 
     /// Duplicate the most recently pushed frame into the next ring slot.
-    /// Used at end-of-stream (`flush`) to keep the window full while
-    /// future context shrinks.
+    /// Used at end-of-stream to keep the window full while future
+    /// context shrinks. Slots never overlap, so the in-buffer copy is
+    /// well-defined.
     fn duplicate_last_frame(&mut self) {
         let total_frames = self.params.total_frames() as usize;
         let last_slot = (self.ring_head - 1) % total_frames;
@@ -304,17 +286,13 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         let stored_ch = self.params.channels.storage_count();
         let frame_size = self.width * self.height * stored_ch;
-        let byte = (frame_size as u64) * (size_of::<f32>() as u64);
+        let bytes_per_slot = (frame_size as u64) * (size_of::<f32>() as u64);
         let src = self
             .input_buf
             .clone()
-            .offset_start((last_slot as u64) * byte);
+            .offset_start((last_slot as u64) * bytes_per_slot);
 
-        // copy_frame_into_slot does the dispatch on a sub-view of input_buf.
-        // src here is a sub-view into the same buffer — copy is well-defined
-        // because slots do not overlap.
         self.copy_frame_into_slot(&src, next_slot);
-
         self.ring_head += 1;
     }
 
@@ -326,8 +304,6 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// hold the data across another `denoise`/`flush`/`push_frame` call.
     pub fn denoise(&mut self) -> Result<Option<&[f32]>, anyhow::Error> {
         let total_frames = self.params.total_frames() as usize;
-
-        // Need all frames in the temporal window.
         if self.frames_loaded < total_frames {
             return Ok(None);
         }
@@ -336,32 +312,28 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(Some(self.output_scratch.as_slice()))
     }
 
-    /// Flush remaining frames at end-of-stream.
-    /// For the last `d` frames where future context is incomplete,
+    /// Flush remaining frames at end-of-stream. For the last `d` frames
     /// the temporal window is clamped by duplicating the last frame.
-    /// The callback `sink` is invoked once per produced frame; the
-    /// borrowed slice is only valid for that call.
-    pub fn flush(
-        &mut self,
-        mut sink: impl FnMut(&[f32]),
-    ) -> Result<(), anyhow::Error> {
-        let d = self.params.temporal_radius as usize;
+    /// `sink` is invoked once per produced frame; the borrowed slice is
+    /// only valid for that call.
+    pub fn flush(&mut self, mut sink: impl FnMut(&[f32])) -> Result<(), anyhow::Error> {
+        let temporal_radius = self.params.temporal_radius as usize;
         let total_frames = self.params.total_frames() as usize;
 
-        // If we never had enough frames for a full window,
-        // process what we have by duplicating the last frame.
-        if d > 0 && self.frames_loaded < total_frames {
+        // Partial window: pad with duplicates of the last frame so the
+        // temporal neighbourhood is complete, then emit one denoised frame.
+        if temporal_radius > 0 && self.frames_loaded < total_frames {
             while self.frames_loaded < total_frames {
                 self.duplicate_last_frame();
                 self.frames_loaded += 1;
             }
-
             self.run_denoise_kernels()?;
             sink(self.output_scratch.as_slice());
         }
 
-        // Process the remaining d frames with shrinking future context.
-        for _ in 0..d {
+        // Trailing `temporal_radius` frames with shrinking future context,
+        // each padded by duplicating the most recent frame.
+        for _ in 0..temporal_radius {
             self.duplicate_last_frame();
             self.run_denoise_kernels()?;
             sink(self.output_scratch.as_slice());
@@ -371,8 +343,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     }
 
     /// Physical slot of logical frame 0 (oldest frame in the window).
-    /// Defined only after a full window has been pushed (`frames_loaded
-    /// >= total_frames`).
+    /// Defined only once a full window has been pushed.
     fn ring_start(&self) -> u32 {
         let total_frames = self.params.total_frames() as usize;
         (self.ring_head % total_frames) as u32
@@ -382,67 +353,92 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// physical slot inside `input_buf`.
     fn phys_frame(&self, logical: i32) -> u32 {
         let total_frames = self.params.total_frames() as i32;
-        let l = logical.rem_euclid(total_frames);
-        ((self.ring_start() as i32 + l).rem_euclid(total_frames)) as u32
+        let wrapped = logical.rem_euclid(total_frames);
+        ((self.ring_start() as i32 + wrapped).rem_euclid(total_frames)) as u32
     }
 
-    /// Fused-path displacement step: one launch that computes both
-    /// weights in registers and accumulates the +q / −q contributions.
-    /// Same kernel handles `k == 0` (caller passes equal frame indices).
+    fn input_arg(&self, ctx: &LaunchCtx) -> ArrayArg<'_, R> {
+        let stored_ch = self.params.channels.storage_count() as usize;
+        unsafe { ArrayArg::from_raw_parts::<f32>(&self.input_buf, ctx.total_frame_data, stored_ch) }
+    }
+
+    fn accum_arg(&self, ctx: &LaunchCtx) -> ArrayArg<'_, R> {
+        let stored_ch = self.params.channels.storage_count() as usize;
+        unsafe { ArrayArg::from_raw_parts::<f32>(&self.accum, ctx.frame_size, stored_ch) }
+    }
+
+    fn output_arg(&self, ctx: &LaunchCtx) -> ArrayArg<'_, R> {
+        let stored_ch = self.params.channels.storage_count() as usize;
+        unsafe { ArrayArg::from_raw_parts::<f32>(&self.output, ctx.frame_size, stored_ch) }
+    }
+
+    fn weight_sum_arg(&self, ctx: &LaunchCtx) -> ArrayArg<'_, R> {
+        unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_sum, ctx.pixels, 1) }
+    }
+
+    fn max_weight_arg(&self, ctx: &LaunchCtx) -> ArrayArg<'_, R> {
+        unsafe { ArrayArg::from_raw_parts::<f32>(&self.max_weight, ctx.pixels, 1) }
+    }
+
+    fn weight_buf_arg(&self, ctx: &LaunchCtx) -> ArrayArg<'_, R> {
+        unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_buf, ctx.pixels, 1) }
+    }
+
+    fn raw_fwd_arg(&self, ctx: &LaunchCtx) -> ArrayArg<'_, R> {
+        unsafe { ArrayArg::from_raw_parts::<f32>(&self.raw_fwd, ctx.pixels, 1) }
+    }
+
+    fn raw_bwd_arg(&self, ctx: &LaunchCtx) -> ArrayArg<'_, R> {
+        unsafe { ArrayArg::from_raw_parts::<f32>(&self.raw_bwd, ctx.pixels, 1) }
+    }
+
+    fn tmp_hsum_arg(&self, ctx: &LaunchCtx) -> ArrayArg<'_, R> {
+        unsafe { ArrayArg::from_raw_parts::<f32>(&self.tmp_hsum, ctx.pixels, 1) }
+    }
+
+    fn tmp_hsum_bwd_arg(&self, ctx: &LaunchCtx) -> ArrayArg<'_, R> {
+        unsafe { ArrayArg::from_raw_parts::<f32>(&self.tmp_hsum_bwd, ctx.pixels, 1) }
+    }
+
+    /// Temporal (k≠0) fused-path step: one launch that computes both
+    /// weights in registers and applies the +q / −q contributions.
     fn dispatch_fused_iter(
         &self,
-        t: u32,
-        i: i32,
-        j: i32,
-        k: i32,
-        total_frames: u32,
-        total_frame_data: usize,
-        pixels: usize,
-        frame_size: usize,
-        cube_count: &CubeCount,
-        cube_dim: CubeDim,
+        ctx: &LaunchCtx,
+        center_t: u32,
+        q_x: i32,
+        q_y: i32,
+        q_k: i32,
     ) -> Result<(), anyhow::Error> {
-        let ch = self.params.channels.count();
-        let stored_ch = self.params.channels.storage_count();
-        let frame_t = self.phys_frame(t as i32);
-        let frame_fwd = self.phys_frame(t as i32 + k);
-        let frame_bwd = self.phys_frame(t as i32 - k);
-        // Bwd shift convention: +q for k=0 (matches legacy single-buffer
-        // path), -q for k!=0 (matches legacy fused pair path). Required
-        // to reproduce existing fused-path semantics.
-        let (bwd_shift_x, bwd_shift_y) = if k == 0 { (i, j) } else { (-i, -j) };
+        let channels = self.params.channels.count();
+        let frame_t = self.phys_frame(center_t as i32);
+        let frame_fwd = self.phys_frame(center_t as i32 + q_k);
+        let frame_bwd = self.phys_frame(center_t as i32 - q_k);
+        // The backward distance compares against a different neighbour
+        // depending on whether the temporal offset is zero. For k=0 the
+        // pair collapses to a symmetric (+q, +q) self-comparison; for
+        // k≠0 the true (+q, −q) cross-frame comparison applies.
+        let (bwd_shift_x, bwd_shift_y) = if q_k == 0 { (q_x, q_y) } else { (-q_x, -q_y) };
+
         nlm_fused_pair_accumulate::launch::<R>(
             &self.client,
-            cube_count.clone(),
-            cube_dim,
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(
-                    &self.input_buf,
-                    total_frame_data,
-                    stored_ch as usize,
-                )
-            },
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(
-                    &self.accum,
-                    frame_size,
-                    stored_ch as usize,
-                )
-            },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_sum, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.max_weight, pixels, 1) },
+            ctx.cube_count.clone(),
+            ctx.cube_dim,
+            self.input_arg(ctx),
+            self.accum_arg(ctx),
+            self.weight_sum_arg(ctx),
+            self.max_weight_arg(ctx),
             ScalarArg::new(frame_t),
             ScalarArg::new(frame_fwd),
             ScalarArg::new(frame_bwd),
-            ScalarArg::new(i),
-            ScalarArg::new(j),
+            ScalarArg::new(q_x),
+            ScalarArg::new(q_y),
             ScalarArg::new(bwd_shift_x),
             ScalarArg::new(bwd_shift_y),
             ScalarArg::new(self.h2_inv_norm),
             self.width,
             self.height,
-            ch,
-            total_frames,
+            channels,
             self.params.patch_radius,
             BLOCK_X,
             BLOCK_Y,
@@ -450,61 +446,48 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
-    /// Separable-path displacement step: nlm_distance_pair →
-    /// nlm_horizontal_sum_pair → nlm_vweight_pair_accumulate. The
-    /// vweight pass is fused with the accumulate; no global weight
-    /// buffers are written.
+    /// Temporal (k≠0) separable-path step: distance_pair →
+    /// horizontal_sum_pair → fused vweight+accumulate. The fused
+    /// terminal kernel consumes both hsum buffers, so no global weight
+    /// buffer is written.
     fn dispatch_separable_iter(
         &self,
-        t: u32,
-        i: i32,
-        j: i32,
-        k: i32,
-        total_frames: u32,
-        total_frame_data: usize,
-        pixels: usize,
-        frame_size: usize,
-        cube_count: &CubeCount,
-        cube_dim: CubeDim,
+        ctx: &LaunchCtx,
+        center_t: u32,
+        q_x: i32,
+        q_y: i32,
+        q_k: i32,
     ) -> Result<(), anyhow::Error> {
-        let ch = self.params.channels.count();
-        let stored_ch = self.params.channels.storage_count();
-        let frame_t = self.phys_frame(t as i32);
-        let frame_fwd = self.phys_frame(t as i32 + k);
-        let frame_bwd = self.phys_frame(t as i32 - k);
+        let channels = self.params.channels.count();
+        let frame_t = self.phys_frame(center_t as i32);
+        let frame_fwd = self.phys_frame(center_t as i32 + q_k);
+        let frame_bwd = self.phys_frame(center_t as i32 - q_k);
 
         nlm_distance_pair::launch::<R>(
             &self.client,
-            cube_count.clone(),
-            cube_dim,
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(
-                    &self.input_buf,
-                    total_frame_data,
-                    stored_ch as usize,
-                )
-            },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.raw_fwd, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.raw_bwd, pixels, 1) },
+            ctx.cube_count.clone(),
+            ctx.cube_dim,
+            self.input_arg(ctx),
+            self.raw_fwd_arg(ctx),
+            self.raw_bwd_arg(ctx),
             ScalarArg::new(frame_t),
             ScalarArg::new(frame_fwd),
             ScalarArg::new(frame_bwd),
-            ScalarArg::new(i),
-            ScalarArg::new(j),
+            ScalarArg::new(q_x),
+            ScalarArg::new(q_y),
             self.width,
             self.height,
-            ch,
-            total_frames,
+            channels,
         )?;
 
         nlm_horizontal_sum_pair::launch::<R>(
             &self.client,
-            cube_count.clone(),
-            cube_dim,
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.raw_fwd, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.raw_bwd, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.tmp_hsum, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.tmp_hsum_bwd, pixels, 1) },
+            ctx.cube_count.clone(),
+            ctx.cube_dim,
+            self.raw_fwd_arg(ctx),
+            self.raw_bwd_arg(ctx),
+            self.tmp_hsum_arg(ctx),
+            self.tmp_hsum_bwd_arg(ctx),
             self.width,
             self.height,
             self.params.patch_radius,
@@ -514,35 +497,21 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         nlm_vweight_pair_accumulate::launch::<R>(
             &self.client,
-            cube_count.clone(),
-            cube_dim,
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.tmp_hsum, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.tmp_hsum_bwd, pixels, 1) },
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(
-                    &self.input_buf,
-                    total_frame_data,
-                    stored_ch as usize,
-                )
-            },
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(
-                    &self.accum,
-                    frame_size,
-                    stored_ch as usize,
-                )
-            },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_sum, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.max_weight, pixels, 1) },
+            ctx.cube_count.clone(),
+            ctx.cube_dim,
+            self.tmp_hsum_arg(ctx),
+            self.tmp_hsum_bwd_arg(ctx),
+            self.input_arg(ctx),
+            self.accum_arg(ctx),
+            self.weight_sum_arg(ctx),
+            self.max_weight_arg(ctx),
             ScalarArg::new(frame_fwd),
             ScalarArg::new(frame_bwd),
-            ScalarArg::new(i),
-            ScalarArg::new(j),
+            ScalarArg::new(q_x),
+            ScalarArg::new(q_y),
             ScalarArg::new(self.h2_inv_norm),
             self.width,
             self.height,
-            ch,
-            total_frames,
             self.params.patch_radius,
             BLOCK_X,
             BLOCK_Y,
@@ -550,48 +519,33 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
-    /// Spatial (`k = 0`) fused-path step. Uses the legacy single-tile
-    /// weight kernel + accumulate combo — cheaper than `dispatch_fused_iter`
-    /// for this case because the fused-pair kernel pays for two SMEM
-    /// tiles that, for a symmetric (k=0) weight map, would carry the
-    /// same content at shifted origins.
+    /// Spatial (k=0) fused-path step: single-tile weight + accumulate.
+    /// Cheaper than the paired fused kernel here because the weight
+    /// map is symmetric, so a single tile is enough.
     fn dispatch_fused_iter_k0(
         &self,
-        t: u32,
-        i: i32,
-        j: i32,
-        total_frames: u32,
-        total_frame_data: usize,
-        pixels: usize,
-        frame_size: usize,
-        cube_count: &CubeCount,
-        cube_dim: CubeDim,
+        ctx: &LaunchCtx,
+        center_t: u32,
+        q_x: i32,
+        q_y: i32,
     ) -> Result<(), anyhow::Error> {
-        let ch = self.params.channels.count();
-        let stored_ch = self.params.channels.storage_count();
-        let frame_t = self.phys_frame(t as i32);
+        let channels = self.params.channels.count();
+        let frame_t = self.phys_frame(center_t as i32);
 
         nlm_dist_2d_weight::launch::<R>(
             &self.client,
-            cube_count.clone(),
-            cube_dim,
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(
-                    &self.input_buf,
-                    total_frame_data,
-                    stored_ch as usize,
-                )
-            },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_buf, pixels, 1) },
+            ctx.cube_count.clone(),
+            ctx.cube_dim,
+            self.input_arg(ctx),
+            self.weight_buf_arg(ctx),
             ScalarArg::new(frame_t),
             ScalarArg::new(frame_t),
-            ScalarArg::new(i),
-            ScalarArg::new(j),
+            ScalarArg::new(q_x),
+            ScalarArg::new(q_y),
             ScalarArg::new(self.h2_inv_norm),
             self.width,
             self.height,
-            ch,
-            total_frames,
+            channels,
             self.params.patch_radius,
             BLOCK_X,
             BLOCK_Y,
@@ -599,85 +553,58 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         nlm_accumulate::launch::<R>(
             &self.client,
-            cube_count.clone(),
-            cube_dim,
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(
-                    &self.input_buf,
-                    total_frame_data,
-                    stored_ch as usize,
-                )
-            },
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(
-                    &self.accum,
-                    frame_size,
-                    stored_ch as usize,
-                )
-            },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_sum, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_buf, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_buf, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.max_weight, pixels, 1) },
+            ctx.cube_count.clone(),
+            ctx.cube_dim,
+            self.input_arg(ctx),
+            self.accum_arg(ctx),
+            self.weight_sum_arg(ctx),
+            self.weight_buf_arg(ctx),
+            self.weight_buf_arg(ctx),
+            self.max_weight_arg(ctx),
             ScalarArg::new(frame_t),
             ScalarArg::new(frame_t),
-            ScalarArg::new(i),
-            ScalarArg::new(j),
+            ScalarArg::new(q_x),
+            ScalarArg::new(q_y),
             self.width,
             self.height,
-            ch,
-            total_frames,
         )?;
         Ok(())
     }
 
-    /// Spatial (`k = 0`) separable-path step. Three weight passes plus
-    /// accumulate, all single-buffer — same reasoning as
-    /// `dispatch_fused_iter_k0`: avoid the paired-tile overhead.
+    /// Spatial (k=0) separable-path step: distance → hsum → vweight
+    /// (single buffer) → accumulate. Symmetric weight map, so one
+    /// buffer is reused for both forward and backward lookups.
     fn dispatch_separable_iter_k0(
         &self,
-        t: u32,
-        i: i32,
-        j: i32,
-        total_frames: u32,
-        total_frame_data: usize,
-        pixels: usize,
-        frame_size: usize,
-        cube_count: &CubeCount,
-        cube_dim: CubeDim,
+        ctx: &LaunchCtx,
+        center_t: u32,
+        q_x: i32,
+        q_y: i32,
     ) -> Result<(), anyhow::Error> {
-        let ch = self.params.channels.count();
-        let stored_ch = self.params.channels.storage_count();
-        let frame_t = self.phys_frame(t as i32);
+        let channels = self.params.channels.count();
+        let frame_t = self.phys_frame(center_t as i32);
 
         nlm_distance::launch::<R>(
             &self.client,
-            cube_count.clone(),
-            cube_dim,
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(
-                    &self.input_buf,
-                    total_frame_data,
-                    stored_ch as usize,
-                )
-            },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.raw_fwd, pixels, 1) },
+            ctx.cube_count.clone(),
+            ctx.cube_dim,
+            self.input_arg(ctx),
+            self.raw_fwd_arg(ctx),
             ScalarArg::new(frame_t),
             ScalarArg::new(frame_t),
-            ScalarArg::new(i),
-            ScalarArg::new(j),
+            ScalarArg::new(q_x),
+            ScalarArg::new(q_y),
             self.width,
             self.height,
-            ch,
-            total_frames,
+            channels,
         )?;
 
         nlm_horizontal_sum::launch::<R>(
             &self.client,
-            cube_count.clone(),
-            cube_dim,
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.raw_fwd, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.tmp_hsum, pixels, 1) },
+            ctx.cube_count.clone(),
+            ctx.cube_dim,
+            self.raw_fwd_arg(ctx),
+            self.tmp_hsum_arg(ctx),
             self.width,
             self.height,
             self.params.patch_radius,
@@ -687,10 +614,10 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         nlm_vertical_weight::launch::<R>(
             &self.client,
-            cube_count.clone(),
-            cube_dim,
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.tmp_hsum, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_buf, pixels, 1) },
+            ctx.cube_count.clone(),
+            ctx.cube_dim,
+            self.tmp_hsum_arg(ctx),
+            self.weight_buf_arg(ctx),
             ScalarArg::new(self.h2_inv_norm),
             self.width,
             self.height,
@@ -701,205 +628,150 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         nlm_accumulate::launch::<R>(
             &self.client,
-            cube_count.clone(),
-            cube_dim,
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(
-                    &self.input_buf,
-                    total_frame_data,
-                    stored_ch as usize,
-                )
-            },
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(
-                    &self.accum,
-                    frame_size,
-                    stored_ch as usize,
-                )
-            },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_sum, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_buf, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_buf, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.max_weight, pixels, 1) },
+            ctx.cube_count.clone(),
+            ctx.cube_dim,
+            self.input_arg(ctx),
+            self.accum_arg(ctx),
+            self.weight_sum_arg(ctx),
+            self.weight_buf_arg(ctx),
+            self.weight_buf_arg(ctx),
+            self.max_weight_arg(ctx),
             ScalarArg::new(frame_t),
             ScalarArg::new(frame_t),
-            ScalarArg::new(i),
-            ScalarArg::new(j),
+            ScalarArg::new(q_x),
+            ScalarArg::new(q_y),
             self.width,
             self.height,
-            ch,
-            total_frames,
         )?;
         Ok(())
     }
 
-    /// Run all NLM kernels on the current frame, writing the result
-    /// into `self.output_scratch` (resized as needed). The slice can be
-    /// read back via `self.output_scratch.as_slice()`.
-    fn run_denoise_kernels(&mut self) -> Result<(), anyhow::Error> {
-        let w = self.width;
-        let h = self.height;
-        let ch = self.params.channels.count();
-        let stored_ch = self.params.channels.storage_count();
-        let d = self.params.temporal_radius;
-        let a = self.params.search_radius as i32;
-        let total_frames = self.params.total_frames();
-        let pixels = (w * h) as usize;
-        let frame_size = pixels * stored_ch as usize;
-        let total_frame_data = frame_size * total_frames as usize;
-
-        // input_buf is already laid out as a ring with the latest frame
-        // in slot (ring_head - 1) % total_frames; no per-denoise copy.
-
-        // Fused zero: accum + weight_sum + max_weight.
-        // frame_size >= pixels (stored_ch >= 1), so the bound is just frame_size.
-        let zero_grid = (frame_size as u32).div_ceil(BLOCK_1D).min(MAX_GRID_1D);
-        let zero_threads = zero_grid * BLOCK_1D;
-
+    fn zero_accumulators(&self, ctx: &LaunchCtx) -> Result<(), anyhow::Error> {
+        let grid = (ctx.frame_size as u32).div_ceil(BLOCK_1D).min(MAX_GRID_1D);
+        let total_threads = grid * BLOCK_1D;
         gpu_zero_buffers::launch::<R>(
             &self.client,
-            CubeCount::new_1d(zero_grid),
+            CubeCount::new_1d(grid),
             CubeDim::new_1d(BLOCK_1D),
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.accum, frame_size, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_sum, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.max_weight, pixels, 1) },
-            frame_size as u32,
-            pixels as u32,
-            zero_threads,
+            unsafe { ArrayArg::from_raw_parts::<f32>(&self.accum, ctx.frame_size, 1) },
+            self.weight_sum_arg(ctx),
+            self.max_weight_arg(ctx),
+            ctx.frame_size as u32,
+            ctx.pixels as u32,
+            total_threads,
         )?;
+        Ok(())
+    }
 
-        // 2D dispatch dimensions.
-        let grid_x = w.div_ceil(BLOCK_X);
-        let grid_y = h.div_ceil(BLOCK_Y);
-        let cube_count = CubeCount::new_2d(grid_x, grid_y);
-        let cube_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
-
-        // t: center frame index.
-        let t = d;
-        let spt_side = 2 * a + 1;
-        let spt_area = spt_side * spt_side;
-
-        // Spatio-temporal loop with symmetry exploitation. Each
-        // iteration does a single launch (fused path) or three
-        // launches (separable path) — no global weight buffers; both
-        // fwd and bwd weights live in registers inside the fused
-        // weight+accumulate kernel.
-        let k_start = -(d as i32);
-        for k in k_start..=0 {
-            for j in -a..=a {
-                for i in -a..=a {
-                    let linear = k * spt_area + j * spt_side + i;
-                    if linear >= 0 {
-                        continue;
-                    }
-
-                    // k == 0 is symmetric in q (single weight map) — the
-                    // legacy single-tile path beats the paired fused
-                    // kernel because the latter pays for two SMEM tiles
-                    // carrying the same content at shifted origins.
-                    // For k != 0 (temporal pair) the fused path wins.
-                    match (self.use_separable, k == 0) {
-                        (true, true) => self.dispatch_separable_iter_k0(
-                            t,
-                            i,
-                            j,
-                            total_frames,
-                            total_frame_data,
-                            pixels,
-                            frame_size,
-                            &cube_count,
-                            cube_dim,
-                        )?,
-                        (false, true) => self.dispatch_fused_iter_k0(
-                            t,
-                            i,
-                            j,
-                            total_frames,
-                            total_frame_data,
-                            pixels,
-                            frame_size,
-                            &cube_count,
-                            cube_dim,
-                        )?,
-                        (true, false) => self.dispatch_separable_iter(
-                            t,
-                            i,
-                            j,
-                            k,
-                            total_frames,
-                            total_frame_data,
-                            pixels,
-                            frame_size,
-                            &cube_count,
-                            cube_dim,
-                        )?,
-                        (false, false) => self.dispatch_fused_iter(
-                            t,
-                            i,
-                            j,
-                            k,
-                            total_frames,
-                            total_frame_data,
-                            pixels,
-                            frame_size,
-                            &cube_count,
-                            cube_dim,
-                        )?,
-                    }
-                }
-            }
-        }
-
-        // Final normalization.
+    fn run_finish(&self, ctx: &LaunchCtx, center_t: u32) -> Result<(), anyhow::Error> {
+        let channels = self.params.channels.count();
         nlm_finish::launch::<R>(
             &self.client,
-            cube_count,
-            cube_dim,
+            ctx.cube_count.clone(),
+            ctx.cube_dim,
+            self.input_arg(ctx),
+            self.output_arg(ctx),
             unsafe {
                 ArrayArg::from_raw_parts::<f32>(
-                    &self.input_buf,
-                    total_frame_data,
-                    stored_ch as usize,
+                    &self.accum,
+                    ctx.frame_size,
+                    self.params.channels.storage_count() as usize,
                 )
             },
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(&self.output, frame_size, stored_ch as usize)
-            },
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(&self.accum, frame_size, stored_ch as usize)
-            },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_sum, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.max_weight, pixels, 1) },
-            ScalarArg::new(self.phys_frame(t as i32)),
+            self.weight_sum_arg(ctx),
+            self.max_weight_arg(ctx),
+            ScalarArg::new(self.phys_frame(center_t as i32)),
             ScalarArg::new(self.params.self_weight),
-            w,
-            h,
-            ch,
-            total_frames,
+            self.width,
+            self.height,
+            channels,
         )?;
+        Ok(())
+    }
 
-        // Read back the denoised frame, stripping padding lanes if any.
-        // Writes into the reusable `output_scratch` Vec — no per-call
-        // heap alloc.
+    fn read_output_into_scratch(&mut self, pixels: usize) {
+        let channels = self.params.channels.count() as usize;
+        let stored_ch = self.params.channels.storage_count() as usize;
         let bytes = self.client.read_one(self.output.clone());
         let data = f32::from_bytes(&bytes);
 
         let out = &mut self.output_scratch;
         out.clear();
-        if ch == stored_ch {
+        if channels == stored_ch {
             out.extend_from_slice(data);
         } else {
-            out.reserve(pixels * ch as usize);
-            for i in 0..pixels {
-                let src = i * stored_ch as usize;
-                out.extend_from_slice(&data[src..src + ch as usize]);
+            // Strip the padding lane (YUV: 4 stored → 3 logical) row by
+            // row into the contiguous output Vec.
+            out.reserve(pixels * channels);
+            for pixel in 0..pixels {
+                let src = pixel * stored_ch;
+                out.extend_from_slice(&data[src..src + channels]);
             }
         }
+    }
+
+    fn run_denoise_kernels(&mut self) -> Result<(), anyhow::Error> {
+        let width = self.width;
+        let height = self.height;
+        let stored_ch = self.params.channels.storage_count();
+        let temporal_radius = self.params.temporal_radius;
+        let search_radius = self.params.search_radius as i32;
+        let total_frames = self.params.total_frames();
+        let pixels = (width * height) as usize;
+        let frame_size = pixels * stored_ch as usize;
+
+        let ctx = LaunchCtx {
+            total_frame_data: frame_size * total_frames as usize,
+            frame_size,
+            pixels,
+            cube_count: CubeCount::new_2d(width.div_ceil(BLOCK_X), height.div_ceil(BLOCK_Y)),
+            cube_dim: CubeDim::new_2d(BLOCK_X, BLOCK_Y),
+        };
+
+        self.zero_accumulators(&ctx)?;
+
+        let center_t = temporal_radius;
+        let window_side = 2 * search_radius + 1;
+        let window_area = window_side * window_side;
+
+        // Visit only the negative-`linear` half of the search window;
+        // every iteration applies both +q and −q via the paired
+        // accumulate, so the omitted half is implicitly covered.
+        let k_start = -(temporal_radius as i32);
+        for q_k in k_start..=0 {
+            for q_y in -search_radius..=search_radius {
+                for q_x in -search_radius..=search_radius {
+                    let linear = q_k * window_area + q_y * window_side + q_x;
+                    if linear >= 0 {
+                        continue;
+                    }
+
+                    // The k=0 paths use the single-tile weight kernel
+                    // because the weight map is symmetric in q and a
+                    // paired tile would carry duplicate content at
+                    // shifted origins. The k≠0 paths fuse the weight
+                    // computation with the accumulate inside a single
+                    // kernel using a register-resident weight pair.
+                    if q_k == 0 {
+                        if self.use_separable {
+                            self.dispatch_separable_iter_k0(&ctx, center_t, q_x, q_y)?;
+                        } else {
+                            self.dispatch_fused_iter_k0(&ctx, center_t, q_x, q_y)?;
+                        }
+                    } else if self.use_separable {
+                        self.dispatch_separable_iter(&ctx, center_t, q_x, q_y, q_k)?;
+                    } else {
+                        self.dispatch_fused_iter(&ctx, center_t, q_x, q_y, q_k)?;
+                    }
+                }
+            }
+        }
+
+        self.run_finish(&ctx, center_t)?;
+        self.read_output_into_scratch(pixels);
         Ok(())
     }
 }
-
-// --- Normalization utilities ---
 
 pub fn normalize_u8(input: &[u8]) -> Vec<f32> {
     input.iter().map(|&v| v as f32 / 255.0).collect()
@@ -922,4 +794,3 @@ pub fn denormalize_u16(input: &[f32]) -> Vec<u16> {
         .map(|&v| (v * 65535.0).round().clamp(0.0, 65535.0) as u16)
         .collect()
 }
-

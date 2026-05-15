@@ -14,8 +14,6 @@ const ITERS_KERNEL: usize = 100;
 const WARMUP_PIPELINE: usize = 2;
 const ITERS_PIPELINE: usize = 500;
 
-// --- Synthetic image ---
-
 fn stored_channels(ch: u32) -> u32 {
     match ch {
         1 => 1,
@@ -61,8 +59,6 @@ fn make_padded_frame(w: u32, h: u32, ch: u32) -> Vec<f32> {
     data
 }
 
-// --- Bench harness ---
-
 struct BenchResult {
     name: String,
     backend: String,
@@ -78,13 +74,7 @@ impl BenchResult {
         println!(
             "[{:<7}] {:<40} {:>3} iters  {:>8.2} fps  {:>8.2} ms/frame  \
              (min: {:.2}, max: {:.2})",
-            self.backend,
-            self.name,
-            self.iterations,
-            self.fps,
-            self.mean_ms,
-            self.min_ms,
-            self.max_ms,
+            self.backend, self.name, self.iterations, self.fps, self.mean_ms, self.min_ms, self.max_ms,
         );
     }
 }
@@ -129,13 +119,9 @@ fn run_bench<R: Runtime>(
     }
 }
 
-// --- Helper: div_ceil ---
-
 fn div_ceil(a: u32, b: u32) -> u32 {
     (a + b - 1) / b
 }
-
-// --- Individual kernel benchmarks ---
 
 fn bench_dist_2d_weight<R: Runtime>(
     client: &ComputeClient<R>,
@@ -144,7 +130,6 @@ fn bench_dist_2d_weight<R: Runtime>(
     ch_name: &str,
 ) -> BenchResult {
     let pixels = (W * H) as usize;
-    let num_frames = 1u32;
     let stored_ch = stored_channels(ch);
     let frame = make_padded_frame(W, H, ch);
     let input = client.create_from_slice(f32::as_bytes(&frame));
@@ -173,9 +158,7 @@ fn bench_dist_2d_weight<R: Runtime>(
             client,
             cube_count.clone(),
             cube_dim,
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(&input, frame.len(), stored_ch as usize)
-            },
+            unsafe { ArrayArg::from_raw_parts::<f32>(&input, frame.len(), stored_ch as usize) },
             unsafe { ArrayArg::from_raw_parts::<f32>(&output, pixels, 1) },
             ScalarArg::new(0u32),
             ScalarArg::new(0u32),
@@ -185,7 +168,6 @@ fn bench_dist_2d_weight<R: Runtime>(
             W,
             H,
             ch,
-            num_frames,
             params.patch_radius,
             BLOCK_X,
             BLOCK_Y,
@@ -201,7 +183,6 @@ fn bench_accumulate<R: Runtime>(
     ch_name: &str,
 ) -> BenchResult {
     let pixels = (W * H) as usize;
-    let num_frames = 1u32;
     let stored_ch = stored_channels(ch);
     let frame = make_padded_frame(W, H, ch);
     let input = client.create_from_slice(f32::as_bytes(&frame));
@@ -225,15 +206,9 @@ fn bench_accumulate<R: Runtime>(
             client,
             cube_count.clone(),
             cube_dim,
+            unsafe { ArrayArg::from_raw_parts::<f32>(&input, frame.len(), stored_ch as usize) },
             unsafe {
-                ArrayArg::from_raw_parts::<f32>(&input, frame.len(), stored_ch as usize)
-            },
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(
-                    &accum,
-                    pixels * stored_ch as usize,
-                    stored_ch as usize,
-                )
+                ArrayArg::from_raw_parts::<f32>(&accum, pixels * stored_ch as usize, stored_ch as usize)
             },
             unsafe { ArrayArg::from_raw_parts::<f32>(&weight_sum, pixels, 1) },
             unsafe { ArrayArg::from_raw_parts::<f32>(&weights, pixels, 1) },
@@ -245,21 +220,13 @@ fn bench_accumulate<R: Runtime>(
             ScalarArg::new(0i32),
             W,
             H,
-            ch,
-            num_frames,
         )
         .unwrap();
     })
 }
 
-fn bench_finish<R: Runtime>(
-    client: &ComputeClient<R>,
-    backend: &str,
-    ch: u32,
-    ch_name: &str,
-) -> BenchResult {
+fn bench_finish<R: Runtime>(client: &ComputeClient<R>, backend: &str, ch: u32, ch_name: &str) -> BenchResult {
     let pixels = (W * H) as usize;
-    let num_frames = 1u32;
     let stored_ch = stored_channels(ch);
     let frame = make_padded_frame(W, H, ch);
     let input = client.create_from_slice(f32::as_bytes(&frame));
@@ -287,22 +254,12 @@ fn bench_finish<R: Runtime>(
             client,
             cube_count.clone(),
             cube_dim,
+            unsafe { ArrayArg::from_raw_parts::<f32>(&input, frame.len(), stored_ch as usize) },
             unsafe {
-                ArrayArg::from_raw_parts::<f32>(&input, frame.len(), stored_ch as usize)
+                ArrayArg::from_raw_parts::<f32>(&output, pixels * stored_ch as usize, stored_ch as usize)
             },
             unsafe {
-                ArrayArg::from_raw_parts::<f32>(
-                    &output,
-                    pixels * stored_ch as usize,
-                    stored_ch as usize,
-                )
-            },
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(
-                    &accum,
-                    pixels * stored_ch as usize,
-                    stored_ch as usize,
-                )
+                ArrayArg::from_raw_parts::<f32>(&accum, pixels * stored_ch as usize, stored_ch as usize)
             },
             unsafe { ArrayArg::from_raw_parts::<f32>(&weight_sum, pixels, 1) },
             unsafe { ArrayArg::from_raw_parts::<f32>(&max_weight, pixels, 1) },
@@ -311,13 +268,10 @@ fn bench_finish<R: Runtime>(
             W,
             H,
             ch,
-            num_frames,
         )
         .unwrap();
     })
 }
-
-// --- Full pipeline benchmarks ---
 
 fn bench_denoise_spatial<R: Runtime>(
     client: &ComputeClient<R>,
@@ -339,19 +293,12 @@ fn bench_denoise_spatial<R: Runtime>(
 
     let name = format!("denoise_spatial_1080p_{ch_name}");
 
-    run_bench(
-        &name,
-        backend,
-        client,
-        WARMUP_PIPELINE,
-        ITERS_PIPELINE,
-        || {
-            let mut denoiser = NlmDenoiser::<R>::new(client, params.clone(), W, H);
-            denoiser.push_frame(&frame);
-            let result = denoiser.denoise().unwrap().unwrap();
-            black_box(&result);
-        },
-    )
+    run_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
+        let mut denoiser = NlmDenoiser::<R>::new(client, params.clone(), W, H);
+        denoiser.push_frame(&frame);
+        let result = denoiser.denoise().unwrap().unwrap();
+        black_box(&result);
+    })
 }
 
 fn bench_denoise_temporal<R: Runtime>(
@@ -376,24 +323,15 @@ fn bench_denoise_temporal<R: Runtime>(
 
     let name = format!("denoise_temporal_1080p_{ch_name}");
 
-    run_bench(
-        &name,
-        backend,
-        client,
-        WARMUP_PIPELINE,
-        ITERS_PIPELINE,
-        || {
-            let mut denoiser = NlmDenoiser::<R>::new(client, params.clone(), W, H);
-            denoiser.push_frame(&frame0);
-            denoiser.push_frame(&frame1);
-            denoiser.push_frame(&frame2);
-            let result = denoiser.denoise().unwrap().unwrap();
-            black_box(&result);
-        },
-    )
+    run_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
+        let mut denoiser = NlmDenoiser::<R>::new(client, params.clone(), W, H);
+        denoiser.push_frame(&frame0);
+        denoiser.push_frame(&frame1);
+        denoiser.push_frame(&frame2);
+        let result = denoiser.denoise().unwrap().unwrap();
+        black_box(&result);
+    })
 }
-
-// --- Runner ---
 
 fn run_all_benches<R: Runtime>(backend: &str) {
     let device = <R as Runtime>::Device::default();

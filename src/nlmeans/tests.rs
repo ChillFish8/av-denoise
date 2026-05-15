@@ -427,9 +427,7 @@ fn flush_produces_remaining_frames() {
     }
 
     let mut remaining: Vec<Vec<f32>> = Vec::new();
-    denoiser
-        .flush(|frame| remaining.push(frame.to_vec()))
-        .unwrap();
+    denoiser.flush(|frame| remaining.push(frame.to_vec())).unwrap();
     assert_eq!(
         remaining.len(),
         1,
@@ -561,10 +559,7 @@ fn separable_uniform_passthrough() {
     let frame = make_uniform_frame(w, h, 1, 0.5);
 
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
-    assert!(
-        denoiser.use_separable,
-        "should use separable for patch_radius=4"
-    );
+    assert!(denoiser.use_separable, "should use separable for patch_radius=4");
     denoiser.push_frame(&frame);
 
     let result = denoiser.denoise().unwrap().unwrap().to_vec();
