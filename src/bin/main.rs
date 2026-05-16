@@ -1,4 +1,5 @@
 use av_denoise::accelerate::{Accelerator, get_default_accelerators};
+use av_denoise::{Denoiser, DenoiserOptions, Device};
 use clap::Parser;
 use strum_macros::EnumString;
 
@@ -23,7 +24,7 @@ struct Args {
     ///
     /// Currently, only "nlmeans" is available.
     pub algorithm: Algorithm,
-    #[arg(short, long, value_delimiter = ',', default_values_t = get_default_accelerators())]
+    #[arg(short = 'A', long, value_delimiter = ',', default_values_t = get_default_accelerators())]
     /// The hardware accelerators to perform the computation
     ///
     /// Accelerators should be ordered from the highest priority to the lowest priority,
@@ -34,11 +35,17 @@ struct Args {
     ///
     /// By default, this will be all accelerators the binary was compiled with.
     pub accelerators: Vec<Accelerator>,
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "default")]
     /// Run the compute operations on a specific device.
     ///
-    /// If this is left unset, the system will select the default device.
-    pub device: Option<String>,
+    /// Format: `default`, `discrete[:N]`, `integrated[:N]`, `virtual[:N]`, or `cpu`.
+    pub device: Device,
+    #[arg(short, long)]
+    /// Width of the input frames in pixels.
+    pub width: u32,
+    #[arg(short = 'H', long)]
+    /// Height of the input frames in pixels.
+    pub height: u32,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -47,10 +54,19 @@ fn main() -> anyhow::Result<()> {
     if std::env::var("RUST_LOG").is_err() {
         unsafe { std::env::set_var("RUST_LOG", "info") };
     }
-
     tracing_subscriber::fmt::init();
 
-    todo!("implement connection to lib");
+    let options = DenoiserOptions::builder().build();
+    let denoiser = Denoiser::new(&args.accelerators, &args.device, args.width, args.height, options)?;
+
+    tracing::info!(
+        algorithm = ?args.algorithm,
+        accelerator = ?denoiser.selected_accelerator(),
+        device = ?args.device,
+        width = args.width,
+        height = args.height,
+        "denoiser initialised; frame ingestion not yet implemented",
+    );
 
     Ok(())
 }

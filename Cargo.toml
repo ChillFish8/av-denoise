@@ -11,6 +11,7 @@ required-features = ["binary", "ffms2", "stdin"]
 
 [dependencies]
 anyhow = "1"
+thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 strum_macros = "0.28"

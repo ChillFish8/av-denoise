@@ -515,59 +515,12 @@ fn run_all_benches<R: Runtime>(backend: &str, device: &R::Device) {
 struct Cli {
     /// GPU device to bind to. Format: `default`, `discrete[:N]`,
     /// `integrated[:N]`, `virtual[:N]`, or `cpu`.
-    #[arg(long, default_value = "default", value_parser = parse_device_spec)]
-    device: DeviceSpec,
+    #[arg(long, default_value = "default")]
+    device: av_denoise::Device,
 
     /// Swallowed: cargo passes this when invoking the bench binary.
     #[arg(long, hide = true)]
     bench: bool,
-}
-
-#[derive(Clone, Debug)]
-struct DeviceSpec {
-    kind: DeviceKind,
-    index: usize,
-}
-
-#[derive(Clone, Debug)]
-enum DeviceKind {
-    Default,
-    Discrete,
-    Integrated,
-    Virtual,
-    Cpu,
-}
-
-fn parse_device_spec(s: &str) -> Result<DeviceSpec, String> {
-    let (kind_str, idx_str) = s.split_once(':').unwrap_or((s, "0"));
-    let index = idx_str
-        .parse()
-        .map_err(|_| format!("invalid device index '{idx_str}' in '{s}'"))?;
-    let kind = match kind_str {
-        "default" => DeviceKind::Default,
-        "discrete" => DeviceKind::Discrete,
-        "integrated" => DeviceKind::Integrated,
-        "virtual" => DeviceKind::Virtual,
-        "cpu" => DeviceKind::Cpu,
-        other => {
-            return Err(format!(
-                "unknown device kind '{other}'; expected default, discrete[:N], integrated[:N], virtual[:N], or cpu"
-            ));
-        },
-    };
-    Ok(DeviceSpec { kind, index })
-}
-
-#[cfg(feature = "vulkan")]
-fn device_spec_to_wgpu(spec: &DeviceSpec) -> cubecl::wgpu::WgpuDevice {
-    use cubecl::wgpu::WgpuDevice;
-    match spec.kind {
-        DeviceKind::Default => WgpuDevice::DefaultDevice,
-        DeviceKind::Discrete => WgpuDevice::DiscreteGpu(spec.index),
-        DeviceKind::Integrated => WgpuDevice::IntegratedGpu(spec.index),
-        DeviceKind::Virtual => WgpuDevice::VirtualGpu(spec.index),
-        DeviceKind::Cpu => WgpuDevice::Cpu,
-    }
 }
 
 fn main() {
@@ -580,7 +533,7 @@ fn main() {
 
     #[cfg(feature = "vulkan")]
     {
-        let device = device_spec_to_wgpu(&cli.device);
+        let device = cli.device.to_wgpu().expect("wgpu device conversion failed");
         println!("  device:   {device:?}");
         println!();
         run_all_benches::<cubecl::wgpu::WgpuRuntime>("vulkan", &device);
