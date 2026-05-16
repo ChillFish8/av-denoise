@@ -196,6 +196,7 @@ dependencies = [
  "strum_macros",
  "tracing",
  "tracing-subscriber",
+ "y4m",
 ]
 
 [[package]]
