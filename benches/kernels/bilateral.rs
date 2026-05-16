@@ -15,7 +15,6 @@ use super::{
     cube_count_2d,
     cube_dim_2d,
     make_padded_frame,
-    map_err,
     shapes_with_ch,
     stored_channels,
 };
@@ -47,24 +46,26 @@ impl<R: Runtime> Benchmark for BilateralBench<R> {
         let pixels = (W * H) as usize;
         let stored = stored_channels(self.ch) as usize;
         let radius = bilateral_radius(BILATERAL_SIGMA_S);
-        nlm_bilateral::launch::<R>(
-            &self.client,
-            cube_count_2d(),
-            cube_dim_2d(),
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.input, args.frame_len, stored) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.output, pixels * stored, stored) },
-            ScalarArg::new(0u32),
-            ScalarArg::new(1.0 / (2.0 * BILATERAL_SIGMA_S * BILATERAL_SIGMA_S)),
-            ScalarArg::new(1.0 / (2.0 * BILATERAL_SIGMA_R * BILATERAL_SIGMA_R)),
-            W,
-            H,
-            self.ch,
-            stored as u32,
-            radius,
-            BLOCK_X,
-            BLOCK_Y,
-        )
-        .map_err(map_err)
+        unsafe {
+            nlm_bilateral::launch_unchecked::<R>(
+                &self.client,
+                cube_count_2d(),
+                cube_dim_2d(),
+                stored,
+                ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
+                ArrayArg::from_raw_parts(args.output.clone(), pixels * stored),
+                0u32,
+                1.0 / (2.0 * BILATERAL_SIGMA_S * BILATERAL_SIGMA_S),
+                1.0 / (2.0 * BILATERAL_SIGMA_R * BILATERAL_SIGMA_R),
+                W,
+                H,
+                self.ch,
+                radius,
+                BLOCK_X,
+                BLOCK_Y,
+            );
+        }
+        Ok(())
     }
 
     fn name(&self) -> String {

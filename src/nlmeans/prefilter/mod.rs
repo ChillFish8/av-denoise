@@ -4,11 +4,11 @@
 //! `_ref` distance kernels so weight calculation sees a cleaner image
 //! than the noisy input.
 
+mod bilateral;
+
+pub use bilateral::bilateral_radius;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
-
-use super::kernels::nlm_bilateral;
-use super::{BLOCK_X, BLOCK_Y};
 
 /// How the per-frame reference clip is produced.
 ///
@@ -64,46 +64,44 @@ pub(crate) fn run_prefilter<R: Runtime>(
 ) -> Result<(), anyhow::Error> {
     match mode {
         PrefilterMode::None | PrefilterMode::External => Ok(()),
-        PrefilterMode::Bilateral { sigma_s, sigma_r } => run_bilateral::<R>(client, ctx, sigma_s, sigma_r),
+        PrefilterMode::Bilateral { sigma_s, sigma_r } => {
+            bilateral::run_bilateral::<R>(client, ctx, sigma_s, sigma_r)
+        },
     }
 }
 
-/// Comptime radius derived from `sigma_s`. Truncating at `2·σ` covers
-/// >95% of the Gaussian mass and bounds SMEM/register usage.
-pub fn bilateral_radius(sigma_s: f32) -> u32 {
-    ((2.0 * sigma_s).ceil() as u32).max(1)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn run_bilateral<R: Runtime>(
-    client: &ComputeClient<R>,
-    ctx: &PrefilterCtx<'_>,
-    sigma_s: f32,
-    sigma_r: f32,
-) -> Result<(), anyhow::Error> {
-    let radius = bilateral_radius(sigma_s);
-    let total = (ctx.frame_count * ctx.height * ctx.width * ctx.stored_ch) as usize;
-    let stored_ch = ctx.stored_ch as usize;
+    #[test]
+    fn none_requires_no_reference_buffer() {
+        assert!(!PrefilterMode::None.needs_reference_buf());
+        assert!(!PrefilterMode::None.is_gpu_internal());
+    }
 
-    let inv_two_sigma_s_sq = 1.0 / (2.0 * sigma_s * sigma_s);
-    let inv_two_sigma_r_sq = 1.0 / (2.0 * sigma_r * sigma_r);
+    #[test]
+    fn external_needs_buffer_but_not_gpu() {
+        assert!(PrefilterMode::External.needs_reference_buf());
+        assert!(!PrefilterMode::External.is_gpu_internal());
+    }
 
-    nlm_bilateral::launch::<R>(
-        client,
-        CubeCount::new_2d(ctx.width.div_ceil(BLOCK_X), ctx.height.div_ceil(BLOCK_Y)),
-        CubeDim::new_2d(BLOCK_X, BLOCK_Y),
-        unsafe { ArrayArg::from_raw_parts::<f32>(ctx.input_buf, total, stored_ch) },
-        unsafe { ArrayArg::from_raw_parts::<f32>(ctx.reference_buf, total, stored_ch) },
-        ScalarArg::new(ctx.frame),
-        ScalarArg::new(inv_two_sigma_s_sq),
-        ScalarArg::new(inv_two_sigma_r_sq),
-        ctx.width,
-        ctx.height,
-        ctx.channels,
-        ctx.stored_ch,
-        radius,
-        BLOCK_X,
-        BLOCK_Y,
-    )?;
+    #[test]
+    fn bilateral_is_gpu_internal() {
+        let m = PrefilterMode::Bilateral {
+            sigma_s: 3.0,
+            sigma_r: 0.02,
+        };
 
-    Ok(())
+        assert!(m.needs_reference_buf());
+        assert!(m.is_gpu_internal());
+    }
+
+    #[test]
+    fn bilateral_radius_truncates_at_two_sigma() {
+        assert_eq!(bilateral_radius(0.1), 1);
+        assert_eq!(bilateral_radius(1.0), 2);
+        assert_eq!(bilateral_radius(3.0), 6);
+        assert_eq!(bilateral_radius(3.5), 7);
+    }
 }

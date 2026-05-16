@@ -12,7 +12,6 @@ use super::{
     cube_count_2d,
     cube_dim_2d,
     make_padded_frame,
-    map_err,
     shapes_with_ch,
     stored_channels,
 };
@@ -42,21 +41,24 @@ impl<R: Runtime> Benchmark for DistanceRefBench<R> {
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let pixels = (W * H) as usize;
         let stored = stored_channels(self.ch) as usize;
-        nlm_distance_ref::launch::<R>(
-            &self.client,
-            cube_count_2d(),
-            cube_dim_2d(),
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.input, args.frame_len, stored) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.dist, pixels, 1) },
-            ScalarArg::new(0u32),
-            ScalarArg::new(0u32),
-            ScalarArg::new(Q_X),
-            ScalarArg::new(Q_Y),
-            W,
-            H,
-            self.ch,
-        )
-        .map_err(map_err)
+        unsafe {
+            nlm_distance_ref::launch_unchecked::<R>(
+                &self.client,
+                cube_count_2d(),
+                cube_dim_2d(),
+                stored,
+                ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
+                ArrayArg::from_raw_parts(args.dist.clone(), pixels),
+                0u32,
+                0u32,
+                Q_X,
+                Q_Y,
+                W,
+                H,
+                self.ch,
+            );
+        }
+        Ok(())
     }
 
     fn name(&self) -> String {

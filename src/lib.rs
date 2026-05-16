@@ -1,3 +1,9 @@
-mod models;
+pub mod accelerate;
+mod denoiser;
+pub mod device;
 pub mod nlmeans;
-mod sniff;
+pub mod sniff;
+
+pub use denoiser::{Denoiser, DenoiserError, DenoiserOptions, DenoisingMode, NlmTuning};
+pub use device::Device;
+pub use nlmeans::{ChannelMode, PrefilterMode};

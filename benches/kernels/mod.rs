@@ -16,6 +16,7 @@ pub mod distance_ref;
 pub mod finish;
 pub mod fused_pair_accumulate;
 pub mod fused_pair_accumulate_ref;
+pub mod fused_window;
 pub mod horizontal_sum;
 pub mod horizontal_sum_pair;
 pub mod vertical_weight;
@@ -25,6 +26,7 @@ pub mod zero;
 pub const W: u32 = 1920;
 pub const H: u32 = 1080;
 pub const PATCH_RADIUS: u32 = 4;
+pub const SEARCH_RADIUS: u32 = 2;
 pub const Q_X: i32 = 1;
 pub const Q_Y: i32 = 0;
 pub const BILATERAL_SIGMA_S: f32 = 3.0;
@@ -102,10 +104,6 @@ pub fn block_sync<R: Runtime>(client: &ComputeClient<R>) {
 
 pub fn shapes_with_ch(ch: u32) -> Vec<Vec<usize>> {
     vec![vec![W as usize, H as usize, ch as usize]]
-}
-
-pub fn map_err<E: core::fmt::Debug>(e: E) -> String {
-    format!("{e:?}")
 }
 
 /// Shared input shape for kernels that take one framebuffer and write

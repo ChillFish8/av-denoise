@@ -5,31 +5,30 @@ use super::helpers::{read_clamped_line, read_line};
 
 /// Joint spatial+range Gaussian bilateral prefilter. Each thread loads
 /// a `(block + 2·radius)²` tile of source pixels into shared memory as
-/// `Line<f32>` (one vectorised entry per pixel), then convolves over
+/// `Vector<f32, N>` (one vectorised entry per pixel), then convolves over
 /// the patch using
 ///     `w = exp(-(dx² + dy²) · inv_two_sigma_s_sq)`
 ///     `  · exp(-||Δc||² · inv_two_sigma_r_sq)`
 /// against the centre pixel. The output keeps the same channel layout
 /// as the input (padding lanes copied through unchanged) so it can
 /// stand in for `input` in the `_ref` distance kernels.
-#[cube(launch)]
-pub fn nlm_bilateral(
-    input: &Array<Line<f32>>,
-    output: &mut Array<Line<f32>>,
+#[cube(launch_unchecked)]
+pub fn nlm_bilateral<N: Size>(
+    input: &Array<Vector<f32, N>>,
+    output: &mut Array<Vector<f32, N>>,
     frame: u32,
     inv_two_sigma_s_sq: f32,
     inv_two_sigma_r_sq: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
-    #[comptime] stored_ch: u32,
     #[comptime] radius: u32,
     #[comptime] block_x: u32,
     #[comptime] block_y: u32,
 ) {
     let tile_width = comptime!(block_x + 2 * radius);
     let tile_elems = comptime!((block_x + 2 * radius) * (block_y + 2 * radius));
-    let mut smem = SharedMemory::<f32>::new_lined(tile_elems as usize, stored_ch as usize);
+    let mut smem = SharedMemory::<Vector<f32, N>>::new(tile_elems as usize);
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -79,7 +78,7 @@ pub fn nlm_bilateral(
 
     let patch_size = 2 * radius + 1;
     let mut weight_sum = 0.0f32;
-    let mut acc = Line::<f32>::empty(input.line_size()).fill(0.0f32);
+    let mut acc = Vector::<f32, N>::empty().fill(0.0f32);
     for offset_y in 0..patch_size {
         for offset_x in 0..patch_size {
             let dy = offset_y as i32 - radius as i32;
@@ -97,13 +96,13 @@ pub fn nlm_bilateral(
             let spatial = (dx * dx + dy * dy) as f32 * inv_two_sigma_s_sq;
             let w = f32::exp(-(spatial + range_sq * inv_two_sigma_r_sq));
 
-            let line_w = Line::<f32>::empty(input.line_size()).fill(w);
+            let line_w = Vector::<f32, N>::empty().fill(w);
             acc += neighbor * line_w;
             weight_sum += w;
         }
     }
 
     let inv = 1.0f32 / weight_sum;
-    let line_inv = Line::<f32>::empty(input.line_size()).fill(inv);
+    let line_inv = Vector::<f32, N>::empty().fill(inv);
     output[((frame * height + global_y) * width + global_x) as usize] = acc * line_inv;
 }

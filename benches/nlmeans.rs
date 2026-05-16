@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use av_denoise::nlmeans::kernels::{nlm_accumulate, nlm_bilateral, nlm_dist_2d_weight, nlm_finish};
 use av_denoise::nlmeans::prefilter::bilateral_radius;
-use av_denoise::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, NlmParams, PrefilterMode};
+use av_denoise::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, NlmParams, Pending, PrefilterMode};
 use cubecl::prelude::*;
 
 const W: u32 = 1920;
@@ -73,7 +73,7 @@ struct BenchResult {
 impl BenchResult {
     fn print(&self) {
         println!(
-            "[{:<7}] {:<48} {:>4} iters  {:>9.2} fps  {:>7.2} ms/frame  \
+            "[{:<7}] {:<60} {:>4} iters  {:>9.2} fps  {:>7.2} ms/frame  \
              (min: {:>6.2}, max: {:>6.2})",
             self.backend, self.name, self.iterations, self.fps, self.mean_ms, self.min_ms, self.max_ms,
         );
@@ -121,7 +121,7 @@ fn run_bench<R: Runtime>(
 }
 
 fn div_ceil(a: u32, b: u32) -> u32 {
-    (a + b - 1) / b
+    a.div_ceil(b)
 }
 
 fn bench_dist_2d_weight<R: Runtime>(
@@ -154,26 +154,26 @@ fn bench_dist_2d_weight<R: Runtime>(
 
     let name = format!("dist_2d_weight_1080p_{ch_name}");
 
-    run_bench(&name, backend, client, WARMUP_KERNEL, ITERS_KERNEL, || {
-        nlm_dist_2d_weight::launch::<R>(
+    run_bench(&name, backend, client, WARMUP_KERNEL, ITERS_KERNEL, || unsafe {
+        nlm_dist_2d_weight::launch_unchecked::<R>(
             client,
             cube_count.clone(),
             cube_dim,
-            unsafe { ArrayArg::from_raw_parts::<f32>(&input, frame.len(), stored_ch as usize) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&output, pixels, 1) },
-            ScalarArg::new(0u32),
-            ScalarArg::new(0u32),
-            ScalarArg::new(1i32),
-            ScalarArg::new(0i32),
-            ScalarArg::new(h2_inv_norm),
+            stored_ch as usize,
+            ArrayArg::from_raw_parts(input.clone(), frame.len()),
+            ArrayArg::from_raw_parts(output.clone(), pixels),
+            0u32,
+            0u32,
+            1i32,
+            0i32,
+            h2_inv_norm,
             W,
             H,
             ch,
             params.patch_radius,
             BLOCK_X,
             BLOCK_Y,
-        )
-        .unwrap();
+        );
     })
 }
 
@@ -202,27 +202,25 @@ fn bench_accumulate<R: Runtime>(
 
     let name = format!("accumulate_1080p_{ch_name}");
 
-    run_bench(&name, backend, client, WARMUP_KERNEL, ITERS_KERNEL, || {
-        nlm_accumulate::launch::<R>(
+    run_bench(&name, backend, client, WARMUP_KERNEL, ITERS_KERNEL, || unsafe {
+        nlm_accumulate::launch_unchecked::<R>(
             client,
             cube_count.clone(),
             cube_dim,
-            unsafe { ArrayArg::from_raw_parts::<f32>(&input, frame.len(), stored_ch as usize) },
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(&accum, pixels * stored_ch as usize, stored_ch as usize)
-            },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&weight_sum, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&weights, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&weights, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&max_weight, pixels, 1) },
-            ScalarArg::new(0u32),
-            ScalarArg::new(0u32),
-            ScalarArg::new(1i32),
-            ScalarArg::new(0i32),
+            stored_ch as usize,
+            ArrayArg::from_raw_parts(input.clone(), frame.len()),
+            ArrayArg::from_raw_parts(accum.clone(), pixels * stored_ch as usize),
+            ArrayArg::from_raw_parts(weight_sum.clone(), pixels),
+            ArrayArg::from_raw_parts(weights.clone(), pixels),
+            ArrayArg::from_raw_parts(weights.clone(), pixels),
+            ArrayArg::from_raw_parts(max_weight.clone(), pixels),
+            0u32,
+            0u32,
+            1i32,
+            0i32,
             W,
             H,
-        )
-        .unwrap();
+        );
     })
 }
 
@@ -250,27 +248,23 @@ fn bench_finish<R: Runtime>(client: &ComputeClient<R>, backend: &str, ch: u32, c
 
     let name = format!("finish_1080p_{ch_name}");
 
-    run_bench(&name, backend, client, WARMUP_KERNEL, ITERS_KERNEL, || {
-        nlm_finish::launch::<R>(
+    run_bench(&name, backend, client, WARMUP_KERNEL, ITERS_KERNEL, || unsafe {
+        nlm_finish::launch_unchecked::<R>(
             client,
             cube_count.clone(),
             cube_dim,
-            unsafe { ArrayArg::from_raw_parts::<f32>(&input, frame.len(), stored_ch as usize) },
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(&output, pixels * stored_ch as usize, stored_ch as usize)
-            },
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(&accum, pixels * stored_ch as usize, stored_ch as usize)
-            },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&weight_sum, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&max_weight, pixels, 1) },
-            ScalarArg::new(0u32),
-            ScalarArg::new(1.0f32),
+            stored_ch as usize,
+            ArrayArg::from_raw_parts(input.clone(), frame.len()),
+            ArrayArg::from_raw_parts(output.clone(), pixels * stored_ch as usize),
+            ArrayArg::from_raw_parts(accum.clone(), pixels * stored_ch as usize),
+            ArrayArg::from_raw_parts(weight_sum.clone(), pixels),
+            ArrayArg::from_raw_parts(max_weight.clone(), pixels),
+            0u32,
+            1.0f32,
             W,
             H,
             ch,
-        )
-        .unwrap();
+        );
     })
 }
 
@@ -295,27 +289,24 @@ fn bench_bilateral<R: Runtime>(
 
     let name = format!("bilateral_1080p_{ch_name}");
 
-    run_bench(&name, backend, client, WARMUP_KERNEL, ITERS_KERNEL, || {
-        nlm_bilateral::launch::<R>(
+    run_bench(&name, backend, client, WARMUP_KERNEL, ITERS_KERNEL, || unsafe {
+        nlm_bilateral::launch_unchecked::<R>(
             client,
             cube_count.clone(),
             cube_dim,
-            unsafe { ArrayArg::from_raw_parts::<f32>(&input, frame.len(), stored_ch as usize) },
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(&output, pixels * stored_ch as usize, stored_ch as usize)
-            },
-            ScalarArg::new(0u32),
-            ScalarArg::new(1.0 / (2.0 * BILATERAL_SIGMA_S * BILATERAL_SIGMA_S)),
-            ScalarArg::new(1.0 / (2.0 * BILATERAL_SIGMA_R * BILATERAL_SIGMA_R)),
+            stored_ch as usize,
+            ArrayArg::from_raw_parts(input.clone(), frame.len()),
+            ArrayArg::from_raw_parts(output.clone(), pixels * stored_ch as usize),
+            0u32,
+            1.0 / (2.0 * BILATERAL_SIGMA_S * BILATERAL_SIGMA_S),
+            1.0 / (2.0 * BILATERAL_SIGMA_R * BILATERAL_SIGMA_R),
             W,
             H,
             ch,
-            stored_ch,
             radius,
             BLOCK_X,
             BLOCK_Y,
-        )
-        .unwrap();
+        );
     })
 }
 
@@ -331,6 +322,25 @@ fn denoise_params(channels: ChannelMode, temporal_radius: u32, prefilter: Prefil
     }
 }
 
+/// Push a frame (and, when needed, a matching reference) for the
+/// configured prefilter mode. Used by the streaming pipeline benches so
+/// the same push pattern works for `External` and non-`External` modes.
+fn push_frame_for_prefilter<R: Runtime>(
+    denoiser: &mut NlmDenoiser<R>,
+    frame: &[f32],
+    supply_reference: bool,
+) {
+    if supply_reference {
+        denoiser.push_frame_with_reference(frame, frame);
+    } else {
+        denoiser.push_frame(frame);
+    }
+}
+
+/// Steady-state streaming bench: every iteration pushes a fresh frame
+/// (the real per-frame cost — upload + optional prefilter) and then
+/// calls the synchronous `denoise()` which waits for the readback. This
+/// is the cost a caller pays if they push and wait in lockstep.
 fn bench_denoise_spatial<R: Runtime>(
     client: &ComputeClient<R>,
     backend: &str,
@@ -345,18 +355,19 @@ fn bench_denoise_spatial<R: Runtime>(
     let supply_reference = matches!(prefilter, PrefilterMode::External);
     let name = format!("denoise_spatial{tag}_1080p_{ch_name}");
 
+    let mut denoiser = NlmDenoiser::<R>::new(client, params, W, H);
+    futures::executor::block_on(client.sync()).unwrap();
+
     run_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
-        let mut denoiser = NlmDenoiser::<R>::new(client, params.clone(), W, H);
-        if supply_reference {
-            denoiser.push_frame_with_reference(&frame, &frame);
-        } else {
-            denoiser.push_frame(&frame);
-        }
+        push_frame_for_prefilter(&mut denoiser, &frame, supply_reference);
         let result = denoiser.denoise().unwrap().unwrap();
         black_box(&result);
     })
 }
 
+/// Steady-state temporal streaming bench. The window is pre-filled
+/// outside the timer (a one-off cost in real usage), then every measured
+/// iteration pushes one fresh frame and waits for that frame's denoise.
 fn bench_denoise_temporal<R: Runtime>(
     client: &ComputeClient<R>,
     backend: &str,
@@ -367,24 +378,66 @@ fn bench_denoise_temporal<R: Runtime>(
 ) -> BenchResult {
     let ch = channels.count();
     let params = denoise_params(channels, 1, prefilter);
-    let frame0 = make_synthetic_frame(W, H, ch);
-    let frame1 = make_synthetic_frame(W, H, ch);
-    let frame2 = make_synthetic_frame(W, H, ch);
+    let frame = make_synthetic_frame(W, H, ch);
+    let total_frames = 1 + 2 * params.temporal_radius as usize;
     let supply_reference = matches!(prefilter, PrefilterMode::External);
     let name = format!("denoise_temporal{tag}_1080p_{ch_name}");
 
+    let mut denoiser = NlmDenoiser::<R>::new(client, params, W, H);
+    for _ in 0..total_frames - 1 {
+        push_frame_for_prefilter(&mut denoiser, &frame, supply_reference);
+    }
+    futures::executor::block_on(client.sync()).unwrap();
+
     run_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
-        let mut denoiser = NlmDenoiser::<R>::new(client, params.clone(), W, H);
-        for f in [&frame0, &frame1, &frame2] {
-            if supply_reference {
-                denoiser.push_frame_with_reference(f, f);
-            } else {
-                denoiser.push_frame(f);
-            }
-        }
+        push_frame_for_prefilter(&mut denoiser, &frame, supply_reference);
         let result = denoiser.denoise().unwrap().unwrap();
         black_box(&result);
     })
+}
+
+/// Pipelined variant: each iteration pushes a fresh frame, submits its
+/// denoise kernels (no wait), then blocks on the *previous* frame's
+/// readback. With double-buffered output handles, frame N+1's kernels
+/// run on the GPU while frame N's host readback is still in flight.
+fn bench_denoise_temporal_pipelined<R: Runtime>(
+    client: &ComputeClient<R>,
+    backend: &str,
+    channels: ChannelMode,
+    ch_name: &str,
+    prefilter: PrefilterMode,
+    tag: &str,
+) -> BenchResult {
+    let ch = channels.count();
+    let params = denoise_params(channels, 1, prefilter);
+    let frame = make_synthetic_frame(W, H, ch);
+    let total_frames = 1 + 2 * params.temporal_radius as usize;
+    let supply_reference = matches!(prefilter, PrefilterMode::External);
+    let name = format!("denoise_temporal_pipelined{tag}_1080p_{ch_name}");
+
+    let mut denoiser = NlmDenoiser::<R>::new(client, params, W, H);
+    for _ in 0..total_frames - 1 {
+        push_frame_for_prefilter(&mut denoiser, &frame, supply_reference);
+    }
+    futures::executor::block_on(client.sync()).unwrap();
+
+    // Prime the pipeline with one outstanding `Pending` so every measured
+    // iteration has previous work to wait on.
+    push_frame_for_prefilter(&mut denoiser, &frame, supply_reference);
+    let mut in_flight: Option<Pending<R>> = Some(denoiser.denoise_submit().unwrap().unwrap());
+
+    let result = run_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
+        push_frame_for_prefilter(&mut denoiser, &frame, supply_reference);
+        let next = denoiser.denoise_submit().unwrap().unwrap();
+        let output = in_flight.take().unwrap().wait().unwrap();
+        black_box(&output);
+        in_flight = Some(next);
+    });
+
+    if let Some(pending) = in_flight.take() {
+        let _ = pending.wait().unwrap();
+    }
+    result
 }
 
 const BILATERAL_SIGMA_S: f32 = 3.0;
@@ -449,6 +502,7 @@ fn run_all_benches<R: Runtime>(backend: &str, device: &R::Device) {
                 continue;
             }
             bench_denoise_temporal::<R>(&client, backend, mode, ch_name, prefilter, tag).print();
+            bench_denoise_temporal_pipelined::<R>(&client, backend, mode, ch_name, prefilter, tag).print();
         }
     }
     println!();
@@ -461,59 +515,12 @@ fn run_all_benches<R: Runtime>(backend: &str, device: &R::Device) {
 struct Cli {
     /// GPU device to bind to. Format: `default`, `discrete[:N]`,
     /// `integrated[:N]`, `virtual[:N]`, or `cpu`.
-    #[arg(long, default_value = "default", value_parser = parse_device_spec)]
-    device: DeviceSpec,
+    #[arg(long, default_value = "default")]
+    device: av_denoise::Device,
 
     /// Swallowed: cargo passes this when invoking the bench binary.
     #[arg(long, hide = true)]
     bench: bool,
-}
-
-#[derive(Clone, Debug)]
-struct DeviceSpec {
-    kind: DeviceKind,
-    index: usize,
-}
-
-#[derive(Clone, Debug)]
-enum DeviceKind {
-    Default,
-    Discrete,
-    Integrated,
-    Virtual,
-    Cpu,
-}
-
-fn parse_device_spec(s: &str) -> Result<DeviceSpec, String> {
-    let (kind_str, idx_str) = s.split_once(':').unwrap_or((s, "0"));
-    let index = idx_str
-        .parse()
-        .map_err(|_| format!("invalid device index '{idx_str}' in '{s}'"))?;
-    let kind = match kind_str {
-        "default" => DeviceKind::Default,
-        "discrete" => DeviceKind::Discrete,
-        "integrated" => DeviceKind::Integrated,
-        "virtual" => DeviceKind::Virtual,
-        "cpu" => DeviceKind::Cpu,
-        other => {
-            return Err(format!(
-                "unknown device kind '{other}'; expected default, discrete[:N], integrated[:N], virtual[:N], or cpu"
-            ));
-        },
-    };
-    Ok(DeviceSpec { kind, index })
-}
-
-#[cfg(feature = "vulkan")]
-fn device_spec_to_wgpu(spec: &DeviceSpec) -> cubecl::wgpu::WgpuDevice {
-    use cubecl::wgpu::WgpuDevice;
-    match spec.kind {
-        DeviceKind::Default => WgpuDevice::DefaultDevice,
-        DeviceKind::Discrete => WgpuDevice::DiscreteGpu(spec.index),
-        DeviceKind::Integrated => WgpuDevice::IntegratedGpu(spec.index),
-        DeviceKind::Virtual => WgpuDevice::VirtualGpu(spec.index),
-        DeviceKind::Cpu => WgpuDevice::Cpu,
-    }
 }
 
 fn main() {
@@ -526,7 +533,7 @@ fn main() {
 
     #[cfg(feature = "vulkan")]
     {
-        let device = device_spec_to_wgpu(&cli.device);
+        let device = cli.device.to_wgpu().expect("wgpu device conversion failed");
         println!("  device:   {device:?}");
         println!();
         run_all_benches::<cubecl::wgpu::WgpuRuntime>("vulkan", &device);

@@ -12,9 +12,9 @@ use super::helpers::{accumulate_pair, channel_scale, line_sum_sq, read_clamped_l
 /// the whole tile (and its q-shifted twin) lies inside the image; warps
 /// near the border fall back to the clamped path. The flag is uniform
 /// across the cube, so the branch causes no warp divergence.
-#[cube(launch)]
-pub fn nlm_dist_2d_weight(
-    input: &Array<Line<f32>>,
+#[cube(launch_unchecked)]
+pub fn nlm_dist_2d_weight<N: Size>(
+    input: &Array<Vector<f32, N>>,
     output: &mut Array<f32>,
     frame_t: u32,
     frame_q: u32,
@@ -131,10 +131,10 @@ pub fn nlm_dist_2d_weight(
 /// `bwd_shift_(x|y)` controls which neighbour the backward distance
 /// reads against: `+q` for `k == 0` (the patch comparison degenerates
 /// to a symmetric self-pair), `−q` for `k != 0` (true temporal pair).
-#[cube(launch)]
-pub fn nlm_fused_pair_accumulate(
-    input: &Array<Line<f32>>,
-    accum: &mut Array<Line<f32>>,
+#[cube(launch_unchecked)]
+pub fn nlm_fused_pair_accumulate<N: Size>(
+    input: &Array<Vector<f32, N>>,
+    accum: &mut Array<Vector<f32, N>>,
     weight_sum: &mut Array<f32>,
     max_weight: &mut Array<f32>,
     frame_t: u32,
@@ -298,9 +298,9 @@ pub fn nlm_fused_pair_accumulate(
 /// layout as `input`); the weight output is unchanged. Used when an
 /// rclip is active so weight calculation sees a cleaner image than the
 /// noisy input.
-#[cube(launch)]
-pub fn nlm_dist_2d_weight_ref(
-    reference: &Array<Line<f32>>,
+#[cube(launch_unchecked)]
+pub fn nlm_dist_2d_weight_ref<N: Size>(
+    reference: &Array<Vector<f32, N>>,
     output: &mut Array<f32>,
     frame_t: u32,
     frame_q: u32,
@@ -403,11 +403,11 @@ pub fn nlm_dist_2d_weight_ref(
 /// computed from `reference` (prefiltered clip); the pixel values
 /// folded into `accum` still come from `input`. Same SMEM footprint and
 /// dispatch shape as the non-`_ref` variant.
-#[cube(launch)]
-pub fn nlm_fused_pair_accumulate_ref(
-    input: &Array<Line<f32>>,
-    reference: &Array<Line<f32>>,
-    accum: &mut Array<Line<f32>>,
+#[cube(launch_unchecked)]
+pub fn nlm_fused_pair_accumulate_ref<N: Size>(
+    input: &Array<Vector<f32, N>>,
+    reference: &Array<Vector<f32, N>>,
+    accum: &mut Array<Vector<f32, N>>,
     weight_sum: &mut Array<f32>,
     max_weight: &mut Array<f32>,
     frame_t: u32,
@@ -585,10 +585,10 @@ pub fn nlm_fused_pair_accumulate_ref(
 ///
 /// The two distance tiles (`smem_fwd`, `smem_bwd`) are reused across q
 /// iterations and invalidated by `sync_cube` between iterations.
-#[cube(launch)]
-pub fn nlm_fused_pair_accumulate_window(
-    input: &Array<Line<f32>>,
-    accum: &mut Array<Line<f32>>,
+#[cube(launch_unchecked)]
+pub fn nlm_fused_pair_accumulate_window<N: Size>(
+    input: &Array<Vector<f32, N>>,
+    accum: &mut Array<Vector<f32, N>>,
     weight_sum: &mut Array<f32>,
     max_weight: &mut Array<f32>,
     frame_t: u32,
@@ -598,7 +598,6 @@ pub fn nlm_fused_pair_accumulate_window(
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
-    #[comptime] stored: u32,
     #[comptime] patch_radius: u32,
     #[comptime] search_radius: u32,
     #[comptime] block_x: u32,
@@ -610,7 +609,7 @@ pub fn nlm_fused_pair_accumulate_window(
     let expanded_elems = comptime!(
         (block_x + 2 * patch_radius + 2 * search_radius) * (block_y + 2 * patch_radius + 2 * search_radius)
     );
-    let mut smem_center = SharedMemory::<f32>::new_lined(expanded_elems as usize, stored as usize);
+    let mut smem_center = SharedMemory::<Vector<f32, N>>::new(expanded_elems as usize);
     let mut smem_fwd = SharedMemory::<f32>::new(tile_elems as usize);
     let mut smem_bwd = SharedMemory::<f32>::new(tile_elems as usize);
 
@@ -642,7 +641,7 @@ pub fn nlm_fused_pair_accumulate_window(
     }
     sync_cube();
 
-    let mut accum_reg = Line::<f32>::empty(input.line_size());
+    let mut accum_reg = Vector::<f32, N>::empty();
     let mut weight_sum_reg = 0.0f32;
     let mut max_weight_reg = 0.0f32;
 
@@ -733,8 +732,8 @@ pub fn nlm_fused_pair_accumulate_window(
                     height,
                 );
 
-                let line_w_fwd = Line::<f32>::empty(input.line_size()).fill(weight_fwd);
-                let line_w_bwd = Line::<f32>::empty(input.line_size()).fill(weight_bwd);
+                let line_w_fwd = Vector::<f32, N>::empty().fill(weight_fwd);
+                let line_w_bwd = Vector::<f32, N>::empty().fill(weight_bwd);
                 accum_reg = accum_reg + fwd_pixel * line_w_fwd + bwd_pixel * line_w_bwd;
                 weight_sum_reg += weight_fwd + weight_bwd;
                 max_weight_reg = f32::max(max_weight_reg, f32::max(weight_fwd, weight_bwd));
@@ -767,10 +766,10 @@ pub fn nlm_fused_pair_accumulate_window(
 /// global only for the shifted neighbour pixel. `q = (0, 0)` is skipped
 /// at comptime; the self-pair contribution is folded back in by `nlm_finish`
 /// via the `wref · max_weight` term.
-#[cube(launch)]
-pub fn nlm_fused_single_window(
-    input: &Array<Line<f32>>,
-    accum: &mut Array<Line<f32>>,
+#[cube(launch_unchecked)]
+pub fn nlm_fused_single_window<N: Size>(
+    input: &Array<Vector<f32, N>>,
+    accum: &mut Array<Vector<f32, N>>,
     weight_sum: &mut Array<f32>,
     max_weight: &mut Array<f32>,
     frame_t: u32,
@@ -778,7 +777,6 @@ pub fn nlm_fused_single_window(
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
-    #[comptime] stored: u32,
     #[comptime] patch_radius: u32,
     #[comptime] search_radius: u32,
     #[comptime] block_x: u32,
@@ -790,7 +788,7 @@ pub fn nlm_fused_single_window(
     let expanded_elems = comptime!(
         (block_x + 2 * patch_radius + 2 * search_radius) * (block_y + 2 * patch_radius + 2 * search_radius)
     );
-    let mut smem_center = SharedMemory::<f32>::new_lined(expanded_elems as usize, stored as usize);
+    let mut smem_center = SharedMemory::<Vector<f32, N>>::new(expanded_elems as usize);
     let mut smem_dist = SharedMemory::<f32>::new(tile_elems as usize);
 
     let local_x = UNIT_POS_X;
@@ -819,7 +817,7 @@ pub fn nlm_fused_single_window(
     }
     sync_cube();
 
-    let mut accum_reg = Line::<f32>::empty(input.line_size());
+    let mut accum_reg = Vector::<f32, N>::empty();
     let mut weight_sum_reg = 0.0f32;
     let mut max_weight_reg = 0.0f32;
 
@@ -881,8 +879,8 @@ pub fn nlm_fused_single_window(
                         width,
                         height,
                     );
-                    let line_w = Line::<f32>::empty(input.line_size()).fill(weight);
-                    accum_reg = accum_reg + neighbor_pixel * line_w;
+                    let line_w = Vector::<f32, N>::empty().fill(weight);
+                    accum_reg += neighbor_pixel * line_w;
                     weight_sum_reg += weight;
                     max_weight_reg = f32::max(max_weight_reg, weight);
                 }
@@ -907,11 +905,11 @@ pub fn nlm_fused_single_window(
 /// pixel accumulation reads from `input` so the original-clip values
 /// flow into `accum` while weights are derived from the cleaner
 /// reference frames.
-#[cube(launch)]
-pub fn nlm_fused_pair_accumulate_window_ref(
-    input: &Array<Line<f32>>,
-    reference: &Array<Line<f32>>,
-    accum: &mut Array<Line<f32>>,
+#[cube(launch_unchecked)]
+pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
+    input: &Array<Vector<f32, N>>,
+    reference: &Array<Vector<f32, N>>,
+    accum: &mut Array<Vector<f32, N>>,
     weight_sum: &mut Array<f32>,
     max_weight: &mut Array<f32>,
     frame_t: u32,
@@ -921,7 +919,6 @@ pub fn nlm_fused_pair_accumulate_window_ref(
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
-    #[comptime] stored: u32,
     #[comptime] patch_radius: u32,
     #[comptime] search_radius: u32,
     #[comptime] block_x: u32,
@@ -933,7 +930,7 @@ pub fn nlm_fused_pair_accumulate_window_ref(
     let expanded_elems = comptime!(
         (block_x + 2 * patch_radius + 2 * search_radius) * (block_y + 2 * patch_radius + 2 * search_radius)
     );
-    let mut smem_center = SharedMemory::<f32>::new_lined(expanded_elems as usize, stored as usize);
+    let mut smem_center = SharedMemory::<Vector<f32, N>>::new(expanded_elems as usize);
     let mut smem_fwd = SharedMemory::<f32>::new(tile_elems as usize);
     let mut smem_bwd = SharedMemory::<f32>::new(tile_elems as usize);
 
@@ -964,7 +961,7 @@ pub fn nlm_fused_pair_accumulate_window_ref(
     }
     sync_cube();
 
-    let mut accum_reg = Line::<f32>::empty(input.line_size());
+    let mut accum_reg = Vector::<f32, N>::empty();
     let mut weight_sum_reg = 0.0f32;
     let mut max_weight_reg = 0.0f32;
 
@@ -1050,8 +1047,8 @@ pub fn nlm_fused_pair_accumulate_window_ref(
                     width,
                     height,
                 );
-                let line_w_fwd = Line::<f32>::empty(input.line_size()).fill(weight_fwd);
-                let line_w_bwd = Line::<f32>::empty(input.line_size()).fill(weight_bwd);
+                let line_w_fwd = Vector::<f32, N>::empty().fill(weight_fwd);
+                let line_w_bwd = Vector::<f32, N>::empty().fill(weight_bwd);
                 accum_reg = accum_reg + fwd_pixel * line_w_fwd + bwd_pixel * line_w_bwd;
                 weight_sum_reg += weight_fwd + weight_bwd;
                 max_weight_reg = f32::max(max_weight_reg, f32::max(weight_fwd, weight_bwd));
@@ -1074,11 +1071,11 @@ pub fn nlm_fused_pair_accumulate_window_ref(
 /// `_ref` variant of [`nlm_fused_single_window`]. Distance reads from
 /// `reference[frame_t]` (cached center + per-q neighbours, all at q_k=0);
 /// pixel accumulation reads from `input[frame_t]`.
-#[cube(launch)]
-pub fn nlm_fused_single_window_ref(
-    input: &Array<Line<f32>>,
-    reference: &Array<Line<f32>>,
-    accum: &mut Array<Line<f32>>,
+#[cube(launch_unchecked)]
+pub fn nlm_fused_single_window_ref<N: Size>(
+    input: &Array<Vector<f32, N>>,
+    reference: &Array<Vector<f32, N>>,
+    accum: &mut Array<Vector<f32, N>>,
     weight_sum: &mut Array<f32>,
     max_weight: &mut Array<f32>,
     frame_t: u32,
@@ -1086,7 +1083,6 @@ pub fn nlm_fused_single_window_ref(
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
-    #[comptime] stored: u32,
     #[comptime] patch_radius: u32,
     #[comptime] search_radius: u32,
     #[comptime] block_x: u32,
@@ -1098,7 +1094,7 @@ pub fn nlm_fused_single_window_ref(
     let expanded_elems = comptime!(
         (block_x + 2 * patch_radius + 2 * search_radius) * (block_y + 2 * patch_radius + 2 * search_radius)
     );
-    let mut smem_center = SharedMemory::<f32>::new_lined(expanded_elems as usize, stored as usize);
+    let mut smem_center = SharedMemory::<Vector<f32, N>>::new(expanded_elems as usize);
     let mut smem_dist = SharedMemory::<f32>::new(tile_elems as usize);
 
     let local_x = UNIT_POS_X;
@@ -1127,7 +1123,7 @@ pub fn nlm_fused_single_window_ref(
     }
     sync_cube();
 
-    let mut accum_reg = Line::<f32>::empty(input.line_size());
+    let mut accum_reg = Vector::<f32, N>::empty();
     let mut weight_sum_reg = 0.0f32;
     let mut max_weight_reg = 0.0f32;
 
@@ -1187,8 +1183,8 @@ pub fn nlm_fused_single_window_ref(
                         width,
                         height,
                     );
-                    let line_w = Line::<f32>::empty(input.line_size()).fill(weight);
-                    accum_reg = accum_reg + neighbor_pixel * line_w;
+                    let line_w = Vector::<f32, N>::empty().fill(weight);
+                    accum_reg += neighbor_pixel * line_w;
                     weight_sum_reg += weight;
                     max_weight_reg = f32::max(max_weight_reg, weight);
                 }

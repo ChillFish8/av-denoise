@@ -7,10 +7,10 @@ use super::helpers::{accumulate_pair, clamp_coord};
 /// weight map. `weights_fwd` and `weights_bwd` may point to the same
 /// buffer for the symmetric (k=0) case. The backward lookup uses the
 /// clamped neighbour index so border pixels read a valid weight.
-#[cube(launch)]
-pub fn nlm_accumulate(
-    input: &Array<Line<f32>>,
-    accum: &mut Array<Line<f32>>,
+#[cube(launch_unchecked)]
+pub fn nlm_accumulate<N: Size>(
+    input: &Array<Vector<f32, N>>,
+    accum: &mut Array<Vector<f32, N>>,
     weight_sum: &mut Array<f32>,
     weights_fwd: &Array<f32>,
     weights_bwd: &Array<f32>,
@@ -45,11 +45,11 @@ pub fn nlm_accumulate(
 ///     `out = (original × m + acc) / (m + weight_sum)`  where  `m = wref × max_weight`.
 /// When the denominator is near zero (no usable matches across the
 /// search window) the original pixel value is preserved unchanged.
-#[cube(launch)]
-pub fn nlm_finish(
-    input: &Array<Line<f32>>,
-    output: &mut Array<Line<f32>>,
-    accum: &Array<Line<f32>>,
+#[cube(launch_unchecked)]
+pub fn nlm_finish<N: Size>(
+    input: &Array<Vector<f32, N>>,
+    output: &mut Array<Vector<f32, N>>,
+    accum: &Array<Vector<f32, N>>,
     weight_sum: &Array<f32>,
     max_weight: &Array<f32>,
     center_frame: u32,
@@ -73,9 +73,9 @@ pub fn nlm_finish(
     let original = input[frame_idx];
     let accumulated = accum[pixel_idx];
 
-    // `Line::empty` zero-initialises so any padding lanes (vec3 → vec4)
+    // `Vector::empty` zero-initialises so any padding lanes (vec3 → vec4)
     // stay 0 regardless of which branch runs below.
-    let mut out = Line::empty(input.line_size());
+    let mut out = Vector::<f32, N>::empty();
 
     if denominator > 1e-30f32 {
         let inv_denominator = 1.0f32 / denominator;

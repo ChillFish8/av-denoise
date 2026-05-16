@@ -3,7 +3,7 @@ use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::{BLOCK_1D, COPY_GRID_1D, H, W, block_sync, map_err, shapes_with_ch, stored_channels};
+use super::{BLOCK_1D, COPY_GRID_1D, H, W, block_sync, shapes_with_ch, stored_channels};
 
 #[derive(Clone)]
 pub struct ZeroInput {
@@ -39,18 +39,20 @@ impl<R: Runtime> Benchmark for ZeroBench<R> {
         let pixels = (W * H) as usize;
         let stored = stored_channels(self.ch) as usize;
         let total_threads = COPY_GRID_1D * BLOCK_1D;
-        gpu_zero_buffers::launch::<R>(
-            &self.client,
-            CubeCount::new_1d(COPY_GRID_1D),
-            CubeDim::new_1d(BLOCK_1D),
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.accum, pixels * stored, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.weight_sum, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.max_weight, pixels, 1) },
-            (pixels * stored) as u32,
-            pixels as u32,
-            total_threads,
-        )
-        .map_err(map_err)
+        unsafe {
+            gpu_zero_buffers::launch_unchecked::<R>(
+                &self.client,
+                CubeCount::new_1d(COPY_GRID_1D),
+                CubeDim::new_1d(BLOCK_1D),
+                ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored),
+                ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels),
+                ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
+                (pixels * stored) as u32,
+                pixels as u32,
+                total_threads,
+            );
+        }
+        Ok(())
     }
 
     fn name(&self) -> String {

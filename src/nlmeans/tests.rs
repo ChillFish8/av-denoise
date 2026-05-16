@@ -16,6 +16,7 @@ fn make_uniform_frame(w: u32, h: u32, ch: u32, val: f32) -> Vec<f32> {
 
 /// Creates a frame with a patch of noise (not just a single pixel)
 /// so that NLMeans has matching noisy patches to work with.
+#[allow(clippy::too_many_arguments)]
 fn make_frame_with_noisy_region(
     w: u32,
     h: u32,
@@ -43,8 +44,6 @@ fn make_frame_with_noisy_region(
 
     frame
 }
-
-// ==================== Single-frame (spatial) tests ====================
 
 #[test]
 fn uniform_image_passthrough() {
@@ -275,8 +274,6 @@ fn spatial_only_no_delay() {
     assert!(result.is_some(), "d=0 should not delay output");
 }
 
-// ==================== Temporal tests ====================
-
 #[test]
 fn temporal_requires_full_window() {
     let client = make_client();
@@ -451,8 +448,6 @@ fn flush_produces_remaining_frames() {
     }
 }
 
-// ==================== Symmetry and edge tests ====================
-
 #[test]
 fn symmetry_preserved() {
     let client = make_client();
@@ -533,8 +528,6 @@ fn clamp_to_edge_no_darkening() {
     );
 }
 
-// ==================== Normalization tests ====================
-
 #[test]
 fn normalization_u8_roundtrip() {
     let original: Vec<u8> = (0..=255).collect();
@@ -553,9 +546,8 @@ fn normalization_u16_roundtrip() {
     assert_eq!(original, restored);
 }
 
-// ==================== Separable filter tests ====================
-// These use patch_radius > SEPARABLE_THRESHOLD to trigger the separable path.
-
+/// The following tests use `patch_radius > SEPARABLE_THRESHOLD` to trigger
+/// the separable path.
 #[test]
 fn separable_uniform_passthrough() {
     let client = make_client();
@@ -855,6 +847,99 @@ fn bilateral_noisy_image_finite() {
             sigma_s: 2.0,
             sigma_r: 0.05,
         },
+    };
+
+    let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
+    d.push_frame(&frame);
+    let result = d.denoise().unwrap().unwrap().to_vec();
+
+    for (i, &v) in result.iter().enumerate() {
+        assert!(v.is_finite(), "pixel {i}: non-finite output {v}");
+        assert!((-0.01..=1.01).contains(&v), "pixel {i}: out-of-range output {v}");
+    }
+}
+
+#[test]
+fn validate_rejects_oversized_patch_radius() {
+    let params = NlmParams {
+        patch_radius: MAX_PATCH_RADIUS + 1,
+        ..NlmParams::default()
+    };
+    assert!(params.validate().is_err());
+}
+
+#[test]
+fn validate_rejects_oversized_search_radius() {
+    let params = NlmParams {
+        search_radius: MAX_SEARCH_RADIUS + 1,
+        ..NlmParams::default()
+    };
+    assert!(params.validate().is_err());
+}
+
+#[test]
+fn validate_rejects_oversized_temporal_radius() {
+    let params = NlmParams {
+        temporal_radius: MAX_TEMPORAL_RADIUS + 1,
+        ..NlmParams::default()
+    };
+    assert!(params.validate().is_err());
+}
+
+#[test]
+fn validate_rejects_non_positive_strength() {
+    let zero = NlmParams {
+        strength: 0.0,
+        ..NlmParams::default()
+    };
+    assert!(zero.validate().is_err());
+
+    let nan = NlmParams {
+        strength: f32::NAN,
+        ..NlmParams::default()
+    };
+    assert!(nan.validate().is_err());
+
+    let inf = NlmParams {
+        strength: f32::INFINITY,
+        ..NlmParams::default()
+    };
+    assert!(inf.validate().is_err());
+}
+
+#[test]
+fn validate_rejects_negative_self_weight() {
+    let params = NlmParams {
+        self_weight: -0.1,
+        ..NlmParams::default()
+    };
+    assert!(params.validate().is_err());
+}
+
+#[test]
+fn validate_accepts_defaults() {
+    assert!(NlmParams::default().validate().is_ok());
+}
+
+/// Drives most weights toward zero by combining a near-maximum search
+/// radius with extremely low strength (large `h2_inv_norm`), and on
+/// noisy content so denominators land near the underflow guard in
+/// `nlm_finish`. The output must contain no `inf`/`nan` regardless.
+#[test]
+fn extreme_params_produce_finite_output() {
+    let client = make_client();
+    let w = 32;
+    let h = 32;
+    let frame = make_frame_with_noisy_region(w, h, 1, 0.1, 16, 16, 5, 0.9);
+
+    let params = NlmParams {
+        temporal_radius: 0,
+        search_radius: 2,
+        patch_radius: 2,
+        strength: 0.1,
+        self_weight: 1.0,
+        channels: ChannelMode::Luma,
+        prefilter: PrefilterMode::None,
     };
 
     let mut d = NlmDenoiser::<R>::new(&client, params, w, h);

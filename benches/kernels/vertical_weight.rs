@@ -3,18 +3,7 @@ use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 
 use super::horizontal_sum::HSumInput;
-use super::{
-    BLOCK_X,
-    BLOCK_Y,
-    H,
-    PATCH_RADIUS,
-    W,
-    block_sync,
-    cube_count_2d,
-    cube_dim_2d,
-    h2_inv_norm,
-    map_err,
-};
+use super::{BLOCK_X, BLOCK_Y, H, PATCH_RADIUS, W, block_sync, cube_count_2d, cube_dim_2d, h2_inv_norm};
 
 pub struct VWeightBench<R: Runtime> {
     pub client: ComputeClient<R>,
@@ -34,20 +23,22 @@ impl<R: Runtime> Benchmark for VWeightBench<R> {
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let pixels = (W * H) as usize;
-        nlm_vertical_weight::launch::<R>(
-            &self.client,
-            cube_count_2d(),
-            cube_dim_2d(),
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.input, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.output, pixels, 1) },
-            ScalarArg::new(h2_inv_norm()),
-            W,
-            H,
-            PATCH_RADIUS,
-            BLOCK_X,
-            BLOCK_Y,
-        )
-        .map_err(map_err)
+        unsafe {
+            nlm_vertical_weight::launch_unchecked::<R>(
+                &self.client,
+                cube_count_2d(),
+                cube_dim_2d(),
+                ArrayArg::from_raw_parts(args.input.clone(), pixels),
+                ArrayArg::from_raw_parts(args.output.clone(), pixels),
+                h2_inv_norm(),
+                W,
+                H,
+                PATCH_RADIUS,
+                BLOCK_X,
+                BLOCK_Y,
+            );
+        }
+        Ok(())
     }
 
     fn name(&self) -> String {

@@ -13,9 +13,9 @@ use super::helpers::{
 /// Per-pixel squared distance for the `+q` / `−q` pair. Writes both
 /// raw distance buffers in a single pass; downstream the separable
 /// box filter and the fused vweight+accumulate consume them.
-#[cube(launch)]
-pub fn nlm_distance_pair(
-    input: &Array<Line<f32>>,
+#[cube(launch_unchecked)]
+pub fn nlm_distance_pair<N: Size>(
+    input: &Array<Vector<f32, N>>,
     dist_fwd: &mut Array<f32>,
     dist_bwd: &mut Array<f32>,
     frame_t: u32,
@@ -75,9 +75,9 @@ pub fn nlm_distance_pair(
 
 /// Per-pixel squared distance between `(frame_t, x, y)` and
 /// `(frame_q, x + q_x, y + q_y)`, scaled to the channel convention.
-#[cube(launch)]
-pub fn nlm_distance(
-    input: &Array<Line<f32>>,
+#[cube(launch_unchecked)]
+pub fn nlm_distance<N: Size>(
+    input: &Array<Vector<f32, N>>,
     dist: &mut Array<f32>,
     frame_t: u32,
     frame_q: u32,
@@ -119,7 +119,7 @@ pub fn nlm_distance(
 /// Horizontal 1D box filter (width = 2·patch_radius + 1) via shared
 /// memory. Loads a `(block_x + 2·patch_radius) × block_y` tile cooperatively
 /// then writes the per-row patch sum at each `(global_x, global_y)`.
-#[cube(launch)]
+#[cube(launch_unchecked)]
 pub fn nlm_horizontal_sum(
     input: &Array<f32>,
     output: &mut Array<f32>,
@@ -170,7 +170,7 @@ pub fn nlm_horizontal_sum(
 
 /// Vertical 1D box filter (height = 2·patch_radius + 1) over the
 /// hsum buffer, followed by the Welsch weight `exp(−sum · h2_inv_norm)`.
-#[cube(launch)]
+#[cube(launch_unchecked)]
 pub fn nlm_vertical_weight(
     input: &Array<f32>,
     output: &mut Array<f32>,
@@ -220,7 +220,7 @@ pub fn nlm_vertical_weight(
 
 /// Paired horizontal 1D box filter — the forward and backward hsum
 /// passes share one cooperative tile load and one `sync_cube`.
-#[cube(launch)]
+#[cube(launch_unchecked)]
 pub fn nlm_horizontal_sum_pair(
     input_fwd: &Array<f32>,
     input_bwd: &Array<f32>,
@@ -283,12 +283,12 @@ pub fn nlm_horizontal_sum_pair(
 /// paired-distance separable path. The backward tile is loaded from
 /// `hsum_bwd` at the cube position shifted by `(−q_x, −q_y)` so the
 /// vsum at each thread directly produces the neighbour backward weight.
-#[cube(launch)]
-pub fn nlm_vweight_pair_accumulate(
+#[cube(launch_unchecked)]
+pub fn nlm_vweight_pair_accumulate<N: Size>(
     hsum_fwd: &Array<f32>,
     hsum_bwd: &Array<f32>,
-    input: &Array<Line<f32>>,
-    accum: &mut Array<Line<f32>>,
+    input: &Array<Vector<f32, N>>,
+    accum: &mut Array<Vector<f32, N>>,
     weight_sum: &mut Array<f32>,
     max_weight: &mut Array<f32>,
     frame_fwd: u32,
@@ -364,9 +364,9 @@ pub fn nlm_vweight_pair_accumulate(
 /// `_ref` variant of [`nlm_distance`]. Reads `reference` for both
 /// center and neighbour; downstream separable kernels consume the
 /// distance buffer unchanged.
-#[cube(launch)]
-pub fn nlm_distance_ref(
-    reference: &Array<Line<f32>>,
+#[cube(launch_unchecked)]
+pub fn nlm_distance_ref<N: Size>(
+    reference: &Array<Vector<f32, N>>,
     dist: &mut Array<f32>,
     frame_t: u32,
     frame_q: u32,
@@ -407,9 +407,9 @@ pub fn nlm_distance_ref(
 
 /// `_ref` variant of [`nlm_distance_pair`]. Both forward and backward
 /// distance signals read from `reference`.
-#[cube(launch)]
-pub fn nlm_distance_pair_ref(
-    reference: &Array<Line<f32>>,
+#[cube(launch_unchecked)]
+pub fn nlm_distance_pair_ref<N: Size>(
+    reference: &Array<Vector<f32, N>>,
     dist_fwd: &mut Array<f32>,
     dist_bwd: &mut Array<f32>,
     frame_t: u32,

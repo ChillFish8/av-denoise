@@ -4,8 +4,13 @@ pub mod prefilter;
 #[cfg(test)]
 mod tests;
 
+use std::future::Future;
+use std::marker::PhantomData;
+use std::pin::Pin;
+
+use cubecl::bytes::Bytes;
 use cubecl::prelude::*;
-use cubecl::server::Handle;
+use cubecl::server::{Handle, ServerError};
 
 use self::kernels::{
     gpu_copy,
@@ -56,6 +61,7 @@ const MAX_GRID_1D: u32 = 65535;
 const BLOCK_1D: u32 = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How to apply denoising to the input frame channels.
 pub enum ChannelMode {
     /// Single luminance channel. Distance scaled by 3.0.
     Luma,
@@ -131,7 +137,71 @@ impl NlmParams {
     fn total_frames(&self) -> u32 {
         1 + 2 * self.temporal_radius
     }
+
+    /// Reject parameter combinations that would either fail to launch
+    /// (kernels hitting SMEM/register limits) or produce numerically
+    /// degenerate output. Called automatically by `NlmDenoiser::new` —
+    /// callers building params manually can invoke it directly to
+    /// surface errors before construction.
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        if self.patch_radius > MAX_PATCH_RADIUS {
+            anyhow::bail!(
+                "patch_radius={} exceeds the supported maximum ({}); larger patches \
+                 exhaust on-chip SMEM in the fused/windowed kernels",
+                self.patch_radius,
+                MAX_PATCH_RADIUS,
+            );
+        }
+
+        if self.search_radius > MAX_SEARCH_RADIUS {
+            anyhow::bail!(
+                "search_radius={} exceeds the supported maximum ({}); the windowed \
+                 kernel allocates `(block + 2·patch_radius + 2·search_radius)²` of SMEM",
+                self.search_radius,
+                MAX_SEARCH_RADIUS,
+            );
+        }
+
+        if self.temporal_radius > MAX_TEMPORAL_RADIUS {
+            anyhow::bail!(
+                "temporal_radius={} exceeds the supported maximum ({}); the ring \
+                 buffer grows linearly with the window size",
+                self.temporal_radius,
+                MAX_TEMPORAL_RADIUS,
+            );
+        }
+
+        if !(self.strength.is_finite() && self.strength > 0.0) {
+            anyhow::bail!(
+                "strength must be finite and > 0 (got {}); strength = 0 produces an \
+                 infinite Welsch normalisation factor",
+                self.strength,
+            );
+        }
+
+        if !self.self_weight.is_finite() || self.self_weight < 0.0 {
+            anyhow::bail!("self_weight must be finite and >= 0 (got {})", self.self_weight,);
+        }
+
+        Ok(())
+    }
 }
+
+/// Hard ceiling on `patch_radius`. The fused kernels load a
+/// `(block + 2·patch_radius)²` SMEM tile; values above this run out of
+/// SMEM on RDNA-class GPUs.
+pub const MAX_PATCH_RADIUS: u32 = 16;
+
+/// Hard ceiling on `search_radius`. The windowed kernel SMEM tile is
+/// `(block + 2·patch_radius + 2·search_radius)² × stored_ch × 4` bytes;
+/// the per-q dispatch path is also gated on this so launch counts stay
+/// sane (`(2·a+1)²` launches per frame).
+pub const MAX_SEARCH_RADIUS: u32 = 8;
+
+/// Hard ceiling on `temporal_radius`. The ring buffer is sized for
+/// `2·t + 1` frames; values above this consume excessive device memory
+/// (e.g. 1080p YUV at `t = 16` ≈ 540 MB just for input).
+pub const MAX_TEMPORAL_RADIUS: u32 = 8;
 
 /// Stateful NLMeans denoiser. Maintains a ring of frames in
 /// `input_buf`; each `push_frame` uploads one frame, each `denoise`
@@ -172,14 +242,67 @@ pub struct NlmDenoiser<R: Runtime> {
     tmp_hsum: Handle,
     /// `[pixels]` hsum intermediate, bwd direction (separable path).
     tmp_hsum_bwd: Handle,
-    /// `[pixels * stored_ch]` denoised output.
-    output: Handle,
-    /// CPU scratch reused for the readback Vec — avoids a per-frame alloc.
+    /// Double-buffered `[pixels * stored_ch]` denoised output. A new
+    /// `denoise_submit()` writes into `outputs[next_output_slot]` while
+    /// the previous slot may still be draining via `read_async`, letting
+    /// frame N+1's kernels overlap with frame N's readback.
+    outputs: [Handle; 2],
+    /// Index of the next output slot to write into.
+    next_output_slot: usize,
+    /// CPU scratch reused by the sync `denoise()` path via
+    /// `Pending::wait_into` — avoids a per-frame allocation.
     output_scratch: Vec<f32>,
 
     h2_inv_norm: f32,
     use_separable: bool,
     use_reference: bool,
+}
+
+type ReadFuture = Pin<Box<dyn Future<Output = Result<Vec<Bytes>, ServerError>> + Send>>;
+
+/// In-flight denoise: kernels are queued, the GPU may still be working,
+/// and the host-side readback hasn't completed yet. Created by
+/// [`NlmDenoiser::denoise_submit`]; consume with [`Self::wait`] or
+/// [`Self::wait_into`] to retrieve the denoised frame.
+pub struct Pending<R: Runtime> {
+    fut: ReadFuture,
+    channels: u32,
+    stored_ch: u32,
+    pixels: usize,
+    _marker: PhantomData<R>,
+}
+
+impl<R: Runtime> Pending<R> {
+    /// Block until the readback completes, returning the denoised frame
+    /// as a freshly allocated `Vec`. YUV padding lanes are stripped so
+    /// the returned buffer is densely packed (`pixels * channels` f32s).
+    pub fn wait(self) -> Result<Vec<f32>, anyhow::Error> {
+        let mut out = Vec::with_capacity(self.pixels * self.channels as usize);
+        self.wait_into(&mut out)?;
+        Ok(out)
+    }
+
+    /// Block until the readback completes, writing the result into
+    /// `dst` (cleared first). Lets the caller reuse an allocation when
+    /// running synchronously frame-after-frame.
+    pub fn wait_into(self, dst: &mut Vec<f32>) -> Result<(), anyhow::Error> {
+        let bytes = cubecl::future::block_on(self.fut)?.remove(0);
+        let data = f32::from_bytes(&bytes);
+        let channels = self.channels as usize;
+        let stored_ch = self.stored_ch as usize;
+
+        dst.clear();
+        if channels == stored_ch {
+            dst.extend_from_slice(data);
+        } else {
+            dst.reserve(self.pixels * channels);
+            for pixel in 0..self.pixels {
+                let src = pixel * stored_ch;
+                dst.extend_from_slice(&data[src..src + channels]);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Derived sizes plus dispatch shape for the per-frame work, bundled so
@@ -197,7 +320,14 @@ struct LaunchCtx {
 }
 
 impl<R: Runtime> NlmDenoiser<R> {
+    /// Build a new denoiser. **Panics** if `params.validate()` fails;
+    /// the high-level [`crate::Denoiser`] runs validation first and
+    /// surfaces errors as `Result`, so most callers should prefer that.
     pub fn new(client: &ComputeClient<R>, params: NlmParams, width: u32, height: u32) -> Self {
+        params
+            .validate()
+            .expect("invalid NlmParams; call params.validate() first to surface this as Result");
+
         let stored_ch = params.channels.storage_count();
         let total_frames = params.total_frames();
         let pixels = (width * height) as usize;
@@ -223,7 +353,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let raw_bwd = client.empty(scalar_bytes);
         let tmp_hsum = client.empty(scalar_bytes);
         let tmp_hsum_bwd = client.empty(scalar_bytes);
-        let output = client.empty(frame_bytes);
+        let outputs = [client.empty(frame_bytes), client.empty(frame_bytes)];
 
         let h2_inv_norm = params.h2_inv_norm();
         let use_separable = params.patch_radius > SEPARABLE_THRESHOLD;
@@ -248,7 +378,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             raw_bwd,
             tmp_hsum,
             tmp_hsum_bwd,
-            output,
+            outputs,
+            next_output_slot: 0,
             output_scratch: Vec::with_capacity(output_scratch_cap),
             h2_inv_norm,
             use_separable,
@@ -372,16 +503,17 @@ impl<R: Runtime> NlmDenoiser<R> {
         let grid = frame_size.div_ceil(BLOCK_1D).min(MAX_GRID_1D);
         let total_threads = grid * BLOCK_1D;
 
-        gpu_copy::launch::<R>(
-            &self.client,
-            CubeCount::new_1d(grid),
-            CubeDim::new_1d(BLOCK_1D),
-            unsafe { ArrayArg::from_raw_parts::<f32>(src, frame_size as usize, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&dst_handle, frame_size as usize, 1) },
-            frame_size,
-            total_threads,
-        )
-        .expect("gpu_copy launch failed");
+        unsafe {
+            gpu_copy::launch_unchecked::<R>(
+                &self.client,
+                CubeCount::new_1d(grid),
+                CubeDim::new_1d(BLOCK_1D),
+                ArrayArg::from_raw_parts(src.clone(), frame_size as usize),
+                ArrayArg::from_raw_parts(dst_handle.clone(), frame_size as usize),
+                frame_size,
+                total_threads,
+            )
+        };
     }
 
     /// Duplicate the most recently pushed frame into the next ring slot.
@@ -414,20 +546,68 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.ring_head += 1;
     }
 
-    /// Try to denoise the current center frame.
+    /// Queue denoise kernels for the current window and kick off an
+    /// async readback. Returns a [`Pending`] whose `wait()` produces the
+    /// denoised frame.
+    ///
+    /// Output handles are double-buffered, so the caller may push and
+    /// submit the next frame while holding the previous frame's
+    /// [`Pending`] — frame N+1's kernels then overlap with frame N's
+    /// readback. Holding more than one `Pending` in flight is unsound:
+    /// a third submit would alias the first pending's output handle.
+    ///
+    /// Returns `Ok(None)` if the temporal window is not yet filled.
+    pub fn denoise_submit(&mut self) -> Result<Option<Pending<R>>, anyhow::Error> {
+        let total_frames = self.params.total_frames() as usize;
+        if self.frames_loaded < total_frames {
+            return Ok(None);
+        }
+
+        let slot = self.next_output_slot;
+        self.next_output_slot = (slot + 1) % self.outputs.len();
+
+        self.run_denoise_kernels(slot)?;
+
+        // Call `read_async` eagerly so the GPU-side copy is queued before
+        // the caller dispatches the next frame's kernels. Erasing the
+        // future's inferred `&self` lifetime to `'static` is sound:
+        // `read_async` internally returns a `DynFut` that moves all owned
+        // data into its state machine and holds Arc-shared device refs,
+        // so no actual borrow of `self.client` outlives this call.
+        let handle = self.outputs[slot].clone();
+        let read_future: Pin<Box<dyn Future<Output = Result<Vec<Bytes>, ServerError>> + Send + '_>> =
+            Box::pin(self.client.read_async(vec![handle]));
+        let fut: ReadFuture = unsafe {
+            std::mem::transmute::<
+                Pin<Box<dyn Future<Output = Result<Vec<Bytes>, ServerError>> + Send + '_>>,
+                ReadFuture,
+            >(read_future)
+        };
+
+        let pixels = (self.width * self.height) as usize;
+        Ok(Some(Pending {
+            fut,
+            channels: self.params.channels.count(),
+            stored_ch: self.params.channels.storage_count(),
+            pixels,
+            _marker: PhantomData,
+        }))
+    }
+
+    /// Synchronous convenience wrapper: submits + immediately waits.
+    /// Prefer [`Self::denoise_submit`] when the caller can hold one frame
+    /// in flight, letting frame N+1's kernels overlap with frame N's
+    /// readback.
     ///
     /// Returns `Ok(None)` if not enough frames have been pushed yet.
     /// On success returns `Ok(Some(&[f32]))` borrowing a reusable
     /// internal buffer — copy it out (e.g. `to_vec()`) if you need to
     /// hold the data across another `denoise`/`flush`/`push_frame` call.
     pub fn denoise(&mut self) -> Result<Option<&[f32]>, anyhow::Error> {
-        let total_frames = self.params.total_frames() as usize;
-        if self.frames_loaded < total_frames {
+        let Some(pending) = self.denoise_submit()? else {
             return Ok(None);
-        }
-
-        self.run_denoise_kernels()?;
-
+        };
+        pending.wait_into(&mut self.output_scratch)?;
         Ok(Some(self.output_scratch.as_slice()))
     }
 
@@ -446,16 +626,20 @@ impl<R: Runtime> NlmDenoiser<R> {
                 self.duplicate_last_frame();
                 self.frames_loaded += 1;
             }
-            self.run_denoise_kernels()?;
-            sink(self.output_scratch.as_slice());
+            if let Some(pending) = self.denoise_submit()? {
+                pending.wait_into(&mut self.output_scratch)?;
+                sink(self.output_scratch.as_slice());
+            }
         }
 
         // Trailing `temporal_radius` frames with shrinking future context,
         // each padded by duplicating the most recent frame.
         for _ in 0..temporal_radius {
             self.duplicate_last_frame();
-            self.run_denoise_kernels()?;
-            sink(self.output_scratch.as_slice());
+            if let Some(pending) = self.denoise_submit()? {
+                pending.wait_into(&mut self.output_scratch)?;
+                sink(self.output_scratch.as_slice());
+            }
         }
 
         Ok(())
@@ -476,56 +660,52 @@ impl<R: Runtime> NlmDenoiser<R> {
         ((self.ring_start() as i32 + wrapped).rem_euclid(total_frames)) as u32
     }
 
-    fn input_arg(&self, ctx: &LaunchCtx) -> ArrayArg<'_, R> {
-        let stored_ch = self.params.channels.storage_count() as usize;
-        unsafe { ArrayArg::from_raw_parts::<f32>(&self.input_buf, ctx.total_frame_data, stored_ch) }
+    fn input_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
+        unsafe { ArrayArg::from_raw_parts(self.input_buf.clone(), ctx.total_frame_data) }
     }
 
-    fn reference_arg(&self, ctx: &LaunchCtx) -> ArrayArg<'_, R> {
-        let stored_ch = self.params.channels.storage_count() as usize;
+    fn reference_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
         let buf = self
             .reference_buf
             .as_ref()
             .expect("reference buffer must exist when use_reference is set");
-        unsafe { ArrayArg::from_raw_parts::<f32>(buf, ctx.total_frame_data, stored_ch) }
+        unsafe { ArrayArg::from_raw_parts(buf.clone(), ctx.total_frame_data) }
     }
 
-    fn accum_arg(&self, ctx: &LaunchCtx) -> ArrayArg<'_, R> {
-        let stored_ch = self.params.channels.storage_count() as usize;
-        unsafe { ArrayArg::from_raw_parts::<f32>(&self.accum, ctx.frame_size, stored_ch) }
+    fn accum_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
+        unsafe { ArrayArg::from_raw_parts(self.accum.clone(), ctx.frame_size) }
     }
 
-    fn output_arg(&self, ctx: &LaunchCtx) -> ArrayArg<'_, R> {
-        let stored_ch = self.params.channels.storage_count() as usize;
-        unsafe { ArrayArg::from_raw_parts::<f32>(&self.output, ctx.frame_size, stored_ch) }
+    fn output_arg(&self, ctx: &LaunchCtx, slot: usize) -> ArrayArg<R> {
+        unsafe { ArrayArg::from_raw_parts(self.outputs[slot].clone(), ctx.frame_size) }
     }
 
-    fn weight_sum_arg(&self, ctx: &LaunchCtx) -> ArrayArg<'_, R> {
-        unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_sum, ctx.pixels, 1) }
+    fn weight_sum_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
+        unsafe { ArrayArg::from_raw_parts(self.weight_sum.clone(), ctx.pixels) }
     }
 
-    fn max_weight_arg(&self, ctx: &LaunchCtx) -> ArrayArg<'_, R> {
-        unsafe { ArrayArg::from_raw_parts::<f32>(&self.max_weight, ctx.pixels, 1) }
+    fn max_weight_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
+        unsafe { ArrayArg::from_raw_parts(self.max_weight.clone(), ctx.pixels) }
     }
 
-    fn weight_buf_arg(&self, ctx: &LaunchCtx) -> ArrayArg<'_, R> {
-        unsafe { ArrayArg::from_raw_parts::<f32>(&self.weight_buf, ctx.pixels, 1) }
+    fn weight_buf_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
+        unsafe { ArrayArg::from_raw_parts(self.weight_buf.clone(), ctx.pixels) }
     }
 
-    fn raw_fwd_arg(&self, ctx: &LaunchCtx) -> ArrayArg<'_, R> {
-        unsafe { ArrayArg::from_raw_parts::<f32>(&self.raw_fwd, ctx.pixels, 1) }
+    fn raw_fwd_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
+        unsafe { ArrayArg::from_raw_parts(self.raw_fwd.clone(), ctx.pixels) }
     }
 
-    fn raw_bwd_arg(&self, ctx: &LaunchCtx) -> ArrayArg<'_, R> {
-        unsafe { ArrayArg::from_raw_parts::<f32>(&self.raw_bwd, ctx.pixels, 1) }
+    fn raw_bwd_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
+        unsafe { ArrayArg::from_raw_parts(self.raw_bwd.clone(), ctx.pixels) }
     }
 
-    fn tmp_hsum_arg(&self, ctx: &LaunchCtx) -> ArrayArg<'_, R> {
-        unsafe { ArrayArg::from_raw_parts::<f32>(&self.tmp_hsum, ctx.pixels, 1) }
+    fn tmp_hsum_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
+        unsafe { ArrayArg::from_raw_parts(self.tmp_hsum.clone(), ctx.pixels) }
     }
 
-    fn tmp_hsum_bwd_arg(&self, ctx: &LaunchCtx) -> ArrayArg<'_, R> {
-        unsafe { ArrayArg::from_raw_parts::<f32>(&self.tmp_hsum_bwd, ctx.pixels, 1) }
+    fn tmp_hsum_bwd_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
+        unsafe { ArrayArg::from_raw_parts(self.tmp_hsum_bwd.clone(), ctx.pixels) }
     }
 
     /// Temporal (k≠0) fused-path step: one launch that computes both
@@ -549,54 +729,60 @@ impl<R: Runtime> NlmDenoiser<R> {
         let (bwd_shift_x, bwd_shift_y) = if q_k == 0 { (q_x, q_y) } else { (-q_x, -q_y) };
 
         if self.use_reference {
-            nlm_fused_pair_accumulate_ref::launch::<R>(
-                &self.client,
-                ctx.cube_count.clone(),
-                ctx.cube_dim,
-                self.input_arg(ctx),
-                self.reference_arg(ctx),
-                self.accum_arg(ctx),
-                self.weight_sum_arg(ctx),
-                self.max_weight_arg(ctx),
-                ScalarArg::new(frame_t),
-                ScalarArg::new(frame_fwd),
-                ScalarArg::new(frame_bwd),
-                ScalarArg::new(q_x),
-                ScalarArg::new(q_y),
-                ScalarArg::new(bwd_shift_x),
-                ScalarArg::new(bwd_shift_y),
-                ScalarArg::new(self.h2_inv_norm),
-                self.width,
-                self.height,
-                channels,
-                self.params.patch_radius,
-                BLOCK_X,
-                BLOCK_Y,
-            )?;
+            unsafe {
+                nlm_fused_pair_accumulate_ref::launch_unchecked::<R>(
+                    &self.client,
+                    ctx.cube_count.clone(),
+                    ctx.cube_dim,
+                    self.params.channels.storage_count() as usize,
+                    self.input_arg(ctx),
+                    self.reference_arg(ctx),
+                    self.accum_arg(ctx),
+                    self.weight_sum_arg(ctx),
+                    self.max_weight_arg(ctx),
+                    frame_t,
+                    frame_fwd,
+                    frame_bwd,
+                    q_x,
+                    q_y,
+                    bwd_shift_x,
+                    bwd_shift_y,
+                    self.h2_inv_norm,
+                    self.width,
+                    self.height,
+                    channels,
+                    self.params.patch_radius,
+                    BLOCK_X,
+                    BLOCK_Y,
+                );
+            }
         } else {
-            nlm_fused_pair_accumulate::launch::<R>(
-                &self.client,
-                ctx.cube_count.clone(),
-                ctx.cube_dim,
-                self.input_arg(ctx),
-                self.accum_arg(ctx),
-                self.weight_sum_arg(ctx),
-                self.max_weight_arg(ctx),
-                ScalarArg::new(frame_t),
-                ScalarArg::new(frame_fwd),
-                ScalarArg::new(frame_bwd),
-                ScalarArg::new(q_x),
-                ScalarArg::new(q_y),
-                ScalarArg::new(bwd_shift_x),
-                ScalarArg::new(bwd_shift_y),
-                ScalarArg::new(self.h2_inv_norm),
-                self.width,
-                self.height,
-                channels,
-                self.params.patch_radius,
-                BLOCK_X,
-                BLOCK_Y,
-            )?;
+            unsafe {
+                nlm_fused_pair_accumulate::launch_unchecked::<R>(
+                    &self.client,
+                    ctx.cube_count.clone(),
+                    ctx.cube_dim,
+                    self.params.channels.storage_count() as usize,
+                    self.input_arg(ctx),
+                    self.accum_arg(ctx),
+                    self.weight_sum_arg(ctx),
+                    self.max_weight_arg(ctx),
+                    frame_t,
+                    frame_fwd,
+                    frame_bwd,
+                    q_x,
+                    q_y,
+                    bwd_shift_x,
+                    bwd_shift_y,
+                    self.h2_inv_norm,
+                    self.width,
+                    self.height,
+                    channels,
+                    self.params.patch_radius,
+                    BLOCK_X,
+                    BLOCK_Y,
+                );
+            }
         }
 
         Ok(())
@@ -613,56 +799,60 @@ impl<R: Runtime> NlmDenoiser<R> {
         q_k: i32,
     ) -> Result<(), anyhow::Error> {
         let channels = self.params.channels.count();
-        let stored = self.params.channels.storage_count();
+        let _stored = self.params.channels.storage_count();
         let frame_t = self.phys_frame(center_t as i32);
         let frame_fwd = self.phys_frame(center_t as i32 + q_k);
         let frame_bwd = self.phys_frame(center_t as i32 - q_k);
 
         if self.use_reference {
-            nlm_fused_pair_accumulate_window_ref::launch::<R>(
-                &self.client,
-                ctx.cube_count.clone(),
-                ctx.cube_dim,
-                self.input_arg(ctx),
-                self.reference_arg(ctx),
-                self.accum_arg(ctx),
-                self.weight_sum_arg(ctx),
-                self.max_weight_arg(ctx),
-                ScalarArg::new(frame_t),
-                ScalarArg::new(frame_fwd),
-                ScalarArg::new(frame_bwd),
-                ScalarArg::new(self.h2_inv_norm),
-                self.width,
-                self.height,
-                channels,
-                stored,
-                self.params.patch_radius,
-                self.params.search_radius,
-                BLOCK_X,
-                BLOCK_Y,
-            )?;
+            unsafe {
+                nlm_fused_pair_accumulate_window_ref::launch_unchecked::<R>(
+                    &self.client,
+                    ctx.cube_count.clone(),
+                    ctx.cube_dim,
+                    self.params.channels.storage_count() as usize,
+                    self.input_arg(ctx),
+                    self.reference_arg(ctx),
+                    self.accum_arg(ctx),
+                    self.weight_sum_arg(ctx),
+                    self.max_weight_arg(ctx),
+                    frame_t,
+                    frame_fwd,
+                    frame_bwd,
+                    self.h2_inv_norm,
+                    self.width,
+                    self.height,
+                    channels,
+                    self.params.patch_radius,
+                    self.params.search_radius,
+                    BLOCK_X,
+                    BLOCK_Y,
+                );
+            }
         } else {
-            nlm_fused_pair_accumulate_window::launch::<R>(
-                &self.client,
-                ctx.cube_count.clone(),
-                ctx.cube_dim,
-                self.input_arg(ctx),
-                self.accum_arg(ctx),
-                self.weight_sum_arg(ctx),
-                self.max_weight_arg(ctx),
-                ScalarArg::new(frame_t),
-                ScalarArg::new(frame_fwd),
-                ScalarArg::new(frame_bwd),
-                ScalarArg::new(self.h2_inv_norm),
-                self.width,
-                self.height,
-                channels,
-                stored,
-                self.params.patch_radius,
-                self.params.search_radius,
-                BLOCK_X,
-                BLOCK_Y,
-            )?;
+            unsafe {
+                nlm_fused_pair_accumulate_window::launch_unchecked::<R>(
+                    &self.client,
+                    ctx.cube_count.clone(),
+                    ctx.cube_dim,
+                    self.params.channels.storage_count() as usize,
+                    self.input_arg(ctx),
+                    self.accum_arg(ctx),
+                    self.weight_sum_arg(ctx),
+                    self.max_weight_arg(ctx),
+                    frame_t,
+                    frame_fwd,
+                    frame_bwd,
+                    self.h2_inv_norm,
+                    self.width,
+                    self.height,
+                    channels,
+                    self.params.patch_radius,
+                    self.params.search_radius,
+                    BLOCK_X,
+                    BLOCK_Y,
+                );
+            }
         }
 
         Ok(())
@@ -675,50 +865,54 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// applied per q.
     fn dispatch_fused_single_window_iter(&self, ctx: &LaunchCtx, center_t: u32) -> Result<(), anyhow::Error> {
         let channels = self.params.channels.count();
-        let stored = self.params.channels.storage_count();
+        let _stored = self.params.channels.storage_count();
         let frame_t = self.phys_frame(center_t as i32);
 
         if self.use_reference {
-            nlm_fused_single_window_ref::launch::<R>(
-                &self.client,
-                ctx.cube_count.clone(),
-                ctx.cube_dim,
-                self.input_arg(ctx),
-                self.reference_arg(ctx),
-                self.accum_arg(ctx),
-                self.weight_sum_arg(ctx),
-                self.max_weight_arg(ctx),
-                ScalarArg::new(frame_t),
-                ScalarArg::new(self.h2_inv_norm),
-                self.width,
-                self.height,
-                channels,
-                stored,
-                self.params.patch_radius,
-                self.params.search_radius,
-                BLOCK_X,
-                BLOCK_Y,
-            )?;
+            unsafe {
+                nlm_fused_single_window_ref::launch_unchecked::<R>(
+                    &self.client,
+                    ctx.cube_count.clone(),
+                    ctx.cube_dim,
+                    self.params.channels.storage_count() as usize,
+                    self.input_arg(ctx),
+                    self.reference_arg(ctx),
+                    self.accum_arg(ctx),
+                    self.weight_sum_arg(ctx),
+                    self.max_weight_arg(ctx),
+                    frame_t,
+                    self.h2_inv_norm,
+                    self.width,
+                    self.height,
+                    channels,
+                    self.params.patch_radius,
+                    self.params.search_radius,
+                    BLOCK_X,
+                    BLOCK_Y,
+                );
+            }
         } else {
-            nlm_fused_single_window::launch::<R>(
-                &self.client,
-                ctx.cube_count.clone(),
-                ctx.cube_dim,
-                self.input_arg(ctx),
-                self.accum_arg(ctx),
-                self.weight_sum_arg(ctx),
-                self.max_weight_arg(ctx),
-                ScalarArg::new(frame_t),
-                ScalarArg::new(self.h2_inv_norm),
-                self.width,
-                self.height,
-                channels,
-                stored,
-                self.params.patch_radius,
-                self.params.search_radius,
-                BLOCK_X,
-                BLOCK_Y,
-            )?;
+            unsafe {
+                nlm_fused_single_window::launch_unchecked::<R>(
+                    &self.client,
+                    ctx.cube_count.clone(),
+                    ctx.cube_dim,
+                    self.params.channels.storage_count() as usize,
+                    self.input_arg(ctx),
+                    self.accum_arg(ctx),
+                    self.weight_sum_arg(ctx),
+                    self.max_weight_arg(ctx),
+                    frame_t,
+                    self.h2_inv_norm,
+                    self.width,
+                    self.height,
+                    channels,
+                    self.params.patch_radius,
+                    self.params.search_radius,
+                    BLOCK_X,
+                    BLOCK_Y,
+                );
+            }
         }
 
         Ok(())
@@ -742,77 +936,88 @@ impl<R: Runtime> NlmDenoiser<R> {
         let frame_bwd = self.phys_frame(center_t as i32 - q_k);
 
         if self.use_reference {
-            nlm_distance_pair_ref::launch::<R>(
-                &self.client,
-                ctx.cube_count.clone(),
-                ctx.cube_dim,
-                self.reference_arg(ctx),
-                self.raw_fwd_arg(ctx),
-                self.raw_bwd_arg(ctx),
-                ScalarArg::new(frame_t),
-                ScalarArg::new(frame_fwd),
-                ScalarArg::new(frame_bwd),
-                ScalarArg::new(q_x),
-                ScalarArg::new(q_y),
-                self.width,
-                self.height,
-                channels,
-            )?;
+            unsafe {
+                nlm_distance_pair_ref::launch_unchecked::<R>(
+                    &self.client,
+                    ctx.cube_count.clone(),
+                    ctx.cube_dim,
+                    self.params.channels.storage_count() as usize,
+                    self.reference_arg(ctx),
+                    self.raw_fwd_arg(ctx),
+                    self.raw_bwd_arg(ctx),
+                    frame_t,
+                    frame_fwd,
+                    frame_bwd,
+                    q_x,
+                    q_y,
+                    self.width,
+                    self.height,
+                    channels,
+                );
+            }
         } else {
-            nlm_distance_pair::launch::<R>(
-                &self.client,
-                ctx.cube_count.clone(),
-                ctx.cube_dim,
-                self.input_arg(ctx),
-                self.raw_fwd_arg(ctx),
-                self.raw_bwd_arg(ctx),
-                ScalarArg::new(frame_t),
-                ScalarArg::new(frame_fwd),
-                ScalarArg::new(frame_bwd),
-                ScalarArg::new(q_x),
-                ScalarArg::new(q_y),
-                self.width,
-                self.height,
-                channels,
-            )?;
+            unsafe {
+                nlm_distance_pair::launch_unchecked::<R>(
+                    &self.client,
+                    ctx.cube_count.clone(),
+                    ctx.cube_dim,
+                    self.params.channels.storage_count() as usize,
+                    self.input_arg(ctx),
+                    self.raw_fwd_arg(ctx),
+                    self.raw_bwd_arg(ctx),
+                    frame_t,
+                    frame_fwd,
+                    frame_bwd,
+                    q_x,
+                    q_y,
+                    self.width,
+                    self.height,
+                    channels,
+                );
+            }
         }
 
-        nlm_horizontal_sum_pair::launch::<R>(
-            &self.client,
-            ctx.cube_count.clone(),
-            ctx.cube_dim,
-            self.raw_fwd_arg(ctx),
-            self.raw_bwd_arg(ctx),
-            self.tmp_hsum_arg(ctx),
-            self.tmp_hsum_bwd_arg(ctx),
-            self.width,
-            self.height,
-            self.params.patch_radius,
-            BLOCK_X,
-            BLOCK_Y,
-        )?;
+        unsafe {
+            nlm_horizontal_sum_pair::launch_unchecked::<R>(
+                &self.client,
+                ctx.cube_count.clone(),
+                ctx.cube_dim,
+                self.raw_fwd_arg(ctx),
+                self.raw_bwd_arg(ctx),
+                self.tmp_hsum_arg(ctx),
+                self.tmp_hsum_bwd_arg(ctx),
+                self.width,
+                self.height,
+                self.params.patch_radius,
+                BLOCK_X,
+                BLOCK_Y,
+            );
+        }
 
-        nlm_vweight_pair_accumulate::launch::<R>(
-            &self.client,
-            ctx.cube_count.clone(),
-            ctx.cube_dim,
-            self.tmp_hsum_arg(ctx),
-            self.tmp_hsum_bwd_arg(ctx),
-            self.input_arg(ctx),
-            self.accum_arg(ctx),
-            self.weight_sum_arg(ctx),
-            self.max_weight_arg(ctx),
-            ScalarArg::new(frame_fwd),
-            ScalarArg::new(frame_bwd),
-            ScalarArg::new(q_x),
-            ScalarArg::new(q_y),
-            ScalarArg::new(self.h2_inv_norm),
-            self.width,
-            self.height,
-            self.params.patch_radius,
-            BLOCK_X,
-            BLOCK_Y,
-        )?;
+        unsafe {
+            nlm_vweight_pair_accumulate::launch_unchecked::<R>(
+                &self.client,
+                ctx.cube_count.clone(),
+                ctx.cube_dim,
+                self.params.channels.storage_count() as usize,
+                self.tmp_hsum_arg(ctx),
+                self.tmp_hsum_bwd_arg(ctx),
+                self.input_arg(ctx),
+                self.accum_arg(ctx),
+                self.weight_sum_arg(ctx),
+                self.max_weight_arg(ctx),
+                frame_fwd,
+                frame_bwd,
+                q_x,
+                q_y,
+                self.h2_inv_norm,
+                self.width,
+                self.height,
+                self.params.patch_radius,
+                BLOCK_X,
+                BLOCK_Y,
+            );
+        }
 
         Ok(())
     }
@@ -831,62 +1036,71 @@ impl<R: Runtime> NlmDenoiser<R> {
         let frame_t = self.phys_frame(center_t as i32);
 
         if self.use_reference {
-            nlm_dist_2d_weight_ref::launch::<R>(
-                &self.client,
-                ctx.cube_count.clone(),
-                ctx.cube_dim,
-                self.reference_arg(ctx),
-                self.weight_buf_arg(ctx),
-                ScalarArg::new(frame_t),
-                ScalarArg::new(frame_t),
-                ScalarArg::new(q_x),
-                ScalarArg::new(q_y),
-                ScalarArg::new(self.h2_inv_norm),
-                self.width,
-                self.height,
-                channels,
-                self.params.patch_radius,
-                BLOCK_X,
-                BLOCK_Y,
-            )?;
+            unsafe {
+                nlm_dist_2d_weight_ref::launch_unchecked::<R>(
+                    &self.client,
+                    ctx.cube_count.clone(),
+                    ctx.cube_dim,
+                    self.params.channels.storage_count() as usize,
+                    self.reference_arg(ctx),
+                    self.weight_buf_arg(ctx),
+                    frame_t,
+                    frame_t,
+                    q_x,
+                    q_y,
+                    self.h2_inv_norm,
+                    self.width,
+                    self.height,
+                    channels,
+                    self.params.patch_radius,
+                    BLOCK_X,
+                    BLOCK_Y,
+                );
+            }
         } else {
-            nlm_dist_2d_weight::launch::<R>(
-                &self.client,
-                ctx.cube_count.clone(),
-                ctx.cube_dim,
-                self.input_arg(ctx),
-                self.weight_buf_arg(ctx),
-                ScalarArg::new(frame_t),
-                ScalarArg::new(frame_t),
-                ScalarArg::new(q_x),
-                ScalarArg::new(q_y),
-                ScalarArg::new(self.h2_inv_norm),
-                self.width,
-                self.height,
-                channels,
-                self.params.patch_radius,
-                BLOCK_X,
-                BLOCK_Y,
-            )?;
+            unsafe {
+                nlm_dist_2d_weight::launch_unchecked::<R>(
+                    &self.client,
+                    ctx.cube_count.clone(),
+                    ctx.cube_dim,
+                    self.params.channels.storage_count() as usize,
+                    self.input_arg(ctx),
+                    self.weight_buf_arg(ctx),
+                    frame_t,
+                    frame_t,
+                    q_x,
+                    q_y,
+                    self.h2_inv_norm,
+                    self.width,
+                    self.height,
+                    channels,
+                    self.params.patch_radius,
+                    BLOCK_X,
+                    BLOCK_Y,
+                );
+            }
         }
 
-        nlm_accumulate::launch::<R>(
-            &self.client,
-            ctx.thin_cube_count.clone(),
-            ctx.thin_cube_dim,
-            self.input_arg(ctx),
-            self.accum_arg(ctx),
-            self.weight_sum_arg(ctx),
-            self.weight_buf_arg(ctx),
-            self.weight_buf_arg(ctx),
-            self.max_weight_arg(ctx),
-            ScalarArg::new(frame_t),
-            ScalarArg::new(frame_t),
-            ScalarArg::new(q_x),
-            ScalarArg::new(q_y),
-            self.width,
-            self.height,
-        )?;
+        unsafe {
+            nlm_accumulate::launch_unchecked::<R>(
+                &self.client,
+                ctx.thin_cube_count.clone(),
+                ctx.thin_cube_dim,
+                self.params.channels.storage_count() as usize,
+                self.input_arg(ctx),
+                self.accum_arg(ctx),
+                self.weight_sum_arg(ctx),
+                self.weight_buf_arg(ctx),
+                self.weight_buf_arg(ctx),
+                self.max_weight_arg(ctx),
+                frame_t,
+                frame_t,
+                q_x,
+                q_y,
+                self.width,
+                self.height,
+            );
+        }
 
         Ok(())
     }
@@ -905,81 +1119,94 @@ impl<R: Runtime> NlmDenoiser<R> {
         let frame_t = self.phys_frame(center_t as i32);
 
         if self.use_reference {
-            nlm_distance_ref::launch::<R>(
-                &self.client,
-                ctx.cube_count.clone(),
-                ctx.cube_dim,
-                self.reference_arg(ctx),
-                self.raw_fwd_arg(ctx),
-                ScalarArg::new(frame_t),
-                ScalarArg::new(frame_t),
-                ScalarArg::new(q_x),
-                ScalarArg::new(q_y),
-                self.width,
-                self.height,
-                channels,
-            )?;
+            unsafe {
+                nlm_distance_ref::launch_unchecked::<R>(
+                    &self.client,
+                    ctx.cube_count.clone(),
+                    ctx.cube_dim,
+                    self.params.channels.storage_count() as usize,
+                    self.reference_arg(ctx),
+                    self.raw_fwd_arg(ctx),
+                    frame_t,
+                    frame_t,
+                    q_x,
+                    q_y,
+                    self.width,
+                    self.height,
+                    channels,
+                );
+            }
         } else {
-            nlm_distance::launch::<R>(
-                &self.client,
-                ctx.cube_count.clone(),
-                ctx.cube_dim,
-                self.input_arg(ctx),
-                self.raw_fwd_arg(ctx),
-                ScalarArg::new(frame_t),
-                ScalarArg::new(frame_t),
-                ScalarArg::new(q_x),
-                ScalarArg::new(q_y),
-                self.width,
-                self.height,
-                channels,
-            )?;
+            unsafe {
+                nlm_distance::launch_unchecked::<R>(
+                    &self.client,
+                    ctx.cube_count.clone(),
+                    ctx.cube_dim,
+                    self.params.channels.storage_count() as usize,
+                    self.input_arg(ctx),
+                    self.raw_fwd_arg(ctx),
+                    frame_t,
+                    frame_t,
+                    q_x,
+                    q_y,
+                    self.width,
+                    self.height,
+                    channels,
+                );
+            }
         }
 
-        nlm_horizontal_sum::launch::<R>(
-            &self.client,
-            ctx.cube_count.clone(),
-            ctx.cube_dim,
-            self.raw_fwd_arg(ctx),
-            self.tmp_hsum_arg(ctx),
-            self.width,
-            self.height,
-            self.params.patch_radius,
-            BLOCK_X,
-            BLOCK_Y,
-        )?;
+        unsafe {
+            nlm_horizontal_sum::launch_unchecked::<R>(
+                &self.client,
+                ctx.cube_count.clone(),
+                ctx.cube_dim,
+                self.raw_fwd_arg(ctx),
+                self.tmp_hsum_arg(ctx),
+                self.width,
+                self.height,
+                self.params.patch_radius,
+                BLOCK_X,
+                BLOCK_Y,
+            );
+        }
 
-        nlm_vertical_weight::launch::<R>(
-            &self.client,
-            ctx.cube_count.clone(),
-            ctx.cube_dim,
-            self.tmp_hsum_arg(ctx),
-            self.weight_buf_arg(ctx),
-            ScalarArg::new(self.h2_inv_norm),
-            self.width,
-            self.height,
-            self.params.patch_radius,
-            BLOCK_X,
-            BLOCK_Y,
-        )?;
+        unsafe {
+            nlm_vertical_weight::launch_unchecked::<R>(
+                &self.client,
+                ctx.cube_count.clone(),
+                ctx.cube_dim,
+                self.tmp_hsum_arg(ctx),
+                self.weight_buf_arg(ctx),
+                self.h2_inv_norm,
+                self.width,
+                self.height,
+                self.params.patch_radius,
+                BLOCK_X,
+                BLOCK_Y,
+            );
+        }
 
-        nlm_accumulate::launch::<R>(
-            &self.client,
-            ctx.thin_cube_count.clone(),
-            ctx.thin_cube_dim,
-            self.input_arg(ctx),
-            self.accum_arg(ctx),
-            self.weight_sum_arg(ctx),
-            self.weight_buf_arg(ctx),
-            self.weight_buf_arg(ctx),
-            self.max_weight_arg(ctx),
-            ScalarArg::new(frame_t),
-            ScalarArg::new(frame_t),
-            ScalarArg::new(q_x),
-            ScalarArg::new(q_y),
-            self.width,
-            self.height,
-        )?;
+        unsafe {
+            nlm_accumulate::launch_unchecked::<R>(
+                &self.client,
+                ctx.thin_cube_count.clone(),
+                ctx.thin_cube_dim,
+                self.params.channels.storage_count() as usize,
+                self.input_arg(ctx),
+                self.accum_arg(ctx),
+                self.weight_sum_arg(ctx),
+                self.weight_buf_arg(ctx),
+                self.weight_buf_arg(ctx),
+                self.max_weight_arg(ctx),
+                frame_t,
+                frame_t,
+                q_x,
+                q_y,
+                self.width,
+                self.height,
+            );
+        }
 
         Ok(())
     }
@@ -987,70 +1214,48 @@ impl<R: Runtime> NlmDenoiser<R> {
     fn zero_accumulators(&self, ctx: &LaunchCtx) -> Result<(), anyhow::Error> {
         let grid = (ctx.frame_size as u32).div_ceil(BLOCK_1D).min(MAX_GRID_1D);
         let total_threads = grid * BLOCK_1D;
-        gpu_zero_buffers::launch::<R>(
-            &self.client,
-            CubeCount::new_1d(grid),
-            CubeDim::new_1d(BLOCK_1D),
-            unsafe { ArrayArg::from_raw_parts::<f32>(&self.accum, ctx.frame_size, 1) },
-            self.weight_sum_arg(ctx),
-            self.max_weight_arg(ctx),
-            ctx.frame_size as u32,
-            ctx.pixels as u32,
-            total_threads,
-        )?;
-
-        Ok(())
-    }
-
-    fn run_finish(&self, ctx: &LaunchCtx, center_t: u32) -> Result<(), anyhow::Error> {
-        let channels = self.params.channels.count();
-        nlm_finish::launch::<R>(
-            &self.client,
-            ctx.cube_count.clone(),
-            ctx.cube_dim,
-            self.input_arg(ctx),
-            self.output_arg(ctx),
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(
-                    &self.accum,
-                    ctx.frame_size,
-                    self.params.channels.storage_count() as usize,
-                )
-            },
-            self.weight_sum_arg(ctx),
-            self.max_weight_arg(ctx),
-            ScalarArg::new(self.phys_frame(center_t as i32)),
-            ScalarArg::new(self.params.self_weight),
-            self.width,
-            self.height,
-            channels,
-        )?;
-
-        Ok(())
-    }
-
-    fn read_output_into_scratch(&mut self, pixels: usize) {
-        let channels = self.params.channels.count() as usize;
-        let stored_ch = self.params.channels.storage_count() as usize;
-        let bytes = self.client.read_one(self.output.clone());
-        let data = f32::from_bytes(&bytes);
-
-        let out = &mut self.output_scratch;
-        out.clear();
-        if channels == stored_ch {
-            out.extend_from_slice(data);
-        } else {
-            // Strip the padding lane (YUV: 4 stored → 3 logical) row by
-            // row into the contiguous output Vec.
-            out.reserve(pixels * channels);
-            for pixel in 0..pixels {
-                let src = pixel * stored_ch;
-                out.extend_from_slice(&data[src..src + channels]);
-            }
+        unsafe {
+            gpu_zero_buffers::launch_unchecked::<R>(
+                &self.client,
+                CubeCount::new_1d(grid),
+                CubeDim::new_1d(BLOCK_1D),
+                ArrayArg::from_raw_parts(self.accum.clone(), ctx.frame_size),
+                self.weight_sum_arg(ctx),
+                self.max_weight_arg(ctx),
+                ctx.frame_size as u32,
+                ctx.pixels as u32,
+                total_threads,
+            );
         }
+
+        Ok(())
     }
 
-    fn run_denoise_kernels(&mut self) -> Result<(), anyhow::Error> {
+    fn run_finish(&self, ctx: &LaunchCtx, center_t: u32, output_slot: usize) -> Result<(), anyhow::Error> {
+        let channels = self.params.channels.count();
+        unsafe {
+            nlm_finish::launch_unchecked::<R>(
+                &self.client,
+                ctx.cube_count.clone(),
+                ctx.cube_dim,
+                self.params.channels.storage_count() as usize,
+                self.input_arg(ctx),
+                self.output_arg(ctx, output_slot),
+                ArrayArg::from_raw_parts(self.accum.clone(), ctx.frame_size),
+                self.weight_sum_arg(ctx),
+                self.max_weight_arg(ctx),
+                self.phys_frame(center_t as i32),
+                self.params.self_weight,
+                self.width,
+                self.height,
+                channels,
+            );
+        }
+
+        Ok(())
+    }
+
+    fn run_denoise_kernels(&mut self, output_slot: usize) -> Result<(), anyhow::Error> {
         let width = self.width;
         let height = self.height;
         let stored_ch = self.params.channels.storage_count();
@@ -1118,8 +1323,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             }
         }
 
-        self.run_finish(&ctx, center_t)?;
-        self.read_output_into_scratch(pixels);
+        self.run_finish(&ctx, center_t, output_slot)?;
 
         Ok(())
     }

@@ -16,7 +16,6 @@ use super::{
     cube_dim_2d,
     h2_inv_norm,
     make_padded_frame,
-    map_err,
     shapes_with_ch,
     stored_channels,
 };
@@ -63,31 +62,34 @@ impl<R: Runtime> Benchmark for FusedPairRefBench<R> {
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let pixels = (W * H) as usize;
         let stored = stored_channels(self.ch) as usize;
-        nlm_fused_pair_accumulate_ref::launch::<R>(
-            &self.client,
-            cube_count_2d(),
-            cube_dim_2d(),
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.input, args.frame_len, stored) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.reference, args.frame_len, stored) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.accum, pixels * stored, stored) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.weight_sum, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.max_weight, pixels, 1) },
-            ScalarArg::new(0u32),
-            ScalarArg::new(0u32),
-            ScalarArg::new(0u32),
-            ScalarArg::new(Q_X),
-            ScalarArg::new(Q_Y),
-            ScalarArg::new(-Q_X),
-            ScalarArg::new(-Q_Y),
-            ScalarArg::new(h2_inv_norm()),
-            W,
-            H,
-            self.ch,
-            PATCH_RADIUS,
-            BLOCK_X,
-            BLOCK_Y,
-        )
-        .map_err(map_err)
+        unsafe {
+            nlm_fused_pair_accumulate_ref::launch_unchecked::<R>(
+                &self.client,
+                cube_count_2d(),
+                cube_dim_2d(),
+                stored,
+                ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
+                ArrayArg::from_raw_parts(args.reference.clone(), args.frame_len),
+                ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored),
+                ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels),
+                ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
+                0u32,
+                0u32,
+                0u32,
+                Q_X,
+                Q_Y,
+                -Q_X,
+                -Q_Y,
+                h2_inv_norm(),
+                W,
+                H,
+                self.ch,
+                PATCH_RADIUS,
+                BLOCK_X,
+                BLOCK_Y,
+            );
+        }
+        Ok(())
     }
 
     fn name(&self) -> String {
