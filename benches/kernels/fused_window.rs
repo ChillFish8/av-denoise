@@ -79,8 +79,6 @@ fn prepare_window_ref<R: Runtime>(client: &ComputeClient<R>, ch: u32) -> WindowR
     }
 }
 
-// ---- nlm_fused_pair_accumulate_window (temporal k≠0 windowed) ----
-
 pub struct FusedPairWindowBench<R: Runtime> {
     pub client: ComputeClient<R>,
     pub ch: u32,
@@ -135,8 +133,6 @@ impl<R: Runtime> Benchmark for FusedPairWindowBench<R> {
     }
 }
 
-// ---- nlm_fused_single_window (spatial k=0 windowed) ----
-
 pub struct FusedSingleWindowBench<R: Runtime> {
     pub client: ComputeClient<R>,
     pub ch: u32,
@@ -188,8 +184,6 @@ impl<R: Runtime> Benchmark for FusedSingleWindowBench<R> {
         shapes_with_ch(self.ch)
     }
 }
-
-// ---- nlm_fused_pair_accumulate_window_ref ----
 
 pub struct FusedPairWindowRefBench<R: Runtime> {
     pub client: ComputeClient<R>,
@@ -245,8 +239,6 @@ impl<R: Runtime> Benchmark for FusedPairWindowRefBench<R> {
         shapes_with_ch(self.ch)
     }
 }
-
-// ---- nlm_fused_single_window_ref ----
 
 pub struct FusedSingleWindowRefBench<R: Runtime> {
     pub client: ComputeClient<R>,

@@ -342,6 +342,65 @@ fn build_backend(
     }
 }
 
+#[cfg(test)]
+mod options_tests {
+    use super::*;
+
+    #[test]
+    fn spatial_mode_maps_to_zero_temporal_radius() {
+        let opts = DenoiserOptions::builder()
+            .channel_mode(ChannelMode::Yuv)
+            .mode(DenoisingMode::Spacial)
+            .build();
+        let params = opts.to_nlm_params();
+
+        assert_eq!(params.temporal_radius, 0);
+        assert_eq!(params.channels, ChannelMode::Yuv);
+    }
+
+    #[test]
+    fn temporal_mode_propagates_radius() {
+        let opts = DenoiserOptions::builder()
+            .mode(DenoisingMode::Temporal { radius: 3 })
+            .build();
+        let params = opts.to_nlm_params();
+
+        assert_eq!(params.temporal_radius, 3);
+    }
+
+    #[test]
+    fn prefilter_passthrough() {
+        let opts = DenoiserOptions::builder()
+            .prefilter(PrefilterMode::Bilateral {
+                sigma_s: 3.0,
+                sigma_r: 0.02,
+            })
+            .build();
+        let params = opts.to_nlm_params();
+
+        assert!(matches!(params.prefilter, PrefilterMode::Bilateral { .. }));
+    }
+
+    #[test]
+    fn nlm_tuning_overrides_individual_fields() {
+        let defaults = NlmParams::default();
+        let opts = DenoiserOptions::builder()
+            .nlm(NlmTuning {
+                search_radius: Some(7),
+                patch_radius: None,
+                strength: Some(2.5),
+                self_weight: None,
+            })
+            .build();
+        let params = opts.to_nlm_params();
+
+        assert_eq!(params.search_radius, 7);
+        assert_eq!(params.patch_radius, defaults.patch_radius);
+        assert!((params.strength - 2.5).abs() < f32::EPSILON);
+        assert!((params.self_weight - defaults.self_weight).abs() < f32::EPSILON);
+    }
+}
+
 #[cfg(all(test, feature = "cpu"))]
 mod tests {
     use super::*;

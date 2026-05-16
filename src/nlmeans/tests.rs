@@ -45,8 +45,6 @@ fn make_frame_with_noisy_region(
     frame
 }
 
-// ==================== Single-frame (spatial) tests ====================
-
 #[test]
 fn uniform_image_passthrough() {
     let client = make_client();
@@ -276,8 +274,6 @@ fn spatial_only_no_delay() {
     assert!(result.is_some(), "d=0 should not delay output");
 }
 
-// ==================== Temporal tests ====================
-
 #[test]
 fn temporal_requires_full_window() {
     let client = make_client();
@@ -452,8 +448,6 @@ fn flush_produces_remaining_frames() {
     }
 }
 
-// ==================== Symmetry and edge tests ====================
-
 #[test]
 fn symmetry_preserved() {
     let client = make_client();
@@ -534,8 +528,6 @@ fn clamp_to_edge_no_darkening() {
     );
 }
 
-// ==================== Normalization tests ====================
-
 #[test]
 fn normalization_u8_roundtrip() {
     let original: Vec<u8> = (0..=255).collect();
@@ -554,9 +546,8 @@ fn normalization_u16_roundtrip() {
     assert_eq!(original, restored);
 }
 
-// ==================== Separable filter tests ====================
-// These use patch_radius > SEPARABLE_THRESHOLD to trigger the separable path.
-
+/// The following tests use `patch_radius > SEPARABLE_THRESHOLD` to trigger
+/// the separable path.
 #[test]
 fn separable_uniform_passthrough() {
     let client = make_client();

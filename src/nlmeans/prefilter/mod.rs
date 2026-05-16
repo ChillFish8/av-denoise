@@ -69,3 +69,39 @@ pub(crate) fn run_prefilter<R: Runtime>(
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn none_requires_no_reference_buffer() {
+        assert!(!PrefilterMode::None.needs_reference_buf());
+        assert!(!PrefilterMode::None.is_gpu_internal());
+    }
+
+    #[test]
+    fn external_needs_buffer_but_not_gpu() {
+        assert!(PrefilterMode::External.needs_reference_buf());
+        assert!(!PrefilterMode::External.is_gpu_internal());
+    }
+
+    #[test]
+    fn bilateral_is_gpu_internal() {
+        let m = PrefilterMode::Bilateral {
+            sigma_s: 3.0,
+            sigma_r: 0.02,
+        };
+
+        assert!(m.needs_reference_buf());
+        assert!(m.is_gpu_internal());
+    }
+
+    #[test]
+    fn bilateral_radius_truncates_at_two_sigma() {
+        assert_eq!(bilateral_radius(0.1), 1);
+        assert_eq!(bilateral_radius(1.0), 2);
+        assert_eq!(bilateral_radius(3.0), 6);
+        assert_eq!(bilateral_radius(3.5), 7);
+    }
+}
