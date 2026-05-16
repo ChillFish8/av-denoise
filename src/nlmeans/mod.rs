@@ -670,11 +670,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// symmetry of the patch distance (`w(x, −q) = w(x−q, q)`) so the
     /// full-window single-direction sum equals the half-window paired sum
     /// applied per q.
-    fn dispatch_fused_single_window_iter(
-        &self,
-        ctx: &LaunchCtx,
-        center_t: u32,
-    ) -> Result<(), anyhow::Error> {
+    fn dispatch_fused_single_window_iter(&self, ctx: &LaunchCtx, center_t: u32) -> Result<(), anyhow::Error> {
         let channels = self.params.channels.count();
         let stored = self.params.channels.storage_count();
         let frame_t = self.phys_frame(center_t as i32);
@@ -1061,10 +1057,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             pixels,
             cube_count: CubeCount::new_2d(width.div_ceil(BLOCK_X), height.div_ceil(BLOCK_Y)),
             cube_dim: CubeDim::new_2d(BLOCK_X, BLOCK_Y),
-            thin_cube_count: CubeCount::new_2d(
-                width.div_ceil(BLOCK_X_THIN),
-                height.div_ceil(BLOCK_Y_THIN),
-            ),
+            thin_cube_count: CubeCount::new_2d(width.div_ceil(BLOCK_X_THIN), height.div_ceil(BLOCK_Y_THIN)),
             thin_cube_dim: CubeDim::new_2d(BLOCK_X_THIN, BLOCK_Y_THIN),
         };
 

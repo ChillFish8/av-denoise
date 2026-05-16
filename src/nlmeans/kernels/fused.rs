@@ -608,11 +608,9 @@ pub fn nlm_fused_pair_accumulate_window(
     let tile_elems = comptime!((block_x + 2 * patch_radius) * (block_y + 2 * patch_radius));
     let expanded_width = comptime!(block_x + 2 * patch_radius + 2 * search_radius);
     let expanded_elems = comptime!(
-        (block_x + 2 * patch_radius + 2 * search_radius)
-            * (block_y + 2 * patch_radius + 2 * search_radius)
+        (block_x + 2 * patch_radius + 2 * search_radius) * (block_y + 2 * patch_radius + 2 * search_radius)
     );
-    let mut smem_center =
-        SharedMemory::<f32>::new_lined(expanded_elems as usize, stored as usize);
+    let mut smem_center = SharedMemory::<f32>::new_lined(expanded_elems as usize, stored as usize);
     let mut smem_fwd = SharedMemory::<f32>::new(tile_elems as usize);
     let mut smem_bwd = SharedMemory::<f32>::new(tile_elems as usize);
 
@@ -664,8 +662,8 @@ pub fn nlm_fused_pair_accumulate_window(
 
                 // fwd center sits at (tile_x + search_radius, tile_y + search_radius)
                 // in expanded-tile coordinates.
-                let fwd_center_idx = ((tile_y + search_radius) * expanded_width
-                    + (tile_x + search_radius)) as usize;
+                let fwd_center_idx =
+                    ((tile_y + search_radius) * expanded_width + (tile_x + search_radius)) as usize;
                 let fwd_center = smem_center[fwd_center_idx];
                 let fwd_neighbor = read_clamped_line(
                     input,
@@ -788,11 +786,9 @@ pub fn nlm_fused_single_window(
     let tile_elems = comptime!((block_x + 2 * patch_radius) * (block_y + 2 * patch_radius));
     let expanded_width = comptime!(block_x + 2 * patch_radius + 2 * search_radius);
     let expanded_elems = comptime!(
-        (block_x + 2 * patch_radius + 2 * search_radius)
-            * (block_y + 2 * patch_radius + 2 * search_radius)
+        (block_x + 2 * patch_radius + 2 * search_radius) * (block_y + 2 * patch_radius + 2 * search_radius)
     );
-    let mut smem_center =
-        SharedMemory::<f32>::new_lined(expanded_elems as usize, stored as usize);
+    let mut smem_center = SharedMemory::<f32>::new_lined(expanded_elems as usize, stored as usize);
     let mut smem_dist = SharedMemory::<f32>::new(tile_elems as usize);
 
     let local_x = UNIT_POS_X;
@@ -841,8 +837,8 @@ pub fn nlm_fused_single_window(
                 while tidx < tile_elems {
                     let tile_x = tidx % tile_width;
                     let tile_y = tidx / tile_width;
-                    let center_idx = ((tile_y + search_radius) * expanded_width
-                        + (tile_x + search_radius)) as usize;
+                    let center_idx =
+                        ((tile_y + search_radius) * expanded_width + (tile_x + search_radius)) as usize;
                     let center = smem_center[center_idx];
                     let neighbor = read_clamped_line(
                         input,
@@ -852,8 +848,7 @@ pub fn nlm_fused_single_window(
                         width,
                         height,
                     );
-                    smem_dist[tidx as usize] =
-                        line_sum_sq(center - neighbor, channels) * scale;
+                    smem_dist[tidx as usize] = line_sum_sq(center - neighbor, channels) * scale;
                     tidx += threads;
                 }
                 sync_cube();
@@ -865,12 +860,10 @@ pub fn nlm_fused_single_window(
                     let mut patch_sum = 0.0f32;
                     for offset_y in 0..patch_size {
                         for offset_x in 0..patch_size {
-                            let smem_idx = ((center_tile_y - patch_radius + offset_y)
-                                * tile_width
+                            let smem_idx = ((center_tile_y - patch_radius + offset_y) * tile_width
                                 + center_tile_x
                                 - patch_radius
-                                + offset_x)
-                                as usize;
+                                + offset_x) as usize;
                             patch_sum += smem_dist[smem_idx];
                         }
                     }
@@ -934,11 +927,9 @@ pub fn nlm_fused_pair_accumulate_window_ref(
     let tile_elems = comptime!((block_x + 2 * patch_radius) * (block_y + 2 * patch_radius));
     let expanded_width = comptime!(block_x + 2 * patch_radius + 2 * search_radius);
     let expanded_elems = comptime!(
-        (block_x + 2 * patch_radius + 2 * search_radius)
-            * (block_y + 2 * patch_radius + 2 * search_radius)
+        (block_x + 2 * patch_radius + 2 * search_radius) * (block_y + 2 * patch_radius + 2 * search_radius)
     );
-    let mut smem_center =
-        SharedMemory::<f32>::new_lined(expanded_elems as usize, stored as usize);
+    let mut smem_center = SharedMemory::<f32>::new_lined(expanded_elems as usize, stored as usize);
     let mut smem_fwd = SharedMemory::<f32>::new(tile_elems as usize);
     let mut smem_bwd = SharedMemory::<f32>::new(tile_elems as usize);
 
@@ -964,8 +955,7 @@ pub fn nlm_fused_pair_accumulate_window_ref(
         let ey = idx / expanded_width;
         let src_x = expanded_x0 + ex as i32;
         let src_y = expanded_y0 + ey as i32;
-        smem_center[idx as usize] =
-            read_clamped_line(reference, src_x, src_y, frame_t, width, height);
+        smem_center[idx as usize] = read_clamped_line(reference, src_x, src_y, frame_t, width, height);
         idx += threads;
     }
     sync_cube();
@@ -988,8 +978,8 @@ pub fn nlm_fused_pair_accumulate_window_ref(
                 let tile_x = idx % tile_width;
                 let tile_y = idx / tile_width;
 
-                let fwd_center_idx = ((tile_y + search_radius) * expanded_width
-                    + (tile_x + search_radius)) as usize;
+                let fwd_center_idx =
+                    ((tile_y + search_radius) * expanded_width + (tile_x + search_radius)) as usize;
                 let fwd_center = smem_center[fwd_center_idx];
                 let fwd_neighbor = read_clamped_line(
                     reference,
@@ -1102,11 +1092,9 @@ pub fn nlm_fused_single_window_ref(
     let tile_elems = comptime!((block_x + 2 * patch_radius) * (block_y + 2 * patch_radius));
     let expanded_width = comptime!(block_x + 2 * patch_radius + 2 * search_radius);
     let expanded_elems = comptime!(
-        (block_x + 2 * patch_radius + 2 * search_radius)
-            * (block_y + 2 * patch_radius + 2 * search_radius)
+        (block_x + 2 * patch_radius + 2 * search_radius) * (block_y + 2 * patch_radius + 2 * search_radius)
     );
-    let mut smem_center =
-        SharedMemory::<f32>::new_lined(expanded_elems as usize, stored as usize);
+    let mut smem_center = SharedMemory::<f32>::new_lined(expanded_elems as usize, stored as usize);
     let mut smem_dist = SharedMemory::<f32>::new(tile_elems as usize);
 
     let local_x = UNIT_POS_X;
@@ -1130,8 +1118,7 @@ pub fn nlm_fused_single_window_ref(
         let ey = idx / expanded_width;
         let src_x = expanded_x0 + ex as i32;
         let src_y = expanded_y0 + ey as i32;
-        smem_center[idx as usize] =
-            read_clamped_line(reference, src_x, src_y, frame_t, width, height);
+        smem_center[idx as usize] = read_clamped_line(reference, src_x, src_y, frame_t, width, height);
         idx += threads;
     }
     sync_cube();
@@ -1154,8 +1141,8 @@ pub fn nlm_fused_single_window_ref(
                 while tidx < tile_elems {
                     let tile_x = tidx % tile_width;
                     let tile_y = tidx / tile_width;
-                    let center_idx = ((tile_y + search_radius) * expanded_width
-                        + (tile_x + search_radius)) as usize;
+                    let center_idx =
+                        ((tile_y + search_radius) * expanded_width + (tile_x + search_radius)) as usize;
                     let center = smem_center[center_idx];
                     let neighbor = read_clamped_line(
                         reference,
@@ -1165,8 +1152,7 @@ pub fn nlm_fused_single_window_ref(
                         width,
                         height,
                     );
-                    smem_dist[tidx as usize] =
-                        line_sum_sq(center - neighbor, channels) * scale;
+                    smem_dist[tidx as usize] = line_sum_sq(center - neighbor, channels) * scale;
                     tidx += threads;
                 }
                 sync_cube();
@@ -1178,12 +1164,10 @@ pub fn nlm_fused_single_window_ref(
                     let mut patch_sum = 0.0f32;
                     for offset_y in 0..patch_size {
                         for offset_x in 0..patch_size {
-                            let smem_idx = ((center_tile_y - patch_radius + offset_y)
-                                * tile_width
+                            let smem_idx = ((center_tile_y - patch_radius + offset_y) * tile_width
                                 + center_tile_x
                                 - patch_radius
-                                + offset_x)
-                                as usize;
+                                + offset_x) as usize;
                             patch_sum += smem_dist[smem_idx];
                         }
                     }

@@ -29,8 +29,7 @@ pub fn nlm_bilateral(
 ) {
     let tile_width = comptime!(block_x + 2 * radius);
     let tile_elems = comptime!((block_x + 2 * radius) * (block_y + 2 * radius));
-    let mut smem =
-        SharedMemory::<f32>::new_lined(tile_elems as usize, stored_ch as usize);
+    let mut smem = SharedMemory::<f32>::new_lined(tile_elems as usize, stored_ch as usize);
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -85,8 +84,7 @@ pub fn nlm_bilateral(
         for offset_x in 0..patch_size {
             let dy = offset_y as i32 - radius as i32;
             let dx = offset_x as i32 - radius as i32;
-            let smem_idx = ((center_tile_y + offset_y - radius) * tile_width + center_tile_x
-                + offset_x
+            let smem_idx = ((center_tile_y + offset_y - radius) * tile_width + center_tile_x + offset_x
                 - radius) as usize;
             let neighbor = smem[smem_idx];
 
