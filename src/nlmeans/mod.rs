@@ -4,8 +4,13 @@ pub mod prefilter;
 #[cfg(test)]
 mod tests;
 
+use std::future::Future;
+use std::marker::PhantomData;
+use std::pin::Pin;
+
+use cubecl::bytes::Bytes;
 use cubecl::prelude::*;
-use cubecl::server::Handle;
+use cubecl::server::{Handle, ServerError};
 
 use self::kernels::{
     gpu_copy,
@@ -172,14 +177,67 @@ pub struct NlmDenoiser<R: Runtime> {
     tmp_hsum: Handle,
     /// `[pixels]` hsum intermediate, bwd direction (separable path).
     tmp_hsum_bwd: Handle,
-    /// `[pixels * stored_ch]` denoised output.
-    output: Handle,
-    /// CPU scratch reused for the readback Vec — avoids a per-frame alloc.
+    /// Double-buffered `[pixels * stored_ch]` denoised output. A new
+    /// `denoise_submit()` writes into `outputs[next_output_slot]` while
+    /// the previous slot may still be draining via `read_async`, letting
+    /// frame N+1's kernels overlap with frame N's readback.
+    outputs: [Handle; 2],
+    /// Index of the next output slot to write into.
+    next_output_slot: usize,
+    /// CPU scratch reused by the sync `denoise()` path via
+    /// `Pending::wait_into` — avoids a per-frame allocation.
     output_scratch: Vec<f32>,
 
     h2_inv_norm: f32,
     use_separable: bool,
     use_reference: bool,
+}
+
+type ReadFuture = Pin<Box<dyn Future<Output = Result<Vec<Bytes>, ServerError>> + Send>>;
+
+/// In-flight denoise: kernels are queued, the GPU may still be working,
+/// and the host-side readback hasn't completed yet. Created by
+/// [`NlmDenoiser::denoise_submit`]; consume with [`Self::wait`] or
+/// [`Self::wait_into`] to retrieve the denoised frame.
+pub struct Pending<R: Runtime> {
+    fut: ReadFuture,
+    channels: u32,
+    stored_ch: u32,
+    pixels: usize,
+    _marker: PhantomData<R>,
+}
+
+impl<R: Runtime> Pending<R> {
+    /// Block until the readback completes, returning the denoised frame
+    /// as a freshly allocated `Vec`. YUV padding lanes are stripped so
+    /// the returned buffer is densely packed (`pixels * channels` f32s).
+    pub fn wait(self) -> Result<Vec<f32>, anyhow::Error> {
+        let mut out = Vec::with_capacity(self.pixels * self.channels as usize);
+        self.wait_into(&mut out)?;
+        Ok(out)
+    }
+
+    /// Block until the readback completes, writing the result into
+    /// `dst` (cleared first). Lets the caller reuse an allocation when
+    /// running synchronously frame-after-frame.
+    pub fn wait_into(self, dst: &mut Vec<f32>) -> Result<(), anyhow::Error> {
+        let bytes = cubecl::future::block_on(self.fut)?.remove(0);
+        let data = f32::from_bytes(&bytes);
+        let channels = self.channels as usize;
+        let stored_ch = self.stored_ch as usize;
+
+        dst.clear();
+        if channels == stored_ch {
+            dst.extend_from_slice(data);
+        } else {
+            dst.reserve(self.pixels * channels);
+            for pixel in 0..self.pixels {
+                let src = pixel * stored_ch;
+                dst.extend_from_slice(&data[src..src + channels]);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Derived sizes plus dispatch shape for the per-frame work, bundled so
@@ -223,7 +281,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let raw_bwd = client.empty(scalar_bytes);
         let tmp_hsum = client.empty(scalar_bytes);
         let tmp_hsum_bwd = client.empty(scalar_bytes);
-        let output = client.empty(frame_bytes);
+        let outputs = [client.empty(frame_bytes), client.empty(frame_bytes)];
 
         let h2_inv_norm = params.h2_inv_norm();
         let use_separable = params.patch_radius > SEPARABLE_THRESHOLD;
@@ -248,7 +306,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             raw_bwd,
             tmp_hsum,
             tmp_hsum_bwd,
-            output,
+            outputs,
+            next_output_slot: 0,
             output_scratch: Vec::with_capacity(output_scratch_cap),
             h2_inv_norm,
             use_separable,
@@ -416,20 +475,68 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.ring_head += 1;
     }
 
-    /// Try to denoise the current center frame.
+    /// Queue denoise kernels for the current window and kick off an
+    /// async readback. Returns a [`Pending`] whose `wait()` produces the
+    /// denoised frame.
+    ///
+    /// Output handles are double-buffered, so the caller may push and
+    /// submit the next frame while holding the previous frame's
+    /// [`Pending`] — frame N+1's kernels then overlap with frame N's
+    /// readback. Holding more than one `Pending` in flight is unsound:
+    /// a third submit would alias the first pending's output handle.
+    ///
+    /// Returns `Ok(None)` if the temporal window is not yet filled.
+    pub fn denoise_submit(&mut self) -> Result<Option<Pending<R>>, anyhow::Error> {
+        let total_frames = self.params.total_frames() as usize;
+        if self.frames_loaded < total_frames {
+            return Ok(None);
+        }
+
+        let slot = self.next_output_slot;
+        self.next_output_slot = (slot + 1) % self.outputs.len();
+
+        self.run_denoise_kernels(slot)?;
+
+        // Call `read_async` eagerly so the GPU-side copy is queued before
+        // the caller dispatches the next frame's kernels. Erasing the
+        // future's inferred `&self` lifetime to `'static` is sound:
+        // `read_async` internally returns a `DynFut` that moves all owned
+        // data into its state machine and holds Arc-shared device refs,
+        // so no actual borrow of `self.client` outlives this call.
+        let handle = self.outputs[slot].clone();
+        let read_future: Pin<Box<dyn Future<Output = Result<Vec<Bytes>, ServerError>> + Send + '_>> =
+            Box::pin(self.client.read_async(vec![handle]));
+        let fut: ReadFuture = unsafe {
+            std::mem::transmute::<
+                Pin<Box<dyn Future<Output = Result<Vec<Bytes>, ServerError>> + Send + '_>>,
+                ReadFuture,
+            >(read_future)
+        };
+
+        let pixels = (self.width * self.height) as usize;
+        Ok(Some(Pending {
+            fut,
+            channels: self.params.channels.count(),
+            stored_ch: self.params.channels.storage_count(),
+            pixels,
+            _marker: PhantomData,
+        }))
+    }
+
+    /// Synchronous convenience wrapper: submits + immediately waits.
+    /// Prefer [`Self::denoise_submit`] when the caller can hold one frame
+    /// in flight, letting frame N+1's kernels overlap with frame N's
+    /// readback.
     ///
     /// Returns `Ok(None)` if not enough frames have been pushed yet.
     /// On success returns `Ok(Some(&[f32]))` borrowing a reusable
     /// internal buffer — copy it out (e.g. `to_vec()`) if you need to
     /// hold the data across another `denoise`/`flush`/`push_frame` call.
     pub fn denoise(&mut self) -> Result<Option<&[f32]>, anyhow::Error> {
-        let total_frames = self.params.total_frames() as usize;
-        if self.frames_loaded < total_frames {
+        let Some(pending) = self.denoise_submit()? else {
             return Ok(None);
-        }
-
-        self.run_denoise_kernels()?;
-
+        };
+        pending.wait_into(&mut self.output_scratch)?;
         Ok(Some(self.output_scratch.as_slice()))
     }
 
@@ -448,16 +555,20 @@ impl<R: Runtime> NlmDenoiser<R> {
                 self.duplicate_last_frame();
                 self.frames_loaded += 1;
             }
-            self.run_denoise_kernels()?;
-            sink(self.output_scratch.as_slice());
+            if let Some(pending) = self.denoise_submit()? {
+                pending.wait_into(&mut self.output_scratch)?;
+                sink(self.output_scratch.as_slice());
+            }
         }
 
         // Trailing `temporal_radius` frames with shrinking future context,
         // each padded by duplicating the most recent frame.
         for _ in 0..temporal_radius {
             self.duplicate_last_frame();
-            self.run_denoise_kernels()?;
-            sink(self.output_scratch.as_slice());
+            if let Some(pending) = self.denoise_submit()? {
+                pending.wait_into(&mut self.output_scratch)?;
+                sink(self.output_scratch.as_slice());
+            }
         }
 
         Ok(())
@@ -494,8 +605,8 @@ impl<R: Runtime> NlmDenoiser<R> {
         unsafe { ArrayArg::from_raw_parts(self.accum.clone(), ctx.frame_size) }
     }
 
-    fn output_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
-        unsafe { ArrayArg::from_raw_parts(self.output.clone(), ctx.frame_size) }
+    fn output_arg(&self, ctx: &LaunchCtx, slot: usize) -> ArrayArg<R> {
+        unsafe { ArrayArg::from_raw_parts(self.outputs[slot].clone(), ctx.frame_size) }
     }
 
     fn weight_sum_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
@@ -1049,7 +1160,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
-    fn run_finish(&self, ctx: &LaunchCtx, center_t: u32) -> Result<(), anyhow::Error> {
+    fn run_finish(&self, ctx: &LaunchCtx, center_t: u32, output_slot: usize) -> Result<(), anyhow::Error> {
         let channels = self.params.channels.count();
         unsafe {
             nlm_finish::launch_unchecked::<R>(
@@ -1058,7 +1169,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                 ctx.cube_dim,
                 self.params.channels.storage_count() as usize,
                 self.input_arg(ctx),
-                self.output_arg(ctx),
+                self.output_arg(ctx, output_slot),
                 unsafe { ArrayArg::from_raw_parts(self.accum.clone(), ctx.frame_size) },
                 self.weight_sum_arg(ctx),
                 self.max_weight_arg(ctx),
@@ -1073,31 +1184,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
-    fn read_output_into_scratch(&mut self, pixels: usize) {
-        let channels = self.params.channels.count() as usize;
-        let stored_ch = self.params.channels.storage_count() as usize;
-        let bytes = self
-            .client
-            .read_one(self.output.clone())
-            .expect("output readback failed");
-        let data = f32::from_bytes(&bytes);
-
-        let out = &mut self.output_scratch;
-        out.clear();
-        if channels == stored_ch {
-            out.extend_from_slice(data);
-        } else {
-            // Strip the padding lane (YUV: 4 stored → 3 logical) row by
-            // row into the contiguous output Vec.
-            out.reserve(pixels * channels);
-            for pixel in 0..pixels {
-                let src = pixel * stored_ch;
-                out.extend_from_slice(&data[src..src + channels]);
-            }
-        }
-    }
-
-    fn run_denoise_kernels(&mut self) -> Result<(), anyhow::Error> {
+    fn run_denoise_kernels(&mut self, output_slot: usize) -> Result<(), anyhow::Error> {
         let width = self.width;
         let height = self.height;
         let stored_ch = self.params.channels.storage_count();
@@ -1165,8 +1252,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             }
         }
 
-        self.run_finish(&ctx, center_t)?;
-        self.read_output_into_scratch(pixels);
+        self.run_finish(&ctx, center_t, output_slot)?;
 
         Ok(())
     }

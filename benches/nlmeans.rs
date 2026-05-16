@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use av_denoise::nlmeans::kernels::{nlm_accumulate, nlm_bilateral, nlm_dist_2d_weight, nlm_finish};
 use av_denoise::nlmeans::prefilter::bilateral_radius;
-use av_denoise::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, NlmParams, PrefilterMode};
+use av_denoise::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, NlmParams, Pending, PrefilterMode};
 use cubecl::prelude::*;
 
 const W: u32 = 1920;
@@ -73,7 +73,7 @@ struct BenchResult {
 impl BenchResult {
     fn print(&self) {
         println!(
-            "[{:<7}] {:<48} {:>4} iters  {:>9.2} fps  {:>7.2} ms/frame  \
+            "[{:<7}] {:<60} {:>4} iters  {:>9.2} fps  {:>7.2} ms/frame  \
              (min: {:>6.2}, max: {:>6.2})",
             self.backend, self.name, self.iterations, self.fps, self.mean_ms, self.min_ms, self.max_ms,
         );
@@ -338,6 +338,25 @@ fn denoise_params(channels: ChannelMode, temporal_radius: u32, prefilter: Prefil
     }
 }
 
+/// Push a frame (and, when needed, a matching reference) for the
+/// configured prefilter mode. Used by the streaming pipeline benches so
+/// the same push pattern works for `External` and non-`External` modes.
+fn push_frame_for_prefilter<R: Runtime>(
+    denoiser: &mut NlmDenoiser<R>,
+    frame: &[f32],
+    supply_reference: bool,
+) {
+    if supply_reference {
+        denoiser.push_frame_with_reference(frame, frame);
+    } else {
+        denoiser.push_frame(frame);
+    }
+}
+
+/// Steady-state streaming bench: every iteration pushes a fresh frame
+/// (the real per-frame cost — upload + optional prefilter) and then
+/// calls the synchronous `denoise()` which waits for the readback. This
+/// is the cost a caller pays if they push and wait in lockstep.
 fn bench_denoise_spatial<R: Runtime>(
     client: &ComputeClient<R>,
     backend: &str,
@@ -352,18 +371,19 @@ fn bench_denoise_spatial<R: Runtime>(
     let supply_reference = matches!(prefilter, PrefilterMode::External);
     let name = format!("denoise_spatial{tag}_1080p_{ch_name}");
 
+    let mut denoiser = NlmDenoiser::<R>::new(client, params, W, H);
+    futures::executor::block_on(client.sync()).unwrap();
+
     run_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
-        let mut denoiser = NlmDenoiser::<R>::new(client, params.clone(), W, H);
-        if supply_reference {
-            denoiser.push_frame_with_reference(&frame, &frame);
-        } else {
-            denoiser.push_frame(&frame);
-        }
+        push_frame_for_prefilter(&mut denoiser, &frame, supply_reference);
         let result = denoiser.denoise().unwrap().unwrap();
         black_box(&result);
     })
 }
 
+/// Steady-state temporal streaming bench. The window is pre-filled
+/// outside the timer (a one-off cost in real usage), then every measured
+/// iteration pushes one fresh frame and waits for that frame's denoise.
 fn bench_denoise_temporal<R: Runtime>(
     client: &ComputeClient<R>,
     backend: &str,
@@ -374,24 +394,66 @@ fn bench_denoise_temporal<R: Runtime>(
 ) -> BenchResult {
     let ch = channels.count();
     let params = denoise_params(channels, 1, prefilter);
-    let frame0 = make_synthetic_frame(W, H, ch);
-    let frame1 = make_synthetic_frame(W, H, ch);
-    let frame2 = make_synthetic_frame(W, H, ch);
+    let frame = make_synthetic_frame(W, H, ch);
+    let total_frames = 1 + 2 * params.temporal_radius as usize;
     let supply_reference = matches!(prefilter, PrefilterMode::External);
     let name = format!("denoise_temporal{tag}_1080p_{ch_name}");
 
+    let mut denoiser = NlmDenoiser::<R>::new(client, params, W, H);
+    for _ in 0..total_frames - 1 {
+        push_frame_for_prefilter(&mut denoiser, &frame, supply_reference);
+    }
+    futures::executor::block_on(client.sync()).unwrap();
+
     run_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
-        let mut denoiser = NlmDenoiser::<R>::new(client, params.clone(), W, H);
-        for f in [&frame0, &frame1, &frame2] {
-            if supply_reference {
-                denoiser.push_frame_with_reference(f, f);
-            } else {
-                denoiser.push_frame(f);
-            }
-        }
+        push_frame_for_prefilter(&mut denoiser, &frame, supply_reference);
         let result = denoiser.denoise().unwrap().unwrap();
         black_box(&result);
     })
+}
+
+/// Pipelined variant: each iteration pushes a fresh frame, submits its
+/// denoise kernels (no wait), then blocks on the *previous* frame's
+/// readback. With double-buffered output handles, frame N+1's kernels
+/// run on the GPU while frame N's host readback is still in flight.
+fn bench_denoise_temporal_pipelined<R: Runtime>(
+    client: &ComputeClient<R>,
+    backend: &str,
+    channels: ChannelMode,
+    ch_name: &str,
+    prefilter: PrefilterMode,
+    tag: &str,
+) -> BenchResult {
+    let ch = channels.count();
+    let params = denoise_params(channels, 1, prefilter);
+    let frame = make_synthetic_frame(W, H, ch);
+    let total_frames = 1 + 2 * params.temporal_radius as usize;
+    let supply_reference = matches!(prefilter, PrefilterMode::External);
+    let name = format!("denoise_temporal_pipelined{tag}_1080p_{ch_name}");
+
+    let mut denoiser = NlmDenoiser::<R>::new(client, params, W, H);
+    for _ in 0..total_frames - 1 {
+        push_frame_for_prefilter(&mut denoiser, &frame, supply_reference);
+    }
+    futures::executor::block_on(client.sync()).unwrap();
+
+    // Prime the pipeline with one outstanding `Pending` so every measured
+    // iteration has previous work to wait on.
+    push_frame_for_prefilter(&mut denoiser, &frame, supply_reference);
+    let mut in_flight: Option<Pending<R>> = Some(denoiser.denoise_submit().unwrap().unwrap());
+
+    let result = run_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
+        push_frame_for_prefilter(&mut denoiser, &frame, supply_reference);
+        let next = denoiser.denoise_submit().unwrap().unwrap();
+        let output = in_flight.take().unwrap().wait().unwrap();
+        black_box(&output);
+        in_flight = Some(next);
+    });
+
+    if let Some(pending) = in_flight.take() {
+        let _ = pending.wait().unwrap();
+    }
+    result
 }
 
 const BILATERAL_SIGMA_S: f32 = 3.0;
@@ -456,6 +518,7 @@ fn run_all_benches<R: Runtime>(backend: &str, device: &R::Device) {
                 continue;
             }
             bench_denoise_temporal::<R>(&client, backend, mode, ch_name, prefilter, tag).print();
+            bench_denoise_temporal_pipelined::<R>(&client, backend, mode, ch_name, prefilter, tag).print();
         }
     }
     println!();
