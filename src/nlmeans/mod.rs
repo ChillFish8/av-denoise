@@ -20,6 +20,7 @@ use self::kernels::{
     nlm_finish,
     nlm_fused_pair_accumulate,
     nlm_fused_pair_accumulate_ref,
+    nlm_fused_pair_accumulate_window,
     nlm_horizontal_sum,
     nlm_horizontal_sum_pair,
     nlm_vertical_weight,
@@ -30,6 +31,14 @@ use self::prefilter::{PrefilterCtx, run_prefilter};
 
 pub const BLOCK_X: u32 = 32;
 pub const BLOCK_Y: u32 = 8;
+
+/// Cube shape for per-pixel kernels with no SMEM tile (`nlm_accumulate`,
+/// `nlm_finish`) and the small-tile `nlm_dist_2d_weight(_ref)` kernels.
+/// On RDNA-class GPUs these benchmark 10–25% faster at (32, 16) than at
+/// the tile-heavy default, because they're memory-latency-bound and the
+/// extra threads hide load latency.
+pub const BLOCK_X_THIN: u32 = 32;
+pub const BLOCK_Y_THIN: u32 = 16;
 
 const NLM_NORM: f32 = 255.0 * 255.0;
 const NLM_LEGACY: f32 = 3.0;
@@ -178,6 +187,10 @@ struct LaunchCtx {
     pixels: usize,
     cube_count: CubeCount,
     cube_dim: CubeDim,
+    /// Alternate shape used by `nlm_accumulate` / `nlm_finish` and the
+    /// small-tile `nlm_dist_2d_weight(_ref)` kernels — see [`BLOCK_X_THIN`].
+    thin_cube_count: CubeCount,
+    thin_cube_dim: CubeDim,
 }
 
 impl<R: Runtime> NlmDenoiser<R> {
@@ -584,6 +597,46 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
+    /// Temporal (k≠0) windowed fused step: a single launch covers every
+    /// `(q_x, q_y)` in the search window, keeping accum / weight_sum /
+    /// max_weight register-resident across the inner q-loop. Collapses
+    /// `(2·search_radius + 1)²` per-q launches into one.
+    fn dispatch_fused_window_iter(
+        &self,
+        ctx: &LaunchCtx,
+        center_t: u32,
+        q_k: i32,
+    ) -> Result<(), anyhow::Error> {
+        let channels = self.params.channels.count();
+        let stored = self.params.channels.storage_count();
+        let frame_t = self.phys_frame(center_t as i32);
+        let frame_fwd = self.phys_frame(center_t as i32 + q_k);
+        let frame_bwd = self.phys_frame(center_t as i32 - q_k);
+
+        nlm_fused_pair_accumulate_window::launch::<R>(
+            &self.client,
+            ctx.cube_count.clone(),
+            ctx.cube_dim,
+            self.input_arg(ctx),
+            self.accum_arg(ctx),
+            self.weight_sum_arg(ctx),
+            self.max_weight_arg(ctx),
+            ScalarArg::new(frame_t),
+            ScalarArg::new(frame_fwd),
+            ScalarArg::new(frame_bwd),
+            ScalarArg::new(self.h2_inv_norm),
+            self.width,
+            self.height,
+            channels,
+            stored,
+            self.params.patch_radius,
+            self.params.search_radius,
+            BLOCK_X,
+            BLOCK_Y,
+        )?;
+        Ok(())
+    }
+
     /// Temporal (k≠0) separable-path step: distance_pair →
     /// horizontal_sum_pair → fused vweight+accumulate. The fused
     /// terminal kernel consumes both hsum buffers, so no global weight
@@ -731,8 +784,8 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         nlm_accumulate::launch::<R>(
             &self.client,
-            ctx.cube_count.clone(),
-            ctx.cube_dim,
+            ctx.thin_cube_count.clone(),
+            ctx.thin_cube_dim,
             self.input_arg(ctx),
             self.accum_arg(ctx),
             self.weight_sum_arg(ctx),
@@ -823,8 +876,8 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         nlm_accumulate::launch::<R>(
             &self.client,
-            ctx.cube_count.clone(),
-            ctx.cube_dim,
+            ctx.thin_cube_count.clone(),
+            ctx.thin_cube_dim,
             self.input_arg(ctx),
             self.accum_arg(ctx),
             self.weight_sum_arg(ctx),
@@ -921,6 +974,11 @@ impl<R: Runtime> NlmDenoiser<R> {
             pixels,
             cube_count: CubeCount::new_2d(width.div_ceil(BLOCK_X), height.div_ceil(BLOCK_Y)),
             cube_dim: CubeDim::new_2d(BLOCK_X, BLOCK_Y),
+            thin_cube_count: CubeCount::new_2d(
+                width.div_ceil(BLOCK_X_THIN),
+                height.div_ceil(BLOCK_Y_THIN),
+            ),
+            thin_cube_dim: CubeDim::new_2d(BLOCK_X_THIN, BLOCK_Y_THIN),
         };
 
         self.zero_accumulators(&ctx)?;
@@ -929,11 +987,22 @@ impl<R: Runtime> NlmDenoiser<R> {
         let window_side = 2 * search_radius + 1;
         let window_area = window_side * window_side;
 
-        // Visit only the negative-`linear` half of the search window;
-        // every iteration applies both +q and −q via the paired
-        // accumulate, so the omitted half is implicitly covered.
+        // The k≠0 temporal slices cover the full search window (every q
+        // there has `linear < 0`), so the non-reference fused path takes
+        // the windowed kernel: one launch per q_k that internally loops
+        // over every (q_x, q_y). The k=0 slice still uses the per-q
+        // half-window dispatch because its weight map is symmetric in q
+        // and the single-tile path is cheaper per q.
+        //
+        // Reference-clip and separable paths still iterate per q until
+        // a matching windowed variant is added.
         let k_start = -(temporal_radius as i32);
+        let use_windowed = !self.use_separable && !self.use_reference;
         for q_k in k_start..=0 {
+            if q_k != 0 && use_windowed {
+                self.dispatch_fused_window_iter(&ctx, center_t, q_k)?;
+                continue;
+            }
             for q_y in -search_radius..=search_radius {
                 for q_x in -search_radius..=search_radius {
                     let linear = q_k * window_area + q_y * window_side + q_x;
@@ -941,12 +1010,6 @@ impl<R: Runtime> NlmDenoiser<R> {
                         continue;
                     }
 
-                    // The k=0 paths use the single-tile weight kernel
-                    // because the weight map is symmetric in q and a
-                    // paired tile would carry duplicate content at
-                    // shifted origins. The k≠0 paths fuse the weight
-                    // computation with the accumulate inside a single
-                    // kernel using a register-resident weight pair.
                     if q_k == 0 {
                         if self.use_separable {
                             self.dispatch_separable_iter_k0(&ctx, center_t, q_x, q_y)?;
