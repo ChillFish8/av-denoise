@@ -9,56 +9,42 @@ build *ARGS:
 run *ARGS:
     cargo run {{ARGS}}
 
-denoise-file input width height hdr="false" *ARGS:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    exec 3>&2
-    if [[ "{{hdr}}" == "true" ]]; then
-        pix_fmt="rgb48le"
-        hdr_flag="--hdr"
-    else
-        pix_fmt="rgb24"
-        hdr_flag=""
-    fi
-    ffmpeg -hide_banner -stats -stats_period 0.5 -loglevel info -i "{{input}}" -f rawvideo -pix_fmt "${pix_fmt}" - 2> >(cat >&3) | cargo run --release --bin main -- {{ARGS}} --width "{{width}}" --height "{{height}}" ${hdr_flag} 2> >(cat >&3) > /dev/null
-
-denoise-video input output width height fps hdr="false" *ARGS:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    exec 3>&2
-    if [[ "{{hdr}}" == "true" ]]; then
-        pix_fmt="rgb48le"
-        hdr_flag="--hdr"
-        codec_opts=( -c:v ffv1 )
-    else
-        pix_fmt="rgb24"
-        hdr_flag=""
-        codec_opts=( -c:v libx264 -crf 18 -preset slow )
-    fi
-    ffmpeg -hide_banner -stats -stats_period 0.5 -loglevel info -i "{{input}}" -f rawvideo -pix_fmt "${pix_fmt}" - 2> >(cat >&3) | cargo run --release --bin main -- {{ARGS}} --width "{{width}}" --height "{{height}}" ${hdr_flag}
-
 bench *ARGS:
     cargo bench {{ARGS}}
 
-docker-test-run image="localhost/av-denoise:local" input="data/test.mkv" width="1920" height="1080" duration="1" *ARGS:
+[arg("input", long="input", short="i")]
+[arg("output", long="output", short="o")]
+denoise-file input output *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo run --release --bin av-denoise --features binary-full -- {{ARGS}} file --input "{{input}}" \
+        | ffmpeg -hide_banner -stats -stats_period 0.5 -loglevel info \
+            -y -f yuv4mpegpipe -i - -c:v ffv1 "{{output}}"
+
+
+[arg("input", long="input", short="i")]
+[arg("output", long="output", short="o")]
+[arg("image", long="image")]
+docker-test-run image="localhost/av-denoise:latest" input="data/test.mkv" output="data/test.denoised.mkv" *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
     exec 3>&2
     podman build -t "{{image}}" . 2> >(cat >&3)
-    ffmpeg -hide_banner \
-        -stats \
-        -stats_period 0.5 \
-        -loglevel info \
-        -t "{{duration}}" \
-        -i "{{input}}" \
-        -f rawvideo \
-        -pix_fmt rgb24 \
-        - 2> >(cat >&3) | podman run --rm --name av-denoise --device /dev/kfd --device /dev/dri \
-            --group-add video --group-add render \
-            --security-opt seccomp=unconfined \
-            --memory=48g \
-            --ulimit memlock=-1 --ulimit stack=67108864 --ipc=host \
-            -i "{{image}}" \
-            --accelerators vulkan,cpu {{ARGS}} \
-            --width "{{width}}" \
-            --height "{{height}}"
+    input_abs="$(realpath "{{input}}")"
+    output_abs="$(realpath -m "{{output}}")"
+    input_dir="$(dirname "${input_abs}")"
+    output_dir="$(dirname "${output_abs}")"
+    input_name="$(basename "${input_abs}")"
+    mkdir -p "${output_dir}"
+    podman run --rm --name av-denoise \
+        --device /dev/kfd --device /dev/dri \
+        --group-add video --group-add render \
+        --security-opt seccomp=unconfined \
+        --memory=48g \
+        --ulimit memlock=-1 --ulimit stack=67108864 --ipc=host \
+        -v "${input_dir}:/in:ro" \
+        "{{image}}" \
+        --accelerators vulkan,cpu {{ARGS}} \
+        file --input "/in/${input_name}" \
+        | ffmpeg -hide_banner -stats -stats_period 0.5 -loglevel info \
+            -y -f yuv4mpegpipe -i - -c:v ffv1 "${output_abs}"
