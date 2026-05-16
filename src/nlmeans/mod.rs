@@ -61,6 +61,7 @@ const MAX_GRID_1D: u32 = 65535;
 const BLOCK_1D: u32 = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How to apply denoising to the input frame channels.
 pub enum ChannelMode {
     /// Single luminance channel. Distance scaled by 3.0.
     Luma,

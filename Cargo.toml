@@ -15,9 +15,14 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 strum_macros = "0.28"
 strum = "0.28"
+bon = "3"
 
 serde = { version = "1", features = ["derive"] }
 cubecl = { version = "0.10", features = ["std"] }
+
+# Frame ingestion via ffms2
+ffms2 = { version = "0.3", optional = true }
+av-scenechange = { version = "0.23", optional = true, features = ["ffms2"] }
 
 # Binary dependencies
 clap = { version = "4", optional = true, features = ["derive"] }
@@ -34,6 +39,7 @@ rocm = ["cubecl/hip"]
 cpu = ["cubecl/cpu"]
 default = ["cpu", "vulkan"]
 binary = ["clap", "mimalloc"]
+ffms2 = ["dep:ffms2", "av-scenechange"]
 
 [[bench]]
 name = "nlmeans"
