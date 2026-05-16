@@ -33,14 +33,14 @@ pub enum Device {
     Cpu,
 }
 
-/// `FromStr` accepts the same syntax as the bench CLI:
-///
-/// - `default`
-/// - `discrete[:N]`, `integrated[:N]`, `virtual[:N]` (default `N = 0`)
-/// - `cpu`
 impl FromStr for Device {
     type Err = String;
 
+    /// `FromStr` accepts the same syntax as the bench CLI:
+    ///
+    /// - `default`
+    /// - `discrete[:N]`, `integrated[:N]`, `virtual[:N]` (default `N = 0`)
+    /// - `cpu`
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (kind, idx) = s.split_once(':').unwrap_or((s, "0"));
         let index: usize = idx
