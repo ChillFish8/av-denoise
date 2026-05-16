@@ -14,6 +14,7 @@ use av_denoise::{
     DenoiserOptions,
     DenoisingMode,
     Device,
+    NlmTuning,
     PrefilterMode,
 };
 
@@ -108,15 +109,47 @@ pub struct CliOptions {
     pub intent: BinaryChannelIntent,
     pub mode: DenoisingMode,
     pub prefilter: PrefilterMode,
+    pub nlm_tuning: Option<NlmTuning>,
+    /// Per-plane strength override for the luma denoiser. Takes
+    /// precedence over `nlm_tuning.strength` when set.
+    pub luma_strength: Option<f32>,
+    /// Per-plane strength override for the chroma denoiser. Takes
+    /// precedence over `nlm_tuning.strength` when set.
+    pub chroma_strength: Option<f32>,
 }
 
 impl CliOptions {
     fn denoiser_options(&self, channels: ChannelMode) -> DenoiserOptions {
-        DenoiserOptions::builder()
+        let b = DenoiserOptions::builder()
             .channel_mode(channels)
             .mode(self.mode)
-            .prefilter(self.prefilter)
-            .build()
+            .prefilter(self.prefilter);
+
+        let strength_override = match channels {
+            ChannelMode::Luma => self.luma_strength,
+            ChannelMode::Chroma => self.chroma_strength,
+            ChannelMode::Yuv => None,
+        };
+
+        let tuning = match (self.nlm_tuning, strength_override) {
+            (Some(base), Some(s)) => Some(NlmTuning {
+                strength: Some(s),
+                ..base
+            }),
+            (None, Some(s)) => Some(NlmTuning {
+                search_radius: None,
+                patch_radius: None,
+                strength: Some(s),
+                self_weight: None,
+            }),
+            (Some(base), None) => Some(base),
+            (None, None) => None,
+        };
+
+        match tuning {
+            Some(t) => b.nlm(t).build(),
+            None => b.build(),
+        }
     }
 }
 

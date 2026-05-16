@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use av_denoise::accelerate::{Accelerator, get_default_accelerators};
-use av_denoise::{DenoisingMode, Device, PrefilterMode};
+use av_denoise::{DenoisingMode, Device, NlmTuning, PrefilterMode};
 use clap::{Parser, Subcommand};
 use strum_macros::EnumString;
 
@@ -151,6 +151,49 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     temporal_radius: u32,
 
+    /// Override NLM search-window radius. Library default: 2.
+    ///
+    /// Higher values find more candidate patches at the cost of work
+    /// quadratic in this value. Bounded by the library's
+    /// `MAX_SEARCH_RADIUS`.
+    #[arg(long)]
+    search_radius: Option<u32>,
+
+    /// Override NLM patch radius. Library default: 4.
+    ///
+    /// Patch is `(2*patch_radius + 1)` square. Larger patches preserve
+    /// structure better at the cost of higher GPU memory. Bounded by
+    /// the library's `MAX_PATCH_RADIUS`.
+    #[arg(long)]
+    patch_radius: Option<u32>,
+
+    /// Override NLM filter strength (sigma). Library default: 1.2.
+    ///
+    /// Higher = more smoothing. Must be finite and > 0. Acts as the
+    /// shared default for both planes; `--luma-strength` and
+    /// `--chroma-strength` take precedence when set.
+    #[arg(long)]
+    strength: Option<f32>,
+
+    /// Override strength for the luma denoiser only. Falls back to
+    /// `--strength` (or the library default) when unset. Ignored when
+    /// luma isn't being denoised or when `--channel-mode yuv` is used
+    /// (the fused kernel can't tune planes independently).
+    #[arg(long)]
+    luma_strength: Option<f32>,
+
+    /// Override strength for the chroma denoiser only. Falls back to
+    /// `--strength` (or the library default) when unset. Ignored when
+    /// chroma isn't being denoised or when `--channel-mode yuv` is
+    /// used.
+    #[arg(long)]
+    chroma_strength: Option<f32>,
+
+    /// Override the centre pixel's self-weight in NLM averaging.
+    /// Library default: 1.0. Must be finite and >= 0.
+    #[arg(long)]
+    self_weight: Option<f32>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -237,12 +280,30 @@ fn main() -> anyhow::Result<()> {
     let prefilter = parse_prefilter(&args.prefilter)?;
     let intent = resolve_channel_intent(&args.channel_mode)?;
 
+    let nlm_tuning = if args.search_radius.is_some()
+        || args.patch_radius.is_some()
+        || args.strength.is_some()
+        || args.self_weight.is_some()
+    {
+        Some(NlmTuning {
+            search_radius: args.search_radius,
+            patch_radius: args.patch_radius,
+            strength: args.strength,
+            self_weight: args.self_weight,
+        })
+    } else {
+        None
+    };
+
     let opts = CliOptions {
         accelerators: args.accelerators,
         device: args.device,
         intent,
         mode,
         prefilter,
+        nlm_tuning,
+        luma_strength: args.luma_strength,
+        chroma_strength: args.chroma_strength,
     };
 
     match args.command {
