@@ -13,6 +13,9 @@ pub use fused::{
     nlm_fused_pair_accumulate,
     nlm_fused_pair_accumulate_ref,
     nlm_fused_pair_accumulate_window,
+    nlm_fused_pair_accumulate_window_ref,
+    nlm_fused_single_window,
+    nlm_fused_single_window_ref,
 };
 pub use memory::{gpu_copy, gpu_zero_buffers};
 pub use separable::{

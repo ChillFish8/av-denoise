@@ -21,6 +21,9 @@ use self::kernels::{
     nlm_fused_pair_accumulate,
     nlm_fused_pair_accumulate_ref,
     nlm_fused_pair_accumulate_window,
+    nlm_fused_pair_accumulate_window_ref,
+    nlm_fused_single_window,
+    nlm_fused_single_window_ref,
     nlm_horizontal_sum,
     nlm_horizontal_sum_pair,
     nlm_vertical_weight,
@@ -613,27 +616,111 @@ impl<R: Runtime> NlmDenoiser<R> {
         let frame_fwd = self.phys_frame(center_t as i32 + q_k);
         let frame_bwd = self.phys_frame(center_t as i32 - q_k);
 
-        nlm_fused_pair_accumulate_window::launch::<R>(
-            &self.client,
-            ctx.cube_count.clone(),
-            ctx.cube_dim,
-            self.input_arg(ctx),
-            self.accum_arg(ctx),
-            self.weight_sum_arg(ctx),
-            self.max_weight_arg(ctx),
-            ScalarArg::new(frame_t),
-            ScalarArg::new(frame_fwd),
-            ScalarArg::new(frame_bwd),
-            ScalarArg::new(self.h2_inv_norm),
-            self.width,
-            self.height,
-            channels,
-            stored,
-            self.params.patch_radius,
-            self.params.search_radius,
-            BLOCK_X,
-            BLOCK_Y,
-        )?;
+        if self.use_reference {
+            nlm_fused_pair_accumulate_window_ref::launch::<R>(
+                &self.client,
+                ctx.cube_count.clone(),
+                ctx.cube_dim,
+                self.input_arg(ctx),
+                self.reference_arg(ctx),
+                self.accum_arg(ctx),
+                self.weight_sum_arg(ctx),
+                self.max_weight_arg(ctx),
+                ScalarArg::new(frame_t),
+                ScalarArg::new(frame_fwd),
+                ScalarArg::new(frame_bwd),
+                ScalarArg::new(self.h2_inv_norm),
+                self.width,
+                self.height,
+                channels,
+                stored,
+                self.params.patch_radius,
+                self.params.search_radius,
+                BLOCK_X,
+                BLOCK_Y,
+            )?;
+        } else {
+            nlm_fused_pair_accumulate_window::launch::<R>(
+                &self.client,
+                ctx.cube_count.clone(),
+                ctx.cube_dim,
+                self.input_arg(ctx),
+                self.accum_arg(ctx),
+                self.weight_sum_arg(ctx),
+                self.max_weight_arg(ctx),
+                ScalarArg::new(frame_t),
+                ScalarArg::new(frame_fwd),
+                ScalarArg::new(frame_bwd),
+                ScalarArg::new(self.h2_inv_norm),
+                self.width,
+                self.height,
+                channels,
+                stored,
+                self.params.patch_radius,
+                self.params.search_radius,
+                BLOCK_X,
+                BLOCK_Y,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Spatial (k=0) windowed fused step: a single launch covers every
+    /// `(q_x, q_y)` in the search window in one direction, exploiting the
+    /// symmetry of the patch distance (`w(x, −q) = w(x−q, q)`) so the
+    /// full-window single-direction sum equals the half-window paired sum
+    /// applied per q.
+    fn dispatch_fused_single_window_iter(
+        &self,
+        ctx: &LaunchCtx,
+        center_t: u32,
+    ) -> Result<(), anyhow::Error> {
+        let channels = self.params.channels.count();
+        let stored = self.params.channels.storage_count();
+        let frame_t = self.phys_frame(center_t as i32);
+
+        if self.use_reference {
+            nlm_fused_single_window_ref::launch::<R>(
+                &self.client,
+                ctx.cube_count.clone(),
+                ctx.cube_dim,
+                self.input_arg(ctx),
+                self.reference_arg(ctx),
+                self.accum_arg(ctx),
+                self.weight_sum_arg(ctx),
+                self.max_weight_arg(ctx),
+                ScalarArg::new(frame_t),
+                ScalarArg::new(self.h2_inv_norm),
+                self.width,
+                self.height,
+                channels,
+                stored,
+                self.params.patch_radius,
+                self.params.search_radius,
+                BLOCK_X,
+                BLOCK_Y,
+            )?;
+        } else {
+            nlm_fused_single_window::launch::<R>(
+                &self.client,
+                ctx.cube_count.clone(),
+                ctx.cube_dim,
+                self.input_arg(ctx),
+                self.accum_arg(ctx),
+                self.weight_sum_arg(ctx),
+                self.max_weight_arg(ctx),
+                ScalarArg::new(frame_t),
+                ScalarArg::new(self.h2_inv_norm),
+                self.width,
+                self.height,
+                channels,
+                stored,
+                self.params.patch_radius,
+                self.params.search_radius,
+                BLOCK_X,
+                BLOCK_Y,
+            )?;
+        }
         Ok(())
     }
 
@@ -997,10 +1084,14 @@ impl<R: Runtime> NlmDenoiser<R> {
         // Reference-clip and separable paths still iterate per q until
         // a matching windowed variant is added.
         let k_start = -(temporal_radius as i32);
-        let use_windowed = !self.use_separable && !self.use_reference;
+        let use_windowed = !self.use_separable;
         for q_k in k_start..=0 {
-            if q_k != 0 && use_windowed {
-                self.dispatch_fused_window_iter(&ctx, center_t, q_k)?;
+            if use_windowed {
+                if q_k != 0 {
+                    self.dispatch_fused_window_iter(&ctx, center_t, q_k)?;
+                } else {
+                    self.dispatch_fused_single_window_iter(&ctx, center_t)?;
+                }
                 continue;
             }
             for q_y in -search_radius..=search_radius {
