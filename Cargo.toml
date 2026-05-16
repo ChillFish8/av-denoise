@@ -3,6 +3,7 @@ name = "av-denoise"
 version = "0.1.0"
 edition = "2024"
 description = "Fast and efficient video denoising using accelerated nlmeans."
+autobins = false
 
 [[bin]]
 name = "av-denoise"
@@ -24,6 +25,8 @@ cubecl = { version = "0.10", features = ["std"] }
 # Frame ingestion via ffms2
 ffms2 = { version = "0.3", optional = true }
 av-scenechange = { version = "0.23", optional = true, features = ["ffms2"] }
+av-decoders = { version = "0.9", optional = true, features = ["ffms2"] }
+v_frame = { version = "0.5", optional = true }
 
 # Frame ingestion via y4m stdin
 y4m = { version = "0.8", optional = true }
@@ -42,7 +45,7 @@ cuda = ["cubecl/cuda"]
 rocm = ["cubecl/hip"]
 cpu = ["cubecl/cpu"]
 binary = ["clap", "mimalloc"]
-ffms2 = ["dep:ffms2", "av-scenechange"]
+ffms2 = ["dep:ffms2", "av-scenechange", "dep:av-decoders", "dep:v_frame"]
 stdin = ["y4m"]
 binary-full = ["binary", "ffms2", "stdin"]
 default = ["cpu", "vulkan"]

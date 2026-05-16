@@ -184,6 +184,7 @@ name = "av-denoise"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "av-decoders",
  "av-scenechange",
  "bon",
  "clap",
@@ -197,6 +198,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "tracing-subscriber",
+ "v_frame",
  "y4m",
 ]
 
