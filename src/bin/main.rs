@@ -19,6 +19,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// Currently only Non-Local Means is implemented; the flag exists so
 /// future algorithms can be added without breaking the CLI surface.
 #[derive(Debug, Copy, Clone, Default, EnumString)]
+#[strum(ascii_case_insensitive)]
 pub enum Algorithm {
     #[default]
     Nlmeans,
