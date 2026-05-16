@@ -30,12 +30,14 @@ pub fn gpu_zero_buffers(
     #[comptime] total_threads: u32,
 ) {
     let mut idx = ABSOLUTE_POS_X;
+
     while idx < weight_len {
         accum[idx as usize] = 0.0f32;
         weight_sum[idx as usize] = 0.0f32;
         max_weight[idx as usize] = 0.0f32;
         idx += total_threads;
     }
+
     while idx < accum_len {
         accum[idx as usize] = 0.0f32;
         idx += total_threads;

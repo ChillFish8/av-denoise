@@ -427,6 +427,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
 
         self.run_denoise_kernels()?;
+
         Ok(Some(self.output_scratch.as_slice()))
     }
 
@@ -597,6 +598,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                 BLOCK_Y,
             )?;
         }
+
         Ok(())
     }
 
@@ -662,6 +664,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                 BLOCK_Y,
             )?;
         }
+
         Ok(())
     }
 
@@ -717,6 +720,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                 BLOCK_Y,
             )?;
         }
+
         Ok(())
     }
 
@@ -809,6 +813,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             BLOCK_X,
             BLOCK_Y,
         )?;
+
         Ok(())
     }
 
@@ -882,6 +887,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             self.width,
             self.height,
         )?;
+
         Ok(())
     }
 
@@ -974,6 +980,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             self.width,
             self.height,
         )?;
+
         Ok(())
     }
 
@@ -991,6 +998,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             ctx.pixels as u32,
             total_threads,
         )?;
+
         Ok(())
     }
 
@@ -1017,6 +1025,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             self.height,
             channels,
         )?;
+
         Ok(())
     }
 
@@ -1111,6 +1120,7 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         self.run_finish(&ctx, center_t)?;
         self.read_output_into_scratch(pixels);
+
         Ok(())
     }
 }

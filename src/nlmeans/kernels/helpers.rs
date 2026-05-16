@@ -109,6 +109,7 @@ pub(super) fn accumulate_pair(
     } else {
         read_clamped_line(input, fwd_nx, fwd_ny, frame_fwd, width, height)
     };
+
     let bwd_pixel = if interior {
         read_line(input, bwd_nx as u32, bwd_ny as u32, frame_bwd, width, height)
     } else {

@@ -449,6 +449,7 @@ pub fn nlm_distance_pair_ref(
     } else {
         read_clamped_line(reference, neighbor_x, neighbor_y, frame_fwd, width, height)
     };
+
     let bwd_neighbor = if interior {
         read_line(
             reference,

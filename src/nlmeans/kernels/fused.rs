@@ -723,6 +723,7 @@ pub fn nlm_fused_pair_accumulate_window(
                     width,
                     height,
                 );
+
                 let bwd_pixel = read_clamped_line(
                     input,
                     global_x as i32 - q_x,
@@ -731,6 +732,7 @@ pub fn nlm_fused_pair_accumulate_window(
                     width,
                     height,
                 );
+
                 let line_w_fwd = Line::<f32>::empty(input.line_size()).fill(weight_fwd);
                 let line_w_bwd = Line::<f32>::empty(input.line_size()).fill(weight_bwd);
                 accum_reg = accum_reg + fwd_pixel * line_w_fwd + bwd_pixel * line_w_bwd;
@@ -829,9 +831,11 @@ pub fn nlm_fused_single_window(
         for q_xi in 0..window_side {
             let q_x = q_xi as i32 - search_radius as i32;
             let q_y = q_yi as i32 - search_radius as i32;
-            // Skip the self-pair; its contribution is reintroduced by
-            // `nlm_finish` via `wref · max_weight`.
             if comptime!(q_x == 0 && q_y == 0) {
+                // Skip the self-pair; its contribution is reintroduced by
+                // `nlm_finish` via `wref * max_weight`.
+                // No continue available in CubeCL yet, doesn't end up being
+                // a branch in the kernel, just gets optimised out at compile time.
             } else {
                 let mut tidx = thread_id;
                 while tidx < tile_elems {
@@ -1136,6 +1140,8 @@ pub fn nlm_fused_single_window_ref(
             let q_x = q_xi as i32 - search_radius as i32;
             let q_y = q_yi as i32 - search_radius as i32;
             if comptime!(q_x == 0 && q_y == 0) {
+                // No continue available in CubeCL yet, doesn't end up being
+                // a branch in the kernel, just gets optimised out at compile time.
             } else {
                 let mut tidx = thread_id;
                 while tidx < tile_elems {

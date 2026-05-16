@@ -17,17 +17,15 @@ use super::{BLOCK_X, BLOCK_Y};
 /// reference frame via [`super::NlmDenoiser::push_frame_with_reference`].
 /// `None` disables the reference path entirely (zero-cost).
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub enum PrefilterMode {
+    #[default]
     None,
     External,
-    Bilateral { sigma_s: f32, sigma_r: f32 },
-}
-
-impl Default for PrefilterMode {
-    fn default() -> Self {
-        Self::None
-    }
+    Bilateral {
+        sigma_s: f32,
+        sigma_r: f32,
+    },
 }
 
 impl PrefilterMode {
@@ -106,5 +104,6 @@ fn run_bilateral<R: Runtime>(
         BLOCK_X,
         BLOCK_Y,
     )?;
+
     Ok(())
 }
