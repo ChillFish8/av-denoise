@@ -290,21 +290,21 @@ fn temporal_requires_full_window() {
 
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
 
+    // Leading-edge mirror fills R past slots from the very first push, so the
+    // window only needs R+1 real pushes (= 2 for radius 1) before the first
+    // submit produces output.
     denoiser.push_frame(&frame);
     assert!(
         denoiser.denoise().unwrap().is_none(),
-        "should not output with only 1 of 3 frames"
-    );
-
-    denoiser.push_frame(&frame);
-    assert!(
-        denoiser.denoise().unwrap().is_none(),
-        "should not output with only 2 of 3 frames"
+        "should not output with only 1 real push (leading-mirror fills R, total still R+1 < 2R+1)"
     );
 
     denoiser.push_frame(&frame);
     let result = denoiser.denoise().unwrap();
-    assert!(result.is_some(), "should output with 3 of 3 frames");
+    assert!(
+        result.is_some(),
+        "should output once R+1 real frames have been pushed (window now full via leading mirror)"
+    );
 }
 
 #[test]
@@ -445,6 +445,49 @@ fn flush_produces_remaining_frames() {
 
     for frame in &remaining {
         assert_eq!(frame.len(), (w * h) as usize);
+    }
+}
+
+/// `N` pushes at temporal radius `R` must produce exactly `N` total emissions
+/// (during pushes + flush). Regression guard against the old bug where the
+/// leading `R` logical frames were silently dropped (every scene lost its
+/// first frame under `--temporal-radius >= 1`).
+#[test]
+fn temporal_push_flush_frame_count_matches() {
+    let client = make_client();
+    let w = 8;
+    let h = 8;
+
+    for radius in 1..=2 {
+        let params = NlmParams {
+            temporal_radius: radius,
+            channels: ChannelMode::Luma,
+            prefilter: PrefilterMode::None,
+            ..NlmParams::default()
+        };
+        let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+
+        const PUSHES: usize = 10;
+        let mut during_pushes = 0usize;
+        for i in 0..PUSHES {
+            // Distinct frames so the kernel can't accidentally satisfy a
+            // count check by mis-pairing duplicate buffers.
+            let value = 0.1 + (i as f32) * 0.05;
+            let frame = make_uniform_frame(w, h, 1, value);
+            denoiser.push_frame(&frame);
+            if denoiser.denoise().unwrap().is_some() {
+                during_pushes += 1;
+            }
+        }
+
+        let mut flushed = 0usize;
+        denoiser.flush(|_| flushed += 1).unwrap();
+
+        assert_eq!(
+            during_pushes + flushed,
+            PUSHES,
+            "radius {radius}: pushed {PUSHES} frames, got {during_pushes} during pushes + {flushed} from flush",
+        );
     }
 }
 

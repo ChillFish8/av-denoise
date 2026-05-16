@@ -406,6 +406,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
 
         self.advance_ring();
+        self.prime_leading_edge_if_first();
     }
 
     /// Push a new frame together with an externally-prefiltered
@@ -425,6 +426,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             .clone();
         self.upload_into_slot(&reference_buf, reference, slot);
         self.advance_ring();
+        self.prime_leading_edge_if_first();
     }
 
     /// Upload `frame` into the next ring slot of `dst`. Returns the
@@ -521,6 +523,21 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// context shrinks. Slots never overlap, so the in-buffer copy is
     /// well-defined. The reference ring is duplicated in lockstep when
     /// active, so weight calculation never falls back to a stale slot.
+    /// Mirror the very first pushed frame into the `R` leading ring
+    /// slots so the temporal window starts symmetric instead of dropping
+    /// the first `R` logical frames. Mirrors the trailing-edge logic in
+    /// [`Self::flush`].
+    fn prime_leading_edge_if_first(&mut self) {
+        let r = self.params.temporal_radius as usize;
+        if r == 0 || self.frames_loaded != 1 {
+            return;
+        }
+        for _ in 0..r {
+            self.duplicate_last_frame();
+            self.frames_loaded += 1;
+        }
+    }
+
     fn duplicate_last_frame(&mut self) {
         let total_frames = self.params.total_frames() as usize;
         let last_slot = (self.ring_head - 1) % total_frames;
