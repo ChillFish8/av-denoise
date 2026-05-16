@@ -161,6 +161,8 @@ impl Denoiser {
             sniff_best_accelerator(accelerators).ok_or(DenoiserError::NoAcceleratorAvailable)?;
 
         let params = options.to_nlm_params();
+        params.validate()?;
+
         let channels = params.channels.count();
         let temporal_radius = params.temporal_radius;
         let backend = build_backend(accelerator, device, params, width, height)?;
@@ -431,6 +433,25 @@ mod tests {
         d.push_frame(&frame(16, 16)).expect("push failed");
         let out = d.recv_frame().expect("recv failed").expect("no frame");
         assert_eq!(out.len(), 16 * 16);
+    }
+
+    #[test]
+    fn invalid_params_surface_as_error() {
+        let bad = DenoiserOptions::builder()
+            .nlm(NlmTuning {
+                search_radius: None,
+                patch_radius: None,
+                strength: Some(0.0),
+                self_weight: None,
+            })
+            .build();
+        let result = Denoiser::new(&[Accelerator::Cpu], &Device::Default, 16, 16, bad);
+
+        match result {
+            Err(DenoiserError::Other(_)) => {},
+            Err(other) => panic!("expected DenoiserError::Other, got {other:?}"),
+            Ok(_) => panic!("expected validation error, got Ok"),
+        }
     }
 
     #[test]

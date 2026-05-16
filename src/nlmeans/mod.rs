@@ -137,7 +137,71 @@ impl NlmParams {
     fn total_frames(&self) -> u32 {
         1 + 2 * self.temporal_radius
     }
+
+    /// Reject parameter combinations that would either fail to launch
+    /// (kernels hitting SMEM/register limits) or produce numerically
+    /// degenerate output. Called automatically by `NlmDenoiser::new` —
+    /// callers building params manually can invoke it directly to
+    /// surface errors before construction.
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        if self.patch_radius > MAX_PATCH_RADIUS {
+            anyhow::bail!(
+                "patch_radius={} exceeds the supported maximum ({}); larger patches \
+                 exhaust on-chip SMEM in the fused/windowed kernels",
+                self.patch_radius,
+                MAX_PATCH_RADIUS,
+            );
+        }
+
+        if self.search_radius > MAX_SEARCH_RADIUS {
+            anyhow::bail!(
+                "search_radius={} exceeds the supported maximum ({}); the windowed \
+                 kernel allocates `(block + 2·patch_radius + 2·search_radius)²` of SMEM",
+                self.search_radius,
+                MAX_SEARCH_RADIUS,
+            );
+        }
+
+        if self.temporal_radius > MAX_TEMPORAL_RADIUS {
+            anyhow::bail!(
+                "temporal_radius={} exceeds the supported maximum ({}); the ring \
+                 buffer grows linearly with the window size",
+                self.temporal_radius,
+                MAX_TEMPORAL_RADIUS,
+            );
+        }
+
+        if !(self.strength.is_finite() && self.strength > 0.0) {
+            anyhow::bail!(
+                "strength must be finite and > 0 (got {}); strength = 0 produces an \
+                 infinite Welsch normalisation factor",
+                self.strength,
+            );
+        }
+
+        if !self.self_weight.is_finite() || self.self_weight < 0.0 {
+            anyhow::bail!("self_weight must be finite and >= 0 (got {})", self.self_weight,);
+        }
+
+        Ok(())
+    }
 }
+
+/// Hard ceiling on `patch_radius`. The fused kernels load a
+/// `(block + 2·patch_radius)²` SMEM tile; values above this run out of
+/// SMEM on RDNA-class GPUs.
+pub const MAX_PATCH_RADIUS: u32 = 16;
+
+/// Hard ceiling on `search_radius`. The windowed kernel SMEM tile is
+/// `(block + 2·patch_radius + 2·search_radius)² × stored_ch × 4` bytes;
+/// the per-q dispatch path is also gated on this so launch counts stay
+/// sane (`(2·a+1)²` launches per frame).
+pub const MAX_SEARCH_RADIUS: u32 = 8;
+
+/// Hard ceiling on `temporal_radius`. The ring buffer is sized for
+/// `2·t + 1` frames; values above this consume excessive device memory
+/// (e.g. 1080p YUV at `t = 16` ≈ 540 MB just for input).
+pub const MAX_TEMPORAL_RADIUS: u32 = 8;
 
 /// Stateful NLMeans denoiser. Maintains a ring of frames in
 /// `input_buf`; each `push_frame` uploads one frame, each `denoise`
@@ -256,7 +320,14 @@ struct LaunchCtx {
 }
 
 impl<R: Runtime> NlmDenoiser<R> {
+    /// Build a new denoiser. **Panics** if `params.validate()` fails;
+    /// the high-level [`crate::Denoiser`] runs validation first and
+    /// surfaces errors as `Result`, so most callers should prefer that.
     pub fn new(client: &ComputeClient<R>, params: NlmParams, width: u32, height: u32) -> Self {
+        params
+            .validate()
+            .expect("invalid NlmParams; call params.validate() first to surface this as Result");
+
         let stored_ch = params.channels.storage_count();
         let total_frames = params.total_frames();
         let pixels = (width * height) as usize;

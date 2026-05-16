@@ -858,3 +858,96 @@ fn bilateral_noisy_image_finite() {
         assert!((-0.01..=1.01).contains(&v), "pixel {i}: out-of-range output {v}");
     }
 }
+
+#[test]
+fn validate_rejects_oversized_patch_radius() {
+    let params = NlmParams {
+        patch_radius: MAX_PATCH_RADIUS + 1,
+        ..NlmParams::default()
+    };
+    assert!(params.validate().is_err());
+}
+
+#[test]
+fn validate_rejects_oversized_search_radius() {
+    let params = NlmParams {
+        search_radius: MAX_SEARCH_RADIUS + 1,
+        ..NlmParams::default()
+    };
+    assert!(params.validate().is_err());
+}
+
+#[test]
+fn validate_rejects_oversized_temporal_radius() {
+    let params = NlmParams {
+        temporal_radius: MAX_TEMPORAL_RADIUS + 1,
+        ..NlmParams::default()
+    };
+    assert!(params.validate().is_err());
+}
+
+#[test]
+fn validate_rejects_non_positive_strength() {
+    let zero = NlmParams {
+        strength: 0.0,
+        ..NlmParams::default()
+    };
+    assert!(zero.validate().is_err());
+
+    let nan = NlmParams {
+        strength: f32::NAN,
+        ..NlmParams::default()
+    };
+    assert!(nan.validate().is_err());
+
+    let inf = NlmParams {
+        strength: f32::INFINITY,
+        ..NlmParams::default()
+    };
+    assert!(inf.validate().is_err());
+}
+
+#[test]
+fn validate_rejects_negative_self_weight() {
+    let params = NlmParams {
+        self_weight: -0.1,
+        ..NlmParams::default()
+    };
+    assert!(params.validate().is_err());
+}
+
+#[test]
+fn validate_accepts_defaults() {
+    assert!(NlmParams::default().validate().is_ok());
+}
+
+/// Drives most weights toward zero by combining a near-maximum search
+/// radius with extremely low strength (large `h2_inv_norm`), and on
+/// noisy content so denominators land near the underflow guard in
+/// `nlm_finish`. The output must contain no `inf`/`nan` regardless.
+#[test]
+fn extreme_params_produce_finite_output() {
+    let client = make_client();
+    let w = 32;
+    let h = 32;
+    let frame = make_frame_with_noisy_region(w, h, 1, 0.1, 16, 16, 5, 0.9);
+
+    let params = NlmParams {
+        temporal_radius: 0,
+        search_radius: 2,
+        patch_radius: 2,
+        strength: 0.1,
+        self_weight: 1.0,
+        channels: ChannelMode::Luma,
+        prefilter: PrefilterMode::None,
+    };
+
+    let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
+    d.push_frame(&frame);
+    let result = d.denoise().unwrap().unwrap().to_vec();
+
+    for (i, &v) in result.iter().enumerate() {
+        assert!(v.is_finite(), "pixel {i}: non-finite output {v}");
+        assert!((-0.01..=1.01).contains(&v), "pixel {i}: out-of-range output {v}");
+    }
+}
