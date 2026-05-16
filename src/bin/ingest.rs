@@ -4,6 +4,8 @@
 //! decoder and the worker, and a [`WorkerDenoiser`] that hides the
 //! Luma/Chroma split required when the source is chroma-subsampled.
 
+use std::collections::VecDeque;
+
 use av_denoise::accelerate::Accelerator;
 use av_denoise::{
     ChannelMode,
@@ -90,6 +92,11 @@ pub struct WorkerDenoiser {
     layout: FrameLayout,
     luma: Option<Denoiser>,
     chroma: Option<Denoiser>,
+    // Source planes queued for passthrough when the corresponding denoiser
+    // is disabled. Only the *disabled* side's queue is ever populated. Popped
+    // 1:1 with the enabled side's output so temporal delays stay aligned.
+    luma_passthrough: VecDeque<Vec<u8>>,
+    chroma_passthrough: VecDeque<(Vec<u8>, Vec<u8>)>,
 }
 
 impl WorkerDenoiser {
@@ -135,7 +142,13 @@ impl WorkerDenoiser {
             None
         };
 
-        Ok(Self { layout, luma, chroma })
+        Ok(Self {
+            layout,
+            luma,
+            chroma,
+            luma_passthrough: VecDeque::new(),
+            chroma_passthrough: VecDeque::new(),
+        })
     }
 
     /// Push one planar frame. On `QueueFull` the caller should `recv` first
@@ -144,11 +157,16 @@ impl WorkerDenoiser {
         if let Some(d) = self.luma.as_mut() {
             let buf = u8_plane_to_f32(&planes.y);
             d.push_frame(&buf)?;
+        } else {
+            self.luma_passthrough.push_back(planes.y.clone());
         }
 
         if let Some(d) = self.chroma.as_mut() {
             let buf = interleave_uv_to_f32(&planes.u, &planes.v);
             d.push_frame(&buf)?;
+        } else {
+            self.chroma_passthrough
+                .push_back((planes.u.clone(), planes.v.clone()));
         }
 
         Ok(())
@@ -166,11 +184,28 @@ impl WorkerDenoiser {
             .transpose()?
             .flatten();
 
+        // A side that's disabled has no Denoiser to query; if the *enabled*
+        // side produced output, pop the matching source-plane frame from the
+        // disabled side's passthrough queue.
+        let luma_passthrough = if self.luma.is_none() && chroma_out.is_some() {
+            self.luma_passthrough.pop_front()
+        } else {
+            None
+        };
+
+        let chroma_passthrough = if self.chroma.is_none() && luma_out.is_some() {
+            self.chroma_passthrough.pop_front()
+        } else {
+            None
+        };
+
         if luma_out.is_none() && chroma_out.is_none() {
             return Ok(None);
         }
 
-        Ok(Some(self.assemble(luma_out, chroma_out)))
+        let planes = self.assemble(luma_out, chroma_out, luma_passthrough, chroma_passthrough);
+
+        Ok(Some(planes))
     }
 
     /// Drain temporal tails for both halves. `sink` is called once per
@@ -191,18 +226,23 @@ impl WorkerDenoiser {
         }
 
         // The two halves run in lock-step, so the number of flushed frames
-        // matches. If only one half is enabled the other yields a passthrough
-        // plane filled with neutral chroma / black luma.
+        // matches. For each emitted frame, the disabled side (if any) pops
+        // the matching source plane from its passthrough queue.
         let count = luma_buf.len().max(chroma_buf.len());
 
         for i in 0..count {
-            let y = luma_buf
-                .get(i)
-                .map(|v| f32_to_u8_plane(v))
-                .unwrap_or_else(|| vec![0u8; luma_pixels]);
+            let y = if let Some(buf) = luma_buf.get(i) {
+                f32_to_u8_plane(buf)
+            } else if let Some(src) = self.luma_passthrough.pop_front() {
+                src
+            } else {
+                vec![0u8; luma_pixels]
+            };
 
             let (u, v) = if let Some(packed) = chroma_buf.get(i) {
                 unpack_uv_from_f32(packed, chroma_pixels)
+            } else if let Some((src_u, src_v)) = self.chroma_passthrough.pop_front() {
+                (src_u, src_v)
             } else {
                 (vec![128u8; chroma_pixels], vec![128u8; chroma_pixels])
             };
@@ -210,21 +250,39 @@ impl WorkerDenoiser {
             sink(Planes { y, u, v });
         }
 
+        if !self.luma_passthrough.is_empty() || !self.chroma_passthrough.is_empty() {
+            tracing::warn!(
+                luma_remaining = self.luma_passthrough.len(),
+                chroma_remaining = self.chroma_passthrough.len(),
+                "passthrough queue not fully drained after flush",
+            );
+            self.luma_passthrough.clear();
+            self.chroma_passthrough.clear();
+        }
+
         Ok(())
     }
 
-    fn assemble(&self, luma: Option<Vec<f32>>, chroma: Option<Vec<f32>>) -> Planes {
+    fn assemble(
+        &self,
+        luma: Option<Vec<f32>>,
+        chroma: Option<Vec<f32>>,
+        luma_passthrough: Option<Vec<u8>>,
+        chroma_passthrough: Option<(Vec<u8>, Vec<u8>)>,
+    ) -> Planes {
         let luma_pixels = self.layout.luma_pixels();
         let chroma_pixels = self.layout.chroma_pixels();
 
-        let y = match luma {
-            Some(v) => f32_to_u8_plane(&v),
-            None => vec![0u8; luma_pixels],
+        let y = match (luma, luma_passthrough) {
+            (Some(v), _) => f32_to_u8_plane(&v),
+            (None, Some(src)) => src,
+            (None, None) => vec![0u8; luma_pixels],
         };
 
-        let (u, v) = match chroma {
-            Some(packed) => unpack_uv_from_f32(&packed, chroma_pixels),
-            None => (vec![128u8; chroma_pixels], vec![128u8; chroma_pixels]),
+        let (u, v) = match (chroma, chroma_passthrough) {
+            (Some(packed), _) => unpack_uv_from_f32(&packed, chroma_pixels),
+            (None, Some(src)) => src,
+            (None, None) => (vec![128u8; chroma_pixels], vec![128u8; chroma_pixels]),
         };
 
         Planes { y, u, v }
