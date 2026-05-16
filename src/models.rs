@@ -32,6 +32,7 @@ pub enum Accelerator {
 }
 
 /// Returns the enabled, default accelerators, in order of what to attempt.
+#[allow(dead_code)]
 pub fn get_default_accelerators() -> Vec<Accelerator> {
     use strum::IntoEnumIterator;
 

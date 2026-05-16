@@ -3,17 +3,7 @@ use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::{
-    BLOCK_1D,
-    COPY_GRID_1D,
-    H,
-    W,
-    block_sync,
-    make_padded_frame,
-    map_err,
-    shapes_with_ch,
-    stored_channels,
-};
+use super::{BLOCK_1D, COPY_GRID_1D, H, W, block_sync, make_padded_frame, shapes_with_ch, stored_channels};
 
 #[derive(Clone)]
 pub struct CopyInput {
@@ -46,8 +36,8 @@ impl<R: Runtime> Benchmark for CopyBench<R> {
                 &self.client,
                 CubeCount::new_1d(COPY_GRID_1D),
                 CubeDim::new_1d(BLOCK_1D),
-                unsafe { ArrayArg::from_raw_parts(args.src.clone(), len) },
-                unsafe { ArrayArg::from_raw_parts(args.dst.clone(), len) },
+                ArrayArg::from_raw_parts(args.src.clone(), len),
+                ArrayArg::from_raw_parts(args.dst.clone(), len),
                 len as u32,
                 total_threads,
             );

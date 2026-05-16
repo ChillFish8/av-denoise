@@ -106,10 +106,6 @@ pub fn shapes_with_ch(ch: u32) -> Vec<Vec<usize>> {
     vec![vec![W as usize, H as usize, ch as usize]]
 }
 
-pub fn map_err<E: core::fmt::Debug>(e: E) -> String {
-    format!("{e:?}")
-}
-
 /// Shared input shape for kernels that take one framebuffer and write
 /// one output of the same logical size (`dist_2d_weight`, its `_ref`
 /// twin, and `bilateral`).

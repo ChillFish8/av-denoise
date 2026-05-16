@@ -3,18 +3,7 @@ use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 
 use super::horizontal_sum::HSumInput;
-use super::{
-    BLOCK_X,
-    BLOCK_Y,
-    H,
-    PATCH_RADIUS,
-    W,
-    block_sync,
-    cube_count_2d,
-    cube_dim_2d,
-    h2_inv_norm,
-    map_err,
-};
+use super::{BLOCK_X, BLOCK_Y, H, PATCH_RADIUS, W, block_sync, cube_count_2d, cube_dim_2d, h2_inv_norm};
 
 pub struct VWeightBench<R: Runtime> {
     pub client: ComputeClient<R>,
@@ -39,8 +28,8 @@ impl<R: Runtime> Benchmark for VWeightBench<R> {
                 &self.client,
                 cube_count_2d(),
                 cube_dim_2d(),
-                unsafe { ArrayArg::from_raw_parts(args.input.clone(), pixels) },
-                unsafe { ArrayArg::from_raw_parts(args.output.clone(), pixels) },
+                ArrayArg::from_raw_parts(args.input.clone(), pixels),
+                ArrayArg::from_raw_parts(args.output.clone(), pixels),
                 h2_inv_norm(),
                 W,
                 H,

@@ -880,7 +880,7 @@ pub fn nlm_fused_single_window<N: Size>(
                         height,
                     );
                     let line_w = Vector::<f32, N>::empty().fill(weight);
-                    accum_reg = accum_reg + neighbor_pixel * line_w;
+                    accum_reg += neighbor_pixel * line_w;
                     weight_sum_reg += weight;
                     max_weight_reg = f32::max(max_weight_reg, weight);
                 }
@@ -1184,7 +1184,7 @@ pub fn nlm_fused_single_window_ref<N: Size>(
                         height,
                     );
                     let line_w = Vector::<f32, N>::empty().fill(weight);
-                    accum_reg = accum_reg + neighbor_pixel * line_w;
+                    accum_reg += neighbor_pixel * line_w;
                     weight_sum_reg += weight;
                     max_weight_reg = f32::max(max_weight_reg, weight);
                 }

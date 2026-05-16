@@ -436,13 +436,12 @@ impl<R: Runtime> NlmDenoiser<R> {
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(BLOCK_1D),
-                unsafe { ArrayArg::from_raw_parts(src.clone(), frame_size as usize) },
-                unsafe { ArrayArg::from_raw_parts(dst_handle.clone(), frame_size as usize) },
+                ArrayArg::from_raw_parts(src.clone(), frame_size as usize),
+                ArrayArg::from_raw_parts(dst_handle.clone(), frame_size as usize),
                 frame_size,
                 total_threads,
             )
-        }
-        ;
+        };
     }
 
     /// Duplicate the most recently pushed frame into the next ring slot.
@@ -728,7 +727,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         q_k: i32,
     ) -> Result<(), anyhow::Error> {
         let channels = self.params.channels.count();
-        let stored = self.params.channels.storage_count();
+        let _stored = self.params.channels.storage_count();
         let frame_t = self.phys_frame(center_t as i32);
         let frame_fwd = self.phys_frame(center_t as i32 + q_k);
         let frame_bwd = self.phys_frame(center_t as i32 - q_k);
@@ -794,7 +793,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// applied per q.
     fn dispatch_fused_single_window_iter(&self, ctx: &LaunchCtx, center_t: u32) -> Result<(), anyhow::Error> {
         let channels = self.params.channels.count();
-        let stored = self.params.channels.storage_count();
+        let _stored = self.params.channels.storage_count();
         let frame_t = self.phys_frame(center_t as i32);
 
         if self.use_reference {
@@ -1148,7 +1147,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(BLOCK_1D),
-                unsafe { ArrayArg::from_raw_parts(self.accum.clone(), ctx.frame_size) },
+                ArrayArg::from_raw_parts(self.accum.clone(), ctx.frame_size),
                 self.weight_sum_arg(ctx),
                 self.max_weight_arg(ctx),
                 ctx.frame_size as u32,
@@ -1170,7 +1169,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                 self.params.channels.storage_count() as usize,
                 self.input_arg(ctx),
                 self.output_arg(ctx, output_slot),
-                unsafe { ArrayArg::from_raw_parts(self.accum.clone(), ctx.frame_size) },
+                ArrayArg::from_raw_parts(self.accum.clone(), ctx.frame_size),
                 self.weight_sum_arg(ctx),
                 self.max_weight_arg(ctx),
                 self.phys_frame(center_t as i32),

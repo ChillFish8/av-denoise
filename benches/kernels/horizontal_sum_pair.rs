@@ -3,7 +3,7 @@ use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::{BLOCK_X, BLOCK_Y, H, PATCH_RADIUS, W, block_sync, cube_count_2d, cube_dim_2d, map_err};
+use super::{BLOCK_X, BLOCK_Y, H, PATCH_RADIUS, W, block_sync, cube_count_2d, cube_dim_2d};
 
 #[derive(Clone)]
 pub struct HSumPairInput {
@@ -43,10 +43,10 @@ impl<R: Runtime> Benchmark for HSumPairBench<R> {
                 &self.client,
                 cube_count_2d(),
                 cube_dim_2d(),
-                unsafe { ArrayArg::from_raw_parts(args.input_fwd.clone(), pixels) },
-                unsafe { ArrayArg::from_raw_parts(args.input_bwd.clone(), pixels) },
-                unsafe { ArrayArg::from_raw_parts(args.output_fwd.clone(), pixels) },
-                unsafe { ArrayArg::from_raw_parts(args.output_bwd.clone(), pixels) },
+                ArrayArg::from_raw_parts(args.input_fwd.clone(), pixels),
+                ArrayArg::from_raw_parts(args.input_bwd.clone(), pixels),
+                ArrayArg::from_raw_parts(args.output_fwd.clone(), pixels),
+                ArrayArg::from_raw_parts(args.output_bwd.clone(), pixels),
                 W,
                 H,
                 PATCH_RADIUS,

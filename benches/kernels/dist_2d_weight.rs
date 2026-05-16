@@ -16,7 +16,6 @@ use super::{
     cube_dim_2d,
     h2_inv_norm,
     make_padded_frame,
-    map_err,
     shapes_with_ch,
     stored_channels,
 };
@@ -52,8 +51,8 @@ impl<R: Runtime> Benchmark for DistWeightBench<R> {
                 cube_count_2d(),
                 cube_dim_2d(),
                 stored,
-                unsafe { ArrayArg::from_raw_parts(args.input.clone(), args.frame_len) },
-                unsafe { ArrayArg::from_raw_parts(args.output.clone(), pixels) },
+                ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
+                ArrayArg::from_raw_parts(args.output.clone(), pixels),
                 0u32,
                 0u32,
                 Q_X,

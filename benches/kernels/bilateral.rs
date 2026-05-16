@@ -15,7 +15,6 @@ use super::{
     cube_count_2d,
     cube_dim_2d,
     make_padded_frame,
-    map_err,
     shapes_with_ch,
     stored_channels,
 };
@@ -53,8 +52,8 @@ impl<R: Runtime> Benchmark for BilateralBench<R> {
                 cube_count_2d(),
                 cube_dim_2d(),
                 stored,
-                unsafe { ArrayArg::from_raw_parts(args.input.clone(), args.frame_len) },
-                unsafe { ArrayArg::from_raw_parts(args.output.clone(), pixels * stored) },
+                ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
+                ArrayArg::from_raw_parts(args.output.clone(), pixels * stored),
                 0u32,
                 1.0 / (2.0 * BILATERAL_SIGMA_S * BILATERAL_SIGMA_S),
                 1.0 / (2.0 * BILATERAL_SIGMA_R * BILATERAL_SIGMA_R),

@@ -16,6 +16,7 @@ fn make_uniform_frame(w: u32, h: u32, ch: u32, val: f32) -> Vec<f32> {
 
 /// Creates a frame with a patch of noise (not just a single pixel)
 /// so that NLMeans has matching noisy patches to work with.
+#[allow(clippy::too_many_arguments)]
 fn make_frame_with_noisy_region(
     w: u32,
     h: u32,

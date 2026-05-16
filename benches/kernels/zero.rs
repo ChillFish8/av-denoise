@@ -3,7 +3,7 @@ use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::{BLOCK_1D, COPY_GRID_1D, H, W, block_sync, map_err, shapes_with_ch, stored_channels};
+use super::{BLOCK_1D, COPY_GRID_1D, H, W, block_sync, shapes_with_ch, stored_channels};
 
 #[derive(Clone)]
 pub struct ZeroInput {
@@ -44,9 +44,9 @@ impl<R: Runtime> Benchmark for ZeroBench<R> {
                 &self.client,
                 CubeCount::new_1d(COPY_GRID_1D),
                 CubeDim::new_1d(BLOCK_1D),
-                unsafe { ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored) },
-                unsafe { ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels) },
-                unsafe { ArrayArg::from_raw_parts(args.max_weight.clone(), pixels) },
+                ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored),
+                ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels),
+                ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
                 (pixels * stored) as u32,
                 pixels as u32,
                 total_threads,

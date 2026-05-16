@@ -12,7 +12,6 @@ use super::{
     cube_count_2d,
     cube_dim_2d,
     make_padded_frame,
-    map_err,
     shapes_with_ch,
     stored_channels,
 };
@@ -48,8 +47,8 @@ impl<R: Runtime> Benchmark for DistanceRefBench<R> {
                 cube_count_2d(),
                 cube_dim_2d(),
                 stored,
-                unsafe { ArrayArg::from_raw_parts(args.input.clone(), args.frame_len) },
-                unsafe { ArrayArg::from_raw_parts(args.dist.clone(), pixels) },
+                ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
+                ArrayArg::from_raw_parts(args.dist.clone(), pixels),
                 0u32,
                 0u32,
                 Q_X,
