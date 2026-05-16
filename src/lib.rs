@@ -1,3 +1,4 @@
-mod models;
+pub mod accelerate;
+pub mod device;
 pub mod nlmeans;
-mod sniff;
+pub mod sniff;

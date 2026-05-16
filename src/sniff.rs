@@ -1,12 +1,11 @@
 use cubecl::prelude::*;
 
-use crate::models::Accelerator;
+use crate::accelerate::Accelerator;
 
 /// Probe each enabled accelerator and return the first one whose client
 /// can be created and synchronised. cubecl 0.10 kernels are fully
 /// asynchronous, so a successful `client.sync()` is sufficient to
 /// confirm the backend is usable — no test kernel needed.
-#[allow(dead_code)]
 pub fn sniff_best_accelerator(enable: &[Accelerator]) -> Option<Accelerator> {
     for accelerator in enable {
         let is_enabled = match accelerator {
@@ -30,7 +29,6 @@ pub fn sniff_best_accelerator(enable: &[Accelerator]) -> Option<Accelerator> {
     None
 }
 
-#[allow(dead_code)]
 fn probe_runtime<R: Runtime>(name: &'static str) -> bool {
     let device = <R::Device as Default>::default();
     let client = R::client(&device);
