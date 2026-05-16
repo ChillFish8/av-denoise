@@ -3,29 +3,33 @@ FROM archlinux:latest AS builder
 RUN pacman -Syu --noconfirm --needed \
     base-devel \
     git \
-    rust
+    rust \
+    clang \
+    nasm \
+    ffms2
 
 WORKDIR /build
 
-COPY Cargo.toml Cargo.lock build.rs ./
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-COPY models ./models
+COPY benches ./benches
 
-RUN cargo build --release --bin main --no-default-features --features cpu,vulkan
+RUN cargo build --release --bin av-denoise --no-default-features --features cpu,vulkan,binary-full
 
 
 FROM archlinux:latest AS runtime
 
 RUN pacman -Syu --noconfirm --needed \
     ffmpeg \
+    ffms2 \
     gcc-libs \
     vulkan-icd-loader \
-    vulkan-radeon
+    vulkan-radeon \
+    vulkan-intel
 
 WORKDIR /app
 
 # CPU works everywhere. Vulkan requires host-provided devices and driver/ICD files.
-COPY --from=builder /build/target/release/main /app/main
-COPY models/rt_ldr.bpk models/rt_ldr_small.bpk /app/models/
+COPY --from=builder /build/target/release/av-denoise /app/av-denoise
 
-ENTRYPOINT ["/app/main"]
+ENTRYPOINT ["/app/av-denoise"]
