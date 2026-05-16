@@ -15,14 +15,14 @@ rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }
 mimalloc = { version = "0.1", default-features = false }
-cubecl = { version = "0.9", features = ["std"] }
+cubecl = { version = "0.10", features = ["std"] }
 
 [dev-dependencies]
 futures = "0.3"
 
 [features]
-vulkan = ["cubecl/wgpu", "cubecl/wgpu-spirv"]
-metal = ["cubecl/wgpu", "cubecl/wgpu-msl"]
+vulkan = ["cubecl/vulkan"]
+metal = ["cubecl/metal"]
 cuda = ["cubecl/cuda"]
 rocm = ["cubecl/hip"]
 cpu = ["cubecl/cpu"]

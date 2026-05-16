@@ -155,25 +155,27 @@ fn bench_dist_2d_weight<R: Runtime>(
     let name = format!("dist_2d_weight_1080p_{ch_name}");
 
     run_bench(&name, backend, client, WARMUP_KERNEL, ITERS_KERNEL, || {
-        nlm_dist_2d_weight::launch::<R>(
-            client,
-            cube_count.clone(),
-            cube_dim,
-            unsafe { ArrayArg::from_raw_parts::<f32>(&input, frame.len(), stored_ch as usize) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&output, pixels, 1) },
-            ScalarArg::new(0u32),
-            ScalarArg::new(0u32),
-            ScalarArg::new(1i32),
-            ScalarArg::new(0i32),
-            ScalarArg::new(h2_inv_norm),
-            W,
-            H,
-            ch,
-            params.patch_radius,
-            BLOCK_X,
-            BLOCK_Y,
-        )
-        .unwrap();
+        unsafe {
+            nlm_dist_2d_weight::launch_unchecked::<R>(
+                client,
+                cube_count.clone(),
+                cube_dim,
+                stored_ch as usize,
+                unsafe { ArrayArg::from_raw_parts(input.clone(), frame.len()) },
+                unsafe { ArrayArg::from_raw_parts(output.clone(), pixels) },
+                0u32,
+                0u32,
+                1i32,
+                0i32,
+                h2_inv_norm,
+                W,
+                H,
+                ch,
+                params.patch_radius,
+                BLOCK_X,
+                BLOCK_Y,
+            );
+        }
     })
 }
 
@@ -203,26 +205,28 @@ fn bench_accumulate<R: Runtime>(
     let name = format!("accumulate_1080p_{ch_name}");
 
     run_bench(&name, backend, client, WARMUP_KERNEL, ITERS_KERNEL, || {
-        nlm_accumulate::launch::<R>(
-            client,
-            cube_count.clone(),
-            cube_dim,
-            unsafe { ArrayArg::from_raw_parts::<f32>(&input, frame.len(), stored_ch as usize) },
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(&accum, pixels * stored_ch as usize, stored_ch as usize)
-            },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&weight_sum, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&weights, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&weights, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&max_weight, pixels, 1) },
-            ScalarArg::new(0u32),
-            ScalarArg::new(0u32),
-            ScalarArg::new(1i32),
-            ScalarArg::new(0i32),
-            W,
-            H,
-        )
-        .unwrap();
+        unsafe {
+            nlm_accumulate::launch_unchecked::<R>(
+                client,
+                cube_count.clone(),
+                cube_dim,
+                stored_ch as usize,
+                unsafe { ArrayArg::from_raw_parts(input.clone(), frame.len()) },
+                unsafe {
+                    ArrayArg::from_raw_parts(accum.clone(), pixels * stored_ch as usize)
+                },
+                unsafe { ArrayArg::from_raw_parts(weight_sum.clone(), pixels) },
+                unsafe { ArrayArg::from_raw_parts(weights.clone(), pixels) },
+                unsafe { ArrayArg::from_raw_parts(weights.clone(), pixels) },
+                unsafe { ArrayArg::from_raw_parts(max_weight.clone(), pixels) },
+                0u32,
+                0u32,
+                1i32,
+                0i32,
+                W,
+                H,
+            );
+        }
     })
 }
 
@@ -251,26 +255,28 @@ fn bench_finish<R: Runtime>(client: &ComputeClient<R>, backend: &str, ch: u32, c
     let name = format!("finish_1080p_{ch_name}");
 
     run_bench(&name, backend, client, WARMUP_KERNEL, ITERS_KERNEL, || {
-        nlm_finish::launch::<R>(
-            client,
-            cube_count.clone(),
-            cube_dim,
-            unsafe { ArrayArg::from_raw_parts::<f32>(&input, frame.len(), stored_ch as usize) },
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(&output, pixels * stored_ch as usize, stored_ch as usize)
-            },
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(&accum, pixels * stored_ch as usize, stored_ch as usize)
-            },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&weight_sum, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&max_weight, pixels, 1) },
-            ScalarArg::new(0u32),
-            ScalarArg::new(1.0f32),
-            W,
-            H,
-            ch,
-        )
-        .unwrap();
+        unsafe {
+            nlm_finish::launch_unchecked::<R>(
+                client,
+                cube_count.clone(),
+                cube_dim,
+                stored_ch as usize,
+                unsafe { ArrayArg::from_raw_parts(input.clone(), frame.len()) },
+                unsafe {
+                    ArrayArg::from_raw_parts(output.clone(), pixels * stored_ch as usize)
+                },
+                unsafe {
+                    ArrayArg::from_raw_parts(accum.clone(), pixels * stored_ch as usize)
+                },
+                unsafe { ArrayArg::from_raw_parts(weight_sum.clone(), pixels) },
+                unsafe { ArrayArg::from_raw_parts(max_weight.clone(), pixels) },
+                0u32,
+                1.0f32,
+                W,
+                H,
+                ch,
+            );
+        }
     })
 }
 
@@ -296,26 +302,27 @@ fn bench_bilateral<R: Runtime>(
     let name = format!("bilateral_1080p_{ch_name}");
 
     run_bench(&name, backend, client, WARMUP_KERNEL, ITERS_KERNEL, || {
-        nlm_bilateral::launch::<R>(
-            client,
-            cube_count.clone(),
-            cube_dim,
-            unsafe { ArrayArg::from_raw_parts::<f32>(&input, frame.len(), stored_ch as usize) },
-            unsafe {
-                ArrayArg::from_raw_parts::<f32>(&output, pixels * stored_ch as usize, stored_ch as usize)
-            },
-            ScalarArg::new(0u32),
-            ScalarArg::new(1.0 / (2.0 * BILATERAL_SIGMA_S * BILATERAL_SIGMA_S)),
-            ScalarArg::new(1.0 / (2.0 * BILATERAL_SIGMA_R * BILATERAL_SIGMA_R)),
-            W,
-            H,
-            ch,
-            stored_ch,
-            radius,
-            BLOCK_X,
-            BLOCK_Y,
-        )
-        .unwrap();
+        unsafe {
+            nlm_bilateral::launch_unchecked::<R>(
+                client,
+                cube_count.clone(),
+                cube_dim,
+                stored_ch as usize,
+                unsafe { ArrayArg::from_raw_parts(input.clone(), frame.len()) },
+                unsafe {
+                    ArrayArg::from_raw_parts(output.clone(), pixels * stored_ch as usize)
+                },
+                0u32,
+                1.0 / (2.0 * BILATERAL_SIGMA_S * BILATERAL_SIGMA_S),
+                1.0 / (2.0 * BILATERAL_SIGMA_R * BILATERAL_SIGMA_R),
+                W,
+                H,
+                ch,
+                radius,
+                BLOCK_X,
+                BLOCK_Y,
+            );
+        }
     })
 }
 

@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 
 /// GPU→GPU buffer copy. Uses a strided loop so the grid can be capped
 /// under the 65 535 1D dispatch limit.
-#[cube(launch)]
+#[cube(launch_unchecked)]
 pub fn gpu_copy(
     src: &Array<f32>,
     dst: &mut Array<f32>,
@@ -20,7 +20,7 @@ pub fn gpu_copy(
 /// loop covers all three up to `weight_len`; a tail loop finishes the
 /// channel-padded remainder of `accum` (which is always at least as
 /// long as `weight_sum` and `max_weight`).
-#[cube(launch)]
+#[cube(launch_unchecked)]
 pub fn gpu_zero_buffers(
     accum: &mut Array<f32>,
     weight_sum: &mut Array<f32>,

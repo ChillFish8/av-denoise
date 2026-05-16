@@ -38,21 +38,23 @@ impl<R: Runtime> Benchmark for HSumPairBench<R> {
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let pixels = (W * H) as usize;
-        nlm_horizontal_sum_pair::launch::<R>(
-            &self.client,
-            cube_count_2d(),
-            cube_dim_2d(),
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.input_fwd, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.input_bwd, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.output_fwd, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.output_bwd, pixels, 1) },
-            W,
-            H,
-            PATCH_RADIUS,
-            BLOCK_X,
-            BLOCK_Y,
-        )
-        .map_err(map_err)
+        unsafe {
+            nlm_horizontal_sum_pair::launch_unchecked::<R>(
+                &self.client,
+                cube_count_2d(),
+                cube_dim_2d(),
+                unsafe { ArrayArg::from_raw_parts(args.input_fwd.clone(), pixels) },
+                unsafe { ArrayArg::from_raw_parts(args.input_bwd.clone(), pixels) },
+                unsafe { ArrayArg::from_raw_parts(args.output_fwd.clone(), pixels) },
+                unsafe { ArrayArg::from_raw_parts(args.output_bwd.clone(), pixels) },
+                W,
+                H,
+                PATCH_RADIUS,
+                BLOCK_X,
+                BLOCK_Y,
+            );
+        }
+        Ok(())
     }
 
     fn name(&self) -> String {

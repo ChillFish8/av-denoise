@@ -41,16 +41,18 @@ impl<R: Runtime> Benchmark for CopyBench<R> {
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let len = (W * H) as usize * stored_channels(self.ch) as usize;
         let total_threads = COPY_GRID_1D * BLOCK_1D;
-        gpu_copy::launch::<R>(
-            &self.client,
-            CubeCount::new_1d(COPY_GRID_1D),
-            CubeDim::new_1d(BLOCK_1D),
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.src, len, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.dst, len, 1) },
-            len as u32,
-            total_threads,
-        )
-        .map_err(map_err)
+        unsafe {
+            gpu_copy::launch_unchecked::<R>(
+                &self.client,
+                CubeCount::new_1d(COPY_GRID_1D),
+                CubeDim::new_1d(BLOCK_1D),
+                unsafe { ArrayArg::from_raw_parts(args.src.clone(), len) },
+                unsafe { ArrayArg::from_raw_parts(args.dst.clone(), len) },
+                len as u32,
+                total_threads,
+            );
+        }
+        Ok(())
     }
 
     fn name(&self) -> String {

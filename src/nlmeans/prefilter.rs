@@ -87,23 +87,25 @@ fn run_bilateral<R: Runtime>(
     let inv_two_sigma_s_sq = 1.0 / (2.0 * sigma_s * sigma_s);
     let inv_two_sigma_r_sq = 1.0 / (2.0 * sigma_r * sigma_r);
 
-    nlm_bilateral::launch::<R>(
-        client,
-        CubeCount::new_2d(ctx.width.div_ceil(BLOCK_X), ctx.height.div_ceil(BLOCK_Y)),
-        CubeDim::new_2d(BLOCK_X, BLOCK_Y),
-        unsafe { ArrayArg::from_raw_parts::<f32>(ctx.input_buf, total, stored_ch) },
-        unsafe { ArrayArg::from_raw_parts::<f32>(ctx.reference_buf, total, stored_ch) },
-        ScalarArg::new(ctx.frame),
-        ScalarArg::new(inv_two_sigma_s_sq),
-        ScalarArg::new(inv_two_sigma_r_sq),
-        ctx.width,
-        ctx.height,
-        ctx.channels,
-        ctx.stored_ch,
-        radius,
-        BLOCK_X,
-        BLOCK_Y,
-    )?;
+    unsafe {
+        nlm_bilateral::launch_unchecked::<R>(
+            client,
+            CubeCount::new_2d(ctx.width.div_ceil(BLOCK_X), ctx.height.div_ceil(BLOCK_Y)),
+            CubeDim::new_2d(BLOCK_X, BLOCK_Y),
+            stored_ch,
+            unsafe { ArrayArg::from_raw_parts(ctx.input_buf.clone(), total) },
+            unsafe { ArrayArg::from_raw_parts(ctx.reference_buf.clone(), total) },
+            ctx.frame,
+            inv_two_sigma_s_sq,
+            inv_two_sigma_r_sq,
+            ctx.width,
+            ctx.height,
+            ctx.channels,
+            radius,
+            BLOCK_X,
+            BLOCK_Y,
+        );
+    }
 
     Ok(())
 }

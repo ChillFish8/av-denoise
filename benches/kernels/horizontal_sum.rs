@@ -29,19 +29,21 @@ impl<R: Runtime> Benchmark for HSumBench<R> {
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let pixels = (W * H) as usize;
-        nlm_horizontal_sum::launch::<R>(
-            &self.client,
-            cube_count_2d(),
-            cube_dim_2d(),
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.input, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.output, pixels, 1) },
-            W,
-            H,
-            PATCH_RADIUS,
-            BLOCK_X,
-            BLOCK_Y,
-        )
-        .map_err(map_err)
+        unsafe {
+            nlm_horizontal_sum::launch_unchecked::<R>(
+                &self.client,
+                cube_count_2d(),
+                cube_dim_2d(),
+                unsafe { ArrayArg::from_raw_parts(args.input.clone(), pixels) },
+                unsafe { ArrayArg::from_raw_parts(args.output.clone(), pixels) },
+                W,
+                H,
+                PATCH_RADIUS,
+                BLOCK_X,
+                BLOCK_Y,
+            );
+        }
+        Ok(())
     }
 
     fn name(&self) -> String {

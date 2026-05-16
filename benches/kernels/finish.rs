@@ -60,22 +60,25 @@ impl<R: Runtime> Benchmark for FinishBench<R> {
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let pixels = (W * H) as usize;
         let stored = stored_channels(self.ch) as usize;
-        nlm_finish::launch::<R>(
-            &self.client,
-            cube_count_2d(),
-            cube_dim_2d(),
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.input, args.frame_len, stored) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.output, pixels * stored, stored) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.accum, pixels * stored, stored) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.weight_sum, pixels, 1) },
-            unsafe { ArrayArg::from_raw_parts::<f32>(&args.max_weight, pixels, 1) },
-            ScalarArg::new(0u32),
-            ScalarArg::new(1.0f32),
-            W,
-            H,
-            self.ch,
-        )
-        .map_err(map_err)
+        unsafe {
+            nlm_finish::launch_unchecked::<R>(
+                &self.client,
+                cube_count_2d(),
+                cube_dim_2d(),
+                stored,
+                unsafe { ArrayArg::from_raw_parts(args.input.clone(), args.frame_len) },
+                unsafe { ArrayArg::from_raw_parts(args.output.clone(), pixels * stored) },
+                unsafe { ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored) },
+                unsafe { ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels) },
+                unsafe { ArrayArg::from_raw_parts(args.max_weight.clone(), pixels) },
+                0u32,
+                1.0f32,
+                W,
+                H,
+                self.ch,
+            );
+        }
+        Ok(())
     }
 
     fn name(&self) -> String {

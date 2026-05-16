@@ -15,14 +15,14 @@ pub(super) fn clamp_coord(value: i32, #[comptime] limit: u32) -> u32 {
 /// edges on both axes. The frame index is trusted; callers always pass
 /// a physical slot that references loaded data.
 #[cube]
-pub(super) fn read_clamped_line(
-    buf: &Array<Line<f32>>,
+pub(super) fn read_clamped_line<N: Size>(
+    buf: &Array<Vector<f32, N>>,
     x: i32,
     y: i32,
     frame: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
-) -> Line<f32> {
+) -> Vector<f32, N> {
     let clamped_x = clamp_coord(x, width);
     let clamped_y = clamp_coord(y, height);
     let idx = (frame * height + clamped_y) * width + clamped_x;
@@ -32,22 +32,22 @@ pub(super) fn read_clamped_line(
 /// Unchecked variant of `read_clamped_line`. The caller guarantees
 /// `x ∈ [0, width)` and `y ∈ [0, height)`.
 #[cube]
-pub(super) fn read_line(
-    buf: &Array<Line<f32>>,
+pub(super) fn read_line<N: Size>(
+    buf: &Array<Vector<f32, N>>,
     x: u32,
     y: u32,
     frame: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
-) -> Line<f32> {
+) -> Vector<f32, N> {
     let idx = (frame * height + y) * width + x;
     buf[idx as usize]
 }
 
-/// Sum of squared lane differences over a `Line`. The loop is fully
+/// Sum of squared lane differences over a vector. The loop is fully
 /// unrolled at compile time because `channels` is comptime.
 #[cube]
-pub(super) fn line_sum_sq(diff: Line<f32>, #[comptime] channels: u32) -> f32 {
+pub(super) fn line_sum_sq<N: Size>(diff: Vector<f32, N>, #[comptime] channels: u32) -> f32 {
     let mut sum = 0.0f32;
     #[unroll]
     for c in 0..channels {
@@ -75,9 +75,9 @@ pub(super) fn channel_scale(#[comptime] channels: u32) -> f32 {
 /// weighted by `weight_bwd`. A single per-thread interior check covers
 /// both reads, with a clamped fallback for the border.
 #[cube]
-pub(super) fn accumulate_pair(
-    input: &Array<Line<f32>>,
-    accum: &mut Array<Line<f32>>,
+pub(super) fn accumulate_pair<N: Size>(
+    input: &Array<Vector<f32, N>>,
+    accum: &mut Array<Vector<f32, N>>,
     weight_sum: &mut Array<f32>,
     max_weight: &mut Array<f32>,
     global_x: u32,
@@ -120,8 +120,8 @@ pub(super) fn accumulate_pair(
     let cur_max = max_weight[pixel_idx];
     max_weight[pixel_idx] = f32::max(f32::max(weight_fwd, weight_bwd), cur_max);
 
-    let line_w_fwd = Line::<f32>::empty(input.line_size()).fill(weight_fwd);
-    let line_w_bwd = Line::<f32>::empty(input.line_size()).fill(weight_bwd);
+    let line_w_fwd = Vector::<f32, N>::empty().fill(weight_fwd);
+    let line_w_bwd = Vector::<f32, N>::empty().fill(weight_bwd);
     let cur = accum[pixel_idx];
     accum[pixel_idx] = cur + fwd_pixel * line_w_fwd + bwd_pixel * line_w_bwd;
 
