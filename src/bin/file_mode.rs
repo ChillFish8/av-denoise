@@ -255,7 +255,7 @@ fn run_worker(
                         flush_worker(&mut prev, &mut pending, &tx)?;
                     }
 
-                    wd = Some(WorkerDenoiser::new(&opts, layout)?);
+                    wd = Some(WorkerDenoiser::create(&opts, layout)?);
                     current_scene = Some(scene_idx);
                     pending.clear();
 

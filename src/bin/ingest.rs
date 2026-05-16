@@ -137,7 +137,7 @@ pub struct WorkerDenoiser {
 }
 
 impl WorkerDenoiser {
-    pub fn new(opts: &CliOptions, layout: FrameLayout) -> Result<Self, anyhow::Error> {
+    pub fn create(opts: &CliOptions, layout: FrameLayout) -> Result<Self, anyhow::Error> {
         let (chroma_w, chroma_h) = layout.chroma_dims();
 
         if chroma_w == 0 || chroma_h == 0 {
@@ -160,7 +160,7 @@ impl WorkerDenoiser {
 
         let luma = denoise_luma
             .then(|| {
-                Denoiser::new(
+                Denoiser::create(
                     &opts.accelerators,
                     &opts.device,
                     layout.width,
@@ -172,7 +172,7 @@ impl WorkerDenoiser {
 
         let chroma = denoise_chroma
             .then(|| {
-                Denoiser::new(
+                Denoiser::create(
                     &opts.accelerators,
                     &opts.device,
                     chroma_w,
@@ -184,7 +184,7 @@ impl WorkerDenoiser {
 
         let yuv = denoise_yuv
             .then(|| {
-                Denoiser::new(
+                Denoiser::create(
                     &opts.accelerators,
                     &opts.device,
                     layout.width,

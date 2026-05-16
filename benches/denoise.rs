@@ -93,7 +93,7 @@ fn bench_push_recv(
     let ch = channel_mode.count();
     let frame = make_synthetic_frame(W, H, ch);
 
-    let mut denoiser = Denoiser::new(accelerators, device, W, H, options(channel_mode, mode, prefilter))?;
+    let mut denoiser = Denoiser::create(accelerators, device, W, H, options(channel_mode, mode, prefilter))?;
     let accelerator = denoiser.selected_accelerator();
 
     // Fill the temporal window so subsequent push/recv steady-state lines up.

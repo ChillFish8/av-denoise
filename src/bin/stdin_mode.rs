@@ -40,7 +40,7 @@ pub fn run_stdin(opts: &CliOptions) -> Result<(), anyhow::Error> {
         .with_pixel_aspect(pixel_aspect)
         .write_header(stdout.lock())?;
 
-    let mut wd = WorkerDenoiser::new(opts, layout)?;
+    let mut wd = WorkerDenoiser::create(opts, layout)?;
 
     tracing::info!(
         accelerator = ?opts.accelerators,

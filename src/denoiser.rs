@@ -150,7 +150,7 @@ impl Denoiser {
     /// Probe each accelerator in `accelerators` in order and build a
     /// denoiser on the first one that's available. `device` lets the
     /// caller pick a non-default device for the chosen runtime.
-    pub fn new(
+    pub fn create(
         accelerators: &[Accelerator],
         device: &Device,
         width: u32,
@@ -420,7 +420,7 @@ mod tests {
 
     #[test]
     fn spatial_denoise_roundtrip() {
-        let mut d = Denoiser::new(
+        let mut d = Denoiser::create(
             &[Accelerator::Cpu],
             &Device::Default,
             16,
@@ -445,7 +445,7 @@ mod tests {
                 self_weight: None,
             })
             .build();
-        let result = Denoiser::new(&[Accelerator::Cpu], &Device::Default, 16, 16, bad);
+        let result = Denoiser::create(&[Accelerator::Cpu], &Device::Default, 16, 16, bad);
 
         match result {
             Err(DenoiserError::Other(_)) => {},
@@ -456,7 +456,7 @@ mod tests {
 
     #[test]
     fn push_after_pending_returns_queue_full() {
-        let mut d = Denoiser::new(
+        let mut d = Denoiser::create(
             &[Accelerator::Cpu],
             &Device::Default,
             16,
