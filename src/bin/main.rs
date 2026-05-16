@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use av_denoise::accelerate::{Accelerator, get_default_accelerators};
-use av_denoise::{ChannelMode, DenoisingMode, Device, PrefilterMode};
+use av_denoise::{DenoisingMode, Device, PrefilterMode};
 use clap::{Parser, Subcommand};
 use strum_macros::EnumString;
 
@@ -9,7 +9,7 @@ mod file_mode;
 mod ingest;
 mod stdin_mode;
 
-use ingest::CliOptions;
+use ingest::{BinaryChannelIntent, CliOptions};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -26,27 +26,45 @@ pub enum Algorithm {
 }
 
 /// Which channels of each frame should be denoised.
-#[derive(Debug, Copy, Clone, Default, clap::ValueEnum)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
 pub enum CliChannelMode {
     /// Denoise only the luma (Y) plane. Chroma is passed through.
-    #[default]
     Luma,
     /// Denoise only the chroma (U, V) planes. Luma is passed through.
     Chroma,
-    /// Denoise luma and chroma. Internally this runs two `Denoiser`s
-    /// (one per plane group) so the chroma half can operate at the
-    /// source's native subsampled resolution.
+    /// Single-pass fused YUV denoising via the library's 3-channel
+    /// kernel. Requires a YUV444 source and cannot be combined with
+    /// other modes.
     Yuv,
 }
 
-impl From<CliChannelMode> for ChannelMode {
-    fn from(v: CliChannelMode) -> Self {
-        match v {
-            CliChannelMode::Luma => ChannelMode::Luma,
-            CliChannelMode::Chroma => ChannelMode::Chroma,
-            CliChannelMode::Yuv => ChannelMode::Yuv,
-        }
+fn resolve_channel_intent(modes: &[CliChannelMode]) -> Result<BinaryChannelIntent, anyhow::Error> {
+    if modes.is_empty() {
+        anyhow::bail!("--channel-mode must contain at least one value");
     }
+
+    let has_yuv = modes.contains(&CliChannelMode::Yuv);
+    if has_yuv && modes.len() > 1 {
+        anyhow::bail!("--channel-mode `yuv` cannot be combined with other modes");
+    }
+
+    let has_luma = modes.contains(&CliChannelMode::Luma);
+    let has_chroma = modes.contains(&CliChannelMode::Chroma);
+    let luma_count = modes.iter().filter(|m| **m == CliChannelMode::Luma).count();
+    let chroma_count = modes.iter().filter(|m| **m == CliChannelMode::Chroma).count();
+    let yuv_count = modes.iter().filter(|m| **m == CliChannelMode::Yuv).count();
+
+    if luma_count > 1 || chroma_count > 1 || yuv_count > 1 {
+        anyhow::bail!("--channel-mode entries must be unique");
+    }
+
+    Ok(match (has_yuv, has_luma, has_chroma) {
+        (true, _, _) => BinaryChannelIntent::YuvFused,
+        (false, true, true) => BinaryChannelIntent::LumaChroma,
+        (false, true, false) => BinaryChannelIntent::Luma,
+        (false, false, true) => BinaryChannelIntent::Chroma,
+        (false, false, false) => unreachable!("empty list rejected above"),
+    })
 }
 
 /// Fast and efficient video denoising.
@@ -95,13 +113,17 @@ struct Args {
     #[arg(short, long, default_value = "default")]
     device: Device,
 
-    /// Which channels of each frame to denoise.
+    /// Which channels of each frame to denoise (comma-delimited).
     ///
-    /// `yuv` denoises everything; `luma` only Y; `chroma` only U/V.
-    /// When the source is subsampled (4:2:0, 4:2:2) the chroma half
-    /// runs at the native subsampled resolution.
-    #[arg(long, value_enum, default_value_t = CliChannelMode::Luma)]
-    channel_mode: CliChannelMode,
+    /// `luma` denoises only Y; `chroma` only U/V at the source's
+    /// native subsampled resolution. `luma,chroma` runs both as two
+    /// independent denoisers (full-res Y + subsampled UV).
+    ///
+    /// `yuv` invokes the library's fused 3-channel kernel in one
+    /// pass. It requires a YUV444 source and cannot be combined with
+    /// any other mode.
+    #[arg(long, value_enum, value_delimiter = ',', default_values_t = vec![CliChannelMode::Luma])]
+    channel_mode: Vec<CliChannelMode>,
 
     /// Reference clip used for NLM weight calculation.
     ///
@@ -213,11 +235,12 @@ fn main() -> anyhow::Result<()> {
     };
 
     let prefilter = parse_prefilter(&args.prefilter)?;
+    let intent = resolve_channel_intent(&args.channel_mode)?;
 
     let opts = CliOptions {
         accelerators: args.accelerators,
         device: args.device,
-        channel_mode: args.channel_mode.into(),
+        intent,
         mode,
         prefilter,
     };

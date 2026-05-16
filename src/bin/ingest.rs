@@ -65,12 +65,47 @@ pub struct Planes {
     pub v: Vec<u8>,
 }
 
+/// Resolved channel-denoising intent driven by the binary CLI.
+///
+/// Distinct from the library's [`ChannelMode`] because the binary can
+/// run *multiple* library `Denoiser`s in lockstep (luma + chroma split)
+/// or a single fused 3-channel denoiser, depending on the user's
+/// `--channel-mode` choice and the source's chroma subsampling.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum BinaryChannelIntent {
+    /// Denoise luma only; chroma passes through.
+    Luma,
+    /// Denoise chroma only; luma passes through.
+    Chroma,
+    /// Denoise both luma and chroma as two independent denoisers.
+    /// Chroma runs at the source's native subsampled resolution.
+    LumaChroma,
+    /// Single library `Denoiser` running the fused 3-channel kernel.
+    /// Requires a YUV444 source — validated at ingest setup time.
+    YuvFused,
+}
+
+impl BinaryChannelIntent {
+    /// Reject the intent if the source's subsampling is incompatible.
+    pub fn validate_for_source(self, layout: FrameLayout) -> Result<(), anyhow::Error> {
+        match self {
+            BinaryChannelIntent::YuvFused if layout.subsampling != Subsampling::Yuv444 => {
+                anyhow::bail!(
+                    "--channel-mode yuv requires a YUV444 source (got {:?}); convert the input first (e.g. ffmpeg -pix_fmt yuv444p)",
+                    layout.subsampling
+                );
+            },
+            _ => Ok(()),
+        }
+    }
+}
+
 /// CLI-shaped option set forwarded from `main` into ingest modules.
 #[derive(Debug, Clone)]
 pub struct CliOptions {
     pub accelerators: Vec<Accelerator>,
     pub device: Device,
-    pub channel_mode: ChannelMode,
+    pub intent: BinaryChannelIntent,
     pub mode: DenoisingMode,
     pub prefilter: PrefilterMode,
 }
@@ -92,6 +127,8 @@ pub struct WorkerDenoiser {
     layout: FrameLayout,
     luma: Option<Denoiser>,
     chroma: Option<Denoiser>,
+    /// Set when intent is `YuvFused`; mutually exclusive with `luma`/`chroma`.
+    yuv: Option<Denoiser>,
     // Source planes queued for passthrough when the corresponding denoiser
     // is disabled. Only the *disabled* side's queue is ever populated. Popped
     // 1:1 with the enabled side's output so temporal delays stay aligned.
@@ -112,40 +149,56 @@ impl WorkerDenoiser {
             );
         }
 
-        let (denoise_luma, denoise_chroma) = match opts.channel_mode {
-            ChannelMode::Luma => (true, false),
-            ChannelMode::Chroma => (false, true),
-            ChannelMode::Yuv => (true, true),
+        opts.intent.validate_for_source(layout)?;
+
+        let (denoise_luma, denoise_chroma, denoise_yuv) = match opts.intent {
+            BinaryChannelIntent::Luma => (true, false, false),
+            BinaryChannelIntent::Chroma => (false, true, false),
+            BinaryChannelIntent::LumaChroma => (true, true, false),
+            BinaryChannelIntent::YuvFused => (false, false, true),
         };
 
-        let luma = if denoise_luma {
-            Some(Denoiser::new(
-                &opts.accelerators,
-                &opts.device,
-                layout.width,
-                layout.height,
-                opts.denoiser_options(ChannelMode::Luma),
-            )?)
-        } else {
-            None
-        };
+        let luma = denoise_luma
+            .then(|| {
+                Denoiser::new(
+                    &opts.accelerators,
+                    &opts.device,
+                    layout.width,
+                    layout.height,
+                    opts.denoiser_options(ChannelMode::Luma),
+                )
+            })
+            .transpose()?;
 
-        let chroma = if denoise_chroma {
-            Some(Denoiser::new(
-                &opts.accelerators,
-                &opts.device,
-                chroma_w,
-                chroma_h,
-                opts.denoiser_options(ChannelMode::Chroma),
-            )?)
-        } else {
-            None
-        };
+        let chroma = denoise_chroma
+            .then(|| {
+                Denoiser::new(
+                    &opts.accelerators,
+                    &opts.device,
+                    chroma_w,
+                    chroma_h,
+                    opts.denoiser_options(ChannelMode::Chroma),
+                )
+            })
+            .transpose()?;
+
+        let yuv = denoise_yuv
+            .then(|| {
+                Denoiser::new(
+                    &opts.accelerators,
+                    &opts.device,
+                    layout.width,
+                    layout.height,
+                    opts.denoiser_options(ChannelMode::Yuv),
+                )
+            })
+            .transpose()?;
 
         Ok(Self {
             layout,
             luma,
             chroma,
+            yuv,
             luma_passthrough: VecDeque::new(),
             chroma_passthrough: VecDeque::new(),
         })
@@ -154,6 +207,12 @@ impl WorkerDenoiser {
     /// Push one planar frame. On `QueueFull` the caller should `recv` first
     /// and retry — the error propagates upwards unchanged.
     pub fn push(&mut self, planes: &Planes) -> Result<(), DenoiserError> {
+        if let Some(d) = self.yuv.as_mut() {
+            let buf = interleave_yuv_to_f32(&planes.y, &planes.u, &planes.v);
+            d.push_frame(&buf)?;
+            return Ok(());
+        }
+
         if let Some(d) = self.luma.as_mut() {
             let buf = u8_plane_to_f32(&planes.y);
             d.push_frame(&buf)?;
@@ -175,6 +234,13 @@ impl WorkerDenoiser {
     /// Block until each enabled half emits one frame; reassemble a planar frame.
     /// Returns `Ok(None)` if neither half had pending output.
     pub fn recv(&mut self) -> Result<Option<Planes>, anyhow::Error> {
+        if let Some(d) = self.yuv.as_mut() {
+            return match d.recv_frame()? {
+                Some(packed) => Ok(Some(unpack_yuv_from_f32(&packed, self.layout.luma_pixels()))),
+                None => Ok(None),
+            };
+        }
+
         let luma_out = self.luma.as_mut().map(|d| d.recv_frame()).transpose()?.flatten();
 
         let chroma_out = self
@@ -211,6 +277,12 @@ impl WorkerDenoiser {
     /// Drain temporal tails for both halves. `sink` is called once per
     /// emitted planar frame.
     pub fn flush(&mut self, mut sink: impl FnMut(Planes)) -> Result<(), anyhow::Error> {
+        if let Some(d) = self.yuv.as_mut() {
+            let pixels = self.layout.luma_pixels();
+            d.flush(|packed| sink(unpack_yuv_from_f32(&packed, pixels)))?;
+            return Ok(());
+        }
+
         let luma_pixels = self.layout.luma_pixels();
         let chroma_pixels = self.layout.chroma_pixels();
 
@@ -298,6 +370,42 @@ fn f32_to_u8_plane(plane: &[f32]) -> Vec<u8> {
         .iter()
         .map(|&v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
         .collect()
+}
+
+/// Interleave Y/U/V planes (all equal length, i.e. YUV444) into
+/// `[Y0,U0,V0, Y1,U1,V1, …]` f32 in `[0, 1]` — the layout the library's
+/// fused 3-channel kernel expects.
+fn interleave_yuv_to_f32(y: &[u8], u: &[u8], v: &[u8]) -> Vec<f32> {
+    debug_assert_eq!(y.len(), u.len());
+    debug_assert_eq!(u.len(), v.len());
+
+    let mut out = Vec::with_capacity(y.len() * 3);
+
+    for ((&yy, &uu), &vv) in y.iter().zip(u.iter()).zip(v.iter()) {
+        out.push(yy as f32 / 255.0);
+        out.push(uu as f32 / 255.0);
+        out.push(vv as f32 / 255.0);
+    }
+
+    out
+}
+
+/// Reverse of `interleave_yuv_to_f32`: take a `[Y,U,V,Y,U,V,…]` f32
+/// buffer (length `3 * pixels`) and split into three u8 planes.
+fn unpack_yuv_from_f32(packed: &[f32], pixels: usize) -> Planes {
+    debug_assert_eq!(packed.len(), 3 * pixels);
+
+    let mut y = Vec::with_capacity(pixels);
+    let mut u = Vec::with_capacity(pixels);
+    let mut v = Vec::with_capacity(pixels);
+
+    for chunk in packed.chunks_exact(3) {
+        y.push((chunk[0].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+        u.push((chunk[1].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+        v.push((chunk[2].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+    }
+
+    Planes { y, u, v }
 }
 
 /// Interleave separate U and V planes into [U,V,U,V,...] f32 in [0, 1].
