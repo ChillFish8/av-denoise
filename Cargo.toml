@@ -41,10 +41,11 @@ metal = ["cubecl/metal"]
 cuda = ["cubecl/cuda"]
 rocm = ["cubecl/hip"]
 cpu = ["cubecl/cpu"]
-default = ["cpu", "vulkan"]
 binary = ["clap", "mimalloc"]
 ffms2 = ["dep:ffms2", "av-scenechange"]
 stdin = ["y4m"]
+binary-full = ["binary", "ffms2", "stdin"]
+default = ["cpu", "vulkan"]
 
 [[bench]]
 name = "nlmeans"
