@@ -24,15 +24,15 @@ denoise-file input output *ARGS:
 
 [arg("input", long="input", short="i")]
 [arg("output", long="output", short="o")]
-[arg("patch_radius", long="patch-radius")]
-[arg("search_radius", long="search-radius")]
+[arg("patch", long="patch")]
+[arg("search", long="search")]
 [arg("strength", long="strength")]
-denoise-file-ffmpeg input output patch_radius="4" search_radius="2" strength="1.2":
+denoise-file-ffmpeg input output patch="9" search="5" strength="1.2":
     #!/usr/bin/env bash
     set -euo pipefail
     ffmpeg -hide_banner -stats -stats_period 0.5 -loglevel info \
         -init_hw_device opencl=ocl:0.0 -filter_hw_device ocl \
-        -y -i "{{input}}" -vf "hwupload,nlmeans_opencl=s=1.2:p=9:pc=9:r=5:rc=5,hwdownload,format=yuv420p" -c:v ffv1 "{{output}}"
+        -y -i "{{input}}" -vf "hwupload,nlmeans_opencl=s={{strength}}:p={{patch}}:pc={{patch}}:r={{search}}:rc={{search}},hwdownload,format=yuv420p" -c:v ffv1 "{{output}}"
 
 
 [arg("input", long="input", short="i")]

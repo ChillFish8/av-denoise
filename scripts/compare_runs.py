@@ -103,6 +103,10 @@ RUNS: list[Run] = [
         "av_denoise_spatial_chroma_default",
         f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- --temporal-radius 0 --channel-mode chroma",
     ),
+    Run(
+        "ffmpeg_opencl_nlmeans",
+        f"just denoise-file-ffmpeg -i {SOURCE_VIDEO} -o {{out_file}} --patch 9 --search 5 --strength 1.2",
+    ),
 ]
 
 # ---------------------------------------------------------------------------
