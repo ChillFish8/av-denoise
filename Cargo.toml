@@ -49,7 +49,9 @@ stdin = ["y4m"]
 [[bench]]
 name = "nlmeans"
 harness = false
+required-features = ["clap"]
 
 [[bench]]
 name = "bench_kernels"
 harness = false
+required-features = ["clap"]
