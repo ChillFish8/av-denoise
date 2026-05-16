@@ -24,6 +24,16 @@ denoise-file input output *ARGS:
 
 [arg("input", long="input", short="i")]
 [arg("output", long="output", short="o")]
+[arg("filter", long="filter")]
+denoise-file-ffmpeg input output filter="nlmeans":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ffmpeg -hide_banner -stats -stats_period 0.5 -loglevel info \
+        -y -i "{{input}}" -vf "{{filter}}" -c:v ffv1 "{{output}}"
+
+
+[arg("input", long="input", short="i")]
+[arg("output", long="output", short="o")]
 [arg("image", long="image")]
 docker-test-run image="localhost/av-denoise:latest" input="data/test.mkv" output="data/test.denoised.mkv" *ARGS:
     #!/usr/bin/env bash
