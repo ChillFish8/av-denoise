@@ -1,9 +1,3 @@
-//! Stateful NLMeans denoiser: ring-buffer state, per-frame upload,
-//! pyramid build, and the public push / recv / flush API. The actual
-//! kernel dispatch lives in [`super::dispatch`] in a sibling
-//! `impl<R: Runtime> NlmDenoiser<R>` block — fields are `pub(super)`
-//! so that file can read them directly.
-
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -66,7 +60,7 @@ pub struct NlmDenoiser<R: Runtime> {
     /// Index of the next output slot to write into.
     pub(super) next_output_slot: usize,
     /// CPU scratch reused by the sync `denoise()` path via
-    /// `Pending::wait_into` — avoids a per-frame allocation.
+    /// `Pending::wait_into`. Avoids a per-frame allocation.
     pub(super) output_scratch: Vec<f32>,
 
     pub(super) h2_inv_norm: f32,
@@ -437,7 +431,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     ///
     /// Output handles are double-buffered (`outputs: [Handle; 2]`), so
     /// the caller may keep up to `self.outputs.len()` (= 2) `Pending`s
-    /// in flight at once — frame N+1's kernels overlap frame N's
+    /// in flight at once, so frame N+1's kernels overlap frame N's
     /// readback. A third concurrent submit would alias the oldest
     /// pending's output handle and silently corrupt results, so the
     /// high-level [`crate::Denoiser`] enforces that cap via its
@@ -488,7 +482,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     ///
     /// Returns `Ok(None)` if not enough frames have been pushed yet.
     /// On success returns `Ok(Some(&[f32]))` borrowing a reusable
-    /// internal buffer — copy it out (e.g. `to_vec()`) if you need to
+    /// internal buffer; copy it out (e.g. `to_vec()`) if you need to
     /// hold the data across another `denoise`/`flush`/`push_frame` call.
     pub fn denoise(&mut self) -> Result<Option<&[f32]>, anyhow::Error> {
         let Some(pending) = self.denoise_submit()? else {

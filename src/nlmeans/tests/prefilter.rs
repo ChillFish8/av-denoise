@@ -1,8 +1,3 @@
-//! Prefilter-path tests: externally-supplied reference clip and the
-//! built-in GPU bilateral prefilter. Identity tests (reference == input)
-//! must reproduce the no-prefilter baseline; smoke tests verify the
-//! kernel produces finite, in-range output on noisy input.
-
 use super::helpers::*;
 use crate::nlmeans::*;
 

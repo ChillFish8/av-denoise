@@ -1,5 +1,3 @@
-//! Public helper roundtrips and numerical-edge regression.
-
 use super::helpers::*;
 use crate::nlmeans::*;
 

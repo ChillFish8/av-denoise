@@ -1,6 +1,3 @@
-//! Shared test fixtures. Re-exported from sibling test modules via
-//! `use super::helpers::*;`.
-
 use cubecl::prelude::*;
 use cubecl::wgpu::WgpuRuntime;
 

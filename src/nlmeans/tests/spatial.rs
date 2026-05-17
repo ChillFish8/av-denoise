@@ -1,8 +1,3 @@
-//! Single-frame (k=0) fused-path tests. These exercise the
-//! `nlm_dist_2d_weight` + `nlm_accumulate` + `nlm_finish` pipeline at
-//! varying strengths and channel modes, plus the symmetry / clamp
-//! regression guards.
-
 use super::helpers::*;
 use crate::nlmeans::*;
 

@@ -1,9 +1,3 @@
-//! End-to-end benchmark of the public `Denoiser` library API.
-//!
-//! Builds a [`Denoiser`] for each accelerator that can initialise,
-//! then drives a steady-state push/recv loop at 1920×1080 over a few
-//! channel-mode × denoising-mode configurations and reports throughput.
-
 use std::time::{Duration, Instant};
 
 use av_denoise::accelerate::Accelerator;
@@ -179,7 +173,7 @@ fn main() {
     // worker thread can codegen the (2R+1)²-unrolled windowed NLM kernels
     // at large --search-radius. See src/bin/main.rs for the full rationale.
     if std::env::var_os("RUST_MIN_STACK").is_none() {
-        // SAFETY: single-threaded at entry — no race possible.
+        // SAFETY: single-threaded at entry, no race possible.
         unsafe { std::env::set_var("RUST_MIN_STACK", "16777216") };
     }
 
@@ -201,7 +195,13 @@ fn main() {
     // Side-by-side ordering: each temporal config is followed by its
     // motion-compensation variant so the cost delta from `--motion-compensation`
     // is visible on adjacent rows.
-    let configs: &[(&str, ChannelMode, DenoisingMode, PrefilterMode, MotionCompensationMode)] = &[
+    let configs: &[(
+        &str,
+        ChannelMode,
+        DenoisingMode,
+        PrefilterMode,
+        MotionCompensationMode,
+    )] = &[
         (
             "spatial_luma",
             ChannelMode::Luma,

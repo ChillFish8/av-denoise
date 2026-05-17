@@ -1,6 +1,3 @@
-//! `NlmParams::validate` accept/reject matrix. Each test exercises one
-//! failure mode so a regression points directly at the broken rule.
-
 use crate::nlmeans::*;
 
 #[test]

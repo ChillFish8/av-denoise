@@ -1,7 +1,3 @@
-//! Motion-vector analyse pass dispatch. Hierarchical block-matching:
-//! coarse pass on the `/2` pyramid level seeds a fine pass at full
-//! resolution; result is a per-block i16x2 MV field per neighbour.
-
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 

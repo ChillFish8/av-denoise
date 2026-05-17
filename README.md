@@ -154,130 +154,156 @@ av-denoise file \
 
 ## Binary usage
 
-```angular2html
+```
 Fast and efficient video denoising
 
 Usage: av-denoise [OPTIONS] <COMMAND>
 
 Commands:
-  file   Denoise a video file with scene-aware parallel processing
-  stdin  Denoise a y4m stream from stdin and emit y4m to stdout
+  file   Denoise a video file, splitting work by scene
+  stdin  Denoise a y4m stream coming in on stdin, writing y4m on stdout
   help   Print this message or the help of the given subcommand(s)
 
 Options:
   -a, --algorithm <ALGORITHM>
-          Denoising algorithm.
-          
-          Only `nlmeans` is currently implemented.
-          
+          Denoising algorithm to run.
+
+          Only `nlmeans` is currently available.
+
           [default: nlmeans]
 
   -A, --accelerators <ACCELERATORS>
-          Hardware accelerator priority list (comma-delimited).
-          
-          The runtime is selected by probing each accelerator in order and taking the first one that initialises successfully. If none work, the binary exits with an error.
-          
-          Defaults to every backend the binary was compiled with.
-          
+          Which hardware backends to try, in order of preference.
+
+          The first backend that initialises is used. If none work the program exits with an error. The list is comma-separated, for example `vulkan,cpu`.
+
           [default: vulkan cpu]
 
   -d, --device <DEVICE>
-          Specific device to bind to on the selected accelerator.
-          
-          Accepted forms:
-          
-          `default` — backend-chosen default device.
-          
-          `discrete[:N]` — discrete GPU at ordinal N (default 0). Honoured by CUDA, ROCm, and wgpu.
-          
-          `integrated[:N]` — integrated GPU at ordinal N. wgpu only.
-          
-          `virtual[:N]` — virtual GPU at ordinal N. wgpu only.
-          
-          `cpu` — software/CPU device.
-          
+          Which device to use on the chosen backend.
+
+          Accepted values:
+
+          `default` lets the backend pick.
+
+          `discrete[:N]` picks the Nth discrete GPU (default 0). Works on CUDA, ROCm, and Vulkan.
+
+          `integrated[:N]` picks the Nth integrated GPU. Vulkan only.
+
+          `virtual[:N]` picks the Nth virtual GPU. Vulkan only.
+
+          `cpu` uses the software backend.
+
           [default: default]
 
       --channel-mode <CHANNEL_MODE>
-          Which channels of each frame to denoise (comma-delimited).
-          
-          `luma` denoises only Y; `chroma` only U/V at the source's native subsampled resolution. `luma,chroma` runs both as two independent denoisers (full-res Y + subsampled UV).
-          
-          `yuv` invokes the library's fused 3-channel kernel in one pass. It requires a YUV444 source and cannot be combined with any other mode.
+          Which planes of the video to clean (comma-separated).
+
+          `luma` cleans only the brightness plane.
+
+          `chroma` cleans only the colour planes at their native size.
+
+          `luma,chroma` cleans both as two independent passes, which is usually what you want for noisy footage.
+
+          `yuv` cleans all three planes in one fused pass. This needs a YUV444 source and cannot be combined with the other modes.
 
           Possible values:
-          - luma:   Denoise only the luma (Y) plane. Chroma is passed through
-          - chroma: Denoise only the chroma (U, V) planes. Luma is passed through
-          - yuv:    Single-pass fused YUV denoising via the library's 3-channel kernel. Requires a YUV444 source and cannot be combined with other modes
-          
+          - luma:   Clean only the brightness plane (Y). Colour passes through
+          - chroma: Clean only the colour planes (U, V). Brightness passes through
+          - yuv:    Clean all three planes together in one pass. Needs a YUV444 source and cannot be combined with the other modes
+
           [default: luma]
 
       --prefilter <PREFILTER>
-          Reference clip used for NLM weight calculation.
-          
-          `none` disables prefiltering and uses the noisy input directly for both weight calculation and pixel accumulation.
-          
-          `bilateral:<sigma_s>,<sigma_r>` runs an on-GPU bilateral prefilter; `sigma_s` is the spatial sigma in pixels and `sigma_r` is the range sigma in `[0, 1]` intensity units. A sensible starting point is `bilateral:3.0,0.02`.
-          
+          Reference image used when comparing patches.
+
+          `none` uses the noisy input directly (the cheapest option).
+
+          `bilateral:<sigma_s>,<sigma_r>` runs a quick on-GPU bilateral blur first, then compares patches against that cleaner image. `sigma_s` is the spatial blur radius in pixels and `sigma_r` is the colour-similarity threshold in `[0, 1]`. A good starting point is `bilateral:3.0,0.02`.
+
+          Prefiltering keeps more detail at the cost of one extra GPU pass per frame.
+
           [default: none]
 
       --temporal-radius <TEMPORAL_RADIUS>
-          Temporal radius for temporal-aware denoising.
-          
-          `0` (default) runs spatial-only denoising — each output frame depends only on the matching input frame. Values `> 0` enable temporal denoising over a `2 * radius + 1` frame window centred on the current frame; higher values give stronger noise reduction at the cost of latency and memory.
-          
-          In `file` mode, temporal context is reset at every scene boundary detected by av-scenechange, so increasing the radius never blends frames across cuts.
-          
+          How many neighbouring frames to look at on each side when cleaning a frame.
+
+          `0` (default) means no temporal blending: each frame is cleaned on its own.
+
+          Values above `0` look at that many frames before and after the current one. Larger values give stronger cleanup but use more memory and add latency.
+
+          In `file` mode this is reset at every scene change, so raising it never causes blending across cuts.
+
           [default: 0]
 
       --search-radius <SEARCH_RADIUS>
-          Override NLM search-window radius. Library default: 2.
-          
-          Higher values find more candidate patches at the cost of work quadratic in this value. Bounded by the library's `MAX_SEARCH_RADIUS`.
+          How far away to look for similar patches inside a frame.
+
+          Larger values find more matches but cost quadratically more work. Library default is 2.
 
       --patch-radius <PATCH_RADIUS>
-          Override NLM patch radius. Library default: 4.
-          
-          Patch is `(2*patch_radius + 1)` square. Larger patches preserve structure better at the cost of higher GPU memory. Bounded by the library's `MAX_PATCH_RADIUS`.
+          Size of each patch being compared. The patch is `(2*patch_radius + 1)` pixels square.
+
+          Larger patches preserve fine structure better but cost more GPU memory. Library default is 4.
 
       --strength <STRENGTH>
-          Override NLM filter strength (sigma). Library default: 1.2.
-          
-          Higher = more smoothing. Must be finite and > 0. Acts as the shared default for both planes; `--luma-strength` and `--chroma-strength` take precedence when set.
+          Cleaning strength. Higher numbers smooth more.
+
+          Must be a finite number greater than 0. Library default is 1.2.
+
+          This value applies to both planes unless `--luma-strength` or `--chroma-strength` is set.
 
       --luma-strength <LUMA_STRENGTH>
-          Override strength for the luma denoiser only. Falls back to `--strength` (or the library default) when unset. Ignored when luma isn't being denoised or when `--channel-mode yuv` is used (the fused kernel can't tune planes independently)
+          Strength override for the brightness plane only.
+
+          Falls back to `--strength` (or the library default) when not set. Ignored when luma is not being denoised, or when `--channel-mode yuv` is used.
 
       --chroma-strength <CHROMA_STRENGTH>
-          Override strength for the chroma denoiser only. Falls back to `--strength` (or the library default) when unset. Ignored when chroma isn't being denoised or when `--channel-mode yuv` is used
+          Strength override for the colour planes only.
+
+          Falls back to `--strength` (or the library default) when not set. Ignored when chroma is not being denoised, or when `--channel-mode yuv` is used.
 
       --self-weight <SELF_WEIGHT>
-          Override the centre pixel's self-weight in NLM averaging. Library default: 1.0. Must be finite and >= 0
+          How much weight to give the centre pixel itself when averaging.
+
+          Library default is 1.0. Must be a finite number `>= 0`. Setting to 0 gives pure NLM (centre pixel only counts if a similar patch was found nearby).
 
       --motion-compensation
-          Enable MVTools-style motion compensation for temporal denoising.
+          Turn on motion compensation for temporal denoising.
 
-          Estimates per-block motion between the centre frame and each temporal neighbour, then warps neighbours into spatial alignment before NLM weighting. Greatly improves quality on heavy-motion content (anime, fast pans, action) where the temporal path would otherwise smear edges or collapse to spatial-only.
+          When the camera or content moves between frames, the brightness at the same `(x, y)` is different content in each frame. Without help, temporal cleanup will blur moving edges.
 
-          No-op when `--temporal-radius 0`.
+          Motion compensation looks at where each block of pixels moved between frames, then shifts neighbour frames to line up with the current frame before cleaning. This keeps detail sharp on anime, fast pans, and action footage.
+
+          Has no effect when `--temporal-radius 0`.
 
       --mc-blksize <MC_BLKSIZE>
-          Motion-compensation block size in pixels (must be even).
+          Size of each motion-search block, in pixels. Must be even.
+
+          Larger blocks are more stable but track motion less accurately on small details.
 
           [default: 16]
 
       --mc-overlap <MC_OVERLAP>
-          Motion-compensation block overlap in pixels. Must satisfy `overlap < blksize` so the step (`blksize - overlap`) is positive.
+          How many pixels neighbouring motion blocks may overlap.
+
+          Must be less than `--mc-blksize`. Higher overlap smooths the transitions between blocks but does more work.
 
           [default: 8]
 
       --mc-search <MC_SEARCH>
-          Motion-compensation search radius at the finest pyramid level (in pixels). The coarse pass uses the same radius on the `/2` image so the effective reach is doubled.
+          How many pixels of motion to search for at the finest level.
+
+          The coarse pyramid pass reaches further (search radius times 2 for a 2-level pyramid), so for typical content the default is fine. Raise it for very fast motion.
 
           [default: 4]
 
       --mc-pyramid-levels <MC_PYRAMID_LEVELS>
-          Pyramid levels for hierarchical motion estimation. `1` disables the coarse pass; `2` adds a `/2` coarse pass that seeds the fine refinement.
+          How many levels the motion-search pyramid uses.
+
+          `1` does a single full-resolution search (cheaper, weaker on large motion).
+
+          `2` (default) does a coarse pass on a half-size image first, then refines at full resolution. This handles much larger motion at modest extra cost.
 
           [default: 2]
 

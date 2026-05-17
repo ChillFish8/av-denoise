@@ -1,7 +1,3 @@
-//! NLM parameters and channel layout. Pure data + validation; no
-//! kernel dispatch lives here, so `NlmDenoiser` can keep its
-//! construction-time checks in one cheap module.
-
 use super::{MotionCompensationMode, PrefilterMode};
 
 /// SSD normalisation reference, matching FFmpeg's nlmeans (255² for
@@ -118,7 +114,7 @@ impl NlmParams {
 
     /// Reject parameter combinations that would either fail to launch
     /// (kernels hitting SMEM/register limits) or produce numerically
-    /// degenerate output. Called automatically by `NlmDenoiser::new` —
+    /// degenerate output. Called automatically by `NlmDenoiser::new`;
     /// callers building params manually can invoke it directly to
     /// surface errors before construction.
     pub fn validate(&self) -> Result<(), anyhow::Error> {

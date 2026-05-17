@@ -1,9 +1,3 @@
-//! Per-frame kernel dispatch for [`NlmDenoiser`]. Lives in its own
-//! file so `denoiser.rs` can focus on lifecycle (state machine, ring
-//! buffer, public API) and this module owns everything launch-related:
-//! arg getters, the per-q dispatch helpers, motion-compensation sweep,
-//! and the top-level `run_denoise_kernels` orchestrator.
-
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
@@ -42,7 +36,7 @@ pub(super) struct LaunchCtx {
     pub(super) cube_count: CubeCount,
     pub(super) cube_dim: CubeDim,
     /// Alternate shape used by `nlm_accumulate` / `nlm_finish` and the
-    /// small-tile `nlm_dist_2d_weight(_ref)` kernels — see
+    /// small-tile `nlm_dist_2d_weight(_ref)` kernels. See
     /// [`super::BLOCK_X_THIN`].
     pub(super) thin_cube_count: CubeCount,
     pub(super) thin_cube_dim: CubeDim,

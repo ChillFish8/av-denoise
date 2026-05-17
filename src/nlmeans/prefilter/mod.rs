@@ -1,9 +1,3 @@
-//! Prefilter plumbing. Each variant of [`PrefilterMode`] either
-//! supplies the reference clip externally or is dispatched on the GPU
-//! during `push_frame`. The reference clip is then consumed by the
-//! `_ref` distance kernels so weight calculation sees a cleaner image
-//! than the noisy input.
-
 mod bilateral;
 
 pub use bilateral::bilateral_radius;

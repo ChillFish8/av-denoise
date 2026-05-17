@@ -1,8 +1,3 @@
-//! Per-kernel benchmarks (CubeCL `Benchmark` framework, device timing).
-//!
-//! Run: `cargo bench --bench bench_kernels --features vulkan`
-//! Override sample count: `BENCH_NUM_SAMPLES=N` (default 15).
-
 use cubecl::prelude::*;
 
 mod kernels;

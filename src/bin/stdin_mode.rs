@@ -1,5 +1,3 @@
-//! Single-thread y4m stdin → denoise → y4m stdout pipeline.
-
 use std::io::{stdin, stdout};
 
 use av_denoise::DenoiserError;

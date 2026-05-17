@@ -1,7 +1,3 @@
-//! Separable path tests (`patch_radius > SEPARABLE_THRESHOLD`). The
-//! separable kernels split the 2D box filter into horizontal + vertical
-//! passes so the per-pixel cost stays linear in `patch_radius`.
-
 use super::helpers::*;
 use crate::nlmeans::*;
 

@@ -1,7 +1,3 @@
-//! Bilateral prefilter variant. Runs a joint spatial+range Gaussian
-//! filter on the noisy input to produce a reference clip used by the
-//! `_ref` distance kernels.
-
 use cubecl::prelude::*;
 
 use super::PrefilterCtx;

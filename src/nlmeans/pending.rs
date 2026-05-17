@@ -1,8 +1,3 @@
-//! In-flight readback handle. Returned by
-//! [`super::NlmDenoiser::denoise_submit`]; consume with
-//! [`Pending::wait`] or [`Pending::wait_into`] to retrieve the
-//! denoised frame.
-
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;

@@ -1,17 +1,3 @@
-//! ffms2 file ingestion + scene-parallel denoising.
-//!
-//! Pipeline:
-//!  1. Open the input with `av_decoders::Decoder` (ffms2 backend).
-//!  2. Detect scene boundaries with `av_scenechange`.
-//!  3. Re-open the decoder and stream frames sequentially. Each frame is
-//!     tagged with the index of the scene it belongs to and dispatched to
-//!     worker `scene_idx % N`. Workers each own a [`WorkerDenoiser`] that's
-//!     rebuilt at every scene boundary, so temporal context never crosses
-//!     a scene cut.
-//!  4. Workers emit `(global_frame_idx, Planes)` tuples to a coordinator
-//!     thread that buffers out-of-order arrivals in a `BTreeMap` and writes
-//!     the contiguous prefix to a y4m stdout encoder.
-
 use std::collections::BTreeMap;
 use std::io::stdout;
 use std::path::Path;

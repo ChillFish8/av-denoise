@@ -1,6 +1,3 @@
-//! Multi-frame ring behaviour: window priming, leading/trailing
-//! mirrors, flush semantics, frame-count parity across push + flush.
-
 use super::helpers::*;
 use crate::nlmeans::*;
 

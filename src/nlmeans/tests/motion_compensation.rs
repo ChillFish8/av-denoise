@@ -1,7 +1,3 @@
-//! Motion-compensation end-to-end smoke tests. Verifies that the
-//! pyramid build, analyse, and warp dispatches run without crashing
-//! and that uniform / moving inputs produce sensible output.
-
 use super::helpers::*;
 use crate::nlmeans::*;
 
@@ -171,7 +167,7 @@ fn motion_compensation_translating_square_preserves_centre() {
     }
 
     // The centre of the centre-frame's square (15, 15) should still
-    // look brightly square-like. We allow significant tolerance —
+    // look brightly square-like. We allow significant tolerance:
     // temporal blending will pull it toward the background even with
     // MC because the warping is integer-pixel and the square's edges
     // may not align perfectly across all neighbours. The assertion

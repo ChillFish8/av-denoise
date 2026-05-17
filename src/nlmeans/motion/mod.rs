@@ -1,14 +1,3 @@
-//! Motion compensation plumbing. When active, the denoiser estimates
-//! per-block motion between the centre frame and each temporal
-//! neighbour, then warps the neighbours into spatial alignment with the
-//! centre before the NLM temporal weighting kicks in. The temporal
-//! distance / accumulate kernels then read neighbour pixels from a
-//! parallel "compensated" ring buffer instead of `input_buf` directly.
-//!
-//! Inspired by MVTools' `mv.Super` / `mv.Analyse` / `mv.Compensate`
-//! pipeline, simplified to integer-pixel (`pel=1`) motion with a
-//! two-level pyramid for hierarchical search.
-
 mod analyse;
 mod compensate;
 mod pyramid;
@@ -59,7 +48,7 @@ pub const DEFAULT_OVERLAP: u32 = 8;
 /// reaches motion up to roughly ±12 pixels at the finest scale.
 pub const DEFAULT_SEARCH_RADIUS: u32 = 4;
 /// Default number of pyramid levels. `2` gives a single `/2` coarse
-/// pass — enough to handle most heavy-motion anime while keeping the
+/// pass, enough to handle most heavy-motion anime while keeping the
 /// kernel count manageable.
 pub const DEFAULT_PYRAMID_LEVELS: u32 = 2;
 

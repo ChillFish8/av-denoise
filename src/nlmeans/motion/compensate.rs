@@ -1,7 +1,3 @@
-//! Compensate (warp) pass dispatch. Takes the MV field produced by
-//! `analyse` and produces an aligned copy of the neighbour frame in
-//! the compensated ring buffer.
-
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 

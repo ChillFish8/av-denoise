@@ -84,7 +84,7 @@ pub fn make_padded_frame(w: u32, h: u32, ch: u32) -> Vec<f32> {
 }
 
 /// Welsch coefficient for the bench-default parameter set. Channel mode
-/// is irrelevant here — `NlmParams::h2_inv_norm` only reads `patch_radius`
+/// is irrelevant here; `NlmParams::h2_inv_norm` only reads `patch_radius`
 /// and `strength`.
 pub fn h2_inv_norm() -> f32 {
     NlmParams {

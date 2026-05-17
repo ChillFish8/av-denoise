@@ -1,9 +1,3 @@
-//! Backend-agnostic device selector. Each cubecl runtime exposes a
-//! different `Device` type — `CudaDevice { index }`, `AmdDevice { index }`,
-//! `WgpuDevice` (a variant enum), and the unit `CpuDevice`. [`Device`]
-//! is a unified description that the library translates into the
-//! concrete type for the runtime it ends up using.
-
 use std::str::FromStr;
 
 /// Where to run the compute. The library maps each variant onto the

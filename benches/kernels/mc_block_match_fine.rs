@@ -11,7 +11,7 @@ const SEARCH_RADIUS: u32 = 4;
 
 /// Fine refinement pass at full resolution. Reads no seed (the bench
 /// uses `use_seed = 0` so the kernel cost is bounded purely by the
-/// `(2·r + 1)²` search window per block — fair across runs even if
+/// `(2·r + 1)²` search window per block; fair across runs even if
 /// the coarse bench tuning changes).
 pub struct BlockMatchFineBench<R: Runtime> {
     pub client: ComputeClient<R>,

@@ -10,8 +10,8 @@ use cubecl::terminate;
 /// Overlap handling: pixels inside a block's interior take the block's
 /// MV directly. Pixels in the overlap band of two adjacent blocks
 /// (relevant when `step < blksize`) use the closest block's MV (no
-/// blending in v1) — this is the "winner-block" rule and is documented
-/// to be a v1 simplification of MVTools' raised-cosine blend.
+/// blending in v1). This "winner-block" rule is a v1 simplification
+/// of MVTools' raised-cosine blend.
 #[cube(launch_unchecked)]
 pub fn nlm_mc_warp<N: Size>(
     src: &Array<Vector<f32, N>>,

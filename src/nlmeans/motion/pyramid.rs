@@ -1,7 +1,3 @@
-//! Pyramid-build dispatch for the motion-estimation hierarchy. Lives
-//! alongside `analyse` and `compensate` so each step's Rust-side glue
-//! is colocated with its kernel-launch pattern.
-
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 

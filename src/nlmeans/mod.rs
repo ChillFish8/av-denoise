@@ -1,19 +1,3 @@
-//! NLMeans denoiser internals. Split into focused submodules:
-//! - [`params`] — `NlmParams`, `ChannelMode`, validation, limit constants.
-//! - [`pending`] — `Pending<R>` async readback handle.
-//! - [`denoiser`] — `NlmDenoiser<R>` struct + state machine + push /
-//!   recv / flush API.
-//! - [`dispatch`] — per-frame kernel dispatch and the MC sweep,
-//!   attached to `NlmDenoiser` via a second `impl` block.
-//! - [`kernels`] — `#[cube]` GPU kernels.
-//! - [`motion`] — motion-compensation mode + analyse / compensate
-//!   dispatch wrappers.
-//! - [`prefilter`] — reference-clip prefilters (external + bilateral).
-//!
-//! `mod.rs` itself only re-exports the public surface, declares the
-//! shared block-size constants used across dispatch helpers, and
-//! exposes the small `u8` / `u16` normalisation helpers.
-
 pub mod kernels;
 pub mod motion;
 pub mod prefilter;
@@ -39,7 +23,7 @@ pub const BLOCK_Y: u32 = 8;
 
 /// Cube shape for per-pixel kernels with no SMEM tile (`nlm_accumulate`,
 /// `nlm_finish`) and the small-tile `nlm_dist_2d_weight(_ref)` kernels.
-/// On RDNA-class GPUs these benchmark 10–25% faster at (32, 16) than at
+/// On RDNA-class GPUs these benchmark 10 to 25% faster at (32, 16) than at
 /// the tile-heavy default, because they're memory-latency-bound and the
 /// extra threads hide load latency.
 pub const BLOCK_X_THIN: u32 = 32;

@@ -1,21 +1,3 @@
-//! Grouped motion-compensation benches.
-//!
-//! Two layers, both at 1080p:
-//!
-//! 1. **Per-kernel timings** — the four MC kernels (downscale,
-//!    block-match coarse, block-match fine, warp) run individually so
-//!    regressions in any single kernel surface quickly. These share
-//!    the structs defined under `benches/kernels/` so the numbers
-//!    line up 1:1 with the per-kernel scoreboard in `bench_kernels`.
-//!
-//! 2. **End-to-end pipeline timings** — temporal denoise with and
-//!    without `--motion-compensation`, both eager and pipelined,
-//!    printed side-by-side per channel mode. Lets you eyeball the
-//!    real-world cost of enabling MC.
-//!
-//! Run with `cargo bench --bench motion --features vulkan -- --device discrete:1`
-//! (the `--device` default stays at `default` for CI / other users).
-
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
