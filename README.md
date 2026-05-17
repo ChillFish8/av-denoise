@@ -54,7 +54,54 @@ This primarily has the following impacts:
 Since both the CUDA and ROCm backends are very heavy in terms of dependencies, I recommend just using the `vulkan`
 backend for those devices. It should be more or less the same performance, without all the library headache.
 
-## Binary Usage
+## Example commands
+
+**Y/UV Denoise - ROCm/Vulkan - On GPU 1 - Light Denoise - Spatial - strength=luma:1.2,choma:1.2**
+```bash
+av-denoise file \
+  --accelerators rocm,vulkan \
+  --device discrete:1 \
+  --channel-mode luma,chroma \
+  --strength 1.2 \
+  --input ./sample.mkv \
+    | ffmpeg -hide_banner -loglevel info -y -f yuv4mpegpipe -i - -c:v ffv1 ./output.mkv
+```
+
+**Y/UV Denoise - Vulkan - On iGPU 0 - Split Denoise - Temporal (radius=1) - strength=luma:2.0,choma:1.5**
+```bash
+av-denoise file \
+  --accelerators vulkan \
+  --device integrated:0 \
+  --channel-mode luma,chroma \
+  --temporal-radius 1 \
+  --luma-strength 2.0 \
+  --chroma-strength 1.5 \
+  --input ./sample.mkv \
+    | ffmpeg -hide_banner -loglevel info -y -f yuv4mpegpipe -i - -c:v ffv1 ./output.mkv
+```
+
+**Y-Only Denoise - Metal - On GPU 0 - Heavy Denoise - Spatial - strength=luma:3.0**
+```bash
+av-denoise file \
+  --accelerators metal \
+  --device discrete:0 \
+  --channel-mode luma \
+  --strength 3.0 \
+  --input ./sample.mkv \
+    | ffmpeg -hide_banner -loglevel info -y -f yuv4mpegpipe -i - -c:v ffv1 ./output.mkv
+```
+
+**YUV Fused Denoise - Vulkan - On Default GPU - Medium Denoise - Spatial - strength=yuv:2.0**
+```bash
+av-denoise file \
+  --accelerators vulkan \
+  --channel-mode yuv \
+  --strength 2.0 \
+  --input ./sample.mkv \
+    | ffmpeg -hide_banner -loglevel info -y -f yuv4mpegpipe -i - -c:v ffv1 ./output.mkv
+```
+
+## Binary usage
 
 ```angular2html
 Fast and efficient video denoising
