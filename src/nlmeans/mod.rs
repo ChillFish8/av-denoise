@@ -1,4 +1,5 @@
 pub mod kernels;
+pub mod motion;
 pub mod prefilter;
 
 #[cfg(test)]
@@ -34,6 +35,7 @@ use self::kernels::{
     nlm_vertical_weight,
     nlm_vweight_pair_accumulate,
 };
+pub use self::motion::MotionCompensationMode;
 pub use self::prefilter::PrefilterMode;
 use self::prefilter::{PrefilterCtx, run_prefilter};
 
@@ -112,6 +114,11 @@ pub struct NlmParams {
     /// from a prefiltered or externally-supplied clip while pixel
     /// accumulation continues to read the original input.
     pub prefilter: PrefilterMode,
+    /// Motion-compensation mode. Default: `None`. When set to
+    /// `Mvtools`, each `denoise_submit` warps the temporal neighbours
+    /// into spatial alignment with the centre before NLM weighting.
+    /// Only takes effect when `temporal_radius > 0`.
+    pub motion_compensation: MotionCompensationMode,
 }
 
 impl Default for NlmParams {
@@ -124,6 +131,7 @@ impl Default for NlmParams {
             self_weight: 1.0,
             channels: ChannelMode::Yuv,
             prefilter: PrefilterMode::None,
+            motion_compensation: MotionCompensationMode::None,
         }
     }
 }
@@ -182,6 +190,8 @@ impl NlmParams {
         if !self.self_weight.is_finite() || self.self_weight < 0.0 {
             anyhow::bail!("self_weight must be finite and >= 0 (got {})", self.self_weight,);
         }
+
+        self.motion_compensation.validate()?;
 
         Ok(())
     }

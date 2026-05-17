@@ -56,6 +56,7 @@ fn uniform_image_passthrough() {
         self_weight: 1.0,
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
     };
 
     let w = 16;
@@ -83,6 +84,7 @@ fn uniform_yuv_passthrough() {
         self_weight: 1.0,
         channels: ChannelMode::Yuv,
         prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
     };
 
     let w = 16;
@@ -111,6 +113,7 @@ fn uniform_chroma_passthrough() {
         self_weight: 1.0,
         channels: ChannelMode::Chroma,
         prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
     };
 
     let w = 16;
@@ -139,6 +142,7 @@ fn noisy_region_suppressed() {
         self_weight: 1.0,
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
     };
 
     let w = 32;
@@ -171,6 +175,7 @@ fn high_strength_smooths_heavily() {
         self_weight: 1.0,
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
     };
 
     let w = 16;
@@ -207,6 +212,7 @@ fn low_strength_preserves_original() {
         self_weight: 1.0,
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
     };
 
     let w = 16;
@@ -238,6 +244,7 @@ fn self_weight_zero_uniform() {
         self_weight: 0.0,
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
     };
 
     let w = 16;
@@ -318,6 +325,7 @@ fn temporal_denoise_uniform() {
         self_weight: 1.0,
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
     };
 
     let w = 8;
@@ -351,6 +359,7 @@ fn temporal_with_noisy_center_frame() {
         self_weight: 1.0,
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
     };
 
     let w = 16;
@@ -384,6 +393,7 @@ fn temporal_asymmetric_frames_correct_weights() {
         self_weight: 0.0,
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
     };
 
     let w = 16;
@@ -502,6 +512,7 @@ fn symmetry_preserved() {
         self_weight: 1.0,
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
     };
 
     let w = 16;
@@ -545,6 +556,7 @@ fn clamp_to_edge_no_darkening() {
         self_weight: 1.0,
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
     };
 
     let w = 8;
@@ -602,6 +614,7 @@ fn separable_uniform_passthrough() {
         self_weight: 1.0,
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
     };
 
     let w = 32;
@@ -633,6 +646,7 @@ fn separable_yuv_passthrough() {
         self_weight: 1.0,
         channels: ChannelMode::Yuv,
         prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
     };
 
     let w = 32;
@@ -665,6 +679,7 @@ fn separable_symmetry_preserved() {
         self_weight: 1.0,
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
     };
 
     let w = 16;
@@ -715,6 +730,7 @@ fn external_reference_equals_input_matches_baseline() {
             self_weight: 1.0,
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::None,
+            motion_compensation: MotionCompensationMode::None,
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
         d.push_frame(&frame);
@@ -730,6 +746,7 @@ fn external_reference_equals_input_matches_baseline() {
             self_weight: 1.0,
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::External,
+            motion_compensation: MotionCompensationMode::None,
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
         d.push_frame_with_reference(&frame, &frame);
@@ -759,6 +776,7 @@ fn external_reference_separable_matches_baseline() {
             self_weight: 1.0,
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::None,
+            motion_compensation: MotionCompensationMode::None,
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
         d.push_frame(&frame);
@@ -774,6 +792,7 @@ fn external_reference_separable_matches_baseline() {
             self_weight: 1.0,
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::External,
+            motion_compensation: MotionCompensationMode::None,
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
         d.push_frame_with_reference(&frame, &frame);
@@ -807,6 +826,7 @@ fn external_reference_temporal_matches_baseline() {
             self_weight: 1.0,
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::None,
+            motion_compensation: MotionCompensationMode::None,
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
         for f in &frames {
@@ -824,6 +844,7 @@ fn external_reference_temporal_matches_baseline() {
             self_weight: 1.0,
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::External,
+            motion_compensation: MotionCompensationMode::None,
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
         for f in &frames {
@@ -858,6 +879,7 @@ fn bilateral_uniform_image_passthrough() {
             sigma_s: 1.0,
             sigma_r: 0.1,
         },
+        motion_compensation: MotionCompensationMode::None,
     };
 
     let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
@@ -890,6 +912,7 @@ fn bilateral_noisy_image_finite() {
             sigma_s: 2.0,
             sigma_r: 0.05,
         },
+        motion_compensation: MotionCompensationMode::None,
     };
 
     let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
@@ -983,6 +1006,7 @@ fn extreme_params_produce_finite_output() {
         self_weight: 1.0,
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
     };
 
     let mut d = NlmDenoiser::<R>::new(&client, params, w, h);

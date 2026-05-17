@@ -319,6 +319,7 @@ fn denoise_params(channels: ChannelMode, temporal_radius: u32, prefilter: Prefil
         self_weight: 1.0,
         channels,
         prefilter,
+        ..NlmParams::default()
     }
 }
 

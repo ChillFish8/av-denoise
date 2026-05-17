@@ -3,6 +3,7 @@ mod bilateral;
 mod fused;
 mod helpers;
 mod memory;
+pub mod motion;
 mod separable;
 
 pub use accumulate::{nlm_accumulate, nlm_finish};
