@@ -29,12 +29,16 @@ leverage modern hardware instead of relying on the now rather outdated OpenCL.
 
 Numbers below come from `scripts/bench_runs.py` (`just compare-perf`), which pipes
 each tool to `ffmpeg -f null -` so the encoder is not measured. Throughput is
-total frames divided by wall-clock elapsed; the input is a 3,450-frame 1080p clip.
+total frames divided by wall-clock elapsed.
+
+- Input is a 3,450-frame 1080p FFV1 clip.
+- `av-denoise` using the `vulkan` backend.
+- Running on a `AMD AI Pro R9700` (AMD 9070XT equivalent) GPU.
 
 ### Apples-to-apples spatial NL-means (strength 1.0)
 
-Matched patch and search sizes on both tools (`size = 2 * radius + 1` for
-av-denoise; `p` / `r` for `nlmeans_opencl`).
+Matched patch and search sizes on both tools, av-denoise uses radii compared to
+ffmpeg which takes the absolute size.
 
 | patch / search | av-denoise (fps) | ffmpeg nlmeans_opencl (fps) | speedup |
 |----------------|-----------------:|----------------------------:|--------:|
@@ -44,7 +48,7 @@ av-denoise; `p` / `r` for `nlmeans_opencl`).
 
 ### av-denoise feature cost (strength 1.0, default patch/search)
 
-All luma+chroma. Spatial baseline is the reference; lower fps = more work.
+All luma+chroma. Spatial baseline is the reference. _Lower fps = more work._
 
 | run                              |   fps | notes                               |
 |----------------------------------|------:|-------------------------------------|
