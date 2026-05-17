@@ -3,6 +3,11 @@ name = "av-denoise"
 version = "0.1.0"
 edition = "2024"
 description = "Fast and efficient video denoising using accelerated nlmeans."
+categories = ["multimedia::video"]
+keywords = ["cubecl", "denoise", "gpu"]
+license = "Apache-2.0"
+repository = "https://github.com/ChillFish8/av-denoise"
+readme = "README.md"
 autobins = false
 
 [[bin]]
