@@ -27,7 +27,7 @@ denoise-file input output *ARGS:
 [arg("patch", long="patch")]
 [arg("search", long="search")]
 [arg("strength", long="strength")]
-denoise-file-ffmpeg input output patch="9" search="5" strength="1.2":
+denoise-file-ffmpeg input output search="5" patch="9" strength="1.2":
     #!/usr/bin/env bash
     set -euo pipefail
     ffmpeg -hide_banner -stats -stats_period 0.5 -loglevel info \
