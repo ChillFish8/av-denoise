@@ -567,11 +567,13 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// async readback. Returns a [`Pending`] whose `wait()` produces the
     /// denoised frame.
     ///
-    /// Output handles are double-buffered, so the caller may push and
-    /// submit the next frame while holding the previous frame's
-    /// [`Pending`] — frame N+1's kernels then overlap with frame N's
-    /// readback. Holding more than one `Pending` in flight is unsound:
-    /// a third submit would alias the first pending's output handle.
+    /// Output handles are double-buffered (`outputs: [Handle; 2]`), so
+    /// the caller may keep up to `self.outputs.len()` (= 2) `Pending`s
+    /// in flight at once — frame N+1's kernels overlap frame N's
+    /// readback. A third concurrent submit would alias the oldest
+    /// pending's output handle and silently corrupt results, so the
+    /// high-level [`crate::Denoiser`] enforces that cap via its
+    /// `MAX_PENDING` constant.
     ///
     /// Returns `Ok(None)` if the temporal window is not yet filled.
     pub fn denoise_submit(&mut self) -> Result<Option<Pending<R>>, anyhow::Error> {

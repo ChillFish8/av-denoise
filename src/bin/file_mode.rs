@@ -264,12 +264,13 @@ fn run_worker(
 
                 let denoiser = wd.as_mut().expect("denoiser exists after new-scene init");
 
+                // No post-push recv: push_with_drain handles backpressure via
+                // QueueFull when the 2-deep pending pipeline fills, and
+                // flush_worker drains the tail at the scene boundary. Pulling
+                // a recv after every push would clamp the pipeline back to
+                // depth 1 and serialise the GPU readback into the critical
+                // path of the next push.
                 push_with_drain(denoiser, &mut pending, global_idx, &planes, &tx)?;
-
-                if let Some(out) = denoiser.recv()? {
-                    let g = pending.pop_front().expect("pending non-empty");
-                    send_output(&tx, g, out)?;
-                }
             },
             Ok(WorkerMsg::Eof) | Err(_) => {
                 if let Some(mut prev) = wd.take() {

@@ -3,6 +3,8 @@
 //! exposes a push/recv streaming API on top of the generic
 //! `NlmDenoiser<R>`.
 
+use std::collections::VecDeque;
+
 use cubecl::Runtime;
 
 use crate::accelerate::Accelerator;
@@ -135,9 +137,16 @@ impl BackendPending {
 /// [`recv_frame`](Self::recv_frame) or
 /// [`try_recv_frame`](Self::try_recv_frame); call [`flush`](Self::flush)
 /// at end-of-stream to drain any remaining temporal context.
+/// Maximum number of outstanding `Pending` readbacks the high-level
+/// [`Denoiser`] keeps in flight. Must equal the backend's output-handle
+/// count ([`crate::nlmeans::NlmDenoiser::outputs`] is `[Handle; 2]`).
+/// Exceeding this aliases the oldest pending's output handle and
+/// silently corrupts results.
+const MAX_PENDING: usize = 2;
+
 pub struct Denoiser {
     backend: Backend,
-    pending: Option<BackendPending>,
+    pending: VecDeque<BackendPending>,
     accelerator: Accelerator,
     width: u32,
     height: u32,
@@ -189,7 +198,7 @@ impl Denoiser {
 
         Ok(Self {
             backend,
-            pending: None,
+            pending: VecDeque::with_capacity(MAX_PENDING),
             accelerator,
             width,
             height,
@@ -216,15 +225,20 @@ impl Denoiser {
 
     /// Upload one frame into the temporal window. `frame` must contain
     /// `width * height * channels` `f32` values in `[0, 1]`. Once the
-    /// window is full and no previous output is in flight, this also
+    /// window is full and the in-flight pipeline has room, this also
     /// kicks off the kernels for the next denoised frame.
     ///
-    /// Returns [`DenoiserError::QueueFull`] when a previous output
-    /// hasn't been collected — call [`Self::recv_frame`] first, then
-    /// retry this `push_frame` call.
+    /// Up to [`MAX_PENDING`] outputs may be in flight simultaneously —
+    /// the GPU runs frame N+1's kernels while frame N's readback is in
+    /// flight. Returns [`DenoiserError::QueueFull`] once that ceiling
+    /// is reached; the caller must drain via [`Self::recv_frame`] before
+    /// pushing more.
     pub fn push_frame(&mut self, frame: &[f32]) -> Result<(), DenoiserError> {
-        let window_full = self.frames_pushed > 2 * self.temporal_radius;
-        if window_full && self.pending.is_some() {
+        // After `temporal_radius` real pushes the leading-edge mirror has
+        // primed the window, so the next push will set a pending. From
+        // that point on, every push consumes a pending slot.
+        let window_full = self.frames_pushed > self.temporal_radius;
+        if window_full && self.pending.len() >= MAX_PENDING {
             return Err(DenoiserError::QueueFull);
         }
 
@@ -233,28 +247,28 @@ impl Denoiser {
             Backend::Cuda(d) => {
                 d.push_frame(frame);
                 if let Some(p) = d.denoise_submit()? {
-                    self.pending = Some(BackendPending::Cuda(p));
+                    self.pending.push_back(BackendPending::Cuda(p));
                 }
             },
             #[cfg(feature = "rocm")]
             Backend::Rocm(d) => {
                 d.push_frame(frame);
                 if let Some(p) = d.denoise_submit()? {
-                    self.pending = Some(BackendPending::Rocm(p));
+                    self.pending.push_back(BackendPending::Rocm(p));
                 }
             },
             #[cfg(any(feature = "vulkan", feature = "metal"))]
             Backend::Wgpu(d) => {
                 d.push_frame(frame);
                 if let Some(p) = d.denoise_submit()? {
-                    self.pending = Some(BackendPending::Wgpu(p));
+                    self.pending.push_back(BackendPending::Wgpu(p));
                 }
             },
             #[cfg(feature = "cpu")]
             Backend::Cpu(d) => {
                 d.push_frame(frame);
                 if let Some(p) = d.denoise_submit()? {
-                    self.pending = Some(BackendPending::Cpu(p));
+                    self.pending.push_back(BackendPending::Cpu(p));
                 }
             },
         }
@@ -267,7 +281,7 @@ impl Denoiser {
     /// denoised frame. Returns `Ok(None)` if nothing is in flight
     /// (e.g. the temporal window isn't full yet).
     pub fn recv_frame(&mut self) -> Result<Option<Vec<f32>>, DenoiserError> {
-        let Some(pending) = self.pending.take() else {
+        let Some(pending) = self.pending.pop_front() else {
             return Ok(None);
         };
         Ok(Some(pending.wait()?))
@@ -281,11 +295,13 @@ impl Denoiser {
         self.recv_frame()
     }
 
-    /// End-of-stream: collect any in-flight frame, then drain the
+    /// End-of-stream: collect every in-flight frame, then drain the
     /// trailing temporal tail by duplicating the last pushed frame.
     /// Each produced frame is handed to `sink`.
     pub fn flush(&mut self, mut sink: impl FnMut(Vec<f32>)) -> Result<(), DenoiserError> {
-        if let Some(frame) = self.recv_frame()? {
+        // Drain the full pending pipeline (up to MAX_PENDING frames) before
+        // submitting the trailing-tail mirrors.
+        while let Some(frame) = self.recv_frame()? {
             sink(frame);
         }
 
@@ -485,15 +501,18 @@ mod tests {
         )
         .unwrap();
 
+        // Depth-2 pipeline: the first two pushes both submit successfully
+        // (output handles are double-buffered). The third would alias the
+        // oldest pending's output slot and is rejected with QueueFull.
         d.push_frame(&frame(16, 16)).unwrap();
-        // window is now full (spatial → radius=0) and a Pending is in flight.
+        d.push_frame(&frame(16, 16)).unwrap();
         let err = d.push_frame(&frame(16, 16)).expect_err("expected QueueFull");
         assert!(matches!(err, DenoiserError::QueueFull));
 
         let out = d.recv_frame().unwrap().unwrap();
         assert_eq!(out.len(), 16 * 16);
 
-        // After draining, the same push must succeed.
+        // After draining one slot the next push must succeed.
         d.push_frame(&frame(16, 16)).expect("push after drain failed");
     }
 }
