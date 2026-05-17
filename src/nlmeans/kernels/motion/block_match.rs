@@ -154,11 +154,17 @@ pub fn nlm_mc_block_match_fine(
 
     let mv_slot = ((by * blocks_x + bx) * 2) as usize;
 
+    // The `.into()` calls quiet clippy's `useless_conversion` lint
+    // away from these lines, but are actually required: the `if`
+    // branches must produce matching cubecl `NativeExpand<i32>` types
+    // and a bare `0i32` literal won't coerce inside the cube macro.
+    #[allow(clippy::useless_conversion)]
     let seed_dx = if use_seed == 1u32 {
         mv_field[mv_slot]
     } else {
         0i32.into()
     };
+    #[allow(clippy::useless_conversion)]
     let seed_dy = if use_seed == 1u32 {
         mv_field[mv_slot + 1]
     } else {

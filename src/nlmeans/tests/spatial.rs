@@ -3,8 +3,8 @@
 //! varying strengths and channel modes, plus the symmetry / clamp
 //! regression guards.
 
-use super::super::*;
 use super::helpers::*;
+use crate::nlmeans::*;
 
 #[test]
 fn uniform_image_passthrough() {

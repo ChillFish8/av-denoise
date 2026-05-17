@@ -1,7 +1,7 @@
 //! `NlmParams::validate` accept/reject matrix. Each test exercises one
 //! failure mode so a regression points directly at the broken rule.
 
-use super::super::*;
+use crate::nlmeans::*;
 
 #[test]
 fn validate_rejects_oversized_patch_radius() {

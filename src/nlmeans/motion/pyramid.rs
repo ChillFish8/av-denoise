@@ -5,8 +5,8 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::super::kernels::motion::{nlm_mc_downscale, nlm_mc_extract_luma};
 use super::MotionCtx;
+use crate::nlmeans::kernels::motion::{nlm_mc_downscale, nlm_mc_extract_luma};
 
 /// Number of luma pixels stored per frame across every pyramid level
 /// for an image of `(width, height)`. Level 0 contributes `w*h`; each
@@ -25,13 +25,7 @@ pub fn pyramid_pixels_per_frame(width: u32, height: u32, levels: u32) -> usize {
 
 /// Byte offset of a given `(level, frame)` slot inside the flat pyramid
 /// buffer.
-pub fn pyramid_slot_byte_offset(
-    width: u32,
-    height: u32,
-    frame_count: u32,
-    level: u32,
-    frame: u32,
-) -> u64 {
+pub fn pyramid_slot_byte_offset(width: u32, height: u32, frame_count: u32, level: u32, frame: u32) -> u64 {
     let mut offset_pixels: u64 = 0;
     let mut w = width as u64;
     let mut h = height as u64;
@@ -60,6 +54,7 @@ pub fn level_dims(width: u32, height: u32, level: u32) -> (u32, u32) {
 /// from the packed full-resolution input. Level 0 is the extracted
 /// luma plane; each subsequent level is a 2x box downsample of the one
 /// before it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_pyramid_build<R: Runtime>(
     client: &ComputeClient<R>,
     mc: &MotionCtx,
@@ -72,13 +67,23 @@ pub(crate) fn run_pyramid_build<R: Runtime>(
     stored_ch: u32,
 ) -> Result<(), anyhow::Error> {
     let _ = mc;
-    extract_luma::<R>(client, full_res, pyramid, slot, width, height, frame_count, stored_ch);
+    extract_luma::<R>(
+        client,
+        full_res,
+        pyramid,
+        slot,
+        width,
+        height,
+        frame_count,
+        stored_ch,
+    );
     for level in 1..mc.pyramid_levels {
         downscale_level::<R>(client, pyramid, slot, width, height, frame_count, level);
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extract_luma<R: Runtime>(
     client: &ComputeClient<R>,
     full_res: &Handle,
@@ -94,9 +99,10 @@ fn extract_luma<R: Runtime>(
     let grid = CubeCount::new_2d(width.div_ceil(block_x), height.div_ceil(block_y));
     let dim = CubeDim::new_2d(block_x, block_y);
     let full_len = (frame_count * height * width * stored_ch) as usize;
-    let level0_dst = pyramid.clone().offset_start(pyramid_slot_byte_offset(
-        width, height, frame_count, 0, slot,
-    ));
+    let level0_dst =
+        pyramid
+            .clone()
+            .offset_start(pyramid_slot_byte_offset(width, height, frame_count, 0, slot));
     let level0_len = (frame_count * height * width) as usize;
 
     unsafe {
@@ -132,11 +138,15 @@ fn downscale_level<R: Runtime>(
     let dim = CubeDim::new_2d(block_x, block_y);
 
     let src = pyramid.clone().offset_start(pyramid_slot_byte_offset(
-        width, height, frame_count, level - 1, slot,
+        width,
+        height,
+        frame_count,
+        level - 1,
+        slot,
     ));
-    let dst = pyramid.clone().offset_start(pyramid_slot_byte_offset(
-        width, height, frame_count, level, slot,
-    ));
+    let dst = pyramid
+        .clone()
+        .offset_start(pyramid_slot_byte_offset(width, height, frame_count, level, slot));
     let src_len = (src_w * src_h) as usize;
     let dst_len = (dst_w * dst_h) as usize;
 

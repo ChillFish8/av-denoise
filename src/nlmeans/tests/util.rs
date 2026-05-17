@@ -1,7 +1,7 @@
 //! Public helper roundtrips and numerical-edge regression.
 
-use super::super::*;
 use super::helpers::*;
+use crate::nlmeans::*;
 
 #[test]
 fn normalization_u8_roundtrip() {

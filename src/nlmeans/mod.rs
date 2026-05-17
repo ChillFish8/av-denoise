@@ -28,13 +28,7 @@ mod tests;
 
 pub use denoiser::NlmDenoiser;
 pub use motion::MotionCompensationMode;
-pub use params::{
-    ChannelMode,
-    MAX_PATCH_RADIUS,
-    MAX_SEARCH_RADIUS,
-    MAX_TEMPORAL_RADIUS,
-    NlmParams,
-};
+pub use params::{ChannelMode, MAX_PATCH_RADIUS, MAX_SEARCH_RADIUS, MAX_TEMPORAL_RADIUS, NlmParams};
 pub use pending::Pending;
 pub use prefilter::PrefilterMode;
 

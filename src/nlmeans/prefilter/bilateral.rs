@@ -4,9 +4,9 @@
 
 use cubecl::prelude::*;
 
-use super::super::kernels::nlm_bilateral;
-use super::super::{BLOCK_X, BLOCK_Y};
 use super::PrefilterCtx;
+use crate::nlmeans::kernels::nlm_bilateral;
+use crate::nlmeans::{BLOCK_X, BLOCK_Y};
 
 /// Comptime radius derived from `sigma_s`. Truncating at `2·σ` covers
 /// >95% of the Gaussian mass and bounds SMEM/register usage.

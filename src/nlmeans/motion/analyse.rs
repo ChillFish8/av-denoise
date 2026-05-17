@@ -5,9 +5,9 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::super::kernels::motion::{nlm_mc_block_match_coarse, nlm_mc_block_match_fine};
-use super::pyramid::{level_dims, pyramid_slot_byte_offset};
 use super::MotionCtx;
+use super::pyramid::{level_dims, pyramid_slot_byte_offset};
+use crate::nlmeans::kernels::motion::{nlm_mc_block_match_coarse, nlm_mc_block_match_fine};
 
 /// Byte offset of the MV-field slice for a given neighbour index.
 /// The MV-field buffer is laid out as `[neighbour][block_y][block_x][2]`
@@ -17,15 +17,11 @@ pub(crate) fn mv_field_byte_offset(mc: &MotionCtx, neighbour_idx: u32) -> u64 {
     (neighbour_idx as u64) * per_neighbour * (size_of::<i32>() as u64)
 }
 
-/// Total number of `i32` slots needed for `n` neighbours' MV fields.
-pub(crate) fn mv_field_total_i32(mc: &MotionCtx, neighbours: u32) -> usize {
-    (neighbours as usize) * (mc.blocks_x as usize) * (mc.blocks_y as usize) * 2
-}
-
 /// Run analyse for one (centre, neighbour) pair: coarse pass on the
 /// pyramid top level, fine refinement at full resolution. Writes the
 /// resulting MV field into `mv_field` at the slot reserved for this
 /// neighbour.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_analyse<R: Runtime>(
     client: &ComputeClient<R>,
     mc: &MotionCtx,
@@ -46,20 +42,20 @@ pub(crate) fn run_analyse<R: Runtime>(
     if mc.pyramid_levels > 1 {
         let coarse_level = mc.pyramid_levels - 1;
         let (cw, ch) = level_dims(width, height, coarse_level);
-        let coarse_centre =
-            pyramid
-                .clone()
-                .offset_start(pyramid_slot_byte_offset(width, height, frame_count, coarse_level, centre_slot));
-        let coarse_neighbour =
-            pyramid
-                .clone()
-                .offset_start(pyramid_slot_byte_offset(
-                    width,
-                    height,
-                    frame_count,
-                    coarse_level,
-                    neighbour_slot,
-                ));
+        let coarse_centre = pyramid.clone().offset_start(pyramid_slot_byte_offset(
+            width,
+            height,
+            frame_count,
+            coarse_level,
+            centre_slot,
+        ));
+        let coarse_neighbour = pyramid.clone().offset_start(pyramid_slot_byte_offset(
+            width,
+            height,
+            frame_count,
+            coarse_level,
+            neighbour_slot,
+        ));
         let level_len = (cw * ch) as usize;
         let coarse_scale = 1u32 << coarse_level;
         // Coarse blocks correspond to fine blocks downscaled by 2^coarse_level.
@@ -101,10 +97,18 @@ pub(crate) fn run_analyse<R: Runtime>(
     // Fine pass at full resolution.
     let (fw, fh) = level_dims(width, height, 0);
     let fine_centre = pyramid.clone().offset_start(pyramid_slot_byte_offset(
-        width, height, frame_count, 0, centre_slot,
+        width,
+        height,
+        frame_count,
+        0,
+        centre_slot,
     ));
     let fine_neighbour = pyramid.clone().offset_start(pyramid_slot_byte_offset(
-        width, height, frame_count, 0, neighbour_slot,
+        width,
+        height,
+        frame_count,
+        0,
+        neighbour_slot,
     ));
     let level_len = (fw * fh) as usize;
     let grid = CubeCount::new_2d(mc.blocks_x, mc.blocks_y);
@@ -136,7 +140,7 @@ pub(crate) fn run_analyse<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::MotionCompensationMode;
+    use crate::nlmeans::motion::MotionCompensationMode;
 
     fn mc(blksize: u32, overlap: u32) -> MotionCtx {
         MotionCtx::new(
@@ -162,12 +166,5 @@ mod tests {
         let m = mc(16, 8);
         let per = (m.blocks_x as u64) * (m.blocks_y as u64) * 2 * 4;
         assert_eq!(mv_field_byte_offset(&m, 3), 3 * per);
-    }
-
-    #[test]
-    fn mv_field_total_scales_with_neighbours() {
-        let m = mc(16, 8);
-        let per = (m.blocks_x as usize) * (m.blocks_y as usize) * 2;
-        assert_eq!(mv_field_total_i32(&m, 4), 4 * per);
     }
 }

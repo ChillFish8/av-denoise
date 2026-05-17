@@ -11,8 +11,7 @@ use cubecl::bytes::Bytes;
 use cubecl::prelude::*;
 use cubecl::server::ServerError;
 
-pub(super) type ReadFuture =
-    Pin<Box<dyn Future<Output = Result<Vec<Bytes>, ServerError>> + Send>>;
+pub(super) type ReadFuture = Pin<Box<dyn Future<Output = Result<Vec<Bytes>, ServerError>> + Send>>;
 
 /// In-flight denoise: kernels are queued, the GPU may still be working,
 /// and the host-side readback hasn't completed yet.

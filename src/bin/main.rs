@@ -203,30 +203,29 @@ struct Args {
     /// path would otherwise smear edges or collapse to spatial-only.
     ///
     /// No-op when `--temporal-radius 0`.
-    #[arg(long, default_value_t = false, global = true)]
+    #[arg(long, global = true)]
     motion_compensation: bool,
 
     /// Motion-compensation block size in pixels (must be even).
-    /// Default: 16.
-    #[arg(long, default_value_t = 16, global = true)]
+    #[arg(long, default_value = "16", global = true)]
     mc_blksize: u32,
 
     /// Motion-compensation block overlap in pixels. Must satisfy
     /// `overlap < blksize` so the step (`blksize - overlap`) is
-    /// positive. Default: 8.
-    #[arg(long, default_value_t = 8, global = true)]
+    /// positive.
+    #[arg(long, default_value = "8", global = true)]
     mc_overlap: u32,
 
     /// Motion-compensation search radius at the finest pyramid level
     /// (in pixels). The coarse pass uses the same radius on the `/2`
-    /// image so the effective reach is doubled. Default: 4.
-    #[arg(long, default_value_t = 4, global = true)]
+    /// image so the effective reach is doubled.
+    #[arg(long, default_value = "4", global = true)]
     mc_search: u32,
 
     /// Pyramid levels for hierarchical motion estimation.
-    /// `1` disables the coarse pass; `2` (default) adds a `/2`
-    /// coarse pass that seeds the fine refinement.
-    #[arg(long, default_value_t = 2, global = true)]
+    /// `1` disables the coarse pass; `2` adds a `/2` coarse pass
+    /// that seeds the fine refinement.
+    #[arg(long, default_value = "2", global = true)]
     mc_pyramid_levels: u32,
 
     #[command(subcommand)]

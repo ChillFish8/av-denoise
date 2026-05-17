@@ -5,13 +5,14 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::super::kernels::motion::nlm_mc_warp;
-use super::analyse::mv_field_byte_offset;
 use super::MotionCtx;
+use super::analyse::mv_field_byte_offset;
+use crate::nlmeans::kernels::motion::nlm_mc_warp;
 
 /// Run the compensate kernel for one neighbour, warping it toward the
 /// centre frame. Produces a full-frame `Vector<f32, N>` write into
 /// `compensated[neighbour_slot]`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_compensate<R: Runtime>(
     client: &ComputeClient<R>,
     mc: &MotionCtx,

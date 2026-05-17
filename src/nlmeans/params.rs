@@ -2,8 +2,7 @@
 //! kernel dispatch lives here, so `NlmDenoiser` can keep its
 //! construction-time checks in one cheap module.
 
-use super::MotionCompensationMode;
-use super::PrefilterMode;
+use super::{MotionCompensationMode, PrefilterMode};
 
 /// SSD normalisation reference, matching FFmpeg's nlmeans (255² for
 /// 8-bit normalisation). Distances are computed in `[0, 1]` units so

@@ -3,8 +3,8 @@
 //! must reproduce the no-prefilter baseline; smoke tests verify the
 //! kernel produces finite, in-range output on noisy input.
 
-use super::super::*;
 use super::helpers::*;
+use crate::nlmeans::*;
 
 /// Aliasing the reference to the input must reproduce the no-prefilter
 /// baseline exactly. Sanity check on the `_ref` kernel variants.

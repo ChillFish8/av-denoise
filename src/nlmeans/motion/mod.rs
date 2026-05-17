@@ -13,11 +13,10 @@ mod analyse;
 mod compensate;
 mod pyramid;
 
-use cubecl::prelude::*;
-use cubecl::server::Handle;
-
 pub(crate) use analyse::run_analyse;
 pub(crate) use compensate::run_compensate;
+use cubecl::prelude::*;
+use cubecl::server::Handle;
 pub(crate) use pyramid::{pyramid_pixels_per_frame, run_pyramid_build};
 
 /// How motion compensation is configured for a denoise pass.
@@ -91,11 +90,6 @@ impl MotionCompensationMode {
         !matches!(self, Self::None)
     }
 
-    /// Whether the denoiser needs to allocate the compensated ring buffer.
-    pub(crate) fn needs_compensated_buf(self) -> bool {
-        self.is_active()
-    }
-
     /// Reject parameter combinations that the kernels can't honour.
     pub fn validate(&self) -> Result<(), anyhow::Error> {
         let Self::Mvtools {
@@ -109,9 +103,7 @@ impl MotionCompensationMode {
         };
 
         if blksize < 4 {
-            anyhow::bail!(
-                "motion-compensation blksize={blksize} is too small; minimum is 4 pixels per side"
-            );
+            anyhow::bail!("motion-compensation blksize={blksize} is too small; minimum is 4 pixels per side");
         }
         if blksize > MAX_BLKSIZE {
             anyhow::bail!(
@@ -141,22 +133,6 @@ impl MotionCompensationMode {
 
         Ok(())
     }
-
-    /// Step between adjacent blocks in pixels (`blksize - overlap`).
-    /// Defined only for `Mvtools`.
-    pub(crate) fn step(self) -> Option<u32> {
-        match self {
-            Self::Mvtools { blksize, overlap, .. } => Some(blksize - overlap),
-            Self::None => None,
-        }
-    }
-
-    /// Number of blocks along each axis for an image of `dim` pixels.
-    pub(crate) fn blocks_along(self, dim: u32) -> Option<u32> {
-        let step = self.step()?;
-        // Round-up division so the right/bottom edges are covered.
-        Some(dim.div_ceil(step).max(1))
-    }
 }
 
 /// Per-denoiser MC state, owned by `NlmDenoiser` when MC is active.
@@ -164,18 +140,19 @@ impl MotionCompensationMode {
 /// Lives next to (not inside) the optional buffer handles so the hot
 /// dispatch path can fish out comptime-relevant scalars without
 /// pattern-matching the enum every call.
+/// Per-denoiser MC state cached at construction time so the hot
+/// dispatch path doesn't re-pattern-match the enum on every call.
+/// Holds only the fields actually read by analyse / compensate
+/// dispatchers; the full configuration lives on
+/// [`MotionCompensationMode`].
 #[derive(Debug, Clone)]
 pub(crate) struct MotionCtx {
-    pub mode: MotionCompensationMode,
     pub blksize: u32,
-    pub overlap: u32,
     pub step: u32,
     pub search_radius: u32,
     pub pyramid_levels: u32,
     pub blocks_x: u32,
     pub blocks_y: u32,
-    pub width: u32,
-    pub height: u32,
 }
 
 impl MotionCtx {
@@ -195,16 +172,12 @@ impl MotionCtx {
         let blocks_y = height.div_ceil(step).max(1);
 
         Some(Self {
-            mode,
             blksize,
-            overlap,
             step,
             search_radius,
             pyramid_levels,
             blocks_x,
             blocks_y,
-            width,
-            height,
         })
     }
 
@@ -214,23 +187,9 @@ impl MotionCtx {
     }
 }
 
-/// Borrowed context passed into the per-dispatch helpers.
-pub(crate) struct MotionDispatchCtx<'a> {
-    pub mc: &'a MotionCtx,
-    pub channels: u32,
-    pub stored_ch: u32,
-    pub frame_count: u32,
-    pub input_buf: &'a Handle,
-    pub reference_buf: Option<&'a Handle>,
-    pub compensated_input_buf: &'a Handle,
-    pub compensated_reference_buf: Option<&'a Handle>,
-    pub mv_field_buf: &'a Handle,
-    pub pyramid_input: &'a Handle,
-    pub pyramid_reference: Option<&'a Handle>,
-}
-
 /// Build the per-frame pyramid for the slot just uploaded by
 /// `push_frame`. Cheap no-op if `pyramid_levels == 1`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_pyramid_for_slot<R: Runtime>(
     client: &ComputeClient<R>,
     mc: &MotionCtx,
@@ -245,7 +204,17 @@ pub(crate) fn build_pyramid_for_slot<R: Runtime>(
     if mc.pyramid_levels <= 1 {
         return Ok(());
     }
-    run_pyramid_build::<R>(client, mc, width, height, frame_count, slot, full_res, pyramid, stored_ch)
+    run_pyramid_build::<R>(
+        client,
+        mc,
+        width,
+        height,
+        frame_count,
+        slot,
+        full_res,
+        pyramid,
+        stored_ch,
+    )
 }
 
 #[cfg(test)]
@@ -256,7 +225,6 @@ mod tests {
     fn none_is_inactive() {
         let m = MotionCompensationMode::None;
         assert!(!m.is_active());
-        assert!(!m.needs_compensated_buf());
         m.validate().unwrap();
     }
 
@@ -264,7 +232,6 @@ mod tests {
     fn mvtools_default_is_active() {
         let m = MotionCompensationMode::mvtools_default();
         assert!(m.is_active());
-        assert!(m.needs_compensated_buf());
         m.validate().unwrap();
     }
 

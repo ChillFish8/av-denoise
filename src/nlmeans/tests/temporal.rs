@@ -1,8 +1,8 @@
 //! Multi-frame ring behaviour: window priming, leading/trailing
 //! mirrors, flush semantics, frame-count parity across push + flush.
 
-use super::super::*;
 use super::helpers::*;
+use crate::nlmeans::*;
 
 #[test]
 fn temporal_requires_full_window() {

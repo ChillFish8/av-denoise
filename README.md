@@ -17,6 +17,12 @@ leverage modern hardware instead of relying on the now rather outdated OpenCL.
 - **Prefilter support** for more accurate denoising with less detail loss.
    * Includes an on-gpu bilateral filter out of the box
    * You can specify the reference frame yourself using the library rather than CLI.
+- **Motion compensation** for high-quality temporal denoising on heavy motion.
+   * MVTools-inspired hierarchical block matching, fully on-GPU.
+   * Warps temporal neighbours into spatial alignment with the centre frame
+     before NLM weighting — preserves detail on anime, fast pans, and action.
+   * Enabled with `--motion-compensation`; tuned via `--mc-blksize`,
+     `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels`.
 - _**Fast!**_ - Around **2x** faster than FFmpeg's OpenCL implementation.
    * Be aware that the `STDIN` mode for the binary cannot fully utilise larger modern GPUs, it will
      likely be just as fast as FFmpeg using much less GPU compute, but we cannot parallelize across scenes.
@@ -135,6 +141,19 @@ av-denoise file \
     | ffmpeg -hide_banner -loglevel info -y -f yuv4mpegpipe -i - -c:v ffv1 ./output.mkv
 ```
 
+**Y/UV Denoise - Vulkan - On GPU 0 - Temporal (radius=2) + Motion Compensation - Anime / Heavy Motion**
+```bash
+av-denoise file \
+  --accelerators vulkan \
+  --device discrete:0 \
+  --channel-mode luma,chroma \
+  --temporal-radius 2 \
+  --motion-compensation \
+  --strength 1.5 \
+  --input ./anime.mkv \
+    | ffmpeg -hide_banner -loglevel info -y -f yuv4mpegpipe -i - -c:v ffv1 ./output.mkv
+```
+
 ## Binary usage
 
 ```angular2html
@@ -236,6 +255,33 @@ Options:
 
       --self-weight <SELF_WEIGHT>
           Override the centre pixel's self-weight in NLM averaging. Library default: 1.0. Must be finite and >= 0
+
+      --motion-compensation
+          Enable MVTools-style motion compensation for temporal denoising.
+
+          Estimates per-block motion between the centre frame and each temporal neighbour, then warps neighbours into spatial alignment before NLM weighting. Greatly improves quality on heavy-motion content (anime, fast pans, action) where the temporal path would otherwise smear edges or collapse to spatial-only.
+
+          No-op when `--temporal-radius 0`.
+
+      --mc-blksize <MC_BLKSIZE>
+          Motion-compensation block size in pixels (must be even).
+
+          [default: 16]
+
+      --mc-overlap <MC_OVERLAP>
+          Motion-compensation block overlap in pixels. Must satisfy `overlap < blksize` so the step (`blksize - overlap`) is positive.
+
+          [default: 8]
+
+      --mc-search <MC_SEARCH>
+          Motion-compensation search radius at the finest pyramid level (in pixels). The coarse pass uses the same radius on the `/2` image so the effective reach is doubled.
+
+          [default: 4]
+
+      --mc-pyramid-levels <MC_PYRAMID_LEVELS>
+          Pyramid levels for hierarchical motion estimation. `1` disables the coarse pass; `2` adds a `/2` coarse pass that seeds the fine refinement.
+
+          [default: 2]
 
   -h, --help
           Print help (see a summary with '-h')

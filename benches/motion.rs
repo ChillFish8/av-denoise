@@ -27,9 +27,9 @@ use av_denoise::nlmeans::{
     Pending,
     PrefilterMode,
 };
-use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 
+#[allow(dead_code)]
 #[path = "kernels/mod.rs"]
 mod kernels;
 
@@ -64,13 +64,7 @@ impl BenchResult {
         println!(
             "[{:<7}] {:<58} {:>4} iters  {:>9.2} fps  {:>7.2} ms/frame  \
              (min: {:>6.2}, max: {:>6.2})",
-            self.backend,
-            self.name,
-            self.iterations,
-            self.fps,
-            self.mean_ms,
-            self.min_ms,
-            self.max_ms,
+            self.backend, self.name, self.iterations, self.fps, self.mean_ms, self.min_ms, self.max_ms,
         );
     }
 }
@@ -126,7 +120,6 @@ fn temporal_params(channels: ChannelMode, mc: MotionCompensationMode) -> NlmPara
         channels,
         prefilter: PrefilterMode::None,
         motion_compensation: mc,
-        ..NlmParams::default()
     }
 }
 
@@ -214,9 +207,15 @@ fn run_kernels<R: Runtime>(backend: &str, client: &ComputeClient<R>) {
     println!("--- {backend}: MC kernels ---");
     print_header();
 
-    run(DownscaleBench { client: client.clone() });
-    run(BlockMatchCoarseBench { client: client.clone() });
-    run(BlockMatchFineBench { client: client.clone() });
+    run(DownscaleBench {
+        client: client.clone(),
+    });
+    run(BlockMatchCoarseBench {
+        client: client.clone(),
+    });
+    run(BlockMatchFineBench {
+        client: client.clone(),
+    });
     for &(ch, ch_name) in CHANNELS {
         run(WarpBench {
             client: client.clone(),
@@ -233,10 +232,8 @@ fn run_pipelines<R: Runtime>(backend: &str, client: &ComputeClient<R>) {
     println!();
     println!("--- {backend}: temporal pipeline (with vs without MC) ---");
 
-    let variants: &[(MotionCompensationMode, &str)] = &[
-        (MotionCompensationMode::None, "_no_mc"),
-        (mc_default(), "_mc"),
-    ];
+    let variants: &[(MotionCompensationMode, &str)] =
+        &[(MotionCompensationMode::None, "_no_mc"), (mc_default(), "_mc")];
     let channels = [
         ("luma", ChannelMode::Luma),
         ("chroma", ChannelMode::Chroma),

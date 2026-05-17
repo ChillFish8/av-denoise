@@ -144,31 +144,33 @@ impl<R: Runtime> NlmDenoiser<R> {
         } else {
             None
         };
-        let (compensated_input_buf, compensated_reference_buf, mv_field_buf, pyramid_input, pyramid_reference) =
-            if let Some(ctx) = mc_ctx.as_ref() {
-                let comp_in = client.empty(frame_bytes * total_frames as usize);
-                let comp_ref = if use_reference {
-                    Some(client.empty(frame_bytes * total_frames as usize))
-                } else {
-                    None
-                };
-                let neighbours = (2 * params.temporal_radius) as usize;
-                let mv_field = client.empty(
-                    neighbours * ctx.mv_slots_per_neighbour() * 2 * size_of::<i32>(),
-                );
-                let pyramid_pixels =
-                    motion::pyramid_pixels_per_frame(width, height, ctx.pyramid_levels);
-                let pyr_in_bytes = pyramid_pixels * total_frames as usize * size_of::<f32>();
-                let pyr_in = client.empty(pyr_in_bytes);
-                let pyr_ref = if use_reference {
-                    Some(client.empty(pyr_in_bytes))
-                } else {
-                    None
-                };
-                (Some(comp_in), comp_ref, Some(mv_field), Some(pyr_in), pyr_ref)
+        let (
+            compensated_input_buf,
+            compensated_reference_buf,
+            mv_field_buf,
+            pyramid_input,
+            pyramid_reference,
+        ) = if let Some(ctx) = mc_ctx.as_ref() {
+            let comp_in = client.empty(frame_bytes * total_frames as usize);
+            let comp_ref = if use_reference {
+                Some(client.empty(frame_bytes * total_frames as usize))
             } else {
-                (None, None, None, None, None)
+                None
             };
+            let neighbours = (2 * params.temporal_radius) as usize;
+            let mv_field = client.empty(neighbours * ctx.mv_slots_per_neighbour() * 2 * size_of::<i32>());
+            let pyramid_pixels = motion::pyramid_pixels_per_frame(width, height, ctx.pyramid_levels);
+            let pyr_in_bytes = pyramid_pixels * total_frames as usize * size_of::<f32>();
+            let pyr_in = client.empty(pyr_in_bytes);
+            let pyr_ref = if use_reference {
+                Some(client.empty(pyr_in_bytes))
+            } else {
+                None
+            };
+            (Some(comp_in), comp_ref, Some(mv_field), Some(pyr_in), pyr_ref)
+        } else {
+            (None, None, None, None, None)
+        };
 
         Self {
             client: client.clone(),
@@ -329,10 +331,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             .expect("input pyramid build dispatch failed");
         }
 
-        if let (Some(pyr_ref), Some(ref_buf)) = (
-            self.pyramid_reference.as_ref(),
-            self.reference_buf.as_ref(),
-        ) {
+        if let (Some(pyr_ref), Some(ref_buf)) = (self.pyramid_reference.as_ref(), self.reference_buf.as_ref())
+        {
             build_pyramid_for_slot::<R>(
                 &self.client,
                 ctx,

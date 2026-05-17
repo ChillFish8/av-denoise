@@ -679,10 +679,7 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         // Use the cleaner of the two buffers for motion estimation:
         // the reference (prefiltered) pyramid when available.
-        let analyse_pyramid = self
-            .pyramid_reference
-            .as_ref()
-            .unwrap_or(pyramid_input);
+        let analyse_pyramid = self.pyramid_reference.as_ref().unwrap_or(pyramid_input);
 
         // One analyse + warp per non-centre neighbour. Neighbours run
         // in logical order k = -R .. -1, +1 .. +R; their MV-field index
