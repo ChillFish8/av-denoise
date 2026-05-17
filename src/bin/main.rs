@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use av_denoise::accelerate::{Accelerator, get_default_accelerators};
-use av_denoise::{DenoisingMode, Device, NlmTuning, PrefilterMode};
+use av_denoise::{DenoisingMode, Device, MotionCompensationMode, NlmTuning, PrefilterMode};
 use clap::{Parser, Subcommand};
 use strum_macros::EnumString;
 
@@ -194,6 +194,41 @@ struct Args {
     #[arg(long)]
     self_weight: Option<f32>,
 
+    /// Enable MVTools-style motion compensation for temporal denoising.
+    ///
+    /// Estimates per-block motion between the centre and each
+    /// temporal neighbour, then warps neighbours into spatial
+    /// alignment before NLM weighting. Greatly improves quality on
+    /// heavy-motion content (anime, fast pans) where the temporal
+    /// path would otherwise smear edges or collapse to spatial-only.
+    ///
+    /// No-op when `--temporal-radius 0`.
+    #[arg(long, default_value_t = false, global = true)]
+    motion_compensation: bool,
+
+    /// Motion-compensation block size in pixels (must be even).
+    /// Default: 16.
+    #[arg(long, default_value_t = 16, global = true)]
+    mc_blksize: u32,
+
+    /// Motion-compensation block overlap in pixels. Must satisfy
+    /// `overlap < blksize` so the step (`blksize - overlap`) is
+    /// positive. Default: 8.
+    #[arg(long, default_value_t = 8, global = true)]
+    mc_overlap: u32,
+
+    /// Motion-compensation search radius at the finest pyramid level
+    /// (in pixels). The coarse pass uses the same radius on the `/2`
+    /// image so the effective reach is doubled. Default: 4.
+    #[arg(long, default_value_t = 4, global = true)]
+    mc_search: u32,
+
+    /// Pyramid levels for hierarchical motion estimation.
+    /// `1` disables the coarse pass; `2` (default) adds a `/2`
+    /// coarse pass that seeds the fine refinement.
+    #[arg(long, default_value_t = 2, global = true)]
+    mc_pyramid_levels: u32,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -292,6 +327,23 @@ fn main() -> anyhow::Result<()> {
     let prefilter = parse_prefilter(&args.prefilter)?;
     let intent = resolve_channel_intent(&args.channel_mode)?;
 
+    let motion_compensation = if args.motion_compensation {
+        if args.temporal_radius == 0 {
+            tracing::warn!(
+                "--motion-compensation has no effect when --temporal-radius is 0; \
+                 the spatial path doesn't use temporal neighbours"
+            );
+        }
+        MotionCompensationMode::Mvtools {
+            blksize: args.mc_blksize,
+            overlap: args.mc_overlap,
+            search_radius: args.mc_search,
+            pyramid_levels: args.mc_pyramid_levels,
+        }
+    } else {
+        MotionCompensationMode::None
+    };
+
     let nlm_tuning = if args.search_radius.is_some()
         || args.patch_radius.is_some()
         || args.strength.is_some()
@@ -313,6 +365,7 @@ fn main() -> anyhow::Result<()> {
         intent,
         mode,
         prefilter,
+        motion_compensation,
         nlm_tuning,
         luma_strength: args.luma_strength,
         chroma_strength: args.chroma_strength,

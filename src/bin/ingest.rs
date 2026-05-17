@@ -14,6 +14,7 @@ use av_denoise::{
     DenoiserOptions,
     DenoisingMode,
     Device,
+    MotionCompensationMode,
     NlmTuning,
     PrefilterMode,
 };
@@ -109,6 +110,7 @@ pub struct CliOptions {
     pub intent: BinaryChannelIntent,
     pub mode: DenoisingMode,
     pub prefilter: PrefilterMode,
+    pub motion_compensation: MotionCompensationMode,
     pub nlm_tuning: Option<NlmTuning>,
     /// Per-plane strength override for the luma denoiser. Takes
     /// precedence over `nlm_tuning.strength` when set.
@@ -123,7 +125,8 @@ impl CliOptions {
         let b = DenoiserOptions::builder()
             .channel_mode(channels)
             .mode(self.mode)
-            .prefilter(self.prefilter);
+            .prefilter(self.prefilter)
+            .motion_compensation(self.motion_compensation);
 
         let strength_override = match channels {
             ChannelMode::Luma => self.luma_strength,
