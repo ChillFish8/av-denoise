@@ -25,6 +25,41 @@ leverage modern hardware instead of relying on the now rather outdated OpenCL.
    * Be aware that the `STDIN` mode for the binary cannot fully utilise larger modern GPUs, it will
      likely be just as fast as FFmpeg using much less GPU compute, but we cannot parallelize across scenes.
 
+## Benchmarks
+
+Numbers below come from `scripts/bench_runs.py` (`just compare-perf`), which pipes
+each tool to `ffmpeg -f null -` so the encoder is not measured. Throughput is
+total frames divided by wall-clock elapsed; the input is a 3,450-frame 1080p clip.
+
+### Apples-to-apples spatial NL-means (strength 1.0)
+
+Matched patch and search sizes on both tools (`size = 2 * radius + 1` for
+av-denoise; `p` / `r` for `nlmeans_opencl`).
+
+| patch / search | av-denoise (fps) | ffmpeg nlmeans_opencl (fps) | speedup |
+|----------------|-----------------:|----------------------------:|--------:|
+| p=5, r=11      |        **72.57** |                       30.25 |  ~2.40x |
+| p=7, r=15      |        **42.41** |                       16.33 |  ~2.60x |
+| p=9, r=15      |        **41.84** |                       16.26 |  ~2.57x |
+
+### av-denoise feature cost (strength 1.0, default patch/search)
+
+All luma+chroma. Spatial baseline is the reference; lower fps = more work.
+
+| run                              |   fps | notes                               |
+|----------------------------------|------:|-------------------------------------|
+| spatial baseline                 | 97.25 | `--temporal-radius 0`               |
+| spatial + bilateral prefilter    | 93.50 | adds one on-GPU pass per frame      |
+| temporal r=1                     | 72.73 | 3-frame window                      |
+| temporal r=2                     | 62.07 | 5-frame window                      |
+| temporal r=1 + motion comp       | 64.03 | hierarchical block matching enabled |
+| temporal r=2 + motion comp       | 54.29 |                                     |
+| temporal r=1 + prefilter         | 69.58 |                                     |
+| full r=1 (temporal+MC+prefilter) | 60.97 |                                     |
+| full r=2 (temporal+MC+prefilter) | 52.18 |                                     |
+
+Reproduce with `just compare-perf` (config: `scripts/bench_runs.toml`).
+
 ## Hardware support
 
 The project supports the following accelerators/gpus:
