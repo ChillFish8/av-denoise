@@ -1,9 +1,3 @@
-//! Common ingestion types shared by the file (ffms2) and stdin (y4m) pipelines.
-//!
-//! Defines the planar 8-bit YUV frame representation passed between the
-//! decoder and the worker, and a [`WorkerDenoiser`] that hides the
-//! Luma/Chroma split required when the source is chroma-subsampled.
-
 use std::collections::VecDeque;
 
 use av_denoise::accelerate::Accelerator;
@@ -14,6 +8,7 @@ use av_denoise::{
     DenoiserOptions,
     DenoisingMode,
     Device,
+    MotionCompensationMode,
     NlmTuning,
     PrefilterMode,
 };
@@ -82,7 +77,7 @@ pub enum BinaryChannelIntent {
     /// Chroma runs at the source's native subsampled resolution.
     LumaChroma,
     /// Single library `Denoiser` running the fused 3-channel kernel.
-    /// Requires a YUV444 source — validated at ingest setup time.
+    /// Requires a YUV444 source, validated at ingest setup time.
     YuvFused,
 }
 
@@ -109,6 +104,7 @@ pub struct CliOptions {
     pub intent: BinaryChannelIntent,
     pub mode: DenoisingMode,
     pub prefilter: PrefilterMode,
+    pub motion_compensation: MotionCompensationMode,
     pub nlm_tuning: Option<NlmTuning>,
     /// Per-plane strength override for the luma denoiser. Takes
     /// precedence over `nlm_tuning.strength` when set.
@@ -123,7 +119,8 @@ impl CliOptions {
         let b = DenoiserOptions::builder()
             .channel_mode(channels)
             .mode(self.mode)
-            .prefilter(self.prefilter);
+            .prefilter(self.prefilter)
+            .motion_compensation(self.motion_compensation);
 
         let strength_override = match channels {
             ChannelMode::Luma => self.luma_strength,
@@ -238,7 +235,7 @@ impl WorkerDenoiser {
     }
 
     /// Push one planar frame. On `QueueFull` the caller should `recv` first
-    /// and retry — the error propagates upwards unchanged.
+    /// and retry; the error propagates upwards unchanged.
     pub fn push(&mut self, planes: &Planes) -> Result<(), DenoiserError> {
         if let Some(d) = self.yuv.as_mut() {
             let buf = interleave_yuv_to_f32(&planes.y, &planes.u, &planes.v);
@@ -406,7 +403,7 @@ fn f32_to_u8_plane(plane: &[f32]) -> Vec<u8> {
 }
 
 /// Interleave Y/U/V planes (all equal length, i.e. YUV444) into
-/// `[Y0,U0,V0, Y1,U1,V1, …]` f32 in `[0, 1]` — the layout the library's
+/// `[Y0,U0,V0, Y1,U1,V1, ...]` f32 in `[0, 1]`, the layout the library's
 /// fused 3-channel kernel expects.
 fn interleave_yuv_to_f32(y: &[u8], u: &[u8], v: &[u8]) -> Vec<f32> {
     debug_assert_eq!(y.len(), u.len());

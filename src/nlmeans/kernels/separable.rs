@@ -218,7 +218,7 @@ pub fn nlm_vertical_weight(
     output[(global_y * width + global_x) as usize] = f32::exp(-sum * h2_inv_norm);
 }
 
-/// Paired horizontal 1D box filter — the forward and backward hsum
+/// Paired horizontal 1D box filter. The forward and backward hsum
 /// passes share one cooperative tile load and one `sync_cube`.
 #[cube(launch_unchecked)]
 pub fn nlm_horizontal_sum_pair(

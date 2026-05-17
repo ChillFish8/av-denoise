@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use av_denoise::accelerate::{Accelerator, get_default_accelerators};
-use av_denoise::{DenoisingMode, Device, NlmTuning, PrefilterMode};
+use av_denoise::{DenoisingMode, Device, MotionCompensationMode, NlmTuning, PrefilterMode};
 use clap::{Parser, Subcommand};
 use strum_macros::EnumString;
 
@@ -14,10 +14,7 @@ use ingest::{BinaryChannelIntent, CliOptions};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// The denoising algorithm to use.
-///
-/// Currently only Non-Local Means is implemented; the flag exists so
-/// future algorithms can be added without breaking the CLI surface.
+/// Denoising algorithm. Only `nlmeans` is currently implemented.
 #[derive(Debug, Copy, Clone, Default, EnumString)]
 #[strum(ascii_case_insensitive)]
 pub enum Algorithm {
@@ -25,16 +22,15 @@ pub enum Algorithm {
     Nlmeans,
 }
 
-/// Which channels of each frame should be denoised.
+/// Which planes to clean up.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
 pub enum CliChannelMode {
-    /// Denoise only the luma (Y) plane. Chroma is passed through.
+    /// Clean only the brightness plane (Y). Colour passes through.
     Luma,
-    /// Denoise only the chroma (U, V) planes. Luma is passed through.
+    /// Clean only the colour planes (U, V). Brightness passes through.
     Chroma,
-    /// Single-pass fused YUV denoising via the library's 3-channel
-    /// kernel. Requires a YUV444 source and cannot be combined with
-    /// other modes.
+    /// Clean all three planes together in one pass. Needs a YUV444
+    /// source and cannot be combined with the other modes.
     Yuv,
 }
 
@@ -67,175 +63,218 @@ fn resolve_channel_intent(modes: &[CliChannelMode]) -> Result<BinaryChannelInten
     })
 }
 
-/// Fast and efficient video denoising.
-///
-/// Reads a video from either a file (with scene-aware parallel
-/// denoising) or a y4m stream on stdin, runs NLMeans on the GPU via
-/// cubecl, and writes the denoised result as y4m to stdout.
-///
-/// Pick the input source with a subcommand:
-///
-///   av-denoise file --input clip.mkv | x265 ...
-///   ffmpeg -i clip.mkv -f yuv4mpegpipe - | av-denoise stdin | x265 ...
 #[derive(Debug, Parser)]
 #[command(about = "Fast and efficient video denoising", long_about = None)]
 struct Args {
-    /// Denoising algorithm.
+    /// Denoising algorithm to run.
     ///
-    /// Only `nlmeans` is currently implemented.
+    /// Only `nlmeans` is currently available.
     #[arg(short, long, default_value = "nlmeans", global = true)]
     algorithm: Algorithm,
 
-    /// Hardware accelerator priority list (comma-delimited).
+    /// Which hardware backends to try, in order of preference.
     ///
-    /// The runtime is selected by probing each accelerator in order
-    /// and taking the first one that initialises successfully. If
-    /// none work, the binary exits with an error.
-    ///
-    /// Defaults to every backend the binary was compiled with.
+    /// The first backend that initialises is used. If none work the
+    /// program exits with an error. The list is comma-separated,
+    /// for example `vulkan,cpu`.
     #[arg(short = 'A', long, value_delimiter = ',', default_values_t = get_default_accelerators(), global = true)]
     accelerators: Vec<Accelerator>,
 
-    /// Specific device to bind to on the selected accelerator.
+    /// Which device to use on the chosen backend.
     ///
-    /// Accepted forms:
+    /// Accepted values:
     ///
-    /// `default` — backend-chosen default device.
+    /// `default` lets the backend pick.
     ///
-    /// `discrete[:N]` — discrete GPU at ordinal N (default 0).
-    /// Honoured by CUDA, ROCm, and wgpu.
+    /// `discrete[:N]` picks the Nth discrete GPU (default 0).
+    /// Works on CUDA, ROCm, and Vulkan.
     ///
-    /// `integrated[:N]` — integrated GPU at ordinal N. wgpu only.
+    /// `integrated[:N]` picks the Nth integrated GPU. Vulkan only.
     ///
-    /// `virtual[:N]` — virtual GPU at ordinal N. wgpu only.
+    /// `virtual[:N]` picks the Nth virtual GPU. Vulkan only.
     ///
-    /// `cpu` — software/CPU device.
+    /// `cpu` uses the software backend.
     #[arg(short, long, default_value = "default", global = true)]
     device: Device,
 
-    /// Which channels of each frame to denoise (comma-delimited).
+    /// Which planes of the video to clean (comma-separated).
     ///
-    /// `luma` denoises only Y; `chroma` only U/V at the source's
-    /// native subsampled resolution. `luma,chroma` runs both as two
-    /// independent denoisers (full-res Y + subsampled UV).
+    /// `luma` cleans only the brightness plane.
     ///
-    /// `yuv` invokes the library's fused 3-channel kernel in one
-    /// pass. It requires a YUV444 source and cannot be combined with
-    /// any other mode.
+    /// `chroma` cleans only the colour planes at their native size.
+    ///
+    /// `luma,chroma` cleans both as two independent passes, which is
+    /// usually what you want for noisy footage.
+    ///
+    /// `yuv` cleans all three planes in one fused pass. This needs a
+    /// YUV444 source and cannot be combined with the other modes.
     #[arg(long, value_enum, value_delimiter = ',', default_values_t = vec![CliChannelMode::Luma], global = true)]
     channel_mode: Vec<CliChannelMode>,
 
-    /// Reference clip used for NLM weight calculation.
+    /// Reference image used when comparing patches.
     ///
-    /// `none` disables prefiltering and uses the noisy input directly
-    /// for both weight calculation and pixel accumulation.
+    /// `none` uses the noisy input directly (the cheapest option).
     ///
-    /// `bilateral:<sigma_s>,<sigma_r>` runs an on-GPU bilateral
-    /// prefilter; `sigma_s` is the spatial sigma in pixels and
-    /// `sigma_r` is the range sigma in `[0, 1]` intensity units.
-    /// A sensible starting point is `bilateral:3.0,0.02`.
+    /// `bilateral:<sigma_s>,<sigma_r>` runs a quick on-GPU bilateral
+    /// blur first, then compares patches against that cleaner image.
+    /// `sigma_s` is the spatial blur radius in pixels and `sigma_r`
+    /// is the colour-similarity threshold in `[0, 1]`. A good
+    /// starting point is `bilateral:3.0,0.02`.
+    ///
+    /// Prefiltering keeps more detail at the cost of one extra GPU
+    /// pass per frame.
     #[arg(long, default_value = "none", global = true)]
     prefilter: String,
 
-    /// Temporal radius for temporal-aware denoising.
+    /// How many neighbouring frames to look at on each side when
+    /// cleaning a frame.
     ///
-    /// `0` (default) runs spatial-only denoising — each output frame
-    /// depends only on the matching input frame. Values `> 0` enable
-    /// temporal denoising over a `2 * radius + 1` frame window
-    /// centred on the current frame; higher values give stronger
-    /// noise reduction at the cost of latency and memory.
+    /// `0` (default) means no temporal blending: each frame is
+    /// cleaned on its own.
     ///
-    /// In `file` mode, temporal context is reset at every scene
-    /// boundary detected by av-scenechange, so increasing the radius
-    /// never blends frames across cuts.
+    /// Values above `0` look at that many frames before and after
+    /// the current one. Larger values give stronger cleanup but use
+    /// more memory and add latency.
+    ///
+    /// In `file` mode this is reset at every scene change, so
+    /// raising it never causes blending across cuts.
     #[arg(long, default_value_t = 0, global = true)]
     temporal_radius: u32,
 
-    /// Override NLM search-window radius. Library default: 2.
+    /// How far away to look for similar patches inside a frame.
     ///
-    /// Higher values find more candidate patches at the cost of work
-    /// quadratic in this value. Bounded by the library's
-    /// `MAX_SEARCH_RADIUS`.
+    /// Larger values find more matches but cost quadratically more
+    /// work. Library default is 2.
     #[arg(long, global = true)]
     search_radius: Option<u32>,
 
-    /// Override NLM patch radius. Library default: 4.
+    /// Size of each patch being compared. The patch is
+    /// `(2*patch_radius + 1)` pixels square.
     ///
-    /// Patch is `(2*patch_radius + 1)` square. Larger patches preserve
-    /// structure better at the cost of higher GPU memory. Bounded by
-    /// the library's `MAX_PATCH_RADIUS`.
+    /// Larger patches preserve fine structure better but cost more
+    /// GPU memory. Library default is 4.
     #[arg(long, global = true)]
     patch_radius: Option<u32>,
 
-    /// Override NLM filter strength (sigma). Library default: 1.2.
+    /// Cleaning strength. Higher numbers smooth more.
     ///
-    /// Higher = more smoothing. Must be finite and > 0. Acts as the
-    /// shared default for both planes; `--luma-strength` and
-    /// `--chroma-strength` take precedence when set.
+    /// Must be a finite number greater than 0. Library default is
+    /// 1.2.
+    ///
+    /// This value applies to both planes unless `--luma-strength`
+    /// or `--chroma-strength` is set.
     #[arg(long, global = true)]
     strength: Option<f32>,
 
-    /// Override strength for the luma denoiser only. Falls back to
-    /// `--strength` (or the library default) when unset. Ignored when
-    /// luma isn't being denoised or when `--channel-mode yuv` is used
-    /// (the fused kernel can't tune planes independently).
+    /// Strength override for the brightness plane only.
+    ///
+    /// Falls back to `--strength` (or the library default) when not
+    /// set. Ignored when luma is not being denoised, or when
+    /// `--channel-mode yuv` is used.
     #[arg(long, global = true)]
     luma_strength: Option<f32>,
 
-    /// Override strength for the chroma denoiser only. Falls back to
-    /// `--strength` (or the library default) when unset. Ignored when
-    /// chroma isn't being denoised or when `--channel-mode yuv` is
-    /// used.
+    /// Strength override for the colour planes only.
+    ///
+    /// Falls back to `--strength` (or the library default) when not
+    /// set. Ignored when chroma is not being denoised, or when
+    /// `--channel-mode yuv` is used.
     #[arg(long, global = true)]
     chroma_strength: Option<f32>,
 
-    /// Override the centre pixel's self-weight in NLM averaging.
-    /// Library default: 1.0. Must be finite and >= 0.
+    /// How much weight to give the centre pixel itself when
+    /// averaging.
+    ///
+    /// Library default is 1.0. Must be a finite number `>= 0`.
+    /// Setting to 0 gives pure NLM (centre pixel only counts if a
+    /// similar patch was found nearby).
     #[arg(long)]
     self_weight: Option<f32>,
+
+    /// Turn on motion compensation for temporal denoising.
+    ///
+    /// When the camera or content moves between frames, the
+    /// brightness at the same `(x, y)` is different content in each
+    /// frame. Without help, temporal cleanup will blur moving edges.
+    ///
+    /// Motion compensation looks at where each block of pixels
+    /// moved between frames, then shifts neighbour frames to line up
+    /// with the current frame before cleaning. This keeps detail
+    /// sharp on anime, fast pans, and action footage.
+    ///
+    /// Has no effect when `--temporal-radius 0`.
+    #[arg(long, global = true)]
+    motion_compensation: bool,
+
+    /// Size of each motion-search block, in pixels. Must be even.
+    ///
+    /// Larger blocks are more stable but track motion less
+    /// accurately on small details.
+    #[arg(long, default_value = "16", global = true)]
+    mc_blksize: u32,
+
+    /// How many pixels neighbouring motion blocks may overlap.
+    ///
+    /// Must be less than `--mc-blksize`. Higher overlap smooths the
+    /// transitions between blocks but does more work.
+    #[arg(long, default_value = "8", global = true)]
+    mc_overlap: u32,
+
+    /// How many pixels of motion to search for at the finest level.
+    ///
+    /// The coarse pyramid pass reaches further (search radius times
+    /// 2 for a 2-level pyramid), so for typical content the default
+    /// is fine. Raise it for very fast motion.
+    #[arg(long, default_value = "4", global = true)]
+    mc_search: u32,
+
+    /// How many levels the motion-search pyramid uses.
+    ///
+    /// `1` does a single full-resolution search (cheaper, weaker on
+    /// large motion).
+    ///
+    /// `2` (default) does a coarse pass on a half-size image first,
+    /// then refines at full resolution. This handles much larger
+    /// motion at modest extra cost.
+    #[arg(long, default_value = "2", global = true)]
+    mc_pyramid_levels: u32,
 
     #[command(subcommand)]
     command: Command,
 }
 
-/// Input-source selector.
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Denoise a video file with scene-aware parallel processing.
+    /// Denoise a video file, splitting work by scene.
     ///
-    /// Opens the input with ffms2, runs scene detection
-    /// (av-scenechange), and dispatches scenes across N worker
-    /// threads. Each worker holds its own `Denoiser` and rebuilds it
-    /// at every scene boundary, so temporal context never leaks
-    /// across cuts. Workers emit frames to a coordinator that
-    /// re-orders them and writes y4m to stdout.
+    /// Opens the file with ffms2, finds scene boundaries with
+    /// `av-scenechange`, and runs each scene on its own worker
+    /// thread. Temporal context is reset between scenes so the
+    /// denoiser never blends frames across a cut.
     File {
         /// Path to the input video file.
         ///
-        /// Any container/codec supported by ffmpeg (and therefore
-        /// ffms2) is accepted. The source must be 8-bit; 10/12-bit
-        /// inputs are rejected with a clear error.
+        /// Any container or codec supported by ffmpeg works. The
+        /// source must be 8-bit; 10 or 12-bit inputs are rejected
+        /// with a clear error message.
         #[arg(short, long)]
         input: PathBuf,
 
-        /// Number of denoiser workers running in parallel.
+        /// How many scenes to clean in parallel.
         ///
-        /// Each worker holds its own `Denoiser` and processes one
-        /// scene at a time. Higher values increase GPU utilisation on
-        /// content with many short scenes, at the cost of more GPU
-        /// memory (each worker's denoiser allocates its own temporal
-        /// ring buffer).
-        ///
+        /// Each worker uses its own GPU memory for the frame ring
+        /// buffer, so higher values trade GPU memory for throughput.
         /// `1` is valid and useful for debugging.
         #[arg(short = 'W', long, default_value_t = 2)]
         workers: usize,
     },
-    /// Denoise a y4m stream from stdin and emit y4m to stdout.
+    /// Denoise a y4m stream coming in on stdin, writing y4m on
+    /// stdout.
     ///
-    /// Useful for piping through ffmpeg/x264/x265/etc. No scene
-    /// detection is performed — the temporal window slides
-    /// continuously across the entire stream. Only 8-bit 4:2:0 /
-    /// 4:2:2 / 4:4:4 y4m is supported for v1.
+    /// Useful for piping through ffmpeg or an encoder. There is no
+    /// scene detection in this mode, so temporal denoising slides
+    /// across the whole stream. Only 8-bit 4:2:0 / 4:2:2 / 4:4:4
+    /// y4m is supported right now.
     Stdin,
 }
 
@@ -261,15 +300,14 @@ fn parse_prefilter(s: &str) -> Result<PrefilterMode, anyhow::Error> {
 }
 
 fn main() -> anyhow::Result<()> {
-    // cubecl spawns its per-device "DS{U,D}-…" worker thread via
-    // `std::thread::Builder::new().spawn(...)` with no explicit stack size
-    // (cubecl-common's DeviceClient::new). GPU kernel codegen runs on that
-    // thread; at large --search-radius the (2R+1)² unrolled body in the
-    // four windowed kernels in src/nlmeans/kernels/fused.rs overflows the
-    // default 2 MiB stack. RUST_MIN_STACK is cached on first read, so set
-    // it here before any GPU thread spawns.
+    // cubecl spawns its per-device worker thread with no explicit stack
+    // size (uses Rust's default 2 MiB). GPU kernel codegen runs on that
+    // thread; at large --search-radius the (2R+1)^2 unrolled body in
+    // the windowed NLM kernels in src/nlmeans/kernels/fused.rs
+    // overflows the default stack. RUST_MIN_STACK is cached on first
+    // read, so set it here before any GPU thread spawns.
     if std::env::var_os("RUST_MIN_STACK").is_none() {
-        // SAFETY: still single-threaded — no other thread can race the env mutation.
+        // SAFETY: still single-threaded, no other thread can race the env mutation.
         unsafe { std::env::set_var("RUST_MIN_STACK", "16777216") };
     }
 
@@ -292,6 +330,23 @@ fn main() -> anyhow::Result<()> {
     let prefilter = parse_prefilter(&args.prefilter)?;
     let intent = resolve_channel_intent(&args.channel_mode)?;
 
+    let motion_compensation = if args.motion_compensation {
+        if args.temporal_radius == 0 {
+            tracing::warn!(
+                "--motion-compensation has no effect when --temporal-radius is 0; \
+                 the spatial path doesn't use temporal neighbours"
+            );
+        }
+        MotionCompensationMode::Mvtools {
+            blksize: args.mc_blksize,
+            overlap: args.mc_overlap,
+            search_radius: args.mc_search,
+            pyramid_levels: args.mc_pyramid_levels,
+        }
+    } else {
+        MotionCompensationMode::None
+    };
+
     let nlm_tuning = if args.search_radius.is_some()
         || args.patch_radius.is_some()
         || args.strength.is_some()
@@ -313,6 +368,7 @@ fn main() -> anyhow::Result<()> {
         intent,
         mode,
         prefilter,
+        motion_compensation,
         nlm_tuning,
         luma_strength: args.luma_strength,
         chroma_strength: args.chroma_strength,

@@ -19,6 +19,10 @@ pub mod fused_pair_accumulate_ref;
 pub mod fused_window;
 pub mod horizontal_sum;
 pub mod horizontal_sum_pair;
+pub mod mc_block_match_coarse;
+pub mod mc_block_match_fine;
+pub mod mc_downscale;
+pub mod mc_warp;
 pub mod vertical_weight;
 pub mod vweight_pair_accumulate;
 pub mod zero;
@@ -80,7 +84,7 @@ pub fn make_padded_frame(w: u32, h: u32, ch: u32) -> Vec<f32> {
 }
 
 /// Welsch coefficient for the bench-default parameter set. Channel mode
-/// is irrelevant here — `NlmParams::h2_inv_norm` only reads `patch_radius`
+/// is irrelevant here; `NlmParams::h2_inv_norm` only reads `patch_radius`
 /// and `strength`.
 pub fn h2_inv_norm() -> f32 {
     NlmParams {

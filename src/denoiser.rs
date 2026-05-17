@@ -1,15 +1,10 @@
-//! High-level, runtime-erased denoiser. Picks a cubecl backend at
-//! construction time from the user's accelerator priority list and
-//! exposes a push/recv streaming API on top of the generic
-//! `NlmDenoiser<R>`.
-
 use std::collections::VecDeque;
 
 use cubecl::Runtime;
 
 use crate::accelerate::Accelerator;
 use crate::device::Device;
-use crate::nlmeans::{ChannelMode, NlmDenoiser, NlmParams, Pending, PrefilterMode};
+use crate::nlmeans::{ChannelMode, MotionCompensationMode, NlmDenoiser, NlmParams, Pending, PrefilterMode};
 use crate::sniff::sniff_best_accelerator;
 
 /// User-facing denoiser configuration. Build with `DenoiserOptions::builder()`.
@@ -24,6 +19,12 @@ pub struct DenoiserOptions {
     /// Reference clip source for NLM weight computation.
     #[builder(default = PrefilterMode::None)]
     pub prefilter: PrefilterMode,
+    /// Motion-compensation mode for temporal denoising. `None`
+    /// disables MC; `Mvtools` warps temporal neighbours into spatial
+    /// alignment with the centre frame before NLM weighting. Only
+    /// takes effect when `mode` is `Temporal { .. }`.
+    #[builder(default = MotionCompensationMode::None)]
+    pub motion_compensation: MotionCompensationMode,
     /// Override NLM tuning (search/patch radius, strength, self-weight).
     /// `None` uses the defaults baked into [`NlmParams`].
     pub nlm: Option<NlmTuning>,
@@ -53,6 +54,7 @@ impl DenoiserOptions {
         let mut params = NlmParams {
             channels: self.channel_mode,
             prefilter: self.prefilter,
+            motion_compensation: self.motion_compensation,
             temporal_radius: match self.mode {
                 DenoisingMode::Spacial => 0,
                 DenoisingMode::Temporal { radius } => radius,
@@ -164,7 +166,7 @@ impl Denoiser {
     ///
     /// cubecl spawns an internal per-device worker thread (named
     /// `DS{U,D}-…`) on which GPU kernel codegen runs. It uses Rust's
-    /// default thread stack — `RUST_MIN_STACK` or 2 MiB if unset. The
+    /// default thread stack (`RUST_MIN_STACK`, or 2 MiB if unset). The
     /// windowed NLM kernels here contain `(2·search_radius + 1)²`-times
     /// `#[unroll]`ed bodies, so large `search_radius` (≳ 5) values can
     /// overflow that 2 MiB default and abort the process.
@@ -228,7 +230,7 @@ impl Denoiser {
     /// window is full and the in-flight pipeline has room, this also
     /// kicks off the kernels for the next denoised frame.
     ///
-    /// Up to [`MAX_PENDING`] outputs may be in flight simultaneously —
+    /// Up to [`MAX_PENDING`] outputs may be in flight simultaneously:
     /// the GPU runs frame N+1's kernels while frame N's readback is in
     /// flight. Returns [`DenoiserError::QueueFull`] once that ceiling
     /// is reached; the caller must drain via [`Self::recv_frame`] before
@@ -417,6 +419,37 @@ mod options_tests {
         let params = opts.to_nlm_params();
 
         assert!(matches!(params.prefilter, PrefilterMode::Bilateral { .. }));
+    }
+
+    #[test]
+    fn motion_compensation_passthrough() {
+        let opts = DenoiserOptions::builder()
+            .mode(DenoisingMode::Temporal { radius: 1 })
+            .motion_compensation(MotionCompensationMode::Mvtools {
+                blksize: 16,
+                overlap: 8,
+                search_radius: 4,
+                pyramid_levels: 2,
+            })
+            .build();
+        let params = opts.to_nlm_params();
+
+        assert!(matches!(
+            params.motion_compensation,
+            MotionCompensationMode::Mvtools {
+                blksize: 16,
+                overlap: 8,
+                search_radius: 4,
+                pyramid_levels: 2,
+            }
+        ));
+    }
+
+    #[test]
+    fn motion_compensation_defaults_to_none() {
+        let opts = DenoiserOptions::builder().build();
+        let params = opts.to_nlm_params();
+        assert!(matches!(params.motion_compensation, MotionCompensationMode::None));
     }
 
     #[test]

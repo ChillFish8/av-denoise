@@ -319,6 +319,7 @@ fn denoise_params(channels: ChannelMode, temporal_radius: u32, prefilter: Prefil
         self_weight: 1.0,
         channels,
         prefilter,
+        ..NlmParams::default()
     }
 }
 
@@ -338,7 +339,7 @@ fn push_frame_for_prefilter<R: Runtime>(
 }
 
 /// Steady-state streaming bench: every iteration pushes a fresh frame
-/// (the real per-frame cost — upload + optional prefilter) and then
+/// (the real per-frame cost: upload plus optional prefilter) and then
 /// calls the synchronous `denoise()` which waits for the readback. This
 /// is the cost a caller pays if they push and wait in lockstep.
 fn bench_denoise_spatial<R: Runtime>(

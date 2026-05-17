@@ -5,7 +5,7 @@ use crate::accelerate::Accelerator;
 /// Probe each enabled accelerator and return the first one whose client
 /// can be created and synchronised. cubecl 0.10 kernels are fully
 /// asynchronous, so a successful `client.sync()` is sufficient to
-/// confirm the backend is usable — no test kernel needed.
+/// confirm the backend is usable (no test kernel needed).
 pub fn sniff_best_accelerator(enable: &[Accelerator]) -> Option<Accelerator> {
     for accelerator in enable {
         let is_enabled = match accelerator {

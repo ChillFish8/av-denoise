@@ -84,6 +84,29 @@ RUNS: list[Run] = [
         f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- --temporal-radius 1 --channel-mode luma,chroma --strength 2.0 --prefilter 'bilateral:3.0,0.02'",
     ),
     Run(
+        "variant_a",
+        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- "
+        f"--temporal-radius 1 --channel-mode luma,chroma "
+        f"--strength 1.0 --prefilter 'bilateral:3.0,0.02' --search-radius 2 --patch-radius 4",
+    ),
+    Run(
+        "variant_b",
+        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- "
+        f"--temporal-radius 0 --channel-mode luma,chroma "
+        f"--strength 1.0 --search-radius 7 --patch-radius 3",
+    ),
+    Run(
+        "variant_c",
+        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- "
+        f"--temporal-radius 1 --channel-mode luma,chroma "
+        f"--strength 1.0 --search-radius 3 --patch-radius 3",
+    ),
+    Run(
+        "variant_d",
+        f"just denoise-file-ffmpeg -i {SOURCE_VIDEO} -o {{out_file}} "
+        f"--search 15 --patch 7 --strength 1.2",
+    ),
+    Run(
         "av_denoise_temporal_1_chroma_default",
         f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- --temporal-radius 1 --channel-mode chroma",
     ),
