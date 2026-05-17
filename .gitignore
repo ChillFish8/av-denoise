@@ -4,3 +4,4 @@ cubecl.log
 /models/*.onnx
 /**/*.bpk
 /.claude/
+/scripts/**/*.pyc
