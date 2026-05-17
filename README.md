@@ -19,9 +19,7 @@ leverage modern hardware instead of relying on the now rather outdated OpenCL.
    * You can specify the reference frame yourself using the library rather than CLI.
 - **Motion compensation** for high-quality temporal denoising on heavy motion.
    * MVTools-inspired hierarchical block matching, fully on-GPU.
-   * Warps temporal neighbours into spatial alignment with the centre frame
-     before NLM weighting — preserves detail on anime, fast pans, and action.
-   * Enabled with `--motion-compensation`; tuned via `--mc-blksize`,
+   * Enabled with `--motion-compensation`, tuned via `--mc-blksize`,
      `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels`.
 - _**Fast!**_ - Around **2x** faster than FFmpeg's OpenCL implementation.
    * Be aware that the `STDIN` mode for the binary cannot fully utilise larger modern GPUs, it will
