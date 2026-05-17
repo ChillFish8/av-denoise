@@ -361,7 +361,7 @@ pub fn nlm_vweight_pair_accumulate<N: Size>(
     );
 }
 
-/// `_ref` variant of [`nlm_distance`]. Reads `reference` for both
+/// `_ref` variant of `nlm_distance`. Reads `reference` for both
 /// center and neighbour; downstream separable kernels consume the
 /// distance buffer unchanged.
 #[cube(launch_unchecked)]
@@ -405,7 +405,7 @@ pub fn nlm_distance_ref<N: Size>(
     dist[(y * width + x) as usize] = line_sum_sq(center - neighbor, channels) * scale;
 }
 
-/// `_ref` variant of [`nlm_distance_pair`]. Both forward and backward
+/// `_ref` variant of `nlm_distance_pair`. Both forward and backward
 /// distance signals read from `reference`.
 #[cube(launch_unchecked)]
 pub fn nlm_distance_pair_ref<N: Size>(

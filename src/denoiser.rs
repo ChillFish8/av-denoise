@@ -230,7 +230,7 @@ impl Denoiser {
     /// window is full and the in-flight pipeline has room, this also
     /// kicks off the kernels for the next denoised frame.
     ///
-    /// Up to [`MAX_PENDING`] outputs may be in flight simultaneously:
+    /// Up to `MAX_PENDING` outputs may be in flight simultaneously:
     /// the GPU runs frame N+1's kernels while frame N's readback is in
     /// flight. Returns [`DenoiserError::QueueFull`] once that ceiling
     /// is reached; the caller must drain via [`Self::recv_frame`] before

@@ -293,7 +293,7 @@ pub fn nlm_fused_pair_accumulate<N: Size>(
     );
 }
 
-/// `_ref` variant of [`nlm_dist_2d_weight`]. Distance reads come from
+/// `_ref` variant of `nlm_dist_2d_weight`. Distance reads come from
 /// `reference` (a prefiltered or externally-supplied clip with the same
 /// layout as `input`); the weight output is unchanged. Used when an
 /// rclip is active so weight calculation sees a cleaner image than the
@@ -399,7 +399,7 @@ pub fn nlm_dist_2d_weight_ref<N: Size>(
     output[(global_y * width + global_x) as usize] = f32::exp(-patch_sum * h2_inv_norm);
 }
 
-/// `_ref` variant of [`nlm_fused_pair_accumulate`]. Patch distances are
+/// `_ref` variant of `nlm_fused_pair_accumulate`. Patch distances are
 /// computed from `reference` (prefiltered clip); the pixel values
 /// folded into `accum` still come from `input`. Same SMEM footprint and
 /// dispatch shape as the non-`_ref` variant.
@@ -756,7 +756,7 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
 }
 
 /// Windowed spatial (q_k == 0) kernel: same structure as
-/// [`nlm_fused_pair_accumulate_window`] but exploits the q-symmetry of
+/// `nlm_fused_pair_accumulate_window` but exploits the q-symmetry of
 /// the weight map. Patch distance is symmetric (`w(x, −q) = w(x−q, q)`),
 /// so iterating the full search window in a single direction at pixel x
 /// produces the same accumulator as the original half-window paired
@@ -900,7 +900,7 @@ pub fn nlm_fused_single_window<N: Size>(
     }
 }
 
-/// `_ref` variant of [`nlm_fused_pair_accumulate_window`]. Distance reads
+/// `_ref` variant of `nlm_fused_pair_accumulate_window`. Distance reads
 /// (the cached center tile and per-q neighbours) come from `reference`;
 /// pixel accumulation reads from `input` so the original-clip values
 /// flow into `accum` while weights are derived from the cleaner
@@ -1068,7 +1068,7 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
     }
 }
 
-/// `_ref` variant of [`nlm_fused_single_window`]. Distance reads from
+/// `_ref` variant of `nlm_fused_single_window`. Distance reads from
 /// `reference[frame_t]` (cached center + per-q neighbours, all at q_k=0);
 /// pixel accumulation reads from `input[frame_t]`.
 #[cube(launch_unchecked)]

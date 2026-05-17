@@ -1,6 +1,7 @@
 pub mod accelerate;
 mod denoiser;
 pub mod device;
+#[doc(hidden)]
 pub mod nlmeans;
 pub mod sniff;
 
