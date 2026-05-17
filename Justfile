@@ -18,7 +18,7 @@ bench *ARGS:
 denoise-file input output workers="2" *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo run --release --bin av-denoise --features binary-full -- {{ARGS}} file --workers {{workers}} --input "{{input}}" \
+    cargo run --release --bin av-denoise --features binary -- {{ARGS}} file --workers {{workers}} --input "{{input}}" \
         | ffmpeg -hide_banner -stats -stats_period 0.5 -loglevel info \
             -y -f yuv4mpegpipe -i - -c:v ffv1 "{{output}}"
 

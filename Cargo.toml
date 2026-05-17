@@ -8,7 +8,7 @@ autobins = false
 [[bin]]
 name = "av-denoise"
 path = "src/bin/main.rs"
-required-features = ["binary", "ffms2", "stdin"]
+required-features = ["binary"]
 
 [dependencies]
 anyhow = "1"
@@ -44,10 +44,7 @@ metal = ["cubecl/metal"]
 cuda = ["cubecl/cuda"]
 rocm = ["cubecl/hip"]
 cpu = ["cubecl/cpu"]
-binary = ["clap", "mimalloc"]
-ffms2 = ["dep:ffms2", "av-scenechange", "dep:av-decoders", "dep:v_frame"]
-stdin = ["y4m"]
-binary-full = ["binary", "ffms2", "stdin"]
+binary = ["clap", "mimalloc", "dep:ffms2", "av-scenechange", "dep:av-decoders", "dep:v_frame", "y4m"]
 default = ["cpu", "vulkan"]
 
 [[bench]]

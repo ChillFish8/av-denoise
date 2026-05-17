@@ -14,7 +14,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY benches ./benches
 
-RUN cargo build --release --bin av-denoise --no-default-features --features cpu,vulkan,binary-full
+RUN cargo build --release --bin av-denoise --no-default-features --features cpu,vulkan,binary
 
 
 FROM archlinux:latest AS runtime
