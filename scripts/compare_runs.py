@@ -98,11 +98,17 @@ RUNS: list[Run] = [
     Run(
         "variant_c",
         f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- "
-        f"--temporal-radius 1 --channel-mode luma,chroma "
-        f"--strength 1.0 --search-radius 3 --patch-radius 3",
+        f"--temporal-radius 0 --channel-mode luma,chroma --motion-compensation"
+        f"--strength 1.0 --search-radius 7 --patch-radius 3",
     ),
     Run(
         "variant_d",
+        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- "
+        f"--temporal-radius 0 --channel-mode luma,chroma --motion-compensation"
+        f"--strength 1.0 --prefilter 'bilateral:3.0,0.02' --search-radius 2 --patch-radius 4",
+    ),
+    Run(
+        "ffmpeg_strength_1_2",
         f"just denoise-file-ffmpeg -i {SOURCE_VIDEO} -o {{out_file}} "
         f"--search 15 --patch 7 --strength 1.2",
     ),
