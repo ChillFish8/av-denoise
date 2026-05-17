@@ -6,6 +6,21 @@ This project is heavily inspired by [KNLmeansCL](https://github.com/Khanattila/K
 implementation but is built to be a more standalone tool and also make use or more modern tooling to better 
 leverage modern hardware instead of relying on the now rather outdated OpenCL.
 
+## Table of contents
+
+- [Features](#features)
+- [Benchmarks](#benchmarks)
+  - [Apples-to-apples spatial NL-means (strength 1.0)](#apples-to-apples-spatial-nl-means-strength-10)
+  - [av-denoise feature cost (strength 1.0, default patch/search)](#av-denoise-feature-cost-strength-10-default-patchsearch)
+- [Hardware support](#hardware-support)
+  - [Notes about the JIT](#notes-about-the-jit)
+- [Installing](#installing)
+  - [Cargo install](#cargo-install)
+  - [From source](#from-source)
+  - [As a library](#as-a-library)
+- [Example commands](#example-commands)
+- [Binary usage](#binary-usage)
+
 ## Features
 
 - Library and binary offering.
