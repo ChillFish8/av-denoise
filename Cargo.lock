@@ -189,10 +189,8 @@ dependencies = [
  "bon",
  "clap",
  "cubecl",
- "ffms2",
  "futures",
  "mimalloc",
- "serde",
  "strum",
  "strum_macros",
  "thiserror",
@@ -488,16 +486,6 @@ checksum = "57663b653d948a338bfb3eeba9bb2fd5fcfaecb9e199e87e1eda4d9e8b240fd9"
 dependencies = [
  "ciborium-io",
  "half",
-]
-
-[[package]]
-name = "clang"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84c044c781163c001b913cd018fc95a628c50d0d2dfea8bca77dad71edb16e37"
-dependencies = [
- "clang-sys",
- "libc",
 ]
 
 [[package]]
@@ -1347,43 +1335,6 @@ name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
-
-[[package]]
-name = "ffmpeg-sys-the-third"
-version = "4.1.0+ffmpeg-8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0c1bf5e362dfb2fbdf9b3e634f3d7f7f0f057103689f518ba4fd96813faf1ef"
-dependencies = [
- "bindgen 0.72.1",
- "cc",
- "clang",
- "libc",
- "pkg-config",
- "vcpkg",
-]
-
-[[package]]
-name = "ffmpeg-the-third"
-version = "4.1.0+ffmpeg-8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71a274244c87178cd01144536061d63114cecea74cb1037a3614c81cc7ca01e0"
-dependencies = [
- "bitflags",
- "ffmpeg-sys-the-third",
- "libc",
-]
-
-[[package]]
-name = "ffms2"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "933517a6cac032a0ac480b55add6bc5ace234b04f59f756ac76eca88d0265b34"
-dependencies = [
- "cfg-if",
- "ffmpeg-the-third",
- "ffms2-sys",
- "paste",
-]
 
 [[package]]
 name = "ffms2-sys"
@@ -3907,12 +3858,6 @@ dependencies = [
  "quote",
  "syn 2.0.117",
 ]
-
-[[package]]
-name = "vcpkg"
-version = "0.2.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version_check"

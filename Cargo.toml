@@ -19,11 +19,9 @@ strum_macros = "0.28"
 strum = "0.28"
 bon = "3"
 
-serde = { version = "1", features = ["derive"] }
 cubecl = { version = "0.10", features = ["std"] }
 
 # Frame ingestion via ffms2
-ffms2 = { version = "0.3", optional = true }
 av-scenechange = { version = "0.23", optional = true, features = ["ffms2"] }
 av-decoders = { version = "0.9", optional = true, features = ["ffms2"] }
 v_frame = { version = "0.5", optional = true }
@@ -44,7 +42,7 @@ metal = ["cubecl/metal"]
 cuda = ["cubecl/cuda"]
 rocm = ["cubecl/hip"]
 cpu = ["cubecl/cpu"]
-binary = ["clap", "mimalloc", "dep:ffms2", "av-scenechange", "dep:av-decoders", "dep:v_frame", "y4m"]
+binary = ["clap", "mimalloc", "av-scenechange", "av-decoders", "v_frame", "y4m"]
 default = ["cpu", "vulkan"]
 
 [[bench]]
