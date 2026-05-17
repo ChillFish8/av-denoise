@@ -210,15 +210,17 @@ struct Args {
     #[arg(long, default_value = "16", global = true)]
     mc_blksize: u32,
 
-    /// Motion-compensation block overlap in pixels. Must satisfy
-    /// `overlap < blksize` so the step (`blksize - overlap`) is
+    /// Motion-compensation block overlap in pixels.
+    ///
+    /// Must satisfy `overlap < blksize` so the step (`blksize - overlap`) is
     /// positive.
     #[arg(long, default_value = "8", global = true)]
     mc_overlap: u32,
 
     /// Motion-compensation search radius at the finest pyramid level
-    /// (in pixels). The coarse pass uses the same radius on the `/2`
-    /// image so the effective reach is doubled.
+    /// (in pixels).
+    ///
+    /// The coarse pass uses the same radius on the `/2` image so the effective reach is doubled.
     #[arg(long, default_value = "4", global = true)]
     mc_search: u32,
 
