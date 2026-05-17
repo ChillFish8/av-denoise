@@ -8,6 +8,13 @@ keywords = ["cubecl", "denoise", "gpu"]
 license = "Apache-2.0"
 repository = "https://github.com/ChillFish8/av-denoise"
 readme = "README.md"
+exclude = [
+    "scripts/",
+    ".idea/",
+    "cubecl.toml",
+    "Dockerfile",
+    "Justfile"
+]
 autobins = false
 
 [[bin]]

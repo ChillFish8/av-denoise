@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+
 pub mod accelerate;
 mod denoiser;
 pub mod device;

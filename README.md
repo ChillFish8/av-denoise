@@ -208,7 +208,7 @@ av-denoise file \
 
 ## Binary usage
 
-```
+```text
 Fast and efficient video denoising
 
 Usage: av-denoise [OPTIONS] <COMMAND>
