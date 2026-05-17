@@ -83,7 +83,7 @@ struct Args {
     /// Denoising algorithm.
     ///
     /// Only `nlmeans` is currently implemented.
-    #[arg(short, long, default_value = "nlmeans")]
+    #[arg(short, long, default_value = "nlmeans", global = true)]
     algorithm: Algorithm,
 
     /// Hardware accelerator priority list (comma-delimited).
@@ -93,7 +93,7 @@ struct Args {
     /// none work, the binary exits with an error.
     ///
     /// Defaults to every backend the binary was compiled with.
-    #[arg(short = 'A', long, value_delimiter = ',', default_values_t = get_default_accelerators())]
+    #[arg(short = 'A', long, value_delimiter = ',', default_values_t = get_default_accelerators(), global = true)]
     accelerators: Vec<Accelerator>,
 
     /// Specific device to bind to on the selected accelerator.
@@ -110,7 +110,7 @@ struct Args {
     /// `virtual[:N]` — virtual GPU at ordinal N. wgpu only.
     ///
     /// `cpu` — software/CPU device.
-    #[arg(short, long, default_value = "default")]
+    #[arg(short, long, default_value = "default", global = true)]
     device: Device,
 
     /// Which channels of each frame to denoise (comma-delimited).
@@ -122,7 +122,7 @@ struct Args {
     /// `yuv` invokes the library's fused 3-channel kernel in one
     /// pass. It requires a YUV444 source and cannot be combined with
     /// any other mode.
-    #[arg(long, value_enum, value_delimiter = ',', default_values_t = vec![CliChannelMode::Luma])]
+    #[arg(long, value_enum, value_delimiter = ',', default_values_t = vec![CliChannelMode::Luma], global = true)]
     channel_mode: Vec<CliChannelMode>,
 
     /// Reference clip used for NLM weight calculation.
@@ -134,7 +134,7 @@ struct Args {
     /// prefilter; `sigma_s` is the spatial sigma in pixels and
     /// `sigma_r` is the range sigma in `[0, 1]` intensity units.
     /// A sensible starting point is `bilateral:3.0,0.02`.
-    #[arg(long, default_value = "none")]
+    #[arg(long, default_value = "none", global = true)]
     prefilter: String,
 
     /// Temporal radius for temporal-aware denoising.
@@ -148,7 +148,7 @@ struct Args {
     /// In `file` mode, temporal context is reset at every scene
     /// boundary detected by av-scenechange, so increasing the radius
     /// never blends frames across cuts.
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 0, global = true)]
     temporal_radius: u32,
 
     /// Override NLM search-window radius. Library default: 2.
@@ -156,7 +156,7 @@ struct Args {
     /// Higher values find more candidate patches at the cost of work
     /// quadratic in this value. Bounded by the library's
     /// `MAX_SEARCH_RADIUS`.
-    #[arg(long)]
+    #[arg(long, global = true)]
     search_radius: Option<u32>,
 
     /// Override NLM patch radius. Library default: 4.
@@ -164,7 +164,7 @@ struct Args {
     /// Patch is `(2*patch_radius + 1)` square. Larger patches preserve
     /// structure better at the cost of higher GPU memory. Bounded by
     /// the library's `MAX_PATCH_RADIUS`.
-    #[arg(long)]
+    #[arg(long, global = true)]
     patch_radius: Option<u32>,
 
     /// Override NLM filter strength (sigma). Library default: 1.2.
@@ -172,21 +172,21 @@ struct Args {
     /// Higher = more smoothing. Must be finite and > 0. Acts as the
     /// shared default for both planes; `--luma-strength` and
     /// `--chroma-strength` take precedence when set.
-    #[arg(long)]
+    #[arg(long, global = true)]
     strength: Option<f32>,
 
     /// Override strength for the luma denoiser only. Falls back to
     /// `--strength` (or the library default) when unset. Ignored when
     /// luma isn't being denoised or when `--channel-mode yuv` is used
     /// (the fused kernel can't tune planes independently).
-    #[arg(long)]
+    #[arg(long, global = true)]
     luma_strength: Option<f32>,
 
     /// Override strength for the chroma denoiser only. Falls back to
     /// `--strength` (or the library default) when unset. Ignored when
     /// chroma isn't being denoised or when `--channel-mode yuv` is
     /// used.
-    #[arg(long)]
+    #[arg(long, global = true)]
     chroma_strength: Option<f32>,
 
     /// Override the centre pixel's self-weight in NLM averaging.
