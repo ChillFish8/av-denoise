@@ -150,6 +150,26 @@ impl Denoiser {
     /// Probe each accelerator in `accelerators` in order and build a
     /// denoiser on the first one that's available. `device` lets the
     /// caller pick a non-default device for the chosen runtime.
+    ///
+    /// # Thread stack size
+    ///
+    /// cubecl spawns an internal per-device worker thread (named
+    /// `DS{U,D}-…`) on which GPU kernel codegen runs. It uses Rust's
+    /// default thread stack — `RUST_MIN_STACK` or 2 MiB if unset. The
+    /// windowed NLM kernels here contain `(2·search_radius + 1)²`-times
+    /// `#[unroll]`ed bodies, so large `search_radius` (≳ 5) values can
+    /// overflow that 2 MiB default and abort the process.
+    ///
+    /// Callers planning to use `search_radius > 4` should set
+    /// `RUST_MIN_STACK` to at least 16 MiB before any cubecl thread
+    /// spawns (typically at the very top of `main`), e.g.:
+    ///
+    /// ```no_run
+    /// if std::env::var_os("RUST_MIN_STACK").is_none() {
+    ///     // SAFETY: single-threaded at startup.
+    ///     unsafe { std::env::set_var("RUST_MIN_STACK", "16777216") };
+    /// }
+    /// ```
     pub fn create(
         accelerators: &[Accelerator],
         device: &Device,

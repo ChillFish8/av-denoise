@@ -261,6 +261,18 @@ fn parse_prefilter(s: &str) -> Result<PrefilterMode, anyhow::Error> {
 }
 
 fn main() -> anyhow::Result<()> {
+    // cubecl spawns its per-device "DS{U,D}-…" worker thread via
+    // `std::thread::Builder::new().spawn(...)` with no explicit stack size
+    // (cubecl-common's DeviceClient::new). GPU kernel codegen runs on that
+    // thread; at large --search-radius the (2R+1)² unrolled body in the
+    // four windowed kernels in src/nlmeans/kernels/fused.rs overflows the
+    // default 2 MiB stack. RUST_MIN_STACK is cached on first read, so set
+    // it here before any GPU thread spawns.
+    if std::env::var_os("RUST_MIN_STACK").is_none() {
+        // SAFETY: still single-threaded — no other thread can race the env mutation.
+        unsafe { std::env::set_var("RUST_MIN_STACK", "16777216") };
+    }
+
     let args = Args::parse();
 
     if std::env::var("RUST_LOG").is_err() {
