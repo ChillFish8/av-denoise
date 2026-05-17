@@ -27,6 +27,10 @@ use kernels::fused_window::{
 };
 use kernels::horizontal_sum::HSumBench;
 use kernels::horizontal_sum_pair::HSumPairBench;
+use kernels::mc_block_match_coarse::BlockMatchCoarseBench;
+use kernels::mc_block_match_fine::BlockMatchFineBench;
+use kernels::mc_downscale::DownscaleBench;
+use kernels::mc_warp::WarpBench;
 use kernels::vertical_weight::VWeightBench;
 use kernels::vweight_pair_accumulate::VWeightPairAccBench;
 use kernels::zero::ZeroBench;
@@ -174,6 +178,26 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
 
     for &(ch, ch_name) in CHANNELS {
         run(BilateralBench {
+            client: client.clone(),
+            ch,
+            ch_name,
+        });
+    }
+
+    // Motion-compensation kernels. Pyramid build and analyse are
+    // luma-only (ME doesn't look at chroma); warp runs per channel
+    // mode because its memory traffic scales with `stored_ch`.
+    run(DownscaleBench {
+        client: client.clone(),
+    });
+    run(BlockMatchCoarseBench {
+        client: client.clone(),
+    });
+    run(BlockMatchFineBench {
+        client: client.clone(),
+    });
+    for &(ch, ch_name) in CHANNELS {
+        run(WarpBench {
             client: client.clone(),
             ch,
             ch_name,
