@@ -37,7 +37,7 @@ pub(super) struct LaunchCtx {
     pub(super) cube_dim: CubeDim,
     /// Alternate shape used by `nlm_accumulate` / `nlm_finish` and the
     /// small-tile `nlm_dist_2d_weight(_ref)` kernels. See
-    /// [`super::BLOCK_X_THIN`].
+    /// [`BLOCK_X_THIN`].
     pub(super) thin_cube_count: CubeCount,
     pub(super) thin_cube_dim: CubeDim,
 }
@@ -835,6 +835,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                 }
                 continue;
             }
+
             for q_y in -search_radius..=search_radius {
                 for q_x in -search_radius..=search_radius {
                     let linear = q_k * window_area + q_y * window_side + q_x;

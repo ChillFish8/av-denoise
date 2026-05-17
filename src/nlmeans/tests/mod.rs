@@ -1,6 +1,7 @@
 mod helpers;
 
 mod motion_compensation;
+mod pending_outlives;
 mod prefilter;
 mod separable;
 mod spatial;

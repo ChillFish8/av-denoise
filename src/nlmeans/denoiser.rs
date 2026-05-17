@@ -1,15 +1,12 @@
-use std::future::Future;
 use std::marker::PhantomData;
-use std::pin::Pin;
 
-use cubecl::bytes::Bytes;
 use cubecl::prelude::*;
-use cubecl::server::{Handle, ServerError};
+use cubecl::server::Handle;
 
 use super::kernels::gpu_copy;
 use super::motion::{self, MotionCtx, build_pyramid_for_slot};
 use super::params::{NlmParams, SEPARABLE_THRESHOLD};
-use super::pending::{Pending, ReadFuture};
+use super::pending::Pending;
 use super::prefilter::{PrefilterCtx, PrefilterMode, run_prefilter};
 use super::{BLOCK_1D, MAX_GRID_1D};
 
@@ -110,11 +107,13 @@ impl<R: Runtime> NlmDenoiser<R> {
         } else {
             None
         };
+
         let padding_scratch = if params.channels.count() != stored_ch {
             vec![0.0f32; pixels * stored_ch as usize]
         } else {
             Vec::new()
         };
+
         let accum = client.empty(frame_bytes);
         let weight_sum = client.empty(scalar_bytes);
         let max_weight = client.empty(scalar_bytes);
@@ -138,6 +137,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         } else {
             None
         };
+
         let (
             compensated_input_buf,
             compensated_reference_buf,
@@ -287,6 +287,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             .reference_buf
             .as_ref()
             .expect("reference buffer must exist for GPU prefilter");
+
         let ctx = PrefilterCtx {
             width: self.width,
             height: self.height,
@@ -297,6 +298,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             input_buf: &self.input_buf,
             reference_buf,
         };
+
         run_prefilter::<R>(self.params.prefilter, &self.client, &ctx).expect("prefilter dispatch failed");
     }
 
@@ -307,6 +309,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let Some(ctx) = self.mc_ctx.as_ref() else {
             return;
         };
+
         let stored_ch = self.params.channels.storage_count();
         let frame_count = self.params.total_frames();
 
@@ -381,9 +384,11 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// [`Self::flush`].
     fn prime_leading_edge_if_first(&mut self) {
         let r = self.params.temporal_radius as usize;
+
         if r == 0 || self.frames_loaded != 1 {
             return;
         }
+
         for _ in 0..r {
             self.duplicate_last_frame();
             self.frames_loaded += 1;
@@ -450,20 +455,15 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.run_denoise_kernels(slot)?;
 
         // Call `read_async` eagerly so the GPU-side copy is queued before
-        // the caller dispatches the next frame's kernels. Erasing the
-        // future's inferred `&self` lifetime to `'static` is sound:
-        // `read_async` internally returns a `DynFut` that moves all owned
-        // data into its state machine and holds Arc-shared device refs,
-        // so no actual borrow of `self.client` outlives this call.
+        // the caller dispatches the next frame's kernels. The future is
+        // wrapped in an `async move` that owns a cloned `ComputeClient`
+        // (cheap: it's `Arc`-shared internally). That owned client lives
+        // inside the future's state machine, so the resulting future is
+        // genuinely `'static` and the `Pending` may outlive the
+        // `NlmDenoiser` without any lifetime gymnastics.
         let handle = self.outputs[slot].clone();
-        let read_future: Pin<Box<dyn Future<Output = Result<Vec<Bytes>, ServerError>> + Send + '_>> =
-            Box::pin(self.client.read_async(vec![handle]));
-        let fut: ReadFuture = unsafe {
-            std::mem::transmute::<
-                Pin<Box<dyn Future<Output = Result<Vec<Bytes>, ServerError>> + Send + '_>>,
-                ReadFuture,
-            >(read_future)
-        };
+        let client = self.client.clone();
+        let fut = Box::pin(async move { client.read_async(vec![handle]).await });
 
         let pixels = (self.width * self.height) as usize;
         Ok(Some(Pending {
