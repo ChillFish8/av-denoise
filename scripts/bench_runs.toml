@@ -1,0 +1,179 @@
+input = "./data/bench-sample.mkv"
+
+# ---------------------------------------------------------------------------
+# Strength 1.0 baseline — same strength on both tools, otherwise defaults.
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "av_spatial_s1.0"
+kind = "av-denoise"
+workers = 2
+args = ["--temporal-radius", "0", "--channel-mode", "luma,chroma", "--strength", "1.0"]
+
+[[runs]]
+name = "ffmpeg_spatial_s1.0"
+kind = "ffmpeg-nlmeans"
+strength = 1.0
+patch = 7
+search = 15
+
+# ---------------------------------------------------------------------------
+# Apples-to-apples spatial: matched patch / search across both tools.
+# ffmpeg `p` / `r` are sizes (odd). av-denoise uses radii: size = 2r + 1.
+#   ffmpeg p=5,r=11  <->  av-denoise patch-radius=2, search-radius=5
+#   ffmpeg p=7,r=15  <->  av-denoise patch-radius=3, search-radius=7
+#   ffmpeg p=9,r=15  <->  av-denoise patch-radius=4, search-radius=7
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "av_a2a_p5_r11"
+kind = "av-denoise"
+workers = 2
+args = [
+    "--temporal-radius", "0",
+    "--channel-mode", "luma,chroma",
+    "--strength", "1.0",
+    "--patch-radius", "2",
+    "--search-radius", "5",
+]
+
+[[runs]]
+name = "ffmpeg_a2a_p5_r11"
+kind = "ffmpeg-nlmeans"
+strength = 1.0
+patch = 5
+search = 11
+
+[[runs]]
+name = "av_a2a_p7_r15"
+kind = "av-denoise"
+workers = 2
+args = [
+    "--temporal-radius", "0",
+    "--channel-mode", "luma,chroma",
+    "--strength", "1.0",
+    "--patch-radius", "3",
+    "--search-radius", "7",
+]
+
+[[runs]]
+name = "ffmpeg_a2a_p7_r15"
+kind = "ffmpeg-nlmeans"
+strength = 1.0
+patch = 7
+search = 15
+
+[[runs]]
+name = "av_a2a_p9_r15"
+kind = "av-denoise"
+workers = 2
+args = [
+    "--temporal-radius", "0",
+    "--channel-mode", "luma,chroma",
+    "--strength", "1.0",
+    "--patch-radius", "4",
+    "--search-radius", "7",
+]
+
+[[runs]]
+name = "ffmpeg_a2a_p9_r15"
+kind = "ffmpeg-nlmeans"
+strength = 1.0
+patch = 9
+search = 15
+
+# ---------------------------------------------------------------------------
+# Temporal-only (av-denoise has no equivalent in ffmpeg nlmeans_opencl).
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "av_temporal_r1"
+kind = "av-denoise"
+workers = 2
+args = ["--temporal-radius", "1", "--channel-mode", "luma,chroma", "--strength", "1.0"]
+
+[[runs]]
+name = "av_temporal_r2"
+kind = "av-denoise"
+workers = 2
+args = ["--temporal-radius", "2", "--channel-mode", "luma,chroma", "--strength", "1.0"]
+
+# ---------------------------------------------------------------------------
+# Motion compensation (only meaningful with temporal-radius > 0).
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "av_motioncomp_r1"
+kind = "av-denoise"
+workers = 2
+args = [
+    "--temporal-radius", "1",
+    "--channel-mode", "luma,chroma",
+    "--strength", "1.0",
+    "--motion-compensation",
+]
+
+[[runs]]
+name = "av_motioncomp_r2"
+kind = "av-denoise"
+workers = 2
+args = [
+    "--temporal-radius", "2",
+    "--channel-mode", "luma,chroma",
+    "--strength", "1.0",
+    "--motion-compensation",
+]
+
+# ---------------------------------------------------------------------------
+# Prefilter (bilateral) — spatial only, isolates prefilter cost.
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "av_prefilter_spatial"
+kind = "av-denoise"
+workers = 2
+args = [
+    "--temporal-radius", "0",
+    "--channel-mode", "luma,chroma",
+    "--strength", "1.0",
+    "--prefilter", "bilateral:3.0,0.02",
+]
+
+[[runs]]
+name = "av_prefilter_temporal_r1"
+kind = "av-denoise"
+workers = 2
+args = [
+    "--temporal-radius", "1",
+    "--channel-mode", "luma,chroma",
+    "--strength", "1.0",
+    "--prefilter", "bilateral:3.0,0.02",
+]
+
+# ---------------------------------------------------------------------------
+# Everything on: temporal + motion comp + prefilter.
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "av_full_r1"
+kind = "av-denoise"
+workers = 2
+args = [
+    "--temporal-radius", "1",
+    "--channel-mode", "luma,chroma",
+    "--strength", "1.0",
+    "--motion-compensation",
+    "--prefilter", "bilateral:3.0,0.02",
+]
+
+[[runs]]
+name = "av_full_r2"
+kind = "av-denoise"
+workers = 2
+args = [
+    "--temporal-radius", "2",
+    "--channel-mode", "luma,chroma",
+    "--strength", "1.0",
+    "--motion-compensation",
+    "--prefilter", "bilateral:3.0,0.02",
+]

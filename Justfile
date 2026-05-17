@@ -12,6 +12,12 @@ run *ARGS:
 bench *ARGS:
     cargo bench {{ARGS}}
 
+compare-perf *ARGS:
+    uv run scripts/bench_runs.py {{ARGS}}
+
+compare-runs *ARGS:
+    uv run scripts/compare_runs.py {{ARGS}}
+
 [arg("input", long="input", short="i")]
 [arg("output", long="output", short="o")]
 [arg("workers", long="workers", short="w")]
@@ -34,7 +40,6 @@ denoise-file-ffmpeg input output search="5" patch="9" strength="1.2":
     ffmpeg -hide_banner -stats -stats_period 0.5 -loglevel info \
         -init_hw_device opencl=ocl:0.0 -filter_hw_device ocl \
         -y -i "{{input}}" -vf "hwupload,nlmeans_opencl=s={{strength}}:p={{patch}}:pc={{patch}}:r={{search}}:rc={{search}},hwdownload,format=yuv420p" -c:v ffv1 "{{output}}"
-
 
 [arg("input", long="input", short="i")]
 [arg("output", long="output", short="o")]
