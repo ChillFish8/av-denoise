@@ -36,6 +36,7 @@ use self::kernels::{
     nlm_vweight_pair_accumulate,
 };
 pub use self::motion::MotionCompensationMode;
+use self::motion::{MotionCtx, build_pyramid_for_slot, run_analyse, run_compensate};
 pub use self::prefilter::PrefilterMode;
 use self::prefilter::{PrefilterCtx, run_prefilter};
 
@@ -266,6 +267,27 @@ pub struct NlmDenoiser<R: Runtime> {
     h2_inv_norm: f32,
     use_separable: bool,
     use_reference: bool,
+
+    /// Cached motion-compensation context. `Some` when MC is active.
+    mc_ctx: Option<MotionCtx>,
+    /// `[total_frames * height * width * stored_ch]` warped input ring,
+    /// matching `input_buf`. Temporal (k≠0) kernels read neighbours
+    /// from here; the centre slot is a straight copy of `input_buf`.
+    compensated_input_buf: Option<Handle>,
+    /// Same shape as `compensated_input_buf`, mirroring the reference
+    /// ring when a prefilter is active.
+    compensated_reference_buf: Option<Handle>,
+    /// Per-neighbour MV field. Layout:
+    /// `[2·temporal_radius][blocks_y * blocks_x * 2]` `i32`. Neighbour
+    /// indices `0..R` are the backward k = -R..-1; `R..2R` are forward
+    /// k = +1..+R.
+    mv_field_buf: Option<Handle>,
+    /// Luma-only pyramid storage:
+    /// `[pyramid_levels][total_frames][level_w * level_h]` `f32`.
+    pyramid_input: Option<Handle>,
+    /// Same shape as `pyramid_input`, built from the reference ring
+    /// when a prefilter is active.
+    pyramid_reference: Option<Handle>,
 }
 
 type ReadFuture = Pin<Box<dyn Future<Output = Result<Vec<Bytes>, ServerError>> + Send>>;
@@ -370,6 +392,40 @@ impl<R: Runtime> NlmDenoiser<R> {
         let use_reference = params.prefilter.needs_reference_buf();
         let output_scratch_cap = pixels * params.channels.count() as usize;
 
+        // Motion-compensation buffers. Only allocated when MC is
+        // active *and* the temporal window is non-trivial (k=0 path
+        // would never touch them).
+        let mc_ctx = if params.motion_compensation.is_active() && params.temporal_radius > 0 {
+            MotionCtx::new(params.motion_compensation, width, height)
+        } else {
+            None
+        };
+        let (compensated_input_buf, compensated_reference_buf, mv_field_buf, pyramid_input, pyramid_reference) =
+            if let Some(ctx) = mc_ctx.as_ref() {
+                let comp_in = client.empty(frame_bytes * total_frames as usize);
+                let comp_ref = if use_reference {
+                    Some(client.empty(frame_bytes * total_frames as usize))
+                } else {
+                    None
+                };
+                let neighbours = (2 * params.temporal_radius) as usize;
+                let mv_field = client.empty(
+                    neighbours * ctx.mv_slots_per_neighbour() * 2 * size_of::<i32>(),
+                );
+                let pyramid_pixels =
+                    motion::pyramid_pixels_per_frame(width, height, ctx.pyramid_levels);
+                let pyr_in_bytes = pyramid_pixels * total_frames as usize * size_of::<f32>();
+                let pyr_in = client.empty(pyr_in_bytes);
+                let pyr_ref = if use_reference {
+                    Some(client.empty(pyr_in_bytes))
+                } else {
+                    None
+                };
+                (Some(comp_in), comp_ref, Some(mv_field), Some(pyr_in), pyr_ref)
+            } else {
+                (None, None, None, None, None)
+            };
+
         Self {
             client: client.clone(),
             params,
@@ -394,6 +450,12 @@ impl<R: Runtime> NlmDenoiser<R> {
             h2_inv_norm,
             use_separable,
             use_reference,
+            mc_ctx,
+            compensated_input_buf,
+            compensated_reference_buf,
+            mv_field_buf,
+            pyramid_input,
+            pyramid_reference,
         }
     }
 
@@ -415,6 +477,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             self.run_prefilter_for_slot(slot);
         }
 
+        self.build_pyramids_for_slot(slot as u32);
+
         self.advance_ring();
         self.prime_leading_edge_if_first();
     }
@@ -435,6 +499,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             .expect("reference buffer must exist for External prefilter")
             .clone();
         self.upload_into_slot(&reference_buf, reference, slot);
+        self.build_pyramids_for_slot(slot as u32);
         self.advance_ring();
         self.prime_leading_edge_if_first();
     }
@@ -493,6 +558,50 @@ impl<R: Runtime> NlmDenoiser<R> {
             reference_buf,
         };
         run_prefilter::<R>(self.params.prefilter, &self.client, &ctx).expect("prefilter dispatch failed");
+    }
+
+    /// Build the per-frame motion-estimation pyramid for `slot` on
+    /// both the input and (when present) the reference rings. No-op
+    /// when MC is disabled or `pyramid_levels == 1`.
+    fn build_pyramids_for_slot(&self, slot: u32) {
+        let Some(ctx) = self.mc_ctx.as_ref() else {
+            return;
+        };
+        let stored_ch = self.params.channels.storage_count();
+        let frame_count = self.params.total_frames();
+
+        if let Some(pyr) = self.pyramid_input.as_ref() {
+            build_pyramid_for_slot::<R>(
+                &self.client,
+                ctx,
+                self.width,
+                self.height,
+                frame_count,
+                slot,
+                &self.input_buf,
+                pyr,
+                stored_ch,
+            )
+            .expect("input pyramid build dispatch failed");
+        }
+
+        if let (Some(pyr_ref), Some(ref_buf)) = (
+            self.pyramid_reference.as_ref(),
+            self.reference_buf.as_ref(),
+        ) {
+            build_pyramid_for_slot::<R>(
+                &self.client,
+                ctx,
+                self.width,
+                self.height,
+                frame_count,
+                slot,
+                ref_buf,
+                pyr_ref,
+                stored_ch,
+            )
+            .expect("reference pyramid build dispatch failed");
+        }
     }
 
     fn advance_ring(&mut self) {
@@ -569,6 +678,11 @@ impl<R: Runtime> NlmDenoiser<R> {
                 .offset_start((last_slot as u64) * bytes_per_slot);
             self.copy_frame_into_slot(&reference_buf, &ref_src, next_slot);
         }
+
+        // Keep the motion-estimation pyramid for the duplicated slot
+        // in lockstep so a subsequent denoise sees a valid pyramid for
+        // every ring slot it visits.
+        self.build_pyramids_for_slot(next_slot as u32);
 
         self.ring_head += 1;
     }
@@ -701,6 +815,25 @@ impl<R: Runtime> NlmDenoiser<R> {
         unsafe { ArrayArg::from_raw_parts(buf.clone(), ctx.total_frame_data) }
     }
 
+    /// Input array for the temporal (k≠0) kernels. Falls back to the
+    /// compensated ring when motion compensation is active; otherwise
+    /// identical to [`Self::input_arg`].
+    fn input_arg_for_temporal(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
+        match self.compensated_input_buf.as_ref() {
+            Some(buf) => unsafe { ArrayArg::from_raw_parts(buf.clone(), ctx.total_frame_data) },
+            None => self.input_arg(ctx),
+        }
+    }
+
+    /// Reference array for the temporal (k≠0) `_ref` kernels. Same
+    /// fallback as [`Self::input_arg_for_temporal`].
+    fn reference_arg_for_temporal(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
+        match self.compensated_reference_buf.as_ref() {
+            Some(buf) => unsafe { ArrayArg::from_raw_parts(buf.clone(), ctx.total_frame_data) },
+            None => self.reference_arg(ctx),
+        }
+    }
+
     fn accum_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
         unsafe { ArrayArg::from_raw_parts(self.accum.clone(), ctx.frame_size) }
     }
@@ -764,8 +897,8 @@ impl<R: Runtime> NlmDenoiser<R> {
                     ctx.cube_count.clone(),
                     ctx.cube_dim,
                     self.params.channels.storage_count() as usize,
-                    self.input_arg(ctx),
-                    self.reference_arg(ctx),
+                    self.input_arg_for_temporal(ctx),
+                    self.reference_arg_for_temporal(ctx),
                     self.accum_arg(ctx),
                     self.weight_sum_arg(ctx),
                     self.max_weight_arg(ctx),
@@ -792,7 +925,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                     ctx.cube_count.clone(),
                     ctx.cube_dim,
                     self.params.channels.storage_count() as usize,
-                    self.input_arg(ctx),
+                    self.input_arg_for_temporal(ctx),
                     self.accum_arg(ctx),
                     self.weight_sum_arg(ctx),
                     self.max_weight_arg(ctx),
@@ -840,8 +973,8 @@ impl<R: Runtime> NlmDenoiser<R> {
                     ctx.cube_count.clone(),
                     ctx.cube_dim,
                     self.params.channels.storage_count() as usize,
-                    self.input_arg(ctx),
-                    self.reference_arg(ctx),
+                    self.input_arg_for_temporal(ctx),
+                    self.reference_arg_for_temporal(ctx),
                     self.accum_arg(ctx),
                     self.weight_sum_arg(ctx),
                     self.max_weight_arg(ctx),
@@ -865,7 +998,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                     ctx.cube_count.clone(),
                     ctx.cube_dim,
                     self.params.channels.storage_count() as usize,
-                    self.input_arg(ctx),
+                    self.input_arg_for_temporal(ctx),
                     self.accum_arg(ctx),
                     self.weight_sum_arg(ctx),
                     self.max_weight_arg(ctx),
@@ -971,7 +1104,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                     ctx.cube_count.clone(),
                     ctx.cube_dim,
                     self.params.channels.storage_count() as usize,
-                    self.reference_arg(ctx),
+                    self.reference_arg_for_temporal(ctx),
                     self.raw_fwd_arg(ctx),
                     self.raw_bwd_arg(ctx),
                     frame_t,
@@ -991,7 +1124,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                     ctx.cube_count.clone(),
                     ctx.cube_dim,
                     self.params.channels.storage_count() as usize,
-                    self.input_arg(ctx),
+                    self.input_arg_for_temporal(ctx),
                     self.raw_fwd_arg(ctx),
                     self.raw_bwd_arg(ctx),
                     frame_t,
@@ -1031,7 +1164,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                 self.params.channels.storage_count() as usize,
                 self.tmp_hsum_arg(ctx),
                 self.tmp_hsum_bwd_arg(ctx),
-                self.input_arg(ctx),
+                self.input_arg_for_temporal(ctx),
                 self.accum_arg(ctx),
                 self.weight_sum_arg(ctx),
                 self.max_weight_arg(ctx),
@@ -1240,6 +1373,136 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
+    /// Run the per-submit motion-compensation sweep: estimate MVs from
+    /// the centre to each of the `2·R` neighbours and warp them into
+    /// `compensated_*_buf`. The centre slot is copied through
+    /// unchanged so temporal kernels can read it uniformly. No-op
+    /// when MC is inactive (or no neighbours).
+    fn run_motion_compensation(&self, center_t: u32) -> Result<(), anyhow::Error> {
+        let Some(mc) = self.mc_ctx.as_ref() else {
+            return Ok(());
+        };
+
+        let temporal_radius = self.params.temporal_radius;
+        if temporal_radius == 0 {
+            return Ok(());
+        }
+
+        let frame_count = self.params.total_frames();
+        let centre_slot = self.phys_frame(center_t as i32);
+        let stored_ch = self.params.channels.storage_count();
+
+        let pyramid_input = self
+            .pyramid_input
+            .as_ref()
+            .expect("pyramid_input allocated when mc_ctx is Some");
+        let mv_field = self
+            .mv_field_buf
+            .as_ref()
+            .expect("mv_field allocated when mc_ctx is Some");
+        let compensated_input = self
+            .compensated_input_buf
+            .as_ref()
+            .expect("compensated_input allocated when mc_ctx is Some");
+
+        // Centre frame: straight passthrough copy so the temporal
+        // kernels can read it uniformly from the compensated buffer.
+        copy_frame_into_slot_handle::<R>(
+            &self.client,
+            &self.input_buf,
+            compensated_input,
+            centre_slot as usize,
+            self.width,
+            self.height,
+            stored_ch,
+        );
+        if let (Some(ref_src), Some(ref_dst)) = (
+            self.reference_buf.as_ref(),
+            self.compensated_reference_buf.as_ref(),
+        ) {
+            copy_frame_into_slot_handle::<R>(
+                &self.client,
+                ref_src,
+                ref_dst,
+                centre_slot as usize,
+                self.width,
+                self.height,
+                stored_ch,
+            );
+        }
+
+        // Use the cleaner of the two buffers for motion estimation:
+        // the reference (prefiltered) pyramid when available.
+        let analyse_pyramid = self
+            .pyramid_reference
+            .as_ref()
+            .unwrap_or(pyramid_input);
+
+        // One analyse + warp per non-centre neighbour. Neighbours run
+        // in logical order k = -R .. -1, +1 .. +R; their MV-field index
+        // is contiguous so packing keeps the field tight.
+        let radius = temporal_radius as i32;
+        let mut neighbour_idx: u32 = 0;
+        for k in -radius..=radius {
+            if k == 0 {
+                continue;
+            }
+            let neighbour_slot = self.phys_frame(center_t as i32 + k);
+
+            run_analyse::<R>(
+                &self.client,
+                mc,
+                self.width,
+                self.height,
+                frame_count,
+                centre_slot,
+                neighbour_slot,
+                neighbour_idx,
+                analyse_pyramid,
+                mv_field,
+            )?;
+
+            run_compensate::<R>(
+                &self.client,
+                mc,
+                self.params.channels.count(),
+                stored_ch,
+                self.width,
+                self.height,
+                frame_count,
+                neighbour_slot,
+                neighbour_idx,
+                &self.input_buf,
+                compensated_input,
+                mv_field,
+            )?;
+
+            if let (Some(ref_src), Some(ref_dst)) = (
+                self.reference_buf.as_ref(),
+                self.compensated_reference_buf.as_ref(),
+            ) {
+                run_compensate::<R>(
+                    &self.client,
+                    mc,
+                    self.params.channels.count(),
+                    stored_ch,
+                    self.width,
+                    self.height,
+                    frame_count,
+                    neighbour_slot,
+                    neighbour_idx,
+                    ref_src,
+                    ref_dst,
+                    mv_field,
+                )?;
+            }
+
+            neighbour_idx += 1;
+        }
+
+        Ok(())
+    }
+
     fn zero_accumulators(&self, ctx: &LaunchCtx) -> Result<(), anyhow::Error> {
         let grid = (ctx.frame_size as u32).div_ceil(BLOCK_1D).min(MAX_GRID_1D);
         let total_threads = grid * BLOCK_1D;
@@ -1304,9 +1567,14 @@ impl<R: Runtime> NlmDenoiser<R> {
             thin_cube_dim: CubeDim::new_2d(BLOCK_X_THIN, BLOCK_Y_THIN),
         };
 
-        self.zero_accumulators(&ctx)?;
-
         let center_t = temporal_radius;
+
+        // Motion compensation runs before any NLM dispatch so the
+        // temporal kernels (k≠0) can read aligned neighbours from
+        // `compensated_*_buf`. No-op when MC is inactive.
+        self.run_motion_compensation(center_t)?;
+
+        self.zero_accumulators(&ctx)?;
         let window_side = 2 * search_radius + 1;
         let window_area = window_side * window_side;
 
@@ -1355,6 +1623,42 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.run_finish(&ctx, center_t, output_slot)?;
 
         Ok(())
+    }
+}
+
+/// GPU→GPU copy of one frame from `src`'s slot `slot` into `dst`'s
+/// slot `slot`. Both buffers must share the same ring-buffer layout
+/// (`total_frames * height * width * stored_ch`). Free function so
+/// the motion-compensation dispatcher can call it without tying back
+/// into the `NlmDenoiser` impl block (avoids borrow conflicts inside
+/// the per-submit method).
+fn copy_frame_into_slot_handle<R: Runtime>(
+    client: &ComputeClient<R>,
+    src: &Handle,
+    dst: &Handle,
+    slot: usize,
+    width: u32,
+    height: u32,
+    stored_ch: u32,
+) {
+    let frame_size = width * height * stored_ch;
+    let byte_offset = (slot as u64) * (frame_size as u64) * (size_of::<f32>() as u64);
+    let src_handle = src.clone().offset_start(byte_offset);
+    let dst_handle = dst.clone().offset_start(byte_offset);
+
+    let grid = frame_size.div_ceil(BLOCK_1D).min(MAX_GRID_1D);
+    let total_threads = grid * BLOCK_1D;
+
+    unsafe {
+        gpu_copy::launch_unchecked::<R>(
+            client,
+            CubeCount::new_1d(grid),
+            CubeDim::new_1d(BLOCK_1D),
+            ArrayArg::from_raw_parts(src_handle, frame_size as usize),
+            ArrayArg::from_raw_parts(dst_handle, frame_size as usize),
+            frame_size,
+            total_threads,
+        );
     }
 }
 
