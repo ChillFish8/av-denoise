@@ -221,144 +221,172 @@ Commands:
 Options:
   -a, --algorithm <ALGORITHM>
           Denoising algorithm to run.
-
+          
           Only `nlmeans` is currently available.
-
+          
           [default: nlmeans]
 
   -A, --accelerators <ACCELERATORS>
           Which hardware backends to try, in order of preference.
-
-          The first backend that initialises is used. If none work the program exits with an error. The list is comma-separated, for example `vulkan,cpu`.
-
+          
+          The first backend that initialises is used. If none work the program exits with an error.
+          
+          The list is comma-separated, for example `vulkan,cpu`.
+          
           [default: vulkan cpu]
 
   -d, --device <DEVICE>
           Which device to use on the chosen backend.
-
+          
           Accepted values:
-
+          
           `default` lets the backend pick.
-
+          
           `discrete[:N]` picks the Nth discrete GPU (default 0). Works on CUDA, ROCm, and Vulkan.
-
+          
           `integrated[:N]` picks the Nth integrated GPU. Vulkan only.
-
+          
           `virtual[:N]` picks the Nth virtual GPU. Vulkan only.
-
+          
           `cpu` uses the software backend.
-
+          
           [default: default]
 
       --channel-mode <CHANNEL_MODE>
           Which planes of the video to clean (comma-separated).
-
+          
           `luma` cleans only the brightness plane.
-
+          
           `chroma` cleans only the colour planes at their native size.
-
+          
           `luma,chroma` cleans both as two independent passes, which is usually what you want for noisy footage.
-
-          `yuv` cleans all three planes in one fused pass. This needs a YUV444 source and cannot be combined with the other modes.
+          
+          `yuv` cleans all three planes in one fused pass.
+          
+          `yuv` needs a YUV444 source and cannot be combined with the other modes.
 
           Possible values:
           - luma:   Clean only the brightness plane (Y). Colour passes through
           - chroma: Clean only the colour planes (U, V). Brightness passes through
           - yuv:    Clean all three planes together in one pass. Needs a YUV444 source and cannot be combined with the other modes
-
+          
           [default: luma]
 
       --prefilter <PREFILTER>
           Reference image used when comparing patches.
-
+          
           `none` uses the noisy input directly (the cheapest option).
-
-          `bilateral:<sigma_s>,<sigma_r>` runs a quick on-GPU bilateral blur first, then compares patches against that cleaner image. `sigma_s` is the spatial blur radius in pixels and `sigma_r` is the colour-similarity threshold in `[0, 1]`. A good starting point is `bilateral:3.0,0.02`.
-
+          
+          `bilateral:<sigma_s>,<sigma_r>` runs a quick on-GPU bilateral blur first, then compares patches against that cleaner image.
+          
+          `sigma_s` is the spatial blur radius in pixels.
+          
+          `sigma_r` is the colour-similarity threshold in `[0, 1]`.
+          
+          A good starting point is `bilateral:3.0,0.02`.
+          
           Prefiltering keeps more detail at the cost of one extra GPU pass per frame.
-
+          
           [default: none]
 
       --temporal-radius <TEMPORAL_RADIUS>
           How many neighbouring frames to look at on each side when cleaning a frame.
-
+          
           `0` (default) means no temporal blending: each frame is cleaned on its own.
-
-          Values above `0` look at that many frames before and after the current one. Larger values give stronger cleanup but use more memory and add latency.
-
+          
+          Values above `0` look at that many frames before and after the current one.
+          
+          Larger values give stronger cleanup but use more memory and add latency.
+          
           In `file` mode this is reset at every scene change, so raising it never causes blending across cuts.
-
+          
           [default: 0]
 
       --search-radius <SEARCH_RADIUS>
           How far away to look for similar patches inside a frame.
-
+          
           Larger values find more matches but cost quadratically more work. Library default is 2.
 
       --patch-radius <PATCH_RADIUS>
           Size of each patch being compared. The patch is `(2*patch_radius + 1)` pixels square.
-
+          
           Larger patches preserve fine structure better but cost more GPU memory. Library default is 4.
 
       --strength <STRENGTH>
           Cleaning strength. Higher numbers smooth more.
-
-          Must be a finite number greater than 0. Library default is 1.2.
-
+          
+          Must be a finite number greater than 0.
+          
+          Library default is 1.2.
+          
           This value applies to both planes unless `--luma-strength` or `--chroma-strength` is set.
 
       --luma-strength <LUMA_STRENGTH>
           Strength override for the brightness plane only.
-
-          Falls back to `--strength` (or the library default) when not set. Ignored when luma is not being denoised, or when `--channel-mode yuv` is used.
+          
+          Falls back to `--strength` (or the library default) when not set.
+          
+          Ignored when luma is not being denoised, or when `--channel-mode yuv` is used.
 
       --chroma-strength <CHROMA_STRENGTH>
           Strength override for the colour planes only.
-
-          Falls back to `--strength` (or the library default) when not set. Ignored when chroma is not being denoised, or when `--channel-mode yuv` is used.
+          
+          Falls back to `--strength` (or the library default) when not set.
+          
+          Ignored when chroma is not being denoised, or when `--channel-mode yuv` is used.
 
       --self-weight <SELF_WEIGHT>
           How much weight to give the centre pixel itself when averaging.
-
-          Library default is 1.0. Must be a finite number `>= 0`. Setting to 0 gives pure NLM (centre pixel only counts if a similar patch was found nearby).
+          
+          Library default is 1.0. Must be a finite number `>= 0`.
+          
+          Setting to 0 gives pure NLM (centre pixel only counts if a similar patch was found nearby).
 
       --motion-compensation
           Turn on motion compensation for temporal denoising.
-
-          When the camera or content moves between frames, the brightness at the same `(x, y)` is different content in each frame. Without help, temporal cleanup will blur moving edges.
-
-          Motion compensation looks at where each block of pixels moved between frames, then shifts neighbour frames to line up with the current frame before cleaning. This keeps detail sharp on anime, fast pans, and action footage.
-
+          
+          When the camera or content moves between frames, the brightness at the same `(x, y)` is different content in each frame.
+          
+          Without help, temporal cleanup will blur moving edges.
+          
+          Motion compensation looks at where each block of pixels moved between frames, then shifts neighbour frames to line up with the current frame before cleaning.
+          
+          This keeps detail sharp on anime, fast pans, and action footage.
+          
           Has no effect when `--temporal-radius 0`.
 
       --mc-blksize <MC_BLKSIZE>
           Size of each motion-search block, in pixels. Must be even.
-
+          
           Larger blocks are more stable but track motion less accurately on small details.
-
+          
           [default: 16]
 
       --mc-overlap <MC_OVERLAP>
           How many pixels neighbouring motion blocks may overlap.
-
+          
           Must be less than `--mc-blksize`. Higher overlap smooths the transitions between blocks but does more work.
-
+          
           [default: 8]
 
       --mc-search <MC_SEARCH>
           How many pixels of motion to search for at the finest level.
-
-          The coarse pyramid pass reaches further (search radius times 2 for a 2-level pyramid), so for typical content the default is fine. Raise it for very fast motion.
-
+          
+          The coarse pyramid pass reaches further (search radius times 2 for a 2-level pyramid), so for typical content the default is fine.
+          
+          Raise it for very fast motion.
+          
           [default: 4]
 
       --mc-pyramid-levels <MC_PYRAMID_LEVELS>
           How many levels the motion-search pyramid uses.
-
+          
           `1` does a single full-resolution search (cheaper, weaker on large motion).
-
-          `2` (default) does a coarse pass on a half-size image first, then refines at full resolution. This handles much larger motion at modest extra cost.
-
+          
+          `2` (default) does a coarse pass on a half-size image first, then refines at full resolution.
+          
+          This handles much larger motion at modest extra cost.
+          
           [default: 2]
 
   -h, --help

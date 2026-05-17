@@ -1,6 +1,6 @@
 [package]
 name = "av-denoise"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Fast and efficient video denoising using accelerated nlmeans."
 categories = ["multimedia::video"]

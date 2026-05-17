@@ -75,8 +75,9 @@ struct Args {
     /// Which hardware backends to try, in order of preference.
     ///
     /// The first backend that initialises is used. If none work the
-    /// program exits with an error. The list is comma-separated,
-    /// for example `vulkan,cpu`.
+    /// program exits with an error.
+    ///
+    /// The list is comma-separated, for example `vulkan,cpu`.
     #[arg(short = 'A', long, value_delimiter = ',', default_values_t = get_default_accelerators(), global = true)]
     accelerators: Vec<Accelerator>,
 
@@ -106,8 +107,10 @@ struct Args {
     /// `luma,chroma` cleans both as two independent passes, which is
     /// usually what you want for noisy footage.
     ///
-    /// `yuv` cleans all three planes in one fused pass. This needs a
-    /// YUV444 source and cannot be combined with the other modes.
+    /// `yuv` cleans all three planes in one fused pass.
+    ///
+    /// `yuv` needs a YUV444 source and cannot be combined with the
+    /// other modes.
     #[arg(long, value_enum, value_delimiter = ',', default_values_t = vec![CliChannelMode::Luma], global = true)]
     channel_mode: Vec<CliChannelMode>,
 
@@ -117,9 +120,12 @@ struct Args {
     ///
     /// `bilateral:<sigma_s>,<sigma_r>` runs a quick on-GPU bilateral
     /// blur first, then compares patches against that cleaner image.
-    /// `sigma_s` is the spatial blur radius in pixels and `sigma_r`
-    /// is the colour-similarity threshold in `[0, 1]`. A good
-    /// starting point is `bilateral:3.0,0.02`.
+    ///
+    /// `sigma_s` is the spatial blur radius in pixels.
+    ///
+    /// `sigma_r` is the colour-similarity threshold in `[0, 1]`.
+    ///
+    /// A good starting point is `bilateral:3.0,0.02`.
     ///
     /// Prefiltering keeps more detail at the cost of one extra GPU
     /// pass per frame.
@@ -133,8 +139,10 @@ struct Args {
     /// cleaned on its own.
     ///
     /// Values above `0` look at that many frames before and after
-    /// the current one. Larger values give stronger cleanup but use
-    /// more memory and add latency.
+    /// the current one.
+    ///
+    /// Larger values give stronger cleanup but use more memory and
+    /// add latency.
     ///
     /// In `file` mode this is reset at every scene change, so
     /// raising it never causes blending across cuts.
@@ -158,8 +166,9 @@ struct Args {
 
     /// Cleaning strength. Higher numbers smooth more.
     ///
-    /// Must be a finite number greater than 0. Library default is
-    /// 1.2.
+    /// Must be a finite number greater than 0.
+    ///
+    /// Library default is 1.2.
     ///
     /// This value applies to both planes unless `--luma-strength`
     /// or `--chroma-strength` is set.
@@ -169,7 +178,9 @@ struct Args {
     /// Strength override for the brightness plane only.
     ///
     /// Falls back to `--strength` (or the library default) when not
-    /// set. Ignored when luma is not being denoised, or when
+    /// set.
+    ///
+    /// Ignored when luma is not being denoised, or when
     /// `--channel-mode yuv` is used.
     #[arg(long, global = true)]
     luma_strength: Option<f32>,
@@ -177,7 +188,9 @@ struct Args {
     /// Strength override for the colour planes only.
     ///
     /// Falls back to `--strength` (or the library default) when not
-    /// set. Ignored when chroma is not being denoised, or when
+    /// set.
+    ///
+    /// Ignored when chroma is not being denoised, or when
     /// `--channel-mode yuv` is used.
     #[arg(long, global = true)]
     chroma_strength: Option<f32>,
@@ -186,6 +199,7 @@ struct Args {
     /// averaging.
     ///
     /// Library default is 1.0. Must be a finite number `>= 0`.
+    ///
     /// Setting to 0 gives pure NLM (centre pixel only counts if a
     /// similar patch was found nearby).
     #[arg(long)]
@@ -195,12 +209,16 @@ struct Args {
     ///
     /// When the camera or content moves between frames, the
     /// brightness at the same `(x, y)` is different content in each
-    /// frame. Without help, temporal cleanup will blur moving edges.
+    /// frame.
+    ///
+    /// Without help, temporal cleanup will blur moving edges.
     ///
     /// Motion compensation looks at where each block of pixels
     /// moved between frames, then shifts neighbour frames to line up
-    /// with the current frame before cleaning. This keeps detail
-    /// sharp on anime, fast pans, and action footage.
+    /// with the current frame before cleaning.
+    ///
+    /// This keeps detail sharp on anime, fast pans, and action
+    /// footage.
     ///
     /// Has no effect when `--temporal-radius 0`.
     #[arg(long, global = true)]
@@ -224,7 +242,9 @@ struct Args {
     ///
     /// The coarse pyramid pass reaches further (search radius times
     /// 2 for a 2-level pyramid), so for typical content the default
-    /// is fine. Raise it for very fast motion.
+    /// is fine.
+    ///
+    /// Raise it for very fast motion.
     #[arg(long, default_value = "4", global = true)]
     mc_search: u32,
 
@@ -234,8 +254,9 @@ struct Args {
     /// large motion).
     ///
     /// `2` (default) does a coarse pass on a half-size image first,
-    /// then refines at full resolution. This handles much larger
-    /// motion at modest extra cost.
+    /// then refines at full resolution.
+    ///
+    /// This handles much larger motion at modest extra cost.
     #[arg(long, default_value = "2", global = true)]
     mc_pyramid_levels: u32,
 
@@ -249,14 +270,17 @@ enum Command {
     ///
     /// Opens the file with ffms2, finds scene boundaries with
     /// `av-scenechange`, and runs each scene on its own worker
-    /// thread. Temporal context is reset between scenes so the
-    /// denoiser never blends frames across a cut.
+    /// thread.
+    ///
+    /// Temporal context is reset between scenes so the denoiser
+    /// never blends frames across a cut.
     File {
         /// Path to the input video file.
         ///
-        /// Any container or codec supported by ffmpeg works. The
-        /// source must be 8-bit; 10 or 12-bit inputs are rejected
-        /// with a clear error message.
+        /// Any container or codec supported by ffmpeg works.
+        ///
+        /// The source must be 8-bit; 10 or 12-bit inputs are
+        /// rejected with a clear error message.
         #[arg(short, long)]
         input: PathBuf,
 
@@ -264,6 +288,7 @@ enum Command {
         ///
         /// Each worker uses its own GPU memory for the frame ring
         /// buffer, so higher values trade GPU memory for throughput.
+        ///
         /// `1` is valid and useful for debugging.
         #[arg(short = 'W', long, default_value_t = 2)]
         workers: usize,
@@ -271,10 +296,12 @@ enum Command {
     /// Denoise a y4m stream coming in on stdin, writing y4m on
     /// stdout.
     ///
-    /// Useful for piping through ffmpeg or an encoder. There is no
-    /// scene detection in this mode, so temporal denoising slides
-    /// across the whole stream. Only 8-bit 4:2:0 / 4:2:2 / 4:4:4
-    /// y4m is supported right now.
+    /// Useful for piping through ffmpeg or an encoder.
+    ///
+    /// There is no scene detection in this mode, so temporal
+    /// denoising slides across the whole stream.
+    ///
+    /// Only 8-bit 4:2:0 / 4:2:2 / 4:4:4 y4m is supported right now.
     Stdin,
 }
 
