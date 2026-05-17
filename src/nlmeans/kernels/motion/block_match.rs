@@ -154,7 +154,7 @@ pub fn nlm_mc_block_match_fine(
 
     let mv_slot = ((by * blocks_x + bx) * 2) as usize;
 
-    // The `.into()` calls quiet clippy's `useless_conversion` lint
+    // The `.into()` calls clippy's `useless_conversion` lint
     // away from these lines, but are actually required: the `if`
     // branches must produce matching cubecl `NativeExpand<i32>` types
     // and a bare `0i32` literal won't coerce inside the cube macro.
