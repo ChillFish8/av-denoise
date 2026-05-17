@@ -54,6 +54,40 @@ This primarily has the following impacts:
 Since both the CUDA and ROCm backends are very heavy in terms of dependencies, I recommend just using the `vulkan`
 backend for those devices. It should be more or less the same performance, without all the library headache.
 
+## Installing
+
+`av-denoise` is available both in library _and_ binary format, by default only the `cpu` and `vulkan` features
+are enabled, since they are typically the default accelerators you will want to use.
+
+When compiling the binary, you want to enable the `binary` feature at minimum, but I recommend for most users
+to enable the `binary-full` feature instead if you are ever unsure about how you are going to be ingesting frames.
+
+The following (non-accelerator) features are available:
+
+- `binary` - Enables the dependencies and code required to compile `av-denoise` as a binary.
+   * This pulls in `ffms2` as hard dependencies. This means you must install `ffms2` before you can compile and link
+     the binary.
+
+### Cargo install
+
+```bash
+cargo install --locked av-denoise --features binary
+```
+
+### From source
+
+```bash
+git clone https://github.com/ChillFish8/av-denoise.git
+cargo build --release --features binary
+cp ./target/release/av-denoise ./av-denoise
+```
+
+### As a library
+
+```bash
+cargo add av-denoise
+```
+
 ## Example commands
 
 **Y/UV Denoise - ROCm/Vulkan - On GPU 1 - Light Denoise - Spatial - strength=luma:1.2,choma:1.2**
