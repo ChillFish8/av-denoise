@@ -9,7 +9,7 @@ use cubecl::Runtime;
 
 use crate::accelerate::Accelerator;
 use crate::device::Device;
-use crate::nlmeans::{ChannelMode, NlmDenoiser, NlmParams, Pending, PrefilterMode};
+use crate::nlmeans::{ChannelMode, MotionCompensationMode, NlmDenoiser, NlmParams, Pending, PrefilterMode};
 use crate::sniff::sniff_best_accelerator;
 
 /// User-facing denoiser configuration. Build with `DenoiserOptions::builder()`.
@@ -24,6 +24,12 @@ pub struct DenoiserOptions {
     /// Reference clip source for NLM weight computation.
     #[builder(default = PrefilterMode::None)]
     pub prefilter: PrefilterMode,
+    /// Motion-compensation mode for temporal denoising. `None`
+    /// disables MC; `Mvtools` warps temporal neighbours into spatial
+    /// alignment with the centre frame before NLM weighting. Only
+    /// takes effect when `mode` is `Temporal { .. }`.
+    #[builder(default = MotionCompensationMode::None)]
+    pub motion_compensation: MotionCompensationMode,
     /// Override NLM tuning (search/patch radius, strength, self-weight).
     /// `None` uses the defaults baked into [`NlmParams`].
     pub nlm: Option<NlmTuning>,
@@ -53,6 +59,7 @@ impl DenoiserOptions {
         let mut params = NlmParams {
             channels: self.channel_mode,
             prefilter: self.prefilter,
+            motion_compensation: self.motion_compensation,
             temporal_radius: match self.mode {
                 DenoisingMode::Spacial => 0,
                 DenoisingMode::Temporal { radius } => radius,
@@ -417,6 +424,37 @@ mod options_tests {
         let params = opts.to_nlm_params();
 
         assert!(matches!(params.prefilter, PrefilterMode::Bilateral { .. }));
+    }
+
+    #[test]
+    fn motion_compensation_passthrough() {
+        let opts = DenoiserOptions::builder()
+            .mode(DenoisingMode::Temporal { radius: 1 })
+            .motion_compensation(MotionCompensationMode::Mvtools {
+                blksize: 16,
+                overlap: 8,
+                search_radius: 4,
+                pyramid_levels: 2,
+            })
+            .build();
+        let params = opts.to_nlm_params();
+
+        assert!(matches!(
+            params.motion_compensation,
+            MotionCompensationMode::Mvtools {
+                blksize: 16,
+                overlap: 8,
+                search_radius: 4,
+                pyramid_levels: 2,
+            }
+        ));
+    }
+
+    #[test]
+    fn motion_compensation_defaults_to_none() {
+        let opts = DenoiserOptions::builder().build();
+        let params = opts.to_nlm_params();
+        assert!(matches!(params.motion_compensation, MotionCompensationMode::None));
     }
 
     #[test]
