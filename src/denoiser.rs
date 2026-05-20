@@ -297,9 +297,16 @@ impl Denoiser {
         self.recv_frame()
     }
 
-    /// End-of-stream: collect every in-flight frame, then drain the
-    /// trailing temporal tail by duplicating the last pushed frame.
-    /// Each produced frame is handed to `sink`.
+    /// Drain in-flight frames and the trailing temporal tail (padded by duplicating
+    /// the last pushed frame), handing each produced frame to `sink`.
+    ///
+    /// On success the denoiser is left ready to accept a fresh,
+    /// independent stream of the same dimensions and parameters.
+    /// Pushing more frames after `flush` starts a new temporal window from
+    /// scratch. May be called multiple times.
+    ///
+    /// If `flush` returns `Err`, the denoiser is left in an undefined
+    /// state and should be dropped rather than reused.
     pub fn flush(&mut self, mut sink: impl FnMut(Vec<f32>)) -> Result<(), DenoiserError> {
         // Drain the full pending pipeline (up to MAX_PENDING frames) before
         // submitting the trailing-tail mirrors.
@@ -337,6 +344,12 @@ impl Denoiser {
                 sink(v);
             })?,
         }
+
+        // Backend has already reset its own stream indices. Reset the
+        // outer push counter too so the next push re-arms the
+        // window-priming logic at the top of `push_frame`.
+        self.frames_pushed = 0;
+
         Ok(())
     }
 }
@@ -547,5 +560,126 @@ mod tests {
 
         // After draining one slot the next push must succeed.
         d.push_frame(&frame(16, 16)).expect("push after drain failed");
+    }
+
+    fn frame_filled(w: u32, h: u32, value: f32) -> Vec<f32> {
+        vec![value; (w * h) as usize]
+    }
+
+    /// Push `n` frames of the given value, interleaving `recv_frame` to keep
+    /// the in-flight pipeline below `MAX_PENDING`.
+    fn push_n_with_drain(d: &mut Denoiser, n: usize, value: f32, out: &mut Vec<Vec<f32>>) {
+        for _ in 0..n {
+            loop {
+                match d.push_frame(&frame_filled(16, 16, value)) {
+                    Ok(()) => break,
+                    Err(DenoiserError::QueueFull) => {
+                        let f = d
+                            .recv_frame()
+                            .expect("recv ok")
+                            .expect("queue full but recv yielded none");
+                        out.push(f);
+                    },
+                    Err(e) => panic!("unexpected push error: {e:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn flush_leaves_denoiser_reusable_spatial() {
+        let mut d = Denoiser::create(
+            &[Accelerator::Cpu],
+            &Device::Default,
+            16,
+            16,
+            opts(DenoisingMode::Spacial),
+        )
+        .unwrap();
+
+        let mut batch_a = Vec::new();
+        push_n_with_drain(&mut d, 5, 0.25, &mut batch_a);
+        d.flush(|f| batch_a.push(f)).expect("first flush failed");
+        assert_eq!(batch_a.len(), 5);
+
+        // After flush the pipeline must be empty.
+        assert!(d.recv_frame().unwrap().is_none());
+
+        let mut batch_b = Vec::new();
+        push_n_with_drain(&mut d, 5, 0.75, &mut batch_b);
+        d.flush(|f| batch_b.push(f)).expect("second flush failed");
+        assert_eq!(batch_b.len(), 5);
+
+        for v in batch_b.iter().flatten() {
+            assert!((v - 0.75).abs() < 0.1, "batch_b carried state from batch_a: {v}");
+        }
+        for v in batch_a.iter().flatten() {
+            assert!((v - 0.25).abs() < 0.1, "batch_a value unexpectedly drifted: {v}");
+        }
+    }
+
+    #[test]
+    fn flush_leaves_denoiser_reusable_temporal() {
+        let mut d = Denoiser::create(
+            &[Accelerator::Cpu],
+            &Device::Default,
+            16,
+            16,
+            opts(DenoisingMode::Temporal { radius: 1 }),
+        )
+        .unwrap();
+
+        let mut batch_a = Vec::new();
+        push_n_with_drain(&mut d, 5, 0.25, &mut batch_a);
+        d.flush(|f| batch_a.push(f)).expect("first flush failed");
+        assert_eq!(batch_a.len(), 5, "expected 5 frames from first batch");
+
+        // The temporal window must be empty after flush: the first push of
+        // the new stream should not yield a pending immediately. With r=1
+        // the window needs 3 frames before `denoise_submit` fires.
+        assert!(d.recv_frame().unwrap().is_none());
+        d.push_frame(&frame_filled(16, 16, 0.75)).unwrap();
+        assert!(
+            d.recv_frame().unwrap().is_none(),
+            "first push of new temporal stream should not produce output yet"
+        );
+
+        // Push 4 more frames (5 total in batch B) with drain.
+        let mut batch_b = Vec::new();
+        push_n_with_drain(&mut d, 4, 0.75, &mut batch_b);
+        d.flush(|f| batch_b.push(f)).expect("second flush failed");
+        assert_eq!(batch_b.len(), 5, "expected 5 frames from second batch");
+
+        for v in batch_b.iter().flatten() {
+            assert!((v - 0.75).abs() < 0.1, "batch_b carried state from batch_a: {v}");
+        }
+    }
+
+    #[test]
+    fn flush_emits_exactly_n_outputs_for_small_n() {
+        // With temporal radius R=2 the window is 5 frames. Pushing fewer
+        // than R+1 frames means the window never fills during pushes —
+        // flush must still emit exactly N outputs (one per pushed frame),
+        // not R+1.
+        for n in 1..=5usize {
+            let mut d = Denoiser::create(
+                &[Accelerator::Cpu],
+                &Device::Default,
+                16,
+                16,
+                opts(DenoisingMode::Temporal { radius: 2 }),
+            )
+            .unwrap();
+
+            let mut out = Vec::new();
+            push_n_with_drain(&mut d, n, 0.5, &mut out);
+            d.flush(|f| out.push(f)).expect("flush failed");
+            assert_eq!(
+                out.len(),
+                n,
+                "expected {n} outputs for {n} pushes, got {}",
+                out.len()
+            );
+        }
     }
 }

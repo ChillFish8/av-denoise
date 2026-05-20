@@ -24,6 +24,10 @@ pub struct NlmDenoiser<R: Runtime> {
     pub(super) ring_head: usize,
     /// Frames loaded so far, capped at `total_frames`.
     pub(super) frames_loaded: usize,
+    /// Number of real `push_frame` / `push_frame_with_reference` calls
+    /// in the current stream (does not count internal leading/trailing
+    /// duplicates). Reset by [`Self::reset_stream_state`].
+    pub(super) real_pushes: usize,
 
     /// `[total_frames * height * width * stored_ch]` ring buffer.
     pub(super) input_buf: Handle,
@@ -87,9 +91,10 @@ pub struct NlmDenoiser<R: Runtime> {
 }
 
 impl<R: Runtime> NlmDenoiser<R> {
-    /// Build a new denoiser. **Panics** if `params.validate()` fails;
-    /// the high-level [`crate::Denoiser`] runs validation first and
-    /// surfaces errors as `Result`, so most callers should prefer that.
+    /// Build a new denoiser.
+    ///
+    /// **Panics** if `params.validate()` fails, the high-level [`crate::Denoiser`]
+    /// runs validation first and surfaces errors as `Result`, so most callers should prefer that.
     pub fn new(client: &ComputeClient<R>, params: NlmParams, width: u32, height: u32) -> Self {
         params
             .validate()
@@ -173,6 +178,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             height,
             ring_head: 0,
             frames_loaded: 0,
+            real_pushes: 0,
             input_buf,
             reference_buf,
             padding_scratch,
@@ -351,6 +357,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         if self.frames_loaded < total_frames {
             self.frames_loaded += 1;
         }
+        self.real_pushes += 1;
     }
 
     /// GPU→GPU copy of one frame from `src` into `dst` at the given
@@ -500,30 +507,63 @@ impl<R: Runtime> NlmDenoiser<R> {
         let temporal_radius = self.params.temporal_radius as usize;
         let total_frames = self.params.total_frames() as usize;
 
-        // Partial window: pad with duplicates of the last frame so the
-        // temporal neighbourhood is complete, then emit one denoised frame.
-        if temporal_radius > 0 && self.frames_loaded < total_frames {
-            while self.frames_loaded < total_frames {
-                self.duplicate_last_frame();
-                self.frames_loaded += 1;
-            }
-            if let Some(pending) = self.denoise_submit()? {
+        // Spatial mode has no trailing context to drain.
+        if temporal_radius == 0 || self.real_pushes == 0 {
+            self.reset_stream_state();
+            return Ok(());
+        }
+
+        // During pushes the backend submits `real_pushes - R` denoises
+        // (zero when `real_pushes <= R`). flush must produce the
+        // remainder so the caller gets exactly `real_pushes` outputs.
+        let target = self.real_pushes.min(temporal_radius);
+        let mut emitted = 0usize;
+
+        // Partial window: pad with trailing duplicates of the last
+        // pushed frame so the temporal neighbourhood is complete, then
+        // emit centred denoises. Each padded step shifts the centre
+        // forward by one, so we may emit several outputs before
+        // crossing into the regular trailing-tail loop.
+        while self.frames_loaded < total_frames && emitted < target {
+            self.duplicate_last_frame();
+            self.frames_loaded += 1;
+            if self.frames_loaded == total_frames
+                && let Some(pending) = self.denoise_submit()?
+            {
                 pending.wait_into(&mut self.output_scratch)?;
                 sink(self.output_scratch.as_slice());
+                emitted += 1;
             }
         }
 
-        // Trailing `temporal_radius` frames with shrinking future context,
-        // each padded by duplicating the most recent frame.
-        for _ in 0..temporal_radius {
+        // Trailing window: full ring, shrinking future context. Each
+        // iteration duplicates the most recent frame and emits one more
+        // centred denoise.
+        while emitted < target {
             self.duplicate_last_frame();
             if let Some(pending) = self.denoise_submit()? {
                 pending.wait_into(&mut self.output_scratch)?;
                 sink(self.output_scratch.as_slice());
+                emitted += 1;
             }
         }
 
+        // Leave the denoiser ready for a fresh stream of the same shape.
+        // GPU buffers stay allocated, they get overwritten slot-by-slot
+        // as new frames arrive, and `prime_leading_edge_if_first` re-fills
+        // the leading edge once `frames_loaded == 1` on the new stream.
+        self.reset_stream_state();
+
         Ok(())
+    }
+
+    /// Reset stream-tracking indices so the next `push_frame` begins a
+    /// fresh temporal stream. GPU buffers are intentionally not cleared.
+    pub(crate) fn reset_stream_state(&mut self) {
+        self.ring_head = 0;
+        self.frames_loaded = 0;
+        self.next_output_slot = 0;
+        self.real_pushes = 0;
     }
 
     /// Physical slot of logical frame 0 (oldest frame in the window).

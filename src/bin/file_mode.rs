@@ -237,11 +237,14 @@ fn run_worker(
                 planes,
             }) => {
                 if current_scene != Some(scene_idx) {
-                    if let Some(mut prev) = wd.take() {
-                        flush_worker(&mut prev, &mut pending, &tx)?;
+                    // Reuse the existing WorkerDenoiser across scenes, flushing the worker
+                    // will ensure there is no cross-scene blending during temporal workloads.
+                    if let Some(prev) = wd.as_mut() {
+                        flush_worker(prev, &mut pending, &tx)?;
+                    } else {
+                        wd = Some(WorkerDenoiser::create(&opts, layout)?);
                     }
 
-                    wd = Some(WorkerDenoiser::create(&opts, layout)?);
                     current_scene = Some(scene_idx);
                     pending.clear();
 
