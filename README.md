@@ -114,8 +114,8 @@ backend for those devices. It should be more or less the same performance, witho
 
 ## Installing
 
-`av-denoise` is available both in library _and_ binary format, by default only the `cpu` and `vulkan` features
-are enabled, since they are typically the default accelerators you will want to use.
+`av-denoise` is available both in library _and_ binary format, by default only the `vulkan` feature
+is enabled, since that is typically the default accelerators you will want to use.
 
 When compiling the binary, you want to enable the `binary` feature at minimum, but I recommend for most users
 to enable the `binary-full` feature instead if you are ever unsure about how you are going to be ingesting frames.
@@ -233,7 +233,7 @@ Options:
           
           The list is comma-separated, for example `vulkan,cpu`.
           
-          [default: vulkan cpu]
+          [default: <all_compiled_accelerators>]
 
   -d, --device <DEVICE>
           Which device to use on the chosen backend.

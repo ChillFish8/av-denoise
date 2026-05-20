@@ -1,6 +1,6 @@
 [package]
 name = "av-denoise"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 description = "Fast and efficient video denoising using accelerated nlmeans."
 categories = ["multimedia::video"]
@@ -55,7 +55,7 @@ cuda = ["cubecl/cuda"]
 rocm = ["cubecl/hip"]
 cpu = ["cubecl/cpu"]
 binary = ["clap", "mimalloc", "av-scenechange", "av-decoders", "v_frame", "y4m"]
-default = ["cpu", "vulkan"]
+default = ["vulkan"]
 
 [[bench]]
 name = "nlmeans"
