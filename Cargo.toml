@@ -17,6 +17,10 @@ exclude = [
 ]
 autobins = false
 
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]
+targets = ["x86_64-unknown-linux-gnu"]
+
 [[bin]]
 name = "av-denoise"
 path = "src/bin/main.rs"

@@ -4,29 +4,34 @@ use strum_macros::{Display, EnumIter, EnumString, IntoStaticStr};
 #[strum(serialize_all = "snake_case")]
 /// A hardware accelerator that can be used to compute any target metrics.
 pub enum Accelerator {
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", docsrs))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
     /// Run kernels using the Nvidia CUDA backend.
     ///
     /// Nvidia GPUs only (duh.)
     Cuda,
-    #[cfg(feature = "rocm")]
+    #[cfg(any(feature = "rocm", docsrs))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "rocm")))]
     /// Run kernels using the AMD ROCm backend.
     ///
     /// AMD GPUs only (duh.)
     Rocm,
-    #[cfg(feature = "vulkan")]
+    #[cfg(any(feature = "vulkan", docsrs))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "vulkan")))]
     /// Run kernels using the WGPU Vulkan backend.
     ///
     /// This is the most lightweight and portable accelerator
     /// because it supports all platforms and GPUs that support basic
     /// compute shaders.
     Vulkan,
-    #[cfg(feature = "metal")]
+    #[cfg(any(feature = "metal", docsrs))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "metal")))]
     /// Run kernels using the WGPU Metal backend.
     ///
     /// This is the only accelerator available for Apple Silicon.
     Metal,
-    #[cfg(feature = "cpu")]
+    #[cfg(any(feature = "cpu", docsrs))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "cpu")))]
     /// Run kernels using the CPU JIT compiler.
     Cpu,
 }

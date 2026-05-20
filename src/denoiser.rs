@@ -392,6 +392,12 @@ fn build_backend(
             let client = <cubecl::cpu::CpuRuntime as Runtime>::client(&dev);
             Ok(Backend::Cpu(NlmDenoiser::new(&client, params, width, height)))
         },
+        // Match-exhaustiveness placeholder for docs.rs, where `cfg(docsrs)`
+        // widens the `Accelerator` enum to include variants whose backend
+        // feature is not actually enabled. Never reached at runtime.
+        #[cfg(docsrs)]
+        #[allow(unreachable_patterns)]
+        _ => unreachable!(),
     }
 }
 
