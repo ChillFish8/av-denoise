@@ -14,6 +14,7 @@ leverage modern hardware instead of relying on the now rather outdated OpenCL.
   - [av-denoise feature cost (strength 1.0, default patch/search)](#av-denoise-feature-cost-strength-10-default-patchsearch)
 - [Hardware support](#hardware-support)
   - [Notes about the JIT](#notes-about-the-jit)
+    - [Configure compilation cache directory](#configure-compilation-cache-directory)
 - [Installing](#installing)
   - [Cargo install](#cargo-install)
   - [From source](#from-source)
@@ -111,6 +112,13 @@ This primarily has the following impacts:
 
 Since both the CUDA and ROCm backends are very heavy in terms of dependencies, I recommend just using the `vulkan`
 backend for those devices. It should be more or less the same performance, without all the library headache.
+
+#### Configure compilation cache directory
+
+Set `AV_DENOISE_COMPILATION_CACHE=/some/dir` to redirect the compiled-kernel and autotune caches to a specific
+directory (overrides whatever is in `cubecl.toml`). 
+Library users can call `av_denoise::apply_compilation_cache_env()` before `Denoiser::create` to honor the same 
+env var from their own binary.
 
 ## Installing
 

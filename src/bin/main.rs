@@ -346,6 +346,16 @@ fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::fmt().with_writer(std::io::stderr).init();
 
+    // Honor AV_DENOISE_COMPILATION_CACHE. Must run before Denoiser::create
+    // since the first CubeCL client lazily locks the global config.
+    match av_denoise::apply_compilation_cache_env() {
+        Ok(Some(path)) => {
+            tracing::info!(?path, "AV_DENOISE_COMPILATION_CACHE override active")
+        },
+        Ok(None) => {},
+        Err(_) => anyhow::bail!("unable to apply AV_DENOISE_COMPILATION_CACHE, this is a bug."),
+    }
+
     let mode = if args.temporal_radius == 0 {
         DenoisingMode::Spacial
     } else {
