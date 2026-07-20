@@ -1,0 +1,76 @@
+input = "./data/bench-sample.mkv"
+workdir = "./data/quality_runs"
+# Frames scored per run. The reference clip is trimmed to this length
+# once and cached, so all runs compare the same segment.
+frames = 240
+seed = 4242
+# ffmpeg `noise` filter `alls` strengths (8-bit amplitude units).
+noise = [8, 16, 28]
+
+# Strength used at each noise level wherever a run says "$strength".
+# A single fixed strength cannot serve every level — 1.0 barely acts
+# above alls≈8, leaving denoised rows indistinguishable from `noisy`.
+[strengths]
+8 = 1.5
+16 = 3.0
+28 = 5.0
+
+# ---------------------------------------------------------------------------
+# Baseline: the corrupted clip scored against the clean reference. Every
+# denoise variant should beat this row.
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "noisy"
+kind = "noisy"
+
+# ---------------------------------------------------------------------------
+# Current fast mode at increasing capability: spatial, temporal, temporal
+# with motion compensation, and everything on.
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "av_spatial"
+kind = "av-denoise"
+workers = 2
+args = ["--temporal-radius", "0", "--channel-mode", "luma,chroma", "--strength", "$strength"]
+
+[[runs]]
+name = "av_temporal_r2"
+kind = "av-denoise"
+workers = 2
+args = ["--temporal-radius", "2", "--channel-mode", "luma,chroma", "--strength", "$strength"]
+
+[[runs]]
+name = "av_temporal_r2_mc"
+kind = "av-denoise"
+workers = 2
+args = [
+    "--temporal-radius", "2",
+    "--channel-mode", "luma,chroma",
+    "--strength", "$strength",
+    "--motion-compensation",
+]
+
+[[runs]]
+name = "av_full_r2"
+kind = "av-denoise"
+workers = 2
+args = [
+    "--temporal-radius", "2",
+    "--channel-mode", "luma,chroma",
+    "--strength", "$strength",
+    "--motion-compensation",
+    "--prefilter", "bilateral:3.0,0.02",
+]
+
+# ---------------------------------------------------------------------------
+# External baseline: ffmpeg's OpenCL nlmeans.
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "ffmpeg_spatial"
+kind = "ffmpeg-nlmeans"
+strength = "$strength"
+patch = 7
+search = 15

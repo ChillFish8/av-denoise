@@ -18,6 +18,9 @@ compare-perf *ARGS:
 compare-runs *ARGS:
     uv run scripts/compare_runs.py {{ARGS}}
 
+quality-runs *ARGS:
+    uv run scripts/quality_runs.py {{ARGS}}
+
 [arg("input", long="input", short="i")]
 [arg("output", long="output", short="o")]
 [arg("workers", long="workers", short="w")]
