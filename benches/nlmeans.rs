@@ -455,6 +455,7 @@ const DENOISE_VARIANTS: &[(PrefilterMode, &str)] = &[
         },
         "_rclip_bilateral",
     ),
+    (PrefilterMode::NlmSpatial { strength_scale: 1.0 }, "_nlm_pilot"),
 ];
 
 fn run_all_benches<R: Runtime>(backend: &str, device: &R::Device) {

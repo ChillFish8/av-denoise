@@ -104,7 +104,8 @@ pub struct CliOptions {
     pub device: Device,
     pub intent: BinaryChannelIntent,
     pub mode: DenoisingMode,
-    pub prefilter: PrefilterMode,
+    /// `None` means no prefilter is applied by default.
+    pub prefilter: Option<PrefilterMode>,
     pub motion_compensation: MotionCompensationMode,
     /// Which denoising algorithm variant to run.
     pub algorithm: Algorithm,
@@ -122,7 +123,7 @@ impl CliOptions {
         let b = DenoiserOptions::builder()
             .channel_mode(channels)
             .mode(self.mode)
-            .prefilter(self.prefilter)
+            .maybe_prefilter(self.prefilter)
             .motion_compensation(self.motion_compensation)
             .algorithm(self.algorithm);
 

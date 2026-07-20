@@ -1,7 +1,14 @@
 use std::path::PathBuf;
 
 use av_denoise::accelerate::{Accelerator, get_default_accelerators};
-use av_denoise::{DenoisingMode, Device, MotionCompensationMode, NlmTuning, PrefilterMode};
+use av_denoise::{
+    DEFAULT_PILOT_STRENGTH_SCALE,
+    DenoisingMode,
+    Device,
+    MotionCompensationMode,
+    NlmTuning,
+    PrefilterMode,
+};
 use clap::{Parser, Subcommand};
 use strum_macros::EnumString;
 
@@ -121,7 +128,16 @@ struct Args {
 
     /// Reference image used when comparing patches.
     ///
-    /// `none` uses the noisy input directly (the cheapest option).
+    /// Omitted (the default) means no prefilter, for both `nlmeans`
+    /// and `nlmeans-hq`.
+    ///
+    /// `none` forces the noisy input directly (the cheapest option).
+    /// This is the same as leaving the flag unset.
+    ///
+    /// `nlm` or `nlm:<strength_scale>` runs a windowed spatial NLM
+    /// pass first and compares patches against that cleaner image.
+    /// `strength_scale` multiplies the main pass strength for the
+    /// pilot pass. Bare `nlm` uses the calibrated default.
     ///
     /// `bilateral:<sigma_s>,<sigma_r>` runs a quick on-GPU bilateral
     /// blur first, then compares patches against that cleaner image.
@@ -134,8 +150,8 @@ struct Args {
     ///
     /// Prefiltering keeps more detail at the cost of one extra GPU
     /// pass per frame.
-    #[arg(long, default_value = "none", global = true)]
-    prefilter: String,
+    #[arg(long, global = true)]
+    prefilter: Option<String>,
 
     /// How many neighbouring frames to look at on each side when
     /// cleaning a frame.
@@ -173,7 +189,9 @@ struct Args {
     ///
     /// Must be a finite number greater than 0.
     ///
-    /// Library default is 1.2.
+    /// The default depends on the algorithm. `nlmeans` defaults to
+    /// 1.2. `nlmeans-hq` interprets strength as a multiplier on the
+    /// measured noise level and defaults to 0.45.
     ///
     /// This value applies to both planes unless `--luma-strength`
     /// or `--chroma-strength` is set.
@@ -336,6 +354,21 @@ fn parse_prefilter(s: &str) -> Result<PrefilterMode, anyhow::Error> {
         return Ok(PrefilterMode::None);
     }
 
+    if s == "nlm" {
+        return Ok(PrefilterMode::NlmSpatial {
+            strength_scale: DEFAULT_PILOT_STRENGTH_SCALE,
+        });
+    }
+
+    if let Some(rest) = s.strip_prefix("nlm:") {
+        let strength_scale: f32 = rest
+            .trim()
+            .parse()
+            .map_err(|_| anyhow::anyhow!("--prefilter nlm expects a number: nlm:<strength_scale>"))?;
+
+        return Ok(PrefilterMode::NlmSpatial { strength_scale });
+    }
+
     if let Some(rest) = s.strip_prefix("bilateral:") {
         let parts: Vec<&str> = rest.split(',').collect();
 
@@ -349,7 +382,62 @@ fn parse_prefilter(s: &str) -> Result<PrefilterMode, anyhow::Error> {
         return Ok(PrefilterMode::Bilateral { sigma_s, sigma_r });
     }
 
-    anyhow::bail!("unknown prefilter '{s}'; expected `none` or `bilateral:<sigma_s>,<sigma_r>`")
+    anyhow::bail!(
+        "unknown prefilter '{s}'; expected `none`, `nlm[:<strength_scale>]`, or `bilateral:<sigma_s>,<sigma_r>`"
+    )
+}
+
+#[cfg(test)]
+mod parse_prefilter_tests {
+    use super::*;
+
+    #[test]
+    fn none_and_empty() {
+        assert!(matches!(parse_prefilter("none").unwrap(), PrefilterMode::None));
+        assert!(matches!(parse_prefilter("").unwrap(), PrefilterMode::None));
+    }
+
+    #[test]
+    fn bilateral_with_values() {
+        let mode = parse_prefilter("bilateral:3.0,0.02").unwrap();
+        assert!(matches!(
+            mode,
+            PrefilterMode::Bilateral {
+                sigma_s,
+                sigma_r,
+            } if (sigma_s - 3.0).abs() < f32::EPSILON && (sigma_r - 0.02).abs() < f32::EPSILON
+        ));
+    }
+
+    #[test]
+    fn bare_nlm_uses_default_strength_scale() {
+        let mode = parse_prefilter("nlm").unwrap();
+        assert!(matches!(
+            mode,
+            PrefilterMode::NlmSpatial { strength_scale }
+                if (strength_scale - DEFAULT_PILOT_STRENGTH_SCALE).abs() < f32::EPSILON
+        ));
+    }
+
+    #[test]
+    fn nlm_with_explicit_strength_scale() {
+        let mode = parse_prefilter("nlm:0.8").unwrap();
+        assert!(matches!(
+            mode,
+            PrefilterMode::NlmSpatial { strength_scale } if (strength_scale - 0.8).abs() < f32::EPSILON
+        ));
+    }
+
+    #[test]
+    fn malformed_nlm_scale_is_rejected() {
+        let err = parse_prefilter("nlm:x").expect_err("expected parse failure");
+        assert!(err.to_string().contains("nlm"));
+    }
+
+    #[test]
+    fn unknown_prefilter_is_rejected() {
+        assert!(parse_prefilter("garbage").is_err());
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -390,7 +478,7 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    let prefilter = parse_prefilter(&args.prefilter)?;
+    let prefilter = args.prefilter.as_deref().map(parse_prefilter).transpose()?;
     let intent = resolve_channel_intent(&args.channel_mode)?;
 
     let motion_compensation = if args.motion_compensation {

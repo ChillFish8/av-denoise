@@ -8,6 +8,12 @@ pub(super) const NLM_NORM: f32 = 255.0 * 255.0;
 /// our `strength` parameter has equivalent meaning.
 pub(super) const NLM_LEGACY: f32 = 3.0;
 
+/// Calibrated default `strength` multiplier for `nlmeans-hq`'s
+/// auto-strength mode. A sweep across noise levels found a flat XPSNR
+/// plateau with the luma optimum near 0.42 and the chroma optimum near
+/// 0.5. This value sits on that measured plateau between the two.
+pub const HQ_DEFAULT_STRENGTH: f32 = 0.45;
+
 /// Patch radius threshold: above this the dispatcher switches to the
 /// separable path so the per-pixel cost stays linear in `patch_radius`.
 pub(super) const SEPARABLE_THRESHOLD: u32 = 8;
@@ -267,6 +273,23 @@ impl NlmParams {
             );
         }
 
+        if let PrefilterMode::NlmSpatial { strength_scale } = self.prefilter {
+            if !strength_scale.is_finite() || strength_scale <= 0.0 {
+                anyhow::bail!(
+                    "nlm pilot strength_scale must be finite and > 0 (got {})",
+                    strength_scale,
+                );
+            }
+            if self.patch_radius > SEPARABLE_THRESHOLD {
+                anyhow::bail!(
+                    "the nlm pilot uses the windowed spatial kernel, which supports \
+                     patch_radius up to {} (got {})",
+                    SEPARABLE_THRESHOLD,
+                    self.patch_radius,
+                );
+            }
+        }
+
         self.motion_compensation.validate()?;
 
         Ok(())
@@ -413,6 +436,43 @@ mod tests {
         let got = sigma_eff(&sigmas, ChannelMode::Chroma);
         let expected = ((sigmas[0] * sigmas[0] + sigmas[1] * sigmas[1]) / 2.0).sqrt();
         assert!((got - expected).abs() < 1e-9, "expected {expected}, got {got}");
+    }
+
+    #[test]
+    fn validate_rejects_non_positive_pilot_strength_scale() {
+        let zero = NlmParams {
+            prefilter: PrefilterMode::NlmSpatial { strength_scale: 0.0 },
+            ..NlmParams::default()
+        };
+        assert!(zero.validate().is_err());
+
+        let nan = NlmParams {
+            prefilter: PrefilterMode::NlmSpatial {
+                strength_scale: f32::NAN,
+            },
+            ..NlmParams::default()
+        };
+        assert!(nan.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_pilot_with_patch_radius_above_separable_threshold() {
+        let params = NlmParams {
+            prefilter: PrefilterMode::NlmSpatial { strength_scale: 1.0 },
+            patch_radius: SEPARABLE_THRESHOLD + 1,
+            ..NlmParams::default()
+        };
+        assert!(params.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_pilot_within_limits() {
+        let params = NlmParams {
+            prefilter: PrefilterMode::NlmSpatial { strength_scale: 1.0 },
+            patch_radius: SEPARABLE_THRESHOLD,
+            ..NlmParams::default()
+        };
+        assert!(params.validate().is_ok());
     }
 
     #[test]

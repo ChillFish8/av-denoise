@@ -15,6 +15,7 @@ pub use denoiser::NlmDenoiser;
 pub use motion::MotionCompensationMode;
 pub use params::{
     ChannelMode,
+    HQ_DEFAULT_STRENGTH,
     HqParams,
     MAX_PATCH_RADIUS,
     MAX_SEARCH_RADIUS,
@@ -22,7 +23,7 @@ pub use params::{
     NlmParams,
 };
 pub use pending::Pending;
-pub use prefilter::PrefilterMode;
+pub use prefilter::{DEFAULT_PILOT_STRENGTH_SCALE, PrefilterMode};
 
 /// Cube X dimension for tile-heavy fused/separable kernels.
 pub const BLOCK_X: u32 = 32;

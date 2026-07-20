@@ -6,6 +6,7 @@ use crate::accelerate::Accelerator;
 use crate::device::Device;
 use crate::nlmeans::{
     ChannelMode,
+    HQ_DEFAULT_STRENGTH,
     HqParams,
     MotionCompensationMode,
     NlmDenoiser,
@@ -26,12 +27,16 @@ pub struct DenoiserOptions {
     pub mode: DenoisingMode,
     /// Algorithm variant. `Nlmeans` is the fast default. `NlmeansHq`
     /// adapts weighting to the noise level, measured automatically per
-    /// frame unless `HqParams::sigma_override` pins a fixed value.
+    /// frame unless `HqParams::sigma_override` pins a fixed value. Its
+    /// default `strength` multiplier is also different, see
+    /// [`crate::nlmeans::HQ_DEFAULT_STRENGTH`].
     #[builder(default = Algorithm::Nlmeans)]
     pub algorithm: Algorithm,
-    /// Reference clip source for NLM weight computation.
-    #[builder(default = PrefilterMode::None)]
-    pub prefilter: PrefilterMode,
+    /// Reference clip source for NLM weight computation. `None` (the
+    /// default) uses no prefilter for either algorithm. Set
+    /// `PrefilterMode::NlmSpatial` explicitly to opt into the NLM
+    /// spatial pilot.
+    pub prefilter: Option<PrefilterMode>,
     /// Motion-compensation mode for temporal denoising. `None`
     /// disables MC; `Mvtools` warps temporal neighbours into spatial
     /// alignment with the centre frame before NLM weighting. Only
@@ -73,9 +78,21 @@ pub struct NlmTuning {
 
 impl DenoiserOptions {
     fn to_nlm_params(&self) -> NlmParams {
+        // An explicit `strength` (whether from `NlmTuning` directly or a
+        // per-plane override already folded into it by the caller) always
+        // wins. Otherwise the default depends on the algorithm. HQ's
+        // `strength` is a multiplier on the measured noise level, so it
+        // needs its own calibrated default rather than the fast path's
+        // absolute FFmpeg-style default.
+        let explicit_strength = self.nlm.and_then(|t| t.strength);
+        let strength = explicit_strength.unwrap_or(match self.algorithm {
+            Algorithm::NlmeansHq(_) => HQ_DEFAULT_STRENGTH,
+            Algorithm::Nlmeans => NlmParams::default().strength,
+        });
+
         let mut params = NlmParams {
             channels: self.channel_mode,
-            prefilter: self.prefilter,
+            prefilter: self.prefilter.unwrap_or(PrefilterMode::None),
             motion_compensation: self.motion_compensation,
             temporal_radius: match self.mode {
                 DenoisingMode::Spacial => 0,
@@ -85,6 +102,7 @@ impl DenoiserOptions {
                 Algorithm::Nlmeans => None,
                 Algorithm::NlmeansHq(hq) => Some(hq),
             },
+            strength,
             ..NlmParams::default()
         };
         if let Some(t) = self.nlm {
@@ -93,9 +111,6 @@ impl DenoiserOptions {
             }
             if let Some(v) = t.patch_radius {
                 params.patch_radius = v;
-            }
-            if let Some(v) = t.strength {
-                params.strength = v;
             }
             if let Some(v) = t.self_weight {
                 params.self_weight = v;
@@ -464,6 +479,85 @@ mod options_tests {
         let params = opts.to_nlm_params();
 
         assert!(matches!(params.prefilter, PrefilterMode::Bilateral { .. }));
+    }
+
+    #[test]
+    fn hq_unset_prefilter_defaults_to_none() {
+        let opts = DenoiserOptions::builder()
+            .algorithm(Algorithm::NlmeansHq(HqParams {
+                auto_strength: true,
+                noise_floor: true,
+                sigma_override: None,
+            }))
+            .build();
+        let params = opts.to_nlm_params();
+
+        assert!(matches!(params.prefilter, PrefilterMode::None));
+    }
+
+    #[test]
+    fn hq_explicit_none_prefilter_is_respected() {
+        let opts = DenoiserOptions::builder()
+            .algorithm(Algorithm::NlmeansHq(HqParams {
+                auto_strength: true,
+                noise_floor: true,
+                sigma_override: None,
+            }))
+            .prefilter(PrefilterMode::None)
+            .build();
+        let params = opts.to_nlm_params();
+
+        assert!(matches!(params.prefilter, PrefilterMode::None));
+    }
+
+    #[test]
+    fn fast_unset_prefilter_defaults_to_none() {
+        let opts = DenoiserOptions::builder().algorithm(Algorithm::Nlmeans).build();
+        let params = opts.to_nlm_params();
+
+        assert!(matches!(params.prefilter, PrefilterMode::None));
+    }
+
+    #[test]
+    fn hq_unset_strength_defaults_to_hq_default_strength() {
+        let opts = DenoiserOptions::builder()
+            .algorithm(Algorithm::NlmeansHq(HqParams {
+                auto_strength: true,
+                noise_floor: true,
+                sigma_override: None,
+            }))
+            .build();
+        let params = opts.to_nlm_params();
+
+        assert!((params.strength - HQ_DEFAULT_STRENGTH).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn hq_explicit_strength_is_respected() {
+        let opts = DenoiserOptions::builder()
+            .algorithm(Algorithm::NlmeansHq(HqParams {
+                auto_strength: true,
+                noise_floor: true,
+                sigma_override: None,
+            }))
+            .nlm(NlmTuning {
+                search_radius: None,
+                patch_radius: None,
+                strength: Some(1.0),
+                self_weight: None,
+            })
+            .build();
+        let params = opts.to_nlm_params();
+
+        assert!((params.strength - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn fast_unset_strength_defaults_to_legacy_default() {
+        let opts = DenoiserOptions::builder().algorithm(Algorithm::Nlmeans).build();
+        let params = opts.to_nlm_params();
+
+        assert!((params.strength - 1.2).abs() < f32::EPSILON);
     }
 
     #[test]

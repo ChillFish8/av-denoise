@@ -336,3 +336,110 @@ fn hq_reset_clears_noise_state() {
         "reset should clear the EMA so the next estimate starts fresh, not blended with stale state"
     );
 }
+
+/// HQ auto-σ combined with the nlm-spatial pilot over a short temporal
+/// sequence. Mirrors `hq_auto_sigma_temporal_smoke` but with the pilot
+/// enabled. Every produced frame must stay finite and in range, and the
+/// pipeline must still emit exactly one output per pushed frame.
+#[test]
+fn hq_pilot_temporal_end_to_end() {
+    let client = make_client();
+    let w = 16;
+    let h = 16;
+
+    let params = NlmParams {
+        temporal_radius: 1,
+        prefilter: PrefilterMode::NlmSpatial { strength_scale: 1.0 },
+        hq: Some(HqParams {
+            auto_strength: true,
+            noise_floor: true,
+            sigma_override: None,
+        }),
+        ..base_params()
+    };
+
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+
+    let frames: Vec<Vec<f32>> = (0..5)
+        .map(|i| make_frame_with_noisy_region(w, h, 1, 0.5, 6 + i, 8, 2, 0.8))
+        .collect();
+
+    let mut emitted = 0usize;
+    let check = |frame: &[f32]| {
+        for (i, &v) in frame.iter().enumerate() {
+            assert!(v.is_finite(), "pixel {i}: non-finite output {v}");
+            assert!((0.0..=1.0).contains(&v), "pixel {i}: out-of-range output {v}");
+        }
+    };
+
+    for frame in &frames {
+        denoiser.push_frame(frame);
+        if let Some(result) = denoiser.denoise().unwrap() {
+            check(result);
+            emitted += 1;
+        }
+    }
+
+    denoiser
+        .flush(|frame| {
+            check(frame);
+            emitted += 1;
+        })
+        .unwrap();
+
+    assert_eq!(emitted, frames.len(), "expected one output per pushed frame");
+}
+
+/// The nlm-spatial pilot changes what the main pass reads as its
+/// distance signal, so HQ with the pilot enabled must diverge from
+/// plain HQ (`prefilter: None`) on the same input.
+///
+/// Uses per-pixel Gaussian noise rather than a solid noisy block (as
+/// `hq_noise_floor_changes_output` explains, a flat block only
+/// disturbs its boundary ring, leaving patch distances elsewhere
+/// identical whether or not the pilot ran).
+#[test]
+fn hq_pilot_differs_from_unguided() {
+    let client = make_client();
+    let w = 32;
+    let h = 32;
+    let frame = make_noisy_gaussian_frame(w, h, 1, 0.5, &[10.0 / 255.0]);
+
+    let hq_params = |prefilter: PrefilterMode| NlmParams {
+        prefilter,
+        hq: Some(HqParams {
+            auto_strength: true,
+            noise_floor: true,
+            sigma_override: None,
+        }),
+        ..base_params()
+    };
+
+    let mut unguided = NlmDenoiser::<R>::new(&client, hq_params(PrefilterMode::None), w, h);
+    unguided.push_frame(&frame);
+    let unguided_out = unguided.denoise().unwrap().unwrap().to_vec();
+
+    let mut piloted = NlmDenoiser::<R>::new(
+        &client,
+        hq_params(PrefilterMode::NlmSpatial { strength_scale: 1.0 }),
+        w,
+        h,
+    );
+    piloted.push_frame(&frame);
+    let piloted_out = piloted.denoise().unwrap().unwrap().to_vec();
+
+    let mut max_diff = 0.0f32;
+    for (i, (&a, &b)) in unguided_out.iter().zip(piloted_out.iter()).enumerate() {
+        assert!(b.is_finite(), "pixel {i}: non-finite piloted output {b}");
+        assert!(
+            (0.0..=1.0).contains(&b),
+            "pixel {i}: out-of-range piloted output {b}"
+        );
+        max_diff = max_diff.max((a - b).abs());
+    }
+
+    assert!(
+        max_diff > 1e-4,
+        "expected the pilot to change HQ output somewhere, max diff was {max_diff}"
+    );
+}

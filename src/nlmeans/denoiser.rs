@@ -66,7 +66,17 @@ pub struct NlmDenoiser<R: Runtime> {
     pub(super) output_scratch: Vec<f32>,
 
     pub(super) h2_inv_norm: f32,
+    /// Distance floor fed to the main-pass weighting kernels. Zero for
+    /// `NlmSpatial`, because pilot-vs-pilot distances no longer carry
+    /// the 2σ² floor, so subtracting it there would overweight
+    /// mismatched patches. Equal to `input_noise_offset` for every
+    /// other prefilter mode.
     pub(super) noise_offset: f32,
+    /// Distance floor for comparisons against noisy input pixels. The
+    /// pilot pass always uses this value, since its own inputs still
+    /// carry the full noise floor even when `noise_offset` has been
+    /// zeroed for the main pass.
+    pub(super) input_noise_offset: f32,
     pub use_separable: bool,
     pub(super) use_reference: bool,
 
@@ -146,7 +156,16 @@ impl<R: Runtime> NlmDenoiser<R> {
         let outputs = [client.empty(frame_bytes), client.empty(frame_bytes)];
 
         let h2_inv_norm = params.h2_inv_norm();
-        let noise_offset = params.noise_offset();
+        let input_noise_offset = params.noise_offset();
+        // The pilot pass compares noisy input pixels, so it always
+        // keeps the full noise floor. Main-pass distances under
+        // `NlmSpatial` are pilot-vs-pilot, which no longer carries
+        // that floor, so subtracting it there would overweight
+        // mismatched patches.
+        let noise_offset = match params.prefilter {
+            PrefilterMode::NlmSpatial { .. } => 0.0,
+            _ => input_noise_offset,
+        };
         let use_separable = params.patch_radius > SEPARABLE_THRESHOLD;
         let use_reference = params.prefilter.needs_reference_buf();
         let output_scratch_cap = pixels * params.channels.count() as usize;
@@ -228,6 +247,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             output_scratch: Vec::with_capacity(output_scratch_cap),
             h2_inv_norm,
             noise_offset,
+            input_noise_offset,
             use_separable,
             use_reference,
             noise_partials,
@@ -256,12 +276,17 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         let slot = self.upload_into(&self.input_buf.clone(), frame);
 
-        if self.params.prefilter.is_gpu_internal() {
+        self.run_noise_estimate_for_slot(slot as u32);
+        self.seed_noise_estimate_if_first_frame(slot as u32);
+
+        if let PrefilterMode::NlmSpatial { strength_scale } = self.params.prefilter {
+            self.run_nlm_spatial_pilot(slot as u32, strength_scale)
+                .expect("nlm spatial pilot dispatch failed");
+        } else if self.params.prefilter.is_gpu_internal() {
             self.run_prefilter_for_slot(slot);
         }
 
         self.build_pyramids_for_slot(slot as u32);
-        self.run_noise_estimate_for_slot(slot as u32);
 
         self.advance_ring();
         self.prime_leading_edge_if_first();
@@ -392,8 +417,10 @@ impl<R: Runtime> NlmDenoiser<R> {
 
     /// Queue the Immerkær noise estimate for `slot` on the input ring.
     /// No-op unless auto noise estimation is active. The read of these
-    /// results happens later in [`Self::denoise_submit`], once `slot`
-    /// reaches the centre of the temporal window.
+    /// results normally happens later in [`Self::denoise_submit`], once
+    /// `slot` reaches the centre of the temporal window. The stream's
+    /// very first frame also gets an immediate read, see
+    /// [`Self::seed_noise_estimate_if_first_frame`].
     fn run_noise_estimate_for_slot(&self, slot: u32) {
         let (Some(partials_buf), Some(results_buf)) =
             (self.noise_partials.as_ref(), self.noise_results.as_ref())
@@ -415,6 +442,58 @@ impl<R: Runtime> NlmDenoiser<R> {
         };
 
         run_noise_estimate::<R>(&self.client, &ctx).expect("noise estimate dispatch failed");
+    }
+
+    /// One-time σ bootstrap for the very first frame of a stream. Auto
+    /// noise estimation normally updates `h2_inv_norm` / `noise_offset`
+    /// / `input_noise_offset` from [`Self::update_noise_estimate`] at
+    /// submit time, but any push-time GPU work that reads them (the
+    /// nlm-spatial pilot) runs before the first submit ever happens.
+    /// Without this, that work would run on the absolute-strength
+    /// fallback set at construction for every frame up to the first
+    /// submit. One blocking read of the estimate this push just queued
+    /// for `slot` fixes that from frame one onward. Detects "first
+    /// frame of the stream" from `frames_loaded`, the same counter
+    /// [`Self::prime_leading_edge_if_first`] checks, but reads it here
+    /// before [`Self::advance_ring`] increments it, and applies for
+    /// every `temporal_radius` rather than only when priming happens.
+    /// The first submit's [`Self::update_noise_estimate`] folds the
+    /// same frame's estimate into the EMA a second time, which only
+    /// reproduces this seed's values up to floating-point rounding,
+    /// not bit-exactly.
+    fn seed_noise_estimate_if_first_frame(&mut self, slot: u32) {
+        if self.frames_loaded != 0 {
+            return;
+        }
+        let Some(results_buf) = self.noise_results.as_ref() else {
+            return;
+        };
+
+        let bytes = self
+            .client
+            .read_one(results_buf.clone())
+            .expect("noise-estimate seed readback failed");
+        let data = f32::from_bytes(&bytes);
+
+        let channels = self.params.channels.count() as usize;
+        let base = slot as usize * 4;
+
+        let mut raw = [0.0f32; 3];
+        for (c, s) in raw.iter_mut().enumerate().take(channels) {
+            *s = sigma_from_abs_sum(data[base + c], self.width, self.height);
+        }
+
+        let updated = self.noise_estimator.update(&raw[..channels]);
+        let mut smoothed = [0.0f32; 3];
+        smoothed[..channels].copy_from_slice(updated);
+
+        let eff = sigma_eff(&smoothed[..channels], self.params.channels);
+        self.h2_inv_norm = self.params.h2_inv_norm_with(Some(eff));
+        self.input_noise_offset = self.params.noise_offset_with(Some(&smoothed[..channels]));
+        self.noise_offset = match self.params.prefilter {
+            PrefilterMode::NlmSpatial { .. } => 0.0,
+            _ => self.input_noise_offset,
+        };
     }
 
     fn advance_ring(&mut self) {
@@ -488,7 +567,12 @@ impl<R: Runtime> NlmDenoiser<R> {
             .offset_start((last_slot as u64) * bytes_per_slot);
         self.copy_frame_into_slot(&self.input_buf.clone(), &input_src, next_slot);
 
-        if let Some(reference_buf) = self.reference_buf.clone() {
+        // Skipped for `NlmSpatial`: the pilot dispatch below recomputes
+        // this slot's reference from scratch, so the byte copy would
+        // just be overwritten immediately.
+        if !matches!(self.params.prefilter, PrefilterMode::NlmSpatial { .. })
+            && let Some(reference_buf) = self.reference_buf.clone()
+        {
             let ref_src = reference_buf
                 .clone()
                 .offset_start((last_slot as u64) * bytes_per_slot);
@@ -498,7 +582,14 @@ impl<R: Runtime> NlmDenoiser<R> {
         // Keep the motion-estimation pyramid and noise estimate for the
         // duplicated slot in lockstep so a subsequent denoise sees valid
         // state for every ring slot it visits, not whatever an older
-        // frame left behind at this physical position.
+        // frame left behind at this physical position. The nlm-spatial
+        // pilot needs the same treatment, otherwise the duplicated
+        // slot's reference would keep whatever an older frame at this
+        // physical position last wrote there.
+        if let PrefilterMode::NlmSpatial { strength_scale } = self.params.prefilter {
+            self.run_nlm_spatial_pilot(next_slot as u32, strength_scale)
+                .expect("nlm spatial pilot dispatch failed");
+        }
         self.build_pyramids_for_slot(next_slot as u32);
         self.run_noise_estimate_for_slot(next_slot as u32);
 
@@ -589,7 +680,11 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         let eff = sigma_eff(&smoothed[..channels], self.params.channels);
         self.h2_inv_norm = self.params.h2_inv_norm_with(Some(eff));
-        self.noise_offset = self.params.noise_offset_with(Some(&smoothed[..channels]));
+        self.input_noise_offset = self.params.noise_offset_with(Some(&smoothed[..channels]));
+        self.noise_offset = match self.params.prefilter {
+            PrefilterMode::NlmSpatial { .. } => 0.0,
+            _ => self.input_noise_offset,
+        };
 
         Ok(())
     }

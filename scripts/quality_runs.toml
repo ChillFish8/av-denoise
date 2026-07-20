@@ -91,3 +91,17 @@ name = "av_hq_temporal_r2"
 kind = "av-denoise"
 workers = 2
 args = ["--algorithm", "nlmeans-hq", "--temporal-radius", "2", "--channel-mode", "luma,chroma"]
+
+# Opt-in NLM spatial pilot. `--prefilter` defaults to none for both
+# algorithms, so this tracks the pilot lever at its calibrated default
+# scale (0.4) against the `av_hq_temporal_r2` no-pilot baseline above.
+[[runs]]
+name = "av_hq_temporal_r2_pilot"
+kind = "av-denoise"
+workers = 2
+args = [
+    "--algorithm", "nlmeans-hq",
+    "--temporal-radius", "2",
+    "--channel-mode", "luma,chroma",
+    "--prefilter", "nlm",
+]

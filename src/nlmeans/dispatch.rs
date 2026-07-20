@@ -82,6 +82,19 @@ impl<R: Runtime> NlmDenoiser<R> {
         unsafe { ArrayArg::from_raw_parts(self.outputs[slot].clone(), ctx.frame_size) }
     }
 
+    /// Reference ring slot `slot`, viewed as a single frame-sized array
+    /// via a byte offset into `reference_buf`. Same byte-offset slicing
+    /// pattern as the motion pyramid's per-slot views.
+    fn reference_slot_arg(&self, ctx: &LaunchCtx, slot: u32) -> ArrayArg<R> {
+        let buf = self
+            .reference_buf
+            .as_ref()
+            .expect("reference buffer must exist for the nlm spatial pilot");
+        let byte_offset = (slot as u64) * (ctx.frame_size as u64) * (size_of::<f32>() as u64);
+        let handle = buf.clone().offset_start(byte_offset);
+        unsafe { ArrayArg::from_raw_parts(handle, ctx.frame_size) }
+    }
+
     fn weight_sum_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
         unsafe { ArrayArg::from_raw_parts(self.weight_sum.clone(), ctx.pixels) }
     }
@@ -770,7 +783,15 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
-    fn run_finish(&self, ctx: &LaunchCtx, center_t: u32, output_slot: usize) -> Result<(), anyhow::Error> {
+    /// Shared `nlm_finish` launch, parameterized on where the result
+    /// is written. `run_finish` targets an output slot. The nlm-spatial
+    /// pilot targets a reference-ring slot instead.
+    fn run_finish_to(
+        &self,
+        ctx: &LaunchCtx,
+        center_frame: u32,
+        output: ArrayArg<R>,
+    ) -> Result<(), anyhow::Error> {
         let channels = self.params.channels.count();
         unsafe {
             nlm_finish::launch_unchecked::<R>(
@@ -779,11 +800,11 @@ impl<R: Runtime> NlmDenoiser<R> {
                 ctx.cube_dim,
                 self.params.channels.storage_count() as usize,
                 self.input_arg(ctx),
-                self.output_arg(ctx, output_slot),
+                output,
                 ArrayArg::from_raw_parts(self.accum.clone(), ctx.frame_size),
                 self.weight_sum_arg(ctx),
                 self.max_weight_arg(ctx),
-                self.phys_frame(center_t as i32),
+                center_frame,
                 self.params.self_weight,
                 self.width,
                 self.height,
@@ -794,17 +815,25 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
-    pub(super) fn run_denoise_kernels(&mut self, output_slot: usize) -> Result<(), anyhow::Error> {
+    fn run_finish(&self, ctx: &LaunchCtx, center_t: u32, output_slot: usize) -> Result<(), anyhow::Error> {
+        self.run_finish_to(
+            ctx,
+            self.phys_frame(center_t as i32),
+            self.output_arg(ctx, output_slot),
+        )
+    }
+
+    /// Derive the launch shapes shared by every per-frame dispatch
+    /// (main pass and the nlm-spatial pilot alike).
+    fn launch_ctx(&self) -> LaunchCtx {
         let width = self.width;
         let height = self.height;
         let stored_ch = self.params.channels.storage_count();
-        let temporal_radius = self.params.temporal_radius;
-        let search_radius = self.params.search_radius as i32;
         let total_frames = self.params.total_frames();
         let pixels = (width * height) as usize;
         let frame_size = pixels * stored_ch as usize;
 
-        let ctx = LaunchCtx {
+        LaunchCtx {
             total_frame_data: frame_size * total_frames as usize,
             frame_size,
             pixels,
@@ -812,7 +841,56 @@ impl<R: Runtime> NlmDenoiser<R> {
             cube_dim: CubeDim::new_2d(BLOCK_X, BLOCK_Y),
             thin_cube_count: CubeCount::new_2d(width.div_ceil(BLOCK_X_THIN), height.div_ceil(BLOCK_Y_THIN)),
             thin_cube_dim: CubeDim::new_2d(BLOCK_X_THIN, BLOCK_Y_THIN),
-        };
+        }
+    }
+
+    /// Denoise one freshly pushed frame with the windowed spatial
+    /// kernel and store the result in its reference ring slot. Shares
+    /// the frame-sized accumulators with the main pass. The in-order
+    /// GPU queue makes that safe because the main dispatch zeroes them
+    /// again before use.
+    pub(super) fn run_nlm_spatial_pilot(&self, slot: u32, strength_scale: f32) -> Result<(), anyhow::Error> {
+        let ctx = self.launch_ctx();
+        self.zero_accumulators(&ctx)?;
+
+        let channels = self.params.channels.count();
+        let pilot_h2 = self.h2_inv_norm / (strength_scale * strength_scale);
+
+        // Always read the noisy input here, never `reference_arg`: for
+        // `NlmSpatial`, `reference_buf` is the pilot's own output, not
+        // an input to it, even though `use_reference` is true so the
+        // *main* pass's kernels pick the `_ref` variants.
+        unsafe {
+            nlm_fused_single_window::launch_unchecked::<R>(
+                &self.client,
+                ctx.cube_count.clone(),
+                ctx.cube_dim,
+                self.params.channels.storage_count() as usize,
+                self.input_arg(&ctx),
+                self.accum_arg(&ctx),
+                self.weight_sum_arg(&ctx),
+                self.max_weight_arg(&ctx),
+                slot,
+                pilot_h2,
+                self.input_noise_offset,
+                self.width,
+                self.height,
+                channels,
+                self.params.patch_radius,
+                self.params.search_radius,
+                BLOCK_X,
+                BLOCK_Y,
+            );
+        }
+
+        self.run_finish_to(&ctx, slot, self.reference_slot_arg(&ctx, slot))
+    }
+
+    pub(super) fn run_denoise_kernels(&mut self, output_slot: usize) -> Result<(), anyhow::Error> {
+        let temporal_radius = self.params.temporal_radius;
+        let search_radius = self.params.search_radius as i32;
+
+        let ctx = self.launch_ctx();
 
         let center_t = temporal_radius;
 
