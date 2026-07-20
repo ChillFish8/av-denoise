@@ -25,7 +25,8 @@ pub struct DenoiserOptions {
     #[builder(default = DenoisingMode::Spacial)]
     pub mode: DenoisingMode,
     /// Algorithm variant. `Nlmeans` is the fast default. `NlmeansHq`
-    /// adapts weighting to a known noise level.
+    /// adapts weighting to the noise level, measured automatically per
+    /// frame unless `HqParams::sigma_override` pins a fixed value.
     #[builder(default = Algorithm::Nlmeans)]
     pub algorithm: Algorithm,
     /// Reference clip source for NLM weight computation.

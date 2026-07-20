@@ -2,6 +2,7 @@ mod helpers;
 
 mod hq;
 mod motion_compensation;
+mod noise;
 mod pending_outlives;
 mod prefilter;
 mod separable;

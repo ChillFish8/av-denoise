@@ -68,24 +68,37 @@ impl ChannelMode {
 pub struct HqParams {
     /// Interpret `strength` as a multiplier on the noise level. The
     /// effective FFmpeg-style strength becomes
-    /// `strength × sigma × 255`. Default: true.
+    /// `strength × sigma_eff × 255`. Default: true.
     pub auto_strength: bool,
     /// Subtract the expected noise floor from patch distances before
     /// weighting, so matches are not penalised for the noise they
     /// carry. Default: true.
     pub noise_floor: bool,
-    /// Noise standard deviation in `[0, 1]` units. Required. The CLI
-    /// takes this in 8-bit units via `--hq-sigma` and divides by 255.
-    pub sigma: f32,
+    /// Fixed noise standard deviation in `[0, 1]` units, overriding
+    /// automatic per-frame estimation. `None` (the default) measures
+    /// noise from each pushed frame and smooths it over time. `Some`
+    /// applies one fixed value to every frame instead. The CLI takes
+    /// this in 8-bit units via `--hq-sigma` and divides by 255.
+    pub sigma_override: Option<f32>,
 }
 
-impl HqParams {
-    /// HQ defaults for a known noise level in `[0, 1]` units.
-    pub fn with_sigma(sigma: f32) -> Self {
+impl Default for HqParams {
+    fn default() -> Self {
         Self {
             auto_strength: true,
             noise_floor: true,
-            sigma,
+            sigma_override: None,
+        }
+    }
+}
+
+impl HqParams {
+    /// HQ defaults with a fixed noise level in `[0, 1]` units, skipping
+    /// automatic estimation.
+    pub fn with_sigma(sigma: f32) -> Self {
+        Self {
+            sigma_override: Some(sigma),
+            ..Self::default()
         }
     }
 }
@@ -137,31 +150,61 @@ impl Default for NlmParams {
 impl NlmParams {
     /// FFmpeg-style strength actually used for weighting. With HQ
     /// auto strength the user value multiplies the noise level, so
-    /// one setting tracks differently noisy sources.
-    pub(super) fn effective_strength(&self) -> f32 {
-        match self.hq {
-            Some(hq) if hq.auto_strength => self.strength * hq.sigma * 255.0,
+    /// one setting tracks differently noisy sources. `sigma_eff` is
+    /// the scale-weighted RMS of the per-channel noise estimates.
+    pub(super) fn effective_strength_with(&self, sigma_eff: Option<f32>) -> f32 {
+        match (self.hq, sigma_eff) {
+            (Some(hq), Some(sigma)) if hq.auto_strength => self.strength * sigma * 255.0,
             _ => self.strength,
         }
     }
 
-    pub fn h2_inv_norm(&self) -> f32 {
+    /// `h2_inv_norm` for an explicit noise estimate, bypassing whatever
+    /// `self.hq.sigma_override` holds. Used by the denoiser to refresh
+    /// the derived value from a freshly measured sigma each submit.
+    pub fn h2_inv_norm_with(&self, sigma_eff: Option<f32>) -> f32 {
         let s_size = (2 * self.patch_radius + 1) * (2 * self.patch_radius + 1);
-        let s = self.effective_strength();
+        let s = self.effective_strength_with(sigma_eff);
         NLM_NORM / (NLM_LEGACY * s * s * s_size as f32)
     }
 
+    /// `h2_inv_norm` using `self.hq.sigma_override` as the noise
+    /// estimate (or none, for the fast path). Auto-estimating HQ
+    /// denoisers recompute with [`Self::h2_inv_norm_with`] each submit
+    /// instead of calling this.
+    pub fn h2_inv_norm(&self) -> f32 {
+        self.h2_inv_norm_with(self.hq.and_then(|hq| hq.sigma_override))
+    }
+
     /// Expected box-summed patch distance between two noisy copies of
-    /// identical content. Each summed term contributes
-    /// `channel_scale × channels × 2σ²`, which is `6σ²` in every
-    /// channel mode, over `(2s+1)²` taps. Zero without HQ noise floor.
-    pub(super) fn noise_offset(&self) -> f32 {
-        match self.hq {
-            Some(hq) if hq.noise_floor => {
+    /// identical content, for an explicit set of per-channel sigma
+    /// estimates. Each active channel contributes `2 × channel_scale ×
+    /// σ_c²`, summed over `(2s+1)²` taps. Zero without HQ noise floor
+    /// or without an estimate to apply.
+    pub(super) fn noise_offset_with(&self, sigmas: Option<&[f32]>) -> f32 {
+        match (self.hq, sigmas) {
+            (Some(hq), Some(sigmas)) if hq.noise_floor => {
                 let s_size = (2 * self.patch_radius + 1) * (2 * self.patch_radius + 1);
-                6.0 * hq.sigma * hq.sigma * s_size as f32
+                let scale = channel_scale(self.channels);
+                let count = self.channels.count() as usize;
+                let sum_sq: f32 = sigmas.iter().take(count).map(|&s| s * s).sum();
+                2.0 * scale * sum_sq * s_size as f32
             },
             _ => 0.0,
+        }
+    }
+
+    /// `noise_offset` using `self.hq.sigma_override` applied to every
+    /// active channel (or none, for the fast path). Auto-estimating HQ
+    /// denoisers recompute with [`Self::noise_offset_with`] each submit
+    /// instead of calling this.
+    pub(super) fn noise_offset(&self) -> f32 {
+        match self.hq.and_then(|hq| hq.sigma_override) {
+            Some(sigma) => {
+                let sigmas = [sigma; 3];
+                self.noise_offset_with(Some(&sigmas[..self.channels.count() as usize]))
+            },
+            None => 0.0,
         }
     }
 
@@ -214,19 +257,42 @@ impl NlmParams {
             anyhow::bail!("self_weight must be finite and >= 0 (got {})", self.self_weight,);
         }
 
-        if let Some(hq) = self.hq {
-            if !hq.sigma.is_finite() || hq.sigma <= 0.0 || hq.sigma > 1.0 {
-                anyhow::bail!(
-                    "hq sigma must be finite and in (0, 1] in normalised units (got {})",
-                    hq.sigma,
-                );
-            }
+        if let Some(hq) = self.hq
+            && let Some(sigma) = hq.sigma_override
+            && (!sigma.is_finite() || sigma <= 0.0 || sigma > 1.0)
+        {
+            anyhow::bail!(
+                "hq sigma_override must be finite and in (0, 1] in normalised units (got {})",
+                sigma,
+            );
         }
 
         self.motion_compensation.validate()?;
 
         Ok(())
     }
+}
+
+/// Per-channel distance scale for a channel mode (luma×3, chroma×1.5,
+/// full YUV×1), matching the GPU-side `channel_scale` used inside the
+/// weighting kernels. Uniform across every channel in a given mode.
+pub(super) fn channel_scale(channels: ChannelMode) -> f32 {
+    match channels {
+        ChannelMode::Luma => 3.0,
+        ChannelMode::Chroma => 1.5,
+        ChannelMode::Yuv => 1.0,
+    }
+}
+
+/// Scale-weighted RMS of the per-channel noise estimates over a
+/// channel mode's active channel count. Because `channel_scale` is
+/// uniform within a mode, the weighting cancels and this reduces to a
+/// plain RMS. Extra elements in `sigmas` beyond the mode's channel
+/// count are ignored.
+pub(super) fn sigma_eff(sigmas: &[f32], channels: ChannelMode) -> f32 {
+    let count = channels.count() as usize;
+    let sum_sq: f32 = sigmas.iter().take(count).map(|&s| s * s).sum();
+    (sum_sq / count as f32).sqrt()
 }
 
 #[cfg(test)]
@@ -244,7 +310,7 @@ mod tests {
 
         let expected = 6.0 * sigma * sigma * 81.0;
         assert!(
-            (params.noise_offset() - expected).abs() < 1e-9,
+            (params.noise_offset() - expected).abs() < 1e-6,
             "expected {expected}, got {}",
             params.noise_offset()
         );
@@ -256,7 +322,7 @@ mod tests {
             hq: Some(HqParams {
                 auto_strength: true,
                 noise_floor: false,
-                sigma: 4.0 / 255.0,
+                sigma_override: Some(4.0 / 255.0),
             }),
             ..NlmParams::default()
         };
@@ -315,5 +381,50 @@ mod tests {
             ..NlmParams::default()
         };
         assert!(params.validate().is_err());
+    }
+
+    #[test]
+    fn noise_offset_with_handles_distinct_per_channel_sigmas() {
+        let sigma_u = 4.0 / 255.0;
+        let sigma_v = 10.0 / 255.0;
+        let params = NlmParams {
+            patch_radius: 4,
+            channels: ChannelMode::Chroma,
+            hq: Some(HqParams {
+                auto_strength: true,
+                noise_floor: true,
+                sigma_override: None,
+            }),
+            ..NlmParams::default()
+        };
+
+        let s_size = (2 * params.patch_radius + 1) * (2 * params.patch_radius + 1);
+        // Chroma scale is 1.5, applied per channel; each channel keeps
+        // its own sigma instead of a shared value.
+        let expected = 2.0 * 1.5 * (sigma_u * sigma_u + sigma_v * sigma_v) * s_size as f32;
+
+        let got = params.noise_offset_with(Some(&[sigma_u, sigma_v]));
+        assert!((got - expected).abs() < 1e-9, "expected {expected}, got {got}");
+    }
+
+    #[test]
+    fn sigma_eff_is_rms_over_active_channels() {
+        let sigmas = [3.0 / 255.0, 4.0 / 255.0];
+        let got = sigma_eff(&sigmas, ChannelMode::Chroma);
+        let expected = ((sigmas[0] * sigmas[0] + sigmas[1] * sigmas[1]) / 2.0).sqrt();
+        assert!((got - expected).abs() < 1e-9, "expected {expected}, got {got}");
+    }
+
+    #[test]
+    fn sigma_eff_ignores_channels_past_the_mode_count() {
+        // Luma only looks at the first element even when given extra
+        // (chroma) samples.
+        let sigmas = [6.0 / 255.0, 100.0 / 255.0, 200.0 / 255.0];
+        let got = sigma_eff(&sigmas, ChannelMode::Luma);
+        assert!(
+            (got - sigmas[0]).abs() < 1e-9,
+            "expected {}, got {got}",
+            sigmas[0]
+        );
     }
 }

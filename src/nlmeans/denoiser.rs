@@ -5,7 +5,8 @@ use cubecl::server::Handle;
 
 use super::kernels::gpu_copy;
 use super::motion::{self, MotionCtx, build_pyramid_for_slot};
-use super::params::{NlmParams, SEPARABLE_THRESHOLD};
+use super::noise::{NoiseCtx, NoiseEstimator, partials_len, run_noise_estimate, sigma_from_abs_sum};
+use super::params::{NlmParams, SEPARABLE_THRESHOLD, sigma_eff};
 use super::pending::Pending;
 use super::prefilter::{PrefilterCtx, PrefilterMode, run_prefilter};
 use super::{BLOCK_1D, MAX_GRID_1D};
@@ -68,6 +69,20 @@ pub struct NlmDenoiser<R: Runtime> {
     pub(super) noise_offset: f32,
     pub use_separable: bool,
     pub(super) use_reference: bool,
+
+    /// Stage-1 noise-estimate scratch, `[partials_len(width, height)]`
+    /// f32s. `Some` only when the noise level is measured
+    /// automatically (`hq` is set and `sigma_override` is `None`).
+    /// Reused across pushes. Each `run_noise_estimate` call fully
+    /// overwrites it before the reduce kernel reads it back.
+    pub(super) noise_partials: Option<Handle>,
+    /// Per-ring-slot Immerkær totals, `[total_frames * 4]` f32s. Same
+    /// gating as `noise_partials`.
+    pub(super) noise_results: Option<Handle>,
+    /// Smooths the raw per-frame noise estimate into a stable
+    /// per-channel sigma. Inert (never updated) when noise is not
+    /// measured automatically.
+    pub(super) noise_estimator: NoiseEstimator,
 
     /// Cached motion-compensation context. `Some` when MC is active.
     pub(super) mc_ctx: Option<MotionCtx>,
@@ -136,6 +151,22 @@ impl<R: Runtime> NlmDenoiser<R> {
         let use_reference = params.prefilter.needs_reference_buf();
         let output_scratch_cap = pixels * params.channels.count() as usize;
 
+        // Auto noise estimation only runs when HQ is on and the caller
+        // hasn't pinned a fixed sigma. The fast path and the
+        // sigma-override path allocate neither buffer nor ever launch
+        // the estimate kernels.
+        let auto_noise = params.hq.is_some_and(|hq| hq.sigma_override.is_none());
+        let (noise_partials, noise_results) = if auto_noise {
+            let n_partials = partials_len(width, height);
+            let n_results = (total_frames * 4) as usize;
+            (
+                Some(client.empty(n_partials * size_of::<f32>())),
+                Some(client.empty(n_results * size_of::<f32>())),
+            )
+        } else {
+            (None, None)
+        };
+
         // Motion-compensation buffers. Only allocated when MC is
         // active *and* the temporal window is non-trivial (k=0 path
         // would never touch them).
@@ -199,6 +230,9 @@ impl<R: Runtime> NlmDenoiser<R> {
             noise_offset,
             use_separable,
             use_reference,
+            noise_partials,
+            noise_results,
+            noise_estimator: NoiseEstimator::default(),
             mc_ctx,
             compensated_input_buf,
             compensated_reference_buf,
@@ -227,6 +261,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
 
         self.build_pyramids_for_slot(slot as u32);
+        self.run_noise_estimate_for_slot(slot as u32);
 
         self.advance_ring();
         self.prime_leading_edge_if_first();
@@ -249,6 +284,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             .clone();
         self.upload_into_slot(&reference_buf, reference, slot);
         self.build_pyramids_for_slot(slot as u32);
+        self.run_noise_estimate_for_slot(slot as u32);
         self.advance_ring();
         self.prime_leading_edge_if_first();
     }
@@ -354,6 +390,33 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
     }
 
+    /// Queue the Immerkær noise estimate for `slot` on the input ring.
+    /// No-op unless auto noise estimation is active. The read of these
+    /// results happens later in [`Self::denoise_submit`], once `slot`
+    /// reaches the centre of the temporal window.
+    fn run_noise_estimate_for_slot(&self, slot: u32) {
+        let (Some(partials_buf), Some(results_buf)) =
+            (self.noise_partials.as_ref(), self.noise_results.as_ref())
+        else {
+            return;
+        };
+
+        let ctx = NoiseCtx {
+            width: self.width,
+            height: self.height,
+            channels: self.params.channels.count(),
+            stored_ch: self.params.channels.storage_count(),
+            frame_count: self.params.total_frames(),
+            frame: slot,
+            slot,
+            input_buf: &self.input_buf,
+            partials_buf,
+            results_buf,
+        };
+
+        run_noise_estimate::<R>(&self.client, &ctx).expect("noise estimate dispatch failed");
+    }
+
     fn advance_ring(&mut self) {
         let total_frames = self.params.total_frames() as usize;
         self.ring_head += 1;
@@ -432,10 +495,12 @@ impl<R: Runtime> NlmDenoiser<R> {
             self.copy_frame_into_slot(&reference_buf, &ref_src, next_slot);
         }
 
-        // Keep the motion-estimation pyramid for the duplicated slot
-        // in lockstep so a subsequent denoise sees a valid pyramid for
-        // every ring slot it visits.
+        // Keep the motion-estimation pyramid and noise estimate for the
+        // duplicated slot in lockstep so a subsequent denoise sees valid
+        // state for every ring slot it visits, not whatever an older
+        // frame left behind at this physical position.
         self.build_pyramids_for_slot(next_slot as u32);
+        self.run_noise_estimate_for_slot(next_slot as u32);
 
         self.ring_head += 1;
     }
@@ -457,6 +522,10 @@ impl<R: Runtime> NlmDenoiser<R> {
         let total_frames = self.params.total_frames() as usize;
         if self.frames_loaded < total_frames {
             return Ok(None);
+        }
+
+        if self.noise_results.is_some() {
+            self.update_noise_estimate()?;
         }
 
         let slot = self.next_output_slot;
@@ -483,6 +552,46 @@ impl<R: Runtime> NlmDenoiser<R> {
             pixels,
             _marker: PhantomData,
         }))
+    }
+
+    /// Refresh `h2_inv_norm` / `noise_offset` from the centre slot's
+    /// noise estimate. The centre slot's estimate was queued
+    /// `temporal_radius` pushes earlier (see
+    /// [`Self::run_noise_estimate_for_slot`]), so this blocking read
+    /// lands on work the GPU already finished instead of stalling the
+    /// pipeline behind a fresh dispatch.
+    fn update_noise_estimate(&mut self) -> Result<(), anyhow::Error> {
+        let results_buf = self
+            .noise_results
+            .as_ref()
+            .expect("noise_results allocated when auto noise is active")
+            .clone();
+
+        let bytes = self
+            .client
+            .read_one(results_buf)
+            .map_err(|e| anyhow::anyhow!("noise-estimate results readback failed: {e}"))?;
+        let data = f32::from_bytes(&bytes);
+
+        let center_t = self.params.temporal_radius;
+        let center_slot = self.phys_frame(center_t as i32) as usize;
+        let channels = self.params.channels.count() as usize;
+        let base = center_slot * 4;
+
+        let mut raw = [0.0f32; 3];
+        for (c, slot) in raw.iter_mut().enumerate().take(channels) {
+            *slot = sigma_from_abs_sum(data[base + c], self.width, self.height);
+        }
+
+        let updated = self.noise_estimator.update(&raw[..channels]);
+        let mut smoothed = [0.0f32; 3];
+        smoothed[..channels].copy_from_slice(updated);
+
+        let eff = sigma_eff(&smoothed[..channels], self.params.channels);
+        self.h2_inv_norm = self.params.h2_inv_norm_with(Some(eff));
+        self.noise_offset = self.params.noise_offset_with(Some(&smoothed[..channels]));
+
+        Ok(())
     }
 
     /// Synchronous convenience wrapper: submits + immediately waits.
@@ -567,6 +676,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.frames_loaded = 0;
         self.next_output_slot = 0;
         self.real_pushes = 0;
+        self.noise_estimator.reset();
     }
 
     /// Physical slot of logical frame 0 (oldest frame in the window).

@@ -72,8 +72,8 @@ struct Args {
     /// Denoising algorithm to run.
     ///
     /// `nlmeans` is the fast default. `nlmeans-hq` is a quality-focused
-    /// variant that calibrates its weighting to a known noise level
-    /// (see `--hq-sigma`).
+    /// variant that calibrates its weighting to the noise level,
+    /// measured automatically per frame (see `--hq-sigma` to override).
     #[arg(short, long, default_value = "nlmeans", global = true)]
     algorithm: Algorithm,
 
@@ -210,10 +210,14 @@ struct Args {
     #[arg(long)]
     self_weight: Option<f32>,
 
-    /// Noise level for `nlmeans-hq`, in 8-bit units.
+    /// Fixed noise level for `nlmeans-hq`, in 8-bit units.
+    ///
+    /// `nlmeans-hq` measures the noise level automatically per frame
+    /// by default. Setting this overrides that measurement with a
+    /// fixed value applied to every frame instead.
     ///
     /// Typical grain sits around `3` to `6`. Heavy noise is `10` and
-    /// up. Required when `--algorithm nlmeans-hq` is selected.
+    /// up.
     #[arg(long, global = true)]
     hq_sigma: Option<f32>,
 
@@ -413,16 +417,11 @@ fn main() -> anyhow::Result<()> {
             }
             av_denoise::Algorithm::Nlmeans
         },
-        Algorithm::NlmeansHq => {
-            let Some(sigma) = args.hq_sigma else {
-                anyhow::bail!("--algorithm nlmeans-hq requires --hq-sigma");
-            };
-            av_denoise::Algorithm::NlmeansHq(av_denoise::HqParams {
-                auto_strength: !args.hq_no_auto_strength,
-                noise_floor: !args.hq_no_noise_floor,
-                sigma: sigma / 255.0,
-            })
-        },
+        Algorithm::NlmeansHq => av_denoise::Algorithm::NlmeansHq(av_denoise::HqParams {
+            auto_strength: !args.hq_no_auto_strength,
+            noise_floor: !args.hq_no_noise_floor,
+            sigma_override: args.hq_sigma.map(|s| s / 255.0),
+        }),
     };
 
     let nlm_tuning = if args.search_radius.is_some()

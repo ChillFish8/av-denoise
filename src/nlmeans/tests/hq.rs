@@ -35,7 +35,7 @@ fn hq_disabled_features_match_fast_mode() {
         hq: Some(HqParams {
             auto_strength: false,
             noise_floor: false,
-            sigma: 8.0 / 255.0,
+            sigma_override: Some(8.0 / 255.0),
         }),
         ..base_params()
     };
@@ -79,7 +79,7 @@ fn hq_noise_floor_changes_output() {
         hq: Some(HqParams {
             auto_strength: false,
             noise_floor: true,
-            sigma: 40.0 / 255.0,
+            sigma_override: Some(40.0 / 255.0),
         }),
         ..base_params()
     };
@@ -169,4 +169,170 @@ fn hq_temporal_smoke() {
         .unwrap();
 
     assert_eq!(emitted, frames.len(), "expected one output per pushed frame");
+}
+
+/// `sigma_override: None` measures the noise level from the pushed
+/// frame instead of requiring a caller-supplied value, and the
+/// measured sigma must still drive real denoising.
+///
+/// Uses per-pixel Gaussian noise rather than a solid noisy block. The
+/// Immerkær estimator responds to genuine high-frequency variation. A
+/// single flat block only disturbs its boundary ring, so it reads back
+/// close to the noise floor and barely denoises anything.
+#[test]
+fn hq_auto_sigma_denoises() {
+    let client = make_client();
+    let w = 32;
+    let h = 32;
+    let frame = make_noisy_gaussian_frame(w, h, 1, 0.5, &[8.0 / 255.0]);
+
+    let params = NlmParams {
+        hq: Some(HqParams {
+            auto_strength: true,
+            noise_floor: true,
+            sigma_override: None,
+        }),
+        ..base_params()
+    };
+
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+    denoiser.push_frame(&frame);
+    let result = denoiser.denoise().unwrap().unwrap().to_vec();
+
+    let mut max_diff = 0.0f32;
+    for (i, (&input, &output)) in frame.iter().zip(result.iter()).enumerate() {
+        assert!(output.is_finite(), "pixel {i}: non-finite output {output}");
+        assert!(
+            (0.0..=1.0).contains(&output),
+            "pixel {i}: out-of-range output {output}"
+        );
+        max_diff = max_diff.max((input - output).abs());
+    }
+
+    assert!(
+        max_diff > 1e-3,
+        "expected the auto-estimated sigma to actually denoise the input, max diff was {max_diff}"
+    );
+}
+
+/// Mirrors `hq_temporal_smoke` but with the noise level measured
+/// automatically instead of supplied up front.
+#[test]
+fn hq_auto_sigma_temporal_smoke() {
+    let client = make_client();
+    let w = 16;
+    let h = 16;
+
+    let params = NlmParams {
+        temporal_radius: 1,
+        hq: Some(HqParams {
+            auto_strength: true,
+            noise_floor: true,
+            sigma_override: None,
+        }),
+        ..base_params()
+    };
+
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+
+    let frames: Vec<Vec<f32>> = (0..5)
+        .map(|i| make_frame_with_noisy_region(w, h, 1, 0.5, 6 + i, 8, 2, 0.8))
+        .collect();
+
+    let mut emitted = 0usize;
+    let check = |frame: &[f32]| {
+        for (i, &v) in frame.iter().enumerate() {
+            assert!(v.is_finite(), "pixel {i}: non-finite output {v}");
+            assert!((0.0..=1.0).contains(&v), "pixel {i}: out-of-range output {v}");
+        }
+    };
+
+    for frame in &frames {
+        denoiser.push_frame(frame);
+        if let Some(result) = denoiser.denoise().unwrap() {
+            check(result);
+            emitted += 1;
+        }
+    }
+
+    denoiser
+        .flush(|frame| {
+            check(frame);
+            emitted += 1;
+        })
+        .unwrap();
+
+    assert_eq!(emitted, frames.len(), "expected one output per pushed frame");
+}
+
+/// A `sigma_override` must skip automatic estimation entirely. Neither
+/// scratch buffer is allocated, and (by construction) no estimate
+/// kernel is ever launched.
+#[test]
+fn hq_override_skips_estimation() {
+    let client = make_client();
+    let w = 16;
+    let h = 16;
+
+    let params = NlmParams {
+        hq: Some(HqParams::with_sigma(8.0 / 255.0)),
+        ..base_params()
+    };
+
+    let denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+
+    assert!(
+        denoiser.noise_partials.is_none(),
+        "sigma_override must skip allocating the partials scratch buffer"
+    );
+    assert!(
+        denoiser.noise_results.is_none(),
+        "sigma_override must skip allocating the results buffer"
+    );
+}
+
+/// `reset_stream_state` (called by `flush`) must clear the noise
+/// estimator's EMA so a new stream doesn't inherit the previous
+/// stream's noise level. Verified by observable behaviour. Pushing a
+/// low-noise frame right after a reset must derive exactly the same
+/// `h2_inv_norm` / `noise_offset` as a brand-new denoiser that only
+/// ever saw that frame, instead of a value blended with the earlier
+/// high-noise estimate.
+#[test]
+fn hq_reset_clears_noise_state() {
+    let client = make_client();
+    let w = 16;
+    let h = 16;
+    let noisy = make_frame_with_noisy_region(w, h, 1, 0.5, 8, 8, 3, 0.9);
+    let low = make_uniform_frame(w, h, 1, 0.5);
+
+    let params = NlmParams {
+        hq: Some(HqParams {
+            auto_strength: true,
+            noise_floor: true,
+            sigma_override: None,
+        }),
+        ..base_params()
+    };
+
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params.clone(), w, h);
+    denoiser.push_frame(&noisy);
+    denoiser.denoise().unwrap();
+
+    denoiser.reset_stream_state();
+    denoiser.push_frame(&low);
+    denoiser.denoise().unwrap();
+
+    let mut fresh = NlmDenoiser::<R>::new(&client, params, w, h);
+    fresh.push_frame(&low);
+    fresh.denoise().unwrap();
+
+    assert_eq!(
+        denoiser.h2_inv_norm, fresh.h2_inv_norm,
+        "reset should clear the EMA so the next estimate starts fresh, not blended with stale state"
+    );
+    assert_eq!(
+        denoiser.noise_offset, fresh.noise_offset,
+        "reset should clear the EMA so the next estimate starts fresh, not blended with stale state"
+    );
 }

@@ -74,3 +74,20 @@ kind = "ffmpeg-nlmeans"
 strength = "$strength"
 patch = 7
 search = 15
+
+# ---------------------------------------------------------------------------
+# HQ mode: noise level measured automatically, strength is a multiplier
+# on it, expected-noise floor subtracted from distances.
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "av_hq_spatial"
+kind = "av-denoise"
+workers = 2
+args = ["--algorithm", "nlmeans-hq", "--temporal-radius", "0", "--channel-mode", "luma,chroma"]
+
+[[runs]]
+name = "av_hq_temporal_r2"
+kind = "av-denoise"
+workers = 2
+args = ["--algorithm", "nlmeans-hq", "--temporal-radius", "2", "--channel-mode", "luma,chroma"]

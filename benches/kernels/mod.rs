@@ -23,6 +23,7 @@ pub mod mc_block_match_coarse;
 pub mod mc_block_match_fine;
 pub mod mc_downscale;
 pub mod mc_warp;
+pub mod noise_partial;
 pub mod vertical_weight;
 pub mod vweight_pair_accumulate;
 pub mod zero;

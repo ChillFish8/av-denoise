@@ -4,6 +4,7 @@ pub mod prefilter;
 
 mod denoiser;
 mod dispatch;
+mod noise;
 mod params;
 mod pending;
 

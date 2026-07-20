@@ -4,6 +4,7 @@ mod fused;
 mod helpers;
 mod memory;
 pub mod motion;
+mod noise;
 mod separable;
 
 pub use accumulate::{nlm_accumulate, nlm_finish};
@@ -19,6 +20,7 @@ pub use fused::{
     nlm_fused_single_window_ref,
 };
 pub use memory::{gpu_copy, gpu_zero_buffers};
+pub use noise::{nlm_noise_partial, nlm_noise_reduce};
 pub use separable::{
     nlm_distance,
     nlm_distance_pair,
