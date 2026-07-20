@@ -14,12 +14,15 @@ use ingest::{BinaryChannelIntent, CliOptions};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// Denoising algorithm. Only `nlmeans` is currently implemented.
+/// Denoising algorithm. `nlmeans` is the fast default. `nlmeans-hq`
+/// trades some speed for noise-calibrated quality.
 #[derive(Debug, Copy, Clone, Default, EnumString)]
 #[strum(ascii_case_insensitive)]
 pub enum Algorithm {
     #[default]
     Nlmeans,
+    #[strum(serialize = "nlmeans-hq")]
+    NlmeansHq,
 }
 
 /// Which planes to clean up.
@@ -68,7 +71,9 @@ fn resolve_channel_intent(modes: &[CliChannelMode]) -> Result<BinaryChannelInten
 struct Args {
     /// Denoising algorithm to run.
     ///
-    /// Only `nlmeans` is currently available.
+    /// `nlmeans` is the fast default. `nlmeans-hq` is a quality-focused
+    /// variant that calibrates its weighting to a known noise level
+    /// (see `--hq-sigma`).
     #[arg(short, long, default_value = "nlmeans", global = true)]
     algorithm: Algorithm,
 
@@ -204,6 +209,23 @@ struct Args {
     /// similar patch was found nearby).
     #[arg(long)]
     self_weight: Option<f32>,
+
+    /// Noise level for `nlmeans-hq`, in 8-bit units.
+    ///
+    /// Typical grain sits around `3` to `6`. Heavy noise is `10` and
+    /// up. Required when `--algorithm nlmeans-hq` is selected.
+    #[arg(long, global = true)]
+    hq_sigma: Option<f32>,
+
+    /// Treat `--strength` as an absolute value instead of a
+    /// multiplier on `--hq-sigma`.
+    #[arg(long, global = true)]
+    hq_no_auto_strength: bool,
+
+    /// Keep the expected-noise floor inside patch distances instead
+    /// of subtracting it.
+    #[arg(long, global = true)]
+    hq_no_noise_floor: bool,
 
     /// Turn on motion compensation for temporal denoising.
     ///
@@ -384,6 +406,25 @@ fn main() -> anyhow::Result<()> {
         MotionCompensationMode::None
     };
 
+    let algorithm = match args.algorithm {
+        Algorithm::Nlmeans => {
+            if args.hq_sigma.is_some() || args.hq_no_auto_strength || args.hq_no_noise_floor {
+                tracing::warn!("--hq-* options are ignored unless --algorithm nlmeans-hq is selected");
+            }
+            av_denoise::Algorithm::Nlmeans
+        },
+        Algorithm::NlmeansHq => {
+            let Some(sigma) = args.hq_sigma else {
+                anyhow::bail!("--algorithm nlmeans-hq requires --hq-sigma");
+            };
+            av_denoise::Algorithm::NlmeansHq(av_denoise::HqParams {
+                auto_strength: !args.hq_no_auto_strength,
+                noise_floor: !args.hq_no_noise_floor,
+                sigma: sigma / 255.0,
+            })
+        },
+    };
+
     let nlm_tuning = if args.search_radius.is_some()
         || args.patch_radius.is_some()
         || args.strength.is_some()
@@ -406,6 +447,7 @@ fn main() -> anyhow::Result<()> {
         mode,
         prefilter,
         motion_compensation,
+        algorithm,
         nlm_tuning,
         luma_strength: args.luma_strength,
         chroma_strength: args.chroma_strength,

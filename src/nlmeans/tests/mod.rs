@@ -1,5 +1,6 @@
 mod helpers;
 
+mod hq;
 mod motion_compensation;
 mod pending_outlives;
 mod prefilter;

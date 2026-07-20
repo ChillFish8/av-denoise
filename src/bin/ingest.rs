@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use av_denoise::accelerate::Accelerator;
 use av_denoise::{
+    Algorithm,
     ChannelMode,
     Denoiser,
     DenoiserError,
@@ -105,6 +106,8 @@ pub struct CliOptions {
     pub mode: DenoisingMode,
     pub prefilter: PrefilterMode,
     pub motion_compensation: MotionCompensationMode,
+    /// Which denoising algorithm variant to run.
+    pub algorithm: Algorithm,
     pub nlm_tuning: Option<NlmTuning>,
     /// Per-plane strength override for the luma denoiser. Takes
     /// precedence over `nlm_tuning.strength` when set.
@@ -120,7 +123,8 @@ impl CliOptions {
             .channel_mode(channels)
             .mode(self.mode)
             .prefilter(self.prefilter)
-            .motion_compensation(self.motion_compensation);
+            .motion_compensation(self.motion_compensation)
+            .algorithm(self.algorithm);
 
         let strength_override = match channels {
             ChannelMode::Luma => self.luma_strength,

@@ -102,6 +102,7 @@ fn temporal_params(channels: ChannelMode, mc: MotionCompensationMode) -> NlmPara
         channels,
         prefilter: PrefilterMode::None,
         motion_compensation: mc,
+        hq: None,
     }
 }
 

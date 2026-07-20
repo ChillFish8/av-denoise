@@ -31,6 +31,7 @@ impl<R: Runtime> Benchmark for VWeightBench<R> {
                 ArrayArg::from_raw_parts(args.input.clone(), pixels),
                 ArrayArg::from_raw_parts(args.output.clone(), pixels),
                 h2_inv_norm(),
+                0.0f32,
                 W,
                 H,
                 PATCH_RADIUS,

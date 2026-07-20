@@ -11,6 +11,6 @@ pub mod nlmeans;
 pub mod sniff;
 
 pub use cache::{COMPILATION_CACHE_ENV, CacheAlreadyInitialisedError, apply_compilation_cache_env};
-pub use denoiser::{Denoiser, DenoiserError, DenoiserOptions, DenoisingMode, NlmTuning};
+pub use denoiser::{Algorithm, Denoiser, DenoiserError, DenoiserOptions, DenoisingMode, NlmTuning};
 pub use device::Device;
-pub use nlmeans::{ChannelMode, MotionCompensationMode, PrefilterMode};
+pub use nlmeans::{ChannelMode, HqParams, MotionCompensationMode, PrefilterMode};

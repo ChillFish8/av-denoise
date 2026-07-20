@@ -20,6 +20,7 @@ fn external_reference_equals_input_matches_baseline() {
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::None,
             motion_compensation: MotionCompensationMode::None,
+            hq: None,
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
         d.push_frame(&frame);
@@ -36,6 +37,7 @@ fn external_reference_equals_input_matches_baseline() {
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::External,
             motion_compensation: MotionCompensationMode::None,
+            hq: None,
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
         d.push_frame_with_reference(&frame, &frame);
@@ -66,6 +68,7 @@ fn external_reference_separable_matches_baseline() {
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::None,
             motion_compensation: MotionCompensationMode::None,
+            hq: None,
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
         d.push_frame(&frame);
@@ -82,6 +85,7 @@ fn external_reference_separable_matches_baseline() {
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::External,
             motion_compensation: MotionCompensationMode::None,
+            hq: None,
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
         d.push_frame_with_reference(&frame, &frame);
@@ -116,6 +120,7 @@ fn external_reference_temporal_matches_baseline() {
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::None,
             motion_compensation: MotionCompensationMode::None,
+            hq: None,
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
         for f in &frames {
@@ -134,6 +139,7 @@ fn external_reference_temporal_matches_baseline() {
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::External,
             motion_compensation: MotionCompensationMode::None,
+            hq: None,
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
         for f in &frames {
@@ -169,6 +175,7 @@ fn bilateral_uniform_image_passthrough() {
             sigma_r: 0.1,
         },
         motion_compensation: MotionCompensationMode::None,
+        hq: None,
     };
 
     let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
@@ -202,6 +209,7 @@ fn bilateral_noisy_image_finite() {
             sigma_r: 0.05,
         },
         motion_compensation: MotionCompensationMode::None,
+        hq: None,
     };
 
     let mut d = NlmDenoiser::<R>::new(&client, params, w, h);

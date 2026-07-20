@@ -167,6 +167,7 @@ fn bench_dist_2d_weight<R: Runtime>(
             1i32,
             0i32,
             h2_inv_norm,
+            0.0f32,
             W,
             H,
             ch,

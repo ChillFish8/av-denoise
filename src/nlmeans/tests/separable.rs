@@ -13,6 +13,7 @@ fn separable_uniform_passthrough() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        hq: None,
     };
 
     let w = 32;
@@ -45,6 +46,7 @@ fn separable_yuv_passthrough() {
         channels: ChannelMode::Yuv,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        hq: None,
     };
 
     let w = 32;
@@ -78,6 +80,7 @@ fn separable_symmetry_preserved() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        hq: None,
     };
 
     let w = 16;

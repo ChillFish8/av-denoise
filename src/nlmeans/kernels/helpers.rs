@@ -69,6 +69,16 @@ pub(super) fn channel_scale(#[comptime] channels: u32) -> f32 {
     scale
 }
 
+/// Welsch weight for a box-summed patch distance. `noise_offset` is
+/// the expected distance between two noisy copies of identical
+/// content. Subtracting it stops matches being penalised for the
+/// noise they carry. An offset of `0.0` reproduces the plain weight
+/// exactly because the box sum is never negative.
+#[cube]
+pub(super) fn welsch_weight(sum: f32, h2_inv_norm: f32, noise_offset: f32) -> f32 {
+    f32::exp(-f32::max(sum - noise_offset, 0.0) * h2_inv_norm)
+}
+
 /// Add the `+q` and `−q` contributions at thread `(global_x, global_y)`.
 /// The forward neighbour lives at `(global + q, frame_fwd)` weighted by
 /// `weight_fwd`; the backward neighbour at `(global − q, frame_bwd)`

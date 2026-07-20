@@ -1,7 +1,14 @@
 use cubecl::prelude::*;
 use cubecl::terminate;
 
-use super::helpers::{accumulate_pair, channel_scale, line_sum_sq, read_clamped_line, read_line};
+use super::helpers::{
+    accumulate_pair,
+    channel_scale,
+    line_sum_sq,
+    read_clamped_line,
+    read_line,
+    welsch_weight,
+};
 
 /// Distance + 2D box filter + Welsch weight, written to `output[gx, gy]`.
 ///
@@ -21,6 +28,7 @@ pub fn nlm_dist_2d_weight<N: Size>(
     q_x: i32,
     q_y: i32,
     h2_inv_norm: f32,
+    noise_offset: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
@@ -110,7 +118,7 @@ pub fn nlm_dist_2d_weight<N: Size>(
         }
     }
 
-    output[(global_y * width + global_x) as usize] = f32::exp(-patch_sum * h2_inv_norm);
+    output[(global_y * width + global_x) as usize] = welsch_weight(patch_sum, h2_inv_norm, noise_offset);
 }
 
 /// Fully fused distance + 2D box filter + Welsch weight + accumulate.
@@ -145,6 +153,7 @@ pub fn nlm_fused_pair_accumulate<N: Size>(
     bwd_shift_x: i32,
     bwd_shift_y: i32,
     h2_inv_norm: f32,
+    noise_offset: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
@@ -284,8 +293,8 @@ pub fn nlm_fused_pair_accumulate<N: Size>(
         }
     }
 
-    let weight_fwd = f32::exp(-sum_fwd * h2_inv_norm);
-    let weight_bwd = f32::exp(-sum_bwd * h2_inv_norm);
+    let weight_fwd = welsch_weight(sum_fwd, h2_inv_norm, noise_offset);
+    let weight_bwd = welsch_weight(sum_bwd, h2_inv_norm, noise_offset);
 
     accumulate_pair(
         input, accum, weight_sum, max_weight, global_x, global_y, q_x, q_y, frame_fwd, frame_bwd, weight_fwd,
@@ -307,6 +316,7 @@ pub fn nlm_dist_2d_weight_ref<N: Size>(
     q_x: i32,
     q_y: i32,
     h2_inv_norm: f32,
+    noise_offset: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
@@ -396,7 +406,7 @@ pub fn nlm_dist_2d_weight_ref<N: Size>(
         }
     }
 
-    output[(global_y * width + global_x) as usize] = f32::exp(-patch_sum * h2_inv_norm);
+    output[(global_y * width + global_x) as usize] = welsch_weight(patch_sum, h2_inv_norm, noise_offset);
 }
 
 /// `_ref` variant of `nlm_fused_pair_accumulate`. Patch distances are
@@ -418,6 +428,7 @@ pub fn nlm_fused_pair_accumulate_ref<N: Size>(
     bwd_shift_x: i32,
     bwd_shift_y: i32,
     h2_inv_norm: f32,
+    noise_offset: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
@@ -559,8 +570,8 @@ pub fn nlm_fused_pair_accumulate_ref<N: Size>(
         }
     }
 
-    let weight_fwd = f32::exp(-sum_fwd * h2_inv_norm);
-    let weight_bwd = f32::exp(-sum_bwd * h2_inv_norm);
+    let weight_fwd = welsch_weight(sum_fwd, h2_inv_norm, noise_offset);
+    let weight_bwd = welsch_weight(sum_bwd, h2_inv_norm, noise_offset);
 
     accumulate_pair(
         input, accum, weight_sum, max_weight, global_x, global_y, q_x, q_y, frame_fwd, frame_bwd, weight_fwd,
@@ -595,6 +606,7 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
     frame_fwd: u32,
     frame_bwd: u32,
     h2_inv_norm: f32,
+    noise_offset: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
@@ -711,8 +723,8 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
                     }
                 }
 
-                let weight_fwd = f32::exp(-sum_fwd * h2_inv_norm);
-                let weight_bwd = f32::exp(-sum_bwd * h2_inv_norm);
+                let weight_fwd = welsch_weight(sum_fwd, h2_inv_norm, noise_offset);
+                let weight_bwd = welsch_weight(sum_bwd, h2_inv_norm, noise_offset);
 
                 let fwd_pixel = read_clamped_line(
                     input,
@@ -774,6 +786,7 @@ pub fn nlm_fused_single_window<N: Size>(
     max_weight: &mut Array<f32>,
     frame_t: u32,
     h2_inv_norm: f32,
+    noise_offset: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
@@ -869,7 +882,7 @@ pub fn nlm_fused_single_window<N: Size>(
                             patch_sum += smem_dist[smem_idx];
                         }
                     }
-                    let weight = f32::exp(-patch_sum * h2_inv_norm);
+                    let weight = welsch_weight(patch_sum, h2_inv_norm, noise_offset);
 
                     let neighbor_pixel = read_clamped_line(
                         input,
@@ -916,6 +929,7 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
     frame_fwd: u32,
     frame_bwd: u32,
     h2_inv_norm: f32,
+    noise_offset: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
@@ -1027,8 +1041,8 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
                     }
                 }
 
-                let weight_fwd = f32::exp(-sum_fwd * h2_inv_norm);
-                let weight_bwd = f32::exp(-sum_bwd * h2_inv_norm);
+                let weight_fwd = welsch_weight(sum_fwd, h2_inv_norm, noise_offset);
+                let weight_bwd = welsch_weight(sum_bwd, h2_inv_norm, noise_offset);
 
                 // Pixel accumulation reads from `input`, not `reference`.
                 let fwd_pixel = read_clamped_line(
@@ -1080,6 +1094,7 @@ pub fn nlm_fused_single_window_ref<N: Size>(
     max_weight: &mut Array<f32>,
     frame_t: u32,
     h2_inv_norm: f32,
+    noise_offset: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
@@ -1173,7 +1188,7 @@ pub fn nlm_fused_single_window_ref<N: Size>(
                             patch_sum += smem_dist[smem_idx];
                         }
                     }
-                    let weight = f32::exp(-patch_sum * h2_inv_norm);
+                    let weight = welsch_weight(patch_sum, h2_inv_norm, noise_offset);
 
                     let neighbor_pixel = read_clamped_line(
                         input,

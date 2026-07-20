@@ -13,6 +13,7 @@ fn uniform_image_passthrough() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        hq: None,
     };
 
     let w = 16;
@@ -41,6 +42,7 @@ fn uniform_yuv_passthrough() {
         channels: ChannelMode::Yuv,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        hq: None,
     };
 
     let w = 16;
@@ -70,6 +72,7 @@ fn uniform_chroma_passthrough() {
         channels: ChannelMode::Chroma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        hq: None,
     };
 
     let w = 16;
@@ -99,6 +102,7 @@ fn noisy_region_suppressed() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        hq: None,
     };
 
     let w = 32;
@@ -132,6 +136,7 @@ fn high_strength_smooths_heavily() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        hq: None,
     };
 
     let w = 16;
@@ -169,6 +174,7 @@ fn low_strength_preserves_original() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        hq: None,
     };
 
     let w = 16;
@@ -201,6 +207,7 @@ fn self_weight_zero_uniform() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        hq: None,
     };
 
     let w = 16;
@@ -249,6 +256,7 @@ fn symmetry_preserved() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        hq: None,
     };
 
     let w = 16;
@@ -293,6 +301,7 @@ fn clamp_to_edge_no_darkening() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        hq: None,
     };
 
     let w = 8;

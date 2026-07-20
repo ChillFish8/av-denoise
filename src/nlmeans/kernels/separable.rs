@@ -8,6 +8,7 @@ use super::helpers::{
     line_sum_sq,
     read_clamped_line,
     read_line,
+    welsch_weight,
 };
 
 /// Per-pixel squared distance for the `+q` / `−q` pair. Writes both
@@ -169,12 +170,13 @@ pub fn nlm_horizontal_sum(
 }
 
 /// Vertical 1D box filter (height = 2·patch_radius + 1) over the
-/// hsum buffer, followed by the Welsch weight `exp(−sum · h2_inv_norm)`.
+/// hsum buffer, followed by the Welsch weight from `welsch_weight`.
 #[cube(launch_unchecked)]
 pub fn nlm_vertical_weight(
     input: &Array<f32>,
     output: &mut Array<f32>,
     h2_inv_norm: f32,
+    noise_offset: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] patch_radius: u32,
@@ -215,7 +217,7 @@ pub fn nlm_vertical_weight(
     for offset_y in 0..patch_size {
         sum += smem[((local_y + offset_y) * block_x + local_x) as usize];
     }
-    output[(global_y * width + global_x) as usize] = f32::exp(-sum * h2_inv_norm);
+    output[(global_y * width + global_x) as usize] = welsch_weight(sum, h2_inv_norm, noise_offset);
 }
 
 /// Paired horizontal 1D box filter. The forward and backward hsum
@@ -296,6 +298,7 @@ pub fn nlm_vweight_pair_accumulate<N: Size>(
     q_x: i32,
     q_y: i32,
     h2_inv_norm: f32,
+    noise_offset: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] patch_radius: u32,
@@ -352,8 +355,8 @@ pub fn nlm_vweight_pair_accumulate<N: Size>(
         sum_bwd += smem_bwd[smem_idx];
     }
 
-    let weight_fwd = f32::exp(-sum_fwd * h2_inv_norm);
-    let weight_bwd = f32::exp(-sum_bwd * h2_inv_norm);
+    let weight_fwd = welsch_weight(sum_fwd, h2_inv_norm, noise_offset);
+    let weight_bwd = welsch_weight(sum_bwd, h2_inv_norm, noise_offset);
 
     accumulate_pair(
         input, accum, weight_sum, max_weight, global_x, global_y, q_x, q_y, frame_fwd, frame_bwd, weight_fwd,

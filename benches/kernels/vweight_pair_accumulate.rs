@@ -83,6 +83,7 @@ impl<R: Runtime> Benchmark for VWeightPairAccBench<R> {
                 Q_X,
                 Q_Y,
                 h2_inv_norm(),
+                0.0f32,
                 W,
                 H,
                 PATCH_RADIUS,

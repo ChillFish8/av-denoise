@@ -53,6 +53,7 @@ fn motion_compensation_uniform_passthrough() {
             search_radius: 2,
             pyramid_levels: 2,
         },
+        hq: None,
     };
 
     let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
@@ -97,6 +98,7 @@ fn motion_compensation_with_bilateral_finite() {
             search_radius: 2,
             pyramid_levels: 2,
         },
+        hq: None,
     };
 
     let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
@@ -152,6 +154,7 @@ fn motion_compensation_translating_square_preserves_centre() {
             search_radius: 2,
             pyramid_levels: 2,
         },
+        hq: None,
     };
 
     let mut d = NlmDenoiser::<R>::new(&client, params, w, h);

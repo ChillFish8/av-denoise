@@ -1,0 +1,18 @@
+# cubecl spawns a per-device worker thread (named `DS{U,D}-…`) the
+# first time a client touches that device. Rust's thread-spawn logic
+# locks in the default stack size (from `RUST_MIN_STACK`, or 2 MiB if
+# unset) the first time any thread is spawned in the process. `cargo
+# test` and `cargo bench` spawn other threads before any test or bench
+# body gets a chance to set the variable itself, so raising it
+# in-process (as `src/bin/main.rs` and `benches/denoise.rs` do for the
+# standalone binaries) is too late. It has to be set before the
+# process starts.
+#
+# The windowed and temporal NLM kernels' `#[unroll]`ed bodies overflow
+# the 2 MiB default during codegen. This is confirmed pre-existing on
+# this machine, reproduced at commit e5ad3e0 (before any of this
+# phase's kernel changes) with a cold CubeCL compilation cache and a
+# fresh `CARGO_TARGET_DIR`. Bump the stack size here for every `cargo`
+# invocation in this workspace.
+[env]
+RUST_MIN_STACK = "16777216"

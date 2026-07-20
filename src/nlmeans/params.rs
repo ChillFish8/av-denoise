@@ -61,6 +61,35 @@ impl ChannelMode {
     }
 }
 
+/// Parameters for the quality-focused `nlmeans-hq` variant. The noise
+/// level drives both the effective strength and the distance floor,
+/// so weighting adapts to how noisy the source actually is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HqParams {
+    /// Interpret `strength` as a multiplier on the noise level. The
+    /// effective FFmpeg-style strength becomes
+    /// `strength × sigma × 255`. Default: true.
+    pub auto_strength: bool,
+    /// Subtract the expected noise floor from patch distances before
+    /// weighting, so matches are not penalised for the noise they
+    /// carry. Default: true.
+    pub noise_floor: bool,
+    /// Noise standard deviation in `[0, 1]` units. Required. The CLI
+    /// takes this in 8-bit units via `--hq-sigma` and divides by 255.
+    pub sigma: f32,
+}
+
+impl HqParams {
+    /// HQ defaults for a known noise level in `[0, 1]` units.
+    pub fn with_sigma(sigma: f32) -> Self {
+        Self {
+            auto_strength: true,
+            noise_floor: true,
+            sigma,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NlmParams {
     /// Temporal radius. 0 = spatial only, d > 0 uses 2*d+1 frames.
@@ -85,6 +114,8 @@ pub struct NlmParams {
     /// into spatial alignment with the centre before NLM weighting.
     /// Only takes effect when `temporal_radius > 0`.
     pub motion_compensation: MotionCompensationMode,
+    /// Quality-mode parameters. `None` runs the fast path unchanged.
+    pub hq: Option<HqParams>,
 }
 
 impl Default for NlmParams {
@@ -98,14 +129,40 @@ impl Default for NlmParams {
             channels: ChannelMode::Yuv,
             prefilter: PrefilterMode::None,
             motion_compensation: MotionCompensationMode::None,
+            hq: None,
         }
     }
 }
 
 impl NlmParams {
+    /// FFmpeg-style strength actually used for weighting. With HQ
+    /// auto strength the user value multiplies the noise level, so
+    /// one setting tracks differently noisy sources.
+    pub(super) fn effective_strength(&self) -> f32 {
+        match self.hq {
+            Some(hq) if hq.auto_strength => self.strength * hq.sigma * 255.0,
+            _ => self.strength,
+        }
+    }
+
     pub fn h2_inv_norm(&self) -> f32 {
         let s_size = (2 * self.patch_radius + 1) * (2 * self.patch_radius + 1);
-        NLM_NORM / (NLM_LEGACY * self.strength * self.strength * s_size as f32)
+        let s = self.effective_strength();
+        NLM_NORM / (NLM_LEGACY * s * s * s_size as f32)
+    }
+
+    /// Expected box-summed patch distance between two noisy copies of
+    /// identical content. Each summed term contributes
+    /// `channel_scale × channels × 2σ²`, which is `6σ²` in every
+    /// channel mode, over `(2s+1)²` taps. Zero without HQ noise floor.
+    pub(super) fn noise_offset(&self) -> f32 {
+        match self.hq {
+            Some(hq) if hq.noise_floor => {
+                let s_size = (2 * self.patch_radius + 1) * (2 * self.patch_radius + 1);
+                6.0 * hq.sigma * hq.sigma * s_size as f32
+            },
+            _ => 0.0,
+        }
     }
 
     pub(super) fn total_frames(&self) -> u32 {
@@ -157,8 +214,106 @@ impl NlmParams {
             anyhow::bail!("self_weight must be finite and >= 0 (got {})", self.self_weight,);
         }
 
+        if let Some(hq) = self.hq {
+            if !hq.sigma.is_finite() || hq.sigma <= 0.0 || hq.sigma > 1.0 {
+                anyhow::bail!(
+                    "hq sigma must be finite and in (0, 1] in normalised units (got {})",
+                    hq.sigma,
+                );
+            }
+        }
+
         self.motion_compensation.validate()?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn noise_offset_scales_with_sigma_and_patch_size() {
+        let sigma = 4.0 / 255.0;
+        let params = NlmParams {
+            patch_radius: 4,
+            hq: Some(HqParams::with_sigma(sigma)),
+            ..NlmParams::default()
+        };
+
+        let expected = 6.0 * sigma * sigma * 81.0;
+        assert!(
+            (params.noise_offset() - expected).abs() < 1e-9,
+            "expected {expected}, got {}",
+            params.noise_offset()
+        );
+    }
+
+    #[test]
+    fn noise_offset_zero_without_noise_floor() {
+        let params = NlmParams {
+            hq: Some(HqParams {
+                auto_strength: true,
+                noise_floor: false,
+                sigma: 4.0 / 255.0,
+            }),
+            ..NlmParams::default()
+        };
+
+        assert_eq!(params.noise_offset(), 0.0);
+    }
+
+    #[test]
+    fn noise_offset_zero_without_hq() {
+        let params = NlmParams::default();
+        assert_eq!(params.noise_offset(), 0.0);
+    }
+
+    #[test]
+    fn h2_inv_norm_with_auto_strength_matches_hand_computed() {
+        let sigma = 8.0 / 255.0;
+        let params = NlmParams {
+            strength: 1.0,
+            hq: Some(HqParams::with_sigma(sigma)),
+            ..NlmParams::default()
+        };
+
+        let s_size = (2 * params.patch_radius + 1) * (2 * params.patch_radius + 1);
+        let effective_strength = 1.0 * sigma * 255.0;
+        let expected = NLM_NORM / (NLM_LEGACY * effective_strength * effective_strength * s_size as f32);
+
+        assert!(
+            (params.h2_inv_norm() - expected).abs() < 1e-6,
+            "expected {expected}, got {}",
+            params.h2_inv_norm()
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_hq_sigma() {
+        let params = NlmParams {
+            hq: Some(HqParams::with_sigma(0.0)),
+            ..NlmParams::default()
+        };
+        assert!(params.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_hq_sigma_above_one() {
+        let params = NlmParams {
+            hq: Some(HqParams::with_sigma(1.5)),
+            ..NlmParams::default()
+        };
+        assert!(params.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_nan_hq_sigma() {
+        let params = NlmParams {
+            hq: Some(HqParams::with_sigma(f32::NAN)),
+            ..NlmParams::default()
+        };
+        assert!(params.validate().is_err());
     }
 }

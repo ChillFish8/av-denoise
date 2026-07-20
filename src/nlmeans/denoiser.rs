@@ -65,6 +65,7 @@ pub struct NlmDenoiser<R: Runtime> {
     pub(super) output_scratch: Vec<f32>,
 
     pub(super) h2_inv_norm: f32,
+    pub(super) noise_offset: f32,
     pub use_separable: bool,
     pub(super) use_reference: bool,
 
@@ -130,6 +131,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let outputs = [client.empty(frame_bytes), client.empty(frame_bytes)];
 
         let h2_inv_norm = params.h2_inv_norm();
+        let noise_offset = params.noise_offset();
         let use_separable = params.patch_radius > SEPARABLE_THRESHOLD;
         let use_reference = params.prefilter.needs_reference_buf();
         let output_scratch_cap = pixels * params.channels.count() as usize;
@@ -194,6 +196,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             next_output_slot: 0,
             output_scratch: Vec::with_capacity(output_scratch_cap),
             h2_inv_norm,
+            noise_offset,
             use_separable,
             use_reference,
             mc_ctx,

@@ -46,6 +46,7 @@ fn temporal_denoise_uniform() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        hq: None,
     };
 
     let w = 8;
@@ -80,6 +81,7 @@ fn temporal_with_noisy_center_frame() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        hq: None,
     };
 
     let w = 16;
@@ -114,6 +116,7 @@ fn temporal_asymmetric_frames_correct_weights() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        hq: None,
     };
 
     let w = 16;

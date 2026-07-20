@@ -58,6 +58,7 @@ impl<R: Runtime> Benchmark for DistWeightBench<R> {
                 Q_X,
                 Q_Y,
                 h2_inv_norm(),
+                0.0f32,
                 W,
                 H,
                 self.ch,

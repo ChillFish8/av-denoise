@@ -4,7 +4,15 @@ use cubecl::Runtime;
 
 use crate::accelerate::Accelerator;
 use crate::device::Device;
-use crate::nlmeans::{ChannelMode, MotionCompensationMode, NlmDenoiser, NlmParams, Pending, PrefilterMode};
+use crate::nlmeans::{
+    ChannelMode,
+    HqParams,
+    MotionCompensationMode,
+    NlmDenoiser,
+    NlmParams,
+    Pending,
+    PrefilterMode,
+};
 use crate::sniff::sniff_best_accelerator;
 
 /// User-facing denoiser configuration. Build with `DenoiserOptions::builder()`.
@@ -16,6 +24,10 @@ pub struct DenoiserOptions {
     /// Spatial-only or temporal denoising.
     #[builder(default = DenoisingMode::Spacial)]
     pub mode: DenoisingMode,
+    /// Algorithm variant. `Nlmeans` is the fast default. `NlmeansHq`
+    /// adapts weighting to a known noise level.
+    #[builder(default = Algorithm::Nlmeans)]
+    pub algorithm: Algorithm,
     /// Reference clip source for NLM weight computation.
     #[builder(default = PrefilterMode::None)]
     pub prefilter: PrefilterMode,
@@ -28,6 +40,15 @@ pub struct DenoiserOptions {
     /// Override NLM tuning (search/patch radius, strength, self-weight).
     /// `None` uses the defaults baked into [`NlmParams`].
     pub nlm: Option<NlmTuning>,
+}
+
+/// Which denoising algorithm variant to run.
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum Algorithm {
+    /// The fast NLMeans path.
+    Nlmeans,
+    /// Quality-focused NLMeans with noise-calibrated weighting.
+    NlmeansHq(HqParams),
 }
 
 /// Standard spatial or temporal-aware denoising.
@@ -58,6 +79,10 @@ impl DenoiserOptions {
             temporal_radius: match self.mode {
                 DenoisingMode::Spacial => 0,
                 DenoisingMode::Temporal { radius } => radius,
+            },
+            hq: match self.algorithm {
+                Algorithm::Nlmeans => None,
+                Algorithm::NlmeansHq(hq) => Some(hq),
             },
             ..NlmParams::default()
         };

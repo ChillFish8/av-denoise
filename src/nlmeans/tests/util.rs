@@ -39,6 +39,7 @@ fn extreme_params_produce_finite_output() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        hq: None,
     };
 
     let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
