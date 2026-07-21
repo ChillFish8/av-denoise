@@ -1,5 +1,6 @@
 mod helpers;
 
+mod confidence;
 mod hq;
 mod motion_compensation;
 mod noise;

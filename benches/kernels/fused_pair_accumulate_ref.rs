@@ -27,6 +27,7 @@ pub struct FusedPairRefInput {
     accum: Handle,
     weight_sum: Handle,
     max_weight: Handle,
+    confidence_dummy: Handle,
     frame_len: usize,
 }
 
@@ -49,12 +50,14 @@ impl<R: Runtime> Benchmark for FusedPairRefBench<R> {
         let accum = self.client.empty(pixels * stored * size_of::<f32>());
         let weight_sum = self.client.empty(pixels * size_of::<f32>());
         let max_weight = self.client.empty(pixels * size_of::<f32>());
+        let confidence_dummy = self.client.empty(size_of::<f32>());
         FusedPairRefInput {
             input,
             reference,
             accum,
             weight_sum,
             max_weight,
+            confidence_dummy,
             frame_len: frame.len(),
         }
     }
@@ -73,6 +76,9 @@ impl<R: Runtime> Benchmark for FusedPairRefBench<R> {
                 ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored),
                 ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels),
                 ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
+                ArrayArg::from_raw_parts(args.confidence_dummy.clone(), 1),
+                ArrayArg::from_raw_parts(args.confidence_dummy.clone(), 1),
+                false,
                 0u32,
                 0u32,
                 0u32,
@@ -88,6 +94,9 @@ impl<R: Runtime> Benchmark for FusedPairRefBench<R> {
                 PATCH_RADIUS,
                 BLOCK_X,
                 BLOCK_Y,
+                1u32,
+                1u32,
+                1u32,
             );
         }
         Ok(())

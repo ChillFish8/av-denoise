@@ -17,6 +17,7 @@ mod kernels;
 
 use kernels::mc_block_match_coarse::BlockMatchCoarseBench;
 use kernels::mc_block_match_fine::BlockMatchFineBench;
+use kernels::mc_confidence::McConfidenceBench;
 use kernels::mc_downscale::DownscaleBench;
 use kernels::mc_warp::WarpBench;
 use kernels::{CHANNELS, print_header, run};
@@ -197,6 +198,9 @@ fn run_kernels<R: Runtime>(backend: &str, client: &ComputeClient<R>) {
         client: client.clone(),
     });
     run(BlockMatchFineBench {
+        client: client.clone(),
+    });
+    run(McConfidenceBench {
         client: client.clone(),
     });
     for &(ch, ch_name) in CHANNELS {

@@ -1,4 +1,8 @@
+use cubecl::prelude::*;
+
 use super::helpers::*;
+use crate::nlmeans::kernels::motion::nlm_mc_block_match_fine;
+use crate::nlmeans::motion::{DEFAULT_BLKSIZE, DEFAULT_SEARCH_RADIUS};
 use crate::nlmeans::*;
 
 /// Build a frame with a constant background and a bright square at
@@ -24,6 +28,209 @@ fn frame_with_square(
         }
     }
     frame
+}
+
+/// Launches `nlm_mc_block_match_fine` directly over a single block
+/// covering the whole `blksize × blksize` buffer (one cube, `blocks_x
+/// = blocks_y = 1`, `use_seed = 0`), returning the winning MV and
+/// confidence score. Exercises the kernel's SAD reduction and argmin
+/// directly, without `run_analyse`'s pyramid/geometry plumbing.
+#[allow(clippy::too_many_arguments)]
+fn run_fine_block_match_single_block(
+    blksize: u32,
+    search_radius: u32,
+    centre: &[f32],
+    neighbour: &[f32],
+    sad_noise_floor: f32,
+    thsad: f32,
+) -> (i32, i32, f32) {
+    let client = make_client();
+    let level_len = (blksize * blksize) as usize;
+    assert_eq!(centre.len(), level_len);
+    assert_eq!(neighbour.len(), level_len);
+
+    let centre_buf = client.create_from_slice(f32::as_bytes(centre));
+    let neighbour_buf = client.create_from_slice(f32::as_bytes(neighbour));
+    let mv_field = client.empty(2 * size_of::<i32>());
+    let confidence = client.empty(size_of::<f32>());
+
+    let grid = CubeCount::new_2d(1, 1);
+    let dim = CubeDim::new_2d(8, 8);
+
+    unsafe {
+        nlm_mc_block_match_fine::launch_unchecked::<R>(
+            &client,
+            grid,
+            dim,
+            ArrayArg::from_raw_parts(centre_buf, level_len),
+            ArrayArg::from_raw_parts(neighbour_buf, level_len),
+            ArrayArg::from_raw_parts(mv_field.clone(), 2),
+            ArrayArg::from_raw_parts(confidence.clone(), 1),
+            true,
+            sad_noise_floor,
+            thsad,
+            blksize,
+            blksize,
+            blksize,
+            blksize,
+            search_radius,
+            0u32,
+            1,
+            1,
+        );
+    }
+
+    let mv_bytes = client.read_one(mv_field).expect("mv readback failed");
+    let mv = i32::from_bytes(&mv_bytes);
+    let conf_bytes = client.read_one(confidence).expect("confidence readback failed");
+    let confidence = f32::from_bytes(&conf_bytes)[0];
+    (mv[0], mv[1], confidence)
+}
+
+/// Recovers the fine kernel's raw `best_sad` from its confidence
+/// output by inverting the confidence formula (`confidence = (thsad² -
+/// S²) / (thsad² + S²)` inverts to `S = thsad · sqrt((1 - confidence) /
+/// (1 + confidence))`). Requires `sad_noise_floor = 0.0` (so `excess ==
+/// best_sad`) and a `thsad` comfortably larger than the expected SAD,
+/// so the confidence value stays well clear of both the `≈ 1` corner
+/// (catastrophic cancellation computing `1 - confidence`) and the `= 0`
+/// clamp corner (all precision lost).
+fn recover_sad_from_confidence(confidence: f32, thsad: f32) -> f32 {
+    thsad * ((1.0 - confidence) / (1.0 + confidence)).sqrt()
+}
+
+/// Exact-SAD test. A uniform `|Δ| = d` mismatch between centre and
+/// neighbour across the whole block, at zero MV (`search_radius = 0`,
+/// a single candidate), must give `best_sad = blksize² · d` exactly
+/// (within a tight f32 tolerance). This is the ground truth the
+/// block-match kernel's SAD reduction is supposed to compute.
+///
+/// Before the candidate-parallel reduction fix, every thread in the
+/// cube accumulated its pixel share into the *same* shared-memory
+/// candidate slot with a plain `+=` and no atomics, so most
+/// contributions were lost to the race. This test failed by roughly
+/// two orders of magnitude on that code (see the report for the
+/// measured before/after values).
+#[test]
+fn block_match_fine_exact_sad_uniform_mismatch() {
+    let blksize = 16u32;
+    let d = 0.1f32;
+    let centre = vec![0.25f32; (blksize * blksize) as usize];
+    let neighbour = vec![0.25f32 + d; (blksize * blksize) as usize];
+
+    let expected_sad = (blksize * blksize) as f32 * d;
+    // Comfortably above the expected SAD so the confidence readout
+    // avoids both precision corners (see `recover_sad_from_confidence`).
+    let thsad = 3.0 * expected_sad;
+
+    let (_, _, confidence) = run_fine_block_match_single_block(blksize, 0, &centre, &neighbour, 0.0, thsad);
+    let measured_sad = recover_sad_from_confidence(confidence, thsad);
+
+    assert!(
+        (measured_sad - expected_sad).abs() < expected_sad * 0.01,
+        "uniform |Δ|={d} over a {blksize}x{blksize} block should give best_sad \
+         = {expected_sad} (blksize²·d), measured {measured_sad} (confidence={confidence})",
+    );
+}
+
+/// Clamps `val - delta` into `[0, limit)`. Used to build a "clean
+/// shift" neighbour frame below whose out-of-range edge pixels use the
+/// same clamp-to-edge convention the kernel itself applies (`clamp_i32`
+/// in `block_match.rs`), even though the test's block/search geometry
+/// never actually reaches those edges.
+fn shift_clamped(val: i32, delta: i32, limit: i32) -> i32 {
+    (val - delta).clamp(0, limit - 1)
+}
+
+/// Argmin correctness. The neighbour frame is a clean `(+2, +1)` pixel
+/// shift of the centre frame's content (`neighbour(x, y) =
+/// centre(x - 2, y - 1)`), so the true best match sits exactly at
+/// `mv = (2, 1)`. Content is a deterministic pseudo-random pattern
+/// (`noisy_copy`, reused here purely as "content-rich, no ties" filler)
+/// rather than a flat value, so every other candidate in the search
+/// window gives a strictly larger SAD and the argmin is unambiguous.
+///
+/// Runs the fine kernel over a `3×3` block grid at the library's
+/// default blksize/search radius so the winning block (the centre one,
+/// away from the frame edges) sees the same clamped addressing the
+/// production dispatch path uses, but reads back only that one block's
+/// MV. Before the reduction fix this could pick a quasi-arbitrary MV
+/// because the racy SAD values didn't reflect the true per-candidate
+/// cost. Recorded as a pre-fix data point in the report.
+///
+/// Passes `write_confidence: false` with a small placeholder
+/// confidence buffer, since this test only checks the winning MV. That
+/// also exercises the gated-off confidence path this fix round added.
+#[test]
+fn block_match_fine_argmin_finds_clean_shift() {
+    let w = 64u32;
+    let h = 64u32;
+    let blksize = DEFAULT_BLKSIZE;
+    let step = blksize;
+    let search_radius = DEFAULT_SEARCH_RADIUS;
+    let blocks_x = 3u32;
+    let blocks_y = 3u32;
+
+    let centre = noisy_copy(w, 0.5, 0.2, 123);
+    let mut neighbour = vec![0.0f32; (w * h) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let sx = shift_clamped(x as i32, 2, w as i32) as u32;
+            let sy = shift_clamped(y as i32, 1, h as i32) as u32;
+            neighbour[(y * w + x) as usize] = centre[(sy * w + sx) as usize];
+        }
+    }
+
+    let client = make_client();
+    let level_len = (w * h) as usize;
+    let centre_buf = client.create_from_slice(f32::as_bytes(&centre));
+    let neighbour_buf = client.create_from_slice(f32::as_bytes(&neighbour));
+    let mv_len = (blocks_x * blocks_y * 2) as usize;
+    let mv_field = client.empty(mv_len * size_of::<i32>());
+    // `write_confidence: false` below, so this placeholder never gets
+    // indexed into regardless of its size.
+    let confidence = client.empty(size_of::<f32>());
+
+    let grid = CubeCount::new_2d(blocks_x, blocks_y);
+    let dim = CubeDim::new_2d(8, 8);
+
+    unsafe {
+        nlm_mc_block_match_fine::launch_unchecked::<R>(
+            &client,
+            grid,
+            dim,
+            ArrayArg::from_raw_parts(centre_buf, level_len),
+            ArrayArg::from_raw_parts(neighbour_buf, level_len),
+            ArrayArg::from_raw_parts(mv_field.clone(), mv_len),
+            ArrayArg::from_raw_parts(confidence, 1),
+            false,
+            0.0,
+            1.0,
+            w,
+            h,
+            blksize,
+            step,
+            search_radius,
+            0u32,
+            blocks_x,
+            blocks_y,
+        );
+    }
+
+    let bytes = client.read_one(mv_field).expect("mv readback failed");
+    let mv = i32::from_bytes(&bytes);
+    // Middle block (bx=1, by=1). Its content and search window sit
+    // `blksize` pixels away from every frame edge, well clear of the
+    // `search_radius + shift` margin, so no clamped addressing is hit.
+    let idx = ((1 * blocks_x + 1) * 2) as usize;
+    assert_eq!(
+        (mv[idx], mv[idx + 1]),
+        (2, 1),
+        "a clean (+2, +1) shift of the centre content should give exactly \
+         MV=(2, 1) at default blksize={blksize}/search_radius={search_radius}, got ({}, {})",
+        mv[idx],
+        mv[idx + 1],
+    );
 }
 
 /// Smoke test: a temporal denoiser with motion compensation enabled

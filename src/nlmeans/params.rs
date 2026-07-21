@@ -86,6 +86,15 @@ pub struct HqParams {
     /// applies one fixed value to every frame instead. The CLI takes
     /// this in 8-bit units via `--hq-sigma` and divides by 255.
     pub sigma_override: Option<f32>,
+    /// Weight temporal neighbours by how well they block-match the
+    /// centre frame, so occlusion or content change collapses their
+    /// contribution instead of blurring it in. Only takes effect when
+    /// `temporal_radius > 0`. Default: true.
+    pub temporal_confidence: bool,
+    /// Multiplier on the per-pixel mismatch threshold that decides how
+    /// much excess SAD a block tolerates before its confidence starts
+    /// dropping. Higher values tolerate larger mismatches. Default: 1.0.
+    pub thsad_scale: f32,
 }
 
 impl Default for HqParams {
@@ -94,6 +103,8 @@ impl Default for HqParams {
             auto_strength: true,
             noise_floor: true,
             sigma_override: None,
+            temporal_confidence: true,
+            thsad_scale: 1.0,
         }
     }
 }
@@ -273,6 +284,16 @@ impl NlmParams {
             );
         }
 
+        if let Some(hq) = self.hq
+            && !(hq.thsad_scale.is_finite() && hq.thsad_scale > 0.0)
+        {
+            anyhow::bail!(
+                "hq thsad_scale must be finite and > 0 (got {}); thsad_scale = 0 collapses \
+                 every block's confidence to zero regardless of match quality",
+                hq.thsad_scale,
+            );
+        }
+
         if let PrefilterMode::NlmSpatial { strength_scale } = self.prefilter {
             if !strength_scale.is_finite() || strength_scale <= 0.0 {
                 anyhow::bail!(
@@ -346,6 +367,8 @@ mod tests {
                 auto_strength: true,
                 noise_floor: false,
                 sigma_override: Some(4.0 / 255.0),
+                temporal_confidence: true,
+                thsad_scale: 1.0,
             }),
             ..NlmParams::default()
         };
@@ -407,6 +430,51 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_zero_thsad_scale() {
+        let params = NlmParams {
+            hq: Some(HqParams {
+                thsad_scale: 0.0,
+                ..HqParams::default()
+            }),
+            ..NlmParams::default()
+        };
+        assert!(params.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_negative_thsad_scale() {
+        let params = NlmParams {
+            hq: Some(HqParams {
+                thsad_scale: -1.0,
+                ..HqParams::default()
+            }),
+            ..NlmParams::default()
+        };
+        assert!(params.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_nan_thsad_scale() {
+        let params = NlmParams {
+            hq: Some(HqParams {
+                thsad_scale: f32::NAN,
+                ..HqParams::default()
+            }),
+            ..NlmParams::default()
+        };
+        assert!(params.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_default_thsad_scale() {
+        let params = NlmParams {
+            hq: Some(HqParams::default()),
+            ..NlmParams::default()
+        };
+        assert!(params.validate().is_ok());
+    }
+
+    #[test]
     fn noise_offset_with_handles_distinct_per_channel_sigmas() {
         let sigma_u = 4.0 / 255.0;
         let sigma_v = 10.0 / 255.0;
@@ -417,6 +485,8 @@ mod tests {
                 auto_strength: true,
                 noise_floor: true,
                 sigma_override: None,
+                temporal_confidence: true,
+                thsad_scale: 1.0,
             }),
             ..NlmParams::default()
         };

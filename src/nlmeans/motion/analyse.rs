@@ -13,10 +13,29 @@ pub(crate) fn mv_field_byte_offset(mc: &MotionCtx, neighbour_idx: u32) -> u64 {
     (neighbour_idx as u64) * per_neighbour * (size_of::<i32>() as u64)
 }
 
-/// Run analyse for one (centre, neighbour) pair: coarse pass on the
+/// Byte offset of the confidence slice for a given neighbour index.
+/// The confidence buffer mirrors the MV field's layout,
+/// `[neighbour][block_y][block_x]` of `f32`, but stores one scalar per
+/// block instead of the MV field's two `i32` components, and each
+/// neighbour's slice is padded up to a 32-byte boundary (see
+/// [`MotionCtx::confidence_bytes_per_neighbour`]).
+pub(crate) fn confidence_byte_offset(mc: &MotionCtx, neighbour_idx: u32) -> u64 {
+    (neighbour_idx as u64) * mc.confidence_bytes_per_neighbour()
+}
+
+/// Run analyse for one (centre, neighbour) pair. Coarse pass on the
 /// pyramid top level, fine refinement at full resolution. Writes the
 /// resulting MV field into `mv_field` at the slot reserved for this
-/// neighbour.
+/// neighbour. `sad_noise_floor` and `thsad` are the fine kernel's
+/// confidence scalars (see
+/// [`crate::nlmeans::kernels::motion::nlm_mc_block_match_fine`]).
+///
+/// When `write_confidence` is `true`, also writes a per-block
+/// confidence score into `confidence` at the matching slot. When
+/// `false`, `confidence` is never indexed, so callers that don't
+/// consume the confidence output can pass a small placeholder buffer
+/// and skip computing `sad_noise_floor`/`thsad` (`0.0` for both is
+/// fine in that case).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_analyse<R: Runtime>(
     client: &ComputeClient<R>,
@@ -29,10 +48,28 @@ pub(crate) fn run_analyse<R: Runtime>(
     neighbour_idx: u32,
     pyramid: &Handle,
     mv_field: &Handle,
+    confidence: &Handle,
+    write_confidence: bool,
+    sad_noise_floor: f32,
+    thsad: f32,
 ) -> Result<(), anyhow::Error> {
     let mv_offset = mv_field_byte_offset(mc, neighbour_idx);
     let mv_slot = mv_field.clone().offset_start(mv_offset);
     let mv_slot_len = (mc.blocks_x as usize) * (mc.blocks_y as usize) * 2;
+
+    // Only slice into `confidence` at its real per-neighbour offset
+    // when the kernel will actually write it. Otherwise `confidence`
+    // is a small placeholder buffer with no per-neighbour layout to
+    // offset into.
+    let (conf_slot, conf_slot_len) = if write_confidence {
+        let conf_offset = confidence_byte_offset(mc, neighbour_idx);
+        (
+            confidence.clone().offset_start(conf_offset),
+            (mc.blocks_x as usize) * (mc.blocks_y as usize),
+        )
+    } else {
+        (confidence.clone(), 1)
+    };
 
     // Coarse pass on the top pyramid level (if pyramid_levels > 1).
     if mc.pyramid_levels > 1 {
@@ -119,6 +156,10 @@ pub(crate) fn run_analyse<R: Runtime>(
             ArrayArg::from_raw_parts(fine_centre, level_len),
             ArrayArg::from_raw_parts(fine_neighbour, level_len),
             ArrayArg::from_raw_parts(mv_slot, mv_slot_len),
+            ArrayArg::from_raw_parts(conf_slot, conf_slot_len),
+            write_confidence,
+            sad_noise_floor,
+            thsad,
             fw,
             fh,
             mc.blksize,
@@ -162,5 +203,58 @@ mod tests {
         let m = mc(16, 8);
         let per = (m.blocks_x as u64) * (m.blocks_y as u64) * 2 * 4;
         assert_eq!(mv_field_byte_offset(&m, 3), 3 * per);
+    }
+
+    #[test]
+    fn confidence_offset_zero_for_first_neighbour() {
+        assert_eq!(confidence_byte_offset(&mc(16, 8), 0), 0);
+    }
+
+    #[test]
+    fn confidence_offset_advances_by_blocks() {
+        let m = mc(16, 8);
+        let per = (m.blocks_x as u64) * (m.blocks_y as u64) * 4;
+        assert_eq!(confidence_byte_offset(&m, 3), 3 * per);
+    }
+
+    #[test]
+    fn confidence_offset_is_one_component_not_two() {
+        // Confidence stores one f32 per block. The MV field stores two
+        // i32 components per block. Both scalars are 4 bytes, so equal
+        // block counts should give the confidence stride exactly half
+        // the MV field's, as long as the unpadded stride is already a
+        // multiple of 32 (true for this fixture's 64 blocks).
+        let m = mc(16, 8);
+        assert_eq!(mv_field_byte_offset(&m, 1), 2 * confidence_byte_offset(&m, 1));
+    }
+
+    #[test]
+    fn confidence_offset_pads_small_block_counts_to_32_bytes() {
+        // A tiny frame with this geometry has only 1 block
+        // (4x4, blksize=4, overlap=0 => step=4 => 1x1 blocks), so the
+        // unpadded stride (1 block * 4 bytes = 4 bytes) would place
+        // neighbour 1 at a non-32-aligned offset. `wgpu` rejects a
+        // bind-group offset that isn't a multiple of its
+        // `min_storage_buffer_offset_alignment`, so the stride must be
+        // padded up to 32 bytes regardless of block count.
+        let m = MotionCtx::new(
+            MotionCompensationMode::Mvtools {
+                blksize: 4,
+                overlap: 0,
+                search_radius: 1,
+                pyramid_levels: 1,
+            },
+            4,
+            4,
+        )
+        .unwrap();
+        assert_eq!(
+            m.blocks_x * m.blocks_y,
+            1,
+            "fixture should have exactly one block"
+        );
+        assert_eq!(confidence_byte_offset(&m, 0), 0);
+        assert_eq!(confidence_byte_offset(&m, 1), 32);
+        assert_eq!(confidence_byte_offset(&m, 2), 64);
     }
 }

@@ -36,6 +36,8 @@ fn hq_disabled_features_match_fast_mode() {
             auto_strength: false,
             noise_floor: false,
             sigma_override: Some(8.0 / 255.0),
+            temporal_confidence: true,
+            thsad_scale: 1.0,
         }),
         ..base_params()
     };
@@ -80,6 +82,8 @@ fn hq_noise_floor_changes_output() {
             auto_strength: false,
             noise_floor: true,
             sigma_override: Some(40.0 / 255.0),
+            temporal_confidence: true,
+            thsad_scale: 1.0,
         }),
         ..base_params()
     };
@@ -191,6 +195,8 @@ fn hq_auto_sigma_denoises() {
             auto_strength: true,
             noise_floor: true,
             sigma_override: None,
+            temporal_confidence: true,
+            thsad_scale: 1.0,
         }),
         ..base_params()
     };
@@ -229,6 +235,8 @@ fn hq_auto_sigma_temporal_smoke() {
             auto_strength: true,
             noise_floor: true,
             sigma_override: None,
+            temporal_confidence: true,
+            thsad_scale: 1.0,
         }),
         ..base_params()
     };
@@ -311,6 +319,8 @@ fn hq_reset_clears_noise_state() {
             auto_strength: true,
             noise_floor: true,
             sigma_override: None,
+            temporal_confidence: true,
+            thsad_scale: 1.0,
         }),
         ..base_params()
     };
@@ -354,6 +364,8 @@ fn hq_pilot_temporal_end_to_end() {
             auto_strength: true,
             noise_floor: true,
             sigma_override: None,
+            temporal_confidence: true,
+            thsad_scale: 1.0,
         }),
         ..base_params()
     };
@@ -411,6 +423,8 @@ fn hq_pilot_differs_from_unguided() {
             auto_strength: true,
             noise_floor: true,
             sigma_override: None,
+            temporal_confidence: true,
+            thsad_scale: 1.0,
         }),
         ..base_params()
     };
@@ -442,4 +456,184 @@ fn hq_pilot_differs_from_unguided() {
         max_diff > 1e-4,
         "expected the pilot to change HQ output somewhere, max diff was {max_diff}"
     );
+}
+
+/// HQ temporal params tuned so a uniformly mismatched neighbour sits
+/// well past `thsad` (confidence collapses to ~0) while the plain NLM
+/// patch weight for that same neighbour stays significant on its own.
+/// `strength`/`patch_radius` are chosen so the two thresholds don't
+/// coincide, otherwise confidence toggling wouldn't be separable from
+/// the intrinsic Welsch suppression.
+fn temporal_conf_params(temporal_confidence: bool) -> NlmParams {
+    NlmParams {
+        temporal_radius: 1,
+        search_radius: 1,
+        patch_radius: 1,
+        strength: 20.0,
+        self_weight: 0.0,
+        channels: ChannelMode::Luma,
+        prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
+        hq: Some(HqParams {
+            auto_strength: false,
+            noise_floor: false,
+            sigma_override: Some(2.0 / 255.0),
+            temporal_confidence,
+            thsad_scale: 1.0,
+        }),
+    }
+}
+
+/// A mismatched neighbour's contribution must be suppressed by
+/// confidence weighting while a matching neighbour's is not. The
+/// centre frame and the "next" neighbour are flat at 0.5. The "prev"
+/// neighbour is flat at 0.55 (uniformly mismatched by 0.05, well past
+/// the default `thsad` at the library's block size). Without
+/// confidence, plain NLM weighting still gives `prev` a non-negligible
+/// weight (patch distances are small at this `strength`), pulling the
+/// output away from 0.5. With confidence, `prev`'s block-level
+/// mismatch collapses its weight to ~0, so the output stays at 0.5 —
+/// the style of comparison `temporal_asymmetric_frames_correct_weights`
+/// uses for the fast path, applied here against confidence-off instead
+/// of a hand-computed target.
+#[test]
+fn hq_temporal_confidence_suppresses_mismatched_neighbour() {
+    let client = make_client();
+    let w = 16;
+    let h = 16;
+
+    let prev = make_uniform_frame(w, h, 1, 0.55);
+    let center = make_uniform_frame(w, h, 1, 0.5);
+    let next = make_uniform_frame(w, h, 1, 0.5);
+
+    let run = |temporal_confidence: bool| {
+        let mut d = NlmDenoiser::<R>::new(&client, temporal_conf_params(temporal_confidence), w, h);
+        d.push_frame(&prev);
+        d.push_frame(&center);
+        d.push_frame(&next);
+        d.denoise().unwrap().unwrap().to_vec()
+    };
+
+    let off = run(false);
+    let on = run(true);
+
+    let off_dev = (off[(8 * w + 8) as usize] - 0.5).abs();
+    let on_dev = (on[(8 * w + 8) as usize] - 0.5).abs();
+
+    assert!(
+        off_dev > 5e-3,
+        "without confidence weighting the mismatched neighbour should pull the \
+         output measurably away from 0.5, got deviation {off_dev}"
+    );
+    assert!(
+        on_dev < off_dev * 0.5,
+        "confidence weighting should suppress the mismatched neighbour's \
+         contribution: off deviation {off_dev}, on deviation {on_dev}"
+    );
+}
+
+/// HQ with `temporal_confidence` set to `false` must ignore the
+/// confidence machinery entirely, not just apply a weak version of it.
+/// `thsad_scale` only ever feeds the confidence threshold (see
+/// `HqParams::thsad_scale`), so if the disabled kernel path genuinely
+/// never reads the confidence buffer, sweeping it must leave the
+/// output bitwise unchanged. This is the observable form of "compiles
+/// to the same code as before confidence consumption existed" for a
+/// config the plan requires to match prior HQ output exactly.
+#[test]
+fn hq_temporal_confidence_disabled_ignores_thsad_scale() {
+    let client = make_client();
+    let w = 16;
+    let h = 16;
+    let frames: Vec<Vec<f32>> = (0..3)
+        .map(|i| make_frame_with_noisy_region(w, h, 1, 0.5, 6 + i, 8, 2, 0.8))
+        .collect();
+
+    let run = |thsad_scale: f32| {
+        let params = NlmParams {
+            temporal_radius: 1,
+            search_radius: 2,
+            patch_radius: 2,
+            strength: 1.2,
+            self_weight: 1.0,
+            channels: ChannelMode::Luma,
+            prefilter: PrefilterMode::None,
+            motion_compensation: MotionCompensationMode::None,
+            hq: Some(HqParams {
+                auto_strength: true,
+                noise_floor: true,
+                sigma_override: Some(6.0 / 255.0),
+                temporal_confidence: false,
+                thsad_scale,
+            }),
+        };
+        let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
+        for frame in &frames {
+            d.push_frame(frame);
+        }
+        d.denoise().unwrap().unwrap().to_vec()
+    };
+
+    let base = run(1.0);
+    let scaled = run(4.0);
+
+    assert_eq!(
+        base, scaled,
+        "temporal_confidence: false must make thsad_scale inert (confidence buffer unused)"
+    );
+}
+
+/// End-to-end smoke test covering HQ temporal denoising with motion
+/// compensation and (default-on) confidence weighting together, over a
+/// short synthetic sequence. Every produced frame must stay finite and
+/// in range, mirroring `hq_auto_sigma_temporal_smoke` with MC layered
+/// on top.
+#[test]
+fn hq_temporal_mc_confidence_smoke() {
+    let client = make_client();
+    let w = 32;
+    let h = 32;
+
+    let params = NlmParams {
+        temporal_radius: 1,
+        motion_compensation: MotionCompensationMode::Mvtools {
+            blksize: 8,
+            overlap: 4,
+            search_radius: 2,
+            pyramid_levels: 2,
+        },
+        hq: Some(HqParams::with_sigma(6.0 / 255.0)),
+        ..base_params()
+    };
+
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+
+    let frames: Vec<Vec<f32>> = (0..5)
+        .map(|i| make_frame_with_noisy_region(w, h, 1, 0.5, 6 + i, 8, 2, 0.8))
+        .collect();
+
+    let mut emitted = 0usize;
+    let check = |frame: &[f32]| {
+        for (i, &v) in frame.iter().enumerate() {
+            assert!(v.is_finite(), "pixel {i}: non-finite output {v}");
+            assert!((0.0..=1.0).contains(&v), "pixel {i}: out-of-range output {v}");
+        }
+    };
+
+    for frame in &frames {
+        denoiser.push_frame(frame);
+        if let Some(result) = denoiser.denoise().unwrap() {
+            check(result);
+            emitted += 1;
+        }
+    }
+
+    denoiser
+        .flush(|frame| {
+            check(frame);
+            emitted += 1;
+        })
+        .unwrap();
+
+    assert_eq!(emitted, frames.len(), "expected one output per pushed frame");
 }

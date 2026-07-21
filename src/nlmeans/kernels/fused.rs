@@ -139,12 +139,24 @@ pub fn nlm_dist_2d_weight<N: Size>(
 /// `bwd_shift_(x|y)` controls which neighbour the backward distance
 /// reads against: `+q` for `k == 0` (the patch comparison degenerates
 /// to a symmetric self-pair), `−q` for `k != 0` (true temporal pair).
+///
+/// When `use_confidence` is true, `weight_fwd`/`weight_bwd` are each
+/// multiplied by their block's confidence (`conf_fwd`/`conf_bwd`)
+/// before `accumulate_pair` folds them in, so a low-confidence
+/// neighbour can't inflate the self-weight term. The block index comes
+/// from `(global_x, global_y)`, the same pixel→block mapping
+/// `nlm_mc_warp` uses. When `use_confidence` is false (the common
+/// case), the block-index and multiply are skipped entirely at compile
+/// time and `conf_fwd`/`conf_bwd` are never read.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_pair_accumulate<N: Size>(
     input: &Array<Vector<f32, N>>,
     accum: &mut Array<Vector<f32, N>>,
     weight_sum: &mut Array<f32>,
     max_weight: &mut Array<f32>,
+    conf_fwd: &Array<f32>,
+    conf_bwd: &Array<f32>,
+    #[comptime] use_confidence: bool,
     frame_t: u32,
     frame_fwd: u32,
     frame_bwd: u32,
@@ -160,6 +172,9 @@ pub fn nlm_fused_pair_accumulate<N: Size>(
     #[comptime] patch_radius: u32,
     #[comptime] block_x: u32,
     #[comptime] block_y: u32,
+    #[comptime] step: u32,
+    #[comptime] blocks_x: u32,
+    #[comptime] blocks_y: u32,
 ) {
     let tile_width = comptime!(block_x + 2 * patch_radius);
     let tile_height = comptime!(block_y + 2 * patch_radius);
@@ -293,8 +308,16 @@ pub fn nlm_fused_pair_accumulate<N: Size>(
         }
     }
 
-    let weight_fwd = welsch_weight(sum_fwd, h2_inv_norm, noise_offset);
-    let weight_bwd = welsch_weight(sum_bwd, h2_inv_norm, noise_offset);
+    let mut weight_fwd = welsch_weight(sum_fwd, h2_inv_norm, noise_offset);
+    let mut weight_bwd = welsch_weight(sum_bwd, h2_inv_norm, noise_offset);
+
+    if use_confidence {
+        let bx = (global_x / step).min(blocks_x - 1);
+        let by = (global_y / step).min(blocks_y - 1);
+        let block_idx = (by * blocks_x + bx) as usize;
+        weight_fwd *= conf_fwd[block_idx];
+        weight_bwd *= conf_bwd[block_idx];
+    }
 
     accumulate_pair(
         input, accum, weight_sum, max_weight, global_x, global_y, q_x, q_y, frame_fwd, frame_bwd, weight_fwd,
@@ -412,7 +435,8 @@ pub fn nlm_dist_2d_weight_ref<N: Size>(
 /// `_ref` variant of `nlm_fused_pair_accumulate`. Patch distances are
 /// computed from `reference` (prefiltered clip); the pixel values
 /// folded into `accum` still come from `input`. Same SMEM footprint and
-/// dispatch shape as the non-`_ref` variant.
+/// dispatch shape as the non-`_ref` variant, including the confidence
+/// multiply (see that kernel's doc comment).
 #[cube(launch_unchecked)]
 pub fn nlm_fused_pair_accumulate_ref<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -420,6 +444,9 @@ pub fn nlm_fused_pair_accumulate_ref<N: Size>(
     accum: &mut Array<Vector<f32, N>>,
     weight_sum: &mut Array<f32>,
     max_weight: &mut Array<f32>,
+    conf_fwd: &Array<f32>,
+    conf_bwd: &Array<f32>,
+    #[comptime] use_confidence: bool,
     frame_t: u32,
     frame_fwd: u32,
     frame_bwd: u32,
@@ -435,6 +462,9 @@ pub fn nlm_fused_pair_accumulate_ref<N: Size>(
     #[comptime] patch_radius: u32,
     #[comptime] block_x: u32,
     #[comptime] block_y: u32,
+    #[comptime] step: u32,
+    #[comptime] blocks_x: u32,
+    #[comptime] blocks_y: u32,
 ) {
     let tile_width = comptime!(block_x + 2 * patch_radius);
     let tile_height = comptime!(block_y + 2 * patch_radius);
@@ -570,8 +600,16 @@ pub fn nlm_fused_pair_accumulate_ref<N: Size>(
         }
     }
 
-    let weight_fwd = welsch_weight(sum_fwd, h2_inv_norm, noise_offset);
-    let weight_bwd = welsch_weight(sum_bwd, h2_inv_norm, noise_offset);
+    let mut weight_fwd = welsch_weight(sum_fwd, h2_inv_norm, noise_offset);
+    let mut weight_bwd = welsch_weight(sum_bwd, h2_inv_norm, noise_offset);
+
+    if use_confidence {
+        let bx = (global_x / step).min(blocks_x - 1);
+        let by = (global_y / step).min(blocks_y - 1);
+        let block_idx = (by * blocks_x + bx) as usize;
+        weight_fwd *= conf_fwd[block_idx];
+        weight_bwd *= conf_bwd[block_idx];
+    }
 
     accumulate_pair(
         input, accum, weight_sum, max_weight, global_x, global_y, q_x, q_y, frame_fwd, frame_bwd, weight_fwd,
@@ -596,12 +634,24 @@ pub fn nlm_fused_pair_accumulate_ref<N: Size>(
 ///
 /// The two distance tiles (`smem_fwd`, `smem_bwd`) are reused across q
 /// iterations and invalidated by `sync_cube` between iterations.
+///
+/// When `use_confidence` is true, `weight_fwd`/`weight_bwd` are each
+/// multiplied by their block's confidence (`conf_fwd`/`conf_bwd`)
+/// before they're folded into the register accumulators, using the
+/// same pixel→block mapping `nlm_mc_warp` uses. The block index only
+/// depends on `(global_x, global_y)`, so it applies uniformly across
+/// every `q` in the window for this neighbour. When `use_confidence`
+/// is false, the lookup and multiply are skipped entirely at compile
+/// time and `conf_fwd`/`conf_bwd` are never read.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_pair_accumulate_window<N: Size>(
     input: &Array<Vector<f32, N>>,
     accum: &mut Array<Vector<f32, N>>,
     weight_sum: &mut Array<f32>,
     max_weight: &mut Array<f32>,
+    conf_fwd: &Array<f32>,
+    conf_bwd: &Array<f32>,
+    #[comptime] use_confidence: bool,
     frame_t: u32,
     frame_fwd: u32,
     frame_bwd: u32,
@@ -614,6 +664,9 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
     #[comptime] search_radius: u32,
     #[comptime] block_x: u32,
     #[comptime] block_y: u32,
+    #[comptime] step: u32,
+    #[comptime] blocks_x: u32,
+    #[comptime] blocks_y: u32,
 ) {
     let tile_width = comptime!(block_x + 2 * patch_radius);
     let tile_elems = comptime!((block_x + 2 * patch_radius) * (block_y + 2 * patch_radius));
@@ -723,8 +776,16 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
                     }
                 }
 
-                let weight_fwd = welsch_weight(sum_fwd, h2_inv_norm, noise_offset);
-                let weight_bwd = welsch_weight(sum_bwd, h2_inv_norm, noise_offset);
+                let mut weight_fwd = welsch_weight(sum_fwd, h2_inv_norm, noise_offset);
+                let mut weight_bwd = welsch_weight(sum_bwd, h2_inv_norm, noise_offset);
+
+                if use_confidence {
+                    let bx = (global_x / step).min(blocks_x - 1);
+                    let by = (global_y / step).min(blocks_y - 1);
+                    let block_idx = (by * blocks_x + bx) as usize;
+                    weight_fwd *= conf_fwd[block_idx];
+                    weight_bwd *= conf_bwd[block_idx];
+                }
 
                 let fwd_pixel = read_clamped_line(
                     input,
@@ -917,7 +978,8 @@ pub fn nlm_fused_single_window<N: Size>(
 /// (the cached center tile and per-q neighbours) come from `reference`;
 /// pixel accumulation reads from `input` so the original-clip values
 /// flow into `accum` while weights are derived from the cleaner
-/// reference frames.
+/// reference frames. Same confidence multiply as the non-`_ref`
+/// variant (see its doc comment).
 #[cube(launch_unchecked)]
 pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -925,6 +987,9 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
     accum: &mut Array<Vector<f32, N>>,
     weight_sum: &mut Array<f32>,
     max_weight: &mut Array<f32>,
+    conf_fwd: &Array<f32>,
+    conf_bwd: &Array<f32>,
+    #[comptime] use_confidence: bool,
     frame_t: u32,
     frame_fwd: u32,
     frame_bwd: u32,
@@ -937,6 +1002,9 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
     #[comptime] search_radius: u32,
     #[comptime] block_x: u32,
     #[comptime] block_y: u32,
+    #[comptime] step: u32,
+    #[comptime] blocks_x: u32,
+    #[comptime] blocks_y: u32,
 ) {
     let tile_width = comptime!(block_x + 2 * patch_radius);
     let tile_elems = comptime!((block_x + 2 * patch_radius) * (block_y + 2 * patch_radius));
@@ -1041,8 +1109,16 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
                     }
                 }
 
-                let weight_fwd = welsch_weight(sum_fwd, h2_inv_norm, noise_offset);
-                let weight_bwd = welsch_weight(sum_bwd, h2_inv_norm, noise_offset);
+                let mut weight_fwd = welsch_weight(sum_fwd, h2_inv_norm, noise_offset);
+                let mut weight_bwd = welsch_weight(sum_bwd, h2_inv_norm, noise_offset);
+
+                if use_confidence {
+                    let bx = (global_x / step).min(blocks_x - 1);
+                    let by = (global_y / step).min(blocks_y - 1);
+                    let block_idx = (by * blocks_x + bx) as usize;
+                    weight_fwd *= conf_fwd[block_idx];
+                    weight_bwd *= conf_bwd[block_idx];
+                }
 
                 // Pixel accumulation reads from `input`, not `reference`.
                 let fwd_pixel = read_clamped_line(

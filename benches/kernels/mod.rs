@@ -21,6 +21,7 @@ pub mod horizontal_sum;
 pub mod horizontal_sum_pair;
 pub mod mc_block_match_coarse;
 pub mod mc_block_match_fine;
+pub mod mc_confidence;
 pub mod mc_downscale;
 pub mod mc_warp;
 pub mod noise_partial;

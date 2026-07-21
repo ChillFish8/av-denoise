@@ -1,9 +1,11 @@
 mod analyse;
 mod compensate;
+mod confidence;
 mod pyramid;
 
-pub(crate) use analyse::run_analyse;
+pub(crate) use analyse::{confidence_byte_offset, run_analyse};
 pub(crate) use compensate::run_compensate;
+pub(crate) use confidence::{run_confidence_for_neighbour, sad_noise_floor, thsad};
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 pub(crate) use pyramid::{pyramid_pixels_per_frame, run_pyramid_build};
@@ -173,6 +175,42 @@ impl MotionCtx {
     /// MV-field slot count per neighbour. One i16x2 per block.
     pub fn mv_slots_per_neighbour(&self) -> usize {
         (self.blocks_x * self.blocks_y) as usize
+    }
+
+    /// Padded per-neighbour confidence-buffer stride in bytes. One
+    /// `f32` per block, rounded up to the GPU storage-buffer offset
+    /// alignment (32 bytes). Small block counts (as few as one block
+    /// for tiny frames) would otherwise produce a per-neighbour stride
+    /// under 32 bytes, and `wgpu` rejects a bind-group offset that
+    /// isn't a multiple of its `min_storage_buffer_offset_alignment`.
+    /// The MV field avoids this by using two `i32` components per
+    /// block (8 bytes), which happens to land on a 32-byte multiple
+    /// for the block counts exercised so far. The confidence buffer's
+    /// single `f32` per block doesn't have that margin, so it pads
+    /// explicitly instead of relying on coincidence.
+    pub(crate) fn confidence_bytes_per_neighbour(&self) -> u64 {
+        let blocks = (self.blocks_x as u64) * (self.blocks_y as u64);
+        (blocks * size_of::<f32>() as u64).next_multiple_of(32)
+    }
+
+    /// Block geometry for the no-MC confidence pass. Uses the
+    /// library's default block size and overlap, a single pyramid
+    /// level (no coarse pass), and zero search radius (a static
+    /// per-block SAD, no motion search). Used when confidence
+    /// weighting is active but no `Mvtools` mode was configured to
+    /// derive geometry from.
+    pub(crate) fn confidence_only(width: u32, height: u32) -> Self {
+        Self::new(
+            MotionCompensationMode::Mvtools {
+                blksize: DEFAULT_BLKSIZE,
+                overlap: DEFAULT_OVERLAP,
+                search_radius: 0,
+                pyramid_levels: 1,
+            },
+            width,
+            height,
+        )
+        .expect("Mvtools variant always yields Some")
     }
 }
 

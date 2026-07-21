@@ -249,6 +249,27 @@ struct Args {
     #[arg(long, global = true)]
     hq_no_noise_floor: bool,
 
+    /// Disable per-block temporal confidence weighting for `nlmeans-hq`.
+    ///
+    /// By default HQ block-matches each temporal neighbour against the
+    /// centre frame and lets a poor match suppress that neighbour's
+    /// contribution, instead of blurring in occluded or changed
+    /// content. Setting this applies temporal weights uniformly no
+    /// matter how well a neighbour matches.
+    ///
+    /// Only takes effect when `--temporal-radius` is above 0.
+    #[arg(long, global = true)]
+    hq_no_temporal_confidence: bool,
+
+    /// Multiplier on the per-block mismatch threshold temporal
+    /// confidence weighting tolerates before a neighbour's contribution
+    /// starts dropping.
+    ///
+    /// Higher values tolerate larger mismatches. Library default is
+    /// 1.0. Ignored when `--hq-no-temporal-confidence` is set.
+    #[arg(long, global = true)]
+    hq_thsad_scale: Option<f32>,
+
     /// Turn on motion compensation for temporal denoising.
     ///
     /// When the camera or content moves between frames, the
@@ -500,7 +521,12 @@ fn main() -> anyhow::Result<()> {
 
     let algorithm = match args.algorithm {
         Algorithm::Nlmeans => {
-            if args.hq_sigma.is_some() || args.hq_no_auto_strength || args.hq_no_noise_floor {
+            if args.hq_sigma.is_some()
+                || args.hq_no_auto_strength
+                || args.hq_no_noise_floor
+                || args.hq_no_temporal_confidence
+                || args.hq_thsad_scale.is_some()
+            {
                 tracing::warn!("--hq-* options are ignored unless --algorithm nlmeans-hq is selected");
             }
             av_denoise::Algorithm::Nlmeans
@@ -509,6 +535,8 @@ fn main() -> anyhow::Result<()> {
             auto_strength: !args.hq_no_auto_strength,
             noise_floor: !args.hq_no_noise_floor,
             sigma_override: args.hq_sigma.map(|s| s / 255.0),
+            temporal_confidence: !args.hq_no_temporal_confidence,
+            thsad_scale: args.hq_thsad_scale.unwrap_or(1.0),
         }),
     };
 

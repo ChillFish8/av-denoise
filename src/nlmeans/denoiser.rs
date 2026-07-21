@@ -4,7 +4,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::kernels::gpu_copy;
-use super::motion::{self, MotionCtx, build_pyramid_for_slot};
+use super::motion::{self, MotionCtx, build_pyramid_for_slot, run_pyramid_build};
 use super::noise::{NoiseCtx, NoiseEstimator, partials_len, run_noise_estimate, sigma_from_abs_sum};
 use super::params::{NlmParams, SEPARABLE_THRESHOLD, sigma_eff};
 use super::pending::Pending;
@@ -114,6 +114,38 @@ pub struct NlmDenoiser<R: Runtime> {
     /// Same shape as `pyramid_input`, built from the reference ring
     /// when a prefilter is active.
     pub(super) pyramid_reference: Option<Handle>,
+
+    /// Block geometry for the no-MC confidence pass. `Some` only when
+    /// confidence weighting is active (HQ, `temporal_confidence: true`,
+    /// `temporal_radius > 0`) and motion compensation is not. The
+    /// MC-active case reuses `mc_ctx`'s geometry instead.
+    pub(super) confidence_ctx: Option<MotionCtx>,
+    /// Per-neighbour block-match confidence. Layout mirrors
+    /// `mv_field_buf`, `[2·temporal_radius][blocks_y * blocks_x]`
+    /// `f32`. `Some` only when confidence weighting is active (see
+    /// `confidence_ctx`), whether the block geometry comes from
+    /// `mc_ctx` or from the no-MC confidence pass.
+    pub(super) confidence_buf: Option<Handle>,
+    /// Luma-only single-level pyramid ring feeding the no-MC
+    /// confidence pass. `Some` only alongside `confidence_ctx`.
+    pub(super) confidence_pyramid: Option<Handle>,
+    /// Discard sink for the no-MC confidence pass's mandatory MV
+    /// write. Nothing warps by it without motion compensation. `Some`
+    /// only alongside `confidence_ctx`.
+    pub(super) confidence_mv_scratch: Option<Handle>,
+    /// Small placeholder buffer passed as the fine block-match
+    /// kernel's `confidence` argument whenever confidence weighting is
+    /// inactive but motion compensation still runs. The kernel's
+    /// `write_confidence` comptime flag skips indexing into it
+    /// entirely in that case, so its size never matters. Always
+    /// allocated (trivially small), unlike the confidence-specific
+    /// buffers above.
+    pub(super) confidence_dummy: Handle,
+    /// Smoothed sigma for channel 0 (the plane motion estimation
+    /// treats as luma), feeding the confidence noise floor. Zero
+    /// unless HQ is active. A fixed `sigma_override` seeds it once at
+    /// construction, auto estimation refreshes it every submit.
+    pub(super) sigma_y: f32,
 }
 
 impl<R: Runtime> NlmDenoiser<R> {
@@ -223,6 +255,54 @@ impl<R: Runtime> NlmDenoiser<R> {
             (None, None, None, None, None)
         };
 
+        // Confidence weighting (in either its MC-active or its no-MC
+        // form) is active only when HQ has `temporal_confidence: true`
+        // and the temporal window is non-trivial. This gate applies
+        // even when MC is active. Without it, every MC-active submit
+        // would pay for the fine kernel's confidence write whether or
+        // not anything consumes it.
+        let confidence_active =
+            params.hq.is_some_and(|hq| hq.temporal_confidence) && params.temporal_radius > 0;
+
+        // Confidence-only geometry, only needed when MC isn't already
+        // supplying block geometry (and thus MVs and confidence via
+        // its own analyse pass). This incurs real extra work beyond
+        // the MC-active case. It needs its own luma pyramid ring and a
+        // block-match kernel per neighbour.
+        let confidence_only_active = confidence_active && mc_ctx.is_none();
+        let confidence_ctx = confidence_only_active.then(|| MotionCtx::confidence_only(width, height));
+
+        // The confidence buffer piggybacks on whichever block geometry
+        // is available, but only when confidence weighting is active.
+        let confidence_geometry = if confidence_active {
+            mc_ctx.as_ref().or(confidence_ctx.as_ref())
+        } else {
+            None
+        };
+        let confidence_buf = confidence_geometry.map(|ctx| {
+            let neighbours = (2 * params.temporal_radius) as u64;
+            client.empty((neighbours * ctx.confidence_bytes_per_neighbour()) as usize)
+        });
+        // Always allocated, trivially small, and reused whenever the
+        // fine block-match kernel runs with `write_confidence: false`.
+        let confidence_dummy = client.empty(size_of::<f32>());
+
+        let (confidence_pyramid, confidence_mv_scratch) = if let Some(ctx) = confidence_ctx.as_ref() {
+            let pyramid_pixels = motion::pyramid_pixels_per_frame(width, height, ctx.pyramid_levels);
+            let pyr_bytes = pyramid_pixels * total_frames as usize * size_of::<f32>();
+            let mv_scratch_len = ctx.mv_slots_per_neighbour() * 2 * size_of::<i32>();
+            (Some(client.empty(pyr_bytes)), Some(client.empty(mv_scratch_len)))
+        } else {
+            (None, None)
+        };
+
+        // `sigma_override` is the only source before the first noise
+        // estimate lands. Auto estimation refreshes this every submit
+        // (see `update_noise_estimate`). The fast path (`hq: None`)
+        // leaves it at zero, which `motion::sad_noise_floor` turns into
+        // a zero floor exactly as callers with no estimate should get.
+        let sigma_y = params.hq.and_then(|hq| hq.sigma_override).unwrap_or(0.0);
+
         Self {
             client: client.clone(),
             params,
@@ -259,6 +339,12 @@ impl<R: Runtime> NlmDenoiser<R> {
             mv_field_buf,
             pyramid_input,
             pyramid_reference,
+            confidence_ctx,
+            confidence_buf,
+            confidence_pyramid,
+            confidence_mv_scratch,
+            confidence_dummy,
+            sigma_y,
         }
     }
 
@@ -287,6 +373,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
 
         self.build_pyramids_for_slot(slot as u32);
+        self.build_confidence_pyramid_for_slot(slot as u32);
 
         self.advance_ring();
         self.prime_leading_edge_if_first();
@@ -309,6 +396,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             .clone();
         self.upload_into_slot(&reference_buf, reference, slot);
         self.build_pyramids_for_slot(slot as u32);
+        self.build_confidence_pyramid_for_slot(slot as u32);
         self.run_noise_estimate_for_slot(slot as u32);
         self.advance_ring();
         self.prime_leading_edge_if_first();
@@ -415,6 +503,36 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
     }
 
+    /// Extract the level-0 luma plane for `slot` into the no-MC
+    /// confidence pyramid. No-op unless the no-MC confidence pass is
+    /// active. Always reads `input_buf`, even under a prefilter. The
+    /// no-MC path keeps confidence simple by comparing raw input
+    /// rather than duplicating the reference ring's pyramid.
+    ///
+    /// Calls `run_pyramid_build` directly rather than going through
+    /// [`Self::build_pyramids_for_slot`]'s `build_pyramid_for_slot`
+    /// helper, which no-ops for a single pyramid level. The confidence
+    /// geometry is always exactly one level and still needs that one
+    /// level's luma extracted every push.
+    fn build_confidence_pyramid_for_slot(&self, slot: u32) {
+        let (Some(ctx), Some(pyr)) = (self.confidence_ctx.as_ref(), self.confidence_pyramid.as_ref()) else {
+            return;
+        };
+
+        run_pyramid_build::<R>(
+            &self.client,
+            ctx,
+            self.width,
+            self.height,
+            self.params.total_frames(),
+            slot,
+            &self.input_buf,
+            pyr,
+            self.params.channels.storage_count(),
+        )
+        .expect("confidence pyramid build dispatch failed");
+    }
+
     /// Queue the Immerkær noise estimate for `slot` on the input ring.
     /// No-op unless auto noise estimation is active. The read of these
     /// results normally happens later in [`Self::denoise_submit`], once
@@ -494,6 +612,10 @@ impl<R: Runtime> NlmDenoiser<R> {
             PrefilterMode::NlmSpatial { .. } => 0.0,
             _ => self.input_noise_offset,
         };
+        // Channel 0 is whatever motion estimation already treats as
+        // luma (see `nlm_mc_extract_luma`), so the confidence floor
+        // uses the same plane's noise estimate.
+        self.sigma_y = smoothed[0];
     }
 
     fn advance_ring(&mut self) {
@@ -591,6 +713,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                 .expect("nlm spatial pilot dispatch failed");
         }
         self.build_pyramids_for_slot(next_slot as u32);
+        self.build_confidence_pyramid_for_slot(next_slot as u32);
         self.run_noise_estimate_for_slot(next_slot as u32);
 
         self.ring_head += 1;
@@ -685,6 +808,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             PrefilterMode::NlmSpatial { .. } => 0.0,
             _ => self.input_noise_offset,
         };
+        self.sigma_y = smoothed[0];
 
         Ok(())
     }

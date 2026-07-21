@@ -24,7 +24,13 @@ use super::kernels::{
     nlm_vertical_weight,
     nlm_vweight_pair_accumulate,
 };
-use super::motion::{run_analyse, run_compensate};
+use super::motion::{
+    self,
+    confidence_byte_offset,
+    run_analyse,
+    run_compensate,
+    run_confidence_for_neighbour,
+};
 use super::{BLOCK_1D, BLOCK_X, BLOCK_X_THIN, BLOCK_Y, BLOCK_Y_THIN, MAX_GRID_1D};
 
 /// Derived sizes plus dispatch shape for the per-frame work, bundled so
@@ -40,6 +46,41 @@ pub(super) struct LaunchCtx {
     /// [`BLOCK_X_THIN`].
     pub(super) thin_cube_count: CubeCount,
     pub(super) thin_cube_dim: CubeDim,
+}
+
+/// Map a nonzero temporal offset `k` (in `-radius..=radius`) to the
+/// neighbour index the analyse/confidence passes use when filling
+/// `mv_field_buf`/`confidence_buf` (see `NlmDenoiser::run_motion_compensation`
+/// and `run_confidence_pass`). Those passes fill neighbours in the order
+/// `k = -radius..-1` first (indices `0..radius-1`), then `k = 1..radius`
+/// (indices `radius..2·radius-1`), so this is the inverse of that walk.
+fn neighbour_idx_for_k(radius: u32, k: i32) -> u32 {
+    debug_assert_ne!(k, 0, "k=0 is the spatial pair, it has no neighbour index");
+    debug_assert!(
+        k.unsigned_abs() <= radius,
+        "k={k} outside the temporal window ±{radius}"
+    );
+    if k < 0 {
+        (k + radius as i32) as u32
+    } else {
+        (radius as i32 - 1 + k) as u32
+    }
+}
+
+/// Confidence-kernel arguments for one temporal (k≠0) pair dispatch.
+/// Carries whether confidence weighting is active, the forward/backward
+/// per-block confidence array views, and the block geometry the
+/// kernel needs to map an output pixel to its block index (mirrors
+/// `nlm_mc_warp`'s pixel→block mapping). Inactive configurations carry
+/// the small placeholder dummy buffer, `use_confidence` set to `false`,
+/// and harmless (never read) geometry.
+struct ConfidenceArgs<R: Runtime> {
+    use_confidence: bool,
+    conf_fwd: ArrayArg<R>,
+    conf_bwd: ArrayArg<R>,
+    step: u32,
+    blocks_x: u32,
+    blocks_y: u32,
 }
 
 impl<R: Runtime> NlmDenoiser<R> {
@@ -123,6 +164,48 @@ impl<R: Runtime> NlmDenoiser<R> {
         unsafe { ArrayArg::from_raw_parts(self.tmp_hsum_bwd.clone(), ctx.pixels) }
     }
 
+    /// Build the confidence-kernel arguments for one temporal pair at
+    /// offset `q_k` (always nonzero at every call site). `frame_fwd`
+    /// reads neighbour `center + q_k`, so its confidence comes from
+    /// neighbour `q_k`'s slice. `frame_bwd` reads `center - q_k`, so its
+    /// confidence comes from neighbour `-q_k`'s slice (see
+    /// `neighbour_idx_for_k`).
+    ///
+    /// Confidence weighting is active only when `confidence_buf` is
+    /// allocated (see `NlmDenoiser::new`) and block geometry exists,
+    /// either from `mc_ctx` (MC active) or `confidence_ctx` (the no-MC
+    /// confidence pass). Otherwise this falls back to the 1-element
+    /// `confidence_dummy` buffer with `use_confidence` set to `false`,
+    /// so the kernel never reads it.
+    fn confidence_pair_args(&self, q_k: i32) -> ConfidenceArgs<R> {
+        let geometry = self.mc_ctx.as_ref().or(self.confidence_ctx.as_ref());
+        if let (Some(buf), Some(mc)) = (self.confidence_buf.as_ref(), geometry) {
+            let radius = self.params.temporal_radius;
+            let fwd_idx = neighbour_idx_for_k(radius, q_k);
+            let bwd_idx = neighbour_idx_for_k(radius, -q_k);
+            let conf_len = (mc.blocks_x * mc.blocks_y) as usize;
+            let fwd_handle = buf.clone().offset_start(confidence_byte_offset(mc, fwd_idx));
+            let bwd_handle = buf.clone().offset_start(confidence_byte_offset(mc, bwd_idx));
+            ConfidenceArgs {
+                use_confidence: true,
+                conf_fwd: unsafe { ArrayArg::from_raw_parts(fwd_handle, conf_len) },
+                conf_bwd: unsafe { ArrayArg::from_raw_parts(bwd_handle, conf_len) },
+                step: mc.step,
+                blocks_x: mc.blocks_x,
+                blocks_y: mc.blocks_y,
+            }
+        } else {
+            ConfidenceArgs {
+                use_confidence: false,
+                conf_fwd: unsafe { ArrayArg::from_raw_parts(self.confidence_dummy.clone(), 1) },
+                conf_bwd: unsafe { ArrayArg::from_raw_parts(self.confidence_dummy.clone(), 1) },
+                step: 1,
+                blocks_x: 1,
+                blocks_y: 1,
+            }
+        }
+    }
+
     /// Temporal (k≠0) fused-path step: one launch that computes both
     /// weights in registers and applies the +q / −q contributions.
     fn dispatch_fused_iter(
@@ -142,6 +225,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         // pair collapses to a symmetric (+q, +q) self-comparison; for
         // k≠0 the true (+q, −q) cross-frame comparison applies.
         let (bwd_shift_x, bwd_shift_y) = if q_k == 0 { (q_x, q_y) } else { (-q_x, -q_y) };
+        let confidence = self.confidence_pair_args(q_k);
 
         if self.use_reference {
             unsafe {
@@ -155,6 +239,9 @@ impl<R: Runtime> NlmDenoiser<R> {
                     self.accum_arg(ctx),
                     self.weight_sum_arg(ctx),
                     self.max_weight_arg(ctx),
+                    confidence.conf_fwd,
+                    confidence.conf_bwd,
+                    confidence.use_confidence,
                     frame_t,
                     frame_fwd,
                     frame_bwd,
@@ -170,6 +257,9 @@ impl<R: Runtime> NlmDenoiser<R> {
                     self.params.patch_radius,
                     BLOCK_X,
                     BLOCK_Y,
+                    confidence.step,
+                    confidence.blocks_x,
+                    confidence.blocks_y,
                 );
             }
         } else {
@@ -183,6 +273,9 @@ impl<R: Runtime> NlmDenoiser<R> {
                     self.accum_arg(ctx),
                     self.weight_sum_arg(ctx),
                     self.max_weight_arg(ctx),
+                    confidence.conf_fwd,
+                    confidence.conf_bwd,
+                    confidence.use_confidence,
                     frame_t,
                     frame_fwd,
                     frame_bwd,
@@ -198,6 +291,9 @@ impl<R: Runtime> NlmDenoiser<R> {
                     self.params.patch_radius,
                     BLOCK_X,
                     BLOCK_Y,
+                    confidence.step,
+                    confidence.blocks_x,
+                    confidence.blocks_y,
                 );
             }
         }
@@ -220,6 +316,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let frame_t = self.phys_frame(center_t as i32);
         let frame_fwd = self.phys_frame(center_t as i32 + q_k);
         let frame_bwd = self.phys_frame(center_t as i32 - q_k);
+        let confidence = self.confidence_pair_args(q_k);
 
         if self.use_reference {
             unsafe {
@@ -233,6 +330,9 @@ impl<R: Runtime> NlmDenoiser<R> {
                     self.accum_arg(ctx),
                     self.weight_sum_arg(ctx),
                     self.max_weight_arg(ctx),
+                    confidence.conf_fwd,
+                    confidence.conf_bwd,
+                    confidence.use_confidence,
                     frame_t,
                     frame_fwd,
                     frame_bwd,
@@ -245,6 +345,9 @@ impl<R: Runtime> NlmDenoiser<R> {
                     self.params.search_radius,
                     BLOCK_X,
                     BLOCK_Y,
+                    confidence.step,
+                    confidence.blocks_x,
+                    confidence.blocks_y,
                 );
             }
         } else {
@@ -258,6 +361,9 @@ impl<R: Runtime> NlmDenoiser<R> {
                     self.accum_arg(ctx),
                     self.weight_sum_arg(ctx),
                     self.max_weight_arg(ctx),
+                    confidence.conf_fwd,
+                    confidence.conf_bwd,
+                    confidence.use_confidence,
                     frame_t,
                     frame_fwd,
                     frame_bwd,
@@ -270,6 +376,9 @@ impl<R: Runtime> NlmDenoiser<R> {
                     self.params.search_radius,
                     BLOCK_X,
                     BLOCK_Y,
+                    confidence.step,
+                    confidence.blocks_x,
+                    confidence.blocks_y,
                 );
             }
         }
@@ -415,6 +524,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             );
         }
 
+        let confidence = self.confidence_pair_args(q_k);
         unsafe {
             nlm_vweight_pair_accumulate::launch_unchecked::<R>(
                 &self.client,
@@ -427,6 +537,9 @@ impl<R: Runtime> NlmDenoiser<R> {
                 self.accum_arg(ctx),
                 self.weight_sum_arg(ctx),
                 self.max_weight_arg(ctx),
+                confidence.conf_fwd,
+                confidence.conf_bwd,
+                confidence.use_confidence,
                 frame_fwd,
                 frame_bwd,
                 q_x,
@@ -438,6 +551,9 @@ impl<R: Runtime> NlmDenoiser<R> {
                 self.params.patch_radius,
                 BLOCK_X,
                 BLOCK_Y,
+                confidence.step,
+                confidence.blocks_x,
+                confidence.blocks_y,
             );
         }
 
@@ -667,6 +783,18 @@ impl<R: Runtime> NlmDenoiser<R> {
             .compensated_input_buf
             .as_ref()
             .expect("compensated_input allocated when mc_ctx is Some");
+        // `confidence_buf` only exists when confidence weighting is
+        // active (see `NlmDenoiser::new`). MC itself doesn't need it.
+        // When it's absent, the fine kernel still requires some buffer
+        // for its `confidence` argument, so fall back to the small
+        // always-present dummy and tell the kernel not to write it.
+        let (confidence_arg, write_confidence): (&Handle, bool) = match self.confidence_buf.as_ref() {
+            Some(buf) => (buf, true),
+            None => (&self.confidence_dummy, false),
+        };
+        let thsad_scale = self.params.hq.map_or(1.0, |hq| hq.thsad_scale);
+        let sad_noise_floor = motion::sad_noise_floor(mc.blksize, self.sigma_y);
+        let thsad = motion::thsad(mc.blksize, thsad_scale);
 
         // Centre frame: straight passthrough copy so the temporal
         // kernels can read it uniformly from the compensated buffer.
@@ -720,6 +848,10 @@ impl<R: Runtime> NlmDenoiser<R> {
                 neighbour_idx,
                 analyse_pyramid,
                 mv_field,
+                confidence_arg,
+                write_confidence,
+                sad_noise_floor,
+                thsad,
             )?;
 
             run_compensate::<R>(
@@ -756,6 +888,72 @@ impl<R: Runtime> NlmDenoiser<R> {
                     mv_field,
                 )?;
             }
+
+            neighbour_idx += 1;
+        }
+
+        Ok(())
+    }
+
+    /// Run the per-submit no-MC confidence sweep. A zero-search-radius
+    /// block match from the centre frame to each of the `2·R`
+    /// neighbours, writing per-block confidence into `confidence_buf`.
+    /// No-op unless the no-MC confidence pass is active (`confidence_ctx`
+    /// is `None` whenever motion compensation is active instead, or
+    /// confidence is off entirely).
+    fn run_confidence_pass(&self, center_t: u32) -> Result<(), anyhow::Error> {
+        let Some(ctx) = self.confidence_ctx.as_ref() else {
+            return Ok(());
+        };
+
+        // `confidence_ctx` is only ever constructed alongside
+        // `temporal_radius > 0` (see `NlmDenoiser::new`), so
+        // `temporal_radius` is guaranteed non-zero here.
+        let temporal_radius = self.params.temporal_radius;
+
+        let frame_count = self.params.total_frames();
+        let centre_slot = self.phys_frame(center_t as i32);
+
+        let luma_pyramid = self
+            .confidence_pyramid
+            .as_ref()
+            .expect("confidence_pyramid allocated when confidence_ctx is Some");
+        let mv_scratch = self
+            .confidence_mv_scratch
+            .as_ref()
+            .expect("confidence_mv_scratch allocated when confidence_ctx is Some");
+        let confidence_buf = self
+            .confidence_buf
+            .as_ref()
+            .expect("confidence_buf allocated when confidence_ctx is Some");
+
+        let thsad_scale = self.params.hq.map_or(1.0, |hq| hq.thsad_scale);
+        let sad_noise_floor = motion::sad_noise_floor(ctx.blksize, self.sigma_y);
+        let thsad = motion::thsad(ctx.blksize, thsad_scale);
+
+        let radius = temporal_radius as i32;
+        let mut neighbour_idx: u32 = 0;
+        for k in -radius..=radius {
+            if k == 0 {
+                continue;
+            }
+            let neighbour_slot = self.phys_frame(center_t as i32 + k);
+
+            run_confidence_for_neighbour::<R>(
+                &self.client,
+                ctx,
+                self.width,
+                self.height,
+                frame_count,
+                centre_slot,
+                neighbour_slot,
+                neighbour_idx,
+                luma_pyramid,
+                mv_scratch,
+                confidence_buf,
+                sad_noise_floor,
+                thsad,
+            )?;
 
             neighbour_idx += 1;
         }
@@ -898,6 +1096,11 @@ impl<R: Runtime> NlmDenoiser<R> {
         // temporal kernels (k≠0) can read aligned neighbours from
         // `compensated_*_buf`. No-op when MC is inactive.
         self.run_motion_compensation(center_t)?;
+        // No-op unless the no-MC confidence pass is active. This is
+        // mutually exclusive with `run_motion_compensation` actually
+        // doing anything, since `confidence_ctx` is only `Some` when
+        // MC isn't.
+        self.run_confidence_pass(center_t)?;
 
         self.zero_accumulators(&ctx)?;
         let window_side = 2 * search_radius + 1;
@@ -985,5 +1188,58 @@ fn copy_frame_into_slot_handle<R: Runtime>(
             frame_size,
             total_threads,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::neighbour_idx_for_k;
+
+    /// Walking `k = -radius..=radius` (skipping 0) and incrementing a
+    /// counter from 0 must reproduce `neighbour_idx_for_k` exactly, for
+    /// every radius. This is the same walk `run_motion_compensation`
+    /// and `run_confidence_pass` use to fill `mv_field_buf` /
+    /// `confidence_buf`, so it pins down the fill order those passes
+    /// established.
+    #[test]
+    fn matches_the_sequential_fill_order() {
+        for radius in 1..=8u32 {
+            let mut expected = 0u32;
+            for k in -(radius as i32)..=(radius as i32) {
+                if k == 0 {
+                    continue;
+                }
+                assert_eq!(neighbour_idx_for_k(radius, k), expected, "radius={radius} k={k}");
+                expected += 1;
+            }
+        }
+    }
+
+    /// The forward slice (neighbour `center + q_k`) and backward slice
+    /// (neighbour `center - q_k`) must always land on distinct,
+    /// in-range indices. A mismatch here would silently apply the
+    /// wrong frame's confidence to a temporal weight.
+    #[test]
+    fn forward_and_backward_indices_are_distinct_and_in_range() {
+        for radius in 1..=8u32 {
+            for q_k in -(radius as i32)..0 {
+                let fwd = neighbour_idx_for_k(radius, q_k);
+                let bwd = neighbour_idx_for_k(radius, -q_k);
+                assert_ne!(fwd, bwd, "radius={radius} q_k={q_k}");
+                assert!(fwd < 2 * radius, "radius={radius} q_k={q_k} fwd={fwd}");
+                assert!(bwd < 2 * radius, "radius={radius} q_k={q_k} bwd={bwd}");
+            }
+        }
+    }
+
+    /// Explicit worked example at `radius = 2`, matching the doc
+    /// comment's stated ordering. `k = -2, -1` fill indices `0, 1`,
+    /// then `k = 1, 2` fill indices `2, 3`.
+    #[test]
+    fn radius_two_explicit_indices() {
+        assert_eq!(neighbour_idx_for_k(2, -2), 0);
+        assert_eq!(neighbour_idx_for_k(2, -1), 1);
+        assert_eq!(neighbour_idx_for_k(2, 1), 2);
+        assert_eq!(neighbour_idx_for_k(2, 2), 3);
     }
 }

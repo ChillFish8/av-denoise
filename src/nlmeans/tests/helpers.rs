@@ -71,6 +71,31 @@ pub(super) fn make_noisy_gaussian_frame(w: u32, h: u32, ch: u32, base: f32, sigm
     frame
 }
 
+/// Independent pseudo-Gaussian noise sample at `(idx, seed)`, decorrelated
+/// across `seed` values so two calls with the same `size`/`base`/`sigma`
+/// but different `seed`s produce two independently-noisy copies of the
+/// same clean signal. Same Irwin-Hall construction as
+/// `make_noisy_gaussian_frame`, which is deterministic in position alone
+/// and so can't produce a *second*, decorrelated sample.
+pub(super) fn noisy_copy(size: u32, base: f32, sigma: f32, seed: u32) -> Vec<f32> {
+    let unit_std = (1.0f32 / 3.0f32).sqrt();
+    let mut frame = vec![0.0f32; (size * size) as usize];
+    for idx in 0..(size * size) {
+        let mut sum = 0.0f32;
+        for k in 0..4u32 {
+            let mut hash = (idx * 4 + k)
+                .wrapping_mul(2654435761)
+                .wrapping_add(seed.wrapping_mul(0x9E37_79B9).wrapping_add(k));
+            hash ^= hash >> 15;
+            hash = hash.wrapping_mul(0x85EB_CA6B);
+            hash ^= hash >> 13;
+            sum += (hash as f32 / u32::MAX as f32) - 0.5;
+        }
+        frame[idx as usize] = (base + (sum / unit_std) * sigma).clamp(0.0, 1.0);
+    }
+    frame
+}
+
 /// Smooth horizontal luma gradient from `lo` to `hi` inclusive,
 /// replicated down every row.
 pub(super) fn make_gradient_frame(w: u32, h: u32, lo: f32, hi: f32) -> Vec<f32> {
