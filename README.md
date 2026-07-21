@@ -35,8 +35,9 @@ leverage modern hardware instead of relying on the now rather outdated OpenCL.
    * You can specify the reference frame yourself using the library rather than CLI.
 - **`nlmeans-hq` algorithm** (`--algorithm nlmeans-hq`) for quality-focused denoising.
    * Measures the noise level automatically per scene (EMA-smoothed across frames) and scales its
-     strength to it, a multiplier defaulting to `0.45`. Override with `--hq-sigma` if the automatic
-     estimate misjudges a source, or fall back to an absolute strength with `--hq-no-auto-strength`.
+     strength to it, a multiplier whose default is calibrated per temporal radius and per plane
+     (luma or chroma). Override with `--hq-sigma` if the automatic estimate misjudges a source, or
+     fall back to an absolute strength with `--hq-no-auto-strength`.
    * Subtracts the expected noise floor from patch distances so matching isn't skewed by grain
      (`--hq-no-noise-floor` to keep it in).
    * Gates each temporal neighbour's contribution by how well it block-matches the centre frame, so
@@ -339,7 +340,7 @@ Options:
           
           Must be a finite number greater than 0.
           
-          The default depends on the algorithm. `nlmeans` defaults to 1.2. `nlmeans-hq` interprets strength as a multiplier on the measured noise level and defaults to 0.45.
+          The default depends on the algorithm. `nlmeans` defaults to 1.2. `nlmeans-hq` interprets strength as a multiplier on the measured noise level. Its default is calibrated automatically, adapting to the temporal radius and to which plane (luma or chroma) is being denoised, so lower and higher radii each get their own measured value.
           
           This value applies to both planes unless `--luma-strength` or `--chroma-strength` is set.
 

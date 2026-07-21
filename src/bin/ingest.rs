@@ -473,6 +473,109 @@ fn unpack_uv_from_f32(packed: &[f32], chroma_pixels: usize) -> (Vec<u8>, Vec<u8>
     (u, v)
 }
 
+#[cfg(test)]
+mod cli_options_tests {
+    use av_denoise::HqParams;
+    use av_denoise::nlmeans::NlmParams;
+
+    use super::*;
+
+    /// A `CliOptions` with every field at a neutral default, so each test
+    /// only needs to override what it cares about. `mode`/`algorithm` are
+    /// the two fields every test below sets explicitly.
+    fn base_opts(
+        mode: DenoisingMode,
+        algorithm: Algorithm,
+        nlm_tuning: Option<NlmTuning>,
+        luma_strength: Option<f32>,
+        chroma_strength: Option<f32>,
+    ) -> CliOptions {
+        CliOptions {
+            accelerators: vec![],
+            device: Device::Default,
+            intent: BinaryChannelIntent::LumaChroma,
+            mode,
+            prefilter: None,
+            motion_compensation: MotionCompensationMode::None,
+            algorithm,
+            nlm_tuning,
+            luma_strength,
+            chroma_strength,
+        }
+    }
+
+    #[test]
+    fn luma_strength_alone_overrides_only_the_luma_plane() {
+        let opts = base_opts(DenoisingMode::Spacial, Algorithm::Nlmeans, None, Some(0.7), None);
+
+        let luma = opts.denoiser_options(ChannelMode::Luma);
+        let chroma = opts.denoiser_options(ChannelMode::Chroma);
+
+        assert!(
+            matches!(luma.nlm, Some(NlmTuning { strength: Some(s), .. }) if (s - 0.7).abs() < f32::EPSILON),
+            "expected luma NlmTuning.strength = Some(0.7), got {:?}",
+            luma.nlm
+        );
+        assert!(
+            chroma.nlm.is_none(),
+            "chroma plane should carry no override so the table default applies, got {:?}",
+            chroma.nlm
+        );
+    }
+
+    #[test]
+    fn both_per_plane_strengths_set_independently() {
+        let opts = base_opts(
+            DenoisingMode::Spacial,
+            Algorithm::Nlmeans,
+            None,
+            Some(0.7),
+            Some(0.3),
+        );
+
+        let luma = opts.denoiser_options(ChannelMode::Luma);
+        let chroma = opts.denoiser_options(ChannelMode::Chroma);
+
+        assert!(
+            matches!(luma.nlm, Some(NlmTuning { strength: Some(s), .. }) if (s - 0.7).abs() < f32::EPSILON),
+            "expected luma NlmTuning.strength = Some(0.7), got {:?}",
+            luma.nlm
+        );
+        assert!(
+            matches!(chroma.nlm, Some(NlmTuning { strength: Some(s), .. }) if (s - 0.3).abs() < f32::EPSILON),
+            "expected chroma NlmTuning.strength = Some(0.3), got {:?}",
+            chroma.nlm
+        );
+    }
+
+    #[test]
+    fn no_overrides_hq_resolves_through_to_nlm_params_to_the_measured_tables() {
+        // Radius 4: measured table is luma 0.35, chroma 0.45 (Phase 10
+        // Task 1 tables in `src/nlmeans/params.rs`).
+        let opts = base_opts(
+            DenoisingMode::Temporal { radius: 4 },
+            Algorithm::NlmeansHq(HqParams::default()),
+            None,
+            None,
+            None,
+        );
+
+        let luma_params: NlmParams = opts.denoiser_options(ChannelMode::Luma).to_nlm_params();
+        let chroma_params: NlmParams = opts.denoiser_options(ChannelMode::Chroma).to_nlm_params();
+
+        assert!(
+            (luma_params.strength - 0.35).abs() < f32::EPSILON,
+            "expected luma strength 0.35 at r4, got {}",
+            luma_params.strength
+        );
+        assert!(
+            (chroma_params.strength - 0.45).abs() < f32::EPSILON,
+            "expected chroma strength 0.45 at r4, got {}",
+            chroma_params.strength
+        );
+    }
+}
+
 /// Map our [`Subsampling`] enum onto the y4m [`y4m::Colorspace`] used for
 /// both reading the input and writing the output header.
 pub fn subsampling_to_y4m(s: Subsampling) -> y4m::Colorspace {

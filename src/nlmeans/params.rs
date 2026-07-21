@@ -8,11 +8,44 @@ pub(super) const NLM_NORM: f32 = 255.0 * 255.0;
 /// our `strength` parameter has equivalent meaning.
 pub(super) const NLM_LEGACY: f32 = 3.0;
 
+/// Measured HQ default `strength` per temporal radius for the luma
+/// table, `hq_default_strength`'s `ChannelMode::Luma`/`ChannelMode::Yuv`
+/// source. Index is `temporal_radius.min(8)`.
+const HQ_DEFAULT_STRENGTH_LUMA: [f32; 9] = [0.45, 0.45, 0.42, 0.42, 0.35, 0.35, 0.35, 0.30, 0.30];
+
+/// Measured HQ default `strength` per temporal radius for the chroma
+/// table, `hq_default_strength`'s `ChannelMode::Chroma` source. Index is
+/// `temporal_radius.min(8)`.
+const HQ_DEFAULT_STRENGTH_CHROMA: [f32; 9] = [0.50, 0.50, 0.50, 0.45, 0.45, 0.45, 0.45, 0.45, 0.45];
+
 /// Calibrated default `strength` multiplier for `nlmeans-hq`'s
-/// auto-strength mode. A sweep across noise levels found a flat XPSNR
-/// plateau with the luma optimum near 0.42 and the chroma optimum near
-/// 0.5. This value sits on that measured plateau between the two.
-pub const HQ_DEFAULT_STRENGTH: f32 = 0.45;
+/// auto-strength mode, as a function of which plane is denoised and how
+/// far the temporal window reaches.
+///
+/// Each entry is a measured value, not a fitted curve. A 174-run sweep
+/// scored every radius 0..=8 against a strength grid at three noise
+/// levels. The value picked at each radius is the one whose smallest
+/// XPSNR gain across those noise levels (max-min) is largest, so the
+/// choice holds up at whichever noise level is hardest to serve. Both
+/// tables are monotonically non-increasing with radius, meaning wider
+/// temporal windows want less spatial strength since they already
+/// gather more samples to average over.
+///
+/// `ChannelMode::Yuv` reads the luma table on the assumption that a
+/// fused pass is luma-dominant. That mode wasn't part of the sweep, so
+/// this is an assumption rather than a separate measurement.
+///
+/// `temporal_radius` is clamped to the table's last index
+/// (`temporal_radius.min(8)`, matching [`MAX_TEMPORAL_RADIUS`]) as a
+/// belt-and-braces guard. Callers should already reject radii above the
+/// maximum in [`NlmParams::validate`].
+pub fn hq_default_strength(channels: ChannelMode, temporal_radius: u32) -> f32 {
+    let idx = temporal_radius.min(MAX_TEMPORAL_RADIUS) as usize;
+    match channels {
+        ChannelMode::Luma | ChannelMode::Yuv => HQ_DEFAULT_STRENGTH_LUMA[idx],
+        ChannelMode::Chroma => HQ_DEFAULT_STRENGTH_CHROMA[idx],
+    }
+}
 
 /// Patch radius threshold: above this the dispatcher switches to the
 /// separable path so the per-pixel cost stays linear in `patch_radius`.
@@ -555,6 +588,52 @@ mod tests {
             (got - sigmas[0]).abs() < 1e-9,
             "expected {}, got {got}",
             sigmas[0]
+        );
+    }
+
+    #[test]
+    fn hq_default_strength_matches_the_measured_luma_table() {
+        const EXPECTED: [f32; 9] = [0.45, 0.45, 0.42, 0.42, 0.35, 0.35, 0.35, 0.30, 0.30];
+        for (radius, &expected) in EXPECTED.iter().enumerate() {
+            let got = hq_default_strength(ChannelMode::Luma, radius as u32);
+            assert!(
+                (got - expected).abs() < f32::EPSILON,
+                "radius={radius}: expected {expected}, got {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn hq_default_strength_matches_the_measured_chroma_table() {
+        const EXPECTED: [f32; 9] = [0.50, 0.50, 0.50, 0.45, 0.45, 0.45, 0.45, 0.45, 0.45];
+        for (radius, &expected) in EXPECTED.iter().enumerate() {
+            let got = hq_default_strength(ChannelMode::Chroma, radius as u32);
+            assert!(
+                (got - expected).abs() < f32::EPSILON,
+                "radius={radius}: expected {expected}, got {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn hq_default_strength_yuv_reads_the_luma_table() {
+        for radius in 0..=8u32 {
+            let yuv = hq_default_strength(ChannelMode::Yuv, radius);
+            let luma = hq_default_strength(ChannelMode::Luma, radius);
+            assert!(
+                (yuv - luma).abs() < f32::EPSILON,
+                "radius={radius}: yuv={yuv}, luma={luma}"
+            );
+        }
+    }
+
+    #[test]
+    fn hq_default_strength_clamps_radius_above_the_table() {
+        let at_max = hq_default_strength(ChannelMode::Luma, MAX_TEMPORAL_RADIUS);
+        let above_max = hq_default_strength(ChannelMode::Luma, MAX_TEMPORAL_RADIUS + 5);
+        assert!(
+            (at_max - above_max).abs() < f32::EPSILON,
+            "expected clamping to hold the last table entry, got {at_max} vs {above_max}"
         );
     }
 }

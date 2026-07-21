@@ -8,13 +8,13 @@ use crate::device::Device;
 use crate::nlmeans::MotionEstimation;
 use crate::nlmeans::{
     ChannelMode,
-    HQ_DEFAULT_STRENGTH,
     HqParams,
     MotionCompensationMode,
     NlmDenoiser,
     NlmParams,
     Pending,
     PrefilterMode,
+    hq_default_strength,
 };
 use crate::sniff::sniff_best_accelerator;
 
@@ -30,8 +30,9 @@ pub struct DenoiserOptions {
     /// Algorithm variant. `Nlmeans` is the fast default. `NlmeansHq`
     /// adapts weighting to the noise level, measured automatically per
     /// frame unless `HqParams::sigma_override` pins a fixed value. Its
-    /// default `strength` multiplier is also different, see
-    /// [`crate::nlmeans::HQ_DEFAULT_STRENGTH`].
+    /// default `strength` multiplier is also different, and adapts to
+    /// the temporal radius and the plane being denoised, see
+    /// [`crate::nlmeans::hq_default_strength`].
     #[builder(default = Algorithm::Nlmeans)]
     pub algorithm: Algorithm,
     /// Reference clip source for NLM weight computation. `None` (the
@@ -79,16 +80,30 @@ pub struct NlmTuning {
 }
 
 impl DenoiserOptions {
-    fn to_nlm_params(&self) -> NlmParams {
+    /// Resolve this option set into the low-level [`NlmParams`] a
+    /// backend `Denoiser` is actually built from, folding in whichever
+    /// default `strength` applies (see [`crate::nlmeans::hq_default_strength`]
+    /// for the HQ algorithm). Exposed (rather than kept private) so
+    /// callers building per-plane options, and tests, can inspect the
+    /// resolved values without constructing a real `Denoiser`.
+    #[doc(hidden)]
+    pub fn to_nlm_params(&self) -> NlmParams {
+        let temporal_radius = match self.mode {
+            DenoisingMode::Spacial => 0,
+            DenoisingMode::Temporal { radius } => radius,
+        };
+
         // An explicit `strength` (whether from `NlmTuning` directly or a
         // per-plane override already folded into it by the caller) always
         // wins. Otherwise the default depends on the algorithm. HQ's
         // `strength` is a multiplier on the measured noise level, so it
         // needs its own calibrated default rather than the fast path's
-        // absolute FFmpeg-style default.
+        // absolute FFmpeg-style default. The HQ default also depends on
+        // the temporal radius and which plane `self.channel_mode` names,
+        // since each per-plane `Denoiser` carries its own channel mode.
         let explicit_strength = self.nlm.and_then(|t| t.strength);
         let strength = explicit_strength.unwrap_or(match self.algorithm {
-            Algorithm::NlmeansHq(_) => HQ_DEFAULT_STRENGTH,
+            Algorithm::NlmeansHq(_) => hq_default_strength(self.channel_mode, temporal_radius),
             Algorithm::Nlmeans => NlmParams::default().strength,
         });
 
@@ -96,10 +111,7 @@ impl DenoiserOptions {
             channels: self.channel_mode,
             prefilter: self.prefilter.unwrap_or(PrefilterMode::None),
             motion_compensation: self.motion_compensation,
-            temporal_radius: match self.mode {
-                DenoisingMode::Spacial => 0,
-                DenoisingMode::Temporal { radius } => radius,
-            },
+            temporal_radius,
             hq: match self.algorithm {
                 Algorithm::Nlmeans => None,
                 Algorithm::NlmeansHq(hq) => Some(hq),
@@ -526,6 +538,7 @@ mod options_tests {
 
     #[test]
     fn hq_unset_strength_defaults_to_hq_default_strength() {
+        // Default channel_mode is Yuv, default mode is Spacial (radius 0).
         let opts = DenoiserOptions::builder()
             .algorithm(Algorithm::NlmeansHq(HqParams {
                 auto_strength: true,
@@ -537,7 +550,86 @@ mod options_tests {
             .build();
         let params = opts.to_nlm_params();
 
-        assert!((params.strength - HQ_DEFAULT_STRENGTH).abs() < f32::EPSILON);
+        let expected = hq_default_strength(ChannelMode::Yuv, 0);
+        assert!((params.strength - expected).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn hq_luma_r4_uses_measured_table_value() {
+        let opts = DenoiserOptions::builder()
+            .channel_mode(ChannelMode::Luma)
+            .mode(DenoisingMode::Temporal { radius: 4 })
+            .algorithm(Algorithm::NlmeansHq(HqParams::default()))
+            .build();
+        let params = opts.to_nlm_params();
+
+        assert!((params.strength - 0.35).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn hq_chroma_r4_uses_measured_table_value() {
+        let opts = DenoiserOptions::builder()
+            .channel_mode(ChannelMode::Chroma)
+            .mode(DenoisingMode::Temporal { radius: 4 })
+            .algorithm(Algorithm::NlmeansHq(HqParams::default()))
+            .build();
+        let params = opts.to_nlm_params();
+
+        assert!((params.strength - 0.45).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn hq_yuv_r8_uses_measured_table_value() {
+        let opts = DenoiserOptions::builder()
+            .channel_mode(ChannelMode::Yuv)
+            .mode(DenoisingMode::Temporal { radius: 8 })
+            .algorithm(Algorithm::NlmeansHq(HqParams::default()))
+            .build();
+        let params = opts.to_nlm_params();
+
+        assert!((params.strength - 0.30).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn hq_spacial_mode_uses_radius_zero_table_values() {
+        for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
+            let opts = DenoiserOptions::builder()
+                .channel_mode(channels)
+                .mode(DenoisingMode::Spacial)
+                .algorithm(Algorithm::NlmeansHq(HqParams::default()))
+                .build();
+            let params = opts.to_nlm_params();
+
+            let expected = hq_default_strength(channels, 0);
+            assert!(
+                (params.strength - expected).abs() < f32::EPSILON,
+                "channels={channels:?}: expected {expected}, got {}",
+                params.strength
+            );
+        }
+    }
+
+    #[test]
+    fn hq_explicit_strength_wins_over_the_table_for_every_plane() {
+        for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
+            let opts = DenoiserOptions::builder()
+                .channel_mode(channels)
+                .mode(DenoisingMode::Temporal { radius: 4 })
+                .algorithm(Algorithm::NlmeansHq(HqParams::default()))
+                .nlm(NlmTuning {
+                    search_radius: None,
+                    patch_radius: None,
+                    strength: Some(0.99),
+                    self_weight: None,
+                })
+                .build();
+            let params = opts.to_nlm_params();
+
+            assert!(
+                (params.strength - 0.99).abs() < f32::EPSILON,
+                "channels={channels:?}: explicit strength was overridden by the table"
+            );
+        }
     }
 
     #[test]

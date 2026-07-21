@@ -3,15 +3,18 @@
 # requires-python = ">=3.11"
 # dependencies = []
 # ///
-"""XPSNR quality benchmark for av-denoise variants.
+"""XPSNR and SSIM quality benchmark for av-denoise variants.
 
 Each run denoises a synthetically-noised copy of a clean source clip
-and is scored against the clean original with ffmpeg's `xpsnr` filter.
-Noisy clips are generated once per noise level with ffmpeg's `noise`
-filter (temporal noise, fixed seed) and cached in the work directory.
-Denoised frames are piped straight into the scoring ffmpeg, so no
-intermediate denoised files are written. A `noisy` run kind scores the
-corrupted clip itself, making each variant's recovery visible.
+and is scored against the clean original with ffmpeg's `xpsnr` and
+`ssim` filters in a single pass. Noisy clips are generated once per
+noise level with ffmpeg's `noise` filter (temporal noise, fixed seed)
+and cached in the work directory. Denoised frames are piped straight
+into the scoring ffmpeg, so no intermediate denoised files are
+written. A `noisy` run kind scores the corrupted clip itself, making
+each variant's recovery visible. SSIM scores each plane independently,
+so its chroma values do not carry XPSNR's luma-masking cross-talk,
+making it the cleaner chroma-comparison signal.
 """
 
 from __future__ import annotations
@@ -31,6 +34,11 @@ XPSNR_RE = re.compile(
     r"\s+\(minimum:\s*(inf|[\d.]+)\)"
 )
 
+SSIM_RE = re.compile(
+    r"SSIM\s+Y:([\d.]+)\s+\([^)]*\)\s+U:([\d.]+)\s+\([^)]*\)"
+    r"\s+V:([\d.]+)\s+\([^)]*\)\s+All:([\d.]+)\s+\([^)]*\)"
+)
+
 DEFAULT_CONFIG = Path(__file__).parent / "quality_runs.toml"
 
 
@@ -43,6 +51,7 @@ class Run:
     strength: float | str = 1.2
     patch: int = 9
     search: int = 5
+    sigma: float | str = 15.0
 
 
 @dataclass
@@ -53,6 +62,7 @@ class Config:
     seed: int
     noise: list[int]
     strengths: dict[int, float]
+    bm3d_sigmas: dict[int, float]
     runs: list[Run]
 
 
@@ -64,6 +74,8 @@ class Result:
     u: float | None = None
     v: float | None = None
     minimum: float | None = None
+    ssim_y: float | None = None
+    ssim_all: float | None = None
     ok: bool = False
 
 
@@ -97,7 +109,7 @@ def load_config(config_path: Path) -> Config:
     runs: list[Run] = []
     for raw in data.get("runs", []):
         kind = raw.get("kind")
-        if kind not in ("noisy", "av-denoise", "ffmpeg-nlmeans"):
+        if kind not in ("noisy", "av-denoise", "ffmpeg-nlmeans", "ffmpeg-bm3d"):
             sys.exit(f"unknown kind in run {raw.get('name')!r}: {kind!r}")
         runs.append(
             Run(
@@ -108,6 +120,7 @@ def load_config(config_path: Path) -> Config:
                 strength=raw.get("strength", 1.2),
                 patch=raw.get("patch", 9),
                 search=raw.get("search", 5),
+                sigma=raw.get("sigma", 15.0),
             )
         )
     return Config(
@@ -117,6 +130,7 @@ def load_config(config_path: Path) -> Config:
         seed=data.get("seed", 4242),
         noise=list(data["noise"]),
         strengths={int(k): float(v) for k, v in data.get("strengths", {}).items()},
+        bm3d_sigmas={int(k): float(v) for k, v in data.get("bm3d_sigmas", {}).items()},
         runs=runs,
     )
 
@@ -186,12 +200,26 @@ def parse_xpsnr(stderr: str) -> tuple[float, float, float, float] | None:
     return y, u, v, minimum
 
 
+def parse_ssim(stderr: str) -> tuple[float, float, float, float] | None:
+    match = None
+    for match in SSIM_RE.finditer(stderr):
+        pass
+    if match is None:
+        return None
+    y, u, v, all_planes = (float(g) for g in match.groups())
+    return y, u, v, all_planes
+
+
 def score_noisy(noisy: Path, ref: Path) -> tuple[bool, str]:
+    graph = (
+        "[0:v]split=2[n1][n2];[1:v]split=2[r1][r2];"
+        "[n1][r1]xpsnr;[n2][r2]ssim"
+    )
     cmd = [
         "ffmpeg", "-hide_banner", "-y",
         "-i", str(noisy),
         "-i", str(ref),
-        "-lavfi", "xpsnr",
+        "-lavfi", graph,
         "-f", "null", "-",
     ]
     print(f"$ {shlex.join(cmd)}", flush=True)
@@ -212,11 +240,15 @@ def score_av_denoise(run: Run, noisy: Path, ref: Path, device: str) -> tuple[boo
         "--workers", str(run.workers),
         "--input", str(noisy),
     ]
+    graph = (
+        "[0:v]split=2[d1][d2];[1:v]split=2[r1][r2];"
+        "[d1][r1]xpsnr;[d2][r2]ssim"
+    )
     p2_cmd = [
         "ffmpeg", "-hide_banner", "-y",
         "-f", "yuv4mpegpipe", "-i", "-",
         "-i", str(ref),
-        "-lavfi", "[0:v][1:v]xpsnr",
+        "-lavfi", graph,
         "-f", "null", "-",
     ]
     print(f"$ {shlex.join(p1_cmd)} | {shlex.join(p2_cmd)}", flush=True)
@@ -235,7 +267,8 @@ def score_ffmpeg_nlmeans(run: Run, noisy: Path, ref: Path) -> tuple[bool, str]:
     graph = (
         f"[0:v]hwupload,nlmeans_opencl="
         f"s={run.strength}:p={run.patch}:pc={run.patch}:r={run.search}:rc={run.search},"
-        f"hwdownload,format=yuv420p[den];[den][1:v]xpsnr"
+        f"hwdownload,format=yuv420p[den];"
+        f"[den]split=2[d1][d2];[1:v]split=2[r1][r2];[d1][r1]xpsnr;[d2][r2]ssim"
     )
     cmd = [
         "ffmpeg", "-hide_banner", "-y",
@@ -251,51 +284,96 @@ def score_ffmpeg_nlmeans(run: Run, noisy: Path, ref: Path) -> tuple[bool, str]:
     return proc.returncode == 0, proc.stderr
 
 
-def resolve_run(run: Run, alls: int, strengths: dict[int, float]) -> Run:
-    """Substitute `$strength` placeholders with the `[strengths]` entry
-    for this noise level."""
+def score_ffmpeg_bm3d(run: Run, noisy: Path, ref: Path) -> tuple[bool, str]:
+    graph = (
+        f"[0:v]bm3d=sigma={run.sigma}:estim=basic[den];"
+        f"[den]split=2[d1][d2];[1:v]split=2[r1][r2];[d1][r1]xpsnr;[d2][r2]ssim"
+    )
+    cmd = [
+        "ffmpeg", "-hide_banner", "-y",
+        "-i", str(noisy),
+        "-i", str(ref),
+        "-lavfi", graph,
+        "-f", "null", "-",
+    ]
+    print(f"$ {shlex.join(cmd)}", flush=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    return proc.returncode == 0, proc.stderr
 
-    def lookup() -> float:
+
+def resolve_run(
+    run: Run, alls: int, strengths: dict[int, float], bm3d_sigmas: dict[int, float]
+) -> Run:
+    """Substitute `$strength` placeholders with the `[strengths]` entry
+    and `$bm3d_sigma` placeholders with the `[bm3d_sigmas]` entry for
+    this noise level."""
+
+    def lookup_strength() -> float:
         if alls not in strengths:
             sys.exit(
                 f"run {run.name!r} uses $strength but [strengths] has no entry for noise {alls}"
             )
         return strengths[alls]
 
-    args = [str(lookup()) if a == "$strength" else a for a in run.args]
-    strength = lookup() if run.strength == "$strength" else run.strength
-    return replace(run, args=args, strength=strength)
+    def lookup_sigma() -> float:
+        if alls not in bm3d_sigmas:
+            sys.exit(
+                f"run {run.name!r} uses $bm3d_sigma but [bm3d_sigmas] has no entry for noise {alls}"
+            )
+        return bm3d_sigmas[alls]
+
+    def substitute(a: str) -> str:
+        if a == "$strength":
+            return str(lookup_strength())
+        if a == "$bm3d_sigma":
+            return str(lookup_sigma())
+        return a
+
+    args = [substitute(a) for a in run.args]
+    strength = lookup_strength() if run.strength == "$strength" else run.strength
+    sigma = lookup_sigma() if run.sigma == "$bm3d_sigma" else run.sigma
+    return replace(run, args=args, strength=strength, sigma=sigma)
 
 
 def execute(
-    run: Run, noisy: Path, ref: Path, alls: int, strengths: dict[int, float], device: str
+    run: Run,
+    noisy: Path,
+    ref: Path,
+    alls: int,
+    strengths: dict[int, float],
+    bm3d_sigmas: dict[int, float],
+    device: str,
 ) -> Result:
-    run = resolve_run(run, alls, strengths)
+    run = resolve_run(run, alls, strengths, bm3d_sigmas)
     if run.kind == "noisy":
         ok, stderr = score_noisy(noisy, ref)
     elif run.kind == "av-denoise":
         ok, stderr = score_av_denoise(run, noisy, ref, device)
-    else:
+    elif run.kind == "ffmpeg-nlmeans":
         ok, stderr = score_ffmpeg_nlmeans(run, noisy, ref)
+    else:
+        ok, stderr = score_ffmpeg_bm3d(run, noisy, ref)
 
-    parsed = parse_xpsnr(stderr)
-    if not ok or parsed is None:
+    xpsnr = parse_xpsnr(stderr)
+    ssim = parse_ssim(stderr)
+    if not ok or xpsnr is None or ssim is None:
         sys.stderr.write(stderr)
         return Result(run.name, alls)
-    y, u, v, minimum = parsed
-    return Result(run.name, alls, y, u, v, minimum, ok=True)
+    y, u, v, minimum = xpsnr
+    ssim_y, _ssim_u, _ssim_v, ssim_all = ssim
+    return Result(run.name, alls, y, u, v, minimum, ssim_y, ssim_all, ok=True)
 
 
 def print_table(results: list[Result]) -> None:
     if not results:
         return
 
-    def fmt(value: float | None) -> str:
+    def fmt(value: float | None, precision: int = 2) -> str:
         if value is None:
             return "—"
         if value == float("inf"):
             return "inf"
-        return f"{value:.2f}"
+        return f"{value:.{precision}f}"
 
     name_w = max(len("name"), max(len(r.name) for r in results))
     noise_w = max(len("noise"), 5)
@@ -303,11 +381,13 @@ def print_table(results: list[Result]) -> None:
 
     header = (
         f"{'name':<{name_w}}  {'noise':>{noise_w}}  "
-        f"{'xpsnr_y':>{col_w}}  {'xpsnr_u':>{col_w}}  {'xpsnr_v':>{col_w}}  {'min':>{col_w}}"
+        f"{'xpsnr_y':>{col_w}}  {'xpsnr_u':>{col_w}}  {'xpsnr_v':>{col_w}}  {'min':>{col_w}}  "
+        f"{'ssim_y':>{col_w}}  {'ssim_all':>{col_w}}"
     )
     sep = (
         f"{'─' * name_w}  {'─' * noise_w}  "
-        f"{'─' * col_w}  {'─' * col_w}  {'─' * col_w}  {'─' * col_w}"
+        f"{'─' * col_w}  {'─' * col_w}  {'─' * col_w}  {'─' * col_w}  "
+        f"{'─' * col_w}  {'─' * col_w}"
     )
     print()
     print(header)
@@ -315,11 +395,14 @@ def print_table(results: list[Result]) -> None:
     for r in results:
         if r.ok:
             y, u, v, mn = fmt(r.y), fmt(r.u), fmt(r.v), fmt(r.minimum)
+            sy, sa = fmt(r.ssim_y, 4), fmt(r.ssim_all, 4)
         else:
             y, u, v, mn = "FAILED", "—", "—", "—"
+            sy, sa = "—", "—"
         print(
             f"{r.name:<{name_w}}  {r.alls:>{noise_w}}  "
-            f"{y:>{col_w}}  {u:>{col_w}}  {v:>{col_w}}  {mn:>{col_w}}"
+            f"{y:>{col_w}}  {u:>{col_w}}  {v:>{col_w}}  {mn:>{col_w}}  "
+            f"{sy:>{col_w}}  {sa:>{col_w}}"
         )
 
 
@@ -340,7 +423,15 @@ def main() -> None:
             print(f"[{run.name} @ noise {alls}]", flush=True)
             try:
                 results.append(
-                    execute(run, noisy_clips[alls], ref, alls, cfg.strengths, args.device)
+                    execute(
+                        run,
+                        noisy_clips[alls],
+                        ref,
+                        alls,
+                        cfg.strengths,
+                        cfg.bm3d_sigmas,
+                        args.device,
+                    )
                 )
             except Exception as e:  # noqa: BLE001
                 print(f"[{run.name}] error: {e}", file=sys.stderr, flush=True)

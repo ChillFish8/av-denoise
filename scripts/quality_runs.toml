@@ -15,6 +15,18 @@ noise = [8, 16, 28]
 16 = 3.0
 28 = 5.0
 
+# Sigma used at each noise level for the `ffmpeg_bm3d` reference row.
+# These are hand-tuned per-clip peaks found by sweeping sigma against
+# this bench clip, not the true 8-bit noise sigma. FFmpeg's bm3d sigma
+# is not on the true-noise-sigma scale. Peaks landed around 3 to 6
+# times the true sigma and the ratio was not constant across noise
+# levels. This row is a quality reference ceiling, not out-of-box bm3d
+# behavior.
+[bm3d_sigmas]
+8 = 15
+16 = 40
+28 = 55
+
 # ---------------------------------------------------------------------------
 # Baseline: the corrupted clip scored against the clean reference. Every
 # denoise variant should beat this row.
@@ -74,6 +86,15 @@ kind = "ffmpeg-nlmeans"
 strength = "$strength"
 patch = 7
 search = 15
+
+# External baseline: BM3D via ffmpeg's CPU filter, run at its per-clip
+# sigma peak rather than the true noise sigma (see the [bm3d_sigmas]
+# comment above). CPU-only and slow, around 6.6 fps, so this row adds
+# roughly 2 minutes to a full harness run.
+[[runs]]
+name = "ffmpeg_bm3d"
+kind = "ffmpeg-bm3d"
+sigma = "$bm3d_sigma"
 
 # ---------------------------------------------------------------------------
 # HQ mode: noise level measured automatically, strength is a multiplier

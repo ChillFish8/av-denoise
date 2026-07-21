@@ -192,7 +192,10 @@ struct Args {
     ///
     /// The default depends on the algorithm. `nlmeans` defaults to
     /// 1.2. `nlmeans-hq` interprets strength as a multiplier on the
-    /// measured noise level and defaults to 0.45.
+    /// measured noise level. Its default is calibrated automatically,
+    /// adapting to the temporal radius and to which plane (luma or
+    /// chroma) is being denoised, so lower and higher radii each get
+    /// their own measured value.
     ///
     /// This value applies to both planes unless `--luma-strength`
     /// or `--chroma-strength` is set.

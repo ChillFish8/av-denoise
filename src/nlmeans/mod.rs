@@ -15,12 +15,12 @@ pub use denoiser::NlmDenoiser;
 pub use motion::{MotionCompensationMode, MotionEstimation};
 pub use params::{
     ChannelMode,
-    HQ_DEFAULT_STRENGTH,
     HqParams,
     MAX_PATCH_RADIUS,
     MAX_SEARCH_RADIUS,
     MAX_TEMPORAL_RADIUS,
     NlmParams,
+    hq_default_strength,
 };
 pub use pending::Pending;
 pub use prefilter::{DEFAULT_PILOT_STRENGTH_SCALE, PrefilterMode};
