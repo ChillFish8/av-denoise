@@ -187,7 +187,7 @@ pub fn nlm_mc_block_match_coarse(
 /// when `use_seed != 0`, then searches a small `(2·search_radius + 1)²`
 /// window around it. Writes the refined MV back into the same slot.
 /// Uses the same shared-memory-cached, candidate-parallel SAD
-/// reduction as [`nlm_mc_block_match_coarse`] (see its doc comment).
+/// reduction as `nlm_mc_block_match_coarse` (see its doc comment).
 ///
 /// When `write_confidence` is `true`, also writes a per-block
 /// confidence score to `confidence`, derived from the winning SAD.

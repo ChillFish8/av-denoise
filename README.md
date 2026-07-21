@@ -33,10 +33,22 @@ leverage modern hardware instead of relying on the now rather outdated OpenCL.
 - **Prefilter support** for more accurate denoising with less detail loss.
    * Includes an on-gpu bilateral filter out of the box
    * You can specify the reference frame yourself using the library rather than CLI.
+- **`nlmeans-hq` algorithm** (`--algorithm nlmeans-hq`) for quality-focused denoising.
+   * Measures the noise level automatically per scene (EMA-smoothed across frames) and scales its
+     strength to it, a multiplier defaulting to `0.45`. Override with `--hq-sigma` if the automatic
+     estimate misjudges a source, or fall back to an absolute strength with `--hq-no-auto-strength`.
+   * Subtracts the expected noise floor from patch distances so matching isn't skewed by grain
+     (`--hq-no-noise-floor` to keep it in).
+   * Gates each temporal neighbour's contribution by how well it block-matches the centre frame, so
+     occluded or changed content doesn't get blurred in (`--hq-no-temporal-confidence`,
+     `--hq-thsad-scale`).
+   * Adds an opt-in NLM-spatial pilot prefilter (`--prefilter nlm[:<strength_scale>]`) alongside the
+     bilateral one.
 - **Motion compensation** for high-quality temporal denoising on heavy motion.
    * MVTools-inspired hierarchical block matching, fully on-GPU.
    * Enabled with `--motion-compensation`, tuned via `--mc-blksize`,
      `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels`.
+   * The motion-tracking strategy adapts automatically to `--temporal-radius`.
 - _**Fast!**_ - Around **2x** faster than FFmpeg's OpenCL implementation.
    * Be aware that the `STDIN` mode for the binary cannot fully utilise larger modern GPUs, it will
      likely be just as fast as FFmpeg using much less GPU compute, but we cannot parallelize across scenes.
@@ -125,8 +137,8 @@ env var from their own binary.
 `av-denoise` is available both in library _and_ binary format, by default only the `vulkan` feature
 is enabled, since that is typically the default accelerators you will want to use.
 
-When compiling the binary, you want to enable the `binary` feature at minimum, but I recommend for most users
-to enable the `binary-full` feature instead if you are ever unsure about how you are going to be ingesting frames.
+When compiling the binary, enable the `binary` feature. It pulls in both ingestion paths (FFMS2 for
+`file` mode, y4m for `stdin` mode), so there's nothing else to pick between.
 
 The following (non-accelerator) features are available:
 
@@ -230,7 +242,7 @@ Options:
   -a, --algorithm <ALGORITHM>
           Denoising algorithm to run.
           
-          Only `nlmeans` is currently available.
+          `nlmeans` is the fast default. `nlmeans-hq` is a quality-focused variant that calibrates its weighting to the noise level, measured automatically per frame (see `--hq-sigma` to override).
           
           [default: nlmeans]
 
@@ -241,7 +253,7 @@ Options:
           
           The list is comma-separated, for example `vulkan,cpu`.
           
-          [default: <all_compiled_accelerators>]
+          [default: vulkan]
 
   -d, --device <DEVICE>
           Which device to use on the chosen backend.
@@ -283,7 +295,11 @@ Options:
       --prefilter <PREFILTER>
           Reference image used when comparing patches.
           
-          `none` uses the noisy input directly (the cheapest option).
+          Omitted (the default) means no prefilter, for both `nlmeans` and `nlmeans-hq`.
+          
+          `none` forces the noisy input directly (the cheapest option). This is the same as leaving the flag unset.
+          
+          `nlm` or `nlm:<strength_scale>` runs a windowed spatial NLM pass first and compares patches against that cleaner image. `strength_scale` multiplies the main pass strength for the pilot pass. Bare `nlm` uses the calibrated default.
           
           `bilateral:<sigma_s>,<sigma_r>` runs a quick on-GPU bilateral blur first, then compares patches against that cleaner image.
           
@@ -294,8 +310,6 @@ Options:
           A good starting point is `bilateral:3.0,0.02`.
           
           Prefiltering keeps more detail at the cost of one extra GPU pass per frame.
-          
-          [default: none]
 
       --temporal-radius <TEMPORAL_RADIUS>
           How many neighbouring frames to look at on each side when cleaning a frame.
@@ -325,7 +339,7 @@ Options:
           
           Must be a finite number greater than 0.
           
-          Library default is 1.2.
+          The default depends on the algorithm. `nlmeans` defaults to 1.2. `nlmeans-hq` interprets strength as a multiplier on the measured noise level and defaults to 0.45.
           
           This value applies to both planes unless `--luma-strength` or `--chroma-strength` is set.
 
@@ -350,6 +364,31 @@ Options:
           
           Setting to 0 gives pure NLM (centre pixel only counts if a similar patch was found nearby).
 
+      --hq-sigma <HQ_SIGMA>
+          How noisy the source is. Leave it unset for almost all uses.
+          
+          The noise level is measured automatically per scene when this is not set. Set it only when the automatic estimate misjudges a source and you want to pin the value.
+          
+          Small values mean light grain and larger values mean heavier noise. `3` is subtle grain, `6` is clearly visible grain, `12` and up is heavy noise.
+
+      --hq-no-auto-strength
+          Treat `--strength` as an absolute value instead of a multiplier on `--hq-sigma`
+
+      --hq-no-noise-floor
+          Keep the expected-noise floor inside patch distances instead of subtracting it
+
+      --hq-no-temporal-confidence
+          Disable per-block temporal confidence weighting for `nlmeans-hq`.
+          
+          By default HQ block-matches each temporal neighbour against the centre frame and lets a poor match suppress that neighbour's contribution, instead of blurring in occluded or changed content. Setting this applies temporal weights uniformly no matter how well a neighbour matches.
+          
+          Only takes effect when `--temporal-radius` is above 0.
+
+      --hq-thsad-scale <HQ_THSAD_SCALE>
+          Multiplier on the per-block mismatch threshold temporal confidence weighting tolerates before a neighbour's contribution starts dropping.
+          
+          Higher values tolerate larger mismatches. Library default is 1.0. Ignored when `--hq-no-temporal-confidence` is set.
+
       --motion-compensation
           Turn on motion compensation for temporal denoising.
           
@@ -360,6 +399,8 @@ Options:
           Motion compensation looks at where each block of pixels moved between frames, then shifts neighbour frames to line up with the current frame before cleaning.
           
           This keeps detail sharp on anime, fast pans, and action footage.
+          
+          The tracking strategy adapts automatically to `--temporal-radius`.
           
           Has no effect when `--temporal-radius 0`.
 

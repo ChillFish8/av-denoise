@@ -4,12 +4,13 @@ use cubecl::Runtime;
 
 use crate::accelerate::Accelerator;
 use crate::device::Device;
+#[cfg(test)]
+use crate::nlmeans::MotionEstimation;
 use crate::nlmeans::{
     ChannelMode,
     HQ_DEFAULT_STRENGTH,
     HqParams,
     MotionCompensationMode,
-    MotionEstimation,
     NlmDenoiser,
     NlmParams,
     Pending,

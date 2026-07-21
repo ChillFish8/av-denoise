@@ -229,14 +229,15 @@ struct Args {
     #[arg(long)]
     self_weight: Option<f32>,
 
-    /// Fixed noise level for `nlmeans-hq`, in 8-bit units.
+    /// How noisy the source is. Leave it unset for almost all uses.
     ///
-    /// `nlmeans-hq` measures the noise level automatically per frame
-    /// by default. Setting this overrides that measurement with a
-    /// fixed value applied to every frame instead.
+    /// The noise level is measured automatically per scene when this
+    /// is not set. Set it only when the automatic estimate misjudges
+    /// a source and you want to pin the value.
     ///
-    /// Typical grain sits around `3` to `6`. Heavy noise is `10` and
-    /// up.
+    /// Small values mean light grain and larger values mean heavier
+    /// noise. `3` is subtle grain, `6` is clearly visible grain, `12`
+    /// and up is heavy noise.
     #[arg(long, global = true)]
     hq_sigma: Option<f32>,
 
