@@ -18,5 +18,6 @@ pub use nlmeans::{
     DEFAULT_PILOT_STRENGTH_SCALE,
     HqParams,
     MotionCompensationMode,
+    MotionEstimation,
     PrefilterMode,
 };

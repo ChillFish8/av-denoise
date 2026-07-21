@@ -174,10 +174,98 @@ pub(crate) fn run_analyse<R: Runtime>(
     Ok(())
 }
 
+/// Seeded refinement pass used by chained motion estimation. Reads the
+/// composed seed already sitting in `mv_field` at `neighbour_idx`'s
+/// slot, searches a small `(2·refine_radius + 1)²` window around it,
+/// and writes the corrected MV back to the same slot. Skips the coarse
+/// pass entirely, unlike [`run_analyse`], since the composed seed
+/// already carries the coarse displacement.
+///
+/// `refine_radius` is the comptime search radius for this pass, set
+/// independently of `mc.search_radius` (the direct path's window).
+/// Every other argument matches `run_analyse`'s fine-pass call exactly,
+/// including the confidence-write convention.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_seeded_refine<R: Runtime>(
+    client: &ComputeClient<R>,
+    mc: &MotionCtx,
+    width: u32,
+    height: u32,
+    frame_count: u32,
+    centre_slot: u32,
+    neighbour_slot: u32,
+    neighbour_idx: u32,
+    refine_radius: u32,
+    pyramid: &Handle,
+    mv_field: &Handle,
+    confidence: &Handle,
+    write_confidence: bool,
+    sad_noise_floor: f32,
+    thsad: f32,
+) -> Result<(), anyhow::Error> {
+    let mv_offset = mv_field_byte_offset(mc, neighbour_idx);
+    let mv_slot = mv_field.clone().offset_start(mv_offset);
+    let mv_slot_len = (mc.blocks_x as usize) * (mc.blocks_y as usize) * 2;
+
+    let (conf_slot, conf_slot_len) = if write_confidence {
+        let conf_offset = confidence_byte_offset(mc, neighbour_idx);
+        (
+            confidence.clone().offset_start(conf_offset),
+            (mc.blocks_x as usize) * (mc.blocks_y as usize),
+        )
+    } else {
+        (confidence.clone(), 1)
+    };
+
+    let (fw, fh) = level_dims(width, height, 0);
+    let fine_centre = pyramid.clone().offset_start(pyramid_slot_byte_offset(
+        width,
+        height,
+        frame_count,
+        0,
+        centre_slot,
+    ));
+    let fine_neighbour = pyramid.clone().offset_start(pyramid_slot_byte_offset(
+        width,
+        height,
+        frame_count,
+        0,
+        neighbour_slot,
+    ));
+    let level_len = (fw * fh) as usize;
+    let grid = CubeCount::new_2d(mc.blocks_x, mc.blocks_y);
+    let dim = CubeDim::new_2d(8, 8);
+
+    unsafe {
+        nlm_mc_block_match_fine::launch_unchecked::<R>(
+            client,
+            grid,
+            dim,
+            ArrayArg::from_raw_parts(fine_centre, level_len),
+            ArrayArg::from_raw_parts(fine_neighbour, level_len),
+            ArrayArg::from_raw_parts(mv_slot, mv_slot_len),
+            ArrayArg::from_raw_parts(conf_slot, conf_slot_len),
+            write_confidence,
+            sad_noise_floor,
+            thsad,
+            fw,
+            fh,
+            mc.blksize,
+            mc.step,
+            refine_radius,
+            1u32,
+            mc.blocks_x,
+            mc.blocks_y,
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nlmeans::motion::MotionCompensationMode;
+    use crate::nlmeans::motion::{MotionCompensationMode, MotionEstimation};
 
     fn mc(blksize: u32, overlap: u32) -> MotionCtx {
         MotionCtx::new(
@@ -186,6 +274,7 @@ mod tests {
                 overlap,
                 search_radius: 4,
                 pyramid_levels: 2,
+                estimation: MotionEstimation::Direct,
             },
             64,
             64,
@@ -243,6 +332,7 @@ mod tests {
                 overlap: 0,
                 search_radius: 1,
                 pyramid_levels: 1,
+                estimation: MotionEstimation::Direct,
             },
             4,
             4,

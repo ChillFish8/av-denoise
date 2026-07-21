@@ -1,8 +1,19 @@
 use cubecl::prelude::*;
+use cubecl::server::Handle;
 
 use super::helpers::*;
 use crate::nlmeans::kernels::motion::nlm_mc_block_match_fine;
-use crate::nlmeans::motion::{DEFAULT_BLKSIZE, DEFAULT_SEARCH_RADIUS};
+use crate::nlmeans::motion::{
+    CHAINED_RADIUS_THRESHOLD,
+    DEFAULT_BLKSIZE,
+    DEFAULT_OVERLAP,
+    DEFAULT_PYRAMID_LEVELS,
+    DEFAULT_SEARCH_RADIUS,
+    MotionCtx,
+    mv_field_byte_offset,
+    neighbour_idx_for_k,
+    pair_byte_offset,
+};
 use crate::nlmeans::*;
 
 /// Build a frame with a constant background and a bright square at
@@ -259,6 +270,7 @@ fn motion_compensation_uniform_passthrough() {
             overlap: 4,
             search_radius: 2,
             pyramid_levels: 2,
+            estimation: MotionEstimation::Direct,
         },
         hq: None,
     };
@@ -304,6 +316,7 @@ fn motion_compensation_with_bilateral_finite() {
             overlap: 4,
             search_radius: 2,
             pyramid_levels: 2,
+            estimation: MotionEstimation::Direct,
         },
         hq: None,
     };
@@ -360,6 +373,7 @@ fn motion_compensation_translating_square_preserves_centre() {
             overlap: 4,
             search_radius: 2,
             pyramid_levels: 2,
+            estimation: MotionEstimation::Direct,
         },
         hq: None,
     };
@@ -399,5 +413,606 @@ fn motion_compensation_translating_square_preserves_centre() {
         (bg_val - bg).abs() < 0.05,
         "background pixel (2, 2) should stay near {bg}, got {bg_val} \
          (MC may be warping neighbour squares into the background region)",
+    );
+}
+
+// --- Chained motion estimation, pair ring + composition kernel ---
+//
+// These tests exercise `NlmDenoiser::run_chain_compose` and the
+// push-time pair analyse directly. Nothing in the submit path calls
+// either yet, so every test drives them explicitly.
+
+const CHAIN_TEST_RADIUS: u32 = 2;
+const CHAIN_TEST_SIZE: u32 = 64;
+
+fn chained_params(refine_radius: u32) -> NlmParams {
+    NlmParams {
+        temporal_radius: CHAIN_TEST_RADIUS,
+        search_radius: 2,
+        patch_radius: 2,
+        strength: 1.2,
+        self_weight: 1.0,
+        channels: ChannelMode::Luma,
+        prefilter: PrefilterMode::None,
+        // Matches the MC geometry the other tests in this file already
+        // exercise through the real push pipeline (blksize=8, overlap=4,
+        // pyramid_levels=2).
+        motion_compensation: MotionCompensationMode::Mvtools {
+            blksize: 8,
+            overlap: 4,
+            search_radius: 2,
+            pyramid_levels: 2,
+            estimation: MotionEstimation::Chained { refine_radius },
+        },
+        hq: None,
+    }
+}
+
+/// Builds a `w × h` frame that reads `world` shifted by `(dx, dy)`
+/// pixels, clamped to `world`'s own edges, i.e. `frame(x, y) = world(x
+/// - dx, y - dy)`. A sequence built from the same `world` with `dx = n
+/// * v` for increasing `n` gives adjacent frames that differ by
+/// exactly `(v, v)` everywhere except right at the frame edges.
+fn frame_shifted_by(world: &[f32], w: u32, h: u32, dx: i32, dy: i32) -> Vec<f32> {
+    let mut frame = vec![0.0f32; (w * h) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let sx = shift_clamped(x as i32, dx, w as i32) as u32;
+            let sy = shift_clamped(y as i32, dy, h as i32) as u32;
+            frame[(y * w + x) as usize] = world[(sy * w + sx) as usize];
+        }
+    }
+    frame
+}
+
+/// Same idea as `frame_shifted_by`, but wraps at the frame edges
+/// (`rem_euclid`) instead of clamping. `world`'s content is spatially
+/// unstructured (see `noisy_copy`), so a wrapped shift keeps every
+/// pixel position fully translation-invariant, with no degenerate
+/// clamped border region anywhere in the frame regardless of how large
+/// `dx`/`dy` grow. Used by the k4 alignment test below, which pushes
+/// many frames with a steadily growing absolute shift and needs the
+/// whole frame to stay a clean, uniform translation of `world`.
+fn frame_shifted_wrapped(world: &[f32], w: u32, h: u32, dx: i32, dy: i32) -> Vec<f32> {
+    let mut frame = vec![0.0f32; (w * h) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let sx = (x as i32 - dx).rem_euclid(w as i32) as u32;
+            let sy = (y as i32 - dy).rem_euclid(h as i32) as u32;
+            frame[(y * w + x) as usize] = world[(sy * w + sx) as usize];
+        }
+    }
+    frame
+}
+
+/// Pushes a constant-velocity sequence (`v` pixels/frame on both axes,
+/// built from one rich pattern) through a `Chained` denoiser. Pushes
+/// `1 + 3 * radius + 2` real frames past the stream's first one. `1 +
+/// 3 * radius` is enough for every one of the `2 * radius` pair-ring
+/// slots to be overwritten by real analyse past the initial priming
+/// duplicates (see `NlmDenoiser::pair_slot`'s doc comment for the
+/// `2 * radius`-push lifetime this relies on), plus 2 frames of margin.
+/// The chosen frame size and a centre-block readout keep every match
+/// clear of both the frame edges and the accumulated drift.
+fn push_constant_velocity(client: &ComputeClient<R>, radius: u32, v: i32) -> NlmDenoiser<R> {
+    let w = CHAIN_TEST_SIZE;
+    let h = CHAIN_TEST_SIZE;
+    let world = noisy_copy(w, 0.5, 0.2, 99);
+
+    let mut d = NlmDenoiser::<R>::new(client, chained_params(2), w, h);
+
+    let real_pushes = 1 + 3 * radius as i32 + 2;
+    for n in 0..real_pushes {
+        let frame = frame_shifted_by(&world, w, h, n * v, n * v);
+        d.push_frame(&frame);
+    }
+    d
+}
+
+/// Runs `run_chain_compose` for neighbour offset `k` and reads back the
+/// composed MV at the block nearest the frame's centre.
+fn composed_centre_mv(d: &NlmDenoiser<R>, radius: u32, k: i32) -> (i32, i32) {
+    d.run_chain_compose(radius, k)
+        .expect("chain compose dispatch failed");
+
+    let mc = MotionCtx::new(d.params.motion_compensation, d.width, d.height).unwrap();
+    let neighbour_idx = neighbour_idx_for_k(radius, k);
+    let mv_field = d
+        .mv_field_buf
+        .as_ref()
+        .expect("mv_field allocated when mc_ctx is Some");
+    let offset = mv_field_byte_offset(&mc, neighbour_idx);
+    let sliced = mv_field.clone().offset_start(offset);
+    let bytes = d.client.read_one(sliced).expect("mv readback failed");
+    let data = i32::from_bytes(&bytes);
+
+    let bx = mc.blocks_x / 2;
+    let by = mc.blocks_y / 2;
+    let idx = ((by * mc.blocks_x + bx) * 2) as usize;
+    (data[idx], data[idx + 1])
+}
+
+/// Asserts that the `radius` pair-ring writes starting at
+/// `ring_head_before` (the `ring_head` value the first of those writes
+/// saw, pre-advance) are all zero in both directions. Used to check
+/// duplicated slots (priming or flush), whose pair is zero motion by
+/// definition.
+fn assert_pair_ring_zero_from(d: &NlmDenoiser<R>, ring_head_before: i32, radius: u32) {
+    let mc = MotionCtx::new(d.params.motion_compensation, d.width, d.height).unwrap();
+    let pair_ring = d
+        .pair_ring_buf
+        .as_ref()
+        .expect("pair_ring allocated when Chained is active");
+    let pair_ring_slots = 2 * radius as i32;
+    let dir_len = mc.pair_direction_len() as usize;
+
+    for i in 0..radius as i32 {
+        let slot = (ring_head_before + i).rem_euclid(pair_ring_slots) as u32;
+        for direction in 0..2u32 {
+            let offset = pair_byte_offset(&mc, slot, direction);
+            let sliced = pair_ring.clone().offset_start(offset);
+            let bytes = d.client.read_one(sliced).expect("pair ring readback failed");
+            let data = i32::from_bytes(&bytes);
+            assert!(
+                data[..dir_len].iter().all(|&v| v == 0),
+                "duplicate pair slot {slot} direction {direction} should be zero-filled, got {:?}",
+                &data[..dir_len],
+            );
+        }
+    }
+}
+
+/// Zero-motion sequence (every pushed frame is bit-identical). Every
+/// composed field, forward and backward, must be exactly zero.
+#[test]
+fn chain_compose_zero_motion_gives_zero_mv() {
+    let client = make_client();
+    let radius = CHAIN_TEST_RADIUS;
+    let d = push_constant_velocity(&client, radius, 0);
+
+    for k in 1..=radius as i32 {
+        assert_eq!(
+            composed_centre_mv(&d, radius, k),
+            (0, 0),
+            "forward k={k} should compose to zero motion on a static sequence"
+        );
+        assert_eq!(
+            composed_centre_mv(&d, radius, -k),
+            (0, 0),
+            "backward k={k} should compose to zero motion on a static sequence"
+        );
+    }
+}
+
+/// Constant-velocity sequence. The forward-composed MV to neighbour k
+/// must equal exactly `k * v` for every k up to the temporal radius.
+///
+/// Uses `v = 2` rather than `1`, since the block-match geometry here
+/// runs a 2-level pyramid, and a `v = 1` fine-level shift is only half
+/// a pixel at the coarse level, ambiguous enough that the coarse pass
+/// can lock onto the wrong candidate for either pair direction
+/// (confirmed by hand-checking the pair ring directly during
+/// debugging). `v = 2` gives a clean one-pixel shift at both levels.
+#[test]
+fn chain_compose_constant_velocity_matches_k_times_v() {
+    let client = make_client();
+    let radius = CHAIN_TEST_RADIUS;
+    let v = 2;
+    let d = push_constant_velocity(&client, radius, v);
+
+    for k in 1..=radius as i32 {
+        assert_eq!(
+            composed_centre_mv(&d, radius, k),
+            (k * v, k * v),
+            "forward k={k} should compose to exactly k*v = ({}, {})",
+            k * v,
+            k * v
+        );
+    }
+}
+
+/// Same constant-velocity sequence walked backward. The composed MV to
+/// neighbour -k must equal `-k * v`, the mirror image of the forward
+/// case, since the backward pass reads the newer→older field at every
+/// hop instead of older→newer. Uses `v = 2` for the same reason as
+/// `chain_compose_constant_velocity_matches_k_times_v`.
+#[test]
+fn chain_compose_backward_direction_matches_negative_k_times_v() {
+    let client = make_client();
+    let radius = CHAIN_TEST_RADIUS;
+    let v = 2;
+    let d = push_constant_velocity(&client, radius, v);
+
+    for k in 1..=radius as i32 {
+        assert_eq!(
+            composed_centre_mv(&d, radius, -k),
+            (-k * v, -k * v),
+            "backward k={k} should compose to exactly -k*v = ({}, {})",
+            -k * v,
+            -k * v
+        );
+    }
+}
+
+/// Duplicated ring slots (stream priming and end-of-stream flush) get
+/// a zero-filled pair field rather than a real analyse. Pushes real,
+/// nonzero-motion frames in between so the check isn't trivially true
+/// from a freshly-allocated, still-zeroed buffer.
+#[test]
+fn chain_compose_duplicated_slot_pairs_are_zero_filled() {
+    let client = make_client();
+    let radius = CHAIN_TEST_RADIUS;
+    let w = CHAIN_TEST_SIZE;
+    let h = CHAIN_TEST_SIZE;
+    let world = noisy_copy(w, 0.5, 0.2, 7);
+
+    let mut d = NlmDenoiser::<R>::new(&client, chained_params(2), w, h);
+
+    // During priming the very first push has no older partner (`ring_head ==
+    // 0`), so the analyse skip leaves the window's very first gap to
+    // be filled entirely by the `radius` auto-primed duplicates that
+    // follow. Each of those duplicates' own pair write happens with
+    // `ring_head` starting at 1 (right after the real push's
+    // `advance_ring`).
+    d.push_frame(&world);
+    assert_pair_ring_zero_from(&d, 1, radius);
+
+    // Overwrite every pair slot with real, nonzero motion before
+    // checking the flush path, so its zero-fill isn't indistinguishable
+    // from an untouched buffer.
+    for n in 1..=(3 * radius) {
+        let frame = frame_shifted_by(&world, w, h, n as i32, n as i32);
+        d.push_frame(&frame);
+    }
+
+    let ring_head_before_flush = d.ring_head as i32;
+    d.flush(|_| {}).expect("flush failed");
+    assert_pair_ring_zero_from(&d, ring_head_before_flush, radius);
+}
+
+// --- Chained motion estimation, submit-path wiring (dispatch.rs) ---
+//
+// The tests above drive `run_chain_compose` directly. These exercise the
+// real per-submit dispatch branch (`run_motion_compensation` in
+// `dispatch.rs`), which composes, refines, and warps automatically on
+// every `push_frame` + `denoise`/`flush` call once `estimation` is
+// `Chained`.
+
+/// Builds an HQ config with `Chained` motion estimation at the given
+/// temporal radius and refinement radius. Auto noise estimation and
+/// temporal confidence stay on, mirroring `hq_temporal_mc_confidence_smoke`
+/// in `tests/hq.rs` but with the chained estimator instead of direct.
+fn chained_hq_params(radius: u32, refine_radius: u32) -> NlmParams {
+    NlmParams {
+        temporal_radius: radius,
+        search_radius: 2,
+        patch_radius: 2,
+        strength: 1.2,
+        self_weight: 1.0,
+        channels: ChannelMode::Luma,
+        prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::Mvtools {
+            blksize: 8,
+            overlap: 4,
+            search_radius: 2,
+            pyramid_levels: 2,
+            estimation: MotionEstimation::Chained { refine_radius },
+        },
+        hq: Some(HqParams {
+            auto_strength: true,
+            noise_floor: true,
+            sigma_override: None,
+            temporal_confidence: true,
+            thsad_scale: 1.0,
+        }),
+    }
+}
+
+/// End-to-end smoke test. A `Chained`-estimation denoiser must produce
+/// finite, `[0, 1]` output for every pushed frame, whether from pushes
+/// or the trailing flush, at the given temporal radius. Exercises the
+/// full `push_frame` → `denoise` → `flush` pipeline, so the compose and
+/// seeded-refine dispatch branch in `run_motion_compensation` actually
+/// runs (not just `run_chain_compose` in isolation).
+fn chained_end_to_end_finite(radius: u32) {
+    let client = make_client();
+    let w = 32u32;
+    let h = 32u32;
+
+    let mut denoiser = NlmDenoiser::<R>::new(&client, chained_hq_params(radius, 2), w, h);
+
+    let frames: Vec<Vec<f32>> = (0..8)
+        .map(|i| make_frame_with_noisy_region(w, h, 1, 0.5, 6 + i, 8, 2, 0.8))
+        .collect();
+
+    let mut emitted = 0usize;
+    let check = |frame: &[f32]| {
+        for (i, &v) in frame.iter().enumerate() {
+            assert!(v.is_finite(), "pixel {i}: non-finite output {v}");
+            assert!((0.0..=1.0).contains(&v), "pixel {i}: out-of-range output {v}");
+        }
+    };
+
+    for frame in &frames {
+        denoiser.push_frame(frame);
+        if let Some(result) = denoiser.denoise().unwrap() {
+            check(result);
+            emitted += 1;
+        }
+    }
+
+    denoiser
+        .flush(|frame| {
+            check(frame);
+            emitted += 1;
+        })
+        .unwrap();
+
+    assert_eq!(emitted, frames.len(), "expected one output per pushed frame");
+}
+
+#[test]
+fn chained_end_to_end_finite_r2() {
+    chained_end_to_end_finite(2);
+}
+
+#[test]
+fn chained_end_to_end_finite_r4() {
+    chained_end_to_end_finite(4);
+}
+
+/// `MotionCompensationMode::mvtools_default()` sets `estimation: Direct`
+/// (see its own doc comment). Building the same configuration two ways
+/// the codebase supports it, the convenience constructor and an
+/// explicit `Mvtools` struct literal, must give bit-identical output for
+/// identical input, since dispatch behaviour depends only on the
+/// resulting value. Guards against the new chained dispatch branch in
+/// `run_motion_compensation` accidentally changing what the Direct
+/// branch does.
+#[test]
+fn direct_estimation_default_and_explicit_construction_match_bit_for_bit() {
+    let client = make_client();
+    let w = 32u32;
+    let h = 32u32;
+    let frame = make_frame_with_noisy_region(w, h, 1, 0.5, 16, 16, 4, 0.8);
+
+    let run = |mc: MotionCompensationMode| {
+        let params = NlmParams {
+            temporal_radius: 1,
+            search_radius: 2,
+            patch_radius: 2,
+            strength: 1.2,
+            self_weight: 1.0,
+            channels: ChannelMode::Luma,
+            prefilter: PrefilterMode::None,
+            motion_compensation: mc,
+            hq: None,
+        };
+        let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
+        d.push_frame(&frame);
+        d.push_frame(&frame);
+        d.push_frame(&frame);
+        d.denoise().unwrap().unwrap().to_vec()
+    };
+
+    let via_default = run(MotionCompensationMode::mvtools_default());
+    let via_explicit = run(MotionCompensationMode::Mvtools {
+        blksize: DEFAULT_BLKSIZE,
+        overlap: DEFAULT_OVERLAP,
+        search_radius: DEFAULT_SEARCH_RADIUS,
+        pyramid_levels: DEFAULT_PYRAMID_LEVELS,
+        estimation: MotionEstimation::Direct,
+    });
+
+    assert_eq!(
+        via_default, via_explicit,
+        "Direct estimation must give the same output regardless of which \
+         constructor produced the MotionCompensationMode value"
+    );
+}
+
+// --- Auto estimation, resolution allocates the pair ring exactly like
+// an explicit Chained request would ---
+
+fn auto_params(temporal_radius: u32) -> NlmParams {
+    NlmParams {
+        temporal_radius,
+        search_radius: 2,
+        patch_radius: 2,
+        strength: 1.2,
+        self_weight: 1.0,
+        channels: ChannelMode::Luma,
+        prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::Mvtools {
+            blksize: 8,
+            overlap: 4,
+            search_radius: 2,
+            pyramid_levels: 2,
+            estimation: MotionEstimation::Auto,
+        },
+        hq: None,
+    }
+}
+
+/// `Auto` at or above `CHAINED_RADIUS_THRESHOLD` resolves to `Chained`,
+/// so the pair ring must be allocated at construction exactly as if
+/// `Chained` had been requested explicitly. Reuses the
+/// `pair_ring_buf.is_some()`/`is_none()` accessor pattern
+/// `tests/confidence.rs` already establishes for `confidence_buf`.
+#[test]
+fn auto_estimation_at_high_radius_allocates_pair_ring() {
+    let client = make_client();
+    let params = auto_params(CHAINED_RADIUS_THRESHOLD);
+
+    let d = NlmDenoiser::<R>::new(&client, params, 32, 32);
+
+    assert!(
+        d.pair_ring_buf.is_some(),
+        "Auto at radius {CHAINED_RADIUS_THRESHOLD} (>= CHAINED_RADIUS_THRESHOLD) should \
+         resolve to Chained and allocate the pair ring"
+    );
+}
+
+/// `Auto` below `CHAINED_RADIUS_THRESHOLD` resolves to `Direct`, so the
+/// pair ring must stay unallocated, matching the direct path's existing
+/// zero-cost guarantee.
+#[test]
+fn auto_estimation_at_low_radius_does_not_allocate_pair_ring() {
+    let client = make_client();
+    let params = auto_params(CHAINED_RADIUS_THRESHOLD - 1);
+
+    let d = NlmDenoiser::<R>::new(&client, params, 32, 32);
+
+    assert!(
+        d.pair_ring_buf.is_none(),
+        "Auto at radius {} (< CHAINED_RADIUS_THRESHOLD) should resolve to Direct \
+         and skip the pair ring",
+        CHAINED_RADIUS_THRESHOLD - 1
+    );
+}
+
+// --- The key regression test, chained beats direct once k*v exceeds
+// direct's search window ---
+
+/// Temporal radius for the k4 alignment tests below. Chosen so k=4 is
+/// reachable (needs `radius >= 4`).
+const K4_RADIUS: u32 = 4;
+/// Frame side length. Comfortably larger than any candidate offset the
+/// coarse+fine search (or its seeded refine) can reach, so a wrapped
+/// shift is never ambiguous with its aliased counterpart on the other
+/// side of the torus.
+const K4_SIZE: u32 = 128;
+/// Per-frame diagonal shift in pixels. At this geometry (`mc.search_radius
+/// = 4`, `pyramid_levels = 2`), the coarse pass doubles reach to 8px
+/// (half-res search radius 4, scaled by the /2 level) and the fine pass
+/// adds another 4px around that seed, so direct's reachable window is
+/// 12px total. `k = 1` motion (this value) sits comfortably inside that
+/// window. `k = 4` motion (`4 * K4_V = 16` px) exceeds it.
+const K4_V: i32 = 4;
+
+fn k4_params(estimation: MotionEstimation) -> NlmParams {
+    NlmParams {
+        temporal_radius: K4_RADIUS,
+        search_radius: 2,
+        patch_radius: 2,
+        strength: 1.2,
+        self_weight: 1.0,
+        channels: ChannelMode::Luma,
+        prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::Mvtools {
+            blksize: 8,
+            overlap: 4,
+            search_radius: 4,
+            pyramid_levels: 2,
+            estimation,
+        },
+        hq: None,
+    }
+}
+
+/// Reads back frame `slot` from a ring-buffer handle laid out
+/// `[total_frames][h][w][stored_ch]` f32, matching `input_buf` /
+/// `compensated_input_buf`'s shared layout.
+fn read_frame_slot(
+    client: &ComputeClient<R>,
+    buf: &Handle,
+    slot: u32,
+    w: u32,
+    h: u32,
+    stored_ch: u32,
+) -> Vec<f32> {
+    let frame_size = (w * h * stored_ch) as usize;
+    let byte_offset = (slot as u64) * (frame_size as u64) * (size_of::<f32>() as u64);
+    let sliced = buf.clone().offset_start(byte_offset);
+    let bytes = client.read_one(sliced).expect("frame readback failed");
+    f32::from_bytes(&bytes)[..frame_size].to_vec()
+}
+
+/// Pushes a diagonal constant-velocity sequence (`K4_V` px/frame,
+/// wrapped at the edges via `frame_shifted_wrapped` so the whole frame
+/// stays a clean, uniform translation of one rich pattern with no
+/// degenerate border region) through a `k4_params`-geometry denoiser,
+/// then returns the mean absolute residual between the centre frame and
+/// the forward `k`-neighbour's *compensated* (warped) copy, averaged
+/// over the whole frame.
+///
+/// Pushes `2 * K4_RADIUS + 4` real frames before reading back, clearing
+/// the stream's leading-edge priming duplicates (which need only `>
+/// 2 * radius + 1` real pushes, see `NlmDenoiser::pair_slot`'s doc
+/// comment) with a small margin to spare.
+fn k4_compensated_residual(estimation: MotionEstimation, k: i32) -> f32 {
+    let client = make_client();
+    let w = K4_SIZE;
+    let h = K4_SIZE;
+    let world = noisy_copy(w, 0.5, 0.2, 55);
+
+    let mut d = NlmDenoiser::<R>::new(&client, k4_params(estimation), w, h);
+
+    let real_pushes = 2 * K4_RADIUS as i32 + 4;
+    for n in 0..real_pushes {
+        let frame = frame_shifted_wrapped(&world, w, h, n * K4_V, n * K4_V);
+        d.push_frame(&frame);
+    }
+    d.denoise().unwrap();
+
+    let radius = d.params.temporal_radius;
+    let stored_ch = d.params.channels.storage_count();
+    let centre_slot = d.phys_frame(radius as i32);
+    let neighbour_slot = d.phys_frame(radius as i32 + k);
+    let compensated = d
+        .compensated_input_buf
+        .as_ref()
+        .expect("compensated buf allocated when MC is active");
+
+    let centre_frame = read_frame_slot(&d.client, &d.input_buf, centre_slot, w, h, stored_ch);
+    let warped = read_frame_slot(&d.client, compensated, neighbour_slot, w, h, stored_ch);
+
+    let mut sum = 0.0f32;
+    let mut count = 0u32;
+    for y in 0..h {
+        for x in 0..w {
+            let idx = (y * w + x) as usize;
+            sum += (centre_frame[idx] - warped[idx]).abs();
+            count += 1;
+        }
+    }
+    sum / count as f32
+}
+
+/// THE key regression test for chained motion estimation. At `k = 4`
+/// the true displacement is `4 * K4_V = 16` px, beyond direct's
+/// reachable window (`≈ 12` px at this geometry), while chained
+/// composes four exact per-step vectors and only needs a `refine_radius
+/// = 2` correction to land on the true offset. A real, wide-margin
+/// assertion, not just a smoke check, since this comparison is the
+/// entire reason `Chained` estimation exists.
+#[test]
+fn chained_beats_direct_at_k4_beyond_direct_window() {
+    let direct_residual = k4_compensated_residual(MotionEstimation::Direct, 4);
+    let chained_residual = k4_compensated_residual(MotionEstimation::Chained { refine_radius: 2 }, 4);
+
+    assert!(
+        direct_residual > 0.02,
+        "expected direct's k=4 match to show a real misalignment residual \
+         (window reach ≈12px, true motion 16px), got {direct_residual}"
+    );
+    assert!(
+        chained_residual < direct_residual * 0.5,
+        "chained's composed+refined k=4 alignment should beat direct's by a \
+         wide margin: chained={chained_residual}, direct={direct_residual}"
+    );
+}
+
+/// Companion sanity check. At `k = 1` the true displacement (`K4_V` = 4
+/// px) sits comfortably inside direct's reach, so direct should already
+/// align cleanly there. This isolates the k=4 test's effect to the
+/// window-size failure mode rather than a blanket "chained is always
+/// better" claim.
+#[test]
+fn direct_already_aligns_at_k1_inside_its_window() {
+    let direct_residual = k4_compensated_residual(MotionEstimation::Direct, 1);
+    assert!(
+        direct_residual < 0.02,
+        "direct should align cleanly at k=1 (motion {K4_V}px, well inside its ~12px reach), got {direct_residual}"
     );
 }

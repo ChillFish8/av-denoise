@@ -601,6 +601,7 @@ fn hq_temporal_mc_confidence_smoke() {
             overlap: 4,
             search_radius: 2,
             pyramid_levels: 2,
+            estimation: MotionEstimation::Direct,
         },
         hq: Some(HqParams::with_sigma(6.0 / 255.0)),
         ..base_params()

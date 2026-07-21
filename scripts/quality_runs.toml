@@ -119,6 +119,33 @@ args = [
     "--motion-compensation",
 ]
 
+# ---------------------------------------------------------------------------
+# Phase 6: temporal radius 4, no MC vs MC. `--motion-compensation` has no
+# way to pick an estimation strategy from the CLI; it always resolves
+# automatically from `--temporal-radius`, and at r4 that resolves to
+# `Chained` (radius 4 is at or above the auto-resolution threshold), so
+# this row measures chained's quality at the radius where its reach
+# advantage should show up most clearly. `av_hq_temporal_r2_mc` above
+# stays on the direct path, since auto resolves to direct at r2.
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "av_hq_temporal_r4"
+kind = "av-denoise"
+workers = 2
+args = ["--algorithm", "nlmeans-hq", "--temporal-radius", "4", "--channel-mode", "luma,chroma"]
+
+[[runs]]
+name = "av_hq_temporal_r4_mc"
+kind = "av-denoise"
+workers = 2
+args = [
+    "--algorithm", "nlmeans-hq",
+    "--temporal-radius", "4",
+    "--channel-mode", "luma,chroma",
+    "--motion-compensation",
+]
+
 # Opt-in NLM spatial pilot. `--prefilter` defaults to none for both
 # algorithms, so this tracks the pilot lever at its calibrated default
 # scale (0.4) against the `av_hq_temporal_r2` no-pilot baseline above.

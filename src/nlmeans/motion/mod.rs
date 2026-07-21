@@ -1,9 +1,11 @@
 mod analyse;
+mod chain;
 mod compensate;
 mod confidence;
 mod pyramid;
 
-pub(crate) use analyse::{confidence_byte_offset, run_analyse};
+pub(crate) use analyse::{confidence_byte_offset, mv_field_byte_offset, run_analyse, run_seeded_refine};
+pub(crate) use chain::{neighbour_idx_for_k, pair_byte_offset, run_pair_analyse, zero_pair_slot};
 pub(crate) use compensate::run_compensate;
 pub(crate) use confidence::{run_confidence_for_neighbour, sad_noise_floor, thsad};
 use cubecl::prelude::*;
@@ -38,7 +40,86 @@ pub enum MotionCompensationMode {
         /// coarse pass; `2` adds a `/2` coarse pass that seeds the
         /// fine pass. Bounded by [`MAX_PYRAMID_LEVELS`].
         pyramid_levels: u32,
+        /// How temporal MVs are estimated. `Auto` (the default) picks
+        /// the strategy from the temporal radius. Callers normally
+        /// leave this at the default. Explicit `Direct`/`Chained` are
+        /// mainly useful for pinning a variant in tests and benches.
+        estimation: MotionEstimation,
     },
+}
+
+/// Strategy for estimating a temporal neighbour's motion vector.
+#[non_exhaustive]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub enum MotionEstimation {
+    /// Resolve to `Direct` or `Chained` from the temporal radius at
+    /// denoiser construction. See [`MotionEstimation::resolve`] for the
+    /// exact rule and its empirical basis.
+    #[default]
+    Auto,
+    /// Match every neighbour directly against the centre frame at the
+    /// configured search radius. Cost scales with the temporal radius,
+    /// since each neighbour repeats the full coarse+fine search.
+    Direct,
+    /// Estimate motion between adjacent frames only, once per pushed
+    /// frame, then compose the per-step vectors into a seed for each
+    /// neighbour and correct residual drift with a small seeded
+    /// refinement search.
+    Chained {
+        /// Search radius for the seeded refinement pass, in pixels at
+        /// the finest pyramid level. Small because the composed seed
+        /// already carries most of the true displacement.
+        refine_radius: u32,
+    },
+}
+
+/// Default refinement radius for [`MotionEstimation::Chained`].
+pub const DEFAULT_REFINE_RADIUS: u32 = 2;
+
+/// Temporal radius at or above which [`MotionEstimation::Auto`]
+/// resolves to `Chained` instead of `Direct`. Below this, `Direct`
+/// tracks slightly better since the true motion still fits inside its
+/// own search window. At or above it, `Chained` stays in-window and is
+/// faster, since its reach scales with the radius instead of being
+/// capped by a fixed search window.
+pub const CHAINED_RADIUS_THRESHOLD: u32 = 3;
+
+impl MotionEstimation {
+    /// Convenience constructor for `Chained` with the library default
+    /// refinement radius.
+    pub fn chained_default() -> Self {
+        Self::Chained {
+            refine_radius: DEFAULT_REFINE_RADIUS,
+        }
+    }
+
+    /// Resolve `Auto` against the temporal radius, returning a concrete
+    /// `Direct` or `Chained` estimation. Never returns `Auto`. `Direct`
+    /// and `Chained` pass through unchanged, regardless of
+    /// `temporal_radius`. See [`CHAINED_RADIUS_THRESHOLD`] for the
+    /// threshold this applies.
+    pub fn resolve(self, temporal_radius: u32) -> Self {
+        match self {
+            Self::Auto if temporal_radius >= CHAINED_RADIUS_THRESHOLD => Self::chained_default(),
+            Self::Auto => Self::Direct,
+            other => other,
+        }
+    }
+
+    /// Reject a refinement radius the seeded fine kernel can't honour.
+    pub(crate) fn validate(&self) -> Result<(), anyhow::Error> {
+        let Self::Chained { refine_radius } = *self else {
+            return Ok(());
+        };
+
+        if refine_radius == 0 || refine_radius > MAX_SEARCH_RADIUS {
+            anyhow::bail!(
+                "motion-estimation refine_radius={refine_radius} must be in 1..={MAX_SEARCH_RADIUS}"
+            );
+        }
+
+        Ok(())
+    }
 }
 
 /// Default block size used when callers don't override it. Matches the
@@ -73,12 +154,26 @@ impl MotionCompensationMode {
             overlap: DEFAULT_OVERLAP,
             search_radius: DEFAULT_SEARCH_RADIUS,
             pyramid_levels: DEFAULT_PYRAMID_LEVELS,
+            estimation: MotionEstimation::Direct,
         }
     }
 
     /// Whether motion compensation is active at all.
     pub(crate) fn is_active(self) -> bool {
         !matches!(self, Self::None)
+    }
+
+    /// Resolved estimation strategy for this mode at `temporal_radius`.
+    /// `None` when this mode isn't `Mvtools`. Never `Auto`, see
+    /// [`MotionEstimation::resolve`]. The single source every
+    /// estimation-dependent decision site (pair-ring allocation,
+    /// push-time pair-analyse gating, the submit-path dispatch branch)
+    /// goes through.
+    pub(crate) fn resolved_estimation(&self, temporal_radius: u32) -> Option<MotionEstimation> {
+        match *self {
+            Self::Mvtools { estimation, .. } => Some(estimation.resolve(temporal_radius)),
+            Self::None => None,
+        }
     }
 
     /// Reject parameter combinations that the kernels can't honour.
@@ -88,6 +183,7 @@ impl MotionCompensationMode {
             overlap,
             search_radius,
             pyramid_levels,
+            estimation,
         } = *self
         else {
             return Ok(());
@@ -122,6 +218,8 @@ impl MotionCompensationMode {
             );
         }
 
+        estimation.validate()?;
+
         Ok(())
     }
 }
@@ -153,6 +251,7 @@ impl MotionCtx {
             overlap,
             search_radius,
             pyramid_levels,
+            estimation: _,
         } = mode
         else {
             return None;
@@ -193,6 +292,18 @@ impl MotionCtx {
         (blocks * size_of::<f32>() as u64).next_multiple_of(32)
     }
 
+    /// i32 elements per pair-ring direction sub-array, one `(dx, dy)`
+    /// per block, matching the MV field's own per-neighbour layout.
+    pub(crate) fn pair_direction_len(&self) -> u32 {
+        self.blocks_x * self.blocks_y * 2
+    }
+
+    /// i32 elements per pair-ring slot, both directions back to back
+    /// (see [`pair_ring_slot_count`] for the slot-count invariant).
+    pub(crate) fn pair_slot_len(&self) -> u32 {
+        2 * self.pair_direction_len()
+    }
+
     /// Block geometry for the no-MC confidence pass. Uses the
     /// library's default block size and overlap, a single pyramid
     /// level (no coarse pass), and zero search radius (a static
@@ -206,12 +317,28 @@ impl MotionCtx {
                 overlap: DEFAULT_OVERLAP,
                 search_radius: 0,
                 pyramid_levels: 1,
+                estimation: MotionEstimation::Direct,
             },
             width,
             height,
         )
         .expect("Mvtools variant always yields Some")
     }
+}
+
+/// Pair-ring slot count for a temporal radius, `2 * radius`.
+///
+/// The pair ring stores one adjacent-frame motion field per gap
+/// between consecutive frames in the temporal window. A window of
+/// `2 * radius + 1` frames has exactly `2 * radius` such gaps, and a
+/// gap's pair field is only ever read by composition while both its
+/// frames remain in some window, a span of exactly `2 * radius`
+/// consecutive frame pushes. Sizing the ring at `2 * radius` slots
+/// means a slot's next reuse lands exactly when its previous contents
+/// stop being needed, never before (see
+/// `NlmDenoiser::pair_slot` for the derivation this relies on).
+pub(crate) fn pair_ring_slot_count(temporal_radius: u32) -> u32 {
+    2 * temporal_radius
 }
 
 /// Build the per-frame pyramid for the slot just uploaded by
@@ -269,6 +396,7 @@ mod tests {
             overlap: 0,
             search_radius: 4,
             pyramid_levels: 2,
+            estimation: MotionEstimation::Direct,
         };
         assert!(m.validate().is_err());
     }
@@ -280,6 +408,7 @@ mod tests {
             overlap: 0,
             search_radius: 4,
             pyramid_levels: 2,
+            estimation: MotionEstimation::Direct,
         };
         assert!(m.validate().is_err());
     }
@@ -291,6 +420,7 @@ mod tests {
             overlap: 16,
             search_radius: 4,
             pyramid_levels: 2,
+            estimation: MotionEstimation::Direct,
         };
         // overlap == blksize would give step=0.
         assert!(m.validate().is_err());
@@ -303,6 +433,7 @@ mod tests {
             overlap: 8,
             search_radius: 4,
             pyramid_levels: 2,
+            estimation: MotionEstimation::Direct,
         };
         m.validate().unwrap();
     }
@@ -314,6 +445,7 @@ mod tests {
             overlap: 4,
             search_radius: 0,
             pyramid_levels: 2,
+            estimation: MotionEstimation::Direct,
         };
         assert!(m.validate().is_err());
     }
@@ -325,8 +457,150 @@ mod tests {
             overlap: 4,
             search_radius: 4,
             pyramid_levels: 0,
+            estimation: MotionEstimation::Direct,
         };
         assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn chained_default_is_valid() {
+        let m = MotionCompensationMode::Mvtools {
+            blksize: 16,
+            overlap: 8,
+            search_radius: 4,
+            pyramid_levels: 2,
+            estimation: MotionEstimation::chained_default(),
+        };
+        m.validate().unwrap();
+        assert_eq!(
+            m,
+            MotionCompensationMode::Mvtools {
+                blksize: 16,
+                overlap: 8,
+                search_radius: 4,
+                pyramid_levels: 2,
+                estimation: MotionEstimation::Chained {
+                    refine_radius: DEFAULT_REFINE_RADIUS
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_refine_radius() {
+        let m = MotionCompensationMode::Mvtools {
+            blksize: 16,
+            overlap: 8,
+            search_radius: 4,
+            pyramid_levels: 2,
+            estimation: MotionEstimation::Chained { refine_radius: 0 },
+        };
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_refine_radius_above_max() {
+        let m = MotionCompensationMode::Mvtools {
+            blksize: 16,
+            overlap: 8,
+            search_radius: 4,
+            pyramid_levels: 2,
+            estimation: MotionEstimation::Chained {
+                refine_radius: MAX_SEARCH_RADIUS + 1,
+            },
+        };
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_refine_radius_at_max() {
+        let m = MotionCompensationMode::Mvtools {
+            blksize: 16,
+            overlap: 8,
+            search_radius: 4,
+            pyramid_levels: 2,
+            estimation: MotionEstimation::Chained {
+                refine_radius: MAX_SEARCH_RADIUS,
+            },
+        };
+        m.validate().unwrap();
+    }
+
+    #[test]
+    fn motion_estimation_default_is_auto() {
+        assert_eq!(MotionEstimation::default(), MotionEstimation::Auto);
+    }
+
+    #[test]
+    fn resolve_auto_below_threshold_gives_direct() {
+        assert_eq!(MotionEstimation::Auto.resolve(1), MotionEstimation::Direct);
+        assert_eq!(MotionEstimation::Auto.resolve(2), MotionEstimation::Direct);
+    }
+
+    #[test]
+    fn resolve_auto_at_and_above_threshold_gives_chained_default() {
+        assert_eq!(
+            MotionEstimation::Auto.resolve(CHAINED_RADIUS_THRESHOLD),
+            MotionEstimation::chained_default()
+        );
+        assert_eq!(
+            MotionEstimation::Auto.resolve(8),
+            MotionEstimation::chained_default()
+        );
+    }
+
+    #[test]
+    fn resolve_leaves_explicit_direct_unchanged_at_every_radius() {
+        for radius in 1..=8u32 {
+            assert_eq!(MotionEstimation::Direct.resolve(radius), MotionEstimation::Direct);
+        }
+    }
+
+    #[test]
+    fn resolve_leaves_explicit_chained_unchanged_at_every_radius() {
+        let chained = MotionEstimation::Chained { refine_radius: 5 };
+        for radius in 1..=8u32 {
+            assert_eq!(chained.resolve(radius), chained);
+        }
+    }
+
+    #[test]
+    fn validate_accepts_auto() {
+        let m = MotionCompensationMode::Mvtools {
+            blksize: 16,
+            overlap: 8,
+            search_radius: 4,
+            pyramid_levels: 2,
+            estimation: MotionEstimation::Auto,
+        };
+        m.validate().unwrap();
+    }
+
+    #[test]
+    fn resolved_estimation_is_none_when_mode_is_none() {
+        assert_eq!(MotionCompensationMode::None.resolved_estimation(4), None);
+    }
+
+    #[test]
+    fn resolved_estimation_resolves_auto_from_the_mode() {
+        let m = MotionCompensationMode::Mvtools {
+            blksize: 16,
+            overlap: 8,
+            search_radius: 4,
+            pyramid_levels: 2,
+            estimation: MotionEstimation::Auto,
+        };
+        assert_eq!(m.resolved_estimation(1), Some(MotionEstimation::Direct));
+        assert_eq!(
+            m.resolved_estimation(4),
+            Some(MotionEstimation::chained_default())
+        );
+    }
+
+    #[test]
+    fn pair_ring_slot_count_is_double_radius() {
+        assert_eq!(pair_ring_slot_count(3), 6);
+        assert_eq!(pair_ring_slot_count(1), 2);
     }
 
     #[test]
@@ -336,6 +610,7 @@ mod tests {
             overlap: 8,
             search_radius: 4,
             pyramid_levels: 2,
+            estimation: MotionEstimation::Direct,
         };
         let ctx = MotionCtx::new(mode, 1920, 1080).unwrap();
         assert_eq!(ctx.step, 8);

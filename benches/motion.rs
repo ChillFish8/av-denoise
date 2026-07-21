@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use av_denoise::nlmeans::{
     ChannelMode,
     MotionCompensationMode,
+    MotionEstimation,
     NlmDenoiser,
     NlmParams,
     Pending,
@@ -93,9 +94,9 @@ fn run_pipeline_bench<R: Runtime>(
 
 const TEMPORAL_RADIUS: u32 = 1;
 
-fn temporal_params(channels: ChannelMode, mc: MotionCompensationMode) -> NlmParams {
+fn temporal_params(radius: u32, channels: ChannelMode, mc: MotionCompensationMode) -> NlmParams {
     NlmParams {
-        temporal_radius: TEMPORAL_RADIUS,
+        temporal_radius: radius,
         search_radius: 2,
         patch_radius: 4,
         strength: 1.2,
@@ -113,6 +114,20 @@ fn mc_default() -> MotionCompensationMode {
         overlap: 8,
         search_radius: 4,
         pyramid_levels: 2,
+        estimation: MotionEstimation::Direct,
+    }
+}
+
+/// Same block geometry as `mc_default`, but with `Chained` estimation
+/// at the library's default refinement radius. Used by the direct vs
+/// chained throughput comparison below.
+fn mc_chained_default() -> MotionCompensationMode {
+    MotionCompensationMode::Mvtools {
+        blksize: 16,
+        overlap: 8,
+        search_radius: 4,
+        pyramid_levels: 2,
+        estimation: MotionEstimation::chained_default(),
     }
 }
 
@@ -122,13 +137,14 @@ fn mc_default() -> MotionCompensationMode {
 fn bench_eager<R: Runtime>(
     client: &ComputeClient<R>,
     backend: &str,
+    radius: u32,
     channels: ChannelMode,
     ch_name: &str,
     mc: MotionCompensationMode,
     tag: &str,
 ) -> BenchResult {
     let ch = channels.count();
-    let params = temporal_params(channels, mc);
+    let params = temporal_params(radius, channels, mc);
     let frame = make_synthetic_frame(W, H, ch);
     let total_frames = 1 + 2 * params.temporal_radius as usize;
     let name = format!("denoise_temporal{tag}_1080p_{ch_name}");
@@ -152,13 +168,14 @@ fn bench_eager<R: Runtime>(
 fn bench_pipelined<R: Runtime>(
     client: &ComputeClient<R>,
     backend: &str,
+    radius: u32,
     channels: ChannelMode,
     ch_name: &str,
     mc: MotionCompensationMode,
     tag: &str,
 ) -> BenchResult {
     let ch = channels.count();
-    let params = temporal_params(channels, mc);
+    let params = temporal_params(radius, channels, mc);
     let frame = make_synthetic_frame(W, H, ch);
     let total_frames = 1 + 2 * params.temporal_radius as usize;
     let name = format!("denoise_temporal_pipelined{tag}_1080p_{ch_name}");
@@ -229,8 +246,29 @@ fn run_pipelines<R: Runtime>(backend: &str, client: &ComputeClient<R>) {
 
     for &(ch_name, mode) in &channels {
         for &(mc, tag) in variants {
-            bench_eager::<R>(client, backend, mode, ch_name, mc, tag).print();
-            bench_pipelined::<R>(client, backend, mode, ch_name, mc, tag).print();
+            bench_eager::<R>(client, backend, TEMPORAL_RADIUS, mode, ch_name, mc, tag).print();
+            bench_pipelined::<R>(client, backend, TEMPORAL_RADIUS, mode, ch_name, mc, tag).print();
+        }
+    }
+    println!();
+}
+
+/// Direct vs chained MC estimation throughput at higher temporal
+/// radii (r2, r4), luma only. The cost delta this comparison tracks
+/// lives entirely in the MC dispatch path, not per-channel NLM
+/// weighting, so extra channels would only add bench time without
+/// adding signal. Prints eager and pipelined rows for each radius
+/// and estimation strategy side by side, mirroring `run_pipelines`'s
+/// "adjacent so the delta is visible at a glance" layout.
+fn run_mc_estimation_comparison<R: Runtime>(backend: &str, client: &ComputeClient<R>) {
+    println!();
+    println!("--- {backend}: MC estimation comparison (direct vs chained, r2/r4) ---");
+
+    for &radius in &[2u32, 4u32] {
+        for (mc, label) in [(mc_default(), "direct"), (mc_chained_default(), "chained")] {
+            let tag = format!("_mc_r{radius}_{label}");
+            bench_eager::<R>(client, backend, radius, ChannelMode::Luma, "luma", mc, &tag).print();
+            bench_pipelined::<R>(client, backend, radius, ChannelMode::Luma, "luma", mc, &tag).print();
         }
     }
     println!();
@@ -240,6 +278,7 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
     let client = R::client(device);
     run_kernels::<R>(backend, &client);
     run_pipelines::<R>(backend, &client);
+    run_mc_estimation_comparison::<R>(backend, &client);
 }
 
 #[derive(clap::Parser, Debug)]

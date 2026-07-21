@@ -26,10 +26,12 @@ use super::kernels::{
 };
 use super::motion::{
     self,
+    MotionEstimation,
     confidence_byte_offset,
     run_analyse,
     run_compensate,
     run_confidence_for_neighbour,
+    run_seeded_refine,
 };
 use super::{BLOCK_1D, BLOCK_X, BLOCK_X_THIN, BLOCK_Y, BLOCK_Y_THIN, MAX_GRID_1D};
 
@@ -826,9 +828,14 @@ impl<R: Runtime> NlmDenoiser<R> {
         // the reference (prefiltered) pyramid when available.
         let analyse_pyramid = self.pyramid_reference.as_ref().unwrap_or(pyramid_input);
 
-        // One analyse + warp per non-centre neighbour. Neighbours run
-        // in logical order k = -R .. -1, +1 .. +R; their MV-field index
-        // is contiguous so packing keeps the field tight.
+        // One motion estimate + warp per non-centre neighbour. Neighbours
+        // run in logical order k = -R .. -1, +1 .. +R. Their MV-field
+        // index is contiguous, so packing keeps the field tight. Motion
+        // estimation itself branches on `estimation`. `Direct` matches
+        // straight against the centre frame exactly as before. `Chained`
+        // composes the adjacent-pair fields into a seed, then refines it
+        // with a small search. Either way the warp below is identical.
+        let is_chained = self.is_chained();
         let radius = temporal_radius as i32;
         let mut neighbour_idx: u32 = 0;
         for k in -radius..=radius {
@@ -837,22 +844,52 @@ impl<R: Runtime> NlmDenoiser<R> {
             }
             let neighbour_slot = self.phys_frame(center_t as i32 + k);
 
-            run_analyse::<R>(
-                &self.client,
-                mc,
-                self.width,
-                self.height,
-                frame_count,
-                centre_slot,
-                neighbour_slot,
-                neighbour_idx,
-                analyse_pyramid,
-                mv_field,
-                confidence_arg,
-                write_confidence,
-                sad_noise_floor,
-                thsad,
-            )?;
+            if is_chained {
+                self.run_chain_compose(center_t, k)?;
+                let refine_radius = match self
+                    .params
+                    .motion_compensation
+                    .resolved_estimation(self.params.temporal_radius)
+                {
+                    Some(MotionEstimation::Chained { refine_radius }) => refine_radius,
+                    _ => unreachable!("is_chained() guarantees a resolved Chained estimation"),
+                };
+
+                run_seeded_refine::<R>(
+                    &self.client,
+                    mc,
+                    self.width,
+                    self.height,
+                    frame_count,
+                    centre_slot,
+                    neighbour_slot,
+                    neighbour_idx,
+                    refine_radius,
+                    analyse_pyramid,
+                    mv_field,
+                    confidence_arg,
+                    write_confidence,
+                    sad_noise_floor,
+                    thsad,
+                )?;
+            } else {
+                run_analyse::<R>(
+                    &self.client,
+                    mc,
+                    self.width,
+                    self.height,
+                    frame_count,
+                    centre_slot,
+                    neighbour_slot,
+                    neighbour_idx,
+                    analyse_pyramid,
+                    mv_field,
+                    confidence_arg,
+                    write_confidence,
+                    sad_noise_floor,
+                    thsad,
+                )?;
+            }
 
             run_compensate::<R>(
                 &self.client,

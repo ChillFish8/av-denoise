@@ -12,7 +12,7 @@ mod pending;
 mod tests;
 
 pub use denoiser::NlmDenoiser;
-pub use motion::MotionCompensationMode;
+pub use motion::{MotionCompensationMode, MotionEstimation};
 pub use params::{
     ChannelMode,
     HQ_DEFAULT_STRENGTH,

@@ -24,6 +24,7 @@ use kernels::horizontal_sum::HSumBench;
 use kernels::horizontal_sum_pair::HSumPairBench;
 use kernels::mc_block_match_coarse::BlockMatchCoarseBench;
 use kernels::mc_block_match_fine::BlockMatchFineBench;
+use kernels::mc_chain_compose::ChainComposeBench;
 use kernels::mc_confidence::McConfidenceBench;
 use kernels::mc_downscale::DownscaleBench;
 use kernels::mc_warp::WarpBench;
@@ -199,6 +200,9 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         client: client.clone(),
     });
     run(McConfidenceBench {
+        client: client.clone(),
+    });
+    run(ChainComposeBench {
         client: client.clone(),
     });
     for &(ch, ch_name) in CHANNELS {

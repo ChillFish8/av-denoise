@@ -234,6 +234,7 @@ fn run_analyse_fills_confidence_buffer() {
             overlap: 4,
             search_radius: 2,
             pyramid_levels: 1,
+            estimation: MotionEstimation::Direct,
         },
         width,
         height,
@@ -419,6 +420,7 @@ fn confidence_buf_filled_with_motion_compensation() {
             overlap: 4,
             search_radius: 2,
             pyramid_levels: 2,
+            estimation: MotionEstimation::Direct,
         },
         hq: Some(HqParams {
             auto_strength: true,
@@ -485,6 +487,7 @@ fn confidence_buf_absent_with_motion_compensation_and_no_hq() {
             overlap: 4,
             search_radius: 2,
             pyramid_levels: 2,
+            estimation: MotionEstimation::Direct,
         },
         hq: None,
     };
@@ -529,6 +532,7 @@ fn confidence_buf_absent_with_motion_compensation_when_temporal_confidence_disab
             overlap: 4,
             search_radius: 2,
             pyramid_levels: 2,
+            estimation: MotionEstimation::Direct,
         },
         hq: Some(HqParams {
             temporal_confidence: false,

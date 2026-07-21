@@ -9,6 +9,7 @@ use crate::nlmeans::{
     HQ_DEFAULT_STRENGTH,
     HqParams,
     MotionCompensationMode,
+    MotionEstimation,
     NlmDenoiser,
     NlmParams,
     Pending,
@@ -577,6 +578,7 @@ mod options_tests {
                 overlap: 8,
                 search_radius: 4,
                 pyramid_levels: 2,
+                estimation: MotionEstimation::Direct,
             })
             .build();
         let params = opts.to_nlm_params();
@@ -588,6 +590,7 @@ mod options_tests {
                 overlap: 8,
                 search_radius: 4,
                 pyramid_levels: 2,
+                ..
             }
         ));
     }

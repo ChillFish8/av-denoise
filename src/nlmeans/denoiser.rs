@@ -4,7 +4,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::kernels::gpu_copy;
-use super::motion::{self, MotionCtx, build_pyramid_for_slot, run_pyramid_build};
+use super::motion::{self, MotionCtx, MotionEstimation, build_pyramid_for_slot, run_pyramid_build};
 use super::noise::{NoiseCtx, NoiseEstimator, partials_len, run_noise_estimate, sigma_from_abs_sum};
 use super::params::{NlmParams, SEPARABLE_THRESHOLD, sigma_eff};
 use super::pending::Pending;
@@ -108,6 +108,15 @@ pub struct NlmDenoiser<R: Runtime> {
     /// indices `0..R` are the backward k = -R..-1; `R..2R` are forward
     /// k = +1..+R.
     pub(super) mv_field_buf: Option<Handle>,
+    /// Adjacent-frame pair-motion ring, laid out
+    /// `[2·temporal_radius][2][blocks_y][blocks_x][2]` `i32` (outer
+    /// index is the pair slot, next is direction, 0 = older→newer, 1 =
+    /// newer→older). `Some` only when `MotionEstimation::Chained` is
+    /// active. The direct path never touches this buffer. See
+    /// `motion::pair_ring_slot_count` for why `2·temporal_radius` slots
+    /// is exactly enough, and `Self::pair_slot` for how a slot is
+    /// resolved from a frame's position in the push sequence.
+    pub(super) pair_ring_buf: Option<Handle>,
     /// Luma-only pyramid storage:
     /// `[pyramid_levels][total_frames][level_w * level_h]` `f32`.
     pub(super) pyramid_input: Option<Handle>,
@@ -255,6 +264,26 @@ impl<R: Runtime> NlmDenoiser<R> {
             (None, None, None, None, None)
         };
 
+        // The pair ring is allocated only when `Chained` estimation is
+        // active (explicitly, or via `Auto` resolving to it at this
+        // temporal radius), on top of `mc_ctx` already being `Some`.
+        // The direct path never reads or writes it.
+        let is_chained = matches!(
+            params
+                .motion_compensation
+                .resolved_estimation(params.temporal_radius),
+            Some(MotionEstimation::Chained { .. })
+        );
+        let pair_ring_buf = if is_chained {
+            mc_ctx.as_ref().map(|ctx| {
+                let pair_ring_slots = motion::pair_ring_slot_count(params.temporal_radius) as usize;
+                let bytes = pair_ring_slots * ctx.pair_slot_len() as usize * size_of::<i32>();
+                client.empty(bytes)
+            })
+        } else {
+            None
+        };
+
         // Confidence weighting (in either its MC-active or its no-MC
         // form) is active only when HQ has `temporal_confidence: true`
         // and the temporal window is non-trivial. This gate applies
@@ -337,6 +366,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             compensated_input_buf,
             compensated_reference_buf,
             mv_field_buf,
+            pair_ring_buf,
             pyramid_input,
             pyramid_reference,
             confidence_ctx,
@@ -374,6 +404,7 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         self.build_pyramids_for_slot(slot as u32);
         self.build_confidence_pyramid_for_slot(slot as u32);
+        self.run_pair_analyse_for_slot(slot as u32);
 
         self.advance_ring();
         self.prime_leading_edge_if_first();
@@ -397,6 +428,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.upload_into_slot(&reference_buf, reference, slot);
         self.build_pyramids_for_slot(slot as u32);
         self.build_confidence_pyramid_for_slot(slot as u32);
+        self.run_pair_analyse_for_slot(slot as u32);
         self.run_noise_estimate_for_slot(slot as u32);
         self.advance_ring();
         self.prime_leading_edge_if_first();
@@ -531,6 +563,90 @@ impl<R: Runtime> NlmDenoiser<R> {
             self.params.channels.storage_count(),
         )
         .expect("confidence pyramid build dispatch failed");
+    }
+
+    /// Whether `Chained` motion estimation is configured, explicitly or
+    /// via `Auto` resolving to it at this denoiser's temporal radius
+    /// (see `resolved_estimation`, the single source every
+    /// estimation-dependent decision goes through). Orthogonal to
+    /// `mc_ctx.is_some()`, which callers still need to check
+    /// separately, since `mc_ctx` also requires `temporal_radius > 0`.
+    pub(super) fn is_chained(&self) -> bool {
+        matches!(
+            self.params
+                .motion_compensation
+                .resolved_estimation(self.params.temporal_radius),
+            Some(MotionEstimation::Chained { .. })
+        )
+    }
+
+    /// Run the adjacent-frame pair analyse for the physical input-ring
+    /// slot just written by `push_frame`/`push_frame_with_reference`,
+    /// storing both directions' motion fields into the pair ring at
+    /// `Self::pair_slot(0)`. No-op unless `Chained` estimation is
+    /// active, and for the very first frame of a stream (`ring_head ==
+    /// 0`), which has no older partner to pair against. Composition
+    /// for that gap instead reads the priming duplicate's zero-filled
+    /// pair (see [`Self::zero_pair_slot_for_duplicate`]).
+    fn run_pair_analyse_for_slot(&self, newer_slot: u32) {
+        if self.ring_head == 0 {
+            return;
+        }
+        let Some(mc) = self.mc_ctx.as_ref() else {
+            return;
+        };
+        if !self.is_chained() {
+            return;
+        }
+        let pair_ring = self
+            .pair_ring_buf
+            .as_ref()
+            .expect("pair_ring allocated when Chained is active");
+
+        // Use the cleaner of the two buffers for motion estimation,
+        // exactly as `run_motion_compensation` does for the direct path.
+        let pyramid = self.pyramid_reference.as_ref().unwrap_or_else(|| {
+            self.pyramid_input
+                .as_ref()
+                .expect("pyramid_input allocated when mc_ctx is Some")
+        });
+
+        let total_frames = self.params.total_frames();
+        let older_slot = (newer_slot + total_frames - 1) % total_frames;
+        let pair_slot = self.pair_slot(0);
+
+        motion::run_pair_analyse::<R>(
+            &self.client,
+            mc,
+            self.width,
+            self.height,
+            total_frames,
+            older_slot,
+            newer_slot,
+            pair_slot,
+            pyramid,
+            pair_ring,
+            &self.confidence_dummy,
+        )
+        .expect("pair analyse dispatch failed");
+    }
+
+    /// Zero-fill the pair-ring slot for a duplicated ring slot (stream
+    /// priming or end-of-stream flush). No-op unless `Chained`
+    /// estimation is active.
+    fn zero_pair_slot_for_duplicate(&self) {
+        let Some(mc) = self.mc_ctx.as_ref() else {
+            return;
+        };
+        if !self.is_chained() {
+            return;
+        }
+        let pair_ring = self
+            .pair_ring_buf
+            .as_ref()
+            .expect("pair_ring allocated when Chained is active");
+        let pair_slot = self.pair_slot(0);
+        motion::zero_pair_slot::<R>(&self.client, mc, pair_ring, pair_slot);
     }
 
     /// Queue the Immerkær noise estimate for `slot` on the input ring.
@@ -715,6 +831,10 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.build_pyramids_for_slot(next_slot as u32);
         self.build_confidence_pyramid_for_slot(next_slot as u32);
         self.run_noise_estimate_for_slot(next_slot as u32);
+        // Runs before `ring_head` advances, so `pair_slot(0)` reads the
+        // same pre-advance `ring_head` as `run_pair_analyse_for_slot`
+        // (see `Self::pair_slot`).
+        self.zero_pair_slot_for_duplicate();
 
         self.ring_head += 1;
     }
@@ -890,6 +1010,11 @@ impl<R: Runtime> NlmDenoiser<R> {
 
     /// Reset stream-tracking indices so the next `push_frame` begins a
     /// fresh temporal stream. GPU buffers are intentionally not cleared.
+    /// `pair_ring_buf` relies on the same write-before-read convention as
+    /// the pyramid and noise-estimate buffers. A fresh stream's first
+    /// pushes fully overwrite every slot they touch before anything
+    /// reads it back, so leftover content from the previous stream is
+    /// never observed.
     pub(crate) fn reset_stream_state(&mut self) {
         self.ring_head = 0;
         self.frames_loaded = 0;
@@ -911,5 +1036,33 @@ impl<R: Runtime> NlmDenoiser<R> {
         let total_frames = self.params.total_frames() as i32;
         let wrapped = logical.rem_euclid(total_frames);
         ((self.ring_start() as i32 + wrapped).rem_euclid(total_frames)) as u32
+    }
+
+    /// Pair-ring slot for the gap between window-relative logical
+    /// frames `gap_index` and `gap_index + 1`. Reduces the current
+    /// `ring_head`, the monotonic count of frames pushed so far
+    /// (including duplicates), by `2 * temporal_radius` instead of the
+    /// `total_frames` modulus `Self::phys_frame` uses for the frame
+    /// ring.
+    ///
+    /// Called two ways that resolve to the same slot for the same
+    /// physical pair. At push time, with `gap_index = 0` and the
+    /// pre-advance `ring_head` (the generation of the frame just
+    /// written), it gives the slot that frame's pair with its
+    /// immediate predecessor belongs in. At compose time, with the
+    /// post-push `ring_head` and `gap_index` measured from the
+    /// window's centre, it gives the slot a past push already wrote
+    /// to. The two calls only differ in how far `ring_head` has
+    /// advanced since the pair was created, and `gap_index` exactly
+    /// offsets that advance, so `ring_head + gap_index` lands on the
+    /// same value mod `2 * temporal_radius` either way.
+    pub(super) fn pair_slot(&self, gap_index: i32) -> u32 {
+        let radius = self.params.temporal_radius as i32;
+        debug_assert!(
+            radius > 0,
+            "pair ring is only meaningful when temporal_radius > 0"
+        );
+        let n = 2 * radius;
+        ((self.ring_head as i32 + gap_index).rem_euclid(n)) as u32
     }
 }

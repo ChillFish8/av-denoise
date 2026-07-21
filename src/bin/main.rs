@@ -6,6 +6,7 @@ use av_denoise::{
     DenoisingMode,
     Device,
     MotionCompensationMode,
+    MotionEstimation,
     NlmTuning,
     PrefilterMode,
 };
@@ -285,6 +286,8 @@ struct Args {
     /// This keeps detail sharp on anime, fast pans, and action
     /// footage.
     ///
+    /// The tracking strategy adapts automatically to `--temporal-radius`.
+    ///
     /// Has no effect when `--temporal-radius 0`.
     #[arg(long, global = true)]
     motion_compensation: bool,
@@ -514,6 +517,7 @@ fn main() -> anyhow::Result<()> {
             overlap: args.mc_overlap,
             search_radius: args.mc_search,
             pyramid_levels: args.mc_pyramid_levels,
+            estimation: MotionEstimation::default(),
         }
     } else {
         MotionCompensationMode::None
