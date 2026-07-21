@@ -416,6 +416,449 @@ fn motion_compensation_translating_square_preserves_centre() {
     );
 }
 
+// --- Phase 6.5 regression tests, coarse-seeding tiling (Bug 1) and
+// pyramid level-0 extraction (Bug 2). Both bugs live in the shared
+// coarse+fine machinery every estimation mode funnels through
+// (`run_analyse`), so they're exercised here through a real
+// `Direct`-estimation `NlmDenoiser`, reading `mv_field_buf` back
+// directly (the same pattern `composed_centre_mv` above already
+// establishes for the Chained tests).
+
+/// Builds a `w x h` frame from two independently-rich `half`-wide
+/// halves (`left`, `right`), each optionally shifted locally within
+/// its own half by `left_shift`/`right_shift` fine-level pixels
+/// (`0` for the unshifted base frame). Local, per-half clamped
+/// shifting (via `shift_clamped`) keeps each half's content a
+/// self-contained translation, so a block deep inside one half never
+/// legitimately depends on the other half's content.
+#[allow(clippy::too_many_arguments)]
+fn split_half_frame(
+    w: u32,
+    h: u32,
+    half: u32,
+    left: &[f32],
+    right: &[f32],
+    left_shift: i32,
+    right_shift: i32,
+) -> Vec<f32> {
+    let mut frame = vec![0.0f32; (w * h) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let idx = (y * w + x) as usize;
+            if x < half {
+                let lx = shift_clamped(x as i32, left_shift, half as i32) as u32;
+                frame[idx] = left[(y * half + lx) as usize];
+            } else {
+                let rx = shift_clamped((x - half) as i32, right_shift, half as i32) as u32;
+                frame[idx] = right[(y * half + rx) as usize];
+            }
+        }
+    }
+    frame
+}
+
+/// Pushes `base` twice then `neighbour` once through a fresh `Direct`
+/// `NlmDenoiser` at `mode`, runs one `denoise()`, and reads back the
+/// forward (`k = 1`) neighbour's MV field. Mirrors the push order
+/// every other test in this file relies on (`push, push, push`, single
+/// `denoise()`, centre = the second push, see
+/// `motion_compensation_translating_square_preserves_centre`'s own
+/// comment for the derivation), so `neighbour` (the third push) is
+/// what the returned MV field is matched against.
+fn direct_mv_field_for_forward_neighbour(
+    mode: MotionCompensationMode,
+    w: u32,
+    h: u32,
+    base: &[f32],
+    neighbour: &[f32],
+) -> Vec<i32> {
+    let params = NlmParams {
+        temporal_radius: 1,
+        search_radius: 2,
+        patch_radius: 2,
+        strength: 1.2,
+        self_weight: 1.0,
+        channels: ChannelMode::Luma,
+        prefilter: PrefilterMode::None,
+        motion_compensation: mode,
+        hq: None,
+    };
+
+    let client = make_client();
+    let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
+    d.push_frame(base);
+    d.push_frame(base);
+    d.push_frame(neighbour);
+    d.denoise().unwrap();
+
+    let mc = MotionCtx::new(mode, w, h).unwrap();
+    let neighbour_idx = neighbour_idx_for_k(1, 1);
+    let mv_field = d
+        .mv_field_buf
+        .as_ref()
+        .expect("mv_field allocated when mc_ctx is Some");
+    let offset = mv_field_byte_offset(&mc, neighbour_idx);
+    let sliced = mv_field.clone().offset_start(offset);
+    let bytes = d.client.read_one(sliced).expect("mv readback failed");
+    i32::from_bytes(&bytes).to_vec()
+}
+
+/// Bug 1 regression test. At `blksize=8, overlap=4, pyramid_levels=2`
+/// the coarse and fine grids come out to the *same* block count
+/// (`coarse_blocks_x == blocks_x`, verified below algebraically rather
+/// than assumed), which the old fixed-doubling seeding
+/// (`fine_bx_origin = bx * level_scale`) mapped wrongly. A coarse
+/// block's own correctly-computed displacement landed at fine index
+/// `2 * bx` instead of `bx`, so roughly half the fine grid was seeded
+/// from a coarse block spatially tied to a *different* region.
+///
+/// Content is a left half and a right half, each independently rich
+/// (`noisy_copy`) and each translated by a different, clean (a
+/// multiple of `level_scale` so the box-downsampled coarse level sees
+/// an exact half-magnitude shift) motion vector between the centre and
+/// forward neighbour frame. The chosen fine blocks sit deep inside
+/// each half (`search_radius + blksize` or more away from both the
+/// half boundary and the frame edges), so a correctly-seeded block
+/// finds its own half's true motion, while a block mis-seeded from the
+/// other half lands outside the fine pass's small search window and
+/// can't self-correct. Left-half blocks happen to always get
+/// mis-seeded from other left-half coarse blocks at this geometry
+/// (their shared half still carries the same true motion), so this
+/// bug only becomes visible on the right half here, which is exactly
+/// what the pre-fix run below shows.
+#[test]
+fn coarse_seeding_handles_equal_grids() {
+    let w = 128u32;
+    let h = 64u32;
+    let half = 64u32;
+
+    let mode = MotionCompensationMode::Mvtools {
+        blksize: 8,
+        overlap: 4,
+        search_radius: 3,
+        pyramid_levels: 2,
+        estimation: MotionEstimation::Direct,
+    };
+    let mc = MotionCtx::new(mode, w, h).unwrap();
+
+    // Recompute `run_analyse`'s coarse-grid formula directly (mirrors
+    // `analyse.rs`'s own derivation) rather than trusting the brief's
+    // worked numbers, confirming this geometry actually lands on
+    // "equal grids" before relying on it.
+    let coarse_scale = 1u32 << (mc.pyramid_levels - 1);
+    let coarse_step = (mc.step / coarse_scale).max(1);
+    let cw = w / coarse_scale;
+    let coarse_blocks_x = cw.div_ceil(coarse_step).max(1);
+    assert_eq!(
+        coarse_blocks_x, mc.blocks_x,
+        "test premise: this geometry must give equal coarse/fine grids"
+    );
+
+    let left = noisy_copy(half, 0.5, 0.2, 201);
+    let right = noisy_copy(half, 0.5, 0.2, 202);
+    let left_shift = 4i32;
+    let right_shift = -4i32;
+
+    let base = split_half_frame(w, h, half, &left, &right, 0, 0);
+    let shifted = split_half_frame(w, h, half, &left, &right, left_shift, right_shift);
+
+    let data = direct_mv_field_for_forward_neighbour(mode, w, h, &base, &shifted);
+
+    // Deep inside each half, clear of the boundary at x=64 and the
+    // frame edges by well over `search_radius + blksize` (= 11).
+    let by = 4u32;
+    let bx_left = 8u32;
+    let bx_right = 24u32;
+    let idx_left = ((by * mc.blocks_x + bx_left) * 2) as usize;
+    let idx_right = ((by * mc.blocks_x + bx_right) * 2) as usize;
+
+    assert_eq!(
+        (data[idx_left], data[idx_left + 1]),
+        (left_shift, 0),
+        "left-half block should recover the left half's own motion ({left_shift}, 0), got ({}, {})",
+        data[idx_left],
+        data[idx_left + 1],
+    );
+    assert_eq!(
+        (data[idx_right], data[idx_right + 1]),
+        (right_shift, 0),
+        "right-half block should recover the right half's own motion ({right_shift}, 0), got \
+         ({}, {}); a wrong value here means it was seeded from the wrong (left-half) coarse block",
+        data[idx_right],
+        data[idx_right + 1],
+    );
+}
+
+/// Non-regression test at the genuine half-grid geometry (`fine_blocks_x/y
+/// == 2 * coarse_blocks_x/y`) Bug 1's old fixed-doubling seeding was
+/// originally written for. `mc.step == 1` reaches this ratio through
+/// the `.max(1)` floor clamp in `run_analyse`'s `coarse_step`
+/// derivation (`coarse_step = (1 / 2).max(1) = 1`), verified
+/// algebraically below rather than assumed. The old seeding already
+/// handled this geometry correctly (a coarse block's region really
+/// does correspond to exactly `level_scale` fine blocks here), so this
+/// test is a non-regression check that the new position-based tiling
+/// formula still reduces to the same behaviour, both for uniform
+/// motion and for the left/right split (different motion per half)
+/// that Bug 1's test above exercises at the equal-grid geometry.
+#[test]
+fn coarse_seeding_still_correct_at_half_grid() {
+    let w = 48u32;
+    let h = 16u32;
+    let half = 24u32;
+
+    let mode = MotionCompensationMode::Mvtools {
+        blksize: 4,
+        overlap: 3,
+        search_radius: 2,
+        pyramid_levels: 2,
+        estimation: MotionEstimation::Direct,
+    };
+    let mc = MotionCtx::new(mode, w, h).unwrap();
+
+    let coarse_scale = 1u32 << (mc.pyramid_levels - 1);
+    let coarse_step = (mc.step / coarse_scale).max(1);
+    let cw = w / coarse_scale;
+    let ch = h / coarse_scale;
+    let coarse_blocks_x = cw.div_ceil(coarse_step).max(1);
+    let coarse_blocks_y = ch.div_ceil(coarse_step).max(1);
+    assert_eq!(mc.step, 1, "test premise: step must floor-clamp coarse_step to 1");
+    assert_eq!(
+        mc.blocks_x,
+        2 * coarse_blocks_x,
+        "test premise: this geometry must give a genuine 2:1 fine:coarse ratio in x"
+    );
+    assert_eq!(
+        mc.blocks_y,
+        2 * coarse_blocks_y,
+        "test premise: this geometry must give a genuine 2:1 fine:coarse ratio in y"
+    );
+
+    let left = noisy_copy(half, 0.5, 0.2, 301);
+    let right = noisy_copy(half, 0.5, 0.2, 302);
+    // Deep inside each half, clear of the boundary at x=24 and the
+    // frame edges by well over `search_radius + blksize` (= 6).
+    let by = 6u32;
+    let bx_left = 10u32;
+    let bx_right = 32u32;
+
+    let mv_at = |left_shift: i32, right_shift: i32| -> ((i32, i32), (i32, i32)) {
+        let base = split_half_frame(w, h, half, &left, &right, 0, 0);
+        let shifted = split_half_frame(w, h, half, &left, &right, left_shift, right_shift);
+        let data = direct_mv_field_for_forward_neighbour(mode, w, h, &base, &shifted);
+        let idx_left = ((by * mc.blocks_x + bx_left) * 2) as usize;
+        let idx_right = ((by * mc.blocks_x + bx_right) * 2) as usize;
+        (
+            (data[idx_left], data[idx_left + 1]),
+            (data[idx_right], data[idx_right + 1]),
+        )
+    };
+
+    // Uniform sub-case. Both halves share one motion vector, already
+    // correct before Bug 1's fix (both bugs are invisible on uniform
+    // motion).
+    let (uni_left, uni_right) = mv_at(2, 2);
+    assert_eq!(uni_left, (2, 0), "uniform motion: left block got {uni_left:?}");
+    assert_eq!(uni_right, (2, 0), "uniform motion: right block got {uni_right:?}");
+
+    // Varying sub-case. Left and right halves move oppositely, the
+    // sub-case that actually runs the new tiling formula's code path
+    // over a genuine half-grid, confirming it still reduces to the
+    // old (here, already-correct) behaviour.
+    let (var_left, var_right) = mv_at(2, -2);
+    assert_eq!(var_left, (2, 0), "varying motion: left block got {var_left:?}");
+    assert_eq!(
+        var_right,
+        (-2, 0),
+        "varying motion: right block got {var_right:?}"
+    );
+}
+
+/// Bug 2 regression test. `build_pyramid_for_slot` must extract
+/// level-0 luma even when `pyramid_levels == 1`, not skip the whole
+/// pyramid build. This is a real `Mvtools` MC config (not
+/// `MotionCtx::confidence_only`, a different, already-correct path
+/// that bypasses this bug entirely), so the fine pass runs unseeded
+/// straight off level 0. If level 0 was never written, the recovered
+/// MV has no reason to match the known shift below.
+#[test]
+fn pyramid_level0_extracted_at_one_level() {
+    let w = 64u32;
+    let h = 64u32;
+    let dx = 2i32;
+    let dy = 1i32;
+
+    let mode = MotionCompensationMode::Mvtools {
+        blksize: DEFAULT_BLKSIZE,
+        overlap: DEFAULT_OVERLAP,
+        search_radius: DEFAULT_SEARCH_RADIUS,
+        pyramid_levels: 1,
+        estimation: MotionEstimation::Direct,
+    };
+    let mc = MotionCtx::new(mode, w, h).unwrap();
+
+    let world = noisy_copy(w, 0.5, 0.2, 77);
+    let shifted = frame_shifted_by(&world, w, h, dx, dy);
+
+    let data = direct_mv_field_for_forward_neighbour(mode, w, h, &world, &shifted);
+
+    // Interior block, well clear of the frame edges.
+    let bx = mc.blocks_x / 2;
+    let by = mc.blocks_y / 2;
+    let idx = ((by * mc.blocks_x + bx) * 2) as usize;
+
+    assert_eq!(
+        (data[idx], data[idx + 1]),
+        (dx, dy),
+        "a clean ({dx}, {dy}) shift with pyramid_levels=1 should give exactly that MV at an \
+         interior block once level-0 luma is actually extracted, got ({}, {})",
+        data[idx],
+        data[idx + 1],
+    );
+}
+
+/// Fix-round-1 regression test. Bug 1's tiling formula computes the
+/// coarse and fine block counts from two independent ceil-divisions,
+/// each over a different image width and a different step, so they
+/// can round differently even where the coarse/fine ratio is
+/// otherwise consistent. At `blksize=16, overlap=8, pyramid_levels=2`
+/// (the library defaults), any `width`/`height` congruent to `1`
+/// modulo `mc.step` (= 8) makes `coarse_blocks_x/y` come out to
+/// `fine_blocks_x/y` minus one. The coarse grid's total nominal reach
+/// then falls exactly one fine block short of the frame's true edge (matching the exact
+/// arithmetic the review's own worked example used, `width = 601`).
+/// Before the last-block fix, the trailing fine column/row was never
+/// written by *any* coarse cube, so it silently kept whatever
+/// `mv_field_buf` already held. Here that means all-zero, from a
+/// fresh buffer. In the real, reused buffer the review's finding
+/// describes, it means a stale previous frame's MV. Test premises
+/// verified below rather than assumed.
+///
+/// Motion here is a single uniform diagonal shift, not a
+/// spatially-varying split like `coarse_seeding_handles_equal_grids`
+/// above. This defect's failure mode is "never seeded at all" (falls
+/// back to a zero seed), not "seeded from the wrong region" (already
+/// covered by that test), so what distinguishes seeded from unseeded
+/// here is a shift large enough to exceed the *unseeded* fine-only
+/// search window while still small enough to reach through a correct
+/// coarse seed, uniform or not. The shift is negative in both axes
+/// deliberately. A block sitting on the frame's trailing edge only has
+/// one genuinely valid pixel column/row to read (the rest of its own
+/// centre tile clamps to that same edge pixel), and the SAD sweep at
+/// that single valid position can only discriminate offsets that pull
+/// content in from the interior, not offsets that would reach further
+/// past the edge (those clamp to the identical neighbour pixel for
+/// every candidate, contributing a constant, non-discriminating SAD
+/// term). A positive shift at a trailing edge would be unrecoverable
+/// by any search, seeded or not, and wouldn't isolate this bug.
+#[test]
+fn coarse_seeding_covers_ragged_last_block() {
+    let shift = -6i32;
+    let mode = MotionCompensationMode::Mvtools {
+        blksize: DEFAULT_BLKSIZE,
+        overlap: DEFAULT_OVERLAP,
+        search_radius: 4,
+        pyramid_levels: 2,
+        estimation: MotionEstimation::Direct,
+    };
+
+    // `w_gap` (57) is congruent to 1 modulo `step` (8), giving a
+    // coarse grid exactly one block short of the fine grid on that
+    // axis (matching the exact arithmetic the review's own worked
+    // example used, `width = 601`). `h_nice` (64) is an exact multiple
+    // of `step`, giving an ordinary equal coarse/fine grid on the
+    // other axis (no gap there). Each case below uses one frame ragged
+    // on a single axis, rather than one frame ragged on both, because
+    // two dimensions both congruent to 1 modulo an even step are both
+    // odd, and an odd-by-odd pixel count can never be a multiple of
+    // the ring buffers' own 32-byte frame-stride alignment
+    // requirement.
+    let w_gap = 57u32;
+    let h_nice = 64u32;
+
+    // Builds the MV field for a `w x h` frame under a uniform diagonal
+    // `(shift, shift)` translation and returns it alongside the
+    // `MotionCtx` used to index it.
+    let build = |w: u32, h: u32| -> (MotionCtx, Vec<i32>) {
+        let mc = MotionCtx::new(mode, w, h).unwrap();
+        let world = make_noisy_gaussian_frame(w, h, 1, 0.5, &[0.2]);
+        let shifted = frame_shifted_by(&world, w, h, shift, shift);
+        let data = direct_mv_field_for_forward_neighbour(mode, w, h, &world, &shifted);
+        (mc, data)
+    };
+    let at = |mc: &MotionCtx, data: &[i32], bx: u32, by: u32| -> (i32, i32) {
+        let idx = ((by * mc.blocks_x + bx) * 2) as usize;
+        (data[idx], data[idx + 1])
+    };
+    // Test premise, verified rather than assumed. Mirrors
+    // `run_analyse`'s own coarse-grid formula (see the equal-grid test
+    // above for the same derivation style) to confirm this geometry
+    // actually lands on the ragged, one-short-of-the-fine-grid case on
+    // exactly the named axis, and an ordinary equal grid on the other.
+    let assert_ragged_on = |mc: &MotionCtx, w: u32, h: u32, ragged_axis_is_x: bool| {
+        let coarse_scale = 1u32 << (mc.pyramid_levels - 1);
+        let coarse_step = (mc.step / coarse_scale).max(1);
+        let coarse_blocks_x = (w / coarse_scale).div_ceil(coarse_step).max(1);
+        let coarse_blocks_y = (h / coarse_scale).div_ceil(coarse_step).max(1);
+        if ragged_axis_is_x {
+            assert_eq!(w % mc.step, 1, "test premise: width must be step*k + 1");
+            assert_eq!(
+                coarse_blocks_x,
+                mc.blocks_x - 1,
+                "test premise: ragged coarse grid, one block short in x"
+            );
+            assert_eq!(
+                coarse_blocks_y, mc.blocks_y,
+                "test premise: y axis is an ordinary equal grid here"
+            );
+        } else {
+            assert_eq!(h % mc.step, 1, "test premise: height must be step*k + 1");
+            assert_eq!(
+                coarse_blocks_y,
+                mc.blocks_y - 1,
+                "test premise: ragged coarse grid, one block short in y"
+            );
+            assert_eq!(
+                coarse_blocks_x, mc.blocks_x,
+                "test premise: x axis is an ordinary equal grid here"
+            );
+        }
+    };
+
+    // X-axis case, last column at a non-edge row.
+    let (mc_x, data_x) = build(w_gap, h_nice);
+    assert_ragged_on(&mc_x, w_gap, h_nice, true);
+    let mid_bx_x = mc_x.blocks_x / 2;
+    let mid_by_x = mc_x.blocks_y / 2;
+    assert_eq!(
+        at(&mc_x, &data_x, mid_bx_x, mid_by_x),
+        (shift, shift),
+        "interior control block (x-axis case) should recover ({shift}, {shift})"
+    );
+    assert_eq!(
+        at(&mc_x, &data_x, mc_x.blocks_x - 1, mid_by_x),
+        (shift, shift),
+        "last-column block (x-axis coverage gap) should recover ({shift}, {shift})"
+    );
+
+    // Y-axis case, last row at a non-edge column (the same frame,
+    // transposed).
+    let (mc_y, data_y) = build(h_nice, w_gap);
+    assert_ragged_on(&mc_y, h_nice, w_gap, false);
+    let mid_bx_y = mc_y.blocks_x / 2;
+    let mid_by_y = mc_y.blocks_y / 2;
+    assert_eq!(
+        at(&mc_y, &data_y, mid_bx_y, mid_by_y),
+        (shift, shift),
+        "interior control block (y-axis case) should recover ({shift}, {shift})"
+    );
+    assert_eq!(
+        at(&mc_y, &data_y, mid_bx_y, mc_y.blocks_y - 1),
+        (shift, shift),
+        "last-row block (y-axis coverage gap) should recover ({shift}, {shift})"
+    );
+}
+
 // --- Chained motion estimation, pair ring + composition kernel ---
 //
 // These tests exercise `NlmDenoiser::run_chain_compose` and the

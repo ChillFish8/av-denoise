@@ -342,7 +342,9 @@ pub(crate) fn pair_ring_slot_count(temporal_radius: u32) -> u32 {
 }
 
 /// Build the per-frame pyramid for the slot just uploaded by
-/// `push_frame`. Cheap no-op if `pyramid_levels == 1`.
+/// `push_frame`. Always extracts level-0 luma, and also builds the
+/// downscale chain when `pyramid_levels > 1`. A thin wrapper around
+/// [`run_pyramid_build`], which already handles both cases on its own.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_pyramid_for_slot<R: Runtime>(
     client: &ComputeClient<R>,
@@ -355,9 +357,6 @@ pub(crate) fn build_pyramid_for_slot<R: Runtime>(
     pyramid: &Handle,
     stored_ch: u32,
 ) -> Result<(), anyhow::Error> {
-    if mc.pyramid_levels <= 1 {
-        return Ok(());
-    }
     run_pyramid_build::<R>(
         client,
         mc,

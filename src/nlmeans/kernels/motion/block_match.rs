@@ -21,6 +21,12 @@ use cubecl::terminate;
 /// `level_scale` rescales the produced MV components into "fine-level
 /// pixels" (caller passes `2^coarse_level`).
 ///
+/// After finding its own best MV, the cube seeds every fine block
+/// whose position falls inside this coarse block's own source region,
+/// using `step` and `fine_step` (the coarse and fine grids' own block
+/// spacings) to convert between the two index spaces. See the seeding
+/// code below for the exact formula.
+///
 /// [`MAX_BLKSIZE`]: crate::nlmeans::motion::MAX_BLKSIZE
 #[cube(launch_unchecked)]
 pub fn nlm_mc_block_match_coarse(
@@ -35,6 +41,7 @@ pub fn nlm_mc_block_match_coarse(
     #[comptime] level_scale: u32,
     #[comptime] fine_blocks_x: u32,
     #[comptime] fine_blocks_y: u32,
+    #[comptime] fine_step: u32,
 ) {
     let bx = CUBE_POS_X;
     let by = CUBE_POS_Y;
@@ -123,30 +130,56 @@ pub fn nlm_mc_block_match_coarse(
         }
     }
 
-    // Project coarse block index into the fine-block index space. The
-    // fine grid runs at `level_scale × coarse` density, so a single
-    // coarse block seeds a `level_scale × level_scale` patch of fine
-    // blocks. Each thread-0 here writes one coarse block; the seeding
-    // pattern below covers the corresponding fine patch.
+    // Project coarse block index into the fine-block index space by
+    // position, not by literal index doubling. Coarse block `bx`
+    // covers source pixels `[bx * step, (bx + 1) * step)` at the
+    // coarse level, which corresponds to fine-level pixels
+    // `[bx * step * level_scale, (bx + 1) * step * level_scale)`.
+    // Dividing that span by `fine_step` gives the fine block index
+    // range this coarse block seeds. Floor-division tiling keeps every
+    // interior boundary touching with no gap and no overlap, but the
+    // coarse block count and the fine block count are each their own
+    // ceil-division over a different image width and a different
+    // step, so they can round differently and the coarse grid's total
+    // nominal reach can fall just short of the fine grid's true edge.
+    // The last coarse block on each axis extends its end to the fine
+    // grid's own edge, absorbing that remainder so every fine block
+    // still gets seeded exactly once. This one formula covers a
+    // genuine `level_scale × level_scale` patch (the coarse grid
+    // really is coarser than the fine grid by that ratio), a 1:1
+    // mapping (equal grids), and the ragged last block on either
+    // geometry, with no separate code path per case. The number of
+    // fine blocks a coarse block seeds can now vary per cube, so this
+    // uses a runtime `while` loop rather than a comptime-unrolled
+    // `for` loop.
     let mvx_fine = best_dx * level_scale as i32;
     let mvy_fine = best_dy * level_scale as i32;
 
-    let fine_bx_origin = bx * level_scale;
-    let fine_by_origin = by * level_scale;
-    for fy in 0..level_scale {
-        let fby = fine_by_origin + fy;
-        if fby >= fine_blocks_y {
-            // outside; skip
-        } else {
-            for fx in 0..level_scale {
-                let fbx = fine_bx_origin + fx;
-                if fbx < fine_blocks_x {
-                    let idx = ((fby * fine_blocks_x + fbx) * 2) as usize;
-                    mv_field[idx] = mvx_fine;
-                    mv_field[idx + 1] = mvy_fine;
-                }
-            }
+    let fbx_start = (bx * step * level_scale / fine_step).min(fine_blocks_x);
+    #[allow(clippy::useless_conversion)]
+    let fbx_end = if bx == CUBE_COUNT_X - 1 {
+        fine_blocks_x.into()
+    } else {
+        ((bx + 1) * step * level_scale / fine_step).min(fine_blocks_x)
+    };
+    let fby_start = (by * step * level_scale / fine_step).min(fine_blocks_y);
+    #[allow(clippy::useless_conversion)]
+    let fby_end = if by == CUBE_COUNT_Y - 1 {
+        fine_blocks_y.into()
+    } else {
+        ((by + 1) * step * level_scale / fine_step).min(fine_blocks_y)
+    };
+
+    let mut fby = fby_start;
+    while fby < fby_end {
+        let mut fbx = fbx_start;
+        while fbx < fbx_end {
+            let idx = ((fby * fine_blocks_x + fbx) * 2) as usize;
+            mv_field[idx] = mvx_fine;
+            mv_field[idx + 1] = mvy_fine;
+            fbx += 1;
         }
+        fby += 1;
     }
 }
 

@@ -494,7 +494,7 @@ impl<R: Runtime> NlmDenoiser<R> {
 
     /// Build the per-frame motion-estimation pyramid for `slot` on
     /// both the input and (when present) the reference rings. No-op
-    /// when MC is disabled or `pyramid_levels == 1`.
+    /// when MC is disabled.
     fn build_pyramids_for_slot(&self, slot: u32) {
         let Some(ctx) = self.mc_ctx.as_ref() else {
             return;
@@ -543,9 +543,11 @@ impl<R: Runtime> NlmDenoiser<R> {
     ///
     /// Calls `run_pyramid_build` directly rather than going through
     /// [`Self::build_pyramids_for_slot`]'s `build_pyramid_for_slot`
-    /// helper, which no-ops for a single pyramid level. The confidence
-    /// geometry is always exactly one level and still needs that one
-    /// level's luma extracted every push.
+    /// helper. That helper only ever touches `mc_ctx`'s own pyramid
+    /// buffers (`pyramid_input`, `pyramid_reference`), and
+    /// `confidence_ctx` is only `Some` when `mc_ctx` is `None`, so it
+    /// would return immediately without ever building this method's
+    /// own `confidence_pyramid`.
     fn build_confidence_pyramid_for_slot(&self, slot: u32) {
         let (Some(ctx), Some(pyr)) = (self.confidence_ctx.as_ref(), self.confidence_pyramid.as_ref()) else {
             return;

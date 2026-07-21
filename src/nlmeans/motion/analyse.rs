@@ -117,6 +117,7 @@ pub(crate) fn run_analyse<R: Runtime>(
                 coarse_scale,
                 mc.blocks_x,
                 mc.blocks_y,
+                mc.step,
             );
         }
     } else {
