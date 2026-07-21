@@ -12,6 +12,11 @@ run *ARGS:
 bench *ARGS:
     cargo bench {{ARGS}}
 
+test:
+    cargo nextest run --features cpu,binary
+    cargo test --doc --features cpu,binary
+    cargo check
+
 compare-perf *ARGS:
     uv run scripts/bench_runs.py {{ARGS}}
 

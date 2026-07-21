@@ -622,7 +622,7 @@ mod options_tests {
     }
 }
 
-#[cfg(all(test, feature = "cpu"))]
+#[cfg(all(test, feature = "vulkan"))]
 mod tests {
     use super::*;
 
@@ -640,14 +640,14 @@ mod tests {
     #[test]
     fn spatial_denoise_roundtrip() {
         let mut d = Denoiser::create(
-            &[Accelerator::Cpu],
+            &[Accelerator::Vulkan],
             &Device::Default,
             16,
             16,
             opts(DenoisingMode::Spacial),
         )
         .expect("denoiser construction failed");
-        assert_eq!(d.selected_accelerator(), Accelerator::Cpu);
+        assert_eq!(d.selected_accelerator(), Accelerator::Vulkan);
 
         d.push_frame(&frame(16, 16)).expect("push failed");
         let out = d.recv_frame().expect("recv failed").expect("no frame");
@@ -664,7 +664,7 @@ mod tests {
                 self_weight: None,
             })
             .build();
-        let result = Denoiser::create(&[Accelerator::Cpu], &Device::Default, 16, 16, bad);
+        let result = Denoiser::create(&[Accelerator::Vulkan], &Device::Default, 16, 16, bad);
 
         match result {
             Err(DenoiserError::Other(_)) => {},
@@ -676,7 +676,7 @@ mod tests {
     #[test]
     fn push_after_pending_returns_queue_full() {
         let mut d = Denoiser::create(
-            &[Accelerator::Cpu],
+            &[Accelerator::Vulkan],
             &Device::Default,
             16,
             16,
@@ -726,7 +726,7 @@ mod tests {
     #[test]
     fn flush_leaves_denoiser_reusable_spatial() {
         let mut d = Denoiser::create(
-            &[Accelerator::Cpu],
+            &[Accelerator::Vulkan],
             &Device::Default,
             16,
             16,
@@ -758,7 +758,7 @@ mod tests {
     #[test]
     fn flush_leaves_denoiser_reusable_temporal() {
         let mut d = Denoiser::create(
-            &[Accelerator::Cpu],
+            &[Accelerator::Vulkan],
             &Device::Default,
             16,
             16,
@@ -800,7 +800,7 @@ mod tests {
         // not R+1.
         for n in 1..=5usize {
             let mut d = Denoiser::create(
-                &[Accelerator::Cpu],
+                &[Accelerator::Vulkan],
                 &Device::Default,
                 16,
                 16,
@@ -818,5 +818,26 @@ mod tests {
                 out.len()
             );
         }
+    }
+}
+
+// Used to just catch fires on the CPU backend
+#[cfg(all(test, feature = "cpu"))]
+mod cpu_smoke_tests {
+    use super::*;
+
+    #[test]
+    fn cpu_backend_denoises_a_frame() {
+        let opts = DenoiserOptions::builder()
+            .channel_mode(ChannelMode::Luma)
+            .mode(DenoisingMode::Spacial)
+            .build();
+        let mut d = Denoiser::create(&[Accelerator::Cpu], &Device::Default, 16, 16, opts)
+            .expect("denoiser construction failed");
+        assert_eq!(d.selected_accelerator(), Accelerator::Cpu);
+
+        d.push_frame(&vec![0.5f32; 16 * 16]).expect("push failed");
+        let out = d.recv_frame().expect("recv failed").expect("no frame");
+        assert_eq!(out.len(), 16 * 16);
     }
 }
