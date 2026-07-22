@@ -45,19 +45,20 @@ kind = "noisy"
 name = "av_spatial"
 kind = "av-denoise"
 workers = 2
-args = ["--temporal-radius", "0", "--channel-mode", "luma,chroma", "--strength", "$strength"]
+args = ["--algorithm", "nlmeans", "--temporal-radius", "0", "--channel-mode", "luma,chroma", "--strength", "$strength"]
 
 [[runs]]
 name = "av_temporal_r2"
 kind = "av-denoise"
 workers = 2
-args = ["--temporal-radius", "2", "--channel-mode", "luma,chroma", "--strength", "$strength"]
+args = ["--algorithm", "nlmeans", "--temporal-radius", "2", "--channel-mode", "luma,chroma", "--strength", "$strength"]
 
 [[runs]]
 name = "av_temporal_r2_mc"
 kind = "av-denoise"
 workers = 2
 args = [
+    "--algorithm", "nlmeans",
     "--temporal-radius", "2",
     "--channel-mode", "luma,chroma",
     "--strength", "$strength",
@@ -69,6 +70,7 @@ name = "av_full_r2"
 kind = "av-denoise"
 workers = 2
 args = [
+    "--algorithm", "nlmeans",
     "--temporal-radius", "2",
     "--channel-mode", "luma,chroma",
     "--strength", "$strength",

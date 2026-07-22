@@ -22,7 +22,7 @@ use ingest::{BinaryChannelIntent, CliOptions};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// Denoising algorithm. `nlmeans` is the fast default. `nlmeans-hq`
+/// Denoising algorithm. `nlmeans` is the fast path. `nlmeans-hq`
 /// trades some speed for noise-calibrated quality.
 #[derive(Debug, Copy, Clone, Default, EnumString)]
 #[strum(ascii_case_insensitive)]
@@ -31,6 +31,57 @@ pub enum Algorithm {
     Nlmeans,
     #[strum(serialize = "nlmeans-hq")]
     NlmeansHq,
+}
+
+/// Speed vs quality dial.
+///
+/// Fills in `--algorithm`, `--temporal-radius`, and `--search-radius`
+/// with a matched set of values.
+///
+/// Passing any of those three flags explicitly overrides just that value.
+/// The rest of the preset still applies.
+#[derive(Debug, Copy, Clone, Default, EnumString)]
+#[strum(ascii_case_insensitive)]
+pub enum Preset {
+    /// Fastest. `nlmeans`, no temporal window, search radius 2. Matches
+    /// this tool's original default behavior.
+    Veryfast,
+    /// `nlmeans-hq`, temporal radius 1, search radius 2.
+    Fast,
+    /// `nlmeans-hq`, temporal radius 2, search radius 2. The default,
+    /// favouring quality over the old default's speed.
+    #[default]
+    Base,
+    /// `nlmeans-hq`, temporal radius 4, search radius 4.
+    Slow,
+    /// Slowest. `nlmeans-hq`, temporal radius 8, search radius 4.
+    Veryslow,
+}
+
+impl Preset {
+    fn algorithm(self) -> Algorithm {
+        match self {
+            Preset::Veryfast => Algorithm::Nlmeans,
+            Preset::Fast | Preset::Base | Preset::Slow | Preset::Veryslow => Algorithm::NlmeansHq,
+        }
+    }
+
+    fn temporal_radius(self) -> u32 {
+        match self {
+            Preset::Veryfast => 0,
+            Preset::Fast => 1,
+            Preset::Base => 2,
+            Preset::Slow => 4,
+            Preset::Veryslow => 8,
+        }
+    }
+
+    fn search_radius(self) -> u32 {
+        match self {
+            Preset::Veryfast | Preset::Fast | Preset::Base => 2,
+            Preset::Slow | Preset::Veryslow => 4,
+        }
+    }
 }
 
 /// Which planes to clean up.
@@ -77,13 +128,30 @@ fn resolve_channel_intent(modes: &[CliChannelMode]) -> Result<BinaryChannelInten
 #[derive(Debug, Parser)]
 #[command(about = "Fast and efficient video denoising", long_about = None)]
 struct Args {
+    /// Speed vs quality dial.
+    ///
+    /// `veryfast` is the fastest and lowest-quality end of the dial. It
+    /// runs the plain `nlmeans` algorithm with no temporal window and
+    /// matches this tool's original default behavior.
+    ///
+    /// `fast`, `base`, `slow`, and `veryslow` all run `nlmeans-hq` and
+    /// widen the temporal window going up the list, from a 1-frame
+    /// radius at `fast` to an 8-frame radius at `veryslow`. `slow` and
+    /// `veryslow` also widen the search radius.
+    ///
+    /// `base` is the default.
+    #[arg(long, default_value = "base", global = true)]
+    preset: Preset,
+
     /// Denoising algorithm to run.
     ///
-    /// `nlmeans` is the fast default. `nlmeans-hq` is a quality-focused
+    /// `nlmeans` is the fast path. `nlmeans-hq` is a quality-focused
     /// variant that calibrates its weighting to the noise level,
     /// measured automatically per frame (see `--hq-sigma` to override).
-    #[arg(short, long, default_value = "nlmeans", global = true)]
-    algorithm: Algorithm,
+    ///
+    /// Defaults to whatever `--preset` selects.
+    #[arg(short, long, global = true)]
+    algorithm: Option<Algorithm>,
 
     /// Which hardware backends to try, in order of preference.
     ///
@@ -157,8 +225,8 @@ struct Args {
     /// How many neighbouring frames to look at on each side when
     /// cleaning a frame.
     ///
-    /// `0` (default) means no temporal blending: each frame is
-    /// cleaned on its own.
+    /// `0` means no temporal blending. Each frame is cleaned on its
+    /// own.
     ///
     /// Values above `0` look at that many frames before and after
     /// the current one.
@@ -168,13 +236,17 @@ struct Args {
     ///
     /// In `file` mode this is reset at every scene change, so
     /// raising it never causes blending across cuts.
-    #[arg(long, default_value_t = 0, global = true)]
-    temporal_radius: u32,
+    ///
+    /// Defaults to whatever `--preset` selects.
+    #[arg(long, global = true)]
+    temporal_radius: Option<u32>,
 
     /// How far away to look for similar patches inside a frame.
     ///
     /// Larger values find more matches but cost quadratically more
-    /// work. Library default is 2.
+    /// work.
+    ///
+    /// Defaults to whatever `--preset` selects.
     #[arg(long, global = true)]
     search_radius: Option<u32>,
 
@@ -336,6 +408,27 @@ struct Args {
     command: Command,
 }
 
+/// `--algorithm`, `--temporal-radius`, and `--search-radius` resolved
+/// from either an explicit flag or the active `--preset`.
+#[derive(Debug, Copy, Clone)]
+struct ResolvedPreset {
+    algorithm: Algorithm,
+    temporal_radius: u32,
+    search_radius: u32,
+}
+
+impl Args {
+    fn resolve_preset(&self) -> ResolvedPreset {
+        ResolvedPreset {
+            algorithm: self.algorithm.unwrap_or_else(|| self.preset.algorithm()),
+            temporal_radius: self
+                .temporal_radius
+                .unwrap_or_else(|| self.preset.temporal_radius()),
+            search_radius: self.search_radius.unwrap_or_else(|| self.preset.search_radius()),
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Denoise a video file, splitting work by scene.
@@ -468,6 +561,93 @@ mod parse_prefilter_tests {
     }
 }
 
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+
+    /// Parses `Args` from CLI-style tokens, always terminated with the
+    /// `stdin` subcommand since these tests only exercise the top-level
+    /// preset resolution.
+    fn parse(extra: &[&str]) -> Args {
+        let mut argv = vec!["av-denoise"];
+        argv.extend_from_slice(extra);
+        argv.push("stdin");
+        Args::parse_from(argv)
+    }
+
+    #[test]
+    fn default_preset_is_base() {
+        let resolved = parse(&[]).resolve_preset();
+        assert!(matches!(resolved.algorithm, Algorithm::NlmeansHq));
+        assert_eq!(resolved.temporal_radius, 2);
+        assert_eq!(resolved.search_radius, 2);
+    }
+
+    #[test]
+    fn veryfast_matches_former_defaults() {
+        let resolved = parse(&["--preset", "veryfast"]).resolve_preset();
+        assert!(matches!(resolved.algorithm, Algorithm::Nlmeans));
+        assert_eq!(resolved.temporal_radius, 0);
+        assert_eq!(resolved.search_radius, 2);
+    }
+
+    #[test]
+    fn fast_grid_row() {
+        let resolved = parse(&["--preset", "fast"]).resolve_preset();
+        assert!(matches!(resolved.algorithm, Algorithm::NlmeansHq));
+        assert_eq!(resolved.temporal_radius, 1);
+        assert_eq!(resolved.search_radius, 2);
+    }
+
+    #[test]
+    fn base_grid_row() {
+        let resolved = parse(&["--preset", "base"]).resolve_preset();
+        assert!(matches!(resolved.algorithm, Algorithm::NlmeansHq));
+        assert_eq!(resolved.temporal_radius, 2);
+        assert_eq!(resolved.search_radius, 2);
+    }
+
+    #[test]
+    fn slow_grid_row() {
+        let resolved = parse(&["--preset", "slow"]).resolve_preset();
+        assert!(matches!(resolved.algorithm, Algorithm::NlmeansHq));
+        assert_eq!(resolved.temporal_radius, 4);
+        assert_eq!(resolved.search_radius, 4);
+    }
+
+    #[test]
+    fn veryslow_grid_row() {
+        let resolved = parse(&["--preset", "veryslow"]).resolve_preset();
+        assert!(matches!(resolved.algorithm, Algorithm::NlmeansHq));
+        assert_eq!(resolved.temporal_radius, 8);
+        assert_eq!(resolved.search_radius, 4);
+    }
+
+    #[test]
+    fn explicit_algorithm_overrides_preset() {
+        let resolved = parse(&["--preset", "base", "--algorithm", "nlmeans"]).resolve_preset();
+        assert!(matches!(resolved.algorithm, Algorithm::Nlmeans));
+        assert_eq!(resolved.temporal_radius, 2);
+        assert_eq!(resolved.search_radius, 2);
+    }
+
+    #[test]
+    fn explicit_temporal_radius_overrides_preset() {
+        let resolved = parse(&["--preset", "base", "--temporal-radius", "6"]).resolve_preset();
+        assert!(matches!(resolved.algorithm, Algorithm::NlmeansHq));
+        assert_eq!(resolved.temporal_radius, 6);
+        assert_eq!(resolved.search_radius, 2);
+    }
+
+    #[test]
+    fn explicit_search_radius_overrides_preset() {
+        let resolved = parse(&["--preset", "veryslow", "--search-radius", "1"]).resolve_preset();
+        assert!(matches!(resolved.algorithm, Algorithm::NlmeansHq));
+        assert_eq!(resolved.temporal_radius, 8);
+        assert_eq!(resolved.search_radius, 1);
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     // cubecl spawns its per-device worker thread with no explicit stack
     // size (uses Rust's default 2 MiB). GPU kernel codegen runs on that
@@ -498,11 +678,13 @@ fn main() -> anyhow::Result<()> {
         Err(_) => anyhow::bail!("unable to apply AV_DENOISE_COMPILATION_CACHE, this is a bug."),
     }
 
-    let mode = if args.temporal_radius == 0 {
+    let resolved = args.resolve_preset();
+
+    let mode = if resolved.temporal_radius == 0 {
         DenoisingMode::Spacial
     } else {
         DenoisingMode::Temporal {
-            radius: args.temporal_radius,
+            radius: resolved.temporal_radius,
         }
     };
 
@@ -510,7 +692,7 @@ fn main() -> anyhow::Result<()> {
     let intent = resolve_channel_intent(&args.channel_mode)?;
 
     let motion_compensation = if args.motion_compensation {
-        if args.temporal_radius == 0 {
+        if resolved.temporal_radius == 0 {
             tracing::warn!(
                 "--motion-compensation has no effect when --temporal-radius is 0; \
                  the spatial path doesn't use temporal neighbours"
@@ -527,7 +709,7 @@ fn main() -> anyhow::Result<()> {
         MotionCompensationMode::None
     };
 
-    let algorithm = match args.algorithm {
+    let algorithm = match resolved.algorithm {
         Algorithm::Nlmeans => {
             if args.hq_sigma.is_some()
                 || args.hq_no_auto_strength
@@ -548,20 +730,14 @@ fn main() -> anyhow::Result<()> {
         }),
     };
 
-    let nlm_tuning = if args.search_radius.is_some()
-        || args.patch_radius.is_some()
-        || args.strength.is_some()
-        || args.self_weight.is_some()
-    {
-        Some(NlmTuning {
-            search_radius: args.search_radius,
-            patch_radius: args.patch_radius,
-            strength: args.strength,
-            self_weight: args.self_weight,
-        })
-    } else {
-        None
-    };
+    // search_radius always has a resolved value (explicit flag or the
+    // active preset), so it's always carried into the tuning override.
+    let nlm_tuning = Some(NlmTuning {
+        search_radius: Some(resolved.search_radius),
+        patch_radius: args.patch_radius,
+        strength: args.strength,
+        self_weight: args.self_weight,
+    });
 
     let opts = CliOptions {
         accelerators: args.accelerators,

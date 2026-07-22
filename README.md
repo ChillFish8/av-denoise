@@ -24,6 +24,9 @@ leverage modern hardware instead of relying on the now rather outdated OpenCL.
 
 ## Features
 
+- **`--preset` speed/quality ladder** (`veryfast`, `fast`, `base`, `slow`, `veryslow`) bundling
+  algorithm, temporal radius, and search radius into a single dial.
+   * `base` is the default. `veryfast` matches this tool's original default behavior.
 - Library and binary offering.
   * The binary supports both STDIN (y4m) and FFMS2 ingestion and emits y4m frames to STDOUT.
 - **Spatial** and **Temporal** support
@@ -63,6 +66,8 @@ total frames divided by wall-clock elapsed.
 - Input is a 3,450-frame 1080p FFV1 clip.
 - `av-denoise` using the `vulkan` backend.
 - Running on a `AMD AI Pro R9700` (AMD 9070XT equivalent) GPU.
+- These tables measure the `nlmeans` algorithm at `veryfast`-preset settings, not the
+  `base` default.
 
 ### Apples-to-apples spatial NL-means (strength 1.0)
 
@@ -169,9 +174,14 @@ cargo add av-denoise
 
 ## Example commands
 
+These use `--preset veryfast` to pin the plain `nlmeans` algorithm, so `--strength`
+stays an absolute value rather than the `nlmeans-hq` noise multiplier `base` (the
+default preset) would apply.
+
 **Y/UV Denoise - ROCm/Vulkan - On GPU 1 - Light Denoise - Spatial - strength=luma:1.2,choma:1.2**
 ```bash
 av-denoise file \
+  --preset veryfast \
   --accelerators rocm,vulkan \
   --device discrete:1 \
   --channel-mode luma,chroma \
@@ -183,6 +193,7 @@ av-denoise file \
 **Y/UV Denoise - Vulkan - On iGPU 0 - Split Denoise - Temporal (radius=1) - strength=luma:2.0,choma:1.5**
 ```bash
 av-denoise file \
+  --preset veryfast \
   --accelerators vulkan \
   --device integrated:0 \
   --channel-mode luma,chroma \
@@ -196,6 +207,7 @@ av-denoise file \
 **Y-Only Denoise - Metal - On GPU 0 - Heavy Denoise - Spatial - strength=luma:3.0**
 ```bash
 av-denoise file \
+  --preset veryfast \
   --accelerators metal \
   --device discrete:0 \
   --channel-mode luma \
@@ -207,6 +219,7 @@ av-denoise file \
 **YUV Fused Denoise - Vulkan - On Default GPU - Medium Denoise - Spatial - strength=yuv:2.0**
 ```bash
 av-denoise file \
+  --preset veryfast \
   --accelerators vulkan \
   --channel-mode yuv \
   --strength 2.0 \
@@ -217,6 +230,7 @@ av-denoise file \
 **Y/UV Denoise - Vulkan - On GPU 0 - Temporal (radius=2) + Motion Compensation - Anime / Heavy Motion**
 ```bash
 av-denoise file \
+  --preset veryfast \
   --accelerators vulkan \
   --device discrete:0 \
   --channel-mode luma,chroma \
@@ -240,12 +254,23 @@ Commands:
   help   Print this message or the help of the given subcommand(s)
 
 Options:
+      --preset <PRESET>
+          Speed vs quality dial.
+          
+          `veryfast` is the fastest and lowest-quality end of the dial. It runs the plain `nlmeans` algorithm with no temporal window and matches this tool's original default behavior.
+          
+          `fast`, `base`, `slow`, and `veryslow` all run `nlmeans-hq` and widen the temporal window going up the list, from a 1-frame radius at `fast` to an 8-frame radius at `veryslow`. `slow` and `veryslow` also widen the search radius.
+          
+          `base` is the default.
+          
+          [default: base]
+
   -a, --algorithm <ALGORITHM>
           Denoising algorithm to run.
           
-          `nlmeans` is the fast default. `nlmeans-hq` is a quality-focused variant that calibrates its weighting to the noise level, measured automatically per frame (see `--hq-sigma` to override).
+          `nlmeans` is the fast path. `nlmeans-hq` is a quality-focused variant that calibrates its weighting to the noise level, measured automatically per frame (see `--hq-sigma` to override).
           
-          [default: nlmeans]
+          Defaults to whatever `--preset` selects.
 
   -A, --accelerators <ACCELERATORS>
           Which hardware backends to try, in order of preference.
@@ -315,7 +340,7 @@ Options:
       --temporal-radius <TEMPORAL_RADIUS>
           How many neighbouring frames to look at on each side when cleaning a frame.
           
-          `0` (default) means no temporal blending: each frame is cleaned on its own.
+          `0` means no temporal blending. Each frame is cleaned on its own.
           
           Values above `0` look at that many frames before and after the current one.
           
@@ -323,12 +348,14 @@ Options:
           
           In `file` mode this is reset at every scene change, so raising it never causes blending across cuts.
           
-          [default: 0]
+          Defaults to whatever `--preset` selects.
 
       --search-radius <SEARCH_RADIUS>
           How far away to look for similar patches inside a frame.
           
-          Larger values find more matches but cost quadratically more work. Library default is 2.
+          Larger values find more matches but cost quadratically more work.
+          
+          Defaults to whatever `--preset` selects.
 
       --patch-radius <PATCH_RADIUS>
           Size of each patch being compared. The patch is `(2*patch_radius + 1)` pixels square.

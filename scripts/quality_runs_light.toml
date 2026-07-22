@@ -61,7 +61,7 @@ kind = "noisy"
 name = "av_temporal_r2"
 kind = "av-denoise"
 workers = 2
-args = ["--temporal-radius", "2", "--channel-mode", "luma,chroma", "--strength", "$strength"]
+args = ["--algorithm", "nlmeans", "--temporal-radius", "2", "--channel-mode", "luma,chroma", "--strength", "$strength"]
 
 # ---------------------------------------------------------------------------
 # HQ mode: noise level measured automatically, strength is a multiplier
