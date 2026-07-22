@@ -575,7 +575,7 @@ mod options_tests {
             .build();
         let params = opts.to_nlm_params();
 
-        assert!((params.strength - 0.45).abs() < f32::EPSILON);
+        assert!((params.strength - 0.70).abs() < f32::EPSILON);
     }
 
     #[test]

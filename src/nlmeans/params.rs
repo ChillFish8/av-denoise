@@ -16,20 +16,36 @@ const HQ_DEFAULT_STRENGTH_LUMA: [f32; 9] = [0.45, 0.45, 0.42, 0.42, 0.35, 0.35, 
 /// Measured HQ default `strength` per temporal radius for the chroma
 /// table, `hq_default_strength`'s `ChannelMode::Chroma` source. Index is
 /// `temporal_radius.min(8)`.
-const HQ_DEFAULT_STRENGTH_CHROMA: [f32; 9] = [0.50, 0.50, 0.50, 0.45, 0.45, 0.45, 0.45, 0.45, 0.45];
+const HQ_DEFAULT_STRENGTH_CHROMA: [f32; 9] = [1.00, 0.85, 0.70, 0.70, 0.70, 0.70, 0.70, 0.70, 0.70];
 
 /// Calibrated default `strength` multiplier for `nlmeans-hq`'s
 /// auto-strength mode, as a function of which plane is denoised and how
 /// far the temporal window reaches.
 ///
-/// Each entry is a measured value, not a fitted curve. A 174-run sweep
-/// scored every radius 0..=8 against a strength grid at three noise
-/// levels. The value picked at each radius is the one whose smallest
-/// XPSNR gain across those noise levels (max-min) is largest, so the
-/// choice holds up at whichever noise level is hardest to serve. Both
-/// tables are monotonically non-increasing with radius, meaning wider
-/// temporal windows want less spatial strength since they already
-/// gather more samples to average over.
+/// Each entry is a measured value, not a fitted curve. Both tables
+/// come from quality-harness sweeps that score a strength grid at
+/// three noise levels per radius.
+///
+/// The luma sweep covers every radius 0..=8 directly.
+/// The chroma sweep pins luma at each radius's chosen
+/// value, so the chroma metrics stay uncontaminated, and covers radii
+/// 0, 1, 2, 4, and 8 with a bracketed peak at each.
+///
+/// Radius 0 peaks at 1.00, radius 1 at 0.85, and radii 2, 4,
+/// and 8 all land at 0.70, a plateau that does not keep falling
+/// with radius the way luma does.
+///
+/// Radii 3, 5, 6, and 7 sit on that measured flat plateau between the
+/// r2/r4/r8 anchors rather than being swept directly. For both tables
+/// the value picked at each measured radius is the one whose smallest
+/// XPSNR gain across the tested noise levels (max-min) is largest, so
+/// the choice holds up at whichever noise level is hardest to serve.
+///
+/// Luma stays monotonically non-increasing with radius, since wider
+/// temporal windows already gather more samples to average over.
+///
+/// Chroma drops the same way out to r2 and then holds flat, rather than
+/// continuing to decrease.
 ///
 /// `ChannelMode::Yuv` reads the luma table on the assumption that a
 /// fused pass is luma-dominant. That mode wasn't part of the sweep, so
@@ -605,7 +621,7 @@ mod tests {
 
     #[test]
     fn hq_default_strength_matches_the_measured_chroma_table() {
-        const EXPECTED: [f32; 9] = [0.50, 0.50, 0.50, 0.45, 0.45, 0.45, 0.45, 0.45, 0.45];
+        const EXPECTED: [f32; 9] = [1.00, 0.85, 0.70, 0.70, 0.70, 0.70, 0.70, 0.70, 0.70];
         for (radius, &expected) in EXPECTED.iter().enumerate() {
             let got = hq_default_strength(ChannelMode::Chroma, radius as u32);
             assert!(

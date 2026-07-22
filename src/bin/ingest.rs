@@ -550,8 +550,8 @@ mod cli_options_tests {
 
     #[test]
     fn no_overrides_hq_resolves_through_to_nlm_params_to_the_measured_tables() {
-        // Radius 4: measured table is luma 0.35, chroma 0.45 (Phase 10
-        // Task 1 tables in `src/nlmeans/params.rs`).
+        // Radius 4 in the measured tables is luma 0.35 and chroma
+        // 0.70 (see the table docs in `src/nlmeans/params.rs`).
         let opts = base_opts(
             DenoisingMode::Temporal { radius: 4 },
             Algorithm::NlmeansHq(HqParams::default()),
@@ -569,8 +569,8 @@ mod cli_options_tests {
             luma_params.strength
         );
         assert!(
-            (chroma_params.strength - 0.45).abs() < f32::EPSILON,
-            "expected chroma strength 0.45 at r4, got {}",
+            (chroma_params.strength - 0.70).abs() < f32::EPSILON,
+            "expected chroma strength 0.70 at r4, got {}",
             chroma_params.strength
         );
     }

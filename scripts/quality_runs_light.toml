@@ -1,0 +1,93 @@
+input = "./data/clean-1080p.mkv"
+workdir = "./data/quality_runs_light"
+# Frames scored per run. Matches quality_runs.toml's convention. The
+# clean source clip is 288 frames, so this trims off the last 48.
+frames = 240
+seed = 4242
+# Light noise levels. bench-sample.mkv's own intrinsic grain (measured
+# sigma about 0.80 in 8-bit units over this same 240-frame window) sits
+# close to these alls values, so its lowest noise row (8) is not a
+# clean measurement of light-noise behavior. clean-1080p.mkv measures
+# about 0.43 over the same window, so these levels stay noise-dominated
+# instead of source-grain-dominated.
+noise = [4, 6, 8]
+
+# Strength used at each noise level wherever a run says "$strength",
+# calibrated for clean-1080p.mkv specifically. Probed on the fast
+# temporal-r2 row over strength {0.6, 0.8, 1.0, 1.5, 2.0} at each
+# noise level, picking the value where luma XPSNR peaks and checking
+# SSIM does not disagree. Noise 4 peaks at 1.5, a shallow interior
+# peak only 0.11 dB above 1.0 and 0.20 dB above 2.0. Noise 6 peaks at
+# 2.0, 0.28 dB above 1.5. Noise 8 also peaks at 2.0 but is still
+# rising at that grid edge, so its true optimum may sit above 2.0 and
+# was not tested.
+[strengths]
+4 = 1.5
+6 = 2.0
+8 = 2.0
+
+# Sigma used at each noise level for the `ffmpeg_bm3d` reference row,
+# same per-clip-peak convention as quality_runs.toml (not the true
+# noise sigma, see that file's [bm3d_sigmas] comment). Found by
+# sweeping sigma per level and picking between the XPSNR-Y peak and the
+# SSIM peak. True sigma of each noisy clip, measured with the
+# Immerkær estimator over the same 240-frame window, anchors the
+# ratio. alls 4 measures 2.32 true sigma with a chosen bm3d sigma of 7,
+# about 3.0x. alls 6 measures 3.60 with a chosen sigma of 12, about
+# 3.3x. alls 8 measures 4.90 with a chosen sigma of 16, about 3.3x.
+# All three land at the low end of the 3 to 6x range quality_runs.toml
+# found for bench-sample's heavier noise levels, consistent with
+# "lower ratio at lighter noise".
+[bm3d_sigmas]
+4 = 7
+6 = 12
+8 = 16
+
+# ---------------------------------------------------------------------------
+# Baseline: the corrupted clip scored against the clean reference. Every
+# denoise variant should beat this row on both SSIM and XPSNR.
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "noisy"
+kind = "noisy"
+
+# ---------------------------------------------------------------------------
+# Current fast mode, temporal radius 2, no motion compensation. Mirrors
+# quality_runs.toml's av_temporal_r2 row on the light-noise source.
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "av_temporal_r2"
+kind = "av-denoise"
+workers = 2
+args = ["--temporal-radius", "2", "--channel-mode", "luma,chroma", "--strength", "$strength"]
+
+# ---------------------------------------------------------------------------
+# HQ mode: noise level measured automatically, strength is a multiplier
+# on it, expected-noise floor subtracted from distances. Radii 2 and 4
+# mirror quality_runs.toml's av_hq_temporal_r2 and av_hq_temporal_r4.
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "av_hq_temporal_r2"
+kind = "av-denoise"
+workers = 2
+args = ["--algorithm", "nlmeans-hq", "--temporal-radius", "2", "--channel-mode", "luma,chroma"]
+
+[[runs]]
+name = "av_hq_temporal_r4"
+kind = "av-denoise"
+workers = 2
+args = ["--algorithm", "nlmeans-hq", "--temporal-radius", "4", "--channel-mode", "luma,chroma"]
+
+# ---------------------------------------------------------------------------
+# External baseline: BM3D via ffmpeg's CPU filter, run at its per-clip
+# sigma peak rather than the true noise sigma (see the [bm3d_sigmas]
+# comment above).
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "ffmpeg_bm3d"
+kind = "ffmpeg-bm3d"
+sigma = "$bm3d_sigma"

@@ -39,6 +39,17 @@ SSIM_RE = re.compile(
     r"\s+V:([\d.]+)\s+\([^)]*\)\s+All:([\d.]+)\s+\([^)]*\)"
 )
 
+# ffmpeg's framesync (the machinery behind dual-input filters like xpsnr
+# and ssim) warns rather than fails when the two inputs disagree on
+# timebase or drop/duplicate frames while pairing them up. A passing exit
+# code and a normal-looking number are not proof the two streams were
+# paired frame-for-frame, so these patterns must be swept for explicitly.
+TIMEBASE_MISMATCH_RE = re.compile(
+    r"not matching timebases found|timebase \(\d+/\d+\) (?:do|does) not match",
+    re.IGNORECASE,
+)
+FRAME_SYNC_DROP_RE = re.compile(r"(\d+) frames? dropped, (\d+) frames? duplicated")
+
 DEFAULT_CONFIG = Path(__file__).parent / "quality_runs.toml"
 
 
@@ -210,6 +221,23 @@ def parse_ssim(stderr: str) -> tuple[float, float, float, float] | None:
     return y, u, v, all_planes
 
 
+def find_scoring_corruption(stderr: str) -> str | None:
+    """Look for signs that framesync silently mispaired frames.
+
+    A mismatched timebase or a nonzero dropped/duplicated frame count
+    means the XPSNR/SSIM numbers ffmpeg printed do not describe the two
+    inputs compared frame-for-frame. ffmpeg treats this as a warning, not
+    an error, so it must be caught here instead of trusted by exit code.
+    Returns a human-readable reason, or None if the stderr looks clean.
+    """
+    if TIMEBASE_MISMATCH_RE.search(stderr):
+        return "ffmpeg reported mismatched timebases between the scoring inputs"
+    drop_match = FRAME_SYNC_DROP_RE.search(stderr)
+    if drop_match and (int(drop_match.group(1)) or int(drop_match.group(2))):
+        return "ffmpeg reported dropped or duplicated frames while pairing the scoring inputs"
+    return None
+
+
 def score_noisy(noisy: Path, ref: Path) -> tuple[bool, str]:
     graph = (
         "[0:v]split=2[n1][n2];[1:v]split=2[r1][r2];"
@@ -240,8 +268,24 @@ def score_av_denoise(run: Run, noisy: Path, ref: Path, device: str) -> tuple[boo
         "--workers", str(run.workers),
         "--input", str(noisy),
     ]
+    # Input 0 is the av-denoise y4m pipe, exact timebase 1001/24000. Input
+    # 1 is the reference file, whose Matroska container stores PTS
+    # quantized to 1/1000 (millisecond) ticks. That quantization drifts against
+    # the pipe's exact PTS as frame count grows, so xpsnr/ssim's internal
+    # framesync (which pairs frames by nearest real time) walks out of
+    # sync and silently scores the wrong frame pairs. ffmpeg only warns
+    # about this, it does not fail the run. A plain `settb=AVTB` on both
+    # branches does not fix it, since it only relabels the units and does
+    # not undo drift already baked into the reference's stored PTS values.
+    # `settb=1,setpts=N` does fix it. It puts both branches on the same
+    # unit-second timebase and rewrites each frame's PTS to its own
+    # sequential frame index, so frame k of one branch always lands at the
+    # same real time as frame k of the other, which is what actually
+    # matters here since both streams are the same fixed frame count by
+    # construction.
     graph = (
-        "[0:v]split=2[d1][d2];[1:v]split=2[r1][r2];"
+        "[0:v]settb=1,setpts=N,split=2[d1][d2];"
+        "[1:v]settb=1,setpts=N,split=2[r1][r2];"
         "[d1][r1]xpsnr;[d2][r2]ssim"
     )
     p2_cmd = [
@@ -353,6 +397,12 @@ def execute(
         ok, stderr = score_ffmpeg_nlmeans(run, noisy, ref)
     else:
         ok, stderr = score_ffmpeg_bm3d(run, noisy, ref)
+
+    corruption = find_scoring_corruption(stderr)
+    if corruption:
+        sys.stderr.write(stderr)
+        print(f"[{run.name} @ noise {alls}] FAILED: {corruption}", file=sys.stderr, flush=True)
+        return Result(run.name, alls)
 
     xpsnr = parse_xpsnr(stderr)
     ssim = parse_ssim(stderr)
