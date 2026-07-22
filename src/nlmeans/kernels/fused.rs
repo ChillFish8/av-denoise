@@ -126,15 +126,17 @@ pub fn nlm_dist_2d_weight<N: Size>(
 /// Each thread accumulates two contributions at its output pixel
 /// `(global_x, global_y)`:
 /// * the forward neighbour at `(global + q, frame_fwd)` weighted by the
-///   patch similarity at `(global, frame_t)` vs the shifted neighbour;
-/// * the backward neighbour at `(global − q, frame_bwd)` weighted by
-///   the patch similarity centred at `(global − q, frame_t)`.
+///   patch similarity between `(global, frame_t)` and the shifted
+///   neighbour;
+/// * the backward neighbour at `(global + bwd_shift, frame_bwd)`
+///   weighted by the patch similarity between `(global, frame_t)` and
+///   that neighbour — the same pattern as the forward term, just
+///   against `frame_bwd` at `bwd_shift` instead of `frame_fwd` at `q`.
 ///
-/// Both weights live in registers, computed from two SMEM tiles. The
-/// forward tile is centred on the cube so its tile-local centre maps
-/// to `(global_x, global_y)`. The backward tile is centred at the cube
-/// shifted by `(−q_x, −q_y)` so its tile-local centre maps to
-/// `(global_x − q_x, global_y − q_y)`.
+/// Both weights live in registers, computed from two SMEM tiles that
+/// share the same tile origin (both centred on the cube, so both
+/// tile-local centres map to `(global_x, global_y)`). Only the
+/// neighbour each tile reads differs.
 ///
 /// `bwd_shift_(x|y)` controls which neighbour the backward distance
 /// reads against: `+q` for `k == 0` (the patch comparison degenerates
@@ -193,15 +195,12 @@ pub fn nlm_fused_pair_accumulate<N: Size>(
 
     let fwd_tile_x = CUBE_POS_X as i32 * block_x as i32 - patch_radius as i32;
     let fwd_tile_y = CUBE_POS_Y as i32 * block_y as i32 - patch_radius as i32;
-    let bwd_tile_x = fwd_tile_x - q_x;
-    let bwd_tile_y = fwd_tile_y - q_y;
 
     let scale = channel_scale(channels);
 
-    // The four read regions are (frame_t, fwd_tile), (frame_fwd, fwd_tile+q),
-    // (frame_t, bwd_tile), and (frame_bwd, bwd_tile − q). Since
-    // bwd_tile = fwd_tile − q, the third region is fwd_tile − q and the
-    // fourth is fwd_tile − 2q.
+    // Three read regions: (frame_t, fwd_tile) shared by both the forward
+    // and backward centres, (frame_fwd, fwd_tile+q), and
+    // (frame_bwd, fwd_tile+bwd_shift).
     let fwd_end_x = fwd_tile_x + tile_width as i32;
     let fwd_end_y = fwd_tile_y + tile_height as i32;
     let interior = fwd_tile_x >= 0
@@ -212,14 +211,10 @@ pub fn nlm_fused_pair_accumulate<N: Size>(
         && (fwd_end_x + q_x) <= width as i32
         && (fwd_tile_y + q_y) >= 0
         && (fwd_end_y + q_y) <= height as i32
-        && (fwd_tile_x - q_x) >= 0
-        && (fwd_end_x - q_x) <= width as i32
-        && (fwd_tile_y - q_y) >= 0
-        && (fwd_end_y - q_y) <= height as i32
-        && (fwd_tile_x - 2 * q_x) >= 0
-        && (fwd_end_x - 2 * q_x) <= width as i32
-        && (fwd_tile_y - 2 * q_y) >= 0
-        && (fwd_end_y - 2 * q_y) <= height as i32;
+        && (fwd_tile_x + bwd_shift_x) >= 0
+        && (fwd_end_x + bwd_shift_x) <= width as i32
+        && (fwd_tile_y + bwd_shift_y) >= 0
+        && (fwd_end_y + bwd_shift_y) <= height as i32;
 
     let threads = block_x * block_y;
     let thread_id = local_y * block_x + local_x;
@@ -231,10 +226,8 @@ pub fn nlm_fused_pair_accumulate<N: Size>(
             let tile_y = idx / tile_width;
             let fwd_src_x = (fwd_tile_x + tile_x as i32) as u32;
             let fwd_src_y = (fwd_tile_y + tile_y as i32) as u32;
-            let bwd_src_x = (bwd_tile_x + tile_x as i32) as u32;
-            let bwd_src_y = (bwd_tile_y + tile_y as i32) as u32;
 
-            let fwd_center = read_line(input, fwd_src_x, fwd_src_y, frame_t, width, height);
+            let center = read_line(input, fwd_src_x, fwd_src_y, frame_t, width, height);
             let fwd_neighbor = read_line(
                 input,
                 (fwd_src_x as i32 + q_x) as u32,
@@ -243,18 +236,17 @@ pub fn nlm_fused_pair_accumulate<N: Size>(
                 width,
                 height,
             );
-            smem_fwd[idx as usize] = line_sum_sq(fwd_center - fwd_neighbor, channels) * scale;
+            smem_fwd[idx as usize] = line_sum_sq(center - fwd_neighbor, channels) * scale;
 
-            let bwd_center = read_line(input, bwd_src_x, bwd_src_y, frame_t, width, height);
             let bwd_neighbor = read_line(
                 input,
-                (bwd_src_x as i32 + bwd_shift_x) as u32,
-                (bwd_src_y as i32 + bwd_shift_y) as u32,
+                (fwd_src_x as i32 + bwd_shift_x) as u32,
+                (fwd_src_y as i32 + bwd_shift_y) as u32,
                 frame_bwd,
                 width,
                 height,
             );
-            smem_bwd[idx as usize] = line_sum_sq(bwd_center - bwd_neighbor, channels) * scale;
+            smem_bwd[idx as usize] = line_sum_sq(center - bwd_neighbor, channels) * scale;
 
             idx += threads;
         }
@@ -264,24 +256,21 @@ pub fn nlm_fused_pair_accumulate<N: Size>(
             let tile_y = idx / tile_width;
             let fwd_src_x = fwd_tile_x + tile_x as i32;
             let fwd_src_y = fwd_tile_y + tile_y as i32;
-            let bwd_src_x = bwd_tile_x + tile_x as i32;
-            let bwd_src_y = bwd_tile_y + tile_y as i32;
 
-            let fwd_center = read_clamped_line(input, fwd_src_x, fwd_src_y, frame_t, width, height);
+            let center = read_clamped_line(input, fwd_src_x, fwd_src_y, frame_t, width, height);
             let fwd_neighbor =
                 read_clamped_line(input, fwd_src_x + q_x, fwd_src_y + q_y, frame_fwd, width, height);
-            smem_fwd[idx as usize] = line_sum_sq(fwd_center - fwd_neighbor, channels) * scale;
+            smem_fwd[idx as usize] = line_sum_sq(center - fwd_neighbor, channels) * scale;
 
-            let bwd_center = read_clamped_line(input, bwd_src_x, bwd_src_y, frame_t, width, height);
             let bwd_neighbor = read_clamped_line(
                 input,
-                bwd_src_x + bwd_shift_x,
-                bwd_src_y + bwd_shift_y,
+                fwd_src_x + bwd_shift_x,
+                fwd_src_y + bwd_shift_y,
                 frame_bwd,
                 width,
                 height,
             );
-            smem_bwd[idx as usize] = line_sum_sq(bwd_center - bwd_neighbor, channels) * scale;
+            smem_bwd[idx as usize] = line_sum_sq(center - bwd_neighbor, channels) * scale;
 
             idx += threads;
         }
@@ -483,11 +472,12 @@ pub fn nlm_fused_pair_accumulate_ref<N: Size>(
 
     let fwd_tile_x = CUBE_POS_X as i32 * block_x as i32 - patch_radius as i32;
     let fwd_tile_y = CUBE_POS_Y as i32 * block_y as i32 - patch_radius as i32;
-    let bwd_tile_x = fwd_tile_x - q_x;
-    let bwd_tile_y = fwd_tile_y - q_y;
 
     let scale = channel_scale(channels);
 
+    // Three read regions: (frame_t, fwd_tile) shared by both the forward
+    // and backward centres, (frame_fwd, fwd_tile+q), and
+    // (frame_bwd, fwd_tile+bwd_shift).
     let fwd_end_x = fwd_tile_x + tile_width as i32;
     let fwd_end_y = fwd_tile_y + tile_height as i32;
     let interior = fwd_tile_x >= 0
@@ -498,14 +488,10 @@ pub fn nlm_fused_pair_accumulate_ref<N: Size>(
         && (fwd_end_x + q_x) <= width as i32
         && (fwd_tile_y + q_y) >= 0
         && (fwd_end_y + q_y) <= height as i32
-        && (fwd_tile_x - q_x) >= 0
-        && (fwd_end_x - q_x) <= width as i32
-        && (fwd_tile_y - q_y) >= 0
-        && (fwd_end_y - q_y) <= height as i32
-        && (fwd_tile_x - 2 * q_x) >= 0
-        && (fwd_end_x - 2 * q_x) <= width as i32
-        && (fwd_tile_y - 2 * q_y) >= 0
-        && (fwd_end_y - 2 * q_y) <= height as i32;
+        && (fwd_tile_x + bwd_shift_x) >= 0
+        && (fwd_end_x + bwd_shift_x) <= width as i32
+        && (fwd_tile_y + bwd_shift_y) >= 0
+        && (fwd_end_y + bwd_shift_y) <= height as i32;
 
     let threads = block_x * block_y;
     let thread_id = local_y * block_x + local_x;
@@ -517,10 +503,8 @@ pub fn nlm_fused_pair_accumulate_ref<N: Size>(
             let tile_y = idx / tile_width;
             let fwd_src_x = (fwd_tile_x + tile_x as i32) as u32;
             let fwd_src_y = (fwd_tile_y + tile_y as i32) as u32;
-            let bwd_src_x = (bwd_tile_x + tile_x as i32) as u32;
-            let bwd_src_y = (bwd_tile_y + tile_y as i32) as u32;
 
-            let fwd_center = read_line(reference, fwd_src_x, fwd_src_y, frame_t, width, height);
+            let center = read_line(reference, fwd_src_x, fwd_src_y, frame_t, width, height);
             let fwd_neighbor = read_line(
                 reference,
                 (fwd_src_x as i32 + q_x) as u32,
@@ -529,18 +513,17 @@ pub fn nlm_fused_pair_accumulate_ref<N: Size>(
                 width,
                 height,
             );
-            smem_fwd[idx as usize] = line_sum_sq(fwd_center - fwd_neighbor, channels) * scale;
+            smem_fwd[idx as usize] = line_sum_sq(center - fwd_neighbor, channels) * scale;
 
-            let bwd_center = read_line(reference, bwd_src_x, bwd_src_y, frame_t, width, height);
             let bwd_neighbor = read_line(
                 reference,
-                (bwd_src_x as i32 + bwd_shift_x) as u32,
-                (bwd_src_y as i32 + bwd_shift_y) as u32,
+                (fwd_src_x as i32 + bwd_shift_x) as u32,
+                (fwd_src_y as i32 + bwd_shift_y) as u32,
                 frame_bwd,
                 width,
                 height,
             );
-            smem_bwd[idx as usize] = line_sum_sq(bwd_center - bwd_neighbor, channels) * scale;
+            smem_bwd[idx as usize] = line_sum_sq(center - bwd_neighbor, channels) * scale;
 
             idx += threads;
         }
@@ -550,10 +533,8 @@ pub fn nlm_fused_pair_accumulate_ref<N: Size>(
             let tile_y = idx / tile_width;
             let fwd_src_x = fwd_tile_x + tile_x as i32;
             let fwd_src_y = fwd_tile_y + tile_y as i32;
-            let bwd_src_x = bwd_tile_x + tile_x as i32;
-            let bwd_src_y = bwd_tile_y + tile_y as i32;
 
-            let fwd_center = read_clamped_line(reference, fwd_src_x, fwd_src_y, frame_t, width, height);
+            let center = read_clamped_line(reference, fwd_src_x, fwd_src_y, frame_t, width, height);
             let fwd_neighbor = read_clamped_line(
                 reference,
                 fwd_src_x + q_x,
@@ -562,18 +543,17 @@ pub fn nlm_fused_pair_accumulate_ref<N: Size>(
                 width,
                 height,
             );
-            smem_fwd[idx as usize] = line_sum_sq(fwd_center - fwd_neighbor, channels) * scale;
+            smem_fwd[idx as usize] = line_sum_sq(center - fwd_neighbor, channels) * scale;
 
-            let bwd_center = read_clamped_line(reference, bwd_src_x, bwd_src_y, frame_t, width, height);
             let bwd_neighbor = read_clamped_line(
                 reference,
-                bwd_src_x + bwd_shift_x,
-                bwd_src_y + bwd_shift_y,
+                fwd_src_x + bwd_shift_x,
+                fwd_src_y + bwd_shift_y,
                 frame_bwd,
                 width,
                 height,
             );
-            smem_bwd[idx as usize] = line_sum_sq(bwd_center - bwd_neighbor, channels) * scale;
+            smem_bwd[idx as usize] = line_sum_sq(center - bwd_neighbor, channels) * scale;
 
             idx += threads;
         }
@@ -625,10 +605,12 @@ pub fn nlm_fused_pair_accumulate_ref<N: Size>(
 ///
 /// `frame_t` is read once into an expanded SMEM tile of size
 /// `(block + 2·patch_radius + 2·search_radius)²`, large enough to cover
-/// both the forward tile (centred on the cube) and every shifted backward
-/// tile (centred at `cube − q` for q in the window). Per q, only the
+/// every `frame_fwd` / `frame_bwd` neighbour offset in the window
+/// relative to the cube's own tile — the forward and backward
+/// comparisons both centre on the same `frame_t` patch (the output
+/// pixel's own), so one cached tile covers both. Per q, only the
 /// shifted neighbour pixels in `frame_fwd` / `frame_bwd` come from
-/// global; both center reads hit the cache. This roughly halves the
+/// global. The center read hits the cache. This roughly halves the
 /// global read traffic vs the naive windowed version that re-reads
 /// `frame_t` for every q.
 ///
@@ -724,11 +706,15 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
                 let tile_x = idx % tile_width;
                 let tile_y = idx / tile_width;
 
-                // fwd center sits at (tile_x + search_radius, tile_y + search_radius)
-                // in expanded-tile coordinates.
-                let fwd_center_idx =
+                // Both the forward and backward centres sit at
+                // (tile_x + search_radius, tile_y + search_radius) in
+                // expanded-tile coordinates. The backward comparison is
+                // centred on the same output pixel as the forward one,
+                // mirroring it against `frame_bwd` at `-q` instead of
+                // `frame_fwd` at `+q`.
+                let center_idx =
                     ((tile_y + search_radius) * expanded_width + (tile_x + search_radius)) as usize;
-                let fwd_center = smem_center[fwd_center_idx];
+                let center = smem_center[center_idx];
                 let fwd_neighbor = read_clamped_line(
                     input,
                     fwd_tile_x0 + tile_x as i32 + q_x,
@@ -737,22 +723,17 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
                     width,
                     height,
                 );
-                smem_fwd[idx as usize] = line_sum_sq(fwd_center - fwd_neighbor, channels) * scale;
+                smem_fwd[idx as usize] = line_sum_sq(center - fwd_neighbor, channels) * scale;
 
-                // bwd center sits at (tile_x − q_x + search_radius, tile_y − q_y + search_radius).
-                // q ∈ [−search_radius, +search_radius] keeps the result in [0, expanded_width).
-                let bwd_ex = (tile_x as i32 - q_x + search_radius as i32) as u32;
-                let bwd_ey = (tile_y as i32 - q_y + search_radius as i32) as u32;
-                let bwd_center = smem_center[(bwd_ey * expanded_width + bwd_ex) as usize];
                 let bwd_neighbor = read_clamped_line(
                     input,
-                    fwd_tile_x0 + tile_x as i32 - 2 * q_x,
-                    fwd_tile_y0 + tile_y as i32 - 2 * q_y,
+                    fwd_tile_x0 + tile_x as i32 - q_x,
+                    fwd_tile_y0 + tile_y as i32 - q_y,
                     frame_bwd,
                     width,
                     height,
                 );
-                smem_bwd[idx as usize] = line_sum_sq(bwd_center - bwd_neighbor, channels) * scale;
+                smem_bwd[idx as usize] = line_sum_sq(center - bwd_neighbor, channels) * scale;
 
                 idx += threads;
             }
@@ -1061,9 +1042,12 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
                 let tile_x = idx % tile_width;
                 let tile_y = idx / tile_width;
 
-                let fwd_center_idx =
+                // Both the forward and backward comparisons centre on
+                // the same `frame_t` patch (see the non-`_ref` variant's
+                // doc comment).
+                let center_idx =
                     ((tile_y + search_radius) * expanded_width + (tile_x + search_radius)) as usize;
-                let fwd_center = smem_center[fwd_center_idx];
+                let center = smem_center[center_idx];
                 let fwd_neighbor = read_clamped_line(
                     reference,
                     fwd_tile_x0 + tile_x as i32 + q_x,
@@ -1072,20 +1056,17 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
                     width,
                     height,
                 );
-                smem_fwd[idx as usize] = line_sum_sq(fwd_center - fwd_neighbor, channels) * scale;
+                smem_fwd[idx as usize] = line_sum_sq(center - fwd_neighbor, channels) * scale;
 
-                let bwd_ex = (tile_x as i32 - q_x + search_radius as i32) as u32;
-                let bwd_ey = (tile_y as i32 - q_y + search_radius as i32) as u32;
-                let bwd_center = smem_center[(bwd_ey * expanded_width + bwd_ex) as usize];
                 let bwd_neighbor = read_clamped_line(
                     reference,
-                    fwd_tile_x0 + tile_x as i32 - 2 * q_x,
-                    fwd_tile_y0 + tile_y as i32 - 2 * q_y,
+                    fwd_tile_x0 + tile_x as i32 - q_x,
+                    fwd_tile_y0 + tile_y as i32 - q_y,
                     frame_bwd,
                     width,
                     height,
                 );
-                smem_bwd[idx as usize] = line_sum_sq(bwd_center - bwd_neighbor, channels) * scale;
+                smem_bwd[idx as usize] = line_sum_sq(center - bwd_neighbor, channels) * scale;
 
                 idx += threads;
             }

@@ -30,11 +30,10 @@ pub const BLOCK_X: u32 = 32;
 /// Cube Y dimension for tile-heavy fused/separable kernels.
 pub const BLOCK_Y: u32 = 8;
 
-/// Cube shape for per-pixel kernels with no SMEM tile (`nlm_accumulate`,
-/// `nlm_finish`) and the small-tile `nlm_dist_2d_weight(_ref)` kernels.
-/// On RDNA-class GPUs these benchmark 10 to 25% faster at (32, 16) than at
-/// the tile-heavy default, because they're memory-latency-bound and the
-/// extra threads hide load latency.
+/// Cube shape for the per-pixel `nlm_accumulate` kernel, which has no
+/// SMEM tile. On RDNA-class GPUs it benchmarks 10 to 25% faster at
+/// (32, 16) than at the tile-heavy default, because it's
+/// memory-latency-bound and the extra threads hide load latency.
 pub const BLOCK_X_THIN: u32 = 32;
 pub const BLOCK_Y_THIN: u32 = 16;
 

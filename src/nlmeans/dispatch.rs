@@ -6,15 +6,11 @@ use super::kernels::{
     gpu_copy,
     gpu_zero_buffers,
     nlm_accumulate,
-    nlm_dist_2d_weight,
-    nlm_dist_2d_weight_ref,
     nlm_distance,
     nlm_distance_pair,
     nlm_distance_pair_ref,
     nlm_distance_ref,
     nlm_finish,
-    nlm_fused_pair_accumulate,
-    nlm_fused_pair_accumulate_ref,
     nlm_fused_pair_accumulate_window,
     nlm_fused_pair_accumulate_window_ref,
     nlm_fused_single_window,
@@ -43,9 +39,7 @@ pub(super) struct LaunchCtx {
     pub(super) pixels: usize,
     pub(super) cube_count: CubeCount,
     pub(super) cube_dim: CubeDim,
-    /// Alternate shape used by `nlm_accumulate` / `nlm_finish` and the
-    /// small-tile `nlm_dist_2d_weight(_ref)` kernels. See
-    /// [`BLOCK_X_THIN`].
+    /// Alternate shape used by `nlm_accumulate`. See [`BLOCK_X_THIN`].
     pub(super) thin_cube_count: CubeCount,
     pub(super) thin_cube_dim: CubeDim,
 }
@@ -206,101 +200,6 @@ impl<R: Runtime> NlmDenoiser<R> {
                 blocks_y: 1,
             }
         }
-    }
-
-    /// Temporal (k≠0) fused-path step: one launch that computes both
-    /// weights in registers and applies the +q / −q contributions.
-    fn dispatch_fused_iter(
-        &self,
-        ctx: &LaunchCtx,
-        center_t: u32,
-        q_x: i32,
-        q_y: i32,
-        q_k: i32,
-    ) -> Result<(), anyhow::Error> {
-        let channels = self.params.channels.count();
-        let frame_t = self.phys_frame(center_t as i32);
-        let frame_fwd = self.phys_frame(center_t as i32 + q_k);
-        let frame_bwd = self.phys_frame(center_t as i32 - q_k);
-        // The backward distance compares against a different neighbour
-        // depending on whether the temporal offset is zero. For k=0 the
-        // pair collapses to a symmetric (+q, +q) self-comparison; for
-        // k≠0 the true (+q, −q) cross-frame comparison applies.
-        let (bwd_shift_x, bwd_shift_y) = if q_k == 0 { (q_x, q_y) } else { (-q_x, -q_y) };
-        let confidence = self.confidence_pair_args(q_k);
-
-        if self.use_reference {
-            unsafe {
-                nlm_fused_pair_accumulate_ref::launch_unchecked::<R>(
-                    &self.client,
-                    ctx.cube_count.clone(),
-                    ctx.cube_dim,
-                    self.params.channels.storage_count() as usize,
-                    self.input_arg_for_temporal(ctx),
-                    self.reference_arg_for_temporal(ctx),
-                    self.accum_arg(ctx),
-                    self.weight_sum_arg(ctx),
-                    self.max_weight_arg(ctx),
-                    confidence.conf_fwd,
-                    confidence.conf_bwd,
-                    confidence.use_confidence,
-                    frame_t,
-                    frame_fwd,
-                    frame_bwd,
-                    q_x,
-                    q_y,
-                    bwd_shift_x,
-                    bwd_shift_y,
-                    self.h2_inv_norm,
-                    self.noise_offset,
-                    self.width,
-                    self.height,
-                    channels,
-                    self.params.patch_radius,
-                    BLOCK_X,
-                    BLOCK_Y,
-                    confidence.step,
-                    confidence.blocks_x,
-                    confidence.blocks_y,
-                );
-            }
-        } else {
-            unsafe {
-                nlm_fused_pair_accumulate::launch_unchecked::<R>(
-                    &self.client,
-                    ctx.cube_count.clone(),
-                    ctx.cube_dim,
-                    self.params.channels.storage_count() as usize,
-                    self.input_arg_for_temporal(ctx),
-                    self.accum_arg(ctx),
-                    self.weight_sum_arg(ctx),
-                    self.max_weight_arg(ctx),
-                    confidence.conf_fwd,
-                    confidence.conf_bwd,
-                    confidence.use_confidence,
-                    frame_t,
-                    frame_fwd,
-                    frame_bwd,
-                    q_x,
-                    q_y,
-                    bwd_shift_x,
-                    bwd_shift_y,
-                    self.h2_inv_norm,
-                    self.noise_offset,
-                    self.width,
-                    self.height,
-                    channels,
-                    self.params.patch_radius,
-                    BLOCK_X,
-                    BLOCK_Y,
-                    confidence.step,
-                    confidence.blocks_x,
-                    confidence.blocks_y,
-                );
-            }
-        }
-
-        Ok(())
     }
 
     /// Temporal (k≠0) windowed fused step: a single launch covers every
@@ -556,91 +455,6 @@ impl<R: Runtime> NlmDenoiser<R> {
                 confidence.step,
                 confidence.blocks_x,
                 confidence.blocks_y,
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Spatial (k=0) fused-path step: single-tile weight + accumulate.
-    /// Cheaper than the paired fused kernel here because the weight
-    /// map is symmetric, so a single tile is enough.
-    fn dispatch_fused_iter_k0(
-        &self,
-        ctx: &LaunchCtx,
-        center_t: u32,
-        q_x: i32,
-        q_y: i32,
-    ) -> Result<(), anyhow::Error> {
-        let channels = self.params.channels.count();
-        let frame_t = self.phys_frame(center_t as i32);
-
-        if self.use_reference {
-            unsafe {
-                nlm_dist_2d_weight_ref::launch_unchecked::<R>(
-                    &self.client,
-                    ctx.cube_count.clone(),
-                    ctx.cube_dim,
-                    self.params.channels.storage_count() as usize,
-                    self.reference_arg(ctx),
-                    self.weight_buf_arg(ctx),
-                    frame_t,
-                    frame_t,
-                    q_x,
-                    q_y,
-                    self.h2_inv_norm,
-                    self.noise_offset,
-                    self.width,
-                    self.height,
-                    channels,
-                    self.params.patch_radius,
-                    BLOCK_X,
-                    BLOCK_Y,
-                );
-            }
-        } else {
-            unsafe {
-                nlm_dist_2d_weight::launch_unchecked::<R>(
-                    &self.client,
-                    ctx.cube_count.clone(),
-                    ctx.cube_dim,
-                    self.params.channels.storage_count() as usize,
-                    self.input_arg(ctx),
-                    self.weight_buf_arg(ctx),
-                    frame_t,
-                    frame_t,
-                    q_x,
-                    q_y,
-                    self.h2_inv_norm,
-                    self.noise_offset,
-                    self.width,
-                    self.height,
-                    channels,
-                    self.params.patch_radius,
-                    BLOCK_X,
-                    BLOCK_Y,
-                );
-            }
-        }
-
-        unsafe {
-            nlm_accumulate::launch_unchecked::<R>(
-                &self.client,
-                ctx.thin_cube_count.clone(),
-                ctx.thin_cube_dim,
-                self.params.channels.storage_count() as usize,
-                self.input_arg(ctx),
-                self.accum_arg(ctx),
-                self.weight_sum_arg(ctx),
-                self.weight_buf_arg(ctx),
-                self.weight_buf_arg(ctx),
-                self.max_weight_arg(ctx),
-                frame_t,
-                frame_t,
-                q_x,
-                q_y,
-                self.width,
-                self.height,
             );
         }
 
@@ -1172,15 +986,9 @@ impl<R: Runtime> NlmDenoiser<R> {
                     }
 
                     if q_k == 0 {
-                        if self.use_separable {
-                            self.dispatch_separable_iter_k0(&ctx, center_t, q_x, q_y)?;
-                        } else {
-                            self.dispatch_fused_iter_k0(&ctx, center_t, q_x, q_y)?;
-                        }
-                    } else if self.use_separable {
-                        self.dispatch_separable_iter(&ctx, center_t, q_x, q_y, q_k)?;
+                        self.dispatch_separable_iter_k0(&ctx, center_t, q_x, q_y)?;
                     } else {
-                        self.dispatch_fused_iter(&ctx, center_t, q_x, q_y, q_k)?;
+                        self.dispatch_separable_iter(&ctx, center_t, q_x, q_y, q_k)?;
                     }
                 }
             }

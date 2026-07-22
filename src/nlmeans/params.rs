@@ -72,10 +72,16 @@ pub(super) const SEPARABLE_THRESHOLD: u32 = 8;
 /// SMEM on RDNA-class GPUs.
 pub const MAX_PATCH_RADIUS: u32 = 16;
 
-/// Hard ceiling on `search_radius`. The windowed kernel SMEM tile is
-/// `(block + 2·patch_radius + 2·search_radius)² × stored_ch × 4` bytes;
-/// the per-q dispatch path is also gated on this so launch counts stay
-/// sane (`(2·a+1)²` launches per frame).
+/// Hard ceiling on `search_radius`. The windowed kernel's SMEM tile is
+/// `(block + 2·patch_radius + 2·search_radius)² × stored_ch × 4` bytes,
+/// well within hardware SMEM limits at every supported size. The real
+/// cost that grows with `search_radius` is the kernel's `#[unroll]`ed
+/// `(2·search_radius + 1)²` window loop, whose compiled size and
+/// codegen time both scale with it (see the stack-size note in
+/// `.cargo/config.toml`). The per-q dispatch path (used when
+/// `patch_radius` forces the separable fallback) is gated on this too,
+/// so launch counts stay sane (`(2·a+1)²` launches per temporal
+/// offset).
 pub const MAX_SEARCH_RADIUS: u32 = 8;
 
 /// Hard ceiling on `temporal_radius`. The ring buffer is sized for
@@ -295,8 +301,9 @@ impl NlmParams {
 
         if self.search_radius > MAX_SEARCH_RADIUS {
             anyhow::bail!(
-                "search_radius={} exceeds the supported maximum ({}); the windowed \
-                 kernel allocates `(block + 2·patch_radius + 2·search_radius)²` of SMEM",
+                "search_radius={} exceeds the supported maximum ({}). The windowed \
+                 kernel's search window loop is fully unrolled, so its compiled size \
+                 and codegen time both grow with search_radius",
                 self.search_radius,
                 MAX_SEARCH_RADIUS,
             );
