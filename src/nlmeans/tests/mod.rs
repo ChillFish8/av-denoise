@@ -9,5 +9,6 @@ mod prefilter;
 mod separable;
 mod spatial;
 mod temporal;
+mod temporal_noise;
 mod util;
 mod validation;

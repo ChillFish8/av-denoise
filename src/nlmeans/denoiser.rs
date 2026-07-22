@@ -5,7 +5,21 @@ use cubecl::server::Handle;
 
 use super::kernels::gpu_copy;
 use super::motion::{self, MotionCtx, MotionEstimation, build_pyramid_for_slot, run_pyramid_build};
-use super::noise::{NoiseCtx, NoiseEstimator, partials_len, run_noise_estimate, sigma_from_abs_sum};
+use super::noise::{
+    NoiseCtx,
+    NoiseEstimator,
+    TemporalNoiseSample,
+    TemporalStatsCtx,
+    aggregate_temporal_noise_stats,
+    partials_len,
+    read_temporal_stats_slot,
+    run_noise_estimate,
+    run_temporal_noise_stats,
+    sigma_from_abs_sum,
+    temporal_sigma_eff,
+    temporal_stats_buf_bytes,
+    zero_temporal_stats_slot,
+};
 use super::params::{NlmParams, SEPARABLE_THRESHOLD, sigma_eff, validate_dimensions};
 use super::pending::Pending;
 use super::prefilter::{PrefilterCtx, PrefilterMode, run_prefilter};
@@ -89,6 +103,14 @@ pub struct NlmDenoiser<R: Runtime> {
     /// Per-ring-slot Immerkær totals, `[total_frames * 4]` f32s. Same
     /// gating as `noise_partials`.
     pub(super) noise_results: Option<Handle>,
+    /// Per-ring-slot temporal-residual block stats. One region per
+    /// ring slot, each region `blocks_x * blocks_y` block records
+    /// (row-major), each record `[sum_d(ch0..stored_ch-1),
+    /// sum_d2(ch0..stored_ch-1), sum_lag]`. `Some` only when auto
+    /// noise estimation is active (same as `noise_partials`) and
+    /// `temporal_radius >= 1` (the r=0 path has no temporal neighbour
+    /// to diff against).
+    pub(super) temporal_stats_buf: Option<Handle>,
     /// Smooths the raw per-frame noise estimate into a stable
     /// per-channel sigma. Inert (never updated) when noise is not
     /// measured automatically.
@@ -230,6 +252,15 @@ impl<R: Runtime> NlmDenoiser<R> {
             (None, None)
         };
 
+        // The temporal residual estimator additionally needs a real
+        // temporal neighbour to diff against, so it stays inert at
+        // temporal_radius = 0 even when auto noise estimation is on.
+        let temporal_stats_buf = if auto_noise && params.temporal_radius >= 1 {
+            Some(client.empty(temporal_stats_buf_bytes(width, height, stored_ch, total_frames)))
+        } else {
+            None
+        };
+
         // Motion-compensation buffers. Only allocated when MC is
         // active *and* the temporal window is non-trivial (k=0 path
         // would never touch them).
@@ -364,6 +395,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             use_reference,
             noise_partials,
             noise_results,
+            temporal_stats_buf,
             noise_estimator: NoiseEstimator::default(),
             mc_ctx,
             compensated_input_buf,
@@ -396,6 +428,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let slot = self.upload_into(&self.input_buf.clone(), frame);
 
         self.run_noise_estimate_for_slot(slot as u32);
+        self.run_temporal_stats_for_slot(slot as u32);
         self.seed_noise_estimate_if_first_frame(slot as u32);
 
         if let PrefilterMode::NlmSpatial { strength_scale } = self.params.prefilter {
@@ -433,6 +466,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.build_confidence_pyramid_for_slot(slot as u32);
         self.run_pair_analyse_for_slot(slot as u32);
         self.run_noise_estimate_for_slot(slot as u32);
+        self.run_temporal_stats_for_slot(slot as u32);
         self.advance_ring();
         self.prime_leading_edge_if_first();
     }
@@ -683,6 +717,58 @@ impl<R: Runtime> NlmDenoiser<R> {
         run_noise_estimate::<R>(&self.client, &ctx).expect("noise estimate dispatch failed");
     }
 
+    /// Queue the temporal-residual noise-stats kernel for `slot`,
+    /// diffing it against the ring's immediately preceding physical
+    /// slot. No-op unless the temporal estimator is active
+    /// (`temporal_stats_buf` allocated), and for the very first frame
+    /// of a stream (`ring_head == 0`), which has no predecessor to
+    /// diff against — mirrors [`Self::run_pair_analyse_for_slot`]'s
+    /// same gate. The centre slot's stats are read back and aggregated
+    /// later in [`Self::update_noise_estimate`].
+    fn run_temporal_stats_for_slot(&self, slot: u32) {
+        let Some(stats_buf) = self.temporal_stats_buf.as_ref() else {
+            return;
+        };
+        if self.ring_head == 0 {
+            return;
+        }
+
+        let total_frames = self.params.total_frames();
+        let slot_prev = (slot + total_frames - 1) % total_frames;
+
+        let ctx = TemporalStatsCtx {
+            width: self.width,
+            height: self.height,
+            stored_ch: self.params.channels.storage_count(),
+            frame_count: total_frames,
+            slot_new: slot,
+            slot_prev,
+            input_buf: &self.input_buf,
+            stats_buf,
+        };
+
+        run_temporal_noise_stats::<R>(&self.client, &ctx).expect("temporal noise stats dispatch failed");
+    }
+
+    /// Zero-fill the duplicated slot's temporal-stats region. A
+    /// duplicate mirrors its predecessor's pixels exactly, so a real
+    /// diff against it would just recompute an all-zero record; this
+    /// is the cheaper equivalent. No-op unless the temporal estimator
+    /// is active.
+    fn zero_temporal_stats_for_slot(&self, slot: u32) {
+        let Some(stats_buf) = self.temporal_stats_buf.as_ref() else {
+            return;
+        };
+        zero_temporal_stats_slot::<R>(
+            &self.client,
+            stats_buf,
+            self.width,
+            self.height,
+            self.params.channels.storage_count(),
+            slot,
+        );
+    }
+
     /// One-time σ bootstrap for the very first frame of a stream. Auto
     /// noise estimation normally updates `h2_inv_norm` / `noise_offset`
     /// / `input_noise_offset` from [`Self::update_noise_estimate`] at
@@ -714,22 +800,41 @@ impl<R: Runtime> NlmDenoiser<R> {
             .expect("noise-estimate seed readback failed");
         let data = f32::from_bytes(&bytes);
 
-        self.fold_noise_estimate(data, slot as usize);
+        // The stream's first frame has no predecessor, so
+        // `run_temporal_stats_for_slot` never ran for it (see its
+        // `ring_head == 0` gate) and this slot's stats region is
+        // unwritten. Seed from Immerkær alone, exactly as before the
+        // temporal estimator existed.
+        self.fold_noise_estimate(data, slot as usize, None);
     }
 
-    /// Fold one physical ring slot's already-read-back noise totals into
-    /// the EMA and recompute the filter parameters derived from it
-    /// (`h2_inv_norm`, `noise_offset`, `input_noise_offset`, `sigma_y`).
-    /// Shared by [`Self::seed_noise_estimate_if_first_frame`] and
-    /// [`Self::update_noise_estimate`], which differ only in how they
-    /// obtain `data` and which slot they pass in.
-    fn fold_noise_estimate(&mut self, data: &[f32], slot: usize) {
+    /// Fold one physical ring slot's already-read-back noise totals
+    /// into the EMA and recompute the filter parameters derived from
+    /// it (`h2_inv_norm`, `noise_offset`, `input_noise_offset`,
+    /// `sigma_y`). Shared by [`Self::seed_noise_estimate_if_first_frame`]
+    /// and [`Self::update_noise_estimate`], which differ in how they
+    /// obtain `data`/`temporal` and which slot they pass in.
+    ///
+    /// When `temporal` carries a sample, each channel's raw estimate
+    /// becomes `max(sigma_eff, sigma_immerkaer)` — the temporal
+    /// residual estimator sees correlated grain the Immerkær mask
+    /// underestimates, but scarce static content (motion, scene
+    /// changes) makes its sample unreliable, so it can only push the
+    /// estimate up from Immerkær, never down.
+    fn fold_noise_estimate(&mut self, data: &[f32], slot: usize, temporal: Option<TemporalNoiseSample>) {
         let channels = self.params.channels.count() as usize;
         let base = slot * 4;
 
         let mut raw = [0.0f32; 3];
         for (c, s) in raw.iter_mut().enumerate().take(channels) {
             *s = sigma_from_abs_sum(data[base + c], self.width, self.height);
+        }
+
+        if let Some(sample) = temporal {
+            let eff = temporal_sigma_eff(&sample, channels);
+            for (r, e) in raw.iter_mut().zip(eff.iter()).take(channels) {
+                *r = r.max(*e);
+            }
         }
 
         let updated = self.noise_estimator.update(&raw[..channels]);
@@ -846,6 +951,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.build_pyramids_for_slot(next_slot as u32);
         self.build_confidence_pyramid_for_slot(next_slot as u32);
         self.run_noise_estimate_for_slot(next_slot as u32);
+        self.zero_temporal_stats_for_slot(next_slot as u32);
         // Runs before `ring_head` advances, so `pair_slot(0)` reads the
         // same pre-advance `ring_head` as `run_pair_analyse_for_slot`
         // (see `Self::pair_slot`).
@@ -925,9 +1031,44 @@ impl<R: Runtime> NlmDenoiser<R> {
         let center_t = self.params.temporal_radius;
         let center_slot = self.phys_frame(center_t as i32) as usize;
 
-        self.fold_noise_estimate(data, center_slot);
+        let temporal = self.read_temporal_noise_sample(center_slot as u32)?;
+
+        self.fold_noise_estimate(data, center_slot, temporal);
 
         Ok(())
+    }
+
+    /// Reads back and aggregates the centre slot's temporal-residual
+    /// stats. `None` when the temporal estimator is inactive
+    /// (`temporal_stats_buf` unallocated: `temporal_radius == 0` or a
+    /// fixed `sigma_override`) or when aggregation itself falls back
+    /// (see [`aggregate_temporal_noise_stats`]).
+    fn read_temporal_noise_sample(&self, slot: u32) -> Result<Option<TemporalNoiseSample>, anyhow::Error> {
+        let Some(stats_buf) = self.temporal_stats_buf.as_ref() else {
+            return Ok(None);
+        };
+
+        let stored_ch = self.params.channels.storage_count();
+        let channels = self.params.channels.count();
+        let frame_count = self.params.total_frames();
+
+        let records = read_temporal_stats_slot::<R>(
+            &self.client,
+            stats_buf,
+            self.width,
+            self.height,
+            stored_ch,
+            frame_count,
+            slot,
+        )?;
+
+        Ok(aggregate_temporal_noise_stats(
+            &records,
+            channels,
+            stored_ch,
+            self.width,
+            self.height,
+        ))
     }
 
     /// Synchronous convenience wrapper: submits + immediately waits.

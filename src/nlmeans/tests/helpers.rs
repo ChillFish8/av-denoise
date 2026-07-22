@@ -96,6 +96,46 @@ pub(super) fn noisy_copy(size: u32, base: f32, sigma: f32, seed: u32) -> Vec<f32
     frame
 }
 
+/// Spatially-correlated grain: an independent white noise field at
+/// `sigma_pre`, horizontally blurred with a `[0.25, 0.5, 0.25]`
+/// binomial kernel (edge-clamped), added to `base` and clamped once.
+/// The blur is the same for every call, so two calls with different
+/// `seed`s are temporally independent but each individually carries
+/// the blur's spatial autocorrelation (horizontal lag-1 correlation
+/// `2/3` for any input distribution, variance scaled by `0.375`, the
+/// sum of the taps' squares).
+pub(super) fn correlated_noisy_frame(w: u32, h: u32, base: f32, sigma_pre: f32, seed: u32) -> Vec<f32> {
+    let unit_std = (1.0f32 / 3.0f32).sqrt();
+    let mut raw = vec![0.0f32; (w * h) as usize];
+    for idx in 0..(w * h) {
+        let mut sum = 0.0f32;
+        for k in 0..4u32 {
+            let mut hash = (idx * 4 + k)
+                .wrapping_mul(2654435761)
+                .wrapping_add(seed.wrapping_mul(0x9E37_79B9).wrapping_add(k));
+            hash ^= hash >> 15;
+            hash = hash.wrapping_mul(0x85EB_CA6B);
+            hash ^= hash >> 13;
+            sum += (hash as f32 / u32::MAX as f32) - 0.5;
+        }
+        raw[idx as usize] = (sum / unit_std) * sigma_pre;
+    }
+
+    let mut out = vec![0.0f32; raw.len()];
+    for y in 0..h {
+        for x in 0..w {
+            let xl = x.saturating_sub(1);
+            let xr = (x + 1).min(w - 1);
+            let l = raw[(y * w + xl) as usize];
+            let c = raw[(y * w + x) as usize];
+            let r = raw[(y * w + xr) as usize];
+            let blurred = 0.25 * l + 0.5 * c + 0.25 * r;
+            out[(y * w + x) as usize] = (base + blurred).clamp(0.0, 1.0);
+        }
+    }
+    out
+}
+
 /// Smooth horizontal luma gradient from `lo` to `hi` inclusive,
 /// replicated down every row.
 pub(super) fn make_gradient_frame(w: u32, h: u32, lo: f32, hi: f32) -> Vec<f32> {

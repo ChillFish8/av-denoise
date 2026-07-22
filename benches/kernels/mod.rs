@@ -24,6 +24,7 @@ pub mod mc_confidence;
 pub mod mc_downscale;
 pub mod mc_warp;
 pub mod noise_partial;
+pub mod temporal_noise_stats;
 pub mod vertical_weight;
 pub mod vweight_pair_accumulate;
 pub mod zero;

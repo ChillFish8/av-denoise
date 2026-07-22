@@ -27,6 +27,7 @@ use kernels::mc_confidence::McConfidenceBench;
 use kernels::mc_downscale::DownscaleBench;
 use kernels::mc_warp::WarpBench;
 use kernels::noise_partial::NoisePartialBench;
+use kernels::temporal_noise_stats::TemporalNoiseStatsBench;
 use kernels::vertical_weight::VWeightBench;
 use kernels::vweight_pair_accumulate::VWeightPairAccBench;
 use kernels::zero::ZeroBench;
@@ -168,6 +169,11 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
 
     // Immerkær noise estimate (stage 1 + stage 2 back-to-back).
     run(NoisePartialBench {
+        client: client.clone(),
+    });
+
+    // Temporal-residual noise-stats kernel.
+    run(TemporalNoiseStatsBench {
         client: client.clone(),
     });
 
