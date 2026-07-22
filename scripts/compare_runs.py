@@ -32,11 +32,11 @@ COMPARE_VIDEOS_DIR = Path("./data/compare_videos")
 
 # Frame indices (0-based) extracted from every queued output.
 FRAMES: list[int] = [
-    384,
-    864,
-    959,
-    1679,
-    2374,
+    100,
+    150,
+    200,
+    250,
+    300,
 ]
 
 
@@ -64,14 +64,8 @@ class Run:
         return self.output if self.output is not None else COMPARE_VIDEOS_DIR / f"{self.name}.mkv"
 
 
-SOURCE_VIDEO = Path("./data/food-for-the-soul-noisy-op-ref.mkv")
+SOURCE_VIDEO = Path("./data/91-days.mkv")
 
-# The fast path (`--preset veryfast` selects `nlmeans`) and the HQ path
-# (`--preset base` selects `nlmeans-hq`) at temporal radius 0, 2, and 4,
-# each radius with and without motion compensation. Both presets settle
-# on search radius 2, so the algorithm is the only difference between
-# the two halves of the matrix. Motion compensation is a no-op without a
-# temporal window, so radius 0 gets a single row per path.
 RUNS: list[Run] = [
     Run("source", None, SOURCE_VIDEO),
     Run(
@@ -125,12 +119,21 @@ RUNS: list[Run] = [
         f"--preset base --temporal-radius 4 --channel-mode luma,chroma --motion-compensation",
     ),
     Run(
+        "hq_t4_heavy",
+        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- {{av_flags}} "
+        f"--preset slow --temporal-radius 4 --search-radius 4 --patch-radius 6 "
+        f"--channel-mode luma,chroma --hq-thsad-scale 2.0",
+    ),
+    Run(
         "ffmpeg_opencl_nlmeans",
         f"just denoise-file-ffmpeg -i {SOURCE_VIDEO} -o {{out_file}} "
         f"--patch 9 --search 5 --strength 1.2",
     ),
-    # BM3D is CPU-only and slow, and its sigma is on ffmpeg's own scale
-    # rather than the true noise sigma, so it needs sweeping per clip.
+    # BM3D is CPU-only and slow. `just denoise-file-bm3d` splits the clip
+    # across one process per four cores, since the filter's own slice
+    # threading stops scaling around eight threads. Its sigma is on
+    # ffmpeg's own scale rather than the true noise sigma, so it needs
+    # sweeping per clip.
     Run(
         "ffmpeg_bm3d",
         f"just denoise-file-bm3d -i {SOURCE_VIDEO} -o {{out_file}} --sigma 15",
