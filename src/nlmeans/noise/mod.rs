@@ -363,9 +363,14 @@ fn median(values: &mut [f32]) -> f32 {
 }
 
 /// Piecewise-linear correlation-correction table, `(rho, factor)`
-/// points sorted by `rho`. Currently an identity mapping with no
-/// measured values landed.
-const CORRELATION_FACTOR_TABLE: [(f32, f32); 2] = [(0.0, 1.0), (1.0, 1.0)];
+/// points sorted by `rho`. Measured on synthetic correlated-grain
+/// sweeps against the clean bench reference. Each factor is how far
+/// the quality peak shifts above the true marginal sigma at that
+/// grain autocorrelation, relative to the white-noise optimum at the
+/// same sigma. At the heaviest measured correlation both XPSNR and
+/// SSIM prefer the raised value. Clamped flat past the last measured
+/// point.
+const CORRELATION_FACTOR_TABLE: [(f32, f32); 4] = [(0.0, 1.0), (0.3, 1.05), (0.5, 1.25), (0.65, 1.45)];
 
 /// Correction factor turning a temporal sigma into an effective sigma
 /// that accounts for spatial grain correlation:
@@ -449,6 +454,7 @@ impl NoiseEstimator {
 
     /// Current smoothed per-channel sigma, or `None` before the first
     /// [`Self::update`] call.
+    #[cfg(test)]
     pub(super) fn current(&self) -> Option<&[f32]> {
         self.ema.as_deref()
     }
@@ -716,9 +722,19 @@ mod tests {
     }
 
     #[test]
-    fn correlation_factor_is_identity_for_phase_a_placeholder_table() {
-        for rho in [0.0, 0.2, 0.4, 0.65, 1.0] {
-            assert_eq!(correlation_factor(rho), 1.0);
+    fn correlation_factor_matches_measured_table() {
+        assert_eq!(correlation_factor(0.0), 1.0);
+        assert!((correlation_factor(0.65) - 1.45).abs() < 1e-6);
+        // Clamped flat past the last measured point.
+        assert!((correlation_factor(0.9) - 1.45).abs() < 1e-6);
+        // White noise stays uncorrected.
+        assert_eq!(correlation_factor(-0.2), 1.0);
+        // Monotone non-decreasing across the measured range.
+        let mut last = 0.0;
+        for i in 0..=20 {
+            let f = correlation_factor(i as f32 / 20.0);
+            assert!(f >= last, "factor must not decrease, {f} < {last}");
+            last = f;
         }
     }
 
@@ -729,11 +745,12 @@ mod tests {
             rho: 0.5,
             static_fraction: 1.0,
         };
-        // Phase A's placeholder table is identity, so eff == sigma for
-        // the active channels and 0 past them.
+        // Every active channel scales by the same rho-derived factor,
+        // channels past the active count stay 0.
+        let factor = correlation_factor(sample.rho);
         let eff = temporal_sigma_eff(&sample, 2);
-        assert!((eff[0] - sample.sigma[0]).abs() < 1e-6);
-        assert!((eff[1] - sample.sigma[1]).abs() < 1e-6);
+        assert!((eff[0] - sample.sigma[0] * factor).abs() < 1e-6);
+        assert!((eff[1] - sample.sigma[1] * factor).abs() < 1e-6);
         assert_eq!(eff[2], 0.0);
     }
 }

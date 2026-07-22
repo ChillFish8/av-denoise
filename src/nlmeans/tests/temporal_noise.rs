@@ -6,6 +6,7 @@ use crate::nlmeans::noise::{
     TEMPORAL_NOISE_BLOCK,
     TemporalStatsCtx,
     aggregate_temporal_noise_stats,
+    correlation_factor,
     partials_len,
     read_temporal_stats_slot,
     run_noise_estimate,
@@ -300,9 +301,12 @@ fn moving_content_pair_mostly_non_static() {
 
 /// End-to-end: an HQ r2 denoiser fed a correlated-noise (spatially
 /// blurred grain) synthetic stream must fold its estimator state to
-/// within 25% of the marginal truth, in contrast to what Immerkær
-/// alone reads on the very same content (multiple times lower — this
-/// is the regression this estimator exists to fix).
+/// within 25% of the marginal truth scaled by the correlation
+/// correction, in contrast to what Immerkær alone reads on the very
+/// same content (multiple times lower — this is the regression this
+/// estimator exists to fix). The blur's analytic lag-1
+/// autocorrelation is 2/3, from the same coefficient sums that give
+/// the 0.375 variance scale.
 #[test]
 fn hq_temporal_folds_correlated_grain_above_immerkaer_alone() {
     let client = make_client();
@@ -376,10 +380,11 @@ fn hq_temporal_folds_correlated_grain_above_immerkaer_alone() {
         .current()
         .expect("estimator should hold a value after several full-window submits")[0];
 
-    let rel_err = (folded - sigma_marginal).abs() / sigma_marginal;
+    let expected = sigma_marginal * correlation_factor(2.0 / 3.0);
+    let rel_err = (folded - expected).abs() / expected;
     assert!(
         rel_err <= 0.25,
-        "folded sigma {folded} vs marginal truth {sigma_marginal} (rel err {rel_err:.3}), \
+        "folded sigma {folded} vs corrected truth {expected} (rel err {rel_err:.3}), \
          versus Immerkær-alone {immerkaer_only}"
     );
 }
