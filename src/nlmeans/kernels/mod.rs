@@ -12,8 +12,6 @@ pub use bilateral::nlm_bilateral;
 pub use fused::{
     nlm_dist_2d_weight,
     nlm_dist_2d_weight_ref,
-    nlm_fused_pair_accumulate,
-    nlm_fused_pair_accumulate_ref,
     nlm_fused_pair_accumulate_window,
     nlm_fused_pair_accumulate_window_ref,
     nlm_fused_single_window,

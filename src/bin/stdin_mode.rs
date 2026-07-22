@@ -9,6 +9,7 @@ use crate::ingest::{
     WorkerDenoiser,
     subsampling_from_y4m,
     subsampling_to_y4m,
+    y4m_vendor_extensions,
 };
 
 pub fn run_stdin(opts: &CliOptions) -> Result<(), anyhow::Error> {
@@ -33,10 +34,15 @@ pub fn run_stdin(opts: &CliOptions) -> Result<(), anyhow::Error> {
     let colorspace = subsampling_to_y4m(layout.subsampling);
 
     let stdout = stdout();
-    let mut encoder = y4m::encode(layout.width as usize, layout.height as usize, framerate)
+    let mut builder = y4m::encode(layout.width as usize, layout.height as usize, framerate)
         .with_colorspace(colorspace)
-        .with_pixel_aspect(pixel_aspect)
-        .write_header(stdout.lock())?;
+        .with_pixel_aspect(pixel_aspect);
+    // Forward the source's `X` extension params (e.g. `XCOLORRANGE=`)
+    // verbatim instead of silently dropping them.
+    for ext in y4m_vendor_extensions(decoder.get_raw_params()) {
+        builder = builder.append_vendor_extension(ext);
+    }
+    let mut encoder = builder.write_header(stdout.lock())?;
 
     let mut wd = WorkerDenoiser::create(opts, layout)?;
 

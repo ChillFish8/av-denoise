@@ -331,6 +331,9 @@ fn run_coordinator(
     let stdout = stdout();
     let lock = stdout.lock();
 
+    // No `XCOLORRANGE=` tag is emitted here. `av_decoders::VideoDetails`
+    // doesn't surface the source's color range for any of its backends
+    // (ffms2 included), so there's nothing to forward.
     let mut encoder = y4m::encode(
         layout.width as usize,
         layout.height as usize,

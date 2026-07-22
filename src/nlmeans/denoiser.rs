@@ -714,8 +714,18 @@ impl<R: Runtime> NlmDenoiser<R> {
             .expect("noise-estimate seed readback failed");
         let data = f32::from_bytes(&bytes);
 
+        self.fold_noise_estimate(data, slot as usize);
+    }
+
+    /// Fold one physical ring slot's already-read-back noise totals into
+    /// the EMA and recompute the filter parameters derived from it
+    /// (`h2_inv_norm`, `noise_offset`, `input_noise_offset`, `sigma_y`).
+    /// Shared by [`Self::seed_noise_estimate_if_first_frame`] and
+    /// [`Self::update_noise_estimate`], which differ only in how they
+    /// obtain `data` and which slot they pass in.
+    fn fold_noise_estimate(&mut self, data: &[f32], slot: usize) {
         let channels = self.params.channels.count() as usize;
-        let base = slot as usize * 4;
+        let base = slot * 4;
 
         let mut raw = [0.0f32; 3];
         for (c, s) in raw.iter_mut().enumerate().take(channels) {
@@ -914,26 +924,8 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         let center_t = self.params.temporal_radius;
         let center_slot = self.phys_frame(center_t as i32) as usize;
-        let channels = self.params.channels.count() as usize;
-        let base = center_slot * 4;
 
-        let mut raw = [0.0f32; 3];
-        for (c, slot) in raw.iter_mut().enumerate().take(channels) {
-            *slot = sigma_from_abs_sum(data[base + c], self.width, self.height);
-        }
-
-        let updated = self.noise_estimator.update(&raw[..channels]);
-        let mut smoothed = [0.0f32; 3];
-        smoothed[..channels].copy_from_slice(updated);
-
-        let eff = sigma_eff(&smoothed[..channels], self.params.channels);
-        self.h2_inv_norm = self.params.h2_inv_norm_with(Some(eff));
-        self.input_noise_offset = self.params.noise_offset_with(Some(&smoothed[..channels]));
-        self.noise_offset = match self.params.prefilter {
-            PrefilterMode::NlmSpatial { .. } => 0.0,
-            _ => self.input_noise_offset,
-        };
-        self.sigma_y = smoothed[0];
+        self.fold_noise_estimate(data, center_slot);
 
         Ok(())
     }

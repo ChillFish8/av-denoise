@@ -12,8 +12,6 @@ use kernels::distance_pair::DistancePairBench;
 use kernels::distance_pair_ref::DistancePairRefBench;
 use kernels::distance_ref::DistanceRefBench;
 use kernels::finish::FinishBench;
-use kernels::fused_pair_accumulate::FusedPairBench;
-use kernels::fused_pair_accumulate_ref::FusedPairRefBench;
 use kernels::fused_window::{
     FusedPairWindowBench,
     FusedPairWindowRefBench,
@@ -65,20 +63,6 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
     }
     for &(ch, ch_name) in CHANNELS {
         run(DistWeightRefBench {
-            client: client.clone(),
-            ch,
-            ch_name,
-        });
-    }
-    for &(ch, ch_name) in CHANNELS {
-        run(FusedPairBench {
-            client: client.clone(),
-            ch,
-            ch_name,
-        });
-    }
-    for &(ch, ch_name) in CHANNELS {
-        run(FusedPairRefBench {
             client: client.clone(),
             ch,
             ch_name,

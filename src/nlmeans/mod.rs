@@ -8,7 +8,12 @@ mod noise;
 mod params;
 mod pending;
 
-#[cfg(test)]
+// Every test in this tree runs against a real GPU runtime (see
+// `tests::helpers::R`), so it only builds when a wgpu-backed feature is
+// enabled. A cpu-only build (`--no-default-features --features cpu`)
+// skips it entirely. `src/denoiser.rs`'s `cpu_smoke_tests` module covers
+// the cpu backend instead.
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 mod tests;
 
 pub use denoiser::NlmDenoiser;

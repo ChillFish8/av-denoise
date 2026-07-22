@@ -372,15 +372,21 @@ struct Args {
     ///
     /// Larger blocks are more stable but track motion less
     /// accurately on small details.
-    #[arg(long, default_value = "16", global = true)]
-    mc_blksize: u32,
+    ///
+    /// Only takes effect with `--motion-compensation`. Defaults to 16
+    /// when unset.
+    #[arg(long, global = true)]
+    mc_blksize: Option<u32>,
 
     /// How many pixels neighbouring motion blocks may overlap.
     ///
     /// Must be less than `--mc-blksize`. Higher overlap smooths the
     /// transitions between blocks but does more work.
-    #[arg(long, default_value = "8", global = true)]
-    mc_overlap: u32,
+    ///
+    /// Only takes effect with `--motion-compensation`. Defaults to 8
+    /// when unset.
+    #[arg(long, global = true)]
+    mc_overlap: Option<u32>,
 
     /// How many pixels of motion to search for at the finest level.
     ///
@@ -389,8 +395,11 @@ struct Args {
     /// is fine.
     ///
     /// Raise it for very fast motion.
-    #[arg(long, default_value = "4", global = true)]
-    mc_search: u32,
+    ///
+    /// Only takes effect with `--motion-compensation`. Defaults to 4
+    /// when unset.
+    #[arg(long, global = true)]
+    mc_search: Option<u32>,
 
     /// How many levels the motion-search pyramid uses.
     ///
@@ -401,8 +410,11 @@ struct Args {
     /// then refines at full resolution.
     ///
     /// This handles much larger motion at modest extra cost.
-    #[arg(long, default_value = "2", global = true)]
-    mc_pyramid_levels: u32,
+    ///
+    /// Only takes effect with `--motion-compensation`. Defaults to 2
+    /// when unset.
+    #[arg(long, global = true)]
+    mc_pyramid_levels: Option<u32>,
 
     #[command(subcommand)]
     command: Command,
@@ -699,13 +711,20 @@ fn main() -> anyhow::Result<()> {
             );
         }
         MotionCompensationMode::Mvtools {
-            blksize: args.mc_blksize,
-            overlap: args.mc_overlap,
-            search_radius: args.mc_search,
-            pyramid_levels: args.mc_pyramid_levels,
+            blksize: args.mc_blksize.unwrap_or(16),
+            overlap: args.mc_overlap.unwrap_or(8),
+            search_radius: args.mc_search.unwrap_or(4),
+            pyramid_levels: args.mc_pyramid_levels.unwrap_or(2),
             estimation: MotionEstimation::default(),
         }
     } else {
+        if args.mc_blksize.is_some()
+            || args.mc_overlap.is_some()
+            || args.mc_search.is_some()
+            || args.mc_pyramid_levels.is_some()
+        {
+            tracing::warn!("--mc-* options are ignored unless --motion-compensation is set");
+        }
         MotionCompensationMode::None
     };
 

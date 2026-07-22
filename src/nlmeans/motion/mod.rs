@@ -4,10 +4,10 @@ mod compensate;
 mod confidence;
 mod pyramid;
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use analyse::mv_field_byte_offset;
 pub(crate) use analyse::{confidence_byte_offset, run_analyse, run_seeded_refine};
-#[cfg(test)]
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use chain::{neighbour_idx_for_k, pair_byte_offset};
 pub(crate) use chain::{run_pair_analyse, zero_pair_slot};
 pub(crate) use compensate::run_compensate;

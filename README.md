@@ -437,14 +437,14 @@ Options:
           
           Larger blocks are more stable but track motion less accurately on small details.
           
-          [default: 16]
+          Only takes effect with `--motion-compensation`. Defaults to 16 when unset.
 
       --mc-overlap <MC_OVERLAP>
           How many pixels neighbouring motion blocks may overlap.
           
           Must be less than `--mc-blksize`. Higher overlap smooths the transitions between blocks but does more work.
           
-          [default: 8]
+          Only takes effect with `--motion-compensation`. Defaults to 8 when unset.
 
       --mc-search <MC_SEARCH>
           How many pixels of motion to search for at the finest level.
@@ -453,7 +453,7 @@ Options:
           
           Raise it for very fast motion.
           
-          [default: 4]
+          Only takes effect with `--motion-compensation`. Defaults to 4 when unset.
 
       --mc-pyramid-levels <MC_PYRAMID_LEVELS>
           How many levels the motion-search pyramid uses.
@@ -464,7 +464,7 @@ Options:
           
           This handles much larger motion at modest extra cost.
           
-          [default: 2]
+          Only takes effect with `--motion-compensation`. Defaults to 2 when unset.
 
   -h, --help
           Print help (see a summary with '-h')

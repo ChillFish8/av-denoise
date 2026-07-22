@@ -14,8 +14,6 @@ pub mod distance_pair;
 pub mod distance_pair_ref;
 pub mod distance_ref;
 pub mod finish;
-pub mod fused_pair_accumulate;
-pub mod fused_pair_accumulate_ref;
 pub mod fused_window;
 pub mod horizontal_sum;
 pub mod horizontal_sum_pair;

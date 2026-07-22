@@ -597,3 +597,18 @@ pub fn subsampling_from_y4m(c: y4m::Colorspace) -> Result<Subsampling, anyhow::E
         other => anyhow::bail!("unsupported y4m colorspace {other:?}; need 4:2:0, 4:2:2, or 4:4:4 8-bit"),
     }
 }
+
+/// Pull the `X`-prefixed vendor extension params (e.g. `XCOLORRANGE=LIMITED`)
+/// out of a decoded y4m header's raw params bytes, stripped of their
+/// leading `X` and ready for [`y4m::EncoderBuilder::append_vendor_extension`],
+/// which re-adds the `X` itself when it writes the output header. Used to
+/// forward whatever colorspace/range tags the source declared instead of
+/// silently dropping them. Tokens that fail [`y4m::VendorExtensionString`]
+/// validation (an embedded space) are skipped rather than failing the run.
+pub fn y4m_vendor_extensions(raw_params: &[u8]) -> Vec<y4m::VendorExtensionString> {
+    raw_params
+        .split(|&b| b == b' ')
+        .filter(|tok| tok.first() == Some(&b'X'))
+        .filter_map(|tok| y4m::VendorExtensionString::new(tok[1..].to_vec()).ok())
+        .collect()
+}
