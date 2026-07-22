@@ -56,6 +56,21 @@ denoise-file-ffmpeg input output search="5" patch="9" strength="1.2":
         -init_hw_device opencl=ocl:0.0 -filter_hw_device ocl \
         -y -i "{{input}}" -vf "hwupload,nlmeans_opencl=s={{strength}}:p={{patch}}:pc={{patch}}:r={{search}}:rc={{search}},hwdownload,format=yuv420p" -c:v ffv1 "{{output}}"
 
+# Denoises with ffmpeg's CPU BM3D filter, a slow external quality reference.
+[arg("input", long="input", short="i")]
+[arg("output", long="output", short="o")]
+[arg("sigma", long="sigma")]
+denoise-file-bm3d input output sigma="15":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Full two-stage BM3D. The basic estimate feeds the final estimate as
+    # its reference stream. Sigma is on ffmpeg's own scale rather than the
+    # true noise sigma, so it needs sweeping per clip.
+    ffmpeg -hide_banner -stats -stats_period 0.5 -loglevel info \
+        -y -i "{{input}}" \
+        -vf "split[a][b];[b]bm3d=sigma={{sigma}}:estim=basic[basic];[a][basic]bm3d=sigma={{sigma}}:estim=final:ref=1" \
+        -c:v ffv1 "{{output}}"
+
 [arg("input", long="input", short="i")]
 [arg("output", long="output", short="o")]
 [arg("image", long="image")]

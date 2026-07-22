@@ -51,8 +51,9 @@ class Run:
     `COMPARE_VIDEOS_DIR / f"{name}.mkv"`.
 
     Inside `command`, the placeholder `{out_file}` is replaced with the
-    resolved output path before execution. (When writing the command as
-    an f-string, escape as `{{out_file}}`.)
+    resolved output path and `{av_flags}` with the backend flags built
+    from `--accelerators` / `--device`. (When writing the command as an
+    f-string, escape as `{{out_file}}` and `{{av_flags}}`.)
     """
 
     name: str
@@ -65,70 +66,74 @@ class Run:
 
 SOURCE_VIDEO = Path("./data/food-for-the-soul-noisy-op-ref.mkv")
 
+# The fast path (`--preset veryfast` selects `nlmeans`) and the HQ path
+# (`--preset base` selects `nlmeans-hq`) at temporal radius 0, 2, and 4,
+# each radius with and without motion compensation. Both presets settle
+# on search radius 2, so the algorithm is the only difference between
+# the two halves of the matrix. Motion compensation is a no-op without a
+# temporal window, so radius 0 gets a single row per path.
 RUNS: list[Run] = [
     Run("source", None, SOURCE_VIDEO),
     Run(
-        "av_denoise_temporal_1_luma_chroma_default",
-        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- --temporal-radius 1 --channel-mode luma,chroma",
+        "fast_t0",
+        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- {{av_flags}} "
+        f"--preset veryfast --temporal-radius 0 --channel-mode luma,chroma",
     ),
     Run(
-        "av_denoise_temporal_1_luma_chroma_prefilter_default",
-        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- --temporal-radius 1 --channel-mode luma,chroma --prefilter 'bilateral:3.0,0.02'",
+        "fast_t2_mc_off",
+        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- {{av_flags}} "
+        f"--preset veryfast --temporal-radius 2 --channel-mode luma,chroma",
     ),
     Run(
-        "av_denoise_temporal_1_luma_chroma_strength_2_0",
-        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- --temporal-radius 1 --channel-mode luma,chroma --strength 2.0",
+        "fast_t2_mc_on",
+        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- {{av_flags}} "
+        f"--preset veryfast --temporal-radius 2 --channel-mode luma,chroma --motion-compensation",
     ),
     Run(
-        "av_denoise_temporal_1_luma_chroma_prefilter_strength_2_0",
-        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- --temporal-radius 1 --channel-mode luma,chroma --strength 2.0 --prefilter 'bilateral:3.0,0.02'",
+        "fast_t4_mc_off",
+        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- {{av_flags}} "
+        f"--preset veryfast --temporal-radius 4 --channel-mode luma,chroma",
     ),
     Run(
-        "variant_a",
-        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- "
-        f"--temporal-radius 1 --channel-mode luma,chroma "
-        f"--strength 1.0 --prefilter 'bilateral:3.0,0.02' --search-radius 2 --patch-radius 4",
+        "fast_t4_mc_on",
+        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- {{av_flags}} "
+        f"--preset veryfast --temporal-radius 4 --channel-mode luma,chroma --motion-compensation",
     ),
     Run(
-        "variant_b",
-        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- "
-        f"--temporal-radius 0 --channel-mode luma,chroma "
-        f"--strength 1.0 --search-radius 7 --patch-radius 3",
+        "hq_t0",
+        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- {{av_flags}} "
+        f"--preset base --temporal-radius 0 --channel-mode luma,chroma",
     ),
     Run(
-        "variant_c",
-        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- "
-        f"--temporal-radius 1 --channel-mode luma,chroma --motion-compensation "
-        f"--strength 1.0 --search-radius 7 --patch-radius 3",
+        "hq_t2_mc_off",
+        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- {{av_flags}} "
+        f"--preset base --temporal-radius 2 --channel-mode luma,chroma",
     ),
     Run(
-        "ffmpeg_strength_1_2",
-        f"just denoise-file-ffmpeg -i {SOURCE_VIDEO} -o {{out_file}} "
-        f"--search 15 --patch 7 --strength 1.2",
+        "hq_t2_mc_on",
+        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- {{av_flags}} "
+        f"--preset base --temporal-radius 2 --channel-mode luma,chroma --motion-compensation",
     ),
     Run(
-        "av_denoise_temporal_1_chroma_default",
-        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- --temporal-radius 1 --channel-mode chroma",
+        "hq_t4_mc_off",
+        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- {{av_flags}} "
+        f"--preset base --temporal-radius 4 --channel-mode luma,chroma",
     ),
     Run(
-        "av_denoise_temporal_1_luma_default",
-        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- --temporal-radius 1 --channel-mode luma",
-    ),
-    Run(
-        "av_denoise_spatial_luma_chroma_default",
-        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- --temporal-radius 0 --channel-mode luma,chroma",
-    ),
-    Run(
-        "av_denoise_spatial_luma_default",
-        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- --temporal-radius 0 --channel-mode luma",
-    ),
-    Run(
-        "av_denoise_spatial_chroma_default",
-        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- --temporal-radius 0 --channel-mode chroma",
+        "hq_t4_mc_on",
+        f"just denoise-file -i {SOURCE_VIDEO} -o {{out_file}} -- {{av_flags}} "
+        f"--preset base --temporal-radius 4 --channel-mode luma,chroma --motion-compensation",
     ),
     Run(
         "ffmpeg_opencl_nlmeans",
-        f"just denoise-file-ffmpeg -i {SOURCE_VIDEO} -o {{out_file}} --patch 9 --search 5 --strength 1.2",
+        f"just denoise-file-ffmpeg -i {SOURCE_VIDEO} -o {{out_file}} "
+        f"--patch 9 --search 5 --strength 1.2",
+    ),
+    # BM3D is CPU-only and slow, and its sigma is on ffmpeg's own scale
+    # rather than the true noise sigma, so it needs sweeping per clip.
+    Run(
+        "ffmpeg_bm3d",
+        f"just denoise-file-bm3d -i {SOURCE_VIDEO} -o {{out_file}} --sigma 15",
     ),
 ]
 
@@ -154,7 +159,27 @@ def parse_cli() -> argparse.Namespace:
         default="",
         help="comma-separated run names to include (default: all)",
     )
+    p.add_argument(
+        "--accelerators",
+        default="",
+        help="av-denoise --accelerators value applied to every av-denoise run",
+    )
+    p.add_argument(
+        "--device",
+        default="",
+        help="av-denoise --device value applied to every av-denoise run",
+    )
     return p.parse_args()
+
+
+def backend_flags(accelerators: str, device: str) -> str:
+    """Backend selection flags shared by every av-denoise run."""
+    flags = []
+    if accelerators:
+        flags.append(f"--accelerators {accelerators}")
+    if device:
+        flags.append(f"--device {device}")
+    return " ".join(flags)
 
 
 def filtered_runs(only: str) -> list[Run]:
@@ -172,7 +197,7 @@ def ensure_dirs() -> None:
     COMPARE_VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def run_command(run: Run, force: bool) -> None:
+def run_command(run: Run, force: bool, av_flags: str = "") -> None:
     output = run.resolved_output()
 
     if run.command is None:
@@ -192,7 +217,11 @@ def run_command(run: Run, force: bool) -> None:
         )
         return
 
-    rendered = run.command.replace("{out_file}", str(output))
+    # Substituting "{av_flags} " rather than "{av_flags}" keeps the command
+    # free of a stray double space when no backend flags are set.
+    rendered = run.command.replace("{out_file}", str(output)).replace(
+        "{av_flags} ", f"{av_flags} " if av_flags else ""
+    )
     print(f"[{run.name}] running: {rendered}", flush=True)
     output.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(rendered, shell=True, check=True)
@@ -264,9 +293,10 @@ def main() -> None:
     args = parse_cli()
     ensure_dirs()
     runs = filtered_runs(args.only)
+    av_flags = backend_flags(args.accelerators, args.device)
 
     for run in runs:
-        run_command(run, force=args.force)
+        run_command(run, force=args.force, av_flags=av_flags)
         if not args.skip_extract:
             extract_frames(run, FRAMES, force=args.force)
 
