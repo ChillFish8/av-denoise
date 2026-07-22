@@ -170,10 +170,10 @@ fn confidence_decreases_as_excess_grows() {
 /// the SAD two noisy copies produce by chance sits at the floor on
 /// average, so confidence should stay high (the floor "absorbs" the
 /// noise) rather than collapsing just because real content is noisy.
-/// Before the SAD-reduction race fix, every thread's contribution to a
-/// shared candidate slot raced, undercounting `best_sad` and making
-/// this pass "by accident" rather than because the formula is
-/// discriminating. Now it holds because `best_sad` is the true SAD.
+///
+/// This only demonstrates the formula discriminating when `best_sad`
+/// is the true SAD. A racy reduction that undercounts it lets the
+/// assertion pass without the floor doing any work.
 #[test]
 fn confidence_matched_noisy_content_at_blksize_16_is_near_one() {
     let blksize = 16;
@@ -194,11 +194,11 @@ fn confidence_matched_noisy_content_at_blksize_16_is_near_one() {
 /// Realistic-blksize mismatched case. Same noise characteristics but a
 /// clearly different underlying signal (a different base level), so
 /// the true per-pixel diff is far larger than noise alone. Confidence
-/// must collapse toward 0, not sit artificially high the way it would
-/// under the pre-fix reduction race (which undercounted SAD by
-/// roughly two orders of magnitude at this blksize/cube-dim
-/// combination, `best_sad ≈ 2.4` instead of `≈ 153.6` for a uniform
-/// 0.6 mismatch, hiding all but the most extreme real mismatches).
+/// must collapse toward 0. An undercounted `best_sad` keeps
+/// confidence artificially high instead. At this blksize/cube-dim
+/// combination a racy reduction undercounts by roughly two orders of
+/// magnitude (`best_sad ≈ 2.4` instead of `≈ 153.6` for a uniform
+/// 0.6 mismatch), hiding all but the most extreme real mismatches.
 #[test]
 fn confidence_mismatched_block_at_blksize_16_is_near_zero() {
     let blksize = 16;

@@ -47,29 +47,6 @@ pub fn nlm_mc_warp<N: Size>(
     dst[dst_idx as usize] = src[src_idx as usize];
 }
 
-/// Trivial centre-frame copy used to populate the `compensated_*` slot
-/// for the centre so temporal kernels can read uniformly.
-#[cube(launch_unchecked)]
-pub fn nlm_mc_copy_frame<N: Size>(
-    src: &Array<Vector<f32, N>>,
-    dst: &mut Array<Vector<f32, N>>,
-    src_frame: u32,
-    dst_frame: u32,
-    #[comptime] width: u32,
-    #[comptime] height: u32,
-) {
-    let x = ABSOLUTE_POS_X;
-    let y = ABSOLUTE_POS_Y;
-
-    if x >= width || y >= height {
-        terminate!();
-    }
-
-    let src_idx = (src_frame * height + y) * width + x;
-    let dst_idx = (dst_frame * height + y) * width + x;
-    dst[dst_idx as usize] = src[src_idx as usize];
-}
-
 #[cube]
 fn clamp_pos(value: i32, limit: i32) -> i32 {
     let mut result = value;

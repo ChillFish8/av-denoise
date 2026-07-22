@@ -6,7 +6,7 @@ use cubecl::server::Handle;
 use super::kernels::gpu_copy;
 use super::motion::{self, MotionCtx, MotionEstimation, build_pyramid_for_slot, run_pyramid_build};
 use super::noise::{NoiseCtx, NoiseEstimator, partials_len, run_noise_estimate, sigma_from_abs_sum};
-use super::params::{NlmParams, SEPARABLE_THRESHOLD, sigma_eff};
+use super::params::{NlmParams, SEPARABLE_THRESHOLD, sigma_eff, validate_dimensions};
 use super::pending::Pending;
 use super::prefilter::{PrefilterCtx, PrefilterMode, run_prefilter};
 use super::{BLOCK_1D, MAX_GRID_1D};
@@ -160,12 +160,15 @@ pub struct NlmDenoiser<R: Runtime> {
 impl<R: Runtime> NlmDenoiser<R> {
     /// Build a new denoiser.
     ///
-    /// **Panics** if `params.validate()` fails, the high-level [`crate::Denoiser`]
-    /// runs validation first and surfaces errors as `Result`, so most callers should prefer that.
+    /// **Panics** if `params.validate()` or the frame-dimension check
+    /// fails, the high-level [`crate::Denoiser`] runs both first and
+    /// surfaces errors as `Result`, so most callers should prefer that.
     pub fn new(client: &ComputeClient<R>, params: NlmParams, width: u32, height: u32) -> Self {
         params
             .validate()
             .expect("invalid NlmParams; call params.validate() first to surface this as Result");
+        validate_dimensions(width, height)
+            .expect("unsupported frame dimensions; call validate_dimensions first to surface this as Result");
 
         let stored_ch = params.channels.storage_count();
         let total_frames = params.total_frames();

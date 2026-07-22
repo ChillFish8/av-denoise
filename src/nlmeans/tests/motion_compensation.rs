@@ -116,12 +116,10 @@ fn recover_sad_from_confidence(confidence: f32, thsad: f32) -> f32 {
 /// (within a tight f32 tolerance). This is the ground truth the
 /// block-match kernel's SAD reduction is supposed to compute.
 ///
-/// Before the candidate-parallel reduction fix, every thread in the
-/// cube accumulated its pixel share into the *same* shared-memory
-/// candidate slot with a plain `+=` and no atomics, so most
-/// contributions were lost to the race. This test failed by roughly
-/// two orders of magnitude on that code (see the report for the
-/// measured before/after values).
+/// Every pixel's contribution must land in the candidate's SAD sum
+/// exactly once. A racy shared-memory accumulation (multiple threads
+/// `+=`-ing one candidate slot without atomics) loses most
+/// contributions and undercounts the SAD by orders of magnitude.
 #[test]
 fn block_match_fine_exact_sad_uniform_mismatch() {
     let blksize = 16u32;
@@ -165,13 +163,13 @@ fn shift_clamped(val: i32, delta: i32, limit: i32) -> i32 {
 /// default blksize/search radius so the winning block (the centre one,
 /// away from the frame edges) sees the same clamped addressing the
 /// production dispatch path uses, but reads back only that one block's
-/// MV. Before the reduction fix this could pick a quasi-arbitrary MV
-/// because the racy SAD values didn't reflect the true per-candidate
-/// cost. Recorded as a pre-fix data point in the report.
+/// MV. The argmin is only meaningful when each candidate's SAD
+/// reflects its true cost. Corrupted per-candidate sums make the
+/// winner quasi-arbitrary.
 ///
 /// Passes `write_confidence: false` with a small placeholder
 /// confidence buffer, since this test only checks the winning MV. That
-/// also exercises the gated-off confidence path this fix round added.
+/// also exercises the comptime-gated-off confidence path.
 #[test]
 fn block_match_fine_argmin_finds_clean_shift() {
     let w = 64u32;
@@ -416,13 +414,13 @@ fn motion_compensation_translating_square_preserves_centre() {
     );
 }
 
-// --- Phase 6.5 regression tests, coarse-seeding tiling (Bug 1) and
-// pyramid level-0 extraction (Bug 2). Both bugs live in the shared
-// coarse+fine machinery every estimation mode funnels through
-// (`run_analyse`), so they're exercised here through a real
-// `Direct`-estimation `NlmDenoiser`, reading `mv_field_buf` back
-// directly (the same pattern `composed_centre_mv` above already
-// establishes for the Chained tests).
+// --- Coarse-seeding tiling and pyramid level-0 extraction guards.
+// Both defects live in the shared coarse+fine machinery every
+// estimation mode funnels through (`run_analyse`), so they're
+// exercised here through a real `Direct`-estimation `NlmDenoiser`,
+// reading `mv_field_buf` back directly (the same pattern
+// `composed_centre_mv` above already establishes for the Chained
+// tests).
 
 /// Builds a `w x h` frame from two independently-rich `half`-wide
 /// halves (`left`, `right`), each optionally shifted locally within
@@ -503,14 +501,15 @@ fn direct_mv_field_for_forward_neighbour(
     i32::from_bytes(&bytes).to_vec()
 }
 
-/// Bug 1 regression test. At `blksize=8, overlap=4, pyramid_levels=2`
-/// the coarse and fine grids come out to the *same* block count
-/// (`coarse_blocks_x == blocks_x`, verified below algebraically rather
-/// than assumed), which the old fixed-doubling seeding
-/// (`fine_bx_origin = bx * level_scale`) mapped wrongly. A coarse
-/// block's own correctly-computed displacement landed at fine index
-/// `2 * bx` instead of `bx`, so roughly half the fine grid was seeded
-/// from a coarse block spatially tied to a *different* region.
+/// Equal-grid seeding guard. At `blksize=8, overlap=4,
+/// pyramid_levels=2` the coarse and fine grids come out to the *same*
+/// block count (`coarse_blocks_x == blocks_x`, verified below
+/// algebraically rather than assumed), so seeding must map by
+/// position, not by index doubling. A fixed-doubling map
+/// (`fine_bx_origin = bx * level_scale`) lands a coarse block's
+/// displacement at fine index `2 * bx` instead of `bx`, seeding
+/// roughly half the fine grid from a coarse block spatially tied to a
+/// *different* region.
 ///
 /// Content is a left half and a right half, each independently rich
 /// (`noisy_copy`) and each translated by a different, clean (a
@@ -521,11 +520,10 @@ fn direct_mv_field_for_forward_neighbour(
 /// half boundary and the frame edges), so a correctly-seeded block
 /// finds its own half's true motion, while a block mis-seeded from the
 /// other half lands outside the fine pass's small search window and
-/// can't self-correct. Left-half blocks happen to always get
-/// mis-seeded from other left-half coarse blocks at this geometry
-/// (their shared half still carries the same true motion), so this
-/// bug only becomes visible on the right half here, which is exactly
-/// what the pre-fix run below shows.
+/// can't self-correct. Left-half blocks always get mis-seeded from
+/// other left-half coarse blocks at this geometry (their shared half
+/// still carries the same true motion), so a seeding defect only
+/// becomes visible on the right half here.
 #[test]
 fn coarse_seeding_handles_equal_grids() {
     let w = 128u32;
@@ -589,18 +587,15 @@ fn coarse_seeding_handles_equal_grids() {
     );
 }
 
-/// Non-regression test at the genuine half-grid geometry (`fine_blocks_x/y
-/// == 2 * coarse_blocks_x/y`) Bug 1's old fixed-doubling seeding was
-/// originally written for. `mc.step == 1` reaches this ratio through
-/// the `.max(1)` floor clamp in `run_analyse`'s `coarse_step`
+/// Half-grid seeding coverage at the genuine `fine_blocks_x/y ==
+/// 2 * coarse_blocks_x/y` geometry. `mc.step == 1` reaches this ratio
+/// through the `.max(1)` floor clamp in `run_analyse`'s `coarse_step`
 /// derivation (`coarse_step = (1 / 2).max(1) = 1`), verified
-/// algebraically below rather than assumed. The old seeding already
-/// handled this geometry correctly (a coarse block's region really
-/// does correspond to exactly `level_scale` fine blocks here), so this
-/// test is a non-regression check that the new position-based tiling
-/// formula still reduces to the same behaviour, both for uniform
-/// motion and for the left/right split (different motion per half)
-/// that Bug 1's test above exercises at the equal-grid geometry.
+/// algebraically below rather than assumed. A coarse block's region
+/// really does correspond to exactly `level_scale` fine blocks here,
+/// so the position-based tiling formula must reduce to plain index
+/// doubling, both for uniform motion and for the left/right split
+/// (different motion per half) the equal-grid test above exercises.
 #[test]
 fn coarse_seeding_still_correct_at_half_grid() {
     let w = 48u32;
@@ -654,17 +649,17 @@ fn coarse_seeding_still_correct_at_half_grid() {
         )
     };
 
-    // Uniform sub-case. Both halves share one motion vector, already
-    // correct before Bug 1's fix (both bugs are invisible on uniform
-    // motion).
+    // Uniform sub-case. Both halves share one motion vector, so any
+    // coarse block seeds any fine block correctly and seeding defects
+    // stay invisible.
     let (uni_left, uni_right) = mv_at(2, 2);
     assert_eq!(uni_left, (2, 0), "uniform motion: left block got {uni_left:?}");
     assert_eq!(uni_right, (2, 0), "uniform motion: right block got {uni_right:?}");
 
-    // Varying sub-case. Left and right halves move oppositely, the
-    // sub-case that actually runs the new tiling formula's code path
-    // over a genuine half-grid, confirming it still reduces to the
-    // old (here, already-correct) behaviour.
+    // Varying sub-case. Left and right halves move oppositely, so
+    // each fine block only recovers its own half's motion when the
+    // tiling formula seeds it from the coarse block covering the same
+    // region.
     let (var_left, var_right) = mv_at(2, -2);
     assert_eq!(var_left, (2, 0), "varying motion: left block got {var_left:?}");
     assert_eq!(
@@ -674,13 +669,13 @@ fn coarse_seeding_still_correct_at_half_grid() {
     );
 }
 
-/// Bug 2 regression test. `build_pyramid_for_slot` must extract
-/// level-0 luma even when `pyramid_levels == 1`, not skip the whole
-/// pyramid build. This is a real `Mvtools` MC config (not
-/// `MotionCtx::confidence_only`, a different, already-correct path
-/// that bypasses this bug entirely), so the fine pass runs unseeded
-/// straight off level 0. If level 0 was never written, the recovered
-/// MV has no reason to match the known shift below.
+/// Pyramid level-0 extraction guard. `build_pyramid_for_slot` must
+/// extract level-0 luma even when `pyramid_levels == 1`, not skip the
+/// whole pyramid build. This is a real `Mvtools` MC config (not
+/// `MotionCtx::confidence_only`, a separate path that doesn't share
+/// this build step), so the fine pass runs unseeded straight off
+/// level 0. If level 0 is never written, the recovered MV has no
+/// reason to match the known shift below.
 #[test]
 fn pyramid_level0_extracted_at_one_level() {
     let w = 64u32;
@@ -717,22 +712,21 @@ fn pyramid_level0_extracted_at_one_level() {
     );
 }
 
-/// Fix-round-1 regression test. Bug 1's tiling formula computes the
-/// coarse and fine block counts from two independent ceil-divisions,
-/// each over a different image width and a different step, so they
-/// can round differently even where the coarse/fine ratio is
-/// otherwise consistent. At `blksize=16, overlap=8, pyramid_levels=2`
-/// (the library defaults), any `width`/`height` congruent to `1`
-/// modulo `mc.step` (= 8) makes `coarse_blocks_x/y` come out to
-/// `fine_blocks_x/y` minus one. The coarse grid's total nominal reach
-/// then falls exactly one fine block short of the frame's true edge (matching the exact
-/// arithmetic the review's own worked example used, `width = 601`).
-/// Before the last-block fix, the trailing fine column/row was never
-/// written by *any* coarse cube, so it silently kept whatever
-/// `mv_field_buf` already held. Here that means all-zero, from a
-/// fresh buffer. In the real, reused buffer the review's finding
-/// describes, it means a stale previous frame's MV. Test premises
-/// verified below rather than assumed.
+/// Ragged-edge seeding guard. The coarse and fine block counts come
+/// from two independent ceil-divisions, each over a different image
+/// width and a different step, so they can round differently even
+/// where the coarse/fine ratio is otherwise consistent. At
+/// `blksize=16, overlap=8, pyramid_levels=2` (the library defaults),
+/// any `width`/`height` congruent to `1` modulo `mc.step` (= 8) makes
+/// `coarse_blocks_x/y` come out to `fine_blocks_x/y` minus one
+/// (`width = 601` is one such case). The coarse grid's total nominal
+/// reach then falls exactly one fine block short of the frame's true
+/// edge, so the last coarse cube on each axis must extend its reach
+/// to absorb the remainder. A trailing fine column/row that no coarse
+/// cube writes silently keeps whatever `mv_field_buf` already holds,
+/// all-zero from a fresh buffer here, a stale previous frame's MV in
+/// a reused buffer in production. Test premises verified below rather
+/// than assumed.
 ///
 /// Motion here is a single uniform diagonal shift, not a
 /// spatially-varying split like `coarse_seeding_handles_equal_grids`

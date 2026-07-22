@@ -191,9 +191,10 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// older→newer field when `k > 0` or the newer→older field when
     /// `k < 0`.
     ///
-    /// No-op when `Chained` estimation isn't active. The per-submit
-    /// motion-compensation sweep still only runs the direct path, so
-    /// tests are this method's only caller today.
+    /// No-op when `Chained` estimation isn't active. When it is
+    /// active, `dispatch::run_motion_compensation` calls this once per
+    /// neighbour on every submit, then corrects the composed seed with
+    /// `run_seeded_refine`. Tests also call it directly.
     pub(crate) fn run_chain_compose(&self, center_t: u32, k: i32) -> Result<(), anyhow::Error> {
         let Some(mc) = self.mc_ctx.as_ref() else {
             return Ok(());

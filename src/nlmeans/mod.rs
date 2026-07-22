@@ -19,8 +19,10 @@ pub use params::{
     MAX_PATCH_RADIUS,
     MAX_SEARCH_RADIUS,
     MAX_TEMPORAL_RADIUS,
+    MIN_FRAME_DIM,
     NlmParams,
     hq_default_strength,
+    validate_dimensions,
 };
 pub use pending::Pending;
 pub use prefilter::{DEFAULT_PILOT_STRENGTH_SCALE, PrefilterMode};

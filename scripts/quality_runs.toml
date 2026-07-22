@@ -143,8 +143,8 @@ args = [
 ]
 
 # ---------------------------------------------------------------------------
-# Phase 6: temporal radius 4, no MC vs MC. `--motion-compensation` has no
-# way to pick an estimation strategy from the CLI; it always resolves
+# Temporal radius 4, no MC vs MC. `--motion-compensation` has no
+# way to pick an estimation strategy from the CLI. it always resolves
 # automatically from `--temporal-radius`, and at r4 that resolves to
 # `Chained` (radius 4 is at or above the auto-resolution threshold), so
 # this row measures chained's quality at the radius where its reach

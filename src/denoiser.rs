@@ -15,6 +15,7 @@ use crate::nlmeans::{
     Pending,
     PrefilterMode,
     hq_default_strength,
+    validate_dimensions,
 };
 use crate::sniff::sniff_best_accelerator;
 
@@ -248,6 +249,7 @@ impl Denoiser {
 
         let params = options.to_nlm_params();
         params.validate()?;
+        validate_dimensions(width, height)?;
 
         let channels = params.channels.count();
         let temporal_radius = params.temporal_radius;
@@ -763,6 +765,28 @@ mod tests {
             Err(DenoiserError::Other(_)) => {},
             Err(other) => panic!("expected DenoiserError::Other, got {other:?}"),
             Ok(_) => panic!("expected validation error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn tiny_frame_dimensions_surface_as_error() {
+        let result = Denoiser::create(
+            &[Accelerator::Vulkan],
+            &Device::Default,
+            2,
+            2,
+            opts(DenoisingMode::Spacial),
+        );
+
+        match result {
+            Err(DenoiserError::Other(e)) => {
+                assert!(
+                    e.to_string().contains("supported minimum"),
+                    "unexpected error message: {e}"
+                );
+            },
+            Err(other) => panic!("expected DenoiserError::Other, got {other:?}"),
+            Ok(_) => panic!("expected dimension validation error, got Ok"),
         }
     }
 

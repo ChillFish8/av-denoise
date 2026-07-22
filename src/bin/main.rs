@@ -301,7 +301,7 @@ struct Args {
     ///
     /// Setting to 0 gives pure NLM (centre pixel only counts if a
     /// similar patch was found nearby).
-    #[arg(long)]
+    #[arg(long, global = true)]
     self_weight: Option<f32>,
 
     /// How noisy the source is. Leave it unset for almost all uses.
@@ -721,13 +721,24 @@ fn main() -> anyhow::Result<()> {
             }
             av_denoise::Algorithm::Nlmeans
         },
-        Algorithm::NlmeansHq => av_denoise::Algorithm::NlmeansHq(av_denoise::HqParams {
-            auto_strength: !args.hq_no_auto_strength,
-            noise_floor: !args.hq_no_noise_floor,
-            sigma_override: args.hq_sigma.map(|s| s / 255.0),
-            temporal_confidence: !args.hq_no_temporal_confidence,
-            thsad_scale: args.hq_thsad_scale.unwrap_or(1.0),
-        }),
+        Algorithm::NlmeansHq => {
+            // Check the raw 8-bit value here so an out-of-range
+            // `--hq-sigma` reports the number the user typed. The
+            // library re-validates the same bound after the /255
+            // normalisation, but its message speaks in [0, 1] units.
+            if let Some(sigma) = args.hq_sigma
+                && (!sigma.is_finite() || sigma <= 0.0 || sigma > 255.0)
+            {
+                anyhow::bail!("--hq-sigma must be a finite value in (0, 255] 8-bit units (got {sigma})");
+            }
+            av_denoise::Algorithm::NlmeansHq(av_denoise::HqParams {
+                auto_strength: !args.hq_no_auto_strength,
+                noise_floor: !args.hq_no_noise_floor,
+                sigma_override: args.hq_sigma.map(|s| s / 255.0),
+                temporal_confidence: !args.hq_no_temporal_confidence,
+                thsad_scale: args.hq_thsad_scale.unwrap_or(1.0),
+            })
+        },
     };
 
     // search_radius always has a resolved value (explicit flag or the

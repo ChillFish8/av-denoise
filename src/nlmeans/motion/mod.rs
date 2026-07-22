@@ -152,6 +152,10 @@ pub const MAX_BLKSIZE: u32 = 32;
 
 impl MotionCompensationMode {
     /// Convenience constructor for `Mvtools` with library defaults.
+    ///
+    /// Pins `estimation` to `Direct` rather than the field's own
+    /// `Auto` default, so it never switches to `Chained` at larger
+    /// temporal radii the way an `Auto` configuration does.
     pub fn mvtools_default() -> Self {
         Self::Mvtools {
             blksize: DEFAULT_BLKSIZE,
@@ -230,14 +234,10 @@ impl MotionCompensationMode {
 
 /// Per-denoiser MC state, owned by `NlmDenoiser` when MC is active.
 ///
-/// Lives next to (not inside) the optional buffer handles so the hot
-/// dispatch path can fish out comptime-relevant scalars without
-/// pattern-matching the enum every call.
-/// Per-denoiser MC state cached at construction time so the hot
-/// dispatch path doesn't re-pattern-match the enum on every call.
-/// Holds only the fields actually read by analyse / compensate
-/// dispatchers; the full configuration lives on
-/// [`MotionCompensationMode`].
+/// Cached at construction time so the hot dispatch path doesn't
+/// re-pattern-match the enum on every call. Holds only the fields the
+/// analyse and compensate dispatchers actually read. The full
+/// configuration lives on [`MotionCompensationMode`].
 #[derive(Debug, Clone)]
 pub(crate) struct MotionCtx {
     pub blksize: u32,

@@ -63,6 +63,25 @@ pub fn hq_default_strength(channels: ChannelMode, temporal_radius: u32) -> f32 {
     }
 }
 
+/// Smallest supported frame side length. The Immerkær noise estimate
+/// only measures interior pixels (the 3×3 mask cannot reach the
+/// one-pixel border), so a frame narrower or shorter than 3 pixels
+/// has no interior at all and the estimate is undefined.
+pub const MIN_FRAME_DIM: u32 = 3;
+
+/// Reject frame dimensions the kernels cannot handle. Called by both
+/// denoiser constructors before any buffer is allocated.
+pub fn validate_dimensions(width: u32, height: u32) -> Result<(), anyhow::Error> {
+    if width < MIN_FRAME_DIM || height < MIN_FRAME_DIM {
+        anyhow::bail!(
+            "frame dimensions {width}x{height} are below the supported minimum \
+             ({MIN_FRAME_DIM}x{MIN_FRAME_DIM}); the noise estimate needs at least \
+             one interior pixel"
+        );
+    }
+    Ok(())
+}
+
 /// Patch radius threshold: above this the dispatcher switches to the
 /// separable path so the per-pixel cost stays linear in `patch_radius`.
 pub(super) const SEPARABLE_THRESHOLD: u32 = 8;
@@ -648,6 +667,19 @@ mod tests {
                 "radius={radius}: yuv={yuv}, luma={luma}"
             );
         }
+    }
+
+    #[test]
+    fn validate_dimensions_rejects_frames_below_the_minimum() {
+        assert!(validate_dimensions(2, 64).is_err());
+        assert!(validate_dimensions(64, 2).is_err());
+        assert!(validate_dimensions(0, 0).is_err());
+    }
+
+    #[test]
+    fn validate_dimensions_accepts_the_minimum() {
+        assert!(validate_dimensions(MIN_FRAME_DIM, MIN_FRAME_DIM).is_ok());
+        assert!(validate_dimensions(1920, 1080).is_ok());
     }
 
     #[test]
