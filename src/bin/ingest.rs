@@ -116,6 +116,8 @@ pub struct CliOptions {
     /// Per-plane strength override for the chroma denoiser. Takes
     /// precedence over `nlm_tuning.strength` when set.
     pub chroma_strength: Option<f32>,
+    /// Hides the scene-detection progress bar in `file` mode.
+    pub no_progress: bool,
 }
 
 impl CliOptions {
@@ -501,6 +503,7 @@ mod cli_options_tests {
             nlm_tuning,
             luma_strength,
             chroma_strength,
+            no_progress: false,
         }
     }
 

@@ -15,6 +15,7 @@ use strum_macros::EnumString;
 
 mod file_mode;
 mod ingest;
+mod progress;
 mod stdin_mode;
 
 use ingest::{BinaryChannelIntent, CliOptions};
@@ -430,6 +431,14 @@ struct Args {
     #[arg(long, global = true)]
     mc_pyramid_levels: Option<u32>,
 
+    /// Hides the progress bar.
+    ///
+    /// The progress bar is otherwise shown when the output terminal
+    /// supports it. It only appears during scene detection in `file`
+    /// mode. There is nothing to show a bar for in `stdin` mode.
+    #[arg(long, global = true)]
+    no_progress: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -800,6 +809,32 @@ mod hq_sigma_scale_tests {
     }
 }
 
+#[cfg(test)]
+mod no_progress_tests {
+    use super::*;
+
+    /// Parses `Args` from CLI-style tokens, always terminated with the
+    /// `stdin` subcommand. Mirrors `preset_tests::parse`.
+    fn parse(extra: &[&str]) -> Args {
+        let mut argv = vec!["av-denoise"];
+        argv.extend_from_slice(extra);
+        argv.push("stdin");
+        Args::parse_from(argv)
+    }
+
+    #[test]
+    fn defaults_to_false() {
+        let args = parse(&[]);
+        assert!(!args.no_progress);
+    }
+
+    #[test]
+    fn flag_sets_it_true() {
+        let args = parse(&["--no-progress"]);
+        assert!(args.no_progress);
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     // cubecl spawns its per-device worker thread with no explicit stack
     // size (uses Rust's default 2 MiB). GPU kernel codegen runs on that
@@ -890,6 +925,7 @@ fn main() -> anyhow::Result<()> {
         nlm_tuning,
         luma_strength: args.luma_strength,
         chroma_strength: args.chroma_strength,
+        no_progress: args.no_progress,
     };
 
     match args.command {

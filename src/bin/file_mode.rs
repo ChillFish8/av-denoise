@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::io::stdout;
+use std::io::{IsTerminal, stdout};
 use std::path::Path;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
@@ -9,6 +9,7 @@ use av_scenechange::{DetectionOptions, detect_scene_changes};
 use y4m::Frame as Y4mFrame;
 
 use crate::ingest::{CliOptions, FrameLayout, Planes, Subsampling, WorkerDenoiser, subsampling_to_y4m};
+use crate::progress::{progress_visible, scene_progress_bar};
 
 const FRAME_CHANNEL_DEPTH: usize = 8;
 const OUTPUT_CHANNEL_DEPTH: usize = 32;
@@ -35,7 +36,7 @@ pub fn run_file(opts: &CliOptions, input: &Path, workers: usize) -> Result<(), a
         anyhow::bail!("--workers must be at least 1");
     }
 
-    let scenes = detect_scenes(input)?;
+    let scenes = detect_scenes(input, opts.no_progress)?;
 
     tracing::info!(
         scene_count = scenes.scene_count(),
@@ -50,7 +51,7 @@ pub fn run_file(opts: &CliOptions, input: &Path, workers: usize) -> Result<(), a
 /// Open the input, read its layout, and run `av_scenechange` to produce a
 /// list of scene boundaries. Returns once the detector pass has finished
 /// and the temporary decoder it used has been dropped.
-fn detect_scenes(input: &Path) -> Result<SceneLayout, anyhow::Error> {
+fn detect_scenes(input: &Path, no_progress: bool) -> Result<SceneLayout, anyhow::Error> {
     let mut decoder = Decoder::from_file(input)?;
     let details = *decoder.get_video_details();
 
@@ -72,8 +73,16 @@ fn detect_scenes(input: &Path) -> Result<SceneLayout, anyhow::Error> {
         "running scene detection",
     );
 
+    let visible = progress_visible(no_progress, std::io::stderr().is_terminal());
+    let pb = scene_progress_bar(details.total_frames, visible);
+    let on_progress = |frames_analyzed: usize, _keyframe_count: usize| {
+        pb.set_position(frames_analyzed as u64);
+    };
+
     let detect_opts = DetectionOptions::default();
-    let detection = detect_scene_changes::<u8>(&mut decoder, detect_opts, None, None)?;
+    let detection = detect_scene_changes::<u8>(&mut decoder, detect_opts, None, Some(&on_progress))?;
+
+    pb.finish_and_clear();
 
     drop(decoder);
 

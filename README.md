@@ -555,6 +555,11 @@ Options:
           
           Only takes effect with `--motion-compensation`. Defaults to 2 when unset.
 
+      --no-progress
+          Hides the progress bar.
+          
+          The progress bar is otherwise shown when the output terminal supports it. It only appears during scene detection in `file` mode. There is nothing to show a bar for in `stdin` mode.
+
   -h, --help
           Print help (see a summary with '-h')
 ```
