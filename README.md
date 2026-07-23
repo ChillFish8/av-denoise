@@ -3,12 +3,18 @@
 Fast and efficient NLMEANS video denoising using CubeCL.
 
 This project is heavily inspired by [KNLmeansCL](https://github.com/Khanattila/KNLMeansCL) alongside FFmpeg's nlmeans 
-implementation but is built to be a more standalone tool and also make use or more modern tooling to better 
+implementation but is built to be a more standalone tool and also make use of more modern tooling to better 
 leverage modern hardware instead of relying on the now rather outdated OpenCL.
 
 ## Table of contents
 
 - [Features](#features)
+- [Tuning guide](#tuning-guide)
+  - [Start here](#start-here)
+  - [Still too noisy](#still-too-noisy)
+  - [Losing detail](#losing-detail)
+  - [Common situations](#common-situations)
+  - [What not to do](#what-not-to-do)
 - [Benchmarks](#benchmarks)
   - [Apples-to-apples spatial NL-means (strength 1.0)](#apples-to-apples-spatial-nl-means-strength-10)
   - [av-denoise feature cost (strength 1.0, default patch/search)](#av-denoise-feature-cost-strength-10-default-patchsearch)
@@ -24,45 +30,112 @@ leverage modern hardware instead of relying on the now rather outdated OpenCL.
 
 ## Features
 
-- **`--preset` speed/quality ladder** (`veryfast`, `fast`, `base`, `slow`, `veryslow`) bundling
-  algorithm, temporal radius, and search radius into a single dial.
-   * `base` is the default. `veryfast` matches this tool's original default behavior.
-- Library and binary offering.
-  * The binary supports both STDIN (y4m) and FFMS2 ingestion and emits y4m frames to STDOUT.
-- **Spatial** and **Temporal** support
-- **Luma**, **Chroma** and **YUV*** specific denoising kernels.
-   * YUV is for YUV 4:4:4 only.
-- Adjustable nlmeans tuning paramters with sensible defaults.
-- **Prefilter support** for more accurate denoising with less detail loss.
-   * Includes an on-gpu bilateral filter out of the box
-   * You can specify the reference frame yourself using the library rather than CLI.
-- **`nlmeans-hq` algorithm** (`--algorithm nlmeans-hq`) for quality-focused denoising.
-   * Measures the noise level automatically per scene (EMA-smoothed across frames) and scales its
-     strength to it, a multiplier whose default is calibrated per temporal radius and per plane
-     (luma or chroma). Override with `--hq-sigma` if the automatic estimate misjudges a source, or
-     fall back to an absolute strength with `--hq-no-auto-strength`. Nudge the measurement itself up
-     or down with `--hq-sigma-scale` instead of pinning it (`1.0` keeps the measurement as-is).
-   * Combines two noise estimators. A spatial Immerkær estimate covers every frame, and at temporal
-     radius 1 or higher a temporal-residual estimate measures static blocks between neighbouring
-     frames. The temporal estimate sees spatially-correlated grain (film grain, encoder grain) at
-     its true level where the spatial mask under-reads it, and it also measures the grain's
-     correlation to raise the effective level the way heavy grain needs. The stronger of the two
-     estimates wins.
-   * Subtracts the expected noise floor from patch distances so matching isn't skewed by grain
-     (`--hq-no-noise-floor` to keep it in).
-   * Gates each temporal neighbour's contribution by how well it block-matches the centre frame, so
-     occluded or changed content doesn't get blurred in (`--hq-no-temporal-confidence`,
-     `--hq-thsad-scale`).
-   * Adds an opt-in NLM-spatial pilot prefilter (`--prefilter nlm[:<strength_scale>]`) alongside the
-     bilateral one.
-- **Motion compensation** for high-quality temporal denoising on heavy motion.
-   * MVTools-inspired hierarchical block matching, fully on-GPU.
-   * Enabled with `--motion-compensation`, tuned via `--mc-blksize`,
-     `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels`.
-   * The motion-tracking strategy adapts automatically to `--temporal-radius`.
-- _**Fast!**_ - Around **2x** faster than FFmpeg's OpenCL implementation.
-   * Be aware that the `STDIN` mode for the binary cannot fully utilise larger modern GPUs, it will
-     likely be just as fast as FFmpeg using much less GPU compute, but we cannot parallelize across scenes.
+- **One dial** - the `--preset` ladder (`veryfast` → `veryslow`) bundles algorithm, temporal
+  radius, and search radius. `base` is the default.
+- **Automatic noise handling** - the `nlmeans-hq` algorithm measures the noise level, the grain's
+  spatial correlation, and per-plane strength for every scene. Film grain and encoder grain are
+  seen at their true level, and `--hq-sigma-scale` nudges the measurement when your eye disagrees.
+- **Temporal denoising with motion awareness** - up to 17-frame windows, per-neighbour
+  block-match confidence, and opt-in on-GPU motion compensation (`--motion-compensation`).
+- **Luma, chroma, and YUV444 kernels** - spatial or temporal, each plane individually tunable.
+- **Prefilters** - on-GPU bilateral and NLM-pilot reference clips, or supply your own guide via
+  the library.
+- **Library and binary** - y4m over STDIN/STDOUT, or direct file ingestion via FFMS2 with
+  scene-parallel workers.
+- _**Fast!**_ - around **2x** FFmpeg's `nlmeans_opencl` at matched settings. STDIN mode can't
+  parallelize across scenes, so file mode makes the best use of big GPUs.
+
+## Tuning guide
+
+The defaults are measured, not guessed. Start with them, judge the result by eye, and adjust one
+knob at a time using the situations below.
+
+### Start here
+
+```bash
+av-denoise file --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+```
+
+This runs the `base` preset: the `nlmeans-hq` algorithm with a 5-frame temporal window (radius of `2`) and fully
+automatic noise handling. The noise level, the grain's spatial correlation, and the per-plane
+strength are all measured per scene, so most sources need nothing else.
+
+Your main dial is `--preset`. Go up the ladder (`slow`, `veryslow`) for noisier sources or when
+quality matters more than time. Go down (`fast`, `veryfast`) when speed wins.
+
+| Symptom                        | First thing to try                 | Second                      |
+|--------------------------------|------------------------------------|-----------------------------|
+| Grain or noise still visible   | one preset higher                  | `--hq-sigma-scale 1.1`      |
+| Fine texture getting scrubbed  | `--hq-sigma-scale 0.9`             | lower `--strength` slightly |
+| Smearing or ghosting on motion | `--motion-compensation`            | one preset lower            |
+| Colour speckle survives        | `--chroma-strength` up             | -                           |
+| Too slow                       | check the GPU is actually selected | one preset lower            |
+
+### Still too noisy
+
+Work through these in order.
+
+1. **Go up a preset.** Noise and grain are independent frame to frame, so a deeper temporal
+   window removes them more effectively than any strength increase. This is the strongest lever in
+   the tool.
+2. **Enable `--motion-compensation`** on footage with real movement, so the deeper window keeps
+   finding usable matches instead of falling back to the current frame.
+    * For **Anime** sources, you may not want to enable this option. Anime sources typically cope with
+      high motion much more effectively, and introducing motion compensation can work against you.
+3. **Nudge `--hq-sigma-scale` up** (try 1.1, then 1.2). This tells the denoiser the noise is a
+   little stronger than it measured, and everything downstream (strength, patch matching, motion
+   confidence) adapts together. Increase in small steps, judging by eye each time.
+
+### Losing detail
+
+The same dial works downward: `--hq-sigma-scale 0.9` tells it the source is cleaner than measured.
+If texture is still being scrubbed after that, lower `--strength` a little.
+
+The rule of thumb for choosing between the two:
+
+- `--hq-sigma-scale` says *how noisy the source really is*
+- `--strength` says *how aggressively to clean at that noise level*. 
+
+**Prefer the sigma scale first.** The noise level also steers patch matching and motion confidence, so correcting it
+fixes the cause rather than the symptom.
+
+### Common situations
+
+- **Old live action, heavy film grain.** Real grain is spatially correlated and hides from naive
+  estimators. The estimator here measures it from frame-to-frame residuals, so start with plain
+  `--preset slow --motion-compensation` before reaching for any manual value. If it still reads
+  slightly weak to your eye, `--hq-sigma-scale 1.1` is the intended fix.
+- **Mostly clean sources.** `fast` or `veryfast` is usually enough, and over-denoising a clean
+  source only costs detail. If you only want the light grain layer gone, stay at a low preset and
+  let the automatic strength do its thing.
+- **Colour speckle.** Chroma already gets its own measured strength, but stubborn colour noise can
+  take `--chroma-strength` above the default without touching luma.
+- **Fast motion looks smeary.** Enable `--motion-compensation` first. If a scene still trails,
+  drop one preset (a shallower window has less material to mis-blend).
+
+### What not to do
+
+These exist for debugging, calibration work, and unusual sources. Reaching for them first usually
+makes things worse.
+
+- **`--hq-sigma`** pins the noise level to a fixed value, which disables the per-scene measurement
+  entirely. `--hq-sigma-scale` keeps the measurement and nudges it, which is almost always what
+  you actually want.
+- **Raising `--strength` to fight leftover grain.** Grain that survives means the noise level read
+  low, and extra strength scrubs detail before it removes grain. Fix the level
+  (`--hq-sigma-scale`) instead.
+- **`--hq-no-noise-floor`, `--hq-no-auto-strength`, `--hq-no-temporal-confidence`** switch off
+  measured machinery. They are comparison and debugging switches, not quality options.
+- **`--hq-thsad-scale`, `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels`**
+  tune the motion machinery's internals. The defaults are calibrated together.
+- **`--prefilter`** (the NLM pilot and bilateral modes) changes what patch matching sees, and
+  under `nlmeans-hq`'s calibrated automatic handling both modes measured neutral at best on
+  default settings. They exist for experimentation and for library users supplying their own
+  reference clip, not as a default quality upgrade.
+- **`--search-radius` and `--patch-radius`** reshape the whole matching problem, and every other
+  default is tuned around them. Cost grows quadratically with the search radius, and the presets
+  already adjust these parameters based on exhaustive tuning.
+- **The `cpu` accelerator** is for testing the pipeline, not for real encodes.
 
 ## Benchmarks
 
