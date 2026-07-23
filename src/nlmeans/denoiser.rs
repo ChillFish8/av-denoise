@@ -13,12 +13,14 @@ use super::noise::{
     TemporalStatsCtx,
     aggregate_temporal_noise_stats,
     build_spatial_offset_lut,
+    correlation_factor,
+    noise_partials_slot_stride_bytes,
     partials_len,
     read_temporal_stats_slot,
     run_noise_estimate,
     run_temporal_noise_stats,
+    sigma_block_p25_from_partials,
     sigma_from_abs_sum,
-    temporal_sigma_eff,
     temporal_stats_buf_bytes,
     zero_temporal_stats_slot,
 };
@@ -111,11 +113,14 @@ pub struct NlmDenoiser<R: Runtime> {
     /// replaced.
     pub(super) spatial_offset_lut: Handle,
 
-    /// Stage-1 noise-estimate scratch, `[partials_len(width, height)]`
-    /// f32s. `Some` only when the noise level is measured
-    /// automatically (`hq` is set and `sigma_override` is `None`).
-    /// Reused across pushes. Each `run_noise_estimate` call fully
-    /// overwrites it before the reduce kernel reads it back.
+    /// Stage-1 noise-estimate scratch ring, `total_frames` slots each
+    /// `noise_partials_slot_stride_bytes(width, height)` bytes. `Some`
+    /// only when the noise level is measured automatically (`hq` is
+    /// set and `sigma_override` is `None`). One slot per ring position
+    /// keeps a slot's partials intact between the push that queues
+    /// them and the later fold that reads the centre slot back for the
+    /// low chain's block-p25 statistic, unlike a single shared region
+    /// every push would overwrite before that slot ever reaches centre.
     pub(super) noise_partials: Option<Handle>,
     /// Per-ring-slot Immerkær totals, `[total_frames * 4]` f32s. Same
     /// gating as `noise_partials`.
@@ -128,10 +133,18 @@ pub struct NlmDenoiser<R: Runtime> {
     /// `temporal_radius >= 1` (the r=0 path has no temporal neighbour
     /// to diff against).
     pub(super) temporal_stats_buf: Option<Handle>,
-    /// Smooths the raw per-frame noise estimate into a stable
-    /// per-channel sigma. Inert (never updated) when noise is not
-    /// measured automatically.
+    /// Smooths the median chain's raw per-frame noise estimate into a
+    /// stable per-channel sigma, feeding `h2_inv_norm` and `sigma_y`.
+    /// Inert (never updated) when noise is not measured automatically.
     pub(super) noise_estimator: NoiseEstimator,
+    /// Smooths the low chain's raw per-frame noise estimate into a
+    /// stable per-channel sigma, feeding `input_noise_offset` and
+    /// `noise_offset` only. The low chain uses block-p25 Immerkær
+    /// maxed with the temporal lower quartile rather than the median
+    /// chain's frame-mean Immerkær maxed with the temporal median, a
+    /// more conservative read for a consumer where an over-read is
+    /// destructive. Inert under the same condition as `noise_estimator`.
+    pub(super) noise_estimator_low: NoiseEstimator,
 
     /// Cached motion-compensation context. `Some` when MC is active.
     pub(super) mc_ctx: Option<MotionCtx>,
@@ -269,10 +282,10 @@ impl<R: Runtime> NlmDenoiser<R> {
         // the estimate kernels.
         let auto_noise = params.hq.is_some_and(|hq| hq.sigma_override.is_none());
         let (noise_partials, noise_results) = if auto_noise {
-            let n_partials = partials_len(width, height);
+            let partials_ring_bytes = noise_partials_slot_stride_bytes(width, height) * total_frames as u64;
             let n_results = (total_frames * 4) as usize;
             (
-                Some(client.empty(n_partials * size_of::<f32>())),
+                Some(client.empty(partials_ring_bytes as usize)),
                 Some(client.empty(n_results * size_of::<f32>())),
             )
         } else {
@@ -426,6 +439,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             noise_results,
             temporal_stats_buf,
             noise_estimator: NoiseEstimator::default(),
+            noise_estimator_low: NoiseEstimator::default(),
             mc_ctx,
             compensated_input_buf,
             compensated_reference_buf,
@@ -730,6 +744,9 @@ impl<R: Runtime> NlmDenoiser<R> {
             return;
         };
 
+        let stride = noise_partials_slot_stride_bytes(self.width, self.height);
+        let partials_slot = partials_buf.clone().offset_start((slot as u64) * stride);
+
         let ctx = NoiseCtx {
             width: self.width,
             height: self.height,
@@ -739,7 +756,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             frame: slot,
             slot,
             input_buf: &self.input_buf,
-            partials_buf,
+            partials_buf: &partials_slot,
             results_buf,
         };
 
@@ -834,27 +851,49 @@ impl<R: Runtime> NlmDenoiser<R> {
         // `ring_head == 0` gate) and this slot's stats region is
         // unwritten. Seed from Immerkær alone, exactly as before the
         // temporal estimator existed.
-        self.fold_noise_estimate(data, slot as usize, None);
+        let imm_low = self
+            .read_noise_partials_low(slot)
+            .expect("noise-partials seed readback failed");
+        self.fold_noise_estimate(data, slot as usize, None, imm_low);
     }
 
     /// Fold one physical ring slot's already-read-back noise totals
-    /// into the EMA and recompute the filter parameters derived from
-    /// it (`h2_inv_norm`, `noise_offset`, `input_noise_offset`,
-    /// `sigma_y`). Shared by [`Self::seed_noise_estimate_if_first_frame`]
-    /// and [`Self::update_noise_estimate`], which differ in how they
-    /// obtain `data`/`temporal` and which slot they pass in.
+    /// into the median and low chains' EMAs and recompute the filter
+    /// parameters derived from them (`h2_inv_norm`, `noise_offset`,
+    /// `input_noise_offset`, `sigma_y`). Shared by
+    /// [`Self::seed_noise_estimate_if_first_frame`] and
+    /// [`Self::update_noise_estimate`], which differ in how they obtain
+    /// `data`/`temporal`/`imm_low` and which slot they pass in.
     ///
-    /// When `temporal` carries a sample, each channel's raw estimate
-    /// becomes `max(sigma_eff, sigma_immerkaer)` — the temporal
-    /// residual estimator sees correlated grain the Immerkær mask
-    /// underestimates, but scarce static content (motion, scene
-    /// changes) makes its sample unreliable, so it can only push the
-    /// estimate up from Immerkær, never down. The same sample's `rho`
-    /// also folds into `rho_smoothed`, the spatial-offset LUT's
-    /// attenuation input. `rho_smoothed` stays at its seeded 0 for the
-    /// fast path and a fixed `sigma_override`, since `temporal` is
-    /// always `None` there.
-    fn fold_noise_estimate(&mut self, data: &[f32], slot: usize, temporal: Option<TemporalNoiseSample>) {
+    /// Both chains start from an Immerkær read of `data`, maxed with a
+    /// temporal-residual read when `temporal` carries a sample — the
+    /// temporal residual estimator sees correlated grain the Immerkær
+    /// mask underestimates, but scarce static content (motion, scene
+    /// changes) makes its sample unreliable, so it can only push either
+    /// chain's estimate up, never down. The two chains differ only in
+    /// which statistic they read at each step. The median chain reads
+    /// `data`'s frame-mean Immerkær total and `temporal.sigma`'s
+    /// per-block median, while the low chain reads `imm_low` (Immerkær's
+    /// own block-p25) and `temporal.sigma_low`'s per-block lower
+    /// quartile. `noise_offset` weighs patch distances quadratically in
+    /// sigma, so an over-read there is destructive to fine texture, and
+    /// the low chain's conservative statistics keep it from over-reading
+    /// on shots where texture leaks into the temporal residuals. The
+    /// strength and confidence floor keep the median chain instead,
+    /// since that's what the dark-footage calibration validated.
+    ///
+    /// The temporal sample's `rho` also folds into `rho_smoothed`, the
+    /// spatial-offset LUT's attenuation input, once regardless of which
+    /// chain reads it. `rho_smoothed` stays at its seeded 0 for the fast
+    /// path and a fixed `sigma_override`, since `temporal` is always
+    /// `None` there.
+    fn fold_noise_estimate(
+        &mut self,
+        data: &[f32],
+        slot: usize,
+        temporal: Option<TemporalNoiseSample>,
+        imm_low: [f32; 3],
+    ) {
         let channels = self.params.channels.count() as usize;
         let base = slot * 4;
 
@@ -862,11 +901,13 @@ impl<R: Runtime> NlmDenoiser<R> {
         for (c, s) in raw.iter_mut().enumerate().take(channels) {
             *s = sigma_from_abs_sum(data[base + c], self.width, self.height);
         }
+        let mut raw_low = imm_low;
 
         if let Some(sample) = temporal {
-            let eff = temporal_sigma_eff(&sample, channels);
-            for (r, e) in raw.iter_mut().zip(eff.iter()).take(channels) {
-                *r = r.max(*e);
+            let factor = correlation_factor(sample.rho);
+            for c in 0..channels {
+                raw[c] = raw[c].max(sample.sigma[c] * factor);
+                raw_low[c] = raw_low[c].max(sample.sigma_low[c] * factor);
             }
             self.rho_smoothed = EMA_ALPHA * sample.rho + (1.0 - EMA_ALPHA) * self.rho_smoothed;
         }
@@ -878,24 +919,29 @@ impl<R: Runtime> NlmDenoiser<R> {
         // `sigma_override` is `None` (see `auto_noise` at construction),
         // so `self.params.hq` is always `Some` here.
         let sigma_scale = self.params.hq.map_or(1.0, |hq| hq.sigma_scale);
-        for r in raw.iter_mut().take(channels) {
-            *r *= sigma_scale;
+        for c in 0..channels {
+            raw[c] *= sigma_scale;
+            raw_low[c] *= sigma_scale;
         }
 
         let updated = self.noise_estimator.update(&raw[..channels]);
         let mut smoothed = [0.0f32; 3];
         smoothed[..channels].copy_from_slice(updated);
 
+        let updated_low = self.noise_estimator_low.update(&raw_low[..channels]);
+        let mut smoothed_low = [0.0f32; 3];
+        smoothed_low[..channels].copy_from_slice(updated_low);
+
         let eff = sigma_eff(&smoothed[..channels], self.params.channels);
         self.h2_inv_norm = self.params.h2_inv_norm_with(Some(eff));
-        self.input_noise_offset = self.params.noise_offset_with(Some(&smoothed[..channels]));
+        self.input_noise_offset = self.params.noise_offset_with(Some(&smoothed_low[..channels]));
         self.noise_offset = match self.params.prefilter {
             PrefilterMode::NlmSpatial { .. } => 0.0,
             _ => self.input_noise_offset,
         };
         // Channel 0 is whatever motion estimation already treats as
         // luma (see `nlm_mc_extract_luma`), so the confidence floor
-        // uses the same plane's noise estimate.
+        // uses the median chain's same-plane noise estimate.
         self.sigma_y = smoothed[0];
     }
 
@@ -1078,10 +1124,43 @@ impl<R: Runtime> NlmDenoiser<R> {
         let center_slot = self.phys_frame(center_t as i32) as usize;
 
         let temporal = self.read_temporal_noise_sample(center_slot as u32)?;
+        let imm_low = self.read_noise_partials_low(center_slot as u32)?;
 
-        self.fold_noise_estimate(data, center_slot, temporal);
+        self.fold_noise_estimate(data, center_slot, temporal, imm_low);
 
         Ok(())
+    }
+
+    /// Reads back one ring slot's stage-1 noise partials and reduces
+    /// them to the low chain's per-channel block-p25 Immerkær estimate.
+    /// Slices the shared ring handle by byte offset so the transfer is
+    /// proportional to one slot instead of the whole ring, mirroring
+    /// [`read_temporal_stats_slot`].
+    fn read_noise_partials_low(&self, slot: u32) -> Result<[f32; 3], anyhow::Error> {
+        let partials_buf = self
+            .noise_partials
+            .as_ref()
+            .expect("noise_partials allocated when auto noise is active");
+
+        let slot_len_bytes = partials_len(self.width, self.height) as u64 * size_of::<f32>() as u64;
+        let stride = noise_partials_slot_stride_bytes(self.width, self.height);
+        let total_bytes = self.params.total_frames() as u64 * stride;
+        let start = (slot as u64) * stride;
+        let end_trim = total_bytes - start - slot_len_bytes;
+
+        let sliced = partials_buf.clone().offset_start(start).offset_end(end_trim);
+        let bytes = self
+            .client
+            .read_one(sliced)
+            .map_err(|e| anyhow::anyhow!("noise partials readback failed: {e}"))?;
+        let data = f32::from_bytes(&bytes);
+
+        Ok(sigma_block_p25_from_partials(
+            data,
+            self.params.channels.count(),
+            self.width,
+            self.height,
+        ))
     }
 
     /// Reads back and aggregates the centre slot's temporal-residual
@@ -1216,6 +1295,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.next_output_slot = 0;
         self.real_pushes = 0;
         self.noise_estimator.reset();
+        self.noise_estimator_low.reset();
         self.rho_smoothed = 0.0;
     }
 

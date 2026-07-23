@@ -32,6 +32,17 @@ pub(super) fn partials_len(width: u32, height: u32) -> usize {
     (width.div_ceil(BLOCK_X) * height.div_ceil(BLOCK_Y) * 4) as usize
 }
 
+/// Byte stride between ring slots in the stage-1 partials buffer,
+/// padded up to the GPU storage-buffer offset alignment (32 bytes).
+/// Small frames can produce a [`partials_len`] under 8 `f32`s, and
+/// `wgpu` rejects a bind-group offset that isn't a multiple of its
+/// `min_storage_buffer_offset_alignment` — mirrors
+/// [`temporal_stats_slot_stride_bytes`].
+pub(super) fn noise_partials_slot_stride_bytes(width: u32, height: u32) -> u64 {
+    let bytes = partials_len(width, height) as u64 * size_of::<f32>() as u64;
+    bytes.next_multiple_of(32)
+}
+
 /// Dispatch both stages of the Immerkær noise estimate for `ctx.frame`,
 /// writing the per-channel absolute-mask-response totals into
 /// `ctx.results_buf` at `ctx.slot`. The results buffer is sized for
@@ -85,6 +96,67 @@ pub(super) fn run_noise_estimate<R: Runtime>(
 pub(super) fn sigma_from_abs_sum(abs_sum: f32, width: u32, height: u32) -> f32 {
     let interior = ((width - 2) as f32) * ((height - 2) as f32);
     (std::f32::consts::FRAC_PI_2).sqrt() * abs_sum / (6.0 * interior)
+}
+
+/// Per-channel lower quartile of per-cube Immerkær sigma estimates,
+/// read straight from one slot's stage-1 partials, `partials[cube_index
+/// * 4 + ch]` as the stage-1 kernel lays them out. A cube's own sigma
+/// is its interior-pixel overlap's share of `sigma_from_abs_sum`'s
+/// formula, the overlap of the cube's `BLOCK_X × BLOCK_Y` tile with
+/// the frame's interior rect (`1 <= x <= width - 2`, `1 <= y <= height
+/// - 2`). Cubes with no interior overlap are skipped rather than
+/// diluting the quartile with a spurious zero. The block-level
+/// quartile reads lower than [`sigma_from_abs_sum`]'s frame-wide mean
+/// whenever noise is spatially uneven, the more conservative estimate
+/// the low chain wants. Channels past `channels` stay 0.
+pub(super) fn sigma_block_p25_from_partials(
+    partials: &[f32],
+    channels: u32,
+    width: u32,
+    height: u32,
+) -> [f32; 3] {
+    let cubes_x = width.div_ceil(BLOCK_X);
+    let cubes_y = height.div_ceil(BLOCK_Y);
+    let channels = channels as usize;
+
+    let mut cube_sigmas: Vec<Vec<f32>> = vec![Vec::new(); channels];
+
+    for cy in 0..cubes_y {
+        let tile_y0 = cy * BLOCK_Y;
+        let tile_y1 = ((cy + 1) * BLOCK_Y).min(height);
+        let overlap_y0 = tile_y0.max(1);
+        let overlap_y1 = tile_y1.min(height - 1);
+
+        for cx in 0..cubes_x {
+            let tile_x0 = cx * BLOCK_X;
+            let tile_x1 = ((cx + 1) * BLOCK_X).min(width);
+            let overlap_x0 = tile_x0.max(1);
+            let overlap_x1 = tile_x1.min(width - 1);
+
+            if overlap_x1 <= overlap_x0 || overlap_y1 <= overlap_y0 {
+                continue;
+            }
+
+            let area = ((overlap_x1 - overlap_x0) * (overlap_y1 - overlap_y0)) as f32;
+            let cube_index = (cy * cubes_x + cx) as usize;
+            let base = cube_index * 4;
+
+            for (c, sigmas) in cube_sigmas.iter_mut().enumerate() {
+                let sum = partials[base + c];
+                sigmas.push(std::f32::consts::FRAC_PI_2.sqrt() * sum / (6.0 * area));
+            }
+        }
+    }
+
+    let mut sigma_low = [0.0f32; 3];
+    for (c, sigmas) in cube_sigmas.iter_mut().enumerate() {
+        if sigmas.is_empty() {
+            continue;
+        }
+        sort_ascending(sigmas);
+        sigma_low[c] = lower_quartile(sigmas);
+    }
+    sigma_low
 }
 
 /// Spatial block size for the temporal residual noise-stats kernel.
@@ -243,6 +315,12 @@ pub(super) struct TemporalNoiseSample {
     /// Per-channel temporal sigma (median over static blocks), `[0,
     /// 1]` units. Unused entries past the active channel count are 0.
     pub sigma: [f32; 3],
+    /// Per-channel temporal sigma at the lower quartile over the same
+    /// static-block sigma sets `sigma` medians, `[0, 1]` units. A more
+    /// conservative read than `sigma`, meant for consumers where an
+    /// over-read is more harmful than an under-read. Unused entries
+    /// past the active channel count are 0.
+    pub sigma_low: [f32; 3],
     /// Grain autocorrelation: the median, over static blocks with
     /// measurable channel-0 noise, of the channel-0 residual's
     /// horizontal lag-1 correlation.
@@ -337,28 +415,60 @@ pub(super) fn aggregate_temporal_noise_stats(
     }
 
     let mut sigma = [0.0f32; 3];
+    let mut sigma_low = [0.0f32; 3];
     for (c, sigmas) in static_sigmas.iter_mut().enumerate() {
+        sort_ascending(sigmas);
         sigma[c] = median(sigmas);
+        sigma_low[c] = lower_quartile(sigmas);
     }
-    let rho = median(&mut rho_samples);
+    sort_ascending(&mut rho_samples);
+    let rho = median(&rho_samples);
 
     Some(TemporalNoiseSample {
         sigma,
+        sigma_low,
         rho,
         static_fraction,
     })
 }
 
-/// Median of `values`, sorted in place. The average of the two middle
-/// elements on an even count. Callers only invoke this on a
-/// non-empty slice.
-fn median(values: &mut [f32]) -> f32 {
+/// Sorts `values` ascending in place. A shared first step for
+/// [`median`] and [`lower_quartile`], so a caller that needs both
+/// statistics from the same set sorts once and passes the same slice
+/// to each.
+fn sort_ascending(values: &mut [f32]) {
     values.sort_by(|a, b| a.partial_cmp(b).expect("noise stats are never NaN"));
+}
+
+/// Median of an ascending-sorted `values`. The average of the two
+/// middle elements on an even count. Callers only invoke this on a
+/// non-empty slice.
+fn median(values: &[f32]) -> f32 {
     let n = values.len();
     if n % 2 == 1 {
         values[n / 2]
     } else {
         (values[n / 2 - 1] + values[n / 2]) / 2.0
+    }
+}
+
+/// Lower quartile of an ascending-sorted `values`, index `0.25 * (n -
+/// 1)` with linear interpolation between the two neighbouring
+/// elements. A single-element slice returns that element. Callers
+/// only invoke this on a non-empty slice.
+fn lower_quartile(values: &[f32]) -> f32 {
+    let n = values.len();
+    if n == 1 {
+        return values[0];
+    }
+    let idx = 0.25 * (n - 1) as f32;
+    let lo = idx.floor() as usize;
+    let hi = idx.ceil() as usize;
+    if lo == hi {
+        values[lo]
+    } else {
+        let t = idx - lo as f32;
+        values[lo] + t * (values[hi] - values[lo])
     }
 }
 
@@ -398,17 +508,6 @@ fn interpolate_table(table: &[(f32, f32)], x: f32) -> f32 {
     }
 
     table[table.len() - 1].1
-}
-
-/// Per-channel effective sigma from a temporal sample, correcting for
-/// spatial grain correlation. Entries past `channels` stay 0.
-pub(super) fn temporal_sigma_eff(sample: &TemporalNoiseSample, channels: usize) -> [f32; 3] {
-    let factor = correlation_factor(sample.rho);
-    let mut eff = [0.0f32; 3];
-    for (c, e) in eff.iter_mut().enumerate().take(channels) {
-        *e = sample.sigma[c] * factor;
-    }
-    eff
 }
 
 /// Attenuation factor for the spatial noise-floor offset at grain
@@ -570,12 +669,121 @@ mod tests {
     }
 
     #[test]
+    fn noise_partials_slot_stride_bytes_pads_odd_cube_count() {
+        // A single BLOCK_X x BLOCK_Y cube, partials_len(32, 8) = 4
+        // f32s = 16 bytes, padded up to the next 32-byte multiple.
+        assert_eq!(noise_partials_slot_stride_bytes(32, 8), 32);
+    }
+
+    #[test]
+    fn noise_partials_slot_stride_bytes_aligned_count_unchanged() {
+        // A 2x2 cube grid, partials_len(33, 9) = 16 f32s = 64 bytes,
+        // already a multiple of 32, so no padding is added.
+        assert_eq!(noise_partials_slot_stride_bytes(33, 9), 64);
+    }
+
+    /// A `70x20` frame grids into a ragged 3x3 cube layout (`BLOCK_X =
+    /// 32`, `BLOCK_Y = 8`). Two full columns/rows plus one partial each,
+    /// so every cube's interior-overlap area is distinct. Hand-computed
+    /// per-cube interior areas, row-major `[cy][cx]`, summing exactly to
+    /// the frame's own interior area `(70-2)*(20-2) = 1224`.
+    const RAGGED_CUBE_AREAS: [[f32; 3]; 3] = [[217.0, 224.0, 35.0], [248.0, 256.0, 40.0], [93.0, 96.0, 15.0]];
+
+    /// A uniform per-pixel mask response has the same sigma in every
+    /// cube regardless of that cube's area, since `sum = r * area`
+    /// cancels the area out of `sigma_from_abs_sum`'s formula. The
+    /// block-level lower quartile of identical values is that same
+    /// value, and it must equal the frame-wide estimate over the same
+    /// total response.
+    #[test]
+    fn sigma_block_p25_from_partials_uniform_response_matches_frame_wide() {
+        let width = 70;
+        let height = 20;
+        let channels = 1;
+        let r = 0.02f32;
+
+        let mut partials = vec![0.0f32; 3 * 3 * 4];
+        let mut total_sum = 0.0f32;
+        for (cy, row) in RAGGED_CUBE_AREAS.iter().enumerate() {
+            for (cx, &area) in row.iter().enumerate() {
+                let sum = r * area;
+                partials[(cy * 3 + cx) * 4] = sum;
+                total_sum += sum;
+            }
+        }
+
+        let sigma_low = sigma_block_p25_from_partials(&partials, channels, width, height);
+        let expected = sigma_from_abs_sum(total_sum, width, height);
+
+        assert!(
+            (sigma_low[0] - expected).abs() < expected * 1e-4,
+            "uniform response should reproduce the frame-wide estimate {expected}, got {}",
+            sigma_low[0]
+        );
+    }
+
+    /// Nine cubes given a permutation of `1..9` (in `/255` sigma units,
+    /// via each cube's own area) so sorting ascending reproduces exactly
+    /// `[1, 2, ..., 9] / 255`. `n = 9` puts the lower-quartile index at
+    /// `0.25 * 8 = 2.0` exactly, the third-smallest cube.
+    #[test]
+    fn sigma_block_p25_from_partials_distinct_sums_pick_expected_cube() {
+        let width = 70;
+        let height = 20;
+        let channels = 1;
+        let sigma_targets_255 = [5.0f32, 2.0, 8.0, 1.0, 9.0, 3.0, 7.0, 4.0, 6.0];
+
+        let mut partials = vec![0.0f32; 3 * 3 * 4];
+        for (cy, row) in RAGGED_CUBE_AREAS.iter().enumerate() {
+            for (cx, &area) in row.iter().enumerate() {
+                let i = cy * 3 + cx;
+                let sigma_target = sigma_targets_255[i] / 255.0;
+                let sum = sigma_target * 6.0 * area / std::f32::consts::FRAC_PI_2.sqrt();
+                partials[i * 4] = sum;
+            }
+        }
+
+        let sigma_low = sigma_block_p25_from_partials(&partials, channels, width, height);
+        let expected = 3.0 / 255.0;
+        assert!(
+            (sigma_low[0] - expected).abs() < 1e-4,
+            "expected the lower quartile to land on the third-smallest cube sigma {expected}, got {}",
+            sigma_low[0]
+        );
+    }
+
+    #[test]
     fn temporal_stats_blocks_and_slot_len() {
         assert_eq!(temporal_stats_blocks(32, 16), (2, 1));
         assert_eq!(temporal_stats_blocks(33, 17), (3, 2)); // ragged on both axes
         assert_eq!(temporal_stats_record_len(1), 3);
         assert_eq!(temporal_stats_record_len(4), 9);
         assert_eq!(temporal_stats_slot_len(32, 16, 1), 6); // 2 blocks x record_len 3
+    }
+
+    #[test]
+    fn lower_quartile_odd_count_exact_index() {
+        // n = 5, idx = 0.25 * 4 = 1.0 exact, no interpolation needed.
+        assert_eq!(lower_quartile(&[1.0, 2.0, 3.0, 4.0, 5.0]), 2.0);
+    }
+
+    #[test]
+    fn lower_quartile_even_count() {
+        // n = 4, idx = 0.25 * 3 = 0.75, between values[0] and values[1].
+        let got = lower_quartile(&[1.0, 2.0, 3.0, 4.0]);
+        assert!((got - 1.75).abs() < 1e-6, "expected 1.75, got {got}");
+    }
+
+    #[test]
+    fn lower_quartile_interpolates_at_a_fractional_index() {
+        // n = 3, idx = 0.25 * 2 = 0.5, halfway between values[0] and values[1].
+        let got = lower_quartile(&[10.0, 20.0, 30.0]);
+        assert!((got - 15.0).abs() < 1e-6, "expected 15.0, got {got}");
+    }
+
+    #[test]
+    fn lower_quartile_single_element_returns_it() {
+        assert_eq!(lower_quartile(&[42.0]), 42.0);
     }
 
     /// Two blocks, one static and one not. Only the static block
@@ -622,8 +830,9 @@ mod tests {
     }
 
     /// Five static blocks with distinct sigmas and (for the four that
-    /// clear the rho gate) distinct rhos. Exercises both the odd-count
-    /// sigma median and the even-count rho median in one pass.
+    /// clear the rho gate) distinct rhos. Exercises the odd-count sigma
+    /// median, the even-count rho median, and the sigma lower quartile
+    /// in one pass.
     #[test]
     fn aggregate_median_over_multiple_static_blocks() {
         let width = 16 * 5;
@@ -655,6 +864,11 @@ mod tests {
             (sample.sigma[0] - 3.0 / 255.0).abs() < 1e-4,
             "expected median sigma 3/255 (middle of [0.1,2,3,4,5]), got {}",
             sample.sigma[0]
+        );
+        assert!(
+            (sample.sigma_low[0] - 2.0 / 255.0).abs() < 1e-4,
+            "expected lower-quartile sigma 2/255 (index 0.25*4=1.0 of [0.1,2,3,4,5]), got {}",
+            sample.sigma_low[0]
         );
         assert!(
             (sample.rho - 0.4).abs() < 1e-4,
@@ -880,21 +1094,5 @@ mod tests {
 
         // Centre (dx=0, dy=0) is always zero.
         assert_eq!(lut[2 * side + 2], 0.0);
-    }
-
-    #[test]
-    fn temporal_sigma_eff_applies_correlation_factor_per_channel() {
-        let sample = TemporalNoiseSample {
-            sigma: [2.0 / 255.0, 4.0 / 255.0, 6.0 / 255.0],
-            rho: 0.5,
-            static_fraction: 1.0,
-        };
-        // Every active channel scales by the same rho-derived factor,
-        // channels past the active count stay 0.
-        let factor = correlation_factor(sample.rho);
-        let eff = temporal_sigma_eff(&sample, 2);
-        assert!((eff[0] - sample.sigma[0] * factor).abs() < 1e-6);
-        assert!((eff[1] - sample.sigma[1] * factor).abs() < 1e-6);
-        assert_eq!(eff[2], 0.0);
     }
 }
