@@ -506,6 +506,7 @@ mod options_tests {
                 sigma_override: None,
                 temporal_confidence: true,
                 thsad_scale: 1.0,
+                sigma_scale: 1.0,
             }))
             .build();
         let params = opts.to_nlm_params();
@@ -522,6 +523,7 @@ mod options_tests {
                 sigma_override: None,
                 temporal_confidence: true,
                 thsad_scale: 1.0,
+                sigma_scale: 1.0,
             }))
             .prefilter(PrefilterMode::None)
             .build();
@@ -548,6 +550,7 @@ mod options_tests {
                 sigma_override: None,
                 temporal_confidence: true,
                 thsad_scale: 1.0,
+                sigma_scale: 1.0,
             }))
             .build();
         let params = opts.to_nlm_params();
@@ -643,6 +646,7 @@ mod options_tests {
                 sigma_override: None,
                 temporal_confidence: true,
                 thsad_scale: 1.0,
+                sigma_scale: 1.0,
             }))
             .nlm(NlmTuning {
                 search_radius: None,

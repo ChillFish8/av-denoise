@@ -871,6 +871,17 @@ impl<R: Runtime> NlmDenoiser<R> {
             self.rho_smoothed = EMA_ALPHA * sample.rho + (1.0 - EMA_ALPHA) * self.rho_smoothed;
         }
 
+        // User nudge on the measured noise level. Applied after the
+        // temporal/Immerkær blend and before the EMA fold, so it scales
+        // the smoothed estimate and everything derived from it
+        // (`h2_inv_norm`, `noise_offset`, `sigma_y`). Only reached when
+        // `sigma_override` is `None` (see `auto_noise` at construction),
+        // so `self.params.hq` is always `Some` here.
+        let sigma_scale = self.params.hq.map_or(1.0, |hq| hq.sigma_scale);
+        for r in raw.iter_mut().take(channels) {
+            *r *= sigma_scale;
+        }
+
         let updated = self.noise_estimator.update(&raw[..channels]);
         let mut smoothed = [0.0f32; 3];
         smoothed[..channels].copy_from_slice(updated);

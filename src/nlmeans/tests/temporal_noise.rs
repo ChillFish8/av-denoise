@@ -366,6 +366,7 @@ fn hq_temporal_folds_correlated_grain_above_immerkaer_alone() {
             sigma_override: None,
             temporal_confidence: false,
             thsad_scale: 1.0,
+            sigma_scale: 1.0,
         }),
     };
 

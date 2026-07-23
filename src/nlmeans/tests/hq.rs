@@ -38,6 +38,7 @@ fn hq_disabled_features_match_fast_mode() {
             sigma_override: Some(8.0 / 255.0),
             temporal_confidence: true,
             thsad_scale: 1.0,
+            sigma_scale: 1.0,
         }),
         ..base_params()
     };
@@ -84,6 +85,7 @@ fn hq_noise_floor_changes_output() {
             sigma_override: Some(40.0 / 255.0),
             temporal_confidence: true,
             thsad_scale: 1.0,
+            sigma_scale: 1.0,
         }),
         ..base_params()
     };
@@ -197,6 +199,7 @@ fn hq_auto_sigma_denoises() {
             sigma_override: None,
             temporal_confidence: true,
             thsad_scale: 1.0,
+            sigma_scale: 1.0,
         }),
         ..base_params()
     };
@@ -237,6 +240,7 @@ fn hq_auto_sigma_temporal_smoke() {
             sigma_override: None,
             temporal_confidence: true,
             thsad_scale: 1.0,
+            sigma_scale: 1.0,
         }),
         ..base_params()
     };
@@ -321,6 +325,7 @@ fn hq_reset_clears_noise_state() {
             sigma_override: None,
             temporal_confidence: true,
             thsad_scale: 1.0,
+            sigma_scale: 1.0,
         }),
         ..base_params()
     };
@@ -366,6 +371,7 @@ fn hq_pilot_temporal_end_to_end() {
             sigma_override: None,
             temporal_confidence: true,
             thsad_scale: 1.0,
+            sigma_scale: 1.0,
         }),
         ..base_params()
     };
@@ -425,6 +431,7 @@ fn hq_pilot_differs_from_unguided() {
             sigma_override: None,
             temporal_confidence: true,
             thsad_scale: 1.0,
+            sigma_scale: 1.0,
         }),
         ..base_params()
     };
@@ -480,6 +487,7 @@ fn temporal_conf_params(temporal_confidence: bool) -> NlmParams {
             sigma_override: Some(2.0 / 255.0),
             temporal_confidence,
             thsad_scale: 1.0,
+            sigma_scale: 1.0,
         }),
     }
 }
@@ -565,6 +573,7 @@ fn hq_temporal_confidence_disabled_ignores_thsad_scale() {
                 sigma_override: Some(6.0 / 255.0),
                 temporal_confidence: false,
                 thsad_scale,
+                sigma_scale: 1.0,
             }),
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
@@ -637,4 +646,53 @@ fn hq_temporal_mc_confidence_smoke() {
         .unwrap();
 
     assert_eq!(emitted, frames.len(), "expected one output per pushed frame");
+}
+
+/// `sigma_scale` multiplies each channel's raw sigma before it folds
+/// into the running EMA, so doubling it must exactly double the folded
+/// estimator state (the EMA's first sample sets its state directly,
+/// with no nonlinearity to round off) and quadruple `noise_offset`
+/// (quadratic in sigma). Checking both consumers from a single fold
+/// proves the multiply sits before the blend feeds either of them,
+/// rather than one of them picking it up incidentally.
+#[test]
+fn hq_sigma_scale_multiplies_the_folded_estimate() {
+    let client = make_client();
+    let w = 32;
+    let h = 32;
+    let frame = make_noisy_gaussian_frame(w, h, 1, 0.5, &[8.0 / 255.0]);
+
+    let run = |sigma_scale: f32| {
+        let params = NlmParams {
+            hq: Some(HqParams {
+                auto_strength: true,
+                noise_floor: true,
+                sigma_override: None,
+                temporal_confidence: true,
+                thsad_scale: 1.0,
+                sigma_scale,
+            }),
+            ..base_params()
+        };
+        let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
+        d.push_frame(&frame);
+        d.denoise().unwrap();
+        let folded = d
+            .noise_estimator
+            .current()
+            .expect("estimator should hold a value after one push")[0];
+        (folded, d.noise_offset)
+    };
+
+    let (folded_1x, offset_1x) = run(1.0);
+    let (folded_2x, offset_2x) = run(2.0);
+
+    assert!(
+        (folded_2x - folded_1x * 2.0).abs() < folded_1x * 1e-4,
+        "expected the folded estimate to scale exactly 2x: 1x={folded_1x}, 2x={folded_2x}"
+    );
+    assert!(
+        (offset_2x - offset_1x * 4.0).abs() < offset_1x * 1e-4,
+        "expected noise_offset to scale 4x (quadratic in sigma): 1x={offset_1x}, 2x={offset_2x}"
+    );
 }

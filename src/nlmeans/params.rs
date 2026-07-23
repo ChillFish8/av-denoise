@@ -169,6 +169,12 @@ pub struct HqParams {
     /// much excess SAD a block tolerates before its confidence starts
     /// dropping. Higher values tolerate larger mismatches. Default: 1.0.
     pub thsad_scale: f32,
+    /// Multiplier applied to each channel's automatically measured
+    /// sigma before it folds into the running estimate. `1.0` keeps
+    /// the measurement as-is. Has no effect when `sigma_override` is
+    /// set, since the estimation path never runs in that case.
+    /// Default: 1.0. The CLI takes this as `--hq-sigma-scale`.
+    pub sigma_scale: f32,
 }
 
 impl Default for HqParams {
@@ -179,6 +185,7 @@ impl Default for HqParams {
             sigma_override: None,
             temporal_confidence: true,
             thsad_scale: 1.0,
+            sigma_scale: 1.0,
         }
     }
 }
@@ -369,6 +376,15 @@ impl NlmParams {
             );
         }
 
+        if let Some(hq) = self.hq
+            && !(hq.sigma_scale.is_finite() && (0.1..=10.0).contains(&hq.sigma_scale))
+        {
+            anyhow::bail!(
+                "--hq-sigma-scale must be finite and in [0.1, 10.0] (got {})",
+                hq.sigma_scale,
+            );
+        }
+
         if let PrefilterMode::NlmSpatial { strength_scale } = self.prefilter {
             if !strength_scale.is_finite() || strength_scale <= 0.0 {
                 anyhow::bail!(
@@ -444,6 +460,7 @@ mod tests {
                 sigma_override: Some(4.0 / 255.0),
                 temporal_confidence: true,
                 thsad_scale: 1.0,
+                sigma_scale: 1.0,
             }),
             ..NlmParams::default()
         };
@@ -550,6 +567,72 @@ mod tests {
     }
 
     #[test]
+    fn hq_params_default_sigma_scale_is_one() {
+        assert_eq!(HqParams::default().sigma_scale, 1.0);
+    }
+
+    #[test]
+    fn validate_rejects_sigma_scale_below_the_minimum() {
+        let params = NlmParams {
+            hq: Some(HqParams {
+                sigma_scale: 0.05,
+                ..HqParams::default()
+            }),
+            ..NlmParams::default()
+        };
+        let err = params.validate().expect_err("0.05 is below the 0.1 minimum");
+        assert!(
+            err.to_string().contains("--hq-sigma-scale"),
+            "error should name the flag, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_sigma_scale_above_the_maximum() {
+        let params = NlmParams {
+            hq: Some(HqParams {
+                sigma_scale: 10.5,
+                ..HqParams::default()
+            }),
+            ..NlmParams::default()
+        };
+        assert!(params.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_nan_sigma_scale() {
+        let params = NlmParams {
+            hq: Some(HqParams {
+                sigma_scale: f32::NAN,
+                ..HqParams::default()
+            }),
+            ..NlmParams::default()
+        };
+        assert!(params.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_sigma_scale_at_the_bounds() {
+        let low = NlmParams {
+            hq: Some(HqParams {
+                sigma_scale: 0.1,
+                ..HqParams::default()
+            }),
+            ..NlmParams::default()
+        };
+        assert!(low.validate().is_ok());
+
+        let high = NlmParams {
+            hq: Some(HqParams {
+                sigma_scale: 10.0,
+                ..HqParams::default()
+            }),
+            ..NlmParams::default()
+        };
+        assert!(high.validate().is_ok());
+    }
+
+    #[test]
     fn noise_offset_with_handles_distinct_per_channel_sigmas() {
         let sigma_u = 4.0 / 255.0;
         let sigma_v = 10.0 / 255.0;
@@ -562,6 +645,7 @@ mod tests {
                 sigma_override: None,
                 temporal_confidence: true,
                 thsad_scale: 1.0,
+                sigma_scale: 1.0,
             }),
             ..NlmParams::default()
         };

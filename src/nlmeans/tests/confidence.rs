@@ -366,6 +366,7 @@ fn confidence_buf_filled_without_motion_compensation() {
             sigma_override: Some(4.0 / 255.0),
             temporal_confidence: true,
             thsad_scale: 1.0,
+            sigma_scale: 1.0,
         }),
     };
 
@@ -428,6 +429,7 @@ fn confidence_buf_filled_with_motion_compensation() {
             sigma_override: Some(4.0 / 255.0),
             temporal_confidence: true,
             thsad_scale: 1.0,
+            sigma_scale: 1.0,
         }),
     };
 

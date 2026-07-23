@@ -40,7 +40,8 @@ leverage modern hardware instead of relying on the now rather outdated OpenCL.
    * Measures the noise level automatically per scene (EMA-smoothed across frames) and scales its
      strength to it, a multiplier whose default is calibrated per temporal radius and per plane
      (luma or chroma). Override with `--hq-sigma` if the automatic estimate misjudges a source, or
-     fall back to an absolute strength with `--hq-no-auto-strength`.
+     fall back to an absolute strength with `--hq-no-auto-strength`. Nudge the measurement itself up
+     or down with `--hq-sigma-scale` instead of pinning it (`1.0` keeps the measurement as-is).
    * Combines two noise estimators. A spatial Immerkær estimate covers every frame, and at temporal
      radius 1 or higher a temporal-residual estimate measures static blocks between neighbouring
      frames. The temporal estimate sees spatially-correlated grain (film grain, encoder grain) at
@@ -422,6 +423,15 @@ Options:
           Multiplier on the per-block mismatch threshold temporal confidence weighting tolerates before a neighbour's contribution starts dropping.
           
           Higher values tolerate larger mismatches. Library default is 1.0. Ignored when `--hq-no-temporal-confidence` is set.
+
+      --hq-sigma-scale <HQ_SIGMA_SCALE>
+          Nudges the automatically measured noise level up or down.
+          
+          `1.0` (the library default) keeps the measurement as-is. Raise it a little when the cleaned result still looks noisy. Lower it when detail is getting scrubbed.
+          
+          This differs from `--strength` because the noise level also sets the patch-distance noise floor and the motion-confidence floor, not just the weighting.
+          
+          Has no effect when `--hq-sigma` pins the noise level.
 
       --motion-compensation
           Turn on motion compensation for temporal denoising.

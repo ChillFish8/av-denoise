@@ -21,6 +21,7 @@ fn attenuation_params(sigma: f32) -> NlmParams {
             sigma_override: Some(sigma),
             temporal_confidence: false,
             thsad_scale: 1.0,
+            sigma_scale: 1.0,
         }),
     }
 }

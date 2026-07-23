@@ -347,6 +347,20 @@ struct Args {
     #[arg(long, global = true)]
     hq_thsad_scale: Option<f32>,
 
+    /// Nudges the automatically measured noise level up or down.
+    ///
+    /// `1.0` (the library default) keeps the measurement as-is. Raise
+    /// it a little when the cleaned result still looks noisy. Lower
+    /// it when detail is getting scrubbed.
+    ///
+    /// This differs from `--strength` because the noise level also
+    /// sets the patch-distance noise floor and the motion-confidence
+    /// floor, not just the weighting.
+    ///
+    /// Has no effect when `--hq-sigma` pins the noise level.
+    #[arg(long, global = true)]
+    hq_sigma_scale: Option<f32>,
+
     /// Turn on motion compensation for temporal denoising.
     ///
     /// When the camera or content moves between frames, the
@@ -437,6 +451,52 @@ impl Args {
                 .temporal_radius
                 .unwrap_or_else(|| self.preset.temporal_radius()),
             search_radius: self.search_radius.unwrap_or_else(|| self.preset.search_radius()),
+        }
+    }
+
+    /// Builds the library's [`av_denoise::Algorithm`] from the resolved
+    /// preset and the `--hq-*` flags, warning about flags that are set
+    /// but have no effect given the rest of the resolved configuration.
+    fn resolve_algorithm(&self, resolved: ResolvedPreset) -> Result<av_denoise::Algorithm, anyhow::Error> {
+        let sigma_scale_is_set = self.hq_sigma_scale.is_some_and(|v| v != 1.0);
+
+        match resolved.algorithm {
+            Algorithm::Nlmeans => {
+                if self.hq_sigma.is_some()
+                    || self.hq_no_auto_strength
+                    || self.hq_no_noise_floor
+                    || self.hq_no_temporal_confidence
+                    || self.hq_thsad_scale.is_some()
+                    || sigma_scale_is_set
+                {
+                    tracing::warn!("--hq-* options are ignored unless --algorithm nlmeans-hq is selected");
+                }
+                Ok(av_denoise::Algorithm::Nlmeans)
+            },
+            Algorithm::NlmeansHq => {
+                // Check the raw 8-bit value here so an out-of-range
+                // `--hq-sigma` reports the number the user typed. The
+                // library re-validates the same bound after the /255
+                // normalisation, but its message speaks in [0, 1] units.
+                if let Some(sigma) = self.hq_sigma
+                    && (!sigma.is_finite() || sigma <= 0.0 || sigma > 255.0)
+                {
+                    anyhow::bail!("--hq-sigma must be a finite value in (0, 255] 8-bit units (got {sigma})");
+                }
+
+                if self.hq_sigma.is_some() && sigma_scale_is_set {
+                    tracing::warn!("--hq-sigma-scale has no effect when --hq-sigma pins the noise level");
+                }
+
+                Ok(av_denoise::Algorithm::NlmeansHq(av_denoise::HqParams {
+                    auto_strength: !self.hq_no_auto_strength,
+                    noise_floor: !self.hq_no_noise_floor,
+                    sigma_override: self.hq_sigma.map(|s| s / 255.0),
+                    temporal_confidence: !self.hq_no_temporal_confidence,
+                    thsad_scale: self.hq_thsad_scale.unwrap_or(1.0),
+                    sigma_scale: self.hq_sigma_scale.unwrap_or(1.0),
+                }))
+            },
         }
     }
 }
@@ -660,6 +720,86 @@ mod preset_tests {
     }
 }
 
+#[cfg(test)]
+mod hq_sigma_scale_tests {
+    use super::*;
+
+    /// Parses `Args` from CLI-style tokens, always terminated with the
+    /// `stdin` subcommand. Mirrors `preset_tests::parse`.
+    fn parse(extra: &[&str]) -> Args {
+        let mut argv = vec!["av-denoise"];
+        argv.extend_from_slice(extra);
+        argv.push("stdin");
+        Args::parse_from(argv)
+    }
+
+    #[test]
+    fn flag_parses_to_the_typed_value() {
+        let args = parse(&["--hq-sigma-scale", "2.0"]);
+        assert_eq!(args.hq_sigma_scale, Some(2.0));
+    }
+
+    #[test]
+    fn unset_flag_resolves_to_the_library_default_of_one() {
+        let args = parse(&["--algorithm", "nlmeans-hq"]);
+        let resolved = args.resolve_preset();
+        let algorithm = args
+            .resolve_algorithm(resolved)
+            .expect("resolution should succeed");
+
+        match algorithm {
+            av_denoise::Algorithm::NlmeansHq(hq) => assert_eq!(hq.sigma_scale, 1.0),
+            other => panic!("expected NlmeansHq, got {other:?}"),
+        }
+    }
+
+    /// Setting `--hq-sigma-scale` without `--algorithm nlmeans-hq` (nor
+    /// a preset that resolves to it) should warn, not fail; the CLI
+    /// still resolves to the fast path.
+    #[test]
+    fn set_without_hq_algorithm_still_resolves_to_nlmeans() {
+        let args = parse(&["--algorithm", "nlmeans", "--hq-sigma-scale", "2.0"]);
+        let resolved = args.resolve_preset();
+        let algorithm = args
+            .resolve_algorithm(resolved)
+            .expect("resolution should succeed");
+
+        assert!(matches!(algorithm, av_denoise::Algorithm::Nlmeans));
+    }
+
+    /// Combined with `--hq-sigma`, both values should still resolve
+    /// through into `HqParams` (the override warns rather than errors;
+    /// `sigma_scale` staying inert at runtime is the library's job, not
+    /// the CLI's).
+    #[test]
+    fn combined_with_hq_sigma_still_resolves_both_values() {
+        let args = parse(&[
+            "--algorithm",
+            "nlmeans-hq",
+            "--hq-sigma",
+            "6",
+            "--hq-sigma-scale",
+            "2.0",
+        ]);
+        let resolved = args.resolve_preset();
+        let algorithm = args
+            .resolve_algorithm(resolved)
+            .expect("resolution should succeed");
+
+        match algorithm {
+            av_denoise::Algorithm::NlmeansHq(hq) => {
+                assert!(
+                    matches!(hq.sigma_override, Some(s) if (s - 6.0 / 255.0).abs() < f32::EPSILON),
+                    "expected sigma_override Some(6/255), got {:?}",
+                    hq.sigma_override
+                );
+                assert_eq!(hq.sigma_scale, 2.0);
+            },
+            other => panic!("expected NlmeansHq, got {other:?}"),
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     // cubecl spawns its per-device worker thread with no explicit stack
     // size (uses Rust's default 2 MiB). GPU kernel codegen runs on that
@@ -728,37 +868,7 @@ fn main() -> anyhow::Result<()> {
         MotionCompensationMode::None
     };
 
-    let algorithm = match resolved.algorithm {
-        Algorithm::Nlmeans => {
-            if args.hq_sigma.is_some()
-                || args.hq_no_auto_strength
-                || args.hq_no_noise_floor
-                || args.hq_no_temporal_confidence
-                || args.hq_thsad_scale.is_some()
-            {
-                tracing::warn!("--hq-* options are ignored unless --algorithm nlmeans-hq is selected");
-            }
-            av_denoise::Algorithm::Nlmeans
-        },
-        Algorithm::NlmeansHq => {
-            // Check the raw 8-bit value here so an out-of-range
-            // `--hq-sigma` reports the number the user typed. The
-            // library re-validates the same bound after the /255
-            // normalisation, but its message speaks in [0, 1] units.
-            if let Some(sigma) = args.hq_sigma
-                && (!sigma.is_finite() || sigma <= 0.0 || sigma > 255.0)
-            {
-                anyhow::bail!("--hq-sigma must be a finite value in (0, 255] 8-bit units (got {sigma})");
-            }
-            av_denoise::Algorithm::NlmeansHq(av_denoise::HqParams {
-                auto_strength: !args.hq_no_auto_strength,
-                noise_floor: !args.hq_no_noise_floor,
-                sigma_override: args.hq_sigma.map(|s| s / 255.0),
-                temporal_confidence: !args.hq_no_temporal_confidence,
-                thsad_scale: args.hq_thsad_scale.unwrap_or(1.0),
-            })
-        },
-    };
+    let algorithm = args.resolve_algorithm(resolved)?;
 
     // search_radius always has a resolved value (explicit flag or the
     // active preset), so it's always carried into the tuning override.
