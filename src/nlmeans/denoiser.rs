@@ -6,11 +6,13 @@ use cubecl::server::Handle;
 use super::kernels::gpu_copy;
 use super::motion::{self, MotionCtx, MotionEstimation, build_pyramid_for_slot, run_pyramid_build};
 use super::noise::{
+    EMA_ALPHA,
     NoiseCtx,
     NoiseEstimator,
     TemporalNoiseSample,
     TemporalStatsCtx,
     aggregate_temporal_noise_stats,
+    build_spatial_offset_lut,
     partials_len,
     read_temporal_stats_slot,
     run_noise_estimate,
@@ -93,6 +95,21 @@ pub struct NlmDenoiser<R: Runtime> {
     pub(super) input_noise_offset: f32,
     pub use_separable: bool,
     pub(super) use_reference: bool,
+
+    /// Smoothed grain autocorrelation, same EMA cadence as the sigma
+    /// estimate. Seeded at 0 per stream and only ever updated at fold
+    /// time when a temporal sample exists, so the fast path and a
+    /// fixed `sigma_override` leave it inert at 0 (white-noise
+    /// attenuation, i.e. no attenuation) for the whole stream.
+    pub(super) rho_smoothed: f32,
+    /// Per-candidate spatial noise-floor offset for the k=0 windowed
+    /// and separable weighting kernels, `[(2*search_radius+1)^2]`
+    /// f32s, row-major `(dy+r)*(2r+1)+(dx+r)`. Rebuilt from
+    /// `noise_offset` and `rho_smoothed` every `denoise_submit` (see
+    /// `Self::rebuild_spatial_offset_lut`). At `rho_smoothed == 0` this
+    /// is numerically identical to the flat `noise_offset` scalar it
+    /// replaced.
+    pub(super) spatial_offset_lut: Handle,
 
     /// Stage-1 noise-estimate scratch, `[partials_len(width, height)]`
     /// f32s. `Some` only when the noise level is measured
@@ -235,6 +252,16 @@ impl<R: Runtime> NlmDenoiser<R> {
         let use_separable = params.patch_radius > SEPARABLE_THRESHOLD;
         let use_reference = params.prefilter.needs_reference_buf();
         let output_scratch_cap = pixels * params.channels.count() as usize;
+
+        // Seeded at rho = 0, so the initial LUT is numerically
+        // identical to the flat `noise_offset` scalar it replaces
+        // until the first temporal sample lands.
+        let rho_smoothed = 0.0f32;
+        let spatial_offset_lut = client.create_from_slice(f32::as_bytes(&build_spatial_offset_lut(
+            params.search_radius,
+            rho_smoothed,
+            noise_offset,
+        )));
 
         // Auto noise estimation only runs when HQ is on and the caller
         // hasn't pinned a fixed sigma. The fast path and the
@@ -393,6 +420,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             input_noise_offset,
             use_separable,
             use_reference,
+            rho_smoothed,
+            spatial_offset_lut,
             noise_partials,
             noise_results,
             temporal_stats_buf,
@@ -820,7 +849,11 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// residual estimator sees correlated grain the Immerkær mask
     /// underestimates, but scarce static content (motion, scene
     /// changes) makes its sample unreliable, so it can only push the
-    /// estimate up from Immerkær, never down.
+    /// estimate up from Immerkær, never down. The same sample's `rho`
+    /// also folds into `rho_smoothed`, the spatial-offset LUT's
+    /// attenuation input. `rho_smoothed` stays at its seeded 0 for the
+    /// fast path and a fixed `sigma_override`, since `temporal` is
+    /// always `None` there.
     fn fold_noise_estimate(&mut self, data: &[f32], slot: usize, temporal: Option<TemporalNoiseSample>) {
         let channels = self.params.channels.count() as usize;
         let base = slot * 4;
@@ -835,6 +868,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             for (r, e) in raw.iter_mut().zip(eff.iter()).take(channels) {
                 *r = r.max(*e);
             }
+            self.rho_smoothed = EMA_ALPHA * sample.rho + (1.0 - EMA_ALPHA) * self.rho_smoothed;
         }
 
         let updated = self.noise_estimator.update(&raw[..channels]);
@@ -982,6 +1016,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         if self.noise_results.is_some() {
             self.update_noise_estimate()?;
         }
+        self.rebuild_spatial_offset_lut();
 
         let slot = self.next_output_slot;
         self.next_output_slot = (slot + 1) % self.outputs.len();
@@ -1069,6 +1104,17 @@ impl<R: Runtime> NlmDenoiser<R> {
             self.width,
             self.height,
         ))
+    }
+
+    /// Rebuilds `spatial_offset_lut` from the current `noise_offset`
+    /// and `rho_smoothed`. Called once per `denoise_submit`, after
+    /// `noise_offset` has been refreshed for this submit (when auto
+    /// estimation is active) so the LUT and the scalar it's derived
+    /// from never disagree. The rebuild is cheap, at most
+    /// `(2*8+1)^2` floats.
+    fn rebuild_spatial_offset_lut(&mut self) {
+        let lut = build_spatial_offset_lut(self.params.search_radius, self.rho_smoothed, self.noise_offset);
+        self.spatial_offset_lut = self.client.create_from_slice(f32::as_bytes(&lut));
     }
 
     /// Synchronous convenience wrapper: submits + immediately waits.
@@ -1159,6 +1205,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.next_output_slot = 0;
         self.real_pushes = 0;
         self.noise_estimator.reset();
+        self.rho_smoothed = 0.0;
     }
 
     /// Physical slot of logical frame 0 (oldest frame in the window).

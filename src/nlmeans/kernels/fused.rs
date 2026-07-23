@@ -444,6 +444,12 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
 /// global only for the shifted neighbour pixel. `q = (0, 0)` is skipped
 /// at comptime; the self-pair contribution is folded back in by `nlm_finish`
 /// via the `wref · max_weight` term.
+///
+/// `spatial_offset_lut` holds one noise-floor offset per candidate,
+/// row-major `(dy+search_radius)*(2*search_radius+1)+(dx+search_radius)`.
+/// Nearby candidates share more of the grain's spatial correlation, so
+/// their offset is attenuated relative to distant ones (see
+/// `noise::build_spatial_offset_lut`).
 #[cube(launch_unchecked)]
 pub fn nlm_fused_single_window<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -452,7 +458,7 @@ pub fn nlm_fused_single_window<N: Size>(
     max_weight: &mut Array<f32>,
     frame_t: u32,
     h2_inv_norm: f32,
-    noise_offset: f32,
+    spatial_offset_lut: &Array<f32>,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
@@ -548,7 +554,9 @@ pub fn nlm_fused_single_window<N: Size>(
                             patch_sum += smem_dist[smem_idx];
                         }
                     }
-                    let weight = welsch_weight(patch_sum, h2_inv_norm, noise_offset);
+                    let lut_idx = (q_yi * window_side + q_xi) as usize;
+                    let offset = spatial_offset_lut[lut_idx];
+                    let weight = welsch_weight(patch_sum, h2_inv_norm, offset);
 
                     let neighbor_pixel = read_clamped_line(
                         input,
@@ -765,7 +773,8 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
 
 /// `_ref` variant of `nlm_fused_single_window`. Distance reads from
 /// `reference[frame_t]` (cached center + per-q neighbours, all at q_k=0);
-/// pixel accumulation reads from `input[frame_t]`.
+/// pixel accumulation reads from `input[frame_t]`. `spatial_offset_lut`
+/// has the same layout as `nlm_fused_single_window`'s.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_single_window_ref<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -775,7 +784,7 @@ pub fn nlm_fused_single_window_ref<N: Size>(
     max_weight: &mut Array<f32>,
     frame_t: u32,
     h2_inv_norm: f32,
-    noise_offset: f32,
+    spatial_offset_lut: &Array<f32>,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
@@ -869,7 +878,9 @@ pub fn nlm_fused_single_window_ref<N: Size>(
                             patch_sum += smem_dist[smem_idx];
                         }
                     }
-                    let weight = welsch_weight(patch_sum, h2_inv_norm, noise_offset);
+                    let lut_idx = (q_yi * window_side + q_xi) as usize;
+                    let offset = spatial_offset_lut[lut_idx];
+                    let weight = welsch_weight(patch_sum, h2_inv_norm, offset);
 
                     let neighbor_pixel = read_clamped_line(
                         input,

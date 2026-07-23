@@ -29,6 +29,7 @@ use super::motion::{
     run_confidence_for_neighbour,
     run_seeded_refine,
 };
+use super::noise::{build_spatial_offset_lut, spatial_offset_factor, spatial_offset_lut_len};
 use super::{BLOCK_1D, BLOCK_X, BLOCK_X_THIN, BLOCK_Y, BLOCK_Y_THIN, MAX_GRID_1D};
 
 /// Derived sizes plus dispatch shape for the per-frame work, bundled so
@@ -158,6 +159,14 @@ impl<R: Runtime> NlmDenoiser<R> {
 
     fn tmp_hsum_bwd_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
         unsafe { ArrayArg::from_raw_parts(self.tmp_hsum_bwd.clone(), ctx.pixels) }
+    }
+
+    /// View of `spatial_offset_lut`, sized for this denoiser's
+    /// `search_radius`. Only the k=0 windowed kernels read it. Every
+    /// other launch keeps the flat `noise_offset` scalar.
+    fn spatial_offset_lut_arg(&self) -> ArrayArg<R> {
+        let len = spatial_offset_lut_len(self.params.search_radius);
+        unsafe { ArrayArg::from_raw_parts(self.spatial_offset_lut.clone(), len) }
     }
 
     /// Build the confidence-kernel arguments for one temporal pair at
@@ -311,7 +320,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                     self.max_weight_arg(ctx),
                     frame_t,
                     self.h2_inv_norm,
-                    self.noise_offset,
+                    self.spatial_offset_lut_arg(),
                     self.width,
                     self.height,
                     channels,
@@ -334,7 +343,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                     self.max_weight_arg(ctx),
                     frame_t,
                     self.h2_inv_norm,
-                    self.noise_offset,
+                    self.spatial_offset_lut_arg(),
                     self.width,
                     self.height,
                     channels,
@@ -527,6 +536,12 @@ impl<R: Runtime> NlmDenoiser<R> {
             );
         }
 
+        // Same correlation-attenuated offset the k=0 windowed kernel's
+        // LUT holds at this (q_x, q_y), computed directly instead of
+        // reading the LUT buffer back, this dispatch already has the
+        // exact candidate offset the windowed kernel derives at
+        // comptime from its unrolled loop.
+        let offset = self.noise_offset * spatial_offset_factor(q_x, q_y, self.rho_smoothed);
         unsafe {
             nlm_vertical_weight::launch_unchecked::<R>(
                 &self.client,
@@ -535,7 +550,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                 self.tmp_hsum_arg(ctx),
                 self.weight_buf_arg(ctx),
                 self.h2_inv_norm,
-                self.noise_offset,
+                offset,
                 self.width,
                 self.height,
                 self.params.patch_radius,
@@ -905,6 +920,16 @@ impl<R: Runtime> NlmDenoiser<R> {
         let channels = self.params.channels.count();
         let pilot_h2 = self.h2_inv_norm / (strength_scale * strength_scale);
 
+        // Flat LUT at rho = 0: the pilot compares noisy-input patches
+        // directly and keeps the full white-noise floor unconditionally
+        // (out of scope for the correlation attenuation, see
+        // `input_noise_offset`'s doc comment on the denoiser). Built
+        // fresh per call rather than cached, `input_noise_offset` can
+        // change between pushes and this is a tiny, one-off upload.
+        let pilot_lut = build_spatial_offset_lut(self.params.search_radius, 0.0, self.input_noise_offset);
+        let pilot_lut_handle = self.client.create_from_slice(f32::as_bytes(&pilot_lut));
+        let pilot_lut_arg = unsafe { ArrayArg::<R>::from_raw_parts(pilot_lut_handle, pilot_lut.len()) };
+
         // Always read the noisy input here, never `reference_arg`: for
         // `NlmSpatial`, `reference_buf` is the pilot's own output, not
         // an input to it, even though `use_reference` is true so the
@@ -921,7 +946,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                 self.max_weight_arg(&ctx),
                 slot,
                 pilot_h2,
-                self.input_noise_offset,
+                pilot_lut_arg,
                 self.width,
                 self.height,
                 channels,

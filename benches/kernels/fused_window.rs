@@ -24,6 +24,17 @@ use super::{
     stored_channels,
 };
 
+/// Zero-filled spatial-offset LUT for `SEARCH_RADIUS`. Zero everywhere
+/// reproduces the old flat `noise_offset = 0.0` the single-window
+/// benches measured before the LUT replaced that scalar, so the
+/// timing stays comparable.
+fn zero_spatial_offset_lut<R: Runtime>(client: &ComputeClient<R>) -> (Handle, usize) {
+    let side = (2 * SEARCH_RADIUS + 1) as usize;
+    let lut = vec![0.0f32; side * side];
+    let handle = client.create_from_slice(f32::as_bytes(&lut));
+    (handle, lut.len())
+}
+
 #[derive(Clone)]
 pub struct WindowInput {
     input: Handle,
@@ -31,6 +42,8 @@ pub struct WindowInput {
     weight_sum: Handle,
     max_weight: Handle,
     confidence_dummy: Handle,
+    spatial_offset_lut: Handle,
+    spatial_offset_lut_len: usize,
     frame_len: usize,
 }
 
@@ -42,6 +55,8 @@ pub struct WindowRefInput {
     weight_sum: Handle,
     max_weight: Handle,
     confidence_dummy: Handle,
+    spatial_offset_lut: Handle,
+    spatial_offset_lut_len: usize,
     frame_len: usize,
 }
 
@@ -54,12 +69,15 @@ fn prepare_window<R: Runtime>(client: &ComputeClient<R>, ch: u32) -> WindowInput
     let weight_sum = client.empty(pixels * size_of::<f32>());
     let max_weight = client.empty(pixels * size_of::<f32>());
     let confidence_dummy = client.empty(size_of::<f32>());
+    let (spatial_offset_lut, spatial_offset_lut_len) = zero_spatial_offset_lut(client);
     WindowInput {
         input,
         accum,
         weight_sum,
         max_weight,
         confidence_dummy,
+        spatial_offset_lut,
+        spatial_offset_lut_len,
         frame_len: frame.len(),
     }
 }
@@ -74,6 +92,7 @@ fn prepare_window_ref<R: Runtime>(client: &ComputeClient<R>, ch: u32) -> WindowR
     let weight_sum = client.empty(pixels * size_of::<f32>());
     let max_weight = client.empty(pixels * size_of::<f32>());
     let confidence_dummy = client.empty(size_of::<f32>());
+    let (spatial_offset_lut, spatial_offset_lut_len) = zero_spatial_offset_lut(client);
     WindowRefInput {
         input,
         reference,
@@ -81,6 +100,8 @@ fn prepare_window_ref<R: Runtime>(client: &ComputeClient<R>, ch: u32) -> WindowR
         weight_sum,
         max_weight,
         confidence_dummy,
+        spatial_offset_lut,
+        spatial_offset_lut_len,
         frame_len: frame.len(),
     }
 }
@@ -175,7 +196,7 @@ impl<R: Runtime> Benchmark for FusedSingleWindowBench<R> {
                 ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
                 0u32,
                 h2_inv_norm(),
-                0.0f32,
+                ArrayArg::from_raw_parts(args.spatial_offset_lut.clone(), args.spatial_offset_lut_len),
                 W,
                 H,
                 self.ch,
@@ -291,7 +312,7 @@ impl<R: Runtime> Benchmark for FusedSingleWindowRefBench<R> {
                 ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
                 0u32,
                 h2_inv_norm(),
-                0.0f32,
+                ArrayArg::from_raw_parts(args.spatial_offset_lut.clone(), args.spatial_offset_lut_len),
                 W,
                 H,
                 self.ch,

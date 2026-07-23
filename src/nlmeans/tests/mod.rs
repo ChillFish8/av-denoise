@@ -8,6 +8,7 @@ mod pending_outlives;
 mod prefilter;
 mod separable;
 mod spatial;
+mod spatial_offset;
 mod temporal;
 mod temporal_noise;
 mod util;

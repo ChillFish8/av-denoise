@@ -411,8 +411,54 @@ pub(super) fn temporal_sigma_eff(sample: &TemporalNoiseSample, channels: usize) 
     eff
 }
 
-/// EMA weight for the newest frame estimate.
-const EMA_ALPHA: f32 = 0.2;
+/// Attenuation factor for the spatial noise-floor offset at grain
+/// autocorrelation `rho` and integer candidate offset `(dx, dy)`.
+/// Spatial candidates share correlated noise with their centre patch,
+/// so only a `(1 - rho^d)` fraction of the white-noise floor is
+/// independent noise, where `d = sqrt(dx^2 + dy^2)`. The self offset
+/// (`dx == dy == 0`) always returns 0, its true distance is zero, so
+/// none of the floor is independent noise. `rho <= 0` (no measured
+/// correlation, or auto estimation inert) returns 1 for every other
+/// offset, reproducing the flat white-noise floor exactly.
+pub(super) fn spatial_offset_factor(dx: i32, dy: i32, rho: f32) -> f32 {
+    if dx == 0 && dy == 0 {
+        return 0.0;
+    }
+    if rho <= 0.0 {
+        return 1.0;
+    }
+    let d = ((dx * dx + dy * dy) as f32).sqrt();
+    1.0 - (d * rho.ln()).exp()
+}
+
+/// Number of `f32`s in a `search_radius`-sized spatial-offset LUT.
+pub(super) fn spatial_offset_lut_len(search_radius: u32) -> usize {
+    let side = (2 * search_radius + 1) as usize;
+    side * side
+}
+
+/// Builds the per-candidate spatial noise-floor offset LUT for a
+/// `search_radius`-sized search window, row-major
+/// `(dy+search_radius)*(2*search_radius+1)+(dx+search_radius)`.
+/// `lut[q] = noise_offset * spatial_offset_factor(dx, dy, rho)`. Cheap
+/// enough to rebuild every `denoise_submit` (at most `(2*8+1)^2 = 289`
+/// entries at the largest supported search radius).
+pub(super) fn build_spatial_offset_lut(search_radius: u32, rho: f32, noise_offset: f32) -> Vec<f32> {
+    let r = search_radius as i32;
+    let side = (2 * search_radius + 1) as usize;
+    let mut lut = vec![0.0f32; side * side];
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let idx = ((dy + r) as usize) * side + (dx + r) as usize;
+            lut[idx] = noise_offset * spatial_offset_factor(dx, dy, rho);
+        }
+    }
+    lut
+}
+
+/// EMA weight for the newest frame estimate. Shared by the sigma
+/// estimator below and the denoiser's `rho_smoothed` EMA.
+pub(super) const EMA_ALPHA: f32 = 0.2;
 /// Lower bound on the smoothed sigma in `[0, 1]` units (0.1 in 8-bit
 /// terms). Near-zero estimates would blow up the derived strength.
 const SIGMA_FLOOR: f32 = 0.1 / 255.0;
@@ -736,6 +782,104 @@ mod tests {
             assert!(f >= last, "factor must not decrease, {f} < {last}");
             last = f;
         }
+    }
+
+    #[test]
+    fn spatial_offset_factor_rho_zero_is_white_identity() {
+        // rho = 0 (and negative, which the aggregator never produces
+        // but the formula must still handle inertly): every non-self
+        // candidate keeps the full white-noise factor of 1.
+        for rho in [0.0f32, -0.2] {
+            for dy in -3..=3 {
+                for dx in -3..=3 {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    assert_eq!(
+                        spatial_offset_factor(dx, dy, rho),
+                        1.0,
+                        "dx={dx} dy={dy} rho={rho}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn spatial_offset_factor_self_is_always_zero() {
+        for rho in [-0.2f32, 0.0, 0.3, 0.65, 1.0] {
+            assert_eq!(spatial_offset_factor(0, 0, rho), 0.0, "rho={rho}");
+        }
+    }
+
+    #[test]
+    fn spatial_offset_factor_monotone_nondecreasing_in_distance() {
+        let rho = 0.65f32;
+        let mut last = spatial_offset_factor(0, 0, rho);
+        for d in 1..=8 {
+            let f = spatial_offset_factor(d, 0, rho);
+            assert!(f >= last, "factor decreased at d={d}: {f} < {last}");
+            last = f;
+        }
+    }
+
+    #[test]
+    fn spatial_offset_factor_rho_0_65_shape() {
+        let rho = 0.65f32;
+        // d = 1: 1 - rho^1.
+        assert!((spatial_offset_factor(1, 0, rho) - (1.0 - rho)).abs() < 1e-6);
+        // d = 2 (axis-aligned): 1 - rho^2.
+        assert!((spatial_offset_factor(2, 0, rho) - (1.0 - rho * rho)).abs() < 1e-6);
+        // Diagonal d = sqrt(2): matches the sqrt(dx^2+dy^2) formula directly.
+        let d = 2.0f32.sqrt();
+        let expected = 1.0 - (d * rho.ln()).exp();
+        assert!((spatial_offset_factor(1, 1, rho) - expected).abs() < 1e-6);
+        // Every factor stays within [0, 1].
+        for dy in -4..=4 {
+            for dx in -4..=4 {
+                let f = spatial_offset_factor(dx, dy, rho);
+                assert!((0.0..=1.0).contains(&f), "dx={dx} dy={dy} factor={f}");
+            }
+        }
+    }
+
+    #[test]
+    fn build_spatial_offset_lut_rho_zero_matches_flat_noise_offset() {
+        let search_radius = 3;
+        let noise_offset = 1.5f32;
+        let lut = build_spatial_offset_lut(search_radius, 0.0, noise_offset);
+        assert_eq!(lut.len(), spatial_offset_lut_len(search_radius));
+
+        let side = (2 * search_radius + 1) as usize;
+        let r = search_radius as i32;
+        for dy in -r..=r {
+            for dx in -r..=r {
+                let idx = ((dy + r) as usize) * side + (dx + r) as usize;
+                if dx == 0 && dy == 0 {
+                    assert_eq!(lut[idx], 0.0, "self offset must be zero");
+                } else {
+                    assert_eq!(lut[idx], noise_offset, "dx={dx} dy={dy}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn build_spatial_offset_lut_indexes_row_major_by_dy_then_dx() {
+        let search_radius = 2;
+        let lut = build_spatial_offset_lut(search_radius, 0.65, 10.0);
+        let side = (2 * search_radius + 1) as usize;
+
+        // (dx=1, dy=0) lands at row 2 (dy+2), column 3 (dx+2): index 2*5+3=13.
+        let expected = 10.0 * spatial_offset_factor(1, 0, 0.65);
+        assert_eq!(lut[2 * side + 3], expected);
+
+        // (dx=0, dy=-2) lands at row 0, column 2: index 0*5+2=2.
+        let expected = 10.0 * spatial_offset_factor(0, -2, 0.65);
+        assert_eq!(lut[2], expected);
+
+        // Centre (dx=0, dy=0) is always zero.
+        assert_eq!(lut[2 * side + 2], 0.0);
     }
 
     #[test]

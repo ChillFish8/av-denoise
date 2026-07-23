@@ -41,6 +41,12 @@ leverage modern hardware instead of relying on the now rather outdated OpenCL.
      strength to it, a multiplier whose default is calibrated per temporal radius and per plane
      (luma or chroma). Override with `--hq-sigma` if the automatic estimate misjudges a source, or
      fall back to an absolute strength with `--hq-no-auto-strength`.
+   * Combines two noise estimators. A spatial Immerkær estimate covers every frame, and at temporal
+     radius 1 or higher a temporal-residual estimate measures static blocks between neighbouring
+     frames. The temporal estimate sees spatially-correlated grain (film grain, encoder grain) at
+     its true level where the spatial mask under-reads it, and it also measures the grain's
+     correlation to raise the effective level the way heavy grain needs. The stronger of the two
+     estimates wins.
    * Subtracts the expected noise floor from patch distances so matching isn't skewed by grain
      (`--hq-no-noise-floor` to keep it in).
    * Gates each temporal neighbour's contribution by how well it block-matches the centre frame, so
