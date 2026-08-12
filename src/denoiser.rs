@@ -96,16 +96,28 @@ impl DenoiserOptions {
 
         // An explicit `strength` (whether from `NlmTuning` directly or a
         // per-plane override already folded into it by the caller) always
-        // wins. Otherwise the default depends on the algorithm. HQ's
-        // `strength` is a multiplier on the measured noise level, so it
-        // needs its own calibrated default rather than the fast path's
-        // absolute FFmpeg-style default. The HQ default also depends on
-        // the temporal radius and which plane `self.channel_mode` names,
+        // wins. Otherwise the default depends on the algorithm and, for
+        // HQ, on `auto_strength`. With auto-strength on, HQ's `strength`
+        // is a multiplier on the measured noise level, so it needs its
+        // own calibrated default rather than the fast path's absolute
+        // FFmpeg-style default. That default also depends on the
+        // temporal radius and which plane `self.channel_mode` names,
         // since each per-plane `Denoiser` carries its own channel mode.
+        // With auto-strength off, HQ's `strength` is used verbatim as an
+        // absolute value, same as the fast path, so it falls back to the
+        // same absolute default.
         let explicit_strength = self.nlm.and_then(|t| t.strength);
         let strength = explicit_strength.unwrap_or(match self.algorithm {
-            Algorithm::NlmeansHq(_) => hq_default_strength(self.channel_mode, temporal_radius),
-            Algorithm::Nlmeans => NlmParams::default().strength,
+            // The calibrated table is a multiplier on measured sigma, so
+            // it only applies when `effective_strength_with` will treat
+            // `strength` that way. With auto-strength off, `strength` is
+            // used verbatim as an FFmpeg-style absolute value, so the
+            // fallback has to be the same absolute default the fast path
+            // uses.
+            Algorithm::NlmeansHq(hq) if hq.auto_strength => {
+                hq_default_strength(self.channel_mode, temporal_radius)
+            },
+            Algorithm::NlmeansHq(_) | Algorithm::Nlmeans => NlmParams::default().strength,
         });
 
         let mut params = NlmParams {
@@ -557,6 +569,34 @@ mod options_tests {
 
         let expected = hq_default_strength(ChannelMode::Yuv, 0);
         assert!((params.strength - expected).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn hq_no_auto_strength_falls_back_to_the_legacy_absolute_default() {
+        // `effective_strength_with` only treats `strength` as a multiplier
+        // on the measured sigma when `auto_strength` is true. With it
+        // false, `strength` is used verbatim as an FFmpeg-style absolute
+        // strength, so the fallback must be the fast path's absolute
+        // default, not a calibrated multiplier from `hq_default_strength`.
+        let opts = DenoiserOptions::builder()
+            .algorithm(Algorithm::NlmeansHq(HqParams {
+                auto_strength: false,
+                noise_floor: true,
+                sigma_override: None,
+                temporal_confidence: true,
+                thsad_scale: 1.0,
+                sigma_scale: 1.0,
+            }))
+            .build();
+        let params = opts.to_nlm_params();
+
+        let expected = NlmParams::default().strength;
+        assert!(
+            (params.strength - expected).abs() < f32::EPSILON,
+            "expected the legacy absolute default {expected}, got {} (looks like the \
+             auto-strength multiplier table leaked through)",
+            params.strength
+        );
     }
 
     #[test]

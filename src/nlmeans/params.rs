@@ -1,4 +1,4 @@
-use super::{MotionCompensationMode, PrefilterMode};
+use super::{MotionCompensationMode, PrefilterMode, prefilter};
 
 /// SSD normalisation reference, matching FFmpeg's nlmeans (255² for
 /// 8-bit normalisation). Distances are computed in `[0, 1]` units so
@@ -385,6 +385,49 @@ impl NlmParams {
             );
         }
 
+        if let PrefilterMode::Bilateral { sigma_s, sigma_r } = self.prefilter {
+            if !sigma_s.is_finite() || sigma_s <= 0.0 {
+                anyhow::bail!(
+                    "bilateral prefilter sigma_s must be finite and > 0 (got {}); \
+                     sigma_s = 0 produces an infinite spatial-weight normalisation factor",
+                    sigma_s,
+                );
+            }
+            if !sigma_r.is_finite() || sigma_r <= 0.0 {
+                anyhow::bail!(
+                    "bilateral prefilter sigma_r must be finite and > 0 (got {}); \
+                     sigma_r = 0 produces an infinite range-weight normalisation factor \
+                     that turns the centre tap into NaN",
+                    sigma_r,
+                );
+            }
+            // A `sigma` can be finite and positive yet still be small
+            // enough that `sigma * sigma` underflows to `0.0` in f32
+            // (true for any positive value below roughly 3.8e-20 here),
+            // which makes the reciprocal normalisation factor the
+            // kernel actually uses infinite. Checking the same derived
+            // factor `run_bilateral` computes for the kernel launch
+            // catches that regardless of exactly where the underflow
+            // threshold falls, rather than picking a sigma-space cutoff
+            // by hand or duplicating the expression here.
+            if !prefilter::inv_two_sigma_sq(sigma_s).is_finite() {
+                anyhow::bail!(
+                    "bilateral prefilter sigma_s is too small (got {}); sigma_s * sigma_s \
+                     underflows to 0 in f32, making the spatial-weight normalisation factor \
+                     infinite",
+                    sigma_s,
+                );
+            }
+            if !prefilter::inv_two_sigma_sq(sigma_r).is_finite() {
+                anyhow::bail!(
+                    "bilateral prefilter sigma_r is too small (got {}); sigma_r * sigma_r \
+                     underflows to 0 in f32, making the range-weight normalisation factor \
+                     infinite and the centre tap NaN",
+                    sigma_r,
+                );
+            }
+        }
+
         if let PrefilterMode::NlmSpatial { strength_scale } = self.prefilter {
             if !strength_scale.is_finite() || strength_scale <= 0.0 {
                 anyhow::bail!(
@@ -702,6 +745,183 @@ mod tests {
             ..NlmParams::default()
         };
         assert!(params.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_non_positive_bilateral_sigma_r() {
+        // sigma_r = 0 makes inv_two_sigma_r_sq = 1/0 = inf. The centre
+        // tap's range_sq is 0, so 0 * inf = NaN, which poisons every
+        // pixel of the reference clip.
+        let params = NlmParams {
+            prefilter: PrefilterMode::Bilateral {
+                sigma_s: 3.0,
+                sigma_r: 0.0,
+            },
+            ..NlmParams::default()
+        };
+        assert!(params.validate().is_err());
+
+        let negative = NlmParams {
+            prefilter: PrefilterMode::Bilateral {
+                sigma_s: 3.0,
+                sigma_r: -0.02,
+            },
+            ..NlmParams::default()
+        };
+        assert!(negative.validate().is_err());
+
+        let nan = NlmParams {
+            prefilter: PrefilterMode::Bilateral {
+                sigma_s: 3.0,
+                sigma_r: f32::NAN,
+            },
+            ..NlmParams::default()
+        };
+        assert!(nan.validate().is_err());
+
+        let inf = NlmParams {
+            prefilter: PrefilterMode::Bilateral {
+                sigma_s: 3.0,
+                sigma_r: f32::INFINITY,
+            },
+            ..NlmParams::default()
+        };
+        assert!(inf.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_non_positive_bilateral_sigma_s() {
+        // sigma_s = 0 makes inv_two_sigma_s_sq = 1/0 = inf; the centre
+        // tap's spatial_dist_sq is 0, so the same 0 * inf = NaN poisoning
+        // applies to the spatial term.
+        let params = NlmParams {
+            prefilter: PrefilterMode::Bilateral {
+                sigma_s: 0.0,
+                sigma_r: 0.02,
+            },
+            ..NlmParams::default()
+        };
+        assert!(params.validate().is_err());
+
+        let negative = NlmParams {
+            prefilter: PrefilterMode::Bilateral {
+                sigma_s: -3.0,
+                sigma_r: 0.02,
+            },
+            ..NlmParams::default()
+        };
+        assert!(negative.validate().is_err());
+
+        let nan = NlmParams {
+            prefilter: PrefilterMode::Bilateral {
+                sigma_s: f32::NAN,
+                sigma_r: 0.02,
+            },
+            ..NlmParams::default()
+        };
+        assert!(nan.validate().is_err());
+
+        let inf = NlmParams {
+            prefilter: PrefilterMode::Bilateral {
+                sigma_s: f32::INFINITY,
+                sigma_r: 0.02,
+            },
+            ..NlmParams::default()
+        };
+        assert!(inf.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_positive_finite_bilateral_sigmas() {
+        let params = NlmParams {
+            prefilter: PrefilterMode::Bilateral {
+                sigma_s: 3.0,
+                sigma_r: 0.02,
+            },
+            ..NlmParams::default()
+        };
+        assert!(params.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_a_small_positive_bilateral_sigma_at_the_boundary() {
+        // Pins the guard to `<= 0.0` rather than `< 0.0`: a value that is
+        // small but strictly positive, and far enough from the f32
+        // underflow cliff that `sigma * sigma` stays a normal (non-zero)
+        // float, must still be accepted for both fields, independently
+        // of the other one. 1e-6 squares to 1e-12, nowhere near the
+        // smallest normal f32 (~1.18e-38), so `inv_two_sigma_sq` stays
+        // finite here.
+        let safe_small = 1e-6_f32;
+        assert!(
+            (safe_small * safe_small).is_normal(),
+            "test value itself must not underflow"
+        );
+
+        let small_sigma_s = NlmParams {
+            prefilter: PrefilterMode::Bilateral {
+                sigma_s: safe_small,
+                sigma_r: 0.02,
+            },
+            ..NlmParams::default()
+        };
+        assert!(small_sigma_s.validate().is_ok());
+
+        let small_sigma_r = NlmParams {
+            prefilter: PrefilterMode::Bilateral {
+                sigma_s: 3.0,
+                sigma_r: safe_small,
+            },
+            ..NlmParams::default()
+        };
+        assert!(small_sigma_r.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_a_subnormal_bilateral_sigma_that_underflows_on_squaring() {
+        // `f32::MIN_POSITIVE` (the smallest *normal* positive f32,
+        // ~1.1754944e-38) is finite and > 0, so the old `is_finite() &&
+        // > 0.0` guard on the raw value let it through. But squaring it
+        // underflows to exactly `0.0` in f32 (its true square,
+        // ~1.38e-76, is far below the smallest subnormal, ~1.4e-45), so
+        // `inv_two_sigma_sq` — `1.0 / (2.0 * sigma * sigma)` — divides
+        // by zero and produces `inf`. That's the exact NaN-poisoning
+        // failure mode this validation exists to prevent, just reached
+        // through a different sigma than exactly `0.0`.
+        let sq = f32::MIN_POSITIVE * f32::MIN_POSITIVE;
+        assert_eq!(
+            sq, 0.0,
+            "test assumption: MIN_POSITIVE must underflow on squaring"
+        );
+        let inv = prefilter::inv_two_sigma_sq(f32::MIN_POSITIVE);
+        assert!(
+            !inv.is_finite(),
+            "test assumption: the derived factor must be infinite here"
+        );
+
+        let sigma_s = NlmParams {
+            prefilter: PrefilterMode::Bilateral {
+                sigma_s: f32::MIN_POSITIVE,
+                sigma_r: 0.02,
+            },
+            ..NlmParams::default()
+        };
+        assert!(
+            sigma_s.validate().is_err(),
+            "a subnormal sigma_s that underflows to an infinite normalisation factor must be rejected"
+        );
+
+        let sigma_r = NlmParams {
+            prefilter: PrefilterMode::Bilateral {
+                sigma_s: 3.0,
+                sigma_r: f32::MIN_POSITIVE,
+            },
+            ..NlmParams::default()
+        };
+        assert!(
+            sigma_r.validate().is_err(),
+            "a subnormal sigma_r that underflows to an infinite normalisation factor must be rejected"
+        );
     }
 
     #[test]

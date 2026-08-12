@@ -213,9 +213,11 @@ struct Args {
     /// `bilateral:<sigma_s>,<sigma_r>` runs a quick on-GPU bilateral
     /// blur first, then compares patches against that cleaner image.
     ///
-    /// `sigma_s` is the spatial blur radius in pixels.
+    /// `sigma_s` is the spatial blur radius in pixels, greater than 0.
     ///
-    /// `sigma_r` is the colour-similarity threshold in `[0, 1]`.
+    /// `sigma_r` is the colour-similarity threshold, greater than 0.
+    /// `(0, 1]` is the typical range for normalised pixel data; there
+    /// is no enforced upper bound.
     ///
     /// A good starting point is `bilateral:3.0,0.02`.
     ///

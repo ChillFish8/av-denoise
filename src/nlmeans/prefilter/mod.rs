@@ -1,6 +1,7 @@
 mod bilateral;
 
 pub use bilateral::bilateral_radius;
+pub(crate) use bilateral::inv_two_sigma_sq;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
