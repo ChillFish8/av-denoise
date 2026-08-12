@@ -541,7 +541,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         // reading the LUT buffer back, this dispatch already has the
         // exact candidate offset the windowed kernel derives at
         // comptime from its unrolled loop.
-        let offset = self.noise_offset * spatial_offset_factor(q_x, q_y, self.rho_smoothed);
+        let offset = self.noise_offset * spatial_offset_factor(q_x, q_y, self.rho_smoothed.unwrap_or(0.0));
         unsafe {
             nlm_vertical_weight::launch_unchecked::<R>(
                 &self.client,

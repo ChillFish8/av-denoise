@@ -48,7 +48,7 @@ fn rho_attenuation_changes_spatial_weighting_on_correlated_content() {
     let rho_zero_out = rho_zero.denoise().unwrap().unwrap().to_vec();
 
     let mut rho_high = NlmDenoiser::<R>::new(&client, params, w, h);
-    rho_high.rho_smoothed = 0.65;
+    rho_high.rho_smoothed = Some(0.65);
     rho_high.push_frame(&frame);
     let rho_high_out = rho_high.denoise().unwrap().unwrap().to_vec();
 
@@ -101,13 +101,13 @@ fn windowed_and_separable_agree_under_rho_attenuation() {
 
     for rho in [0.0f32, 0.65] {
         let mut windowed = NlmDenoiser::<R>::new(&client, params.clone(), w, h);
-        windowed.rho_smoothed = rho;
+        windowed.rho_smoothed = Some(rho);
         windowed.push_frame(&frame);
         let windowed_out = windowed.denoise().unwrap().unwrap().to_vec();
 
         let mut separable = NlmDenoiser::<R>::new(&client, params.clone(), w, h);
         separable.use_separable = true;
-        separable.rho_smoothed = rho;
+        separable.rho_smoothed = Some(rho);
         separable.push_frame(&frame);
         let separable_out = separable.denoise().unwrap().unwrap().to_vec();
 

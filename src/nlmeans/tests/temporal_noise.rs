@@ -389,3 +389,127 @@ fn hq_temporal_folds_correlated_grain_above_immerkaer_alone() {
          versus Immerkær-alone {immerkaer_only}"
     );
 }
+
+/// `rho_smoothed`'s first update must seed directly from the first
+/// temporal sample rather than blend it against an assumed 0. On
+/// correlated grain with true rho 2/3, blending from 0 with
+/// `EMA_ALPHA = 0.2` would read about 0.13 after the very first
+/// sample, an 80% relative error, while seeding directly should land
+/// within the same 25% tolerance
+/// `hq_temporal_folds_correlated_grain_above_immerkaer_alone` uses for
+/// the folded sigma on the same content.
+#[test]
+fn rho_smoothed_seeds_from_first_sample_not_from_zero() {
+    let client = make_client();
+    let w = 128;
+    let h = 128;
+    let sigma_marginal = 8.0 / 255.0;
+    let sigma_pre = sigma_marginal / 0.375f32.sqrt();
+    let base = 0.5f32;
+    let true_rho = 2.0 / 3.0;
+
+    let params = NlmParams {
+        temporal_radius: 2,
+        search_radius: 2,
+        patch_radius: 2,
+        strength: 1.2,
+        self_weight: 1.0,
+        channels: ChannelMode::Luma,
+        prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
+        hq: Some(HqParams {
+            auto_strength: true,
+            noise_floor: true,
+            sigma_override: None,
+            temporal_confidence: false,
+            thsad_scale: 1.0,
+            sigma_scale: 1.0,
+        }),
+    };
+
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+    let mut first_seeded_rho = None;
+    for i in 0..(w.min(h)) {
+        let frame = correlated_noisy_frame(w, h, base, sigma_pre, 200 + i);
+        denoiser.push_frame(&frame);
+        let _ = denoiser.denoise().unwrap();
+        if let Some(rho) = denoiser.rho_smoothed {
+            first_seeded_rho = Some(rho);
+            break;
+        }
+    }
+
+    let first_seeded_rho =
+        first_seeded_rho.expect("estimator should hold a value after enough full-window submits");
+    let rel_err = (first_seeded_rho - true_rho).abs() / true_rho;
+    assert!(
+        rel_err <= 0.25,
+        "rho_smoothed after its first update was {first_seeded_rho} vs true rho {true_rho} \
+         (rel err {rel_err:.3}); a from-zero blend would read close to {}",
+        0.2 * true_rho
+    );
+}
+
+/// A `128x128` frame split top and bottom. The top half is genuinely
+/// static (flat content plus independent measurement noise), the
+/// bottom half is fine texture panning a few pixels between frames
+/// with the same measurement noise on top. The panning residual
+/// averages close to zero over a `TEMPORAL_NOISE_BLOCK` block (same
+/// as `moving_content_pair_mostly_non_static`'s ramp, but this
+/// texture's block-mean residual is near zero rather than an order of
+/// magnitude above the gate, the case that test doesn't cover), so the
+/// signed-mean static gate alone lets nearly the whole frame through.
+/// Only the bottom half's variance actually comes from noise, so the
+/// aggregator must still recover close to the true sigma and reject
+/// most of the panning half.
+#[test]
+fn moving_texture_pair_near_zero_mean_residual_recovers_true_sigma() {
+    let w = 128;
+    let h = 128;
+    let true_sigma = 2.0 / 255.0;
+    let texture_sigma_pre = 24.0 / 255.0 / 0.375f32.sqrt();
+    let shift = 3u32;
+    let base = 0.5f32;
+
+    // One texture field for the bottom half, independent of the
+    // measurement noise added below.
+    let raw_texture = correlated_noisy_frame(w, h / 2, base, texture_sigma_pre, 1);
+
+    let mut clean_prev = vec![base; (w * h) as usize];
+    let mut clean_new = vec![base; (w * h) as usize];
+    for y in 0..(h / 2) {
+        for x in 0..w {
+            let prev_val = raw_texture[(y * w + x) as usize];
+            let xs = (x + shift).min(w - 1);
+            let new_val = raw_texture[(y * w + xs) as usize];
+            let out_y = h / 2 + y;
+            clean_prev[(out_y * w + x) as usize] = prev_val;
+            clean_new[(out_y * w + x) as usize] = new_val;
+        }
+    }
+
+    let prev = noisy_field_over(&clean_prev, w, h, true_sigma, 11);
+    let new = noisy_field_over(&clean_new, w, h, true_sigma, 12);
+
+    let records = run_temporal_stats(w, h, 1, &prev, &new);
+    let sample = aggregate_temporal_noise_stats(&records, 1, 1, w, h)
+        .expect("the static top half should clear STATIC_FRACTION_MIN on its own");
+
+    let (blocks_x, blocks_y) = temporal_stats_blocks(w, h);
+    let total_blocks = blocks_x * blocks_y;
+    let top_half_blocks = total_blocks / 2;
+    assert!(
+        (sample.static_fraction * total_blocks as f32) <= top_half_blocks as f32 * 1.5,
+        "expected static_fraction to stay close to the true static top half ({} of {total_blocks} \
+         blocks), got {}",
+        top_half_blocks,
+        sample.static_fraction
+    );
+
+    let rel_err = (sample.sigma[0] - true_sigma).abs() / true_sigma;
+    assert!(
+        rel_err <= 0.25,
+        "estimated sigma {} vs true static-half sigma {true_sigma} (rel err {rel_err:.3})",
+        sample.sigma[0]
+    );
+}

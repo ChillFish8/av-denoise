@@ -99,18 +99,22 @@ pub struct NlmDenoiser<R: Runtime> {
     pub(super) use_reference: bool,
 
     /// Smoothed grain autocorrelation, same EMA cadence as the sigma
-    /// estimate. Seeded at 0 per stream and only ever updated at fold
-    /// time when a temporal sample exists, so the fast path and a
-    /// fixed `sigma_override` leave it inert at 0 (white-noise
-    /// attenuation, i.e. no attenuation) for the whole stream.
-    pub(super) rho_smoothed: f32,
+    /// estimate. `None` before the first temporal sample of a stream,
+    /// same seeding convention as `NoiseEstimator`. Its first sample
+    /// sets the state directly instead of blending from an assumed 0,
+    /// so a stream doesn't spend its opening frames under-attenuated.
+    /// Only ever updated at fold time when a temporal sample exists,
+    /// so the fast path and a fixed `sigma_override` leave it at `None`
+    /// (read as 0, white-noise attenuation, i.e. no attenuation) for
+    /// the whole stream.
+    pub(super) rho_smoothed: Option<f32>,
     /// Per-candidate spatial noise-floor offset for the k=0 windowed
     /// and separable weighting kernels, `[(2*search_radius+1)^2]`
     /// f32s, row-major `(dy+r)*(2r+1)+(dx+r)`. Rebuilt from
     /// `noise_offset` and `rho_smoothed` every `denoise_submit` (see
-    /// `Self::rebuild_spatial_offset_lut`). At `rho_smoothed == 0` this
-    /// is numerically identical to the flat `noise_offset` scalar it
-    /// replaced.
+    /// `Self::rebuild_spatial_offset_lut`). At `rho_smoothed` unset
+    /// this is numerically identical to the flat `noise_offset` scalar
+    /// it replaced.
     pub(super) spatial_offset_lut: Handle,
 
     /// Stage-1 noise-estimate scratch ring, `total_frames` slots each
@@ -266,13 +270,13 @@ impl<R: Runtime> NlmDenoiser<R> {
         let use_reference = params.prefilter.needs_reference_buf();
         let output_scratch_cap = pixels * params.channels.count() as usize;
 
-        // Seeded at rho = 0, so the initial LUT is numerically
-        // identical to the flat `noise_offset` scalar it replaces
-        // until the first temporal sample lands.
-        let rho_smoothed = 0.0f32;
+        // Unset until the first temporal sample lands, so the initial
+        // LUT is numerically identical to the flat `noise_offset`
+        // scalar it replaces.
+        let rho_smoothed: Option<f32> = None;
         let spatial_offset_lut = client.create_from_slice(f32::as_bytes(&build_spatial_offset_lut(
             params.search_radius,
-            rho_smoothed,
+            0.0,
             noise_offset,
         )));
 
@@ -884,9 +888,11 @@ impl<R: Runtime> NlmDenoiser<R> {
     ///
     /// The temporal sample's `rho` also folds into `rho_smoothed`, the
     /// spatial-offset LUT's attenuation input, once regardless of which
-    /// chain reads it. `rho_smoothed` stays at its seeded 0 for the fast
-    /// path and a fixed `sigma_override`, since `temporal` is always
-    /// `None` there.
+    /// chain reads it. The first fold of a stream sets it directly from
+    /// `sample.rho` instead of blending with an assumed 0, the same
+    /// convention `NoiseEstimator` uses for its own first sample.
+    /// `rho_smoothed` stays unset for the fast path and a fixed
+    /// `sigma_override`, since `temporal` is always `None` there.
     fn fold_noise_estimate(
         &mut self,
         data: &[f32],
@@ -909,7 +915,10 @@ impl<R: Runtime> NlmDenoiser<R> {
                 raw[c] = raw[c].max(sample.sigma[c] * factor);
                 raw_low[c] = raw_low[c].max(sample.sigma_low[c] * factor);
             }
-            self.rho_smoothed = EMA_ALPHA * sample.rho + (1.0 - EMA_ALPHA) * self.rho_smoothed;
+            self.rho_smoothed = Some(match self.rho_smoothed {
+                None => sample.rho,
+                Some(prev) => EMA_ALPHA * sample.rho + (1.0 - EMA_ALPHA) * prev,
+            });
         }
 
         // User nudge on the measured noise level. Applied after the
@@ -1203,7 +1212,11 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// from never disagree. The rebuild is cheap, at most
     /// `(2*8+1)^2` floats.
     fn rebuild_spatial_offset_lut(&mut self) {
-        let lut = build_spatial_offset_lut(self.params.search_radius, self.rho_smoothed, self.noise_offset);
+        let lut = build_spatial_offset_lut(
+            self.params.search_radius,
+            self.rho_smoothed.unwrap_or(0.0),
+            self.noise_offset,
+        );
         self.spatial_offset_lut = self.client.create_from_slice(f32::as_bytes(&lut));
     }
 
@@ -1296,7 +1309,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.real_pushes = 0;
         self.noise_estimator.reset();
         self.noise_estimator_low.reset();
-        self.rho_smoothed = 0.0;
+        self.rho_smoothed = None;
     }
 
     /// Physical slot of logical frame 0 (oldest frame in the window).

@@ -341,6 +341,33 @@ const RHO_SIGMA_GATE: f32 = 0.3 / 255.0;
 /// Below this, motion or a scene change dominates the frame and the
 /// Immerkær estimate is the only usable signal.
 const STATIC_FRACTION_MIN: f32 = 0.05;
+/// How far above the mean-gate-passing population's own lower
+/// quartile a block's channel-0 sigma may sit before it is treated as
+/// displaced texture rather than measurement noise. A block panning
+/// over texture can average to zero over a `TEMPORAL_NOISE_BLOCK`
+/// window (clearing [`STATIC_GATE`]) while its variance is entirely
+/// the shifted texture, not repeatable noise, and that variance runs
+/// several times higher than the rest of the frame's blocks. Real
+/// measurement noise stays within a much narrower spread across a
+/// frame even where its magnitude is genuinely uneven (a dark region
+/// reading noisier than a bright one), so this leaves headroom past
+/// that legitimate spread while still catching texture outliers. The
+/// lower quartile (not the median) is the reference so the filter
+/// still works once texture is the majority of gate-passing blocks,
+/// as long as a genuinely static minority remains to anchor it.
+const SIGMA_OUTLIER_FACTOR: f32 = 5.0;
+
+/// One mean-gate-passing block's per-channel stats, held only long
+/// enough to compute the population's own outlier reference before
+/// deciding which blocks are actually static.
+struct StaticGateCandidate {
+    sigmas: [f32; 3],
+    sigma_ch0: f32,
+    var_ch0: f32,
+    mean0: f32,
+    mean_lag: f32,
+    n_pairs: f32,
+}
 
 /// Aggregates one centre slot's per-block temporal-residual records
 /// into a [`TemporalNoiseSample`]. `records` holds exactly one slot's
@@ -350,6 +377,17 @@ const STATIC_FRACTION_MIN: f32 = 0.05;
 /// when no static block clears [`RHO_SIGMA_GATE`] (no measurable
 /// noise to correlate — the median rho would be undefined — which is
 /// also what a zero-filled duplicate slot's records produce).
+///
+/// Classifying a block as static takes two passes. The first is the
+/// signed mean-residual gate ([`STATIC_GATE`]). It clears a block
+/// whose average residual is near zero, but a block panning over
+/// texture can clear it too, since a displaced texture pattern
+/// averages toward zero over a block just as noise does. The second
+/// pass catches what the first lets through. It rejects any
+/// mean-gate-passing block whose channel-0 sigma sits far above the
+/// passing population's own lower quartile ([`SIGMA_OUTLIER_FACTOR`]),
+/// since a panning block's variance comes from the texture it slid
+/// across, not from noise shared with the rest of the frame.
 pub(super) fn aggregate_temporal_noise_stats(
     records: &[f32],
     channels: u32,
@@ -367,9 +405,7 @@ pub(super) fn aggregate_temporal_noise_stats(
     let channels = channels as usize;
     let stored_ch = stored_ch as usize;
 
-    let mut static_sigmas: Vec<Vec<f32>> = vec![Vec::new(); channels];
-    let mut rho_samples = Vec::new();
-    let mut static_count = 0usize;
+    let mut candidates = Vec::new();
 
     for by in 0..blocks_y {
         for bx in 0..blocks_x {
@@ -387,25 +423,63 @@ pub(super) fn aggregate_temporal_noise_stats(
             if mean0.abs() >= STATIC_GATE {
                 continue;
             }
-            static_count += 1;
 
+            let mut sigmas = [0.0f32; 3];
             let mut sigma_ch0 = 0.0f32;
             let mut var_ch0 = 0.0f32;
-            for (c, sigmas) in static_sigmas.iter_mut().enumerate() {
+            for c in 0..channels {
                 let mean = rec[c] / n;
                 let var = (rec[stored_ch + c] / n - mean * mean).max(0.0);
                 let sigma_block = var.sqrt() / std::f32::consts::SQRT_2;
-                sigmas.push(sigma_block);
+                sigmas[c] = sigma_block;
                 if c == 0 {
                     sigma_ch0 = sigma_block;
                     var_ch0 = var;
                 }
             }
 
-            if sigma_ch0 > RHO_SIGMA_GATE && n_pairs > 0.0 {
-                let mean_lag = rec[2 * stored_ch] / n_pairs;
-                rho_samples.push((mean_lag - mean0 * mean0) / var_ch0);
-            }
+            let mean_lag = if n_pairs > 0.0 {
+                rec[2 * stored_ch] / n_pairs
+            } else {
+                0.0
+            };
+
+            candidates.push(StaticGateCandidate {
+                sigmas,
+                sigma_ch0,
+                var_ch0,
+                mean0,
+                mean_lag,
+                n_pairs,
+            });
+        }
+    }
+
+    let mut candidate_sigma_ch0: Vec<f32> = candidates.iter().map(|c| c.sigma_ch0).collect();
+    sort_ascending(&mut candidate_sigma_ch0);
+    let sigma_ceiling = if candidate_sigma_ch0.is_empty() {
+        0.0
+    } else {
+        lower_quartile(&candidate_sigma_ch0) * SIGMA_OUTLIER_FACTOR
+    };
+
+    let mut static_sigmas: Vec<Vec<f32>> = vec![Vec::new(); channels];
+    let mut rho_samples = Vec::new();
+    let mut static_count = 0usize;
+
+    for candidate in &candidates {
+        if candidate.sigma_ch0 > sigma_ceiling {
+            continue;
+        }
+        static_count += 1;
+
+        for (c, sigmas) in static_sigmas.iter_mut().enumerate().take(channels) {
+            sigmas.push(candidate.sigmas[c]);
+        }
+
+        if candidate.sigma_ch0 > RHO_SIGMA_GATE && candidate.n_pairs > 0.0 {
+            let rho = (candidate.mean_lag - candidate.mean0 * candidate.mean0) / candidate.var_ch0;
+            rho_samples.push(rho.clamp(0.0, 1.0));
         }
     }
 
@@ -963,6 +1037,252 @@ mod tests {
             );
         }
         assert!((sample.rho - rho_target).abs() < 1e-4);
+    }
+
+    /// Builds one block's record from a closed-form channel-0 sigma and
+    /// rho, `sum_d` always 0 so the block clears [`STATIC_GATE`]
+    /// trivially. Shared by the outlier-gate tests below, which only
+    /// vary each block's sigma.
+    fn zero_mean_block_record(sigma_255: f32, rho: f32) -> [f32; 3] {
+        let n = 256.0f32;
+        let n_pairs = 240.0f32;
+        let sigma = sigma_255 / 255.0;
+        let var = 2.0 * sigma * sigma;
+        [0.0, n * var, n_pairs * rho * var]
+    }
+
+    /// A `64x64` frame (16 `TEMPORAL_NOISE_BLOCK` blocks) where most
+    /// blocks are a panning-texture stand-in. Each has zero mean
+    /// residual (it clears [`STATIC_GATE`] the same way real
+    /// measurement noise does) but a channel-0 sigma an order of
+    /// magnitude above the minority of genuinely static blocks, and
+    /// zero lag-1 correlation
+    /// (`rho = 0`, ruling out a rho-based gate as the fix, since these
+    /// blocks look exactly like white noise at lag 1). Without the
+    /// outlier gate, the plain mean gate lets every block through and
+    /// the majority-texture population dominates the median, reading
+    /// the panning blocks' sigma instead of the real noise floor.
+    #[test]
+    fn aggregate_rejects_majority_zero_mean_texture_outliers() {
+        let width = 64;
+        let height = 64;
+        let stored_ch = 1;
+        let channels = 1;
+
+        let background_sigma_255 = 2.0f32;
+        let background_rho = 0.1f32;
+        let texture_sigma_255 = 20.0f32;
+
+        // 6 genuinely static blocks, 10 panning-texture blocks. The
+        // texture population is the majority of the 16 blocks, so a
+        // plain population median would read the texture level.
+        let mut records = Vec::new();
+        for _ in 0..6 {
+            records.extend_from_slice(&zero_mean_block_record(background_sigma_255, background_rho));
+        }
+        for _ in 0..10 {
+            records.extend_from_slice(&zero_mean_block_record(texture_sigma_255, 0.0));
+        }
+
+        let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+            .expect("the static minority clears STATIC_FRACTION_MIN on its own");
+
+        let expected_sigma = background_sigma_255 / 255.0;
+        assert!(
+            (sample.sigma[0] - expected_sigma).abs() < 1e-4,
+            "expected the outlier gate to isolate the real noise floor {expected_sigma}, got {}",
+            sample.sigma[0]
+        );
+        assert!(
+            (sample.static_fraction - 6.0 / 16.0).abs() < 1e-4,
+            "expected only the 6 background blocks to survive both gates, got static_fraction={}",
+            sample.static_fraction
+        );
+        assert!(
+            (sample.rho - background_rho).abs() < 1e-4,
+            "expected rho to come from the surviving background blocks only, got {}",
+            sample.rho
+        );
+    }
+
+    /// The opposite failure direction. Every block is genuinely static
+    /// but the frame's real noise floor varies spatially by 3x (a dark
+    /// region reading noisier than a bright one, same as real sensor
+    /// noise commonly does). None of this spread is texture, so the
+    /// outlier gate must not drop any of it.
+    #[test]
+    fn aggregate_keeps_genuinely_static_blocks_despite_spatial_sigma_spread() {
+        let width = 64;
+        let height = 64;
+        let stored_ch = 1;
+        let channels = 1;
+
+        let low_sigma_255 = 2.0f32;
+        let high_sigma_255 = 6.0f32; // 3x low_sigma_255, real spatial spread.
+        let rho = 0.1f32;
+
+        let mut records = Vec::new();
+        for _ in 0..8 {
+            records.extend_from_slice(&zero_mean_block_record(low_sigma_255, rho));
+        }
+        for _ in 0..8 {
+            records.extend_from_slice(&zero_mean_block_record(high_sigma_255, rho));
+        }
+
+        let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+            .expect("every block is static");
+
+        assert!(
+            (sample.static_fraction - 1.0).abs() < 1e-6,
+            "a real 3x spatial sigma spread must not trip the outlier gate, got static_fraction={}",
+            sample.static_fraction
+        );
+    }
+
+    /// 8 identical background blocks fix the mean-gate-passing
+    /// population's own lower quartile at `background_sigma_255`
+    /// regardless of a 9th block's sigma. With `n = 9` candidates the
+    /// lower-quartile index (`0.25 * 8 = 2.0` exact) lands on the
+    /// 3rd-smallest, still one of the 8 identical values as long as the
+    /// 9th sorts above them. A `48x48` frame grids into exactly 9
+    /// `TEMPORAL_NOISE_BLOCK` blocks, so the 9th block here is the only
+    /// free variable.
+    fn outlier_factor_boundary_records(
+        background_sigma_255: f32,
+        background_rho: f32,
+        ninth_ratio: f32,
+    ) -> Vec<f32> {
+        let mut records = Vec::new();
+        for _ in 0..8 {
+            records.extend_from_slice(&zero_mean_block_record(background_sigma_255, background_rho));
+        }
+        records.extend_from_slice(&zero_mean_block_record(background_sigma_255 * ninth_ratio, 0.0));
+        records
+    }
+
+    /// Calibrated boundary for the outlier gate, pinned as literals
+    /// rather than derived from [`SIGMA_OUTLIER_FACTOR`] itself, so
+    /// the two tests below assert the actual measured calibration
+    /// instead of the gate's own arithmetic (`sigma <=
+    /// quartile * SIGMA_OUTLIER_FACTOR` reduces to `ratio <=
+    /// SIGMA_OUTLIER_FACTOR` for any constant value, which proves
+    /// nothing about where that value should sit). `4.99` and `5.01`
+    /// bracket the measured calibration from the original
+    /// investigation (a scratchpad simulation, `sim3a.py`, not
+    /// committed to the repo). A genuinely static frame with a real
+    /// spatial noise-floor spread up to 4x survives, and a spread of
+    /// 5x is where trimming starts, so `5.0` was chosen as
+    /// [`SIGMA_OUTLIER_FACTOR`]'s value with headroom above the real
+    /// spread and margin below where texture contamination is caught.
+    /// A deliberate change to [`SIGMA_OUTLIER_FACTOR`] needs to update
+    /// these two literals to match, or these tests will (correctly)
+    /// fail.
+    const OUTLIER_FACTOR_SURVIVES_RATIO: f32 = 4.99;
+    const OUTLIER_FACTOR_REJECTS_RATIO: f32 = 5.01;
+
+    #[test]
+    fn aggregate_outlier_factor_survives_just_under_threshold() {
+        let width = 48;
+        let height = 48;
+        let stored_ch = 1;
+        let channels = 1;
+        let background_sigma_255 = 2.0f32;
+        let background_rho = 0.1f32;
+
+        let records = outlier_factor_boundary_records(
+            background_sigma_255,
+            background_rho,
+            OUTLIER_FACTOR_SURVIVES_RATIO,
+        );
+
+        let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+            .expect("all 9 blocks clear the static-fraction floor");
+
+        assert!(
+            (sample.static_fraction - 1.0).abs() < 1e-6,
+            "a 9th block at {OUTLIER_FACTOR_SURVIVES_RATIO}x the reference must survive, \
+             got static_fraction={}",
+            sample.static_fraction
+        );
+    }
+
+    #[test]
+    fn aggregate_outlier_factor_rejects_just_over_threshold() {
+        let width = 48;
+        let height = 48;
+        let stored_ch = 1;
+        let channels = 1;
+        let background_sigma_255 = 2.0f32;
+        let background_rho = 0.1f32;
+
+        let records = outlier_factor_boundary_records(
+            background_sigma_255,
+            background_rho,
+            OUTLIER_FACTOR_REJECTS_RATIO,
+        );
+
+        let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+            .expect("the 8 background blocks alone still clear the static-fraction floor");
+
+        assert!(
+            (sample.static_fraction - 8.0 / 9.0).abs() < 1e-6,
+            "a 9th block at {OUTLIER_FACTOR_REJECTS_RATIO}x the reference must be rejected, \
+             got static_fraction={}",
+            sample.static_fraction
+        );
+    }
+
+    /// A block whose per-block correlation estimate is computed from
+    /// [`STATIC_GATE`] and [`RHO_SIGMA_GATE`]'s own mismatched
+    /// denominators (`mean_lag` over `n_pairs`, `mean0`/`var_ch0` over
+    /// `n`) can read above 1. A full `TEMPORAL_NOISE_BLOCK` row here
+    /// follows the path-graph eigenvector that maximises a row's
+    /// lag-1-sum-to-total-variance ratio (`sin(i*pi/17)` for a
+    /// 16-element row), replicated down every row of the block and
+    /// scaled to clear both the mean gate and the rho-sample sigma
+    /// gate. The resulting per-block estimate is a standalone
+    /// computation, not the module's usual test-data shape, because
+    /// it's checking the aggregation formula's own bound rather than a
+    /// physically-motivated noise scenario.
+    #[test]
+    fn aggregate_rho_estimate_stays_within_unit_range() {
+        let width = TEMPORAL_NOISE_BLOCK;
+        let height = TEMPORAL_NOISE_BLOCK;
+        let stored_ch = 1;
+        let channels = 1;
+
+        let scale = 0.007f32;
+        let row: Vec<f32> = (1..=width)
+            .map(|i| scale * (i as f32 * std::f32::consts::PI / (width + 1) as f32).sin())
+            .collect();
+
+        let n = (width * height) as f32;
+        let sum_d: f32 = row.iter().sum::<f32>() * height as f32;
+        let sum_d2: f32 = row.iter().map(|v| v * v).sum::<f32>() * height as f32;
+        let sum_lag: f32 = row.windows(2).map(|w| w[0] * w[1]).sum::<f32>() * height as f32;
+
+        // Confirms the construction actually clears both gates this
+        // block needs to reach the rho computation at all, so the
+        // assertion below is testing the clamp and not a gate miss.
+        assert!(
+            (sum_d / n).abs() < STATIC_GATE,
+            "construction must clear the static gate"
+        );
+        let var = sum_d2 / n - (sum_d / n) * (sum_d / n);
+        assert!(
+            (var.sqrt() / std::f32::consts::SQRT_2) > RHO_SIGMA_GATE,
+            "construction must clear the rho-sample sigma gate"
+        );
+
+        let records = [sum_d, sum_d2, sum_lag];
+        let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+            .expect("the single block clears both gates");
+
+        assert!(
+            (0.0..=1.0).contains(&sample.rho),
+            "the mismatched-denominator estimate must stay within [0, 1], got {}",
+            sample.rho
+        );
     }
 
     #[test]
