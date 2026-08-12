@@ -8,14 +8,20 @@ use cubecl::terminate;
 ///
 /// `pair_ring` holds every currently-live adjacent-pair field, laid out
 /// `[pair_slot][direction][block_y][block_x][2]` of `i32` (direction 0
-/// = older→newer, 1 = newer→older). The walk starts at
-/// `start_pair_slot` and takes `steps` hops, reading direction 0 and
-/// incrementing the slot (mod `pair_ring_slots`) when `forward` is
-/// true, or reading direction 1 and decrementing the slot otherwise.
-/// Consecutive hops land on consecutive pair slots because the pair
-/// ring is keyed by the newer frame's position in the push sequence
-/// (see `crate::nlmeans::motion::pair_ring_slot_count`), so the caller
-/// only ever has to resolve the first hop's slot.
+/// = older→newer, 1 = newer→older), with each direction's slice padded
+/// up to a 32-byte (8-`i32`-element) boundary. `dir_len`/`slot_len` are
+/// this padded per-direction/per-slot stride in `i32` elements
+/// (`MotionCtx::pair_direction_stride`/`pair_slot_stride` on the host
+/// side), not the raw `blocks_x * blocks_y * 2` element count, since
+/// the host-side write offsets (`pair_byte_offset`) use the padded
+/// value too and this kernel's reads must land on the same bytes. The
+/// walk starts at `start_pair_slot` and takes `steps` hops, reading
+/// direction 0 and incrementing the slot (mod `pair_ring_slots`) when
+/// `forward` is true, or reading direction 1 and decrementing the slot
+/// otherwise. Consecutive hops land on consecutive pair slots because
+/// the pair ring is keyed by the newer frame's position in the push
+/// sequence (see `crate::nlmeans::motion::pair_ring_slot_count`), so
+/// the caller only ever has to resolve the first hop's slot.
 ///
 /// One thread per output block. Each hop resolves the walking
 /// position's current block (nearest block, edge-clamped exactly like
@@ -33,6 +39,8 @@ pub fn nlm_mc_chain_compose(
     #[comptime] forward: bool,
     #[comptime] steps: u32,
     #[comptime] pair_ring_slots: u32,
+    #[comptime] dir_len: u32,
+    #[comptime] slot_len: u32,
     #[comptime] step: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -47,8 +55,6 @@ pub fn nlm_mc_chain_compose(
     }
 
     let direction = comptime!(if forward { 0u32 } else { 1u32 });
-    let dir_len = comptime!(blocks_x * blocks_y * 2);
-    let slot_len = comptime!(2 * dir_len);
 
     let mut pos_x = (bx * step + step / 2) as i32;
     let mut pos_y = (by * step + step / 2) as i32;

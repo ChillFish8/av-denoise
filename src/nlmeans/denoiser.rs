@@ -327,8 +327,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             } else {
                 None
             };
-            let neighbours = (2 * params.temporal_radius) as usize;
-            let mv_field = client.empty(neighbours * ctx.mv_slots_per_neighbour() * 2 * size_of::<i32>());
+            let neighbours = (2 * params.temporal_radius) as u64;
+            let mv_field = client.empty((neighbours * ctx.mv_field_bytes_per_neighbour()) as usize);
             let pyramid_pixels = motion::pyramid_pixels_per_frame(width, height, ctx.pyramid_levels);
             let pyr_in_bytes = pyramid_pixels * total_frames as usize * size_of::<f32>();
             let pyr_in = client.empty(pyr_in_bytes);
@@ -354,9 +354,9 @@ impl<R: Runtime> NlmDenoiser<R> {
         );
         let pair_ring_buf = if is_chained {
             mc_ctx.as_ref().map(|ctx| {
-                let pair_ring_slots = motion::pair_ring_slot_count(params.temporal_radius) as usize;
-                let bytes = pair_ring_slots * ctx.pair_slot_len() as usize * size_of::<i32>();
-                client.empty(bytes)
+                let pair_ring_slots = motion::pair_ring_slot_count(params.temporal_radius) as u64;
+                let bytes = pair_ring_slots * ctx.pair_slot_bytes();
+                client.empty(bytes as usize)
             })
         } else {
             None

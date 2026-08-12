@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::helpers::*;
-use crate::nlmeans::kernels::motion::nlm_mc_block_match_fine;
+use crate::nlmeans::kernels::motion::{nlm_mc_block_match_coarse, nlm_mc_block_match_fine};
 use crate::nlmeans::motion::{
     CHAINED_RADIUS_THRESHOLD,
     DEFAULT_BLKSIZE,
@@ -231,7 +231,8 @@ fn block_match_fine_argmin_finds_clean_shift() {
     // Middle block (bx=1, by=1). Its content and search window sit
     // `blksize` pixels away from every frame edge, well clear of the
     // `search_radius + shift` margin, so no clamped addressing is hit.
-    let idx = ((1 * blocks_x + 1) * 2) as usize;
+    let (mid_bx, mid_by) = (1u32, 1u32);
+    let idx = ((mid_by * blocks_x + mid_bx) * 2) as usize;
     assert_eq!(
         (mv[idx], mv[idx + 1]),
         (2, 1),
@@ -239,6 +240,116 @@ fn block_match_fine_argmin_finds_clean_shift() {
          MV=(2, 1) at default blksize={blksize}/search_radius={search_radius}, got ({}, {})",
         mv[idx],
         mv[idx + 1],
+    );
+}
+
+/// Launches `nlm_mc_block_match_coarse` directly over a single coarse
+/// block covering the whole `blksize × blksize` buffer (one cube,
+/// `fine_blocks_x = fine_blocks_y = 1`, `fine_step = blksize`, so the
+/// coarse block seeds exactly that one fine block), returning the
+/// coarse MV it writes into `mv_field`. `level_scale` is fixed at `1`
+/// so the returned MV is the raw coarse-level offset, unscaled.
+fn run_coarse_block_match_single_block(
+    blksize: u32,
+    search_radius: u32,
+    centre: &[f32],
+    neighbour: &[f32],
+) -> (i32, i32) {
+    let client = make_client();
+    let level_len = (blksize * blksize) as usize;
+    assert_eq!(centre.len(), level_len);
+    assert_eq!(neighbour.len(), level_len);
+
+    let centre_buf = client.create_from_slice(f32::as_bytes(centre));
+    let neighbour_buf = client.create_from_slice(f32::as_bytes(neighbour));
+    let mv_field = client.empty(2 * size_of::<i32>());
+
+    let grid = CubeCount::new_2d(1, 1);
+    let dim = CubeDim::new_2d(8, 8);
+
+    unsafe {
+        nlm_mc_block_match_coarse::launch_unchecked::<R>(
+            &client,
+            grid,
+            dim,
+            ArrayArg::from_raw_parts(centre_buf, level_len),
+            ArrayArg::from_raw_parts(neighbour_buf, level_len),
+            ArrayArg::from_raw_parts(mv_field.clone(), 2),
+            blksize,
+            blksize,
+            blksize,
+            blksize,
+            search_radius,
+            1,
+            1,
+            1,
+            blksize,
+        );
+    }
+
+    let mv_bytes = client.read_one(mv_field).expect("mv readback failed");
+    let mv = i32::from_bytes(&mv_bytes);
+    (mv[0], mv[1])
+}
+
+/// SAD tie-break regression test (fine pass). A block lying entirely
+/// inside a flat region has the same value everywhere, including at
+/// every edge-clamped read the search window's candidates touch, so
+/// every candidate's SAD is exactly `0.0`, an exact tie. The argmin
+/// must resolve that tie to the zero-motion seed (here `(0, 0)`, since
+/// `use_seed = 0`), not the window's `(-search_radius, -search_radius)`
+/// corner, the first candidate the raster scan reaches.
+#[test]
+fn block_match_fine_flat_region_tie_resolves_to_zero_motion() {
+    let blksize = 16u32;
+    let search_radius = 4u32;
+    let value = 0.5f32;
+    let centre = vec![value; (blksize * blksize) as usize];
+    let neighbour = vec![value; (blksize * blksize) as usize];
+
+    let (mvx, mvy, confidence) =
+        run_fine_block_match_single_block(blksize, search_radius, &centre, &neighbour, 0.0, 1.0);
+
+    assert_eq!(
+        (mvx, mvy),
+        (0, 0),
+        "a flat region gives an exact SAD tie at every candidate, which must \
+         resolve to the zero-motion seed, not the window corner \
+         (-{search_radius}, -{search_radius}); got ({mvx}, {mvy})",
+    );
+    // `best_sad == 0` here regardless of which candidate wins the tie,
+    // so confidence is `1.0` either way. The MV assertion above is
+    // what actually distinguishes the fix. Asserted anyway so a future
+    // change to the confidence formula that breaks the exact-zero case
+    // shows up here too.
+    assert_eq!(
+        confidence, 1.0,
+        "an exact SAD=0 match should give full confidence"
+    );
+}
+
+/// SAD tie-break regression test (coarse pass). Same premise as
+/// `block_match_fine_flat_region_tie_resolves_to_zero_motion`, but for
+/// `nlm_mc_block_match_coarse`. A corner-favouring tie here seeds every
+/// fine block the coarse block covers from the wrong position, so
+/// under `Chained` estimation the bias compounds across pyramid
+/// levels.
+#[test]
+fn block_match_coarse_flat_region_tie_resolves_to_zero_motion() {
+    let blksize = 16u32;
+    let search_radius = 4u32;
+    let value = 0.5f32;
+    let centre = vec![value; (blksize * blksize) as usize];
+    let neighbour = vec![value; (blksize * blksize) as usize];
+
+    let (mvx, mvy) = run_coarse_block_match_single_block(blksize, search_radius, &centre, &neighbour);
+
+    assert_eq!(
+        (mvx, mvy),
+        (0, 0),
+        "a flat region gives an exact SAD tie at every candidate, which the \
+         coarse pass must resolve to the zero-motion candidate, not the window \
+         corner (-{search_radius}, -{search_radius}); got ({mvx}, {mvy})",
     );
 }
 
@@ -412,6 +523,135 @@ fn motion_compensation_translating_square_preserves_centre() {
         "background pixel (2, 2) should stay near {bg}, got {bg_val} \
          (MC may be warping neighbour squares into the background region)",
     );
+}
+
+/// MV-field binding-offset alignment guard. A 1080x1080 frame at the
+/// library defaults (`blksize=16`, `overlap=8`, so `step=8`) gives
+/// 135x135 = 18225 blocks, an odd count whose unpadded per-neighbour MV
+/// stride isn't a 32-byte multiple. `wgpu` rejects a storage-buffer
+/// binding offset that isn't a multiple of its
+/// `min_storage_buffer_offset_alignment`, so neighbour 1's dispatch
+/// fails outright at this exact size unless the stride is padded (see
+/// `mv_field_byte_offset`). 1920x1080, the size every other test in
+/// this crate uses, happens to land on an even block count at this
+/// geometry and never exercises the bug, which is why this dedicated
+/// size is needed.
+#[test]
+fn motion_compensation_1080_square_odd_block_count_dispatch_succeeds() {
+    let client = make_client();
+    let w = 1080u32;
+    let h = 1080u32;
+    let frame = make_uniform_frame(w, h, 1, 0.5);
+
+    let params = NlmParams {
+        temporal_radius: 1,
+        search_radius: 2,
+        patch_radius: 2,
+        strength: 1.2,
+        self_weight: 1.0,
+        channels: ChannelMode::Luma,
+        prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::mvtools_default(),
+        hq: None,
+    };
+    let mc = MotionCtx::new(params.motion_compensation, w, h).unwrap();
+    assert_eq!(
+        mc.blocks_x * mc.blocks_y,
+        18225,
+        "test premise: this geometry gives an odd block count"
+    );
+
+    let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
+    d.push_frame(&frame);
+    d.push_frame(&frame);
+    d.push_frame(&frame);
+    let result = d.denoise().unwrap().unwrap().to_vec();
+
+    assert_eq!(result.len(), (w * h) as usize);
+    for (i, &v) in result.iter().enumerate() {
+        assert!(v.is_finite(), "pixel {i}: non-finite output {v}");
+        assert!(
+            (v - 0.5).abs() < 1e-3,
+            "pixel {i}: expected 0.5 (uniform input passthrough), got {v}"
+        );
+    }
+}
+
+/// Pair-ring binding-offset alignment guard. Same 1080x1080 odd-block-
+/// count geometry as `motion_compensation_1080_square_odd_block_count_dispatch_succeeds`
+/// above, but with `Chained` estimation pinned explicitly, so the pair
+/// ring actually gets allocated and exercised. `mvtools_default()`
+/// pins `Direct`, whose dispatch never touches `pair_ring_buf` at all,
+/// so the test above never binds into it through `pair_byte_offset`,
+/// only into the MV field. Every other `Chained` test in this file
+/// uses `CHAIN_TEST_SIZE = 64` with `blksize = 8` (256 blocks, an even
+/// count), so none of them reach an odd block count either. Pushing
+/// enough real frames past the priming window exercises both
+/// `zero_pair_slot` (the duplicated priming slots) and
+/// `run_pair_analyse_for_slot`/`run_chain_compose` (real hops), all of
+/// which bind into the pair ring via `pair_byte_offset`.
+#[test]
+fn motion_compensation_1080_square_odd_block_count_chained_dispatch_succeeds() {
+    let client = make_client();
+    let w = 1080u32;
+    let h = 1080u32;
+    let radius = 2u32;
+    let frames: Vec<Vec<f32>> = (0..8)
+        .map(|i| make_frame_with_noisy_region(w, h, 1, 0.5, 200 + i * 4, 200, 8, 0.8))
+        .collect();
+
+    let params = NlmParams {
+        temporal_radius: radius,
+        search_radius: 2,
+        patch_radius: 2,
+        strength: 1.2,
+        self_weight: 1.0,
+        channels: ChannelMode::Luma,
+        prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::Mvtools {
+            blksize: DEFAULT_BLKSIZE,
+            overlap: DEFAULT_OVERLAP,
+            search_radius: DEFAULT_SEARCH_RADIUS,
+            pyramid_levels: DEFAULT_PYRAMID_LEVELS,
+            estimation: MotionEstimation::chained_default(),
+        },
+        hq: None,
+    };
+    let mc = MotionCtx::new(params.motion_compensation, w, h).unwrap();
+    assert_eq!(
+        mc.blocks_x * mc.blocks_y,
+        18225,
+        "test premise: this geometry gives an odd block count"
+    );
+
+    let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
+    assert!(
+        d.pair_ring_buf.is_some(),
+        "test premise: Chained estimation must allocate the pair ring"
+    );
+
+    let check = |frame: &[f32]| {
+        for (i, &v) in frame.iter().enumerate() {
+            assert!(v.is_finite(), "pixel {i}: non-finite output {v}");
+            assert!((-0.01..=1.01).contains(&v), "pixel {i}: out-of-range output {v}");
+        }
+    };
+
+    let mut emitted = 0usize;
+    for frame in &frames {
+        d.push_frame(frame);
+        if let Some(result) = d.denoise().unwrap() {
+            check(result);
+            emitted += 1;
+        }
+    }
+    d.flush(|frame| {
+        check(frame);
+        emitted += 1;
+    })
+    .unwrap();
+
+    assert_eq!(emitted, frames.len(), "expected one output per pushed frame");
 }
 
 // --- Coarse-seeding tiling and pyramid level-0 extraction guards.

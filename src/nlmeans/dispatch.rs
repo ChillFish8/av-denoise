@@ -30,6 +30,7 @@ use super::motion::{
     run_seeded_refine,
 };
 use super::noise::{build_spatial_offset_lut, spatial_offset_factor, spatial_offset_lut_len};
+use super::prefilter::PrefilterMode;
 use super::{BLOCK_1D, BLOCK_X, BLOCK_X_THIN, BLOCK_Y, BLOCK_Y_THIN, MAX_GRID_1D};
 
 /// Derived sizes plus dispatch shape for the per-frame work, bundled so
@@ -61,6 +62,73 @@ fn neighbour_idx_for_k(radius: u32, k: i32) -> u32 {
         (k + radius as i32) as u32
     } else {
         (radius as i32 - 1 + k) as u32
+    }
+}
+
+/// Share of the raw input's noise sigma the `NlmSpatial` pilot's own
+/// reference still carries. Calibrated, not derived, by sweeping `{0,
+/// 0.25, 0.5, 0.75, 1.0}` against `--algorithm nlmeans-hq --prefilter
+/// nlm --motion-compensation` on `clean-1080p.mkv`'s light noise
+/// levels (`alls 4/6/8`, luma XPSNR and SSIM, matching
+/// `scripts/quality_runs_light.toml`'s own calibration convention).
+/// The sweep came back nearly flat (at most 0.10 dB / 0.0013 SSIM of
+/// spread across the whole grid, both metrics agreeing on direction),
+/// with the peak at the `1.0` edge, no correction at all, the opposite
+/// of this value. `0` is kept anyway: a floor that swamps `thsad`
+/// makes confidence unable to discriminate a genuine mismatch by
+/// construction, independent of whether this one clip's content
+/// happens to exercise that failure mode within the sweep, and the
+/// grid's own flatness means this choice costs nothing measurable on
+/// it either way.
+const NLM_SPATIAL_RESIDUAL_FRACTION: f32 = 0.0;
+
+/// Share of the raw input's noise sigma the `Bilateral` prefilter's
+/// reference still carries. Calibrated the same way as
+/// [`NLM_SPATIAL_RESIDUAL_FRACTION`], against `--prefilter
+/// bilateral:3.0,0.02 --motion-compensation` (this repo's own
+/// calibrated `sigma_s, sigma_r` pair, see `scripts/quality_runs.toml`
+/// and `scripts/bench_runs.toml`). Unlike `NlmSpatial`, this sweep
+/// landed cleanly and monotonically on `0` at every tested noise
+/// level, with a real and growing margin (0.16 dB at the lightest
+/// noise level tested up to 0.57 dB at the heaviest), so `0` here is a
+/// genuine empirical result, not a judgement call. It lands on the
+/// same numeric value as `NLM_SPATIAL_RESIDUAL_FRACTION` by
+/// coincidence of two different reasoning paths, not because the two
+/// prefilters were shown to share one constant, so they stay separate
+/// constants rather than being unified into one.
+const BILATERAL_RESIDUAL_FRACTION: f32 = 0.0;
+
+/// Sigma to feed [`motion::sad_noise_floor`] for the motion-compensation
+/// block match. `run_motion_compensation` matches against
+/// `pyramid_reference` whenever it exists (see `analyse_pyramid` in
+/// that method), not the raw input pyramid. `sad_noise_floor` models
+/// the SAD of two *raw* noisy copies, so `sigma_y` (the raw input's
+/// sigma) only belongs there when the match actually runs on raw
+/// pixels. A GPU-internal prefilter (`NlmSpatial`'s pilot pass, or
+/// `Bilateral`) denoises the frame before the match ever sees it, so
+/// the raw floor overstates the real one there. At `NlmSpatial`,
+/// default `blksize`, σ_y = 0.02, the raw floor (≈5.78) alone exceeds
+/// `thsad` (5.12), swamping confidence's entire dynamic range and
+/// clamping confidence to 1.0 everywhere, including genuinely occluded
+/// blocks.
+///
+/// Rather than asserting a fixed model of how much noise either
+/// prefilter leaves behind (which would only be a different unverified
+/// guess in place of the one being fixed), the sigma actually used is
+/// `sigma_y * residual_fraction`, with `residual_fraction` measured per
+/// prefilter by a quality sweep rather than derived (see
+/// [`NLM_SPATIAL_RESIDUAL_FRACTION`]/[`BILATERAL_RESIDUAL_FRACTION`]).
+/// `0` (the raw floor contributes nothing) and `1` (the pre-fix,
+/// buggy behaviour) are just the grid's two endpoints.
+///
+/// `External`'s reference is caller-supplied with unknown noise
+/// characteristics, not something this crate denoised, so it keeps the
+/// raw sigma unconditionally, the same as `PrefilterMode::None`.
+fn mc_sad_noise_floor_sigma(prefilter: PrefilterMode, sigma_y: f32) -> f32 {
+    match prefilter {
+        PrefilterMode::NlmSpatial { .. } => sigma_y * NLM_SPATIAL_RESIDUAL_FRACTION,
+        PrefilterMode::Bilateral { .. } => sigma_y * BILATERAL_RESIDUAL_FRACTION,
+        PrefilterMode::External | PrefilterMode::None => sigma_y,
     }
 }
 
@@ -624,7 +692,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             None => (&self.confidence_dummy, false),
         };
         let thsad_scale = self.params.hq.map_or(1.0, |hq| hq.thsad_scale);
-        let sad_noise_floor = motion::sad_noise_floor(mc.blksize, self.sigma_y);
+        let mc_sigma_y = mc_sad_noise_floor_sigma(self.params.prefilter, self.sigma_y);
+        let sad_noise_floor = motion::sad_noise_floor(mc.blksize, mc_sigma_y);
         let thsad = motion::thsad(mc.blksize, thsad_scale);
 
         // Centre frame: straight passthrough copy so the temporal
@@ -1063,7 +1132,13 @@ fn copy_frame_into_slot_handle<R: Runtime>(
 
 #[cfg(test)]
 mod tests {
-    use super::neighbour_idx_for_k;
+    use super::{
+        BILATERAL_RESIDUAL_FRACTION,
+        NLM_SPATIAL_RESIDUAL_FRACTION,
+        PrefilterMode,
+        mc_sad_noise_floor_sigma,
+        neighbour_idx_for_k,
+    };
 
     /// Walking `k = -radius..=radius` (skipping 0) and incrementing a
     /// counter from 0 must reproduce `neighbour_idx_for_k` exactly, for
@@ -1111,5 +1186,50 @@ mod tests {
         assert_eq!(neighbour_idx_for_k(2, -1), 1);
         assert_eq!(neighbour_idx_for_k(2, 1), 2);
         assert_eq!(neighbour_idx_for_k(2, 2), 3);
+    }
+
+    /// Pins the calibrated constant itself to a literal, not a value
+    /// re-derived from the constant under test, so a future recalibration
+    /// that changes it actually fails this test instead of trivially
+    /// re-passing.
+    #[test]
+    fn nlm_spatial_residual_fraction_is_calibrated_to_zero() {
+        assert_eq!(NLM_SPATIAL_RESIDUAL_FRACTION, 0.0);
+    }
+
+    #[test]
+    fn bilateral_residual_fraction_is_calibrated_to_zero() {
+        assert_eq!(BILATERAL_RESIDUAL_FRACTION, 0.0);
+    }
+
+    #[test]
+    fn mc_sad_noise_floor_sigma_scales_nlm_spatial_by_the_calibrated_fraction() {
+        let raw = 0.02f32;
+        assert_eq!(
+            mc_sad_noise_floor_sigma(PrefilterMode::NlmSpatial { strength_scale: 1.0 }, raw),
+            raw * NLM_SPATIAL_RESIDUAL_FRACTION
+        );
+    }
+
+    #[test]
+    fn mc_sad_noise_floor_sigma_scales_bilateral_by_the_calibrated_fraction() {
+        let raw = 0.02f32;
+        assert_eq!(
+            mc_sad_noise_floor_sigma(
+                PrefilterMode::Bilateral {
+                    sigma_s: 3.0,
+                    sigma_r: 0.02
+                },
+                raw
+            ),
+            raw * BILATERAL_RESIDUAL_FRACTION
+        );
+    }
+
+    #[test]
+    fn mc_sad_noise_floor_sigma_keeps_raw_sigma_for_none_and_external() {
+        let raw = 0.02f32;
+        assert_eq!(mc_sad_noise_floor_sigma(PrefilterMode::None, raw), raw);
+        assert_eq!(mc_sad_noise_floor_sigma(PrefilterMode::External, raw), raw);
     }
 }

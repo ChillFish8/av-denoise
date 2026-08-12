@@ -9,15 +9,19 @@ use crate::nlmeans::{BLOCK_1D, MAX_GRID_1D};
 
 /// Byte offset of a `(pair_slot, direction)` sub-array inside the pair
 /// ring, laid out `[pair_slot][direction][block_y][block_x][2]` of
-/// `i32` (direction 0 = older→newer, 1 = newer→older). `pair_slot` is
-/// keyed by the newer frame's position in the push sequence, reduced
-/// modulo `2 * temporal_radius` (see
-/// [`super::pair_ring_slot_count`]'s doc comment for the lifetime this
-/// sizing guarantees).
+/// `i32` (direction 0 = older→newer, 1 = newer→older), with each
+/// direction's slice padded up to a 32-byte boundary (see
+/// [`MotionCtx::pair_direction_bytes`]). `pair_slot` is keyed by the
+/// newer frame's position in the push sequence, reduced modulo
+/// `2 * temporal_radius` (see [`super::pair_ring_slot_count`]'s doc
+/// comment for the lifetime this sizing guarantees). The
+/// `nlm_mc_chain_compose` kernel reads the whole pair ring unsliced
+/// and strides through it with the same padded values
+/// (`MotionCtx::pair_direction_stride`/`pair_slot_stride`), so a
+/// change here must stay in sync with that kernel's own stride
+/// arguments.
 pub(crate) fn pair_byte_offset(mc: &MotionCtx, pair_slot: u32, direction: u32) -> u64 {
-    let dir_len = mc.pair_direction_len() as u64;
-    let slot_len = mc.pair_slot_len() as u64;
-    ((pair_slot as u64) * slot_len + (direction as u64) * dir_len) * (size_of::<i32>() as u64)
+    (pair_slot as u64) * mc.pair_slot_bytes() + (direction as u64) * mc.pair_direction_bytes()
 }
 
 /// Run the adjacent-frame pair analyse for one pushed frame, storing
@@ -86,34 +90,42 @@ pub(crate) fn run_pair_analyse<R: Runtime>(
 /// Zero-fill both directions of `pair_slot`. Used for duplicated ring
 /// slots (stream priming and end-of-stream flush), whose pair is zero
 /// motion by definition since both "frames" are identical content.
+/// Zeroes each direction with its own dispatch, at its own padded
+/// offset, since the two directions no longer sit contiguously once
+/// `pair_direction_bytes` pads between them.
 pub(crate) fn zero_pair_slot<R: Runtime>(
     client: &ComputeClient<R>,
     mc: &MotionCtx,
     pair_ring: &Handle,
     pair_slot: u32,
 ) {
-    let offset = pair_byte_offset(mc, pair_slot, 0);
-    let length = mc.pair_slot_len();
-    let dst = pair_ring.clone().offset_start(offset);
-
+    let length = mc.pair_direction_len();
     let grid = length.div_ceil(BLOCK_1D).min(MAX_GRID_1D);
     let total_threads = grid * BLOCK_1D;
 
-    unsafe {
-        nlm_mc_pair_zero::launch_unchecked::<R>(
-            client,
-            CubeCount::new_1d(grid),
-            CubeDim::new_1d(BLOCK_1D),
-            ArrayArg::from_raw_parts(dst, length as usize),
-            length,
-            total_threads,
-        );
+    for direction in 0..2u32 {
+        let offset = pair_byte_offset(mc, pair_slot, direction);
+        let dst = pair_ring.clone().offset_start(offset);
+
+        unsafe {
+            nlm_mc_pair_zero::launch_unchecked::<R>(
+                client,
+                CubeCount::new_1d(grid),
+                CubeDim::new_1d(BLOCK_1D),
+                ArrayArg::from_raw_parts(dst, length as usize),
+                length,
+                total_threads,
+            );
+        }
     }
 }
 
 /// Launch `nlm_mc_chain_compose` once, writing the composed motion
 /// field into `mv_field` at `neighbour_idx`'s slot (the same slot
 /// convention `run_motion_compensation` uses for the direct path).
+/// Passes the padded per-direction/per-slot pair-ring strides through
+/// explicitly, since the kernel reads the whole pair ring unsliced and
+/// must stride through it the same way `pair_byte_offset` does.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_chain_compose<R: Runtime>(
     client: &ComputeClient<R>,
@@ -151,6 +163,8 @@ fn dispatch_chain_compose<R: Runtime>(
             forward,
             steps,
             pair_ring_slots,
+            mc.pair_direction_stride(),
+            mc.pair_slot_stride(),
             mc.step,
             width,
             height,
@@ -227,7 +241,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         };
         let start_pair_slot = self.pair_slot(start_gap);
         let pair_ring_slots = super::pair_ring_slot_count(radius);
-        let pair_ring_len = pair_ring_slots as usize * mc.pair_slot_len() as usize;
+        let pair_ring_len = pair_ring_slots as usize * mc.pair_slot_stride() as usize;
         let neighbour_idx = neighbour_idx_for_k(radius, k);
 
         dispatch_chain_compose::<R>(
@@ -250,6 +264,7 @@ impl<R: Runtime> NlmDenoiser<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nlmeans::motion::{MotionCompensationMode, MotionEstimation};
 
     #[test]
     fn neighbour_idx_for_k_matches_dispatch_convention() {
@@ -259,5 +274,67 @@ mod tests {
         assert_eq!(neighbour_idx_for_k(2, -1), 1);
         assert_eq!(neighbour_idx_for_k(2, 1), 2);
         assert_eq!(neighbour_idx_for_k(2, 2), 3);
+    }
+
+    #[test]
+    fn pair_byte_offset_pads_small_block_counts_to_32_bytes() {
+        // One block (4x4 frame, blksize=4, overlap=0 => step=4 => 1x1
+        // blocks), so the unpadded direction stride (1 block * 2 i32
+        // components * 4 bytes = 8 bytes) would place direction 1 at a
+        // non-32-aligned offset.
+        let m = MotionCtx::new(
+            MotionCompensationMode::Mvtools {
+                blksize: 4,
+                overlap: 0,
+                search_radius: 1,
+                pyramid_levels: 1,
+                estimation: MotionEstimation::Direct,
+            },
+            4,
+            4,
+        )
+        .unwrap();
+        assert_eq!(
+            m.blocks_x * m.blocks_y,
+            1,
+            "fixture should have exactly one block"
+        );
+        assert_eq!(pair_byte_offset(&m, 0, 0), 0);
+        assert_eq!(pair_byte_offset(&m, 0, 1), 32);
+        assert_eq!(pair_byte_offset(&m, 1, 0), 64);
+        assert_eq!(pair_byte_offset(&m, 1, 1), 96);
+    }
+
+    #[test]
+    fn pair_byte_offset_direction_one_pads_even_when_slot_base_is_aligned() {
+        // Two blocks (8x4 frame, blksize=4, overlap=0 => step=4 =>
+        // 2x1 blocks). The unpadded per-slot stride (2 blocks * 2
+        // directions * 2 i32 components * 4 bytes = 32 bytes) is
+        // already 32-aligned, so every slot's own base offset is fine
+        // on its own. But the unpadded per-direction stride within
+        // that slot (2 blocks * 2 i32 components * 4 bytes = 16 bytes)
+        // is not, so direction 1 still needs its own padding even
+        // though direction 0's slot base never did.
+        let m = MotionCtx::new(
+            MotionCompensationMode::Mvtools {
+                blksize: 4,
+                overlap: 0,
+                search_radius: 1,
+                pyramid_levels: 1,
+                estimation: MotionEstimation::Direct,
+            },
+            8,
+            4,
+        )
+        .unwrap();
+        assert_eq!(
+            m.blocks_x * m.blocks_y,
+            2,
+            "fixture should have exactly two blocks"
+        );
+        assert_eq!(pair_byte_offset(&m, 0, 0), 0);
+        assert_eq!(pair_byte_offset(&m, 0, 1), 32);
+        assert_eq!(pair_byte_offset(&m, 1, 0), 64);
+        assert_eq!(pair_byte_offset(&m, 1, 1), 96);
     }
 }

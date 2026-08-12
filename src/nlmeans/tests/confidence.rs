@@ -216,6 +216,72 @@ fn confidence_mismatched_block_at_blksize_16_is_near_zero() {
     );
 }
 
+/// Discriminating regression test for the raw-sigma-vs-prefiltered
+/// noise floor bug (`dispatch.rs`'s `mc_sad_noise_floor_sigma`, unit
+/// tested in isolation there since it's a plain host-side function;
+/// this exercises what it feeds into instead). Builds two block pairs
+/// at a small residual noise level representative of a cleaned
+/// reference (well below a typical raw σ_y): one genuinely matched
+/// (same content, independent residual noise), one genuinely occluded
+/// (a modest but real base-level shift). Runs both under two floors:
+/// the *raw* input sigma (the pre-fix behaviour, oversized for this
+/// content) and a floor sized to the small residual noise instead
+/// (what the fix produces). The raw floor swamps `thsad` and clamps
+/// even the occluded pair near confidence 1, indistinguishable from
+/// the matched pair, reproducing the bug. The residual-scale floor
+/// keeps the matched pair confident while letting the occluded pair
+/// drop well below 1.
+#[test]
+fn confidence_discriminates_occluded_from_matched_at_prefilter_scale_noise() {
+    let blksize = 16;
+    // Representative of a prefiltered reference's small residual noise
+    // (an order of magnitude below a typical raw σ_y).
+    let residual_sigma = 0.002f32;
+    // Representative raw input sigma, the pre-fix floor's input.
+    let raw_sigma = 0.02f32;
+    let th = thsad(blksize, 1.0);
+
+    let matched_centre = noisy_copy(blksize, 0.5, residual_sigma, 50);
+    let matched_neighbour = noisy_copy(blksize, 0.5, residual_sigma, 51);
+    // A modest but genuine base-level shift, small next to a typical
+    // raw floor but large next to the residual noise itself.
+    let occluded_centre = noisy_copy(blksize, 0.5, residual_sigma, 52);
+    let occluded_neighbour = noisy_copy(blksize, 0.518, residual_sigma, 53);
+
+    let raw_floor = sad_noise_floor(blksize, raw_sigma);
+    let matched_conf_raw_floor =
+        run_fine_confidence(blksize, &matched_centre, &matched_neighbour, raw_floor, th);
+    let occluded_conf_raw_floor =
+        run_fine_confidence(blksize, &occluded_centre, &occluded_neighbour, raw_floor, th);
+    assert!(
+        matched_conf_raw_floor > 0.99,
+        "matched pair under the raw-sigma floor should already read as confident, \
+         got {matched_conf_raw_floor}"
+    );
+    assert!(
+        occluded_conf_raw_floor > 0.9,
+        "reproduces the bug: an oversized raw-sigma floor swamps thsad and clamps even the \
+         occluded pair near confidence 1, indistinguishable from the matched pair; \
+         got {occluded_conf_raw_floor}"
+    );
+
+    let residual_floor = sad_noise_floor(blksize, residual_sigma);
+    let matched_conf_residual_floor =
+        run_fine_confidence(blksize, &matched_centre, &matched_neighbour, residual_floor, th);
+    let occluded_conf_residual_floor =
+        run_fine_confidence(blksize, &occluded_centre, &occluded_neighbour, residual_floor, th);
+    assert!(
+        matched_conf_residual_floor > 0.9,
+        "matched pair should stay confident under the residual-scale floor too, not penalised \
+         just because the floor shrank; got {matched_conf_residual_floor}"
+    );
+    assert!(
+        occluded_conf_residual_floor < 0.5,
+        "occluded pair should no longer be clamped once the floor is sized to the actual \
+         (small) content noise instead of raw sigma; got {occluded_conf_residual_floor}"
+    );
+}
+
 /// `run_analyse` (the with-MC path) must fill the confidence buffer
 /// with real, in-range values, not leave it at whatever sentinel the
 /// caller pre-seeded it with. Pyramid data is supplied directly rather

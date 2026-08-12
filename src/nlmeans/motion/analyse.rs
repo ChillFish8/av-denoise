@@ -7,10 +7,10 @@ use crate::nlmeans::kernels::motion::{nlm_mc_block_match_coarse, nlm_mc_block_ma
 
 /// Byte offset of the MV-field slice for a given neighbour index.
 /// The MV-field buffer is laid out as `[neighbour][block_y][block_x][2]`
-/// of `i32` (2 components: dx, dy).
+/// of `i32` (2 components: dx, dy), with each neighbour's slice padded
+/// up to a 32-byte boundary (see [`MotionCtx::mv_field_bytes_per_neighbour`]).
 pub(crate) fn mv_field_byte_offset(mc: &MotionCtx, neighbour_idx: u32) -> u64 {
-    let per_neighbour = (mc.blocks_x as u64) * (mc.blocks_y as u64) * 2;
-    (neighbour_idx as u64) * per_neighbour * (size_of::<i32>() as u64)
+    (neighbour_idx as u64) * mc.mv_field_bytes_per_neighbour()
 }
 
 /// Byte offset of the confidence slice for a given neighbour index.
@@ -347,5 +347,58 @@ mod tests {
         assert_eq!(confidence_byte_offset(&m, 0), 0);
         assert_eq!(confidence_byte_offset(&m, 1), 32);
         assert_eq!(confidence_byte_offset(&m, 2), 64);
+    }
+
+    #[test]
+    fn mv_field_offset_pads_small_block_counts_to_32_bytes() {
+        // Same fixture as `confidence_offset_pads_small_block_counts_to_32_bytes`:
+        // one block, so the unpadded MV-field stride (1 block * 2 i32
+        // components * 4 bytes = 8 bytes) would place neighbour 1 at a
+        // non-32-aligned offset.
+        let m = MotionCtx::new(
+            MotionCompensationMode::Mvtools {
+                blksize: 4,
+                overlap: 0,
+                search_radius: 1,
+                pyramid_levels: 1,
+                estimation: MotionEstimation::Direct,
+            },
+            4,
+            4,
+        )
+        .unwrap();
+        assert_eq!(
+            m.blocks_x * m.blocks_y,
+            1,
+            "fixture should have exactly one block"
+        );
+        assert_eq!(mv_field_byte_offset(&m, 0), 0);
+        assert_eq!(mv_field_byte_offset(&m, 1), 32);
+        assert_eq!(mv_field_byte_offset(&m, 2), 64);
+    }
+
+    #[test]
+    fn mv_field_offset_pads_the_1080_square_odd_block_count_case() {
+        // 1080x1080 at the library defaults (blksize=16, overlap=8, so
+        // step=8) gives 135x135 = 18225 blocks, an odd count. The
+        // unpadded stride (18225 blocks * 8 bytes = 145800) sits 8
+        // bytes past the preceding 32-byte boundary (145792), so it
+        // must round up to 145824 rather than leave neighbour 1
+        // misaligned. 1920x1080 (the harness's usual frame size)
+        // happens to land on an even block count at this geometry, so
+        // it never exercises this rounding.
+        let m = MotionCtx::new(MotionCompensationMode::mvtools_default(), 1080, 1080).unwrap();
+        assert_eq!(
+            m.blocks_x * m.blocks_y,
+            18225,
+            "test premise: this geometry gives an odd block count"
+        );
+        assert_eq!(
+            145_800u64 % 32,
+            8,
+            "test premise: the unpadded stride is not 32-aligned"
+        );
+        assert_eq!(mv_field_byte_offset(&m, 0), 0);
+        assert_eq!(mv_field_byte_offset(&m, 1), 145_824);
     }
 }

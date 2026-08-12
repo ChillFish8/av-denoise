@@ -130,6 +130,19 @@ pub fn nlm_mc_block_match_coarse(
         }
     }
 
+    // An exact SAD tie resolves to the zero-motion candidate rather
+    // than whichever candidate the raster scan above happened to
+    // reach first (the window corner, since it's scanned before the
+    // centre). A block lying entirely inside a flat region has the
+    // same SAD at every candidate, and reporting spurious motion there
+    // then seeds the fine pass, and every block it covers, from a
+    // shifted position no pixel comparison ever preferred.
+    let zero_sad = sad_scratch[(search_radius * window_side + search_radius) as usize];
+    if zero_sad <= best_sad {
+        best_dx = 0i32;
+        best_dy = 0i32;
+    }
+
     // Project coarse block index into the fine-block index space by
     // position, not by literal index doubling. Coarse block `bx`
     // covers source pixels `[bx * step, (bx + 1) * step)` at the
@@ -325,6 +338,22 @@ pub fn nlm_mc_block_match_fine(
                 best_dy = seed_dy + (dy as i32 - search_radius as i32);
             }
         }
+    }
+
+    // An exact SAD tie resolves to the seed itself (zero additional
+    // motion beyond whatever the coarse pass already seeded) rather
+    // than whichever candidate the raster scan above happened to reach
+    // first (the window corner, since it's scanned before the centre).
+    // A block lying entirely inside a flat region has the same SAD at
+    // every candidate, and reporting spurious motion there both warps
+    // in pixels no comparison ever preferred and, since `best_sad == 0`
+    // in that case, writes a falsely perfect confidence for what may be
+    // a genuinely occluded block.
+    let seed_sad = sad_scratch[(search_radius * window_side + search_radius) as usize];
+    if seed_sad <= best_sad {
+        best_sad = seed_sad;
+        best_dx = seed_dx;
+        best_dy = seed_dy;
     }
 
     mv_field[mv_slot] = best_dx;

@@ -280,32 +280,66 @@ impl MotionCtx {
         (self.blocks_x * self.blocks_y) as usize
     }
 
+    /// Padded per-neighbour MV-field stride in bytes. Two `i32`
+    /// components (`dx`, `dy`) per block, rounded up to the GPU
+    /// storage-buffer offset alignment (32 bytes), the same convention
+    /// [`Self::confidence_bytes_per_neighbour`] uses. `wgpu` rejects a
+    /// bind-group offset that isn't a multiple of its
+    /// `min_storage_buffer_offset_alignment`, and an odd block count
+    /// leaves the unpadded 8-byte-per-block stride short of a 32-byte
+    /// multiple.
+    pub(crate) fn mv_field_bytes_per_neighbour(&self) -> u64 {
+        let blocks = (self.blocks_x as u64) * (self.blocks_y as u64);
+        (blocks * 2 * size_of::<i32>() as u64).next_multiple_of(32)
+    }
+
     /// Padded per-neighbour confidence-buffer stride in bytes. One
     /// `f32` per block, rounded up to the GPU storage-buffer offset
-    /// alignment (32 bytes). Small block counts (as few as one block
-    /// for tiny frames) would otherwise produce a per-neighbour stride
-    /// under 32 bytes, and `wgpu` rejects a bind-group offset that
-    /// isn't a multiple of its `min_storage_buffer_offset_alignment`.
-    /// The MV field avoids this by using two `i32` components per
-    /// block (8 bytes), which happens to land on a 32-byte multiple
-    /// for the block counts exercised so far. The confidence buffer's
-    /// single `f32` per block doesn't have that margin, so it pads
-    /// explicitly instead of relying on coincidence.
+    /// alignment (32 bytes), the same convention
+    /// [`Self::mv_field_bytes_per_neighbour`] uses for the MV field.
     pub(crate) fn confidence_bytes_per_neighbour(&self) -> u64 {
         let blocks = (self.blocks_x as u64) * (self.blocks_y as u64);
         (blocks * size_of::<f32>() as u64).next_multiple_of(32)
     }
 
     /// i32 elements per pair-ring direction sub-array, one `(dx, dy)`
-    /// per block, matching the MV field's own per-neighbour layout.
+    /// per block. This is the unpadded element count a direction's
+    /// data actually spans, used as the zero-fill length in
+    /// `zero_pair_slot` and as the input to
+    /// [`Self::pair_direction_bytes`]'s padding.
     pub(crate) fn pair_direction_len(&self) -> u32 {
         self.blocks_x * self.blocks_y * 2
     }
 
-    /// i32 elements per pair-ring slot, both directions back to back
-    /// (see [`pair_ring_slot_count`] for the slot-count invariant).
-    pub(crate) fn pair_slot_len(&self) -> u32 {
-        2 * self.pair_direction_len()
+    /// Padded per-direction pair-ring stride in bytes, rounded up to
+    /// the GPU storage-buffer offset alignment (32 bytes), the same
+    /// convention [`Self::confidence_bytes_per_neighbour`] uses. Both
+    /// `pair_byte_offset` (the host-side write and zero-fill offset)
+    /// and the chain-compose kernel's own internal read stride use
+    /// this padded value, so a direction's data starts at the same
+    /// place for every reader and writer.
+    pub(crate) fn pair_direction_bytes(&self) -> u64 {
+        (self.pair_direction_len() as u64 * size_of::<i32>() as u64).next_multiple_of(32)
+    }
+
+    /// Padded per-slot pair-ring stride in bytes, both directions back
+    /// to back.
+    pub(crate) fn pair_slot_bytes(&self) -> u64 {
+        2 * self.pair_direction_bytes()
+    }
+
+    /// Padded per-direction pair-ring stride in i32 elements. The
+    /// chain-compose kernel reads the whole pair ring as one unsliced
+    /// array and strides through it with this value, matching
+    /// [`Self::pair_direction_bytes`] exactly.
+    pub(crate) fn pair_direction_stride(&self) -> u32 {
+        (self.pair_direction_bytes() / size_of::<i32>() as u64) as u32
+    }
+
+    /// Padded per-slot pair-ring stride in i32 elements, both
+    /// directions back to back.
+    pub(crate) fn pair_slot_stride(&self) -> u32 {
+        2 * self.pair_direction_stride()
     }
 
     /// Block geometry for the no-MC confidence pass. Uses the
