@@ -124,18 +124,25 @@ pub struct Args {
 
     /// Which planes of the video to clean (comma-separated).
     ///
-    /// `luma` cleans only the brightness plane.
+    /// `luma` cleans only the brightness plane. Colour passes through
+    /// untouched, which is cheaper when only luma carries grain.
     ///
     /// `chroma` cleans only the colour planes at their native size.
     ///
-    /// `luma,chroma` cleans both as two independent passes, which is
-    /// usually what you want for noisy footage.
+    /// `luma,chroma` cleans both as two independent passes. This is the
+    /// default and is usually what you want for noisy footage.
     ///
     /// `yuv` cleans all three planes in one fused pass.
     ///
     /// `yuv` needs a YUV444 source and cannot be combined with the
     /// other modes.
-    #[arg(long, value_enum, value_delimiter = ',', default_values_t = vec![CliChannelMode::Luma], global = true)]
+    #[arg(
+        long,
+        value_enum,
+        value_delimiter = ',',
+        default_value = "luma,chroma",
+        global = true
+    )]
     pub channel_mode: Vec<CliChannelMode>,
 
     /// Shows a progress bar for the denoising pass when `--input`

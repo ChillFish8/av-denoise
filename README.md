@@ -307,10 +307,11 @@ av-denoise nlmeans --preset slow --motion-compensation --input noisy.mkv \
   | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
 ```
 
-**Colour speckle as well as luma grain.** By default only the brightness plane is cleaned.
+**Brightness only, for speed.** Both planes are cleaned by default. Narrow to luma when the colour
+is already clean and you want the time back.
 
 ```bash
-av-denoise nlmeans --channel-mode luma,chroma --input noisy.mkv \
+av-denoise nlmeans --channel-mode luma --input noisy.mkv \
   | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
 ```
 
@@ -449,11 +450,11 @@ Options:
       --channel-mode <CHANNEL_MODE>
           Which planes of the video to clean (comma-separated).
 
-          `luma` cleans only the brightness plane.
+          `luma` cleans only the brightness plane. Colour passes through untouched, which is cheaper when only luma carries grain.
 
           `chroma` cleans only the colour planes at their native size.
 
-          `luma,chroma` cleans both as two independent passes, which is usually what you want for noisy footage.
+          `luma,chroma` cleans both as two independent passes. This is the default and is usually what you want for noisy footage.
 
           `yuv` cleans all three planes in one fused pass.
 
@@ -464,7 +465,7 @@ Options:
           - chroma: Clean only the colour planes (U, V). Brightness passes through
           - yuv:    Clean all three planes together in one pass. Needs a YUV444 source and cannot be combined with the other modes
 
-          [default: luma]
+          [default: luma,chroma]
 
       --progress
           Shows a progress bar for the denoising pass when `--input` names a file.
@@ -558,11 +559,11 @@ Options:
       --channel-mode <CHANNEL_MODE>
           Which planes of the video to clean (comma-separated).
 
-          `luma` cleans only the brightness plane.
+          `luma` cleans only the brightness plane. Colour passes through untouched, which is cheaper when only luma carries grain.
 
           `chroma` cleans only the colour planes at their native size.
 
-          `luma,chroma` cleans both as two independent passes, which is usually what you want for noisy footage.
+          `luma,chroma` cleans both as two independent passes. This is the default and is usually what you want for noisy footage.
 
           `yuv` cleans all three planes in one fused pass.
 
@@ -573,7 +574,7 @@ Options:
           - chroma: Clean only the colour planes (U, V). Brightness passes through
           - yuv:    Clean all three planes together in one pass. Needs a YUV444 source and cannot be combined with the other modes
 
-          [default: luma]
+          [default: luma,chroma]
 
       --prefilter <PREFILTER>
           Reference image used when comparing patches.

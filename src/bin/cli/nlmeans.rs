@@ -728,6 +728,29 @@ mod tests {
         assert_eq!(args.channel_mode, vec![CliChannelMode::Chroma]);
     }
 
+    /// Both planes are cleaned unless the caller narrows it, so a
+    /// noisy source needs no flag to get its colour cleaned too.
+    #[test]
+    fn channel_mode_defaults_to_luma_and_chroma() {
+        let (args, _) = parse(&[]);
+        assert_eq!(
+            args.channel_mode,
+            vec![CliChannelMode::Luma, CliChannelMode::Chroma]
+        );
+    }
+
+    /// The default resolves to the two-pass intent rather than either
+    /// single-plane one.
+    #[test]
+    fn default_channel_mode_resolves_to_the_luma_chroma_intent() {
+        let (args, _) = parse(&[]);
+        let intent = resolve_channel_intent(&args.channel_mode).expect("default should resolve");
+        assert!(
+            matches!(intent, crate::ingest::BinaryChannelIntent::LumaChroma),
+            "expected LumaChroma, got {intent:?}",
+        );
+    }
+
     #[test]
     fn variant_flag_is_case_insensitive() {
         let (_, nlm) = parse(&["--variant", "HQ"]);
