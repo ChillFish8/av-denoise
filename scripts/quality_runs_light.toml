@@ -67,7 +67,7 @@ kind = "noisy"
 name = "av_temporal_r2"
 kind = "av-denoise"
 workers = 2
-args = ["--algorithm", "nlmeans", "--temporal-radius", "2", "--channel-mode", "luma,chroma", "--strength", "$strength"]
+args = ["--variant", "fast", "--temporal-radius", "2", "--channel-mode", "luma,chroma", "--strength", "$strength"]
 
 # ---------------------------------------------------------------------------
 # HQ mode: noise level measured automatically, strength is a multiplier
@@ -79,13 +79,13 @@ args = ["--algorithm", "nlmeans", "--temporal-radius", "2", "--channel-mode", "l
 name = "av_hq_temporal_r2"
 kind = "av-denoise"
 workers = 2
-args = ["--algorithm", "nlmeans-hq", "--temporal-radius", "2", "--channel-mode", "luma,chroma"]
+args = ["--variant", "hq", "--temporal-radius", "2", "--channel-mode", "luma,chroma"]
 
 [[runs]]
 name = "av_hq_temporal_r4"
 kind = "av-denoise"
 workers = 2
-args = ["--algorithm", "nlmeans-hq", "--temporal-radius", "4", "--channel-mode", "luma,chroma"]
+args = ["--variant", "hq", "--temporal-radius", "4", "--channel-mode", "luma,chroma"]
 
 # ---------------------------------------------------------------------------
 # External baseline: BM3D via ffmpeg's CPU filter, run at its per-clip

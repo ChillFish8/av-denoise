@@ -116,7 +116,7 @@ pub struct CliOptions {
     /// Per-plane strength override for the chroma denoiser. Takes
     /// precedence over `nlm_tuning.strength` when set.
     pub chroma_strength: Option<f32>,
-    /// Draws the denoising progress bar in `file` mode.
+    /// Draws the denoising progress bar for file input.
     pub progress: bool,
 }
 
@@ -159,7 +159,7 @@ impl CliOptions {
 
 /// Interpret the result of a `WorkerDenoiser::push` call against the
 /// `push`-then-drain-then-retry dance both `file_mode.rs` and
-/// `stdin_mode.rs` use. `Ok(true)` means the queue was full and the
+/// `stream_mode.rs` use. `Ok(true)` means the queue was full and the
 /// caller should drain one output and push again. `Ok(false)` means the
 /// push already landed. Any error other than `QueueFull` propagates
 /// instead of being discarded.
@@ -628,7 +628,7 @@ mod passthrough_retry_tests {
 
     /// Chroma-only intent so `luma` is the disabled, passthrough half and
     /// `chroma` is the fallible one whose `QueueFull` drives the retry
-    /// dance in `push_with_drain`/`stdin_mode.rs`.
+    /// dance in `push_with_drain`/`stream_mode.rs`.
     fn chroma_only_opts() -> CliOptions {
         CliOptions {
             accelerators: vec![Accelerator::Vulkan],
@@ -760,7 +760,7 @@ mod lumachroma_lockstep_tests {
             let planes = marked_planes(layout, idx);
 
             // Mirror `push_with_drain`'s retry dance exactly: the same
-            // sequence `file_mode.rs`/`stdin_mode.rs` drive in production.
+            // sequence `file_mode.rs`/`stream_mode.rs` drive in production.
             if push_needs_retry(wd.push(&planes)).expect("push_needs_retry") {
                 if let Some(out) = wd.recv().expect("recv failed") {
                     outputs.push(out);

@@ -51,20 +51,20 @@ kind = "noisy"
 name = "av_spatial"
 kind = "av-denoise"
 workers = 2
-args = ["--algorithm", "nlmeans", "--temporal-radius", "0", "--channel-mode", "luma,chroma", "--strength", "$strength"]
+args = ["--variant", "fast", "--temporal-radius", "0", "--channel-mode", "luma,chroma", "--strength", "$strength"]
 
 [[runs]]
 name = "av_temporal_r2"
 kind = "av-denoise"
 workers = 2
-args = ["--algorithm", "nlmeans", "--temporal-radius", "2", "--channel-mode", "luma,chroma", "--strength", "$strength"]
+args = ["--variant", "fast", "--temporal-radius", "2", "--channel-mode", "luma,chroma", "--strength", "$strength"]
 
 [[runs]]
 name = "av_temporal_r2_mc"
 kind = "av-denoise"
 workers = 2
 args = [
-    "--algorithm", "nlmeans",
+    "--variant", "fast",
     "--temporal-radius", "2",
     "--channel-mode", "luma,chroma",
     "--strength", "$strength",
@@ -76,7 +76,7 @@ name = "av_full_r2"
 kind = "av-denoise"
 workers = 2
 args = [
-    "--algorithm", "nlmeans",
+    "--variant", "fast",
     "--temporal-radius", "2",
     "--channel-mode", "luma,chroma",
     "--strength", "$strength",
@@ -113,13 +113,13 @@ sigma = "$bm3d_sigma"
 name = "av_hq_spatial"
 kind = "av-denoise"
 workers = 2
-args = ["--algorithm", "nlmeans-hq", "--temporal-radius", "0", "--channel-mode", "luma,chroma"]
+args = ["--variant", "hq", "--temporal-radius", "0", "--channel-mode", "luma,chroma"]
 
 [[runs]]
 name = "av_hq_temporal_r2"
 kind = "av-denoise"
 workers = 2
-args = ["--algorithm", "nlmeans-hq", "--temporal-radius", "2", "--channel-mode", "luma,chroma"]
+args = ["--variant", "hq", "--temporal-radius", "2", "--channel-mode", "luma,chroma"]
 
 # Confidence weighting is on by default in the row above; this row turns
 # it off so the harness can quantify what it buys.
@@ -128,7 +128,7 @@ name = "av_hq_temporal_r2_noconf"
 kind = "av-denoise"
 workers = 2
 args = [
-    "--algorithm", "nlmeans-hq",
+    "--variant", "hq",
     "--temporal-radius", "2",
     "--channel-mode", "luma,chroma",
     "--hq-no-temporal-confidence",
@@ -142,7 +142,7 @@ name = "av_hq_temporal_r2_mc"
 kind = "av-denoise"
 workers = 2
 args = [
-    "--algorithm", "nlmeans-hq",
+    "--variant", "hq",
     "--temporal-radius", "2",
     "--channel-mode", "luma,chroma",
     "--motion-compensation",
@@ -162,14 +162,14 @@ args = [
 name = "av_hq_temporal_r4"
 kind = "av-denoise"
 workers = 2
-args = ["--algorithm", "nlmeans-hq", "--temporal-radius", "4", "--channel-mode", "luma,chroma"]
+args = ["--variant", "hq", "--temporal-radius", "4", "--channel-mode", "luma,chroma"]
 
 [[runs]]
 name = "av_hq_temporal_r4_mc"
 kind = "av-denoise"
 workers = 2
 args = [
-    "--algorithm", "nlmeans-hq",
+    "--variant", "hq",
     "--temporal-radius", "4",
     "--channel-mode", "luma,chroma",
     "--motion-compensation",
@@ -183,7 +183,7 @@ name = "av_hq_temporal_r2_pilot"
 kind = "av-denoise"
 workers = 2
 args = [
-    "--algorithm", "nlmeans-hq",
+    "--variant", "hq",
     "--temporal-radius", "2",
     "--channel-mode", "luma,chroma",
     "--prefilter", "nlm",

@@ -270,9 +270,9 @@ def score_av_denoise(run: Run, noisy: Path, ref: Path, device: str) -> tuple[boo
         "--bin", "av-denoise",
         "--features", "binary",
         "--",
+        "nlmeans",
         *run.args,
         *device_args,
-        "file",
         "--workers", str(run.workers),
         "--input", str(noisy),
     ]

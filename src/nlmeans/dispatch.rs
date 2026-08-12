@@ -66,20 +66,19 @@ fn neighbour_idx_for_k(radius: u32, k: i32) -> u32 {
 }
 
 /// Share of the raw input's noise sigma the `NlmSpatial` pilot's own
-/// reference still carries. Calibrated, not derived, by sweeping `{0,
-/// 0.25, 0.5, 0.75, 1.0}` against `--algorithm nlmeans-hq --prefilter
-/// nlm --motion-compensation` on `clean-1080p.mkv`'s light noise
-/// levels (`alls 4/6/8`, luma XPSNR and SSIM, matching
-/// `scripts/quality_runs_light.toml`'s own calibration convention).
-/// The sweep came back nearly flat (at most 0.10 dB / 0.0013 SSIM of
-/// spread across the whole grid, both metrics agreeing on direction),
-/// with the peak at the `1.0` edge, no correction at all, the opposite
-/// of this value. `0` is kept anyway: a floor that swamps `thsad`
-/// makes confidence unable to discriminate a genuine mismatch by
-/// construction, independent of whether this one clip's content
-/// happens to exercise that failure mode within the sweep, and the
-/// grid's own flatness means this choice costs nothing measurable on
-/// it either way.
+/// reference still carries. Calibrated, not derived, by sweeping `{0, 0.25,
+/// 0.5, 0.75, 1.0}` against `--variant hq --prefilter nlm
+/// --motion-compensation` on `clean-1080p.mkv`'s light noise levels (`alls
+/// 4/6/8`, luma XPSNR and SSIM, matching
+/// `scripts/quality_runs_light.toml`'s own calibration convention). The
+/// sweep came back nearly flat (at most 0.10 dB / 0.0013 SSIM of spread
+/// across the whole grid, both metrics agreeing on direction), with the
+/// peak at the `1.0` edge, no correction at all, the opposite of this
+/// value. `0` is kept anyway, since a floor that swamps `thsad` makes
+/// confidence unable to discriminate a genuine mismatch by construction,
+/// independent of whether this one clip's content happens to exercise
+/// that failure mode within the sweep, and the grid's own flatness means
+/// this choice costs nothing measurable on it either way.
 const NLM_SPATIAL_RESIDUAL_FRACTION: f32 = 0.0;
 
 /// Share of the raw input's noise sigma the `Bilateral` prefilter's

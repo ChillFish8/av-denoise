@@ -111,8 +111,8 @@ def build_av_denoise(run: Run) -> tuple[list[str], list[str]]:
         "--bin", "av-denoise",
         "--features", "binary",
         "--",
+        "nlmeans",
         *run.args,
-        "file",
         "--workers", str(run.workers),
         "--input", str(run.input),
     ]

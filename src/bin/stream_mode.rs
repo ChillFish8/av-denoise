@@ -1,4 +1,4 @@
-use std::io::{stdin, stdout};
+use std::io::{Read, Write, stdout};
 
 use crate::ingest::{
     CliOptions,
@@ -11,9 +11,12 @@ use crate::ingest::{
     y4m_vendor_extensions,
 };
 
-pub fn run_stdin(opts: &CliOptions) -> Result<(), anyhow::Error> {
-    let stdin = stdin();
-    let mut decoder = y4m::Decoder::new(stdin.lock())?;
+/// Denoises a y4m stream frame by frame, writing y4m on stdout.
+///
+/// There is no scene detection here, so the temporal window slides
+/// across the whole stream.
+pub fn run_stream<R: Read>(opts: &CliOptions, reader: R) -> Result<(), anyhow::Error> {
+    let mut decoder = y4m::Decoder::new(reader)?;
 
     if decoder.get_bytes_per_sample() != 1 {
         anyhow::bail!(
@@ -50,7 +53,7 @@ pub fn run_stdin(opts: &CliOptions) -> Result<(), anyhow::Error> {
         width = layout.width,
         height = layout.height,
         subsampling = ?layout.subsampling,
-        "stdin pipeline ready",
+        "streaming pipeline ready",
     );
 
     loop {
@@ -88,12 +91,43 @@ pub fn run_stdin(opts: &CliOptions) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-fn write_planes(
-    encoder: &mut y4m::Encoder<std::io::StdoutLock<'_>>,
-    planes: &Planes,
-) -> Result<(), anyhow::Error> {
+fn write_planes<W: Write>(encoder: &mut y4m::Encoder<W>, planes: &Planes) -> Result<(), anyhow::Error> {
     let frame = y4m::Frame::new([&planes.y, &planes.u, &planes.v], None);
     encoder.write_frame(&frame)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `write_planes` is generic over its writer so the streaming path
+    /// can target stdout in production and an in-memory buffer here.
+    #[test]
+    fn write_planes_emits_a_frame_into_any_writer() {
+        let mut buf = Vec::new();
+        let mut encoder = y4m::encode(2, 2, y4m::Ratio::new(25, 1))
+            .with_colorspace(y4m::Colorspace::C420)
+            .write_header(&mut buf)
+            .expect("header should write");
+
+        let planes = Planes {
+            y: vec![16; 4],
+            u: vec![128; 1],
+            v: vec![128; 1],
+        };
+
+        write_planes(&mut encoder, &planes).expect("frame should write");
+        drop(encoder);
+
+        assert!(
+            buf.starts_with(b"YUV4MPEG2"),
+            "expected a y4m header, got {buf:?}"
+        );
+        assert!(
+            buf.windows(6).any(|w| w == b"FRAME\n"),
+            "expected a FRAME marker in {buf:?}",
+        );
+    }
 }
