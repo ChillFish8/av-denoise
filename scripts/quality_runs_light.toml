@@ -38,6 +38,12 @@ noise = [4, 6, 8]
 # All three land at the low end of the 3 to 6x range quality_runs.toml
 # found for bench-sample's heavier noise levels, consistent with
 # "lower ratio at lighter noise".
+#
+# These values were swept against an invocation that left `group` at
+# ffmpeg's default of 1, which disables block matching. Collaborative
+# filtering is on now, so these sigmas are no longer known to be the
+# per-clip peak and any `ffmpeg_bm3d` numbers recorded before this
+# comment was added are not comparable to later ones.
 [bm3d_sigmas]
 4 = 7
 6 = 12

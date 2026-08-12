@@ -22,6 +22,12 @@ noise = [8, 16, 28]
 # times the true sigma and the ratio was not constant across noise
 # levels. This row is a quality reference ceiling, not out-of-box bm3d
 # behavior.
+#
+# These values were swept against an invocation that left `group` at
+# ffmpeg's default of 1, which disables block matching. Collaborative
+# filtering is on now, so these sigmas are no longer known to be the
+# per-clip peak and any `ffmpeg_bm3d` numbers recorded before this
+# comment was added are not comparable to later ones.
 [bm3d_sigmas]
 8 = 15
 16 = 40

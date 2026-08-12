@@ -52,6 +52,14 @@ FRAME_SYNC_DROP_RE = re.compile(r"(\d+) frames? dropped, (\d+) frames? duplicate
 
 DEFAULT_CONFIG = Path(__file__).parent / "quality_runs.toml"
 
+# Reference-implementation group sizes for the `ffmpeg-bm3d` row's two
+# stages. ffmpeg defaults `group` to 1, which disables block matching
+# entirely and is not BM3D's collaborative filtering. Used both to build
+# the filter graph and to label the results table, so the two cannot
+# drift apart.
+BM3D_GROUP_BASIC = 16
+BM3D_GROUP_FINAL = 32
+
 
 @dataclass
 class Run:
@@ -329,8 +337,19 @@ def score_ffmpeg_nlmeans(run: Run, noisy: Path, ref: Path) -> tuple[bool, str]:
 
 
 def score_ffmpeg_bm3d(run: Run, noisy: Path, ref: Path) -> tuple[bool, str]:
+    # ffmpeg's bm3d defaults `group` (the max number of blocks collected
+    # into one 3D group) to 1, which skips block matching entirely. That
+    # is not collaborative filtering, the step that makes BM3D BM3D, so
+    # every `ffmpeg_bm3d` row from before this file set `group` explicitly
+    # is a weaker filter than BM3D and is not comparable to later runs.
+    # The reference implementation groups up to 16 blocks in the
+    # hard-thresholding stage and up to 32 in the Wiener stage, so both
+    # stages run here with matching group sizes and the basic estimate
+    # feeds the final estimate as its reference, same as bm3d_parallel.py.
     graph = (
-        f"[0:v]bm3d=sigma={run.sigma}:estim=basic[den];"
+        f"[0:v]split[a][b];"
+        f"[b]bm3d=sigma={run.sigma}:group={BM3D_GROUP_BASIC}:estim=basic[basic];"
+        f"[a][basic]bm3d=sigma={run.sigma}:group={BM3D_GROUP_FINAL}:estim=final:ref=1[den];"
         f"[den]split=2[d1][d2];[1:v]split=2[r1][r2];[d1][r1]xpsnr;[d2][r2]ssim"
     )
     cmd = [
@@ -414,9 +433,18 @@ def execute(
     return Result(run.name, alls, y, u, v, minimum, ssim_y, ssim_all, ok=True)
 
 
-def print_table(results: list[Result]) -> None:
+def print_table(results: list[Result], bm3d_included: bool) -> None:
     if not results:
         return
+
+    if bm3d_included:
+        print(
+            f"# ffmpeg_bm3d rows below: two-stage bm3d, "
+            f"group={BM3D_GROUP_BASIC} (estim=basic) / group={BM3D_GROUP_FINAL} "
+            f"(estim=final:ref=1). Rows produced before this line existed used "
+            f"group=1, single-stage estim=basic, and are not comparable.",
+            flush=True,
+        )
 
     def fmt(value: float | None, precision: int = 2) -> str:
         if value is None:
@@ -487,7 +515,7 @@ def main() -> None:
                 print(f"[{run.name}] error: {e}", file=sys.stderr, flush=True)
                 results.append(Result(run.name, alls))
 
-    print_table(results)
+    print_table(results, any(r.kind == "ffmpeg-bm3d" for r in runs))
 
 
 if __name__ == "__main__":

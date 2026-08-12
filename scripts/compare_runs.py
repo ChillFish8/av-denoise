@@ -129,11 +129,12 @@ RUNS: list[Run] = [
         f"just denoise-file-ffmpeg -i {SOURCE_VIDEO} -o {{out_file}} "
         f"--patch 9 --search 5 --strength 1.2",
     ),
-    # BM3D is CPU-only and slow. `just denoise-file-bm3d` splits the clip
-    # across one process per four cores, since the filter's own slice
-    # threading stops scaling around eight threads. Its sigma is on
-    # ffmpeg's own scale rather than the true noise sigma, so it needs
-    # sweeping per clip.
+    # BM3D is CPU-only and slow, and slower still with collaborative
+    # filtering on (see bm3d_parallel.py). `just denoise-file-bm3d`
+    # splits the clip across one process per four cores, since the
+    # filter's own slice threading stops scaling around eight threads.
+    # Its sigma is on ffmpeg's own scale rather than the true noise
+    # sigma, so it needs sweeping per clip.
     Run(
         "ffmpeg_bm3d",
         f"just denoise-file-bm3d -i {SOURCE_VIDEO} -o {{out_file}} --sigma 15",

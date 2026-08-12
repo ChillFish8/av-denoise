@@ -60,12 +60,15 @@ denoise-file-ffmpeg input output search="5" patch="9" strength="1.2":
 # The clip is split across processes because bm3d's own slice threading
 # stops scaling around eight threads. `jobs` of 0 picks a count from the
 # core count. Sigma is on ffmpeg's own scale rather than the true noise
-# sigma, so it needs sweeping per clip.
+# sigma, so it needs sweeping per clip. Runs with collaborative filtering
+# on (group=16/32, the reference implementation's per-stage sizes), which
+# is much slower than ffmpeg's group=1 default.
 [arg("input", long="input", short="i")]
 [arg("output", long="output", short="o")]
 [arg("sigma", long="sigma")]
 [arg("jobs", long="jobs", short="j")]
 denoise-file-bm3d input output sigma="15" jobs="0":
+    @echo "[bm3d] collaborative filtering is on (group=16/32), roughly 30x slower than ffmpeg's group=1 default. This will take a while." >&2
     uv run scripts/bm3d_parallel.py --input "{{input}}" --output "{{output}}" --sigma {{sigma}} --jobs {{jobs}}
 
 [arg("input", long="input", short="i")]

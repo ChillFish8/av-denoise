@@ -158,11 +158,18 @@ def plan_chunks(pts: list[str], jobs: int, parts_dir: Path) -> list[Chunk]:
 
 def worker_command(chunk: Chunk, source: Path, sigma: str, threads: int) -> list[str]:
     """Full two-stage BM3D over one chunk. The basic estimate feeds the
-    final estimate as its reference stream."""
+    final estimate as its reference stream.
+
+    ffmpeg's bm3d defaults `group` (the max number of blocks collected
+    into one 3D group) to 1, which skips block matching entirely and
+    denoises each block on its own. That is not collaborative filtering,
+    the step that makes BM3D BM3D. The reference implementation groups
+    up to 16 blocks in the hard-thresholding stage and up to 32 in the
+    Wiener stage, so both stages are set explicitly here."""
     graph = (
         f"split[a][b];"
-        f"[b]bm3d=sigma={sigma}:estim=basic[basic];"
-        f"[a][basic]bm3d=sigma={sigma}:estim=final:ref=1"
+        f"[b]bm3d=sigma={sigma}:group=16:estim=basic[basic];"
+        f"[a][basic]bm3d=sigma={sigma}:group=32:estim=final:ref=1"
     )
     return [
         "ffmpeg",
