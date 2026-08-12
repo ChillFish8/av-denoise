@@ -12,6 +12,7 @@ use av_denoise::{
 };
 use clap::{Parser, Subcommand};
 use strum_macros::EnumString;
+use tracing_subscriber::EnvFilter;
 
 mod file_mode;
 mod ingest;
@@ -431,13 +432,18 @@ struct Args {
     #[arg(long, global = true)]
     mc_pyramid_levels: Option<u32>,
 
-    /// Hides the progress bar.
+    /// Shows a progress bar for the denoising pass in `file` mode.
     ///
-    /// The progress bar is otherwise shown when the output terminal
-    /// supports it. It only appears during scene detection in `file`
-    /// mode. There is nothing to show a bar for in `stdin` mode.
+    /// Off by default because that bar runs for the whole encode, and
+    /// anything else writing to the terminal, such as the ffmpeg the
+    /// output is usually piped into, scrambles it. Scene detection
+    /// shows its bar without this flag, since it finishes before any
+    /// output is written.
+    ///
+    /// Neither bar is drawn unless stderr is a terminal, and there is
+    /// nothing to show a bar for in `stdin` mode.
     #[arg(long, global = true)]
-    no_progress: bool,
+    progress: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -810,7 +816,7 @@ mod hq_sigma_scale_tests {
 }
 
 #[cfg(test)]
-mod no_progress_tests {
+mod progress_flag_tests {
     use super::*;
 
     /// Parses `Args` from CLI-style tokens, always terminated with the
@@ -825,13 +831,13 @@ mod no_progress_tests {
     #[test]
     fn defaults_to_false() {
         let args = parse(&[]);
-        assert!(!args.no_progress);
+        assert!(!args.progress);
     }
 
     #[test]
     fn flag_sets_it_true() {
-        let args = parse(&["--no-progress"]);
-        assert!(args.no_progress);
+        let args = parse(&["--progress"]);
+        assert!(args.progress);
     }
 }
 
@@ -853,7 +859,10 @@ fn main() -> anyhow::Result<()> {
         unsafe { std::env::set_var("RUST_LOG", "info") };
     }
 
-    tracing_subscriber::fmt().with_writer(std::io::stderr).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_writer(progress::tracing_writer())
+        .init();
 
     // Honor AV_DENOISE_COMPILATION_CACHE. Must run before Denoiser::create
     // since the first CubeCL client lazily locks the global config.
@@ -925,7 +934,7 @@ fn main() -> anyhow::Result<()> {
         nlm_tuning,
         luma_strength: args.luma_strength,
         chroma_strength: args.chroma_strength,
-        no_progress: args.no_progress,
+        progress: args.progress,
     };
 
     match args.command {

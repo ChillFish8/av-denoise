@@ -3,13 +3,15 @@ use std::io::{IsTerminal, stdout};
 use std::path::Path;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
+use std::time::Duration;
 
 use av_decoders::{Decoder, Rational32};
 use av_scenechange::{DetectionOptions, detect_scene_changes};
+use indicatif::ProgressBar;
 use y4m::Frame as Y4mFrame;
 
 use crate::ingest::{CliOptions, FrameLayout, Planes, Subsampling, WorkerDenoiser, subsampling_to_y4m};
-use crate::progress::{progress_visible, scene_progress_bar};
+use crate::progress::{self, denoise_bar_visible, denoise_progress_bar, scene_progress_bar};
 
 const FRAME_CHANNEL_DEPTH: usize = 8;
 const OUTPUT_CHANNEL_DEPTH: usize = 32;
@@ -36,7 +38,12 @@ pub fn run_file(opts: &CliOptions, input: &Path, workers: usize) -> Result<(), a
         anyhow::bail!("--workers must be at least 1");
     }
 
-    let scenes = detect_scenes(input, opts.no_progress)?;
+    // Scene detection finishes before a single frame is written, so its
+    // bar has the terminal to itself and needs no opt-in. The denoising
+    // bar shares the terminal with whatever consumes our output, so it
+    // waits for --progress.
+    let is_terminal = std::io::stderr().is_terminal();
+    let scenes = detect_scenes(input, is_terminal)?;
 
     tracing::info!(
         scene_count = scenes.scene_count(),
@@ -45,13 +52,19 @@ pub fn run_file(opts: &CliOptions, input: &Path, workers: usize) -> Result<(), a
         "scene detection complete",
     );
 
-    encode_scenes(opts, input, &scenes, workers)
+    encode_scenes(
+        opts,
+        input,
+        &scenes,
+        workers,
+        denoise_bar_visible(opts.progress, is_terminal),
+    )
 }
 
 /// Open the input, read its layout, and run `av_scenechange` to produce a
 /// list of scene boundaries. Returns once the detector pass has finished
 /// and the temporary decoder it used has been dropped.
-fn detect_scenes(input: &Path, no_progress: bool) -> Result<SceneLayout, anyhow::Error> {
+fn detect_scenes(input: &Path, visible: bool) -> Result<SceneLayout, anyhow::Error> {
     let mut decoder = Decoder::from_file(input)?;
     let details = *decoder.get_video_details();
 
@@ -73,7 +86,6 @@ fn detect_scenes(input: &Path, no_progress: bool) -> Result<SceneLayout, anyhow:
         "running scene detection",
     );
 
-    let visible = progress_visible(no_progress, std::io::stderr().is_terminal());
     let pb = scene_progress_bar(details.total_frames, visible);
     let on_progress = |frames_analyzed: usize, _keyframe_count: usize| {
         pb.set_position(frames_analyzed as u64);
@@ -82,7 +94,7 @@ fn detect_scenes(input: &Path, no_progress: bool) -> Result<SceneLayout, anyhow:
     let detect_opts = DetectionOptions::default();
     let detection = detect_scene_changes::<u8>(&mut decoder, detect_opts, None, Some(&on_progress))?;
 
-    pb.finish_and_clear();
+    progress::finish(&pb);
 
     drop(decoder);
 
@@ -111,9 +123,16 @@ fn encode_scenes(
     input: &Path,
     scenes: &SceneLayout,
     workers: usize,
+    visible: bool,
 ) -> Result<(), anyhow::Error> {
     let (worker_txs, worker_handles, out_rx) = spawn_workers(opts, scenes.layout, workers);
-    let coordinator = spawn_coordinator(scenes.layout, scenes.framerate, out_rx, scenes.total_frames);
+    let coordinator = spawn_coordinator(
+        scenes.layout,
+        scenes.framerate,
+        out_rx,
+        scenes.total_frames,
+        visible,
+    );
 
     dispatch_frames(input, scenes, &worker_txs)?;
 
@@ -171,8 +190,9 @@ fn spawn_coordinator(
     framerate: Rational32,
     rx: Receiver<OutputMsg>,
     total_frames: usize,
+    visible: bool,
 ) -> thread::JoinHandle<Result<(), anyhow::Error>> {
-    thread::spawn(move || run_coordinator(layout, framerate, rx, total_frames))
+    thread::spawn(move || run_coordinator(layout, framerate, rx, total_frames, visible))
 }
 
 /// Sequential decode loop: read every frame, route it to worker
@@ -336,6 +356,7 @@ fn run_coordinator(
     framerate: Rational32,
     rx: Receiver<OutputMsg>,
     total_frames: usize,
+    visible: bool,
 ) -> Result<(), anyhow::Error> {
     let stdout = stdout();
     let lock = stdout.lock();
@@ -351,9 +372,35 @@ fn run_coordinator(
     .with_colorspace(subsampling_to_y4m(layout.subsampling))
     .write_header(lock)?;
 
+    // Frames written to the output, which lags the frames read by the
+    // depth of the worker pipelines. Emitted frames are the honest
+    // measure of progress: the count stalls whenever whatever consumes
+    // our stdout stops reading.
+    let pb = denoise_progress_bar(total_frames, visible);
+
+    // The first frame only lands once a worker has compiled its
+    // kernels, which takes seconds. A steady tick draws the bar right
+    // away and keeps its elapsed time moving until then.
+    pb.enable_steady_tick(Duration::from_millis(250));
+
+    let result = emit_frames(&mut encoder, &rx, total_frames as u64, &pb);
+
+    progress::finish(&pb);
+
+    result
+}
+
+/// Reorders worker output by frame index and writes it out, updating
+/// `pb` as frames are emitted. Returns once every frame has been
+/// written or the workers have all disconnected.
+fn emit_frames<W: std::io::Write>(
+    encoder: &mut y4m::Encoder<W>,
+    rx: &Receiver<OutputMsg>,
+    total: u64,
+    pb: &ProgressBar,
+) -> Result<(), anyhow::Error> {
     let mut pending: BTreeMap<u64, Planes> = BTreeMap::new();
     let mut next_emit: u64 = 0;
-    let total = total_frames as u64;
 
     while next_emit < total {
         let msg = match rx.recv() {
@@ -368,6 +415,8 @@ fn run_coordinator(
             encoder.write_frame(&frame)?;
             next_emit += 1;
         }
+
+        pb.set_position(next_emit);
     }
 
     Ok(())

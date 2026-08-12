@@ -555,10 +555,12 @@ Options:
           
           Only takes effect with `--motion-compensation`. Defaults to 2 when unset.
 
-      --no-progress
-          Hides the progress bar.
+      --progress
+          Shows a progress bar for the denoising pass in `file` mode.
           
-          The progress bar is otherwise shown when the output terminal supports it. It only appears during scene detection in `file` mode. There is nothing to show a bar for in `stdin` mode.
+          Off by default because that bar runs for the whole encode, and anything else writing to the terminal, such as the ffmpeg the output is usually piped into, scrambles it. Scene detection shows its bar without this flag, since it finishes before any output is written.
+          
+          Neither bar is drawn unless stderr is a terminal, and there is nothing to show a bar for in `stdin` mode.
 
   -h, --help
           Print help (see a summary with '-h')
