@@ -1,12 +1,11 @@
 use std::io::{stdin, stdout};
 
-use av_denoise::DenoiserError;
-
 use crate::ingest::{
     CliOptions,
     FrameLayout,
     Planes,
     WorkerDenoiser,
+    push_needs_retry,
     subsampling_from_y4m,
     subsampling_to_y4m,
     y4m_vendor_extensions,
@@ -67,7 +66,7 @@ pub fn run_stdin(opts: &CliOptions) -> Result<(), anyhow::Error> {
             v: frame.get_v_plane().to_vec(),
         };
 
-        if let Err(DenoiserError::QueueFull) = wd.push(&planes) {
+        if push_needs_retry(wd.push(&planes))? {
             if let Some(out) = wd.recv()? {
                 write_planes(&mut encoder, &out)?;
             }

@@ -10,7 +10,15 @@ use av_scenechange::{DetectionOptions, detect_scene_changes};
 use indicatif::ProgressBar;
 use y4m::Frame as Y4mFrame;
 
-use crate::ingest::{CliOptions, FrameLayout, Planes, Subsampling, WorkerDenoiser, subsampling_to_y4m};
+use crate::ingest::{
+    CliOptions,
+    FrameLayout,
+    Planes,
+    Subsampling,
+    WorkerDenoiser,
+    push_needs_retry,
+    subsampling_to_y4m,
+};
 use crate::progress::{self, denoise_bar_visible, denoise_progress_bar, scene_progress_bar};
 
 const FRAME_CHANNEL_DEPTH: usize = 8;
@@ -313,7 +321,7 @@ fn push_with_drain(
 ) -> Result<(), anyhow::Error> {
     pending.push_back(global_idx);
 
-    if let Err(av_denoise::DenoiserError::QueueFull) = denoiser.push(planes) {
+    if push_needs_retry(denoiser.push(planes))? {
         if let Some(out) = denoiser.recv()? {
             let g = pending
                 .pop_front()
@@ -337,16 +345,30 @@ fn flush_worker(
     pending: &mut std::collections::VecDeque<u64>,
     tx: &SyncSender<OutputMsg>,
 ) -> Result<(), anyhow::Error> {
+    let mut disconnected = false;
+
     wd.flush(|out| {
+        if disconnected {
+            return;
+        }
+
         if let Some(g) = pending.pop_front() {
-            let _ = tx.send(OutputMsg {
+            let msg = OutputMsg {
                 global_idx: g,
                 planes: out,
-            });
+            };
+            let did_send = tx.send(msg).is_ok();
+            if !did_send {
+                disconnected = true;
+            }
         } else {
             tracing::warn!("worker emitted flushed frame with no pending global index");
         }
     })?;
+
+    if disconnected {
+        anyhow::bail!("coordinator disconnected while flushing worker output");
+    }
 
     Ok(())
 }
@@ -392,7 +414,8 @@ fn run_coordinator(
 
 /// Reorders worker output by frame index and writes it out, updating
 /// `pb` as frames are emitted. Returns once every frame has been
-/// written or the workers have all disconnected.
+/// written. Errors if the workers all disconnect before `total` frames
+/// have landed, naming how many were written and how many were expected.
 fn emit_frames<W: std::io::Write>(
     encoder: &mut y4m::Encoder<W>,
     rx: &Receiver<OutputMsg>,
@@ -417,6 +440,13 @@ fn emit_frames<W: std::io::Write>(
         }
 
         pb.set_position(next_emit);
+    }
+
+    if next_emit != total {
+        anyhow::bail!(
+            "wrote {next_emit} frames but expected {total}; every worker disconnected \
+             before the stream finished (a frame index was likely lost)"
+        );
     }
 
     Ok(())
@@ -464,5 +494,118 @@ fn subsampling_from_av_decoders(
         ChromaSubsampling::Yuv422 => Ok(Subsampling::Yuv422),
         ChromaSubsampling::Yuv444 => Ok(Subsampling::Yuv444),
         other => anyhow::bail!("unsupported chroma subsampling {other:?}; need 4:2:0, 4:2:2, or 4:4:4"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use av_denoise::accelerate::Accelerator;
+    use av_denoise::{Algorithm, DenoisingMode, Device, MotionCompensationMode};
+    use indicatif::ProgressBar;
+
+    use super::*;
+    use crate::ingest::BinaryChannelIntent;
+
+    fn tiny_layout() -> FrameLayout {
+        // 4:2:0 chroma at this size is 4x4, clearing the denoiser's 3x3
+        // minimum frame dimension.
+        FrameLayout {
+            width: 8,
+            height: 8,
+            subsampling: Subsampling::Yuv420,
+        }
+    }
+
+    fn tiny_planes(layout: FrameLayout) -> Planes {
+        let (cw, ch) = layout.chroma_dims();
+        let chroma_pixels = (cw * ch) as usize;
+
+        Planes {
+            y: vec![128u8; layout.luma_pixels()],
+            u: vec![128u8; chroma_pixels],
+            v: vec![128u8; chroma_pixels],
+        }
+    }
+
+    #[test]
+    fn emit_frames_errors_when_a_frame_index_is_lost() {
+        let layout = tiny_layout();
+        let (tx, rx) = sync_channel::<OutputMsg>(4);
+        let planes = tiny_planes(layout);
+
+        // Frame 1 is never sent (its index was lost somewhere upstream)
+        // and every worker then disconnects. This used to make
+        // `emit_frames` fall through to `Ok(())` with a truncated y4m.
+        tx.send(OutputMsg {
+            global_idx: 0,
+            planes: planes.clone(),
+        })
+        .unwrap();
+        tx.send(OutputMsg {
+            global_idx: 2,
+            planes,
+        })
+        .unwrap();
+        drop(tx);
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut encoder = y4m::encode(
+            layout.width as usize,
+            layout.height as usize,
+            y4m::Ratio::new(30, 1),
+        )
+        .with_colorspace(subsampling_to_y4m(layout.subsampling))
+        .write_header(&mut buf)
+        .expect("header write failed");
+
+        let pb = ProgressBar::hidden();
+        let err = emit_frames(&mut encoder, &rx, 3, &pb).expect_err("expected a lost-frame error");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains('1') && msg.contains('3'),
+            "error should name frames written (1) vs expected (3): {msg}"
+        );
+    }
+
+    fn temporal_opts() -> CliOptions {
+        CliOptions {
+            accelerators: vec![Accelerator::Vulkan],
+            device: Device::Default,
+            intent: BinaryChannelIntent::LumaChroma,
+            mode: DenoisingMode::Temporal { radius: 1 },
+            prefilter: None,
+            motion_compensation: MotionCompensationMode::None,
+            algorithm: Algorithm::Nlmeans,
+            nlm_tuning: None,
+            luma_strength: None,
+            chroma_strength: None,
+            progress: false,
+        }
+    }
+
+    #[test]
+    fn flush_worker_errors_when_coordinator_has_disconnected() {
+        let layout = tiny_layout();
+        let mut wd = WorkerDenoiser::create(&temporal_opts(), layout).expect("denoiser construction failed");
+        let planes = tiny_planes(layout);
+
+        // One push into a temporal window leaves a trailing tail that
+        // `flush` will pad and emit.
+        wd.push(&planes).expect("push failed");
+
+        let mut pending: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+        pending.push_back(0);
+
+        let (tx, rx) = sync_channel::<OutputMsg>(4);
+        drop(rx);
+
+        let err = flush_worker(&mut wd, &mut pending, &tx)
+            .expect_err("expected the coordinator disconnect to surface as an error");
+
+        assert!(
+            err.to_string().contains("disconnect"),
+            "error should mention the coordinator disconnect: {err}"
+        );
     }
 }
