@@ -92,6 +92,48 @@ fn external_reference_equals_input_matches_baseline() {
     }
 }
 
+/// `push_frame` seeds the noise estimator from the stream's first
+/// frame so any push-time GPU work that reads σ never sees the
+/// absolute-strength fallback (`seed_noise_estimate_if_first_frame`'s
+/// doc says this applies for every `temporal_radius`).
+/// `push_frame_with_reference` queues the same estimate but must reach
+/// the same seed, not leave the estimator unset until the first
+/// `denoise_submit` runs.
+#[test]
+fn push_frame_with_reference_seeds_noise_estimate_on_first_frame() {
+    let client = make_client();
+    let w = 32;
+    let h = 32;
+    let frame = make_noisy_gaussian_frame(w, h, 1, 0.5, &[8.0 / 255.0]);
+
+    let params = NlmParams {
+        temporal_radius: 0,
+        search_radius: 2,
+        patch_radius: 2,
+        strength: 1.2,
+        self_weight: 1.0,
+        channels: ChannelMode::Luma,
+        prefilter: PrefilterMode::External,
+        motion_compensation: MotionCompensationMode::None,
+        hq: Some(HqParams {
+            auto_strength: true,
+            noise_floor: true,
+            sigma_override: None,
+            temporal_confidence: true,
+            thsad_scale: 1.0,
+            sigma_scale: 1.0,
+        }),
+    };
+    let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
+    d.push_frame_with_reference(&frame, &frame);
+
+    assert!(
+        d.noise_estimator.current().is_some(),
+        "push_frame_with_reference must seed the noise estimator on the stream's first \
+         frame, the same as push_frame"
+    );
+}
+
 /// Separable path (patch_radius > 2) variant of the identity check.
 #[test]
 fn external_reference_separable_matches_baseline() {

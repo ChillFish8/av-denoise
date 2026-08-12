@@ -108,6 +108,21 @@ pub const MAX_SEARCH_RADIUS: u32 = 8;
 /// (e.g. 1080p YUV at `t = 16` ≈ 540 MB just for input).
 pub const MAX_TEMPORAL_RADIUS: u32 = 8;
 
+/// Hard ceiling on the bilateral prefilter's derived radius
+/// (`prefilter::bilateral_radius(sigma_s)`, `radius = ceil(2 ·
+/// sigma_s).max(1)`). `nlm_bilateral` loads a `(32 + 2r) × (8 + 2r)`
+/// tile of `Vector<f32, N>` into shared memory, `N` up to 4 for YUV
+/// storage, 4 bytes per `f32`, so the tile costs `16 * (32 + 2r) * (8
+/// + 2r)` bytes.
+///
+/// Targeting the 64 KiB (65536-byte) SMEM budget on RDNA-class
+/// hardware, `r = 22` costs `16 * 76 * 52` bytes, `63232` bytes or
+/// `61.75` KiB, still under budget. `r = 23` costs `16 * 78 * 54`
+/// bytes, `67392` bytes or `65.8` KiB, over it. So 22 is the largest
+/// radius that fits, which `bilateral_radius` reaches at `sigma_s =
+/// 11.0`.
+pub const MAX_BILATERAL_RADIUS: u32 = 22;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// How to apply denoising to the input frame channels.
 pub enum ChannelMode {
@@ -380,7 +395,7 @@ impl NlmParams {
             && !(hq.sigma_scale.is_finite() && (0.1..=10.0).contains(&hq.sigma_scale))
         {
             anyhow::bail!(
-                "--hq-sigma-scale must be finite and in [0.1, 10.0] (got {})",
+                "hq sigma_scale must be finite and in [0.1, 10.0] (got {})",
                 hq.sigma_scale,
             );
         }
@@ -399,6 +414,25 @@ impl NlmParams {
                      sigma_r = 0 produces an infinite range-weight normalisation factor \
                      that turns the centre tap into NaN",
                     sigma_r,
+                );
+            }
+            // sigma_s drives a comptime SMEM tile radius
+            // (`prefilter::bilateral_radius`). Checking the actual
+            // derived radius, rather than re-deriving a sigma_s
+            // threshold here, keeps this in sync automatically if that
+            // formula ever changes. A very large sigma_s can also make
+            // the radius overflow `u32` inside the comptime tile-size
+            // expression. This catches that too, since the overflowed
+            // radius is always far past the maximum.
+            let bilateral_radius = prefilter::bilateral_radius(sigma_s);
+            if bilateral_radius > MAX_BILATERAL_RADIUS {
+                anyhow::bail!(
+                    "bilateral prefilter sigma_s={} implies a shared-memory tile radius of {} \
+                     (radius = ceil(2 * sigma_s), minimum 1), exceeding the supported maximum \
+                     ({}); larger radii exhaust on-chip SMEM in the bilateral kernel",
+                    sigma_s,
+                    bilateral_radius,
+                    MAX_BILATERAL_RADIUS,
                 );
             }
             // A `sigma` can be finite and positive yet still be small
@@ -625,8 +659,8 @@ mod tests {
         };
         let err = params.validate().expect_err("0.05 is below the 0.1 minimum");
         assert!(
-            err.to_string().contains("--hq-sigma-scale"),
-            "error should name the flag, got: {err}"
+            err.to_string().contains("hq sigma_scale"),
+            "error should name the field, got: {err}"
         );
     }
 
@@ -922,6 +956,69 @@ mod tests {
             sigma_r.validate().is_err(),
             "a subnormal sigma_r that underflows to an infinite normalisation factor must be rejected"
         );
+    }
+
+    /// `sigma_s = 16.0` gives `bilateral_radius = 32` (`prefilter.rs`'s
+    /// own worked example), well past [`MAX_BILATERAL_RADIUS`] (22).
+    #[test]
+    fn validate_rejects_bilateral_sigma_s_above_the_smem_ceiling() {
+        let params = NlmParams {
+            prefilter: PrefilterMode::Bilateral {
+                sigma_s: 16.0,
+                sigma_r: 0.02,
+            },
+            ..NlmParams::default()
+        };
+        let err = params.validate().expect_err("radius 32 exceeds the 22 ceiling");
+        assert!(
+            err.to_string().contains("sigma_s"),
+            "error should name the field, got: {err}"
+        );
+    }
+
+    /// `sigma_s = 1e9` overflows `bilateral_radius`'s comptime tile-size
+    /// arithmetic if it ever reaches the kernel launch. Validation must
+    /// reject it long before that, via the same radius check as any
+    /// other oversized `sigma_s`.
+    #[test]
+    fn validate_rejects_extreme_bilateral_sigma_s() {
+        let params = NlmParams {
+            prefilter: PrefilterMode::Bilateral {
+                sigma_s: 1e9,
+                sigma_r: 0.02,
+            },
+            ..NlmParams::default()
+        };
+        assert!(params.validate().is_err());
+    }
+
+    /// Boundary pair for [`MAX_BILATERAL_RADIUS`], pinned as literal
+    /// `sigma_s` values rather than derived from the constant itself.
+    /// `bilateral_radius(11.0) = ceil(22.0) = 22` (at the ceiling,
+    /// survives) and `bilateral_radius(11.01) = ceil(22.02) = 23` (one
+    /// past it, rejected).
+    #[test]
+    fn validate_accepts_bilateral_sigma_s_at_the_smem_ceiling() {
+        let params = NlmParams {
+            prefilter: PrefilterMode::Bilateral {
+                sigma_s: 11.0,
+                sigma_r: 0.02,
+            },
+            ..NlmParams::default()
+        };
+        assert!(params.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_bilateral_sigma_s_just_above_the_smem_ceiling() {
+        let params = NlmParams {
+            prefilter: PrefilterMode::Bilateral {
+                sigma_s: 11.01,
+                sigma_r: 0.02,
+            },
+            ..NlmParams::default()
+        };
+        assert!(params.validate().is_err());
     }
 
     #[test]

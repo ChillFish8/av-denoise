@@ -509,11 +509,20 @@ impl<R: Runtime> NlmDenoiser<R> {
             .expect("reference buffer must exist for External prefilter")
             .clone();
         self.upload_into_slot(&reference_buf, reference, slot);
+
+        // Same order as push_frame. The noise estimate and its
+        // first-frame seed run before anything that could read σ
+        // (build_pyramids_for_slot only needs the reference upload
+        // just above, not the noise estimate, so this reordering
+        // doesn't change what either step reads).
+        self.run_noise_estimate_for_slot(slot as u32);
+        self.run_temporal_stats_for_slot(slot as u32);
+        self.seed_noise_estimate_if_first_frame(slot as u32);
+
         self.build_pyramids_for_slot(slot as u32);
         self.build_confidence_pyramid_for_slot(slot as u32);
         self.run_pair_analyse_for_slot(slot as u32);
-        self.run_noise_estimate_for_slot(slot as u32);
-        self.run_temporal_stats_for_slot(slot as u32);
+
         self.advance_ring();
         self.prime_leading_edge_if_first();
     }

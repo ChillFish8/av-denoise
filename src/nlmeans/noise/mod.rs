@@ -354,7 +354,17 @@ const STATIC_FRACTION_MIN: f32 = 0.05;
 /// that legitimate spread while still catching texture outliers. The
 /// lower quartile (not the median) is the reference so the filter
 /// still works once texture is the majority of gate-passing blocks,
-/// as long as a genuinely static minority remains to anchor it.
+/// as long as a genuinely static minority remains to anchor it. The
+/// quartile is computed only over blocks whose own sigma clears
+/// [`RHO_SIGMA_GATE`], since letterbox bars and other exactly-static
+/// regions read a channel-0 sigma of exactly `0`. Left in, they can
+/// dominate the mean-gate-passing population enough to drag the
+/// quartile itself to `0`, which would reject every block carrying
+/// real noise instead of just the texture outliers. That exclusion
+/// only holds up when a genuinely low population still exists to
+/// anchor the quartile against. See
+/// [`aggregate_temporal_noise_stats`]'s doc for what happens when it
+/// doesn't.
 const SIGMA_OUTLIER_FACTOR: f32 = 5.0;
 
 /// One mean-gate-passing block's per-channel stats, held only long
@@ -373,10 +383,11 @@ struct StaticGateCandidate {
 /// into a [`TemporalNoiseSample`]. `records` holds exactly one slot's
 /// region, laid out block row-major as documented on
 /// [`nlm_temporal_noise_stats`]. Returns `None` when static blocks
-/// fall below [`STATIC_FRACTION_MIN`] (too much motion to trust) or
-/// when no static block clears [`RHO_SIGMA_GATE`] (no measurable
-/// noise to correlate — the median rho would be undefined — which is
-/// also what a zero-filled duplicate slot's records produce).
+/// fall below [`STATIC_FRACTION_MIN`] (too much motion to trust), when
+/// no static block clears [`RHO_SIGMA_GATE`] (no measurable noise to
+/// correlate — the median rho would be undefined — which is also what
+/// a zero-filled duplicate slot's records produce), or when the
+/// outlier gate below has no way to validate its own ceiling.
 ///
 /// Classifying a block as static takes two passes. The first is the
 /// signed mean-residual gate ([`STATIC_GATE`]). It clears a block
@@ -387,7 +398,26 @@ struct StaticGateCandidate {
 /// mean-gate-passing block whose channel-0 sigma sits far above the
 /// passing population's own lower quartile ([`SIGMA_OUTLIER_FACTOR`]),
 /// since a panning block's variance comes from the texture it slid
-/// across, not from noise shared with the rest of the frame.
+/// across, not from noise shared with the rest of the frame. That
+/// quartile itself only looks at blocks clearing [`RHO_SIGMA_GATE`],
+/// so an exactly-static population (letterbox bars, for example)
+/// cannot drag the ceiling down to `0` and reject every noisy block
+/// along with it.
+///
+/// Excluding those low-sigma blocks has its own failure mode. If
+/// every block that clears `RHO_SIGMA_GATE` turns out to be
+/// texture, that population sets its own ceiling and lets every one
+/// of its own members through, since a value never exceeds a
+/// multiple of itself. Nothing in a single block's stats says
+/// "texture" versus "noise", so the only corroboration available is
+/// whether the surviving population shows any internal spread at
+/// all. Real per-block sigma, measured over a finite sample, always
+/// carries some variance across blocks, even for physically uniform
+/// noise. When low-sigma blocks were excluded and what's left is
+/// perfectly uniform, that is the specific signature of a
+/// self-selected outlier population with no genuine anchor to check
+/// it against, and this function reports `None` rather than a
+/// confident, possibly texture-inflated sigma.
 pub(super) fn aggregate_temporal_noise_stats(
     records: &[f32],
     channels: u32,
@@ -455,12 +485,57 @@ pub(super) fn aggregate_temporal_noise_stats(
         }
     }
 
-    let mut candidate_sigma_ch0: Vec<f32> = candidates.iter().map(|c| c.sigma_ch0).collect();
-    sort_ascending(&mut candidate_sigma_ch0);
-    let sigma_ceiling = if candidate_sigma_ch0.is_empty() {
+    // Exactly-static blocks (letterbox bars, a duplicate frame) read
+    // sigma_ch0 == 0 and clear STATIC_GATE trivially, so they can
+    // dominate the mean-gate-passing population without carrying any
+    // measurable noise. Left in this reference set, they drag the
+    // quartile itself toward 0, which then rejects every block with
+    // real noise instead of just the texture outliers the gate exists
+    // to catch. Restricting the reference to blocks that themselves
+    // clear RHO_SIGMA_GATE keeps the ceiling anchored to blocks that
+    // could plausibly be noise.
+    let mut reference_sigma_ch0: Vec<f32> = candidates
+        .iter()
+        .map(|c| c.sigma_ch0)
+        .filter(|&sigma| sigma > RHO_SIGMA_GATE)
+        .collect();
+    sort_ascending(&mut reference_sigma_ch0);
+
+    // Excluding low-sigma blocks from the reference set removes the
+    // information they carried (or lacked), and that has a cost. `x <=
+    // x * SIGMA_OUTLIER_FACTOR` holds for any `x >= 0`, so if every
+    // mean-gate-passing block above RHO_SIGMA_GATE turns out to be a
+    // texture-panning block, that population sets its own ceiling and
+    // lets every one of them through, exactly the failure the ceiling
+    // exists to prevent. There's no feature available here (sigma
+    // magnitude, rho) that tells texture and noise apart on its own,
+    // so this function instead requires corroboration. Some candidates
+    // must have been excluded by RHO_SIGMA_GATE, and the reference
+    // population that's left must show genuine internal spread (its
+    // lowest and highest readings differ). Real per-block sigma is
+    // measured over a finite (`TEMPORAL_NOISE_BLOCK`)² sample, so even
+    // physically uniform noise carries some sampling variance across
+    // blocks. A reference population with zero spread at all, sitting
+    // alongside excluded low-sigma blocks, is the specific signature
+    // this function can't resolve, so it reports `None` rather than a
+    // confident, potentially texture-inflated sigma. Populations where
+    // nothing was excluded (no low-sigma blocks to begin with) skip
+    // this check entirely and are trusted directly, unaffected by
+    // whether a low-sigma population happens to exist elsewhere in the
+    // frame.
+    let candidates_were_excluded = candidates.len() > reference_sigma_ch0.len();
+    let reference_has_spread = match (reference_sigma_ch0.first(), reference_sigma_ch0.last()) {
+        (Some(&lo), Some(&hi)) => hi > lo,
+        (None, _) | (_, None) => false,
+    };
+    if candidates_were_excluded && !reference_has_spread {
+        return None;
+    }
+
+    let sigma_ceiling = if reference_sigma_ch0.is_empty() {
         0.0
     } else {
-        lower_quartile(&candidate_sigma_ch0) * SIGMA_OUTLIER_FACTOR
+        lower_quartile(&reference_sigma_ch0) * SIGMA_OUTLIER_FACTOR
     };
 
     let mut static_sigmas: Vec<Vec<f32>> = vec![Vec::new(); channels];
@@ -1228,6 +1303,190 @@ mod tests {
             (sample.static_fraction - 8.0 / 9.0).abs() < 1e-6,
             "a 9th block at {OUTLIER_FACTOR_REJECTS_RATIO}x the reference must be rejected, \
              got static_fraction={}",
+            sample.static_fraction
+        );
+    }
+
+    /// A `160x160` frame (100 `TEMPORAL_NOISE_BLOCK` blocks, a 10x10
+    /// grid) where 26 blocks are exactly-zero-residual letterbox bars
+    /// and the other 74 carry real static noise. Both populations
+    /// trivially clear [`STATIC_GATE`] (mean residual is exactly zero
+    /// for the bars, and centred on zero by construction for the real
+    /// noise), so all 100 land in the mean-gate-passing population.
+    ///
+    /// The 74 real-noise blocks cycle through five close sigma levels
+    /// (`3.8..=4.2` in `/255` units, `0.1` apart) rather than a single
+    /// repeated value, standing in for the sampling variance any
+    /// real per-block measurement carries even under a physically
+    /// uniform noise process. That spread is what lets this population
+    /// clear the anchor check the outlier gate now requires whenever it
+    /// excludes low-sigma blocks (see
+    /// [`aggregate_temporal_noise_stats`]'s doc) — a population with no
+    /// internal spread at all, sitting next to an excluded low-sigma
+    /// population, is indistinguishable from a self-captured outlier
+    /// run and reports `None` instead (see
+    /// [`aggregate_returns_none_when_the_only_above_gate_population_is_texture`]).
+    ///
+    /// 74 blocks split five ways gives counts `[15, 15, 15, 15, 14]`
+    /// for levels `[3.8, 3.9, 4.0, 4.1, 4.2]` (`74 = 4*15 + 14`, the
+    /// remainder falling to the earliest levels). Combined with the 26
+    /// zero blocks sorted first, the `n = 100` population's median
+    /// (`values[49]`/`values[50]`) lands at cumulative index 41..55,
+    /// the `3.9` run, so the expected sigma is exactly `3.9 / 255`, not
+    /// an approximation.
+    #[test]
+    fn aggregate_returns_correct_sigma_with_letterbox_zero_population() {
+        let width = 160;
+        let height = 160;
+        let stored_ch = 1;
+        let channels = 1;
+
+        let background_rho = 0.2f32;
+        let sigma_levels_255 = [3.8f32, 3.9, 4.0, 4.1, 4.2];
+
+        let mut records = Vec::new();
+        for _ in 0..26 {
+            records.extend_from_slice(&zero_mean_block_record(0.0, 0.0));
+        }
+        for i in 0..74 {
+            let sigma_255 = sigma_levels_255[i % sigma_levels_255.len()];
+            records.extend_from_slice(&zero_mean_block_record(sigma_255, background_rho));
+        }
+
+        let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+            .expect("74 of 100 blocks carry real static noise, far above the 5% floor");
+
+        let expected_sigma = 3.9 / 255.0;
+        assert!(
+            (sample.sigma[0] - expected_sigma).abs() < 1e-4,
+            "expected the letterbox bars to leave the real noise floor near {expected_sigma} intact, got {}",
+            sample.sigma[0]
+        );
+        assert!(
+            (sample.rho - background_rho).abs() < 1e-4,
+            "expected rho to come from the real-noise blocks, got {}",
+            sample.rho
+        );
+    }
+
+    /// The capture scenario the outlier-gate exclusion opens up. The
+    /// same 26 exactly-zero letterbox blocks, but the other 74 are all
+    /// panning-texture blocks at a single repeated `sigma_ch0 =
+    /// 20/255`, with no legitimate above-gate noise anywhere in the
+    /// frame. Every candidate above [`RHO_SIGMA_GATE`] is the same
+    /// outlier value, so the reference population's own lower quartile
+    /// equals that value, and `x <= x * SIGMA_OUTLIER_FACTOR` holds for
+    /// any `x >= 0` — the outlier ceiling accepts every one of its own
+    /// outliers. A population that homogeneous, sitting next to 26
+    /// excluded zero-sigma blocks, is exactly the signature this
+    /// function cannot resolve, so it must report `None` and let the
+    /// caller fall back to the Immerkær read rather than a confidently
+    /// wrong ~20/255.
+    #[test]
+    fn aggregate_returns_none_when_the_only_above_gate_population_is_texture() {
+        let width = 160;
+        let height = 160;
+        let stored_ch = 1;
+        let channels = 1;
+
+        let texture_sigma_255 = 20.0f32;
+
+        let mut records = Vec::new();
+        for _ in 0..26 {
+            records.extend_from_slice(&zero_mean_block_record(0.0, 0.0));
+        }
+        for _ in 0..74 {
+            records.extend_from_slice(&zero_mean_block_record(texture_sigma_255, 0.0));
+        }
+
+        assert!(
+            aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height).is_none(),
+            "a homogeneous above-gate population with no genuine low anchor must fall back to \
+             None rather than report the texture level as sigma"
+        );
+    }
+
+    /// [`aggregate_rejects_majority_zero_mean_texture_outliers`] with a
+    /// letterbox-style zero-sigma population mixed in. The outlier gate
+    /// must still isolate the real noise floor from the texture
+    /// majority, and the zero population must not disturb that result.
+    #[test]
+    fn aggregate_rejects_texture_outliers_with_zero_population_present() {
+        let width = 64;
+        let height = 80; // 4 x 5 TEMPORAL_NOISE_BLOCK grid, 20 blocks.
+        let stored_ch = 1;
+        let channels = 1;
+
+        let background_sigma_255 = 2.0f32;
+        let background_rho = 0.1f32;
+        let texture_sigma_255 = 20.0f32;
+
+        let mut records = Vec::new();
+        for _ in 0..6 {
+            records.extend_from_slice(&zero_mean_block_record(background_sigma_255, background_rho));
+        }
+        for _ in 0..10 {
+            records.extend_from_slice(&zero_mean_block_record(texture_sigma_255, 0.0));
+        }
+        for _ in 0..4 {
+            records.extend_from_slice(&zero_mean_block_record(0.0, 0.0));
+        }
+
+        let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+            .expect("the static minority clears STATIC_FRACTION_MIN on its own");
+
+        let expected_sigma = background_sigma_255 / 255.0;
+        assert!(
+            (sample.sigma[0] - expected_sigma).abs() < 1e-4,
+            "expected the outlier gate to isolate the real noise floor {expected_sigma} despite \
+             the zero population, got {}",
+            sample.sigma[0]
+        );
+        assert!(
+            (sample.static_fraction - 10.0 / 20.0).abs() < 1e-4,
+            "expected the 6 background blocks and 4 zero blocks to survive, got static_fraction={}",
+            sample.static_fraction
+        );
+        assert!(
+            (sample.rho - background_rho).abs() < 1e-4,
+            "expected rho to come from the surviving background blocks only, got {}",
+            sample.rho
+        );
+    }
+
+    /// [`aggregate_keeps_genuinely_static_blocks_despite_spatial_sigma_spread`]
+    /// with a letterbox-style zero-sigma population mixed in. A real
+    /// spatial sigma spread must still survive the outlier gate, and
+    /// the zero population must not trip it either.
+    #[test]
+    fn aggregate_keeps_static_spread_with_zero_population_present() {
+        let width = 64;
+        let height = 80; // 4 x 5 TEMPORAL_NOISE_BLOCK grid, 20 blocks.
+        let stored_ch = 1;
+        let channels = 1;
+
+        let low_sigma_255 = 2.0f32;
+        let high_sigma_255 = 6.0f32; // 3x low_sigma_255, real spatial spread.
+        let rho = 0.1f32;
+
+        let mut records = Vec::new();
+        for _ in 0..8 {
+            records.extend_from_slice(&zero_mean_block_record(low_sigma_255, rho));
+        }
+        for _ in 0..8 {
+            records.extend_from_slice(&zero_mean_block_record(high_sigma_255, rho));
+        }
+        for _ in 0..4 {
+            records.extend_from_slice(&zero_mean_block_record(0.0, 0.0));
+        }
+
+        let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+            .expect("every non-zero block is static");
+
+        assert!(
+            (sample.static_fraction - 1.0).abs() < 1e-6,
+            "a real 3x spatial sigma spread plus a zero population must not trip the outlier \
+             gate, got static_fraction={}",
             sample.static_fraction
         );
     }
