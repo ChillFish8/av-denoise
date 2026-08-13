@@ -562,7 +562,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                 .create_from_slice(f32::as_bytes(&self.padding_scratch))
         };
 
-        self.copy_frame_into_slot(dst, &staging, slot);
+        self.copy_frame_into_slot(dst, slot, &staging, 0, 1);
     }
 
     fn run_prefilter_for_slot(&self, slot: usize) {
@@ -972,14 +972,29 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.real_pushes += 1;
     }
 
-    /// GPU→GPU copy of one frame from `src` into `dst` at the given
-    /// physical slot. `dst` must have ring-buffer layout matching
+    /// GPU→GPU copy of one frame from `src`'s slot `src_slot` into
+    /// `dst`'s slot `slot`. `dst` must have ring-buffer layout matching
     /// `input_buf` (`total_frames * height * width * stored_ch`).
-    fn copy_frame_into_slot(&self, dst: &Handle, src: &Handle, slot: usize) {
+    /// `src_slots` is how many frames `src` holds, `1` for a
+    /// frame-sized staging buffer.
+    ///
+    /// Both handles are bound whole and the slots addressed by the
+    /// kernel's own offset arguments. Binding a slot directly would
+    /// need its byte offset to be a multiple of the GPU's
+    /// `min_storage_buffer_offset_alignment` (32 bytes), which a frame
+    /// stride only satisfies when `width * height * stored_ch` is a
+    /// multiple of 8.
+    fn copy_frame_into_slot(
+        &self,
+        dst: &Handle,
+        slot: usize,
+        src: &Handle,
+        src_slot: usize,
+        src_slots: usize,
+    ) {
         let stored_ch = self.params.channels.storage_count();
         let frame_size = self.width * self.height * stored_ch;
-        let byte_offset = (slot as u64) * (frame_size as u64) * (size_of::<f32>() as u64);
-        let dst_handle = dst.clone().offset_start(byte_offset);
+        let dst_slots = self.params.total_frames() as usize;
 
         let grid = frame_size.div_ceil(BLOCK_1D).min(MAX_GRID_1D);
         let total_threads = grid * BLOCK_1D;
@@ -989,8 +1004,10 @@ impl<R: Runtime> NlmDenoiser<R> {
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(BLOCK_1D),
-                ArrayArg::from_raw_parts(src.clone(), frame_size as usize),
-                ArrayArg::from_raw_parts(dst_handle.clone(), frame_size as usize),
+                ArrayArg::from_raw_parts(src.clone(), src_slots * frame_size as usize),
+                ArrayArg::from_raw_parts(dst.clone(), dst_slots * frame_size as usize),
+                src_slot as u32 * frame_size,
+                slot as u32 * frame_size,
                 frame_size,
                 total_threads,
             )
@@ -1024,15 +1041,8 @@ impl<R: Runtime> NlmDenoiser<R> {
         let last_slot = (self.ring_head - 1) % total_frames;
         let next_slot = self.ring_head % total_frames;
 
-        let stored_ch = self.params.channels.storage_count();
-        let frame_size = self.width * self.height * stored_ch;
-        let bytes_per_slot = (frame_size as u64) * (size_of::<f32>() as u64);
-
-        let input_src = self
-            .input_buf
-            .clone()
-            .offset_start((last_slot as u64) * bytes_per_slot);
-        self.copy_frame_into_slot(&self.input_buf.clone(), &input_src, next_slot);
+        let input_buf = self.input_buf.clone();
+        self.copy_frame_into_slot(&input_buf, next_slot, &input_buf, last_slot, total_frames);
 
         // Skipped for `NlmSpatial`: the pilot dispatch below recomputes
         // this slot's reference from scratch, so the byte copy would
@@ -1040,10 +1050,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         if !matches!(self.params.prefilter, PrefilterMode::NlmSpatial { .. })
             && let Some(reference_buf) = self.reference_buf.clone()
         {
-            let ref_src = reference_buf
-                .clone()
-                .offset_start((last_slot as u64) * bytes_per_slot);
-            self.copy_frame_into_slot(&reference_buf, &ref_src, next_slot);
+            self.copy_frame_into_slot(&reference_buf, next_slot, &reference_buf, last_slot, total_frames);
         }
 
         // Keep the motion-estimation pyramid and noise estimate for the

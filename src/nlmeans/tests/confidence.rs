@@ -5,12 +5,26 @@ use crate::nlmeans::kernels::motion::nlm_mc_block_match_fine;
 use crate::nlmeans::motion::{
     MotionCompensationMode,
     MotionCtx,
+    pyramid_pixels_per_frame,
     run_analyse,
     run_confidence_for_neighbour,
     sad_noise_floor,
     thsad,
 };
 use crate::nlmeans::*;
+
+/// Lays `frames` out as a single-level pyramid buffer, each frame at
+/// the slot stride `run_pyramid_build` writes to. Slots are padded up
+/// to the GPU's storage-buffer offset alignment, so a frame does not
+/// necessarily start right where the one before it ended.
+fn pack_single_level_pyramid(frames: &[&[f32]], width: u32, height: u32) -> Vec<f32> {
+    let stride = pyramid_pixels_per_frame(width, height, 1);
+    let mut data = vec![0.0f32; frames.len() * stride];
+    for (slot, frame) in frames.iter().enumerate() {
+        data[slot * stride..slot * stride + frame.len()].copy_from_slice(frame);
+    }
+    data
+}
 
 /// Runs the fine block-match kernel over a single `blksize × blksize`
 /// block (one cube covers the whole frame, no seed, no search window)
@@ -285,8 +299,9 @@ fn confidence_discriminates_occluded_from_matched_at_prefilter_scale_noise() {
 /// `run_analyse` (the with-MC path) must fill the confidence buffer
 /// with real, in-range values, not leave it at whatever sentinel the
 /// caller pre-seeded it with. Pyramid data is supplied directly rather
-/// than built via `run_pyramid_build`, since a single-level pyramid is
-/// just its two frames concatenated (`[frame0][frame1]`).
+/// than built via `run_pyramid_build`, a single-level pyramid being
+/// just its two frames laid out at the pyramid's own slot stride (see
+/// [`pack_single_level_pyramid`]).
 #[test]
 fn run_analyse_fills_confidence_buffer() {
     let client = make_client();
@@ -309,8 +324,7 @@ fn run_analyse_fills_confidence_buffer() {
 
     let frame0 = noisy_copy(width, 0.5, 4.0 / 255.0, 10);
     let frame1 = noisy_copy(width, 0.5, 4.0 / 255.0, 11);
-    let mut pyramid_data = frame0;
-    pyramid_data.extend(frame1);
+    let pyramid_data = pack_single_level_pyramid(&[&frame0, &frame1], width, height);
     let pyramid = client.create_from_slice(f32::as_bytes(&pyramid_data));
 
     let mv_field = client.empty(mc.mv_slots_per_neighbour() * 2 * size_of::<i32>());
@@ -365,8 +379,7 @@ fn run_confidence_for_neighbour_fills_confidence_buffer() {
 
     let frame0 = noisy_copy(width, 0.5, 4.0 / 255.0, 20);
     let frame1 = noisy_copy(width, 0.5, 4.0 / 255.0, 21);
-    let mut pyramid_data = frame0;
-    pyramid_data.extend(frame1);
+    let pyramid_data = pack_single_level_pyramid(&[&frame0, &frame1], width, height);
     let pyramid = client.create_from_slice(f32::as_bytes(&pyramid_data));
 
     let mv_scratch = client.empty(ctx.mv_slots_per_neighbour() * 2 * size_of::<i32>());

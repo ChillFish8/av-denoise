@@ -4,35 +4,45 @@ use cubecl::server::Handle;
 use super::MotionCtx;
 use crate::nlmeans::kernels::motion::{nlm_mc_downscale, nlm_mc_extract_luma};
 
+/// GPU storage-buffer offset alignment expressed in `f32` elements
+/// (32 bytes). Every pyramid slot starts on a multiple of this, the
+/// same 32-byte convention [`MotionCtx::mv_field_bytes_per_neighbour`]
+/// pads the MV field to.
+const SLOT_ALIGN_PIXELS: usize = 32 / size_of::<f32>();
+
+/// Luma pixels one frame occupies at `level`, padded up to
+/// [`SLOT_ALIGN_PIXELS`]. Slot offsets are sums of whole slot strides,
+/// so padding the stride is what keeps every offset 32-byte aligned.
+/// `wgpu` rejects a bind-group offset that isn't a multiple of its
+/// `min_storage_buffer_offset_alignment`, and a level whose `w * h`
+/// isn't a multiple of 8 (a 180x137 chroma level, say) leaves every
+/// odd slot short of that boundary. Kernels only ever read a slot's
+/// leading `w * h` pixels, so the pad is never touched.
+fn level_slot_pixels(width: u32, height: u32, level: u32) -> usize {
+    let (w, h) = level_dims(width, height, level);
+    ((w as usize) * (h as usize)).next_multiple_of(SLOT_ALIGN_PIXELS)
+}
+
 /// Number of luma pixels stored per frame across every pyramid level
 /// for an image of `(width, height)`. Level 0 contributes `w*h`; each
-/// subsequent level halves both axes.
+/// subsequent level halves both axes. Each level's contribution is
+/// padded to [`SLOT_ALIGN_PIXELS`], matching the layout
+/// [`pyramid_slot_byte_offset`] addresses.
 pub fn pyramid_pixels_per_frame(width: u32, height: u32, levels: u32) -> usize {
-    let mut total: usize = 0;
-    let mut w = width;
-    let mut h = height;
-    for _ in 0..levels {
-        total += (w as usize) * (h as usize);
-        w = (w / 2).max(1);
-        h = (h / 2).max(1);
-    }
-    total
+    (0..levels)
+        .map(|level| level_slot_pixels(width, height, level))
+        .sum()
 }
 
 /// Byte offset of a given `(level, frame)` slot inside the flat pyramid
-/// buffer.
+/// buffer. Always a multiple of 32, see [`level_slot_pixels`].
 pub fn pyramid_slot_byte_offset(width: u32, height: u32, frame_count: u32, level: u32, frame: u32) -> u64 {
-    let mut offset_pixels: u64 = 0;
-    let mut w = width as u64;
-    let mut h = height as u64;
+    let mut offset_pixels: usize = 0;
     for l in 0..level {
-        offset_pixels += (frame_count as u64) * w * h;
-        w = (w / 2).max(1);
-        h = (h / 2).max(1);
-        let _ = l;
+        offset_pixels += (frame_count as usize) * level_slot_pixels(width, height, l);
     }
-    offset_pixels += (frame as u64) * w * h;
-    offset_pixels * (size_of::<f32>() as u64)
+    offset_pixels += (frame as usize) * level_slot_pixels(width, height, level);
+    (offset_pixels * size_of::<f32>()) as u64
 }
 
 /// Pixel dimensions at `level` (level 0 = full res).
@@ -183,6 +193,48 @@ mod tests {
         assert_eq!(level_dims(64, 32, 0), (64, 32));
         assert_eq!(level_dims(64, 32, 1), (32, 16));
         assert_eq!(level_dims(64, 32, 2), (16, 8));
+    }
+
+    #[test]
+    fn slot_byte_offsets_are_storage_aligned() {
+        // `wgpu` rejects a bind-group offset that isn't a multiple of
+        // `min_storage_buffer_offset_alignment` (32 bytes). Every
+        // dimension pair here has at least one level whose unpadded
+        // slot stride falls short of that: 360x274 is the chroma plane
+        // of a 720x548 frame, whose /2 level is 180x137 = 24 660 f32 =
+        // 98 640 bytes, 16 bytes short of a 32-byte multiple.
+        for (w, h) in [(360, 274), (720, 548), (722, 546), (66, 66), (42, 28)] {
+            for level in 0..super::super::MAX_PYRAMID_LEVELS {
+                for frame in 0..5 {
+                    let offset = pyramid_slot_byte_offset(w, h, 5, level, frame);
+                    assert_eq!(
+                        offset % 32,
+                        0,
+                        "{w}x{h} level={level} frame={frame} lands at byte {offset}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pixels_per_frame_covers_the_last_slot_of_every_level() {
+        // The allocation `pyramid_pixels_per_frame` sizes must hold
+        // every slot `pyramid_slot_byte_offset` addresses, padding
+        // included.
+        let (w, h, frames, levels) = (360u32, 274u32, 5u32, 3u32);
+        let total_bytes = pyramid_pixels_per_frame(w, h, levels) * frames as usize * size_of::<f32>();
+
+        for level in 0..levels {
+            let (lw, lh) = level_dims(w, h, level);
+            let last = pyramid_slot_byte_offset(w, h, frames, level, frames - 1) as usize;
+            let end = last + (lw * lh) as usize * size_of::<f32>();
+            assert!(
+                end <= total_bytes,
+                "level {level} slot {} ends at {end}, past the {total_bytes}-byte buffer",
+                frames - 1
+            );
+        }
     }
 
     #[test]

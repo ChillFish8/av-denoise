@@ -187,17 +187,16 @@ impl<R: Runtime> NlmDenoiser<R> {
         unsafe { ArrayArg::from_raw_parts(self.outputs[slot].clone(), ctx.frame_size) }
     }
 
-    /// Reference ring slot `slot`, viewed as a single frame-sized array
-    /// via a byte offset into `reference_buf`. Same byte-offset slicing
-    /// pattern as the motion pyramid's per-slot views.
-    fn reference_slot_arg(&self, ctx: &LaunchCtx, slot: u32) -> ArrayArg<R> {
+    /// The whole reference ring, for a kernel that addresses one of its
+    /// slots itself. Binding a single slot instead would need the
+    /// slot's byte offset to be 32-byte aligned, which a
+    /// `width * height * stored_ch` frame stride does not guarantee.
+    fn reference_ring_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
         let buf = self
             .reference_buf
             .as_ref()
             .expect("reference buffer must exist for the nlm spatial pilot");
-        let byte_offset = (slot as u64) * (ctx.frame_size as u64) * (size_of::<f32>() as u64);
-        let handle = buf.clone().offset_start(byte_offset);
-        unsafe { ArrayArg::from_raw_parts(handle, ctx.frame_size) }
+        unsafe { ArrayArg::from_raw_parts(buf.clone(), ctx.total_frame_data) }
     }
 
     fn weight_sum_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
@@ -702,6 +701,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             &self.input_buf,
             compensated_input,
             centre_slot as usize,
+            self.params.total_frames(),
             self.width,
             self.height,
             stored_ch,
@@ -715,6 +715,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                 ref_src,
                 ref_dst,
                 centre_slot as usize,
+                self.params.total_frames(),
                 self.width,
                 self.height,
                 stored_ch,
@@ -922,6 +923,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         &self,
         ctx: &LaunchCtx,
         center_frame: u32,
+        output_frame: u32,
         output: ArrayArg<R>,
     ) -> Result<(), anyhow::Error> {
         let channels = self.params.channels.count();
@@ -937,6 +939,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                 self.weight_sum_arg(ctx),
                 self.max_weight_arg(ctx),
                 center_frame,
+                output_frame,
                 self.params.self_weight,
                 self.width,
                 self.height,
@@ -951,6 +954,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.run_finish_to(
             ctx,
             self.phys_frame(center_t as i32),
+            0,
             self.output_arg(ctx, output_slot),
         )
     }
@@ -1025,7 +1029,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             );
         }
 
-        self.run_finish_to(&ctx, slot, self.reference_slot_arg(&ctx, slot))
+        self.run_finish_to(&ctx, slot, slot, self.reference_ring_arg(&ctx))
     }
 
     pub(super) fn run_denoise_kernels(&mut self, output_slot: usize) -> Result<(), anyhow::Error> {
@@ -1095,23 +1099,28 @@ impl<R: Runtime> NlmDenoiser<R> {
 
 /// GPU→GPU copy of one frame from `src`'s slot `slot` into `dst`'s
 /// slot `slot`. Both buffers must share the same ring-buffer layout
-/// (`total_frames * height * width * stored_ch`). Free function so
+/// (`frame_count * height * width * stored_ch`). Free function so
 /// the motion-compensation dispatcher can call it without tying back
 /// into the `NlmDenoiser` impl block (avoids borrow conflicts inside
 /// the per-submit method).
+///
+/// Binds both rings whole and lets the kernel address the slot, for
+/// the alignment reason [`NlmDenoiser::copy_frame_into_slot`]
+/// documents.
+#[allow(clippy::too_many_arguments)]
 fn copy_frame_into_slot_handle<R: Runtime>(
     client: &ComputeClient<R>,
     src: &Handle,
     dst: &Handle,
     slot: usize,
+    frame_count: u32,
     width: u32,
     height: u32,
     stored_ch: u32,
 ) {
     let frame_size = width * height * stored_ch;
-    let byte_offset = (slot as u64) * (frame_size as u64) * (size_of::<f32>() as u64);
-    let src_handle = src.clone().offset_start(byte_offset);
-    let dst_handle = dst.clone().offset_start(byte_offset);
+    let ring_len = frame_count as usize * frame_size as usize;
+    let offset = slot as u32 * frame_size;
 
     let grid = frame_size.div_ceil(BLOCK_1D).min(MAX_GRID_1D);
     let total_threads = grid * BLOCK_1D;
@@ -1121,8 +1130,10 @@ fn copy_frame_into_slot_handle<R: Runtime>(
             client,
             CubeCount::new_1d(grid),
             CubeDim::new_1d(BLOCK_1D),
-            ArrayArg::from_raw_parts(src_handle, frame_size as usize),
-            ArrayArg::from_raw_parts(dst_handle, frame_size as usize),
+            ArrayArg::from_raw_parts(src.clone(), ring_len),
+            ArrayArg::from_raw_parts(dst.clone(), ring_len),
+            offset,
+            offset,
             frame_size,
             total_threads,
         );
