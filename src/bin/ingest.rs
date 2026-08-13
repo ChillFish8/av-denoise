@@ -757,6 +757,32 @@ mod converter_tests {
         }
     }
 
+    #[test]
+    fn quantise_matches_the_clamping_form_including_nan() {
+        fn reference(v: f32, max: f32) -> u16 {
+            (v.clamp(0.0, 1.0) * max + 0.5) as u16
+        }
+
+        let max = 1023.0;
+        let cases = [
+            -1.0,
+            -0.001,
+            0.0,
+            0.5,
+            0.999,
+            1.0,
+            1.001,
+            2.0,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ];
+
+        for v in cases {
+            assert_eq!(quantise(v, max), reference(v, max), "mismatch at {v}");
+        }
+    }
+
     /// Limited-range codes normalize to matching values across depths,
     /// the property the whole design rests on.
     ///

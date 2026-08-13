@@ -212,7 +212,7 @@ impl BackendPending {
 /// count ([`crate::nlmeans::NlmDenoiser::outputs`] is `[Handle; 2]`).
 /// Exceeding this aliases the oldest pending's output handle and
 /// silently corrupts results.
-const MAX_PENDING: usize = 2;
+pub const MAX_PENDING: usize = 2;
 
 pub struct Denoiser {
     backend: Backend,

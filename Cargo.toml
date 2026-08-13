@@ -92,3 +92,8 @@ required-features = ["clap"]
 name = "motion"
 harness = false
 required-features = ["clap"]
+
+[[bench]]
+name = "convert"
+harness = false
+required-features = ["clap"]

@@ -22,8 +22,68 @@ use crate::ingest::{
 };
 use crate::progress::{self, denoise_bar_visible, denoise_progress_bar, scene_progress_bar};
 
-const FRAME_CHANNEL_DEPTH: usize = 8;
-const OUTPUT_CHANNEL_DEPTH: usize = 32;
+/// Target ceiling for CPU-side frame buffers held in flight. Channel
+/// depths shrink to stay under this when frames are large.
+const FRAME_MEMORY_BUDGET_BYTES: usize = 1 << 30;
+
+/// Channel depths used when frames are small enough to afford them.
+const FRAME_CHANNEL_DEPTH_MAX: usize = 8;
+const OUTPUT_CHANNEL_DEPTH_MAX: usize = 32;
+
+/// Floors that keep the pipeline from starving no matter the frame size.
+const FRAME_CHANNEL_DEPTH_MIN: usize = 2;
+const OUTPUT_CHANNEL_DEPTH_MIN: usize = 4;
+
+/// Channel depths for one run, with the frame counts they imply.
+#[derive(Debug, Clone, Copy)]
+struct ChannelBudget {
+    frame_depth: usize,
+    output_depth: usize,
+    /// Frames held in the channels. This is what the budget scales, and
+    /// it stays under [`FRAME_MEMORY_BUDGET_BYTES`] whenever the depth
+    /// floors allow it.
+    ceiling_frames: usize,
+    /// Frames alive anywhere, including the ones each worker holds
+    /// inside its GPU pipeline. Larger than `ceiling_frames`, and the
+    /// figure the reorder high-water mark is judged against.
+    peak_frames: usize,
+}
+
+/// Picks channel depths so the frames held in flight stay near
+/// [`FRAME_MEMORY_BUDGET_BYTES`]. Small frames keep the maximum depths,
+/// so the common case behaves exactly as it did before. Large frames
+/// scale both depths down together, never below their floors.
+fn channel_budget(layout: FrameLayout, workers: usize) -> ChannelBudget {
+    let frame_bytes = layout.luma_bytes() + 2 * layout.chroma_bytes();
+    let max_frames = workers * FRAME_CHANNEL_DEPTH_MAX + OUTPUT_CHANNEL_DEPTH_MAX;
+
+    let affordable = FRAME_MEMORY_BUDGET_BYTES / frame_bytes.max(1);
+
+    let (frame_depth, output_depth) = if max_frames <= affordable {
+        (FRAME_CHANNEL_DEPTH_MAX, OUTPUT_CHANNEL_DEPTH_MAX)
+    } else {
+        let scale = affordable as f64 / max_frames as f64;
+        let frame_depth =
+            ((FRAME_CHANNEL_DEPTH_MAX as f64 * scale).floor() as usize).max(FRAME_CHANNEL_DEPTH_MIN);
+        let output_depth =
+            ((OUTPUT_CHANNEL_DEPTH_MAX as f64 * scale).floor() as usize).max(OUTPUT_CHANNEL_DEPTH_MIN);
+        (frame_depth, output_depth)
+    };
+
+    // Each worker also holds frames the channels never see: up to
+    // `MAX_PENDING` readbacks in flight inside its denoiser, plus the one
+    // it is pushing. Those count toward real memory and toward how far
+    // the reorder map can legitimately run ahead, so they belong in the
+    // peak even though the budget only scales channel capacity.
+    let per_worker_pipeline = av_denoise::MAX_PENDING + 1;
+
+    ChannelBudget {
+        frame_depth,
+        output_depth,
+        ceiling_frames: workers * frame_depth + output_depth,
+        peak_frames: workers * (frame_depth + per_worker_pipeline) + output_depth,
+    }
+}
 
 /// Scene boundaries + the video metadata needed to build the output y4m header.
 struct SceneLayout {
@@ -139,13 +199,26 @@ fn encode_scenes(
     workers: usize,
     visible: bool,
 ) -> Result<(), anyhow::Error> {
-    let (worker_txs, worker_handles, out_rx) = spawn_workers(opts, scenes.layout, workers);
+    let budget = channel_budget(scenes.layout, workers);
+    let frame_bytes = scenes.layout.luma_bytes() + 2 * scenes.layout.chroma_bytes();
+
+    tracing::info!(
+        frame_depth = budget.frame_depth,
+        output_depth = budget.output_depth,
+        ceiling_frames = budget.ceiling_frames,
+        peak_frames = budget.peak_frames,
+        peak_mib = (budget.peak_frames * frame_bytes) / (1 << 20),
+        "frame buffer budget",
+    );
+
+    let (worker_txs, worker_handles, out_rx) = spawn_workers(opts, scenes.layout, workers, budget);
     let coordinator = spawn_coordinator(
         scenes.layout,
         scenes.framerate,
         out_rx,
         scenes.total_frames,
         visible,
+        budget.peak_frames,
     );
 
     dispatch_frames(input, scenes, &worker_txs)?;
@@ -176,13 +249,14 @@ fn spawn_workers(
     opts: &CliOptions,
     layout: FrameLayout,
     workers: usize,
+    budget: ChannelBudget,
 ) -> (Vec<SyncSender<WorkerMsg>>, Vec<WorkerJoin>, Receiver<OutputMsg>) {
     let mut worker_txs: Vec<SyncSender<WorkerMsg>> = Vec::with_capacity(workers);
-    let (out_tx, out_rx) = sync_channel::<OutputMsg>(OUTPUT_CHANNEL_DEPTH);
+    let (out_tx, out_rx) = sync_channel::<OutputMsg>(budget.output_depth);
     let mut worker_handles: Vec<WorkerJoin> = Vec::with_capacity(workers);
 
     for worker_id in 0..workers {
-        let (frame_tx, frame_rx) = sync_channel::<WorkerMsg>(FRAME_CHANNEL_DEPTH);
+        let (frame_tx, frame_rx) = sync_channel::<WorkerMsg>(budget.frame_depth);
         let opts = opts.clone();
         let out_tx = out_tx.clone();
 
@@ -205,8 +279,9 @@ fn spawn_coordinator(
     rx: Receiver<OutputMsg>,
     total_frames: usize,
     visible: bool,
+    peak_frames: usize,
 ) -> thread::JoinHandle<Result<(), anyhow::Error>> {
-    thread::spawn(move || run_coordinator(layout, framerate, rx, total_frames, visible))
+    thread::spawn(move || run_coordinator(layout, framerate, rx, total_frames, visible, peak_frames))
 }
 
 /// Sequential decode loop: read every frame, route it to worker
@@ -393,6 +468,7 @@ fn run_coordinator(
     rx: Receiver<OutputMsg>,
     total_frames: usize,
     visible: bool,
+    peak_frames: usize,
 ) -> Result<(), anyhow::Error> {
     let stdout = stdout();
     let lock = stdout.lock();
@@ -419,7 +495,7 @@ fn run_coordinator(
     // away and keeps its elapsed time moving until then.
     pb.enable_steady_tick(Duration::from_millis(250));
 
-    let result = emit_frames(&mut encoder, &rx, total_frames as u64, &pb);
+    let result = emit_frames(&mut encoder, &rx, total_frames as u64, &pb, peak_frames);
 
     progress::finish(&pb);
 
@@ -435,9 +511,13 @@ fn emit_frames<W: std::io::Write>(
     rx: &Receiver<OutputMsg>,
     total: u64,
     pb: &ProgressBar,
+    peak_frames: usize,
 ) -> Result<(), anyhow::Error> {
     let mut pending: BTreeMap<u64, Planes> = BTreeMap::new();
     let mut next_emit: u64 = 0;
+
+    let mut high_water = 0usize;
+    let mut warned = false;
 
     while next_emit < total {
         let msg = match rx.recv() {
@@ -447,6 +527,19 @@ fn emit_frames<W: std::io::Write>(
 
         pending.insert(msg.global_idx, msg.planes);
 
+        if pending.len() > high_water {
+            high_water = pending.len();
+
+            if high_water > peak_frames && !warned {
+                warned = true;
+                tracing::warn!(
+                    high_water,
+                    peak_frames,
+                    "reorder buffer exceeded its predicted peak, frame memory may run high"
+                );
+            }
+        }
+
         while let Some(planes) = pending.remove(&next_emit) {
             let frame = Y4mFrame::new([&planes.y, &planes.u, &planes.v], None);
             encoder.write_frame(&frame)?;
@@ -455,6 +548,8 @@ fn emit_frames<W: std::io::Write>(
 
         pb.set_position(next_emit);
     }
+
+    tracing::debug!(high_water, peak_frames, "reorder buffer high-water mark");
 
     if next_emit != total {
         anyhow::bail!(
@@ -601,7 +696,7 @@ mod tests {
         .expect("header write failed");
 
         let pb = ProgressBar::hidden();
-        let err = emit_frames(&mut encoder, &rx, 3, &pb).expect_err("expected a lost-frame error");
+        let err = emit_frames(&mut encoder, &rx, 3, &pb, 4).expect_err("expected a lost-frame error");
 
         let msg = err.to_string();
         assert!(
@@ -682,5 +777,76 @@ mod tests {
             err.to_string().contains("disconnect"),
             "error should mention the coordinator disconnect: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    fn layout(width: u32, height: u32, depth: Depth) -> FrameLayout {
+        FrameLayout {
+            width,
+            height,
+            subsampling: Subsampling::Yuv420,
+            depth,
+        }
+    }
+
+    /// The common case must keep today's depths exactly, so 8-bit 1080p
+    /// behaviour does not change.
+    #[test]
+    fn small_frames_keep_the_maximum_depths() {
+        let b = channel_budget(layout(1920, 1080, Depth::Eight), 2);
+
+        assert_eq!(b.frame_depth, FRAME_CHANNEL_DEPTH_MAX);
+        assert_eq!(b.output_depth, OUTPUT_CHANNEL_DEPTH_MAX);
+    }
+
+    /// Pins the exact output of the scaling branch. Relative assertions
+    /// like "large <= small" pass even if the shrink path never runs, so
+    /// this names the numbers instead. 4K 10-bit 4:2:0 is 24,883,200
+    /// bytes a frame, which affords 43 frames of the 1 GiB budget
+    /// against a 96-frame request, giving a scale of 43/96.
+    #[test]
+    fn large_frames_shrink_the_depths() {
+        let small = channel_budget(layout(1920, 1080, Depth::Eight), 8);
+        let large = channel_budget(layout(3840, 2160, Depth::Ten), 8);
+
+        assert_eq!(
+            (small.frame_depth, small.output_depth),
+            (FRAME_CHANNEL_DEPTH_MAX, OUTPUT_CHANNEL_DEPTH_MAX),
+            "1080p 8-bit at 8 workers still fits the budget"
+        );
+
+        assert_eq!(large.frame_depth, 3, "floor(8 * 43/96)");
+        assert_eq!(large.output_depth, 14, "floor(32 * 43/96)");
+        assert_eq!(large.ceiling_frames, 38, "8 * 3 + 14");
+        assert_eq!(large.peak_frames, 62, "8 * (3 + 3) + 14");
+    }
+
+    #[test]
+    fn depths_never_fall_below_the_minimum() {
+        // Deliberately absurd frame size, far past any budget.
+        let b = channel_budget(layout(15360, 8640, Depth::Twelve), 16);
+
+        assert!(b.frame_depth >= FRAME_CHANNEL_DEPTH_MIN);
+        assert!(b.output_depth >= OUTPUT_CHANNEL_DEPTH_MIN);
+    }
+
+    #[test]
+    fn budget_is_respected_where_the_minimums_allow_it() {
+        let l = layout(3840, 2160, Depth::Ten);
+        let b = channel_budget(l, 8);
+        let frame_bytes = l.luma_bytes() + 2 * l.chroma_bytes();
+
+        let floor_frames = 8 * FRAME_CHANNEL_DEPTH_MIN + OUTPUT_CHANNEL_DEPTH_MIN;
+        if floor_frames * frame_bytes <= FRAME_MEMORY_BUDGET_BYTES {
+            assert!(
+                b.ceiling_frames * frame_bytes <= FRAME_MEMORY_BUDGET_BYTES,
+                "ceiling {} frames x {frame_bytes} bytes exceeds the budget",
+                b.ceiling_frames
+            );
+        }
     }
 }
