@@ -189,8 +189,9 @@ impl<R: Runtime> NlmDenoiser<R> {
 
     /// The whole reference ring, for a kernel that addresses one of its
     /// slots itself. Binding a single slot instead would need the
-    /// slot's byte offset to be 32-byte aligned, which a
-    /// `width * height * stored_ch` frame stride does not guarantee.
+    /// slot's byte offset to land on one of the runtime's alignment
+    /// boundaries, which a `width * height * stored_ch` frame stride
+    /// does not guarantee.
     fn reference_ring_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
         let buf = self
             .reference_buf

@@ -1,11 +1,19 @@
 use cubecl::prelude::*;
 use cubecl::wgpu::WgpuRuntime;
 
+pub(super) use crate::nlmeans::align::StorageAlign;
+
 pub(super) type R = WgpuRuntime;
 
 pub(super) fn make_client() -> ComputeClient<R> {
     let device = <R as Runtime>::Device::default();
     R::client(&device)
+}
+
+/// Buffer-binding alignment the test runtime reports, the same value
+/// `NlmDenoiser` lays its per-slot buffers out against.
+pub(super) fn test_align() -> StorageAlign {
+    StorageAlign::from_client(&make_client())
 }
 
 pub(super) fn make_uniform_frame(w: u32, h: u32, ch: u32, val: f32) -> Vec<f32> {

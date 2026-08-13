@@ -3,6 +3,8 @@ use cubecl::server::Handle;
 
 use super::MotionCtx;
 use super::pyramid::{level_dims, pyramid_slot_byte_offset};
+#[cfg(test)]
+use crate::nlmeans::align::StorageAlign;
 use crate::nlmeans::kernels::motion::{nlm_mc_block_match_coarse, nlm_mc_block_match_fine};
 
 /// Byte offset of the MV-field slice for a given neighbour index.
@@ -81,6 +83,7 @@ pub(crate) fn run_analyse<R: Runtime>(
             frame_count,
             coarse_level,
             centre_slot,
+            mc.align,
         ));
         let coarse_neighbour = pyramid.clone().offset_start(pyramid_slot_byte_offset(
             width,
@@ -88,6 +91,7 @@ pub(crate) fn run_analyse<R: Runtime>(
             frame_count,
             coarse_level,
             neighbour_slot,
+            mc.align,
         ));
         let level_len = (cw * ch) as usize;
         let coarse_scale = 1u32 << coarse_level;
@@ -136,6 +140,7 @@ pub(crate) fn run_analyse<R: Runtime>(
         frame_count,
         0,
         centre_slot,
+        mc.align,
     ));
     let fine_neighbour = pyramid.clone().offset_start(pyramid_slot_byte_offset(
         width,
@@ -143,6 +148,7 @@ pub(crate) fn run_analyse<R: Runtime>(
         frame_count,
         0,
         neighbour_slot,
+        mc.align,
     ));
     let level_len = (fw * fh) as usize;
     let grid = CubeCount::new_2d(mc.blocks_x, mc.blocks_y);
@@ -225,6 +231,7 @@ pub(crate) fn run_seeded_refine<R: Runtime>(
         frame_count,
         0,
         centre_slot,
+        mc.align,
     ));
     let fine_neighbour = pyramid.clone().offset_start(pyramid_slot_byte_offset(
         width,
@@ -232,6 +239,7 @@ pub(crate) fn run_seeded_refine<R: Runtime>(
         frame_count,
         0,
         neighbour_slot,
+        mc.align,
     ));
     let level_len = (fw * fh) as usize;
     let grid = CubeCount::new_2d(mc.blocks_x, mc.blocks_y);
@@ -268,6 +276,11 @@ mod tests {
     use super::*;
     use crate::nlmeans::motion::{MotionCompensationMode, MotionEstimation};
 
+    /// The alignment the Vulkan adapters we test against report.
+    fn align() -> StorageAlign {
+        StorageAlign::new(32)
+    }
+
     fn mc(blksize: u32, overlap: u32) -> MotionCtx {
         MotionCtx::new(
             MotionCompensationMode::Mvtools {
@@ -279,6 +292,7 @@ mod tests {
             },
             64,
             64,
+            align(),
         )
         .unwrap()
     }
@@ -337,6 +351,7 @@ mod tests {
             },
             4,
             4,
+            align(),
         )
         .unwrap();
         assert_eq!(
@@ -365,6 +380,7 @@ mod tests {
             },
             4,
             4,
+            align(),
         )
         .unwrap();
         assert_eq!(
@@ -387,7 +403,7 @@ mod tests {
         // misaligned. 1920x1080 (the harness's usual frame size)
         // happens to land on an even block count at this geometry, so
         // it never exercises this rounding.
-        let m = MotionCtx::new(MotionCompensationMode::mvtools_default(), 1080, 1080).unwrap();
+        let m = MotionCtx::new(MotionCompensationMode::mvtools_default(), 1080, 1080, align()).unwrap();
         assert_eq!(
             m.blocks_x * m.blocks_y,
             18225,

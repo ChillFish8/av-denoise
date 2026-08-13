@@ -49,8 +49,8 @@ pub fn nlm_accumulate<N: Size>(
 /// Reads the centre pixel from `input`'s frame `center_frame` and
 /// writes to `output`'s frame `output_frame`, so a caller writing into
 /// a ring buffer slot passes the whole ring rather than binding it at
-/// the slot's byte offset (which the GPU only accepts on 32-byte
-/// boundaries).
+/// the slot's byte offset (which the GPU only accepts on its own
+/// alignment boundaries).
 #[cube(launch_unchecked)]
 pub fn nlm_finish<N: Size>(
     input: &Array<Vector<f32, N>>,

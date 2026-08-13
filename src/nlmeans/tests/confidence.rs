@@ -17,8 +17,8 @@ use crate::nlmeans::*;
 /// the slot stride `run_pyramid_build` writes to. Slots are padded up
 /// to the GPU's storage-buffer offset alignment, so a frame does not
 /// necessarily start right where the one before it ended.
-fn pack_single_level_pyramid(frames: &[&[f32]], width: u32, height: u32) -> Vec<f32> {
-    let stride = pyramid_pixels_per_frame(width, height, 1);
+fn pack_single_level_pyramid(frames: &[&[f32]], width: u32, height: u32, align: StorageAlign) -> Vec<f32> {
+    let stride = pyramid_pixels_per_frame(width, height, 1, align);
     let mut data = vec![0.0f32; frames.len() * stride];
     for (slot, frame) in frames.iter().enumerate() {
         data[slot * stride..slot * stride + frame.len()].copy_from_slice(frame);
@@ -319,12 +319,13 @@ fn run_analyse_fills_confidence_buffer() {
         },
         width,
         height,
+        test_align(),
     )
     .unwrap();
 
     let frame0 = noisy_copy(width, 0.5, 4.0 / 255.0, 10);
     let frame1 = noisy_copy(width, 0.5, 4.0 / 255.0, 11);
-    let pyramid_data = pack_single_level_pyramid(&[&frame0, &frame1], width, height);
+    let pyramid_data = pack_single_level_pyramid(&[&frame0, &frame1], width, height, test_align());
     let pyramid = client.create_from_slice(f32::as_bytes(&pyramid_data));
 
     let mv_field = client.empty(mc.mv_slots_per_neighbour() * 2 * size_of::<i32>());
@@ -375,11 +376,11 @@ fn run_confidence_for_neighbour_fills_confidence_buffer() {
     let height = 16;
     let frame_count = 2;
 
-    let ctx = MotionCtx::confidence_only(width, height);
+    let ctx = MotionCtx::confidence_only(width, height, test_align());
 
     let frame0 = noisy_copy(width, 0.5, 4.0 / 255.0, 20);
     let frame1 = noisy_copy(width, 0.5, 4.0 / 255.0, 21);
-    let pyramid_data = pack_single_level_pyramid(&[&frame0, &frame1], width, height);
+    let pyramid_data = pack_single_level_pyramid(&[&frame0, &frame1], width, height, test_align());
     let pyramid = client.create_from_slice(f32::as_bytes(&pyramid_data));
 
     let mv_scratch = client.empty(ctx.mv_slots_per_neighbour() * 2 * size_of::<i32>());

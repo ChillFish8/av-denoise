@@ -548,7 +548,7 @@ fn motion_compensation_1080_square_odd_block_count_dispatch_succeeds() {
         motion_compensation: MotionCompensationMode::mvtools_default(),
         hq: None,
     };
-    let mc = MotionCtx::new(params.motion_compensation, w, h).unwrap();
+    let mc = MotionCtx::new(params.motion_compensation, w, h, test_align()).unwrap();
     assert_eq!(
         mc.blocks_x * mc.blocks_y,
         18225,
@@ -611,7 +611,7 @@ fn motion_compensation_1080_square_odd_block_count_chained_dispatch_succeeds() {
         },
         hq: None,
     };
-    let mc = MotionCtx::new(params.motion_compensation, w, h).unwrap();
+    let mc = MotionCtx::new(params.motion_compensation, w, h, test_align()).unwrap();
     assert_eq!(
         mc.blocks_x * mc.blocks_y,
         18225,
@@ -723,7 +723,7 @@ fn direct_mv_field_for_forward_neighbour(
     d.push_frame(neighbour);
     d.denoise().unwrap();
 
-    let mc = MotionCtx::new(mode, w, h).unwrap();
+    let mc = MotionCtx::new(mode, w, h, test_align()).unwrap();
     let neighbour_idx = neighbour_idx_for_k(1, 1);
     let mv_field = d
         .mv_field_buf
@@ -771,7 +771,7 @@ fn coarse_seeding_handles_equal_grids() {
         pyramid_levels: 2,
         estimation: MotionEstimation::Direct,
     };
-    let mc = MotionCtx::new(mode, w, h).unwrap();
+    let mc = MotionCtx::new(mode, w, h, test_align()).unwrap();
 
     // Recompute `run_analyse`'s coarse-grid formula directly (mirrors
     // `analyse.rs`'s own derivation) rather than trusting the brief's
@@ -843,7 +843,7 @@ fn coarse_seeding_still_correct_at_half_grid() {
         pyramid_levels: 2,
         estimation: MotionEstimation::Direct,
     };
-    let mc = MotionCtx::new(mode, w, h).unwrap();
+    let mc = MotionCtx::new(mode, w, h, test_align()).unwrap();
 
     let coarse_scale = 1u32 << (mc.pyramid_levels - 1);
     let coarse_step = (mc.step / coarse_scale).max(1);
@@ -924,7 +924,7 @@ fn pyramid_level0_extracted_at_one_level() {
         pyramid_levels: 1,
         estimation: MotionEstimation::Direct,
     };
-    let mc = MotionCtx::new(mode, w, h).unwrap();
+    let mc = MotionCtx::new(mode, w, h, test_align()).unwrap();
 
     let world = noisy_copy(w, 0.5, 0.2, 77);
     let shifted = frame_shifted_by(&world, w, h, dx, dy);
@@ -1008,7 +1008,7 @@ fn coarse_seeding_covers_ragged_last_block() {
     // `(shift, shift)` translation and returns it alongside the
     // `MotionCtx` used to index it.
     let build = |w: u32, h: u32| -> (MotionCtx, Vec<i32>) {
-        let mc = MotionCtx::new(mode, w, h).unwrap();
+        let mc = MotionCtx::new(mode, w, h, test_align()).unwrap();
         let world = make_noisy_gaussian_frame(w, h, 1, 0.5, &[0.2]);
         let shifted = frame_shifted_by(&world, w, h, shift, shift);
         let data = direct_mv_field_for_forward_neighbour(mode, w, h, &world, &shifted);
@@ -1186,7 +1186,7 @@ fn composed_centre_mv(d: &NlmDenoiser<R>, radius: u32, k: i32) -> (i32, i32) {
     d.run_chain_compose(radius, k)
         .expect("chain compose dispatch failed");
 
-    let mc = MotionCtx::new(d.params.motion_compensation, d.width, d.height).unwrap();
+    let mc = MotionCtx::new(d.params.motion_compensation, d.width, d.height, d.align).unwrap();
     let neighbour_idx = neighbour_idx_for_k(radius, k);
     let mv_field = d
         .mv_field_buf
@@ -1209,7 +1209,7 @@ fn composed_centre_mv(d: &NlmDenoiser<R>, radius: u32, k: i32) -> (i32, i32) {
 /// duplicated slots (priming or flush), whose pair is zero motion by
 /// definition.
 fn assert_pair_ring_zero_from(d: &NlmDenoiser<R>, ring_head_before: i32, radius: u32) {
-    let mc = MotionCtx::new(d.params.motion_compensation, d.width, d.height).unwrap();
+    let mc = MotionCtx::new(d.params.motion_compensation, d.width, d.height, d.align).unwrap();
     let pair_ring = d
         .pair_ring_buf
         .as_ref()

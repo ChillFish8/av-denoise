@@ -1,7 +1,8 @@
 //! Frame dimensions whose per-slot byte strides are not multiples of
-//! the GPU's storage-buffer offset alignment (32 bytes). A buffer view
-//! bound at such an offset is rejected outright, so these sizes used to
-//! abort the whole pipeline rather than denoise.
+//! the GPU's storage-buffer offset alignment, 32 bytes on the adapters
+//! these tests run against. A buffer view bound at such an offset is
+//! rejected outright, so these sizes used to abort the whole pipeline
+//! rather than denoise.
 
 use super::helpers::*;
 use crate::nlmeans::*;
