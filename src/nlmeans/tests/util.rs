@@ -2,21 +2,14 @@ use super::helpers::*;
 use crate::nlmeans::*;
 
 #[test]
-fn normalization_u8_roundtrip() {
-    let original: Vec<u8> = (0..=255).collect();
-    let normalized = normalize_u8(&original);
-    let restored = denormalize_u8(&normalized);
+fn normalization_round_trips_across_the_full_range() {
+    for depth in [Depth::Eight, Depth::Ten, Depth::Twelve] {
+        let max = depth.max_value() as u16;
+        let original: Vec<u16> = (0..=max).collect();
+        let restored = denormalize(&normalize(&original, depth), depth);
 
-    assert_eq!(original, restored);
-}
-
-#[test]
-fn normalization_u16_roundtrip() {
-    let original: Vec<u16> = (0..1024).chain(64000..=65535).collect();
-    let normalized = normalize_u16(&original);
-    let restored = denormalize_u16(&normalized);
-
-    assert_eq!(original, restored);
+        assert_eq!(original, restored, "round trip failed at {depth:?}");
+    }
 }
 
 /// Drives most weights toward zero by combining a near-maximum search

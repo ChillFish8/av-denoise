@@ -16,8 +16,10 @@ pub use device::Device;
 pub use nlmeans::{
     ChannelMode,
     DEFAULT_PILOT_STRENGTH_SCALE,
+    Depth,
     HqParams,
     MotionCompensationMode,
     MotionEstimation,
     PrefilterMode,
+    UnsupportedDepthError,
 };
