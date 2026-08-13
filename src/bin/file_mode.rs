@@ -77,21 +77,20 @@ fn detect_scenes(input: &Path, visible: bool) -> Result<SceneLayout, anyhow::Err
     let mut decoder = Decoder::from_file(input)?;
     let details = *decoder.get_video_details();
 
-    if details.bit_depth != 8 {
-        anyhow::bail!("only 8-bit sources are supported (got {}-bit)", details.bit_depth);
-    }
+    let depth = Depth::from_bits(details.bit_depth)?;
 
     let layout = FrameLayout {
         width: details.width as u32,
         height: details.height as u32,
         subsampling: subsampling_from_av_decoders(details.chroma_sampling)?,
-        depth: Depth::Eight,
+        depth,
     };
 
     tracing::info!(
         width = layout.width,
         height = layout.height,
         subsampling = ?layout.subsampling,
+        depth = ?layout.depth,
         total_frames = details.total_frames,
         "running scene detection",
     );
@@ -102,7 +101,12 @@ fn detect_scenes(input: &Path, visible: bool) -> Result<SceneLayout, anyhow::Err
     };
 
     let detect_opts = DetectionOptions::default();
-    let detection = detect_scene_changes::<u8>(&mut decoder, detect_opts, None, Some(&on_progress))?;
+    let detection = match depth {
+        Depth::Eight => detect_scene_changes::<u8>(&mut decoder, detect_opts, None, Some(&on_progress))?,
+        Depth::Ten | Depth::Twelve => {
+            detect_scene_changes::<u16>(&mut decoder, detect_opts, None, Some(&on_progress))?
+        },
+    };
 
     progress::finish(&pb);
 
@@ -225,8 +229,16 @@ fn dispatch_frames(
             next_boundary = scenes.scene_starts[scene_idx + 1];
         }
 
-        let frame = decoder.read_video_frame::<u8>()?;
-        let planes = planes_from_v_frame(&frame, scenes.layout);
+        let planes = match scenes.layout.depth {
+            Depth::Eight => {
+                let frame = decoder.read_video_frame::<u8>()?;
+                planes_from_v_frame_u8(&frame, scenes.layout)
+            },
+            Depth::Ten | Depth::Twelve => {
+                let frame = decoder.read_video_frame::<u16>()?;
+                planes_from_v_frame_u16(&frame, scenes.layout)
+            },
+        };
         let target = scene_idx % workers;
 
         worker_txs[target]
@@ -393,7 +405,7 @@ fn run_coordinator(
         layout.height as usize,
         y4m::Ratio::new((*framerate.numer()) as usize, (*framerate.denom()) as usize),
     )
-    .with_colorspace(subsampling_to_y4m(layout.subsampling))
+    .with_colorspace(subsampling_to_y4m(layout.subsampling, layout.depth))
     .write_header(lock)?;
 
     // Frames written to the output, which lags the frames read by the
@@ -454,23 +466,39 @@ fn emit_frames<W: std::io::Write>(
     Ok(())
 }
 
-fn planes_from_v_frame(frame: &v_frame::frame::Frame<u8>, layout: FrameLayout) -> Planes {
+fn planes_from_v_frame_u8(frame: &v_frame::frame::Frame<u8>, layout: FrameLayout) -> Planes {
     Planes {
-        y: collect_plane(&frame.y_plane),
+        y: collect_plane_u8(&frame.y_plane),
         u: frame
             .u_plane
             .as_ref()
-            .map(collect_plane)
+            .map(collect_plane_u8)
             .unwrap_or_else(|| layout.neutral_chroma_plane()),
         v: frame
             .v_plane
             .as_ref()
-            .map(collect_plane)
+            .map(collect_plane_u8)
             .unwrap_or_else(|| layout.neutral_chroma_plane()),
     }
 }
 
-fn collect_plane(plane: &v_frame::plane::Plane<u8>) -> Vec<u8> {
+fn planes_from_v_frame_u16(frame: &v_frame::frame::Frame<u16>, layout: FrameLayout) -> Planes {
+    Planes {
+        y: collect_plane_u16(&frame.y_plane),
+        u: frame
+            .u_plane
+            .as_ref()
+            .map(collect_plane_u16)
+            .unwrap_or_else(|| layout.neutral_chroma_plane()),
+        v: frame
+            .v_plane
+            .as_ref()
+            .map(collect_plane_u16)
+            .unwrap_or_else(|| layout.neutral_chroma_plane()),
+    }
+}
+
+fn collect_plane_u8(plane: &v_frame::plane::Plane<u8>) -> Vec<u8> {
     let width = plane.width().get();
     let height = plane.height().get();
     let mut out = Vec::with_capacity(width * height);
@@ -478,6 +506,22 @@ fn collect_plane(plane: &v_frame::plane::Plane<u8>) -> Vec<u8> {
     for y in 0..height {
         if let Some(row) = plane.row(y) {
             out.extend_from_slice(&row[..width]);
+        }
+    }
+
+    out
+}
+
+fn collect_plane_u16(plane: &v_frame::plane::Plane<u16>) -> Vec<u8> {
+    let width = plane.width().get();
+    let height = plane.height().get();
+    let mut out = Vec::with_capacity(width * height * 2);
+
+    for y in 0..height {
+        if let Some(row) = plane.row(y) {
+            for &s in &row[..width] {
+                out.extend_from_slice(&s.to_le_bytes());
+            }
         }
     }
 
@@ -552,7 +596,7 @@ mod tests {
             layout.height as usize,
             y4m::Ratio::new(30, 1),
         )
-        .with_colorspace(subsampling_to_y4m(layout.subsampling))
+        .with_colorspace(subsampling_to_y4m(layout.subsampling, layout.depth))
         .write_header(&mut buf)
         .expect("header write failed");
 
@@ -580,6 +624,39 @@ mod tests {
             chroma_strength: None,
             progress: false,
         }
+    }
+
+    /// A 10-bit v_frame plane serialises to little-endian wire bytes at
+    /// twice the sample count.
+    #[test]
+    fn collect_plane_u16_writes_little_endian_bytes() {
+        use std::num::{NonZeroU8, NonZeroUsize};
+
+        use v_frame::chroma::ChromaSubsampling;
+        use v_frame::frame::{Frame, FrameBuilder};
+
+        let mut frame: Frame<u16> = FrameBuilder::new(
+            NonZeroUsize::new(2).expect("width is non-zero"),
+            NonZeroUsize::new(2).expect("height is non-zero"),
+            ChromaSubsampling::Yuv420,
+            NonZeroU8::new(10).expect("depth is non-zero"),
+        )
+        .build()
+        .expect("a 2x2 10-bit frame builds");
+
+        frame
+            .y_plane
+            .copy_from_slice(&[0u16, 1, 512, 1023])
+            .expect("four samples fill a 2x2 plane");
+
+        let bytes = collect_plane_u16(&frame.y_plane);
+
+        assert_eq!(bytes.len(), 8, "4 samples at 2 bytes each");
+        assert_eq!(
+            bytes,
+            vec![0x00, 0x00, 0x01, 0x00, 0x00, 0x02, 0xFF, 0x03],
+            "samples must be little-endian"
+        );
     }
 
     #[test]
