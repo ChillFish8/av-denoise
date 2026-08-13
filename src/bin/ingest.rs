@@ -8,6 +8,7 @@ use av_denoise::{
     DenoiserError,
     DenoiserOptions,
     DenoisingMode,
+    Depth,
     Device,
     MotionCompensationMode,
     NlmTuning,
@@ -36,6 +37,7 @@ pub struct FrameLayout {
     pub width: u32,
     pub height: u32,
     pub subsampling: Subsampling,
+    pub depth: Depth,
 }
 
 impl FrameLayout {
@@ -51,10 +53,46 @@ impl FrameLayout {
         let (w, h) = self.chroma_dims();
         (w as usize) * (h as usize)
     }
+
+    /// Wire size of the luma plane.
+    pub fn luma_bytes(&self) -> usize {
+        self.luma_pixels() * self.depth.bytes_per_sample()
+    }
+
+    /// Wire size of one chroma plane.
+    pub fn chroma_bytes(&self) -> usize {
+        self.chroma_pixels() * self.depth.bytes_per_sample()
+    }
+
+    /// A full black luma plane, used when no luma source is available.
+    pub fn black_luma_plane(&self) -> Vec<u8> {
+        fill_plane(self.luma_pixels(), 0, self.depth)
+    }
+
+    /// A full neutral chroma plane, used when a source has no chroma.
+    pub fn neutral_chroma_plane(&self) -> Vec<u8> {
+        fill_plane(self.chroma_pixels(), self.depth.neutral_chroma(), self.depth)
+    }
 }
 
-/// Planar 8-bit YUV frame. Plane lengths are determined by [`FrameLayout`]:
-/// `y.len() == width*height`, `u.len() == v.len() == chroma_w*chroma_h`.
+/// Builds a plane of `samples` copies of `value` in wire-byte form.
+pub(crate) fn fill_plane(samples: usize, value: u16, depth: Depth) -> Vec<u8> {
+    match depth.bytes_per_sample() {
+        1 => vec![value as u8; samples],
+        _ => {
+            let word = value.to_le_bytes();
+            let mut out = Vec::with_capacity(samples * 2);
+            for _ in 0..samples {
+                out.extend_from_slice(&word);
+            }
+            out
+        },
+    }
+}
+
+/// Planar YUV frame holding little-endian wire bytes. Plane lengths come
+/// from [`FrameLayout`], so `y.len() == layout.luma_bytes()` and
+/// `u.len() == v.len() == layout.chroma_bytes()`.
 #[derive(Debug, Clone)]
 pub struct Planes {
     pub y: Vec<u8>,
@@ -281,18 +319,18 @@ impl WorkerDenoiser {
     /// therefore unreachable, and retrying is safe.
     pub fn push(&mut self, planes: &Planes) -> Result<(), DenoiserError> {
         if let Some(d) = self.yuv.as_mut() {
-            let buf = interleave_yuv_to_f32(&planes.y, &planes.u, &planes.v);
+            let buf = interleave_yuv_to_f32(&planes.y, &planes.u, &planes.v, self.layout.depth);
             d.push_frame(&buf)?;
             return Ok(());
         }
 
         if let Some(d) = self.luma.as_mut() {
-            let buf = u8_plane_to_f32(&planes.y);
+            let buf = plane_to_f32(&planes.y, self.layout.depth);
             d.push_frame(&buf)?;
         }
 
         if let Some(d) = self.chroma.as_mut() {
-            let buf = interleave_uv_to_f32(&planes.u, &planes.v);
+            let buf = interleave_uv_to_f32(&planes.u, &planes.v, self.layout.depth);
             d.push_frame(&buf)?;
         }
 
@@ -313,7 +351,11 @@ impl WorkerDenoiser {
     pub fn recv(&mut self) -> Result<Option<Planes>, anyhow::Error> {
         if let Some(d) = self.yuv.as_mut() {
             return match d.recv_frame()? {
-                Some(packed) => Ok(Some(unpack_yuv_from_f32(&packed, self.layout.luma_pixels()))),
+                Some(packed) => Ok(Some(unpack_yuv_from_f32(
+                    &packed,
+                    self.layout.luma_pixels(),
+                    self.layout.depth,
+                ))),
                 None => Ok(None),
             };
         }
@@ -356,11 +398,11 @@ impl WorkerDenoiser {
     pub fn flush(&mut self, mut sink: impl FnMut(Planes)) -> Result<(), anyhow::Error> {
         if let Some(d) = self.yuv.as_mut() {
             let pixels = self.layout.luma_pixels();
-            d.flush(|packed| sink(unpack_yuv_from_f32(&packed, pixels)))?;
+            let depth = self.layout.depth;
+            d.flush(|packed| sink(unpack_yuv_from_f32(&packed, pixels, depth)))?;
             return Ok(());
         }
 
-        let luma_pixels = self.layout.luma_pixels();
         let chroma_pixels = self.layout.chroma_pixels();
 
         let mut luma_buf: Vec<Vec<f32>> = Vec::new();
@@ -381,19 +423,22 @@ impl WorkerDenoiser {
 
         for i in 0..count {
             let y = if let Some(buf) = luma_buf.get(i) {
-                f32_to_u8_plane(buf)
+                f32_to_plane(buf, self.layout.depth)
             } else if let Some(src) = self.luma_passthrough.pop_front() {
                 src
             } else {
-                vec![0u8; luma_pixels]
+                self.layout.black_luma_plane()
             };
 
             let (u, v) = if let Some(packed) = chroma_buf.get(i) {
-                unpack_uv_from_f32(packed, chroma_pixels)
+                unpack_uv_from_f32(packed, chroma_pixels, self.layout.depth)
             } else if let Some((src_u, src_v)) = self.chroma_passthrough.pop_front() {
                 (src_u, src_v)
             } else {
-                (vec![128u8; chroma_pixels], vec![128u8; chroma_pixels])
+                (
+                    self.layout.neutral_chroma_plane(),
+                    self.layout.neutral_chroma_plane(),
+                )
             };
 
             sink(Planes { y, u, v });
@@ -419,100 +464,322 @@ impl WorkerDenoiser {
         luma_passthrough: Option<Vec<u8>>,
         chroma_passthrough: Option<(Vec<u8>, Vec<u8>)>,
     ) -> Planes {
-        let luma_pixels = self.layout.luma_pixels();
         let chroma_pixels = self.layout.chroma_pixels();
 
         let y = match (luma, luma_passthrough) {
-            (Some(v), _) => f32_to_u8_plane(&v),
+            (Some(v), _) => f32_to_plane(&v, self.layout.depth),
             (None, Some(src)) => src,
-            (None, None) => vec![0u8; luma_pixels],
+            (None, None) => self.layout.black_luma_plane(),
         };
 
         let (u, v) = match (chroma, chroma_passthrough) {
-            (Some(packed), _) => unpack_uv_from_f32(&packed, chroma_pixels),
+            (Some(packed), _) => unpack_uv_from_f32(&packed, chroma_pixels, self.layout.depth),
             (None, Some(src)) => src,
-            (None, None) => (vec![128u8; chroma_pixels], vec![128u8; chroma_pixels]),
+            (None, None) => (
+                self.layout.neutral_chroma_plane(),
+                self.layout.neutral_chroma_plane(),
+            ),
         };
 
         Planes { y, u, v }
     }
 }
 
-fn u8_plane_to_f32(plane: &[u8]) -> Vec<f32> {
-    plane.iter().map(|&b| b as f32 / 255.0).collect()
+/// Reads and writes samples in one wire format. Implementors are
+/// selected once per conversion, which keeps the per-sample path free of
+/// depth branches.
+trait SampleCodec {
+    const BYTES: usize;
+
+    fn read(plane: &[u8], i: usize) -> u16;
+    fn write(plane: &mut [u8], i: usize, value: u16);
 }
 
-fn f32_to_u8_plane(plane: &[f32]) -> Vec<u8> {
-    plane
-        .iter()
-        .map(|&v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
-        .collect()
+/// One byte per sample.
+struct Narrow;
+
+impl SampleCodec for Narrow {
+    const BYTES: usize = 1;
+
+    #[inline(always)]
+    fn read(plane: &[u8], i: usize) -> u16 {
+        plane[i] as u16
+    }
+
+    #[inline(always)]
+    fn write(plane: &mut [u8], i: usize, value: u16) {
+        plane[i] = value as u8;
+    }
 }
 
-/// Interleave Y/U/V planes (all equal length, i.e. YUV444) into
+/// Two bytes per sample, little-endian.
+struct Wide;
+
+impl SampleCodec for Wide {
+    const BYTES: usize = 2;
+
+    #[inline(always)]
+    fn read(plane: &[u8], i: usize) -> u16 {
+        u16::from_le_bytes([plane[2 * i], plane[2 * i + 1]])
+    }
+
+    #[inline(always)]
+    fn write(plane: &mut [u8], i: usize, value: u16) {
+        plane[2 * i..2 * i + 2].copy_from_slice(&value.to_le_bytes());
+    }
+}
+
+/// Quantises a normalised value to a native-depth sample.
+#[inline(always)]
+fn quantise(v: f32, max: f32) -> u16 {
+    (v.clamp(0.0, 1.0) * max + 0.5) as u16
+}
+
+/// Converts one wire-byte plane to normalised f32.
+fn plane_to_f32(plane: &[u8], depth: Depth) -> Vec<f32> {
+    let max = depth.max_value();
+
+    fn run<C: SampleCodec>(plane: &[u8], max: f32) -> Vec<f32> {
+        let samples = plane.len() / C::BYTES;
+        (0..samples).map(|i| C::read(plane, i) as f32 / max).collect()
+    }
+
+    match depth.bytes_per_sample() {
+        1 => run::<Narrow>(plane, max),
+        _ => run::<Wide>(plane, max),
+    }
+}
+
+/// Reverse of [`plane_to_f32`].
+fn f32_to_plane(plane: &[f32], depth: Depth) -> Vec<u8> {
+    let max = depth.max_value();
+
+    fn run<C: SampleCodec>(plane: &[f32], max: f32) -> Vec<u8> {
+        let mut out = vec![0u8; plane.len() * C::BYTES];
+        for (i, &v) in plane.iter().enumerate() {
+            C::write(&mut out, i, quantise(v, max));
+        }
+        out
+    }
+
+    match depth.bytes_per_sample() {
+        1 => run::<Narrow>(plane, max),
+        _ => run::<Wide>(plane, max),
+    }
+}
+
+/// Interleaves equal-length Y/U/V planes (YUV444) into
 /// `[Y0,U0,V0, Y1,U1,V1, ...]` f32 in `[0, 1]`, the layout the library's
 /// fused 3-channel kernel expects.
-fn interleave_yuv_to_f32(y: &[u8], u: &[u8], v: &[u8]) -> Vec<f32> {
+fn interleave_yuv_to_f32(y: &[u8], u: &[u8], v: &[u8], depth: Depth) -> Vec<f32> {
     debug_assert_eq!(y.len(), u.len());
     debug_assert_eq!(u.len(), v.len());
 
-    let mut out = Vec::with_capacity(y.len() * 3);
+    let max = depth.max_value();
 
-    for ((&yy, &uu), &vv) in y.iter().zip(u.iter()).zip(v.iter()) {
-        out.push(yy as f32 / 255.0);
-        out.push(uu as f32 / 255.0);
-        out.push(vv as f32 / 255.0);
+    fn run<C: SampleCodec>(y: &[u8], u: &[u8], v: &[u8], max: f32) -> Vec<f32> {
+        let pixels = y.len() / C::BYTES;
+        let mut out = Vec::with_capacity(pixels * 3);
+
+        for i in 0..pixels {
+            out.push(C::read(y, i) as f32 / max);
+            out.push(C::read(u, i) as f32 / max);
+            out.push(C::read(v, i) as f32 / max);
+        }
+
+        out
     }
 
-    out
+    match depth.bytes_per_sample() {
+        1 => run::<Narrow>(y, u, v, max),
+        _ => run::<Wide>(y, u, v, max),
+    }
 }
 
-/// Reverse of `interleave_yuv_to_f32`: take a `[Y,U,V,Y,U,V,…]` f32
-/// buffer (length `3 * pixels`) and split into three u8 planes.
-fn unpack_yuv_from_f32(packed: &[f32], pixels: usize) -> Planes {
+/// Reverse of [`interleave_yuv_to_f32`].
+fn unpack_yuv_from_f32(packed: &[f32], pixels: usize, depth: Depth) -> Planes {
     debug_assert_eq!(packed.len(), 3 * pixels);
 
-    let mut y = Vec::with_capacity(pixels);
-    let mut u = Vec::with_capacity(pixels);
-    let mut v = Vec::with_capacity(pixels);
+    let max = depth.max_value();
 
-    for chunk in packed.chunks_exact(3) {
-        y.push((chunk[0].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
-        u.push((chunk[1].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
-        v.push((chunk[2].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+    fn run<C: SampleCodec>(packed: &[f32], pixels: usize, max: f32) -> Planes {
+        let mut y = vec![0u8; pixels * C::BYTES];
+        let mut u = vec![0u8; pixels * C::BYTES];
+        let mut v = vec![0u8; pixels * C::BYTES];
+
+        for (i, chunk) in packed.chunks_exact(3).enumerate() {
+            C::write(&mut y, i, quantise(chunk[0], max));
+            C::write(&mut u, i, quantise(chunk[1], max));
+            C::write(&mut v, i, quantise(chunk[2], max));
+        }
+
+        Planes { y, u, v }
     }
 
-    Planes { y, u, v }
+    match depth.bytes_per_sample() {
+        1 => run::<Narrow>(packed, pixels, max),
+        _ => run::<Wide>(packed, pixels, max),
+    }
 }
 
-/// Interleave separate U and V planes into [U,V,U,V,...] f32 in [0, 1].
-fn interleave_uv_to_f32(u: &[u8], v: &[u8]) -> Vec<f32> {
+/// Interleaves separate U and V planes into `[U,V,U,V,...]` f32 in `[0, 1]`.
+fn interleave_uv_to_f32(u: &[u8], v: &[u8], depth: Depth) -> Vec<f32> {
     debug_assert_eq!(u.len(), v.len());
 
-    let mut out = Vec::with_capacity(u.len() * 2);
+    let max = depth.max_value();
 
-    for (&uu, &vv) in u.iter().zip(v.iter()) {
-        out.push(uu as f32 / 255.0);
-        out.push(vv as f32 / 255.0);
+    fn run<C: SampleCodec>(u: &[u8], v: &[u8], max: f32) -> Vec<f32> {
+        let pixels = u.len() / C::BYTES;
+        let mut out = Vec::with_capacity(pixels * 2);
+
+        for i in 0..pixels {
+            out.push(C::read(u, i) as f32 / max);
+            out.push(C::read(v, i) as f32 / max);
+        }
+
+        out
     }
 
-    out
+    match depth.bytes_per_sample() {
+        1 => run::<Narrow>(u, v, max),
+        _ => run::<Wide>(u, v, max),
+    }
 }
 
-/// Reverse of `interleave_uv_to_f32`: take a packed [U,V,U,V,...] f32 buffer
-/// and split into two u8 planes.
-fn unpack_uv_from_f32(packed: &[f32], chroma_pixels: usize) -> (Vec<u8>, Vec<u8>) {
+/// Reverse of [`interleave_uv_to_f32`].
+fn unpack_uv_from_f32(packed: &[f32], chroma_pixels: usize, depth: Depth) -> (Vec<u8>, Vec<u8>) {
     debug_assert_eq!(packed.len(), 2 * chroma_pixels);
 
-    let mut u = Vec::with_capacity(chroma_pixels);
-    let mut v = Vec::with_capacity(chroma_pixels);
+    let max = depth.max_value();
 
-    for chunk in packed.chunks_exact(2) {
-        u.push((chunk[0].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
-        v.push((chunk[1].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+    fn run<C: SampleCodec>(packed: &[f32], chroma_pixels: usize, max: f32) -> (Vec<u8>, Vec<u8>) {
+        let mut u = vec![0u8; chroma_pixels * C::BYTES];
+        let mut v = vec![0u8; chroma_pixels * C::BYTES];
+
+        for (i, chunk) in packed.chunks_exact(2).enumerate() {
+            C::write(&mut u, i, quantise(chunk[0], max));
+            C::write(&mut v, i, quantise(chunk[1], max));
+        }
+
+        (u, v)
     }
 
-    (u, v)
+    match depth.bytes_per_sample() {
+        1 => run::<Narrow>(packed, chroma_pixels, max),
+        _ => run::<Wide>(packed, chroma_pixels, max),
+    }
+}
+
+#[cfg(test)]
+mod converter_tests {
+    use super::*;
+
+    /// Encodes native-depth samples into wire bytes, the inverse of what
+    /// the converters read.
+    fn wire(samples: &[u16], depth: Depth) -> Vec<u8> {
+        match depth.bytes_per_sample() {
+            1 => samples.iter().map(|&s| s as u8).collect(),
+            _ => samples.iter().flat_map(|&s| s.to_le_bytes()).collect(),
+        }
+    }
+
+    #[test]
+    fn plane_round_trips_boundary_codes_at_every_depth() {
+        for depth in [Depth::Eight, Depth::Ten, Depth::Twelve] {
+            let max = depth.max_value() as u16;
+            let samples: Vec<u16> = vec![0, 1, 16, 64, 235, max / 2, max - 1, max]
+                .into_iter()
+                .filter(|&s| s <= max)
+                .collect();
+
+            let bytes = wire(&samples, depth);
+            let restored = f32_to_plane(&plane_to_f32(&bytes, depth), depth);
+
+            assert_eq!(restored, bytes, "plane round trip failed at {depth:?}");
+        }
+    }
+
+    /// Samples above 8 bits are little-endian on the wire regardless of
+    /// host endianness.
+    #[test]
+    fn high_depth_samples_are_little_endian() {
+        // 1023 = 0x03FF -> [0xFF, 0x03]
+        let bytes = wire(&[1023, 0, 512], Depth::Ten);
+        assert_eq!(bytes, vec![0xFF, 0x03, 0x00, 0x00, 0x00, 0x02]);
+
+        let f = plane_to_f32(&bytes, Depth::Ten);
+        assert!(
+            (f[0] - 1.0).abs() < 1e-6,
+            "0x03FF should normalize to 1.0, got {}",
+            f[0]
+        );
+        assert_eq!(f[1], 0.0);
+    }
+
+    #[test]
+    fn uv_interleave_round_trips_at_every_depth() {
+        for depth in [Depth::Eight, Depth::Ten, Depth::Twelve] {
+            let max = depth.max_value() as u16;
+            let u_samples = vec![0, max / 4, max];
+            let v_samples = vec![max, max / 2, 1];
+
+            let u_bytes = wire(&u_samples, depth);
+            let v_bytes = wire(&v_samples, depth);
+
+            let packed = interleave_uv_to_f32(&u_bytes, &v_bytes, depth);
+            assert_eq!(packed.len(), 6, "packed UV length wrong at {depth:?}");
+
+            let (ru, rv) = unpack_uv_from_f32(&packed, 3, depth);
+            assert_eq!(ru, u_bytes, "U round trip failed at {depth:?}");
+            assert_eq!(rv, v_bytes, "V round trip failed at {depth:?}");
+        }
+    }
+
+    #[test]
+    fn yuv_interleave_round_trips_at_every_depth() {
+        for depth in [Depth::Eight, Depth::Ten, Depth::Twelve] {
+            let max = depth.max_value() as u16;
+            let y_samples = vec![0, max / 3, max];
+            let u_samples = vec![max, 0, max / 2];
+            let v_samples = vec![max / 4, max, 0];
+
+            let y_bytes = wire(&y_samples, depth);
+            let u_bytes = wire(&u_samples, depth);
+            let v_bytes = wire(&v_samples, depth);
+
+            let packed = interleave_yuv_to_f32(&y_bytes, &u_bytes, &v_bytes, depth);
+            assert_eq!(packed.len(), 9, "packed YUV length wrong at {depth:?}");
+
+            let out = unpack_yuv_from_f32(&packed, 3, depth);
+            assert_eq!(out.y, y_bytes, "Y round trip failed at {depth:?}");
+            assert_eq!(out.u, u_bytes, "U round trip failed at {depth:?}");
+            assert_eq!(out.v, v_bytes, "V round trip failed at {depth:?}");
+        }
+    }
+
+    /// Limited-range codes normalize to matching values across depths,
+    /// the property the whole design rests on.
+    ///
+    /// The match is to within one 8-bit code level rather than exact.
+    /// ITU defines the limited-range endpoints as exact multiples
+    /// (16 -> 64, 235 -> 940) while full scale is not (255 -> 1023), so
+    /// 235/255 and 940/1023 differ by 0.0027, about 0.69 of an 8-bit
+    /// step. Sub-step agreement is the real property here. This mirrors
+    /// `normalized_scale_is_identical_across_depths` in
+    /// `src/nlmeans/mod.rs`, which pins the same property on the
+    /// library's own normalize helper.
+    #[test]
+    fn limited_range_codes_agree_across_depths() {
+        /// One 8-bit code level, the precision the endpoints agree to.
+        const TOL: f32 = 1.0 / 255.0;
+
+        let eight = plane_to_f32(&wire(&[16, 235], Depth::Eight), Depth::Eight);
+        let ten = plane_to_f32(&wire(&[64, 940], Depth::Ten), Depth::Ten);
+
+        for (a, b) in eight.iter().zip(ten.iter()) {
+            assert!((a - b).abs() < TOL, "8-bit {a} vs 10-bit {b}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -646,13 +913,10 @@ mod passthrough_retry_tests {
     }
 
     fn fake_planes(layout: FrameLayout) -> Planes {
-        let (cw, ch) = layout.chroma_dims();
-        let chroma_pixels = (cw * ch) as usize;
-
         Planes {
-            y: vec![128u8; layout.luma_pixels()],
-            u: vec![128u8; chroma_pixels],
-            v: vec![128u8; chroma_pixels],
+            y: fill_plane(layout.luma_pixels(), layout.depth.neutral_chroma(), layout.depth),
+            u: layout.neutral_chroma_plane(),
+            v: layout.neutral_chroma_plane(),
         }
     }
 
@@ -662,6 +926,7 @@ mod passthrough_retry_tests {
             width: 16,
             height: 16,
             subsampling: Subsampling::Yuv420,
+            depth: Depth::Eight,
         };
         let mut wd =
             WorkerDenoiser::create(&chroma_only_opts(), layout).expect("denoiser construction failed");
@@ -729,15 +994,14 @@ mod lumachroma_lockstep_tests {
     /// `idx` via a different formula, so a desynced pair (luma from one
     /// push, chroma from another) is detectable after the round trip.
     fn marked_planes(layout: FrameLayout, idx: u8) -> Planes {
-        let (cw, ch) = layout.chroma_dims();
-        let chroma_pixels = (cw * ch) as usize;
+        let chroma_pixels = layout.chroma_pixels();
         let y_val = 10 + idx;
         let uv_val = 200 - idx;
 
         Planes {
-            y: vec![y_val; layout.luma_pixels()],
-            u: vec![uv_val; chroma_pixels],
-            v: vec![uv_val; chroma_pixels],
+            y: fill_plane(layout.luma_pixels(), y_val as u16, layout.depth),
+            u: fill_plane(chroma_pixels, uv_val as u16, layout.depth),
+            v: fill_plane(chroma_pixels, uv_val as u16, layout.depth),
         }
     }
 
@@ -747,6 +1011,7 @@ mod lumachroma_lockstep_tests {
             width: 16,
             height: 16,
             subsampling: Subsampling::Yuv420,
+            depth: Depth::Eight,
         };
         let mut wd =
             WorkerDenoiser::create(&luma_chroma_opts(), layout).expect("denoiser construction failed");
@@ -821,6 +1086,49 @@ mod push_needs_retry_tests {
             outcome.is_err(),
             "a non-QueueFull push error must propagate instead of being silently treated as success"
         );
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    fn layout(depth: Depth) -> FrameLayout {
+        FrameLayout {
+            width: 4,
+            height: 4,
+            subsampling: Subsampling::Yuv420,
+            depth,
+        }
+    }
+
+    #[test]
+    fn byte_lengths_scale_with_depth() {
+        assert_eq!(layout(Depth::Eight).luma_bytes(), 16);
+        assert_eq!(layout(Depth::Ten).luma_bytes(), 32);
+        assert_eq!(layout(Depth::Eight).chroma_bytes(), 4);
+        assert_eq!(layout(Depth::Ten).chroma_bytes(), 8);
+    }
+
+    #[test]
+    fn neutral_chroma_fill_is_correct_at_each_depth() {
+        let eight = layout(Depth::Eight).neutral_chroma_plane();
+        assert_eq!(eight, vec![128u8; 4]);
+
+        // 512 little-endian is [0x00, 0x02], repeated per sample.
+        let ten = layout(Depth::Ten).neutral_chroma_plane();
+        assert_eq!(ten, vec![0x00, 0x02, 0x00, 0x02, 0x00, 0x02, 0x00, 0x02]);
+
+        // 2048 little-endian is [0x00, 0x08].
+        let twelve = layout(Depth::Twelve).neutral_chroma_plane();
+        assert_eq!(twelve.len(), 8);
+        assert_eq!(&twelve[0..2], &[0x00, 0x08]);
+    }
+
+    #[test]
+    fn black_luma_fill_is_zero_at_the_right_length() {
+        assert_eq!(layout(Depth::Eight).black_luma_plane(), vec![0u8; 16]);
+        assert_eq!(layout(Depth::Ten).black_luma_plane(), vec![0u8; 32]);
     }
 }
 

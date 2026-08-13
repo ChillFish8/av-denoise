@@ -6,6 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use av_decoders::{Decoder, Rational32};
+use av_denoise::Depth;
 use av_scenechange::{DetectionOptions, detect_scene_changes};
 use indicatif::ProgressBar;
 use y4m::Frame as Y4mFrame;
@@ -84,6 +85,7 @@ fn detect_scenes(input: &Path, visible: bool) -> Result<SceneLayout, anyhow::Err
         width: details.width as u32,
         height: details.height as u32,
         subsampling: subsampling_from_av_decoders(details.chroma_sampling)?,
+        depth: Depth::Eight,
     };
 
     tracing::info!(
@@ -453,20 +455,18 @@ fn emit_frames<W: std::io::Write>(
 }
 
 fn planes_from_v_frame(frame: &v_frame::frame::Frame<u8>, layout: FrameLayout) -> Planes {
-    let chroma_pixels = layout.chroma_pixels();
-
     Planes {
         y: collect_plane(&frame.y_plane),
         u: frame
             .u_plane
             .as_ref()
             .map(collect_plane)
-            .unwrap_or_else(|| vec![128u8; chroma_pixels]),
+            .unwrap_or_else(|| layout.neutral_chroma_plane()),
         v: frame
             .v_plane
             .as_ref()
             .map(collect_plane)
-            .unwrap_or_else(|| vec![128u8; chroma_pixels]),
+            .unwrap_or_else(|| layout.neutral_chroma_plane()),
     }
 }
 
@@ -504,7 +504,7 @@ mod tests {
     use indicatif::ProgressBar;
 
     use super::*;
-    use crate::ingest::BinaryChannelIntent;
+    use crate::ingest::{BinaryChannelIntent, fill_plane};
 
     fn tiny_layout() -> FrameLayout {
         // 4:2:0 chroma at this size is 4x4, clearing the denoiser's 3x3
@@ -513,17 +513,15 @@ mod tests {
             width: 8,
             height: 8,
             subsampling: Subsampling::Yuv420,
+            depth: Depth::Eight,
         }
     }
 
     fn tiny_planes(layout: FrameLayout) -> Planes {
-        let (cw, ch) = layout.chroma_dims();
-        let chroma_pixels = (cw * ch) as usize;
-
         Planes {
-            y: vec![128u8; layout.luma_pixels()],
-            u: vec![128u8; chroma_pixels],
-            v: vec![128u8; chroma_pixels],
+            y: fill_plane(layout.luma_pixels(), layout.depth.neutral_chroma(), layout.depth),
+            u: layout.neutral_chroma_plane(),
+            v: layout.neutral_chroma_plane(),
         }
     }
 

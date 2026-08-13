@@ -1,5 +1,7 @@
 use std::io::{Read, Write, stdout};
 
+use av_denoise::Depth;
+
 use crate::ingest::{
     CliOptions,
     FrameLayout,
@@ -29,6 +31,7 @@ pub fn run_stream<R: Read>(opts: &CliOptions, reader: R) -> Result<(), anyhow::E
         width: decoder.get_width() as u32,
         height: decoder.get_height() as u32,
         subsampling: subsampling_from_y4m(decoder.get_colorspace())?,
+        depth: Depth::Eight,
     };
 
     let framerate = decoder.get_framerate();
