@@ -207,8 +207,6 @@ fn kernel_ragged_block_dims() {
     }
 }
 
-/// White noise (no spatial correlation): the temporal estimator must
-/// recover the known marginal sigma within 10%.
 #[test]
 fn white_noise_pair_recovers_known_sigma() {
     let size = 256;

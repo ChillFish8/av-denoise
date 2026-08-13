@@ -43,8 +43,6 @@ fn mean_abs_neighbour_diff(frame: &[f32], w: u32, h: u32) -> f32 {
     sum / count as f32
 }
 
-/// Aliasing the reference to the input must reproduce the no-prefilter
-/// baseline exactly. Sanity check on the `_ref` kernel variants.
 #[test]
 fn external_reference_equals_input_matches_baseline() {
     let client = make_client();
@@ -181,8 +179,6 @@ fn external_reference_separable_matches_baseline() {
     }
 }
 
-/// Temporal rclip with `reference == input` for every pushed frame
-/// must also reproduce baseline.
 #[test]
 fn external_reference_temporal_matches_baseline() {
     let client = make_client();
@@ -320,9 +316,6 @@ fn nlm_spatial_params() -> NlmParams {
     }
 }
 
-/// The pilot must actually populate the reference ring slot with
-/// something derived from (but different than) the noisy input, and
-/// every value must stay finite and in range.
 #[test]
 fn nlm_spatial_pilot_fills_reference() {
     let client = make_client();
@@ -350,9 +343,6 @@ fn nlm_spatial_pilot_fills_reference() {
     assert!(differs, "pilot output must differ from the noisy input somewhere");
 }
 
-/// The pilot denoises rather than merely copying the input through. Its
-/// mean absolute neighbour difference (a roughness proxy) must be
-/// strictly lower than the noisy input's.
 #[test]
 fn nlm_spatial_pilot_smooths() {
     let client = make_client();

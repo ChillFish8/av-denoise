@@ -621,9 +621,6 @@ mod tests {
         assert_eq!(resolved.search_radius, 1);
     }
 
-    /// Globals are declared with `global = true`, so they parse both
-    /// before and after the subcommand. Every other test here passes
-    /// them after, so this one covers the leading position.
     #[test]
     fn globals_parse_before_the_subcommand() {
         let args = Args::parse_from(["av-denoise", "--preset", "slow", "nlmeans", "-i", "-"]);
@@ -658,8 +655,6 @@ mod tests {
         );
     }
 
-    /// Same coverage as [`accelerators_are_accepted_before_the_subcommand`]
-    /// but for the short `-A` spelling.
     #[test]
     fn short_accelerators_flag_is_accepted_before_the_subcommand() {
         let args = Args::parse_from(["av-denoise", "-A", "cpu", "nlmeans", "-i", "-"]);
@@ -728,8 +723,6 @@ mod tests {
         assert_eq!(args.channel_mode, vec![CliChannelMode::Chroma]);
     }
 
-    /// Both planes are cleaned unless the caller narrows it, so a
-    /// noisy source needs no flag to get its colour cleaned too.
     #[test]
     fn channel_mode_defaults_to_luma_and_chroma() {
         let (args, _) = parse(&[]);
@@ -739,8 +732,6 @@ mod tests {
         );
     }
 
-    /// The default resolves to the two-pass intent rather than either
-    /// single-plane one.
     #[test]
     fn default_channel_mode_resolves_to_the_luma_chroma_intent() {
         let (args, _) = parse(&[]);
@@ -777,8 +768,6 @@ mod tests {
         }
     }
 
-    /// Setting an `--hq-*` flag on the fast variant warns rather than
-    /// failing, and the fast path still resolves.
     #[test]
     fn hq_flags_on_the_fast_variant_still_resolve_to_nlmeans() {
         let (args, nlm) = parse(&["--variant", "fast", "--hq-sigma-scale", "2.0"]);
@@ -880,7 +869,6 @@ mod tests {
         assert!(parse_prefilter("garbage").is_err());
     }
 
-    /// The old `file` and `stdin` subcommands are gone outright.
     #[test]
     fn the_old_subcommands_are_rejected() {
         assert!(Args::try_parse_from(["av-denoise", "stdin"]).is_err());

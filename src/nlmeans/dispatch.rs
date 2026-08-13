@@ -1176,9 +1176,6 @@ mod tests {
         }
     }
 
-    /// Explicit worked example at `radius = 2`, matching the doc
-    /// comment's stated ordering. `k = -2, -1` fill indices `0, 1`,
-    /// then `k = 1, 2` fill indices `2, 3`.
     #[test]
     fn radius_two_explicit_indices() {
         assert_eq!(neighbour_idx_for_k(2, -2), 0);

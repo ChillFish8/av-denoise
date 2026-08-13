@@ -406,10 +406,6 @@ fn run_confidence_for_neighbour_fills_confidence_buffer() {
     }
 }
 
-/// End-to-end wiring check for the no-MC confidence pass. A temporal
-/// HQ denoiser with `temporal_confidence: true` and no motion
-/// compensation must allocate `confidence_buf` and leave it populated
-/// with finite, in-range values after a submit.
 #[test]
 fn confidence_buf_filled_without_motion_compensation() {
     let client = make_client();
@@ -628,9 +624,6 @@ fn confidence_buf_absent_with_motion_compensation_when_temporal_confidence_disab
     );
 }
 
-/// No motion compensation and no HQ confidence request. Neither
-/// `confidence_ctx` nor `confidence_buf` should exist. Confirms the
-/// fast path allocates nothing extra.
 #[test]
 fn confidence_buf_absent_without_mc_or_hq() {
     let client = make_client();

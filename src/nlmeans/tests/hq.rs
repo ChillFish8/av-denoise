@@ -130,9 +130,6 @@ fn hq_uniform_input_passthrough() {
     }
 }
 
-/// Smoke test: HQ with a live temporal window over a short synthetic
-/// sequence must produce finite, in-range output for every frame it
-/// emits, whether during pushes or from the trailing flush.
 #[test]
 fn hq_temporal_smoke() {
     let client = make_client();
@@ -277,9 +274,6 @@ fn hq_auto_sigma_temporal_smoke() {
     assert_eq!(emitted, frames.len(), "expected one output per pushed frame");
 }
 
-/// A `sigma_override` must skip automatic estimation entirely. Neither
-/// scratch buffer is allocated, and (by construction) no estimate
-/// kernel is ever launched.
 #[test]
 fn hq_override_skips_estimation() {
     let client = make_client();

@@ -35,8 +35,6 @@ fn estimate_abs_sums(w: u32, h: u32, ch: u32, stored_ch: u32, dense: &[f32]) -> 
     [data[0], data[1], data[2], data[3]]
 }
 
-/// Deterministic pseudo-Gaussian noise at a known sigma on a flat
-/// mid-gray luma frame must be recovered within ±20%.
 #[test]
 fn noise_estimate_recovers_known_sigma() {
     let w = 256;

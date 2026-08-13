@@ -935,11 +935,8 @@ mod tests {
         assert_eq!(lower_quartile(&[42.0]), 42.0);
     }
 
-    /// Two blocks, one static and one not. Only the static block
-    /// should contribute to `sigma`/`rho`, and `static_fraction` must
-    /// reflect the 1-of-2 split exactly.
     #[test]
-    fn aggregate_gate_and_rho() {
+    fn aggregate_only_static_block_contributes_to_sigma_and_rho() {
         let width = 32;
         let height = 16;
         let stored_ch = 1;

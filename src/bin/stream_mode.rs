@@ -102,8 +102,6 @@ fn write_planes<W: Write>(encoder: &mut y4m::Encoder<W>, planes: &Planes) -> Res
 mod tests {
     use super::*;
 
-    /// `write_planes` is generic over its writer so the streaming path
-    /// can target stdout in production and an in-memory buffer here.
     #[test]
     fn write_planes_emits_a_frame_into_any_writer() {
         let mut buf = Vec::new();

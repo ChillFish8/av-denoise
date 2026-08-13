@@ -353,12 +353,6 @@ fn block_match_coarse_flat_region_tie_resolves_to_zero_motion() {
     );
 }
 
-/// Smoke test: a temporal denoiser with motion compensation enabled
-/// must allocate, run the pyramid build, analyse, and warp dispatches
-/// on every pushed frame, and produce a denoised frame that preserves
-/// a uniform input. Catches plumbing mistakes (buffer allocation,
-/// pyramid offsets, MC dispatch ordering) even before quality is
-/// evaluated.
 #[test]
 fn motion_compensation_uniform_passthrough() {
     let client = make_client();
@@ -1239,8 +1233,6 @@ fn assert_pair_ring_zero_from(d: &NlmDenoiser<R>, ring_head_before: i32, radius:
     }
 }
 
-/// Zero-motion sequence (every pushed frame is bit-identical). Every
-/// composed field, forward and backward, must be exactly zero.
 #[test]
 fn chain_compose_zero_motion_gives_zero_mv() {
     let client = make_client();
@@ -1512,11 +1504,6 @@ fn auto_params(temporal_radius: u32) -> NlmParams {
     }
 }
 
-/// `Auto` at or above `CHAINED_RADIUS_THRESHOLD` resolves to `Chained`,
-/// so the pair ring must be allocated at construction exactly as if
-/// `Chained` had been requested explicitly. Reuses the
-/// `pair_ring_buf.is_some()`/`is_none()` accessor pattern
-/// `tests/confidence.rs` already establishes for `confidence_buf`.
 #[test]
 fn auto_estimation_at_high_radius_allocates_pair_ring() {
     let client = make_client();
@@ -1531,9 +1518,6 @@ fn auto_estimation_at_high_radius_allocates_pair_ring() {
     );
 }
 
-/// `Auto` below `CHAINED_RADIUS_THRESHOLD` resolves to `Direct`, so the
-/// pair ring must stay unallocated, matching the direct path's existing
-/// zero-cost guarantee.
 #[test]
 fn auto_estimation_at_low_radius_does_not_allocate_pair_ring() {
     let client = make_client();
