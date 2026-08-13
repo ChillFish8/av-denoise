@@ -43,8 +43,9 @@ pub struct NlmeansArgs {
     /// A file whose name would otherwise be read as a pipe is
     /// reachable by prefixing it, for example `./-`.
     ///
-    /// The source must be 8-bit. 10 or 12-bit inputs are rejected
-    /// with a clear error message.
+    /// The source's bit depth is detected automatically. 8, 10, and
+    /// 12-bit sources are supported and the output keeps the source's
+    /// depth. Other depths are rejected with a clear error message.
     #[arg(short, long)]
     pub input: InputSource,
 
@@ -190,6 +191,9 @@ pub struct NlmeansArgs {
     /// Small values mean light grain and larger values mean heavier
     /// noise. `3` is subtle grain, `6` is clearly visible grain, `12`
     /// and up is heavy noise.
+    ///
+    /// Always expressed on an 8-bit 0-255 scale, no matter the
+    /// source's actual bit depth.
     #[arg(long)]
     pub hq_sigma: Option<f32>,
 
@@ -643,6 +647,9 @@ mod tests {
     /// interpolates user flags there), which is what the
     /// `*_parses_after_the_subcommand` tests further down exist to
     /// guard.
+    /// Gated because it names the `Vulkan` and `Cpu` accelerator
+    /// variants, which only exist when their features are enabled.
+    #[cfg(all(feature = "vulkan", feature = "cpu"))]
     #[test]
     fn accelerators_are_accepted_before_the_subcommand() {
         let args = Args::parse_from(["av-denoise", "--accelerators", "vulkan,cpu", "nlmeans", "-i", "-"]);
@@ -655,6 +662,9 @@ mod tests {
         );
     }
 
+    /// Gated because it names the `Cpu` accelerator variant, which
+    /// only exists when the `cpu` feature is enabled.
+    #[cfg(feature = "cpu")]
     #[test]
     fn short_accelerators_flag_is_accepted_before_the_subcommand() {
         let args = Args::parse_from(["av-denoise", "-A", "cpu", "nlmeans", "-i", "-"]);
@@ -694,6 +704,9 @@ mod tests {
     /// `nlmeans` is rejected as unknown to the subcommand's own
     /// parser. `Justfile:42`'s `denoise-file` recipe interpolates
     /// `{{ARGS}}` in exactly this position.
+    /// Gated because it names the `Vulkan` and `Cpu` accelerator
+    /// variants, which only exist when their features are enabled.
+    #[cfg(all(feature = "vulkan", feature = "cpu"))]
     #[test]
     fn accelerators_parses_after_the_subcommand() {
         let (args, _) = parse(&["--accelerators", "vulkan,cpu"]);

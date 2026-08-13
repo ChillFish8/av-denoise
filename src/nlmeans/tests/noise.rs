@@ -2,6 +2,7 @@ use cubecl::prelude::*;
 
 use super::helpers::*;
 use crate::nlmeans::noise::{NoiseCtx, partials_len, run_noise_estimate, sigma_from_abs_sum};
+use crate::nlmeans::{Depth, denormalize, normalize};
 
 /// Uploads `dense` (packed `pixels * ch`) as the padded GPU storage
 /// layout and runs both noise-estimate stages for a single frame in a
@@ -133,5 +134,79 @@ fn noise_estimate_gradient_bias_bounded() {
     assert!(
         rel_err <= 0.30,
         "estimated sigma {estimated} vs true {true_sigma} on gradient content (rel err {rel_err:.3})"
+    );
+}
+
+/// Quantises a normalised frame through a given depth and back, the
+/// round trip a real source of that depth goes through.
+fn requantise(frame: &[f32], depth: Depth) -> Vec<f32> {
+    normalize(&denormalize(frame, depth), depth)
+}
+
+/// The same content at 8-bit and at 10-bit must yield the same measured
+/// sigma. Normalising by `(1 << bits) - 1` holds the normalised scale
+/// fixed across depths, which is what lets every calibrated constant in
+/// the library stay depth-independent.
+#[test]
+fn sigma_estimate_agrees_across_bit_depths() {
+    let w = 256;
+    let h = 256;
+    let true_sigma = 8.0 / 255.0;
+
+    let frame = make_noisy_gaussian_frame(w, h, 1, 0.5, &[true_sigma]);
+
+    let eight = requantise(&frame, Depth::Eight);
+    let ten = requantise(&frame, Depth::Ten);
+
+    let sigma_eight = sigma_from_abs_sum(estimate_abs_sums(w, h, 1, 1, &eight)[0], w, h);
+    let sigma_ten = sigma_from_abs_sum(estimate_abs_sums(w, h, 1, 1, &ten)[0], w, h);
+
+    let rel_diff = (sigma_eight - sigma_ten).abs() / sigma_eight;
+    assert!(
+        rel_diff <= 0.05,
+        "8-bit sigma {sigma_eight} vs 10-bit sigma {sigma_ten} (rel diff {rel_diff:.4})"
+    );
+
+    // Both must still recover the true sigma, not merely agree with
+    // each other on a wrong answer.
+    for (label, s) in [("8-bit", sigma_eight), ("10-bit", sigma_ten)] {
+        let err = (s - true_sigma).abs() / true_sigma;
+        assert!(err <= 0.20, "{label} sigma {s} vs true {true_sigma}");
+    }
+}
+
+/// Grain too fine for 8-bit to represent survives 10-bit quantisation.
+///
+/// The chosen sigma is half of one 8-bit step (1/255), so 8-bit cannot
+/// carry it, while 10-bit resolves it across two of its own steps
+/// (1/1023). It also sits 5x above `SIGMA_FLOOR` (0.1/255), so a pass
+/// shows the floor is not clipping a legitimate fine measurement.
+#[test]
+fn fine_grain_survives_ten_bit_quantisation() {
+    let w = 256;
+    let h = 256;
+    let true_sigma = 0.5 / 255.0;
+
+    let frame = make_noisy_gaussian_frame(w, h, 1, 0.5, &[true_sigma]);
+    let ten = requantise(&frame, Depth::Ten);
+    let eight = requantise(&frame, Depth::Eight);
+
+    let estimated = sigma_from_abs_sum(estimate_abs_sums(w, h, 1, 1, &ten)[0], w, h);
+    let err = (estimated - true_sigma).abs() / true_sigma;
+
+    assert!(
+        err <= 0.25,
+        "10-bit estimate {estimated} vs true {true_sigma} (rel err {err:.3})"
+    );
+
+    // The same grain through 8-bit picks up quantisation noise worth
+    // more than half its own amplitude, so the estimate inflates. That
+    // gap is the point of the depth, and it must be visible here or the
+    // test above is measuring nothing 8-bit could not already do.
+    let estimated_eight = sigma_from_abs_sum(estimate_abs_sums(w, h, 1, 1, &eight)[0], w, h);
+
+    assert!(
+        estimated_eight > estimated,
+        "8-bit estimate {estimated_eight} should inflate above the 10-bit estimate {estimated}"
     );
 }

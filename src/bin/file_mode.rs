@@ -638,12 +638,21 @@ fn subsampling_from_av_decoders(
 
 #[cfg(test)]
 mod tests {
+    // Only `temporal_opts` and the test that uses it name the
+    // `Accelerator::Vulkan`, `Algorithm`, `DenoisingMode`, `Device`,
+    // `MotionCompensationMode`, and `BinaryChannelIntent` items, so those
+    // imports are gated alongside them below to avoid an unused-import
+    // warning in cpu-only builds.
+    #[cfg(feature = "vulkan")]
     use av_denoise::accelerate::Accelerator;
+    #[cfg(feature = "vulkan")]
     use av_denoise::{Algorithm, DenoisingMode, Device, MotionCompensationMode};
     use indicatif::ProgressBar;
 
     use super::*;
-    use crate::ingest::{BinaryChannelIntent, fill_plane};
+    #[cfg(feature = "vulkan")]
+    use crate::ingest::BinaryChannelIntent;
+    use crate::ingest::fill_plane;
 
     fn tiny_layout() -> FrameLayout {
         // 4:2:0 chroma at this size is 4x4, clearing the denoiser's 3x3
@@ -705,6 +714,9 @@ mod tests {
         );
     }
 
+    /// Gated because it names the `Vulkan` accelerator variant, which only
+    /// exists when the `vulkan` feature is enabled.
+    #[cfg(feature = "vulkan")]
     fn temporal_opts() -> CliOptions {
         CliOptions {
             accelerators: vec![Accelerator::Vulkan],
@@ -754,6 +766,10 @@ mod tests {
         );
     }
 
+    /// Gated because it depends on `temporal_opts`, which names the
+    /// `Vulkan` accelerator variant and only builds when the `vulkan`
+    /// feature is enabled.
+    #[cfg(feature = "vulkan")]
     #[test]
     fn flush_worker_errors_when_coordinator_has_disconnected() {
         let layout = tiny_layout();

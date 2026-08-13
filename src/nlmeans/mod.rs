@@ -112,7 +112,7 @@ pub fn normalize(input: &[u16], depth: Depth) -> Vec<f32> {
     input.iter().map(|&v| v as f32 / max).collect()
 }
 
-/// Reverse of [`normalize`]. Values outside `[0, 1]` are clamped.
+/// Reverse of [`normalize`]. Values outside `[0, 1]` are clamped. `NaN` maps to 0.
 pub fn denormalize(input: &[f32], depth: Depth) -> Vec<u16> {
     let max = depth.max_value();
     input

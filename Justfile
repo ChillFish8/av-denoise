@@ -33,6 +33,10 @@ quality-runs-light *ARGS:
 make-clean-source:
     ffmpeg -hide_banner -loglevel error -y -ss 36 -i data/asterisk-war.mkv -frames:v 288 -c:v ffv1 -pix_fmt yuv420p -an -sn data/clean-1080p.mkv
 
+# Builds data/bench-sample-10bit.mkv, the 10-bit input for the bit-depth bench row.
+make-10bit-sample:
+    ffmpeg -hide_banner -loglevel error -y -i data/bench-sample.mkv -pix_fmt yuv420p10le -c:v ffv1 data/bench-sample-10bit.mkv
+
 [arg("input", long="input", short="i")]
 [arg("output", long="output", short="o")]
 [arg("workers", long="workers", short="w")]

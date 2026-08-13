@@ -30,4 +30,6 @@ pub use nlmeans::{
     MotionEstimation,
     PrefilterMode,
     UnsupportedDepthError,
+    denormalize,
+    normalize,
 };

@@ -912,6 +912,10 @@ mod cli_options_tests {
     }
 }
 
+// Gated because every test in this module builds its `CliOptions` from
+// `chroma_only_opts`, which names the `Vulkan` accelerator variant and so
+// only builds when the `vulkan` feature is enabled.
+#[cfg(feature = "vulkan")]
 #[cfg(test)]
 mod passthrough_retry_tests {
     use av_denoise::accelerate::Accelerator;
@@ -989,6 +993,10 @@ mod passthrough_retry_tests {
     }
 }
 
+// Gated because every test in this module builds its `CliOptions` from
+// `luma_chroma_opts`, which names the `Vulkan` accelerator variant and so
+// only builds when the `vulkan` feature is enabled.
+#[cfg(feature = "vulkan")]
 #[cfg(test)]
 mod lumachroma_lockstep_tests {
     use av_denoise::accelerate::Accelerator;
@@ -1258,6 +1266,18 @@ mod colorspace_tests {
             let (sub, depth) = subsampling_from_y4m(cs).expect("should map");
             assert_eq!(sub, Subsampling::Yuv420);
             assert_eq!(depth, Depth::Eight);
+        }
+    }
+
+    #[test]
+    fn grayscale_colorspaces_are_rejected_with_a_clear_message() {
+        for cs in [y4m::Colorspace::Cmono, y4m::Colorspace::Cmono12] {
+            let err = subsampling_from_y4m(cs).expect_err("grayscale should be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&format!("{cs:?}")),
+                "error should name the offending colorspace: {msg}"
+            );
         }
     }
 }
