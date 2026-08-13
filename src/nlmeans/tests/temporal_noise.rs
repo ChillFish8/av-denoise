@@ -34,7 +34,8 @@ fn run_temporal_stats(w: u32, h: u32, stored_ch: u32, prev: &[f32], new: &[f32])
     ring[frame_len..].copy_from_slice(new);
 
     let input_buf = client.create_from_slice(f32::as_bytes(&ring));
-    let stats_buf = client.empty(temporal_stats_buf_bytes(w, h, stored_ch, frame_count));
+    let align = test_align();
+    let stats_buf = client.empty(temporal_stats_buf_bytes(w, h, stored_ch, frame_count, align));
 
     let ctx = TemporalStatsCtx {
         width: w,
@@ -45,10 +46,11 @@ fn run_temporal_stats(w: u32, h: u32, stored_ch: u32, prev: &[f32], new: &[f32])
         slot_prev: 0,
         input_buf: &input_buf,
         stats_buf: &stats_buf,
+        align,
     };
     run_temporal_noise_stats::<R>(&client, &ctx).expect("temporal noise stats dispatch failed");
 
-    read_temporal_stats_slot::<R>(&client, &stats_buf, w, h, stored_ch, frame_count, 1)
+    read_temporal_stats_slot::<R>(&client, &stats_buf, w, h, stored_ch, frame_count, 1, align)
         .expect("readback failed")
 }
 

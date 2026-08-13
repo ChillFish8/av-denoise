@@ -38,6 +38,8 @@ impl<R: Runtime> Benchmark for CopyBench<R> {
                 CubeDim::new_1d(BLOCK_1D),
                 ArrayArg::from_raw_parts(args.src.clone(), len),
                 ArrayArg::from_raw_parts(args.dst.clone(), len),
+                0u32,
+                0u32,
                 len as u32,
                 total_threads,
             );

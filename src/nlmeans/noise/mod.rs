@@ -1,6 +1,7 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
+use super::align::StorageAlign;
 use super::kernels::{
     nlm_noise_partial,
     nlm_noise_reduce,
@@ -33,14 +34,13 @@ pub(super) fn partials_len(width: u32, height: u32) -> usize {
 }
 
 /// Byte stride between ring slots in the stage-1 partials buffer,
-/// padded up to the GPU storage-buffer offset alignment (32 bytes).
-/// Small frames can produce a [`partials_len`] under 8 `f32`s, and
-/// `wgpu` rejects a bind-group offset that isn't a multiple of its
+/// padded up to the runtime's buffer-binding alignment. Small frames
+/// can produce a [`partials_len`] short of one boundary, and `wgpu`
+/// rejects a bind-group offset that isn't a multiple of its
 /// `min_storage_buffer_offset_alignment` — mirrors
 /// [`temporal_stats_slot_stride_bytes`].
-pub(super) fn noise_partials_slot_stride_bytes(width: u32, height: u32) -> u64 {
-    let bytes = partials_len(width, height) as u64 * size_of::<f32>() as u64;
-    bytes.next_multiple_of(32)
+pub(super) fn noise_partials_slot_stride_bytes(width: u32, height: u32, align: StorageAlign) -> u64 {
+    align.pad_bytes(partials_len(width, height) as u64 * size_of::<f32>() as u64)
 }
 
 /// Dispatch both stages of the Immerkær noise estimate for `ctx.frame`,
@@ -187,20 +187,29 @@ pub(super) fn temporal_stats_slot_len(width: u32, height: u32, stored_ch: u32) -
 }
 
 /// Byte stride between ring slots in the temporal-stats buffer, padded
-/// up to the GPU storage-buffer offset alignment (32 bytes). Small
-/// frames (or a single-channel mode) can produce a
-/// [`temporal_stats_slot_len`] under 8 `f32`s, and `wgpu` rejects a
-/// bind-group offset that isn't a multiple of its
-/// `min_storage_buffer_offset_alignment` — mirrors
-/// `MotionCtx::confidence_bytes_per_neighbour`.
-pub(super) fn temporal_stats_slot_stride_bytes(width: u32, height: u32, stored_ch: u32) -> u64 {
-    let bytes = temporal_stats_slot_len(width, height, stored_ch) as u64 * size_of::<f32>() as u64;
-    bytes.next_multiple_of(32)
+/// up to the runtime's buffer-binding alignment. Small frames (or a
+/// single-channel mode) can produce a [`temporal_stats_slot_len`]
+/// short of one boundary, and `wgpu` rejects a bind-group offset that
+/// isn't a multiple of its `min_storage_buffer_offset_alignment` —
+/// mirrors `MotionCtx::confidence_bytes_per_neighbour`.
+pub(super) fn temporal_stats_slot_stride_bytes(
+    width: u32,
+    height: u32,
+    stored_ch: u32,
+    align: StorageAlign,
+) -> u64 {
+    align.pad_bytes(temporal_stats_slot_len(width, height, stored_ch) as u64 * size_of::<f32>() as u64)
 }
 
 /// Total byte size of a `frame_count`-slot temporal-stats ring.
-pub(super) fn temporal_stats_buf_bytes(width: u32, height: u32, stored_ch: u32, frame_count: u32) -> usize {
-    (temporal_stats_slot_stride_bytes(width, height, stored_ch) * frame_count as u64) as usize
+pub(super) fn temporal_stats_buf_bytes(
+    width: u32,
+    height: u32,
+    stored_ch: u32,
+    frame_count: u32,
+    align: StorageAlign,
+) -> usize {
+    (temporal_stats_slot_stride_bytes(width, height, stored_ch, align) * frame_count as u64) as usize
 }
 
 /// Inputs for a single temporal-residual noise-stats dispatch, diffing
@@ -214,6 +223,7 @@ pub(super) struct TemporalStatsCtx<'a> {
     pub slot_prev: u32,
     pub input_buf: &'a Handle,
     pub stats_buf: &'a Handle,
+    pub align: StorageAlign,
 }
 
 /// Dispatch the temporal residual stats kernel for `ctx.slot_new`,
@@ -229,7 +239,7 @@ pub(super) fn run_temporal_noise_stats<R: Runtime>(
     let total_input = (ctx.frame_count * ctx.height * ctx.width * ctx.stored_ch) as usize;
     let (blocks_x, blocks_y) = temporal_stats_blocks(ctx.width, ctx.height);
     let slot_len = temporal_stats_slot_len(ctx.width, ctx.height, ctx.stored_ch);
-    let stride = temporal_stats_slot_stride_bytes(ctx.width, ctx.height, ctx.stored_ch);
+    let stride = temporal_stats_slot_stride_bytes(ctx.width, ctx.height, ctx.stored_ch, ctx.align);
     let stats_slot = ctx.stats_buf.clone().offset_start((ctx.slot_new as u64) * stride);
 
     unsafe {
@@ -264,9 +274,10 @@ pub(super) fn zero_temporal_stats_slot<R: Runtime>(
     height: u32,
     stored_ch: u32,
     slot: u32,
+    align: StorageAlign,
 ) {
     let slot_len = temporal_stats_slot_len(width, height, stored_ch) as u32;
-    let stride = temporal_stats_slot_stride_bytes(width, height, stored_ch);
+    let stride = temporal_stats_slot_stride_bytes(width, height, stored_ch, align);
     let dst = stats_buf.clone().offset_start((slot as u64) * stride);
 
     let grid = slot_len.div_ceil(BLOCK_1D).min(MAX_GRID_1D);
@@ -287,6 +298,7 @@ pub(super) fn zero_temporal_stats_slot<R: Runtime>(
 /// Reads back exactly one ring slot's temporal-stats region as owned
 /// `f32`s. Slices the shared ring handle by byte offset so the
 /// transfer is proportional to one slot instead of the whole ring.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn read_temporal_stats_slot<R: Runtime>(
     client: &ComputeClient<R>,
     stats_buf: &Handle,
@@ -295,9 +307,10 @@ pub(super) fn read_temporal_stats_slot<R: Runtime>(
     stored_ch: u32,
     frame_count: u32,
     slot: u32,
+    align: StorageAlign,
 ) -> Result<Vec<f32>, anyhow::Error> {
     let slot_len_bytes = temporal_stats_slot_len(width, height, stored_ch) as u64 * size_of::<f32>() as u64;
-    let stride = temporal_stats_slot_stride_bytes(width, height, stored_ch);
+    let stride = temporal_stats_slot_stride_bytes(width, height, stored_ch, align);
     let total_bytes = frame_count as u64 * stride;
     let start = (slot as u64) * stride;
     let end_trim = total_bytes - start - slot_len_bytes;
@@ -821,14 +834,14 @@ mod tests {
     fn noise_partials_slot_stride_bytes_pads_odd_cube_count() {
         // A single BLOCK_X x BLOCK_Y cube, partials_len(32, 8) = 4
         // f32s = 16 bytes, padded up to the next 32-byte multiple.
-        assert_eq!(noise_partials_slot_stride_bytes(32, 8), 32);
+        assert_eq!(noise_partials_slot_stride_bytes(32, 8, StorageAlign::new(32)), 32);
     }
 
     #[test]
     fn noise_partials_slot_stride_bytes_aligned_count_unchanged() {
         // A 2x2 cube grid, partials_len(33, 9) = 16 f32s = 64 bytes,
         // already a multiple of 32, so no padding is added.
-        assert_eq!(noise_partials_slot_stride_bytes(33, 9), 64);
+        assert_eq!(noise_partials_slot_stride_bytes(33, 9, StorageAlign::new(32)), 64);
     }
 
     /// A `70x20` frame grids into a ragged 3x3 cube layout (`BLOCK_X =

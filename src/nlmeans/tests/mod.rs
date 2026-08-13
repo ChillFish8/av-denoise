@@ -1,5 +1,6 @@
 mod helpers;
 
+mod alignment;
 mod confidence;
 mod hq;
 mod motion_compensation;

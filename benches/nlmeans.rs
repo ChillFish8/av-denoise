@@ -261,6 +261,7 @@ fn bench_finish<R: Runtime>(client: &ComputeClient<R>, backend: &str, ch: u32, c
             ArrayArg::from_raw_parts(weight_sum.clone(), pixels),
             ArrayArg::from_raw_parts(max_weight.clone(), pixels),
             0u32,
+            0u32,
             1.0f32,
             W,
             H,

@@ -264,6 +264,7 @@ impl<R: Runtime> NlmDenoiser<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nlmeans::align::StorageAlign;
     use crate::nlmeans::motion::{MotionCompensationMode, MotionEstimation};
 
     #[test]
@@ -292,6 +293,7 @@ mod tests {
             },
             4,
             4,
+            StorageAlign::new(32),
         )
         .unwrap();
         assert_eq!(
@@ -325,6 +327,7 @@ mod tests {
             },
             8,
             4,
+            StorageAlign::new(32),
         )
         .unwrap();
         assert_eq!(

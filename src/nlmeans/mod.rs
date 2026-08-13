@@ -2,6 +2,7 @@ pub mod kernels;
 pub mod motion;
 pub mod prefilter;
 
+mod align;
 mod denoiser;
 mod dispatch;
 mod noise;
