@@ -1,14 +1,25 @@
 use std::collections::BTreeMap;
-use std::io::stdout;
+use std::io::{IsTerminal, stdout};
 use std::path::Path;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
+use std::time::Duration;
 
 use av_decoders::{Decoder, Rational32};
 use av_scenechange::{DetectionOptions, detect_scene_changes};
+use indicatif::ProgressBar;
 use y4m::Frame as Y4mFrame;
 
-use crate::ingest::{CliOptions, FrameLayout, Planes, Subsampling, WorkerDenoiser, subsampling_to_y4m};
+use crate::ingest::{
+    CliOptions,
+    FrameLayout,
+    Planes,
+    Subsampling,
+    WorkerDenoiser,
+    push_needs_retry,
+    subsampling_to_y4m,
+};
+use crate::progress::{self, denoise_bar_visible, denoise_progress_bar, scene_progress_bar};
 
 const FRAME_CHANNEL_DEPTH: usize = 8;
 const OUTPUT_CHANNEL_DEPTH: usize = 32;
@@ -35,7 +46,12 @@ pub fn run_file(opts: &CliOptions, input: &Path, workers: usize) -> Result<(), a
         anyhow::bail!("--workers must be at least 1");
     }
 
-    let scenes = detect_scenes(input)?;
+    // Scene detection finishes before a single frame is written, so its
+    // bar has the terminal to itself and needs no opt-in. The denoising
+    // bar shares the terminal with whatever consumes our output, so it
+    // waits for --progress.
+    let is_terminal = std::io::stderr().is_terminal();
+    let scenes = detect_scenes(input, is_terminal)?;
 
     tracing::info!(
         scene_count = scenes.scene_count(),
@@ -44,13 +60,19 @@ pub fn run_file(opts: &CliOptions, input: &Path, workers: usize) -> Result<(), a
         "scene detection complete",
     );
 
-    encode_scenes(opts, input, &scenes, workers)
+    encode_scenes(
+        opts,
+        input,
+        &scenes,
+        workers,
+        denoise_bar_visible(opts.progress, is_terminal),
+    )
 }
 
 /// Open the input, read its layout, and run `av_scenechange` to produce a
 /// list of scene boundaries. Returns once the detector pass has finished
 /// and the temporary decoder it used has been dropped.
-fn detect_scenes(input: &Path) -> Result<SceneLayout, anyhow::Error> {
+fn detect_scenes(input: &Path, visible: bool) -> Result<SceneLayout, anyhow::Error> {
     let mut decoder = Decoder::from_file(input)?;
     let details = *decoder.get_video_details();
 
@@ -72,8 +94,15 @@ fn detect_scenes(input: &Path) -> Result<SceneLayout, anyhow::Error> {
         "running scene detection",
     );
 
+    let pb = scene_progress_bar(details.total_frames, visible);
+    let on_progress = |frames_analyzed: usize, _keyframe_count: usize| {
+        pb.set_position(frames_analyzed as u64);
+    };
+
     let detect_opts = DetectionOptions::default();
-    let detection = detect_scene_changes::<u8>(&mut decoder, detect_opts, None, None)?;
+    let detection = detect_scene_changes::<u8>(&mut decoder, detect_opts, None, Some(&on_progress))?;
+
+    progress::finish(&pb);
 
     drop(decoder);
 
@@ -102,9 +131,16 @@ fn encode_scenes(
     input: &Path,
     scenes: &SceneLayout,
     workers: usize,
+    visible: bool,
 ) -> Result<(), anyhow::Error> {
     let (worker_txs, worker_handles, out_rx) = spawn_workers(opts, scenes.layout, workers);
-    let coordinator = spawn_coordinator(scenes.layout, scenes.framerate, out_rx, scenes.total_frames);
+    let coordinator = spawn_coordinator(
+        scenes.layout,
+        scenes.framerate,
+        out_rx,
+        scenes.total_frames,
+        visible,
+    );
 
     dispatch_frames(input, scenes, &worker_txs)?;
 
@@ -162,8 +198,9 @@ fn spawn_coordinator(
     framerate: Rational32,
     rx: Receiver<OutputMsg>,
     total_frames: usize,
+    visible: bool,
 ) -> thread::JoinHandle<Result<(), anyhow::Error>> {
-    thread::spawn(move || run_coordinator(layout, framerate, rx, total_frames))
+    thread::spawn(move || run_coordinator(layout, framerate, rx, total_frames, visible))
 }
 
 /// Sequential decode loop: read every frame, route it to worker
@@ -284,7 +321,7 @@ fn push_with_drain(
 ) -> Result<(), anyhow::Error> {
     pending.push_back(global_idx);
 
-    if let Err(av_denoise::DenoiserError::QueueFull) = denoiser.push(planes) {
+    if push_needs_retry(denoiser.push(planes))? {
         if let Some(out) = denoiser.recv()? {
             let g = pending
                 .pop_front()
@@ -308,16 +345,30 @@ fn flush_worker(
     pending: &mut std::collections::VecDeque<u64>,
     tx: &SyncSender<OutputMsg>,
 ) -> Result<(), anyhow::Error> {
+    let mut disconnected = false;
+
     wd.flush(|out| {
+        if disconnected {
+            return;
+        }
+
         if let Some(g) = pending.pop_front() {
-            let _ = tx.send(OutputMsg {
+            let msg = OutputMsg {
                 global_idx: g,
                 planes: out,
-            });
+            };
+            let did_send = tx.send(msg).is_ok();
+            if !did_send {
+                disconnected = true;
+            }
         } else {
             tracing::warn!("worker emitted flushed frame with no pending global index");
         }
     })?;
+
+    if disconnected {
+        anyhow::bail!("coordinator disconnected while flushing worker output");
+    }
 
     Ok(())
 }
@@ -327,10 +378,14 @@ fn run_coordinator(
     framerate: Rational32,
     rx: Receiver<OutputMsg>,
     total_frames: usize,
+    visible: bool,
 ) -> Result<(), anyhow::Error> {
     let stdout = stdout();
     let lock = stdout.lock();
 
+    // No `XCOLORRANGE=` tag is emitted here. `av_decoders::VideoDetails`
+    // doesn't surface the source's color range for any of its backends
+    // (ffms2 included), so there's nothing to forward.
     let mut encoder = y4m::encode(
         layout.width as usize,
         layout.height as usize,
@@ -339,9 +394,36 @@ fn run_coordinator(
     .with_colorspace(subsampling_to_y4m(layout.subsampling))
     .write_header(lock)?;
 
+    // Frames written to the output, which lags the frames read by the
+    // depth of the worker pipelines. Emitted frames are the honest
+    // measure of progress: the count stalls whenever whatever consumes
+    // our stdout stops reading.
+    let pb = denoise_progress_bar(total_frames, visible);
+
+    // The first frame only lands once a worker has compiled its
+    // kernels, which takes seconds. A steady tick draws the bar right
+    // away and keeps its elapsed time moving until then.
+    pb.enable_steady_tick(Duration::from_millis(250));
+
+    let result = emit_frames(&mut encoder, &rx, total_frames as u64, &pb);
+
+    progress::finish(&pb);
+
+    result
+}
+
+/// Reorders worker output by frame index and writes it out, updating
+/// `pb` as frames are emitted. Returns once every frame has been
+/// written. Errors if the workers all disconnect before `total` frames
+/// have landed, naming how many were written and how many were expected.
+fn emit_frames<W: std::io::Write>(
+    encoder: &mut y4m::Encoder<W>,
+    rx: &Receiver<OutputMsg>,
+    total: u64,
+    pb: &ProgressBar,
+) -> Result<(), anyhow::Error> {
     let mut pending: BTreeMap<u64, Planes> = BTreeMap::new();
     let mut next_emit: u64 = 0;
-    let total = total_frames as u64;
 
     while next_emit < total {
         let msg = match rx.recv() {
@@ -356,6 +438,15 @@ fn run_coordinator(
             encoder.write_frame(&frame)?;
             next_emit += 1;
         }
+
+        pb.set_position(next_emit);
+    }
+
+    if next_emit != total {
+        anyhow::bail!(
+            "wrote {next_emit} frames but expected {total}; every worker disconnected \
+             before the stream finished (a frame index was likely lost)"
+        );
     }
 
     Ok(())
@@ -403,5 +494,118 @@ fn subsampling_from_av_decoders(
         ChromaSubsampling::Yuv422 => Ok(Subsampling::Yuv422),
         ChromaSubsampling::Yuv444 => Ok(Subsampling::Yuv444),
         other => anyhow::bail!("unsupported chroma subsampling {other:?}; need 4:2:0, 4:2:2, or 4:4:4"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use av_denoise::accelerate::Accelerator;
+    use av_denoise::{Algorithm, DenoisingMode, Device, MotionCompensationMode};
+    use indicatif::ProgressBar;
+
+    use super::*;
+    use crate::ingest::BinaryChannelIntent;
+
+    fn tiny_layout() -> FrameLayout {
+        // 4:2:0 chroma at this size is 4x4, clearing the denoiser's 3x3
+        // minimum frame dimension.
+        FrameLayout {
+            width: 8,
+            height: 8,
+            subsampling: Subsampling::Yuv420,
+        }
+    }
+
+    fn tiny_planes(layout: FrameLayout) -> Planes {
+        let (cw, ch) = layout.chroma_dims();
+        let chroma_pixels = (cw * ch) as usize;
+
+        Planes {
+            y: vec![128u8; layout.luma_pixels()],
+            u: vec![128u8; chroma_pixels],
+            v: vec![128u8; chroma_pixels],
+        }
+    }
+
+    #[test]
+    fn emit_frames_errors_when_a_frame_index_is_lost() {
+        let layout = tiny_layout();
+        let (tx, rx) = sync_channel::<OutputMsg>(4);
+        let planes = tiny_planes(layout);
+
+        // Frame 1 is never sent (its index was lost somewhere upstream)
+        // and every worker then disconnects. This used to make
+        // `emit_frames` fall through to `Ok(())` with a truncated y4m.
+        tx.send(OutputMsg {
+            global_idx: 0,
+            planes: planes.clone(),
+        })
+        .unwrap();
+        tx.send(OutputMsg {
+            global_idx: 2,
+            planes,
+        })
+        .unwrap();
+        drop(tx);
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut encoder = y4m::encode(
+            layout.width as usize,
+            layout.height as usize,
+            y4m::Ratio::new(30, 1),
+        )
+        .with_colorspace(subsampling_to_y4m(layout.subsampling))
+        .write_header(&mut buf)
+        .expect("header write failed");
+
+        let pb = ProgressBar::hidden();
+        let err = emit_frames(&mut encoder, &rx, 3, &pb).expect_err("expected a lost-frame error");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains('1') && msg.contains('3'),
+            "error should name frames written (1) vs expected (3): {msg}"
+        );
+    }
+
+    fn temporal_opts() -> CliOptions {
+        CliOptions {
+            accelerators: vec![Accelerator::Vulkan],
+            device: Device::Default,
+            intent: BinaryChannelIntent::LumaChroma,
+            mode: DenoisingMode::Temporal { radius: 1 },
+            prefilter: None,
+            motion_compensation: MotionCompensationMode::None,
+            algorithm: Algorithm::Nlmeans,
+            nlm_tuning: None,
+            luma_strength: None,
+            chroma_strength: None,
+            progress: false,
+        }
+    }
+
+    #[test]
+    fn flush_worker_errors_when_coordinator_has_disconnected() {
+        let layout = tiny_layout();
+        let mut wd = WorkerDenoiser::create(&temporal_opts(), layout).expect("denoiser construction failed");
+        let planes = tiny_planes(layout);
+
+        // One push into a temporal window leaves a trailing tail that
+        // `flush` will pad and emit.
+        wd.push(&planes).expect("push failed");
+
+        let mut pending: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+        pending.push_back(0);
+
+        let (tx, rx) = sync_channel::<OutputMsg>(4);
+        drop(rx);
+
+        let err = flush_worker(&mut wd, &mut pending, &tx)
+            .expect_err("expected the coordinator disconnect to surface as an error");
+
+        assert!(
+            err.to_string().contains("disconnect"),
+            "error should mention the coordinator disconnect: {err}"
+        );
     }
 }

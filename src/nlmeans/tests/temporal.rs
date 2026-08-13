@@ -46,6 +46,7 @@ fn temporal_denoise_uniform() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        hq: None,
     };
 
     let w = 8;
@@ -80,6 +81,7 @@ fn temporal_with_noisy_center_frame() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        hq: None,
     };
 
     let w = 16;
@@ -114,6 +116,7 @@ fn temporal_asymmetric_frames_correct_weights() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        hq: None,
     };
 
     let w = 16;
@@ -218,5 +221,254 @@ fn temporal_push_flush_frame_count_matches() {
             PUSHES,
             "radius {radius}: pushed {PUSHES} frames, got {during_pushes} during pushes + {flushed} from flush",
         );
+    }
+}
+
+/// Deterministic per-frame noisy copy of `base`, decorrelated across
+/// `seed`. Same Irwin-Hall hash as `noisy_copy`, generalised to a
+/// non-uniform base image instead of a flat value.
+fn noisy_copy_of(base: &[f32], seed: u32, sigma: f32) -> Vec<f32> {
+    let unit_std = (1.0f32 / 3.0f32).sqrt();
+    base.iter()
+        .enumerate()
+        .map(|(idx, &b)| {
+            let idx = idx as u32;
+            let mut sum = 0.0f32;
+            for k in 0..4u32 {
+                let mut hash = (idx * 4 + k)
+                    .wrapping_mul(2654435761)
+                    .wrapping_add(seed.wrapping_mul(0x9E37_79B9).wrapping_add(k));
+                hash ^= hash >> 15;
+                hash = hash.wrapping_mul(0x85EB_CA6B);
+                hash ^= hash >> 13;
+                sum += (hash as f32 / u32::MAX as f32) - 0.5;
+            }
+            (b + (sum / unit_std) * sigma).clamp(0.0, 1.0)
+        })
+        .collect()
+}
+
+fn psnr(reference: &[f32], test: &[f32]) -> f64 {
+    let mse: f64 = reference
+        .iter()
+        .zip(test.iter())
+        .map(|(&r, &t)| {
+            let d = (r as f64) - (t as f64);
+            d * d
+        })
+        .sum::<f64>()
+        / reference.len() as f64;
+    if mse <= 1e-20 {
+        return 999.0;
+    }
+    10.0 * (1.0f64 / mse).log10()
+}
+
+/// Structured content for the search-radius regression tests below.
+/// Combines a gradient (a smooth region for NLM to average) with a
+/// block of a different value (an edge NLM should preserve rather
+/// than blur across).
+fn structured_base(w: u32, h: u32) -> Vec<f32> {
+    let mut base = make_gradient_frame(w, h, 0.2, 0.8);
+    let bx0 = w / 3;
+    let by0 = h / 3;
+    for y in by0..by0 * 2 {
+        for x in bx0..bx0 * 2 {
+            base[(y * w + x) as usize] = 0.15;
+        }
+    }
+    base
+}
+
+/// Runs `params` through the windowed (default) dispatch and again
+/// through the separable dispatch (forced via the public
+/// `use_separable` flag, an independently-implemented path that
+/// doesn't share the windowed pair kernel's code), denoising `frames`
+/// of noisy copies of `base` both times. Returns `(windowed_psnr,
+/// separable_psnr)` against `base`.
+fn windowed_vs_separable_psnr(
+    client: &cubecl::prelude::ComputeClient<R>,
+    params: &NlmParams,
+    w: u32,
+    h: u32,
+    base: &[f32],
+    frames: &[Vec<f32>],
+) -> (f64, f64) {
+    let mut windowed = NlmDenoiser::<R>::new(client, params.clone(), w, h);
+    for frame in frames {
+        windowed.push_frame(frame);
+    }
+    let windowed_result = windowed.denoise().unwrap().unwrap().to_vec();
+
+    let mut separable = NlmDenoiser::<R>::new(client, params.clone(), w, h);
+    separable.use_separable = true;
+    for frame in frames {
+        separable.push_frame(frame);
+    }
+    let separable_result = separable.denoise().unwrap().unwrap().to_vec();
+
+    (psnr(base, &windowed_result), psnr(base, &separable_result))
+}
+
+/// The backward temporal weight in `nlm_fused_pair_accumulate_window[_ref]`
+/// must be measured against the same centre patch as the value it
+/// multiplies. A weight measured against a shifted patch instead grows
+/// wrong with the search offset, so this checks the windowed dispatch
+/// against the independent separable dispatch at a search radius large
+/// enough to expose a shift.
+#[test]
+fn temporal_windowed_matches_separable_at_search_5_and_6() {
+    let client = make_client();
+    let w = 128;
+    let h = 128;
+    let base = structured_base(w, h);
+
+    for search_radius in [5u32, 6] {
+        let params = NlmParams {
+            temporal_radius: 4,
+            search_radius,
+            patch_radius: 4,
+            strength: 0.35,
+            self_weight: 1.0,
+            channels: ChannelMode::Luma,
+            prefilter: PrefilterMode::None,
+            motion_compensation: MotionCompensationMode::None,
+            hq: Some(HqParams::with_sigma(16.0 / 255.0)),
+        };
+
+        let sigma = 16.0 / 255.0;
+        let frames: Vec<Vec<f32>> = (0..9).map(|i| noisy_copy_of(&base, i, sigma)).collect();
+
+        let (windowed_psnr, separable_psnr) =
+            windowed_vs_separable_psnr(&client, &params, w, h, &base, &frames);
+
+        assert!(
+            (windowed_psnr - separable_psnr).abs() < 1.5,
+            "search_radius={search_radius}: windowed ({windowed_psnr:.2} dB) should track \
+             separable ({separable_psnr:.2} dB) within measurement noise"
+        );
+    }
+}
+
+/// Same check as [`temporal_windowed_matches_separable_at_search_5_and_6`]
+/// for `nlm_fused_pair_accumulate_window_ref`, the variant that reads
+/// patch distances from a prefiltered reference clip instead of the raw
+/// input. A prefilter is active so both the windowed and separable
+/// dispatches route through their `_ref` kernels.
+#[test]
+fn temporal_windowed_ref_matches_separable_ref_at_search_5_and_6() {
+    let client = make_client();
+    let w = 128;
+    let h = 128;
+    let base = structured_base(w, h);
+
+    for search_radius in [5u32, 6] {
+        let params = NlmParams {
+            temporal_radius: 4,
+            search_radius,
+            patch_radius: 4,
+            strength: 0.35,
+            self_weight: 1.0,
+            channels: ChannelMode::Luma,
+            prefilter: PrefilterMode::Bilateral {
+                sigma_s: 1.0,
+                sigma_r: 0.1,
+            },
+            motion_compensation: MotionCompensationMode::None,
+            hq: Some(HqParams::with_sigma(16.0 / 255.0)),
+        };
+
+        let sigma = 16.0 / 255.0;
+        let frames: Vec<Vec<f32>> = (0..9).map(|i| noisy_copy_of(&base, i, sigma)).collect();
+
+        let (windowed_psnr, separable_psnr) =
+            windowed_vs_separable_psnr(&client, &params, w, h, &base, &frames);
+
+        assert!(
+            (windowed_psnr - separable_psnr).abs() < 1.5,
+            "search_radius={search_radius}: windowed ({windowed_psnr:.2} dB) should track \
+             separable ({separable_psnr:.2} dB) within measurement noise"
+        );
+    }
+}
+
+/// Same check as [`temporal_windowed_matches_separable_at_search_5_and_6`]
+/// at the maximum supported search radius. Ignored by default. The
+/// windowed kernel's fully unrolled window loop at this size overflows a
+/// debug build's codegen stack even at the stack size
+/// `.cargo/config.toml` sets (the spatial windowed kernel hits the same
+/// limit). Release builds compile it fine. Run with
+/// `cargo test --release -- --ignored
+/// temporal_windowed_matches_separable_at_the_search_ceiling`.
+#[test]
+#[ignore = "debug build codegen overflows the stack at search_radius=8, run with --release"]
+fn temporal_windowed_matches_separable_at_the_search_ceiling() {
+    let client = make_client();
+    let w = 128;
+    let h = 128;
+    let base = structured_base(w, h);
+
+    let params = NlmParams {
+        temporal_radius: 4,
+        search_radius: MAX_SEARCH_RADIUS,
+        patch_radius: 4,
+        strength: 0.35,
+        self_weight: 1.0,
+        channels: ChannelMode::Luma,
+        prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
+        hq: Some(HqParams::with_sigma(16.0 / 255.0)),
+    };
+
+    let sigma = 16.0 / 255.0;
+    let frames: Vec<Vec<f32>> = (0..9).map(|i| noisy_copy_of(&base, i, sigma)).collect();
+
+    let (windowed_psnr, separable_psnr) = windowed_vs_separable_psnr(&client, &params, w, h, &base, &frames);
+
+    assert!(
+        (windowed_psnr - separable_psnr).abs() < 1.5,
+        "search_radius={MAX_SEARCH_RADIUS}: windowed ({windowed_psnr:.2} dB) should track \
+         separable ({separable_psnr:.2} dB) within measurement noise"
+    );
+}
+
+/// Uniform-content sanity check at the same search radii as
+/// [`temporal_windowed_matches_separable_at_search_5_and_6`]. Uniform
+/// input makes every patch distance zero regardless of which pixel a
+/// kernel reads, so this cannot catch a mis-centred weight, but it does
+/// catch a kernel reading or writing outside its intended memory region,
+/// which would pull in unrelated data and break uniformity even here.
+#[test]
+fn temporal_uniform_passthrough_search_5_and_6() {
+    let client = make_client();
+    let w = 64;
+    let h = 64;
+    let frame = make_uniform_frame(w, h, 1, 0.5);
+
+    for search_radius in [5u32, 6] {
+        let params = NlmParams {
+            temporal_radius: 2,
+            search_radius,
+            patch_radius: 4,
+            strength: 1.2,
+            self_weight: 1.0,
+            channels: ChannelMode::Luma,
+            prefilter: PrefilterMode::None,
+            motion_compensation: MotionCompensationMode::None,
+            hq: None,
+        };
+
+        let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+        for _ in 0..5 {
+            denoiser.push_frame(&frame);
+        }
+        let result = denoiser.denoise().unwrap().unwrap().to_vec();
+
+        for (i, &v) in result.iter().enumerate() {
+            assert!(
+                (v - 0.5).abs() < 1e-3,
+                "search_radius={search_radius}: pixel {i} expected ~0.5, got {v}"
+            );
+        }
     }
 }

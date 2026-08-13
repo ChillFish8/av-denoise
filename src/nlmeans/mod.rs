@@ -4,28 +4,43 @@ pub mod prefilter;
 
 mod denoiser;
 mod dispatch;
+mod noise;
 mod params;
 mod pending;
 
-#[cfg(test)]
+// Every test in this tree runs against a real GPU runtime (see
+// `tests::helpers::R`), so it only builds when a wgpu-backed feature is
+// enabled. A cpu-only build (`--no-default-features --features cpu`)
+// skips it entirely. `src/denoiser.rs`'s `cpu_smoke_tests` module covers
+// the cpu backend instead.
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 mod tests;
 
 pub use denoiser::NlmDenoiser;
-pub use motion::MotionCompensationMode;
-pub use params::{ChannelMode, MAX_PATCH_RADIUS, MAX_SEARCH_RADIUS, MAX_TEMPORAL_RADIUS, NlmParams};
+pub use motion::{MotionCompensationMode, MotionEstimation};
+pub use params::{
+    ChannelMode,
+    HqParams,
+    MAX_PATCH_RADIUS,
+    MAX_SEARCH_RADIUS,
+    MAX_TEMPORAL_RADIUS,
+    MIN_FRAME_DIM,
+    NlmParams,
+    hq_default_strength,
+    validate_dimensions,
+};
 pub use pending::Pending;
-pub use prefilter::PrefilterMode;
+pub use prefilter::{DEFAULT_PILOT_STRENGTH_SCALE, PrefilterMode};
 
 /// Cube X dimension for tile-heavy fused/separable kernels.
 pub const BLOCK_X: u32 = 32;
 /// Cube Y dimension for tile-heavy fused/separable kernels.
 pub const BLOCK_Y: u32 = 8;
 
-/// Cube shape for per-pixel kernels with no SMEM tile (`nlm_accumulate`,
-/// `nlm_finish`) and the small-tile `nlm_dist_2d_weight(_ref)` kernels.
-/// On RDNA-class GPUs these benchmark 10 to 25% faster at (32, 16) than at
-/// the tile-heavy default, because they're memory-latency-bound and the
-/// extra threads hide load latency.
+/// Cube shape for the per-pixel `nlm_accumulate` kernel, which has no
+/// SMEM tile. On RDNA-class GPUs it benchmarks 10 to 25% faster at
+/// (32, 16) than at the tile-heavy default, because it's
+/// memory-latency-bound and the extra threads hide load latency.
 pub const BLOCK_X_THIN: u32 = 32;
 pub const BLOCK_Y_THIN: u32 = 16;
 

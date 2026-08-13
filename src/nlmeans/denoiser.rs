@@ -4,8 +4,27 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::kernels::gpu_copy;
-use super::motion::{self, MotionCtx, build_pyramid_for_slot};
-use super::params::{NlmParams, SEPARABLE_THRESHOLD};
+use super::motion::{self, MotionCtx, MotionEstimation, build_pyramid_for_slot, run_pyramid_build};
+use super::noise::{
+    EMA_ALPHA,
+    NoiseCtx,
+    NoiseEstimator,
+    TemporalNoiseSample,
+    TemporalStatsCtx,
+    aggregate_temporal_noise_stats,
+    build_spatial_offset_lut,
+    correlation_factor,
+    noise_partials_slot_stride_bytes,
+    partials_len,
+    read_temporal_stats_slot,
+    run_noise_estimate,
+    run_temporal_noise_stats,
+    sigma_block_p25_from_partials,
+    sigma_from_abs_sum,
+    temporal_stats_buf_bytes,
+    zero_temporal_stats_slot,
+};
+use super::params::{NlmParams, SEPARABLE_THRESHOLD, sigma_eff, validate_dimensions};
 use super::pending::Pending;
 use super::prefilter::{PrefilterCtx, PrefilterMode, run_prefilter};
 use super::{BLOCK_1D, MAX_GRID_1D};
@@ -65,8 +84,71 @@ pub struct NlmDenoiser<R: Runtime> {
     pub(super) output_scratch: Vec<f32>,
 
     pub(super) h2_inv_norm: f32,
+    /// Distance floor fed to the main-pass weighting kernels. Zero for
+    /// `NlmSpatial`, because pilot-vs-pilot distances no longer carry
+    /// the 2σ² floor, so subtracting it there would overweight
+    /// mismatched patches. Equal to `input_noise_offset` for every
+    /// other prefilter mode.
+    pub(super) noise_offset: f32,
+    /// Distance floor for comparisons against noisy input pixels. The
+    /// pilot pass always uses this value, since its own inputs still
+    /// carry the full noise floor even when `noise_offset` has been
+    /// zeroed for the main pass.
+    pub(super) input_noise_offset: f32,
     pub use_separable: bool,
     pub(super) use_reference: bool,
+
+    /// Smoothed grain autocorrelation, same EMA cadence as the sigma
+    /// estimate. `None` before the first temporal sample of a stream,
+    /// same seeding convention as `NoiseEstimator`. Its first sample
+    /// sets the state directly instead of blending from an assumed 0,
+    /// so a stream doesn't spend its opening frames under-attenuated.
+    /// Only ever updated at fold time when a temporal sample exists,
+    /// so the fast path and a fixed `sigma_override` leave it at `None`
+    /// (read as 0, white-noise attenuation, i.e. no attenuation) for
+    /// the whole stream.
+    pub(super) rho_smoothed: Option<f32>,
+    /// Per-candidate spatial noise-floor offset for the k=0 windowed
+    /// and separable weighting kernels, `[(2*search_radius+1)^2]`
+    /// f32s, row-major `(dy+r)*(2r+1)+(dx+r)`. Rebuilt from
+    /// `noise_offset` and `rho_smoothed` every `denoise_submit` (see
+    /// `Self::rebuild_spatial_offset_lut`). At `rho_smoothed` unset
+    /// this is numerically identical to the flat `noise_offset` scalar
+    /// it replaced.
+    pub(super) spatial_offset_lut: Handle,
+
+    /// Stage-1 noise-estimate scratch ring, `total_frames` slots each
+    /// `noise_partials_slot_stride_bytes(width, height)` bytes. `Some`
+    /// only when the noise level is measured automatically (`hq` is
+    /// set and `sigma_override` is `None`). One slot per ring position
+    /// keeps a slot's partials intact between the push that queues
+    /// them and the later fold that reads the centre slot back for the
+    /// low chain's block-p25 statistic, unlike a single shared region
+    /// every push would overwrite before that slot ever reaches centre.
+    pub(super) noise_partials: Option<Handle>,
+    /// Per-ring-slot Immerkær totals, `[total_frames * 4]` f32s. Same
+    /// gating as `noise_partials`.
+    pub(super) noise_results: Option<Handle>,
+    /// Per-ring-slot temporal-residual block stats. One region per
+    /// ring slot, each region `blocks_x * blocks_y` block records
+    /// (row-major), each record `[sum_d(ch0..stored_ch-1),
+    /// sum_d2(ch0..stored_ch-1), sum_lag]`. `Some` only when auto
+    /// noise estimation is active (same as `noise_partials`) and
+    /// `temporal_radius >= 1` (the r=0 path has no temporal neighbour
+    /// to diff against).
+    pub(super) temporal_stats_buf: Option<Handle>,
+    /// Smooths the median chain's raw per-frame noise estimate into a
+    /// stable per-channel sigma, feeding `h2_inv_norm` and `sigma_y`.
+    /// Inert (never updated) when noise is not measured automatically.
+    pub(super) noise_estimator: NoiseEstimator,
+    /// Smooths the low chain's raw per-frame noise estimate into a
+    /// stable per-channel sigma, feeding `input_noise_offset` and
+    /// `noise_offset` only. The low chain uses block-p25 Immerkær
+    /// maxed with the temporal lower quartile rather than the median
+    /// chain's frame-mean Immerkær maxed with the temporal median, a
+    /// more conservative read for a consumer where an over-read is
+    /// destructive. Inert under the same condition as `noise_estimator`.
+    pub(super) noise_estimator_low: NoiseEstimator,
 
     /// Cached motion-compensation context. `Some` when MC is active.
     pub(super) mc_ctx: Option<MotionCtx>,
@@ -82,23 +164,67 @@ pub struct NlmDenoiser<R: Runtime> {
     /// indices `0..R` are the backward k = -R..-1; `R..2R` are forward
     /// k = +1..+R.
     pub(super) mv_field_buf: Option<Handle>,
+    /// Adjacent-frame pair-motion ring, laid out
+    /// `[2·temporal_radius][2][blocks_y][blocks_x][2]` `i32` (outer
+    /// index is the pair slot, next is direction, 0 = older→newer, 1 =
+    /// newer→older). `Some` only when `MotionEstimation::Chained` is
+    /// active. The direct path never touches this buffer. See
+    /// `motion::pair_ring_slot_count` for why `2·temporal_radius` slots
+    /// is exactly enough, and `Self::pair_slot` for how a slot is
+    /// resolved from a frame's position in the push sequence.
+    pub(super) pair_ring_buf: Option<Handle>,
     /// Luma-only pyramid storage:
     /// `[pyramid_levels][total_frames][level_w * level_h]` `f32`.
     pub(super) pyramid_input: Option<Handle>,
     /// Same shape as `pyramid_input`, built from the reference ring
     /// when a prefilter is active.
     pub(super) pyramid_reference: Option<Handle>,
+
+    /// Block geometry for the no-MC confidence pass. `Some` only when
+    /// confidence weighting is active (HQ, `temporal_confidence: true`,
+    /// `temporal_radius > 0`) and motion compensation is not. The
+    /// MC-active case reuses `mc_ctx`'s geometry instead.
+    pub(super) confidence_ctx: Option<MotionCtx>,
+    /// Per-neighbour block-match confidence. Layout mirrors
+    /// `mv_field_buf`, `[2·temporal_radius][blocks_y * blocks_x]`
+    /// `f32`. `Some` only when confidence weighting is active (see
+    /// `confidence_ctx`), whether the block geometry comes from
+    /// `mc_ctx` or from the no-MC confidence pass.
+    pub(super) confidence_buf: Option<Handle>,
+    /// Luma-only single-level pyramid ring feeding the no-MC
+    /// confidence pass. `Some` only alongside `confidence_ctx`.
+    pub(super) confidence_pyramid: Option<Handle>,
+    /// Discard sink for the no-MC confidence pass's mandatory MV
+    /// write. Nothing warps by it without motion compensation. `Some`
+    /// only alongside `confidence_ctx`.
+    pub(super) confidence_mv_scratch: Option<Handle>,
+    /// Small placeholder buffer passed as the fine block-match
+    /// kernel's `confidence` argument whenever confidence weighting is
+    /// inactive but motion compensation still runs. The kernel's
+    /// `write_confidence` comptime flag skips indexing into it
+    /// entirely in that case, so its size never matters. Always
+    /// allocated (trivially small), unlike the confidence-specific
+    /// buffers above.
+    pub(super) confidence_dummy: Handle,
+    /// Smoothed sigma for channel 0 (the plane motion estimation
+    /// treats as luma), feeding the confidence noise floor. Zero
+    /// unless HQ is active. A fixed `sigma_override` seeds it once at
+    /// construction, auto estimation refreshes it every submit.
+    pub(super) sigma_y: f32,
 }
 
 impl<R: Runtime> NlmDenoiser<R> {
     /// Build a new denoiser.
     ///
-    /// **Panics** if `params.validate()` fails, the high-level [`crate::Denoiser`]
-    /// runs validation first and surfaces errors as `Result`, so most callers should prefer that.
+    /// **Panics** if `params.validate()` or the frame-dimension check
+    /// fails, the high-level [`crate::Denoiser`] runs both first and
+    /// surfaces errors as `Result`, so most callers should prefer that.
     pub fn new(client: &ComputeClient<R>, params: NlmParams, width: u32, height: u32) -> Self {
         params
             .validate()
             .expect("invalid NlmParams; call params.validate() first to surface this as Result");
+        validate_dimensions(width, height)
+            .expect("unsupported frame dimensions; call validate_dimensions first to surface this as Result");
 
         let stored_ch = params.channels.storage_count();
         let total_frames = params.total_frames();
@@ -130,9 +256,54 @@ impl<R: Runtime> NlmDenoiser<R> {
         let outputs = [client.empty(frame_bytes), client.empty(frame_bytes)];
 
         let h2_inv_norm = params.h2_inv_norm();
+        let input_noise_offset = params.noise_offset();
+        // The pilot pass compares noisy input pixels, so it always
+        // keeps the full noise floor. Main-pass distances under
+        // `NlmSpatial` are pilot-vs-pilot, which no longer carries
+        // that floor, so subtracting it there would overweight
+        // mismatched patches.
+        let noise_offset = match params.prefilter {
+            PrefilterMode::NlmSpatial { .. } => 0.0,
+            _ => input_noise_offset,
+        };
         let use_separable = params.patch_radius > SEPARABLE_THRESHOLD;
         let use_reference = params.prefilter.needs_reference_buf();
         let output_scratch_cap = pixels * params.channels.count() as usize;
+
+        // Unset until the first temporal sample lands, so the initial
+        // LUT is numerically identical to the flat `noise_offset`
+        // scalar it replaces.
+        let rho_smoothed: Option<f32> = None;
+        let spatial_offset_lut = client.create_from_slice(f32::as_bytes(&build_spatial_offset_lut(
+            params.search_radius,
+            0.0,
+            noise_offset,
+        )));
+
+        // Auto noise estimation only runs when HQ is on and the caller
+        // hasn't pinned a fixed sigma. The fast path and the
+        // sigma-override path allocate neither buffer nor ever launch
+        // the estimate kernels.
+        let auto_noise = params.hq.is_some_and(|hq| hq.sigma_override.is_none());
+        let (noise_partials, noise_results) = if auto_noise {
+            let partials_ring_bytes = noise_partials_slot_stride_bytes(width, height) * total_frames as u64;
+            let n_results = (total_frames * 4) as usize;
+            (
+                Some(client.empty(partials_ring_bytes as usize)),
+                Some(client.empty(n_results * size_of::<f32>())),
+            )
+        } else {
+            (None, None)
+        };
+
+        // The temporal residual estimator additionally needs a real
+        // temporal neighbour to diff against, so it stays inert at
+        // temporal_radius = 0 even when auto noise estimation is on.
+        let temporal_stats_buf = if auto_noise && params.temporal_radius >= 1 {
+            Some(client.empty(temporal_stats_buf_bytes(width, height, stored_ch, total_frames)))
+        } else {
+            None
+        };
 
         // Motion-compensation buffers. Only allocated when MC is
         // active *and* the temporal window is non-trivial (k=0 path
@@ -156,8 +327,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             } else {
                 None
             };
-            let neighbours = (2 * params.temporal_radius) as usize;
-            let mv_field = client.empty(neighbours * ctx.mv_slots_per_neighbour() * 2 * size_of::<i32>());
+            let neighbours = (2 * params.temporal_radius) as u64;
+            let mv_field = client.empty((neighbours * ctx.mv_field_bytes_per_neighbour()) as usize);
             let pyramid_pixels = motion::pyramid_pixels_per_frame(width, height, ctx.pyramid_levels);
             let pyr_in_bytes = pyramid_pixels * total_frames as usize * size_of::<f32>();
             let pyr_in = client.empty(pyr_in_bytes);
@@ -170,6 +341,74 @@ impl<R: Runtime> NlmDenoiser<R> {
         } else {
             (None, None, None, None, None)
         };
+
+        // The pair ring is allocated only when `Chained` estimation is
+        // active (explicitly, or via `Auto` resolving to it at this
+        // temporal radius), on top of `mc_ctx` already being `Some`.
+        // The direct path never reads or writes it.
+        let is_chained = matches!(
+            params
+                .motion_compensation
+                .resolved_estimation(params.temporal_radius),
+            Some(MotionEstimation::Chained { .. })
+        );
+        let pair_ring_buf = if is_chained {
+            mc_ctx.as_ref().map(|ctx| {
+                let pair_ring_slots = motion::pair_ring_slot_count(params.temporal_radius) as u64;
+                let bytes = pair_ring_slots * ctx.pair_slot_bytes();
+                client.empty(bytes as usize)
+            })
+        } else {
+            None
+        };
+
+        // Confidence weighting (in either its MC-active or its no-MC
+        // form) is active only when HQ has `temporal_confidence: true`
+        // and the temporal window is non-trivial. This gate applies
+        // even when MC is active. Without it, every MC-active submit
+        // would pay for the fine kernel's confidence write whether or
+        // not anything consumes it.
+        let confidence_active =
+            params.hq.is_some_and(|hq| hq.temporal_confidence) && params.temporal_radius > 0;
+
+        // Confidence-only geometry, only needed when MC isn't already
+        // supplying block geometry (and thus MVs and confidence via
+        // its own analyse pass). This incurs real extra work beyond
+        // the MC-active case. It needs its own luma pyramid ring and a
+        // block-match kernel per neighbour.
+        let confidence_only_active = confidence_active && mc_ctx.is_none();
+        let confidence_ctx = confidence_only_active.then(|| MotionCtx::confidence_only(width, height));
+
+        // The confidence buffer piggybacks on whichever block geometry
+        // is available, but only when confidence weighting is active.
+        let confidence_geometry = if confidence_active {
+            mc_ctx.as_ref().or(confidence_ctx.as_ref())
+        } else {
+            None
+        };
+        let confidence_buf = confidence_geometry.map(|ctx| {
+            let neighbours = (2 * params.temporal_radius) as u64;
+            client.empty((neighbours * ctx.confidence_bytes_per_neighbour()) as usize)
+        });
+        // Always allocated, trivially small, and reused whenever the
+        // fine block-match kernel runs with `write_confidence: false`.
+        let confidence_dummy = client.empty(size_of::<f32>());
+
+        let (confidence_pyramid, confidence_mv_scratch) = if let Some(ctx) = confidence_ctx.as_ref() {
+            let pyramid_pixels = motion::pyramid_pixels_per_frame(width, height, ctx.pyramid_levels);
+            let pyr_bytes = pyramid_pixels * total_frames as usize * size_of::<f32>();
+            let mv_scratch_len = ctx.mv_slots_per_neighbour() * 2 * size_of::<i32>();
+            (Some(client.empty(pyr_bytes)), Some(client.empty(mv_scratch_len)))
+        } else {
+            (None, None)
+        };
+
+        // `sigma_override` is the only source before the first noise
+        // estimate lands. Auto estimation refreshes this every submit
+        // (see `update_noise_estimate`). The fast path (`hq: None`)
+        // leaves it at zero, which `motion::sad_noise_floor` turns into
+        // a zero floor exactly as callers with no estimate should get.
+        let sigma_y = params.hq.and_then(|hq| hq.sigma_override).unwrap_or(0.0);
 
         Self {
             client: client.clone(),
@@ -194,14 +433,30 @@ impl<R: Runtime> NlmDenoiser<R> {
             next_output_slot: 0,
             output_scratch: Vec::with_capacity(output_scratch_cap),
             h2_inv_norm,
+            noise_offset,
+            input_noise_offset,
             use_separable,
             use_reference,
+            rho_smoothed,
+            spatial_offset_lut,
+            noise_partials,
+            noise_results,
+            temporal_stats_buf,
+            noise_estimator: NoiseEstimator::default(),
+            noise_estimator_low: NoiseEstimator::default(),
             mc_ctx,
             compensated_input_buf,
             compensated_reference_buf,
             mv_field_buf,
+            pair_ring_buf,
             pyramid_input,
             pyramid_reference,
+            confidence_ctx,
+            confidence_buf,
+            confidence_pyramid,
+            confidence_mv_scratch,
+            confidence_dummy,
+            sigma_y,
         }
     }
 
@@ -219,11 +474,20 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         let slot = self.upload_into(&self.input_buf.clone(), frame);
 
-        if self.params.prefilter.is_gpu_internal() {
+        self.run_noise_estimate_for_slot(slot as u32);
+        self.run_temporal_stats_for_slot(slot as u32);
+        self.seed_noise_estimate_if_first_frame(slot as u32);
+
+        if let PrefilterMode::NlmSpatial { strength_scale } = self.params.prefilter {
+            self.run_nlm_spatial_pilot(slot as u32, strength_scale)
+                .expect("nlm spatial pilot dispatch failed");
+        } else if self.params.prefilter.is_gpu_internal() {
             self.run_prefilter_for_slot(slot);
         }
 
         self.build_pyramids_for_slot(slot as u32);
+        self.build_confidence_pyramid_for_slot(slot as u32);
+        self.run_pair_analyse_for_slot(slot as u32);
 
         self.advance_ring();
         self.prime_leading_edge_if_first();
@@ -245,7 +509,20 @@ impl<R: Runtime> NlmDenoiser<R> {
             .expect("reference buffer must exist for External prefilter")
             .clone();
         self.upload_into_slot(&reference_buf, reference, slot);
+
+        // Same order as push_frame. The noise estimate and its
+        // first-frame seed run before anything that could read σ
+        // (build_pyramids_for_slot only needs the reference upload
+        // just above, not the noise estimate, so this reordering
+        // doesn't change what either step reads).
+        self.run_noise_estimate_for_slot(slot as u32);
+        self.run_temporal_stats_for_slot(slot as u32);
+        self.seed_noise_estimate_if_first_frame(slot as u32);
+
         self.build_pyramids_for_slot(slot as u32);
+        self.build_confidence_pyramid_for_slot(slot as u32);
+        self.run_pair_analyse_for_slot(slot as u32);
+
         self.advance_ring();
         self.prime_leading_edge_if_first();
     }
@@ -310,7 +587,7 @@ impl<R: Runtime> NlmDenoiser<R> {
 
     /// Build the per-frame motion-estimation pyramid for `slot` on
     /// both the input and (when present) the reference rings. No-op
-    /// when MC is disabled or `pyramid_levels == 1`.
+    /// when MC is disabled.
     fn build_pyramids_for_slot(&self, slot: u32) {
         let Some(ctx) = self.mc_ctx.as_ref() else {
             return;
@@ -349,6 +626,341 @@ impl<R: Runtime> NlmDenoiser<R> {
             )
             .expect("reference pyramid build dispatch failed");
         }
+    }
+
+    /// Extract the level-0 luma plane for `slot` into the no-MC
+    /// confidence pyramid. No-op unless the no-MC confidence pass is
+    /// active. Always reads `input_buf`, even under a prefilter. The
+    /// no-MC path keeps confidence simple by comparing raw input
+    /// rather than duplicating the reference ring's pyramid.
+    ///
+    /// Calls `run_pyramid_build` directly rather than going through
+    /// [`Self::build_pyramids_for_slot`]'s `build_pyramid_for_slot`
+    /// helper. That helper only ever touches `mc_ctx`'s own pyramid
+    /// buffers (`pyramid_input`, `pyramid_reference`), and
+    /// `confidence_ctx` is only `Some` when `mc_ctx` is `None`, so it
+    /// would return immediately without ever building this method's
+    /// own `confidence_pyramid`.
+    fn build_confidence_pyramid_for_slot(&self, slot: u32) {
+        let (Some(ctx), Some(pyr)) = (self.confidence_ctx.as_ref(), self.confidence_pyramid.as_ref()) else {
+            return;
+        };
+
+        run_pyramid_build::<R>(
+            &self.client,
+            ctx,
+            self.width,
+            self.height,
+            self.params.total_frames(),
+            slot,
+            &self.input_buf,
+            pyr,
+            self.params.channels.storage_count(),
+        )
+        .expect("confidence pyramid build dispatch failed");
+    }
+
+    /// Whether `Chained` motion estimation is configured, explicitly or
+    /// via `Auto` resolving to it at this denoiser's temporal radius
+    /// (see `resolved_estimation`, the single source every
+    /// estimation-dependent decision goes through). Orthogonal to
+    /// `mc_ctx.is_some()`, which callers still need to check
+    /// separately, since `mc_ctx` also requires `temporal_radius > 0`.
+    pub(super) fn is_chained(&self) -> bool {
+        matches!(
+            self.params
+                .motion_compensation
+                .resolved_estimation(self.params.temporal_radius),
+            Some(MotionEstimation::Chained { .. })
+        )
+    }
+
+    /// Run the adjacent-frame pair analyse for the physical input-ring
+    /// slot just written by `push_frame`/`push_frame_with_reference`,
+    /// storing both directions' motion fields into the pair ring at
+    /// `Self::pair_slot(0)`. No-op unless `Chained` estimation is
+    /// active, and for the very first frame of a stream (`ring_head ==
+    /// 0`), which has no older partner to pair against. Composition
+    /// for that gap instead reads the priming duplicate's zero-filled
+    /// pair (see [`Self::zero_pair_slot_for_duplicate`]).
+    fn run_pair_analyse_for_slot(&self, newer_slot: u32) {
+        if self.ring_head == 0 {
+            return;
+        }
+        let Some(mc) = self.mc_ctx.as_ref() else {
+            return;
+        };
+        if !self.is_chained() {
+            return;
+        }
+        let pair_ring = self
+            .pair_ring_buf
+            .as_ref()
+            .expect("pair_ring allocated when Chained is active");
+
+        // Use the cleaner of the two buffers for motion estimation,
+        // exactly as `run_motion_compensation` does for the direct path.
+        let pyramid = self.pyramid_reference.as_ref().unwrap_or_else(|| {
+            self.pyramid_input
+                .as_ref()
+                .expect("pyramid_input allocated when mc_ctx is Some")
+        });
+
+        let total_frames = self.params.total_frames();
+        let older_slot = (newer_slot + total_frames - 1) % total_frames;
+        let pair_slot = self.pair_slot(0);
+
+        motion::run_pair_analyse::<R>(
+            &self.client,
+            mc,
+            self.width,
+            self.height,
+            total_frames,
+            older_slot,
+            newer_slot,
+            pair_slot,
+            pyramid,
+            pair_ring,
+            &self.confidence_dummy,
+        )
+        .expect("pair analyse dispatch failed");
+    }
+
+    /// Zero-fill the pair-ring slot for a duplicated ring slot (stream
+    /// priming or end-of-stream flush). No-op unless `Chained`
+    /// estimation is active.
+    fn zero_pair_slot_for_duplicate(&self) {
+        let Some(mc) = self.mc_ctx.as_ref() else {
+            return;
+        };
+        if !self.is_chained() {
+            return;
+        }
+        let pair_ring = self
+            .pair_ring_buf
+            .as_ref()
+            .expect("pair_ring allocated when Chained is active");
+        let pair_slot = self.pair_slot(0);
+        motion::zero_pair_slot::<R>(&self.client, mc, pair_ring, pair_slot);
+    }
+
+    /// Queue the Immerkær noise estimate for `slot` on the input ring.
+    /// No-op unless auto noise estimation is active. The read of these
+    /// results normally happens later in [`Self::denoise_submit`], once
+    /// `slot` reaches the centre of the temporal window. The stream's
+    /// very first frame also gets an immediate read, see
+    /// [`Self::seed_noise_estimate_if_first_frame`].
+    fn run_noise_estimate_for_slot(&self, slot: u32) {
+        let (Some(partials_buf), Some(results_buf)) =
+            (self.noise_partials.as_ref(), self.noise_results.as_ref())
+        else {
+            return;
+        };
+
+        let stride = noise_partials_slot_stride_bytes(self.width, self.height);
+        let partials_slot = partials_buf.clone().offset_start((slot as u64) * stride);
+
+        let ctx = NoiseCtx {
+            width: self.width,
+            height: self.height,
+            channels: self.params.channels.count(),
+            stored_ch: self.params.channels.storage_count(),
+            frame_count: self.params.total_frames(),
+            frame: slot,
+            slot,
+            input_buf: &self.input_buf,
+            partials_buf: &partials_slot,
+            results_buf,
+        };
+
+        run_noise_estimate::<R>(&self.client, &ctx).expect("noise estimate dispatch failed");
+    }
+
+    /// Queue the temporal-residual noise-stats kernel for `slot`,
+    /// diffing it against the ring's immediately preceding physical
+    /// slot. No-op unless the temporal estimator is active
+    /// (`temporal_stats_buf` allocated), and for the very first frame
+    /// of a stream (`ring_head == 0`), which has no predecessor to
+    /// diff against — mirrors [`Self::run_pair_analyse_for_slot`]'s
+    /// same gate. The centre slot's stats are read back and aggregated
+    /// later in [`Self::update_noise_estimate`].
+    fn run_temporal_stats_for_slot(&self, slot: u32) {
+        let Some(stats_buf) = self.temporal_stats_buf.as_ref() else {
+            return;
+        };
+        if self.ring_head == 0 {
+            return;
+        }
+
+        let total_frames = self.params.total_frames();
+        let slot_prev = (slot + total_frames - 1) % total_frames;
+
+        let ctx = TemporalStatsCtx {
+            width: self.width,
+            height: self.height,
+            stored_ch: self.params.channels.storage_count(),
+            frame_count: total_frames,
+            slot_new: slot,
+            slot_prev,
+            input_buf: &self.input_buf,
+            stats_buf,
+        };
+
+        run_temporal_noise_stats::<R>(&self.client, &ctx).expect("temporal noise stats dispatch failed");
+    }
+
+    /// Zero-fill the duplicated slot's temporal-stats region. A
+    /// duplicate mirrors its predecessor's pixels exactly, so a real
+    /// diff against it would just recompute an all-zero record; this
+    /// is the cheaper equivalent. No-op unless the temporal estimator
+    /// is active.
+    fn zero_temporal_stats_for_slot(&self, slot: u32) {
+        let Some(stats_buf) = self.temporal_stats_buf.as_ref() else {
+            return;
+        };
+        zero_temporal_stats_slot::<R>(
+            &self.client,
+            stats_buf,
+            self.width,
+            self.height,
+            self.params.channels.storage_count(),
+            slot,
+        );
+    }
+
+    /// One-time σ bootstrap for the very first frame of a stream. Auto
+    /// noise estimation normally updates `h2_inv_norm` / `noise_offset`
+    /// / `input_noise_offset` from [`Self::update_noise_estimate`] at
+    /// submit time, but any push-time GPU work that reads them (the
+    /// nlm-spatial pilot) runs before the first submit ever happens.
+    /// Without this, that work would run on the absolute-strength
+    /// fallback set at construction for every frame up to the first
+    /// submit. One blocking read of the estimate this push just queued
+    /// for `slot` fixes that from frame one onward. Detects "first
+    /// frame of the stream" from `frames_loaded`, the same counter
+    /// [`Self::prime_leading_edge_if_first`] checks, but reads it here
+    /// before [`Self::advance_ring`] increments it, and applies for
+    /// every `temporal_radius` rather than only when priming happens.
+    /// The first submit's [`Self::update_noise_estimate`] folds the
+    /// same frame's estimate into the EMA a second time, which only
+    /// reproduces this seed's values up to floating-point rounding,
+    /// not bit-exactly.
+    fn seed_noise_estimate_if_first_frame(&mut self, slot: u32) {
+        if self.frames_loaded != 0 {
+            return;
+        }
+        let Some(results_buf) = self.noise_results.as_ref() else {
+            return;
+        };
+
+        let bytes = self
+            .client
+            .read_one(results_buf.clone())
+            .expect("noise-estimate seed readback failed");
+        let data = f32::from_bytes(&bytes);
+
+        // The stream's first frame has no predecessor, so
+        // `run_temporal_stats_for_slot` never ran for it (see its
+        // `ring_head == 0` gate) and this slot's stats region is
+        // unwritten. Seed from Immerkær alone, exactly as before the
+        // temporal estimator existed.
+        let imm_low = self
+            .read_noise_partials_low(slot)
+            .expect("noise-partials seed readback failed");
+        self.fold_noise_estimate(data, slot as usize, None, imm_low);
+    }
+
+    /// Fold one physical ring slot's already-read-back noise totals
+    /// into the median and low chains' EMAs and recompute the filter
+    /// parameters derived from them (`h2_inv_norm`, `noise_offset`,
+    /// `input_noise_offset`, `sigma_y`). Shared by
+    /// [`Self::seed_noise_estimate_if_first_frame`] and
+    /// [`Self::update_noise_estimate`], which differ in how they obtain
+    /// `data`/`temporal`/`imm_low` and which slot they pass in.
+    ///
+    /// Both chains start from an Immerkær read of `data`, maxed with a
+    /// temporal-residual read when `temporal` carries a sample — the
+    /// temporal residual estimator sees correlated grain the Immerkær
+    /// mask underestimates, but scarce static content (motion, scene
+    /// changes) makes its sample unreliable, so it can only push either
+    /// chain's estimate up, never down. The two chains differ only in
+    /// which statistic they read at each step. The median chain reads
+    /// `data`'s frame-mean Immerkær total and `temporal.sigma`'s
+    /// per-block median, while the low chain reads `imm_low` (Immerkær's
+    /// own block-p25) and `temporal.sigma_low`'s per-block lower
+    /// quartile. `noise_offset` weighs patch distances quadratically in
+    /// sigma, so an over-read there is destructive to fine texture, and
+    /// the low chain's conservative statistics keep it from over-reading
+    /// on shots where texture leaks into the temporal residuals. The
+    /// strength and confidence floor keep the median chain instead,
+    /// since that's what the dark-footage calibration validated.
+    ///
+    /// The temporal sample's `rho` also folds into `rho_smoothed`, the
+    /// spatial-offset LUT's attenuation input, once regardless of which
+    /// chain reads it. The first fold of a stream sets it directly from
+    /// `sample.rho` instead of blending with an assumed 0, the same
+    /// convention `NoiseEstimator` uses for its own first sample.
+    /// `rho_smoothed` stays unset for the fast path and a fixed
+    /// `sigma_override`, since `temporal` is always `None` there.
+    fn fold_noise_estimate(
+        &mut self,
+        data: &[f32],
+        slot: usize,
+        temporal: Option<TemporalNoiseSample>,
+        imm_low: [f32; 3],
+    ) {
+        let channels = self.params.channels.count() as usize;
+        let base = slot * 4;
+
+        let mut raw = [0.0f32; 3];
+        for (c, s) in raw.iter_mut().enumerate().take(channels) {
+            *s = sigma_from_abs_sum(data[base + c], self.width, self.height);
+        }
+        let mut raw_low = imm_low;
+
+        if let Some(sample) = temporal {
+            let factor = correlation_factor(sample.rho);
+            for c in 0..channels {
+                raw[c] = raw[c].max(sample.sigma[c] * factor);
+                raw_low[c] = raw_low[c].max(sample.sigma_low[c] * factor);
+            }
+            self.rho_smoothed = Some(match self.rho_smoothed {
+                None => sample.rho,
+                Some(prev) => EMA_ALPHA * sample.rho + (1.0 - EMA_ALPHA) * prev,
+            });
+        }
+
+        // User nudge on the measured noise level. Applied after the
+        // temporal/Immerkær blend and before the EMA fold, so it scales
+        // the smoothed estimate and everything derived from it
+        // (`h2_inv_norm`, `noise_offset`, `sigma_y`). Only reached when
+        // `sigma_override` is `None` (see `auto_noise` at construction),
+        // so `self.params.hq` is always `Some` here.
+        let sigma_scale = self.params.hq.map_or(1.0, |hq| hq.sigma_scale);
+        for c in 0..channels {
+            raw[c] *= sigma_scale;
+            raw_low[c] *= sigma_scale;
+        }
+
+        let updated = self.noise_estimator.update(&raw[..channels]);
+        let mut smoothed = [0.0f32; 3];
+        smoothed[..channels].copy_from_slice(updated);
+
+        let updated_low = self.noise_estimator_low.update(&raw_low[..channels]);
+        let mut smoothed_low = [0.0f32; 3];
+        smoothed_low[..channels].copy_from_slice(updated_low);
+
+        let eff = sigma_eff(&smoothed[..channels], self.params.channels);
+        self.h2_inv_norm = self.params.h2_inv_norm_with(Some(eff));
+        self.input_noise_offset = self.params.noise_offset_with(Some(&smoothed_low[..channels]));
+        self.noise_offset = match self.params.prefilter {
+            PrefilterMode::NlmSpatial { .. } => 0.0,
+            _ => self.input_noise_offset,
+        };
+        // Channel 0 is whatever motion estimation already treats as
+        // luma (see `nlm_mc_extract_luma`), so the confidence floor
+        // uses the median chain's same-plane noise estimate.
+        self.sigma_y = smoothed[0];
     }
 
     fn advance_ring(&mut self) {
@@ -422,17 +1034,37 @@ impl<R: Runtime> NlmDenoiser<R> {
             .offset_start((last_slot as u64) * bytes_per_slot);
         self.copy_frame_into_slot(&self.input_buf.clone(), &input_src, next_slot);
 
-        if let Some(reference_buf) = self.reference_buf.clone() {
+        // Skipped for `NlmSpatial`: the pilot dispatch below recomputes
+        // this slot's reference from scratch, so the byte copy would
+        // just be overwritten immediately.
+        if !matches!(self.params.prefilter, PrefilterMode::NlmSpatial { .. })
+            && let Some(reference_buf) = self.reference_buf.clone()
+        {
             let ref_src = reference_buf
                 .clone()
                 .offset_start((last_slot as u64) * bytes_per_slot);
             self.copy_frame_into_slot(&reference_buf, &ref_src, next_slot);
         }
 
-        // Keep the motion-estimation pyramid for the duplicated slot
-        // in lockstep so a subsequent denoise sees a valid pyramid for
-        // every ring slot it visits.
+        // Keep the motion-estimation pyramid and noise estimate for the
+        // duplicated slot in lockstep so a subsequent denoise sees valid
+        // state for every ring slot it visits, not whatever an older
+        // frame left behind at this physical position. The nlm-spatial
+        // pilot needs the same treatment, otherwise the duplicated
+        // slot's reference would keep whatever an older frame at this
+        // physical position last wrote there.
+        if let PrefilterMode::NlmSpatial { strength_scale } = self.params.prefilter {
+            self.run_nlm_spatial_pilot(next_slot as u32, strength_scale)
+                .expect("nlm spatial pilot dispatch failed");
+        }
         self.build_pyramids_for_slot(next_slot as u32);
+        self.build_confidence_pyramid_for_slot(next_slot as u32);
+        self.run_noise_estimate_for_slot(next_slot as u32);
+        self.zero_temporal_stats_for_slot(next_slot as u32);
+        // Runs before `ring_head` advances, so `pair_slot(0)` reads the
+        // same pre-advance `ring_head` as `run_pair_analyse_for_slot`
+        // (see `Self::pair_slot`).
+        self.zero_pair_slot_for_duplicate();
 
         self.ring_head += 1;
     }
@@ -455,6 +1087,11 @@ impl<R: Runtime> NlmDenoiser<R> {
         if self.frames_loaded < total_frames {
             return Ok(None);
         }
+
+        if self.noise_results.is_some() {
+            self.update_noise_estimate()?;
+        }
+        self.rebuild_spatial_offset_lut();
 
         let slot = self.next_output_slot;
         self.next_output_slot = (slot + 1) % self.outputs.len();
@@ -480,6 +1117,116 @@ impl<R: Runtime> NlmDenoiser<R> {
             pixels,
             _marker: PhantomData,
         }))
+    }
+
+    /// Refresh `h2_inv_norm` / `noise_offset` from the centre slot's
+    /// noise estimate. The centre slot's estimate was queued
+    /// `temporal_radius` pushes earlier (see
+    /// [`Self::run_noise_estimate_for_slot`]), so this blocking read
+    /// lands on work the GPU already finished instead of stalling the
+    /// pipeline behind a fresh dispatch.
+    fn update_noise_estimate(&mut self) -> Result<(), anyhow::Error> {
+        let results_buf = self
+            .noise_results
+            .as_ref()
+            .expect("noise_results allocated when auto noise is active")
+            .clone();
+
+        let bytes = self
+            .client
+            .read_one(results_buf)
+            .map_err(|e| anyhow::anyhow!("noise-estimate results readback failed: {e}"))?;
+        let data = f32::from_bytes(&bytes);
+
+        let center_t = self.params.temporal_radius;
+        let center_slot = self.phys_frame(center_t as i32) as usize;
+
+        let temporal = self.read_temporal_noise_sample(center_slot as u32)?;
+        let imm_low = self.read_noise_partials_low(center_slot as u32)?;
+
+        self.fold_noise_estimate(data, center_slot, temporal, imm_low);
+
+        Ok(())
+    }
+
+    /// Reads back one ring slot's stage-1 noise partials and reduces
+    /// them to the low chain's per-channel block-p25 Immerkær estimate.
+    /// Slices the shared ring handle by byte offset so the transfer is
+    /// proportional to one slot instead of the whole ring, mirroring
+    /// [`read_temporal_stats_slot`].
+    fn read_noise_partials_low(&self, slot: u32) -> Result<[f32; 3], anyhow::Error> {
+        let partials_buf = self
+            .noise_partials
+            .as_ref()
+            .expect("noise_partials allocated when auto noise is active");
+
+        let slot_len_bytes = partials_len(self.width, self.height) as u64 * size_of::<f32>() as u64;
+        let stride = noise_partials_slot_stride_bytes(self.width, self.height);
+        let total_bytes = self.params.total_frames() as u64 * stride;
+        let start = (slot as u64) * stride;
+        let end_trim = total_bytes - start - slot_len_bytes;
+
+        let sliced = partials_buf.clone().offset_start(start).offset_end(end_trim);
+        let bytes = self
+            .client
+            .read_one(sliced)
+            .map_err(|e| anyhow::anyhow!("noise partials readback failed: {e}"))?;
+        let data = f32::from_bytes(&bytes);
+
+        Ok(sigma_block_p25_from_partials(
+            data,
+            self.params.channels.count(),
+            self.width,
+            self.height,
+        ))
+    }
+
+    /// Reads back and aggregates the centre slot's temporal-residual
+    /// stats. `None` when the temporal estimator is inactive
+    /// (`temporal_stats_buf` unallocated: `temporal_radius == 0` or a
+    /// fixed `sigma_override`) or when aggregation itself falls back
+    /// (see [`aggregate_temporal_noise_stats`]).
+    fn read_temporal_noise_sample(&self, slot: u32) -> Result<Option<TemporalNoiseSample>, anyhow::Error> {
+        let Some(stats_buf) = self.temporal_stats_buf.as_ref() else {
+            return Ok(None);
+        };
+
+        let stored_ch = self.params.channels.storage_count();
+        let channels = self.params.channels.count();
+        let frame_count = self.params.total_frames();
+
+        let records = read_temporal_stats_slot::<R>(
+            &self.client,
+            stats_buf,
+            self.width,
+            self.height,
+            stored_ch,
+            frame_count,
+            slot,
+        )?;
+
+        Ok(aggregate_temporal_noise_stats(
+            &records,
+            channels,
+            stored_ch,
+            self.width,
+            self.height,
+        ))
+    }
+
+    /// Rebuilds `spatial_offset_lut` from the current `noise_offset`
+    /// and `rho_smoothed`. Called once per `denoise_submit`, after
+    /// `noise_offset` has been refreshed for this submit (when auto
+    /// estimation is active) so the LUT and the scalar it's derived
+    /// from never disagree. The rebuild is cheap, at most
+    /// `(2*8+1)^2` floats.
+    fn rebuild_spatial_offset_lut(&mut self) {
+        let lut = build_spatial_offset_lut(
+            self.params.search_radius,
+            self.rho_smoothed.unwrap_or(0.0),
+            self.noise_offset,
+        );
+        self.spatial_offset_lut = self.client.create_from_slice(f32::as_bytes(&lut));
     }
 
     /// Synchronous convenience wrapper: submits + immediately waits.
@@ -559,11 +1306,19 @@ impl<R: Runtime> NlmDenoiser<R> {
 
     /// Reset stream-tracking indices so the next `push_frame` begins a
     /// fresh temporal stream. GPU buffers are intentionally not cleared.
+    /// `pair_ring_buf` relies on the same write-before-read convention as
+    /// the pyramid and noise-estimate buffers. A fresh stream's first
+    /// pushes fully overwrite every slot they touch before anything
+    /// reads it back, so leftover content from the previous stream is
+    /// never observed.
     pub(crate) fn reset_stream_state(&mut self) {
         self.ring_head = 0;
         self.frames_loaded = 0;
         self.next_output_slot = 0;
         self.real_pushes = 0;
+        self.noise_estimator.reset();
+        self.noise_estimator_low.reset();
+        self.rho_smoothed = None;
     }
 
     /// Physical slot of logical frame 0 (oldest frame in the window).
@@ -579,5 +1334,33 @@ impl<R: Runtime> NlmDenoiser<R> {
         let total_frames = self.params.total_frames() as i32;
         let wrapped = logical.rem_euclid(total_frames);
         ((self.ring_start() as i32 + wrapped).rem_euclid(total_frames)) as u32
+    }
+
+    /// Pair-ring slot for the gap between window-relative logical
+    /// frames `gap_index` and `gap_index + 1`. Reduces the current
+    /// `ring_head`, the monotonic count of frames pushed so far
+    /// (including duplicates), by `2 * temporal_radius` instead of the
+    /// `total_frames` modulus `Self::phys_frame` uses for the frame
+    /// ring.
+    ///
+    /// Called two ways that resolve to the same slot for the same
+    /// physical pair. At push time, with `gap_index = 0` and the
+    /// pre-advance `ring_head` (the generation of the frame just
+    /// written), it gives the slot that frame's pair with its
+    /// immediate predecessor belongs in. At compose time, with the
+    /// post-push `ring_head` and `gap_index` measured from the
+    /// window's centre, it gives the slot a past push already wrote
+    /// to. The two calls only differ in how far `ring_head` has
+    /// advanced since the pair was created, and `gap_index` exactly
+    /// offsets that advance, so `ring_head + gap_index` lands on the
+    /// same value mod `2 * temporal_radius` either way.
+    pub(super) fn pair_slot(&self, gap_index: i32) -> u32 {
+        let radius = self.params.temporal_radius as i32;
+        debug_assert!(
+            radius > 0,
+            "pair ring is only meaningful when temporal_radius > 0"
+        );
+        let n = 2 * radius;
+        ((self.ring_head as i32 + gap_index).rem_euclid(n)) as u32
     }
 }

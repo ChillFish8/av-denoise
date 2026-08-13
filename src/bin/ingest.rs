@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use av_denoise::accelerate::Accelerator;
 use av_denoise::{
+    Algorithm,
     ChannelMode,
     Denoiser,
     DenoiserError,
@@ -103,8 +104,11 @@ pub struct CliOptions {
     pub device: Device,
     pub intent: BinaryChannelIntent,
     pub mode: DenoisingMode,
-    pub prefilter: PrefilterMode,
+    /// `None` means no prefilter is applied by default.
+    pub prefilter: Option<PrefilterMode>,
     pub motion_compensation: MotionCompensationMode,
+    /// Which denoising algorithm variant to run.
+    pub algorithm: Algorithm,
     pub nlm_tuning: Option<NlmTuning>,
     /// Per-plane strength override for the luma denoiser. Takes
     /// precedence over `nlm_tuning.strength` when set.
@@ -112,6 +116,8 @@ pub struct CliOptions {
     /// Per-plane strength override for the chroma denoiser. Takes
     /// precedence over `nlm_tuning.strength` when set.
     pub chroma_strength: Option<f32>,
+    /// Draws the denoising progress bar for file input.
+    pub progress: bool,
 }
 
 impl CliOptions {
@@ -119,8 +125,9 @@ impl CliOptions {
         let b = DenoiserOptions::builder()
             .channel_mode(channels)
             .mode(self.mode)
-            .prefilter(self.prefilter)
-            .motion_compensation(self.motion_compensation);
+            .maybe_prefilter(self.prefilter)
+            .motion_compensation(self.motion_compensation)
+            .algorithm(self.algorithm);
 
         let strength_override = match channels {
             ChannelMode::Luma => self.luma_strength,
@@ -147,6 +154,20 @@ impl CliOptions {
             Some(t) => b.nlm(t).build(),
             None => b.build(),
         }
+    }
+}
+
+/// Interpret the result of a `WorkerDenoiser::push` call against the
+/// `push`-then-drain-then-retry dance both `file_mode.rs` and
+/// `stream_mode.rs` use. `Ok(true)` means the queue was full and the
+/// caller should drain one output and push again. `Ok(false)` means the
+/// push already landed. Any error other than `QueueFull` propagates
+/// instead of being discarded.
+pub fn push_needs_retry(result: Result<(), DenoiserError>) -> Result<bool, anyhow::Error> {
+    match result {
+        Ok(()) => Ok(false),
+        Err(DenoiserError::QueueFull) => Ok(true),
+        Err(other) => Err(other.into()),
     }
 }
 
@@ -234,8 +255,30 @@ impl WorkerDenoiser {
         })
     }
 
-    /// Push one planar frame. On `QueueFull` the caller should `recv` first
-    /// and retry; the error propagates upwards unchanged.
+    /// Push one planar frame. On `QueueFull` the caller should `recv` first.
+    /// Then it should retry the whole call. Any other error propagates
+    /// upwards unchanged.
+    ///
+    /// The fallible half's `push_frame` runs before either passthrough
+    /// queue is touched, so a `QueueFull` retry re-attempts the entire
+    /// frame cleanly instead of double-queuing the disabled side's plane.
+    ///
+    /// In `LumaChroma` mode both `luma` and `chroma` are real `Denoiser`s,
+    /// each with its own `push_frame`/`recv_frame`. A `QueueFull` retry
+    /// re-calls `push_frame` on whichever half already succeeded this
+    /// call, which would duplicate that half's frame if the two
+    /// `Denoiser`s could ever be at different fill levels. They can't be.
+    /// Both are built from the same `opts.mode`, so they share the same
+    /// temporal radius and the same `MAX_PENDING` ceiling. Every
+    /// successful `push`/`recv` advances both by exactly one frame in
+    /// lockstep, and a failed `push` advances neither, since the
+    /// `QueueFull` check runs before any state changes. So `luma` and
+    /// `chroma` always enter this function with identical
+    /// `(frames_pushed, pending.len())`, which means the `QueueFull`
+    /// check inside `push_frame` evaluates identically for both. If
+    /// `luma` above succeeds, `chroma` is guaranteed to succeed too. A
+    /// `QueueFull` on `chroma` after a successful `luma` push is
+    /// therefore unreachable, and retrying is safe.
     pub fn push(&mut self, planes: &Planes) -> Result<(), DenoiserError> {
         if let Some(d) = self.yuv.as_mut() {
             let buf = interleave_yuv_to_f32(&planes.y, &planes.u, &planes.v);
@@ -246,14 +289,18 @@ impl WorkerDenoiser {
         if let Some(d) = self.luma.as_mut() {
             let buf = u8_plane_to_f32(&planes.y);
             d.push_frame(&buf)?;
-        } else {
-            self.luma_passthrough.push_back(planes.y.clone());
         }
 
         if let Some(d) = self.chroma.as_mut() {
             let buf = interleave_uv_to_f32(&planes.u, &planes.v);
             d.push_frame(&buf)?;
-        } else {
+        }
+
+        if self.luma.is_none() {
+            self.luma_passthrough.push_back(planes.y.clone());
+        }
+
+        if self.chroma.is_none() {
             self.chroma_passthrough
                 .push_back((planes.u.clone(), planes.v.clone()));
         }
@@ -468,6 +515,315 @@ fn unpack_uv_from_f32(packed: &[f32], chroma_pixels: usize) -> (Vec<u8>, Vec<u8>
     (u, v)
 }
 
+#[cfg(test)]
+mod cli_options_tests {
+    use av_denoise::HqParams;
+    use av_denoise::nlmeans::NlmParams;
+
+    use super::*;
+
+    /// A `CliOptions` with every field at a neutral default, so each test
+    /// only needs to override what it cares about. `mode`/`algorithm` are
+    /// the two fields every test below sets explicitly.
+    fn base_opts(
+        mode: DenoisingMode,
+        algorithm: Algorithm,
+        nlm_tuning: Option<NlmTuning>,
+        luma_strength: Option<f32>,
+        chroma_strength: Option<f32>,
+    ) -> CliOptions {
+        CliOptions {
+            accelerators: vec![],
+            device: Device::Default,
+            intent: BinaryChannelIntent::LumaChroma,
+            mode,
+            prefilter: None,
+            motion_compensation: MotionCompensationMode::None,
+            algorithm,
+            nlm_tuning,
+            luma_strength,
+            chroma_strength,
+            progress: false,
+        }
+    }
+
+    #[test]
+    fn luma_strength_alone_overrides_only_the_luma_plane() {
+        let opts = base_opts(DenoisingMode::Spacial, Algorithm::Nlmeans, None, Some(0.7), None);
+
+        let luma = opts.denoiser_options(ChannelMode::Luma);
+        let chroma = opts.denoiser_options(ChannelMode::Chroma);
+
+        assert!(
+            matches!(luma.nlm, Some(NlmTuning { strength: Some(s), .. }) if (s - 0.7).abs() < f32::EPSILON),
+            "expected luma NlmTuning.strength = Some(0.7), got {:?}",
+            luma.nlm
+        );
+        assert!(
+            chroma.nlm.is_none(),
+            "chroma plane should carry no override so the table default applies, got {:?}",
+            chroma.nlm
+        );
+    }
+
+    #[test]
+    fn both_per_plane_strengths_set_independently() {
+        let opts = base_opts(
+            DenoisingMode::Spacial,
+            Algorithm::Nlmeans,
+            None,
+            Some(0.7),
+            Some(0.3),
+        );
+
+        let luma = opts.denoiser_options(ChannelMode::Luma);
+        let chroma = opts.denoiser_options(ChannelMode::Chroma);
+
+        assert!(
+            matches!(luma.nlm, Some(NlmTuning { strength: Some(s), .. }) if (s - 0.7).abs() < f32::EPSILON),
+            "expected luma NlmTuning.strength = Some(0.7), got {:?}",
+            luma.nlm
+        );
+        assert!(
+            matches!(chroma.nlm, Some(NlmTuning { strength: Some(s), .. }) if (s - 0.3).abs() < f32::EPSILON),
+            "expected chroma NlmTuning.strength = Some(0.3), got {:?}",
+            chroma.nlm
+        );
+    }
+
+    #[test]
+    fn no_overrides_hq_resolves_through_to_nlm_params_to_the_measured_tables() {
+        // Radius 4 in the measured tables is luma 0.35 and chroma
+        // 0.70 (see the table docs in `src/nlmeans/params.rs`).
+        let opts = base_opts(
+            DenoisingMode::Temporal { radius: 4 },
+            Algorithm::NlmeansHq(HqParams::default()),
+            None,
+            None,
+            None,
+        );
+
+        let luma_params: NlmParams = opts.denoiser_options(ChannelMode::Luma).to_nlm_params();
+        let chroma_params: NlmParams = opts.denoiser_options(ChannelMode::Chroma).to_nlm_params();
+
+        assert!(
+            (luma_params.strength - 0.35).abs() < f32::EPSILON,
+            "expected luma strength 0.35 at r4, got {}",
+            luma_params.strength
+        );
+        assert!(
+            (chroma_params.strength - 0.70).abs() < f32::EPSILON,
+            "expected chroma strength 0.70 at r4, got {}",
+            chroma_params.strength
+        );
+    }
+}
+
+#[cfg(test)]
+mod passthrough_retry_tests {
+    use av_denoise::accelerate::Accelerator;
+    use av_denoise::{Algorithm, DenoisingMode};
+
+    use super::*;
+
+    /// Chroma-only intent so `luma` is the disabled, passthrough half and
+    /// `chroma` is the fallible one whose `QueueFull` drives the retry
+    /// dance in `push_with_drain`/`stream_mode.rs`.
+    fn chroma_only_opts() -> CliOptions {
+        CliOptions {
+            accelerators: vec![Accelerator::Vulkan],
+            device: Device::Default,
+            intent: BinaryChannelIntent::Chroma,
+            mode: DenoisingMode::Spacial,
+            prefilter: None,
+            motion_compensation: MotionCompensationMode::None,
+            algorithm: Algorithm::Nlmeans,
+            nlm_tuning: None,
+            luma_strength: None,
+            chroma_strength: None,
+            progress: false,
+        }
+    }
+
+    fn fake_planes(layout: FrameLayout) -> Planes {
+        let (cw, ch) = layout.chroma_dims();
+        let chroma_pixels = (cw * ch) as usize;
+
+        Planes {
+            y: vec![128u8; layout.luma_pixels()],
+            u: vec![128u8; chroma_pixels],
+            v: vec![128u8; chroma_pixels],
+        }
+    }
+
+    #[test]
+    fn queue_full_retry_does_not_double_queue_the_passthrough_plane() {
+        let layout = FrameLayout {
+            width: 16,
+            height: 16,
+            subsampling: Subsampling::Yuv420,
+        };
+        let mut wd =
+            WorkerDenoiser::create(&chroma_only_opts(), layout).expect("denoiser construction failed");
+        let planes = fake_planes(layout);
+
+        // Spatial mode's depth-2 pipeline: the first two pushes land
+        // directly (see `push_after_pending_returns_queue_full` in
+        // `src/denoiser.rs`).
+        wd.push(&planes).expect("first push should land");
+        wd.push(&planes).expect("second push should land");
+
+        // Third push hits QueueFull on the chroma half.
+        let err = wd.push(&planes).expect_err("expected QueueFull");
+        assert!(
+            matches!(err, DenoiserError::QueueFull),
+            "expected QueueFull, got {err:?}"
+        );
+
+        // Mirror `push_with_drain`'s retry dance: drain one output, then
+        // retry the whole `push()` call for the same frame.
+        wd.recv().expect("recv after drain failed");
+        wd.push(&planes).expect("retry push should land after drain");
+
+        // 3 real frames were ever accepted by the chroma denoiser (2
+        // direct + 1 on retry); 1 was popped by `recv`. The disabled
+        // luma half's passthrough queue must track that 1:1, not double
+        // count the frame whose first attempt failed with `QueueFull`.
+        assert_eq!(
+            wd.luma_passthrough.len(),
+            2,
+            "expected exactly one passthrough entry per chroma frame actually accepted, got {}",
+            wd.luma_passthrough.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod lumachroma_lockstep_tests {
+    use av_denoise::accelerate::Accelerator;
+    use av_denoise::{Algorithm, DenoisingMode};
+
+    use super::*;
+
+    /// Both `luma` and `chroma` real `Denoiser`s, spatial mode so a
+    /// uniform-valued plane round-trips unchanged (see
+    /// `uniform_*_passthrough` in `src/nlmeans/tests`), letting the test
+    /// use distinct marker values per plane to detect a desync.
+    fn luma_chroma_opts() -> CliOptions {
+        CliOptions {
+            accelerators: vec![Accelerator::Vulkan],
+            device: Device::Default,
+            intent: BinaryChannelIntent::LumaChroma,
+            mode: DenoisingMode::Spacial,
+            prefilter: None,
+            motion_compensation: MotionCompensationMode::None,
+            algorithm: Algorithm::Nlmeans,
+            nlm_tuning: None,
+            luma_strength: None,
+            chroma_strength: None,
+            progress: false,
+        }
+    }
+
+    /// A uniform-valued frame whose luma and chroma planes each encode
+    /// `idx` via a different formula, so a desynced pair (luma from one
+    /// push, chroma from another) is detectable after the round trip.
+    fn marked_planes(layout: FrameLayout, idx: u8) -> Planes {
+        let (cw, ch) = layout.chroma_dims();
+        let chroma_pixels = (cw * ch) as usize;
+        let y_val = 10 + idx;
+        let uv_val = 200 - idx;
+
+        Planes {
+            y: vec![y_val; layout.luma_pixels()],
+            u: vec![uv_val; chroma_pixels],
+            v: vec![uv_val; chroma_pixels],
+        }
+    }
+
+    #[test]
+    fn queue_full_retries_never_desync_luma_and_chroma() {
+        let layout = FrameLayout {
+            width: 16,
+            height: 16,
+            subsampling: Subsampling::Yuv420,
+        };
+        let mut wd =
+            WorkerDenoiser::create(&luma_chroma_opts(), layout).expect("denoiser construction failed");
+
+        // More pushes than the depth-2 pipeline holds, so this drives
+        // several `QueueFull`-then-retry cycles.
+        const N: u8 = 6;
+        let mut outputs: Vec<Planes> = Vec::new();
+
+        for idx in 0..N {
+            let planes = marked_planes(layout, idx);
+
+            // Mirror `push_with_drain`'s retry dance exactly: the same
+            // sequence `file_mode.rs`/`stream_mode.rs` drive in production.
+            if push_needs_retry(wd.push(&planes)).expect("push_needs_retry") {
+                if let Some(out) = wd.recv().expect("recv failed") {
+                    outputs.push(out);
+                }
+
+                wd.push(&planes).expect("retry push should land after drain");
+            }
+        }
+
+        wd.flush(|out| outputs.push(out)).expect("flush failed");
+
+        assert_eq!(
+            outputs.len(),
+            N as usize,
+            "expected exactly one output frame per input frame, got {}",
+            outputs.len()
+        );
+
+        for out in &outputs {
+            let y_val = out.y[0];
+            let uv_val = out.u[0];
+            let idx_from_y = y_val - 10;
+            let idx_from_uv = 200 - uv_val;
+
+            assert_eq!(
+                idx_from_y, idx_from_uv,
+                "luma marker {y_val} (frame {idx_from_y}) and chroma marker {uv_val} \
+                 (frame {idx_from_uv}) disagree; luma and chroma pushes have desynced"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod push_needs_retry_tests {
+    use super::*;
+
+    #[test]
+    fn ok_means_no_retry() {
+        let outcome = push_needs_retry(Ok(())).expect("Ok(()) must not itself error");
+        assert!(!outcome, "a landed push must not ask the caller to retry");
+    }
+
+    #[test]
+    fn queue_full_signals_retry() {
+        let outcome =
+            push_needs_retry(Err(DenoiserError::QueueFull)).expect("QueueFull must not itself error");
+        assert!(outcome, "QueueFull must still trigger the retry-after-drain path");
+    }
+
+    #[test]
+    fn non_queue_full_errors_propagate_instead_of_being_swallowed() {
+        let synthetic = DenoiserError::Other(anyhow::anyhow!("synthetic readback failure"));
+
+        let outcome = push_needs_retry(Err(synthetic));
+
+        assert!(
+            outcome.is_err(),
+            "a non-QueueFull push error must propagate instead of being silently treated as success"
+        );
+    }
+}
+
 /// Map our [`Subsampling`] enum onto the y4m [`y4m::Colorspace`] used for
 /// both reading the input and writing the output header.
 pub fn subsampling_to_y4m(s: Subsampling) -> y4m::Colorspace {
@@ -488,4 +844,19 @@ pub fn subsampling_from_y4m(c: y4m::Colorspace) -> Result<Subsampling, anyhow::E
         y4m::Colorspace::C444 => Ok(Subsampling::Yuv444),
         other => anyhow::bail!("unsupported y4m colorspace {other:?}; need 4:2:0, 4:2:2, or 4:4:4 8-bit"),
     }
+}
+
+/// Pull the `X`-prefixed vendor extension params (e.g. `XCOLORRANGE=LIMITED`)
+/// out of a decoded y4m header's raw params bytes, stripped of their
+/// leading `X` and ready for [`y4m::EncoderBuilder::append_vendor_extension`],
+/// which re-adds the `X` itself when it writes the output header. Used to
+/// forward whatever colorspace/range tags the source declared instead of
+/// silently dropping them. Tokens that fail [`y4m::VendorExtensionString`]
+/// validation (an embedded space) are skipped rather than failing the run.
+pub fn y4m_vendor_extensions(raw_params: &[u8]) -> Vec<y4m::VendorExtensionString> {
+    raw_params
+        .split(|&b| b == b' ')
+        .filter(|tok| tok.first() == Some(&b'X'))
+        .filter_map(|tok| y4m::VendorExtensionString::new(tok[1..].to_vec()).ok())
+        .collect()
 }

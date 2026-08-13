@@ -8,6 +8,7 @@ use super::helpers::{
     line_sum_sq,
     read_clamped_line,
     read_line,
+    welsch_weight,
 };
 
 /// Per-pixel squared distance for the `+q` / `−q` pair. Writes both
@@ -169,12 +170,13 @@ pub fn nlm_horizontal_sum(
 }
 
 /// Vertical 1D box filter (height = 2·patch_radius + 1) over the
-/// hsum buffer, followed by the Welsch weight `exp(−sum · h2_inv_norm)`.
+/// hsum buffer, followed by the Welsch weight from `welsch_weight`.
 #[cube(launch_unchecked)]
 pub fn nlm_vertical_weight(
     input: &Array<f32>,
     output: &mut Array<f32>,
     h2_inv_norm: f32,
+    noise_offset: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] patch_radius: u32,
@@ -215,7 +217,7 @@ pub fn nlm_vertical_weight(
     for offset_y in 0..patch_size {
         sum += smem[((local_y + offset_y) * block_x + local_x) as usize];
     }
-    output[(global_y * width + global_x) as usize] = f32::exp(-sum * h2_inv_norm);
+    output[(global_y * width + global_x) as usize] = welsch_weight(sum, h2_inv_norm, noise_offset);
 }
 
 /// Paired horizontal 1D box filter. The forward and backward hsum
@@ -283,6 +285,13 @@ pub fn nlm_horizontal_sum_pair(
 /// paired-distance separable path. The backward tile is loaded from
 /// `hsum_bwd` at the cube position shifted by `(−q_x, −q_y)` so the
 /// vsum at each thread directly produces the neighbour backward weight.
+///
+/// When `use_confidence` is true, `weight_fwd`/`weight_bwd` are each
+/// multiplied by their block's confidence (`conf_fwd`/`conf_bwd`)
+/// before `accumulate_pair` folds them in, using the same pixel→block
+/// mapping `nlm_mc_warp` uses. When `use_confidence` is false, the
+/// lookup and multiply are skipped entirely at compile time and
+/// `conf_fwd`/`conf_bwd` are never read.
 #[cube(launch_unchecked)]
 pub fn nlm_vweight_pair_accumulate<N: Size>(
     hsum_fwd: &Array<f32>,
@@ -291,16 +300,23 @@ pub fn nlm_vweight_pair_accumulate<N: Size>(
     accum: &mut Array<Vector<f32, N>>,
     weight_sum: &mut Array<f32>,
     max_weight: &mut Array<f32>,
+    conf_fwd: &Array<f32>,
+    conf_bwd: &Array<f32>,
+    #[comptime] use_confidence: bool,
     frame_fwd: u32,
     frame_bwd: u32,
     q_x: i32,
     q_y: i32,
     h2_inv_norm: f32,
+    noise_offset: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] patch_radius: u32,
     #[comptime] block_x: u32,
     #[comptime] block_y: u32,
+    #[comptime] step: u32,
+    #[comptime] blocks_x: u32,
+    #[comptime] blocks_y: u32,
 ) {
     let tile_elems = comptime!(block_x * (block_y + 2 * patch_radius));
     let mut smem_fwd = SharedMemory::<f32>::new(comptime!(block_x * (block_y + 2 * patch_radius)) as usize);
@@ -352,8 +368,16 @@ pub fn nlm_vweight_pair_accumulate<N: Size>(
         sum_bwd += smem_bwd[smem_idx];
     }
 
-    let weight_fwd = f32::exp(-sum_fwd * h2_inv_norm);
-    let weight_bwd = f32::exp(-sum_bwd * h2_inv_norm);
+    let mut weight_fwd = welsch_weight(sum_fwd, h2_inv_norm, noise_offset);
+    let mut weight_bwd = welsch_weight(sum_bwd, h2_inv_norm, noise_offset);
+
+    if use_confidence {
+        let bx = (global_x / step).min(blocks_x - 1);
+        let by = (global_y / step).min(blocks_y - 1);
+        let block_idx = (by * blocks_x + bx) as usize;
+        weight_fwd *= conf_fwd[block_idx];
+        weight_bwd *= conf_bwd[block_idx];
+    }
 
     accumulate_pair(
         input, accum, weight_sum, max_weight, global_x, global_y, q_x, q_y, frame_fwd, frame_bwd, weight_fwd,

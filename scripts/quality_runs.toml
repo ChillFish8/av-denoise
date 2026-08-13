@@ -1,0 +1,190 @@
+input = "./data/bench-sample.mkv"
+workdir = "./data/quality_runs"
+# Frames scored per run. The reference clip is trimmed to this length
+# once and cached, so all runs compare the same segment.
+frames = 240
+seed = 4242
+# ffmpeg `noise` filter `alls` strengths (8-bit amplitude units).
+noise = [8, 16, 28]
+
+# Strength used at each noise level wherever a run says "$strength".
+# A single fixed strength cannot serve every level — 1.0 barely acts
+# above alls≈8, leaving denoised rows indistinguishable from `noisy`.
+[strengths]
+8 = 1.5
+16 = 3.0
+28 = 5.0
+
+# Sigma used at each noise level for the `ffmpeg_bm3d` reference row.
+# These are hand-tuned per-clip peaks found by sweeping sigma against
+# this bench clip, not the true 8-bit noise sigma. FFmpeg's bm3d sigma
+# is not on the true-noise-sigma scale. Peaks landed around 3 to 6
+# times the true sigma and the ratio was not constant across noise
+# levels. This row is a quality reference ceiling, not out-of-box bm3d
+# behavior.
+#
+# These values were swept against an invocation that left `group` at
+# ffmpeg's default of 1, which disables block matching. Collaborative
+# filtering is on now, so these sigmas are no longer known to be the
+# per-clip peak and any `ffmpeg_bm3d` numbers recorded before this
+# comment was added are not comparable to later ones.
+[bm3d_sigmas]
+8 = 15
+16 = 40
+28 = 55
+
+# ---------------------------------------------------------------------------
+# Baseline: the corrupted clip scored against the clean reference. Every
+# denoise variant should beat this row.
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "noisy"
+kind = "noisy"
+
+# ---------------------------------------------------------------------------
+# Current fast mode at increasing capability: spatial, temporal, temporal
+# with motion compensation, and everything on.
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "av_spatial"
+kind = "av-denoise"
+workers = 2
+args = ["--variant", "fast", "--temporal-radius", "0", "--channel-mode", "luma,chroma", "--strength", "$strength"]
+
+[[runs]]
+name = "av_temporal_r2"
+kind = "av-denoise"
+workers = 2
+args = ["--variant", "fast", "--temporal-radius", "2", "--channel-mode", "luma,chroma", "--strength", "$strength"]
+
+[[runs]]
+name = "av_temporal_r2_mc"
+kind = "av-denoise"
+workers = 2
+args = [
+    "--variant", "fast",
+    "--temporal-radius", "2",
+    "--channel-mode", "luma,chroma",
+    "--strength", "$strength",
+    "--motion-compensation",
+]
+
+[[runs]]
+name = "av_full_r2"
+kind = "av-denoise"
+workers = 2
+args = [
+    "--variant", "fast",
+    "--temporal-radius", "2",
+    "--channel-mode", "luma,chroma",
+    "--strength", "$strength",
+    "--motion-compensation",
+    "--prefilter", "bilateral:3.0,0.02",
+]
+
+# ---------------------------------------------------------------------------
+# External baseline: ffmpeg's OpenCL nlmeans.
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "ffmpeg_spatial"
+kind = "ffmpeg-nlmeans"
+strength = "$strength"
+patch = 7
+search = 15
+
+# External baseline: BM3D via ffmpeg's CPU filter, run at its per-clip
+# sigma peak rather than the true noise sigma (see the [bm3d_sigmas]
+# comment above). CPU-only and slow, around 6.6 fps, so this row adds
+# roughly 2 minutes to a full harness run.
+[[runs]]
+name = "ffmpeg_bm3d"
+kind = "ffmpeg-bm3d"
+sigma = "$bm3d_sigma"
+
+# ---------------------------------------------------------------------------
+# HQ mode: noise level measured automatically, strength is a multiplier
+# on it, expected-noise floor subtracted from distances.
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "av_hq_spatial"
+kind = "av-denoise"
+workers = 2
+args = ["--variant", "hq", "--temporal-radius", "0", "--channel-mode", "luma,chroma"]
+
+[[runs]]
+name = "av_hq_temporal_r2"
+kind = "av-denoise"
+workers = 2
+args = ["--variant", "hq", "--temporal-radius", "2", "--channel-mode", "luma,chroma"]
+
+# Confidence weighting is on by default in the row above; this row turns
+# it off so the harness can quantify what it buys.
+[[runs]]
+name = "av_hq_temporal_r2_noconf"
+kind = "av-denoise"
+workers = 2
+args = [
+    "--variant", "hq",
+    "--temporal-radius", "2",
+    "--channel-mode", "luma,chroma",
+    "--hq-no-temporal-confidence",
+]
+
+# HQ temporal with motion compensation, confidence weighting still on by
+# default. Tracks whether confidence closes MC's own quality deficit
+# (MC alone historically cost some XPSNR vs no-MC temporal).
+[[runs]]
+name = "av_hq_temporal_r2_mc"
+kind = "av-denoise"
+workers = 2
+args = [
+    "--variant", "hq",
+    "--temporal-radius", "2",
+    "--channel-mode", "luma,chroma",
+    "--motion-compensation",
+]
+
+# ---------------------------------------------------------------------------
+# Temporal radius 4, no MC vs MC. `--motion-compensation` has no
+# way to pick an estimation strategy from the CLI. it always resolves
+# automatically from `--temporal-radius`, and at r4 that resolves to
+# `Chained` (radius 4 is at or above the auto-resolution threshold), so
+# this row measures chained's quality at the radius where its reach
+# advantage should show up most clearly. `av_hq_temporal_r2_mc` above
+# stays on the direct path, since auto resolves to direct at r2.
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "av_hq_temporal_r4"
+kind = "av-denoise"
+workers = 2
+args = ["--variant", "hq", "--temporal-radius", "4", "--channel-mode", "luma,chroma"]
+
+[[runs]]
+name = "av_hq_temporal_r4_mc"
+kind = "av-denoise"
+workers = 2
+args = [
+    "--variant", "hq",
+    "--temporal-radius", "4",
+    "--channel-mode", "luma,chroma",
+    "--motion-compensation",
+]
+
+# Opt-in NLM spatial pilot. `--prefilter` defaults to none for both
+# algorithms, so this tracks the pilot lever at its calibrated default
+# scale (0.4) against the `av_hq_temporal_r2` no-pilot baseline above.
+[[runs]]
+name = "av_hq_temporal_r2_pilot"
+kind = "av-denoise"
+workers = 2
+args = [
+    "--variant", "hq",
+    "--temporal-radius", "2",
+    "--channel-mode", "luma,chroma",
+    "--prefilter", "nlm",
+]

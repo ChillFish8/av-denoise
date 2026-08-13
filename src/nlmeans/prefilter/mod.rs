@@ -1,6 +1,7 @@
 mod bilateral;
 
 pub use bilateral::bilateral_radius;
+pub(crate) use bilateral::inv_two_sigma_sq;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
@@ -20,7 +21,21 @@ pub enum PrefilterMode {
         sigma_s: f32,
         sigma_r: f32,
     },
+    /// Spatial NLM pilot. Denoises each frame with the windowed
+    /// spatial kernel at push time and stores the result as the
+    /// reference clip, so patch distances are computed on a clean
+    /// image while accumulation still reads the noisy input.
+    NlmSpatial {
+        /// Multiplier on the main pass strength for the pilot pass.
+        strength_scale: f32,
+    },
 }
+
+/// Measured default for the pilot pass's relative strength, a
+/// multiplier on the main pass strength. A calibration sweep across
+/// noise levels found the XPSNR plateau optimum for
+/// `PrefilterMode::NlmSpatial` at this value.
+pub const DEFAULT_PILOT_STRENGTH_SCALE: f32 = 0.4;
 
 impl PrefilterMode {
     /// Whether the denoiser needs to allocate the reference ring buffer.
@@ -31,7 +46,7 @@ impl PrefilterMode {
     /// Whether the variant computes its reference on the GPU during
     /// `push_frame` (as opposed to consuming a caller-supplied clip).
     pub(crate) fn is_gpu_internal(self) -> bool {
-        matches!(self, Self::Bilateral { .. })
+        matches!(self, Self::Bilateral { .. } | Self::NlmSpatial { .. })
     }
 }
 
@@ -58,6 +73,11 @@ pub(crate) fn run_prefilter<R: Runtime>(
 ) -> Result<(), anyhow::Error> {
     match mode {
         PrefilterMode::None | PrefilterMode::External => Ok(()),
+        // The pilot needs the full accumulator context (accum,
+        // weight_sum, max_weight, h2_inv_norm), which `PrefilterCtx`
+        // doesn't carry, so `NlmDenoiser::run_nlm_spatial_pilot`
+        // dispatches it directly instead of going through this path.
+        PrefilterMode::NlmSpatial { .. } => Ok(()),
         PrefilterMode::Bilateral { sigma_s, sigma_r } => {
             bilateral::run_bilateral::<R>(client, ctx, sigma_s, sigma_r)
         },
@@ -86,6 +106,14 @@ mod tests {
             sigma_s: 3.0,
             sigma_r: 0.02,
         };
+
+        assert!(m.needs_reference_buf());
+        assert!(m.is_gpu_internal());
+    }
+
+    #[test]
+    fn nlm_spatial_is_gpu_internal() {
+        let m = PrefilterMode::NlmSpatial { strength_scale: 1.0 };
 
         assert!(m.needs_reference_buf());
         assert!(m.is_gpu_internal());

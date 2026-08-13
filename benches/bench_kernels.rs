@@ -12,8 +12,6 @@ use kernels::distance_pair::DistancePairBench;
 use kernels::distance_pair_ref::DistancePairRefBench;
 use kernels::distance_ref::DistanceRefBench;
 use kernels::finish::FinishBench;
-use kernels::fused_pair_accumulate::FusedPairBench;
-use kernels::fused_pair_accumulate_ref::FusedPairRefBench;
 use kernels::fused_window::{
     FusedPairWindowBench,
     FusedPairWindowRefBench,
@@ -24,8 +22,12 @@ use kernels::horizontal_sum::HSumBench;
 use kernels::horizontal_sum_pair::HSumPairBench;
 use kernels::mc_block_match_coarse::BlockMatchCoarseBench;
 use kernels::mc_block_match_fine::BlockMatchFineBench;
+use kernels::mc_chain_compose::ChainComposeBench;
+use kernels::mc_confidence::McConfidenceBench;
 use kernels::mc_downscale::DownscaleBench;
 use kernels::mc_warp::WarpBench;
+use kernels::noise_partial::NoisePartialBench;
+use kernels::temporal_noise_stats::TemporalNoiseStatsBench;
 use kernels::vertical_weight::VWeightBench;
 use kernels::vweight_pair_accumulate::VWeightPairAccBench;
 use kernels::zero::ZeroBench;
@@ -62,20 +64,6 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
     }
     for &(ch, ch_name) in CHANNELS {
         run(DistWeightRefBench {
-            client: client.clone(),
-            ch,
-            ch_name,
-        });
-    }
-    for &(ch, ch_name) in CHANNELS {
-        run(FusedPairBench {
-            client: client.clone(),
-            ch,
-            ch_name,
-        });
-    }
-    for &(ch, ch_name) in CHANNELS {
-        run(FusedPairRefBench {
             client: client.clone(),
             ch,
             ch_name,
@@ -179,6 +167,16 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         });
     }
 
+    // Immerkær noise estimate (stage 1 + stage 2 back-to-back).
+    run(NoisePartialBench {
+        client: client.clone(),
+    });
+
+    // Temporal-residual noise-stats kernel.
+    run(TemporalNoiseStatsBench {
+        client: client.clone(),
+    });
+
     // Motion-compensation kernels. Pyramid build and analyse are
     // luma-only (ME doesn't look at chroma); warp runs per channel
     // mode because its memory traffic scales with `stored_ch`.
@@ -189,6 +187,12 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         client: client.clone(),
     });
     run(BlockMatchFineBench {
+        client: client.clone(),
+    });
+    run(McConfidenceBench {
+        client: client.clone(),
+    });
+    run(ChainComposeBench {
         client: client.clone(),
     });
     for &(ch, ch_name) in CHANNELS {

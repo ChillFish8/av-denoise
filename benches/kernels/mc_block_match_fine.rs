@@ -9,10 +9,17 @@ const FINE_BLKSIZE: u32 = 16;
 const FINE_STEP: u32 = 8;
 const SEARCH_RADIUS: u32 = 4;
 
+// Mirrors `motion::confidence::THSAD_PIXEL` / `thsad`, duplicated here
+// since those host helpers are crate-internal and unreachable from the
+// bench binary.
+const THSAD_PIXEL: f32 = 0.02;
+
 /// Fine refinement pass at full resolution. Reads no seed (the bench
 /// uses `use_seed = 0` so the kernel cost is bounded purely by the
 /// `(2·r + 1)²` search window per block; fair across runs even if
-/// the coarse bench tuning changes).
+/// the coarse bench tuning changes). `sad_noise_floor` is `0.0` (no
+/// noise estimate available at this level) and `thsad` uses the
+/// library's default `thsad_scale` of `1.0`.
 pub struct BlockMatchFineBench<R: Runtime> {
     pub client: ComputeClient<R>,
 }
@@ -22,6 +29,7 @@ pub struct FineInput {
     pub centre: Handle,
     pub neighbour: Handle,
     pub mv_field: Handle,
+    pub confidence: Handle,
 }
 
 impl<R: Runtime> Benchmark for BlockMatchFineBench<R> {
@@ -39,11 +47,15 @@ impl<R: Runtime> Benchmark for BlockMatchFineBench<R> {
         let mv_field = self
             .client
             .empty((blocks_x * blocks_y * 2) as usize * size_of::<i32>());
+        let confidence = self
+            .client
+            .empty((blocks_x * blocks_y) as usize * size_of::<f32>());
 
         FineInput {
             centre,
             neighbour,
             mv_field,
+            confidence,
         }
     }
 
@@ -52,6 +64,8 @@ impl<R: Runtime> Benchmark for BlockMatchFineBench<R> {
         let blocks_x = W.div_ceil(FINE_STEP);
         let blocks_y = H.div_ceil(FINE_STEP);
         let mv_len = (blocks_x * blocks_y * 2) as usize;
+        let conf_len = (blocks_x * blocks_y) as usize;
+        let thsad = (FINE_BLKSIZE * FINE_BLKSIZE) as f32 * THSAD_PIXEL;
 
         let grid = CubeCount::new_2d(blocks_x, blocks_y);
         let dim = CubeDim::new_2d(8, 8);
@@ -64,6 +78,10 @@ impl<R: Runtime> Benchmark for BlockMatchFineBench<R> {
                 ArrayArg::from_raw_parts(args.centre.clone(), level_len),
                 ArrayArg::from_raw_parts(args.neighbour.clone(), level_len),
                 ArrayArg::from_raw_parts(args.mv_field.clone(), mv_len),
+                ArrayArg::from_raw_parts(args.confidence.clone(), conf_len),
+                true, // benchmark the full production-realistic cost, confidence included
+                0.0,
+                thsad,
                 W,
                 H,
                 FINE_BLKSIZE,

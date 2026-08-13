@@ -6,15 +6,11 @@ use super::kernels::{
     gpu_copy,
     gpu_zero_buffers,
     nlm_accumulate,
-    nlm_dist_2d_weight,
-    nlm_dist_2d_weight_ref,
     nlm_distance,
     nlm_distance_pair,
     nlm_distance_pair_ref,
     nlm_distance_ref,
     nlm_finish,
-    nlm_fused_pair_accumulate,
-    nlm_fused_pair_accumulate_ref,
     nlm_fused_pair_accumulate_window,
     nlm_fused_pair_accumulate_window_ref,
     nlm_fused_single_window,
@@ -24,7 +20,17 @@ use super::kernels::{
     nlm_vertical_weight,
     nlm_vweight_pair_accumulate,
 };
-use super::motion::{run_analyse, run_compensate};
+use super::motion::{
+    self,
+    MotionEstimation,
+    confidence_byte_offset,
+    run_analyse,
+    run_compensate,
+    run_confidence_for_neighbour,
+    run_seeded_refine,
+};
+use super::noise::{build_spatial_offset_lut, spatial_offset_factor, spatial_offset_lut_len};
+use super::prefilter::PrefilterMode;
 use super::{BLOCK_1D, BLOCK_X, BLOCK_X_THIN, BLOCK_Y, BLOCK_Y_THIN, MAX_GRID_1D};
 
 /// Derived sizes plus dispatch shape for the per-frame work, bundled so
@@ -35,11 +41,110 @@ pub(super) struct LaunchCtx {
     pub(super) pixels: usize,
     pub(super) cube_count: CubeCount,
     pub(super) cube_dim: CubeDim,
-    /// Alternate shape used by `nlm_accumulate` / `nlm_finish` and the
-    /// small-tile `nlm_dist_2d_weight(_ref)` kernels. See
-    /// [`BLOCK_X_THIN`].
+    /// Alternate shape used by `nlm_accumulate`. See [`BLOCK_X_THIN`].
     pub(super) thin_cube_count: CubeCount,
     pub(super) thin_cube_dim: CubeDim,
+}
+
+/// Map a nonzero temporal offset `k` (in `-radius..=radius`) to the
+/// neighbour index the analyse/confidence passes use when filling
+/// `mv_field_buf`/`confidence_buf` (see `NlmDenoiser::run_motion_compensation`
+/// and `run_confidence_pass`). Those passes fill neighbours in the order
+/// `k = -radius..-1` first (indices `0..radius-1`), then `k = 1..radius`
+/// (indices `radius..2·radius-1`), so this is the inverse of that walk.
+fn neighbour_idx_for_k(radius: u32, k: i32) -> u32 {
+    debug_assert_ne!(k, 0, "k=0 is the spatial pair, it has no neighbour index");
+    debug_assert!(
+        k.unsigned_abs() <= radius,
+        "k={k} outside the temporal window ±{radius}"
+    );
+    if k < 0 {
+        (k + radius as i32) as u32
+    } else {
+        (radius as i32 - 1 + k) as u32
+    }
+}
+
+/// Share of the raw input's noise sigma the `NlmSpatial` pilot's own
+/// reference still carries. Calibrated, not derived, by sweeping `{0, 0.25,
+/// 0.5, 0.75, 1.0}` against `--variant hq --prefilter nlm
+/// --motion-compensation` on `clean-1080p.mkv`'s light noise levels (`alls
+/// 4/6/8`, luma XPSNR and SSIM, matching
+/// `scripts/quality_runs_light.toml`'s own calibration convention). The
+/// sweep came back nearly flat (at most 0.10 dB / 0.0013 SSIM of spread
+/// across the whole grid, both metrics agreeing on direction), with the
+/// peak at the `1.0` edge, no correction at all, the opposite of this
+/// value. `0` is kept anyway, since a floor that swamps `thsad` makes
+/// confidence unable to discriminate a genuine mismatch by construction,
+/// independent of whether this one clip's content happens to exercise
+/// that failure mode within the sweep, and the grid's own flatness means
+/// this choice costs nothing measurable on it either way.
+const NLM_SPATIAL_RESIDUAL_FRACTION: f32 = 0.0;
+
+/// Share of the raw input's noise sigma the `Bilateral` prefilter's
+/// reference still carries. Calibrated the same way as
+/// [`NLM_SPATIAL_RESIDUAL_FRACTION`], against `--prefilter
+/// bilateral:3.0,0.02 --motion-compensation` (this repo's own
+/// calibrated `sigma_s, sigma_r` pair, see `scripts/quality_runs.toml`
+/// and `scripts/bench_runs.toml`). Unlike `NlmSpatial`, this sweep
+/// landed cleanly and monotonically on `0` at every tested noise
+/// level, with a real and growing margin (0.16 dB at the lightest
+/// noise level tested up to 0.57 dB at the heaviest), so `0` here is a
+/// genuine empirical result, not a judgement call. It lands on the
+/// same numeric value as `NLM_SPATIAL_RESIDUAL_FRACTION` by
+/// coincidence of two different reasoning paths, not because the two
+/// prefilters were shown to share one constant, so they stay separate
+/// constants rather than being unified into one.
+const BILATERAL_RESIDUAL_FRACTION: f32 = 0.0;
+
+/// Sigma to feed [`motion::sad_noise_floor`] for the motion-compensation
+/// block match. `run_motion_compensation` matches against
+/// `pyramid_reference` whenever it exists (see `analyse_pyramid` in
+/// that method), not the raw input pyramid. `sad_noise_floor` models
+/// the SAD of two *raw* noisy copies, so `sigma_y` (the raw input's
+/// sigma) only belongs there when the match actually runs on raw
+/// pixels. A GPU-internal prefilter (`NlmSpatial`'s pilot pass, or
+/// `Bilateral`) denoises the frame before the match ever sees it, so
+/// the raw floor overstates the real one there. At `NlmSpatial`,
+/// default `blksize`, σ_y = 0.02, the raw floor (≈5.78) alone exceeds
+/// `thsad` (5.12), swamping confidence's entire dynamic range and
+/// clamping confidence to 1.0 everywhere, including genuinely occluded
+/// blocks.
+///
+/// Rather than asserting a fixed model of how much noise either
+/// prefilter leaves behind (which would only be a different unverified
+/// guess in place of the one being fixed), the sigma actually used is
+/// `sigma_y * residual_fraction`, with `residual_fraction` measured per
+/// prefilter by a quality sweep rather than derived (see
+/// [`NLM_SPATIAL_RESIDUAL_FRACTION`]/[`BILATERAL_RESIDUAL_FRACTION`]).
+/// `0` (the raw floor contributes nothing) and `1` (the pre-fix,
+/// buggy behaviour) are just the grid's two endpoints.
+///
+/// `External`'s reference is caller-supplied with unknown noise
+/// characteristics, not something this crate denoised, so it keeps the
+/// raw sigma unconditionally, the same as `PrefilterMode::None`.
+fn mc_sad_noise_floor_sigma(prefilter: PrefilterMode, sigma_y: f32) -> f32 {
+    match prefilter {
+        PrefilterMode::NlmSpatial { .. } => sigma_y * NLM_SPATIAL_RESIDUAL_FRACTION,
+        PrefilterMode::Bilateral { .. } => sigma_y * BILATERAL_RESIDUAL_FRACTION,
+        PrefilterMode::External | PrefilterMode::None => sigma_y,
+    }
+}
+
+/// Confidence-kernel arguments for one temporal (k≠0) pair dispatch.
+/// Carries whether confidence weighting is active, the forward/backward
+/// per-block confidence array views, and the block geometry the
+/// kernel needs to map an output pixel to its block index (mirrors
+/// `nlm_mc_warp`'s pixel→block mapping). Inactive configurations carry
+/// the small placeholder dummy buffer, `use_confidence` set to `false`,
+/// and harmless (never read) geometry.
+struct ConfidenceArgs<R: Runtime> {
+    use_confidence: bool,
+    conf_fwd: ArrayArg<R>,
+    conf_bwd: ArrayArg<R>,
+    step: u32,
+    blocks_x: u32,
+    blocks_y: u32,
 }
 
 impl<R: Runtime> NlmDenoiser<R> {
@@ -82,6 +187,19 @@ impl<R: Runtime> NlmDenoiser<R> {
         unsafe { ArrayArg::from_raw_parts(self.outputs[slot].clone(), ctx.frame_size) }
     }
 
+    /// Reference ring slot `slot`, viewed as a single frame-sized array
+    /// via a byte offset into `reference_buf`. Same byte-offset slicing
+    /// pattern as the motion pyramid's per-slot views.
+    fn reference_slot_arg(&self, ctx: &LaunchCtx, slot: u32) -> ArrayArg<R> {
+        let buf = self
+            .reference_buf
+            .as_ref()
+            .expect("reference buffer must exist for the nlm spatial pilot");
+        let byte_offset = (slot as u64) * (ctx.frame_size as u64) * (size_of::<f32>() as u64);
+        let handle = buf.clone().offset_start(byte_offset);
+        unsafe { ArrayArg::from_raw_parts(handle, ctx.frame_size) }
+    }
+
     fn weight_sum_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
         unsafe { ArrayArg::from_raw_parts(self.weight_sum.clone(), ctx.pixels) }
     }
@@ -110,84 +228,54 @@ impl<R: Runtime> NlmDenoiser<R> {
         unsafe { ArrayArg::from_raw_parts(self.tmp_hsum_bwd.clone(), ctx.pixels) }
     }
 
-    /// Temporal (k≠0) fused-path step: one launch that computes both
-    /// weights in registers and applies the +q / −q contributions.
-    fn dispatch_fused_iter(
-        &self,
-        ctx: &LaunchCtx,
-        center_t: u32,
-        q_x: i32,
-        q_y: i32,
-        q_k: i32,
-    ) -> Result<(), anyhow::Error> {
-        let channels = self.params.channels.count();
-        let frame_t = self.phys_frame(center_t as i32);
-        let frame_fwd = self.phys_frame(center_t as i32 + q_k);
-        let frame_bwd = self.phys_frame(center_t as i32 - q_k);
-        // The backward distance compares against a different neighbour
-        // depending on whether the temporal offset is zero. For k=0 the
-        // pair collapses to a symmetric (+q, +q) self-comparison; for
-        // k≠0 the true (+q, −q) cross-frame comparison applies.
-        let (bwd_shift_x, bwd_shift_y) = if q_k == 0 { (q_x, q_y) } else { (-q_x, -q_y) };
+    /// View of `spatial_offset_lut`, sized for this denoiser's
+    /// `search_radius`. Only the k=0 windowed kernels read it. Every
+    /// other launch keeps the flat `noise_offset` scalar.
+    fn spatial_offset_lut_arg(&self) -> ArrayArg<R> {
+        let len = spatial_offset_lut_len(self.params.search_radius);
+        unsafe { ArrayArg::from_raw_parts(self.spatial_offset_lut.clone(), len) }
+    }
 
-        if self.use_reference {
-            unsafe {
-                nlm_fused_pair_accumulate_ref::launch_unchecked::<R>(
-                    &self.client,
-                    ctx.cube_count.clone(),
-                    ctx.cube_dim,
-                    self.params.channels.storage_count() as usize,
-                    self.input_arg_for_temporal(ctx),
-                    self.reference_arg_for_temporal(ctx),
-                    self.accum_arg(ctx),
-                    self.weight_sum_arg(ctx),
-                    self.max_weight_arg(ctx),
-                    frame_t,
-                    frame_fwd,
-                    frame_bwd,
-                    q_x,
-                    q_y,
-                    bwd_shift_x,
-                    bwd_shift_y,
-                    self.h2_inv_norm,
-                    self.width,
-                    self.height,
-                    channels,
-                    self.params.patch_radius,
-                    BLOCK_X,
-                    BLOCK_Y,
-                );
+    /// Build the confidence-kernel arguments for one temporal pair at
+    /// offset `q_k` (always nonzero at every call site). `frame_fwd`
+    /// reads neighbour `center + q_k`, so its confidence comes from
+    /// neighbour `q_k`'s slice. `frame_bwd` reads `center - q_k`, so its
+    /// confidence comes from neighbour `-q_k`'s slice (see
+    /// `neighbour_idx_for_k`).
+    ///
+    /// Confidence weighting is active only when `confidence_buf` is
+    /// allocated (see `NlmDenoiser::new`) and block geometry exists,
+    /// either from `mc_ctx` (MC active) or `confidence_ctx` (the no-MC
+    /// confidence pass). Otherwise this falls back to the 1-element
+    /// `confidence_dummy` buffer with `use_confidence` set to `false`,
+    /// so the kernel never reads it.
+    fn confidence_pair_args(&self, q_k: i32) -> ConfidenceArgs<R> {
+        let geometry = self.mc_ctx.as_ref().or(self.confidence_ctx.as_ref());
+        if let (Some(buf), Some(mc)) = (self.confidence_buf.as_ref(), geometry) {
+            let radius = self.params.temporal_radius;
+            let fwd_idx = neighbour_idx_for_k(radius, q_k);
+            let bwd_idx = neighbour_idx_for_k(radius, -q_k);
+            let conf_len = (mc.blocks_x * mc.blocks_y) as usize;
+            let fwd_handle = buf.clone().offset_start(confidence_byte_offset(mc, fwd_idx));
+            let bwd_handle = buf.clone().offset_start(confidence_byte_offset(mc, bwd_idx));
+            ConfidenceArgs {
+                use_confidence: true,
+                conf_fwd: unsafe { ArrayArg::from_raw_parts(fwd_handle, conf_len) },
+                conf_bwd: unsafe { ArrayArg::from_raw_parts(bwd_handle, conf_len) },
+                step: mc.step,
+                blocks_x: mc.blocks_x,
+                blocks_y: mc.blocks_y,
             }
         } else {
-            unsafe {
-                nlm_fused_pair_accumulate::launch_unchecked::<R>(
-                    &self.client,
-                    ctx.cube_count.clone(),
-                    ctx.cube_dim,
-                    self.params.channels.storage_count() as usize,
-                    self.input_arg_for_temporal(ctx),
-                    self.accum_arg(ctx),
-                    self.weight_sum_arg(ctx),
-                    self.max_weight_arg(ctx),
-                    frame_t,
-                    frame_fwd,
-                    frame_bwd,
-                    q_x,
-                    q_y,
-                    bwd_shift_x,
-                    bwd_shift_y,
-                    self.h2_inv_norm,
-                    self.width,
-                    self.height,
-                    channels,
-                    self.params.patch_radius,
-                    BLOCK_X,
-                    BLOCK_Y,
-                );
+            ConfidenceArgs {
+                use_confidence: false,
+                conf_fwd: unsafe { ArrayArg::from_raw_parts(self.confidence_dummy.clone(), 1) },
+                conf_bwd: unsafe { ArrayArg::from_raw_parts(self.confidence_dummy.clone(), 1) },
+                step: 1,
+                blocks_x: 1,
+                blocks_y: 1,
             }
         }
-
-        Ok(())
     }
 
     /// Temporal (k≠0) windowed fused step: a single launch covers every
@@ -205,6 +293,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let frame_t = self.phys_frame(center_t as i32);
         let frame_fwd = self.phys_frame(center_t as i32 + q_k);
         let frame_bwd = self.phys_frame(center_t as i32 - q_k);
+        let confidence = self.confidence_pair_args(q_k);
 
         if self.use_reference {
             unsafe {
@@ -218,10 +307,14 @@ impl<R: Runtime> NlmDenoiser<R> {
                     self.accum_arg(ctx),
                     self.weight_sum_arg(ctx),
                     self.max_weight_arg(ctx),
+                    confidence.conf_fwd,
+                    confidence.conf_bwd,
+                    confidence.use_confidence,
                     frame_t,
                     frame_fwd,
                     frame_bwd,
                     self.h2_inv_norm,
+                    self.noise_offset,
                     self.width,
                     self.height,
                     channels,
@@ -229,6 +322,9 @@ impl<R: Runtime> NlmDenoiser<R> {
                     self.params.search_radius,
                     BLOCK_X,
                     BLOCK_Y,
+                    confidence.step,
+                    confidence.blocks_x,
+                    confidence.blocks_y,
                 );
             }
         } else {
@@ -242,10 +338,14 @@ impl<R: Runtime> NlmDenoiser<R> {
                     self.accum_arg(ctx),
                     self.weight_sum_arg(ctx),
                     self.max_weight_arg(ctx),
+                    confidence.conf_fwd,
+                    confidence.conf_bwd,
+                    confidence.use_confidence,
                     frame_t,
                     frame_fwd,
                     frame_bwd,
                     self.h2_inv_norm,
+                    self.noise_offset,
                     self.width,
                     self.height,
                     channels,
@@ -253,6 +353,9 @@ impl<R: Runtime> NlmDenoiser<R> {
                     self.params.search_radius,
                     BLOCK_X,
                     BLOCK_Y,
+                    confidence.step,
+                    confidence.blocks_x,
+                    confidence.blocks_y,
                 );
             }
         }
@@ -284,6 +387,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                     self.max_weight_arg(ctx),
                     frame_t,
                     self.h2_inv_norm,
+                    self.spatial_offset_lut_arg(),
                     self.width,
                     self.height,
                     channels,
@@ -306,6 +410,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                     self.max_weight_arg(ctx),
                     frame_t,
                     self.h2_inv_norm,
+                    self.spatial_offset_lut_arg(),
                     self.width,
                     self.height,
                     channels,
@@ -396,6 +501,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             );
         }
 
+        let confidence = self.confidence_pair_args(q_k);
         unsafe {
             nlm_vweight_pair_accumulate::launch_unchecked::<R>(
                 &self.client,
@@ -408,99 +514,23 @@ impl<R: Runtime> NlmDenoiser<R> {
                 self.accum_arg(ctx),
                 self.weight_sum_arg(ctx),
                 self.max_weight_arg(ctx),
+                confidence.conf_fwd,
+                confidence.conf_bwd,
+                confidence.use_confidence,
                 frame_fwd,
                 frame_bwd,
                 q_x,
                 q_y,
                 self.h2_inv_norm,
+                self.noise_offset,
                 self.width,
                 self.height,
                 self.params.patch_radius,
                 BLOCK_X,
                 BLOCK_Y,
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Spatial (k=0) fused-path step: single-tile weight + accumulate.
-    /// Cheaper than the paired fused kernel here because the weight
-    /// map is symmetric, so a single tile is enough.
-    fn dispatch_fused_iter_k0(
-        &self,
-        ctx: &LaunchCtx,
-        center_t: u32,
-        q_x: i32,
-        q_y: i32,
-    ) -> Result<(), anyhow::Error> {
-        let channels = self.params.channels.count();
-        let frame_t = self.phys_frame(center_t as i32);
-
-        if self.use_reference {
-            unsafe {
-                nlm_dist_2d_weight_ref::launch_unchecked::<R>(
-                    &self.client,
-                    ctx.cube_count.clone(),
-                    ctx.cube_dim,
-                    self.params.channels.storage_count() as usize,
-                    self.reference_arg(ctx),
-                    self.weight_buf_arg(ctx),
-                    frame_t,
-                    frame_t,
-                    q_x,
-                    q_y,
-                    self.h2_inv_norm,
-                    self.width,
-                    self.height,
-                    channels,
-                    self.params.patch_radius,
-                    BLOCK_X,
-                    BLOCK_Y,
-                );
-            }
-        } else {
-            unsafe {
-                nlm_dist_2d_weight::launch_unchecked::<R>(
-                    &self.client,
-                    ctx.cube_count.clone(),
-                    ctx.cube_dim,
-                    self.params.channels.storage_count() as usize,
-                    self.input_arg(ctx),
-                    self.weight_buf_arg(ctx),
-                    frame_t,
-                    frame_t,
-                    q_x,
-                    q_y,
-                    self.h2_inv_norm,
-                    self.width,
-                    self.height,
-                    channels,
-                    self.params.patch_radius,
-                    BLOCK_X,
-                    BLOCK_Y,
-                );
-            }
-        }
-
-        unsafe {
-            nlm_accumulate::launch_unchecked::<R>(
-                &self.client,
-                ctx.thin_cube_count.clone(),
-                ctx.thin_cube_dim,
-                self.params.channels.storage_count() as usize,
-                self.input_arg(ctx),
-                self.accum_arg(ctx),
-                self.weight_sum_arg(ctx),
-                self.weight_buf_arg(ctx),
-                self.weight_buf_arg(ctx),
-                self.max_weight_arg(ctx),
-                frame_t,
-                frame_t,
-                q_x,
-                q_y,
-                self.width,
-                self.height,
+                confidence.step,
+                confidence.blocks_x,
+                confidence.blocks_y,
             );
         }
 
@@ -573,6 +603,12 @@ impl<R: Runtime> NlmDenoiser<R> {
             );
         }
 
+        // Same correlation-attenuated offset the k=0 windowed kernel's
+        // LUT holds at this (q_x, q_y), computed directly instead of
+        // reading the LUT buffer back, this dispatch already has the
+        // exact candidate offset the windowed kernel derives at
+        // comptime from its unrolled loop.
+        let offset = self.noise_offset * spatial_offset_factor(q_x, q_y, self.rho_smoothed.unwrap_or(0.0));
         unsafe {
             nlm_vertical_weight::launch_unchecked::<R>(
                 &self.client,
@@ -581,6 +617,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                 self.tmp_hsum_arg(ctx),
                 self.weight_buf_arg(ctx),
                 self.h2_inv_norm,
+                offset,
                 self.width,
                 self.height,
                 self.params.patch_radius,
@@ -644,6 +681,19 @@ impl<R: Runtime> NlmDenoiser<R> {
             .compensated_input_buf
             .as_ref()
             .expect("compensated_input allocated when mc_ctx is Some");
+        // `confidence_buf` only exists when confidence weighting is
+        // active (see `NlmDenoiser::new`). MC itself doesn't need it.
+        // When it's absent, the fine kernel still requires some buffer
+        // for its `confidence` argument, so fall back to the small
+        // always-present dummy and tell the kernel not to write it.
+        let (confidence_arg, write_confidence): (&Handle, bool) = match self.confidence_buf.as_ref() {
+            Some(buf) => (buf, true),
+            None => (&self.confidence_dummy, false),
+        };
+        let thsad_scale = self.params.hq.map_or(1.0, |hq| hq.thsad_scale);
+        let mc_sigma_y = mc_sad_noise_floor_sigma(self.params.prefilter, self.sigma_y);
+        let sad_noise_floor = motion::sad_noise_floor(mc.blksize, mc_sigma_y);
+        let thsad = motion::thsad(mc.blksize, thsad_scale);
 
         // Centre frame: straight passthrough copy so the temporal
         // kernels can read it uniformly from the compensated buffer.
@@ -675,9 +725,14 @@ impl<R: Runtime> NlmDenoiser<R> {
         // the reference (prefiltered) pyramid when available.
         let analyse_pyramid = self.pyramid_reference.as_ref().unwrap_or(pyramid_input);
 
-        // One analyse + warp per non-centre neighbour. Neighbours run
-        // in logical order k = -R .. -1, +1 .. +R; their MV-field index
-        // is contiguous so packing keeps the field tight.
+        // One motion estimate + warp per non-centre neighbour. Neighbours
+        // run in logical order k = -R .. -1, +1 .. +R. Their MV-field
+        // index is contiguous, so packing keeps the field tight. Motion
+        // estimation itself branches on `estimation`. `Direct` matches
+        // straight against the centre frame exactly as before. `Chained`
+        // composes the adjacent-pair fields into a seed, then refines it
+        // with a small search. Either way the warp below is identical.
+        let is_chained = self.is_chained();
         let radius = temporal_radius as i32;
         let mut neighbour_idx: u32 = 0;
         for k in -radius..=radius {
@@ -686,18 +741,52 @@ impl<R: Runtime> NlmDenoiser<R> {
             }
             let neighbour_slot = self.phys_frame(center_t as i32 + k);
 
-            run_analyse::<R>(
-                &self.client,
-                mc,
-                self.width,
-                self.height,
-                frame_count,
-                centre_slot,
-                neighbour_slot,
-                neighbour_idx,
-                analyse_pyramid,
-                mv_field,
-            )?;
+            if is_chained {
+                self.run_chain_compose(center_t, k)?;
+                let refine_radius = match self
+                    .params
+                    .motion_compensation
+                    .resolved_estimation(self.params.temporal_radius)
+                {
+                    Some(MotionEstimation::Chained { refine_radius }) => refine_radius,
+                    _ => unreachable!("is_chained() guarantees a resolved Chained estimation"),
+                };
+
+                run_seeded_refine::<R>(
+                    &self.client,
+                    mc,
+                    self.width,
+                    self.height,
+                    frame_count,
+                    centre_slot,
+                    neighbour_slot,
+                    neighbour_idx,
+                    refine_radius,
+                    analyse_pyramid,
+                    mv_field,
+                    confidence_arg,
+                    write_confidence,
+                    sad_noise_floor,
+                    thsad,
+                )?;
+            } else {
+                run_analyse::<R>(
+                    &self.client,
+                    mc,
+                    self.width,
+                    self.height,
+                    frame_count,
+                    centre_slot,
+                    neighbour_slot,
+                    neighbour_idx,
+                    analyse_pyramid,
+                    mv_field,
+                    confidence_arg,
+                    write_confidence,
+                    sad_noise_floor,
+                    thsad,
+                )?;
+            }
 
             run_compensate::<R>(
                 &self.client,
@@ -740,6 +829,72 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
+    /// Run the per-submit no-MC confidence sweep. A zero-search-radius
+    /// block match from the centre frame to each of the `2·R`
+    /// neighbours, writing per-block confidence into `confidence_buf`.
+    /// No-op unless the no-MC confidence pass is active (`confidence_ctx`
+    /// is `None` whenever motion compensation is active instead, or
+    /// confidence is off entirely).
+    fn run_confidence_pass(&self, center_t: u32) -> Result<(), anyhow::Error> {
+        let Some(ctx) = self.confidence_ctx.as_ref() else {
+            return Ok(());
+        };
+
+        // `confidence_ctx` is only ever constructed alongside
+        // `temporal_radius > 0` (see `NlmDenoiser::new`), so
+        // `temporal_radius` is guaranteed non-zero here.
+        let temporal_radius = self.params.temporal_radius;
+
+        let frame_count = self.params.total_frames();
+        let centre_slot = self.phys_frame(center_t as i32);
+
+        let luma_pyramid = self
+            .confidence_pyramid
+            .as_ref()
+            .expect("confidence_pyramid allocated when confidence_ctx is Some");
+        let mv_scratch = self
+            .confidence_mv_scratch
+            .as_ref()
+            .expect("confidence_mv_scratch allocated when confidence_ctx is Some");
+        let confidence_buf = self
+            .confidence_buf
+            .as_ref()
+            .expect("confidence_buf allocated when confidence_ctx is Some");
+
+        let thsad_scale = self.params.hq.map_or(1.0, |hq| hq.thsad_scale);
+        let sad_noise_floor = motion::sad_noise_floor(ctx.blksize, self.sigma_y);
+        let thsad = motion::thsad(ctx.blksize, thsad_scale);
+
+        let radius = temporal_radius as i32;
+        let mut neighbour_idx: u32 = 0;
+        for k in -radius..=radius {
+            if k == 0 {
+                continue;
+            }
+            let neighbour_slot = self.phys_frame(center_t as i32 + k);
+
+            run_confidence_for_neighbour::<R>(
+                &self.client,
+                ctx,
+                self.width,
+                self.height,
+                frame_count,
+                centre_slot,
+                neighbour_slot,
+                neighbour_idx,
+                luma_pyramid,
+                mv_scratch,
+                confidence_buf,
+                sad_noise_floor,
+                thsad,
+            )?;
+
+            neighbour_idx += 1;
+        }
+
+        Ok(())
+    }
+
     fn zero_accumulators(&self, ctx: &LaunchCtx) -> Result<(), anyhow::Error> {
         let grid = (ctx.frame_size as u32).div_ceil(BLOCK_1D).min(MAX_GRID_1D);
         let total_threads = grid * BLOCK_1D;
@@ -760,7 +915,15 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
-    fn run_finish(&self, ctx: &LaunchCtx, center_t: u32, output_slot: usize) -> Result<(), anyhow::Error> {
+    /// Shared `nlm_finish` launch, parameterized on where the result
+    /// is written. `run_finish` targets an output slot. The nlm-spatial
+    /// pilot targets a reference-ring slot instead.
+    fn run_finish_to(
+        &self,
+        ctx: &LaunchCtx,
+        center_frame: u32,
+        output: ArrayArg<R>,
+    ) -> Result<(), anyhow::Error> {
         let channels = self.params.channels.count();
         unsafe {
             nlm_finish::launch_unchecked::<R>(
@@ -769,11 +932,11 @@ impl<R: Runtime> NlmDenoiser<R> {
                 ctx.cube_dim,
                 self.params.channels.storage_count() as usize,
                 self.input_arg(ctx),
-                self.output_arg(ctx, output_slot),
+                output,
                 ArrayArg::from_raw_parts(self.accum.clone(), ctx.frame_size),
                 self.weight_sum_arg(ctx),
                 self.max_weight_arg(ctx),
-                self.phys_frame(center_t as i32),
+                center_frame,
                 self.params.self_weight,
                 self.width,
                 self.height,
@@ -784,17 +947,25 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
-    pub(super) fn run_denoise_kernels(&mut self, output_slot: usize) -> Result<(), anyhow::Error> {
+    fn run_finish(&self, ctx: &LaunchCtx, center_t: u32, output_slot: usize) -> Result<(), anyhow::Error> {
+        self.run_finish_to(
+            ctx,
+            self.phys_frame(center_t as i32),
+            self.output_arg(ctx, output_slot),
+        )
+    }
+
+    /// Derive the launch shapes shared by every per-frame dispatch
+    /// (main pass and the nlm-spatial pilot alike).
+    fn launch_ctx(&self) -> LaunchCtx {
         let width = self.width;
         let height = self.height;
         let stored_ch = self.params.channels.storage_count();
-        let temporal_radius = self.params.temporal_radius;
-        let search_radius = self.params.search_radius as i32;
         let total_frames = self.params.total_frames();
         let pixels = (width * height) as usize;
         let frame_size = pixels * stored_ch as usize;
 
-        let ctx = LaunchCtx {
+        LaunchCtx {
             total_frame_data: frame_size * total_frames as usize,
             frame_size,
             pixels,
@@ -802,7 +973,66 @@ impl<R: Runtime> NlmDenoiser<R> {
             cube_dim: CubeDim::new_2d(BLOCK_X, BLOCK_Y),
             thin_cube_count: CubeCount::new_2d(width.div_ceil(BLOCK_X_THIN), height.div_ceil(BLOCK_Y_THIN)),
             thin_cube_dim: CubeDim::new_2d(BLOCK_X_THIN, BLOCK_Y_THIN),
-        };
+        }
+    }
+
+    /// Denoise one freshly pushed frame with the windowed spatial
+    /// kernel and store the result in its reference ring slot. Shares
+    /// the frame-sized accumulators with the main pass. The in-order
+    /// GPU queue makes that safe because the main dispatch zeroes them
+    /// again before use.
+    pub(super) fn run_nlm_spatial_pilot(&self, slot: u32, strength_scale: f32) -> Result<(), anyhow::Error> {
+        let ctx = self.launch_ctx();
+        self.zero_accumulators(&ctx)?;
+
+        let channels = self.params.channels.count();
+        let pilot_h2 = self.h2_inv_norm / (strength_scale * strength_scale);
+
+        // Flat LUT at rho = 0: the pilot compares noisy-input patches
+        // directly and keeps the full white-noise floor unconditionally
+        // (out of scope for the correlation attenuation, see
+        // `input_noise_offset`'s doc comment on the denoiser). Built
+        // fresh per call rather than cached, `input_noise_offset` can
+        // change between pushes and this is a tiny, one-off upload.
+        let pilot_lut = build_spatial_offset_lut(self.params.search_radius, 0.0, self.input_noise_offset);
+        let pilot_lut_handle = self.client.create_from_slice(f32::as_bytes(&pilot_lut));
+        let pilot_lut_arg = unsafe { ArrayArg::<R>::from_raw_parts(pilot_lut_handle, pilot_lut.len()) };
+
+        // Always read the noisy input here, never `reference_arg`: for
+        // `NlmSpatial`, `reference_buf` is the pilot's own output, not
+        // an input to it, even though `use_reference` is true so the
+        // *main* pass's kernels pick the `_ref` variants.
+        unsafe {
+            nlm_fused_single_window::launch_unchecked::<R>(
+                &self.client,
+                ctx.cube_count.clone(),
+                ctx.cube_dim,
+                self.params.channels.storage_count() as usize,
+                self.input_arg(&ctx),
+                self.accum_arg(&ctx),
+                self.weight_sum_arg(&ctx),
+                self.max_weight_arg(&ctx),
+                slot,
+                pilot_h2,
+                pilot_lut_arg,
+                self.width,
+                self.height,
+                channels,
+                self.params.patch_radius,
+                self.params.search_radius,
+                BLOCK_X,
+                BLOCK_Y,
+            );
+        }
+
+        self.run_finish_to(&ctx, slot, self.reference_slot_arg(&ctx, slot))
+    }
+
+    pub(super) fn run_denoise_kernels(&mut self, output_slot: usize) -> Result<(), anyhow::Error> {
+        let temporal_radius = self.params.temporal_radius;
+        let search_radius = self.params.search_radius as i32;
+
+        let ctx = self.launch_ctx();
 
         let center_t = temporal_radius;
 
@@ -810,6 +1040,11 @@ impl<R: Runtime> NlmDenoiser<R> {
         // temporal kernels (k≠0) can read aligned neighbours from
         // `compensated_*_buf`. No-op when MC is inactive.
         self.run_motion_compensation(center_t)?;
+        // No-op unless the no-MC confidence pass is active. This is
+        // mutually exclusive with `run_motion_compensation` actually
+        // doing anything, since `confidence_ctx` is only `Some` when
+        // MC isn't.
+        self.run_confidence_pass(center_t)?;
 
         self.zero_accumulators(&ctx)?;
         let window_side = 2 * search_radius + 1;
@@ -844,15 +1079,9 @@ impl<R: Runtime> NlmDenoiser<R> {
                     }
 
                     if q_k == 0 {
-                        if self.use_separable {
-                            self.dispatch_separable_iter_k0(&ctx, center_t, q_x, q_y)?;
-                        } else {
-                            self.dispatch_fused_iter_k0(&ctx, center_t, q_x, q_y)?;
-                        }
-                    } else if self.use_separable {
-                        self.dispatch_separable_iter(&ctx, center_t, q_x, q_y, q_k)?;
+                        self.dispatch_separable_iter_k0(&ctx, center_t, q_x, q_y)?;
                     } else {
-                        self.dispatch_fused_iter(&ctx, center_t, q_x, q_y, q_k)?;
+                        self.dispatch_separable_iter(&ctx, center_t, q_x, q_y, q_k)?;
                     }
                 }
             }
@@ -897,5 +1126,106 @@ fn copy_frame_into_slot_handle<R: Runtime>(
             frame_size,
             total_threads,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        BILATERAL_RESIDUAL_FRACTION,
+        NLM_SPATIAL_RESIDUAL_FRACTION,
+        PrefilterMode,
+        mc_sad_noise_floor_sigma,
+        neighbour_idx_for_k,
+    };
+
+    /// Walking `k = -radius..=radius` (skipping 0) and incrementing a
+    /// counter from 0 must reproduce `neighbour_idx_for_k` exactly, for
+    /// every radius. This is the same walk `run_motion_compensation`
+    /// and `run_confidence_pass` use to fill `mv_field_buf` /
+    /// `confidence_buf`, so it pins down the fill order those passes
+    /// established.
+    #[test]
+    fn matches_the_sequential_fill_order() {
+        for radius in 1..=8u32 {
+            let mut expected = 0u32;
+            for k in -(radius as i32)..=(radius as i32) {
+                if k == 0 {
+                    continue;
+                }
+                assert_eq!(neighbour_idx_for_k(radius, k), expected, "radius={radius} k={k}");
+                expected += 1;
+            }
+        }
+    }
+
+    /// The forward slice (neighbour `center + q_k`) and backward slice
+    /// (neighbour `center - q_k`) must always land on distinct,
+    /// in-range indices. A mismatch here would silently apply the
+    /// wrong frame's confidence to a temporal weight.
+    #[test]
+    fn forward_and_backward_indices_are_distinct_and_in_range() {
+        for radius in 1..=8u32 {
+            for q_k in -(radius as i32)..0 {
+                let fwd = neighbour_idx_for_k(radius, q_k);
+                let bwd = neighbour_idx_for_k(radius, -q_k);
+                assert_ne!(fwd, bwd, "radius={radius} q_k={q_k}");
+                assert!(fwd < 2 * radius, "radius={radius} q_k={q_k} fwd={fwd}");
+                assert!(bwd < 2 * radius, "radius={radius} q_k={q_k} bwd={bwd}");
+            }
+        }
+    }
+
+    #[test]
+    fn radius_two_explicit_indices() {
+        assert_eq!(neighbour_idx_for_k(2, -2), 0);
+        assert_eq!(neighbour_idx_for_k(2, -1), 1);
+        assert_eq!(neighbour_idx_for_k(2, 1), 2);
+        assert_eq!(neighbour_idx_for_k(2, 2), 3);
+    }
+
+    /// Pins the calibrated constant itself to a literal, not a value
+    /// re-derived from the constant under test, so a future recalibration
+    /// that changes it actually fails this test instead of trivially
+    /// re-passing.
+    #[test]
+    fn nlm_spatial_residual_fraction_is_calibrated_to_zero() {
+        assert_eq!(NLM_SPATIAL_RESIDUAL_FRACTION, 0.0);
+    }
+
+    #[test]
+    fn bilateral_residual_fraction_is_calibrated_to_zero() {
+        assert_eq!(BILATERAL_RESIDUAL_FRACTION, 0.0);
+    }
+
+    #[test]
+    fn mc_sad_noise_floor_sigma_scales_nlm_spatial_by_the_calibrated_fraction() {
+        let raw = 0.02f32;
+        assert_eq!(
+            mc_sad_noise_floor_sigma(PrefilterMode::NlmSpatial { strength_scale: 1.0 }, raw),
+            raw * NLM_SPATIAL_RESIDUAL_FRACTION
+        );
+    }
+
+    #[test]
+    fn mc_sad_noise_floor_sigma_scales_bilateral_by_the_calibrated_fraction() {
+        let raw = 0.02f32;
+        assert_eq!(
+            mc_sad_noise_floor_sigma(
+                PrefilterMode::Bilateral {
+                    sigma_s: 3.0,
+                    sigma_r: 0.02
+                },
+                raw
+            ),
+            raw * BILATERAL_RESIDUAL_FRACTION
+        );
+    }
+
+    #[test]
+    fn mc_sad_noise_floor_sigma_keeps_raw_sigma_for_none_and_external() {
+        let raw = 0.02f32;
+        assert_eq!(mc_sad_noise_floor_sigma(PrefilterMode::None, raw), raw);
+        assert_eq!(mc_sad_noise_floor_sigma(PrefilterMode::External, raw), raw);
     }
 }

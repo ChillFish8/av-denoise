@@ -83,6 +83,7 @@ impl<R: Runtime> Benchmark for BlockMatchCoarseBench<R> {
                 coarse_scale,
                 fine_blocks_x,
                 fine_blocks_y,
+                FINE_STEP,
             );
         }
         Ok(())
