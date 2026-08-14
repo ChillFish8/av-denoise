@@ -12,6 +12,40 @@ const _: () = assert!(
     "update the hardcoded 8usize/8u32 slots in haar_fwd_stack and haar_inv_stack to MAX_K"
 );
 
+/// A reciprocal weight that never trusts a driver's `NaN`-`max` behaviour.
+///
+/// Returns `1 / max(denom, floor)` for an ordinary finite denominator,
+/// the same value the unguarded expression this replaces would produce.
+/// A `denom` that is `NaN` or infinite is caught explicitly first and
+/// returns `0` instead.
+///
+/// `wiener_shrinkage_factor` treats an unknown (`NaN`) variance
+/// differently from a known-infinite one, since it can fall back to
+/// passing a coefficient's value through untouched, a safe middle
+/// ground between full trust and full distrust. `safe_reciprocal` has
+/// no such middle ground available. Its result only ever feeds a weight
+/// or a normalising divisor, never a value that could stand in for real
+/// content, so there is nothing to "pass through". Zero is the correct
+/// fallback here regardless of whether the denominator is unknown or
+/// known-unusable, because both cases mean this reciprocal cannot be
+/// trusted to mean anything.
+///
+/// The explicit check matters because `f32::max(NaN, floor)` is not
+/// guaranteed to discard the `NaN` on every GPU backend the way it does
+/// on the CPU. SPIR-V's `FMax` instruction leaves a `NaN` operand
+/// undefined, and only the separate `NMax` instruction promises to
+/// discard it, so a caller that relied on `max` alone would have its
+/// correctness depend on which instruction a given driver happened to
+/// lower `f32::max` to.
+#[cube]
+pub(crate) fn safe_reciprocal(denom: f32, floor: f32) -> f32 {
+    let mut inv = 0.0f32;
+    if !denom.is_nan() && !denom.is_inf() {
+        inv = 1.0f32 / f32::max(denom, floor);
+    }
+    inv
+}
+
 /// Fills an 8x8 orthonormal DCT-II basis into shared memory, one entry
 /// per thread.
 ///

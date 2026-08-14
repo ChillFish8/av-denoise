@@ -218,6 +218,93 @@ fn dct8_forward_preserves_the_sum_of_squares() {
     );
 }
 
+#[cube(launch_unchecked)]
+fn safe_reciprocal_probe(denom: &Array<f32>, floor: &Array<f32>, out: &mut Array<f32>, n: u32) {
+    let tid = ABSOLUTE_POS_X;
+    if tid < n {
+        out[tid as usize] = safe_reciprocal(denom[tid as usize], floor[tid as usize]);
+    }
+}
+
+/// Pins `safe_reciprocal`'s own contract directly, rather than only
+/// through whatever a caller's `f32::max` happens to do with a `NaN` on
+/// this particular GPU backend.
+///
+/// `collab_filter_ht`, `collab_filter_wiener`, and `collab_aggregate`
+/// all reach this same function for their own weight and normalisation
+/// divisions, so a probe of the function itself covers every call site
+/// at once, and does not depend on a real denominator ever going
+/// non-finite in one of those larger kernels to exercise the guard.
+#[test]
+fn safe_reciprocal_is_zero_for_a_non_finite_denominator_and_ordinary_otherwise() {
+    let client = make_client();
+
+    let denom = vec![
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        0.0f32,
+        5.0f32,
+        -3.0f32,
+    ];
+    let floor = vec![1e-12f32; 6];
+    let n = denom.len();
+
+    let denom_buf = client.create_from_slice(f32::as_bytes(&denom));
+    let floor_buf = client.create_from_slice(f32::as_bytes(&floor));
+    let out_buf = client.empty(n * size_of::<f32>());
+
+    unsafe {
+        safe_reciprocal_probe::launch_unchecked::<R>(
+            &client,
+            CubeCount::new_1d(1),
+            CubeDim::new_1d(n as u32),
+            ArrayArg::from_raw_parts(denom_buf, n),
+            ArrayArg::from_raw_parts(floor_buf, n),
+            ArrayArg::from_raw_parts(out_buf.clone(), n),
+            n as u32,
+        );
+    }
+
+    let bytes = client.read_one(out_buf).expect("safe_reciprocal readback failed");
+    let out = f32::from_bytes(&bytes)[..n].to_vec();
+
+    assert_eq!(
+        out[0], 0.0,
+        "a NaN denominator must yield exactly 0, got {}",
+        out[0]
+    );
+    assert_eq!(
+        out[1], 0.0,
+        "a positive-infinite denominator must yield exactly 0, got {}",
+        out[1]
+    );
+    assert_eq!(
+        out[2], 0.0,
+        "a negative-infinite denominator must yield exactly 0, got {}",
+        out[2]
+    );
+    assert_eq!(
+        out[3], 1e12,
+        "an ordinary zero denominator floors to 1e12, got {}",
+        out[3]
+    );
+    assert!(
+        (out[4] - 0.2).abs() < 1e-6,
+        "1 / max(5, 1e-12) should be 0.2, got {}",
+        out[4]
+    );
+    // A negative but finite denominator is not a case any real caller
+    // hits (every caller here sums non-negative terms), but it still
+    // has to stay finite rather than flip the sign of the result. The
+    // floor outweighs it the same way it outweighs a legitimate zero.
+    assert_eq!(
+        out[5], 1e12,
+        "a negative but finite denominator floors the same way zero does, got {}",
+        out[5]
+    );
+}
+
 #[test]
 fn haar_stack_round_trip_recovers_the_input_for_every_k_use() {
     for k_use in [1u32, 2, 4, 8] {

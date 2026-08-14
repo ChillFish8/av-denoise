@@ -1,6 +1,6 @@
 use cubecl::prelude::*;
 
-use super::helpers::{R, make_client, make_gradient_frame, noisy_field_over};
+use super::helpers::{R, make_client, make_gradient_frame, noisy_field_over, textured_frame};
 use crate::collab::{CollabParams, CollabPipeline};
 use crate::nlmeans::ChannelMode;
 
@@ -168,4 +168,152 @@ fn chroma_mode_runs() {
         assert!((u - u_base).abs() < 1e-3, "pixel {i}: u={u} want near {u_base}");
         assert!((v - v_base).abs() < 1e-3, "pixel {i}: v={v} want near {v_base}");
     }
+}
+
+/// A cascade's second stage runs on already-mostly-clean content, so a
+/// small but real sigma over genuinely textured content, not a flat
+/// field, is the regime that matters most and the one every other test
+/// in this file avoids.
+///
+/// Sweeps sigma down from a moderate value to exactly 0 over a textured
+/// frame. At every step the output must stay finite and stay close to
+/// the valid pixel range. As sigma shrinks toward 0 the filter has less
+/// and less noise to remove, so its output should converge toward the
+/// untouched input rather than drift away from it, and the deviation
+/// from the input at sigma 0 should be small. A shrinkage factor or
+/// group weight that turned unbounded under a small sigma would fail the
+/// finite/range check directly, and a filter that kept over-smoothing
+/// even as sigma shrank would fail the convergence check.
+#[test]
+fn output_stays_sane_and_converges_to_input_as_sigma_shrinks_over_textured_content() {
+    let (w, h) = (64u32, 64u32);
+    let frame = textured_frame(w, h);
+    let client = make_client();
+    let params = CollabParams {
+        channels: ChannelMode::Luma,
+        ..CollabParams::default()
+    };
+
+    let sigmas = [0.05f32, 0.01, 0.001, 0.0001, 0.00001, 0.0];
+    let mut prev_max_dev: Option<f32> = None;
+
+    for &sigma in &sigmas {
+        let mut pipeline =
+            CollabPipeline::<R>::new(&client, params, w, h).expect("pipeline construction failed");
+        let input = client.create_from_slice(f32::as_bytes(&frame));
+        let output = client.empty(frame.len() * size_of::<f32>());
+        pipeline
+            .run_two_stage(&input, &[sigma], &output)
+            .expect("run_two_stage failed");
+
+        let out_bytes = client.read_one(output).expect("output readback failed");
+        let out = f32::from_bytes(&out_bytes)[..frame.len()].to_vec();
+
+        let mut max_dev = 0.0f32;
+        for (idx, (&want, &have)) in frame.iter().zip(out.iter()).enumerate() {
+            assert!(have.is_finite(), "sigma={sigma}: out[{idx}]={have} is not finite");
+            assert!(
+                (-0.1..=1.1).contains(&have),
+                "sigma={sigma}: out[{idx}]={have} left the valid pixel range"
+            );
+            max_dev = max_dev.max((want - have).abs());
+        }
+
+        if let Some(prev) = prev_max_dev {
+            assert!(
+                max_dev <= prev + 1e-4,
+                "deviation from the input grew as sigma shrank, from {prev} to {max_dev} at \
+                 sigma={sigma}, expected it to hold steady or shrink toward the identity"
+            );
+        }
+        prev_max_dev = Some(max_dev);
+    }
+
+    let final_dev = prev_max_dev.expect("the sweep ran at least one sigma");
+    assert!(
+        final_dev < 0.05,
+        "at sigma 0 the two-stage filter should be nearly the identity over textured content, \
+         got a maximum deviation of {final_dev} from the input"
+    );
+}
+
+/// A non-finite sigma reaching `run_two_stage` must not leave the output
+/// non-finite or out of range, at the public API boundary rather than
+/// inside any one kernel.
+///
+/// `sigmas` feeds both the admission threshold grouping uses and the
+/// noise variance the filter kernels shrink by. This pins the whole
+/// path at once, so a future change to either use of `sigmas` that
+/// reintroduces an unbounded result would fail here even if it slipped
+/// past a narrower test.
+///
+/// Finite and in-range is not enough on its own. A fully black frame is
+/// also finite and in range, and a filter that quietly zeroes everything
+/// under a noise level it cannot make sense of has destroyed the frame
+/// just as thoroughly as one that blows it up, only more quietly. The
+/// variance and correlation checks below catch that. A filter with no
+/// real noise level to shrink by has no principled reason to remove
+/// signal it cannot evaluate, so the correct fail-safe response is to
+/// leave the content close to untouched, not delete it.
+#[test]
+fn non_finite_sigma_reaching_run_two_stage_stays_bounded() {
+    let (w, h) = (64u32, 64u32);
+    let frame = textured_frame(w, h);
+    let client = make_client();
+    let params = CollabParams {
+        channels: ChannelMode::Luma,
+        ..CollabParams::default()
+    };
+    let mut pipeline = CollabPipeline::<R>::new(&client, params, w, h).expect("pipeline construction failed");
+
+    let input = client.create_from_slice(f32::as_bytes(&frame));
+    let output = client.empty(frame.len() * size_of::<f32>());
+    pipeline
+        .run_two_stage(&input, &[f32::NAN], &output)
+        .expect("run_two_stage failed");
+
+    let out_bytes = client.read_one(output).expect("output readback failed");
+    let out = f32::from_bytes(&out_bytes)[..frame.len()].to_vec();
+
+    for (idx, &v) in out.iter().enumerate() {
+        assert!(
+            v.is_finite(),
+            "out[{idx}]={v} is not finite under a non-finite sigma"
+        );
+        assert!(
+            (-0.1..=1.1).contains(&v),
+            "out[{idx}]={v} left the valid pixel range under a non-finite sigma"
+        );
+    }
+
+    let n = out.len() as f64;
+    let in_mean: f64 = frame.iter().map(|&v| v as f64).sum::<f64>() / n;
+    let out_mean: f64 = out.iter().map(|&v| v as f64).sum::<f64>() / n;
+    let in_var: f64 = frame.iter().map(|&v| (v as f64 - in_mean).powi(2)).sum::<f64>() / n;
+    let out_var: f64 = out.iter().map(|&v| (v as f64 - out_mean).powi(2)).sum::<f64>() / n;
+    let cov: f64 = out
+        .iter()
+        .zip(frame.iter())
+        .map(|(&o, &i)| (o as f64 - out_mean) * (i as f64 - in_mean))
+        .sum::<f64>()
+        / n;
+    let correlation = cov / (in_var.sqrt() * out_var.sqrt());
+
+    assert!(
+        in_var > 1e-6,
+        "sanity check: textured_frame must itself carry real variance ({in_var}) for the \
+         checks below to mean anything"
+    );
+    assert!(
+        out_var > 0.5 * in_var,
+        "output variance {out_var} collapsed relative to the input's {in_var} under a \
+         non-finite sigma -- a black or otherwise flattened frame would pass the \
+         finite/in-range checks above while failing this one"
+    );
+    assert!(
+        correlation > 0.9,
+        "output barely correlates with the input ({correlation}) under a non-finite sigma -- \
+         a bounded but scrambled frame would pass the finite/in-range checks above while \
+         failing this one"
+    );
 }

@@ -154,6 +154,23 @@ impl<R: Runtime> CollabPipeline<R> {
         // finds real matches at sigma 0, where `floor` itself collapses
         // to 0 and would otherwise leave `tau` at 0 too, admitting
         // nothing but a reference's own self match.
+        //
+        // `tau` only ever gates admission in `collab_group_spatial`, a
+        // candidate patch joins a group when its distance to the
+        // reference is at most `tau`. A reference's own self match, at
+        // distance 0, is always seeded into the group before that gate
+        // runs, so every group holds at least one member regardless of
+        // `tau`. A `sigmas` entry that is not finite makes `sum_sq`, and
+        // therefore `floor`, not finite too. `f32::max(floor,
+        // floor_epsilon)` discards a non-finite `floor` and returns
+        // `floor_epsilon`, the same small, fixed, always-positive
+        // constant sigma 0 already falls back to. `tau` then admits
+        // close to nothing beyond the guaranteed self match, the most
+        // restrictive grouping this pipeline ever runs, not an
+        // unbounded or negative one. `tau` never multiplies into a
+        // pixel or coefficient value anywhere downstream, so a
+        // restrictive `tau` cannot amplify anything, only shrink every
+        // group toward its self-only floor.
         let scale = channel_scale(self.params.channels);
         let sum_sq: f32 = sigmas.iter().map(|&s| s * s).sum();
         let floor = 2.0 * scale * sum_sq * PATCH_AREA as f32;

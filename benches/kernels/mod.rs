@@ -9,6 +9,7 @@ pub mod bilateral;
 pub mod collab_aggregate;
 pub mod collab_group;
 pub mod collab_ht;
+pub mod collab_weight_ratio;
 pub mod collab_wiener;
 pub mod copy;
 pub mod dist_2d_weight;

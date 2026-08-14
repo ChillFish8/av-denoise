@@ -25,6 +25,7 @@ fn pending_survives_denoiser_drop() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        track_weight_sq: false,
         hq: None,
     };
 

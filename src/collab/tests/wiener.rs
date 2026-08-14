@@ -4,7 +4,7 @@ use cubecl::server::Handle;
 use super::helpers::{R, deterministic_texture, make_client, noisy_field_over, plant_patch};
 use crate::collab::geometry::{filtered_buf_len, member_buf_len, ref_count, refs_along};
 use crate::collab::kernels::filter_ht::collab_filter_ht;
-use crate::collab::kernels::filter_wiener::collab_filter_wiener;
+use crate::collab::kernels::filter_wiener::{collab_filter_wiener, wiener_shrinkage_factor};
 use crate::collab::kernels::group::collab_group_spatial;
 
 fn variance(data: &[f32]) -> f64 {
@@ -232,6 +232,58 @@ fn zero_sigma_is_identity() {
     }
 }
 
+/// A non-finite sigma must never turn the shrinkage factor into an
+/// amplifier.
+///
+/// `w = p * p / max(p * p + v_j, WIENER_EPSILON)` is a shrinkage factor by
+/// definition, mathematically bounded to `[0, 1]` whenever `v_j` is a real
+/// variance, since the denominator can only be as small as the numerator.
+/// But `v_j` propagates from the caller-supplied sigma, and if that sigma
+/// is `NaN` (which a poisoned upstream noise estimate can produce), the
+/// sum `p * p + v_j` is `NaN` too. `f32::max(NaN, WIENER_EPSILON)`
+/// silently discards the `NaN` and returns `WIENER_EPSILON` (`1e-20`)
+/// instead, so the "shrinkage" factor becomes `p * p / 1e-20`, unbounded
+/// and enormous for any ordinary coefficient. That is not a shrinkage
+/// factor collapsing to a safe default, it is `max` treating an undefined
+/// variance as if it were known to be essentially zero, the opposite of
+/// the intended fail-safe.
+///
+/// This plants real (non-flat) content so the pilot carries genuine
+/// nonzero coefficients for `w` to blow up, and checks the reconstructed
+/// patch never leaves a sane multiple of the input's own range.
+#[test]
+fn non_finite_sigma_does_not_amplify_the_output() {
+    let (w, h) = (32u32, 32u32);
+    let mut frame = vec![0.3f32; (w * h) as usize];
+    let texture = deterministic_texture(11);
+    plant_patch(&mut frame, w, 12, 12, &texture);
+
+    let client = make_client();
+    let handle = client.create_from_slice(f32::as_bytes(&frame));
+    let groups = run_group_raw(&client, &handle, frame.len(), w, h, 0.0, 1e-6, 6, 8);
+
+    let (filtered, weights) =
+        run_wiener_raw(&client, &handle, &handle, frame.len(), &groups, w, h, 8, f32::NAN);
+
+    let in_min = frame.iter().cloned().fold(f32::INFINITY, f32::min);
+    let in_max = frame.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let bound = (in_max - in_min).max(1.0) * 4.0;
+
+    for (idx, &v) in filtered.iter().enumerate() {
+        assert!(
+            v.is_finite() && v.abs() <= in_max.abs().max(in_min.abs()) + bound,
+            "filtered[{idx}]={v} escaped a sane multiple of the input range \
+             [{in_min}, {in_max}] under a non-finite sigma"
+        );
+    }
+    for (idx, &v) in weights.iter().enumerate() {
+        assert!(
+            v.is_finite(),
+            "group_weight[{idx}]={v} is not finite under a non-finite sigma"
+        );
+    }
+}
+
 /// A flat, exactly noise-free pilot next to a genuinely noisy copy of
 /// the same content, both grouped into a full 8-member stack (every
 /// candidate the pilot offers is an exact match, since it is flat).
@@ -291,4 +343,82 @@ fn flat_field_noise_crushed_harder_than_ht() {
         "expected Wiener-filtered variance ({wiener_var}) to be at most hard-threshold-filtered \
          variance ({ht_var}), both from the same full 8-member group"
     );
+}
+
+#[cube(launch_unchecked)]
+fn wiener_shrinkage_factor_probe(p: &Array<f32>, vj: &Array<f32>, out: &mut Array<f32>, n: u32) {
+    let tid = ABSOLUTE_POS_X;
+    if tid < n {
+        out[tid as usize] = wiener_shrinkage_factor(p[tid as usize], vj[tid as usize]);
+    }
+}
+
+/// Pins the shrinkage factor itself to `[0, 1]` for a spread of pilot
+/// and variance inputs, including a `NaN` variance, an infinite
+/// variance, a zero pilot, and a huge pilot, rather than only checking
+/// that a whole filtered patch stays in some generous range.
+///
+/// A regression that made the shrinkage factor 1.5 or 3 instead of
+/// unbounded would still pass a test that only bounds a filtered patch
+/// against several times the input's own range. Bounding the factor
+/// directly closes that gap.
+#[test]
+fn shrinkage_factor_stays_in_zero_one_for_every_input() {
+    let client = make_client();
+
+    let p = vec![0.5f32, 0.0, 1.0e6, 0.5, 0.5, f32::NAN, 0.0, 1.0e6];
+    let vj = vec![0.01f32, 0.01, 0.01, f32::NAN, f32::INFINITY, 0.01, 0.0, f32::NAN];
+    let n = p.len();
+
+    let p_buf = client.create_from_slice(f32::as_bytes(&p));
+    let vj_buf = client.create_from_slice(f32::as_bytes(&vj));
+    let out_buf = client.empty(n * size_of::<f32>());
+
+    unsafe {
+        wiener_shrinkage_factor_probe::launch_unchecked::<R>(
+            &client,
+            CubeCount::new_1d(1),
+            CubeDim::new_1d(n as u32),
+            ArrayArg::from_raw_parts(p_buf, n),
+            ArrayArg::from_raw_parts(vj_buf, n),
+            ArrayArg::from_raw_parts(out_buf.clone(), n),
+            n as u32,
+        );
+    }
+
+    let bytes = client
+        .read_one(out_buf)
+        .expect("shrinkage factor readback failed");
+    let w = f32::from_bytes(&bytes)[..n].to_vec();
+
+    for (idx, &value) in w.iter().enumerate() {
+        assert!(
+            value.is_finite() && (0.0..=1.0).contains(&value),
+            "w[{idx}] (p={}, vj={})={value} is outside [0, 1]",
+            p[idx],
+            vj[idx]
+        );
+    }
+
+    // A NaN variance (indices 3 and 7) means the noise level for that
+    // coefficient is unknown, neither large nor small, so it passes
+    // through untouched at exactly 1 rather than being deleted at 0 on
+    // a noise level nobody actually measured. Trust of exactly 1 can
+    // never amplify anything, so this stays just as safe as shrinking
+    // to 0 would have been.
+    assert_eq!(w[3], 1.0, "a NaN variance must yield exactly 1, got {}", w[3]);
+    assert_eq!(w[7], 1.0, "a NaN variance must yield exactly 1, got {}", w[7]);
+    // An infinite variance (index 4) means the coefficient is pure
+    // noise, and must also shrink to 0.
+    assert_eq!(
+        w[4], 0.0,
+        "an infinite variance must yield exactly 0, got {}",
+        w[4]
+    );
+    // A zero pilot (index 1) carries no signal, so its coefficient
+    // shrinks to 0 regardless of the variance.
+    assert_eq!(w[1], 0.0, "a zero pilot must yield exactly 0, got {}", w[1]);
+    // A huge pilot next to an ordinary variance (index 2) is confidently
+    // real signal, so it passes through close to unchanged.
+    assert!(w[2] > 0.99, "a huge pilot should keep w near 1, got {}", w[2]);
 }

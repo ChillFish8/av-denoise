@@ -875,7 +875,6 @@ impl NoiseEstimator {
 
     /// The current smoothed per-channel sigma, or `None` before the
     /// first [`Self::update`] call.
-    #[cfg(test)]
     pub(super) fn current(&self) -> Option<&[f32]> {
         self.ema.as_deref()
     }

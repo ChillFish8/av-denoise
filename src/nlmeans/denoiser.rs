@@ -1,5 +1,3 @@
-use std::marker::PhantomData;
-
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
@@ -26,9 +24,29 @@ use super::noise::{
     zero_temporal_stats_slot,
 };
 use super::params::{NlmParams, SEPARABLE_THRESHOLD, sigma_eff, validate_dimensions};
-use super::pending::Pending;
+use super::pending::{Pending, unpack_frame};
 use super::prefilter::{PrefilterCtx, PrefilterMode, run_prefilter};
 use super::{BLOCK_1D, MAX_GRID_1D};
+
+/// A denoised frame that has finished its kernels but is still resident
+/// on the GPU.
+///
+/// [`NlmDenoiser::denoise_submit_gpu`] returns this instead of starting a
+/// readback, for a caller that queues more GPU work against the frame
+/// rather than pulling it back to the host straight away.
+///
+/// `handle` points at one of the denoiser's two output slots, and it
+/// stays valid only until that slot is reused. A denoiser only has two
+/// output slots, so at most two outstanding `GpuOutput`s (or
+/// [`Pending`]s, which are built from the same slots) may exist for one
+/// denoiser at a time. Submitting a third before an earlier one is
+/// consumed reuses its slot and silently corrupts it.
+pub struct GpuOutput {
+    /// The GPU buffer holding the denoised frame.
+    pub handle: Handle,
+    /// Which of the denoiser's two output slots `handle` came from.
+    pub slot: usize,
+}
 
 /// The stateful NLMeans denoiser that owns the GPU buffers.
 ///
@@ -73,6 +91,21 @@ pub struct NlmDenoiser<R: Runtime> {
     pub(super) weight_sum: Handle,
     /// The largest neighbour weight at each pixel.
     pub(super) max_weight: Handle,
+    /// The sum of squared neighbour weights at each pixel, alongside
+    /// `weight_sum`.
+    ///
+    /// It only exists when `NlmParams::track_weight_sq` is set, because
+    /// nothing reads it otherwise and every windowed and separable
+    /// kernel would pay for writing it regardless.
+    pub(super) weight_sq_sum: Option<Handle>,
+    /// A small placeholder passed as the weight-squared argument to every
+    /// kernel that can accumulate it, whenever `weight_sq_sum` does not
+    /// exist.
+    ///
+    /// The kernel drops the write at compile time in that case, so this
+    /// buffer is never indexed and its size does not matter. It is tiny,
+    /// so unlike `weight_sq_sum` it is always allocated.
+    pub(super) weight_sq_sum_dummy: Handle,
     /// Weight scratch for the path that compares a frame against itself.
     pub(super) weight_buf: Handle,
     /// The raw forward distance on the separable path.
@@ -296,6 +329,8 @@ impl<R: Runtime> NlmDenoiser<R> {
         let accum = client.empty(frame_bytes);
         let weight_sum = client.empty(scalar_bytes);
         let max_weight = client.empty(scalar_bytes);
+        let weight_sq_sum = params.track_weight_sq.then(|| client.empty(scalar_bytes));
+        let weight_sq_sum_dummy = client.empty(size_of::<f32>());
         let weight_buf = client.empty(scalar_bytes);
         let raw_fwd = client.empty(scalar_bytes);
         let raw_bwd = client.empty(scalar_bytes);
@@ -487,6 +522,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             accum,
             weight_sum,
             max_weight,
+            weight_sq_sum,
+            weight_sq_sum_dummy,
             weight_buf,
             raw_fwd,
             raw_bwd,
@@ -1184,6 +1221,38 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.ring_head += 1;
     }
 
+    /// Queues the denoise kernels for the current window, without
+    /// reading the result back.
+    ///
+    /// Use this instead of [`Self::denoise_submit`] when the output has
+    /// more GPU work ahead of it, so the round trip to the host can be
+    /// skipped until the value the caller actually wants is ready. The
+    /// returned [`GpuOutput`] documents the lifetime the caller has to
+    /// respect.
+    ///
+    /// Returns `Ok(None)` while the temporal window is still filling.
+    pub fn denoise_submit_gpu(&mut self) -> Result<Option<GpuOutput>, anyhow::Error> {
+        let total_frames = self.params.total_frames() as usize;
+        if self.frames_loaded < total_frames {
+            return Ok(None);
+        }
+
+        if self.noise_results.is_some() {
+            self.update_noise_estimate()?;
+        }
+        self.rebuild_spatial_offset_lut();
+
+        let slot = self.next_output_slot;
+        self.next_output_slot = (slot + 1) % self.outputs.len();
+
+        self.run_denoise_kernels(slot)?;
+
+        Ok(Some(GpuOutput {
+            handle: self.outputs[slot].clone(),
+            slot,
+        }))
+    }
+
     /// Queues the denoise kernels for the current window and starts the
     /// readback.
     ///
@@ -1200,20 +1269,9 @@ impl<R: Runtime> NlmDenoiser<R> {
     ///
     /// Returns `Ok(None)` while the temporal window is still filling.
     pub fn denoise_submit(&mut self) -> Result<Option<Pending<R>>, anyhow::Error> {
-        let total_frames = self.params.total_frames() as usize;
-        if self.frames_loaded < total_frames {
+        let Some(output) = self.denoise_submit_gpu()? else {
             return Ok(None);
-        }
-
-        if self.noise_results.is_some() {
-            self.update_noise_estimate()?;
-        }
-        self.rebuild_spatial_offset_lut();
-
-        let slot = self.next_output_slot;
-        self.next_output_slot = (slot + 1) % self.outputs.len();
-
-        self.run_denoise_kernels(slot)?;
+        };
 
         // Start the readback right away, so the GPU-side copy is queued
         // before the caller dispatches the next frame's kernels.
@@ -1223,18 +1281,36 @@ impl<R: Runtime> NlmDenoiser<R> {
         // internals. That owned client lives inside the future, so the
         // future is genuinely `'static` and the `Pending` can outlive
         // the denoiser without any lifetime tricks.
-        let handle = self.outputs[slot].clone();
         let client = self.client.clone();
-        let fut = Box::pin(async move { client.read_async(vec![handle]).await });
+        let fut = Box::pin(async move { client.read_async(vec![output.handle]).await });
 
         let pixels = (self.width * self.height) as usize;
-        Ok(Some(Pending {
+        Ok(Some(Pending::new(
             fut,
-            channels: self.params.channels.count(),
-            stored_ch: self.params.channels.storage_count(),
+            self.params.channels.count(),
+            self.params.channels.storage_count(),
             pixels,
-            _marker: PhantomData,
-        }))
+        )))
+    }
+
+    /// The smoothed per-channel sigma estimate NLMeans is currently
+    /// filtering with.
+    ///
+    /// This is `sigma_override` broadcast to every channel when HQ
+    /// pinned a fixed sigma. Otherwise it is the median chain's smoothed
+    /// estimate once one has landed, and zeros before that first
+    /// estimate and on the fast path where no estimate ever runs.
+    pub fn current_sigmas(&self) -> [f32; 3] {
+        if let Some(sigma) = self.params.hq.and_then(|hq| hq.sigma_override) {
+            return [sigma; 3];
+        }
+
+        let channels = self.params.channels.count() as usize;
+        let mut sigmas = [0.0f32; 3];
+        if let Some(smoothed) = self.noise_estimator.current() {
+            sigmas[..channels].copy_from_slice(&smoothed[..channels]);
+        }
+        sigmas
     }
 
     /// Refreshes the derived filter parameters from the centre slot's
@@ -1375,6 +1451,57 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(Some(self.output_scratch.as_slice()))
     }
 
+    /// How many tail frames a call to [`Self::flush`] must emit for the
+    /// stream pushed so far.
+    ///
+    /// While frames were being pushed the backend produced one output
+    /// per push beyond the temporal radius, or none at all if the
+    /// stream was shorter than that. This is the remaining difference,
+    /// so a caller driving [`Self::flush_step_gpu`] directly knows how
+    /// many `Some` results to collect before the stream is fully
+    /// drained.
+    ///
+    /// It reads as zero for spatial mode, where there is no trailing
+    /// context to drain, and for a stream that has not pushed anything
+    /// yet.
+    pub(crate) fn flush_target(&self) -> usize {
+        let temporal_radius = self.params.temporal_radius as usize;
+        if temporal_radius == 0 || self.real_pushes == 0 {
+            0
+        } else {
+            self.real_pushes.min(temporal_radius)
+        }
+    }
+
+    /// Runs one step of the end-of-stream drain. It duplicates the most
+    /// recently pushed frame forward and submits the window that
+    /// results.
+    ///
+    /// Returns `Ok(None)` while the very first duplicates are still
+    /// filling out a window that never reached its full size during
+    /// pushing. Every step after the window is full returns `Ok(Some)`,
+    /// so a caller has to stop on its own once it has collected
+    /// [`Self::flush_target`] outputs, not on seeing `None` again.
+    ///
+    /// [`Self::flush`] is a loop over this method. A caller that wants
+    /// the tail frames to stay on the GPU for further work, rather than
+    /// making a round trip through the host, can drive this directly
+    /// instead and check its own count against [`Self::flush_target`].
+    ///
+    /// This assumes there is a frame to duplicate, which means
+    /// `flush_target() > 0`. Calling it on spatial mode, or before any
+    /// frame has been pushed, duplicates a frame that was never written.
+    pub(crate) fn flush_step_gpu(&mut self) -> Result<Option<GpuOutput>, anyhow::Error> {
+        let total_frames = self.params.total_frames() as usize;
+
+        self.duplicate_last_frame();
+        if self.frames_loaded < total_frames {
+            self.frames_loaded += 1;
+        }
+
+        self.denoise_submit_gpu()
+    }
+
     /// Produces the frames still held at the end of a stream.
     ///
     /// For the last few frames the temporal window is kept full by
@@ -1383,46 +1510,24 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// `sink` is called once per frame produced, and the slice it
     /// receives is only valid for that call.
     pub fn flush(&mut self, mut sink: impl FnMut(&[f32])) -> Result<(), anyhow::Error> {
-        let temporal_radius = self.params.temporal_radius as usize;
-        let total_frames = self.params.total_frames() as usize;
-
-        // Spatial mode has no trailing context to drain.
-        if temporal_radius == 0 || self.real_pushes == 0 {
-            self.reset_stream_state();
-            return Ok(());
-        }
-
-        // While frames were being pushed the backend produced one
-        // output per push beyond the radius, or none at all if the
-        // stream was shorter than that. Flush has to make up the
-        // difference, so the caller gets one output per pushed frame.
-        let target = self.real_pushes.min(temporal_radius);
+        let target = self.flush_target();
         let mut emitted = 0usize;
 
-        // The window never filled, so pad it with copies of the last
-        // pushed frame until the neighbourhood is complete, then start
-        // emitting. Each padding step moves the centre forward by one,
-        // so several outputs can come out before the loop below takes
-        // over.
-        while self.frames_loaded < total_frames && emitted < target {
-            self.duplicate_last_frame();
-            self.frames_loaded += 1;
-            if self.frames_loaded == total_frames
-                && let Some(pending) = self.denoise_submit()?
-            {
-                pending.wait_into(&mut self.output_scratch)?;
-                sink(self.output_scratch.as_slice());
-                emitted += 1;
-            }
-        }
-
-        // The ring is full, but the real frames ahead of the centre are
-        // running out. Each pass copies the most recent frame forward
-        // and emits one more output.
         while emitted < target {
-            self.duplicate_last_frame();
-            if let Some(pending) = self.denoise_submit()? {
-                pending.wait_into(&mut self.output_scratch)?;
+            if let Some(output) = self.flush_step_gpu()? {
+                let bytes = self
+                    .client
+                    .read_one(output.handle)
+                    .map_err(|e| anyhow::anyhow!("flush readback failed: {e}"))?;
+                let data = f32::from_bytes(&bytes);
+                let pixels = (self.width * self.height) as usize;
+                unpack_frame(
+                    data,
+                    pixels,
+                    self.params.channels.count() as usize,
+                    self.params.channels.storage_count() as usize,
+                    &mut self.output_scratch,
+                );
                 sink(self.output_scratch.as_slice());
                 emitted += 1;
             }

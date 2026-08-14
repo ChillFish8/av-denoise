@@ -2,12 +2,14 @@ use std::time::{Duration, Instant};
 
 use av_denoise::accelerate::Accelerator;
 use av_denoise::{
+    Algorithm,
     ChannelMode,
     Denoiser,
     DenoiserOptions,
     DenoisingMode,
     Device,
     MotionCompensationMode,
+    Nl3dOptions,
     PrefilterMode,
 };
 
@@ -76,17 +78,20 @@ impl BenchResult {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn options(
     channel_mode: ChannelMode,
     mode: DenoisingMode,
     prefilter: PrefilterMode,
     motion_compensation: MotionCompensationMode,
+    algorithm: Algorithm,
 ) -> DenoiserOptions {
     DenoiserOptions::builder()
         .channel_mode(channel_mode)
         .mode(mode)
         .prefilter(prefilter)
         .motion_compensation(motion_compensation)
+        .algorithm(algorithm)
         .build()
 }
 
@@ -99,6 +104,7 @@ fn bench_push_recv(
     mode: DenoisingMode,
     prefilter: PrefilterMode,
     motion_compensation: MotionCompensationMode,
+    algorithm: Algorithm,
 ) -> Result<BenchResult, anyhow::Error> {
     let ch = channel_mode.count();
     let frame = make_synthetic_frame(W, H, ch);
@@ -108,7 +114,7 @@ fn bench_push_recv(
         device,
         W,
         H,
-        options(channel_mode, mode, prefilter, motion_compensation),
+        options(channel_mode, mode, prefilter, motion_compensation, algorithm),
     )?;
     let accelerator = denoiser.selected_accelerator();
 
@@ -195,12 +201,15 @@ fn main() {
     // Side-by-side ordering: each temporal config is followed by its
     // motion-compensation variant so the cost delta from `--motion-compensation`
     // is visible on adjacent rows.
+    let nl3d = Algorithm::Nl3d(Nl3dOptions::default());
+
     let configs: &[(
         &str,
         ChannelMode,
         DenoisingMode,
         PrefilterMode,
         MotionCompensationMode,
+        Algorithm,
     )] = &[
         (
             "spatial_luma",
@@ -208,6 +217,7 @@ fn main() {
             DenoisingMode::Spacial,
             PrefilterMode::None,
             MotionCompensationMode::None,
+            Algorithm::Nlmeans,
         ),
         (
             "spatial_chroma",
@@ -215,6 +225,7 @@ fn main() {
             DenoisingMode::Spacial,
             PrefilterMode::None,
             MotionCompensationMode::None,
+            Algorithm::Nlmeans,
         ),
         (
             "spatial_yuv",
@@ -222,6 +233,7 @@ fn main() {
             DenoisingMode::Spacial,
             PrefilterMode::None,
             MotionCompensationMode::None,
+            Algorithm::Nlmeans,
         ),
         (
             "temporal_r1_yuv",
@@ -229,6 +241,7 @@ fn main() {
             DenoisingMode::Temporal { radius: 1 },
             PrefilterMode::None,
             MotionCompensationMode::None,
+            Algorithm::Nlmeans,
         ),
         (
             "temporal_r1_yuv+mc",
@@ -236,6 +249,7 @@ fn main() {
             DenoisingMode::Temporal { radius: 1 },
             PrefilterMode::None,
             mc,
+            Algorithm::Nlmeans,
         ),
         (
             "temporal_r2_yuv",
@@ -243,6 +257,7 @@ fn main() {
             DenoisingMode::Temporal { radius: 2 },
             PrefilterMode::None,
             MotionCompensationMode::None,
+            Algorithm::Nlmeans,
         ),
         (
             "temporal_r2_yuv+mc",
@@ -250,6 +265,7 @@ fn main() {
             DenoisingMode::Temporal { radius: 2 },
             PrefilterMode::None,
             mc,
+            Algorithm::Nlmeans,
         ),
         (
             "spatial_luma+bilateral",
@@ -257,6 +273,7 @@ fn main() {
             DenoisingMode::Spacial,
             bilateral,
             MotionCompensationMode::None,
+            Algorithm::Nlmeans,
         ),
         (
             "spatial_chroma+bilateral",
@@ -264,6 +281,7 @@ fn main() {
             DenoisingMode::Spacial,
             bilateral,
             MotionCompensationMode::None,
+            Algorithm::Nlmeans,
         ),
         (
             "spatial_yuv+bilateral",
@@ -271,6 +289,7 @@ fn main() {
             DenoisingMode::Spacial,
             bilateral,
             MotionCompensationMode::None,
+            Algorithm::Nlmeans,
         ),
         (
             "temporal_r1_yuv+bilateral",
@@ -278,6 +297,7 @@ fn main() {
             DenoisingMode::Temporal { radius: 1 },
             bilateral,
             MotionCompensationMode::None,
+            Algorithm::Nlmeans,
         ),
         (
             "temporal_r1_yuv+bilateral+mc",
@@ -285,6 +305,7 @@ fn main() {
             DenoisingMode::Temporal { radius: 1 },
             bilateral,
             mc,
+            Algorithm::Nlmeans,
         ),
         (
             "temporal_r2_yuv+bilateral",
@@ -292,6 +313,7 @@ fn main() {
             DenoisingMode::Temporal { radius: 2 },
             bilateral,
             MotionCompensationMode::None,
+            Algorithm::Nlmeans,
         ),
         (
             "temporal_r2_yuv+bilateral+mc",
@@ -299,10 +321,25 @@ fn main() {
             DenoisingMode::Temporal { radius: 2 },
             bilateral,
             mc,
+            Algorithm::Nlmeans,
+        ),
+        // nl3d always runs the HQ front end internally, so this is the
+        // one row in this file that is not `Algorithm::Nlmeans`. Same
+        // temporal radius and channel mode as `temporal_r2_yuv` above,
+        // so the fps/ms delta between the two rows is the cost of the
+        // collaborative-filter stage on top of an otherwise identical
+        // front end.
+        (
+            "temporal_r2_yuv+nl3d",
+            ChannelMode::Yuv,
+            DenoisingMode::Temporal { radius: 2 },
+            PrefilterMode::None,
+            MotionCompensationMode::None,
+            nl3d,
         ),
     ];
 
-    for (name, ch, mode, prefilter, motion_compensation) in configs {
+    for (name, ch, mode, prefilter, motion_compensation, algorithm) in configs {
         match bench_push_recv(
             name,
             &cli.accelerators,
@@ -311,6 +348,7 @@ fn main() {
             *mode,
             *prefilter,
             *motion_compensation,
+            *algorithm,
         ) {
             Ok(result) => result.print(),
             Err(err) => eprintln!("[{name}] failed: {err:?}"),

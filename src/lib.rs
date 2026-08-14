@@ -9,6 +9,8 @@ pub mod collab;
 mod denoiser;
 pub mod device;
 #[doc(hidden)]
+pub mod nl3d;
+#[doc(hidden)]
 pub mod nlmeans;
 pub mod sniff;
 
@@ -20,6 +22,7 @@ pub use denoiser::{
     DenoiserOptions,
     DenoisingMode,
     MAX_PENDING,
+    Nl3dOptions,
     NlmTuning,
 };
 pub use device::Device;

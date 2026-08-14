@@ -29,14 +29,22 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 
+#  A severely broken denoiser can score worse than a flat predictor,
+# which ffmpeg reports as a negative XPSNR/SSIM value rather than
+# clamping at zero. The previous `[\d.]+` groups had no `-` in the
+# character class, so any negative value made the whole line fail to
+# match, `parse_xpsnr`/`parse_ssim` returned `None`, and a run that
+# actually completed and scored (badly) was misreported as FAILED
+# with no numbers at all. `-?` on each group fixes that without
+# changing what a normal positive score parses to.
 XPSNR_RE = re.compile(
-    r"XPSNR\s+y:\s*(inf|[\d.]+)\s+u:\s*(inf|[\d.]+)\s+v:\s*(inf|[\d.]+)"
-    r"\s+\(minimum:\s*(inf|[\d.]+)\)"
+    r"XPSNR\s+y:\s*(inf|-?[\d.]+)\s+u:\s*(inf|-?[\d.]+)\s+v:\s*(inf|-?[\d.]+)"
+    r"\s+\(minimum:\s*(inf|-?[\d.]+)\)"
 )
 
 SSIM_RE = re.compile(
-    r"SSIM\s+Y:([\d.]+)\s+\([^)]*\)\s+U:([\d.]+)\s+\([^)]*\)"
-    r"\s+V:([\d.]+)\s+\([^)]*\)\s+All:([\d.]+)\s+\([^)]*\)"
+    r"SSIM\s+Y:(-?[\d.]+)\s+\([^)]*\)\s+U:(-?[\d.]+)\s+\([^)]*\)"
+    r"\s+V:(-?[\d.]+)\s+\([^)]*\)\s+All:(-?[\d.]+)\s+\([^)]*\)"
 )
 
 # ffmpeg's framesync (the machinery behind dual-input filters like xpsnr
@@ -128,7 +136,13 @@ def load_config(config_path: Path) -> Config:
     runs: list[Run] = []
     for raw in data.get("runs", []):
         kind = raw.get("kind")
-        if kind not in ("noisy", "av-denoise", "ffmpeg-nlmeans", "ffmpeg-bm3d"):
+        if kind not in (
+            "noisy",
+            "av-denoise",
+            "av-denoise-nl3d",
+            "ffmpeg-nlmeans",
+            "ffmpeg-bm3d",
+        ):
             sys.exit(f"unknown kind in run {raw.get('name')!r}: {kind!r}")
         runs.append(
             Run(
@@ -263,14 +277,16 @@ def score_noisy(noisy: Path, ref: Path) -> tuple[bool, str]:
     return proc.returncode == 0, proc.stderr
 
 
-def score_av_denoise(run: Run, noisy: Path, ref: Path, device: str) -> tuple[bool, str]:
+def score_av_denoise(
+    run: Run, noisy: Path, ref: Path, device: str, subcommand: str = "nlmeans"
+) -> tuple[bool, str]:
     device_args = ["--device", device] if device else []
     p1_cmd = [
         "cargo", "run", "--release",
         "--bin", "av-denoise",
         "--features", "binary",
         "--",
-        "nlmeans",
+        subcommand,
         *run.args,
         *device_args,
         "--workers", str(run.workers),
@@ -412,6 +428,8 @@ def execute(
         ok, stderr = score_noisy(noisy, ref)
     elif run.kind == "av-denoise":
         ok, stderr = score_av_denoise(run, noisy, ref, device)
+    elif run.kind == "av-denoise-nl3d":
+        ok, stderr = score_av_denoise(run, noisy, ref, device, subcommand="nl3d")
     elif run.kind == "ffmpeg-nlmeans":
         ok, stderr = score_ffmpeg_nlmeans(run, noisy, ref)
     else:

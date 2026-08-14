@@ -1,9 +1,12 @@
 use std::collections::VecDeque;
 
 use cubecl::Runtime;
+use cubecl::prelude::ComputeClient;
 
 use crate::accelerate::Accelerator;
+use crate::collab::CollabParams;
 use crate::device::Device;
+use crate::nl3d::{Nl3dDenoiser, Nl3dParams};
 #[cfg(test)]
 use crate::nlmeans::MotionEstimation;
 use crate::nlmeans::{
@@ -43,6 +46,10 @@ pub struct DenoiserOptions {
     /// HQ also uses a different default `strength`, one that adapts to
     /// the temporal radius and the plane being denoised. See
     /// [`crate::nlmeans::hq_default_strength`].
+    ///
+    /// `Nl3d` runs the same HQ front end, then a collaborative-filter
+    /// cleanup pass on top. It reads its front-end strength from the
+    /// same table HQ does.
     #[builder(default = Algorithm::Nlmeans)]
     pub algorithm: Algorithm,
     /// Which reference image the NLM weights are computed against.
@@ -73,6 +80,101 @@ pub enum Algorithm {
     Nlmeans,
     /// Quality-focused NLMeans with noise-calibrated weighting.
     NlmeansHq(HqParams),
+    /// NLMeans followed by a collaborative-filter cleanup pass.
+    ///
+    /// Always runs the HQ front end, because the collaborative stage
+    /// needs the front end's estimated noise sigma to shrink its own
+    /// coefficients by.
+    Nl3d(Nl3dOptions),
+}
+
+/// Tuning for the [`Algorithm::Nl3d`] cascade.
+///
+/// `hq` configures the NLMeans front end the same way
+/// [`Algorithm::NlmeansHq`] does. The remaining fields tune the
+/// collaborative filter that runs second.
+///
+/// # Where the calibrated defaults come from
+///
+/// `front_strength_scale`, `residual_sigma_scale`, and `lambda_ht` were
+/// swept together on `clean-1080p.mkv` at temporal radius 2, noise
+/// levels 4, 6, and 8, one dial at a time with the others pinned, then
+/// checked for interaction with a small joint sweep around the chosen
+/// point. `k_max` and `tau_match` were left at their pre-existing
+/// values, not part of this sweep.
+///
+/// `residual_sigma_scale` went first, because a separate test
+/// (`residual_ratio_matches_measured_residual_within_the_known_independence_gap`
+/// in `src/nlmeans/tests/weight_ratio.rs`) had already measured the
+/// front end's true residual noise at about 1.92x what the analytic
+/// formula predicts. The sweep covered 1.0, 1.4, 1.9, 2.4, and 3.0,
+/// bracketed on both sides at all three noise levels, and 1.9 won by
+/// having the best worst-case luma XPSNR across the three levels,
+/// matching the independent measurement closely. SSIM agreed at every
+/// point tested.
+///
+/// `front_strength_scale` went next, at `residual_sigma_scale` fixed to
+/// 1.9. Luma XPSNR forms a broad, nearly flat plateau from 0.3 to 0.6 at
+/// every noise level, clearly ahead of 0.8 and 1.0, so the default moved
+/// from a 0.8 guess to 0.5, the plateau's centre. SSIM does not disagree
+/// anywhere on the plateau.
+///
+/// `lambda_ht` went last, at the two values above. Luma XPSNR favors 2.0
+/// over 2.7 at the two lighter noise levels but the two tie at the
+/// heaviest, while luma SSIM favors 2.7 at the two heavier noise levels.
+/// 2.7 is kept because it wins the noise level where XPSNR itself is
+/// tied and SSIM is not, so lowering it would only help the noise levels
+/// that already have the most headroom. This is the one dial where the
+/// two metrics point different directions depending on noise level.
+///
+/// The joint check varied `front_strength_scale` and `lambda_ht`
+/// together, one step either side of the chosen point, and found no
+/// combination that beat it by more than run-to-run noise, so no
+/// interaction large enough to move the calibration was found.
+///
+/// Radius 4 was checked afterward, with the same three values pinned
+/// rather than swept again. It shows the same or larger improvement
+/// over the radius-2 front end at every noise level, so the radius-2
+/// calibration carries over.
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct Nl3dOptions {
+    /// The front end's HQ parameters.
+    pub hq: HqParams,
+    /// A multiplier applied to the front end's calibrated strength
+    /// before it runs.
+    ///
+    /// Sitting below 1.0 leaves the front end filtering gently, so it
+    /// leaves structured residual noise behind for the collaborative
+    /// stage to remove through grouped shrinkage instead. Calibrated to
+    /// 0.5, see the struct-level docs for how.
+    pub front_strength_scale: f32,
+    /// Largest collaborative stack size, a power of two up to 8.
+    /// Defaults to 8.
+    pub k_max: u32,
+    /// Admission threshold multiplier on the patch noise floor.
+    /// Defaults to 3.0.
+    pub tau_match: f32,
+    /// Hard-threshold multiplier for the collaborative filter's first
+    /// stage. Calibrated to 2.7, see the struct-level docs for how.
+    pub lambda_ht: f32,
+    /// A multiplier on the analytic residual sigma the collaborative
+    /// stage shrinks with. Calibrated to 1.9, see the struct-level docs
+    /// for how.
+    pub residual_sigma_scale: f32,
+}
+
+impl Default for Nl3dOptions {
+    fn default() -> Self {
+        let collab = CollabParams::default();
+        Self {
+            hq: HqParams::default(),
+            front_strength_scale: 0.5,
+            k_max: collab.k_max,
+            tau_match: collab.tau_match,
+            lambda_ht: collab.lambda_ht,
+            residual_sigma_scale: 1.9,
+        }
+    }
 }
 
 /// Whether a frame is cleaned on its own or alongside its neighbours.
@@ -129,6 +231,8 @@ impl DenoiserOptions {
         // With auto-strength off, HQ reads `strength` as an absolute
         // value just like the fast path, so it falls back to the same
         // absolute default.
+        // `Nl3d` shares the HQ front end, so it reads `strength` from the
+        // same calibrated table `NlmeansHq` does.
         let explicit_strength = self.nlm.and_then(|t| t.strength);
         let strength = explicit_strength.unwrap_or(match self.algorithm {
             // The calibrated table is a multiplier on the measured
@@ -137,7 +241,12 @@ impl DenoiserOptions {
             Algorithm::NlmeansHq(hq) if hq.auto_strength => {
                 hq_default_strength(self.channel_mode, temporal_radius)
             },
-            Algorithm::NlmeansHq(_) | Algorithm::Nlmeans => NlmParams::default().strength,
+            Algorithm::Nl3d(opts) if opts.hq.auto_strength => {
+                hq_default_strength(self.channel_mode, temporal_radius)
+            },
+            Algorithm::NlmeansHq(_) | Algorithm::Nlmeans | Algorithm::Nl3d(_) => {
+                NlmParams::default().strength
+            },
         });
 
         let mut params = NlmParams {
@@ -148,8 +257,13 @@ impl DenoiserOptions {
             hq: match self.algorithm {
                 Algorithm::Nlmeans => None,
                 Algorithm::NlmeansHq(hq) => Some(hq),
+                Algorithm::Nl3d(opts) => Some(opts.hq),
             },
             strength,
+            // The collaborative stage measures how much noise the front
+            // end left behind, which needs the front end's own weight-
+            // squared accumulator turned on.
+            track_weight_sq: matches!(self.algorithm, Algorithm::Nl3d(_)),
             ..NlmParams::default()
         };
         if let Some(t) = self.nlm {
@@ -186,15 +300,90 @@ pub enum DenoiserError {
     Other(#[from] anyhow::Error),
 }
 
+/// Either denoiser a `Backend` runtime arm can hold.
+///
+/// This keeps `Backend`'s own match arms at one line each. Without it,
+/// adding a second denoiser type would multiply the runtime arms instead
+/// of fanning out once here.
+// Both variants are boxed so neither denoiser's size dictates every
+// `Engine` value's size, whichever variant is actually held.
+enum Engine<R: Runtime> {
+    Nlm(Box<NlmDenoiser<R>>),
+    Nl3d(Box<Nl3dDenoiser<R>>),
+}
+
+impl<R: Runtime> Engine<R> {
+    fn push_frame(&mut self, frame: &[f32]) {
+        match self {
+            Self::Nlm(d) => d.push_frame(frame),
+            Self::Nl3d(d) => d.push_frame(frame),
+        }
+    }
+
+    fn denoise_submit(&mut self) -> Result<Option<Pending<R>>, anyhow::Error> {
+        match self {
+            Self::Nlm(d) => d.denoise_submit(),
+            Self::Nl3d(d) => d.denoise_submit(),
+        }
+    }
+
+    fn flush(&mut self, sink: impl FnMut(&[f32])) -> Result<(), anyhow::Error> {
+        match self {
+            Self::Nlm(d) => d.flush(sink),
+            Self::Nl3d(d) => d.flush(sink),
+        }
+    }
+}
+
+/// Builds whichever [`Engine`] `algorithm` calls for.
+///
+/// `Algorithm::Nl3d` also carries the collaborative filter's own tuning,
+/// which is not part of `NlmParams`, so it is read from `algorithm`
+/// directly rather than from `params`.
+fn build_engine<R: Runtime>(
+    client: &ComputeClient<R>,
+    algorithm: &Algorithm,
+    params: NlmParams,
+    width: u32,
+    height: u32,
+) -> Result<Engine<R>, DenoiserError> {
+    match algorithm {
+        Algorithm::Nl3d(opts) => {
+            let collab = CollabParams {
+                channels: params.channels,
+                k_max: opts.k_max,
+                tau_match: opts.tau_match,
+                lambda_ht: opts.lambda_ht,
+                ..CollabParams::default()
+            };
+            let nl3d_params = Nl3dParams {
+                nlm: params,
+                front_strength_scale: opts.front_strength_scale,
+                collab,
+                residual_sigma_scale: opts.residual_sigma_scale,
+            };
+            Ok(Engine::Nl3d(Box::new(Nl3dDenoiser::new(
+                client,
+                nl3d_params,
+                width,
+                height,
+            )?)))
+        },
+        Algorithm::Nlmeans | Algorithm::NlmeansHq(_) => Ok(Engine::Nlm(Box::new(NlmDenoiser::new(
+            client, params, width, height,
+        )))),
+    }
+}
+
 enum Backend {
     #[cfg(feature = "cuda")]
-    Cuda(NlmDenoiser<cubecl::cuda::CudaRuntime>),
+    Cuda(Engine<cubecl::cuda::CudaRuntime>),
     #[cfg(feature = "rocm")]
-    Rocm(NlmDenoiser<cubecl::hip::HipRuntime>),
+    Rocm(Engine<cubecl::hip::HipRuntime>),
     #[cfg(any(feature = "vulkan", feature = "metal"))]
-    Wgpu(NlmDenoiser<cubecl::wgpu::WgpuRuntime>),
+    Wgpu(Engine<cubecl::wgpu::WgpuRuntime>),
     #[cfg(feature = "cpu")]
-    Cpu(NlmDenoiser<cubecl::cpu::CpuRuntime>),
+    Cpu(Engine<cubecl::cpu::CpuRuntime>),
 }
 
 enum BackendPending {
@@ -334,7 +523,7 @@ impl Denoiser {
 
         let channels = params.channels.count();
         let temporal_radius = params.temporal_radius;
-        let backend = build_backend(accelerator, device, params, width, height)?;
+        let backend = build_backend(accelerator, device, &options.algorithm, params, width, height)?;
 
         Ok(Self {
             backend,
@@ -503,6 +692,7 @@ impl Denoiser {
 fn build_backend(
     accel: Accelerator,
     device: &Device,
+    algorithm: &Algorithm,
     params: NlmParams,
     width: u32,
     height: u32,
@@ -512,31 +702,41 @@ fn build_backend(
         Accelerator::Cuda => {
             let dev = device.to_cuda()?;
             let client = <cubecl::cuda::CudaRuntime as Runtime>::client(&dev);
-            Ok(Backend::Cuda(NlmDenoiser::new(&client, params, width, height)))
+            Ok(Backend::Cuda(build_engine(
+                &client, algorithm, params, width, height,
+            )?))
         },
         #[cfg(feature = "rocm")]
         Accelerator::Rocm => {
             let dev = device.to_amd()?;
             let client = <cubecl::hip::HipRuntime as Runtime>::client(&dev);
-            Ok(Backend::Rocm(NlmDenoiser::new(&client, params, width, height)))
+            Ok(Backend::Rocm(build_engine(
+                &client, algorithm, params, width, height,
+            )?))
         },
         #[cfg(feature = "vulkan")]
         Accelerator::Vulkan => {
             let dev = device.to_wgpu()?;
             let client = <cubecl::wgpu::WgpuRuntime as Runtime>::client(&dev);
-            Ok(Backend::Wgpu(NlmDenoiser::new(&client, params, width, height)))
+            Ok(Backend::Wgpu(build_engine(
+                &client, algorithm, params, width, height,
+            )?))
         },
         #[cfg(feature = "metal")]
         Accelerator::Metal => {
             let dev = device.to_wgpu()?;
             let client = <cubecl::wgpu::WgpuRuntime as Runtime>::client(&dev);
-            Ok(Backend::Wgpu(NlmDenoiser::new(&client, params, width, height)))
+            Ok(Backend::Wgpu(build_engine(
+                &client, algorithm, params, width, height,
+            )?))
         },
         #[cfg(feature = "cpu")]
         Accelerator::Cpu => {
             let dev = device.to_cpu()?;
             let client = <cubecl::cpu::CpuRuntime as Runtime>::client(&dev);
-            Ok(Backend::Cpu(NlmDenoiser::new(&client, params, width, height)))
+            Ok(Backend::Cpu(build_engine(
+                &client, algorithm, params, width, height,
+            )?))
         },
         // Keeps the match exhaustive on docs.rs, where `cfg(docsrs)`
         // widens the `Accelerator` enum to include variants whose
@@ -787,6 +987,66 @@ mod options_tests {
     }
 
     #[test]
+    fn nl3d_sets_track_weight_sq() {
+        let opts = DenoiserOptions::builder()
+            .algorithm(Algorithm::Nl3d(Nl3dOptions::default()))
+            .build();
+        let params = opts.to_nlm_params();
+
+        assert!(
+            params.track_weight_sq,
+            "nl3d needs the front end's weight-squared sums tracked"
+        );
+    }
+
+    #[test]
+    fn nl3d_hq_field_is_populated_from_nl3d_options() {
+        let hq = HqParams {
+            auto_strength: false,
+            ..HqParams::default()
+        };
+        let opts = DenoiserOptions::builder()
+            .algorithm(Algorithm::Nl3d(Nl3dOptions {
+                hq,
+                ..Nl3dOptions::default()
+            }))
+            .build();
+        let params = opts.to_nlm_params();
+
+        assert_eq!(params.hq, Some(hq));
+    }
+
+    #[test]
+    fn nl3d_uses_the_hq_strength_table_when_auto_strength_is_on() {
+        let opts = DenoiserOptions::builder()
+            .channel_mode(ChannelMode::Luma)
+            .mode(DenoisingMode::Temporal { radius: 4 })
+            .algorithm(Algorithm::Nl3d(Nl3dOptions::default()))
+            .build();
+        let params = opts.to_nlm_params();
+
+        let expected = hq_default_strength(ChannelMode::Luma, 4);
+        assert!((params.strength - expected).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn nl3d_explicit_strength_wins_over_the_table() {
+        let opts = DenoiserOptions::builder()
+            .mode(DenoisingMode::Temporal { radius: 4 })
+            .algorithm(Algorithm::Nl3d(Nl3dOptions::default()))
+            .nlm(NlmTuning {
+                search_radius: None,
+                patch_radius: None,
+                strength: Some(0.99),
+                self_weight: None,
+            })
+            .build();
+        let params = opts.to_nlm_params();
+
+        assert!((params.strength - 0.99).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn motion_compensation_passthrough() {
         let opts = DenoiserOptions::builder()
             .mode(DenoisingMode::Temporal { radius: 1 })
@@ -864,6 +1124,22 @@ mod tests {
             opts(DenoisingMode::Spacial),
         )
         .expect("denoiser construction failed");
+        assert_eq!(d.selected_accelerator(), Accelerator::Vulkan);
+
+        d.push_frame(&frame(16, 16)).expect("push failed");
+        let out = d.recv_frame().expect("recv failed").expect("no frame");
+        assert_eq!(out.len(), 16 * 16);
+    }
+
+    #[test]
+    fn nl3d_algorithm_round_trips_through_the_facade() {
+        let opts = DenoiserOptions::builder()
+            .channel_mode(ChannelMode::Luma)
+            .mode(DenoisingMode::Spacial)
+            .algorithm(Algorithm::Nl3d(Nl3dOptions::default()))
+            .build();
+        let mut d = Denoiser::create(&[Accelerator::Vulkan], &Device::Default, 16, 16, opts)
+            .expect("nl3d denoiser construction failed");
         assert_eq!(d.selected_accelerator(), Accelerator::Vulkan);
 
         d.push_frame(&frame(16, 16)).expect("push failed");

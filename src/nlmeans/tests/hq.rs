@@ -13,6 +13,7 @@ fn base_params() -> NlmParams {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        track_weight_sq: false,
         hq: None,
     }
 }
@@ -32,6 +33,7 @@ fn hq_disabled_features_match_fast_mode() {
     let fast_out = fast.denoise().unwrap().unwrap().to_vec();
 
     let hq_params = NlmParams {
+        track_weight_sq: false,
         hq: Some(HqParams {
             auto_strength: false,
             noise_floor: false,
@@ -79,6 +81,7 @@ fn hq_noise_floor_changes_output() {
     let fast_out = fast.denoise().unwrap().unwrap().to_vec();
 
     let hq_params = NlmParams {
+        track_weight_sq: false,
         hq: Some(HqParams {
             auto_strength: false,
             noise_floor: true,
@@ -118,6 +121,7 @@ fn hq_uniform_input_passthrough() {
     let frame = make_uniform_frame(w, h, 1, 0.5);
 
     let params = NlmParams {
+        track_weight_sq: false,
         hq: Some(HqParams::with_sigma(8.0 / 255.0)),
         ..base_params()
     };
@@ -139,6 +143,7 @@ fn hq_temporal_smoke() {
 
     let params = NlmParams {
         temporal_radius: 1,
+        track_weight_sq: false,
         hq: Some(HqParams::with_sigma(6.0 / 255.0)),
         ..base_params()
     };
@@ -191,6 +196,7 @@ fn hq_auto_sigma_denoises() {
     let frame = make_noisy_gaussian_frame(w, h, 1, 0.5, &[8.0 / 255.0]);
 
     let params = NlmParams {
+        track_weight_sq: false,
         hq: Some(HqParams {
             auto_strength: true,
             noise_floor: true,
@@ -232,6 +238,7 @@ fn hq_auto_sigma_temporal_smoke() {
 
     let params = NlmParams {
         temporal_radius: 1,
+        track_weight_sq: false,
         hq: Some(HqParams {
             auto_strength: true,
             noise_floor: true,
@@ -282,6 +289,7 @@ fn hq_override_skips_estimation() {
     let h = 16;
 
     let params = NlmParams {
+        track_weight_sq: false,
         hq: Some(HqParams::with_sigma(8.0 / 255.0)),
         ..base_params()
     };
@@ -314,6 +322,7 @@ fn hq_reset_clears_noise_state() {
     let low = make_uniform_frame(w, h, 1, 0.5);
 
     let params = NlmParams {
+        track_weight_sq: false,
         hq: Some(HqParams {
             auto_strength: true,
             noise_floor: true,
@@ -360,6 +369,7 @@ fn hq_pilot_temporal_end_to_end() {
     let params = NlmParams {
         temporal_radius: 1,
         prefilter: PrefilterMode::NlmSpatial { strength_scale: 1.0 },
+        track_weight_sq: false,
         hq: Some(HqParams {
             auto_strength: true,
             noise_floor: true,
@@ -420,6 +430,7 @@ fn hq_pilot_differs_from_unguided() {
 
     let hq_params = |prefilter: PrefilterMode| NlmParams {
         prefilter,
+        track_weight_sq: false,
         hq: Some(HqParams {
             auto_strength: true,
             noise_floor: true,
@@ -476,6 +487,7 @@ fn temporal_conf_params(temporal_confidence: bool) -> NlmParams {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
+        track_weight_sq: false,
         hq: Some(HqParams {
             auto_strength: false,
             noise_floor: false,
@@ -569,6 +581,7 @@ fn hq_temporal_confidence_disabled_ignores_thsad_scale() {
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::None,
             motion_compensation: MotionCompensationMode::None,
+            track_weight_sq: false,
             hq: Some(HqParams {
                 auto_strength: true,
                 noise_floor: true,
@@ -614,6 +627,7 @@ fn hq_temporal_mc_confidence_smoke() {
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         },
+        track_weight_sq: false,
         hq: Some(HqParams::with_sigma(6.0 / 255.0)),
         ..base_params()
     };
@@ -666,6 +680,7 @@ fn hq_sigma_scale_multiplies_the_folded_estimate() {
 
     let run = |sigma_scale: f32| {
         let params = NlmParams {
+            track_weight_sq: false,
             hq: Some(HqParams {
                 auto_strength: true,
                 noise_floor: true,

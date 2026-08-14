@@ -104,6 +104,7 @@ fn temporal_params(radius: u32, channels: ChannelMode, mc: MotionCompensationMod
         channels,
         prefilter: PrefilterMode::None,
         motion_compensation: mc,
+        track_weight_sq: false,
         hq: None,
     }
 }

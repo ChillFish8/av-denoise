@@ -60,6 +60,7 @@ fn external_reference_equals_input_matches_baseline() {
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::None,
             motion_compensation: MotionCompensationMode::None,
+            track_weight_sq: false,
             hq: None,
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
@@ -77,6 +78,7 @@ fn external_reference_equals_input_matches_baseline() {
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::External,
             motion_compensation: MotionCompensationMode::None,
+            track_weight_sq: false,
             hq: None,
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
@@ -113,6 +115,7 @@ fn push_frame_with_reference_seeds_noise_estimate_on_first_frame() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::External,
         motion_compensation: MotionCompensationMode::None,
+        track_weight_sq: false,
         hq: Some(HqParams {
             auto_strength: true,
             noise_floor: true,
@@ -150,6 +153,7 @@ fn external_reference_separable_matches_baseline() {
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::None,
             motion_compensation: MotionCompensationMode::None,
+            track_weight_sq: false,
             hq: None,
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
@@ -167,6 +171,7 @@ fn external_reference_separable_matches_baseline() {
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::External,
             motion_compensation: MotionCompensationMode::None,
+            track_weight_sq: false,
             hq: None,
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
@@ -200,6 +205,7 @@ fn external_reference_temporal_matches_baseline() {
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::None,
             motion_compensation: MotionCompensationMode::None,
+            track_weight_sq: false,
             hq: None,
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
@@ -219,6 +225,7 @@ fn external_reference_temporal_matches_baseline() {
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::External,
             motion_compensation: MotionCompensationMode::None,
+            track_weight_sq: false,
             hq: None,
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
@@ -255,6 +262,7 @@ fn bilateral_uniform_image_passthrough() {
             sigma_r: 0.1,
         },
         motion_compensation: MotionCompensationMode::None,
+        track_weight_sq: false,
         hq: None,
     };
 
@@ -289,6 +297,7 @@ fn bilateral_noisy_image_finite() {
             sigma_r: 0.05,
         },
         motion_compensation: MotionCompensationMode::None,
+        track_weight_sq: false,
         hq: None,
     };
 
@@ -312,6 +321,7 @@ fn nlm_spatial_params() -> NlmParams {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::NlmSpatial { strength_scale: 1.0 },
         motion_compensation: MotionCompensationMode::None,
+        track_weight_sq: false,
         hq: None,
     }
 }
@@ -396,6 +406,7 @@ fn nlm_spatial_zeros_main_offset_but_keeps_input_offset() {
 
     let params = NlmParams {
         prefilter: PrefilterMode::NlmSpatial { strength_scale: 1.0 },
+        track_weight_sq: false,
         hq: Some(HqParams::with_sigma(sigma)),
         ..nlm_spatial_params()
     };

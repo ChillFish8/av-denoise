@@ -1,4 +1,5 @@
 mod input;
+mod nl3d;
 mod nlmeans;
 
 use av_denoise::Device;
@@ -7,6 +8,7 @@ use clap::{Parser, Subcommand};
 use strum_macros::EnumString;
 
 pub use self::input::InputSource;
+pub use self::nl3d::Nl3dArgs;
 pub use self::nlmeans::NlmeansArgs;
 use crate::ingest::BinaryChannelIntent;
 
@@ -163,4 +165,19 @@ pub enum Command {
     /// that look alike, either inside a single frame or across a
     /// temporal window.
     Nlmeans(NlmeansArgs),
+
+    /// Denoise with non-local means, then clean up what it leaves behind
+    /// with a collaborative filter.
+    ///
+    /// `nl3d` runs the same `hq` front end `nlmeans` does, tuned to
+    /// filter a little more gently than usual. That leaves some
+    /// structured noise in its output on purpose. A second pass then
+    /// groups matching patches from that output into stacks, runs each
+    /// stack through a joint transform, and shrinks away the
+    /// coefficients noise is most likely to have produced. That reaches
+    /// noise the first pass's averaging could not remove without
+    /// smoothing away real detail along with it.
+    ///
+    /// Always runs the `hq` front end. `--variant fast` is rejected.
+    Nl3d(Nl3dArgs),
 }

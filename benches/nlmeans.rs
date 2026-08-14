@@ -195,6 +195,7 @@ fn bench_accumulate<R: Runtime>(
     let accum = client.empty(pixels * stored_ch as usize * size_of::<f32>());
     let weight_sum = client.empty(pixels * size_of::<f32>());
     let max_weight = client.empty(pixels * size_of::<f32>());
+    let weight_sq_sum_dummy = client.empty(size_of::<f32>());
 
     let grid_x = div_ceil(W, BLOCK_X);
     let grid_y = div_ceil(H, BLOCK_Y);
@@ -215,6 +216,8 @@ fn bench_accumulate<R: Runtime>(
             ArrayArg::from_raw_parts(weights.clone(), pixels),
             ArrayArg::from_raw_parts(weights.clone(), pixels),
             ArrayArg::from_raw_parts(max_weight.clone(), pixels),
+            ArrayArg::from_raw_parts(weight_sq_sum_dummy.clone(), 1),
+            false,
             0u32,
             0u32,
             1i32,

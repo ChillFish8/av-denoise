@@ -11,6 +11,9 @@ use super::helpers::{accumulate_pair, clamp_coord};
 ///
 /// The backward lookup uses the clamped neighbour index so border pixels
 /// still read a valid weight.
+///
+/// `weight_sq_sum` and `track_weight_sq` follow `accumulate_pair`'s own
+/// rule, only written when the flag is set.
 #[cube(launch_unchecked)]
 pub fn nlm_accumulate<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -19,6 +22,8 @@ pub fn nlm_accumulate<N: Size>(
     weights_fwd: &Array<f32>,
     weights_bwd: &Array<f32>,
     max_weight: &mut Array<f32>,
+    weight_sq_sum: &mut Array<f32>,
+    #[comptime] track_weight_sq: bool,
     frame_fwd: u32,
     frame_bwd: u32,
     q_x: i32,
@@ -40,8 +45,22 @@ pub fn nlm_accumulate<N: Size>(
     let weight_bwd = weights_bwd[(clamped_bwd_y * width + clamped_bwd_x) as usize];
 
     accumulate_pair(
-        input, accum, weight_sum, max_weight, x, y, q_x, q_y, frame_fwd, frame_bwd, weight_fwd, weight_bwd,
-        width, height,
+        input,
+        accum,
+        weight_sum,
+        max_weight,
+        weight_sq_sum,
+        track_weight_sq,
+        x,
+        y,
+        q_x,
+        q_y,
+        frame_fwd,
+        frame_bwd,
+        weight_fwd,
+        weight_bwd,
+        width,
+        height,
     );
 }
 

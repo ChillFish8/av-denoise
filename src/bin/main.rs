@@ -71,8 +71,10 @@ fn main() -> anyhow::Result<()> {
         Err(_) => anyhow::bail!("unable to apply AV_DENOISE_COMPILATION_CACHE, this is a bug."),
     }
 
-    let Command::Nlmeans(nlm) = &args.command;
-    let opts = nlm.build_options(&args)?;
+    let (opts, input, workers) = match &args.command {
+        Command::Nlmeans(nlm) => (nlm.build_options(&args)?, &nlm.input, nlm.workers),
+        Command::Nl3d(nl3d) => (nl3d.build_options(&args)?, &nl3d.nlm.input, nl3d.nlm.workers),
+    };
 
-    run_input(&opts, &nlm.input, nlm.workers)
+    run_input(&opts, input, workers)
 }

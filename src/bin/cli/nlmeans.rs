@@ -529,8 +529,10 @@ mod tests {
         argv.extend_from_slice(extra);
 
         let args = Args::parse_from(argv);
-        let Command::Nlmeans(nlm) = &args.command;
-        let nlm = NlmeansArgs::clone(nlm);
+        let nlm = match &args.command {
+            Command::Nlmeans(nlm) => NlmeansArgs::clone(nlm),
+            Command::Nl3d(_) => unreachable!("parse() always builds a nlmeans argv"),
+        };
 
         (args, nlm)
     }
@@ -542,9 +544,10 @@ mod tests {
         argv.extend_from_slice(extra);
 
         let args = Args::parse_from(argv);
-        let Command::Nlmeans(nlm) = &args.command;
-
-        NlmeansArgs::clone(nlm)
+        match &args.command {
+            Command::Nlmeans(nlm) => NlmeansArgs::clone(nlm),
+            Command::Nl3d(_) => unreachable!("parse_input() always builds a nlmeans argv"),
+        }
     }
 
     fn resolve(extra: &[&str]) -> ResolvedPreset {

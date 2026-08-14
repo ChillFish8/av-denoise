@@ -2,6 +2,7 @@ mod helpers;
 
 mod alignment;
 mod confidence;
+mod gpu_submit;
 mod hq;
 mod motion_compensation;
 mod noise;
@@ -15,3 +16,4 @@ mod temporal;
 mod temporal_noise;
 mod util;
 mod validation;
+mod weight_ratio;

@@ -5,6 +5,7 @@ use super::denoiser::NlmDenoiser;
 use super::kernels::{
     gpu_copy,
     gpu_zero_buffers,
+    gpu_zero_one,
     nlm_accumulate,
     nlm_distance,
     nlm_distance_pair,
@@ -19,6 +20,7 @@ use super::kernels::{
     nlm_horizontal_sum_pair,
     nlm_vertical_weight,
     nlm_vweight_pair_accumulate,
+    nlm_weight_ratio_partial,
 };
 use super::motion::{
     self,
@@ -225,6 +227,21 @@ impl<R: Runtime> NlmDenoiser<R> {
         unsafe { ArrayArg::from_raw_parts(self.max_weight.clone(), ctx.pixels) }
     }
 
+    /// The weight-squared accumulator argument follows the same
+    /// dummy-buffer rule as [`Self::confidence_pair_args`]. It is the real
+    /// buffer when `NlmParams::track_weight_sq` allocated one, or the
+    /// tiny always-present placeholder otherwise.
+    ///
+    /// Every call site pairs this with `self.params.track_weight_sq`, so
+    /// the placeholder is only ever bound alongside the flag that tells
+    /// the kernel not to read or write it.
+    fn weight_sq_sum_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
+        match self.weight_sq_sum.as_ref() {
+            Some(buf) => unsafe { ArrayArg::from_raw_parts(buf.clone(), ctx.pixels) },
+            None => unsafe { ArrayArg::from_raw_parts(self.weight_sq_sum_dummy.clone(), 1) },
+        }
+    }
+
     fn weight_buf_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
         unsafe { ArrayArg::from_raw_parts(self.weight_buf.clone(), ctx.pixels) }
     }
@@ -329,9 +346,11 @@ impl<R: Runtime> NlmDenoiser<R> {
                     self.accum_arg(ctx),
                     self.weight_sum_arg(ctx),
                     self.max_weight_arg(ctx),
+                    self.weight_sq_sum_arg(ctx),
                     confidence.conf_fwd,
                     confidence.conf_bwd,
                     confidence.use_confidence,
+                    self.params.track_weight_sq,
                     frame_t,
                     frame_fwd,
                     frame_bwd,
@@ -360,9 +379,11 @@ impl<R: Runtime> NlmDenoiser<R> {
                     self.accum_arg(ctx),
                     self.weight_sum_arg(ctx),
                     self.max_weight_arg(ctx),
+                    self.weight_sq_sum_arg(ctx),
                     confidence.conf_fwd,
                     confidence.conf_bwd,
                     confidence.use_confidence,
+                    self.params.track_weight_sq,
                     frame_t,
                     frame_fwd,
                     frame_bwd,
@@ -408,6 +429,8 @@ impl<R: Runtime> NlmDenoiser<R> {
                     self.accum_arg(ctx),
                     self.weight_sum_arg(ctx),
                     self.max_weight_arg(ctx),
+                    self.weight_sq_sum_arg(ctx),
+                    self.params.track_weight_sq,
                     frame_t,
                     self.h2_inv_norm,
                     self.spatial_offset_lut_arg(),
@@ -431,6 +454,8 @@ impl<R: Runtime> NlmDenoiser<R> {
                     self.accum_arg(ctx),
                     self.weight_sum_arg(ctx),
                     self.max_weight_arg(ctx),
+                    self.weight_sq_sum_arg(ctx),
+                    self.params.track_weight_sq,
                     frame_t,
                     self.h2_inv_norm,
                     self.spatial_offset_lut_arg(),
@@ -541,9 +566,11 @@ impl<R: Runtime> NlmDenoiser<R> {
                 self.accum_arg(ctx),
                 self.weight_sum_arg(ctx),
                 self.max_weight_arg(ctx),
+                self.weight_sq_sum_arg(ctx),
                 confidence.conf_fwd,
                 confidence.conf_bwd,
                 confidence.use_confidence,
+                self.params.track_weight_sq,
                 frame_fwd,
                 frame_bwd,
                 q_x,
@@ -669,6 +696,8 @@ impl<R: Runtime> NlmDenoiser<R> {
                 self.weight_buf_arg(ctx),
                 self.weight_buf_arg(ctx),
                 self.max_weight_arg(ctx),
+                self.weight_sq_sum_arg(ctx),
+                self.params.track_weight_sq,
                 frame_t,
                 frame_t,
                 q_x,
@@ -956,6 +985,24 @@ impl<R: Runtime> NlmDenoiser<R> {
             );
         }
 
+        // The weight-squared plane sits outside `gpu_zero_buffers`'
+        // fixed three-buffer shape, because it only exists at all when
+        // `NlmParams::track_weight_sq` is set.
+        if let Some(buf) = self.weight_sq_sum.as_ref() {
+            let grid_w = (ctx.pixels as u32).div_ceil(BLOCK_1D).min(MAX_GRID_1D);
+            let total_threads_w = grid_w * BLOCK_1D;
+            unsafe {
+                gpu_zero_one::launch_unchecked::<R>(
+                    &self.client,
+                    CubeCount::new_1d(grid_w),
+                    CubeDim::new_1d(BLOCK_1D),
+                    ArrayArg::from_raw_parts(buf.clone(), ctx.pixels),
+                    ctx.pixels as u32,
+                    total_threads_w,
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -1065,6 +1112,8 @@ impl<R: Runtime> NlmDenoiser<R> {
                 self.accum_arg(&ctx),
                 self.weight_sum_arg(&ctx),
                 self.max_weight_arg(&ctx),
+                self.weight_sq_sum_arg(&ctx),
+                self.params.track_weight_sq,
                 slot,
                 pilot_h2,
                 pilot_lut_arg,
@@ -1147,6 +1196,100 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         Ok(())
     }
+
+    /// sqrt(mean over pixels of (sum w^2) / (sum w)^2) for the last
+    /// submitted frame, including the centre self weight.
+    ///
+    /// 1.0 means the window collapsed to a single sample and no noise was
+    /// removed there. The value falls as more independent samples join
+    /// the average, which is what a second-stage filter needs to know
+    /// how much noise this pass actually left behind. See
+    /// `nlm_weight_ratio_partial` for the derivation.
+    ///
+    /// Only meaningful right after a submit made with
+    /// `NlmParams::track_weight_sq` set, because that is what keeps
+    /// `weight_sq_sum` allocated and filled in. Returns an error
+    /// otherwise. This performs a small blocking readback, one `f32` per
+    /// dispatched block rather than per pixel.
+    ///
+    /// This dispatches its own reduction kernel and blocks right behind
+    /// it. A caller that has more GPU work to queue for the same frame
+    /// should use [`Self::residual_ratio_sqrt_submit`] and
+    /// [`Self::read_residual_ratio_sqrt`] instead, so the blocking read
+    /// lands on work the GPU has already finished, the same pattern
+    /// [`Self::update_noise_estimate`] uses for its own readback.
+    pub fn residual_ratio_sqrt(&self) -> Result<f32, anyhow::Error> {
+        let pending = self.residual_ratio_sqrt_submit()?;
+        self.read_residual_ratio_sqrt(pending)
+    }
+
+    /// Queues the residual-ratio reduction kernel for the last submitted
+    /// frame and returns a handle to its still-unread result, without
+    /// blocking on it.
+    ///
+    /// Pair this with [`Self::read_residual_ratio_sqrt`] once the caller
+    /// has queued more GPU work in between, so the readback lands on
+    /// work the GPU has already finished instead of stalling the queue
+    /// right behind this dispatch.
+    ///
+    /// Same `track_weight_sq` requirement as [`Self::residual_ratio_sqrt`].
+    pub fn residual_ratio_sqrt_submit(&self) -> Result<PendingResidualRatio, anyhow::Error> {
+        let weight_sq_sum = self.weight_sq_sum.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "residual_ratio_sqrt_submit needs NlmParams::track_weight_sq set, so \
+                 weight_sq_sum was never allocated"
+            )
+        })?;
+
+        let ctx = self.launch_ctx();
+        let grid = (ctx.pixels as u32).div_ceil(BLOCK_1D).min(MAX_GRID_1D);
+        let total_threads = grid * BLOCK_1D;
+        let partials = self.client.empty(grid as usize * size_of::<f32>());
+
+        unsafe {
+            nlm_weight_ratio_partial::launch_unchecked::<R>(
+                &self.client,
+                CubeCount::new_1d(grid),
+                CubeDim::new_1d(BLOCK_1D),
+                self.weight_sum_arg(&ctx),
+                ArrayArg::from_raw_parts(weight_sq_sum.clone(), ctx.pixels),
+                self.max_weight_arg(&ctx),
+                ArrayArg::from_raw_parts(partials.clone(), grid as usize),
+                self.params.self_weight,
+                ctx.pixels as u32,
+                total_threads,
+                BLOCK_1D,
+            );
+        }
+
+        Ok(PendingResidualRatio {
+            partials,
+            pixels: ctx.pixels,
+        })
+    }
+
+    /// Reads back a reduction queued by [`Self::residual_ratio_sqrt_submit`].
+    ///
+    /// Blocks until the GPU finishes the reduction. The wait is cheap
+    /// only when the caller queued other GPU work between the submit
+    /// and this call, giving the reduction time to finish on its own.
+    pub fn read_residual_ratio_sqrt(&self, pending: PendingResidualRatio) -> Result<f32, anyhow::Error> {
+        let bytes = self
+            .client
+            .read_one(pending.partials)
+            .map_err(|e| anyhow::anyhow!("residual ratio partials readback failed: {e}"))?;
+        let data = f32::from_bytes(&bytes);
+        let sum: f32 = data.iter().sum();
+        let mean = sum / pending.pixels as f32;
+        Ok(mean.sqrt())
+    }
+}
+
+/// A residual-ratio reduction dispatched by
+/// [`NlmDenoiser::residual_ratio_sqrt_submit`] but not yet read back.
+pub struct PendingResidualRatio {
+    partials: Handle,
+    pixels: usize,
 }
 
 /// Copies one frame from a slot of `src` into the same slot of `dst`,

@@ -7,6 +7,7 @@ use kernels::bilateral::BilateralBench;
 use kernels::collab_aggregate::CollabAggregateBench;
 use kernels::collab_group::CollabGroupBench;
 use kernels::collab_ht::CollabHtBench;
+use kernels::collab_weight_ratio::CollabWeightRatioBench;
 use kernels::collab_wiener::CollabWienerBench;
 use kernels::copy::CopyBench;
 use kernels::dist_2d_weight::DistWeightBench;
@@ -206,6 +207,9 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         client: client.clone(),
     });
     run(CollabWienerBench {
+        client: client.clone(),
+    });
+    run(CollabWeightRatioBench {
         client: client.clone(),
     });
     for &(ch, ch_name) in CHANNELS {

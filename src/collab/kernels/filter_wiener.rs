@@ -7,6 +7,7 @@ use crate::collab::kernels::transforms::{
     fill_dct8_basis,
     haar_fwd_stack,
     haar_inv_stack,
+    safe_reciprocal,
 };
 use crate::collab::{MAX_K, PATCH_AREA, PATCH_SIZE};
 use crate::nlmeans::kernels::helpers::read_line;
@@ -31,6 +32,58 @@ const _: () = assert!(
 /// `0` instead of `NaN`. Real coefficients never land this close to
 /// zero, so it never perturbs a genuine shrinkage factor.
 const WIENER_EPSILON: f32 = 1e-20;
+
+/// The Wiener shrinkage factor for one coefficient, always in `[0, 1]`.
+///
+/// `p` is the pilot's coefficient value and `vj` is that coefficient's
+/// propagated noise variance. `p * p / max(p * p + vj, WIENER_EPSILON)`
+/// is mathematically bounded to `[0, 1]` whenever `vj` is a real,
+/// non-negative variance, since the denominator can only be as small as
+/// the numerator.
+///
+/// `vj` reaches this function in three qualitatively different states,
+/// and each gets a different fallback.
+///
+/// A `vj` of `f32::INFINITY` is real information. It says the
+/// coefficient is known to be pure noise, so it shrinks all the way to
+/// 0, the same as an ordinary large finite variance would, just sooner.
+///
+/// A `vj` that is `NaN` carries no information at all, neither "large"
+/// nor "small", simply undefined. Computing the ratio anyway would be
+/// wrong twice over. `p * p + vj` is `NaN`, and `f32::max(NaN,
+/// WIENER_EPSILON)` discards it in favor of the epsilon floor instead of
+/// something large, turning the denominator tiny and the ratio into an
+/// unbounded amplifier. Falling back to 0, the way the infinite case
+/// does, would be just as wrong in the other direction. It would delete
+/// a coefficient based on a noise level nobody actually measured. The
+/// only response that neither destroys the signal nor risks amplifying
+/// it is to leave the coefficient exactly as the noisy input carried it,
+/// `w = 1`, full trust rather than full distrust, since trust of exactly
+/// 1 can never amplify anything either.
+///
+/// A negative `vj` is not a real variance at all and is treated the same
+/// as an infinite one, shrinking to 0, since there is no principled
+/// value to fall back to for a quantity that should never be negative in
+/// the first place.
+///
+/// A `p` that is itself not finite reaches the ordinary ratio branch
+/// with a finite `vj`, so `f32::max(w_raw, 0.0)` catches that case
+/// afterward. `.clamp()` is not used for this second guard on purpose,
+/// since it returns `NaN` right back out for a `NaN` input, which is
+/// exactly the case this function exists to catch.
+#[cube]
+pub(crate) fn wiener_shrinkage_factor(p: f32, vj: f32) -> f32 {
+    let mut w = 0.0f32;
+    if vj.is_nan() {
+        w = 1.0f32;
+    } else if !vj.is_inf() && vj >= 0.0f32 {
+        let w_raw = p * p / f32::max(p * p + vj, WIENER_EPSILON);
+        #[allow(clippy::manual_clamp)]
+        let clamped = f32::min(f32::max(w_raw, 0.0f32), 1.0f32);
+        w = clamped;
+    }
+    w
+}
 
 /// Filters one group of similar patches with Wiener shrinkage steered by
 /// a pilot estimate, and writes back the filtered reference patch.
@@ -242,9 +295,20 @@ pub fn collab_filter_wiener<N: Size>(
             let idx = (j * PATCH_AREA + tid) as usize;
             let p = pilot_stack[idx];
             let vj = v[j as usize];
-            let w = p * p / f32::max(p * p + vj, WIENER_EPSILON);
+            let w = wiener_shrinkage_factor(p, vj);
             noisy_stack[idx] = w * noisy_stack[idx];
-            wsum += w * w * vj;
+            // w * w * vj is meant to be this coefficient's contribution
+            // to the group's own residual-noise estimate, but `vj`
+            // itself is not finite for either of `wiener_shrinkage_factor`'s
+            // non-finite fallbacks, and multiplying a non-finite value
+            // by anything, including a `w` of exactly 0 or exactly 1,
+            // is still non-finite. There is no real propagated-variance
+            // number to contribute here in either case, so this
+            // coefficient is left out of `wsum` entirely rather than
+            // adding a poisoned term to it.
+            if !vj.is_nan() && !vj.is_inf() {
+                wsum += w * w * vj;
+            }
             j += 1u32;
         }
 
@@ -281,7 +345,12 @@ pub fn collab_filter_wiener<N: Size>(
 
             if tid == 0u32 {
                 let sum = wred[0];
-                group_weight[ref_idx as usize] = 1.0f32 / f32::max(sum, 1e-12f32);
+                // Same reasoning as collab_filter_ht's group_weight.
+                // safe_reciprocal checks for a non-finite sum explicitly
+                // instead of leaning on `f32::max` to discard one, so
+                // this is always finite regardless of GPU-specific NaN
+                // behaviour.
+                group_weight[ref_idx as usize] = safe_reciprocal(sum, 1e-12f32);
             }
         }
 

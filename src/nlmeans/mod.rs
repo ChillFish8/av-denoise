@@ -41,7 +41,8 @@ mod pending;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 mod tests;
 
-pub use denoiser::NlmDenoiser;
+pub use denoiser::{GpuOutput, NlmDenoiser};
+pub use dispatch::PendingResidualRatio;
 pub use motion::{MotionCompensationMode, MotionEstimation};
 pub use params::{
     ChannelMode,

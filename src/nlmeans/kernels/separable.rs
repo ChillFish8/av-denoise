@@ -302,6 +302,9 @@ pub fn nlm_horizontal_sum_pair(
 ///
 /// When `use_confidence` is false the lookup and the multiply are
 /// dropped at compile time, and the confidence buffers are never read.
+///
+/// `weight_sq_sum` and `track_weight_sq` follow `accumulate_pair`'s own
+/// rule, only written when the flag is set.
 #[cube(launch_unchecked)]
 pub fn nlm_vweight_pair_accumulate<N: Size>(
     hsum_fwd: &Array<f32>,
@@ -310,9 +313,11 @@ pub fn nlm_vweight_pair_accumulate<N: Size>(
     accum: &mut Array<Vector<f32, N>>,
     weight_sum: &mut Array<f32>,
     max_weight: &mut Array<f32>,
+    weight_sq_sum: &mut Array<f32>,
     conf_fwd: &Array<f32>,
     conf_bwd: &Array<f32>,
     #[comptime] use_confidence: bool,
+    #[comptime] track_weight_sq: bool,
     frame_fwd: u32,
     frame_bwd: u32,
     q_x: i32,
@@ -390,8 +395,22 @@ pub fn nlm_vweight_pair_accumulate<N: Size>(
     }
 
     accumulate_pair(
-        input, accum, weight_sum, max_weight, global_x, global_y, q_x, q_y, frame_fwd, frame_bwd, weight_fwd,
-        weight_bwd, width, height,
+        input,
+        accum,
+        weight_sum,
+        max_weight,
+        weight_sq_sum,
+        track_weight_sq,
+        global_x,
+        global_y,
+        q_x,
+        q_y,
+        frame_fwd,
+        frame_bwd,
+        weight_fwd,
+        weight_bwd,
+        width,
+        height,
     );
 }
 

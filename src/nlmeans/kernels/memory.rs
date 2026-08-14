@@ -55,3 +55,17 @@ pub fn gpu_zero_buffers(
         idx += total_threads;
     }
 }
+
+/// Zeroes one plain `f32` buffer.
+///
+/// This covers a plane `gpu_zero_buffers` does not already clear, such
+/// as the optional weight-squared accumulator, without folding it into
+/// that kernel's fixed three-buffer shape.
+#[cube(launch_unchecked)]
+pub fn gpu_zero_one(dst: &mut Array<f32>, #[comptime] length: u32, #[comptime] total_threads: u32) {
+    let mut idx = ABSOLUTE_POS_X;
+    while idx < length {
+        dst[idx as usize] = 0.0f32;
+        idx += total_threads;
+    }
+}

@@ -293,6 +293,17 @@ pub struct NlmParams {
     pub motion_compensation: MotionCompensationMode,
     /// The quality-mode parameters. `None` runs the fast path unchanged.
     pub hq: Option<HqParams>,
+    /// Whether the accumulators also track each pixel's sum of squared
+    /// neighbour weights, alongside the sum of weights they already
+    /// keep.
+    ///
+    /// Defaults to false. A second-stage filter that shrinks its
+    /// coefficients by how much noise this pass left behind needs that
+    /// second sum, read back through
+    /// [`crate::nlmeans::NlmDenoiser::residual_ratio_sqrt`]. Nothing else
+    /// reads it, so every kernel drops the extra write at compile time
+    /// while this stays false.
+    pub track_weight_sq: bool,
 }
 
 impl Default for NlmParams {
@@ -307,6 +318,7 @@ impl Default for NlmParams {
             prefilter: PrefilterMode::None,
             motion_compensation: MotionCompensationMode::None,
             hq: None,
+            track_weight_sq: false,
         }
     }
 }

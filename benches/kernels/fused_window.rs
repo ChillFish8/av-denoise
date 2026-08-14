@@ -41,6 +41,7 @@ pub struct WindowInput {
     accum: Handle,
     weight_sum: Handle,
     max_weight: Handle,
+    weight_sq_sum_dummy: Handle,
     confidence_dummy: Handle,
     spatial_offset_lut: Handle,
     spatial_offset_lut_len: usize,
@@ -54,6 +55,7 @@ pub struct WindowRefInput {
     accum: Handle,
     weight_sum: Handle,
     max_weight: Handle,
+    weight_sq_sum_dummy: Handle,
     confidence_dummy: Handle,
     spatial_offset_lut: Handle,
     spatial_offset_lut_len: usize,
@@ -68,6 +70,7 @@ fn prepare_window<R: Runtime>(client: &ComputeClient<R>, ch: u32) -> WindowInput
     let accum = client.empty(pixels * stored * size_of::<f32>());
     let weight_sum = client.empty(pixels * size_of::<f32>());
     let max_weight = client.empty(pixels * size_of::<f32>());
+    let weight_sq_sum_dummy = client.empty(size_of::<f32>());
     let confidence_dummy = client.empty(size_of::<f32>());
     let (spatial_offset_lut, spatial_offset_lut_len) = zero_spatial_offset_lut(client);
     WindowInput {
@@ -75,6 +78,7 @@ fn prepare_window<R: Runtime>(client: &ComputeClient<R>, ch: u32) -> WindowInput
         accum,
         weight_sum,
         max_weight,
+        weight_sq_sum_dummy,
         confidence_dummy,
         spatial_offset_lut,
         spatial_offset_lut_len,
@@ -91,6 +95,7 @@ fn prepare_window_ref<R: Runtime>(client: &ComputeClient<R>, ch: u32) -> WindowR
     let accum = client.empty(pixels * stored * size_of::<f32>());
     let weight_sum = client.empty(pixels * size_of::<f32>());
     let max_weight = client.empty(pixels * size_of::<f32>());
+    let weight_sq_sum_dummy = client.empty(size_of::<f32>());
     let confidence_dummy = client.empty(size_of::<f32>());
     let (spatial_offset_lut, spatial_offset_lut_len) = zero_spatial_offset_lut(client);
     WindowRefInput {
@@ -99,6 +104,7 @@ fn prepare_window_ref<R: Runtime>(client: &ComputeClient<R>, ch: u32) -> WindowR
         accum,
         weight_sum,
         max_weight,
+        weight_sq_sum_dummy,
         confidence_dummy,
         spatial_offset_lut,
         spatial_offset_lut_len,
@@ -133,8 +139,10 @@ impl<R: Runtime> Benchmark for FusedPairWindowBench<R> {
                 ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored),
                 ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels),
                 ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
+                ArrayArg::from_raw_parts(args.weight_sq_sum_dummy.clone(), 1),
                 ArrayArg::from_raw_parts(args.confidence_dummy.clone(), 1),
                 ArrayArg::from_raw_parts(args.confidence_dummy.clone(), 1),
+                false,
                 false,
                 0u32,
                 0u32,
@@ -194,6 +202,8 @@ impl<R: Runtime> Benchmark for FusedSingleWindowBench<R> {
                 ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored),
                 ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels),
                 ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
+                ArrayArg::from_raw_parts(args.weight_sq_sum_dummy.clone(), 1),
+                false,
                 0u32,
                 h2_inv_norm(),
                 ArrayArg::from_raw_parts(args.spatial_offset_lut.clone(), args.spatial_offset_lut_len),
@@ -248,8 +258,10 @@ impl<R: Runtime> Benchmark for FusedPairWindowRefBench<R> {
                 ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored),
                 ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels),
                 ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
+                ArrayArg::from_raw_parts(args.weight_sq_sum_dummy.clone(), 1),
                 ArrayArg::from_raw_parts(args.confidence_dummy.clone(), 1),
                 ArrayArg::from_raw_parts(args.confidence_dummy.clone(), 1),
+                false,
                 false,
                 0u32,
                 0u32,
@@ -310,6 +322,8 @@ impl<R: Runtime> Benchmark for FusedSingleWindowRefBench<R> {
                 ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored),
                 ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels),
                 ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
+                ArrayArg::from_raw_parts(args.weight_sq_sum_dummy.clone(), 1),
+                false,
                 0u32,
                 h2_inv_norm(),
                 ArrayArg::from_raw_parts(args.spatial_offset_lut.clone(), args.spatial_offset_lut_len),

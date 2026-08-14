@@ -6,6 +6,7 @@ use crate::collab::kernels::transforms::{
     fill_dct8_basis,
     haar_fwd_stack,
     haar_inv_stack,
+    safe_reciprocal,
 };
 use crate::collab::{MAX_K, PATCH_AREA, PATCH_SIZE};
 use crate::nlmeans::kernels::helpers::read_line;
@@ -279,7 +280,22 @@ pub fn collab_filter_ht<N: Size>(
 
             if tid == 0u32 {
                 let sum = wred[0];
-                group_weight[ref_idx as usize] = 1.0f32 / f32::max(sum, 1e-12f32);
+                // sum is a sum of non-negative propagated variances, so
+                // it can never be negative for an ordinary finite
+                // caller sigma. safe_reciprocal checks for a non-finite
+                // sum explicitly rather than leaning on `f32::max` to
+                // discard one, so group_weight is always finite here
+                // regardless of GPU-specific NaN behaviour, capped at
+                // 1e12 for an ordinary small sum and 0 for a sum that
+                // turned out non-finite.
+                //
+                // Aggregation only ever multiplies this weight into a
+                // convex combination of finite filtered patch values and
+                // divides by the sum of the weights covering a pixel.
+                // However large or unequal the weights get, that kind of
+                // weighted mean cannot leave the range the patch values
+                // it combines already span.
+                group_weight[ref_idx as usize] = safe_reciprocal(sum, 1e-12f32);
             }
         }
 

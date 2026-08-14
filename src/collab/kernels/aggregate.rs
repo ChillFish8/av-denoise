@@ -1,6 +1,7 @@
 use cubecl::prelude::*;
 use cubecl::terminate;
 
+use crate::collab::kernels::transforms::safe_reciprocal;
 use crate::collab::{PATCH_AREA, PATCH_SIZE, STEP};
 
 /// Blends every reference patch's filtered output back onto one frame
@@ -156,7 +157,15 @@ pub fn collab_aggregate<N: Size>(
         }
     }
 
-    let inv = 1.0f32 / wsum;
+    // wsum is a sum of one to nine group_weight values, each already
+    // guaranteed finite and non-negative by collab_filter_ht and
+    // collab_filter_wiener's own guards, and the doc above establishes
+    // it is never exactly zero either. safe_reciprocal still checks
+    // explicitly rather than trusting those guarantees to survive
+    // whatever a given GPU driver does with a NaN operand to `f32::max`,
+    // so this stays finite even if that chain of guarantees is ever
+    // broken upstream.
+    let inv = safe_reciprocal(wsum, 1e-12f32);
     let line_inv = Vector::<f32, N>::empty().fill(inv);
     output[(y * width + x) as usize] = acc * line_inv;
 }

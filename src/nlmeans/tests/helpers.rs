@@ -159,6 +159,29 @@ pub(super) fn correlated_noisy_frame(w: u32, h: u32, base: f32, sigma_pre: f32, 
     out
 }
 
+/// A deterministic frame with real spatial structure at more than one
+/// scale, rather than a flat field or a smooth gradient.
+///
+/// Two out-of-phase sine waves plus a finer third one give NLMeans
+/// patches with genuinely varying content to match against, so a test
+/// built over this frame exercises the same weight spread real footage
+/// produces instead of the uniform, always-maximal weights a flat frame
+/// hands every candidate.
+pub(super) fn make_textured_frame(w: u32, h: u32) -> Vec<f32> {
+    let mut frame = vec![0.0f32; (w * h) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let fx = x as f32 / w as f32;
+            let fy = y as f32 / h as f32;
+            let v = 0.5
+                + 0.2 * (fx * 8.0 * std::f32::consts::PI).sin() * (fy * 6.0 * std::f32::consts::PI).cos()
+                + 0.1 * (fx * 20.0 * std::f32::consts::PI).sin();
+            frame[(y * w + x) as usize] = v.clamp(0.05, 0.95);
+        }
+    }
+    frame
+}
+
 /// Smooth horizontal luma gradient from `lo` to `hi` inclusive,
 /// replicated down every row.
 pub(super) fn make_gradient_frame(w: u32, h: u32, lo: f32, hi: f32) -> Vec<f32> {
