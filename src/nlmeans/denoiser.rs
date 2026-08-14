@@ -3,6 +3,7 @@ use std::marker::PhantomData;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
+use super::align::StorageAlign;
 use super::kernels::gpu_copy;
 use super::motion::{self, MotionCtx, MotionEstimation, build_pyramid_for_slot, run_pyramid_build};
 use super::noise::{
@@ -37,6 +38,9 @@ pub struct NlmDenoiser<R: Runtime> {
     pub(super) params: NlmParams,
     pub(super) width: u32,
     pub(super) height: u32,
+    /// Byte alignment every per-slot buffer view must start on, read
+    /// from `client`'s runtime at construction. See [`StorageAlign`].
+    pub(super) align: StorageAlign,
 
     /// Monotonic count of frames pushed; `% total_frames` is the next
     /// physical slot in `input_buf` to overwrite.
@@ -118,7 +122,7 @@ pub struct NlmDenoiser<R: Runtime> {
     pub(super) spatial_offset_lut: Handle,
 
     /// Stage-1 noise-estimate scratch ring, `total_frames` slots each
-    /// `noise_partials_slot_stride_bytes(width, height)` bytes. `Some`
+    /// [`noise_partials_slot_stride_bytes`] bytes wide. `Some`
     /// only when the noise level is measured automatically (`hq` is
     /// set and `sigma_override` is `None`). One slot per ring position
     /// keeps a slot's partials intact between the push that queues
@@ -226,6 +230,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         validate_dimensions(width, height)
             .expect("unsupported frame dimensions; call validate_dimensions first to surface this as Result");
 
+        let align = StorageAlign::from_client(client);
         let stored_ch = params.channels.storage_count();
         let total_frames = params.total_frames();
         let pixels = (width * height) as usize;
@@ -286,7 +291,8 @@ impl<R: Runtime> NlmDenoiser<R> {
         // the estimate kernels.
         let auto_noise = params.hq.is_some_and(|hq| hq.sigma_override.is_none());
         let (noise_partials, noise_results) = if auto_noise {
-            let partials_ring_bytes = noise_partials_slot_stride_bytes(width, height) * total_frames as u64;
+            let partials_ring_bytes =
+                noise_partials_slot_stride_bytes(width, height, align) * total_frames as u64;
             let n_results = (total_frames * 4) as usize;
             (
                 Some(client.empty(partials_ring_bytes as usize)),
@@ -300,7 +306,13 @@ impl<R: Runtime> NlmDenoiser<R> {
         // temporal neighbour to diff against, so it stays inert at
         // temporal_radius = 0 even when auto noise estimation is on.
         let temporal_stats_buf = if auto_noise && params.temporal_radius >= 1 {
-            Some(client.empty(temporal_stats_buf_bytes(width, height, stored_ch, total_frames)))
+            Some(client.empty(temporal_stats_buf_bytes(
+                width,
+                height,
+                stored_ch,
+                total_frames,
+                align,
+            )))
         } else {
             None
         };
@@ -309,7 +321,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         // active *and* the temporal window is non-trivial (k=0 path
         // would never touch them).
         let mc_ctx = if params.motion_compensation.is_active() && params.temporal_radius > 0 {
-            MotionCtx::new(params.motion_compensation, width, height)
+            MotionCtx::new(params.motion_compensation, width, height, align)
         } else {
             None
         };
@@ -329,7 +341,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             };
             let neighbours = (2 * params.temporal_radius) as u64;
             let mv_field = client.empty((neighbours * ctx.mv_field_bytes_per_neighbour()) as usize);
-            let pyramid_pixels = motion::pyramid_pixels_per_frame(width, height, ctx.pyramid_levels);
+            let pyramid_pixels =
+                motion::pyramid_pixels_per_frame(width, height, ctx.pyramid_levels, ctx.align);
             let pyr_in_bytes = pyramid_pixels * total_frames as usize * size_of::<f32>();
             let pyr_in = client.empty(pyr_in_bytes);
             let pyr_ref = if use_reference {
@@ -377,7 +390,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         // the MC-active case. It needs its own luma pyramid ring and a
         // block-match kernel per neighbour.
         let confidence_only_active = confidence_active && mc_ctx.is_none();
-        let confidence_ctx = confidence_only_active.then(|| MotionCtx::confidence_only(width, height));
+        let confidence_ctx = confidence_only_active.then(|| MotionCtx::confidence_only(width, height, align));
 
         // The confidence buffer piggybacks on whichever block geometry
         // is available, but only when confidence weighting is active.
@@ -395,7 +408,8 @@ impl<R: Runtime> NlmDenoiser<R> {
         let confidence_dummy = client.empty(size_of::<f32>());
 
         let (confidence_pyramid, confidence_mv_scratch) = if let Some(ctx) = confidence_ctx.as_ref() {
-            let pyramid_pixels = motion::pyramid_pixels_per_frame(width, height, ctx.pyramid_levels);
+            let pyramid_pixels =
+                motion::pyramid_pixels_per_frame(width, height, ctx.pyramid_levels, ctx.align);
             let pyr_bytes = pyramid_pixels * total_frames as usize * size_of::<f32>();
             let mv_scratch_len = ctx.mv_slots_per_neighbour() * 2 * size_of::<i32>();
             (Some(client.empty(pyr_bytes)), Some(client.empty(mv_scratch_len)))
@@ -415,6 +429,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             params,
             width,
             height,
+            align,
             ring_head: 0,
             frames_loaded: 0,
             real_pushes: 0,
@@ -562,7 +577,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                 .create_from_slice(f32::as_bytes(&self.padding_scratch))
         };
 
-        self.copy_frame_into_slot(dst, &staging, slot);
+        self.copy_frame_into_slot(dst, slot, &staging, 0, 1);
     }
 
     fn run_prefilter_for_slot(&self, slot: usize) {
@@ -757,7 +772,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             return;
         };
 
-        let stride = noise_partials_slot_stride_bytes(self.width, self.height);
+        let stride = noise_partials_slot_stride_bytes(self.width, self.height, self.align);
         let partials_slot = partials_buf.clone().offset_start((slot as u64) * stride);
 
         let ctx = NoiseCtx {
@@ -804,6 +819,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             slot_prev,
             input_buf: &self.input_buf,
             stats_buf,
+            align: self.align,
         };
 
         run_temporal_noise_stats::<R>(&self.client, &ctx).expect("temporal noise stats dispatch failed");
@@ -825,6 +841,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             self.height,
             self.params.channels.storage_count(),
             slot,
+            self.align,
         );
     }
 
@@ -972,14 +989,28 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.real_pushes += 1;
     }
 
-    /// GPU→GPU copy of one frame from `src` into `dst` at the given
-    /// physical slot. `dst` must have ring-buffer layout matching
+    /// GPU→GPU copy of one frame from `src`'s slot `src_slot` into
+    /// `dst`'s slot `slot`. `dst` must have ring-buffer layout matching
     /// `input_buf` (`total_frames * height * width * stored_ch`).
-    fn copy_frame_into_slot(&self, dst: &Handle, src: &Handle, slot: usize) {
+    /// `src_slots` is how many frames `src` holds, `1` for a
+    /// frame-sized staging buffer.
+    ///
+    /// Both handles are bound whole and the slots addressed by the
+    /// kernel's own offset arguments. Binding a slot directly would
+    /// need its byte offset to be a multiple of the GPU's
+    /// `min_storage_buffer_offset_alignment`, which a
+    /// `width * height * stored_ch` frame stride meets only by luck.
+    fn copy_frame_into_slot(
+        &self,
+        dst: &Handle,
+        slot: usize,
+        src: &Handle,
+        src_slot: usize,
+        src_slots: usize,
+    ) {
         let stored_ch = self.params.channels.storage_count();
         let frame_size = self.width * self.height * stored_ch;
-        let byte_offset = (slot as u64) * (frame_size as u64) * (size_of::<f32>() as u64);
-        let dst_handle = dst.clone().offset_start(byte_offset);
+        let dst_slots = self.params.total_frames() as usize;
 
         let grid = frame_size.div_ceil(BLOCK_1D).min(MAX_GRID_1D);
         let total_threads = grid * BLOCK_1D;
@@ -989,8 +1020,10 @@ impl<R: Runtime> NlmDenoiser<R> {
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(BLOCK_1D),
-                ArrayArg::from_raw_parts(src.clone(), frame_size as usize),
-                ArrayArg::from_raw_parts(dst_handle.clone(), frame_size as usize),
+                ArrayArg::from_raw_parts(src.clone(), src_slots * frame_size as usize),
+                ArrayArg::from_raw_parts(dst.clone(), dst_slots * frame_size as usize),
+                src_slot as u32 * frame_size,
+                slot as u32 * frame_size,
                 frame_size,
                 total_threads,
             )
@@ -1024,15 +1057,8 @@ impl<R: Runtime> NlmDenoiser<R> {
         let last_slot = (self.ring_head - 1) % total_frames;
         let next_slot = self.ring_head % total_frames;
 
-        let stored_ch = self.params.channels.storage_count();
-        let frame_size = self.width * self.height * stored_ch;
-        let bytes_per_slot = (frame_size as u64) * (size_of::<f32>() as u64);
-
-        let input_src = self
-            .input_buf
-            .clone()
-            .offset_start((last_slot as u64) * bytes_per_slot);
-        self.copy_frame_into_slot(&self.input_buf.clone(), &input_src, next_slot);
+        let input_buf = self.input_buf.clone();
+        self.copy_frame_into_slot(&input_buf, next_slot, &input_buf, last_slot, total_frames);
 
         // Skipped for `NlmSpatial`: the pilot dispatch below recomputes
         // this slot's reference from scratch, so the byte copy would
@@ -1040,10 +1066,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         if !matches!(self.params.prefilter, PrefilterMode::NlmSpatial { .. })
             && let Some(reference_buf) = self.reference_buf.clone()
         {
-            let ref_src = reference_buf
-                .clone()
-                .offset_start((last_slot as u64) * bytes_per_slot);
-            self.copy_frame_into_slot(&reference_buf, &ref_src, next_slot);
+            self.copy_frame_into_slot(&reference_buf, next_slot, &reference_buf, last_slot, total_frames);
         }
 
         // Keep the motion-estimation pyramid and noise estimate for the
@@ -1161,7 +1184,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             .expect("noise_partials allocated when auto noise is active");
 
         let slot_len_bytes = partials_len(self.width, self.height) as u64 * size_of::<f32>() as u64;
-        let stride = noise_partials_slot_stride_bytes(self.width, self.height);
+        let stride = noise_partials_slot_stride_bytes(self.width, self.height, self.align);
         let total_bytes = self.params.total_frames() as u64 * stride;
         let start = (slot as u64) * stride;
         let end_trim = total_bytes - start - slot_len_bytes;
@@ -1203,6 +1226,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             stored_ch,
             frame_count,
             slot,
+            self.align,
         )?;
 
         Ok(aggregate_temporal_noise_stats(

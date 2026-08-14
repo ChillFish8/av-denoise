@@ -1,6 +1,6 @@
 [package]
 name = "av-denoise"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "Fast and efficient video denoising using accelerated nlmeans."
 categories = ["multimedia::video"]
@@ -90,5 +90,10 @@ required-features = ["clap"]
 
 [[bench]]
 name = "motion"
+harness = false
+required-features = ["clap"]
+
+[[bench]]
+name = "convert"
 harness = false
 required-features = ["clap"]

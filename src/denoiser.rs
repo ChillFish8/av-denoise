@@ -202,18 +202,17 @@ impl BackendPending {
     }
 }
 
+/// Maximum number of outstanding `Pending` readbacks the high-level
+/// [`Denoiser`] keeps in flight. Must equal the backend's output-handle
+/// count, which is two output handles. Exceeding this aliases the oldest
+/// pending's output handle and silently corrupts results.
+pub const MAX_PENDING: usize = 2;
+
 /// High-level stateful denoiser. Push frames in order with
 /// [`push_frame`](Self::push_frame); collect denoised frames with
 /// [`recv_frame`](Self::recv_frame) or
 /// [`try_recv_frame`](Self::try_recv_frame); call [`flush`](Self::flush)
 /// at end-of-stream to drain any remaining temporal context.
-/// Maximum number of outstanding `Pending` readbacks the high-level
-/// [`Denoiser`] keeps in flight. Must equal the backend's output-handle
-/// count ([`crate::nlmeans::NlmDenoiser::outputs`] is `[Handle; 2]`).
-/// Exceeding this aliases the oldest pending's output handle and
-/// silently corrupts results.
-const MAX_PENDING: usize = 2;
-
 pub struct Denoiser {
     backend: Backend,
     pending: VecDeque<BackendPending>,

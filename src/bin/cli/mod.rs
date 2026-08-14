@@ -79,7 +79,7 @@ pub fn resolve_channel_intent(modes: &[CliChannelMode]) -> Result<BinaryChannelI
 }
 
 #[derive(Debug, Parser)]
-#[command(about = "Fast and efficient video denoising", long_about = None)]
+#[command(about = "Fast and efficient video denoising", long_about = None, version)]
 pub struct Args {
     /// Speed vs quality dial.
     ///

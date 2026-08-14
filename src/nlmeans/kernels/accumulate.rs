@@ -45,6 +45,12 @@ pub fn nlm_accumulate<N: Size>(
 ///     `out = (original × m + acc) / (m + weight_sum)`  where  `m = wref × max_weight`.
 /// When the denominator is near zero (no usable matches across the
 /// search window) the original pixel value is preserved unchanged.
+///
+/// Reads the centre pixel from `input`'s frame `center_frame` and
+/// writes to `output`'s frame `output_frame`, so a caller writing into
+/// a ring buffer slot passes the whole ring rather than binding it at
+/// the slot's byte offset (which the GPU only accepts on its own
+/// alignment boundaries).
 #[cube(launch_unchecked)]
 pub fn nlm_finish<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -53,6 +59,7 @@ pub fn nlm_finish<N: Size>(
     weight_sum: &Array<f32>,
     max_weight: &Array<f32>,
     center_frame: u32,
+    output_frame: u32,
     wref: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -66,6 +73,7 @@ pub fn nlm_finish<N: Size>(
 
     let pixel_idx = (y * width + x) as usize;
     let frame_idx = ((center_frame * height + y) * width + x) as usize;
+    let output_idx = ((output_frame * height + y) * width + x) as usize;
 
     let m = wref * max_weight[pixel_idx];
     let denominator = m + weight_sum[pixel_idx];
@@ -90,5 +98,5 @@ pub fn nlm_finish<N: Size>(
         }
     }
 
-    output[pixel_idx] = out;
+    output[output_idx] = out;
 }

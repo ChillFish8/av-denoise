@@ -18,6 +18,7 @@ leverage modern hardware instead of relying on the now rather outdated OpenCL.
 - [Benchmarks](#benchmarks)
   - [Apples-to-apples spatial NL-means (strength 1.0)](#apples-to-apples-spatial-nl-means-strength-10)
   - [av-denoise feature cost (strength 1.0, default patch/search)](#av-denoise-feature-cost-strength-10-default-patchsearch)
+  - [Bit depth cost](#bit-depth-cost)
 - [Hardware support](#hardware-support)
   - [Notes about the JIT](#notes-about-the-jit)
     - [Configure compilation cache directory](#configure-compilation-cache-directory)
@@ -42,6 +43,9 @@ leverage modern hardware instead of relying on the now rather outdated OpenCL.
   the library.
 - **Library and binary** - y4m over a pipe, or direct file ingestion via FFMS2 with
   scene-parallel workers.
+- **8, 10, and 12-bit** - depth is detected from the source and preserved on output.
+  Sample values are normalised by `(1 << depth) - 1`, so tuning values mean the
+  same thing at every depth.
 - _**Fast!**_ - around **2x** FFmpeg's `nlmeans_opencl` at matched settings. Piped input can't
   parallelize across scenes, so file input makes the best use of big GPUs.
 
@@ -71,6 +75,17 @@ ffmpeg -i noisy.mkv -pix_fmt yuv420p -f yuv4mpegpipe - \
 
 > Piped input has no scene detection, so the temporal window slides across the whole stream and
 > `--workers` does not apply.
+
+> ffmpeg will not write 10 or 12-bit y4m without `-strict -1`, so high-depth
+> pipelines need it on the *producing* side:
+>
+> ```bash
+> ffmpeg -i noisy.mkv -pix_fmt yuv420p10le -strict -1 -f yuv4mpegpipe - \
+>   | av-denoise nlmeans --input - \
+>   | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+> ```
+>
+> File input via `--input noisy.mkv` needs no such flag.
 
 Your main dial is `--preset`. Go up the ladder (`slow`, `veryslow`) for noisier sources or when
 quality matters more than time. Go down (`fast`, `veryfast`) when speed is more important.
@@ -160,6 +175,9 @@ total frames divided by wall-clock elapsed.
 - Running on a `AMD AI Pro R9700` (AMD 9070XT equivalent) GPU.
 - These tables measure the `nlmeans` algorithm at `veryfast`-preset settings, not the
   `base` default.
+- Absolute fps varies between benchmarking sessions (thermal state, background load,
+  driver version). Treat comparisons within a table as meaningful; treat the same
+  config's absolute fps across different tables as not directly comparable.
 
 ### Apples-to-apples spatial NL-means (strength 1.0)
 
@@ -189,6 +207,17 @@ All luma+chroma. Spatial baseline is the reference. _Lower fps = more work._
 | full r=2 (temporal+MC+prefilter) | 52.18 |                                     |
 
 Reproduce with `just compare-perf` (config: `scripts/bench_runs.toml`).
+
+### Bit depth cost
+
+Same clip, same settings, differing only in source depth. 10-bit moves twice
+the bytes through decode, conversion, and the y4m output, so some of the gap is
+I/O rather than denoising.
+
+| source depth | fps       |
+|--------------|----------:|
+| 8-bit        | **91.19** |
+| 10-bit       |     73.57 |
 
 ## Hardware support
 
@@ -501,7 +530,7 @@ Options:
 
           A file whose name would otherwise be read as a pipe is reachable by prefixing it, for example `./-`.
 
-          The source must be 8-bit. 10 or 12-bit inputs are rejected with a clear error message.
+          The source's bit depth is detected automatically. 8, 10, and 12-bit sources are supported and the output keeps the source's depth. Other depths are rejected with a clear error message.
 
       --preset <PRESET>
           Speed vs quality dial.
@@ -663,6 +692,8 @@ Options:
           The noise level is measured automatically per scene when this is not set. Set it only when the automatic estimate misjudges a source and you want to pin the value.
 
           Small values mean light grain and larger values mean heavier noise. `3` is subtle grain, `6` is clearly visible grain, `12` and up is heavy noise.
+
+          Always expressed on an 8-bit 0-255 scale, no matter the source's actual bit depth.
 
       --hq-no-auto-strength
           Treat `--strength` as an absolute value instead of a multiplier on `--hq-sigma`

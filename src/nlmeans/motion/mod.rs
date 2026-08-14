@@ -16,6 +16,8 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 pub(crate) use pyramid::{pyramid_pixels_per_frame, run_pyramid_build};
 
+use crate::nlmeans::align::StorageAlign;
+
 /// How motion compensation is configured for a denoise pass.
 ///
 /// `None` disables motion compensation entirely (zero-cost; no extra
@@ -246,10 +248,14 @@ pub(crate) struct MotionCtx {
     pub pyramid_levels: u32,
     pub blocks_x: u32,
     pub blocks_y: u32,
+    /// Alignment every buffer this context slices per-slot must respect
+    /// (the MV field, the confidence buffer, the pair ring, and the
+    /// pyramid). Read from the runtime, see [`StorageAlign`].
+    pub align: StorageAlign,
 }
 
 impl MotionCtx {
-    pub fn new(mode: MotionCompensationMode, width: u32, height: u32) -> Option<Self> {
+    pub fn new(mode: MotionCompensationMode, width: u32, height: u32, align: StorageAlign) -> Option<Self> {
         let MotionCompensationMode::Mvtools {
             blksize,
             overlap,
@@ -272,6 +278,7 @@ impl MotionCtx {
             pyramid_levels,
             blocks_x,
             blocks_y,
+            align,
         })
     }
 
@@ -281,25 +288,25 @@ impl MotionCtx {
     }
 
     /// Padded per-neighbour MV-field stride in bytes. Two `i32`
-    /// components (`dx`, `dy`) per block, rounded up to the GPU
-    /// storage-buffer offset alignment (32 bytes), the same convention
+    /// components (`dx`, `dy`) per block, rounded up to the runtime's
+    /// buffer-binding alignment, the same convention
     /// [`Self::confidence_bytes_per_neighbour`] uses. `wgpu` rejects a
     /// bind-group offset that isn't a multiple of its
     /// `min_storage_buffer_offset_alignment`, and an odd block count
-    /// leaves the unpadded 8-byte-per-block stride short of a 32-byte
-    /// multiple.
+    /// leaves the unpadded 8-byte-per-block stride short of that
+    /// boundary.
     pub(crate) fn mv_field_bytes_per_neighbour(&self) -> u64 {
         let blocks = (self.blocks_x as u64) * (self.blocks_y as u64);
-        (blocks * 2 * size_of::<i32>() as u64).next_multiple_of(32)
+        self.align.pad_bytes(blocks * 2 * size_of::<i32>() as u64)
     }
 
     /// Padded per-neighbour confidence-buffer stride in bytes. One
-    /// `f32` per block, rounded up to the GPU storage-buffer offset
-    /// alignment (32 bytes), the same convention
+    /// `f32` per block, rounded up to the runtime's buffer-binding
+    /// alignment, the same convention
     /// [`Self::mv_field_bytes_per_neighbour`] uses for the MV field.
     pub(crate) fn confidence_bytes_per_neighbour(&self) -> u64 {
         let blocks = (self.blocks_x as u64) * (self.blocks_y as u64);
-        (blocks * size_of::<f32>() as u64).next_multiple_of(32)
+        self.align.pad_bytes(blocks * size_of::<f32>() as u64)
     }
 
     /// i32 elements per pair-ring direction sub-array, one `(dx, dy)`
@@ -312,14 +319,15 @@ impl MotionCtx {
     }
 
     /// Padded per-direction pair-ring stride in bytes, rounded up to
-    /// the GPU storage-buffer offset alignment (32 bytes), the same
-    /// convention [`Self::confidence_bytes_per_neighbour`] uses. Both
+    /// the runtime's buffer-binding alignment, the same convention
+    /// [`Self::confidence_bytes_per_neighbour`] uses. Both
     /// `pair_byte_offset` (the host-side write and zero-fill offset)
     /// and the chain-compose kernel's own internal read stride use
     /// this padded value, so a direction's data starts at the same
     /// place for every reader and writer.
     pub(crate) fn pair_direction_bytes(&self) -> u64 {
-        (self.pair_direction_len() as u64 * size_of::<i32>() as u64).next_multiple_of(32)
+        self.align
+            .pad_bytes(self.pair_direction_len() as u64 * size_of::<i32>() as u64)
     }
 
     /// Padded per-slot pair-ring stride in bytes, both directions back
@@ -348,7 +356,7 @@ impl MotionCtx {
     /// per-block SAD, no motion search). Used when confidence
     /// weighting is active but no `Mvtools` mode was configured to
     /// derive geometry from.
-    pub(crate) fn confidence_only(width: u32, height: u32) -> Self {
+    pub(crate) fn confidence_only(width: u32, height: u32, align: StorageAlign) -> Self {
         Self::new(
             MotionCompensationMode::Mvtools {
                 blksize: DEFAULT_BLKSIZE,
@@ -359,6 +367,7 @@ impl MotionCtx {
             },
             width,
             height,
+            align,
         )
         .expect("Mvtools variant always yields Some")
     }
@@ -649,7 +658,7 @@ mod tests {
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         };
-        let ctx = MotionCtx::new(mode, 1920, 1080).unwrap();
+        let ctx = MotionCtx::new(mode, 1920, 1080, StorageAlign::new(32)).unwrap();
         assert_eq!(ctx.step, 8);
         assert_eq!(ctx.blocks_x, 1920u32.div_ceil(8));
         assert_eq!(ctx.blocks_y, 1080u32.div_ceil(8));

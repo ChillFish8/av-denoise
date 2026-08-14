@@ -186,3 +186,15 @@ args = [
     "--motion-compensation",
     "--prefilter", "bilateral:3.0,0.02",
 ]
+
+# ---------------------------------------------------------------------------
+# High bit depth. Same settings as the spatial baseline, 10-bit source, so
+# the delta isolates the cost of the wider sample path.
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "av_spatial_s1.0_10bit"
+kind = "av-denoise"
+input = "./data/bench-sample-10bit.mkv"
+workers = 2
+args = ["--variant", "fast", "--temporal-radius", "0", "--channel-mode", "luma,chroma", "--strength", "1.0"]

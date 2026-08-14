@@ -61,6 +61,7 @@ pub(crate) fn run_confidence_for_neighbour<R: Runtime>(
         frame_count,
         0,
         centre_slot,
+        ctx.align,
     ));
     let neighbour = luma_pyramid.clone().offset_start(pyramid_slot_byte_offset(
         width,
@@ -68,6 +69,7 @@ pub(crate) fn run_confidence_for_neighbour<R: Runtime>(
         frame_count,
         0,
         neighbour_slot,
+        ctx.align,
     ));
     let level_len = (fw * fh) as usize;
 

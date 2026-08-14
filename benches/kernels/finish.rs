@@ -71,6 +71,7 @@ impl<R: Runtime> Benchmark for FinishBench<R> {
                 ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels),
                 ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
                 0u32,
+                0u32,
                 1.0f32,
                 W,
                 H,
