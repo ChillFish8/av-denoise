@@ -17,7 +17,7 @@ pub(super) fn clamp_coord(value: i32, #[comptime] limit: u32) -> u32 {
 /// The frame index is taken on trust, because callers always pass a
 /// physical slot that holds loaded data.
 #[cube]
-pub(super) fn read_clamped_line<N: Size>(
+pub(crate) fn read_clamped_line<N: Size>(
     buf: &Array<Vector<f32, N>>,
     x: i32,
     y: i32,
@@ -36,7 +36,7 @@ pub(super) fn read_clamped_line<N: Size>(
 /// The caller promises that `x` is inside `[0, width)` and `y` is inside
 /// `[0, height)`.
 #[cube]
-pub(super) fn read_line<N: Size>(
+pub(crate) fn read_line<N: Size>(
     buf: &Array<Vector<f32, N>>,
     x: u32,
     y: u32,
@@ -53,7 +53,7 @@ pub(super) fn read_line<N: Size>(
 /// The loop unrolls fully at compile time, because `channels` is known
 /// then.
 #[cube]
-pub(super) fn line_sum_sq<N: Size>(diff: Vector<f32, N>, #[comptime] channels: u32) -> f32 {
+pub(crate) fn line_sum_sq<N: Size>(diff: Vector<f32, N>, #[comptime] channels: u32) -> f32 {
     let mut sum = 0.0f32;
     #[unroll]
     for c in 0..channels {
@@ -68,7 +68,7 @@ pub(super) fn line_sum_sq<N: Size>(diff: Vector<f32, N>, #[comptime] channels: u
 /// Scaling this way lets all three channel modes share one
 /// `h2_inv_norm`.
 #[cube]
-pub(super) fn channel_scale(#[comptime] channels: u32) -> f32 {
+pub(crate) fn channel_scale(#[comptime] channels: u32) -> f32 {
     let mut scale = 1.0f32;
     if channels == 1 {
         scale = 3.0f32;

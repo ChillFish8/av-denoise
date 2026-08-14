@@ -4,6 +4,8 @@
 
 pub mod accelerate;
 pub mod cache;
+#[doc(hidden)]
+pub mod collab;
 mod denoiser;
 pub mod device;
 #[doc(hidden)]

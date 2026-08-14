@@ -22,7 +22,7 @@
 mod accumulate;
 mod bilateral;
 mod fused;
-mod helpers;
+pub(crate) mod helpers;
 mod memory;
 pub mod motion;
 mod noise;
