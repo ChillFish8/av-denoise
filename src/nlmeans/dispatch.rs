@@ -33,8 +33,8 @@ use super::noise::{build_spatial_offset_lut, spatial_offset_factor, spatial_offs
 use super::prefilter::PrefilterMode;
 use super::{BLOCK_1D, BLOCK_X, BLOCK_X_THIN, BLOCK_Y, BLOCK_Y_THIN, MAX_GRID_1D};
 
-/// Derived sizes plus dispatch shape for the per-frame work, bundled so
-/// the dispatch helpers don't carry long parallel argument lists.
+/// The sizes and grid shape one frame's work needs, bundled together so
+/// the dispatch helpers do not each carry the same long argument list.
 pub(super) struct LaunchCtx {
     pub(super) total_frame_data: usize,
     pub(super) frame_size: usize,
@@ -46,12 +46,14 @@ pub(super) struct LaunchCtx {
     pub(super) thin_cube_dim: CubeDim,
 }
 
-/// Map a nonzero temporal offset `k` (in `-radius..=radius`) to the
-/// neighbour index the analyse/confidence passes use when filling
-/// `mv_field_buf`/`confidence_buf` (see `NlmDenoiser::run_motion_compensation`
-/// and `run_confidence_pass`). Those passes fill neighbours in the order
-/// `k = -radius..-1` first (indices `0..radius-1`), then `k = 1..radius`
-/// (indices `radius..2·radius-1`), so this is the inverse of that walk.
+/// Maps a nonzero temporal offset onto the neighbour index the analyse
+/// and confidence passes use when filling their buffers.
+///
+/// Those passes fill the negative offsets first, taking indices 0 up to
+/// the radius minus 1, then the positive ones. This is the inverse of
+/// that walk.
+///
+/// See `NlmDenoiser::run_motion_compensation` and `run_confidence_pass`.
 fn neighbour_idx_for_k(radius: u32, k: i32) -> u32 {
     debug_assert_ne!(k, 0, "k=0 is the spatial pair, it has no neighbour index");
     debug_assert!(
@@ -65,64 +67,76 @@ fn neighbour_idx_for_k(radius: u32, k: i32) -> u32 {
     }
 }
 
-/// Share of the raw input's noise sigma the `NlmSpatial` pilot's own
-/// reference still carries. Calibrated, not derived, by sweeping `{0, 0.25,
-/// 0.5, 0.75, 1.0}` against `--variant hq --prefilter nlm
-/// --motion-compensation` on `clean-1080p.mkv`'s light noise levels (`alls
-/// 4/6/8`, luma XPSNR and SSIM, matching
-/// `scripts/quality_runs_light.toml`'s own calibration convention). The
-/// sweep came back nearly flat (at most 0.10 dB / 0.0013 SSIM of spread
-/// across the whole grid, both metrics agreeing on direction), with the
-/// peak at the `1.0` edge, no correction at all, the opposite of this
-/// value. `0` is kept anyway, since a floor that swamps `thsad` makes
-/// confidence unable to discriminate a genuine mismatch by construction,
-/// independent of whether this one clip's content happens to exercise
-/// that failure mode within the sweep, and the grid's own flatness means
-/// this choice costs nothing measurable on it either way.
+/// How much of the raw input's noise the `NlmSpatial` pilot's reference
+/// image still carries.
+///
+/// This was measured rather than derived, by sweeping 0, 0.25, 0.5,
+/// 0.75, and 1.0 against the HQ variant with the NLM prefilter and
+/// motion compensation, at light noise levels on `clean-1080p.mkv`.
+///
+/// The sweep came back nearly flat, with at most 0.10 dB of spread
+/// across the whole grid and both metrics agreeing on direction. Its
+/// peak sat at 1.0, meaning no correction at all, which is the opposite
+/// of the value chosen here.
+///
+/// 0 is kept anyway. A floor large enough to swamp `thsad` leaves
+/// confidence unable to tell a genuine mismatch apart from noise, no
+/// matter whether this one clip happens to show that failure. Because
+/// the grid is flat, choosing 0 costs nothing measurable either.
 const NLM_SPATIAL_RESIDUAL_FRACTION: f32 = 0.0;
 
-/// Share of the raw input's noise sigma the `Bilateral` prefilter's
-/// reference still carries. Calibrated the same way as
-/// [`NLM_SPATIAL_RESIDUAL_FRACTION`], against `--prefilter
-/// bilateral:3.0,0.02 --motion-compensation` (this repo's own
-/// calibrated `sigma_s, sigma_r` pair, see `scripts/quality_runs.toml`
-/// and `scripts/bench_runs.toml`). Unlike `NlmSpatial`, this sweep
-/// landed cleanly and monotonically on `0` at every tested noise
-/// level, with a real and growing margin (0.16 dB at the lightest
-/// noise level tested up to 0.57 dB at the heaviest), so `0` here is a
-/// genuine empirical result, not a judgement call. It lands on the
-/// same numeric value as `NLM_SPATIAL_RESIDUAL_FRACTION` by
-/// coincidence of two different reasoning paths, not because the two
-/// prefilters were shown to share one constant, so they stay separate
-/// constants rather than being unified into one.
+/// How much of the raw input's noise the `Bilateral` prefilter's
+/// reference image still carries.
+///
+/// This was measured the same way as
+/// [`NLM_SPATIAL_RESIDUAL_FRACTION`], using the repo's own calibrated
+/// `sigma_s` and `sigma_r` pair with motion compensation on.
+///
+/// Unlike the NLM pilot, this sweep landed cleanly on 0 at every noise
+/// level tested, and the margin grew with the noise, from 0.16 dB at
+/// the lightest level to 0.57 dB at the heaviest. So 0 here is a real
+/// result rather than a judgement call.
+///
+/// It matches [`NLM_SPATIAL_RESIDUAL_FRACTION`] by coincidence of two
+/// different lines of reasoning, not because the two prefilters were
+/// shown to share a value. They stay separate constants for that
+/// reason.
 const BILATERAL_RESIDUAL_FRACTION: f32 = 0.0;
 
-/// Sigma to feed [`motion::sad_noise_floor`] for the motion-compensation
-/// block match. `run_motion_compensation` matches against
-/// `pyramid_reference` whenever it exists (see `analyse_pyramid` in
-/// that method), not the raw input pyramid. `sad_noise_floor` models
-/// the SAD of two *raw* noisy copies, so `sigma_y` (the raw input's
-/// sigma) only belongs there when the match actually runs on raw
-/// pixels. A GPU-internal prefilter (`NlmSpatial`'s pilot pass, or
-/// `Bilateral`) denoises the frame before the match ever sees it, so
-/// the raw floor overstates the real one there. At `NlmSpatial`,
-/// default `blksize`, σ_y = 0.02, the raw floor (≈5.78) alone exceeds
-/// `thsad` (5.12), swamping confidence's entire dynamic range and
-/// clamping confidence to 1.0 everywhere, including genuinely occluded
+/// The sigma to hand [`motion::sad_noise_floor`] for the
+/// motion-compensation block match.
+///
+/// `run_motion_compensation` matches against the reference pyramid
+/// whenever one exists, not the raw input pyramid.
+/// [`motion::sad_noise_floor`] models the score two raw noisy copies
+/// would produce, so the raw sigma only belongs there when the match
+/// really runs on raw pixels.
+///
+/// A prefilter that runs on the GPU, meaning the NLM pilot pass or the
+/// bilateral blur, cleans the frame before the match ever sees it. The
+/// raw floor therefore overstates the real one.
+///
+/// The consequences are not subtle. With the NLM pilot, the default
+/// block size, and a sigma of 0.02, the raw floor alone comes to about
+/// 5.78 against a threshold of 5.12. That swamps confidence's whole
+/// range and pins it at 1.0 everywhere, including genuinely occluded
 /// blocks.
 ///
-/// Rather than asserting a fixed model of how much noise either
-/// prefilter leaves behind (which would only be a different unverified
-/// guess in place of the one being fixed), the sigma actually used is
-/// `sigma_y * residual_fraction`, with `residual_fraction` measured per
-/// prefilter by a quality sweep rather than derived (see
-/// [`NLM_SPATIAL_RESIDUAL_FRACTION`]/[`BILATERAL_RESIDUAL_FRACTION`]).
-/// `0` (the raw floor contributes nothing) and `1` (the pre-fix,
-/// buggy behaviour) are just the grid's two endpoints.
+/// # What is used instead
 ///
-/// `External`'s reference is caller-supplied with unknown noise
-/// characteristics, not something this crate denoised, so it keeps the
-/// raw sigma unconditionally, the same as `PrefilterMode::None`.
+/// Rather than asserting a model of how much noise each prefilter
+/// leaves behind, which would only swap one unverified guess for
+/// another, the sigma used is the raw sigma times a residual fraction
+/// measured per prefilter by a quality sweep. See
+/// [`NLM_SPATIAL_RESIDUAL_FRACTION`] and
+/// [`BILATERAL_RESIDUAL_FRACTION`].
+///
+/// 0 means the raw floor contributes nothing, and 1 is the old
+/// behaviour this replaced. Those are the sweep grid's two endpoints.
+///
+/// An `External` reference comes from the caller with unknown noise, and
+/// is not something this crate denoised, so it keeps the raw sigma just
+/// as `PrefilterMode::None` does.
 fn mc_sad_noise_floor_sigma(prefilter: PrefilterMode, sigma_y: f32) -> f32 {
     match prefilter {
         PrefilterMode::NlmSpatial { .. } => sigma_y * NLM_SPATIAL_RESIDUAL_FRACTION,
@@ -131,13 +145,15 @@ fn mc_sad_noise_floor_sigma(prefilter: PrefilterMode, sigma_y: f32) -> f32 {
     }
 }
 
-/// Confidence-kernel arguments for one temporal (k≠0) pair dispatch.
-/// Carries whether confidence weighting is active, the forward/backward
-/// per-block confidence array views, and the block geometry the
-/// kernel needs to map an output pixel to its block index (mirrors
-/// `nlm_mc_warp`'s pixel→block mapping). Inactive configurations carry
-/// the small placeholder dummy buffer, `use_confidence` set to `false`,
-/// and harmless (never read) geometry.
+/// The confidence arguments for one temporal pair dispatch.
+///
+/// This carries whether confidence weighting is on, the forward and
+/// backward per-block confidence views, and the block geometry the
+/// kernel needs to map an output pixel onto its block. That mapping
+/// mirrors the one `nlm_mc_warp` uses.
+///
+/// When confidence is off, this holds the small placeholder buffer, a
+/// false flag, and geometry that is never read.
 struct ConfidenceArgs<R: Runtime> {
     use_confidence: bool,
     conf_fwd: ArrayArg<R>,
@@ -160,9 +176,10 @@ impl<R: Runtime> NlmDenoiser<R> {
         unsafe { ArrayArg::from_raw_parts(buf.clone(), ctx.total_frame_data) }
     }
 
-    /// Input array for the temporal (k≠0) kernels. Falls back to the
-    /// compensated ring when motion compensation is active; otherwise
-    /// identical to [`Self::input_arg`].
+    /// The input array the temporal kernels read.
+    ///
+    /// With motion compensation active this is the compensated ring.
+    /// Otherwise it is the same as [`Self::input_arg`].
     fn input_arg_for_temporal(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
         match self.compensated_input_buf.as_ref() {
             Some(buf) => unsafe { ArrayArg::from_raw_parts(buf.clone(), ctx.total_frame_data) },
@@ -170,8 +187,8 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
     }
 
-    /// Reference array for the temporal (k≠0) `_ref` kernels. Same
-    /// fallback as [`Self::input_arg_for_temporal`].
+    /// The reference array the temporal `_ref` kernels read, following
+    /// the same rule as [`Self::input_arg_for_temporal`].
     fn reference_arg_for_temporal(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
         match self.compensated_reference_buf.as_ref() {
             Some(buf) => unsafe { ArrayArg::from_raw_parts(buf.clone(), ctx.total_frame_data) },
@@ -187,11 +204,11 @@ impl<R: Runtime> NlmDenoiser<R> {
         unsafe { ArrayArg::from_raw_parts(self.outputs[slot].clone(), ctx.frame_size) }
     }
 
-    /// The whole reference ring, for a kernel that addresses one of its
-    /// slots itself. Binding a single slot instead would need the
-    /// slot's byte offset to land on one of the runtime's alignment
-    /// boundaries, which a `width * height * stored_ch` frame stride
-    /// does not guarantee.
+    /// The whole reference ring, for a kernel that picks a slot itself.
+    ///
+    /// Binding one slot instead would need its byte offset to land on
+    /// one of the runtime's alignment boundaries, which a
+    /// `width * height * stored_ch` frame stride cannot promise.
     fn reference_ring_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
         let buf = self
             .reference_buf
@@ -228,27 +245,31 @@ impl<R: Runtime> NlmDenoiser<R> {
         unsafe { ArrayArg::from_raw_parts(self.tmp_hsum_bwd.clone(), ctx.pixels) }
     }
 
-    /// View of `spatial_offset_lut`, sized for this denoiser's
-    /// `search_radius`. Only the k=0 windowed kernels read it. Every
-    /// other launch keeps the flat `noise_offset` scalar.
+    /// A view of `spatial_offset_lut`, sized for this denoiser's search
+    /// radius.
+    ///
+    /// Only the spatial windowed kernels read it. Every other launch
+    /// uses the flat `noise_offset` scalar instead.
     fn spatial_offset_lut_arg(&self) -> ArrayArg<R> {
         let len = spatial_offset_lut_len(self.params.search_radius);
         unsafe { ArrayArg::from_raw_parts(self.spatial_offset_lut.clone(), len) }
     }
 
-    /// Build the confidence-kernel arguments for one temporal pair at
-    /// offset `q_k` (always nonzero at every call site). `frame_fwd`
-    /// reads neighbour `center + q_k`, so its confidence comes from
-    /// neighbour `q_k`'s slice. `frame_bwd` reads `center - q_k`, so its
-    /// confidence comes from neighbour `-q_k`'s slice (see
-    /// `neighbour_idx_for_k`).
+    /// Builds the confidence arguments for one temporal pair, at an
+    /// offset that is never zero at any call site.
     ///
-    /// Confidence weighting is active only when `confidence_buf` is
-    /// allocated (see `NlmDenoiser::new`) and block geometry exists,
-    /// either from `mc_ctx` (MC active) or `confidence_ctx` (the no-MC
-    /// confidence pass). Otherwise this falls back to the 1-element
-    /// `confidence_dummy` buffer with `use_confidence` set to `false`,
-    /// so the kernel never reads it.
+    /// The forward frame reads the neighbour at a positive offset, so
+    /// its confidence comes from that neighbour's slice. The backward
+    /// frame reads the negative offset, so its confidence comes from the
+    /// opposite slice. See `neighbour_idx_for_k`.
+    ///
+    /// Confidence weighting only runs when `confidence_buf` was
+    /// allocated, which `NlmDenoiser::new` decides, and when block
+    /// geometry exists, either from `mc_ctx` with motion compensation on
+    /// or from `confidence_ctx` without it.
+    ///
+    /// Otherwise this falls back to the one-element `confidence_dummy`
+    /// buffer with the flag off, so the kernel never reads it.
     fn confidence_pair_args(&self, q_k: i32) -> ConfidenceArgs<R> {
         let geometry = self.mc_ctx.as_ref().or(self.confidence_ctx.as_ref());
         if let (Some(buf), Some(mc)) = (self.confidence_buf.as_ref(), geometry) {
@@ -278,10 +299,11 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
     }
 
-    /// Temporal (k≠0) windowed fused step: a single launch covers every
-    /// `(q_x, q_y)` in the search window, keeping accum / weight_sum /
-    /// max_weight register-resident across the inner q-loop. Collapses
-    /// `(2·search_radius + 1)²` per-q launches into one.
+    /// The windowed fused step for a temporal neighbour.
+    ///
+    /// One launch covers every offset in the search window, keeping the
+    /// accumulator, weight sum, and max weight in registers throughout.
+    /// That collapses `(2 * search_radius + 1)^2` launches into one.
     fn dispatch_fused_window_iter(
         &self,
         ctx: &LaunchCtx,
@@ -363,11 +385,12 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
-    /// Spatial (k=0) windowed fused step: a single launch covers every
-    /// `(q_x, q_y)` in the search window in one direction, exploiting the
-    /// symmetry of the patch distance (`w(x, −q) = w(x−q, q)`) so the
-    /// full-window single-direction sum equals the half-window paired sum
-    /// applied per q.
+    /// The windowed fused step for the frame against itself.
+    ///
+    /// One launch covers every offset in the search window, walking it
+    /// in a single direction. Patch distance reads the same either way,
+    /// so a full window in one direction gives exactly the same total as
+    /// a half window walked in both.
     fn dispatch_fused_single_window_iter(&self, ctx: &LaunchCtx, center_t: u32) -> Result<(), anyhow::Error> {
         let channels = self.params.channels.count();
         let _stored = self.params.channels.storage_count();
@@ -425,10 +448,14 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
-    /// Temporal (k≠0) separable-path step: distance_pair →
-    /// horizontal_sum_pair → fused vweight+accumulate. The fused
-    /// terminal kernel consumes both hsum buffers, so no global weight
-    /// buffer is written.
+    /// The separable-path step for a temporal neighbour.
+    ///
+    /// It runs the paired distance, then the paired horizontal sums,
+    /// then one fused kernel that finishes the vertical sum, the
+    /// weights, and the accumulation together.
+    ///
+    /// That last kernel reads both horizontal-sum buffers itself, so no
+    /// weight buffer is ever written to global memory.
     fn dispatch_separable_iter(
         &self,
         ctx: &LaunchCtx,
@@ -537,9 +564,13 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
-    /// Spatial (k=0) separable-path step: distance → hsum → vweight
-    /// (single buffer) → accumulate. Symmetric weight map, so one
-    /// buffer is reused for both forward and backward lookups.
+    /// The separable-path step for the frame against itself.
+    ///
+    /// It runs the distance, the horizontal sums, the vertical sums and
+    /// weights, and then the accumulation.
+    ///
+    /// The weight map reads the same in either direction, so one buffer
+    /// serves both the forward and backward lookups.
     fn dispatch_separable_iter_k0(
         &self,
         ctx: &LaunchCtx,
@@ -603,11 +634,11 @@ impl<R: Runtime> NlmDenoiser<R> {
             );
         }
 
-        // Same correlation-attenuated offset the k=0 windowed kernel's
-        // LUT holds at this (q_x, q_y), computed directly instead of
-        // reading the LUT buffer back, this dispatch already has the
-        // exact candidate offset the windowed kernel derives at
-        // comptime from its unrolled loop.
+        // The same correlation-adjusted offset the spatial windowed
+        // kernel's table holds for this candidate. It is computed
+        // directly rather than read back from the table, because this
+        // dispatch already knows the exact candidate offset the
+        // windowed kernel works out at compile time.
         let offset = self.noise_offset * spatial_offset_factor(q_x, q_y, self.rho_smoothed.unwrap_or(0.0));
         unsafe {
             nlm_vertical_weight::launch_unchecked::<R>(
@@ -650,11 +681,16 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
-    /// Run the per-submit motion-compensation sweep: estimate MVs from
-    /// the centre to each of the `2·R` neighbours and warp them into
-    /// `compensated_*_buf`. The centre slot is copied through
-    /// unchanged so temporal kernels can read it uniformly. No-op
-    /// when MC is inactive (or no neighbours).
+    /// Runs the motion-compensation sweep for one submit.
+    ///
+    /// It estimates the motion from the centre frame to each neighbour
+    /// and shifts them into the compensated buffers.
+    ///
+    /// The centre slot is copied through unchanged, so the temporal
+    /// kernels can read every slot the same way.
+    ///
+    /// This does nothing when motion compensation is off, or when there
+    /// are no neighbours.
     fn run_motion_compensation(&self, center_t: u32) -> Result<(), anyhow::Error> {
         let Some(mc) = self.mc_ctx.as_ref() else {
             return Ok(());
@@ -681,11 +717,13 @@ impl<R: Runtime> NlmDenoiser<R> {
             .compensated_input_buf
             .as_ref()
             .expect("compensated_input allocated when mc_ctx is Some");
-        // `confidence_buf` only exists when confidence weighting is
-        // active (see `NlmDenoiser::new`). MC itself doesn't need it.
-        // When it's absent, the fine kernel still requires some buffer
-        // for its `confidence` argument, so fall back to the small
-        // always-present dummy and tell the kernel not to write it.
+        // `confidence_buf` only exists when confidence weighting is on,
+        // which `NlmDenoiser::new` decides. Motion compensation itself
+        // does not need it.
+        //
+        // The fine kernel still wants some buffer for its `confidence`
+        // argument, so when there is none, pass the small always-present
+        // dummy and tell the kernel not to write it.
         let (confidence_arg, write_confidence): (&Handle, bool) = match self.confidence_buf.as_ref() {
             Some(buf) => (buf, true),
             None => (&self.confidence_dummy, false),
@@ -695,8 +733,8 @@ impl<R: Runtime> NlmDenoiser<R> {
         let sad_noise_floor = motion::sad_noise_floor(mc.blksize, mc_sigma_y);
         let thsad = motion::thsad(mc.blksize, thsad_scale);
 
-        // Centre frame: straight passthrough copy so the temporal
-        // kernels can read it uniformly from the compensated buffer.
+        // The centre frame is copied straight through, so the temporal
+        // kernels can read every slot from the compensated buffer.
         copy_frame_into_slot_handle::<R>(
             &self.client,
             &self.input_buf,
@@ -723,17 +761,19 @@ impl<R: Runtime> NlmDenoiser<R> {
             );
         }
 
-        // Use the cleaner of the two buffers for motion estimation:
-        // the reference (prefiltered) pyramid when available.
+        // Match against the cleaner of the two buffers, which is the
+        // prefiltered reference pyramid whenever one exists.
         let analyse_pyramid = self.pyramid_reference.as_ref().unwrap_or(pyramid_input);
 
-        // One motion estimate + warp per non-centre neighbour. Neighbours
-        // run in logical order k = -R .. -1, +1 .. +R. Their MV-field
-        // index is contiguous, so packing keeps the field tight. Motion
-        // estimation itself branches on `estimation`. `Direct` matches
-        // straight against the centre frame exactly as before. `Chained`
-        // composes the adjacent-pair fields into a seed, then refines it
-        // with a small search. Either way the warp below is identical.
+        // One motion estimate and one shift per neighbour. They run in
+        // order from the furthest behind to the furthest ahead, skipping
+        // the centre, and their motion-field indices are contiguous so
+        // the field stays tight.
+        //
+        // Only the estimate branches. `Direct` matches straight against
+        // the centre frame, while `Chained` joins the adjacent-pair
+        // fields into a seed and then refines it with a small search.
+        // The shift below is the same either way.
         let is_chained = self.is_chained();
         let radius = temporal_radius as i32;
         let mut neighbour_idx: u32 = 0;
@@ -831,20 +871,22 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
-    /// Run the per-submit no-MC confidence sweep. A zero-search-radius
-    /// block match from the centre frame to each of the `2·R`
-    /// neighbours, writing per-block confidence into `confidence_buf`.
-    /// No-op unless the no-MC confidence pass is active (`confidence_ctx`
-    /// is `None` whenever motion compensation is active instead, or
-    /// confidence is off entirely).
+    /// Scores each neighbour against the centre frame without searching
+    /// for motion, once per submit.
+    ///
+    /// Every block is matched where it stands, and the per-block score
+    /// goes into `confidence_buf`.
+    ///
+    /// This only runs when confidence is on and motion compensation is
+    /// off. `confidence_ctx` is `None` in every other case.
     fn run_confidence_pass(&self, center_t: u32) -> Result<(), anyhow::Error> {
         let Some(ctx) = self.confidence_ctx.as_ref() else {
             return Ok(());
         };
 
-        // `confidence_ctx` is only ever constructed alongside
-        // `temporal_radius > 0` (see `NlmDenoiser::new`), so
-        // `temporal_radius` is guaranteed non-zero here.
+        // `confidence_ctx` is only ever built when the temporal radius
+        // is above 0, which `NlmDenoiser::new` sees to, so the radius
+        // cannot be zero here.
         let temporal_radius = self.params.temporal_radius;
 
         let frame_count = self.params.total_frames();
@@ -917,9 +959,11 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
-    /// Shared `nlm_finish` launch, parameterized on where the result
-    /// is written. `run_finish` targets an output slot. The nlm-spatial
-    /// pilot targets a reference-ring slot instead.
+    /// The shared `nlm_finish` launch, with the destination left to the
+    /// caller.
+    ///
+    /// `run_finish` writes to an output slot, while the NLM pilot writes
+    /// to a reference-ring slot instead.
     fn run_finish_to(
         &self,
         ctx: &LaunchCtx,
@@ -960,8 +1004,8 @@ impl<R: Runtime> NlmDenoiser<R> {
         )
     }
 
-    /// Derive the launch shapes shared by every per-frame dispatch
-    /// (main pass and the nlm-spatial pilot alike).
+    /// Works out the launch shapes every per-frame dispatch shares,
+    /// covering both the main pass and the NLM pilot.
     fn launch_ctx(&self) -> LaunchCtx {
         let width = self.width;
         let height = self.height;
@@ -981,11 +1025,12 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
     }
 
-    /// Denoise one freshly pushed frame with the windowed spatial
-    /// kernel and store the result in its reference ring slot. Shares
-    /// the frame-sized accumulators with the main pass. The in-order
-    /// GPU queue makes that safe because the main dispatch zeroes them
-    /// again before use.
+    /// Denoises a freshly pushed frame with the windowed spatial kernel
+    /// and stores the result in its reference-ring slot.
+    ///
+    /// This shares the frame-sized accumulators with the main pass. The
+    /// GPU queue runs in order and the main dispatch zeroes them again
+    /// before use, so sharing them is safe.
     pub(super) fn run_nlm_spatial_pilot(&self, slot: u32, strength_scale: f32) -> Result<(), anyhow::Error> {
         let ctx = self.launch_ctx();
         self.zero_accumulators(&ctx)?;
@@ -993,20 +1038,23 @@ impl<R: Runtime> NlmDenoiser<R> {
         let channels = self.params.channels.count();
         let pilot_h2 = self.h2_inv_norm / (strength_scale * strength_scale);
 
-        // Flat LUT at rho = 0: the pilot compares noisy-input patches
-        // directly and keeps the full white-noise floor unconditionally
-        // (out of scope for the correlation attenuation, see
-        // `input_noise_offset`'s doc comment on the denoiser). Built
-        // fresh per call rather than cached, `input_noise_offset` can
-        // change between pushes and this is a tiny, one-off upload.
+        // A flat table with no correlation adjustment. The pilot
+        // compares noisy input patches directly and keeps the full
+        // white-noise floor, which puts it outside the scope of that
+        // adjustment. The denoiser's `input_noise_offset` doc explains
+        // why.
+        //
+        // It is built fresh each call rather than cached, because
+        // `input_noise_offset` can change between pushes and this is a
+        // tiny one-off upload.
         let pilot_lut = build_spatial_offset_lut(self.params.search_radius, 0.0, self.input_noise_offset);
         let pilot_lut_handle = self.client.create_from_slice(f32::as_bytes(&pilot_lut));
         let pilot_lut_arg = unsafe { ArrayArg::<R>::from_raw_parts(pilot_lut_handle, pilot_lut.len()) };
 
-        // Always read the noisy input here, never `reference_arg`: for
-        // `NlmSpatial`, `reference_buf` is the pilot's own output, not
-        // an input to it, even though `use_reference` is true so the
-        // *main* pass's kernels pick the `_ref` variants.
+        // Always read the noisy input here, never `reference_arg`. For
+        // `NlmSpatial` the reference buffer is the pilot's own output
+        // rather than an input to it, even though `use_reference` is
+        // true so the main pass picks the `_ref` kernels.
         unsafe {
             nlm_fused_single_window::launch_unchecked::<R>(
                 &self.client,
@@ -1041,29 +1089,32 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         let center_t = temporal_radius;
 
-        // Motion compensation runs before any NLM dispatch so the
-        // temporal kernels (k≠0) can read aligned neighbours from
-        // `compensated_*_buf`. No-op when MC is inactive.
+        // Motion compensation runs before any NLM dispatch, so the
+        // temporal kernels can read already-aligned neighbours from the
+        // compensated buffers. It does nothing when motion compensation
+        // is off.
         self.run_motion_compensation(center_t)?;
-        // No-op unless the no-MC confidence pass is active. This is
-        // mutually exclusive with `run_motion_compensation` actually
-        // doing anything, since `confidence_ctx` is only `Some` when
-        // MC isn't.
+        // This does nothing unless the confidence pass without motion
+        // compensation is active. The two never both run, because
+        // `confidence_ctx` is only `Some` when motion compensation is
+        // off.
         self.run_confidence_pass(center_t)?;
 
         self.zero_accumulators(&ctx)?;
         let window_side = 2 * search_radius + 1;
         let window_area = window_side * window_side;
 
-        // The k≠0 temporal slices cover the full search window (every q
-        // there has `linear < 0`), so the non-reference fused path takes
-        // the windowed kernel: one launch per q_k that internally loops
-        // over every (q_x, q_y). The k=0 slice still uses the per-q
-        // half-window dispatch because its weight map is symmetric in q
-        // and the single-tile path is cheaper per q.
+        // Every temporal neighbour covers the full search window, so the
+        // plain fused path uses the windowed kernel, one launch per
+        // neighbour that loops over the offsets itself.
         //
-        // Reference-clip and separable paths still iterate per q until
-        // a matching windowed variant is added.
+        // The frame against itself still dispatches one offset at a
+        // time over half the window, because its weight map reads the
+        // same in either direction and the single-tile path is cheaper
+        // per offset.
+        //
+        // The reference-image and separable paths also go one offset at
+        // a time, until they gain windowed kernels of their own.
         let k_start = -(temporal_radius as i32);
         let use_windowed = !self.use_separable;
         for q_k in k_start..=0 {
@@ -1098,16 +1149,17 @@ impl<R: Runtime> NlmDenoiser<R> {
     }
 }
 
-/// GPU→GPU copy of one frame from `src`'s slot `slot` into `dst`'s
-/// slot `slot`. Both buffers must share the same ring-buffer layout
-/// (`frame_count * height * width * stored_ch`). Free function so
-/// the motion-compensation dispatcher can call it without tying back
-/// into the `NlmDenoiser` impl block (avoids borrow conflicts inside
-/// the per-submit method).
+/// Copies one frame from a slot of `src` into the same slot of `dst`,
+/// entirely on the GPU.
 ///
-/// Binds both rings whole and lets the kernel address the slot, for
-/// the alignment reason [`NlmDenoiser::copy_frame_into_slot`]
-/// documents.
+/// Both buffers have to share the same ring layout.
+///
+/// This is a free function rather than a method, so the
+/// motion-compensation dispatcher can call it without borrowing the
+/// denoiser again inside the per-submit method.
+///
+/// Both rings are bound whole and the kernel picks the slot itself, for
+/// the alignment reason [`NlmDenoiser::copy_frame_into_slot`] explains.
 #[allow(clippy::too_many_arguments)]
 fn copy_frame_into_slot_handle<R: Runtime>(
     client: &ComputeClient<R>,
@@ -1151,12 +1203,13 @@ mod tests {
         neighbour_idx_for_k,
     };
 
-    /// Walking `k = -radius..=radius` (skipping 0) and incrementing a
-    /// counter from 0 must reproduce `neighbour_idx_for_k` exactly, for
-    /// every radius. This is the same walk `run_motion_compensation`
-    /// and `run_confidence_pass` use to fill `mv_field_buf` /
-    /// `confidence_buf`, so it pins down the fill order those passes
-    /// established.
+    /// Walking every offset in order, skipping zero, and counting up
+    /// from 0 has to reproduce `neighbour_idx_for_k` exactly at every
+    /// radius.
+    ///
+    /// That is the same walk `run_motion_compensation` and
+    /// `run_confidence_pass` use to fill their buffers, so this pins
+    /// down the order those passes established.
     #[test]
     fn matches_the_sequential_fill_order() {
         for radius in 1..=8u32 {
@@ -1171,10 +1224,11 @@ mod tests {
         }
     }
 
-    /// The forward slice (neighbour `center + q_k`) and backward slice
-    /// (neighbour `center - q_k`) must always land on distinct,
-    /// in-range indices. A mismatch here would silently apply the
-    /// wrong frame's confidence to a temporal weight.
+    /// The forward and backward slices must always land on different
+    /// indices, both in range.
+    ///
+    /// Getting that wrong would quietly apply one frame's confidence to
+    /// another frame's temporal weight.
     #[test]
     fn forward_and_backward_indices_are_distinct_and_in_range() {
         for radius in 1..=8u32 {
@@ -1196,10 +1250,11 @@ mod tests {
         assert_eq!(neighbour_idx_for_k(2, 2), 3);
     }
 
-    /// Pins the calibrated constant itself to a literal, not a value
-    /// re-derived from the constant under test, so a future recalibration
-    /// that changes it actually fails this test instead of trivially
-    /// re-passing.
+    /// Pins the calibrated constant to a literal rather than to a value
+    /// worked out from the constant itself.
+    ///
+    /// That way a future recalibration fails this test instead of
+    /// quietly passing again.
     #[test]
     fn nlm_spatial_residual_fraction_is_calibrated_to_zero() {
         assert_eq!(NLM_SPATIAL_RESIDUAL_FRACTION, 0.0);

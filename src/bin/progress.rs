@@ -12,11 +12,12 @@ static PROGRESS: OnceLock<MultiProgress> = OnceLock::new();
 
 /// The `MultiProgress` every bar is registered on.
 ///
-/// Bars go through this rather than drawing to stderr directly so that
-/// tracing output routed through [`tracing_writer`] can suspend them
-/// while it writes. `MultiProgress::new` draws to stderr and reports
-/// itself hidden when stderr is not a terminal, so a redirected run
-/// emits nothing.
+/// Bars go through this rather than drawing to stderr directly. That
+/// lets tracing output routed through [`tracing_writer`] suspend them
+/// while it writes.
+///
+/// `MultiProgress::new` draws to stderr and reports itself hidden when
+/// stderr is not a terminal, so a redirected run emits nothing.
 fn multi() -> &'static MultiProgress {
     PROGRESS.get_or_init(MultiProgress::new)
 }
@@ -31,11 +32,13 @@ pub fn tracing_writer() -> IndicatifWriter<Stderr> {
 
 /// Whether the denoising progress bar should be drawn.
 ///
-/// That bar is opt-in: true only when `progress` is set and the target
-/// stream is a terminal. It runs for the whole encode, alongside
-/// whatever the consumer of our output is printing, so leaving it off
-/// by default keeps a piped run readable. The scene-detection bar has
-/// no such conflict and only checks the terminal.
+/// That bar is opt-in. It shows only when `progress` is set and the
+/// target stream is a terminal.
+///
+/// It runs for the whole encode, alongside whatever the consumer of our
+/// output is printing, so leaving it off by default keeps a piped run
+/// readable. The scene-detection bar has no such conflict and only
+/// checks the terminal.
 ///
 /// The terminal check is a parameter rather than read directly here so
 /// this stays unit-testable without a real tty.

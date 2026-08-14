@@ -1,5 +1,3 @@
-//! Parsing and opening of the `-i`/`--input` value.
-
 use std::fmt;
 use std::io::Read;
 use std::path::PathBuf;

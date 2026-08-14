@@ -1,3 +1,24 @@
+//! The GPU kernels the denoiser launches.
+//!
+//! Everything here is cubecl code that runs on the device. The host side
+//! decides which kernels to launch and with what arguments, which is the
+//! `dispatch` module's job.
+//!
+//! A denoise pass measures how alike patches are, turns those distances
+//! into weights, accumulates the weighted pixels, and then normalises
+//! the result.
+//!
+//! `fused` does the first three steps in one kernel, which is the fast
+//! path for small patches. `separable` splits the distance step into
+//! horizontal and vertical passes so the cost stays linear as patches
+//! grow. `accumulate` holds the shared accumulation and normalisation
+//! steps.
+//!
+//! `bilateral` is the prefilter, `noise` measures the noise level,
+//! [`motion`] tracks movement between frames, `memory` holds the copy
+//! and zero utilities, and `helpers` holds the small pieces the kernels
+//! share.
+
 mod accumulate;
 mod bilateral;
 mod fused;

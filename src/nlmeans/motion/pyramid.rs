@@ -5,32 +5,42 @@ use super::MotionCtx;
 use crate::nlmeans::align::StorageAlign;
 use crate::nlmeans::kernels::motion::{nlm_mc_downscale, nlm_mc_extract_luma};
 
-/// Luma pixels one frame occupies at `level`, padded up to a whole
-/// number of `align` boundaries. Slot offsets are sums of whole slot
-/// strides, so padding the stride is what keeps every offset aligned.
-/// `wgpu` rejects a bind-group offset that isn't a multiple of its
-/// `min_storage_buffer_offset_alignment`, and a level whose `w * h`
-/// doesn't fill whole boundaries (a 180x137 chroma level, say) leaves
-/// every odd slot short of one. Kernels only ever read a slot's
-/// leading `w * h` pixels, so the pad is never touched.
+/// How many luma pixels one frame takes up at `level`, padded up to a
+/// whole number of alignment boundaries.
+///
+/// Slot offsets are sums of whole slot strides, so padding the stride is
+/// what keeps every offset aligned.
+///
+/// wgpu rejects a bind-group offset that is not a multiple of its
+/// `min_storage_buffer_offset_alignment`. A level whose pixel count does
+/// not fill whole boundaries, such as a 180x137 chroma level, would
+/// otherwise leave every odd slot short of one.
+///
+/// Kernels only ever read a slot's leading `width * height` pixels, so
+/// the padding is never touched.
 fn level_slot_pixels(width: u32, height: u32, level: u32, align: StorageAlign) -> usize {
     let (w, h) = level_dims(width, height, level);
     align.pad_elems::<f32>((w as usize) * (h as usize))
 }
 
-/// Number of luma pixels stored per frame across every pyramid level
-/// for an image of `(width, height)`. Level 0 contributes `w*h`; each
-/// subsequent level halves both axes. Each level's contribution is
-/// padded to `align`, matching the layout
-/// [`pyramid_slot_byte_offset`] addresses.
+/// How many luma pixels each frame takes up across every pyramid level.
+///
+/// Level 0 contributes the full pixel count, and each level after that
+/// halves both axes.
+///
+/// Every level's contribution is padded to the alignment, which matches
+/// the layout [`pyramid_slot_byte_offset`] addresses.
 pub fn pyramid_pixels_per_frame(width: u32, height: u32, levels: u32, align: StorageAlign) -> usize {
     (0..levels)
         .map(|level| level_slot_pixels(width, height, level, align))
         .sum()
 }
 
-/// Byte offset of a given `(level, frame)` slot inside the flat pyramid
-/// buffer. Always a multiple of `align`, see [`level_slot_pixels`].
+/// Where a given level and frame slot starts inside the flat pyramid
+/// buffer.
+///
+/// The result is always a multiple of the alignment. See
+/// [`level_slot_pixels`].
 pub fn pyramid_slot_byte_offset(
     width: u32,
     height: u32,
@@ -47,7 +57,7 @@ pub fn pyramid_slot_byte_offset(
     (offset_pixels * size_of::<f32>()) as u64
 }
 
-/// Pixel dimensions at `level` (level 0 = full res).
+/// The pixel dimensions at `level`, where level 0 is full resolution.
 pub fn level_dims(width: u32, height: u32, level: u32) -> (u32, u32) {
     let mut w = width;
     let mut h = height;
@@ -58,10 +68,11 @@ pub fn level_dims(width: u32, height: u32, level: u32) -> (u32, u32) {
     (w, h)
 }
 
-/// Build every pyramid level for the freshly-uploaded slot, starting
-/// from the packed full-resolution input. Level 0 is the extracted
-/// luma plane; each subsequent level is a 2x box downsample of the one
-/// before it.
+/// Builds every pyramid level for the slot that was just uploaded,
+/// starting from the packed full-resolution input.
+///
+/// Level 0 is the luma plane on its own. Each level after that is the
+/// one before it at half size, averaged 2x2.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_pyramid_build<R: Runtime>(
     client: &ComputeClient<R>,
@@ -193,7 +204,7 @@ fn downscale_level<R: Runtime>(
 mod tests {
     use super::*;
 
-    /// The alignment the Vulkan adapters we test against report.
+    /// The alignment the Vulkan adapters these tests run on report.
     fn align() -> StorageAlign {
         StorageAlign::new(32)
     }
@@ -205,7 +216,8 @@ mod tests {
 
     #[test]
     fn pyramid_pixels_two_levels_sums_levels() {
-        // Level 0: 64x32 = 2048; level 1: 32x16 = 512. Total 2560.
+        // Level 0 is 64x32, so 2048 pixels. Level 1 is 32x16, so 512.
+        // That gives 2560 in total.
         assert_eq!(pyramid_pixels_per_frame(64, 32, 2, align()), 2048 + 512);
     }
 
@@ -218,13 +230,14 @@ mod tests {
 
     #[test]
     fn slot_byte_offsets_respect_every_alignment_a_runtime_can_report() {
-        // A GPU rejects a bind-group offset that isn't a multiple of
+        // A GPU rejects a bind-group offset that is not a multiple of
         // `min_storage_buffer_offset_alignment`, which backends report
-        // anywhere from 4 to 256 bytes. Every dimension pair here has
-        // at least one level whose unpadded slot stride falls short:
-        // 360x274 is the chroma plane of a 720x548 frame, whose /2
-        // level is 180x137 = 24 660 f32 = 98 640 bytes, 16 bytes short
-        // of a 32-byte boundary.
+        // anywhere from 4 to 256 bytes.
+        //
+        // Every dimension pair here has at least one level whose
+        // unpadded slot stride falls short. 360x274 is the chroma plane
+        // of a 720x548 frame, and its half-size level of 180x137 comes
+        // to 98,640 bytes, 16 short of a 32-byte boundary.
         for bytes in [4u64, 16, 32, 64, 256] {
             let align = StorageAlign::new(bytes);
             for (w, h) in [(360, 274), (720, 548), (722, 546), (66, 66), (42, 28)] {
@@ -244,9 +257,9 @@ mod tests {
 
     #[test]
     fn pixels_per_frame_covers_the_last_slot_of_every_level() {
-        // The allocation `pyramid_pixels_per_frame` sizes must hold
+        // The allocation `pyramid_pixels_per_frame` sizes has to hold
         // every slot `pyramid_slot_byte_offset` addresses, padding
-        // included, whatever the runtime's alignment.
+        // included, whatever alignment the runtime reports.
         let (w, h, frames, levels) = (360u32, 274u32, 5u32, 3u32);
 
         for bytes in [4u64, 16, 32, 64, 256] {
@@ -269,9 +282,9 @@ mod tests {
 
     #[test]
     fn slot_byte_offset_advances_past_full_levels() {
-        // 4 frames, 64x32 image, 2 levels. Offset to (level=1, frame=2):
-        //   skip level 0 entirely: 4 * 64 * 32 = 8192 pixels
-        //   plus 2 frames at level 1 (32x16 = 512 each): 1024 pixels
+        // 4 frames of a 64x32 image across 2 levels. Reaching level 1,
+        // frame 2 means skipping all of level 0, which is 8192 pixels,
+        // then two frames of level 1 at 512 pixels each, so 1024 more.
         let bytes = pyramid_slot_byte_offset(64, 32, 4, 1, 2, align());
         assert_eq!(bytes as usize, (8192 + 1024) * 4);
     }

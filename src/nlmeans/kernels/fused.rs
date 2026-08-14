@@ -3,15 +3,18 @@ use cubecl::terminate;
 
 use super::helpers::{channel_scale, line_sum_sq, read_clamped_line, read_line, welsch_weight};
 
-/// Distance + 2D box filter + Welsch weight, written to `output[gx, gy]`.
+/// Measures the distance, box-filters it over the patch, and turns the
+/// result into a Welsch weight, all in one kernel.
 ///
-/// The cube cooperatively loads a `(block + 2·patch_radius)²` tile of
-/// per-pixel scaled distances into shared memory, then each thread
-/// sums its `(2·patch_radius + 1)²` patch and applies the Welsch
-/// kernel. A cube-uniform `interior` flag picks unclamped reads when
-/// the whole tile (and its q-shifted twin) lies inside the image; warps
-/// near the border fall back to the clamped path. The flag is uniform
-/// across the cube, so the branch causes no warp divergence.
+/// The block first loads a `(block + 2 * patch_radius)^2` tile of
+/// per-pixel scaled distances into shared memory. Each thread then sums
+/// its own `(2 * patch_radius + 1)^2` patch and applies the Welsch
+/// kernel.
+///
+/// An `interior` flag picks unclamped reads when the whole tile, and its
+/// shifted twin, lie inside the image. Blocks near the border take the
+/// clamped path instead. The flag is the same for every thread in the
+/// block, so the branch costs nothing in divergence.
 #[cube(launch_unchecked)]
 pub fn nlm_dist_2d_weight<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -114,11 +117,14 @@ pub fn nlm_dist_2d_weight<N: Size>(
     output[(global_y * width + global_x) as usize] = welsch_weight(patch_sum, h2_inv_norm, noise_offset);
 }
 
-/// `_ref` variant of `nlm_dist_2d_weight`. Distance reads come from
-/// `reference` (a prefiltered or externally-supplied clip with the same
-/// layout as `input`); the weight output is unchanged. Used when an
-/// rclip is active so weight calculation sees a cleaner image than the
-/// noisy input.
+/// The reference-image version of `nlm_dist_2d_weight`.
+///
+/// Distances are read from `reference`, a prefiltered or externally
+/// supplied image with the same layout as `input`. The weight output is
+/// unchanged.
+///
+/// This runs when a prefilter is active, so the weights are computed
+/// from a cleaner image than the noisy input.
 #[cube(launch_unchecked)]
 pub fn nlm_dist_2d_weight_ref<N: Size>(
     reference: &Array<Vector<f32, N>>,
@@ -221,34 +227,42 @@ pub fn nlm_dist_2d_weight_ref<N: Size>(
     output[(global_y * width + global_x) as usize] = welsch_weight(patch_sum, h2_inv_norm, noise_offset);
 }
 
-/// Windowed temporal pair kernel: loops over every `(q_x, q_y)` in the
-/// search window for one `q_k != 0` inside a single launch, keeping the
-/// running accumulator / weight sum / max weight in registers. The final
-/// values are added to global once at the end, collapsing what used to be
-/// `(2·search_radius + 1)²` launches into one.
+/// Compares the centre frame against one pair of temporal neighbours,
+/// covering the whole search window in a single launch.
 ///
-/// `frame_t` is read once into an expanded SMEM tile of size
-/// `(block + 2·patch_radius + 2·search_radius)²`, large enough to cover
-/// every `frame_fwd` / `frame_bwd` neighbour offset in the window
-/// relative to the cube's own tile — the forward and backward
-/// comparisons both centre on the same `frame_t` patch (the output
-/// pixel's own), so one cached tile covers both. Per q, only the
-/// shifted neighbour pixels in `frame_fwd` / `frame_bwd` come from
-/// global. The center read hits the cache. This roughly halves the
-/// global read traffic vs the naive windowed version that re-reads
-/// `frame_t` for every q.
+/// The kernel loops over every offset in the search window for one
+/// temporal distance, keeping the running accumulator, weight sum, and
+/// max weight in registers. Those are written to global memory once at
+/// the end, which collapses `(2 * search_radius + 1)^2` launches into
+/// one.
 ///
-/// The two distance tiles (`smem_fwd`, `smem_bwd`) are reused across q
-/// iterations and invalidated by `sync_cube` between iterations.
+/// # Caching the centre frame
 ///
-/// When `use_confidence` is true, `weight_fwd`/`weight_bwd` are each
-/// multiplied by their block's confidence (`conf_fwd`/`conf_bwd`)
-/// before they're folded into the register accumulators, using the
-/// same pixel→block mapping `nlm_mc_warp` uses. The block index only
-/// depends on `(global_x, global_y)`, so it applies uniformly across
-/// every `q` in the window for this neighbour. When `use_confidence`
-/// is false, the lookup and multiply are skipped entirely at compile
-/// time and `conf_fwd`/`conf_bwd` are never read.
+/// The centre frame is read once into a shared-memory tile of
+/// `(block + 2 * patch_radius + 2 * search_radius)^2` pixels, big enough
+/// to cover every neighbour offset the window can reach.
+///
+/// The forward and backward comparisons both centre on that same patch,
+/// so one cached tile serves both. Only the shifted neighbour pixels
+/// come from global memory each iteration.
+///
+/// That roughly halves the global read traffic compared with re-reading
+/// the centre frame for every offset.
+///
+/// The two distance tiles are reused across iterations, with a
+/// `sync_cube` between them.
+///
+/// # Confidence weighting
+///
+/// When `use_confidence` is true, each weight is multiplied by its
+/// block's confidence before it folds into the accumulators, using the
+/// same pixel-to-block mapping `nlm_mc_warp` uses.
+///
+/// The block index depends only on the pixel position, so it is the same
+/// for every offset in the window.
+///
+/// When `use_confidence` is false the lookup and the multiply are
+/// dropped at compile time, and the confidence buffers are never read.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_pair_accumulate_window<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -433,23 +447,30 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
     }
 }
 
-/// Windowed spatial (q_k == 0) kernel: same structure as
-/// `nlm_fused_pair_accumulate_window` but exploits the q-symmetry of
-/// the weight map. Patch distance is symmetric (`w(x, −q) = w(x−q, q)`),
-/// so iterating the full search window in a single direction at pixel x
-/// produces the same accumulator as the original half-window paired
-/// dispatch. One distance tile, one neighbour read per q.
+/// Compares a frame against itself across the search window, which is
+/// the spatial-only case.
 ///
-/// `frame_t` is cached in the expanded SMEM tile so per-q work touches
-/// global only for the shifted neighbour pixel. `q = (0, 0)` is skipped
-/// at comptime; the self-pair contribution is folded back in by `nlm_finish`
-/// via the `wref · max_weight` term.
+/// The structure matches `nlm_fused_pair_accumulate_window`, but this
+/// kernel takes advantage of the weight map's symmetry. Patch distance
+/// reads the same in either direction, so walking the full window one
+/// way gives the same accumulator as the paired half-window version,
+/// with one distance tile and one neighbour read per offset.
 ///
-/// `spatial_offset_lut` holds one noise-floor offset per candidate,
-/// row-major `(dy+search_radius)*(2*search_radius+1)+(dx+search_radius)`.
+/// The centre frame is cached in the expanded shared-memory tile, so
+/// each offset only touches global memory for its shifted neighbour
+/// pixel.
+///
+/// The zero offset is skipped at compile time. `nlm_finish` folds that
+/// self-contribution back in through its `wref * max_weight` term.
+///
+/// # Spatial offset table
+///
+/// `spatial_offset_lut` holds one noise-floor offset per candidate, laid
+/// out row-major over the window.
+///
 /// Nearby candidates share more of the grain's spatial correlation, so
-/// their offset is attenuated relative to distant ones (see
-/// `noise::build_spatial_offset_lut`).
+/// their offset is reduced relative to distant ones. See
+/// `noise::build_spatial_offset_lut`.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_single_window<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -515,10 +536,12 @@ pub fn nlm_fused_single_window<N: Size>(
             let q_x = q_xi as i32 - search_radius as i32;
             let q_y = q_yi as i32 - search_radius as i32;
             if comptime!(q_x == 0 && q_y == 0) {
-                // Skip the self-pair; its contribution is reintroduced by
-                // `nlm_finish` via `wref * max_weight`.
-                // No continue available in CubeCL yet, doesn't end up being
-                // a branch in the kernel, just gets optimised out at compile time.
+                // Skip the zero offset. `nlm_finish` puts that
+                // contribution back through `wref * max_weight`.
+                //
+                // CubeCL has no `continue` yet. This does not become a
+                // branch in the kernel, because it is optimised out at
+                // compile time.
             } else {
                 let mut tidx = thread_id;
                 while tidx < tile_elems {
@@ -587,12 +610,14 @@ pub fn nlm_fused_single_window<N: Size>(
     }
 }
 
-/// `_ref` variant of `nlm_fused_pair_accumulate_window`. Distance reads
-/// (the cached center tile and per-q neighbours) come from `reference`;
-/// pixel accumulation reads from `input` so the original-clip values
-/// flow into `accum` while weights are derived from the cleaner
-/// reference frames. Same confidence multiply as the non-`_ref`
-/// variant (see its doc comment).
+/// The reference-image version of `nlm_fused_pair_accumulate_window`.
+///
+/// Distances, both the cached centre tile and the per-offset
+/// neighbours, are read from `reference`. The pixels being accumulated
+/// still come from `input`, so the original values reach `accum` while
+/// the weights come from the cleaner reference frames.
+///
+/// Confidence weighting works the same way as in the plain version.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -675,8 +700,8 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
                 let tile_y = idx / tile_width;
 
                 // Both the forward and backward comparisons centre on
-                // the same `frame_t` patch (see the non-`_ref` variant's
-                // doc comment).
+                // the same patch of the centre frame. The plain
+                // variant's doc comment explains why.
                 let center_idx =
                     ((tile_y + search_radius) * expanded_width + (tile_x + search_radius)) as usize;
                 let center = smem_center[center_idx];
@@ -771,10 +796,14 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
     }
 }
 
-/// `_ref` variant of `nlm_fused_single_window`. Distance reads from
-/// `reference[frame_t]` (cached center + per-q neighbours, all at q_k=0);
-/// pixel accumulation reads from `input[frame_t]`. `spatial_offset_lut`
-/// has the same layout as `nlm_fused_single_window`'s.
+/// The reference-image version of `nlm_fused_single_window`.
+///
+/// Distances come from the reference image, both the cached centre and
+/// the per-offset neighbours, while the pixels being accumulated come
+/// from the input.
+///
+/// `spatial_offset_lut` has the same layout as in
+/// `nlm_fused_single_window`.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_single_window_ref<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -841,8 +870,9 @@ pub fn nlm_fused_single_window_ref<N: Size>(
             let q_x = q_xi as i32 - search_radius as i32;
             let q_y = q_yi as i32 - search_radius as i32;
             if comptime!(q_x == 0 && q_y == 0) {
-                // No continue available in CubeCL yet, doesn't end up being
-                // a branch in the kernel, just gets optimised out at compile time.
+                // CubeCL has no `continue` yet. This does not become a
+                // branch in the kernel, because it is optimised out at
+                // compile time.
             } else {
                 let mut tidx = thread_id;
                 while tidx < tile_elems {

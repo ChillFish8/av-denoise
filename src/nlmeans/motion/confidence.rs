@@ -6,38 +6,55 @@ use super::analyse::confidence_byte_offset;
 use super::pyramid::{level_dims, pyramid_slot_byte_offset};
 use crate::nlmeans::kernels::motion::nlm_mc_block_match_fine;
 
-/// Per-pixel mean-mismatch threshold in `[0, 1]` luma units (about
-/// 5/255), the MDegrain-style reference point for "this block no
-/// longer matches". Scaled by block area and `thsad_scale` to produce
-/// the actual `thsad` a caller compares excess SAD against.
+/// How far a pixel can be off, on average, before a block counts as no
+/// longer matching.
+///
+/// The value is in normalised luma units and works out at roughly 5 of
+/// 255, which is the reference point MDegrain uses.
+///
+/// [`thsad`] scales it by block area and by `thsad_scale` to get the
+/// threshold a caller compares against.
 pub(crate) const THSAD_PIXEL: f32 = 0.02;
 
-/// Expected block SAD between two independently noisy copies of
-/// otherwise identical content, so it can be subtracted before a real
-/// mismatch is judged. Each pixel's noisy-vs-noisy absolute difference
-/// is the magnitude of a zero-mean Gaussian of scale `σ_y√2`, which has
-/// mean `σ_y√2 · √(2/π) = 2σ_y/√π`. Summed over the block's
-/// `blksize²` pixels.
+/// The score two noisy copies of the same content are expected to
+/// produce by chance.
+///
+/// Subtracting this first means a block is only judged on how far its
+/// content really differs, not on the noise it happens to carry.
+///
+/// Each pixel's noisy-against-noisy absolute difference is the magnitude
+/// of a zero-mean Gaussian with scale `sigma * sqrt(2)`, whose mean is
+/// `2 * sigma / sqrt(pi)`. That is then summed over all `blksize^2`
+/// pixels in the block.
 pub(crate) fn sad_noise_floor(blksize: u32, sigma_y: f32) -> f32 {
     let block_area = (blksize * blksize) as f32;
     block_area * 2.0 * sigma_y / std::f32::consts::PI.sqrt()
 }
 
-/// Excess-SAD value at which confidence collapses to zero, scaled by
-/// block area so it stays comparable across block sizes. `thsad_scale`
-/// is the user-facing multiplier ([`crate::nlmeans::HqParams::thsad_scale`]).
+/// How far past the noise floor a block can score before its confidence
+/// reaches zero.
+///
+/// It is scaled by block area, so the value stays comparable across
+/// block sizes.
+///
+/// `thsad_scale` is the user-facing multiplier, exposed as
+/// [`crate::nlmeans::HqParams::thsad_scale`].
 pub(crate) fn thsad(blksize: u32, thsad_scale: f32) -> f32 {
     let block_area = (blksize * blksize) as f32;
     thsad_scale * block_area * THSAD_PIXEL
 }
 
-/// Confidence-only block match for one (centre, neighbour) pair, used
-/// when motion compensation is off. Runs a single-candidate SAD (no
-/// coarse seed, no search window) at level 0 of `luma_pyramid` and
-/// writes the resulting confidence into `confidence` at the slot
-/// reserved for `neighbour_idx`. The matching MV write is discarded
-/// into `mv_scratch`, since without motion compensation nothing warps
-/// by it.
+/// Scores how well one neighbour matches the centre frame, without
+/// searching for motion.
+///
+/// This is what runs when confidence weighting is on but motion
+/// compensation is off. Each block is scored exactly where it stands, at
+/// level 0 of the pyramid, with no coarse seed and no search window.
+///
+/// The result goes into `confidence` at the slot reserved for this
+/// neighbour. The motion vector the kernel also produces is thrown away
+/// into `mv_scratch`, because with motion compensation off nothing would
+/// use it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_confidence_for_neighbour<R: Runtime>(
     client: &ComputeClient<R>,

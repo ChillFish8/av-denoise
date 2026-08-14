@@ -1,13 +1,39 @@
+//! Which physical device to run on.
+//!
+//! A [`Device`] picks the hardware inside a backend, while
+//! [`Accelerator`](crate::accelerate::Accelerator) picks the backend
+//! itself. The two are chosen separately because most backends expose
+//! more than one device.
+//!
+//! [`Device`] implements `FromStr`, so it can be taken straight from a
+//! command-line flag or a config file.
+//!
+//! ```
+//! use av_denoise::Device;
+//!
+//! // Let the backend decide.
+//! assert_eq!("default".parse::<Device>().unwrap(), Device::Default);
+//!
+//! // Or name the second discrete GPU in the machine.
+//! assert_eq!(
+//!     "discrete:1".parse::<Device>().unwrap(),
+//!     Device::Discrete { index: 1 },
+//! );
+//! ```
+
 use std::str::FromStr;
 
-/// Where to run the compute. The library maps each variant onto the
-/// concrete `Device` type of whichever cubecl runtime was selected.
+/// Where to run the compute.
 ///
-/// Some variants are only meaningful for certain backends. `Integrated`
-/// and `Virtual` are wgpu-only; `Cpu` is a no-op on the `cpu` runtime
-/// and selects `WgpuDevice::Cpu` on wgpu. Asking for a variant on a
-/// runtime that can't honour it returns an error from the relevant
-/// `to_*` conversion.
+/// Each variant maps onto the concrete `Device` type of whichever cubecl
+/// runtime was selected.
+///
+/// Not every variant makes sense on every backend. `Integrated` and
+/// `Virtual` are wgpu-only, and `Cpu` does nothing on the `cpu` runtime
+/// while selecting `WgpuDevice::Cpu` on wgpu.
+///
+/// Asking for a variant a runtime cannot honour returns an error from
+/// the matching `to_*` conversion.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub enum Device {
     /// Backend-chosen default device.
@@ -22,18 +48,19 @@ pub enum Device {
     Integrated { index: usize },
     /// Virtual GPU at ordinal `index`. wgpu-only.
     Virtual { index: usize },
-    /// Software/CPU device. Valid on the `cpu` runtime and on wgpu
-    /// (where it picks the lavapipe / software adapter).
+    /// The software device. Valid on the `cpu` runtime, and on wgpu
+    /// where it picks the lavapipe or software adapter.
     Cpu,
 }
 
 impl FromStr for Device {
     type Err = String;
 
-    /// `FromStr` accepts the same syntax as the bench CLI:
+    /// Accepts the same spellings as the bench CLI.
     ///
     /// - `default`
-    /// - `discrete[:N]`, `integrated[:N]`, `virtual[:N]` (default `N = 0`)
+    /// - `discrete[:N]`, `integrated[:N]`, and `virtual[:N]`, where `N`
+    ///   defaults to 0
     /// - `cpu`
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (kind, idx) = s.split_once(':').unwrap_or((s, "0"));
@@ -47,7 +74,7 @@ impl FromStr for Device {
             "virtual" => Ok(Device::Virtual { index }),
             "cpu" => Ok(Device::Cpu),
             other => Err(format!(
-                "unknown device kind '{other}'; expected default, discrete[:N], integrated[:N], virtual[:N], or cpu"
+                "unknown device kind '{other}', expected default, discrete[:N], integrated[:N], virtual[:N], or cpu"
             )),
         }
     }
@@ -60,7 +87,7 @@ impl Device {
             Device::Default => Ok(cubecl::cuda::CudaDevice { index: 0 }),
             Device::Discrete { index } => Ok(cubecl::cuda::CudaDevice { index: *index }),
             other => Err(anyhow::anyhow!(
-                "device {other:?} is not supported on the CUDA runtime; use `default` or `discrete[:N]`"
+                "device {other:?} is not supported on the CUDA runtime, use `default` or `discrete[:N]`"
             )),
         }
     }
@@ -73,7 +100,7 @@ impl Device {
             Device::Default => Ok(cubecl::hip::AmdDevice { index: 0 }),
             Device::Discrete { index } => Ok(cubecl::hip::AmdDevice { index: *index }),
             other => Err(anyhow::anyhow!(
-                "device {other:?} is not supported on the ROCm runtime; use `default` or `discrete[:N]`"
+                "device {other:?} is not supported on the ROCm runtime, use `default` or `discrete[:N]`"
             )),
         }
     }
@@ -99,7 +126,7 @@ impl Device {
         match self {
             Device::Default | Device::Cpu => Ok(cubecl::cpu::CpuDevice),
             other => Err(anyhow::anyhow!(
-                "device {other:?} is not supported on the CPU runtime; use `default` or `cpu`"
+                "device {other:?} is not supported on the CPU runtime, use `default` or `cpu`"
             )),
         }
     }

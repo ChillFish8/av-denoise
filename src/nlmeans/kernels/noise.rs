@@ -2,13 +2,18 @@ use cubecl::prelude::*;
 
 use super::helpers::read_line;
 
-/// Per-cube stage of the Immerkær noise estimate. Every interior thread
-/// applies the 3×3 Laplacian-difference mask to its pixel and the cube
-/// reduces the absolute responses per channel into one partial sum.
-/// Border pixels (and threads that fall outside the image because the
-/// grid overshoots on the last row/column of cubes) contribute zero.
-/// The result layout is `partials[cube_index * 4 + lane]` with unused
-/// lanes left at zero.
+/// The per-block stage of the Immerkær noise estimate.
+///
+/// Every interior thread applies a 3x3 mask to its pixel, which cancels
+/// out smooth content and leaves mostly noise. The block then sums the
+/// absolute responses per channel into one partial total.
+///
+/// Border pixels contribute zero, as do threads that land outside the
+/// image because the grid overshoots on the last row or column of
+/// blocks.
+///
+/// Results are written as `partials[block_index * 4 + lane]`, with any
+/// unused lane left at zero.
 #[cube(launch_unchecked)]
 pub fn nlm_noise_partial<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -69,10 +74,11 @@ pub fn nlm_noise_partial<N: Size>(
     }
 }
 
-/// Final stage of the Immerkær noise estimate. One cube sums every
-/// per-cube partial into the per-channel totals for the given ring
-/// slot. Each thread accumulates a strided share of the partials and
-/// thread zero folds the shares together.
+/// The final stage of the Immerkær noise estimate.
+///
+/// A single block sums every partial into the per-channel totals for the
+/// given ring slot. Each thread adds up a strided share of the partials,
+/// then thread zero folds those shares together.
 #[cube(launch_unchecked)]
 pub fn nlm_noise_reduce(
     partials: &Array<f32>,
@@ -115,25 +121,34 @@ pub fn nlm_noise_reduce(
     }
 }
 
-/// Per-block temporal residual statistics. One cube per `block × block`
-/// spatial block. Computes `d = input[slot_new] − input[slot_prev]` for
-/// every pixel in the block and reduces it into one stats record:
-/// `sum_d` and `sum_d2` per stored channel, plus the channel-0
-/// horizontal lag-1 product `d0[x] · d0[x+1]` summed over in-block
-/// adjacent pairs. A block that runs past the frame edge uses its
-/// truncated in-frame extent for every sum; pixels outside the frame
-/// contribute nothing, and a pair is only formed when its second pixel
-/// is still inside that truncated extent (never across a block
-/// boundary).
+/// Gathers temporal residual statistics for each spatial block, with one
+/// GPU block per `block x block` region.
 ///
-/// Records are written row-major, one per block, into `stats`:
-/// `stats[block_index * (2 * stored_ch + 1) ..]`, laid out
-/// `[sum_d(ch0..stored_ch-1), sum_d2(ch0..stored_ch-1), sum_lag]`.
-/// `stats` is expected to already be sliced down to `slot_new`'s own
-/// region of a larger ring buffer (see `noise::run_temporal_noise_stats`),
-/// the same convention the motion-compensation kernels use for their
-/// per-neighbour slices, so the kernel itself never needs to know
-/// about the ring's other slots or any stride padding between them.
+/// For every pixel it computes the difference between the new slot and
+/// the previous one, then reduces those differences into a single
+/// record.
+///
+/// Each record holds `sum_d` and `sum_d2` per stored channel, plus the
+/// summed lag-1 product of neighbouring channel-0 differences. That last
+/// figure is what reveals grain correlated across nearby pixels.
+///
+/// A block that runs past the frame edge uses only its in-frame part.
+/// Pixels outside the frame contribute nothing, and a pair only forms
+/// when its second pixel is still inside that part, so a pair never
+/// crosses a block boundary.
+///
+/// # Layout
+///
+/// Records go into `stats` one per block, at
+/// `stats[block_index * (2 * stored_ch + 1) ..]`, laid out as every
+/// `sum_d`, then every `sum_d2`, then `sum_lag`.
+///
+/// `stats` should already be sliced down to the new slot's own region of
+/// the larger ring buffer. See `noise::run_temporal_noise_stats`.
+///
+/// That is the same convention the motion-compensation kernels use for
+/// their per-neighbour slices, and it means this kernel never needs to
+/// know about the ring's other slots or the padding between them.
 #[cube(launch_unchecked)]
 pub fn nlm_temporal_noise_stats<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -169,9 +184,9 @@ pub fn nlm_temporal_noise_stats<N: Size>(
         d = c - p;
     }
 
-    // The `.into()` calls satisfy cubecl's `if`/`else` type unification
-    // (both arms must expand to the same `NativeExpand<f32>`); the
-    // clippy lint doesn't see that requirement.
+    // The `.into()` calls are what let cubecl unify the two branches,
+    // because both arms have to expand to the same `NativeExpand<f32>`.
+    // Clippy cannot see that requirement.
     #[allow(clippy::useless_conversion)]
     let d0 = if valid { d[0] } else { 0.0f32.into() };
     d0_tile[tid as usize] = d0;
@@ -186,11 +201,11 @@ pub fn nlm_temporal_noise_stats<N: Size>(
 
     sync_cube();
 
-    // Truncated in-block width, so a pair never reaches past this
-    // block's own slice of the frame (ragged right/bottom edges use
-    // this truncated extent, mirroring how the block matcher's coarse
-    // kernel seeds its ragged last block by position rather than by a
-    // fixed block size).
+    // The in-block width, truncated so a pair never reaches past this
+    // block's own slice of the frame. Ragged right and bottom edges use
+    // the truncated extent, the same way the block matcher's coarse
+    // kernel seeds its ragged last block from its position rather than
+    // from a fixed block size.
     let block_w = u32::min(block, width - block_origin_x);
     let pair_valid = valid && local_x + 1 < block_w;
     #[allow(clippy::useless_conversion)]
@@ -218,11 +233,12 @@ pub fn nlm_temporal_noise_stats<N: Size>(
     }
 }
 
-/// Zero-fill a slice of the temporal-stats ring. A duplicated ring
-/// slot mirrors its predecessor's pixels exactly, so diffing it for
-/// real would just recompute an all-zero record; zeroing it directly
-/// is cheaper and gives aggregation the same "nothing measurable
-/// here" signal.
+/// Fills a slice of the temporal-stats ring with zeroes.
+///
+/// A duplicated ring slot holds exactly the same pixels as the one
+/// before it, so measuring the difference would only ever produce an
+/// all-zero record. Writing the zeroes directly is cheaper and gives the
+/// aggregation step the same "nothing to measure here" signal.
 #[cube(launch_unchecked)]
 pub fn nlm_temporal_stats_zero(
     dst: &mut Array<f32>,

@@ -1,6 +1,3 @@
-//! The `nlmeans` subcommand and how its flags resolve into library
-//! parameters.
-
 use av_denoise::{
     DEFAULT_PILOT_STRENGTH_SCALE,
     DenoisingMode,
@@ -335,8 +332,10 @@ impl NlmeansArgs {
     }
 
     /// Builds the library's [`av_denoise::Algorithm`] from the resolved
-    /// preset and the `--hq-*` flags, warning about flags that are set
-    /// but have no effect given the rest of the resolved configuration.
+    /// preset and the `--hq-*` flags.
+    ///
+    /// Flags that are set but do nothing for this configuration are
+    /// reported as warnings.
     pub fn resolve_algorithm(
         &self,
         resolved: ResolvedPreset,
@@ -631,24 +630,24 @@ mod tests {
         assert!(matches!(args.preset, Preset::Slow));
     }
 
-    /// The five tests below pin down that every global flag is
-    /// accepted when placed *before* `nlmeans`, the exact shape
-    /// `Justfile`'s `docker-test-run` recipe uses (`-A vulkan,cpu`
-    /// ahead of the subcommand at `Justfile:96`). That is worth
-    /// having, but despite the name they do **not** guard
-    /// `global = true` — clap accepts `Args`'s own fields in the
-    /// leading position regardless of that attribute, since `global`
-    /// only takes effect once the subcommand token has been reached.
-    /// Verified by removing `global = true` from each of
-    /// `accelerators`, `device`, `channel_mode`, and `progress` in
-    /// turn — every test below kept passing every time. What
-    /// `global = true` actually controls is the *trailing* position,
-    /// after `nlmeans` (`Justfile:42`'s `denoise-file` recipe
-    /// interpolates user flags there), which is what the
-    /// `*_parses_after_the_subcommand` tests further down exist to
-    /// guard.
-    /// Gated because it names the `Vulkan` and `Cpu` accelerator
-    /// variants, which only exist when their features are enabled.
+    /// The five tests below check that every global flag is accepted
+    /// before the `nlmeans` token. That is the shape the `Justfile`
+    /// uses, passing `-A vulkan,cpu` ahead of the subcommand.
+    ///
+    /// Despite the name they do not guard `global = true`. Clap accepts
+    /// `Args`'s own fields in the leading position either way, because
+    /// `global` only starts to matter once the subcommand token has
+    /// been read. Dropping `global = true` from `accelerators`,
+    /// `device`, `channel_mode`, and `progress` in turn left all five
+    /// tests passing.
+    ///
+    /// What `global = true` really controls is the trailing position,
+    /// after `nlmeans`. The `*_parses_after_the_subcommand` tests
+    /// further down cover that.
+    ///
+    /// Feature-gated because it names the `Vulkan` and `Cpu`
+    /// accelerator variants, which only exist when their features are
+    /// enabled.
     #[cfg(all(feature = "vulkan", feature = "cpu"))]
     #[test]
     fn accelerators_are_accepted_before_the_subcommand() {
@@ -689,9 +688,10 @@ mod tests {
         assert!(args.progress);
     }
 
-    /// The other half of the invariant: `--strength` is owned by the
-    /// `nlmeans` subcommand, not global, so it must be rejected before
-    /// `nlmeans` even though the globals above are accepted there.
+    /// The other half of the rule. `--strength` is owned by the
+    /// `nlmeans` subcommand rather than being global, so it must be
+    /// rejected before `nlmeans` even though the globals above are
+    /// accepted there.
     #[test]
     fn a_subcommand_owned_flag_is_rejected_before_the_subcommand() {
         let err = Args::try_parse_from(["av-denoise", "--strength", "1.2", "nlmeans", "-i", "-"])
@@ -699,13 +699,15 @@ mod tests {
         assert!(err.to_string().contains("strength"), "got {err}");
     }
 
-    /// This is the test that actually depends on `--accelerators`
-    /// being `global = true`. Without it, a flag placed after
-    /// `nlmeans` is rejected as unknown to the subcommand's own
-    /// parser. `Justfile:42`'s `denoise-file` recipe interpolates
-    /// `{{ARGS}}` in exactly this position.
-    /// Gated because it names the `Vulkan` and `Cpu` accelerator
-    /// variants, which only exist when their features are enabled.
+    /// This is the test that really depends on `--accelerators` being
+    /// `global = true`. Without it, a flag placed after `nlmeans` is
+    /// rejected as unknown to the subcommand's own parser. The
+    /// `denoise-file` recipe in the `Justfile` passes user flags in
+    /// exactly this position.
+    ///
+    /// Feature-gated because it names the `Vulkan` and `Cpu`
+    /// accelerator variants, which only exist when their features are
+    /// enabled.
     #[cfg(all(feature = "vulkan", feature = "cpu"))]
     #[test]
     fn accelerators_parses_after_the_subcommand() {

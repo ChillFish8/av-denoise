@@ -8,8 +8,10 @@ use cubecl::server::ServerError;
 
 pub(super) type ReadFuture = Pin<Box<dyn Future<Output = Result<Vec<Bytes>, ServerError>> + Send>>;
 
-/// In-flight denoise: kernels are queued, the GPU may still be working,
-/// and the host-side readback hasn't completed yet.
+/// A denoise that is still in flight.
+///
+/// The kernels are queued, the GPU may still be working on them, and the
+/// readback to the host has not finished.
 pub struct Pending<R: Runtime> {
     pub(super) fut: ReadFuture,
     pub(super) channels: u32,
@@ -19,18 +21,22 @@ pub struct Pending<R: Runtime> {
 }
 
 impl<R: Runtime> Pending<R> {
-    /// Block until the readback completes, returning the denoised frame
-    /// as a freshly allocated `Vec`. YUV padding lanes are stripped so
-    /// the returned buffer is densely packed (`pixels * channels` f32s).
+    /// Blocks until the readback finishes and returns the denoised frame
+    /// in a fresh `Vec`.
+    ///
+    /// YUV padding lanes are stripped, so the buffer holds exactly
+    /// `pixels * channels` values.
     pub fn wait(self) -> Result<Vec<f32>, anyhow::Error> {
         let mut out = Vec::with_capacity(self.pixels * self.channels as usize);
         self.wait_into(&mut out)?;
         Ok(out)
     }
 
-    /// Block until the readback completes, writing the result into
-    /// `dst` (cleared first). Lets the caller reuse an allocation when
-    /// running synchronously frame-after-frame.
+    /// Blocks until the readback finishes and writes the result into
+    /// `dst`, which is cleared first.
+    ///
+    /// This lets a caller reuse one allocation when running frame after
+    /// frame.
     pub fn wait_into(self, dst: &mut Vec<f32>) -> Result<(), anyhow::Error> {
         let bytes = cubecl::future::block_on(self.fut)?.remove(0);
         let data = f32::from_bytes(&bytes);

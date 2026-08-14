@@ -19,35 +19,49 @@ use crate::nlmeans::{
 };
 use crate::sniff::sniff_best_accelerator;
 
-/// User-facing denoiser configuration. Build with `DenoiserOptions::builder()`.
+/// How a [`Denoiser`] should be set up.
+///
+/// Build one with `DenoiserOptions::builder()`. Every field has a
+/// default, so only the parts you care about need naming.
 #[derive(Debug, Clone, bon::Builder)]
 pub struct DenoiserOptions {
     /// Which channels of the frame to denoise.
     #[builder(default = ChannelMode::Yuv)]
     pub channel_mode: ChannelMode,
-    /// Spatial-only or temporal denoising.
+    /// Whether to clean each frame on its own or across a temporal
+    /// window.
     #[builder(default = DenoisingMode::Spacial)]
     pub mode: DenoisingMode,
-    /// Algorithm variant. `Nlmeans` is the fast default. `NlmeansHq`
-    /// adapts weighting to the noise level, measured automatically per
-    /// frame unless `HqParams::sigma_override` pins a fixed value. Its
-    /// default `strength` multiplier is also different, and adapts to
-    /// the temporal radius and the plane being denoised, see
+    /// Which algorithm variant to run.
+    ///
+    /// `Nlmeans` is the fast default.
+    ///
+    /// `NlmeansHq` matches its weighting to the noise level, which it
+    /// measures per frame unless `HqParams::sigma_override` pins a fixed
+    /// value.
+    ///
+    /// HQ also uses a different default `strength`, one that adapts to
+    /// the temporal radius and the plane being denoised. See
     /// [`crate::nlmeans::hq_default_strength`].
     #[builder(default = Algorithm::Nlmeans)]
     pub algorithm: Algorithm,
-    /// Reference clip source for NLM weight computation. `None` (the
-    /// default) uses no prefilter for either algorithm. Set
-    /// `PrefilterMode::NlmSpatial` explicitly to opt into the NLM
-    /// spatial pilot.
+    /// Which reference image the NLM weights are computed against.
+    ///
+    /// `None`, the default, means no prefilter for either algorithm. Set
+    /// `PrefilterMode::NlmSpatial` to opt into the NLM spatial pilot.
     pub prefilter: Option<PrefilterMode>,
-    /// Motion-compensation mode for temporal denoising. `None`
-    /// disables MC; `Mvtools` warps temporal neighbours into spatial
-    /// alignment with the centre frame before NLM weighting. Only
-    /// takes effect when `mode` is `Temporal { .. }`.
+    /// Whether temporal denoising follows motion between frames.
+    ///
+    /// `None` turns motion compensation off. `Mvtools` warps temporal
+    /// neighbours into line with the centre frame before the NLM
+    /// weighting runs.
+    ///
+    /// Only has an effect when `mode` is `Temporal { .. }`.
     #[builder(default = MotionCompensationMode::None)]
     pub motion_compensation: MotionCompensationMode,
-    /// Override NLM tuning (search/patch radius, strength, self-weight).
+    /// Overrides for the NLM search radius, patch radius, strength, and
+    /// self-weight.
+    ///
     /// `None` uses the defaults baked into [`NlmParams`].
     pub nlm: Option<NlmTuning>,
 }
@@ -61,17 +75,19 @@ pub enum Algorithm {
     NlmeansHq(HqParams),
 }
 
-/// Standard spatial or temporal-aware denoising.
+/// Whether a frame is cleaned on its own or alongside its neighbours.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum DenoisingMode {
-    /// Spatial-only denoising (single frame).
+    /// Cleans each frame using only its own pixels.
     Spacial,
-    /// Temporal-aware denoising over a `2 * radius + 1` window.
+    /// Cleans each frame using a window of `2 * radius + 1` frames.
     Temporal { radius: u32 },
 }
 
-/// NLM tuning knobs. All optional; missing fields fall back to library
-/// defaults.
+/// NLM tuning knobs.
+///
+/// Every field is optional. Whatever is left unset falls back to the
+/// library default.
 #[derive(Debug, Copy, Clone)]
 pub struct NlmTuning {
     pub search_radius: Option<u32>,
@@ -81,12 +97,15 @@ pub struct NlmTuning {
 }
 
 impl DenoiserOptions {
-    /// Resolve this option set into the low-level [`NlmParams`] a
-    /// backend `Denoiser` is actually built from, folding in whichever
-    /// default `strength` applies (see [`crate::nlmeans::hq_default_strength`]
-    /// for the HQ algorithm). Exposed (rather than kept private) so
-    /// callers building per-plane options, and tests, can inspect the
-    /// resolved values without constructing a real `Denoiser`.
+    /// Turns this option set into the low-level [`NlmParams`] a backend
+    /// denoiser is built from.
+    ///
+    /// Whichever default `strength` applies is folded in here. For the
+    /// HQ algorithm that comes from
+    /// [`crate::nlmeans::hq_default_strength`].
+    ///
+    /// This is public so callers building per-plane options, and tests,
+    /// can read the resolved values without building a real `Denoiser`.
     #[doc(hidden)]
     pub fn to_nlm_params(&self) -> NlmParams {
         let temporal_radius = match self.mode {
@@ -94,26 +113,27 @@ impl DenoiserOptions {
             DenoisingMode::Temporal { radius } => radius,
         };
 
-        // An explicit `strength` (whether from `NlmTuning` directly or a
-        // per-plane override already folded into it by the caller) always
-        // wins. Otherwise the default depends on the algorithm and, for
-        // HQ, on `auto_strength`. With auto-strength on, HQ's `strength`
-        // is a multiplier on the measured noise level, so it needs its
-        // own calibrated default rather than the fast path's absolute
-        // FFmpeg-style default. That default also depends on the
-        // temporal radius and which plane `self.channel_mode` names,
-        // since each per-plane `Denoiser` carries its own channel mode.
-        // With auto-strength off, HQ's `strength` is used verbatim as an
-        // absolute value, same as the fast path, so it falls back to the
-        // same absolute default.
+        // An explicit `strength` always wins, whether it came straight
+        // from `NlmTuning` or from a per-plane override the caller
+        // already folded in.
+        //
+        // Otherwise the default depends on the algorithm, and for HQ
+        // also on `auto_strength`. With auto-strength on, HQ reads
+        // `strength` as a multiplier on the measured noise level, so it
+        // needs its own calibrated default rather than the fast path's
+        // absolute FFmpeg-style one. That calibrated default also varies
+        // with the temporal radius and with the plane `channel_mode`
+        // names, because each per-plane `Denoiser` carries its own
+        // channel mode.
+        //
+        // With auto-strength off, HQ reads `strength` as an absolute
+        // value just like the fast path, so it falls back to the same
+        // absolute default.
         let explicit_strength = self.nlm.and_then(|t| t.strength);
         let strength = explicit_strength.unwrap_or(match self.algorithm {
-            // The calibrated table is a multiplier on measured sigma, so
-            // it only applies when `effective_strength_with` will treat
-            // `strength` that way. With auto-strength off, `strength` is
-            // used verbatim as an FFmpeg-style absolute value, so the
-            // fallback has to be the same absolute default the fast path
-            // uses.
+            // The calibrated table is a multiplier on the measured
+            // sigma, so it only applies when `effective_strength_with`
+            // will read `strength` that way.
             Algorithm::NlmeansHq(hq) if hq.auto_strength => {
                 hq_default_strength(self.channel_mode, temporal_radius)
             },
@@ -147,20 +167,21 @@ impl DenoiserOptions {
     }
 }
 
-/// Errors surfaced from the high-level [`Denoiser`].
+/// Errors reported by the high-level [`Denoiser`].
 #[derive(Debug, thiserror::Error)]
 pub enum DenoiserError {
-    /// A previous denoised frame hasn't been collected yet and the
-    /// internal double-buffered output slot would alias. Call
-    /// [`Denoiser::recv_frame`] or [`Denoiser::try_recv_frame`] first,
+    /// An earlier denoised frame has not been collected yet, so pushing
+    /// again would overwrite it in the double-buffered output slot.
+    ///
+    /// Call [`Denoiser::recv_frame`] or [`Denoiser::try_recv_frame`],
     /// then retry the same `push_frame` call.
-    #[error("denoiser queue is full; collect the pending frame before pushing more")]
+    #[error("denoiser queue is full, collect the pending frame before pushing more")]
     QueueFull,
-    /// None of the accelerators in the priority list could be initialised.
+    /// None of the accelerators in the priority list could be started.
     #[error("no accelerator from the priority list is available")]
     NoAcceleratorAvailable,
-    /// Catch-all wrapping internal `anyhow` errors from kernel dispatch
-    /// and readback.
+    /// Anything else, wrapping the internal `anyhow` errors raised by
+    /// kernel dispatch and readback.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -202,17 +223,63 @@ impl BackendPending {
     }
 }
 
-/// Maximum number of outstanding `Pending` readbacks the high-level
-/// [`Denoiser`] keeps in flight. Must equal the backend's output-handle
-/// count, which is two output handles. Exceeding this aliases the oldest
-/// pending's output handle and silently corrupts results.
+/// How many readbacks the high-level [`Denoiser`] keeps in flight at
+/// once.
+///
+/// This has to match the backend's output-handle count, which is two.
+/// Going past it would reuse the oldest pending frame's output handle
+/// and quietly corrupt the results.
 pub const MAX_PENDING: usize = 2;
 
-/// High-level stateful denoiser. Push frames in order with
-/// [`push_frame`](Self::push_frame); collect denoised frames with
-/// [`recv_frame`](Self::recv_frame) or
-/// [`try_recv_frame`](Self::try_recv_frame); call [`flush`](Self::flush)
-/// at end-of-stream to drain any remaining temporal context.
+/// A stateful denoiser that cleans a stream of frames.
+///
+/// Push frames in order with [`push_frame`](Self::push_frame) and
+/// collect the cleaned ones with [`recv_frame`](Self::recv_frame) or
+/// [`try_recv_frame`](Self::try_recv_frame).
+///
+/// At the end of the stream call [`flush`](Self::flush) to drain
+/// whatever temporal context is left.
+///
+/// Frames are `f32` values in `[0, 1]`, laid out as
+/// `width * height * channels`.
+///
+/// ```no_run
+/// use av_denoise::accelerate::Accelerator;
+/// use av_denoise::{ChannelMode, Denoiser, DenoiserOptions, DenoisingMode, Device};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let options = DenoiserOptions::builder()
+///     .channel_mode(ChannelMode::Luma)
+///     .mode(DenoisingMode::Temporal { radius: 2 })
+///     .build();
+///
+/// let mut denoiser = Denoiser::create(
+///     &[Accelerator::Vulkan],
+///     &Device::Default,
+///     1920,
+///     1080,
+///     options,
+/// )?;
+///
+/// let frames: Vec<Vec<f32>> = read_my_frames();
+/// let mut cleaned: Vec<Vec<f32>> = Vec::new();
+///
+/// for frame in &frames {
+///     denoiser.push_frame(frame)?;
+///
+///     // Temporal denoising runs a few frames behind the input, so
+///     // there is not always one ready to collect.
+///     if let Some(out) = denoiser.recv_frame()? {
+///         cleaned.push(out);
+///     }
+/// }
+///
+/// // Drain the frames still inside the temporal window.
+/// denoiser.flush(|out| cleaned.push(out))?;
+/// # Ok(())
+/// # }
+/// # fn read_my_frames() -> Vec<Vec<f32>> { Vec::new() }
+/// ```
 pub struct Denoiser {
     backend: Backend,
     pending: VecDeque<BackendPending>,
@@ -225,22 +292,25 @@ pub struct Denoiser {
 }
 
 impl Denoiser {
-    /// Probe each accelerator in `accelerators` in order and build a
-    /// denoiser on the first one that's available. `device` lets the
-    /// caller pick a non-default device for the chosen runtime.
+    /// Tries each accelerator in `accelerators` in order and builds a
+    /// denoiser on the first one that works.
+    ///
+    /// `device` picks a non-default device on the chosen runtime.
     ///
     /// # Thread stack size
     ///
-    /// cubecl spawns an internal per-device worker thread (named
-    /// `DS{U,D}-…`) on which GPU kernel codegen runs. It uses Rust's
-    /// default thread stack (`RUST_MIN_STACK`, or 2 MiB if unset). The
-    /// windowed NLM kernels here contain `(2·search_radius + 1)²`-times
-    /// `#[unroll]`ed bodies, so large `search_radius` (≳ 5) values can
-    /// overflow that 2 MiB default and abort the process.
+    /// cubecl spawns its own per-device worker thread, named
+    /// `DS{U,D}-…`, and runs GPU kernel codegen on it. That thread gets
+    /// Rust's default stack, which is `RUST_MIN_STACK` or 2 MiB when
+    /// that is unset.
     ///
-    /// Callers planning to use `search_radius > 4` should set
+    /// The windowed NLM kernels unroll their body
+    /// `(2 * search_radius + 1)^2` times, so a `search_radius` of about
+    /// 5 or more can overflow the 2 MiB default and abort the process.
+    ///
+    /// Callers using a `search_radius` above 4 should set
     /// `RUST_MIN_STACK` to at least 16 MiB before any cubecl thread
-    /// spawns (typically at the very top of `main`), e.g.:
+    /// spawns, usually right at the top of `main`.
     ///
     /// ```no_run
     /// if std::env::var_os("RUST_MIN_STACK").is_none() {
@@ -278,35 +348,38 @@ impl Denoiser {
         })
     }
 
-    /// The accelerator picked by [`sniff_best_accelerator`].
+    /// The accelerator [`sniff_best_accelerator`] picked.
     pub fn selected_accelerator(&self) -> Accelerator {
         self.accelerator
     }
 
-    /// Width passed at construction.
+    /// The width passed at construction.
     pub fn width(&self) -> u32 {
         self.width
     }
 
-    /// Height passed at construction.
+    /// The height passed at construction.
     pub fn height(&self) -> u32 {
         self.height
     }
 
-    /// Upload one frame into the temporal window. `frame` must contain
-    /// `width * height * channels` `f32` values in `[0, 1]`. Once the
-    /// window is full and the in-flight pipeline has room, this also
-    /// kicks off the kernels for the next denoised frame.
+    /// Uploads one frame into the temporal window.
     ///
-    /// Up to `MAX_PENDING` outputs may be in flight simultaneously:
-    /// the GPU runs frame N+1's kernels while frame N's readback is in
-    /// flight. Returns [`DenoiserError::QueueFull`] once that ceiling
-    /// is reached; the caller must drain via [`Self::recv_frame`] before
-    /// pushing more.
+    /// `frame` holds `width * height * channels` `f32` values in
+    /// `[0, 1]`.
+    ///
+    /// Once the window is full and the pipeline has room, this also
+    /// starts the kernels for the next denoised frame.
+    ///
+    /// Up to `MAX_PENDING` outputs can be in flight at once, so the GPU
+    /// runs one frame's kernels while the previous frame's readback is
+    /// still travelling. At that ceiling this returns
+    /// [`DenoiserError::QueueFull`], and the caller has to drain a frame
+    /// with [`Self::recv_frame`] before pushing more.
     pub fn push_frame(&mut self, frame: &[f32]) -> Result<(), DenoiserError> {
-        // After `temporal_radius` real pushes the leading-edge mirror has
-        // primed the window, so the next push will set a pending. From
-        // that point on, every push consumes a pending slot.
+        // After `temporal_radius` real pushes the leading-edge mirror
+        // has primed the window, so the next push produces a pending
+        // frame. From then on every push takes a pending slot.
         let window_full = self.frames_pushed > self.temporal_radius;
         if window_full && self.pending.len() >= MAX_PENDING {
             return Err(DenoiserError::QueueFull);
@@ -347,9 +420,11 @@ impl Denoiser {
         Ok(())
     }
 
-    /// Block until the in-flight denoise completes and return the
-    /// denoised frame. Returns `Ok(None)` if nothing is in flight
-    /// (e.g. the temporal window isn't full yet).
+    /// Blocks until the in-flight denoise finishes and returns the
+    /// cleaned frame.
+    ///
+    /// Returns `Ok(None)` when nothing is in flight, which happens while
+    /// the temporal window is still filling up.
     pub fn recv_frame(&mut self) -> Result<Option<Vec<f32>>, DenoiserError> {
         let Some(pending) = self.pending.pop_front() else {
             return Ok(None);
@@ -357,27 +432,30 @@ impl Denoiser {
         Ok(Some(pending.wait()?))
     }
 
-    /// Drain the in-flight denoise if one is ready. **May block
-    /// briefly** while the runtime confirms the readback has landed;
-    /// on workloads where kernels are already complete, the wait is
-    /// effectively immediate.
+    /// Collects the in-flight denoise if one is ready.
+    ///
+    /// This can still block for a moment while the runtime confirms the
+    /// readback has landed. When the kernels have already finished the
+    /// wait is effectively nothing.
     pub fn try_recv_frame(&mut self) -> Result<Option<Vec<f32>>, DenoiserError> {
         self.recv_frame()
     }
 
-    /// Drain in-flight frames and the trailing temporal tail (padded by duplicating
-    /// the last pushed frame), handing each produced frame to `sink`.
+    /// Drains the in-flight frames and the trailing temporal tail,
+    /// handing each frame it produces to `sink`.
     ///
-    /// On success the denoiser is left ready to accept a fresh,
-    /// independent stream of the same dimensions and parameters.
-    /// Pushing more frames after `flush` starts a new temporal window from
-    /// scratch. May be called multiple times.
+    /// The tail is padded by repeating the last pushed frame.
     ///
-    /// If `flush` returns `Err`, the denoiser is left in an undefined
-    /// state and should be dropped rather than reused.
+    /// On success the denoiser is ready for a fresh, unrelated stream of
+    /// the same size and parameters. Pushing again after a flush starts
+    /// a new temporal window from scratch, and flushing more than once
+    /// is fine.
+    ///
+    /// If `flush` returns `Err` the denoiser is in an undefined state
+    /// and should be dropped rather than reused.
     pub fn flush(&mut self, mut sink: impl FnMut(Vec<f32>)) -> Result<(), DenoiserError> {
-        // Drain the full pending pipeline (up to MAX_PENDING frames) before
-        // submitting the trailing-tail mirrors.
+        // Drain the whole pending pipeline, up to MAX_PENDING frames,
+        // before submitting the trailing-tail mirrors.
         while let Some(frame) = self.recv_frame()? {
             sink(frame);
         }
@@ -413,9 +491,9 @@ impl Denoiser {
             })?,
         }
 
-        // Backend has already reset its own stream indices. Reset the
-        // outer push counter too so the next push re-arms the
-        // window-priming logic at the top of `push_frame`.
+        // The backend has already reset its own stream indices. Reset
+        // the outer push counter too, so the next push re-arms the
+        // window-priming check at the top of `push_frame`.
         self.frames_pushed = 0;
 
         Ok(())
@@ -460,9 +538,9 @@ fn build_backend(
             let client = <cubecl::cpu::CpuRuntime as Runtime>::client(&dev);
             Ok(Backend::Cpu(NlmDenoiser::new(&client, params, width, height)))
         },
-        // Match-exhaustiveness placeholder for docs.rs, where `cfg(docsrs)`
-        // widens the `Accelerator` enum to include variants whose backend
-        // feature is not actually enabled. Never reached at runtime.
+        // Keeps the match exhaustive on docs.rs, where `cfg(docsrs)`
+        // widens the `Accelerator` enum to include variants whose
+        // backend feature is not enabled. Never reached at runtime.
         #[cfg(docsrs)]
         #[allow(unreachable_patterns)]
         _ => unreachable!(),
@@ -572,11 +650,12 @@ mod options_tests {
 
     #[test]
     fn hq_no_auto_strength_falls_back_to_the_legacy_absolute_default() {
-        // `effective_strength_with` only treats `strength` as a multiplier
-        // on the measured sigma when `auto_strength` is true. With it
-        // false, `strength` is used verbatim as an FFmpeg-style absolute
-        // strength, so the fallback must be the fast path's absolute
-        // default, not a calibrated multiplier from `hq_default_strength`.
+        // `effective_strength_with` only reads `strength` as a
+        // multiplier on the measured sigma when `auto_strength` is true.
+        // With it false, `strength` is an FFmpeg-style absolute value,
+        // so the fallback has to be the fast path's absolute default
+        // rather than a calibrated multiplier from
+        // `hq_default_strength`.
         let opts = DenoiserOptions::builder()
             .algorithm(Algorithm::NlmeansHq(HqParams {
                 auto_strength: false,
@@ -592,8 +671,8 @@ mod options_tests {
         let expected = NlmParams::default().strength;
         assert!(
             (params.strength - expected).abs() < f32::EPSILON,
-            "expected the legacy absolute default {expected}, got {} (looks like the \
-             auto-strength multiplier table leaked through)",
+            "expected the legacy absolute default {expected}, got {}, which looks like the \
+             auto-strength multiplier table leaking through",
             params.strength
         );
     }
@@ -647,7 +726,7 @@ mod options_tests {
             let expected = hq_default_strength(channels, 0);
             assert!(
                 (params.strength - expected).abs() < f32::EPSILON,
-                "channels={channels:?}: expected {expected}, got {}",
+                "for channels {channels:?} expected {expected}, got {}",
                 params.strength
             );
         }
@@ -671,7 +750,7 @@ mod options_tests {
 
             assert!(
                 (params.strength - 0.99).abs() < f32::EPSILON,
-                "channels={channels:?}: explicit strength was overridden by the table"
+                "for channels {channels:?} the explicit strength was overridden by the table"
             );
         }
     }
@@ -844,9 +923,10 @@ mod tests {
         )
         .unwrap();
 
-        // Depth-2 pipeline: the first two pushes both submit successfully
-        // (output handles are double-buffered). The third would alias the
-        // oldest pending's output slot and is rejected with QueueFull.
+        // The pipeline is two deep because the output handles are
+        // double-buffered, so the first two pushes both submit. The
+        // third would overwrite the oldest pending frame's output slot,
+        // so it is rejected with QueueFull.
         d.push_frame(&frame(16, 16)).unwrap();
         d.push_frame(&frame(16, 16)).unwrap();
         let err = d.push_frame(&frame(16, 16)).expect_err("expected QueueFull");
@@ -863,8 +943,8 @@ mod tests {
         vec![value; (w * h) as usize]
     }
 
-    /// Push `n` frames of the given value, interleaving `recv_frame` to keep
-    /// the in-flight pipeline below `MAX_PENDING`.
+    /// Pushes `n` frames of the given value, receiving along the way to
+    /// keep the in-flight pipeline below `MAX_PENDING`.
     fn push_n_with_drain(d: &mut Denoiser, n: usize, value: f32, out: &mut Vec<Vec<f32>>) {
         for _ in 0..n {
             loop {
@@ -931,9 +1011,10 @@ mod tests {
         d.flush(|f| batch_a.push(f)).expect("first flush failed");
         assert_eq!(batch_a.len(), 5, "expected 5 frames from first batch");
 
-        // The temporal window must be empty after flush: the first push of
-        // the new stream should not yield a pending immediately. With r=1
-        // the window needs 3 frames before `denoise_submit` fires.
+        // The temporal window must be empty after a flush, so the first
+        // push of the new stream should not produce a pending frame.
+        // With r=1 the window needs 3 frames before `denoise_submit`
+        // fires.
         assert!(d.recv_frame().unwrap().is_none());
         d.push_frame(&frame_filled(16, 16, 0.75)).unwrap();
         assert!(
@@ -955,9 +1036,9 @@ mod tests {
     #[test]
     fn flush_emits_exactly_n_outputs_for_small_n() {
         // With temporal radius R=2 the window is 5 frames. Pushing fewer
-        // than R+1 frames means the window never fills during pushes —
-        // flush must still emit exactly N outputs (one per pushed frame),
-        // not R+1.
+        // than R+1 frames means the window never fills while pushing, so
+        // flush must still emit one output per pushed frame rather than
+        // R+1 of them.
         for n in 1..=5usize {
             let mut d = Denoiser::create(
                 &[Accelerator::Vulkan],
@@ -981,7 +1062,7 @@ mod tests {
     }
 }
 
-// Used to just catch fires on the CPU backend
+// A smoke test that catches outright breakage on the CPU backend.
 #[cfg(all(test, feature = "cpu"))]
 mod cpu_smoke_tests {
     use super::*;

@@ -1,8 +1,9 @@
-//! Frame dimensions whose per-slot byte strides are not multiples of
-//! the GPU's storage-buffer offset alignment, 32 bytes on the adapters
-//! these tests run against. A buffer view bound at such an offset is
-//! rejected outright, so these sizes used to abort the whole pipeline
-//! rather than denoise.
+//! Frame sizes whose per-slot byte strides do not land on the GPU's
+//! buffer-offset alignment, which is 32 bytes on the adapters these
+//! tests run against.
+//!
+//! A buffer view bound at such an offset is rejected outright, so these
+//! sizes used to abort the whole pipeline instead of denoising.
 
 use super::helpers::*;
 use crate::nlmeans::*;
@@ -44,9 +45,9 @@ fn denoise_uniform(w: u32, h: u32, params: NlmParams) {
 
 #[test]
 fn denoises_when_the_frame_ring_slot_stride_is_unaligned() {
-    // 34x34 luma is 1156 f32 per ring slot, 4624 bytes: a multiple of
-    // 16 but not of 32, so every odd ring slot starts 16 bytes short of
-    // an alignment boundary.
+    // A 34x34 luma slot is 4624 bytes, which is a multiple of 16 but
+    // not of 32, so every odd ring slot starts 16 bytes short of an
+    // alignment boundary.
     denoise_uniform(34, 34, luma_params(MotionCompensationMode::None));
 }
 
@@ -65,11 +66,12 @@ fn denoises_the_nlm_spatial_pilot_when_the_reference_ring_slot_stride_is_unalign
 
 #[test]
 fn denoises_with_motion_compensation_when_the_pyramid_slot_stride_is_unaligned() {
-    // 42x28 luma sizes the ring slot at 1176 f32 (4704 bytes, a clean
-    // 32-byte multiple), so only the motion pyramid is at stake: its
-    // /2 level is 21x14 = 294 f32 = 1176 bytes, 24 bytes short of a
-    // 32-byte multiple. Same shape as the 720x548 chroma plane that
-    // first hit this.
+    // A 42x28 luma slot is 4704 bytes, a clean 32-byte multiple, so
+    // only the motion pyramid is at stake here. Its half-size level is
+    // 21x14, which comes to 1176 bytes, 24 short of a boundary.
+    //
+    // That is the same shape as the 720x548 chroma plane that first hit
+    // this.
     denoise_uniform(
         42,
         28,

@@ -113,14 +113,20 @@ pub(super) fn noisy_copy(size: u32, base: f32, sigma: f32, seed: u32) -> Vec<f32
     noisy_field_over(&vec![base; (size * size) as usize], size, size, sigma, seed)
 }
 
-/// Spatially-correlated grain: an independent white noise field at
-/// `sigma_pre`, horizontally blurred with a `[0.25, 0.5, 0.25]`
-/// binomial kernel (edge-clamped), added to `base` and clamped once.
-/// The blur is the same for every call, so two calls with different
-/// `seed`s are temporally independent but each individually carries
-/// the blur's spatial autocorrelation (horizontal lag-1 correlation
-/// `2/3` for any input distribution, variance scaled by `0.375`, the
-/// sum of the taps' squares).
+/// Builds a frame of grain that is correlated between neighbouring
+/// pixels.
+///
+/// An independent white noise field is blurred horizontally with a
+/// `[0.25, 0.5, 0.25]` kernel, clamped at the edges, then added to
+/// `base` and clamped once more.
+///
+/// The blur is identical every call, so two calls with different seeds
+/// are independent of each other while each carries the blur's own
+/// spatial correlation.
+///
+/// That works out at a lag-1 correlation of two thirds for any input
+/// distribution, with the variance scaled by 0.375, the sum of the taps
+/// squared.
 pub(super) fn correlated_noisy_frame(w: u32, h: u32, base: f32, sigma_pre: f32, seed: u32) -> Vec<f32> {
     let unit_std = (1.0f32 / 3.0f32).sqrt();
     let mut raw = vec![0.0f32; (w * h) as usize];

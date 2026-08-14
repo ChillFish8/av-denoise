@@ -1,11 +1,14 @@
-//! Regression guard for `denoise_submit`'s `Pending` outliving its
-//! `NlmDenoiser`. The readback future is constructed via an `async move`
-//! that owns a cloned `ComputeClient`; this test pins that contract.
+//! A `Pending` has to keep working after the denoiser that produced it
+//! is dropped.
 //!
-//! If a future cubecl release changes `read_async` so the returned
-//! future borrows from the client, or if a refactor here re-introduces
-//! a lifetime-erasing `transmute`, this test will use-after-free under
-//! Miri / ASan and may fail on stock builds too.
+//! The readback future is built inside an `async move` that owns a
+//! cloned `ComputeClient`, which is what makes that safe. This test pins
+//! that arrangement down.
+//!
+//! If a future cubecl release changes `read_async` so its future borrows
+//! from the client, or if a refactor here brings back a
+//! lifetime-erasing `transmute`, this test reaches freed memory. Miri
+//! and ASan will catch it, and a plain build may fail too.
 
 use super::helpers::*;
 use crate::nlmeans::*;
@@ -36,7 +39,7 @@ fn pending_survives_denoiser_drop() {
             .denoise_submit()
             .expect("submit failed")
             .expect("expected a pending readback for spatial mode")
-        // `denoiser` is dropped here; `pending` must remain valid.
+        // `denoiser` is dropped here, and `pending` has to stay valid.
     };
 
     let out = pending.wait().expect("wait failed");

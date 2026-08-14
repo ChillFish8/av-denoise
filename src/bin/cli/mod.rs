@@ -1,9 +1,3 @@
-//! Command-line surface for the `av-denoise` binary.
-//!
-//! Options that any denoising family understands live on [`Args`].
-//! Options that only one family understands live on that family's
-//! subcommand.
-
 mod input;
 mod nlmeans;
 
@@ -106,8 +100,6 @@ pub struct Args {
     pub accelerators: Vec<Accelerator>,
 
     /// Which device to use on the chosen backend.
-    ///
-    /// Accepted values:
     ///
     /// `default` lets the backend pick.
     ///
