@@ -94,6 +94,14 @@ pub enum Algorithm {
 /// [`Algorithm::NlmeansHq`] does. The remaining fields tune the
 /// collaborative filter that runs second.
 ///
+/// `residual_sigma_scale` used to be one shared value across both
+/// planes, and everything below this note describes the sweeps that
+/// were run while that was still true. It is now resolved per plane,
+/// `None` reading through [`nl3d_default_residual_sigma_scale`], and
+/// luma is the only plane whose value those sweeps still describe.
+/// Chroma's own value and its very different evidence are documented
+/// on that function directly.
+///
 /// # Where the calibrated defaults come from
 ///
 /// `front_strength_scale`, `residual_sigma_scale`, and `lambda_ht` were
@@ -227,9 +235,13 @@ pub struct Nl3dOptions {
     /// stage. Calibrated to 2.7, see the struct-level docs for how.
     pub lambda_ht: f32,
     /// A multiplier on the analytic residual sigma the collaborative
-    /// stage shrinks with. Calibrated to 1.9, see the struct-level docs
-    /// for how.
-    pub residual_sigma_scale: f32,
+    /// stage shrinks with, per plane.
+    ///
+    /// `None` resolves through [`nl3d_default_residual_sigma_scale`],
+    /// which returns a different calibrated value for luma than for
+    /// chroma. Read that function's docs before relying on either
+    /// number, since the two rest on very different evidence.
+    pub residual_sigma_scale: Option<f32>,
 }
 
 impl Default for Nl3dOptions {
@@ -241,9 +253,76 @@ impl Default for Nl3dOptions {
             k_max: collab.k_max,
             tau_match: collab.tau_match,
             lambda_ht: collab.lambda_ht,
-            residual_sigma_scale: 1.9,
+            // Resolved per plane by `nl3d_default_residual_sigma_scale`
+            // at construction time, once the plane being denoised is
+            // known.
+            residual_sigma_scale: None,
         }
     }
+}
+
+/// The calibrated default `residual_sigma_scale` for the nl3d
+/// collaborative stage, per plane.
+///
+/// # Where the numbers come from
+///
+/// The two values rest on very different evidence. Luma's is
+/// metric-driven. Chroma's is one human's visual judgement on one
+/// clip. Treat them accordingly.
+///
+/// ## Luma, 1.9
+///
+/// Chosen by a quality-harness sweep that scored a clean reference
+/// with synthetic noise added, at three noise levels, picking the
+/// value whose worst-case luma XPSNR held up best. Re-swept after a
+/// patch-grouping defect in the collaborative stage was fixed, and it
+/// held at 1.9 again. A later sweep at finer granularity around 1.9
+/// found every adjacent variant scoring within run-to-run noise of
+/// each other, differing by under half a code level, below visual
+/// threshold. See the struct-level docs on [`Nl3dOptions`] for the
+/// full sweep history this value comes from.
+///
+/// ## Chroma, 8.0
+///
+/// Chosen by a human reviewing stills and residuals on one clip,
+/// `data/brick_source.mkv`, 53 largely static frames. A metric sweep
+/// first showed `residual_sigma_scale` has real authority over chroma
+/// once it is decoupled from luma, since luma alone had been
+/// saturating the shared value and leaving chroma barely filtered (86
+/// to 90 percent of its high-frequency content retained, against
+/// luma's 45 percent). A human then judged 8.0 to look good and to
+/// retain more apparent detail than earlier, less-filtered builds, on
+/// the theory that chroma noise had been masking that detail.
+///
+/// Its upper bound is evidenced directly. At 24.0 the chroma-only
+/// residual on one frame renders a character's hair, face, and hands,
+/// plus nearby sign text, as legible line art, unambiguous chroma
+/// detail loss. Its lower bound is not swept, only that 1.9 left
+/// chroma almost unfiltered.
+///
+/// This value has not been checked on footage with real motion. It
+/// rests on one clip and one reviewer, not a metric optimum, and
+/// should not be read as being on the same footing as luma's value
+/// above.
+///
+/// # `ChannelMode::Yuv`
+///
+/// Reads the luma value, the same "a fused pass is dominated by luma"
+/// assumption [`crate::nlmeans::hq_default_strength`] makes for its
+/// own Yuv case. Yuv was not part of either value's evidence.
+pub fn nl3d_default_residual_sigma_scale(channels: ChannelMode) -> f32 {
+    match channels {
+        ChannelMode::Luma | ChannelMode::Yuv => 1.9,
+        ChannelMode::Chroma => 8.0,
+    }
+}
+
+/// Resolves `Nl3dOptions.residual_sigma_scale` for one plane, falling
+/// back to [`nl3d_default_residual_sigma_scale`] when the caller left
+/// it unset.
+fn resolve_residual_sigma_scale(opts: &Nl3dOptions, channels: ChannelMode) -> f32 {
+    opts.residual_sigma_scale
+        .unwrap_or_else(|| nl3d_default_residual_sigma_scale(channels))
 }
 
 /// Whether a frame is cleaned on its own or alongside its neighbours.
@@ -408,7 +487,11 @@ impl<R: Runtime> Engine<R> {
 ///
 /// `Algorithm::Nl3d` also carries the collaborative filter's own tuning,
 /// which is not part of `NlmParams`, so it is read from `algorithm`
-/// directly rather than from `params`.
+/// directly rather than from `params`. This is also where an unset
+/// `residual_sigma_scale` picks up its calibrated per-plane default
+/// (`resolve_residual_sigma_scale`), the same way `to_nlm_params`
+/// resolves HQ's calibrated `strength`, since this is the first point
+/// construction has both `opts` and `params.channels` together.
 fn build_engine<R: Runtime>(
     client: &ComputeClient<R>,
     algorithm: &Algorithm,
@@ -425,11 +508,12 @@ fn build_engine<R: Runtime>(
                 lambda_ht: opts.lambda_ht,
                 ..CollabParams::default()
             };
+            let residual_sigma_scale = resolve_residual_sigma_scale(opts, params.channels);
             let nl3d_params = Nl3dParams {
                 nlm: params,
                 front_strength_scale: opts.front_strength_scale,
                 collab,
-                residual_sigma_scale: opts.residual_sigma_scale,
+                residual_sigma_scale,
             };
             Ok(Engine::Nl3d(Box::new(Nl3dDenoiser::new(
                 client,
@@ -819,6 +903,54 @@ fn build_backend(
 #[cfg(test)]
 mod options_tests {
     use super::*;
+
+    #[test]
+    fn nl3d_default_residual_sigma_scale_differs_between_luma_and_chroma() {
+        let luma = nl3d_default_residual_sigma_scale(ChannelMode::Luma);
+        let chroma = nl3d_default_residual_sigma_scale(ChannelMode::Chroma);
+
+        assert!((luma - 1.9).abs() < f32::EPSILON);
+        assert!((chroma - 8.0).abs() < f32::EPSILON);
+        assert!(
+            (chroma - luma).abs() > 1.0,
+            "luma ({luma}) and chroma ({chroma}) must resolve to clearly different defaults"
+        );
+    }
+
+    #[test]
+    fn nl3d_default_residual_sigma_scale_yuv_reads_the_luma_value() {
+        let yuv = nl3d_default_residual_sigma_scale(ChannelMode::Yuv);
+        let luma = nl3d_default_residual_sigma_scale(ChannelMode::Luma);
+
+        assert!((yuv - luma).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn resolve_residual_sigma_scale_unset_uses_the_per_plane_default() {
+        let opts = Nl3dOptions::default();
+
+        let luma = resolve_residual_sigma_scale(&opts, ChannelMode::Luma);
+        let chroma = resolve_residual_sigma_scale(&opts, ChannelMode::Chroma);
+
+        assert!((luma - 1.9).abs() < f32::EPSILON, "got {luma}");
+        assert!((chroma - 8.0).abs() < f32::EPSILON, "got {chroma}");
+    }
+
+    #[test]
+    fn resolve_residual_sigma_scale_explicit_value_overrides_every_plane() {
+        let opts = Nl3dOptions {
+            residual_sigma_scale: Some(3.3),
+            ..Nl3dOptions::default()
+        };
+
+        for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
+            let got = resolve_residual_sigma_scale(&opts, channels);
+            assert!(
+                (got - 3.3).abs() < f32::EPSILON,
+                "channels {channels:?} got {got}"
+            );
+        }
+    }
 
     #[test]
     fn spatial_mode_maps_to_zero_temporal_radius() {

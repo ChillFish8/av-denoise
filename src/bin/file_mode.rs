@@ -744,6 +744,10 @@ mod tests {
             nlm_tuning: None,
             luma_strength: None,
             chroma_strength: None,
+            luma_residual_sigma_scale: None,
+            chroma_residual_sigma_scale: None,
+            luma_lambda_ht: None,
+            chroma_lambda_ht: None,
             progress: false,
         }
     }

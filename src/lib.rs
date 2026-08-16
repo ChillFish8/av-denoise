@@ -24,6 +24,7 @@ pub use denoiser::{
     MAX_PENDING,
     Nl3dOptions,
     NlmTuning,
+    nl3d_default_residual_sigma_scale,
 };
 pub use device::Device;
 pub use nlmeans::{

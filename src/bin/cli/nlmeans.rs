@@ -445,6 +445,12 @@ impl NlmeansArgs {
             nlm_tuning,
             luma_strength: self.luma_strength,
             chroma_strength: self.chroma_strength,
+            // `nlmeans` has no collaborative stage, so these stay unset
+            // here. `Nl3dArgs::build_options` fills them in afterwards.
+            luma_residual_sigma_scale: None,
+            chroma_residual_sigma_scale: None,
+            luma_lambda_ht: None,
+            chroma_lambda_ht: None,
             progress: globals.progress,
         })
     }

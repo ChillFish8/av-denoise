@@ -1,6 +1,6 @@
 use super::Args;
 use super::nlmeans::{NlmeansArgs, Variant};
-use crate::ingest::CliOptions;
+use crate::ingest::{BinaryChannelIntent, CliOptions};
 
 /// Flags for `nl3d`, the non-local means front end followed by a
 /// collaborative-filter cleanup pass.
@@ -48,7 +48,8 @@ pub struct Nl3dArgs {
     /// Multiplies the noise sigma each coefficient is compared against.
     /// Higher values remove more noise but risk taking fine detail with
     /// it. Library default is 2.7, checked by sweep against 2.0 and 3.5,
-    /// see `Nl3dOptions`'s docs for the numbers.
+    /// see `Nl3dOptions`'s docs for the numbers. Applies to both planes
+    /// unless `--luma-lambda-ht` or `--chroma-lambda-ht` is set.
     #[arg(long)]
     pub lambda_ht: Option<f32>,
 
@@ -56,13 +57,57 @@ pub struct Nl3dArgs {
     /// coefficients by.
     ///
     /// The collaborative stage estimates how much noise the front end
-    /// left behind and shrinks by that amount. `1.9`, the library
-    /// default, corrects for the front end's real residual noise running
-    /// almost twice the analytic estimate, see `Nl3dOptions`'s docs for
-    /// the sweep this came from. Raise it further if the result still
-    /// looks noisy, lower it if fine detail is getting scrubbed.
+    /// left behind and shrinks by that amount. The library default is
+    /// now per plane rather than a single shared number, see
+    /// `nl3d_default_residual_sigma_scale`'s docs for both values and
+    /// how differently certain they are. Setting this flag applies the
+    /// same explicit value to both planes, overriding the per-plane
+    /// default for each. Raise it further if the result still looks
+    /// noisy, lower it if fine detail is getting scrubbed. Applies to
+    /// both planes unless `--luma-residual-sigma-scale` or
+    /// `--chroma-residual-sigma-scale` is set.
     #[arg(long)]
     pub residual_sigma_scale: Option<f32>,
+
+    /// `--residual-sigma-scale` override for the brightness plane only.
+    ///
+    /// Falls back to `--residual-sigma-scale` (or the calibrated
+    /// per-plane library default) when not set.
+    ///
+    /// Ignored when luma is not being denoised, or when `--channel-mode
+    /// yuv` is used.
+    #[arg(long)]
+    pub luma_residual_sigma_scale: Option<f32>,
+
+    /// `--residual-sigma-scale` override for the colour planes only.
+    ///
+    /// Falls back to `--residual-sigma-scale` (or the calibrated
+    /// per-plane library default) when not set.
+    ///
+    /// Ignored when chroma is not being denoised, or when
+    /// `--channel-mode yuv` is used.
+    #[arg(long)]
+    pub chroma_residual_sigma_scale: Option<f32>,
+
+    /// `--lambda-ht` override for the brightness plane only.
+    ///
+    /// Falls back to `--lambda-ht` (or the library default) when not
+    /// set.
+    ///
+    /// Ignored when luma is not being denoised, or when `--channel-mode
+    /// yuv` is used.
+    #[arg(long)]
+    pub luma_lambda_ht: Option<f32>,
+
+    /// `--lambda-ht` override for the colour planes only.
+    ///
+    /// Falls back to `--lambda-ht` (or the library default) when not
+    /// set.
+    ///
+    /// Ignored when chroma is not being denoised, or when
+    /// `--channel-mode yuv` is used.
+    #[arg(long)]
+    pub chroma_lambda_ht: Option<f32>,
 }
 
 impl Nl3dArgs {
@@ -102,10 +147,53 @@ impl Nl3dArgs {
             k_max: self.k_max.unwrap_or(defaults.k_max),
             tau_match: self.tau_match.unwrap_or(defaults.tau_match),
             lambda_ht: self.lambda_ht.unwrap_or(defaults.lambda_ht),
-            residual_sigma_scale: self.residual_sigma_scale.unwrap_or(defaults.residual_sigma_scale),
+            // Left unresolved when unset, rather than eagerly picked
+            // from `defaults` here, because the calibrated default now
+            // depends on which plane is being denoised, which is not
+            // known yet at this point. `CliOptions::algorithm_for`
+            // (src/bin/ingest.rs) applies `--luma-`/`--chroma-
+            // residual-sigma-scale` on top of this once the plane is
+            // known, and construction itself picks the calibrated
+            // per-plane default for whatever is still unset.
+            residual_sigma_scale: self.residual_sigma_scale,
         });
 
+        opts.luma_residual_sigma_scale = self.luma_residual_sigma_scale;
+        opts.chroma_residual_sigma_scale = self.chroma_residual_sigma_scale;
+        opts.luma_lambda_ht = self.luma_lambda_ht;
+        opts.chroma_lambda_ht = self.chroma_lambda_ht;
+
+        self.warn_on_dead_per_plane_flags(opts.intent);
+
         Ok(opts)
+    }
+
+    /// Warns when a per-plane collaborative-stage override was set but
+    /// the resolved `--channel-mode` means it has no effect, the same
+    /// way `NlmeansArgs::build_options` warns about `--hq-*` on the fast
+    /// variant.
+    fn warn_on_dead_per_plane_flags(&self, intent: BinaryChannelIntent) {
+        let luma_set = self.luma_residual_sigma_scale.is_some() || self.luma_lambda_ht.is_some();
+        let chroma_set = self.chroma_residual_sigma_scale.is_some() || self.chroma_lambda_ht.is_some();
+
+        match intent {
+            BinaryChannelIntent::Luma if chroma_set => {
+                tracing::warn!(
+                    "--chroma-residual-sigma-scale and --chroma-lambda-ht are ignored when chroma is not being denoised"
+                );
+            },
+            BinaryChannelIntent::Chroma if luma_set => {
+                tracing::warn!(
+                    "--luma-residual-sigma-scale and --luma-lambda-ht are ignored when luma is not being denoised"
+                );
+            },
+            BinaryChannelIntent::YuvFused if luma_set || chroma_set => {
+                tracing::warn!(
+                    "--luma-/--chroma-residual-sigma-scale and --luma-/--chroma-lambda-ht are ignored when --channel-mode yuv is used"
+                );
+            },
+            _ => {},
+        }
     }
 }
 
@@ -139,6 +227,10 @@ mod tests {
         assert_eq!(nl3d.tau_match, None);
         assert_eq!(nl3d.lambda_ht, None);
         assert_eq!(nl3d.residual_sigma_scale, None);
+        assert_eq!(nl3d.luma_residual_sigma_scale, None);
+        assert_eq!(nl3d.chroma_residual_sigma_scale, None);
+        assert_eq!(nl3d.luma_lambda_ht, None);
+        assert_eq!(nl3d.chroma_lambda_ht, None);
     }
 
     #[test]
@@ -204,8 +296,9 @@ mod tests {
                 assert_eq!(nl3d_opts.k_max, defaults.k_max);
                 assert!((nl3d_opts.tau_match - defaults.tau_match).abs() < f32::EPSILON);
                 assert!((nl3d_opts.lambda_ht - defaults.lambda_ht).abs() < f32::EPSILON);
-                assert!(
-                    (nl3d_opts.residual_sigma_scale - defaults.residual_sigma_scale).abs() < f32::EPSILON
+                assert_eq!(
+                    nl3d_opts.residual_sigma_scale, defaults.residual_sigma_scale,
+                    "unset --residual-sigma-scale should stay None here, resolved later per plane"
                 );
             },
             other => panic!("expected Algorithm::Nl3d, got {other:?}"),
@@ -234,5 +327,82 @@ mod tests {
             opts.is_ok(),
             "explicit hq should be accepted under nl3d: {opts:?}"
         );
+    }
+
+    #[test]
+    fn per_plane_collab_flags_parse_to_the_typed_values() {
+        let (_, nl3d) = parse(&[
+            "--luma-residual-sigma-scale",
+            "5.0",
+            "--chroma-residual-sigma-scale",
+            "8.0",
+            "--luma-lambda-ht",
+            "2.0",
+            "--chroma-lambda-ht",
+            "3.5",
+        ]);
+
+        assert!((nl3d.luma_residual_sigma_scale.unwrap() - 5.0).abs() < f32::EPSILON);
+        assert!((nl3d.chroma_residual_sigma_scale.unwrap() - 8.0).abs() < f32::EPSILON);
+        assert!((nl3d.luma_lambda_ht.unwrap() - 2.0).abs() < f32::EPSILON);
+        assert!((nl3d.chroma_lambda_ht.unwrap() - 3.5).abs() < f32::EPSILON);
+    }
+
+    /// `build_options` carries the four per-plane overrides straight
+    /// through onto `CliOptions`, unresolved, the same shape
+    /// `luma_strength`/`chroma_strength` use. `CliOptions::algorithm_for`
+    /// (see `src/bin/ingest.rs`) is what actually resolves them per
+    /// plane, so this test only checks the flow into `CliOptions`.
+    #[test]
+    fn luma_residual_sigma_scale_alone_flows_into_cli_options_luma_field_only() {
+        let (args, nl3d) = parse(&["--luma-residual-sigma-scale", "5.0"]);
+        let opts = nl3d.build_options(&args).expect("build_options should succeed");
+
+        assert!((opts.luma_residual_sigma_scale.unwrap() - 5.0).abs() < f32::EPSILON);
+        assert_eq!(opts.chroma_residual_sigma_scale, None);
+        assert_eq!(opts.luma_lambda_ht, None);
+        assert_eq!(opts.chroma_lambda_ht, None);
+    }
+
+    #[test]
+    fn chroma_lambda_ht_alone_flows_into_cli_options_chroma_field_only() {
+        let (args, nl3d) = parse(&["--chroma-lambda-ht", "3.5"]);
+        let opts = nl3d.build_options(&args).expect("build_options should succeed");
+
+        assert!((opts.chroma_lambda_ht.unwrap() - 3.5).abs() < f32::EPSILON);
+        assert_eq!(opts.luma_lambda_ht, None);
+        assert_eq!(opts.luma_residual_sigma_scale, None);
+        assert_eq!(opts.chroma_residual_sigma_scale, None);
+    }
+
+    #[test]
+    fn both_planes_per_plane_overrides_flow_into_cli_options_independently() {
+        let (args, nl3d) = parse(&[
+            "--luma-residual-sigma-scale",
+            "5.0",
+            "--chroma-residual-sigma-scale",
+            "8.0",
+            "--luma-lambda-ht",
+            "2.0",
+            "--chroma-lambda-ht",
+            "3.5",
+        ]);
+        let opts = nl3d.build_options(&args).expect("build_options should succeed");
+
+        assert!((opts.luma_residual_sigma_scale.unwrap() - 5.0).abs() < f32::EPSILON);
+        assert!((opts.chroma_residual_sigma_scale.unwrap() - 8.0).abs() < f32::EPSILON);
+        assert!((opts.luma_lambda_ht.unwrap() - 2.0).abs() < f32::EPSILON);
+        assert!((opts.chroma_lambda_ht.unwrap() - 3.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn unset_per_plane_overrides_leave_cli_options_fields_none() {
+        let (args, nl3d) = parse(&[]);
+        let opts = nl3d.build_options(&args).expect("build_options should succeed");
+
+        assert_eq!(opts.luma_residual_sigma_scale, None);
+        assert_eq!(opts.chroma_residual_sigma_scale, None);
+        assert_eq!(opts.luma_lambda_ht, None);
+        assert_eq!(opts.chroma_lambda_ht, None);
     }
 }
