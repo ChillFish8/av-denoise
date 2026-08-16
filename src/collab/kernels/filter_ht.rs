@@ -122,6 +122,15 @@ pub(crate) fn variance_ladder(v: &mut Array<f32>, k_use: u32) {
 /// `refs * PATCH_AREA` lines, member 0's filtered patch for every
 /// reference. `group_weight` holds `refs` weights, and `sigma` holds one
 /// value per stored channel.
+///
+/// `dct_profile` holds 8 values, [`crate::collab::kernels::transforms::dct_noise_profile`]'s
+/// output. Every member's propagated coefficient variance at DCT
+/// position `(u, v)` scales by `dct_profile[u] * dct_profile[v]` before
+/// the threshold reads it, `u` and `v` read straight off the calling
+/// thread's own `local_x`/`local_y` (see the body for why that's exactly
+/// the coefficient position this thread ends up owning). At `rho = 0`
+/// every entry is exactly `1.0`, so this multiply is a no-op and the
+/// threshold behaves exactly as it did before this profile existed.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn collab_filter_ht<N: Size>(
@@ -133,6 +142,7 @@ pub fn collab_filter_ht<N: Size>(
     group_weight: &mut Array<f32>,
     frame: u32,
     sigma: &Array<f32>,
+    dct_profile: &Array<f32>,
     lambda_ht: f32,
     #[comptime] use_member_sigma: bool,
     #[comptime] width: u32,
@@ -146,6 +156,17 @@ pub fn collab_filter_ht<N: Size>(
     let tid = local_y * PATCH_SIZE + local_x;
     let ref_idx = CUBE_POS_Y * refs_x + CUBE_POS_X;
     let k_use = member_count[ref_idx as usize];
+
+    // Every thread ends up owning DCT coefficient `(u = local_x, v =
+    // local_y)` after the row/column DCT passes below run (the row pass
+    // writes horizontal frequency `j` at position `row * 8 + j`, and the
+    // column pass, reading that with `col` fixed to this thread's own
+    // `tid % 8`, writes vertical frequency `j` at `j * 8 + col`, so
+    // position `tid` ends up holding `(v = tid / 8, u = tid % 8) =
+    // (local_y, local_x)`). The profile is purely spatial and identical
+    // for every member of the stack, so it is read once here rather than
+    // inside the per-channel loop below.
+    let dct_profile_factor = dct_profile[local_x as usize] * dct_profile[local_y as usize];
 
     let mut basis = SharedMemory::<f32>::new(PATCH_AREA as usize);
     let mut stack = SharedMemory::<f32>::new(comptime!(k_max * PATCH_AREA) as usize);
@@ -220,7 +241,7 @@ pub fn collab_filter_ht<N: Size>(
             if use_member_sigma && k < k_max {
                 sig2_k += member_sig2[(ref_idx * k_max + k) as usize];
             }
-            v[k as usize] = sig2_k;
+            v[k as usize] = sig2_k * dct_profile_factor;
         }
         variance_ladder(&mut v, k_use);
 

@@ -18,6 +18,28 @@ pub struct CollabParams {
     /// Hard-threshold multiplier on the propagated coefficient sigma,
     /// applied during collaborative filtering.
     pub lambda_ht: f32,
+    /// The spatial correlation of the residual noise this filter is
+    /// shrinking, in `[0, 1)`.
+    ///
+    /// A white-noise input assigns every DCT coefficient the same
+    /// variance. Real input to this filter is rarely white, an
+    /// upstream denoising pass (nl3d's own non-local means front end,
+    /// for instance) typically leaves a residual whose covariance falls
+    /// off with distance roughly as `rho^d`, concentrating noise power
+    /// at low frequencies. `rho` lets the filter model that instead of
+    /// assuming white noise, by scaling each DCT coefficient's variance
+    /// through [`crate::collab::kernels::transforms::dct_noise_profile`]
+    /// before shrinkage sees it.
+    ///
+    /// Defaults to `0.0`, which reproduces flat white-noise behaviour
+    /// exactly. `nl3d` leaves this at the default. It once overrode it
+    /// per frame from a measured table keyed by the front end's search
+    /// radius (`nl3d::rho::rho_window`), but that shaping measured worse
+    /// on real footage than the plain white-noise assumption, so nl3d no
+    /// longer reaches for it; see `Nl3dDenoiser::new`'s doc comment for
+    /// the numbers. The table and this field stay available for a
+    /// caller who wants to opt into shaping directly.
+    pub rho: f32,
 }
 
 impl Default for CollabParams {
@@ -28,6 +50,7 @@ impl Default for CollabParams {
             spatial_radius: 9,
             tau_match: 3.0,
             lambda_ht: 2.7,
+            rho: 0.0,
         }
     }
 }
@@ -74,6 +97,14 @@ impl CollabParams {
                 "lambda_ht must be finite and greater than 0, got {}. A lambda_ht of 0 hard-\
                  thresholds every coefficient to zero",
                 self.lambda_ht,
+            );
+        }
+
+        if !(self.rho.is_finite() && self.rho >= 0.0 && self.rho < 1.0) {
+            anyhow::bail!(
+                "rho must be finite and in [0, 1), got {}. rho is a correlation, and 1.0 is a \
+                 degenerate value this filter's noise model was never validated against",
+                self.rho,
             );
         }
 
@@ -215,5 +246,43 @@ mod tests {
             ..CollabParams::default()
         };
         assert!(inf.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_rho_zero_and_rejects_out_of_range() {
+        assert!(
+            CollabParams {
+                rho: 0.0,
+                ..CollabParams::default()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            CollabParams {
+                rho: 0.86,
+                ..CollabParams::default()
+            }
+            .validate()
+            .is_ok()
+        );
+
+        let negative = CollabParams {
+            rho: -0.1,
+            ..CollabParams::default()
+        };
+        assert!(negative.validate().is_err());
+
+        let one = CollabParams {
+            rho: 1.0,
+            ..CollabParams::default()
+        };
+        assert!(one.validate().is_err());
+
+        let nan = CollabParams {
+            rho: f32::NAN,
+            ..CollabParams::default()
+        };
+        assert!(nan.validate().is_err());
     }
 }

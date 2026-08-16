@@ -12,7 +12,7 @@ use super::helpers::{
 use crate::collab::geometry::{filtered_buf_len, member_buf_len, ref_count, ref_pos, refs_along};
 use crate::collab::kernels::filter_ht::{collab_filter_ht, variance_ladder};
 use crate::collab::kernels::group::collab_group_spatial;
-use crate::collab::kernels::transforms::haar_variance_ladder;
+use crate::collab::kernels::transforms::{dct_noise_profile, haar_variance_ladder};
 
 /// Every reference top-left position on the grid, in the same raster
 /// order the kernels use to compute `ref_idx`.
@@ -124,6 +124,7 @@ fn run_filter_raw(
     member_sig2: &Handle,
     member_sig2_len: usize,
     use_member_sigma: bool,
+    rho: f32,
 ) -> (Vec<f32>, Vec<f32>) {
     let refs_x = refs_along(width);
     let refs_y = refs_along(height);
@@ -133,6 +134,7 @@ fn run_filter_raw(
     let filtered_buf = client.empty(filt_len * size_of::<f32>());
     let weight_buf = client.empty(refs * size_of::<f32>());
     let sigma_buf = client.create_from_slice(f32::as_bytes(&[sigma]));
+    let dct_profile_buf = client.create_from_slice(f32::as_bytes(&dct_noise_profile(rho)));
 
     let grid = CubeCount::new_2d(refs_x, refs_y);
     let dim = CubeDim::new_2d(8, 8);
@@ -151,6 +153,7 @@ fn run_filter_raw(
             ArrayArg::from_raw_parts(weight_buf.clone(), refs),
             0u32,
             ArrayArg::from_raw_parts(sigma_buf, 1),
+            ArrayArg::from_raw_parts(dct_profile_buf, 8),
             lambda_ht,
             use_member_sigma,
             width,
@@ -186,6 +189,36 @@ fn run_filter(
     sigma: f32,
     lambda_ht: f32,
 ) -> (Vec<f32>, Vec<f32>) {
+    run_filter_with_rho(
+        frame,
+        width,
+        height,
+        noise_floor,
+        tau_admit,
+        spatial_radius,
+        k_max,
+        sigma,
+        lambda_ht,
+        0.0,
+    )
+}
+
+/// [`run_filter`] with an explicit `rho`, for tests that need
+/// correlation shaping turned on rather than the white-noise default
+/// every other test in this file uses.
+#[allow(clippy::too_many_arguments)]
+fn run_filter_with_rho(
+    frame: &[f32],
+    width: u32,
+    height: u32,
+    noise_floor: f32,
+    tau_admit: f32,
+    spatial_radius: u32,
+    k_max: u32,
+    sigma: f32,
+    lambda_ht: f32,
+    rho: f32,
+) -> (Vec<f32>, Vec<f32>) {
     assert_eq!(frame.len(), (width * height) as usize);
 
     let client = make_client();
@@ -216,6 +249,7 @@ fn run_filter(
         &dummy,
         1,
         false,
+        rho,
     )
 }
 
@@ -288,6 +322,7 @@ fn zero_sigma_is_identity_for_a_full_stack() {
         &dummy,
         1,
         false,
+        0.0,
     );
 
     let expected = extract_patch(&frame, w, 16, 16);
@@ -413,6 +448,7 @@ fn hetero_flag_off_never_reads_member_sig2() {
         &dummy,
         1,
         false,
+        0.0,
     );
     let (filtered_full, weight_full) = run_filter_raw(
         &client,
@@ -427,6 +463,7 @@ fn hetero_flag_off_never_reads_member_sig2() {
         &full_zero,
         refs * 8,
         false,
+        0.0,
     );
 
     assert_eq!(
@@ -503,4 +540,138 @@ fn gpu_variance_ladder_matches_the_host_mirror() {
             );
         }
     }
+}
+
+/// `rho = 0` must leave the kernel's output bit for bit identical to
+/// what it would be with no noise-shaping profile in the computation at
+/// all. This is checked two ways from the same noisy multi-member
+/// group: once through the real `dct_noise_profile(0.0)` production
+/// path, and once through a profile buffer built entirely by hand,
+/// `[1.0; 8]`, which is mathematically the exact identity multiplier
+/// and so stands in for "no profile logic at all" without needing a
+/// second copy of the kernel to prove it against.
+#[test]
+fn dct_profile_rho_zero_matches_a_hand_built_all_ones_profile() {
+    let (w, h) = (48u32, 48u32);
+    let sigma = 0.04f32;
+    let frame = noisy_field_over(w, h, 0.5, sigma);
+
+    let floor = 2.0 * 3.0 * sigma * sigma * 64.0;
+    let tau_admit = floor * 3.0;
+
+    let client = make_client();
+    let reference = client.create_from_slice(f32::as_bytes(&frame));
+    let groups = run_group_raw(&client, &reference, frame.len(), w, h, floor, tau_admit, 9, 8);
+    let dummy = client.empty(size_of::<f32>());
+
+    assert_eq!(
+        dct_noise_profile(0.0),
+        [1.0f32; 8],
+        "dct_noise_profile(0.0) must be exactly [1.0; 8], the property this test's kernel-level \
+         comparison relies on"
+    );
+
+    let (filtered_zero_rho, weight_zero_rho) = run_filter_raw(
+        &client,
+        &reference,
+        frame.len(),
+        &groups,
+        w,
+        h,
+        8,
+        sigma,
+        2.7,
+        &dummy,
+        1,
+        false,
+        0.0,
+    );
+
+    // Bypasses run_filter_raw's own dct_noise_profile(rho) call entirely,
+    // building the profile buffer by hand so this half of the comparison
+    // does not depend on dct_noise_profile being correct at rho = 0, only
+    // on the kernel actually treating an all-ones profile as a no-op.
+    let refs_x = refs_along(w);
+    let refs = groups.refs;
+    let filt_len = filtered_buf_len(w, h);
+    let filtered_buf = client.empty(filt_len * size_of::<f32>());
+    let weight_buf = client.empty(refs * size_of::<f32>());
+    let sigma_buf = client.create_from_slice(f32::as_bytes(&[sigma]));
+    let ones_profile_buf = client.create_from_slice(f32::as_bytes(&[1.0f32; 8]));
+    let grid = CubeCount::new_2d(refs_x, refs_along(h));
+    let dim = CubeDim::new_2d(8, 8);
+    unsafe {
+        collab_filter_ht::launch_unchecked::<R>(
+            &client,
+            grid,
+            dim,
+            1usize,
+            ArrayArg::from_raw_parts(reference.clone(), frame.len()),
+            ArrayArg::from_raw_parts(groups.member_pos.clone(), groups.pos_len),
+            ArrayArg::from_raw_parts(groups.member_count.clone(), refs),
+            ArrayArg::from_raw_parts(dummy, 1),
+            ArrayArg::from_raw_parts(filtered_buf.clone(), filt_len),
+            ArrayArg::from_raw_parts(weight_buf.clone(), refs),
+            0u32,
+            ArrayArg::from_raw_parts(sigma_buf, 1),
+            ArrayArg::from_raw_parts(ones_profile_buf, 8),
+            2.7f32,
+            false,
+            w,
+            h,
+            1u32,
+            8u32,
+            refs_x,
+        );
+    }
+    let filtered_hand_built =
+        f32::from_bytes(&client.read_one(filtered_buf).expect("filtered readback failed"))[..filt_len]
+            .to_vec();
+    let weight_hand_built =
+        f32::from_bytes(&client.read_one(weight_buf).expect("weight readback failed"))[..refs].to_vec();
+
+    assert_eq!(
+        filtered_zero_rho, filtered_hand_built,
+        "filtered output at rho=0 must be bit-for-bit identical to a hand-built all-ones \
+         profile, proving correlation shaping off is exactly a no-op"
+    );
+    assert_eq!(
+        weight_zero_rho, weight_hand_built,
+        "group_weight at rho=0 must be bit-for-bit identical to a hand-built all-ones profile"
+    );
+}
+
+/// Higher `rho` must retain more residual noise on a flat, noise-only
+/// field than `rho = 0` does, at the same `lambda_ht`.
+///
+/// A positive `rho` moves variance out of the high frequencies and into
+/// the low ones (`dct_noise_profile`'s own monotonic-decrease property),
+/// so a fixed `lambda_ht` reaches a smaller threshold on most
+/// non-DC coefficients than the white-noise assumption would, and more
+/// of the pure noise sitting in those coefficients survives. This is the
+/// documented, deliberate trade the shipped table's caveat describes: on
+/// content where the true correlation is lower than the table assumes,
+/// shaping under-shrinks rather than over-shrinks, trading a little
+/// leftover noise for preserved detail. A flat, noise-only field isolates
+/// that trade with nothing else going on.
+#[test]
+fn higher_rho_retains_more_noise_on_a_flat_field() {
+    let (w, h) = (48u32, 48u32);
+    let sigma = 0.04f32;
+    let frame = noisy_field_over(w, h, 0.5, sigma);
+
+    let floor = 2.0 * 3.0 * sigma * sigma * 64.0;
+    let tau_admit = floor * 3.0;
+
+    let (filtered_rho0, _) = run_filter_with_rho(&frame, w, h, floor, tau_admit, 9, 8, sigma, 2.7, 0.0);
+    let (filtered_rho_high, _) = run_filter_with_rho(&frame, w, h, floor, tau_admit, 9, 8, sigma, 2.7, 0.86);
+
+    let var_rho0 = variance(&filtered_rho0);
+    let var_rho_high = variance(&filtered_rho_high);
+
+    assert!(
+        var_rho_high > var_rho0 * 1.05,
+        "expected rho=0.86 to leave meaningfully more residual variance than rho=0 at the same \
+         lambda_ht, got rho=0 variance={var_rho0} rho=0.86 variance={var_rho_high}"
+    );
 }

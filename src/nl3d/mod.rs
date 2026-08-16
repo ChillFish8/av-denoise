@@ -35,6 +35,7 @@
 //! second.
 
 mod denoiser;
+mod rho;
 
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 mod tests;

@@ -232,3 +232,98 @@ fn corner_clamp_collisions_are_deduplicated() {
         "expected the exact hand-traced member order for the corner ref"
     );
 }
+
+/// Writes an 8x8 flat block into `frame` with its top-left corner at
+/// `(px, py)`.
+fn set_flat_block(frame: &mut [f32], w: u32, px: u32, py: u32, value: f32) {
+    for row in 0..8u32 {
+        for col in 0..8u32 {
+            frame[((py + row) * w + (px + col)) as usize] = value;
+        }
+    }
+}
+
+/// The regression the other tests in this file never covered: that the
+/// members a group ADMITS are also the ones RANKED best, not just any
+/// candidates that happened to pass `tau_admit`.
+///
+/// Every other test here uses a `noise_floor` of `0.0`, or a flat frame
+/// where every candidate is genuinely tied at distance `0`. Neither
+/// exercises the ranking path a large `noise_floor` used to break: once
+/// `red[0] - noise_floor` was clamped at zero before ranking, every
+/// candidate whose raw distance sat below the floor collapsed to the
+/// same `0.0`, and the insertion sort's strict `>` comparison never
+/// swaps equal values, so the kept members were just whichever ones the
+/// scan visited first, not the closest ones.
+///
+/// This builds a reference patch and four flat candidate patches at
+/// four known, widely separated raw distances (`best1 < best2 < best3
+/// < worst`), all far enough below `noise_floor` that the old clamp
+/// would flatten every one of them to an identical `0.0`. The
+/// candidates are placed so the kernel's scan (dy ascending, then dx
+/// ascending within each row) visits them in the order `worst, best1,
+/// best2, best3` - the reverse of true similarity order - specifically
+/// so that a scan-order tie-break would keep `worst` and drop `best3`,
+/// which is exactly the defect this test exists to catch.
+///
+/// Every candidate sits at least 8px of pure background away from every
+/// other candidate and from the reference's own patch on at least one
+/// axis, so no 8x8 window the kernel scans can ever straddle two of
+/// them: every scanned candidate is either wholly one of the four
+/// blocks, wholly background, or a block/background mix whose
+/// background component alone (a ~5.7-per-pixel difference from the
+/// reference) pushes its distance far past `noise_floor + tau_admit`
+/// and gets rejected. That keeps the four planted distances the only
+/// ones competing for the group.
+#[test]
+fn ranking_survives_a_noise_floor_that_would_clamp_every_candidate_to_zero() {
+    let (w, h) = (64u32, 64u32);
+    let (rx, ry) = (40u32, 40u32);
+    let ref_value = 0.7f32;
+
+    let mut frame = vec![-5.0f32; (w * h) as usize];
+    set_flat_block(&mut frame, w, rx, ry, ref_value);
+
+    // Raw distance for a flat candidate offset from the reference by a
+    // constant `delta`: channel_scale (3, luma) * patch area (64) *
+    // delta^2.
+    //   best1 (delta 0.01): raw 0.0192
+    //   best2 (delta 0.02): raw 0.0768
+    //   best3 (delta 0.03): raw 0.1728
+    //   worst (delta 0.15): raw 4.32
+    // All four sit comfortably under noise_floor (10.0) below, so the
+    // old clamp flattens every one of them to 0.0.
+    set_flat_block(&mut frame, w, rx - 8, ry - 16, ref_value + 0.15); // worst
+    set_flat_block(&mut frame, w, rx + 8, ry - 16, ref_value + 0.01); // best1
+    set_flat_block(&mut frame, w, rx - 8, ry + 16, ref_value + 0.02); // best2
+    set_flat_block(&mut frame, w, rx + 8, ry + 16, ref_value + 0.03); // best3
+
+    let noise_floor = 10.0f32;
+    let tau_admit = 5.0f32;
+
+    let (member_pos, member_count) = run_group(&frame, w, h, noise_floor, tau_admit, 16, 4);
+
+    let refs_x = refs_along(w);
+    let ref_idx = ((ry / crate::collab::STEP) * refs_x + (rx / crate::collab::STEP)) as usize;
+
+    assert_eq!(
+        member_count[ref_idx], 4,
+        "expected the self-match plus all 3 true best candidates to fill the stack"
+    );
+
+    let members: Vec<(u32, u32)> = (0..4)
+        .map(|j| unpack_pos_host(member_pos[ref_idx * 4 + j]))
+        .collect();
+
+    assert_eq!(
+        members[0],
+        (rx, ry),
+        "member 0 must always be the reference itself"
+    );
+    assert_eq!(
+        members[1..],
+        [(rx + 8, ry - 16), (rx - 8, ry + 16), (rx + 8, ry + 16)],
+        "expected the 3 true best candidates (best1, best2, best3) in similarity order, \
+         with the worst candidate evicted; got {members:?}"
+    );
+}

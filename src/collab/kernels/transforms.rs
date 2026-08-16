@@ -215,6 +215,63 @@ pub(crate) fn haar_inv_stack(stack: &mut SharedMemory<f32>, pos: u32, k_use: u32
     }
 }
 
+/// The per-DCT-frequency multiplier a spatially correlated residual
+/// leaves on top of an otherwise flat noise variance.
+///
+/// Non-local means leaves a residual whose covariance falls off with
+/// distance as `rho^d`, not the flat covariance a white-noise model
+/// assumes. Projecting that falling covariance through the same
+/// orthonormal 8-point DCT basis [`fill_dct8_basis`] builds on the GPU
+/// spreads a flat variance unevenly across frequencies: low frequencies
+/// pick up more of the noise power, high frequencies less.
+///
+/// `g(u) = sum_i sum_j B_u(i) * B_u(j) * rho^|i-j|`, where `B_u` is row
+/// `u` of that basis. A 2D 8x8 patch's coefficient at `(u, v)` scales by
+/// `g(u) * g(v)`, since the correlation model treats rows and columns
+/// the same way and the 2D DCT itself runs as two separable 1D passes.
+///
+/// Two properties hold for every `rho`, both following from the basis
+/// being orthonormal. `sum_u g(u) = 8`, so this profile redistributes
+/// variance across frequencies rather than changing its total, and
+/// needs no separate normalisation. And at `rho = 0`, `g(u) = 1` for
+/// every `u`, since only the `i = j` terms of the sum survive and each
+/// basis row has unit norm.
+///
+/// `rho <= 0` returns `[1.0; 8]` directly instead of running the sum
+/// below. Floating-point summation of eight squared cosine terms does
+/// not land on exactly `1.0` the way exact arithmetic does, and a caller
+/// with correlation shaping turned off needs to multiply a variance by
+/// exactly `1.0`, not by something a few bits away from it, so its
+/// result stays bit for bit what it would have been with no shaping
+/// applied at all.
+pub fn dct_noise_profile(rho: f32) -> [f32; 8] {
+    if rho <= 0.0 {
+        return [1.0; 8];
+    }
+
+    let rho = rho as f64;
+    let mut basis = [[0.0f64; 8]; 8];
+    for (u, row) in basis.iter_mut().enumerate() {
+        let c = if u == 0 { 1.0 / 8.0f64.sqrt() } else { 0.5 };
+        for (i, entry) in row.iter_mut().enumerate() {
+            let angle = std::f64::consts::PI * (2.0 * i as f64 + 1.0) * u as f64 / 16.0;
+            *entry = c * angle.cos();
+        }
+    }
+
+    let mut g = [0.0f32; 8];
+    for (u, slot) in g.iter_mut().enumerate() {
+        let mut sum = 0.0f64;
+        for (i, &bi) in basis[u].iter().enumerate() {
+            for (j, &bj) in basis[u].iter().enumerate() {
+                sum += bi * bj * rho.powi((i as i32 - j as i32).abs());
+            }
+        }
+        *slot = sum as f32;
+    }
+    g
+}
+
 /// The host-side mirror of the variance propagation `haar_fwd_stack`
 /// applies to a per-coefficient noise variance instead of a signal.
 ///
@@ -249,6 +306,52 @@ pub fn haar_variance_ladder(sig2: &[f32], k_use: u32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dct_noise_profile_rho_zero_is_uniform_identity() {
+        let g = dct_noise_profile(0.0);
+        assert_eq!(
+            g, [1.0f32; 8],
+            "rho=0 must give exactly 1.0 at every frequency, got {g:?}"
+        );
+
+        // A small negative rho is not a real correlation either, and
+        // must fall onto the same exact identity rather than running
+        // the summation with a negative base.
+        let g_neg = dct_noise_profile(-0.1);
+        assert_eq!(g_neg, [1.0f32; 8]);
+    }
+
+    #[test]
+    fn dct_noise_profile_sums_to_eight_across_a_range_of_rho() {
+        for rho in [0.05f32, 0.3, 0.5, 0.67, 0.8, 0.85, 0.86, 0.95, 0.99] {
+            let g = dct_noise_profile(rho);
+            let sum: f32 = g.iter().sum();
+            assert!(
+                (sum - 8.0).abs() < 1e-3,
+                "rho={rho}: expected sum(g) == 8.0 (variance redistributed, not created or \
+                 destroyed), got {sum}"
+            );
+        }
+    }
+
+    #[test]
+    fn dct_noise_profile_is_monotonically_decreasing_for_positive_rho() {
+        for rho in [0.05f32, 0.3, 0.5, 0.67, 0.8, 0.85, 0.86, 0.95, 0.99] {
+            let g = dct_noise_profile(rho);
+            for u in 0..7 {
+                assert!(
+                    g[u] > g[u + 1],
+                    "rho={rho}: expected g to strictly decrease with frequency (low frequencies \
+                     carry more of a positively correlated residual's noise power), got \
+                     g[{u}]={} <= g[{}]={}",
+                    g[u],
+                    u + 1,
+                    g[u + 1],
+                );
+            }
+        }
+    }
 
     #[test]
     fn uniform_variance_is_unchanged_by_the_ladder() {

@@ -97,7 +97,7 @@ pub enum Algorithm {
 /// # Where the calibrated defaults come from
 ///
 /// `front_strength_scale`, `residual_sigma_scale`, and `lambda_ht` were
-/// swept together on `clean-1080p.mkv` at temporal radius 2, noise
+/// first swept together on `clean-1080p.mkv` at temporal radius 2, noise
 /// levels 4, 6, and 8, one dial at a time with the others pinned, then
 /// checked for interaction with a small joint sweep around the chosen
 /// point. `k_max` and `tau_match` were left at their pre-existing
@@ -136,6 +136,75 @@ pub enum Algorithm {
 /// rather than swept again. It shows the same or larger improvement
 /// over the radius-2 front end at every noise level, so the radius-2
 /// calibration carries over.
+///
+/// # Recalibration after the patch-grouping fix
+///
+/// The collaborative filter's group-ranking kernel had a bug that
+/// clamped patch distances at zero before ranking them. Once the noise
+/// floor exceeded a candidate's raw distance, which it did for nearly
+/// every candidate at `residual_sigma_scale = 1.9`, every candidate tied
+/// at exactly zero and the group filled with whichever patches the scan
+/// visited first rather than the most similar ones. Every parameter
+/// above was originally chosen while this bug was live, so all of them
+/// were re-measured once it was fixed, plus `rho`
+/// ([`crate::collab::CollabParams::rho`]), a per-frequency noise-shaping
+/// correlation that was, at the time, forced on unconditionally for
+/// nl3d.
+///
+/// This round changed the objective on purpose. The original sweep
+/// above scored luma XPSNR and SSIM against a clean reference with
+/// synthetic noise added, and that reference carries no fine grain or
+/// texture of its own, so a configuration that destroys real texture
+/// scores no worse than one that only removes noise. The recalibration
+/// instead uses the high-frequency energy ratio as its primary target,
+/// Laplacian variance in a real-footage face crop divided by the same
+/// measurement on the clean source, at a value of 1.0. Below 1.0 means
+/// real texture was smoothed away. Above 1.0 means noise was left
+/// behind. XPSNR and SSIM are still measured, but only as a guard
+/// against a configuration that pushes the ratio far from 1.0 while
+/// scoring well, not as the value being maximised.
+///
+/// `rho` and `residual_sigma_scale` were swept together, since both
+/// change how much the collaborative stage shrinks and can trade
+/// against each other. `rho` was tried at 0.0, 0.4, 0.65, and 0.8. 0.0
+/// is shaping off. 0.8 is the flat-content correlation `rho_window` used
+/// to force. 0.65 is the measured correlation on real fine texture.
+/// Each `rho` value was crossed with `residual_sigma_scale` at 1.0, 1.4,
+/// and 1.9, all twelve combinations, at all three noise levels, on the
+/// same `clean-1080p.mkv` source used for the metric-only sweep above.
+/// `rho = 0.0` beat every other `rho` value at every
+/// `residual_sigma_scale` and every noise level tested, on both the
+/// high-frequency ratio and on XPSNR/SSIM simultaneously, with no
+/// exception. Raising `rho` monotonically pushed the ratio further above
+/// 1.0 (more noise kept) and lowered XPSNR/SSIM at the same time, rather
+/// than trading one for the other. Shaping was therefore dropped from
+/// nl3d's default entirely, not just tuned down. See
+/// `Nl3dDenoiser::new`'s doc comment for where that is done and the
+/// measured before/after numbers.
+///
+/// With `rho` settled at `0.0`, `residual_sigma_scale` was checked
+/// across 1.0, 1.4, 1.9, 2.4, and 3.0. 1.9 remained the best value,
+/// unchanged from the pre-fix sweep above. It has the best worst-case
+/// luma XPSNR and SSIM across the three noise levels, and its
+/// high-frequency ratio (0.85 to 1.04 across both faces and all three
+/// noise levels) is the closest of any tested value to the 1.0 target.
+/// It is bracketed on both sides. 1.4 undershoots the noise removal,
+/// with ratios running 0.91 to 1.20. 2.4 and 3.0 overshoot it, with
+/// ratios drifting down to 0.82 to 0.88, and XPSNR falls off past 1.9
+/// too. `front_strength_scale` and `lambda_ht` were left at their
+/// existing values. The `rho` / `residual_sigma_scale` grid already
+/// showed no headroom to chase, so neither was re-swept this round.
+///
+/// The collaborative filter's grouping stage was also checked
+/// separately for whether it can tell similar patches from dissimilar
+/// ones, since that is a distinct property from how good the final
+/// image looks. At the chosen `residual_sigma_scale = 1.9`, admitted
+/// patches on flat content average 0.19x the clean-domain distance of a
+/// random draw from the same search window, and on fine texture 0.10x,
+/// both well under 1.0, meaning admission is finding genuinely closer
+/// patches rather than noise-fooled ones. `rho` does not affect
+/// grouping. Grouping ranks raw pixel distances, before the DCT
+/// transform that `rho` shapes ever runs.
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Nl3dOptions {
     /// The front end's HQ parameters.

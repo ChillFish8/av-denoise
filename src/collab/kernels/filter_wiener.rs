@@ -138,6 +138,13 @@ pub(crate) fn wiener_shrinkage_factor(p: f32, vj: f32) -> f32 {
 /// `refs * PATCH_AREA` lines, member 0's filtered patch for every
 /// reference. `group_weight` holds `refs` weights, and `sigma` holds one
 /// value per stored channel.
+///
+/// `dct_profile` holds 8 values, [`crate::collab::kernels::transforms::dct_noise_profile`]'s
+/// output. Every propagated coefficient variance at DCT position `(u,
+/// v)` scales by `dct_profile[u] * dct_profile[v]` before it sets that
+/// coefficient's Wiener shrinkage factor, the same mapping and the same
+/// no-op-at-`rho = 0` guarantee [`crate::collab::kernels::filter_ht::collab_filter_ht`]
+/// documents.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn collab_filter_wiener<N: Size>(
@@ -151,6 +158,7 @@ pub fn collab_filter_wiener<N: Size>(
     noisy_frame: u32,
     pilot_frame: u32,
     sigma: &Array<f32>,
+    dct_profile: &Array<f32>,
     #[comptime] use_member_sigma: bool,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -163,6 +171,11 @@ pub fn collab_filter_wiener<N: Size>(
     let tid = local_y * PATCH_SIZE + local_x;
     let ref_idx = CUBE_POS_Y * refs_x + CUBE_POS_X;
     let k_use = member_count[ref_idx as usize];
+
+    // Same coefficient-position derivation `collab_filter_ht` documents:
+    // this thread ends up owning DCT position `(u = local_x, v =
+    // local_y)` after the row/column DCT passes below.
+    let dct_profile_factor = dct_profile[local_x as usize] * dct_profile[local_y as usize];
 
     let mut basis = SharedMemory::<f32>::new(PATCH_AREA as usize);
     let mut pilot_stack = SharedMemory::<f32>::new(comptime!(k_max * PATCH_AREA) as usize);
@@ -277,7 +290,7 @@ pub fn collab_filter_wiener<N: Size>(
             if use_member_sigma && k < k_max {
                 sig2_k += member_sig2[(ref_idx * k_max + k) as usize];
             }
-            v[k as usize] = sig2_k;
+            v[k as usize] = sig2_k * dct_profile_factor;
         }
         variance_ladder(&mut v, k_use);
 

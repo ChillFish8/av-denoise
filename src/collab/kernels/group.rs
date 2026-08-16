@@ -64,11 +64,17 @@ fn clamp_top_left(v: i32, max_pos: u32) -> u32 {
 /// # Distance and admission
 ///
 /// A candidate's distance is the channel-scaled sum of squared pixel
-/// differences over the whole patch, with `noise_floor` subtracted and
-/// clamped at zero. `noise_floor` is the distance two noisy copies of
-/// the same content are expected to show by chance, so a genuine match
-/// isn't penalised for the noise it carries. A candidate is admitted
-/// only when what's left is at most `tau_admit`.
+/// differences over the whole patch, with `noise_floor` subtracted.
+/// `noise_floor` is the distance two noisy copies of the same content
+/// are expected to show by chance, so a genuine match isn't penalised
+/// for the noise it carries. A candidate is admitted only when what's
+/// left is at most `tau_admit`, which is the same threshold as `red[0]
+/// <= noise_floor + tau_admit` on the raw distance. The floored value
+/// is never clamped to zero before ranking. Subtracting a constant
+/// from every candidate shifts them all by the same amount and does
+/// not change their relative order, so the top-K selection below stays
+/// a genuine similarity ranking even when `noise_floor` is large enough
+/// to push most candidates' floored distance negative.
 ///
 /// Each thread contributes its own pixel's squared difference, and a
 /// tree reduction over shared memory folds the 64 contributions into one
@@ -167,10 +173,7 @@ pub fn collab_group_spatial<N: Size>(
             }
 
             if tid == 0u32 {
-                let mut d = red[0] - noise_floor;
-                if d < 0.0f32 {
-                    d = 0.0f32;
-                }
+                let d = red[0] - noise_floor;
                 if d <= tau_admit {
                     let packed = pack_pos(cx, cy);
                     let cur_found = found[0];

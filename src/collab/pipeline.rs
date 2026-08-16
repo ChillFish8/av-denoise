@@ -6,6 +6,7 @@ use crate::collab::kernels::aggregate::collab_aggregate;
 use crate::collab::kernels::filter_ht::collab_filter_ht;
 use crate::collab::kernels::filter_wiener::collab_filter_wiener;
 use crate::collab::kernels::group::collab_group_spatial;
+use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{CollabParams, PATCH_AREA, PATCH_SIZE};
 use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode};
 
@@ -60,6 +61,7 @@ pub struct CollabPipeline<R: Runtime> {
     group_weight: Handle,
     pilot: Handle,
     sigma_buf: Handle,
+    dct_profile_buf: Handle,
 }
 
 impl<R: Runtime> CollabPipeline<R> {
@@ -98,6 +100,11 @@ impl<R: Runtime> CollabPipeline<R> {
         let group_weight = client.empty(refs * size_of::<f32>());
         let pilot = client.empty(frame_len * size_of::<f32>());
         let sigma_buf = client.create_from_slice(f32::as_bytes(&vec![0.0f32; stored_ch]));
+        // The profile is purely spatial, derived only from `params.rho`,
+        // so it never changes across frames and is built once here
+        // rather than every `run_two_stage` call the way `sigma_buf`
+        // (which depends on the per-frame `sigmas` argument) is.
+        let dct_profile_buf = client.create_from_slice(f32::as_bytes(&dct_noise_profile(params.rho)));
 
         Ok(Self {
             client: client.clone(),
@@ -111,6 +118,7 @@ impl<R: Runtime> CollabPipeline<R> {
             group_weight,
             pilot,
             sigma_buf,
+            dct_profile_buf,
         })
     }
 
@@ -227,6 +235,7 @@ impl<R: Runtime> CollabPipeline<R> {
                 ArrayArg::from_raw_parts(self.group_weight.clone(), refs),
                 0u32,
                 ArrayArg::from_raw_parts(self.sigma_buf.clone(), stored_ch),
+                ArrayArg::from_raw_parts(self.dct_profile_buf.clone(), 8),
                 self.params.lambda_ht,
                 false,
                 width,
@@ -289,6 +298,7 @@ impl<R: Runtime> CollabPipeline<R> {
                 0u32,
                 0u32,
                 ArrayArg::from_raw_parts(self.sigma_buf.clone(), stored_ch),
+                ArrayArg::from_raw_parts(self.dct_profile_buf.clone(), 8),
                 false,
                 width,
                 height,

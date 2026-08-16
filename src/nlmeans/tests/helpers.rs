@@ -159,6 +159,57 @@ pub(super) fn correlated_noisy_frame(w: u32, h: u32, base: f32, sigma_pre: f32, 
     out
 }
 
+/// Builds grain correlated the same way [`correlated_noisy_frame`] does,
+/// with a tunable horizontal blur tap `a` (kernel `[a, 1 - 2a, a]`)
+/// instead of that function's fixed `0.25`.
+///
+/// For taps `(a, b, a)` applied to unit-variance white noise, the
+/// lag-1 correlation along x works out to `2*a*b / (2*a^2 + b^2)`.
+/// `a = 0.25` reduces to `correlated_noisy_frame`'s two thirds; `a =
+/// 0.125` gives a predicted correlation of about `0.316`, an
+/// intermediate value between the uncorrelated and two-thirds cases.
+/// Both are confirmed empirically, not just derived, in
+/// `residual_correlation.rs`.
+pub(super) fn correlated_noisy_frame_with_tap(
+    w: u32,
+    h: u32,
+    base: f32,
+    sigma_pre: f32,
+    seed: u32,
+    a: f32,
+) -> Vec<f32> {
+    let b = 1.0 - 2.0 * a;
+    let unit_std = (1.0f32 / 3.0f32).sqrt();
+    let mut raw = vec![0.0f32; (w * h) as usize];
+    for idx in 0..(w * h) {
+        let mut sum = 0.0f32;
+        for k in 0..4u32 {
+            let mut hash = (idx * 4 + k)
+                .wrapping_mul(2654435761)
+                .wrapping_add(seed.wrapping_mul(0x9E37_79B9).wrapping_add(k));
+            hash ^= hash >> 15;
+            hash = hash.wrapping_mul(0x85EB_CA6B);
+            hash ^= hash >> 13;
+            sum += (hash as f32 / u32::MAX as f32) - 0.5;
+        }
+        raw[idx as usize] = (sum / unit_std) * sigma_pre;
+    }
+
+    let mut out = vec![0.0f32; raw.len()];
+    for y in 0..h {
+        for x in 0..w {
+            let xl = x.saturating_sub(1);
+            let xr = (x + 1).min(w - 1);
+            let l = raw[(y * w + xl) as usize];
+            let c = raw[(y * w + x) as usize];
+            let r = raw[(y * w + xr) as usize];
+            let blurred = a * l + b * c + a * r;
+            out[(y * w + x) as usize] = (base + blurred).clamp(0.0, 1.0);
+        }
+    }
+    out
+}
+
 /// A deterministic frame with real spatial structure at more than one
 /// scale, rather than a flat field or a smooth gradient.
 ///

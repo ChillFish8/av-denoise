@@ -213,6 +213,31 @@ pub struct NlmDenoiser<R: Runtime> {
     ///
     /// It is inert under the same condition as `noise_estimator`.
     pub(super) noise_estimator_low: NoiseEstimator,
+    /// Smooths the low chain's raw per-frame estimate a second time,
+    /// built the same way `noise_estimator_low` is except the temporal
+    /// reading never passes through `correlation_factor`.
+    ///
+    /// A consumer that squares this sigma into a shrinkage threshold
+    /// pays for any over-read twice over, so it can read this estimator
+    /// instead of `noise_estimator_low` to get the temporal reading on
+    /// its own, without a second correction stacked on top of it.
+    ///
+    /// It is inert under the same condition as `noise_estimator`.
+    pub(super) noise_estimator_low_unboosted: NoiseEstimator,
+    /// Smooths the temporal reading on its own, with no maximum taken
+    /// against an Immerkær spatial reading and no correlation boost.
+    ///
+    /// It only updates on a fold that has a temporal sample trustworthy
+    /// enough for `aggregate_temporal_noise_stats` to produce one. A fold
+    /// with no such sample, whether because the temporal radius is zero
+    /// or because too little of the frame held still, leaves this
+    /// estimator exactly where it was. `current_sigmas_temporal_only`
+    /// treats "never updated" as "no trustworthy reading has arrived
+    /// yet" and falls back to `noise_estimator_low_unboosted` for that
+    /// case.
+    ///
+    /// It is inert under the same condition as `noise_estimator`.
+    pub(super) noise_estimator_temporal_only: NoiseEstimator,
 
     /// The motion-compensation geometry, present while motion
     /// compensation is active.
@@ -544,6 +569,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             temporal_stats_buf,
             noise_estimator: NoiseEstimator::default(),
             noise_estimator_low: NoiseEstimator::default(),
+            noise_estimator_low_unboosted: NoiseEstimator::default(),
+            noise_estimator_temporal_only: NoiseEstimator::default(),
             mc_ctx,
             compensated_input_buf,
             compensated_reference_buf,
@@ -1003,7 +1030,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// [`Self::update_noise_estimate`] both call this. They differ only
     /// in how they obtain the readings and which slot they pass.
     ///
-    /// # The two chains
+    /// # The estimator chains
     ///
     /// Each chain starts from an Immerkær reading and takes the larger
     /// of that and a temporal-residual reading, when one is available.
@@ -1026,6 +1053,25 @@ impl<R: Runtime> NlmDenoiser<R> {
     ///
     /// The strength and the confidence floor stay on the median chain,
     /// because that is what the dark-footage calibration validated.
+    ///
+    /// A third estimator, `noise_estimator_low_unboosted`, folds the
+    /// same lower-quartile temporal reading as the low chain but skips
+    /// the correlation boost described below. It exists for a consumer
+    /// that squares its sigma into a threshold, where a boost meant to
+    /// offset a spatial estimator's blind spot on correlated grain would
+    /// otherwise be applied a second time to a temporal reading that
+    /// already tracks that grain directly.
+    ///
+    /// A fourth estimator, `noise_estimator_temporal_only`, folds the
+    /// temporal reading by itself, with neither the maximum against the
+    /// Immerkær spatial reading nor the correlation boost. It exists for
+    /// the same squaring consumer, for a stronger reason than the boost
+    /// alone: a spatial mask reads regularly repeating texture the same
+    /// way it reads noise, and taking the maximum against it lets that
+    /// misreading through no matter how accurate the temporal side is.
+    /// This estimator only folds a new value on a fold whose temporal
+    /// sample was trustworthy enough for `aggregate_temporal_noise_stats`
+    /// to produce, and otherwise keeps whatever it last held.
     ///
     /// # Grain correlation
     ///
@@ -1054,13 +1100,17 @@ impl<R: Runtime> NlmDenoiser<R> {
             *s = sigma_from_abs_sum(data[base + c], self.width, self.height);
         }
         let mut raw_low = imm_low;
+        let mut raw_low_unboosted = imm_low;
+        let mut raw_temporal_only: Option<[f32; 3]> = None;
 
         if let Some(sample) = temporal {
             let factor = correlation_factor(sample.rho);
             for c in 0..channels {
                 raw[c] = raw[c].max(sample.sigma[c] * factor);
                 raw_low[c] = raw_low[c].max(sample.sigma_low[c] * factor);
+                raw_low_unboosted[c] = raw_low_unboosted[c].max(sample.sigma_low[c]);
             }
+            raw_temporal_only = Some(sample.sigma_low);
             self.rho_smoothed = Some(match self.rho_smoothed {
                 None => sample.rho,
                 Some(prev) => EMA_ALPHA * sample.rho + (1.0 - EMA_ALPHA) * prev,
@@ -1078,6 +1128,12 @@ impl<R: Runtime> NlmDenoiser<R> {
         for c in 0..channels {
             raw[c] *= sigma_scale;
             raw_low[c] *= sigma_scale;
+            raw_low_unboosted[c] *= sigma_scale;
+        }
+        if let Some(raw_t) = raw_temporal_only.as_mut() {
+            for s in raw_t.iter_mut().take(channels) {
+                *s *= sigma_scale;
+            }
         }
 
         let updated = self.noise_estimator.update(&raw[..channels]);
@@ -1087,6 +1143,13 @@ impl<R: Runtime> NlmDenoiser<R> {
         let updated_low = self.noise_estimator_low.update(&raw_low[..channels]);
         let mut smoothed_low = [0.0f32; 3];
         smoothed_low[..channels].copy_from_slice(updated_low);
+
+        self.noise_estimator_low_unboosted
+            .update(&raw_low_unboosted[..channels]);
+
+        if let Some(raw_t) = raw_temporal_only {
+            self.noise_estimator_temporal_only.update(&raw_t[..channels]);
+        }
 
         let eff = sigma_eff(&smoothed[..channels], self.params.channels);
         self.h2_inv_norm = self.params.h2_inv_norm_with(Some(eff));
@@ -1311,6 +1374,96 @@ impl<R: Runtime> NlmDenoiser<R> {
             sigmas[..channels].copy_from_slice(&smoothed[..channels]);
         }
         sigmas
+    }
+
+    /// The smoothed per-channel sigma estimate from the low chain.
+    ///
+    /// This is `sigma_override` broadcast to every channel when HQ
+    /// pinned a fixed sigma, the same as [`Self::current_sigmas`]. There
+    /// is only one sigma once a fixed value is pinned, so the two chains
+    /// are indistinguishable in that case. Otherwise it is the low
+    /// chain's smoothed estimate once one has landed, and zeros before
+    /// that first estimate and on the fast path where no estimate ever
+    /// runs.
+    ///
+    /// See the "The estimator chains" section of [`Self::fold_noise_estimate`]
+    /// for why a consumer would want this instead of
+    /// [`Self::current_sigmas`].
+    pub fn current_sigmas_low(&self) -> [f32; 3] {
+        if let Some(sigma) = self.params.hq.and_then(|hq| hq.sigma_override) {
+            return [sigma; 3];
+        }
+
+        let channels = self.params.channels.count() as usize;
+        let mut sigmas = [0.0f32; 3];
+        if let Some(smoothed) = self.noise_estimator_low.current() {
+            sigmas[..channels].copy_from_slice(&smoothed[..channels]);
+        }
+        sigmas
+    }
+
+    /// The smoothed per-channel sigma estimate from the low chain, with
+    /// the correlation boost left out of its temporal reading.
+    ///
+    /// This is `sigma_override` broadcast to every channel when HQ
+    /// pinned a fixed sigma, the same as [`Self::current_sigmas_low`].
+    /// Otherwise it is `noise_estimator_low_unboosted`'s smoothed
+    /// estimate once one has landed, and zeros before that first
+    /// estimate and on the fast path where no estimate ever runs.
+    ///
+    /// See the "The estimator chains" section of [`Self::fold_noise_estimate`]
+    /// for why a consumer would want this instead of
+    /// [`Self::current_sigmas_low`].
+    pub fn current_sigmas_low_unboosted(&self) -> [f32; 3] {
+        if let Some(sigma) = self.params.hq.and_then(|hq| hq.sigma_override) {
+            return [sigma; 3];
+        }
+
+        let channels = self.params.channels.count() as usize;
+        let mut sigmas = [0.0f32; 3];
+        if let Some(smoothed) = self.noise_estimator_low_unboosted.current() {
+            sigmas[..channels].copy_from_slice(&smoothed[..channels]);
+        }
+        sigmas
+    }
+
+    /// The smoothed per-channel sigma estimate from the temporal reading
+    /// alone, with no maximum taken against an Immerkær spatial reading
+    /// and no correlation boost.
+    ///
+    /// This is `sigma_override` broadcast to every channel when HQ
+    /// pinned a fixed sigma, the same as the other chains. Otherwise it
+    /// is `noise_estimator_temporal_only`'s smoothed estimate, once a
+    /// fold has arrived with a temporal sample trustworthy enough for
+    /// `aggregate_temporal_noise_stats` to produce one.
+    ///
+    /// Before that first trustworthy reading, this falls back to
+    /// [`Self::current_sigmas_low_unboosted`] instead of reading zero,
+    /// which would under-filter. Two situations reach that fallback: a
+    /// temporal radius of zero, where no temporal sample ever exists
+    /// because there is no neighbouring frame to difference against, and
+    /// any push where too little of the frame held still for
+    /// `aggregate_temporal_noise_stats` to trust its own reading. Once a
+    /// trustworthy reading has landed the smoothed estimate keeps going
+    /// on later folds that individually lack one, the same way the other
+    /// chains keep going between folds.
+    ///
+    /// See the "The estimator chains" section of [`Self::fold_noise_estimate`]
+    /// for why a consumer would want this instead of
+    /// [`Self::current_sigmas_low_unboosted`].
+    pub fn current_sigmas_temporal_only(&self) -> [f32; 3] {
+        if let Some(sigma) = self.params.hq.and_then(|hq| hq.sigma_override) {
+            return [sigma; 3];
+        }
+
+        let channels = self.params.channels.count() as usize;
+        if let Some(smoothed) = self.noise_estimator_temporal_only.current() {
+            let mut sigmas = [0.0f32; 3];
+            sigmas[..channels].copy_from_slice(&smoothed[..channels]);
+            return sigmas;
+        }
+
+        self.current_sigmas_low_unboosted()
     }
 
     /// Refreshes the derived filter parameters from the centre slot's
@@ -1560,6 +1713,8 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.real_pushes = 0;
         self.noise_estimator.reset();
         self.noise_estimator_low.reset();
+        self.noise_estimator_low_unboosted.reset();
+        self.noise_estimator_temporal_only.reset();
         self.rho_smoothed = None;
     }
 

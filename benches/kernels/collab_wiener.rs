@@ -1,6 +1,7 @@
 use av_denoise::collab::geometry::{filtered_buf_len, member_buf_len, ref_count, refs_along};
 use av_denoise::collab::kernels::filter_wiener::collab_filter_wiener;
 use av_denoise::collab::kernels::group::collab_group_spatial;
+use av_denoise::collab::kernels::transforms::dct_noise_profile;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -37,6 +38,7 @@ pub struct CollabWienerInput {
     pub filtered: Handle,
     pub group_weight: Handle,
     pub sigma: Handle,
+    pub dct_profile: Handle,
 }
 
 impl<R: Runtime> Benchmark for CollabWienerBench<R> {
@@ -87,6 +89,9 @@ impl<R: Runtime> Benchmark for CollabWienerBench<R> {
         let filtered = self.client.empty(filt_len * size_of::<f32>());
         let group_weight = self.client.empty(refs * size_of::<f32>());
         let sigma = self.client.create_from_slice(f32::as_bytes(&[SIGMA]));
+        let dct_profile = self
+            .client
+            .create_from_slice(f32::as_bytes(&dct_noise_profile(0.0)));
 
         CollabWienerInput {
             noisy,
@@ -97,6 +102,7 @@ impl<R: Runtime> Benchmark for CollabWienerBench<R> {
             filtered,
             group_weight,
             sigma,
+            dct_profile,
         }
     }
 
@@ -127,6 +133,7 @@ impl<R: Runtime> Benchmark for CollabWienerBench<R> {
                 0u32,
                 0u32,
                 ArrayArg::from_raw_parts(args.sigma.clone(), 1),
+                ArrayArg::from_raw_parts(args.dct_profile.clone(), 8),
                 false,
                 W,
                 H,

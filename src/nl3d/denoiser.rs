@@ -64,7 +64,7 @@ impl Default for Nl3dParams {
 /// between the two.
 pub struct Nl3dDenoiser<R: Runtime> {
     client: ComputeClient<R>,
-    front: NlmDenoiser<R>,
+    pub(super) front: NlmDenoiser<R>,
     collab: CollabPipeline<R>,
     /// The collaborative stage's own two output buffers, alternated the
     /// same way `NlmDenoiser`'s output ring is, so one frame's
@@ -75,7 +75,7 @@ pub struct Nl3dDenoiser<R: Runtime> {
     width: u32,
     height: u32,
     channels: ChannelMode,
-    residual_sigma_scale: f32,
+    pub(super) residual_sigma_scale: f32,
     /// The residual ratio measured on the previous frame, reused for
     /// this frame's sigma. `None` only before the first frame has ever
     /// been measured.
@@ -95,6 +95,16 @@ pub struct Nl3dDenoiser<R: Runtime> {
     /// behind it, so the read lands on already-finished work instead of
     /// stalling the queue right behind the dispatch that produced it.
     pending_ratio: Option<PendingResidualRatio>,
+    /// The exact per-channel sigma most recently handed to the
+    /// collaborative stage, kept only so tests can pin which of the
+    /// front end's two noise chains it came from.
+    #[cfg(test)]
+    pub(super) last_collab_sigmas: Vec<f32>,
+    /// The residual ratio used to build `last_collab_sigmas`, kept
+    /// alongside it so a test can reconstruct the exact formula and
+    /// confirm which base sigma fed it.
+    #[cfg(test)]
+    pub(super) last_collab_ratio: f32,
 }
 
 impl<R: Runtime> Nl3dDenoiser<R> {
@@ -159,6 +169,26 @@ impl<R: Runtime> Nl3dDenoiser<R> {
         params.nlm.track_weight_sq = true;
         params.nlm.validate()?;
 
+        // `params.collab.rho` is left exactly as the caller set it,
+        // which defaults to `CollabParams::default`'s white-noise `0.0`.
+        // An earlier version of this constructor forced `rho` to a
+        // measured correlation table keyed by search radius
+        // (`rho::rho_window`), on the theory that the collaborative
+        // stage's real input, the front end's residual, is spatially
+        // correlated rather than white. Measured against a clean
+        // reference with the high-frequency energy ratio, that shaping
+        // made both stages under-shrink high-frequency coefficients
+        // enough to leave visibly more noise behind (the ratio moved
+        // from 0.85-1.05 to 1.19-2.05 on real footage) while also
+        // scoring worse on XPSNR and SSIM than shaping left off, at
+        // every noise level and every `residual_sigma_scale` tested. No
+        // configuration of the shaped profile recovered the plain
+        // white-noise assumption's quality, so it is no longer applied
+        // by default. `rho::rho_window` and the DCT noise-shaping
+        // machinery in `collab::kernels::transforms` are kept, since a
+        // caller can still opt in through `CollabParams.rho` directly,
+        // but nl3d itself no longer reaches for them on its own.
+
         let front = NlmDenoiser::new(client, params.nlm.clone(), width, height);
         let collab = CollabPipeline::new(client, params.collab, width, height)?;
 
@@ -178,6 +208,10 @@ impl<R: Runtime> Nl3dDenoiser<R> {
             residual_sigma_scale: params.residual_sigma_scale,
             last_ratio: None,
             pending_ratio: None,
+            #[cfg(test)]
+            last_collab_sigmas: Vec::new(),
+            #[cfg(test)]
+            last_collab_ratio: 0.0,
         })
     }
 
@@ -274,21 +308,55 @@ impl<R: Runtime> Nl3dDenoiser<R> {
     /// The correct value is the original sigma scaled down by how much
     /// noise the front end actually removed. `resolve_ratio` supplies
     /// exactly that fraction, measured from whatever the front end's own
-    /// last pass left in its accumulators. `current_sigmas` gives the
-    /// original per-channel estimate those accumulators were built from.
-    /// Multiplying the two together, per channel, gives the sigma the
-    /// residual noise actually has. `residual_sigma_scale` is then
-    /// applied last, a further calibratable multiplier on top of that
-    /// analytic value, for tuning without touching either stage's own
-    /// parameters.
+    /// last pass left in its accumulators.
+    /// `current_sigmas_temporal_only` gives the original per-channel
+    /// estimate those accumulators were built from. Multiplying the two
+    /// together, per channel, gives the sigma the residual noise
+    /// actually has. `residual_sigma_scale` is then applied last, a
+    /// further calibratable multiplier on top of that analytic value,
+    /// for tuning without touching either stage's own parameters.
+    ///
+    /// This reads the front end's temporal reading on its own, not the
+    /// maximum it takes against a spatial Immerkær reading for the front
+    /// end's own filtering strength. The collaborative kernels square
+    /// this sigma into a per-coefficient shrinkage threshold, so an
+    /// over-read is squared too and removes real texture along with the
+    /// noise. A spatial reading built from one frame cannot tell fine,
+    /// regularly repeating texture apart from noise, so on content like
+    /// brick coursing it reads the texture as if it were noise, and
+    /// squaring that reading into the threshold destroys the texture
+    /// along with whatever noise is actually there. Differencing a
+    /// static block against its neighbour in the next frame has no such
+    /// blind spot: repeating texture is identical from one frame to the
+    /// next and subtracts away in the difference, leaving only the noise
+    /// genuinely present. The front end's own strength and confidence
+    /// floor still use the median chain, unchanged, since that is what
+    /// its own calibration assumes.
+    ///
+    /// The temporal reading does not always exist. At a temporal radius
+    /// of zero there is no neighbouring frame to difference against, and
+    /// on any push where too little of the frame held still,
+    /// `aggregate_temporal_noise_stats` declines to produce a sample at
+    /// all rather than trust a reading dominated by motion.
+    /// `current_sigmas_temporal_only` falls back to
+    /// `current_sigmas_low_unboosted` in both cases, the combined
+    /// spatial-and-temporal reading this collaborative stage read before
+    /// this change, rather than falling back to zero, which would
+    /// under-filter badly.
     fn run_collab_stage(&mut self, gpu: GpuOutput) -> Result<Handle, anyhow::Error> {
         let ratio = self.resolve_ratio()?;
-        let base_sigmas = self.front.current_sigmas();
+        let base_sigmas = self.front.current_sigmas_temporal_only();
         let count = self.channels.count() as usize;
 
         let mut sigmas = vec![0.0f32; count];
         for (dst, &base) in sigmas.iter_mut().zip(base_sigmas[..count].iter()) {
             *dst = base * ratio * self.residual_sigma_scale;
+        }
+
+        #[cfg(test)]
+        {
+            self.last_collab_sigmas = sigmas.clone();
+            self.last_collab_ratio = ratio;
         }
 
         // Queue this frame's own ratio reduction while its accumulators

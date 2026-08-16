@@ -6,6 +6,7 @@ use crate::collab::geometry::{filtered_buf_len, member_buf_len, ref_count, refs_
 use crate::collab::kernels::filter_ht::collab_filter_ht;
 use crate::collab::kernels::filter_wiener::{collab_filter_wiener, wiener_shrinkage_factor};
 use crate::collab::kernels::group::collab_group_spatial;
+use crate::collab::kernels::transforms::dct_noise_profile;
 
 fn variance(data: &[f32]) -> f64 {
     let n = data.len() as f64;
@@ -88,6 +89,7 @@ fn run_wiener_raw(
     height: u32,
     k_max: u32,
     sigma: f32,
+    rho: f32,
 ) -> (Vec<f32>, Vec<f32>) {
     let refs_x = refs_along(width);
     let refs_y = refs_along(height);
@@ -97,6 +99,7 @@ fn run_wiener_raw(
     let filtered_buf = client.empty(filt_len * size_of::<f32>());
     let weight_buf = client.empty(refs * size_of::<f32>());
     let sigma_buf = client.create_from_slice(f32::as_bytes(&[sigma]));
+    let dct_profile_buf = client.create_from_slice(f32::as_bytes(&dct_noise_profile(rho)));
     let dummy = client.empty(size_of::<f32>());
 
     let grid = CubeCount::new_2d(refs_x, refs_y);
@@ -118,6 +121,7 @@ fn run_wiener_raw(
             0u32,
             0u32,
             ArrayArg::from_raw_parts(sigma_buf, 1),
+            ArrayArg::from_raw_parts(dct_profile_buf, 8),
             false,
             width,
             height,
@@ -158,6 +162,7 @@ fn run_ht_raw(
     let filtered_buf = client.empty(filt_len * size_of::<f32>());
     let weight_buf = client.empty(refs * size_of::<f32>());
     let sigma_buf = client.create_from_slice(f32::as_bytes(&[sigma]));
+    let dct_profile_buf = client.create_from_slice(f32::as_bytes(&dct_noise_profile(0.0)));
     let dummy = client.empty(size_of::<f32>());
 
     let grid = CubeCount::new_2d(refs_x, refs_y);
@@ -177,6 +182,7 @@ fn run_ht_raw(
             ArrayArg::from_raw_parts(weight_buf, refs),
             0u32,
             ArrayArg::from_raw_parts(sigma_buf, 1),
+            ArrayArg::from_raw_parts(dct_profile_buf, 8),
             lambda_ht,
             false,
             width,
@@ -219,7 +225,8 @@ fn zero_sigma_is_identity() {
     let handle = client.create_from_slice(f32::as_bytes(&frame));
     let groups = run_group_raw(&client, &handle, frame.len(), w, h, 0.0, 1e-6, 6, 8);
 
-    let (filtered, _weights) = run_wiener_raw(&client, &handle, &handle, frame.len(), &groups, w, h, 8, 0.0);
+    let (filtered, _weights) =
+        run_wiener_raw(&client, &handle, &handle, frame.len(), &groups, w, h, 8, 0.0, 0.0);
 
     let refs_x = refs_along(w);
     let ref_idx = (3 * refs_x + 3) as usize; // ref_pos(3, 32) == 12 on both axes
@@ -262,8 +269,18 @@ fn non_finite_sigma_does_not_amplify_the_output() {
     let handle = client.create_from_slice(f32::as_bytes(&frame));
     let groups = run_group_raw(&client, &handle, frame.len(), w, h, 0.0, 1e-6, 6, 8);
 
-    let (filtered, weights) =
-        run_wiener_raw(&client, &handle, &handle, frame.len(), &groups, w, h, 8, f32::NAN);
+    let (filtered, weights) = run_wiener_raw(
+        &client,
+        &handle,
+        &handle,
+        frame.len(),
+        &groups,
+        w,
+        h,
+        8,
+        f32::NAN,
+        0.0,
+    );
 
     let in_min = frame.iter().cloned().fold(f32::INFINITY, f32::min);
     let in_max = frame.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -322,6 +339,7 @@ fn flat_field_noise_crushed_harder_than_ht() {
         h,
         8,
         sigma,
+        0.0,
     );
     let ht_filtered = run_ht_raw(
         &client,
@@ -421,4 +439,86 @@ fn shrinkage_factor_stays_in_zero_one_for_every_input() {
     // A huge pilot next to an ordinary variance (index 2) is confidently
     // real signal, so it passes through close to unchanged.
     assert!(w[2] > 0.99, "a huge pilot should keep w near 1, got {}", w[2]);
+}
+
+/// `rho = 0` must leave `collab_filter_wiener`'s output bit for bit
+/// identical to a hand-built `[1.0; 8]` profile, the same regression
+/// [`super::filter_ht::dct_profile_rho_zero_matches_a_hand_built_all_ones_profile`]
+/// runs for the hard-threshold kernel. `[1.0; 8]` is the exact identity
+/// multiplier, so this stands in for "no profile logic in the kernel at
+/// all" without a second copy of the kernel to compare against.
+#[test]
+fn dct_profile_rho_zero_matches_a_hand_built_all_ones_profile() {
+    let (w, h) = (48u32, 48u32);
+    let sigma = 0.04f32;
+    let pilot_frame = vec![0.5f32; (w * h) as usize];
+    let noisy_frame = noisy_field_over(w, h, 0.5, sigma);
+
+    let client = make_client();
+    let pilot_handle = client.create_from_slice(f32::as_bytes(&pilot_frame));
+    let noisy_handle = client.create_from_slice(f32::as_bytes(&noisy_frame));
+    let groups = run_group_raw(&client, &pilot_handle, pilot_frame.len(), w, h, 0.0, 1e-6, 9, 8);
+
+    let (filtered_zero_rho, weight_zero_rho) = run_wiener_raw(
+        &client,
+        &noisy_handle,
+        &pilot_handle,
+        noisy_frame.len(),
+        &groups,
+        w,
+        h,
+        8,
+        sigma,
+        0.0,
+    );
+
+    let refs_x = refs_along(w);
+    let refs = groups.refs;
+    let filt_len = filtered_buf_len(w, h);
+    let filtered_buf = client.empty(filt_len * size_of::<f32>());
+    let weight_buf = client.empty(refs * size_of::<f32>());
+    let sigma_buf = client.create_from_slice(f32::as_bytes(&[sigma]));
+    let ones_profile_buf = client.create_from_slice(f32::as_bytes(&[1.0f32; 8]));
+    let dummy = client.empty(size_of::<f32>());
+    let grid = CubeCount::new_2d(refs_x, refs_along(h));
+    let dim = CubeDim::new_2d(8, 8);
+    unsafe {
+        collab_filter_wiener::launch_unchecked::<R>(
+            &client,
+            grid,
+            dim,
+            1usize,
+            ArrayArg::from_raw_parts(noisy_handle.clone(), noisy_frame.len()),
+            ArrayArg::from_raw_parts(pilot_handle.clone(), pilot_frame.len()),
+            ArrayArg::from_raw_parts(groups.member_pos.clone(), groups.pos_len),
+            ArrayArg::from_raw_parts(groups.member_count.clone(), refs),
+            ArrayArg::from_raw_parts(dummy, 1),
+            ArrayArg::from_raw_parts(filtered_buf.clone(), filt_len),
+            ArrayArg::from_raw_parts(weight_buf.clone(), refs),
+            0u32,
+            0u32,
+            ArrayArg::from_raw_parts(sigma_buf, 1),
+            ArrayArg::from_raw_parts(ones_profile_buf, 8),
+            false,
+            w,
+            h,
+            1u32,
+            8u32,
+            refs_x,
+        );
+    }
+    let filtered_hand_built =
+        f32::from_bytes(&client.read_one(filtered_buf).expect("filtered readback failed"))[..filt_len]
+            .to_vec();
+    let weight_hand_built =
+        f32::from_bytes(&client.read_one(weight_buf).expect("weight readback failed"))[..refs].to_vec();
+
+    assert_eq!(
+        filtered_zero_rho, filtered_hand_built,
+        "filtered output at rho=0 must be bit-for-bit identical to a hand-built all-ones profile"
+    );
+    assert_eq!(
+        weight_zero_rho, weight_hand_built,
+        "group_weight at rho=0 must be bit-for-bit identical to a hand-built all-ones profile"
+    );
 }

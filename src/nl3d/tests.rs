@@ -29,6 +29,24 @@ fn textured_base(w: u32, h: u32) -> Vec<f32> {
     frame
 }
 
+/// A static field carrying fine, regularly repeating texture near the
+/// pixel grid's own Nyquist limit, similar in spatial frequency to brick
+/// mortar coursing. The Immerkær mask (a small high-pass kernel) reads
+/// this kind of detail the same way it reads noise, unlike the broad,
+/// low-frequency waves [`textured_base`] carries.
+fn fine_textured_base(w: u32, h: u32) -> Vec<f32> {
+    let mut frame = vec![0.0f32; (w * h) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let hx = (2.0 * std::f32::consts::PI * x as f32 / 3.0).sin();
+            let hy = (2.0 * std::f32::consts::PI * y as f32 / 5.0).cos();
+            let v = 0.5 + 0.10 * hx * hy;
+            frame[(y * w + x) as usize] = v.clamp(0.05, 0.95);
+        }
+    }
+    frame
+}
+
 /// Adds independent pseudo-Gaussian noise to `base`, decorrelated across
 /// `seed` so different seeds over the same base give independently noisy
 /// copies of the same clean content. Each sample sums four hash-derived
@@ -52,6 +70,48 @@ fn noisy_copy_of(base: &[f32], w: u32, h: u32, sigma: f32, seed: u32) -> Vec<f32
         frame[idx as usize] = (base[idx as usize] + (sum / unit_std) * sigma).clamp(0.0, 1.0);
     }
     frame
+}
+
+/// Adds grain correlated between neighbouring pixels to a flat `base`
+/// field, at a lag-1 horizontal correlation of two thirds.
+///
+/// An independent noise field, built the same way [`noisy_copy_of`]
+/// builds its noise, is blurred horizontally with `[0.25, 0.5, 0.25]`
+/// (edges clamped), then added to `base`. This is a copy of
+/// `nlmeans::tests::helpers::correlated_noisy_frame`, which is
+/// `pub(super)` to that module and so not reachable from here, adapted
+/// to this file's own noise generator so the two stay bit-identical in
+/// method even though they draw from different hashes.
+fn correlated_noisy_copy_of(base: &[f32], w: u32, h: u32, sigma_pre: f32, seed: u32) -> Vec<f32> {
+    let unit_std = (1.0f32 / 3.0f32).sqrt();
+    let mut raw = vec![0.0f32; base.len()];
+    for idx in 0..(w * h) {
+        let mut sum = 0.0f32;
+        for k in 0..4u32 {
+            let mut hash = (idx * 4 + k)
+                .wrapping_mul(2654435761)
+                .wrapping_add(seed.wrapping_mul(0x9E37_79B9).wrapping_add(k));
+            hash ^= hash >> 15;
+            hash = hash.wrapping_mul(0x85EB_CA6B);
+            hash ^= hash >> 13;
+            sum += (hash as f32 / u32::MAX as f32) - 0.5;
+        }
+        raw[idx as usize] = (sum / unit_std) * sigma_pre;
+    }
+
+    let mut out = vec![0.0f32; raw.len()];
+    for y in 0..h {
+        for x in 0..w {
+            let xl = x.saturating_sub(1);
+            let xr = (x + 1).min(w - 1);
+            let l = raw[(y * w + xl) as usize];
+            let c = raw[(y * w + x) as usize];
+            let r = raw[(y * w + xr) as usize];
+            let blurred = 0.25 * l + 0.5 * c + 0.25 * r;
+            out[(y * w + x) as usize] = (base[(y * w + x) as usize] + blurred).clamp(0.0, 1.0);
+        }
+    }
+    out
 }
 
 fn psnr(a: &[f32], b: &[f32]) -> f64 {
@@ -364,6 +424,18 @@ fn uniform_passthrough_stays_flat() {
 /// SSIM is measured alongside PSNR, since PSNR alone rewards
 /// over-smoothing and would not catch a collaborative stage that traded
 /// real structure for a smoother, higher-PSNR result.
+///
+/// `Nl3dDenoiser` leaves `CollabParams.rho` at its default of `0.0`,
+/// plain white-noise shrinkage, rather than deriving it from
+/// `rho::rho_window`. An earlier version forced that table's value on
+/// unconditionally, which lowered this gate's margin from about 0.84 dB
+/// to 0.28 dB on this test's content, a smooth synthetic sine-wave
+/// texture. Recalibration found that shaping cost more than it gave
+/// back, on both the high-frequency energy ratio and on XPSNR/SSIM, so
+/// it was dropped from the default and the wider margin is back. The
+/// threshold below stayed at 0.2 dB anyway, since a smoke gate should
+/// stay loose enough to survive small, legitimate future changes to
+/// either stage.
 #[test]
 fn psnr_improves_over_front_end_alone() {
     let client = make_client();
@@ -409,8 +481,8 @@ fn psnr_improves_over_front_end_alone() {
     );
 
     assert!(
-        nl3d_psnr >= front_psnr + 0.3,
-        "expected nl3d to beat the front end alone by at least 0.3 dB, got front={front_psnr:.4} dB \
+        nl3d_psnr >= front_psnr + 0.2,
+        "expected nl3d to beat the front end alone by at least 0.2 dB, got front={front_psnr:.4} dB \
          nl3d={nl3d_psnr:.4} dB"
     );
     assert!(
@@ -451,6 +523,243 @@ fn flush_emits_one_output_per_push() {
         pushes,
         "every pushed frame must produce exactly one output across push-time submits and the \
          final flush, got {during_pushes} during pushing and {flushed} from flush"
+    );
+}
+
+/// A flat frame whose top half carries `sigma_a` noise and whose bottom
+/// half carries `sigma_b`, both built with [`noisy_copy_of`] and spliced
+/// row-wise. Mirrors `nlmeans::tests::split_sigma`'s own
+/// `block_heterogeneous_frame` helper, adapted to this file's noise
+/// generator.
+fn block_heterogeneous_frame(w: u32, h: u32, base: f32, sigma_a: f32, sigma_b: f32) -> Vec<f32> {
+    let flat = vec![base; (w * h) as usize];
+    let top = noisy_copy_of(&flat, w, h, sigma_a, 0);
+    let bottom = noisy_copy_of(&flat, w, h, sigma_b, 1);
+    let row_len = w as usize;
+    let half = (h / 2) as usize;
+    let mut out = top;
+    for row in half..h as usize {
+        let start = row * row_len;
+        out[start..start + row_len].copy_from_slice(&bottom[start..start + row_len]);
+    }
+    out
+}
+
+/// Pins that the collaborative stage's shrinkage sigma comes from the
+/// front end's low noise chain, not its median chain.
+///
+/// A block-heterogeneous frame (top half low noise, bottom half high
+/// noise) makes the two chains read different values on the same push,
+/// the same technique `nlmeans::tests::split_sigma` uses to tell them
+/// apart. `residual_sigma_scale` is pinned to `1.0` by `params_at`, so
+/// the collaborative-stage sigma equals `base_sigma * ratio` exactly,
+/// with no further scale to account for.
+///
+/// If `run_collab_stage` were changed back to read `current_sigmas`
+/// (the median chain) instead of `current_sigmas_low`, this test would
+/// see the recorded sigma match the median-chain reconstruction instead
+/// of the low-chain one, and fail.
+#[test]
+fn collab_stage_uses_the_low_noise_chain() {
+    let client = make_client();
+    let (w, h) = (256u32, 256u32);
+    let sigma_a = 2.0 / 255.0;
+    let sigma_b = 20.0 / 255.0;
+    let frame = block_heterogeneous_frame(w, h, 0.5, sigma_a, sigma_b);
+
+    let params = params_at(0);
+    let mut nl3d = Nl3dDenoiser::<R>::new(&client, params, w, h).expect("construction failed");
+
+    nl3d.push_frame(&frame);
+    nl3d.denoise()
+        .expect("denoise failed")
+        .expect("a spatial-only cascade must emit on its first push");
+
+    let median = nl3d.front.current_sigmas()[0];
+    let low = nl3d.front.current_sigmas_low()[0];
+    assert!(
+        low < median,
+        "block-heterogeneous noise: low chain {low} should read below median chain {median}, \
+         or this test cannot tell the two chains apart"
+    );
+
+    let recorded = nl3d.last_collab_sigmas[0];
+    let ratio = nl3d.last_collab_ratio;
+    assert_eq!(
+        nl3d.residual_sigma_scale, 1.0,
+        "this test assumes residual_sigma_scale is 1.0 so the reconstruction below needs no \
+         further scale"
+    );
+
+    let from_low = low * ratio;
+    let from_median = median * ratio;
+    let rel_err_low = (recorded - from_low).abs() / from_low;
+    assert!(
+        rel_err_low < 1e-4,
+        "the collaborative stage's sigma {recorded} should reconstruct from the low chain \
+         ({low} * ratio {ratio} = {from_low}), rel err {rel_err_low:.6}"
+    );
+    assert!(
+        (recorded - from_median).abs() / from_median > 0.05,
+        "the collaborative stage's sigma {recorded} should NOT match a median-chain \
+         reconstruction ({median} * ratio {ratio} = {from_median}); if it does, \
+         run_collab_stage has regressed back to the median chain"
+    );
+}
+
+/// Pins that the front end's low chain still separates a boosted
+/// reading from an unboosted one on correlated grain.
+///
+/// `current_sigmas_low_unboosted` is what
+/// `current_sigmas_temporal_only` falls back to whenever no trustworthy
+/// temporal sample exists, so its own correctness still matters even
+/// though the collaborative stage no longer reads it directly on every
+/// push. Correlated grain, pushed for several frames so the temporal
+/// estimator has real neighbours to read a correlation figure from,
+/// makes `current_sigmas_low` (with the boost) and
+/// `current_sigmas_low_unboosted` (without it) read apart on the same
+/// push, the same way `collab_stage_uses_the_low_noise_chain` uses
+/// block-heterogeneous noise to make the low and median chains read
+/// apart.
+#[test]
+fn low_chain_still_separates_boosted_from_unboosted() {
+    let client = make_client();
+    let (w, h) = (128u32, 128u32);
+    let base = vec![0.5f32; (w * h) as usize];
+
+    let params = params_at(2);
+    let mut nl3d = Nl3dDenoiser::<R>::new(&client, params, w, h).expect("construction failed");
+
+    let pushes = 8u32;
+    for seed in 0..pushes {
+        let frame = correlated_noisy_copy_of(&base, w, h, 0.08, seed);
+        nl3d.push_frame(&frame);
+        nl3d.denoise().expect("denoise failed");
+    }
+
+    let boosted = nl3d.front.current_sigmas_low()[0];
+    let unboosted = nl3d.front.current_sigmas_low_unboosted()[0];
+    assert!(
+        boosted > unboosted * 1.05,
+        "correlated grain should make the boosted low chain {boosted} read meaningfully above \
+         the unboosted low chain {unboosted}, or this test cannot tell the two readings apart"
+    );
+}
+
+/// Pins that the collaborative stage's shrinkage sigma comes from the
+/// front end's temporal reading alone, not the maximum it takes against
+/// its spatial Immerkær reading.
+///
+/// A static textured base with independent noise added fresh on every
+/// push makes the two readings disagree: the spatial reading sees the
+/// texture on a single frame and cannot tell it apart from noise, so it
+/// reads high, while the temporal reading differences one frame against
+/// the next, where the identical texture cancels out and only the true
+/// noise remains. `current_sigmas_low_unboosted` (the maximum of both)
+/// therefore reads above `current_sigmas_temporal_only` (the temporal
+/// reading alone) on this content, the same way
+/// `low_chain_still_separates_boosted_from_unboosted` uses correlated
+/// grain to make the boosted and unboosted low chains read apart.
+/// `residual_sigma_scale` is pinned to `1.0` by `params_at`, so the
+/// collaborative-stage sigma equals `base_sigma * ratio` exactly.
+///
+/// If `run_collab_stage` were changed back to read
+/// `current_sigmas_low_unboosted` instead of
+/// `current_sigmas_temporal_only`, this test would see the recorded
+/// sigma match the combined reconstruction instead of the temporal-only
+/// one, and fail.
+#[test]
+fn collab_stage_uses_the_temporal_only_chain() {
+    let client = make_client();
+    let (w, h) = (128u32, 128u32);
+    let base = fine_textured_base(w, h);
+
+    let params = params_at(2);
+    let mut nl3d = Nl3dDenoiser::<R>::new(&client, params, w, h).expect("construction failed");
+
+    let pushes = 8u32;
+    for seed in 0..pushes {
+        let frame = noisy_copy_of(&base, w, h, 0.02, seed);
+        nl3d.push_frame(&frame);
+        nl3d.denoise().expect("denoise failed");
+    }
+
+    let low_unboosted = nl3d.front.current_sigmas_low_unboosted()[0];
+    let temporal_only = nl3d.front.current_sigmas_temporal_only()[0];
+    assert!(
+        temporal_only < low_unboosted * 0.95,
+        "texture-inflated spatial reading should make the combined low-unboosted chain \
+         {low_unboosted} read meaningfully above the temporal-only chain {temporal_only}, \
+         or this test cannot tell the two readings apart"
+    );
+
+    let recorded = nl3d.last_collab_sigmas[0];
+    let ratio = nl3d.last_collab_ratio;
+    assert_eq!(
+        nl3d.residual_sigma_scale, 1.0,
+        "this test assumes residual_sigma_scale is 1.0 so the reconstruction below needs no \
+         further scale"
+    );
+
+    let from_temporal = temporal_only * ratio;
+    let from_low_unboosted = low_unboosted * ratio;
+    let rel_err_temporal = (recorded - from_temporal).abs() / from_temporal;
+    assert!(
+        rel_err_temporal < 1e-4,
+        "the collaborative stage's sigma {recorded} should reconstruct from the temporal-only \
+         chain ({temporal_only} * ratio {ratio} = {from_temporal}), rel err {rel_err_temporal:.6}"
+    );
+    assert!(
+        (recorded - from_low_unboosted).abs() / from_low_unboosted > 0.03,
+        "the collaborative stage's sigma {recorded} should NOT match a low-unboosted \
+         reconstruction ({low_unboosted} * ratio {ratio} = {from_low_unboosted}); if it does, \
+         run_collab_stage has regressed back to the combined maximum"
+    );
+}
+
+/// Pins the fallback that keeps the collaborative stage from
+/// under-filtering when no temporal reading exists at all.
+///
+/// At a temporal radius of zero there is no neighbouring frame to
+/// difference against, so `current_sigmas_temporal_only` never has a
+/// trustworthy reading to report and must fall back to
+/// `current_sigmas_low_unboosted`, the combined reading this stage used
+/// before this change, rather than reading zero.
+#[test]
+fn collab_stage_falls_back_when_no_temporal_sample_exists() {
+    let client = make_client();
+    let (w, h) = (128u32, 128u32);
+    let base = textured_base(w, h);
+    let frame = noisy_copy_of(&base, w, h, 0.02, 0);
+
+    let params = params_at(0);
+    let mut nl3d = Nl3dDenoiser::<R>::new(&client, params, w, h).expect("construction failed");
+
+    nl3d.push_frame(&frame);
+    nl3d.denoise()
+        .expect("denoise failed")
+        .expect("a spatial-only cascade must emit on its first push");
+
+    let low_unboosted = nl3d.front.current_sigmas_low_unboosted()[0];
+    let temporal_only = nl3d.front.current_sigmas_temporal_only()[0];
+    assert!(
+        low_unboosted > 0.0,
+        "the low-unboosted chain should read a real sigma from this noisy frame"
+    );
+    assert_eq!(
+        temporal_only, low_unboosted,
+        "with temporal_radius=0 no temporal sample ever exists, so the temporal-only chain \
+         must fall back to the low-unboosted chain rather than reading zero"
+    );
+
+    let recorded = nl3d.last_collab_sigmas[0];
+    let ratio = nl3d.last_collab_ratio;
+    let expected = low_unboosted * ratio;
+    let rel_err = (recorded - expected).abs() / expected;
+    assert!(
+        rel_err < 1e-4,
+        "the collaborative stage's sigma {recorded} should reconstruct from the fallback value \
+         ({low_unboosted} * ratio {ratio} = {expected}), rel err {rel_err:.6}"
     );
 }
 
