@@ -266,9 +266,9 @@ impl Default for Nl3dOptions {
 ///
 /// # Where the numbers come from
 ///
-/// The two values rest on very different evidence. Luma's is
-/// metric-driven. Chroma's is one human's visual judgement on one
-/// clip. Treat them accordingly.
+/// Both values are metric-driven now, each picked by the same
+/// worst-case criterion, and each checked against real footage
+/// afterward. Chroma's was not always, see its own section below.
 ///
 /// ## Luma, 1.9
 ///
@@ -282,28 +282,48 @@ impl Default for Nl3dOptions {
 /// threshold. See the struct-level docs on [`Nl3dOptions`] for the
 /// full sweep history this value comes from.
 ///
-/// ## Chroma, 8.0
+/// ## Chroma, 2.5
 ///
-/// Chosen by a human reviewing stills and residuals on one clip,
-/// `data/brick_source.mkv`, 53 largely static frames. A metric sweep
-/// first showed `residual_sigma_scale` has real authority over chroma
-/// once it is decoupled from luma, since luma alone had been
-/// saturating the shared value and leaving chroma barely filtered (86
-/// to 90 percent of its high-frequency content retained, against
-/// luma's 45 percent). A human then judged 8.0 to look good and to
-/// retain more apparent detail than earlier, less-filtered builds, on
-/// the theory that chroma noise had been masking that detail.
+/// This was 8.0 until it was swept properly, and 8.0 over-smoothed
+/// chroma badly. The sweep covered 1.0, 1.9, 2.5, 3.0, 4.0, 6.0, 8.0,
+/// 10.0, and 12.0 at all three noise levels, bracketing an interior
+/// peak on both sides. 2.5 holds the best worst-case chroma XPSNR, the
+/// same criterion luma's value above was picked on, and moving off 8.0
+/// is worth about 1.1 dB at noise 4 and 0.7 dB at noise 8. The
+/// whole-image SSIM agrees at every level. Luma XPSNR does not move at
+/// all across the whole sweep, so this dial reaches chroma alone.
 ///
-/// Its upper bound is evidenced directly. At 24.0 the chroma-only
-/// residual on one frame renders a character's hair, face, and hands,
-/// plus nearby sign text, as legible line art, unambiguous chroma
-/// detail loss. Its lower bound is not swept, only that 1.9 left
-/// chroma almost unfiltered.
+/// Two measurements on real footage agree, against `brick_source.mkv`
+/// and a 120-frame cut of `asterisk-war.mkv`. High-frequency chroma
+/// energy surviving rises from 0.59/0.67 to 0.83/0.88 on the first clip
+/// and from 0.68/0.81 to 0.87/0.93 on the second. Chroma magnitude lost
+/// against the source falls from -0.125 to -0.042 and from -0.021 to
+/// -0.008. The matching luma figures are identical for both values.
 ///
-/// This value has not been checked on footage with real motion. It
-/// rests on one clip and one reviewer, not a metric optimum, and
-/// should not be read as being on the same footing as luma's value
-/// above.
+/// The chroma-only residual at 16x on a brick frame is what settles it.
+/// At 8.0 that residual is structured, the brick coursing is legible in
+/// what the filter threw away, which is chroma detail rather than
+/// chroma noise. At 2.5 it is close to black. The failure mode a low
+/// value risks was checked too, at 4x saturation on the tower and 8x on
+/// a flat sky region, and neither showed chroma grain surviving.
+///
+/// # How 8.0 came to be here
+///
+/// Worth recording, because the earlier value was not arrived at
+/// carelessly. It was chosen by a human reviewing stills and residuals
+/// on `brick_source.mkv`, after a metric sweep showed this dial has
+/// real authority over chroma once decoupled from luma. Its upper bound
+/// was evidenced directly, at 24.0 the chroma residual renders hair,
+/// face, hands, and sign text as legible line art. Its lower bound was
+/// never swept. The reviewer rejected the low end on the theory that
+/// chroma noise had been masking detail, and the sweep above is what
+/// tested that theory rather than assuming it.
+///
+/// The error predates the collaborative stage's move to aggregating
+/// every group member. Re-running this sweep against the commit before
+/// that change gives the same ordering and the same gap, 44.30/44.47
+/// against 43.16/42.95 at noise 4, so full aggregation neither caused
+/// the problem nor moved the optimum.
 ///
 /// # `ChannelMode::Yuv`
 ///
@@ -313,7 +333,7 @@ impl Default for Nl3dOptions {
 pub fn nl3d_default_residual_sigma_scale(channels: ChannelMode) -> f32 {
     match channels {
         ChannelMode::Luma | ChannelMode::Yuv => 1.9,
-        ChannelMode::Chroma => 8.0,
+        ChannelMode::Chroma => 2.5,
     }
 }
 
@@ -883,10 +903,15 @@ mod options_tests {
         let chroma = nl3d_default_residual_sigma_scale(ChannelMode::Chroma);
 
         assert!((luma - 1.9).abs() < f32::EPSILON);
-        assert!((chroma - 8.0).abs() < f32::EPSILON);
+        assert!((chroma - 2.5).abs() < f32::EPSILON);
+        // Only that the two resolve apart, not by how far. The gap used
+        // to be 6.1 and is now 0.6, because chroma's value came down
+        // from 8.0 to its own swept optimum. What this pins is that the
+        // per-plane split is still live, so a future edit collapsing
+        // both planes back onto one number fails here.
         assert!(
-            (chroma - luma).abs() > 1.0,
-            "luma ({luma}) and chroma ({chroma}) must resolve to clearly different defaults"
+            (chroma - luma).abs() > f32::EPSILON,
+            "luma ({luma}) and chroma ({chroma}) must resolve to different defaults"
         );
     }
 
@@ -906,7 +931,7 @@ mod options_tests {
         let chroma = resolve_residual_sigma_scale(&opts, ChannelMode::Chroma);
 
         assert!((luma - 1.9).abs() < f32::EPSILON, "got {luma}");
-        assert!((chroma - 8.0).abs() < f32::EPSILON, "got {chroma}");
+        assert!((chroma - 2.5).abs() < f32::EPSILON, "got {chroma}");
     }
 
     #[test]

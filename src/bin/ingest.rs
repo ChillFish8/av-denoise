@@ -1147,14 +1147,14 @@ mod cli_options_tests {
 
         // ...but resolving each through the same function construction
         // uses (`nl3d_default_residual_sigma_scale`, see
-        // `src/denoiser.rs`) gives luma and chroma clearly different
-        // values, which is the whole point of a caller passing no
-        // flags at all getting both calibrated defaults.
+        // `src/denoiser.rs`) gives luma and chroma different values,
+        // which is the whole point of a caller passing no flags at all
+        // getting both calibrated defaults.
         let luma_default = av_denoise::nl3d_default_residual_sigma_scale(ChannelMode::Luma);
         let chroma_default = av_denoise::nl3d_default_residual_sigma_scale(ChannelMode::Chroma);
         assert!((luma_default - 1.9).abs() < f32::EPSILON);
-        assert!((chroma_default - 8.0).abs() < f32::EPSILON);
-        assert!((chroma_default - luma_default).abs() > 1.0);
+        assert!((chroma_default - 2.5).abs() < f32::EPSILON);
+        assert!((chroma_default - luma_default).abs() > f32::EPSILON);
     }
 }
 
