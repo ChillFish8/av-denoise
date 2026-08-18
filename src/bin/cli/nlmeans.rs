@@ -654,29 +654,44 @@ mod tests {
     /// after `nlmeans`. The `*_parses_after_the_subcommand` tests
     /// further down cover that.
     ///
-    /// Feature-gated because it names the `Vulkan` and `Cpu`
-    /// accelerator variants, which only exist when their features are
-    /// enabled.
-    #[cfg(all(feature = "vulkan", feature = "cpu"))]
+    /// The repeated `vulkan` is deliberate. What this pins is that the
+    /// comma delimiter splits the value into a list, and `Vulkan` is
+    /// the only accelerator variant a default build is guaranteed to
+    /// have, so naming it twice tests the split without depending on a
+    /// second backend feature being enabled.
+    ///
+    /// Feature-gated because it names the `Vulkan` accelerator variant,
+    /// which only exists when its feature is enabled.
+    #[cfg(feature = "vulkan")]
     #[test]
     fn accelerators_are_accepted_before_the_subcommand() {
-        let args = Args::parse_from(["av-denoise", "--accelerators", "vulkan,cpu", "nlmeans", "-i", "-"]);
+        let args = Args::parse_from([
+            "av-denoise",
+            "--accelerators",
+            "vulkan,vulkan",
+            "nlmeans",
+            "-i",
+            "-",
+        ]);
         assert_eq!(
             args.accelerators,
             vec![
                 av_denoise::accelerate::Accelerator::Vulkan,
-                av_denoise::accelerate::Accelerator::Cpu
+                av_denoise::accelerate::Accelerator::Vulkan
             ]
         );
     }
 
-    /// Gated because it names the `Cpu` accelerator variant, which
-    /// only exists when the `cpu` feature is enabled.
-    #[cfg(feature = "cpu")]
+    /// Gated because it names the `Vulkan` accelerator variant, which
+    /// only exists when the `vulkan` feature is enabled.
+    #[cfg(feature = "vulkan")]
     #[test]
     fn short_accelerators_flag_is_accepted_before_the_subcommand() {
-        let args = Args::parse_from(["av-denoise", "-A", "cpu", "nlmeans", "-i", "-"]);
-        assert_eq!(args.accelerators, vec![av_denoise::accelerate::Accelerator::Cpu]);
+        let args = Args::parse_from(["av-denoise", "-A", "vulkan", "nlmeans", "-i", "-"]);
+        assert_eq!(
+            args.accelerators,
+            vec![av_denoise::accelerate::Accelerator::Vulkan]
+        );
     }
 
     #[test]
@@ -714,19 +729,15 @@ mod tests {
     /// `denoise-file` recipe in the `Justfile` passes user flags in
     /// exactly this position.
     ///
-    /// Feature-gated because it names the `Vulkan` and `Cpu`
-    /// accelerator variants, which only exist when their features are
-    /// enabled.
-    #[cfg(all(feature = "vulkan", feature = "cpu"))]
+    /// Feature-gated because it names the `Vulkan` accelerator variant,
+    /// which only exists when its feature is enabled.
+    #[cfg(feature = "vulkan")]
     #[test]
     fn accelerators_parses_after_the_subcommand() {
-        let (args, _) = parse(&["--accelerators", "vulkan,cpu"]);
+        let (args, _) = parse(&["--accelerators", "vulkan"]);
         assert_eq!(
             args.accelerators,
-            vec![
-                av_denoise::accelerate::Accelerator::Vulkan,
-                av_denoise::accelerate::Accelerator::Cpu
-            ]
+            vec![av_denoise::accelerate::Accelerator::Vulkan]
         );
     }
 

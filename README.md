@@ -162,7 +162,8 @@ makes things worse.
 - **`--search-radius` and `--patch-radius`** reshape the whole matching problem, and every other
   default is tuned around them. Cost grows quadratically with the search radius, and the presets
   already adjust these parameters based on exhaustive tuning.
-- **The `cpu` accelerator** is for testing the pipeline, not for real encodes.
+- **`--device cpu`** selects a software device where the platform offers one, such as lavapipe
+  under Vulkan. It is for testing the pipeline, not for real encodes.
 
 ## Benchmarks
 
@@ -227,9 +228,11 @@ The project supports the following accelerators/gpus:
 - **Intel GPUs** (via the `vulkan` feature)
 - **Nvidia GPUs** (via the `cuda` or `vulkan` features)
 - **Apple Silicon** (via the `metal` feature)
-- **CPU** (via the `cpu` feature)
-  * _WARNING! The CPU backend within CubeCL is still very new, and is not as optimised as a manually written kernel.<br/>
-    As such, I do not recommend using this backend outside of testing._
+
+There is no software backend. The collaborative filter aggregates its filtered patches through
+atomic floating-point adds, and CubeCL's CPU runtime does not implement atomics. A software
+*device* is still reachable with `--device cpu` where the platform provides one, such as lavapipe
+under Vulkan.
 
 ### Notes about the JIT
 
@@ -244,7 +247,6 @@ This primarily has the following impacts:
 
 - The `rocm` backend requires the AMD HIP compiler and headers, typically vendored via the ROCm dev SDK.
 - The `cuda` backend requires the NVIDIA CUDA headers and nvcc, typically vendored via the CUDA devel toolkit.
-- The `cpu` backend should not require any special dependencies directly, as it should already be vendored.
 - The `vulkan` and `metal` backends should "just work" on non-containerised hosts. If you are building for
   docker, then the vulkan backend requires `vulkan-icd-loader` and then the relevant GPU specific driver,
   i.e. `vulkan-radeon` or `vulkan-intel`.
@@ -455,7 +457,7 @@ Options:
 
           The first backend that initialises is used. If none work the program exits with an error.
 
-          The list is comma-separated, for example `vulkan,cpu`.
+          The list is comma-separated, for example `cuda,vulkan`.
 
           [default: vulkan]
 
@@ -472,7 +474,7 @@ Options:
 
           `virtual[:N]` picks the Nth virtual GPU. Vulkan only.
 
-          `cpu` uses the software backend.
+          `cpu` picks a software device where the platform offers one, such as lavapipe under Vulkan. It is for testing the pipeline, not for real encodes.
 
           [default: default]
 
@@ -548,7 +550,7 @@ Options:
 
           The first backend that initialises is used. If none work the program exits with an error.
 
-          The list is comma-separated, for example `vulkan,cpu`.
+          The list is comma-separated, for example `cuda,vulkan`.
 
           [default: vulkan]
 
@@ -574,7 +576,7 @@ Options:
 
           `virtual[:N]` picks the Nth virtual GPU. Vulkan only.
 
-          `cpu` uses the software backend.
+          `cpu` picks a software device where the platform offers one, such as lavapipe under Vulkan. It is for testing the pipeline, not for real encodes.
 
           [default: default]
 

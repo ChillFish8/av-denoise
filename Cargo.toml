@@ -69,7 +69,6 @@ vulkan = ["cubecl/vulkan"]
 metal = ["cubecl/metal"]
 cuda = ["cubecl/cuda"]
 rocm = ["cubecl/hip"]
-cpu = ["cubecl/cpu"]
 binary = [
     "clap",
     "mimalloc",

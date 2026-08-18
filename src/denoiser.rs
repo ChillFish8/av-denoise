@@ -535,8 +535,6 @@ enum Backend {
     Rocm(Engine<cubecl::hip::HipRuntime>),
     #[cfg(any(feature = "vulkan", feature = "metal"))]
     Wgpu(Engine<cubecl::wgpu::WgpuRuntime>),
-    #[cfg(feature = "cpu")]
-    Cpu(Engine<cubecl::cpu::CpuRuntime>),
 }
 
 enum BackendPending {
@@ -546,8 +544,6 @@ enum BackendPending {
     Rocm(Pending<cubecl::hip::HipRuntime>),
     #[cfg(any(feature = "vulkan", feature = "metal"))]
     Wgpu(Pending<cubecl::wgpu::WgpuRuntime>),
-    #[cfg(feature = "cpu")]
-    Cpu(Pending<cubecl::cpu::CpuRuntime>),
 }
 
 impl BackendPending {
@@ -559,8 +555,6 @@ impl BackendPending {
             Self::Rocm(p) => p.wait(),
             #[cfg(any(feature = "vulkan", feature = "metal"))]
             Self::Wgpu(p) => p.wait(),
-            #[cfg(feature = "cpu")]
-            Self::Cpu(p) => p.wait(),
         }
     }
 }
@@ -749,13 +743,6 @@ impl Denoiser {
                     self.pending.push_back(BackendPending::Wgpu(p));
                 }
             },
-            #[cfg(feature = "cpu")]
-            Backend::Cpu(d) => {
-                d.push_frame(frame);
-                if let Some(p) = d.denoise_submit()? {
-                    self.pending.push_back(BackendPending::Cpu(p));
-                }
-            },
         }
 
         self.frames_pushed = self.frames_pushed.saturating_add(1);
@@ -825,12 +812,6 @@ impl Denoiser {
                 v.extend_from_slice(slice);
                 sink(v);
             })?,
-            #[cfg(feature = "cpu")]
-            Backend::Cpu(d) => d.flush(|slice| {
-                let mut v = Vec::with_capacity(scratch_cap);
-                v.extend_from_slice(slice);
-                sink(v);
-            })?,
         }
 
         // The backend has already reset its own stream indices. Reset
@@ -880,14 +861,6 @@ fn build_backend(
             let dev = device.to_wgpu()?;
             let client = <cubecl::wgpu::WgpuRuntime as Runtime>::client(&dev);
             Ok(Backend::Wgpu(build_engine(
-                &client, algorithm, params, width, height,
-            )?))
-        },
-        #[cfg(feature = "cpu")]
-        Accelerator::Cpu => {
-            let dev = device.to_cpu()?;
-            let client = <cubecl::cpu::CpuRuntime as Runtime>::client(&dev);
-            Ok(Backend::Cpu(build_engine(
                 &client, algorithm, params, width, height,
             )?))
         },
@@ -1536,26 +1509,5 @@ mod tests {
                 out.len()
             );
         }
-    }
-}
-
-// A smoke test that catches outright breakage on the CPU backend.
-#[cfg(all(test, feature = "cpu"))]
-mod cpu_smoke_tests {
-    use super::*;
-
-    #[test]
-    fn cpu_backend_denoises_a_frame() {
-        let opts = DenoiserOptions::builder()
-            .channel_mode(ChannelMode::Luma)
-            .mode(DenoisingMode::Spacial)
-            .build();
-        let mut d = Denoiser::create(&[Accelerator::Cpu], &Device::Default, 16, 16, opts)
-            .expect("denoiser construction failed");
-        assert_eq!(d.selected_accelerator(), Accelerator::Cpu);
-
-        d.push_frame(&vec![0.5f32; 16 * 16]).expect("push failed");
-        let out = d.recv_frame().expect("recv failed").expect("no frame");
-        assert_eq!(out.len(), 16 * 16);
     }
 }

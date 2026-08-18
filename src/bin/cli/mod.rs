@@ -97,7 +97,7 @@ pub struct Args {
     /// The first backend that initialises is used. If none work the
     /// program exits with an error.
     ///
-    /// The list is comma-separated, for example `vulkan,cpu`.
+    /// The list is comma-separated, for example `cuda,vulkan`.
     #[arg(short = 'A', long, value_delimiter = ',', default_values_t = get_default_accelerators(), global = true)]
     pub accelerators: Vec<Accelerator>,
 
@@ -112,7 +112,9 @@ pub struct Args {
     ///
     /// `virtual[:N]` picks the Nth virtual GPU. Vulkan only.
     ///
-    /// `cpu` uses the software backend.
+    /// `cpu` picks a software device where the platform offers one,
+    /// such as lavapipe under Vulkan. It is for testing the pipeline,
+    /// not for real encodes.
     #[arg(short, long, default_value = "default", global = true)]
     pub device: Device,
 

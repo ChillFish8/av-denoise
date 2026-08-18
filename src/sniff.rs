@@ -43,8 +43,6 @@ pub fn sniff_best_accelerator(enable: &[Accelerator]) -> Option<Accelerator> {
             Accelerator::Vulkan => probe_runtime::<cubecl::wgpu::WgpuRuntime>("VULKAN"),
             #[cfg(feature = "metal")]
             Accelerator::Metal => probe_runtime::<cubecl::wgpu::WgpuRuntime>("METAL"),
-            #[cfg(feature = "cpu")]
-            Accelerator::Cpu => probe_runtime::<cubecl::cpu::CpuRuntime>("CPU"),
             // docs.rs widens the `Accelerator` variants behind
             // `cfg(docsrs)` so they all appear in the rendered enum, even
             // when the matching backend feature is off. This arm keeps

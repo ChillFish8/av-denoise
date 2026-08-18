@@ -21,8 +21,14 @@
 //! ```
 //!
 //! A list can also be written out by hand, such as
-//! `vec![Accelerator::Vulkan, Accelerator::Cpu]` to prefer the GPU and
-//! fall back to software rendering.
+//! `vec![Accelerator::Cuda, Accelerator::Vulkan]` to prefer the vendor
+//! backend and fall back to the portable one.
+//!
+//! Every accelerator here runs kernels on a GPU. There is no software
+//! backend, because the collaborative filter aggregates through atomic
+//! floating-point adds and cubecl's CPU runtime does not implement
+//! atomics. [`crate::Device::Cpu`] still selects a software *device*
+//! where the platform offers one, such as lavapipe under Vulkan.
 
 use strum_macros::{Display, EnumIter, EnumString, IntoStaticStr};
 
@@ -55,10 +61,6 @@ pub enum Accelerator {
     ///
     /// This is the only option on Apple Silicon.
     Metal,
-    #[cfg(any(feature = "cpu", docsrs))]
-    #[cfg_attr(docsrs, doc(cfg(feature = "cpu")))]
-    /// Runs kernels through the CPU JIT compiler.
-    Cpu,
 }
 
 /// Returns every accelerator this build enables, in the order to try

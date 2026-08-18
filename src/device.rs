@@ -120,18 +120,6 @@ impl Device {
     }
 }
 
-#[cfg(feature = "cpu")]
-impl Device {
-    pub fn to_cpu(&self) -> Result<cubecl::cpu::CpuDevice, anyhow::Error> {
-        match self {
-            Device::Default | Device::Cpu => Ok(cubecl::cpu::CpuDevice),
-            other => Err(anyhow::anyhow!(
-                "device {other:?} is not supported on the CPU runtime, use `default` or `cpu`"
-            )),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,13 +167,5 @@ mod tests {
     #[test]
     fn default_is_default_variant() {
         assert_eq!(Device::default(), Device::Default);
-    }
-
-    #[cfg(feature = "cpu")]
-    #[test]
-    fn cpu_runtime_rejects_gpu_variants() {
-        assert!(Device::Default.to_cpu().is_ok());
-        assert!(Device::Cpu.to_cpu().is_ok());
-        assert!(Device::Discrete { index: 0 }.to_cpu().is_err());
     }
 }

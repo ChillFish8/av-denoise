@@ -14,12 +14,23 @@ const K_MAX: u32 = 8;
 // items and `CollabParams`'s fields alone don't give a ready-to-use
 // noise floor or tau. `mc_confidence.rs` duplicates `THSAD_PIXEL` for
 // the same reason.
-const NOISE_FLOOR: f32 = 0.0;
-const TAU_ADMIT: f32 = 1e-3;
+// A floor and tau in the shape `CollabPipeline::run_two_stage` builds
+// them, rather than a token pair that admits nothing. The floor is the
+// distance two noisy copies of the same content are expected to show,
+// `2 * channel_scale * sigma^2 * PATCH_AREA` at the luma scale of 3,
+// and tau is `CollabParams::default().tau_match` times that.
+//
+// The value matters more than it looks. Admission drives the group's
+// selection rounds, so a tau that admits nothing skips most of the work
+// the kernel does in production and reports a time well under the real
+// one. This benched 35% fast when `TAU_ADMIT` was 1e-3.
+const BENCH_SIGMA: f32 = 0.02;
+const NOISE_FLOOR: f32 = 2.0 * 3.0 * BENCH_SIGMA * BENCH_SIGMA * 64.0;
+const TAU_ADMIT: f32 = 3.0 * NOISE_FLOOR;
 
 /// The spatial grouping kernel at the library's default search geometry,
-/// over a 1080p luma frame. One cube per reference patch, an 8x8 window
-/// of threads scoring every candidate in a 19x19 search window.
+/// over a 1080p luma frame. One cube per reference patch, and its 64
+/// threads score the 19x19 search window one candidate per thread.
 pub struct CollabGroupBench<R: Runtime> {
     pub client: ComputeClient<R>,
 }

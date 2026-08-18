@@ -13,8 +13,8 @@ bench *ARGS:
     cargo bench {{ARGS}}
 
 test:
-    cargo nextest run --features cpu,binary
-    cargo test --doc --features cpu,binary
+    cargo nextest run --features vulkan,binary
+    cargo test --doc --features vulkan,binary
     cargo check
 
 compare-perf *ARGS:
@@ -97,7 +97,7 @@ docker-test-run image="localhost/av-denoise:latest" input="data/test.mkv" output
         --ulimit memlock=-1 --ulimit stack=67108864 --ipc=host \
         -v "${input_dir}:/in:ro" \
         "{{image}}" \
-        --accelerators vulkan,cpu \
+        --accelerators vulkan \
         nlmeans {{ARGS}} --input "/in/${input_name}" \
         | ffmpeg -hide_banner -stats -stats_period 0.5 -loglevel info \
             -y -f yuv4mpegpipe -i - -c:v ffv1 "${output_abs}"
