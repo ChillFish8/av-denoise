@@ -1,7 +1,9 @@
 use cubecl::prelude::*;
 
+use crate::collab::kernels::aggregate::scatter_patch;
 use crate::collab::kernels::filter_ht::variance_ladder;
 use crate::collab::kernels::transforms::{
+    RECIPROCAL_FLOOR,
     dct8_line_fwd,
     dct8_line_inv,
     fill_dct8_basis,
@@ -153,17 +155,22 @@ pub fn collab_filter_wiener<N: Size>(
     member_pos: &Array<u32>,
     member_count: &Array<u32>,
     member_sig2: &Array<f32>,
+    accum: &mut Array<Atomic<i32>>,
+    wsum: &mut Array<Atomic<i32>>,
     filtered: &mut Array<Vector<f32, N>>,
     group_weight: &mut Array<f32>,
     noisy_frame: u32,
     pilot_frame: u32,
     sigma: &Array<f32>,
     dct_profile: &Array<f32>,
+    weight_scale: f32,
     #[comptime] use_member_sigma: bool,
+    #[comptime] emit_filtered: bool,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
     #[comptime] k_max: u32,
+    #[comptime] stored_ch: u32,
     #[comptime] refs_x: u32,
 ) {
     let local_x = UNIT_POS_X;
@@ -182,6 +189,9 @@ pub fn collab_filter_wiener<N: Size>(
     let mut noisy_stack = SharedMemory::<f32>::new(comptime!(k_max * PATCH_AREA) as usize);
     let mut scratch = SharedMemory::<f32>::new(comptime!(k_max * PATCH_AREA) as usize);
     let mut wred = SharedMemory::<f32>::new(PATCH_AREA as usize);
+    // The group's normalised weight, shared so every channel's scatter
+    // reads the one the first channel computed.
+    let mut gw = SharedMemory::<f32>::new(1usize);
 
     fill_dct8_basis(&mut basis, tid);
     sync_cube();
@@ -302,7 +312,7 @@ pub fn collab_filter_wiener<N: Size>(
         // Wiener shrinkage. Every coefficient the stack holds
         // contributes to the group weight, there is no discrete
         // retain/reject decision the way a hard threshold makes one.
-        let mut wsum = 0.0f32;
+        let mut var_sum = 0.0f32;
         let mut j = 0u32;
         while j < k_use {
             let idx = (j * PATCH_AREA + tid) as usize;
@@ -320,31 +330,16 @@ pub fn collab_filter_wiener<N: Size>(
             // coefficient is left out of `wsum` entirely rather than
             // adding a poisoned term to it.
             if !vj.is_nan() && !vj.is_inf() {
-                wsum += w * w * vj;
+                var_sum += w * w * vj;
             }
             j += 1u32;
         }
 
-        // Haar inverse, back from stack coefficients to per-member DCT
-        // coefficients, on the filtered noisy stack.
-        haar_inv_stack(&mut noisy_stack, tid, k_use);
-        sync_cube();
-
-        // Only member 0, the reference patch itself, is written out, so
-        // only its DCT coefficients need inverting back to pixels.
-        if tid < PATCH_SIZE {
-            dct8_line_inv(&basis, &noisy_stack, &mut scratch, tid * PATCH_SIZE, 1u32);
-        }
-        sync_cube();
-        if tid < PATCH_SIZE {
-            dct8_line_inv(&basis, &scratch, &mut noisy_stack, tid, PATCH_SIZE);
-        }
-        sync_cube();
-
-        out_vec[c as usize] = noisy_stack[tid as usize];
-
+        // The group weight has to be known before the scatter below, and
+        // only the first channel computes it, so the reduction runs here
+        // rather than after the inverse transforms.
         if comptime!(c == 0u32) {
-            wred[tid as usize] = wsum;
+            wred[tid as usize] = var_sum;
             sync_cube();
 
             let mut stride = 32u32;
@@ -363,12 +358,83 @@ pub fn collab_filter_wiener<N: Size>(
                 // instead of leaning on `f32::max` to discard one, so
                 // this is always finite regardless of GPU-specific NaN
                 // behaviour.
-                group_weight[ref_idx as usize] = safe_reciprocal(sum, 1e-12f32);
+                let w = safe_reciprocal(sum, RECIPROCAL_FLOOR);
+                group_weight[ref_idx as usize] = w;
+                gw[0] = w * weight_scale;
+            }
+        }
+        sync_cube();
+
+        // Haar inverse, back from stack coefficients to per-member DCT
+        // coefficients, on the filtered noisy stack.
+        haar_inv_stack(&mut noisy_stack, tid, k_use);
+        sync_cube();
+
+        // Every member of the group is written back, not just the
+        // reference patch, so every member's DCT coefficients need
+        // inverting. The row and column passes mirror the forward ones
+        // exactly, one thread per (member, line).
+        let lines = k_use * PATCH_SIZE;
+        if tid < lines {
+            let member_k = tid / PATCH_SIZE;
+            let row = tid % PATCH_SIZE;
+            dct8_line_inv(
+                &basis,
+                &noisy_stack,
+                &mut scratch,
+                member_k * PATCH_AREA + row * PATCH_SIZE,
+                1u32,
+            );
+        }
+        sync_cube();
+        if tid < lines {
+            let member_k = tid / PATCH_SIZE;
+            let col = tid % PATCH_SIZE;
+            dct8_line_inv(
+                &basis,
+                &scratch,
+                &mut noisy_stack,
+                member_k * PATCH_AREA + col,
+                PATCH_SIZE,
+            );
+        }
+        sync_cube();
+
+        out_vec[c as usize] = noisy_stack[tid as usize];
+
+        // Scatter every member back to where it came from. One thread
+        // owns one pixel of each member's patch.
+        let weight = gw[0];
+        let mut mo = 0u32;
+        while mo < k_use {
+            let packed = member_pos[(ref_idx * k_max + mo) as usize];
+            scatter_patch(
+                accum,
+                wsum,
+                noisy_stack[(mo * PATCH_AREA + tid) as usize],
+                weight,
+                packed & 0xFFFFu32,
+                packed >> 16u32,
+                tid,
+                comptime!(c == 0u32),
+                c,
+                width,
+                stored_ch,
+            );
+            mo += 1u32;
+        }
+
+        if emit_filtered {
+            let mut me = 0u32;
+            while me < k_use {
+                let slot = (ref_idx * k_max * PATCH_AREA + me * PATCH_AREA + tid) as usize;
+                let mut line = filtered[slot];
+                line[c as usize] = noisy_stack[(me * PATCH_AREA + tid) as usize];
+                filtered[slot] = line;
+                me += 1u32;
             }
         }
 
         sync_cube();
     }
-
-    filtered[(ref_idx * PATCH_AREA + tid) as usize] = out_vec;
 }

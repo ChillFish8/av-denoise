@@ -1,66 +1,172 @@
 use cubecl::prelude::*;
-use cubecl::terminate;
 
-use crate::collab::kernels::transforms::safe_reciprocal;
-use crate::collab::{PATCH_AREA, PATCH_SIZE, STEP};
+use crate::collab::kernels::transforms::RECIPROCAL_FLOOR;
+use crate::collab::{PATCH_AREA, PATCH_SIZE};
 
-/// Blends every reference patch's filtered output back onto one frame
-/// plane, weighted by how much its group agreed on it.
+/// The fixed-point scale the accumulators count in.
 ///
-/// Reference patches sit on a grid with stride `STEP` but are
-/// `PATCH_SIZE` pixels wide, so most pixels fall inside more than one
-/// reference patch. One thread owns one output pixel, finds every
-/// reference whose patch covers it, and writes the weighted mean of
-/// their filtered values there. Each covering reference contributes its
-/// filtered pixel scaled by `group_weight`, the inverse-variance weight
-/// [`crate::collab::kernels::filter_ht::collab_filter_ht`] computed for
-/// that group, so a group whose content agreed more strongly counts for
-/// more of the output.
+/// Aggregation sums one weighted value per covering patch into a shared
+/// accumulator, which means one atomic add per contribution. Floating
+/// point atomics are emulated through compare-and-swap retry loops on
+/// several GPUs and measured roughly 50 times slower than integer ones
+/// on the hardware this was developed against, so the accumulators hold
+/// fixed-point integers instead.
 ///
-/// # Finding the covering references
+/// `2^19` is chosen from three bounds. The normalised group weight lands
+/// in `[1/512, 1]` (see [`weight_scale`]), a filtered pixel is clamped to
+/// [`ACCUM_CLAMP`], and a pixel is covered by at most 392 member patches
+/// (49 reference patches within reach on the step grid, each holding at
+/// most `MAX_K` members). The largest accumulator value is therefore
+/// `392 * 1 * 5 * 2^19`, about `1.03e9`, which leaves a factor of two
+/// under `i32::MAX`. One unit is `1.9e-6`, well under the `2.4e-4` one
+/// code level of 12-bit output spans.
 ///
-/// The host-side `geometry::ref_pos` places reference `i` at `(i *
-/// STEP).min(dim - PATCH_SIZE)` on each axis, clamping the last
-/// reference so its patch never runs past the frame edge. Away from that
-/// edge, the references covering a pixel `x` form a short contiguous run
-/// computed directly from `x`, at most two indices wide because `STEP`
-/// is half of `PATCH_SIZE`. The clamp breaks that regularity at the far
-/// edge. Pulling the last reference back to stay inside the frame can
-/// leave it closer to its neighbour than `STEP` pixels, so it can cover
-/// pixels the contiguous run never reaches. This kernel always tests the
-/// clamped last index on top of that run, and skips it when the run
-/// already reached it, so a reference covering a pixel through both
-/// paths at once is never added twice.
+/// The scale cancels in `collab_normalise`, which divides one
+/// accumulator by the other, so nothing downstream has to know it.
+pub const ACCUM_SCALE: f32 = 524_288.0;
+
+/// The magnitude a single filtered value is clamped to before it enters
+/// the accumulator.
 ///
-/// Every candidate index, found either way, still has to pass the real
-/// coverage test, its clamped patch position at or before the pixel and
-/// its far edge past it, before it contributes anything. A candidate
-/// that turns out not to cover the pixel simply adds nothing.
+/// The filters shrink DCT coefficients of input already inside `[0, 1]`,
+/// so a value this large means the filter has already gone wrong. The
+/// clamp exists so that when it does, the accumulator saturates
+/// gracefully rather than overflowing `i32` and wrapping into a wildly
+/// wrong pixel. See [`ACCUM_SCALE`] for how this bound sizes the scale.
+pub const ACCUM_CLAMP: f32 = 5.0;
+
+/// The constant every group weight is multiplied by before it reaches
+/// the accumulator, so the weights land in a fixed-point-friendly band.
+///
+/// A group's weight is `1 / sum(retained coefficient variance)`. That
+/// sum is a multiple of the caller's `sigma^2`, so the weight's absolute
+/// magnitude tracks `1 / sigma^2` and spans far too wide a range for a
+/// fixed-point accumulator to hold directly.
+///
+/// Scaling every weight by the same constant is free, because
+/// aggregation computes `sum(w * x) / sum(w)` and any factor common to
+/// every weight cancels exactly. This returns that constant.
+///
+/// `sigma^2 * g_max^2` is the right one, because the weight is the
+/// reciprocal of the retained variance sum and that sum is bounded
+/// below by exactly this quantity. Both filters always retain the
+/// group's DC coefficient, whose propagated variance is exactly
+/// `sigma^2 * g[0]^2` for a profile `g`, and `g[0]` is that profile's
+/// maximum for every correlation it is defined for. The retained sum
+/// therefore sits in `[sigma^2 * g_max^2, 512 * sigma^2 * g_max^2]`, so
+/// the normalised weight sits in `[1/512, 1]` whatever `sigma` and
+/// whatever correlation shaping is in use.
+///
+/// A `sigma` small enough that `sigma^2 * g_max^2` falls under
+/// [`RECIPROCAL_FLOOR`], `sigma` of exactly zero included, is why the
+/// floor appears here too. The filters build their weight with
+/// `safe_reciprocal(sum, RECIPROCAL_FLOOR)`, so once the retained sum
+/// drops under that floor every group's weight saturates at `1 /
+/// RECIPROCAL_FLOOR` instead of following the sum. Taking the larger of
+/// the two tracks whichever bound the weight is actually against, and
+/// the normalised weight stays inside `[1/512, 1]` either way. Without
+/// it a `sigma` of zero would leave every weight at `1e12`, and the
+/// accumulator's clamp would saturate the value and the weight alike and
+/// return a flat 1.0 for every pixel.
+pub fn weight_scale(sigma: f32, dct_profile: &[f32; 8]) -> f32 {
+    let g_max = dct_profile.iter().copied().fold(0.0f32, f32::max);
+    let norm = sigma * sigma * g_max * g_max;
+    if norm.is_finite() && norm > RECIPROCAL_FLOOR {
+        norm
+    } else {
+        RECIPROCAL_FLOOR
+    }
+}
+
+/// Converts one weighted value into the accumulator's fixed point.
+#[cube]
+pub fn to_fixed(value: f32) -> i32 {
+    let clamped = f32::clamp(value, -ACCUM_CLAMP, ACCUM_CLAMP);
+    (clamped * ACCUM_SCALE) as i32
+}
+
+/// Adds one filtered patch to the accumulators at its own position in
+/// the frame.
+///
+/// `value` is this thread's pixel of the patch, and `weight` the
+/// normalised weight of the group the patch came from. Every thread in
+/// the cube owns one of the patch's 64 pixels, so one call per member
+/// scatters the whole patch.
+///
+/// `write_weight` adds the weight itself to `wsum`. Aggregation needs
+/// one weight per covering patch, not one per channel, so only the pass
+/// over the first channel sets this.
+#[cube]
+pub fn scatter_patch(
+    accum: &mut Array<Atomic<i32>>,
+    wsum: &mut Array<Atomic<i32>>,
+    value: f32,
+    weight: f32,
+    patch_x: u32,
+    patch_y: u32,
+    tid: u32,
+    write_weight: bool,
+    #[comptime] channel: u32,
+    #[comptime] width: u32,
+    #[comptime] stored_ch: u32,
+) {
+    let pixel = (patch_y + tid / PATCH_SIZE) * width + patch_x + tid % PATCH_SIZE;
+    Atomic::fetch_add(
+        &accum[(pixel * stored_ch + channel) as usize],
+        to_fixed(value * weight),
+    );
+    if write_weight {
+        Atomic::fetch_add(&wsum[pixel as usize], to_fixed(weight));
+    }
+}
+
+/// Clears both accumulators ahead of a filter pass.
+///
+/// One thread per accumulator slot. `accum` holds `width * height *
+/// stored_ch` slots and `wsum` holds `width * height`, so the launch is
+/// sized for the larger one and the weight write is masked off past its
+/// end.
+#[cube(launch_unchecked)]
+pub fn collab_zero_accum(
+    accum: &mut Array<Atomic<i32>>,
+    wsum: &mut Array<Atomic<i32>>,
+    #[comptime] pixels: u32,
+    #[comptime] stored_ch: u32,
+) {
+    let idx = ABSOLUTE_POS_X;
+    if idx < pixels * stored_ch {
+        Atomic::store(&accum[idx as usize], 0i32);
+    }
+    if idx < pixels {
+        Atomic::store(&wsum[idx as usize], 0i32);
+    }
+}
+
+/// Turns the accumulators into the finished frame plane.
+///
+/// Each pixel's output is the weighted mean of every filtered patch that
+/// covered it, which is `accum / wsum`. Both sides carry the same
+/// [`ACCUM_SCALE`], so the scale divides out and never appears here.
 ///
 /// # Why the weight sum is never zero
 ///
-/// Every pixel is covered by one to three references per axis, so at
-/// most nine in two dimensions, and never zero, for any frame at least
-/// `PATCH_SIZE` pixels on a side. This kernel divides by the accumulated
-/// weight relying on that.
-///
-/// # Buffers
-///
-/// `filtered` holds `refs * PATCH_AREA` lines, one 8x8 patch per
-/// reference in raster order, the layout `collab_filter_ht` writes.
-/// `group_weight` holds one weight per reference, also written by
-/// `collab_filter_ht`. `output` is a single frame plane of `width *
-/// height` lines, not a ring buffer, so writing to it needs no frame
-/// index.
+/// A group always contains its own reference patch as member 0, and the
+/// reference patches alone cover every pixel of the frame between one
+/// and nine times over, because they sit on a grid of stride `STEP` and
+/// are `PATCH_SIZE` wide. Every pixel therefore receives at least one
+/// contribution with a positive weight. A `wsum` of zero would still
+/// have to come from somewhere for this to divide by it, so the guard
+/// below returns the accumulator untouched rather than a NaN or an
+/// infinity.
 #[cube(launch_unchecked)]
-pub fn collab_aggregate<N: Size>(
-    filtered: &Array<Vector<f32, N>>,
-    group_weight: &Array<f32>,
+pub fn collab_normalise<N: Size>(
+    accum: &Array<i32>,
+    wsum: &Array<i32>,
     output: &mut Array<Vector<f32, N>>,
     #[comptime] width: u32,
     #[comptime] height: u32,
-    #[comptime] refs_x: u32,
-    #[comptime] refs_y: u32,
+    #[comptime] channels: u32,
+    #[comptime] stored_ch: u32,
 ) {
     let x = ABSOLUTE_POS_X;
     let y = ABSOLUTE_POS_Y;
@@ -68,104 +174,27 @@ pub fn collab_aggregate<N: Size>(
         terminate!();
     }
 
-    // Up to three candidate reference indices per axis, in the layout
-    // the doc above describes: the contiguous run's low and high ends,
-    // then the clamped last index when the run doesn't already reach
-    // it. An unused slot holds `refs_x`/`refs_y`, one past the last
-    // valid index, so the coverage check below skips it without a
-    // separate validity flag.
-    //
-    // The `.into()` calls below are what let cubecl unify an if/else
-    // branch built from a runtime expression with one built from a
-    // `#[comptime]` value, since both arms have to expand to the same
-    // `NativeExpand<u32>`. Clippy cannot see that requirement.
-    #[allow(clippy::useless_conversion)]
-    let ix_lo = if x >= PATCH_SIZE - 1 {
-        (x - (PATCH_SIZE - 1)).div_ceil(STEP)
-    } else {
-        0u32.into()
-    };
-    let ix_hi = (x / STEP).min(refs_x - 1);
+    let pixel = y * width + x;
+    let w = wsum[pixel as usize];
 
-    let mut cand_x = Array::<u32>::new(3usize);
-    cand_x[0] = ix_lo;
-    #[allow(clippy::useless_conversion)]
-    let cand_x1 = if ix_lo < ix_hi {
-        ix_lo + 1u32
-    } else {
-        refs_x.into()
-    };
-    #[allow(clippy::useless_conversion)]
-    let cand_x2: u32 = if refs_x - 1u32 > ix_hi {
-        (refs_x - 1u32).into()
-    } else {
-        refs_x.into()
-    };
-    cand_x[1] = cand_x1;
-    cand_x[2] = cand_x2;
-
-    #[allow(clippy::useless_conversion)]
-    let iy_lo = if y >= PATCH_SIZE - 1 {
-        (y - (PATCH_SIZE - 1)).div_ceil(STEP)
-    } else {
-        0u32.into()
-    };
-    let iy_hi = (y / STEP).min(refs_y - 1);
-
-    let mut cand_y = Array::<u32>::new(3usize);
-    cand_y[0] = iy_lo;
-    #[allow(clippy::useless_conversion)]
-    let cand_y1 = if iy_lo < iy_hi {
-        iy_lo + 1u32
-    } else {
-        refs_y.into()
-    };
-    #[allow(clippy::useless_conversion)]
-    let cand_y2: u32 = if refs_y - 1u32 > iy_hi {
-        (refs_y - 1u32).into()
-    } else {
-        refs_y.into()
-    };
-    cand_y[1] = cand_y1;
-    cand_y[2] = cand_y2;
-
-    let mut acc = Vector::<f32, N>::empty();
-    let mut wsum = 0.0f32;
-
+    let mut out = Vector::<f32, N>::empty();
     #[unroll]
-    for xi in 0..3u32 {
-        let ix = cand_x[xi as usize];
-        if ix < refs_x {
-            let rx = (ix * STEP).min(width - PATCH_SIZE);
-            if rx <= x && x < rx + PATCH_SIZE {
-                #[unroll]
-                for yi in 0..3u32 {
-                    let iy = cand_y[yi as usize];
-                    if iy < refs_y {
-                        let ry = (iy * STEP).min(height - PATCH_SIZE);
-                        if ry <= y && y < ry + PATCH_SIZE {
-                            let ref_idx = iy * refs_x + ix;
-                            let w = group_weight[ref_idx as usize];
-                            let patch_idx = ref_idx * PATCH_AREA + (y - ry) * PATCH_SIZE + (x - rx);
-                            let line_w = Vector::<f32, N>::empty().fill(w);
-                            acc += filtered[patch_idx as usize] * line_w;
-                            wsum += w;
-                        }
-                    }
-                }
-            }
+    for c in 0..channels {
+        let a = accum[(pixel * stored_ch + c) as usize] as f32;
+        let mut v = a;
+        if w != 0i32 {
+            v = a / (w as f32);
         }
+        out[c as usize] = v;
     }
-
-    // wsum is a sum of one to nine group_weight values, each already
-    // guaranteed finite and non-negative by collab_filter_ht and
-    // collab_filter_wiener's own guards, and the doc above establishes
-    // it is never exactly zero either. safe_reciprocal still checks
-    // explicitly rather than trusting those guarantees to survive
-    // whatever a given GPU driver does with a NaN operand to `f32::max`,
-    // so this stays finite even if that chain of guarantees is ever
-    // broken upstream.
-    let inv = safe_reciprocal(wsum, 1e-12f32);
-    let line_inv = Vector::<f32, N>::empty().fill(inv);
-    output[(y * width + x) as usize] = acc * line_inv;
+    output[pixel as usize] = out;
 }
+
+// Ties the fixed-point headroom argument in `ACCUM_SCALE`'s docs to the
+// constants it is actually derived from. A larger patch or a larger
+// group both raise the number of contributions a pixel can receive, and
+// the scale has to come down to match.
+const _: () = assert!(
+    PATCH_AREA == 64 && super::super::MAX_K == 8,
+    "recheck ACCUM_SCALE's headroom, the per-pixel contribution bound moved"
+);

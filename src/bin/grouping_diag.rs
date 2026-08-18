@@ -67,8 +67,8 @@
 use std::collections::HashSet;
 use std::fs;
 
-use av_denoise::collab::geometry::{filtered_buf_len, member_buf_len, ref_count, ref_pos, refs_along};
-use av_denoise::collab::kernels::aggregate::collab_aggregate;
+use av_denoise::collab::geometry::{member_buf_len, ref_count, ref_pos, refs_along};
+use av_denoise::collab::kernels::aggregate::{collab_normalise, collab_zero_accum, weight_scale};
 use av_denoise::collab::kernels::filter_ht::collab_filter_ht;
 use av_denoise::collab::kernels::group::collab_group_spatial;
 use av_denoise::collab::kernels::transforms::dct_noise_profile;
@@ -313,7 +313,6 @@ fn run_stage1(
     floor: f32,
     tau: f32,
     pos_len: usize,
-    filt_len: usize,
     sigma: f32,
 ) -> (GroupResult, Handle, Vec<f32>) {
     let stage1 = run_group(
@@ -335,14 +334,29 @@ fn run_stage1(
     let member_pos_buf = client.create_from_slice(u32::as_bytes(&stage1.member_pos));
     let member_count_buf = client.create_from_slice(u32::as_bytes(&stage1.member_count));
     let member_sig2_dummy = client.empty(size_of::<f32>());
-    let filtered = client.empty(filt_len * size_of::<f32>());
+    let filtered_dummy = client.empty(size_of::<f32>());
     let group_weight = client.empty(refs * size_of::<f32>());
     let sigma_buf = client.create_from_slice(f32::as_bytes(&[sigma]));
-    let dct_profile_buf = client.create_from_slice(f32::as_bytes(&dct_noise_profile(params.rho)));
+    let profile = dct_noise_profile(params.rho);
+    let dct_profile_buf = client.create_from_slice(f32::as_bytes(&profile));
+    let accum = client.empty(frame_len * size_of::<i32>());
+    let wsum = client.empty(frame_len * size_of::<i32>());
+    let wnorm = weight_scale(sigma, &profile);
 
     let group_grid = CubeCount::new_2d(refs_x, refs_y);
     let group_dim = CubeDim::new_2d(8, 8);
+    let zero_dim = 256u32;
     unsafe {
+        collab_zero_accum::launch_unchecked::<R>(
+            client,
+            CubeCount::new_1d((frame_len as u32).div_ceil(zero_dim)),
+            CubeDim::new_1d(zero_dim),
+            ArrayArg::from_raw_parts(accum.clone(), frame_len),
+            ArrayArg::from_raw_parts(wsum.clone(), frame_len),
+            frame_len as u32,
+            1u32,
+        );
+
         collab_filter_ht::launch_unchecked::<R>(
             client,
             group_grid,
@@ -352,17 +366,22 @@ fn run_stage1(
             ArrayArg::from_raw_parts(member_pos_buf, pos_len),
             ArrayArg::from_raw_parts(member_count_buf, refs),
             ArrayArg::from_raw_parts(member_sig2_dummy, 1),
-            ArrayArg::from_raw_parts(filtered.clone(), filt_len),
+            ArrayArg::from_raw_parts(accum.clone(), frame_len),
+            ArrayArg::from_raw_parts(wsum.clone(), frame_len),
+            ArrayArg::from_raw_parts(filtered_dummy, 1),
             ArrayArg::from_raw_parts(group_weight.clone(), refs),
             0u32,
             ArrayArg::from_raw_parts(sigma_buf, 1),
             ArrayArg::from_raw_parts(dct_profile_buf, 8),
             params.lambda_ht,
+            wnorm,
+            false,
             false,
             width,
             height,
             1u32,
             params.k_max,
+            1u32,
             refs_x,
         );
     }
@@ -371,18 +390,18 @@ fn run_stage1(
     let agg_grid = CubeCount::new_2d(width.div_ceil(BLOCK_X), height.div_ceil(BLOCK_Y));
     let agg_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
     unsafe {
-        collab_aggregate::launch_unchecked::<R>(
+        collab_normalise::launch_unchecked::<R>(
             client,
             agg_grid,
             agg_dim,
             1usize,
-            ArrayArg::from_raw_parts(filtered, filt_len),
-            ArrayArg::from_raw_parts(group_weight, refs),
+            ArrayArg::from_raw_parts(accum, frame_len),
+            ArrayArg::from_raw_parts(wsum, frame_len),
             ArrayArg::from_raw_parts(pilot.clone(), frame_len),
             width,
             height,
-            refs_x,
-            refs_y,
+            1u32,
+            1u32,
         );
     }
 
@@ -527,7 +546,6 @@ fn main() {
     let refs_y = refs_along(height);
     let refs = ref_count(width, height);
     let pos_len = member_buf_len(width, height, 8);
-    let filt_len = filtered_buf_len(width, height);
 
     let regions: [(&str, Region); 2] = [("flat", args.flat_region), ("texture", args.texture_region)];
     let sample_refs: Vec<(&str, Vec<(u32, u32)>)> = regions
@@ -592,7 +610,7 @@ fn main() {
 
         let (stage1, _pilot_gpu, pilot_host) = run_stage1(
             &client, &noisy_gpu, frame_len, width, height, refs_x, refs_y, refs, &params, floor, tau,
-            pos_len, filt_len, sigma,
+            pos_len, sigma,
         );
 
         let stage2 = run_group(

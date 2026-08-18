@@ -3,6 +3,7 @@ use cubecl::server::Handle;
 
 use super::helpers::{R, deterministic_texture, make_client, noisy_field_over, plant_patch};
 use crate::collab::geometry::{filtered_buf_len, member_buf_len, ref_count, refs_along};
+use crate::collab::kernels::aggregate::weight_scale;
 use crate::collab::kernels::filter_ht::collab_filter_ht;
 use crate::collab::kernels::filter_wiener::{collab_filter_wiener, wiener_shrinkage_factor};
 use crate::collab::kernels::group::collab_group_spatial;
@@ -94,13 +95,20 @@ fn run_wiener_raw(
     let refs_x = refs_along(width);
     let refs_y = refs_along(height);
     let refs = groups.refs;
-    let filt_len = filtered_buf_len(width, height);
+    let filt_len = filtered_buf_len(width, height, k_max);
+    let pixels = (width * height) as usize;
 
     let filtered_buf = client.empty(filt_len * size_of::<f32>());
     let weight_buf = client.empty(refs * size_of::<f32>());
     let sigma_buf = client.create_from_slice(f32::as_bytes(&[sigma]));
-    let dct_profile_buf = client.create_from_slice(f32::as_bytes(&dct_noise_profile(rho)));
+    let profile = dct_noise_profile(rho);
+    let dct_profile_buf = client.create_from_slice(f32::as_bytes(&profile));
     let dummy = client.empty(size_of::<f32>());
+    // The filter scatters into these on every launch. These tests read
+    // the filtered patches themselves rather than the aggregated frame,
+    // so they are allocated only to give the scatter somewhere to land.
+    let accum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels]));
+    let wsum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels]));
 
     let grid = CubeCount::new_2d(refs_x, refs_y);
     let dim = CubeDim::new_2d(8, 8);
@@ -116,28 +124,41 @@ fn run_wiener_raw(
             ArrayArg::from_raw_parts(groups.member_pos.clone(), groups.pos_len),
             ArrayArg::from_raw_parts(groups.member_count.clone(), refs),
             ArrayArg::from_raw_parts(dummy, 1),
+            ArrayArg::from_raw_parts(accum, pixels),
+            ArrayArg::from_raw_parts(wsum, pixels),
             ArrayArg::from_raw_parts(filtered_buf.clone(), filt_len),
             ArrayArg::from_raw_parts(weight_buf.clone(), refs),
             0u32,
             0u32,
             ArrayArg::from_raw_parts(sigma_buf, 1),
             ArrayArg::from_raw_parts(dct_profile_buf, 8),
+            weight_scale(sigma, &profile),
             false,
+            true,
             width,
             height,
             1u32,
             k_max,
+            1u32,
             refs_x,
         );
     }
 
     let filtered_bytes = client.read_one(filtered_buf).expect("filtered readback failed");
     let weight_bytes = client.read_one(weight_buf).expect("group_weight readback failed");
+    let all_k = f32::from_bytes(&filtered_bytes)[..filt_len].to_vec();
 
-    (
-        f32::from_bytes(&filtered_bytes)[..filt_len].to_vec(),
-        f32::from_bytes(&weight_bytes)[..refs].to_vec(),
-    )
+    // The kernel now writes every member of every group. These tests
+    // assert against member 0, the reference patch itself, so that one
+    // patch per reference is lifted out here and the callers keep their
+    // original `ref_idx * PATCH_AREA + pos` indexing.
+    let mut member_zero = vec![0.0f32; refs * 64];
+    for r in 0..refs {
+        let src = r * k_max as usize * 64;
+        member_zero[r * 64..(r + 1) * 64].copy_from_slice(&all_k[src..src + 64]);
+    }
+
+    (member_zero, f32::from_bytes(&weight_bytes)[..refs].to_vec())
 }
 
 /// Runs [`collab_filter_ht`] against an already-grouped frame and reads
@@ -157,13 +178,17 @@ fn run_ht_raw(
     let refs_x = refs_along(width);
     let refs_y = refs_along(height);
     let refs = groups.refs;
-    let filt_len = filtered_buf_len(width, height);
+    let filt_len = filtered_buf_len(width, height, k_max);
+    let pixels = (width * height) as usize;
 
     let filtered_buf = client.empty(filt_len * size_of::<f32>());
     let weight_buf = client.empty(refs * size_of::<f32>());
     let sigma_buf = client.create_from_slice(f32::as_bytes(&[sigma]));
-    let dct_profile_buf = client.create_from_slice(f32::as_bytes(&dct_noise_profile(0.0)));
+    let profile = dct_noise_profile(0.0);
+    let dct_profile_buf = client.create_from_slice(f32::as_bytes(&profile));
     let dummy = client.empty(size_of::<f32>());
+    let accum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels]));
+    let wsum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels]));
 
     let grid = CubeCount::new_2d(refs_x, refs_y);
     let dim = CubeDim::new_2d(8, 8);
@@ -178,23 +203,34 @@ fn run_ht_raw(
             ArrayArg::from_raw_parts(groups.member_pos.clone(), groups.pos_len),
             ArrayArg::from_raw_parts(groups.member_count.clone(), refs),
             ArrayArg::from_raw_parts(dummy, 1),
+            ArrayArg::from_raw_parts(accum, pixels),
+            ArrayArg::from_raw_parts(wsum, pixels),
             ArrayArg::from_raw_parts(filtered_buf.clone(), filt_len),
             ArrayArg::from_raw_parts(weight_buf, refs),
             0u32,
             ArrayArg::from_raw_parts(sigma_buf, 1),
             ArrayArg::from_raw_parts(dct_profile_buf, 8),
             lambda_ht,
+            weight_scale(sigma, &profile),
             false,
+            true,
             width,
             height,
             1u32,
             k_max,
+            1u32,
             refs_x,
         );
     }
 
     let filtered_bytes = client.read_one(filtered_buf).expect("filtered readback failed");
-    f32::from_bytes(&filtered_bytes)[..filt_len].to_vec()
+    let all_k = f32::from_bytes(&filtered_bytes)[..filt_len].to_vec();
+    let mut member_zero = vec![0.0f32; refs * 64];
+    for r in 0..refs {
+        let src = r * k_max as usize * 64;
+        member_zero[r * 64..(r + 1) * 64].copy_from_slice(&all_k[src..src + 64]);
+    }
+    member_zero
 }
 
 fn extract_patch(frame: &[f32], w: u32, px: u32, py: u32) -> [f32; 64] {
@@ -474,12 +510,15 @@ fn dct_profile_rho_zero_matches_a_hand_built_all_ones_profile() {
 
     let refs_x = refs_along(w);
     let refs = groups.refs;
-    let filt_len = filtered_buf_len(w, h);
+    let filt_len = filtered_buf_len(w, h, 8);
+    let pixels = (w * h) as usize;
     let filtered_buf = client.empty(filt_len * size_of::<f32>());
     let weight_buf = client.empty(refs * size_of::<f32>());
     let sigma_buf = client.create_from_slice(f32::as_bytes(&[sigma]));
     let ones_profile_buf = client.create_from_slice(f32::as_bytes(&[1.0f32; 8]));
     let dummy = client.empty(size_of::<f32>());
+    let accum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels]));
+    let wsum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels]));
     let grid = CubeCount::new_2d(refs_x, refs_along(h));
     let dim = CubeDim::new_2d(8, 8);
     unsafe {
@@ -493,23 +532,33 @@ fn dct_profile_rho_zero_matches_a_hand_built_all_ones_profile() {
             ArrayArg::from_raw_parts(groups.member_pos.clone(), groups.pos_len),
             ArrayArg::from_raw_parts(groups.member_count.clone(), refs),
             ArrayArg::from_raw_parts(dummy, 1),
+            ArrayArg::from_raw_parts(accum, pixels),
+            ArrayArg::from_raw_parts(wsum, pixels),
             ArrayArg::from_raw_parts(filtered_buf.clone(), filt_len),
             ArrayArg::from_raw_parts(weight_buf.clone(), refs),
             0u32,
             0u32,
             ArrayArg::from_raw_parts(sigma_buf, 1),
             ArrayArg::from_raw_parts(ones_profile_buf, 8),
+            weight_scale(sigma, &[1.0f32; 8]),
             false,
+            true,
             w,
             h,
             1u32,
             8u32,
+            1u32,
             refs_x,
         );
     }
-    let filtered_hand_built =
-        f32::from_bytes(&client.read_one(filtered_buf).expect("filtered readback failed"))[..filt_len]
-            .to_vec();
+    let all_k = f32::from_bytes(&client.read_one(filtered_buf).expect("filtered readback failed"))
+        [..filt_len]
+        .to_vec();
+    let mut filtered_hand_built = vec![0.0f32; refs * 64];
+    for r in 0..refs {
+        let src = r * 8 * 64;
+        filtered_hand_built[r * 64..(r + 1) * 64].copy_from_slice(&all_k[src..src + 64]);
+    }
     let weight_hand_built =
         f32::from_bytes(&client.read_one(weight_buf).expect("weight readback failed"))[..refs].to_vec();
 

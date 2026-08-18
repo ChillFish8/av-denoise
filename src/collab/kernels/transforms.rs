@@ -12,6 +12,14 @@ const _: () = assert!(
     "update the hardcoded 8usize/8u32 slots in haar_fwd_stack and haar_inv_stack to MAX_K"
 );
 
+/// The floor both filters pass to [`safe_reciprocal`] when they turn a
+/// retained variance sum into a group weight.
+///
+/// A group weight therefore never exceeds `1 / RECIPROCAL_FLOOR`, which
+/// is the bound [`crate::collab::kernels::aggregate::weight_scale`]
+/// needs to fit the weights into a fixed-point accumulator.
+pub const RECIPROCAL_FLOOR: f32 = 1e-12;
+
 /// A reciprocal weight that never trusts a driver's `NaN`-`max` behaviour.
 ///
 /// Returns `1 / max(denom, floor)` for an ordinary finite denominator,

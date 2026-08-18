@@ -4,7 +4,7 @@ mod kernels;
 
 use kernels::accumulate::AccumulateBench;
 use kernels::bilateral::BilateralBench;
-use kernels::collab_aggregate::CollabAggregateBench;
+use kernels::collab_aggregate::{CollabNormaliseBench, CollabZeroAccumBench};
 use kernels::collab_group::CollabGroupBench;
 use kernels::collab_ht::CollabHtBench;
 use kernels::collab_weight_ratio::CollabWeightRatioBench;
@@ -213,7 +213,14 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         client: client.clone(),
     });
     for &(ch, ch_name) in CHANNELS {
-        run(CollabAggregateBench {
+        run(CollabNormaliseBench {
+            client: client.clone(),
+            ch,
+            ch_name,
+        });
+    }
+    for &(ch, ch_name) in CHANNELS {
+        run(CollabZeroAccumBench {
             client: client.clone(),
             ch,
             ch_name,

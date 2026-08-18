@@ -22,9 +22,14 @@ pub fn member_buf_len(width: u32, height: u32, k_max: u32) -> usize {
     ref_count(width, height) * k_max as usize
 }
 
-/// Length of the filtered-patch buffer in `Vector<f32, N>` lines.
-pub fn filtered_buf_len(width: u32, height: u32) -> usize {
-    ref_count(width, height) * super::PATCH_AREA as usize
+/// Length of the filtered-patch debug buffer in `Vector<f32, N>` lines,
+/// one whole group of `k_max` patches per reference.
+///
+/// The filters only fill this when their `emit_filtered` flag is set,
+/// which tests do and the pipeline does not, so nothing sizes a real
+/// allocation off this outside of tests.
+pub fn filtered_buf_len(width: u32, height: u32, k_max: u32) -> usize {
+    ref_count(width, height) * k_max as usize * super::PATCH_AREA as usize
 }
 
 #[cfg(test)]
@@ -84,9 +89,10 @@ mod tests {
     }
 
     #[test]
-    fn filtered_buf_len_scales_with_patch_area() {
-        // ref_count(16, 16) is 9, as above, and filtered_buf_len(16, 16)
-        // is 9 * PATCH_AREA (64) = 576.
-        assert_eq!(filtered_buf_len(16, 16), 576);
+    fn filtered_buf_len_scales_with_patch_area_and_k_max() {
+        // ref_count(16, 16) is 9, as above, so filtered_buf_len(16, 16,
+        // 8) is 9 * 8 * PATCH_AREA (64) = 4608.
+        assert_eq!(filtered_buf_len(16, 16, 8), 4608);
+        assert_eq!(filtered_buf_len(16, 16, 1), 576);
     }
 }

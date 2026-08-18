@@ -1,8 +1,8 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use crate::collab::geometry::{filtered_buf_len, member_buf_len, ref_count, refs_along};
-use crate::collab::kernels::aggregate::collab_aggregate;
+use crate::collab::geometry::{member_buf_len, ref_count, refs_along};
+use crate::collab::kernels::aggregate::{collab_normalise, collab_zero_accum, weight_scale};
 use crate::collab::kernels::filter_ht::collab_filter_ht;
 use crate::collab::kernels::filter_wiener::collab_filter_wiener;
 use crate::collab::kernels::group::collab_group_spatial;
@@ -57,11 +57,19 @@ pub struct CollabPipeline<R: Runtime> {
     member_pos: Handle,
     member_count: Handle,
     member_sig2_dummy: Handle,
-    filtered: Handle,
+    filtered_dummy: Handle,
     group_weight: Handle,
     pilot: Handle,
     sigma_buf: Handle,
     dct_profile_buf: Handle,
+    /// Fixed-point accumulators the filters scatter into, one weighted
+    /// value per covering patch, cleared before each pass and divided
+    /// out by `collab_normalise` after it.
+    accum: Handle,
+    wsum: Handle,
+    /// The correlation profile the shrinkage uses, kept on the host too
+    /// so the weight normalisation can be derived from it per frame.
+    dct_profile: [f32; 8],
 }
 
 impl<R: Runtime> CollabPipeline<R> {
@@ -90,21 +98,28 @@ impl<R: Runtime> CollabPipeline<R> {
         let k_max = params.k_max;
         let refs = ref_count(width, height);
         let pos_len = member_buf_len(width, height, k_max);
-        let filt_len = filtered_buf_len(width, height);
-        let frame_len = (width * height) as usize * stored_ch;
+        let pixels = (width * height) as usize;
+        let frame_len = pixels * stored_ch;
 
         let member_pos = client.empty(pos_len * size_of::<u32>());
         let member_count = client.empty(refs * size_of::<u32>());
         let member_sig2_dummy = client.empty(size_of::<f32>());
-        let filtered = client.empty(filt_len * stored_ch * size_of::<f32>());
+        // The filters only write their filtered patches out when
+        // `emit_filtered` is set, which only tests do, so this pipeline
+        // binds a one-element placeholder rather than carrying a buffer
+        // large enough to hold every group.
+        let filtered_dummy = client.empty(stored_ch * size_of::<f32>());
         let group_weight = client.empty(refs * size_of::<f32>());
         let pilot = client.empty(frame_len * size_of::<f32>());
+        let accum = client.empty(frame_len * size_of::<i32>());
+        let wsum = client.empty(pixels * size_of::<i32>());
         let sigma_buf = client.create_from_slice(f32::as_bytes(&vec![0.0f32; stored_ch]));
         // The profile is purely spatial, derived only from `params.rho`,
         // so it never changes across frames and is built once here
         // rather than every `run_two_stage` call the way `sigma_buf`
         // (which depends on the per-frame `sigmas` argument) is.
-        let dct_profile_buf = client.create_from_slice(f32::as_bytes(&dct_noise_profile(params.rho)));
+        let dct_profile = dct_noise_profile(params.rho);
+        let dct_profile_buf = client.create_from_slice(f32::as_bytes(&dct_profile));
 
         Ok(Self {
             client: client.clone(),
@@ -114,11 +129,14 @@ impl<R: Runtime> CollabPipeline<R> {
             member_pos,
             member_count,
             member_sig2_dummy,
-            filtered,
+            filtered_dummy,
             group_weight,
             pilot,
             sigma_buf,
             dct_profile_buf,
+            accum,
+            wsum,
+            dct_profile,
         })
     }
 
@@ -191,13 +209,21 @@ impl<R: Runtime> CollabPipeline<R> {
         let refs_y = refs_along(height);
         let refs = ref_count(width, height);
         let pos_len = member_buf_len(width, height, k_max);
-        let filt_len = filtered_buf_len(width, height);
-        let frame_len = (width * height) as usize * stored_ch;
+        let pixels = (width * height) as usize;
+        let frame_len = pixels * stored_ch;
+
+        // Every weight is divided by this before it reaches the
+        // fixed-point accumulators. The first channel's sigma is the one
+        // that matters, because that is the channel whose retained
+        // variances the group weight is built from.
+        let wnorm = weight_scale(sigmas[0], &self.dct_profile);
 
         let group_grid = CubeCount::new_2d(refs_x, refs_y);
         let group_dim = CubeDim::new_2d(8, 8);
         let agg_grid = CubeCount::new_2d(width.div_ceil(BLOCK_X), height.div_ceil(BLOCK_Y));
         let agg_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
+        let zero_dim = 256u32;
+        let zero_grid = CubeCount::new_1d((frame_len as u32).div_ceil(zero_dim));
 
         unsafe {
             // Stage one: group on the noisy input with the noise floor
@@ -222,6 +248,16 @@ impl<R: Runtime> CollabPipeline<R> {
                 refs_x,
             );
 
+            collab_zero_accum::launch_unchecked::<R>(
+                &self.client,
+                zero_grid.clone(),
+                CubeDim::new_1d(zero_dim),
+                ArrayArg::from_raw_parts(self.accum.clone(), frame_len),
+                ArrayArg::from_raw_parts(self.wsum.clone(), pixels),
+                pixels as u32,
+                stored_ch as u32,
+            );
+
             collab_filter_ht::launch_unchecked::<R>(
                 &self.client,
                 group_grid.clone(),
@@ -231,32 +267,37 @@ impl<R: Runtime> CollabPipeline<R> {
                 ArrayArg::from_raw_parts(self.member_pos.clone(), pos_len),
                 ArrayArg::from_raw_parts(self.member_count.clone(), refs),
                 ArrayArg::from_raw_parts(self.member_sig2_dummy.clone(), 1),
-                ArrayArg::from_raw_parts(self.filtered.clone(), filt_len * stored_ch),
+                ArrayArg::from_raw_parts(self.accum.clone(), frame_len),
+                ArrayArg::from_raw_parts(self.wsum.clone(), pixels),
+                ArrayArg::from_raw_parts(self.filtered_dummy.clone(), 1),
                 ArrayArg::from_raw_parts(self.group_weight.clone(), refs),
                 0u32,
                 ArrayArg::from_raw_parts(self.sigma_buf.clone(), stored_ch),
                 ArrayArg::from_raw_parts(self.dct_profile_buf.clone(), 8),
                 self.params.lambda_ht,
+                wnorm,
+                false,
                 false,
                 width,
                 height,
                 channels_count as u32,
                 k_max,
+                stored_ch as u32,
                 refs_x,
             );
 
-            collab_aggregate::launch_unchecked::<R>(
+            collab_normalise::launch_unchecked::<R>(
                 &self.client,
                 agg_grid.clone(),
                 agg_dim,
                 stored_ch,
-                ArrayArg::from_raw_parts(self.filtered.clone(), filt_len * stored_ch),
-                ArrayArg::from_raw_parts(self.group_weight.clone(), refs),
+                ArrayArg::from_raw_parts(self.accum.clone(), frame_len),
+                ArrayArg::from_raw_parts(self.wsum.clone(), pixels),
                 ArrayArg::from_raw_parts(self.pilot.clone(), frame_len),
                 width,
                 height,
-                refs_x,
-                refs_y,
+                channels_count as u32,
+                stored_ch as u32,
             );
 
             // Stage two: regroup on the pilot with no floor, since the
@@ -283,6 +324,16 @@ impl<R: Runtime> CollabPipeline<R> {
                 refs_x,
             );
 
+            collab_zero_accum::launch_unchecked::<R>(
+                &self.client,
+                zero_grid,
+                CubeDim::new_1d(zero_dim),
+                ArrayArg::from_raw_parts(self.accum.clone(), frame_len),
+                ArrayArg::from_raw_parts(self.wsum.clone(), pixels),
+                pixels as u32,
+                stored_ch as u32,
+            );
+
             collab_filter_wiener::launch_unchecked::<R>(
                 &self.client,
                 group_grid,
@@ -293,32 +344,37 @@ impl<R: Runtime> CollabPipeline<R> {
                 ArrayArg::from_raw_parts(self.member_pos.clone(), pos_len),
                 ArrayArg::from_raw_parts(self.member_count.clone(), refs),
                 ArrayArg::from_raw_parts(self.member_sig2_dummy.clone(), 1),
-                ArrayArg::from_raw_parts(self.filtered.clone(), filt_len * stored_ch),
+                ArrayArg::from_raw_parts(self.accum.clone(), frame_len),
+                ArrayArg::from_raw_parts(self.wsum.clone(), pixels),
+                ArrayArg::from_raw_parts(self.filtered_dummy.clone(), 1),
                 ArrayArg::from_raw_parts(self.group_weight.clone(), refs),
                 0u32,
                 0u32,
                 ArrayArg::from_raw_parts(self.sigma_buf.clone(), stored_ch),
                 ArrayArg::from_raw_parts(self.dct_profile_buf.clone(), 8),
+                wnorm,
+                false,
                 false,
                 width,
                 height,
                 channels_count as u32,
                 k_max,
+                stored_ch as u32,
                 refs_x,
             );
 
-            collab_aggregate::launch_unchecked::<R>(
+            collab_normalise::launch_unchecked::<R>(
                 &self.client,
                 agg_grid,
                 agg_dim,
                 stored_ch,
-                ArrayArg::from_raw_parts(self.filtered.clone(), filt_len * stored_ch),
-                ArrayArg::from_raw_parts(self.group_weight.clone(), refs),
+                ArrayArg::from_raw_parts(self.accum.clone(), frame_len),
+                ArrayArg::from_raw_parts(self.wsum.clone(), pixels),
                 ArrayArg::from_raw_parts(output.clone(), frame_len),
                 width,
                 height,
-                refs_x,
-                refs_y,
+                channels_count as u32,
+                stored_ch as u32,
             );
         }
 
