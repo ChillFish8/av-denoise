@@ -36,7 +36,10 @@
 //!   region chosen to have the least motion of any candidate checked (a
 //!   patch of sky beside the tower, one continuous shot, frames 12-23 of
 //!   the clip), and compares that against what the same front end
-//!   reports on the same clip.
+//!   reports on the same clip, then carries the chain the rest of the
+//!   way with the same `residual_ratio_sqrt` and `residual_sigma_scale`
+//!   ground-truth mode uses, to report the final assumed sigma the
+//!   collaborative stage actually shrinks with on this real grain.
 //!
 //! # Running it
 //!
@@ -588,6 +591,8 @@ fn run_brick(brick_path: &str, w: u32, h: u32) {
         BRICK_SHOT_START,
         BRICK_SHOT_END_INCLUSIVE
     );
+    let residual_sigma_scale = Nl3dParams::default().residual_sigma_scale;
+    println!("residual_sigma_scale (Nl3dParams default) = {residual_sigma_scale:.4}");
 
     let diff_sigma = temporal_diff_sigma(
         &frames,
@@ -641,6 +646,7 @@ fn run_brick(brick_path: &str, w: u32, h: u32) {
     let mut estimates_low = Vec::new();
     let mut estimates_low_unboosted = Vec::new();
     let mut estimates_temporal_only = Vec::new();
+    let mut ratios = Vec::new();
     for frame in shot_frames {
         denoiser.push_frame(frame);
         if denoiser.denoise().expect("denoise failed").is_some() {
@@ -648,6 +654,11 @@ fn run_brick(brick_path: &str, w: u32, h: u32) {
             estimates_low.push(denoiser.current_sigmas_low()[0]);
             estimates_low_unboosted.push(denoiser.current_sigmas_low_unboosted()[0]);
             estimates_temporal_only.push(denoiser.current_sigmas_temporal_only()[0]);
+            ratios.push(
+                denoiser
+                    .residual_ratio_sqrt()
+                    .expect("residual_ratio_sqrt failed"),
+            );
         }
     }
     let last = estimates.len().min(4);
@@ -655,10 +666,16 @@ fn run_brick(brick_path: &str, w: u32, h: u32) {
     let tail_low = &estimates_low[estimates_low.len() - last..];
     let tail_low_unboosted = &estimates_low_unboosted[estimates_low_unboosted.len() - last..];
     let tail_temporal_only = &estimates_temporal_only[estimates_temporal_only.len() - last..];
+    let tail_ratio = &ratios[ratios.len() - last..];
     let est_mean8 = mean(tail.iter().copied()) * 255.0;
     let est_low_mean8 = mean(tail_low.iter().copied()) * 255.0;
     let est_low_unboosted_mean8 = mean(tail_low_unboosted.iter().copied()) * 255.0;
     let est_temporal_only_mean8 = mean(tail_temporal_only.iter().copied()) * 255.0;
+    let ratio_mean = mean(tail_ratio.iter().copied());
+    // The collaborative stage builds its sigma from the temporal reading
+    // alone, so this is the chain actually reported to
+    // `run_collab_stage`, matching ground-truth mode's `final_sigma8`.
+    let final_sigma8 = est_temporal_only_mean8 * ratio_mean * residual_sigma_scale;
     println!(
         "front-end median-chain estimate over just the static region's own shot (trailing {last}-fold mean of current_sigmas): sigma8={est_mean8:.4}"
     );
@@ -670,6 +687,12 @@ fn run_brick(brick_path: &str, w: u32, h: u32) {
     );
     println!(
         "front-end temporal-only estimate over just the static region's own shot (trailing {last}-fold mean of current_sigmas_temporal_only, what the collaborative stage actually gets): sigma8={est_temporal_only_mean8:.4}"
+    );
+    println!(
+        "residual_ratio_sqrt over just the static region's own shot (trailing {last}-fold mean): {ratio_mean:.4}"
+    );
+    println!(
+        "final assumed sigma, temporal-only, over just the static region's own shot (what the collaborative stage actually shrinks with): sigma8={final_sigma8:.4}"
     );
     println!(
         "median estimate / temporal-diff ratio: {:.4}",
