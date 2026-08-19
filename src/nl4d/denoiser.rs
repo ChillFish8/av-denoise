@@ -51,15 +51,21 @@ pub struct Nl4dDenoiser<R: Runtime> {
     spatial_radius: u32,
     lambda_ht: f32,
     c_min: f32,
+    mismatch_scale: f32,
+    confidence_variance: bool,
     k_max: u32,
 
     member_pos: Handle,
     member_frame: Handle,
     member_count: Handle,
-    /// `collab_filter_ht`'s `member_sig2` argument. This denoiser never
-    /// sets `use_member_sigma`, so a one-element placeholder is valid
-    /// here, the same pattern `CollabPipeline` uses.
-    member_sig2_dummy: Handle,
+    /// [`collab_group_temporal`]'s per-member mismatch-variance output,
+    /// and `collab_filter_ht`'s `member_sig2` argument on the way back
+    /// in. Always the real `refs * k_max` size, whatever
+    /// `confidence_variance` is, since the grouping kernel always fills
+    /// it. `confidence_variance` gates whether `collab_filter_ht` reads
+    /// it back, through that call's own `use_member_sigma`, not whether
+    /// this buffer holds real values.
+    member_sig2: Handle,
     /// `collab_filter_ht`'s `filtered` argument. This denoiser never
     /// sets `emit_filtered`, so a one-element placeholder is valid here
     /// too.
@@ -144,7 +150,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let member_pos = client.empty(pos_len * size_of::<u32>());
         let member_frame = client.empty(pos_len * size_of::<u32>());
         let member_count = client.empty(refs * size_of::<u32>());
-        let member_sig2_dummy = client.empty(size_of::<f32>());
+        let member_sig2 = client.empty(pos_len * size_of::<f32>());
         let filtered_dummy = client.empty(stored_ch as usize * size_of::<f32>());
         let group_weight = client.empty(refs * size_of::<f32>());
         let sigma_buf = client.create_from_slice(f32::as_bytes(&vec![0.0f32; stored_ch as usize]));
@@ -176,11 +182,13 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             spatial_radius: params.spatial_radius,
             lambda_ht: params.lambda_ht,
             c_min: params.c_min,
+            mismatch_scale: params.mismatch_scale,
+            confidence_variance: params.confidence_variance,
             k_max,
             member_pos,
             member_frame,
             member_count,
-            member_sig2_dummy,
+            member_sig2,
             filtered_dummy,
             group_weight,
             sigma_buf,
@@ -390,8 +398,10 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
         let mc = self.front.motion_ctx();
         let blk_step = mc.step;
+        let blksize = mc.blksize;
         let blocks_x = mc.blocks_x;
         let blocks_y = mc.blocks_y;
+        let thsad = self.front.thsad_value();
 
         // See the doc comment above for why these two slots are what
         // this pass clears and completes. `total_frames` is added
@@ -440,6 +450,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 ArrayArg::from_raw_parts(self.member_pos.clone(), pos_len),
                 ArrayArg::from_raw_parts(self.member_frame.clone(), pos_len),
                 ArrayArg::from_raw_parts(self.member_count.clone(), refs),
+                ArrayArg::from_raw_parts(self.member_sig2.clone(), pos_len),
                 centre_slot,
                 ArrayArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
                 // `collab_group_temporal` has no admission gate (see its
@@ -449,11 +460,14 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 // 0.0 is the simplest one that says so.
                 0.0f32,
                 self.c_min,
+                thsad,
+                self.mismatch_scale,
                 self.temporal_radius,
                 self.refine,
                 view.mv_stride,
                 view.conf_stride,
                 blk_step,
+                blksize,
                 blocks_x,
                 blocks_y,
                 self.width,
@@ -473,7 +487,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 ArrayArg::from_raw_parts(self.member_pos.clone(), pos_len),
                 ArrayArg::from_raw_parts(self.member_frame.clone(), pos_len),
                 ArrayArg::from_raw_parts(self.member_count.clone(), refs),
-                ArrayArg::from_raw_parts(self.member_sig2_dummy.clone(), 1),
+                ArrayArg::from_raw_parts(self.member_sig2.clone(), pos_len),
                 ArrayArg::from_raw_parts(self.accum.clone(), accum_ring_len),
                 ArrayArg::from_raw_parts(self.wsum.clone(), wsum_ring_len),
                 ArrayArg::from_raw_parts(self.filtered_dummy.clone(), 1),
@@ -484,7 +498,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 self.lambda_ht,
                 wnorm,
                 CROSS_FRAME_ACCUM_SCALE,
-                false,
+                self.confidence_variance,
                 false,
                 false,
                 true,

@@ -41,6 +41,8 @@ fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
         spatial_radius: SPATIAL_RADIUS,
         lambda_ht: LAMBDA_HT,
         c_min: C_MIN,
+        mismatch_scale: 1.0,
+        confidence_variance: true,
     }
 }
 
@@ -254,6 +256,12 @@ fn run_spatial_only(
     let member_pos = client.empty(pos_len * size_of::<u32>());
     let member_frame = client.empty(pos_len * size_of::<u32>());
     let member_count = client.empty(refs * size_of::<u32>());
+    // `collab_group_temporal` always writes this, whatever `radius` is,
+    // so it needs its real `pos_len` size here even though this
+    // function's own `collab_filter_ht` call below never reads it back
+    // (that call keeps `use_member_sigma` off and passes
+    // `member_sig2_dummy` instead, unaffected by this buffer).
+    let member_sig2 = client.empty(pos_len * size_of::<f32>());
     let member_sig2_dummy = client.empty(size_of::<f32>());
     let filtered_dummy = client.empty(size_of::<f32>());
     let group_weight = client.empty(refs * size_of::<f32>());
@@ -300,14 +308,20 @@ fn run_spatial_only(
             ArrayArg::from_raw_parts(member_pos.clone(), pos_len),
             ArrayArg::from_raw_parts(member_frame.clone(), pos_len),
             ArrayArg::from_raw_parts(member_count.clone(), refs),
+            ArrayArg::from_raw_parts(member_sig2, pos_len),
             centre_slot,
             ArrayArg::from_raw_parts(neighbour_slots_dummy, 1),
             0.0f32,
             c_min,
+            // `radius` is 0 below, so no temporal candidate is ever
+            // scored and neither of these runtime scalars is ever read.
+            0.0f32,
+            0.0f32,
             0u32,
             refine,
             1u32,
             1u32,
+            8u32,
             8u32,
             1u32,
             1u32,
@@ -537,6 +551,11 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
         let member_pos = client.empty(pos_len * size_of::<u32>());
         let member_frame = client.empty(pos_len * size_of::<u32>());
         let member_count = client.empty(refs * size_of::<u32>());
+        // `collab_group_temporal` always writes this, and the
+        // `collab_filter_ht` call below keeps `use_member_sigma` off
+        // and reads `member_sig2_dummy` instead, unaffected by it, the
+        // same split `run_spatial_only` above uses.
+        let member_sig2 = client.empty(pos_len * size_of::<f32>());
         let member_sig2_dummy = client.empty(size_of::<f32>());
         let filtered_buf = client.empty(filt_len * size_of::<f32>());
         let group_weight = client.empty(refs * size_of::<f32>());
@@ -562,15 +581,19 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 ArrayArg::from_raw_parts(member_pos.clone(), pos_len),
                 ArrayArg::from_raw_parts(member_frame.clone(), pos_len),
                 ArrayArg::from_raw_parts(member_count.clone(), refs),
+                ArrayArg::from_raw_parts(member_sig2, pos_len),
                 centre_slot,
                 ArrayArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
                 0.0f32,
                 C_MIN,
+                front.thsad_value(),
+                1.0f32,
                 radius,
                 REFINE,
                 view.mv_stride,
                 view.conf_stride,
                 mc.step,
+                mc.blksize,
                 mc.blocks_x,
                 mc.blocks_y,
                 w,

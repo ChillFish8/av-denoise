@@ -451,6 +451,8 @@ impl NlmeansArgs {
             chroma_residual_sigma_scale: None,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
+            luma_mismatch_scale: None,
+            chroma_mismatch_scale: None,
             debug_ht_only: false,
             debug_ht_wavelet: false,
             debug_admission_sigma: None,

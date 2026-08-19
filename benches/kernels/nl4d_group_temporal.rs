@@ -11,6 +11,16 @@ const REFINE: u32 = 2;
 const SPATIAL_RADIUS: u32 = 9;
 const K_MAX: u32 = 8;
 const BLK_STEP: u32 = 8;
+// The library's own default motion block side length
+// (`MotionCompensationMode::Mvtools`'s `blksize`), distinct from
+// `BLK_STEP` above, which this bench keeps at `PATCH_SIZE` so a block
+// boundary lines up with a patch boundary.
+const BLKSIZE: u32 = 16;
+// `thsad(BLKSIZE, 1.0)` in normalised SAD units (block_area *
+// THSAD_PIXEL, see `crate::nlmeans::motion::thsad`), hand-computed here
+// since that function is crate-private.
+const THSAD: f32 = (BLKSIZE * BLKSIZE) as f32 * 0.02;
+const MISMATCH_SCALE: f32 = 1.0;
 const N_FRAMES: u32 = 2 * RADIUS + 1;
 const CENTRE_SLOT: u32 = RADIUS;
 
@@ -47,6 +57,7 @@ pub struct CollabGroupTemporalInput {
     pub member_pos: Handle,
     pub member_frame: Handle,
     pub member_count: Handle,
+    pub member_sig2: Handle,
     pub ring_len: usize,
 }
 
@@ -78,6 +89,7 @@ impl<R: Runtime> Benchmark for CollabGroupTemporalBench<R> {
         let member_pos = self.client.empty(pos_len * size_of::<u32>());
         let member_frame = self.client.empty(frame_len * size_of::<u32>());
         let member_count = self.client.empty(refs * size_of::<u32>());
+        let member_sig2 = self.client.empty(pos_len * size_of::<f32>());
 
         CollabGroupTemporalInput {
             ring,
@@ -87,6 +99,7 @@ impl<R: Runtime> Benchmark for CollabGroupTemporalBench<R> {
             member_pos,
             member_frame,
             member_count,
+            member_sig2,
             ring_len: ring_data.len(),
         }
     }
@@ -118,15 +131,19 @@ impl<R: Runtime> Benchmark for CollabGroupTemporalBench<R> {
                 ArrayArg::from_raw_parts(args.member_pos.clone(), pos_len),
                 ArrayArg::from_raw_parts(args.member_frame.clone(), frame_len),
                 ArrayArg::from_raw_parts(args.member_count.clone(), refs),
+                ArrayArg::from_raw_parts(args.member_sig2.clone(), pos_len),
                 CENTRE_SLOT,
                 ArrayArg::from_raw_parts(args.neighbour_slots.clone(), NEIGHBOUR_SLOTS.len()),
                 0.0f32,
                 0.0f32,
+                THSAD,
+                MISMATCH_SCALE,
                 RADIUS,
                 REFINE,
                 mv_stride,
                 conf_stride,
                 BLK_STEP,
+                BLKSIZE,
                 blocks_x,
                 blocks_y,
                 W,

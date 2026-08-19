@@ -17,6 +17,43 @@ const _: () = assert!(
 // use site rather than naming it. See that file's module-level comment
 // for the full reasoning. It applies unchanged here.
 
+/// The extra per-member variance a temporal candidate's motion-block
+/// confidence implies, the value [`collab_group_temporal`] writes into
+/// `member_sig2` for that member.
+///
+/// A poorly matched motion block is treated as a noisier observation of
+/// the true patch rather than a different patch, so its confidence `c`
+/// turns into extra variance instead of an admission decision. `thsad`
+/// is the same SAD threshold that block's confidence score was derived
+/// from, in normalised SAD units (see
+/// [`crate::nlmeans::motion::thsad`]), and `blksize` is the motion
+/// block's side length in pixels.
+///
+///     E^2      = thsad^2 * (1 - c) / (1 + c)
+///     eps      = E / blksize^2
+///     sigma_m2 = (pi / 2) * eps^2 * mismatch_scale^2
+///
+/// `c = 1`, a perfect match, gives `sigma_m2 = 0` exactly. Lower
+/// confidence inflates it, and `mismatch_scale` scales the result by
+/// its square, a per-plane dial for how far block SAD's coarse mismatch
+/// proxy should be trusted. A caller wanting the mechanism off entirely
+/// passes `mismatch_scale = 0.0`, which collapses every result to `0.0`
+/// regardless of `c`, the constant-addition no-op
+/// [`crate::collab::kernels::filter_ht::collab_filter_ht`]'s own
+/// `use_member_sigma = false` path already reproduces.
+///
+/// This function never runs for a centre-frame member. Those carry
+/// `sigma_m2 = 0` exactly because they are not motion-predicted, so
+/// there is no mismatch to model, and [`collab_group_temporal`] takes
+/// that branch before ever calling this.
+#[cube]
+fn mismatch_sigma2(confidence: f32, thsad: f32, blksize_area: f32, mismatch_scale: f32) -> f32 {
+    let ratio = (1.0f32 - confidence) / (1.0f32 + confidence);
+    let e2 = thsad * thsad * ratio;
+    let eps = f32::sqrt(e2) / blksize_area;
+    std::f32::consts::FRAC_PI_2 * eps * eps * mismatch_scale * mismatch_scale
+}
+
 /// Finds the K most similar patches to each reference patch, searching
 /// the centre frame spatially and each neighbour frame in the ring
 /// around where motion compensation predicts the reference patch moved.
@@ -68,6 +105,26 @@ const _: () = assert!(
 /// the tree-reduction argmin per slot, and the power-of-two rounding of
 /// the final count, works exactly as
 /// [`super::group::collab_group_spatial`] documents it.
+///
+/// # Per-member mismatch variance
+///
+/// `member_sig2` is written alongside `member_pos`/`member_frame`, the
+/// same `ref_idx * k_max + j` layout, and holds the extra variance
+/// [`crate::collab::kernels::filter_ht::collab_filter_ht`] adds to
+/// `sigma[c]^2` for that member when its own `use_member_sigma` is set.
+/// A centre-frame member carries `0.0` exactly. A temporal member's
+/// value comes from [`mismatch_sigma2`], run against the same
+/// confidence that decided whether its neighbour block was gated,
+/// `thsad` and `mismatch_scale` passed straight through, and `blksize`
+/// squared into the block area `mismatch_sigma2` divides by.
+///
+/// Every candidate carries its source block's confidence alongside its
+/// distance, in a `cand_conf` array shaped like `dist`/`posn`/`frm`.
+/// The selection rounds below already read `posn`/`frm` off the
+/// winning index once a round's argmin has picked it, so `cand_conf`
+/// is read the same way, into a `top_c` array shaped like `top_p`/
+/// `top_f`, and it is that saved confidence [`mismatch_sigma2`] runs
+/// on, not a later re-read of `confidence` itself.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments, unused_assignments)]
 pub fn collab_group_temporal<N: Size>(
@@ -77,15 +134,19 @@ pub fn collab_group_temporal<N: Size>(
     member_pos: &mut Array<u32>,
     member_frame: &mut Array<u32>,
     member_count: &mut Array<u32>,
+    member_sig2: &mut Array<f32>,
     centre_slot: u32,
     neighbour_slots: &Array<u32>,
     noise_floor: f32,
     c_min: f32,
+    thsad: f32,
+    mismatch_scale: f32,
     #[comptime] radius: u32,
     #[comptime] refine: u32,
     #[comptime] mv_stride: u32,
     #[comptime] conf_stride: u32,
     #[comptime] blk_step: u32,
+    #[comptime] blksize: u32,
     #[comptime] blocks_x: u32,
     #[comptime] blocks_y: u32,
     #[comptime] width: u32,
@@ -115,10 +176,12 @@ pub fn collab_group_temporal<N: Size>(
     let mut dist = SharedMemory::<f32>::new(n_cand as usize);
     let mut posn = SharedMemory::<u32>::new(n_cand as usize);
     let mut frm = SharedMemory::<u32>::new(n_cand as usize);
+    let mut cand_conf = SharedMemory::<f32>::new(n_cand as usize);
     let mut red_d = SharedMemory::<f32>::new(PATCH_AREA as usize);
     let mut red_i = SharedMemory::<u32>::new(PATCH_AREA as usize);
     let mut top_p = SharedMemory::<u32>::new(k_max as usize);
     let mut top_f = SharedMemory::<u32>::new(k_max as usize);
+    let mut top_c = SharedMemory::<f32>::new(k_max as usize);
     let mut found = SharedMemory::<u32>::new(1usize);
 
     // Stage the reference patch from the centre frame, one thread per
@@ -133,6 +196,10 @@ pub fn collab_group_temporal<N: Size>(
     if tid == 0u32 {
         top_p[0] = self_packed;
         top_f[0] = centre_slot;
+        // Never read, the centre slot on `top_f[0]` always forces
+        // `mismatch_sigma2` to be skipped below, but every slot this
+        // kernel could write gets a defined value here regardless.
+        top_c[0] = 0.0f32;
         found[0] = 1u32;
     }
     sync_cube();
@@ -148,6 +215,10 @@ pub fn collab_group_temporal<N: Size>(
     // Score: each thread owns a strided slice of the candidates and
     // walks each of its candidates' pixels on its own.
     let scale = channel_scale(channels);
+    // `mismatch_sigma2` divides by this rather than `blksize` itself,
+    // see its own doc comment, and it is the same for every temporal
+    // candidate this whole cube scores, so it is computed once here.
+    let blksize_area = comptime!(blksize * blksize) as f32;
 
     // A thread's own `ci` only ever increases as the loop below strides
     // through it, so the neighbour index `t` a temporal candidate maps
@@ -168,6 +239,12 @@ pub fn collab_group_temporal<N: Size>(
         let mut cy = 0u32;
         let mut frame_val = centre_slot;
         let mut gated = false;
+        // Never read for a spatial candidate, `frame_val` stays
+        // `centre_slot` for one of those and the write-out below never
+        // calls `mismatch_sigma2` on a centre-frame member, but every
+        // slot `cand_conf` could be indexed at still gets a defined
+        // value here.
+        let mut cand_c = 1.0f32;
 
         if ci < n_spatial {
             cx = clamp_top_left(
@@ -198,6 +275,7 @@ pub fn collab_group_temporal<N: Size>(
             let py = ry as i32 + cached_mv1 + (j / refine_side) as i32 - refine as i32;
             cx = clamp_top_left(px, max_x);
             cy = clamp_top_left(py, max_y);
+            cand_c = cached_c;
 
             if cached_c < c_min {
                 gated = true;
@@ -235,6 +313,7 @@ pub fn collab_group_temporal<N: Size>(
         dist[ci as usize] = kept;
         posn[ci as usize] = packed;
         frm[ci as usize] = frame_val;
+        cand_conf[ci as usize] = cand_c;
         ci += PATCH_AREA;
     }
     sync_cube();
@@ -280,10 +359,12 @@ pub fn collab_group_temporal<N: Size>(
         let win_d = red_d[0];
         let win_p = posn[red_i[0] as usize];
         let win_f = frm[red_i[0] as usize];
+        let win_c = cand_conf[red_i[0] as usize];
         if win_d < 3.0e38f32 {
             if tid == 0u32 {
                 top_p[slot as usize] = win_p;
                 top_f[slot as usize] = win_f;
+                top_c[slot as usize] = win_c;
                 found[0] += 1u32;
             }
             // Retire the winner along with every other candidate
@@ -312,8 +393,14 @@ pub fn collab_group_temporal<N: Size>(
         member_count[ref_idx as usize] = k;
         let mut j = 0u32;
         while j < k {
+            let frame_j = top_f[j as usize];
             member_pos[(ref_idx * k_max + j) as usize] = top_p[j as usize];
-            member_frame[(ref_idx * k_max + j) as usize] = top_f[j as usize];
+            member_frame[(ref_idx * k_max + j) as usize] = frame_j;
+            let mut sig2 = 0.0f32;
+            if frame_j != centre_slot {
+                sig2 = mismatch_sigma2(top_c[j as usize], thsad, blksize_area, mismatch_scale);
+            }
+            member_sig2[(ref_idx * k_max + j) as usize] = sig2;
             j += 1u32;
         }
     }

@@ -125,7 +125,12 @@ pub(crate) fn variance_ladder(v: &mut Array<f32>, k_use: u32) {
 /// `member_sig2` holds `refs * k_max` extra per-member variance, added to
 /// `sigma[c]^2` when `use_member_sigma` is true. It is never read when that
 /// flag is false, so a 1-element dummy buffer is valid there, the same
-/// pattern `confidence_dummy` uses in `nlmeans`. `filtered` holds
+/// pattern `confidence_dummy` uses in `nlmeans`.
+/// [`crate::collab::kernels::group_temporal::collab_group_temporal`] is
+/// the producer that fills it with real values, one motion-block
+/// mismatch variance per temporal member and `0.0` for every
+/// centre-frame member, when the caller wants `nl4d`'s confidence-as-
+/// variance mechanism live. `filtered` holds
 /// `refs * PATCH_AREA` lines, member 0's filtered patch for every
 /// reference. `group_weight` holds `refs` weights, and `sigma` holds one
 /// value per stored channel. `accum_scale` is the fixed-point scale the

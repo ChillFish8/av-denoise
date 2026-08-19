@@ -37,6 +37,27 @@ pub struct Nl4dParams {
     /// compute a submit spends, never which candidates are admitted once
     /// they are scored.
     pub c_min: f32,
+    /// Multiplies the extra per-member variance a temporal member's
+    /// motion-block confidence implies, see
+    /// [`crate::collab::kernels::group_temporal::collab_group_temporal`]'s
+    /// `mismatch_sigma2` for the formula this scales. Defaults to `1.0`,
+    /// per plane through [`crate::denoiser::Nl4dOptions`]. `0.0` turns
+    /// the mechanism into a no-op, every temporal member's extra
+    /// variance collapsing to `0.0` regardless of its confidence, the
+    /// cleanest way to reproduce [`Self::confidence_variance`]'s own
+    /// off state without also flipping that switch.
+    pub mismatch_scale: f32,
+    /// Whether a temporal member's mismatch variance reaches the
+    /// hard-threshold shrinkage at all.
+    ///
+    /// Defaults to `true`, the design this denoiser exists to test.
+    /// `false` runs the hard-threshold stage exactly as it ran before
+    /// this mechanism existed, every member's variance the plain
+    /// channel sigma with no per-member addition, for an ablation that
+    /// needs the mechanism off at otherwise identical settings rather
+    /// than through `mismatch_scale = 0.0`, which reaches the same
+    /// output through the extra-variance buffer instead of skipping it.
+    pub confidence_variance: bool,
 }
 
 impl Default for Nl4dParams {
@@ -60,6 +81,8 @@ impl Default for Nl4dParams {
             spatial_radius: 9,
             lambda_ht: 5.3,
             c_min: 0.05,
+            mismatch_scale: 1.0,
+            confidence_variance: true,
         }
     }
 }
@@ -123,6 +146,13 @@ impl Nl4dParams {
             return Err(format!(
                 "c_min must be finite and in [0, 1), got {}",
                 self.c_min
+            ));
+        }
+
+        if !(self.mismatch_scale.is_finite() && self.mismatch_scale >= 0.0) {
+            return Err(format!(
+                "mismatch_scale must be finite and non-negative, got {}",
+                self.mismatch_scale
             ));
         }
 
@@ -253,6 +283,29 @@ mod tests {
                 ..Nl4dParams::default()
             };
             assert!(params.validate().is_err(), "c_min={bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_mismatch_scale_zero() {
+        let params = Nl4dParams {
+            mismatch_scale: 0.0,
+            ..Nl4dParams::default()
+        };
+        assert!(params.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_negative_or_non_finite_mismatch_scale() {
+        for bad in [-1.0f32, f32::NAN, f32::INFINITY] {
+            let params = Nl4dParams {
+                mismatch_scale: bad,
+                ..Nl4dParams::default()
+            };
+            assert!(
+                params.validate().is_err(),
+                "mismatch_scale={bad} should be rejected"
+            );
         }
     }
 }

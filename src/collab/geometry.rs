@@ -31,6 +31,15 @@ pub fn member_frame_buf_len(width: u32, height: u32, k_max: u32) -> usize {
     member_buf_len(width, height, k_max)
 }
 
+/// Length of the member-sigma buffer, one extra-variance `f32` per slot.
+///
+/// Identical to [`member_buf_len`]. A distinct name documents that this
+/// buffer holds [`crate::collab::kernels::group_temporal::collab_group_temporal`]'s
+/// per-member mismatch variance rather than a packed position.
+pub fn member_sig2_buf_len(width: u32, height: u32, k_max: u32) -> usize {
+    member_buf_len(width, height, k_max)
+}
+
 /// Length of the filtered-patch debug buffer in `Vector<f32, N>` lines,
 /// one whole group of `k_max` patches per reference.
 ///
