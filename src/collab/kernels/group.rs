@@ -54,8 +54,12 @@ pub(crate) fn unpack_pos_host(packed: u32) -> (u32, u32) {
 /// anything reads from it. That guarantees a patch read at that position
 /// always starts and ends inside the frame, so no kernel that later
 /// consumes a group needs to clamp its own reads.
+///
+/// `pub(crate)` because [`crate::collab::kernels::group_temporal`] reuses
+/// it for the same purpose against both the spatial window and each
+/// neighbour frame's refine window.
 #[cube]
-fn clamp_top_left(v: i32, max_pos: u32) -> u32 {
+pub(crate) fn clamp_top_left(v: i32, max_pos: u32) -> u32 {
     let mut result = v;
     if result < 0 {
         result = 0;

@@ -333,6 +333,7 @@ fn run_stage1(
 
     let member_pos_buf = client.create_from_slice(u32::as_bytes(&stage1.member_pos));
     let member_count_buf = client.create_from_slice(u32::as_bytes(&stage1.member_count));
+    let member_frame_dummy = client.empty(size_of::<u32>());
     let member_sig2_dummy = client.empty(size_of::<f32>());
     let filtered_dummy = client.empty(size_of::<f32>());
     let group_weight = client.empty(refs * size_of::<f32>());
@@ -364,6 +365,7 @@ fn run_stage1(
             1usize,
             ArrayArg::from_raw_parts(noisy_gpu.clone(), frame_len),
             ArrayArg::from_raw_parts(member_pos_buf, pos_len),
+            ArrayArg::from_raw_parts(member_frame_dummy, 1),
             ArrayArg::from_raw_parts(member_count_buf, refs),
             ArrayArg::from_raw_parts(member_sig2_dummy, 1),
             ArrayArg::from_raw_parts(accum.clone(), frame_len),
@@ -375,6 +377,7 @@ fn run_stage1(
             ArrayArg::from_raw_parts(dct_profile_buf, 8),
             params.lambda_ht,
             wnorm,
+            false,
             false,
             false,
             false,

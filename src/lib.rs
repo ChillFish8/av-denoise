@@ -11,6 +11,8 @@ pub mod device;
 #[doc(hidden)]
 pub mod nl3d;
 #[doc(hidden)]
+pub mod nl4d;
+#[doc(hidden)]
 pub mod nlmeans;
 pub mod sniff;
 

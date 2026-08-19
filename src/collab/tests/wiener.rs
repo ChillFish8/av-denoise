@@ -187,6 +187,7 @@ fn run_ht_raw(
     let profile = dct_noise_profile(0.0);
     let dct_profile_buf = client.create_from_slice(f32::as_bytes(&profile));
     let dummy = client.empty(size_of::<f32>());
+    let member_frame_dummy = client.empty(size_of::<u32>());
     let accum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels]));
     let wsum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels]));
 
@@ -201,6 +202,7 @@ fn run_ht_raw(
             1usize,
             ArrayArg::from_raw_parts(frame.clone(), frame_len),
             ArrayArg::from_raw_parts(groups.member_pos.clone(), groups.pos_len),
+            ArrayArg::from_raw_parts(member_frame_dummy, 1),
             ArrayArg::from_raw_parts(groups.member_count.clone(), refs),
             ArrayArg::from_raw_parts(dummy, 1),
             ArrayArg::from_raw_parts(accum, pixels),
@@ -214,6 +216,7 @@ fn run_ht_raw(
             weight_scale(sigma, &profile),
             false,
             true,
+            false,
             false,
             width,
             height,

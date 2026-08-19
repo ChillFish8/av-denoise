@@ -141,6 +141,7 @@ fn run_scatter_stage(frame: &[f32], width: u32, height: u32, sigma: f32) -> (Vec
 
     let input = client.create_from_slice(f32::as_bytes(frame));
     let member_pos = client.empty(pos_len * size_of::<u32>());
+    let member_frame_dummy = client.empty(size_of::<u32>());
     let member_count = client.empty(refs * size_of::<u32>());
     let accum = client.empty(pixels * size_of::<i32>());
     let wsum = client.empty(pixels * size_of::<i32>());
@@ -191,6 +192,7 @@ fn run_scatter_stage(frame: &[f32], width: u32, height: u32, sigma: f32) -> (Vec
             1usize,
             ArrayArg::from_raw_parts(input.clone(), pixels),
             ArrayArg::from_raw_parts(member_pos.clone(), pos_len),
+            ArrayArg::from_raw_parts(member_frame_dummy, 1),
             ArrayArg::from_raw_parts(member_count.clone(), refs),
             ArrayArg::from_raw_parts(dummy, 1),
             ArrayArg::from_raw_parts(accum.clone(), pixels),
@@ -202,6 +204,7 @@ fn run_scatter_stage(frame: &[f32], width: u32, height: u32, sigma: f32) -> (Vec
             ArrayArg::from_raw_parts(profile_buf, 8),
             2.7f32,
             weight_scale(sigma, &profile),
+            false,
             false,
             false,
             false,

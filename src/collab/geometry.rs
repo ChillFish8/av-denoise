@@ -22,6 +22,15 @@ pub fn member_buf_len(width: u32, height: u32, k_max: u32) -> usize {
     ref_count(width, height) * k_max as usize
 }
 
+/// Length of the member-frame buffer, one `u32` ring slot per slot.
+///
+/// Identical to [`member_buf_len`]. A distinct name documents that this
+/// buffer holds the physical frame slot each member was matched in,
+/// rather than a packed position.
+pub fn member_frame_buf_len(width: u32, height: u32, k_max: u32) -> usize {
+    member_buf_len(width, height, k_max)
+}
+
 /// Length of the filtered-patch debug buffer in `Vector<f32, N>` lines,
 /// one whole group of `k_max` patches per reference.
 ///
@@ -86,6 +95,11 @@ mod tests {
         // refs_along(16) = (16 - 8) / 4 + 1 = 3, so ref_count(16, 16) is
         // 3 * 3 = 9, and member_buf_len(16, 16, 8) is 9 * 8 = 72.
         assert_eq!(member_buf_len(16, 16, 8), 72);
+    }
+
+    #[test]
+    fn member_frame_buf_len_matches_member_buf_len() {
+        assert_eq!(member_frame_buf_len(16, 16, 8), member_buf_len(16, 16, 8));
     }
 
     #[test]

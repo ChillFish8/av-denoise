@@ -18,9 +18,14 @@
 //! onto one frame plane, weighted by how much its group agreed on it,
 //! turning the overlapping per-reference estimates into a single output
 //! value per pixel.
+//!
+//! `group_temporal` groups patches the way `group` does, plus a
+//! motion-guided search of each neighbour frame in a ring, so a group can
+//! carry members whose grain is independent of the reference frame's own.
 
 pub mod aggregate;
 pub mod filter_ht;
 pub mod filter_wiener;
 pub mod group;
+pub mod group_temporal;
 pub mod transforms;

@@ -31,6 +31,7 @@ use kernels::mc_chain_compose::ChainComposeBench;
 use kernels::mc_confidence::McConfidenceBench;
 use kernels::mc_downscale::DownscaleBench;
 use kernels::mc_warp::WarpBench;
+use kernels::nl4d_group_temporal::CollabGroupTemporalBench;
 use kernels::noise_partial::NoisePartialBench;
 use kernels::temporal_noise_stats::TemporalNoiseStatsBench;
 use kernels::vertical_weight::VWeightBench;
@@ -203,6 +204,13 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
     run(CollabGroupBench {
         client: client.clone(),
     });
+    for &(ch, ch_name) in CHANNELS {
+        run(CollabGroupTemporalBench {
+            client: client.clone(),
+            ch,
+            ch_name,
+        });
+    }
     run(CollabHtBench {
         client: client.clone(),
     });

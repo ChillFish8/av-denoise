@@ -116,8 +116,12 @@ pub(crate) fn variance_ladder(v: &mut Array<f32>, k_use: u32) {
 /// # Buffers
 ///
 /// `input` is the frame ring `collab_group_spatial` also reads, indexed
-/// by `frame`. `member_pos` and `member_count` are `collab_group_spatial`'s
-/// outputs, `refs * k_max` packed positions and `refs` counts.
+/// by `frame` when `temporal` is false and by each member's own
+/// `member_frame` entry when it is true. `member_pos` and `member_count`
+/// are `collab_group_spatial`'s outputs, `refs * k_max` packed positions
+/// and `refs` counts. `member_frame` is `collab_group_temporal`'s extra
+/// output, `refs * k_max` ring slots in the same layout, read only when
+/// `temporal` is true.
 /// `member_sig2` holds `refs * k_max` extra per-member variance, added to
 /// `sigma[c]^2` when `use_member_sigma` is true. It is never read when that
 /// flag is false, so a 1-element dummy buffer is valid there, the same
@@ -141,11 +145,40 @@ pub(crate) fn variance_ladder(v: &mut Array<f32>, k_use: u32) {
 /// alternative for comparing the two bases. The `dct8_line_*` mat-vec
 /// helpers run either basis unchanged, since both are orthonormal 8x8
 /// matrices with their inverse equal to their transpose.
+///
+/// # Temporal members
+///
+/// `member_frame` holds one physical ring slot per member, the same
+/// `ref_idx * k_max + m` layout `member_pos` uses, written by
+/// [`crate::collab::kernels::group_temporal::collab_group_temporal`].
+/// `temporal` selects how the filter treats it.
+///
+/// False, the path every shipped single-frame denoiser runs, leaves
+/// `member_frame` unread. Every member's patch comes from `input` at
+/// `frame`, exactly as before this parameter existed, and every member
+/// scatters back into `accum`/`wsum` unconditionally. A 1-element dummy
+/// buffer is valid for `member_frame` here, the same pattern
+/// `member_sig2` uses under `use_member_sigma = false`.
+///
+/// True reads each member's patch from `input` at its own
+/// `member_frame` entry rather than at `frame`, so a member matched in a
+/// neighbour frame is loaded from that frame's own pixels. Every member
+/// still runs through the full forward transform, threshold, and inverse
+/// transform, and still lands in `filtered` when `emit_filtered` is set,
+/// whatever frame it came from. Only the scatter is conditional, a
+/// member scatters into `accum`/`wsum` only when its `member_frame`
+/// entry equals `frame`, the centre frame. A neighbour-frame member
+/// contributes to the group's shared statistics (the group weight, the
+/// coefficients every member's inverse transform depends on) without
+/// writing its filtered pixels anywhere, since scattering them would
+/// place a neighbour frame's content at this member's position in the
+/// centre frame's output.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn collab_filter_ht<N: Size>(
     input: &Array<Vector<f32, N>>,
     member_pos: &Array<u32>,
+    member_frame: &Array<u32>,
     member_count: &Array<u32>,
     member_sig2: &Array<f32>,
     accum: &mut Array<Atomic<i32>>,
@@ -160,6 +193,7 @@ pub fn collab_filter_ht<N: Size>(
     #[comptime] use_member_sigma: bool,
     #[comptime] emit_filtered: bool,
     #[comptime] ht_wavelet: bool,
+    #[comptime] temporal: bool,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
@@ -210,11 +244,15 @@ pub fn collab_filter_ht<N: Size>(
             let packed = member_pos[(ref_idx * k_max + m) as usize];
             let member_x = packed & 0xFFFFu32;
             let member_y = packed >> 16u32;
+            let mut src_frame = frame;
+            if temporal {
+                src_frame = member_frame[(ref_idx * k_max + m) as usize];
+            }
             let pixel = read_line(
                 input,
                 member_x + local_x,
                 member_y + local_y,
-                frame,
+                src_frame,
                 width,
                 height,
             );
@@ -374,24 +412,47 @@ pub fn collab_filter_ht<N: Size>(
         out_vec[c as usize] = stack[tid as usize];
 
         // Scatter every member back to where it came from. One thread
-        // owns one pixel of each member's patch.
+        // owns one pixel of each member's patch. `temporal` guards the
+        // scatter itself, not the transform above it, a neighbour-frame
+        // member is still filtered as part of the group, it just never
+        // writes into this centre frame's accumulators, since that
+        // position belongs to a different frame's output.
         let weight = gw[0];
         let mut mo = 0u32;
         while mo < k_use {
             let packed = member_pos[(ref_idx * k_max + mo) as usize];
-            scatter_patch(
-                accum,
-                wsum,
-                stack[(mo * PATCH_AREA + tid) as usize],
-                weight,
-                packed & 0xFFFFu32,
-                packed >> 16u32,
-                tid,
-                comptime!(c == 0u32),
-                c,
-                width,
-                stored_ch,
-            );
+            if temporal {
+                let member_frame_val = member_frame[(ref_idx * k_max + mo) as usize];
+                if member_frame_val == frame {
+                    scatter_patch(
+                        accum,
+                        wsum,
+                        stack[(mo * PATCH_AREA + tid) as usize],
+                        weight,
+                        packed & 0xFFFFu32,
+                        packed >> 16u32,
+                        tid,
+                        comptime!(c == 0u32),
+                        c,
+                        width,
+                        stored_ch,
+                    );
+                }
+            } else {
+                scatter_patch(
+                    accum,
+                    wsum,
+                    stack[(mo * PATCH_AREA + tid) as usize],
+                    weight,
+                    packed & 0xFFFFu32,
+                    packed >> 16u32,
+                    tid,
+                    comptime!(c == 0u32),
+                    c,
+                    width,
+                    stored_ch,
+                );
+            }
             mo += 1u32;
         }
 

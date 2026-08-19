@@ -54,6 +54,7 @@ pub struct CollabPipeline<R: Runtime> {
     width: u32,
     height: u32,
     member_pos: Handle,
+    member_frame_dummy: Handle,
     member_count: Handle,
     member_sig2_dummy: Handle,
     filtered_dummy: Handle,
@@ -101,6 +102,12 @@ impl<R: Runtime> CollabPipeline<R> {
         let frame_len = pixels * stored_ch;
 
         let member_pos = client.empty(pos_len * size_of::<u32>());
+        // This pipeline only ever runs `collab_filter_ht` with
+        // `temporal = false`, the single-frame nl3d path, so
+        // `member_frame` is never read and a one-element placeholder is
+        // valid here, the same pattern `member_sig2_dummy` and
+        // `filtered_dummy` already use.
+        let member_frame_dummy = client.empty(size_of::<u32>());
         let member_count = client.empty(refs * size_of::<u32>());
         let member_sig2_dummy = client.empty(size_of::<f32>());
         // The filters only write their filtered patches out when
@@ -126,6 +133,7 @@ impl<R: Runtime> CollabPipeline<R> {
             width,
             height,
             member_pos,
+            member_frame_dummy,
             member_count,
             member_sig2_dummy,
             filtered_dummy,
@@ -301,6 +309,7 @@ impl<R: Runtime> CollabPipeline<R> {
                 stored_ch,
                 ArrayArg::from_raw_parts(input.clone(), frame_len),
                 ArrayArg::from_raw_parts(self.member_pos.clone(), pos_len),
+                ArrayArg::from_raw_parts(self.member_frame_dummy.clone(), 1),
                 ArrayArg::from_raw_parts(self.member_count.clone(), refs),
                 ArrayArg::from_raw_parts(self.member_sig2_dummy.clone(), 1),
                 ArrayArg::from_raw_parts(self.accum.clone(), frame_len),
@@ -315,6 +324,7 @@ impl<R: Runtime> CollabPipeline<R> {
                 false,
                 false,
                 self.params.ht_wavelet,
+                false,
                 width,
                 height,
                 channels_count as u32,

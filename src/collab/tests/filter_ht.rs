@@ -12,7 +12,7 @@ use super::helpers::{
 use crate::collab::geometry::{filtered_buf_len, member_buf_len, ref_count, ref_pos, refs_along};
 use crate::collab::kernels::aggregate::weight_scale;
 use crate::collab::kernels::filter_ht::{collab_filter_ht, variance_ladder};
-use crate::collab::kernels::group::collab_group_spatial;
+use crate::collab::kernels::group::{collab_group_spatial, pack_pos_host};
 use crate::collab::kernels::transforms::{dct_noise_profile, haar_variance_ladder};
 
 /// Every reference top-left position on the grid, in the same raster
@@ -111,6 +111,11 @@ fn run_group_raw(
 
 /// Runs [`collab_filter_ht`] against an already-grouped frame and reads
 /// back both output buffers.
+///
+/// `member_frame`/`member_frame_len`/`temporal` follow the same
+/// pattern `member_sig2`/`member_sig2_len`/`use_member_sigma` already
+/// use. A 1-element dummy is valid whenever `temporal` is false, since
+/// the kernel never reads the buffer in that case.
 #[allow(clippy::too_many_arguments)]
 fn run_filter_raw(
     client: &ComputeClient<R>,
@@ -126,6 +131,10 @@ fn run_filter_raw(
     member_sig2_len: usize,
     use_member_sigma: bool,
     rho: f32,
+    member_frame: &Handle,
+    member_frame_len: usize,
+    temporal: bool,
+    frame: u32,
 ) -> (Vec<f32>, Vec<f32>) {
     let refs_x = refs_along(width);
     let refs_y = refs_along(height);
@@ -155,13 +164,14 @@ fn run_filter_raw(
             1usize,
             ArrayArg::from_raw_parts(reference.clone(), frame_len),
             ArrayArg::from_raw_parts(groups.member_pos.clone(), groups.pos_len),
+            ArrayArg::from_raw_parts(member_frame.clone(), member_frame_len),
             ArrayArg::from_raw_parts(groups.member_count.clone(), refs),
             ArrayArg::from_raw_parts(member_sig2.clone(), member_sig2_len),
             ArrayArg::from_raw_parts(accum, pixels),
             ArrayArg::from_raw_parts(wsum, pixels),
             ArrayArg::from_raw_parts(filtered_buf.clone(), filt_len),
             ArrayArg::from_raw_parts(weight_buf.clone(), refs),
-            0u32,
+            frame,
             ArrayArg::from_raw_parts(sigma_buf, 1),
             ArrayArg::from_raw_parts(dct_profile_buf, 8),
             lambda_ht,
@@ -169,6 +179,7 @@ fn run_filter_raw(
             use_member_sigma,
             true,
             false,
+            temporal,
             width,
             height,
             1u32,
@@ -257,6 +268,7 @@ fn run_filter_with_rho(
         k_max,
     );
     let dummy = client.empty(size_of::<f32>());
+    let frame_dummy = client.empty(size_of::<u32>());
 
     run_filter_raw(
         &client,
@@ -272,6 +284,10 @@ fn run_filter_with_rho(
         1,
         false,
         rho,
+        &frame_dummy,
+        1,
+        false,
+        0u32,
     )
 }
 
@@ -331,6 +347,7 @@ fn zero_sigma_is_identity_for_a_full_stack() {
     );
 
     let dummy = client.empty(size_of::<f32>());
+    let frame_dummy = client.empty(size_of::<u32>());
     let (filtered, _weights) = run_filter_raw(
         &client,
         &reference,
@@ -345,6 +362,10 @@ fn zero_sigma_is_identity_for_a_full_stack() {
         1,
         false,
         0.0,
+        &frame_dummy,
+        1,
+        false,
+        0u32,
     );
 
     let expected = extract_patch(&frame, w, 16, 16);
@@ -456,6 +477,7 @@ fn hetero_flag_off_never_reads_member_sig2() {
     let refs = groups.refs;
     let dummy = client.empty(size_of::<f32>());
     let full_zero = client.create_from_slice(f32::as_bytes(&vec![0.0f32; refs * 8]));
+    let frame_dummy = client.empty(size_of::<u32>());
 
     let (filtered_dummy, weight_dummy) = run_filter_raw(
         &client,
@@ -471,6 +493,10 @@ fn hetero_flag_off_never_reads_member_sig2() {
         1,
         false,
         0.0,
+        &frame_dummy,
+        1,
+        false,
+        0u32,
     );
     let (filtered_full, weight_full) = run_filter_raw(
         &client,
@@ -486,6 +512,10 @@ fn hetero_flag_off_never_reads_member_sig2() {
         refs * 8,
         false,
         0.0,
+        &frame_dummy,
+        1,
+        false,
+        0u32,
     );
 
     assert_eq!(
@@ -585,6 +615,7 @@ fn dct_profile_rho_zero_matches_a_hand_built_all_ones_profile() {
     let reference = client.create_from_slice(f32::as_bytes(&frame));
     let groups = run_group_raw(&client, &reference, frame.len(), w, h, floor, tau_admit, 9, 8);
     let dummy = client.empty(size_of::<f32>());
+    let frame_dummy = client.empty(size_of::<u32>());
 
     assert_eq!(
         dct_noise_profile(0.0),
@@ -607,6 +638,10 @@ fn dct_profile_rho_zero_matches_a_hand_built_all_ones_profile() {
         1,
         false,
         0.0,
+        &frame_dummy,
+        1,
+        false,
+        0u32,
     );
 
     // Bypasses run_filter_raw's own dct_noise_profile(rho) call entirely,
@@ -633,6 +668,7 @@ fn dct_profile_rho_zero_matches_a_hand_built_all_ones_profile() {
             1usize,
             ArrayArg::from_raw_parts(reference.clone(), frame.len()),
             ArrayArg::from_raw_parts(groups.member_pos.clone(), groups.pos_len),
+            ArrayArg::from_raw_parts(frame_dummy, 1),
             ArrayArg::from_raw_parts(groups.member_count.clone(), refs),
             ArrayArg::from_raw_parts(dummy, 1),
             ArrayArg::from_raw_parts(accum, pixels),
@@ -646,6 +682,7 @@ fn dct_profile_rho_zero_matches_a_hand_built_all_ones_profile() {
             weight_scale(sigma, &[1.0f32; 8]),
             false,
             true,
+            false,
             false,
             w,
             h,
@@ -712,4 +749,271 @@ fn higher_rho_retains_more_noise_on_a_flat_field() {
         "expected rho=0.86 to leave meaningfully more residual variance than rho=0 at the same \
          lambda_ht, got rho=0 variance={var_rho0} rho=0.86 variance={var_rho_high}"
     );
+}
+
+/// A hand-built two-frame, two-member group, one member in the centre
+/// frame and one in a neighbour frame, with `sigma = 0` so the hard
+/// threshold keeps every coefficient and the filter is an identity.
+///
+/// `width = height = 16` gives a `4 x 4` `refs_x/refs_y` grid (`STEP =
+/// 4`, `PATCH_SIZE = 8`), so there are 9 references. Only reference 0
+/// carries any members, both frames at `rho = 0` planted so its two
+/// members' 8x8 patches, at `(0, 0)` and `(8, 8)`, do not overlap. Every
+/// other reference gets `member_count = 0`, so it contributes nothing.
+///
+/// With `temporal = true` and the guard around `scatter_patch` in place,
+/// the reduction is this. Both members still go through the full
+/// forward/inverse transform (`emit_filtered` proves that, both patches
+/// come back matching their planted input exactly), but only the
+/// centre-frame member's weight reaches `wsum`. The neighbour-frame
+/// member's own 8x8 region therefore reads back with `wsum == 0`
+/// everywhere, since no other reference reaches into it.
+#[test]
+fn temporal_members_filter_but_do_not_scatter() {
+    let (w, h) = (16u32, 16u32);
+    let pixels = (w * h) as usize;
+    let refs_x = refs_along(w);
+    let refs = ref_count(w, h);
+    let k_max = 2u32;
+
+    let centre_slot = 0u32;
+    let neighbour_slot = 1u32;
+    let centre_patch = deterministic_texture(21);
+    let neighbour_patch = deterministic_texture(22);
+
+    // Two stacked planes, `read_line`'s `frame` index selects between
+    // them. Centre-frame content lives at (0, 0), neighbour-frame content
+    // at (8, 8), matching where each member's own position points.
+    let mut ring = vec![0.4f32; 2 * pixels];
+    plant_patch(&mut ring[..pixels], w, 0, 0, &centre_patch);
+    plant_patch(&mut ring[pixels..], w, 8, 8, &neighbour_patch);
+
+    let mut member_pos = vec![0u32; refs * k_max as usize];
+    let mut member_frame = vec![0u32; refs * k_max as usize];
+    let mut member_count = vec![0u32; refs];
+    member_pos[0] = pack_pos_host(0, 0);
+    member_frame[0] = centre_slot;
+    member_pos[1] = pack_pos_host(8, 8);
+    member_frame[1] = neighbour_slot;
+    member_count[0] = 2;
+
+    let client = make_client();
+    let ring_buf = client.create_from_slice(f32::as_bytes(&ring));
+    let member_pos_buf = client.create_from_slice(u32::as_bytes(&member_pos));
+    let member_frame_buf = client.create_from_slice(u32::as_bytes(&member_frame));
+    let member_count_buf = client.create_from_slice(u32::as_bytes(&member_count));
+    let member_sig2_dummy = client.empty(size_of::<f32>());
+    let filt_len = filtered_buf_len(w, h, k_max);
+    let filtered_buf = client.create_from_slice(f32::as_bytes(&vec![0.0f32; filt_len]));
+    let weight_buf = client.empty(refs * size_of::<f32>());
+    let sigma_buf = client.create_from_slice(f32::as_bytes(&[0.0f32]));
+    let profile = dct_noise_profile(0.0);
+    let dct_profile_buf = client.create_from_slice(f32::as_bytes(&profile));
+    let accum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels]));
+    let wsum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels]));
+
+    let grid = CubeCount::new_2d(refs_x, refs_along(h));
+    let dim = CubeDim::new_2d(8, 8);
+    unsafe {
+        collab_filter_ht::launch_unchecked::<R>(
+            &client,
+            grid,
+            dim,
+            1usize,
+            ArrayArg::from_raw_parts(ring_buf, 2 * pixels),
+            ArrayArg::from_raw_parts(member_pos_buf, refs * k_max as usize),
+            ArrayArg::from_raw_parts(member_frame_buf, refs * k_max as usize),
+            ArrayArg::from_raw_parts(member_count_buf, refs),
+            ArrayArg::from_raw_parts(member_sig2_dummy, 1),
+            ArrayArg::from_raw_parts(accum, pixels),
+            ArrayArg::from_raw_parts(wsum.clone(), pixels),
+            ArrayArg::from_raw_parts(filtered_buf.clone(), filt_len),
+            ArrayArg::from_raw_parts(weight_buf, refs),
+            centre_slot,
+            ArrayArg::from_raw_parts(sigma_buf, 1),
+            ArrayArg::from_raw_parts(dct_profile_buf, 8),
+            2.7f32,
+            weight_scale(0.0, &profile),
+            false,
+            true,
+            false,
+            true,
+            w,
+            h,
+            1u32,
+            k_max,
+            1u32,
+            refs_x,
+        );
+    }
+
+    let filtered = f32::from_bytes(&client.read_one(filtered_buf).expect("filtered readback failed"))
+        [..filt_len]
+        .to_vec();
+    let wsum_out = i32::from_bytes(&client.read_one(wsum).expect("wsum readback failed"))[..pixels].to_vec();
+
+    // Both members were filtered, sigma = 0 makes the threshold a no-op,
+    // so each patch reads back exactly as planted.
+    let centre_out = &filtered[0..64];
+    let neighbour_out = &filtered[64..128];
+    for (idx, (&want, &have)) in centre_patch.iter().zip(centre_out.iter()).enumerate() {
+        assert!((want - have).abs() < 1e-4, "centre member idx={idx}: want {want} got {have}");
+    }
+    for (idx, (&want, &have)) in neighbour_patch.iter().zip(neighbour_out.iter()).enumerate() {
+        assert!((want - have).abs() < 1e-4, "neighbour member idx={idx}: want {want} got {have}");
+    }
+
+    // The centre member's own 8x8 region, (0,0)-(7,7), was scattered.
+    for y in 0..8u32 {
+        for x in 0..8u32 {
+            let w = wsum_out[(y * 16 + x) as usize];
+            assert!(w > 0, "centre region ({x},{y}): expected wsum > 0, got {w}");
+        }
+    }
+    // The neighbour member's own 8x8 region, (8,8)-(15,15), was never
+    // scattered, and no other reference reaches into it, so it must
+    // still read back exactly zero.
+    for y in 8..16u32 {
+        for x in 8..16u32 {
+            let w = wsum_out[(y * 16 + x) as usize];
+            assert_eq!(w, 0, "neighbour region ({x},{y}): expected wsum == 0, got {w}");
+        }
+    }
+}
+
+/// With `temporal = false` the kernel must behave exactly as it did
+/// before `member_frame` existed, ignoring the buffer's contents
+/// entirely. This is the substitute this task's report describes for
+/// the "bit-identical to the pre-change kernel" comparison the plan
+/// asks for, which cannot be captured retroactively. Instead, this
+/// proves the property that comparison would have proven, that
+/// `temporal = false` never reads `member_frame`, by filling it with
+/// values that would visibly corrupt the result if they were ever read.
+///
+/// The same two-member, two-frame setup as
+/// [`temporal_members_filter_but_do_not_scatter`] runs with
+/// `temporal = false`, `frame = centre_slot`, and `member_frame` filled
+/// entirely with `neighbour_slot`, the wrong slot for every member. If
+/// `temporal = false` read `member_frame` for the scatter guard or the
+/// per-member source frame, either the neighbour member's region would
+/// stay unscattered (as in the temporal test) or the centre member's
+/// patch would read back as the neighbour's content. Neither happens,
+/// every member scatters and every member reads from `frame`.
+#[test]
+fn nl3d_path_is_unchanged_when_temporal_is_false() {
+    let (w, h) = (16u32, 16u32);
+    let pixels = (w * h) as usize;
+    let refs_x = refs_along(w);
+    let refs = ref_count(w, h);
+    let k_max = 2u32;
+
+    let centre_slot = 0u32;
+    let neighbour_slot = 1u32;
+    let centre_patch = deterministic_texture(21);
+    let neighbour_patch = deterministic_texture(22);
+
+    let mut ring = vec![0.4f32; 2 * pixels];
+    plant_patch(&mut ring[..pixels], w, 0, 0, &centre_patch);
+    plant_patch(&mut ring[pixels..], w, 8, 8, &neighbour_patch);
+
+    let mut member_pos = vec![0u32; refs * k_max as usize];
+    // Every entry lies about its frame. Both members are read from the
+    // centre plane at run time (since temporal = false), but member_frame
+    // claims the neighbour slot for both, which is wrong for member 0 too.
+    let member_frame = vec![neighbour_slot; refs * k_max as usize];
+    let mut member_count = vec![0u32; refs];
+    member_pos[0] = pack_pos_host(0, 0);
+    member_pos[1] = pack_pos_host(8, 8);
+    member_count[0] = 2;
+
+    let client = make_client();
+    let ring_buf = client.create_from_slice(f32::as_bytes(&ring));
+    let member_pos_buf = client.create_from_slice(u32::as_bytes(&member_pos));
+    let member_frame_buf = client.create_from_slice(u32::as_bytes(&member_frame));
+    let member_count_buf = client.create_from_slice(u32::as_bytes(&member_count));
+    let member_sig2_dummy = client.empty(size_of::<f32>());
+    let filt_len = filtered_buf_len(w, h, k_max);
+    let filtered_buf = client.create_from_slice(f32::as_bytes(&vec![0.0f32; filt_len]));
+    let weight_buf = client.empty(refs * size_of::<f32>());
+    let sigma_buf = client.create_from_slice(f32::as_bytes(&[0.0f32]));
+    let profile = dct_noise_profile(0.0);
+    let dct_profile_buf = client.create_from_slice(f32::as_bytes(&profile));
+    let accum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels]));
+    let wsum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels]));
+
+    let grid = CubeCount::new_2d(refs_x, refs_along(h));
+    let dim = CubeDim::new_2d(8, 8);
+    unsafe {
+        collab_filter_ht::launch_unchecked::<R>(
+            &client,
+            grid,
+            dim,
+            1usize,
+            ArrayArg::from_raw_parts(ring_buf, 2 * pixels),
+            ArrayArg::from_raw_parts(member_pos_buf, refs * k_max as usize),
+            ArrayArg::from_raw_parts(member_frame_buf, refs * k_max as usize),
+            ArrayArg::from_raw_parts(member_count_buf, refs),
+            ArrayArg::from_raw_parts(member_sig2_dummy, 1),
+            ArrayArg::from_raw_parts(accum, pixels),
+            ArrayArg::from_raw_parts(wsum.clone(), pixels),
+            ArrayArg::from_raw_parts(filtered_buf.clone(), filt_len),
+            ArrayArg::from_raw_parts(weight_buf, refs),
+            centre_slot,
+            ArrayArg::from_raw_parts(sigma_buf, 1),
+            ArrayArg::from_raw_parts(dct_profile_buf, 8),
+            2.7f32,
+            weight_scale(0.0, &profile),
+            false,
+            true,
+            false,
+            false, // temporal
+            w,
+            h,
+            1u32,
+            k_max,
+            1u32,
+            refs_x,
+        );
+    }
+
+    let filtered = f32::from_bytes(&client.read_one(filtered_buf).expect("filtered readback failed"))
+        [..filt_len]
+        .to_vec();
+    let wsum_out = i32::from_bytes(&client.read_one(wsum).expect("wsum readback failed"))[..pixels].to_vec();
+
+    // Both members are read from the centre plane (frame = centre_slot),
+    // whatever member_frame claims, so member 1's filtered patch matches
+    // the centre plane's content at (8, 8), the flat 0.4 background, not
+    // the neighbour_patch actually planted at (8, 8) on the neighbour
+    // plane.
+    let centre_out = &filtered[0..64];
+    let member1_out = &filtered[64..128];
+    for (idx, (&want, &have)) in centre_patch.iter().zip(centre_out.iter()).enumerate() {
+        assert!((want - have).abs() < 1e-4, "member 0 idx={idx}: want {want} got {have}");
+    }
+    for (idx, &have) in member1_out.iter().enumerate() {
+        assert!(
+            (0.4f32 - have).abs() < 1e-4,
+            "member 1 idx={idx}: expected the centre plane's flat background 0.4, got {have}, \
+             proving temporal=false read member_frame instead of ignoring it"
+        );
+    }
+
+    // Every member scatters when temporal = false, whatever member_frame
+    // says, so both members' own 8x8 regions receive a contribution.
+    // The other two quadrants of this 16x16 frame are covered by
+    // neither member's patch, only by other references' zero-count
+    // groups, so they are not part of this assertion.
+    for y in 0..8u32 {
+        for x in 0..8u32 {
+            let w = wsum_out[(y * 16 + x) as usize];
+            assert!(w > 0, "member 0 region ({x},{y}): expected wsum > 0, got {w}");
+        }
+    }
+    for y in 8..16u32 {
+        for x in 8..16u32 {
+            let w = wsum_out[(y * 16 + x) as usize];
+            assert!(w > 0, "member 1 region ({x},{y}): expected wsum > 0, got {w}");
+        }
+    }
 }
