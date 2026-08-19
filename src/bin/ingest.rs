@@ -181,6 +181,15 @@ pub struct CliOptions {
     /// when set. Only has an effect when `algorithm` is
     /// `Algorithm::Nl3d`.
     pub chroma_lambda_ht: Option<f32>,
+    /// Diagnostic. Runs the luma instance's collaborative filter in
+    /// hard-threshold-only mode. See `Nl3dArgs::debug_ht_only`.
+    pub debug_ht_only: bool,
+    /// Diagnostic admission-sigma pin for the luma instance, already
+    /// converted to normalised units.
+    pub debug_admission_sigma: Option<f32>,
+    /// Diagnostic shrinkage-sigma pin for the luma instance, already
+    /// converted to normalised units.
+    pub debug_shrinkage_sigma: Option<f32>,
     /// Draws the denoising progress bar for file input.
     pub progress: bool,
 }
@@ -211,9 +220,23 @@ impl CliOptions {
             ChannelMode::Yuv => (None, None),
         };
 
+        // The `--debug-*` diagnostic overrides only ever apply to the
+        // luma instance.
+        let (ht_only, admission_sigma_override, shrinkage_sigma_override) = match channels {
+            ChannelMode::Luma => (
+                self.debug_ht_only,
+                self.debug_admission_sigma,
+                self.debug_shrinkage_sigma,
+            ),
+            ChannelMode::Chroma | ChannelMode::Yuv => (false, None, None),
+        };
+
         Algorithm::Nl3d(Nl3dOptions {
             residual_sigma_scale: residual_sigma_scale.or(nl3d.residual_sigma_scale),
             lambda_ht: lambda_ht.unwrap_or(nl3d.lambda_ht),
+            ht_only,
+            admission_sigma_override,
+            shrinkage_sigma_override,
             ..nl3d
         })
     }
@@ -920,6 +943,9 @@ mod cli_options_tests {
             chroma_residual_sigma_scale: None,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
+            debug_ht_only: false,
+            debug_admission_sigma: None,
+            debug_shrinkage_sigma: None,
             progress: false,
         }
     }
@@ -1019,6 +1045,9 @@ mod cli_options_tests {
             chroma_residual_sigma_scale,
             luma_lambda_ht,
             chroma_lambda_ht,
+            debug_ht_only: false,
+            debug_admission_sigma: None,
+            debug_shrinkage_sigma: None,
             progress: false,
         }
     }
@@ -1156,6 +1185,24 @@ mod cli_options_tests {
         assert!((chroma_default - 2.5).abs() < f32::EPSILON);
         assert!((chroma_default - luma_default).abs() > f32::EPSILON);
     }
+
+    #[test]
+    fn debug_overrides_reach_only_the_luma_plane() {
+        let mut opts = nl3d_opts(None, None, None, None);
+        opts.debug_ht_only = true;
+        opts.debug_admission_sigma = Some(0.0115);
+        opts.debug_shrinkage_sigma = Some(0.0078);
+
+        let luma = expect_nl3d(opts.algorithm_for(ChannelMode::Luma));
+        assert!(luma.ht_only);
+        assert_eq!(luma.admission_sigma_override, Some(0.0115));
+        assert_eq!(luma.shrinkage_sigma_override, Some(0.0078));
+
+        let chroma = expect_nl3d(opts.algorithm_for(ChannelMode::Chroma));
+        assert!(!chroma.ht_only);
+        assert_eq!(chroma.admission_sigma_override, None);
+        assert_eq!(chroma.shrinkage_sigma_override, None);
+    }
 }
 
 // Feature-gated because every test here builds its `CliOptions` from
@@ -1190,6 +1237,9 @@ mod passthrough_retry_tests {
             chroma_residual_sigma_scale: None,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
+            debug_ht_only: false,
+            debug_admission_sigma: None,
+            debug_shrinkage_sigma: None,
             progress: false,
         }
     }
@@ -1279,6 +1329,9 @@ mod lumachroma_lockstep_tests {
             chroma_residual_sigma_scale: None,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
+            debug_ht_only: false,
+            debug_admission_sigma: None,
+            debug_shrinkage_sigma: None,
             progress: false,
         }
     }

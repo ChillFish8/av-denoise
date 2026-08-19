@@ -242,6 +242,17 @@ pub struct Nl3dOptions {
     /// chroma. Read that function's docs before relying on either
     /// number, since the two rest on very different evidence.
     pub residual_sigma_scale: Option<f32>,
+    /// Runs only the collaborative filter's hard-threshold stage.
+    ///
+    /// Diagnostic switch, see `CollabParams::ht_only`. Defaults to
+    /// false.
+    pub ht_only: bool,
+    /// Diagnostic override for the grouping admission sigma, in
+    /// normalised units. See `CollabParams::admission_sigma_override`.
+    pub admission_sigma_override: Option<f32>,
+    /// Diagnostic override for the shrinkage sigma, in normalised
+    /// units. See `CollabParams::shrinkage_sigma_override`.
+    pub shrinkage_sigma_override: Option<f32>,
 }
 
 impl Default for Nl3dOptions {
@@ -257,6 +268,9 @@ impl Default for Nl3dOptions {
             // at construction time, once the plane being denoised is
             // known.
             residual_sigma_scale: None,
+            ht_only: false,
+            admission_sigma_override: None,
+            shrinkage_sigma_override: None,
         }
     }
 }
@@ -343,6 +357,21 @@ pub fn nl3d_default_residual_sigma_scale(channels: ChannelMode) -> f32 {
 fn resolve_residual_sigma_scale(opts: &Nl3dOptions, channels: ChannelMode) -> f32 {
     opts.residual_sigma_scale
         .unwrap_or_else(|| nl3d_default_residual_sigma_scale(channels))
+}
+
+/// Builds the collaborative-stage parameters for one plane from the
+/// caller's nl3d options.
+fn collab_params_for(opts: &Nl3dOptions, channels: ChannelMode) -> CollabParams {
+    CollabParams {
+        channels,
+        k_max: opts.k_max,
+        tau_match: opts.tau_match,
+        lambda_ht: opts.lambda_ht,
+        ht_only: opts.ht_only,
+        admission_sigma_override: opts.admission_sigma_override,
+        shrinkage_sigma_override: opts.shrinkage_sigma_override,
+        ..CollabParams::default()
+    }
 }
 
 /// Whether a frame is cleaned on its own or alongside its neighbours.
@@ -521,13 +550,7 @@ fn build_engine<R: Runtime>(
 ) -> Result<Engine<R>, DenoiserError> {
     match algorithm {
         Algorithm::Nl3d(opts) => {
-            let collab = CollabParams {
-                channels: params.channels,
-                k_max: opts.k_max,
-                tau_match: opts.tau_match,
-                lambda_ht: opts.lambda_ht,
-                ..CollabParams::default()
-            };
+            let collab = collab_params_for(opts, params.channels);
             let residual_sigma_scale = resolve_residual_sigma_scale(opts, params.channels);
             let nl3d_params = Nl3dParams {
                 nlm: params,
@@ -948,6 +971,31 @@ mod options_tests {
                 "channels {channels:?} got {got}"
             );
         }
+    }
+
+    #[test]
+    fn collab_params_carry_the_diagnostic_fields() {
+        // Every field the test sets differs from `CollabParams::default()`
+        // (k_max 8, tau_match 3.0, lambda_ht 2.7, channels Luma), so each
+        // assertion below distinguishes a copied-through value from a
+        // default one, not just a value from its own default.
+        let opts = Nl3dOptions {
+            k_max: 4,
+            tau_match: 1.5,
+            lambda_ht: 3.5,
+            ht_only: true,
+            admission_sigma_override: Some(0.007),
+            shrinkage_sigma_override: Some(0.011),
+            ..Nl3dOptions::default()
+        };
+        let collab = collab_params_for(&opts, ChannelMode::Chroma);
+        assert!(collab.ht_only);
+        assert_eq!(collab.admission_sigma_override, Some(0.007));
+        assert_eq!(collab.shrinkage_sigma_override, Some(0.011));
+        assert_eq!(collab.channels, ChannelMode::Chroma);
+        assert_eq!(collab.k_max, opts.k_max);
+        assert_eq!(collab.tau_match, opts.tau_match);
+        assert_eq!(collab.lambda_ht, opts.lambda_ht);
     }
 
     #[test]

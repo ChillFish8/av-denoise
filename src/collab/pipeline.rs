@@ -23,8 +23,7 @@ fn channel_scale(channels: ChannelMode) -> f32 {
     }
 }
 
-/// Drives one frame plane through both stages of the collaborative
-/// filter.
+/// Drives one frame plane through the collaborative filter.
 ///
 /// BM3D-style collaborative filtering works in two passes. The first
 /// groups similar patches straight out of the noisy input, shrinks their
@@ -46,7 +45,7 @@ fn channel_scale(channels: ChannelMode) -> f32 {
 /// second, steered pass is what recovers detail a hard threshold alone
 /// would have discarded.
 ///
-/// `CollabPipeline` owns every GPU buffer both stages need and reuses
+/// `CollabPipeline` owns every GPU buffer the stages need and reuses
 /// them across calls, so denoising a stream of frames at the same
 /// dimensions and channel mode allocates nothing new per frame.
 pub struct CollabPipeline<R: Runtime> {
@@ -140,8 +139,23 @@ impl<R: Runtime> CollabPipeline<R> {
         })
     }
 
-    /// Runs both stages of the collaborative filter over one frame
-    /// plane.
+    /// The pilot buffer stage 1 wrote on the most recent
+    /// `run_two_stage` call. Test-facing, used to check that `ht_only`
+    /// emits exactly this buffer.
+    #[allow(
+        dead_code,
+        reason = "test-only accessor, used from src/collab/tests/pipeline.rs"
+    )]
+    pub(crate) fn pilot_handle(&self) -> &Handle {
+        &self.pilot
+    }
+
+    /// Runs collaborative filtering over one frame plane.
+    ///
+    /// When `params.ht_only` is true, runs only the hard-threshold stage
+    /// and writes its aggregate to `output`. When false, both stages run.
+    /// `admission_sigma_override` and `shrinkage_sigma_override` replace
+    /// the `sigmas` argument for their respective consumers when set.
     ///
     /// `input` and `output` are whole-plane buffers in the vectorized
     /// `Vector<f32, N>` layout this pipeline was built for, `width *
@@ -167,9 +181,22 @@ impl<R: Runtime> CollabPipeline<R> {
             );
         }
 
+        // The diagnostic overrides split the sigma fan-out. Shrinkage
+        // covers the filter kernels' sigma buffer and the weight
+        // normalisation, whose scale cancels in the final divide.
+        // Admission covers only the grouping floor.
+        let shrink_sigmas: Vec<f32> = match self.params.shrinkage_sigma_override {
+            Some(s) => vec![s; channels_count],
+            None => sigmas.to_vec(),
+        };
+        let admission_sigmas: Vec<f32> = match self.params.admission_sigma_override {
+            Some(s) => vec![s; channels_count],
+            None => sigmas.to_vec(),
+        };
+
         let stored_ch = self.params.channels.storage_count() as usize;
         let mut sigma_host = vec![0.0f32; stored_ch];
-        sigma_host[..channels_count].copy_from_slice(sigmas);
+        sigma_host[..channels_count].copy_from_slice(&shrink_sigmas);
         self.sigma_buf = self.client.create_from_slice(f32::as_bytes(&sigma_host));
 
         // The distance two noisy copies of the same patch are expected
@@ -198,7 +225,7 @@ impl<R: Runtime> CollabPipeline<R> {
         // restrictive `tau` cannot amplify anything, only shrink every
         // group toward its self-only floor.
         let scale = channel_scale(self.params.channels);
-        let sum_sq: f32 = sigmas.iter().map(|&s| s * s).sum();
+        let sum_sq: f32 = admission_sigmas.iter().map(|&s| s * s).sum();
         let floor = 2.0 * scale * sum_sq * PATCH_AREA as f32;
         let floor_epsilon = PATCH_AREA as f32 * scale * (1.0f32 / 255.0f32).powi(2);
         let tau = self.params.tau_match * f32::max(floor, floor_epsilon);
@@ -216,7 +243,7 @@ impl<R: Runtime> CollabPipeline<R> {
         // fixed-point accumulators. The first channel's sigma is the one
         // that matters, because that is the channel whose retained
         // variances the group weight is built from.
-        let wnorm = weight_scale(sigmas[0], &self.dct_profile);
+        let wnorm = weight_scale(shrink_sigmas[0], &self.dct_profile);
 
         let group_grid = CubeCount::new_2d(refs_x, refs_y);
         let group_dim = CubeDim::new_2d(8, 8);
@@ -225,10 +252,19 @@ impl<R: Runtime> CollabPipeline<R> {
         let zero_dim = 256u32;
         let zero_grid = CubeCount::new_1d((frame_len as u32).div_ceil(zero_dim));
 
+        // In ht_only mode stage 1's aggregate is the final output, so
+        // the normalise writes straight to the caller's buffer and
+        // stage 2 never launches.
+        let stage1_target = if self.params.ht_only {
+            output.clone()
+        } else {
+            self.pilot.clone()
+        };
+
         unsafe {
             // Stage one: group on the noisy input with the noise floor
             // subtracted, hard-threshold the group's coefficients, and
-            // aggregate the result into the pilot.
+            // aggregate the result.
             collab_group_spatial::launch_unchecked::<R>(
                 &self.client,
                 group_grid.clone(),
@@ -293,12 +329,16 @@ impl<R: Runtime> CollabPipeline<R> {
                 stored_ch,
                 ArrayArg::from_raw_parts(self.accum.clone(), frame_len),
                 ArrayArg::from_raw_parts(self.wsum.clone(), pixels),
-                ArrayArg::from_raw_parts(self.pilot.clone(), frame_len),
+                ArrayArg::from_raw_parts(stage1_target, frame_len),
                 width,
                 height,
                 channels_count as u32,
                 stored_ch as u32,
             );
+
+            if self.params.ht_only {
+                return Ok(());
+            }
 
             // Stage two: regroup on the pilot with no floor, since the
             // pilot is already clean and subtracting a floor there would

@@ -748,6 +748,9 @@ mod tests {
             chroma_residual_sigma_scale: None,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
+            debug_ht_only: false,
+            debug_admission_sigma: None,
+            debug_shrinkage_sigma: None,
             progress: false,
         }
     }

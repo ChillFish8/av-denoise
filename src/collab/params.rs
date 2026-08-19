@@ -40,6 +40,28 @@ pub struct CollabParams {
     /// the numbers. The table and this field stay available for a
     /// caller who wants to opt into shaping directly.
     pub rho: f32,
+    /// Runs only the hard-threshold stage. Stage 1's aggregate goes to
+    /// the caller's output and the Wiener stage is skipped.
+    ///
+    /// Diagnostic switch for the brick-wash investigation. Defaults to
+    /// false, which runs both stages.
+    pub ht_only: bool,
+    /// Replaces the sigma the grouping stage builds its admission
+    /// floor from, in normalised `[0, 1]` units.
+    ///
+    /// Diagnostic override for the brick-wash investigation. The value
+    /// is applied to every active channel, so it is only meaningful on
+    /// single-channel runs. `None` keeps the per-frame sigmas the
+    /// caller passes to `run_two_stage`.
+    pub admission_sigma_override: Option<f32>,
+    /// Replaces the sigma the shrinkage stages threshold and weight
+    /// with, in normalised `[0, 1]` units.
+    ///
+    /// Diagnostic override for the brick-wash investigation. The value
+    /// is applied to every active channel, so it is only meaningful on
+    /// single-channel runs. `None` keeps the per-frame sigmas the
+    /// caller passes to `run_two_stage`.
+    pub shrinkage_sigma_override: Option<f32>,
 }
 
 impl Default for CollabParams {
@@ -51,6 +73,9 @@ impl Default for CollabParams {
             tau_match: 3.0,
             lambda_ht: 2.7,
             rho: 0.0,
+            ht_only: false,
+            admission_sigma_override: None,
+            shrinkage_sigma_override: None,
         }
     }
 }
@@ -106,6 +131,20 @@ impl CollabParams {
                  degenerate value this filter's noise model was never validated against",
                 self.rho,
             );
+        }
+
+        for (name, sigma) in [
+            ("admission_sigma_override", self.admission_sigma_override),
+            ("shrinkage_sigma_override", self.shrinkage_sigma_override),
+        ] {
+            if let Some(s) = sigma {
+                if !(s.is_finite() && s > 0.0) {
+                    anyhow::bail!(
+                        "{name} must be finite and greater than 0 when set, got {s}. A zero \
+                         or negative sigma has no meaning as a noise level"
+                    );
+                }
+            }
         }
 
         Ok(())

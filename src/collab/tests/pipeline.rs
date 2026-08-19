@@ -317,3 +317,161 @@ fn non_finite_sigma_reaching_run_two_stage_stays_bounded() {
          failing this one"
     );
 }
+
+/// `ht_only` must emit exactly what a full run writes to its stage-1
+/// pilot, so HT-only probe arms measure the same stage the two-stage
+/// pipeline builds internally. Grouping tie-breaks are explicit and
+/// aggregation uses integer atomics, so equal inputs give bit-equal
+/// buffers.
+#[test]
+fn ht_only_output_is_the_stage_one_pilot() {
+    let (w, h) = (64u32, 64u32);
+    let sigma = 0.03f32;
+    let noisy = noisy_field_over(w, h, 0.5, sigma);
+
+    let client = make_client();
+    let full_params = CollabParams {
+        channels: ChannelMode::Luma,
+        ..CollabParams::default()
+    };
+    let mut full =
+        CollabPipeline::<R>::new(&client, full_params, w, h).expect("pipeline construction failed");
+    let input = client.create_from_slice(f32::as_bytes(&noisy));
+    let output = client.empty(noisy.len() * size_of::<f32>());
+    full.run_two_stage(&input, &[sigma], &output)
+        .expect("run_two_stage failed");
+    let pilot_bytes = client
+        .read_one(full.pilot_handle().clone())
+        .expect("pilot readback failed");
+    let pilot = f32::from_bytes(&pilot_bytes)[..noisy.len()].to_vec();
+
+    let ht_params = CollabParams {
+        channels: ChannelMode::Luma,
+        ht_only: true,
+        ..CollabParams::default()
+    };
+    let mut ht =
+        CollabPipeline::<R>::new(&client, ht_params, w, h).expect("pipeline construction failed");
+    let ht_output = client.empty(noisy.len() * size_of::<f32>());
+    ht.run_two_stage(&input, &[sigma], &ht_output)
+        .expect("run_two_stage failed");
+    let ht_bytes = client.read_one(ht_output).expect("output readback failed");
+    let ht_out = f32::from_bytes(&ht_bytes)[..noisy.len()].to_vec();
+
+    assert_eq!(
+        pilot, ht_out,
+        "ht_only output must equal the full run's stage-1 pilot bitwise"
+    );
+}
+
+/// With both overrides set to the same value, the `sigmas` argument
+/// must become irrelevant. This catches any consumer still reading
+/// the raw argument after the split.
+#[test]
+fn sigma_overrides_fully_replace_the_passed_sigmas() {
+    let (w, h) = (64u32, 64u32);
+    let noisy = noisy_field_over(w, h, 0.5, 0.03);
+    let client = make_client();
+
+    let base_params = CollabParams {
+        channels: ChannelMode::Luma,
+        ..CollabParams::default()
+    };
+    let mut base =
+        CollabPipeline::<R>::new(&client, base_params, w, h).expect("pipeline construction failed");
+    let input = client.create_from_slice(f32::as_bytes(&noisy));
+    let out_a = client.empty(noisy.len() * size_of::<f32>());
+    base.run_two_stage(&input, &[0.03], &out_a)
+        .expect("run_two_stage failed");
+
+    let override_params = CollabParams {
+        channels: ChannelMode::Luma,
+        admission_sigma_override: Some(0.03),
+        shrinkage_sigma_override: Some(0.03),
+        ..CollabParams::default()
+    };
+    let mut overridden = CollabPipeline::<R>::new(&client, override_params, w, h)
+        .expect("pipeline construction failed");
+    let out_b = client.empty(noisy.len() * size_of::<f32>());
+    overridden
+        .run_two_stage(&input, &[0.4], &out_b)
+        .expect("run_two_stage failed");
+
+    let a = f32::from_bytes(&client.read_one(out_a).expect("readback failed"))[..noisy.len()].to_vec();
+    let b = f32::from_bytes(&client.read_one(out_b).expect("readback failed"))[..noisy.len()].to_vec();
+    assert_eq!(a, b, "overrides must make the passed sigmas irrelevant");
+}
+
+/// A tiny admission override collapses grouping toward self-only
+/// matches while shrinkage stays untouched, so the output must move.
+/// This proves the admission override reaches the floor computation.
+#[test]
+fn admission_override_reaches_the_grouping_floor() {
+    let (w, h) = (64u32, 64u32);
+    let noisy = noisy_field_over(w, h, 0.5, 0.03);
+    let client = make_client();
+    let input = client.create_from_slice(f32::as_bytes(&noisy));
+
+    let base_params = CollabParams {
+        channels: ChannelMode::Luma,
+        ..CollabParams::default()
+    };
+    let mut base =
+        CollabPipeline::<R>::new(&client, base_params, w, h).expect("pipeline construction failed");
+    let out_a = client.empty(noisy.len() * size_of::<f32>());
+    base.run_two_stage(&input, &[0.03], &out_a)
+        .expect("run_two_stage failed");
+
+    let pinned_params = CollabParams {
+        channels: ChannelMode::Luma,
+        admission_sigma_override: Some(1.0e-6),
+        ..CollabParams::default()
+    };
+    let mut pinned =
+        CollabPipeline::<R>::new(&client, pinned_params, w, h).expect("pipeline construction failed");
+    let out_b = client.empty(noisy.len() * size_of::<f32>());
+    pinned
+        .run_two_stage(&input, &[0.03], &out_b)
+        .expect("run_two_stage failed");
+
+    let a = f32::from_bytes(&client.read_one(out_a).expect("readback failed"))[..noisy.len()].to_vec();
+    let b = f32::from_bytes(&client.read_one(out_b).expect("readback failed"))[..noisy.len()].to_vec();
+    assert_ne!(a, b, "a collapsed admission floor must change grouping and the output");
+}
+
+/// A 10x shrinkage override thresholds far harder at unchanged
+/// grouping, so the output must move. This proves the shrinkage
+/// override reaches the sigma buffer.
+#[test]
+fn shrinkage_override_reaches_the_threshold() {
+    let (w, h) = (64u32, 64u32);
+    let noisy = noisy_field_over(w, h, 0.5, 0.03);
+    let client = make_client();
+    let input = client.create_from_slice(f32::as_bytes(&noisy));
+
+    let base_params = CollabParams {
+        channels: ChannelMode::Luma,
+        ..CollabParams::default()
+    };
+    let mut base =
+        CollabPipeline::<R>::new(&client, base_params, w, h).expect("pipeline construction failed");
+    let out_a = client.empty(noisy.len() * size_of::<f32>());
+    base.run_two_stage(&input, &[0.03], &out_a)
+        .expect("run_two_stage failed");
+
+    let pinned_params = CollabParams {
+        channels: ChannelMode::Luma,
+        shrinkage_sigma_override: Some(0.3),
+        ..CollabParams::default()
+    };
+    let mut pinned =
+        CollabPipeline::<R>::new(&client, pinned_params, w, h).expect("pipeline construction failed");
+    let out_b = client.empty(noisy.len() * size_of::<f32>());
+    pinned
+        .run_two_stage(&input, &[0.03], &out_b)
+        .expect("run_two_stage failed");
+
+    let a = f32::from_bytes(&client.read_one(out_a).expect("readback failed"))[..noisy.len()].to_vec();
+    let b = f32::from_bytes(&client.read_one(out_b).expect("readback failed"))[..noisy.len()].to_vec();
+    assert_ne!(a, b, "a 10x shrinkage sigma must change the thresholded output");
+}

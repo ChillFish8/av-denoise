@@ -108,6 +108,32 @@ pub struct Nl3dArgs {
     /// `--channel-mode yuv` is used.
     #[arg(long)]
     pub chroma_lambda_ht: Option<f32>,
+
+    /// Diagnostic. Runs only the collaborative filter's hard-threshold
+    /// stage on the brightness plane, skipping the Wiener stage.
+    ///
+    /// Colour planes are unaffected. Ignored with `--channel-mode
+    /// yuv`.
+    #[arg(long)]
+    pub debug_ht_only: bool,
+
+    /// Diagnostic. Pins the sigma the brightness plane's grouping
+    /// admission floor is built from, in 8-bit code units, the units
+    /// `sigma_chain_diag` prints.
+    ///
+    /// Colour planes are unaffected. Ignored with `--channel-mode
+    /// yuv`.
+    #[arg(long)]
+    pub debug_admission_sigma8: Option<f32>,
+
+    /// Diagnostic. Pins the sigma the brightness plane's shrinkage
+    /// thresholds use, in 8-bit code units, the units
+    /// `sigma_chain_diag` prints.
+    ///
+    /// Colour planes are unaffected. Ignored with `--channel-mode
+    /// yuv`.
+    #[arg(long)]
+    pub debug_shrinkage_sigma8: Option<f32>,
 }
 
 impl Nl3dArgs {
@@ -156,12 +182,23 @@ impl Nl3dArgs {
             // known, and construction itself picks the calibrated
             // per-plane default for whatever is still unset.
             residual_sigma_scale: self.residual_sigma_scale,
+            // The `--debug-*` flags land on `CliOptions` below and are
+            // resolved per plane in `CliOptions::algorithm_for`
+            // (src/bin/ingest.rs), the same way the per-plane
+            // `residual_sigma_scale`/`lambda_ht` overrides are. These
+            // fields stay at the library default here.
+            ht_only: defaults.ht_only,
+            admission_sigma_override: defaults.admission_sigma_override,
+            shrinkage_sigma_override: defaults.shrinkage_sigma_override,
         });
 
         opts.luma_residual_sigma_scale = self.luma_residual_sigma_scale;
         opts.chroma_residual_sigma_scale = self.chroma_residual_sigma_scale;
         opts.luma_lambda_ht = self.luma_lambda_ht;
         opts.chroma_lambda_ht = self.chroma_lambda_ht;
+        opts.debug_ht_only = self.debug_ht_only;
+        opts.debug_admission_sigma = self.debug_admission_sigma8.map(|s| s / 255.0);
+        opts.debug_shrinkage_sigma = self.debug_shrinkage_sigma8.map(|s| s / 255.0);
 
         self.warn_on_dead_per_plane_flags(opts.intent);
 
@@ -175,6 +212,9 @@ impl Nl3dArgs {
     fn warn_on_dead_per_plane_flags(&self, intent: BinaryChannelIntent) {
         let luma_set = self.luma_residual_sigma_scale.is_some() || self.luma_lambda_ht.is_some();
         let chroma_set = self.chroma_residual_sigma_scale.is_some() || self.chroma_lambda_ht.is_some();
+        let debug_set = self.debug_ht_only
+            || self.debug_admission_sigma8.is_some()
+            || self.debug_shrinkage_sigma8.is_some();
 
         match intent {
             BinaryChannelIntent::Luma if chroma_set => {
@@ -182,14 +222,14 @@ impl Nl3dArgs {
                     "--chroma-residual-sigma-scale and --chroma-lambda-ht are ignored when chroma is not being denoised"
                 );
             },
-            BinaryChannelIntent::Chroma if luma_set => {
+            BinaryChannelIntent::Chroma if luma_set || debug_set => {
                 tracing::warn!(
-                    "--luma-residual-sigma-scale and --luma-lambda-ht are ignored when luma is not being denoised"
+                    "--luma-residual-sigma-scale, --luma-lambda-ht and --debug-* are ignored when luma is not being denoised"
                 );
             },
-            BinaryChannelIntent::YuvFused if luma_set || chroma_set => {
+            BinaryChannelIntent::YuvFused if luma_set || chroma_set || debug_set => {
                 tracing::warn!(
-                    "--luma-/--chroma-residual-sigma-scale and --luma-/--chroma-lambda-ht are ignored when --channel-mode yuv is used"
+                    "--luma-/--chroma-residual-sigma-scale, --luma-/--chroma-lambda-ht and --debug-* are ignored when --channel-mode yuv is used"
                 );
             },
             _ => {},
@@ -404,5 +444,29 @@ mod tests {
         assert_eq!(opts.chroma_residual_sigma_scale, None);
         assert_eq!(opts.luma_lambda_ht, None);
         assert_eq!(opts.chroma_lambda_ht, None);
+    }
+
+    #[test]
+    fn debug_flags_parse_and_convert_to_normalised_units() {
+        let (args, nl3d) = parse(&[
+            "--debug-ht-only",
+            "--debug-admission-sigma8",
+            "2.93",
+            "--debug-shrinkage-sigma8",
+            "1.99",
+        ]);
+        let opts = nl3d.build_options(&args).expect("build_options should succeed");
+        assert!(opts.debug_ht_only);
+        assert!((opts.debug_admission_sigma.unwrap() - 2.93 / 255.0).abs() < 1e-7);
+        assert!((opts.debug_shrinkage_sigma.unwrap() - 1.99 / 255.0).abs() < 1e-7);
+    }
+
+    #[test]
+    fn debug_flags_default_to_off() {
+        let (args, nl3d) = parse(&[]);
+        let opts = nl3d.build_options(&args).expect("build_options should succeed");
+        assert!(!opts.debug_ht_only);
+        assert_eq!(opts.debug_admission_sigma, None);
+        assert_eq!(opts.debug_shrinkage_sigma, None);
     }
 }
