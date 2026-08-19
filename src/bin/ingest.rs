@@ -12,6 +12,7 @@ use av_denoise::{
     Device,
     MotionCompensationMode,
     Nl3dOptions,
+    Nl4dOptions,
     NlmTuning,
     PrefilterMode,
 };
@@ -200,52 +201,71 @@ pub struct CliOptions {
 
 impl CliOptions {
     /// Resolves `self.algorithm` for one plane, folding in the per-plane
-    /// `residual_sigma_scale` and `lambda_ht` overrides when the
-    /// algorithm is `Nl3d`.
+    /// overrides that apply to whichever cascade `self.algorithm` is.
     ///
-    /// `k_max` and `tau_match` stay shared across planes, since they
-    /// aren't aggression dials in the same sense as the other two.
+    /// For `Nl3d` that is `residual_sigma_scale` and `lambda_ht`. For
+    /// `Nl4d` it is `lambda_ht` alone, the only aggression dial that
+    /// cascade has. Every other algorithm is returned unchanged, since
+    /// neither per-plane override has anything to apply to.
     ///
-    /// `residual_sigma_scale` stays `Option<f32>` all the way through
-    /// this method. When neither a per-plane flag nor the shared
-    /// `--residual-sigma-scale` was set, the result is `None`, deferred
-    /// to `nl3d_default_residual_sigma_scale` at construction, once the
-    /// plane being denoised is known there too. That is what gives luma
-    /// and chroma different values when a caller passes no flags at
-    /// all.
+    /// `k_max` and `tau_match`, `Nl3d`-only, stay shared across planes,
+    /// since they aren't aggression dials in the same sense as the
+    /// other two.
+    ///
+    /// `Nl3d`'s `residual_sigma_scale` stays `Option<f32>` all the way
+    /// through this method. When neither a per-plane flag nor the
+    /// shared `--residual-sigma-scale` was set, the result is `None`,
+    /// deferred to `nl3d_default_residual_sigma_scale` at construction,
+    /// once the plane being denoised is known there too. That is what
+    /// gives luma and chroma different values when a caller passes no
+    /// flags at all. `Nl4d` has no per-plane default to defer to, so its
+    /// `lambda_ht` always resolves to a concrete value here.
     fn algorithm_for(&self, channels: ChannelMode) -> Algorithm {
-        let Algorithm::Nl3d(nl3d) = self.algorithm else {
-            return self.algorithm;
-        };
+        match self.algorithm {
+            Algorithm::Nl3d(nl3d) => {
+                let (residual_sigma_scale, lambda_ht) = match channels {
+                    ChannelMode::Luma => (self.luma_residual_sigma_scale, self.luma_lambda_ht),
+                    ChannelMode::Chroma => (self.chroma_residual_sigma_scale, self.chroma_lambda_ht),
+                    ChannelMode::Yuv => (None, None),
+                };
 
-        let (residual_sigma_scale, lambda_ht) = match channels {
-            ChannelMode::Luma => (self.luma_residual_sigma_scale, self.luma_lambda_ht),
-            ChannelMode::Chroma => (self.chroma_residual_sigma_scale, self.chroma_lambda_ht),
-            ChannelMode::Yuv => (None, None),
-        };
+                // The `--debug-*` diagnostic overrides only ever apply
+                // to the luma instance.
+                let (ht_only, admission_sigma_override, shrinkage_sigma_override, debug_ht_wavelet) =
+                    match channels {
+                        ChannelMode::Luma => (
+                            self.debug_ht_only,
+                            self.debug_admission_sigma,
+                            self.debug_shrinkage_sigma,
+                            self.debug_ht_wavelet,
+                        ),
+                        ChannelMode::Chroma | ChannelMode::Yuv => (false, None, None, false),
+                    };
 
-        // The `--debug-*` diagnostic overrides only ever apply to the
-        // luma instance.
-        let (ht_only, admission_sigma_override, shrinkage_sigma_override, debug_ht_wavelet) =
-            match channels {
-                ChannelMode::Luma => (
-                    self.debug_ht_only,
-                    self.debug_admission_sigma,
-                    self.debug_shrinkage_sigma,
-                    self.debug_ht_wavelet,
-                ),
-                ChannelMode::Chroma | ChannelMode::Yuv => (false, None, None, false),
-            };
+                Algorithm::Nl3d(Nl3dOptions {
+                    residual_sigma_scale: residual_sigma_scale.or(nl3d.residual_sigma_scale),
+                    lambda_ht: lambda_ht.unwrap_or(nl3d.lambda_ht),
+                    ht_only,
+                    admission_sigma_override,
+                    shrinkage_sigma_override,
+                    debug_ht_wavelet,
+                    ..nl3d
+                })
+            },
+            Algorithm::Nl4d(nl4d) => {
+                let lambda_ht = match channels {
+                    ChannelMode::Luma => self.luma_lambda_ht,
+                    ChannelMode::Chroma => self.chroma_lambda_ht,
+                    ChannelMode::Yuv => None,
+                };
 
-        Algorithm::Nl3d(Nl3dOptions {
-            residual_sigma_scale: residual_sigma_scale.or(nl3d.residual_sigma_scale),
-            lambda_ht: lambda_ht.unwrap_or(nl3d.lambda_ht),
-            ht_only,
-            admission_sigma_override,
-            shrinkage_sigma_override,
-            debug_ht_wavelet,
-            ..nl3d
-        })
+                Algorithm::Nl4d(Nl4dOptions {
+                    lambda_ht: lambda_ht.unwrap_or(nl4d.lambda_ht),
+                    ..nl4d
+                })
+            },
+            other => other,
+        }
     }
 
     fn denoiser_options(&self, channels: ChannelMode) -> DenoiserOptions {
@@ -1211,6 +1231,106 @@ mod cli_options_tests {
         assert!(!chroma.ht_only);
         assert_eq!(chroma.admission_sigma_override, None);
         assert_eq!(chroma.shrinkage_sigma_override, None);
+    }
+
+    /// A `CliOptions` running `Algorithm::Nl4d`, with every field at a
+    /// neutral default except the two per-plane `lambda_ht` overrides
+    /// under test.
+    fn nl4d_opts(luma_lambda_ht: Option<f32>, chroma_lambda_ht: Option<f32>) -> CliOptions {
+        CliOptions {
+            accelerators: vec![],
+            device: Device::Default,
+            intent: BinaryChannelIntent::LumaChroma,
+            mode: DenoisingMode::Temporal { radius: 2 },
+            prefilter: None,
+            motion_compensation: MotionCompensationMode::None,
+            algorithm: Algorithm::Nl4d(Nl4dOptions::default()),
+            nlm_tuning: None,
+            luma_strength: None,
+            chroma_strength: None,
+            luma_residual_sigma_scale: None,
+            chroma_residual_sigma_scale: None,
+            luma_lambda_ht,
+            chroma_lambda_ht,
+            debug_ht_only: false,
+            debug_ht_wavelet: false,
+            debug_admission_sigma: None,
+            debug_shrinkage_sigma: None,
+            progress: false,
+        }
+    }
+
+    /// Unwraps an `Algorithm::Nl4d`, panicking with the whole value on
+    /// any other variant.
+    fn expect_nl4d(algorithm: Algorithm) -> Nl4dOptions {
+        match algorithm {
+            Algorithm::Nl4d(n) => n,
+            other => panic!("expected Algorithm::Nl4d, got {other:?}"),
+        }
+    }
+
+    /// The routing property that matters most for a shared field: an
+    /// override aimed at one plane must never leak into the other
+    /// instance. `luma_lambda_ht` set alone must change nothing about
+    /// the chroma instance, and vice versa in the sibling test below.
+    #[test]
+    fn luma_lambda_ht_alone_overrides_only_the_luma_instance_for_nl4d() {
+        let opts = nl4d_opts(Some(4.0), None);
+
+        let luma = expect_nl4d(opts.algorithm_for(ChannelMode::Luma));
+        let chroma = expect_nl4d(opts.algorithm_for(ChannelMode::Chroma));
+
+        assert!((luma.lambda_ht - 4.0).abs() < f32::EPSILON);
+        assert!(
+            (chroma.lambda_ht - Nl4dOptions::default().lambda_ht).abs() < f32::EPSILON,
+            "chroma should keep the shared default when only --luma-lambda-ht is set, got {}",
+            chroma.lambda_ht
+        );
+    }
+
+    #[test]
+    fn chroma_lambda_ht_alone_overrides_only_the_chroma_instance_for_nl4d() {
+        let opts = nl4d_opts(None, Some(4.0));
+
+        let luma = expect_nl4d(opts.algorithm_for(ChannelMode::Luma));
+        let chroma = expect_nl4d(opts.algorithm_for(ChannelMode::Chroma));
+
+        assert!(
+            (luma.lambda_ht - Nl4dOptions::default().lambda_ht).abs() < f32::EPSILON,
+            "luma should keep the shared default when only --chroma-lambda-ht is set, got {}",
+            luma.lambda_ht
+        );
+        assert!((chroma.lambda_ht - 4.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn both_planes_lambda_ht_set_independently_for_nl4d() {
+        let opts = nl4d_opts(Some(2.0), Some(3.5));
+
+        let luma = expect_nl4d(opts.algorithm_for(ChannelMode::Luma));
+        let chroma = expect_nl4d(opts.algorithm_for(ChannelMode::Chroma));
+
+        assert!((luma.lambda_ht - 2.0).abs() < f32::EPSILON);
+        assert!((chroma.lambda_ht - 3.5).abs() < f32::EPSILON);
+
+        // Every other field stays shared between the two instances even
+        // though lambda_ht diverges.
+        assert_eq!(luma.temporal_radius, chroma.temporal_radius);
+        assert_eq!(luma.refine, chroma.refine);
+        assert_eq!(luma.spatial_radius, chroma.spatial_radius);
+        assert!((luma.c_min - chroma.c_min).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn unset_nl4d_lambda_ht_overrides_fall_back_to_the_shared_default_on_both_planes() {
+        let opts = nl4d_opts(None, None);
+        let defaults = Nl4dOptions::default();
+
+        let luma = expect_nl4d(opts.algorithm_for(ChannelMode::Luma));
+        let chroma = expect_nl4d(opts.algorithm_for(ChannelMode::Chroma));
+
+        assert!((luma.lambda_ht - defaults.lambda_ht).abs() < f32::EPSILON);
+        assert!((chroma.lambda_ht - defaults.lambda_ht).abs() < f32::EPSILON);
     }
 }
 

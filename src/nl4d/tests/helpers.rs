@@ -3,6 +3,62 @@ use cubecl::wgpu::WgpuRuntime;
 
 use crate::nlmeans::motion::neighbour_idx_for_k;
 
+/// A non-flat luma field, built from two out-of-phase sine waves rather
+/// than noise, so it carries real spatial structure a denoiser can
+/// either preserve or destroy. Matches `nl3d::tests::textured_base`,
+/// duplicated here since that helper is private to its own module.
+pub(super) fn textured_base(w: u32, h: u32) -> Vec<f32> {
+    let mut frame = vec![0.0f32; (w * h) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let fx = x as f32 / w as f32;
+            let fy = y as f32 / h as f32;
+            let v = 0.5
+                + 0.15 * (fx * 6.0 * std::f32::consts::PI).sin() * (fy * 4.0 * std::f32::consts::PI).cos();
+            frame[(y * w + x) as usize] = v.clamp(0.05, 0.95);
+        }
+    }
+    frame
+}
+
+/// Adds independent pseudo-Gaussian noise to `base`, decorrelated across
+/// `seed` so different seeds over the same base give independently
+/// noisy copies of the same clean content. Matches
+/// `nl3d::tests::noisy_copy_of`.
+pub(super) fn noisy_copy_of(base: &[f32], w: u32, h: u32, sigma: f32, seed: u32) -> Vec<f32> {
+    let unit_std = (1.0f32 / 3.0f32).sqrt();
+    let mut frame = vec![0.0f32; base.len()];
+    for idx in 0..(w * h) {
+        let mut sum = 0.0f32;
+        for k in 0..4u32 {
+            let mut hash = (idx * 4 + k)
+                .wrapping_mul(2654435761)
+                .wrapping_add(seed.wrapping_mul(0x9E37_79B9).wrapping_add(k));
+            hash ^= hash >> 15;
+            hash = hash.wrapping_mul(0x85EB_CA6B);
+            hash ^= hash >> 13;
+            sum += (hash as f32 / u32::MAX as f32) - 0.5;
+        }
+        frame[idx as usize] = (base[idx as usize] + (sum / unit_std) * sigma).clamp(0.0, 1.0);
+    }
+    frame
+}
+
+/// PSNR between two equal-length planes, in dB. Matches
+/// `nl3d::tests::psnr`.
+pub(super) fn psnr(a: &[f32], b: &[f32]) -> f64 {
+    let mse: f64 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| (x as f64 - y as f64).powi(2))
+        .sum::<f64>()
+        / a.len() as f64;
+    if mse <= 0.0 {
+        return f64::INFINITY;
+    }
+    10.0 * (1.0f64 / mse).log10()
+}
+
 pub(super) type R = WgpuRuntime;
 
 pub(super) fn make_client() -> ComputeClient<R> {

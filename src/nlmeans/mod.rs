@@ -42,6 +42,7 @@ mod pending;
 mod tests;
 
 pub use denoiser::{GpuOutput, NlmDenoiser};
+pub(crate) use denoiser::RingView;
 pub use dispatch::PendingResidualRatio;
 pub use motion::{MotionCompensationMode, MotionEstimation};
 pub use params::{

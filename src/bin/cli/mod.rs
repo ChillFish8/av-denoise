@@ -1,5 +1,6 @@
 mod input;
 mod nl3d;
+mod nl4d;
 mod nlmeans;
 
 use av_denoise::Device;
@@ -9,6 +10,7 @@ use strum_macros::EnumString;
 
 pub use self::input::InputSource;
 pub use self::nl3d::Nl3dArgs;
+pub use self::nl4d::Nl4dArgs;
 pub use self::nlmeans::NlmeansArgs;
 use crate::ingest::BinaryChannelIntent;
 
@@ -182,4 +184,20 @@ pub enum Command {
     ///
     /// Always runs the `hq` front end. `--variant fast` is rejected.
     Nl3d(Nl3dArgs),
+
+    /// Denoise by grouping matching patches across several noisy frames
+    /// directly, rather than filtering with non-local means first.
+    ///
+    /// `nl4d` runs the same `hq` front end `nlmeans` and `nl3d` do, but
+    /// only for its machinery, the frame ring, the motion field, and
+    /// the per-block temporal confidence it builds. No NLM weighting
+    /// pass ever runs. Instead, patches are grouped straight out of the
+    /// noisy frames, searching both the centre frame spatially and each
+    /// motion-compensated neighbour frame around where a patch is
+    /// predicted to have moved, then each group's coefficients are
+    /// shrunk jointly.
+    ///
+    /// Always runs the `hq` front end with motion compensation forced
+    /// on. `--variant fast` is rejected.
+    Nl4d(Nl4dArgs),
 }

@@ -7,6 +7,7 @@ use crate::accelerate::Accelerator;
 use crate::collab::CollabParams;
 use crate::device::Device;
 use crate::nl3d::{Nl3dDenoiser, Nl3dParams};
+use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 #[cfg(test)]
 use crate::nlmeans::MotionEstimation;
 use crate::nlmeans::{
@@ -86,6 +87,15 @@ pub enum Algorithm {
     /// needs the front end's estimated noise sigma to shrink its own
     /// coefficients by.
     Nl3d(Nl3dOptions),
+    /// Groups 8x8 patches across the motion-compensated temporal window
+    /// itself, rather than filtering with NLM first and grouping within
+    /// one frame afterward.
+    ///
+    /// Always runs the HQ front end with an active motion-compensated
+    /// ring and temporal confidence on, because the grouping kernel
+    /// reads the motion field and confidence scores that front end
+    /// builds.
+    Nl4d(Nl4dOptions),
 }
 
 /// Tuning for the [`Algorithm::Nl3d`] cascade.
@@ -282,6 +292,65 @@ impl Default for Nl3dOptions {
     }
 }
 
+/// Tuning for the [`Algorithm::Nl4d`] cascade.
+///
+/// `hq` configures the front end the same way [`Algorithm::NlmeansHq`]
+/// and [`Nl3dOptions::hq`] do. The remaining fields tune the temporal
+/// grouping and shrinkage that run on top of it, mirroring
+/// [`crate::nl4d::Nl4dParams`] one for one.
+///
+/// `lambda_ht` has one shared library default rather than a per-plane
+/// one, the same as [`Nl3dOptions::lambda_ht`]. A caller wanting luma
+/// and chroma to shrink by different amounts sets `--luma-lambda-ht`
+/// and `--chroma-lambda-ht` on the CLI, resolved per plane in
+/// `CliOptions::algorithm_for` (`src/bin/ingest.rs`) the same way
+/// nl3d's per-plane overrides are.
+///
+/// No dial here has been calibrated by a sweep yet. Every default below
+/// is carried straight over from [`crate::nl4d::Nl4dParams::default`].
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct Nl4dOptions {
+    /// The front end's HQ parameters.
+    pub hq: HqParams,
+    /// How many frames on each side of the centre frame the temporal
+    /// search reaches into, in `1..=8`. Defaults to 2.
+    ///
+    /// This has to equal the temporal radius [`DenoisingMode`] resolves
+    /// to for the same [`DenoiserOptions`], because the front end's
+    /// frame ring and the outer [`Denoiser`]'s own push/flush bookkeeping
+    /// both depend on that radius agreeing everywhere it is read.
+    pub temporal_radius: u32,
+    /// Half-width of the refine window searched around each neighbour
+    /// frame's motion-predicted position, in `1..=4`. Defaults to 2.
+    pub refine: u32,
+    /// Half-width of the spatial candidate window searched in the centre
+    /// frame, in `1..=16`. Defaults to 9.
+    pub spatial_radius: u32,
+    /// Hard-threshold multiplier on the propagated coefficient sigma.
+    /// Defaults to 2.7. Applies to both planes unless overridden per
+    /// plane on the CLI.
+    pub lambda_ht: f32,
+    /// The confidence floor below which a whole neighbour block is
+    /// skipped rather than scored, in `[0, 1)`. Defaults to 0.05. Only
+    /// affects how much compute a submit spends, never which candidates
+    /// are admitted once they are scored.
+    pub c_min: f32,
+}
+
+impl Default for Nl4dOptions {
+    fn default() -> Self {
+        let defaults = Nl4dParams::default();
+        Self {
+            hq: HqParams::default(),
+            temporal_radius: defaults.temporal_radius,
+            refine: defaults.refine,
+            spatial_radius: defaults.spatial_radius,
+            lambda_ht: defaults.lambda_ht,
+            c_min: defaults.c_min,
+        }
+    }
+}
+
 /// The calibrated default `residual_sigma_scale` for the nl3d
 /// collaborative stage, per plane.
 ///
@@ -436,8 +505,8 @@ impl DenoiserOptions {
         // With auto-strength off, HQ reads `strength` as an absolute
         // value just like the fast path, so it falls back to the same
         // absolute default.
-        // `Nl3d` shares the HQ front end, so it reads `strength` from the
-        // same calibrated table `NlmeansHq` does.
+        // `Nl3d` and `Nl4d` both share the HQ front end, so each reads
+        // `strength` from the same calibrated table `NlmeansHq` does.
         let explicit_strength = self.nlm.and_then(|t| t.strength);
         let strength = explicit_strength.unwrap_or(match self.algorithm {
             // The calibrated table is a multiplier on the measured
@@ -449,7 +518,10 @@ impl DenoiserOptions {
             Algorithm::Nl3d(opts) if opts.hq.auto_strength => {
                 hq_default_strength(self.channel_mode, temporal_radius)
             },
-            Algorithm::NlmeansHq(_) | Algorithm::Nlmeans | Algorithm::Nl3d(_) => {
+            Algorithm::Nl4d(opts) if opts.hq.auto_strength => {
+                hq_default_strength(self.channel_mode, temporal_radius)
+            },
+            Algorithm::NlmeansHq(_) | Algorithm::Nlmeans | Algorithm::Nl3d(_) | Algorithm::Nl4d(_) => {
                 NlmParams::default().strength
             },
         });
@@ -463,11 +535,14 @@ impl DenoiserOptions {
                 Algorithm::Nlmeans => None,
                 Algorithm::NlmeansHq(hq) => Some(hq),
                 Algorithm::Nl3d(opts) => Some(opts.hq),
+                Algorithm::Nl4d(opts) => Some(opts.hq),
             },
             strength,
             // The collaborative stage measures how much noise the front
             // end left behind, which needs the front end's own weight-
-            // squared accumulator turned on.
+            // squared accumulator turned on. `Nl4d` has no such stage, it
+            // shrinks straight off the propagated coefficient sigma, so
+            // it does not need this.
             track_weight_sq: matches!(self.algorithm, Algorithm::Nl3d(_)),
             ..NlmParams::default()
         };
@@ -515,6 +590,7 @@ pub enum DenoiserError {
 enum Engine<R: Runtime> {
     Nlm(Box<NlmDenoiser<R>>),
     Nl3d(Box<Nl3dDenoiser<R>>),
+    Nl4d(Box<Nl4dDenoiser<R>>),
 }
 
 impl<R: Runtime> Engine<R> {
@@ -522,6 +598,7 @@ impl<R: Runtime> Engine<R> {
         match self {
             Self::Nlm(d) => d.push_frame(frame),
             Self::Nl3d(d) => d.push_frame(frame),
+            Self::Nl4d(d) => d.push_frame(frame),
         }
     }
 
@@ -529,6 +606,11 @@ impl<R: Runtime> Engine<R> {
         match self {
             Self::Nlm(d) => d.denoise_submit(),
             Self::Nl3d(d) => d.denoise_submit(),
+            // `Nl4dDenoiser::denoise_submit` already returns
+            // `DenoiserError` rather than `anyhow::Error`, so this leans
+            // on `DenoiserError`'s own `anyhow::Error` conversion instead
+            // of re-wrapping it.
+            Self::Nl4d(d) => d.denoise_submit().map_err(anyhow::Error::from),
         }
     }
 
@@ -536,17 +618,18 @@ impl<R: Runtime> Engine<R> {
         match self {
             Self::Nlm(d) => d.flush(sink),
             Self::Nl3d(d) => d.flush(sink),
+            Self::Nl4d(d) => d.flush(sink).map_err(anyhow::Error::from),
         }
     }
 }
 
 /// Builds whichever [`Engine`] `algorithm` calls for.
 ///
-/// `Algorithm::Nl3d` also carries the collaborative filter's own tuning,
-/// which is not part of `NlmParams`, so it is read from `algorithm`
-/// directly rather than from `params`. This is also where an unset
-/// `residual_sigma_scale` picks up its calibrated per-plane default
-/// (`resolve_residual_sigma_scale`), the same way `to_nlm_params`
+/// `Algorithm::Nl3d` and `Algorithm::Nl4d` each carry their own cascade
+/// tuning, which is not part of `NlmParams`, so it is read from
+/// `algorithm` directly rather than from `params`. This is also where an
+/// unset `residual_sigma_scale` picks up its calibrated per-plane
+/// default (`resolve_residual_sigma_scale`), the same way `to_nlm_params`
 /// resolves HQ's calibrated `strength`, since this is the first point
 /// construction has both `opts` and `params.channels` together.
 fn build_engine<R: Runtime>(
@@ -572,6 +655,19 @@ fn build_engine<R: Runtime>(
                 width,
                 height,
             )?)))
+        },
+        Algorithm::Nl4d(opts) => {
+            let nl4d_params = Nl4dParams {
+                nlm: params,
+                temporal_radius: opts.temporal_radius,
+                refine: opts.refine,
+                spatial_radius: opts.spatial_radius,
+                lambda_ht: opts.lambda_ht,
+                c_min: opts.c_min,
+            };
+            let denoiser = Nl4dDenoiser::new(client, nl4d_params, width, height)
+                .map_err(|e| DenoiserError::Other(anyhow::anyhow!(e)))?;
+            Ok(Engine::Nl4d(Box::new(denoiser)))
         },
         Algorithm::Nlmeans | Algorithm::NlmeansHq(_) => Ok(Engine::Nlm(Box::new(NlmDenoiser::new(
             client, params, width, height,
@@ -720,7 +816,17 @@ impl Denoiser {
         validate_dimensions(width, height)?;
 
         let channels = params.channels.count();
-        let temporal_radius = params.temporal_radius;
+        // `Nl4dDenoiser` forces its own `temporal_radius` onto the front
+        // end's ring regardless of what `params.temporal_radius` says
+        // (see `Nl4dParams::validate`'s doc comment), so the outer
+        // push/flush bookkeeping below has to read the value nl4d will
+        // actually run with, not the one `to_nlm_params` derived from
+        // `mode`. Every other algorithm still runs at exactly
+        // `params.temporal_radius`.
+        let temporal_radius = match &options.algorithm {
+            Algorithm::Nl4d(opts) => opts.temporal_radius,
+            _ => params.temporal_radius,
+        };
         let backend = build_backend(accelerator, device, &options.algorithm, params, width, height)?;
 
         Ok(Self {
@@ -1302,6 +1408,84 @@ mod options_tests {
     }
 
     #[test]
+    fn nl4d_options_default_matches_nl4d_params_default() {
+        let opts = Nl4dOptions::default();
+        let params = crate::nl4d::Nl4dParams::default();
+
+        assert_eq!(opts.temporal_radius, params.temporal_radius);
+        assert_eq!(opts.refine, params.refine);
+        assert_eq!(opts.spatial_radius, params.spatial_radius);
+        assert!((opts.lambda_ht - params.lambda_ht).abs() < f32::EPSILON);
+        assert!((opts.c_min - params.c_min).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn nl4d_does_not_set_track_weight_sq() {
+        // Unlike nl3d, nl4d has no second-stage Wiener shrinkage that
+        // needs the front end's measured residual noise, so it does not
+        // need the weight-squared accumulator turned on.
+        let opts = DenoiserOptions::builder()
+            .algorithm(Algorithm::Nl4d(Nl4dOptions::default()))
+            .build();
+        let params = opts.to_nlm_params();
+
+        assert!(!params.track_weight_sq);
+    }
+
+    #[test]
+    fn nl4d_hq_field_is_populated_from_nl4d_options() {
+        let hq = HqParams {
+            auto_strength: false,
+            ..HqParams::default()
+        };
+        let opts = DenoiserOptions::builder()
+            .algorithm(Algorithm::Nl4d(Nl4dOptions {
+                hq,
+                ..Nl4dOptions::default()
+            }))
+            .build();
+        let params = opts.to_nlm_params();
+
+        assert_eq!(params.hq, Some(hq));
+    }
+
+    #[test]
+    fn nl4d_uses_the_hq_strength_table_when_auto_strength_is_on() {
+        let opts = DenoiserOptions::builder()
+            .channel_mode(ChannelMode::Luma)
+            .mode(DenoisingMode::Temporal { radius: 4 })
+            .algorithm(Algorithm::Nl4d(Nl4dOptions {
+                temporal_radius: 4,
+                ..Nl4dOptions::default()
+            }))
+            .build();
+        let params = opts.to_nlm_params();
+
+        let expected = hq_default_strength(ChannelMode::Luma, 4);
+        assert!((params.strength - expected).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn nl4d_explicit_strength_wins_over_the_table() {
+        let opts = DenoiserOptions::builder()
+            .mode(DenoisingMode::Temporal { radius: 4 })
+            .algorithm(Algorithm::Nl4d(Nl4dOptions {
+                temporal_radius: 4,
+                ..Nl4dOptions::default()
+            }))
+            .nlm(NlmTuning {
+                search_radius: None,
+                patch_radius: None,
+                strength: Some(0.99),
+                self_weight: None,
+            })
+            .build();
+        let params = opts.to_nlm_params();
+
+        assert!((params.strength - 0.99).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn motion_compensation_passthrough() {
         let opts = DenoiserOptions::builder()
             .mode(DenoisingMode::Temporal { radius: 1 })
@@ -1400,6 +1584,36 @@ mod tests {
         d.push_frame(&frame(16, 16)).expect("push failed");
         let out = d.recv_frame().expect("recv failed").expect("no frame");
         assert_eq!(out.len(), 16 * 16);
+    }
+
+    #[test]
+    fn nl4d_algorithm_round_trips_through_the_facade() {
+        let opts = DenoiserOptions::builder()
+            .channel_mode(ChannelMode::Luma)
+            .mode(DenoisingMode::Temporal { radius: 2 })
+            .motion_compensation(MotionCompensationMode::Mvtools {
+                blksize: 16,
+                overlap: 8,
+                search_radius: 4,
+                pyramid_levels: 2,
+                estimation: MotionEstimation::Auto,
+            })
+            .algorithm(Algorithm::Nl4d(Nl4dOptions::default()))
+            .build();
+        let mut d = Denoiser::create(&[Accelerator::Vulkan], &Device::Default, 16, 16, opts)
+            .expect("nl4d denoiser construction failed");
+        assert_eq!(d.selected_accelerator(), Accelerator::Vulkan);
+
+        // temporal_radius is 2, so a single push does not fill the
+        // window yet, the same convention every temporal algorithm here
+        // follows.
+        d.push_frame(&frame(16, 16)).expect("push failed");
+        assert!(d.recv_frame().expect("recv failed").is_none());
+
+        let mut out = Vec::new();
+        d.flush(|f| out.push(f)).expect("flush failed");
+        assert_eq!(out.len(), 1, "expected exactly one output for one pushed frame");
+        assert_eq!(out[0].len(), 16 * 16);
     }
 
     #[test]

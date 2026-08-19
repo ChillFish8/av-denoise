@@ -265,6 +265,7 @@ mod tests {
         let nl3d = match &args.command {
             Command::Nl3d(nl3d) => Nl3dArgs::clone(nl3d),
             Command::Nlmeans(_) => unreachable!("parse() always builds a nl3d argv"),
+            Command::Nl4d(_) => unreachable!("parse() always builds a nl3d argv"),
         };
 
         (args, nl3d)
