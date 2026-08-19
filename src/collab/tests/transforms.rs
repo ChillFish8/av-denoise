@@ -305,6 +305,128 @@ fn safe_reciprocal_is_zero_for_a_non_finite_denominator_and_ordinary_otherwise()
     );
 }
 
+#[cube(launch_unchecked)]
+fn haar8_roundtrip_kernel(input: &Array<f32>, output: &mut Array<f32>) {
+    let tid = UNIT_POS;
+    let mut basis = SharedMemory::<f32>::new(64usize);
+    fill_haar8_basis(&mut basis, tid);
+    sync_cube();
+    let mut line = SharedMemory::<f32>::new(8usize);
+    let mut coeff = SharedMemory::<f32>::new(8usize);
+    if tid == 0 {
+        for i in 0..8u32 {
+            line[i as usize] = input[i as usize];
+        }
+    }
+    sync_cube();
+    if tid == 0 {
+        dct8_line_fwd(&basis, &line, &mut coeff, 0u32, 1u32);
+        dct8_line_inv(&basis, &coeff, &mut line, 0u32, 1u32);
+        for i in 0..8u32 {
+            output[i as usize] = line[i as usize];
+        }
+    }
+}
+
+/// Writes the Haar-8 basis straight to global memory, one entry per
+/// thread, so the host side can check its orthonormality directly.
+#[cube(launch_unchecked)]
+fn haar8_basis_kernel(output: &mut Array<f32>) {
+    let tid = UNIT_POS;
+    let mut basis = SharedMemory::<f32>::new(64usize);
+    fill_haar8_basis(&mut basis, tid);
+    sync_cube();
+    if tid < 64u32 {
+        output[tid as usize] = basis[tid as usize];
+    }
+}
+
+fn run_haar8_roundtrip(input: &[f32; 8]) -> Vec<f32> {
+    let client = make_client();
+    let input_buf = client.create_from_slice(f32::as_bytes(input));
+    let output_buf = client.empty(8 * size_of::<f32>());
+
+    let grid = CubeCount::new_single();
+    let dim = CubeDim::new_1d(64);
+
+    unsafe {
+        haar8_roundtrip_kernel::launch_unchecked::<R>(
+            &client,
+            grid,
+            dim,
+            ArrayArg::from_raw_parts(input_buf, 8),
+            ArrayArg::from_raw_parts(output_buf.clone(), 8),
+        );
+    }
+
+    let bytes = client
+        .read_one(output_buf)
+        .expect("haar8 roundtrip readback failed");
+    f32::from_bytes(&bytes)[..8].to_vec()
+}
+
+fn run_haar8_basis() -> Vec<f32> {
+    let client = make_client();
+    let output_buf = client.empty(64 * size_of::<f32>());
+
+    let grid = CubeCount::new_single();
+    let dim = CubeDim::new_1d(64);
+
+    unsafe {
+        haar8_basis_kernel::launch_unchecked::<R>(
+            &client,
+            grid,
+            dim,
+            ArrayArg::from_raw_parts(output_buf.clone(), 64),
+        );
+    }
+
+    let bytes = client
+        .read_one(output_buf)
+        .expect("haar8 basis readback failed");
+    f32::from_bytes(&bytes)[..64].to_vec()
+}
+
+/// Round-trips an arbitrary 8-vector through the Haar-8 forward and
+/// inverse mat-vec helpers, then reads the basis itself back and checks
+/// on the host that it is genuinely orthonormal: `B * B^T` is the
+/// identity, and row 0, the DC row, is the constant `1/sqrt(8)`.
+#[test]
+fn haar8_basis_roundtrips_and_is_orthonormal() {
+    let patch = pseudo_random_patch(3);
+    let input: [f32; 8] = patch[..8].try_into().expect("patch has at least 8 entries");
+    let output = run_haar8_roundtrip(&input);
+    for (idx, (&want, &got)) in input.iter().zip(output.iter()).enumerate() {
+        assert!(
+            (want - got).abs() < 1e-6,
+            "idx={idx}: want {want} got {got}"
+        );
+    }
+
+    let basis = run_haar8_basis();
+    for j in 0..8usize {
+        for k in 0..8usize {
+            let mut dot = 0.0f32;
+            for i in 0..8usize {
+                dot += basis[j * 8 + i] * basis[k * 8 + i];
+            }
+            let expected = if j == k { 1.0 } else { 0.0 };
+            assert!(
+                (dot - expected).abs() < 1e-6,
+                "G[{j}][{k}] = {dot}, want {expected}"
+            );
+        }
+    }
+
+    let expected_row0 = 1.0f32 / 8.0f32.sqrt();
+    for (i, &v) in basis[..8].iter().enumerate() {
+        assert!(
+            (v - expected_row0).abs() < 1e-6,
+            "row0[{i}] = {v}, want {expected_row0}"
+        );
+    }
+}
+
 #[test]
 fn haar_stack_round_trip_recovers_the_input_for_every_k_use() {
     for k_use in [1u32, 2, 4, 8] {

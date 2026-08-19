@@ -314,6 +314,7 @@ impl<R: Runtime> CollabPipeline<R> {
                 wnorm,
                 false,
                 false,
+                self.params.ht_wavelet,
                 width,
                 height,
                 channels_count as u32,

@@ -253,6 +253,12 @@ pub struct Nl3dOptions {
     /// Diagnostic override for the shrinkage sigma, in normalised
     /// units. See `CollabParams::shrinkage_sigma_override`.
     pub shrinkage_sigma_override: Option<f32>,
+    /// Runs the collaborative filter's hard-threshold stage in the
+    /// orthonormal Haar-8 basis instead of the DCT basis.
+    ///
+    /// Diagnostic switch, see `CollabParams::ht_wavelet`. Defaults to
+    /// false.
+    pub debug_ht_wavelet: bool,
 }
 
 impl Default for Nl3dOptions {
@@ -271,6 +277,7 @@ impl Default for Nl3dOptions {
             ht_only: false,
             admission_sigma_override: None,
             shrinkage_sigma_override: None,
+            debug_ht_wavelet: false,
         }
     }
 }
@@ -370,6 +377,7 @@ fn collab_params_for(opts: &Nl3dOptions, channels: ChannelMode) -> CollabParams 
         ht_only: opts.ht_only,
         admission_sigma_override: opts.admission_sigma_override,
         shrinkage_sigma_override: opts.shrinkage_sigma_override,
+        ht_wavelet: opts.debug_ht_wavelet,
         ..CollabParams::default()
     }
 }

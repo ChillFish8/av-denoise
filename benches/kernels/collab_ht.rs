@@ -153,6 +153,7 @@ impl<R: Runtime> Benchmark for CollabHtBench<R> {
                 weight_scale(SIGMA, &dct_noise_profile(0.0)),
                 false,
                 false,
+                false,
                 W,
                 H,
                 1u32,

@@ -184,6 +184,10 @@ pub struct CliOptions {
     /// Diagnostic. Runs the luma instance's collaborative filter in
     /// hard-threshold-only mode. See `Nl3dArgs::debug_ht_only`.
     pub debug_ht_only: bool,
+    /// Diagnostic. Runs the luma instance's hard-threshold stage in the
+    /// orthonormal Haar-8 basis instead of the DCT basis. See
+    /// `Nl3dArgs::debug_ht_wavelet`.
+    pub debug_ht_wavelet: bool,
     /// Diagnostic admission-sigma pin for the luma instance, already
     /// converted to normalised units.
     pub debug_admission_sigma: Option<f32>,
@@ -222,14 +226,16 @@ impl CliOptions {
 
         // The `--debug-*` diagnostic overrides only ever apply to the
         // luma instance.
-        let (ht_only, admission_sigma_override, shrinkage_sigma_override) = match channels {
-            ChannelMode::Luma => (
-                self.debug_ht_only,
-                self.debug_admission_sigma,
-                self.debug_shrinkage_sigma,
-            ),
-            ChannelMode::Chroma | ChannelMode::Yuv => (false, None, None),
-        };
+        let (ht_only, admission_sigma_override, shrinkage_sigma_override, debug_ht_wavelet) =
+            match channels {
+                ChannelMode::Luma => (
+                    self.debug_ht_only,
+                    self.debug_admission_sigma,
+                    self.debug_shrinkage_sigma,
+                    self.debug_ht_wavelet,
+                ),
+                ChannelMode::Chroma | ChannelMode::Yuv => (false, None, None, false),
+            };
 
         Algorithm::Nl3d(Nl3dOptions {
             residual_sigma_scale: residual_sigma_scale.or(nl3d.residual_sigma_scale),
@@ -237,6 +243,7 @@ impl CliOptions {
             ht_only,
             admission_sigma_override,
             shrinkage_sigma_override,
+            debug_ht_wavelet,
             ..nl3d
         })
     }
@@ -944,6 +951,7 @@ mod cli_options_tests {
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
             debug_ht_only: false,
+            debug_ht_wavelet: false,
             debug_admission_sigma: None,
             debug_shrinkage_sigma: None,
             progress: false,
@@ -1046,6 +1054,7 @@ mod cli_options_tests {
             luma_lambda_ht,
             chroma_lambda_ht,
             debug_ht_only: false,
+            debug_ht_wavelet: false,
             debug_admission_sigma: None,
             debug_shrinkage_sigma: None,
             progress: false,
@@ -1238,6 +1247,7 @@ mod passthrough_retry_tests {
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
             debug_ht_only: false,
+            debug_ht_wavelet: false,
             debug_admission_sigma: None,
             debug_shrinkage_sigma: None,
             progress: false,
@@ -1330,6 +1340,7 @@ mod lumachroma_lockstep_tests {
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
             debug_ht_only: false,
+            debug_ht_wavelet: false,
             debug_admission_sigma: None,
             debug_shrinkage_sigma: None,
             progress: false,

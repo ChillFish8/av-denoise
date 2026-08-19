@@ -214,6 +214,7 @@ fn run_ht_raw(
             weight_scale(sigma, &profile),
             false,
             true,
+            false,
             width,
             height,
             1u32,

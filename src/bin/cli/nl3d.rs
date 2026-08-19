@@ -117,6 +117,14 @@ pub struct Nl3dArgs {
     #[arg(long)]
     pub debug_ht_only: bool,
 
+    /// Diagnostic. Runs the brightness plane's hard-threshold stage in
+    /// the orthonormal Haar-8 basis instead of the DCT basis.
+    ///
+    /// Colour planes are unaffected. Ignored with `--channel-mode
+    /// yuv`.
+    #[arg(long)]
+    pub debug_ht_wavelet: bool,
+
     /// Diagnostic. Pins the sigma the brightness plane's grouping
     /// admission floor is built from, in 8-bit code units, the units
     /// `sigma_chain_diag` prints.
@@ -190,6 +198,7 @@ impl Nl3dArgs {
             ht_only: defaults.ht_only,
             admission_sigma_override: defaults.admission_sigma_override,
             shrinkage_sigma_override: defaults.shrinkage_sigma_override,
+            debug_ht_wavelet: defaults.debug_ht_wavelet,
         });
 
         opts.luma_residual_sigma_scale = self.luma_residual_sigma_scale;
@@ -197,6 +206,7 @@ impl Nl3dArgs {
         opts.luma_lambda_ht = self.luma_lambda_ht;
         opts.chroma_lambda_ht = self.chroma_lambda_ht;
         opts.debug_ht_only = self.debug_ht_only;
+        opts.debug_ht_wavelet = self.debug_ht_wavelet;
         opts.debug_admission_sigma = self.debug_admission_sigma8.map(|s| s / 255.0);
         opts.debug_shrinkage_sigma = self.debug_shrinkage_sigma8.map(|s| s / 255.0);
 
@@ -213,6 +223,7 @@ impl Nl3dArgs {
         let luma_set = self.luma_residual_sigma_scale.is_some() || self.luma_lambda_ht.is_some();
         let chroma_set = self.chroma_residual_sigma_scale.is_some() || self.chroma_lambda_ht.is_some();
         let debug_set = self.debug_ht_only
+            || self.debug_ht_wavelet
             || self.debug_admission_sigma8.is_some()
             || self.debug_shrinkage_sigma8.is_some();
 

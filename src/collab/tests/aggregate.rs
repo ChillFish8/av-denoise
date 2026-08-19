@@ -204,6 +204,7 @@ fn run_scatter_stage(frame: &[f32], width: u32, height: u32, sigma: f32) -> (Vec
             weight_scale(sigma, &profile),
             false,
             false,
+            false,
             width,
             height,
             1u32,

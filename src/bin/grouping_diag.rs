@@ -377,6 +377,7 @@ fn run_stage1(
             wnorm,
             false,
             false,
+            false,
             width,
             height,
             1u32,

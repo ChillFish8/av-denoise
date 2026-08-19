@@ -6,6 +6,7 @@ use crate::collab::kernels::transforms::{
     dct8_line_fwd,
     dct8_line_inv,
     fill_dct8_basis,
+    fill_haar8_basis,
     haar_fwd_stack,
     haar_inv_stack,
     safe_reciprocal,
@@ -133,6 +134,13 @@ pub(crate) fn variance_ladder(v: &mut Array<f32>, k_use: u32) {
 /// the coefficient position this thread ends up owning). At `rho = 0`
 /// every entry is exactly `1.0`, so this multiply is a no-op and the
 /// threshold behaves exactly as it did before this profile existed.
+///
+/// `ht_wavelet` selects the transform basis the shrinkage above runs
+/// in. False, the default, fills the DCT basis this filter has always
+/// used. True fills the orthonormal Haar-8 basis instead, a diagnostic
+/// alternative for comparing the two bases. The `dct8_line_*` mat-vec
+/// helpers run either basis unchanged, since both are orthonormal 8x8
+/// matrices with their inverse equal to their transpose.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn collab_filter_ht<N: Size>(
@@ -151,6 +159,7 @@ pub fn collab_filter_ht<N: Size>(
     weight_scale: f32,
     #[comptime] use_member_sigma: bool,
     #[comptime] emit_filtered: bool,
+    #[comptime] ht_wavelet: bool,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
@@ -183,7 +192,11 @@ pub fn collab_filter_ht<N: Size>(
     // reads the one the first channel computed.
     let mut gw = SharedMemory::<f32>::new(1usize);
 
-    fill_dct8_basis(&mut basis, tid);
+    if ht_wavelet {
+        fill_haar8_basis(&mut basis, tid);
+    } else {
+        fill_dct8_basis(&mut basis, tid);
+    }
     sync_cube();
 
     let mut out_vec = Vector::<f32, N>::empty();

@@ -62,6 +62,14 @@ pub struct CollabParams {
     /// single-channel runs. `None` keeps the per-frame sigmas the
     /// caller passes to `run_two_stage`.
     pub shrinkage_sigma_override: Option<f32>,
+    /// Selects the transform basis the hard-threshold stage's shrinkage
+    /// runs in.
+    ///
+    /// Diagnostic switch for comparing the DCT basis this filter has
+    /// always used against an orthonormal Haar-8 basis. Defaults to
+    /// false, which keeps the DCT basis. See
+    /// `crate::collab::kernels::transforms::fill_haar8_basis`.
+    pub ht_wavelet: bool,
 }
 
 impl Default for CollabParams {
@@ -76,6 +84,7 @@ impl Default for CollabParams {
             ht_only: false,
             admission_sigma_override: None,
             shrinkage_sigma_override: None,
+            ht_wavelet: false,
         }
     }
 }
