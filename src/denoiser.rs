@@ -498,45 +498,34 @@ fn collab_params_for(opts: &Nl3dOptions, channels: ChannelMode) -> CollabParams 
 /// lands, the whole ladder shifts and this value should be re-swept,
 /// not just nudged.
 ///
-/// # Chroma, 3.6
+/// # Chroma, 4.2
 ///
-/// Metric-driven, unlike luma. Swept with luma pinned at 5.3 (see
-/// `data/nl4d_chroma_calibration/README.md`) on the quality harness's
-/// `av_nl4d_temporal_r2` row at all three light noise levels, over 2.7
-/// (the prior shared library default), 3.0, 3.3, 3.6, 4.0, 5.3 (luma
-/// parity), 7.0, and 10.0. `xpsnr_u`/`xpsnr_v` peak on a broad, nearly
-/// flat plateau from 3.0 to 4.0, clearly ahead of both the prior 2.7
-/// default and of every value at or above luma parity. 3.6 has the
-/// best worst-case `min(xpsnr_u, xpsnr_v)` across the three noise
-/// levels, tied with 4.0 on the single worst figure but ahead of it at
-/// every other point on the plateau, and `ssim_all` does not disagree
-/// anywhere on the plateau.
+/// The prior value here was 3.6, chosen on metric optima alone (see
+/// `data/nl4d_chroma_calibration/README.md`) and never checked by eye.
 ///
-/// The metric sweep alone would not have been trusted on its own. This
-/// project's chroma dial was set to 8.0 once by visual plausibility
-/// and only caught by amplifying the U-plane residual and finding
-/// brick coursing in what the filter had removed, see
-/// [`nl3d_default_residual_sigma_scale`]'s own "How 8.0 came to be
-/// here" section. The same check was run here, real brick grain, a
-/// 16x-amplified removed-residual of the U plane at frame 22, luma
-/// pinned at 5.3, for the plateau's three candidates (3.3, 3.6, 4.0)
-/// plus the prior 2.7 default. All four residuals read as
-/// near-featureless speckle with no legible brick structure at any
-/// point, so the plateau's metric winner was trusted rather than
-/// second-guessed.
+/// It was re-swept on the cross-frame-aggregation build with luma
+/// pinned at 5.3, across a nine-rung ladder deliberately extended to
+/// 8.5 so it bracketed and exceeded luma parity, since the assumption
+/// that chroma wants less aggression than luma had never itself been
+/// checked against a residual look. A human judged the frame-22 crops
+/// and the 16x-amplified U-plane removed-residuals from that ladder
+/// and picked 4.2.
 ///
-/// This sweep predates cross-frame aggregation landing, the same
-/// change noted as provisional in the luma section above. A fresh
-/// sweep against the new aggregation, recorded in
-/// `data/nl4d_chroma_recal/README.md`, measured encoded file size
-/// under a realistic encode alongside the quality metrics and
-/// produced 16x-amplified U-plane residuals at frame 22 for six
-/// chroma values bracketing 3.6. The value here stays at 3.6 pending
-/// a human pick from that evidence.
+/// Two sets of numbers accompanied that judgement without deciding
+/// it. Encoded size under a realistic delivery encode saves 57.21
+/// percent against the undenoised source at 4.2, against 56.87
+/// percent at the prior 3.6 and 57.73 percent at luma parity 5.3.
+/// U-plane residual structure correlation rises smoothly across the
+/// ladder with no threshold, 0.341 at 3.6, 0.358 at 4.2, and 0.394 at
+/// 5.3, so there is no cliff in that number either and the choice is
+/// a continuum trade a human still has to make.
+///
+/// The full evidence, every rendered arm, the residual crops, and the
+/// numbers above, lives in `data/nl4d_chroma_recal/README.md`.
 pub fn nl4d_default_lambda_ht(channels: ChannelMode) -> f32 {
     match channels {
         ChannelMode::Luma | ChannelMode::Yuv => 5.3,
-        ChannelMode::Chroma => 3.6,
+        ChannelMode::Chroma => 4.2,
     }
 }
 
@@ -1190,7 +1179,7 @@ mod options_tests {
         let chroma = nl4d_default_lambda_ht(ChannelMode::Chroma);
 
         assert!((luma - 5.3).abs() < f32::EPSILON);
-        assert!((chroma - 3.6).abs() < f32::EPSILON);
+        assert!((chroma - 4.2).abs() < f32::EPSILON);
         assert!(
             (chroma - luma).abs() > f32::EPSILON,
             "luma ({luma}) and chroma ({chroma}) must resolve to different defaults"
@@ -1213,7 +1202,7 @@ mod options_tests {
         let chroma = resolve_lambda_ht(&opts, ChannelMode::Chroma);
 
         assert!((luma - 5.3).abs() < f32::EPSILON, "got {luma}");
-        assert!((chroma - 3.6).abs() < f32::EPSILON, "got {chroma}");
+        assert!((chroma - 4.2).abs() < f32::EPSILON, "got {chroma}");
     }
 
     #[test]

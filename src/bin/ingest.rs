@@ -1355,7 +1355,7 @@ mod cli_options_tests {
         let luma_default = av_denoise::nl4d_default_lambda_ht(ChannelMode::Luma);
         let chroma_default = av_denoise::nl4d_default_lambda_ht(ChannelMode::Chroma);
         assert!((luma_default - 5.3).abs() < f32::EPSILON);
-        assert!((chroma_default - 3.6).abs() < f32::EPSILON);
+        assert!((chroma_default - 4.2).abs() < f32::EPSILON);
         assert!((chroma_default - luma_default).abs() > f32::EPSILON);
     }
 }
