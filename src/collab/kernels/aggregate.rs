@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 
 use crate::collab::kernels::transforms::RECIPROCAL_FLOOR;
-use crate::collab::{MAX_K, MAX_TEMPORAL_RADIUS, PATCH_AREA, PATCH_SIZE};
+use crate::collab::{MAX_K, PATCH_AREA, PATCH_SIZE, STEP};
 
 /// The fixed-point scale the accumulators count in.
 ///
@@ -26,7 +26,7 @@ use crate::collab::{MAX_K, MAX_TEMPORAL_RADIUS, PATCH_AREA, PATCH_SIZE};
 /// accumulator only ever sees one pass's worth of contributions. A
 /// cross-frame accumulator, [`crate::nl4d::Nl4dDenoiser`]'s ring of
 /// per-frame regions, sees contributions from several passes before it
-/// is read back and needs [`CROSS_FRAME_ACCUM_SCALE`] instead, a smaller
+/// is read back and needs [`cross_frame_accum_scale`] instead, a smaller
 /// scale sized for that larger worst case. `scatter_patch` takes the
 /// scale as a runtime argument rather than reading either constant
 /// itself, precisely so a caller with only one pass's worth of headroom
@@ -37,20 +37,94 @@ use crate::collab::{MAX_K, MAX_TEMPORAL_RADIUS, PATCH_AREA, PATCH_SIZE};
 /// accumulator by the other, so nothing downstream has to know it.
 pub const ACCUM_SCALE: f32 = 524_288.0;
 
-/// The fixed-point scale [`crate::nl4d::Nl4dDenoiser`]'s cross-frame
-/// accumulator ring counts in, in place of [`ACCUM_SCALE`].
+/// The factor of headroom [`cross_frame_accum_scale`] leaves under
+/// `i32::MAX`, matching the roughly two-fold margin [`ACCUM_SCALE`]'s
+/// own fixed derivation leaves for the single-pass case.
+const CROSS_FRAME_SAFETY_FACTOR: f64 = 2.0;
+
+/// Derives the fixed-point scale [`crate::nl4d::Nl4dDenoiser`]'s
+/// cross-frame accumulator ring should count in, in place of
+/// [`ACCUM_SCALE`], from the `spatial_radius` and `temporal_radius` a
+/// particular denoiser was actually built with.
 ///
-/// `2^15` is chosen from the same three bounds [`ACCUM_SCALE`] is, plus a
-/// fourth: a cross-frame accumulator stays live for at most `2 *
-/// MAX_TEMPORAL_RADIUS + 1` consecutive passes before it is read back and
-/// cleared, and every one of those passes can cover the same pixel with
-/// its own 392 member patches, not just one pass's worth. The largest
-/// accumulator value is therefore `392 * (2 * MAX_TEMPORAL_RADIUS + 1) *
-/// 1 * 5 * 2^15`, about `1.09e9`, which leaves a factor of about two
-/// under `i32::MAX`, the same margin [`ACCUM_SCALE`] leaves for the
-/// single-pass case. One unit is `3.1e-5`, still well under the `2.4e-4`
-/// one code level of 12-bit output spans.
-pub const CROSS_FRAME_ACCUM_SCALE: f32 = 32_768.0;
+/// # Why a fixed constant was not safe
+///
+/// An earlier version of this scale was a single constant, `2^15`,
+/// derived from `392 contributions/pass * 17 passes * 5 * 2^15`, about
+/// `1.09e9`, a little under half of `i32::MAX`. That derivation mixed a
+/// worst case from each axis without checking the two are reachable
+/// together. `17 passes` is the worst case on the temporal axis, `2 *
+/// MAX_TEMPORAL_RADIUS + 1` at the validated ceiling
+/// `MAX_TEMPORAL_RADIUS = 8`. But `392` contributions per pass is only
+/// the default `spatial_radius = 9`, not that axis's own worst case.
+/// [`crate::nl4d::Nl4dParams::validate`] permits `spatial_radius` up to
+/// `16`, and a larger radius raises the contribution count. At
+/// `spatial_radius = 15` or `16` combined with `temporal_radius = 8`,
+/// the true worst-case accumulator value clears `i32::MAX` outright, and
+/// the fixed `2^15` scale silently overflows and wraps the accumulator
+/// into a wildly wrong pixel, with no crash and nothing in the output to
+/// flag it.
+///
+/// # The real bound
+///
+/// A member patch that ends up covering pixel `x` has a top-left `P`
+/// somewhere in `[x - (PATCH_SIZE - 1), x]`, and `P` lies within
+/// `spatial_radius` pixels of whichever reference `R` produced it (see
+/// [`crate::collab::kernels::group_temporal::collab_group_temporal`]'s
+/// spatial search window). So every reference that could have scattered
+/// a member covering `x` has its own top-left within `(PATCH_SIZE - 1) +
+/// 2 * spatial_radius` pixels of `x`, and references sit on the `STEP`
+/// grid, so at most
+///
+/// ```text
+/// refs_per_axis = ((PATCH_SIZE - 1) + 2 * spatial_radius) / STEP + 1
+/// ```
+///
+/// of them (integer division) lie in that span along one axis. This
+/// reproduces the old `392` figure exactly at `spatial_radius = 9`
+/// (`refs_per_axis = 7`, `7 * 7 * MAX_K = 392`), which is what validates
+/// the model. Squaring for both axes and taking every one of `MAX_K`
+/// members from each such reference gives the worst-case contribution
+/// count for one pass,
+///
+/// ```text
+/// contribs_per_pass = refs_per_axis^2 * MAX_K
+/// ```
+///
+/// and a cross-frame accumulator can receive that many times over from
+/// as many as `2 * temporal_radius + 1` passes before
+/// [`crate::nl4d::Nl4dDenoiser::run_collab_stage`] reads it back, each
+/// contribution clamped to [`ACCUM_CLAMP`] and weighted by at most `1.0`
+/// (see [`weight_scale`]). The scale returned is the largest power of
+/// two that keeps `contribs_per_pass * (2 * temporal_radius + 1) *
+/// ACCUM_CLAMP * scale` under `i32::MAX / `[`CROSS_FRAME_SAFETY_FACTOR`],
+/// so a power-of-two scale keeps the same fixed-point behaviour the
+/// rest of this module relies on.
+///
+/// Deriving the scale from the configuration actually in use, rather
+/// than the worst case every axis allows, also means a typical
+/// configuration keeps more fixed-point precision than the worst case
+/// would afford it. At the defaults, `spatial_radius = 9` and
+/// `temporal_radius = 2`, this returns a scale several times larger than
+/// the old fixed `2^15`.
+pub fn cross_frame_accum_scale(spatial_radius: u32, temporal_radius: u32) -> f32 {
+    let refs_per_axis = ((PATCH_SIZE - 1) + 2 * spatial_radius) / STEP + 1;
+    let contribs_per_pass = refs_per_axis as f64 * refs_per_axis as f64 * MAX_K as f64;
+    let passes = (2 * temporal_radius + 1) as f64;
+    let max_raw_value = contribs_per_pass * passes * ACCUM_CLAMP as f64;
+
+    let budget = i32::MAX as f64 / CROSS_FRAME_SAFETY_FACTOR;
+    let exponent = (budget / max_raw_value).log2().floor();
+    let scale = 2f64.powf(exponent);
+
+    debug_assert!(
+        scale * max_raw_value <= budget,
+        "cross_frame_accum_scale({spatial_radius}, {temporal_radius}) picked {scale}, which \
+         does not keep the worst-case accumulator value under the safety budget",
+    );
+
+    scale as f32
+}
 
 /// The magnitude a single filtered value is clamped to before it enters
 /// the accumulator.
@@ -106,8 +180,8 @@ pub fn weight_scale(sigma: f32, dct_profile: &[f32; 8]) -> f32 {
 }
 
 /// Converts one weighted value into the accumulator's fixed point, at
-/// `scale` ([`ACCUM_SCALE`] for a single-frame accumulator,
-/// [`CROSS_FRAME_ACCUM_SCALE`] for a cross-frame ring).
+/// `scale` ([`ACCUM_SCALE`] for a single-frame accumulator, or
+/// [`cross_frame_accum_scale`]'s return value for a cross-frame ring).
 #[cube]
 pub fn to_fixed(value: f32, scale: f32) -> i32 {
     let clamped = f32::clamp(value, -ACCUM_CLAMP, ACCUM_CLAMP);
@@ -138,10 +212,11 @@ pub fn to_fixed(value: f32, scale: f32) -> i32 {
 ///
 /// `accum_scale` is the fixed-point scale [`to_fixed`] converts into,
 /// [`ACCUM_SCALE`] for a single-frame accumulator or
-/// [`CROSS_FRAME_ACCUM_SCALE`] for a cross-frame ring. It cancels in
-/// `collab_normalise` the same way either constant does on its own, so a
-/// caller is free to pick whichever one matches how many passes its own
-/// accumulator can receive contributions from before it is read back.
+/// [`cross_frame_accum_scale`]'s return value for a cross-frame ring. It
+/// cancels in `collab_normalise` the same way either scale does on its
+/// own, so a caller is free to pick whichever one matches how many
+/// passes its own accumulator can receive contributions from before it
+/// is read back.
 #[cube]
 #[allow(clippy::too_many_arguments)]
 pub fn scatter_patch(
@@ -185,8 +260,17 @@ pub fn scatter_patch(
 /// in full before its first pass.
 ///
 /// The `accum` region is `pixels * stored_ch` slots wide and `wsum`'s is
-/// `pixels` wide, so the launch is sized for the larger one and the
+/// `pixels` wide, so the loop is sized for the larger one and the
 /// weight write is masked off past its end.
+///
+/// Grid-strided rather than one thread per slot, because the caller's
+/// dispatch grid is clamped to the GPU's 65,535-workgroups-per-dimension
+/// limit and a 4K or 8K frame's `pixels * stored_ch` can need more
+/// workgroups than that at the 256-thread block size this launches
+/// with. A one-thread-per-slot launch would leave the tail past the
+/// clamp point holding whatever was already there instead of zero, so
+/// each thread instead steps forward by the whole grid's thread count
+/// until it has covered every slot.
 #[cube(launch_unchecked)]
 pub fn collab_zero_accum(
     accum: &mut Array<Atomic<i32>>,
@@ -194,13 +278,15 @@ pub fn collab_zero_accum(
     frame_offset: u32,
     #[comptime] pixels: u32,
     #[comptime] stored_ch: u32,
+    #[comptime] total_threads: u32,
 ) {
-    let idx = ABSOLUTE_POS_X;
-    if idx < pixels * stored_ch {
+    let mut idx = ABSOLUTE_POS_X;
+    while idx < pixels * stored_ch {
         Atomic::store(&accum[(frame_offset * stored_ch + idx) as usize], 0i32);
-    }
-    if idx < pixels {
-        Atomic::store(&wsum[(frame_offset + idx) as usize], 0i32);
+        if idx < pixels {
+            Atomic::store(&wsum[(frame_offset + idx) as usize], 0i32);
+        }
+        idx += total_threads;
     }
 }
 
@@ -209,9 +295,9 @@ pub fn collab_zero_accum(
 ///
 /// Each pixel's output is the weighted mean of every filtered patch that
 /// covered it, which is `accum / wsum`. Both sides carry whatever fixed-
-/// point scale the caller's own [`scatter_patch`] calls used, [`ACCUM_SCALE`]
-/// or [`CROSS_FRAME_ACCUM_SCALE`], so that scale divides out and never
-/// appears here.
+/// point scale the caller's own [`scatter_patch`] calls used,
+/// [`ACCUM_SCALE`] or a [`cross_frame_accum_scale`] result, so that scale
+/// divides out and never appears here.
 ///
 /// `accum`/`wsum` may hold more than one frame's worth of pixels, laid
 /// out back to back in ring-slot order the way [`scatter_patch`]
@@ -277,11 +363,97 @@ const _: () = assert!(
     "recheck ACCUM_SCALE's headroom, the per-pass contribution bound moved"
 );
 
-// Ties `CROSS_FRAME_ACCUM_SCALE`'s docs to the same two constants, plus
-// `MAX_TEMPORAL_RADIUS`, since a larger radius raises how many passes'
-// worth of 392-contribution bounds a cross-frame accumulator can stack
-// up before it is read back.
-const _: () = assert!(
-    PATCH_AREA == 64 && MAX_K == 8 && MAX_TEMPORAL_RADIUS == 8,
-    "recheck CROSS_FRAME_ACCUM_SCALE's headroom, the per-pixel contribution bound moved"
-);
+// `cross_frame_accum_scale` has no equivalent compile-time assertion,
+// unlike `ACCUM_SCALE` above. That assertion exists because `ACCUM_SCALE`
+// is a constant baked in ahead of time from `PATCH_AREA` and `MAX_K`, so
+// nothing else re-checks it if either constant moves. `cross_frame_accum_
+// scale` reads `PATCH_SIZE`, `STEP`, and `MAX_K` itself and re-derives
+// the scale from whatever they currently are, plus the caller's own
+// `spatial_radius` and `temporal_radius`, every time it runs, so there is
+// no baked-in number left for a compile-time check to protect. This is
+// exactly the bug this module used to have: a scale derived once from a
+// worst case and then trusted for every configuration, including ones
+// the derivation never actually covered. What needs guarding now is the
+// derivation's own arithmetic, which a `debug_assert!` inside
+// `cross_frame_accum_scale` itself checks on every call, and which this
+// module's own test `every_spatial_and_temporal_radius_stays_under_the_
+// safety_budget` checks exhaustively across every `spatial_radius` and
+// `temporal_radius` the validated parameter ranges allow, independent of
+// whether debug assertions are compiled in.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `Nl4dParams::validate` in `nl4d/params.rs` is what actually enforces
+    // these ranges; they are repeated here as plain numbers rather than
+    // imported, so this test does not depend on `nl4d` at all and keeps
+    // exercising the true worst case even if that module's ranges ever
+    // narrow.
+    const SPATIAL_RADIUS_RANGE: std::ops::RangeInclusive<u32> = 1..=16;
+    const TEMPORAL_RADIUS_RANGE: std::ops::RangeInclusive<u32> = 1..=8;
+
+    /// This is the test that would have caught the original bug: it
+    /// recomputes the worst-case accumulator value the same way
+    /// [`cross_frame_accum_scale`]'s own `debug_assert!` does, for every
+    /// `(spatial_radius, temporal_radius)` pair the validated parameter
+    /// ranges allow, rather than only the one pair a debug build happens
+    /// to exercise at runtime.
+    #[test]
+    fn every_spatial_and_temporal_radius_stays_under_the_safety_budget() {
+        let budget = i32::MAX as f64 / CROSS_FRAME_SAFETY_FACTOR;
+
+        for spatial_radius in SPATIAL_RADIUS_RANGE {
+            for temporal_radius in TEMPORAL_RADIUS_RANGE {
+                let refs_per_axis = ((PATCH_SIZE - 1) + 2 * spatial_radius) / STEP + 1;
+                let contribs_per_pass = refs_per_axis as f64 * refs_per_axis as f64 * MAX_K as f64;
+                let passes = (2 * temporal_radius + 1) as f64;
+                let max_raw_value = contribs_per_pass * passes * ACCUM_CLAMP as f64;
+
+                let scale = cross_frame_accum_scale(spatial_radius, temporal_radius) as f64;
+                let worst_case_value = max_raw_value * scale;
+
+                assert!(
+                    worst_case_value <= budget,
+                    "spatial_radius={spatial_radius} temporal_radius={temporal_radius}: \
+                     scale={scale} gives worst-case value {worst_case_value}, over the \
+                     budget {budget}",
+                );
+                assert!(
+                    scale > 0.0 && scale.is_finite(),
+                    "spatial_radius={spatial_radius} temporal_radius={temporal_radius}: \
+                     scale={scale} is not a usable fixed-point scale",
+                );
+            }
+        }
+    }
+
+    /// The point of deriving the scale per configuration, rather than
+    /// sizing one constant for the worst case every configuration is
+    /// allowed to reach, is that a typical configuration keeps more
+    /// fixed-point precision than the worst case would afford it. At the
+    /// defaults this should give a scale at or above the old fixed
+    /// `2^15`.
+    #[test]
+    fn defaults_keep_at_least_the_old_fixed_scale() {
+        let old_fixed_scale = 32_768.0f32;
+        let derived = cross_frame_accum_scale(9, 2);
+
+        assert!(
+            derived >= old_fixed_scale,
+            "derived scale {derived} at the defaults (spatial_radius=9, temporal_radius=2) \
+             should be at least the old fixed scale {old_fixed_scale}",
+        );
+    }
+
+    /// Ties the `392`-contribution figure in this module's docs to the
+    /// model `cross_frame_accum_scale` is built on, the same way the
+    /// original derivation's own worked example did.
+    #[test]
+    fn contribution_model_reproduces_the_documented_392_at_the_default_spatial_radius() {
+        let spatial_radius = 9u32;
+        let refs_per_axis = ((PATCH_SIZE - 1) + 2 * spatial_radius) / STEP + 1;
+        assert_eq!(refs_per_axis, 7);
+        assert_eq!(refs_per_axis * refs_per_axis * MAX_K, 392);
+    }
+}

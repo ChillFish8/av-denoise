@@ -88,6 +88,145 @@ fn denoises_a_static_noisy_clip() {
     }
 }
 
+/// `spatial_radius = 16` combined with `temporal_radius =
+/// MAX_TEMPORAL_RADIUS` (8) is the configuration that overflowed `i32`
+/// under the old fixed `CROSS_FRAME_ACCUM_SCALE = 2^15`: the worst-case
+/// cross-frame accumulator value at that combination clears `i32::MAX`,
+/// so the old scale silently wrapped it into a wildly wrong pixel with
+/// no crash and nothing in the output to flag it.
+/// `cross_frame_accum_scale` derives a scale from the real configuration
+/// instead, so this combination should denoise cleanly, the same way any
+/// other combination does, rather than producing the non-finite or wildly
+/// out-of-range values an overflow leaves behind.
+#[test]
+fn denoises_at_the_previously_overflowing_spatial_and_temporal_radius() {
+    let client = make_client();
+    let (w, h) = (64u32, 64u32);
+    let radius = crate::collab::MAX_TEMPORAL_RADIUS;
+    let base = textured_base(w, h);
+    let n = 3usize;
+
+    let noisy_frames: Vec<Vec<f32>> = (0..n as u32).map(|seed| noisy_copy_of(&base, w, h, SIGMA, seed)).collect();
+
+    let params = Nl4dParams {
+        spatial_radius: 16,
+        ..static_clip_params(radius)
+    };
+    let mut d = Nl4dDenoiser::<R>::new(&client, params, w, h).expect("construction failed");
+
+    let mut outputs: Vec<Vec<f32>> = Vec::new();
+    for frame in &noisy_frames {
+        d.push_frame(frame);
+        if let Some(pending) = d.denoise_submit().expect("denoise_submit failed") {
+            outputs.push(pending.wait().expect("readback failed"));
+        }
+    }
+    d.flush(|frame| outputs.push(frame.to_vec())).expect("flush failed");
+
+    assert_eq!(
+        outputs.len(),
+        n,
+        "expected one emitted frame per pushed frame"
+    );
+
+    for (i, out) in outputs.iter().enumerate() {
+        // An `i32` overflow wraps the fixed-point accumulator into a huge
+        // or negative value, which `collab_normalise` then divides
+        // through into non-finite or wildly out-of-range output. Checking
+        // finiteness first gives a clearer failure than letting a bad
+        // value fall through into the PSNR comparison below.
+        assert!(
+            out.iter().all(|v| v.is_finite()),
+            "frame {i}: output contains non-finite values, a symptom of the accumulator \
+             overflow this test guards against"
+        );
+
+        let noisy_psnr = psnr(&noisy_frames[i], &base);
+        let out_psnr = psnr(out, &base);
+        assert!(
+            out_psnr > noisy_psnr,
+            "frame {i}: expected a PSNR improvement over the noisy input at spatial_radius=16, \
+             temporal_radius={radius}, got noisy={noisy_psnr:.4} dB denoised={out_psnr:.4} dB"
+        );
+    }
+}
+
+/// Guards `run_collab_stage`'s pass-0 accumulator zero against the GPU's
+/// per-dimension dispatch limit.
+///
+/// A single 1D dispatch has to stay at or under 65,535 workgroups on
+/// every backend this project targets. Pass 0 used to zero the whole
+/// cross-frame ring in one such dispatch, sized for `accum_ring_len`
+/// (`width * height * stored_ch * (1 + 2 * temporal_radius)` elements at
+/// 256 threads per workgroup), so a resolution and `temporal_radius`
+/// combination large enough pushed that dispatch over the limit. A GPU
+/// that rejects the oversized dispatch leaves the ring holding
+/// `client.empty`'s undefined memory instead of zero, which every
+/// subsequent pass's atomic scatter then adds real contributions on top
+/// of, and `collab_normalise` divides through into wildly wrong output
+/// for whichever frames complete before that garbage is ever cleared.
+///
+/// `1024 * 1024` at `temporal_radius = MAX_TEMPORAL_RADIUS` (a
+/// `1 + 2 * 8 = 17`-frame ring) needs `1024 * 1024 * 17 = 17,825,792`
+/// accumulator elements, `69,632` workgroups at 256 threads each,
+/// comfortably over the limit. This is also the exact failure mode a
+/// real run hit at `temporal_radius = 4` on a 1080p input, `72,900`
+/// workgroups for the luma plane alone.
+///
+/// The frame count pushes the ring past a second full cycle
+/// (`2 * total_frames + 3`), so this also stands as a regression guard
+/// for slot reuse across more than one lap of the ring, not only the
+/// pass-0 dispatch itself.
+#[test]
+fn survives_a_ring_size_that_would_overflow_a_single_zero_dispatch() {
+    let client = make_client();
+    let (w, h) = (1024u32, 1024u32);
+    let radius = crate::collab::MAX_TEMPORAL_RADIUS;
+    let base = textured_base(w, h);
+    let total_frames = 1 + 2 * radius;
+    let n = (2 * total_frames + 3) as usize;
+
+    let noisy_frames: Vec<Vec<f32>> = (0..n as u32).map(|seed| noisy_copy_of(&base, w, h, SIGMA, seed)).collect();
+
+    let params = Nl4dParams {
+        // Cheaper than the module defaults so the test spends its time
+        // on the ring size under test, not on a wide spatial search
+        // this bug has nothing to do with.
+        spatial_radius: 2,
+        refine: 1,
+        ..static_clip_params(radius)
+    };
+    let mut d = Nl4dDenoiser::<R>::new(&client, params, w, h).expect("construction failed");
+
+    let mut outputs: Vec<Vec<f32>> = Vec::new();
+    for frame in &noisy_frames {
+        d.push_frame(frame);
+        if let Some(pending) = d.denoise_submit().expect("denoise_submit failed") {
+            outputs.push(pending.wait().expect("readback failed"));
+        }
+    }
+    d.flush(|frame| outputs.push(frame.to_vec())).expect("flush failed");
+
+    assert_eq!(outputs.len(), n, "expected one emitted frame per pushed frame");
+
+    for (i, out) in outputs.iter().enumerate() {
+        assert!(
+            out.iter().all(|v| v.is_finite()),
+            "frame {i}: output contains non-finite values, a symptom of the pass-0 dispatch \
+             this test guards against leaving the accumulator ring unzeroed"
+        );
+
+        let noisy_psnr = psnr(&noisy_frames[i], &base);
+        let out_psnr = psnr(out, &base);
+        assert!(
+            out_psnr > noisy_psnr,
+            "frame {i}: expected a PSNR improvement over the noisy input, got noisy={noisy_psnr:.4} dB \
+             denoised={out_psnr:.4} dB; a worse-than-noisy result is what leftover garbage in the \
+             accumulator ring looks like once collab_normalise divides through it"
+        );
+    }
+}
+
 /// Guards the `centre_slot`/`frame` contract `run_collab_stage` depends
 /// on: `collab_group_temporal`'s `centre_slot` and `collab_filter_ht`'s
 /// `frame` must read the same physical ring slot. Nothing in the type
@@ -280,7 +419,8 @@ fn run_spatial_only(
     );
     let agg_dim = CubeDim::new_2d(crate::nlmeans::BLOCK_X, crate::nlmeans::BLOCK_Y);
     let zero_dim = 256u32;
-    let zero_grid = CubeCount::new_1d((frame_len as u32).div_ceil(zero_dim));
+    let zero_workgroups = (frame_len as u32).div_ceil(zero_dim);
+    let zero_grid = CubeCount::new_1d(zero_workgroups);
 
     let wnorm = weight_scale(sigma, &dct_profile);
     let centre_slot = 0u32;
@@ -295,6 +435,7 @@ fn run_spatial_only(
             0u32,
             pixels as u32,
             stored_ch,
+            zero_workgroups * zero_dim,
         );
 
         collab_group_temporal::launch_unchecked::<R>(

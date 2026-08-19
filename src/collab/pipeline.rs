@@ -8,7 +8,7 @@ use crate::collab::kernels::filter_wiener::collab_filter_wiener;
 use crate::collab::kernels::group::collab_group_spatial;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{CollabParams, PATCH_AREA, PATCH_SIZE};
-use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode};
+use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, MAX_GRID_1D};
 
 /// The per-channel distance scale collaborative grouping and the noise
 /// floor use, 3 for luma, 1.5 for chroma, 1 for full YUV. Mirrors
@@ -258,7 +258,16 @@ impl<R: Runtime> CollabPipeline<R> {
         let agg_grid = CubeCount::new_2d(width.div_ceil(BLOCK_X), height.div_ceil(BLOCK_Y));
         let agg_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
         let zero_dim = 256u32;
-        let zero_grid = CubeCount::new_1d((frame_len as u32).div_ceil(zero_dim));
+        // Clamped to the GPU's 65,535-workgroups-per-dimension limit,
+        // which `frame_len.div_ceil(zero_dim)` alone can exceed once
+        // `frame_len` passes about 16.8 million (a 4:4:4 4K frame or an
+        // 8K luma plane already do). `collab_zero_accum` is grid-strided
+        // precisely so a clamped launch like this one still reaches
+        // every slot instead of leaving the tail past the clamp point
+        // un-zeroed.
+        let zero_workgroups = (frame_len as u32).div_ceil(zero_dim).min(MAX_GRID_1D);
+        let zero_grid = CubeCount::new_1d(zero_workgroups);
+        let zero_total_threads = zero_workgroups * zero_dim;
 
         // In ht_only mode stage 1's aggregate is the final output, so
         // the normalise writes straight to the caller's buffer and
@@ -301,6 +310,7 @@ impl<R: Runtime> CollabPipeline<R> {
                 0u32,
                 pixels as u32,
                 stored_ch as u32,
+                zero_total_threads,
             );
 
             collab_filter_ht::launch_unchecked::<R>(
@@ -387,6 +397,7 @@ impl<R: Runtime> CollabPipeline<R> {
                 0u32,
                 pixels as u32,
                 stored_ch as u32,
+                zero_total_threads,
             );
 
             collab_filter_wiener::launch_unchecked::<R>(

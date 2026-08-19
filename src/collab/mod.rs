@@ -48,10 +48,10 @@ pub const MAX_K: u32 = 8;
 /// Hard ceiling on a cross-frame denoiser's temporal radius, `r`.
 ///
 /// [`crate::nl4d::Nl4dParams::validate`] rejects a `temporal_radius`
-/// outside `1..=MAX_TEMPORAL_RADIUS`.
-/// `kernels::aggregate::CROSS_FRAME_ACCUM_SCALE` ties its own headroom
-/// to this same constant, because the widest ring a cross-frame
-/// accumulator ever holds is `2 * MAX_TEMPORAL_RADIUS + 1` frames, and
-/// that is what bounds how many passes can write into one pixel before
-/// it is read back.
+/// outside `1..=MAX_TEMPORAL_RADIUS`, so this is also the largest
+/// `temporal_radius` [`kernels::aggregate::cross_frame_accum_scale`]
+/// ever has to derive a scale for. The widest ring a cross-frame
+/// accumulator ever holds is `2 * MAX_TEMPORAL_RADIUS + 1` frames, which
+/// is what bounds how many passes can write into one pixel before it is
+/// read back.
 pub const MAX_TEMPORAL_RADIUS: u32 = 8;

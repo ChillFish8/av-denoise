@@ -347,16 +347,24 @@ fn run_stage1(
     let group_grid = CubeCount::new_2d(refs_x, refs_y);
     let group_dim = CubeDim::new_2d(8, 8);
     let zero_dim = 256u32;
+    // Same 65,535-workgroups-per-dimension GPU limit `MAX_GRID_1D`
+    // guards against elsewhere, clamped by literal here since that
+    // constant is crate-private and this diagnostic is a separate
+    // binary crate. `collab_zero_accum` is grid-strided, so the clamp
+    // still reaches every slot even on frames large enough to need it.
+    const MAX_GRID_1D: u32 = 65535;
+    let zero_workgroups = (frame_len as u32).div_ceil(zero_dim).min(MAX_GRID_1D);
     unsafe {
         collab_zero_accum::launch_unchecked::<R>(
             client,
-            CubeCount::new_1d((frame_len as u32).div_ceil(zero_dim)),
+            CubeCount::new_1d(zero_workgroups),
             CubeDim::new_1d(zero_dim),
             ArrayArg::from_raw_parts(accum.clone(), frame_len),
             ArrayArg::from_raw_parts(wsum.clone(), frame_len),
             0u32,
             frame_len as u32,
             1u32,
+            zero_workgroups * zero_dim,
         );
 
         collab_filter_ht::launch_unchecked::<R>(

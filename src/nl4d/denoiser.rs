@@ -3,9 +3,9 @@ use cubecl::server::Handle;
 
 use crate::collab::geometry::{member_buf_len, ref_count, refs_along};
 use crate::collab::kernels::aggregate::{
-    CROSS_FRAME_ACCUM_SCALE,
     collab_normalise,
     collab_zero_accum,
+    cross_frame_accum_scale,
     weight_scale,
 };
 use crate::collab::kernels::filter_ht::collab_filter_ht;
@@ -13,7 +13,7 @@ use crate::collab::kernels::group_temporal::collab_group_temporal;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, PATCH_SIZE};
 use crate::denoiser::DenoiserError;
-use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, Pending, RingView};
+use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, MAX_GRID_1D, NlmDenoiser, Pending, RingView};
 
 use super::params::Nl4dParams;
 
@@ -54,6 +54,15 @@ pub struct Nl4dDenoiser<R: Runtime> {
     mismatch_scale: f32,
     confidence_variance: bool,
     k_max: u32,
+    /// The fixed-point scale the cross-frame accumulator ring counts in,
+    /// derived once here from this denoiser's own `spatial_radius` and
+    /// `temporal_radius` by
+    /// [`crate::collab::kernels::aggregate::cross_frame_accum_scale`]
+    /// rather than read from a constant sized for every configuration's
+    /// worst case. Both radii are fixed for the denoiser's lifetime, so
+    /// this only needs deriving once, not on every
+    /// [`Self::run_collab_stage`] call.
+    accum_scale: f32,
 
     member_pos: Handle,
     member_frame: Handle,
@@ -185,6 +194,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             mismatch_scale: params.mismatch_scale,
             confidence_variance: params.confidence_variance,
             k_max,
+            accum_scale: cross_frame_accum_scale(params.spatial_radius, params.temporal_radius),
             member_pos,
             member_frame,
             member_count,
@@ -392,9 +402,21 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let agg_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
         let zero_dim = 256u32;
         // Sized for one frame's worth of the ring, the region a
-        // steady-state pass clears. Pass 0 clears the whole ring
-        // instead, with its own grid sized for that below.
-        let zero_grid_one_frame = CubeCount::new_1d((frame_len as u32).div_ceil(zero_dim));
+        // steady-state pass clears. Pass 0 clears the whole ring by
+        // issuing this same, already-safe dispatch once per ring slot
+        // rather than in one dispatch sized for the whole ring, see the
+        // `pass_index == 0` branch below for why.
+        //
+        // Still clamped to the GPU's 65,535-workgroups-per-dimension
+        // limit, because one frame alone can pass it too, a 4:4:4 4K
+        // frame or an 8K luma plane both need more than 65,535
+        // workgroups at 256 threads each. `collab_zero_accum` is
+        // grid-strided precisely so a clamped launch here still reaches
+        // every slot in the frame instead of leaving the tail past the
+        // clamp point holding whatever the ring already had in it.
+        let zero_workgroups_one_frame = (frame_len as u32).div_ceil(zero_dim).min(MAX_GRID_1D);
+        let zero_grid_one_frame = CubeCount::new_1d(zero_workgroups_one_frame);
+        let zero_total_threads_one_frame = zero_workgroups_one_frame * zero_dim;
 
         let mc = self.front.motion_ctx();
         let blk_step = mc.step;
@@ -416,16 +438,37 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
         unsafe {
             if pass_index == 0 {
-                collab_zero_accum::launch_unchecked::<R>(
-                    &client,
-                    CubeCount::new_1d((accum_ring_len as u32).div_ceil(zero_dim)),
-                    CubeDim::new_1d(zero_dim),
-                    ArrayArg::from_raw_parts(self.accum.clone(), accum_ring_len),
-                    ArrayArg::from_raw_parts(self.wsum.clone(), wsum_ring_len),
-                    0u32,
-                    wsum_ring_len as u32,
-                    stored_ch,
-                );
+                // A single dispatch sized for the whole ring
+                // (`accum_ring_len.div_ceil(zero_dim)` workgroups) can
+                // pass the GPU's 65,535-workgroups-per-dimension limit
+                // once `temporal_radius` is large enough, since
+                // `accum_ring_len` grows with `total_frames`. `zero_dim`
+                // is only 256, so at `temporal_radius = 4` a 1080p luma
+                // plane alone needs 72,900 workgroups, already over that
+                // limit, and a hard GPU dispatch failure leaves the ring
+                // holding `client.empty`'s undefined memory instead of
+                // zero, exactly the leftover garbage a fresh stream's
+                // first pass, first frame most of all, was never meant
+                // to see.
+                //
+                // Issuing `zero_grid_one_frame` once per ring slot
+                // instead keeps every dispatch the same size the
+                // steady-state `else` branch below already relies on
+                // staying under that limit, whatever `total_frames`
+                // turns out to be.
+                for slot in 0..total_frames {
+                    collab_zero_accum::launch_unchecked::<R>(
+                        &client,
+                        zero_grid_one_frame.clone(),
+                        CubeDim::new_1d(zero_dim),
+                        ArrayArg::from_raw_parts(self.accum.clone(), accum_ring_len),
+                        ArrayArg::from_raw_parts(self.wsum.clone(), wsum_ring_len),
+                        slot * pixels as u32,
+                        pixels as u32,
+                        stored_ch,
+                        zero_total_threads_one_frame,
+                    );
+                }
             } else {
                 collab_zero_accum::launch_unchecked::<R>(
                     &client,
@@ -436,6 +479,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                     newest_slot * pixels as u32,
                     pixels as u32,
                     stored_ch,
+                    zero_total_threads_one_frame,
                 );
             }
 
@@ -497,7 +541,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 ArrayArg::from_raw_parts(self.dct_profile_buf.clone(), 8),
                 self.lambda_ht,
                 wnorm,
-                CROSS_FRAME_ACCUM_SCALE,
+                self.accum_scale,
                 self.confidence_variance,
                 false,
                 false,

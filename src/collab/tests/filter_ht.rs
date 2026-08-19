@@ -10,7 +10,7 @@ use super::helpers::{
     plant_patch,
 };
 use crate::collab::geometry::{filtered_buf_len, member_buf_len, ref_count, ref_pos, refs_along};
-use crate::collab::kernels::aggregate::{ACCUM_SCALE, CROSS_FRAME_ACCUM_SCALE, weight_scale};
+use crate::collab::kernels::aggregate::{ACCUM_SCALE, cross_frame_accum_scale, weight_scale};
 use crate::collab::kernels::filter_ht::{collab_filter_ht, variance_ladder};
 use crate::collab::kernels::group::{collab_group_spatial, pack_pos_host};
 use crate::collab::kernels::transforms::{dct_noise_profile, haar_variance_ladder};
@@ -840,7 +840,10 @@ fn temporal_members_scatter_into_their_own_frames_region() {
             ArrayArg::from_raw_parts(dct_profile_buf, 8),
             2.7f32,
             weight_scale(0.0, &profile),
-            CROSS_FRAME_ACCUM_SCALE,
+            // Any real denoiser's own `spatial_radius`/`temporal_radius`
+            // works here, this test only checks the frame-slot addressing,
+            // not the scale's magnitude, so `nl4d`'s defaults stand in.
+            cross_frame_accum_scale(9, 2),
             false,
             true,
             false,

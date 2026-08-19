@@ -142,7 +142,7 @@ pub(crate) fn wiener_shrinkage_factor(p: f32, vj: f32) -> f32 {
 /// value per stored channel. `accum_scale` is the fixed-point scale the
 /// scatter at the end of this kernel converts into, the same
 /// [`crate::collab::kernels::aggregate::ACCUM_SCALE`] or
-/// [`crate::collab::kernels::aggregate::CROSS_FRAME_ACCUM_SCALE`] choice
+/// [`crate::collab::kernels::aggregate::cross_frame_accum_scale`] choice
 /// [`crate::collab::kernels::filter_ht::collab_filter_ht`] documents.
 ///
 /// `dct_profile` holds 8 values, [`crate::collab::kernels::transforms::dct_noise_profile`]'s

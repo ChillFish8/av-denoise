@@ -108,11 +108,18 @@ impl<R: Runtime> Benchmark for CollabZeroAccumBench<R> {
         let stored = stored_channels(self.ch) as usize;
         let pixels = (W * H) as usize;
         let dim = 256u32;
+        // Same 65,535-workgroups-per-dimension GPU limit `MAX_GRID_1D`
+        // guards against elsewhere, clamped by literal here since that
+        // constant is crate-private and this bench is a separate crate
+        // target. `collab_zero_accum` is grid-strided, so the clamp
+        // still reaches every slot even past 1080p bench sizes.
+        const MAX_GRID_1D: u32 = 65_535;
+        let grid = ((pixels * stored) as u32).div_ceil(dim).min(MAX_GRID_1D);
 
         unsafe {
             collab_zero_accum::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::new_1d(((pixels * stored) as u32).div_ceil(dim)),
+                CubeCount::new_1d(grid),
                 CubeDim::new_1d(dim),
                 ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored),
                 ArrayArg::from_raw_parts(args.wsum.clone(), pixels),
@@ -121,6 +128,7 @@ impl<R: Runtime> Benchmark for CollabZeroAccumBench<R> {
                 0u32,
                 pixels as u32,
                 stored as u32,
+                grid * dim,
             );
         }
         Ok(())

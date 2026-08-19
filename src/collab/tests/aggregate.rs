@@ -111,16 +111,18 @@ fn zero_accum_clears_both_buffers() {
     let wsum = client.create_from_slice(i32::as_bytes(&vec![7i32; pixels]));
 
     let dim = 256u32;
+    let grid = (pixels as u32).div_ceil(dim);
     unsafe {
         collab_zero_accum::launch_unchecked::<R>(
             &client,
-            CubeCount::new_1d((pixels as u32).div_ceil(dim)),
+            CubeCount::new_1d(grid),
             CubeDim::new_1d(dim),
             ArrayArg::from_raw_parts(accum.clone(), pixels),
             ArrayArg::from_raw_parts(wsum.clone(), pixels),
             0u32,
             pixels as u32,
             1u32,
+            grid * dim,
         );
     }
 
@@ -128,6 +130,54 @@ fn zero_accum_clears_both_buffers() {
     let s = client.read_one(wsum).expect("wsum readback failed");
     assert!(i32::from_bytes(&a)[..pixels].iter().all(|&v| v == 0));
     assert!(i32::from_bytes(&s)[..pixels].iter().all(|&v| v == 0));
+}
+
+/// A buffer sized past the GPU's 65,535-workgroups-per-dimension
+/// dispatch limit at the 256-thread block size the caller launches
+/// this kernel with, and not a multiple of that block size either, so
+/// the tail both needs the grid clamp and lands mid-block.
+///
+/// A one-thread-per-slot launch clamped to that limit stops short of
+/// `pixels`, leaving the tail un-zeroed, which is exactly the silent
+/// under-zeroing the task's clamp-without-striding trap describes.
+/// `collab_zero_accum` is grid-strided so a clamped launch still walks
+/// every slot in a second pass, this buffer needs a real 65,626-thread
+/// unclamped grid, only 65,535 of which the dispatch actually starts.
+#[test]
+fn zero_accum_clears_every_slot_of_a_buffer_past_the_grid_clamp() {
+    const MAX_GRID_1D: u32 = 65_535;
+    let dim = 256u32;
+    let pixels = 16_800_005usize;
+    assert!(pixels as u32 > MAX_GRID_1D * dim, "test buffer must exceed the clamp point");
+    assert_ne!(pixels as u32 % dim, 0, "test buffer must not be a multiple of the block size");
+
+    let client = make_client();
+    let accum = client.create_from_slice(i32::as_bytes(&vec![42i32; pixels]));
+    let wsum = client.create_from_slice(i32::as_bytes(&vec![7i32; pixels]));
+
+    let grid = (pixels as u32).div_ceil(dim).min(MAX_GRID_1D);
+    unsafe {
+        collab_zero_accum::launch_unchecked::<R>(
+            &client,
+            CubeCount::new_1d(grid),
+            CubeDim::new_1d(dim),
+            ArrayArg::from_raw_parts(accum.clone(), pixels),
+            ArrayArg::from_raw_parts(wsum.clone(), pixels),
+            0u32,
+            pixels as u32,
+            1u32,
+            grid * dim,
+        );
+    }
+
+    let a = client.read_one(accum).expect("accum readback failed");
+    let s = client.read_one(wsum).expect("wsum readback failed");
+    let a = i32::from_bytes(&a);
+    let s = i32::from_bytes(&s);
+    for i in 0..pixels {
+        assert_eq!(a[i], 0, "accum[{i}] left un-zeroed past the clamp point");
+        assert_eq!(s[i], 0, "wsum[{i}] left un-zeroed past the clamp point");
+    }
 }
 
 /// Groups, filters, and aggregates a frame the way the pipeline does,
@@ -178,15 +228,17 @@ fn run_scatter_stage(frame: &[f32], width: u32, height: u32, sigma: f32) -> (Vec
             9u32,
             refs_x,
         );
+        let zero_grid = (pixels as u32).div_ceil(zero_dim);
         collab_zero_accum::launch_unchecked::<R>(
             &client,
-            CubeCount::new_1d((pixels as u32).div_ceil(zero_dim)),
+            CubeCount::new_1d(zero_grid),
             CubeDim::new_1d(zero_dim),
             ArrayArg::from_raw_parts(accum.clone(), pixels),
             ArrayArg::from_raw_parts(wsum.clone(), pixels),
             0u32,
             pixels as u32,
             1u32,
+            zero_grid * zero_dim,
         );
         collab_filter_ht::launch_unchecked::<R>(
             &client,

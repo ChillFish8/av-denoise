@@ -137,9 +137,10 @@ pub(crate) fn variance_ladder(v: &mut Array<f32>, k_use: u32) {
 /// scatter at the end of this kernel converts into (see
 /// [`crate::collab::kernels::aggregate::scatter_patch`]),
 /// [`crate::collab::kernels::aggregate::ACCUM_SCALE`] for a caller whose
-/// `accum`/`wsum` hold one frame, or
-/// [`crate::collab::kernels::aggregate::CROSS_FRAME_ACCUM_SCALE`] for a
-/// caller whose accumulators are a cross-frame ring several passes wide.
+/// `accum`/`wsum` hold one frame, or a
+/// [`crate::collab::kernels::aggregate::cross_frame_accum_scale`] result
+/// for a caller whose accumulators are a cross-frame ring several passes
+/// wide.
 ///
 /// `dct_profile` holds 8 values, [`crate::collab::kernels::transforms::dct_noise_profile`]'s
 /// output. Every member's propagated coefficient variance at DCT
