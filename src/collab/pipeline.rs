@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use crate::collab::geometry::{member_buf_len, ref_count, refs_along};
-use crate::collab::kernels::aggregate::{collab_normalise, collab_zero_accum, weight_scale};
+use crate::collab::kernels::aggregate::{ACCUM_SCALE, collab_normalise, collab_zero_accum, weight_scale};
 use crate::collab::kernels::filter_ht::collab_filter_ht;
 use crate::collab::kernels::filter_wiener::collab_filter_wiener;
 use crate::collab::kernels::group::collab_group_spatial;
@@ -298,6 +298,7 @@ impl<R: Runtime> CollabPipeline<R> {
                 CubeDim::new_1d(zero_dim),
                 ArrayArg::from_raw_parts(self.accum.clone(), frame_len),
                 ArrayArg::from_raw_parts(self.wsum.clone(), pixels),
+                0u32,
                 pixels as u32,
                 stored_ch as u32,
             );
@@ -321,6 +322,7 @@ impl<R: Runtime> CollabPipeline<R> {
                 ArrayArg::from_raw_parts(self.dct_profile_buf.clone(), 8),
                 self.params.lambda_ht,
                 wnorm,
+                ACCUM_SCALE,
                 false,
                 false,
                 self.params.ht_wavelet,
@@ -341,6 +343,7 @@ impl<R: Runtime> CollabPipeline<R> {
                 ArrayArg::from_raw_parts(self.accum.clone(), frame_len),
                 ArrayArg::from_raw_parts(self.wsum.clone(), pixels),
                 ArrayArg::from_raw_parts(stage1_target, frame_len),
+                0u32,
                 width,
                 height,
                 channels_count as u32,
@@ -381,6 +384,7 @@ impl<R: Runtime> CollabPipeline<R> {
                 CubeDim::new_1d(zero_dim),
                 ArrayArg::from_raw_parts(self.accum.clone(), frame_len),
                 ArrayArg::from_raw_parts(self.wsum.clone(), pixels),
+                0u32,
                 pixels as u32,
                 stored_ch as u32,
             );
@@ -404,6 +408,7 @@ impl<R: Runtime> CollabPipeline<R> {
                 ArrayArg::from_raw_parts(self.sigma_buf.clone(), stored_ch),
                 ArrayArg::from_raw_parts(self.dct_profile_buf.clone(), 8),
                 wnorm,
+                ACCUM_SCALE,
                 false,
                 false,
                 width,
@@ -422,6 +427,7 @@ impl<R: Runtime> CollabPipeline<R> {
                 ArrayArg::from_raw_parts(self.accum.clone(), frame_len),
                 ArrayArg::from_raw_parts(self.wsum.clone(), pixels),
                 ArrayArg::from_raw_parts(output.clone(), frame_len),
+                0u32,
                 width,
                 height,
                 channels_count as u32,

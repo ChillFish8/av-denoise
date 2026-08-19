@@ -68,7 +68,7 @@ use std::collections::HashSet;
 use std::fs;
 
 use av_denoise::collab::geometry::{member_buf_len, ref_count, ref_pos, refs_along};
-use av_denoise::collab::kernels::aggregate::{collab_normalise, collab_zero_accum, weight_scale};
+use av_denoise::collab::kernels::aggregate::{ACCUM_SCALE, collab_normalise, collab_zero_accum, weight_scale};
 use av_denoise::collab::kernels::filter_ht::collab_filter_ht;
 use av_denoise::collab::kernels::group::collab_group_spatial;
 use av_denoise::collab::kernels::transforms::dct_noise_profile;
@@ -354,6 +354,7 @@ fn run_stage1(
             CubeDim::new_1d(zero_dim),
             ArrayArg::from_raw_parts(accum.clone(), frame_len),
             ArrayArg::from_raw_parts(wsum.clone(), frame_len),
+            0u32,
             frame_len as u32,
             1u32,
         );
@@ -377,6 +378,7 @@ fn run_stage1(
             ArrayArg::from_raw_parts(dct_profile_buf, 8),
             params.lambda_ht,
             wnorm,
+            ACCUM_SCALE,
             false,
             false,
             false,
@@ -402,6 +404,7 @@ fn run_stage1(
             ArrayArg::from_raw_parts(accum, frame_len),
             ArrayArg::from_raw_parts(wsum, frame_len),
             ArrayArg::from_raw_parts(pilot.clone(), frame_len),
+            0u32,
             width,
             height,
             1u32,

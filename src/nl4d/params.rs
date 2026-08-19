@@ -93,10 +93,11 @@ impl Nl4dParams {
             );
         }
 
-        if !(1..=8).contains(&self.temporal_radius) {
+        if !(1..=crate::collab::MAX_TEMPORAL_RADIUS).contains(&self.temporal_radius) {
             return Err(format!(
-                "temporal_radius={} must be in 1..=8",
-                self.temporal_radius
+                "temporal_radius={} must be in 1..={}",
+                self.temporal_radius,
+                crate::collab::MAX_TEMPORAL_RADIUS,
             ));
         }
 

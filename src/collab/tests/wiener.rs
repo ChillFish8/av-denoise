@@ -3,7 +3,7 @@ use cubecl::server::Handle;
 
 use super::helpers::{R, deterministic_texture, make_client, noisy_field_over, plant_patch};
 use crate::collab::geometry::{filtered_buf_len, member_buf_len, ref_count, refs_along};
-use crate::collab::kernels::aggregate::weight_scale;
+use crate::collab::kernels::aggregate::{ACCUM_SCALE, weight_scale};
 use crate::collab::kernels::filter_ht::collab_filter_ht;
 use crate::collab::kernels::filter_wiener::{collab_filter_wiener, wiener_shrinkage_factor};
 use crate::collab::kernels::group::collab_group_spatial;
@@ -133,6 +133,7 @@ fn run_wiener_raw(
             ArrayArg::from_raw_parts(sigma_buf, 1),
             ArrayArg::from_raw_parts(dct_profile_buf, 8),
             weight_scale(sigma, &profile),
+            ACCUM_SCALE,
             false,
             true,
             width,
@@ -214,6 +215,7 @@ fn run_ht_raw(
             ArrayArg::from_raw_parts(dct_profile_buf, 8),
             lambda_ht,
             weight_scale(sigma, &profile),
+            ACCUM_SCALE,
             false,
             true,
             false,
@@ -545,6 +547,7 @@ fn dct_profile_rho_zero_matches_a_hand_built_all_ones_profile() {
             ArrayArg::from_raw_parts(sigma_buf, 1),
             ArrayArg::from_raw_parts(ones_profile_buf, 8),
             weight_scale(sigma, &[1.0f32; 8]),
+            ACCUM_SCALE,
             false,
             true,
             w,

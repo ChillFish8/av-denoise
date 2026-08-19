@@ -10,7 +10,7 @@ use super::helpers::{
     plant_patch,
 };
 use crate::collab::geometry::{filtered_buf_len, member_buf_len, ref_count, ref_pos, refs_along};
-use crate::collab::kernels::aggregate::weight_scale;
+use crate::collab::kernels::aggregate::{ACCUM_SCALE, CROSS_FRAME_ACCUM_SCALE, weight_scale};
 use crate::collab::kernels::filter_ht::{collab_filter_ht, variance_ladder};
 use crate::collab::kernels::group::{collab_group_spatial, pack_pos_host};
 use crate::collab::kernels::transforms::{dct_noise_profile, haar_variance_ladder};
@@ -176,6 +176,7 @@ fn run_filter_raw(
             ArrayArg::from_raw_parts(dct_profile_buf, 8),
             lambda_ht,
             weight_scale(sigma, &profile),
+            ACCUM_SCALE,
             use_member_sigma,
             true,
             false,
@@ -680,6 +681,7 @@ fn dct_profile_rho_zero_matches_a_hand_built_all_ones_profile() {
             ArrayArg::from_raw_parts(ones_profile_buf, 8),
             2.7f32,
             weight_scale(sigma, &[1.0f32; 8]),
+            ACCUM_SCALE,
             false,
             true,
             false,
@@ -761,15 +763,16 @@ fn higher_rho_retains_more_noise_on_a_flat_field() {
 /// members' 8x8 patches, at `(0, 0)` and `(8, 8)`, do not overlap. Every
 /// other reference gets `member_count = 0`, so it contributes nothing.
 ///
-/// With `temporal = true` and the guard around `scatter_patch` in place,
-/// the reduction is this. Both members still go through the full
-/// forward/inverse transform (`emit_filtered` proves that, both patches
-/// come back matching their planted input exactly), but only the
-/// centre-frame member's weight reaches `wsum`. The neighbour-frame
-/// member's own 8x8 region therefore reads back with `wsum == 0`
-/// everywhere, since no other reference reaches into it.
+/// `accum`/`wsum` here hold two frames' worth of pixels back to back,
+/// the caller's own cross-frame accumulator ring
+/// [`crate::nl4d::Nl4dDenoiser`] builds. With `temporal = true`, each
+/// member scatters into its own `member_frame` entry's region of that
+/// ring rather than always into `frame`'s, so the centre member lands in
+/// region 0 and the neighbour member lands in region 1, distinguishable
+/// content planted per frame proving each landed in the right one rather
+/// than being conflated or dropped.
 #[test]
-fn temporal_members_filter_but_do_not_scatter() {
+fn temporal_members_scatter_into_their_own_frames_region() {
     let (w, h) = (16u32, 16u32);
     let pixels = (w * h) as usize;
     let refs_x = refs_along(w);
@@ -809,8 +812,11 @@ fn temporal_members_filter_but_do_not_scatter() {
     let sigma_buf = client.create_from_slice(f32::as_bytes(&[0.0f32]));
     let profile = dct_noise_profile(0.0);
     let dct_profile_buf = client.create_from_slice(f32::as_bytes(&profile));
-    let accum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels]));
-    let wsum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels]));
+    // Two frames' worth of accumulators, region 0 for the centre slot
+    // and region 1 for the neighbour slot, the same layout
+    // `scatter_patch`'s `frame_slot` addresses.
+    let accum = client.create_from_slice(i32::as_bytes(&vec![0i32; 2 * pixels]));
+    let wsum = client.create_from_slice(i32::as_bytes(&vec![0i32; 2 * pixels]));
 
     let grid = CubeCount::new_2d(refs_x, refs_along(h));
     let dim = CubeDim::new_2d(8, 8);
@@ -825,8 +831,8 @@ fn temporal_members_filter_but_do_not_scatter() {
             ArrayArg::from_raw_parts(member_frame_buf, refs * k_max as usize),
             ArrayArg::from_raw_parts(member_count_buf, refs),
             ArrayArg::from_raw_parts(member_sig2_dummy, 1),
-            ArrayArg::from_raw_parts(accum, pixels),
-            ArrayArg::from_raw_parts(wsum.clone(), pixels),
+            ArrayArg::from_raw_parts(accum, 2 * pixels),
+            ArrayArg::from_raw_parts(wsum.clone(), 2 * pixels),
             ArrayArg::from_raw_parts(filtered_buf.clone(), filt_len),
             ArrayArg::from_raw_parts(weight_buf, refs),
             centre_slot,
@@ -834,6 +840,7 @@ fn temporal_members_filter_but_do_not_scatter() {
             ArrayArg::from_raw_parts(dct_profile_buf, 8),
             2.7f32,
             weight_scale(0.0, &profile),
+            CROSS_FRAME_ACCUM_SCALE,
             false,
             true,
             false,
@@ -850,7 +857,9 @@ fn temporal_members_filter_but_do_not_scatter() {
     let filtered = f32::from_bytes(&client.read_one(filtered_buf).expect("filtered readback failed"))
         [..filt_len]
         .to_vec();
-    let wsum_out = i32::from_bytes(&client.read_one(wsum).expect("wsum readback failed"))[..pixels].to_vec();
+    let wsum_out =
+        i32::from_bytes(&client.read_one(wsum).expect("wsum readback failed"))[..2 * pixels].to_vec();
+    let (centre_region, neighbour_region) = wsum_out.split_at(pixels);
 
     // Both members were filtered, sigma = 0 makes the threshold a no-op,
     // so each patch reads back exactly as planted.
@@ -863,20 +872,45 @@ fn temporal_members_filter_but_do_not_scatter() {
         assert!((want - have).abs() < 1e-4, "neighbour member idx={idx}: want {want} got {have}");
     }
 
-    // The centre member's own 8x8 region, (0,0)-(7,7), was scattered.
+    // The centre member's own 8x8 region, (0,0)-(7,7), was scattered into
+    // region 0 (the centre slot), and nowhere in region 1 (the neighbour
+    // slot).
     for y in 0..8u32 {
         for x in 0..8u32 {
-            let w = wsum_out[(y * 16 + x) as usize];
-            assert!(w > 0, "centre region ({x},{y}): expected wsum > 0, got {w}");
+            let idx = (y * 16 + x) as usize;
+            assert!(
+                centre_region[idx] > 0,
+                "centre region ({x},{y}) in the centre slot's own accumulator: expected wsum > 0, got \
+                 {}",
+                centre_region[idx]
+            );
+            assert_eq!(
+                neighbour_region[idx], 0,
+                "centre region ({x},{y}) leaked into the neighbour slot's accumulator: got {}",
+                neighbour_region[idx]
+            );
         }
     }
-    // The neighbour member's own 8x8 region, (8,8)-(15,15), was never
-    // scattered, and no other reference reaches into it, so it must
-    // still read back exactly zero.
+    // The neighbour member's own 8x8 region, (8,8)-(15,15), was
+    // scattered into region 1 (the neighbour slot), and nowhere in
+    // region 0 (the centre slot), the reverse of the centre member's
+    // check above. No other reference reaches into either region, so
+    // both sides of both checks hold without any competing contribution
+    // to account for.
     for y in 8..16u32 {
         for x in 8..16u32 {
-            let w = wsum_out[(y * 16 + x) as usize];
-            assert_eq!(w, 0, "neighbour region ({x},{y}): expected wsum == 0, got {w}");
+            let idx = (y * 16 + x) as usize;
+            assert!(
+                neighbour_region[idx] > 0,
+                "neighbour region ({x},{y}) in the neighbour slot's own accumulator: expected wsum > \
+                 0, got {}",
+                neighbour_region[idx]
+            );
+            assert_eq!(
+                centre_region[idx], 0,
+                "neighbour region ({x},{y}) leaked into the centre slot's accumulator: got {}",
+                centre_region[idx]
+            );
         }
     }
 }
@@ -891,7 +925,7 @@ fn temporal_members_filter_but_do_not_scatter() {
 /// values that would visibly corrupt the result if they were ever read.
 ///
 /// The same two-member, two-frame setup as
-/// [`temporal_members_filter_but_do_not_scatter`] runs with
+/// [`temporal_members_scatter_into_their_own_frames_region`] runs with
 /// `temporal = false`, `frame = centre_slot`, and `member_frame` filled
 /// entirely with `neighbour_slot`, the wrong slot for every member. If
 /// `temporal = false` read `member_frame` for the scatter guard or the
@@ -963,6 +997,7 @@ fn nl3d_path_is_unchanged_when_temporal_is_false() {
             ArrayArg::from_raw_parts(dct_profile_buf, 8),
             2.7f32,
             weight_scale(0.0, &profile),
+            ACCUM_SCALE,
             false,
             true,
             false,

@@ -139,7 +139,11 @@ pub(crate) fn wiener_shrinkage_factor(p: f32, vj: f32) -> f32 {
 /// false, so a 1-element dummy buffer is valid there. `filtered` holds
 /// `refs * PATCH_AREA` lines, member 0's filtered patch for every
 /// reference. `group_weight` holds `refs` weights, and `sigma` holds one
-/// value per stored channel.
+/// value per stored channel. `accum_scale` is the fixed-point scale the
+/// scatter at the end of this kernel converts into, the same
+/// [`crate::collab::kernels::aggregate::ACCUM_SCALE`] or
+/// [`crate::collab::kernels::aggregate::CROSS_FRAME_ACCUM_SCALE`] choice
+/// [`crate::collab::kernels::filter_ht::collab_filter_ht`] documents.
 ///
 /// `dct_profile` holds 8 values, [`crate::collab::kernels::transforms::dct_noise_profile`]'s
 /// output. Every propagated coefficient variance at DCT position `(u,
@@ -164,6 +168,7 @@ pub fn collab_filter_wiener<N: Size>(
     sigma: &Array<f32>,
     dct_profile: &Array<f32>,
     weight_scale: f32,
+    accum_scale: f32,
     #[comptime] use_member_sigma: bool,
     #[comptime] emit_filtered: bool,
     #[comptime] width: u32,
@@ -403,7 +408,10 @@ pub fn collab_filter_wiener<N: Size>(
         out_vec[c as usize] = noisy_stack[tid as usize];
 
         // Scatter every member back to where it came from. One thread
-        // owns one pixel of each member's patch.
+        // owns one pixel of each member's patch. This filter has no
+        // temporal mode, every member always belongs to `noisy_frame`,
+        // the single frame `accum`/`wsum` hold, so `frame_slot` is that
+        // same value for every member (0 for every caller today).
         let weight = gw[0];
         let mut mo = 0u32;
         while mo < k_use {
@@ -420,6 +428,9 @@ pub fn collab_filter_wiener<N: Size>(
                 c,
                 width,
                 stored_ch,
+                noisy_frame,
+                comptime!(width * height),
+                accum_scale,
             );
             mo += 1u32;
         }

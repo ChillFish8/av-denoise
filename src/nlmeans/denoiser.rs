@@ -1776,6 +1776,18 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
     }
 
+    /// How many genuine `push_frame`/`push_frame_with_reference` calls
+    /// the current stream has seen, not counting the duplicates
+    /// [`Self::prime_leading_edge_if_first`] and [`Self::flush`] add at
+    /// either end.
+    ///
+    /// A collaborative stage built on top of [`Self::submit_machinery`]
+    /// reads this to size its own end-of-stream drain, the way
+    /// [`Self::flush_target`] sizes this front end's.
+    pub(crate) fn real_pushes(&self) -> usize {
+        self.real_pushes
+    }
+
     /// Runs one step of the end-of-stream drain. It duplicates the most
     /// recently pushed frame forward and submits the window that
     /// results.

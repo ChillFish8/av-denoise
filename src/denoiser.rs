@@ -524,6 +524,15 @@ fn collab_params_for(opts: &Nl3dOptions, channels: ChannelMode) -> CollabParams 
 /// near-featureless speckle with no legible brick structure at any
 /// point, so the plateau's metric winner was trusted rather than
 /// second-guessed.
+///
+/// This sweep predates cross-frame aggregation landing, the same
+/// change noted as provisional in the luma section above. A fresh
+/// sweep against the new aggregation, recorded in
+/// `data/nl4d_chroma_recal/README.md`, measured encoded file size
+/// under a realistic encode alongside the quality metrics and
+/// produced 16x-amplified U-plane residuals at frame 22 for six
+/// chroma values bracketing 3.6. The value here stays at 3.6 pending
+/// a human pick from that evidence.
 pub fn nl4d_default_lambda_ht(channels: ChannelMode) -> f32 {
     match channels {
         ChannelMode::Luma | ChannelMode::Yuv => 5.3,

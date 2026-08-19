@@ -128,7 +128,13 @@ pub(crate) fn variance_ladder(v: &mut Array<f32>, k_use: u32) {
 /// pattern `confidence_dummy` uses in `nlmeans`. `filtered` holds
 /// `refs * PATCH_AREA` lines, member 0's filtered patch for every
 /// reference. `group_weight` holds `refs` weights, and `sigma` holds one
-/// value per stored channel.
+/// value per stored channel. `accum_scale` is the fixed-point scale the
+/// scatter at the end of this kernel converts into (see
+/// [`crate::collab::kernels::aggregate::scatter_patch`]),
+/// [`crate::collab::kernels::aggregate::ACCUM_SCALE`] for a caller whose
+/// `accum`/`wsum` hold one frame, or
+/// [`crate::collab::kernels::aggregate::CROSS_FRAME_ACCUM_SCALE`] for a
+/// caller whose accumulators are a cross-frame ring several passes wide.
 ///
 /// `dct_profile` holds 8 values, [`crate::collab::kernels::transforms::dct_noise_profile`]'s
 /// output. Every member's propagated coefficient variance at DCT
@@ -165,14 +171,15 @@ pub(crate) fn variance_ladder(v: &mut Array<f32>, k_use: u32) {
 /// neighbour frame is loaded from that frame's own pixels. Every member
 /// still runs through the full forward transform, threshold, and inverse
 /// transform, and still lands in `filtered` when `emit_filtered` is set,
-/// whatever frame it came from. Only the scatter is conditional, a
-/// member scatters into `accum`/`wsum` only when its `member_frame`
-/// entry equals `frame`, the centre frame. A neighbour-frame member
-/// contributes to the group's shared statistics (the group weight, the
-/// coefficients every member's inverse transform depends on) without
-/// writing its filtered pixels anywhere, since scattering them would
-/// place a neighbour frame's content at this member's position in the
-/// centre frame's output.
+/// whatever frame it came from. The scatter follows the same split, a
+/// member's filtered pixels land in its own `member_frame` entry's
+/// region of `accum`/`wsum` rather than always in `frame`'s, the way
+/// [`crate::collab::kernels::aggregate::scatter_patch`]'s `frame_slot`
+/// argument addresses a multi-frame accumulator. A neighbour-frame
+/// member therefore still contributes its filtered pixels to the
+/// caller's cross-frame accumulator ring, at that neighbour frame's own
+/// position in it, rather than being discarded once it has served the
+/// group's shared statistics.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn collab_filter_ht<N: Size>(
@@ -190,6 +197,7 @@ pub fn collab_filter_ht<N: Size>(
     dct_profile: &Array<f32>,
     lambda_ht: f32,
     weight_scale: f32,
+    accum_scale: f32,
     #[comptime] use_member_sigma: bool,
     #[comptime] emit_filtered: bool,
     #[comptime] ht_wavelet: bool,
@@ -411,48 +419,36 @@ pub fn collab_filter_ht<N: Size>(
 
         out_vec[c as usize] = stack[tid as usize];
 
-        // Scatter every member back to where it came from. One thread
-        // owns one pixel of each member's patch. `temporal` guards the
-        // scatter itself, not the transform above it, a neighbour-frame
-        // member is still filtered as part of the group, it just never
-        // writes into this centre frame's accumulators, since that
-        // position belongs to a different frame's output.
+        // Scatter every member back to where it came from, into its own
+        // frame's region of the accumulators. `temporal` selects where
+        // that frame identity comes from, `member_frame`'s own entry for
+        // a member matched in a neighbour frame, or `frame` (the centre
+        // frame) uniformly when there is no per-member frame to read,
+        // the same split the load at the top of this loop follows.
         let weight = gw[0];
         let mut mo = 0u32;
         while mo < k_use {
             let packed = member_pos[(ref_idx * k_max + mo) as usize];
+            let mut member_frame_val = frame;
             if temporal {
-                let member_frame_val = member_frame[(ref_idx * k_max + mo) as usize];
-                if member_frame_val == frame {
-                    scatter_patch(
-                        accum,
-                        wsum,
-                        stack[(mo * PATCH_AREA + tid) as usize],
-                        weight,
-                        packed & 0xFFFFu32,
-                        packed >> 16u32,
-                        tid,
-                        comptime!(c == 0u32),
-                        c,
-                        width,
-                        stored_ch,
-                    );
-                }
-            } else {
-                scatter_patch(
-                    accum,
-                    wsum,
-                    stack[(mo * PATCH_AREA + tid) as usize],
-                    weight,
-                    packed & 0xFFFFu32,
-                    packed >> 16u32,
-                    tid,
-                    comptime!(c == 0u32),
-                    c,
-                    width,
-                    stored_ch,
-                );
+                member_frame_val = member_frame[(ref_idx * k_max + mo) as usize];
             }
+            scatter_patch(
+                accum,
+                wsum,
+                stack[(mo * PATCH_AREA + tid) as usize],
+                weight,
+                packed & 0xFFFFu32,
+                packed >> 16u32,
+                tid,
+                comptime!(c == 0u32),
+                c,
+                width,
+                stored_ch,
+                member_frame_val,
+                comptime!(width * height),
+                accum_scale,
+            );
             mo += 1u32;
         }
 
