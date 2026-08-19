@@ -24,6 +24,7 @@ use super::kernels::{
 };
 use super::motion::{
     self,
+    MotionCtx,
     MotionEstimation,
     confidence_byte_offset,
     run_analyse,
@@ -710,6 +711,170 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
+    /// Works out how the neighbour at temporal offset `k` moved relative
+    /// to the centre frame, and writes the result into `mv_field` at
+    /// this neighbour's slot.
+    ///
+    /// Runs the chained compose-and-refine sequence when `Chained`
+    /// estimation is active, or a direct coarse-to-fine match otherwise.
+    /// `write_confidence` controls whether a per-block score also lands
+    /// in `confidence_arg`, the same as `run_analyse` and
+    /// `run_seeded_refine` document.
+    ///
+    /// Returns the neighbour's physical ring slot. This never shifts any
+    /// buffer, so both [`Self::run_motion_compensation`], which follows
+    /// it with `run_compensate`, and [`Self::run_motion_machinery`],
+    /// which does not, can share it without either duplicating the
+    /// estimate branch or paying for a shift neither one of them wants
+    /// in the other's place.
+    #[allow(clippy::too_many_arguments)]
+    fn run_motion_estimate(
+        &self,
+        mc: &MotionCtx,
+        analyse_pyramid: &Handle,
+        mv_field: &Handle,
+        confidence_arg: &Handle,
+        write_confidence: bool,
+        frame_count: u32,
+        centre_slot: u32,
+        center_t: u32,
+        k: i32,
+        neighbour_idx: u32,
+        sad_noise_floor: f32,
+        thsad: f32,
+    ) -> Result<u32, anyhow::Error> {
+        let neighbour_slot = self.phys_frame(center_t as i32 + k);
+
+        if self.is_chained() {
+            self.run_chain_compose(center_t, k)?;
+            let refine_radius = match self
+                .params
+                .motion_compensation
+                .resolved_estimation(self.params.temporal_radius)
+            {
+                Some(MotionEstimation::Chained { refine_radius }) => refine_radius,
+                _ => unreachable!("is_chained() guarantees a resolved Chained estimation"),
+            };
+
+            run_seeded_refine::<R>(
+                &self.client,
+                mc,
+                self.width,
+                self.height,
+                frame_count,
+                centre_slot,
+                neighbour_slot,
+                neighbour_idx,
+                refine_radius,
+                analyse_pyramid,
+                mv_field,
+                confidence_arg,
+                write_confidence,
+                sad_noise_floor,
+                thsad,
+            )?;
+        } else {
+            run_analyse::<R>(
+                &self.client,
+                mc,
+                self.width,
+                self.height,
+                frame_count,
+                centre_slot,
+                neighbour_slot,
+                neighbour_idx,
+                analyse_pyramid,
+                mv_field,
+                confidence_arg,
+                write_confidence,
+                sad_noise_floor,
+                thsad,
+            )?;
+        }
+
+        Ok(neighbour_slot)
+    }
+
+    /// Runs the same per-neighbour motion estimate
+    /// [`Self::run_motion_compensation`] does, for every neighbour in
+    /// the temporal window, but shifts nothing into the compensated
+    /// buffers.
+    ///
+    /// Returns each neighbour's physical ring slot, in the same
+    /// furthest-behind-to-furthest-ahead order their motion-field
+    /// indices already follow, which is also the order
+    /// `NlmDenoiser::submit_machinery` hands back through
+    /// `RingView::neighbour_slots`.
+    ///
+    /// Returns an empty `Vec` when motion compensation is off, or when
+    /// there are no neighbours.
+    pub(super) fn run_motion_machinery(&self, center_t: u32) -> Result<Vec<u32>, anyhow::Error> {
+        let Some(mc) = self.mc_ctx.as_ref() else {
+            return Ok(Vec::new());
+        };
+
+        let temporal_radius = self.params.temporal_radius;
+        if temporal_radius == 0 {
+            return Ok(Vec::new());
+        }
+
+        let frame_count = self.params.total_frames();
+        let centre_slot = self.phys_frame(center_t as i32);
+
+        let pyramid_input = self
+            .pyramid_input
+            .as_ref()
+            .expect("pyramid_input allocated when mc_ctx is Some");
+        let mv_field = self
+            .mv_field_buf
+            .as_ref()
+            .expect("mv_field allocated when mc_ctx is Some");
+        // Same placeholder convention `run_motion_compensation` uses:
+        // when confidence weighting is off, pass the small dummy buffer
+        // and tell the kernel not to write it.
+        let (confidence_arg, write_confidence): (&Handle, bool) = match self.confidence_buf.as_ref() {
+            Some(buf) => (buf, true),
+            None => (&self.confidence_dummy, false),
+        };
+        let thsad_scale = self.params.hq.map_or(1.0, |hq| hq.thsad_scale);
+        let mc_sigma_y = mc_sad_noise_floor_sigma(self.params.prefilter, self.sigma_y);
+        let sad_noise_floor = motion::sad_noise_floor(mc.blksize, mc_sigma_y);
+        let thsad = motion::thsad(mc.blksize, thsad_scale);
+
+        // Match against the cleaner of the two buffers, the same as
+        // `run_motion_compensation`.
+        let analyse_pyramid = self.pyramid_reference.as_ref().unwrap_or(pyramid_input);
+
+        let radius = temporal_radius as i32;
+        let mut neighbour_idx: u32 = 0;
+        let mut slots = Vec::with_capacity((2 * temporal_radius) as usize);
+        for k in -radius..=radius {
+            if k == 0 {
+                continue;
+            }
+
+            let neighbour_slot = self.run_motion_estimate(
+                mc,
+                analyse_pyramid,
+                mv_field,
+                confidence_arg,
+                write_confidence,
+                frame_count,
+                centre_slot,
+                center_t,
+                k,
+                neighbour_idx,
+                sad_noise_floor,
+                thsad,
+            )?;
+            slots.push(neighbour_slot);
+
+            neighbour_idx += 1;
+        }
+
+        Ok(slots)
+    }
+
     /// Runs the motion-compensation sweep for one submit.
     ///
     /// It estimates the motion from the centre frame to each neighbour
@@ -798,66 +963,27 @@ impl<R: Runtime> NlmDenoiser<R> {
         // order from the furthest behind to the furthest ahead, skipping
         // the centre, and their motion-field indices are contiguous so
         // the field stays tight.
-        //
-        // Only the estimate branches. `Direct` matches straight against
-        // the centre frame, while `Chained` joins the adjacent-pair
-        // fields into a seed and then refines it with a small search.
-        // The shift below is the same either way.
-        let is_chained = self.is_chained();
         let radius = temporal_radius as i32;
         let mut neighbour_idx: u32 = 0;
         for k in -radius..=radius {
             if k == 0 {
                 continue;
             }
-            let neighbour_slot = self.phys_frame(center_t as i32 + k);
 
-            if is_chained {
-                self.run_chain_compose(center_t, k)?;
-                let refine_radius = match self
-                    .params
-                    .motion_compensation
-                    .resolved_estimation(self.params.temporal_radius)
-                {
-                    Some(MotionEstimation::Chained { refine_radius }) => refine_radius,
-                    _ => unreachable!("is_chained() guarantees a resolved Chained estimation"),
-                };
-
-                run_seeded_refine::<R>(
-                    &self.client,
-                    mc,
-                    self.width,
-                    self.height,
-                    frame_count,
-                    centre_slot,
-                    neighbour_slot,
-                    neighbour_idx,
-                    refine_radius,
-                    analyse_pyramid,
-                    mv_field,
-                    confidence_arg,
-                    write_confidence,
-                    sad_noise_floor,
-                    thsad,
-                )?;
-            } else {
-                run_analyse::<R>(
-                    &self.client,
-                    mc,
-                    self.width,
-                    self.height,
-                    frame_count,
-                    centre_slot,
-                    neighbour_slot,
-                    neighbour_idx,
-                    analyse_pyramid,
-                    mv_field,
-                    confidence_arg,
-                    write_confidence,
-                    sad_noise_floor,
-                    thsad,
-                )?;
-            }
+            let neighbour_slot = self.run_motion_estimate(
+                mc,
+                analyse_pyramid,
+                mv_field,
+                confidence_arg,
+                write_confidence,
+                frame_count,
+                centre_slot,
+                center_t,
+                k,
+                neighbour_idx,
+                sad_noise_floor,
+                thsad,
+            )?;
 
             run_compensate::<R>(
                 &self.client,

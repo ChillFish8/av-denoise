@@ -1,6 +1,8 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
+use crate::denoiser::DenoiserError;
+
 use super::align::StorageAlign;
 use super::kernels::gpu_copy;
 use super::motion::{self, MotionCtx, MotionEstimation, build_pyramid_for_slot, run_pyramid_build};
@@ -46,6 +48,39 @@ pub struct GpuOutput {
     pub handle: Handle,
     /// Which of the denoiser's two output slots `handle` came from.
     pub slot: usize,
+}
+
+/// Handles and geometry a collaborative stage needs to read the ring.
+///
+/// [`NlmDenoiser::submit_machinery`] and
+/// [`NlmDenoiser::flush_step_machinery`] build this instead of running
+/// any NLM denoising kernel, so a caller that wants the frame ring, the
+/// motion fields, and the confidence scores without the NLM weighting
+/// itself can read them straight from here.
+///
+/// The handles are views into the denoiser's own buffers, valid until
+/// the next push or the next machinery step reuses the slots they point
+/// into.
+pub(crate) struct RingView {
+    /// The whole input ring, indexable by physical frame slot.
+    pub input: Handle,
+    /// Chained motion fields, one per neighbour index.
+    pub mv_field: Handle,
+    /// Per-block confidence, one plane per neighbour index.
+    pub confidence: Handle,
+    /// Physical ring slot of the centre frame.
+    pub centre_slot: u32,
+    /// Physical ring slot per logical offset k, indexed by
+    /// `neighbour_idx_for_k(radius, k)`.
+    ///
+    /// This stays a host `Vec` rather than a GPU buffer, because the
+    /// grouping kernel that consumes it indexes it per candidate on the
+    /// device, and it is the caller's job to upload it, not this one's.
+    pub neighbour_slots: Vec<u32>,
+    /// `i32` element stride between neighbours in `mv_field`.
+    pub mv_stride: u32,
+    /// `f32` element stride between neighbours in `confidence`.
+    pub conf_stride: u32,
 }
 
 /// The stateful NLMeans denoiser that owns the GPU buffers.
@@ -1314,6 +1349,121 @@ impl<R: Runtime> NlmDenoiser<R> {
             handle: self.outputs[slot].clone(),
             slot,
         }))
+    }
+
+    /// Runs the per-submit machinery a collaborative stage builds on,
+    /// without launching any NLM denoising kernel.
+    ///
+    /// This refreshes the noise estimate the same way
+    /// [`Self::denoise_submit_gpu`] does, then runs the same per-neighbour
+    /// motion estimate [`Self::run_motion_compensation`] runs, minus the
+    /// `run_compensate` shift into the compensated buffers. The returned
+    /// [`RingView`] reads the unmodified input ring directly, so a
+    /// caller predicts where a patch moved from the motion field and
+    /// searches around that prediction itself, rather than reading
+    /// content a warp has already resampled.
+    ///
+    /// Returns `Ok(None)` while the temporal window is still filling, the
+    /// same condition [`Self::denoise_submit_gpu`] checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the denoiser was not built with motion
+    /// compensation and temporal confidence both active, since a
+    /// [`RingView`] has nothing meaningful to hand back otherwise.
+    pub(crate) fn submit_machinery(&mut self) -> Result<Option<RingView>, DenoiserError> {
+        let total_frames = self.params.total_frames() as usize;
+        if self.frames_loaded < total_frames {
+            return Ok(None);
+        }
+
+        if self.noise_results.is_some() {
+            self.update_noise_estimate()?;
+        }
+
+        let center_t = self.params.temporal_radius;
+        let neighbour_slots = self.run_motion_machinery(center_t)?;
+
+        let mc = self.mc_ctx.as_ref().ok_or_else(|| {
+            DenoiserError::Other(anyhow::anyhow!(
+                "submit_machinery requires motion compensation to be active"
+            ))
+        })?;
+        let mv_field = self
+            .mv_field_buf
+            .as_ref()
+            .expect("mv_field allocated when mc_ctx is Some")
+            .clone();
+        let confidence = self
+            .confidence_buf
+            .as_ref()
+            .ok_or_else(|| {
+                DenoiserError::Other(anyhow::anyhow!(
+                    "submit_machinery requires HQ temporal confidence to be active"
+                ))
+            })?
+            .clone();
+
+        Ok(Some(RingView {
+            input: self.input_buf.clone(),
+            mv_field,
+            confidence,
+            centre_slot: self.phys_frame(center_t as i32),
+            neighbour_slots,
+            mv_stride: (mc.mv_field_bytes_per_neighbour() / size_of::<i32>() as u64) as u32,
+            conf_stride: (mc.confidence_bytes_per_neighbour() / size_of::<f32>() as u64) as u32,
+        }))
+    }
+
+    /// Flush-mode counterpart of [`Self::submit_machinery`], duplicating
+    /// the trailing frame the same way [`Self::flush_step_gpu`] does,
+    /// minus the NLM launches.
+    ///
+    /// Returns `Ok(None)` while the very first duplicates are still
+    /// filling out a window that never reached its full size during
+    /// pushing, the same condition [`Self::flush_step_gpu`] documents.
+    pub(crate) fn flush_step_machinery(&mut self) -> Result<Option<RingView>, DenoiserError> {
+        let total_frames = self.params.total_frames() as usize;
+
+        self.duplicate_last_frame();
+        if self.frames_loaded < total_frames {
+            self.frames_loaded += 1;
+        }
+
+        self.submit_machinery()
+    }
+
+    /// The motion-compensation geometry the last [`Self::submit_machinery`]
+    /// or [`Self::flush_step_machinery`] call used.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the denoiser was not built with motion compensation
+    /// active. Only call this on a denoiser [`Self::submit_machinery`]
+    /// has already returned `Some` for.
+    pub(crate) fn motion_ctx(&self) -> &MotionCtx {
+        self.mc_ctx
+            .as_ref()
+            .expect("motion_ctx called without motion compensation active")
+    }
+
+    /// `thsad(blksize, thsad_scale)` in normalised SAD units, the same
+    /// threshold [`Self::submit_machinery`] scores confidence against.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the same condition as [`Self::motion_ctx`].
+    pub(crate) fn thsad_value(&self) -> f32 {
+        let blksize = self.motion_ctx().blksize;
+        let thsad_scale = self.params.hq.map_or(1.0, |hq| hq.thsad_scale);
+        motion::thsad(blksize, thsad_scale)
+    }
+
+    /// The compute client this denoiser dispatches kernels through, for
+    /// a collaborative stage that reads a [`RingView`]'s handles back or
+    /// launches its own kernels against them.
+    pub(crate) fn compute_client(&self) -> &cubecl::client::ComputeClient<R> {
+        &self.client
     }
 
     /// Queues the denoise kernels for the current window and starts the

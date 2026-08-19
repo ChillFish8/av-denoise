@@ -4,6 +4,7 @@ mod alignment;
 mod confidence;
 mod gpu_submit;
 mod hq;
+mod machinery;
 mod motion_compensation;
 mod noise;
 mod pending_outlives;
