@@ -28,6 +28,7 @@ pub use denoiser::{
     Nl4dOptions,
     NlmTuning,
     nl3d_default_residual_sigma_scale,
+    nl4d_default_lambda_ht,
 };
 pub use device::Device;
 pub use nlmeans::{

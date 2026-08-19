@@ -299,15 +299,17 @@ impl Default for Nl3dOptions {
 /// grouping and shrinkage that run on top of it, mirroring
 /// [`crate::nl4d::Nl4dParams`] one for one.
 ///
-/// `lambda_ht` has one shared library default rather than a per-plane
-/// one, the same as [`Nl3dOptions::lambda_ht`]. A caller wanting luma
-/// and chroma to shrink by different amounts sets `--luma-lambda-ht`
-/// and `--chroma-lambda-ht` on the CLI, resolved per plane in
-/// `CliOptions::algorithm_for` (`src/bin/ingest.rs`) the same way
-/// nl3d's per-plane overrides are.
+/// `lambda_ht` now has a per-plane calibrated default, the same shape
+/// as [`Nl3dOptions::residual_sigma_scale`]. `None` resolves through
+/// [`nl4d_default_lambda_ht`] once the plane being denoised is known.
+/// A caller wanting luma and chroma to shrink by different amounts
+/// explicitly sets `--luma-lambda-ht` and `--chroma-lambda-ht` on the
+/// CLI, resolved per plane in `CliOptions::algorithm_for`
+/// (`src/bin/ingest.rs`) the same way nl3d's per-plane overrides are.
 ///
-/// No dial here has been calibrated by a sweep yet. Every default below
-/// is carried straight over from [`crate::nl4d::Nl4dParams::default`].
+/// `temporal_radius`, `refine`, `spatial_radius`, and `c_min` have not
+/// been calibrated by a sweep. Their defaults are carried straight
+/// over from [`crate::nl4d::Nl4dParams::default`].
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Nl4dOptions {
     /// The front end's HQ parameters.
@@ -327,9 +329,12 @@ pub struct Nl4dOptions {
     /// frame, in `1..=16`. Defaults to 9.
     pub spatial_radius: u32,
     /// Hard-threshold multiplier on the propagated coefficient sigma.
-    /// Defaults to 2.7. Applies to both planes unless overridden per
-    /// plane on the CLI.
-    pub lambda_ht: f32,
+    ///
+    /// `None` resolves through [`nl4d_default_lambda_ht`], which
+    /// returns a different calibrated value for luma than for chroma.
+    /// Read that function's docs before relying on either number,
+    /// since the two rest on very different evidence.
+    pub lambda_ht: Option<f32>,
     /// The confidence floor below which a whole neighbour block is
     /// skipped rather than scored, in `[0, 1)`. Defaults to 0.05. Only
     /// affects how much compute a submit spends, never which candidates
@@ -345,7 +350,10 @@ impl Default for Nl4dOptions {
             temporal_radius: defaults.temporal_radius,
             refine: defaults.refine,
             spatial_radius: defaults.spatial_radius,
-            lambda_ht: defaults.lambda_ht,
+            // Resolved per plane by `nl4d_default_lambda_ht` at
+            // construction time, once the plane being denoised is
+            // known.
+            lambda_ht: None,
             c_min: defaults.c_min,
         }
     }
@@ -449,6 +457,84 @@ fn collab_params_for(opts: &Nl3dOptions, channels: ChannelMode) -> CollabParams 
         ht_wavelet: opts.debug_ht_wavelet,
         ..CollabParams::default()
     }
+}
+
+/// The calibrated default `lambda_ht` for the nl4d temporal grouping's
+/// hard-threshold stage, per plane.
+///
+/// # Luma and `ChannelMode::Yuv`, 5.3
+///
+/// Chosen by a human from a rendered ladder on real brick grain
+/// (`data/nl4d_calibration/README.md`), luma `lambda_ht` pinned across
+/// 5.0, 5.3, 5.6, 7.0, 8.5, 10.0, and 12.0 at temporal radius 2, each
+/// rung measured against a frame-22 Laplacian high-frequency-energy
+/// ratio and checked by eye against crops and 16x-amplified removed
+/// residuals. Every rung from 5.6 up removes noticeably more
+/// high-frequency energy than the `bm3dhip` reference does at its own
+/// matched strength, and 5.6 and 7.0 remove more of it than 5.3 for
+/// only a fairly small further loss of detail. The reviewer picked 5.3
+/// anyway, recorded verbatim in that document:
+///
+/// > "09_nl4d_lam5p3 Is probably the best for a default, although 5.6
+/// > and 7.0 reduce the noise more for faily minimal detail loss, we
+/// > should opt on the side of detail retention given the additional
+/// > noise reduction is not great enough to warrent it."
+///
+/// The numbers alone do not carry that reasoning. A metric-only pick
+/// could just as well have landed on 5.6 or 7.0, so the deliberate
+/// bias toward detail retention is the reason 5.3 is the value here
+/// rather than either of those. `ChannelMode::Yuv` reads the same
+/// value, the same "a fused pass is dominated by luma" assumption
+/// [`crate::nlmeans::hq_default_strength`] and
+/// [`nl3d_default_residual_sigma_scale`] both make for their own Yuv
+/// case. Yuv was not part of the ladder's own evidence.
+///
+/// This value is provisional in one specific way, independent of
+/// which rung looks best. The temporal grouping kernel currently
+/// discards every non-centre group member at the scatter and writes
+/// back only centre-frame members, so it compensates for the lost
+/// cross-frame averaging with a harsher `lambda_ht` than a filter that
+/// aggregated every member would need. If cross-frame aggregation
+/// lands, the whole ladder shifts and this value should be re-swept,
+/// not just nudged.
+///
+/// # Chroma, 3.6
+///
+/// Metric-driven, unlike luma. Swept with luma pinned at 5.3 (see
+/// `data/nl4d_chroma_calibration/README.md`) on the quality harness's
+/// `av_nl4d_temporal_r2` row at all three light noise levels, over 2.7
+/// (the prior shared library default), 3.0, 3.3, 3.6, 4.0, 5.3 (luma
+/// parity), 7.0, and 10.0. `xpsnr_u`/`xpsnr_v` peak on a broad, nearly
+/// flat plateau from 3.0 to 4.0, clearly ahead of both the prior 2.7
+/// default and of every value at or above luma parity. 3.6 has the
+/// best worst-case `min(xpsnr_u, xpsnr_v)` across the three noise
+/// levels, tied with 4.0 on the single worst figure but ahead of it at
+/// every other point on the plateau, and `ssim_all` does not disagree
+/// anywhere on the plateau.
+///
+/// The metric sweep alone would not have been trusted on its own. This
+/// project's chroma dial was set to 8.0 once by visual plausibility
+/// and only caught by amplifying the U-plane residual and finding
+/// brick coursing in what the filter had removed, see
+/// [`nl3d_default_residual_sigma_scale`]'s own "How 8.0 came to be
+/// here" section. The same check was run here, real brick grain, a
+/// 16x-amplified removed-residual of the U plane at frame 22, luma
+/// pinned at 5.3, for the plateau's three candidates (3.3, 3.6, 4.0)
+/// plus the prior 2.7 default. All four residuals read as
+/// near-featureless speckle with no legible brick structure at any
+/// point, so the plateau's metric winner was trusted rather than
+/// second-guessed.
+pub fn nl4d_default_lambda_ht(channels: ChannelMode) -> f32 {
+    match channels {
+        ChannelMode::Luma | ChannelMode::Yuv => 5.3,
+        ChannelMode::Chroma => 3.6,
+    }
+}
+
+/// Resolves `Nl4dOptions.lambda_ht` for one plane, falling back to
+/// [`nl4d_default_lambda_ht`] when the caller left it unset.
+fn resolve_lambda_ht(opts: &Nl4dOptions, channels: ChannelMode) -> f32 {
+    opts.lambda_ht.unwrap_or_else(|| nl4d_default_lambda_ht(channels))
 }
 
 /// Whether a frame is cleaned on its own or alongside its neighbours.
@@ -629,7 +715,8 @@ impl<R: Runtime> Engine<R> {
 /// tuning, which is not part of `NlmParams`, so it is read from
 /// `algorithm` directly rather than from `params`. This is also where an
 /// unset `residual_sigma_scale` picks up its calibrated per-plane
-/// default (`resolve_residual_sigma_scale`), the same way `to_nlm_params`
+/// default (`resolve_residual_sigma_scale`) and an unset `lambda_ht`
+/// picks up its own (`resolve_lambda_ht`), the same way `to_nlm_params`
 /// resolves HQ's calibrated `strength`, since this is the first point
 /// construction has both `opts` and `params.channels` together.
 fn build_engine<R: Runtime>(
@@ -657,12 +744,13 @@ fn build_engine<R: Runtime>(
             )?)))
         },
         Algorithm::Nl4d(opts) => {
+            let lambda_ht = resolve_lambda_ht(opts, params.channels);
             let nl4d_params = Nl4dParams {
                 nlm: params,
                 temporal_radius: opts.temporal_radius,
                 refine: opts.refine,
                 spatial_radius: opts.spatial_radius,
-                lambda_ht: opts.lambda_ht,
+                lambda_ht,
                 c_min: opts.c_min,
             };
             let denoiser = Nl4dDenoiser::new(client, nl4d_params, width, height)
@@ -1088,6 +1176,54 @@ mod options_tests {
     }
 
     #[test]
+    fn nl4d_default_lambda_ht_differs_between_luma_and_chroma() {
+        let luma = nl4d_default_lambda_ht(ChannelMode::Luma);
+        let chroma = nl4d_default_lambda_ht(ChannelMode::Chroma);
+
+        assert!((luma - 5.3).abs() < f32::EPSILON);
+        assert!((chroma - 3.6).abs() < f32::EPSILON);
+        assert!(
+            (chroma - luma).abs() > f32::EPSILON,
+            "luma ({luma}) and chroma ({chroma}) must resolve to different defaults"
+        );
+    }
+
+    #[test]
+    fn nl4d_default_lambda_ht_yuv_reads_the_luma_value() {
+        let yuv = nl4d_default_lambda_ht(ChannelMode::Yuv);
+        let luma = nl4d_default_lambda_ht(ChannelMode::Luma);
+
+        assert!((yuv - luma).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn resolve_lambda_ht_unset_uses_the_per_plane_default() {
+        let opts = Nl4dOptions::default();
+
+        let luma = resolve_lambda_ht(&opts, ChannelMode::Luma);
+        let chroma = resolve_lambda_ht(&opts, ChannelMode::Chroma);
+
+        assert!((luma - 5.3).abs() < f32::EPSILON, "got {luma}");
+        assert!((chroma - 3.6).abs() < f32::EPSILON, "got {chroma}");
+    }
+
+    #[test]
+    fn resolve_lambda_ht_explicit_value_overrides_every_plane() {
+        let opts = Nl4dOptions {
+            lambda_ht: Some(4.4),
+            ..Nl4dOptions::default()
+        };
+
+        for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
+            let got = resolve_lambda_ht(&opts, channels);
+            assert!(
+                (got - 4.4).abs() < f32::EPSILON,
+                "channels {channels:?} got {got}"
+            );
+        }
+    }
+
+    #[test]
     fn collab_params_carry_the_diagnostic_fields() {
         // Every field the test sets differs from `CollabParams::default()`
         // (k_max 8, tau_match 3.0, lambda_ht 2.7, channels Luma), so each
@@ -1415,8 +1551,15 @@ mod options_tests {
         assert_eq!(opts.temporal_radius, params.temporal_radius);
         assert_eq!(opts.refine, params.refine);
         assert_eq!(opts.spatial_radius, params.spatial_radius);
-        assert!((opts.lambda_ht - params.lambda_ht).abs() < f32::EPSILON);
         assert!((opts.c_min - params.c_min).abs() < f32::EPSILON);
+        // `lambda_ht` is no longer compared here. `opts.lambda_ht` stays
+        // `None`, deferred to `nl4d_default_lambda_ht` once the plane is
+        // known (`resolve_lambda_ht_unset_uses_the_per_plane_default`
+        // above), while `params.lambda_ht` is `Nl4dParams`'s own
+        // independent concrete default, which mirrors the Luma/Yuv
+        // calibrated value.
+        assert_eq!(opts.lambda_ht, None);
+        assert!((params.lambda_ht - nl4d_default_lambda_ht(ChannelMode::Yuv)).abs() < f32::EPSILON);
     }
 
     #[test]

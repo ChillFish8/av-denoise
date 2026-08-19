@@ -173,14 +173,19 @@ pub struct CliOptions {
     /// calibrated per-plane default when nothing at all is set. Only
     /// has an effect when `algorithm` is `Algorithm::Nl3d`.
     pub chroma_residual_sigma_scale: Option<f32>,
-    /// Per-plane override for the nl3d collaborative stage's
-    /// `lambda_ht`, luma. Takes precedence over `algorithm`'s value when
-    /// set. Only has an effect when `algorithm` is `Algorithm::Nl3d`.
+    /// Per-plane override for `lambda_ht`, luma. Takes precedence over
+    /// `algorithm`'s value when set, which itself falls back to a
+    /// calibrated per-plane default when nothing at all is set. Has an
+    /// effect when `algorithm` is `Algorithm::Nl3d` (the collaborative
+    /// stage's hard threshold) or `Algorithm::Nl4d` (the temporal
+    /// grouping stage's hard threshold).
     pub luma_lambda_ht: Option<f32>,
-    /// Per-plane override for the nl3d collaborative stage's
-    /// `lambda_ht`, chroma. Takes precedence over `algorithm`'s value
-    /// when set. Only has an effect when `algorithm` is
-    /// `Algorithm::Nl3d`.
+    /// Per-plane override for `lambda_ht`, chroma. Takes precedence over
+    /// `algorithm`'s value when set, which itself falls back to a
+    /// calibrated per-plane default when nothing at all is set. Has an
+    /// effect when `algorithm` is `Algorithm::Nl3d` (the collaborative
+    /// stage's hard threshold) or `Algorithm::Nl4d` (the temporal
+    /// grouping stage's hard threshold).
     pub chroma_lambda_ht: Option<f32>,
     /// Diagnostic. Runs the luma instance's collaborative filter in
     /// hard-threshold-only mode. See `Nl3dArgs::debug_ht_only`.
@@ -212,14 +217,15 @@ impl CliOptions {
     /// since they aren't aggression dials in the same sense as the
     /// other two.
     ///
-    /// `Nl3d`'s `residual_sigma_scale` stays `Option<f32>` all the way
-    /// through this method. When neither a per-plane flag nor the
-    /// shared `--residual-sigma-scale` was set, the result is `None`,
-    /// deferred to `nl3d_default_residual_sigma_scale` at construction,
-    /// once the plane being denoised is known there too. That is what
-    /// gives luma and chroma different values when a caller passes no
-    /// flags at all. `Nl4d` has no per-plane default to defer to, so its
-    /// `lambda_ht` always resolves to a concrete value here.
+    /// `Nl3d`'s `residual_sigma_scale` and `Nl4d`'s `lambda_ht` both stay
+    /// `Option<f32>` all the way through this method. When neither a
+    /// per-plane flag nor the matching shared flag was set, the result
+    /// is `None`, deferred to `nl3d_default_residual_sigma_scale` or
+    /// `nl4d_default_lambda_ht` at construction, once the plane being
+    /// denoised is known there too. That is what gives luma and chroma
+    /// different values when a caller passes no flags at all. `Nl3d`'s
+    /// own `lambda_ht` has no per-plane default to defer to, so it
+    /// always resolves to a concrete value here.
     fn algorithm_for(&self, channels: ChannelMode) -> Algorithm {
         match self.algorithm {
             Algorithm::Nl3d(nl3d) => {
@@ -260,7 +266,11 @@ impl CliOptions {
                 };
 
                 Algorithm::Nl4d(Nl4dOptions {
-                    lambda_ht: lambda_ht.unwrap_or(nl4d.lambda_ht),
+                    // Left unresolved when unset, the same as `Nl3d`'s
+                    // `residual_sigma_scale` above, since the calibrated
+                    // default now depends on the plane, which
+                    // `nl4d_default_lambda_ht` resolves at construction.
+                    lambda_ht: lambda_ht.or(nl4d.lambda_ht),
                     ..nl4d
                 })
             },
@@ -1280,10 +1290,12 @@ mod cli_options_tests {
         let luma = expect_nl4d(opts.algorithm_for(ChannelMode::Luma));
         let chroma = expect_nl4d(opts.algorithm_for(ChannelMode::Chroma));
 
-        assert!((luma.lambda_ht - 4.0).abs() < f32::EPSILON);
-        assert!(
-            (chroma.lambda_ht - Nl4dOptions::default().lambda_ht).abs() < f32::EPSILON,
-            "chroma should keep the shared default when only --luma-lambda-ht is set, got {}",
+        assert!((luma.lambda_ht.unwrap() - 4.0).abs() < f32::EPSILON);
+        assert_eq!(
+            chroma.lambda_ht,
+            Nl4dOptions::default().lambda_ht,
+            "chroma should stay unresolved here (None), deferred to its own per-plane \
+             default at construction, got {:?}",
             chroma.lambda_ht
         );
     }
@@ -1295,12 +1307,14 @@ mod cli_options_tests {
         let luma = expect_nl4d(opts.algorithm_for(ChannelMode::Luma));
         let chroma = expect_nl4d(opts.algorithm_for(ChannelMode::Chroma));
 
-        assert!(
-            (luma.lambda_ht - Nl4dOptions::default().lambda_ht).abs() < f32::EPSILON,
-            "luma should keep the shared default when only --chroma-lambda-ht is set, got {}",
+        assert_eq!(
+            luma.lambda_ht,
+            Nl4dOptions::default().lambda_ht,
+            "luma should stay unresolved here (None), deferred to its own per-plane \
+             default at construction, got {:?}",
             luma.lambda_ht
         );
-        assert!((chroma.lambda_ht - 4.0).abs() < f32::EPSILON);
+        assert!((chroma.lambda_ht.unwrap() - 4.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -1310,8 +1324,8 @@ mod cli_options_tests {
         let luma = expect_nl4d(opts.algorithm_for(ChannelMode::Luma));
         let chroma = expect_nl4d(opts.algorithm_for(ChannelMode::Chroma));
 
-        assert!((luma.lambda_ht - 2.0).abs() < f32::EPSILON);
-        assert!((chroma.lambda_ht - 3.5).abs() < f32::EPSILON);
+        assert!((luma.lambda_ht.unwrap() - 2.0).abs() < f32::EPSILON);
+        assert!((chroma.lambda_ht.unwrap() - 3.5).abs() < f32::EPSILON);
 
         // Every other field stays shared between the two instances even
         // though lambda_ht diverges.
@@ -1322,15 +1336,27 @@ mod cli_options_tests {
     }
 
     #[test]
-    fn unset_nl4d_lambda_ht_overrides_fall_back_to_the_shared_default_on_both_planes() {
+    fn unset_nl4d_overrides_resolve_to_different_lambda_ht_per_plane_end_to_end() {
         let opts = nl4d_opts(None, None);
-        let defaults = Nl4dOptions::default();
 
         let luma = expect_nl4d(opts.algorithm_for(ChannelMode::Luma));
         let chroma = expect_nl4d(opts.algorithm_for(ChannelMode::Chroma));
 
-        assert!((luma.lambda_ht - defaults.lambda_ht).abs() < f32::EPSILON);
-        assert!((chroma.lambda_ht - defaults.lambda_ht).abs() < f32::EPSILON);
+        // Neither plane has anything set anywhere, so both stay
+        // unresolved at this layer...
+        assert_eq!(luma.lambda_ht, None);
+        assert_eq!(chroma.lambda_ht, None);
+
+        // ...but resolving each through the same function construction
+        // uses (`nl4d_default_lambda_ht`, see `src/denoiser.rs`) gives
+        // luma and chroma different values, which is the whole point of
+        // a caller passing no flags at all getting both calibrated
+        // defaults.
+        let luma_default = av_denoise::nl4d_default_lambda_ht(ChannelMode::Luma);
+        let chroma_default = av_denoise::nl4d_default_lambda_ht(ChannelMode::Chroma);
+        assert!((luma_default - 5.3).abs() < f32::EPSILON);
+        assert!((chroma_default - 3.6).abs() < f32::EPSILON);
+        assert!((chroma_default - luma_default).abs() > f32::EPSILON);
     }
 }
 

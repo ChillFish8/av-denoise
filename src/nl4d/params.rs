@@ -25,6 +25,12 @@ pub struct Nl4dParams {
     /// centre frame. In `1..=16`.
     pub spatial_radius: u32,
     /// Hard-threshold multiplier on the propagated coefficient sigma.
+    /// Calibrated to 5.3 by default (the Luma/Yuv value), see
+    /// [`crate::Nl4dOptions`]'s struct-level docs and
+    /// `nl4d_default_lambda_ht` for the ladder this came from. Callers
+    /// building `Nl4dParams` directly, rather than through
+    /// [`crate::Nl4dOptions`], get no per-plane resolution and should
+    /// set this themselves for chroma.
     pub lambda_ht: f32,
     /// The confidence floor below which a whole neighbour block is
     /// skipped rather than scored, in `[0, 1)`. Only affects how much
@@ -52,7 +58,7 @@ impl Default for Nl4dParams {
             temporal_radius: 2,
             refine: 2,
             spatial_radius: 9,
-            lambda_ht: 2.7,
+            lambda_ht: 5.3,
             c_min: 0.05,
         }
     }

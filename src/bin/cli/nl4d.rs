@@ -32,16 +32,20 @@ pub struct Nl4dArgs {
     /// How aggressively the temporal grouping's hard-threshold stage
     /// zeroes out small transform coefficients.
     ///
-    /// Multiplies the propagated coefficient sigma. Library default is
-    /// 2.7. Applies to both planes unless `--luma-lambda-ht` or
+    /// Multiplies the propagated coefficient sigma. The library default
+    /// is now per plane rather than a single shared number, see
+    /// `nl4d_default_lambda_ht`'s docs for both values and how
+    /// differently certain they are. Setting this flag applies the same
+    /// explicit value to both planes, overriding the per-plane default
+    /// for each. Applies to both planes unless `--luma-lambda-ht` or
     /// `--chroma-lambda-ht` is set.
     #[arg(long)]
     pub lambda_ht: Option<f32>,
 
     /// `--lambda-ht` override for the brightness plane only.
     ///
-    /// Falls back to `--lambda-ht` (or the library default) when not
-    /// set.
+    /// Falls back to `--lambda-ht` (or the calibrated per-plane library
+    /// default) when not set.
     ///
     /// Ignored when luma is not being denoised, or when `--channel-mode
     /// yuv` is used.
@@ -50,8 +54,8 @@ pub struct Nl4dArgs {
 
     /// `--lambda-ht` override for the colour planes only.
     ///
-    /// Falls back to `--lambda-ht` (or the library default) when not
-    /// set.
+    /// Falls back to `--lambda-ht` (or the calibrated per-plane library
+    /// default) when not set.
     ///
     /// Ignored when chroma is not being denoised, or when
     /// `--channel-mode yuv` is used.
@@ -126,7 +130,15 @@ impl Nl4dArgs {
             temporal_radius: resolved.temporal_radius,
             refine: self.refine.unwrap_or(defaults.refine),
             spatial_radius: self.spatial_radius.unwrap_or(defaults.spatial_radius),
-            lambda_ht: self.lambda_ht.unwrap_or(defaults.lambda_ht),
+            // Left unresolved when unset, rather than eagerly picked
+            // from `defaults` here, because the calibrated default now
+            // depends on which plane is being denoised, which is not
+            // known yet at this point. `CliOptions::algorithm_for`
+            // (src/bin/ingest.rs) applies `--luma-`/`--chroma-lambda-ht`
+            // on top of this once the plane is known, and construction
+            // itself picks the calibrated per-plane default for
+            // whatever is still unset.
+            lambda_ht: self.lambda_ht,
             c_min: self.c_min.unwrap_or(defaults.c_min),
         });
 
@@ -260,7 +272,10 @@ mod tests {
                 );
                 assert_eq!(nl4d_opts.refine, defaults.refine);
                 assert_eq!(nl4d_opts.spatial_radius, defaults.spatial_radius);
-                assert!((nl4d_opts.lambda_ht - defaults.lambda_ht).abs() < f32::EPSILON);
+                assert_eq!(
+                    nl4d_opts.lambda_ht, defaults.lambda_ht,
+                    "unset --lambda-ht should stay None here, resolved later per plane"
+                );
                 assert!((nl4d_opts.c_min - defaults.c_min).abs() < f32::EPSILON);
             },
             other => panic!("expected Algorithm::Nl4d, got {other:?}"),
