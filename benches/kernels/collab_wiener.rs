@@ -1,5 +1,5 @@
 use av_denoise::collab::geometry::{member_buf_len, ref_count, refs_along};
-use av_denoise::collab::kernels::aggregate::weight_scale;
+use av_denoise::collab::kernels::aggregate::{ACCUM_SCALE, weight_scale};
 use av_denoise::collab::kernels::filter_wiener::collab_filter_wiener;
 use av_denoise::collab::kernels::group::collab_group_spatial;
 use av_denoise::collab::kernels::transforms::dct_noise_profile;
@@ -155,6 +155,7 @@ impl<R: Runtime> Benchmark for CollabWienerBench<R> {
                 ArrayArg::from_raw_parts(args.sigma.clone(), 1),
                 ArrayArg::from_raw_parts(args.dct_profile.clone(), 8),
                 weight_scale(SIGMA, &dct_noise_profile(0.0)),
+                ACCUM_SCALE,
                 false,
                 false,
                 W,

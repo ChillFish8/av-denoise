@@ -1,5 +1,5 @@
 use av_denoise::collab::geometry::{member_buf_len, ref_count, refs_along};
-use av_denoise::collab::kernels::aggregate::weight_scale;
+use av_denoise::collab::kernels::aggregate::{ACCUM_SCALE, weight_scale};
 use av_denoise::collab::kernels::filter_ht::collab_filter_ht;
 use av_denoise::collab::kernels::group::collab_group_spatial;
 use av_denoise::collab::kernels::transforms::dct_noise_profile;
@@ -42,6 +42,11 @@ pub struct CollabHtBench<R: Runtime> {
 pub struct CollabHtInput {
     pub reference: Handle,
     pub member_pos: Handle,
+    // Never read: `temporal` is false below, the single-frame path every
+    // shipped denoiser except `Nl4dDenoiser` runs, so a 1-element dummy
+    // buffer is valid here, the same pattern `src/collab/pipeline.rs`
+    // binds for its own single-frame `collab_filter_ht` calls.
+    pub member_frame_dummy: Handle,
     pub member_count: Handle,
     pub member_sig2_dummy: Handle,
     pub accum: Handle,
@@ -94,6 +99,7 @@ impl<R: Runtime> Benchmark for CollabHtBench<R> {
         }
         block_sync(&self.client);
 
+        let member_frame_dummy = self.client.empty(size_of::<u32>());
         let member_sig2_dummy = self.client.empty(size_of::<f32>());
         let accum = self.client.empty(pixels * size_of::<i32>());
         let wsum = self.client.empty(pixels * size_of::<i32>());
@@ -110,6 +116,7 @@ impl<R: Runtime> Benchmark for CollabHtBench<R> {
         CollabHtInput {
             reference,
             member_pos,
+            member_frame_dummy,
             member_count,
             member_sig2_dummy,
             accum,
@@ -140,6 +147,7 @@ impl<R: Runtime> Benchmark for CollabHtBench<R> {
                 1usize,
                 ArrayArg::from_raw_parts(args.reference.clone(), frame_len),
                 ArrayArg::from_raw_parts(args.member_pos.clone(), pos_len),
+                ArrayArg::from_raw_parts(args.member_frame_dummy.clone(), 1),
                 ArrayArg::from_raw_parts(args.member_count.clone(), refs),
                 ArrayArg::from_raw_parts(args.member_sig2_dummy.clone(), 1),
                 ArrayArg::from_raw_parts(args.accum.clone(), pixels),
@@ -151,6 +159,8 @@ impl<R: Runtime> Benchmark for CollabHtBench<R> {
                 ArrayArg::from_raw_parts(args.dct_profile.clone(), 8),
                 LAMBDA_HT,
                 weight_scale(SIGMA, &dct_noise_profile(0.0)),
+                ACCUM_SCALE,
+                false,
                 false,
                 false,
                 false,

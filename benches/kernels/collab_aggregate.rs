@@ -55,6 +55,11 @@ impl<R: Runtime> Benchmark for CollabNormaliseBench<R> {
                 ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored),
                 ArrayArg::from_raw_parts(args.wsum.clone(), pixels),
                 ArrayArg::from_raw_parts(args.output.clone(), pixels * stored),
+                // Single-frame region, the same `frame_offset = 0` every
+                // shipped single-frame caller passes (see
+                // `src/collab/pipeline.rs`); this bench measures one
+                // frame's worth of normalisation, not a cross-frame ring.
+                0u32,
                 W,
                 H,
                 self.ch,
@@ -111,6 +116,9 @@ impl<R: Runtime> Benchmark for CollabZeroAccumBench<R> {
                 CubeDim::new_1d(dim),
                 ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored),
                 ArrayArg::from_raw_parts(args.wsum.clone(), pixels),
+                // Single-frame region, the same `frame_offset = 0` every
+                // shipped single-frame caller passes.
+                0u32,
                 pixels as u32,
                 stored as u32,
             );
