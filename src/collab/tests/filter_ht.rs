@@ -9,10 +9,19 @@ use super::helpers::{
     noisy_field_over,
     plant_patch,
 };
-use crate::collab::geometry::{filtered_buf_len, member_buf_len, ref_count, ref_pos, refs_along};
+use crate::collab::geometry::{
+    filtered_buf_len,
+    member_buf_len,
+    member_frame_buf_len,
+    member_sig2_buf_len,
+    ref_count,
+    ref_pos,
+    refs_along,
+};
 use crate::collab::kernels::aggregate::{ACCUM_SCALE, cross_frame_accum_scale, weight_scale};
 use crate::collab::kernels::filter_ht::{collab_filter_ht, variance_ladder};
-use crate::collab::kernels::group::{collab_group_spatial, pack_pos_host};
+use crate::collab::kernels::group::pack_pos_host;
+use crate::collab::kernels::group_temporal::collab_group_temporal;
 use crate::collab::kernels::transforms::{dct_noise_profile, haar_variance_ladder};
 
 /// Every reference top-left position on the grid, in the same raster
@@ -54,10 +63,16 @@ struct Groups {
     refs: usize,
 }
 
-/// Runs [`collab_group_spatial`] and keeps the raw device buffers,
-/// rather than reading them back, so a filter launch can consume them
-/// directly.
-#[allow(clippy::too_many_arguments)]
+/// Runs [`collab_group_temporal`] over a one-frame ring and keeps the
+/// raw device buffers, rather than reading them back, so a filter launch
+/// can consume them directly.
+///
+/// `radius = 0` means the ring is one frame wide and every candidate
+/// comes from the spatial window around the reference patch. The motion
+/// field, the confidence field, and the neighbour slot list are all
+/// one-element dummies, since nothing reads them at that radius. The
+/// groups these tests feed the filter are a fixed input, not the thing
+/// under test, so a spatial-only search is all they need.
 fn run_group_raw(
     client: &ComputeClient<R>,
     reference: &Handle,
@@ -65,7 +80,6 @@ fn run_group_raw(
     width: u32,
     height: u32,
     noise_floor: f32,
-    tau_admit: f32,
     spatial_radius: u32,
     k_max: u32,
 ) -> Groups {
@@ -73,25 +87,47 @@ fn run_group_raw(
     let refs_y = refs_along(height);
     let refs = ref_count(width, height);
     let pos_len = member_buf_len(width, height, k_max);
+    let frame_len_out = member_frame_buf_len(width, height, k_max);
+    let sig2_len = member_sig2_buf_len(width, height, k_max);
 
     let member_pos = client.empty(pos_len * size_of::<u32>());
+    let member_frame = client.empty(frame_len_out * size_of::<u32>());
     let member_count = client.empty(refs * size_of::<u32>());
+    let member_sig2 = client.empty(sig2_len * size_of::<f32>());
+    let mv_dummy = client.create_from_slice(i32::as_bytes(&[0i32, 0i32]));
+    let conf_dummy = client.create_from_slice(f32::as_bytes(&[1.0f32]));
+    let slots_dummy = client.create_from_slice(u32::as_bytes(&[0u32]));
 
     let grid = CubeCount::new_2d(refs_x, refs_y);
     let dim = CubeDim::new_2d(8, 8);
 
     unsafe {
-        collab_group_spatial::launch_unchecked::<R>(
+        collab_group_temporal::launch_unchecked::<R>(
             client,
             grid,
             dim,
             1usize,
             ArrayArg::from_raw_parts(reference.clone(), frame_len),
+            ArrayArg::from_raw_parts(mv_dummy, 2),
+            ArrayArg::from_raw_parts(conf_dummy, 1),
             ArrayArg::from_raw_parts(member_pos.clone(), pos_len),
+            ArrayArg::from_raw_parts(member_frame, frame_len_out),
             ArrayArg::from_raw_parts(member_count.clone(), refs),
+            ArrayArg::from_raw_parts(member_sig2, sig2_len),
             0u32,
+            ArrayArg::from_raw_parts(slots_dummy, 1),
             noise_floor,
-            tau_admit,
+            0.0f32,
+            1.0f32,
+            1.0f32,
+            0u32,
+            0u32,
+            2u32,
+            1u32,
+            8u32,
+            8u32,
+            1u32,
+            1u32,
             width,
             height,
             1u32,
@@ -217,7 +253,6 @@ fn run_filter(
     width: u32,
     height: u32,
     noise_floor: f32,
-    tau_admit: f32,
     spatial_radius: u32,
     k_max: u32,
     sigma: f32,
@@ -228,7 +263,6 @@ fn run_filter(
         width,
         height,
         noise_floor,
-        tau_admit,
         spatial_radius,
         k_max,
         sigma,
@@ -246,7 +280,6 @@ fn run_filter_with_rho(
     width: u32,
     height: u32,
     noise_floor: f32,
-    tau_admit: f32,
     spatial_radius: u32,
     k_max: u32,
     sigma: f32,
@@ -264,7 +297,6 @@ fn run_filter_with_rho(
         width,
         height,
         noise_floor,
-        tau_admit,
         spatial_radius,
         k_max,
     );
@@ -292,6 +324,18 @@ fn run_filter_with_rho(
     )
 }
 
+/// A single-member stack at `sigma = 0`, the `k_use = 1` case.
+///
+/// `k_max = 1` is what pins the group to one member. The search pins the
+/// reference patch itself into slot 0 before selection starts, selection
+/// only ever fills slots 1 and above, and the power-of-two rounding then
+/// caps the count at `k_max`, so a group can hold nothing else. The
+/// assertion on `member_count` below is what proves that, rather than
+/// leaving it to be assumed.
+///
+/// With one member the Haar stack transform is a no-op and `sigma = 0`
+/// makes every threshold 0, so the DCT round trip alone must reproduce
+/// the reference patch exactly.
 #[test]
 fn zero_sigma_is_identity() {
     let (w, h) = (32u32, 32u32);
@@ -299,10 +343,43 @@ fn zero_sigma_is_identity() {
     let texture = deterministic_texture(11);
     plant_patch(&mut frame, w, 12, 12, &texture);
 
-    let (filtered, _weights) = run_filter(&frame, w, h, 0.0, 1e-6, 6, 8, 0.0, 2.7);
+    let client = make_client();
+    let reference = client.create_from_slice(f32::as_bytes(&frame));
+    let groups = run_group_raw(&client, &reference, frame.len(), w, h, 0.0, 6, 1);
 
     let refs_x = refs_along(w);
     let ref_idx = (3 * refs_x + 3) as usize; // ref_pos(3, 32) == 12 on both axes
+
+    let count_bytes = client
+        .read_one(groups.member_count.clone())
+        .expect("member_count readback failed");
+    let member_count = u32::from_bytes(&count_bytes)[ref_idx];
+    assert_eq!(
+        member_count, 1,
+        "expected k_max = 1 to hold the group at the pinned self-match alone, got {member_count}"
+    );
+
+    let dummy = client.empty(size_of::<f32>());
+    let frame_dummy = client.empty(size_of::<u32>());
+    let (filtered, _weights) = run_filter_raw(
+        &client,
+        &reference,
+        frame.len(),
+        &groups,
+        w,
+        h,
+        1,
+        0.0,
+        2.7,
+        &dummy,
+        1,
+        false,
+        0.0,
+        &frame_dummy,
+        1,
+        false,
+        0u32,
+    );
 
     let expected = extract_patch(&frame, w, 12, 12);
     let got = &filtered[ref_idx * 64..ref_idx * 64 + 64];
@@ -315,13 +392,11 @@ fn zero_sigma_is_identity() {
 /// The `k_use = 1` case above never enters `haar_fwd_stack`/
 /// `haar_inv_stack`'s `while len > 1` loop, so it can't tell a correct
 /// multi-level Haar butterfly from a broken one. This forces a full
-/// 8-member stack instead, with `tau_admit` effectively unconditional
-/// (`1e9`, comfortably past any possible channel-scaled patch distance)
-/// so every one of the up to 81 candidates a `spatial_radius = 4` window
-/// offers is admitted regardless of content, over a frame where every
-/// position differs from every other (`make_unique_frame`), so the 8
-/// admitted members carry genuinely different per-position content and
-/// their Haar detail coefficients are not all trivially zero. With
+/// 8-member stack instead, over a frame where every position differs
+/// from every other (`make_unique_frame`), so the 8 members the search
+/// keeps out of the 81 a `spatial_radius = 4` window offers carry
+/// genuinely different per-position content and their Haar detail
+/// coefficients are not all trivially zero. With
 /// `sigma = 0` every threshold is still 0, so nothing is discarded and
 /// the full forward-and-inverse chain, all 3 Haar levels included, must
 /// reproduce member 0's patch exactly.
@@ -332,7 +407,7 @@ fn zero_sigma_is_identity_for_a_full_stack() {
 
     let client = make_client();
     let reference = client.create_from_slice(f32::as_bytes(&frame));
-    let groups = run_group_raw(&client, &reference, frame.len(), w, h, 0.0, 1e9, 4, 8);
+    let groups = run_group_raw(&client, &reference, frame.len(), w, h, 0.0, 4, 8);
 
     let refs_x = refs_along(w);
     let ref_idx = (4 * refs_x + 4) as usize; // ref_pos(4, 32) == 16 on both axes
@@ -383,15 +458,13 @@ fn noise_is_suppressed_on_a_flat_field() {
     let sigma = 0.04f32;
     let frame = noisy_field_over(w, h, 0.5, sigma);
 
-    // Same floor the `noise_floor_rescues_noisy_matches` test in
-    // `collab::tests::group` derives: the channel-scaled expected SSD
-    // between two independent noisy copies of the same flat content. A
-    // generous tau on top of it lets the stack fill, since every
-    // position on a flat field is a real match.
+    // The channel-scaled expected SSD between two independent noisy
+    // copies of the same flat content, which is what a real match on
+    // this frame costs. Every position on a flat field is a real match,
+    // so the stack fills.
     let floor = 2.0 * 3.0 * sigma * sigma * 64.0;
-    let tau_admit = floor * 3.0;
 
-    let (filtered, _weights) = run_filter(&frame, w, h, floor, tau_admit, 9, 8, sigma, 2.7);
+    let (filtered, _weights) = run_filter(&frame, w, h, floor, 9, 8, sigma, 2.7);
 
     let input_pool: Vec<f32> = ref_positions(w, h)
         .iter()
@@ -415,10 +488,9 @@ fn group_weight_matches_uniform_theory() {
     let frame = noisy_field_over(w, h, 0.5, sigma);
 
     let floor = 2.0 * 3.0 * sigma * sigma * 64.0;
-    let tau_admit = floor * 3.0;
     let lambda_ht = 2.7f32;
 
-    let (_filtered, weights) = run_filter(&frame, w, h, floor, tau_admit, 9, 8, sigma, lambda_ht);
+    let (_filtered, weights) = run_filter(&frame, w, h, floor, 9, 8, sigma, lambda_ht);
 
     // With every member's variance equal to `sigma^2`, the ladder is a
     // fixed point (see `haar_variance_ladder`'s own `uniform_variance_
@@ -473,7 +545,7 @@ fn hetero_flag_off_never_reads_member_sig2() {
 
     let client = make_client();
     let reference = client.create_from_slice(f32::as_bytes(&frame));
-    let groups = run_group_raw(&client, &reference, frame.len(), w, h, 0.0, 1e-3, 6, 8);
+    let groups = run_group_raw(&client, &reference, frame.len(), w, h, 0.0, 6, 8);
 
     let refs = groups.refs;
     let dummy = client.empty(size_of::<f32>());
@@ -610,11 +682,10 @@ fn dct_profile_rho_zero_matches_a_hand_built_all_ones_profile() {
     let frame = noisy_field_over(w, h, 0.5, sigma);
 
     let floor = 2.0 * 3.0 * sigma * sigma * 64.0;
-    let tau_admit = floor * 3.0;
 
     let client = make_client();
     let reference = client.create_from_slice(f32::as_bytes(&frame));
-    let groups = run_group_raw(&client, &reference, frame.len(), w, h, floor, tau_admit, 9, 8);
+    let groups = run_group_raw(&client, &reference, frame.len(), w, h, floor, 9, 8);
     let dummy = client.empty(size_of::<f32>());
     let frame_dummy = client.empty(size_of::<u32>());
 
@@ -738,10 +809,9 @@ fn higher_rho_retains_more_noise_on_a_flat_field() {
     let frame = noisy_field_over(w, h, 0.5, sigma);
 
     let floor = 2.0 * 3.0 * sigma * sigma * 64.0;
-    let tau_admit = floor * 3.0;
 
-    let (filtered_rho0, _) = run_filter_with_rho(&frame, w, h, floor, tau_admit, 9, 8, sigma, 2.7, 0.0);
-    let (filtered_rho_high, _) = run_filter_with_rho(&frame, w, h, floor, tau_admit, 9, 8, sigma, 2.7, 0.86);
+    let (filtered_rho0, _) = run_filter_with_rho(&frame, w, h, floor, 9, 8, sigma, 2.7, 0.0);
+    let (filtered_rho_high, _) = run_filter_with_rho(&frame, w, h, floor, 9, 8, sigma, 2.7, 0.86);
 
     let var_rho0 = variance(&filtered_rho0);
     let var_rho_high = variance(&filtered_rho_high);
@@ -937,7 +1007,7 @@ fn temporal_members_scatter_into_their_own_frames_region() {
 /// patch would read back as the neighbour's content. Neither happens,
 /// every member scatters and every member reads from `frame`.
 #[test]
-fn nl3d_path_is_unchanged_when_temporal_is_false() {
+fn single_frame_path_is_unchanged_when_temporal_is_false() {
     let (w, h) = (16u32, 16u32);
     let pixels = (w * h) as usize;
     let refs_x = refs_along(w);

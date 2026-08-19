@@ -1,7 +1,13 @@
-use av_denoise::collab::geometry::{member_buf_len, ref_count, refs_along};
+use av_denoise::collab::geometry::{
+    member_buf_len,
+    member_frame_buf_len,
+    member_sig2_buf_len,
+    ref_count,
+    refs_along,
+};
 use av_denoise::collab::kernels::aggregate::{ACCUM_SCALE, weight_scale};
 use av_denoise::collab::kernels::filter_ht::collab_filter_ht;
-use av_denoise::collab::kernels::group::collab_group_spatial;
+use av_denoise::collab::kernels::group_temporal::collab_group_temporal;
 use av_denoise::collab::kernels::transforms::dct_noise_profile;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
@@ -14,24 +20,18 @@ const K_MAX: u32 = 8;
 const LAMBDA_HT: f32 = 2.7;
 const SIGMA: f32 = 0.02;
 
-// Duplicated for the same reason `collab_group.rs` duplicates them:
-// bench code can't reach crate-internal items, and `CollabParams` alone
-// doesn't give a ready-to-use noise floor or tau.
-// A floor and tau in the shape `CollabPipeline::run_two_stage` builds
-// them, rather than a token pair that admits nothing.
-//
-// This drives the group size the filter actually runs at, and nearly
-// everything the filter does scales with it. The stack DCT, the Haar
-// ladder, the inverse DCT, and the scatter back to the frame are all
-// per-member. A tau that admits nothing leaves every group at a single
-// member and reports a time far under the real one.
+// The channel-scaled distance two independent noisy copies of the same
+// content are expected to show at this sigma, which is what the search
+// subtracts before it ranks candidates.
 const NOISE_FLOOR: f32 = 2.0 * 3.0 * SIGMA * SIGMA * 64.0;
-const TAU_ADMIT: f32 = 3.0 * NOISE_FLOOR;
 
 /// The hard-threshold shrinkage kernel at the library's default search
 /// geometry, over a 1080p luma frame.
 ///
-/// Grouping runs once in `prepare`, so `execute` measures only the
+/// Grouping runs once in `prepare`, at `radius = 0` so the search stays
+/// spatial over a one-frame ring, and fills every group to `K_MAX`. That
+/// is the group size the filter actually runs at, and nearly everything
+/// the filter does scales with it. `execute` then measures only the
 /// filter launch, one cube per reference patch, an 8x8 window of
 /// threads.
 pub struct CollabHtBench<R: Runtime> {
@@ -42,10 +42,9 @@ pub struct CollabHtBench<R: Runtime> {
 pub struct CollabHtInput {
     pub reference: Handle,
     pub member_pos: Handle,
-    // Never read: `temporal` is false below, the single-frame path every
-    // shipped denoiser except `Nl4dDenoiser` runs, so a 1-element dummy
-    // buffer is valid here, the same pattern `src/collab/pipeline.rs`
-    // binds for its own single-frame `collab_filter_ht` calls.
+    // Never read: `temporal` is false below, so the kernel indexes the
+    // frame ring by `frame` alone and a 1-element dummy buffer is valid
+    // here.
     pub member_frame_dummy: Handle,
     pub member_count: Handle,
     pub member_sig2_dummy: Handle,
@@ -69,8 +68,16 @@ impl<R: Runtime> Benchmark for CollabHtBench<R> {
         let refs = ref_count(W, H);
         let pixels = (W * H) as usize;
 
+        let frame_out_len = member_frame_buf_len(W, H, K_MAX);
+        let sig2_out_len = member_sig2_buf_len(W, H, K_MAX);
+
         let member_pos = self.client.empty(pos_len * size_of::<u32>());
         let member_count = self.client.empty(refs * size_of::<u32>());
+        let member_frame_out = self.client.empty(frame_out_len * size_of::<u32>());
+        let member_sig2_out = self.client.empty(sig2_out_len * size_of::<f32>());
+        let mv_dummy = self.client.create_from_slice(i32::as_bytes(&[0i32, 0i32]));
+        let conf_dummy = self.client.create_from_slice(f32::as_bytes(&[1.0f32]));
+        let slots_dummy = self.client.create_from_slice(u32::as_bytes(&[0u32]));
 
         let refs_x = refs_along(W);
         let refs_y = refs_along(H);
@@ -78,17 +85,32 @@ impl<R: Runtime> Benchmark for CollabHtBench<R> {
         let dim = CubeDim::new_2d(8, 8);
 
         unsafe {
-            collab_group_spatial::launch_unchecked::<R>(
+            collab_group_temporal::launch_unchecked::<R>(
                 &self.client,
                 grid,
                 dim,
                 1usize,
                 ArrayArg::from_raw_parts(reference.clone(), (W * H) as usize),
+                ArrayArg::from_raw_parts(mv_dummy, 2),
+                ArrayArg::from_raw_parts(conf_dummy, 1),
                 ArrayArg::from_raw_parts(member_pos.clone(), pos_len),
+                ArrayArg::from_raw_parts(member_frame_out, frame_out_len),
                 ArrayArg::from_raw_parts(member_count.clone(), refs),
+                ArrayArg::from_raw_parts(member_sig2_out, sig2_out_len),
                 0u32,
+                ArrayArg::from_raw_parts(slots_dummy, 1),
                 NOISE_FLOOR,
-                TAU_ADMIT,
+                0.0f32,
+                1.0f32,
+                1.0f32,
+                0u32,
+                0u32,
+                2u32,
+                1u32,
+                8u32,
+                8u32,
+                1u32,
+                1u32,
                 W,
                 H,
                 1u32,
@@ -103,9 +125,9 @@ impl<R: Runtime> Benchmark for CollabHtBench<R> {
         let member_sig2_dummy = self.client.empty(size_of::<f32>());
         let accum = self.client.empty(pixels * size_of::<i32>());
         let wsum = self.client.empty(pixels * size_of::<i32>());
-        // The pipeline never asks for the filtered patches themselves,
-        // it scatters straight into the accumulators, so this binds the
-        // same one-element placeholder the pipeline does.
+        // A denoiser never asks for the filtered patches themselves, it
+        // scatters straight into the accumulators, so this binds the same
+        // one-element placeholder a real caller does.
         let filtered_dummy = self.client.empty(size_of::<f32>());
         let group_weight = self.client.empty(refs * size_of::<f32>());
         let sigma = self.client.create_from_slice(f32::as_bytes(&[SIGMA]));

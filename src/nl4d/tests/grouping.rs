@@ -16,7 +16,7 @@ pub(super) const BLKSIZE: u32 = 16;
 ///
 /// Luma always stores one channel per line, so the kernel's `Size`
 /// selector is fixed at 1 here rather than threaded through as an
-/// argument, matching `collab::tests::group::run_group`.
+/// argument.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_group_temporal(
     fx: &RingFixture,

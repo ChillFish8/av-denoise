@@ -1,10 +1,16 @@
 use cubecl::prelude::*;
 
 use super::helpers::{R, make_client, noisy_field_over};
-use crate::collab::geometry::{member_buf_len, ref_count, refs_along};
+use crate::collab::geometry::{
+    member_buf_len,
+    member_frame_buf_len,
+    member_sig2_buf_len,
+    ref_count,
+    refs_along,
+};
 use crate::collab::kernels::aggregate::{ACCUM_SCALE, collab_normalise, collab_zero_accum, weight_scale};
 use crate::collab::kernels::filter_ht::collab_filter_ht;
-use crate::collab::kernels::group::collab_group_spatial;
+use crate::collab::kernels::group_temporal::collab_group_temporal;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::nlmeans::{BLOCK_X, BLOCK_Y};
 
@@ -180,8 +186,12 @@ fn zero_accum_clears_every_slot_of_a_buffer_past_the_grid_clamp() {
     }
 }
 
-/// Groups, filters, and aggregates a frame the way the pipeline does,
-/// returning the finished plane and the weight sum behind it.
+/// Groups, filters, and aggregates a frame end to end, returning the
+/// finished plane and the weight sum behind it.
+///
+/// The grouping search runs at `radius = 0`, a one-frame ring with no
+/// neighbours, so this covers the single-frame scatter path the
+/// aggregation kernels are being checked on here.
 fn run_scatter_stage(frame: &[f32], width: u32, height: u32, sigma: f32) -> (Vec<f32>, Vec<i32>) {
     let client = make_client();
     let refs_x = refs_along(width);
@@ -189,10 +199,17 @@ fn run_scatter_stage(frame: &[f32], width: u32, height: u32, sigma: f32) -> (Vec
     let refs = ref_count(width, height);
     let k_max = 8u32;
     let pos_len = member_buf_len(width, height, k_max);
+    let member_frame_len = member_frame_buf_len(width, height, k_max);
+    let sig2_len = member_sig2_buf_len(width, height, k_max);
     let pixels = (width * height) as usize;
 
     let input = client.create_from_slice(f32::as_bytes(frame));
     let member_pos = client.empty(pos_len * size_of::<u32>());
+    let member_frame = client.empty(member_frame_len * size_of::<u32>());
+    let member_sig2 = client.empty(sig2_len * size_of::<f32>());
+    let mv_dummy = client.create_from_slice(i32::as_bytes(&[0i32, 0i32]));
+    let conf_dummy = client.create_from_slice(f32::as_bytes(&[1.0f32]));
+    let slots_dummy = client.create_from_slice(u32::as_bytes(&[0u32]));
     let member_frame_dummy = client.empty(size_of::<u32>());
     let member_count = client.empty(refs * size_of::<u32>());
     let accum = client.empty(pixels * size_of::<i32>());
@@ -206,21 +223,35 @@ fn run_scatter_stage(frame: &[f32], width: u32, height: u32, sigma: f32) -> (Vec
     let output = client.empty(pixels * size_of::<f32>());
 
     let floor = 2.0 * 3.0 * sigma * sigma * 64.0;
-    let tau = 3.0 * f32::max(floor, 64.0 * 3.0 * (1.0 / 255.0f32).powi(2));
 
     let zero_dim = 256u32;
     unsafe {
-        collab_group_spatial::launch_unchecked::<R>(
+        collab_group_temporal::launch_unchecked::<R>(
             &client,
             CubeCount::new_2d(refs_x, refs_y),
             CubeDim::new_2d(8, 8),
             1usize,
             ArrayArg::from_raw_parts(input.clone(), pixels),
+            ArrayArg::from_raw_parts(mv_dummy, 2),
+            ArrayArg::from_raw_parts(conf_dummy, 1),
             ArrayArg::from_raw_parts(member_pos.clone(), pos_len),
+            ArrayArg::from_raw_parts(member_frame, member_frame_len),
             ArrayArg::from_raw_parts(member_count.clone(), refs),
+            ArrayArg::from_raw_parts(member_sig2, sig2_len),
             0u32,
+            ArrayArg::from_raw_parts(slots_dummy, 1),
             floor,
-            tau,
+            0.0f32,
+            1.0f32,
+            1.0f32,
+            0u32,
+            0u32,
+            2u32,
+            1u32,
+            8u32,
+            8u32,
+            1u32,
+            1u32,
             width,
             height,
             1u32,

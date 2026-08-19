@@ -230,8 +230,8 @@ fn safe_reciprocal_probe(denom: &Array<f32>, floor: &Array<f32>, out: &mut Array
 /// through whatever a caller's `f32::max` happens to do with a `NaN` on
 /// this particular GPU backend.
 ///
-/// `collab_filter_ht`, `collab_filter_wiener`, and `collab_aggregate`
-/// all reach this same function for their own weight and normalisation
+/// `collab_filter_ht` and `collab_aggregate` both reach this same
+/// function for their own weight and normalisation
 /// divisions, so a probe of the function itself covers every call site
 /// at once, and does not depend on a real denominator ever going
 /// non-finite in one of those larger kernels to exercise the guard.

@@ -1,5 +1,4 @@
-//! A BM3D-style collaborative filter core, shared by the `nl3d` and
-//! `nl4d` denoisers.
+//! A BM3D-style collaborative filter core, used by the `nl4d` denoiser.
 //!
 //! Collaborative filtering cleans a frame by grouping similar patches
 //! together and denoising the whole group at once, rather than pixel by
@@ -13,28 +12,19 @@
 //! with, and works out how large the buffers driven by that grid need to
 //! be.
 //!
-//! `params` holds the tuning values the filter is built from, in
-//! [`CollabParams`].
-//!
 //! [`kernels`] holds the GPU code, starting with the DCT and Haar
-//! transforms the filter runs patches and patch stacks through.
-//!
-//! `pipeline` chains the grouping, filtering, and aggregation kernels
-//! into the two-stage filter itself, in [`CollabPipeline`].
+//! transforms the filter runs patches and patch stacks through. A
+//! denoiser chains those kernels into a filter of its own, and holds the
+//! tuning values it drives them with.
 
 pub mod geometry;
 pub mod kernels;
-mod params;
-mod pipeline;
 
 // Every test in this tree runs against a real GPU runtime, see
 // `tests::helpers::R`, so it only builds when a wgpu-backed feature is
 // enabled. A cpu-only build skips it entirely.
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 mod tests;
-
-pub use params::CollabParams;
-pub use pipeline::CollabPipeline;
 
 /// Side length of a collaborative patch in pixels.
 pub const PATCH_SIZE: u32 = 8;

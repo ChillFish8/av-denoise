@@ -68,38 +68,6 @@ pub(super) fn plant_patch(frame: &mut [f32], w: u32, px: u32, py: u32, patch: &[
     }
 }
 
-/// Smooth horizontal luma gradient from `lo` to `hi` inclusive,
-/// replicated down every row.
-pub(super) fn make_gradient_frame(w: u32, h: u32, lo: f32, hi: f32) -> Vec<f32> {
-    let mut frame = vec![0.0f32; (w * h) as usize];
-    for y in 0..h {
-        for x in 0..w {
-            let t = x as f32 / (w - 1).max(1) as f32;
-            frame[(y * w + x) as usize] = lo + (hi - lo) * t;
-        }
-    }
-    frame
-}
-
-/// A non-flat field built from two out-of-phase sine waves plus a finer
-/// third one, so it carries real spatial structure at more than one
-/// scale rather than the single, gentle gradient `make_gradient_frame`
-/// produces.
-pub(super) fn textured_frame(w: u32, h: u32) -> Vec<f32> {
-    let mut frame = vec![0.0f32; (w * h) as usize];
-    for y in 0..h {
-        for x in 0..w {
-            let fx = x as f32 / w as f32;
-            let fy = y as f32 / h as f32;
-            let v = 0.5
-                + 0.2 * (fx * 8.0 * std::f32::consts::PI).sin() * (fy * 6.0 * std::f32::consts::PI).cos()
-                + 0.1 * (fx * 20.0 * std::f32::consts::PI).sin();
-            frame[(y * w + x) as usize] = v.clamp(0.05, 0.95);
-        }
-    }
-    frame
-}
-
 /// A deterministic 8x8 texture with values well clear of the flat
 /// backgrounds these tests plant it over.
 pub(super) fn deterministic_texture(seed: u32) -> [f32; 64] {

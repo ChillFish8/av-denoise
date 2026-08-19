@@ -5,10 +5,8 @@ mod kernels;
 use kernels::accumulate::AccumulateBench;
 use kernels::bilateral::BilateralBench;
 use kernels::collab_aggregate::{CollabNormaliseBench, CollabZeroAccumBench};
-use kernels::collab_group::CollabGroupBench;
 use kernels::collab_ht::CollabHtBench;
 use kernels::collab_weight_ratio::CollabWeightRatioBench;
-use kernels::collab_wiener::CollabWienerBench;
 use kernels::copy::CopyBench;
 use kernels::dist_2d_weight::DistWeightBench;
 use kernels::dist_2d_weight_ref::DistWeightRefBench;
@@ -201,9 +199,6 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
     run(ChainComposeBench {
         client: client.clone(),
     });
-    run(CollabGroupBench {
-        client: client.clone(),
-    });
     for &(ch, ch_name) in CHANNELS {
         run(CollabGroupTemporalBench {
             client: client.clone(),
@@ -212,9 +207,6 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         });
     }
     run(CollabHtBench {
-        client: client.clone(),
-    });
-    run(CollabWienerBench {
         client: client.clone(),
     });
     run(CollabWeightRatioBench {

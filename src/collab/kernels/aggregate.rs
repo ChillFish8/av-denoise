@@ -22,8 +22,8 @@ use crate::collab::{MAX_K, PATCH_AREA, PATCH_SIZE, STEP};
 /// `2.4e-4` one code level of 12-bit output spans.
 ///
 /// This is the scale every single-frame caller passes to
-/// [`scatter_patch`], `nl3d`'s spatial-only path among them, where an
-/// accumulator only ever sees one pass's worth of contributions. A
+/// [`scatter_patch`], where an accumulator only ever sees one pass's
+/// worth of contributions. A
 /// cross-frame accumulator, [`crate::nl4d::Nl4dDenoiser`]'s ring of
 /// per-frame regions, sees contributions from several passes before it
 /// is read back and needs [`cross_frame_accum_scale`] instead, a smaller
@@ -200,9 +200,9 @@ pub fn to_fixed(value: f32, scale: f32) -> i32 {
 /// `frame_pixels` (`width * height`) pixels wide, laid out back to back
 /// in ring-slot order. `frame_slot` selects which region this member's
 /// own frame owns, and `frame_pixels` is that region's width. A caller
-/// with only one frame, `nl3d`'s spatial-only path among them, always
-/// passes `frame_slot = 0`, which folds the frame offset away to
-/// nothing and reproduces the single-frame addressing this function
+/// with only one frame always passes `frame_slot = 0`, which folds the
+/// frame offset away to nothing and reproduces the single-frame
+/// addressing this function
 /// used before cross-frame aggregation existed, whatever `frame_pixels`
 /// happens to be.
 ///
@@ -255,9 +255,9 @@ pub fn scatter_patch(
 /// [`scatter_patch`] addresses them, so `frame_offset` (in pixels, the
 /// same unit `pixels` is) picks out which region this call zeroes.
 /// `frame_offset = 0` together with `pixels` covering the whole buffer
-/// zeroes it all in one call, the way a single-frame caller such as
-/// `nl3d` always does, and the way a fresh cross-frame ring is cleared
-/// in full before its first pass.
+/// zeroes it all in one call, the way a single-frame caller always
+/// does, and the way a fresh cross-frame ring is cleared in full before
+/// its first pass.
 ///
 /// The `accum` region is `pixels * stored_ch` slots wide and `wsum`'s is
 /// `pixels` wide, so the loop is sized for the larger one and the
@@ -305,9 +305,9 @@ pub fn collab_zero_accum(
 /// region this call reads. `output` is always exactly one frame wide,
 /// `width * height` pixels, regardless of how big `accum`/`wsum` are,
 /// so it is indexed by the plain, offset-free pixel position. A
-/// single-frame caller such as `nl3d` always passes `frame_offset = 0`,
-/// which reproduces the addressing this function used before
-/// cross-frame aggregation existed.
+/// single-frame caller always passes `frame_offset = 0`, which
+/// reproduces the addressing this function used before cross-frame
+/// aggregation existed.
 ///
 /// # Why the weight sum is never zero
 ///

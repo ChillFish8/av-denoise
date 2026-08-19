@@ -39,9 +39,8 @@ const NEIGHBOUR_SLOTS: [u32; (2 * RADIUS) as usize] = [0, 1, 3, 4];
 /// Confidence is uniformly 1.0, so no neighbour block is gated and every
 /// candidate the kernel finds runs the full patch comparison. Gating a
 /// block skips its comparisons entirely, so leaving it always open here
-/// measures the same worst case `collab_group.rs` documents for
-/// `tau_admit`: a bench that gates freely reports a time well under the
-/// real one.
+/// measures the worst case. A bench that gates freely would report a
+/// time well under the real one.
 pub struct CollabGroupTemporalBench<R: Runtime> {
     pub client: ComputeClient<R>,
     pub ch: u32,

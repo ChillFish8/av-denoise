@@ -15,7 +15,7 @@ use crate::collab::{MAX_K, PATCH_AREA, PATCH_SIZE};
 use crate::nlmeans::kernels::helpers::read_line;
 
 // Ties the `stride = 32u32` literal in the group-weight reduction below
-// back to `PATCH_AREA`, the same way `collab_group_spatial` ties its own
+// back to `PATCH_AREA`, the same way `collab_group_temporal` ties its own
 // copy of this literal (see that kernel for why the literal can't be
 // written as `PATCH_AREA / 2` directly).
 const _: () = assert!(
@@ -79,7 +79,7 @@ pub(crate) fn variance_ladder(v: &mut Array<f32>, k_use: u32) {
 /// transform domain, and writes back the filtered reference patch.
 ///
 /// One cube owns one reference patch's group, with the same `member_pos`
-/// / `member_count` layout `collab_group_spatial` produces. Its
+/// / `member_count` layout `collab_group_temporal` produces. Its
 /// `CubeDim::new_2d(8, 8)` threads map one-to-one onto a patch's 64
 /// pixels.
 ///
@@ -115,12 +115,12 @@ pub(crate) fn variance_ladder(v: &mut Array<f32>, k_use: u32) {
 ///
 /// # Buffers
 ///
-/// `input` is the frame ring `collab_group_spatial` also reads, indexed
+/// `input` is the frame ring `collab_group_temporal` also reads, indexed
 /// by `frame` when `temporal` is false and by each member's own
-/// `member_frame` entry when it is true. `member_pos` and `member_count`
-/// are `collab_group_spatial`'s outputs, `refs * k_max` packed positions
-/// and `refs` counts. `member_frame` is `collab_group_temporal`'s extra
-/// output, `refs * k_max` ring slots in the same layout, read only when
+/// `member_frame` entry when it is true. `member_pos`, `member_count`,
+/// and `member_frame` are `collab_group_temporal`'s outputs, `refs *
+/// k_max` packed positions, `refs` counts, and `refs * k_max` ring slots
+/// in the same layout as the positions. `member_frame` is read only when
 /// `temporal` is true.
 /// `member_sig2` holds `refs * k_max` extra per-member variance, added to
 /// `sigma[c]^2` when `use_member_sigma` is true. It is never read when that

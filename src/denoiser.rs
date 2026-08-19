@@ -1165,8 +1165,8 @@ mod options_tests {
 
     #[test]
     fn nl4d_does_not_set_track_weight_sq() {
-        // nl4d has no second-stage Wiener shrinkage that needs the
-        // front end's measured residual noise, so it does not need the
+        // nl4d has no second shrinkage stage that needs the front end's
+        // measured residual noise, so it does not need the
         // weight-squared accumulator turned on.
         let opts = DenoiserOptions::builder()
             .algorithm(Algorithm::Nl4d(Nl4dOptions::default()))

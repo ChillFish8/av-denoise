@@ -4,18 +4,25 @@ use super::group::{clamp_top_left, pack_pos};
 use crate::collab::{PATCH_AREA, PATCH_SIZE, STEP};
 use crate::nlmeans::kernels::helpers::{channel_scale, read_line};
 
-// The same compile-time tie `group.rs` carries for its own `stride =
-// 32u32` literal, repeated here because this kernel runs the same
-// argmin reduction over the same 8x8, 64-thread cube.
+// A compile-time tie from the `stride = 32u32` literal in the argmin
+// reduction below back to `PATCH_AREA`. That literal can't be written as
+// `PATCH_AREA / 2` directly (see the comment at its use site), so this is
+// what catches it going stale if `PATCH_SIZE` ever changes.
 const _: () = assert!(
     PATCH_AREA / 2 == 32,
     "update the `stride = 32u32` literal in collab_group_temporal to PATCH_AREA / 2"
 );
 
 // The distance a candidate carries once it is out of the running is the
-// literal `3.0e38`, for the same reason `group.rs` spells it out at each
-// use site rather than naming it. See that file's module-level comment
-// for the full reasoning. It applies unchanged here.
+// literal `3.0e38`, written out at each use below rather than named.
+// Every real distance is a sum of at most `PATCH_AREA` squared
+// differences between values in `[0, 1]`, scaled by at most 3, so it
+// never exceeds 192. `3.0e38` sits far above that and just below
+// `f32::MAX`, which leaves it comparing greater than any live candidate
+// without overflowing the argmin reduction. It is spelled as a literal
+// rather than a `const`, `f32::MAX`, or `f32::INFINITY` because cubecl
+// treats all three as compile-time-only, and the selection loop needs a
+// genuine mutable runtime variable to start from.
 
 /// The extra per-member variance a temporal candidate's motion-block
 /// confidence implies, the value [`collab_group_temporal`] writes into
@@ -60,37 +67,56 @@ fn mismatch_sigma2(confidence: f32, thsad: f32, blksize_area: f32, mismatch_scal
 /// the centre frame spatially and each neighbour frame in the ring
 /// around where motion compensation predicts the reference patch moved.
 ///
-/// This mirrors [`super::group::collab_group_spatial`]'s structure. One
-/// cube owns one reference patch, its `CubeDim::new_2d(8, 8)` threads
-/// score every candidate, and the reference patch is staged in shared
-/// memory once. The differences are the extra candidates a neighbour
-/// frame contributes, and the extra bookkeeping that keeps track of
-/// which frame each surviving candidate came from.
+/// One cube owns one reference patch, and its `CubeDim::new_2d(8, 8)`
+/// threads score the search space one candidate per thread. A thread
+/// walks its own candidate's 64 pixels start to finish on its own, so
+/// scoring needs no barrier and no cross-thread reduction at all. The
+/// candidates outnumber the threads, so each thread takes a strided
+/// slice of the search space and scores several in turn.
+///
+/// The reference patch is staged in shared memory first, because all 64
+/// threads read all 64 of its pixels. Candidate pixels are read straight
+/// from global memory, which measured faster than staging the window in
+/// shared memory. The search windows of neighbouring reference patches
+/// overlap heavily at a step of 4, so the cache already serves those
+/// reads well, and a shared-memory tile only costs occupancy.
 ///
 /// # Candidates
 ///
 /// A candidate's index `ci` runs from `0` to `n_cand`, the centre
 /// frame's `(2 * spatial_radius + 1)^2` window followed by a
 /// `(2 * refine + 1)^2` refine window for each of the `2 * radius`
-/// neighbour frames. `ci < n_spatial` reads exactly the position
-/// [`super::group::collab_group_spatial`] would score, in the centre
-/// frame. `ci >= n_spatial` divides the remainder into `n_refine`-sized
-/// blocks, one per neighbour, and searches around that neighbour's
-/// predicted position for the reference patch, `rx, ry` plus the motion
-/// vector at the block containing the reference patch, plus an offset
-/// inside the refine window.
+/// neighbour frames. `ci < n_spatial` reads a position in the centre
+/// frame, the reference patch's own position plus an offset inside the
+/// spatial window. `ci >= n_spatial` divides the remainder into
+/// `n_refine`-sized blocks, one per neighbour, and searches around that
+/// neighbour's predicted position for the reference patch, `rx, ry` plus
+/// the motion vector at the block containing the reference patch, plus
+/// an offset inside the refine window.
+///
+/// # Distance
+///
+/// A candidate's distance is the channel-scaled sum of squared pixel
+/// differences over the whole patch, with `noise_floor` subtracted.
+/// `noise_floor` is the distance two noisy copies of the same content
+/// are expected to show by chance, so a genuine match isn't penalised
+/// for the noise it carries. The floored value is never clamped to zero.
+/// Subtracting a constant from every candidate shifts them all by the
+/// same amount and does not change their relative order, so the
+/// selection below stays a genuine similarity ranking even when
+/// `noise_floor` is large enough to push most candidates' floored
+/// distance negative.
 ///
 /// # No admission gate
 ///
-/// There is no `tau_admit`. Every candidate that is not the pinned
-/// self-match stays in the running whatever its distance, so the group
-/// always fills to `k_max`. `c_min` is not an admission threshold on
-/// individual candidates, it gates a whole neighbour frame at a block's
-/// worth of granularity, as a compute saving. A neighbour block whose
-/// confidence sits below `c_min` never runs the pixel comparison that
-/// would score its candidates, and every one of them is retired the same
-/// way a `tau_admit` rejection would have retired it, without the search
-/// ever discovering that block is a poor match.
+/// Every candidate that is not the pinned self-match stays in the
+/// running whatever its distance, so the group always fills to `k_max`.
+/// `c_min` is not an admission threshold on individual candidates, it
+/// gates a whole neighbour frame at a block's worth of granularity, as a
+/// compute saving. A neighbour block whose confidence sits below `c_min`
+/// never runs the pixel comparison that would score its candidates, and
+/// every one of them is retired outright, without the search ever
+/// discovering that block is a poor match.
 ///
 /// # Members carry a frame
 ///
@@ -103,10 +129,36 @@ fn mismatch_sigma2(confidence: f32, thsad: f32, blksize_area: f32, mismatch_scal
 /// `centre_slot` as its frame, and dedup against it, and against every
 /// other clamped duplicate, follows the same pair rule.
 ///
-/// Everything else, the shared-memory staging, the strided scoring walk,
-/// the tree-reduction argmin per slot, and the power-of-two rounding of
-/// the final count, works exactly as
-/// [`super::group::collab_group_spatial`] documents it.
+/// # Selection
+///
+/// Once every candidate has a distance, the group's remaining members
+/// are picked by `k_max - 1` rounds of argmin across the whole search
+/// space. Each round every thread finds the best candidate in its own
+/// slice, a tree reduction over shared memory folds those into the
+/// round's winner, and that winner is retired before the next round
+/// runs. Ties break toward the lower candidate index, which is the order
+/// a linear scan would visit them in. Exactly-equal distances are common
+/// on flat content, so this is what fixes which member a group keeps
+/// rather than leaving it to thread scheduling.
+///
+/// # Clamped duplicates
+///
+/// Candidate positions are patch top-left coordinates clamped to `[0,
+/// dim - 8]` on each axis, which is what keeps every member read fully
+/// inside the frame. That clamping also means two different search
+/// offsets near an edge can land on the same clamped position. Admitting
+/// both would let one physical patch count twice toward the group, which
+/// would look like stronger agreement than the group actually has.
+/// Retiring a winner retires every candidate sharing its `(pos, frame)`
+/// pair, and the self-match's pair is retired before the first round, so
+/// no member is ever kept twice.
+///
+/// # Group size
+///
+/// The final member count is rounded down to the nearest power of two,
+/// capped at `k_max`. The stack transform a filtered group later passes
+/// through is only defined for power-of-two stack sizes, so a count of
+/// 5, 6, or 7 members still only keeps 4 of them.
 ///
 /// # Per-member mismatch variance
 ///
@@ -320,9 +372,8 @@ pub fn collab_group_temporal<N: Size>(
     }
     sync_cube();
 
-    // Selection: one round of argmin per remaining slot, identical to
-    // `collab_group_spatial` except the dedup below compares the
-    // `(position, frame)` pair, not position alone.
+    // Selection: one round of argmin per remaining slot. The dedup
+    // below compares the `(position, frame)` pair, not position alone.
     let mut slot = found[0];
     while slot < k_max {
         let mut best_d = 3.0e38f32;
@@ -339,9 +390,12 @@ pub fn collab_group_temporal<N: Size>(
         red_i[tid as usize] = best_i;
         sync_cube();
 
-        // See `collab_group_spatial` for why this starts from a literal
-        // rather than `PATCH_AREA / 2`. The module-level `const _: ()
-        // = assert!(...)` above ties it back to `PATCH_AREA`.
+        // A literal starting value, not `PATCH_AREA / 2`, because a
+        // value built entirely from `#[comptime]`/const inputs gets
+        // treated as compile-time-only, and this loop needs `stride`
+        // to be a genuine mutable runtime variable. The module-level
+        // `const _: () = assert!(...)` above ties this literal back to
+        // `PATCH_AREA` at compile time, so it can't drift silently.
         let mut stride = 32u32;
         while stride > 0u32 {
             if tid < stride {
