@@ -4,8 +4,7 @@ use crate::ingest::{BinaryChannelIntent, CliOptions};
 
 /// Flags for `nl4d`, which groups 8x8 patches across the
 /// motion-compensated temporal window itself, rather than filtering
-/// with `nlmeans` first and grouping within one frame afterward the way
-/// `nl3d` does.
+/// with `nlmeans` first and grouping within one frame afterward.
 ///
 /// Everything `nlmeans` accepts is inherited through `nlm`. The fields
 /// below tune the temporal grouping and shrinkage stage that runs on
@@ -126,10 +125,10 @@ impl Nl4dArgs {
     /// reads the motion field and confidence scores that front end
     /// builds. A resolved variant of `fast`, whether from an explicit
     /// `--variant fast` or from a preset that resolves to it, is
-    /// rejected here rather than left to fail deep inside construction,
-    /// the same way `nl3d` rejects it. Motion compensation is turned on
-    /// unconditionally rather than left to `--motion-compensation`,
-    /// which defaults off and has no preset-driven default of its own.
+    /// rejected here rather than left to fail deep inside construction.
+    /// Motion compensation is turned on unconditionally rather than
+    /// left to `--motion-compensation`, which defaults off and has no
+    /// preset-driven default of its own.
     pub fn build_options(&self, globals: &Args) -> Result<CliOptions, anyhow::Error> {
         let resolved = self.nlm.resolve_preset(globals.preset);
         if resolved.variant == Variant::Fast {
@@ -203,8 +202,7 @@ impl Nl4dArgs {
     }
 
     /// Warns when a per-plane override was set but the resolved
-    /// `--channel-mode` means it has no effect, the same way
-    /// `Nl3dArgs::warn_on_dead_per_plane_flags` does.
+    /// `--channel-mode` means it has no effect.
     fn warn_on_dead_per_plane_flags(&self, intent: BinaryChannelIntent) {
         match intent {
             BinaryChannelIntent::Luma if self.chroma_lambda_ht.is_some() => {
@@ -256,7 +254,6 @@ mod tests {
         let nl4d = match &args.command {
             Command::Nl4d(nl4d) => Nl4dArgs::clone(nl4d),
             Command::Nlmeans(_) => unreachable!("parse() always builds a nl4d argv"),
-            Command::Nl3d(_) => unreachable!("parse() always builds a nl4d argv"),
         };
 
         (args, nl4d)
@@ -429,8 +426,7 @@ mod tests {
     }
 
     /// `build_options` carries the two per-plane `lambda_ht` overrides
-    /// straight through onto `CliOptions`, unresolved, the same shape
-    /// nl3d's per-plane overrides use.
+    /// straight through onto `CliOptions`, unresolved.
     /// `CliOptions::algorithm_for` (`src/bin/ingest.rs`) is what
     /// actually resolves them per plane, so this test only checks the
     /// flow into `CliOptions`.

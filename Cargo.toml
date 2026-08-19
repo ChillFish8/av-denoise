@@ -31,11 +31,6 @@ name = "grouping_diag"
 path = "src/bin/grouping_diag.rs"
 required-features = ["vulkan"]
 
-[[bin]]
-name = "sigma_chain_diag"
-path = "src/bin/sigma_chain_diag.rs"
-required-features = ["vulkan"]
-
 [dependencies]
 anyhow = "1"
 thiserror = "2"

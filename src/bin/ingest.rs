@@ -11,7 +11,6 @@ use av_denoise::{
     Depth,
     Device,
     MotionCompensationMode,
-    Nl3dOptions,
     Nl4dOptions,
     NlmTuning,
     PrefilterMode,
@@ -161,31 +160,17 @@ pub struct CliOptions {
     /// Per-plane strength override for the chroma denoiser. Takes
     /// precedence over `nlm_tuning.strength` when set.
     pub chroma_strength: Option<f32>,
-    /// Per-plane override for the nl3d collaborative stage's
-    /// `residual_sigma_scale`, luma. Takes precedence over
-    /// `algorithm`'s value when set, which itself falls back to a
-    /// calibrated per-plane default when nothing at all is set. Only
-    /// has an effect when `algorithm` is `Algorithm::Nl3d`.
-    pub luma_residual_sigma_scale: Option<f32>,
-    /// Per-plane override for the nl3d collaborative stage's
-    /// `residual_sigma_scale`, chroma. Takes precedence over
-    /// `algorithm`'s value when set, which itself falls back to a
-    /// calibrated per-plane default when nothing at all is set. Only
-    /// has an effect when `algorithm` is `Algorithm::Nl3d`.
-    pub chroma_residual_sigma_scale: Option<f32>,
     /// Per-plane override for `lambda_ht`, luma. Takes precedence over
     /// `algorithm`'s value when set, which itself falls back to a
-    /// calibrated per-plane default when nothing at all is set. Has an
-    /// effect when `algorithm` is `Algorithm::Nl3d` (the collaborative
-    /// stage's hard threshold) or `Algorithm::Nl4d` (the temporal
-    /// grouping stage's hard threshold).
+    /// calibrated per-plane default when nothing at all is set. Only
+    /// has an effect when `algorithm` is `Algorithm::Nl4d`, where it
+    /// pins the temporal grouping stage's hard threshold.
     pub luma_lambda_ht: Option<f32>,
     /// Per-plane override for `lambda_ht`, chroma. Takes precedence over
     /// `algorithm`'s value when set, which itself falls back to a
-    /// calibrated per-plane default when nothing at all is set. Has an
-    /// effect when `algorithm` is `Algorithm::Nl3d` (the collaborative
-    /// stage's hard threshold) or `Algorithm::Nl4d` (the temporal
-    /// grouping stage's hard threshold).
+    /// calibrated per-plane default when nothing at all is set. Only
+    /// has an effect when `algorithm` is `Algorithm::Nl4d`, where it
+    /// pins the temporal grouping stage's hard threshold.
     pub chroma_lambda_ht: Option<f32>,
     /// Per-plane override for `mismatch_scale`, luma. Takes precedence
     /// over `algorithm`'s value when set, which itself falls back to a
@@ -197,19 +182,6 @@ pub struct CliOptions {
     /// back to a per-plane default when nothing at all is set. Only has
     /// an effect when `algorithm` is `Algorithm::Nl4d`.
     pub chroma_mismatch_scale: Option<f32>,
-    /// Diagnostic. Runs the luma instance's collaborative filter in
-    /// hard-threshold-only mode. See `Nl3dArgs::debug_ht_only`.
-    pub debug_ht_only: bool,
-    /// Diagnostic. Runs the luma instance's hard-threshold stage in the
-    /// orthonormal Haar-8 basis instead of the DCT basis. See
-    /// `Nl3dArgs::debug_ht_wavelet`.
-    pub debug_ht_wavelet: bool,
-    /// Diagnostic admission-sigma pin for the luma instance, already
-    /// converted to normalised units.
-    pub debug_admission_sigma: Option<f32>,
-    /// Diagnostic shrinkage-sigma pin for the luma instance, already
-    /// converted to normalised units.
-    pub debug_shrinkage_sigma: Option<f32>,
     /// Draws the denoising progress bar for file input.
     pub progress: bool,
 }
@@ -218,56 +190,18 @@ impl CliOptions {
     /// Resolves `self.algorithm` for one plane, folding in the per-plane
     /// overrides that apply to whichever cascade `self.algorithm` is.
     ///
-    /// For `Nl3d` that is `residual_sigma_scale` and `lambda_ht`. For
-    /// `Nl4d` it is `lambda_ht` alone, the only aggression dial that
-    /// cascade has. Every other algorithm is returned unchanged, since
-    /// neither per-plane override has anything to apply to.
+    /// For `Nl4d` that is `lambda_ht` and `mismatch_scale`. Every other
+    /// algorithm is returned unchanged, since neither per-plane
+    /// override has anything to apply to.
     ///
-    /// `k_max` and `tau_match`, `Nl3d`-only, stay shared across planes,
-    /// since they aren't aggression dials in the same sense as the
-    /// other two.
-    ///
-    /// `Nl3d`'s `residual_sigma_scale` and `Nl4d`'s `lambda_ht` both stay
-    /// `Option<f32>` all the way through this method. When neither a
-    /// per-plane flag nor the matching shared flag was set, the result
-    /// is `None`, deferred to `nl3d_default_residual_sigma_scale` or
+    /// `Nl4d`'s `lambda_ht` stays `Option<f32>` all the way through
+    /// this method. When neither a per-plane flag nor the matching
+    /// shared flag was set, the result is `None`, deferred to
     /// `nl4d_default_lambda_ht` at construction, once the plane being
     /// denoised is known there too. That is what gives luma and chroma
-    /// different values when a caller passes no flags at all. `Nl3d`'s
-    /// own `lambda_ht` has no per-plane default to defer to, so it
-    /// always resolves to a concrete value here.
+    /// different values when a caller passes no flags at all.
     fn algorithm_for(&self, channels: ChannelMode) -> Algorithm {
         match self.algorithm {
-            Algorithm::Nl3d(nl3d) => {
-                let (residual_sigma_scale, lambda_ht) = match channels {
-                    ChannelMode::Luma => (self.luma_residual_sigma_scale, self.luma_lambda_ht),
-                    ChannelMode::Chroma => (self.chroma_residual_sigma_scale, self.chroma_lambda_ht),
-                    ChannelMode::Yuv => (None, None),
-                };
-
-                // The `--debug-*` diagnostic overrides only ever apply
-                // to the luma instance.
-                let (ht_only, admission_sigma_override, shrinkage_sigma_override, debug_ht_wavelet) =
-                    match channels {
-                        ChannelMode::Luma => (
-                            self.debug_ht_only,
-                            self.debug_admission_sigma,
-                            self.debug_shrinkage_sigma,
-                            self.debug_ht_wavelet,
-                        ),
-                        ChannelMode::Chroma | ChannelMode::Yuv => (false, None, None, false),
-                    };
-
-                Algorithm::Nl3d(Nl3dOptions {
-                    residual_sigma_scale: residual_sigma_scale.or(nl3d.residual_sigma_scale),
-                    lambda_ht: lambda_ht.unwrap_or(nl3d.lambda_ht),
-                    ht_only,
-                    admission_sigma_override,
-                    shrinkage_sigma_override,
-                    debug_ht_wavelet,
-                    ..nl3d
-                })
-            },
             Algorithm::Nl4d(nl4d) => {
                 let lambda_ht = match channels {
                     ChannelMode::Luma => self.luma_lambda_ht,
@@ -281,9 +215,8 @@ impl CliOptions {
                 };
 
                 Algorithm::Nl4d(Nl4dOptions {
-                    // Left unresolved when unset, the same as `Nl3d`'s
-                    // `residual_sigma_scale` above, since the calibrated
-                    // default now depends on the plane, which
+                    // Left unresolved when unset, since the calibrated
+                    // default depends on the plane, which
                     // `nl4d_default_lambda_ht` resolves at construction.
                     lambda_ht: lambda_ht.or(nl4d.lambda_ht),
                     // Same deferral, `nl4d_default_mismatch_scale`
@@ -994,16 +927,10 @@ mod cli_options_tests {
             nlm_tuning,
             luma_strength,
             chroma_strength,
-            luma_residual_sigma_scale: None,
-            chroma_residual_sigma_scale: None,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
             luma_mismatch_scale: None,
             chroma_mismatch_scale: None,
-            debug_ht_only: false,
-            debug_ht_wavelet: false,
-            debug_admission_sigma: None,
-            debug_shrinkage_sigma: None,
             progress: false,
         }
     }
@@ -1079,192 +1006,6 @@ mod cli_options_tests {
         );
     }
 
-    /// A `CliOptions` running `Algorithm::Nl3d`, with every field at a
-    /// neutral default except the four per-plane collaborative-stage
-    /// overrides under test.
-    fn nl3d_opts(
-        luma_residual_sigma_scale: Option<f32>,
-        chroma_residual_sigma_scale: Option<f32>,
-        luma_lambda_ht: Option<f32>,
-        chroma_lambda_ht: Option<f32>,
-    ) -> CliOptions {
-        CliOptions {
-            accelerators: vec![],
-            device: Device::Default,
-            intent: BinaryChannelIntent::LumaChroma,
-            mode: DenoisingMode::Spacial,
-            prefilter: None,
-            motion_compensation: MotionCompensationMode::None,
-            algorithm: Algorithm::Nl3d(Nl3dOptions::default()),
-            nlm_tuning: None,
-            luma_strength: None,
-            chroma_strength: None,
-            luma_residual_sigma_scale,
-            chroma_residual_sigma_scale,
-            luma_lambda_ht,
-            chroma_lambda_ht,
-            luma_mismatch_scale: None,
-            chroma_mismatch_scale: None,
-            debug_ht_only: false,
-            debug_ht_wavelet: false,
-            debug_admission_sigma: None,
-            debug_shrinkage_sigma: None,
-            progress: false,
-        }
-    }
-
-    /// Unwraps an `Algorithm::Nl3d`, panicking with the whole value on any
-    /// other variant.
-    fn expect_nl3d(algorithm: Algorithm) -> Nl3dOptions {
-        match algorithm {
-            Algorithm::Nl3d(n) => n,
-            other => panic!("expected Algorithm::Nl3d, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn luma_residual_sigma_scale_alone_overrides_only_the_luma_plane() {
-        let opts = nl3d_opts(Some(5.0), None, None, None);
-
-        let luma = expect_nl3d(opts.algorithm_for(ChannelMode::Luma));
-        let chroma = expect_nl3d(opts.algorithm_for(ChannelMode::Chroma));
-
-        assert!((luma.residual_sigma_scale.unwrap() - 5.0).abs() < f32::EPSILON);
-        assert_eq!(
-            chroma.residual_sigma_scale,
-            Nl3dOptions::default().residual_sigma_scale,
-            "chroma should stay unresolved here (None), deferred to its own per-plane \
-             default at construction, got {:?}",
-            chroma.residual_sigma_scale
-        );
-    }
-
-    #[test]
-    fn chroma_residual_sigma_scale_alone_overrides_only_the_chroma_plane() {
-        let opts = nl3d_opts(None, Some(5.0), None, None);
-
-        let luma = expect_nl3d(opts.algorithm_for(ChannelMode::Luma));
-        let chroma = expect_nl3d(opts.algorithm_for(ChannelMode::Chroma));
-
-        assert_eq!(
-            luma.residual_sigma_scale,
-            Nl3dOptions::default().residual_sigma_scale,
-            "luma should stay unresolved here (None), deferred to its own per-plane \
-             default at construction, got {:?}",
-            luma.residual_sigma_scale
-        );
-        assert!((chroma.residual_sigma_scale.unwrap() - 5.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn luma_lambda_ht_alone_overrides_only_the_luma_plane() {
-        let opts = nl3d_opts(None, None, Some(4.0), None);
-
-        let luma = expect_nl3d(opts.algorithm_for(ChannelMode::Luma));
-        let chroma = expect_nl3d(opts.algorithm_for(ChannelMode::Chroma));
-
-        assert!((luma.lambda_ht - 4.0).abs() < f32::EPSILON);
-        assert!(
-            (chroma.lambda_ht - Nl3dOptions::default().lambda_ht).abs() < f32::EPSILON,
-            "chroma should keep the shared default, got {}",
-            chroma.lambda_ht
-        );
-    }
-
-    #[test]
-    fn chroma_lambda_ht_alone_overrides_only_the_chroma_plane() {
-        let opts = nl3d_opts(None, None, None, Some(4.0));
-
-        let luma = expect_nl3d(opts.algorithm_for(ChannelMode::Luma));
-        let chroma = expect_nl3d(opts.algorithm_for(ChannelMode::Chroma));
-
-        assert!(
-            (luma.lambda_ht - Nl3dOptions::default().lambda_ht).abs() < f32::EPSILON,
-            "luma should keep the shared default, got {}",
-            luma.lambda_ht
-        );
-        assert!((chroma.lambda_ht - 4.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn both_planes_residual_sigma_scale_and_lambda_ht_set_independently() {
-        let opts = nl3d_opts(Some(5.0), Some(8.0), Some(2.0), Some(3.5));
-
-        let luma = expect_nl3d(opts.algorithm_for(ChannelMode::Luma));
-        let chroma = expect_nl3d(opts.algorithm_for(ChannelMode::Chroma));
-
-        assert!((luma.residual_sigma_scale.unwrap() - 5.0).abs() < f32::EPSILON);
-        assert!((chroma.residual_sigma_scale.unwrap() - 8.0).abs() < f32::EPSILON);
-        assert!((luma.lambda_ht - 2.0).abs() < f32::EPSILON);
-        assert!((chroma.lambda_ht - 3.5).abs() < f32::EPSILON);
-
-        // k_max and tau_match stay shared, so both planes must agree on
-        // them even though residual_sigma_scale and lambda_ht diverge.
-        assert_eq!(luma.k_max, chroma.k_max);
-        assert!((luma.tau_match - chroma.tau_match).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn unset_nl3d_overrides_leave_residual_sigma_scale_none_but_lambda_ht_falls_back_to_the_shared_value() {
-        let opts = nl3d_opts(None, None, None, None);
-        let defaults = Nl3dOptions::default();
-
-        let luma = expect_nl3d(opts.algorithm_for(ChannelMode::Luma));
-        let chroma = expect_nl3d(opts.algorithm_for(ChannelMode::Chroma));
-
-        // residual_sigma_scale has no single shared default any more, so
-        // with nothing set anywhere it stays None for both planes here,
-        // deferred to `nl3d_default_residual_sigma_scale` at
-        // construction. lambda_ht still has one shared default, and
-        // still resolves to a concrete value at this layer.
-        assert_eq!(luma.residual_sigma_scale, defaults.residual_sigma_scale);
-        assert_eq!(chroma.residual_sigma_scale, defaults.residual_sigma_scale);
-        assert!((luma.lambda_ht - defaults.lambda_ht).abs() < f32::EPSILON);
-        assert!((chroma.lambda_ht - defaults.lambda_ht).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn unset_nl3d_overrides_resolve_to_different_residual_sigma_scale_per_plane_end_to_end() {
-        let opts = nl3d_opts(None, None, None, None);
-
-        let luma = expect_nl3d(opts.algorithm_for(ChannelMode::Luma));
-        let chroma = expect_nl3d(opts.algorithm_for(ChannelMode::Chroma));
-
-        // Neither plane has anything set anywhere, so both stay
-        // unresolved at this layer...
-        assert_eq!(luma.residual_sigma_scale, None);
-        assert_eq!(chroma.residual_sigma_scale, None);
-
-        // ...but resolving each through the same function construction
-        // uses (`nl3d_default_residual_sigma_scale`, see
-        // `src/denoiser.rs`) gives luma and chroma different values,
-        // which is the whole point of a caller passing no flags at all
-        // getting both calibrated defaults.
-        let luma_default = av_denoise::nl3d_default_residual_sigma_scale(ChannelMode::Luma);
-        let chroma_default = av_denoise::nl3d_default_residual_sigma_scale(ChannelMode::Chroma);
-        assert!((luma_default - 1.9).abs() < f32::EPSILON);
-        assert!((chroma_default - 2.5).abs() < f32::EPSILON);
-        assert!((chroma_default - luma_default).abs() > f32::EPSILON);
-    }
-
-    #[test]
-    fn debug_overrides_reach_only_the_luma_plane() {
-        let mut opts = nl3d_opts(None, None, None, None);
-        opts.debug_ht_only = true;
-        opts.debug_admission_sigma = Some(0.0115);
-        opts.debug_shrinkage_sigma = Some(0.0078);
-
-        let luma = expect_nl3d(opts.algorithm_for(ChannelMode::Luma));
-        assert!(luma.ht_only);
-        assert_eq!(luma.admission_sigma_override, Some(0.0115));
-        assert_eq!(luma.shrinkage_sigma_override, Some(0.0078));
-
-        let chroma = expect_nl3d(opts.algorithm_for(ChannelMode::Chroma));
-        assert!(!chroma.ht_only);
-        assert_eq!(chroma.admission_sigma_override, None);
-        assert_eq!(chroma.shrinkage_sigma_override, None);
-    }
-
     /// A `CliOptions` running `Algorithm::Nl4d`, with every field at a
     /// neutral default except the two per-plane `lambda_ht` overrides
     /// under test.
@@ -1280,16 +1021,10 @@ mod cli_options_tests {
             nlm_tuning: None,
             luma_strength: None,
             chroma_strength: None,
-            luma_residual_sigma_scale: None,
-            chroma_residual_sigma_scale: None,
             luma_lambda_ht,
             chroma_lambda_ht,
             luma_mismatch_scale: None,
             chroma_mismatch_scale: None,
-            debug_ht_only: false,
-            debug_ht_wavelet: false,
-            debug_admission_sigma: None,
-            debug_shrinkage_sigma: None,
             progress: false,
         }
     }
@@ -1458,16 +1193,10 @@ mod passthrough_retry_tests {
             nlm_tuning: None,
             luma_strength: None,
             chroma_strength: None,
-            luma_residual_sigma_scale: None,
-            chroma_residual_sigma_scale: None,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
             luma_mismatch_scale: None,
             chroma_mismatch_scale: None,
-            debug_ht_only: false,
-            debug_ht_wavelet: false,
-            debug_admission_sigma: None,
-            debug_shrinkage_sigma: None,
             progress: false,
         }
     }
@@ -1553,16 +1282,10 @@ mod lumachroma_lockstep_tests {
             nlm_tuning: None,
             luma_strength: None,
             chroma_strength: None,
-            luma_residual_sigma_scale: None,
-            chroma_residual_sigma_scale: None,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
             luma_mismatch_scale: None,
             chroma_mismatch_scale: None,
-            debug_ht_only: false,
-            debug_ht_wavelet: false,
-            debug_admission_sigma: None,
-            debug_shrinkage_sigma: None,
             progress: false,
         }
     }

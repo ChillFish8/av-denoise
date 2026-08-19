@@ -1,5 +1,4 @@
 mod input;
-mod nl3d;
 mod nl4d;
 mod nlmeans;
 
@@ -9,7 +8,6 @@ use clap::{Parser, Subcommand};
 use strum_macros::EnumString;
 
 pub use self::input::InputSource;
-pub use self::nl3d::Nl3dArgs;
 pub use self::nl4d::Nl4dArgs;
 pub use self::nlmeans::NlmeansArgs;
 use crate::ingest::BinaryChannelIntent;
@@ -170,26 +168,11 @@ pub enum Command {
     /// temporal window.
     Nlmeans(NlmeansArgs),
 
-    /// Denoise with non-local means, then clean up what it leaves behind
-    /// with a collaborative filter.
-    ///
-    /// `nl3d` runs the same `hq` front end `nlmeans` does, tuned to
-    /// filter a little more gently than usual. That leaves some
-    /// structured noise in its output on purpose. A second pass then
-    /// groups matching patches from that output into stacks, runs each
-    /// stack through a joint transform, and shrinks away the
-    /// coefficients noise is most likely to have produced. That reaches
-    /// noise the first pass's averaging could not remove without
-    /// smoothing away real detail along with it.
-    ///
-    /// Always runs the `hq` front end. `--variant fast` is rejected.
-    Nl3d(Nl3dArgs),
-
     /// Denoise by grouping matching patches across several noisy frames
     /// directly, rather than filtering with non-local means first.
     ///
-    /// `nl4d` runs the same `hq` front end `nlmeans` and `nl3d` do, but
-    /// only for its machinery, the frame ring, the motion field, and
+    /// `nl4d` runs the same `hq` front end `nlmeans` does, but only for
+    /// its machinery, the frame ring, the motion field, and
     /// the per-block temporal confidence it builds. No NLM weighting
     /// pass ever runs. Instead, patches are grouped straight out of the
     /// noisy frames, searching both the centre frame spatially and each

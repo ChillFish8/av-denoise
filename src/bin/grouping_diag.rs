@@ -33,19 +33,14 @@
 //! the power-of-two rounding `collab_group_spatial` applies), and the
 //! distribution of `member_count` after that cap.
 //!
-//! # How this differs from the real nl3d cascade
+//! # What this feeds the kernels
 //!
-//! nl3d's collaborative stage never sees raw noisy pixels. It sees the
-//! nlmeans front end's own output, already partly denoised, and the
-//! sigma it is told is the front end's noise estimate times a measured
-//! residual ratio times `residual_sigma_scale`. This diagnostic skips
-//! the front end entirely and feeds the collaborative kernels a directly
-//! noised frame, told its own true injected sigma times
+//! This skips any front end and feeds the collaborative kernels a
+//! directly noised frame, told its own true injected sigma times
 //! `residual_sigma_scale`. That isolates exactly the mechanism under
 //! suspicion, whether an inflated sigma inflates the admission floor
 //! enough to break discrimination, without needing a front-end run to
-//! measure a residual ratio first. It is a fair test of that mechanism
-//! on its own terms, not a reproduction of nl3d's exact numbers.
+//! measure a residual ratio first.
 //!
 //! # Running it
 //!

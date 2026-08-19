@@ -9,7 +9,6 @@ use av_denoise::{
     DenoisingMode,
     Device,
     MotionCompensationMode,
-    Nl3dOptions,
     PrefilterMode,
 };
 
@@ -201,8 +200,6 @@ fn main() {
     // Side-by-side ordering: each temporal config is followed by its
     // motion-compensation variant so the cost delta from `--motion-compensation`
     // is visible on adjacent rows.
-    let nl3d = Algorithm::Nl3d(Nl3dOptions::default());
-
     let configs: &[(
         &str,
         ChannelMode,
@@ -322,20 +319,6 @@ fn main() {
             bilateral,
             mc,
             Algorithm::Nlmeans,
-        ),
-        // nl3d always runs the HQ front end internally, so this is the
-        // one row in this file that is not `Algorithm::Nlmeans`. Same
-        // temporal radius and channel mode as `temporal_r2_yuv` above,
-        // so the fps/ms delta between the two rows is the cost of the
-        // collaborative-filter stage on top of an otherwise identical
-        // front end.
-        (
-            "temporal_r2_yuv+nl3d",
-            ChannelMode::Yuv,
-            DenoisingMode::Temporal { radius: 2 },
-            PrefilterMode::None,
-            MotionCompensationMode::None,
-            nl3d,
         ),
     ];
 

@@ -73,7 +73,6 @@ fn main() -> anyhow::Result<()> {
 
     let (opts, input, workers) = match &args.command {
         Command::Nlmeans(nlm) => (nlm.build_options(&args)?, &nlm.input, nlm.workers),
-        Command::Nl3d(nl3d) => (nl3d.build_options(&args)?, &nl3d.nlm.input, nl3d.nlm.workers),
         Command::Nl4d(nl4d) => (nl4d.build_options(&args)?, &nl4d.nlm.input, nl4d.nlm.workers),
     };
 

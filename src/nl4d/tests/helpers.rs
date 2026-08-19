@@ -5,8 +5,7 @@ use crate::nlmeans::motion::neighbour_idx_for_k;
 
 /// A non-flat luma field, built from two out-of-phase sine waves rather
 /// than noise, so it carries real spatial structure a denoiser can
-/// either preserve or destroy. Matches `nl3d::tests::textured_base`,
-/// duplicated here since that helper is private to its own module.
+/// either preserve or destroy.
 pub(super) fn textured_base(w: u32, h: u32) -> Vec<f32> {
     let mut frame = vec![0.0f32; (w * h) as usize];
     for y in 0..h {
@@ -23,8 +22,7 @@ pub(super) fn textured_base(w: u32, h: u32) -> Vec<f32> {
 
 /// Adds independent pseudo-Gaussian noise to `base`, decorrelated across
 /// `seed` so different seeds over the same base give independently
-/// noisy copies of the same clean content. Matches
-/// `nl3d::tests::noisy_copy_of`.
+/// noisy copies of the same clean content.
 pub(super) fn noisy_copy_of(base: &[f32], w: u32, h: u32, sigma: f32, seed: u32) -> Vec<f32> {
     let unit_std = (1.0f32 / 3.0f32).sqrt();
     let mut frame = vec![0.0f32; base.len()];
@@ -44,8 +42,7 @@ pub(super) fn noisy_copy_of(base: &[f32], w: u32, h: u32, sigma: f32, seed: u32)
     frame
 }
 
-/// PSNR between two equal-length planes, in dB. Matches
-/// `nl3d::tests::psnr`.
+/// PSNR between two equal-length planes, in dB.
 pub(super) fn psnr(a: &[f32], b: &[f32]) -> f64 {
     let mse: f64 = a
         .iter()

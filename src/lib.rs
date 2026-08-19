@@ -9,8 +9,6 @@ pub mod collab;
 mod denoiser;
 pub mod device;
 #[doc(hidden)]
-pub mod nl3d;
-#[doc(hidden)]
 pub mod nl4d;
 #[doc(hidden)]
 pub mod nlmeans;
@@ -24,10 +22,8 @@ pub use denoiser::{
     DenoiserOptions,
     DenoisingMode,
     MAX_PENDING,
-    Nl3dOptions,
     Nl4dOptions,
     NlmTuning,
-    nl3d_default_residual_sigma_scale,
     nl4d_default_lambda_ht,
     nl4d_default_mismatch_scale,
 };

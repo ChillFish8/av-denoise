@@ -4,9 +4,7 @@ use cubecl::Runtime;
 use cubecl::prelude::ComputeClient;
 
 use crate::accelerate::Accelerator;
-use crate::collab::CollabParams;
 use crate::device::Device;
-use crate::nl3d::{Nl3dDenoiser, Nl3dParams};
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 #[cfg(test)]
 use crate::nlmeans::MotionEstimation;
@@ -48,9 +46,10 @@ pub struct DenoiserOptions {
     /// the temporal radius and the plane being denoised. See
     /// [`crate::nlmeans::hq_default_strength`].
     ///
-    /// `Nl3d` runs the same HQ front end, then a collaborative-filter
-    /// cleanup pass on top. It reads its front-end strength from the
-    /// same table HQ does.
+    /// `Nl4d` drives the same HQ front end for its machinery, the frame
+    /// ring, the motion field, and the noise estimate, rather than
+    /// filtering with it first. It reads its front-end strength from
+    /// the same table HQ does.
     #[builder(default = Algorithm::Nlmeans)]
     pub algorithm: Algorithm,
     /// Which reference image the NLM weights are computed against.
@@ -81,12 +80,6 @@ pub enum Algorithm {
     Nlmeans,
     /// Quality-focused NLMeans with noise-calibrated weighting.
     NlmeansHq(HqParams),
-    /// NLMeans followed by a collaborative-filter cleanup pass.
-    ///
-    /// Always runs the HQ front end, because the collaborative stage
-    /// needs the front end's estimated noise sigma to shrink its own
-    /// coefficients by.
-    Nl3d(Nl3dOptions),
     /// Groups 8x8 patches across the motion-compensated temporal window
     /// itself, rather than filtering with NLM first and grouping within
     /// one frame afterward.
@@ -98,214 +91,19 @@ pub enum Algorithm {
     Nl4d(Nl4dOptions),
 }
 
-/// Tuning for the [`Algorithm::Nl3d`] cascade.
-///
-/// `hq` configures the NLMeans front end the same way
-/// [`Algorithm::NlmeansHq`] does. The remaining fields tune the
-/// collaborative filter that runs second.
-///
-/// `residual_sigma_scale` used to be one shared value across both
-/// planes, and everything below this note describes the sweeps that
-/// were run while that was still true. It is now resolved per plane,
-/// `None` reading through [`nl3d_default_residual_sigma_scale`], and
-/// luma is the only plane whose value those sweeps still describe.
-/// Chroma's own value and its very different evidence are documented
-/// on that function directly.
-///
-/// # Where the calibrated defaults come from
-///
-/// `front_strength_scale`, `residual_sigma_scale`, and `lambda_ht` were
-/// first swept together on `clean-1080p.mkv` at temporal radius 2, noise
-/// levels 4, 6, and 8, one dial at a time with the others pinned, then
-/// checked for interaction with a small joint sweep around the chosen
-/// point. `k_max` and `tau_match` were left at their pre-existing
-/// values, not part of this sweep.
-///
-/// `residual_sigma_scale` went first, because a separate test
-/// (`residual_ratio_matches_measured_residual_within_the_known_independence_gap`
-/// in `src/nlmeans/tests/weight_ratio.rs`) had already measured the
-/// front end's true residual noise at about 1.92x what the analytic
-/// formula predicts. The sweep covered 1.0, 1.4, 1.9, 2.4, and 3.0,
-/// bracketed on both sides at all three noise levels, and 1.9 won by
-/// having the best worst-case luma XPSNR across the three levels,
-/// matching the independent measurement closely. SSIM agreed at every
-/// point tested.
-///
-/// `front_strength_scale` went next, at `residual_sigma_scale` fixed to
-/// 1.9. Luma XPSNR forms a broad, nearly flat plateau from 0.3 to 0.6 at
-/// every noise level, clearly ahead of 0.8 and 1.0, so the default moved
-/// from a 0.8 guess to 0.5, the plateau's centre. SSIM does not disagree
-/// anywhere on the plateau.
-///
-/// `lambda_ht` went last, at the two values above. Luma XPSNR favors 2.0
-/// over 2.7 at the two lighter noise levels but the two tie at the
-/// heaviest, while luma SSIM favors 2.7 at the two heavier noise levels.
-/// 2.7 is kept because it wins the noise level where XPSNR itself is
-/// tied and SSIM is not, so lowering it would only help the noise levels
-/// that already have the most headroom. This is the one dial where the
-/// two metrics point different directions depending on noise level.
-///
-/// The joint check varied `front_strength_scale` and `lambda_ht`
-/// together, one step either side of the chosen point, and found no
-/// combination that beat it by more than run-to-run noise, so no
-/// interaction large enough to move the calibration was found.
-///
-/// Radius 4 was checked afterward, with the same three values pinned
-/// rather than swept again. It shows the same or larger improvement
-/// over the radius-2 front end at every noise level, so the radius-2
-/// calibration carries over.
-///
-/// # Recalibration after the patch-grouping fix
-///
-/// The collaborative filter's group-ranking kernel had a bug that
-/// clamped patch distances at zero before ranking them. Once the noise
-/// floor exceeded a candidate's raw distance, which it did for nearly
-/// every candidate at `residual_sigma_scale = 1.9`, every candidate tied
-/// at exactly zero and the group filled with whichever patches the scan
-/// visited first rather than the most similar ones. Every parameter
-/// above was originally chosen while this bug was live, so all of them
-/// were re-measured once it was fixed, plus `rho`
-/// ([`crate::collab::CollabParams::rho`]), a per-frequency noise-shaping
-/// correlation that was, at the time, forced on unconditionally for
-/// nl3d.
-///
-/// This round changed the objective on purpose. The original sweep
-/// above scored luma XPSNR and SSIM against a clean reference with
-/// synthetic noise added, and that reference carries no fine grain or
-/// texture of its own, so a configuration that destroys real texture
-/// scores no worse than one that only removes noise. The recalibration
-/// instead uses the high-frequency energy ratio as its primary target,
-/// Laplacian variance in a real-footage face crop divided by the same
-/// measurement on the clean source, at a value of 1.0. Below 1.0 means
-/// real texture was smoothed away. Above 1.0 means noise was left
-/// behind. XPSNR and SSIM are still measured, but only as a guard
-/// against a configuration that pushes the ratio far from 1.0 while
-/// scoring well, not as the value being maximised.
-///
-/// `rho` and `residual_sigma_scale` were swept together, since both
-/// change how much the collaborative stage shrinks and can trade
-/// against each other. `rho` was tried at 0.0, 0.4, 0.65, and 0.8. 0.0
-/// is shaping off. 0.8 is the flat-content correlation `rho_window` used
-/// to force. 0.65 is the measured correlation on real fine texture.
-/// Each `rho` value was crossed with `residual_sigma_scale` at 1.0, 1.4,
-/// and 1.9, all twelve combinations, at all three noise levels, on the
-/// same `clean-1080p.mkv` source used for the metric-only sweep above.
-/// `rho = 0.0` beat every other `rho` value at every
-/// `residual_sigma_scale` and every noise level tested, on both the
-/// high-frequency ratio and on XPSNR/SSIM simultaneously, with no
-/// exception. Raising `rho` monotonically pushed the ratio further above
-/// 1.0 (more noise kept) and lowered XPSNR/SSIM at the same time, rather
-/// than trading one for the other. Shaping was therefore dropped from
-/// nl3d's default entirely, not just tuned down. See
-/// `Nl3dDenoiser::new`'s doc comment for where that is done and the
-/// measured before/after numbers.
-///
-/// With `rho` settled at `0.0`, `residual_sigma_scale` was checked
-/// across 1.0, 1.4, 1.9, 2.4, and 3.0. 1.9 remained the best value,
-/// unchanged from the pre-fix sweep above. It has the best worst-case
-/// luma XPSNR and SSIM across the three noise levels, and its
-/// high-frequency ratio (0.85 to 1.04 across both faces and all three
-/// noise levels) is the closest of any tested value to the 1.0 target.
-/// It is bracketed on both sides. 1.4 undershoots the noise removal,
-/// with ratios running 0.91 to 1.20. 2.4 and 3.0 overshoot it, with
-/// ratios drifting down to 0.82 to 0.88, and XPSNR falls off past 1.9
-/// too. `front_strength_scale` and `lambda_ht` were left at their
-/// existing values. The `rho` / `residual_sigma_scale` grid already
-/// showed no headroom to chase, so neither was re-swept this round.
-///
-/// The collaborative filter's grouping stage was also checked
-/// separately for whether it can tell similar patches from dissimilar
-/// ones, since that is a distinct property from how good the final
-/// image looks. At the chosen `residual_sigma_scale = 1.9`, admitted
-/// patches on flat content average 0.19x the clean-domain distance of a
-/// random draw from the same search window, and on fine texture 0.10x,
-/// both well under 1.0, meaning admission is finding genuinely closer
-/// patches rather than noise-fooled ones. `rho` does not affect
-/// grouping. Grouping ranks raw pixel distances, before the DCT
-/// transform that `rho` shapes ever runs.
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub struct Nl3dOptions {
-    /// The front end's HQ parameters.
-    pub hq: HqParams,
-    /// A multiplier applied to the front end's calibrated strength
-    /// before it runs.
-    ///
-    /// Sitting below 1.0 leaves the front end filtering gently, so it
-    /// leaves structured residual noise behind for the collaborative
-    /// stage to remove through grouped shrinkage instead. Calibrated to
-    /// 0.5, see the struct-level docs for how.
-    pub front_strength_scale: f32,
-    /// Largest collaborative stack size, a power of two up to 8.
-    /// Defaults to 8.
-    pub k_max: u32,
-    /// Admission threshold multiplier on the patch noise floor.
-    /// Defaults to 3.0.
-    pub tau_match: f32,
-    /// Hard-threshold multiplier for the collaborative filter's first
-    /// stage. Calibrated to 2.7, see the struct-level docs for how.
-    pub lambda_ht: f32,
-    /// A multiplier on the analytic residual sigma the collaborative
-    /// stage shrinks with, per plane.
-    ///
-    /// `None` resolves through [`nl3d_default_residual_sigma_scale`],
-    /// which returns a different calibrated value for luma than for
-    /// chroma. Read that function's docs before relying on either
-    /// number, since the two rest on very different evidence.
-    pub residual_sigma_scale: Option<f32>,
-    /// Runs only the collaborative filter's hard-threshold stage.
-    ///
-    /// Diagnostic switch, see `CollabParams::ht_only`. Defaults to
-    /// false.
-    pub ht_only: bool,
-    /// Diagnostic override for the grouping admission sigma, in
-    /// normalised units. See `CollabParams::admission_sigma_override`.
-    pub admission_sigma_override: Option<f32>,
-    /// Diagnostic override for the shrinkage sigma, in normalised
-    /// units. See `CollabParams::shrinkage_sigma_override`.
-    pub shrinkage_sigma_override: Option<f32>,
-    /// Runs the collaborative filter's hard-threshold stage in the
-    /// orthonormal Haar-8 basis instead of the DCT basis.
-    ///
-    /// Diagnostic switch, see `CollabParams::ht_wavelet`. Defaults to
-    /// false.
-    pub debug_ht_wavelet: bool,
-}
-
-impl Default for Nl3dOptions {
-    fn default() -> Self {
-        let collab = CollabParams::default();
-        Self {
-            hq: HqParams::default(),
-            front_strength_scale: 0.5,
-            k_max: collab.k_max,
-            tau_match: collab.tau_match,
-            lambda_ht: collab.lambda_ht,
-            // Resolved per plane by `nl3d_default_residual_sigma_scale`
-            // at construction time, once the plane being denoised is
-            // known.
-            residual_sigma_scale: None,
-            ht_only: false,
-            admission_sigma_override: None,
-            shrinkage_sigma_override: None,
-            debug_ht_wavelet: false,
-        }
-    }
-}
-
 /// Tuning for the [`Algorithm::Nl4d`] cascade.
 ///
 /// `hq` configures the front end the same way [`Algorithm::NlmeansHq`]
-/// and [`Nl3dOptions::hq`] do. The remaining fields tune the temporal
-/// grouping and shrinkage that run on top of it, mirroring
-/// [`crate::nl4d::Nl4dParams`] one for one.
+/// does. The remaining fields tune the temporal grouping and shrinkage
+/// that run on top of it, mirroring [`crate::nl4d::Nl4dParams`] one for
+/// one.
 ///
-/// `lambda_ht` now has a per-plane calibrated default, the same shape
-/// as [`Nl3dOptions::residual_sigma_scale`]. `None` resolves through
-/// [`nl4d_default_lambda_ht`] once the plane being denoised is known.
-/// A caller wanting luma and chroma to shrink by different amounts
-/// explicitly sets `--luma-lambda-ht` and `--chroma-lambda-ht` on the
-/// CLI, resolved per plane in `CliOptions::algorithm_for`
-/// (`src/bin/ingest.rs`) the same way nl3d's per-plane overrides are.
+/// `lambda_ht` has a per-plane calibrated default. `None` resolves
+/// through [`nl4d_default_lambda_ht`] once the plane being denoised is
+/// known. A caller wanting luma and chroma to shrink by different
+/// amounts explicitly sets `--luma-lambda-ht` and `--chroma-lambda-ht`
+/// on the CLI, resolved per plane in `CliOptions::algorithm_for`
+/// (`src/bin/ingest.rs`).
 ///
 /// `temporal_radius`, `refine`, `spatial_radius`, and `c_min` have not
 /// been calibrated by a sweep. Their defaults are carried straight
@@ -376,106 +174,6 @@ impl Default for Nl4dOptions {
     }
 }
 
-/// The calibrated default `residual_sigma_scale` for the nl3d
-/// collaborative stage, per plane.
-///
-/// # Where the numbers come from
-///
-/// Both values are metric-driven now, each picked by the same
-/// worst-case criterion, and each checked against real footage
-/// afterward. Chroma's was not always, see its own section below.
-///
-/// ## Luma, 1.9
-///
-/// Chosen by a quality-harness sweep that scored a clean reference
-/// with synthetic noise added, at three noise levels, picking the
-/// value whose worst-case luma XPSNR held up best. Re-swept after a
-/// patch-grouping defect in the collaborative stage was fixed, and it
-/// held at 1.9 again. A later sweep at finer granularity around 1.9
-/// found every adjacent variant scoring within run-to-run noise of
-/// each other, differing by under half a code level, below visual
-/// threshold. See the struct-level docs on [`Nl3dOptions`] for the
-/// full sweep history this value comes from.
-///
-/// ## Chroma, 2.5
-///
-/// This was 8.0 until it was swept properly, and 8.0 over-smoothed
-/// chroma badly. The sweep covered 1.0, 1.9, 2.5, 3.0, 4.0, 6.0, 8.0,
-/// 10.0, and 12.0 at all three noise levels, bracketing an interior
-/// peak on both sides. 2.5 holds the best worst-case chroma XPSNR, the
-/// same criterion luma's value above was picked on, and moving off 8.0
-/// is worth about 1.1 dB at noise 4 and 0.7 dB at noise 8. The
-/// whole-image SSIM agrees at every level. Luma XPSNR does not move at
-/// all across the whole sweep, so this dial reaches chroma alone.
-///
-/// Two measurements on real footage agree, against `brick_source.mkv`
-/// and a 120-frame cut of `asterisk-war.mkv`. High-frequency chroma
-/// energy surviving rises from 0.59/0.67 to 0.83/0.88 on the first clip
-/// and from 0.68/0.81 to 0.87/0.93 on the second. Chroma magnitude lost
-/// against the source falls from -0.125 to -0.042 and from -0.021 to
-/// -0.008. The matching luma figures are identical for both values.
-///
-/// The chroma-only residual at 16x on a brick frame is what settles it.
-/// At 8.0 that residual is structured, the brick coursing is legible in
-/// what the filter threw away, which is chroma detail rather than
-/// chroma noise. At 2.5 it is close to black. The failure mode a low
-/// value risks was checked too, at 4x saturation on the tower and 8x on
-/// a flat sky region, and neither showed chroma grain surviving.
-///
-/// # How 8.0 came to be here
-///
-/// Worth recording, because the earlier value was not arrived at
-/// carelessly. It was chosen by a human reviewing stills and residuals
-/// on `brick_source.mkv`, after a metric sweep showed this dial has
-/// real authority over chroma once decoupled from luma. Its upper bound
-/// was evidenced directly, at 24.0 the chroma residual renders hair,
-/// face, hands, and sign text as legible line art. Its lower bound was
-/// never swept. The reviewer rejected the low end on the theory that
-/// chroma noise had been masking detail, and the sweep above is what
-/// tested that theory rather than assuming it.
-///
-/// The error predates the collaborative stage's move to aggregating
-/// every group member. Re-running this sweep against the commit before
-/// that change gives the same ordering and the same gap, 44.30/44.47
-/// against 43.16/42.95 at noise 4, so full aggregation neither caused
-/// the problem nor moved the optimum.
-///
-/// # `ChannelMode::Yuv`
-///
-/// Reads the luma value, the same "a fused pass is dominated by luma"
-/// assumption [`crate::nlmeans::hq_default_strength`] makes for its
-/// own Yuv case. Yuv was not part of either value's evidence.
-pub fn nl3d_default_residual_sigma_scale(channels: ChannelMode) -> f32 {
-    match channels {
-        ChannelMode::Luma | ChannelMode::Yuv => 1.9,
-        ChannelMode::Chroma => 2.5,
-    }
-}
-
-/// Resolves `Nl3dOptions.residual_sigma_scale` for one plane, falling
-/// back to [`nl3d_default_residual_sigma_scale`] when the caller left
-/// it unset.
-fn resolve_residual_sigma_scale(opts: &Nl3dOptions, channels: ChannelMode) -> f32 {
-    opts.residual_sigma_scale
-        .unwrap_or_else(|| nl3d_default_residual_sigma_scale(channels))
-}
-
-/// Builds the collaborative-stage parameters for one plane from the
-/// caller's nl3d options.
-fn collab_params_for(opts: &Nl3dOptions, channels: ChannelMode) -> CollabParams {
-    CollabParams {
-        channels,
-        k_max: opts.k_max,
-        tau_match: opts.tau_match,
-        lambda_ht: opts.lambda_ht,
-        ht_only: opts.ht_only,
-        admission_sigma_override: opts.admission_sigma_override,
-        shrinkage_sigma_override: opts.shrinkage_sigma_override,
-        ht_wavelet: opts.debug_ht_wavelet,
-        ..CollabParams::default()
-    }
-}
-
 /// The calibrated default `lambda_ht` for the nl4d temporal grouping's
 /// hard-threshold stage, per plane.
 ///
@@ -502,9 +200,8 @@ fn collab_params_for(opts: &Nl3dOptions, channels: ChannelMode) -> CollabParams 
 /// bias toward detail retention is the reason 5.3 is the value here
 /// rather than either of those. `ChannelMode::Yuv` reads the same
 /// value, the same "a fused pass is dominated by luma" assumption
-/// [`crate::nlmeans::hq_default_strength`] and
-/// [`nl3d_default_residual_sigma_scale`] both make for their own Yuv
-/// case. Yuv was not part of the ladder's own evidence.
+/// [`crate::nlmeans::hq_default_strength`] makes for its own Yuv case.
+/// Yuv was not part of the ladder's own evidence.
 ///
 /// This value is provisional in one specific way, independent of
 /// which rung looks best. The temporal grouping kernel currently
@@ -626,8 +323,8 @@ impl DenoiserOptions {
         // With auto-strength off, HQ reads `strength` as an absolute
         // value just like the fast path, so it falls back to the same
         // absolute default.
-        // `Nl3d` and `Nl4d` both share the HQ front end, so each reads
-        // `strength` from the same calibrated table `NlmeansHq` does.
+        // `Nl4d` shares the HQ front end, so it reads `strength` from
+        // the same calibrated table `NlmeansHq` does.
         let explicit_strength = self.nlm.and_then(|t| t.strength);
         let strength = explicit_strength.unwrap_or(match self.algorithm {
             // The calibrated table is a multiplier on the measured
@@ -636,13 +333,10 @@ impl DenoiserOptions {
             Algorithm::NlmeansHq(hq) if hq.auto_strength => {
                 hq_default_strength(self.channel_mode, temporal_radius)
             },
-            Algorithm::Nl3d(opts) if opts.hq.auto_strength => {
-                hq_default_strength(self.channel_mode, temporal_radius)
-            },
             Algorithm::Nl4d(opts) if opts.hq.auto_strength => {
                 hq_default_strength(self.channel_mode, temporal_radius)
             },
-            Algorithm::NlmeansHq(_) | Algorithm::Nlmeans | Algorithm::Nl3d(_) | Algorithm::Nl4d(_) => {
+            Algorithm::NlmeansHq(_) | Algorithm::Nlmeans | Algorithm::Nl4d(_) => {
                 NlmParams::default().strength
             },
         });
@@ -655,16 +349,13 @@ impl DenoiserOptions {
             hq: match self.algorithm {
                 Algorithm::Nlmeans => None,
                 Algorithm::NlmeansHq(hq) => Some(hq),
-                Algorithm::Nl3d(opts) => Some(opts.hq),
                 Algorithm::Nl4d(opts) => Some(opts.hq),
             },
             strength,
-            // The collaborative stage measures how much noise the front
-            // end left behind, which needs the front end's own weight-
-            // squared accumulator turned on. `Nl4d` has no such stage, it
-            // shrinks straight off the propagated coefficient sigma, so
-            // it does not need this.
-            track_weight_sq: matches!(self.algorithm, Algorithm::Nl3d(_)),
+            // `Nl4d` shrinks straight off the propagated coefficient
+            // sigma, so no algorithm needs the front end's
+            // weight-squared accumulator turned on.
+            track_weight_sq: false,
             ..NlmParams::default()
         };
         if let Some(t) = self.nlm {
@@ -710,7 +401,6 @@ pub enum DenoiserError {
 // `Engine` value's size, whichever variant is actually held.
 enum Engine<R: Runtime> {
     Nlm(Box<NlmDenoiser<R>>),
-    Nl3d(Box<Nl3dDenoiser<R>>),
     Nl4d(Box<Nl4dDenoiser<R>>),
 }
 
@@ -718,7 +408,6 @@ impl<R: Runtime> Engine<R> {
     fn push_frame(&mut self, frame: &[f32]) {
         match self {
             Self::Nlm(d) => d.push_frame(frame),
-            Self::Nl3d(d) => d.push_frame(frame),
             Self::Nl4d(d) => d.push_frame(frame),
         }
     }
@@ -726,7 +415,6 @@ impl<R: Runtime> Engine<R> {
     fn denoise_submit(&mut self) -> Result<Option<Pending<R>>, anyhow::Error> {
         match self {
             Self::Nlm(d) => d.denoise_submit(),
-            Self::Nl3d(d) => d.denoise_submit(),
             // `Nl4dDenoiser::denoise_submit` already returns
             // `DenoiserError` rather than `anyhow::Error`, so this leans
             // on `DenoiserError`'s own `anyhow::Error` conversion instead
@@ -738,7 +426,6 @@ impl<R: Runtime> Engine<R> {
     fn flush(&mut self, sink: impl FnMut(&[f32])) -> Result<(), anyhow::Error> {
         match self {
             Self::Nlm(d) => d.flush(sink),
-            Self::Nl3d(d) => d.flush(sink),
             Self::Nl4d(d) => d.flush(sink).map_err(anyhow::Error::from),
         }
     }
@@ -746,14 +433,13 @@ impl<R: Runtime> Engine<R> {
 
 /// Builds whichever [`Engine`] `algorithm` calls for.
 ///
-/// `Algorithm::Nl3d` and `Algorithm::Nl4d` each carry their own cascade
-/// tuning, which is not part of `NlmParams`, so it is read from
-/// `algorithm` directly rather than from `params`. This is also where an
-/// unset `residual_sigma_scale` picks up its calibrated per-plane
-/// default (`resolve_residual_sigma_scale`) and an unset `lambda_ht`
-/// picks up its own (`resolve_lambda_ht`), the same way `to_nlm_params`
-/// resolves HQ's calibrated `strength`, since this is the first point
-/// construction has both `opts` and `params.channels` together.
+/// `Algorithm::Nl4d` carries its own cascade tuning, which is not part
+/// of `NlmParams`, so it is read from `algorithm` directly rather than
+/// from `params`. This is also where an unset `lambda_ht` picks up its
+/// calibrated per-plane default (`resolve_lambda_ht`), the same way
+/// `to_nlm_params` resolves HQ's calibrated `strength`, since this is
+/// the first point construction has both `opts` and `params.channels`
+/// together.
 fn build_engine<R: Runtime>(
     client: &ComputeClient<R>,
     algorithm: &Algorithm,
@@ -762,22 +448,6 @@ fn build_engine<R: Runtime>(
     height: u32,
 ) -> Result<Engine<R>, DenoiserError> {
     match algorithm {
-        Algorithm::Nl3d(opts) => {
-            let collab = collab_params_for(opts, params.channels);
-            let residual_sigma_scale = resolve_residual_sigma_scale(opts, params.channels);
-            let nl3d_params = Nl3dParams {
-                nlm: params,
-                front_strength_scale: opts.front_strength_scale,
-                collab,
-                residual_sigma_scale,
-            };
-            Ok(Engine::Nl3d(Box::new(Nl3dDenoiser::new(
-                client,
-                nl3d_params,
-                width,
-                height,
-            )?)))
-        },
         Algorithm::Nl4d(opts) => {
             let lambda_ht = resolve_lambda_ht(opts, params.channels);
             let mismatch_scale = resolve_mismatch_scale(opts, params.channels);
@@ -1161,59 +831,6 @@ mod options_tests {
     use super::*;
 
     #[test]
-    fn nl3d_default_residual_sigma_scale_differs_between_luma_and_chroma() {
-        let luma = nl3d_default_residual_sigma_scale(ChannelMode::Luma);
-        let chroma = nl3d_default_residual_sigma_scale(ChannelMode::Chroma);
-
-        assert!((luma - 1.9).abs() < f32::EPSILON);
-        assert!((chroma - 2.5).abs() < f32::EPSILON);
-        // Only that the two resolve apart, not by how far. The gap used
-        // to be 6.1 and is now 0.6, because chroma's value came down
-        // from 8.0 to its own swept optimum. What this pins is that the
-        // per-plane split is still live, so a future edit collapsing
-        // both planes back onto one number fails here.
-        assert!(
-            (chroma - luma).abs() > f32::EPSILON,
-            "luma ({luma}) and chroma ({chroma}) must resolve to different defaults"
-        );
-    }
-
-    #[test]
-    fn nl3d_default_residual_sigma_scale_yuv_reads_the_luma_value() {
-        let yuv = nl3d_default_residual_sigma_scale(ChannelMode::Yuv);
-        let luma = nl3d_default_residual_sigma_scale(ChannelMode::Luma);
-
-        assert!((yuv - luma).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn resolve_residual_sigma_scale_unset_uses_the_per_plane_default() {
-        let opts = Nl3dOptions::default();
-
-        let luma = resolve_residual_sigma_scale(&opts, ChannelMode::Luma);
-        let chroma = resolve_residual_sigma_scale(&opts, ChannelMode::Chroma);
-
-        assert!((luma - 1.9).abs() < f32::EPSILON, "got {luma}");
-        assert!((chroma - 2.5).abs() < f32::EPSILON, "got {chroma}");
-    }
-
-    #[test]
-    fn resolve_residual_sigma_scale_explicit_value_overrides_every_plane() {
-        let opts = Nl3dOptions {
-            residual_sigma_scale: Some(3.3),
-            ..Nl3dOptions::default()
-        };
-
-        for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
-            let got = resolve_residual_sigma_scale(&opts, channels);
-            assert!(
-                (got - 3.3).abs() < f32::EPSILON,
-                "channels {channels:?} got {got}"
-            );
-        }
-    }
-
-    #[test]
     fn nl4d_default_lambda_ht_differs_between_luma_and_chroma() {
         let luma = nl4d_default_lambda_ht(ChannelMode::Luma);
         let chroma = nl4d_default_lambda_ht(ChannelMode::Chroma);
@@ -1290,31 +907,6 @@ mod options_tests {
             let got = resolve_mismatch_scale(&opts, channels);
             assert!(got.abs() < f32::EPSILON, "channels {channels:?} got {got}");
         }
-    }
-
-    #[test]
-    fn collab_params_carry_the_diagnostic_fields() {
-        // Every field the test sets differs from `CollabParams::default()`
-        // (k_max 8, tau_match 3.0, lambda_ht 2.7, channels Luma), so each
-        // assertion below distinguishes a copied-through value from a
-        // default one, not just a value from its own default.
-        let opts = Nl3dOptions {
-            k_max: 4,
-            tau_match: 1.5,
-            lambda_ht: 3.5,
-            ht_only: true,
-            admission_sigma_override: Some(0.007),
-            shrinkage_sigma_override: Some(0.011),
-            ..Nl3dOptions::default()
-        };
-        let collab = collab_params_for(&opts, ChannelMode::Chroma);
-        assert!(collab.ht_only);
-        assert_eq!(collab.admission_sigma_override, Some(0.007));
-        assert_eq!(collab.shrinkage_sigma_override, Some(0.011));
-        assert_eq!(collab.channels, ChannelMode::Chroma);
-        assert_eq!(collab.k_max, opts.k_max);
-        assert_eq!(collab.tau_match, opts.tau_match);
-        assert_eq!(collab.lambda_ht, opts.lambda_ht);
     }
 
     #[test]
@@ -1553,66 +1145,6 @@ mod options_tests {
     }
 
     #[test]
-    fn nl3d_sets_track_weight_sq() {
-        let opts = DenoiserOptions::builder()
-            .algorithm(Algorithm::Nl3d(Nl3dOptions::default()))
-            .build();
-        let params = opts.to_nlm_params();
-
-        assert!(
-            params.track_weight_sq,
-            "nl3d needs the front end's weight-squared sums tracked"
-        );
-    }
-
-    #[test]
-    fn nl3d_hq_field_is_populated_from_nl3d_options() {
-        let hq = HqParams {
-            auto_strength: false,
-            ..HqParams::default()
-        };
-        let opts = DenoiserOptions::builder()
-            .algorithm(Algorithm::Nl3d(Nl3dOptions {
-                hq,
-                ..Nl3dOptions::default()
-            }))
-            .build();
-        let params = opts.to_nlm_params();
-
-        assert_eq!(params.hq, Some(hq));
-    }
-
-    #[test]
-    fn nl3d_uses_the_hq_strength_table_when_auto_strength_is_on() {
-        let opts = DenoiserOptions::builder()
-            .channel_mode(ChannelMode::Luma)
-            .mode(DenoisingMode::Temporal { radius: 4 })
-            .algorithm(Algorithm::Nl3d(Nl3dOptions::default()))
-            .build();
-        let params = opts.to_nlm_params();
-
-        let expected = hq_default_strength(ChannelMode::Luma, 4);
-        assert!((params.strength - expected).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn nl3d_explicit_strength_wins_over_the_table() {
-        let opts = DenoiserOptions::builder()
-            .mode(DenoisingMode::Temporal { radius: 4 })
-            .algorithm(Algorithm::Nl3d(Nl3dOptions::default()))
-            .nlm(NlmTuning {
-                search_radius: None,
-                patch_radius: None,
-                strength: Some(0.99),
-                self_weight: None,
-            })
-            .build();
-        let params = opts.to_nlm_params();
-
-        assert!((params.strength - 0.99).abs() < f32::EPSILON);
-    }
-
-    #[test]
     fn nl4d_options_default_matches_nl4d_params_default() {
         let opts = Nl4dOptions::default();
         let params = crate::nl4d::Nl4dParams::default();
@@ -1633,9 +1165,9 @@ mod options_tests {
 
     #[test]
     fn nl4d_does_not_set_track_weight_sq() {
-        // Unlike nl3d, nl4d has no second-stage Wiener shrinkage that
-        // needs the front end's measured residual noise, so it does not
-        // need the weight-squared accumulator turned on.
+        // nl4d has no second-stage Wiener shrinkage that needs the
+        // front end's measured residual noise, so it does not need the
+        // weight-squared accumulator turned on.
         let opts = DenoiserOptions::builder()
             .algorithm(Algorithm::Nl4d(Nl4dOptions::default()))
             .build();
@@ -1775,22 +1307,6 @@ mod tests {
             opts(DenoisingMode::Spacial),
         )
         .expect("denoiser construction failed");
-        assert_eq!(d.selected_accelerator(), Accelerator::Vulkan);
-
-        d.push_frame(&frame(16, 16)).expect("push failed");
-        let out = d.recv_frame().expect("recv failed").expect("no frame");
-        assert_eq!(out.len(), 16 * 16);
-    }
-
-    #[test]
-    fn nl3d_algorithm_round_trips_through_the_facade() {
-        let opts = DenoiserOptions::builder()
-            .channel_mode(ChannelMode::Luma)
-            .mode(DenoisingMode::Spacial)
-            .algorithm(Algorithm::Nl3d(Nl3dOptions::default()))
-            .build();
-        let mut d = Denoiser::create(&[Accelerator::Vulkan], &Device::Default, 16, 16, opts)
-            .expect("nl3d denoiser construction failed");
         assert_eq!(d.selected_accelerator(), Accelerator::Vulkan);
 
         d.push_frame(&frame(16, 16)).expect("push failed");

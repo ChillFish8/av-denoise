@@ -191,8 +191,7 @@ fn small_but_real_denominator_does_not_divide_by_an_underflowed_square() {
 
 /// The design's own specified check. On a frame with real spatial
 /// structure, not a flat field, the noise NLMeans actually leaves in its
-/// output should track `base_sigma * residual_ratio_sqrt()`, the same
-/// quantity `nl3d` hands its collaborative stage as the residual sigma.
+/// output should track `base_sigma * residual_ratio_sqrt()`.
 ///
 /// `uniform_window_ratio_is_exact` above pins the formula analytically
 /// on a uniform frame, the one case where every candidate weight is

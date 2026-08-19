@@ -445,18 +445,12 @@ impl NlmeansArgs {
             nlm_tuning,
             luma_strength: self.luma_strength,
             chroma_strength: self.chroma_strength,
-            // `nlmeans` has no collaborative stage, so these stay unset
-            // here. `Nl3dArgs::build_options` fills them in afterwards.
-            luma_residual_sigma_scale: None,
-            chroma_residual_sigma_scale: None,
+            // `nlmeans` has no grouping stage, so these stay unset
+            // here. `Nl4dArgs::build_options` fills them in afterwards.
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
             luma_mismatch_scale: None,
             chroma_mismatch_scale: None,
-            debug_ht_only: false,
-            debug_ht_wavelet: false,
-            debug_admission_sigma: None,
-            debug_shrinkage_sigma: None,
             progress: globals.progress,
         })
     }
@@ -543,7 +537,6 @@ mod tests {
         let args = Args::parse_from(argv);
         let nlm = match &args.command {
             Command::Nlmeans(nlm) => NlmeansArgs::clone(nlm),
-            Command::Nl3d(_) => unreachable!("parse() always builds a nlmeans argv"),
             Command::Nl4d(_) => unreachable!("parse() always builds a nlmeans argv"),
         };
 
@@ -559,7 +552,6 @@ mod tests {
         let args = Args::parse_from(argv);
         match &args.command {
             Command::Nlmeans(nlm) => NlmeansArgs::clone(nlm),
-            Command::Nl3d(_) => unreachable!("parse_input() always builds a nlmeans argv"),
             Command::Nl4d(_) => unreachable!("parse_input() always builds a nlmeans argv"),
         }
     }

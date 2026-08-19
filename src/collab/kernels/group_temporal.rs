@@ -29,9 +29,11 @@ const _: () = assert!(
 /// [`crate::nlmeans::motion::thsad`]), and `blksize` is the motion
 /// block's side length in pixels.
 ///
-///     E^2      = thsad^2 * (1 - c) / (1 + c)
-///     eps      = E / blksize^2
-///     sigma_m2 = (pi / 2) * eps^2 * mismatch_scale^2
+/// ```text
+/// E^2      = thsad^2 * (1 - c) / (1 + c)
+/// eps      = E / blksize^2
+/// sigma_m2 = (pi / 2) * eps^2 * mismatch_scale^2
+/// ```
 ///
 /// `c = 1`, a perfect match, gives `sigma_m2 = 0` exactly. Lower
 /// confidence inflates it, and `mismatch_scale` scales the result by

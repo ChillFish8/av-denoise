@@ -20,9 +20,8 @@ use super::params::Nl4dParams;
 /// Groups similar 8x8 patches across a motion-compensated temporal
 /// window and denoises each group jointly.
 ///
-/// This drives the same front end [`crate::nl3d::Nl3dDenoiser`] uses,
-/// but only for its machinery, the frame ring, the motion field, and
-/// the confidence scores built by
+/// This drives the NLMeans front end, but only for its machinery, the
+/// frame ring, the motion field, and the confidence scores built by
 /// [`NlmDenoiser::submit_machinery`]/[`NlmDenoiser::flush_step_machinery`].
 /// No NLM weighting kernel ever runs. Instead, every submit groups
 /// patches straight out of the noisy ring with
@@ -36,11 +35,11 @@ use super::params::Nl4dParams;
 /// one actually came from, not only the centre frame, so a frame's own
 /// output only finishes once every pass that can reach it,
 /// `temporal_radius` on either side of it, has run. Latency is therefore
-/// `2 * temporal_radius` pushes, twice [`crate::nl3d::Nl3dDenoiser`]'s
-/// own `temporal_radius`. [`Self::denoise_submit`] returns `None` while
-/// the front end's window is still filling and for the further passes
-/// this cross-frame accumulation still needs, and [`Self::flush`] drains
-/// the frames still held once the input stream ends.
+/// `2 * temporal_radius` pushes, twice the front end's own window
+/// depth. [`Self::denoise_submit`] returns `None` while the front end's
+/// window is still filling and for the further passes this cross-frame
+/// accumulation still needs, and [`Self::flush`] drains the frames
+/// still held once the input stream ends.
 pub struct Nl4dDenoiser<R: Runtime> {
     front: NlmDenoiser<R>,
     width: u32,
