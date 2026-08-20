@@ -144,7 +144,6 @@ def load_config(config_path: Path) -> Config:
         if kind not in (
             "noisy",
             "av-denoise",
-            "av-denoise-nl3d",
             "av-denoise-nl4d",
             "ffmpeg-nlmeans",
             "ffmpeg-bm3d",
@@ -362,8 +361,8 @@ def score_ffmpeg_nlmeans(run: Run, noisy: Path, ref: Path) -> tuple[bool, str]:
 
 def score_ffmpeg_bm3d(run: Run, noisy: Path, ref: Path) -> tuple[bool, str]:
     # ffmpeg's `bm3d` filter is single-image, it has no temporal window at
-    # all, so it denoises each frame from that frame alone. `nl3d`/`nl4d`
-    # group patches across several frames, which is a different amount of
+    # all, so it denoises each frame from that frame alone. `nl4d`
+    # groups patches across several frames, which is a different amount of
     # work to score against. This function is kept working and correct for
     # what it measures, but no run in the .toml configs uses it any more.
     # `bm3dhip` (score_bm3dhip below) is the temporal reference those rows
@@ -416,7 +415,7 @@ def score_bm3dhip(run: Run, noisy: Path, ref: Path, device: str) -> tuple[bool, 
     """Scores GPU V-BM3D via `scripts/bm3dhip_arm.py`, run at `run.radius`.
 
     Unlike `score_ffmpeg_bm3d`, this reference has a real temporal window
-    (`2 * radius + 1` frames), the same shape of work `nl3d`/`nl4d` do, so
+    (`2 * radius + 1` frames), the same shape of work `nl4d` does, so
     it is the reference row those arms are actually comparable to.
     `bm3dhip_arm.py` writes y4m to stdout, piped into ffmpeg exactly like
     `score_av_denoise` pipes `av-denoise`'s stdout. `settb=1,setpts=N` on
@@ -506,8 +505,6 @@ def execute(
         ok, stderr = score_noisy(noisy, ref)
     elif run.kind == "av-denoise":
         ok, stderr = score_av_denoise(run, noisy, ref, device)
-    elif run.kind == "av-denoise-nl3d":
-        ok, stderr = score_av_denoise(run, noisy, ref, device, subcommand="nl3d")
     elif run.kind == "av-denoise-nl4d":
         ok, stderr = score_av_denoise(run, noisy, ref, device, subcommand="nl4d")
     elif run.kind == "ffmpeg-nlmeans":

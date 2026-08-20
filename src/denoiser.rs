@@ -203,14 +203,19 @@ impl Default for Nl4dOptions {
 /// [`crate::nlmeans::hq_default_strength`] makes for its own Yuv case.
 /// Yuv was not part of the ladder's own evidence.
 ///
-/// This value is provisional in one specific way, independent of
-/// which rung looks best. The temporal grouping kernel currently
-/// discards every non-centre group member at the scatter and writes
-/// back only centre-frame members, so it compensates for the lost
-/// cross-frame averaging with a harsher `lambda_ht` than a filter that
-/// aggregated every member would need. If cross-frame aggregation
-/// lands, the whole ladder shifts and this value should be re-swept,
-/// not just nudged.
+/// The ladder behind 5.3 was rendered on a build that scattered only
+/// centre-frame members, so it compensated for the lost cross-frame
+/// averaging with a harsher `lambda_ht` than a filter aggregating
+/// every member would need. Cross-frame aggregation has since landed,
+/// and every member now writes back into the frame it was matched
+/// from, so that compensation no longer applies. The value was left at
+/// 5.3 because a human checked it on the cross-frame build and
+/// confirmed it still held, recorded verbatim:
+///
+/// > "no, I confirmed manually that 5.3 was fine."
+///
+/// That is a confirmation of this one value on this one build, not a
+/// re-run of the ladder and not a fresh calibration.
 ///
 /// # Chroma, 4.2
 ///

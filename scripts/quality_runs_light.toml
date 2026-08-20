@@ -99,73 +99,14 @@ workers = 2
 args = ["--variant", "hq", "--temporal-radius", "4", "--channel-mode", "luma,chroma"]
 
 # ---------------------------------------------------------------------------
-# nl3d: the HQ front end above, followed by a collaborative-filter cleanup
-# pass. Same temporal radius and channel mode as the matching av_hq_temporal
-# row above it, and no nl3d-specific flags are set, so both arms run
-# Nl3dOptions::default(). The point of running these two rows next to
-# av_hq_temporal_r2/r4 is that the front end is identical, so whatever
-# XPSNR/SSIM delta shows up is attributable to the collaborative stage
-# alone, not to a different noise estimate or a different strength table.
-#
-# The default is now calibrated (front_strength_scale 0.5, k_max 8,
-# tau_match 3.0, lambda_ht 2.7, residual_sigma_scale 1.9), swept on this
-# same clip at temporal radius 2, one dial at a time with the others
-# pinned, then checked with a small joint sweep for interaction. k_max
-# and tau_match were left at their pre-existing values, not swept.
-#
-# residual_sigma_scale went first, over 1.0, 1.4, 1.9, 2.4, 3.0,
-# bracketed on both sides at noise 4, 6, and 8. 1.9 won on the value
-# whose worst luma XPSNR across the three levels is highest, matching a
-# separate residual-noise measurement (src/nlmeans/tests/weight_ratio.rs)
-# that found the front end's true residual running about 1.92x the
-# analytic formula's prediction. SSIM agreed at every point.
-#
-# front_strength_scale went next, at residual_sigma_scale 1.9, over 0.6,
-# 0.8, 1.0. 0.6 won at every noise level and sat at the grid's edge, so
-# the grid was extended down through 0.3, 0.4, 0.5. Luma XPSNR turned
-# out to be a broad, nearly flat plateau from 0.3 to 0.6 at every noise
-# level, clearly ahead of 0.8 and 1.0, so 0.5, the plateau's centre, was
-# chosen over the edge value. SSIM does not disagree anywhere on the
-# plateau.
-#
-# lambda_ht went last, at the two values above, over 2.0, 2.7, 3.5. Luma
-# XPSNR favors 2.0 over 2.7 at noise 4 and 6 but ties it at noise 8,
-# while luma SSIM favors 2.7 at noise 6 and 8. 2.7 was kept, since it
-# wins the noise level where XPSNR itself is tied and SSIM is not, and a
-# check at 1.5 confirmed the value was already bracketed rather than
-# sitting on a still-rising edge. This is the one dial where the two
-# metrics point different directions depending on noise level.
-#
-# A joint check varying front_strength_scale and lambda_ht together, one
-# step either side of the chosen point (0.4/0.6 and 2.0/3.5), found no
-# combination beating the chosen point by more than run-to-run noise, so
-# no interaction large enough to move the calibration.
-#
-# Radius 4 was checked afterward with these same three values pinned
-# rather than swept again, and showed the same or larger XPSNR/SSIM gain
-# over its own av_hq_temporal_r4 row at every noise level, so the
-# radius-2 calibration carries over.
-# ---------------------------------------------------------------------------
-
-[[runs]]
-name = "av_nl3d_temporal_r2"
-kind = "av-denoise-nl3d"
-workers = 2
-args = ["--variant", "hq", "--temporal-radius", "2", "--channel-mode", "luma,chroma"]
-
-[[runs]]
-name = "av_nl3d_temporal_r4"
-kind = "av-denoise-nl3d"
-workers = 2
-args = ["--variant", "hq", "--temporal-radius", "4", "--channel-mode", "luma,chroma"]
-
-# ---------------------------------------------------------------------------
 # nl4d: groups 8x8 patches across the motion-compensated temporal window
 # itself, rather than filtering with nlmeans first and grouping within one
 # frame after. Runs at Nl4dOptions::default() (temporal_radius 2, refine 2,
-# spatial_radius 9, lambda_ht 2.7, c_min 0.05). No dial here has been swept
-# yet, so this row is a regression tripwire against future changes to the
-# defaults, not a tuned quality point.
+# spatial_radius 9, lambda_ht 5.3 in luma and 4.2 in chroma, c_min 0.05).
+# lambda_ht was picked by eye on real grain rather than swept on this
+# synthetic clip, and no other dial has been swept at all, so this row is
+# a regression tripwire against future changes to the defaults, not a
+# tuned quality point.
 # ---------------------------------------------------------------------------
 
 [[runs]]
@@ -176,9 +117,9 @@ args = ["--variant", "hq", "--temporal-radius", "2", "--channel-mode", "luma,chr
 
 # ---------------------------------------------------------------------------
 # External baseline: V-BM3D via bm3dhip (GPU, VapourSynth), radius 2 so
-# its 5-frame window matches av_nl3d_temporal_r2 and av_nl4d_temporal_r2
-# above. This is the temporal reference those two arms are actually
-# comparable to. ffmpeg's `bm3d` filter (score_ffmpeg_bm3d in the .py) has
+# its 5-frame window matches av_nl4d_temporal_r2 above. This is the
+# temporal reference that arm is actually comparable to. ffmpeg's
+# `bm3d` filter (score_ffmpeg_bm3d in the .py) has
 # no temporal window at all, so it measures a different amount of work
 # and no row here uses it any more. Sigma is the per-clip peak from the
 # [bm3d_sigmas] comment above, not the true noise sigma.
