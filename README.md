@@ -344,10 +344,10 @@ rows are directly comparable. NL4D always tracks motion, which is why the
 motion-compensated NLMeans-HQ row is here — that is the like-for-like comparison, not
 the plain one.
 
-| run                                          | preset |       fps | denoising   | detail retention | notes                                                                 |
-|----------------------------------------------|--------|----------:|-------------|------------------|-----------------------------------------------------------------------|
-| `nlmeans --variant fast`                     | `base` | **58.91** | medium      | low              | Traditional NLMeans algorithm                                         |
-| `nl4d --preset fast`                         | `fast` |     48.04 | higher      | higher           | Better detail retention compared to V-BM3D (r=1)                      |
+| run                                          | preset |       fps | denoising   | detail retention | notes                                                                     |
+|----------------------------------------------|--------|----------:|-------------|------------------|---------------------------------------------------------------------------|
+| `nlmeans --variant fast`                     | `base` | **58.91** | medium      | low              | Traditional NLMeans algorithm                                             |
+| `nl4d --preset fast`                         | `fast` |     48.04 | higher      | higher           | Better detail retention compared to V-BM3D (r=1)                          |
 | `nlmeans --variant hq`                       | `base` |     47.34 | medium      | medium           | NLMeans with adaptive noise estimation and motion confidence (NLMeans-HQ) |
 | `nlmeans --variant hq --motion-compensation` | `base` |     42.48 | high        | high             | NLMeans-HQ + block matching motion compensation                           |
 | `nl4d`                                       | `base` |     42.39 | **highest** | **highest**      | Better detail retention compared to V-BM3D (r=2) and all NLMeans variants |
