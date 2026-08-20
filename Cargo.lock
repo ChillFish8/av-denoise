@@ -844,9 +844,9 @@ dependencies = [
 
 [[package]]
 name = "cubecl-hip-sys"
-version = "7.1.5280200"
+version = "7.14.6085000"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bcdd98f72d6f17836a0477bcd5ae5dd6b57a80fb62a3c0919f867a231f897f28"
+checksum = "760c605ca1b54d12ba9209d2a47992082ff66346fbd96d830af22ac43adfeebc"
 dependencies = [
  "libc",
  "regex",
