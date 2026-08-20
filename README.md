@@ -84,13 +84,19 @@ The following (non-accelerator) features are available:
 
 ### Cargo install
 
+This builds the binary with the default accelerators enabled (`vulkan`)
+
 ```bash
 cargo install --locked av-denoise --features binary
 ```
 
+> [!IMPORTANT]
+> If you are building on macOS, you will want to add `--no-default-features` and add `--features metal` to
+> enable acceleration for Apple Silicon.
+
 ### From source
 
-This builds the binary with the default accelerators enabled (`vulkan` or `metal` if on macOS.)
+This builds the binary with the default accelerators enabled (`vulkan`)
 
 ```bash
 git clone https://github.com/ChillFish8/av-denoise.git
