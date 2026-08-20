@@ -2,7 +2,6 @@ use av_denoise::{
     DEFAULT_PILOT_STRENGTH_SCALE,
     DenoisingMode,
     MotionCompensationMode,
-    MotionEstimation,
     NlmTuning,
     NlmeansHqOptions,
     NlmeansOptions,
@@ -10,7 +9,7 @@ use av_denoise::{
 };
 use strum_macros::EnumString;
 
-use super::{Args, InputSource, Preset, resolve_channel_intent};
+use super::{Args, CommonArgs, MotionArgs, Preset, resolve_channel_intent};
 use crate::ingest::CliOptions;
 
 /// Which non-local means variant to run.
@@ -26,39 +25,8 @@ pub enum Variant {
 
 #[derive(Debug, Clone, clap::Args)]
 pub struct NlmeansArgs {
-    /// Where to read frames from.
-    ///
-    /// A path opens the file with ffms2 and splits the work by
-    /// scene. Any container or codec supported by ffmpeg works.
-    ///
-    /// `-` or `pipe:0` reads a y4m stream from standard input.
-    ///
-    /// `pipe:N` for `N` of 3 or above reads a y4m stream from an
-    /// inherited file descriptor.
-    ///
-    /// Piped input has no scene detection, so the temporal window
-    /// slides across the whole stream.
-    ///
-    /// A file whose name would otherwise be read as a pipe is
-    /// reachable by prefixing it, for example `./-`.
-    ///
-    /// The source's bit depth is detected automatically. 8, 10, and
-    /// 12-bit sources are supported and the output keeps the source's
-    /// depth. Other depths are rejected with a clear error message.
-    #[arg(short, long)]
-    pub input: InputSource,
-
-    /// How many scenes to clean in parallel.
-    ///
-    /// Each worker uses its own GPU memory for the frame ring
-    /// buffer, so higher values trade GPU memory for throughput.
-    ///
-    /// `1` is valid and useful for debugging. Defaults to 2 when
-    /// unset.
-    ///
-    /// Ignored for piped input, which cannot be split by scene.
-    #[arg(short = 'W', long)]
-    pub workers: Option<usize>,
+    #[command(flatten)]
+    pub common: CommonArgs,
 
     /// Which variant to run.
     ///
@@ -259,57 +227,13 @@ pub struct NlmeansArgs {
     ///
     /// The tracking strategy adapts automatically to `--temporal-radius`.
     ///
-    /// Has no effect when `--temporal-radius 0`.
+    /// The `--mc-*` flags only take effect with this set. Has no effect
+    /// when `--temporal-radius 0`.
     #[arg(long)]
     pub motion_compensation: bool,
 
-    /// Size of each motion-search block, in pixels. Must be even.
-    ///
-    /// Larger blocks are more stable but track motion less
-    /// accurately on small details.
-    ///
-    /// Only takes effect with `--motion-compensation`. Defaults to 16
-    /// when unset.
-    #[arg(long)]
-    pub mc_blksize: Option<u32>,
-
-    /// How many pixels neighbouring motion blocks may overlap.
-    ///
-    /// Must be less than `--mc-blksize`. Higher overlap smooths the
-    /// transitions between blocks but does more work.
-    ///
-    /// Only takes effect with `--motion-compensation`. Defaults to 8
-    /// when unset.
-    #[arg(long)]
-    pub mc_overlap: Option<u32>,
-
-    /// How many pixels of motion to search for at the finest level.
-    ///
-    /// The coarse pyramid pass reaches further (search radius times
-    /// 2 for a 2-level pyramid), so for typical content the default
-    /// is fine.
-    ///
-    /// Raise it for very fast motion.
-    ///
-    /// Only takes effect with `--motion-compensation`. Defaults to 4
-    /// when unset.
-    #[arg(long)]
-    pub mc_search: Option<u32>,
-
-    /// How many levels the motion-search pyramid uses.
-    ///
-    /// `1` does a single full-resolution search (cheaper, weaker on
-    /// large motion).
-    ///
-    /// `2` (default) does a coarse pass on a half-size image first,
-    /// then refines at full resolution.
-    ///
-    /// This handles much larger motion at modest extra cost.
-    ///
-    /// Only takes effect with `--motion-compensation`. Defaults to 2
-    /// when unset.
-    #[arg(long)]
-    pub mc_pyramid_levels: Option<u32>,
+    #[command(flatten)]
+    pub motion: MotionArgs,
 }
 
 /// `--variant`, `--temporal-radius`, and `--search-radius` resolved
@@ -416,19 +340,9 @@ impl NlmeansArgs {
                      the spatial path doesn't use temporal neighbours"
                 );
             }
-            MotionCompensationMode::Mvtools {
-                blksize: self.mc_blksize.unwrap_or(16),
-                overlap: self.mc_overlap.unwrap_or(8),
-                search_radius: self.mc_search.unwrap_or(4),
-                pyramid_levels: self.mc_pyramid_levels.unwrap_or(2),
-                estimation: MotionEstimation::default(),
-            }
+            self.motion.to_motion_search().into()
         } else {
-            if self.mc_blksize.is_some()
-                || self.mc_overlap.is_some()
-                || self.mc_search.is_some()
-                || self.mc_pyramid_levels.is_some()
-            {
+            if self.motion.any_set() {
                 tracing::warn!("--mc-* options are ignored unless --motion-compensation is set");
             }
             MotionCompensationMode::None
@@ -530,7 +444,7 @@ fn parse_prefilter(s: &str) -> Result<PrefilterMode, anyhow::Error> {
 mod tests {
     use clap::Parser;
 
-    use super::super::{Args, CliChannelMode, Command, Preset};
+    use super::super::{Args, CliChannelMode, Command, InputSource, Preset};
     use super::*;
 
     /// Parses a full argv into the `nlmeans` subcommand's args plus the
@@ -924,7 +838,7 @@ mod tests {
     fn a_path_parses_as_a_file_source() {
         let nlm = parse_input(&["--input", "noisy.mkv"]);
         assert_eq!(
-            nlm.input,
+            nlm.common.input,
             InputSource::File(std::path::PathBuf::from("noisy.mkv"))
         );
     }
@@ -932,13 +846,13 @@ mod tests {
     #[test]
     fn a_dash_parses_as_stdin() {
         let nlm = parse_input(&["-i", "-"]);
-        assert_eq!(nlm.input, InputSource::Stdin);
+        assert_eq!(nlm.common.input, InputSource::Stdin);
     }
 
     #[test]
     fn a_pipe_parses_as_a_descriptor() {
         let nlm = parse_input(&["-i", "pipe:3"]);
-        assert_eq!(nlm.input, InputSource::Fd(3));
+        assert_eq!(nlm.common.input, InputSource::Fd(3));
     }
 
     #[test]
@@ -951,12 +865,12 @@ mod tests {
     #[test]
     fn workers_is_unset_by_default() {
         let nlm = parse_input(&["-i", "noisy.mkv"]);
-        assert_eq!(nlm.workers, None);
+        assert_eq!(nlm.common.workers, None);
     }
 
     #[test]
     fn workers_carries_the_typed_value() {
         let nlm = parse_input(&["-i", "noisy.mkv", "--workers", "4"]);
-        assert_eq!(nlm.workers, Some(4));
+        assert_eq!(nlm.common.workers, Some(4));
     }
 }

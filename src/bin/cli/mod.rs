@@ -1,4 +1,6 @@
+mod common;
 mod input;
+mod motion;
 mod nl4d;
 mod nlmeans;
 
@@ -7,16 +9,18 @@ use av_denoise::accelerate::{Accelerator, get_default_accelerators};
 use clap::{Parser, Subcommand};
 use strum_macros::EnumString;
 
+pub use self::common::CommonArgs;
 pub use self::input::InputSource;
+pub use self::motion::MotionArgs;
 pub use self::nl4d::Nl4dArgs;
 pub use self::nlmeans::NlmeansArgs;
 use crate::ingest::BinaryChannelIntent;
 
 /// Speed vs quality dial.
 ///
-/// Each denoising family reads the same dial and fills in its own
-/// knobs from it. For `nlmeans` that is the variant, the temporal
-/// radius, and the search radius.
+/// Each denoising family reads the same dial and fills in its own knobs
+/// from it. For `nlmeans` that is the variant, the temporal radius, and
+/// the search radius. For `nl4d` it is the temporal radius alone.
 #[derive(Debug, Copy, Clone, Default, EnumString)]
 #[strum(ascii_case_insensitive)]
 pub enum Preset {
@@ -81,12 +85,14 @@ pub struct Args {
     ///
     /// `veryfast` is the fastest and lowest-quality end of the dial.
     /// For `nlmeans` it runs the `fast` variant with no temporal window
-    /// and matches this tool's original default behavior.
+    /// and matches this tool's original default behavior. For `nl4d` it
+    /// keeps a 1-frame temporal window, which that algorithm needs, and
+    /// narrows the spatial search instead.
     ///
-    /// `fast`, `base`, `slow`, and `veryslow` all run the `hq` variant
-    /// and widen the temporal window going up the list, from a 1-frame
-    /// radius at `fast` to an 8-frame radius at `veryslow`. `slow` and
-    /// `veryslow` also widen the search radius.
+    /// Going up the list widens the temporal window, from a 1-frame
+    /// radius at `fast` to an 8-frame radius at `veryslow`. `fast` and
+    /// above also run the `hq` variant of `nlmeans`, and `slow` and
+    /// `veryslow` widen its search radius.
     ///
     /// `base` is the default.
     #[arg(long, default_value = "base", global = true)]
@@ -171,16 +177,15 @@ pub enum Command {
     /// Denoise by grouping matching patches across several noisy frames
     /// directly, rather than filtering with non-local means first.
     ///
-    /// `nl4d` runs the same `hq` front end `nlmeans` does, but only for
-    /// its machinery, the frame ring, the motion field, and
-    /// the per-block temporal confidence it builds. No NLM weighting
-    /// pass ever runs. Instead, patches are grouped straight out of the
-    /// noisy frames, searching both the centre frame spatially and each
-    /// motion-compensated neighbour frame around where a patch is
-    /// predicted to have moved, then each group's coefficients are
-    /// shrunk jointly.
+    /// `nl4d` measures the noise level, tracks motion, and scores how
+    /// well each neighbour frame matches, the same way `nlmeans hq`
+    /// does. No NLM weighting pass ever runs. Instead, patches are
+    /// grouped straight out of the noisy frames, searching both the
+    /// centre frame spatially and each neighbour frame around where a
+    /// patch is predicted to have moved, then each group's coefficients
+    /// are shrunk jointly.
     ///
-    /// Always runs the `hq` front end with motion compensation forced
-    /// on. `--variant fast` is rejected.
+    /// Motion tracking is always on, and every preset keeps a temporal
+    /// window, which this algorithm needs.
     Nl4d(Nl4dArgs),
 }
