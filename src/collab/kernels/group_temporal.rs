@@ -66,6 +66,55 @@ fn mismatch_sigma2(confidence: f32, thsad: f32, blksize_area: f32) -> f32 {
     std::f32::consts::FRAC_PI_2 * eps * eps
 }
 
+/// The ring slot candidate `ci` is read from.
+///
+/// A candidate below `n_spatial` sits in the centre frame. Above it, the
+/// remainder divides into `n_refine`-sized blocks, one per neighbour, and
+/// the block index picks the neighbour's physical slot.
+///
+/// [`collab_group_temporal`] derives this where it needs it rather than
+/// keeping one entry per candidate in shared memory. Shared memory is
+/// what limits how many groups the GPU keeps in flight, and this is a
+/// divide and a small indexed read.
+#[cube]
+fn candidate_frame(
+    neighbour_slots: &Array<u32>,
+    ci: u32,
+    centre_slot: u32,
+    #[comptime] n_spatial: u32,
+    #[comptime] n_refine: u32,
+) -> u32 {
+    let mut frame = centre_slot;
+    if ci >= n_spatial {
+        frame = neighbour_slots[((ci - n_spatial) / n_refine) as usize];
+    }
+    frame
+}
+
+/// The motion-block confidence candidate `ci` carries.
+///
+/// A spatial candidate is not motion-predicted, so it carries `1.0`, the
+/// value a perfect match scores. A temporal candidate reads the
+/// confidence of its own neighbour's copy of `block`.
+///
+/// Derived on demand for the same reason [`candidate_frame`] is.
+#[cube]
+fn candidate_confidence(
+    confidence: &Array<f32>,
+    ci: u32,
+    block: u32,
+    #[comptime] n_spatial: u32,
+    #[comptime] n_refine: u32,
+    #[comptime] conf_stride: u32,
+) -> f32 {
+    let mut c = 1.0f32;
+    if ci >= n_spatial {
+        let t = (ci - n_spatial) / n_refine;
+        c = confidence[(t * conf_stride + block) as usize];
+    }
+    c
+}
+
 /// Finds the K most similar patches to each reference patch, searching
 /// the centre frame spatially and each neighbour frame in the ring
 /// around where motion compensation predicts the reference patch moved.
@@ -175,13 +224,12 @@ fn mismatch_sigma2(confidence: f32, thsad: f32, blksize_area: f32) -> f32 {
 /// `thsad` passed straight through, and `blksize` squared into the
 /// block area `mismatch_sigma2` divides by.
 ///
-/// Every candidate carries its source block's confidence alongside its
-/// distance, in a `cand_conf` array shaped like `dist`/`posn`/`frm`.
-/// The selection rounds below already read `posn`/`frm` off the
-/// winning index once a round's argmin has picked it, so `cand_conf`
-/// is read the same way, into a `top_c` array shaped like `top_p`/
-/// `top_f`, and it is that saved confidence [`mismatch_sigma2`] runs
-/// on, not a later re-read of `confidence` itself.
+/// A candidate's confidence is derived from its index by
+/// [`candidate_confidence`] at the one point a round needs it, the
+/// winner, rather than held in an array shaped like `dist`. The same
+/// goes for its ring slot and [`candidate_frame`]. Both are cheap to
+/// rebuild and shared memory is what limits how many groups this kernel
+/// keeps in flight.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments, unused_assignments)]
 pub fn collab_group_temporal<N: Size>(
@@ -231,8 +279,6 @@ pub fn collab_group_temporal<N: Size>(
     let mut ref_patch = SharedMemory::<f32>::new(comptime!(PATCH_AREA * channels) as usize);
     let mut dist = SharedMemory::<f32>::new(n_cand as usize);
     let mut posn = SharedMemory::<u32>::new(n_cand as usize);
-    let mut frm = SharedMemory::<u32>::new(n_cand as usize);
-    let mut cand_conf = SharedMemory::<f32>::new(n_cand as usize);
     let mut red_d = SharedMemory::<f32>::new(PATCH_AREA as usize);
     let mut red_i = SharedMemory::<u32>::new(PATCH_AREA as usize);
     let mut top_p = SharedMemory::<u32>::new(k_max as usize);
@@ -295,12 +341,6 @@ pub fn collab_group_temporal<N: Size>(
         let mut cy = 0u32;
         let mut frame_val = centre_slot;
         let mut gated = false;
-        // Never read for a spatial candidate, `frame_val` stays
-        // `centre_slot` for one of those and the write-out below never
-        // calls `mismatch_sigma2` on a centre-frame member, but every
-        // slot `cand_conf` could be indexed at still gets a defined
-        // value here.
-        let mut cand_c = 1.0f32;
 
         if ci < n_spatial {
             cx = clamp_top_left(
@@ -331,7 +371,6 @@ pub fn collab_group_temporal<N: Size>(
             let py = ry as i32 + cached_mv1 + (j / refine_side) as i32 - refine as i32;
             cx = clamp_top_left(px, max_x);
             cy = clamp_top_left(py, max_y);
-            cand_c = cached_c;
 
             if cached_c < c_min {
                 gated = true;
@@ -368,8 +407,6 @@ pub fn collab_group_temporal<N: Size>(
         }
         dist[ci as usize] = kept;
         posn[ci as usize] = packed;
-        frm[ci as usize] = frame_val;
-        cand_conf[ci as usize] = cand_c;
         ci += PATCH_AREA;
     }
     sync_cube();
@@ -415,9 +452,10 @@ pub fn collab_group_temporal<N: Size>(
         }
 
         let win_d = red_d[0];
-        let win_p = posn[red_i[0] as usize];
-        let win_f = frm[red_i[0] as usize];
-        let win_c = cand_conf[red_i[0] as usize];
+        let win_i = red_i[0];
+        let win_p = posn[win_i as usize];
+        let win_f = candidate_frame(neighbour_slots, win_i, centre_slot, n_spatial, n_refine);
+        let win_c = candidate_confidence(confidence, win_i, block, n_spatial, n_refine, conf_stride);
         if win_d < 3.0e38f32 {
             if tid == 0u32 {
                 top_p[slot as usize] = win_p;
@@ -432,7 +470,9 @@ pub fn collab_group_temporal<N: Size>(
             // neighbour.
             let mut di = tid;
             while di < n_cand {
-                if posn[di as usize] == win_p && frm[di as usize] == win_f {
+                let di_frame =
+                    candidate_frame(neighbour_slots, di, centre_slot, n_spatial, n_refine);
+                if posn[di as usize] == win_p && di_frame == win_f {
                     dist[di as usize] = 3.0e38f32;
                 }
                 di += PATCH_AREA;
