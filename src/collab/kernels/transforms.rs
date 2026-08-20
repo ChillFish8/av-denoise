@@ -122,33 +122,44 @@ pub fn fill_haar8_basis(basis: &mut SharedMemory<f32>, thread_id: u32) {
     }
 }
 
-/// Runs one forward 8-point DCT over the 8 values at `src[base + i *
-/// stride]`, writing the 8 coefficients to the same positions of `dst`.
+/// Runs one forward 8-point DCT over the 8 values at `buf[base + i *
+/// stride]`, writing the 8 coefficients back to the same positions.
 ///
 /// One thread computes all 8 outputs of one line, so the caller decides
 /// how many lines run at once by deciding how many threads call this.
 /// Passing `base` and `stride` as row or column offsets turns the same
 /// function into either a row transform or a column transform.
 ///
-/// `dst` must not alias `src`, this reads every input before writing any
-/// output, but it reads the whole line first only to keep the pattern
-/// simple, not because aliasing would otherwise be safe.
+/// The whole line is read into registers before any output is written, so
+/// writing an output cannot disturb an input a later output still needs.
+/// Reading once rather than once per output also turns 64 shared-memory
+/// reads per line into 8.
+///
+/// A thread owns its own eight slots for the whole call, so nothing here
+/// reads or writes across threads and no barrier is needed inside it. A
+/// caller that follows a row pass with a column pass still needs its own
+/// barrier between them, because the column pass reads slots the row pass
+/// wrote from other threads.
 #[cube]
 pub(crate) fn dct8_line_fwd(
     basis: &SharedMemory<f32>,
-    src: &SharedMemory<f32>,
-    dst: &mut SharedMemory<f32>,
+    buf: &mut SharedMemory<f32>,
     base: u32,
     stride: u32,
 ) {
+    let mut line = Array::<f32>::new(8usize);
+    #[unroll]
+    for i in 0..PATCH_SIZE {
+        line[i as usize] = buf[(base + i * stride) as usize];
+    }
     #[unroll]
     for j in 0..PATCH_SIZE {
         let mut sum = 0.0f32;
         #[unroll]
         for i in 0..PATCH_SIZE {
-            sum += basis[(j * PATCH_SIZE + i) as usize] * src[(base + i * stride) as usize];
+            sum += basis[(j * PATCH_SIZE + i) as usize] * line[i as usize];
         }
-        dst[(base + j * stride) as usize] = sum;
+        buf[(base + j * stride) as usize] = sum;
     }
 }
 
@@ -158,22 +169,37 @@ pub(crate) fn dct8_line_fwd(
 /// this reads `basis[j*8+i]` for output position `i` instead of output
 /// position `j`, and sums over `j` instead of `i`. Everything else about
 /// the calling convention matches `dct8_line_fwd`.
+///
+/// The whole line is read into registers before any output is written, so
+/// writing an output cannot disturb an input a later output still needs.
+/// Reading once rather than once per output also turns 64 shared-memory
+/// reads per line into 8.
+///
+/// A thread owns its own eight slots for the whole call, so nothing here
+/// reads or writes across threads and no barrier is needed inside it. A
+/// caller that follows a row pass with a column pass still needs its own
+/// barrier between them, because the column pass reads slots the row pass
+/// wrote from other threads.
 #[cube]
 pub(crate) fn dct8_line_inv(
     basis: &SharedMemory<f32>,
-    src: &SharedMemory<f32>,
-    dst: &mut SharedMemory<f32>,
+    buf: &mut SharedMemory<f32>,
     base: u32,
     stride: u32,
 ) {
+    let mut line = Array::<f32>::new(8usize);
+    #[unroll]
+    for j in 0..PATCH_SIZE {
+        line[j as usize] = buf[(base + j * stride) as usize];
+    }
     #[unroll]
     for i in 0..PATCH_SIZE {
         let mut sum = 0.0f32;
         #[unroll]
         for j in 0..PATCH_SIZE {
-            sum += basis[(j * PATCH_SIZE + i) as usize] * src[(base + j * stride) as usize];
+            sum += basis[(j * PATCH_SIZE + i) as usize] * line[j as usize];
         }
-        dst[(base + i * stride) as usize] = sum;
+        buf[(base + i * stride) as usize] = sum;
     }
 }
 

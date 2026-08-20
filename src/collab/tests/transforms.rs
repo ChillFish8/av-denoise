@@ -25,27 +25,26 @@ fn pseudo_random_patch(seed: u32) -> [f32; 64] {
 fn dct8_roundtrip_kernel(input: &Array<f32>, output: &mut Array<f32>) {
     let mut basis = SharedMemory::<f32>::new(64usize);
     let mut a = SharedMemory::<f32>::new(64usize);
-    let mut b = SharedMemory::<f32>::new(64usize);
     let tid = UNIT_POS_Y * 8 + UNIT_POS_X;
     fill_dct8_basis(&mut basis, tid);
     a[tid as usize] = input[tid as usize];
     sync_cube();
     // Rows then columns, forward.
     if tid < 8 {
-        dct8_line_fwd(&basis, &a, &mut b, tid * 8, 1);
+        dct8_line_fwd(&basis, &mut a, tid * 8, 1);
     }
     sync_cube();
     if tid < 8 {
-        dct8_line_fwd(&basis, &b, &mut a, tid, 8);
+        dct8_line_fwd(&basis, &mut a, tid, 8);
     }
     sync_cube();
     // Columns then rows, inverse.
     if tid < 8 {
-        dct8_line_inv(&basis, &a, &mut b, tid, 8);
+        dct8_line_inv(&basis, &mut a, tid, 8);
     }
     sync_cube();
     if tid < 8 {
-        dct8_line_inv(&basis, &b, &mut a, tid * 8, 1);
+        dct8_line_inv(&basis, &mut a, tid * 8, 1);
     }
     sync_cube();
     output[tid as usize] = a[tid as usize];
@@ -57,17 +56,16 @@ fn dct8_roundtrip_kernel(input: &Array<f32>, output: &mut Array<f32>) {
 fn dct8_forward_kernel(input: &Array<f32>, output: &mut Array<f32>) {
     let mut basis = SharedMemory::<f32>::new(64usize);
     let mut a = SharedMemory::<f32>::new(64usize);
-    let mut b = SharedMemory::<f32>::new(64usize);
     let tid = UNIT_POS_Y * 8 + UNIT_POS_X;
     fill_dct8_basis(&mut basis, tid);
     a[tid as usize] = input[tid as usize];
     sync_cube();
     if tid < 8 {
-        dct8_line_fwd(&basis, &a, &mut b, tid * 8, 1);
+        dct8_line_fwd(&basis, &mut a, tid * 8, 1);
     }
     sync_cube();
     if tid < 8 {
-        dct8_line_fwd(&basis, &b, &mut a, tid, 8);
+        dct8_line_fwd(&basis, &mut a, tid, 8);
     }
     sync_cube();
     output[tid as usize] = a[tid as usize];
@@ -312,7 +310,6 @@ fn haar8_roundtrip_kernel(input: &Array<f32>, output: &mut Array<f32>) {
     fill_haar8_basis(&mut basis, tid);
     sync_cube();
     let mut line = SharedMemory::<f32>::new(8usize);
-    let mut coeff = SharedMemory::<f32>::new(8usize);
     if tid == 0 {
         for i in 0..8u32 {
             line[i as usize] = input[i as usize];
@@ -320,8 +317,8 @@ fn haar8_roundtrip_kernel(input: &Array<f32>, output: &mut Array<f32>) {
     }
     sync_cube();
     if tid == 0 {
-        dct8_line_fwd(&basis, &line, &mut coeff, 0u32, 1u32);
-        dct8_line_inv(&basis, &coeff, &mut line, 0u32, 1u32);
+        dct8_line_fwd(&basis, &mut line, 0u32, 1u32);
+        dct8_line_inv(&basis, &mut line, 0u32, 1u32);
         for i in 0..8u32 {
             output[i as usize] = line[i as usize];
         }

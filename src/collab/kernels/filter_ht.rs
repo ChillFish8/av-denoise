@@ -234,7 +234,6 @@ pub fn collab_filter_ht<N: Size>(
 
     let mut basis = SharedMemory::<f32>::new(PATCH_AREA as usize);
     let mut stack = SharedMemory::<f32>::new(comptime!(k_max * PATCH_AREA) as usize);
-    let mut scratch = SharedMemory::<f32>::new(comptime!(k_max * PATCH_AREA) as usize);
     let mut wred = SharedMemory::<f32>::new(PATCH_AREA as usize);
     // The group's normalised weight, shared so every channel's scatter
     // reads the one the first channel computed.
@@ -276,32 +275,21 @@ pub fn collab_filter_ht<N: Size>(
         sync_cube();
 
         // 2D DCT forward, independently for each member's patch. Row
-        // pass then column pass, alternating `stack`/`scratch` as
-        // source and destination, the same convention a single-patch
-        // DCT follows.
+        // pass then column pass, both in place over `stack`. A thread
+        // owns its own eight slots within a pass, and the barrier
+        // between the passes covers the hand-off to the threads that
+        // read them next.
         let lines = k_use * PATCH_SIZE;
         if tid < lines {
             let member_k = tid / PATCH_SIZE;
             let row = tid % PATCH_SIZE;
-            dct8_line_fwd(
-                &basis,
-                &stack,
-                &mut scratch,
-                member_k * PATCH_AREA + row * PATCH_SIZE,
-                1u32,
-            );
+            dct8_line_fwd(&basis, &mut stack, member_k * PATCH_AREA + row * PATCH_SIZE, 1u32);
         }
         sync_cube();
         if tid < lines {
             let member_k = tid / PATCH_SIZE;
             let col = tid % PATCH_SIZE;
-            dct8_line_fwd(
-                &basis,
-                &scratch,
-                &mut stack,
-                member_k * PATCH_AREA + col,
-                PATCH_SIZE,
-            );
+            dct8_line_fwd(&basis, &mut stack, member_k * PATCH_AREA + col, PATCH_SIZE);
         }
         sync_cube();
 
@@ -396,30 +384,21 @@ pub fn collab_filter_ht<N: Size>(
         // Every member of the group is written back, not just the
         // reference patch, so every member's DCT coefficients need
         // inverting. The row and column passes mirror the forward ones
-        // exactly, one thread per (member, line).
+        // exactly, one thread per (member, line), both in place over
+        // `stack`. A thread owns its own eight slots within a pass, and
+        // the barrier between the passes covers the hand-off to the
+        // threads that read them next.
         let lines = k_use * PATCH_SIZE;
         if tid < lines {
             let member_k = tid / PATCH_SIZE;
             let row = tid % PATCH_SIZE;
-            dct8_line_inv(
-                &basis,
-                &stack,
-                &mut scratch,
-                member_k * PATCH_AREA + row * PATCH_SIZE,
-                1u32,
-            );
+            dct8_line_inv(&basis, &mut stack, member_k * PATCH_AREA + row * PATCH_SIZE, 1u32);
         }
         sync_cube();
         if tid < lines {
             let member_k = tid / PATCH_SIZE;
             let col = tid % PATCH_SIZE;
-            dct8_line_inv(
-                &basis,
-                &scratch,
-                &mut stack,
-                member_k * PATCH_AREA + col,
-                PATCH_SIZE,
-            );
+            dct8_line_inv(&basis, &mut stack, member_k * PATCH_AREA + col, PATCH_SIZE);
         }
         sync_cube();
 
