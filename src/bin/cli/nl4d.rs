@@ -19,7 +19,7 @@ pub struct Nl4dArgs {
     /// cleaning a frame.
     ///
     /// Larger values find more matches for a patch but use more memory
-    /// and add latency. In 1..=8.
+    /// and add latency. Between `1` and `8`.
     ///
     /// When `--input` names a file this is reset at every scene change,
     /// so raising it never causes blending across cuts.
@@ -33,7 +33,7 @@ pub struct Nl4dArgs {
     ///
     /// This is where most of the search work goes, since the window
     /// covers `(2 * radius + 1)^2` positions. Larger values find more
-    /// matches but cost quadratically more. In 1..=16.
+    /// matches but cost quadratically more. Between `1` and `16`.
     ///
     /// Defaults to whatever `--preset` selects.
     #[arg(long)]
@@ -42,8 +42,8 @@ pub struct Nl4dArgs {
     /// Half-width of the refine window searched around each neighbour
     /// frame's motion-predicted position.
     ///
-    /// Raise it when motion tracking lands close but not exact. In
-    /// 1..=4. Library default is 2.
+    /// Raise it when motion tracking lands close but not exact.
+    /// Between `1` and `4`. Library default is 2.
     #[arg(long)]
     pub refine: Option<u32>,
 
@@ -76,6 +76,19 @@ pub struct Nl4dArgs {
     /// `--channel-mode yuv` is used.
     #[arg(long)]
     pub chroma_lambda_ht: Option<f32>,
+
+    /// Multiplies the `--lambda-ht` in effect for each plane.
+    ///
+    /// `1.0` (the library default) changes nothing. Raise it to remove
+    /// more noise and more fine detail with it. Lower it to keep more
+    /// detail.
+    ///
+    /// This is the single dial for moving both planes together, since
+    /// luma and chroma have different defaults. It applies on top of
+    /// `--lambda-ht` and the per-plane overrides as well, so pinning one
+    /// plane and scaling both works. Between `0.1` and `10.0`.
+    #[arg(long)]
+    pub lambda_ht_scale: Option<f32>,
 
     /// How noisy the source is. Leave it unset for almost all uses.
     ///
@@ -112,9 +125,9 @@ pub struct Nl4dArgs {
     /// The confidence floor below which a whole neighbour block is
     /// skipped rather than scored.
     ///
-    /// In [0, 1). Library default is 0.05. Only affects how much
-    /// compute a submit spends, never which candidates are admitted
-    /// once they are scored.
+    /// Between `0` and `1`, not including `1`. Library default is
+    /// 0.05. Only affects how much compute a submit spends, never
+    /// which candidates are admitted once they are scored.
     #[arg(long)]
     pub c_min: Option<f32>,
 
@@ -200,6 +213,7 @@ impl Nl4dArgs {
                 // plane is known, and construction fills in the per-plane
                 // default for whatever is still unset.
                 lambda_ht: self.lambda_ht,
+                lambda_ht_scale: self.lambda_ht_scale.unwrap_or(defaults.lambda_ht_scale),
                 c_min: self.c_min.unwrap_or(defaults.c_min),
                 confidence_variance: !self.no_confidence_variance,
             }),
@@ -315,6 +329,7 @@ mod tests {
         assert_eq!(nl4d.lambda_ht, None);
         assert_eq!(nl4d.luma_lambda_ht, None);
         assert_eq!(nl4d.chroma_lambda_ht, None);
+        assert_eq!(nl4d.lambda_ht_scale, None);
         assert_eq!(nl4d.sigma, None);
         assert_eq!(nl4d.sigma_scale, None);
         assert_eq!(nl4d.thsad_scale, None);
@@ -334,6 +349,8 @@ mod tests {
             "12",
             "--lambda-ht",
             "2.0",
+            "--lambda-ht-scale",
+            "1.2",
             "--sigma",
             "6",
             "--sigma-scale",
@@ -349,11 +366,29 @@ mod tests {
         assert_eq!(nl4d.refine, Some(3));
         assert_eq!(nl4d.spatial_radius, Some(12));
         assert!((nl4d.lambda_ht.unwrap() - 2.0).abs() < f32::EPSILON);
+        assert!((nl4d.lambda_ht_scale.unwrap() - 1.2).abs() < f32::EPSILON);
         assert!((nl4d.sigma.unwrap() - 6.0).abs() < f32::EPSILON);
         assert!((nl4d.sigma_scale.unwrap() - 1.1).abs() < f32::EPSILON);
         assert!((nl4d.thsad_scale.unwrap() - 0.8).abs() < f32::EPSILON);
         assert!((nl4d.c_min.unwrap() - 0.1).abs() < f32::EPSILON);
         assert!(nl4d.no_confidence_variance);
+    }
+
+    #[test]
+    fn lambda_ht_scale_flows_into_the_nl4d_algorithm() {
+        let (args, nl4d) = parse(&["--lambda-ht-scale", "1.1"]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+
+        assert!((expect_nl4d(&opts).lambda_ht_scale - 1.1).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn unset_lambda_ht_scale_resolves_to_the_library_default() {
+        let (args, nl4d) = parse(&[]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let defaults = Nl4dOptions::default();
+
+        assert!((expect_nl4d(&opts).lambda_ht_scale - defaults.lambda_ht_scale).abs() < f32::EPSILON);
     }
 
     /// nl4d never runs an NLM weighting pass, so the flags that only

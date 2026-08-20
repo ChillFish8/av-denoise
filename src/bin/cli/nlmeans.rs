@@ -57,8 +57,8 @@ pub struct NlmeansArgs {
     /// and at most 11.0 (anything beyond this is insane.)
     ///
     /// `sigma_r` is the colour-similarity threshold, greater than 0.
-    /// `(0, 1]` is the typical range for normalised pixel data. There
-    /// is no enforced upper bound.
+    /// Values above `0` and up to `1` are typical for normalised
+    /// pixel data. There is no enforced upper bound.
     ///
     /// A good starting point is `bilateral:3.0,0.02`.
     ///

@@ -119,8 +119,9 @@ pub struct NlmeansHqOptions {
 ///
 /// `lambda_ht` has a per-plane default. `None` resolves through
 /// [`nl4d_default_lambda_ht`] once the plane being denoised is known.
+/// `lambda_ht_scale` then multiplies whichever value that resolves to.
 ///
-/// Every other default comes from [`crate::nl4d::Nl4dParams::default`].
+/// Every other default comes from [`Nl4dParams::default`].
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Nl4dOptions {
     /// How motion between frames is tracked.
@@ -155,6 +156,13 @@ pub struct Nl4dOptions {
     /// `None` resolves through [`nl4d_default_lambda_ht`], which returns
     /// a different value for luma than for chroma.
     pub lambda_ht: Option<f32>,
+    /// A multiplier applied to the resolved `lambda_ht`. Defaults to
+    /// 1.0.
+    ///
+    /// It scales an explicit `lambda_ht` and the calibrated per-plane
+    /// default alike, so one value moves both planes together. Has to
+    /// be finite and in `[0.1, 10.0]`.
+    pub lambda_ht_scale: f32,
     /// The confidence floor below which a whole neighbour block is
     /// skipped rather than scored, in `[0, 1)`. Defaults to 0.05. Only
     /// affects how much compute a submit spends, never which candidates
@@ -181,6 +189,7 @@ impl Default for Nl4dOptions {
             // construction time, once the plane being denoised is
             // known.
             lambda_ht: None,
+            lambda_ht_scale: 1.0,
             c_min: defaults.c_min,
             confidence_variance: defaults.confidence_variance,
         }
@@ -218,7 +227,7 @@ impl Nl4dOptions {
 /// texture.
 ///
 /// `ChannelMode::Yuv` reads the luma value, on the same "a fused pass is
-/// dominated by luma" assumption [`crate::nlmeans::hq_default_strength`]
+/// dominated by luma" assumption [`hq_default_strength`]
 /// makes for its own Yuv case.
 ///
 /// Chroma gets 4.2, picked the same way from the chroma residuals with
@@ -231,9 +240,27 @@ pub fn nl4d_default_lambda_ht(channels: ChannelMode) -> f32 {
 }
 
 /// Resolves `Nl4dOptions.lambda_ht` for one plane, falling back to
-/// [`nl4d_default_lambda_ht`] when the caller left it unset.
-fn resolve_lambda_ht(opts: &Nl4dOptions, channels: ChannelMode) -> f32 {
-    opts.lambda_ht.unwrap_or_else(|| nl4d_default_lambda_ht(channels))
+/// [`nl4d_default_lambda_ht`] when the caller left it unset, then
+/// applies `lambda_ht_scale`.
+///
+/// The scale multiplies an explicit value and the calibrated default
+/// alike, so it moves both planes together whether or not one of them
+/// is pinned.
+///
+/// The range check lives here rather than in [`Nl4dParams`],
+/// which only ever sees the product. A scale of 0 would surface there as
+/// a complaint about `lambda_ht`, naming a knob the caller never set.
+fn resolve_lambda_ht(opts: &Nl4dOptions, channels: ChannelMode) -> Result<f32, String> {
+    if !(opts.lambda_ht_scale.is_finite() && (0.1..=10.0).contains(&opts.lambda_ht_scale)) {
+        return Err(format!(
+            "lambda_ht_scale must be finite and in [0.1, 10.0], got {}",
+            opts.lambda_ht_scale
+        ));
+    }
+
+    let lambda_ht = opts.lambda_ht.unwrap_or_else(|| nl4d_default_lambda_ht(channels));
+
+    Ok(lambda_ht * opts.lambda_ht_scale)
 }
 
 /// Whether a frame is cleaned on its own or alongside its neighbours.
@@ -356,8 +383,6 @@ pub enum DenoiserError {
 /// This keeps `Backend`'s own match arms at one line each. Without it,
 /// adding a second denoiser type would multiply the runtime arms instead
 /// of fanning out once here.
-// Both variants are boxed so neither denoiser's size dictates every
-// `Engine` value's size, whichever variant is actually held.
 enum Engine<R: Runtime> {
     Nlm(Box<NlmDenoiser<R>>),
     Nl4d(Box<Nl4dDenoiser<R>>),
@@ -417,7 +442,8 @@ fn build_engine<R: Runtime>(
                 )));
             }
 
-            let lambda_ht = resolve_lambda_ht(opts, params.channels);
+            let lambda_ht = resolve_lambda_ht(opts, params.channels)
+                .map_err(|e| DenoiserError::Other(anyhow::anyhow!(e)))?;
             let nl4d_params = Nl4dParams {
                 temporal_radius: params.temporal_radius,
                 nlm: params,
@@ -828,8 +854,8 @@ mod options_tests {
     fn resolve_lambda_ht_unset_uses_the_per_plane_default() {
         let opts = Nl4dOptions::default();
 
-        let luma = resolve_lambda_ht(&opts, ChannelMode::Luma);
-        let chroma = resolve_lambda_ht(&opts, ChannelMode::Chroma);
+        let luma = resolve_lambda_ht(&opts, ChannelMode::Luma).expect("the default scale is in range");
+        let chroma = resolve_lambda_ht(&opts, ChannelMode::Chroma).expect("the default scale is in range");
 
         assert!((luma - 5.3).abs() < f32::EPSILON, "got {luma}");
         assert!((chroma - 4.2).abs() < f32::EPSILON, "got {chroma}");
@@ -843,10 +869,70 @@ mod options_tests {
         };
 
         for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
-            let got = resolve_lambda_ht(&opts, channels);
+            let got = resolve_lambda_ht(&opts, channels).expect("the default scale is in range");
             assert!(
                 (got - 4.4).abs() < f32::EPSILON,
                 "channels {channels:?} got {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_lambda_ht_default_scale_leaves_the_value_alone() {
+        let opts = Nl4dOptions::default();
+
+        for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
+            let got = resolve_lambda_ht(&opts, channels).expect("the default scale is in range");
+            let want = nl4d_default_lambda_ht(channels);
+            assert!(
+                (got - want).abs() < f32::EPSILON,
+                "channels {channels:?} got {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_lambda_ht_scale_multiplies_the_per_plane_default() {
+        let opts = Nl4dOptions {
+            lambda_ht_scale: 1.1,
+            ..Nl4dOptions::default()
+        };
+
+        for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
+            let got = resolve_lambda_ht(&opts, channels).expect("1.1 is in range");
+            let want = nl4d_default_lambda_ht(channels) * 1.1;
+            assert!(
+                (got - want).abs() < 1e-5,
+                "channels {channels:?} got {got}, want {want}"
+            );
+        }
+    }
+
+    /// The scale is not limited to the defaults. Pinning one plane and
+    /// scaling both is the combination this exists for.
+    #[test]
+    fn resolve_lambda_ht_scale_multiplies_an_explicit_value() {
+        let opts = Nl4dOptions {
+            lambda_ht: Some(5.0),
+            lambda_ht_scale: 0.9,
+            ..Nl4dOptions::default()
+        };
+
+        let got = resolve_lambda_ht(&opts, ChannelMode::Luma).expect("0.9 is in range");
+        assert!((got - 4.5).abs() < 1e-5, "got {got}");
+    }
+
+    #[test]
+    fn resolve_lambda_ht_rejects_an_out_of_range_scale() {
+        for bad in [0.0, -1.0, 0.05, 10.5, f32::NAN, f32::INFINITY] {
+            let opts = Nl4dOptions {
+                lambda_ht_scale: bad,
+                ..Nl4dOptions::default()
+            };
+            let err = resolve_lambda_ht(&opts, ChannelMode::Luma).unwrap_err();
+            assert!(
+                err.contains("lambda_ht_scale"),
+                "lambda_ht_scale={bad} should be rejected, got {err}"
             );
         }
     }

@@ -199,25 +199,31 @@ instead, since NL4D has nothing to group without neighbours.
 
 ### The NL4D dials
 
-| Symptom                               | First thing to try          | Second                    |
-|---------------------------------------|-----------------------------|---------------------------|
-| Grain or noise still visible          | one preset higher           | `--lambda-ht` up a little |
-| Fine texture getting scrubbed         | `--lambda-ht` down a little | `--sigma-scale 0.9`       |
-| Result looks under-cleaned everywhere | `--sigma-scale 1.1`         | one preset higher         |
-| Smearing or ghosting on motion        | one preset lower            | `--refine` up             |
-| Too slow                              | `--spatial-radius` down     | one preset lower          |
+| Symptom                               | First thing to try                | Second              |
+|---------------------------------------|-----------------------------------|---------------------|
+| Grain or noise still visible          | `--lambda-ht-scale` up a little   | one preset higher   |
+| Fine texture getting scrubbed         | `--lambda-ht-scale` down a little | `--sigma-scale 0.9` |
+| Result looks under-cleaned everywhere | `--sigma-scale 1.1`               | one preset higher   |
+| Smearing or ghosting on motion        | one preset lower                  | `--refine` up       |
+| Too slow                              | `--spatial-radius` down           | one preset lower    |
 
-**`--lambda-ht` is the main dial.** It sets how many standard deviations of estimated noise a
-transform coefficient has to clear to survive, so raising it removes more noise and takes more
-fine detail with it. The defaults, 5.3 for luma and 4.2 for chroma, were picked by eye on real
-grain and deliberately biased toward keeping detail. Move in steps of about 0.3 and judge by eye.
-`--luma-lambda-ht` and `--chroma-lambda-ht` pin one plane without touching the other.
+**`--lambda-ht-scale` is the main dial.** The threshold it scales is how many standard deviations
+of estimated noise a transform coefficient has to clear to survive, so raising the scale removes
+more noise and takes more fine detail with it. Move in steps of about 0.05 and judge by eye.
+Reach for it before the absolute values, since luma and chroma start from different defaults and
+the scale keeps that separation.
 
-**`--sigma-scale` is the other one**, and it does something different. `--lambda-ht` decides how
-aggressive to be at a given noise leve. `--sigma-scale` corrects the noise level itself. That
+**`--lambda-ht` sets those thresholds outright.** The defaults, 5.3 for luma and 4.2 for chroma,
+were picked by eye on real grain and deliberately biased toward keeping detail. A single value
+here flattens both planes onto the same number, so prefer the scale unless you have a figure you
+want. `--luma-lambda-ht` and `--chroma-lambda-ht` pin one plane without touching the other, and
+`--lambda-ht-scale` still applies on top of whatever is pinned.
+
+**`--sigma-scale` is the other one**, and it does something different. The lambda dials decide how
+aggressive to be at a given noise level. `--sigma-scale` corrects the noise level itself. That
 estimate also feeds the motion confidence scoring, so when the whole result reads uniformly
 under- or over-cleaned, correcting the level fixes the cause rather than the symptom. When you
-are happy with the level and just want a different trade, use `--lambda-ht`.
+are happy with the level and just want a different trade, use `--lambda-ht-scale`.
 
 **`--spatial-radius` is the speed dial.** The centre-frame search covers `(2 * radius + 1)^2`
 positions, so it dominates the work. Dropping it from 9 to 6 roughly halves the candidates, which
@@ -496,12 +502,13 @@ the defaults.
 av-denoise nl4d --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
 ```
 
-**Keep more detail, or take out more grain.** `--lambda-ht` is NL4D's main dial. Lower keeps more
-detail, higher removes more noise. The default differs between luma and chroma, and either plane
-can be pinned on its own with `--luma-lambda-ht` / `--chroma-lambda-ht`.
+**Keep more detail, or take out more grain.** `--lambda-ht-scale` is NL4D's main dial. Lower keeps
+more detail, higher removes more noise. It moves luma and chroma together, which matters because
+they start from different defaults. Either plane can still be pinned outright with
+`--luma-lambda-ht` / `--chroma-lambda-ht`.
 
 ```bash
-av-denoise nl4d --lambda-ht 4.5 --input noisy.mkv \
+av-denoise nl4d --lambda-ht-scale 0.85 --input noisy.mkv \
   | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
 ```
 
@@ -686,17 +693,18 @@ What `--preset` fills in:
 
 | Flag                    | What it does                                                                                                                                                                                                         | Default              |
 |-------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------|
-| `--temporal-radius <N>` | How many neighbouring frames to search on each side, in 1..=8. More frames means more patches to group.                                                                                                              | from `--preset`      |
-| `--lambda-ht <f>`       | How aggressively small transform coefficients are zeroed out. Higher removes more noise and more fine detail with it. This is the main quality dial. `--luma-lambda-ht` and `--chroma-lambda-ht` override one plane. | 5.3 luma, 4.2 chroma |
-| `--spatial-radius <N>`  | Half-width of the candidate search inside the centre frame, in 1..=16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                              | from `--preset`      |
-| `--sigma-scale <f>`     | Nudges the measured noise level, the same dial NLMeans spells `--hq-sigma-scale`.                                                                                                                                  | `1.0`                |
+| `--temporal-radius <N>` | How many neighbouring frames to search on each side, between 1 and 8. More frames means more patches to group.                                                                                                       | from `--preset`      |
+| `--lambda-ht <f>`       | How aggressively small transform coefficients are zeroed out. Higher removes more noise and more fine detail with it. `--luma-lambda-ht` and `--chroma-lambda-ht` override one plane.                                | 5.3 luma, 4.2 chroma |
+| `--lambda-ht-scale <f>` | Multiplies the `--lambda-ht` in effect for each plane. The main quality dial, since luma and chroma start from different defaults and this moves both together.                                                      | `1.0`                |
+| `--spatial-radius <N>`  | Half-width of the candidate search inside the centre frame, between 1 and 16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                       | from `--preset`      |
+| `--sigma-scale <f>`     | Nudges the measured noise level, the same dial NLMeans spells `--hq-sigma-scale`.                                                                                                                                    | `1.0`                |
 
 <details>
 <summary><b>Expert flags</b> — calibration and debugging, not everyday tuning</summary>
 
 | Flag                                                                 | What it does                                                                                                                                                                   | Default             |
 |----------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------|
-| `--refine <N>`                                                       | Half-width of the window searched around each neighbour frame's motion-predicted position, in 1..=4. Raise it when motion tracking lands close but not exact.                  | `2`                 |
+| `--refine <N>`                                                       | Half-width of the window searched around each neighbour frame's motion-predicted position, between 1 and 4. Raise it when motion tracking lands close but not exact.           | `2`                 |
 | `--sigma <f>`                                                        | Pins the noise level in 8-bit units, turning the per-scene measurement off entirely.                                                                                           | measured            |
 | `--thsad-scale <f>`                                                  | How badly a neighbour frame may match before its patches stop being trusted.                                                                                                   | `1.0`               |
 | `--c-min <f>`                                                        | Confidence floor below which a whole neighbour block is skipped rather than scored. Only changes how much compute a frame costs, never which patches are admitted once scored. | `0.05`              |
@@ -736,7 +744,7 @@ What `--preset` fills in:
 |----------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------|
 | `--search-radius <N>`                                                | How far to look for matching patches inside a frame. Costs quadratically.                                                                                                          | from `--preset`     |
 | `--patch-radius <N>`                                                 | Half-width of a compared patch, which covers `(2N+1)^2` pixels.                                                                                                                    | `4`                 |
-| `--self-weight <f>`                                                  | How much weight the centre pixel gets in the average. `0` is pure NLMeans.                                                                                                             | `1.0`               |
+| `--self-weight <f>`                                                  | How much weight the centre pixel gets in the average. `0` is pure NLMeans.                                                                                                         | `1.0`               |
 | `--hq-sigma <f>`                                                     | Pins the noise level in 8-bit units, turning the per-scene measurement off entirely. `--hq-sigma-scale` keeps the measurement and nudges it, which is almost always what you want. | measured            |
 | `--hq-thsad-scale <f>`                                               | How badly a neighbour may match before its contribution starts dropping.                                                                                                           | `1.0`               |
 | `--hq-no-auto-strength`                                              | Reads `--strength` as an absolute value instead of a multiplier on the measured noise.                                                                                             | off                 |
