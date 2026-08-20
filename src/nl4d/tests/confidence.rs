@@ -1,7 +1,15 @@
 use cubecl::prelude::*;
 
 use super::grouping::{BLKSIZE, THSAD, run_group_temporal};
-use super::helpers::{R, deterministic_texture, make_client, noisy_copy_of, noisy_ring, planted_ring, textured_base};
+use super::helpers::{
+    R,
+    deterministic_texture,
+    make_client,
+    noisy_copy_of,
+    noisy_ring,
+    planted_ring,
+    textured_base,
+};
 use crate::collab::STEP;
 use crate::collab::geometry::refs_along;
 use crate::collab::kernels::transforms::haar_variance_ladder;
@@ -75,11 +83,21 @@ fn low_confidence_produces_the_derived_mismatch_variance() {
     // k = +1 carries the confidence under test, every other neighbour
     // stays at 1.0 so this group still fills without the low-confidence
     // neighbour crowding anything else out of contention.
-    let fx = planted_ring(w, h, radius, ref_pos, 3, &patch, 0.2, |k| if k == 1 { low_c } else { 1.0 });
+    let fx = planted_ring(w, h, radius, ref_pos, 3, &patch, 0.2, |k| {
+        if k == 1 { low_c } else { 1.0 }
+    });
     let mismatch_scale = 1.0f32;
 
-    let (_pos, member_frame, member_count, member_sig2) =
-        run_group_temporal(&fx, 0.0, 0.05, THSAD, mismatch_scale, REFINE, K_MAX, SPATIAL_RADIUS);
+    let (_pos, member_frame, member_count, member_sig2) = run_group_temporal(
+        &fx,
+        0.0,
+        0.05,
+        THSAD,
+        mismatch_scale,
+        REFINE,
+        K_MAX,
+        SPATIAL_RADIUS,
+    );
 
     let refs_x = refs_along(w);
     let ref_idx = ((ref_pos.1 / STEP) * refs_x + (ref_pos.0 / STEP)) as usize;
@@ -100,7 +118,10 @@ fn low_confidence_produces_the_derived_mismatch_variance() {
     // Sanity: the derived value must actually be far from zero, or the
     // assertion above would pass trivially against a broken formula
     // that always returns ~0.
-    assert!(expected > 1e-4, "expected a non-trivial mismatch variance, got {expected}");
+    assert!(
+        expected > 1e-4,
+        "expected a non-trivial mismatch variance, got {expected}"
+    );
 }
 
 /// A centre-frame member carries `sigma_m2 = 0.0` exactly, whatever the
@@ -192,7 +213,11 @@ fn inflated_member_variance_raises_exactly_the_rows_it_touches() {
     }
 }
 
-fn confidence_variance_test_params(temporal_radius: u32, mismatch_scale: f32, confidence_variance: bool) -> Nl4dParams {
+fn confidence_variance_test_params(
+    temporal_radius: u32,
+    mismatch_scale: f32,
+    confidence_variance: bool,
+) -> Nl4dParams {
     const SIGMA: f32 = 6.0 / 255.0;
     Nl4dParams {
         nlm: NlmParams {
@@ -224,7 +249,13 @@ fn confidence_variance_test_params(temporal_radius: u32, mismatch_scale: f32, co
 
 /// Runs [`Nl4dDenoiser`] over a short static-content clip and returns
 /// every frame it emits.
-fn run_denoiser(client: &ComputeClient<R>, params: Nl4dParams, w: u32, h: u32, frames: &[Vec<f32>]) -> Vec<Vec<f32>> {
+fn run_denoiser(
+    client: &ComputeClient<R>,
+    params: Nl4dParams,
+    w: u32,
+    h: u32,
+    frames: &[Vec<f32>],
+) -> Vec<Vec<f32>> {
     let mut d = Nl4dDenoiser::<R>::new(client, params, w, h).expect("construction failed");
     let mut outputs = Vec::new();
     for frame in frames {
@@ -247,7 +278,9 @@ fn mismatch_scale_zero_matches_confidence_variance_off_bit_for_bit() {
     let radius = 2u32;
     let base = textured_base(w, h);
     let n = 9usize;
-    let frames: Vec<Vec<f32>> = (0..n as u32).map(|seed| noisy_copy_of(&base, w, h, 6.0 / 255.0, seed)).collect();
+    let frames: Vec<Vec<f32>> = (0..n as u32)
+        .map(|seed| noisy_copy_of(&base, w, h, 6.0 / 255.0, seed))
+        .collect();
 
     let off_by_flag = run_denoiser(
         &client,
@@ -264,7 +297,11 @@ fn mismatch_scale_zero_matches_confidence_variance_off_bit_for_bit() {
         &frames,
     );
 
-    assert_eq!(off_by_flag.len(), off_by_scale.len(), "both arms must emit the same frame count");
+    assert_eq!(
+        off_by_flag.len(),
+        off_by_scale.len(),
+        "both arms must emit the same frame count"
+    );
     assert!(
         !off_by_flag.is_empty(),
         "expected at least one emitted frame from this clip length"

@@ -211,7 +211,9 @@ impl Nl4dArgs {
             BinaryChannelIntent::Chroma if self.luma_lambda_ht.is_some() => {
                 tracing::warn!("--luma-lambda-ht is ignored when luma is not being denoised");
             },
-            BinaryChannelIntent::YuvFused if self.luma_lambda_ht.is_some() || self.chroma_lambda_ht.is_some() => {
+            BinaryChannelIntent::YuvFused
+                if self.luma_lambda_ht.is_some() || self.chroma_lambda_ht.is_some() =>
+            {
                 tracing::warn!(
                     "--luma-lambda-ht and --chroma-lambda-ht are ignored when --channel-mode yuv is used"
                 );
@@ -327,7 +329,10 @@ mod tests {
     fn explicit_variant_hq_is_accepted() {
         let (args, nl4d) = parse(&["--variant", "hq"]);
         let opts = nl4d.build_options(&args);
-        assert!(opts.is_ok(), "explicit hq should be accepted under nl4d: {opts:?}");
+        assert!(
+            opts.is_ok(),
+            "explicit hq should be accepted under nl4d: {opts:?}"
+        );
     }
 
     #[test]

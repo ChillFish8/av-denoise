@@ -154,8 +154,15 @@ fn zero_accum_clears_every_slot_of_a_buffer_past_the_grid_clamp() {
     const MAX_GRID_1D: u32 = 65_535;
     let dim = 256u32;
     let pixels = 16_800_005usize;
-    assert!(pixels as u32 > MAX_GRID_1D * dim, "test buffer must exceed the clamp point");
-    assert_ne!(pixels as u32 % dim, 0, "test buffer must not be a multiple of the block size");
+    assert!(
+        pixels as u32 > MAX_GRID_1D * dim,
+        "test buffer must exceed the clamp point"
+    );
+    assert_ne!(
+        pixels as u32 % dim,
+        0,
+        "test buffer must not be a multiple of the block size"
+    );
 
     let client = make_client();
     let accum = client.create_from_slice(i32::as_bytes(&vec![42i32; pixels]));

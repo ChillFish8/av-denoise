@@ -143,10 +143,7 @@ impl Nl4dParams {
         }
 
         if !(self.c_min.is_finite() && self.c_min >= 0.0 && self.c_min < 1.0) {
-            return Err(format!(
-                "c_min must be finite and in [0, 1), got {}",
-                self.c_min
-            ));
+            return Err(format!("c_min must be finite and in [0, 1), got {}", self.c_min));
         }
 
         if !(self.mismatch_scale.is_finite() && self.mismatch_scale >= 0.0) {
@@ -268,10 +265,7 @@ mod tests {
                 lambda_ht: bad,
                 ..Nl4dParams::default()
             };
-            assert!(
-                params.validate().is_err(),
-                "lambda_ht={bad} should be rejected"
-            );
+            assert!(params.validate().is_err(), "lambda_ht={bad} should be rejected");
         }
     }
 

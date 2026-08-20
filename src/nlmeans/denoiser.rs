@@ -1,8 +1,6 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use crate::denoiser::DenoiserError;
-
 use super::align::StorageAlign;
 use super::kernels::gpu_copy;
 use super::motion::{self, MotionCtx, MotionEstimation, build_pyramid_for_slot, run_pyramid_build};
@@ -29,6 +27,7 @@ use super::params::{NlmParams, SEPARABLE_THRESHOLD, sigma_eff, validate_dimensio
 use super::pending::{Pending, unpack_frame};
 use super::prefilter::{PrefilterCtx, PrefilterMode, run_prefilter};
 use super::{BLOCK_1D, MAX_GRID_1D};
+use crate::denoiser::DenoiserError;
 
 /// A denoised frame that has finished its kernels but is still resident
 /// on the GPU.

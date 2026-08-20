@@ -381,9 +381,7 @@ fn run_haar8_basis() -> Vec<f32> {
         );
     }
 
-    let bytes = client
-        .read_one(output_buf)
-        .expect("haar8 basis readback failed");
+    let bytes = client.read_one(output_buf).expect("haar8 basis readback failed");
     f32::from_bytes(&bytes)[..64].to_vec()
 }
 
@@ -397,10 +395,7 @@ fn haar8_basis_roundtrips_and_is_orthonormal() {
     let input: [f32; 8] = patch[..8].try_into().expect("patch has at least 8 entries");
     let output = run_haar8_roundtrip(&input);
     for (idx, (&want, &got)) in input.iter().zip(output.iter()).enumerate() {
-        assert!(
-            (want - got).abs() < 1e-6,
-            "idx={idx}: want {want} got {got}"
-        );
+        assert!((want - got).abs() < 1e-6, "idx={idx}: want {want} got {got}");
     }
 
     let basis = run_haar8_basis();

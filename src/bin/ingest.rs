@@ -1031,7 +1031,10 @@ mod cli_options_tests {
 
     /// The same shape as [`nl4d_opts`], with the two per-plane
     /// `mismatch_scale` overrides under test instead of `lambda_ht`.
-    fn nl4d_mismatch_opts(luma_mismatch_scale: Option<f32>, chroma_mismatch_scale: Option<f32>) -> CliOptions {
+    fn nl4d_mismatch_opts(
+        luma_mismatch_scale: Option<f32>,
+        chroma_mismatch_scale: Option<f32>,
+    ) -> CliOptions {
         CliOptions {
             luma_mismatch_scale,
             chroma_mismatch_scale,

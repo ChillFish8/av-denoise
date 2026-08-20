@@ -1,6 +1,7 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
+use super::params::Nl4dParams;
 use crate::collab::geometry::{member_buf_len, ref_count, refs_along};
 use crate::collab::kernels::aggregate::{
     collab_normalise,
@@ -14,8 +15,6 @@ use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, PATCH_SIZE};
 use crate::denoiser::DenoiserError;
 use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, MAX_GRID_1D, NlmDenoiser, Pending, RingView};
-
-use super::params::Nl4dParams;
 
 /// Groups similar 8x8 patches across a motion-compensated temporal
 /// window and denoises each group jointly.
@@ -127,7 +126,12 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     ///
     /// Rejects an invalid `params` (see [`Nl4dParams::validate`]) and a
     /// frame smaller than one collaborative patch on either axis.
-    pub fn new(client: &ComputeClient<R>, mut params: Nl4dParams, width: u32, height: u32) -> Result<Self, String> {
+    pub fn new(
+        client: &ComputeClient<R>,
+        mut params: Nl4dParams,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
         params.validate()?;
 
         if width < PATCH_SIZE || height < PATCH_SIZE {

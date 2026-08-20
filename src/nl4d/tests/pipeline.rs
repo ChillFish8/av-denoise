@@ -1,14 +1,21 @@
 use cubecl::prelude::*;
 
-use super::helpers::{make_client, noisy_copy_of, psnr, textured_base, R};
+use super::helpers::{R, make_client, noisy_copy_of, psnr, textured_base};
+use crate::collab::MAX_K;
 use crate::collab::geometry::{filtered_buf_len, member_buf_len, ref_count, refs_along};
 use crate::collab::kernels::aggregate::{ACCUM_SCALE, collab_normalise, collab_zero_accum, weight_scale};
 use crate::collab::kernels::filter_ht::collab_filter_ht;
 use crate::collab::kernels::group_temporal::collab_group_temporal;
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::MAX_K;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
-use crate::nlmeans::{ChannelMode, HqParams, MotionCompensationMode, MotionEstimation, NlmDenoiser, NlmParams};
+use crate::nlmeans::{
+    ChannelMode,
+    HqParams,
+    MotionCompensationMode,
+    MotionEstimation,
+    NlmDenoiser,
+    NlmParams,
+};
 
 const SIGMA: f32 = 6.0 / 255.0;
 const SPATIAL_RADIUS: u32 = 9;
@@ -56,7 +63,9 @@ fn denoises_a_static_noisy_clip() {
     let base = textured_base(w, h);
     let n = 9usize;
 
-    let noisy_frames: Vec<Vec<f32>> = (0..n as u32).map(|seed| noisy_copy_of(&base, w, h, SIGMA, seed)).collect();
+    let noisy_frames: Vec<Vec<f32>> = (0..n as u32)
+        .map(|seed| noisy_copy_of(&base, w, h, SIGMA, seed))
+        .collect();
 
     let params = static_clip_params(radius);
     let mut d = Nl4dDenoiser::<R>::new(&client, params, w, h).expect("construction failed");
@@ -68,13 +77,10 @@ fn denoises_a_static_noisy_clip() {
             outputs.push(pending.wait().expect("readback failed"));
         }
     }
-    d.flush(|frame| outputs.push(frame.to_vec())).expect("flush failed");
+    d.flush(|frame| outputs.push(frame.to_vec()))
+        .expect("flush failed");
 
-    assert_eq!(
-        outputs.len(),
-        n,
-        "expected one emitted frame per pushed frame"
-    );
+    assert_eq!(outputs.len(), n, "expected one emitted frame per pushed frame");
 
     for (i, out) in outputs.iter().enumerate() {
         let noisy_psnr = psnr(&noisy_frames[i], &base);
@@ -105,7 +111,9 @@ fn denoises_at_the_previously_overflowing_spatial_and_temporal_radius() {
     let base = textured_base(w, h);
     let n = 3usize;
 
-    let noisy_frames: Vec<Vec<f32>> = (0..n as u32).map(|seed| noisy_copy_of(&base, w, h, SIGMA, seed)).collect();
+    let noisy_frames: Vec<Vec<f32>> = (0..n as u32)
+        .map(|seed| noisy_copy_of(&base, w, h, SIGMA, seed))
+        .collect();
 
     let params = Nl4dParams {
         spatial_radius: 16,
@@ -120,13 +128,10 @@ fn denoises_at_the_previously_overflowing_spatial_and_temporal_radius() {
             outputs.push(pending.wait().expect("readback failed"));
         }
     }
-    d.flush(|frame| outputs.push(frame.to_vec())).expect("flush failed");
+    d.flush(|frame| outputs.push(frame.to_vec()))
+        .expect("flush failed");
 
-    assert_eq!(
-        outputs.len(),
-        n,
-        "expected one emitted frame per pushed frame"
-    );
+    assert_eq!(outputs.len(), n, "expected one emitted frame per pushed frame");
 
     for (i, out) in outputs.iter().enumerate() {
         // An `i32` overflow wraps the fixed-point accumulator into a huge
@@ -185,7 +190,9 @@ fn survives_a_ring_size_that_would_overflow_a_single_zero_dispatch() {
     let total_frames = 1 + 2 * radius;
     let n = (2 * total_frames + 3) as usize;
 
-    let noisy_frames: Vec<Vec<f32>> = (0..n as u32).map(|seed| noisy_copy_of(&base, w, h, SIGMA, seed)).collect();
+    let noisy_frames: Vec<Vec<f32>> = (0..n as u32)
+        .map(|seed| noisy_copy_of(&base, w, h, SIGMA, seed))
+        .collect();
 
     let params = Nl4dParams {
         // Cheaper than the module defaults so the test spends its time
@@ -204,7 +211,8 @@ fn survives_a_ring_size_that_would_overflow_a_single_zero_dispatch() {
             outputs.push(pending.wait().expect("readback failed"));
         }
     }
-    d.flush(|frame| outputs.push(frame.to_vec())).expect("flush failed");
+    d.flush(|frame| outputs.push(frame.to_vec()))
+        .expect("flush failed");
 
     assert_eq!(outputs.len(), n, "expected one emitted frame per pushed frame");
 
@@ -293,7 +301,11 @@ fn output_carries_its_own_frames_marker_no_other_frame_has() {
     let n_frames = 3 * radius + 1;
     let frames: Vec<Vec<f32>> = (0..n_frames)
         .map(|seed| {
-            let content = if seed == marker_frame { &marker_clean } else { &base };
+            let content = if seed == marker_frame {
+                &marker_clean
+            } else {
+                &base
+            };
             noisy_copy_of(content, w, h, SIGMA, seed)
         })
         .collect();
@@ -549,7 +561,9 @@ fn temporal_grouping_beats_spatial_only_on_a_static_clip() {
     let radius = 2u32;
     let base = textured_base(w, h);
 
-    let noisy_frames: Vec<Vec<f32>> = (0..(3 * radius + 1)).map(|seed| noisy_copy_of(&base, w, h, SIGMA, seed)).collect();
+    let noisy_frames: Vec<Vec<f32>> = (0..(3 * radius + 1))
+        .map(|seed| noisy_copy_of(&base, w, h, SIGMA, seed))
+        .collect();
     let centre_index = radius as usize;
 
     let params = static_clip_params(radius);
@@ -628,7 +642,9 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
     let base = textured_base(w, h);
 
     let n_frames = 3 * radius + 1;
-    let frames: Vec<Vec<f32>> = (0..n_frames).map(|seed| noisy_copy_of(&base, w, h, SIGMA, seed)).collect();
+    let frames: Vec<Vec<f32>> = (0..n_frames)
+        .map(|seed| noisy_copy_of(&base, w, h, SIGMA, seed))
+        .collect();
     let judged_frame = radius as usize;
 
     // Cross-frame arm: the real denoiser, unmodified, driven the same
@@ -778,16 +794,29 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
         }
 
         let member_pos_host =
-            u32::from_bytes(&client.read_one(member_pos).expect("member_pos readback failed"))[..pos_len].to_vec();
-        let member_frame_host =
-            u32::from_bytes(&client.read_one(member_frame).expect("member_frame readback failed"))[..pos_len]
+            u32::from_bytes(&client.read_one(member_pos).expect("member_pos readback failed"))[..pos_len]
                 .to_vec();
-        let member_count_host =
-            u32::from_bytes(&client.read_one(member_count).expect("member_count readback failed"))[..refs].to_vec();
-        let group_weight_host =
-            f32::from_bytes(&client.read_one(group_weight).expect("group_weight readback failed"))[..refs].to_vec();
+        let member_frame_host = u32::from_bytes(
+            &client
+                .read_one(member_frame)
+                .expect("member_frame readback failed"),
+        )[..pos_len]
+            .to_vec();
+        let member_count_host = u32::from_bytes(
+            &client
+                .read_one(member_count)
+                .expect("member_count readback failed"),
+        )[..refs]
+            .to_vec();
+        let group_weight_host = f32::from_bytes(
+            &client
+                .read_one(group_weight)
+                .expect("group_weight readback failed"),
+        )[..refs]
+            .to_vec();
         let filtered_host =
-            f32::from_bytes(&client.read_one(filtered_buf).expect("filtered readback failed"))[..filt_len].to_vec();
+            f32::from_bytes(&client.read_one(filtered_buf).expect("filtered readback failed"))[..filt_len]
+                .to_vec();
 
         let mut sum = vec![0.0f64; pixels];
         let mut wsum = vec![0.0f64; pixels];
@@ -817,7 +846,10 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
         }
         let mut out = vec![0.0f32; pixels];
         for i in 0..pixels {
-            assert!(wsum[i] > 0.0, "pixel {i}: centre-only arm left it with no contribution at all");
+            assert!(
+                wsum[i] > 0.0,
+                "pixel {i}: centre-only arm left it with no contribution at all"
+            );
             out[i] = (sum[i] / wsum[i]) as f32;
         }
         centre_only_out = Some(out);

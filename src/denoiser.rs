@@ -883,7 +883,10 @@ mod options_tests {
     fn nl4d_default_mismatch_scale_is_one_for_every_plane() {
         for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
             let got = nl4d_default_mismatch_scale(channels);
-            assert!((got - 1.0).abs() < f32::EPSILON, "channels {channels:?} got {got}");
+            assert!(
+                (got - 1.0).abs() < f32::EPSILON,
+                "channels {channels:?} got {got}"
+            );
         }
     }
 
@@ -893,7 +896,10 @@ mod options_tests {
 
         for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
             let got = resolve_mismatch_scale(&opts, channels);
-            assert!((got - 1.0).abs() < f32::EPSILON, "channels {channels:?} got {got}");
+            assert!(
+                (got - 1.0).abs() < f32::EPSILON,
+                "channels {channels:?} got {got}"
+            );
         }
     }
 

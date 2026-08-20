@@ -939,10 +939,16 @@ fn temporal_members_scatter_into_their_own_frames_region() {
     let centre_out = &filtered[0..64];
     let neighbour_out = &filtered[64..128];
     for (idx, (&want, &have)) in centre_patch.iter().zip(centre_out.iter()).enumerate() {
-        assert!((want - have).abs() < 1e-4, "centre member idx={idx}: want {want} got {have}");
+        assert!(
+            (want - have).abs() < 1e-4,
+            "centre member idx={idx}: want {want} got {have}"
+        );
     }
     for (idx, (&want, &have)) in neighbour_patch.iter().zip(neighbour_out.iter()).enumerate() {
-        assert!((want - have).abs() < 1e-4, "neighbour member idx={idx}: want {want} got {have}");
+        assert!(
+            (want - have).abs() < 1e-4,
+            "neighbour member idx={idx}: want {want} got {have}"
+        );
     }
 
     // The centre member's own 8x8 region, (0,0)-(7,7), was scattered into
@@ -1097,7 +1103,10 @@ fn single_frame_path_is_unchanged_when_temporal_is_false() {
     let centre_out = &filtered[0..64];
     let member1_out = &filtered[64..128];
     for (idx, (&want, &have)) in centre_patch.iter().zip(centre_out.iter()).enumerate() {
-        assert!((want - have).abs() < 1e-4, "member 0 idx={idx}: want {want} got {have}");
+        assert!(
+            (want - have).abs() < 1e-4,
+            "member 0 idx={idx}: want {want} got {have}"
+        );
     }
     for (idx, &have) in member1_out.iter().enumerate() {
         assert!(

@@ -1,8 +1,22 @@
 use cubecl::prelude::*;
 
-use super::helpers::{BLK_STEP, R, RingFixture, deterministic_texture, make_client, noisy_ring, planted_ring};
+use super::helpers::{
+    BLK_STEP,
+    R,
+    RingFixture,
+    deterministic_texture,
+    make_client,
+    noisy_ring,
+    planted_ring,
+};
 use crate::collab::STEP;
-use crate::collab::geometry::{member_buf_len, member_frame_buf_len, member_sig2_buf_len, ref_count, refs_along};
+use crate::collab::geometry::{
+    member_buf_len,
+    member_frame_buf_len,
+    member_sig2_buf_len,
+    ref_count,
+    refs_along,
+};
 use crate::collab::kernels::group::{pack_pos_host, unpack_pos_host};
 use crate::collab::kernels::group_temporal::collab_group_temporal;
 
@@ -86,7 +100,9 @@ pub(super) fn run_group_temporal(
         );
     }
 
-    let pos_bytes = client.read_one(member_pos_buf).expect("member_pos readback failed");
+    let pos_bytes = client
+        .read_one(member_pos_buf)
+        .expect("member_pos readback failed");
     let frame_bytes = client
         .read_one(member_frame_buf)
         .expect("member_frame readback failed");
@@ -196,7 +212,8 @@ fn no_admission_gate_means_the_group_always_fills() {
     let radius = 2u32;
     let fx = noisy_ring(w, h, radius, 1.0);
 
-    let (_, _, member_count, _) = run_group_temporal(&fx, 0.0, 0.05, THSAD, 1.0, REFINE, K_MAX, SPATIAL_RADIUS);
+    let (_, _, member_count, _) =
+        run_group_temporal(&fx, 0.0, 0.05, THSAD, 1.0, REFINE, K_MAX, SPATIAL_RADIUS);
 
     for (i, &count) in member_count.iter().enumerate() {
         assert_eq!(
@@ -229,7 +246,8 @@ fn the_reference_patch_is_always_member_zero() {
                 "ref {ref_idx}: member 0 must unpack to the reference position"
             );
             assert_eq!(
-                member_frame[ref_idx * K_MAX as usize], fx.centre_slot,
+                member_frame[ref_idx * K_MAX as usize],
+                fx.centre_slot,
                 "ref {ref_idx}: member 0 must carry the centre slot"
             );
         }
