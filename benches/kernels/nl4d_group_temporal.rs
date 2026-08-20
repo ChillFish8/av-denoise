@@ -20,7 +20,6 @@ const BLKSIZE: u32 = 16;
 // THSAD_PIXEL, see `crate::nlmeans::motion::thsad`), hand-computed here
 // since that function is crate-private.
 const THSAD: f32 = (BLKSIZE * BLKSIZE) as f32 * 0.02;
-const MISMATCH_SCALE: f32 = 1.0;
 const N_FRAMES: u32 = 2 * RADIUS + 1;
 const CENTRE_SLOT: u32 = RADIUS;
 
@@ -136,7 +135,6 @@ impl<R: Runtime> Benchmark for CollabGroupTemporalBench<R> {
                 0.0f32,
                 0.0f32,
                 THSAD,
-                MISMATCH_SCALE,
                 RADIUS,
                 REFINE,
                 mv_stride,

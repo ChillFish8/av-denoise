@@ -47,7 +47,6 @@ fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
         spatial_radius: SPATIAL_RADIUS,
         lambda_ht: LAMBDA_HT,
         c_min: C_MIN,
-        mismatch_scale: 1.0,
         confidence_variance: true,
     }
 }
@@ -466,8 +465,7 @@ fn run_spatial_only(
             0.0f32,
             c_min,
             // `radius` is 0 below, so no temporal candidate is ever
-            // scored and neither of these runtime scalars is ever read.
-            0.0f32,
+            // scored and this runtime scalar is never read.
             0.0f32,
             0u32,
             refine,
@@ -743,7 +741,6 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 0.0f32,
                 C_MIN,
                 front.thsad_value(),
-                1.0f32,
                 radius,
                 REFINE,
                 view.mv_stride,

@@ -37,7 +37,6 @@ pub(super) fn run_group_temporal(
     noise_floor: f32,
     c_min: f32,
     thsad: f32,
-    mismatch_scale: f32,
     refine: u32,
     k_max: u32,
     spatial_radius: u32,
@@ -82,7 +81,6 @@ pub(super) fn run_group_temporal(
             noise_floor,
             c_min,
             thsad,
-            mismatch_scale,
             fx.radius,
             refine,
             fx.mv_stride,
@@ -140,7 +138,7 @@ fn temporal_members_are_found_at_the_mv_prediction() {
     let fx = planted_ring(w, h, radius, ref_pos, 3, &patch, 0.2, |_| 1.0);
 
     let (member_pos, member_frame, member_count, _member_sig2) =
-        run_group_temporal(&fx, 0.0, 0.05, THSAD, 1.0, REFINE, K_MAX, SPATIAL_RADIUS);
+        run_group_temporal(&fx, 0.0, 0.05, THSAD, REFINE, K_MAX, SPATIAL_RADIUS);
 
     let refs_x = refs_along(w);
     let ref_idx = ((ref_pos.1 / STEP) * refs_x + (ref_pos.0 / STEP)) as usize;
@@ -190,7 +188,7 @@ fn low_confidence_neighbours_contribute_no_candidates() {
     let c_min = 0.05f32;
 
     let (_member_pos, member_frame, member_count, _member_sig2) =
-        run_group_temporal(&fx, 0.0, c_min, THSAD, 1.0, REFINE, K_MAX, SPATIAL_RADIUS);
+        run_group_temporal(&fx, 0.0, c_min, THSAD, REFINE, K_MAX, SPATIAL_RADIUS);
 
     let refs_x = refs_along(w);
     let ref_idx = ((ref_pos.1 / STEP) * refs_x + (ref_pos.0 / STEP)) as usize;
@@ -212,8 +210,7 @@ fn no_admission_gate_means_the_group_always_fills() {
     let radius = 2u32;
     let fx = noisy_ring(w, h, radius, 1.0);
 
-    let (_, _, member_count, _) =
-        run_group_temporal(&fx, 0.0, 0.05, THSAD, 1.0, REFINE, K_MAX, SPATIAL_RADIUS);
+    let (_, _, member_count, _) = run_group_temporal(&fx, 0.0, 0.05, THSAD, REFINE, K_MAX, SPATIAL_RADIUS);
 
     for (i, &count) in member_count.iter().enumerate() {
         assert_eq!(
@@ -230,7 +227,7 @@ fn the_reference_patch_is_always_member_zero() {
     let fx = noisy_ring(w, h, radius, 1.0);
 
     let (member_pos, member_frame, _member_count, _member_sig2) =
-        run_group_temporal(&fx, 0.0, 0.05, THSAD, 1.0, REFINE, K_MAX, SPATIAL_RADIUS);
+        run_group_temporal(&fx, 0.0, 0.05, THSAD, REFINE, K_MAX, SPATIAL_RADIUS);
 
     let refs_x = refs_along(w);
     let refs_y = refs_along(h);

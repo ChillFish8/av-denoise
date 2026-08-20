@@ -449,8 +449,6 @@ impl NlmeansArgs {
             // here. `Nl4dArgs::build_options` fills them in afterwards.
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
-            luma_mismatch_scale: None,
-            chroma_mismatch_scale: None,
             progress: globals.progress,
         })
     }

@@ -24,16 +24,16 @@ const SPATIAL_RADIUS: u32 = 4;
 /// `mismatch_sigma2` runs on the GPU, mirrored on the host for these
 /// tests, with the same argument order and the same operations, so
 /// floating-point rounding matches to well within the tolerances below.
-fn expected_mismatch_sigma2(confidence: f32, thsad: f32, blksize: u32, mismatch_scale: f32) -> f32 {
+fn expected_mismatch_sigma2(confidence: f32, thsad: f32, blksize: u32) -> f32 {
     let blksize_area = (blksize * blksize) as f32;
     let ratio = (1.0 - confidence) / (1.0 + confidence);
     let e2 = thsad * thsad * ratio;
     let eps = e2.sqrt() / blksize_area;
-    std::f32::consts::FRAC_PI_2 * eps * eps * mismatch_scale * mismatch_scale
+    std::f32::consts::FRAC_PI_2 * eps * eps
 }
 
 /// `c = 1.0`, a perfect motion match, must give `sigma_m2 = 0.0` for
-/// every temporal member, whatever `thsad`/`mismatch_scale` are.
+/// every temporal member, whatever `thsad` is.
 #[test]
 fn confidence_one_gives_zero_mismatch_variance_for_every_temporal_member() {
     let (w, h) = (96u32, 96u32);
@@ -43,7 +43,7 @@ fn confidence_one_gives_zero_mismatch_variance_for_every_temporal_member() {
     let fx = planted_ring(w, h, radius, ref_pos, 3, &patch, 0.2, |_| 1.0);
 
     let (_pos, member_frame, member_count, member_sig2) =
-        run_group_temporal(&fx, 0.0, 0.05, THSAD, 1.0, REFINE, K_MAX, SPATIAL_RADIUS);
+        run_group_temporal(&fx, 0.0, 0.05, THSAD, REFINE, K_MAX, SPATIAL_RADIUS);
 
     let refs_x = refs_along(w);
     let ref_idx = ((ref_pos.1 / STEP) * refs_x + (ref_pos.0 / STEP)) as usize;
@@ -86,18 +86,9 @@ fn low_confidence_produces_the_derived_mismatch_variance() {
     let fx = planted_ring(w, h, radius, ref_pos, 3, &patch, 0.2, |k| {
         if k == 1 { low_c } else { 1.0 }
     });
-    let mismatch_scale = 1.0f32;
 
-    let (_pos, member_frame, member_count, member_sig2) = run_group_temporal(
-        &fx,
-        0.0,
-        0.05,
-        THSAD,
-        mismatch_scale,
-        REFINE,
-        K_MAX,
-        SPATIAL_RADIUS,
-    );
+    let (_pos, member_frame, member_count, member_sig2) =
+        run_group_temporal(&fx, 0.0, 0.05, THSAD, REFINE, K_MAX, SPATIAL_RADIUS);
 
     let refs_x = refs_along(w);
     let ref_idx = ((ref_pos.1 / STEP) * refs_x + (ref_pos.0 / STEP)) as usize;
@@ -109,7 +100,7 @@ fn low_confidence_produces_the_derived_mismatch_variance() {
         .expect("the k=+1 neighbour must have joined the group");
     let idx = ref_idx * K_MAX as usize + member_idx;
 
-    let expected = expected_mismatch_sigma2(low_c, THSAD, BLKSIZE, mismatch_scale);
+    let expected = expected_mismatch_sigma2(low_c, THSAD, BLKSIZE);
     assert!(
         (member_sig2[idx] - expected).abs() < 1e-6,
         "expected sigma_m2 {expected} for confidence {low_c}, got {}",
@@ -136,7 +127,7 @@ fn centre_frame_members_always_carry_zero_regardless_of_confidence() {
     let fx = noisy_ring(w, h, radius, 0.0);
 
     let (_pos, member_frame, member_count, member_sig2) =
-        run_group_temporal(&fx, 0.0, 0.0, THSAD, 1.0, REFINE, K_MAX, SPATIAL_RADIUS);
+        run_group_temporal(&fx, 0.0, 0.0, THSAD, REFINE, K_MAX, SPATIAL_RADIUS);
 
     let refs_x = refs_along(w);
     let refs_y = refs_along(h);
@@ -213,11 +204,7 @@ fn inflated_member_variance_raises_exactly_the_rows_it_touches() {
     }
 }
 
-fn confidence_variance_test_params(
-    temporal_radius: u32,
-    mismatch_scale: f32,
-    confidence_variance: bool,
-) -> Nl4dParams {
+fn confidence_variance_test_params(temporal_radius: u32, confidence_variance: bool) -> Nl4dParams {
     const SIGMA: f32 = 6.0 / 255.0;
     Nl4dParams {
         nlm: NlmParams {
@@ -242,7 +229,6 @@ fn confidence_variance_test_params(
         spatial_radius: 9,
         lambda_ht: 2.7,
         c_min: 0.05,
-        mismatch_scale,
         confidence_variance,
     }
 }
@@ -267,12 +253,17 @@ fn run_denoiser(
     outputs
 }
 
-/// `mismatch_scale = 0.0` and `confidence_variance = false` both reach
-/// the same output, bit-for-bit, at otherwise identical settings. This
-/// is the mechanism's own regression test, the design's claim that
-/// "off" really means off, not just "usually close to off".
+/// The `confidence_variance` toggle actually reaches the output.
+///
+/// It is the only way to turn the mechanism off now that the per-plane
+/// scale is gone, so a flag that silently did nothing would leave the
+/// ablation arm measuring the same filter twice. The two arms have to
+/// differ on content whose members carry imperfect confidence.
+///
+/// Note this does not assert a direction or a magnitude. It asserts the
+/// switch is live, which is the part a refactor can break silently.
 #[test]
-fn mismatch_scale_zero_matches_confidence_variance_off_bit_for_bit() {
+fn confidence_variance_toggle_changes_the_output() {
     let client = make_client();
     let (w, h) = (64u32, 64u32);
     let radius = 2u32;
@@ -282,35 +273,29 @@ fn mismatch_scale_zero_matches_confidence_variance_off_bit_for_bit() {
         .map(|seed| noisy_copy_of(&base, w, h, 6.0 / 255.0, seed))
         .collect();
 
-    let off_by_flag = run_denoiser(
+    let on = run_denoiser(
         &client,
-        confidence_variance_test_params(radius, 1.0, false),
+        confidence_variance_test_params(radius, true),
         w,
         h,
         &frames,
     );
-    let off_by_scale = run_denoiser(
+    let off = run_denoiser(
         &client,
-        confidence_variance_test_params(radius, 0.0, true),
+        confidence_variance_test_params(radius, false),
         w,
         h,
         &frames,
     );
 
-    assert_eq!(
-        off_by_flag.len(),
-        off_by_scale.len(),
-        "both arms must emit the same frame count"
-    );
+    assert_eq!(on.len(), off.len(), "both arms must emit the same frame count");
     assert!(
-        !off_by_flag.is_empty(),
+        !on.is_empty(),
         "expected at least one emitted frame from this clip length"
     );
-    for (i, (a, b)) in off_by_flag.iter().zip(off_by_scale.iter()).enumerate() {
-        assert_eq!(
-            a, b,
-            "frame {i}: confidence_variance=false and mismatch_scale=0.0 must produce bit-\
-             identical output"
-        );
-    }
+    assert!(
+        on.iter().zip(off.iter()).any(|(a, b)| a != b),
+        "confidence_variance=true and false produced identical output on every frame, so the \
+         toggle is not reaching the filter"
+    );
 }

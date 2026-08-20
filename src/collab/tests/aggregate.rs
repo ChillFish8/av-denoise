@@ -250,7 +250,6 @@ fn run_scatter_stage(frame: &[f32], width: u32, height: u32, sigma: f32) -> (Vec
             floor,
             0.0f32,
             1.0f32,
-            1.0f32,
             0u32,
             0u32,
             2u32,

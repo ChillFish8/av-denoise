@@ -172,16 +172,6 @@ pub struct CliOptions {
     /// has an effect when `algorithm` is `Algorithm::Nl4d`, where it
     /// pins the temporal grouping stage's hard threshold.
     pub chroma_lambda_ht: Option<f32>,
-    /// Per-plane override for `mismatch_scale`, luma. Takes precedence
-    /// over `algorithm`'s value when set, which itself falls back to a
-    /// per-plane default when nothing at all is set. Only has an effect
-    /// when `algorithm` is `Algorithm::Nl4d`.
-    pub luma_mismatch_scale: Option<f32>,
-    /// Per-plane override for `mismatch_scale`, chroma. Takes
-    /// precedence over `algorithm`'s value when set, which itself falls
-    /// back to a per-plane default when nothing at all is set. Only has
-    /// an effect when `algorithm` is `Algorithm::Nl4d`.
-    pub chroma_mismatch_scale: Option<f32>,
     /// Draws the denoising progress bar for file input.
     pub progress: bool,
 }
@@ -190,9 +180,9 @@ impl CliOptions {
     /// Resolves `self.algorithm` for one plane, folding in the per-plane
     /// overrides that apply to whichever cascade `self.algorithm` is.
     ///
-    /// For `Nl4d` that is `lambda_ht` and `mismatch_scale`. Every other
-    /// algorithm is returned unchanged, since neither per-plane
-    /// override has anything to apply to.
+    /// For `Nl4d` that is `lambda_ht`. Every other algorithm is
+    /// returned unchanged, since the per-plane override has nothing to
+    /// apply to.
     ///
     /// `Nl4d`'s `lambda_ht` stays `Option<f32>` all the way through
     /// this method. When neither a per-plane flag nor the matching
@@ -208,20 +198,11 @@ impl CliOptions {
                     ChannelMode::Chroma => self.chroma_lambda_ht,
                     ChannelMode::Yuv => None,
                 };
-                let mismatch_scale = match channels {
-                    ChannelMode::Luma => self.luma_mismatch_scale,
-                    ChannelMode::Chroma => self.chroma_mismatch_scale,
-                    ChannelMode::Yuv => None,
-                };
-
                 Algorithm::Nl4d(Nl4dOptions {
                     // Left unresolved when unset, since the calibrated
                     // default depends on the plane, which
                     // `nl4d_default_lambda_ht` resolves at construction.
                     lambda_ht: lambda_ht.or(nl4d.lambda_ht),
-                    // Same deferral, `nl4d_default_mismatch_scale`
-                    // resolving it at construction.
-                    mismatch_scale: mismatch_scale.or(nl4d.mismatch_scale),
                     ..nl4d
                 })
             },
@@ -929,8 +910,6 @@ mod cli_options_tests {
             chroma_strength,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
-            luma_mismatch_scale: None,
-            chroma_mismatch_scale: None,
             progress: false,
         }
     }
@@ -1023,22 +1002,7 @@ mod cli_options_tests {
             chroma_strength: None,
             luma_lambda_ht,
             chroma_lambda_ht,
-            luma_mismatch_scale: None,
-            chroma_mismatch_scale: None,
             progress: false,
-        }
-    }
-
-    /// The same shape as [`nl4d_opts`], with the two per-plane
-    /// `mismatch_scale` overrides under test instead of `lambda_ht`.
-    fn nl4d_mismatch_opts(
-        luma_mismatch_scale: Option<f32>,
-        chroma_mismatch_scale: Option<f32>,
-    ) -> CliOptions {
-        CliOptions {
-            luma_mismatch_scale,
-            chroma_mismatch_scale,
-            ..nl4d_opts(None, None)
         }
     }
 
@@ -1130,42 +1094,6 @@ mod cli_options_tests {
         assert!((chroma_default - 4.2).abs() < f32::EPSILON);
         assert!((chroma_default - luma_default).abs() > f32::EPSILON);
     }
-
-    /// The same routing property `luma_lambda_ht_alone_overrides_only_
-    /// the_luma_instance_for_nl4d` checks, for `mismatch_scale` instead.
-    #[test]
-    fn luma_mismatch_scale_alone_overrides_only_the_luma_instance_for_nl4d() {
-        let opts = nl4d_mismatch_opts(Some(0.0), None);
-
-        let luma = expect_nl4d(opts.algorithm_for(ChannelMode::Luma));
-        let chroma = expect_nl4d(opts.algorithm_for(ChannelMode::Chroma));
-
-        assert!((luma.mismatch_scale.unwrap()).abs() < f32::EPSILON);
-        assert_eq!(
-            chroma.mismatch_scale,
-            Nl4dOptions::default().mismatch_scale,
-            "chroma should stay unresolved here (None), deferred to its own per-plane \
-             default at construction, got {:?}",
-            chroma.mismatch_scale
-        );
-    }
-
-    #[test]
-    fn chroma_mismatch_scale_alone_overrides_only_the_chroma_instance_for_nl4d() {
-        let opts = nl4d_mismatch_opts(None, Some(0.0));
-
-        let luma = expect_nl4d(opts.algorithm_for(ChannelMode::Luma));
-        let chroma = expect_nl4d(opts.algorithm_for(ChannelMode::Chroma));
-
-        assert_eq!(
-            luma.mismatch_scale,
-            Nl4dOptions::default().mismatch_scale,
-            "luma should stay unresolved here (None), deferred to its own per-plane \
-             default at construction, got {:?}",
-            luma.mismatch_scale
-        );
-        assert!((chroma.mismatch_scale.unwrap()).abs() < f32::EPSILON);
-    }
 }
 
 // Feature-gated because every test here builds its `CliOptions` from
@@ -1198,8 +1126,6 @@ mod passthrough_retry_tests {
             chroma_strength: None,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
-            luma_mismatch_scale: None,
-            chroma_mismatch_scale: None,
             progress: false,
         }
     }
@@ -1287,8 +1213,6 @@ mod lumachroma_lockstep_tests {
             chroma_strength: None,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
-            luma_mismatch_scale: None,
-            chroma_mismatch_scale: None,
             progress: false,
         }
     }

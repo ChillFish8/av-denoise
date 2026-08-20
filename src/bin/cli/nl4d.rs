@@ -70,40 +70,6 @@ pub struct Nl4dArgs {
     #[arg(long)]
     pub c_min: Option<f32>,
 
-    /// Multiplies the extra per-member variance a temporal member's
-    /// motion-block confidence implies, before the hard-threshold stage
-    /// sees it.
-    ///
-    /// Library default is 1.0 for every plane. Setting this flag
-    /// applies the same explicit value to both planes, overriding the
-    /// per-plane default for each. Applies to both planes unless
-    /// `--luma-mismatch-scale` or `--chroma-mismatch-scale` is set. `0`
-    /// reaches the same output as `--no-confidence-variance`, every
-    /// temporal member's extra variance collapsing to `0.0` regardless
-    /// of its confidence.
-    #[arg(long)]
-    pub mismatch_scale: Option<f32>,
-
-    /// `--mismatch-scale` override for the brightness plane only.
-    ///
-    /// Falls back to `--mismatch-scale` (or the library default) when
-    /// not set.
-    ///
-    /// Ignored when luma is not being denoised, or when `--channel-mode
-    /// yuv` is used.
-    #[arg(long)]
-    pub luma_mismatch_scale: Option<f32>,
-
-    /// `--mismatch-scale` override for the colour planes only.
-    ///
-    /// Falls back to `--mismatch-scale` (or the library default) when
-    /// not set.
-    ///
-    /// Ignored when chroma is not being denoised, or when
-    /// `--channel-mode yuv` is used.
-    #[arg(long)]
-    pub chroma_mismatch_scale: Option<f32>,
-
     /// Turns the confidence-as-variance mechanism off, so every
     /// member's hard-threshold shrinkage runs on the plain channel
     /// sigma alone, with no per-member addition for a temporal member's
@@ -184,17 +150,11 @@ impl Nl4dArgs {
             // whatever is still unset.
             lambda_ht: self.lambda_ht,
             c_min: self.c_min.unwrap_or(defaults.c_min),
-            // Left unresolved when unset, the same deferral `lambda_ht`
-            // above uses, since `nl4d_default_mismatch_scale` also
-            // depends on the plane.
-            mismatch_scale: self.mismatch_scale,
             confidence_variance: !self.no_confidence_variance,
         });
 
         opts.luma_lambda_ht = self.luma_lambda_ht;
         opts.chroma_lambda_ht = self.chroma_lambda_ht;
-        opts.luma_mismatch_scale = self.luma_mismatch_scale;
-        opts.chroma_mismatch_scale = self.chroma_mismatch_scale;
 
         self.warn_on_dead_per_plane_flags(opts.intent);
 
@@ -216,22 +176,6 @@ impl Nl4dArgs {
             {
                 tracing::warn!(
                     "--luma-lambda-ht and --chroma-lambda-ht are ignored when --channel-mode yuv is used"
-                );
-            },
-            _ => {},
-        }
-        match intent {
-            BinaryChannelIntent::Luma if self.chroma_mismatch_scale.is_some() => {
-                tracing::warn!("--chroma-mismatch-scale is ignored when chroma is not being denoised");
-            },
-            BinaryChannelIntent::Chroma if self.luma_mismatch_scale.is_some() => {
-                tracing::warn!("--luma-mismatch-scale is ignored when luma is not being denoised");
-            },
-            BinaryChannelIntent::YuvFused
-                if self.luma_mismatch_scale.is_some() || self.chroma_mismatch_scale.is_some() =>
-            {
-                tracing::warn!(
-                    "--luma-mismatch-scale and --chroma-mismatch-scale are ignored when --channel-mode yuv is used"
                 );
             },
             _ => {},
@@ -270,9 +214,6 @@ mod tests {
         assert_eq!(nl4d.luma_lambda_ht, None);
         assert_eq!(nl4d.chroma_lambda_ht, None);
         assert_eq!(nl4d.c_min, None);
-        assert_eq!(nl4d.mismatch_scale, None);
-        assert_eq!(nl4d.luma_mismatch_scale, None);
-        assert_eq!(nl4d.chroma_mismatch_scale, None);
         assert!(!nl4d.no_confidence_variance);
     }
 
@@ -287,8 +228,6 @@ mod tests {
             "2.0",
             "--c-min",
             "0.1",
-            "--mismatch-scale",
-            "0.5",
             "--no-confidence-variance",
         ]);
 
@@ -296,7 +235,6 @@ mod tests {
         assert_eq!(nl4d.spatial_radius, Some(12));
         assert!((nl4d.lambda_ht.unwrap() - 2.0).abs() < f32::EPSILON);
         assert!((nl4d.c_min.unwrap() - 0.1).abs() < f32::EPSILON);
-        assert!((nl4d.mismatch_scale.unwrap() - 0.5).abs() < f32::EPSILON);
         assert!(nl4d.no_confidence_variance);
     }
 
@@ -356,10 +294,6 @@ mod tests {
                     "unset --lambda-ht should stay None here, resolved later per plane"
                 );
                 assert!((nl4d_opts.c_min - defaults.c_min).abs() < f32::EPSILON);
-                assert_eq!(
-                    nl4d_opts.mismatch_scale, defaults.mismatch_scale,
-                    "unset --mismatch-scale should stay None here, resolved later per plane"
-                );
                 assert_eq!(nl4d_opts.confidence_variance, defaults.confidence_variance);
             },
             other => panic!("expected Algorithm::Nl4d, got {other:?}"),
@@ -411,19 +345,6 @@ mod tests {
     }
 
     #[test]
-    fn explicit_mismatch_scale_flows_into_the_nl4d_algorithm() {
-        let (args, nl4d) = parse(&["--mismatch-scale", "0.0"]);
-        let opts = nl4d.build_options(&args).expect("build_options should succeed");
-
-        match opts.algorithm {
-            av_denoise::Algorithm::Nl4d(nl4d_opts) => {
-                assert!((nl4d_opts.mismatch_scale.unwrap()).abs() < f32::EPSILON);
-            },
-            other => panic!("expected Algorithm::Nl4d, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn per_plane_lambda_ht_flags_parse_to_the_typed_values() {
         let (_, nl4d) = parse(&["--luma-lambda-ht", "2.0", "--chroma-lambda-ht", "3.5"]);
         assert!((nl4d.luma_lambda_ht.unwrap() - 2.0).abs() < f32::EPSILON);
@@ -469,38 +390,5 @@ mod tests {
 
         assert_eq!(opts.luma_lambda_ht, None);
         assert_eq!(opts.chroma_lambda_ht, None);
-        assert_eq!(opts.luma_mismatch_scale, None);
-        assert_eq!(opts.chroma_mismatch_scale, None);
-    }
-
-    #[test]
-    fn per_plane_mismatch_scale_flags_parse_to_the_typed_values() {
-        let (_, nl4d) = parse(&["--luma-mismatch-scale", "2.0", "--chroma-mismatch-scale", "0.5"]);
-        assert!((nl4d.luma_mismatch_scale.unwrap() - 2.0).abs() < f32::EPSILON);
-        assert!((nl4d.chroma_mismatch_scale.unwrap() - 0.5).abs() < f32::EPSILON);
-    }
-
-    /// `build_options` carries the two per-plane `mismatch_scale`
-    /// overrides straight through onto `CliOptions`, unresolved, the
-    /// same shape the `lambda_ht` overrides above use.
-    /// `CliOptions::algorithm_for` (`src/bin/ingest.rs`) is what
-    /// actually resolves them per plane, so this test only checks the
-    /// flow into `CliOptions`.
-    #[test]
-    fn luma_mismatch_scale_alone_flows_into_cli_options_luma_field_only() {
-        let (args, nl4d) = parse(&["--luma-mismatch-scale", "2.0"]);
-        let opts = nl4d.build_options(&args).expect("build_options should succeed");
-
-        assert!((opts.luma_mismatch_scale.unwrap() - 2.0).abs() < f32::EPSILON);
-        assert_eq!(opts.chroma_mismatch_scale, None);
-    }
-
-    #[test]
-    fn chroma_mismatch_scale_alone_flows_into_cli_options_chroma_field_only() {
-        let (args, nl4d) = parse(&["--chroma-mismatch-scale", "0.5"]);
-        let opts = nl4d.build_options(&args).expect("build_options should succeed");
-
-        assert!((opts.chroma_mismatch_scale.unwrap() - 0.5).abs() < f32::EPSILON);
-        assert_eq!(opts.luma_mismatch_scale, None);
     }
 }

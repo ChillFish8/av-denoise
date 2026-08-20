@@ -25,7 +25,6 @@ pub use denoiser::{
     Nl4dOptions,
     NlmTuning,
     nl4d_default_lambda_ht,
-    nl4d_default_mismatch_scale,
 };
 pub use device::Device;
 pub use nlmeans::{

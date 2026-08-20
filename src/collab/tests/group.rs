@@ -206,7 +206,6 @@ fn run_group(
             noise_floor,
             0.0f32,
             1.0f32,
-            1.0f32,
             0u32,
             0u32,
             2u32,

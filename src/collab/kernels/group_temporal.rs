@@ -39,28 +39,31 @@ const _: () = assert!(
 /// ```text
 /// E^2      = thsad^2 * (1 - c) / (1 + c)
 /// eps      = E / blksize^2
-/// sigma_m2 = (pi / 2) * eps^2 * mismatch_scale^2
+/// sigma_m2 = (pi / 2) * eps^2
 /// ```
 ///
 /// `c = 1`, a perfect match, gives `sigma_m2 = 0` exactly. Lower
-/// confidence inflates it, and `mismatch_scale` scales the result by
-/// its square, a per-plane dial for how far block SAD's coarse mismatch
-/// proxy should be trusted. A caller wanting the mechanism off entirely
-/// passes `mismatch_scale = 0.0`, which collapses every result to `0.0`
-/// regardless of `c`, the constant-addition no-op
-/// [`crate::collab::kernels::filter_ht::collab_filter_ht`]'s own
-/// `use_member_sigma = false` path already reproduces.
+/// confidence inflates it.
+///
+/// A per-plane scale on this result used to be configurable. It is not,
+/// because no value other than 1.0 is usable. A ladder over 1, 2, 4, 8
+/// and 16, recorded in `data/nl4d_mismatch_ladder/README.md`, found the
+/// filter corrupts frames above 2, collapsing high-contrast edges toward
+/// black through a cause that is still unexplained, and found the whole
+/// usable range too narrow to matter. Turning the mechanism off is
+/// [`crate::collab::kernels::filter_ht::collab_filter_ht`]'s
+/// `use_member_sigma = false` path.
 ///
 /// This function never runs for a centre-frame member. Those carry
 /// `sigma_m2 = 0` exactly because they are not motion-predicted, so
 /// there is no mismatch to model, and [`collab_group_temporal`] takes
 /// that branch before ever calling this.
 #[cube]
-fn mismatch_sigma2(confidence: f32, thsad: f32, blksize_area: f32, mismatch_scale: f32) -> f32 {
+fn mismatch_sigma2(confidence: f32, thsad: f32, blksize_area: f32) -> f32 {
     let ratio = (1.0f32 - confidence) / (1.0f32 + confidence);
     let e2 = thsad * thsad * ratio;
     let eps = f32::sqrt(e2) / blksize_area;
-    std::f32::consts::FRAC_PI_2 * eps * eps * mismatch_scale * mismatch_scale
+    std::f32::consts::FRAC_PI_2 * eps * eps
 }
 
 /// Finds the K most similar patches to each reference patch, searching
@@ -169,8 +172,8 @@ fn mismatch_sigma2(confidence: f32, thsad: f32, blksize_area: f32, mismatch_scal
 /// A centre-frame member carries `0.0` exactly. A temporal member's
 /// value comes from [`mismatch_sigma2`], run against the same
 /// confidence that decided whether its neighbour block was gated,
-/// `thsad` and `mismatch_scale` passed straight through, and `blksize`
-/// squared into the block area `mismatch_sigma2` divides by.
+/// `thsad` passed straight through, and `blksize` squared into the
+/// block area `mismatch_sigma2` divides by.
 ///
 /// Every candidate carries its source block's confidence alongside its
 /// distance, in a `cand_conf` array shaped like `dist`/`posn`/`frm`.
@@ -194,7 +197,6 @@ pub fn collab_group_temporal<N: Size>(
     noise_floor: f32,
     c_min: f32,
     thsad: f32,
-    mismatch_scale: f32,
     #[comptime] radius: u32,
     #[comptime] refine: u32,
     #[comptime] mv_stride: u32,
@@ -454,7 +456,7 @@ pub fn collab_group_temporal<N: Size>(
             member_frame[(ref_idx * k_max + j) as usize] = frame_j;
             let mut sig2 = 0.0f32;
             if frame_j != centre_slot {
-                sig2 = mismatch_sigma2(top_c[j as usize], thsad, blksize_area, mismatch_scale);
+                sig2 = mismatch_sigma2(top_c[j as usize], thsad, blksize_area);
             }
             member_sig2[(ref_idx * k_max + j) as usize] = sig2;
             j += 1u32;

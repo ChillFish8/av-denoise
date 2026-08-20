@@ -138,15 +138,6 @@ pub struct Nl4dOptions {
     /// affects how much compute a submit spends, never which candidates
     /// are admitted once they are scored.
     pub c_min: f32,
-    /// Multiplies the extra per-member variance a temporal member's
-    /// motion-block confidence implies.
-    ///
-    /// `None` resolves through [`nl4d_default_mismatch_scale`], `1.0`
-    /// for every plane today. A caller wanting luma and chroma to trust
-    /// block SAD by different amounts sets `--luma-mismatch-scale` and
-    /// `--chroma-mismatch-scale` explicitly, resolved per plane in
-    /// `CliOptions::algorithm_for` the same way `lambda_ht` is.
-    pub mismatch_scale: Option<f32>,
     /// Whether a temporal member's mismatch variance reaches the
     /// hard-threshold shrinkage at all. Defaults to `true`. See
     /// [`crate::nl4d::Nl4dParams::confidence_variance`].
@@ -166,9 +157,6 @@ impl Default for Nl4dOptions {
             // known.
             lambda_ht: None,
             c_min: defaults.c_min,
-            // Resolved per plane by `nl4d_default_mismatch_scale` at
-            // construction time, the same deferral `lambda_ht` uses.
-            mismatch_scale: None,
             confidence_variance: defaults.confidence_variance,
         }
     }
@@ -252,26 +240,6 @@ pub fn nl4d_default_lambda_ht(channels: ChannelMode) -> f32 {
 /// [`nl4d_default_lambda_ht`] when the caller left it unset.
 fn resolve_lambda_ht(opts: &Nl4dOptions, channels: ChannelMode) -> f32 {
     opts.lambda_ht.unwrap_or_else(|| nl4d_default_lambda_ht(channels))
-}
-
-/// The default `mismatch_scale` for the nl4d temporal grouping's
-/// confidence-as-variance mechanism, per plane.
-///
-/// `1.0` for every plane. Block SAD is a coarse proxy for patch
-/// mismatch either way, so unlike [`nl4d_default_lambda_ht`] this
-/// dial has no calibration sweep behind it yet, only the design's own
-/// starting point of trusting the raw formula. See
-/// [`crate::collab::kernels::group_temporal`]'s `mismatch_sigma2` for
-/// what it scales.
-pub fn nl4d_default_mismatch_scale(_channels: ChannelMode) -> f32 {
-    1.0
-}
-
-/// Resolves `Nl4dOptions.mismatch_scale` for one plane, falling back to
-/// [`nl4d_default_mismatch_scale`] when the caller left it unset.
-fn resolve_mismatch_scale(opts: &Nl4dOptions, channels: ChannelMode) -> f32 {
-    opts.mismatch_scale
-        .unwrap_or_else(|| nl4d_default_mismatch_scale(channels))
 }
 
 /// Whether a frame is cleaned on its own or alongside its neighbours.
@@ -451,7 +419,6 @@ fn build_engine<R: Runtime>(
     match algorithm {
         Algorithm::Nl4d(opts) => {
             let lambda_ht = resolve_lambda_ht(opts, params.channels);
-            let mismatch_scale = resolve_mismatch_scale(opts, params.channels);
             let nl4d_params = Nl4dParams {
                 nlm: params,
                 temporal_radius: opts.temporal_radius,
@@ -459,7 +426,6 @@ fn build_engine<R: Runtime>(
                 spatial_radius: opts.spatial_radius,
                 lambda_ht,
                 c_min: opts.c_min,
-                mismatch_scale,
                 confidence_variance: opts.confidence_variance,
             };
             let denoiser = Nl4dDenoiser::new(client, nl4d_params, width, height)
@@ -876,43 +842,6 @@ mod options_tests {
                 (got - 4.4).abs() < f32::EPSILON,
                 "channels {channels:?} got {got}"
             );
-        }
-    }
-
-    #[test]
-    fn nl4d_default_mismatch_scale_is_one_for_every_plane() {
-        for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
-            let got = nl4d_default_mismatch_scale(channels);
-            assert!(
-                (got - 1.0).abs() < f32::EPSILON,
-                "channels {channels:?} got {got}"
-            );
-        }
-    }
-
-    #[test]
-    fn resolve_mismatch_scale_unset_uses_the_default() {
-        let opts = Nl4dOptions::default();
-
-        for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
-            let got = resolve_mismatch_scale(&opts, channels);
-            assert!(
-                (got - 1.0).abs() < f32::EPSILON,
-                "channels {channels:?} got {got}"
-            );
-        }
-    }
-
-    #[test]
-    fn resolve_mismatch_scale_explicit_value_overrides_every_plane() {
-        let opts = Nl4dOptions {
-            mismatch_scale: Some(0.0),
-            ..Nl4dOptions::default()
-        };
-
-        for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
-            let got = resolve_mismatch_scale(&opts, channels);
-            assert!(got.abs() < f32::EPSILON, "channels {channels:?} got {got}");
         }
     }
 
