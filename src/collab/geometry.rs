@@ -43,7 +43,7 @@ pub fn member_sig2_buf_len(width: u32, height: u32, k_max: u32) -> usize {
 /// Length of the filtered-patch debug buffer in `Vector<f32, N>` lines,
 /// one whole group of `k_max` patches per reference.
 ///
-/// The filters only fill this when their `emit_filtered` flag is set,
+/// The filter only fills this when its `emit_filtered` flag is set,
 /// which tests do and the pipeline does not, so nothing sizes a real
 /// allocation off this outside of tests.
 pub fn filtered_buf_len(width: u32, height: u32, k_max: u32) -> usize {

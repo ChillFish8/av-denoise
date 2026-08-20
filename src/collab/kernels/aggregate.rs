@@ -129,7 +129,7 @@ pub fn cross_frame_accum_scale(spatial_radius: u32, temporal_radius: u32) -> f32
 /// The magnitude a single filtered value is clamped to before it enters
 /// the accumulator.
 ///
-/// The filters shrink DCT coefficients of input already inside `[0, 1]`,
+/// The filter shrinks DCT coefficients of input already inside `[0, 1]`,
 /// so a value this large means the filter has already gone wrong. The
 /// clamp exists so that when it does, the accumulator saturates
 /// gracefully rather than overflowing `i32` and wrapping into a wildly
@@ -150,7 +150,7 @@ pub const ACCUM_CLAMP: f32 = 5.0;
 ///
 /// `sigma^2 * g_max^2` is the right one, because the weight is the
 /// reciprocal of the retained variance sum and that sum is bounded
-/// below by exactly this quantity. Both filters always retain the
+/// below by exactly this quantity. The filter always retains the
 /// group's DC coefficient, whose propagated variance is exactly
 /// `sigma^2 * g[0]^2` for a profile `g`, and `g[0]` is that profile's
 /// maximum for every correlation it is defined for. The retained sum
@@ -160,7 +160,7 @@ pub const ACCUM_CLAMP: f32 = 5.0;
 ///
 /// A `sigma` small enough that `sigma^2 * g_max^2` falls under
 /// [`RECIPROCAL_FLOOR`], `sigma` of exactly zero included, is why the
-/// floor appears here too. The filters build their weight with
+/// floor appears here too. The filter builds its weight with
 /// `safe_reciprocal(sum, RECIPROCAL_FLOOR)`, so once the retained sum
 /// drops under that floor every group's weight saturates at `1 /
 /// RECIPROCAL_FLOOR` instead of following the sum. Taking the larger of

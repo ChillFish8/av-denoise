@@ -6,6 +6,10 @@
 """Measures how well the collaborative filter's spatial grouping
 discriminates real matches from noise-fooled ones.
 
+Retired. The `grouping_diag` binary this builds and invokes was removed
+along with nl3d, so the script no longer runs and is kept only as a
+record of the experiment.
+
 Extracts a clean frame from `data/clean-1080p.mkv` and a synthetically
 noised copy of the same frame, using ffmpeg's `noise` filter the same
 way `scripts/quality_runs.py` does (`allf=t`, a fixed seed), then hands

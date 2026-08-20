@@ -1273,7 +1273,6 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         Ok(())
     }
-
 }
 
 /// Copies one frame from a slot of `src` into the same slot of `dst`,

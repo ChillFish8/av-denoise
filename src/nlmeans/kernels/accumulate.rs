@@ -40,20 +40,8 @@ pub fn nlm_accumulate<N: Size>(
     let weight_bwd = weights_bwd[(clamped_bwd_y * width + clamped_bwd_x) as usize];
 
     accumulate_pair(
-        input,
-        accum,
-        weight_sum,
-        max_weight,
-        x,
-        y,
-        q_x,
-        q_y,
-        frame_fwd,
-        frame_bwd,
-        weight_fwd,
-        weight_bwd,
-        width,
-        height,
+        input, accum, weight_sum, max_weight, x, y, q_x, q_y, frame_fwd, frame_bwd, weight_fwd, weight_bwd,
+        width, height,
     );
 }
 

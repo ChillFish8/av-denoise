@@ -390,20 +390,8 @@ pub fn nlm_vweight_pair_accumulate<N: Size>(
     }
 
     accumulate_pair(
-        input,
-        accum,
-        weight_sum,
-        max_weight,
-        global_x,
-        global_y,
-        q_x,
-        q_y,
-        frame_fwd,
-        frame_bwd,
-        weight_fwd,
-        weight_bwd,
-        width,
-        height,
+        input, accum, weight_sum, max_weight, global_x, global_y, q_x, q_y, frame_fwd, frame_bwd, weight_fwd,
+        weight_bwd, width, height,
     );
 }
 
