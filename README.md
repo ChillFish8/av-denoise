@@ -28,11 +28,17 @@ leverage modern hardware instead of relying on the now rather outdated OpenCL.
   - [As a library](#as-a-library)
 - [Example commands](#example-commands)
 - [Binary usage](#binary-usage)
+  - [Global options](#global-options)
+  - [`nlmeans`](#nlmeans)
+  - [`nl4d`](#nl4d)
 
 ## Features
 
-- **One dial** - the `--preset` ladder (`veryfast` → `veryslow`) bundles algorithm, temporal
-  radius, and search radius. `base` is the default.
+- **One dial** - the `--preset` ladder (`veryfast` → `veryslow`) fills in the temporal radius
+  and how wide each algorithm searches. `base` is the default.
+- **Two algorithms** - `nlmeans` averages patches that look alike. `nl4d` groups matching
+  patches from across the temporal window into one stack and shrinks them together, which
+  holds onto fine texture `nlmeans` smooths away, for more time per frame.
 - **Automatic noise handling** - the `hq` variant measures the noise level, the grain's
   spatial correlation, and per-plane strength for every scene. Film grain and encoder grain are
   seen at their true level, and `--hq-sigma-scale` nudges the measurement when your eye disagrees.
@@ -215,7 +221,7 @@ Same clip, same settings, differing only in source depth. 10-bit moves twice
 the bytes through decode, conversion, and the y4m output, so some of the gap is
 I/O rather than denoising.
 
-| source depth | fps       |
+| source depth |       fps |
 |--------------|----------:|
 | 8-bit        | **91.19** |
 | 10-bit       |     73.57 |
@@ -297,9 +303,9 @@ cargo add av-denoise
 
 ## Example commands
 
-Almost everything is handled by two dials: `--preset` for how hard to work, and
-`--hq-sigma-scale` to nudge the measured noise level when your eye disagrees with it. Each example
-below changes one thing from the defaults.
+Most of these run `nlmeans`, where two dials do almost everything: `--preset` for how hard to
+work, and `--hq-sigma-scale` to nudge the measured noise level when your eye disagrees with it.
+Each example below changes one thing from the defaults.
 
 **Clean up a noisy file.** The defaults measure the noise per scene and pick their own strength.
 
@@ -350,6 +356,23 @@ av-denoise nlmeans --channel-mode luma --input noisy.mkv \
 
 ```bash
 av-denoise --accelerators vulkan --device discrete:1 nlmeans --input noisy.mkv \
+  | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+```
+
+**Fine texture that `nlmeans` keeps scrubbing.** Switch algorithms. `nl4d` groups matching
+patches across the temporal window and shrinks them together, which holds onto detail
+`nlmeans` averages away. It costs more time per frame.
+
+```bash
+av-denoise nl4d --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+```
+
+**Tuning `nl4d`.** `--lambda-ht` is its main dial. Lower keeps more detail, higher removes
+more noise. The default differs between luma and chroma, and either plane can be pinned on
+its own.
+
+```bash
+av-denoise nl4d --lambda-ht 4.5 --input noisy.mkv \
   | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
 ```
 
@@ -429,350 +452,113 @@ av-denoise nlmeans \
 
 ## Binary usage
 
+Two algorithms share one set of global flags. `nlmeans` is the one to
+reach for first. `nl4d` spends more time per frame to hold onto fine
+texture that `nlmeans` smooths away, and needs a temporal window to do
+it, so it has no spatial-only mode.
+
+The tables below cover the flags worth reaching for. Each subcommand's
+`--help` carries every flag with the full explanation.
+
 ### Global options
 
-```text
-Fast and efficient video denoising
+These are global, so they work on either side of the subcommand.
 
-Usage: av-denoise [OPTIONS] <COMMAND>
+| Flag                               | What it does                                                                                                     | Default       |
+|------------------------------------|------------------------------------------------------------------------------------------------------------------|---------------|
+| `--preset <veryfast..veryslow>`    | Speed vs quality. Each algorithm fills in its own knobs from it, see the ladders below.                          | `base`        |
+| `--channel-mode <luma,chroma,yuv>` | Which planes to clean. `yuv` is one fused pass and needs a YUV444 source.                                        | `luma,chroma` |
+| `-A, --accelerators <list>`        | Backends to try, in order. Comma-separated, for example `cuda,vulkan`.                                           | `vulkan`      |
+| `-d, --device <spec>`              | `default`, `discrete[:N]`, `integrated[:N]`, `virtual[:N]`, or `cpu`.                                            | `default`     |
+| `--progress`                       | Draws a progress bar for file input. Off by default, because anything else writing to the terminal scrambles it. | off           |
 
-Commands:
-  nlmeans  Denoise with the non-local means family
-  help     Print this message or the help of the given subcommand(s)
+Both subcommands also take:
 
-Options:
-      --preset <PRESET>
-          Speed vs quality dial.
-
-          `veryfast` is the fastest and lowest-quality end of the dial. For `nlmeans` it runs the `fast` variant with no temporal window and matches this tool's original default behavior.
-
-          `fast`, `base`, `slow`, and `veryslow` all run the `hq` variant and widen the temporal window going up the list, from a 1-frame radius at `fast` to an 8-frame radius at `veryslow`. `slow` and `veryslow` also widen the search radius.
-
-          `base` is the default.
-
-          [default: base]
-
-  -A, --accelerators <ACCELERATORS>
-          Which hardware backends to try, in order of preference.
-
-          The first backend that initialises is used. If none work the program exits with an error.
-
-          The list is comma-separated, for example `cuda,vulkan`.
-
-          [default: vulkan]
-
-  -d, --device <DEVICE>
-          Which device to use on the chosen backend.
-
-          Accepted values:
-
-          `default` lets the backend pick.
-
-          `discrete[:N]` picks the Nth discrete GPU (default 0). Works on CUDA, ROCm, and Vulkan.
-
-          `integrated[:N]` picks the Nth integrated GPU. Vulkan only.
-
-          `virtual[:N]` picks the Nth virtual GPU. Vulkan only.
-
-          `cpu` picks a software device where the platform offers one, such as lavapipe under Vulkan. It is for testing the pipeline, not for real encodes.
-
-          [default: default]
-
-      --channel-mode <CHANNEL_MODE>
-          Which planes of the video to clean (comma-separated).
-
-          `luma` cleans only the brightness plane. Colour passes through untouched, which is cheaper when only luma carries grain.
-
-          `chroma` cleans only the colour planes at their native size.
-
-          `luma,chroma` cleans both as two independent passes. This is the default and is usually what you want for noisy footage.
-
-          `yuv` cleans all three planes in one fused pass.
-
-          `yuv` needs a YUV444 source and cannot be combined with the other modes.
-
-          Possible values:
-          - luma:   Clean only the brightness plane (Y). Colour passes through
-          - chroma: Clean only the colour planes (U, V). Brightness passes through
-          - yuv:    Clean all three planes together in one pass. Needs a YUV444 source and cannot be combined with the other modes
-
-          [default: luma,chroma]
-
-      --progress
-          Shows a progress bar for the denoising pass when `--input` names a file.
-
-          Off by default because that bar runs for the whole encode, and anything else writing to the terminal, such as the ffmpeg the output is usually piped into, scrambles it. Scene detection shows its bar without this flag, since it finishes before any output is written.
-
-          Neither bar is drawn unless stderr is a terminal, and there is nothing to show a bar for on piped input.
-
-  -h, --help
-          Print help (see a summary with '-h')
-```
+| Flag                    | What it does                                                                                     | Default  |
+|-------------------------|--------------------------------------------------------------------------------------------------|----------|
+| `-i, --input <path\|->` | A path is opened with ffms2 and split by scene. `-` or `pipe:0` reads y4m from stdin.            | required |
+| `-W, --workers <N>`     | How many scenes to clean in parallel. Trades GPU memory for throughput. Ignored for piped input. | `2`      |
 
 ### `nlmeans`
 
-```text
-Denoise with the non-local means family.
-
-`nlmeans` compares small patches of pixels and averages the ones that look alike, either inside a single frame or across a temporal window.
-
-Usage: av-denoise nlmeans [OPTIONS] --input <INPUT>
-
-Options:
-  -i, --input <INPUT>
-          Where to read frames from.
-
-          A path opens the file with ffms2 and splits the work by scene. Any container or codec supported by ffmpeg works.
-
-          `-` or `pipe:0` reads a y4m stream from standard input.
-
-          `pipe:N` for `N` of 3 or above reads a y4m stream from an inherited file descriptor.
-
-          Piped input has no scene detection, so the temporal window slides across the whole stream.
-
-          A file whose name would otherwise be read as a pipe is reachable by prefixing it, for example `./-`.
-
-          The source's bit depth is detected automatically. 8, 10, and 12-bit sources are supported and the output keeps the source's depth. Other depths are rejected with a clear error message.
-
-      --preset <PRESET>
-          Speed vs quality dial.
-
-          `veryfast` is the fastest and lowest-quality end of the dial. For `nlmeans` it runs the `fast` variant with no temporal window and matches this tool's original default behavior.
-
-          `fast`, `base`, `slow`, and `veryslow` all run the `hq` variant and widen the temporal window going up the list, from a 1-frame radius at `fast` to an 8-frame radius at `veryslow`. `slow` and `veryslow` also widen the search radius.
-
-          `base` is the default.
-
-          [default: base]
-
-  -A, --accelerators <ACCELERATORS>
-          Which hardware backends to try, in order of preference.
-
-          The first backend that initialises is used. If none work the program exits with an error.
-
-          The list is comma-separated, for example `cuda,vulkan`.
-
-          [default: vulkan]
-
-  -W, --workers <WORKERS>
-          How many scenes to clean in parallel.
-
-          Each worker uses its own GPU memory for the frame ring buffer, so higher values trade GPU memory for throughput.
-
-          `1` is valid and useful for debugging. Defaults to 2 when unset.
-
-          Ignored for piped input, which cannot be split by scene.
-
-  -d, --device <DEVICE>
-          Which device to use on the chosen backend.
-
-          Accepted values:
-
-          `default` lets the backend pick.
-
-          `discrete[:N]` picks the Nth discrete GPU (default 0). Works on CUDA, ROCm, and Vulkan.
-
-          `integrated[:N]` picks the Nth integrated GPU. Vulkan only.
-
-          `virtual[:N]` picks the Nth virtual GPU. Vulkan only.
-
-          `cpu` picks a software device where the platform offers one, such as lavapipe under Vulkan. It is for testing the pipeline, not for real encodes.
-
-          [default: default]
-
-      --variant <VARIANT>
-          Which variant to run.
-
-          `fast` uses fixed weighting and is the cheapest option. `hq` calibrates its weighting to the noise level, measured automatically per frame (see `--hq-sigma` to override).
-
-          Defaults to whatever `--preset` selects.
-
-      --channel-mode <CHANNEL_MODE>
-          Which planes of the video to clean (comma-separated).
-
-          `luma` cleans only the brightness plane. Colour passes through untouched, which is cheaper when only luma carries grain.
-
-          `chroma` cleans only the colour planes at their native size.
-
-          `luma,chroma` cleans both as two independent passes. This is the default and is usually what you want for noisy footage.
-
-          `yuv` cleans all three planes in one fused pass.
-
-          `yuv` needs a YUV444 source and cannot be combined with the other modes.
-
-          Possible values:
-          - luma:   Clean only the brightness plane (Y). Colour passes through
-          - chroma: Clean only the colour planes (U, V). Brightness passes through
-          - yuv:    Clean all three planes together in one pass. Needs a YUV444 source and cannot be combined with the other modes
-
-          [default: luma,chroma]
-
-      --prefilter <PREFILTER>
-          Reference image used when comparing patches.
-
-          Omitted (the default) means no prefilter, for both variants.
-
-          `none` forces the noisy input directly (the cheapest option). This is the same as leaving the flag unset.
-
-          `nlm` or `nlm:<strength_scale>` runs a windowed spatial NLM pass first and compares patches against that cleaner image. `strength_scale` multiplies the main pass strength for the pilot pass. Bare `nlm` uses the calibrated default.
-
-          `bilateral:<sigma_s>,<sigma_r>` runs a quick on-GPU bilateral blur first, then compares patches against that cleaner image.
-
-          `sigma_s` is the spatial blur radius in pixels, greater than 0 and at most 11.0 (anything beyond this is insane.)
-
-          `sigma_r` is the colour-similarity threshold, greater than 0. `(0, 1]` is the typical range for normalised pixel data. There is no enforced upper bound.
-
-          A good starting point is `bilateral:3.0,0.02`.
-
-          Prefiltering keeps more detail at the cost of one extra GPU pass per frame.
-
-      --progress
-          Shows a progress bar for the denoising pass when `--input` names a file.
-
-          Off by default because that bar runs for the whole encode, and anything else writing to the terminal, such as the ffmpeg the output is usually piped into, scrambles it. Scene detection shows its bar without this flag, since it finishes before any output is written.
-
-          Neither bar is drawn unless stderr is a terminal, and there is nothing to show a bar for on piped input.
-
-      --temporal-radius <TEMPORAL_RADIUS>
-          How many neighbouring frames to look at on each side when cleaning a frame.
-
-          `0` means no temporal blending. Each frame is cleaned on its own.
-
-          Values above `0` look at that many frames before and after the current one.
-
-          Larger values give stronger cleanup but use more memory and add latency.
-
-          When `--input` names a file this is reset at every scene change, so raising it never causes blending across cuts.
-
-          Defaults to whatever `--preset` selects.
-
-      --search-radius <SEARCH_RADIUS>
-          How far away to look for similar patches inside a frame.
-
-          Larger values find more matches but cost quadratically more work.
-
-          Defaults to whatever `--preset` selects.
-
-      --patch-radius <PATCH_RADIUS>
-          Size of each patch being compared. The patch is `(2*patch_radius + 1)` pixels square.
-
-          Larger patches preserve fine structure better but cost more GPU memory. Library default is 4.
-
-      --strength <STRENGTH>
-          Cleaning strength. Higher numbers smooth more.
-
-          Must be a finite number greater than 0.
-
-          The default depends on the variant. `fast` defaults to 1.2. `hq` interprets strength as a multiplier on the measured noise level. Its default is calibrated automatically, adapting to the temporal radius and to which plane (luma or chroma) is being denoised, so lower and higher radii each get their own measured value.
-
-          This value applies to both planes unless `--luma-strength` or `--chroma-strength` is set.
-
-      --luma-strength <LUMA_STRENGTH>
-          Strength override for the brightness plane only.
-
-          Falls back to `--strength` (or the library default) when not set.
-
-          Ignored when luma is not being denoised, or when `--channel-mode yuv` is used.
-
-      --chroma-strength <CHROMA_STRENGTH>
-          Strength override for the colour planes only.
-
-          Falls back to `--strength` (or the library default) when not set.
-
-          Ignored when chroma is not being denoised, or when `--channel-mode yuv` is used.
-
-      --self-weight <SELF_WEIGHT>
-          How much weight to give the centre pixel itself when averaging.
-
-          Library default is 1.0. Must be a finite number `>= 0`.
-
-          Setting to 0 gives pure NLM (centre pixel only counts if a similar patch was found nearby).
-
-      --hq-sigma <HQ_SIGMA>
-          How noisy the source is. Leave it unset for almost all uses.
-
-          The noise level is measured automatically per scene when this is not set. Set it only when the automatic estimate misjudges a source and you want to pin the value.
-
-          Small values mean light grain and larger values mean heavier noise. `3` is subtle grain, `6` is clearly visible grain, `12` and up is heavy noise.
-
-          Always expressed on an 8-bit 0-255 scale, no matter the source's actual bit depth.
-
-      --hq-no-auto-strength
-          Treat `--strength` as an absolute value instead of a multiplier on `--hq-sigma`
-
-      --hq-no-noise-floor
-          Keep the expected-noise floor inside patch distances instead of subtracting it
-
-      --hq-no-temporal-confidence
-          Disable per-block temporal confidence weighting for the `hq` variant.
-
-          By default HQ block-matches each temporal neighbour against the centre frame and lets a poor match suppress that neighbour's contribution, instead of blurring in occluded or changed content. Setting this applies temporal weights uniformly no matter how well a neighbour matches.
-
-          Only takes effect when `--temporal-radius` is above 0.
-
-      --hq-thsad-scale <HQ_THSAD_SCALE>
-          Multiplier on the per-block mismatch threshold temporal confidence weighting tolerates before a neighbour's contribution starts dropping.
-
-          Higher values tolerate larger mismatches. Library default is 1.0. Ignored when `--hq-no-temporal-confidence` is set.
-
-      --hq-sigma-scale <HQ_SIGMA_SCALE>
-          Nudges the automatically measured noise level up or down.
-
-          `1.0` (the library default) keeps the measurement as-is. Raise it a little when the cleaned result still looks noisy. Lower it when detail is getting scrubbed.
-
-          This differs from `--strength` because the noise level also sets the patch-distance noise floor and the motion-confidence floor, not just the weighting.
-
-          Has no effect when `--hq-sigma` pins the noise level.
-
-      --motion-compensation
-          Turn on motion compensation for temporal denoising.
-
-          When the camera or content moves between frames, the brightness at the same `(x, y)` is different content in each frame.
-
-          Without help, temporal cleanup will blur moving edges.
-
-          Motion compensation looks at where each block of pixels moved between frames, then shifts neighbour frames to line up with the current frame before cleaning.
-
-          This keeps detail sharp on anime, fast pans, and action footage.
-
-          The tracking strategy adapts automatically to `--temporal-radius`.
-
-          Has no effect when `--temporal-radius 0`.
-
-      --mc-blksize <MC_BLKSIZE>
-          Size of each motion-search block, in pixels. Must be even.
-
-          Larger blocks are more stable but track motion less accurately on small details.
-
-          Only takes effect with `--motion-compensation`. Defaults to 16 when unset.
-
-      --mc-overlap <MC_OVERLAP>
-          How many pixels neighbouring motion blocks may overlap.
-
-          Must be less than `--mc-blksize`. Higher overlap smooths the transitions between blocks but does more work.
-
-          Only takes effect with `--motion-compensation`. Defaults to 8 when unset.
-
-      --mc-search <MC_SEARCH>
-          How many pixels of motion to search for at the finest level.
-
-          The coarse pyramid pass reaches further (search radius times 2 for a 2-level pyramid), so for typical content the default is fine.
-
-          Raise it for very fast motion.
-
-          Only takes effect with `--motion-compensation`. Defaults to 4 when unset.
-
-      --mc-pyramid-levels <MC_PYRAMID_LEVELS>
-          How many levels the motion-search pyramid uses.
-
-          `1` does a single full-resolution search (cheaper, weaker on large motion).
-
-          `2` (default) does a coarse pass on a half-size image first, then refines at full resolution.
-
-          This handles much larger motion at modest extra cost.
-
-          Only takes effect with `--motion-compensation`. Defaults to 2 when unset.
-
-  -h, --help
-          Print help (see a summary with '-h')
-```
+Compares small patches of pixels and averages the ones that look alike,
+either inside a single frame or across a temporal window.
+
+What `--preset` fills in:
+
+| Preset     | Variant | Temporal radius | Search radius |
+|------------|---------|-----------------|---------------|
+| `veryfast` | `fast`  | 0               | 2             |
+| `fast`     | `hq`    | 1               | 2             |
+| `base`     | `hq`    | 2               | 2             |
+| `slow`     | `hq`    | 4               | 4             |
+| `veryslow` | `hq`    | 8               | 4             |
+
+| Flag                    | What it does                                                                                                                                                                                   | Default         |
+|-------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------|
+| `--variant <fast\|hq>`  | `fast` uses fixed weighting and is the cheapest option. `hq` measures the noise level per scene and matches its weighting to it.                                                               | from `--preset` |
+| `--temporal-radius <N>` | How many neighbouring frames to use on each side. `0` cleans each frame on its own. This is the strongest lever in the tool.                                                                   | from `--preset` |
+| `--hq-sigma-scale <f>`  | Nudges the measured noise level. Raise it when the result still looks noisy, lower it when texture is going. Move in steps of 0.1.                                                             | `1.0`           |
+| `--strength <f>`        | How hard to filter. Under `hq` this multiplies the measured noise level, and its default is calibrated per plane and per radius. `--luma-strength` and `--chroma-strength` override one plane. | calibrated      |
+| `--motion-compensation` | Tracks where blocks moved, so a deep window lines frames up instead of smearing them. Usually worth it on live action, often not on anime.                                                     | off             |
+| `--prefilter <mode>`    | Compares patches against a cleaned reference instead of the noisy input. `nlm[:<scale>]` or `bilateral:<sigma_s>,<sigma_r>`. Costs one extra GPU pass per frame.                               | `none`          |
+
+<details>
+<summary><b>Expert flags</b> — calibration and debugging, not everyday tuning</summary>
+
+| Flag                                                                 | What it does                                                                                                                                                                       | Default             |
+|----------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------|
+| `--search-radius <N>`                                                | How far to look for matching patches inside a frame. Costs quadratically.                                                                                                          | from `--preset`     |
+| `--patch-radius <N>`                                                 | Half-width of a compared patch, which covers `(2N+1)^2` pixels.                                                                                                                    | `4`                 |
+| `--self-weight <f>`                                                  | How much weight the centre pixel gets in the average. `0` is pure NLM.                                                                                                             | `1.0`               |
+| `--hq-sigma <f>`                                                     | Pins the noise level in 8-bit units, turning the per-scene measurement off entirely. `--hq-sigma-scale` keeps the measurement and nudges it, which is almost always what you want. | measured            |
+| `--hq-thsad-scale <f>`                                               | How badly a neighbour may match before its contribution starts dropping.                                                                                                           | `1.0`               |
+| `--hq-no-auto-strength`                                              | Reads `--strength` as an absolute value instead of a multiplier on the measured noise.                                                                                             | off                 |
+| `--hq-no-noise-floor`                                                | Keeps the expected noise floor inside patch distances instead of subtracting it.                                                                                                   | off                 |
+| `--hq-no-temporal-confidence`                                        | Weights every neighbour equally, however badly it matches.                                                                                                                         | off                 |
+| `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels` | Motion-search geometry. Only used with `--motion-compensation`.                                                                                                                    | `16`, `8`, `4`, `2` |
+
+</details>
+
+### `nl4d`
+
+Groups matching 8x8 patches from across the whole temporal window into
+one stack and shrinks the stack's transform coefficients together, rather
+than filtering with non-local means first. Patches are searched both
+inside the centre frame and around where each neighbour frame's motion
+predicts they moved to.
+
+Motion tracking is always on, and every preset keeps a temporal window,
+which this algorithm needs. There is no NLM weighting pass, so none of
+the NLM knobs above exist here.
+
+What `--preset` fills in:
+
+| Preset     | Temporal radius | Spatial radius |
+|------------|-----------------|----------------|
+| `veryfast` | 1               | 6              |
+| `fast`     | 1               | 9              |
+| `base`     | 2               | 9              |
+| `slow`     | 4               | 9              |
+| `veryslow` | 8               | 9              |
+
+| Flag                    | What it does                                                                                                                                                                                                         | Default              |
+|-------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------|
+| `--temporal-radius <N>` | How many neighbouring frames to search on each side, in 1..=8. More frames means more patches to group.                                                                                                              | from `--preset`      |
+| `--lambda-ht <f>`       | How aggressively small transform coefficients are zeroed out. Higher removes more noise and more fine detail with it. This is the main quality dial. `--luma-lambda-ht` and `--chroma-lambda-ht` override one plane. | 5.3 luma, 4.2 chroma |
+| `--spatial-radius <N>`  | Half-width of the candidate search inside the centre frame, in 1..=16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                              | from `--preset`      |
+| `--sigma-scale <f>`     | Nudges the measured noise level, the same dial `nlmeans` spells `--hq-sigma-scale`.                                                                                                                                  | `1.0`                |
+
+<details>
+<summary><b>Expert flags</b> — calibration and debugging, not everyday tuning</summary>
+
+| Flag                                                                 | What it does                                                                                                                                                                   | Default             |
+|----------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------|
+| `--refine <N>`                                                       | Half-width of the window searched around each neighbour frame's motion-predicted position, in 1..=4. Raise it when motion tracking lands close but not exact.                  | `2`                 |
+| `--sigma <f>`                                                        | Pins the noise level in 8-bit units, turning the per-scene measurement off entirely.                                                                                           | measured            |
+| `--thsad-scale <f>`                                                  | How badly a neighbour frame may match before its patches stop being trusted.                                                                                                   | `1.0`               |
+| `--c-min <f>`                                                        | Confidence floor below which a whole neighbour block is skipped rather than scored. Only changes how much compute a frame costs, never which patches are admitted once scored. | `0.05`              |
+| `--no-confidence-variance`                                           | Gives every patch the same noise estimate, instead of trusting a poorly matched one less.                                                                                      | off                 |
+| `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels` | Motion-search geometry. nl4d always tracks motion, so these are always live.                                                                                                   | `16`, `8`, `4`, `2` |
+
+</details>
