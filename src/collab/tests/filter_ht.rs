@@ -497,20 +497,22 @@ fn group_weight_matches_uniform_theory() {
     let (_filtered, weights) = run_filter(&frame, w, h, floor, 9, 8, sigma, lambda_ht);
 
     // With every member's variance equal to `sigma^2`, the ladder is a
-    // fixed point (see `haar_variance_ladder`'s own `uniform_variance_
-    // is_unchanged_by_the_ladder` test), so every coefficient the
-    // threshold could possibly keep also carries variance `sigma^2`,
-    // whatever level or spatial position it came from. `group_weight`
-    // is `1 / (sigma^2 * n_ret)` exactly, not just approximately, so
-    // this backs out the mean retained count the run actually produced
-    // and checks it against the two things that should be true of it:
-    // it must include at least the forced group DC, and a hard
-    // threshold at 2.7 standard deviations only lets roughly 0.7% of
-    // pure-noise coefficients through by chance (the two-tailed normal
-    // tail beyond 2.7), so out of the up to `k_max * PATCH_AREA - 1`
-    // coefficients besides the DC that a full 8-member group offers,
-    // the mean false-positive count should be small next to that
-    // ceiling, not close to it.
+    // fixed point, as
+    // `transforms::tests::uniform_variance_is_unchanged_by_the_ladder`
+    // shows. Every coefficient the threshold could keep therefore also
+    // carries variance `sigma^2`, whatever level or spatial position it
+    // came from.
+    //
+    // `group_weight` is then exactly `1 / (sigma^2 * n_ret)`, so this
+    // backs out the mean retained count the run produced and checks two
+    // things about it.
+    //
+    // It must include at least the forced group DC. And a hard threshold
+    // at 2.7 standard deviations lets only about 0.7% of pure-noise
+    // coefficients through by chance, so out of the up to
+    // `k_max * PATCH_AREA - 1` coefficients besides the DC that a full
+    // 8-member group offers, the mean false-positive count should be
+    // small next to that ceiling rather than close to it.
     let sigma2 = sigma * sigma;
     let mean_weight: f64 = weights.iter().map(|&w| w as f64).sum::<f64>() / weights.len() as f64;
     let mean_n_ret = 1.0 / (mean_weight * sigma2 as f64);
@@ -998,14 +1000,11 @@ fn temporal_members_scatter_into_their_own_frames_region() {
     }
 }
 
-/// With `temporal = false` the kernel must behave exactly as it did
-/// before `member_frame` existed, ignoring the buffer's contents
-/// entirely. This is the substitute this task's report describes for
-/// the "bit-identical to the pre-change kernel" comparison the plan
-/// asks for, which cannot be captured retroactively. Instead, this
-/// proves the property that comparison would have proven, that
-/// `temporal = false` never reads `member_frame`, by filling it with
-/// values that would visibly corrupt the result if they were ever read.
+/// With `temporal = false` the kernel must ignore `member_frame`
+/// entirely.
+///
+/// This proves it by filling that buffer with values that would visibly
+/// corrupt the result if they were ever read.
 ///
 /// The same two-member, two-frame setup as
 /// [`temporal_members_scatter_into_their_own_frames_region`] runs with

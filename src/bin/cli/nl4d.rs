@@ -31,20 +31,19 @@ pub struct Nl4dArgs {
     /// How aggressively the temporal grouping's hard-threshold stage
     /// zeroes out small transform coefficients.
     ///
-    /// Multiplies the propagated coefficient sigma. The library default
-    /// is now per plane rather than a single shared number, see
-    /// `nl4d_default_lambda_ht`'s docs for both values and how
-    /// differently certain they are. Setting this flag applies the same
-    /// explicit value to both planes, overriding the per-plane default
-    /// for each. Applies to both planes unless `--luma-lambda-ht` or
-    /// `--chroma-lambda-ht` is set.
+    /// Higher removes more noise and more fine detail. The library
+    /// default differs between luma and chroma, see
+    /// `nl4d_default_lambda_ht`.
+    ///
+    /// Setting this applies one value to both planes, unless
+    /// `--luma-lambda-ht` or `--chroma-lambda-ht` overrides it.
     #[arg(long)]
     pub lambda_ht: Option<f32>,
 
     /// `--lambda-ht` override for the brightness plane only.
     ///
-    /// Falls back to `--lambda-ht` (or the calibrated per-plane library
-    /// default) when not set.
+    /// Falls back to `--lambda-ht`, or to the per-plane library default,
+    /// when not set.
     ///
     /// Ignored when luma is not being denoised, or when `--channel-mode
     /// yuv` is used.
@@ -53,8 +52,8 @@ pub struct Nl4dArgs {
 
     /// `--lambda-ht` override for the colour planes only.
     ///
-    /// Falls back to `--lambda-ht` (or the calibrated per-plane library
-    /// default) when not set.
+    /// Falls back to `--lambda-ht`, or to the per-plane library default,
+    /// when not set.
     ///
     /// Ignored when chroma is not being denoised, or when
     /// `--channel-mode yuv` is used.
@@ -70,13 +69,12 @@ pub struct Nl4dArgs {
     #[arg(long)]
     pub c_min: Option<f32>,
 
-    /// Turns the confidence-as-variance mechanism off, so every
-    /// member's hard-threshold shrinkage runs on the plain channel
-    /// sigma alone, with no per-member addition for a temporal member's
-    /// motion-block confidence.
+    /// Stops a poorly matched patch from being trusted less than a well
+    /// matched one.
     ///
-    /// Library default is on. Exists for an ablation that needs the
-    /// mechanism off at otherwise identical settings, see
+    /// On by default, the shrinkage treats a patch matched across frames
+    /// with low motion confidence as a noisier observation. This flag
+    /// gives every patch the same noise estimate instead. See
     /// `Nl4dParams::confidence_variance`.
     #[arg(long)]
     pub no_confidence_variance: bool,
@@ -89,11 +87,14 @@ impl Nl4dArgs {
     /// nl4d always runs the hq front end with an active
     /// motion-compensated ring, because the temporal grouping kernel
     /// reads the motion field and confidence scores that front end
-    /// builds. A resolved variant of `fast`, whether from an explicit
-    /// `--variant fast` or from a preset that resolves to it, is
-    /// rejected here rather than left to fail deep inside construction.
-    /// Motion compensation is turned on unconditionally rather than
-    /// left to `--motion-compensation`, which defaults off and has no
+    /// builds.
+    ///
+    /// A resolved variant of `fast`, whether from an explicit
+    /// `--variant fast` or from a preset that resolves to it, is rejected
+    /// here rather than left to fail deep inside construction.
+    ///
+    /// Motion compensation is turned on unconditionally rather than left
+    /// to `--motion-compensation`, which defaults off and has no
     /// preset-driven default of its own.
     pub fn build_options(&self, globals: &Args) -> Result<CliOptions, anyhow::Error> {
         let resolved = self.nlm.resolve_preset(globals.preset);
@@ -140,14 +141,13 @@ impl Nl4dArgs {
             temporal_radius: resolved.temporal_radius,
             refine: self.refine.unwrap_or(defaults.refine),
             spatial_radius: self.spatial_radius.unwrap_or(defaults.spatial_radius),
-            // Left unresolved when unset, rather than eagerly picked
-            // from `defaults` here, because the calibrated default now
-            // depends on which plane is being denoised, which is not
-            // known yet at this point. `CliOptions::algorithm_for`
-            // (src/bin/ingest.rs) applies `--luma-`/`--chroma-lambda-ht`
-            // on top of this once the plane is known, and construction
-            // itself picks the calibrated per-plane default for
-            // whatever is still unset.
+            // Left unresolved when unset, rather than picked from
+            // `defaults` here, because the default depends on which plane
+            // is being denoised and that is not known yet.
+            // `CliOptions::algorithm_for` (src/bin/ingest.rs) applies
+            // `--luma-`/`--chroma-lambda-ht` on top of this once the
+            // plane is known, and construction fills in the per-plane
+            // default for whatever is still unset.
             lambda_ht: self.lambda_ht,
             c_min: self.c_min.unwrap_or(defaults.c_min),
             confidence_variance: !self.no_confidence_variance,

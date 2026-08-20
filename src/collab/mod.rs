@@ -4,18 +4,11 @@
 //! together and denoising the whole group at once, rather than pixel by
 //! pixel. A reference patch collects a stack of the patches that match it
 //! best, the stack is filtered as a unit, and the filtered results are
-//! aggregated back onto the frame.
+//! blended back onto the frame.
 //!
-//! # Layout
-//!
-//! `geometry` lays out the grid of reference patches a frame is covered
-//! with, and works out how large the buffers driven by that grid need to
-//! be.
-//!
-//! [`kernels`] holds the GPU code, starting with the DCT and Haar
-//! transforms the filter runs patches and patch stacks through. A
-//! denoiser chains those kernels into a filter of its own, and holds the
-//! tuning values it drives them with.
+//! [`geometry`] lays out the grid of reference patches a frame is covered
+//! with, and sizes the buffers driven by that grid. [`kernels`] holds the
+//! GPU code that does the grouping, filtering, and blending.
 
 pub mod geometry;
 pub mod kernels;
@@ -35,13 +28,12 @@ pub const STEP: u32 = 4;
 /// Hard ceiling on the group size. Power of two, sized so a stack of K
 /// 8x8 f32 patches stays small in shared memory.
 pub const MAX_K: u32 = 8;
-/// Hard ceiling on a cross-frame denoiser's temporal radius, `r`.
+/// Hard ceiling on a cross-frame denoiser's temporal radius.
 ///
 /// [`crate::nl4d::Nl4dParams::validate`] rejects a `temporal_radius`
-/// outside `1..=MAX_TEMPORAL_RADIUS`, so this is also the largest
-/// `temporal_radius` [`kernels::aggregate::cross_frame_accum_scale`]
-/// ever has to derive a scale for. The widest ring a cross-frame
-/// accumulator ever holds is `2 * MAX_TEMPORAL_RADIUS + 1` frames, which
-/// is what bounds how many passes can write into one pixel before it is
-/// read back.
+/// outside `1..=MAX_TEMPORAL_RADIUS`, so this is also the largest radius
+/// [`kernels::aggregate::cross_frame_accum_scale`] has to derive a scale
+/// for. The widest cross-frame accumulator holds
+/// `2 * MAX_TEMPORAL_RADIUS + 1` frames, which bounds how many passes can
+/// write into one pixel before it is read back.
 pub const MAX_TEMPORAL_RADIUS: u32 = 8;

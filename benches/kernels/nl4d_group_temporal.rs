@@ -5,12 +5,12 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::nl4d_geometry::{
-    BLKSIZE,
     BLK_STEP,
+    BLKSIZE,
     CENTRE_SLOT,
     K_MAX,
-    NEIGHBOUR_SLOTS,
     N_FRAMES,
+    NEIGHBOUR_SLOTS,
     RADIUS,
     REFINE,
     SPATIAL_RADIUS,

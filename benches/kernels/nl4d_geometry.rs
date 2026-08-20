@@ -1,10 +1,9 @@
-//! The search geometry `nl4d` ships with, in one place.
-//!
-//! Every value here comes from `Nl4dParams::default()`. The grouping
-//! bench and the hard-threshold bench both build their frame ring and
-//! member buffers from these, so a single set of constants describes
-//! what the denoiser actually runs. Two copies of the shipped geometry
-//! is how one of them goes stale.
+// The search geometry `nl4d` ships with, in one place. Every value here
+// comes from `Nl4dParams::default()`.
+//
+// The grouping bench and the hard-threshold bench both build their frame
+// ring and member buffers from these, so one set of constants describes
+// what the denoiser actually runs.
 
 /// `Nl4dParams::default().temporal_radius`.
 pub const RADIUS: u32 = 2;

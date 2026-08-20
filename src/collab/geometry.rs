@@ -1,7 +1,7 @@
 /// Number of reference patches along one axis.
 ///
-/// `dim` must be at least `PATCH_SIZE`. Denoiser construction validates
-/// that before this runs.
+/// `dim` must be at least `PATCH_SIZE`, which denoiser construction
+/// validates.
 pub fn refs_along(dim: u32) -> u32 {
     (dim - super::PATCH_SIZE).div_ceil(super::STEP) + 1
 }

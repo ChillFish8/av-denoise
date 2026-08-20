@@ -14,14 +14,14 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::nl4d_geometry::{
-    BLKSIZE,
     BLK_STEP,
+    BLKSIZE,
     CENTRE_SLOT,
     CONFIDENCE_VARIANCE,
     K_MAX,
     LAMBDA_HT,
-    NEIGHBOUR_SLOTS,
     N_FRAMES,
+    NEIGHBOUR_SLOTS,
     RADIUS,
     REFINE,
     SIGMA,
@@ -33,21 +33,21 @@ use super::{H, W, block_sync, make_padded_frame, shapes_with_ch, stored_channels
 /// The hard-threshold shrinkage kernel as `nl4d` runs it, over a 1080p
 /// frame ring.
 ///
-/// The kernel takes four `#[comptime]` flags, so each combination is a
-/// separate compiled program. This bench sets the two the denoiser sets:
-/// `temporal`, which indexes members by the ring slot they were matched
-/// in, and `use_member_sigma`, which folds each member's mismatch
-/// variance into its own threshold. Measuring with either one off
-/// reports a program that is not shipped.
+/// Each combination of the kernel's `#[comptime]` flags compiles a
+/// separate program, so this bench sets the two the denoiser sets.
+/// `temporal` indexes members by the ring slot they were matched in, and
+/// `use_member_sigma` folds each member's mismatch variance into its own
+/// threshold. Measuring with either one off would report a program the
+/// denoiser never runs.
 ///
 /// Grouping runs once in `prepare`, in the same temporal mode, so
-/// `member_frame` and `member_sig2` hold real values rather than
-/// placeholders. Setting the flags over dummy buffers would leave the
-/// filter reading whatever those buffers happened to contain.
-/// Confidence is uniformly 1.0 and every group fills to `K_MAX`, which
-/// is the group size the filter runs at and what nearly everything it
-/// does scales with. `execute` then measures only the filter launch, one
-/// cube per reference patch, an 8x8 window of threads.
+/// `member_frame` and `member_sig2` hold real values rather than whatever
+/// a dummy buffer happened to contain.
+///
+/// Confidence is uniformly 1.0 and every group fills to `K_MAX`, the
+/// group size the filter runs at and what nearly all of its work scales
+/// with. `execute` measures only the filter launch, one cube per
+/// reference patch.
 pub struct CollabHtBench<R: Runtime> {
     pub client: ComputeClient<R>,
     pub ch: u32,
@@ -155,9 +155,7 @@ impl<R: Runtime> Benchmark for CollabHtBench<R> {
         let accum = self
             .client
             .empty(frame_len * N_FRAMES as usize * size_of::<i32>());
-        let wsum = self
-            .client
-            .empty(pixels * N_FRAMES as usize * size_of::<i32>());
+        let wsum = self.client.empty(pixels * N_FRAMES as usize * size_of::<i32>());
         // A denoiser never asks for the filtered patches themselves, it
         // scatters straight into the accumulators, so this binds the same
         // one-element placeholder a real caller does.

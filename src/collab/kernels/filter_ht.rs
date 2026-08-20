@@ -35,20 +35,20 @@ const _: () = assert!(
 /// [`haar_fwd_stack`] applies to the signal.
 ///
 /// `v` holds one variance per stack member on entry, at indices `0..8`.
-/// Only `0..k_use` matter, the rest are ignored. A Haar butterfly's two
-/// outputs are each a sum of two independent inputs scaled by
-/// `1/sqrt(2)`, so if `va` and `vb` are the variances of two inputs,
-/// both outputs land on the same variance, `(va + vb) / 2`. Running that
-/// averaging over the same levels, in the same pairing order, that
-/// `haar_fwd_stack` runs over the signal itself turns `v[j]` into the
-/// variance of stack coefficient `j`. The host-only
-/// `haar_variance_ladder` in `transforms` runs the identical computation
-/// off the GPU, for comparison in tests.
+/// Only `0..k_use` matter, the rest are ignored.
 ///
-/// Every level snapshots the values it reads before writing any output.
-/// The output range overlaps the input range, so an in-place write would
-/// otherwise clobber a value a later pair in the same level still needs,
-/// the same reasoning `haar_fwd_stack` follows.
+/// A Haar butterfly's two outputs are each a sum of two independent
+/// inputs scaled by `1/sqrt(2)`, so both land on the same variance,
+/// `(va + vb) / 2`. Running that averaging over the same levels, in the
+/// same pairing order, as [`haar_fwd_stack`] runs over the signal turns
+/// `v[j]` into the variance of stack coefficient `j`.
+///
+/// [`crate::collab::kernels::transforms::haar_variance_ladder`] runs the
+/// identical computation on the host, for comparison in tests.
+///
+/// Every level snapshots the values it reads before writing any output,
+/// because the output range overlaps the input range and an in-place
+/// write would otherwise clobber a value a later pair still needs.
 #[cube]
 pub(crate) fn variance_ladder(v: &mut Array<f32>, k_use: u32) {
     let mut len = k_use;
@@ -115,77 +115,59 @@ pub(crate) fn variance_ladder(v: &mut Array<f32>, k_use: u32) {
 ///
 /// # Buffers
 ///
-/// `input` is the frame ring `collab_group_temporal` also reads, indexed
-/// by `frame` when `temporal` is false and by each member's own
-/// `member_frame` entry when it is true. `member_pos`, `member_count`,
-/// and `member_frame` are `collab_group_temporal`'s outputs, `refs *
-/// k_max` packed positions, `refs` counts, and `refs * k_max` ring slots
-/// in the same layout as the positions. `member_frame` is read only when
-/// `temporal` is true.
-/// `member_sig2` holds `refs * k_max` extra per-member variance, added to
-/// `sigma[c]^2` when `use_member_sigma` is true. It is never read when that
-/// flag is false, so a 1-element dummy buffer is valid there, the same
-/// pattern `confidence_dummy` uses in `nlmeans`.
-/// [`crate::collab::kernels::group_temporal::collab_group_temporal`] is
-/// the producer that fills it with real values, one motion-block
-/// mismatch variance per temporal member and `0.0` for every
-/// centre-frame member, when the caller wants `nl4d`'s confidence-as-
-/// variance mechanism live. `filtered` holds
-/// `refs * PATCH_AREA` lines, member 0's filtered patch for every
-/// reference. `group_weight` holds `refs` weights, and `sigma` holds one
-/// value per stored channel. `accum_scale` is the fixed-point scale the
-/// scatter at the end of this kernel converts into (see
-/// [`crate::collab::kernels::aggregate::scatter_patch`]),
-/// [`crate::collab::kernels::aggregate::ACCUM_SCALE`] for a caller whose
-/// `accum`/`wsum` hold one frame, or a
-/// [`crate::collab::kernels::aggregate::cross_frame_accum_scale`] result
-/// for a caller whose accumulators are a cross-frame ring several passes
-/// wide.
+/// `input` is the frame ring
+/// [`crate::collab::kernels::group_temporal::collab_group_temporal`] also
+/// reads.
 ///
-/// `dct_profile` holds 8 values, [`crate::collab::kernels::transforms::dct_noise_profile`]'s
-/// output. Every member's propagated coefficient variance at DCT
-/// position `(u, v)` scales by `dct_profile[u] * dct_profile[v]` before
-/// the threshold reads it, `u` and `v` read straight off the calling
-/// thread's own `local_x`/`local_y` (see the body for why that's exactly
-/// the coefficient position this thread ends up owning). At `rho = 0`
-/// every entry is exactly `1.0`, so this multiply is a no-op and the
-/// threshold behaves exactly as it did before this profile existed.
+/// `member_pos`, `member_count`, `member_frame`, and `member_sig2` are
+/// that kernel's outputs, all in its `ref_idx * k_max + m` layout except
+/// `member_count`, which holds one count per reference.
 ///
-/// `ht_wavelet` selects the transform basis the shrinkage above runs
-/// in. False, the default, fills the DCT basis this filter has always
-/// used. True fills the orthonormal Haar-8 basis instead, a diagnostic
-/// alternative for comparing the two bases. The `dct8_line_*` mat-vec
-/// helpers run either basis unchanged, since both are orthonormal 8x8
-/// matrices with their inverse equal to their transpose.
+/// `member_frame` is read only when `temporal` is true, and `member_sig2`
+/// only when `use_member_sigma` is true. A 1-element dummy buffer is
+/// valid for either when its flag is off.
+///
+/// `filtered` holds `refs * k_max * PATCH_AREA` lines and is written only
+/// when `emit_filtered` is set. `group_weight` holds `refs` weights, and
+/// `sigma` one value per stored channel.
+///
+/// `accum_scale` is the fixed-point scale the scatter at the end of this
+/// kernel converts into. See
+/// [`crate::collab::kernels::aggregate::scatter_patch`].
+///
+/// `dct_profile` holds
+/// [`crate::collab::kernels::transforms::dct_noise_profile`]'s 8 values.
+/// Every member's coefficient variance at DCT position `(u, v)` scales by
+/// `dct_profile[u] * dct_profile[v]` before the threshold reads it, with
+/// `u` and `v` read off the calling thread's own `local_x`/`local_y` (see
+/// the body for why that is the coefficient this thread owns). At
+/// `rho = 0` every entry is `1.0` and the multiply is a no-op.
+///
+/// `ht_wavelet` selects the transform basis. False, the default, fills
+/// the DCT basis. True fills the orthonormal Haar-8 basis instead, for
+/// comparing the two. The `dct8_line_*` helpers run either unchanged,
+/// since both are orthonormal 8x8 matrices whose inverse is their
+/// transpose.
 ///
 /// # Temporal members
 ///
-/// `member_frame` holds one physical ring slot per member, the same
-/// `ref_idx * k_max + m` layout `member_pos` uses, written by
-/// [`crate::collab::kernels::group_temporal::collab_group_temporal`].
-/// `temporal` selects how the filter treats it.
+/// `temporal` selects where a member's pixels come from and where its
+/// filtered pixels go.
 ///
-/// False, the path every shipped single-frame denoiser runs, leaves
-/// `member_frame` unread. Every member's patch comes from `input` at
-/// `frame`, exactly as before this parameter existed, and every member
-/// scatters back into `accum`/`wsum` unconditionally. A 1-element dummy
-/// buffer is valid for `member_frame` here, the same pattern
-/// `member_sig2` uses under `use_member_sigma = false`.
+/// False leaves `member_frame` unread. Every member is loaded from
+/// `input` at `frame` and scatters back into that same frame's region of
+/// `accum`/`wsum`.
 ///
-/// True reads each member's patch from `input` at its own
-/// `member_frame` entry rather than at `frame`, so a member matched in a
-/// neighbour frame is loaded from that frame's own pixels. Every member
-/// still runs through the full forward transform, threshold, and inverse
-/// transform, and still lands in `filtered` when `emit_filtered` is set,
-/// whatever frame it came from. The scatter follows the same split, a
-/// member's filtered pixels land in its own `member_frame` entry's
-/// region of `accum`/`wsum` rather than always in `frame`'s, the way
-/// [`crate::collab::kernels::aggregate::scatter_patch`]'s `frame_slot`
-/// argument addresses a multi-frame accumulator. A neighbour-frame
-/// member therefore still contributes its filtered pixels to the
-/// caller's cross-frame accumulator ring, at that neighbour frame's own
-/// position in it, rather than being discarded once it has served the
-/// group's shared statistics.
+/// True loads each member from `input` at its own `member_frame` entry,
+/// so a member matched in a neighbour frame comes from that frame's own
+/// pixels, and scatters its filtered pixels back into that frame's region
+/// of the accumulators. A neighbour-frame member therefore contributes to
+/// the caller's cross-frame accumulator ring rather than being discarded
+/// once it has served the group's shared statistics.
+///
+/// Either way every member runs through the full forward transform,
+/// threshold, and inverse transform, and lands in `filtered` when
+/// `emit_filtered` is set.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn collab_filter_ht<N: Size>(
@@ -349,21 +331,11 @@ pub fn collab_filter_ht<N: Size>(
 
             if tid == 0u32 {
                 let sum = wred[0];
-                // sum is a sum of non-negative propagated variances, so
-                // it can never be negative for an ordinary finite
-                // caller sigma. safe_reciprocal checks for a non-finite
-                // sum explicitly rather than leaning on `f32::max` to
-                // discard one, so group_weight is always finite here
-                // regardless of GPU-specific NaN behaviour, capped at
-                // 1e12 for an ordinary small sum and 0 for a sum that
-                // turned out non-finite.
-                //
-                // Aggregation only ever multiplies this weight into a
-                // convex combination of finite filtered patch values and
-                // divides by the sum of the weights covering a pixel.
-                // However large or unequal the weights get, that kind of
-                // weighted mean cannot leave the range the patch values
-                // it combines already span.
+                // `sum` adds non-negative variances, so it is never
+                // negative. `safe_reciprocal` checks for a non-finite sum
+                // explicitly rather than leaning on `f32::max` to discard
+                // one, so the weight is finite here whatever a given GPU
+                // does with NaN.
                 let w = safe_reciprocal(sum, RECIPROCAL_FLOOR);
                 group_weight[ref_idx as usize] = w;
                 // The accumulators count in fixed point, so the weight
@@ -404,12 +376,9 @@ pub fn collab_filter_ht<N: Size>(
 
         out_vec[c as usize] = stack[tid as usize];
 
-        // Scatter every member back to where it came from, into its own
-        // frame's region of the accumulators. `temporal` selects where
-        // that frame identity comes from, `member_frame`'s own entry for
-        // a member matched in a neighbour frame, or `frame` (the centre
-        // frame) uniformly when there is no per-member frame to read,
-        // the same split the load at the top of this loop follows.
+        // Scatter every member back into its own frame's region of the
+        // accumulators, following the same `temporal` split the load at
+        // the top of this loop uses.
         let weight = gw[0];
         let mut mo = 0u32;
         while mo < k_use {

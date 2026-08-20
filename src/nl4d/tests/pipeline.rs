@@ -92,18 +92,16 @@ fn denoises_a_static_noisy_clip() {
     }
 }
 
-/// `spatial_radius = 16` combined with `temporal_radius =
-/// MAX_TEMPORAL_RADIUS` (8) is the configuration that overflowed `i32`
-/// under the old fixed `CROSS_FRAME_ACCUM_SCALE = 2^15`: the worst-case
-/// cross-frame accumulator value at that combination clears `i32::MAX`,
-/// so the old scale silently wrapped it into a wildly wrong pixel with
-/// no crash and nothing in the output to flag it.
-/// `cross_frame_accum_scale` derives a scale from the real configuration
-/// instead, so this combination should denoise cleanly, the same way any
-/// other combination does, rather than producing the non-finite or wildly
-/// out-of-range values an overflow leaves behind.
+/// `spatial_radius = 16` with `temporal_radius = MAX_TEMPORAL_RADIUS` (8)
+/// is the widest configuration the parameter ranges allow, and so the one
+/// whose cross-frame accumulator comes closest to overflowing `i32`.
+///
+/// `cross_frame_accum_scale` sizes the fixed-point scale for it, so this
+/// combination should denoise as cleanly as any other rather than
+/// producing the non-finite or wildly out-of-range values an overflow
+/// leaves behind.
 #[test]
-fn denoises_at_the_previously_overflowing_spatial_and_temporal_radius() {
+fn denoises_at_the_widest_spatial_and_temporal_radius() {
     let client = make_client();
     let (w, h) = (64u32, 64u32);
     let radius = crate::collab::MAX_TEMPORAL_RADIUS;
@@ -158,16 +156,16 @@ fn denoises_at_the_previously_overflowing_spatial_and_temporal_radius() {
 /// per-dimension dispatch limit.
 ///
 /// A single 1D dispatch has to stay at or under 65,535 workgroups on
-/// every backend this project targets. Pass 0 used to zero the whole
-/// cross-frame ring in one such dispatch, sized for `accum_ring_len`
-/// (`width * height * stored_ch * (1 + 2 * temporal_radius)` elements at
-/// 256 threads per workgroup), so a resolution and `temporal_radius`
-/// combination large enough pushed that dispatch over the limit. A GPU
-/// that rejects the oversized dispatch leaves the ring holding
-/// `client.empty`'s undefined memory instead of zero, which every
-/// subsequent pass's atomic scatter then adds real contributions on top
-/// of, and `collab_normalise` divides through into wildly wrong output
-/// for whichever frames complete before that garbage is ever cleared.
+/// every backend this project targets. Zeroing the whole cross-frame ring
+/// in one dispatch would need `accum_ring_len` slots
+/// (`width * height * stored_ch * (1 + 2 * temporal_radius)`) at 256
+/// threads per workgroup, which a large enough resolution and
+/// `temporal_radius` pushes over that limit.
+///
+/// A GPU that rejects an oversized dispatch leaves the ring holding
+/// `client.empty`'s undefined memory instead of zero. Every later pass
+/// then scatters real contributions on top of that, and
+/// `collab_normalise` divides it through into wildly wrong output.
 ///
 /// `1024 * 1024` at `temporal_radius = MAX_TEMPORAL_RADIUS` (a
 /// `1 + 2 * 8 = 17`-frame ring) needs `1024 * 1024 * 17 = 17,825,792`
@@ -610,28 +608,23 @@ fn temporal_grouping_beats_spatial_only_on_a_static_clip() {
 /// temporal grouping's.
 ///
 /// Both arms here group across the identical radius-2 temporal window,
-/// with the identical `lambda_ht`, and read the identical filtered
-/// member patches straight off the GPU (`emit_filtered = true`). They
-/// differ only in which of those filtered members reach the aggregate
-/// for real frame `radius`'s own output: every member that ever matched
-/// into it, whatever pass found it (cross-frame, what `Nl4dDenoiser`
-/// does now), against only the members from the one pass whose own
-/// centre is real frame `radius`, and only the ones among those whose
-/// own `member_frame` entry is that pass's `centre_slot` (centre-only,
-/// this task's starting point, discarding every neighbour-frame
-/// member's filtered pixels after they had served the group's shared
-/// statistics).
+/// with the identical `lambda_ht`, and read the identical filtered member
+/// patches straight off the GPU (`emit_filtered = true`). They differ
+/// only in which of those filtered members reach the aggregate for real
+/// frame `radius`'s own output.
 ///
-/// The cross-frame arm is `Nl4dDenoiser` itself, already proven correct
-/// by the tests above. The centre-only arm reconstructs the old discard
-/// by hand, driving the same front end (`NlmDenoiser::submit_machinery`)
-/// directly and aggregating only that one pass's centre-frame members,
-/// on the host, in double precision, from the GPU's raw
+/// The cross-frame arm is `Nl4dDenoiser` itself, which keeps every member
+/// that ever matched into that frame, whatever pass found it.
+///
+/// The centre-only arm keeps only the members of the one pass centred on
+/// that frame, and only those whose own `member_frame` entry is that
+/// pass's `centre_slot`. It is built by hand, driving the same front end
+/// (`NlmDenoiser::submit_machinery`) directly and aggregating on the host
+/// in double precision from the GPU's raw
 /// `member_pos`/`member_frame`/`member_count`/`group_weight`/`filtered`
-/// outputs. That reproduces exactly what a single-pass, centre-only
-/// design would have produced for this frame, since a member's own
-/// filtered pixels never depended on whether the scatter kept it, only
-/// the choice of what to aggregate did.
+/// outputs. A member's filtered pixels never depend on whether the
+/// scatter keeps it, only the choice of what to aggregate does, so this
+/// is exactly what a single-pass centre-only design would produce.
 #[test]
 fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
     let client = make_client();

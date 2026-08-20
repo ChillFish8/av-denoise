@@ -25,12 +25,12 @@ pub struct Nl4dParams {
     /// centre frame. In `1..=16`.
     pub spatial_radius: u32,
     /// Hard-threshold multiplier on the propagated coefficient sigma.
-    /// Calibrated to 5.3 by default (the Luma/Yuv value), see
-    /// [`crate::Nl4dOptions`]'s struct-level docs and
-    /// `nl4d_default_lambda_ht` for the ladder this came from. Callers
-    /// building `Nl4dParams` directly, rather than through
-    /// [`crate::Nl4dOptions`], get no per-plane resolution and should
-    /// set this themselves for chroma.
+    /// Higher shrinks more coefficients, so it removes more noise and
+    /// more fine detail.
+    ///
+    /// Defaults to 5.3, the luma value. Chroma wants a different one, and
+    /// callers building `Nl4dParams` directly get no per-plane
+    /// resolution. See [`crate::nl4d_default_lambda_ht`].
     pub lambda_ht: f32,
     /// The confidence floor below which a whole neighbour block is
     /// skipped rather than scored, in `[0, 1)`. Only affects how much
@@ -38,14 +38,12 @@ pub struct Nl4dParams {
     /// they are scored.
     pub c_min: f32,
     /// Whether a temporal member's mismatch variance reaches the
-    /// hard-threshold shrinkage at all.
+    /// hard-threshold shrinkage.
     ///
-    /// Defaults to `true`, the design this denoiser exists to test.
-    /// `false` runs the hard-threshold stage exactly as it ran before
-    /// this mechanism existed, every member's variance the plain
-    /// channel sigma with no per-member addition. This is the only way
-    /// to turn the mechanism off, and it exists for an ablation that
-    /// needs it off at otherwise identical settings.
+    /// `true`, the default, treats a poorly matched member as a noisier
+    /// observation, so the threshold trusts it less. `false` gives every
+    /// member the plain channel sigma instead, which is what an ablation
+    /// needs to isolate the effect of this mechanism.
     pub confidence_variance: bool,
 }
 

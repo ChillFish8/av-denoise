@@ -30,15 +30,16 @@ use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, MAX_GRID_1D, NlmDenoiser, Pe
 /// [`collab_filter_ht`] in its temporal mode and aggregates the result
 /// with [`collab_normalise`].
 ///
-/// Every pass scatters its filtered members into whichever frame each
-/// one actually came from, not only the centre frame, so a frame's own
-/// output only finishes once every pass that can reach it,
-/// `temporal_radius` on either side of it, has run. Latency is therefore
-/// `2 * temporal_radius` pushes, twice the front end's own window
-/// depth. [`Self::denoise_submit`] returns `None` while the front end's
-/// window is still filling and for the further passes this cross-frame
-/// accumulation still needs, and [`Self::flush`] drains the frames
-/// still held once the input stream ends.
+/// Every pass scatters its filtered members into whichever frame each one
+/// came from, not only the centre frame, so a frame's own output finishes
+/// only once every pass that can reach it has run, which is
+/// `temporal_radius` passes on either side of it.
+///
+/// Latency is therefore `2 * temporal_radius` pushes, twice the front
+/// end's own window depth. [`Self::denoise_submit`] returns `None` while
+/// the front end's window is still filling and for the further passes
+/// this cross-frame accumulation needs, and [`Self::flush`] drains the
+/// frames still held once the input stream ends.
 pub struct Nl4dDenoiser<R: Runtime> {
     front: NlmDenoiser<R>,
     width: u32,
@@ -52,12 +53,11 @@ pub struct Nl4dDenoiser<R: Runtime> {
     confidence_variance: bool,
     k_max: u32,
     /// The fixed-point scale the cross-frame accumulator ring counts in,
-    /// derived once here from this denoiser's own `spatial_radius` and
-    /// `temporal_radius` by
-    /// [`crate::collab::kernels::aggregate::cross_frame_accum_scale`]
-    /// rather than read from a constant sized for every configuration's
-    /// worst case. Both radii are fixed for the denoiser's lifetime, so
-    /// this only needs deriving once, not on every
+    /// from
+    /// [`crate::collab::kernels::aggregate::cross_frame_accum_scale`].
+    ///
+    /// Both radii it derives from are fixed for the denoiser's lifetime,
+    /// so this is worked out once here rather than on every
     /// [`Self::run_collab_stage`] call.
     accum_scale: f32,
 
@@ -66,11 +66,12 @@ pub struct Nl4dDenoiser<R: Runtime> {
     member_count: Handle,
     /// [`collab_group_temporal`]'s per-member mismatch-variance output,
     /// and `collab_filter_ht`'s `member_sig2` argument on the way back
-    /// in. Always the real `refs * k_max` size, whatever
-    /// `confidence_variance` is, since the grouping kernel always fills
-    /// it. `confidence_variance` gates whether `collab_filter_ht` reads
-    /// it back, through that call's own `use_member_sigma`, not whether
-    /// this buffer holds real values.
+    /// in.
+    ///
+    /// Always the real `refs * k_max` size, whatever
+    /// `confidence_variance` is, because the grouping kernel always fills
+    /// it. That flag decides whether `collab_filter_ht` reads it back,
+    /// not whether it holds real values.
     member_sig2: Handle,
     /// `collab_filter_ht`'s `filtered` argument. This denoiser never
     /// sets `emit_filtered`, so a one-element placeholder is valid here
@@ -84,15 +85,17 @@ pub struct Nl4dDenoiser<R: Runtime> {
     /// device readback.
     dct_profile: [f32; 8],
     /// Fixed-point accumulators the filter scatters into, one weighted
-    /// value per covering patch. Unlike a single-frame collaborative
-    /// filter, these hold `1 + 2 * temporal_radius` frames' worth of
-    /// pixels back to back, one region per physical ring slot of the
-    /// front end's own frame ring. A pass centred on frame `u`
-    /// contributes to every frame in `u - temporal_radius ..= u +
-    /// temporal_radius`, so a frame's own region stays live across that
-    /// many consecutive passes before [`Self::run_collab_stage`] reads
-    /// it back and clears it for reuse. See that method for the exact
-    /// scheduling.
+    /// value per covering patch.
+    ///
+    /// These hold `1 + 2 * temporal_radius` frames' worth of pixels back
+    /// to back, one region per physical ring slot of the front end's own
+    /// frame ring.
+    ///
+    /// A pass centred on frame `u` contributes to every frame in
+    /// `u - temporal_radius ..= u + temporal_radius`, so a frame's region
+    /// stays live across that many consecutive passes before
+    /// [`Self::run_collab_stage`] reads it back and clears it for reuse.
+    /// See that method for the exact scheduling.
     accum: Handle,
     wsum: Handle,
     /// Two output buffers, alternated so one frame's kernels can overlap
@@ -104,17 +107,17 @@ pub struct Nl4dDenoiser<R: Runtime> {
     ///
     /// Pass 0 also full-zeroes `accum`/`wsum`, since every later pass
     /// only zeroes the one region it is about to reuse (see
-    /// [`Self::run_collab_stage`]), so this doubles as "does the ring
-    /// still hold a previous stream's stale contributions". It resets
-    /// to 0 at the end of [`Self::flush`], alongside the front end's own
-    /// stream state.
+    /// [`Self::run_collab_stage`]). This therefore doubles as "does the
+    /// ring still hold a previous stream's stale contributions". It
+    /// resets to 0 at the end of [`Self::flush`], alongside the front
+    /// end's own stream state.
     ///
-    /// A pass only emits an output once `passes_run > temporal_radius`,
-    /// because the earliest a frame's region has received contributions
-    /// from every pass that can reach it, `t - temporal_radius ..= t +
-    /// temporal_radius`, is `temporal_radius` passes after the pass
-    /// centred on `t` itself. [`Self::denoise_submit`] and
-    /// [`Self::flush`] both read this through
+    /// A pass emits an output only once `passes_run > temporal_radius`.
+    /// The earliest a frame's region has contributions from every pass
+    /// that can reach it is `temporal_radius` passes after the pass
+    /// centred on that frame.
+    ///
+    /// [`Self::denoise_submit`] and [`Self::flush`] read this through
     /// [`Self::run_collab_stage`]'s return value rather than checking it
     /// themselves.
     passes_run: u32,
@@ -265,15 +268,17 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// This drives [`NlmDenoiser::flush_step_machinery`] for
     /// [`Self::flush_target`] emissions, which is `2 * temporal_radius`
     /// duplicate-driven passes for a long enough stream, twice what the
-    /// front end's own [`NlmDenoiser::flush_target`] would give. The
-    /// front end only has to let every real frame finish a turn as a
-    /// pass's own centre; this cross-frame stage also has to let every
-    /// real frame finish gathering the `temporal_radius` trailing
-    /// passes its own accumulation needs, which is `temporal_radius`
-    /// pushes' worth of passes beyond that. Every call to
-    /// [`NlmDenoiser::flush_step_machinery`] still runs a pass regardless
-    /// of whether it emits, so the loop below keeps calling it until
-    /// enough passes have actually emitted, the same way it always has.
+    /// front end's own [`NlmDenoiser::flush_target`] would give.
+    ///
+    /// The front end only has to let every real frame finish a turn as a
+    /// pass's own centre. This cross-frame stage also has to let every
+    /// real frame finish gathering the `temporal_radius` trailing passes
+    /// its own accumulation needs, which is another `temporal_radius`
+    /// pushes' worth of passes.
+    ///
+    /// A call to [`NlmDenoiser::flush_step_machinery`] runs a pass
+    /// whether or not it emits, so the loop below keeps calling it until
+    /// enough passes have actually emitted.
     pub fn flush(&mut self, mut sink: impl FnMut(&[f32])) -> Result<(), DenoiserError> {
         let target = self.flush_target();
         let mut emitted = 0usize;
@@ -403,18 +408,14 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let agg_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
         let zero_dim = 256u32;
         // Sized for one frame's worth of the ring, the region a
-        // steady-state pass clears. Pass 0 clears the whole ring by
-        // issuing this same, already-safe dispatch once per ring slot
-        // rather than in one dispatch sized for the whole ring, see the
-        // `pass_index == 0` branch below for why.
+        // steady-state pass clears. Pass 0 issues this same dispatch once
+        // per ring slot, see the `pass_index == 0` branch below.
         //
         // Still clamped to the GPU's 65,535-workgroups-per-dimension
-        // limit, because one frame alone can pass it too, a 4:4:4 4K
-        // frame or an 8K luma plane both need more than 65,535
-        // workgroups at 256 threads each. `collab_zero_accum` is
-        // grid-strided precisely so a clamped launch here still reaches
-        // every slot in the frame instead of leaving the tail past the
-        // clamp point holding whatever the ring already had in it.
+        // limit, because one frame alone can exceed it. A 4:4:4 4K frame
+        // or an 8K luma plane both need more than that at 256 threads
+        // each. `collab_zero_accum` strides, so a clamped launch still
+        // reaches every slot in the frame.
         let zero_workgroups_one_frame = (frame_len as u32).div_ceil(zero_dim).min(MAX_GRID_1D);
         let zero_grid_one_frame = CubeCount::new_1d(zero_workgroups_one_frame);
         let zero_total_threads_one_frame = zero_workgroups_one_frame * zero_dim;
@@ -439,24 +440,18 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
         unsafe {
             if pass_index == 0 {
-                // A single dispatch sized for the whole ring
-                // (`accum_ring_len.div_ceil(zero_dim)` workgroups) can
-                // pass the GPU's 65,535-workgroups-per-dimension limit
-                // once `temporal_radius` is large enough, since
-                // `accum_ring_len` grows with `total_frames`. `zero_dim`
-                // is only 256, so at `temporal_radius = 4` a 1080p luma
-                // plane alone needs 72,900 workgroups, already over that
-                // limit, and a hard GPU dispatch failure leaves the ring
-                // holding `client.empty`'s undefined memory instead of
-                // zero, exactly the leftover garbage a fresh stream's
-                // first pass, first frame most of all, was never meant
-                // to see.
+                // Clearing the whole ring in one dispatch would need
+                // `accum_ring_len.div_ceil(zero_dim)` workgroups, which
+                // grows with `total_frames`. At `temporal_radius = 4` a
+                // 1080p luma plane alone needs 72,900, already over the
+                // GPU's 65,535 limit. A rejected dispatch would leave the
+                // ring holding `client.empty`'s undefined memory instead
+                // of zero, which a fresh stream's first frames would then
+                // aggregate as though it were real.
                 //
-                // Issuing `zero_grid_one_frame` once per ring slot
-                // instead keeps every dispatch the same size the
-                // steady-state `else` branch below already relies on
-                // staying under that limit, whatever `total_frames`
-                // turns out to be.
+                // Issuing `zero_grid_one_frame` once per ring slot keeps
+                // every dispatch the size the steady-state branch below
+                // already relies on, whatever `total_frames` is.
                 for slot in 0..total_frames {
                     collab_zero_accum::launch_unchecked::<R>(
                         &client,

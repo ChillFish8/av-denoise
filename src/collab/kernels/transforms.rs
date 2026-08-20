@@ -20,28 +20,22 @@ const _: () = assert!(
 /// needs to fit the weights into a fixed-point accumulator.
 pub const RECIPROCAL_FLOOR: f32 = 1e-12;
 
-/// A reciprocal weight that never trusts a driver's `NaN`-`max` behaviour.
+/// A reciprocal weight that never trusts a driver's `NaN`-`max`
+/// behaviour.
 ///
-/// Returns `1 / max(denom, floor)` for an ordinary finite denominator,
-/// the same value the unguarded expression this replaces would produce.
-/// A `denom` that is `NaN` or infinite is caught explicitly first and
-/// returns `0` instead.
+/// Returns `1 / max(denom, floor)` for a finite denominator. A `denom`
+/// that is `NaN` or infinite is caught first and returns `0`.
 ///
-/// An unknown (`NaN`) denominator and a known-infinite one get the same
-/// answer, because this function has no middle ground between full
-/// trust and full distrust. Its result only ever feeds a weight or a
-/// normalising divisor, never a value that could stand in for real
-/// content, so there is nothing to pass through untouched. Zero is the
-/// correct fallback either way, because both cases mean this reciprocal
-/// cannot be trusted to mean anything.
+/// The result only ever feeds a weight or a normalising divisor, never a
+/// value that could stand in for real content, so zero is the right
+/// fallback for both cases. Either means the reciprocal cannot be trusted
+/// to mean anything.
 ///
 /// The explicit check matters because `f32::max(NaN, floor)` is not
-/// guaranteed to discard the `NaN` on every GPU backend the way it does
-/// on the CPU. SPIR-V's `FMax` instruction leaves a `NaN` operand
-/// undefined, and only the separate `NMax` instruction promises to
-/// discard it, so a caller that relied on `max` alone would have its
-/// correctness depend on which instruction a given driver happened to
-/// lower `f32::max` to.
+/// guaranteed to discard the `NaN` on a GPU the way it does on the CPU.
+/// SPIR-V's `FMax` leaves a `NaN` operand undefined and only `NMax`
+/// promises to discard it, so leaning on `max` alone would make
+/// correctness depend on which one a driver lowers `f32::max` to.
 #[cube]
 pub(crate) fn safe_reciprocal(denom: f32, floor: f32) -> f32 {
     let mut inv = 0.0f32;
@@ -77,11 +71,17 @@ pub(crate) fn fill_dct8_basis(basis: &mut SharedMemory<f32>, thread_id: u32) {
     }
 }
 
-/// Writes the orthonormal separable Haar-8 basis into shared memory.
-/// Row j, column i lands at basis[j * 8 + i]. Rows are unit-norm and the
-/// inverse is the transpose, matching the fill_dct8_basis contract. Row 0
-/// is the scaling row, so the DC exception in the hard threshold holds.
-/// Only the first 64 threads write. The caller must sync_cube() after.
+/// Fills the orthonormal Haar-8 basis into shared memory, one entry per
+/// thread.
+///
+/// Row `j`, column `i` lands at `basis[j * 8 + i]`. Rows are unit-norm
+/// and the inverse is the transpose, matching [`fill_dct8_basis`]'s
+/// contract, so either basis runs through the same helpers. Row 0 is the
+/// scaling row, which is what keeps the hard threshold's DC exception
+/// meaningful.
+///
+/// Only the first 64 threads write an entry. The caller must call
+/// `sync_cube()` before reading `basis`.
 #[cube]
 pub fn fill_haar8_basis(basis: &mut SharedMemory<f32>, thread_id: u32) {
     if thread_id < 64u32 {
@@ -132,21 +132,14 @@ pub fn fill_haar8_basis(basis: &mut SharedMemory<f32>, thread_id: u32) {
 ///
 /// The whole line is read into registers before any output is written, so
 /// writing an output cannot disturb an input a later output still needs.
-/// Reading once rather than once per output also turns 64 shared-memory
-/// reads per line into 8.
+/// It also turns 64 shared-memory reads per line into 8.
 ///
-/// A thread owns its own eight slots for the whole call, so nothing here
-/// reads or writes across threads and no barrier is needed inside it. A
-/// caller that follows a row pass with a column pass still needs its own
-/// barrier between them, because the column pass reads slots the row pass
-/// wrote from other threads.
+/// A thread owns its own eight slots for the whole call, so no barrier is
+/// needed inside it. A caller that follows a row pass with a column pass
+/// still needs its own barrier between them, because the column pass
+/// reads slots other threads wrote.
 #[cube]
-pub(crate) fn dct8_line_fwd(
-    basis: &SharedMemory<f32>,
-    buf: &mut SharedMemory<f32>,
-    base: u32,
-    stride: u32,
-) {
+pub(crate) fn dct8_line_fwd(basis: &SharedMemory<f32>, buf: &mut SharedMemory<f32>, base: u32, stride: u32) {
     let mut line = Array::<f32>::new(8usize);
     #[unroll]
     for i in 0..PATCH_SIZE {
@@ -172,21 +165,14 @@ pub(crate) fn dct8_line_fwd(
 ///
 /// The whole line is read into registers before any output is written, so
 /// writing an output cannot disturb an input a later output still needs.
-/// Reading once rather than once per output also turns 64 shared-memory
-/// reads per line into 8.
+/// It also turns 64 shared-memory reads per line into 8.
 ///
-/// A thread owns its own eight slots for the whole call, so nothing here
-/// reads or writes across threads and no barrier is needed inside it. A
-/// caller that follows a row pass with a column pass still needs its own
-/// barrier between them, because the column pass reads slots the row pass
-/// wrote from other threads.
+/// A thread owns its own eight slots for the whole call, so no barrier is
+/// needed inside it. A caller that follows a row pass with a column pass
+/// still needs its own barrier between them, because the column pass
+/// reads slots other threads wrote.
 #[cube]
-pub(crate) fn dct8_line_inv(
-    basis: &SharedMemory<f32>,
-    buf: &mut SharedMemory<f32>,
-    base: u32,
-    stride: u32,
-) {
+pub(crate) fn dct8_line_inv(basis: &SharedMemory<f32>, buf: &mut SharedMemory<f32>, base: u32, stride: u32) {
     let mut line = Array::<f32>::new(8usize);
     #[unroll]
     for j in 0..PATCH_SIZE {
@@ -295,31 +281,25 @@ pub(crate) fn haar_inv_stack(stack: &mut SharedMemory<f32>, pos: u32, k_use: u32
 /// leaves on top of an otherwise flat noise variance.
 ///
 /// Non-local means leaves a residual whose covariance falls off with
-/// distance as `rho^d`, not the flat covariance a white-noise model
-/// assumes. Projecting that falling covariance through the same
-/// orthonormal 8-point DCT basis [`fill_dct8_basis`] builds on the GPU
-/// spreads a flat variance unevenly across frequencies: low frequencies
-/// pick up more of the noise power, high frequencies less.
+/// distance as `rho^d`, rather than the flat covariance a white-noise
+/// model assumes. Projecting that through the same orthonormal 8-point
+/// DCT basis [`fill_dct8_basis`] builds spreads a flat variance unevenly
+/// across frequencies. Low frequencies pick up more of the noise power,
+/// high frequencies less.
 ///
 /// `g(u) = sum_i sum_j B_u(i) * B_u(j) * rho^|i-j|`, where `B_u` is row
-/// `u` of that basis. A 2D 8x8 patch's coefficient at `(u, v)` scales by
+/// `u` of that basis. A patch's coefficient at `(u, v)` scales by
 /// `g(u) * g(v)`, since the correlation model treats rows and columns
-/// the same way and the 2D DCT itself runs as two separable 1D passes.
+/// alike and the 2D DCT runs as two separable 1D passes.
 ///
-/// Two properties hold for every `rho`, both following from the basis
-/// being orthonormal. `sum_u g(u) = 8`, so this profile redistributes
-/// variance across frequencies rather than changing its total, and
-/// needs no separate normalisation. And at `rho = 0`, `g(u) = 1` for
-/// every `u`, since only the `i = j` terms of the sum survive and each
-/// basis row has unit norm.
+/// `sum_u g(u) = 8` for every `rho`, because the basis is orthonormal, so
+/// this redistributes variance across frequencies rather than changing
+/// the total and needs no separate normalisation.
 ///
-/// `rho <= 0` returns `[1.0; 8]` directly instead of running the sum
-/// below. Floating-point summation of eight squared cosine terms does
-/// not land on exactly `1.0` the way exact arithmetic does, and a caller
-/// with correlation shaping turned off needs to multiply a variance by
-/// exactly `1.0`, not by something a few bits away from it, so its
-/// result stays bit for bit what it would have been with no shaping
-/// applied at all.
+/// `rho <= 0` returns `[1.0; 8]` directly. The sum below is exactly 1.0
+/// there in exact arithmetic, but eight squared cosine terms in floating
+/// point land a few bits off, and a caller with correlation shaping off
+/// needs its result to be bit for bit what no shaping at all would give.
 pub fn dct_noise_profile(rho: f32) -> [f32; 8] {
     if rho <= 0.0 {
         return [1.0; 8];

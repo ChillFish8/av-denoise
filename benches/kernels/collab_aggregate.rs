@@ -55,10 +55,8 @@ impl<R: Runtime> Benchmark for CollabNormaliseBench<R> {
                 ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored),
                 ArrayArg::from_raw_parts(args.wsum.clone(), pixels),
                 ArrayArg::from_raw_parts(args.output.clone(), pixels * stored),
-                // Single-frame region, the same `frame_offset = 0` every
-                // shipped single-frame caller passes (see
-                // `src/collab/pipeline.rs`); this bench measures one
-                // frame's worth of normalisation, not a cross-frame ring.
+                // A single-frame region. This bench measures one frame's
+                // worth of normalisation, not a cross-frame ring.
                 0u32,
                 W,
                 H,
@@ -82,8 +80,7 @@ impl<R: Runtime> Benchmark for CollabNormaliseBench<R> {
     }
 }
 
-/// Clears both accumulators, which runs once before each of the two
-/// filter passes.
+/// Clears both accumulators, which runs once before every filter pass.
 pub struct CollabZeroAccumBench<R: Runtime> {
     pub client: ComputeClient<R>,
     pub ch: u32,
@@ -108,11 +105,11 @@ impl<R: Runtime> Benchmark for CollabZeroAccumBench<R> {
         let stored = stored_channels(self.ch) as usize;
         let pixels = (W * H) as usize;
         let dim = 256u32;
-        // Same 65,535-workgroups-per-dimension GPU limit `MAX_GRID_1D`
-        // guards against elsewhere, clamped by literal here since that
-        // constant is crate-private and this bench is a separate crate
-        // target. `collab_zero_accum` is grid-strided, so the clamp
-        // still reaches every slot even past 1080p bench sizes.
+        // The same 65,535-workgroups-per-dimension GPU limit the library
+        // clamps to, spelled out here because its own constant is
+        // crate-private and a bench is a separate crate target.
+        // `collab_zero_accum` strides, so the clamp still reaches every
+        // slot.
         const MAX_GRID_1D: u32 = 65_535;
         let grid = ((pixels * stored) as u32).div_ceil(dim).min(MAX_GRID_1D);
 
@@ -123,8 +120,7 @@ impl<R: Runtime> Benchmark for CollabZeroAccumBench<R> {
                 CubeDim::new_1d(dim),
                 ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored),
                 ArrayArg::from_raw_parts(args.wsum.clone(), pixels),
-                // Single-frame region, the same `frame_offset = 0` every
-                // shipped single-frame caller passes.
+                // A single-frame region, as a single-frame caller passes.
                 0u32,
                 pixels as u32,
                 stored as u32,

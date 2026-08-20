@@ -1,11 +1,10 @@
-//! THROWAWAY. Per-frame cost of the four collab kernels at the geometry
-//! the pipeline actually runs them at.
+//! Per-frame cost of the four collab kernels at the geometry the pipeline
+//! actually runs them at.
 //!
-//! Production builds a separate denoiser for luma and for chroma, and at
-//! 4:2:0 the chroma planes are half-size on each axis. A bench that runs
-//! chroma at full resolution reports four times the real work, and the
-//! fused yuv path is never run on 4:2:0 at all. Both planes are measured
-//! here and summed, so the total is one frame's kernel cost.
+//! A separate denoiser runs for luma and for chroma, and at 4:2:0 the
+//! chroma planes are half-size on each axis. A bench that runs chroma at
+//! full resolution would report four times the real work. Both planes are
+//! measured here and summed, so the total is one frame's kernel cost.
 
 use av_denoise::collab::geometry::{member_buf_len, ref_count, refs_along};
 use av_denoise::collab::kernels::aggregate::{
@@ -32,8 +31,20 @@ struct Geom {
 }
 
 const PLANES: &[Geom] = &[
-    Geom { w: 1920, h: 1080, ch: 1, stored: 1, label: "luma   1920x1080 c1" },
-    Geom { w: 960, h: 540, ch: 2, stored: 2, label: "chroma  960x540  c2" },
+    Geom {
+        w: 1920,
+        h: 1080,
+        ch: 1,
+        stored: 1,
+        label: "luma   1920x1080 c1",
+    },
+    Geom {
+        w: 960,
+        h: 540,
+        ch: 2,
+        stored: 2,
+        label: "chroma  960x540  c2",
+    },
 ];
 
 const RADIUS: u32 = 2;
@@ -60,7 +71,13 @@ fn frame_data(g: Geom) -> Vec<f32> {
                     .wrapping_mul(2654435761)
                     .wrapping_add(seed.wrapping_mul(340573321));
                 let noise = (hash as f32 / u32::MAX as f32 - 0.5) * 0.1;
-                data.push(if c < g.ch { (base + noise).clamp(0.0, 1.0) } else { 0.0 });
+                data.push(
+                    if c < g.ch {
+                        (base + noise).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    },
+                );
             }
         }
     }
@@ -312,7 +329,11 @@ impl<R: Runtime> Benchmark for Arm<'_, R> {
     }
 
     fn shapes(&self) -> Vec<Vec<usize>> {
-        vec![vec![self.rig.g.w as usize, self.rig.g.h as usize, self.rig.g.ch as usize]]
+        vec![vec![
+            self.rig.g.w as usize,
+            self.rig.g.h as usize,
+            self.rig.g.ch as usize,
+        ]]
     }
 }
 
@@ -346,7 +367,11 @@ fn main() {
         for g in PLANES {
             let rig = Rig::<cubecl::wgpu::WgpuRuntime>::new(client.clone(), *g);
             for (i, (k, prime)) in kernels.iter().enumerate() {
-                let arm = Arm { rig: &rig, kernel: k, prime: *prime };
+                let arm = Arm {
+                    rig: &rig,
+                    kernel: k,
+                    prime: *prime,
+                };
                 let name = arm.name();
                 match arm.run(TimingMethod::Device) {
                     Ok(d) => {
