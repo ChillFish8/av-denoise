@@ -25,6 +25,7 @@ pub mod mc_chain_compose;
 pub mod mc_confidence;
 pub mod mc_downscale;
 pub mod mc_warp;
+pub mod nl4d_geometry;
 pub mod nl4d_group_temporal;
 pub mod noise_partial;
 pub mod temporal_noise_stats;

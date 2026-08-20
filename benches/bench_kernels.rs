@@ -205,9 +205,13 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
             ch_name,
         });
     }
-    run(CollabHtBench {
-        client: client.clone(),
-    });
+    for &(ch, ch_name) in CHANNELS {
+        run(CollabHtBench {
+            client: client.clone(),
+            ch,
+            ch_name,
+        });
+    }
     for &(ch, ch_name) in CHANNELS {
         run(CollabNormaliseBench {
             client: client.clone(),

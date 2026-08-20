@@ -4,31 +4,19 @@ use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
+use super::nl4d_geometry::{
+    BLKSIZE,
+    BLK_STEP,
+    CENTRE_SLOT,
+    K_MAX,
+    NEIGHBOUR_SLOTS,
+    N_FRAMES,
+    RADIUS,
+    REFINE,
+    SPATIAL_RADIUS,
+    THSAD,
+};
 use super::{H, W, block_sync, make_padded_frame, shapes_with_ch, stored_channels};
-
-const RADIUS: u32 = 2;
-const REFINE: u32 = 2;
-const SPATIAL_RADIUS: u32 = 9;
-const K_MAX: u32 = 8;
-const BLK_STEP: u32 = 8;
-// The library's own default motion block side length
-// (`MotionCompensationMode::Mvtools`'s `blksize`), distinct from
-// `BLK_STEP` above, which this bench keeps at `PATCH_SIZE` so a block
-// boundary lines up with a patch boundary.
-const BLKSIZE: u32 = 16;
-// `thsad(BLKSIZE, 1.0)` in normalised SAD units (block_area *
-// THSAD_PIXEL, see `crate::nlmeans::motion::thsad`), hand-computed here
-// since that function is crate-private.
-const THSAD: f32 = (BLKSIZE * BLKSIZE) as f32 * 0.02;
-const N_FRAMES: u32 = 2 * RADIUS + 1;
-const CENTRE_SLOT: u32 = RADIUS;
-
-// The centre slot is skipped, and physical slots run 0..N_FRAMES, so
-// `neighbour_slots[t]` for the neighbour at temporal offset `k` is
-// `k + RADIUS`, laid out in the same `neighbour_idx_for_k` order
-// `crate::nlmeans::motion::chain` uses: ascending k on the negative
-// side first, then ascending k on the positive side.
-const NEIGHBOUR_SLOTS: [u32; (2 * RADIUS) as usize] = [0, 1, 3, 4];
 
 /// The temporal grouping kernel at the library's default search
 /// geometry, over a 1080p frame ring. One cube per reference patch, its
