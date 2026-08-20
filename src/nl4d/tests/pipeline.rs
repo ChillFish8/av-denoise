@@ -34,7 +34,6 @@ fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
                 estimation: MotionEstimation::Auto,
             },
             hq: Some(HqParams::with_sigma(SIGMA)),
-            track_weight_sq: false,
         },
         temporal_radius,
         refine: REFINE,

@@ -15,7 +15,6 @@ fn auto_params_k0() -> NlmParams {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: Some(HqParams {
             auto_strength: true,
             noise_floor: true,

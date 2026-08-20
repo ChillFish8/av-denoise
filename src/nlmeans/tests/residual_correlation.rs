@@ -119,7 +119,6 @@ fn measure(
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: Some(HqParams::with_sigma(sigma)),
     };
     let mut denoiser = NlmDenoiser::<R>::new(client, params, w, h);
@@ -495,7 +494,6 @@ fn run_front_end(
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: Some(HqParams::with_sigma(sigma)),
     };
     let mut denoiser = NlmDenoiser::<R>::new(client, params, w, h);

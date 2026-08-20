@@ -57,7 +57,6 @@ fn machinery_params() -> NlmParams {
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         },
-        track_weight_sq: false,
         hq: Some(HqParams::with_sigma(4.0 / 255.0)),
     }
 }

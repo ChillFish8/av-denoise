@@ -20,7 +20,6 @@ fn temporal_params(radius: u32) -> NlmParams {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: None,
     }
 }

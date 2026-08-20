@@ -100,19 +100,12 @@ pub(super) fn welsch_weight(sum: f32, h2_inv_norm: f32, noise_offset: f32) -> f3
 ///
 /// One interior check per thread covers both reads, falling back to
 /// clamped reads at the border.
-///
-/// When `track_weight_sq` is true, `weight_fwd * weight_fwd +
-/// weight_bwd * weight_bwd` also folds into `weight_sq_sum`. When it is
-/// false the write is dropped at compile time and `weight_sq_sum` is
-/// never touched.
 #[cube]
 pub(super) fn accumulate_pair<N: Size>(
     input: &Array<Vector<f32, N>>,
     accum: &mut Array<Vector<f32, N>>,
     weight_sum: &mut Array<f32>,
     max_weight: &mut Array<f32>,
-    weight_sq_sum: &mut Array<f32>,
-    #[comptime] track_weight_sq: bool,
     global_x: u32,
     global_y: u32,
     q_x: i32,
@@ -159,8 +152,4 @@ pub(super) fn accumulate_pair<N: Size>(
     accum[pixel_idx] = cur + fwd_pixel * line_w_fwd + bwd_pixel * line_w_bwd;
 
     weight_sum[pixel_idx] += weight_fwd + weight_bwd;
-
-    if track_weight_sq {
-        weight_sq_sum[pixel_idx] += weight_fwd * weight_fwd + weight_bwd * weight_bwd;
-    }
 }

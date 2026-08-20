@@ -13,7 +13,6 @@ fn separable_uniform_passthrough() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: None,
     };
 
@@ -47,7 +46,6 @@ fn separable_yuv_passthrough() {
         channels: ChannelMode::Yuv,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: None,
     };
 
@@ -82,7 +80,6 @@ fn separable_symmetry_preserved() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: None,
     };
 

@@ -16,7 +16,6 @@ fn attenuation_params(sigma: f32) -> NlmParams {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: Some(HqParams {
             auto_strength: false,
             noise_floor: true,

@@ -444,7 +444,6 @@ fn confidence_buf_filled_without_motion_compensation() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: Some(HqParams {
             auto_strength: true,
             noise_floor: true,
@@ -508,7 +507,6 @@ fn confidence_buf_filled_with_motion_compensation() {
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         },
-        track_weight_sq: false,
         hq: Some(HqParams {
             auto_strength: true,
             noise_floor: true,
@@ -580,7 +578,6 @@ fn confidence_buf_absent_with_motion_compensation_and_no_hq() {
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         },
-        track_weight_sq: false,
         hq: None,
     };
 
@@ -629,7 +626,6 @@ fn confidence_buf_absent_with_motion_compensation_when_temporal_confidence_disab
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         },
-        track_weight_sq: false,
         hq: Some(HqParams {
             temporal_confidence: false,
             ..HqParams::with_sigma(4.0 / 255.0)
@@ -678,7 +674,6 @@ fn confidence_buf_absent_when_temporal_confidence_disabled() {
     let client = make_client();
     let params = NlmParams {
         temporal_radius: 1,
-        track_weight_sq: false,
         hq: Some(HqParams {
             temporal_confidence: false,
             ..HqParams::with_sigma(4.0 / 255.0)

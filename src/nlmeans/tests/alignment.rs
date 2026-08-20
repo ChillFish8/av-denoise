@@ -18,7 +18,6 @@ fn luma_params(motion_compensation: MotionCompensationMode) -> NlmParams {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation,
-        track_weight_sq: false,
         hq: None,
     }
 }

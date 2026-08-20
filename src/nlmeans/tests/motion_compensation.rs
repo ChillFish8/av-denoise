@@ -375,7 +375,6 @@ fn motion_compensation_uniform_passthrough() {
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         },
-        track_weight_sq: false,
         hq: None,
     };
 
@@ -424,7 +423,6 @@ fn motion_compensation_with_bilateral_finite() {
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         },
-        track_weight_sq: false,
         hq: None,
     };
 
@@ -482,7 +480,6 @@ fn motion_compensation_translating_square_preserves_centre() {
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         },
-        track_weight_sq: false,
         hq: None,
     };
 
@@ -554,7 +551,6 @@ fn motion_compensation_1080_square_odd_block_count_dispatch_succeeds() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::mvtools_default(),
-        track_weight_sq: false,
         hq: None,
     };
     let mc = MotionCtx::new(params.motion_compensation, w, h, test_align()).unwrap();
@@ -621,7 +617,6 @@ fn motion_compensation_1080_square_odd_block_count_chained_dispatch_succeeds() {
             pyramid_levels: DEFAULT_PYRAMID_LEVELS,
             estimation: MotionEstimation::chained_default(),
         },
-        track_weight_sq: false,
         hq: None,
     };
     let mc = MotionCtx::new(params.motion_compensation, w, h, test_align()).unwrap();
@@ -726,7 +721,6 @@ fn direct_mv_field_for_forward_neighbour(
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: mode,
-        track_weight_sq: false,
         hq: None,
     };
 
@@ -1138,7 +1132,6 @@ fn chained_params(refine_radius: u32) -> NlmParams {
             pyramid_levels: 2,
             estimation: MotionEstimation::Chained { refine_radius },
         },
-        track_weight_sq: false,
         hq: None,
     }
 }
@@ -1391,7 +1384,6 @@ fn chained_hq_params(radius: u32, refine_radius: u32) -> NlmParams {
             pyramid_levels: 2,
             estimation: MotionEstimation::Chained { refine_radius },
         },
-        track_weight_sq: false,
         hq: Some(HqParams {
             auto_strength: true,
             noise_floor: true,
@@ -1481,7 +1473,6 @@ fn direct_estimation_default_and_explicit_construction_match_bit_for_bit() {
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::None,
             motion_compensation: mc,
-            track_weight_sq: false,
             hq: None,
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
@@ -1526,7 +1517,6 @@ fn auto_params(temporal_radius: u32) -> NlmParams {
             pyramid_levels: 2,
             estimation: MotionEstimation::Auto,
         },
-        track_weight_sq: false,
         hq: None,
     }
 }
@@ -1595,7 +1585,6 @@ fn k4_params(estimation: MotionEstimation) -> NlmParams {
             pyramid_levels: 2,
             estimation,
         },
-        track_weight_sq: false,
         hq: None,
     }
 }

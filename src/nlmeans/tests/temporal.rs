@@ -46,7 +46,6 @@ fn temporal_denoise_uniform() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: None,
     };
 
@@ -82,7 +81,6 @@ fn temporal_with_noisy_center_frame() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: None,
     };
 
@@ -118,7 +116,6 @@ fn temporal_asymmetric_frames_correct_weights() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: None,
     };
 
@@ -336,7 +333,6 @@ fn temporal_windowed_matches_separable_at_search_5_and_6() {
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::None,
             motion_compensation: MotionCompensationMode::None,
-            track_weight_sq: false,
             hq: Some(HqParams::with_sigma(16.0 / 255.0)),
         };
 
@@ -379,7 +375,6 @@ fn temporal_windowed_ref_matches_separable_ref_at_search_5_and_6() {
                 sigma_r: 0.1,
             },
             motion_compensation: MotionCompensationMode::None,
-            track_weight_sq: false,
             hq: Some(HqParams::with_sigma(16.0 / 255.0)),
         };
 
@@ -422,7 +417,6 @@ fn temporal_windowed_matches_separable_at_the_search_ceiling() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: Some(HqParams::with_sigma(16.0 / 255.0)),
     };
 
@@ -461,7 +455,6 @@ fn temporal_uniform_passthrough_search_5_and_6() {
             channels: ChannelMode::Luma,
             prefilter: PrefilterMode::None,
             motion_compensation: MotionCompensationMode::None,
-            track_weight_sq: false,
             hq: None,
         };
 

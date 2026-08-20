@@ -211,7 +211,6 @@ fn confidence_variance_test_params(temporal_radius: u32, mismatch_scale: f32, co
                 estimation: MotionEstimation::Auto,
             },
             hq: Some(HqParams::with_sigma(SIGMA)),
-            track_weight_sq: false,
         },
         temporal_radius,
         refine: REFINE,

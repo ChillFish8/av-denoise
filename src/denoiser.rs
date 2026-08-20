@@ -352,10 +352,6 @@ impl DenoiserOptions {
                 Algorithm::Nl4d(opts) => Some(opts.hq),
             },
             strength,
-            // `Nl4d` shrinks straight off the propagated coefficient
-            // sigma, so no algorithm needs the front end's
-            // weight-squared accumulator turned on.
-            track_weight_sq: false,
             ..NlmParams::default()
         };
         if let Some(t) = self.nlm {
@@ -1161,19 +1157,6 @@ mod options_tests {
         // calibrated value.
         assert_eq!(opts.lambda_ht, None);
         assert!((params.lambda_ht - nl4d_default_lambda_ht(ChannelMode::Yuv)).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn nl4d_does_not_set_track_weight_sq() {
-        // nl4d has no second shrinkage stage that needs the front end's
-        // measured residual noise, so it does not need the
-        // weight-squared accumulator turned on.
-        let opts = DenoiserOptions::builder()
-            .algorithm(Algorithm::Nl4d(Nl4dOptions::default()))
-            .build();
-        let params = opts.to_nlm_params();
-
-        assert!(!params.track_weight_sq);
     }
 
     #[test]

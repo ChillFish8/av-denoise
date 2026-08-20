@@ -126,21 +126,6 @@ pub struct NlmDenoiser<R: Runtime> {
     pub(super) weight_sum: Handle,
     /// The largest neighbour weight at each pixel.
     pub(super) max_weight: Handle,
-    /// The sum of squared neighbour weights at each pixel, alongside
-    /// `weight_sum`.
-    ///
-    /// It only exists when `NlmParams::track_weight_sq` is set, because
-    /// nothing reads it otherwise and every windowed and separable
-    /// kernel would pay for writing it regardless.
-    pub(super) weight_sq_sum: Option<Handle>,
-    /// A small placeholder passed as the weight-squared argument to every
-    /// kernel that can accumulate it, whenever `weight_sq_sum` does not
-    /// exist.
-    ///
-    /// The kernel drops the write at compile time in that case, so this
-    /// buffer is never indexed and its size does not matter. It is tiny,
-    /// so unlike `weight_sq_sum` it is always allocated.
-    pub(super) weight_sq_sum_dummy: Handle,
     /// Weight scratch for the path that compares a frame against itself.
     pub(super) weight_buf: Handle,
     /// The raw forward distance on the separable path.
@@ -389,8 +374,6 @@ impl<R: Runtime> NlmDenoiser<R> {
         let accum = client.empty(frame_bytes);
         let weight_sum = client.empty(scalar_bytes);
         let max_weight = client.empty(scalar_bytes);
-        let weight_sq_sum = params.track_weight_sq.then(|| client.empty(scalar_bytes));
-        let weight_sq_sum_dummy = client.empty(size_of::<f32>());
         let weight_buf = client.empty(scalar_bytes);
         let raw_fwd = client.empty(scalar_bytes);
         let raw_bwd = client.empty(scalar_bytes);
@@ -582,8 +565,6 @@ impl<R: Runtime> NlmDenoiser<R> {
             accum,
             weight_sum,
             max_weight,
-            weight_sq_sum,
-            weight_sq_sum_dummy,
             weight_buf,
             raw_fwd,
             raw_bwd,

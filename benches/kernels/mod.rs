@@ -8,7 +8,6 @@ pub mod accumulate;
 pub mod bilateral;
 pub mod collab_aggregate;
 pub mod collab_ht;
-pub mod collab_weight_ratio;
 pub mod copy;
 pub mod dist_2d_weight;
 pub mod dist_2d_weight_ref;

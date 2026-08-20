@@ -22,7 +22,6 @@ pub struct AccumulateInput {
     accum: Handle,
     weight_sum: Handle,
     max_weight: Handle,
-    weight_sq_sum_dummy: Handle,
     weights: Handle,
     frame_len: usize,
 }
@@ -47,13 +46,11 @@ impl<R: Runtime> Benchmark for AccumulateBench<R> {
         let accum = self.client.empty(pixels * stored * size_of::<f32>());
         let weight_sum = self.client.empty(pixels * size_of::<f32>());
         let max_weight = self.client.empty(pixels * size_of::<f32>());
-        let weight_sq_sum_dummy = self.client.empty(size_of::<f32>());
         AccumulateInput {
             input,
             accum,
             weight_sum,
             max_weight,
-            weight_sq_sum_dummy,
             weights,
             frame_len: frame.len(),
         }
@@ -74,8 +71,6 @@ impl<R: Runtime> Benchmark for AccumulateBench<R> {
                 ArrayArg::from_raw_parts(args.weights.clone(), pixels),
                 ArrayArg::from_raw_parts(args.weights.clone(), pixels),
                 ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
-                ArrayArg::from_raw_parts(args.weight_sq_sum_dummy.clone(), 1),
-                false,
                 0u32,
                 0u32,
                 Q_X,

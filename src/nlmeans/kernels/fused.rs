@@ -263,23 +263,15 @@ pub fn nlm_dist_2d_weight_ref<N: Size>(
 ///
 /// When `use_confidence` is false the lookup and the multiply are
 /// dropped at compile time, and the confidence buffers are never read.
-///
-/// `weight_sq_sum` and `track_weight_sq` follow `accumulate_pair`'s own
-/// rule elsewhere in the kernel tree. Every weight this kernel forms also
-/// squares into a register alongside `weight_sum_reg`, written to
-/// `weight_sq_sum` once at the end, and the whole thing vanishes at
-/// compile time when the flag is false.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_pair_accumulate_window<N: Size>(
     input: &Array<Vector<f32, N>>,
     accum: &mut Array<Vector<f32, N>>,
     weight_sum: &mut Array<f32>,
     max_weight: &mut Array<f32>,
-    weight_sq_sum: &mut Array<f32>,
     conf_fwd: &Array<f32>,
     conf_bwd: &Array<f32>,
     #[comptime] use_confidence: bool,
-    #[comptime] track_weight_sq: bool,
     frame_t: u32,
     frame_fwd: u32,
     frame_bwd: u32,
@@ -337,7 +329,6 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
     let mut accum_reg = Vector::<f32, N>::empty();
     let mut weight_sum_reg = 0.0f32;
     let mut max_weight_reg = 0.0f32;
-    let mut weight_sq_sum_reg = 0.0f32;
 
     let window_side = comptime!(2 * search_radius + 1);
 
@@ -437,9 +428,6 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
                 let line_w_bwd = Vector::<f32, N>::empty().fill(weight_bwd);
                 accum_reg = accum_reg + fwd_pixel * line_w_fwd + bwd_pixel * line_w_bwd;
                 weight_sum_reg += weight_fwd + weight_bwd;
-                if track_weight_sq {
-                    weight_sq_sum_reg += weight_fwd * weight_fwd + weight_bwd * weight_bwd;
-                }
                 max_weight_reg = f32::max(max_weight_reg, f32::max(weight_fwd, weight_bwd));
             }
 
@@ -454,9 +442,6 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
         let cur_accum = accum[pixel_idx];
         accum[pixel_idx] = cur_accum + accum_reg;
         weight_sum[pixel_idx] += weight_sum_reg;
-        if track_weight_sq {
-            weight_sq_sum[pixel_idx] += weight_sq_sum_reg;
-        }
         let cur_max = max_weight[pixel_idx];
         max_weight[pixel_idx] = f32::max(cur_max, max_weight_reg);
     }
@@ -486,18 +471,12 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
 /// Nearby candidates share more of the grain's spatial correlation, so
 /// their offset is reduced relative to distant ones. See
 /// `noise::build_spatial_offset_lut`.
-///
-/// `weight_sq_sum` and `track_weight_sq` follow the same rule as
-/// `nlm_fused_pair_accumulate_window`, tracked in a register alongside
-/// `weight_sum_reg` and written once at the end.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_single_window<N: Size>(
     input: &Array<Vector<f32, N>>,
     accum: &mut Array<Vector<f32, N>>,
     weight_sum: &mut Array<f32>,
     max_weight: &mut Array<f32>,
-    weight_sq_sum: &mut Array<f32>,
-    #[comptime] track_weight_sq: bool,
     frame_t: u32,
     h2_inv_norm: f32,
     spatial_offset_lut: &Array<f32>,
@@ -547,7 +526,6 @@ pub fn nlm_fused_single_window<N: Size>(
     let mut accum_reg = Vector::<f32, N>::empty();
     let mut weight_sum_reg = 0.0f32;
     let mut max_weight_reg = 0.0f32;
-    let mut weight_sq_sum_reg = 0.0f32;
 
     let window_side = comptime!(2 * search_radius + 1);
 
@@ -614,9 +592,6 @@ pub fn nlm_fused_single_window<N: Size>(
                     let line_w = Vector::<f32, N>::empty().fill(weight);
                     accum_reg += neighbor_pixel * line_w;
                     weight_sum_reg += weight;
-                    if track_weight_sq {
-                        weight_sq_sum_reg += weight * weight;
-                    }
                     max_weight_reg = f32::max(max_weight_reg, weight);
                 }
 
@@ -630,9 +605,6 @@ pub fn nlm_fused_single_window<N: Size>(
         let cur_accum = accum[pixel_idx];
         accum[pixel_idx] = cur_accum + accum_reg;
         weight_sum[pixel_idx] += weight_sum_reg;
-        if track_weight_sq {
-            weight_sq_sum[pixel_idx] += weight_sq_sum_reg;
-        }
         let cur_max = max_weight[pixel_idx];
         max_weight[pixel_idx] = f32::max(cur_max, max_weight_reg);
     }
@@ -646,9 +618,6 @@ pub fn nlm_fused_single_window<N: Size>(
 /// the weights come from the cleaner reference frames.
 ///
 /// Confidence weighting works the same way as in the plain version.
-///
-/// `weight_sq_sum` and `track_weight_sq` follow the same rule as
-/// `nlm_fused_pair_accumulate_window`.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -656,11 +625,9 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
     accum: &mut Array<Vector<f32, N>>,
     weight_sum: &mut Array<f32>,
     max_weight: &mut Array<f32>,
-    weight_sq_sum: &mut Array<f32>,
     conf_fwd: &Array<f32>,
     conf_bwd: &Array<f32>,
     #[comptime] use_confidence: bool,
-    #[comptime] track_weight_sq: bool,
     frame_t: u32,
     frame_fwd: u32,
     frame_bwd: u32,
@@ -717,7 +684,6 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
     let mut accum_reg = Vector::<f32, N>::empty();
     let mut weight_sum_reg = 0.0f32;
     let mut max_weight_reg = 0.0f32;
-    let mut weight_sq_sum_reg = 0.0f32;
 
     let window_side = comptime!(2 * search_radius + 1);
 
@@ -813,9 +779,6 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
                 let line_w_bwd = Vector::<f32, N>::empty().fill(weight_bwd);
                 accum_reg = accum_reg + fwd_pixel * line_w_fwd + bwd_pixel * line_w_bwd;
                 weight_sum_reg += weight_fwd + weight_bwd;
-                if track_weight_sq {
-                    weight_sq_sum_reg += weight_fwd * weight_fwd + weight_bwd * weight_bwd;
-                }
                 max_weight_reg = f32::max(max_weight_reg, f32::max(weight_fwd, weight_bwd));
             }
 
@@ -828,9 +791,6 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
         let cur_accum = accum[pixel_idx];
         accum[pixel_idx] = cur_accum + accum_reg;
         weight_sum[pixel_idx] += weight_sum_reg;
-        if track_weight_sq {
-            weight_sq_sum[pixel_idx] += weight_sq_sum_reg;
-        }
         let cur_max = max_weight[pixel_idx];
         max_weight[pixel_idx] = f32::max(cur_max, max_weight_reg);
     }
@@ -844,9 +804,6 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
 ///
 /// `spatial_offset_lut` has the same layout as in
 /// `nlm_fused_single_window`.
-///
-/// `weight_sq_sum` and `track_weight_sq` follow the same rule as
-/// `nlm_fused_single_window`.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_single_window_ref<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -854,8 +811,6 @@ pub fn nlm_fused_single_window_ref<N: Size>(
     accum: &mut Array<Vector<f32, N>>,
     weight_sum: &mut Array<f32>,
     max_weight: &mut Array<f32>,
-    weight_sq_sum: &mut Array<f32>,
-    #[comptime] track_weight_sq: bool,
     frame_t: u32,
     h2_inv_norm: f32,
     spatial_offset_lut: &Array<f32>,
@@ -905,7 +860,6 @@ pub fn nlm_fused_single_window_ref<N: Size>(
     let mut accum_reg = Vector::<f32, N>::empty();
     let mut weight_sum_reg = 0.0f32;
     let mut max_weight_reg = 0.0f32;
-    let mut weight_sq_sum_reg = 0.0f32;
 
     let window_side = comptime!(2 * search_radius + 1);
 
@@ -969,9 +923,6 @@ pub fn nlm_fused_single_window_ref<N: Size>(
                     let line_w = Vector::<f32, N>::empty().fill(weight);
                     accum_reg += neighbor_pixel * line_w;
                     weight_sum_reg += weight;
-                    if track_weight_sq {
-                        weight_sq_sum_reg += weight * weight;
-                    }
                     max_weight_reg = f32::max(max_weight_reg, weight);
                 }
 
@@ -985,9 +936,6 @@ pub fn nlm_fused_single_window_ref<N: Size>(
         let cur_accum = accum[pixel_idx];
         accum[pixel_idx] = cur_accum + accum_reg;
         weight_sum[pixel_idx] += weight_sum_reg;
-        if track_weight_sq {
-            weight_sq_sum[pixel_idx] += weight_sq_sum_reg;
-        }
         let cur_max = max_weight[pixel_idx];
         max_weight[pixel_idx] = f32::max(cur_max, max_weight_reg);
     }

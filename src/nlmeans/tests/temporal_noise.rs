@@ -373,7 +373,6 @@ fn hq_temporal_folds_correlated_grain_above_immerkaer_alone() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: Some(HqParams {
             auto_strength: true,
             noise_floor: true,
@@ -431,7 +430,6 @@ fn rho_smoothed_seeds_from_first_sample_not_from_zero() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: Some(HqParams {
             auto_strength: true,
             noise_floor: true,

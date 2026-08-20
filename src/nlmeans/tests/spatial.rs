@@ -13,7 +13,6 @@ fn uniform_image_passthrough() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: None,
     };
 
@@ -43,7 +42,6 @@ fn uniform_yuv_passthrough() {
         channels: ChannelMode::Yuv,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: None,
     };
 
@@ -74,7 +72,6 @@ fn uniform_chroma_passthrough() {
         channels: ChannelMode::Chroma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: None,
     };
 
@@ -105,7 +102,6 @@ fn noisy_region_suppressed() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: None,
     };
 
@@ -140,7 +136,6 @@ fn high_strength_smooths_heavily() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: None,
     };
 
@@ -179,7 +174,6 @@ fn low_strength_preserves_original() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: None,
     };
 
@@ -213,7 +207,6 @@ fn self_weight_zero_uniform() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: None,
     };
 
@@ -263,7 +256,6 @@ fn symmetry_preserved() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: None,
     };
 
@@ -309,7 +301,6 @@ fn clamp_to_edge_no_darkening() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: None,
     };
 

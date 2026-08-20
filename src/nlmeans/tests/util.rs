@@ -32,7 +32,6 @@ fn extreme_params_produce_finite_output() {
         channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
-        track_weight_sq: false,
         hq: None,
     };
 
