@@ -63,18 +63,59 @@ denoising tools.
 - **8, 10, and 12-bit** - depth is detected from the source and preserved on output. Tuning parameters are normalized
   across bit-depth.
 - _**Fast!**_ - around **2x** FFmpeg's `nlmeans_opencl` at matched settings and **~1.4x** faster than V-BM3DHIP.
-  - Piped input can't parallelise across scenes, so file input makes the best use of big GPUs.
+  - Piped input can't parallelize across scenes, so file input makes the best use of big GPUs.
+
+---
+
+## Installing
+
+`av-denoise` is available both in library _and_ binary format, by default only the `vulkan` feature
+is enabled, since that is typically the default accelerators you will want to use.
+
+When compiling the binary, enable the `binary` feature. It pulls in both ingestion paths (FFMS2 for
+file input, y4m for piped input), so there's nothing else to pick between.
+
+The following (non-accelerator) features are available:
+
+- `binary` - Enables the dependencies and code required to compile `av-denoise` as a binary.
+  * This pulls in `ffms2` as hard dependencies. This means you must install `ffms2` before you can compile and link
+    the binary.
+
+### Cargo install
+
+```bash
+cargo install --locked av-denoise --features binary
+```
+
+### From source
+
+This builds the binary with the default accelerators enabled (`vulkan` or `metal` if on macOS.)
+
+```bash
+git clone https://github.com/ChillFish8/av-denoise.git
+cargo build --release --features binary
+cp ./target/release/av-denoise ./av-denoise
+```
+
+### As a library
+
+```bash
+cargo add av-denoise
+```
+
+---
 
 ## Guide
 
-The defaults are measured, not guessed. Start with them, judge the result by eye, and change one
-knob at a time.
+The defaults are exhaustively measured and calibrated to offer highly effective denoising with little to no detail loss.
+You should always start with the defaults and judge the result by eye before changing any options, and when you do,
+change one knob at a time.
 
 ```bash
 av-denoise nl4d --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
 ```
 
-That runs `nl4d` at the `base` preset: a 5-frame temporal window (radius of `2`), motion tracking
+This runs `nl4d` at the `base` preset: a 5-frame temporal window (radius of `2`), motion tracking
 on, and fully automatic noise handling. The noise level and the grain's spatial correlation are
 measured per scene, so most sources need nothing else.
 
@@ -272,6 +313,8 @@ makes things worse.
 - **`--device cpu`** selects a software device where the platform offers one, such as lavapipe
   under Vulkan. It is for testing the pipeline, not for real encodes.
 
+---
+
 ## Benchmarks
 
 Numbers below come from `scripts/bench_runs.py` (`just compare-perf`), which pipes
@@ -286,6 +329,8 @@ total frames divided by wall-clock elapsed.
 - Absolute fps varies between benchmarking sessions (thermal state, background load,
   driver version). Treat comparisons within a table as meaningful; treat the same
   config's absolute fps across different tables as not directly comparable.
+
+---
 
 ### Algorithm defaults
 
@@ -369,6 +414,8 @@ I/O rather than denoising.
 | 8-bit        | **91.19** |
 | 10-bit       |     73.57 |
 
+---
+
 ## Hardware support
 
 The project supports the following accelerators/gpus:
@@ -410,39 +457,7 @@ directory (overrides whatever is in `cubecl.toml`).
 Library users can call `av_denoise::apply_compilation_cache_env()` before `Denoiser::create` to honor the same 
 env var from their own binary.
 
-## Installing
-
-`av-denoise` is available both in library _and_ binary format, by default only the `vulkan` feature
-is enabled, since that is typically the default accelerators you will want to use.
-
-When compiling the binary, enable the `binary` feature. It pulls in both ingestion paths (FFMS2 for
-file input, y4m for piped input), so there's nothing else to pick between.
-
-The following (non-accelerator) features are available:
-
-- `binary` - Enables the dependencies and code required to compile `av-denoise` as a binary.
-   * This pulls in `ffms2` as hard dependencies. This means you must install `ffms2` before you can compile and link
-     the binary.
-
-### Cargo install
-
-```bash
-cargo install --locked av-denoise --features binary
-```
-
-### From source
-
-```bash
-git clone https://github.com/ChillFish8/av-denoise.git
-cargo build --release --features binary
-cp ./target/release/av-denoise ./av-denoise
-```
-
-### As a library
-
-```bash
-cargo add av-denoise
-```
+---
 
 ## Example commands
 
