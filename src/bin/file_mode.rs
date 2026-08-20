@@ -661,7 +661,7 @@ mod tests {
     #[cfg(feature = "vulkan")]
     use av_denoise::accelerate::Accelerator;
     #[cfg(feature = "vulkan")]
-    use av_denoise::{Algorithm, DenoisingMode, Device, MotionCompensationMode};
+    use av_denoise::{Algorithm, DenoisingMode, Device};
     use indicatif::ProgressBar;
 
     use super::*;
@@ -738,10 +738,7 @@ mod tests {
             device: Device::Default,
             intent: BinaryChannelIntent::LumaChroma,
             mode: DenoisingMode::Temporal { radius: 1 },
-            prefilter: None,
-            motion_compensation: MotionCompensationMode::None,
-            algorithm: Algorithm::Nlmeans,
-            nlm_tuning: None,
+            algorithm: Algorithm::default(),
             luma_strength: None,
             chroma_strength: None,
             luma_lambda_ht: None,

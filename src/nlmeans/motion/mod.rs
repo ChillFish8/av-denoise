@@ -44,6 +44,59 @@ pub(crate) use pyramid::{pyramid_pixels_per_frame, run_pyramid_build};
 
 use crate::nlmeans::align::StorageAlign;
 
+/// The motion search's tuning, for a denoiser that always tracks motion.
+///
+/// [`MotionCompensationMode::Mvtools`] carries the same five values for
+/// a denoiser that can also turn motion compensation off.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MotionSearch {
+    /// The side length of each motion-search block, in pixels at the
+    /// finest pyramid level.
+    pub blksize: u32,
+    /// How many pixels neighbouring blocks overlap.
+    ///
+    /// This has to be strictly below `blksize`, so the step between
+    /// blocks stays positive.
+    pub overlap: u32,
+    /// The search radius in pixels at the finest pyramid level.
+    ///
+    /// The coarse pass uses the same radius on a half-size image, so
+    /// its real reach is twice as far.
+    pub search_radius: u32,
+    /// How many levels the pyramid has.
+    ///
+    /// `1` means a single full-resolution search. `2` adds a half-size
+    /// coarse pass that seeds the fine one. The maximum is
+    /// [`MAX_PYRAMID_LEVELS`].
+    pub pyramid_levels: u32,
+    /// How motion toward each temporal neighbour is estimated.
+    pub estimation: MotionEstimation,
+}
+
+impl Default for MotionSearch {
+    fn default() -> Self {
+        Self {
+            blksize: 16,
+            overlap: 8,
+            search_radius: 4,
+            pyramid_levels: 2,
+            estimation: MotionEstimation::Auto,
+        }
+    }
+}
+
+impl From<MotionSearch> for MotionCompensationMode {
+    fn from(search: MotionSearch) -> Self {
+        Self::Mvtools {
+            blksize: search.blksize,
+            overlap: search.overlap,
+            search_radius: search.search_radius,
+            pyramid_levels: search.pyramid_levels,
+            estimation: search.estimation,
+        }
+    }
+}
+
 /// How motion compensation is set up for a denoise pass.
 #[non_exhaustive]
 #[derive(Debug, Default, Clone, Copy, PartialEq)]

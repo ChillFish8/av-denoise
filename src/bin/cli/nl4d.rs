@@ -109,36 +109,31 @@ impl Nl4dArgs {
         let mut opts = self.nlm.build_options(globals)?;
 
         let hq = match opts.algorithm {
-            av_denoise::Algorithm::NlmeansHq(hq) => hq,
+            av_denoise::Algorithm::NlmeansHq(hq) => hq.hq,
             other => unreachable!(
                 "resolved variant is hq, so resolve_algorithm always returns NlmeansHq, got {other:?}"
             ),
         };
 
-        // The temporal grouping kernel reads the motion field and
-        // confidence scores that `submit_machinery` only builds when
-        // both motion compensation and temporal confidence are active
-        // (see `Nl4dParams::validate`), so this is forced on here
-        // rather than left to `--motion-compensation`.
-        opts.motion_compensation = av_denoise::MotionCompensationMode::Mvtools {
-            blksize: self.nlm.mc_blksize.unwrap_or(16),
-            overlap: self.nlm.mc_overlap.unwrap_or(8),
-            search_radius: self.nlm.mc_search.unwrap_or(4),
-            pyramid_levels: self.nlm.mc_pyramid_levels.unwrap_or(2),
-            estimation: av_denoise::MotionEstimation::default(),
-        };
-
         let defaults = av_denoise::Nl4dOptions::default();
 
         opts.algorithm = av_denoise::Algorithm::Nl4d(av_denoise::Nl4dOptions {
-            hq,
-            // Has to equal the temporal radius `resolve_preset` picked
-            // above, which is what `opts.mode` was just built from.
-            // Both the front end's frame ring and the outer
-            // `Denoiser`'s own push/flush bookkeeping depend on that
-            // radius agreeing everywhere it is read, see
-            // `Nl4dOptions`'s doc comment in `src/denoiser.rs`.
-            temporal_radius: resolved.temporal_radius,
+            // Motion tracking is always on for nl4d, because the
+            // temporal grouping kernel reads the motion field and
+            // confidence scores it produces.
+            motion: av_denoise::MotionSearch {
+                blksize: self.nlm.mc_blksize.unwrap_or(defaults.motion.blksize),
+                overlap: self.nlm.mc_overlap.unwrap_or(defaults.motion.overlap),
+                search_radius: self.nlm.mc_search.unwrap_or(defaults.motion.search_radius),
+                pyramid_levels: self
+                    .nlm
+                    .mc_pyramid_levels
+                    .unwrap_or(defaults.motion.pyramid_levels),
+                estimation: defaults.motion.estimation,
+            },
+            sigma: hq.sigma_override,
+            sigma_scale: hq.sigma_scale,
+            thsad_scale: hq.thsad_scale,
             refine: self.refine.unwrap_or(defaults.refine),
             spatial_radius: self.spatial_radius.unwrap_or(defaults.spatial_radius),
             // Left unresolved when unset, rather than picked from
@@ -284,8 +279,9 @@ mod tests {
             av_denoise::Algorithm::Nl4d(nl4d_opts) => {
                 let defaults = av_denoise::Nl4dOptions::default();
                 assert_eq!(
-                    nl4d_opts.temporal_radius, 2,
-                    "base preset resolves to temporal_radius 2"
+                    opts.mode,
+                    av_denoise::DenoisingMode::Temporal { radius: 2 },
+                    "base preset resolves to temporal radius 2"
                 );
                 assert_eq!(nl4d_opts.refine, defaults.refine);
                 assert_eq!(nl4d_opts.spatial_radius, defaults.spatial_radius);
@@ -300,20 +296,19 @@ mod tests {
         }
     }
 
+    /// nl4d always tracks motion, so it carries a `MotionSearch` rather
+    /// than a mode that can be off, no matter what the flags say.
     #[test]
-    fn motion_compensation_is_forced_on_regardless_of_the_flag() {
+    fn motion_search_is_always_present() {
         let (args, nl4d) = parse(&[]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
 
-        assert!(
-            matches!(
-                opts.motion_compensation,
-                av_denoise::MotionCompensationMode::Mvtools { .. }
-            ),
-            "nl4d must force motion compensation on even when --motion-compensation is not \
-             passed, got {:?}",
-            opts.motion_compensation
-        );
+        match opts.algorithm {
+            av_denoise::Algorithm::Nl4d(nl4d_opts) => {
+                assert_eq!(nl4d_opts.motion, av_denoise::MotionSearch::default());
+            },
+            other => panic!("expected Algorithm::Nl4d, got {other:?}"),
+        }
     }
 
     #[test]

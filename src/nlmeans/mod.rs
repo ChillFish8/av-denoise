@@ -43,7 +43,7 @@ mod tests;
 
 pub(crate) use denoiser::RingView;
 pub use denoiser::{GpuOutput, NlmDenoiser};
-pub use motion::{MotionCompensationMode, MotionEstimation};
+pub use motion::{MotionCompensationMode, MotionEstimation, MotionSearch};
 pub use params::{
     ChannelMode,
     HqParams,

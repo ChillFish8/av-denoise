@@ -24,6 +24,8 @@ pub use denoiser::{
     MAX_PENDING,
     Nl4dOptions,
     NlmTuning,
+    NlmeansHqOptions,
+    NlmeansOptions,
     nl4d_default_lambda_ht,
 };
 pub use device::Device;
@@ -34,6 +36,7 @@ pub use nlmeans::{
     HqParams,
     MotionCompensationMode,
     MotionEstimation,
+    MotionSearch,
     PrefilterMode,
     UnsupportedDepthError,
     denormalize,

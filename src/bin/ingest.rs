@@ -10,10 +10,10 @@ use av_denoise::{
     DenoisingMode,
     Depth,
     Device,
-    MotionCompensationMode,
     Nl4dOptions,
     NlmTuning,
-    PrefilterMode,
+    NlmeansHqOptions,
+    NlmeansOptions,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,17 +148,16 @@ pub struct CliOptions {
     pub device: Device,
     pub intent: BinaryChannelIntent,
     pub mode: DenoisingMode,
-    /// `None` means no prefilter is applied by default.
-    pub prefilter: Option<PrefilterMode>,
-    pub motion_compensation: MotionCompensationMode,
-    /// Which denoising algorithm variant to run.
+    /// Which denoising algorithm to run, along with the settings only
+    /// that algorithm reads.
     pub algorithm: Algorithm,
-    pub nlm_tuning: Option<NlmTuning>,
     /// Per-plane strength override for the luma denoiser. Takes
-    /// precedence over `nlm_tuning.strength` when set.
+    /// precedence over the algorithm's own `tuning.strength` when set.
+    /// Only has an effect on the two NLM algorithms.
     pub luma_strength: Option<f32>,
     /// Per-plane strength override for the chroma denoiser. Takes
-    /// precedence over `nlm_tuning.strength` when set.
+    /// precedence over the algorithm's own `tuning.strength` when set.
+    /// Only has an effect on the two NLM algorithms.
     pub chroma_strength: Option<f32>,
     /// Per-plane override for `lambda_ht`, luma. Takes precedence over
     /// `algorithm`'s value when set, which itself falls back to a
@@ -178,11 +177,11 @@ pub struct CliOptions {
 
 impl CliOptions {
     /// Resolves `self.algorithm` for one plane, folding in the per-plane
-    /// overrides that apply to whichever cascade `self.algorithm` is.
+    /// overrides that apply to whichever algorithm `self.algorithm` is.
     ///
-    /// For `Nl4d` that is `lambda_ht`. Every other algorithm is
-    /// returned unchanged, since the per-plane override has nothing to
-    /// apply to.
+    /// For the two NLM algorithms that is `strength`. For `Nl4d` it is
+    /// `lambda_ht`, since nl4d has no NLM weighting pass for a strength
+    /// to affect.
     ///
     /// `Nl4d`'s `lambda_ht` stays `Option<f32>` all the way through
     /// this method. When neither a per-plane flag nor the matching
@@ -191,58 +190,55 @@ impl CliOptions {
     /// denoised is known there too. That is what gives luma and chroma
     /// different values when a caller passes no flags at all.
     fn algorithm_for(&self, channels: ChannelMode) -> Algorithm {
+        let per_plane = |luma, chroma| match channels {
+            ChannelMode::Luma => luma,
+            ChannelMode::Chroma => chroma,
+            ChannelMode::Yuv => None,
+        };
+
         match self.algorithm {
-            Algorithm::Nl4d(nl4d) => {
-                let lambda_ht = match channels {
-                    ChannelMode::Luma => self.luma_lambda_ht,
-                    ChannelMode::Chroma => self.chroma_lambda_ht,
-                    ChannelMode::Yuv => None,
-                };
-                Algorithm::Nl4d(Nl4dOptions {
-                    // Left unresolved when unset, since the calibrated
-                    // default depends on the plane, which
-                    // `nl4d_default_lambda_ht` resolves at construction.
-                    lambda_ht: lambda_ht.or(nl4d.lambda_ht),
-                    ..nl4d
+            Algorithm::Nl4d(nl4d) => Algorithm::Nl4d(Nl4dOptions {
+                // Left unresolved when unset, since the calibrated
+                // default depends on the plane, which
+                // `nl4d_default_lambda_ht` resolves at construction.
+                lambda_ht: per_plane(self.luma_lambda_ht, self.chroma_lambda_ht).or(nl4d.lambda_ht),
+                ..nl4d
+            }),
+            Algorithm::Nlmeans(nlm) => {
+                let strength = per_plane(self.luma_strength, self.chroma_strength);
+                Algorithm::Nlmeans(with_plane_strength(nlm, strength))
+            },
+            Algorithm::NlmeansHq(opts) => {
+                let strength = per_plane(self.luma_strength, self.chroma_strength);
+                Algorithm::NlmeansHq(NlmeansHqOptions {
+                    nlm: with_plane_strength(opts.nlm, strength),
+                    ..opts
                 })
             },
-            other => other,
         }
     }
 
     fn denoiser_options(&self, channels: ChannelMode) -> DenoiserOptions {
-        let b = DenoiserOptions::builder()
+        DenoiserOptions::builder()
             .channel_mode(channels)
             .mode(self.mode)
-            .maybe_prefilter(self.prefilter)
-            .motion_compensation(self.motion_compensation)
-            .algorithm(self.algorithm_for(channels));
+            .algorithm(self.algorithm_for(channels))
+            .build()
+    }
+}
 
-        let strength_override = match channels {
-            ChannelMode::Luma => self.luma_strength,
-            ChannelMode::Chroma => self.chroma_strength,
-            ChannelMode::Yuv => None,
-        };
-
-        let tuning = match (self.nlm_tuning, strength_override) {
-            (Some(base), Some(s)) => Some(NlmTuning {
-                strength: Some(s),
-                ..base
-            }),
-            (None, Some(s)) => Some(NlmTuning {
-                search_radius: None,
-                patch_radius: None,
-                strength: Some(s),
-                self_weight: None,
-            }),
-            (Some(base), None) => Some(base),
-            (None, None) => None,
-        };
-
-        match tuning {
-            Some(t) => b.nlm(t).build(),
-            None => b.build(),
-        }
+/// `nlm` with `strength` replaced by the per-plane override, when there
+/// is one. An unset override leaves the shared value alone.
+fn with_plane_strength(nlm: NlmeansOptions, strength: Option<f32>) -> NlmeansOptions {
+    match strength {
+        None => nlm,
+        Some(strength) => NlmeansOptions {
+            tuning: NlmTuning {
+                strength: Some(strength),
+                ..nlm.tuning
+            },
+            ..nlm
+        },
     }
 }
 
@@ -880,7 +876,6 @@ mod converter_tests {
 
 #[cfg(test)]
 mod cli_options_tests {
-    use av_denoise::HqParams;
     use av_denoise::nlmeans::NlmParams;
 
     use super::*;
@@ -893,7 +888,6 @@ mod cli_options_tests {
     fn base_opts(
         mode: DenoisingMode,
         algorithm: Algorithm,
-        nlm_tuning: Option<NlmTuning>,
         luma_strength: Option<f32>,
         chroma_strength: Option<f32>,
     ) -> CliOptions {
@@ -902,10 +896,7 @@ mod cli_options_tests {
             device: Device::Default,
             intent: BinaryChannelIntent::LumaChroma,
             mode,
-            prefilter: None,
-            motion_compensation: MotionCompensationMode::None,
             algorithm,
-            nlm_tuning,
             luma_strength,
             chroma_strength,
             luma_lambda_ht: None,
@@ -916,45 +907,38 @@ mod cli_options_tests {
 
     #[test]
     fn luma_strength_alone_overrides_only_the_luma_plane() {
-        let opts = base_opts(DenoisingMode::Spacial, Algorithm::Nlmeans, None, Some(0.7), None);
+        let opts = base_opts(DenoisingMode::Spacial, Algorithm::default(), Some(0.7), None);
 
-        let luma = opts.denoiser_options(ChannelMode::Luma);
-        let chroma = opts.denoiser_options(ChannelMode::Chroma);
+        let luma = expect_nlmeans(opts.denoiser_options(ChannelMode::Luma).algorithm);
+        let chroma = expect_nlmeans(opts.denoiser_options(ChannelMode::Chroma).algorithm);
 
         assert!(
-            matches!(luma.nlm, Some(NlmTuning { strength: Some(s), .. }) if (s - 0.7).abs() < f32::EPSILON),
-            "expected luma NlmTuning.strength = Some(0.7), got {:?}",
-            luma.nlm
+            matches!(luma.tuning.strength, Some(s) if (s - 0.7).abs() < f32::EPSILON),
+            "expected luma tuning.strength = Some(0.7), got {:?}",
+            luma.tuning.strength
         );
-        assert!(
-            chroma.nlm.is_none(),
-            "chroma plane should carry no override so the table default applies, got {:?}",
-            chroma.nlm
+        assert_eq!(
+            chroma.tuning.strength, None,
+            "chroma plane should carry no override so the table default applies"
         );
     }
 
     #[test]
     fn both_per_plane_strengths_set_independently() {
-        let opts = base_opts(
-            DenoisingMode::Spacial,
-            Algorithm::Nlmeans,
-            None,
-            Some(0.7),
-            Some(0.3),
-        );
+        let opts = base_opts(DenoisingMode::Spacial, Algorithm::default(), Some(0.7), Some(0.3));
 
-        let luma = opts.denoiser_options(ChannelMode::Luma);
-        let chroma = opts.denoiser_options(ChannelMode::Chroma);
+        let luma = expect_nlmeans(opts.denoiser_options(ChannelMode::Luma).algorithm);
+        let chroma = expect_nlmeans(opts.denoiser_options(ChannelMode::Chroma).algorithm);
 
         assert!(
-            matches!(luma.nlm, Some(NlmTuning { strength: Some(s), .. }) if (s - 0.7).abs() < f32::EPSILON),
-            "expected luma NlmTuning.strength = Some(0.7), got {:?}",
-            luma.nlm
+            matches!(luma.tuning.strength, Some(s) if (s - 0.7).abs() < f32::EPSILON),
+            "expected luma tuning.strength = Some(0.7), got {:?}",
+            luma.tuning.strength
         );
         assert!(
-            matches!(chroma.nlm, Some(NlmTuning { strength: Some(s), .. }) if (s - 0.3).abs() < f32::EPSILON),
-            "expected chroma NlmTuning.strength = Some(0.3), got {:?}",
-            chroma.nlm
+            matches!(chroma.tuning.strength, Some(s) if (s - 0.3).abs() < f32::EPSILON),
+            "expected chroma tuning.strength = Some(0.3), got {:?}",
+            chroma.tuning.strength
         );
     }
 
@@ -964,8 +948,7 @@ mod cli_options_tests {
         // 0.70 (see the table docs in `src/nlmeans/params.rs`).
         let opts = base_opts(
             DenoisingMode::Temporal { radius: 4 },
-            Algorithm::NlmeansHq(HqParams::default()),
-            None,
+            Algorithm::NlmeansHq(NlmeansHqOptions::default()),
             None,
             None,
         );
@@ -994,15 +977,21 @@ mod cli_options_tests {
             device: Device::Default,
             intent: BinaryChannelIntent::LumaChroma,
             mode: DenoisingMode::Temporal { radius: 2 },
-            prefilter: None,
-            motion_compensation: MotionCompensationMode::None,
             algorithm: Algorithm::Nl4d(Nl4dOptions::default()),
-            nlm_tuning: None,
             luma_strength: None,
             chroma_strength: None,
             luma_lambda_ht,
             chroma_lambda_ht,
             progress: false,
+        }
+    }
+
+    /// Unwraps an `Algorithm::Nlmeans`, panicking with the whole value
+    /// on any other variant.
+    fn expect_nlmeans(algorithm: Algorithm) -> NlmeansOptions {
+        match algorithm {
+            Algorithm::Nlmeans(n) => n,
+            other => panic!("expected Algorithm::Nlmeans, got {other:?}"),
         }
     }
 
@@ -1065,7 +1054,6 @@ mod cli_options_tests {
 
         // Every other field stays shared between the two instances even
         // though lambda_ht diverges.
-        assert_eq!(luma.temporal_radius, chroma.temporal_radius);
         assert_eq!(luma.refine, chroma.refine);
         assert_eq!(luma.spatial_radius, chroma.spatial_radius);
         assert!((luma.c_min - chroma.c_min).abs() < f32::EPSILON);
@@ -1118,10 +1106,7 @@ mod passthrough_retry_tests {
             device: Device::Default,
             intent: BinaryChannelIntent::Chroma,
             mode: DenoisingMode::Spacial,
-            prefilter: None,
-            motion_compensation: MotionCompensationMode::None,
-            algorithm: Algorithm::Nlmeans,
-            nlm_tuning: None,
+            algorithm: Algorithm::default(),
             luma_strength: None,
             chroma_strength: None,
             luma_lambda_ht: None,
@@ -1205,10 +1190,7 @@ mod lumachroma_lockstep_tests {
             device: Device::Default,
             intent: BinaryChannelIntent::LumaChroma,
             mode: DenoisingMode::Spacial,
-            prefilter: None,
-            motion_compensation: MotionCompensationMode::None,
-            algorithm: Algorithm::Nlmeans,
-            nlm_tuning: None,
+            algorithm: Algorithm::default(),
             luma_strength: None,
             chroma_strength: None,
             luma_lambda_ht: None,

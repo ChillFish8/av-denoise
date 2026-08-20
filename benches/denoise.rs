@@ -9,6 +9,7 @@ use av_denoise::{
     DenoisingMode,
     Device,
     MotionCompensationMode,
+    NlmeansOptions,
     PrefilterMode,
 };
 
@@ -77,44 +78,35 @@ impl BenchResult {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn options(
-    channel_mode: ChannelMode,
-    mode: DenoisingMode,
-    prefilter: PrefilterMode,
-    motion_compensation: MotionCompensationMode,
-    algorithm: Algorithm,
-) -> DenoiserOptions {
+fn options(channel_mode: ChannelMode, mode: DenoisingMode, algorithm: Algorithm) -> DenoiserOptions {
     DenoiserOptions::builder()
         .channel_mode(channel_mode)
         .mode(mode)
-        .prefilter(prefilter)
-        .motion_compensation(motion_compensation)
         .algorithm(algorithm)
         .build()
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The fast NLM path with a prefilter and a motion-compensation mode.
+fn nlm(prefilter: PrefilterMode, motion_compensation: MotionCompensationMode) -> Algorithm {
+    Algorithm::Nlmeans(NlmeansOptions {
+        prefilter,
+        motion_compensation,
+        ..NlmeansOptions::default()
+    })
+}
+
 fn bench_push_recv(
     name: &str,
     accelerators: &[Accelerator],
     device: &Device,
     channel_mode: ChannelMode,
     mode: DenoisingMode,
-    prefilter: PrefilterMode,
-    motion_compensation: MotionCompensationMode,
     algorithm: Algorithm,
 ) -> Result<BenchResult, anyhow::Error> {
     let ch = channel_mode.count();
     let frame = make_synthetic_frame(W, H, ch);
 
-    let mut denoiser = Denoiser::create(
-        accelerators,
-        device,
-        W,
-        H,
-        options(channel_mode, mode, prefilter, motion_compensation, algorithm),
-    )?;
+    let mut denoiser = Denoiser::create(accelerators, device, W, H, options(channel_mode, mode, algorithm))?;
     let accelerator = denoiser.selected_accelerator();
 
     // Fill the temporal window so subsequent push/recv steady-state
@@ -200,139 +192,95 @@ fn main() {
     // Side-by-side ordering: each temporal config is followed by its
     // motion-compensation variant so the cost delta from `--motion-compensation`
     // is visible on adjacent rows.
-    let configs: &[(
-        &str,
-        ChannelMode,
-        DenoisingMode,
-        PrefilterMode,
-        MotionCompensationMode,
-        Algorithm,
-    )] = &[
+    let configs: &[(&str, ChannelMode, DenoisingMode, Algorithm)] = &[
         (
             "spatial_luma",
             ChannelMode::Luma,
             DenoisingMode::Spacial,
-            PrefilterMode::None,
-            MotionCompensationMode::None,
-            Algorithm::Nlmeans,
+            nlm(PrefilterMode::None, MotionCompensationMode::None),
         ),
         (
             "spatial_chroma",
             ChannelMode::Chroma,
             DenoisingMode::Spacial,
-            PrefilterMode::None,
-            MotionCompensationMode::None,
-            Algorithm::Nlmeans,
+            nlm(PrefilterMode::None, MotionCompensationMode::None),
         ),
         (
             "spatial_yuv",
             ChannelMode::Yuv,
             DenoisingMode::Spacial,
-            PrefilterMode::None,
-            MotionCompensationMode::None,
-            Algorithm::Nlmeans,
+            nlm(PrefilterMode::None, MotionCompensationMode::None),
         ),
         (
             "temporal_r1_yuv",
             ChannelMode::Yuv,
             DenoisingMode::Temporal { radius: 1 },
-            PrefilterMode::None,
-            MotionCompensationMode::None,
-            Algorithm::Nlmeans,
+            nlm(PrefilterMode::None, MotionCompensationMode::None),
         ),
         (
             "temporal_r1_yuv+mc",
             ChannelMode::Yuv,
             DenoisingMode::Temporal { radius: 1 },
-            PrefilterMode::None,
-            mc,
-            Algorithm::Nlmeans,
+            nlm(PrefilterMode::None, mc),
         ),
         (
             "temporal_r2_yuv",
             ChannelMode::Yuv,
             DenoisingMode::Temporal { radius: 2 },
-            PrefilterMode::None,
-            MotionCompensationMode::None,
-            Algorithm::Nlmeans,
+            nlm(PrefilterMode::None, MotionCompensationMode::None),
         ),
         (
             "temporal_r2_yuv+mc",
             ChannelMode::Yuv,
             DenoisingMode::Temporal { radius: 2 },
-            PrefilterMode::None,
-            mc,
-            Algorithm::Nlmeans,
+            nlm(PrefilterMode::None, mc),
         ),
         (
             "spatial_luma+bilateral",
             ChannelMode::Luma,
             DenoisingMode::Spacial,
-            bilateral,
-            MotionCompensationMode::None,
-            Algorithm::Nlmeans,
+            nlm(bilateral, MotionCompensationMode::None),
         ),
         (
             "spatial_chroma+bilateral",
             ChannelMode::Chroma,
             DenoisingMode::Spacial,
-            bilateral,
-            MotionCompensationMode::None,
-            Algorithm::Nlmeans,
+            nlm(bilateral, MotionCompensationMode::None),
         ),
         (
             "spatial_yuv+bilateral",
             ChannelMode::Yuv,
             DenoisingMode::Spacial,
-            bilateral,
-            MotionCompensationMode::None,
-            Algorithm::Nlmeans,
+            nlm(bilateral, MotionCompensationMode::None),
         ),
         (
             "temporal_r1_yuv+bilateral",
             ChannelMode::Yuv,
             DenoisingMode::Temporal { radius: 1 },
-            bilateral,
-            MotionCompensationMode::None,
-            Algorithm::Nlmeans,
+            nlm(bilateral, MotionCompensationMode::None),
         ),
         (
             "temporal_r1_yuv+bilateral+mc",
             ChannelMode::Yuv,
             DenoisingMode::Temporal { radius: 1 },
-            bilateral,
-            mc,
-            Algorithm::Nlmeans,
+            nlm(bilateral, mc),
         ),
         (
             "temporal_r2_yuv+bilateral",
             ChannelMode::Yuv,
             DenoisingMode::Temporal { radius: 2 },
-            bilateral,
-            MotionCompensationMode::None,
-            Algorithm::Nlmeans,
+            nlm(bilateral, MotionCompensationMode::None),
         ),
         (
             "temporal_r2_yuv+bilateral+mc",
             ChannelMode::Yuv,
             DenoisingMode::Temporal { radius: 2 },
-            bilateral,
-            mc,
-            Algorithm::Nlmeans,
+            nlm(bilateral, mc),
         ),
     ];
 
-    for (name, ch, mode, prefilter, motion_compensation, algorithm) in configs {
-        match bench_push_recv(
-            name,
-            &cli.accelerators,
-            &cli.device,
-            *ch,
-            *mode,
-            *prefilter,
-            *motion_compensation,
-            *algorithm,
-        ) {
+    for (name, ch, mode, algorithm) in configs {
+        match bench_push_recv(name, &cli.accelerators, &cli.device, *ch, *mode, *algorithm) {
             Ok(result) => result.print(),
             Err(err) => eprintln!("[{name}] failed: {err:?}"),
         }

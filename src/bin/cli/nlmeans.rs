@@ -4,6 +4,8 @@ use av_denoise::{
     MotionCompensationMode,
     MotionEstimation,
     NlmTuning,
+    NlmeansHqOptions,
+    NlmeansOptions,
     PrefilterMode,
 };
 use strum_macros::EnumString;
@@ -332,13 +334,14 @@ impl NlmeansArgs {
     }
 
     /// Builds the library's [`av_denoise::Algorithm`] from the resolved
-    /// preset and the `--hq-*` flags.
+    /// preset and the flags the chosen variant reads.
     ///
     /// Flags that are set but do nothing for this configuration are
     /// reported as warnings.
     pub fn resolve_algorithm(
         &self,
         resolved: ResolvedPreset,
+        nlm: NlmeansOptions,
     ) -> Result<av_denoise::Algorithm, anyhow::Error> {
         let sigma_scale_is_set = self.hq_sigma_scale.is_some_and(|v| v != 1.0);
 
@@ -353,7 +356,7 @@ impl NlmeansArgs {
                 {
                     tracing::warn!("--hq-* options are ignored unless --variant hq is selected");
                 }
-                Ok(av_denoise::Algorithm::Nlmeans)
+                Ok(av_denoise::Algorithm::Nlmeans(nlm))
             },
             Variant::Hq => {
                 // Check the raw 8-bit value here so an out-of-range
@@ -370,13 +373,16 @@ impl NlmeansArgs {
                     tracing::warn!("--hq-sigma-scale has no effect when --hq-sigma pins the noise level");
                 }
 
-                Ok(av_denoise::Algorithm::NlmeansHq(av_denoise::HqParams {
-                    auto_strength: !self.hq_no_auto_strength,
-                    noise_floor: !self.hq_no_noise_floor,
-                    sigma_override: self.hq_sigma.map(|s| s / 255.0),
-                    temporal_confidence: !self.hq_no_temporal_confidence,
-                    thsad_scale: self.hq_thsad_scale.unwrap_or(1.0),
-                    sigma_scale: self.hq_sigma_scale.unwrap_or(1.0),
+                Ok(av_denoise::Algorithm::NlmeansHq(NlmeansHqOptions {
+                    nlm,
+                    hq: av_denoise::HqParams {
+                        auto_strength: !self.hq_no_auto_strength,
+                        noise_floor: !self.hq_no_noise_floor,
+                        sigma_override: self.hq_sigma.map(|s| s / 255.0),
+                        temporal_confidence: !self.hq_no_temporal_confidence,
+                        thsad_scale: self.hq_thsad_scale.unwrap_or(1.0),
+                        sigma_scale: self.hq_sigma_scale.unwrap_or(1.0),
+                    },
                 }))
             },
         }
@@ -395,7 +401,12 @@ impl NlmeansArgs {
             }
         };
 
-        let prefilter = self.prefilter.as_deref().map(parse_prefilter).transpose()?;
+        let prefilter = self
+            .prefilter
+            .as_deref()
+            .map(parse_prefilter)
+            .transpose()?
+            .unwrap_or(PrefilterMode::None);
         let intent = resolve_channel_intent(&globals.channel_mode)?;
 
         let motion_compensation = if self.motion_compensation {
@@ -423,26 +434,25 @@ impl NlmeansArgs {
             MotionCompensationMode::None
         };
 
-        let algorithm = self.resolve_algorithm(resolved)?;
-
         // search_radius always has a resolved value (explicit flag or the
         // active preset), so it's always carried into the tuning override.
-        let nlm_tuning = Some(NlmTuning {
-            search_radius: Some(resolved.search_radius),
-            patch_radius: self.patch_radius,
-            strength: self.strength,
-            self_weight: self.self_weight,
-        });
+        let nlm = NlmeansOptions {
+            prefilter,
+            motion_compensation,
+            tuning: NlmTuning {
+                search_radius: Some(resolved.search_radius),
+                patch_radius: self.patch_radius,
+                strength: self.strength,
+                self_weight: self.self_weight,
+            },
+        };
 
         Ok(CliOptions {
             accelerators: globals.accelerators.clone(),
             device: globals.device.clone(),
             intent,
             mode,
-            prefilter,
-            motion_compensation,
-            algorithm,
-            nlm_tuning,
+            algorithm: self.resolve_algorithm(resolved, nlm)?,
             luma_strength: self.luma_strength,
             chroma_strength: self.chroma_strength,
             // `nlmeans` has no grouping stage, so these stay unset
@@ -792,11 +802,11 @@ mod tests {
         let (args, nlm) = parse(&["--variant", "hq"]);
         let resolved = nlm.resolve_preset(args.preset);
         let algorithm = nlm
-            .resolve_algorithm(resolved)
+            .resolve_algorithm(resolved, NlmeansOptions::default())
             .expect("resolution should succeed");
 
         match algorithm {
-            av_denoise::Algorithm::NlmeansHq(hq) => assert_eq!(hq.sigma_scale, 1.0),
+            av_denoise::Algorithm::NlmeansHq(opts) => assert_eq!(opts.hq.sigma_scale, 1.0),
             other => panic!("expected NlmeansHq, got {other:?}"),
         }
     }
@@ -806,10 +816,10 @@ mod tests {
         let (args, nlm) = parse(&["--variant", "fast", "--hq-sigma-scale", "2.0"]);
         let resolved = nlm.resolve_preset(args.preset);
         let algorithm = nlm
-            .resolve_algorithm(resolved)
+            .resolve_algorithm(resolved, NlmeansOptions::default())
             .expect("resolution should succeed");
 
-        assert!(matches!(algorithm, av_denoise::Algorithm::Nlmeans));
+        assert!(matches!(algorithm, av_denoise::Algorithm::Nlmeans(_)));
     }
 
     #[test]
@@ -817,17 +827,17 @@ mod tests {
         let (args, nlm) = parse(&["--variant", "hq", "--hq-sigma", "6", "--hq-sigma-scale", "2.0"]);
         let resolved = nlm.resolve_preset(args.preset);
         let algorithm = nlm
-            .resolve_algorithm(resolved)
+            .resolve_algorithm(resolved, NlmeansOptions::default())
             .expect("resolution should succeed");
 
         match algorithm {
-            av_denoise::Algorithm::NlmeansHq(hq) => {
+            av_denoise::Algorithm::NlmeansHq(opts) => {
                 assert!(
-                    matches!(hq.sigma_override, Some(s) if (s - 6.0 / 255.0).abs() < f32::EPSILON),
+                    matches!(opts.hq.sigma_override, Some(s) if (s - 6.0 / 255.0).abs() < f32::EPSILON),
                     "expected sigma_override Some(6/255), got {:?}",
-                    hq.sigma_override,
+                    opts.hq.sigma_override,
                 );
-                assert_eq!(hq.sigma_scale, 2.0);
+                assert_eq!(opts.hq.sigma_scale, 2.0);
             },
             other => panic!("expected NlmeansHq, got {other:?}"),
         }
@@ -837,7 +847,9 @@ mod tests {
     fn out_of_range_hq_sigma_is_rejected() {
         let (args, nlm) = parse(&["--variant", "hq", "--hq-sigma", "300"]);
         let resolved = nlm.resolve_preset(args.preset);
-        let err = nlm.resolve_algorithm(resolved).expect_err("300 is out of range");
+        let err = nlm
+            .resolve_algorithm(resolved, NlmeansOptions::default())
+            .expect_err("300 is out of range");
 
         assert!(err.to_string().contains("--hq-sigma"), "got {err}");
     }
