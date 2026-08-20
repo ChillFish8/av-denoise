@@ -572,7 +572,7 @@ impl Denoiser {
         options: DenoiserOptions,
     ) -> Result<Self, DenoiserError> {
         let accelerator =
-            sniff_best_accelerator(accelerators).ok_or(DenoiserError::NoAcceleratorAvailable)?;
+            sniff_best_accelerator(accelerators, device).ok_or(DenoiserError::NoAcceleratorAvailable)?;
 
         let params = options.to_nlm_params();
         params.validate()?;
