@@ -1,10 +1,13 @@
 # av-denoise
 
-Fast and efficient NLMEANS video denoising using CubeCL.
+Faster and higher quality denoising for all.
 
-This project is heavily inspired by [KNLmeansCL](https://github.com/Khanattila/KNLMeansCL) alongside FFmpeg's nlmeans 
-implementation but is built to be a more standalone tool and also make use of more modern tooling to better 
-leverage modern hardware instead of relying on the now rather outdated OpenCL.
+This project was originally heavily inspired by [KNLmeansCL](https://github.com/Khanattila/KNLMeansCL) alongside 
+FFmpeg's nlmeans implementation but is built to be a more standalone tool built and provide a more advanced denoising
+experience and eventually growing beyond nlmeans.
+
+av-denoise features **nlmeans**, **nlmeans-hq** and **nl4d** algorithms offering significant advantages over existing
+denoising tools.
 
 ## Table of contents
 
@@ -29,31 +32,32 @@ leverage modern hardware instead of relying on the now rather outdated OpenCL.
 - [Example commands](#example-commands)
 - [Binary usage](#binary-usage)
   - [Global options](#global-options)
-  - [`nlmeans`](#nlmeans)
-  - [`nl4d`](#nl4d)
+  - [Algorithm - `nlmeans`](#nlmeans)
+  - [Algorithm - `nl4d`](#nl4d)
 
 ## Features
 
-- **One dial** - the `--preset` ladder (`veryfast` → `veryslow`) fills in the temporal radius
-  and how wide each algorithm searches. `base` is the default.
-- **Two algorithms** - `nlmeans` averages patches that look alike. `nl4d` groups matching
-  patches from across the temporal window into one stack and shrinks them together, which
-  holds onto fine texture `nlmeans` smooths away, for more time per frame.
-- **Automatic noise handling** - the `hq` variant measures the noise level, the grain's
-  spatial correlation, and per-plane strength for every scene. Film grain and encoder grain are
-  seen at their true level, and `--hq-sigma-scale` nudges the measurement when your eye disagrees.
+- **Simple tuning presets** - the `--preset` ladder (`veryfast` → `veryslow`) automatically adjusts denoiser settings
+  without requiring you to modify many sets of parameters for every input.
+- **NL4D Algorithm** - Offers best in class noise removal and detail retention while being faster than more standard
+  V-BM3D algorithms and without the artefacts.
+- **NLMeans-HQ Algorithm** - A smarter NLMeans denoiser able to process motion and detail extraction far better than
+  traditional NLMeans.
+- **Automatic noise handling** - Both _NL4D_ and _NLMeans-HQ_ offer automatic noise estimation removing the need to
+  manually specify a tuned `sigma` parameter for every source, offering a simple to use `sigma-scale` flag for increasing
+  or decreasing the relative denoise strength.
 - **Temporal denoising with motion awareness** - up to 17-frame windows, per-neighbour
-  block-match confidence, and opt-in on-GPU motion compensation (`--motion-compensation`).
+  block-match confidence, and opt-in on-GPU motion compensation.
 - **Luma, chroma, and YUV444 kernels** - spatial or temporal, each plane individually tunable.
 - **Prefilters** - on-GPU bilateral and NLM-pilot reference clips, or supply your own guide via
   the library.
+  - *NLMeans family of denoisers only, not applicable to NL4D.
 - **Library and binary** - y4m over a pipe, or direct file ingestion via FFMS2 with
   scene-parallel workers.
-- **8, 10, and 12-bit** - depth is detected from the source and preserved on output.
-  Sample values are normalised by `(1 << depth) - 1`, so tuning values mean the
-  same thing at every depth.
-- _**Fast!**_ - around **2x** FFmpeg's `nlmeans_opencl` at matched settings. Piped input can't
-  parallelize across scenes, so file input makes the best use of big GPUs.
+- **8, 10, and 12-bit** - depth is detected from the source and preserved on output. Tuning parameters are normalized
+  across bit-depth.
+- _**Fast!**_ - around **2x** FFmpeg's `nlmeans_opencl` at matched settings and **~1.4x** faster than V-BM3DHIP.
+  - Piped input can't parallelise across scenes, so file input makes the best use of big GPUs.
 
 ## Tuning guide
 
@@ -180,13 +184,51 @@ total frames divided by wall-clock elapsed.
 - Input is a 3,450-frame 1080p FFV1 clip.
 - `av-denoise` using the `vulkan` backend.
 - Running on a `AMD AI Pro R9700` (AMD 9070XT equivalent) GPU.
-- These tables measure the `nlmeans` algorithm at `veryfast`-preset settings, not the
-  `base` default.
+- Elapsed time is measured around the whole process, so the one-off scene detection
+  pass is inside every number.
 - Absolute fps varies between benchmarking sessions (thermal state, background load,
   driver version). Treat comparisons within a table as meaningful; treat the same
   config's absolute fps across different tables as not directly comparable.
 
+### Algorithm defaults
+
+Every row uses `--channel-mode luma,chroma` and no tuning beyond the preset, so the
+rows are directly comparable. nl4d always tracks motion, which is why the
+motion-compensated `hq` row is here — that is the like-for-like comparison, not the
+plain `hq` one.
+
+| run                                          | preset |       fps | denoising   | detail retention | notes                                                                 |
+|----------------------------------------------|--------|----------:|-------------|------------------|-----------------------------------------------------------------------|
+| `nlmeans --variant fast`                     | `base` | **58.91** | medium      | low              | Traditional nlmeans algorithm                                         |
+| `nl4d --preset fast`                         | `fast` |     48.04 | higher      | higher           | Better detail retention compared to V-BM3D (r=1)                      |
+| `nlmeans --variant hq`                       | `base` |     47.34 | medium      | medium           | nlmeans with adaptive noise estimation and motion confidence (NLM-HQ) |
+| `nlmeans --variant hq --motion-compensation` | `base` |     42.48 | high        | high             | NLM-HQ + block matching motion compensation                           |
+| `nl4d`                                       | `base` |     42.39 | **highest** | **highest**      | Better detail retention compared to V-BM3D (r=2) and all NLM variants |
+
+The two quality columns are judged by eye on real grain, not computed. They rank the
+rows against each other and mean nothing outside this table.
+
+Grouping patches across the temporal window costs about what motion-compensated
+`nlmeans hq` costs at the same window size. One rung down the ladder, `nl4d --preset
+fast` halves the window to 3 frames and lands on plain `nlmeans hq` throughput while
+still tracking motion.
+
+All five ran back to back in one session. Repeat passes agreed within 2% on every row
+except `nlmeans --variant fast`, the least GPU-bound run of the five, which came in 12%
+low on one pass out of four under background load.
+
+Reproduce with (add `--device discrete:N` to pin a particular GPU):
+
+```bash
+just compare-perf -- --accelerators vulkan \
+  --only av_default_nlmeans_fast,av_default_nlmeans_hq,av_default_nlmeans_hq_mc,av_fast_nl4d,av_default_nl4d
+```
+
 ### Apples-to-apples spatial NL-means (strength 1.0)
+
+The two tables below pin `--variant fast` at `veryfast`-preset settings, not the `base`
+default, so they isolate one feature at a time rather than measuring a shipping config.
+
 
 Matched patch and search sizes on both tools, av-denoise uses radii compared to
 ffmpeg which takes the absolute size.
@@ -361,7 +403,8 @@ av-denoise --accelerators vulkan --device discrete:1 nlmeans --input noisy.mkv \
 
 **Fine texture that `nlmeans` keeps scrubbing.** Switch algorithms. `nl4d` groups matching
 patches across the temporal window and shrinks them together, which holds onto detail
-`nlmeans` averages away. It costs more time per frame.
+`nlmeans` averages away. It always tracks motion, and costs about what
+`nlmeans hq --motion-compensation` does.
 
 ```bash
 av-denoise nl4d --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
@@ -453,9 +496,9 @@ av-denoise nlmeans \
 ## Binary usage
 
 Two algorithms share one set of global flags. `nlmeans` is the one to
-reach for first. `nl4d` spends more time per frame to hold onto fine
-texture that `nlmeans` smooths away, and needs a temporal window to do
-it, so it has no spatial-only mode.
+reach for first. `nl4d` holds onto fine texture that `nlmeans` smooths
+away, and needs a temporal window to do it, so it has no spatial-only
+mode.
 
 The tables below cover the flags worth reaching for. Each subcommand's
 `--help` carries every flag with the full explanation.

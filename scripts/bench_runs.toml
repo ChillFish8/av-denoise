@@ -198,3 +198,44 @@ kind = "av-denoise"
 input = "./data/bench-sample-10bit.mkv"
 workers = 2
 args = ["--variant", "fast", "--temporal-radius", "0", "--channel-mode", "luma,chroma", "--strength", "1.0"]
+
+# ---------------------------------------------------------------------------
+# Algorithm defaults. Every run here is the `base` preset with no tuning
+# beyond picking the algorithm, so the rows are directly comparable. The
+# `nlmeans hq + mc` row exists because nl4d always tracks motion and the
+# other nlmeans rows do not, so it is the like-for-like comparison.
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "av_default_nlmeans_fast"
+kind = "av-denoise"
+workers = 2
+args = ["--variant", "fast"]
+
+[[runs]]
+name = "av_default_nlmeans_hq"
+kind = "av-denoise"
+workers = 2
+args = ["--variant", "hq"]
+
+[[runs]]
+name = "av_default_nlmeans_hq_mc"
+kind = "av-denoise"
+workers = 2
+args = ["--variant", "hq", "--motion-compensation"]
+
+[[runs]]
+name = "av_default_nl4d"
+kind = "av-denoise"
+subcommand = "nl4d"
+workers = 2
+args = []
+
+# One rung down the ladder, to show what the preset buys. `fast` halves
+# nl4d's temporal radius (2 -> 1) and leaves the spatial search alone.
+[[runs]]
+name = "av_fast_nl4d"
+kind = "av-denoise"
+subcommand = "nl4d"
+workers = 2
+args = ["--preset", "fast"]

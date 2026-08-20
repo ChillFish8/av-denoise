@@ -37,6 +37,7 @@ class Run:
     name: str
     kind: str
     input: Path
+    subcommand: str = "nlmeans"
     workers: int = 2
     args: list[str] = field(default_factory=list)
     strength: float = 1.2
@@ -66,6 +67,16 @@ def parse_cli() -> argparse.Namespace:
         action="store_true",
         help="run the first selected run once untimed before the measured pass",
     )
+    p.add_argument(
+        "--accelerators",
+        default="",
+        help="passed to av-denoise as -A (default: let the binary choose)",
+    )
+    p.add_argument(
+        "--device",
+        default="",
+        help="passed to av-denoise as --device (default: let the binary choose)",
+    )
     return p.parse_args()
 
 
@@ -85,6 +96,7 @@ def load_runs(config_path: Path) -> list[Run]:
                 name=raw["name"],
                 kind=kind,
                 input=Path(raw.get("input", default_input)),
+                subcommand=raw.get("subcommand", "nlmeans"),
                 workers=raw.get("workers", 2),
                 args=list(raw.get("args", [])),
                 strength=raw.get("strength", 1.2),
@@ -105,13 +117,14 @@ def filter_runs(runs: list[Run], only: str) -> list[Run]:
     return [r for r in runs if r.name in wanted]
 
 
-def build_av_denoise(run: Run) -> tuple[list[str], list[str]]:
+def build_av_denoise(run: Run, globals_: list[str]) -> tuple[list[str], list[str]]:
     p1 = [
         "cargo", "run", "--release",
         "--bin", "av-denoise",
         "--features", "binary",
         "--",
-        "nlmeans",
+        *globals_,
+        run.subcommand,
         *run.args,
         "--workers", str(run.workers),
         "--input", str(run.input),
@@ -195,8 +208,8 @@ class StatsTail:
                 self.last_fps = float(m.group(2))
 
 
-def run_av_denoise(run: Run) -> Result:
-    p1_cmd, p2_cmd = build_av_denoise(run)
+def run_av_denoise(run: Run, globals_: list[str]) -> Result:
+    p1_cmd, p2_cmd = build_av_denoise(run, globals_)
     print(f"[{run.name}] $ {shlex.join(p1_cmd)} | {shlex.join(p2_cmd)}", flush=True)
 
     start = time.monotonic()
@@ -236,9 +249,9 @@ def run_ffmpeg_nlmeans(run: Run) -> Result:
     return Result(run.name, run.kind, tail.last_frame, elapsed, ok)
 
 
-def execute(run: Run) -> Result:
+def execute(run: Run, globals_: list[str]) -> Result:
     if run.kind == "av-denoise":
-        return run_av_denoise(run)
+        return run_av_denoise(run, globals_)
     return run_ffmpeg_nlmeans(run)
 
 
@@ -282,14 +295,20 @@ def main() -> None:
     if not runs:
         sys.exit("no runs selected")
 
+    av_globals: list[str] = []
+    if args.accelerators:
+        av_globals += ["-A", args.accelerators]
+    if args.device:
+        av_globals += ["--device", args.device]
+
     if args.warmup:
         print(f"[warmup] {runs[0].name} (untimed)", flush=True)
-        execute(runs[0])
+        execute(runs[0], av_globals)
 
     results: list[Result] = []
     for run in runs:
         try:
-            results.append(execute(run))
+            results.append(execute(run, av_globals))
         except Exception as e:  # noqa: BLE001
             print(f"[{run.name}] error: {e}", file=sys.stderr, flush=True)
             results.append(Result(run.name, run.kind, None, 0.0, False))
