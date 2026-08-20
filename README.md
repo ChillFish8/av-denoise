@@ -3,22 +3,28 @@
 Faster and higher quality denoising for all.
 
 This project was originally heavily inspired by [KNLmeansCL](https://github.com/Khanattila/KNLMeansCL) alongside 
-FFmpeg's nlmeans implementation but is built to be a more standalone tool built and provide a more advanced denoising
-experience and eventually growing beyond nlmeans.
+FFmpeg's NLMeans implementation but is built to be a more standalone tool built and provide a more advanced denoising
+experience and eventually growing beyond NLMeans.
 
-av-denoise features **nlmeans**, **nlmeans-hq** and **nl4d** algorithms offering significant advantages over existing
+av-denoise features **NLMeans**, **NLMeans-HQ** and **NL4D** algorithms offering significant advantages over existing
 denoising tools.
 
 ## Table of contents
 
 - [Features](#features)
-- [Tuning guide](#tuning-guide)
-  - [Start here](#start-here)
+- [Guide](#guide)
+  - [Choosing an algorithm](#choosing-an-algorithm)
+  - [Piped input and high bit depth](#piped-input-and-high-bit-depth)
+- [NL4D tuning guide](#nl4d-tuning-guide)
+  - [The NL4D dials](#the-nl4d-dials)
+  - [What not to touch in NL4D](#what-not-to-touch-in-nl4d)
+- [NLMeans tuning guide](#nlmeans-tuning-guide)
   - [Still too noisy](#still-too-noisy)
   - [Losing detail](#losing-detail)
   - [Common situations](#common-situations)
-  - [What not to do](#what-not-to-do)
+  - [What not to touch in nlmeans](#what-not-to-touch-in-nlmeans)
 - [Benchmarks](#benchmarks)
+  - [Algorithm defaults](#algorithm-defaults)
   - [Apples-to-apples spatial NL-means (strength 1.0)](#apples-to-apples-spatial-nl-means-strength-10)
   - [av-denoise feature cost (strength 1.0, default patch/search)](#av-denoise-feature-cost-strength-10-default-patchsearch)
   - [Bit depth cost](#bit-depth-cost)
@@ -32,8 +38,8 @@ denoising tools.
 - [Example commands](#example-commands)
 - [Binary usage](#binary-usage)
   - [Global options](#global-options)
-  - [Algorithm - `nlmeans`](#nlmeans)
-  - [Algorithm - `nl4d`](#nl4d)
+  - [Algorithm - `nl4d`](#nl4d-options)
+  - [Algorithm - `nlmeans`](#nlmeans-options)
 
 ## Features
 
@@ -59,23 +65,59 @@ denoising tools.
 - _**Fast!**_ - around **2x** FFmpeg's `nlmeans_opencl` at matched settings and **~1.4x** faster than V-BM3DHIP.
   - Piped input can't parallelise across scenes, so file input makes the best use of big GPUs.
 
-## Tuning guide
+## Guide
 
-The defaults are measured, not guessed. Start with them, judge the result by eye, and adjust one
-knob at a time using the situations below.
-
-### Start here
+The defaults are measured, not guessed. Start with them, judge the result by eye, and change one
+knob at a time.
 
 ```bash
-av-denoise nlmeans --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+av-denoise nl4d --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
 ```
 
-This runs the `base` preset: the `hq` variant with a 5-frame temporal window (radius of `2`) and fully
-automatic noise handling. The noise level, the grain's spatial correlation, and the per-plane
-strength are all measured per scene, so most sources need nothing else.
+That runs `nl4d` at the `base` preset: a 5-frame temporal window (radius of `2`), motion tracking
+on, and fully automatic noise handling. The noise level and the grain's spatial correlation are
+measured per scene, so most sources need nothing else.
 
-> `--input` also takes `-` (or `pipe:0`) to read a y4m stream from standard input, and `pipe:N` for
-> an inherited file descriptor:
+Your main dial is `--preset`. Go up the ladder (`slow`, `veryslow`) for noisier sources or when
+quality matters more than time. Go down (`fast`, `veryfast`) when speed is more important. Each
+algorithm fills in its own knobs from it.
+
+### Choosing an algorithm
+
+**Use `nl4d` unless you need the speed.** It gives the best noise removal and the best detail
+retention of anything here, on any kind of source. The only thing it asks for is time.
+
+Both algorithms clean a frame using patches from itself and its neighbours. They differ in what
+they do with the matches once they have them.
+
+**`nl4d`** stacks the matching patches, transforms the whole stack together, and zeroes only the
+coefficients that look like noise. Detail shared across the stack survives that, which is why it
+keeps texture the alternative averages away. It always tracks motion and always needs a temporal
+window, so it has no spatial-only mode.
+
+**`nlmeans`** averages the patches that look alike. The averaging is what removes the noise, and
+it is also what softens fine texture, because detail that is not repeated closely enough
+somewhere else gets averaged away along with the grain.
+
+Reach for `nlmeans` when one of these applies:
+
+| Situation                                       | Reach for                     |
+|-------------------------------------------------|-------------------------------|
+| Throughput matters more than the result         | `nlmeans --variant fast`      |
+| You want no temporal window at all              | `nlmeans --temporal-radius 0` |
+| You need a prefilter, or per-plane `--strength` | `nlmeans`                     |
+
+See [Algorithm defaults](#algorithm-defaults) for what each costs.
+
+> [!IMPORTANT]
+> You may _think_ you want a prefilter or no temporal window, but that is probably incorrect or operating on an
+> assumption that does not apply to av-denoise. It is **highly** advised to ignore any advice recommending a prefilter
+> for the NL4D or NLMeans-HQ algorithms in av-denoise, it is going to _hurt_ detail retention, not improve it.
+
+### Piped input and high bit depth
+
+`--input` also takes `-` (or `pipe:0`) to read a y4m stream from standard input, and `pipe:N` for
+an inherited file descriptor:
 
 ```bash
 ffmpeg -i noisy.mkv -pix_fmt yuv420p -f yuv4mpegpipe - \
@@ -83,22 +125,77 @@ ffmpeg -i noisy.mkv -pix_fmt yuv420p -f yuv4mpegpipe - \
   | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
 ```
 
-> Piped input has no scene detection, so the temporal window slides across the whole stream and
-> `--workers` does not apply.
+Piped input has no scene detection, so the temporal window slides across the whole stream and
+`--workers` does not apply.
 
-> ffmpeg will not write 10 or 12-bit y4m without `-strict -1`, so high-depth
-> pipelines need it on the *producing* side:
->
-> ```bash
-> ffmpeg -i noisy.mkv -pix_fmt yuv420p10le -strict -1 -f yuv4mpegpipe - \
->   | av-denoise nlmeans --input - \
->   | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
-> ```
->
-> File input via `--input noisy.mkv` needs no such flag.
+ffmpeg will not write 10 or 12-bit y4m without `-strict -1`, so high-depth pipelines need it on
+the *producing* side:
 
-Your main dial is `--preset`. Go up the ladder (`slow`, `veryslow`) for noisier sources or when
-quality matters more than time. Go down (`fast`, `veryfast`) when speed is more important.
+```bash
+ffmpeg -i noisy.mkv -pix_fmt yuv420p10le -strict -1 -f yuv4mpegpipe - \
+  | av-denoise nlmeans --input - \
+  | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+```
+
+File input via `--input noisy.mkv` needs no such flag.
+
+## NL4D tuning guide
+
+```bash
+av-denoise nl4d --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+```
+
+`--preset` sets how many neighbouring frames are searched, from a 3-frame window at `fast` to a
+17-frame one at `veryslow`. `veryfast` keeps the 3-frame window and narrows the spatial search
+instead, since NL4D has nothing to group without neighbours.
+
+### The NL4D dials
+
+| Symptom                               | First thing to try          | Second                    |
+|---------------------------------------|-----------------------------|---------------------------|
+| Grain or noise still visible          | one preset higher           | `--lambda-ht` up a little |
+| Fine texture getting scrubbed         | `--lambda-ht` down a little | `--sigma-scale 0.9`       |
+| Result looks under-cleaned everywhere | `--sigma-scale 1.1`         | one preset higher         |
+| Smearing or ghosting on motion        | one preset lower            | `--refine` up             |
+| Too slow                              | `--spatial-radius` down     | one preset lower          |
+
+**`--lambda-ht` is the main dial.** It sets how many standard deviations of estimated noise a
+transform coefficient has to clear to survive, so raising it removes more noise and takes more
+fine detail with it. The defaults, 5.3 for luma and 4.2 for chroma, were picked by eye on real
+grain and deliberately biased toward keeping detail. Move in steps of about 0.3 and judge by eye.
+`--luma-lambda-ht` and `--chroma-lambda-ht` pin one plane without touching the other.
+
+**`--sigma-scale` is the other one**, and it does something different. `--lambda-ht` decides how
+aggressive to be at a given noise level; `--sigma-scale` corrects the noise level itself. That
+estimate also feeds the motion confidence scoring, so when the whole result reads uniformly
+under- or over-cleaned, correcting the level fixes the cause rather than the symptom. When you
+are happy with the level and just want a different trade, use `--lambda-ht`.
+
+**`--spatial-radius` is the speed dial.** The centre-frame search covers `(2 * radius + 1)^2`
+positions, so it dominates the work. Dropping it from 9 to 6 roughly halves the candidates, which
+is exactly what `--preset veryfast` does.
+
+### What not to touch in NL4D
+
+- **`--sigma`** pins the noise level to a fixed value and turns the per-scene measurement off
+  entirely. `--sigma-scale` keeps the measurement and nudges it, which is almost always what you
+  actually want.
+- **`--c-min`** only decides how much compute a frame costs. It never changes which patches are
+  admitted once they are scored, so it is not a quality dial.
+- **`--no-confidence-variance`** stops a poorly matched patch from being trusted less than a 
+  well-matched one. It exists to isolate that mechanism in testing and calibration, not to improve output.
+- **`--thsad-scale`, `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels`** tune
+  the motion machinery's internals, changing any of these will likely invalidate all other defaults.
+
+## NLMeans tuning guide
+
+```bash
+av-denoise nlmeans --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+```
+
+`--preset` picks the variant as well as the window: `veryfast` runs the `fast` variant with no
+temporal window at all, and everything above it runs `hq` with a window from 3 frames at `fast`
+to 17 at `veryslow`.
 
 | Symptom                        | First thing to try                 | Second                      |
 |--------------------------------|------------------------------------|-----------------------------|
@@ -150,7 +247,7 @@ fixes the cause rather than the symptom.
 - **Fast motion looks smeary.** Enable `--motion-compensation` first. If a scene still trails,
   drop one preset (a shallower window has less material to mis-blend).
 
-### What not to do
+### What not to touch in NLMeans
 
 These exist for debugging, calibration work, and unusual sources. Reaching for them first usually
 makes things worse.
@@ -229,7 +326,6 @@ just compare-perf -- --accelerators vulkan \
 The two tables below pin `--variant fast` at `veryfast`-preset settings, not the `base`
 default, so they isolate one feature at a time rather than measuring a shipping config.
 
-
 Matched patch and search sizes on both tools, av-denoise uses radii compared to
 ffmpeg which takes the absolute size.
 
@@ -238,6 +334,11 @@ ffmpeg which takes the absolute size.
 | p=5, r=11      |        **72.57** |                       30.25 |  ~2.40x |
 | p=7, r=15      |        **42.41** |                       16.33 |  ~2.60x |
 | p=9, r=15      |        **41.84** |                       16.26 |  ~2.57x |
+
+> [!NOTE]
+> av-denoise uses more sensible defaults compared to ffmpeg and enables the high-quality modes by default so
+> the numbers you see here will not map directly to your own experience unless you explicitly configure it to
+> match the settings to ffmpeg. (_NOT ADVISED_)
 
 ### av-denoise feature cost (strength 1.0, default patch/search)
 
@@ -345,26 +446,43 @@ cargo add av-denoise
 
 ## Example commands
 
-Most of these run `nlmeans`, where two dials do almost everything: `--preset` for how hard to
-work, and `--hq-sigma-scale` to nudge the measured noise level when your eye disagrees with it.
-Each example below changes one thing from the defaults.
+Two dials do almost everything: `--preset` for how hard to work, and a sigma scale to nudge the
+measured noise level when your eye disagrees with it. Each example below changes one thing from
+the defaults.
 
-**Clean up a noisy file.** The defaults measure the noise per scene and pick their own strength.
+**Clean up a noisy file.** `nl4d` measures the noise per scene and picks its own threshold.
 
 ```bash
-av-denoise nlmeans --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+av-denoise nl4d --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
 ```
 
-**A noisier source.** Go up the preset ladder. A deeper temporal window is the strongest lever in
-the tool.
+**Keep more detail, or take out more grain.** `--lambda-ht` is nl4d's main dial. Lower keeps more
+detail, higher removes more noise. The default differs between luma and chroma, and either plane
+can be pinned on its own with `--luma-lambda-ht` / `--chroma-lambda-ht`.
 
 ```bash
-av-denoise nlmeans --preset slow --input noisy.mkv \
+av-denoise nl4d --lambda-ht 4.5 --input noisy.mkv \
   | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
 ```
 
-**Still grainy after raising the preset.** Tell it the noise is a little stronger than it measured.
-Move in steps of 0.1 and judge by eye.
+**A noisier source.** Go up the preset ladder. A deeper temporal window is the strongest lever in
+the tool, for either algorithm.
+
+```bash
+av-denoise nl4d --preset slow --input noisy.mkv \
+  | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+```
+
+**Trade quality for throughput.** `nlmeans` is the faster family. Its `fast` variant does no noise
+measurement at all.
+
+```bash
+av-denoise nlmeans --variant fast --input noisy.mkv \
+  | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+```
+
+**Still grainy under `nlmeans`.** Tell it the noise is a little stronger than it measured. Move in
+steps of 0.1 and judge by eye.
 
 ```bash
 av-denoise nlmeans --preset slow --hq-sigma-scale 1.1 --input noisy.mkv \
@@ -390,32 +508,14 @@ av-denoise nlmeans --preset slow --motion-compensation --input noisy.mkv \
 is already clean and you want the time back.
 
 ```bash
-av-denoise nlmeans --channel-mode luma --input noisy.mkv \
+av-denoise nl4d --channel-mode luma --input noisy.mkv \
   | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
 ```
 
 **Pick a specific GPU.** Both flags are global, so they work either side of the subcommand.
 
 ```bash
-av-denoise --accelerators vulkan --device discrete:1 nlmeans --input noisy.mkv \
-  | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
-```
-
-**Fine texture that `nlmeans` keeps scrubbing.** Switch algorithms. `nl4d` groups matching
-patches across the temporal window and shrinks them together, which holds onto detail
-`nlmeans` averages away. It always tracks motion, and costs about what
-`nlmeans hq --motion-compensation` does.
-
-```bash
-av-denoise nl4d --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
-```
-
-**Tuning `nl4d`.** `--lambda-ht` is its main dial. Lower keeps more detail, higher removes
-more noise. The default differs between luma and chroma, and either plane can be pinned on
-its own.
-
-```bash
-av-denoise nl4d --lambda-ht 4.5 --input noisy.mkv \
+av-denoise --accelerators vulkan --device discrete:1 nl4d --input noisy.mkv \
   | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
 ```
 
@@ -426,7 +526,7 @@ These pin `--preset veryfast` to select the `fast` variant, which makes `--stren
 value rather than the noise multiplier the `hq` variant applies. That trades away the per-scene
 measurement, so treat them as calibration and debugging recipes rather than a starting point. If
 your goal is a better-looking result, the dials above are the ones to reach for first — see
-[What not to do](#what-not-to-do).
+[What not to touch in nlmeans](#what-not-to-touch-in-nlmeans).
 
 **Y/UV Denoise - ROCm/Vulkan - On GPU 1 - Light Denoise - Spatial - strength=luma:1.2,choma:1.2**
 ```bash
@@ -495,10 +595,10 @@ av-denoise nlmeans \
 
 ## Binary usage
 
-Two algorithms share one set of global flags. `nlmeans` is the one to
-reach for first. `nl4d` holds onto fine texture that `nlmeans` smooths
-away, and needs a temporal window to do it, so it has no spatial-only
-mode.
+Two algorithms share one set of global flags. `nl4d` is the one to reach
+for first, and gives up a spatial-only mode to do it. `nlmeans` is there
+for when throughput matters more than the result, or when you need
+something `nl4d` does not carry.
 
 The tables below cover the flags worth reaching for. Each subcommand's
 `--help` carries every flag with the full explanation.
@@ -522,48 +622,7 @@ Both subcommands also take:
 | `-i, --input <path\|->` | A path is opened with ffms2 and split by scene. `-` or `pipe:0` reads y4m from stdin.            | required |
 | `-W, --workers <N>`     | How many scenes to clean in parallel. Trades GPU memory for throughput. Ignored for piped input. | `2`      |
 
-### `nlmeans`
-
-Compares small patches of pixels and averages the ones that look alike,
-either inside a single frame or across a temporal window.
-
-What `--preset` fills in:
-
-| Preset     | Variant | Temporal radius | Search radius |
-|------------|---------|-----------------|---------------|
-| `veryfast` | `fast`  | 0               | 2             |
-| `fast`     | `hq`    | 1               | 2             |
-| `base`     | `hq`    | 2               | 2             |
-| `slow`     | `hq`    | 4               | 4             |
-| `veryslow` | `hq`    | 8               | 4             |
-
-| Flag                    | What it does                                                                                                                                                                                   | Default         |
-|-------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------|
-| `--variant <fast\|hq>`  | `fast` uses fixed weighting and is the cheapest option. `hq` measures the noise level per scene and matches its weighting to it.                                                               | from `--preset` |
-| `--temporal-radius <N>` | How many neighbouring frames to use on each side. `0` cleans each frame on its own. This is the strongest lever in the tool.                                                                   | from `--preset` |
-| `--hq-sigma-scale <f>`  | Nudges the measured noise level. Raise it when the result still looks noisy, lower it when texture is going. Move in steps of 0.1.                                                             | `1.0`           |
-| `--strength <f>`        | How hard to filter. Under `hq` this multiplies the measured noise level, and its default is calibrated per plane and per radius. `--luma-strength` and `--chroma-strength` override one plane. | calibrated      |
-| `--motion-compensation` | Tracks where blocks moved, so a deep window lines frames up instead of smearing them. Usually worth it on live action, often not on anime.                                                     | off             |
-| `--prefilter <mode>`    | Compares patches against a cleaned reference instead of the noisy input. `nlm[:<scale>]` or `bilateral:<sigma_s>,<sigma_r>`. Costs one extra GPU pass per frame.                               | `none`          |
-
-<details>
-<summary><b>Expert flags</b> — calibration and debugging, not everyday tuning</summary>
-
-| Flag                                                                 | What it does                                                                                                                                                                       | Default             |
-|----------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------|
-| `--search-radius <N>`                                                | How far to look for matching patches inside a frame. Costs quadratically.                                                                                                          | from `--preset`     |
-| `--patch-radius <N>`                                                 | Half-width of a compared patch, which covers `(2N+1)^2` pixels.                                                                                                                    | `4`                 |
-| `--self-weight <f>`                                                  | How much weight the centre pixel gets in the average. `0` is pure NLM.                                                                                                             | `1.0`               |
-| `--hq-sigma <f>`                                                     | Pins the noise level in 8-bit units, turning the per-scene measurement off entirely. `--hq-sigma-scale` keeps the measurement and nudges it, which is almost always what you want. | measured            |
-| `--hq-thsad-scale <f>`                                               | How badly a neighbour may match before its contribution starts dropping.                                                                                                           | `1.0`               |
-| `--hq-no-auto-strength`                                              | Reads `--strength` as an absolute value instead of a multiplier on the measured noise.                                                                                             | off                 |
-| `--hq-no-noise-floor`                                                | Keeps the expected noise floor inside patch distances instead of subtracting it.                                                                                                   | off                 |
-| `--hq-no-temporal-confidence`                                        | Weights every neighbour equally, however badly it matches.                                                                                                                         | off                 |
-| `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels` | Motion-search geometry. Only used with `--motion-compensation`.                                                                                                                    | `16`, `8`, `4`, `2` |
-
-</details>
-
-### `nl4d`
+### `nl4d` options
 
 Groups matching 8x8 patches from across the whole temporal window into
 one stack and shrinks the stack's transform coefficients together, rather
@@ -603,5 +662,46 @@ What `--preset` fills in:
 | `--c-min <f>`                                                        | Confidence floor below which a whole neighbour block is skipped rather than scored. Only changes how much compute a frame costs, never which patches are admitted once scored. | `0.05`              |
 | `--no-confidence-variance`                                           | Gives every patch the same noise estimate, instead of trusting a poorly matched one less.                                                                                      | off                 |
 | `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels` | Motion-search geometry. nl4d always tracks motion, so these are always live.                                                                                                   | `16`, `8`, `4`, `2` |
+
+</details>
+
+### `nlmeans` options
+
+Compares small patches of pixels and averages the ones that look alike,
+either inside a single frame or across a temporal window.
+
+What `--preset` fills in:
+
+| Preset     | Variant | Temporal radius | Search radius |
+|------------|---------|-----------------|---------------|
+| `veryfast` | `fast`  | 0               | 2             |
+| `fast`     | `hq`    | 1               | 2             |
+| `base`     | `hq`    | 2               | 2             |
+| `slow`     | `hq`    | 4               | 4             |
+| `veryslow` | `hq`    | 8               | 4             |
+
+| Flag                    | What it does                                                                                                                                                                                   | Default         |
+|-------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------|
+| `--variant <fast\|hq>`  | `fast` uses fixed weighting and is the cheapest option. `hq` measures the noise level per scene and matches its weighting to it.                                                               | from `--preset` |
+| `--temporal-radius <N>` | How many neighbouring frames to use on each side. `0` cleans each frame on its own. This is the strongest lever in the tool.                                                                   | from `--preset` |
+| `--hq-sigma-scale <f>`  | Nudges the measured noise level. Raise it when the result still looks noisy, lower it when texture is going. Move in steps of 0.1.                                                             | `1.0`           |
+| `--strength <f>`        | How hard to filter. Under `hq` this multiplies the measured noise level, and its default is calibrated per plane and per radius. `--luma-strength` and `--chroma-strength` override one plane. | calibrated      |
+| `--motion-compensation` | Tracks where blocks moved, so a deep window lines frames up instead of smearing them. Usually worth it on live action, often not on anime.                                                     | off             |
+| `--prefilter <mode>`    | Compares patches against a cleaned reference instead of the noisy input. `nlm[:<scale>]` or `bilateral:<sigma_s>,<sigma_r>`. Costs one extra GPU pass per frame.                               | `none`          |
+
+<details>
+<summary><b>Expert flags</b> — calibration and debugging, not everyday tuning</summary>
+
+| Flag                                                                 | What it does                                                                                                                                                                       | Default             |
+|----------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------|
+| `--search-radius <N>`                                                | How far to look for matching patches inside a frame. Costs quadratically.                                                                                                          | from `--preset`     |
+| `--patch-radius <N>`                                                 | Half-width of a compared patch, which covers `(2N+1)^2` pixels.                                                                                                                    | `4`                 |
+| `--self-weight <f>`                                                  | How much weight the centre pixel gets in the average. `0` is pure NLM.                                                                                                             | `1.0`               |
+| `--hq-sigma <f>`                                                     | Pins the noise level in 8-bit units, turning the per-scene measurement off entirely. `--hq-sigma-scale` keeps the measurement and nudges it, which is almost always what you want. | measured            |
+| `--hq-thsad-scale <f>`                                               | How badly a neighbour may match before its contribution starts dropping.                                                                                                           | `1.0`               |
+| `--hq-no-auto-strength`                                              | Reads `--strength` as an absolute value instead of a multiplier on the measured noise.                                                                                             | off                 |
+| `--hq-no-noise-floor`                                                | Keeps the expected noise floor inside patch distances instead of subtracting it.                                                                                                   | off                 |
+| `--hq-no-temporal-confidence`                                        | Weights every neighbour equally, however badly it matches.                                                                                                                         | off                 |
+| `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels` | Motion-search geometry. Only used with `--motion-compensation`.                                                                                                                    | `16`, `8`, `4`, `2` |
 
 </details>
