@@ -112,10 +112,10 @@ pub fn fill_haar8_basis(basis: &mut SharedMemory<f32>, thread_id: u32) {
         } else {
             let p = (j - 4u32) * 2u32;
             if i == p {
-                v = 0.70710678f32;
+                v = std::f32::consts::FRAC_1_SQRT_2;
             }
             if i == p + 1u32 {
-                v = -0.70710678f32;
+                v = -std::f32::consts::FRAC_1_SQRT_2;
             }
         }
         basis[thread_id as usize] = v;
