@@ -129,6 +129,7 @@ fn plant_patch(frame: &mut [f32], w: u32, px: u32, py: u32, patch: &[f32; 64]) {
 /// `conf` gives the per-neighbour confidence written into every block of
 /// that neighbour's plane, keyed by the same logical offset `k` the
 /// shift is keyed by.
+#[expect(clippy::too_many_arguments)]
 pub(super) fn planted_ring(
     w: u32,
     h: u32,

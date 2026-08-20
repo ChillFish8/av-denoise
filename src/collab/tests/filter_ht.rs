@@ -73,6 +73,11 @@ struct Groups {
 /// one-element dummies, since nothing reads them at that radius. The
 /// groups these tests feed the filter are a fixed input, not the thing
 /// under test, so a spatial-only search is all they need.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors collab_group_temporal's own launch arguments, so grouping them into a struct \
+              would only move the same list one level out"
+)]
 fn run_group_raw(
     client: &ComputeClient<R>,
     reference: &Handle,

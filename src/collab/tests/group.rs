@@ -45,7 +45,19 @@ fn run_helpers(xs: &[u32], ys: &[u32], coords: &[i32], max_pos: &[u32]) -> (Vec<
     let ys_buf = client.create_from_slice(u32::as_bytes(ys));
     let coords_buf = client.create_from_slice(i32::as_bytes(coords));
     let max_buf = client.create_from_slice(u32::as_bytes(max_pos));
+    // These size the kernel's two output buffers, which hold one u32
+    // per input coordinate. `size_of_val(xs)` reaches the same number
+    // but ties an output's size to an input's slice, which reads as if
+    // the buffers held `xs` itself.
+    #[expect(
+        clippy::manual_slice_size_calculation,
+        reason = "n is the element count these outputs hold, not xs's byte length"
+    )]
     let packed_buf = client.empty(n * size_of::<u32>());
+    #[expect(
+        clippy::manual_slice_size_calculation,
+        reason = "n is the element count these outputs hold, not xs's byte length"
+    )]
     let clamped_buf = client.empty(n * size_of::<u32>());
 
     unsafe {
