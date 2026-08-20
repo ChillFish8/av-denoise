@@ -239,3 +239,27 @@ kind = "av-denoise"
 subcommand = "nl4d"
 workers = 2
 args = ["--preset", "fast"]
+
+# ---------------------------------------------------------------------------
+# V-BM3D reference via bm3dhip (GPU, VapourSynth), at nl4d's own window size
+# so the two are searching the same number of frames. bm3dhip takes no
+# automatic noise estimate, so its sigma is fixed; sigma does not change how
+# much work it does, only what the result looks like.
+#
+# nl4d runs a hard-threshold pass only, so `bm3dhip_r2_basic` is the
+# like-for-like row. `bm3dhip_r2` is the plugin's default, which adds a
+# second Wiener pass over the whole clip.
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "bm3dhip_r2"
+kind = "bm3dhip"
+sigma = "3.0"
+radius = 2
+
+[[runs]]
+name = "bm3dhip_r2_basic"
+kind = "bm3dhip"
+sigma = "3.0"
+radius = 2
+basic_only = true
