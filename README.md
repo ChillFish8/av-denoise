@@ -214,7 +214,7 @@ grain and deliberately biased toward keeping detail. Move in steps of about 0.3 
 `--luma-lambda-ht` and `--chroma-lambda-ht` pin one plane without touching the other.
 
 **`--sigma-scale` is the other one**, and it does something different. `--lambda-ht` decides how
-aggressive to be at a given noise level; `--sigma-scale` corrects the noise level itself. That
+aggressive to be at a given noise leve. `--sigma-scale` corrects the noise level itself. That
 estimate also feeds the motion confidence scoring, so when the whole result reads uniformly
 under- or over-cleaned, correcting the level fixes the cause rather than the symptom. When you
 are happy with the level and just want a different trade, use `--lambda-ht`.
@@ -333,9 +333,7 @@ total frames divided by wall-clock elapsed.
 - Running on a `AMD AI Pro R9700` (AMD 9070XT equivalent) GPU.
 - Elapsed time is measured around the whole process, so the one-off scene detection
   pass is inside every number.
-- Absolute fps varies between benchmarking sessions (thermal state, background load,
-  driver version). Treat comparisons within a table as meaningful; treat the same
-  config's absolute fps across different tables as not directly comparable.
+- Take these numbers with a pinch of salt.
 
 ---
 
@@ -459,7 +457,7 @@ under Vulkan.
 
 ### Notes about the JIT
 
-It is important to note that `av-denoise` internally uses a JIT (Just In Time) compiler for its kernels; this means
+It is important to note that `av-denoise` internally uses a JIT (Just In Time) compiler for its kernels. This means
 that the kernels are compiled and optimised for your specific hardware _at runtime._ As such, the first a couple of
 calls will have significant overhead as the system compiles, optimises and caches the kernels.
 
