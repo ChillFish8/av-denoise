@@ -82,7 +82,7 @@ docker-test-run image="localhost/av-denoise:latest" input="data/test.mkv" output
     #!/usr/bin/env bash
     set -euo pipefail
     exec 3>&2
-    podman build -t "{{image}}" . 2> >(cat >&3)
+    podman build -t "{{image}}" -f docker/vulkan.Dockerfile . 2> >(cat >&3)
     input_abs="$(realpath "{{input}}")"
     output_abs="$(realpath -m "{{output}}")"
     input_dir="$(dirname "${input_abs}")"

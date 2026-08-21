@@ -12,7 +12,8 @@ exclude = [
     "scripts/",
     ".idea/",
     "cubecl.toml",
-    "Dockerfile",
+    "docker/",
+    ".github/",
     "Justfile"
 ]
 autobins = false
