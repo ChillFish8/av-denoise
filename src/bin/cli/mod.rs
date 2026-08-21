@@ -1,10 +1,7 @@
-//! Command-line surface for the `av-denoise` binary.
-//!
-//! Options that any denoising family understands live on [`Args`].
-//! Options that only one family understands live on that family's
-//! subcommand.
-
+mod common;
 mod input;
+mod motion;
+mod nl4d;
 mod nlmeans;
 
 use av_denoise::Device;
@@ -12,15 +9,18 @@ use av_denoise::accelerate::{Accelerator, get_default_accelerators};
 use clap::{Parser, Subcommand};
 use strum_macros::EnumString;
 
+pub use self::common::CommonArgs;
 pub use self::input::InputSource;
+pub use self::motion::MotionArgs;
+pub use self::nl4d::Nl4dArgs;
 pub use self::nlmeans::NlmeansArgs;
 use crate::ingest::BinaryChannelIntent;
 
 /// Speed vs quality dial.
 ///
-/// Each denoising family reads the same dial and fills in its own
-/// knobs from it. For `nlmeans` that is the variant, the temporal
-/// radius, and the search radius.
+/// Each denoising family reads the same dial and fills in its own knobs
+/// from it. For `nlmeans` that is the variant, the temporal radius, and
+/// the search radius. For `nl4d` it is the temporal radius alone.
 #[derive(Debug, Copy, Clone, Default, EnumString)]
 #[strum(ascii_case_insensitive)]
 pub enum Preset {
@@ -85,12 +85,14 @@ pub struct Args {
     ///
     /// `veryfast` is the fastest and lowest-quality end of the dial.
     /// For `nlmeans` it runs the `fast` variant with no temporal window
-    /// and matches this tool's original default behavior.
+    /// and matches this tool's original default behavior. For `nl4d` it
+    /// keeps a 1-frame temporal window, which that algorithm needs, and
+    /// narrows the spatial search instead.
     ///
-    /// `fast`, `base`, `slow`, and `veryslow` all run the `hq` variant
-    /// and widen the temporal window going up the list, from a 1-frame
-    /// radius at `fast` to an 8-frame radius at `veryslow`. `slow` and
-    /// `veryslow` also widen the search radius.
+    /// Going up the list widens the temporal window, from a 1-frame
+    /// radius at `fast` to an 8-frame radius at `veryslow`. `fast` and
+    /// above also run the `hq` variant of `nlmeans`, and `slow` and
+    /// `veryslow` widen its search radius.
     ///
     /// `base` is the default.
     #[arg(long, default_value = "base", global = true)]
@@ -101,13 +103,11 @@ pub struct Args {
     /// The first backend that initialises is used. If none work the
     /// program exits with an error.
     ///
-    /// The list is comma-separated, for example `vulkan,cpu`.
+    /// The list is comma-separated, for example `cuda,vulkan`.
     #[arg(short = 'A', long, value_delimiter = ',', default_values_t = get_default_accelerators(), global = true)]
     pub accelerators: Vec<Accelerator>,
 
     /// Which device to use on the chosen backend.
-    ///
-    /// Accepted values:
     ///
     /// `default` lets the backend pick.
     ///
@@ -118,7 +118,9 @@ pub struct Args {
     ///
     /// `virtual[:N]` picks the Nth virtual GPU. Vulkan only.
     ///
-    /// `cpu` uses the software backend.
+    /// `cpu` picks a software device where the platform offers one,
+    /// such as lavapipe under Vulkan. It is for testing the pipeline,
+    /// not for real encodes.
     #[arg(short, long, default_value = "default", global = true)]
     pub device: Device,
 
@@ -171,4 +173,19 @@ pub enum Command {
     /// that look alike, either inside a single frame or across a
     /// temporal window.
     Nlmeans(NlmeansArgs),
+
+    /// Denoise by grouping matching patches across several noisy frames
+    /// directly, rather than filtering with non-local means first.
+    ///
+    /// `nl4d` measures the noise level, tracks motion, and scores how
+    /// well each neighbour frame matches, the same way `nlmeans hq`
+    /// does. No NLM weighting pass ever runs. Instead, patches are
+    /// grouped straight out of the noisy frames, searching both the
+    /// centre frame spatially and each neighbour frame around where a
+    /// patch is predicted to have moved, then each group's coefficients
+    /// are shrunk jointly.
+    ///
+    /// Motion tracking is always on, and every preset keeps a temporal
+    /// window, which this algorithm needs.
+    Nl4d(Nl4dArgs),
 }

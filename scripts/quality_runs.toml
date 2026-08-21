@@ -15,19 +15,18 @@ noise = [8, 16, 28]
 16 = 3.0
 28 = 5.0
 
-# Sigma used at each noise level for the `ffmpeg_bm3d` reference row.
-# These are hand-tuned per-clip peaks found by sweeping sigma against
-# this bench clip, not the true 8-bit noise sigma. FFmpeg's bm3d sigma
-# is not on the true-noise-sigma scale. Peaks landed around 3 to 6
-# times the true sigma and the ratio was not constant across noise
-# levels. This row is a quality reference ceiling, not out-of-box bm3d
-# behavior.
+# Sigma used at each noise level for the `bm3dhip` reference row. These
+# are hand-tuned per-clip peaks originally found by sweeping sigma
+# against this bench clip for ffmpeg's `bm3d` filter, not the true 8-bit
+# noise sigma and not re-swept for bm3dhip specifically, so they are a
+# starting point for bm3dhip rather than its own per-clip peak. Peaks
+# landed around 3 to 6 times the true sigma and the ratio was not
+# constant across noise levels.
 #
-# These values were swept against an invocation that left `group` at
-# ffmpeg's default of 1, which disables block matching. Collaborative
-# filtering is on now, so these sigmas are no longer known to be the
-# per-clip peak and any `ffmpeg_bm3d` numbers recorded before this
-# comment was added are not comparable to later ones.
+# That original sweep ran against an invocation that left `group` at
+# ffmpeg's default of 1, which disables block matching, so it is not the
+# sigma ffmpeg's `bm3d` would peak at with collaborative filtering on
+# either.
 [bm3d_sigmas]
 8 = 15
 16 = 40
@@ -95,14 +94,19 @@ strength = "$strength"
 patch = 7
 search = 15
 
-# External baseline: BM3D via ffmpeg's CPU filter, run at its per-clip
-# sigma peak rather than the true noise sigma (see the [bm3d_sigmas]
-# comment above). CPU-only and slow, around 6.6 fps, so this row adds
-# roughly 2 minutes to a full harness run.
+# External baseline: V-BM3D via bm3dhip (GPU, VapourSynth), radius 2 to
+# match this file's primary temporal window (av_temporal_r2,
+# av_hq_temporal_r2, av_hq_temporal_r2_mc, av_hq_temporal_r2_pilot all run
+# at temporal-radius 2). ffmpeg's `bm3d` filter (score_ffmpeg_bm3d in the
+# .py) has no temporal window at all, so it measures a different amount
+# of work than any temporal av-denoise arm and no row here uses it any
+# more. Sigma is the per-clip peak from the [bm3d_sigmas] comment above,
+# not the true noise sigma.
 [[runs]]
-name = "ffmpeg_bm3d"
-kind = "ffmpeg-bm3d"
+name = "bm3dhip_r2"
+kind = "bm3dhip"
 sigma = "$bm3d_sigma"
+radius = 2
 
 # ---------------------------------------------------------------------------
 # HQ mode: noise level measured automatically, strength is a multiplier

@@ -116,9 +116,11 @@ fn assert_close(actual: &[f32], expected: &[f32], tol: f32, msg: &str) {
     }
 }
 
-/// A constant diff over a frame with an exact 2×2 grid of full
-/// `16×16` blocks (no ragged edges): every block's sums reduce to a
-/// closed form, `sum_d = n·K`, `sum_d2 = n·K²`, `sum_lag = n_pairs·K²`.
+/// A constant difference over a frame that grids into exactly four full
+/// blocks, with no ragged edges.
+///
+/// Every block's sums then reduce to a closed form, so the expected
+/// values can be written out by hand.
 #[test]
 fn kernel_uniform_diff_exact_sums() {
     let w = 32;
@@ -141,10 +143,11 @@ fn kernel_uniform_diff_exact_sums() {
     assert_close(&got, &oracle, 1e-4, "kernel vs CPU oracle");
 }
 
-/// A horizontal luma ramp diff (`d0(x, y) = x`) over an exact `3×2`
-/// grid of full blocks. No closed form asserted directly; this checks
-/// the kernel against the independent CPU oracle instead, exercising
-/// non-constant per-pixel content the uniform test can't.
+/// A horizontal ramp difference over a grid of six full blocks.
+///
+/// Nothing is asserted in closed form here. The kernel is checked
+/// against the independent CPU reference instead, which covers the
+/// varying per-pixel content the uniform test cannot reach.
 #[test]
 fn kernel_gradient_diff_exact_sums() {
     let w = 48;
@@ -164,11 +167,14 @@ fn kernel_gradient_diff_exact_sums() {
     assert_close(&got, &oracle, 1e-2, "kernel vs CPU oracle (gradient diff)");
 }
 
-/// `33×17`: ragged on both axes (`blocks_x = 3` with a 1-pixel-wide
-/// last column, `blocks_y = 2` with a 1-pixel-tall last row). A
-/// uniform diff still has a closed form per block, just with each
-/// block's own truncated `n`/`n_pairs`, which this asserts directly
-/// rather than only against the oracle.
+/// A 33x17 frame is ragged on both axes, leaving a last column one
+/// pixel wide and a last row one pixel tall.
+///
+/// A uniform difference still has a closed form per block, just with
+/// each block's own truncated counts.
+///
+/// This asserts those directly rather than only against the CPU
+/// reference.
 #[test]
 fn kernel_ragged_block_dims() {
     let w = 33;
@@ -194,11 +200,11 @@ fn kernel_ragged_block_dims() {
 
             let block = (by * blocks_x + bx) as usize;
             let rec = &got[block * 3..block * 3 + 3];
-            // A looser tolerance than the oracle comparison above: this
-            // is a hand-derived closed form summing up to 256 copies of
-            // a non-dyadic float (0.2), so it accumulates a little more
-            // floating-point slack than comparing two summations that
-            // both walk the same block in the same order.
+            // A looser tolerance than the reference comparison above.
+            // This is a hand-derived closed form summing up to 256
+            // copies of a value f32 cannot hold exactly, so it picks up
+            // a little more floating-point slack than comparing two
+            // sums that walk the same block in the same order.
             assert_close(
                 rec,
                 &expected,
@@ -229,20 +235,24 @@ fn white_noise_pair_recovers_known_sigma() {
     );
 }
 
-/// Spatially-correlated grain (same white field, horizontally
-/// blurred): the marginal sigma is still recoverable within 10%
-/// (temporal variance ignores spatial correlation), and rho must
-/// clearly register the correlation the blur introduces — the whole
-/// point of this estimator versus Immerkær, which reads correlated
-/// grain low (see `hq_temporal_folds_correlated_grain_above_immerkaer_alone`).
+/// Grain that is correlated between neighbouring pixels, made by
+/// blurring a white noise field horizontally.
+///
+/// The sigma is still recoverable within 10%, because the temporal
+/// measurement does not care about spatial correlation.
+///
+/// The correlation reading has to clearly register the blur. That is the
+/// whole point of this estimator next to Immerkær, which reads
+/// correlated grain low. See
+/// `hq_temporal_folds_correlated_grain_above_immerkaer_alone`.
 #[test]
 fn correlated_noise_pair_recovers_marginal_sigma_and_rho() {
     let w = 256;
     let h = 256;
     let sigma_marginal = 8.0 / 255.0;
-    // Horizontal binomial blur [0.25, 0.5, 0.25]: variance scales by
-    // the sum of squared weights (0.375), so the pre-blur sigma must
-    // be scaled up to land the *blurred* field at `sigma_marginal`.
+    // The blur scales the variance by 0.375, the sum of its squared
+    // weights, so the sigma before the blur has to be raised to land
+    // the blurred field on the target.
     let sigma_pre = sigma_marginal / 0.375f32.sqrt();
 
     let prev = correlated_noisy_frame(w, h, 0.5, sigma_pre, 11);
@@ -265,10 +275,11 @@ fn correlated_noise_pair_recovers_marginal_sigma_and_rho() {
     );
 }
 
-/// A rich horizontal ramp shifted by a few pixels simulates motion: the
-/// systematic per-pixel offset it introduces overwhelms the static
-/// gate almost everywhere, so the aggregation should classify the
-/// large majority of blocks (if not all) as non-static.
+/// A horizontal ramp shifted by a few pixels stands in for motion.
+///
+/// The steady per-pixel offset that introduces overwhelms the static
+/// check almost everywhere, so most blocks, if not all of them, should
+/// come out as non-static.
 #[test]
 fn moving_content_pair_mostly_non_static() {
     let w = 64;
@@ -299,14 +310,16 @@ fn moving_content_pair_mostly_non_static() {
     );
 }
 
-/// End-to-end: an HQ r2 denoiser fed a correlated-noise (spatially
-/// blurred grain) synthetic stream must fold its estimator state to
-/// within 25% of the marginal truth scaled by the correlation
-/// correction, in contrast to what Immerkær alone reads on the very
-/// same content (multiple times lower — this is the regression this
-/// estimator exists to fix). The blur's analytic lag-1
-/// autocorrelation is 2/3, from the same coefficient sums that give
-/// the 0.375 variance scale.
+/// The whole pipeline, fed a synthetic stream of correlated grain.
+///
+/// The denoiser's estimator has to settle within 25% of the true sigma
+/// once the correlation correction is applied.
+///
+/// Immerkær alone reads several times lower on the same content, which
+/// is the exact problem this estimator exists to fix.
+///
+/// The blur's lag-1 correlation works out at two thirds, from the same
+/// coefficients that give the 0.375 variance scale.
 #[test]
 fn hq_temporal_folds_correlated_grain_above_immerkaer_alone() {
     let client = make_client();
@@ -450,18 +463,22 @@ fn rho_smoothed_seeds_from_first_sample_not_from_zero() {
     );
 }
 
-/// A `128x128` frame split top and bottom. The top half is genuinely
-/// static (flat content plus independent measurement noise), the
-/// bottom half is fine texture panning a few pixels between frames
-/// with the same measurement noise on top. The panning residual
-/// averages close to zero over a `TEMPORAL_NOISE_BLOCK` block (same
-/// as `moving_content_pair_mostly_non_static`'s ramp, but this
-/// texture's block-mean residual is near zero rather than an order of
-/// magnitude above the gate, the case that test doesn't cover), so the
-/// signed-mean static gate alone lets nearly the whole frame through.
-/// Only the bottom half's variance actually comes from noise, so the
-/// aggregator must still recover close to the true sigma and reject
-/// most of the panning half.
+/// A frame split into a static top half and a panning bottom half.
+///
+/// The top is flat content with independent measurement noise. The
+/// bottom is fine texture panning a few pixels between frames, with the
+/// same noise on top.
+///
+/// The panning residual averages close to zero over a block, so the mean
+/// check alone lets nearly the whole frame through.
+///
+/// That is the case `moving_content_pair_mostly_non_static` does not
+/// cover, because its ramp leaves a block-mean residual far above the
+/// check rather than near zero.
+///
+/// Only the top half's variance is really noise, so the aggregation has
+/// to recover close to the true sigma and reject most of the panning
+/// half.
 #[test]
 fn moving_texture_pair_near_zero_mean_residual_recovers_true_sigma() {
     let w = 128;

@@ -36,12 +36,14 @@ fn run_input(opts: &CliOptions, input: &InputSource, workers: Option<usize>) -> 
 }
 
 fn main() -> anyhow::Result<()> {
-    // cubecl spawns its per-device worker thread with no explicit stack
-    // size (uses Rust's default 2 MiB). GPU kernel codegen runs on that
-    // thread; at large --search-radius the (2R+1)^2 unrolled body in
-    // the windowed NLM kernels in src/nlmeans/kernels/fused.rs
-    // overflows the default stack. RUST_MIN_STACK is cached on first
-    // read, so set it here before any GPU thread spawns.
+    // cubecl spawns its per-device worker thread without asking for a
+    // stack size, so it gets Rust's default 2 MiB. GPU kernel codegen
+    // runs on that thread, and at a large --search-radius the (2R+1)^2
+    // unrolled body of the windowed NLM kernels in
+    // src/nlmeans/kernels/fused.rs overflows that stack.
+    //
+    // RUST_MIN_STACK is cached the first time it is read, so it has to
+    // be set here, before any GPU thread spawns.
     if std::env::var_os("RUST_MIN_STACK").is_none() {
         // SAFETY: still single-threaded, no other thread can race the env mutation.
         unsafe { std::env::set_var("RUST_MIN_STACK", "16777216") };
@@ -58,18 +60,26 @@ fn main() -> anyhow::Result<()> {
         .with_writer(progress::tracing_writer())
         .init();
 
-    // Honor AV_DENOISE_COMPILATION_CACHE. Must run before Denoiser::create
-    // since the first CubeCL client lazily locks the global config.
-    match av_denoise::apply_compilation_cache_env() {
-        Ok(Some(path)) => {
-            tracing::info!(?path, "AV_DENOISE_COMPILATION_CACHE override active")
-        },
-        Ok(None) => {},
-        Err(_) => anyhow::bail!("unable to apply AV_DENOISE_COMPILATION_CACHE, this is a bug."),
+    // Point CubeCL at a kernel cache. This has to run before
+    // Denoiser::create, because the first CubeCL client locks the global
+    // config the moment it is built.
+    match av_denoise::install_compilation_cache() {
+        Ok(Some(path)) => tracing::info!(?path, "caching compiled kernels"),
+        Ok(None) => tracing::info!(
+            "kernel caching is off, every run recompiles. Unset {} to turn it back on.",
+            av_denoise::COMPILATION_CACHE_ENV,
+        ),
+        Err(_) => anyhow::bail!("unable to install the kernel cache, this is a bug."),
     }
 
-    let Command::Nlmeans(nlm) = &args.command;
-    let opts = nlm.build_options(&args)?;
+    let (opts, input, workers) = match &args.command {
+        Command::Nlmeans(nlm) => (nlm.build_options(&args)?, &nlm.common.input, nlm.common.workers),
+        Command::Nl4d(nl4d) => (
+            nl4d.build_options(&args)?,
+            &nl4d.common.input,
+            nl4d.common.workers,
+        ),
+    };
 
-    run_input(&opts, &nlm.input, nlm.workers)
+    run_input(&opts, input, workers)
 }

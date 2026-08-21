@@ -4,13 +4,17 @@
 
 pub mod accelerate;
 pub mod cache;
+#[doc(hidden)]
+pub mod collab;
 mod denoiser;
 pub mod device;
+#[doc(hidden)]
+pub mod nl4d;
 #[doc(hidden)]
 pub mod nlmeans;
 pub mod sniff;
 
-pub use cache::{COMPILATION_CACHE_ENV, CacheAlreadyInitialisedError, apply_compilation_cache_env};
+pub use cache::{COMPILATION_CACHE_ENV, CacheAlreadyInitialisedError, install_compilation_cache};
 pub use denoiser::{
     Algorithm,
     Denoiser,
@@ -18,7 +22,11 @@ pub use denoiser::{
     DenoiserOptions,
     DenoisingMode,
     MAX_PENDING,
+    Nl4dOptions,
     NlmTuning,
+    NlmeansHqOptions,
+    NlmeansOptions,
+    nl4d_default_lambda_ht,
 };
 pub use device::Device;
 pub use nlmeans::{
@@ -28,6 +36,7 @@ pub use nlmeans::{
     HqParams,
     MotionCompensationMode,
     MotionEstimation,
+    MotionSearch,
     PrefilterMode,
     UnsupportedDepthError,
     denormalize,

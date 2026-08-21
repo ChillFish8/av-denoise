@@ -88,7 +88,6 @@ impl<R: Runtime> Benchmark for McConfidenceBench<R> {
                 SEARCH_RADIUS,
                 0u32, // use_seed = 0 (no coarse pass in the no-MC path)
                 blocks_x,
-                blocks_y,
             );
         }
         Ok(())

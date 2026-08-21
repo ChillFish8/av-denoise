@@ -1,3 +1,29 @@
+//! Following motion between frames so temporal denoising stays sharp.
+//!
+//! Temporal denoising averages a pixel with the same position in nearby
+//! frames. When the camera or the content moves, that position holds
+//! different content in each frame, and averaging it blurs the moving
+//! parts.
+//!
+//! This module works out where each block of pixels moved to, then
+//! shifts the neighbouring frames back into line with the current one
+//! before the denoising weights are computed.
+//!
+//! # How a frame is tracked
+//!
+//! `pyramid` builds a stack of progressively smaller copies of the luma
+//! plane. A search on a small copy finds large movements cheaply, and
+//! the answer then seeds a short search at full resolution.
+//!
+//! `analyse` runs that search. `chain` handles distant neighbours by
+//! measuring motion between adjacent frames and joining the results,
+//! which reaches further than any single search window.
+//!
+//! `confidence` scores how well each block actually matched, so a block
+//! that was occluded or changed can be held back rather than blurred in.
+//!
+//! `compensate` applies the finished motion field to a frame.
+
 mod analyse;
 mod chain;
 mod compensate;
@@ -18,80 +44,152 @@ pub(crate) use pyramid::{pyramid_pixels_per_frame, run_pyramid_build};
 
 use crate::nlmeans::align::StorageAlign;
 
-/// How motion compensation is configured for a denoise pass.
+/// The motion search's tuning, for a denoiser that always tracks motion.
 ///
-/// `None` disables motion compensation entirely (zero-cost; no extra
-/// buffers are allocated). `Mvtools` enables an MVTools-inspired
-/// per-block estimator and warps neighbours toward the centre at
-/// denoise time.
+/// [`MotionCompensationMode::Mvtools`] carries the same five values for
+/// a denoiser that can also turn motion compensation off.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MotionSearch {
+    /// The side length of each motion-search block, in pixels at the
+    /// finest pyramid level.
+    pub blksize: u32,
+    /// How many pixels neighbouring blocks overlap.
+    ///
+    /// This has to be strictly below `blksize`, so the step between
+    /// blocks stays positive.
+    pub overlap: u32,
+    /// The search radius in pixels at the finest pyramid level.
+    ///
+    /// The coarse pass uses the same radius on a half-size image, so
+    /// its real reach is twice as far.
+    pub search_radius: u32,
+    /// How many levels the pyramid has.
+    ///
+    /// `1` means a single full-resolution search. `2` adds a half-size
+    /// coarse pass that seeds the fine one. The maximum is
+    /// [`MAX_PYRAMID_LEVELS`].
+    pub pyramid_levels: u32,
+    /// How motion toward each temporal neighbour is estimated.
+    pub estimation: MotionEstimation,
+}
+
+impl Default for MotionSearch {
+    fn default() -> Self {
+        Self {
+            blksize: 16,
+            overlap: 8,
+            search_radius: 4,
+            pyramid_levels: 2,
+            estimation: MotionEstimation::Auto,
+        }
+    }
+}
+
+impl From<MotionSearch> for MotionCompensationMode {
+    fn from(search: MotionSearch) -> Self {
+        Self::Mvtools {
+            blksize: search.blksize,
+            overlap: search.overlap,
+            search_radius: search.search_radius,
+            pyramid_levels: search.pyramid_levels,
+            estimation: search.estimation,
+        }
+    }
+}
+
+/// How motion compensation is set up for a denoise pass.
 #[non_exhaustive]
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub enum MotionCompensationMode {
+    /// Motion compensation is off, and no extra buffers are allocated.
     #[default]
     None,
+    /// An estimator inspired by MVTools tracks each block, and the
+    /// neighbouring frames are shifted toward the centre frame at
+    /// denoise time.
     Mvtools {
-        /// Side length of each motion-estimation block in pixels at
+        /// The side length of each motion-search block, in pixels at
         /// the finest pyramid level.
         blksize: u32,
-        /// Overlap between neighbouring blocks in pixels. Must be
-        /// strictly less than `blksize` so the step (`blksize - overlap`)
-        /// stays positive. Values > 0 reserve room for raised-cosine
-        /// blending in the compensate step (v1 uses a winner-block rule).
+        /// How many pixels neighbouring blocks overlap.
+        ///
+        /// This has to be strictly below `blksize`, so the step between
+        /// blocks stays positive.
+        ///
+        /// Anything above 0 leaves room for the raised-cosine blend in
+        /// the compensate step, which currently uses a
+        /// winner-takes-all rule instead.
         overlap: u32,
-        /// Pixel search radius at the *finest* pyramid level. The
-        /// coarse pass uses the same radius on the `/2` image so its
-        /// effective reach is doubled.
+        /// The search radius in pixels at the finest pyramid level.
+        ///
+        /// The coarse pass uses the same radius on a half-size image, so
+        /// its real reach is twice as far.
         search_radius: u32,
-        /// Number of pyramid levels. `1` disables the hierarchical
-        /// coarse pass; `2` adds a `/2` coarse pass that seeds the
-        /// fine pass. Bounded by [`MAX_PYRAMID_LEVELS`].
+        /// How many levels the pyramid has.
+        ///
+        /// `1` means a single full-resolution search. `2` adds a
+        /// half-size coarse pass that seeds the fine one. The maximum is
+        /// [`MAX_PYRAMID_LEVELS`].
         pyramid_levels: u32,
-        /// How temporal MVs are estimated. `Auto` (the default) picks
-        /// the strategy from the temporal radius. Callers normally
-        /// leave this at the default. Explicit `Direct`/`Chained` are
-        /// mainly useful for pinning a variant in tests and benches.
+        /// How motion toward each temporal neighbour is estimated.
+        ///
+        /// `Auto`, the default, picks a strategy from the temporal
+        /// radius and is what callers normally want. Naming `Direct` or
+        /// `Chained` is mostly useful for pinning one strategy in tests
+        /// and benches.
         estimation: MotionEstimation,
     },
 }
 
-/// Strategy for estimating a temporal neighbour's motion vector.
+/// How motion toward a temporal neighbour is estimated.
 #[non_exhaustive]
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub enum MotionEstimation {
-    /// Resolve to `Direct` or `Chained` from the temporal radius at
-    /// denoiser construction. See [`MotionEstimation::resolve`] for the
-    /// exact rule and its empirical basis.
+    /// Picks `Direct` or `Chained` from the temporal radius when the
+    /// denoiser is built.
+    ///
+    /// [`MotionEstimation::resolve`] describes the rule and where it
+    /// came from.
     #[default]
     Auto,
-    /// Match every neighbour directly against the centre frame at the
-    /// configured search radius. Cost scales with the temporal radius,
-    /// since each neighbour repeats the full coarse+fine search.
+    /// Matches every neighbour against the centre frame directly, at the
+    /// configured search radius.
+    ///
+    /// The cost grows with the temporal radius, because each neighbour
+    /// repeats the whole coarse and fine search.
     Direct,
-    /// Estimate motion between adjacent frames only, once per pushed
-    /// frame, then compose the per-step vectors into a seed for each
-    /// neighbour and correct residual drift with a small seeded
-    /// refinement search.
+    /// Measures motion only between adjacent frames, once per pushed
+    /// frame.
+    ///
+    /// Those per-step vectors are then joined into a seed for each
+    /// neighbour, and a small seeded search cleans up whatever drift is
+    /// left.
     Chained {
-        /// Search radius for the seeded refinement pass, in pixels at
-        /// the finest pyramid level. Small because the composed seed
-        /// already carries most of the true displacement.
+        /// The search radius for the seeded refinement pass, in pixels
+        /// at the finest pyramid level.
+        ///
+        /// It can be small, because the joined seed already carries most
+        /// of the real movement.
         refine_radius: u32,
     },
 }
 
-/// Default refinement radius for [`MotionEstimation::Chained`].
+/// The default refinement radius for [`MotionEstimation::Chained`].
 pub const DEFAULT_REFINE_RADIUS: u32 = 2;
 
-/// Temporal radius at or above which [`MotionEstimation::Auto`]
-/// resolves to `Chained` instead of `Direct`. Below this, `Direct`
-/// tracks slightly better since the true motion still fits inside its
-/// own search window. At or above it, `Chained` stays in-window and is
-/// faster, since its reach scales with the radius instead of being
-/// capped by a fixed search window.
+/// The temporal radius at which [`MotionEstimation::Auto`] switches from
+/// `Direct` to `Chained`.
+///
+/// Below this, `Direct` tracks slightly better, because the real motion
+/// still fits inside its own search window.
+///
+/// At or above it, `Chained` both stays inside its window and runs
+/// faster, because its reach grows with the radius rather than being
+/// capped by a fixed window.
 pub const CHAINED_RADIUS_THRESHOLD: u32 = 3;
 
 impl MotionEstimation {
-    /// Convenience constructor for `Chained` with the library default
+    /// Builds a `Chained` estimation with the library's default
     /// refinement radius.
     pub fn chained_default() -> Self {
         Self::Chained {
@@ -99,11 +197,11 @@ impl MotionEstimation {
         }
     }
 
-    /// Resolve `Auto` against the temporal radius, returning a concrete
-    /// `Direct` or `Chained` estimation. Never returns `Auto`. `Direct`
-    /// and `Chained` pass through unchanged, regardless of
-    /// `temporal_radius`. See [`CHAINED_RADIUS_THRESHOLD`] for the
-    /// threshold this applies.
+    /// Resolves `Auto` against the temporal radius, always returning a
+    /// concrete `Direct` or `Chained`.
+    ///
+    /// `Direct` and `Chained` pass through unchanged whatever the
+    /// radius. [`CHAINED_RADIUS_THRESHOLD`] is where the switch happens.
     pub fn resolve(self, temporal_radius: u32) -> Self {
         match self {
             Self::Auto if temporal_radius >= CHAINED_RADIUS_THRESHOLD => Self::chained_default(),
@@ -112,7 +210,7 @@ impl MotionEstimation {
         }
     }
 
-    /// Reject a refinement radius the seeded fine kernel can't honour.
+    /// Rejects a refinement radius the seeded fine kernel cannot honour.
     pub(crate) fn validate(&self) -> Result<(), anyhow::Error> {
         let Self::Chained { refine_radius } = *self else {
             return Ok(());
@@ -128,36 +226,49 @@ impl MotionEstimation {
     }
 }
 
-/// Default block size used when callers don't override it. Matches the
-/// MVTools default and lines up well with NLM's typical patch sizes.
+/// The default block size, matching MVTools and lining up well with the
+/// patch sizes NLM typically uses.
 pub const DEFAULT_BLKSIZE: u32 = 16;
-/// Default block overlap (= `blksize / 2`).
+
+/// The default block overlap, which is half the default block size.
 pub const DEFAULT_OVERLAP: u32 = 8;
-/// Default finest-level search radius. With a 2-level pyramid this
-/// reaches motion up to roughly ±12 pixels at the finest scale.
+
+/// The default search radius at the finest level.
+///
+/// With a two-level pyramid this reaches motion of roughly 12 pixels at
+/// full resolution.
 pub const DEFAULT_SEARCH_RADIUS: u32 = 4;
-/// Default number of pyramid levels. `2` gives a single `/2` coarse
-/// pass, enough to handle most heavy-motion anime while keeping the
-/// kernel count manageable.
+
+/// The default number of pyramid levels.
+///
+/// Two levels give a single half-size coarse pass, which handles most
+/// heavy-motion anime while keeping the number of kernel launches down.
 pub const DEFAULT_PYRAMID_LEVELS: u32 = 2;
 
-/// Hard ceiling on `pyramid_levels`. Each extra level halves the
-/// resolution and adds an analyse-kernel launch per neighbour; 3 is
-/// already overkill for 1080p content.
+/// The hard ceiling on `pyramid_levels`.
+///
+/// Each extra level halves the resolution again and adds a kernel launch
+/// per neighbour. Three is already more than 1080p content needs.
 pub const MAX_PYRAMID_LEVELS: u32 = 3;
-/// Hard ceiling on `search_radius`. The analyse kernel SAD-sweeps a
-/// `(2·r + 1)²` window per block, so the cost is quadratic.
+
+/// The hard ceiling on `search_radius`.
+///
+/// The analyse kernel scores a `(2 * radius + 1)^2` window per block, so
+/// the cost grows with the square of the radius.
 pub const MAX_SEARCH_RADIUS: u32 = 8;
-/// Hard ceiling on `blksize`. Above this the per-block SMEM tile is
-/// uncomfortably large on RDNA-class GPUs.
+
+/// The hard ceiling on `blksize`.
+///
+/// Above this the per-block shared-memory tile grows uncomfortably large
+/// on RDNA-class GPUs.
 pub const MAX_BLKSIZE: u32 = 32;
 
 impl MotionCompensationMode {
-    /// Convenience constructor for `Mvtools` with library defaults.
+    /// Builds an `Mvtools` mode from the library defaults.
     ///
-    /// Pins `estimation` to `Direct` rather than the field's own
+    /// This pins `estimation` to `Direct` rather than the field's own
     /// `Auto` default, so it never switches to `Chained` at larger
-    /// temporal radii the way an `Auto` configuration does.
+    /// temporal radii the way an `Auto` configuration would.
     pub fn mvtools_default() -> Self {
         Self::Mvtools {
             blksize: DEFAULT_BLKSIZE,
@@ -173,12 +284,15 @@ impl MotionCompensationMode {
         !matches!(self, Self::None)
     }
 
-    /// Resolved estimation strategy for this mode at `temporal_radius`.
-    /// `None` when this mode isn't `Mvtools`. Never `Auto`, see
-    /// [`MotionEstimation::resolve`]. The single source every
-    /// estimation-dependent decision site (pair-ring allocation,
-    /// push-time pair-analyse gating, the submit-path dispatch branch)
-    /// goes through.
+    /// The estimation strategy this mode resolves to at
+    /// `temporal_radius`.
+    ///
+    /// Returns `None` when the mode is not `Mvtools`, and never returns
+    /// `Auto`. See [`MotionEstimation::resolve`].
+    ///
+    /// Every decision that depends on the strategy goes through here,
+    /// including pair-ring allocation, whether the push-time pair
+    /// analyse runs, and which branch the submit path takes.
     pub(crate) fn resolved_estimation(&self, temporal_radius: u32) -> Option<MotionEstimation> {
         match *self {
             Self::Mvtools { estimation, .. } => Some(estimation.resolve(temporal_radius)),
@@ -186,7 +300,7 @@ impl MotionCompensationMode {
         }
     }
 
-    /// Reject parameter combinations that the kernels can't honour.
+    /// Rejects parameter combinations the kernels cannot honour.
     pub fn validate(&self) -> Result<(), anyhow::Error> {
         let Self::Mvtools {
             blksize,
@@ -200,11 +314,13 @@ impl MotionCompensationMode {
         };
 
         if blksize < 4 {
-            anyhow::bail!("motion-compensation blksize={blksize} is too small; minimum is 4 pixels per side");
+            anyhow::bail!(
+                "motion-compensation blksize={blksize} is too small, the minimum is 4 pixels per side"
+            );
         }
         if blksize > MAX_BLKSIZE {
             anyhow::bail!(
-                "motion-compensation blksize={blksize} exceeds the supported maximum ({MAX_BLKSIZE})"
+                "motion-compensation blksize={blksize} exceeds the supported maximum of {MAX_BLKSIZE}"
             );
         }
         if blksize % 2 != 0 {
@@ -214,7 +330,8 @@ impl MotionCompensationMode {
         }
         if overlap >= blksize {
             anyhow::bail!(
-                "motion-compensation overlap={overlap} must be strictly less than blksize ({blksize}) so step > 0"
+                "motion-compensation overlap={overlap} must be strictly less than blksize, \
+                 which is {blksize}, so the step between blocks stays positive"
             );
         }
         if search_radius == 0 || search_radius > MAX_SEARCH_RADIUS {
@@ -234,12 +351,14 @@ impl MotionCompensationMode {
     }
 }
 
-/// Per-denoiser MC state, owned by `NlmDenoiser` when MC is active.
+/// The motion-compensation state a `NlmDenoiser` holds while motion
+/// compensation is active.
 ///
-/// Cached at construction time so the hot dispatch path doesn't
-/// re-pattern-match the enum on every call. Holds only the fields the
-/// analyse and compensate dispatchers actually read. The full
-/// configuration lives on [`MotionCompensationMode`].
+/// It is worked out once at construction, so the hot dispatch path never
+/// has to re-read the configuration enum.
+///
+/// Only the fields the analyse and compensate dispatchers use live here.
+/// The full configuration stays on [`MotionCompensationMode`].
 #[derive(Debug, Clone)]
 pub(crate) struct MotionCtx {
     pub blksize: u32,
@@ -248,9 +367,11 @@ pub(crate) struct MotionCtx {
     pub pyramid_levels: u32,
     pub blocks_x: u32,
     pub blocks_y: u32,
-    /// Alignment every buffer this context slices per-slot must respect
-    /// (the MV field, the confidence buffer, the pair ring, and the
-    /// pyramid). Read from the runtime, see [`StorageAlign`].
+    /// The alignment every buffer this context slices per slot has to
+    /// respect, meaning the motion field, the confidence buffer, the
+    /// pair ring, and the pyramid.
+    ///
+    /// It is read from the runtime. See [`StorageAlign`].
     pub align: StorageAlign,
 }
 
@@ -282,80 +403,91 @@ impl MotionCtx {
         })
     }
 
-    /// MV-field slot count per neighbour. One i16x2 per block.
+    /// How many motion-field slots each neighbour needs, which is one
+    /// per block.
     pub fn mv_slots_per_neighbour(&self) -> usize {
         (self.blocks_x * self.blocks_y) as usize
     }
 
-    /// Padded per-neighbour MV-field stride in bytes. Two `i32`
-    /// components (`dx`, `dy`) per block, rounded up to the runtime's
-    /// buffer-binding alignment, the same convention
-    /// [`Self::confidence_bytes_per_neighbour`] uses. `wgpu` rejects a
-    /// bind-group offset that isn't a multiple of its
-    /// `min_storage_buffer_offset_alignment`, and an odd block count
-    /// leaves the unpadded 8-byte-per-block stride short of that
+    /// The padded per-neighbour motion-field stride in bytes.
+    ///
+    /// Each block stores two `i32` components, and the total is rounded
+    /// up to the runtime's buffer-binding alignment. This is the same
+    /// convention [`Self::confidence_bytes_per_neighbour`] uses.
+    ///
+    /// The padding matters because wgpu rejects a bind-group offset that
+    /// is not a multiple of its `min_storage_buffer_offset_alignment`,
+    /// and an odd block count leaves the unpadded stride short of that
     /// boundary.
     pub(crate) fn mv_field_bytes_per_neighbour(&self) -> u64 {
         let blocks = (self.blocks_x as u64) * (self.blocks_y as u64);
         self.align.pad_bytes(blocks * 2 * size_of::<i32>() as u64)
     }
 
-    /// Padded per-neighbour confidence-buffer stride in bytes. One
-    /// `f32` per block, rounded up to the runtime's buffer-binding
-    /// alignment, the same convention
-    /// [`Self::mv_field_bytes_per_neighbour`] uses for the MV field.
+    /// The padded per-neighbour confidence-buffer stride in bytes.
+    ///
+    /// Each block stores one `f32`, rounded up to the runtime's
+    /// buffer-binding alignment the same way
+    /// [`Self::mv_field_bytes_per_neighbour`] rounds the motion field.
     pub(crate) fn confidence_bytes_per_neighbour(&self) -> u64 {
         let blocks = (self.blocks_x as u64) * (self.blocks_y as u64);
         self.align.pad_bytes(blocks * size_of::<f32>() as u64)
     }
 
-    /// i32 elements per pair-ring direction sub-array, one `(dx, dy)`
-    /// per block. This is the unpadded element count a direction's
-    /// data actually spans, used as the zero-fill length in
-    /// `zero_pair_slot` and as the input to
-    /// [`Self::pair_direction_bytes`]'s padding.
+    /// How many `i32` elements one direction of a pair-ring slot holds,
+    /// which is two per block.
+    ///
+    /// This is the unpadded count of the data itself. It is the
+    /// zero-fill length in `zero_pair_slot` and the input
+    /// [`Self::pair_direction_bytes`] pads.
     pub(crate) fn pair_direction_len(&self) -> u32 {
         self.blocks_x * self.blocks_y * 2
     }
 
-    /// Padded per-direction pair-ring stride in bytes, rounded up to
-    /// the runtime's buffer-binding alignment, the same convention
-    /// [`Self::confidence_bytes_per_neighbour`] uses. Both
-    /// `pair_byte_offset` (the host-side write and zero-fill offset)
-    /// and the chain-compose kernel's own internal read stride use
-    /// this padded value, so a direction's data starts at the same
-    /// place for every reader and writer.
+    /// The padded per-direction pair-ring stride in bytes, rounded up to
+    /// the runtime's buffer-binding alignment the same way
+    /// [`Self::confidence_bytes_per_neighbour`] rounds its own stride.
+    ///
+    /// Both `pair_byte_offset`, which the host writes and zero-fills
+    /// at, and the chain-compose kernel's internal read stride use this
+    /// padded value, so a direction's data starts in the same place for
+    /// every reader and writer.
     pub(crate) fn pair_direction_bytes(&self) -> u64 {
         self.align
             .pad_bytes(self.pair_direction_len() as u64 * size_of::<i32>() as u64)
     }
 
-    /// Padded per-slot pair-ring stride in bytes, both directions back
-    /// to back.
+    /// The padded per-slot pair-ring stride in bytes, covering both
+    /// directions back to back.
     pub(crate) fn pair_slot_bytes(&self) -> u64 {
         2 * self.pair_direction_bytes()
     }
 
-    /// Padded per-direction pair-ring stride in i32 elements. The
-    /// chain-compose kernel reads the whole pair ring as one unsliced
-    /// array and strides through it with this value, matching
+    /// The padded per-direction pair-ring stride in `i32` elements.
+    ///
+    /// The chain-compose kernel reads the whole pair ring as one array
+    /// and steps through it with this value, which matches
     /// [`Self::pair_direction_bytes`] exactly.
     pub(crate) fn pair_direction_stride(&self) -> u32 {
         (self.pair_direction_bytes() / size_of::<i32>() as u64) as u32
     }
 
-    /// Padded per-slot pair-ring stride in i32 elements, both
-    /// directions back to back.
+    /// The padded per-slot pair-ring stride in `i32` elements, covering
+    /// both directions back to back.
     pub(crate) fn pair_slot_stride(&self) -> u32 {
         2 * self.pair_direction_stride()
     }
 
-    /// Block geometry for the no-MC confidence pass. Uses the
-    /// library's default block size and overlap, a single pyramid
-    /// level (no coarse pass), and zero search radius (a static
-    /// per-block SAD, no motion search). Used when confidence
-    /// weighting is active but no `Mvtools` mode was configured to
-    /// derive geometry from.
+    /// The block geometry for a confidence pass with no motion
+    /// compensation.
+    ///
+    /// It uses the library's default block size and overlap, one pyramid
+    /// level so there is no coarse pass, and a search radius of zero, so
+    /// each block is scored where it stands with no motion search at
+    /// all.
+    ///
+    /// This is what runs when confidence weighting is on but no
+    /// `Mvtools` mode was configured to take geometry from.
     pub(crate) fn confidence_only(width: u32, height: u32, align: StorageAlign) -> Self {
         Self::new(
             MotionCompensationMode::Mvtools {
@@ -373,25 +505,29 @@ impl MotionCtx {
     }
 }
 
-/// Pair-ring slot count for a temporal radius, `2 * radius`.
+/// How many slots the pair ring needs for a given temporal radius.
 ///
-/// The pair ring stores one adjacent-frame motion field per gap
-/// between consecutive frames in the temporal window. A window of
-/// `2 * radius + 1` frames has exactly `2 * radius` such gaps, and a
-/// gap's pair field is only ever read by composition while both its
-/// frames remain in some window, a span of exactly `2 * radius`
-/// consecutive frame pushes. Sizing the ring at `2 * radius` slots
-/// means a slot's next reuse lands exactly when its previous contents
-/// stop being needed, never before (see
-/// `NlmDenoiser::pair_slot` for the derivation this relies on).
+/// The pair ring stores one adjacent-frame motion field per gap between
+/// consecutive frames in the temporal window. A window of
+/// `2 * radius + 1` frames has exactly `2 * radius` gaps.
+///
+/// A gap's field is only read while both of its frames are still inside
+/// some window, which lasts exactly `2 * radius` frame pushes.
+///
+/// Sizing the ring to match means a slot is reused precisely when its
+/// old contents stop being needed, and never sooner.
+/// `NlmDenoiser::pair_slot` works this out in full.
 pub(crate) fn pair_ring_slot_count(temporal_radius: u32) -> u32 {
     2 * temporal_radius
 }
 
-/// Build the per-frame pyramid for the slot just uploaded by
-/// `push_frame`. Always extracts level-0 luma, and also builds the
-/// downscale chain when `pyramid_levels > 1`. A thin wrapper around
-/// [`run_pyramid_build`], which already handles both cases on its own.
+/// Builds the pyramid for the slot `push_frame` just uploaded.
+///
+/// Level 0 luma is always extracted, and the smaller levels follow when
+/// `pyramid_levels` is above 1.
+///
+/// This is a thin wrapper around [`run_pyramid_build`], which already
+/// handles both cases itself.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_pyramid_for_slot<R: Runtime>(
     client: &ComputeClient<R>,
@@ -468,7 +604,7 @@ mod tests {
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         };
-        // overlap == blksize would give step=0.
+        // An overlap equal to blksize would leave a step of 0.
         assert!(m.validate().is_err());
     }
 

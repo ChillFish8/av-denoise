@@ -1,3 +1,27 @@
+//! The non-local means denoiser that sits behind [`crate::Denoiser`].
+//!
+//! Non-local means cleans a pixel by finding patches elsewhere that look
+//! like the patch around it, then averaging them. Similar patches get a
+//! large weight and dissimilar ones get almost none, so flat areas
+//! smooth out while edges survive.
+//!
+//! The search can reach across neighbouring frames as well as within one
+//! frame, which is what the temporal radius controls.
+//!
+//! # Layout
+//!
+//! `params` holds the tuning values and the calibrated defaults, and
+//! [`NlmParams`] is the single struct everything else is built from.
+//!
+//! [`NlmDenoiser`] owns the GPU buffers and the frame ring, and
+//! `dispatch` turns one set of parameters into the sequence of kernel
+//! launches that produces a frame.
+//!
+//! [`kernels`] holds the GPU code itself. `noise` measures how noisy a
+//! frame is, [`motion`] tracks movement between frames, and
+//! [`prefilter`] builds the cleaner reference image that patches are
+//! compared against.
+
 pub mod kernels;
 pub mod motion;
 pub mod prefilter;
@@ -9,16 +33,17 @@ mod noise;
 mod params;
 mod pending;
 
-// Every test in this tree runs against a real GPU runtime (see
-// `tests::helpers::R`), so it only builds when a wgpu-backed feature is
-// enabled. A cpu-only build (`--no-default-features --features cpu`)
-// skips it entirely. `src/denoiser.rs`'s `cpu_smoke_tests` module covers
-// the cpu backend instead.
+// Every test in this tree runs against a real GPU runtime, see
+// `tests::helpers::R`, so it only builds when a wgpu-backed feature is
+// enabled. A cpu-only build skips it entirely, and the
+// `cpu_smoke_tests` module in `src/denoiser.rs` covers that backend
+// instead.
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 mod tests;
 
-pub use denoiser::NlmDenoiser;
-pub use motion::{MotionCompensationMode, MotionEstimation};
+pub(crate) use denoiser::RingView;
+pub use denoiser::{GpuOutput, NlmDenoiser};
+pub use motion::{MotionCompensationMode, MotionEstimation, MotionSearch};
 pub use params::{
     ChannelMode,
     HqParams,
@@ -39,21 +64,25 @@ pub const BLOCK_X: u32 = 32;
 pub const BLOCK_Y: u32 = 8;
 
 /// Cube shape for the per-pixel `nlm_accumulate` kernel, which has no
-/// SMEM tile. On RDNA-class GPUs it benchmarks 10 to 25% faster at
-/// (32, 16) than at the tile-heavy default, because it's
-/// memory-latency-bound and the extra threads hide load latency.
+/// shared-memory tile.
+///
+/// On RDNA-class GPUs this shape benchmarks 10 to 25% faster than the
+/// tile-heavy default. The kernel waits on memory rather than compute,
+/// so the extra threads hide the load latency.
 pub const BLOCK_X_THIN: u32 = 32;
 pub const BLOCK_Y_THIN: u32 = 16;
 
-/// Maximum 1D grid size for GPU dispatch (WebGPU/Vulkan limit).
+/// Largest 1D grid a dispatch may ask for, set by the WebGPU and Vulkan
+/// limits.
 pub(crate) const MAX_GRID_1D: u32 = 65535;
 
 /// Block size for 1D utility kernels (copy, zero).
 pub(crate) const BLOCK_1D: u32 = 256;
 
-/// Bit depth of a source's samples. Normalisation divides by
-/// [`Depth::max_value`], so a value in normalised units means the same
-/// thing at every depth.
+/// Bit depth of a source's samples.
+///
+/// Normalisation divides by [`Depth::max_value`], so a value in
+/// normalised units means the same thing at every depth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Depth {
     Eight,
@@ -86,8 +115,9 @@ impl Depth {
         }
     }
 
-    /// Bytes each sample occupies on the wire. Depths above 8 use a
-    /// little-endian 16-bit word.
+    /// Bytes each sample takes up on the wire.
+    ///
+    /// Depths above 8 use a little-endian 16-bit word.
     pub fn bytes_per_sample(self) -> usize {
         match self {
             Depth::Eight => 1,
@@ -95,12 +125,13 @@ impl Depth {
         }
     }
 
-    /// Largest representable sample value, the normalisation divisor.
+    /// The largest sample value this depth can hold, which is also the
+    /// normalisation divisor.
     pub fn max_value(self) -> f32 {
         ((1u32 << self.bits()) - 1) as f32
     }
 
-    /// Sample value for neutral chroma at this depth.
+    /// The sample value that means neutral chroma at this depth.
     pub fn neutral_chroma(self) -> u16 {
         1 << (self.bits() - 1)
     }
@@ -112,7 +143,9 @@ pub fn normalize(input: &[u16], depth: Depth) -> Vec<f32> {
     input.iter().map(|&v| v as f32 / max).collect()
 }
 
-/// Reverse of [`normalize`]. Values outside `[0, 1]` are clamped. `NaN` maps to 0.
+/// Reverse of [`normalize`].
+///
+/// Values outside `[0, 1]` are clamped, and `NaN` becomes 0.
 pub fn denormalize(input: &[f32], depth: Depth) -> Vec<u16> {
     let max = depth.max_value();
     input
@@ -162,11 +195,14 @@ mod depth_tests {
     /// at every depth, which is what lets every calibrated constant in
     /// the library stay depth-independent.
     ///
-    /// The match is to within one 8-bit code level rather than exact.
-    /// ITU defines the limited-range endpoints as exact multiples
-    /// (235 -> 940 -> 3760) while full scale is not (255 -> 1023 ->
-    /// 4095), so 235/255 and 940/1023 differ by 0.0027, about 0.69 of an
-    /// 8-bit step. Sub-step agreement is the real property here.
+    /// The match is within one 8-bit code level rather than exact. ITU
+    /// defines the limited-range endpoints as exact multiples, so 235
+    /// becomes 940 and then 3760, but full scale is not a multiple,
+    /// because 255 becomes 1023 and then 4095.
+    ///
+    /// That leaves 235/255 and 940/1023 differing by 0.0027, roughly
+    /// 0.69 of an 8-bit step. Agreement below one step is the real
+    /// property here.
     #[test]
     fn normalized_scale_is_identical_across_depths() {
         /// One 8-bit code level, the precision the endpoints agree to.

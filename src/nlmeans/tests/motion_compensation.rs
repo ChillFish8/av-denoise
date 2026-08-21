@@ -87,7 +87,6 @@ fn run_fine_block_match_single_block(
             search_radius,
             0u32,
             1,
-            1,
         );
     }
 
@@ -167,9 +166,9 @@ fn shift_clamped(val: i32, delta: i32, limit: i32) -> i32 {
 /// reflects its true cost. Corrupted per-candidate sums make the
 /// winner quasi-arbitrary.
 ///
-/// Passes `write_confidence: false` with a small placeholder
-/// confidence buffer, since this test only checks the winning MV. That
-/// also exercises the comptime-gated-off confidence path.
+/// Confidence is turned off and given a small placeholder buffer, since
+/// this test only checks the winning motion vector. That also covers the
+/// path where the confidence write is dropped at compile time.
 #[test]
 fn block_match_fine_argmin_finds_clean_shift() {
     let w = 64u32;
@@ -196,8 +195,8 @@ fn block_match_fine_argmin_finds_clean_shift() {
     let neighbour_buf = client.create_from_slice(f32::as_bytes(&neighbour));
     let mv_len = (blocks_x * blocks_y * 2) as usize;
     let mv_field = client.empty(mv_len * size_of::<i32>());
-    // `write_confidence: false` below, so this placeholder never gets
-    // indexed into regardless of its size.
+    // Confidence is turned off below, so this placeholder is never
+    // indexed whatever its size.
     let confidence = client.empty(size_of::<f32>());
 
     let grid = CubeCount::new_2d(blocks_x, blocks_y);
@@ -222,7 +221,6 @@ fn block_match_fine_argmin_finds_clean_shift() {
             search_radius,
             0u32,
             blocks_x,
-            blocks_y,
         );
     }
 
@@ -394,8 +392,10 @@ fn motion_compensation_uniform_passthrough() {
     }
 }
 
-/// MC + bilateral prefilter compound test: the reference clip ring
-/// must also be warped, and the denoise must remain finite/in-range.
+/// Motion compensation and the bilateral prefilter together.
+///
+/// The reference ring has to be shifted along with the input, and the
+/// output has to stay finite and in range.
 #[test]
 fn motion_compensation_with_bilateral_finite() {
     let client = make_client();
@@ -437,16 +437,16 @@ fn motion_compensation_with_bilateral_finite() {
     }
 }
 
-/// Translating-square regression test. Builds a 3-frame sequence
-/// where a bright square moves diagonally by 2 pixels per frame. The
-/// MC-enabled temporal denoise must:
-///   1. Run end-to-end without crashing.
-///   2. Produce finite, in-range output.
-///   3. Keep the square anchored to the centre frame's position
-///      (no spatial shift introduced by misaligned temporal blending).
+/// A three-frame sequence where a bright square moves diagonally by two
+/// pixels each frame.
 ///
-/// Catches regressions where MC mis-warps neighbours or where the
-/// centre-frame copy into the compensated buffer goes wrong.
+/// With motion compensation on, the denoise has to run end to end
+/// without crashing, produce finite output that stays in range, and
+/// leave the square exactly where the centre frame put it.
+///
+/// That last point is what catches misaligned temporal blending, whether
+/// from a neighbour shifted wrongly or from a bad centre-frame copy into
+/// the compensated buffer.
 #[test]
 fn motion_compensation_translating_square_preserves_centre() {
     let client = make_client();
@@ -519,17 +519,20 @@ fn motion_compensation_translating_square_preserves_centre() {
     );
 }
 
-/// MV-field binding-offset alignment guard. A 1080x1080 frame at the
-/// library defaults (`blksize=16`, `overlap=8`, so `step=8`) gives
-/// 135x135 = 18225 blocks, an odd count whose unpadded per-neighbour MV
-/// stride isn't a 32-byte multiple. `wgpu` rejects a storage-buffer
-/// binding offset that isn't a multiple of its
-/// `min_storage_buffer_offset_alignment`, so neighbour 1's dispatch
-/// fails outright at this exact size unless the stride is padded (see
-/// `mv_field_byte_offset`). 1920x1080, the size every other test in
-/// this crate uses, happens to land on an even block count at this
-/// geometry and never exercises the bug, which is why this dedicated
-/// size is needed.
+/// Guards the motion field's binding offsets against misalignment.
+///
+/// A 1080x1080 frame at the library defaults gives 135x135 blocks, an
+/// odd count of 18,225, whose unpadded per-neighbour stride is not a
+/// 32-byte multiple.
+///
+/// wgpu rejects a binding offset that is not a multiple of its
+/// `min_storage_buffer_offset_alignment`, so the second neighbour's
+/// dispatch fails outright at this exact size unless the stride is
+/// padded. See `mv_field_byte_offset`.
+///
+/// The 1920x1080 size every other test uses happens to land on an even
+/// block count here and never reaches the bug, which is why this needs
+/// its own size.
 #[test]
 fn motion_compensation_1080_square_odd_block_count_dispatch_succeeds() {
     let client = make_client();
@@ -571,19 +574,22 @@ fn motion_compensation_1080_square_odd_block_count_dispatch_succeeds() {
     }
 }
 
-/// Pair-ring binding-offset alignment guard. Same 1080x1080 odd-block-
-/// count geometry as `motion_compensation_1080_square_odd_block_count_dispatch_succeeds`
-/// above, but with `Chained` estimation pinned explicitly, so the pair
-/// ring actually gets allocated and exercised. `mvtools_default()`
-/// pins `Direct`, whose dispatch never touches `pair_ring_buf` at all,
-/// so the test above never binds into it through `pair_byte_offset`,
-/// only into the MV field. Every other `Chained` test in this file
-/// uses `CHAIN_TEST_SIZE = 64` with `blksize = 8` (256 blocks, an even
-/// count), so none of them reach an odd block count either. Pushing
-/// enough real frames past the priming window exercises both
-/// `zero_pair_slot` (the duplicated priming slots) and
-/// `run_pair_analyse_for_slot`/`run_chain_compose` (real hops), all of
-/// which bind into the pair ring via `pair_byte_offset`.
+/// Guards the pair ring's binding offsets against misalignment.
+///
+/// This uses the same odd-block-count geometry as
+/// `motion_compensation_1080_square_odd_block_count_dispatch_succeeds`
+/// above, but pins `Chained` estimation so the pair ring is actually
+/// allocated and used.
+///
+/// The defaults pin `Direct`, whose dispatch never touches the pair ring
+/// at all, so the test above only ever binds into the motion field.
+///
+/// Every other `Chained` test in this file uses a small frame with 256
+/// blocks, an even count, so none of them reach an odd one either.
+///
+/// Pushing enough real frames past the priming window covers both the
+/// zeroed duplicate slots and the real hops, all of which bind into the
+/// pair ring.
 #[test]
 fn motion_compensation_1080_square_odd_block_count_chained_dispatch_succeeds() {
     let client = make_client();
@@ -745,19 +751,22 @@ fn direct_mv_field_for_forward_neighbour(
 /// roughly half the fine grid from a coarse block spatially tied to a
 /// *different* region.
 ///
-/// Content is a left half and a right half, each independently rich
-/// (`noisy_copy`) and each translated by a different, clean (a
-/// multiple of `level_scale` so the box-downsampled coarse level sees
-/// an exact half-magnitude shift) motion vector between the centre and
-/// forward neighbour frame. The chosen fine blocks sit deep inside
-/// each half (`search_radius + blksize` or more away from both the
-/// half boundary and the frame edges), so a correctly-seeded block
-/// finds its own half's true motion, while a block mis-seeded from the
-/// other half lands outside the fine pass's small search window and
-/// can't self-correct. Left-half blocks always get mis-seeded from
-/// other left-half coarse blocks at this geometry (their shared half
-/// still carries the same true motion), so a seeding defect only
-/// becomes visible on the right half here.
+/// The content is a left half and a right half, each independently
+/// detailed, and each moving by a different amount between the centre
+/// frame and the one after it.
+///
+/// Both shifts are multiples of the pyramid scale, so the coarse level
+/// sees an exact half-size version of each.
+///
+/// The blocks under test sit deep inside their own half, well clear of
+/// both the boundary between the halves and the frame edges. A
+/// correctly-seeded block therefore finds its own half's motion, while
+/// one seeded from the wrong half lands outside the fine pass's small
+/// search window and cannot recover.
+///
+/// At this geometry a left-half block always gets seeded from another
+/// left-half block, which carries the same motion, so a seeding defect
+/// only shows up on the right half.
 #[test]
 fn coarse_seeding_handles_equal_grids() {
     let w = 128u32;
@@ -946,39 +955,45 @@ fn pyramid_level0_extracted_at_one_level() {
     );
 }
 
-/// Ragged-edge seeding guard. The coarse and fine block counts come
-/// from two independent ceil-divisions, each over a different image
-/// width and a different step, so they can round differently even
-/// where the coarse/fine ratio is otherwise consistent. At
-/// `blksize=16, overlap=8, pyramid_levels=2` (the library defaults),
-/// any `width`/`height` congruent to `1` modulo `mc.step` (= 8) makes
-/// `coarse_blocks_x/y` come out to `fine_blocks_x/y` minus one
-/// (`width = 601` is one such case). The coarse grid's total nominal
-/// reach then falls exactly one fine block short of the frame's true
-/// edge, so the last coarse cube on each axis must extend its reach
-/// to absorb the remainder. A trailing fine column/row that no coarse
-/// cube writes silently keeps whatever `mv_field_buf` already holds,
-/// all-zero from a fresh buffer here, a stale previous frame's MV in
-/// a reused buffer in production. Test premises verified below rather
-/// than assumed.
+/// Guards the seeding of the ragged blocks at a frame's trailing edge.
 ///
-/// Motion here is a single uniform diagonal shift, not a
-/// spatially-varying split like `coarse_seeding_handles_equal_grids`
-/// above. This defect's failure mode is "never seeded at all" (falls
-/// back to a zero seed), not "seeded from the wrong region" (already
-/// covered by that test), so what distinguishes seeded from unseeded
-/// here is a shift large enough to exceed the *unseeded* fine-only
-/// search window while still small enough to reach through a correct
-/// coarse seed, uniform or not. The shift is negative in both axes
-/// deliberately. A block sitting on the frame's trailing edge only has
-/// one genuinely valid pixel column/row to read (the rest of its own
-/// centre tile clamps to that same edge pixel), and the SAD sweep at
-/// that single valid position can only discriminate offsets that pull
-/// content in from the interior, not offsets that would reach further
-/// past the edge (those clamp to the identical neighbour pixel for
-/// every candidate, contributing a constant, non-discriminating SAD
-/// term). A positive shift at a trailing edge would be unrecoverable
-/// by any search, seeded or not, and wouldn't isolate this bug.
+/// The coarse and fine block counts each round up over a different width
+/// and a different step, so they can round differently even where the
+/// ratio between the two grids is otherwise consistent.
+///
+/// At the library defaults, certain frame sizes leave the coarse grid
+/// exactly one fine block short of the frame's true edge. The last
+/// coarse block on each axis therefore has to extend its reach to
+/// absorb the remainder.
+///
+/// A trailing column or row no coarse block writes quietly keeps
+/// whatever the motion field already holds, which is zero from a fresh
+/// buffer here but a stale frame's motion in production.
+///
+/// The premises are verified below rather than assumed.
+///
+/// # Why the motion is uniform and negative
+///
+/// The motion here is one uniform diagonal shift, not the two-part
+/// split `coarse_seeding_handles_equal_grids` uses above.
+///
+/// This defect leaves a block never seeded at all rather than seeded
+/// from the wrong place, and that other test already covers the wrong
+/// place. So what separates seeded from unseeded here is a shift large
+/// enough to escape the fine-only search window while still small
+/// enough to be reachable through a correct seed.
+///
+/// The shift is negative on both axes on purpose. A block on the
+/// trailing edge has only one genuinely valid column and row to read,
+/// because the rest of its tile clamps to that same edge pixel.
+///
+/// The search at that position can only tell apart offsets that pull
+/// content in from the interior. Offsets reaching further past the edge
+/// clamp to the same neighbour pixel for every candidate and contribute
+/// nothing that distinguishes them.
+///
+/// A positive shift at a trailing edge would be unrecoverable by any
+/// search, seeded or not, and would not isolate this bug.
 #[test]
 fn coarse_seeding_covers_ragged_last_block() {
     let shift = -6i32;

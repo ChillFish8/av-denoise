@@ -29,14 +29,22 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 
+#  A severely broken denoiser can score worse than a flat predictor,
+# which ffmpeg reports as a negative XPSNR/SSIM value rather than
+# clamping at zero. The previous `[\d.]+` groups had no `-` in the
+# character class, so any negative value made the whole line fail to
+# match, `parse_xpsnr`/`parse_ssim` returned `None`, and a run that
+# actually completed and scored (badly) was misreported as FAILED
+# with no numbers at all. `-?` on each group fixes that without
+# changing what a normal positive score parses to.
 XPSNR_RE = re.compile(
-    r"XPSNR\s+y:\s*(inf|[\d.]+)\s+u:\s*(inf|[\d.]+)\s+v:\s*(inf|[\d.]+)"
-    r"\s+\(minimum:\s*(inf|[\d.]+)\)"
+    r"XPSNR\s+y:\s*(inf|-?[\d.]+)\s+u:\s*(inf|-?[\d.]+)\s+v:\s*(inf|-?[\d.]+)"
+    r"\s+\(minimum:\s*(inf|-?[\d.]+)\)"
 )
 
 SSIM_RE = re.compile(
-    r"SSIM\s+Y:([\d.]+)\s+\([^)]*\)\s+U:([\d.]+)\s+\([^)]*\)"
-    r"\s+V:([\d.]+)\s+\([^)]*\)\s+All:([\d.]+)\s+\([^)]*\)"
+    r"SSIM\s+Y:(-?[\d.]+)\s+\([^)]*\)\s+U:(-?[\d.]+)\s+\([^)]*\)"
+    r"\s+V:(-?[\d.]+)\s+\([^)]*\)\s+All:(-?[\d.]+)\s+\([^)]*\)"
 )
 
 # ffmpeg's framesync (the machinery behind dual-input filters like xpsnr
@@ -71,6 +79,11 @@ class Run:
     patch: int = 9
     search: int = 5
     sigma: float | str = 15.0
+    # Temporal radius for a `bm3dhip` row (0 = spatial-only V-BM3D, N =
+    # V-BM3D over 2*N+1 frames). Carried on the row so it lines up with the
+    # av-denoise arm's own `--temporal-radius`, since the two need to match
+    # for the comparison to mean anything.
+    radius: int = 0
 
 
 @dataclass
@@ -128,7 +141,14 @@ def load_config(config_path: Path) -> Config:
     runs: list[Run] = []
     for raw in data.get("runs", []):
         kind = raw.get("kind")
-        if kind not in ("noisy", "av-denoise", "ffmpeg-nlmeans", "ffmpeg-bm3d"):
+        if kind not in (
+            "noisy",
+            "av-denoise",
+            "av-denoise-nl4d",
+            "ffmpeg-nlmeans",
+            "ffmpeg-bm3d",
+            "bm3dhip",
+        ):
             sys.exit(f"unknown kind in run {raw.get('name')!r}: {kind!r}")
         runs.append(
             Run(
@@ -140,6 +160,7 @@ def load_config(config_path: Path) -> Config:
                 patch=raw.get("patch", 9),
                 search=raw.get("search", 5),
                 sigma=raw.get("sigma", 15.0),
+                radius=raw.get("radius", 0),
             )
         )
     return Config(
@@ -263,14 +284,16 @@ def score_noisy(noisy: Path, ref: Path) -> tuple[bool, str]:
     return proc.returncode == 0, proc.stderr
 
 
-def score_av_denoise(run: Run, noisy: Path, ref: Path, device: str) -> tuple[bool, str]:
+def score_av_denoise(
+    run: Run, noisy: Path, ref: Path, device: str, subcommand: str = "nlmeans"
+) -> tuple[bool, str]:
     device_args = ["--device", device] if device else []
     p1_cmd = [
         "cargo", "run", "--release",
         "--bin", "av-denoise",
         "--features", "binary",
         "--",
-        "nlmeans",
+        subcommand,
         *run.args,
         *device_args,
         "--workers", str(run.workers),
@@ -337,6 +360,14 @@ def score_ffmpeg_nlmeans(run: Run, noisy: Path, ref: Path) -> tuple[bool, str]:
 
 
 def score_ffmpeg_bm3d(run: Run, noisy: Path, ref: Path) -> tuple[bool, str]:
+    # ffmpeg's `bm3d` filter is single-image, it has no temporal window at
+    # all, so it denoises each frame from that frame alone. `nl4d`
+    # groups patches across several frames, which is a different amount of
+    # work to score against. This function is kept working and correct for
+    # what it measures, but no run in the .toml configs uses it any more.
+    # `bm3dhip` (score_bm3dhip below) is the temporal reference those rows
+    # compare against instead.
+    #
     # ffmpeg's bm3d defaults `group` (the max number of blocks collected
     # into one 3D group) to 1, which skips block matching entirely. That
     # is not collaborative filtering, the step that makes BM3D BM3D, so
@@ -362,6 +393,68 @@ def score_ffmpeg_bm3d(run: Run, noisy: Path, ref: Path) -> tuple[bool, str]:
     print(f"$ {shlex.join(cmd)}", flush=True)
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     return proc.returncode == 0, proc.stderr
+
+
+def bm3dhip_device_index(device: str) -> str | None:
+    """Extracts a bare device index from the harness's `--device` value.
+
+    The harness's `--device` follows av-denoise's own syntax
+    (`discrete:1`, `integrated:0`, `cpu`, `default`, ...), while
+    `bm3dhip_arm.py --device` wants a plain HIP device index. Only the
+    trailing `:N` form carries an index, so anything else (`cpu`,
+    `default`, or no `--device` at all) returns None and the caller leaves
+    `bm3dhip_arm.py`'s own default alone rather than guessing a mapping.
+    """
+    if ":" not in device:
+        return None
+    index = device.rsplit(":", 1)[-1]
+    return index if index.isdigit() else None
+
+
+def score_bm3dhip(run: Run, noisy: Path, ref: Path, device: str) -> tuple[bool, str]:
+    """Scores GPU V-BM3D via `scripts/bm3dhip_arm.py`, run at `run.radius`.
+
+    Unlike `score_ffmpeg_bm3d`, this reference has a real temporal window
+    (`2 * radius + 1` frames), the same shape of work `nl4d` does, so
+    it is the reference row those arms are actually comparable to.
+    `bm3dhip_arm.py` writes y4m to stdout, piped into ffmpeg exactly like
+    `score_av_denoise` pipes `av-denoise`'s stdout. `settb=1,setpts=N` on
+    both branches is required for the same reason it is there, ffmpeg's
+    framesync pairs frames by nearest real time and a stray timebase drift
+    between the pipe and the reference file's stored PTS makes it silently
+    pick the wrong pairs, scoring around 28 dB instead of correctly.
+    """
+    device_index = bm3dhip_device_index(device)
+    device_args = ["--device", device_index] if device_index else []
+    p1_cmd = [
+        "uv", "run", "scripts/bm3dhip_arm.py",
+        "--input", str(noisy),
+        "--sigma", str(run.sigma),
+        "--radius", str(run.radius),
+        *device_args,
+    ]
+    graph = (
+        "[0:v]settb=1,setpts=N,split=2[d1][d2];"
+        "[1:v]settb=1,setpts=N,split=2[r1][r2];"
+        "[d1][r1]xpsnr;[d2][r2]ssim"
+    )
+    p2_cmd = [
+        "ffmpeg", "-hide_banner", "-y",
+        "-f", "yuv4mpegpipe", "-i", "-",
+        "-i", str(ref),
+        "-lavfi", graph,
+        "-f", "null", "-",
+    ]
+    print(f"$ {shlex.join(p1_cmd)} | {shlex.join(p2_cmd)}", flush=True)
+
+    p1 = subprocess.Popen(p1_cmd, stdout=subprocess.PIPE)
+    assert p1.stdout is not None
+    p2 = subprocess.Popen(p2_cmd, stdin=p1.stdout, stderr=subprocess.PIPE, text=True)
+    p1.stdout.close()  # let p1 receive SIGPIPE if p2 exits
+
+    _, stderr = p2.communicate()
+    rc1 = p1.wait()
+    return rc1 == 0 and p2.returncode == 0, stderr
 
 
 def resolve_run(
@@ -412,8 +505,12 @@ def execute(
         ok, stderr = score_noisy(noisy, ref)
     elif run.kind == "av-denoise":
         ok, stderr = score_av_denoise(run, noisy, ref, device)
+    elif run.kind == "av-denoise-nl4d":
+        ok, stderr = score_av_denoise(run, noisy, ref, device, subcommand="nl4d")
     elif run.kind == "ffmpeg-nlmeans":
         ok, stderr = score_ffmpeg_nlmeans(run, noisy, ref)
+    elif run.kind == "bm3dhip":
+        ok, stderr = score_bm3dhip(run, noisy, ref, device)
     else:
         ok, stderr = score_ffmpeg_bm3d(run, noisy, ref)
 

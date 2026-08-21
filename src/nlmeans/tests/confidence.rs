@@ -70,7 +70,6 @@ fn run_fine_confidence(
             0u32,
             0u32,
             1,
-            1,
         );
     }
 
@@ -230,21 +229,29 @@ fn confidence_mismatched_block_at_blksize_16_is_near_zero() {
     );
 }
 
-/// Discriminating regression test for the raw-sigma-vs-prefiltered
-/// noise floor bug (`dispatch.rs`'s `mc_sad_noise_floor_sigma`, unit
-/// tested in isolation there since it's a plain host-side function;
-/// this exercises what it feeds into instead). Builds two block pairs
-/// at a small residual noise level representative of a cleaned
-/// reference (well below a typical raw σ_y): one genuinely matched
-/// (same content, independent residual noise), one genuinely occluded
-/// (a modest but real base-level shift). Runs both under two floors:
-/// the *raw* input sigma (the pre-fix behaviour, oversized for this
-/// content) and a floor sized to the small residual noise instead
-/// (what the fix produces). The raw floor swamps `thsad` and clamps
-/// even the occluded pair near confidence 1, indistinguishable from
-/// the matched pair, reproducing the bug. The residual-scale floor
-/// keeps the matched pair confident while letting the occluded pair
-/// drop well below 1.
+/// Covers the bug where the confidence noise floor was sized from the
+/// raw input sigma rather than the prefiltered one.
+///
+/// `mc_sad_noise_floor_sigma` in `dispatch.rs` is unit tested there,
+/// being a plain host-side function. This test exercises what it feeds
+/// into instead.
+///
+/// It builds two block pairs at the small residual noise level a cleaned
+/// reference carries, well below a typical raw sigma. One pair genuinely
+/// matches, holding the same content with independent residual noise.
+/// The other is genuinely occluded, with a modest but real shift in
+/// base level.
+///
+/// Both run under two floors. The raw input sigma is the old behaviour,
+/// far too large for this content, and a floor sized to the residual
+/// noise is what the fix produces.
+///
+/// The raw floor swamps the threshold and pins even the occluded pair
+/// near full confidence, making it indistinguishable from the matched
+/// one, which reproduces the bug.
+///
+/// The residual-scale floor keeps the matched pair confident while
+/// letting the occluded pair drop well below.
 #[test]
 fn confidence_discriminates_occluded_from_matched_at_prefilter_scale_noise() {
     let blksize = 16;
@@ -538,13 +545,16 @@ fn confidence_buf_filled_with_motion_compensation() {
     }
 }
 
-/// Motion compensation active but HQ off (the fast path's typical MC
-/// configuration). Confidence weighting requires HQ with
-/// `temporal_confidence: true`, so `hq: None` must leave
-/// `confidence_buf` unallocated even though `mc_ctx` is active. The
-/// fine block-match kernel still runs (it always solves for the MV),
-/// but with `write_confidence: false` and a placeholder buffer, so no
-/// confidence-shaped allocation exists for this configuration.
+/// Motion compensation active with HQ off, which is how the fast path
+/// usually runs it.
+///
+/// Confidence weighting needs HQ with the flag on, so with HQ off no
+/// confidence buffer should be allocated even though motion
+/// compensation is active.
+///
+/// The fine block-match kernel still runs, because it always has to
+/// solve for the motion vector, but it writes no confidence and takes a
+/// placeholder buffer.
 #[test]
 fn confidence_buf_absent_with_motion_compensation_and_no_hq() {
     let client = make_client();
@@ -586,10 +596,13 @@ fn confidence_buf_absent_with_motion_compensation_and_no_hq() {
     );
 }
 
-/// Motion compensation active, HQ on, but `temporal_confidence: false`.
-/// Confidence weighting stays gated on the flag regardless of whether
-/// MC already supplies block geometry, so `confidence_buf` must be
-/// absent here too, matching the no-MC gating test below.
+/// Motion compensation active and HQ on, but temporal confidence turned
+/// off.
+///
+/// Confidence weighting follows the flag whether or not motion
+/// compensation already supplies block geometry, so nothing should be
+/// allocated here either. That matches the test further down for the
+/// same case without motion compensation.
 #[test]
 fn confidence_buf_absent_with_motion_compensation_when_temporal_confidence_disabled() {
     let client = make_client();
@@ -650,10 +663,11 @@ fn confidence_buf_absent_without_mc_or_hq() {
     assert!(d.confidence_mv_scratch.is_none());
 }
 
-/// HQ with `temporal_confidence: false` and no motion compensation
-/// must also allocate nothing. The no-MC confidence pass is the only
-/// source of `confidence_buf` in the absence of MC, and it's gated on
-/// the flag.
+/// HQ with temporal confidence off and no motion compensation should
+/// also allocate nothing.
+///
+/// Without motion compensation the confidence pass is the only thing
+/// that would allocate the buffer, and it follows the same flag.
 #[test]
 fn confidence_buf_absent_when_temporal_confidence_disabled() {
     let client = make_client();

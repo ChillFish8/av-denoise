@@ -106,9 +106,10 @@ fn hq_noise_floor_changes_output() {
     );
 }
 
-/// Mirrors `spatial::uniform_image_passthrough`: every patch distance
-/// is zero on a flat frame, so both HQ features are no-ops and the
-/// output must stay unchanged.
+/// Mirrors `spatial::uniform_image_passthrough`.
+///
+/// Every patch distance is zero on a flat frame, so both HQ features do
+/// nothing and the output has to come back unchanged.
 #[test]
 fn hq_uniform_input_passthrough() {
     let client = make_client();
@@ -486,18 +487,25 @@ fn temporal_conf_params(temporal_confidence: bool) -> NlmParams {
     }
 }
 
-/// A mismatched neighbour's contribution must be suppressed by
-/// confidence weighting while a matching neighbour's is not. The
-/// centre frame and the "next" neighbour are flat at 0.5. The "prev"
-/// neighbour is flat at 0.55 (uniformly mismatched by 0.05, well past
-/// the default `thsad` at the library's block size). Without
-/// confidence, plain NLM weighting still gives `prev` a non-negligible
-/// weight (patch distances are small at this `strength`), pulling the
-/// output away from 0.5. With confidence, `prev`'s block-level
-/// mismatch collapses its weight to ~0, so the output stays at 0.5 —
-/// the style of comparison `temporal_asymmetric_frames_correct_weights`
-/// uses for the fast path, applied here against confidence-off instead
-/// of a hand-computed target.
+/// Confidence weighting has to suppress a mismatched neighbour while
+/// leaving a matching one alone.
+///
+/// The centre frame and the following neighbour are flat at 0.5. The
+/// preceding neighbour is flat at 0.55, mismatched everywhere by 0.05,
+/// which is well past the default threshold at the library's block
+/// size.
+///
+/// Without confidence, plain NLM weighting still gives that neighbour a
+/// noticeable weight, because patch distances stay small at this
+/// strength, and the output drifts away from 0.5.
+///
+/// With confidence, its block-level mismatch collapses that weight to
+/// almost nothing and the output stays at 0.5.
+///
+/// This is the same style of comparison
+/// `temporal_asymmetric_frames_correct_weights` uses for the fast path,
+/// measured here against confidence being off rather than against a
+/// hand-computed target.
 #[test]
 fn hq_temporal_confidence_suppresses_mismatched_neighbour() {
     let client = make_client();

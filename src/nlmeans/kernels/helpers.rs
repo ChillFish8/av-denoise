@@ -11,11 +11,13 @@ pub(super) fn clamp_coord(value: i32, #[comptime] limit: u32) -> u32 {
     result
 }
 
-/// Vectorised pixel read at `(x, y)` in `frame`, clamped to the image
-/// edges on both axes. The frame index is trusted; callers always pass
-/// a physical slot that references loaded data.
+/// Reads the pixel at `(x, y)` in `frame`, clamped to the image edges on
+/// both axes.
+///
+/// The frame index is taken on trust, because callers always pass a
+/// physical slot that holds loaded data.
 #[cube]
-pub(super) fn read_clamped_line<N: Size>(
+pub(crate) fn read_clamped_line<N: Size>(
     buf: &Array<Vector<f32, N>>,
     x: i32,
     y: i32,
@@ -29,10 +31,12 @@ pub(super) fn read_clamped_line<N: Size>(
     buf[idx as usize]
 }
 
-/// Unchecked variant of `read_clamped_line`. The caller guarantees
-/// `x ∈ [0, width)` and `y ∈ [0, height)`.
+/// The unchecked version of `read_clamped_line`.
+///
+/// The caller promises that `x` is inside `[0, width)` and `y` is inside
+/// `[0, height)`.
 #[cube]
-pub(super) fn read_line<N: Size>(
+pub(crate) fn read_line<N: Size>(
     buf: &Array<Vector<f32, N>>,
     x: u32,
     y: u32,
@@ -44,10 +48,12 @@ pub(super) fn read_line<N: Size>(
     buf[idx as usize]
 }
 
-/// Sum of squared lane differences over a vector. The loop is fully
-/// unrolled at compile time because `channels` is comptime.
+/// Sums the squared differences across a vector's lanes.
+///
+/// The loop unrolls fully at compile time, because `channels` is known
+/// then.
 #[cube]
-pub(super) fn line_sum_sq<N: Size>(diff: Vector<f32, N>, #[comptime] channels: u32) -> f32 {
+pub(crate) fn line_sum_sq<N: Size>(diff: Vector<f32, N>, #[comptime] channels: u32) -> f32 {
     let mut sum = 0.0f32;
     #[unroll]
     for c in 0..channels {
@@ -56,10 +62,13 @@ pub(super) fn line_sum_sq<N: Size>(diff: Vector<f32, N>, #[comptime] channels: u
     sum
 }
 
-/// Per-channel distance scale (luma×3, chroma×1.5, full YUV×1) so the
-/// three channel modes share one `h2_inv_norm`.
+/// The per-channel distance scale, which is 3 for luma, 1.5 for chroma,
+/// and 1 for full YUV.
+///
+/// Scaling this way lets all three channel modes share one
+/// `h2_inv_norm`.
 #[cube]
-pub(super) fn channel_scale(#[comptime] channels: u32) -> f32 {
+pub(crate) fn channel_scale(#[comptime] channels: u32) -> f32 {
     let mut scale = 1.0f32;
     if channels == 1 {
         scale = 3.0f32;
@@ -69,21 +78,28 @@ pub(super) fn channel_scale(#[comptime] channels: u32) -> f32 {
     scale
 }
 
-/// Welsch weight for a box-summed patch distance. `noise_offset` is
-/// the expected distance between two noisy copies of identical
-/// content. Subtracting it stops matches being penalised for the
-/// noise they carry. An offset of `0.0` reproduces the plain weight
-/// exactly because the box sum is never negative.
+/// The Welsch weight for a box-summed patch distance.
+///
+/// `noise_offset` is the distance two noisy copies of the same content
+/// are expected to show. Subtracting it stops a good match being
+/// penalised for the noise it carries.
+///
+/// An offset of 0.0 gives exactly the plain weight, because the box sum
+/// is never negative.
 #[cube]
 pub(super) fn welsch_weight(sum: f32, h2_inv_norm: f32, noise_offset: f32) -> f32 {
     f32::exp(-f32::max(sum - noise_offset, 0.0) * h2_inv_norm)
 }
 
-/// Add the `+q` and `−q` contributions at thread `(global_x, global_y)`.
-/// The forward neighbour lives at `(global + q, frame_fwd)` weighted by
-/// `weight_fwd`; the backward neighbour at `(global − q, frame_bwd)`
-/// weighted by `weight_bwd`. A single per-thread interior check covers
-/// both reads, with a clamped fallback for the border.
+/// Adds the forward and backward neighbour contributions at the thread's
+/// pixel.
+///
+/// The forward neighbour sits at `(global + q, frame_fwd)` with
+/// `weight_fwd`, and the backward one at `(global - q, frame_bwd)` with
+/// `weight_bwd`.
+///
+/// One interior check per thread covers both reads, falling back to
+/// clamped reads at the border.
 #[cube]
 pub(super) fn accumulate_pair<N: Size>(
     input: &Array<Vector<f32, N>>,

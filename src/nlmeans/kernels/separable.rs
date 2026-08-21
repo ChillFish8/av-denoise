@@ -11,9 +11,11 @@ use super::helpers::{
     welsch_weight,
 };
 
-/// Per-pixel squared distance for the `+q` / `−q` pair. Writes both
-/// raw distance buffers in a single pass; downstream the separable
-/// box filter and the fused vweight+accumulate consume them.
+/// Computes the per-pixel squared distance for both the forward and the
+/// backward neighbour, filling both distance buffers in one pass.
+///
+/// The separable box filter and the fused weight-and-accumulate kernel
+/// read those buffers afterwards.
 #[cube(launch_unchecked)]
 pub fn nlm_distance_pair<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -74,8 +76,8 @@ pub fn nlm_distance_pair<N: Size>(
     dist_bwd[pixel_idx] = line_sum_sq(bwd_center - bwd_neighbor, channels) * scale;
 }
 
-/// Per-pixel squared distance between `(frame_t, x, y)` and
-/// `(frame_q, x + q_x, y + q_y)`, scaled to the channel convention.
+/// Computes the per-pixel squared distance between each pixel and its
+/// shifted neighbour, scaled for the channel mode in use.
 #[cube(launch_unchecked)]
 pub fn nlm_distance<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -117,9 +119,12 @@ pub fn nlm_distance<N: Size>(
     dist[(y * width + x) as usize] = line_sum_sq(center - neighbor, channels) * scale;
 }
 
-/// Horizontal 1D box filter (width = 2·patch_radius + 1) via shared
-/// memory. Loads a `(block_x + 2·patch_radius) × block_y` tile cooperatively
-/// then writes the per-row patch sum at each `(global_x, global_y)`.
+/// Sums each row of a patch, which is the horizontal half of the
+/// separable box filter.
+///
+/// The block loads a `(block_x + 2 * patch_radius) x block_y` tile into
+/// shared memory, then each thread writes the sum of the
+/// `2 * patch_radius + 1` values across its own row.
 #[cube(launch_unchecked)]
 pub fn nlm_horizontal_sum(
     input: &Array<f32>,
@@ -169,8 +174,8 @@ pub fn nlm_horizontal_sum(
     output[(global_y * width + global_x) as usize] = sum;
 }
 
-/// Vertical 1D box filter (height = 2·patch_radius + 1) over the
-/// hsum buffer, followed by the Welsch weight from `welsch_weight`.
+/// Sums the row sums down each column, completing the patch total, then
+/// turns it into a Welsch weight.
 #[cube(launch_unchecked)]
 pub fn nlm_vertical_weight(
     input: &Array<f32>,
@@ -220,8 +225,10 @@ pub fn nlm_vertical_weight(
     output[(global_y * width + global_x) as usize] = welsch_weight(sum, h2_inv_norm, noise_offset);
 }
 
-/// Paired horizontal 1D box filter. The forward and backward hsum
-/// passes share one cooperative tile load and one `sync_cube`.
+/// The paired version of the horizontal box filter.
+///
+/// The forward and backward passes share one tile load and one
+/// `sync_cube`.
 #[cube(launch_unchecked)]
 pub fn nlm_horizontal_sum_pair(
     input_fwd: &Array<f32>,
@@ -281,17 +288,20 @@ pub fn nlm_horizontal_sum_pair(
     output_bwd[out_idx] = sum_bwd;
 }
 
-/// Fused vertical 1D box filter + Welsch weight + accumulate for the
-/// paired-distance separable path. The backward tile is loaded from
-/// `hsum_bwd` at the cube position shifted by `(−q_x, −q_y)` so the
-/// vsum at each thread directly produces the neighbour backward weight.
+/// Finishes the separable paired path by summing down each column,
+/// turning the result into Welsch weights, and accumulating them, all in
+/// one kernel.
 ///
-/// When `use_confidence` is true, `weight_fwd`/`weight_bwd` are each
-/// multiplied by their block's confidence (`conf_fwd`/`conf_bwd`)
-/// before `accumulate_pair` folds them in, using the same pixel→block
-/// mapping `nlm_mc_warp` uses. When `use_confidence` is false, the
-/// lookup and multiply are skipped entirely at compile time and
-/// `conf_fwd`/`conf_bwd` are never read.
+/// The backward tile is loaded from `hsum_bwd` at the block position
+/// shifted the opposite way, so each thread's column sum lands directly
+/// on the backward neighbour's weight.
+///
+/// When `use_confidence` is true, each weight is multiplied by its
+/// block's confidence before `accumulate_pair` folds it in, using the
+/// same pixel-to-block mapping `nlm_mc_warp` uses.
+///
+/// When `use_confidence` is false the lookup and the multiply are
+/// dropped at compile time, and the confidence buffers are never read.
 #[cube(launch_unchecked)]
 pub fn nlm_vweight_pair_accumulate<N: Size>(
     hsum_fwd: &Array<f32>,
@@ -385,9 +395,10 @@ pub fn nlm_vweight_pair_accumulate<N: Size>(
     );
 }
 
-/// `_ref` variant of `nlm_distance`. Reads `reference` for both
-/// center and neighbour; downstream separable kernels consume the
-/// distance buffer unchanged.
+/// The reference-image version of `nlm_distance`.
+///
+/// Both the centre and the neighbour are read from `reference`. The
+/// separable kernels downstream read the distance buffer unchanged.
 #[cube(launch_unchecked)]
 pub fn nlm_distance_ref<N: Size>(
     reference: &Array<Vector<f32, N>>,
@@ -429,8 +440,10 @@ pub fn nlm_distance_ref<N: Size>(
     dist[(y * width + x) as usize] = line_sum_sq(center - neighbor, channels) * scale;
 }
 
-/// `_ref` variant of `nlm_distance_pair`. Both forward and backward
-/// distance signals read from `reference`.
+/// The reference-image version of `nlm_distance_pair`.
+///
+/// Both the forward and the backward distances are read from
+/// `reference`.
 #[cube(launch_unchecked)]
 pub fn nlm_distance_pair_ref<N: Size>(
     reference: &Array<Vector<f32, N>>,

@@ -7,33 +7,37 @@ use crate::nlmeans::denoiser::NlmDenoiser;
 use crate::nlmeans::kernels::motion::{nlm_mc_chain_compose, nlm_mc_pair_zero};
 use crate::nlmeans::{BLOCK_1D, MAX_GRID_1D};
 
-/// Byte offset of a `(pair_slot, direction)` sub-array inside the pair
-/// ring, laid out `[pair_slot][direction][block_y][block_x][2]` of
-/// `i32` (direction 0 = older→newer, 1 = newer→older), with each
-/// direction's slice padded up to a 32-byte boundary (see
-/// [`MotionCtx::pair_direction_bytes`]). `pair_slot` is keyed by the
-/// newer frame's position in the push sequence, reduced modulo
-/// `2 * temporal_radius` (see [`super::pair_ring_slot_count`]'s doc
-/// comment for the lifetime this sizing guarantees). The
-/// `nlm_mc_chain_compose` kernel reads the whole pair ring unsliced
-/// and strides through it with the same padded values
-/// (`MotionCtx::pair_direction_stride`/`pair_slot_stride`), so a
-/// change here must stay in sync with that kernel's own stride
-/// arguments.
+/// Where one slot and direction of the pair ring starts.
+///
+/// The ring is indexed by slot, then direction, then block, then
+/// component. Direction 0 runs from the older frame to the newer one,
+/// and direction 1 the other way. Each direction's slice is padded up to
+/// an alignment boundary. See [`MotionCtx::pair_direction_bytes`].
+///
+/// The slot is keyed by the newer frame's place in the push sequence,
+/// reduced modulo the ring size. [`super::pair_ring_slot_count`]
+/// explains why that sizing is safe.
+///
+/// The `nlm_mc_chain_compose` kernel reads the whole ring as one array
+/// and steps through it with the same padded strides, so any change here
+/// has to stay in step with that kernel's own stride arguments.
 pub(crate) fn pair_byte_offset(mc: &MotionCtx, pair_slot: u32, direction: u32) -> u64 {
     (pair_slot as u64) * mc.pair_slot_bytes() + (direction as u64) * mc.pair_direction_bytes()
 }
 
-/// Run the adjacent-frame pair analyse for one pushed frame, storing
-/// both directions' motion fields into `pair_ring` at `pair_slot`.
-/// `older_slot`/`newer_slot` are physical input-ring slots, the same
-/// addressing `run_analyse` always uses. `pyramid` is the analyse
-/// pyramid `run_motion_compensation` also reads from (the reference
-/// ring when a prefilter is active, otherwise the raw input ring).
+/// Measures motion between one pushed frame and the one before it, in
+/// both directions, and stores the result in the pair ring.
 ///
-/// Confidence is never consumed at the pair level, so both directions
-/// disable the fine kernel's `write_confidence` output and pass
-/// `confidence_dummy` as its placeholder target.
+/// `older_slot` and `newer_slot` are physical input-ring slots, the same
+/// addressing `run_analyse` uses.
+///
+/// `pyramid` is the same one `run_motion_compensation` reads, which is
+/// the reference ring when a prefilter is active and the raw input ring
+/// otherwise.
+///
+/// Nothing reads confidence at the pair level, so both directions turn
+/// the fine kernel's confidence output off and pass `confidence_dummy`
+/// as the placeholder target.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_pair_analyse<R: Runtime>(
     client: &ComputeClient<R>,
@@ -87,11 +91,14 @@ pub(crate) fn run_pair_analyse<R: Runtime>(
     Ok(())
 }
 
-/// Zero-fill both directions of `pair_slot`. Used for duplicated ring
-/// slots (stream priming and end-of-stream flush), whose pair is zero
-/// motion by definition since both "frames" are identical content.
-/// Zeroes each direction with its own dispatch, at its own padded
-/// offset, since the two directions no longer sit contiguously once
+/// Fills both directions of one pair-ring slot with zeroes.
+///
+/// Duplicated ring slots, which appear while priming the stream and
+/// again during the end-of-stream flush, hold the same content in both
+/// frames, so their motion is zero by definition.
+///
+/// Each direction gets its own dispatch at its own padded offset,
+/// because the two directions no longer sit next to each other once
 /// `pair_direction_bytes` pads between them.
 pub(crate) fn zero_pair_slot<R: Runtime>(
     client: &ComputeClient<R>,
@@ -120,12 +127,14 @@ pub(crate) fn zero_pair_slot<R: Runtime>(
     }
 }
 
-/// Launch `nlm_mc_chain_compose` once, writing the composed motion
-/// field into `mv_field` at `neighbour_idx`'s slot (the same slot
-/// convention `run_motion_compensation` uses for the direct path).
-/// Passes the padded per-direction/per-slot pair-ring strides through
-/// explicitly, since the kernel reads the whole pair ring unsliced and
-/// must stride through it the same way `pair_byte_offset` does.
+/// Launches `nlm_mc_chain_compose` once, writing the joined motion field
+/// into `mv_field` at this neighbour's slot.
+///
+/// That is the same slot the direct path fills for the neighbour.
+///
+/// The padded per-direction and per-slot strides are passed through
+/// explicitly, because the kernel reads the whole pair ring as one array
+/// and has to step through it the same way `pair_byte_offset` does.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_chain_compose<R: Runtime>(
     client: &ComputeClient<R>,
@@ -146,9 +155,9 @@ fn dispatch_chain_compose<R: Runtime>(
         .offset_start(mv_field_byte_offset(mc, neighbour_idx));
     let mv_slot_len = (mc.blocks_x as usize) * (mc.blocks_y as usize) * 2;
 
-    // One thread per output block: a cube per block, a single thread
-    // per cube (unlike the SAD-reduction kernels, there's no
-    // per-candidate work to split across a cube's threads here).
+    // One thread per output block, so one block of threads per image
+    // block with a single thread in it. Unlike the scoring kernels
+    // there is no per-candidate work to spread across threads here.
     let grid = CubeCount::new_2d(mc.blocks_x, mc.blocks_y);
     let dim = CubeDim::new_2d(1, 1);
 
@@ -176,13 +185,17 @@ fn dispatch_chain_compose<R: Runtime>(
     Ok(())
 }
 
-/// Maps a nonzero temporal offset `k` to the neighbour index the
-/// analyse/compose passes use inside `mv_field_buf`. Mirrors
-/// `dispatch::neighbour_idx_for_k` exactly, duplicated here rather than
-/// shared since that helper is private to the direct-path dispatch
-/// module. `dispatch`'s own tests cover this same mapping. `pub(crate)`
-/// so tests can resolve the same neighbour index the compose path
-/// writes to, instead of re-deriving the formula themselves.
+/// Maps a nonzero temporal offset onto the neighbour index the analyse
+/// and compose passes use inside the motion-field buffer.
+///
+/// This mirrors `dispatch::neighbour_idx_for_k` exactly. It is
+/// duplicated rather than shared because that helper is private to the
+/// direct-path dispatch module, and `dispatch`'s own tests already cover
+/// the mapping.
+///
+/// It is `pub(crate)` so tests can look up the same neighbour index the
+/// compose path writes to, rather than working out the formula
+/// themselves.
 pub(crate) fn neighbour_idx_for_k(radius: u32, k: i32) -> u32 {
     debug_assert_ne!(k, 0);
     debug_assert!(k.unsigned_abs() <= radius);
@@ -194,21 +207,24 @@ pub(crate) fn neighbour_idx_for_k(radius: u32, k: i32) -> u32 {
 }
 
 impl<R: Runtime> NlmDenoiser<R> {
-    /// Compose the chained motion field for neighbour offset `k`
-    /// (`k != 0`, `|k| <= temporal_radius`) into `mv_field_buf`, at the
-    /// same slot the direct path fills for this neighbour.
+    /// Joins the adjacent-frame fields into one motion field for the
+    /// neighbour at temporal offset `k`, writing it to the same slot the
+    /// direct path fills.
     ///
-    /// `center_t` is the window-relative index of the centre frame.
-    /// Every caller elsewhere in the codebase passes `temporal_radius`
-    /// (see `dispatch::run_motion_compensation`'s convention). Walks
-    /// `|k|` adjacent-pair hops out from the centre, following the
-    /// older→newer field when `k > 0` or the newer→older field when
-    /// `k < 0`.
+    /// `k` must be nonzero and no further out than the temporal radius.
     ///
-    /// No-op when `Chained` estimation isn't active. When it is
-    /// active, `dispatch::run_motion_compensation` calls this once per
-    /// neighbour on every submit, then corrects the composed seed with
-    /// `run_seeded_refine`. Tests also call it directly.
+    /// The walk takes one hop per step out from the centre, following
+    /// the older-to-newer field for a positive `k` and the
+    /// newer-to-older field for a negative one.
+    ///
+    /// `center_t` is the centre frame's index within the window. Every
+    /// caller passes the temporal radius, which is the convention
+    /// `dispatch::run_motion_compensation` sets.
+    ///
+    /// This does nothing unless `Chained` estimation is active. When it
+    /// is, `dispatch::run_motion_compensation` calls it once per
+    /// neighbour on every submit and then cleans up the seed with
+    /// `run_seeded_refine`. Tests call it directly as well.
     pub(crate) fn run_chain_compose(&self, center_t: u32, k: i32) -> Result<(), anyhow::Error> {
         let Some(mc) = self.mc_ctx.as_ref() else {
             return Ok(());
@@ -269,8 +285,9 @@ mod tests {
 
     #[test]
     fn neighbour_idx_for_k_matches_dispatch_convention() {
-        // Same walk `dispatch::neighbour_idx_for_k`'s own tests check:
-        // k = -radius..-1 first (indices 0..radius-1), then k = 1..radius.
+        // The same walk `dispatch::neighbour_idx_for_k`'s own tests
+        // check. The negative offsets come first, taking indices 0 up
+        // to radius minus 1, then the positive ones follow.
         assert_eq!(neighbour_idx_for_k(2, -2), 0);
         assert_eq!(neighbour_idx_for_k(2, -1), 1);
         assert_eq!(neighbour_idx_for_k(2, 1), 2);
@@ -279,10 +296,9 @@ mod tests {
 
     #[test]
     fn pair_byte_offset_pads_small_block_counts_to_32_bytes() {
-        // One block (4x4 frame, blksize=4, overlap=0 => step=4 => 1x1
-        // blocks), so the unpadded direction stride (1 block * 2 i32
-        // components * 4 bytes = 8 bytes) would place direction 1 at a
-        // non-32-aligned offset.
+        // A 4x4 frame at this geometry has a single block, so the
+        // unpadded direction stride is only 8 bytes and would leave
+        // direction 1 at an offset that is not 32-aligned.
         let m = MotionCtx::new(
             MotionCompensationMode::Mvtools {
                 blksize: 4,
@@ -309,13 +325,12 @@ mod tests {
 
     #[test]
     fn pair_byte_offset_direction_one_pads_even_when_slot_base_is_aligned() {
-        // Two blocks (8x4 frame, blksize=4, overlap=0 => step=4 =>
-        // 2x1 blocks). The unpadded per-slot stride (2 blocks * 2
-        // directions * 2 i32 components * 4 bytes = 32 bytes) is
-        // already 32-aligned, so every slot's own base offset is fine
-        // on its own. But the unpadded per-direction stride within
-        // that slot (2 blocks * 2 i32 components * 4 bytes = 16 bytes)
-        // is not, so direction 1 still needs its own padding even
+        // An 8x4 frame at this geometry has two blocks. The unpadded
+        // per-slot stride comes to 32 bytes, which is already aligned,
+        // so every slot's own base offset would be fine.
+        //
+        // The per-direction stride inside that slot is only 16 bytes
+        // though, so direction 1 still needs padding of its own even
         // though direction 0's slot base never did.
         let m = MotionCtx::new(
             MotionCompensationMode::Mvtools {

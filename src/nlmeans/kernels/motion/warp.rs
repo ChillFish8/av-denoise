@@ -1,17 +1,25 @@
 use cubecl::prelude::*;
 use cubecl::terminate;
 
-/// Warp a neighbour frame into alignment with the centre frame using
-/// the per-block MV field produced by the analyse pass. Each output
-/// pixel resolves which block it belongs to, looks up that block's MV,
-/// and reads the source pixel from the offset position (clamped at
-/// borders). Padding lanes are copied through unchanged.
+/// Shifts a neighbour frame into line with the centre frame, using the
+/// per-block motion field the analyse pass produced.
 ///
-/// Overlap handling: pixels inside a block's interior take the block's
-/// MV directly. Pixels in the overlap band of two adjacent blocks
-/// (relevant when `step < blksize`) use the closest block's MV (no
-/// blending in v1). This "winner-block" rule is a v1 simplification
-/// of MVTools' raised-cosine blend.
+/// Each output pixel works out which block it belongs to, reads that
+/// block's motion vector, and takes its source pixel from the offset
+/// position, clamped at the borders. Padding lanes are copied straight
+/// through.
+///
+/// # Overlapping blocks
+///
+/// A pixel inside a block's interior takes that block's vector
+/// directly.
+///
+/// A pixel in the band where two adjacent blocks overlap, which happens
+/// when the step is smaller than the block size, takes the vector of
+/// whichever block is closest. Nothing is blended between them.
+///
+/// That winner-takes-all rule is a simplification of MVTools'
+/// raised-cosine blend.
 #[cube(launch_unchecked)]
 pub fn nlm_mc_warp<N: Size>(
     src: &Array<Vector<f32, N>>,

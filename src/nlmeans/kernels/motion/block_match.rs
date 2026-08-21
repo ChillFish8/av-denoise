@@ -1,31 +1,43 @@
 use cubecl::prelude::*;
 use cubecl::terminate;
 
-/// SAD-based block matcher run on a single luma pyramid level. One
-/// cube per block; threads of the cube collectively scan the
-/// `(2·search_radius + 1)²` candidate offset window and produce a
-/// single i32x2 MV (in source-level pixels) at the block's slot.
+/// Finds where each block of pixels moved to, by searching one level of
+/// the luma pyramid for the offset with the smallest sum of absolute
+/// differences.
 ///
-/// The reduction works as follows. The cube first cooperatively loads
-/// the block's `blksize × blksize` centre pixels into shared memory
-/// once (a row-strided split across threads). Each thread then owns a
-/// strided subset of the candidate offsets and accumulates that candidate's
-/// full SAD serially, reading the centre value from shared memory and
-/// the neighbour value from global memory, and writes its candidate's
-/// scratch slot exactly once. Because every scratch slot is written by
-/// exactly one thread, no atomics or partial-then-reduce split is
-/// needed. Thread 0 then does a serial argmin over the scratch buffer
-/// after a `sync_cube`. `blksize` is capped at [`MAX_BLKSIZE`] (32), so
-/// the shared centre tile never exceeds 1024 `f32`.
+/// One GPU block handles one image block. Its threads scan the
+/// `(2 * search_radius + 1)^2` candidate offsets between them and
+/// produce a single motion vector, in this level's pixels, at the
+/// block's slot.
 ///
-/// `level_scale` rescales the produced MV components into "fine-level
-/// pixels" (caller passes `2^coarse_level`).
+/// # How the search is split up
 ///
-/// After finding its own best MV, the cube seeds every fine block
-/// whose position falls inside this coarse block's own source region,
-/// using `step` and `fine_step` (the coarse and fine grids' own block
-/// spacings) to convert between the two index spaces. See the seeding
-/// code below for the exact formula.
+/// The block first loads its own `blksize x blksize` centre pixels into
+/// shared memory once, splitting the rows across threads.
+///
+/// Each thread then takes a strided share of the candidate offsets and
+/// works out each one's full score on its own, reading the centre from
+/// shared memory and the neighbour from global memory. It writes each of
+/// its candidates' scores exactly once.
+///
+/// Because every scratch slot has exactly one writer, no atomics and no
+/// second reduction pass are needed. After a `sync_cube`, thread 0 walks
+/// the scratch buffer and picks the winner.
+///
+/// `blksize` is capped at [`MAX_BLKSIZE`], which is 32, so the shared
+/// centre tile never exceeds 1024 values.
+///
+/// # Seeding the fine pass
+///
+/// `level_scale` rescales the motion vector into fine-level pixels. The
+/// caller passes 2 raised to the coarse level.
+///
+/// After finding its own winner, the block seeds every fine block whose
+/// position falls inside its own source region. `step` and `fine_step`
+/// are the coarse and fine grids' block spacings, which is what converts
+/// between the two index spaces.
+///
+/// The seeding code below spells out the exact formula.
 ///
 /// [`MAX_BLKSIZE`]: crate::nlmeans::motion::MAX_BLKSIZE
 #[cube(launch_unchecked)]
@@ -60,10 +72,10 @@ pub fn nlm_mc_block_match_coarse(
     let mut sad_scratch = SharedMemory::<f32>::new(candidates as usize);
     let mut centre_smem = SharedMemory::<f32>::new(block_pixels as usize);
 
-    // This is a cooperative load. Each thread claims a row-strided
-    // subset of the block's pixels and caches the (clamped) centre
-    // value once, so every candidate below reads it from shared memory
-    // instead of re-fetching it from global memory once per candidate.
+    // A cooperative load. Each thread claims a row-strided share of the
+    // block's pixels and caches the clamped centre value once, so every
+    // candidate below reads it from shared memory instead of fetching
+    // it again from global memory.
     let mut py = local_y;
     while py < blksize {
         let mut px = local_x;
@@ -77,11 +89,11 @@ pub fn nlm_mc_block_match_coarse(
     }
     sync_cube();
 
-    // Each thread owns a strided subset of candidates and accumulates
-    // that candidate's full SAD serially over the cached block, then
-    // writes its scratch slot exactly once. Splitting the reduction by
-    // candidate (rather than by pixel) means no two threads ever write
-    // the same slot, so no atomics or reduce pass are needed.
+    // Each thread takes a strided share of the candidates, works out
+    // each one's full score over the cached block, and writes its
+    // scratch slot exactly once. Splitting the work by candidate rather
+    // than by pixel means no two threads ever write the same slot, so
+    // no atomics and no reduce pass are needed.
     let mut candidate_idx = thread_id;
     while candidate_idx < candidates {
         let dy = candidate_idx / window_side;
@@ -112,10 +124,13 @@ pub fn nlm_mc_block_match_coarse(
         terminate!();
     }
 
-    // Serial argmin over candidates. window_side is comptime so this
-    // unrolls cleanly for small search radii. Initialise with a huge
-    // sentinel so the first iteration always wins, avoiding a comptime
-    // negative-init dance that cubecl's macro doesn't lift cleanly.
+    // Walk the candidates and keep the lowest score. `window_side` is
+    // known at compile time, so this unrolls cleanly for small search
+    // radii.
+    //
+    // The starting value is deliberately huge so the first iteration
+    // always wins, which avoids a negative-initialiser pattern cubecl's
+    // macro does not lift cleanly.
     let mut best_sad = 1.0e30f32;
     let mut best_dx = 0i32;
     let mut best_dy = 0i32;
@@ -130,40 +145,45 @@ pub fn nlm_mc_block_match_coarse(
         }
     }
 
-    // An exact SAD tie resolves to the zero-motion candidate rather
-    // than whichever candidate the raster scan above happened to
-    // reach first (the window corner, since it's scanned before the
-    // centre). A block lying entirely inside a flat region has the
-    // same SAD at every candidate, and reporting spurious motion there
-    // then seeds the fine pass, and every block it covers, from a
-    // shifted position no pixel comparison ever preferred.
+    // An exact tie resolves to the zero-motion candidate, rather than
+    // whichever candidate the scan above happened to reach first, which
+    // is the window corner.
+    //
+    // A block lying entirely inside a flat region scores the same at
+    // every candidate. Reporting motion there would seed the fine pass,
+    // and every block it covers, from a shifted position that no pixel
+    // comparison ever preferred.
     let zero_sad = sad_scratch[(search_radius * window_side + search_radius) as usize];
     if zero_sad <= best_sad {
         best_dx = 0i32;
         best_dy = 0i32;
     }
 
-    // Project coarse block index into the fine-block index space by
-    // position, not by literal index doubling. Coarse block `bx`
-    // covers source pixels `[bx * step, (bx + 1) * step)` at the
-    // coarse level, which corresponds to fine-level pixels
-    // `[bx * step * level_scale, (bx + 1) * step * level_scale)`.
-    // Dividing that span by `fine_step` gives the fine block index
-    // range this coarse block seeds. Floor-division tiling keeps every
-    // interior boundary touching with no gap and no overlap, but the
-    // coarse block count and the fine block count are each their own
-    // ceil-division over a different image width and a different
-    // step, so they can round differently and the coarse grid's total
+    // Map the coarse block index into the fine block index space by
+    // position, rather than by simply doubling the index.
+    //
+    // Coarse block `bx` covers source pixels from `bx * step` up to
+    // `(bx + 1) * step` at the coarse level, which at the fine level
+    // means those bounds multiplied by `level_scale`. Dividing that
+    // span by `fine_step` gives the range of fine blocks this coarse
+    // block seeds.
+    //
+    // Floor-division tiling leaves every interior boundary touching,
+    // with no gap and no overlap. The two block counts are each their
+    // own ceil-division over a different width and a different step
+    // though, so they can round differently, and the coarse grid's
     // nominal reach can fall just short of the fine grid's true edge.
-    // The last coarse block on each axis extends its end to the fine
-    // grid's own edge, absorbing that remainder so every fine block
-    // still gets seeded exactly once. This one formula covers a
-    // genuine `level_scale × level_scale` patch (the coarse grid
-    // really is coarser than the fine grid by that ratio), a 1:1
-    // mapping (equal grids), and the ragged last block on either
-    // geometry, with no separate code path per case. The number of
-    // fine blocks a coarse block seeds can now vary per cube, so this
-    // uses a runtime `while` loop rather than a comptime-unrolled
+    //
+    // The last coarse block on each axis therefore extends its end to
+    // the fine grid's own edge, absorbing that remainder so every fine
+    // block still gets seeded exactly once.
+    //
+    // One formula covers all three cases, a genuinely coarser grid, two
+    // equal grids, and the ragged last block on either geometry, with
+    // no separate code path.
+    //
+    // How many fine blocks a coarse block seeds can vary from block to
+    // block, so this is a runtime `while` loop rather than an unrolled
     // `for` loop.
     let mvx_fine = best_dx * level_scale as i32;
     let mvy_fine = best_dy * level_scale as i32;
@@ -196,30 +216,38 @@ pub fn nlm_mc_block_match_coarse(
     }
 }
 
-/// Fine-resolution refinement pass. Reads a seed MV from `mv_field`
-/// when `use_seed != 0`, then searches a small `(2·search_radius + 1)²`
-/// window around it. Writes the refined MV back into the same slot.
-/// Uses the same shared-memory-cached, candidate-parallel SAD
-/// reduction as `nlm_mc_block_match_coarse` (see its doc comment).
+/// Refines a motion estimate at full resolution.
 ///
-/// When `write_confidence` is `true`, also writes a per-block
-/// confidence score to `confidence`, derived from the winning SAD.
-/// `sad_noise_floor` is the SAD two noisy copies of otherwise identical
-/// content produce by chance, subtracted before thresholding so a
-/// clean match isn't penalised for the noise it carries. `thsad` is
-/// the excess-SAD value beyond which confidence collapses to zero.
-/// Callers must pass a strictly positive `thsad` whenever
-/// `write_confidence` is `true`, or the confidence expression divides
-/// zero by zero on a perfect match. A `search_radius` of 0 with
-/// `use_seed = 0` reduces the match to a single candidate at the
-/// block's un-shifted position, useful for a confidence-only pass with
-/// no actual motion search.
+/// When `use_seed` is set, the block starts from the vector the coarse
+/// pass left in `mv_field` and searches a small window around it. The
+/// refined vector goes back into the same slot.
 ///
-/// When `write_confidence` is `false`, the confidence computation and
-/// write are skipped entirely (a comptime branch, so this costs
-/// nothing at runtime). Callers that don't need confidence pass a
-/// small placeholder buffer for `confidence` in that case. Its size
-/// never matters since the kernel never indexes into it.
+/// The search itself works exactly like `nlm_mc_block_match_coarse`,
+/// with the same cached centre tile and the same split by candidate.
+///
+/// # Confidence
+///
+/// When `write_confidence` is true, the block also writes a confidence
+/// score derived from the winning score. That is what lets a poor match
+/// suppress its own frame's contribution later on, instead of blurring
+/// in content that does not belong.
+///
+/// `sad_noise_floor` is the score two noisy copies of the same content
+/// produce by chance. Subtracting it first stops a clean match being
+/// penalised for the noise it carries.
+///
+/// `thsad` is how far past that floor a block can go before its
+/// confidence reaches zero. It has to be strictly positive whenever
+/// `write_confidence` is true, or a perfect match divides zero by zero.
+///
+/// A `search_radius` of 0 with no seed reduces the match to the single
+/// unshifted candidate, which is useful for a confidence-only pass with
+/// no motion search at all.
+///
+/// When `write_confidence` is false, the whole confidence step is
+/// dropped at compile time and costs nothing. Callers pass a small
+/// placeholder buffer in that case, and its size never matters because
+/// the kernel never reads it.
 #[cube(launch_unchecked)]
 pub fn nlm_mc_block_match_fine(
     centre: &Array<f32>,
@@ -236,17 +264,16 @@ pub fn nlm_mc_block_match_fine(
     #[comptime] search_radius: u32,
     use_seed: u32,
     #[comptime] blocks_x: u32,
-    #[comptime] _blocks_y: u32,
 ) {
     let bx = CUBE_POS_X;
     let by = CUBE_POS_Y;
 
     let mv_slot = ((by * blocks_x + bx) * 2) as usize;
 
-    // The `.into()` calls clippy's `useless_conversion` lint
-    // away from these lines, but are actually required: the `if`
-    // branches must produce matching cubecl `NativeExpand<i32>` types
-    // and a bare `0i32` literal won't coerce inside the cube macro.
+    // Clippy flags these `.into()` calls as useless, but they are
+    // required. Both `if` branches have to produce the same cubecl
+    // `NativeExpand<i32>` type, and a bare `0i32` literal does not
+    // coerce inside the cube macro.
     #[allow(clippy::useless_conversion)]
     let seed_dx = if use_seed == 1u32 {
         mv_field[mv_slot]
@@ -274,10 +301,10 @@ pub fn nlm_mc_block_match_fine(
     let mut sad_scratch = SharedMemory::<f32>::new(candidates as usize);
     let mut centre_smem = SharedMemory::<f32>::new(block_pixels as usize);
 
-    // This is a cooperative load. Each thread claims a row-strided
-    // subset of the block's pixels and caches the (clamped) centre
-    // value once, so every candidate below reads it from shared memory
-    // instead of re-fetching it from global memory once per candidate.
+    // A cooperative load. Each thread claims a row-strided share of the
+    // block's pixels and caches the clamped centre value once, so every
+    // candidate below reads it from shared memory instead of fetching
+    // it again from global memory.
     let mut py = local_y;
     while py < blksize {
         let mut px = local_x;
@@ -291,11 +318,11 @@ pub fn nlm_mc_block_match_fine(
     }
     sync_cube();
 
-    // Each thread owns a strided subset of candidates and accumulates
-    // that candidate's full SAD serially over the cached block, then
-    // writes its scratch slot exactly once. Splitting the reduction by
-    // candidate (rather than by pixel) means no two threads ever write
-    // the same slot, so no atomics or reduce pass are needed.
+    // Each thread takes a strided share of the candidates, works out
+    // each one's full score over the cached block, and writes its
+    // scratch slot exactly once. Splitting the work by candidate rather
+    // than by pixel means no two threads ever write the same slot, so
+    // no atomics and no reduce pass are needed.
     let mut candidate_idx = thread_id;
     while candidate_idx < candidates {
         let dy = candidate_idx / window_side;
@@ -340,15 +367,16 @@ pub fn nlm_mc_block_match_fine(
         }
     }
 
-    // An exact SAD tie resolves to the seed itself (zero additional
-    // motion beyond whatever the coarse pass already seeded) rather
-    // than whichever candidate the raster scan above happened to reach
-    // first (the window corner, since it's scanned before the centre).
-    // A block lying entirely inside a flat region has the same SAD at
-    // every candidate, and reporting spurious motion there both warps
-    // in pixels no comparison ever preferred and, since `best_sad == 0`
-    // in that case, writes a falsely perfect confidence for what may be
-    // a genuinely occluded block.
+    // An exact tie resolves to the seed itself, adding no motion beyond
+    // whatever the coarse pass found, rather than to whichever
+    // candidate the scan above happened to reach first, which is the
+    // window corner.
+    //
+    // A block lying entirely inside a flat region scores the same at
+    // every candidate. Reporting motion there would warp in pixels no
+    // comparison ever preferred, and since the winning score is zero in
+    // that case, it would also write a perfect confidence for what may
+    // be a genuinely occluded block.
     let seed_sad = sad_scratch[(search_radius * window_side + search_radius) as usize];
     if seed_sad <= best_sad {
         best_sad = seed_sad;

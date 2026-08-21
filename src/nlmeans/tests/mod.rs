@@ -2,11 +2,14 @@ mod helpers;
 
 mod alignment;
 mod confidence;
+mod gpu_submit;
 mod hq;
+mod machinery;
 mod motion_compensation;
 mod noise;
 mod pending_outlives;
 mod prefilter;
+mod residual_correlation;
 mod separable;
 mod spatial;
 mod spatial_offset;

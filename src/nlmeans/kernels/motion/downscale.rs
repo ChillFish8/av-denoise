@@ -1,13 +1,15 @@
 use cubecl::prelude::*;
 use cubecl::terminate;
 
-/// 2x2 box downsample, luma-only. Reads from a single source pyramid
-/// level (full resolution or a previously-downscaled level) and writes
-/// a half-resolution copy into the destination level slot.
+/// Halves the size of a luma image by averaging each 2x2 group of
+/// pixels.
+///
+/// The source is one pyramid level, either full resolution or an
+/// already-downscaled level, and the result goes into the next level's
+/// slot.
 ///
 /// `src_frame` and `dst_frame` are slot indices inside the per-level
-/// frame rings; `src_*` / `dst_*` dimensions are the half-resolution
-/// destination dimensions plus the source full-resolution dimensions.
+/// frame rings.
 #[cube(launch_unchecked)]
 pub fn nlm_mc_downscale(
     src: &Array<f32>,
@@ -41,10 +43,11 @@ pub fn nlm_mc_downscale(
     dst[(dst_frame * dst_width * dst_height + y * dst_width + x) as usize] = avg;
 }
 
-/// Extract the luma (channel 0) plane from a packed `Vector<f32, N>`
-/// input frame into a flat `Array<f32>` pyramid level-0 slot. Used so
-/// the analyse / pyramid kernels can work on luma-only data without
-/// caring about the full ChannelMode layout.
+/// Copies the luma plane out of a packed input frame into a flat array,
+/// which becomes level 0 of the pyramid.
+///
+/// This lets the pyramid and analyse kernels work on luma alone, without
+/// knowing anything about the channel layout.
 #[cube(launch_unchecked)]
 pub fn nlm_mc_extract_luma<N: Size>(
     src: &Array<Vector<f32, N>>,

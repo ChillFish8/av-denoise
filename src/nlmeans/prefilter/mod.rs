@@ -5,35 +5,40 @@ pub(crate) use bilateral::inv_two_sigma_sq;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-/// How the per-frame reference clip is produced.
+/// How the reference image for each frame is produced.
 ///
-/// `Bilateral` and any future GPU-internal variants run a kernel
-/// during `push_frame`. `External` requires the caller to supply a
-/// reference frame via [`super::NlmDenoiser::push_frame_with_reference`].
-/// `None` disables the reference path entirely (zero-cost).
+/// NLM compares patches to decide how much two pixels look alike. Doing
+/// that on a noisy image means comparing noise as well as content, so a
+/// cleaner reference image can give better weights.
+///
+/// The pixels being averaged always come from the original input. Only
+/// the weights change.
 #[non_exhaustive]
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub enum PrefilterMode {
+    /// No reference image, so patches are compared on the noisy input.
+    /// This costs nothing extra.
     #[default]
     None,
+    /// The caller supplies the reference frame through
+    /// [`super::NlmDenoiser::push_frame_with_reference`].
     External,
-    Bilateral {
-        sigma_s: f32,
-        sigma_r: f32,
-    },
-    /// Spatial NLM pilot. Denoises each frame with the windowed
-    /// spatial kernel at push time and stores the result as the
-    /// reference clip, so patch distances are computed on a clean
-    /// image while accumulation still reads the noisy input.
+    /// A quick bilateral blur run on the GPU at push time.
+    Bilateral { sigma_s: f32, sigma_r: f32 },
+    /// A spatial NLM pilot pass.
+    ///
+    /// Each frame is denoised with the windowed spatial kernel at push
+    /// time and the result is kept as the reference image.
     NlmSpatial {
-        /// Multiplier on the main pass strength for the pilot pass.
+        /// How much of the main pass strength the pilot pass uses.
         strength_scale: f32,
     },
 }
 
-/// Measured default for the pilot pass's relative strength, a
-/// multiplier on the main pass strength. A calibration sweep across
-/// noise levels found the XPSNR plateau optimum for
+/// The measured default strength for the pilot pass, as a multiplier on
+/// the main pass strength.
+///
+/// A calibration sweep across noise levels put the XPSNR plateau for
 /// `PrefilterMode::NlmSpatial` at this value.
 pub const DEFAULT_PILOT_STRENGTH_SCALE: f32 = 0.4;
 
@@ -43,16 +48,17 @@ impl PrefilterMode {
         !matches!(self, Self::None)
     }
 
-    /// Whether the variant computes its reference on the GPU during
-    /// `push_frame` (as opposed to consuming a caller-supplied clip).
+    /// Whether this mode builds its reference on the GPU during
+    /// `push_frame`, rather than taking one from the caller.
     pub(crate) fn is_gpu_internal(self) -> bool {
         matches!(self, Self::Bilateral { .. } | Self::NlmSpatial { .. })
     }
 }
 
-/// Inputs for a single-slot prefilter dispatch. Lives only for the
-/// duration of one `push_frame`, so borrows on the denoiser's buffers
-/// are sound.
+/// The inputs one prefilter dispatch needs.
+///
+/// This lives only for the length of a single `push_frame`, which is
+/// what makes the borrows on the denoiser's buffers sound.
 pub(crate) struct PrefilterCtx<'a> {
     pub width: u32,
     pub height: u32,
@@ -64,8 +70,9 @@ pub(crate) struct PrefilterCtx<'a> {
     pub reference_buf: &'a Handle,
 }
 
-/// Dispatch the GPU prefilter for the most recently uploaded frame.
-/// `None` and `External` are no-ops.
+/// Runs the GPU prefilter for the frame that was uploaded last.
+///
+/// `None` and `External` do nothing here.
 pub(crate) fn run_prefilter<R: Runtime>(
     mode: PrefilterMode,
     client: &ComputeClient<R>,
@@ -73,10 +80,10 @@ pub(crate) fn run_prefilter<R: Runtime>(
 ) -> Result<(), anyhow::Error> {
     match mode {
         PrefilterMode::None | PrefilterMode::External => Ok(()),
-        // The pilot needs the full accumulator context (accum,
-        // weight_sum, max_weight, h2_inv_norm), which `PrefilterCtx`
-        // doesn't carry, so `NlmDenoiser::run_nlm_spatial_pilot`
-        // dispatches it directly instead of going through this path.
+        // The pilot needs the full accumulator context, meaning accum,
+        // weight_sum, max_weight, and h2_inv_norm, which `PrefilterCtx`
+        // does not carry. `NlmDenoiser::run_nlm_spatial_pilot`
+        // dispatches it directly instead of coming through here.
         PrefilterMode::NlmSpatial { .. } => Ok(()),
         PrefilterMode::Bilateral { sigma_s, sigma_r } => {
             bilateral::run_bilateral::<R>(client, ctx, sigma_s, sigma_r)

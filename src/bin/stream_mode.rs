@@ -117,6 +117,14 @@ mod tests {
         };
 
         write_planes(&mut encoder, &planes).expect("frame should write");
+        // Marks the end of writing before the asserts read `buf`, which
+        // the encoder borrows mutably. `y4m::Encoder` implements no
+        // `Drop` and a `Vec` writer needs no flush, so this documents
+        // the handover rather than doing work.
+        #[expect(
+            clippy::drop_non_drop,
+            reason = "reads as the end of the write phase, ahead of the asserts on buf"
+        )]
         drop(encoder);
 
         assert!(
@@ -146,7 +154,15 @@ mod tests {
                 .expect("header should write");
 
             // 512 little-endian, mid-grey at 10-bit.
+            #[expect(
+                clippy::useless_vec,
+                reason = "the vec! spells out that these two bytes are one 10-bit sample"
+            )]
             let y = vec![0x00u8, 0x02].repeat(width * height);
+            #[expect(
+                clippy::useless_vec,
+                reason = "the vec! spells out that these two bytes are one 10-bit sample"
+            )]
             let u = vec![0x00u8, 0x02].repeat((width / 2) * (height / 2));
             let v = u.clone();
 

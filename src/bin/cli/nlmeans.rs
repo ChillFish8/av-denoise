@@ -1,17 +1,15 @@
-//! The `nlmeans` subcommand and how its flags resolve into library
-//! parameters.
-
 use av_denoise::{
     DEFAULT_PILOT_STRENGTH_SCALE,
     DenoisingMode,
     MotionCompensationMode,
-    MotionEstimation,
     NlmTuning,
+    NlmeansHqOptions,
+    NlmeansOptions,
     PrefilterMode,
 };
 use strum_macros::EnumString;
 
-use super::{Args, InputSource, Preset, resolve_channel_intent};
+use super::{Args, CommonArgs, MotionArgs, Preset, resolve_channel_intent};
 use crate::ingest::CliOptions;
 
 /// Which non-local means variant to run.
@@ -27,39 +25,8 @@ pub enum Variant {
 
 #[derive(Debug, Clone, clap::Args)]
 pub struct NlmeansArgs {
-    /// Where to read frames from.
-    ///
-    /// A path opens the file with ffms2 and splits the work by
-    /// scene. Any container or codec supported by ffmpeg works.
-    ///
-    /// `-` or `pipe:0` reads a y4m stream from standard input.
-    ///
-    /// `pipe:N` for `N` of 3 or above reads a y4m stream from an
-    /// inherited file descriptor.
-    ///
-    /// Piped input has no scene detection, so the temporal window
-    /// slides across the whole stream.
-    ///
-    /// A file whose name would otherwise be read as a pipe is
-    /// reachable by prefixing it, for example `./-`.
-    ///
-    /// The source's bit depth is detected automatically. 8, 10, and
-    /// 12-bit sources are supported and the output keeps the source's
-    /// depth. Other depths are rejected with a clear error message.
-    #[arg(short, long)]
-    pub input: InputSource,
-
-    /// How many scenes to clean in parallel.
-    ///
-    /// Each worker uses its own GPU memory for the frame ring
-    /// buffer, so higher values trade GPU memory for throughput.
-    ///
-    /// `1` is valid and useful for debugging. Defaults to 2 when
-    /// unset.
-    ///
-    /// Ignored for piped input, which cannot be split by scene.
-    #[arg(short = 'W', long)]
-    pub workers: Option<usize>,
+    #[command(flatten)]
+    pub common: CommonArgs,
 
     /// Which variant to run.
     ///
@@ -90,8 +57,8 @@ pub struct NlmeansArgs {
     /// and at most 11.0 (anything beyond this is insane.)
     ///
     /// `sigma_r` is the colour-similarity threshold, greater than 0.
-    /// `(0, 1]` is the typical range for normalised pixel data. There
-    /// is no enforced upper bound.
+    /// Values above `0` and up to `1` are typical for normalised
+    /// pixel data. There is no enforced upper bound.
     ///
     /// A good starting point is `bilateral:3.0,0.02`.
     ///
@@ -260,57 +227,13 @@ pub struct NlmeansArgs {
     ///
     /// The tracking strategy adapts automatically to `--temporal-radius`.
     ///
-    /// Has no effect when `--temporal-radius 0`.
+    /// The `--mc-*` flags only take effect with this set. Has no effect
+    /// when `--temporal-radius 0`.
     #[arg(long)]
     pub motion_compensation: bool,
 
-    /// Size of each motion-search block, in pixels. Must be even.
-    ///
-    /// Larger blocks are more stable but track motion less
-    /// accurately on small details.
-    ///
-    /// Only takes effect with `--motion-compensation`. Defaults to 16
-    /// when unset.
-    #[arg(long)]
-    pub mc_blksize: Option<u32>,
-
-    /// How many pixels neighbouring motion blocks may overlap.
-    ///
-    /// Must be less than `--mc-blksize`. Higher overlap smooths the
-    /// transitions between blocks but does more work.
-    ///
-    /// Only takes effect with `--motion-compensation`. Defaults to 8
-    /// when unset.
-    #[arg(long)]
-    pub mc_overlap: Option<u32>,
-
-    /// How many pixels of motion to search for at the finest level.
-    ///
-    /// The coarse pyramid pass reaches further (search radius times
-    /// 2 for a 2-level pyramid), so for typical content the default
-    /// is fine.
-    ///
-    /// Raise it for very fast motion.
-    ///
-    /// Only takes effect with `--motion-compensation`. Defaults to 4
-    /// when unset.
-    #[arg(long)]
-    pub mc_search: Option<u32>,
-
-    /// How many levels the motion-search pyramid uses.
-    ///
-    /// `1` does a single full-resolution search (cheaper, weaker on
-    /// large motion).
-    ///
-    /// `2` (default) does a coarse pass on a half-size image first,
-    /// then refines at full resolution.
-    ///
-    /// This handles much larger motion at modest extra cost.
-    ///
-    /// Only takes effect with `--motion-compensation`. Defaults to 2
-    /// when unset.
-    #[arg(long)]
-    pub mc_pyramid_levels: Option<u32>,
+    #[command(flatten)]
+    pub motion: MotionArgs,
 }
 
 /// `--variant`, `--temporal-radius`, and `--search-radius` resolved
@@ -335,11 +258,14 @@ impl NlmeansArgs {
     }
 
     /// Builds the library's [`av_denoise::Algorithm`] from the resolved
-    /// preset and the `--hq-*` flags, warning about flags that are set
-    /// but have no effect given the rest of the resolved configuration.
+    /// preset and the flags the chosen variant reads.
+    ///
+    /// Flags that are set but do nothing for this configuration are
+    /// reported as warnings.
     pub fn resolve_algorithm(
         &self,
         resolved: ResolvedPreset,
+        nlm: NlmeansOptions,
     ) -> Result<av_denoise::Algorithm, anyhow::Error> {
         let sigma_scale_is_set = self.hq_sigma_scale.is_some_and(|v| v != 1.0);
 
@@ -354,7 +280,7 @@ impl NlmeansArgs {
                 {
                     tracing::warn!("--hq-* options are ignored unless --variant hq is selected");
                 }
-                Ok(av_denoise::Algorithm::Nlmeans)
+                Ok(av_denoise::Algorithm::Nlmeans(nlm))
             },
             Variant::Hq => {
                 // Check the raw 8-bit value here so an out-of-range
@@ -371,13 +297,16 @@ impl NlmeansArgs {
                     tracing::warn!("--hq-sigma-scale has no effect when --hq-sigma pins the noise level");
                 }
 
-                Ok(av_denoise::Algorithm::NlmeansHq(av_denoise::HqParams {
-                    auto_strength: !self.hq_no_auto_strength,
-                    noise_floor: !self.hq_no_noise_floor,
-                    sigma_override: self.hq_sigma.map(|s| s / 255.0),
-                    temporal_confidence: !self.hq_no_temporal_confidence,
-                    thsad_scale: self.hq_thsad_scale.unwrap_or(1.0),
-                    sigma_scale: self.hq_sigma_scale.unwrap_or(1.0),
+                Ok(av_denoise::Algorithm::NlmeansHq(NlmeansHqOptions {
+                    nlm,
+                    hq: av_denoise::HqParams {
+                        auto_strength: !self.hq_no_auto_strength,
+                        noise_floor: !self.hq_no_noise_floor,
+                        sigma_override: self.hq_sigma.map(|s| s / 255.0),
+                        temporal_confidence: !self.hq_no_temporal_confidence,
+                        thsad_scale: self.hq_thsad_scale.unwrap_or(1.0),
+                        sigma_scale: self.hq_sigma_scale.unwrap_or(1.0),
+                    },
                 }))
             },
         }
@@ -396,7 +325,12 @@ impl NlmeansArgs {
             }
         };
 
-        let prefilter = self.prefilter.as_deref().map(parse_prefilter).transpose()?;
+        let prefilter = self
+            .prefilter
+            .as_deref()
+            .map(parse_prefilter)
+            .transpose()?
+            .unwrap_or(PrefilterMode::None);
         let intent = resolve_channel_intent(&globals.channel_mode)?;
 
         let motion_compensation = if self.motion_compensation {
@@ -406,46 +340,41 @@ impl NlmeansArgs {
                      the spatial path doesn't use temporal neighbours"
                 );
             }
-            MotionCompensationMode::Mvtools {
-                blksize: self.mc_blksize.unwrap_or(16),
-                overlap: self.mc_overlap.unwrap_or(8),
-                search_radius: self.mc_search.unwrap_or(4),
-                pyramid_levels: self.mc_pyramid_levels.unwrap_or(2),
-                estimation: MotionEstimation::default(),
-            }
+            self.motion.to_motion_search().into()
         } else {
-            if self.mc_blksize.is_some()
-                || self.mc_overlap.is_some()
-                || self.mc_search.is_some()
-                || self.mc_pyramid_levels.is_some()
-            {
+            if self.motion.any_set() {
                 tracing::warn!("--mc-* options are ignored unless --motion-compensation is set");
             }
             MotionCompensationMode::None
         };
 
-        let algorithm = self.resolve_algorithm(resolved)?;
-
         // search_radius always has a resolved value (explicit flag or the
         // active preset), so it's always carried into the tuning override.
-        let nlm_tuning = Some(NlmTuning {
-            search_radius: Some(resolved.search_radius),
-            patch_radius: self.patch_radius,
-            strength: self.strength,
-            self_weight: self.self_weight,
-        });
+        let nlm = NlmeansOptions {
+            prefilter,
+            motion_compensation,
+            tuning: NlmTuning {
+                search_radius: Some(resolved.search_radius),
+                patch_radius: self.patch_radius,
+                strength: self.strength,
+                self_weight: self.self_weight,
+            },
+        };
 
         Ok(CliOptions {
             accelerators: globals.accelerators.clone(),
             device: globals.device.clone(),
             intent,
             mode,
-            prefilter,
-            motion_compensation,
-            algorithm,
-            nlm_tuning,
+            algorithm: self.resolve_algorithm(resolved, nlm)?,
             luma_strength: self.luma_strength,
             chroma_strength: self.chroma_strength,
+            // `nlmeans` has no grouping stage, so these stay unset
+            // here. `Nl4dArgs::build_options` fills them in afterwards.
+            luma_lambda_ht: None,
+            chroma_lambda_ht: None,
+            luma_mismatch_scale: None,
+            chroma_mismatch_scale: None,
             progress: globals.progress,
         })
     }
@@ -517,7 +446,7 @@ fn parse_prefilter(s: &str) -> Result<PrefilterMode, anyhow::Error> {
 mod tests {
     use clap::Parser;
 
-    use super::super::{Args, CliChannelMode, Command, Preset};
+    use super::super::{Args, CliChannelMode, Command, InputSource, Preset};
     use super::*;
 
     /// Parses a full argv into the `nlmeans` subcommand's args plus the
@@ -530,8 +459,10 @@ mod tests {
         argv.extend_from_slice(extra);
 
         let args = Args::parse_from(argv);
-        let Command::Nlmeans(nlm) = &args.command;
-        let nlm = NlmeansArgs::clone(nlm);
+        let nlm = match &args.command {
+            Command::Nlmeans(nlm) => NlmeansArgs::clone(nlm),
+            Command::Nl4d(_) => unreachable!("parse() always builds a nlmeans argv"),
+        };
 
         (args, nlm)
     }
@@ -543,9 +474,10 @@ mod tests {
         argv.extend_from_slice(extra);
 
         let args = Args::parse_from(argv);
-        let Command::Nlmeans(nlm) = &args.command;
-
-        NlmeansArgs::clone(nlm)
+        match &args.command {
+            Command::Nlmeans(nlm) => NlmeansArgs::clone(nlm),
+            Command::Nl4d(_) => unreachable!("parse_input() always builds a nlmeans argv"),
+        }
     }
 
     fn resolve(extra: &[&str]) -> ResolvedPreset {
@@ -631,44 +563,59 @@ mod tests {
         assert!(matches!(args.preset, Preset::Slow));
     }
 
-    /// The five tests below pin down that every global flag is
-    /// accepted when placed *before* `nlmeans`, the exact shape
-    /// `Justfile`'s `docker-test-run` recipe uses (`-A vulkan,cpu`
-    /// ahead of the subcommand at `Justfile:96`). That is worth
-    /// having, but despite the name they do **not** guard
-    /// `global = true` — clap accepts `Args`'s own fields in the
-    /// leading position regardless of that attribute, since `global`
-    /// only takes effect once the subcommand token has been reached.
-    /// Verified by removing `global = true` from each of
-    /// `accelerators`, `device`, `channel_mode`, and `progress` in
-    /// turn — every test below kept passing every time. What
-    /// `global = true` actually controls is the *trailing* position,
-    /// after `nlmeans` (`Justfile:42`'s `denoise-file` recipe
-    /// interpolates user flags there), which is what the
-    /// `*_parses_after_the_subcommand` tests further down exist to
-    /// guard.
-    /// Gated because it names the `Vulkan` and `Cpu` accelerator
-    /// variants, which only exist when their features are enabled.
-    #[cfg(all(feature = "vulkan", feature = "cpu"))]
+    /// The five tests below check that every global flag is accepted
+    /// before the `nlmeans` token. That is the shape the `Justfile`
+    /// uses, passing `-A vulkan,cpu` ahead of the subcommand.
+    ///
+    /// Despite the name they do not guard `global = true`. Clap accepts
+    /// `Args`'s own fields in the leading position either way, because
+    /// `global` only starts to matter once the subcommand token has
+    /// been read. Dropping `global = true` from `accelerators`,
+    /// `device`, `channel_mode`, and `progress` in turn left all five
+    /// tests passing.
+    ///
+    /// What `global = true` really controls is the trailing position,
+    /// after `nlmeans`. The `*_parses_after_the_subcommand` tests
+    /// further down cover that.
+    ///
+    /// The repeated `vulkan` is deliberate. What this pins is that the
+    /// comma delimiter splits the value into a list, and `Vulkan` is
+    /// the only accelerator variant a default build is guaranteed to
+    /// have, so naming it twice tests the split without depending on a
+    /// second backend feature being enabled.
+    ///
+    /// Feature-gated because it names the `Vulkan` accelerator variant,
+    /// which only exists when its feature is enabled.
+    #[cfg(feature = "vulkan")]
     #[test]
     fn accelerators_are_accepted_before_the_subcommand() {
-        let args = Args::parse_from(["av-denoise", "--accelerators", "vulkan,cpu", "nlmeans", "-i", "-"]);
+        let args = Args::parse_from([
+            "av-denoise",
+            "--accelerators",
+            "vulkan,vulkan",
+            "nlmeans",
+            "-i",
+            "-",
+        ]);
         assert_eq!(
             args.accelerators,
             vec![
                 av_denoise::accelerate::Accelerator::Vulkan,
-                av_denoise::accelerate::Accelerator::Cpu
+                av_denoise::accelerate::Accelerator::Vulkan
             ]
         );
     }
 
-    /// Gated because it names the `Cpu` accelerator variant, which
-    /// only exists when the `cpu` feature is enabled.
-    #[cfg(feature = "cpu")]
+    /// Gated because it names the `Vulkan` accelerator variant, which
+    /// only exists when the `vulkan` feature is enabled.
+    #[cfg(feature = "vulkan")]
     #[test]
     fn short_accelerators_flag_is_accepted_before_the_subcommand() {
-        let args = Args::parse_from(["av-denoise", "-A", "cpu", "nlmeans", "-i", "-"]);
-        assert_eq!(args.accelerators, vec![av_denoise::accelerate::Accelerator::Cpu]);
+        let args = Args::parse_from(["av-denoise", "-A", "vulkan", "nlmeans", "-i", "-"]);
+        assert_eq!(
+            args.accelerators,
+            vec![av_denoise::accelerate::Accelerator::Vulkan]
+        );
     }
 
     #[test]
@@ -689,9 +636,10 @@ mod tests {
         assert!(args.progress);
     }
 
-    /// The other half of the invariant: `--strength` is owned by the
-    /// `nlmeans` subcommand, not global, so it must be rejected before
-    /// `nlmeans` even though the globals above are accepted there.
+    /// The other half of the rule. `--strength` is owned by the
+    /// `nlmeans` subcommand rather than being global, so it must be
+    /// rejected before `nlmeans` even though the globals above are
+    /// accepted there.
     #[test]
     fn a_subcommand_owned_flag_is_rejected_before_the_subcommand() {
         let err = Args::try_parse_from(["av-denoise", "--strength", "1.2", "nlmeans", "-i", "-"])
@@ -699,23 +647,21 @@ mod tests {
         assert!(err.to_string().contains("strength"), "got {err}");
     }
 
-    /// This is the test that actually depends on `--accelerators`
-    /// being `global = true`. Without it, a flag placed after
-    /// `nlmeans` is rejected as unknown to the subcommand's own
-    /// parser. `Justfile:42`'s `denoise-file` recipe interpolates
-    /// `{{ARGS}}` in exactly this position.
-    /// Gated because it names the `Vulkan` and `Cpu` accelerator
-    /// variants, which only exist when their features are enabled.
-    #[cfg(all(feature = "vulkan", feature = "cpu"))]
+    /// This is the test that really depends on `--accelerators` being
+    /// `global = true`. Without it, a flag placed after `nlmeans` is
+    /// rejected as unknown to the subcommand's own parser. The
+    /// `denoise-file` recipe in the `Justfile` passes user flags in
+    /// exactly this position.
+    ///
+    /// Feature-gated because it names the `Vulkan` accelerator variant,
+    /// which only exists when its feature is enabled.
+    #[cfg(feature = "vulkan")]
     #[test]
     fn accelerators_parses_after_the_subcommand() {
-        let (args, _) = parse(&["--accelerators", "vulkan,cpu"]);
+        let (args, _) = parse(&["--accelerators", "vulkan"]);
         assert_eq!(
             args.accelerators,
-            vec![
-                av_denoise::accelerate::Accelerator::Vulkan,
-                av_denoise::accelerate::Accelerator::Cpu
-            ]
+            vec![av_denoise::accelerate::Accelerator::Vulkan]
         );
     }
 
@@ -772,11 +718,11 @@ mod tests {
         let (args, nlm) = parse(&["--variant", "hq"]);
         let resolved = nlm.resolve_preset(args.preset);
         let algorithm = nlm
-            .resolve_algorithm(resolved)
+            .resolve_algorithm(resolved, NlmeansOptions::default())
             .expect("resolution should succeed");
 
         match algorithm {
-            av_denoise::Algorithm::NlmeansHq(hq) => assert_eq!(hq.sigma_scale, 1.0),
+            av_denoise::Algorithm::NlmeansHq(opts) => assert_eq!(opts.hq.sigma_scale, 1.0),
             other => panic!("expected NlmeansHq, got {other:?}"),
         }
     }
@@ -786,10 +732,10 @@ mod tests {
         let (args, nlm) = parse(&["--variant", "fast", "--hq-sigma-scale", "2.0"]);
         let resolved = nlm.resolve_preset(args.preset);
         let algorithm = nlm
-            .resolve_algorithm(resolved)
+            .resolve_algorithm(resolved, NlmeansOptions::default())
             .expect("resolution should succeed");
 
-        assert!(matches!(algorithm, av_denoise::Algorithm::Nlmeans));
+        assert!(matches!(algorithm, av_denoise::Algorithm::Nlmeans(_)));
     }
 
     #[test]
@@ -797,17 +743,17 @@ mod tests {
         let (args, nlm) = parse(&["--variant", "hq", "--hq-sigma", "6", "--hq-sigma-scale", "2.0"]);
         let resolved = nlm.resolve_preset(args.preset);
         let algorithm = nlm
-            .resolve_algorithm(resolved)
+            .resolve_algorithm(resolved, NlmeansOptions::default())
             .expect("resolution should succeed");
 
         match algorithm {
-            av_denoise::Algorithm::NlmeansHq(hq) => {
+            av_denoise::Algorithm::NlmeansHq(opts) => {
                 assert!(
-                    matches!(hq.sigma_override, Some(s) if (s - 6.0 / 255.0).abs() < f32::EPSILON),
+                    matches!(opts.hq.sigma_override, Some(s) if (s - 6.0 / 255.0).abs() < f32::EPSILON),
                     "expected sigma_override Some(6/255), got {:?}",
-                    hq.sigma_override,
+                    opts.hq.sigma_override,
                 );
-                assert_eq!(hq.sigma_scale, 2.0);
+                assert_eq!(opts.hq.sigma_scale, 2.0);
             },
             other => panic!("expected NlmeansHq, got {other:?}"),
         }
@@ -817,7 +763,9 @@ mod tests {
     fn out_of_range_hq_sigma_is_rejected() {
         let (args, nlm) = parse(&["--variant", "hq", "--hq-sigma", "300"]);
         let resolved = nlm.resolve_preset(args.preset);
-        let err = nlm.resolve_algorithm(resolved).expect_err("300 is out of range");
+        let err = nlm
+            .resolve_algorithm(resolved, NlmeansOptions::default())
+            .expect_err("300 is out of range");
 
         assert!(err.to_string().contains("--hq-sigma"), "got {err}");
     }
@@ -892,7 +840,7 @@ mod tests {
     fn a_path_parses_as_a_file_source() {
         let nlm = parse_input(&["--input", "noisy.mkv"]);
         assert_eq!(
-            nlm.input,
+            nlm.common.input,
             InputSource::File(std::path::PathBuf::from("noisy.mkv"))
         );
     }
@@ -900,13 +848,13 @@ mod tests {
     #[test]
     fn a_dash_parses_as_stdin() {
         let nlm = parse_input(&["-i", "-"]);
-        assert_eq!(nlm.input, InputSource::Stdin);
+        assert_eq!(nlm.common.input, InputSource::Stdin);
     }
 
     #[test]
     fn a_pipe_parses_as_a_descriptor() {
         let nlm = parse_input(&["-i", "pipe:3"]);
-        assert_eq!(nlm.input, InputSource::Fd(3));
+        assert_eq!(nlm.common.input, InputSource::Fd(3));
     }
 
     #[test]
@@ -919,12 +867,12 @@ mod tests {
     #[test]
     fn workers_is_unset_by_default() {
         let nlm = parse_input(&["-i", "noisy.mkv"]);
-        assert_eq!(nlm.workers, None);
+        assert_eq!(nlm.common.workers, None);
     }
 
     #[test]
     fn workers_carries_the_typed_value() {
         let nlm = parse_input(&["-i", "noisy.mkv", "--workers", "4"]);
-        assert_eq!(nlm.workers, Some(4));
+        assert_eq!(nlm.common.workers, Some(4));
     }
 }

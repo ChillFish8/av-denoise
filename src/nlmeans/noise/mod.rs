@@ -1,3 +1,35 @@
+//! Measuring how noisy a source is.
+//!
+//! The HQ variant matches its strength to the noise level, so it needs a
+//! number for that level. This module produces one per frame.
+//!
+//! # Two ways of looking
+//!
+//! The Immerkær estimate runs a small mask over each frame that cancels
+//! smooth content and leaves mostly noise. It is cheap and needs only
+//! one frame, but it reads grain that is correlated between neighbouring
+//! pixels too low, because such grain looks partly like content to the
+//! mask.
+//!
+//! The temporal estimate compares a frame against the one before it.
+//! Where nothing moved, whatever is left over is noise, and correlated
+//! grain shows up in full. It needs static content to work, so motion
+//! and scene changes make it unreliable.
+//!
+//! The two are combined by taking whichever reads higher, which lets the
+//! temporal estimate correct an Immerkær under-read without letting an
+//! unreliable one drag the estimate down.
+//!
+//! # Two chains
+//!
+//! The result feeds two separate smoothed estimates.
+//!
+//! The median chain reads typical noise and drives the filter strength.
+//!
+//! The low chain reads cautiously, using lower-quartile statistics, and
+//! drives the distance floor. Reading that too high scrubs fine texture,
+//! so it is deliberately the more conservative of the two.
+
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
@@ -10,9 +42,10 @@ use super::kernels::{
 };
 use super::{BLOCK_1D, BLOCK_X, BLOCK_Y, MAX_GRID_1D};
 
-/// Inputs for a single-slot Immerkær noise estimate dispatch. Lives
-/// only for the duration of one estimate call, so borrows on the
-/// denoiser's buffers are sound.
+/// The inputs one Immerkær noise estimate needs.
+///
+/// This lives only for the length of a single estimate call, which is
+/// what makes the borrows on the denoiser's buffers sound.
 pub(super) struct NoiseCtx<'a> {
     pub width: u32,
     pub height: u32,
@@ -26,27 +59,32 @@ pub(super) struct NoiseCtx<'a> {
     pub results_buf: &'a Handle,
 }
 
-/// Number of `f32` elements the stage-1 partials buffer needs for a
-/// `width × height` frame. One cube covers a `BLOCK_X × BLOCK_Y` tile
-/// and contributes four lanes.
+/// How many `f32` elements the first stage's partials buffer needs for
+/// one frame.
+///
+/// Each block covers a tile of the frame and contributes four lanes.
 pub(super) fn partials_len(width: u32, height: u32) -> usize {
     (width.div_ceil(BLOCK_X) * height.div_ceil(BLOCK_Y) * 4) as usize
 }
 
-/// Byte stride between ring slots in the stage-1 partials buffer,
-/// padded up to the runtime's buffer-binding alignment. Small frames
-/// can produce a [`partials_len`] short of one boundary, and `wgpu`
-/// rejects a bind-group offset that isn't a multiple of its
-/// `min_storage_buffer_offset_alignment` — mirrors
-/// [`temporal_stats_slot_stride_bytes`].
+/// The byte stride between ring slots in the partials buffer, padded up
+/// to the runtime's buffer-binding alignment.
+///
+/// A small frame can leave [`partials_len`] short of a boundary, and
+/// wgpu rejects a bind-group offset that is not a multiple of its
+/// `min_storage_buffer_offset_alignment`.
+///
+/// This matches [`temporal_stats_slot_stride_bytes`].
 pub(super) fn noise_partials_slot_stride_bytes(width: u32, height: u32, align: StorageAlign) -> u64 {
     align.pad_bytes(partials_len(width, height) as u64 * size_of::<f32>() as u64)
 }
 
-/// Dispatch both stages of the Immerkær noise estimate for `ctx.frame`,
-/// writing the per-channel absolute-mask-response totals into
-/// `ctx.results_buf` at `ctx.slot`. The results buffer is sized for
-/// `ctx.frame_count` ring slots (four `f32`s each), mirroring the input
+/// Runs both stages of the Immerkær noise estimate for one frame.
+///
+/// The per-channel totals go into the results buffer at this frame's
+/// slot.
+///
+/// That buffer holds four values per ring slot, matching the input
 /// ring's frame capacity.
 pub(super) fn run_noise_estimate<R: Runtime>(
     client: &ComputeClient<R>,
@@ -91,24 +129,32 @@ pub(super) fn run_noise_estimate<R: Runtime>(
     Ok(())
 }
 
-/// Immerkær estimate from the summed absolute mask responses. The
-/// interior area excludes the one-pixel border the mask cannot reach.
+/// Turns the summed absolute mask responses into an Immerkær sigma.
+///
+/// The interior area leaves out the one-pixel border the mask cannot
+/// reach.
 pub(super) fn sigma_from_abs_sum(abs_sum: f32, width: u32, height: u32) -> f32 {
     let interior = ((width - 2) as f32) * ((height - 2) as f32);
     (std::f32::consts::FRAC_PI_2).sqrt() * abs_sum / (6.0 * interior)
 }
 
-/// Per-channel lower quartile of per-cube Immerkær sigma estimates,
-/// read straight from one slot's stage-1 partials, `partials[cube_index
-/// * 4 + ch]` as the stage-1 kernel lays them out. A cube's own sigma
-/// is its interior-pixel overlap's share of `sigma_from_abs_sum`'s
-/// formula, the overlap of the cube's `BLOCK_X × BLOCK_Y` tile with
-/// the frame's interior rect (`1 <= x <= width - 2`, `1 <= y <= height
-/// - 2`). Cubes with no interior overlap are skipped rather than
-/// diluting the quartile with a spurious zero. The block-level
-/// quartile reads lower than [`sigma_from_abs_sum`]'s frame-wide mean
-/// whenever noise is spatially uneven, the more conservative estimate
-/// the low chain wants. Channels past `channels` stay 0.
+/// The per-channel lower quartile of the per-block Immerkær sigmas.
+///
+/// It reads one slot's partials directly, in the layout the first stage
+/// wrote them.
+///
+/// Each block's own sigma comes from the same formula
+/// [`sigma_from_abs_sum`] uses, applied to however much of that block's
+/// tile overlaps the frame's interior.
+///
+/// A block with no interior overlap is skipped rather than diluting the
+/// quartile with a spurious zero.
+///
+/// Wherever noise is uneven across a frame, this quartile reads lower
+/// than the frame-wide mean, which is the cautious estimate the low
+/// chain wants.
+///
+/// Channels past the active count stay at 0.
 pub(super) fn sigma_block_p25_from_partials(
     partials: &[f32],
     channels: u32,
@@ -159,20 +205,20 @@ pub(super) fn sigma_block_p25_from_partials(
     sigma_low
 }
 
-/// Spatial block size for the temporal residual noise-stats kernel.
-/// One cube per `TEMPORAL_NOISE_BLOCK × TEMPORAL_NOISE_BLOCK` block.
+/// The spatial block size the temporal residual statistics use, with one
+/// GPU block per square of this size.
 pub(super) const TEMPORAL_NOISE_BLOCK: u32 = 16;
 
-/// Number of `f32`s in one block's stats record: `sum_d` and `sum_d2`
-/// per stored channel, plus one channel-0 lag-1 product.
+/// How many `f32`s one block's stats record holds, being a sum and a
+/// sum of squares per stored channel plus one lag-1 total.
 pub(super) fn temporal_stats_record_len(stored_ch: u32) -> u32 {
     2 * stored_ch + 1
 }
 
-/// Block grid covering a `width × height` frame at
-/// `TEMPORAL_NOISE_BLOCK` resolution, row-major. Ragged edges are
-/// truncated rather than padded, mirroring how the block matcher
-/// handles its own ragged last block.
+/// The block grid covering a frame, laid out row-major.
+///
+/// Ragged edges are truncated rather than padded, the same way the block
+/// matcher handles its own ragged last block.
 pub(super) fn temporal_stats_blocks(width: u32, height: u32) -> (u32, u32) {
     (
         width.div_ceil(TEMPORAL_NOISE_BLOCK),
@@ -186,12 +232,15 @@ pub(super) fn temporal_stats_slot_len(width: u32, height: u32, stored_ch: u32) -
     (blocks_x * blocks_y * temporal_stats_record_len(stored_ch)) as usize
 }
 
-/// Byte stride between ring slots in the temporal-stats buffer, padded
-/// up to the runtime's buffer-binding alignment. Small frames (or a
-/// single-channel mode) can produce a [`temporal_stats_slot_len`]
-/// short of one boundary, and `wgpu` rejects a bind-group offset that
-/// isn't a multiple of its `min_storage_buffer_offset_alignment` —
-/// mirrors `MotionCtx::confidence_bytes_per_neighbour`.
+/// The byte stride between ring slots in the temporal-stats buffer,
+/// padded up to the runtime's buffer-binding alignment.
+///
+/// A small frame, or a single-channel mode, can leave
+/// [`temporal_stats_slot_len`] short of a boundary, and wgpu rejects a
+/// bind-group offset that is not a multiple of its
+/// `min_storage_buffer_offset_alignment`.
+///
+/// This matches `MotionCtx::confidence_bytes_per_neighbour`.
 pub(super) fn temporal_stats_slot_stride_bytes(
     width: u32,
     height: u32,
@@ -212,8 +261,8 @@ pub(super) fn temporal_stats_buf_bytes(
     (temporal_stats_slot_stride_bytes(width, height, stored_ch, align) * frame_count as u64) as usize
 }
 
-/// Inputs for a single temporal-residual noise-stats dispatch, diffing
-/// `slot_new` against `slot_prev` on the input ring.
+/// The inputs one temporal residual statistics dispatch needs, comparing
+/// the new slot against the previous one on the input ring.
 pub(super) struct TemporalStatsCtx<'a> {
     pub width: u32,
     pub height: u32,
@@ -226,12 +275,12 @@ pub(super) struct TemporalStatsCtx<'a> {
     pub align: StorageAlign,
 }
 
-/// Dispatch the temporal residual stats kernel for `ctx.slot_new`,
-/// writing one block record per `TEMPORAL_NOISE_BLOCK` block into
-/// `ctx.stats_buf` at `ctx.slot_new`'s (padded) region. The kernel
-/// itself only ever addresses within that one slot's slice, so it
-/// needs no awareness of the ring's other slots or the stride padding
-/// between them.
+/// Runs the temporal residual statistics kernel for the new slot,
+/// writing one record per block into that slot's padded region.
+///
+/// The kernel only ever addresses within its own slice, so it needs to
+/// know nothing about the ring's other slots or the padding between
+/// them.
 pub(super) fn run_temporal_noise_stats<R: Runtime>(
     client: &ComputeClient<R>,
     ctx: &TemporalStatsCtx<'_>,
@@ -262,11 +311,13 @@ pub(super) fn run_temporal_noise_stats<R: Runtime>(
     Ok(())
 }
 
-/// Zero-fill one ring slot's temporal-stats region. Used when a ring
-/// slot is a duplicate of its predecessor (stream priming or
-/// end-of-stream flush), so aggregation sees it as having no static
-/// blocks with measurable noise instead of a fabricated zero-noise
-/// reading.
+/// Fills one ring slot's temporal-stats region with zeroes.
+///
+/// This runs when a slot is a copy of the one before it, which happens
+/// while priming a stream and during the end-of-stream flush.
+///
+/// The zeroes read as no static blocks with measurable noise, rather
+/// than as a made-up reading of zero noise.
 pub(super) fn zero_temporal_stats_slot<R: Runtime>(
     client: &ComputeClient<R>,
     stats_buf: &Handle,
@@ -295,9 +346,11 @@ pub(super) fn zero_temporal_stats_slot<R: Runtime>(
     }
 }
 
-/// Reads back exactly one ring slot's temporal-stats region as owned
-/// `f32`s. Slices the shared ring handle by byte offset so the
-/// transfer is proportional to one slot instead of the whole ring.
+/// Reads exactly one ring slot's temporal-stats region back as owned
+/// values.
+///
+/// The shared ring handle is sliced by byte offset, so the transfer only
+/// covers one slot rather than the whole ring.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn read_temporal_stats_slot<R: Runtime>(
     client: &ComputeClient<R>,
@@ -325,64 +378,77 @@ pub(super) fn read_temporal_stats_slot<R: Runtime>(
 /// One centre slot's aggregated temporal-residual noise measurement.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct TemporalNoiseSample {
-    /// Per-channel temporal sigma (median over static blocks), `[0,
-    /// 1]` units. Unused entries past the active channel count are 0.
+    /// The per-channel sigma, taken as the median over static blocks, in
+    /// normalised units. Entries past the active channel count stay 0.
     pub sigma: [f32; 3],
-    /// Per-channel temporal sigma at the lower quartile over the same
-    /// static-block sigma sets `sigma` medians, `[0, 1]` units. A more
-    /// conservative read than `sigma`, meant for consumers where an
-    /// over-read is more harmful than an under-read. Unused entries
-    /// past the active channel count are 0.
+    /// The same per-channel sigma taken at the lower quartile instead of
+    /// the median, in normalised units.
+    ///
+    /// This reads more cautiously than `sigma`, for the consumers where
+    /// reading too high does more harm than reading too low. Entries
+    /// past the active channel count stay 0.
     pub sigma_low: [f32; 3],
-    /// Grain autocorrelation: the median, over static blocks with
-    /// measurable channel-0 noise, of the channel-0 residual's
-    /// horizontal lag-1 correlation.
+    /// How correlated the grain is between neighbouring pixels.
+    ///
+    /// It is the median, over the static blocks with measurable noise,
+    /// of how strongly each residual matches the one beside it.
     pub rho: f32,
-    /// Fraction of blocks that passed the static gate.
+    /// What fraction of blocks counted as static.
     pub static_fraction: f32,
 }
 
-/// Static gate on a block's mean channel-0 residual, `[0, 1]` units.
-/// A block whose average residual exceeds this is treated as moving
-/// content rather than measurement noise.
+/// How large a block's mean residual can be and still count as static,
+/// in normalised units.
+///
+/// A block above this is treated as moving content rather than as noise.
 const STATIC_GATE: f32 = 1.5 / 255.0;
-/// Minimum channel-0 block sigma for a static block to contribute to
-/// the rho median. Below this the block carries too little signal for
-/// its lag-1 correlation to mean anything.
+/// The smallest block sigma that still counts toward the correlation
+/// median.
+///
+/// Below this a block carries too little signal for its correlation
+/// reading to mean anything.
 const RHO_SIGMA_GATE: f32 = 0.3 / 255.0;
-/// Minimum fraction of static blocks for a sample to be trusted.
+/// The smallest fraction of static blocks a sample needs to be trusted.
+///
 /// Below this, motion or a scene change dominates the frame and the
-/// Immerkær estimate is the only usable signal.
+/// Immerkær estimate is the only usable reading.
 const STATIC_FRACTION_MIN: f32 = 0.05;
-/// How far above the mean-gate-passing population's own lower
-/// quartile a block's channel-0 sigma may sit before it is treated as
-/// displaced texture rather than measurement noise. A block panning
-/// over texture can average to zero over a `TEMPORAL_NOISE_BLOCK`
-/// window (clearing [`STATIC_GATE`]) while its variance is entirely
-/// the shifted texture, not repeatable noise, and that variance runs
-/// several times higher than the rest of the frame's blocks. Real
-/// measurement noise stays within a much narrower spread across a
-/// frame even where its magnitude is genuinely uneven (a dark region
-/// reading noisier than a bright one), so this leaves headroom past
-/// that legitimate spread while still catching texture outliers. The
-/// lower quartile (not the median) is the reference so the filter
-/// still works once texture is the majority of gate-passing blocks,
-/// as long as a genuinely static minority remains to anchor it. The
-/// quartile is computed only over blocks whose own sigma clears
-/// [`RHO_SIGMA_GATE`], since letterbox bars and other exactly-static
-/// regions read a channel-0 sigma of exactly `0`. Left in, they can
-/// dominate the mean-gate-passing population enough to drag the
-/// quartile itself to `0`, which would reject every block carrying
-/// real noise instead of just the texture outliers. That exclusion
-/// only holds up when a genuinely low population still exists to
-/// anchor the quartile against. See
-/// [`aggregate_temporal_noise_stats`]'s doc for what happens when it
-/// doesn't.
+/// How far above the surviving blocks' own lower quartile a block's
+/// sigma may sit before it is treated as moving texture rather than
+/// noise.
+///
+/// # Why this is needed
+///
+/// A block panning across texture can average out to nearly nothing
+/// over its window, which clears [`STATIC_GATE`], while its variance is
+/// entirely shifted texture rather than repeatable noise. That variance
+/// runs several times higher than the rest of the frame's blocks.
+///
+/// Real noise keeps a much narrower spread across a frame, even where
+/// its magnitude genuinely varies, such as a dark region reading noisier
+/// than a bright one. This threshold leaves room for that spread while
+/// still catching the texture outliers.
+///
+/// # Why the lower quartile
+///
+/// The reference is the lower quartile rather than the median, so the
+/// filter still works once texture makes up most of the surviving
+/// blocks, as long as a genuinely static minority remains to anchor it.
+///
+/// The quartile is computed only over blocks whose own sigma clears
+/// [`RHO_SIGMA_GATE`]. Letterbox bars and other perfectly static regions
+/// read a sigma of exactly 0, and leaving them in can drag the quartile
+/// itself to 0, which would reject every block carrying real noise
+/// rather than just the outliers.
+///
+/// That exclusion only holds up while a genuinely low population remains
+/// to anchor the quartile. [`aggregate_temporal_noise_stats`] covers
+/// what happens when none does.
 const SIGMA_OUTLIER_FACTOR: f32 = 5.0;
 
-/// One mean-gate-passing block's per-channel stats, held only long
-/// enough to compute the population's own outlier reference before
-/// deciding which blocks are actually static.
+/// One surviving block's per-channel stats, kept just long enough to
+/// work out the reference the outlier check needs before deciding which
+/// blocks are really static.
 struct StaticGateCandidate {
     sigmas: [f32; 3],
     sigma_ch0: f32,
@@ -392,45 +458,63 @@ struct StaticGateCandidate {
     n_pairs: f32,
 }
 
-/// Aggregates one centre slot's per-block temporal-residual records
-/// into a [`TemporalNoiseSample`]. `records` holds exactly one slot's
-/// region, laid out block row-major as documented on
-/// [`nlm_temporal_noise_stats`]. Returns `None` when static blocks
-/// fall below [`STATIC_FRACTION_MIN`] (too much motion to trust), when
-/// no static block clears [`RHO_SIGMA_GATE`] (no measurable noise to
-/// correlate — the median rho would be undefined — which is also what
-/// a zero-filled duplicate slot's records produce), or when the
-/// outlier gate below has no way to validate its own ceiling.
+/// Combines one centre slot's per-block records into a single
+/// [`TemporalNoiseSample`].
 ///
-/// Classifying a block as static takes two passes. The first is the
-/// signed mean-residual gate ([`STATIC_GATE`]). It clears a block
-/// whose average residual is near zero, but a block panning over
-/// texture can clear it too, since a displaced texture pattern
-/// averages toward zero over a block just as noise does. The second
-/// pass catches what the first lets through. It rejects any
-/// mean-gate-passing block whose channel-0 sigma sits far above the
-/// passing population's own lower quartile ([`SIGMA_OUTLIER_FACTOR`]),
-/// since a panning block's variance comes from the texture it slid
-/// across, not from noise shared with the rest of the frame. That
-/// quartile itself only looks at blocks clearing [`RHO_SIGMA_GATE`],
-/// so an exactly-static population (letterbox bars, for example)
-/// cannot drag the ceiling down to `0` and reject every noisy block
-/// along with it.
+/// `records` holds exactly one slot's region, laid out block by block as
+/// [`nlm_temporal_noise_stats`] documents.
 ///
-/// Excluding those low-sigma blocks has its own failure mode. If
-/// every block that clears `RHO_SIGMA_GATE` turns out to be
-/// texture, that population sets its own ceiling and lets every one
-/// of its own members through, since a value never exceeds a
-/// multiple of itself. Nothing in a single block's stats says
-/// "texture" versus "noise", so the only corroboration available is
-/// whether the surviving population shows any internal spread at
-/// all. Real per-block sigma, measured over a finite sample, always
-/// carries some variance across blocks, even for physically uniform
-/// noise. When low-sigma blocks were excluded and what's left is
-/// perfectly uniform, that is the specific signature of a
-/// self-selected outlier population with no genuine anchor to check
-/// it against, and this function reports `None` rather than a
-/// confident, possibly texture-inflated sigma.
+/// # When no sample is produced
+///
+/// This returns `None` in three cases.
+///
+/// Too few blocks counted as static, below [`STATIC_FRACTION_MIN`], so
+/// motion dominates the frame and nothing here can be trusted.
+///
+/// No static block carried measurable noise, so the correlation median
+/// would be undefined. A zero-filled duplicate slot produces exactly
+/// this.
+///
+/// The outlier check below had no way to validate its own ceiling.
+///
+/// # Deciding which blocks are static
+///
+/// This takes two passes.
+///
+/// The first checks each block's mean residual against [`STATIC_GATE`].
+/// A block whose average residual is near zero passes, but a block
+/// panning across texture passes too, because displaced texture averages
+/// toward zero over a block just as noise does.
+///
+/// The second pass catches what the first let through. It rejects any
+/// surviving block whose sigma sits far above the surviving population's
+/// own lower quartile, by more than [`SIGMA_OUTLIER_FACTOR`]. A panning
+/// block's variance comes from the texture it slid across, not from
+/// noise shared with the rest of the frame.
+///
+/// That quartile looks only at blocks clearing [`RHO_SIGMA_GATE`], so a
+/// perfectly static region such as a letterbox bar cannot drag the
+/// ceiling to 0 and reject every noisy block with it.
+///
+/// # When the ceiling cannot be trusted
+///
+/// Excluding those low-sigma blocks has a cost of its own. If every
+/// remaining block turns out to be texture, that population sets its own
+/// ceiling and lets all of its members through, because a value never
+/// exceeds a multiple of itself.
+///
+/// Nothing in a single block's stats distinguishes texture from noise,
+/// so the only check left is whether the surviving population shows any
+/// internal spread.
+///
+/// Real per-block sigma, measured over a finite sample, always varies a
+/// little from block to block, even for physically uniform noise. So
+/// once the low-sigma blocks are gone, a perfectly uniform remainder is
+/// the signature of a self-selected outlier population with nothing to
+/// anchor it.
+///
+/// In that case this reports `None` rather than a confident sigma that
+/// may be inflated by texture.
 pub(super) fn aggregate_temporal_noise_stats(
     records: &[f32],
     channels: u32,
@@ -498,15 +582,18 @@ pub(super) fn aggregate_temporal_noise_stats(
         }
     }
 
-    // Exactly-static blocks (letterbox bars, a duplicate frame) read
-    // sigma_ch0 == 0 and clear STATIC_GATE trivially, so they can
-    // dominate the mean-gate-passing population without carrying any
-    // measurable noise. Left in this reference set, they drag the
-    // quartile itself toward 0, which then rejects every block with
-    // real noise instead of just the texture outliers the gate exists
-    // to catch. Restricting the reference to blocks that themselves
-    // clear RHO_SIGMA_GATE keeps the ceiling anchored to blocks that
-    // could plausibly be noise.
+    // A perfectly static block, such as a letterbox bar or a duplicate
+    // frame, reads a sigma of 0 and clears STATIC_GATE without effort.
+    // Blocks like that can dominate the surviving population while
+    // carrying no measurable noise at all.
+    //
+    // Left in this reference set they drag the quartile toward 0, which
+    // then rejects every block with real noise instead of just the
+    // texture outliers the check exists for.
+    //
+    // Limiting the reference to blocks that themselves clear
+    // RHO_SIGMA_GATE keeps the ceiling anchored to blocks that could
+    // plausibly be noise.
     let mut reference_sigma_ch0: Vec<f32> = candidates
         .iter()
         .map(|c| c.sigma_ch0)
@@ -514,28 +601,28 @@ pub(super) fn aggregate_temporal_noise_stats(
         .collect();
     sort_ascending(&mut reference_sigma_ch0);
 
-    // Excluding low-sigma blocks from the reference set removes the
-    // information they carried (or lacked), and that has a cost. `x <=
-    // x * SIGMA_OUTLIER_FACTOR` holds for any `x >= 0`, so if every
-    // mean-gate-passing block above RHO_SIGMA_GATE turns out to be a
-    // texture-panning block, that population sets its own ceiling and
-    // lets every one of them through, exactly the failure the ceiling
-    // exists to prevent. There's no feature available here (sigma
-    // magnitude, rho) that tells texture and noise apart on its own,
-    // so this function instead requires corroboration. Some candidates
-    // must have been excluded by RHO_SIGMA_GATE, and the reference
-    // population that's left must show genuine internal spread (its
-    // lowest and highest readings differ). Real per-block sigma is
-    // measured over a finite (`TEMPORAL_NOISE_BLOCK`)² sample, so even
-    // physically uniform noise carries some sampling variance across
-    // blocks. A reference population with zero spread at all, sitting
-    // alongside excluded low-sigma blocks, is the specific signature
-    // this function can't resolve, so it reports `None` rather than a
-    // confident, potentially texture-inflated sigma. Populations where
-    // nothing was excluded (no low-sigma blocks to begin with) skip
-    // this check entirely and are trusted directly, unaffected by
-    // whether a low-sigma population happens to exist elsewhere in the
-    // frame.
+    // Dropping the low-sigma blocks throws away what they told us, and
+    // that has a cost. A value never exceeds a multiple of itself, so
+    // if every remaining block turns out to be a texture-panning block,
+    // that population sets its own ceiling and lets all of them
+    // through, which is exactly the failure the ceiling exists to
+    // prevent.
+    //
+    // Nothing available here tells texture and noise apart on its own,
+    // so this asks for corroboration instead. Some blocks must have
+    // been excluded, and the reference population left behind must show
+    // real internal spread, meaning its lowest and highest readings
+    // differ.
+    //
+    // Per-block sigma is measured over a finite sample, so even
+    // physically uniform noise varies a little from block to block. A
+    // reference population with no spread at all, sitting next to
+    // excluded low-sigma blocks, is the case this cannot resolve, so it
+    // reports None rather than a sigma that may be inflated by texture.
+    //
+    // A population where nothing was excluded, because there were no
+    // low-sigma blocks to begin with, skips this check and is trusted
+    // directly.
     let candidates_were_excluded = candidates.len() > reference_sigma_ch0.len();
     let reference_has_spread = match (reference_sigma_ch0.first(), reference_sigma_ch0.last()) {
         (Some(&lo), Some(&hi)) => hi > lo,
@@ -594,17 +681,18 @@ pub(super) fn aggregate_temporal_noise_stats(
     })
 }
 
-/// Sorts `values` ascending in place. A shared first step for
-/// [`median`] and [`lower_quartile`], so a caller that needs both
-/// statistics from the same set sorts once and passes the same slice
-/// to each.
+/// Sorts `values` into ascending order in place.
+///
+/// Both [`median`] and [`lower_quartile`] need this first, so a caller
+/// wanting both sorts once and passes the same slice to each.
 fn sort_ascending(values: &mut [f32]) {
     values.sort_by(|a, b| a.partial_cmp(b).expect("noise stats are never NaN"));
 }
 
-/// Median of an ascending-sorted `values`. The average of the two
-/// middle elements on an even count. Callers only invoke this on a
-/// non-empty slice.
+/// The median of an already-sorted slice, averaging the two middle
+/// elements when the count is even.
+///
+/// Callers only ever pass a non-empty slice.
 fn median(values: &[f32]) -> f32 {
     let n = values.len();
     if n % 2 == 1 {
@@ -614,10 +702,13 @@ fn median(values: &[f32]) -> f32 {
     }
 }
 
-/// Lower quartile of an ascending-sorted `values`, index `0.25 * (n -
-/// 1)` with linear interpolation between the two neighbouring
-/// elements. A single-element slice returns that element. Callers
-/// only invoke this on a non-empty slice.
+/// The lower quartile of an already-sorted slice.
+///
+/// It reads the value a quarter of the way along, interpolating between
+/// the two neighbouring elements when that lands between them.
+///
+/// A slice of one returns that element. Callers only ever pass a
+/// non-empty slice.
 fn lower_quartile(values: &[f32]) -> f32 {
     let n = values.len();
     if n == 1 {
@@ -634,26 +725,32 @@ fn lower_quartile(values: &[f32]) -> f32 {
     }
 }
 
-/// Piecewise-linear correlation-correction table, `(rho, factor)`
-/// points sorted by `rho`. Measured on synthetic correlated-grain
-/// sweeps against the clean bench reference. Each factor is how far
-/// the quality peak shifts above the true marginal sigma at that
-/// grain autocorrelation, relative to the white-noise optimum at the
-/// same sigma. At the heaviest measured correlation both XPSNR and
-/// SSIM prefer the raised value. Clamped flat past the last measured
-/// point.
+/// The correlation-correction table, as points sorted by correlation.
+///
+/// It was measured on synthetic correlated-grain sweeps against the
+/// clean bench reference.
+///
+/// Each factor is how far the quality peak sits above the true sigma at
+/// that level of grain correlation, relative to the white-noise optimum
+/// at the same sigma.
+///
+/// At the heaviest correlation measured, both quality metrics prefer the
+/// raised value. Past the last measured point the table holds flat.
 const CORRELATION_FACTOR_TABLE: [(f32, f32); 4] = [(0.0, 1.0), (0.3, 1.05), (0.5, 1.25), (0.65, 1.45)];
 
-/// Correction factor turning a temporal sigma into an effective sigma
-/// that accounts for spatial grain correlation:
-/// `sigma_eff = sigma * correlation_factor(rho)`.
+/// The factor that turns a measured temporal sigma into an effective one
+/// allowing for grain correlation.
+///
+/// The effective sigma is the measured one multiplied by this.
 pub(super) fn correlation_factor(rho: f32) -> f32 {
     interpolate_table(&CORRELATION_FACTOR_TABLE, rho)
 }
 
-/// Piecewise-linear interpolation over a small table of `(x, y)`
-/// points sorted by `x`. Clamps `x` to the table's own range first, so
-/// the result never extrapolates past the endpoints.
+/// Reads a value from a small table of points sorted by `x`,
+/// interpolating between the two nearest entries.
+///
+/// `x` is clamped to the table's own range first, so the result never
+/// runs past the endpoints.
 fn interpolate_table(table: &[(f32, f32)], x: f32) -> f32 {
     let x = x.clamp(table[0].0, table[table.len() - 1].0);
 
@@ -672,15 +769,20 @@ fn interpolate_table(table: &[(f32, f32)], x: f32) -> f32 {
     table[table.len() - 1].1
 }
 
-/// Attenuation factor for the spatial noise-floor offset at grain
-/// autocorrelation `rho` and integer candidate offset `(dx, dy)`.
-/// Spatial candidates share correlated noise with their centre patch,
-/// so only a `(1 - rho^d)` fraction of the white-noise floor is
-/// independent noise, where `d = sqrt(dx^2 + dy^2)`. The self offset
-/// (`dx == dy == 0`) always returns 0, its true distance is zero, so
-/// none of the floor is independent noise. `rho <= 0` (no measured
-/// correlation, or auto estimation inert) returns 1 for every other
-/// offset, reproducing the flat white-noise floor exactly.
+/// How much of the noise floor still applies at a given candidate
+/// offset, once grain correlation is taken into account.
+///
+/// A nearby candidate shares some of its grain with the centre patch, so
+/// only part of the white-noise floor is genuinely independent noise.
+/// The further away the candidate, the less they share, and the more of
+/// the floor applies.
+///
+/// The centre itself always returns 0, because its true distance is zero
+/// and none of the floor is independent noise there.
+///
+/// With no measured correlation, which is also what an inert estimator
+/// gives, every other offset returns 1, reproducing the flat white-noise
+/// floor exactly.
 pub(super) fn spatial_offset_factor(dx: i32, dy: i32, rho: f32) -> f32 {
     if dx == 0 && dy == 0 {
         return 0.0;
@@ -692,18 +794,21 @@ pub(super) fn spatial_offset_factor(dx: i32, dy: i32, rho: f32) -> f32 {
     1.0 - (d * rho.ln()).exp()
 }
 
-/// Number of `f32`s in a `search_radius`-sized spatial-offset LUT.
+/// How many `f32`s a spatial-offset table needs at a given search
+/// radius.
 pub(super) fn spatial_offset_lut_len(search_radius: u32) -> usize {
     let side = (2 * search_radius + 1) as usize;
     side * side
 }
 
-/// Builds the per-candidate spatial noise-floor offset LUT for a
-/// `search_radius`-sized search window, row-major
-/// `(dy+search_radius)*(2*search_radius+1)+(dx+search_radius)`.
-/// `lut[q] = noise_offset * spatial_offset_factor(dx, dy, rho)`. Cheap
-/// enough to rebuild every `denoise_submit` (at most `(2*8+1)^2 = 289`
-/// entries at the largest supported search radius).
+/// Builds the per-candidate noise-floor table for a search window, laid
+/// out row-major.
+///
+/// Each entry is the flat noise offset scaled by how much of it applies
+/// at that candidate's distance.
+///
+/// It is cheap enough to rebuild on every submit, reaching at most 289
+/// entries at the largest supported search radius.
 pub(super) fn build_spatial_offset_lut(search_radius: u32, rho: f32, noise_offset: f32) -> Vec<f32> {
     let r = search_radius as i32;
     let side = (2 * search_radius + 1) as usize;
@@ -717,27 +822,35 @@ pub(super) fn build_spatial_offset_lut(search_radius: u32, rho: f32, noise_offse
     lut
 }
 
-/// EMA weight for the newest frame estimate. Shared by the sigma
-/// estimator below and the denoiser's `rho_smoothed` EMA.
+/// How much weight the newest frame's estimate carries when smoothing.
+///
+/// The sigma estimator below and the denoiser's own correlation
+/// smoothing both use it.
 pub(super) const EMA_ALPHA: f32 = 0.2;
-/// Lower bound on the smoothed sigma in `[0, 1]` units (0.1 in 8-bit
-/// terms). Near-zero estimates would blow up the derived strength.
+/// The smallest smoothed sigma allowed, in normalised units, which works
+/// out at 0.1 in 8-bit terms.
+///
+/// An estimate near zero would send the derived strength to infinity.
 const SIGMA_FLOOR: f32 = 0.1 / 255.0;
 
-/// Per-stream noise state. Smooths per-frame estimates with an EMA so
-/// single busy frames cannot spike the strength, and floors the result
-/// so near-clean content keeps a usable Welsch normalisation.
+/// The noise state for one stream.
+///
+/// It smooths the per-frame estimates over time, so a single busy frame
+/// cannot spike the strength, and applies a floor so near-clean content
+/// keeps a usable normalisation factor.
 #[derive(Debug, Default)]
 pub(super) struct NoiseEstimator {
     ema: Option<Vec<f32>>,
 }
 
 impl NoiseEstimator {
-    /// Folds a new set of per-channel sigma samples into the running
-    /// EMA and returns the smoothed result. The first call initialises
-    /// the state directly from `sigmas` (no prior estimate to blend
-    /// with). Every element is floored at [`SIGMA_FLOOR`] regardless of
-    /// how it was produced.
+    /// Folds a new set of per-channel sigmas into the running estimate
+    /// and returns the smoothed result.
+    ///
+    /// The first call sets the state directly from the sample, because
+    /// there is no earlier estimate to blend with.
+    ///
+    /// Every element is floored at [`SIGMA_FLOOR`] either way.
     pub(super) fn update(&mut self, sigmas: &[f32]) -> &[f32] {
         match &mut self.ema {
             None => {
@@ -752,16 +865,16 @@ impl NoiseEstimator {
         self.ema.as_deref().unwrap()
     }
 
-    /// Clears the running estimate. The next [`Self::update`] call
-    /// re-initialises from its sample instead of blending with stale
-    /// state.
+    /// Clears the running estimate.
+    ///
+    /// The next [`Self::update`] then starts from its own sample rather
+    /// than blending with stale state.
     pub(super) fn reset(&mut self) {
         self.ema = None;
     }
 
-    /// Current smoothed per-channel sigma, or `None` before the first
-    /// [`Self::update`] call.
-    #[cfg(test)]
+    /// The current smoothed per-channel sigma, or `None` before the
+    /// first [`Self::update`] call.
     pub(super) fn current(&self) -> Option<&[f32]> {
         self.ema.as_deref()
     }
@@ -810,16 +923,16 @@ mod tests {
         est.update(&[0.10]);
         est.reset();
 
-        // After reset, the next update should re-initialise directly
-        // from the sample rather than blending with the stale 0.10.
+        // After a reset the next update should start from its own
+        // sample rather than blending with the stale 0.10.
         let out = est.update(&[0.02]);
         assert_eq!(out, &[0.02]);
     }
 
     #[test]
     fn sigma_from_abs_sum_zero_for_zero_response() {
-        // No mask response anywhere in the frame must estimate zero
-        // noise regardless of frame size.
+        // No mask response anywhere in the frame has to estimate zero
+        // noise, whatever the frame size.
         assert_eq!(sigma_from_abs_sum(0.0, 64, 64), 0.0);
     }
 
@@ -832,31 +945,32 @@ mod tests {
 
     #[test]
     fn noise_partials_slot_stride_bytes_pads_odd_cube_count() {
-        // A single BLOCK_X x BLOCK_Y cube, partials_len(32, 8) = 4
-        // f32s = 16 bytes, padded up to the next 32-byte multiple.
+        // A single block, whose 4 values come to 16 bytes and pad up to
+        // the next 32-byte multiple.
         assert_eq!(noise_partials_slot_stride_bytes(32, 8, StorageAlign::new(32)), 32);
     }
 
     #[test]
     fn noise_partials_slot_stride_bytes_aligned_count_unchanged() {
-        // A 2x2 cube grid, partials_len(33, 9) = 16 f32s = 64 bytes,
-        // already a multiple of 32, so no padding is added.
+        // A 2x2 grid of blocks, whose 16 values come to 64 bytes.
+        // That is already a multiple of 32, so nothing is padded.
         assert_eq!(noise_partials_slot_stride_bytes(33, 9, StorageAlign::new(32)), 64);
     }
 
-    /// A `70x20` frame grids into a ragged 3x3 cube layout (`BLOCK_X =
-    /// 32`, `BLOCK_Y = 8`). Two full columns/rows plus one partial each,
-    /// so every cube's interior-overlap area is distinct. Hand-computed
-    /// per-cube interior areas, row-major `[cy][cx]`, summing exactly to
-    /// the frame's own interior area `(70-2)*(20-2) = 1224`.
+    /// A 70x20 frame grids into a ragged 3x3 layout of blocks, two full
+    /// rows and columns plus a partial one each way, so every block's
+    /// interior overlap is a different size.
+    ///
+    /// These are the hand-computed interior areas, row by row, summing
+    /// exactly to the frame's own interior area of 1224.
     const RAGGED_CUBE_AREAS: [[f32; 3]; 3] = [[217.0, 224.0, 35.0], [248.0, 256.0, 40.0], [93.0, 96.0, 15.0]];
 
-    /// A uniform per-pixel mask response has the same sigma in every
-    /// cube regardless of that cube's area, since `sum = r * area`
-    /// cancels the area out of `sigma_from_abs_sum`'s formula. The
-    /// block-level lower quartile of identical values is that same
-    /// value, and it must equal the frame-wide estimate over the same
-    /// total response.
+    /// A uniform mask response gives every block the same sigma whatever
+    /// its area, because the area cancels out of the formula.
+    ///
+    /// The lower quartile of identical values is that same value, and it
+    /// has to match the frame-wide estimate over the same total
+    /// response.
     #[test]
     fn sigma_block_p25_from_partials_uniform_response_matches_frame_wide() {
         let width = 70;
@@ -884,10 +998,12 @@ mod tests {
         );
     }
 
-    /// Nine cubes given a permutation of `1..9` (in `/255` sigma units,
-    /// via each cube's own area) so sorting ascending reproduces exactly
-    /// `[1, 2, ..., 9] / 255`. `n = 9` puts the lower-quartile index at
-    /// `0.25 * 8 = 2.0` exactly, the third-smallest cube.
+    /// Nine blocks are given a shuffled set of sigmas from 1 to 9 in
+    /// 8-bit units, scaled through each block's own area, so sorting
+    /// them reproduces that run exactly.
+    ///
+    /// With nine values the lower quartile lands exactly on the third
+    /// smallest, with no interpolation.
     #[test]
     fn sigma_block_p25_from_partials_distinct_sums_pick_expected_cube() {
         let width = 70;
@@ -925,20 +1041,23 @@ mod tests {
 
     #[test]
     fn lower_quartile_odd_count_exact_index() {
-        // n = 5, idx = 0.25 * 4 = 1.0 exact, no interpolation needed.
+        // With 5 values the quartile lands on index 1 exactly, so no
+        // interpolation is needed.
         assert_eq!(lower_quartile(&[1.0, 2.0, 3.0, 4.0, 5.0]), 2.0);
     }
 
     #[test]
     fn lower_quartile_even_count() {
-        // n = 4, idx = 0.25 * 3 = 0.75, between values[0] and values[1].
+        // With 4 values the quartile lands at 0.75, between the first
+        // two.
         let got = lower_quartile(&[1.0, 2.0, 3.0, 4.0]);
         assert!((got - 1.75).abs() < 1e-6, "expected 1.75, got {got}");
     }
 
     #[test]
     fn lower_quartile_interpolates_at_a_fractional_index() {
-        // n = 3, idx = 0.25 * 2 = 0.5, halfway between values[0] and values[1].
+        // With 3 values the quartile lands halfway between the first
+        // two.
         let got = lower_quartile(&[10.0, 20.0, 30.0]);
         assert!((got - 15.0).abs() < 1e-6, "expected 15.0, got {got}");
     }
@@ -988,10 +1107,11 @@ mod tests {
         );
     }
 
-    /// Five static blocks with distinct sigmas and (for the four that
-    /// clear the rho gate) distinct rhos. Exercises the odd-count sigma
-    /// median, the even-count rho median, and the sigma lower quartile
-    /// in one pass.
+    /// Five static blocks, each with its own sigma, and four of them
+    /// with their own correlation reading too.
+    ///
+    /// That covers the odd-count median, the even-count median, and the
+    /// lower quartile in one pass.
     #[test]
     fn aggregate_median_over_multiple_static_blocks() {
         let width = 16 * 5;
@@ -1001,8 +1121,8 @@ mod tests {
         let n = 256.0f32;
         let n_pairs = 240.0f32;
 
-        // Block 0's sigma sits below RHO_SIGMA_GATE, so its rho (0.0,
-        // unused) never enters the rho set; the other four all clear it.
+        // Block 0's sigma sits below RHO_SIGMA_GATE, so its correlation
+        // reading never enters the set. The other four all clear it.
         let sigmas_255 = [0.1f32, 2.0, 3.0, 4.0, 5.0];
         let rhos = [0.0f32, 0.1, 0.3, 0.5, 0.7];
 
@@ -1036,9 +1156,11 @@ mod tests {
         );
     }
 
-    /// Only 1 of 25 blocks is static (4%), below `STATIC_FRACTION_MIN`.
-    /// That single block otherwise carries perfectly valid noise, so
-    /// this isolates the 5% floor from the empty-rho-set fallback.
+    /// Only 1 of 25 blocks is static, which is below
+    /// `STATIC_FRACTION_MIN`.
+    ///
+    /// That single block carries perfectly valid noise otherwise, which
+    /// isolates the static-fraction floor from the other fallback.
     #[test]
     fn aggregate_below_static_floor_returns_none() {
         let width = 16 * 5;
@@ -1063,10 +1185,11 @@ mod tests {
         );
     }
 
-    /// A zero-filled duplicate slot's records must fall back to
-    /// Immerkær, not report a fabricated sigma of zero. Every block
-    /// passes the static gate trivially (mean0 = 0), so this exercises
-    /// the empty-rho-set path rather than the 5% floor.
+    /// A zero-filled duplicate slot has to fall back to Immerkær rather
+    /// than report a made-up sigma of zero.
+    ///
+    /// Every block passes the static check trivially, so this covers the
+    /// no-measurable-noise path rather than the static-fraction floor.
     #[test]
     fn aggregate_zeroed_slot_returns_none() {
         let width = 32;
@@ -1083,9 +1206,9 @@ mod tests {
         );
     }
 
-    /// YUV storage (`stored_ch = 4`, `channels = 3`): per-channel sums
-    /// must be read from the right stride offset, and the unused pad
-    /// lane must never influence the result.
+    /// With YUV storage the three real channels sit in four lanes, so
+    /// each channel's sums have to be read at the right stride and the
+    /// unused padding lane must never affect the result.
     #[test]
     fn aggregate_multi_channel_layout_reads_correct_offsets() {
         let width = 16;
@@ -1124,10 +1247,12 @@ mod tests {
         assert!((sample.rho - rho_target).abs() < 1e-4);
     }
 
-    /// Builds one block's record from a closed-form channel-0 sigma and
-    /// rho, `sum_d` always 0 so the block clears [`STATIC_GATE`]
-    /// trivially. Shared by the outlier-gate tests below, which only
-    /// vary each block's sigma.
+    /// Builds one block's record from a chosen sigma and correlation,
+    /// with a mean residual of 0 so the block clears [`STATIC_GATE`]
+    /// without effort.
+    ///
+    /// The outlier tests below share this and only vary each block's
+    /// sigma.
     fn zero_mean_block_record(sigma_255: f32, rho: f32) -> [f32; 3] {
         let n = 256.0f32;
         let n_pairs = 240.0f32;
@@ -1136,17 +1261,20 @@ mod tests {
         [0.0, n * var, n_pairs * rho * var]
     }
 
-    /// A `64x64` frame (16 `TEMPORAL_NOISE_BLOCK` blocks) where most
-    /// blocks are a panning-texture stand-in. Each has zero mean
-    /// residual (it clears [`STATIC_GATE`] the same way real
-    /// measurement noise does) but a channel-0 sigma an order of
-    /// magnitude above the minority of genuinely static blocks, and
-    /// zero lag-1 correlation
-    /// (`rho = 0`, ruling out a rho-based gate as the fix, since these
-    /// blocks look exactly like white noise at lag 1). Without the
-    /// outlier gate, the plain mean gate lets every block through and
-    /// the majority-texture population dominates the median, reading
-    /// the panning blocks' sigma instead of the real noise floor.
+    /// A 64x64 frame of 16 blocks where most stand in for panning
+    /// texture.
+    ///
+    /// Each has a mean residual of zero, clearing [`STATIC_GATE`] the
+    /// same way real noise does, but a sigma an order of magnitude above
+    /// the genuinely static minority.
+    ///
+    /// Their correlation reading is zero, so they look exactly like
+    /// white noise on that measure. That rules out a correlation-based
+    /// check as the fix.
+    ///
+    /// Without the outlier check the mean check lets every block
+    /// through, and the texture majority dominates the median, reading
+    /// their sigma instead of the real noise floor.
     #[test]
     fn aggregate_rejects_majority_zero_mean_texture_outliers() {
         let width = 64;
@@ -1158,9 +1286,9 @@ mod tests {
         let background_rho = 0.1f32;
         let texture_sigma_255 = 20.0f32;
 
-        // 6 genuinely static blocks, 10 panning-texture blocks. The
-        // texture population is the majority of the 16 blocks, so a
-        // plain population median would read the texture level.
+        // 6 genuinely static blocks against 10 panning-texture ones.
+        // The texture blocks are the majority of the 16, so a plain
+        // median would read their level instead.
         let mut records = Vec::new();
         for _ in 0..6 {
             records.extend_from_slice(&zero_mean_block_record(background_sigma_255, background_rho));
@@ -1190,11 +1318,12 @@ mod tests {
         );
     }
 
-    /// The opposite failure direction. Every block is genuinely static
-    /// but the frame's real noise floor varies spatially by 3x (a dark
-    /// region reading noisier than a bright one, same as real sensor
-    /// noise commonly does). None of this spread is texture, so the
-    /// outlier gate must not drop any of it.
+    /// The opposite failure. Every block here is genuinely static, but
+    /// the frame's real noise varies threefold across it, the way a dark
+    /// region often reads noisier than a bright one.
+    ///
+    /// None of that spread is texture, so the outlier check must not
+    /// drop any of it.
     #[test]
     fn aggregate_keeps_genuinely_static_blocks_despite_spatial_sigma_spread() {
         let width = 64;
@@ -1224,14 +1353,15 @@ mod tests {
         );
     }
 
-    /// 8 identical background blocks fix the mean-gate-passing
-    /// population's own lower quartile at `background_sigma_255`
-    /// regardless of a 9th block's sigma. With `n = 9` candidates the
-    /// lower-quartile index (`0.25 * 8 = 2.0` exact) lands on the
-    /// 3rd-smallest, still one of the 8 identical values as long as the
-    /// 9th sorts above them. A `48x48` frame grids into exactly 9
-    /// `TEMPORAL_NOISE_BLOCK` blocks, so the 9th block here is the only
-    /// free variable.
+    /// Eight identical background blocks pin the surviving population's
+    /// lower quartile, whatever a ninth block's sigma turns out to be.
+    ///
+    /// With nine values the quartile lands exactly on the third
+    /// smallest, which is still one of the eight identical ones as long
+    /// as the ninth sorts above them.
+    ///
+    /// A 48x48 frame grids into exactly nine blocks, so that ninth block
+    /// is the only thing that varies.
     fn outlier_factor_boundary_records(
         background_sigma_255: f32,
         background_rho: f32,
@@ -1245,23 +1375,25 @@ mod tests {
         records
     }
 
-    /// Calibrated boundary for the outlier gate, pinned as literals
-    /// rather than derived from [`SIGMA_OUTLIER_FACTOR`] itself, so
-    /// the two tests below assert the actual measured calibration
-    /// instead of the gate's own arithmetic (`sigma <=
-    /// quartile * SIGMA_OUTLIER_FACTOR` reduces to `ratio <=
-    /// SIGMA_OUTLIER_FACTOR` for any constant value, which proves
-    /// nothing about where that value should sit). `4.99` and `5.01`
-    /// bracket the measured calibration from the original
-    /// investigation (a scratchpad simulation, `sim3a.py`, not
-    /// committed to the repo). A genuinely static frame with a real
-    /// spatial noise-floor spread up to 4x survives, and a spread of
-    /// 5x is where trimming starts, so `5.0` was chosen as
-    /// [`SIGMA_OUTLIER_FACTOR`]'s value with headroom above the real
-    /// spread and margin below where texture contamination is caught.
-    /// A deliberate change to [`SIGMA_OUTLIER_FACTOR`] needs to update
-    /// these two literals to match, or these tests will (correctly)
-    /// fail.
+    /// The two ratios bracketing the outlier check's calibrated
+    /// boundary.
+    ///
+    /// They are written as literals rather than derived from
+    /// [`SIGMA_OUTLIER_FACTOR`], so the tests below assert the measured
+    /// calibration rather than the check's own arithmetic. Deriving them
+    /// would reduce to comparing the constant with itself, which proves
+    /// nothing about where it should sit.
+    ///
+    /// The measurement came from a scratchpad simulation during the
+    /// original investigation, which is not in this repo. A genuinely
+    /// static frame with a real noise spread up to fourfold survives,
+    /// and trimming starts at fivefold.
+    ///
+    /// So 5.0 was chosen with room above the real spread and margin
+    /// below where texture contamination is caught.
+    ///
+    /// Changing [`SIGMA_OUTLIER_FACTOR`] on purpose means updating these
+    /// two literals to match, or these tests will rightly fail.
     const OUTLIER_FACTOR_SURVIVES_RATIO: f32 = 4.99;
     const OUTLIER_FACTOR_REJECTS_RATIO: f32 = 5.01;
 
@@ -1317,33 +1449,39 @@ mod tests {
         );
     }
 
-    /// A `160x160` frame (100 `TEMPORAL_NOISE_BLOCK` blocks, a 10x10
-    /// grid) where 26 blocks are exactly-zero-residual letterbox bars
-    /// and the other 74 carry real static noise. Both populations
-    /// trivially clear [`STATIC_GATE`] (mean residual is exactly zero
-    /// for the bars, and centred on zero by construction for the real
-    /// noise), so all 100 land in the mean-gate-passing population.
+    /// A 160x160 frame of 100 blocks, where 26 stand in for letterbox
+    /// bars with no residual at all and the other 74 carry real static
+    /// noise.
     ///
-    /// The 74 real-noise blocks cycle through five close sigma levels
-    /// (`3.8..=4.2` in `/255` units, `0.1` apart) rather than a single
-    /// repeated value, standing in for the sampling variance any
-    /// real per-block measurement carries even under a physically
-    /// uniform noise process. That spread is what lets this population
-    /// clear the anchor check the outlier gate now requires whenever it
-    /// excludes low-sigma blocks (see
-    /// [`aggregate_temporal_noise_stats`]'s doc) — a population with no
-    /// internal spread at all, sitting next to an excluded low-sigma
-    /// population, is indistinguishable from a self-captured outlier
-    /// run and reports `None` instead (see
-    /// [`aggregate_returns_none_when_the_only_above_gate_population_is_texture`]).
+    /// Both groups clear [`STATIC_GATE`] without effort, the bars
+    /// because their residual is exactly zero and the noisy blocks
+    /// because theirs is centred on zero by construction, so all 100
+    /// survive the first pass.
     ///
-    /// 74 blocks split five ways gives counts `[15, 15, 15, 15, 14]`
-    /// for levels `[3.8, 3.9, 4.0, 4.1, 4.2]` (`74 = 4*15 + 14`, the
-    /// remainder falling to the earliest levels). Combined with the 26
-    /// zero blocks sorted first, the `n = 100` population's median
-    /// (`values[49]`/`values[50]`) lands at cumulative index 41..55,
-    /// the `3.9` run, so the expected sigma is exactly `3.9 / 255`, not
-    /// an approximation.
+    /// # Why the noise levels vary
+    ///
+    /// The 74 noisy blocks cycle through five close sigma levels rather
+    /// than one repeated value, standing in for the sampling variance
+    /// any real measurement carries even under physically uniform noise.
+    ///
+    /// That spread is what lets them pass the anchor check the outlier
+    /// gate applies whenever it excludes low-sigma blocks. See
+    /// [`aggregate_temporal_noise_stats`].
+    ///
+    /// A population with no internal spread, sitting next to excluded
+    /// low-sigma blocks, cannot be told apart from a self-selected
+    /// outlier run, and reports `None` instead. See
+    /// [`aggregate_returns_none_when_the_only_above_gate_population_is_texture`].
+    ///
+    /// # Why the expected value is exact
+    ///
+    /// Splitting 74 blocks five ways gives counts of 15, 15, 15, 15, and
+    /// 14 across the five levels, with the remainder falling to the
+    /// earliest ones.
+    ///
+    /// With the 26 zero blocks sorted first, the median of all 100 lands
+    /// squarely inside the second level's run, so the expected sigma is
+    /// exactly that level rather than an approximation.
     #[test]
     fn aggregate_returns_correct_sigma_with_letterbox_zero_population() {
         let width = 160;
@@ -1379,19 +1517,21 @@ mod tests {
         );
     }
 
-    /// The capture scenario the outlier-gate exclusion opens up. The
-    /// same 26 exactly-zero letterbox blocks, but the other 74 are all
-    /// panning-texture blocks at a single repeated `sigma_ch0 =
-    /// 20/255`, with no legitimate above-gate noise anywhere in the
-    /// frame. Every candidate above [`RHO_SIGMA_GATE`] is the same
-    /// outlier value, so the reference population's own lower quartile
-    /// equals that value, and `x <= x * SIGMA_OUTLIER_FACTOR` holds for
-    /// any `x >= 0` — the outlier ceiling accepts every one of its own
-    /// outliers. A population that homogeneous, sitting next to 26
-    /// excluded zero-sigma blocks, is exactly the signature this
-    /// function cannot resolve, so it must report `None` and let the
-    /// caller fall back to the Immerkær read rather than a confidently
-    /// wrong ~20/255.
+    /// The case the outlier exclusion opens up.
+    ///
+    /// The same 26 letterbox blocks, but all 74 of the others are
+    /// panning texture at one repeated sigma, with no genuine noise
+    /// anywhere above the gate.
+    ///
+    /// Every surviving candidate holds the same value, so the reference
+    /// population's lower quartile is that value too, and a value never
+    /// exceeds a multiple of itself. The ceiling therefore accepts every
+    /// one of its own outliers.
+    ///
+    /// A population that uniform, sitting next to 26 excluded zero-sigma
+    /// blocks, is exactly the case this cannot resolve. It has to report
+    /// `None` and let the caller fall back to the Immerkær reading,
+    /// rather than confidently report the texture level.
     #[test]
     fn aggregate_returns_none_when_the_only_above_gate_population_is_texture() {
         let width = 160;
@@ -1416,10 +1556,12 @@ mod tests {
         );
     }
 
-    /// [`aggregate_rejects_majority_zero_mean_texture_outliers`] with a
-    /// letterbox-style zero-sigma population mixed in. The outlier gate
-    /// must still isolate the real noise floor from the texture
-    /// majority, and the zero population must not disturb that result.
+    /// The same case as
+    /// [`aggregate_rejects_majority_zero_mean_texture_outliers`], with a
+    /// letterbox-style zero-sigma population mixed in.
+    ///
+    /// The outlier check must still pick out the real noise floor from
+    /// the texture majority, and the zero blocks must not disturb it.
     #[test]
     fn aggregate_rejects_texture_outliers_with_zero_population_present() {
         let width = 64;
@@ -1464,10 +1606,12 @@ mod tests {
         );
     }
 
-    /// [`aggregate_keeps_genuinely_static_blocks_despite_spatial_sigma_spread`]
-    /// with a letterbox-style zero-sigma population mixed in. A real
-    /// spatial sigma spread must still survive the outlier gate, and
-    /// the zero population must not trip it either.
+    /// The same case as
+    /// [`aggregate_keeps_genuinely_static_blocks_despite_spatial_sigma_spread`],
+    /// with a letterbox-style zero-sigma population mixed in.
+    ///
+    /// A real spread of noise across the frame must still survive the
+    /// outlier check, and the zero blocks must not trip it either.
     #[test]
     fn aggregate_keeps_static_spread_with_zero_population_present() {
         let width = 64;
@@ -1501,18 +1645,17 @@ mod tests {
         );
     }
 
-    /// A block whose per-block correlation estimate is computed from
-    /// [`STATIC_GATE`] and [`RHO_SIGMA_GATE`]'s own mismatched
-    /// denominators (`mean_lag` over `n_pairs`, `mean0`/`var_ch0` over
-    /// `n`) can read above 1. A full `TEMPORAL_NOISE_BLOCK` row here
-    /// follows the path-graph eigenvector that maximises a row's
-    /// lag-1-sum-to-total-variance ratio (`sin(i*pi/17)` for a
-    /// 16-element row), replicated down every row of the block and
-    /// scaled to clear both the mean gate and the rho-sample sigma
-    /// gate. The resulting per-block estimate is a standalone
-    /// computation, not the module's usual test-data shape, because
-    /// it's checking the aggregation formula's own bound rather than a
-    /// physically-motivated noise scenario.
+    /// A block's correlation estimate can read above 1, because the
+    /// lag-1 total is averaged over adjacent pairs while the mean and
+    /// variance are averaged over every pixel.
+    ///
+    /// Each row here follows the pattern that maximises the ratio
+    /// between a row's lag-1 sum and its total variance, repeated down
+    /// every row of the block and scaled to clear both checks.
+    ///
+    /// This is a standalone construction rather than the usual test data
+    /// in this module, because it probes the formula's own bound instead
+    /// of a realistic noise scenario.
     #[test]
     fn aggregate_rho_estimate_stays_within_unit_range() {
         let width = TEMPORAL_NOISE_BLOCK;
@@ -1589,9 +1732,9 @@ mod tests {
 
     #[test]
     fn spatial_offset_factor_rho_zero_is_white_identity() {
-        // rho = 0 (and negative, which the aggregator never produces
-        // but the formula must still handle inertly): every non-self
-        // candidate keeps the full white-noise factor of 1.
+        // With no correlation, every candidate but the centre keeps the
+        // full white-noise factor of 1. A negative value, which the
+        // aggregation never produces, has to behave the same way.
         for rho in [0.0f32, -0.2] {
             for dy in -3..=3 {
                 for dx in -3..=3 {
@@ -1629,11 +1772,12 @@ mod tests {
     #[test]
     fn spatial_offset_factor_rho_0_65_shape() {
         let rho = 0.65f32;
-        // d = 1: 1 - rho^1.
+        // One pixel away.
         assert!((spatial_offset_factor(1, 0, rho) - (1.0 - rho)).abs() < 1e-6);
-        // d = 2 (axis-aligned): 1 - rho^2.
+        // Two pixels away along an axis.
         assert!((spatial_offset_factor(2, 0, rho) - (1.0 - rho * rho)).abs() < 1e-6);
-        // Diagonal d = sqrt(2): matches the sqrt(dx^2+dy^2) formula directly.
+        // A diagonal candidate sits sqrt(2) away, straight from the
+        // distance formula.
         let d = 2.0f32.sqrt();
         let expected = 1.0 - (d * rho.ln()).exp();
         assert!((spatial_offset_factor(1, 1, rho) - expected).abs() < 1e-6);
@@ -1673,7 +1817,8 @@ mod tests {
         let lut = build_spatial_offset_lut(search_radius, 0.65, 10.0);
         let side = (2 * search_radius + 1) as usize;
 
-        // (dx=1, dy=0) lands at row 2 (dy+2), column 3 (dx+2): index 2*5+3=13.
+        // One step to the right lands at row 2, column 3 of the table,
+        // which is index 13.
         let expected = 10.0 * spatial_offset_factor(1, 0, 0.65);
         assert_eq!(lut[2 * side + 3], expected);
 

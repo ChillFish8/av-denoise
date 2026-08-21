@@ -1,10 +1,11 @@
 use super::helpers::*;
 use crate::nlmeans::*;
 
-/// Shared params for the spatial-offset attenuation tests: k=0 only,
-/// a fixed `sigma_override` so `noise_offset` is nonzero and stable
-/// (auto estimation stays inactive, so nothing but the test itself
-/// ever touches `rho_smoothed`).
+/// The shared parameters for these tests, running spatially only with a
+/// fixed sigma so the noise offset is nonzero and steady.
+///
+/// A fixed sigma also keeps automatic estimation inactive, so nothing
+/// but the test itself ever touches the correlation state.
 fn attenuation_params(sigma: f32) -> NlmParams {
     NlmParams {
         temporal_radius: 0,
@@ -26,12 +27,13 @@ fn attenuation_params(sigma: f32) -> NlmParams {
     }
 }
 
-/// Setting `rho_smoothed` directly (as the correlated-grain estimator
-/// would after folding a temporal sample) must change the spatial k=0
-/// weighting on correlated content relative to the `rho_smoothed = 0`
-/// default: attenuating the noise-floor offset for near candidates
-/// changes which patch distances clamp to full weight in
-/// `welsch_weight`, which changes the weighted average.
+/// Setting the correlation state directly, as the estimator would after
+/// folding a temporal sample, has to change the spatial weighting on
+/// correlated content.
+///
+/// Reducing the noise-floor offset for nearby candidates changes which
+/// patch distances reach full weight, which changes the weighted
+/// average.
 #[test]
 fn rho_attenuation_changes_spatial_weighting_on_correlated_content() {
     let client = make_client();
@@ -72,21 +74,24 @@ fn rho_attenuation_changes_spatial_weighting_on_correlated_content() {
     );
 }
 
-/// The windowed k=0 kernel reads its offset from the LUT, indexed by
-/// its comptime `(dx, dy)`; the separable k=0 kernel gets the same
-/// value computed directly on the CPU per dispatched `(q_x, q_y)`.
-/// Both must derive the identical `spatial_offset_factor(dx, dy, rho)`
-/// for the same candidate, so under a nonzero `rho_smoothed` the two
-/// independently-coded dispatch paths must still agree on interior
-/// pixels (margin `search_radius + patch_radius`, clear of every
-/// clamped-read border case either path takes). Forcing
-/// `use_separable` mirrors `temporal::windowed_vs_separable_psnr`'s
-/// cross-check; unlike that helper this compares interior pixels
-/// directly rather than through PSNR, since both paths' clamped-border
-/// handling (not touched by this change) already diverges near the
-/// edges regardless of `rho_smoothed` — asserted below at `rho = 0`
-/// too, to isolate that pre-existing divergence from anything this LUT
-/// wiring could have introduced.
+/// The windowed and separable paths must agree once correlation is
+/// taken into account.
+///
+/// The windowed kernel reads each candidate's offset from the table,
+/// while the separable path computes the same value on the host for
+/// each dispatched candidate. Both have to arrive at the same factor.
+///
+/// The comparison covers interior pixels only, keeping a margin clear of
+/// every clamped read either path makes.
+///
+/// Forcing the separable path mirrors the cross-check in
+/// `temporal::windowed_vs_separable_psnr`. Unlike that one, this
+/// compares pixels directly rather than through PSNR.
+///
+/// The two paths already handle clamped borders differently, which this
+/// change did not touch, so the test also asserts the same agreement
+/// with no correlation. That separates the existing difference from
+/// anything the table wiring could have introduced.
 #[test]
 fn windowed_and_separable_agree_under_rho_attenuation() {
     let client = make_client();

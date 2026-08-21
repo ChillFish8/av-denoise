@@ -50,9 +50,10 @@ struct ChannelBudget {
 }
 
 /// Picks channel depths so the frames held in flight stay near
-/// [`FRAME_MEMORY_BUDGET_BYTES`]. Small frames keep the maximum depths,
-/// so the common case behaves exactly as it did before. Large frames
-/// scale both depths down together, never below their floors.
+/// [`FRAME_MEMORY_BUDGET_BYTES`].
+///
+/// Small frames keep the maximum depths. Large frames scale both depths
+/// down together, never below their floors.
 fn channel_budget(layout: FrameLayout, workers: usize) -> ChannelBudget {
     let frame_bytes = layout.luma_bytes() + 2 * layout.chroma_bytes();
     let max_frames = workers * FRAME_CHANNEL_DEPTH_MAX + OUTPUT_CHANNEL_DEPTH_MAX;
@@ -70,11 +71,13 @@ fn channel_budget(layout: FrameLayout, workers: usize) -> ChannelBudget {
         (frame_depth, output_depth)
     };
 
-    // Each worker also holds frames the channels never see: up to
-    // `MAX_PENDING` readbacks in flight inside its denoiser, plus the one
-    // it is pushing. Those count toward real memory and toward how far
-    // the reorder map can legitimately run ahead, so they belong in the
-    // peak even though the budget only scales channel capacity.
+    // Each worker also holds frames the channels never see, being the
+    // readbacks in flight inside its denoiser plus the one it is
+    // pushing.
+    //
+    // Those count toward real memory, and toward how far the reorder
+    // map can legitimately run ahead, so they belong in the peak even
+    // though the budget only scales channel capacity.
     let per_worker_pipeline = av_denoise::MAX_PENDING + 1;
 
     ChannelBudget {
@@ -85,7 +88,8 @@ fn channel_budget(layout: FrameLayout, workers: usize) -> ChannelBudget {
     }
 }
 
-/// Scene boundaries + the video metadata needed to build the output y4m header.
+/// Scene boundaries plus the video metadata needed to build the output
+/// y4m header.
 struct SceneLayout {
     layout: FrameLayout,
     framerate: Rational32,
@@ -130,9 +134,11 @@ pub fn run_file(opts: &CliOptions, input: &Path, workers: usize) -> Result<(), a
     )
 }
 
-/// Open the input, read its layout, and run `av_scenechange` to produce a
-/// list of scene boundaries. Returns once the detector pass has finished
-/// and the temporary decoder it used has been dropped.
+/// Opens the input, reads its layout, and runs `av_scenechange` to
+/// produce a list of scene boundaries.
+///
+/// Returns once the detector pass has finished and the temporary decoder
+/// it used has been dropped.
 fn detect_scenes(input: &Path, visible: bool) -> Result<SceneLayout, anyhow::Error> {
     let mut decoder = Decoder::from_file(input)?;
     let details = *decoder.get_video_details();
@@ -189,9 +195,10 @@ fn detect_scenes(input: &Path, visible: bool) -> Result<SceneLayout, anyhow::Err
     })
 }
 
-/// Spin up the worker pool + coordinator, re-open the decoder for actual
-/// frame reading, and drive the dispatch loop until EOF. Blocks until
-/// every worker and the coordinator have completed.
+/// Starts the worker pool and the coordinator, reopens the decoder for
+/// frame reading, then drives the dispatch loop until EOF.
+///
+/// Blocks until every worker and the coordinator have finished.
 fn encode_scenes(
     opts: &CliOptions,
     input: &Path,
@@ -243,8 +250,10 @@ fn encode_scenes(
 
 type WorkerJoin = thread::JoinHandle<Result<(), anyhow::Error>>;
 
-/// Spawn `workers` worker threads, returning their input channels, join
-/// handles, and the shared output channel they emit denoised frames on.
+/// Spawns `workers` worker threads.
+///
+/// Returns their input channels, their join handles, and the shared
+/// output channel they emit denoised frames on.
 fn spawn_workers(
     opts: &CliOptions,
     layout: FrameLayout,
@@ -284,9 +293,10 @@ fn spawn_coordinator(
     thread::spawn(move || run_coordinator(layout, framerate, rx, total_frames, visible, peak_frames))
 }
 
-/// Sequential decode loop: read every frame, route it to worker
-/// `scene_idx % N`. Blocks on `send` when a worker's channel fills,
-/// which provides natural backpressure.
+/// Reads every frame in order and routes it to worker `scene_idx % N`.
+///
+/// The send blocks when a worker's channel fills, which gives the
+/// pipeline its backpressure.
 fn dispatch_frames(
     input: &Path,
     scenes: &SceneLayout,
@@ -379,12 +389,13 @@ fn run_worker(
 
                 let denoiser = wd.as_mut().expect("denoiser exists after new-scene init");
 
-                // No post-push recv: push_with_drain handles backpressure via
-                // QueueFull when the 2-deep pending pipeline fills, and
-                // flush_worker drains the tail at the scene boundary. Pulling
-                // a recv after every push would clamp the pipeline back to
-                // depth 1 and serialise the GPU readback into the critical
-                // path of the next push.
+                // Nothing is received straight after the push.
+                // `push_with_drain` handles backpressure through QueueFull
+                // when the 2-deep pending pipeline fills, and `flush_worker`
+                // drains the tail at the scene boundary. Receiving after
+                // every push would clamp the pipeline back to depth 1 and
+                // put the GPU readback in the critical path of the next
+                // push.
                 push_with_drain(denoiser, &mut pending, global_idx, &planes, &tx)?;
             },
             Ok(WorkerMsg::Eof) | Err(_) => {
@@ -484,10 +495,10 @@ fn run_coordinator(
     .with_colorspace(subsampling_to_y4m(layout.subsampling, layout.depth))
     .write_header(lock)?;
 
-    // Frames written to the output, which lags the frames read by the
-    // depth of the worker pipelines. Emitted frames are the honest
-    // measure of progress: the count stalls whenever whatever consumes
-    // our stdout stops reading.
+    // Counts frames written to the output, which lags the frames read by
+    // the depth of the worker pipelines. Emitted frames are the honest
+    // measure of progress, because the count stalls whenever whatever
+    // consumes our stdout stops reading.
     let pb = denoise_progress_bar(total_frames, visible);
 
     // The first frame only lands once a worker has compiled its
@@ -503,9 +514,11 @@ fn run_coordinator(
 }
 
 /// Reorders worker output by frame index and writes it out, updating
-/// `pb` as frames are emitted. Returns once every frame has been
-/// written. Errors if the workers all disconnect before `total` frames
-/// have landed, naming how many were written and how many were expected.
+/// `pb` as frames are emitted.
+///
+/// Returns once every frame has been written. If the workers all
+/// disconnect before `total` frames have landed this errors, naming how
+/// many were written and how many were expected.
 fn emit_frames<W: std::io::Write>(
     encoder: &mut y4m::Encoder<W>,
     rx: &Receiver<OutputMsg>,
@@ -553,8 +566,8 @@ fn emit_frames<W: std::io::Write>(
 
     if next_emit != total {
         anyhow::bail!(
-            "wrote {next_emit} frames but expected {total}; every worker disconnected \
-             before the stream finished (a frame index was likely lost)"
+            "wrote {next_emit} frames but expected {total}. Every worker disconnected \
+             before the stream finished, so a frame index was likely lost"
         );
     }
 
@@ -632,21 +645,23 @@ fn subsampling_from_av_decoders(
         ChromaSubsampling::Yuv420 => Ok(Subsampling::Yuv420),
         ChromaSubsampling::Yuv422 => Ok(Subsampling::Yuv422),
         ChromaSubsampling::Yuv444 => Ok(Subsampling::Yuv444),
-        other => anyhow::bail!("unsupported chroma subsampling {other:?}; need 4:2:0, 4:2:2, or 4:4:4"),
+        other => {
+            anyhow::bail!("unsupported chroma subsampling {other:?}, need 4:2:0, 4:2:2, or 4:4:4")
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
-    // Only `temporal_opts` and the test that uses it name the
-    // `Accelerator::Vulkan`, `Algorithm`, `DenoisingMode`, `Device`,
-    // `MotionCompensationMode`, and `BinaryChannelIntent` items, so those
-    // imports are gated alongside them below to avoid an unused-import
-    // warning in cpu-only builds.
+    // `temporal_opts` and the one test that uses it are the only things
+    // naming `Accelerator::Vulkan`, `Algorithm`, `DenoisingMode`,
+    // `Device`, `MotionCompensationMode`, and `BinaryChannelIntent`.
+    // Their imports are gated the same way to keep cpu-only builds free
+    // of unused-import warnings.
     #[cfg(feature = "vulkan")]
     use av_denoise::accelerate::Accelerator;
     #[cfg(feature = "vulkan")]
-    use av_denoise::{Algorithm, DenoisingMode, Device, MotionCompensationMode};
+    use av_denoise::{Algorithm, DenoisingMode, Device};
     use indicatif::ProgressBar;
 
     use super::*;
@@ -679,8 +694,8 @@ mod tests {
         let (tx, rx) = sync_channel::<OutputMsg>(4);
         let planes = tiny_planes(layout);
 
-        // Frame 1 is never sent (its index was lost somewhere upstream)
-        // and every worker then disconnects. This used to make
+        // Frame 1 is never sent, as if its index was lost somewhere
+        // upstream, and every worker then disconnects. This used to make
         // `emit_frames` fall through to `Ok(())` with a truncated y4m.
         tx.send(OutputMsg {
             global_idx: 0,
@@ -723,12 +738,13 @@ mod tests {
             device: Device::Default,
             intent: BinaryChannelIntent::LumaChroma,
             mode: DenoisingMode::Temporal { radius: 1 },
-            prefilter: None,
-            motion_compensation: MotionCompensationMode::None,
-            algorithm: Algorithm::Nlmeans,
-            nlm_tuning: None,
+            algorithm: Algorithm::default(),
             luma_strength: None,
             chroma_strength: None,
+            luma_lambda_ht: None,
+            chroma_lambda_ht: None,
+            luma_mismatch_scale: None,
+            chroma_mismatch_scale: None,
             progress: false,
         }
     }
@@ -819,11 +835,14 @@ mod budget_tests {
         assert_eq!(b.output_depth, OUTPUT_CHANNEL_DEPTH_MAX);
     }
 
-    /// Pins the exact output of the scaling branch. Relative assertions
-    /// like "large <= small" pass even if the shrink path never runs, so
-    /// this names the numbers instead. 4K 10-bit 4:2:0 is 24,883,200
-    /// bytes a frame, which affords 43 frames of the 1 GiB budget
-    /// against a 96-frame request, giving a scale of 43/96.
+    /// Pins the exact output of the scaling branch.
+    ///
+    /// Relative assertions like "large <= small" pass even if the shrink
+    /// path never runs, so this names the numbers instead.
+    ///
+    /// A 4K 10-bit 4:2:0 frame is 24,883,200 bytes, so the 1 GiB budget
+    /// affords 43 frames against a 96-frame request. That gives a scale
+    /// of 43/96.
     #[test]
     fn large_frames_shrink_the_depths() {
         let small = channel_budget(layout(1920, 1080, Depth::Eight), 8);

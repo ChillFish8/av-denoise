@@ -4,22 +4,28 @@ use super::PrefilterCtx;
 use crate::nlmeans::kernels::nlm_bilateral;
 use crate::nlmeans::{BLOCK_X, BLOCK_Y};
 
-/// Comptime radius derived from `sigma_s`. Truncating at `2·σ` covers
-/// >95% of the Gaussian mass and bounds SMEM/register usage.
+/// The kernel radius derived from `sigma_s`.
+///
+/// Stopping at two sigma covers over 95% of the Gaussian's mass, and it
+/// keeps shared memory and register use bounded.
 pub fn bilateral_radius(sigma_s: f32) -> u32 {
     ((2.0 * sigma_s).ceil() as u32).max(1)
 }
 
-/// Reciprocal normalisation factor for the bilateral Gaussian kernel's
-/// spatial or range term (`1 / (2·σ²)`, shared by both since they use
-/// the same Gaussian shape). Computed host-side and passed to the GPU
-/// kernel as a plain `f32`, so this is the one place the value is ever
-/// derived from `sigma`; the kernel itself only ever multiplies by it.
-/// Squaring a very small but positive `sigma` can underflow to `0.0` in
-/// `f32`, which makes this reciprocal infinite even though `sigma`
-/// itself is finite and positive. Callers validating user input should
-/// check this value rather than just the sign and finiteness of
-/// `sigma`.
+/// The normalisation factor `1 / (2 * sigma^2)` for the bilateral
+/// Gaussian.
+///
+/// The spatial and range terms share this because they use the same
+/// Gaussian shape.
+///
+/// It is computed on the host and passed to the kernel as a plain `f32`,
+/// so this is the only place the value is derived from a sigma. The
+/// kernel only ever multiplies by it.
+///
+/// Squaring a very small but positive sigma can underflow to 0.0 in
+/// `f32`, which makes this factor infinite even though the sigma itself
+/// was finite and positive. Code validating user input should check this
+/// value rather than only the sign and finiteness of the sigma.
 pub(crate) fn inv_two_sigma_sq(sigma: f32) -> f32 {
     1.0 / (2.0 * sigma * sigma)
 }

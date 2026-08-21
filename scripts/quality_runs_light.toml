@@ -26,28 +26,39 @@ noise = [4, 6, 8]
 6 = 2.0
 8 = 2.0
 
-# Sigma used at each noise level for the `ffmpeg_bm3d` reference row,
-# same per-clip-peak convention as quality_runs.toml (not the true
-# noise sigma, see that file's [bm3d_sigmas] comment). Found by
-# sweeping sigma per level and picking between the XPSNR-Y peak and the
-# SSIM peak. True sigma of each noisy clip, measured with the
-# Immerkær estimator over the same 240-frame window, anchors the
-# ratio. alls 4 measures 2.32 true sigma with a chosen bm3d sigma of 7,
-# about 3.0x. alls 6 measures 3.60 with a chosen sigma of 12, about
-# 3.3x. alls 8 measures 4.90 with a chosen sigma of 16, about 3.3x.
-# All three land at the low end of the 3 to 6x range quality_runs.toml
-# found for bench-sample's heavier noise levels, consistent with
-# "lower ratio at lighter noise".
+# Sigma used at each noise level for the `bm3dhip` reference row, swept
+# directly against bm3dhip itself (radius 2, on this clip's own noisy/ref
+# clips under data/quality_runs_light/). Coarse pass over roughly 2 to 14
+# at alls 4, 3 to 14 at alls 6, and 4 to 14 at alls 8, then refined at 0.5
+# sigma steps around each XPSNR-Y peak. The values previously here (7, 12,
+# 16) were inherited from an unrelated ffmpeg `bm3d` sweep run with
+# `group` at its default of 1, which disables block matching entirely, so
+# that sweep never exercised bm3dhip's own collaborative filtering and
+# its sigmas were not bm3dhip's optimum.
 #
-# These values were swept against an invocation that left `group` at
-# ffmpeg's default of 1, which disables block matching. Collaborative
-# filtering is on now, so these sigmas are no longer known to be the
-# per-clip peak and any `ffmpeg_bm3d` numbers recorded before this
-# comment was added are not comparable to later ones.
+# XPSNR-Y peaks sharply at 3 (42.49), 4 (41.11), and 6 (40.19) for alls 4,
+# 6, and 8 respectively, each matching a historical "bm3dhip at its own
+# swept-best sigma" figure recorded in
+# docs/nl3d-implementation-learning.md exactly, which is strong
+# corroboration these are the right values rather than a harness
+# artifact. SSIM_all disagrees at every level, continuing to climb past
+# the XPSNR peak to its own peak at a higher sigma (about 3.5-4 at alls
+# 4, 6.5-7 at alls 6, 8-9 at alls 8) before flattening. The XPSNR-Y peak
+# was kept at every level, both because it reproduces the historical
+# anchor exactly and because moving to the SSIM peak costs 0.1 to 0.4 dB
+# of XPSNR-Y for a SSIM_all gain of a few thousandths.
+#
+# True sigma of each noisy clip, measured with the Immerkær estimator
+# over the same 240-frame window: alls 4 measures 2.32, alls 6 measures
+# 3.60, alls 8 measures 4.90. The chosen-sigma to true-sigma ratio is
+# 1.29x, 1.11x, and 1.22x, well below the 3 to 6x range this repo has
+# seen for ffmpeg's `bm3d` and for bm3dhip on heavier noise elsewhere,
+# so the ratio is not assumed to generalize and should be re-swept per
+# clip and noise level rather than reused.
 [bm3d_sigmas]
-4 = 7
-6 = 12
-8 = 16
+4 = 3
+6 = 4
+8 = 6
 
 # ---------------------------------------------------------------------------
 # Baseline: the corrupted clip scored against the clean reference. Every
@@ -88,12 +99,34 @@ workers = 2
 args = ["--variant", "hq", "--temporal-radius", "4", "--channel-mode", "luma,chroma"]
 
 # ---------------------------------------------------------------------------
-# External baseline: BM3D via ffmpeg's CPU filter, run at its per-clip
-# sigma peak rather than the true noise sigma (see the [bm3d_sigmas]
-# comment above).
+# nl4d: groups 8x8 patches across the motion-compensated temporal window
+# itself, rather than filtering with nlmeans first and grouping within one
+# frame after. Runs at Nl4dOptions::default() (temporal_radius 2, refine 2,
+# spatial_radius 9, lambda_ht 5.3 in luma and 4.2 in chroma, c_min 0.05).
+# lambda_ht was picked by eye on real grain rather than swept on this
+# synthetic clip, and no other dial has been swept at all, so this row is
+# a regression tripwire against future changes to the defaults, not a
+# tuned quality point.
 # ---------------------------------------------------------------------------
 
 [[runs]]
-name = "ffmpeg_bm3d"
-kind = "ffmpeg-bm3d"
+name = "av_nl4d_temporal_r2"
+kind = "av-denoise-nl4d"
+workers = 2
+args = ["--variant", "hq", "--temporal-radius", "2", "--channel-mode", "luma,chroma"]
+
+# ---------------------------------------------------------------------------
+# External baseline: V-BM3D via bm3dhip (GPU, VapourSynth), radius 2 so
+# its 5-frame window matches av_nl4d_temporal_r2 above. This is the
+# temporal reference that arm is actually comparable to. ffmpeg's
+# `bm3d` filter (score_ffmpeg_bm3d in the .py) has
+# no temporal window at all, so it measures a different amount of work
+# and no row here uses it any more. Sigma is the per-clip peak from the
+# [bm3d_sigmas] comment above, not the true noise sigma.
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "bm3dhip_r2"
+kind = "bm3dhip"
 sigma = "$bm3d_sigma"
+radius = 2

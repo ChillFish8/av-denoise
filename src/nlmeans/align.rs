@@ -3,24 +3,27 @@ use cubecl::prelude::*;
 /// Byte alignment every buffer binding must start on, taken from the
 /// runtime the denoiser is running against.
 ///
-/// A GPU rejects a bind group whose buffer offset isn't a multiple of
-/// its `min_storage_buffer_offset_alignment`, so every buffer this
-/// crate slices into per-slot regions pads its slot stride up to this
-/// value. Backends report their own figure (32 bytes on the Vulkan
-/// adapters we test against, up to 256 elsewhere), which is why it's
+/// A GPU rejects a bind group whose buffer offset is not a multiple of
+/// its `min_storage_buffer_offset_alignment`. Every buffer this crate
+/// slices into per-slot regions therefore pads its slot stride up to
+/// this value.
+///
+/// Each backend reports its own figure, 32 bytes on the Vulkan adapters
+/// we test against and up to 256 elsewhere, which is why the value is
 /// read from the runtime rather than assumed.
 ///
-/// Carried as its own type rather than a bare `u64` so it can't be
-/// transposed with the width, height, or frame-count arguments it
-/// travels alongside.
+/// It is carried as its own type rather than a bare `u64` so it cannot
+/// be swapped by mistake with the width, height, or frame-count
+/// arguments it travels alongside.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StorageAlign(u64);
 
 impl StorageAlign {
-    /// The alignment `client`'s runtime requires. cubecl aligns every
-    /// allocation it hands out to this same value, so a slot offset
-    /// that is a multiple of it lands on a boundary the backend
-    /// accepts.
+    /// The alignment `client`'s runtime requires.
+    ///
+    /// cubecl aligns every allocation it hands out to this same value,
+    /// so a slot offset that is a multiple of it always lands on a
+    /// boundary the backend accepts.
     pub(crate) fn from_client<R: Runtime>(client: &ComputeClient<R>) -> Self {
         Self::new(client.properties().memory.alignment)
     }
@@ -39,11 +42,13 @@ impl StorageAlign {
         bytes.next_multiple_of(self.0)
     }
 
-    /// A count of `T` rounded up so that many elements span a whole
-    /// number of alignment boundaries. Alignments are powers of two, so
-    /// for any `T` whose size divides the alignment this lands exactly
-    /// on a boundary; for a larger `T` the elements are already
-    /// aligned and the count is returned unchanged.
+    /// A count of `T` rounded up so that many elements cover a whole
+    /// number of alignment boundaries.
+    ///
+    /// Alignments are powers of two, so for any `T` whose size divides
+    /// the alignment this lands exactly on a boundary. For a larger `T`
+    /// the elements are already aligned, so the count comes back
+    /// unchanged.
     pub(crate) fn pad_elems<T>(self, elems: usize) -> usize {
         let per_boundary = (self.0 as usize).div_ceil(size_of::<T>()).max(1);
         elems.next_multiple_of(per_boundary)
@@ -89,7 +94,7 @@ mod tests {
             let align = StorageAlign::new(bytes);
             for elems in [1usize, 3, 7, 137, 24_660] {
                 let padded = align.pad_elems::<f32>(elems) as u64 * size_of::<f32>() as u64;
-                assert_eq!(padded % bytes, 0, "align {bytes}, {elems} elements");
+                assert_eq!(padded % bytes, 0, "at align {bytes} with {elems} elements");
             }
         }
     }

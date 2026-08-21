@@ -5,9 +5,10 @@ use super::MotionCtx;
 use super::analyse::mv_field_byte_offset;
 use crate::nlmeans::kernels::motion::nlm_mc_warp;
 
-/// Run the compensate kernel for one neighbour, warping it toward the
-/// centre frame. Produces a full-frame `Vector<f32, N>` write into
-/// `compensated[neighbour_slot]`.
+/// Shifts one neighbour frame into line with the centre frame.
+///
+/// The result is a full frame written into `compensated` at the
+/// neighbour's slot.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_compensate<R: Runtime>(
     client: &ComputeClient<R>,

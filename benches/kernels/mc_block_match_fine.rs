@@ -89,7 +89,6 @@ impl<R: Runtime> Benchmark for BlockMatchFineBench<R> {
                 SEARCH_RADIUS,
                 0u32, // use_seed = 0; bench worst-case without coarse seed
                 blocks_x,
-                blocks_y,
             );
         }
         Ok(())

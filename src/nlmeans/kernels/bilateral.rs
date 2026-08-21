@@ -3,15 +3,20 @@ use cubecl::terminate;
 
 use super::helpers::{read_clamped_line, read_line};
 
-/// Joint spatial+range Gaussian bilateral prefilter. Each thread loads
-/// a `(block + 2·radius)²` tile of source pixels into shared memory as
-/// `Vector<f32, N>` (one vectorised entry per pixel), then convolves over
-/// the patch using
-///     `w = exp(-(dx² + dy²) · inv_two_sigma_s_sq)`
-///     `  · exp(-||Δc||² · inv_two_sigma_r_sq)`
-/// against the centre pixel. The output keeps the same channel layout
-/// as the input (padding lanes copied through unchanged) so it can
-/// stand in for `input` in the `_ref` distance kernels.
+/// A bilateral prefilter that blurs a frame without crossing edges.
+///
+/// Each neighbour's weight is the product of two Gaussians. One falls
+/// off with distance in pixels, the other with difference in colour, so
+/// a neighbour on the far side of an edge contributes almost nothing.
+///
+/// The block first loads a `(block + 2 * radius)^2` tile of source
+/// pixels into shared memory, one vector per pixel, then each thread
+/// convolves over its patch using
+/// `w = exp(-(dx^2 + dy^2) * inv_two_sigma_s_sq - range_sq * inv_two_sigma_r_sq)`.
+///
+/// The output keeps the input's channel layout, with padding lanes
+/// copied straight through, so it can stand in for `input` in the `_ref`
+/// distance kernels.
 #[cube(launch_unchecked)]
 pub fn nlm_bilateral<N: Size>(
     input: &Array<Vector<f32, N>>,

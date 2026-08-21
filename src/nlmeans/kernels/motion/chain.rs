@@ -1,36 +1,51 @@
 use cubecl::prelude::*;
 use cubecl::terminate;
 
-/// Compose a chain of adjacent-frame motion fields into a single
-/// `centre → k` motion vector per block, writing the result into
-/// `mv_field` at the layout `nlm_mc_warp` and the analyse kernels
-/// share (`[block_y][block_x][2]` of `i32`).
+/// Joins a run of adjacent-frame motion fields into one motion vector
+/// per block, reaching from the centre frame to a distant neighbour.
 ///
-/// `pair_ring` holds every currently-live adjacent-pair field, laid out
-/// `[pair_slot][direction][block_y][block_x][2]` of `i32` (direction 0
-/// = older→newer, 1 = newer→older), with each direction's slice padded
-/// up to a 32-byte (8-`i32`-element) boundary. `dir_len`/`slot_len` are
-/// this padded per-direction/per-slot stride in `i32` elements
-/// (`MotionCtx::pair_direction_stride`/`pair_slot_stride` on the host
-/// side), not the raw `blocks_x * blocks_y * 2` element count, since
-/// the host-side write offsets (`pair_byte_offset`) use the padded
-/// value too and this kernel's reads must land on the same bytes. The
-/// walk starts at `start_pair_slot` and takes `steps` hops, reading
-/// direction 0 and incrementing the slot (mod `pair_ring_slots`) when
-/// `forward` is true, or reading direction 1 and decrementing the slot
-/// otherwise. Consecutive hops land on consecutive pair slots because
-/// the pair ring is keyed by the newer frame's position in the push
-/// sequence (see `crate::nlmeans::motion::pair_ring_slot_count`), so
-/// the caller only ever has to resolve the first hop's slot.
+/// Motion is only ever measured between neighbouring frames. To reach a
+/// frame several steps away, this kernel follows the picture from one
+/// frame to the next and adds up what it finds.
 ///
-/// One thread per output block. Each hop resolves the walking
-/// position's current block (nearest block, edge-clamped exactly like
-/// `nlm_mc_warp`'s pixel→block lookup), reads that block's motion
-/// field from the pair ring, adds it to the running total, and
-/// advances the walking position by the same amount before the next
-/// hop. The block lookup at every hop reads a clamped copy of the
-/// position. The position itself accumulates unclamped, so a long
-/// chain can walk outside the frame without corrupting later lookups.
+/// The result goes into `mv_field` in the layout `nlm_mc_warp` and the
+/// analyse kernels share.
+///
+/// # The walk
+///
+/// One thread handles one output block.
+///
+/// Each hop finds the block nearest the walking position, clamped at the
+/// edges exactly the way `nlm_mc_warp` maps a pixel to a block. It reads
+/// that block's motion, adds it to the running total, and moves the
+/// walking position by the same amount before the next hop.
+///
+/// Only the block lookup clamps. The position itself keeps its true
+/// value, so a long chain can wander outside the frame without
+/// corrupting the lookups that follow.
+///
+/// The walk starts at `start_pair_slot` and takes `steps` hops. Going
+/// forward it reads direction 0 and moves to the next slot. Going
+/// backward it reads direction 1 and moves to the previous one.
+///
+/// Consecutive hops land on consecutive slots, because the pair ring is
+/// keyed by the newer frame's place in the push sequence. See
+/// `crate::nlmeans::motion::pair_ring_slot_count`. The caller therefore
+/// only has to work out the first hop's slot.
+///
+/// # Ring layout
+///
+/// `pair_ring` holds every live adjacent-pair field, indexed by slot,
+/// then direction, then block, then component. Direction 0 runs from the
+/// older frame to the newer one, and direction 1 the other way.
+///
+/// Each direction's slice is padded up to a 32-byte boundary, which is 8
+/// `i32` elements.
+///
+/// `dir_len` and `slot_len` are those padded strides in elements, taken
+/// from `MotionCtx::pair_direction_stride` and `pair_slot_stride`, not
+/// the raw block count. The host writes at the padded offsets, so the
+/// reads here have to use the same ones.
 #[cube(launch_unchecked)]
 pub fn nlm_mc_chain_compose(
     pair_ring: &Array<i32>,
@@ -88,10 +103,12 @@ pub fn nlm_mc_chain_compose(
     mv_field[out_idx + 1] = acc_y;
 }
 
-/// Zero-fill both directions of one pair-ring slot. Used for duplicated
-/// ring slots (stream priming and end-of-stream flush), whose pair
-/// field is zero motion by definition since both "frames" are the same
-/// content, cheaper and exact compared to running analyse on identical
+/// Fills both directions of one pair-ring slot with zeroes.
+///
+/// Duplicated ring slots, which appear while priming the stream and
+/// again during the end-of-stream flush, hold the same content in both
+/// frames. Their motion is zero by definition, so writing the zeroes is
+/// both cheaper and exactly right compared with analysing identical
 /// input.
 #[cube(launch_unchecked)]
 pub fn nlm_mc_pair_zero(dst: &mut Array<i32>, #[comptime] length: u32, #[comptime] total_threads: u32) {
