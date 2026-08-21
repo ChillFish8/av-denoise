@@ -117,7 +117,6 @@ pub(crate) fn run_confidence_for_neighbour<R: Runtime>(
             ctx.search_radius,
             0u32,
             ctx.blocks_x,
-            ctx.blocks_y,
         );
     }
 

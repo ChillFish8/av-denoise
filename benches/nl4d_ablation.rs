@@ -195,7 +195,6 @@ impl<R: Runtime> Rig<R> {
                 weight_scale(SIGMA, &dct_noise_profile(0.0)),
                 cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS),
                 true,
-                false,
                 RADIUS,
                 REFINE,
                 self.mv_stride,

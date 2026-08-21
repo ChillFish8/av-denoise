@@ -477,7 +477,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 wnorm,
                 self.accum_scale,
                 self.confidence_variance,
-                false,
                 self.temporal_radius,
                 self.refine,
                 view.mv_stride,

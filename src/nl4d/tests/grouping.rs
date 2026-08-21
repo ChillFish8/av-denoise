@@ -125,7 +125,6 @@ fn run_fused_over(fx: &RingFixture, k: Knobs) -> FusedRun {
             weight_scale(k.sigma, &profile),
             cross_frame_accum_scale(SPATIAL_RADIUS, fx.radius),
             false,
-            false,
             fx.radius,
             REFINE,
             fx.mv_stride,

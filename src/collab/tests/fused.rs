@@ -415,7 +415,6 @@ fn run_fused(s: &Setup) -> Aggregated {
             weight_scale(s.sigma, &profile),
             s.accum_scale(),
             s.confidence_variance,
-            false,
             s.radius,
             s.refine,
             s.mv_stride,

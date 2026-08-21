@@ -70,7 +70,6 @@ fn run_fine_confidence(
             0u32,
             0u32,
             1,
-            1,
         );
     }
 

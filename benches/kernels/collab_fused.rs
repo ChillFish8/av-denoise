@@ -157,7 +157,6 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
                 weight_scale(SIGMA, &dct_noise_profile(0.0)),
                 cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS),
                 CONFIDENCE_VARIANCE,
-                false,
                 RADIUS,
                 REFINE,
                 mv_stride,

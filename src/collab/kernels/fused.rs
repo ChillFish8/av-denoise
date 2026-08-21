@@ -8,7 +8,6 @@ use super::transforms::{
     dct8_reg_fwd,
     dct8_reg_inv,
     fill_dct8_basis,
-    fill_haar8_basis,
     haar_reg_fwd_level,
     haar_reg_inv_level,
     safe_reciprocal,
@@ -249,12 +248,6 @@ pub(crate) fn mismatch_sigma2(confidence: f32, thsad: f32, blksize_area: f32) ->
 /// by `dct_profile[u] * dct_profile[v]` before the threshold reads it.
 /// At `rho = 0` every entry is `1.0` and the multiply is a no-op.
 ///
-/// `ht_wavelet` selects the transform basis. False, the default, fills
-/// the DCT basis. True fills the orthonormal Haar-8 basis instead, for
-/// comparing the two. The `dct8_reg_*` helpers run either unchanged,
-/// since both are orthonormal 8x8 matrices whose inverse is their
-/// transpose.
-///
 /// `use_member_sigma` folds each temporal member's mismatch variance
 /// into its own noise variance. False leaves every member on the plain
 /// `sigma[c]^2`.
@@ -294,7 +287,6 @@ pub fn collab_fused<N: Size>(
     weight_scale: f32,
     accum_scale: f32,
     #[comptime] use_member_sigma: bool,
-    #[comptime] ht_wavelet: bool,
     #[comptime] radius: u32,
     #[comptime] refine: u32,
     #[comptime] mv_stride: u32,
@@ -326,11 +318,7 @@ pub fn collab_fused<N: Size>(
     // what bounds this kernel's occupancy in any case, registers are.
     let mut basis = SharedMemory::<f32>::new(PATCH_AREA as usize);
     let mut tbuf = SharedMemory::<f32>::new(comptime!(8 * 65) as usize);
-    if ht_wavelet {
-        fill_haar8_basis(&mut basis, tid);
-    } else {
-        fill_dct8_basis(&mut basis, tid);
-    }
+    fill_dct8_basis(&mut basis, tid);
     sync_cube();
 
     // A dead group keeps working on the last real reference of the row

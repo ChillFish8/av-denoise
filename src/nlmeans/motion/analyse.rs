@@ -183,7 +183,6 @@ pub(crate) fn run_analyse<R: Runtime>(
             mc.search_radius,
             seeded,
             mc.blocks_x,
-            mc.blocks_y,
         );
     }
 
@@ -275,7 +274,6 @@ pub(crate) fn run_seeded_refine<R: Runtime>(
             refine_radius,
             1u32,
             mc.blocks_x,
-            mc.blocks_y,
         );
     }
 

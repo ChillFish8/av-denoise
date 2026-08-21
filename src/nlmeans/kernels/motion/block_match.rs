@@ -264,7 +264,6 @@ pub fn nlm_mc_block_match_fine(
     #[comptime] search_radius: u32,
     use_seed: u32,
     #[comptime] blocks_x: u32,
-    #[comptime] _blocks_y: u32,
 ) {
     let bx = CUBE_POS_X;
     let by = CUBE_POS_Y;

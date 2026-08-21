@@ -72,57 +72,6 @@ pub(crate) fn fill_dct8_basis(basis: &mut SharedMemory<f32>, thread_id: u32) {
     }
 }
 
-/// Fills the orthonormal Haar-8 basis into shared memory, one entry per
-/// thread.
-///
-/// Row `j`, column `i` lands at `basis[j * 8 + i]`. Rows are unit-norm
-/// and the inverse is the transpose, matching [`fill_dct8_basis`]'s
-/// contract, so either basis runs through the same helpers. Row 0 is the
-/// scaling row, which is what keeps the hard threshold's DC exception
-/// meaningful.
-///
-/// Only the first 64 threads write an entry. The caller must call
-/// `sync_cube()` before reading `basis`.
-#[cube]
-pub fn fill_haar8_basis(basis: &mut SharedMemory<f32>, thread_id: u32) {
-    if thread_id < 64u32 {
-        let j = thread_id / 8u32;
-        let i = thread_id % 8u32;
-        let mut v = 0.0f32;
-        if j == 0u32 {
-            v = 0.35355339f32;
-        } else if j == 1u32 {
-            v = 0.35355339f32;
-            if i >= 4u32 {
-                v = -0.35355339f32;
-            }
-        } else if j == 2u32 {
-            if i < 2u32 {
-                v = 0.5f32;
-            } else if i < 4u32 {
-                v = -0.5f32;
-            }
-        } else if j == 3u32 {
-            if i >= 4u32 {
-                if i < 6u32 {
-                    v = 0.5f32;
-                } else {
-                    v = -0.5f32;
-                }
-            }
-        } else {
-            let p = (j - 4u32) * 2u32;
-            if i == p {
-                v = std::f32::consts::FRAC_1_SQRT_2;
-            }
-            if i == p + 1u32 {
-                v = -std::f32::consts::FRAC_1_SQRT_2;
-            }
-        }
-        basis[thread_id as usize] = v;
-    }
-}
-
 /// Runs one forward 8-point DCT over a line a lane already holds in
 /// registers.
 ///

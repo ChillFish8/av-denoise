@@ -249,7 +249,6 @@ fn run_scatter_stage(frame: &[f32], width: u32, height: u32, sigma: f32) -> (Vec
             weight_scale(sigma, &profile),
             ACCUM_SCALE,
             false,
-            false,
             0u32,
             0u32,
             2u32,
