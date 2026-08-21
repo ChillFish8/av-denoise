@@ -103,10 +103,9 @@ jobs:
           crate_line="$(grep -m1 '^version = ' Cargo.toml)"
           crate_version="${crate_line#version = \"}"
           crate_version="${crate_version%\"}"
-          resolved_stripped="${RESOLVED_VERSION%%-*}"
 
-          if [ "${crate_version}" != "${resolved_stripped}" ]; then
-            message="Cargo.toml version (${crate_version}) does not match resolved release version (${resolved_stripped})"
+          if [ "${crate_version}" != "${RESOLVED_VERSION}" ]; then
+            message="Cargo.toml version (${crate_version}) does not match resolved release version (${RESOLVED_VERSION})"
             if [ "${EVENT_NAME}" = "release" ]; then
               echo "::error::${message}"
               exit 1
