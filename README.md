@@ -210,11 +210,11 @@ instead, since NL4D has nothing to group without neighbours.
 **`--lambda-ht-scale` is the main dial.** The threshold it scales is how many standard deviations
 of estimated noise a transform coefficient has to clear to survive, so raising the scale removes
 more noise and takes more fine detail with it. Move in steps of about 0.05 and judge by eye.
-Reach for it before the absolute values, since luma and chroma start from different defaults and
-the scale keeps that separation.
+You should try this parameter before touching the absolute values, since luma and chroma start 
+from different defaults and the scale keeps that separation.
 
 **`--lambda-ht` sets those thresholds outright.** The defaults, 5.3 for luma and 4.2 for chroma,
-were picked by eye on real grain and deliberately biased toward keeping detail. A single value
+were hand tuned and deliberately biased toward keeping detail. A single value
 here flattens both planes onto the same number, so prefer the scale unless you have a figure you
 want. `--luma-lambda-ht` and `--chroma-lambda-ht` pin one plane without touching the other, and
 `--lambda-ht-scale` still applies on top of whatever is pinned.
