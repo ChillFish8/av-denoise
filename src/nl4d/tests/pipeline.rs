@@ -2,10 +2,15 @@ use cubecl::prelude::*;
 
 use super::helpers::{R, make_client, noisy_copy_of, psnr, textured_base};
 use crate::collab::MAX_K;
-use crate::collab::geometry::{filtered_buf_len, member_buf_len, ref_count, refs_along};
-use crate::collab::kernels::aggregate::{ACCUM_SCALE, collab_normalise, collab_zero_accum, weight_scale};
-use crate::collab::kernels::filter_ht::collab_filter_ht;
-use crate::collab::kernels::group_temporal::collab_group_temporal;
+use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
+use crate::collab::kernels::aggregate::{
+    ACCUM_SCALE,
+    collab_normalise,
+    collab_zero_accum,
+    cross_frame_accum_scale,
+    weight_scale,
+};
+use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::{
@@ -231,23 +236,22 @@ fn survives_a_ring_size_that_would_overflow_a_single_zero_dispatch() {
     }
 }
 
-/// Guards the `centre_slot`/`frame` contract `run_collab_stage` depends
-/// on: `collab_group_temporal`'s `centre_slot` and `collab_filter_ht`'s
-/// `frame` must read the same physical ring slot. Nothing in the type
-/// system enforces that (both are plain `u32`s read from two separate
-/// call sites), so this test plants content only one real frame carries
-/// and checks it survives in that frame's own emitted output.
+/// Guards the `centre_slot` contract `run_collab_stage` depends on. The
+/// slot the pass is centred on is what the reference patch is read from
+/// and what an untouched member scatters back into, and nothing in the
+/// type system pins it to the frame the caller means, so this test
+/// plants content only one real frame carries and checks it survives in
+/// that frame's own emitted output.
 ///
 /// `denoises_a_static_noisy_clip` is a weak canary for this specific
 /// mismatch: every ring slot there holds the same base content, so
 /// feeding the filter a valid but wrong slot would barely move its PSNR
 /// (a neighbour frame denoises to essentially the same clean content).
 /// Here one frame alone carries a strong, low-frequency marker block no
-/// other frame has. If `collab_filter_ht` ever read a different slot
-/// than `collab_group_temporal`'s `centre_slot`, none of the marker's
-/// own members would ever be grouped as part of that pass, and the
-/// marker would be attenuated or absent from its frame's own completed
-/// output.
+/// other frame has. If the pass ever centred on a different physical
+/// ring slot, none of the marker's own patches would be a reference at
+/// all, and the marker would be attenuated or absent from its frame's
+/// own completed output.
 ///
 /// Emission now lags `temporal_radius` passes behind the pass a frame is
 /// the centre of (see [`Nl4dDenoiser::run_collab_stage`]), so this
@@ -336,8 +340,8 @@ fn output_carries_its_own_frames_marker_no_other_frame_has() {
         mean > 0.75,
         "expected frame {marker_frame}'s marker (planted at {MARKER}) to survive denoising with a \
          clear margin over textured_base's own ceiling of 0.65, got mean {mean:.4} over the \
-         marker's interior; this would fail if collab_filter_ht's `frame` argument ever read a \
-         different physical ring slot than collab_group_temporal's `centre_slot`"
+         marker's interior; this would fail if the collaborative pass ever centred on a \
+         different physical ring slot than the caller meant"
     );
 }
 
@@ -367,7 +371,7 @@ fn flush_emits_exactly_the_pushed_frame_count() {
     assert_eq!(emitted, n as usize, "expected exactly {n} emitted frames");
 }
 
-/// Launches the same grouping, filtering, and aggregation kernels
+/// Launches the same collaborative and aggregation kernels
 /// [`Nl4dDenoiser::run_collab_stage`] runs, standalone, for a
 /// single-frame ring at `radius = 0`. This is the "spatial-only" arm of
 /// the hypothesis test below: identical grouping (no admission gate),
@@ -392,7 +396,6 @@ fn run_spatial_only(
     let refs_x = refs_along(w);
     let refs_y = refs_along(h);
     let refs = ref_count(w, h);
-    let pos_len = member_buf_len(w, h, k_max);
     let pixels = (w * h) as usize;
     let frame_len = pixels;
 
@@ -400,17 +403,6 @@ fn run_spatial_only(
     let mv_dummy = client.empty(size_of::<i32>());
     let conf_dummy = client.empty(size_of::<f32>());
     let neighbour_slots_dummy = client.empty(size_of::<u32>());
-    let member_pos = client.empty(pos_len * size_of::<u32>());
-    let member_frame = client.empty(pos_len * size_of::<u32>());
-    let member_count = client.empty(refs * size_of::<u32>());
-    // `collab_group_temporal` always writes this, whatever `radius` is,
-    // so it needs its real `pos_len` size here even though this
-    // function's own `collab_filter_ht` call below never reads it back
-    // (that call keeps `use_member_sigma` off and passes
-    // `member_sig2_dummy` instead, unaffected by this buffer).
-    let member_sig2 = client.empty(pos_len * size_of::<f32>());
-    let member_sig2_dummy = client.empty(size_of::<f32>());
-    let filtered_dummy = client.empty(size_of::<f32>());
     let group_weight = client.empty(refs * size_of::<f32>());
     let sigma_buf = client.create_from_slice(f32::as_bytes(&[sigma]));
     let dct_profile = dct_noise_profile(0.0);
@@ -419,8 +411,6 @@ fn run_spatial_only(
     let wsum = client.empty(pixels * size_of::<i32>());
     let output = client.empty(frame_len * size_of::<f32>());
 
-    let group_grid = CubeCount::new_2d(refs_x, refs_y);
-    let group_dim = CubeDim::new_2d(8, 8);
     let agg_grid = CubeCount::new_2d(
         w.div_ceil(crate::nlmeans::BLOCK_X),
         h.div_ceil(crate::nlmeans::BLOCK_Y),
@@ -446,25 +436,31 @@ fn run_spatial_only(
             zero_workgroups * zero_dim,
         );
 
-        collab_group_temporal::launch_unchecked::<R>(
+        collab_fused::launch_unchecked::<R>(
             client,
-            group_grid.clone(),
-            group_dim,
+            CubeCount::new_2d(fused_cubes_x(w), refs_y),
+            CubeDim::new_1d(64),
             stored_ch as usize,
-            ArrayArg::from_raw_parts(ring_buf.clone(), noisy_centre.len()),
+            ArrayArg::from_raw_parts(ring_buf, noisy_centre.len()),
             ArrayArg::from_raw_parts(mv_dummy, 1),
             ArrayArg::from_raw_parts(conf_dummy, 1),
-            ArrayArg::from_raw_parts(member_pos.clone(), pos_len),
-            ArrayArg::from_raw_parts(member_frame.clone(), pos_len),
-            ArrayArg::from_raw_parts(member_count.clone(), refs),
-            ArrayArg::from_raw_parts(member_sig2, pos_len),
-            centre_slot,
             ArrayArg::from_raw_parts(neighbour_slots_dummy, 1),
+            ArrayArg::from_raw_parts(sigma_buf, stored_ch as usize),
+            ArrayArg::from_raw_parts(dct_profile_buf, 8),
+            ArrayArg::from_raw_parts(accum.clone(), frame_len),
+            ArrayArg::from_raw_parts(wsum.clone(), pixels),
+            ArrayArg::from_raw_parts(group_weight, refs),
+            centre_slot,
             0.0f32,
             c_min,
             // `radius` is 0 below, so no temporal candidate is ever
             // scored and this runtime scalar is never read.
             0.0f32,
+            lambda_ht,
+            wnorm,
+            ACCUM_SCALE,
+            false,
+            false,
             0u32,
             refine,
             1u32,
@@ -477,39 +473,8 @@ fn run_spatial_only(
             h,
             channels_count,
             k_max,
-            spatial_radius,
-            refs_x,
-        );
-
-        collab_filter_ht::launch_unchecked::<R>(
-            client,
-            group_grid,
-            group_dim,
-            stored_ch as usize,
-            ArrayArg::from_raw_parts(ring_buf, noisy_centre.len()),
-            ArrayArg::from_raw_parts(member_pos, pos_len),
-            ArrayArg::from_raw_parts(member_frame, pos_len),
-            ArrayArg::from_raw_parts(member_count, refs),
-            ArrayArg::from_raw_parts(member_sig2_dummy, 1),
-            ArrayArg::from_raw_parts(accum.clone(), frame_len),
-            ArrayArg::from_raw_parts(wsum.clone(), pixels),
-            ArrayArg::from_raw_parts(filtered_dummy, 1),
-            ArrayArg::from_raw_parts(group_weight, refs),
-            centre_slot,
-            ArrayArg::from_raw_parts(sigma_buf, stored_ch as usize),
-            ArrayArg::from_raw_parts(dct_profile_buf, 8),
-            lambda_ht,
-            wnorm,
-            ACCUM_SCALE,
-            false,
-            false,
-            false,
-            true,
-            w,
-            h,
-            channels_count,
-            k_max,
             stored_ch,
+            spatial_radius,
             refs_x,
         );
 
@@ -538,10 +503,10 @@ fn run_spatial_only(
 /// temporal window should cancel more grain than a spatial-only search
 /// on the same frame ever could.
 ///
-/// Both arms run the exact same grouping and filtering kernels, at the
-/// same `spatial_radius`, `c_min`, `lambda_ht`, and fixed `sigma`, over
-/// the identical noisy centre frame. The only difference is whether
-/// `collab_group_temporal` has a temporal window to search.
+/// Both arms run the exact same kernel, at the same `spatial_radius`,
+/// `c_min`, `lambda_ht`, and fixed `sigma`, over the identical noisy
+/// centre frame. The only difference is whether the search has a
+/// temporal window to look in.
 ///
 /// `denoise_submit` is called after every push, exactly the way a real
 /// caller drives this denoiser, and every emitted output is collected in
@@ -608,23 +573,22 @@ fn temporal_grouping_beats_spatial_only_on_a_static_clip() {
 /// temporal grouping's.
 ///
 /// Both arms here group across the identical radius-2 temporal window,
-/// with the identical `lambda_ht`, and read the identical filtered member
-/// patches straight off the GPU (`emit_filtered = true`). They differ
-/// only in which of those filtered members reach the aggregate for real
+/// with the identical `lambda_ht`, and run the identical kernel. They
+/// differ only in which filtered members reach the aggregate for real
 /// frame `radius`'s own output.
 ///
 /// The cross-frame arm is `Nl4dDenoiser` itself, which keeps every member
 /// that ever matched into that frame, whatever pass found it.
 ///
-/// The centre-only arm keeps only the members of the one pass centred on
-/// that frame, and only those whose own `member_frame` entry is that
-/// pass's `centre_slot`. It is built by hand, driving the same front end
-/// (`NlmDenoiser::submit_machinery`) directly and aggregating on the host
-/// in double precision from the GPU's raw
-/// `member_pos`/`member_frame`/`member_count`/`group_weight`/`filtered`
-/// outputs. A member's filtered pixels never depend on whether the
-/// scatter keeps it, only the choice of what to aggregate does, so this
-/// is exactly what a single-pass centre-only design would produce.
+/// The centre-only arm runs the one pass centred on that frame and reads
+/// back only the centre slot's own region of the accumulator ring. The
+/// kernel scatters each member into the region of the frame it was
+/// matched in, so that region holds exactly the members whose own frame
+/// is the centre, which is what a single-pass centre-only design would
+/// have produced. It is built by driving the same front end
+/// (`NlmDenoiser::submit_machinery`) directly, so the ring, the motion
+/// field, and the noise estimate are all the ones the real denoiser
+/// used.
 #[test]
 fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
     let client = make_client();
@@ -656,18 +620,15 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
 
     // Centre-only arm: the same front end, driven directly rather than
     // through `Nl4dDenoiser`, so the pass centred on real frame `radius`
-    // can be aggregated by hand once it runs.
+    // can be aggregated on its own once it runs.
     let mut nlm_params = static_clip_params(radius).nlm;
     nlm_params.temporal_radius = radius;
     let mut front = NlmDenoiser::<R>::new(&client, nlm_params, w, h);
 
     let pixels = (w * h) as usize;
     let refs_x = refs_along(w);
-    let refs_y = refs_along(h);
     let refs = ref_count(w, h);
     let k_max = MAX_K;
-    let pos_len = member_buf_len(w, h, k_max);
-    let filt_len = filtered_buf_len(w, h, k_max);
     let total_frames = 1 + 2 * radius;
 
     let mut centre_only_out: Option<Vec<f32>> = None;
@@ -694,46 +655,43 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
         let profile = dct_noise_profile(0.0);
         let profile_buf = client.create_from_slice(f32::as_bytes(&profile));
         let wnorm = weight_scale(sigmas[0], &profile);
+        let accum_scale = cross_frame_accum_scale(SPATIAL_RADIUS, radius);
 
-        let member_pos = client.empty(pos_len * size_of::<u32>());
-        let member_frame = client.empty(pos_len * size_of::<u32>());
-        let member_count = client.empty(refs * size_of::<u32>());
-        // `collab_group_temporal` always writes this, and the
-        // `collab_filter_ht` call below keeps `use_member_sigma` off
-        // and reads `member_sig2_dummy` instead, unaffected by it, the
-        // same split `run_spatial_only` above uses.
-        let member_sig2 = client.empty(pos_len * size_of::<f32>());
-        let member_sig2_dummy = client.empty(size_of::<f32>());
-        let filtered_buf = client.empty(filt_len * size_of::<f32>());
         let group_weight = client.empty(refs * size_of::<f32>());
-        // The kernel's scatter is unconditional now, so these have to be
-        // sized for the whole ring even though this test never reads
-        // them back, or the scatter's own writes land out of bounds.
-        let accum_scratch = client.empty(pixels * total_frames as usize * size_of::<i32>());
-        let wsum_scratch = client.empty(pixels * total_frames as usize * size_of::<i32>());
+        // The whole ring, because a member matched in a neighbour frame
+        // scatters into that frame's own region. Only the centre slot's
+        // region is read back below, which is exactly what makes this
+        // the centre-only arm.
+        let accum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels * total_frames as usize]));
+        let wsum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels * total_frames as usize]));
+        let output = client.empty(pixels * size_of::<f32>());
 
         let mc = front.motion_ctx();
-        let group_grid = CubeCount::new_2d(refs_x, refs_y);
-        let group_dim = CubeDim::new_2d(8, 8);
 
         unsafe {
-            collab_group_temporal::launch_unchecked::<R>(
+            collab_fused::launch_unchecked::<R>(
                 &client,
-                group_grid.clone(),
-                group_dim,
+                CubeCount::new_2d(fused_cubes_x(w), refs_along(h)),
+                CubeDim::new_1d(64),
                 1usize,
                 ArrayArg::from_raw_parts(view.input.clone(), ring_len),
                 ArrayArg::from_raw_parts(view.mv_field.clone(), mv_len.max(1)),
                 ArrayArg::from_raw_parts(view.confidence.clone(), conf_len.max(1)),
-                ArrayArg::from_raw_parts(member_pos.clone(), pos_len),
-                ArrayArg::from_raw_parts(member_frame.clone(), pos_len),
-                ArrayArg::from_raw_parts(member_count.clone(), refs),
-                ArrayArg::from_raw_parts(member_sig2, pos_len),
-                centre_slot,
                 ArrayArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
+                ArrayArg::from_raw_parts(sigma_buf, 1),
+                ArrayArg::from_raw_parts(profile_buf, 8),
+                ArrayArg::from_raw_parts(accum.clone(), pixels * total_frames as usize),
+                ArrayArg::from_raw_parts(wsum.clone(), pixels * total_frames as usize),
+                ArrayArg::from_raw_parts(group_weight, refs),
+                centre_slot,
                 0.0f32,
                 C_MIN,
                 front.thsad_value(),
+                LAMBDA_HT,
+                wnorm,
+                accum_scale,
+                false,
+                false,
                 radius,
                 REFINE,
                 view.mv_stride,
@@ -746,102 +704,35 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 h,
                 1u32,
                 k_max,
+                1u32,
                 SPATIAL_RADIUS,
                 refs_x,
             );
 
-            collab_filter_ht::launch_unchecked::<R>(
+            collab_normalise::launch_unchecked::<R>(
                 &client,
-                group_grid,
-                group_dim,
+                CubeCount::new_2d(
+                    w.div_ceil(crate::nlmeans::BLOCK_X),
+                    h.div_ceil(crate::nlmeans::BLOCK_Y),
+                ),
+                CubeDim::new_2d(crate::nlmeans::BLOCK_X, crate::nlmeans::BLOCK_Y),
                 1usize,
-                ArrayArg::from_raw_parts(view.input.clone(), ring_len),
-                ArrayArg::from_raw_parts(member_pos.clone(), pos_len),
-                ArrayArg::from_raw_parts(member_frame.clone(), pos_len),
-                ArrayArg::from_raw_parts(member_count.clone(), refs),
-                ArrayArg::from_raw_parts(member_sig2_dummy, 1),
-                ArrayArg::from_raw_parts(accum_scratch, pixels * total_frames as usize),
-                ArrayArg::from_raw_parts(wsum_scratch, pixels * total_frames as usize),
-                ArrayArg::from_raw_parts(filtered_buf.clone(), filt_len),
-                ArrayArg::from_raw_parts(group_weight.clone(), refs),
-                centre_slot,
-                ArrayArg::from_raw_parts(sigma_buf, 1),
-                ArrayArg::from_raw_parts(profile_buf, 8),
-                LAMBDA_HT,
-                wnorm,
-                ACCUM_SCALE,
-                false,
-                true,
-                false,
-                true,
+                ArrayArg::from_raw_parts(accum, pixels * total_frames as usize),
+                ArrayArg::from_raw_parts(wsum, pixels * total_frames as usize),
+                ArrayArg::from_raw_parts(output.clone(), pixels),
+                centre_slot * pixels as u32,
                 w,
                 h,
                 1u32,
-                k_max,
                 1u32,
-                refs_x,
             );
         }
 
-        let member_pos_host =
-            u32::from_bytes(&client.read_one(member_pos).expect("member_pos readback failed"))[..pos_len]
-                .to_vec();
-        let member_frame_host = u32::from_bytes(
-            &client
-                .read_one(member_frame)
-                .expect("member_frame readback failed"),
-        )[..pos_len]
-            .to_vec();
-        let member_count_host = u32::from_bytes(
-            &client
-                .read_one(member_count)
-                .expect("member_count readback failed"),
-        )[..refs]
-            .to_vec();
-        let group_weight_host = f32::from_bytes(
-            &client
-                .read_one(group_weight)
-                .expect("group_weight readback failed"),
-        )[..refs]
-            .to_vec();
-        let filtered_host =
-            f32::from_bytes(&client.read_one(filtered_buf).expect("filtered readback failed"))[..filt_len]
-                .to_vec();
-
-        let mut sum = vec![0.0f64; pixels];
-        let mut wsum = vec![0.0f64; pixels];
-        for r in 0..refs {
-            let k_use = member_count_host[r] as usize;
-            let weight = group_weight_host[r] as f64;
-            for m in 0..k_use {
-                let idx = r * k_max as usize + m;
-                if member_frame_host[idx] != centre_slot {
-                    continue;
-                }
-                let packed = member_pos_host[idx];
-                let mx = packed & 0xFFFF;
-                let my = packed >> 16;
-                let line_base = idx * 64;
-                for row in 0..8u32 {
-                    for col in 0..8u32 {
-                        let px = (mx + col) as usize;
-                        let py = (my + row) as usize;
-                        let pix = py * w as usize + px;
-                        let val = filtered_host[line_base + (row * 8 + col) as usize] as f64;
-                        sum[pix] += val * weight;
-                        wsum[pix] += weight;
-                    }
-                }
-            }
-        }
-        let mut out = vec![0.0f32; pixels];
-        for i in 0..pixels {
-            assert!(
-                wsum[i] > 0.0,
-                "pixel {i}: centre-only arm left it with no contribution at all"
-            );
-            out[i] = (sum[i] / wsum[i]) as f32;
-        }
+        let out = f32::from_bytes(&client.read_one(output).expect("readback failed"))[..pixels].to_vec();
+        assert!(
+            out.iter().all(|v| v.is_finite()),
+            "the centre-only arm left a pixel with no contribution at all"
+        );
         centre_only_out = Some(out);
         break;
     }

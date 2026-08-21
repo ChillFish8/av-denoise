@@ -2,15 +2,14 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::params::Nl4dParams;
-use crate::collab::geometry::{member_buf_len, ref_count, refs_along};
+use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use crate::collab::kernels::aggregate::{
     collab_normalise,
     collab_zero_accum,
     cross_frame_accum_scale,
     weight_scale,
 };
-use crate::collab::kernels::filter_ht::collab_filter_ht;
-use crate::collab::kernels::group_temporal::collab_group_temporal;
+use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, PATCH_SIZE};
 use crate::denoiser::DenoiserError;
@@ -22,13 +21,14 @@ use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, MAX_GRID_1D, NlmDenoiser, Pe
 /// This drives the NLMeans front end, but only for its machinery, the
 /// frame ring, the motion field, and the confidence scores built by
 /// [`NlmDenoiser::submit_machinery`]/[`NlmDenoiser::flush_step_machinery`].
-/// No NLM weighting kernel ever runs. Instead, every submit groups
-/// patches straight out of the noisy ring with
-/// [`collab_group_temporal`], searching both the centre frame spatially
-/// and each neighbour frame around where motion compensation predicts a
-/// patch moved, then shrinks the group's coefficients with
-/// [`collab_filter_ht`] in its temporal mode and aggregates the result
-/// with [`collab_normalise`].
+/// No NLM weighting kernel ever runs. Instead, every submit hands the
+/// noisy ring to [`collab_fused`], which groups patches by searching
+/// both the centre frame spatially and each neighbour frame around
+/// where motion compensation predicts a patch moved, shrinks each
+/// group's coefficients in the transform domain, and scatters the
+/// filtered members back into the accumulator ring.
+/// [`collab_normalise`] then turns one region of that ring into a
+/// finished frame.
 ///
 /// Every pass scatters its filtered members into whichever frame each one
 /// came from, not only the centre frame, so a frame's own output finishes
@@ -61,22 +61,6 @@ pub struct Nl4dDenoiser<R: Runtime> {
     /// [`Self::run_collab_stage`] call.
     accum_scale: f32,
 
-    member_pos: Handle,
-    member_frame: Handle,
-    member_count: Handle,
-    /// [`collab_group_temporal`]'s per-member mismatch-variance output,
-    /// and `collab_filter_ht`'s `member_sig2` argument on the way back
-    /// in.
-    ///
-    /// Always the real `refs * k_max` size, whatever
-    /// `confidence_variance` is, because the grouping kernel always fills
-    /// it. That flag decides whether `collab_filter_ht` reads it back,
-    /// not whether it holds real values.
-    member_sig2: Handle,
-    /// `collab_filter_ht`'s `filtered` argument. This denoiser never
-    /// sets `emit_filtered`, so a one-element placeholder is valid here
-    /// too.
-    filtered_dummy: Handle,
     group_weight: Handle,
     sigma_buf: Handle,
     dct_profile_buf: Handle,
@@ -157,15 +141,9 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let stored_ch = channels.storage_count();
         let k_max = MAX_K;
         let refs = ref_count(width, height);
-        let pos_len = member_buf_len(width, height, k_max);
         let pixels = (width * height) as usize;
         let frame_len = pixels * stored_ch as usize;
 
-        let member_pos = client.empty(pos_len * size_of::<u32>());
-        let member_frame = client.empty(pos_len * size_of::<u32>());
-        let member_count = client.empty(refs * size_of::<u32>());
-        let member_sig2 = client.empty(pos_len * size_of::<f32>());
-        let filtered_dummy = client.empty(stored_ch as usize * size_of::<f32>());
         let group_weight = client.empty(refs * size_of::<f32>());
         let sigma_buf = client.create_from_slice(f32::as_bytes(&vec![0.0f32; stored_ch as usize]));
         // The correlation profile is purely spatial and this denoiser
@@ -199,11 +177,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             confidence_variance: params.confidence_variance,
             k_max,
             accum_scale: cross_frame_accum_scale(params.spatial_radius, params.temporal_radius),
-            member_pos,
-            member_frame,
-            member_count,
-            member_sig2,
-            filtered_dummy,
             group_weight,
             sigma_buf,
             dct_profile_buf,
@@ -330,9 +303,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// A pass is centred on one physical ring slot, `view.centre_slot`,
     /// and every member it groups and filters scatters into its own
     /// frame's region of `self.accum`/`self.wsum`, whichever physical
-    /// slot that member actually came from (see
-    /// [`crate::collab::kernels::filter_ht::collab_filter_ht`]'s
-    /// `temporal` mode). Since this pass searches the centre frame
+    /// slot that member actually came from (see [`collab_fused`]'s
+    /// scatter). Since this pass searches the centre frame
     /// spatially and each of the `temporal_radius` frames on either side
     /// of it, this pass's own contributions land across every region in
     /// `centre_slot - temporal_radius ..= centre_slot + temporal_radius`
@@ -363,12 +335,10 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// stream, whose completed region is still short of contributions
     /// from passes that have not run yet.
     fn run_collab_stage(&mut self, view: &RingView) -> Result<Option<Handle>, DenoiserError> {
-        // The frame-slot contract: `collab_group_temporal`'s
-        // `centre_slot` and `collab_filter_ht`'s `frame` must be the
-        // same physical ring slot, or a member gets grouped against one
-        // frame and scattered as though it belonged to another. Both
-        // launches below read this one local, computed here exactly
-        // once, rather than each recomputing their own.
+        // The frame-slot contract: `collab_fused`'s `centre_slot` and
+        // the ring view's own centre must be the same physical slot, or
+        // a member gets grouped against one frame and scattered as
+        // though it belonged to another.
         let centre_slot = view.centre_slot;
 
         let client = self.front.compute_client().clone();
@@ -400,10 +370,11 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let refs_x = refs_along(self.width);
         let refs_y = refs_along(self.height);
         let refs = ref_count(self.width, self.height);
-        let pos_len = member_buf_len(self.width, self.height, self.k_max);
 
-        let group_grid = CubeCount::new_2d(refs_x, refs_y);
-        let group_dim = CubeDim::new_2d(8, 8);
+        // The kernel packs eight references into one 64-lane cube, so
+        // its grid is an eighth as wide as the reference grid along x.
+        let collab_grid = CubeCount::new_2d(fused_cubes_x(self.width), refs_y);
+        let collab_dim = CubeDim::new_1d(64);
         let agg_grid = CubeCount::new_2d(self.width.div_ceil(BLOCK_X), self.height.div_ceil(BLOCK_Y));
         let agg_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
         let zero_dim = 256u32;
@@ -479,28 +450,34 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 );
             }
 
-            collab_group_temporal::launch_unchecked::<R>(
+            collab_fused::launch_unchecked::<R>(
                 &client,
-                group_grid.clone(),
-                group_dim,
+                collab_grid,
+                collab_dim,
                 stored_ch as usize,
                 ArrayArg::from_raw_parts(view.input.clone(), ring_len),
                 ArrayArg::from_raw_parts(view.mv_field.clone(), mv_len.max(1)),
                 ArrayArg::from_raw_parts(view.confidence.clone(), conf_len.max(1)),
-                ArrayArg::from_raw_parts(self.member_pos.clone(), pos_len),
-                ArrayArg::from_raw_parts(self.member_frame.clone(), pos_len),
-                ArrayArg::from_raw_parts(self.member_count.clone(), refs),
-                ArrayArg::from_raw_parts(self.member_sig2.clone(), pos_len),
-                centre_slot,
                 ArrayArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
-                // `collab_group_temporal` has no admission gate (see its
-                // own doc comment), so a constant subtracted from every
+                ArrayArg::from_raw_parts(self.sigma_buf.clone(), stored_ch as usize),
+                ArrayArg::from_raw_parts(self.dct_profile_buf.clone(), 8),
+                ArrayArg::from_raw_parts(self.accum.clone(), accum_ring_len),
+                ArrayArg::from_raw_parts(self.wsum.clone(), wsum_ring_len),
+                ArrayArg::from_raw_parts(self.group_weight.clone(), refs),
+                centre_slot,
+                // `collab_fused` has no admission gate (see its own doc
+                // comment), so a constant subtracted from every
                 // candidate's distance can never change which ones the
-                // argmin selection below picks. Any value is exact here;
-                // 0.0 is the simplest one that says so.
+                // selection picks. Any value is exact here; 0.0 is the
+                // simplest one that says so.
                 0.0f32,
                 self.c_min,
                 thsad,
+                self.lambda_ht,
+                wnorm,
+                self.accum_scale,
+                self.confidence_variance,
+                false,
                 self.temporal_radius,
                 self.refine,
                 view.mv_stride,
@@ -513,39 +490,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 self.height,
                 channels_count,
                 self.k_max,
-                self.spatial_radius,
-                refs_x,
-            );
-
-            collab_filter_ht::launch_unchecked::<R>(
-                &client,
-                group_grid,
-                group_dim,
-                stored_ch as usize,
-                ArrayArg::from_raw_parts(view.input.clone(), ring_len),
-                ArrayArg::from_raw_parts(self.member_pos.clone(), pos_len),
-                ArrayArg::from_raw_parts(self.member_frame.clone(), pos_len),
-                ArrayArg::from_raw_parts(self.member_count.clone(), refs),
-                ArrayArg::from_raw_parts(self.member_sig2.clone(), pos_len),
-                ArrayArg::from_raw_parts(self.accum.clone(), accum_ring_len),
-                ArrayArg::from_raw_parts(self.wsum.clone(), wsum_ring_len),
-                ArrayArg::from_raw_parts(self.filtered_dummy.clone(), 1),
-                ArrayArg::from_raw_parts(self.group_weight.clone(), refs),
-                centre_slot,
-                ArrayArg::from_raw_parts(self.sigma_buf.clone(), stored_ch as usize),
-                ArrayArg::from_raw_parts(self.dct_profile_buf.clone(), 8),
-                self.lambda_ht,
-                wnorm,
-                self.accum_scale,
-                self.confidence_variance,
-                false,
-                false,
-                true,
-                self.width,
-                self.height,
-                channels_count,
-                self.k_max,
                 stored_ch,
+                self.spatial_radius,
                 refs_x,
             );
         }

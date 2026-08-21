@@ -1,29 +1,18 @@
 use cubecl::prelude::*;
 
-use super::grouping::{BLKSIZE, THSAD, run_group_temporal};
-use super::helpers::{
-    R,
-    deterministic_texture,
-    make_client,
-    noisy_copy_of,
-    noisy_ring,
-    planted_ring,
-    textured_base,
-};
-use crate::collab::STEP;
-use crate::collab::geometry::refs_along;
+use super::grouping::{BLKSIZE, THSAD};
+use super::helpers::{R, make_client, noisy_copy_of, textured_base};
+use crate::collab::kernels::fused::mismatch_sigma2;
 use crate::collab::kernels::transforms::haar_variance_ladder;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::{ChannelMode, HqParams, MotionCompensationMode, MotionEstimation, NlmParams};
 
 const REFINE: u32 = 2;
-const K_MAX: u32 = 8;
-const SPATIAL_RADIUS: u32 = 4;
 
-/// The formula [`crate::collab::kernels::group_temporal::collab_group_temporal`]'s
-/// `mismatch_sigma2` runs on the GPU, mirrored on the host for these
-/// tests, with the same argument order and the same operations, so
-/// floating-point rounding matches to well within the tolerances below.
+/// The formula [`mismatch_sigma2`] runs on the GPU, mirrored on the host
+/// for these tests, with the same argument order and the same
+/// operations, so floating-point rounding matches to well within the
+/// tolerances below.
 fn expected_mismatch_sigma2(confidence: f32, thsad: f32, blksize: u32) -> f32 {
     let blksize_area = (blksize * blksize) as f32;
     let ratio = (1.0 - confidence) / (1.0 + confidence);
@@ -32,135 +21,106 @@ fn expected_mismatch_sigma2(confidence: f32, thsad: f32, blksize: u32) -> f32 {
     std::f32::consts::FRAC_PI_2 * eps * eps
 }
 
-/// `c = 1.0`, a perfect motion match, must give `sigma_m2 = 0.0` for
-/// every temporal member, whatever `thsad` is.
-#[test]
-fn confidence_one_gives_zero_mismatch_variance_for_every_temporal_member() {
-    let (w, h) = (96u32, 96u32);
-    let radius = 2u32;
-    let ref_pos = (64u32, 64u32);
-    let patch = deterministic_texture(7);
-    let fx = planted_ring(w, h, radius, ref_pos, 3, &patch, 0.2, |_| 1.0);
+/// Runs [`mismatch_sigma2`] on the GPU, one confidence per thread, so
+/// the host mirror above is checked against the code the filter
+/// actually calls rather than against itself.
+#[cube(launch_unchecked)]
+fn mismatch_sigma2_probe(
+    confidence: &Array<f32>,
+    thsad: f32,
+    blksize_area: f32,
+    out: &mut Array<f32>,
+    #[comptime] n: u32,
+) {
+    let i = ABSOLUTE_POS_X;
+    if i < n {
+        out[i as usize] = mismatch_sigma2(confidence[i as usize], thsad, blksize_area);
+    }
+}
 
-    let (_pos, member_frame, member_count, member_sig2) =
-        run_group_temporal(&fx, 0.0, 0.05, THSAD, REFINE, K_MAX, SPATIAL_RADIUS);
+fn run_mismatch_sigma2(confidences: &[f32], thsad: f32, blksize: u32) -> Vec<f32> {
+    let client = make_client();
+    let n = confidences.len();
+    let conf_buf = client.create_from_slice(f32::as_bytes(confidences));
+    // One output slot per confidence. `size_of_val(confidences)` reaches
+    // the same number but ties the output's size to the input's slice.
+    #[expect(
+        clippy::manual_slice_size_calculation,
+        reason = "n is the element count this output holds, not the input's byte length"
+    )]
+    let out_buf = client.empty(n * size_of::<f32>());
 
-    let refs_x = refs_along(w);
-    let ref_idx = ((ref_pos.1 / STEP) * refs_x + (ref_pos.0 / STEP)) as usize;
-    let count = member_count[ref_idx] as usize;
-    assert_eq!(count, 8, "expected the planted reference to fill to k_max");
-
-    let mut checked_a_temporal_member = false;
-    for j in 0..count {
-        let idx = ref_idx * K_MAX as usize + j;
-        if member_frame[idx] == fx.centre_slot {
-            continue;
-        }
-        checked_a_temporal_member = true;
-        assert!(
-            member_sig2[idx].abs() < 1e-9,
-            "member {j} (frame {}) at confidence 1.0 must carry sigma_m2 ~ 0, got {}",
-            member_frame[idx],
-            member_sig2[idx]
+    unsafe {
+        mismatch_sigma2_probe::launch_unchecked::<R>(
+            &client,
+            CubeCount::new_1d(1),
+            CubeDim::new_1d(64),
+            ArrayArg::from_raw_parts(conf_buf, n),
+            thsad,
+            (blksize * blksize) as f32,
+            ArrayArg::from_raw_parts(out_buf.clone(), n),
+            n as u32,
         );
     }
-    assert!(
-        checked_a_temporal_member,
-        "expected at least one temporal member in this group to exercise the assertion above"
-    );
+
+    let bytes = client.read_one(out_buf).expect("mismatch_sigma2 readback failed");
+    f32::from_bytes(&bytes)[..n].to_vec()
+}
+
+/// `c = 1.0`, a perfect motion match, must give `sigma_m2 = 0.0`
+/// exactly, whatever `thsad` is.
+#[test]
+fn confidence_one_gives_zero_mismatch_variance() {
+    for thsad in [THSAD, 0.5, 12.0] {
+        let out = run_mismatch_sigma2(&[1.0f32], thsad, BLKSIZE);
+        assert_eq!(
+            out[0], 0.0,
+            "a perfect match must carry no mismatch variance at thsad={thsad}, got {}",
+            out[0]
+        );
+    }
 }
 
 /// A known confidence must produce exactly the variance
-/// `expected_mismatch_sigma2` derives, for the one neighbour that
-/// carries it.
+/// [`expected_mismatch_sigma2`] derives, over the whole range the
+/// confidence field can hold.
 #[test]
 fn low_confidence_produces_the_derived_mismatch_variance() {
-    let (w, h) = (96u32, 96u32);
-    let radius = 2u32;
-    let ref_pos = (64u32, 64u32);
-    let patch = deterministic_texture(11);
-    let low_c = 0.2f32;
-    // k = +1 carries the confidence under test, every other neighbour
-    // stays at 1.0 so this group still fills without the low-confidence
-    // neighbour crowding anything else out of contention.
-    let fx = planted_ring(w, h, radius, ref_pos, 3, &patch, 0.2, |k| {
-        if k == 1 { low_c } else { 1.0 }
-    });
+    let confidences = [0.0f32, 0.05, 0.2, 0.5, 0.8, 0.95];
+    let out = run_mismatch_sigma2(&confidences, THSAD, BLKSIZE);
 
-    let (_pos, member_frame, member_count, member_sig2) =
-        run_group_temporal(&fx, 0.0, 0.05, THSAD, REFINE, K_MAX, SPATIAL_RADIUS);
-
-    let refs_x = refs_along(w);
-    let ref_idx = ((ref_pos.1 / STEP) * refs_x + (ref_pos.0 / STEP)) as usize;
-    let count = member_count[ref_idx] as usize;
-    let expected_slot = 1u32 + radius;
-
-    let member_idx = (0..count)
-        .find(|&j| member_frame[ref_idx * K_MAX as usize + j] == expected_slot)
-        .expect("the k=+1 neighbour must have joined the group");
-    let idx = ref_idx * K_MAX as usize + member_idx;
-
-    let expected = expected_mismatch_sigma2(low_c, THSAD, BLKSIZE);
-    assert!(
-        (member_sig2[idx] - expected).abs() < 1e-6,
-        "expected sigma_m2 {expected} for confidence {low_c}, got {}",
-        member_sig2[idx]
-    );
-    // Sanity: the derived value must actually be far from zero, or the
-    // assertion above would pass trivially against a broken formula
-    // that always returns ~0.
-    assert!(
-        expected > 1e-4,
-        "expected a non-trivial mismatch variance, got {expected}"
-    );
-}
-
-/// A centre-frame member carries `sigma_m2 = 0.0` exactly, whatever the
-/// confidence buffer holds, because centre-frame candidates never read
-/// it. `noisy_ring` sets a uniform confidence of `0.0`, the worst value
-/// the formula can see, with `c_min = 0.0` so nothing is gated and the
-/// self-match's neighbours really do get scored against it.
-#[test]
-fn centre_frame_members_always_carry_zero_regardless_of_confidence() {
-    let (w, h) = (64u32, 64u32);
-    let radius = 2u32;
-    let fx = noisy_ring(w, h, radius, 0.0);
-
-    let (_pos, member_frame, member_count, member_sig2) =
-        run_group_temporal(&fx, 0.0, 0.0, THSAD, REFINE, K_MAX, SPATIAL_RADIUS);
-
-    let refs_x = refs_along(w);
-    let refs_y = refs_along(h);
-    let mut checked_a_centre_member = false;
-    for (ref_idx, &count) in member_count.iter().enumerate().take((refs_x * refs_y) as usize) {
-        let count = count as usize;
-        for j in 0..count {
-            let idx = ref_idx * K_MAX as usize + j;
-            if member_frame[idx] != fx.centre_slot {
-                continue;
-            }
-            checked_a_centre_member = true;
-            assert_eq!(
-                member_sig2[idx], 0.0,
-                "ref {ref_idx} member {j}: centre-frame member must carry sigma_m2 = 0.0 \
-                 exactly, got {}",
-                member_sig2[idx]
-            );
-        }
+    for (idx, &c) in confidences.iter().enumerate() {
+        let expected = expected_mismatch_sigma2(c, THSAD, BLKSIZE);
+        assert!(
+            (out[idx] - expected).abs() < 1e-9,
+            "expected sigma_m2 {expected} for confidence {c}, got {}",
+            out[idx]
+        );
     }
-    assert!(
-        checked_a_centre_member,
-        "expected at least one centre-frame member (the self-match is always one) to exercise \
-         the assertion above"
-    );
+
+    // Sanity: a low confidence must actually derive a value far from
+    // zero, or the assertions above would pass trivially against a
+    // broken formula that always returns ~0.
+    let low = expected_mismatch_sigma2(0.2, THSAD, BLKSIZE);
+    assert!(low > 1e-4, "expected a non-trivial mismatch variance, got {low}");
 }
+
+// The mismatch variance only ever reaches a motion-predicted member.
+// A centre-frame member is not motion-predicted, so there is no
+// mismatch to model and it keeps the plain `sigma^2` whatever the
+// confidence field holds.
+// `collab::tests::fused::centre_frame_members_ignore_the_confidence_field`
+// runs the filter with every neighbour gated out, leaving nothing but
+// centre-frame members, and shows the `confidence_variance` flag then
+// changes nothing at all even with the confidence buffer at 0.0, the
+// worst value the formula above can see.
 
 /// Inflating exactly one member's variance must raise exactly the stack
 /// rows that member participates in and leave every other row
 /// unchanged, checked against the host-mirror ladder
 /// [`haar_variance_ladder`] (already pinned against the GPU
-/// `variance_ladder` it mirrors by
-/// `collab::tests::filter_ht::gpu_variance_ladder_matches_the_host_mirror`).
+/// `variance_reg_level` it mirrors by
+/// `collab::tests::transforms::gpu_variance_ladder_matches_the_host_mirror`).
 ///
 /// For `k_use = 8`, member `m` feeds into exactly the rows the Haar
 /// butterfly pairs it into: the DC rows `{0, 1}`, its quad row (`2` for

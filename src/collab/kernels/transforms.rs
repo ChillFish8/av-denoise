@@ -2,17 +2,18 @@ use cubecl::prelude::*;
 
 use crate::collab::{MAX_K, PATCH_AREA, PATCH_SIZE};
 
-// Ties the hardcoded `8usize`/`8u32` per-thread register-array sizes in
-// `haar_fwd_stack` and `haar_inv_stack` back to `MAX_K`. Both functions
-// snapshot a thread's full column into a fixed-size local array every
-// level rather than sizing it off `MAX_K` directly (see their own doc
-// comments for why), so nothing else catches this constant drifting.
+// The register-layout helpers below stride a group by `PATCH_SIZE`,
+// because one lane holds one 8-value column of each of `MAX_K` members
+// and the two counts happen to be the same number. A caller sizes the
+// array it passes them as `PATCH_AREA`, which is only enough for the
+// whole group while that holds.
 const _: () = assert!(
-    MAX_K == 8,
-    "update the hardcoded 8usize/8u32 slots in haar_fwd_stack and haar_inv_stack to MAX_K"
+    MAX_K == PATCH_SIZE,
+    "haar_reg_fwd_level and haar_reg_inv_level stride a group by PATCH_SIZE, which only holds \
+     the whole stack while MAX_K matches it"
 );
 
-/// The floor both filters pass to [`safe_reciprocal`] when they turn a
+/// The floor the filter passes to [`safe_reciprocal`] when it turns a
 /// retained variance sum into a group weight.
 ///
 /// A group weight therefore never exceeds `1 / RECIPROCAL_FLOOR`, which
@@ -122,158 +123,159 @@ pub fn fill_haar8_basis(basis: &mut SharedMemory<f32>, thread_id: u32) {
     }
 }
 
-/// Runs one forward 8-point DCT over the 8 values at `buf[base + i *
-/// stride]`, writing the 8 coefficients back to the same positions.
+/// Runs one forward 8-point DCT over a line a lane already holds in
+/// registers.
 ///
-/// One thread computes all 8 outputs of one line, so the caller decides
-/// how many lines run at once by deciding how many threads call this.
-/// Passing `base` and `stride` as row or column offsets turns the same
-/// function into either a row transform or a column transform.
+/// `line` holds the 8 values on entry and the 8 coefficients on return.
+/// The basis stays in shared memory, because every lane reads all 64 of
+/// its entries and a per-lane copy would cost 64 registers to save
+/// nothing.
 ///
-/// The whole line is read into registers before any output is written, so
+/// The whole line is snapshotted before any output is written, so
 /// writing an output cannot disturb an input a later output still needs.
-/// It also turns 64 shared-memory reads per line into 8.
-///
-/// A thread owns its own eight slots for the whole call, so no barrier is
-/// needed inside it. A caller that follows a row pass with a column pass
-/// still needs its own barrier between them, because the column pass
-/// reads slots other threads wrote.
+/// A lane owns every value it touches, so no barrier is needed here or
+/// around the call.
 #[cube]
-pub(crate) fn dct8_line_fwd(basis: &SharedMemory<f32>, buf: &mut SharedMemory<f32>, base: u32, stride: u32) {
-    let mut line = Array::<f32>::new(8usize);
+pub(crate) fn dct8_reg_fwd(basis: &SharedMemory<f32>, line: &mut Array<f32>) {
+    let mut src = Array::<f32>::new(8usize);
     #[unroll]
     for i in 0..PATCH_SIZE {
-        line[i as usize] = buf[(base + i * stride) as usize];
+        src[i as usize] = line[i as usize];
     }
     #[unroll]
     for j in 0..PATCH_SIZE {
         let mut sum = 0.0f32;
         #[unroll]
         for i in 0..PATCH_SIZE {
-            sum += basis[(j * PATCH_SIZE + i) as usize] * line[i as usize];
+            sum += basis[(j * PATCH_SIZE + i) as usize] * src[i as usize];
         }
-        buf[(base + j * stride) as usize] = sum;
+        line[j as usize] = sum;
     }
 }
 
-/// The inverse of `dct8_line_fwd`, the transpose of the same basis.
+/// The inverse of [`dct8_reg_fwd`], the transpose of the same basis.
 ///
 /// Because the basis is orthonormal its inverse is its own transpose, so
 /// this reads `basis[j*8+i]` for output position `i` instead of output
-/// position `j`, and sums over `j` instead of `i`. Everything else about
-/// the calling convention matches `dct8_line_fwd`.
-///
-/// The whole line is read into registers before any output is written, so
-/// writing an output cannot disturb an input a later output still needs.
-/// It also turns 64 shared-memory reads per line into 8.
-///
-/// A thread owns its own eight slots for the whole call, so no barrier is
-/// needed inside it. A caller that follows a row pass with a column pass
-/// still needs its own barrier between them, because the column pass
-/// reads slots other threads wrote.
+/// position `j`, and sums over `j` instead of `i`, matching
+/// [`dct8_reg_fwd`]'s calling convention otherwise.
 #[cube]
-pub(crate) fn dct8_line_inv(basis: &SharedMemory<f32>, buf: &mut SharedMemory<f32>, base: u32, stride: u32) {
-    let mut line = Array::<f32>::new(8usize);
+pub(crate) fn dct8_reg_inv(basis: &SharedMemory<f32>, line: &mut Array<f32>) {
+    let mut src = Array::<f32>::new(8usize);
     #[unroll]
     for j in 0..PATCH_SIZE {
-        line[j as usize] = buf[(base + j * stride) as usize];
+        src[j as usize] = line[j as usize];
     }
     #[unroll]
     for i in 0..PATCH_SIZE {
         let mut sum = 0.0f32;
         #[unroll]
         for j in 0..PATCH_SIZE {
-            sum += basis[(j * PATCH_SIZE + i) as usize] * line[j as usize];
+            sum += basis[(j * PATCH_SIZE + i) as usize] * src[j as usize];
         }
-        buf[(base + i * stride) as usize] = sum;
+        line[i as usize] = sum;
     }
 }
 
-/// Runs the orthonormal Haar transform along the stack axis, in place,
-/// for one spatial position `pos`.
+/// One level of the forward stack Haar, over a group a lane holds
+/// entirely in registers.
 ///
-/// The stack holds up to `MAX_K` patches, one per `k`, and element `k`
-/// of the stack at this position lives at `stack[k * PATCH_AREA + pos]`.
-/// `k_use` is the active stack size, a power of two no greater than
-/// `MAX_K`.
+/// `stack` holds `MAX_K` members of 8 values each, member `k` at
+/// `k * PATCH_SIZE + pos`, which is the slice of a group one lane owns
+/// when each lane holds one column. This runs the butterfly at every one
+/// of those 8 positions at once, so one call covers the whole level.
 ///
 /// Each butterfly is `(a, b) -> ((a+b)/sqrt(2), (a-b)/sqrt(2))`, which
-/// has unit-norm rows and is its own inverse. The transform applies that
-/// butterfly across the whole active stack, then recurses on just the
-/// approximation half, halving the working length each time until one
-/// value is left. That is a full multi-level decomposition, with the
-/// coarsest approximation ending up at `k = 0` and finer detail bands
-/// filling the rest in order. A `k_use` of 1 never enters the loop, so
-/// the stack is left unchanged.
+/// has unit-norm rows and is its own inverse. A full multi-level
+/// decomposition calls this once per level, over a length that halves
+/// each time, with the coarsest approximation ending up at `k = 0` and
+/// finer detail bands filling the rest in order.
 ///
-/// Every thread owns a different `pos`, so no other thread ever touches
-/// this thread's slice of the stack and no `sync_cube()` is needed
-/// inside. Each level snapshots every value it might read before writing
-/// any output, because the output range overlaps the input range and an
-/// in-place write would otherwise clobber a value a later pair still
-/// needs.
+/// This takes the level's length as a `#[comptime]` argument, so every
+/// index into `stack` is a compile-time constant. A register array
+/// indexed by a runtime value is not a register array, it is scratch
+/// memory, and the whole point of holding the group in registers is
+/// lost the moment one dynamic index appears. The caller picks the
+/// levels with a run of predicates on the group size rather than a
+/// loop.
+///
+/// The level snapshots every value it reads before writing any output,
+/// because the output range overlaps the input range.
 #[cube]
-pub(crate) fn haar_fwd_stack(stack: &mut SharedMemory<f32>, pos: u32, k_use: u32) {
-    let inv_sqrt2 = 1.0f32 / f32::sqrt(2.0f32);
-    let mut len = k_use;
-    while len > 1 {
-        let half = len / 2;
-
-        let mut snapshot = Array::<f32>::new(8usize);
+pub(crate) fn haar_reg_fwd_level(stack: &mut Array<f32>, #[comptime] len: u32) {
+    let half = comptime!(len / 2);
+    #[unroll]
+    for pos in 0..PATCH_SIZE {
+        let mut snapshot = Array::<f32>::new(MAX_K as usize);
         #[unroll]
-        for k in 0..8u32 {
-            snapshot[k as usize] = stack[(k * PATCH_AREA + pos) as usize];
+        for k in 0..len {
+            snapshot[k as usize] = stack[(k * PATCH_SIZE + pos) as usize];
         }
-
-        let mut p = 0u32;
-        while p < half {
+        #[unroll]
+        for p in 0..half {
             let a = snapshot[(2u32 * p) as usize];
-            let b = snapshot[(2u32 * p + 1) as usize];
-            stack[(p * PATCH_AREA + pos) as usize] = (a + b) * inv_sqrt2;
-            stack[((half + p) * PATCH_AREA + pos) as usize] = (a - b) * inv_sqrt2;
-            p += 1;
+            let b = snapshot[(2u32 * p + 1u32) as usize];
+            stack[(p * PATCH_SIZE + pos) as usize] = (a + b) * std::f32::consts::FRAC_1_SQRT_2;
+            stack[((half + p) * PATCH_SIZE + pos) as usize] =
+                (a - b) * std::f32::consts::FRAC_1_SQRT_2;
         }
-
-        len = half;
     }
 }
 
-/// The inverse of `haar_fwd_stack`.
+/// One level of the inverse stack Haar, the mirror of
+/// [`haar_reg_fwd_level`].
 ///
-/// The forward transform's butterfly is its own inverse, so undoing it
-/// only takes running the same butterfly again, in the opposite level
-/// order. The forward pass works from the full stack down to a single
-/// value, so the inverse pass works back up from a pair to the full
-/// stack, at each level combining the approximation half with the
-/// detail half that level produced, and writing the result back
-/// interleaved.
-///
-/// The calling convention matches `haar_fwd_stack`, including the
-/// per-level snapshot that keeps in-place writes from clobbering values
-/// a later pair still needs.
+/// The butterfly is its own inverse, so this level combines the
+/// approximation half with the detail half and writes the pair back
+/// interleaved. A caller runs the levels in the opposite order to the
+/// forward pass.
 #[cube]
-pub(crate) fn haar_inv_stack(stack: &mut SharedMemory<f32>, pos: u32, k_use: u32) {
-    let inv_sqrt2 = 1.0f32 / f32::sqrt(2.0f32);
-    let mut len = 2u32;
-    while len <= k_use {
-        let half = len / 2;
-
-        let mut snapshot = Array::<f32>::new(8usize);
+pub(crate) fn haar_reg_inv_level(stack: &mut Array<f32>, #[comptime] len: u32) {
+    let half = comptime!(len / 2);
+    #[unroll]
+    for pos in 0..PATCH_SIZE {
+        let mut snapshot = Array::<f32>::new(MAX_K as usize);
         #[unroll]
-        for k in 0..8u32 {
-            snapshot[k as usize] = stack[(k * PATCH_AREA + pos) as usize];
+        for k in 0..len {
+            snapshot[k as usize] = stack[(k * PATCH_SIZE + pos) as usize];
         }
-
-        let mut p = 0u32;
-        while p < half {
+        #[unroll]
+        for p in 0..half {
             let a = snapshot[p as usize];
             let b = snapshot[(half + p) as usize];
-            stack[(2u32 * p * PATCH_AREA + pos) as usize] = (a + b) * inv_sqrt2;
-            stack[((2u32 * p + 1) * PATCH_AREA + pos) as usize] = (a - b) * inv_sqrt2;
-            p += 1;
+            stack[(2u32 * p * PATCH_SIZE + pos) as usize] =
+                (a + b) * std::f32::consts::FRAC_1_SQRT_2;
+            stack[((2u32 * p + 1u32) * PATCH_SIZE + pos) as usize] =
+                (a - b) * std::f32::consts::FRAC_1_SQRT_2;
         }
+    }
+}
 
-        len *= 2;
+/// One level of the variance propagation that shadows
+/// [`haar_reg_fwd_level`].
+///
+/// A Haar butterfly's two outputs are each a sum of two independent
+/// inputs scaled by `1/sqrt(2)`, so both land on the same variance,
+/// `(va + vb) / 2`. Running this over the same levels, in the same
+/// pairing order, as the signal turns `v[j]` into the variance of stack
+/// coefficient `j`.
+///
+/// [`haar_variance_ladder`] is the host mirror this is checked against.
+/// This takes the level length as a `#[comptime]` argument for the
+/// reason [`haar_reg_fwd_level`] gives.
+#[cube]
+pub(crate) fn variance_reg_level(v: &mut Array<f32>, #[comptime] len: u32) {
+    let half = comptime!(len / 2);
+    let mut snapshot = Array::<f32>::new(MAX_K as usize);
+    #[unroll]
+    for k in 0..len {
+        snapshot[k as usize] = v[k as usize];
+    }
+    #[unroll]
+    for p in 0..half {
+        let avg = (snapshot[(2u32 * p) as usize] + snapshot[(2u32 * p + 1u32) as usize]) * 0.5f32;
+        v[p as usize] = avg;
+        v[(half + p) as usize] = avg;
     }
 }
 
@@ -328,7 +330,7 @@ pub fn dct_noise_profile(rho: f32) -> [f32; 8] {
     g
 }
 
-/// The host-side mirror of the variance propagation `haar_fwd_stack`
+/// The host-side mirror of the variance propagation the stack Haar
 /// applies to a per-coefficient noise variance instead of a signal.
 ///
 /// A Haar butterfly's two outputs are each a sum of two independent
@@ -338,10 +340,14 @@ pub fn dct_noise_profile(rho: f32) -> [f32; 8] {
 /// the same value because both are a sum of the same two inputs, just
 /// with one sign flipped.
 ///
-/// This runs the same multi-level recursion as `haar_fwd_stack`, over
-/// plain host `f32`, so a filter kernel can propagate a per-patch sigma
-/// down to a per-coefficient sigma without a GPU round trip.
-pub fn haar_variance_ladder(sig2: &[f32], k_use: u32) -> Vec<f32> {
+/// This runs the same multi-level recursion as [`haar_reg_fwd_level`],
+/// over plain host `f32`, so a filter kernel can propagate a per-patch
+/// sigma down to a per-coefficient sigma without a GPU round trip.
+///
+/// Every caller is a test oracle, so this only builds under `cfg(test)`
+/// with a GPU runtime feature enabled, matching the callers themselves.
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+pub(crate) fn haar_variance_ladder(sig2: &[f32], k_use: u32) -> Vec<f32> {
     let mut out = sig2.to_vec();
     let mut len = k_use;
     while len > 1 {

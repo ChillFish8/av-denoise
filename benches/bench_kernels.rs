@@ -5,7 +5,7 @@ mod kernels;
 use kernels::accumulate::AccumulateBench;
 use kernels::bilateral::BilateralBench;
 use kernels::collab_aggregate::{CollabNormaliseBench, CollabZeroAccumBench};
-use kernels::collab_ht::CollabHtBench;
+use kernels::collab_fused::CollabFusedBench;
 use kernels::copy::CopyBench;
 use kernels::dist_2d_weight::DistWeightBench;
 use kernels::dist_2d_weight_ref::DistWeightRefBench;
@@ -28,7 +28,6 @@ use kernels::mc_chain_compose::ChainComposeBench;
 use kernels::mc_confidence::McConfidenceBench;
 use kernels::mc_downscale::DownscaleBench;
 use kernels::mc_warp::WarpBench;
-use kernels::nl4d_group_temporal::CollabGroupTemporalBench;
 use kernels::noise_partial::NoisePartialBench;
 use kernels::temporal_noise_stats::TemporalNoiseStatsBench;
 use kernels::vertical_weight::VWeightBench;
@@ -199,14 +198,7 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         client: client.clone(),
     });
     for &(ch, ch_name) in CHANNELS {
-        run(CollabGroupTemporalBench {
-            client: client.clone(),
-            ch,
-            ch_name,
-        });
-    }
-    for &(ch, ch_name) in CHANNELS {
-        run(CollabHtBench {
+        run(CollabFusedBench {
             client: client.clone(),
             ch,
             ch_name,

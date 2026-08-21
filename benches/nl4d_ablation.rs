@@ -1,20 +1,19 @@
-//! Per-frame cost of the four collab kernels at the geometry the pipeline
-//! actually runs them at.
+//! Per-frame cost of the three collab kernels at the geometry the
+//! pipeline actually runs them at.
 //!
 //! A separate denoiser runs for luma and for chroma, and at 4:2:0 the
 //! chroma planes are half-size on each axis. A bench that runs chroma at
 //! full resolution would report four times the real work. Both planes are
 //! measured here and summed, so the total is one frame's kernel cost.
 
-use av_denoise::collab::geometry::{member_buf_len, ref_count, refs_along};
+use av_denoise::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use av_denoise::collab::kernels::aggregate::{
     collab_normalise,
     collab_zero_accum,
     cross_frame_accum_scale,
     weight_scale,
 };
-use av_denoise::collab::kernels::filter_ht::collab_filter_ht;
-use av_denoise::collab::kernels::group_temporal::collab_group_temporal;
+use av_denoise::collab::kernels::fused::collab_fused;
 use av_denoise::collab::kernels::transforms::dct_noise_profile;
 use av_denoise::nlmeans::{BLOCK_X, BLOCK_Y};
 use cubecl::benchmark::{Benchmark, BenchmarkComputations, TimingMethod};
@@ -96,14 +95,9 @@ struct Rig<R: Runtime> {
     mv_field: Handle,
     confidence: Handle,
     neighbour_slots: Handle,
-    member_pos: Handle,
-    member_frame: Handle,
-    member_count: Handle,
-    member_sig2: Handle,
     accum: Handle,
     wsum: Handle,
     output: Handle,
-    filtered_dummy: Handle,
     group_weight: Handle,
     sigma: Handle,
     dct_profile: Handle,
@@ -125,12 +119,19 @@ impl<R: Runtime> Rig<R> {
 
         let blocks_x = g.w.div_ceil(BLK_STEP);
         let blocks_y = g.h.div_ceil(BLK_STEP);
-        let mv_stride = blocks_x * blocks_y * 2;
-        let conf_stride = blocks_x * blocks_y;
+        // `MotionCtx` pads each neighbour's slice of the motion and
+        // confidence buffers up to the runtime's binding alignment, and
+        // passes the padded element count as the kernel's stride. The
+        // rig pads the same way so the strides the kernels compile
+        // against here are the ones the pipeline compiles against.
+        let align = client.properties().memory.alignment;
+        let blocks = (blocks_x * blocks_y) as u64;
+        let pad = |bytes: u64| bytes.next_multiple_of(align);
+        let mv_stride = (pad(blocks * 2 * size_of::<i32>() as u64) / size_of::<i32>() as u64) as u32;
+        let conf_stride = (pad(blocks * size_of::<f32>() as u64) / size_of::<f32>() as u64) as u32;
         let mv_len = (2 * RADIUS * mv_stride) as usize;
         let conf_len = (2 * RADIUS * conf_stride) as usize;
 
-        let pos_len = member_buf_len(g.w, g.h, K_MAX);
         let refs = ref_count(g.w, g.h);
         let pixels = (g.w * g.h) as usize;
         let frame_len = pixels * g.stored as usize;
@@ -142,14 +143,9 @@ impl<R: Runtime> Rig<R> {
             mv_field: client.create_from_slice(i32::as_bytes(&vec![0i32; mv_len])),
             confidence: client.create_from_slice(f32::as_bytes(&vec![1.0f32; conf_len])),
             neighbour_slots: client.create_from_slice(u32::as_bytes(&NEIGHBOUR_SLOTS)),
-            member_pos: client.empty(pos_len * size_of::<u32>()),
-            member_frame: client.empty(pos_len * size_of::<u32>()),
-            member_count: client.empty(refs * size_of::<u32>()),
-            member_sig2: client.empty(pos_len * size_of::<f32>()),
             accum: client.empty(frame_len * N_FRAMES as usize * size_of::<i32>()),
             wsum: client.empty(pixels * N_FRAMES as usize * size_of::<i32>()),
             output: client.empty(frame_len * size_of::<f32>()),
-            filtered_dummy: client.empty(size_of::<f32>()),
             group_weight: client.empty(refs * size_of::<f32>()),
             sigma: client.create_from_slice(f32::as_bytes(&sigma_host)),
             dct_profile: client.create_from_slice(f32::as_bytes(&dct_noise_profile(0.0))),
@@ -166,29 +162,40 @@ impl<R: Runtime> Rig<R> {
         }
     }
 
-    fn group(&self) {
+    /// The fused kernel, launched exactly as `Nl4dDenoiser` launches
+    /// it. Eight references share one 64-lane cube, so the grid is an
+    /// eighth as wide along x as the reference grid and the cube is 1D.
+    /// One row covers matching, filtering, and scatter together.
+    fn fused(&self) {
         let g = self.g;
-        let pos_len = member_buf_len(g.w, g.h, K_MAX);
         let refs = ref_count(g.w, g.h);
         let refs_x = refs_along(g.w);
+        let pixels = (g.w * g.h) as usize;
+        let frame_len = pixels * g.stored as usize;
         unsafe {
-            collab_group_temporal::launch_unchecked::<R>(
+            collab_fused::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::new_2d(refs_x, refs_along(g.h)),
-                CubeDim::new_2d(8, 8),
+                CubeCount::new_2d(fused_cubes_x(g.w), refs_along(g.h)),
+                CubeDim::new_1d(64),
                 g.stored as usize,
                 ArrayArg::from_raw_parts(self.ring.clone(), self.ring_len),
                 ArrayArg::from_raw_parts(self.mv_field.clone(), self.mv_len),
                 ArrayArg::from_raw_parts(self.confidence.clone(), self.conf_len),
-                ArrayArg::from_raw_parts(self.member_pos.clone(), pos_len),
-                ArrayArg::from_raw_parts(self.member_frame.clone(), pos_len),
-                ArrayArg::from_raw_parts(self.member_count.clone(), refs),
-                ArrayArg::from_raw_parts(self.member_sig2.clone(), pos_len),
-                CENTRE_SLOT,
                 ArrayArg::from_raw_parts(self.neighbour_slots.clone(), NEIGHBOUR_SLOTS.len()),
+                ArrayArg::from_raw_parts(self.sigma.clone(), g.stored as usize),
+                ArrayArg::from_raw_parts(self.dct_profile.clone(), 8),
+                ArrayArg::from_raw_parts(self.accum.clone(), frame_len * N_FRAMES as usize),
+                ArrayArg::from_raw_parts(self.wsum.clone(), pixels * N_FRAMES as usize),
+                ArrayArg::from_raw_parts(self.group_weight.clone(), refs),
+                CENTRE_SLOT,
                 0.0f32,
                 0.0f32,
                 THSAD,
+                LAMBDA_HT,
+                weight_scale(SIGMA, &dct_noise_profile(0.0)),
+                cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS),
+                true,
+                false,
                 RADIUS,
                 REFINE,
                 self.mv_stride,
@@ -201,49 +208,8 @@ impl<R: Runtime> Rig<R> {
                 g.h,
                 g.ch,
                 K_MAX,
-                SPATIAL_RADIUS,
-                refs_x,
-            );
-        }
-    }
-
-    fn filter(&self) {
-        let g = self.g;
-        let pos_len = member_buf_len(g.w, g.h, K_MAX);
-        let refs = ref_count(g.w, g.h);
-        let refs_x = refs_along(g.w);
-        let pixels = (g.w * g.h) as usize;
-        let frame_len = pixels * g.stored as usize;
-        unsafe {
-            collab_filter_ht::launch_unchecked::<R>(
-                &self.client,
-                CubeCount::new_2d(refs_x, refs_along(g.h)),
-                CubeDim::new_2d(8, 8),
-                g.stored as usize,
-                ArrayArg::from_raw_parts(self.ring.clone(), self.ring_len),
-                ArrayArg::from_raw_parts(self.member_pos.clone(), pos_len),
-                ArrayArg::from_raw_parts(self.member_frame.clone(), pos_len),
-                ArrayArg::from_raw_parts(self.member_count.clone(), refs),
-                ArrayArg::from_raw_parts(self.member_sig2.clone(), pos_len),
-                ArrayArg::from_raw_parts(self.accum.clone(), frame_len * N_FRAMES as usize),
-                ArrayArg::from_raw_parts(self.wsum.clone(), pixels * N_FRAMES as usize),
-                ArrayArg::from_raw_parts(self.filtered_dummy.clone(), 1),
-                ArrayArg::from_raw_parts(self.group_weight.clone(), refs),
-                CENTRE_SLOT,
-                ArrayArg::from_raw_parts(self.sigma.clone(), g.stored as usize),
-                ArrayArg::from_raw_parts(self.dct_profile.clone(), 8),
-                LAMBDA_HT,
-                weight_scale(SIGMA, &dct_noise_profile(0.0)),
-                cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS),
-                true,
-                false,
-                false,
-                true,
-                g.w,
-                g.h,
-                g.ch,
-                K_MAX,
                 g.stored,
+                SPATIAL_RADIUS,
                 refs_x,
             );
         }
@@ -305,15 +271,14 @@ impl<R: Runtime> Benchmark for Arm<'_, R> {
 
     fn prepare(&self) -> Self::Input {
         if self.prime {
-            self.rig.group();
+            self.rig.fused();
             block_sync(&self.rig.client);
         }
     }
 
     fn execute(&self, _: Self::Input) -> Result<(), String> {
         match self.kernel {
-            "group_temporal" => self.rig.group(),
-            "filter_ht" => self.rig.filter(),
+            "fused" => self.rig.fused(),
             "normalise" => self.rig.normalise(),
             _ => self.rig.zero(),
         }
@@ -354,14 +319,16 @@ fn main() {
         let device = cli.device.to_wgpu().expect("wgpu device conversion failed");
         let client = cubecl::wgpu::WgpuRuntime::client(&device);
         println!("\ncollab kernels at real per-frame geometry, TimingMethod::Device");
-        println!("  device: {device:?}\n");
+        println!("  device: {device:?}");
+        println!(
+            "  buffer alignment: {} bytes\n",
+            client.properties().memory.alignment
+        );
 
-        let kernels = [
-            ("zero_accum", false),
-            ("group_temporal", false),
-            ("filter_ht", true),
-            ("normalise", true),
-        ];
+        // (name, prime). A primed arm runs `fused` once before it is
+        // timed, so `normalise` reads real accumulator contents rather
+        // than an empty buffer.
+        let kernels = [("zero_accum", false), ("fused", false), ("normalise", true)];
         let mut totals = vec![0.0f64; kernels.len()];
 
         for g in PLANES {

@@ -14,7 +14,7 @@ pub mod nl4d;
 pub mod nlmeans;
 pub mod sniff;
 
-pub use cache::{COMPILATION_CACHE_ENV, CacheAlreadyInitialisedError, apply_compilation_cache_env};
+pub use cache::{COMPILATION_CACHE_ENV, CacheAlreadyInitialisedError, install_compilation_cache};
 pub use denoiser::{
     Algorithm,
     Denoiser,

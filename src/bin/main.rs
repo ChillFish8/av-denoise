@@ -60,15 +60,16 @@ fn main() -> anyhow::Result<()> {
         .with_writer(progress::tracing_writer())
         .init();
 
-    // Honour AV_DENOISE_COMPILATION_CACHE. This has to run before
+    // Point CubeCL at a kernel cache. This has to run before
     // Denoiser::create, because the first CubeCL client locks the global
     // config the moment it is built.
-    match av_denoise::apply_compilation_cache_env() {
-        Ok(Some(path)) => {
-            tracing::info!(?path, "AV_DENOISE_COMPILATION_CACHE override active")
-        },
-        Ok(None) => {},
-        Err(_) => anyhow::bail!("unable to apply AV_DENOISE_COMPILATION_CACHE, this is a bug."),
+    match av_denoise::install_compilation_cache() {
+        Ok(Some(path)) => tracing::info!(?path, "caching compiled kernels"),
+        Ok(None) => tracing::info!(
+            "kernel caching is off, every run recompiles. Unset {} to turn it back on.",
+            av_denoise::COMPILATION_CACHE_ENV,
+        ),
+        Err(_) => anyhow::bail!("unable to install the kernel cache, this is a bug."),
     }
 
     let (opts, input, workers) = match &args.command {

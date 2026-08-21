@@ -1,5 +1,5 @@
 pub mod aggregate;
-pub mod filter_ht;
+pub mod fused;
 pub mod group;
-pub mod group_temporal;
+pub mod plane_ops;
 pub mod transforms;

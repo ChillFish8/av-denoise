@@ -1,9 +1,9 @@
 // The search geometry `nl4d` ships with, in one place. Every value here
 // comes from `Nl4dParams::default()`.
 //
-// The grouping bench and the hard-threshold bench both build their frame
-// ring and member buffers from these, so one set of constants describes
-// what the denoiser actually runs.
+// `benches/kernels/collab_fused.rs` builds its frame ring and member
+// buffers from these, so one set of constants describes what the
+// denoiser actually runs.
 
 /// `Nl4dParams::default().temporal_radius`.
 pub const RADIUS: u32 = 2;
@@ -16,7 +16,7 @@ pub const K_MAX: u32 = 8;
 /// `Nl4dParams::default().lambda_ht`.
 pub const LAMBDA_HT: f32 = 5.3;
 /// `Nl4dParams::default().confidence_variance`, the `use_member_sigma`
-/// flag `collab_filter_ht` compiles against.
+/// flag `collab_fused` compiles against.
 pub const CONFIDENCE_VARIANCE: bool = true;
 
 /// The motion field's block stride. Held at `collab::PATCH_SIZE` so a
@@ -45,3 +45,28 @@ pub const NEIGHBOUR_SLOTS: [u32; (2 * RADIUS) as usize] = [0, 1, 3, 4];
 
 /// Sigma the hard-threshold bench filters at.
 pub const SIGMA: f32 = 0.02;
+
+/// The motion-field stride one neighbour occupies, in `i32` elements.
+///
+/// `MotionCtx` pads each neighbour's slice of the motion buffer up to
+/// the runtime's buffer-binding alignment, and passes the padded
+/// element count to the kernel as a `#[comptime]` stride. A rig that
+/// passes the unpadded count compiles the kernel against a stride the
+/// pipeline never uses. Pass `client.properties().memory.alignment` as
+/// `align`.
+pub fn mv_stride(blocks_x: u32, blocks_y: u32, align: u64) -> u32 {
+    padded_elems::<i32>(blocks_x as u64 * blocks_y as u64 * 2, align)
+}
+
+/// The confidence stride one neighbour occupies, in `f32` elements,
+/// padded the way [`mv_stride`] describes.
+pub fn conf_stride(blocks_x: u32, blocks_y: u32, align: u64) -> u32 {
+    padded_elems::<f32>(blocks_x as u64 * blocks_y as u64, align)
+}
+
+/// `elems` of `T` rounded up so they cover a whole number of `align`
+/// byte boundaries.
+fn padded_elems<T>(elems: u64, align: u64) -> u32 {
+    let size = size_of::<T>() as u64;
+    ((elems * size).next_multiple_of(align) / size) as u32
+}

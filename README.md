@@ -481,12 +481,24 @@ This primarily has the following impacts:
 Since both the CUDA and ROCm backends are very heavy in terms of dependencies, I recommend just using the `vulkan`
 backend for those devices. It should be more or less the same performance, without all the library headache.
 
-#### Configure compilation cache directory
+#### Compiled kernel cache
 
-Set `AV_DENOISE_COMPILATION_CACHE=/some/dir` to redirect the compiled-kernel and autotune caches to a specific
-directory (overrides whatever is in `cubecl.toml`). 
-Library users can call `av_denoise::apply_compilation_cache_env()` before `Denoiser::create` to honor the same 
-env var from their own binary.
+Compiling the kernels takes about ten seconds when you first start the denoising pipeline. 
+These compiled kernels get cached on disk, which makes that a cost paid once per machine rather than once per run.
+
+By default, the cache lives in `$XDG_CACHE_HOME/av-denoise`, or `~/.cache/av-denoise` when `XDG_CACHE_HOME` is
+unset (`~/Library/Caches/av-denoise` on macOS).
+
+- `AV_DENOISE_COMPILATION_CACHE=/some/dir` puts the compiled-kernel and autotune caches somewhere else, which is
+  what CI runs and containers use to keep the cache on a mounted volume. It overrides whatever is in `cubecl.toml`.
+- `AV_DENOISE_COMPILATION_CACHE=off` disables caching entirely. Use this when benchmarking, because a warm cache
+  hides the compilation cost a first run pays.
+
+If the cache directory cannot be created, `av-denoise` logs a warning and carries on without a cache.
+
+Library users can call `av_denoise::install_compilation_cache()` before `Denoiser::create` to get the same
+behaviour in their own binary. It has to run before the first `Denoiser` exists, because building a CubeCL client
+locks the global config.
 
 ---
 

@@ -73,9 +73,8 @@ pub(super) const BLK_STEP: u32 = 8;
 /// physical slot `radius`.
 ///
 /// Every field is already shaped the way
-/// [`crate::collab::kernels::group_temporal::collab_group_temporal`]
-/// expects to read it, so a test only has to upload each `Vec` and
-/// launch.
+/// [`crate::collab::kernels::fused::collab_fused`] expects to read it,
+/// so a test only has to upload each `Vec` and launch.
 pub(super) struct RingFixture {
     pub ring: Vec<f32>,
     pub mv_field: Vec<i32>,
