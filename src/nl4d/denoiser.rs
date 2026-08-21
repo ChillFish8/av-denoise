@@ -50,6 +50,8 @@ pub struct Nl4dDenoiser<R: Runtime> {
     spatial_radius: u32,
     lambda_ht: f32,
     c_min: f32,
+    /// See [`Nl4dParams::mismatch_scale`].
+    mismatch_scale: f32,
     confidence_variance: bool,
     k_max: u32,
     /// The fixed-point scale the cross-frame accumulator ring counts in,
@@ -174,6 +176,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             spatial_radius: params.spatial_radius,
             lambda_ht: params.lambda_ht,
             c_min: params.c_min,
+            mismatch_scale: params.mismatch_scale,
             confidence_variance: params.confidence_variance,
             k_max,
             accum_scale: cross_frame_accum_scale(params.spatial_radius, params.temporal_radius),
@@ -396,7 +399,11 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let blksize = mc.blksize;
         let blocks_x = mc.blocks_x;
         let blocks_y = mc.blocks_y;
-        let thsad = self.front.thsad_value();
+        // The kernel takes the two multiplied together, see
+        // `mismatch_sigma2`. The confidence score itself stays derived
+        // from the unscaled threshold, which is why this is applied here
+        // rather than inside the front end.
+        let mismatch_thsad = self.front.thsad_value() * self.mismatch_scale;
 
         // See the doc comment above for why these two slots are what
         // this pass clears and completes. `total_frames` is added
@@ -472,7 +479,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 // simplest one that says so.
                 0.0f32,
                 self.c_min,
-                thsad,
+                mismatch_thsad,
                 self.lambda_ht,
                 wnorm,
                 self.accum_scale,

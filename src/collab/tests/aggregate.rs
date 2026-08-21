@@ -2,7 +2,13 @@ use cubecl::prelude::*;
 
 use super::helpers::{R, make_client, noisy_field_over};
 use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
-use crate::collab::kernels::aggregate::{ACCUM_SCALE, collab_normalise, collab_zero_accum, weight_scale};
+use crate::collab::kernels::aggregate::{
+    ACCUM_SCALE,
+    WEIGHT_GAIN,
+    collab_normalise,
+    collab_zero_accum,
+    weight_scale,
+};
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::nlmeans::{BLOCK_X, BLOCK_Y};
@@ -52,7 +58,9 @@ fn normalise_divides_one_accumulator_by_the_other() {
     let got = run_normalise(&accum, &wsum, w, h);
 
     for i in 0..pixels {
-        let want = accum[i] as f32 / wsum[i] as f32;
+        // `wsum` counts at `WEIGHT_GAIN` times `accum`'s scale, the one
+        // factor that does not cancel between the two.
+        let want = accum[i] as f32 * WEIGHT_GAIN / wsum[i] as f32;
         // Relative, because the ratios here run into the thousands and
         // a single-precision divide is only good to about 1e-7 of the
         // value either way.
@@ -77,7 +85,7 @@ fn normalise_cancels_the_fixed_point_scale() {
     let covering = 7;
 
     let accum = vec![((value * weight * ACCUM_SCALE) as i32) * covering; pixels];
-    let wsum = vec![((weight * ACCUM_SCALE) as i32) * covering; pixels];
+    let wsum = vec![((weight * ACCUM_SCALE * WEIGHT_GAIN) as i32) * covering; pixels];
 
     let got = run_normalise(&accum, &wsum, w, h);
     for (i, &v) in got.iter().enumerate() {

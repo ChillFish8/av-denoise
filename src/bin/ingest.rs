@@ -171,6 +171,14 @@ pub struct CliOptions {
     /// has an effect when `algorithm` is `Algorithm::Nl4d`, where it
     /// pins the temporal grouping stage's hard threshold.
     pub chroma_lambda_ht: Option<f32>,
+    /// Per-plane override for `mismatch_scale`, luma. Takes precedence
+    /// over `algorithm`'s value when set. Only has an effect when
+    /// `algorithm` is `Algorithm::Nl4d`.
+    pub luma_mismatch_scale: Option<f32>,
+    /// Per-plane override for `mismatch_scale`, chroma. Takes precedence
+    /// over `algorithm`'s value when set. Only has an effect when
+    /// `algorithm` is `Algorithm::Nl4d`.
+    pub chroma_mismatch_scale: Option<f32>,
     /// Draws the denoising progress bar for file input.
     pub progress: bool,
 }
@@ -202,6 +210,11 @@ impl CliOptions {
                 // default depends on the plane, which
                 // `nl4d_default_lambda_ht` resolves at construction.
                 lambda_ht: per_plane(self.luma_lambda_ht, self.chroma_lambda_ht).or(nl4d.lambda_ht),
+                // Unlike `lambda_ht` this has one default for both
+                // planes, so an unset override simply leaves the shared
+                // value in place rather than deferring to construction.
+                mismatch_scale: per_plane(self.luma_mismatch_scale, self.chroma_mismatch_scale)
+                    .unwrap_or(nl4d.mismatch_scale),
                 ..nl4d
             }),
             Algorithm::Nlmeans(nlm) => {
@@ -901,6 +914,8 @@ mod cli_options_tests {
             chroma_strength,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
+            luma_mismatch_scale: None,
+            chroma_mismatch_scale: None,
             progress: false,
         }
     }
@@ -982,6 +997,8 @@ mod cli_options_tests {
             chroma_strength: None,
             luma_lambda_ht,
             chroma_lambda_ht,
+            luma_mismatch_scale: None,
+            chroma_mismatch_scale: None,
             progress: false,
         }
     }
@@ -1002,6 +1019,61 @@ mod cli_options_tests {
             Algorithm::Nl4d(n) => n,
             other => panic!("expected Algorithm::Nl4d, got {other:?}"),
         }
+    }
+
+    /// A `CliOptions` running `Algorithm::Nl4d` with a shared
+    /// `mismatch_scale` and the two per-plane overrides under test.
+    fn nl4d_mismatch_opts(
+        shared: f32,
+        luma_mismatch_scale: Option<f32>,
+        chroma_mismatch_scale: Option<f32>,
+    ) -> CliOptions {
+        CliOptions {
+            algorithm: Algorithm::Nl4d(Nl4dOptions {
+                mismatch_scale: shared,
+                ..Nl4dOptions::default()
+            }),
+            luma_mismatch_scale,
+            chroma_mismatch_scale,
+            ..nl4d_opts(None, None)
+        }
+    }
+
+    /// The same routing property the `lambda_ht` pair is checked for,
+    /// applied to `mismatch_scale`. An override aimed at one plane must
+    /// leave the other on the shared value, which for this field is a
+    /// resolved number rather than a deferred `None`.
+    #[test]
+    fn a_per_plane_mismatch_scale_overrides_only_its_own_instance_for_nl4d() {
+        let luma_only = nl4d_mismatch_opts(2.0, Some(8.0), None);
+        let luma = expect_nl4d(luma_only.algorithm_for(ChannelMode::Luma));
+        let chroma = expect_nl4d(luma_only.algorithm_for(ChannelMode::Chroma));
+        assert!((luma.mismatch_scale - 8.0).abs() < f32::EPSILON);
+        assert!(
+            (chroma.mismatch_scale - 2.0).abs() < f32::EPSILON,
+            "chroma should keep the shared value, got {}",
+            chroma.mismatch_scale
+        );
+
+        let chroma_only = nl4d_mismatch_opts(2.0, None, Some(8.0));
+        let luma = expect_nl4d(chroma_only.algorithm_for(ChannelMode::Luma));
+        let chroma = expect_nl4d(chroma_only.algorithm_for(ChannelMode::Chroma));
+        assert!((chroma.mismatch_scale - 8.0).abs() < f32::EPSILON);
+        assert!(
+            (luma.mismatch_scale - 2.0).abs() < f32::EPSILON,
+            "luma should keep the shared value, got {}",
+            luma.mismatch_scale
+        );
+    }
+
+    /// A fused Yuv pass has no plane to pick, so neither override
+    /// applies and the shared value stands.
+    #[test]
+    fn a_yuv_instance_ignores_both_per_plane_mismatch_scales() {
+        let opts = nl4d_mismatch_opts(2.0, Some(8.0), Some(4.0));
+        let yuv = expect_nl4d(opts.algorithm_for(ChannelMode::Yuv));
+
+        assert!((yuv.mismatch_scale - 2.0).abs() < f32::EPSILON);
     }
 
     /// The routing property that matters most for a shared field: an
@@ -1111,6 +1183,8 @@ mod passthrough_retry_tests {
             chroma_strength: None,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
+            luma_mismatch_scale: None,
+            chroma_mismatch_scale: None,
             progress: false,
         }
     }
@@ -1195,6 +1269,8 @@ mod lumachroma_lockstep_tests {
             chroma_strength: None,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
+            luma_mismatch_scale: None,
+            chroma_mismatch_scale: None,
             progress: false,
         }
     }

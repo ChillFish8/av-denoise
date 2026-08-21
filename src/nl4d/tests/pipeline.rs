@@ -52,6 +52,7 @@ fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
         spatial_radius: SPATIAL_RADIUS,
         lambda_ht: LAMBDA_HT,
         c_min: C_MIN,
+        mismatch_scale: 1.0,
         confidence_variance: true,
     }
 }

@@ -15,7 +15,9 @@ use crate::collab::{MAX_K, PATCH_AREA, PATCH_SIZE, STEP};
 /// each weighted by at most 1 (see [`weight_scale`]) and clamped to
 /// [`ACCUM_CLAMP`], so the accumulator peaks near `1.03e9`, about half of
 /// `i32::MAX`. One unit is `1.9e-6`, well under the `2.4e-4` that one
-/// 12-bit code level spans.
+/// 12-bit code level spans. `wsum` peaks at the same place, because
+/// [`WEIGHT_GAIN`] trades a weight's smaller bound for exactly that much
+/// more scale.
 ///
 /// A cross-frame ring collects several passes before it is read back and
 /// needs [`cross_frame_accum_scale`] instead. [`scatter_patch`] takes the
@@ -52,7 +54,9 @@ const CROSS_FRAME_SAFETY_FACTOR: f64 = 2.0;
 /// ring collects that from `2 * temporal_radius + 1` passes before
 /// [`crate::nl4d::Nl4dDenoiser::run_collab_stage`] reads it back. Each
 /// contribution is weighted by at most 1 (see [`weight_scale`]) and
-/// clamped to [`ACCUM_CLAMP`].
+/// clamped to [`ACCUM_CLAMP`]. The same figure sizes `wsum`, whose
+/// contributions are bounded by [`WEIGHT_CLAMP`] instead but counted at
+/// [`WEIGHT_GAIN`] times the scale.
 ///
 /// The result is the largest power of two that keeps that worst case
 /// under `i32::MAX` divided by [`CROSS_FRAME_SAFETY_FACTOR`].
@@ -99,18 +103,33 @@ pub const ACCUM_CLAMP: f32 = 5.0;
 ///
 /// `sigma^2 * g_max^2` is the smallest retained sum any group can have.
 /// The filter always keeps the group's DC coefficient, whose variance is
-/// `sigma^2 * g[0]^2`, and `g[0]` is the profile's largest entry. The sum
-/// therefore sits in `[sigma^2 * g_max^2, 512 * sigma^2 * g_max^2]`, so
-/// dividing by it puts the normalised weight in `[1/512, 1]` whatever
-/// `sigma` and whatever correlation shaping is in use.
+/// `sigma^2 * g[0]^2`, and `g[0]` is the profile's largest entry.
+/// Dividing by it therefore bounds the normalised weight above by 1,
+/// whatever `sigma` and whatever correlation shaping is in use, which is
+/// what [`WEIGHT_CLAMP`] relies on.
+///
+/// The bound below is not `1/512`, the figure a group of 512 coefficients
+/// each carrying the plain `sigma^2` would give. `collab_fused` also
+/// gives a temporal member the extra variance its motion block's
+/// confidence implies, and that has no relation to `sigma`, so the sum
+/// runs above `512 * sigma^2 * g_max^2` by however much that extra
+/// variance is worth. What keeps the bound finite is
+/// [`crate::collab::kernels::fused::MEMBER_SIGMA2_CAP`], which holds a
+/// member's own variance to a fixed multiple of the channel's, putting
+/// the weight in `[1 / (512 * (1 + cap)), 1]`.
+///
+/// That range still does not fit `accum`'s fixed point with room to
+/// spare, which is why `wsum` counts at [`WEIGHT_GAIN`] times its scale.
+/// Without both the cap and the gain, a poorly matched group rounds away
+/// to nothing and takes its pixel with it.
 ///
 /// The [`RECIPROCAL_FLOOR`] fallback covers a `sigma` small enough that
 /// `sigma^2 * g_max^2` falls under it, zero included. The filter builds
 /// its weight with `safe_reciprocal(sum, RECIPROCAL_FLOOR)`, so below
 /// that floor every weight saturates at `1 / RECIPROCAL_FLOOR` instead of
 /// following the sum. Taking the larger of the two tracks whichever bound
-/// the weight is actually against, and keeps the normalised weight in
-/// `[1/512, 1]` either way.
+/// the weight is actually against, so the upper bound of 1 holds either
+/// way.
 pub fn weight_scale(sigma: f32, dct_profile: &[f32; 8]) -> f32 {
     let g_max = dct_profile.iter().copied().fold(0.0f32, f32::max);
     let norm = sigma * sigma * g_max * g_max;
@@ -121,13 +140,57 @@ pub fn weight_scale(sigma: f32, dct_profile: &[f32; 8]) -> f32 {
     }
 }
 
+/// The magnitude a group weight is clamped to before it enters `wsum`.
+///
+/// A normalised weight is `weight_scale / sum`, and [`weight_scale`]
+/// returns the smallest `sum` any group can have, so the weight never
+/// exceeds 1. That is a fifth of the bound a filtered value needs, and
+/// [`WEIGHT_GAIN`] is what turns the difference into resolution.
+pub const WEIGHT_CLAMP: f32 = 1.0;
+
+/// The extra fixed-point resolution `wsum` gets over `accum`.
+///
+/// Both accumulators are sized by the same worst case, how many
+/// contributions can reach one pixel multiplied by the largest a single
+/// contribution can be. A value is bounded by [`ACCUM_CLAMP`] and a
+/// weight by the much smaller [`WEIGHT_CLAMP`], so counting the weight at
+/// this multiple of the value's scale spends exactly the same `i32`
+/// budget while resolving weights this many times finer.
+///
+/// The resolution matters because a group weight spans a far wider range
+/// than [`weight_scale`]'s own doc used to claim, see the note there. A
+/// weight that falls below half a fixed-point unit contributes nothing at
+/// all to either accumulator, and this is part of what keeps a poorly
+/// matched group above that point.
+///
+/// [`collab_normalise`] multiplies it back out, so it never reaches a
+/// finished pixel.
+pub const WEIGHT_GAIN: f32 = ACCUM_CLAMP / WEIGHT_CLAMP;
+
 /// Converts one weighted value into the accumulator's fixed point, at
 /// `scale` ([`ACCUM_SCALE`] for a single-frame accumulator, or
 /// [`cross_frame_accum_scale`]'s return value for a cross-frame ring).
+///
+/// Rounds rather than truncating. A filtered value is never negative, so
+/// a toward-zero cast would bias every contribution the same way, and it
+/// biases the value more than the weight it is divided by: at a weight of
+/// three fixed-point units a value of 0.2 truncates to nothing while its
+/// weight still counts three. The result is a weighted mean pulled toward
+/// black, worst exactly where the weights are smallest.
 #[cube]
 pub fn to_fixed(value: f32, scale: f32) -> i32 {
     let clamped = f32::clamp(value, -ACCUM_CLAMP, ACCUM_CLAMP);
-    (clamped * scale) as i32
+    f32::round(clamped * scale) as i32
+}
+
+/// Converts one group weight into `wsum`'s fixed point, which counts at
+/// [`WEIGHT_GAIN`] times the `scale` [`to_fixed`] uses.
+///
+/// Rounds for the same reason [`to_fixed`] does.
+#[cube]
+pub fn to_fixed_weight(weight: f32, scale: f32) -> i32 {
+    let clamped = f32::clamp(weight, 0.0f32, WEIGHT_CLAMP);
+    f32::round(clamped * scale * WEIGHT_GAIN) as i32
 }
 
 /// Adds one filtered patch to the accumulators at its own position,
@@ -152,7 +215,9 @@ pub fn to_fixed(value: f32, scale: f32) -> i32 {
 /// [`ACCUM_SCALE`] for a single-frame accumulator or
 /// [`cross_frame_accum_scale`]'s return value for a cross-frame ring.
 /// Either cancels in [`collab_normalise`], so a caller picks whichever
-/// matches how many passes can write into its accumulator.
+/// matches how many passes can write into its accumulator. `wsum` counts
+/// at [`WEIGHT_GAIN`] times that scale, which [`collab_normalise`]
+/// multiplies back out.
 #[cube]
 #[allow(clippy::too_many_arguments)]
 pub fn scatter_patch(
@@ -178,7 +243,7 @@ pub fn scatter_patch(
         to_fixed(value * weight, accum_scale),
     );
     if write_weight {
-        Atomic::fetch_add(&wsum[pixel as usize], to_fixed(weight, accum_scale));
+        Atomic::fetch_add(&wsum[pixel as usize], to_fixed_weight(weight, accum_scale));
     }
 }
 
@@ -228,7 +293,9 @@ pub fn collab_zero_accum(
 /// Both sides carry whatever fixed-point scale the caller's own
 /// [`scatter_patch`] calls used, [`ACCUM_SCALE`] or a
 /// [`cross_frame_accum_scale`] result, so that scale divides out and
-/// never appears here.
+/// never appears here. The weight sum counts at [`WEIGHT_GAIN`] times
+/// that scale, which is the one factor that does not cancel, so the
+/// ratio is multiplied by it.
 ///
 /// `accum`/`wsum` may hold more than one frame's worth of pixels, laid
 /// out back to back in ring-slot order the way [`scatter_patch`]
@@ -236,13 +303,17 @@ pub fn collab_zero_accum(
 /// this call reads. `output` is always exactly one frame wide, so it is
 /// indexed by the plain, offset-free pixel position.
 ///
-/// The weight sum is never zero in practice. A group always contains its
-/// own reference patch, and the references alone cover every pixel
-/// between one and nine times over, since they sit on a grid of stride
-/// `STEP` and are `PATCH_SIZE` wide.
+/// The weight sum is never zero. A group always contains its own
+/// reference patch, and the references alone cover every pixel between
+/// one and nine times over, since they sit on a grid of stride `STEP` and
+/// are `PATCH_SIZE` wide. Coverage alone is not enough, because a weight
+/// small enough to round to nothing would leave a covered pixel with an
+/// empty weight sum. [`WEIGHT_GAIN`] and
+/// [`crate::collab::kernels::fused::MEMBER_SIGMA2_CAP`] together keep
+/// every group's weight above that point.
 ///
-/// If the weight sum ever were to be zero, the guard below returns the
-/// accumulator untouched rather than a NaN or an infinity.
+/// If the weight sum ever were to be zero anyway, the guard below returns
+/// the accumulator untouched rather than a NaN or an infinity.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn collab_normalise<N: Size>(
@@ -271,7 +342,7 @@ pub fn collab_normalise<N: Size>(
         let a = accum[(pixel * stored_ch + c) as usize] as f32;
         let mut v = a;
         if w != 0i32 {
-            v = a / (w as f32);
+            v = a * WEIGHT_GAIN / (w as f32);
         }
         out[c as usize] = v;
     }
@@ -296,6 +367,40 @@ const _: () = assert!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A filtered value is never negative, so a toward-zero cast biases
+    /// every contribution the same way. Rounding is what keeps the
+    /// weighted mean `collab_normalise` computes centred on the value the
+    /// filter actually produced.
+    #[test]
+    fn to_fixed_rounds_rather_than_truncating() {
+        assert_eq!(to_fixed(0.6, 1.0), 1);
+        assert_eq!(to_fixed(0.4, 1.0), 0);
+        assert_eq!(to_fixed(-0.6, 1.0), -1);
+    }
+
+    /// A weight small enough to round away in `accum`'s fixed point still
+    /// reaches `wsum`, because `WEIGHT_GAIN` buys back exactly the
+    /// resolution the weight's smaller bound leaves unused.
+    #[test]
+    fn to_fixed_weight_resolves_finer_than_to_fixed() {
+        let scale = 65_536.0f32;
+        let weight = 0.3 / scale;
+        assert_eq!(to_fixed(weight, scale), 0);
+        assert_eq!(to_fixed_weight(weight, scale), 2);
+    }
+
+    /// The weight's own bound, which is what lets `WEIGHT_GAIN` spend the
+    /// same `i32` budget as a value clamped to `ACCUM_CLAMP`.
+    #[test]
+    fn to_fixed_weight_clamps_at_one() {
+        let scale = 1_024.0f32;
+        assert_eq!(
+            to_fixed_weight(4.0, scale),
+            to_fixed_weight(WEIGHT_CLAMP, scale),
+        );
+        assert_eq!(to_fixed_weight(-1.0, scale), 0);
+    }
 
     // `Nl4dParams::validate` in `nl4d/params.rs` is what actually enforces
     // these ranges; they are repeated here as plain numbers rather than

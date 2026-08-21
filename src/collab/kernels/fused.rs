@@ -57,16 +57,21 @@ const _: () = assert!(
 /// the true patch rather than a different patch, so its confidence `c`
 /// turns into extra variance instead of an admission decision.
 ///
-/// `thsad` is the same SAD threshold that block's confidence score was
-/// derived from, in normalised SAD units (see
-/// [`crate::nlmeans::motion::thsad`]), and `blksize_area` is the motion
-/// block's area in pixels.
+/// `mismatch_thsad` is the SAD threshold that block's confidence score
+/// was derived from (see [`crate::nlmeans::motion::thsad`]), multiplied
+/// by the caller's `mismatch_scale`, in normalised SAD units.
+/// `blksize_area` is the motion block's area in pixels.
 ///
 /// ```text
-/// E^2      = thsad^2 * (1 - c) / (1 + c)
+/// E^2      = mismatch_thsad^2 * (1 - c) / (1 + c)
 /// eps      = E / blksize_area
 /// sigma_m2 = (pi / 2) * eps^2
 /// ```
+///
+/// The scale is folded into the threshold on the host rather than
+/// carried separately, because the two only ever appear multiplied
+/// together. It is a scale on the mismatch model alone, not on the
+/// confidence score, which stays derived from the unscaled threshold.
 ///
 /// `c = 1`, a perfect match, gives `sigma_m2 = 0` exactly. Lower
 /// confidence inflates it.
@@ -75,12 +80,30 @@ const _: () = assert!(
 /// motion-predicted, so there is no mismatch to model, and
 /// [`collab_fused`] takes that branch before calling this.
 #[cube]
-pub(crate) fn mismatch_sigma2(confidence: f32, thsad: f32, blksize_area: f32) -> f32 {
+pub(crate) fn mismatch_sigma2(confidence: f32, mismatch_thsad: f32, blksize_area: f32) -> f32 {
     let ratio = (1.0f32 - confidence) / (1.0f32 + confidence);
-    let e2 = thsad * thsad * ratio;
+    let e2 = mismatch_thsad * mismatch_thsad * ratio;
     let eps = f32::sqrt(e2) / blksize_area;
     std::f32::consts::FRAC_PI_2 * eps * eps
 }
+
+/// The most extra variance a temporal member's mismatch may carry,
+/// as a multiple of the channel's own variance.
+///
+/// [`mismatch_sigma2`] derives its result from `mismatch_thsad` and a confidence
+/// score, neither of which has any relation to the channel sigma the
+/// group weight is normalised against. Left uncapped it makes the
+/// retained variance sum, and so the weight, unbounded below, and a
+/// weight small enough to round away in the accumulators takes its
+/// pixel's only information with it. See
+/// [`crate::collab::kernels::aggregate::weight_scale`].
+///
+/// Capping restores the bound. A member here is already a 64 times
+/// noisier observation than the channel it came from, which the
+/// threshold treats as carrying almost nothing, so holding it at that
+/// rather than letting it run further costs no filtering and buys a
+/// weight that always survives the conversion to fixed point.
+pub(crate) const MEMBER_SIGMA2_CAP: f32 = 64.0;
 
 /// Groups each reference patch with the patches most similar to it,
 /// filters the whole group jointly with a hard threshold in the
@@ -282,7 +305,7 @@ pub fn collab_fused<N: Size>(
     centre_slot: u32,
     noise_floor: f32,
     c_min: f32,
-    thsad: f32,
+    mismatch_thsad: f32,
     lambda_ht: f32,
     weight_scale: f32,
     accum_scale: f32,
@@ -510,7 +533,7 @@ pub fn collab_fused<N: Size>(
             if mt > 0u32 {
                 sig2 = mismatch_sigma2(
                     confidence[(n * conf_stride + block) as usize],
-                    thsad,
+                    mismatch_thsad,
                     blksize_area,
                 );
             }
@@ -544,7 +567,11 @@ pub fn collab_fused<N: Size>(
             let mx = packed & 0x1FFFu32;
             let my = (packed >> 13u32) & 0x1FFFu32;
             let src_slot = member_slot[m as usize];
-            v[m as usize] = base_sig2 + member_sig2[m as usize];
+            // Capped against this channel's own variance, so the
+            // retained sum stays within a known factor of the smallest
+            // one `weight_scale` normalises by. See `MEMBER_SIGMA2_CAP`.
+            let extra = f32::min(member_sig2[m as usize], MEMBER_SIGMA2_CAP * base_sig2);
+            v[m as usize] = base_sig2 + extra;
             #[unroll]
             for r in 0..PATCH_SIZE {
                 let px = read_line(ring, mx + sub, my + r, src_slot, width, height);
@@ -646,6 +673,9 @@ pub fn collab_fused<N: Size>(
             // in. Aggregation normalises by the weight sum, so scaling
             // every weight by the same constant leaves the result
             // exactly as it would have been.
+            //
+            // The band's lower bound is what `MEMBER_SIGMA2_CAP` exists
+            // to restore, see its doc.
             gw = w * weight_scale;
         }
 

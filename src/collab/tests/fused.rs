@@ -10,7 +10,7 @@ use super::helpers::{
     plant_patch,
 };
 use crate::collab::geometry::{fused_cubes_x, ref_count, ref_pos, refs_along};
-use crate::collab::kernels::aggregate::{cross_frame_accum_scale, weight_scale};
+use crate::collab::kernels::aggregate::{WEIGHT_GAIN, cross_frame_accum_scale, weight_scale};
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, STEP};
@@ -96,6 +96,11 @@ struct Setup {
     /// Residual correlation the noise profile is built for. `0.0` gives
     /// the all-ones profile most runs use.
     rho: f32,
+    /// The SAD threshold a temporal member's mismatch variance is derived
+    /// from. [`THSAD`] is what a real caller passes at the default block
+    /// size, and raising it is how a run drives that variance far above
+    /// the channel sigma.
+    thsad: f32,
     /// A profile buffer supplied outright, bypassing
     /// [`dct_noise_profile`]. The weight scale still follows whatever
     /// profile is in force.
@@ -131,6 +136,7 @@ impl Setup {
             lambda_ht: LAMBDA_HT,
             confidence_variance: true,
             rho: 0.0,
+            thsad: THSAD,
             profile_override: None,
         }
     }
@@ -181,7 +187,10 @@ impl Aggregated {
         if w == 0 {
             0.0
         } else {
-            self.accum[idx] as f64 / w as f64
+            // `wsum` counts at `WEIGHT_GAIN` times `accum`'s scale, the
+            // one factor that does not cancel between the two, exactly as
+            // `collab_normalise` multiplies it back out.
+            self.accum[idx] as f64 * WEIGHT_GAIN as f64 / w as f64
         }
     }
 
@@ -260,10 +269,22 @@ struct Digest {
 ///
 /// Each of these sums thousands of values, so a single coefficient
 /// falling the other side of the hard threshold moves one by around
-/// `1e-8`. `1e-6` is two orders of headroom over that, and still
-/// vanishingly small next to the difference a kernel that stopped
-/// writing would produce.
-const DIGEST_RELATIVE_TOLERANCE: f64 = 1.0e-6;
+/// `1e-8`.
+///
+/// The literals below were recorded from an implementation that
+/// truncated toward zero on the way into the accumulators, which biased
+/// every contribution down by up to a fixed-point unit.
+/// [`crate::collab::kernels::aggregate::to_fixed`] rounds instead, so the
+/// values it produces sit about `1e-5` relative above the recorded ones.
+/// That is the quantisation step itself moving, not the filter, and no
+/// implementation can match across it more tightly than this. Re-recording
+/// from the fused kernel would be worse than loosening, because these
+/// literals are a second implementation's answer and matching the kernel
+/// against itself would prove nothing.
+///
+/// `2e-5` is still vanishingly small next to the difference a kernel that
+/// stopped writing would produce.
+const DIGEST_RELATIVE_TOLERANCE: f64 = 2.0e-5;
 
 /// How far a recorded probe pixel may move, absolute.
 ///
@@ -410,7 +431,7 @@ fn run_fused(s: &Setup) -> Aggregated {
             s.centre_slot,
             s.noise_floor,
             s.c_min,
-            THSAD,
+            s.thsad,
             s.lambda_ht,
             weight_scale(s.sigma, &profile),
             s.accum_scale(),
@@ -905,6 +926,56 @@ fn zero_sigma_hands_every_member_back_unchanged() {
     }
 }
 
+/// A temporal member's mismatch variance has no relation to the channel
+/// sigma the group weight is normalised against, so a badly matched group
+/// has no lower bound on its weight (see
+/// [`crate::collab::kernels::aggregate::weight_scale`]). Push that
+/// variance up far enough and the weight stops being representable at
+/// all, and a group that reaches the accumulators as nothing leaves a
+/// covered pixel with an empty weight sum, which normalisation can only
+/// render as black.
+///
+/// Zero confidence is the worst case `mismatch_sigma2` models, and
+/// `thsad` scales the variance it implies. The radii are the shipped
+/// defaults, so the run counts in the same fixed point a real cross-frame
+/// pass does rather than the finer one a small search would pick. Every
+/// pixel a reference covers has to keep carrying weight across all of it.
+///
+/// The last two rungs are past anything a caller would ask for, which is
+/// the point: they run the mismatch variance so far past
+/// [`crate::collab::kernels::fused::MEMBER_SIGMA2_CAP`] that only the cap
+/// is holding the weight inside the fixed point at all.
+#[test]
+fn a_badly_matched_group_still_reaches_the_accumulators() {
+    let (w, h) = (32u32, 32u32);
+    let counts = reference_cover_counts(w, h);
+
+    for scale in [1.0f32, 64.0, 1024.0, 4096.0] {
+        let mut s = cross_frame_setup(w, h, 2);
+        s.spatial_radius = 9;
+        s.confidence.fill(0.0);
+        // The confidence floor has to come down with it, or the groups
+        // are skipped before they are ever scored and the run says
+        // nothing about their weights.
+        s.c_min = 0.0;
+        s.thsad = THSAD * scale;
+
+        let got = run_fused(&s);
+        let base = s.centre_slot as usize * s.pixels();
+        for (idx, &count) in counts.iter().enumerate() {
+            if count == 0 {
+                continue;
+            }
+            assert!(
+                got.wsum[base + idx] > 0,
+                "thsad scale {scale}: {count} references cover pixel {idx} and its weight \
+                 sum is still {}",
+                got.wsum[base + idx],
+            );
+        }
+    }
+}
+
 /// The reference patch is always the group's first member.
 ///
 /// At `k_max = 1` a group holds exactly one member, so the only patch it
@@ -1387,3 +1458,4 @@ fn centre_frame_members_ignore_the_confidence_field() {
         "the mismatch variance must not reach a centre-frame member"
     );
 }
+

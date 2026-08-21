@@ -1,5 +1,15 @@
 use crate::nlmeans::{ChannelMode, HqParams, MotionCompensationMode, MotionEstimation, NlmParams};
 
+/// The largest [`Nl4dParams::mismatch_scale`] worth accepting.
+///
+/// The mismatch variance is capped at
+/// [`crate::collab::kernels::fused::MEMBER_SIGMA2_CAP`] times the channel
+/// variance, and the worst-matched blocks reach that cap at a scale of
+/// roughly `319 * sigma`. Even a source noisy enough to measure `sigma =
+/// 0.05` saturates below 16, so nothing above this can move a pixel and
+/// accepting it would only promise a range that is not there.
+pub const MAX_MISMATCH_SCALE: f32 = 16.0;
+
 /// Tuning for [`super::Nl4dDenoiser`].
 ///
 /// `nlm` supplies the front end that builds the frame ring, the motion
@@ -37,6 +47,19 @@ pub struct Nl4dParams {
     /// compute a submit spends, never which candidates are admitted once
     /// they are scored.
     pub c_min: f32,
+    /// A multiplier on the mismatch variance a poorly matched temporal
+    /// member carries into the hard threshold.
+    ///
+    /// The variance grows with the square of this, so `2.0` is a
+    /// four-fold increase. `1.0`, the default, is the shipped
+    /// calibration. `0.0` matches `confidence_variance: false`.
+    ///
+    /// The mechanism saturates. A member's extra variance is capped at
+    /// [`crate::collab::kernels::fused::MEMBER_SIGMA2_CAP`] times the
+    /// channel variance, which the worst-matched blocks reach somewhere
+    /// between 3 and 13 depending on how noisy the source is, so raising
+    /// this past that point stops changing anything.
+    pub mismatch_scale: f32,
     /// Whether a temporal member's mismatch variance reaches the
     /// hard-threshold shrinkage.
     ///
@@ -68,6 +91,7 @@ impl Default for Nl4dParams {
             spatial_radius: 9,
             lambda_ht: 5.3,
             c_min: 0.05,
+            mismatch_scale: 1.0,
             confidence_variance: true,
         }
     }
@@ -132,6 +156,14 @@ impl Nl4dParams {
             return Err(format!("c_min must be finite and in [0, 1), got {}", self.c_min));
         }
 
+        if !(self.mismatch_scale.is_finite() && (0.0..=MAX_MISMATCH_SCALE).contains(&self.mismatch_scale))
+        {
+            return Err(format!(
+                "mismatch_scale must be finite and in [0, {MAX_MISMATCH_SCALE}], got {}",
+                self.mismatch_scale
+            ));
+        }
+
         Ok(())
     }
 }
@@ -143,6 +175,37 @@ mod tests {
     #[test]
     fn validate_accepts_default() {
         assert!(Nl4dParams::default().validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_the_whole_mismatch_scale_range() {
+        for scale in [0.0, 1.0, 8.0, MAX_MISMATCH_SCALE] {
+            let params = Nl4dParams {
+                mismatch_scale: scale,
+                ..Nl4dParams::default()
+            };
+            assert!(params.validate().is_ok(), "mismatch_scale={scale} should be accepted");
+        }
+    }
+
+    /// Past the saturation point the dial cannot move a pixel, so a
+    /// caller asking for more is asking for something that does not
+    /// exist and should hear so rather than see no effect.
+    #[test]
+    fn validate_rejects_a_mismatch_scale_past_saturation_or_below_zero() {
+        for scale in [-1.0, MAX_MISMATCH_SCALE + 0.1, f32::NAN, f32::INFINITY] {
+            let params = Nl4dParams {
+                mismatch_scale: scale,
+                ..Nl4dParams::default()
+            };
+            let err = params
+                .validate()
+                .expect_err("mismatch_scale={scale} should be rejected");
+            assert!(
+                err.contains("mismatch_scale"),
+                "error should name mismatch_scale, got {err}"
+            );
+        }
     }
 
     #[test]

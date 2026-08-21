@@ -168,6 +168,13 @@ pub struct Nl4dOptions {
     /// affects how much compute a submit spends, never which candidates
     /// are admitted once they are scored.
     pub c_min: f32,
+    /// A multiplier on the mismatch variance a poorly matched temporal
+    /// member carries into the hard threshold. Defaults to 1.0.
+    ///
+    /// The variance grows with the square of this. The mechanism
+    /// saturates well before the top of its accepted range, see
+    /// [`crate::nl4d::Nl4dParams::mismatch_scale`].
+    pub mismatch_scale: f32,
     /// Whether a temporal member's mismatch variance reaches the
     /// hard-threshold shrinkage at all. Defaults to `true`. See
     /// [`crate::nl4d::Nl4dParams::confidence_variance`].
@@ -191,6 +198,7 @@ impl Default for Nl4dOptions {
             lambda_ht: None,
             lambda_ht_scale: 1.0,
             c_min: defaults.c_min,
+            mismatch_scale: defaults.mismatch_scale,
             confidence_variance: defaults.confidence_variance,
         }
     }
@@ -451,6 +459,7 @@ fn build_engine<R: Runtime>(
                 spatial_radius: opts.spatial_radius,
                 lambda_ht,
                 c_min: opts.c_min,
+                mismatch_scale: opts.mismatch_scale,
                 confidence_variance: opts.confidence_variance,
             };
             let denoiser = Nl4dDenoiser::new(client, nl4d_params, width, height)

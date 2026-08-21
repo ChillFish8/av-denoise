@@ -238,6 +238,10 @@ is exactly what `--preset veryfast` does.
   admitted once they are scored, so it is not a quality dial.
 - **`--no-confidence-variance`** stops a poorly matched patch from being trusted less than a 
   well-matched one. It exists to isolate that mechanism in testing and calibration, not to improve output.
+- **`--mismatch-scale`** sets how much less a poorly matched patch is trusted, rather than whether it is.
+  The variance it controls grows with the square of the value, so `2` distrusts a bad match four times
+  as much. The effect saturates somewhere between `3` and `13` depending on how noisy the source is,
+  and `0` is the same thing as `--no-confidence-variance`.
 - **`--thsad-scale`, `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels`** tune
   the motion machinery's internals, changing any of these will likely invalidate all other defaults.
 
@@ -721,6 +725,7 @@ What `--preset` fills in:
 | `--thsad-scale <f>`                                                  | How badly a neighbour frame may match before its patches stop being trusted.                                                                                                   | `1.0`               |
 | `--c-min <f>`                                                        | Confidence floor below which a whole neighbour block is skipped rather than scored. Only changes how much compute a frame costs, never which patches are admitted once scored. | `0.05`              |
 | `--no-confidence-variance`                                           | Gives every patch the same noise estimate, instead of trusting a poorly matched one less.                                                                                      | off                 |
+| `--mismatch-scale <f>`                                               | How much less a poorly matched patch is trusted. The variance grows with the square of it, and the effect saturates between roughly 3 and 13 depending on source noise. `0` matches `--no-confidence-variance`. Per-plane as `--luma-`/`--chroma-mismatch-scale`. | `1.0`               |
 | `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels` | Motion-search geometry. NL4D always tracks motion, so these are always live.                                                                                                   | `16`, `8`, `4`, `2` |
 
 </details>

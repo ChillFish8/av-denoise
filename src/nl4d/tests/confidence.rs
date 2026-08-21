@@ -165,6 +165,14 @@ fn inflated_member_variance_raises_exactly_the_rows_it_touches() {
 }
 
 fn confidence_variance_test_params(temporal_radius: u32, confidence_variance: bool) -> Nl4dParams {
+    mismatch_scale_test_params(temporal_radius, confidence_variance, 1.0)
+}
+
+fn mismatch_scale_test_params(
+    temporal_radius: u32,
+    confidence_variance: bool,
+    mismatch_scale: f32,
+) -> Nl4dParams {
     const SIGMA: f32 = 6.0 / 255.0;
     Nl4dParams {
         nlm: NlmParams {
@@ -189,6 +197,7 @@ fn confidence_variance_test_params(temporal_radius: u32, confidence_variance: bo
         spatial_radius: 9,
         lambda_ht: 2.7,
         c_min: 0.05,
+        mismatch_scale,
         confidence_variance,
     }
 }
@@ -215,10 +224,9 @@ fn run_denoiser(
 
 /// The `confidence_variance` toggle actually reaches the output.
 ///
-/// It is the only way to turn the mechanism off now that the per-plane
-/// scale is gone, so a flag that silently did nothing would leave the
-/// ablation arm measuring the same filter twice. The two arms have to
-/// differ on content whose members carry imperfect confidence.
+/// An ablation arm built on a flag that silently did nothing would
+/// measure the same filter twice. The two arms have to differ on content
+/// whose members carry imperfect confidence.
 ///
 /// Note this does not assert a direction or a magnitude. It asserts the
 /// switch is live, which is the part a refactor can break silently.
@@ -258,4 +266,99 @@ fn confidence_variance_toggle_changes_the_output() {
         "confidence_variance=true and false produced identical output on every frame, so the \
          toggle is not reaching the filter"
     );
+}
+
+/// A scale of zero leaves every member with the plain channel variance,
+/// which is exactly what turning the mechanism off does.
+///
+/// The two arms have to agree bit for bit. They reach the same place by
+/// different routes, one zeroing the variance and one skipping the
+/// branch that computes it, so this pins the scale's plumbing against
+/// the switch that is known to work.
+#[test]
+fn a_mismatch_scale_of_zero_reproduces_the_mechanism_off_arm() {
+    let client = make_client();
+    let (w, h) = (64u32, 64u32);
+    let radius = 2u32;
+    let base = textured_base(w, h);
+    let frames: Vec<Vec<f32>> = (0..9u32)
+        .map(|seed| noisy_copy_of(&base, w, h, 6.0 / 255.0, seed))
+        .collect();
+
+    let scaled_to_zero = run_denoiser(
+        &client,
+        mismatch_scale_test_params(radius, true, 0.0),
+        w,
+        h,
+        &frames,
+    );
+    let mechanism_off = run_denoiser(
+        &client,
+        mismatch_scale_test_params(radius, false, 1.0),
+        w,
+        h,
+        &frames,
+    );
+
+    assert_eq!(scaled_to_zero, mechanism_off);
+}
+
+/// Raising the scale moves the filter further from the mechanism-off
+/// arm, monotonically.
+///
+/// This is what makes a ladder over the scale readable. A dial that
+/// saturated early, or that moved the output without ordering it, would
+/// leave every rung of such a sweep uninterpretable.
+///
+/// The rungs stop short of the saturation point
+/// [`crate::nl4d::MAX_MISMATCH_SCALE`] documents, since the whole claim
+/// there is that ordering stops past it.
+#[test]
+fn a_larger_mismatch_scale_moves_further_from_the_mechanism_off_arm() {
+    let client = make_client();
+    let (w, h) = (64u32, 64u32);
+    let radius = 2u32;
+    let base = textured_base(w, h);
+    let frames: Vec<Vec<f32>> = (0..9u32)
+        .map(|seed| noisy_copy_of(&base, w, h, 6.0 / 255.0, seed))
+        .collect();
+
+    let off = run_denoiser(
+        &client,
+        mismatch_scale_test_params(radius, false, 1.0),
+        w,
+        h,
+        &frames,
+    );
+
+    let distance_from_off = |scale: f32| {
+        let arm = run_denoiser(
+            &client,
+            mismatch_scale_test_params(radius, true, scale),
+            w,
+            h,
+            &frames,
+        );
+        assert_eq!(arm.len(), off.len(), "both arms must emit the same frame count");
+        let mut sum = 0.0f64;
+        let mut n = 0usize;
+        for (a, b) in arm.iter().zip(off.iter()) {
+            for (x, y) in a.iter().zip(b.iter()) {
+                sum += (*x as f64 - *y as f64).powi(2);
+                n += 1;
+            }
+        }
+        (sum / n as f64).sqrt()
+    };
+
+    let mut previous = 0.0f64;
+    for scale in [1.0f32, 2.0, 4.0] {
+        let d = distance_from_off(scale);
+        assert!(
+            d > previous,
+            "scale {scale} sits {d} from the mechanism-off arm, no further than the {previous} \
+             the rung below reached"
+        );
+        previous = d;
+    }
 }
