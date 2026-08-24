@@ -119,7 +119,7 @@ You should always start with the defaults and judge the result by eye before cha
 change one knob at a time.
 
 ```bash
-av-denoise nl4d --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+av-denoise nl4d --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
 
 This runs NL4D at the `base` preset: a 5-frame temporal window (radius of `2`), motion tracking
@@ -170,7 +170,7 @@ an inherited file descriptor:
 ```bash
 ffmpeg -i noisy.mkv -pix_fmt yuv420p -f yuv4mpegpipe - \
   | av-denoise nlmeans --input - \
-  | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+  | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
 
 Piped input has no scene detection, so the temporal window slides across the whole stream and
@@ -182,7 +182,7 @@ the *producing* side:
 ```bash
 ffmpeg -i noisy.mkv -pix_fmt yuv420p10le -strict -1 -f yuv4mpegpipe - \
   | av-denoise nlmeans --input - \
-  | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+  | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
 
 File input via `--input noisy.mkv` needs no such flag.
@@ -190,7 +190,7 @@ File input via `--input noisy.mkv` needs no such flag.
 ## NL4D tuning guide
 
 ```bash
-av-denoise nl4d --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+av-denoise nl4d --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
 
 `--preset` sets how many neighbouring frames are searched, from a 3-frame window at `fast` to a
@@ -213,7 +213,7 @@ more noise and takes more fine detail with it. Move in steps of about 0.05 and j
 You should try this parameter before touching the absolute values, since luma and chroma start 
 from different defaults and the scale keeps that separation.
 
-**`--lambda-ht` sets those thresholds outright.** The defaults, 5.3 for luma and 4.2 for chroma,
+**`--lambda-ht` sets those thresholds outright.** The defaults, 5.0 for luma and 4.2 for chroma,
 were hand tuned and deliberately biased toward keeping detail. A single value
 here flattens both planes onto the same number, so prefer the scale unless you have a figure you
 want. `--luma-lambda-ht` and `--chroma-lambda-ht` pin one plane without touching the other, and
@@ -248,7 +248,7 @@ is exactly what `--preset veryfast` does.
 ## NLMeans tuning guide
 
 ```bash
-av-denoise nlmeans --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+av-denoise nlmeans --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
 
 `--preset` picks the variant as well as the window: `veryfast` runs the `fast` variant with no
@@ -515,7 +515,7 @@ the defaults.
 **Clean up a noisy file.** NL4D measures the noise per scene and picks its own threshold.
 
 ```bash
-av-denoise nl4d --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+av-denoise nl4d --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
 
 **Keep more detail, or take out more grain.** `--lambda-ht-scale` is NL4D's main dial. Lower keeps
@@ -525,7 +525,7 @@ they start from different defaults. Either plane can still be pinned outright wi
 
 ```bash
 av-denoise nl4d --lambda-ht-scale 0.85 --input noisy.mkv \
-  | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+  | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
 
 **A noisier source.** Go up the preset ladder. A deeper temporal window is the strongest lever in
@@ -533,7 +533,7 @@ the tool, for either algorithm.
 
 ```bash
 av-denoise nl4d --preset slow --input noisy.mkv \
-  | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+  | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
 
 **Trade quality for throughput.** NLMeans is the faster family. Its `fast` variant does no noise
@@ -541,7 +541,7 @@ measurement at all.
 
 ```bash
 av-denoise nlmeans --variant fast --input noisy.mkv \
-  | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+  | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
 
 **Still grainy under NLMeans.** Tell it the noise is a little stronger than it measured. Move in
@@ -549,14 +549,14 @@ steps of 0.1 and judge by eye.
 
 ```bash
 av-denoise nlmeans --preset slow --hq-sigma-scale 1.1 --input noisy.mkv \
-  | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+  | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
 
 **Fine texture getting scrubbed.** The same dial works downward.
 
 ```bash
 av-denoise nlmeans --hq-sigma-scale 0.9 --input noisy.mkv \
-  | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+  | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
 
 **Live action with real movement.** Motion compensation keeps the deeper window finding usable
@@ -564,7 +564,7 @@ matches instead of smearing. Anime is often better off without it.
 
 ```bash
 av-denoise nlmeans --preset slow --motion-compensation --input noisy.mkv \
-  | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+  | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
 
 **Brightness only, for speed.** Both planes are cleaned by default. Narrow to luma when the colour
@@ -572,14 +572,14 @@ is already clean and you want the time back.
 
 ```bash
 av-denoise nl4d --channel-mode luma --input noisy.mkv \
-  | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+  | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
 
 **Pick a specific GPU.** Both flags are global, so they work either side of the subcommand.
 
 ```bash
 av-denoise --accelerators vulkan --device discrete:1 nl4d --input noisy.mkv \
-  | ffmpeg -f yuv4mpegpipe -i - -c:v libsvtav1 clean.mkv
+  | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
 
 <details>
@@ -710,7 +710,7 @@ What `--preset` fills in:
 | Flag                    | What it does                                                                                                                                                                                                         | Default              |
 |-------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------|
 | `--temporal-radius <N>` | How many neighbouring frames to search on each side, between 1 and 8. More frames means more patches to group.                                                                                                       | from `--preset`      |
-| `--lambda-ht <f>`       | How aggressively small transform coefficients are zeroed out. Higher removes more noise and more fine detail with it. `--luma-lambda-ht` and `--chroma-lambda-ht` override one plane.                                | 5.3 luma, 4.2 chroma |
+| `--lambda-ht <f>`       | How aggressively small transform coefficients are zeroed out. Higher removes more noise and more fine detail with it. `--luma-lambda-ht` and `--chroma-lambda-ht` override one plane.                                | 5.0 luma, 4.2 chroma |
 | `--lambda-ht-scale <f>` | Multiplies the `--lambda-ht` in effect for each plane. The main quality dial, since luma and chroma start from different defaults and this moves both together.                                                      | `1.0`                |
 | `--spatial-radius <N>`  | Half-width of the candidate search inside the centre frame, between 1 and 16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                       | from `--preset`      |
 | `--sigma-scale <f>`     | Nudges the measured noise level, the same dial NLMeans spells `--hq-sigma-scale`.                                                                                                                                    | `1.0`                |
