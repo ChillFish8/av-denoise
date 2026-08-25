@@ -31,7 +31,7 @@ denoising tools.
   - [Bit depth cost](#bit-depth-cost)
 - [Hardware support](#hardware-support)
   - [Notes about the JIT](#notes-about-the-jit)
-    - [Configure compilation cache directory](#configure-compilation-cache-directory)
+    - [Configure compilation cache directory](#compiled-kernel-cache)
 - [Installing](#installing)
   - [Cargo install](#cargo-install)
   - [From source](#from-source)
@@ -116,7 +116,7 @@ cargo add av-denoise
 
 The defaults are exhaustively measured and calibrated to offer highly effective denoising with little to no detail loss.
 You should always start with the defaults and judge the result by eye before changing any options, and when you do,
-change one knob at a time.
+change one option at a time.
 
 ```bash
 av-denoise nl4d --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
@@ -356,10 +356,10 @@ the plain one.
 
 | run                                          | preset |       fps | denoising   | detail retention | notes                                                                     |
 |----------------------------------------------|--------|----------:|-------------|------------------|---------------------------------------------------------------------------|
-| `nlmeans --variant fast`                     | `base` | **58.91** | medium      | low              | Traditional NLMeans algorithm                                             |
-| `nl4d --preset fast`                         | `fast` |     48.04 | higher      | higher           | Better detail retention compared to V-BM3D (r=1)                          |
+| `nlmeans --variant fast`                     | `base` | **58.91** | low         | low              | Traditional NLMeans algorithm                                             |
+| `nl4d --preset fast`                         | `fast` |     48.04 | high        | higher           | Better detail retention compared to V-BM3D (r=1)                          |
 | `nlmeans --variant hq`                       | `base` |     47.34 | medium      | medium           | NLMeans with adaptive noise estimation and motion confidence (NLMeans-HQ) |
-| `nlmeans --variant hq --motion-compensation` | `base` |     42.48 | high        | high             | NLMeans-HQ + block matching motion compensation                           |
+| `nlmeans --variant hq --motion-compensation` | `base` |     42.48 | medium      | high             | NLMeans-HQ + block matching motion compensation                           |
 | `nl4d`                                       | `base` |     42.39 | **highest** | **highest**      | Better detail retention compared to V-BM3D (r=2) and all NLMeans variants |
 
 The two quality columns are judged by eye on real grain, not computed. They rank the
