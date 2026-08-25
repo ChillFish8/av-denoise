@@ -1,5 +1,6 @@
 mod common;
 mod input;
+mod list_devices;
 mod motion;
 mod nl4d;
 mod nlmeans;
@@ -11,6 +12,7 @@ use strum_macros::EnumString;
 
 pub use self::common::CommonArgs;
 pub use self::input::InputSource;
+pub use self::list_devices::run_list_devices;
 pub use self::motion::MotionArgs;
 pub use self::nl4d::Nl4dArgs;
 pub use self::nlmeans::NlmeansArgs;
@@ -188,4 +190,14 @@ pub enum Command {
     /// Motion tracking is always on, and every preset keeps a temporal
     /// window, which this algorithm needs.
     Nl4d(Nl4dArgs),
+
+    /// List the devices each backend can see on this machine.
+    ///
+    /// Every row names a device in the spelling `--device` takes, next
+    /// to the backends that offer it. `--accelerators` narrows which
+    /// backends are asked.
+    ///
+    /// Ordinals are counted per backend, so the same row under two
+    /// backends is not always the same physical card.
+    ListDevices,
 }

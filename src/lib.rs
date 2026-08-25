@@ -8,10 +8,12 @@ pub mod cache;
 pub mod collab;
 mod denoiser;
 pub mod device;
+pub mod enumerate;
 #[doc(hidden)]
 pub mod nl4d;
 #[doc(hidden)]
 pub mod nlmeans;
+mod probe;
 pub mod sniff;
 
 pub use cache::{COMPILATION_CACHE_ENV, CacheAlreadyInitialisedError, install_compilation_cache};

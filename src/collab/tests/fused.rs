@@ -1458,4 +1458,3 @@ fn centre_frame_members_ignore_the_confidence_field() {
         "the mismatch variance must not reach a centre-frame member"
     );
 }
-

@@ -461,7 +461,7 @@ mod tests {
         let args = Args::parse_from(argv);
         let nlm = match &args.command {
             Command::Nlmeans(nlm) => NlmeansArgs::clone(nlm),
-            Command::Nl4d(_) => unreachable!("parse() always builds a nlmeans argv"),
+            other => unreachable!("parse() always builds a nlmeans argv, got {other:?}"),
         };
 
         (args, nlm)
@@ -476,7 +476,7 @@ mod tests {
         let args = Args::parse_from(argv);
         match &args.command {
             Command::Nlmeans(nlm) => NlmeansArgs::clone(nlm),
-            Command::Nl4d(_) => unreachable!("parse_input() always builds a nlmeans argv"),
+            other => unreachable!("parse_input() always builds a nlmeans argv, got {other:?}"),
         }
     }
 

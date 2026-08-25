@@ -21,6 +21,7 @@
 //! );
 //! ```
 
+use std::fmt;
 use std::str::FromStr;
 
 /// Where to run the compute.
@@ -76,6 +77,20 @@ impl FromStr for Device {
             other => Err(format!(
                 "unknown device kind '{other}', expected default, discrete[:N], integrated[:N], virtual[:N], or cpu"
             )),
+        }
+    }
+}
+
+impl fmt::Display for Device {
+    /// Writes the selector spelling [`FromStr`] accepts, so a device
+    /// prints as `discrete:1` rather than as its enum variant.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Device::Default => f.write_str("default"),
+            Device::Discrete { index } => write!(f, "discrete:{index}"),
+            Device::Integrated { index } => write!(f, "integrated:{index}"),
+            Device::Virtual { index } => write!(f, "virtual:{index}"),
+            Device::Cpu => f.write_str("cpu"),
         }
     }
 }
@@ -162,6 +177,30 @@ mod tests {
     #[test]
     fn parse_rejects_non_numeric_index() {
         assert!("discrete:abc".parse::<Device>().is_err());
+    }
+
+    #[test]
+    fn display_writes_selector_spellings() {
+        assert_eq!(Device::Default.to_string(), "default");
+        assert_eq!(Device::Discrete { index: 1 }.to_string(), "discrete:1");
+        assert_eq!(Device::Integrated { index: 0 }.to_string(), "integrated:0");
+        assert_eq!(Device::Virtual { index: 2 }.to_string(), "virtual:2");
+        assert_eq!(Device::Cpu.to_string(), "cpu");
+    }
+
+    #[test]
+    fn display_round_trips_through_from_str() {
+        let devices = [
+            Device::Default,
+            Device::Discrete { index: 3 },
+            Device::Integrated { index: 1 },
+            Device::Virtual { index: 0 },
+            Device::Cpu,
+        ];
+        for device in devices {
+            let printed = device.to_string();
+            assert_eq!(printed.parse::<Device>().unwrap(), device, "{printed}");
+        }
     }
 
     #[test]

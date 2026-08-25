@@ -165,8 +165,7 @@ pub(crate) fn haar_reg_fwd_level(stack: &mut Array<f32>, #[comptime] len: u32) {
             let a = snapshot[(2u32 * p) as usize];
             let b = snapshot[(2u32 * p + 1u32) as usize];
             stack[(p * PATCH_SIZE + pos) as usize] = (a + b) * std::f32::consts::FRAC_1_SQRT_2;
-            stack[((half + p) * PATCH_SIZE + pos) as usize] =
-                (a - b) * std::f32::consts::FRAC_1_SQRT_2;
+            stack[((half + p) * PATCH_SIZE + pos) as usize] = (a - b) * std::f32::consts::FRAC_1_SQRT_2;
         }
     }
 }
@@ -192,8 +191,7 @@ pub(crate) fn haar_reg_inv_level(stack: &mut Array<f32>, #[comptime] len: u32) {
         for p in 0..half {
             let a = snapshot[p as usize];
             let b = snapshot[(half + p) as usize];
-            stack[(2u32 * p * PATCH_SIZE + pos) as usize] =
-                (a + b) * std::f32::consts::FRAC_1_SQRT_2;
+            stack[(2u32 * p * PATCH_SIZE + pos) as usize] = (a + b) * std::f32::consts::FRAC_1_SQRT_2;
             stack[((2u32 * p + 1u32) * PATCH_SIZE + pos) as usize] =
                 (a - b) * std::f32::consts::FRAC_1_SQRT_2;
         }

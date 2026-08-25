@@ -33,6 +33,7 @@ use cubecl::prelude::*;
 
 use crate::accelerate::Accelerator;
 use crate::device::Device;
+use crate::probe::open_client;
 
 /// Tries each accelerator in turn and returns the first one whose client
 /// can be built and synchronised on `device`.
@@ -43,28 +44,30 @@ use crate::device::Device;
 ///
 /// An accelerator that cannot express `device` at all is treated as
 /// unavailable and the search moves on. That is the same answer the
-/// caller would get from trying to build on it, one step earlier.
+/// caller would get from trying to build on it, one step earlier. So is
+/// a backend whose driver libraries are missing, however loudly it
+/// fails, see [`probe`](crate::probe).
 pub fn sniff_best_accelerator(enable: &[Accelerator], device: &Device) -> Option<Accelerator> {
     for accelerator in enable {
         let is_enabled = match accelerator {
             #[cfg(feature = "cuda")]
             Accelerator::Cuda => match device.to_cuda() {
-                Ok(dev) => probe_runtime::<cubecl::cuda::CudaRuntime>("CUDA", &dev),
+                Ok(dev) => probe_runtime::<cubecl::cuda::CudaRuntime>(*accelerator, &dev),
                 Err(_) => false,
             },
             #[cfg(feature = "rocm")]
             Accelerator::Rocm => match device.to_amd() {
-                Ok(dev) => probe_runtime::<cubecl::hip::HipRuntime>("ROCM", &dev),
+                Ok(dev) => probe_runtime::<cubecl::hip::HipRuntime>(*accelerator, &dev),
                 Err(_) => false,
             },
             #[cfg(feature = "vulkan")]
             Accelerator::Vulkan => match device.to_wgpu() {
-                Ok(dev) => probe_runtime::<cubecl::wgpu::WgpuRuntime>("VULKAN", &dev),
+                Ok(dev) => probe_runtime::<cubecl::wgpu::WgpuRuntime>(*accelerator, &dev),
                 Err(_) => false,
             },
             #[cfg(feature = "metal")]
             Accelerator::Metal => match device.to_wgpu() {
-                Ok(dev) => probe_runtime::<cubecl::wgpu::WgpuRuntime>("METAL", &dev),
+                Ok(dev) => probe_runtime::<cubecl::wgpu::WgpuRuntime>(*accelerator, &dev),
                 Err(_) => false,
             },
             // docs.rs widens the `Accelerator` variants behind
@@ -85,13 +88,7 @@ pub fn sniff_best_accelerator(enable: &[Accelerator], device: &Device) -> Option
     None
 }
 
-fn probe_runtime<R: Runtime>(name: &'static str, device: &R::Device) -> bool {
-    let client = R::client(device);
-    match cubecl::future::block_on(client.sync()) {
-        Ok(()) => true,
-        Err(err) => {
-            tracing::debug!(err = ?err, "could not use {name} runtime");
-            false
-        },
-    }
+/// Reports whether `accelerator` can really run on `device`.
+fn probe_runtime<R: Runtime>(accelerator: Accelerator, device: &R::Device) -> bool {
+    open_client::<R>(accelerator, device).is_some()
 }

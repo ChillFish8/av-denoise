@@ -39,6 +39,7 @@ denoising tools.
 - [Example commands](#example-commands)
 - [Binary usage](#binary-usage)
   - [Global options](#global-options)
+  - [Listing devices](#listing-devices)
   - [Algorithm - `nl4d`](#nl4d-options)
   - [Algorithm - `nlmeans`](#nlmeans-options)
 
@@ -460,6 +461,9 @@ The project supports the following accelerators/gpus:
 - **Nvidia GPUs** (via the `cuda` or `vulkan` features)
 - **Apple Silicon** (via the `metal` feature)
 
+Run `av-denoise list-devices` to see which of these your machine offers and what to pass to
+`--device`.
+
 There is no software backend. The collaborative filter aggregates its filtered patches through
 atomic floating-point adds, and CubeCL's CPU runtime does not implement atomics. A software
 *device* is still reachable with `--device cpu` where the platform provides one, such as lavapipe
@@ -684,6 +688,33 @@ Both subcommands also take:
 |-------------------------|--------------------------------------------------------------------------------------------------|----------|
 | `-i, --input <path\|->` | A path is opened with ffms2 and split by scene. `-` or `pipe:0` reads y4m from stdin.            | required |
 | `-W, --workers <N>`     | How many scenes to clean in parallel. Trades GPU memory for throughput. Ignored for piped input. | `2`      |
+
+### Listing devices
+
+`av-denoise list-devices` prints what each backend can see on this machine.
+Every row is a device in the format `--device` takes, next to the backends
+that offer it, so it can be copied straight onto a denoising run.
+
+```bash
+av-denoise list-devices
+```
+
+```text
+DEVICE        BACKENDS
+default       rocm, vulkan
+discrete:0    rocm, vulkan
+discrete:1    rocm, vulkan
+discrete:2    rocm
+integrated:0  vulkan
+```
+
+`-A, --accelerators` narrows which backends are asked. Any backend the build
+enables but the machine cannot start is named under the table.
+
+> [!NOTE]
+> Ordinals are counted per backend. `discrete:1` under ROCm and `discrete:1`
+> under Vulkan are each that backend's second discrete GPU, which is not
+> always the same card.
 
 ### `nl4d` options
 

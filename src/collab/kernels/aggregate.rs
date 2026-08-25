@@ -395,10 +395,7 @@ mod tests {
     #[test]
     fn to_fixed_weight_clamps_at_one() {
         let scale = 1_024.0f32;
-        assert_eq!(
-            to_fixed_weight(4.0, scale),
-            to_fixed_weight(WEIGHT_CLAMP, scale),
-        );
+        assert_eq!(to_fixed_weight(4.0, scale), to_fixed_weight(WEIGHT_CLAMP, scale),);
         assert_eq!(to_fixed_weight(-1.0, scale), 0);
     }
 

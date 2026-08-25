@@ -156,8 +156,7 @@ impl Nl4dParams {
             return Err(format!("c_min must be finite and in [0, 1), got {}", self.c_min));
         }
 
-        if !(self.mismatch_scale.is_finite() && (0.0..=MAX_MISMATCH_SCALE).contains(&self.mismatch_scale))
-        {
+        if !(self.mismatch_scale.is_finite() && (0.0..=MAX_MISMATCH_SCALE).contains(&self.mismatch_scale)) {
             return Err(format!(
                 "mismatch_scale must be finite and in [0, {MAX_MISMATCH_SCALE}], got {}",
                 self.mismatch_scale
@@ -184,7 +183,10 @@ mod tests {
                 mismatch_scale: scale,
                 ..Nl4dParams::default()
             };
-            assert!(params.validate().is_ok(), "mismatch_scale={scale} should be accepted");
+            assert!(
+                params.validate().is_ok(),
+                "mismatch_scale={scale} should be accepted"
+            );
         }
     }
 

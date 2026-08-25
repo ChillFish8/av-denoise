@@ -290,9 +290,7 @@ impl Nl4dArgs {
 
         match intent {
             BinaryChannelIntent::Luma if self.chroma_mismatch_scale.is_some() => {
-                tracing::warn!(
-                    "--chroma-mismatch-scale is ignored when chroma is not being denoised"
-                );
+                tracing::warn!("--chroma-mismatch-scale is ignored when chroma is not being denoised");
             },
             BinaryChannelIntent::Chroma if self.luma_mismatch_scale.is_some() => {
                 tracing::warn!("--luma-mismatch-scale is ignored when luma is not being denoised");
@@ -358,7 +356,7 @@ mod tests {
         let args = Args::parse_from(argv);
         let nl4d = match &args.command {
             Command::Nl4d(nl4d) => Nl4dArgs::clone(nl4d),
-            Command::Nlmeans(_) => unreachable!("parse() always builds a nl4d argv"),
+            other => unreachable!("parse() always builds a nl4d argv, got {other:?}"),
         };
 
         (args, nl4d)

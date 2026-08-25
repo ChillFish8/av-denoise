@@ -1,8 +1,8 @@
 use cubecl::prelude::*;
 
 use super::helpers::{R, make_client};
-use crate::collab::kernels::transforms::*;
 use crate::collab::MAX_K;
+use crate::collab::kernels::transforms::*;
 
 #[cube(launch_unchecked)]
 fn safe_reciprocal_probe(denom: &Array<f32>, floor: &Array<f32>, out: &mut Array<f32>, n: u32) {

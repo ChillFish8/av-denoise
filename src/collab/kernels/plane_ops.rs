@@ -54,13 +54,7 @@ pub(crate) fn plane_ssd_reduce8(partial: f32) -> f32 {
 /// on every candidate, so deriving this rather than shuffling a flag is
 /// worth the line of algebra.
 #[cube]
-pub(crate) fn shift_insert8(
-    best_d: &mut f32,
-    best_pos: &mut u32,
-    d: f32,
-    packed: u32,
-    sub: u32,
-) {
+pub(crate) fn shift_insert8(best_d: &mut f32, best_pos: &mut u32, d: f32, packed: u32, sub: u32) {
     let prev_d = plane_shuffle_up(*best_d, 1u32);
     let prev_pos = plane_shuffle_up(*best_pos, 1u32);
 
@@ -119,12 +113,7 @@ pub(crate) fn shift_insert8_gated(
 /// The spatial row pass needs a row and a lane owns a column, so this
 /// runs once before it and once after its inverse.
 #[cube]
-pub(crate) fn transpose8(
-    buf: &mut SharedMemory<f32>,
-    v: &mut Array<f32>,
-    sub: u32,
-    slot: u32,
-) {
+pub(crate) fn transpose8(buf: &mut SharedMemory<f32>, v: &mut Array<f32>, sub: u32, slot: u32) {
     let base = slot * 65u32;
     #[unroll]
     for i in 0..8u32 {
