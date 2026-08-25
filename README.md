@@ -359,11 +359,11 @@ the plain one.
 | `nlmeans --variant fast`                     | `base` | **58.91** | low         | low              | Traditional NLMeans algorithm                                             |
 | `nl4d --preset fast`                         | `fast` |     48.04 | high        | higher           | Better detail retention compared to V-BM3D (r=1)                          |
 | `nlmeans --variant hq`                       | `base` |     47.34 | medium      | medium           | NLMeans with adaptive noise estimation and motion confidence (NLMeans-HQ) |
-| `nlmeans --variant hq --motion-compensation` | `base` |     42.48 | medium      | high             | NLMeans-HQ + block matching motion compensation                           |
+| `nlmeans --variant hq --motion-compensation` | `base` |     42.48 | medium      | medium           | NLMeans-HQ + block matching motion compensation                           |
 | `nl4d`                                       | `base` |     42.39 | **highest** | **highest**      | Better detail retention compared to V-BM3D (r=2) and all NLMeans variants |
 
-The two quality columns are judged by eye on real grain, not computed. They rank the
-rows against each other and mean nothing outside this table.
+The two quality columns are not objective, they exist to give you an idea more of what sort of configuration
+fits your situation best.
 
 Grouping patches across the temporal window costs about what motion-compensated
 NLMeans-HQ costs at the same window size. One rung down the ladder, `nl4d --preset
@@ -568,7 +568,7 @@ av-denoise nlmeans --preset slow --motion-compensation --input noisy.mkv \
 ```
 
 **Brightness only, for speed.** Both planes are cleaned by default. Narrow to luma when the colour
-is already clean and you want the time back.
+is already clean, and you want the time back.
 
 ```bash
 av-denoise nl4d --channel-mode luma --input noisy.mkv \
@@ -591,7 +591,7 @@ measurement, so treat them as calibration and debugging recipes rather than a st
 your goal is a better-looking result, the dials above are the ones to reach for first — see
 [What not to touch in NLMeans](#what-not-to-touch-in-nlmeans).
 
-**Y/UV Denoise - ROCm/Vulkan - On GPU 1 - Light Denoise - Spatial - strength=luma:1.2,choma:1.2**
+**Y/UV Denoise - ROCm/Vulkan - On GPU 1 - Light Denoise - Spatial - strength=luma:0.3,choma:0.6**
 ```bash
 av-denoise nlmeans \
   --preset veryfast \
@@ -629,7 +629,7 @@ av-denoise nlmeans \
     | ffmpeg -hide_banner -loglevel info -y -f yuv4mpegpipe -i - -c:v ffv1 ./output.mkv
 ```
 
-**YUV Fused Denoise - Vulkan - On Default GPU - Medium Denoise - Spatial - strength=yuv:2.0**
+**YUV Fused Denoise - Vulkan - On Default GPU - Medium Denoise - Spatial - strength=yuv:0.8**
 ```bash
 av-denoise nlmeans \
   --preset veryfast \
