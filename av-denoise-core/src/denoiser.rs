@@ -524,8 +524,8 @@ pub const MAX_PENDING: usize = 2;
 /// `width * height * channels`.
 ///
 /// ```no_run
-/// use av_denoise::accelerate::Accelerator;
-/// use av_denoise::{ChannelMode, Denoiser, DenoiserOptions, DenoisingMode, Device};
+/// use av_denoise_core::accelerate::Accelerator;
+/// use av_denoise_core::{ChannelMode, Denoiser, DenoiserOptions, DenoisingMode, Device};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let options = DenoiserOptions::builder()

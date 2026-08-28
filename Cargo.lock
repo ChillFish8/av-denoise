@@ -185,22 +185,38 @@ version = "0.4.0-alpha1"
 dependencies = [
  "anyhow",
  "av-decoders",
+ "av-denoise-core",
  "av-scenechange",
- "bon",
  "clap",
- "cubecl",
- "futures",
  "indicatif",
  "mimalloc",
  "strum",
  "strum_macros",
- "thiserror",
  "tracing",
  "tracing-indicatif",
  "tracing-subscriber",
  "v_frame",
  "y4m",
 ]
+
+[[package]]
+name = "av-denoise-core"
+version = "0.4.0-alpha1"
+dependencies = [
+ "anyhow",
+ "bon",
+ "clap",
+ "cubecl",
+ "futures",
+ "strum",
+ "strum_macros",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "av-denoise-vs"
+version = "0.4.0-alpha1"
 
 [[package]]
 name = "av-scenechange"

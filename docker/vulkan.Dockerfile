@@ -16,10 +16,11 @@ WORKDIR /build
 
 COPY Cargo.toml Cargo.lock ./
 COPY README.md ./
-COPY src ./src
-COPY benches ./benches
+COPY av-denoise-core/ ./av-denoise-core/
+COPY av-denoise/ ./av-denoise/
+COPY av-denoise-vs/ ./av-denoise-vs/
 
-RUN cargo build --release --bin av-denoise --no-default-features --features vulkan,binary
+RUN cargo build --release -p av-denoise --no-default-features --features vulkan,binary
 
 FROM ${ARCH_RUNTIME_IMAGE} AS runtime
 

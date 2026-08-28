@@ -1,0 +1,8 @@
+[package]
+name = "av-denoise-vs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

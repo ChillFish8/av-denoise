@@ -9,7 +9,7 @@
 //! command-line flag or a config file.
 //!
 //! ```
-//! use av_denoise::Device;
+//! use av_denoise_core::Device;
 //!
 //! // Let the backend decide.
 //! assert_eq!("default".parse::<Device>().unwrap(), Device::Default);

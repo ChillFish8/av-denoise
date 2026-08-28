@@ -1,21 +1,23 @@
 hello:
 
+# Prefer `rustfmt +nightly <file>` for targeted edits; this formats the whole workspace.
 format:
     cargo +nightly fmt --all
 
 build *ARGS:
-    cargo build {{ARGS}}
+    cargo build -p av-denoise {{ARGS}}
 
 run *ARGS:
-    cargo run {{ARGS}}
+    cargo run -p av-denoise {{ARGS}}
 
 bench *ARGS:
-    cargo bench {{ARGS}}
+    cargo bench -p av-denoise-core {{ARGS}}
 
 test:
-    cargo nextest run --features vulkan,binary
-    cargo test --doc --features vulkan,binary
-    cargo check
+    cargo nextest run -p av-denoise-core --features vulkan
+    cargo nextest run -p av-denoise --features vulkan,binary
+    cargo test --doc -p av-denoise-core --features vulkan
+    cargo check --workspace
 
 compare-perf *ARGS:
     uv run scripts/bench_runs.py {{ARGS}}

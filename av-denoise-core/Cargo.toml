@@ -1,0 +1,67 @@
+[package]
+name = "av-denoise-core"
+version = "0.4.0-alpha1"
+edition = "2024"
+description = "Fast and efficient video denoising using accelerated nlmeans."
+categories = ["multimedia::video"]
+keywords = ["cubecl", "denoise", "gpu"]
+license = "Apache-2.0"
+repository = "https://github.com/ChillFish8/av-denoise"
+readme = "README.md"
+exclude = [
+    "scripts/",
+    ".idea/",
+    "cubecl.toml",
+    "docker/",
+    ".github/",
+    "Justfile"
+]
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+strum_macros = "0.28"
+strum = "0.28"
+bon = "3"
+
+cubecl = { version = "0.10", features = ["std"] }
+
+[dev-dependencies]
+futures = "0.3"
+clap = { version = "4", features = ["derive"] }
+
+[features]
+vulkan = ["cubecl/vulkan"]
+metal = ["cubecl/metal"]
+cuda = ["cubecl/cuda"]
+rocm = ["cubecl/hip"]
+default = ["vulkan"]
+
+[[bench]]
+name = "nlmeans"
+harness = false
+
+[[bench]]
+name = "bench_kernels"
+harness = false
+
+[[bench]]
+name = "denoise"
+harness = false
+
+[[bench]]
+name = "motion"
+harness = false
+
+[[bench]]
+name = "convert"
+harness = false
+
+[[bench]]
+name = "nl4d_ablation"
+harness = false

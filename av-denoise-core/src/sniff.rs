@@ -19,9 +19,9 @@
 //! building a denoiser.
 //!
 //! ```no_run
-//! use av_denoise::Device;
-//! use av_denoise::accelerate::get_default_accelerators;
-//! use av_denoise::sniff::sniff_best_accelerator;
+//! use av_denoise_core::Device;
+//! use av_denoise_core::accelerate::get_default_accelerators;
+//! use av_denoise_core::sniff::sniff_best_accelerator;
 //!
 //! match sniff_best_accelerator(&get_default_accelerators(), &Device::Default) {
 //!     Some(accelerator) => println!("running on {accelerator}"),

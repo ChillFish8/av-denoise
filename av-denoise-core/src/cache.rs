@@ -23,7 +23,7 @@
 //! ```no_run
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Call this at the top of `main`, before any denoiser exists.
-//! match av_denoise::install_compilation_cache()? {
+//! match av_denoise_core::install_compilation_cache()? {
 //!     Some(path) => println!("caching compiled kernels in {}", path.display()),
 //!     None => println!("kernel caching is off, every run recompiles"),
 //! }

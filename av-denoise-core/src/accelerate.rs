@@ -13,7 +13,7 @@
 //! prefer a fast backend and quietly fall back to a slower one.
 //!
 //! ```no_run
-//! use av_denoise::accelerate::get_default_accelerators;
+//! use av_denoise_core::accelerate::get_default_accelerators;
 //!
 //! // Every backend this build supports, in the order to try them.
 //! let preferred = get_default_accelerators();
