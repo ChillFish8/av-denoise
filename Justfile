@@ -13,6 +13,12 @@ run *ARGS:
 bench *ARGS:
     cargo bench -p av-denoise-core {{ARGS}}
 
+build-vs *ARGS:
+    cargo build -p av-denoise-vs --release {{ARGS}}
+
+test-vs: build-vs
+    uv run av-denoise-vs/tests/vs_harness.py
+
 test:
     cargo nextest run -p av-denoise-core --features vulkan
     cargo nextest run -p av-denoise --features vulkan,binary

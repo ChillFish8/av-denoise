@@ -4,5 +4,19 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "VapourSynth plugin for av-denoise."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+av-denoise-core.workspace = true
+anyhow.workspace = true
+vapoursynth = "0.5.6"
+
+[features]
+vulkan = ["av-denoise-core/vulkan"]
+metal = ["av-denoise-core/metal"]
+cuda = ["av-denoise-core/cuda"]
+rocm = ["av-denoise-core/rocm"]
+default = ["vulkan"]
