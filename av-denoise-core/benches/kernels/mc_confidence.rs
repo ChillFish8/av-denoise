@@ -1,5 +1,5 @@
-use av_denoise::nlmeans::kernels::motion::nlm_mc_block_match_fine;
-use av_denoise::nlmeans::motion::{DEFAULT_BLKSIZE, DEFAULT_OVERLAP};
+use av_denoise_core::nlmeans::kernels::motion::nlm_mc_block_match_fine;
+use av_denoise_core::nlmeans::motion::{DEFAULT_BLKSIZE, DEFAULT_OVERLAP};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;

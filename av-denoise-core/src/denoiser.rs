@@ -421,6 +421,13 @@ impl<R: Runtime> Engine<R> {
             Self::Nl4d(d) => d.flush(sink).map_err(anyhow::Error::from),
         }
     }
+
+    fn reset_stream(&mut self) {
+        match self {
+            Self::Nlm(d) => d.reset_stream_state(),
+            Self::Nl4d(d) => d.reset_stream(),
+        }
+    }
 }
 
 /// Builds whichever [`Engine`] `algorithm` calls for.
@@ -643,6 +650,11 @@ impl Denoiser {
         self.height
     }
 
+    /// The temporal radius the resolved parameters run at.
+    pub fn temporal_radius(&self) -> u32 {
+        self.temporal_radius
+    }
+
     /// Uploads one frame into the temporal window.
     ///
     /// `frame` holds `width * height * channels` `f32` values in
@@ -691,6 +703,46 @@ impl Denoiser {
 
         self.frames_pushed = self.frames_pushed.saturating_add(1);
         Ok(())
+    }
+
+    /// Uploads one frame into the temporal window without starting a
+    /// denoise.
+    ///
+    /// The ring advances exactly as it does for [`Self::push_frame`], so
+    /// the window still fills, but no kernels are submitted and no
+    /// output is queued. This is how a caller that can hand over a whole
+    /// window at once, rather than a strictly ordered stream, fills the
+    /// window in one go and lets only the last push in it submit.
+    pub fn push_frame_priming(&mut self, frame: &[f32]) -> Result<(), DenoiserError> {
+        match &mut self.backend {
+            #[cfg(feature = "cuda")]
+            Backend::Cuda(d) => d.push_frame(frame),
+            #[cfg(feature = "rocm")]
+            Backend::Rocm(d) => d.push_frame(frame),
+            #[cfg(any(feature = "vulkan", feature = "metal"))]
+            Backend::Wgpu(d) => d.push_frame(frame),
+        }
+
+        self.frames_pushed = self.frames_pushed.saturating_add(1);
+        Ok(())
+    }
+
+    /// Drops the current stream and returns to the state a fresh
+    /// denoiser starts in, keeping every GPU allocation.
+    ///
+    /// Anything still in flight is discarded.
+    pub fn reset_stream(&mut self) {
+        self.pending.clear();
+        self.frames_pushed = 0;
+
+        match &mut self.backend {
+            #[cfg(feature = "cuda")]
+            Backend::Cuda(d) => d.reset_stream(),
+            #[cfg(feature = "rocm")]
+            Backend::Rocm(d) => d.reset_stream(),
+            #[cfg(any(feature = "vulkan", feature = "metal"))]
+            Backend::Wgpu(d) => d.reset_stream(),
+        }
     }
 
     /// Blocks until the in-flight denoise finishes and returns the

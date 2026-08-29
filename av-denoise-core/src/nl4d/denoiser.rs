@@ -270,11 +270,22 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             }
         }
 
+        self.reset_stream();
+
+        Ok(())
+    }
+
+    /// Drops the current stream and returns to the state a fresh
+    /// denoiser starts in, keeping every GPU allocation.
+    ///
+    /// Clears the front end's own stream state plus the cross-frame
+    /// accumulator's pass counter and output slot, so a window primed
+    /// after this call never reads a previous window's stale
+    /// contributions out of the fixed-point `accum`/`wsum` ring.
+    pub fn reset_stream(&mut self) {
         self.front.reset_stream_state();
         self.next_output_slot = 0;
         self.passes_run = 0;
-
-        Ok(())
     }
 
     /// How many tail frames [`Self::flush`] must emit for the stream

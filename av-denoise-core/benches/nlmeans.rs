@@ -1,9 +1,9 @@
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use av_denoise::nlmeans::kernels::{nlm_accumulate, nlm_bilateral, nlm_dist_2d_weight, nlm_finish};
-use av_denoise::nlmeans::prefilter::bilateral_radius;
-use av_denoise::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, NlmParams, Pending, PrefilterMode};
+use av_denoise_core::nlmeans::kernels::{nlm_accumulate, nlm_bilateral, nlm_dist_2d_weight, nlm_finish};
+use av_denoise_core::nlmeans::prefilter::bilateral_radius;
+use av_denoise_core::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, NlmParams, Pending, PrefilterMode};
 use cubecl::prelude::*;
 
 const W: u32 = 1920;
@@ -520,7 +520,7 @@ struct Cli {
     /// GPU device to bind to. Format: `default`, `discrete[:N]`,
     /// `integrated[:N]`, `virtual[:N]`, or `cpu`.
     #[arg(long, default_value = "default")]
-    device: av_denoise::Device,
+    device: av_denoise_core::Device,
 
     /// Swallowed: cargo passes this when invoking the bench binary.
     #[arg(long, hide = true)]

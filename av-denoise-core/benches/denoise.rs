@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
-use av_denoise::accelerate::Accelerator;
-use av_denoise::{
+use av_denoise_core::accelerate::Accelerator;
+use av_denoise_core::{
     Algorithm,
     ChannelMode,
     Denoiser,
@@ -32,7 +32,7 @@ struct Cli {
 
     /// Accelerator priority list (comma-delimited). Defaults to all
     /// compiled-in accelerators.
-    #[arg(long, value_delimiter = ',', default_values_t = av_denoise::accelerate::get_default_accelerators())]
+    #[arg(long, value_delimiter = ',', default_values_t = av_denoise_core::accelerate::get_default_accelerators())]
     accelerators: Vec<Accelerator>,
 
     /// Swallowed: cargo passes this when invoking the bench binary.
@@ -121,7 +121,7 @@ fn bench_push_recv(
     };
     let window = 2 * temporal_radius + 1;
     for _ in 0..window.saturating_sub(1) {
-        if let Err(av_denoise::DenoiserError::QueueFull) = denoiser.push_frame(&frame) {
+        if let Err(av_denoise_core::DenoiserError::QueueFull) = denoiser.push_frame(&frame) {
             let _ = denoiser.recv_frame()?;
             denoiser.push_frame(&frame)?;
         }

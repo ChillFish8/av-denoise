@@ -1,4 +1,4 @@
-use av_denoise::nlmeans::kernels::nlm_finish;
+use av_denoise_core::nlmeans::kernels::nlm_finish;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;

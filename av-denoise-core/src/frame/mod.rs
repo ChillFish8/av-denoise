@@ -254,6 +254,13 @@ fn with_plane_strength(nlm: NlmeansOptions, strength: Option<f32>) -> NlmeansOpt
     }
 }
 
+/// Pops up to `count` entries off the front of `queue`, discarding them.
+fn drop_leading<T>(queue: &mut VecDeque<T>, count: usize) {
+    for _ in 0..count.min(queue.len()) {
+        queue.pop_front();
+    }
+}
+
 /// Reads the result of a `PlanarDenoiser::push` call for the
 /// push-then-drain-then-retry loop that `file_mode.rs` and
 /// `stream_mode.rs` both use.
@@ -288,6 +295,9 @@ pub struct PlanarDenoiser {
     // delays stay aligned.
     luma_passthrough: VecDeque<Vec<u8>>,
     chroma_passthrough: VecDeque<(Vec<u8>, Vec<u8>)>,
+    /// The temporal radius every owned denoiser runs at, resolved from
+    /// `opts.mode` at construction.
+    temporal_radius: u32,
 }
 
 impl PlanarDenoiser {
@@ -348,6 +358,11 @@ impl PlanarDenoiser {
             })
             .transpose()?;
 
+        let temporal_radius = match opts.mode {
+            DenoisingMode::Spacial => 0,
+            DenoisingMode::Temporal { radius } => radius,
+        };
+
         Ok(Self {
             layout,
             luma,
@@ -355,7 +370,13 @@ impl PlanarDenoiser {
             yuv,
             luma_passthrough: VecDeque::new(),
             chroma_passthrough: VecDeque::new(),
+            temporal_radius,
         })
+    }
+
+    /// The temporal radius the underlying denoisers run at.
+    pub fn temporal_radius(&self) -> u32 {
+        self.temporal_radius
     }
 
     /// Pushes one planar frame.
@@ -386,20 +407,44 @@ impl PlanarDenoiser {
     /// push succeeds then the chroma push succeeds too, which makes the
     /// duplicate unreachable.
     pub fn push(&mut self, planes: &Planes) -> Result<(), DenoiserError> {
+        self.push_with(planes, Denoiser::push_frame)
+    }
+
+    /// Uploads one planar frame into the temporal window without starting
+    /// a denoise.
+    ///
+    /// Mirrors [`Self::push`], down to queueing the disabled side's
+    /// passthrough plane, but no output is ever produced for this call.
+    /// This is how [`Self::reseed`] fills the window from an explicit
+    /// window of frames before the one real push that starts a denoise.
+    fn push_priming(&mut self, planes: &Planes) -> Result<(), DenoiserError> {
+        self.push_with(planes, Denoiser::push_frame_priming)
+    }
+
+    /// Shared body of [`Self::push`] and [`Self::push_priming`].
+    ///
+    /// `push_frame` is [`Denoiser::push_frame`] for a real push or
+    /// [`Denoiser::push_frame_priming`] for a priming one, run against
+    /// whichever of `yuv`, `luma`, and `chroma` is enabled.
+    fn push_with(
+        &mut self,
+        planes: &Planes,
+        push_frame: fn(&mut Denoiser, &[f32]) -> Result<(), DenoiserError>,
+    ) -> Result<(), DenoiserError> {
         if let Some(d) = self.yuv.as_mut() {
             let buf = interleave_yuv_to_f32(&planes.y, &planes.u, &planes.v, self.layout.depth);
-            d.push_frame(&buf)?;
+            push_frame(d, &buf)?;
             return Ok(());
         }
 
         if let Some(d) = self.luma.as_mut() {
             let buf = plane_to_f32(&planes.y, self.layout.depth);
-            d.push_frame(&buf)?;
+            push_frame(d, &buf)?;
         }
 
         if let Some(d) = self.chroma.as_mut() {
             let buf = interleave_uv_to_f32(&planes.u, &planes.v, self.layout.depth);
-            d.push_frame(&buf)?;
+            push_frame(d, &buf)?;
         }
 
         if self.luma.is_none() {
@@ -527,6 +572,56 @@ impl PlanarDenoiser {
         }
 
         Ok(())
+    }
+
+    /// Denoises the centre of an explicit window of `2r+1` frames.
+    ///
+    /// This abandons whatever stream was running and starts a new one
+    /// from the window, keeping every GPU allocation. When it returns,
+    /// the stream sits exactly where it would be had the window been
+    /// pushed frame by frame, so the caller can carry on with
+    /// [`Self::push`] and [`Self::recv`] for the frame after the centre.
+    ///
+    /// Callers clamp the window's indices at the clip's ends, matching
+    /// how the streaming path repeats the first and last frames.
+    pub fn reseed(&mut self, window: &[Planes]) -> Result<Planes, anyhow::Error> {
+        let expected = (self.temporal_radius * 2 + 1) as usize;
+        if window.len() != expected {
+            anyhow::bail!(
+                "reseed needs a window of {expected} frames, got {}",
+                window.len()
+            );
+        }
+
+        self.luma_passthrough.clear();
+        self.chroma_passthrough.clear();
+
+        for d in [self.yuv.as_mut(), self.luma.as_mut(), self.chroma.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            d.reset_stream();
+        }
+
+        let (head, tail) = window.split_at(expected - 1);
+        for planes in head {
+            self.push_priming(planes)?;
+        }
+        self.push(&tail[0])?;
+
+        // Priming queues one passthrough entry per frame in the window,
+        // just as a real push does, but a reseed emits only the centre
+        // frame's output. The window was pushed oldest first, so the
+        // centre frame's own entry sits `temporal_radius` slots in from
+        // the front. Drop the earlier entries so `recv` pops that one,
+        // leaving the later entries in place for the frames still to
+        // come once streaming resumes.
+        let radius = self.temporal_radius as usize;
+        drop_leading(&mut self.luma_passthrough, radius);
+        drop_leading(&mut self.chroma_passthrough, radius);
+
+        self.recv()?
+            .ok_or_else(|| anyhow::anyhow!("a full window produced no frame, this is a bug"))
     }
 
     fn assemble(
@@ -1410,3 +1505,6 @@ mod layout_tests {
         assert_eq!(layout(Depth::Ten).black_luma_plane(), vec![0u8; 32]);
     }
 }
+
+#[cfg(test)]
+mod tests;

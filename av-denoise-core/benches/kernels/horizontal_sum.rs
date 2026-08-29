@@ -1,4 +1,4 @@
-use av_denoise::nlmeans::kernels::nlm_horizontal_sum;
+use av_denoise_core::nlmeans::kernels::nlm_horizontal_sum;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;

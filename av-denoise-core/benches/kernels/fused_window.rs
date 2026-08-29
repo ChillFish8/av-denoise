@@ -1,4 +1,4 @@
-use av_denoise::nlmeans::kernels::{
+use av_denoise_core::nlmeans::kernels::{
     nlm_fused_pair_accumulate_window,
     nlm_fused_pair_accumulate_window_ref,
     nlm_fused_single_window,

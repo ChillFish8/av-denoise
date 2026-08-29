@@ -1,7 +1,7 @@
-use av_denoise::collab::geometry::{fused_cubes_x, ref_count, refs_along};
-use av_denoise::collab::kernels::aggregate::{cross_frame_accum_scale, weight_scale};
-use av_denoise::collab::kernels::fused::collab_fused;
-use av_denoise::collab::kernels::transforms::dct_noise_profile;
+use av_denoise_core::collab::geometry::{fused_cubes_x, ref_count, refs_along};
+use av_denoise_core::collab::kernels::aggregate::{cross_frame_accum_scale, weight_scale};
+use av_denoise_core::collab::kernels::fused::collab_fused;
+use av_denoise_core::collab::kernels::transforms::dct_noise_profile;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;

@@ -1848,7 +1848,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// A fresh stream's opening pushes overwrite every slot they touch
     /// before anything reads it, so content from the previous stream is
     /// never seen.
-    pub(crate) fn reset_stream_state(&mut self) {
+    pub fn reset_stream_state(&mut self) {
         self.ring_head = 0;
         self.frames_loaded = 0;
         self.next_output_slot = 0;

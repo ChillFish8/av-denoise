@@ -1,4 +1,4 @@
-use av_denoise::nlmeans::kernels::nlm_vertical_weight;
+use av_denoise_core::nlmeans::kernels::nlm_vertical_weight;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 

@@ -235,7 +235,7 @@ struct Cli {
     /// GPU device to bind to. Format: `default`, `discrete[:N]`,
     /// `integrated[:N]`, `virtual[:N]`, or `cpu`.
     #[arg(long, default_value = "default")]
-    device: av_denoise::Device,
+    device: av_denoise_core::Device,
 
     /// Swallowed: cargo passes this when invoking the bench binary.
     #[arg(long, hide = true)]

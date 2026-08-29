@@ -1,4 +1,4 @@
-use av_denoise::nlmeans::kernels::{nlm_noise_partial, nlm_noise_reduce};
+use av_denoise_core::nlmeans::kernels::{nlm_noise_partial, nlm_noise_reduce};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;

@@ -1,4 +1,4 @@
-use av_denoise::nlmeans::kernels::nlm_distance_pair;
+use av_denoise_core::nlmeans::kernels::nlm_distance_pair;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;

@@ -1,5 +1,5 @@
-use av_denoise::nlmeans::kernels::nlm_bilateral;
-use av_denoise::nlmeans::prefilter::bilateral_radius;
+use av_denoise_core::nlmeans::kernels::nlm_bilateral;
+use av_denoise_core::nlmeans::prefilter::bilateral_radius;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 

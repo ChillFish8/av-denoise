@@ -1,4 +1,4 @@
-use av_denoise::nlmeans::kernels::gpu_zero_buffers;
+use av_denoise_core::nlmeans::kernels::gpu_zero_buffers;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;

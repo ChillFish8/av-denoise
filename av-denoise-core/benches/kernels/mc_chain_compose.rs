@@ -1,4 +1,4 @@
-use av_denoise::nlmeans::kernels::motion::nlm_mc_chain_compose;
+use av_denoise_core::nlmeans::kernels::motion::nlm_mc_chain_compose;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;

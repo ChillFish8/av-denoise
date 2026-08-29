@@ -1,4 +1,4 @@
-use av_denoise::nlmeans::kernels::nlm_distance_ref;
+use av_denoise_core::nlmeans::kernels::nlm_distance_ref;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 

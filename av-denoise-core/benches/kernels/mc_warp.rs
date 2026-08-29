@@ -1,4 +1,4 @@
-use av_denoise::nlmeans::kernels::motion::nlm_mc_warp;
+use av_denoise_core::nlmeans::kernels::motion::nlm_mc_warp;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;

@@ -2,6 +2,8 @@ use cubecl::prelude::*;
 use cubecl::wgpu::WgpuRuntime;
 
 pub(super) use crate::nlmeans::align::StorageAlign;
+#[cfg(feature = "vulkan")]
+use crate::{ChannelMode, Denoiser, DenoiserOptions, DenoisingMode, accelerate::Accelerator, device::Device};
 
 pub(super) type R = WgpuRuntime;
 
@@ -250,6 +252,33 @@ pub(super) fn make_gradient_frame(w: u32, h: u32, lo: f32, hi: f32) -> Vec<f32> 
 /// `pixels * stored_ch` GPU storage layout used by `Vector`-typed
 /// kernel buffers (extra lanes zeroed). Mirrors the padding
 /// `NlmDenoiser::upload_into_slot` applies internally.
+/// Builds a top-level [`Denoiser`] at the given temporal radius over
+/// Luma, with every other option left at its default, on the Vulkan
+/// accelerator.
+#[cfg(feature = "vulkan")]
+pub(super) fn test_denoiser(radius: u32, w: u32, h: u32) -> Denoiser {
+    let opts = DenoiserOptions::builder()
+        .channel_mode(ChannelMode::Luma)
+        .mode(DenoisingMode::Temporal { radius })
+        .build();
+    Denoiser::create(&[Accelerator::Vulkan], &Device::Default, w, h, opts)
+        .expect("denoiser construction failed")
+}
+
+/// A deterministic frame whose pixels ramp from `0.2` to `0.8` across
+/// the row and shift a little with `i`, so a sequence built from
+/// increasing `i` gives every frame in the window distinct content.
+pub(super) fn ramp_frame(w: u32, h: u32, i: usize) -> Vec<f32> {
+    let mut frame = vec![0.0f32; (w * h) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let t = (x as f32 + y as f32 * w as f32) / (w * h) as f32;
+            frame[(y * w + x) as usize] = (0.2 + 0.6 * t + i as f32 * 0.01).clamp(0.0, 1.0);
+        }
+    }
+    frame
+}
+
 pub(super) fn pad_channels(dense: &[f32], pixels: usize, ch: u32, stored_ch: u32) -> Vec<f32> {
     if ch == stored_ch {
         return dense.to_vec();

@@ -65,3 +65,7 @@ harness = false
 [[bench]]
 name = "nl4d_ablation"
 harness = false
+
+[[bench]]
+name = "reseed"
+harness = false

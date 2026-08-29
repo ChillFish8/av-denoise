@@ -200,3 +200,35 @@ fn flush_step_machinery_drains_the_tail() {
         assert_eq!(view.neighbour_slots.len(), (2 * RADIUS) as usize);
     }
 }
+
+/// Priming a whole window with [`Denoiser::push_frame_priming`], then
+/// submitting only the last real push, must produce the same frame the
+/// streaming path emits for the window's centre. Filling the window this
+/// way is what a caller with random-order access to a fixed window, such
+/// as a VapourSynth plugin, needs to reseed on every frame request
+/// instead of pushing one frame at a time in order.
+#[cfg(feature = "vulkan")]
+#[test]
+fn priming_pushes_then_one_submit_matches_the_streaming_centre() {
+    let r = 2u32;
+    let window: Vec<Vec<f32>> = (0..(2 * r + 1) as usize).map(|i| ramp_frame(64, 64, i)).collect();
+
+    let mut windowed = test_denoiser(r, 64, 64);
+    for frame in &window[..(2 * r) as usize] {
+        windowed.push_frame_priming(frame).unwrap();
+    }
+    windowed.push_frame(&window[(2 * r) as usize]).unwrap();
+    let got = windowed.recv_frame().unwrap().expect("one frame");
+
+    let mut streamed = test_denoiser(r, 64, 64);
+    let mut emitted = Vec::new();
+    for frame in &window {
+        streamed.push_frame(frame).unwrap();
+        if let Some(out) = streamed.recv_frame().unwrap() {
+            emitted.push(out);
+        }
+    }
+
+    assert_eq!(emitted.len(), (r + 1) as usize);
+    assert_eq!(got, emitted[r as usize]);
+}

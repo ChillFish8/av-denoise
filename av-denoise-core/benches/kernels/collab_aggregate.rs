@@ -1,4 +1,4 @@
-use av_denoise::collab::kernels::aggregate::{collab_normalise, collab_zero_accum};
+use av_denoise_core::collab::kernels::aggregate::{collab_normalise, collab_zero_accum};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;

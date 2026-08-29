@@ -1,5 +1,5 @@
-use av_denoise::nlmeans::NlmParams;
-pub use av_denoise::nlmeans::{BLOCK_X, BLOCK_Y};
+use av_denoise_core::nlmeans::NlmParams;
+pub use av_denoise_core::nlmeans::{BLOCK_X, BLOCK_Y};
 use cubecl::benchmark::{Benchmark, BenchmarkComputations, TimingMethod};
 use cubecl::prelude::*;
 use cubecl::server::Handle;
