@@ -1,21 +1,14 @@
 use std::io::{Read, Write, stdout};
 
-use crate::ingest::{
-    CliOptions,
-    FrameLayout,
-    Planes,
-    WorkerDenoiser,
-    push_needs_retry,
-    subsampling_from_y4m,
-    subsampling_to_y4m,
-    y4m_vendor_extensions,
-};
+use av_denoise::{FrameLayout, PlanarDenoiser, PlaneOptions, Planes, push_needs_retry};
+
+use crate::y4m_format::{subsampling_from_y4m, subsampling_to_y4m, y4m_vendor_extensions};
 
 /// Denoises a y4m stream frame by frame, writing y4m on stdout.
 ///
 /// There is no scene detection here, so the temporal window slides
 /// across the whole stream.
-pub fn run_stream<R: Read>(opts: &CliOptions, reader: R) -> Result<(), anyhow::Error> {
+pub fn run_stream<R: Read>(opts: &PlaneOptions, reader: R) -> Result<(), anyhow::Error> {
     let mut decoder = y4m::Decoder::new(reader)?;
 
     let (subsampling, depth) = subsampling_from_y4m(decoder.get_colorspace())?;
@@ -42,7 +35,7 @@ pub fn run_stream<R: Read>(opts: &CliOptions, reader: R) -> Result<(), anyhow::E
     }
     let mut encoder = builder.write_header(stdout.lock())?;
 
-    let mut wd = WorkerDenoiser::create(opts, layout)?;
+    let mut wd = PlanarDenoiser::create(opts, layout)?;
 
     tracing::info!(
         accelerator = ?opts.accelerators,
@@ -97,10 +90,9 @@ fn write_planes<W: Write>(encoder: &mut y4m::Encoder<W>, planes: &Planes) -> Res
 
 #[cfg(test)]
 mod tests {
-    use av_denoise::Depth;
+    use av_denoise::{Depth, Subsampling};
 
     use super::*;
-    use crate::ingest::Subsampling;
 
     #[test]
     fn write_planes_emits_a_frame_into_any_writer() {

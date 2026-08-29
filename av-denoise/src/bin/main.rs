@@ -3,12 +3,11 @@ use tracing_subscriber::EnvFilter;
 
 mod cli;
 mod file_mode;
-mod ingest;
 mod progress;
 mod stream_mode;
+mod y4m_format;
 
-use cli::{Args, Command, InputSource, run_list_devices};
-use ingest::CliOptions;
+use cli::{Args, Command, InputSource, RunOptions, run_list_devices};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -20,7 +19,7 @@ const DEFAULT_WORKERS: usize = 2;
 ///
 /// A path is opened with ffms2 and split across scenes. Anything piped
 /// streams y4m frame by frame with no scene detection.
-fn run_input(opts: &CliOptions, input: &InputSource, workers: Option<usize>) -> Result<(), anyhow::Error> {
+fn run_input(opts: &RunOptions, input: &InputSource, workers: Option<usize>) -> Result<(), anyhow::Error> {
     match input {
         InputSource::File(path) => file_mode::run_file(opts, path, workers.unwrap_or(DEFAULT_WORKERS)),
         stream @ (InputSource::Stdin | InputSource::Fd(_)) => {
@@ -30,7 +29,7 @@ fn run_input(opts: &CliOptions, input: &InputSource, workers: Option<usize>) -> 
 
             tracing::info!(input = %stream, "reading a y4m stream");
 
-            stream_mode::run_stream(opts, stream.open_reader()?)
+            stream_mode::run_stream(&opts.planes, stream.open_reader()?)
         },
     }
 }

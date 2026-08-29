@@ -9,6 +9,7 @@ pub mod collab;
 mod denoiser;
 pub mod device;
 pub mod enumerate;
+pub mod frame;
 #[doc(hidden)]
 pub mod nl4d;
 #[doc(hidden)]
@@ -31,6 +32,15 @@ pub use denoiser::{
     nl4d_default_lambda_ht,
 };
 pub use device::Device;
+pub use frame::{
+    ChannelIntent,
+    FrameLayout,
+    PlanarDenoiser,
+    PlaneOptions,
+    Planes,
+    Subsampling,
+    push_needs_retry,
+};
 pub use nlmeans::{
     ChannelMode,
     DEFAULT_PILOT_STRENGTH_SCALE,

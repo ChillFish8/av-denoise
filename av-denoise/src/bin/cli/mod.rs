@@ -5,8 +5,8 @@ mod motion;
 mod nl4d;
 mod nlmeans;
 
-use av_denoise::Device;
 use av_denoise::accelerate::{Accelerator, get_default_accelerators};
+use av_denoise::{ChannelIntent, Device, PlaneOptions};
 use clap::{Parser, Subcommand};
 use strum_macros::EnumString;
 
@@ -16,7 +16,18 @@ pub use self::list_devices::run_list_devices;
 pub use self::motion::MotionArgs;
 pub use self::nl4d::Nl4dArgs;
 pub use self::nlmeans::NlmeansArgs;
-use crate::ingest::BinaryChannelIntent;
+
+/// The options `main` runs a denoising pass with.
+///
+/// `planes` is the library-side option set that drives `PlanarDenoiser`.
+/// `progress` is a CLI concern the library layer has no use for, so it
+/// stays here rather than on `PlaneOptions`.
+#[derive(Debug, Clone)]
+pub struct RunOptions {
+    pub planes: PlaneOptions,
+    /// Draws the denoising progress bar for file input.
+    pub progress: bool,
+}
 
 /// Speed vs quality dial.
 ///
@@ -51,7 +62,7 @@ pub enum CliChannelMode {
     Yuv,
 }
 
-pub fn resolve_channel_intent(modes: &[CliChannelMode]) -> Result<BinaryChannelIntent, anyhow::Error> {
+pub fn resolve_channel_intent(modes: &[CliChannelMode]) -> Result<ChannelIntent, anyhow::Error> {
     if modes.is_empty() {
         anyhow::bail!("--channel-mode must contain at least one value");
     }
@@ -72,10 +83,10 @@ pub fn resolve_channel_intent(modes: &[CliChannelMode]) -> Result<BinaryChannelI
     }
 
     Ok(match (has_yuv, has_luma, has_chroma) {
-        (true, _, _) => BinaryChannelIntent::YuvFused,
-        (false, true, true) => BinaryChannelIntent::LumaChroma,
-        (false, true, false) => BinaryChannelIntent::Luma,
-        (false, false, true) => BinaryChannelIntent::Chroma,
+        (true, _, _) => ChannelIntent::YuvFused,
+        (false, true, true) => ChannelIntent::LumaChroma,
+        (false, true, false) => ChannelIntent::Luma,
+        (false, false, true) => ChannelIntent::Chroma,
         (false, false, false) => unreachable!("empty list rejected above"),
     })
 }

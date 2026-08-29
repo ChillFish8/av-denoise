@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
-use av_denoise::accelerate::Accelerator;
-use av_denoise::{
+use crate::accelerate::Accelerator;
+use crate::{
     Algorithm,
     ChannelMode,
     Denoiser,
@@ -77,7 +77,7 @@ impl FrameLayout {
 }
 
 /// Builds a plane of `samples` copies of `value` in wire-byte form.
-pub(crate) fn fill_plane(samples: usize, value: u16, depth: Depth) -> Vec<u8> {
+pub fn fill_plane(samples: usize, value: u16, depth: Depth) -> Vec<u8> {
     match depth.bytes_per_sample() {
         1 => vec![value as u8; samples],
         _ => {
@@ -103,16 +103,16 @@ pub struct Planes {
     pub v: Vec<u8>,
 }
 
-/// Which planes the binary was asked to clean, once `--channel-mode` has
-/// been resolved.
+/// Which planes a caller wants cleaned, once `--channel-mode` (or the
+/// equivalent host option) has been resolved.
 ///
-/// This is separate from the library's [`ChannelMode`] because the binary
+/// This is separate from the library's [`ChannelMode`] because this layer
 /// may run more than one `Denoiser` in lockstep, one for luma and one for
 /// chroma. It may also run a single fused three-channel denoiser instead.
-/// Which of those applies depends on the user's `--channel-mode` and the
-/// source's chroma subsampling.
+/// Which of those applies depends on the caller's channel selection and
+/// the source's chroma subsampling.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum BinaryChannelIntent {
+pub enum ChannelIntent {
     /// Denoise luma only. Chroma passes through.
     Luma,
     /// Denoise chroma only. Luma passes through.
@@ -126,11 +126,11 @@ pub enum BinaryChannelIntent {
     YuvFused,
 }
 
-impl BinaryChannelIntent {
+impl ChannelIntent {
     /// Rejects the intent if the source's subsampling cannot support it.
     pub fn validate_for_source(self, layout: FrameLayout) -> Result<(), anyhow::Error> {
         match self {
-            BinaryChannelIntent::YuvFused if layout.subsampling != Subsampling::Yuv444 => {
+            ChannelIntent::YuvFused if layout.subsampling != Subsampling::Yuv444 => {
                 anyhow::bail!(
                     "--channel-mode yuv requires a YUV444 source, got {:?}. Convert the input first, for example with `ffmpeg -pix_fmt yuv444p`",
                     layout.subsampling
@@ -141,12 +141,13 @@ impl BinaryChannelIntent {
     }
 }
 
-/// CLI-shaped option set forwarded from `main` into ingest modules.
+/// The per-plane option set a caller resolves once and passes into
+/// [`PlanarDenoiser::create`].
 #[derive(Debug, Clone)]
-pub struct CliOptions {
+pub struct PlaneOptions {
     pub accelerators: Vec<Accelerator>,
     pub device: Device,
-    pub intent: BinaryChannelIntent,
+    pub intent: ChannelIntent,
     pub mode: DenoisingMode,
     /// Which denoising algorithm to run, along with the settings only
     /// that algorithm reads.
@@ -179,11 +180,9 @@ pub struct CliOptions {
     /// over `algorithm`'s value when set. Only has an effect when
     /// `algorithm` is `Algorithm::Nl4d`.
     pub chroma_mismatch_scale: Option<f32>,
-    /// Draws the denoising progress bar for file input.
-    pub progress: bool,
 }
 
-impl CliOptions {
+impl PlaneOptions {
     /// Resolves `self.algorithm` for one plane, folding in the per-plane
     /// overrides that apply to whichever algorithm `self.algorithm` is.
     ///
@@ -255,7 +254,7 @@ fn with_plane_strength(nlm: NlmeansOptions, strength: Option<f32>) -> NlmeansOpt
     }
 }
 
-/// Reads the result of a `WorkerDenoiser::push` call for the
+/// Reads the result of a `PlanarDenoiser::push` call for the
 /// push-then-drain-then-retry loop that `file_mode.rs` and
 /// `stream_mode.rs` both use.
 ///
@@ -276,7 +275,7 @@ pub fn push_needs_retry(result: Result<(), DenoiserError>) -> Result<bool, anyho
 ///
 /// The caller pushes planar frames in and gets planar frames out. The
 /// luma and chroma split is invisible from the outside.
-pub struct WorkerDenoiser {
+pub struct PlanarDenoiser {
     layout: FrameLayout,
     luma: Option<Denoiser>,
     chroma: Option<Denoiser>,
@@ -291,8 +290,8 @@ pub struct WorkerDenoiser {
     chroma_passthrough: VecDeque<(Vec<u8>, Vec<u8>)>,
 }
 
-impl WorkerDenoiser {
-    pub fn create(opts: &CliOptions, layout: FrameLayout) -> Result<Self, anyhow::Error> {
+impl PlanarDenoiser {
+    pub fn create(opts: &PlaneOptions, layout: FrameLayout) -> Result<Self, anyhow::Error> {
         let (chroma_w, chroma_h) = layout.chroma_dims();
 
         if chroma_w == 0 || chroma_h == 0 {
@@ -307,10 +306,10 @@ impl WorkerDenoiser {
         opts.intent.validate_for_source(layout)?;
 
         let (denoise_luma, denoise_chroma, denoise_yuv) = match opts.intent {
-            BinaryChannelIntent::Luma => (true, false, false),
-            BinaryChannelIntent::Chroma => (false, true, false),
-            BinaryChannelIntent::LumaChroma => (true, true, false),
-            BinaryChannelIntent::YuvFused => (false, false, true),
+            ChannelIntent::Luma => (true, false, false),
+            ChannelIntent::Chroma => (false, true, false),
+            ChannelIntent::LumaChroma => (true, true, false),
+            ChannelIntent::YuvFused => (false, false, true),
         };
 
         let luma = denoise_luma
@@ -610,7 +609,7 @@ fn quantise(v: f32, max: f32) -> u16 {
 }
 
 /// Converts one wire-byte plane to normalised f32.
-fn plane_to_f32(plane: &[u8], depth: Depth) -> Vec<f32> {
+pub fn plane_to_f32(plane: &[u8], depth: Depth) -> Vec<f32> {
     let max = depth.max_value();
 
     fn run<C: SampleCodec>(plane: &[u8], max: f32) -> Vec<f32> {
@@ -625,7 +624,7 @@ fn plane_to_f32(plane: &[u8], depth: Depth) -> Vec<f32> {
 }
 
 /// Reverse of [`plane_to_f32`].
-fn f32_to_plane(plane: &[f32], depth: Depth) -> Vec<u8> {
+pub fn f32_to_plane(plane: &[f32], depth: Depth) -> Vec<u8> {
     let max = depth.max_value();
 
     fn run<C: SampleCodec>(plane: &[f32], max: f32) -> Vec<u8> {
@@ -646,7 +645,7 @@ fn f32_to_plane(plane: &[f32], depth: Depth) -> Vec<u8> {
 /// `[Y0, U0, V0, Y1, U1, V1, ...]` as f32 in `[0, 1]`.
 ///
 /// This is the layout the library's fused three-channel kernel expects.
-fn interleave_yuv_to_f32(y: &[u8], u: &[u8], v: &[u8], depth: Depth) -> Vec<f32> {
+pub fn interleave_yuv_to_f32(y: &[u8], u: &[u8], v: &[u8], depth: Depth) -> Vec<f32> {
     debug_assert_eq!(y.len(), u.len());
     debug_assert_eq!(u.len(), v.len());
 
@@ -672,7 +671,7 @@ fn interleave_yuv_to_f32(y: &[u8], u: &[u8], v: &[u8], depth: Depth) -> Vec<f32>
 }
 
 /// Reverse of [`interleave_yuv_to_f32`].
-fn unpack_yuv_from_f32(packed: &[f32], pixels: usize, depth: Depth) -> Planes {
+pub fn unpack_yuv_from_f32(packed: &[f32], pixels: usize, depth: Depth) -> Planes {
     debug_assert_eq!(packed.len(), 3 * pixels);
 
     let max = depth.max_value();
@@ -699,7 +698,7 @@ fn unpack_yuv_from_f32(packed: &[f32], pixels: usize, depth: Depth) -> Planes {
 
 /// Interleaves separate U and V planes into `[U, V, U, V, ...]` as f32
 /// in `[0, 1]`.
-fn interleave_uv_to_f32(u: &[u8], v: &[u8], depth: Depth) -> Vec<f32> {
+pub fn interleave_uv_to_f32(u: &[u8], v: &[u8], depth: Depth) -> Vec<f32> {
     debug_assert_eq!(u.len(), v.len());
 
     let max = depth.max_value();
@@ -723,7 +722,7 @@ fn interleave_uv_to_f32(u: &[u8], v: &[u8], depth: Depth) -> Vec<f32> {
 }
 
 /// Reverse of [`interleave_uv_to_f32`].
-fn unpack_uv_from_f32(packed: &[f32], chroma_pixels: usize, depth: Depth) -> (Vec<u8>, Vec<u8>) {
+pub fn unpack_uv_from_f32(packed: &[f32], chroma_pixels: usize, depth: Depth) -> (Vec<u8>, Vec<u8>) {
     debug_assert_eq!(packed.len(), 2 * chroma_pixels);
 
     let max = depth.max_value();
@@ -889,11 +888,10 @@ mod converter_tests {
 
 #[cfg(test)]
 mod cli_options_tests {
-    use av_denoise::nlmeans::NlmParams;
-
     use super::*;
+    use crate::nlmeans::NlmParams;
 
-    /// A `CliOptions` with every field at a neutral default, so each test
+    /// A `PlaneOptions` with every field at a neutral default, so each test
     /// only overrides what it cares about.
     ///
     /// `mode` and `algorithm` are the two fields every test below sets
@@ -903,11 +901,11 @@ mod cli_options_tests {
         algorithm: Algorithm,
         luma_strength: Option<f32>,
         chroma_strength: Option<f32>,
-    ) -> CliOptions {
-        CliOptions {
+    ) -> PlaneOptions {
+        PlaneOptions {
             accelerators: vec![],
             device: Device::Default,
-            intent: BinaryChannelIntent::LumaChroma,
+            intent: ChannelIntent::LumaChroma,
             mode,
             algorithm,
             luma_strength,
@@ -916,7 +914,6 @@ mod cli_options_tests {
             chroma_lambda_ht: None,
             luma_mismatch_scale: None,
             chroma_mismatch_scale: None,
-            progress: false,
         }
     }
 
@@ -983,14 +980,14 @@ mod cli_options_tests {
         );
     }
 
-    /// A `CliOptions` running `Algorithm::Nl4d`, with every field at a
+    /// A `PlaneOptions` running `Algorithm::Nl4d`, with every field at a
     /// neutral default except the two per-plane `lambda_ht` overrides
     /// under test.
-    fn nl4d_opts(luma_lambda_ht: Option<f32>, chroma_lambda_ht: Option<f32>) -> CliOptions {
-        CliOptions {
+    fn nl4d_opts(luma_lambda_ht: Option<f32>, chroma_lambda_ht: Option<f32>) -> PlaneOptions {
+        PlaneOptions {
             accelerators: vec![],
             device: Device::Default,
-            intent: BinaryChannelIntent::LumaChroma,
+            intent: ChannelIntent::LumaChroma,
             mode: DenoisingMode::Temporal { radius: 2 },
             algorithm: Algorithm::Nl4d(Nl4dOptions::default()),
             luma_strength: None,
@@ -999,7 +996,6 @@ mod cli_options_tests {
             chroma_lambda_ht,
             luma_mismatch_scale: None,
             chroma_mismatch_scale: None,
-            progress: false,
         }
     }
 
@@ -1021,14 +1017,14 @@ mod cli_options_tests {
         }
     }
 
-    /// A `CliOptions` running `Algorithm::Nl4d` with a shared
+    /// A `PlaneOptions` running `Algorithm::Nl4d` with a shared
     /// `mismatch_scale` and the two per-plane overrides under test.
     fn nl4d_mismatch_opts(
         shared: f32,
         luma_mismatch_scale: Option<f32>,
         chroma_mismatch_scale: Option<f32>,
-    ) -> CliOptions {
-        CliOptions {
+    ) -> PlaneOptions {
+        PlaneOptions {
             algorithm: Algorithm::Nl4d(Nl4dOptions {
                 mismatch_scale: shared,
                 ..Nl4dOptions::default()
@@ -1148,35 +1144,34 @@ mod cli_options_tests {
         // luma and chroma different values, which is the whole point of
         // a caller passing no flags at all getting both calibrated
         // defaults.
-        let luma_default = av_denoise::nl4d_default_lambda_ht(ChannelMode::Luma);
-        let chroma_default = av_denoise::nl4d_default_lambda_ht(ChannelMode::Chroma);
+        let luma_default = crate::nl4d_default_lambda_ht(ChannelMode::Luma);
+        let chroma_default = crate::nl4d_default_lambda_ht(ChannelMode::Chroma);
         assert!((luma_default - 5.3).abs() < f32::EPSILON);
         assert!((chroma_default - 4.2).abs() < f32::EPSILON);
         assert!((chroma_default - luma_default).abs() > f32::EPSILON);
     }
 }
 
-// Feature-gated because every test here builds its `CliOptions` from
+// Feature-gated because every test here builds its `PlaneOptions` from
 // `chroma_only_opts`, which names the `Vulkan` accelerator variant. That
 // variant only exists when the `vulkan` feature is enabled.
 #[cfg(feature = "vulkan")]
 #[cfg(test)]
 mod passthrough_retry_tests {
-    use av_denoise::accelerate::Accelerator;
-    use av_denoise::{Algorithm, DenoisingMode};
-
     use super::*;
+    use crate::accelerate::Accelerator;
+    use crate::{Algorithm, DenoisingMode};
 
     /// Chroma-only intent, so `luma` is the disabled passthrough half and
     /// `chroma` is the one that can report `QueueFull`.
     ///
     /// That is what drives the retry loop in `push_with_drain` and in
     /// `stream_mode.rs`.
-    fn chroma_only_opts() -> CliOptions {
-        CliOptions {
+    fn chroma_only_opts() -> PlaneOptions {
+        PlaneOptions {
             accelerators: vec![Accelerator::Vulkan],
             device: Device::Default,
-            intent: BinaryChannelIntent::Chroma,
+            intent: ChannelIntent::Chroma,
             mode: DenoisingMode::Spacial,
             algorithm: Algorithm::default(),
             luma_strength: None,
@@ -1185,7 +1180,6 @@ mod passthrough_retry_tests {
             chroma_lambda_ht: None,
             luma_mismatch_scale: None,
             chroma_mismatch_scale: None,
-            progress: false,
         }
     }
 
@@ -1206,7 +1200,7 @@ mod passthrough_retry_tests {
             depth: Depth::Eight,
         };
         let mut wd =
-            WorkerDenoiser::create(&chroma_only_opts(), layout).expect("denoiser construction failed");
+            PlanarDenoiser::create(&chroma_only_opts(), layout).expect("denoiser construction failed");
         let planes = fake_planes(layout);
 
         // Spatial mode runs a depth-2 pipeline, so the first two pushes
@@ -1241,16 +1235,15 @@ mod passthrough_retry_tests {
     }
 }
 
-// Feature-gated because every test here builds its `CliOptions` from
+// Feature-gated because every test here builds its `PlaneOptions` from
 // `luma_chroma_opts`, which names the `Vulkan` accelerator variant. That
 // variant only exists when the `vulkan` feature is enabled.
 #[cfg(feature = "vulkan")]
 #[cfg(test)]
 mod lumachroma_lockstep_tests {
-    use av_denoise::accelerate::Accelerator;
-    use av_denoise::{Algorithm, DenoisingMode};
-
     use super::*;
+    use crate::accelerate::Accelerator;
+    use crate::{Algorithm, DenoisingMode};
 
     /// Runs `luma` and `chroma` as two real `Denoiser`s in spatial mode.
     ///
@@ -1258,11 +1251,11 @@ mod lumachroma_lockstep_tests {
     /// the `uniform_*_passthrough` tests in `src/nlmeans/tests` show. The
     /// test can therefore give each plane its own marker value and spot
     /// the two halves drifting apart.
-    fn luma_chroma_opts() -> CliOptions {
-        CliOptions {
+    fn luma_chroma_opts() -> PlaneOptions {
+        PlaneOptions {
             accelerators: vec![Accelerator::Vulkan],
             device: Device::Default,
-            intent: BinaryChannelIntent::LumaChroma,
+            intent: ChannelIntent::LumaChroma,
             mode: DenoisingMode::Spacial,
             algorithm: Algorithm::default(),
             luma_strength: None,
@@ -1271,7 +1264,6 @@ mod lumachroma_lockstep_tests {
             chroma_lambda_ht: None,
             luma_mismatch_scale: None,
             chroma_mismatch_scale: None,
-            progress: false,
         }
     }
 
@@ -1301,7 +1293,7 @@ mod lumachroma_lockstep_tests {
             depth: Depth::Eight,
         };
         let mut wd =
-            WorkerDenoiser::create(&luma_chroma_opts(), layout).expect("denoiser construction failed");
+            PlanarDenoiser::create(&luma_chroma_opts(), layout).expect("denoiser construction failed");
 
         // More pushes than the depth-2 pipeline holds, so this drives
         // several `QueueFull`-then-retry cycles.
@@ -1416,128 +1408,5 @@ mod layout_tests {
     fn black_luma_fill_is_zero_at_the_right_length() {
         assert_eq!(layout(Depth::Eight).black_luma_plane(), vec![0u8; 16]);
         assert_eq!(layout(Depth::Ten).black_luma_plane(), vec![0u8; 32]);
-    }
-}
-
-/// Maps our [`Subsampling`] and [`Depth`] onto the [`y4m::Colorspace`]
-/// used to read the input and write the output header.
-pub fn subsampling_to_y4m(s: Subsampling, depth: Depth) -> y4m::Colorspace {
-    match (s, depth) {
-        (Subsampling::Yuv420, Depth::Eight) => y4m::Colorspace::C420,
-        (Subsampling::Yuv420, Depth::Ten) => y4m::Colorspace::C420p10,
-        (Subsampling::Yuv420, Depth::Twelve) => y4m::Colorspace::C420p12,
-        (Subsampling::Yuv422, Depth::Eight) => y4m::Colorspace::C422,
-        (Subsampling::Yuv422, Depth::Ten) => y4m::Colorspace::C422p10,
-        (Subsampling::Yuv422, Depth::Twelve) => y4m::Colorspace::C422p12,
-        (Subsampling::Yuv444, Depth::Eight) => y4m::Colorspace::C444,
-        (Subsampling::Yuv444, Depth::Ten) => y4m::Colorspace::C444p10,
-        (Subsampling::Yuv444, Depth::Twelve) => y4m::Colorspace::C444p12,
-    }
-}
-
-/// Maps a [`y4m::Colorspace`] back onto our [`Subsampling`] and
-/// [`Depth`].
-///
-/// Grayscale and any other unsupported colorspace are rejected with an
-/// error naming what is required instead.
-pub fn subsampling_from_y4m(c: y4m::Colorspace) -> Result<(Subsampling, Depth), anyhow::Error> {
-    let sub = match c {
-        y4m::Colorspace::C420
-        | y4m::Colorspace::C420jpeg
-        | y4m::Colorspace::C420paldv
-        | y4m::Colorspace::C420mpeg2
-        | y4m::Colorspace::C420p10
-        | y4m::Colorspace::C420p12 => Subsampling::Yuv420,
-        y4m::Colorspace::C422 | y4m::Colorspace::C422p10 | y4m::Colorspace::C422p12 => Subsampling::Yuv422,
-        y4m::Colorspace::C444 | y4m::Colorspace::C444p10 | y4m::Colorspace::C444p12 => Subsampling::Yuv444,
-        other => anyhow::bail!("unsupported y4m colorspace {other:?}, need 4:2:0, 4:2:2, or 4:4:4"),
-    };
-
-    let depth = Depth::from_bits(c.get_bit_depth())?;
-
-    Ok((sub, depth))
-}
-
-/// Pulls the `X`-prefixed vendor extension params out of a decoded y4m
-/// header's raw params bytes, `XCOLORRANGE=LIMITED` being the common one.
-///
-/// The leading `X` is stripped so the result can go straight to
-/// [`y4m::EncoderBuilder::append_vendor_extension`], which adds the `X`
-/// back when it writes the output header.
-///
-/// This is how whatever colorspace and range tags the source declared
-/// reach the output instead of being dropped.
-///
-/// A token that [`y4m::VendorExtensionString`] rejects, which means one
-/// containing a space, is skipped rather than failing the run.
-pub fn y4m_vendor_extensions(raw_params: &[u8]) -> Vec<y4m::VendorExtensionString> {
-    raw_params
-        .split(|&b| b == b' ')
-        .filter(|tok| tok.first() == Some(&b'X'))
-        .filter_map(|tok| y4m::VendorExtensionString::new(tok[1..].to_vec()).ok())
-        .collect()
-}
-
-#[cfg(test)]
-mod colorspace_tests {
-    use super::*;
-
-    #[test]
-    fn colorspace_round_trips_every_supported_combination() {
-        let combos = [
-            (Subsampling::Yuv420, Depth::Eight),
-            (Subsampling::Yuv420, Depth::Ten),
-            (Subsampling::Yuv420, Depth::Twelve),
-            (Subsampling::Yuv422, Depth::Eight),
-            (Subsampling::Yuv422, Depth::Ten),
-            (Subsampling::Yuv422, Depth::Twelve),
-            (Subsampling::Yuv444, Depth::Eight),
-            (Subsampling::Yuv444, Depth::Ten),
-            (Subsampling::Yuv444, Depth::Twelve),
-        ];
-
-        for (sub, depth) in combos {
-            let cs = subsampling_to_y4m(sub, depth);
-            let (rsub, rdepth) = subsampling_from_y4m(cs).expect("should map back");
-
-            assert_eq!(rsub, sub, "subsampling lost for {cs:?}");
-            assert_eq!(rdepth, depth, "depth lost for {cs:?}");
-        }
-    }
-
-    #[test]
-    fn ten_bit_420_maps_to_c420p10() {
-        // `y4m::Colorspace` derives only `Debug, Clone, Copy`, not
-        // `PartialEq`, so `assert_eq!` won't compile here.
-        assert!(matches!(
-            subsampling_to_y4m(Subsampling::Yuv420, Depth::Ten),
-            y4m::Colorspace::C420p10
-        ));
-    }
-
-    #[test]
-    fn eight_bit_420_variants_all_map_to_yuv420_eight() {
-        for cs in [
-            y4m::Colorspace::C420,
-            y4m::Colorspace::C420jpeg,
-            y4m::Colorspace::C420paldv,
-            y4m::Colorspace::C420mpeg2,
-        ] {
-            let (sub, depth) = subsampling_from_y4m(cs).expect("should map");
-            assert_eq!(sub, Subsampling::Yuv420);
-            assert_eq!(depth, Depth::Eight);
-        }
-    }
-
-    #[test]
-    fn grayscale_colorspaces_are_rejected_with_a_clear_message() {
-        for cs in [y4m::Colorspace::Cmono, y4m::Colorspace::Cmono12] {
-            let err = subsampling_from_y4m(cs).expect_err("grayscale should be rejected");
-            let msg = err.to_string();
-            assert!(
-                msg.contains(&format!("{cs:?}")),
-                "error should name the offending colorspace, got {msg}"
-            );
-        }
     }
 }

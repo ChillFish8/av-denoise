@@ -6,21 +6,14 @@ use std::thread;
 use std::time::Duration;
 
 use av_decoders::{Decoder, Rational32};
-use av_denoise::Depth;
+use av_denoise::{Depth, FrameLayout, PlanarDenoiser, PlaneOptions, Planes, Subsampling, push_needs_retry};
 use av_scenechange::{DetectionOptions, detect_scene_changes};
 use indicatif::ProgressBar;
 use y4m::Frame as Y4mFrame;
 
-use crate::ingest::{
-    CliOptions,
-    FrameLayout,
-    Planes,
-    Subsampling,
-    WorkerDenoiser,
-    push_needs_retry,
-    subsampling_to_y4m,
-};
+use crate::cli::RunOptions;
 use crate::progress::{self, denoise_bar_visible, denoise_progress_bar, scene_progress_bar};
+use crate::y4m_format::subsampling_to_y4m;
 
 /// Target ceiling for CPU-side frame buffers held in flight. Channel
 /// depths shrink to stay under this when frames are large.
@@ -106,7 +99,7 @@ impl SceneLayout {
     }
 }
 
-pub fn run_file(opts: &CliOptions, input: &Path, workers: usize) -> Result<(), anyhow::Error> {
+pub fn run_file(opts: &RunOptions, input: &Path, workers: usize) -> Result<(), anyhow::Error> {
     if workers == 0 {
         anyhow::bail!("--workers must be at least 1");
     }
@@ -126,7 +119,7 @@ pub fn run_file(opts: &CliOptions, input: &Path, workers: usize) -> Result<(), a
     );
 
     encode_scenes(
-        opts,
+        &opts.planes,
         input,
         &scenes,
         workers,
@@ -200,7 +193,7 @@ fn detect_scenes(input: &Path, visible: bool) -> Result<SceneLayout, anyhow::Err
 ///
 /// Blocks until every worker and the coordinator have finished.
 fn encode_scenes(
-    opts: &CliOptions,
+    opts: &PlaneOptions,
     input: &Path,
     scenes: &SceneLayout,
     workers: usize,
@@ -255,7 +248,7 @@ type WorkerJoin = thread::JoinHandle<Result<(), anyhow::Error>>;
 /// Returns their input channels, their join handles, and the shared
 /// output channel they emit denoised frames on.
 fn spawn_workers(
-    opts: &CliOptions,
+    opts: &PlaneOptions,
     layout: FrameLayout,
     workers: usize,
     budget: ChannelBudget,
@@ -354,13 +347,13 @@ struct OutputMsg {
 
 fn run_worker(
     worker_id: usize,
-    opts: CliOptions,
+    opts: PlaneOptions,
     layout: FrameLayout,
     rx: Receiver<WorkerMsg>,
     tx: SyncSender<OutputMsg>,
 ) -> Result<(), anyhow::Error> {
     let mut current_scene: Option<u32> = None;
-    let mut wd: Option<WorkerDenoiser> = None;
+    let mut wd: Option<PlanarDenoiser> = None;
 
     // Indices of pushed-but-not-yet-emitted frames, in push order.
     let mut pending: std::collections::VecDeque<u64> = Default::default();
@@ -373,12 +366,12 @@ fn run_worker(
                 planes,
             }) => {
                 if current_scene != Some(scene_idx) {
-                    // Reuse the existing WorkerDenoiser across scenes, flushing the worker
+                    // Reuse the existing PlanarDenoiser across scenes, flushing the worker
                     // will ensure there is no cross-scene blending during temporal workloads.
                     if let Some(prev) = wd.as_mut() {
                         flush_worker(prev, &mut pending, &tx)?;
                     } else {
-                        wd = Some(WorkerDenoiser::create(&opts, layout)?);
+                        wd = Some(PlanarDenoiser::create(&opts, layout)?);
                     }
 
                     current_scene = Some(scene_idx);
@@ -413,7 +406,7 @@ fn run_worker(
 
 /// Push one frame, draining any pending output first if the queue is full.
 fn push_with_drain(
-    denoiser: &mut WorkerDenoiser,
+    denoiser: &mut PlanarDenoiser,
     pending: &mut std::collections::VecDeque<u64>,
     global_idx: u64,
     planes: &Planes,
@@ -441,7 +434,7 @@ fn send_output(tx: &SyncSender<OutputMsg>, global_idx: u64, planes: Planes) -> R
 }
 
 fn flush_worker(
-    wd: &mut WorkerDenoiser,
+    wd: &mut PlanarDenoiser,
     pending: &mut std::collections::VecDeque<u64>,
     tx: &SyncSender<OutputMsg>,
 ) -> Result<(), anyhow::Error> {
@@ -655,19 +648,17 @@ fn subsampling_from_av_decoders(
 mod tests {
     // `temporal_opts` and the one test that uses it are the only things
     // naming `Accelerator::Vulkan`, `Algorithm`, `DenoisingMode`,
-    // `Device`, `MotionCompensationMode`, and `BinaryChannelIntent`.
+    // `Device`, `MotionCompensationMode`, and `ChannelIntent`.
     // Their imports are gated the same way to keep cpu-only builds free
     // of unused-import warnings.
     #[cfg(feature = "vulkan")]
     use av_denoise::accelerate::Accelerator;
+    use av_denoise::frame::fill_plane;
     #[cfg(feature = "vulkan")]
-    use av_denoise::{Algorithm, DenoisingMode, Device};
+    use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Device};
     use indicatif::ProgressBar;
 
     use super::*;
-    #[cfg(feature = "vulkan")]
-    use crate::ingest::BinaryChannelIntent;
-    use crate::ingest::fill_plane;
 
     fn tiny_layout() -> FrameLayout {
         // 4:2:0 chroma at this size is 4x4, clearing the denoiser's 3x3
@@ -732,11 +723,11 @@ mod tests {
     /// Gated because it names the `Vulkan` accelerator variant, which only
     /// exists when the `vulkan` feature is enabled.
     #[cfg(feature = "vulkan")]
-    fn temporal_opts() -> CliOptions {
-        CliOptions {
+    fn temporal_opts() -> PlaneOptions {
+        PlaneOptions {
             accelerators: vec![Accelerator::Vulkan],
             device: Device::Default,
-            intent: BinaryChannelIntent::LumaChroma,
+            intent: ChannelIntent::LumaChroma,
             mode: DenoisingMode::Temporal { radius: 1 },
             algorithm: Algorithm::default(),
             luma_strength: None,
@@ -745,7 +736,6 @@ mod tests {
             chroma_lambda_ht: None,
             luma_mismatch_scale: None,
             chroma_mismatch_scale: None,
-            progress: false,
         }
     }
 
@@ -789,7 +779,7 @@ mod tests {
     #[test]
     fn flush_worker_errors_when_coordinator_has_disconnected() {
         let layout = tiny_layout();
-        let mut wd = WorkerDenoiser::create(&temporal_opts(), layout).expect("denoiser construction failed");
+        let mut wd = PlanarDenoiser::create(&temporal_opts(), layout).expect("denoiser construction failed");
         let planes = tiny_planes(layout);
 
         // One push into a temporal window leaves a trailing tail that

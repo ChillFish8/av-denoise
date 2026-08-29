@@ -1,7 +1,6 @@
-use av_denoise::{Algorithm, DenoisingMode, Nl4dOptions};
+use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Nl4dOptions, PlaneOptions};
 
-use super::{Args, CommonArgs, MotionArgs, Preset, resolve_channel_intent};
-use crate::ingest::{BinaryChannelIntent, CliOptions};
+use super::{Args, CommonArgs, MotionArgs, Preset, RunOptions, resolve_channel_intent};
 
 /// Flags for `nl4d`, which groups 8x8 patches across the temporal window
 /// itself, rather than filtering with `nlmeans` first and grouping
@@ -208,7 +207,7 @@ impl Nl4dArgs {
 
     /// Turns the parsed flags plus the shared globals into the options
     /// the ingest pipeline takes.
-    pub fn build_options(&self, globals: &Args) -> Result<CliOptions, anyhow::Error> {
+    pub fn build_options(&self, globals: &Args) -> Result<RunOptions, anyhow::Error> {
         let defaults = Nl4dOptions::default();
         let intent = resolve_channel_intent(&globals.channel_mode)?;
 
@@ -228,59 +227,59 @@ impl Nl4dArgs {
 
         self.warn_on_dead_per_plane_flags(intent);
 
-        Ok(CliOptions {
-            accelerators: globals.accelerators.clone(),
-            device: globals.device.clone(),
-            intent,
-            mode: DenoisingMode::Temporal {
-                radius: self.temporal_radius(globals.preset)?,
+        Ok(RunOptions {
+            planes: PlaneOptions {
+                accelerators: globals.accelerators.clone(),
+                device: globals.device.clone(),
+                intent,
+                mode: DenoisingMode::Temporal {
+                    radius: self.temporal_radius(globals.preset)?,
+                },
+                algorithm: Algorithm::Nl4d(Nl4dOptions {
+                    motion: self.motion.to_motion_search(),
+                    sigma: self.sigma.map(|s| s / 255.0),
+                    sigma_scale: self.sigma_scale.unwrap_or(defaults.sigma_scale),
+                    thsad_scale: self.thsad_scale.unwrap_or(defaults.thsad_scale),
+                    refine: self.refine.unwrap_or(defaults.refine),
+                    spatial_radius: self
+                        .spatial_radius
+                        .unwrap_or_else(|| spatial_radius_for(globals.preset)),
+                    // Left unresolved when unset, rather than picked from
+                    // `defaults` here, because the default depends on which
+                    // plane is being denoised and that is not known yet.
+                    // `PlaneOptions::algorithm_for` (av-denoise-core/src/frame/mod.rs)
+                    // applies `--luma-`/`--chroma-lambda-ht` on top of this
+                    // once the plane is known, and construction fills in the
+                    // per-plane default for whatever is still unset.
+                    lambda_ht: self.lambda_ht,
+                    lambda_ht_scale: self.lambda_ht_scale.unwrap_or(defaults.lambda_ht_scale),
+                    c_min: self.c_min.unwrap_or(defaults.c_min),
+                    mismatch_scale: self.mismatch_scale.unwrap_or(defaults.mismatch_scale),
+                    confidence_variance: !self.no_confidence_variance,
+                }),
+                // nl4d has no NLM weighting pass for a strength to apply to.
+                luma_strength: None,
+                chroma_strength: None,
+                luma_lambda_ht: self.luma_lambda_ht,
+                chroma_lambda_ht: self.chroma_lambda_ht,
+                luma_mismatch_scale: self.luma_mismatch_scale,
+                chroma_mismatch_scale: self.chroma_mismatch_scale,
             },
-            algorithm: Algorithm::Nl4d(Nl4dOptions {
-                motion: self.motion.to_motion_search(),
-                sigma: self.sigma.map(|s| s / 255.0),
-                sigma_scale: self.sigma_scale.unwrap_or(defaults.sigma_scale),
-                thsad_scale: self.thsad_scale.unwrap_or(defaults.thsad_scale),
-                refine: self.refine.unwrap_or(defaults.refine),
-                spatial_radius: self
-                    .spatial_radius
-                    .unwrap_or_else(|| spatial_radius_for(globals.preset)),
-                // Left unresolved when unset, rather than picked from
-                // `defaults` here, because the default depends on which
-                // plane is being denoised and that is not known yet.
-                // `CliOptions::algorithm_for` (src/bin/ingest.rs) applies
-                // `--luma-`/`--chroma-lambda-ht` on top of this once the
-                // plane is known, and construction fills in the per-plane
-                // default for whatever is still unset.
-                lambda_ht: self.lambda_ht,
-                lambda_ht_scale: self.lambda_ht_scale.unwrap_or(defaults.lambda_ht_scale),
-                c_min: self.c_min.unwrap_or(defaults.c_min),
-                mismatch_scale: self.mismatch_scale.unwrap_or(defaults.mismatch_scale),
-                confidence_variance: !self.no_confidence_variance,
-            }),
-            // nl4d has no NLM weighting pass for a strength to apply to.
-            luma_strength: None,
-            chroma_strength: None,
-            luma_lambda_ht: self.luma_lambda_ht,
-            chroma_lambda_ht: self.chroma_lambda_ht,
-            luma_mismatch_scale: self.luma_mismatch_scale,
-            chroma_mismatch_scale: self.chroma_mismatch_scale,
             progress: globals.progress,
         })
     }
 
     /// Warns when a per-plane override was set but the resolved
     /// `--channel-mode` means it has no effect.
-    fn warn_on_dead_per_plane_flags(&self, intent: BinaryChannelIntent) {
+    fn warn_on_dead_per_plane_flags(&self, intent: ChannelIntent) {
         match intent {
-            BinaryChannelIntent::Luma if self.chroma_lambda_ht.is_some() => {
+            ChannelIntent::Luma if self.chroma_lambda_ht.is_some() => {
                 tracing::warn!("--chroma-lambda-ht is ignored when chroma is not being denoised");
             },
-            BinaryChannelIntent::Chroma if self.luma_lambda_ht.is_some() => {
+            ChannelIntent::Chroma if self.luma_lambda_ht.is_some() => {
                 tracing::warn!("--luma-lambda-ht is ignored when luma is not being denoised");
             },
-            BinaryChannelIntent::YuvFused
-                if self.luma_lambda_ht.is_some() || self.chroma_lambda_ht.is_some() =>
-            {
+            ChannelIntent::YuvFused if self.luma_lambda_ht.is_some() || self.chroma_lambda_ht.is_some() => {
                 tracing::warn!(
                     "--luma-lambda-ht and --chroma-lambda-ht are ignored when --channel-mode yuv is used"
                 );
@@ -289,13 +288,13 @@ impl Nl4dArgs {
         }
 
         match intent {
-            BinaryChannelIntent::Luma if self.chroma_mismatch_scale.is_some() => {
+            ChannelIntent::Luma if self.chroma_mismatch_scale.is_some() => {
                 tracing::warn!("--chroma-mismatch-scale is ignored when chroma is not being denoised");
             },
-            BinaryChannelIntent::Chroma if self.luma_mismatch_scale.is_some() => {
+            ChannelIntent::Chroma if self.luma_mismatch_scale.is_some() => {
                 tracing::warn!("--luma-mismatch-scale is ignored when luma is not being denoised");
             },
-            BinaryChannelIntent::YuvFused
+            ChannelIntent::YuvFused
                 if self.luma_mismatch_scale.is_some() || self.chroma_mismatch_scale.is_some() =>
             {
                 tracing::warn!(
@@ -371,10 +370,10 @@ mod tests {
         Args::try_parse_from(argv).expect_err("expected clap to reject this argv")
     }
 
-    /// Unwraps a `CliOptions`'s `Algorithm::Nl4d`, panicking with the
+    /// Unwraps a `RunOptions`'s `Algorithm::Nl4d`, panicking with the
     /// whole value on any other variant.
-    fn expect_nl4d(opts: &CliOptions) -> Nl4dOptions {
-        match opts.algorithm {
+    fn expect_nl4d(opts: &RunOptions) -> Nl4dOptions {
+        match opts.planes.algorithm {
             Algorithm::Nl4d(nl4d) => nl4d,
             ref other => panic!("expected Algorithm::Nl4d, got {other:?}"),
         }
@@ -545,7 +544,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("preset {preset} should resolve: {e}"));
 
             assert_eq!(
-                opts.mode,
+                opts.planes.mode,
                 DenoisingMode::Temporal { radius },
                 "preset {preset} resolved to the wrong temporal radius"
             );
@@ -588,7 +587,7 @@ mod tests {
         ]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
 
-        assert_eq!(opts.mode, DenoisingMode::Temporal { radius: 4 });
+        assert_eq!(opts.planes.mode, DenoisingMode::Temporal { radius: 4 });
         assert_eq!(expect_nl4d(&opts).spatial_radius, 12);
     }
 
@@ -602,7 +601,7 @@ mod tests {
         let defaults = Nl4dOptions::default();
 
         assert_eq!(
-            opts.mode,
+            opts.planes.mode,
             DenoisingMode::Temporal { radius: 2 },
             "base preset resolves to temporal radius 2"
         );
@@ -691,26 +690,26 @@ mod tests {
     }
 
     /// `build_options` carries the two per-plane `mismatch_scale`
-    /// overrides straight through onto `CliOptions`, unresolved, the
+    /// overrides straight through onto `PlaneOptions`, unresolved, the
     /// same way it carries the `lambda_ht` pair.
-    /// `CliOptions::algorithm_for` (`src/bin/ingest.rs`) is what
-    /// resolves them per plane.
+    /// `PlaneOptions::algorithm_for` (`av-denoise-core/src/frame/mod.rs`)
+    /// is what resolves them per plane.
     #[test]
     fn per_plane_mismatch_scale_flags_flow_into_cli_options_independently() {
         let (args, nl4d) = parse(&["--luma-mismatch-scale", "4.0"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
-        assert!((opts.luma_mismatch_scale.unwrap() - 4.0).abs() < f32::EPSILON);
-        assert_eq!(opts.chroma_mismatch_scale, None);
+        assert!((opts.planes.luma_mismatch_scale.unwrap() - 4.0).abs() < f32::EPSILON);
+        assert_eq!(opts.planes.chroma_mismatch_scale, None);
 
         let (args, nl4d) = parse(&["--chroma-mismatch-scale", "2.5"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
-        assert!((opts.chroma_mismatch_scale.unwrap() - 2.5).abs() < f32::EPSILON);
-        assert_eq!(opts.luma_mismatch_scale, None);
+        assert!((opts.planes.chroma_mismatch_scale.unwrap() - 2.5).abs() < f32::EPSILON);
+        assert_eq!(opts.planes.luma_mismatch_scale, None);
 
         let (args, nl4d) = parse(&["--luma-mismatch-scale", "4.0", "--chroma-mismatch-scale", "2.5"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
-        assert!((opts.luma_mismatch_scale.unwrap() - 4.0).abs() < f32::EPSILON);
-        assert!((opts.chroma_mismatch_scale.unwrap() - 2.5).abs() < f32::EPSILON);
+        assert!((opts.planes.luma_mismatch_scale.unwrap() - 4.0).abs() < f32::EPSILON);
+        assert!((opts.planes.chroma_mismatch_scale.unwrap() - 2.5).abs() < f32::EPSILON);
     }
 
     /// The shared flag is what a per-plane override falls back to, so
@@ -722,8 +721,8 @@ mod tests {
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
 
         assert!((expect_nl4d(&opts).mismatch_scale - 2.0).abs() < f32::EPSILON);
-        assert!((opts.luma_mismatch_scale.unwrap() - 8.0).abs() < f32::EPSILON);
-        assert_eq!(opts.chroma_mismatch_scale, None);
+        assert!((opts.planes.luma_mismatch_scale.unwrap() - 8.0).abs() < f32::EPSILON);
+        assert_eq!(opts.planes.chroma_mismatch_scale, None);
     }
 
     #[test]
@@ -734,17 +733,17 @@ mod tests {
     }
 
     /// `build_options` carries the two per-plane `lambda_ht` overrides
-    /// straight through onto `CliOptions`, unresolved.
-    /// `CliOptions::algorithm_for` (`src/bin/ingest.rs`) is what
-    /// actually resolves them per plane, so this test only checks the
-    /// flow into `CliOptions`.
+    /// straight through onto `PlaneOptions`, unresolved.
+    /// `PlaneOptions::algorithm_for` (`av-denoise-core/src/frame/mod.rs`)
+    /// is what actually resolves them per plane, so this test only checks
+    /// the flow into `PlaneOptions`.
     #[test]
     fn luma_lambda_ht_alone_flows_into_cli_options_luma_field_only() {
         let (args, nl4d) = parse(&["--luma-lambda-ht", "2.0"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
 
-        assert!((opts.luma_lambda_ht.unwrap() - 2.0).abs() < f32::EPSILON);
-        assert_eq!(opts.chroma_lambda_ht, None);
+        assert!((opts.planes.luma_lambda_ht.unwrap() - 2.0).abs() < f32::EPSILON);
+        assert_eq!(opts.planes.chroma_lambda_ht, None);
     }
 
     #[test]
@@ -752,8 +751,8 @@ mod tests {
         let (args, nl4d) = parse(&["--chroma-lambda-ht", "3.5"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
 
-        assert!((opts.chroma_lambda_ht.unwrap() - 3.5).abs() < f32::EPSILON);
-        assert_eq!(opts.luma_lambda_ht, None);
+        assert!((opts.planes.chroma_lambda_ht.unwrap() - 3.5).abs() < f32::EPSILON);
+        assert_eq!(opts.planes.luma_lambda_ht, None);
     }
 
     #[test]
@@ -761,8 +760,8 @@ mod tests {
         let (args, nl4d) = parse(&["--luma-lambda-ht", "2.0", "--chroma-lambda-ht", "3.5"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
 
-        assert!((opts.luma_lambda_ht.unwrap() - 2.0).abs() < f32::EPSILON);
-        assert!((opts.chroma_lambda_ht.unwrap() - 3.5).abs() < f32::EPSILON);
+        assert!((opts.planes.luma_lambda_ht.unwrap() - 2.0).abs() < f32::EPSILON);
+        assert!((opts.planes.chroma_lambda_ht.unwrap() - 3.5).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -770,7 +769,7 @@ mod tests {
         let (args, nl4d) = parse(&[]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
 
-        assert_eq!(opts.luma_lambda_ht, None);
-        assert_eq!(opts.chroma_lambda_ht, None);
+        assert_eq!(opts.planes.luma_lambda_ht, None);
+        assert_eq!(opts.planes.chroma_lambda_ht, None);
     }
 }

@@ -5,12 +5,12 @@ use av_denoise::{
     NlmTuning,
     NlmeansHqOptions,
     NlmeansOptions,
+    PlaneOptions,
     PrefilterMode,
 };
 use strum_macros::EnumString;
 
-use super::{Args, CommonArgs, MotionArgs, Preset, resolve_channel_intent};
-use crate::ingest::CliOptions;
+use super::{Args, CommonArgs, MotionArgs, Preset, RunOptions, resolve_channel_intent};
 
 /// Which non-local means variant to run.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, EnumString)]
@@ -314,7 +314,7 @@ impl NlmeansArgs {
 
     /// Turns the parsed flags plus the shared globals into the options
     /// the ingest pipeline takes.
-    pub fn build_options(&self, globals: &Args) -> Result<CliOptions, anyhow::Error> {
+    pub fn build_options(&self, globals: &Args) -> Result<RunOptions, anyhow::Error> {
         let resolved = self.resolve_preset(globals.preset);
 
         let mode = if resolved.temporal_radius == 0 {
@@ -361,20 +361,22 @@ impl NlmeansArgs {
             },
         };
 
-        Ok(CliOptions {
-            accelerators: globals.accelerators.clone(),
-            device: globals.device.clone(),
-            intent,
-            mode,
-            algorithm: self.resolve_algorithm(resolved, nlm)?,
-            luma_strength: self.luma_strength,
-            chroma_strength: self.chroma_strength,
-            // `nlmeans` has no grouping stage, so these stay unset
-            // here. `Nl4dArgs::build_options` fills them in afterwards.
-            luma_lambda_ht: None,
-            chroma_lambda_ht: None,
-            luma_mismatch_scale: None,
-            chroma_mismatch_scale: None,
+        Ok(RunOptions {
+            planes: PlaneOptions {
+                accelerators: globals.accelerators.clone(),
+                device: globals.device.clone(),
+                intent,
+                mode,
+                algorithm: self.resolve_algorithm(resolved, nlm)?,
+                luma_strength: self.luma_strength,
+                chroma_strength: self.chroma_strength,
+                // `nlmeans` has no grouping stage, so these stay unset
+                // here. `Nl4dArgs::build_options` fills them in afterwards.
+                luma_lambda_ht: None,
+                chroma_lambda_ht: None,
+                luma_mismatch_scale: None,
+                chroma_mismatch_scale: None,
+            },
             progress: globals.progress,
         })
     }
@@ -696,7 +698,7 @@ mod tests {
         let (args, _) = parse(&[]);
         let intent = resolve_channel_intent(&args.channel_mode).expect("default should resolve");
         assert!(
-            matches!(intent, crate::ingest::BinaryChannelIntent::LumaChroma),
+            matches!(intent, av_denoise::ChannelIntent::LumaChroma),
             "expected LumaChroma, got {intent:?}",
         );
     }
