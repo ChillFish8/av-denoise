@@ -1,4 +1,12 @@
-use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Nl4dOptions, PlaneOptions};
+use av_denoise::{
+    Algorithm,
+    ChannelIntent,
+    DenoisingMode,
+    Nl4dOptions,
+    PlaneOptions,
+    nl4d_spatial_radius_for,
+    nl4d_temporal_radius_for,
+};
 
 use super::{Args, CommonArgs, MotionArgs, Preset, RunOptions, resolve_channel_intent};
 
@@ -178,6 +186,16 @@ pub struct Nl4dArgs {
     #[arg(long)]
     pub no_confidence_variance: bool,
 
+    /// Estimates noise from a local window instead of a temporal EMA
+    /// over stream history.
+    ///
+    /// Experimental measurement switch for comparing the two estimators
+    /// on real footage. Not a committed public interface. Off by
+    /// default, which keeps the temporal EMA every calibrated preset
+    /// assumes.
+    #[arg(long, hide = true)]
+    pub windowed_noise_estimation: bool,
+
     #[command(flatten)]
     pub motion: MotionArgs,
 }
@@ -193,7 +211,7 @@ impl Nl4dArgs {
     fn temporal_radius(&self, preset: Preset) -> Result<u32, anyhow::Error> {
         let radius = self
             .temporal_radius
-            .unwrap_or_else(|| temporal_radius_for(preset));
+            .unwrap_or_else(|| nl4d_temporal_radius_for(preset));
 
         if radius == 0 {
             anyhow::bail!(
@@ -243,7 +261,7 @@ impl Nl4dArgs {
                     refine: self.refine.unwrap_or(defaults.refine),
                     spatial_radius: self
                         .spatial_radius
-                        .unwrap_or_else(|| spatial_radius_for(globals.preset)),
+                        .unwrap_or_else(|| nl4d_spatial_radius_for(globals.preset)),
                     // Left unresolved when unset, rather than picked from
                     // `defaults` here, because the default depends on which
                     // plane is being denoised and that is not known yet.
@@ -256,6 +274,12 @@ impl Nl4dArgs {
                     c_min: self.c_min.unwrap_or(defaults.c_min),
                     mismatch_scale: self.mismatch_scale.unwrap_or(defaults.mismatch_scale),
                     confidence_variance: !self.no_confidence_variance,
+                    // The CLI keeps the temporal EMA every calibrated
+                    // preset assumes by default. Only `av-denoise-vs`
+                    // needs window-local estimation, for random-access
+                    // determinism. `--windowed-noise-estimation` exists
+                    // to measure the difference on real footage.
+                    windowed_noise_estimation: self.windowed_noise_estimation,
                 }),
                 // nl4d has no NLM weighting pass for a strength to apply to.
                 luma_strength: None,
@@ -304,38 +328,6 @@ impl Nl4dArgs {
             },
             _ => {},
         }
-    }
-}
-
-/// How far the temporal window reaches at each preset.
-///
-/// Unlike `nlmeans`, `veryfast` keeps a 1-frame window rather than
-/// dropping to 0, because nl4d has nothing to do without neighbouring
-/// frames to group against.
-fn temporal_radius_for(preset: Preset) -> u32 {
-    match preset {
-        Preset::Veryfast | Preset::Fast => 1,
-        Preset::Base => 2,
-        Preset::Slow => 4,
-        Preset::Veryslow => 8,
-    }
-}
-
-/// How wide the centre frame's candidate search is at each preset.
-///
-/// `veryfast` shares its temporal radius with `fast`, so this is what
-/// separates them. The window covers `(2 * radius + 1)^2` positions, so
-/// 6 searches a little over half the candidates 9 does.
-///
-/// Every preset from `fast` up uses the library default. Widening it
-/// further at the slow end costs quadratically and has not been measured
-/// to be worth it.
-fn spatial_radius_for(preset: Preset) -> u32 {
-    match preset {
-        Preset::Veryfast => 6,
-        Preset::Fast | Preset::Base | Preset::Slow | Preset::Veryslow => {
-            Nl4dOptions::default().spatial_radius
-        },
     }
 }
 

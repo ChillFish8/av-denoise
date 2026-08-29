@@ -1,13 +1,21 @@
-//! The `avd.Passthrough` filter.
+//! The `avd.NLMeans` and `avd.NL4D` filters.
 //!
-//! Returns source frames unchanged. It exists to prove the plugin build,
-//! link, and load path works before any real denoising filter is wired in.
+//! Both share one `Denoise` filter type and one GPU pipeline underneath.
+//! They differ only in the [`AlgorithmKind`] their creation function
+//! passes to [`plane_options_from`].
 
-use anyhow::{Error, anyhow};
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use anyhow::{Error, Result, anyhow};
+use av_denoise_core::{FrameLayout, PlanarDenoiser, Planes, WindowSpan};
 use vapoursynth::core::CoreRef;
 use vapoursynth::plugins::{Filter, FrameContext};
-use vapoursynth::prelude::{API, FrameRef, Node};
-use vapoursynth::video_info::VideoInfo;
+use vapoursynth::prelude::{API, FrameRef, FrameRefMut, Node, Property};
+use vapoursynth::video_info::{Resolution, VideoInfo};
+
+use crate::frames::{pack_plane, unpack_plane_into, window_indices};
+use crate::params::{AlgorithmKind, RawFormat, RawParams, layout_from_format, plane_options_from};
 
 /// Raises the stack size cubecl's kernel codegen thread inherits.
 ///
@@ -26,19 +34,180 @@ pub(crate) fn raise_stack_limit() {
     }
 }
 
-/// A filter that returns the source clip's frames unchanged.
-pub struct Passthrough<'core> {
-    source: Node<'core>,
+/// The running pipeline and the output frame it last produced.
+///
+/// VapourSynth may call `get_frame` from several threads, so the
+/// pipeline sits behind a mutex and requests queue on it. One pipeline
+/// is enough because the GPU is the bottleneck.
+struct State {
+    denoiser: PlanarDenoiser,
+    /// The output frame index the pipeline is positioned after.
+    last: Option<usize>,
 }
 
-impl<'core> Passthrough<'core> {
-    /// Wraps a source clip so its frames pass through unchanged.
-    pub(crate) fn new(source: Node<'core>) -> Self {
-        Self { source }
+/// A denoising filter backed by one [`PlanarDenoiser`] pipeline.
+///
+/// `avd.NLMeans` and `avd.NL4D` both build one of these, differing only
+/// in the algorithm baked into `state.denoiser` at creation.
+pub struct Denoise<'core> {
+    source: Node<'core>,
+    layout: FrameLayout,
+    /// How many source frames a window at output frame `n` needs behind
+    /// and ahead of `n`, read once from
+    /// [`PlanarDenoiser::window_span`] at creation. nlmeans and nl4d
+    /// report different spans, so this is asked for rather than
+    /// assumed symmetric.
+    span: WindowSpan,
+    /// The source clip's frame count, read once at creation.
+    source_len: usize,
+    state: Mutex<State>,
+}
+
+impl<'core> Denoise<'core> {
+    /// Builds the shared parts of a `avd.NLMeans` or `avd.NL4D` filter.
+    ///
+    /// Raises the stack limit first, since a `PlanarDenoiser` is created
+    /// below and cubecl only spawns its codegen thread once that
+    /// happens. Rejects the source's format and resolution before
+    /// touching the GPU, and rejects a variable-resolution source, which
+    /// `FrameLayout` has no way to represent.
+    pub(crate) fn create(
+        _api: API,
+        _core: CoreRef<'core>,
+        source: Node<'core>,
+        algorithm_kind: AlgorithmKind,
+        raw: &RawParams,
+    ) -> Result<Self, Error> {
+        raise_stack_limit();
+
+        let info = source.info();
+
+        let (width, height) = match info.resolution {
+            Property::Constant(res) => (res.width as u32, res.height as u32),
+            Property::Variable => {
+                anyhow::bail!("clips with variable resolution are not supported");
+            },
+        };
+
+        let format = info.format;
+        let raw_format = RawFormat {
+            sample_type: format.sample_type(),
+            bits_per_sample: format.bits_per_sample(),
+            subsampling_w: format.sub_sampling_w(),
+            subsampling_h: format.sub_sampling_h(),
+            color_family: format.color_family(),
+        };
+
+        let layout = layout_from_format(raw_format, width, height)?;
+        let plane_options = plane_options_from(raw, algorithm_kind, layout)?;
+        let denoiser = PlanarDenoiser::create(&plane_options, layout)?;
+        let span = denoiser.window_span();
+
+        Ok(Self {
+            source,
+            layout,
+            span,
+            source_len: info.num_frames,
+            state: Mutex::new(State { denoiser, last: None }),
+        })
+    }
+
+    /// The full, ordered source indices around output frame `n`,
+    /// exactly as `reseed` needs them, boundary repeats included.
+    fn window(&self, n: usize) -> Vec<usize> {
+        window_indices(n, self.span.behind, self.span.ahead, self.source_len - 1)
+    }
+
+    /// The source indices output frame `n` needs, deduplicated so each
+    /// one is requested and fetched from VapourSynth only once.
+    ///
+    /// A window near either end of the clip repeats its boundary frame,
+    /// which [`Self::window`] preserves since `reseed` needs the exact
+    /// count. This is sorted since `window_indices` is already
+    /// non-decreasing, so sorting is a no-op kept for clarity.
+    fn unique_window(&self, n: usize) -> Vec<usize> {
+        let mut indices = self.window(n);
+        indices.sort_unstable();
+        indices.dedup();
+        indices
+    }
+
+    /// Renders one output frame, applying the hybrid fast/rebuild policy.
+    ///
+    /// A request for the frame straight after the last one produced
+    /// pushes a single frame through the running stream. Anything else,
+    /// including frame 0, abandons the stream and rebuilds it from an
+    /// explicit window, which costs more but is correct from any
+    /// starting point.
+    ///
+    /// The fast path can still fall through to a rebuild: `recv` returns
+    /// `None` when the stream has not yet primed enough history to emit,
+    /// which happens right after a `reseed` landed the pipeline on a
+    /// frame within `span.behind` of the clip's start. Falling back to
+    /// the window rebuild handles that case correctly instead of
+    /// surfacing an error or a blank frame.
+    ///
+    /// The one frame this pushes is `n + span.ahead`: the pipeline is
+    /// already positioned to complete output frame `n` once its own
+    /// window reaches that far ahead, the same relationship
+    /// [`Self::window`] uses to build a whole window from scratch.
+    fn render(&self, n: usize, fetch: impl Fn(usize) -> Result<Planes, Error>) -> Result<Planes, Error> {
+        let mut state = self.state.lock().expect("denoiser mutex poisoned");
+        let last_frame = self.source_len - 1;
+
+        if state.last == Some(n.wrapping_sub(1)) && n > 0 {
+            let ahead = (n + self.span.ahead).min(last_frame);
+            state.denoiser.push(&fetch(ahead)?)?;
+            if let Some(out) = state.denoiser.recv()? {
+                state.last = Some(n);
+                return Ok(out);
+            }
+            // The stream did not yield, so fall through and rebuild.
+        }
+
+        let window: Vec<Planes> = self.window(n).into_iter().map(fetch).collect::<Result<_, _>>()?;
+
+        let out = state.denoiser.reseed(&window)?;
+        state.last = Some(n);
+        Ok(out)
     }
 }
 
-impl<'core> Filter<'core> for Passthrough<'core> {
+/// Packs one source frame's three planes into a [`Planes`], dropping
+/// each plane's row padding.
+fn pack_frame(frame: &FrameRef, depth_bytes: usize) -> Planes {
+    let pack = |plane: usize| -> Vec<u8> {
+        let stride = frame.stride(plane);
+        let height = frame.height(plane);
+        let width_bytes = frame.width(plane) * depth_bytes;
+        // SAFETY: `stride * height` is exactly the byte range VapourSynth
+        // allocated for this plane, and `frame` outlives the slice.
+        let data = unsafe { std::slice::from_raw_parts(frame.data_ptr(plane), stride * height) };
+        pack_plane(data, stride, width_bytes, height)
+    };
+
+    Planes {
+        y: pack(0),
+        u: pack(1),
+        v: pack(2),
+    }
+}
+
+/// Writes a denoised [`Planes`] into a freshly allocated output frame.
+fn unpack_into_frame(frame: &mut FrameRefMut, planes: &Planes, depth_bytes: usize) {
+    let sources = [&planes.y, &planes.u, &planes.v];
+    for (plane, src) in sources.into_iter().enumerate() {
+        let stride = frame.stride(plane);
+        let height = frame.height(plane);
+        let width_bytes = frame.width(plane) * depth_bytes;
+        // SAFETY: `stride * height` is exactly the byte range VapourSynth
+        // allocated for this plane.
+        let data = unsafe { std::slice::from_raw_parts_mut(frame.data_ptr_mut(plane), stride * height) };
+        unpack_plane_into(data, stride, width_bytes, height, src);
+    }
+}
+
+impl<'core> Filter<'core> for Denoise<'core> {
     fn video_info(&self, _api: API, _core: CoreRef<'core>) -> Vec<VideoInfo<'core>> {
         vec![self.source.info()]
     }
@@ -50,19 +219,51 @@ impl<'core> Filter<'core> for Passthrough<'core> {
         context: FrameContext,
         n: usize,
     ) -> Result<Option<FrameRef<'core>>, Error> {
-        self.source.request_frame_filter(context, n);
+        for idx in self.unique_window(n) {
+            self.source.request_frame_filter(context, idx);
+        }
         Ok(None)
     }
 
     fn get_frame(
         &self,
         _api: API,
-        _core: CoreRef<'core>,
+        core: CoreRef<'core>,
         context: FrameContext,
         n: usize,
     ) -> Result<FrameRef<'core>, Error> {
-        self.source
-            .get_frame_filter(context, n)
-            .ok_or_else(|| anyhow!("Couldn't get the source frame"))
+        let mut frames: HashMap<usize, FrameRef<'core>> = HashMap::new();
+        for idx in self.unique_window(n) {
+            let frame = self
+                .source
+                .get_frame_filter(context, idx)
+                .ok_or_else(|| anyhow!("couldn't get source frame {idx}"))?;
+            frames.insert(idx, frame);
+        }
+
+        let depth_bytes = self.layout.depth.bytes_per_sample();
+        let fetch = |idx: usize| -> Result<Planes, Error> {
+            let frame = frames
+                .get(&idx)
+                .expect("get_frame_initial requested the same window as get_frame");
+            Ok(pack_frame(frame, depth_bytes))
+        };
+
+        let planes = self.render(n, fetch)?;
+
+        let prop_src = frames.get(&n).expect("the window always includes n");
+        let format = prop_src.format();
+        let resolution = Resolution {
+            width: self.layout.width as usize,
+            height: self.layout.height as usize,
+        };
+
+        // SAFETY: the frame's plane data starts uninitialized, but
+        // `unpack_into_frame` below writes every byte of every plane
+        // before the frame is returned to VapourSynth.
+        let mut out = unsafe { FrameRefMut::new_uninitialized(core, Some(prop_src), format, resolution) };
+        unpack_into_frame(&mut out, &planes, depth_bytes);
+
+        Ok(out.into())
     }
 }

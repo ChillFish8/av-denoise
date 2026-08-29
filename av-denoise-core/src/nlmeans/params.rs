@@ -228,6 +228,19 @@ pub struct HqParams {
     ///
     /// The CLI takes this as `--hq-sigma-scale`.
     pub sigma_scale: f32,
+    /// Estimates noise fresh from each submit's own window, instead of
+    /// smoothing it with an exponential average carried forward from
+    /// every earlier frame the stream has folded.
+    ///
+    /// `false`, the default, keeps the temporal EMA every calibrated
+    /// preset assumes. `true` makes the automatic estimate depend only
+    /// on the frames currently in the window, so a
+    /// [`crate::frame::PlanarDenoiser::reseed`] targeting frame `n` and
+    /// a continuous stream that reaches frame `n` compute the same
+    /// sigma, regardless of how each got there. This does nothing when
+    /// `sigma_override` pins a fixed value, because the estimator never
+    /// runs in that case.
+    pub windowed_noise_estimation: bool,
 }
 
 impl Default for HqParams {
@@ -239,6 +252,7 @@ impl Default for HqParams {
             temporal_confidence: true,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
+            windowed_noise_estimation: false,
         }
     }
 }
@@ -612,6 +626,7 @@ mod tests {
                 temporal_confidence: true,
                 thsad_scale: 1.0,
                 sigma_scale: 1.0,
+                windowed_noise_estimation: false,
             }),
             ..NlmParams::default()
         };
@@ -797,6 +812,7 @@ mod tests {
                 temporal_confidence: true,
                 thsad_scale: 1.0,
                 sigma_scale: 1.0,
+                windowed_noise_estimation: false,
             }),
             ..NlmParams::default()
         };

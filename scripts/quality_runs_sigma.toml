@@ -1,0 +1,60 @@
+input = "./data/clean-1080p.mkv"
+workdir = "./data/quality_runs_sigma"
+# Frames scored per run. Matches quality_runs_light.toml's convention. The
+# clean source clip is 288 frames, so this trims off the last 48.
+frames = 240
+seed = 4242
+# Light noise levels, carried over unchanged from quality_runs_light.toml.
+noise = [4, 6, 8]
+
+# Strength table carried over unchanged from quality_runs_light.toml. No
+# row below actually substitutes `$strength` (the `hq` variant and `nl4d`
+# both pick their own strength from the measured noise level), so this
+# table is inert here, but it is kept so this file stays a direct
+# derivative of the light config rather than a fork with its own numbers.
+[strengths]
+4 = 1.5
+6 = 2.0
+8 = 2.0
+
+# ---------------------------------------------------------------------------
+# This file measures ONE thing: how much quality a window-local noise
+# estimate costs against the temporal EMA the CLI's presets are calibrated
+# around. `--windowed-noise-estimation` is the hidden, experimental CLI
+# switch that flips only the estimator; every other argument in an EMA/
+# windowed pair below is identical.
+#
+# Every arm uses `workers = 1`. In file mode the CLI splits work by scene
+# and gives each worker its own denoiser instance, so with more than one
+# worker the EMA already restarts at every worker's scene boundary. That
+# would muddy the comparison with an effect this file is not measuring, so
+# every row is pinned to a single worker to isolate the estimator itself.
+# ---------------------------------------------------------------------------
+
+[[runs]]
+name = "noisy"
+kind = "noisy"
+
+[[runs]]
+name = "nl4d_ema"
+kind = "av-denoise-nl4d"
+workers = 1
+args = ["--temporal-radius", "2", "--channel-mode", "luma,chroma"]
+
+[[runs]]
+name = "nl4d_windowed"
+kind = "av-denoise-nl4d"
+workers = 1
+args = ["--temporal-radius", "2", "--channel-mode", "luma,chroma", "--windowed-noise-estimation"]
+
+[[runs]]
+name = "hq_ema"
+kind = "av-denoise"
+workers = 1
+args = ["--variant", "hq", "--temporal-radius", "2", "--channel-mode", "luma,chroma"]
+
+[[runs]]
+name = "hq_windowed"
+kind = "av-denoise"
+workers = 1
+args = ["--variant", "hq", "--temporal-radius", "2", "--channel-mode", "luma,chroma", "--windowed-noise-estimation"]

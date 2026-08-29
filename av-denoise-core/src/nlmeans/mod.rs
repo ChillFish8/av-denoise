@@ -56,7 +56,7 @@ pub use params::{
     validate_dimensions,
 };
 pub use pending::Pending;
-pub use prefilter::{DEFAULT_PILOT_STRENGTH_SCALE, PrefilterMode};
+pub use prefilter::{DEFAULT_PILOT_STRENGTH_SCALE, PrefilterMode, parse_prefilter};
 
 /// Cube X dimension for tile-heavy fused/separable kernels.
 pub const BLOCK_X: u32 = 32;

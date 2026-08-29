@@ -380,6 +380,7 @@ fn hq_temporal_folds_correlated_grain_above_immerkaer_alone() {
             temporal_confidence: false,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
+            windowed_noise_estimation: false,
         }),
     };
 
@@ -437,6 +438,7 @@ fn rho_smoothed_seeds_from_first_sample_not_from_zero() {
             temporal_confidence: false,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
+            windowed_noise_estimation: false,
         }),
     };
 

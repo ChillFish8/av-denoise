@@ -55,6 +55,58 @@ impl PrefilterMode {
     }
 }
 
+/// Parses a `--prefilter`-style string into a [`PrefilterMode`].
+///
+/// `"none"` or an empty string means [`PrefilterMode::None`].
+///
+/// `"nlm"` or `"nlm:<strength_scale>"` builds
+/// [`PrefilterMode::NlmSpatial`]. `strength_scale` multiplies the main
+/// pass strength for the pilot pass. Bare `"nlm"` uses
+/// [`DEFAULT_PILOT_STRENGTH_SCALE`].
+///
+/// `"bilateral:<sigma_s>,<sigma_r>"` builds [`PrefilterMode::Bilateral`].
+///
+/// This never produces [`PrefilterMode::External`], since that mode has
+/// no string form: it requires the caller to supply a reference frame
+/// through [`super::NlmDenoiser::push_frame_with_reference`].
+pub fn parse_prefilter(s: &str) -> Result<PrefilterMode, anyhow::Error> {
+    if s == "none" || s.is_empty() {
+        return Ok(PrefilterMode::None);
+    }
+
+    if s == "nlm" {
+        return Ok(PrefilterMode::NlmSpatial {
+            strength_scale: DEFAULT_PILOT_STRENGTH_SCALE,
+        });
+    }
+
+    if let Some(rest) = s.strip_prefix("nlm:") {
+        let strength_scale: f32 = rest
+            .trim()
+            .parse()
+            .map_err(|_| anyhow::anyhow!("--prefilter nlm expects a number: nlm:<strength_scale>"))?;
+
+        return Ok(PrefilterMode::NlmSpatial { strength_scale });
+    }
+
+    if let Some(rest) = s.strip_prefix("bilateral:") {
+        let parts: Vec<&str> = rest.split(',').collect();
+
+        if parts.len() != 2 {
+            anyhow::bail!("--prefilter bilateral expects two values: bilateral:<sigma_s>,<sigma_r>");
+        }
+
+        let sigma_s: f32 = parts[0].trim().parse()?;
+        let sigma_r: f32 = parts[1].trim().parse()?;
+
+        return Ok(PrefilterMode::Bilateral { sigma_s, sigma_r });
+    }
+
+    anyhow::bail!(
+        "unknown prefilter '{s}', expected `none`, `nlm[:<strength_scale>]`, or `bilateral:<sigma_s>,<sigma_r>`"
+    )
+}
+
 /// The inputs one prefilter dispatch needs.
 ///
 /// This lives only for the length of a single `push_frame`, which is
@@ -132,5 +184,72 @@ mod tests {
         assert_eq!(bilateral_radius(1.0), 2);
         assert_eq!(bilateral_radius(3.0), 6);
         assert_eq!(bilateral_radius(3.5), 7);
+    }
+
+    #[test]
+    fn none_and_empty_prefilters_parse() {
+        assert!(matches!(parse_prefilter("none").unwrap(), PrefilterMode::None));
+        assert!(matches!(parse_prefilter("").unwrap(), PrefilterMode::None));
+    }
+
+    #[test]
+    fn bilateral_with_values_parses() {
+        let mode = parse_prefilter("bilateral:3.0,0.02").unwrap();
+        assert!(matches!(
+            mode,
+            PrefilterMode::Bilateral {
+                sigma_s,
+                sigma_r,
+            } if (sigma_s - 3.0).abs() < f32::EPSILON && (sigma_r - 0.02).abs() < f32::EPSILON
+        ));
+    }
+
+    #[test]
+    fn bare_nlm_uses_default_strength_scale() {
+        let mode = parse_prefilter("nlm").unwrap();
+        assert!(matches!(
+            mode,
+            PrefilterMode::NlmSpatial { strength_scale }
+                if (strength_scale - DEFAULT_PILOT_STRENGTH_SCALE).abs() < f32::EPSILON
+        ));
+    }
+
+    #[test]
+    fn nlm_with_explicit_strength_scale_parses() {
+        let mode = parse_prefilter("nlm:0.8").unwrap();
+        assert!(matches!(
+            mode,
+            PrefilterMode::NlmSpatial { strength_scale } if (strength_scale - 0.8).abs() < f32::EPSILON
+        ));
+    }
+
+    #[test]
+    fn malformed_nlm_scale_is_rejected() {
+        let err = parse_prefilter("nlm:x").expect_err("expected parse failure");
+        assert!(err.to_string().contains("nlm"));
+    }
+
+    #[test]
+    fn unknown_prefilter_is_rejected() {
+        assert!(parse_prefilter("garbage").is_err());
+    }
+
+    #[test]
+    fn external_cannot_be_parsed_from_a_string() {
+        for s in [
+            "external",
+            "none",
+            "nlm",
+            "nlm:0.5",
+            "bilateral:3.0,0.02",
+            "garbage",
+        ] {
+            if let Ok(mode) = parse_prefilter(s) {
+                assert!(
+                    !matches!(mode, PrefilterMode::External),
+                    "parse_prefilter must never produce External, got it from '{s}'"
+                );
+            }
+        }
     }
 }

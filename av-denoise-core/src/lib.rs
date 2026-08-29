@@ -29,7 +29,15 @@ pub use denoiser::{
     NlmTuning,
     NlmeansHqOptions,
     NlmeansOptions,
+    NlmeansVariant,
+    Preset,
+    WindowSpan,
     nl4d_default_lambda_ht,
+    nl4d_spatial_radius_for,
+    nl4d_temporal_radius_for,
+    nlmeans_search_radius_for,
+    nlmeans_temporal_radius_for,
+    nlmeans_variant_for,
 };
 pub use device::Device;
 pub use frame::{
@@ -53,4 +61,5 @@ pub use nlmeans::{
     UnsupportedDepthError,
     denormalize,
     normalize,
+    parse_prefilter,
 };

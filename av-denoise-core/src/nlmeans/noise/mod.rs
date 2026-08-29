@@ -848,18 +848,22 @@ impl NoiseEstimator {
     /// and returns the smoothed result.
     ///
     /// The first call sets the state directly from the sample, because
-    /// there is no earlier estimate to blend with.
+    /// there is no earlier estimate to blend with. So does every call
+    /// once `windowed` is set, which drops the running estimate
+    /// entirely and replaces it with this sample: the caller wants the
+    /// current window's own reading, not one blended with history from
+    /// frames outside it.
     ///
     /// Every element is floored at [`SIGMA_FLOOR`] either way.
-    pub(super) fn update(&mut self, sigmas: &[f32]) -> &[f32] {
+    pub(super) fn update(&mut self, sigmas: &[f32], windowed: bool) -> &[f32] {
         match &mut self.ema {
-            None => {
-                self.ema = Some(sigmas.iter().map(|&s| s.max(SIGMA_FLOOR)).collect());
-            },
-            Some(ema) => {
+            Some(ema) if !windowed => {
                 for (e, &s) in ema.iter_mut().zip(sigmas.iter()) {
                     *e = (EMA_ALPHA * s + (1.0 - EMA_ALPHA) * *e).max(SIGMA_FLOOR);
                 }
+            },
+            _ => {
+                self.ema = Some(sigmas.iter().map(|&s| s.max(SIGMA_FLOOR)).collect());
             },
         }
         self.ema.as_deref().unwrap()
@@ -887,18 +891,18 @@ mod tests {
     #[test]
     fn first_sample_initializes_state() {
         let mut est = NoiseEstimator::default();
-        let out = est.update(&[0.05, 0.02]);
+        let out = est.update(&[0.05, 0.02], false);
         assert_eq!(out, &[0.05, 0.02]);
     }
 
     #[test]
     fn update_converges_toward_changed_level() {
         let mut est = NoiseEstimator::default();
-        est.update(&[0.02]);
+        est.update(&[0.02], false);
 
         let mut last = 0.0;
         for _ in 0..200 {
-            last = est.update(&[0.10])[0];
+            last = est.update(&[0.10], false)[0];
         }
 
         assert!(
@@ -910,23 +914,42 @@ mod tests {
     #[test]
     fn update_floors_near_zero_samples() {
         let mut est = NoiseEstimator::default();
-        let out = est.update(&[0.0]);
+        let out = est.update(&[0.0], false);
         assert_eq!(out[0], SIGMA_FLOOR);
 
-        let out = est.update(&[0.0]);
+        let out = est.update(&[0.0], false);
         assert_eq!(out[0], SIGMA_FLOOR);
     }
 
     #[test]
     fn reset_clears_state() {
         let mut est = NoiseEstimator::default();
-        est.update(&[0.10]);
+        est.update(&[0.10], false);
         est.reset();
 
         // After a reset the next update should start from its own
         // sample rather than blending with the stale 0.10.
-        let out = est.update(&[0.02]);
+        let out = est.update(&[0.02], false);
         assert_eq!(out, &[0.02]);
+    }
+
+    /// The property `windowed_noise_estimation` relies on: with
+    /// `windowed` set, every call ignores whatever the running estimate
+    /// held and returns exactly the sample just given, floored the same
+    /// way the very first sample is.
+    #[test]
+    fn windowed_update_ignores_prior_state() {
+        let mut est = NoiseEstimator::default();
+        est.update(&[0.10], false);
+        est.update(&[0.20], false);
+
+        let out = est.update(&[0.02], true);
+        assert_eq!(out, &[0.02]);
+
+        // A second windowed call still ignores the first windowed
+        // call's own result, not just the pre-windowed history.
+        let out = est.update(&[0.0], true);
+        assert_eq!(out[0], SIGMA_FLOOR);
     }
 
     #[test]

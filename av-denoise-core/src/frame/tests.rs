@@ -144,6 +144,43 @@ mod reseed {
         }
     }
 
+    /// Whether plain nlmeans's `reseed` stays order-independent under
+    /// repeated out-of-order reseeds on one long-lived denoiser, the
+    /// same stress the VapourSynth plugin's shuffled-access-order
+    /// harness test puts `avd.NLMeans` through.
+    ///
+    /// `Algorithm::Nlmeans`'s own doc comment says it runs with "no
+    /// noise measurement", and `NlmeansOptions` has no `hq` field for a
+    /// `PlaneOptions` built from it to carry, so `NlmParams::hq` stays
+    /// `None` and `fold_noise_estimate` never runs for it. There is no
+    /// stream-carried noise state for repeated `reseed` calls to
+    /// disagree about, so this is expected to hold without a
+    /// `windowed_noise_estimation` equivalent for nlmeans. This proves
+    /// that rather than assumes it, at a wider temporal radius and a
+    /// longer, more heavily shuffled clip than any other reseed test
+    /// here uses, so a history-dependent regression would have room to
+    /// show itself if one existed.
+    #[test]
+    fn nlmeans_repeated_out_of_order_reseeds_match_streaming() {
+        let opts = test_plane_options(4);
+        let frames = ramp_clip(&layout(), 24);
+        let streamed = stream_all(&opts, &frames);
+
+        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
+        // Skews late, mirroring the plugin harness's shuffled order
+        // that first exposed the nl4d defect.
+        let order = [
+            18, 4, 23, 9, 12, 2, 20, 6, 15, 1, 22, 7, 17, 3, 11, 19, 0, 21, 8, 16, 5, 14, 10, 13,
+        ];
+
+        for &k in &order {
+            let got = d.reseed(&window_of(&frames, k, 4)).unwrap();
+            assert_eq!(got.y, streamed[k].y, "luma mismatch at k = {k}");
+            assert_eq!(got.u, streamed[k].u, "u mismatch at k = {k}");
+            assert_eq!(got.v, streamed[k].v, "v mismatch at k = {k}");
+        }
+    }
+
     #[test]
     fn a_reseed_leaves_the_stream_positioned_for_the_next_frame() {
         let opts = test_plane_options(2);
@@ -223,5 +260,407 @@ mod reseed {
 
         assert_eq!(got.u, frames[k + 1].u, "u should pass through from frame k + 1");
         assert_eq!(got.v, frames[k + 1].v, "v should pass through from frame k + 1");
+    }
+
+    /// A `PlaneOptions` identical to [`test_plane_options`] except the
+    /// algorithm is `Nl4d`, which needs the wider window `reseed` has
+    /// to build for it instead of nlmeans's `2r+1` one.
+    ///
+    /// Pins `sigma` rather than leaving it on nl4d's automatic
+    /// per-frame estimate. That estimate is an exponential moving
+    /// average smoothed over every frame folded into it since the
+    /// stream last reset, so it carries genuine history from before
+    /// the window on a real, never-reset stream, history a windowed
+    /// `reseed` cannot supply and was never meant to reproduce. Pinning
+    /// it keeps these tests checking what `reseed`'s window shape and
+    /// pass sequence are actually responsible for, not that unrelated
+    /// warm-up behaviour.
+    fn nl4d_plane_options(r: u32) -> PlaneOptions {
+        PlaneOptions {
+            algorithm: Algorithm::Nl4d(Nl4dOptions {
+                sigma: Some(0.03),
+                ..Nl4dOptions::default()
+            }),
+            ..test_plane_options(r)
+        }
+    }
+
+    /// The window a [`PlanarDenoiser::window_span`] of `span` needs for
+    /// target frame `k`, clamped at both clip ends exactly as
+    /// [`window_of`] clamps nlmeans's `2r+1` window.
+    ///
+    /// Reads the span from the accessor rather than hand-deriving it,
+    /// so this stays correct however the algorithm's own span is
+    /// shaped.
+    fn window_of_span(frames: &[Planes], k: usize, span: WindowSpan) -> Vec<Planes> {
+        (0..span.frame_count())
+            .map(|i| {
+                let idx = (k + i).saturating_sub(span.behind).min(frames.len() - 1);
+                frames[idx].clone()
+            })
+            .collect()
+    }
+
+    /// This is the test that would have caught the original defect:
+    /// `reseed` for a mid-clip frame under `Algorithm::Nl4d` must match
+    /// the streaming path's own output for that frame bit-for-bit, the
+    /// same property [`reseed_matches_the_streaming_output_mid_clip`]
+    /// checks for nlmeans.
+    #[test]
+    fn nl4d_reseed_matches_the_streaming_output_mid_clip() {
+        let opts = nl4d_plane_options(2);
+        let frames = ramp_clip(&layout(), 16);
+        let streamed = stream_all(&opts, &frames);
+
+        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let k = 8;
+        let span = d.window_span();
+        let got = d.reseed(&window_of_span(&frames, k, span)).unwrap();
+
+        assert_eq!(got.y, streamed[k].y);
+        assert_eq!(got.u, streamed[k].u);
+        assert_eq!(got.v, streamed[k].v);
+    }
+
+    /// The largest absolute per-sample difference between two same-sized
+    /// byte planes.
+    fn max_abs_diff(a: &[u8], b: &[u8]) -> i32 {
+        a.iter()
+            .zip(b.iter())
+            .map(|(&x, &y)| (x as i32 - y as i32).abs())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The nl4d mirror of
+    /// [`reseed_matches_the_streaming_output_at_both_clip_edges`], where
+    /// the widened window clamps at both ends of the clip.
+    ///
+    /// The forward (`ahead`) edge is bit-exact, the same property the
+    /// nlmeans version checks exactly. The backward (`behind`) edge only
+    /// has to fall within a bound, because the two paths fill a clip's
+    /// leading edge with different amounts of the same padding: `reseed`
+    /// fills the whole `behind` span of its window by repeating the
+    /// clip's first frame, while a fresh stream primes only `radius`
+    /// duplicates of that first frame before real ones start arriving.
+    /// nl4d's cross-frame accumulator folds a different amount of
+    /// duplicated history in each case, so the two outputs land close
+    /// but not identical at the very start of a clip.
+    #[test]
+    fn nl4d_reseed_matches_the_streaming_output_at_both_clip_edges() {
+        let opts = nl4d_plane_options(2);
+        let frames = ramp_clip(&layout(), 16);
+        let streamed = stream_all(&opts, &frames);
+        let last = frames.len() - 1;
+
+        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let span = d.window_span();
+        let got = d.reseed(&window_of_span(&frames, last, span)).unwrap();
+        assert_eq!(got.y, streamed[last].y, "luma mismatch at the ahead edge");
+        assert_eq!(got.u, streamed[last].u, "u mismatch at the ahead edge");
+        assert_eq!(got.v, streamed[last].v, "v mismatch at the ahead edge");
+
+        // The bound this leading-edge padding difference stays within:
+        // full-range luma codes span 255, and the extra duplicated
+        // history `reseed` folds in at the clip's first frame moves the
+        // result by at most a handful of 8-bit codes, well short of a
+        // bound that would let a genuine regression through.
+        const BEHIND_EDGE_TOLERANCE: i32 = 8;
+        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let got = d.reseed(&window_of_span(&frames, 0, span)).unwrap();
+        let luma_diff = max_abs_diff(&got.y, &streamed[0].y);
+        assert!(
+            luma_diff <= BEHIND_EDGE_TOLERANCE,
+            "luma at the behind edge (k=0) drifted too far from streaming: max abs diff {luma_diff}"
+        );
+    }
+
+    /// After an nl4d `reseed`, ordinary sequential `push`/`recv` must
+    /// carry on producing the same frames the streaming path would
+    /// have, the nl4d mirror of
+    /// [`a_reseed_leaves_the_stream_positioned_for_the_next_frame`].
+    #[test]
+    fn nl4d_reseed_then_streaming_continues_correctly() {
+        let opts = nl4d_plane_options(2);
+        let frames = ramp_clip(&layout(), 16);
+        let streamed = stream_all(&opts, &frames);
+        let k = 8usize;
+
+        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let span = d.window_span();
+        d.reseed(&window_of_span(&frames, k, span)).unwrap();
+
+        // The next frame in source order after the reseed window's own
+        // last frame is `k + 1 + span.ahead`, the same relationship
+        // [`Denoise::render`]'s fast path in the VapourSynth plugin
+        // relies on for ordinary sequential continuation.
+        d.push(&frames[k + 1 + span.ahead]).unwrap();
+        let got = d.recv().unwrap().expect("frame k + 1");
+
+        assert_eq!(got.y, streamed[k + 1].y);
+        assert_eq!(got.u, streamed[k + 1].u);
+        assert_eq!(got.v, streamed[k + 1].v);
+    }
+
+    /// `reseed` rejects a window of the wrong length for nl4d too, and
+    /// the error names the wider length nl4d needs (`4r+1` at this
+    /// radius), not nlmeans's `2r+1`.
+    #[test]
+    fn nl4d_reseed_rejects_a_window_of_the_wrong_length() {
+        let opts = nl4d_plane_options(2);
+        let frames = ramp_clip(&layout(), 16);
+        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let expected = d.window_span().frame_count();
+
+        let err = d.reseed(&frames[..3]).unwrap_err().to_string();
+        assert!(
+            err.contains(&expected.to_string()),
+            "error should name the expected length ({expected}), got {err}"
+        );
+    }
+
+    /// A `PlaneOptions` identical to [`nl4d_plane_options`] except only
+    /// `intent` differs, for exercising a passthrough side under nl4d's
+    /// wider window and multi-push pass sequence.
+    fn nl4d_plane_options_with_intent(r: u32, intent: ChannelIntent) -> PlaneOptions {
+        PlaneOptions {
+            intent,
+            ..nl4d_plane_options(r)
+        }
+    }
+
+    /// The nl4d mirror of
+    /// [`reseed_pairs_the_passthrough_plane_with_the_centre_frame`].
+    ///
+    /// nl4d's real-push loop drains after every emission, not only the
+    /// last, and each drain pops one passthrough entry. This checks
+    /// that walk still lands on the target's own entry rather than one
+    /// of the earlier, discarded regions' entries.
+    #[test]
+    fn nl4d_reseed_pairs_the_passthrough_plane_with_the_centre_frame() {
+        let opts = nl4d_plane_options_with_intent(2, ChannelIntent::Luma);
+        let frames = ramp_clip(&layout(), 16);
+        let k = 8;
+
+        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let span = d.window_span();
+        let got = d.reseed(&window_of_span(&frames, k, span)).unwrap();
+
+        assert_eq!(got.u, frames[k].u, "u should pass through from the centre frame");
+        assert_eq!(got.v, frames[k].v, "v should pass through from the centre frame");
+    }
+
+    /// The nl4d mirror of
+    /// [`reseed_pairs_the_passthrough_luma_plane_with_the_centre_frame`].
+    #[test]
+    fn nl4d_reseed_pairs_the_passthrough_luma_plane_with_the_centre_frame() {
+        let opts = nl4d_plane_options_with_intent(2, ChannelIntent::Chroma);
+        let frames = ramp_clip(&layout(), 16);
+        let k = 8;
+
+        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let span = d.window_span();
+        let got = d.reseed(&window_of_span(&frames, k, span)).unwrap();
+
+        assert_eq!(got.y, frames[k].y, "y should pass through from the centre frame");
+    }
+
+    /// The nl4d mirror of
+    /// [`reseed_then_streaming_keeps_the_passthrough_plane_aligned_on_the_next_frame`].
+    ///
+    /// A single-shot pairing test only checks the very first entry
+    /// `recv` pops after the drop. A leftover-count defect that still
+    /// happens to leave the right entry at the front would pass every
+    /// single-shot nl4d test above and only misalign the plane paired
+    /// with the frame right after the target, once streaming resumes.
+    #[test]
+    fn nl4d_reseed_then_streaming_keeps_the_passthrough_plane_aligned_on_the_next_frame() {
+        let opts = nl4d_plane_options_with_intent(2, ChannelIntent::Luma);
+        let frames = ramp_clip(&layout(), 16);
+        let k = 8;
+
+        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let span = d.window_span();
+        d.reseed(&window_of_span(&frames, k, span)).unwrap();
+        d.push(&frames[k + 1 + span.ahead]).unwrap();
+        let got = d.recv().unwrap().expect("frame k + 1");
+
+        assert_eq!(got.u, frames[k + 1].u, "u should pass through from frame k + 1");
+        assert_eq!(got.v, frames[k + 1].v, "v should pass through from frame k + 1");
+    }
+
+    /// A `PlaneOptions` identical to [`nl4d_plane_options`] except noise
+    /// estimation is window-local (`windowed_noise_estimation: true`)
+    /// and `sigma` is left on automatic estimation, the configuration
+    /// `av-denoise-vs` runs.
+    ///
+    /// Unlike [`nl4d_plane_options`], `sigma` is deliberately left
+    /// unpinned here: window-local estimation exists precisely so the
+    /// automatic estimate agrees between `reseed` and streaming, and a
+    /// pinned sigma would never have exercised that.
+    fn nl4d_windowed_plane_options(r: u32) -> PlaneOptions {
+        PlaneOptions {
+            algorithm: Algorithm::Nl4d(Nl4dOptions {
+                windowed_noise_estimation: true,
+                ..Nl4dOptions::default()
+            }),
+            ..test_plane_options(r)
+        }
+    }
+
+    /// The property that would have caught the original random-access
+    /// bug directly: with window-local estimation on and `sigma`
+    /// automatic, a `reseed` for a mid-clip frame matches the streaming
+    /// path's own output for that frame bit-for-bit. The mirror of
+    /// [`nl4d_reseed_matches_the_streaming_output_mid_clip`], but with
+    /// the noise estimator actually exercised instead of sidestepped.
+    #[test]
+    fn nl4d_windowed_reseed_matches_the_streaming_output_mid_clip() {
+        let opts = nl4d_windowed_plane_options(2);
+        let frames = ramp_clip(&layout(), 16);
+        let streamed = stream_all(&opts, &frames);
+
+        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let k = 8;
+        let span = d.window_span();
+        let got = d.reseed(&window_of_span(&frames, k, span)).unwrap();
+
+        assert_eq!(got.y, streamed[k].y);
+        assert_eq!(got.u, streamed[k].u);
+        assert_eq!(got.v, streamed[k].v);
+    }
+
+    /// The clip-edge mirror of
+    /// [`nl4d_windowed_reseed_matches_the_streaming_output_mid_clip`],
+    /// covering both ends of the clip the way
+    /// [`nl4d_reseed_matches_the_streaming_output_at_both_clip_edges`]
+    /// does for the sigma-pinned case.
+    #[test]
+    fn nl4d_windowed_reseed_matches_the_streaming_output_at_both_clip_edges() {
+        let opts = nl4d_windowed_plane_options(2);
+        let frames = ramp_clip(&layout(), 16);
+        let streamed = stream_all(&opts, &frames);
+        let last = frames.len() - 1;
+
+        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let span = d.window_span();
+        let got = d.reseed(&window_of_span(&frames, last, span)).unwrap();
+        assert_eq!(got.y, streamed[last].y, "luma mismatch at the ahead edge");
+        assert_eq!(got.u, streamed[last].u, "u mismatch at the ahead edge");
+        assert_eq!(got.v, streamed[last].v, "v mismatch at the ahead edge");
+
+        // The same leading-edge padding difference
+        // `nl4d_reseed_matches_the_streaming_output_at_both_clip_edges`
+        // documents, unrelated to noise estimation: `reseed` fills the
+        // whole `behind` span by repeating the clip's first frame, a
+        // fresh stream primes only `radius` duplicates of it.
+        const BEHIND_EDGE_TOLERANCE: i32 = 8;
+        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let got = d.reseed(&window_of_span(&frames, 0, span)).unwrap();
+        let luma_diff = max_abs_diff(&got.y, &streamed[0].y);
+        assert!(
+            luma_diff <= BEHIND_EDGE_TOLERANCE,
+            "luma at the behind edge (k=0) drifted too far from streaming: max abs diff {luma_diff}"
+        );
+    }
+
+    /// With window-local estimation on and `sigma` automatic, the fast
+    /// path and the reseed path must compute the same sigma for the
+    /// same window, so their outputs agree: a `reseed` at `k` followed
+    /// by an ordinary `push`/`recv` for `k + 1` must match a `reseed`
+    /// targeted directly at `k + 1` on a fresh denoiser.
+    ///
+    /// This is the property window-local estimation exists for. Without
+    /// it, the fast path keeps folding history the reseed path never
+    /// sees, so the two disagree even though both look at the same
+    /// window of real content.
+    #[test]
+    fn nl4d_windowed_fast_path_agrees_with_reseed_at_the_next_frame() {
+        let opts = nl4d_windowed_plane_options(2);
+        let frames = ramp_clip(&layout(), 16);
+        let k = 8usize;
+
+        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let span = d.window_span();
+        d.reseed(&window_of_span(&frames, k, span)).unwrap();
+        d.push(&frames[k + 1 + span.ahead]).unwrap();
+        let via_fast_path = d.recv().unwrap().expect("frame k + 1");
+
+        let mut fresh = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let via_reseed = fresh.reseed(&window_of_span(&frames, k + 1, span)).unwrap();
+
+        assert_eq!(via_fast_path.y, via_reseed.y);
+        assert_eq!(via_fast_path.u, via_reseed.u);
+        assert_eq!(via_fast_path.v, via_reseed.v);
+    }
+
+    /// The property that actually reproduces the VapourSynth plugin
+    /// harness's `random_access_matches_sequential_access_nl4d`
+    /// end-to-end, at the core level: one long-lived `PlanarDenoiser`
+    /// driven through a shuffled access order with the plugin's own
+    /// hybrid fast-path/`reseed` policy, every produced frame compared
+    /// against a true continuous stream.
+    ///
+    /// A single reseed, or a reseed followed by one push, both pass
+    /// under window-local estimation without exercising this: it took
+    /// a longer, repeatedly-reseeded run to show that
+    /// `noise_estimator_temporal_only`'s "keep the last trustworthy
+    /// reading between folds" behaviour survives `reset_stream_state`
+    /// unwindowed even when every other chain is windowed, so a
+    /// `reseed`'s short real-push run can land on "no trustworthy
+    /// reading yet" while a true stream at the same frame is still
+    /// coasting on one from many frames back.
+    ///
+    /// Frames within `span.behind` of the clip's start allow the same
+    /// small, already-documented tolerance
+    /// [`nl4d_reseed_matches_the_streaming_output_at_both_clip_edges`]
+    /// does, for the same reason: a fresh stream's own leading mirror
+    /// and a `reseed`'s explicit clamping both pad the clip's start at
+    /// once there, which true streaming's single mirror does not do.
+    /// That is a content-padding effect, unrelated to noise estimation,
+    /// and unrelated to what this test exists to catch.
+    #[test]
+    fn nl4d_windowed_repeated_out_of_order_access_matches_streaming() {
+        let opts = nl4d_windowed_plane_options(2);
+        let frames = ramp_clip(&layout(), 14);
+        let streamed = stream_all(&opts, &frames);
+        let last = frames.len() - 1;
+
+        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let span = d.window_span();
+        let mut last_n: Option<usize> = None;
+
+        // The VapourSynth plugin harness's exact shuffled order.
+        let order = [9usize, 0, 13, 4, 5, 6, 1, 12, 2, 11, 3, 10, 7, 8];
+        const NEAR_START_TOLERANCE: i32 = 8;
+
+        for &n in &order {
+            let fast = if last_n == Some(n.wrapping_sub(1)) && n > 0 {
+                let ahead = (n + span.ahead).min(last);
+                d.push(&frames[ahead]).unwrap();
+                d.recv().unwrap()
+            } else {
+                None
+            };
+            let got = match fast {
+                Some(out) => out,
+                None => d.reseed(&window_of_span(&frames, n, span)).unwrap(),
+            };
+            last_n = Some(n);
+
+            if n < span.behind {
+                let diff = max_abs_diff(&got.y, &streamed[n].y)
+                    .max(max_abs_diff(&got.u, &streamed[n].u))
+                    .max(max_abs_diff(&got.v, &streamed[n].v));
+                assert!(
+                    diff <= NEAR_START_TOLERANCE,
+                    "near-start frame n = {n} drifted too far from streaming: max abs diff {diff}"
+                );
+            } else {
+                assert_eq!(got.y, streamed[n].y, "luma mismatch at n = {n}");
+                assert_eq!(got.u, streamed[n].u, "u mismatch at n = {n}");
+                assert_eq!(got.v, streamed[n].v, "v mismatch at n = {n}");
+            }
+        }
     }
 }

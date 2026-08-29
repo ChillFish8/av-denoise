@@ -289,6 +289,7 @@ fn current_sigmas_broadcasts_a_pinned_sigma_override() {
             temporal_confidence: false,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
+            windowed_noise_estimation: false,
         }),
         ..temporal_params(0)
     };
@@ -317,6 +318,7 @@ fn current_sigmas_matches_the_median_estimator_once_it_folds() {
             temporal_confidence: false,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
+            windowed_noise_estimation: false,
         }),
         ..temporal_params(0)
     };

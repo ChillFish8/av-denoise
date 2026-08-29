@@ -179,6 +179,16 @@ pub struct Nl4dOptions {
     /// hard-threshold shrinkage at all. Defaults to `true`. See
     /// [`crate::nl4d::Nl4dParams::confidence_variance`].
     pub confidence_variance: bool,
+    /// Estimates noise fresh from each frame's own window instead of
+    /// smoothing it across the whole stream's history. Defaults to
+    /// `false`, matching every calibrated preset.
+    ///
+    /// `av-denoise-vs` turns this on unconditionally, because a
+    /// VapourSynth filter has to return the same pixels for a frame no
+    /// matter what order frames were requested in, and history-dependent
+    /// estimation breaks that guarantee under random access. See
+    /// [`HqParams::windowed_noise_estimation`].
+    pub windowed_noise_estimation: bool,
 }
 
 impl Default for Nl4dOptions {
@@ -200,6 +210,7 @@ impl Default for Nl4dOptions {
             c_min: defaults.c_min,
             mismatch_scale: defaults.mismatch_scale,
             confidence_variance: defaults.confidence_variance,
+            windowed_noise_estimation: false,
         }
     }
 }
@@ -217,6 +228,7 @@ impl Nl4dOptions {
             sigma_scale: self.sigma_scale,
             thsad_scale: self.thsad_scale,
             temporal_confidence: true,
+            windowed_noise_estimation: self.windowed_noise_estimation,
             ..HqParams::default()
         }
     }
@@ -269,6 +281,105 @@ fn resolve_lambda_ht(opts: &Nl4dOptions, channels: ChannelMode) -> Result<f32, S
     let lambda_ht = opts.lambda_ht.unwrap_or_else(|| nl4d_default_lambda_ht(channels));
 
     Ok(lambda_ht * opts.lambda_ht_scale)
+}
+
+/// Speed vs quality dial.
+///
+/// Each denoising family reads the same dial and fills in its own knobs
+/// from it. For `nlmeans` that is [`nlmeans_variant_for`],
+/// [`nlmeans_temporal_radius_for`], and [`nlmeans_search_radius_for`].
+/// For `nl4d` it is [`nl4d_temporal_radius_for`] and
+/// [`nl4d_spatial_radius_for`].
+///
+/// Both front ends parse the same names from this one type, so a preset
+/// resolves to the same dials everywhere it is used.
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, strum_macros::EnumString)]
+#[strum(ascii_case_insensitive)]
+pub enum Preset {
+    /// Fastest and lowest quality.
+    Veryfast,
+    /// One step up from `veryfast`.
+    Fast,
+    /// The default, favouring quality over speed.
+    #[default]
+    Base,
+    /// One step down from `veryslow`.
+    Slow,
+    /// Slowest and highest quality.
+    Veryslow,
+}
+
+/// Which nlmeans implementation a preset, or an explicit choice, selects.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, strum_macros::EnumString)]
+#[strum(ascii_case_insensitive)]
+pub enum NlmeansVariant {
+    /// The fast path. Fixed weighting, no noise measurement.
+    Fast,
+    /// Quality focused. Calibrates its weighting to the noise level,
+    /// measured automatically per frame.
+    Hq,
+}
+
+/// Which [`NlmeansVariant`] a preset runs.
+pub fn nlmeans_variant_for(preset: Preset) -> NlmeansVariant {
+    match preset {
+        Preset::Veryfast => NlmeansVariant::Fast,
+        Preset::Fast | Preset::Base | Preset::Slow | Preset::Veryslow => NlmeansVariant::Hq,
+    }
+}
+
+/// How many neighbouring frames on each side `nlmeans` looks at, at a
+/// preset.
+pub fn nlmeans_temporal_radius_for(preset: Preset) -> u32 {
+    match preset {
+        Preset::Veryfast => 0,
+        Preset::Fast => 1,
+        Preset::Base => 2,
+        Preset::Slow => 4,
+        Preset::Veryslow => 8,
+    }
+}
+
+/// How far `nlmeans` looks for similar patches inside a frame, at a
+/// preset.
+pub fn nlmeans_search_radius_for(preset: Preset) -> u32 {
+    match preset {
+        Preset::Veryfast | Preset::Fast | Preset::Base => 2,
+        Preset::Slow | Preset::Veryslow => 4,
+    }
+}
+
+/// How far the temporal window reaches at each preset, for `nl4d`.
+///
+/// Unlike `nlmeans`, `veryfast` keeps a 1-frame window rather than
+/// dropping to 0, because nl4d has nothing to do without neighbouring
+/// frames to group against.
+pub fn nl4d_temporal_radius_for(preset: Preset) -> u32 {
+    match preset {
+        Preset::Veryfast | Preset::Fast => 1,
+        Preset::Base => 2,
+        Preset::Slow => 4,
+        Preset::Veryslow => 8,
+    }
+}
+
+/// How wide the centre frame's candidate search is at each preset, for
+/// `nl4d`.
+///
+/// `veryfast` shares its temporal radius with `fast`, so this is what
+/// separates them. The window covers `(2 * radius + 1)^2` positions, so
+/// 6 searches a little over half the candidates 9 does.
+///
+/// Every preset from `fast` up uses the library default. Widening it
+/// further at the slow end costs quadratically and has not been measured
+/// to be worth it.
+pub fn nl4d_spatial_radius_for(preset: Preset) -> u32 {
+    match preset {
+        Preset::Veryfast => 6,
+        Preset::Fast | Preset::Base | Preset::Slow | Preset::Veryslow => {
+            Nl4dOptions::default().spatial_radius
+        },
+    }
 }
 
 /// Whether a frame is cleaned on its own or alongside its neighbours.
@@ -397,6 +508,10 @@ enum Engine<R: Runtime> {
 }
 
 impl<R: Runtime> Engine<R> {
+    fn is_nl4d(&self) -> bool {
+        matches!(self, Self::Nl4d(_))
+    }
+
     fn push_frame(&mut self, frame: &[f32]) {
         match self {
             Self::Nlm(d) => d.push_frame(frame),
@@ -488,6 +603,19 @@ enum Backend {
     Wgpu(Engine<cubecl::wgpu::WgpuRuntime>),
 }
 
+impl Backend {
+    fn is_nl4d(&self) -> bool {
+        match self {
+            #[cfg(feature = "cuda")]
+            Self::Cuda(e) => e.is_nl4d(),
+            #[cfg(feature = "rocm")]
+            Self::Rocm(e) => e.is_nl4d(),
+            #[cfg(any(feature = "vulkan", feature = "metal"))]
+            Self::Wgpu(e) => e.is_nl4d(),
+        }
+    }
+}
+
 enum BackendPending {
     #[cfg(feature = "cuda")]
     Cuda(Pending<cubecl::cuda::CudaRuntime>),
@@ -517,6 +645,32 @@ impl BackendPending {
 /// Going past it would reuse the oldest pending frame's output handle
 /// and quietly corrupt the results.
 pub const MAX_PENDING: usize = 2;
+
+/// How many source frames a windowed operation needs behind and ahead
+/// of its target frame, target frame itself not counted in either
+/// number.
+///
+/// `reseed` needs exactly `behind + 1 + ahead` frames, oldest first,
+/// with the target frame sitting at index `behind`. This is what tells
+/// a caller like `reseed` how wide a window to build, and it varies by
+/// algorithm because nl4d's own cross-frame accumulator needs more
+/// forward context than the NLM algorithms do. See
+/// [`Denoiser::window_span`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowSpan {
+    /// How many frames older than the target the window must include.
+    pub behind: usize,
+    /// How many frames newer than the target the window must include.
+    pub ahead: usize,
+}
+
+impl WindowSpan {
+    /// The full window size this span describes, target frame
+    /// included: `behind + 1 + ahead`.
+    pub fn frame_count(&self) -> usize {
+        self.behind + 1 + self.ahead
+    }
+}
 
 /// A stateful denoiser that cleans a stream of frames.
 ///
@@ -653,6 +807,36 @@ impl Denoiser {
     /// The temporal radius the resolved parameters run at.
     pub fn temporal_radius(&self) -> u32 {
         self.temporal_radius
+    }
+
+    /// How many frames behind and ahead of a target frame this
+    /// denoiser needs pushed, in order, to produce that frame's
+    /// output through [`PlanarDenoiser::reseed`](crate::PlanarDenoiser::reseed).
+    ///
+    /// Both NLM algorithms only ever need their own `2 * radius + 1`
+    /// sliding window, symmetric around the target frame:
+    /// `WindowSpan { behind: radius, ahead: radius }`.
+    ///
+    /// nl4d's cross-frame accumulator scatters every pass's
+    /// contribution across the `2 * radius + 1` frames the pass
+    /// reaches, and a frame's own region only starts collecting once
+    /// the pass that first reaches it, the one centred `radius` frames
+    /// behind it, has run. That earliest pass is itself only real once
+    /// the front end's own window is full at that centre, which needs
+    /// `radius` more frames behind it again. So nl4d needs the target's
+    /// own `radius`-wide neighbourhood doubled on both sides:
+    /// `WindowSpan { behind: 2 * radius, ahead: 2 * radius }`.
+    pub fn window_span(&self) -> WindowSpan {
+        let radius = self.temporal_radius as usize;
+        let span = if self.backend.is_nl4d() {
+            2 * radius
+        } else {
+            radius
+        };
+        WindowSpan {
+            behind: span,
+            ahead: span,
+        }
     }
 
     /// Uploads one frame into the temporal window.
@@ -1455,6 +1639,41 @@ mod tests {
             Err(other) => panic!("expected DenoiserError::Other, got {other:?}"),
             Ok(_) => panic!("expected a rejection, got Ok"),
         }
+    }
+
+    /// Both NLM algorithms only need a symmetric `2r+1` window, so
+    /// `window_span` must report the same radius on both sides.
+    #[test]
+    fn window_span_is_symmetric_for_nlmeans() {
+        let opts = DenoiserOptions::builder()
+            .channel_mode(ChannelMode::Luma)
+            .mode(DenoisingMode::Temporal { radius: 3 })
+            .algorithm(Algorithm::Nlmeans(NlmeansOptions::default()))
+            .build();
+        let d = Denoiser::create(&[Accelerator::Vulkan], &Device::Default, 16, 16, opts)
+            .expect("denoiser construction failed");
+
+        let span = d.window_span();
+        assert_eq!(span.behind, 3, "behind should equal the temporal radius");
+        assert_eq!(span.ahead, 3, "ahead should equal the temporal radius");
+    }
+
+    /// nl4d's cross-frame accumulator needs the target's own `radius`
+    /// neighbourhood doubled on both sides, so both `behind` and
+    /// `ahead` must come out to `2 * radius`.
+    #[test]
+    fn window_span_is_doubled_on_both_sides_for_nl4d() {
+        let opts = DenoiserOptions::builder()
+            .channel_mode(ChannelMode::Luma)
+            .mode(DenoisingMode::Temporal { radius: 3 })
+            .algorithm(Algorithm::Nl4d(Nl4dOptions::default()))
+            .build();
+        let d = Denoiser::create(&[Accelerator::Vulkan], &Device::Default, 16, 16, opts)
+            .expect("nl4d denoiser construction failed");
+
+        let span = d.window_span();
+        assert_eq!(span.behind, 6, "behind should equal 2 * the temporal radius");
+        assert_eq!(span.ahead, 6, "ahead should equal 2 * the temporal radius");
     }
 
     #[test]

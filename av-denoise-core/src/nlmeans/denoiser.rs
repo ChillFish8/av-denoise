@@ -255,6 +255,12 @@ pub struct NlmDenoiser<R: Runtime> {
     /// yet" and falls back to `noise_estimator_low_unboosted` for that
     /// case.
     ///
+    /// With `hq.windowed_noise_estimation` set, a fold with no
+    /// trustworthy sample clears this estimator instead of leaving it
+    /// where it was: "keeps going between folds" is itself a form of
+    /// history carried past the current window, the same thing
+    /// window-local estimation exists to remove from the other chains.
+    ///
     /// It is inert under the same condition as `noise_estimator`.
     pub(super) noise_estimator_temporal_only: NoiseEstimator,
 
@@ -1100,6 +1106,17 @@ impl<R: Runtime> NlmDenoiser<R> {
     ///
     /// It stays unset on the fast path and with a fixed sigma, because
     /// no temporal sample ever arrives there.
+    ///
+    /// # Window-local estimation
+    ///
+    /// With `hq.windowed_noise_estimation` set, every chain and
+    /// `rho_smoothed` take this fold's own sample outright instead of
+    /// blending it into their running state, the same way each does for
+    /// its very first sample. `noise_estimator_temporal_only` also stops
+    /// keeping its last trustworthy reading on a fold that lacks one and
+    /// clears instead, since that "keep going" behaviour is itself a
+    /// form of cross-window history. See
+    /// [`crate::nlmeans::HqParams::windowed_noise_estimation`].
     fn fold_noise_estimate(
         &mut self,
         data: &[f32],
@@ -1118,6 +1135,12 @@ impl<R: Runtime> NlmDenoiser<R> {
         let mut raw_low_unboosted = imm_low;
         let mut raw_temporal_only: Option<[f32; 3]> = None;
 
+        // Resolved once per fold rather than re-read per estimator
+        // below, and `false` on every call the default configuration
+        // makes, since `hq.windowed_noise_estimation` is `false` unless
+        // a caller set it. See `HqParams::windowed_noise_estimation`.
+        let windowed = self.params.hq.is_some_and(|hq| hq.windowed_noise_estimation);
+
         if let Some(sample) = temporal {
             let factor = correlation_factor(sample.rho);
             for c in 0..channels {
@@ -1126,10 +1149,16 @@ impl<R: Runtime> NlmDenoiser<R> {
                 raw_low_unboosted[c] = raw_low_unboosted[c].max(sample.sigma_low[c]);
             }
             raw_temporal_only = Some(sample.sigma_low);
-            self.rho_smoothed = Some(match self.rho_smoothed {
-                None => sample.rho,
-                Some(prev) => EMA_ALPHA * sample.rho + (1.0 - EMA_ALPHA) * prev,
-            });
+            self.rho_smoothed = Some(
+                if windowed {
+                    sample.rho
+                } else {
+                    match self.rho_smoothed {
+                        None => sample.rho,
+                        Some(prev) => EMA_ALPHA * sample.rho + (1.0 - EMA_ALPHA) * prev,
+                    }
+                },
+            );
         }
 
         // The user's nudge on the measured noise level. It applies
@@ -1151,19 +1180,30 @@ impl<R: Runtime> NlmDenoiser<R> {
             }
         }
 
-        let updated = self.noise_estimator.update(&raw[..channels]);
+        let updated = self.noise_estimator.update(&raw[..channels], windowed);
         let mut smoothed = [0.0f32; 3];
         smoothed[..channels].copy_from_slice(updated);
 
-        let updated_low = self.noise_estimator_low.update(&raw_low[..channels]);
+        let updated_low = self.noise_estimator_low.update(&raw_low[..channels], windowed);
         let mut smoothed_low = [0.0f32; 3];
         smoothed_low[..channels].copy_from_slice(updated_low);
 
         self.noise_estimator_low_unboosted
-            .update(&raw_low_unboosted[..channels]);
+            .update(&raw_low_unboosted[..channels], windowed);
 
-        if let Some(raw_t) = raw_temporal_only {
-            self.noise_estimator_temporal_only.update(&raw_t[..channels]);
+        match raw_temporal_only {
+            Some(raw_t) => {
+                self.noise_estimator_temporal_only
+                    .update(&raw_t[..channels], windowed);
+            },
+            // Window-local estimation must not let an earlier push's
+            // trustworthy reading leak into a fold that has none of its
+            // own, or the target frame's result would depend on how
+            // many pushes preceded it in this call, the same history
+            // dependence window-local estimation exists to remove from
+            // the other chains. See `noise_estimator_temporal_only`.
+            None if windowed => self.noise_estimator_temporal_only.reset(),
+            None => {},
         }
 
         let eff = sigma_eff(&smoothed[..channels], self.params.channels);

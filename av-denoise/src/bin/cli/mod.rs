@@ -8,7 +8,6 @@ mod nlmeans;
 use av_denoise::accelerate::{Accelerator, get_default_accelerators};
 use av_denoise::{ChannelIntent, Device, PlaneOptions};
 use clap::{Parser, Subcommand};
-use strum_macros::EnumString;
 
 pub use self::common::CommonArgs;
 pub use self::input::InputSource;
@@ -16,6 +15,7 @@ pub use self::list_devices::run_list_devices;
 pub use self::motion::MotionArgs;
 pub use self::nl4d::Nl4dArgs;
 pub use self::nlmeans::NlmeansArgs;
+pub use av_denoise::Preset;
 
 /// The options `main` runs a denoising pass with.
 ///
@@ -27,27 +27,6 @@ pub struct RunOptions {
     pub planes: PlaneOptions,
     /// Draws the denoising progress bar for file input.
     pub progress: bool,
-}
-
-/// Speed vs quality dial.
-///
-/// Each denoising family reads the same dial and fills in its own knobs
-/// from it. For `nlmeans` that is the variant, the temporal radius, and
-/// the search radius. For `nl4d` it is the temporal radius alone.
-#[derive(Debug, Copy, Clone, Default, EnumString)]
-#[strum(ascii_case_insensitive)]
-pub enum Preset {
-    /// Fastest and lowest quality.
-    Veryfast,
-    /// One step up from `veryfast`.
-    Fast,
-    /// The default, favouring quality over speed.
-    #[default]
-    Base,
-    /// One step down from `veryslow`.
-    Slow,
-    /// Slowest and highest quality.
-    Veryslow,
 }
 
 /// Which planes to clean up.

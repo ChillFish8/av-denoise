@@ -120,6 +120,7 @@ fn push_frame_with_reference_seeds_noise_estimate_on_first_frame() {
             temporal_confidence: true,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
+            windowed_noise_estimation: false,
         }),
     };
     let mut d = NlmDenoiser::<R>::new(&client, params, w, h);

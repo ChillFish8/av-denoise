@@ -1,27 +1,19 @@
 use av_denoise::{
-    DEFAULT_PILOT_STRENGTH_SCALE,
     DenoisingMode,
     MotionCompensationMode,
     NlmTuning,
     NlmeansHqOptions,
     NlmeansOptions,
+    NlmeansVariant as Variant,
     PlaneOptions,
     PrefilterMode,
+    nlmeans_search_radius_for,
+    nlmeans_temporal_radius_for,
+    nlmeans_variant_for,
+    parse_prefilter,
 };
-use strum_macros::EnumString;
 
 use super::{Args, CommonArgs, MotionArgs, Preset, RunOptions, resolve_channel_intent};
-
-/// Which non-local means variant to run.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, EnumString)]
-#[strum(ascii_case_insensitive)]
-pub enum Variant {
-    /// The fast path. Fixed weighting, no noise measurement.
-    Fast,
-    /// Quality focused. Calibrates its weighting to the noise level,
-    /// measured automatically per frame.
-    Hq,
-}
 
 #[derive(Debug, Clone, clap::Args)]
 pub struct NlmeansArgs {
@@ -232,6 +224,17 @@ pub struct NlmeansArgs {
     #[arg(long)]
     pub motion_compensation: bool,
 
+    /// Estimates noise from a local window instead of a temporal EMA
+    /// over stream history.
+    ///
+    /// Experimental measurement switch for comparing the two estimators
+    /// on real footage. Not a committed public interface. Off by
+    /// default, which keeps the temporal EMA every calibrated preset
+    /// assumes. Only applies to `--variant hq`, since `fast` never
+    /// measures noise.
+    #[arg(long, hide = true)]
+    pub windowed_noise_estimation: bool,
+
     #[command(flatten)]
     pub motion: MotionArgs,
 }
@@ -249,11 +252,13 @@ impl NlmeansArgs {
     /// Fills the unset dial-driven flags in from `preset`.
     pub fn resolve_preset(&self, preset: Preset) -> ResolvedPreset {
         ResolvedPreset {
-            variant: self.variant.unwrap_or_else(|| variant_for(preset)),
+            variant: self.variant.unwrap_or_else(|| nlmeans_variant_for(preset)),
             temporal_radius: self
                 .temporal_radius
-                .unwrap_or_else(|| temporal_radius_for(preset)),
-            search_radius: self.search_radius.unwrap_or_else(|| search_radius_for(preset)),
+                .unwrap_or_else(|| nlmeans_temporal_radius_for(preset)),
+            search_radius: self
+                .search_radius
+                .unwrap_or_else(|| nlmeans_search_radius_for(preset)),
         }
     }
 
@@ -271,6 +276,13 @@ impl NlmeansArgs {
 
         match resolved.variant {
             Variant::Fast => {
+                if self.windowed_noise_estimation {
+                    anyhow::bail!(
+                        "--windowed-noise-estimation has no effect on --variant fast, which \
+                         never measures noise; select --variant hq instead"
+                    );
+                }
+
                 if self.hq_sigma.is_some()
                     || self.hq_no_auto_strength
                     || self.hq_no_noise_floor
@@ -306,6 +318,13 @@ impl NlmeansArgs {
                         temporal_confidence: !self.hq_no_temporal_confidence,
                         thsad_scale: self.hq_thsad_scale.unwrap_or(1.0),
                         sigma_scale: self.hq_sigma_scale.unwrap_or(1.0),
+                        // The CLI keeps the temporal EMA every
+                        // calibrated preset assumes by default. Only
+                        // `av-denoise-vs` needs window-local estimation,
+                        // for random-access determinism.
+                        // `--windowed-noise-estimation` exists to
+                        // measure the difference on real footage.
+                        windowed_noise_estimation: self.windowed_noise_estimation,
                     },
                 }))
             },
@@ -382,70 +401,9 @@ impl NlmeansArgs {
     }
 }
 
-fn variant_for(preset: Preset) -> Variant {
-    match preset {
-        Preset::Veryfast => Variant::Fast,
-        Preset::Fast | Preset::Base | Preset::Slow | Preset::Veryslow => Variant::Hq,
-    }
-}
-
-fn temporal_radius_for(preset: Preset) -> u32 {
-    match preset {
-        Preset::Veryfast => 0,
-        Preset::Fast => 1,
-        Preset::Base => 2,
-        Preset::Slow => 4,
-        Preset::Veryslow => 8,
-    }
-}
-
-fn search_radius_for(preset: Preset) -> u32 {
-    match preset {
-        Preset::Veryfast | Preset::Fast | Preset::Base => 2,
-        Preset::Slow | Preset::Veryslow => 4,
-    }
-}
-
-fn parse_prefilter(s: &str) -> Result<PrefilterMode, anyhow::Error> {
-    if s == "none" || s.is_empty() {
-        return Ok(PrefilterMode::None);
-    }
-
-    if s == "nlm" {
-        return Ok(PrefilterMode::NlmSpatial {
-            strength_scale: DEFAULT_PILOT_STRENGTH_SCALE,
-        });
-    }
-
-    if let Some(rest) = s.strip_prefix("nlm:") {
-        let strength_scale: f32 = rest
-            .trim()
-            .parse()
-            .map_err(|_| anyhow::anyhow!("--prefilter nlm expects a number: nlm:<strength_scale>"))?;
-
-        return Ok(PrefilterMode::NlmSpatial { strength_scale });
-    }
-
-    if let Some(rest) = s.strip_prefix("bilateral:") {
-        let parts: Vec<&str> = rest.split(',').collect();
-
-        if parts.len() != 2 {
-            anyhow::bail!("--prefilter bilateral expects two values: bilateral:<sigma_s>,<sigma_r>");
-        }
-
-        let sigma_s: f32 = parts[0].trim().parse()?;
-        let sigma_r: f32 = parts[1].trim().parse()?;
-
-        return Ok(PrefilterMode::Bilateral { sigma_s, sigma_r });
-    }
-
-    anyhow::bail!(
-        "unknown prefilter '{s}', expected `none`, `nlm[:<strength_scale>]`, or `bilateral:<sigma_s>,<sigma_r>`"
-    )
-}
-
 #[cfg(test)]
 mod tests {
+    use av_denoise::DEFAULT_PILOT_STRENGTH_SCALE;
     use clap::Parser;
 
     use super::super::{Args, CliChannelMode, Command, InputSource, Preset};
