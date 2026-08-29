@@ -178,6 +178,12 @@ pub struct NlmDenoiser<R: Runtime> {
     /// and a fixed `sigma_override` leave it `None` for the whole
     /// stream. That reads as zero, meaning white noise and no
     /// correction.
+    ///
+    /// With `hq.windowed_noise_estimation` set, a fold with no temporal
+    /// sample clears this to `None` instead of leaving it where it was,
+    /// the same reasoning `noise_estimator_temporal_only` documents:
+    /// coasting on an older window's reading is itself a form of
+    /// cross-window history.
     pub(super) rho_smoothed: Option<f32>,
     /// One noise-floor offset per search candidate, for the weighting
     /// kernels that compare a frame against itself.
@@ -1112,10 +1118,11 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// With `hq.windowed_noise_estimation` set, every chain and
     /// `rho_smoothed` take this fold's own sample outright instead of
     /// blending it into their running state, the same way each does for
-    /// its very first sample. `noise_estimator_temporal_only` also stops
-    /// keeping its last trustworthy reading on a fold that lacks one and
-    /// clears instead, since that "keep going" behaviour is itself a
-    /// form of cross-window history. See
+    /// its very first sample. `noise_estimator_temporal_only` and
+    /// `rho_smoothed` also stop keeping their last reading on a fold
+    /// that has no temporal sample of its own, clearing instead, since
+    /// that "keep going" behaviour is itself a form of cross-window
+    /// history. See
     /// [`crate::nlmeans::HqParams::windowed_noise_estimation`].
     fn fold_noise_estimate(
         &mut self,
@@ -1159,6 +1166,16 @@ impl<R: Runtime> NlmDenoiser<R> {
                     }
                 },
             );
+        } else if windowed {
+            // Window-local estimation must not let an earlier push's
+            // correlation reading leak into a fold that has no temporal
+            // sample of its own, the same reasoning that gates
+            // `noise_estimator_temporal_only` above. Without this,
+            // `rho_smoothed` keeps whatever an earlier window last
+            // measured, so `spatial_offset_lut` would depend on how
+            // many pushes preceded this fold rather than only the
+            // current window's own content.
+            self.rho_smoothed = None;
         }
 
         // The user's nudge on the measured noise level. It applies

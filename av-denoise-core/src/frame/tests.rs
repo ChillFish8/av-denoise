@@ -8,6 +8,7 @@ use super::*;
 #[cfg(feature = "vulkan")]
 mod reseed {
     use super::*;
+    use crate::HqParams;
     use crate::accelerate::Accelerator;
 
     fn layout() -> FrameLayout {
@@ -592,6 +593,245 @@ mod reseed {
         assert_eq!(via_fast_path.y, via_reseed.y);
         assert_eq!(via_fast_path.u, via_reseed.u);
         assert_eq!(via_fast_path.v, via_reseed.v);
+    }
+
+    /// A `PlaneOptions` identical to [`test_plane_options`] except the
+    /// algorithm is `NlmeansHq` with window-local estimation on and
+    /// `sigma` left on automatic estimation, the nlmeans mirror of
+    /// [`nl4d_windowed_plane_options`].
+    fn nlmeans_hq_windowed_plane_options(r: u32) -> PlaneOptions {
+        PlaneOptions {
+            algorithm: Algorithm::NlmeansHq(NlmeansHqOptions {
+                nlm: NlmeansOptions::default(),
+                hq: HqParams {
+                    windowed_noise_estimation: true,
+                    ..HqParams::default()
+                },
+            }),
+            ..test_plane_options(r)
+        }
+    }
+
+    /// The nlmeans-hq mirror of
+    /// [`nl4d_windowed_reseed_matches_the_streaming_output_mid_clip`].
+    ///
+    /// With window-local estimation on and `sigma` automatic, a `reseed`
+    /// for a mid-clip frame must match the streaming path's own output
+    /// for that frame bit-for-bit. No core test exercised HQ with
+    /// automatic sigma under reseed before this, which is how a
+    /// VapourSynth plugin filter that returns different pixels for the
+    /// same frame depending on request order shipped unnoticed.
+    #[test]
+    fn nlmeans_hq_windowed_reseed_matches_the_streaming_output_mid_clip() {
+        let opts = nlmeans_hq_windowed_plane_options(2);
+        let frames = ramp_clip(&layout(), 16);
+        let streamed = stream_all(&opts, &frames);
+
+        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let k = 8;
+        let span = d.window_span();
+        let got = d.reseed(&window_of_span(&frames, k, span)).unwrap();
+
+        assert_eq!(got.y, streamed[k].y);
+        assert_eq!(got.u, streamed[k].u);
+        assert_eq!(got.v, streamed[k].v);
+    }
+
+    /// The nlmeans-hq mirror of
+    /// [`nl4d_windowed_reseed_matches_the_streaming_output_at_both_clip_edges`].
+    #[test]
+    fn nlmeans_hq_windowed_reseed_matches_the_streaming_output_at_both_clip_edges() {
+        let opts = nlmeans_hq_windowed_plane_options(2);
+        let frames = ramp_clip(&layout(), 16);
+        let streamed = stream_all(&opts, &frames);
+        let last = frames.len() - 1;
+
+        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let span = d.window_span();
+        let got = d.reseed(&window_of_span(&frames, last, span)).unwrap();
+        assert_eq!(got.y, streamed[last].y, "luma mismatch at the ahead edge");
+        assert_eq!(got.u, streamed[last].u, "u mismatch at the ahead edge");
+        assert_eq!(got.v, streamed[last].v, "v mismatch at the ahead edge");
+
+        const BEHIND_EDGE_TOLERANCE: i32 = 8;
+        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let got = d.reseed(&window_of_span(&frames, 0, span)).unwrap();
+        let luma_diff = max_abs_diff(&got.y, &streamed[0].y);
+        assert!(
+            luma_diff <= BEHIND_EDGE_TOLERANCE,
+            "luma at the behind edge (k=0) drifted too far from streaming: max abs diff {luma_diff}"
+        );
+    }
+
+    /// The nlmeans-hq mirror of
+    /// [`nl4d_windowed_repeated_out_of_order_access_matches_streaming`]:
+    /// one long-lived `PlanarDenoiser` driven through the VapourSynth
+    /// plugin harness's exact shuffled access order with its hybrid
+    /// fast-path/`reseed` policy, every produced frame compared against
+    /// a true continuous stream.
+    ///
+    /// A single reseed, or a reseed followed by one push, both pass
+    /// under window-local estimation without exercising this, the same
+    /// way they did for nl4d: it takes a longer, repeatedly-reseeded run
+    /// to expose a carrier that survives `reset_stream_state` outside
+    /// the windowed gate.
+    #[test]
+    fn nlmeans_hq_windowed_repeated_out_of_order_access_matches_streaming() {
+        let opts = nlmeans_hq_windowed_plane_options(2);
+        let frames = ramp_clip(&layout(), 14);
+        let streamed = stream_all(&opts, &frames);
+        let last = frames.len() - 1;
+
+        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let span = d.window_span();
+        let mut last_n: Option<usize> = None;
+
+        // The VapourSynth plugin harness's exact shuffled order.
+        let order = [9usize, 0, 13, 4, 5, 6, 1, 12, 2, 11, 3, 10, 7, 8];
+        const NEAR_START_TOLERANCE: i32 = 8;
+
+        for &n in &order {
+            let fast = if last_n == Some(n.wrapping_sub(1)) && n > 0 {
+                let ahead = (n + span.ahead).min(last);
+                d.push(&frames[ahead]).unwrap();
+                d.recv().unwrap()
+            } else {
+                None
+            };
+            let got = match fast {
+                Some(out) => out,
+                None => d.reseed(&window_of_span(&frames, n, span)).unwrap(),
+            };
+            last_n = Some(n);
+
+            if n < span.behind {
+                let diff = max_abs_diff(&got.y, &streamed[n].y)
+                    .max(max_abs_diff(&got.u, &streamed[n].u))
+                    .max(max_abs_diff(&got.v, &streamed[n].v));
+                assert!(
+                    diff <= NEAR_START_TOLERANCE,
+                    "near-start frame n = {n} drifted too far from streaming: max abs diff {diff}"
+                );
+            } else {
+                assert_eq!(got.y, streamed[n].y, "luma mismatch at n = {n}");
+                assert_eq!(got.u, streamed[n].u, "u mismatch at n = {n}");
+                assert_eq!(got.v, streamed[n].v, "v mismatch at n = {n}");
+            }
+        }
+    }
+
+    /// The nlmeans-hq mirror of
+    /// [`nl4d_windowed_fast_path_agrees_with_reseed_at_the_next_frame`]:
+    /// a `reseed` at `k` followed by an ordinary `push`/`recv` for
+    /// `k + 1` must match a `reseed` targeted directly at `k + 1` on a
+    /// fresh denoiser.
+    #[test]
+    fn nlmeans_hq_windowed_fast_path_agrees_with_reseed_at_the_next_frame() {
+        let opts = nlmeans_hq_windowed_plane_options(2);
+        let frames = ramp_clip(&layout(), 16);
+        let k = 8usize;
+
+        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let span = d.window_span();
+        d.reseed(&window_of_span(&frames, k, span)).unwrap();
+        d.push(&frames[k + 1 + span.ahead]).unwrap();
+        let via_fast_path = d.recv().unwrap().expect("frame k + 1");
+
+        let mut fresh = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let via_reseed = fresh.reseed(&window_of_span(&frames, k + 1, span)).unwrap();
+
+        assert_eq!(via_fast_path.y, via_reseed.y);
+        assert_eq!(via_fast_path.u, via_reseed.u);
+        assert_eq!(via_fast_path.v, via_reseed.v);
+    }
+
+    /// Reproduces the VapourSynth plugin harness's own `render` hybrid
+    /// policy exactly: frame 0 goes through `reseed`, and every
+    /// subsequent frame goes through the fast `push`/`recv` path,
+    /// falling back to `reseed` only when `recv` yields nothing.
+    fn render_sequence(
+        d: &mut PlanarDenoiser,
+        frames: &[Planes],
+        span: WindowSpan,
+        order: &[usize],
+    ) -> Vec<Planes> {
+        let last = frames.len() - 1;
+        let mut last_n: Option<usize> = None;
+        let mut out = Vec::new();
+        for &n in order {
+            let fast = if last_n == Some(n.wrapping_sub(1)) && n > 0 {
+                let ahead = (n + span.ahead).min(last);
+                d.push(&frames[ahead]).unwrap();
+                d.recv().unwrap()
+            } else {
+                None
+            };
+            let got = match fast {
+                Some(out) => out,
+                None => d.reseed(&window_of_span(frames, n, span)).unwrap(),
+            };
+            last_n = Some(n);
+            out.push(got);
+        }
+        out
+    }
+
+    /// Mirrors `a_sequential_run_after_a_seek_stays_correct_nlmeans`
+    /// exactly: a `reseed` at frame 11 of a 14-frame clip, then two
+    /// fast-path frames, compared against the same `render` hybrid
+    /// policy run straight through from frame 0. This is the reference
+    /// the VapourSynth harness actually uses, unlike
+    /// [`stream_all`], which is a true continuous stream with no
+    /// `reseed` in it at all.
+    #[test]
+    fn nlmeans_hq_windowed_sequential_run_after_a_seek_stays_correct() {
+        let opts = nlmeans_hq_windowed_plane_options(2);
+        let frames = ramp_clip(&layout(), 14);
+
+        let mut linear = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let span = linear.window_span();
+        let linear_out = render_sequence(&mut linear, &frames, span, &(0..frames.len()).collect::<Vec<_>>());
+
+        let mut seeked = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let seeked_out = render_sequence(&mut seeked, &frames, span, &[11, 12, 13]);
+
+        for (i, n) in [12usize, 13].into_iter().enumerate() {
+            let got = &seeked_out[i + 1];
+            let want = &linear_out[n];
+            assert_eq!(got.y, want.y, "luma mismatch at n = {n}");
+            assert_eq!(got.u, want.u, "u mismatch at n = {n}");
+            assert_eq!(got.v, want.v, "v mismatch at n = {n}");
+        }
+    }
+
+    /// Diagnostic: same as
+    /// [`nlmeans_hq_windowed_sequential_run_after_a_seek_stays_correct`]
+    /// but at the VapourSynth harness's own clip size, 160x120.
+    #[test]
+    fn nlmeans_hq_windowed_sequential_run_after_a_seek_stays_correct_at_harness_size() {
+        let layout = FrameLayout {
+            width: 160,
+            height: 120,
+            subsampling: Subsampling::Yuv420,
+            depth: Depth::Eight,
+        };
+        let opts = nlmeans_hq_windowed_plane_options(2);
+        let frames = ramp_clip(&layout, 14);
+
+        let mut linear = PlanarDenoiser::create(&opts, layout).unwrap();
+        let span = linear.window_span();
+        let linear_out = render_sequence(&mut linear, &frames, span, &(0..frames.len()).collect::<Vec<_>>());
+
+        let mut seeked = PlanarDenoiser::create(&opts, layout).unwrap();
+        let seeked_out = render_sequence(&mut seeked, &frames, span, &[11, 12, 13]);
+
+        for (i, n) in [12usize, 13].into_iter().enumerate() {
+            let got = &seeked_out[i + 1];
+            let want = &linear_out[n];
+            assert_eq!(got.y, want.y, "luma mismatch at n = {n}");
+            assert_eq!(got.u, want.u, "u mismatch at n = {n}");
+            assert_eq!(got.v, want.v, "v mismatch at n = {n}");
+        }
     }
 
     /// The property that actually reproduces the VapourSynth plugin
