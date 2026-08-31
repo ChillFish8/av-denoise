@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to build, e.g. 0.4.0-alpha3. Defaults to the Cargo.toml version."
+        description: "Version to build, e.g. 0.4.0-alpha4. Defaults to the Cargo.toml version."
         required: false
         type: string
 
