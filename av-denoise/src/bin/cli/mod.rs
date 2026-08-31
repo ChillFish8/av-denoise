@@ -5,6 +5,7 @@ mod motion;
 mod nl4d;
 mod nlmeans;
 
+pub use av_denoise::Preset;
 use av_denoise::accelerate::{Accelerator, get_default_accelerators};
 use av_denoise::{ChannelIntent, Device, PlaneOptions};
 use clap::{Parser, Subcommand};
@@ -15,7 +16,6 @@ pub use self::list_devices::run_list_devices;
 pub use self::motion::MotionArgs;
 pub use self::nl4d::Nl4dArgs;
 pub use self::nlmeans::NlmeansArgs;
-pub use av_denoise::Preset;
 
 /// The options `main` runs a denoising pass with.
 ///

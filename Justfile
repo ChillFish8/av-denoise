@@ -4,6 +4,12 @@ hello:
 format:
     cargo +nightly fmt --all
 
+# Lints all three crates, matching the feature sets `test-rust` uses. Pass `-- -D warnings` to fail on any lint.
+clippy *ARGS:
+    cargo clippy -p av-denoise-core --features vulkan --all-targets {{ARGS}}
+    cargo clippy -p av-denoise --features vulkan,binary --all-targets {{ARGS}}
+    cargo clippy -p av-denoise-vs --features vulkan --all-targets {{ARGS}}
+
 build *ARGS:
     cargo build -p av-denoise {{ARGS}}
 

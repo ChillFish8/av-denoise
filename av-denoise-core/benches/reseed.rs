@@ -2,7 +2,6 @@ use std::time::{Duration, Instant};
 
 use av_denoise_core::accelerate::Accelerator;
 use av_denoise_core::{
-    push_needs_retry,
     Algorithm,
     ChannelIntent,
     ChannelMode,
@@ -16,6 +15,7 @@ use av_denoise_core::{
     PlaneOptions,
     Planes,
     Subsampling,
+    push_needs_retry,
 };
 
 const W: u32 = 1920;

@@ -3,7 +3,15 @@ use std::time::{Duration, Instant};
 
 use av_denoise_core::nlmeans::kernels::{nlm_accumulate, nlm_bilateral, nlm_dist_2d_weight, nlm_finish};
 use av_denoise_core::nlmeans::prefilter::bilateral_radius;
-use av_denoise_core::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, NlmParams, Pending, PrefilterMode};
+use av_denoise_core::nlmeans::{
+    BLOCK_X,
+    BLOCK_Y,
+    ChannelMode,
+    NlmDenoiser,
+    NlmParams,
+    Pending,
+    PrefilterMode,
+};
 use cubecl::prelude::*;
 
 const W: u32 = 1920;
