@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{IsTerminal, stdout};
 use std::path::Path;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
@@ -12,6 +12,7 @@ use indicatif::ProgressBar;
 use y4m::Frame as Y4mFrame;
 
 use crate::cli::RunOptions;
+use crate::frame_index;
 use crate::progress::{self, denoise_bar_visible, denoise_progress_bar, scene_progress_bar};
 use crate::y4m_format::subsampling_to_y4m;
 
@@ -86,10 +87,17 @@ fn channel_budget(layout: FrameLayout, workers: usize) -> ChannelBudget {
 struct SceneLayout {
     layout: FrameLayout,
     framerate: Rational32,
+    /// Frames this run emits, being `raw_frames` less the phantom entries.
     total_frames: usize,
-    /// `scene_starts[i]` is the inclusive start frame of scene `i`. The
-    /// final entry is `total_frames` so scene `i` covers
-    /// `scene_starts[i] .. scene_starts[i + 1]`.
+    /// Frames the decoder hands over, phantom entries included. Every
+    /// one has to be read to keep the sequential decoder in step, even
+    /// though only `total_frames` of them are emitted.
+    raw_frames: usize,
+    /// Decoder frame numbers that carry no picture of their own. See
+    /// [`crate::frame_index`].
+    phantom: BTreeSet<usize>,
+    /// `scene_starts[i]` is the inclusive start frame of scene `i`, in  emitted frame numbers.
+    /// The final entry is `total_frames` so scene `i` covers `scene_starts[i]..scene_starts[i + 1]`.
     scene_starts: Vec<usize>,
 }
 
@@ -154,6 +162,19 @@ fn detect_scenes(input: &Path, visible: bool) -> Result<SceneLayout, anyhow::Err
         "running scene detection",
     );
 
+    // Read the index before decoding anything. This only inspects the
+    // metadata ffms2 already built, so it costs nothing.
+    let phantom = frame_index::read_index(&mut decoder)
+        .map(|index| frame_index::phantom_indices(&index))
+        .unwrap_or_default();
+
+    if !phantom.is_empty() {
+        tracing::info!(
+            dropped = phantom.len(),
+            "the decoder reports frames that carry no picture of their own, dropping them",
+        );
+    }
+
     let pb = scene_progress_bar(details.total_frames, visible);
     let on_progress = |frames_analyzed: usize, _keyframe_count: usize| {
         pb.set_position(frames_analyzed as u64);
@@ -177,13 +198,24 @@ fn detect_scenes(input: &Path, visible: bool) -> Result<SceneLayout, anyhow::Err
         scene_starts.insert(0, 0);
     }
 
-    let total_frames = detection.frame_count;
-    scene_starts.push(total_frames);
+    // Detection ran over every frame the decoder offers, so both the count and the boundaries
+    // are in decoder frame numbers. Both move into emitted frame numbers together.
+    let raw_frames = detection.frame_count;
+    scene_starts.push(raw_frames);
+
+    let scene_starts = frame_index::remap_scene_starts(&scene_starts, &phantom);
+    let total_frames = raw_frames - phantom.len();
+
+    if total_frames == 0 {
+        anyhow::bail!("{} holds no decodable frames", input.display());
+    }
 
     Ok(SceneLayout {
         layout,
         framerate: details.frame_rate,
         total_frames,
+        raw_frames,
+        phantom,
         scene_starts,
     })
 }
@@ -300,13 +332,11 @@ fn dispatch_frames(
 
     let mut scene_idx = 0usize;
     let mut next_boundary = scenes.scene_starts[1];
+    let mut g = 0u64;
 
-    for g in 0..scenes.total_frames {
-        while g >= next_boundary && scene_idx + 1 < scenes.scene_count() {
-            scene_idx += 1;
-            next_boundary = scenes.scene_starts[scene_idx + 1];
-        }
-
+    for raw in 0..scenes.raw_frames {
+        // Every frame is read, phantom or not. The decoder walks the file in order and has
+        // no way to be told to skip one.
         let planes = match scenes.layout.depth {
             Depth::Eight => {
                 let frame = decoder.read_video_frame::<u8>()?;
@@ -317,15 +347,30 @@ fn dispatch_frames(
                 planes_from_v_frame_u16(&frame, scenes.layout)
             },
         };
+
+        // A phantom frame repeats one of its neighbours. Emitting it would lengthen the output
+        // and shift everything after it, and feeding it to a worker would put a false
+        // still frame into the temporal window.
+        if scenes.phantom.contains(&raw) {
+            continue;
+        }
+
+        while g >= next_boundary as u64 && scene_idx + 1 < scenes.scene_count() {
+            scene_idx += 1;
+            next_boundary = scenes.scene_starts[scene_idx + 1];
+        }
+
         let target = scene_idx % workers;
 
         worker_txs[target]
             .send(WorkerMsg::Frame {
-                global_idx: g as u64,
+                global_idx: g,
                 scene_idx: scene_idx as u32,
                 planes,
             })
             .map_err(|_| anyhow::anyhow!("worker {target} disconnected"))?;
+
+        g += 1;
     }
 
     Ok(())

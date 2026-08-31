@@ -188,6 +188,7 @@ dependencies = [
  "av-denoise-core",
  "av-scenechange",
  "clap",
+ "ffms2-sys",
  "indicatif",
  "mimalloc",
  "strum",

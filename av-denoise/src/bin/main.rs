@@ -3,6 +3,7 @@ use tracing_subscriber::EnvFilter;
 
 mod cli;
 mod file_mode;
+mod frame_index;
 mod progress;
 mod stream_mode;
 mod y4m_format;
