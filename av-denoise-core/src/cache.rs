@@ -32,7 +32,8 @@
 //! ```
 
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Once, OnceLock};
 
 use cubecl::config::cache::CacheConfig;
 use cubecl::config::{CubeClRuntimeConfig, RuntimeConfig};
@@ -40,6 +41,9 @@ use cubecl::config::{CubeClRuntimeConfig, RuntimeConfig};
 /// The environment variable that overrides where compiled kernels are
 /// cached, or turns caching off.
 pub const COMPILATION_CACHE_ENV: &str = "AV_DENOISE_COMPILATION_CACHE";
+
+/// Where compiled kernels are cached, once an install has settled it.
+static CACHE_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 /// The directory name this crate uses inside the user's cache directory.
 const CACHE_DIR_NAME: &str = "av-denoise";
@@ -128,6 +132,60 @@ pub(crate) fn resolve_cache_location(
 /// Returns `Err` if something else has already read the global config,
 /// which usually means a CubeCL client was created first.
 pub fn install_compilation_cache() -> Result<Option<PathBuf>, CacheAlreadyInitialisedError> {
+    let path = install()?;
+
+    // Only an install that reached the config has a directory worth
+    // recording. `install` also answers `Ok(None)` for a directory it
+    // could not create, and latching that would leave
+    // `compilation_cache_dir` saying `None` for the rest of the process
+    // even if a later call succeeded.
+    if let Some(path) = &path {
+        let _ = CACHE_DIR.set(Some(path.clone()));
+    }
+
+    Ok(path)
+}
+
+/// Points CubeCL at a cache the first time it runs, and reports where.
+///
+/// Written for callers that are not a `main`, such as the VapourSynth
+/// plugin, where filter creation is the earliest hook there is and runs
+/// once per filter rather than once per process.
+///
+/// A failure to install is reported through `tracing` and then ignored,
+/// because a plugin that refuses to denoise is worse than one that
+/// recompiles. Failing here means something else configured CubeCL
+/// first, which may well have pointed it at a cache of its own. What is
+/// lost is knowing where that cache is, which is why this answers `None`
+/// rather than guessing.
+pub fn install_compilation_cache_once() -> Option<&'static Path> {
+    static ONCE: Once = Once::new();
+
+    ONCE.call_once(|| match install_compilation_cache() {
+        Ok(Some(path)) => tracing::info!(?path, "caching compiled kernels"),
+        Ok(None) => tracing::info!("kernel caching is off, every run recompiles"),
+        Err(err) => tracing::warn!(
+            %err,
+            "something else configured CubeCL first, leaving its kernel cache alone"
+        ),
+    });
+
+    compilation_cache_dir()
+}
+
+/// The directory compiled kernels are cached in.
+///
+/// `None` until an install succeeds, and `None` for good when caching is
+/// off. Callers that want to sit alongside the cache, such as
+/// [`WarmUp`](crate::WarmUp), have nowhere to put their own files until
+/// this answers.
+pub fn compilation_cache_dir() -> Option<&'static Path> {
+    CACHE_DIR.get()?.as_deref()
+}
+
+/// The install itself, split from the bookkeeping that records where
+/// the cache landed.
+fn install() -> Result<Option<PathBuf>, CacheAlreadyInitialisedError> {
     let location = resolve_cache_location(
         std::env::var_os(COMPILATION_CACHE_ENV).as_deref(),
         std::env::var_os("XDG_CACHE_HOME").as_deref(),

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use anyhow::{Error, Result, anyhow};
-use av_denoise_core::{FrameLayout, PlanarDenoiser, Planes, WindowSpan};
+use av_denoise_core::{FrameLayout, PlanarDenoiser, Planes, WarmUp, WindowSpan};
 use vapoursynth::core::CoreRef;
 use vapoursynth::plugins::{Filter, FrameContext};
 use vapoursynth::prelude::{API, FrameRef, FrameRefMut, Node, Property};
@@ -43,6 +43,33 @@ struct State {
     denoiser: PlanarDenoiser,
     /// The output frame index the pipeline is positioned after.
     last: Option<usize>,
+    /// The cold-cache queue place this filter holds, until the first
+    /// frame proves the kernels are compiled and cached.
+    ///
+    /// CubeCL compiles a kernel when it is first dispatched rather than
+    /// when the denoiser is built, so the place has to be held across a
+    /// frame and cannot be given up at the end of creation.
+    ///
+    /// A process that builds the filter and then renders nothing keeps
+    /// the place until it exits, and other workers wait out the queue's
+    /// limit before compiling for themselves. That needs a long lived
+    /// process holding a node it never pulls a frame from, which is rare
+    /// enough to accept.
+    warm_up: Option<WarmUp>,
+}
+
+impl State {
+    /// Gives up this filter's place in the cold-cache queue, now that a
+    /// frame has been through and every kernel it needs is compiled and
+    /// written to the cache.
+    ///
+    /// Does nothing after the first call, and nothing at all when the
+    /// filter never took a place.
+    fn finish_warm_up(&mut self) {
+        if let Some(warm_up) = self.warm_up.take() {
+            warm_up.finish();
+        }
+    }
 }
 
 /// A denoising filter backed by one [`PlanarDenoiser`] pipeline.
@@ -100,6 +127,14 @@ impl<'core> Denoise<'core> {
 
         let layout = layout_from_format(raw_format, width, height)?;
         let plane_options = plane_options_from(raw, algorithm_kind, layout)?;
+
+        // Av1an runs one of these per chunk, so without a cache every
+        // chunk pays the ten seconds it takes to compile the kernels.
+        // The queue below keeps the first wave of chunks from all paying
+        // it at once.
+        av_denoise_core::install_compilation_cache_once();
+        let warm_up = WarmUp::begin(av_denoise_core::kernel_key(&plane_options, layout));
+
         let denoiser = PlanarDenoiser::create(&plane_options, layout)?;
         let span = denoiser.window_span();
 
@@ -108,7 +143,11 @@ impl<'core> Denoise<'core> {
             layout,
             span,
             source_len: info.num_frames,
-            state: Mutex::new(State { denoiser, last: None }),
+            state: Mutex::new(State {
+                denoiser,
+                last: None,
+                warm_up,
+            }),
         })
     }
 
@@ -160,6 +199,7 @@ impl<'core> Denoise<'core> {
             state.denoiser.push(&fetch(ahead)?)?;
             if let Some(out) = state.denoiser.recv()? {
                 state.last = Some(n);
+                state.finish_warm_up();
                 return Ok(out);
             }
             // The stream did not yield, so fall through and rebuild.
@@ -169,6 +209,7 @@ impl<'core> Denoise<'core> {
 
         let out = state.denoiser.reseed(&window)?;
         state.last = Some(n);
+        state.finish_warm_up();
         Ok(out)
     }
 }

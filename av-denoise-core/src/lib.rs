@@ -16,8 +16,15 @@ pub mod nl4d;
 pub mod nlmeans;
 mod probe;
 pub mod sniff;
+pub mod warmup;
 
-pub use cache::{COMPILATION_CACHE_ENV, CacheAlreadyInitialisedError, install_compilation_cache};
+pub use cache::{
+    COMPILATION_CACHE_ENV,
+    CacheAlreadyInitialisedError,
+    compilation_cache_dir,
+    install_compilation_cache,
+    install_compilation_cache_once,
+};
 pub use denoiser::{
     Algorithm,
     Denoiser,
@@ -63,3 +70,4 @@ pub use nlmeans::{
     normalize,
     parse_prefilter,
 };
+pub use warmup::{WarmUp, kernel_key};
