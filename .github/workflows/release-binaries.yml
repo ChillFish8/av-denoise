@@ -1,0 +1,171 @@
+name: Release binaries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build, matching Cargo.toml, e.g. 0.4.0-alpha2"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  # The upstream MSVC build of FFMS2, the only prebuilt import library and headers
+  # published for Windows. Bump FFMS2_WINDOWS_VERSION and the archive name together.
+  FFMS2_WINDOWS_VERSION: "5.0"
+
+jobs:
+  resolve-version:
+    name: Resolve release version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve and check version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [ "${EVENT_NAME}" = "release" ]; then
+            version="${RELEASE_TAG}"
+          else
+            version="${DISPATCH_VERSION}"
+          fi
+
+          version="${version#v}"
+
+          if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'${version}' is not a valid semantic version (expected X.Y.Z or X.Y.Z-suffix)"
+            exit 1
+          fi
+
+          cargo_version="$(python3 -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('Cargo.toml').read_text())['workspace']['package']['version'])")"
+
+          if [ "${cargo_version}" != "${version}" ]; then
+            echo "::error::release tag ${version} does not match Cargo.toml ${cargo_version}"
+            exit 1
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+  build:
+    name: ${{ matrix.artifact }}
+    needs: resolve-version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # One binary per platform carrying every backend that platform can reach.
+        # The `Accelerator` variants are additively feature-gated, and both cudarc
+        # and ash load their driver libraries at runtime, so a vulkan+cuda binary
+        # runs on a host that has only one of them and `--accelerators` still picks.
+        # Linux builds on 22.04 for the older glibc floor.
+        include:
+          - os: ubuntu-22.04
+            features: vulkan,cuda,binary
+            artifact: av-denoise-dynamic-linux-x86
+            binary: av-denoise
+          - os: windows-latest
+            features: vulkan,cuda,binary
+            artifact: av-denoise-dynamic-win64-x86.exe
+            binary: av-denoise.exe
+          - os: macos-14
+            features: metal,binary
+            artifact: av-denoise-dynamic-macos-aarch64
+            binary: av-denoise
+    concurrency:
+      group: release-binaries-${{ matrix.artifact }}-${{ github.event.release.tag_name || inputs.version }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # nasm builds av-scenechange's assembly, clang backs ffms2-sys's bindgen, and
+      # ffms2 itself is linked dynamically, so the host supplies it at run time.
+      - name: Install build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nasm clang libclang-dev libffms2-dev
+
+      - name: Install build dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install nasm ffms2
+
+      - name: Install NASM (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      # FFMS2 ships no pkg-config file on Windows, so ffms2-sys reads the headers and
+      # import library out of FFMS_INCLUDE_DIR and FFMS_LIB_DIR instead.
+      - name: Install FFMS2 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $name = "ffms2-$env:FFMS2_WINDOWS_VERSION-msvc"
+          $url = "https://github.com/FFMS/ffms2/releases/download/$env:FFMS2_WINDOWS_VERSION/$name.7z"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\ffms2.7z"
+          7z x "$env:RUNNER_TEMP\ffms2.7z" -o"$env:RUNNER_TEMP\ffms2" | Out-Null
+          $root = "$env:RUNNER_TEMP\ffms2\$name"
+          "FFMS_INCLUDE_DIR=$root\include" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "FFMS_LIB_DIR=$root\x64" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build
+        run: cargo build --release -p av-denoise --no-default-features --features ${{ matrix.features }}
+
+      # Hosted runners have no accelerator, so this only proves the binary's own
+      # dynamic libraries resolve, matching the check the release images run.
+      - name: Smoke test
+        shell: bash
+        run: ./target/release/${{ matrix.binary }} --help > /dev/null
+
+      - name: Name the artifact
+        shell: bash
+        run: mv "target/release/${{ matrix.binary }}" "${{ matrix.artifact }}"
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish release binaries
+    needs: [resolve-version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          path: binaries
+          merge-multiple: true
+
+      - name: List downloaded binaries
+        run: ls -la binaries
+
+      - name: Attach binaries to the GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: binaries/*
