@@ -22,11 +22,30 @@ test-vs: build-vs
 build-wheel *ARGS:
     uv build --wheel packages/vs-avd {{ARGS}}
 
-test:
+# Runs every Rust and Python test. Needs an accelerator, both sides render.
+test: test-rust test-py
+
+# Every Rust test across the three crates.
+test-rust:
     cargo nextest run -p av-denoise-core --features vulkan
     cargo nextest run -p av-denoise --features vulkan,binary
+    cargo nextest run -p av-denoise-vs --features vulkan
     cargo test --doc -p av-denoise-core --features vulkan
     cargo check --workspace
+
+# Every Python test, including the ones that render on the GPU.
+test-py: _rebuild-vs-plugin
+    uv run --directory packages/vs-avd --group test pytest tests
+
+# The Python tests that run without an accelerator.
+test-py-fast: _rebuild-vs-plugin
+    uv run --directory packages/vs-avd --group test pytest tests -m "not gpu"
+
+# `uv run` does not rebuild the cdylib after a Rust change, and the plugin is an
+# editable install, so the tests would otherwise pass against a stale build. Cargo is
+# incremental, so this costs about a second when nothing has moved.
+_rebuild-vs-plugin:
+    uv sync --directory packages/vs-avd --group test --reinstall-package vsavd
 
 compare-perf *ARGS:
     uv run scripts/bench_runs.py {{ARGS}}
