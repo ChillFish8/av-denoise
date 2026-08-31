@@ -1,5 +1,5 @@
 import pytest
-from vsavd import Nlm, NlmHQ, Nl4d
+from vsavd import Nl4d, Nlm, NlmHQ
 
 
 class FakePlugin:

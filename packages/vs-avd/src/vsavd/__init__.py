@@ -3,14 +3,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from . import _plugin
-from ._types import ChannelMode, Preset, Accelerators
+from ._types import Accelerators, ChannelMode, Preset
 
 if TYPE_CHECKING:
-    # vapoursynth ships no py.typed marker and mypy is run without it
-    # installed, so its own type stub can't be resolved here. The stub
-    # file (vapoursynth.pyi) exists and is accurate when the package is
-    # installed, this ignore only covers the environment where it isn't.
-    import vapoursynth as vs  # type: ignore[import-not-found]
+    # vapoursynth ships a vapoursynth.pyi stub but no py.typed marker, so mypy
+    # refuses to read it. The `ignore_missing_imports` override in pyproject.toml
+    # covers both that and the case where the package is absent entirely.
+    import vapoursynth as vs
 
 __all__ = ["Nlm", "NlmHQ", "Nl4d", "Preset", "ChannelMode"]
 
@@ -127,7 +126,8 @@ def NlmHQ(
         device: Compute device to run on. `"cpu"` selects a software device where the platform offers one,
             useful for testing, not for real encodes. Example: `"discrete:0"` for discrete GPU 0.
         sigma_scale: Multiplier nudging the measured noise level up or down.
-            This is the right dial to reach for when leftover grain survives filtering, rather than raising `strength`.
+            This is the right dial to reach for when leftover grain survives filtering,
+            rather than raising `strength`.
         strength: Overall filter strength. Raising this to fight leftover grain is the wrong move, grain
             that survives usually means the noise level read low, correcting `sigma_scale` is the right
             move instead.
@@ -196,8 +196,8 @@ def Nl4d(
         lambda_ht_scale: Threshold multiplier a transform coefficient's estimated-noise standard deviations
             must clear to survive. This  is the main dial, raising it removes more noise and takes more
             fine detail with it. Try it in steps of about 0.05.
-        lambda_ht: Pins luma and chroma's thresholds to the same absolute number instead of their separate defaults,
-            losing that separation. Prefer `lambda_ht_scale` first.
+        lambda_ht: Pins luma and chroma's thresholds to the same absolute number instead of
+            their separate defaults, losing that separation. Prefer `lambda_ht_scale` first.
         sigma_scale: Multiplier nudging the measured noise level up or down, keeping the per-scene
             measurement rather than pinning it.
         spatial_radius: The speed dial. `preset` already resolves it, so setting this explicitly overrides

@@ -1,0 +1,13 @@
+# Matches rustfmt.toml's max_width, so Rust and Python wrap at the same column.
+line-length = 110
+# av-denoise-vs/tests/vs_harness.py declares requires-python = ">=3.11", the lowest
+# floor among the checked files. The vs-avd package itself needs 3.12.
+target-version = "py311"
+
+# scripts/ holds one-off measurement and harness scripts, written to answer a
+# question and kept as a record of how a number was produced. They are not
+# shipped, so they are not held to the shipped code's formatting or lints.
+extend-exclude = ["scripts"]
+
+[lint]
+select = ["E", "F", "I", "W"]
