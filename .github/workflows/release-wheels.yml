@@ -126,8 +126,11 @@ jobs:
         if: runner.os != 'Linux'
         uses: dtolnay/rust-toolchain@stable
 
+      # Stays on 2.x so the CIBW_* variables above keep their meaning. 2.21.3 pinned
+      # packaging==24.1 in the constraints it hands pip, which setuptools 77 and
+      # newer reject, so every wheel failed to build. 2.23.4 pins packaging==25.0.
       - name: Build wheel
-        uses: pypa/cibuildwheel@v2.21.3
+        uses: pypa/cibuildwheel@v2.23.4
         with:
           package-dir: packages/vs-avd
           output-dir: wheelhouse
