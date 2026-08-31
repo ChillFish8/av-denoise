@@ -1,13 +1,15 @@
 [package]
 name = "av-denoise"
-version = "0.4.0-alpha1"
-edition = "2024"
-description = "Fast and efficient video denoising using accelerated nlmeans."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+# A symlink to the workspace README, so `include_str!("../README.md")` in src/lib.rs
+# resolves both in-tree and inside the packaged crate.
+readme = "README.md"
+description = "Fast, best in class video denoising for all providing NLMeans, NLMeans-HQ and NL4D algorithms."
 categories = ["multimedia::video"]
 keywords = ["cubecl", "denoise", "gpu"]
-license = "Apache-2.0"
-repository = "https://github.com/ChillFish8/av-denoise"
-readme = "README.md"
 exclude = [
     "scripts/",
     ".idea/",

@@ -80,6 +80,10 @@ fn raw_params(
     sigma: Option<f64>,
     sigma_scale: Option<f64>,
     motion_compensation: Option<i64>,
+    lambda_ht: Option<f64>,
+    lambda_ht_scale: Option<f64>,
+    spatial_radius: Option<i64>,
+    refine: Option<i64>,
 ) -> Result<RawParams, Error> {
     Ok(RawParams {
         strength,
@@ -101,6 +105,10 @@ fn raw_params(
         sigma,
         sigma_scale,
         motion_compensation: opt_bool(motion_compensation),
+        lambda_ht,
+        lambda_ht_scale,
+        spatial_radius,
+        refine,
     })
 }
 
@@ -148,6 +156,10 @@ make_filter_function! {
             sigma,
             sigma_scale,
             motion_compensation,
+            None,
+            None,
+            None,
+            None,
         )?;
         let filter = Denoise::create(api, core, clip, AlgorithmKind::Nlmeans, &raw)?;
         Ok(Some(Box::new(filter)))
@@ -188,6 +200,10 @@ make_filter_function! {
         temporal_radius: Option<i64>,
         sigma: Option<f64>,
         sigma_scale: Option<f64>,
+        lambda_ht: Option<f64>,
+        lambda_ht_scale: Option<f64>,
+        spatial_radius: Option<i64>,
+        refine: Option<i64>,
     ) -> Result<Option<Box<dyn Filter<'core> + 'core>>, Error> {
         let raw = raw_params(
             None,
@@ -209,6 +225,10 @@ make_filter_function! {
             sigma,
             sigma_scale,
             None,
+            lambda_ht,
+            lambda_ht_scale,
+            spatial_radius,
+            refine,
         )?;
         let filter = Denoise::create(api, core, clip, AlgorithmKind::Nl4d, &raw)?;
         Ok(Some(Box::new(filter)))

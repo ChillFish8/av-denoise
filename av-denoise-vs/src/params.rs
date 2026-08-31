@@ -179,6 +179,10 @@ pub struct RawParams {
     pub sigma: Option<f64>,
     pub sigma_scale: Option<f64>,
     pub motion_compensation: Option<bool>,
+    pub lambda_ht: Option<f64>,
+    pub lambda_ht_scale: Option<f64>,
+    pub spatial_radius: Option<i64>,
+    pub refine: Option<i64>,
 }
 
 /// Turns a nonnegative script integer into a `u32`, naming `field` in
@@ -262,6 +266,10 @@ fn reject_mismatched_params(
         ("chroma_lambda_ht", raw.chroma_lambda_ht.is_some()),
         ("luma_mismatch_scale", raw.luma_mismatch_scale.is_some()),
         ("chroma_mismatch_scale", raw.chroma_mismatch_scale.is_some()),
+        ("lambda_ht", raw.lambda_ht.is_some()),
+        ("lambda_ht_scale", raw.lambda_ht_scale.is_some()),
+        ("spatial_radius", raw.spatial_radius.is_some()),
+        ("refine", raw.refine.is_some()),
     ];
 
     match algorithm_kind {
@@ -477,7 +485,19 @@ pub fn plane_options_from(
                 .sigma_scale
                 .map(|v| v as f32)
                 .unwrap_or_else(|| Nl4dOptions::default().sigma_scale),
-            spatial_radius: nl4d_spatial_radius_for(preset),
+            lambda_ht: raw.lambda_ht.map(|v| v as f32),
+            lambda_ht_scale: raw
+                .lambda_ht_scale
+                .map(|v| v as f32)
+                .unwrap_or_else(|| Nl4dOptions::default().lambda_ht_scale),
+            spatial_radius: match raw.spatial_radius {
+                Some(r) => nonnegative(r, "spatial_radius")?,
+                None => nl4d_spatial_radius_for(preset),
+            },
+            refine: match raw.refine {
+                Some(r) => nonnegative(r, "refine")?,
+                None => Nl4dOptions::default().refine,
+            },
             ..Nl4dOptions::default()
         }),
     };

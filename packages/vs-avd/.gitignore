@@ -1,0 +1,9 @@
+_avdenoise_vs*.so
+_avdenoise_vs*.dll
+_avdenoise_vs*.dylib
+*.egg-info/
+.pytest_cache/
+__pycache__/
+build/
+dist/
+.venv/

@@ -11,6 +11,8 @@
       <sourceFolder url="file://$MODULE_DIR$/av-denoise/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/examples" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/av-denoise-vs/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/packages/vs-avd/src" isTestSource="false" />
+      <excludeFolder url="file://$MODULE_DIR$/packages/vs-avd/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

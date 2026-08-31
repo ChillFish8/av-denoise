@@ -727,3 +727,134 @@ fn motion_compensation_is_rejected_for_nl4d() {
     assert!(err.to_lowercase().contains("motion_compensation"), "got {err}");
     assert!(err.to_lowercase().contains("nl4d"), "got {err}");
 }
+
+#[test]
+fn lambda_ht_scale_reaches_nl4d_options() {
+    let raw = RawParams {
+        lambda_ht_scale: Some(1.15),
+        ..RawParams::default()
+    };
+    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nl4d, layout).unwrap();
+    match opts.algorithm {
+        av_denoise_core::Algorithm::Nl4d(nl4d) => {
+            assert!((nl4d.lambda_ht_scale - 1.15).abs() < 1e-6)
+        },
+        other => panic!("expected Nl4d, got {other:?}"),
+    }
+}
+
+#[test]
+fn shared_lambda_ht_reaches_nl4d_options() {
+    let raw = RawParams {
+        lambda_ht: Some(4.6),
+        ..RawParams::default()
+    };
+    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nl4d, layout).unwrap();
+    match opts.algorithm {
+        av_denoise_core::Algorithm::Nl4d(nl4d) => assert_eq!(nl4d.lambda_ht, Some(4.6)),
+        other => panic!("expected Nl4d, got {other:?}"),
+    }
+}
+
+#[test]
+fn spatial_radius_overrides_the_preset() {
+    let from_preset = {
+        let raw = RawParams {
+            preset: Some("base".into()),
+            ..RawParams::default()
+        };
+        let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+        match plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+            .unwrap()
+            .algorithm
+        {
+            av_denoise_core::Algorithm::Nl4d(nl4d) => nl4d.spatial_radius,
+            other => panic!("expected Nl4d, got {other:?}"),
+        }
+    };
+
+    let raw = RawParams {
+        preset: Some("base".into()),
+        spatial_radius: Some((from_preset + 1) as i64),
+        ..RawParams::default()
+    };
+    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+    match plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+        .unwrap()
+        .algorithm
+    {
+        av_denoise_core::Algorithm::Nl4d(nl4d) => assert_eq!(nl4d.spatial_radius, from_preset + 1),
+        other => panic!("expected Nl4d, got {other:?}"),
+    }
+}
+
+#[test]
+fn refine_reaches_nl4d_options() {
+    let raw = RawParams {
+        refine: Some(3),
+        ..RawParams::default()
+    };
+    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+    match plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+        .unwrap()
+        .algorithm
+    {
+        av_denoise_core::Algorithm::Nl4d(nl4d) => assert_eq!(nl4d.refine, 3),
+        other => panic!("expected Nl4d, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_four_nl4d_dials_are_rejected_for_nlmeans() {
+    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+    for (name, raw) in [
+        (
+            "lambda_ht_scale",
+            RawParams {
+                lambda_ht_scale: Some(1.1),
+                ..RawParams::default()
+            },
+        ),
+        (
+            "lambda_ht",
+            RawParams {
+                lambda_ht: Some(4.6),
+                ..RawParams::default()
+            },
+        ),
+        (
+            "spatial_radius",
+            RawParams {
+                spatial_radius: Some(3),
+                ..RawParams::default()
+            },
+        ),
+        (
+            "refine",
+            RawParams {
+                refine: Some(3),
+                ..RawParams::default()
+            },
+        ),
+    ] {
+        let err = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(name), "error should name {name}, got {err}");
+    }
+}
+
+#[test]
+fn a_negative_spatial_radius_is_rejected() {
+    let raw = RawParams {
+        spatial_radius: Some(-1),
+        ..RawParams::default()
+    };
+    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+    let err = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("spatial_radius"), "got {err}");
+}

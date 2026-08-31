@@ -1,12 +1,12 @@
 [package]
 name = "av-denoise-core"
-version = "0.4.0-alpha1"
-edition = "2024"
-description = "Fast and efficient video denoising using accelerated nlmeans."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core kernels and types for av-denoise (Do not use directly)"
 categories = ["multimedia::video"]
 keywords = ["cubecl", "denoise", "gpu"]
-license = "Apache-2.0"
-repository = "https://github.com/ChillFish8/av-denoise"
 readme = "README.md"
 exclude = [
     "scripts/",

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "VapourSynth plugin for av-denoise."
+description = "VapourSynth core low-level plugin for av-denoise providing fast, best in class denoising. (Use PyPi package)"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

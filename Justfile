@@ -19,6 +19,9 @@ build-vs *ARGS:
 test-vs: build-vs
     uv run av-denoise-vs/tests/vs_harness.py
 
+build-wheel *ARGS:
+    uv build --wheel packages/vs-avd {{ARGS}}
+
 test:
     cargo nextest run -p av-denoise-core --features vulkan
     cargo nextest run -p av-denoise --features vulkan,binary
