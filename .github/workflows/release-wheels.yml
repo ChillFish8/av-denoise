@@ -3,11 +3,14 @@ name: Release wheels
 on:
   release:
     types: [published]
+  # A dispatch run is a dry run. It builds and tests the wheels and uploads them as
+  # workflow artifacts, but attaches nothing to a release and publishes nothing to
+  # PyPI. Leave `version` empty to just check that the three wheels still build.
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to build, matching Cargo.toml, e.g. 0.4.0-alpha2"
-        required: true
+        description: "Version to build, e.g. 0.4.0-alpha2. Defaults to the Cargo.toml version."
+        required: false
         type: string
 
 permissions:
@@ -33,10 +36,14 @@ jobs:
         run: |
           set -euo pipefail
 
+          cargo_version="$(python3 -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('Cargo.toml').read_text())['workspace']['package']['version'])")"
+
           if [ "${EVENT_NAME}" = "release" ]; then
             raw_version="${RELEASE_TAG}"
           else
-            raw_version="${DISPATCH_VERSION}"
+            # A dispatch run that names no version is only checking that the wheels
+            # build, so it inherits whatever the tree currently says.
+            raw_version="${DISPATCH_VERSION:-${cargo_version}}"
           fi
 
           raw_version="${raw_version#v}"
@@ -46,11 +53,16 @@ jobs:
             exit 1
           fi
 
-          cargo_version="$(python3 -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('Cargo.toml').read_text())['workspace']['package']['version'])")"
-
+          # A mismatch is fatal for a real release, since the wrong version would be
+          # published to PyPI. A dispatch run publishes nothing, so it only warns.
           if [ "${cargo_version}" != "${raw_version}" ]; then
-            echo "::error::release tag ${raw_version} does not match Cargo.toml ${cargo_version}"
-            exit 1
+            message="version ${raw_version} does not match Cargo.toml ${cargo_version}"
+            if [ "${EVENT_NAME}" = "release" ]; then
+              echo "::error::${message}"
+              exit 1
+            else
+              echo "::warning::${message}"
+            fi
           fi
 
           pep440_version="$(python3 -c "
@@ -94,7 +106,7 @@ jobs:
             cibw_archs: arm64
             cibw_build: cp312-macosx_arm64
     concurrency:
-      group: release-wheels-${{ matrix.platform }}-${{ github.event.release.tag_name || inputs.version }}
+      group: release-wheels-${{ matrix.platform }}-${{ github.event.release.tag_name || inputs.version || github.run_id }}
       cancel-in-progress: false
     env:
       CIBW_BUILD: ${{ matrix.cibw_build }}
@@ -156,3 +168,18 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: wheelhouse
+
+      - name: Report the dry run
+        if: github.event_name != 'release'
+        env:
+          RAW_VERSION: ${{ needs.resolve-version.outputs.raw_version }}
+          PEP440_VERSION: ${{ needs.resolve-version.outputs.pep440_version }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Dry run"
+            echo
+            echo "All three wheels built and passed their tests at version \`${RAW_VERSION}\` (\`${PEP440_VERSION}\`)."
+            echo "Nothing was attached to a release and nothing was published to PyPI."
+            echo "The wheels are on this run as workflow artifacts."
+          } >> "${GITHUB_STEP_SUMMARY}"

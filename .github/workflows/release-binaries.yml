@@ -3,11 +3,14 @@ name: Release binaries
 on:
   release:
     types: [published]
+  # A dispatch run is a dry run. It builds, smoke tests and uploads the binaries as
+  # workflow artifacts, but never attaches them to a release. Leave `version` empty
+  # to just check that the three targets still compile.
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to build, matching Cargo.toml, e.g. 0.4.0-alpha2"
-        required: true
+        description: "Version to build, e.g. 0.4.0-alpha2. Defaults to the Cargo.toml version."
+        required: false
         type: string
 
 permissions:
@@ -37,10 +40,14 @@ jobs:
         run: |
           set -euo pipefail
 
+          cargo_version="$(python3 -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('Cargo.toml').read_text())['workspace']['package']['version'])")"
+
           if [ "${EVENT_NAME}" = "release" ]; then
             version="${RELEASE_TAG}"
           else
-            version="${DISPATCH_VERSION}"
+            # A dispatch run that names no version is only checking that the targets
+            # build, so it inherits whatever the tree currently says.
+            version="${DISPATCH_VERSION:-${cargo_version}}"
           fi
 
           version="${version#v}"
@@ -50,11 +57,16 @@ jobs:
             exit 1
           fi
 
-          cargo_version="$(python3 -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('Cargo.toml').read_text())['workspace']['package']['version'])")"
-
+          # A mismatch is fatal for a real release, since the wrong version would ship.
+          # A dispatch run attaches nothing, so it only warns and carries on building.
           if [ "${cargo_version}" != "${version}" ]; then
-            echo "::error::release tag ${version} does not match Cargo.toml ${cargo_version}"
-            exit 1
+            message="version ${version} does not match Cargo.toml ${cargo_version}"
+            if [ "${EVENT_NAME}" = "release" ]; then
+              echo "::error::${message}"
+              exit 1
+            else
+              echo "::warning::${message}"
+            fi
           fi
 
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
@@ -85,7 +97,7 @@ jobs:
             artifact: av-denoise-dynamic-macos-aarch64
             binary: av-denoise
     concurrency:
-      group: release-binaries-${{ matrix.artifact }}-${{ github.event.release.tag_name || inputs.version }}
+      group: release-binaries-${{ matrix.artifact }}-${{ github.event.release.tag_name || inputs.version || github.run_id }}
       cancel-in-progress: false
     steps:
       - name: Checkout
@@ -169,3 +181,16 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: binaries/*
+
+      - name: Report the dry run
+        if: github.event_name != 'release'
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Dry run"
+            echo
+            echo "All three targets built and passed their \`--help\` smoke test at version \`${VERSION}\`."
+            echo "Nothing was attached to a release. The binaries are on this run as workflow artifacts."
+          } >> "${GITHUB_STEP_SUMMARY}"
