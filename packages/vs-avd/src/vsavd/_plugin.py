@@ -11,7 +11,10 @@ if TYPE_CHECKING:
 
 _NAMESPACE = "avd"
 _ARTEFACT_GLOB = "_avdenoise_vs*"
-_ARTEFACT_SUFFIXES = (".so", ".dll", ".dylib")
+# setuptools-rust names the artefact with the platform's Python extension suffix,
+# which on Windows is `.pyd` rather than `.dll`. `.dll` and `.dylib` stay for a
+# plugin built by hand and copied into a source checkout.
+_ARTEFACT_SUFFIXES = (".so", ".dll", ".dylib", ".pyd")
 
 
 def plugin_path() -> pathlib.Path:

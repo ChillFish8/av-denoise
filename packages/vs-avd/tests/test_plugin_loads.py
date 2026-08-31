@@ -1,3 +1,19 @@
+def test_artefact_suffixes_cover_this_platforms_extension_suffix():
+    """`plugin_path` must recognise whatever setuptools-rust names the artefact.
+
+    setuptools-rust uses the platform's Python extension suffix, so the file is
+    `.pyd` on Windows and `.abi3.so` elsewhere. Missing `.pyd` made every Windows
+    wheel install cleanly and then fail to find its own plugin.
+    """
+    import pathlib
+    from importlib.machinery import EXTENSION_SUFFIXES
+
+    from vsavd import _plugin
+
+    platform_suffixes = {pathlib.Path("artefact" + s).suffix for s in EXTENSION_SUFFIXES}
+    assert platform_suffixes <= set(_plugin._ARTEFACT_SUFFIXES)
+
+
 def test_plugin_path_points_at_a_real_file():
     from vsavd import _plugin
 
