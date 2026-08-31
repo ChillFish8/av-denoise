@@ -5,7 +5,6 @@ from typing import get_args
 
 import pytest
 import vapoursynth as vs
-
 from vsavd import Nl4d, Nlm, NlmHQ
 from vsavd._types import ChannelMode, Preset
 

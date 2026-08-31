@@ -58,9 +58,8 @@ Because the floor is a flat offset applied across all patches, the strength no l
 compensate for a noisy image. This allows us to achieve the same behaviour as a pre-filter would do, without
 sacrificing fine detail to get there.
 
-> [!NOTE]
-> NM3D and NL4D differ slightly in how pre-filters impact them due to the algorithmic differences compared to NLMeans.
-> But the issue presented is equally if not more relevant.
+_NM3D and NL4D differ slightly in how pre-filters impact them due to the algorithmic differences compared to NLMeans. 
+But the issue presented is equally if not more relevant._
 </details>
 
 ## Don't do two passes

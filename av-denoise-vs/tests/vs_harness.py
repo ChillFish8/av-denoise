@@ -366,19 +366,24 @@ def the_plugin_matches_the_cli_on_the_same_clip():
     env = dict(os.environ, AV_DENOISE_COMPILATION_CACHE="off")
 
     with tempfile.NamedTemporaryFile(suffix=".y4m") as out, open(src_path, "rb") as src_stream:
+        # The gutter lines the CLI's arguments up with the plugin call they mirror,
+        # so the two sides of the parity check can be read against each other. Ruff
+        # would put every argument on its own line and lose that.
+        # fmt: off
         subprocess.run(  # CLI                                    ||  Plugin, same clip and sigma below
             [                                                     # |
                 "cargo", "run", "--release",                      # |
                 "-p", "av-denoise", "--features", "binary", "--",  # |
                 "nl4d",                                            # |
                 "--input", "-",                                    # |  core.avd.NL4D(
-                "--sigma", str(PARITY_SIGMA_8BIT),                 # |      src, sigma=PARITY_SIGMA_NORMALIZED,
-            ],                                                     # |  )
-            stdin=src_stream,
+                "--sigma", str(PARITY_SIGMA_8BIT),                 # |      src,
+            ],                                                     # |      sigma=PARITY_SIGMA_NORMALIZED,
+            stdin=src_stream,                                      # |  )
             stdout=out,
             env=env,
             check=True,
         )
+        # fmt: on
         out.flush()
 
         cli = source_filter(out.name)

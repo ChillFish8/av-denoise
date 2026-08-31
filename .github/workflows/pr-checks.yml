@@ -1,0 +1,87 @@
+name: PR checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-checks-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # rustfmt.toml turns on unstable_features, so the check needs nightly. Nothing
+      # is compiled here, so no system libraries are installed.
+      - name: Install nightly rustfmt
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo +nightly fmt --all --check
+
+  rust-clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # nasm builds av-scenechange's assembly and clang backs ffms2-sys's bindgen.
+      # vapoursynth-sys ships pregenerated bindings and loads VapourSynth through
+      # libloading, so av-denoise-vs needs nothing installed.
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nasm clang libclang-dev libffms2-dev
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # The same three invocations as the `clippy` Justfile recipe. Hosted runners
+      # have no accelerator, so the tests these lint are never run here.
+      - name: Clippy
+        run: |
+          set -euo pipefail
+          cargo clippy -p av-denoise-core --features vulkan --all-targets -- -D warnings
+          cargo clippy -p av-denoise --features vulkan,binary --all-targets -- -D warnings
+          cargo clippy -p av-denoise-vs --features vulkan --all-targets -- -D warnings
+
+  python:
+    name: ruff and mypy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Ruff format
+        run: uvx ruff format --check .
+
+      - name: Ruff lint
+        run: uvx ruff check .
+
+      # `--no-project` type-checks the wrapper without building the setuptools-rust
+      # extension, so a PR does not pay for a release build of av-denoise-vs.
+      - name: Mypy
+        run: |
+          uv run --with mypy --with vapoursynth --no-project \
+            mypy --config-file packages/vs-avd/pyproject.toml packages/vs-avd/src/vsavd

@@ -43,3 +43,9 @@ vsavd = ["py.typed"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
+
+# vapoursynth ships a stub file but no py.typed marker, so mypy will not read it
+# whether or not the package is installed.
+[[tool.mypy.overrides]]
+module = ["vapoursynth"]
+ignore_missing_imports = true

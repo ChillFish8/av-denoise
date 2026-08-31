@@ -10,6 +10,19 @@ clippy *ARGS:
     cargo clippy -p av-denoise --features vulkan,binary --all-targets {{ARGS}}
     cargo clippy -p av-denoise-vs --features vulkan --all-targets {{ARGS}}
 
+# Formats the shipped Python, matching the `python` job in the PR checks workflow. scripts/ is excluded.
+format-py *ARGS:
+    uvx ruff format . {{ARGS}}
+
+# Lints the shipped Python, matching the `python` job in the PR checks workflow. scripts/ is excluded.
+lint-py *ARGS:
+    uvx ruff check . {{ARGS}}
+
+# Type-checks the VapourSynth wrapper. `--no-project` skips building the setuptools-rust extension, which its types do not need.
+typecheck-py:
+    uv run --with mypy --with vapoursynth --no-project \
+        mypy --config-file packages/vs-avd/pyproject.toml packages/vs-avd/src/vsavd
+
 build *ARGS:
     cargo build -p av-denoise {{ARGS}}
 

@@ -1,4 +1,6 @@
-import sys, pathlib
+import pathlib
+import sys
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 
@@ -14,6 +16,7 @@ def test_semver_to_pep440_converts_a_prerelease():
 def test_version_is_read_from_cargo_toml():
     """The wheel's version must match the plugin it carries."""
     import tomllib
+
     from _version import package_version, semver_to_pep440
 
     root = pathlib.Path(__file__).resolve().parents[3] / "Cargo.toml"

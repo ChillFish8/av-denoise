@@ -13,7 +13,7 @@ import tomllib
 
 
 def semver_to_pep440(version: str) -> str:
-    """ Converts a Cargo semver string into a PEP 440 release identifier. """
+    """Converts a Cargo semver string into a PEP 440 release identifier."""
     match = re.fullmatch(r"(\d+\.\d+\.\d+)(?:-(alpha|beta|rc)\.?(\d+))?", version)
     if match is None:
         raise ValueError(f"cannot convert {version!r} to a PEP 440 version")

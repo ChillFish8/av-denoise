@@ -39,13 +39,9 @@ else:
 
 
 def _read_long_description() -> str:
-    readme_path = (
-        pathlib.Path(__file__).resolve().parents[2] / "av-denoise-vs" / "README.md"
-    )
+    readme_path = pathlib.Path(__file__).resolve().parents[2] / "av-denoise-vs" / "README.md"
     if not readme_path.is_file():
-        raise FileNotFoundError(
-            f"expected the shared README at {readme_path}, but it does not exist"
-        )
+        raise FileNotFoundError(f"expected the shared README at {readme_path}, but it does not exist")
     return readme_path.read_text(encoding="utf-8")
 
 

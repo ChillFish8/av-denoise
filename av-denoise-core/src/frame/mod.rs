@@ -836,7 +836,7 @@ pub fn unpack_yuv_from_f32(packed: &[f32], pixels: usize, depth: Depth) -> Plane
         let mut u = vec![0u8; pixels * C::BYTES];
         let mut v = vec![0u8; pixels * C::BYTES];
 
-        for (i, chunk) in packed.chunks_exact(3).enumerate() {
+        for (i, chunk) in packed.as_chunks::<3>().0.iter().enumerate() {
             C::write(&mut y, i, quantise(chunk[0], max));
             C::write(&mut u, i, quantise(chunk[1], max));
             C::write(&mut v, i, quantise(chunk[2], max));
@@ -886,7 +886,7 @@ pub fn unpack_uv_from_f32(packed: &[f32], chroma_pixels: usize, depth: Depth) ->
         let mut u = vec![0u8; chroma_pixels * C::BYTES];
         let mut v = vec![0u8; chroma_pixels * C::BYTES];
 
-        for (i, chunk) in packed.chunks_exact(2).enumerate() {
+        for (i, chunk) in packed.as_chunks::<2>().0.iter().enumerate() {
             C::write(&mut u, i, quantise(chunk[0], max));
             C::write(&mut v, i, quantise(chunk[1], max));
         }

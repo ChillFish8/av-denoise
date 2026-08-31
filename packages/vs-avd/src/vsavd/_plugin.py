@@ -4,11 +4,10 @@ import pathlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    # vapoursynth ships no py.typed marker and mypy is run without it
-    # installed, so its own type stub can't be resolved here. The stub
-    # file (vapoursynth.pyi) exists and is accurate when the package is
-    # installed, this ignore only covers the environment where it isn't.
-    import vapoursynth as vs  # type: ignore[import-not-found]
+    # vapoursynth ships a vapoursynth.pyi stub but no py.typed marker, so mypy
+    # refuses to read it. The `ignore_missing_imports` override in pyproject.toml
+    # covers both that and the case where the package is absent entirely.
+    import vapoursynth as vs
 
 _NAMESPACE = "avd"
 _ARTEFACT_GLOB = "_avdenoise_vs*"
@@ -24,9 +23,7 @@ def plugin_path() -> pathlib.Path:
     limited API, so this helper globs for it instead of matching one fixed name.
     """
     here = pathlib.Path(__file__).parent
-    candidates = sorted(
-        p for p in here.glob(_ARTEFACT_GLOB) if p.suffix in _ARTEFACT_SUFFIXES
-    )
+    candidates = sorted(p for p in here.glob(_ARTEFACT_GLOB) if p.suffix in _ARTEFACT_SUFFIXES)
     if not candidates:
         raise RuntimeError(
             f"no bundled av-denoise plugin found in {here}. "
