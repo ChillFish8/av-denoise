@@ -347,12 +347,13 @@ pub fn plane_options_from(
 
     reject_mismatched_params(raw, algorithm_kind, variant)?;
 
-    if let Some(radius) = raw.search_radius {
-        if radius > 4 && std::env::var_os("RUST_MIN_STACK").is_none() {
-            anyhow::bail!(
-                "search_radius {radius} needs a raised stack, but RUST_MIN_STACK is not set. Values above 4 overflow the default 2 MiB stack during kernel codegen"
-            );
-        }
+    if let Some(radius) = raw.search_radius
+        && radius > 4
+        && std::env::var_os("RUST_MIN_STACK").is_none()
+    {
+        anyhow::bail!(
+            "search_radius {radius} needs a raised stack, but RUST_MIN_STACK is not set. Values above 4 overflow the default 2 MiB stack during kernel codegen"
+        );
     }
 
     let intent = match raw.channel_mode.as_deref() {
