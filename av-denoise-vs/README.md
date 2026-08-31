@@ -11,6 +11,17 @@ We provide typed interfaces for all the [supported algorithms](https://github.co
 
 _All_ algorithms are temporal aware and have inbuilt motion compensation kernels.
 
+### _Here be dragons!_ 🐉
+
+VapourSynth's API significantly restricts how av-denoise can operate and as a result, can produce a worse
+denoising experience compared to the CLI or direct Rust library usage. Primarily because noise estimation
+cannot be incrementally refined over all frames and instead has to be performed only over the temporal
+window.
+
+Performance is a _best effort_ situation, if you have anything which causes frames to arrive to the filter out of order
+your performance can drop by 70-80%.
+
+
 ## Table of contents
 
 - [Installing](#installing)
