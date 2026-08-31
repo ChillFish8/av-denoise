@@ -1,104 +1,20 @@
-[package]
-name = "av-denoise"
-version = "0.4.0-alpha1"
+[workspace]
+resolver = "3"
+members = ["av-denoise-core", "av-denoise", "av-denoise-vs"]
+
+[workspace.package]
+version = "0.4.0-alpha2"
 edition = "2024"
-description = "Fast and efficient video denoising using accelerated nlmeans."
-categories = ["multimedia::video"]
-keywords = ["cubecl", "denoise", "gpu"]
 license = "Apache-2.0"
 repository = "https://github.com/ChillFish8/av-denoise"
 readme = "README.md"
-exclude = [
-    "scripts/",
-    ".idea/",
-    "cubecl.toml",
-    "docker/",
-    ".github/",
-    "Justfile"
-]
-autobins = false
 
-[package.metadata.docs.rs]
-rustdoc-args = ["--cfg", "docsrs"]
-targets = ["x86_64-unknown-linux-gnu"]
-
-[[bin]]
-name = "av-denoise"
-path = "src/bin/main.rs"
-required-features = ["binary"]
-
-[dependencies]
+[workspace.dependencies]
 anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
-strum_macros = "0.28"
 strum = "0.28"
+strum_macros = "0.28"
 bon = "3"
-
 cubecl = { version = "0.10", features = ["std"] }
-
-# Frame ingestion via ffms2
-av-scenechange = { version = "0.23", optional = true, features = ["ffms2"] }
-av-decoders = { version = "0.9", optional = true, features = ["ffms2"] }
-v_frame = { version = "0.5", optional = true }
-
-# Frame ingestion via y4m stdin
-y4m = { version = "0.8", optional = true }
-
-# Binary dependencies
-clap = { version = "4", optional = true, features = ["derive"] }
-mimalloc = { version = "0.1", optional = true, default-features = false }
-indicatif = { version = "0.18", optional = true, default-features = false }
-tracing-indicatif = { version = "0.3", optional = true }
-tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter"] }
-
-[dev-dependencies]
-futures = "0.3"
-
-[features]
-vulkan = ["cubecl/vulkan"]
-metal = ["cubecl/metal"]
-cuda = ["cubecl/cuda"]
-rocm = ["cubecl/hip"]
-binary = [
-    "clap",
-    "mimalloc",
-    "av-scenechange",
-    "av-decoders",
-    "v_frame",
-    "y4m",
-    "indicatif",
-    "tracing-indicatif",
-    "tracing-subscriber",
-]
-default = ["vulkan"]
-
-[[bench]]
-name = "nlmeans"
-harness = false
-required-features = ["clap"]
-
-[[bench]]
-name = "bench_kernels"
-harness = false
-required-features = ["clap"]
-
-[[bench]]
-name = "denoise"
-harness = false
-required-features = ["clap"]
-
-[[bench]]
-name = "motion"
-harness = false
-required-features = ["clap"]
-
-[[bench]]
-name = "convert"
-harness = false
-required-features = ["clap"]
-
-[[bench]]
-name = "nl4d_ablation"
-harness = false
-required-features = ["clap"]
+av-denoise-core = { path = "av-denoise-core", version = "0.4.0-alpha2" }

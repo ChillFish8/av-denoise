@@ -181,25 +181,46 @@ dependencies = [
 
 [[package]]
 name = "av-denoise"
-version = "0.4.0-alpha1"
+version = "0.4.0-alpha2"
 dependencies = [
  "anyhow",
  "av-decoders",
+ "av-denoise-core",
  "av-scenechange",
- "bon",
  "clap",
- "cubecl",
- "futures",
  "indicatif",
  "mimalloc",
  "strum",
  "strum_macros",
- "thiserror",
  "tracing",
  "tracing-indicatif",
  "tracing-subscriber",
  "v_frame",
  "y4m",
+]
+
+[[package]]
+name = "av-denoise-core"
+version = "0.4.0-alpha2"
+dependencies = [
+ "anyhow",
+ "bon",
+ "clap",
+ "cubecl",
+ "futures",
+ "strum",
+ "strum_macros",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "av-denoise-vs"
+version = "0.4.0-alpha2"
+dependencies = [
+ "anyhow",
+ "av-denoise-core",
+ "vapoursynth",
 ]
 
 [[package]]
@@ -3912,6 +3933,26 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "vapoursynth"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "413b994d9955202f99298ef502dec6d84f1be7603483d19158a365f9fdb8f128"
+dependencies = [
+ "anyhow",
+ "thiserror",
+ "vapoursynth-sys",
+]
+
+[[package]]
+name = "vapoursynth-sys"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ef47dc5817613dbe0251eadbe2cea0443edebbb3a551be7b6728314ff44e12e"
+dependencies = [
+ "libloading 0.9.0",
+]
 
 [[package]]
 name = "variadics_please"

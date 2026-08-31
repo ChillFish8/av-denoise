@@ -1,0 +1,70 @@
+[package]
+name = "av-denoise"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+# A symlink to the workspace README, so `include_str!("../README.md")` in src/lib.rs
+# resolves both in-tree and inside the packaged crate.
+readme = "README.md"
+description = "Fast, best in class video denoising for all providing NLMeans, NLMeans-HQ and NL4D algorithms."
+categories = ["multimedia::video"]
+keywords = ["cubecl", "denoise", "gpu"]
+exclude = [
+    "scripts/",
+    ".idea/",
+    "cubecl.toml",
+    "docker/",
+    ".github/",
+    "Justfile"
+]
+autobins = false
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[[bin]]
+name = "av-denoise"
+path = "src/bin/main.rs"
+required-features = ["binary"]
+
+[dependencies]
+av-denoise-core.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+strum.workspace = true
+strum_macros.workspace = true
+
+# Frame ingestion via ffms2
+av-scenechange = { version = "0.23", optional = true, features = ["ffms2"] }
+av-decoders = { version = "0.9", optional = true, features = ["ffms2"] }
+v_frame = { version = "0.5", optional = true }
+
+# Frame ingestion via y4m stdin
+y4m = { version = "0.8", optional = true }
+
+# Binary dependencies
+clap = { version = "4", optional = true, features = ["derive"] }
+mimalloc = { version = "0.1", optional = true, default-features = false }
+indicatif = { version = "0.18", optional = true, default-features = false }
+tracing-indicatif = { version = "0.3", optional = true }
+tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter"] }
+
+[features]
+vulkan = ["av-denoise-core/vulkan"]
+metal = ["av-denoise-core/metal"]
+cuda = ["av-denoise-core/cuda"]
+rocm = ["av-denoise-core/rocm"]
+binary = [
+    "clap",
+    "mimalloc",
+    "av-scenechange",
+    "av-decoders",
+    "v_frame",
+    "y4m",
+    "indicatif",
+    "tracing-indicatif",
+    "tracing-subscriber",
+]
+default = ["vulkan"]

@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-rust", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vsavd"
+dynamic = ["version", "readme"]
+description = "VapourSynth plugin for av-denoise, with typed Python wrappers."
+license = "Apache-2.0"
+authors = [{ name = "ChillFish8" }]
+keywords = ["vapoursynth", "denoise", "video", "gpu", "nlmeans"]
+requires-python = ">=3.12"
+dependencies = ["vapoursynth"]
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Video",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+]
+
+[project.urls]
+Homepage = "https://github.com/ChillFish8/av-denoise"
+Repository = "https://github.com/ChillFish8/av-denoise"
+Issues = "https://github.com/ChillFish8/av-denoise/issues"
+
+[dependency-groups]
+test = ["pytest"]
+dev = ["mypy"]
+
+[tool.pytest.ini_options]
+markers = [
+    "gpu: renders a frame on a GPU and needs an accelerator to pass",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+vsavd = ["py.typed"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true

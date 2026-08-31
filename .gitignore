@@ -5,4 +5,3 @@ cubecl.log
 /**/*.bpk
 /.claude/
 /scripts/**/*.pyc
-/docs

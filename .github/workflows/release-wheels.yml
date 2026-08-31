@@ -1,0 +1,158 @@
+name: Release wheels
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build, matching Cargo.toml, e.g. 0.4.0-alpha2"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  resolve-version:
+    name: Resolve release version
+    runs-on: ubuntu-latest
+    outputs:
+      raw_version: ${{ steps.version.outputs.raw_version }}
+      pep440_version: ${{ steps.version.outputs.pep440_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve and check version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [ "${EVENT_NAME}" = "release" ]; then
+            raw_version="${RELEASE_TAG}"
+          else
+            raw_version="${DISPATCH_VERSION}"
+          fi
+
+          raw_version="${raw_version#v}"
+
+          if ! [[ "${raw_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.?[0-9]+)?$ ]]; then
+            echo "::error::'${raw_version}' is not a valid semantic version (expected X.Y.Z or X.Y.Z-(alpha|beta|rc)N)"
+            exit 1
+          fi
+
+          cargo_version="$(python3 -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('Cargo.toml').read_text())['workspace']['package']['version'])")"
+
+          if [ "${cargo_version}" != "${raw_version}" ]; then
+            echo "::error::release tag ${raw_version} does not match Cargo.toml ${cargo_version}"
+            exit 1
+          fi
+
+          pep440_version="$(python3 -c "
+          import sys
+          sys.path.insert(0, 'packages/vs-avd')
+          from _version import semver_to_pep440
+          print(semver_to_pep440(sys.argv[1]))
+          " "${raw_version}")"
+
+          {
+            echo "raw_version=${raw_version}"
+            echo "pep440_version=${pep440_version}"
+          } >> "${GITHUB_OUTPUT}"
+
+  build-wheels:
+    name: wheel (${{ matrix.platform }})
+    needs: resolve-version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The interpreter here only builds and drives the test step, it never leaks
+        # into the wheel's own tag (bdist_wheel.get_tag() forces py3-none-<platform>
+        # in setup.py). It is pinned to cp312 because VapourSynth's own PyPI wheels
+        # are tagged cp312-abi3 on every platform we target, so CIBW_TEST_REQUIRES
+        # can only resolve a prebuilt `vapoursynth` wheel, instead of falling back to
+        # a from-source build that fails on these runners, when the interpreter
+        # driving the test step is cp312 or newer. Do not lower this without checking
+        # VapourSynth's published wheel tags again.
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            cibw_archs: x86_64
+            cibw_build: cp312-manylinux_x86_64
+          - os: windows-latest
+            platform: windows
+            cibw_archs: AMD64
+            cibw_build: cp312-win_amd64
+          - os: macos-14
+            platform: macos
+            cibw_archs: arm64
+            cibw_build: cp312-macosx_arm64
+    concurrency:
+      group: release-wheels-${{ matrix.platform }}-${{ github.event.release.tag_name || inputs.version }}
+      cancel-in-progress: false
+    env:
+      CIBW_BUILD: ${{ matrix.cibw_build }}
+      CIBW_ARCHS: ${{ matrix.cibw_archs }}
+      CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+      CIBW_BEFORE_ALL_LINUX: curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+      CIBW_ENVIRONMENT_LINUX: PATH="$HOME/.cargo/bin:$PATH" VSAVD_VERSION=${{ needs.resolve-version.outputs.pep440_version }}
+      CIBW_ENVIRONMENT: VSAVD_VERSION=${{ needs.resolve-version.outputs.pep440_version }}
+      CIBW_TEST_REQUIRES: pytest vapoursynth
+      CIBW_TEST_COMMAND: pytest {package}/tests -m "not gpu"
+      CIBW_BUILD_VERBOSITY: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        if: runner.os != 'Linux'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@v2.21.3
+        with:
+          package-dir: packages/vs-avd
+          output-dir: wheelhouse
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.platform }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish release wheels
+    needs: [resolve-version, build-wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: wheelhouse
+          merge-multiple: true
+
+      - name: List downloaded wheels
+        run: ls -la wheelhouse
+
+      - name: Attach wheels to the GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: wheelhouse/*.whl
+
+      - name: Publish to PyPI
+        if: github.event_name == 'release'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: wheelhouse

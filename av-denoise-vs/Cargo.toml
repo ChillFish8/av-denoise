@@ -1,0 +1,22 @@
+[package]
+name = "av-denoise-vs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "VapourSynth core low-level plugin for av-denoise providing fast, best in class denoising. (Use PyPi package)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+av-denoise-core.workspace = true
+anyhow.workspace = true
+vapoursynth = "0.5.6"
+
+[features]
+vulkan = ["av-denoise-core/vulkan"]
+metal = ["av-denoise-core/metal"]
+cuda = ["av-denoise-core/cuda"]
+rocm = ["av-denoise-core/rocm"]
+default = ["vulkan"]

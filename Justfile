@@ -1,21 +1,57 @@
 hello:
 
+# Prefer `rustfmt +nightly <file>` for targeted edits; this formats the whole workspace.
 format:
     cargo +nightly fmt --all
 
+# Lints all three crates, matching the feature sets `test-rust` uses. Pass `-- -D warnings` to fail on any lint.
+clippy *ARGS:
+    cargo clippy -p av-denoise-core --features vulkan --all-targets {{ARGS}}
+    cargo clippy -p av-denoise --features vulkan,binary --all-targets {{ARGS}}
+    cargo clippy -p av-denoise-vs --features vulkan --all-targets {{ARGS}}
+
 build *ARGS:
-    cargo build {{ARGS}}
+    cargo build -p av-denoise {{ARGS}}
 
 run *ARGS:
-    cargo run {{ARGS}}
+    cargo run -p av-denoise {{ARGS}}
 
 bench *ARGS:
-    cargo bench {{ARGS}}
+    cargo bench -p av-denoise-core {{ARGS}}
 
-test:
-    cargo nextest run --features vulkan,binary
-    cargo test --doc --features vulkan,binary
-    cargo check
+build-vs *ARGS:
+    cargo build -p av-denoise-vs --release {{ARGS}}
+
+test-vs: build-vs
+    uv run av-denoise-vs/tests/vs_harness.py
+
+build-wheel *ARGS:
+    uv build --wheel packages/vs-avd {{ARGS}}
+
+# Runs every Rust and Python test. Needs an accelerator, both sides render.
+test: test-rust test-py
+
+# Every Rust test across the three crates.
+test-rust:
+    cargo nextest run -p av-denoise-core --features vulkan
+    cargo nextest run -p av-denoise --features vulkan,binary
+    cargo nextest run -p av-denoise-vs --features vulkan
+    cargo test --doc -p av-denoise-core --features vulkan
+    cargo check --workspace
+
+# Every Python test, including the ones that render on the GPU.
+test-py: _rebuild-vs-plugin
+    uv run --directory packages/vs-avd --group test pytest tests
+
+# The Python tests that run without an accelerator.
+test-py-fast: _rebuild-vs-plugin
+    uv run --directory packages/vs-avd --group test pytest tests -m "not gpu"
+
+# `uv run` does not rebuild the cdylib after a Rust change, and the plugin is an
+# editable install, so the tests would otherwise pass against a stale build. Cargo is
+# incremental, so this costs about a second when nothing has moved.
+_rebuild-vs-plugin:
+    uv sync --directory packages/vs-avd --group test --reinstall-package vsavd
 
 compare-perf *ARGS:
     uv run scripts/bench_runs.py {{ARGS}}
