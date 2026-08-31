@@ -44,8 +44,6 @@ denoising tools.
 
 ### [Tutorial for VapourSynth](https://github.com/ChillFish8/av-denoise/blob/HEAD/av-denoise-vs/README.md)
 
----
-
 
 ## Installing Summary
 
@@ -70,13 +68,10 @@ cargo add av-denoise
 
 A guide to help you understand what each algorithm offers and pick which one is best for you.
 
----
 
 ## ["Don't do this!"](https://github.com/ChillFish8/av-denoise/blob/HEAD/docs/DONT_DO_THIS.md)
 
 Common footguns to avoid and why.
-
----
 
 
 ## Tuning guides
@@ -87,8 +82,6 @@ don't already do what you want.
 #### [Tuning guide for CLI](https://github.com/ChillFish8/av-denoise/blob/HEAD/docs/TUNING-CLI.md)
 
 #### [Tuning guide for VapourSynth](https://github.com/ChillFish8/av-denoise/blob/HEAD/docs/TUNING-VS.md)
-
----
 
 
 ## Benchmarks
