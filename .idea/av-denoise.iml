@@ -14,6 +14,7 @@
       <sourceFolder url="file://$MODULE_DIR$/packages/vs-avd/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/packages/vs-avd/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
+      <excludeFolder url="file://$MODULE_DIR$/workspaces/vs-scripting/.venv" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />
