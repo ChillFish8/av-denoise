@@ -489,6 +489,12 @@ pub enum DenoiserError {
     /// then retry the same `push_frame` call.
     #[error("denoiser queue is full, collect the pending frame before pushing more")]
     QueueFull,
+    /// An earlier call failed, so how many frames are in flight is no
+    /// longer known and later output would not line up with its input.
+    ///
+    /// Call [`Denoiser::reset_stream`] to start a fresh stream, or drop the denoiser.
+    #[error("denoiser failed earlier, reset the stream before using it again")]
+    Poisoned,
     /// None of the accelerators in the priority list could be started.
     #[error("no accelerator from the priority list is available")]
     NoAcceleratorAvailable,
@@ -753,6 +759,12 @@ pub struct Denoiser {
     channels: u32,
     temporal_radius: u32,
     frames_pushed: u32,
+    /// Set once any call other than a `QueueFull` push has failed, so how
+    /// many frames are in flight is no longer known.
+    ///
+    /// Every entry point refuses to run while this is set.
+    /// [`Self::reset_stream`] clears it.
+    poisoned: bool,
 }
 
 impl Denoiser {
@@ -802,6 +814,7 @@ impl Denoiser {
             channels,
             temporal_radius,
             frames_pushed: 0,
+            poisoned: false,
         })
     }
 
@@ -868,7 +881,23 @@ impl Denoiser {
     /// still travelling. At that ceiling this returns
     /// [`DenoiserError::QueueFull`], and the caller has to drain a frame
     /// with [`Self::recv_frame`] before pushing more.
+    ///
+    /// Any other failure poisons the denoiser, so every further call
+    /// returns [`DenoiserError::Poisoned`] until [`Self::reset_stream`]
+    /// clears it. `QueueFull` does not poison, since it is the documented
+    /// retry signal above.
     pub fn push_frame(&mut self, frame: &[f32]) -> Result<(), DenoiserError> {
+        if self.poisoned {
+            return Err(DenoiserError::Poisoned);
+        }
+        self.push_frame_inner(frame).inspect_err(|err| {
+            if !matches!(err, DenoiserError::QueueFull) {
+                self.poisoned = true;
+            }
+        })
+    }
+
+    fn push_frame_inner(&mut self, frame: &[f32]) -> Result<(), DenoiserError> {
         // After `temporal_radius` real pushes the leading-edge mirror
         // has primed the window, so the next push produces a pending
         // frame. From then on every push takes a pending slot.
@@ -913,7 +942,13 @@ impl Denoiser {
     /// output is queued. This is how a caller that can hand over a whole
     /// window at once, rather than a strictly ordered stream, fills the
     /// window in one go and lets only the last push in it submit.
+    ///
+    /// A failure elsewhere poisons the denoiser, so this refuses to run
+    /// until [`Self::reset_stream`] clears it.
     pub fn push_frame_priming(&mut self, frame: &[f32]) -> Result<(), DenoiserError> {
+        if self.poisoned {
+            return Err(DenoiserError::Poisoned);
+        }
         match &mut self.backend {
             #[cfg(feature = "cuda")]
             Backend::Cuda(d) => d.push_frame(frame),
@@ -930,10 +965,13 @@ impl Denoiser {
     /// Drops the current stream and returns to the state a fresh
     /// denoiser starts in, keeping every GPU allocation.
     ///
-    /// Anything still in flight is discarded.
+    /// Anything still in flight is discarded. This also clears the
+    /// poison an earlier failure left, so it is the recovery path for
+    /// [`DenoiserError::Poisoned`].
     pub fn reset_stream(&mut self) {
         self.pending.clear();
         self.frames_pushed = 0;
+        self.poisoned = false;
 
         match &mut self.backend {
             #[cfg(feature = "cuda")]
@@ -950,7 +988,17 @@ impl Denoiser {
     ///
     /// Returns `Ok(None)` when nothing is in flight, which happens while
     /// the temporal window is still filling up.
+    ///
+    /// A failure poisons the denoiser, so every further call returns
+    /// [`DenoiserError::Poisoned`] until [`Self::reset_stream`] clears it.
     pub fn recv_frame(&mut self) -> Result<Option<Vec<f32>>, DenoiserError> {
+        if self.poisoned {
+            return Err(DenoiserError::Poisoned);
+        }
+        self.recv_frame_inner().inspect_err(|_| self.poisoned = true)
+    }
+
+    fn recv_frame_inner(&mut self) -> Result<Option<Vec<f32>>, DenoiserError> {
         let Some(pending) = self.pending.pop_front() else {
             return Ok(None);
         };
@@ -968,7 +1016,17 @@ impl Denoiser {
     /// This only avoids blocking on the wgpu backends, meaning Vulkan and Metal.
     /// On CUDA and ROCm the readback completes synchronously on its first poll,
     /// so this call blocks until the readback lands there, the same as `recv_frame`.
+    ///
+    /// A failure poisons the denoiser, so every further call returns
+    /// [`DenoiserError::Poisoned`] until [`Self::reset_stream`] clears it.
     pub fn try_recv_frame(&mut self) -> Result<Option<Vec<f32>>, DenoiserError> {
+        if self.poisoned {
+            return Err(DenoiserError::Poisoned);
+        }
+        self.try_recv_frame_inner().inspect_err(|_| self.poisoned = true)
+    }
+
+    fn try_recv_frame_inner(&mut self) -> Result<Option<Vec<f32>>, DenoiserError> {
         let Some(pending) = self.pending.pop_front() else {
             return Ok(None);
         };
@@ -992,12 +1050,19 @@ impl Denoiser {
     /// a new temporal window from scratch, and flushing more than once
     /// is fine.
     ///
-    /// If `flush` returns `Err` the denoiser is in an undefined state
-    /// and should be dropped rather than reused.
-    pub fn flush(&mut self, mut sink: impl FnMut(Vec<f32>)) -> Result<(), DenoiserError> {
+    /// A failure poisons the denoiser, so every further call returns
+    /// [`DenoiserError::Poisoned`] until [`Self::reset_stream`] clears it.
+    pub fn flush(&mut self, sink: impl FnMut(Vec<f32>)) -> Result<(), DenoiserError> {
+        if self.poisoned {
+            return Err(DenoiserError::Poisoned);
+        }
+        self.flush_inner(sink).inspect_err(|_| self.poisoned = true)
+    }
+
+    fn flush_inner(&mut self, mut sink: impl FnMut(Vec<f32>)) -> Result<(), DenoiserError> {
         // Drain the whole pending pipeline, up to MAX_PENDING frames,
         // before submitting the trailing-tail mirrors.
-        while let Some(frame) = self.recv_frame()? {
+        while let Some(frame) = self.recv_frame_inner()? {
             sink(frame);
         }
 
@@ -1032,6 +1097,14 @@ impl Denoiser {
         self.frames_pushed = 0;
 
         Ok(())
+    }
+
+    /// Sets the poison flag directly, without going through a failing
+    /// call, so a test can check what a caller sees once the flag is
+    /// already set and what recovers it.
+    #[cfg(test)]
+    pub(crate) fn poison_for_test(&mut self) {
+        self.poisoned = true;
     }
 }
 
@@ -1775,6 +1848,73 @@ mod tests {
 
         // After draining one slot the next push must succeed.
         d.push_frame(&frame(16, 16)).expect("push after drain failed");
+    }
+
+    /// `QueueFull` is the documented retry signal, so it must not leave
+    /// the denoiser poisoned.
+    #[test]
+    fn queue_full_does_not_poison() {
+        let mut d = Denoiser::create(
+            &[Accelerator::Vulkan],
+            &Device::Default,
+            16,
+            16,
+            opts(DenoisingMode::Spacial),
+        )
+        .unwrap();
+
+        d.push_frame(&frame(16, 16)).unwrap();
+        d.push_frame(&frame(16, 16)).unwrap();
+        let err = d.push_frame(&frame(16, 16)).expect_err("expected QueueFull");
+        assert!(matches!(err, DenoiserError::QueueFull));
+        assert!(!d.poisoned, "QueueFull must not poison the denoiser");
+
+        d.recv_frame().unwrap().expect("recv failed after QueueFull");
+
+        // The queue has room again, so the next push must succeed rather
+        // than being rejected as poisoned.
+        d.push_frame(&frame(16, 16))
+            .expect("push after QueueFull drain should succeed, not poison");
+    }
+
+    #[test]
+    fn poisoned_denoiser_refuses_every_entry_point() {
+        let mut d = Denoiser::create(
+            &[Accelerator::Vulkan],
+            &Device::Default,
+            16,
+            16,
+            opts(DenoisingMode::Spacial),
+        )
+        .unwrap();
+        d.poisoned = true;
+
+        assert!(matches!(
+            d.push_frame(&frame(16, 16)),
+            Err(DenoiserError::Poisoned)
+        ));
+        assert!(matches!(d.recv_frame(), Err(DenoiserError::Poisoned)));
+        assert!(matches!(d.try_recv_frame(), Err(DenoiserError::Poisoned)));
+        assert!(matches!(d.flush(|_| {}), Err(DenoiserError::Poisoned)));
+    }
+
+    #[test]
+    fn reset_stream_clears_poison() {
+        let mut d = Denoiser::create(
+            &[Accelerator::Vulkan],
+            &Device::Default,
+            16,
+            16,
+            opts(DenoisingMode::Spacial),
+        )
+        .unwrap();
+        d.poisoned = true;
+
+        d.reset_stream();
+        assert!(!d.poisoned, "reset_stream must clear the poison flag");
+
+        d.push_frame(&frame(16, 16))
+            .expect("push after reset_stream should succeed");
     }
 
     fn frame_filled(w: u32, h: u32, value: f32) -> Vec<f32> {

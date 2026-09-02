@@ -145,6 +145,21 @@ mod reseed {
         }
     }
 
+    #[test]
+    fn reseed_recovers_a_half_poisoned_by_an_earlier_failure() {
+        let opts = test_plane_options(2);
+        let frames = ramp_clip(&layout(), 12);
+
+        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
+        d.luma.as_mut().unwrap().poison_for_test();
+        d.chroma.as_mut().unwrap().poison_for_test();
+
+        let got = d.reseed(&window_of(&frames, 6, 2)).unwrap();
+        assert!(!got.y.is_empty());
+        assert!(!got.u.is_empty());
+        assert!(!got.v.is_empty());
+    }
+
     /// Whether plain nlmeans's `reseed` stays order-independent under
     /// repeated out-of-order reseeds on one long-lived denoiser, the
     /// same stress the VapourSynth plugin's shuffled-access-order

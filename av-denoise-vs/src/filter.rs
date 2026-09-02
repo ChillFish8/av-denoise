@@ -168,23 +168,19 @@ impl<'core> Denoise<'core> {
     /// including frame 0, abandons the stream and rebuilds it from an
     /// explicit window, which costs more but is correct from any
     /// starting point.
-    ///
-    /// The fast path can still fall through to a rebuild: `recv` returns
-    /// `None` when the stream has not yet primed enough history to emit,
-    /// which happens right after a `reseed` landed the pipeline on a
-    /// frame within `span.behind` of the clip's start. Falling back to
-    /// the window rebuild handles that case correctly instead of
-    /// surfacing an error or a blank frame.
-    ///
-    /// The one frame this pushes is `n + span.ahead`: the pipeline is
-    /// already positioned to complete output frame `n` once its own
-    /// window reaches that far ahead, the same relationship
-    /// [`Self::window`] uses to build a whole window from scratch.
     fn render(&self, n: usize, fetch: impl Fn(usize) -> Result<Planes, Error>) -> Result<Planes, Error> {
         let mut state = self.state.lock().expect("denoiser mutex poisoned");
         let last_frame = self.source_len - 1;
 
-        if state.last == Some(n.wrapping_sub(1)) && n > 0 {
+        // Read the anchor, then clear it before anything touches the pipeline.
+        //
+        // Every path below either reaches a `state.last = Some(n)` or leaves through `?`,
+        // so an error out of `fetch`, `push`, `recv`, or `reseed` can never leave the
+        // anchor claiming a position the stream has moved past.
+        let sequential = state.last == Some(n.wrapping_sub(1)) && n > 0;
+        state.last = None;
+
+        if sequential {
             let ahead = (n + self.span.ahead).min(last_frame);
             state.denoiser.push(&fetch(ahead)?)?;
             if let Some(out) = state.denoiser.recv()? {
