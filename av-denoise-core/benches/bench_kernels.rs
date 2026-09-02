@@ -29,6 +29,7 @@ use kernels::mc_confidence::McConfidenceBench;
 use kernels::mc_downscale::DownscaleBench;
 use kernels::mc_warp::WarpBench;
 use kernels::noise_partial::NoisePartialBench;
+use kernels::pack_wire::PackWireBench;
 use kernels::temporal_noise_stats::TemporalNoiseStatsBench;
 use kernels::vertical_weight::VWeightBench;
 use kernels::vweight_pair_accumulate::VWeightPairAccBench;
@@ -48,6 +49,17 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
             ch,
             ch_name,
         });
+    }
+    for &(ch, ch_name) in CHANNELS {
+        for &(bytes_per_sample, depth_name) in &[(1u32, "8bit"), (2u32, "16bit")] {
+            run(PackWireBench {
+                client: client.clone(),
+                ch,
+                ch_name,
+                bytes_per_sample,
+                depth_name,
+            });
+        }
     }
     for &(ch, ch_name) in CHANNELS {
         run(ZeroBench {

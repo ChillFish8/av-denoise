@@ -27,6 +27,7 @@ pub mod mc_downscale;
 pub mod mc_warp;
 pub mod nl4d_geometry;
 pub mod noise_partial;
+pub mod pack_wire;
 pub mod temporal_noise_stats;
 pub mod vertical_weight;
 pub mod vweight_pair_accumulate;

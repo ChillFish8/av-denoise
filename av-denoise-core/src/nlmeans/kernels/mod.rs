@@ -15,9 +15,9 @@
 //! steps.
 //!
 //! `bilateral` is the prefilter, `noise` measures the noise level,
-//! [`motion`] tracks movement between frames, `memory` holds the copy
-//! and zero utilities, and `helpers` holds the small pieces the kernels
-//! share.
+//! [`motion`] tracks movement between frames, `memory` holds the copy,
+//! zero, and wire-packing utilities, and `helpers` holds the small
+//! pieces the kernels share.
 
 mod accumulate;
 mod bilateral;
@@ -38,7 +38,7 @@ pub use fused::{
     nlm_fused_single_window,
     nlm_fused_single_window_ref,
 };
-pub use memory::{gpu_copy, gpu_zero_buffers};
+pub use memory::{gpu_copy, gpu_pack_wire, gpu_zero_buffers};
 pub use noise::{nlm_noise_partial, nlm_noise_reduce, nlm_temporal_noise_stats, nlm_temporal_stats_zero};
 pub use separable::{
     nlm_distance,

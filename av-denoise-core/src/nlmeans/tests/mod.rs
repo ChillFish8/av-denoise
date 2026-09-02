@@ -7,6 +7,7 @@ mod hq;
 mod machinery;
 mod motion_compensation;
 mod noise;
+mod pack_wire;
 mod pending_outlives;
 mod prefilter;
 mod residual_correlation;

@@ -55,3 +55,79 @@ pub fn gpu_zero_buffers(
         idx += total_threads;
     }
 }
+
+/// Quantizes a denoised frame into wire bytes, packed into `u32` words.
+///
+/// `src` holds `pixels * stored_ch` values. The lanes between `channels`
+/// and `stored_ch` are padding and are skipped here, so the host reads
+/// back only the samples it asked for.
+///
+/// `outer` and `split_planes` decide how an output sample index maps
+/// back into `src`. Interleaved output passes `outer = channels`, so the
+/// quotient is the pixel and the remainder is the channel. Split output,
+/// which is what a chroma pair needs, passes `outer = pixels` and gets
+/// the reverse, laying each channel down as one contiguous region.
+///
+/// `samples_per_word` is 4 for 8-bit wire and 2 for 10 and 12-bit, which
+/// matches the host's `Narrow` and `Wide` codecs.
+///
+/// A NaN sample does not come out as zero the way the host converter's
+/// clamp does. The GPU clamp lowers to a min and max pair whose NaN
+/// result is unspecified, and the float to integer cast is undefined on
+/// NaN, so such a sample lands on an arbitrary byte. A denoised frame
+/// holds no NaN, so nothing guards against it here.
+///
+/// Every index is clamped rather than guarded by a branch. A
+/// branch-derived index inside an unrolled loop makes cubecl's GVN pass
+/// panic while compiling the shader, after which the launch silently
+/// writes nothing.
+///
+/// The loop is strided so the grid can stay under the dispatch limit.
+#[cube(launch_unchecked)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a comptime shape the kernel specialises on"
+)]
+pub fn gpu_pack_wire(
+    src: &Array<f32>,
+    dst: &mut Array<u32>,
+    max: f32,
+    #[comptime] pixels: u32,
+    #[comptime] channels: u32,
+    #[comptime] stored_ch: u32,
+    #[comptime] outer: u32,
+    #[comptime] split_planes: bool,
+    #[comptime] samples_per_word: u32,
+    #[comptime] words: u32,
+    #[comptime] total_threads: u32,
+) {
+    let samples = comptime![pixels * channels];
+    let bits = comptime![32u32 / samples_per_word];
+
+    let mut word = ABSOLUTE_POS_X;
+
+    while word < words {
+        let base = word * samples_per_word;
+        let mut acc = 0u32;
+
+        #[unroll]
+        for lane in 0..samples_per_word {
+            let s = base + lane;
+            // Clamped, never branched. A lane past the last sample still
+            // reads a valid slot, and its value is dropped below.
+            let safe = u32::min(s, samples - 1);
+
+            let a = safe / outer;
+            let b = safe % outer;
+            let src_idx = select(split_planes, b * stored_ch + a, a * stored_ch + b);
+
+            let v = f32::clamp(src[src_idx as usize], 0.0, 1.0);
+            let q = u32::cast_from(v * max + 0.5);
+
+            acc |= select(s < samples, q, 0u32) << (lane * bits);
+        }
+
+        dst[word as usize] = acc;
+        word += total_threads;
+    }
+}
