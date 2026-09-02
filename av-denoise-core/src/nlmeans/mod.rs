@@ -42,6 +42,7 @@ mod pending;
 mod tests;
 
 pub(crate) use denoiser::RingView;
+pub(crate) use pending::{f32_frame_to_wire, start_readback};
 pub use denoiser::{GpuOutput, NlmDenoiser};
 pub use motion::{MotionCompensationMode, MotionEstimation, MotionSearch};
 pub use params::{
@@ -134,6 +135,41 @@ impl Depth {
     /// The sample value that means neutral chroma at this depth.
     pub fn neutral_chroma(self) -> u16 {
         1 << (self.bits() - 1)
+    }
+
+    /// How [`crate::nlmeans::kernels::gpu_pack_wire`] packs samples at
+    /// this depth.
+    pub fn wire_pack(self) -> WirePack {
+        WirePack {
+            max: self.max_value(),
+            samples_per_word: 4 / self.bytes_per_sample() as u32,
+        }
+    }
+}
+
+/// The quantisation scale and lane count `gpu_pack_wire` packs one
+/// sample with.
+///
+/// The kernel shifts a quantised sample by `lane * (32 / samples_per_word)`
+/// and never masks it, so a `max` wider than the lane holds spills bits
+/// into the neighbouring sample. Both values come from one [`Depth`]
+/// through [`Depth::wire_pack`], which makes that pairing impossible to
+/// get wrong.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WirePack {
+    max: f32,
+    samples_per_word: u32,
+}
+
+impl WirePack {
+    /// The scale a normalised value is quantised against.
+    pub fn max(self) -> f32 {
+        self.max
+    }
+
+    /// How many samples share one `u32` word.
+    pub fn samples_per_word(self) -> u32 {
+        self.samples_per_word
     }
 }
 

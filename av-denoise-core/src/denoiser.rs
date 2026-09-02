@@ -10,6 +10,7 @@ use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::MotionEstimation;
 use crate::nlmeans::{
     ChannelMode,
+    Depth,
     HqParams,
     MotionCompensationMode,
     MotionSearch,
@@ -18,6 +19,7 @@ use crate::nlmeans::{
     Pending,
     PrefilterMode,
     TryWait,
+    f32_frame_to_wire,
     hq_default_strength,
     validate_dimensions,
 };
@@ -43,6 +45,51 @@ pub struct DenoiserOptions {
     /// algorithm reads.
     #[builder(default)]
     pub algorithm: Algorithm,
+    /// What format denoised frames come back in.
+    #[builder(default = OutputFormat::F32)]
+    pub output_format: OutputFormat,
+}
+
+/// What a denoiser hands back from [`Denoiser::recv_frame`],
+/// [`Denoiser::try_recv_frame`] and [`Denoiser::flush`].
+///
+/// The GPU only ever holds normalised `f32`. [`Depth`] is a wire concept,
+/// so a denoiser that returns wire bytes is told its depth when it is
+/// built rather than at each call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputFormat {
+    /// Normalised `f32`, one value per channel per pixel.
+    F32,
+    /// Wire bytes at this depth, quantised on the GPU.
+    Wire { depth: Depth },
+}
+
+/// One denoised frame, in whichever format its denoiser was built for.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FrameOutput {
+    /// Normalised `f32`, `width * height * channels` values.
+    F32(Vec<f32>),
+    /// Wire bytes, interleaved except for a chroma pair, which is laid
+    /// out as U's whole region followed by V's.
+    Wire(Vec<u8>),
+}
+
+impl FrameOutput {
+    /// The `f32` frame, or `None` if this came from a wire-mode denoiser.
+    pub fn into_f32(self) -> Option<Vec<f32>> {
+        match self {
+            Self::F32(v) => Some(v),
+            Self::Wire(_) => None,
+        }
+    }
+
+    /// The wire bytes, or `None` if this came from an `f32`-mode denoiser.
+    pub fn into_wire(self) -> Option<Vec<u8>> {
+        match self {
+            Self::Wire(v) => Some(v),
+            Self::F32(_) => None,
+        }
+    }
 }
 
 /// Which denoising algorithm to run.
@@ -526,14 +573,14 @@ impl<R: Runtime> Engine<R> {
         }
     }
 
-    fn denoise_submit(&mut self) -> Result<Option<Pending<R>>, anyhow::Error> {
+    fn denoise_submit(&mut self, format: OutputFormat) -> Result<Option<Pending<R>>, anyhow::Error> {
         match self {
-            Self::Nlm(d) => d.denoise_submit(),
-            // `Nl4dDenoiser::denoise_submit` already returns
+            Self::Nlm(d) => d.denoise_submit_as(format),
+            // `Nl4dDenoiser::denoise_submit_as` already returns
             // `DenoiserError` rather than `anyhow::Error`, so this leans
             // on `DenoiserError`'s own `anyhow::Error` conversion instead
             // of re-wrapping it.
-            Self::Nl4d(d) => d.denoise_submit().map_err(anyhow::Error::from),
+            Self::Nl4d(d) => d.denoise_submit_as(format).map_err(anyhow::Error::from),
         }
     }
 
@@ -633,7 +680,7 @@ enum BackendPending {
 }
 
 impl BackendPending {
-    fn wait(self) -> Result<Vec<f32>, anyhow::Error> {
+    fn wait(self) -> Result<FrameOutput, anyhow::Error> {
         match self {
             #[cfg(feature = "cuda")]
             Self::Cuda(p) => p.wait(),
@@ -646,7 +693,7 @@ impl BackendPending {
 
     /// Polls the readback once. `Ok(Ok(frame))` is a landed frame,
     /// `Ok(Err(self))` is a readback still in flight.
-    fn try_wait(self) -> Result<Result<Vec<f32>, Self>, anyhow::Error> {
+    fn try_wait(self) -> Result<Result<FrameOutput, Self>, anyhow::Error> {
         match self {
             #[cfg(feature = "cuda")]
             Self::Cuda(p) => match p.try_wait()? {
@@ -710,8 +757,9 @@ impl WindowSpan {
 /// At the end of the stream call [`flush`](Self::flush) to drain
 /// whatever temporal context is left.
 ///
-/// Frames are `f32` values in `[0, 1]`, laid out as
-/// `width * height * channels`.
+/// Input frames are `f32` values in `[0, 1]`, laid out as
+/// `width * height * channels`. Output comes back as a [`FrameOutput`]
+/// in whichever [`OutputFormat`] the options named.
 ///
 /// ```no_run
 /// use av_denoise_core::accelerate::Accelerator;
@@ -740,12 +788,12 @@ impl WindowSpan {
 ///     // Temporal denoising runs a few frames behind the input, so
 ///     // there is not always one ready to collect.
 ///     if let Some(out) = denoiser.recv_frame()? {
-///         cleaned.push(out);
+///         cleaned.push(out.into_f32().expect("built for f32 output"));
 ///     }
 /// }
 ///
 /// // Drain the frames still inside the temporal window.
-/// denoiser.flush(|out| cleaned.push(out))?;
+/// denoiser.flush(|out| cleaned.push(out.into_f32().expect("built for f32 output")))?;
 /// # Ok(())
 /// # }
 /// # fn read_my_frames() -> Vec<Vec<f32>> { Vec::new() }
@@ -758,6 +806,7 @@ pub struct Denoiser {
     height: u32,
     channels: u32,
     temporal_radius: u32,
+    output_format: OutputFormat,
     frames_pushed: u32,
     /// Set once any call other than a `QueueFull` push has failed, so how
     /// many frames are in flight is no longer known.
@@ -813,6 +862,7 @@ impl Denoiser {
             height,
             channels,
             temporal_radius,
+            output_format: options.output_format,
             frames_pushed: 0,
             poisoned: false,
         })
@@ -836,6 +886,11 @@ impl Denoiser {
     /// The temporal radius the resolved parameters run at.
     pub fn temporal_radius(&self) -> u32 {
         self.temporal_radius
+    }
+
+    /// The format every collected frame comes back in.
+    pub fn output_format(&self) -> OutputFormat {
+        self.output_format
     }
 
     /// How many frames behind and ahead of a target frame this
@@ -906,25 +961,26 @@ impl Denoiser {
             return Err(DenoiserError::QueueFull);
         }
 
+        let format = self.output_format;
         match &mut self.backend {
             #[cfg(feature = "cuda")]
             Backend::Cuda(d) => {
                 d.push_frame(frame);
-                if let Some(p) = d.denoise_submit()? {
+                if let Some(p) = d.denoise_submit(format)? {
                     self.pending.push_back(BackendPending::Cuda(p));
                 }
             },
             #[cfg(feature = "rocm")]
             Backend::Rocm(d) => {
                 d.push_frame(frame);
-                if let Some(p) = d.denoise_submit()? {
+                if let Some(p) = d.denoise_submit(format)? {
                     self.pending.push_back(BackendPending::Rocm(p));
                 }
             },
             #[cfg(any(feature = "vulkan", feature = "metal"))]
             Backend::Wgpu(d) => {
                 d.push_frame(frame);
-                if let Some(p) = d.denoise_submit()? {
+                if let Some(p) = d.denoise_submit(format)? {
                     self.pending.push_back(BackendPending::Wgpu(p));
                 }
             },
@@ -991,14 +1047,14 @@ impl Denoiser {
     ///
     /// A failure poisons the denoiser, so every further call returns
     /// [`DenoiserError::Poisoned`] until [`Self::reset_stream`] clears it.
-    pub fn recv_frame(&mut self) -> Result<Option<Vec<f32>>, DenoiserError> {
+    pub fn recv_frame(&mut self) -> Result<Option<FrameOutput>, DenoiserError> {
         if self.poisoned {
             return Err(DenoiserError::Poisoned);
         }
         self.recv_frame_inner().inspect_err(|_| self.poisoned = true)
     }
 
-    fn recv_frame_inner(&mut self) -> Result<Option<Vec<f32>>, DenoiserError> {
+    fn recv_frame_inner(&mut self) -> Result<Option<FrameOutput>, DenoiserError> {
         let Some(pending) = self.pending.pop_front() else {
             return Ok(None);
         };
@@ -1019,14 +1075,14 @@ impl Denoiser {
     ///
     /// A failure poisons the denoiser, so every further call returns
     /// [`DenoiserError::Poisoned`] until [`Self::reset_stream`] clears it.
-    pub fn try_recv_frame(&mut self) -> Result<Option<Vec<f32>>, DenoiserError> {
+    pub fn try_recv_frame(&mut self) -> Result<Option<FrameOutput>, DenoiserError> {
         if self.poisoned {
             return Err(DenoiserError::Poisoned);
         }
         self.try_recv_frame_inner().inspect_err(|_| self.poisoned = true)
     }
 
-    fn try_recv_frame_inner(&mut self) -> Result<Option<Vec<f32>>, DenoiserError> {
+    fn try_recv_frame_inner(&mut self) -> Result<Option<FrameOutput>, DenoiserError> {
         let Some(pending) = self.pending.pop_front() else {
             return Ok(None);
         };
@@ -1052,14 +1108,14 @@ impl Denoiser {
     ///
     /// A failure poisons the denoiser, so every further call returns
     /// [`DenoiserError::Poisoned`] until [`Self::reset_stream`] clears it.
-    pub fn flush(&mut self, sink: impl FnMut(Vec<f32>)) -> Result<(), DenoiserError> {
+    pub fn flush(&mut self, sink: impl FnMut(FrameOutput)) -> Result<(), DenoiserError> {
         if self.poisoned {
             return Err(DenoiserError::Poisoned);
         }
         self.flush_inner(sink).inspect_err(|_| self.poisoned = true)
     }
 
-    fn flush_inner(&mut self, mut sink: impl FnMut(Vec<f32>)) -> Result<(), DenoiserError> {
+    fn flush_inner(&mut self, mut sink: impl FnMut(FrameOutput)) -> Result<(), DenoiserError> {
         // Drain the whole pending pipeline, up to MAX_PENDING frames,
         // before submitting the trailing-tail mirrors.
         while let Some(frame) = self.recv_frame_inner()? {
@@ -1067,28 +1123,32 @@ impl Denoiser {
         }
 
         let pixels = (self.width * self.height) as usize;
-        let channels = self.channels as usize;
-        let scratch_cap = pixels * channels;
+        let channels = self.channels;
+        let scratch_cap = pixels * channels as usize;
+        let format = self.output_format;
+
+        // The tail frames come back through each algorithm's own
+        // blocking readback rather than a `Pending`, so wire mode
+        // quantises them on the host. There are only `2 * radius` of
+        // them at the very end of a stream.
+        let emit = |slice: &[f32], sink: &mut dyn FnMut(FrameOutput)| match format {
+            OutputFormat::F32 => {
+                let mut v = Vec::with_capacity(scratch_cap);
+                v.extend_from_slice(slice);
+                sink(FrameOutput::F32(v));
+            },
+            OutputFormat::Wire { depth } => {
+                sink(FrameOutput::Wire(f32_frame_to_wire(slice, channels, depth)));
+            },
+        };
 
         match &mut self.backend {
             #[cfg(feature = "cuda")]
-            Backend::Cuda(d) => d.flush(|slice| {
-                let mut v = Vec::with_capacity(scratch_cap);
-                v.extend_from_slice(slice);
-                sink(v);
-            })?,
+            Backend::Cuda(d) => d.flush(|slice| emit(slice, &mut sink))?,
             #[cfg(feature = "rocm")]
-            Backend::Rocm(d) => d.flush(|slice| {
-                let mut v = Vec::with_capacity(scratch_cap);
-                v.extend_from_slice(slice);
-                sink(v);
-            })?,
+            Backend::Rocm(d) => d.flush(|slice| emit(slice, &mut sink))?,
             #[cfg(any(feature = "vulkan", feature = "metal"))]
-            Backend::Wgpu(d) => d.flush(|slice| {
-                let mut v = Vec::with_capacity(scratch_cap);
-                v.extend_from_slice(slice);
-                sink(v);
-            })?,
+            Backend::Wgpu(d) => d.flush(|slice| emit(slice, &mut sink))?,
         }
 
         // The backend has already reset its own stream indices. Reset
@@ -1684,6 +1744,10 @@ mod tests {
         vec![0.5f32; (w * h) as usize]
     }
 
+    fn f32_out(out: FrameOutput) -> Vec<f32> {
+        out.into_f32().expect("f32 output")
+    }
+
     #[test]
     fn spatial_denoise_roundtrip() {
         let mut d = Denoiser::create(
@@ -1697,7 +1761,7 @@ mod tests {
         assert_eq!(d.selected_accelerator(), Accelerator::Vulkan);
 
         d.push_frame(&frame(16, 16)).expect("push failed");
-        let out = d.recv_frame().expect("recv failed").expect("no frame");
+        let out = f32_out(d.recv_frame().expect("recv failed").expect("no frame"));
         assert_eq!(out.len(), 16 * 16);
     }
 
@@ -1719,7 +1783,7 @@ mod tests {
         assert!(d.recv_frame().expect("recv failed").is_none());
 
         let mut out = Vec::new();
-        d.flush(|f| out.push(f)).expect("flush failed");
+        d.flush(|f| out.push(f32_out(f))).expect("flush failed");
         assert_eq!(out.len(), 1, "expected exactly one output for one pushed frame");
         assert_eq!(out[0].len(), 16 * 16);
     }
@@ -1843,7 +1907,7 @@ mod tests {
         let err = d.push_frame(&frame(16, 16)).expect_err("expected QueueFull");
         assert!(matches!(err, DenoiserError::QueueFull));
 
-        let out = d.recv_frame().unwrap().unwrap();
+        let out = f32_out(d.recv_frame().unwrap().unwrap());
         assert_eq!(out.len(), 16 * 16);
 
         // After draining one slot the next push must succeed.
@@ -1933,7 +1997,7 @@ mod tests {
                             .recv_frame()
                             .expect("recv ok")
                             .expect("queue full but recv yielded none");
-                        out.push(f);
+                        out.push(f32_out(f));
                     },
                     Err(e) => panic!("unexpected push error: {e:?}"),
                 }
@@ -1954,7 +2018,7 @@ mod tests {
 
         let mut batch_a = Vec::new();
         push_n_with_drain(&mut d, 5, 0.25, &mut batch_a);
-        d.flush(|f| batch_a.push(f)).expect("first flush failed");
+        d.flush(|f| batch_a.push(f32_out(f))).expect("first flush failed");
         assert_eq!(batch_a.len(), 5);
 
         // After flush the pipeline must be empty.
@@ -1962,7 +2026,8 @@ mod tests {
 
         let mut batch_b = Vec::new();
         push_n_with_drain(&mut d, 5, 0.75, &mut batch_b);
-        d.flush(|f| batch_b.push(f)).expect("second flush failed");
+        d.flush(|f| batch_b.push(f32_out(f)))
+            .expect("second flush failed");
         assert_eq!(batch_b.len(), 5);
 
         for v in batch_b.iter().flatten() {
@@ -1986,7 +2051,7 @@ mod tests {
 
         let mut batch_a = Vec::new();
         push_n_with_drain(&mut d, 5, 0.25, &mut batch_a);
-        d.flush(|f| batch_a.push(f)).expect("first flush failed");
+        d.flush(|f| batch_a.push(f32_out(f))).expect("first flush failed");
         assert_eq!(batch_a.len(), 5, "expected 5 frames from first batch");
 
         // The temporal window must be empty after a flush, so the first
@@ -2003,7 +2068,8 @@ mod tests {
         // Push 4 more frames (5 total in batch B) with drain.
         let mut batch_b = Vec::new();
         push_n_with_drain(&mut d, 4, 0.75, &mut batch_b);
-        d.flush(|f| batch_b.push(f)).expect("second flush failed");
+        d.flush(|f| batch_b.push(f32_out(f)))
+            .expect("second flush failed");
         assert_eq!(batch_b.len(), 5, "expected 5 frames from second batch");
 
         for v in batch_b.iter().flatten() {
@@ -2029,7 +2095,7 @@ mod tests {
 
             let mut out = Vec::new();
             push_n_with_drain(&mut d, n, 0.5, &mut out);
-            d.flush(|f| out.push(f)).expect("flush failed");
+            d.flush(|f| out.push(f32_out(f))).expect("flush failed");
             assert_eq!(
                 out.len(),
                 n,

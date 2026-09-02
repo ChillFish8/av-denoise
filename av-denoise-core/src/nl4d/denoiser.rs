@@ -12,8 +12,17 @@ use crate::collab::kernels::aggregate::{
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, PATCH_SIZE};
-use crate::denoiser::DenoiserError;
-use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, MAX_GRID_1D, NlmDenoiser, Pending, RingView};
+use crate::denoiser::{DenoiserError, OutputFormat};
+use crate::nlmeans::{
+    BLOCK_X,
+    BLOCK_Y,
+    ChannelMode,
+    MAX_GRID_1D,
+    NlmDenoiser,
+    Pending,
+    RingView,
+    start_readback,
+};
 
 /// Groups similar 8x8 patches across a motion-compensated temporal
 /// window and denoises each group jointly.
@@ -214,13 +223,21 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// denoiser may be outstanding at once. A third concurrent submit
     /// reuses the oldest one's slot and silently corrupts it.
     pub fn denoise_submit(&mut self) -> Result<Option<Pending<R>>, DenoiserError> {
+        self.denoise_submit_as(OutputFormat::F32)
+    }
+
+    /// [`Self::denoise_submit`] in a chosen output format.
+    ///
+    /// [`OutputFormat::Wire`] quantises and packs the frame on the GPU
+    /// before the readback, so only the wire bytes cross the bus.
+    pub fn denoise_submit_as(&mut self, format: OutputFormat) -> Result<Option<Pending<R>>, DenoiserError> {
         let Some(view) = self.front.submit_machinery()? else {
             return Ok(None);
         };
         let Some(handle) = self.run_collab_stage(&view)? else {
             return Ok(None);
         };
-        Ok(Some(self.start_readback(handle)))
+        Ok(Some(self.start_readback(handle, format)))
     }
 
     /// Submits and waits for the result in one call.
@@ -231,7 +248,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let Some(pending) = self.denoise_submit()? else {
             return Ok(None);
         };
-        Ok(Some(pending.wait()?))
+        Ok(Some(pending.wait()?.into_f32().unwrap_or_default()))
     }
 
     /// Produces the frames still held at the end of a stream.
@@ -263,8 +280,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             if let Some(view) = self.front.flush_step_machinery()?
                 && let Some(handle) = self.run_collab_stage(&view)?
             {
-                let pending = self.start_readback(handle);
-                let frame = pending.wait()?;
+                let pending = self.start_readback(handle, OutputFormat::F32);
+                let frame = pending.wait()?.into_f32().unwrap_or_default();
                 sink(&frame);
                 emitted += 1;
             }
@@ -547,10 +564,15 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
     /// Starts an async readback of `handle`, wrapped in the same
     /// [`Pending`] type [`NlmDenoiser`] returns.
-    fn start_readback(&self, handle: Handle) -> Pending<R> {
-        let client = self.front.compute_client().clone();
-        let fut = Box::pin(async move { client.read_async(vec![handle]).await });
+    fn start_readback(&self, handle: Handle, format: OutputFormat) -> Pending<R> {
         let pixels = (self.width * self.height) as usize;
-        Pending::new(fut, self.channels.count(), self.channels.storage_count(), pixels)
+        start_readback(
+            self.front.compute_client(),
+            handle,
+            self.channels.count(),
+            self.channels.storage_count(),
+            pixels,
+            format,
+        )
     }
 }

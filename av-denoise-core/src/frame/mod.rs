@@ -10,6 +10,7 @@ use crate::{
     DenoisingMode,
     Depth,
     Device,
+    FrameOutput,
     Nl4dOptions,
     NlmTuning,
     NlmeansHqOptions,
@@ -280,6 +281,16 @@ pub fn push_needs_retry(result: Result<(), DenoiserError>) -> Result<bool, anyho
     }
 }
 
+/// Unwraps a denoised frame from one of the `Denoiser`s
+/// [`PlanarDenoiser`] builds.
+///
+/// Those are always built in [`crate::OutputFormat::F32`], so the other
+/// variant never reaches here.
+fn expect_f32(out: FrameOutput) -> Vec<f32> {
+    out.into_f32()
+        .expect("PlanarDenoiser builds every Denoiser in f32 output format")
+}
+
 /// Wraps the luma and chroma `Denoiser` instances needed for one
 /// subsampled YUV source.
 ///
@@ -470,7 +481,7 @@ impl PlanarDenoiser {
         if let Some(d) = self.yuv.as_mut() {
             return match d.recv_frame()? {
                 Some(packed) => Ok(Some(unpack_yuv_from_f32(
-                    &packed,
+                    &expect_f32(packed),
                     self.layout.luma_pixels(),
                     self.layout.depth,
                 ))),
@@ -478,14 +489,21 @@ impl PlanarDenoiser {
             };
         }
 
-        let luma_out = self.luma.as_mut().map(|d| d.recv_frame()).transpose()?.flatten();
+        let luma_out = self
+            .luma
+            .as_mut()
+            .map(|d| d.recv_frame())
+            .transpose()?
+            .flatten()
+            .map(expect_f32);
 
         let chroma_out = self
             .chroma
             .as_mut()
             .map(|d| d.recv_frame())
             .transpose()?
-            .flatten();
+            .flatten()
+            .map(expect_f32);
 
         // A disabled side has no Denoiser to query. When the enabled side
         // produced output, pop the matching source plane from the
@@ -518,7 +536,7 @@ impl PlanarDenoiser {
         if let Some(d) = self.yuv.as_mut() {
             let pixels = self.layout.luma_pixels();
             let depth = self.layout.depth;
-            d.flush(|packed| sink(unpack_yuv_from_f32(&packed, pixels, depth)))?;
+            d.flush(|packed| sink(unpack_yuv_from_f32(&expect_f32(packed), pixels, depth)))?;
             return Ok(());
         }
 
@@ -528,11 +546,11 @@ impl PlanarDenoiser {
         let mut chroma_buf: Vec<Vec<f32>> = Vec::new();
 
         if let Some(d) = self.luma.as_mut() {
-            d.flush(|v| luma_buf.push(v))?;
+            d.flush(|v| luma_buf.push(expect_f32(v)))?;
         }
 
         if let Some(d) = self.chroma.as_mut() {
-            d.flush(|v| chroma_buf.push(v))?;
+            d.flush(|v| chroma_buf.push(expect_f32(v)))?;
         }
 
         // The two halves run in lockstep, so they flush the same number

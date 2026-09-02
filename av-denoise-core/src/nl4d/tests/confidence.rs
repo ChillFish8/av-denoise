@@ -216,7 +216,8 @@ fn run_denoiser(
     for frame in frames {
         d.push_frame(frame);
         if let Some(pending) = d.denoise_submit().expect("denoise_submit failed") {
-            outputs.push(pending.wait().expect("readback failed"));
+            let frame = pending.wait().expect("readback failed");
+            outputs.push(frame.into_f32().expect("f32 output"));
         }
     }
     outputs

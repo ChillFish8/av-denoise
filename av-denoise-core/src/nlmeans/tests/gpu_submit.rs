@@ -54,7 +54,11 @@ fn submit_gpu_matches_submit() {
         match (expected, actual) {
             (None, None) => {},
             (Some(pending), Some(output)) => {
-                let expected_frame = pending.wait().expect("wait failed");
+                let expected_frame = pending
+                    .wait()
+                    .expect("wait failed")
+                    .into_f32()
+                    .expect("f32 output");
 
                 let bytes = client.read_one(output.handle).expect("gpu readback failed");
                 let actual_frame = f32::from_bytes(&bytes);

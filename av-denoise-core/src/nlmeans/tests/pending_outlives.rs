@@ -42,7 +42,11 @@ fn pending_survives_denoiser_drop() {
         // `denoiser` is dropped here, and `pending` has to stay valid.
     };
 
-    let out = pending.wait().expect("wait failed");
+    let out = pending
+        .wait()
+        .expect("wait failed")
+        .into_f32()
+        .expect("f32 output");
     assert_eq!(out.len(), (w * h) as usize);
     for (i, &v) in out.iter().enumerate() {
         assert!((v - 0.5).abs() < 1e-5, "pixel {i}: expected 0.5, got {v}");

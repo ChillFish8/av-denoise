@@ -24,10 +24,10 @@ use super::noise::{
     zero_temporal_stats_slot,
 };
 use super::params::{NlmParams, SEPARABLE_THRESHOLD, sigma_eff, validate_dimensions};
-use super::pending::{Pending, unpack_frame};
+use super::pending::{Pending, start_readback, unpack_frame};
 use super::prefilter::{PrefilterCtx, PrefilterMode, run_prefilter};
 use super::{BLOCK_1D, MAX_GRID_1D};
-use crate::denoiser::DenoiserError;
+use crate::denoiser::{DenoiserError, FrameOutput, OutputFormat};
 
 /// A denoised frame that has finished its kernels but is still resident
 /// on the GPU.
@@ -1519,27 +1519,28 @@ impl<R: Runtime> NlmDenoiser<R> {
     ///
     /// Returns `Ok(None)` while the temporal window is still filling.
     pub fn denoise_submit(&mut self) -> Result<Option<Pending<R>>, anyhow::Error> {
+        self.denoise_submit_as(OutputFormat::F32)
+    }
+
+    /// [`Self::denoise_submit`] in a chosen output format.
+    ///
+    /// [`OutputFormat::Wire`] quantises and packs the frame on the GPU
+    /// before the readback, so only the wire bytes cross the bus.
+    pub fn denoise_submit_as(&mut self, format: OutputFormat) -> Result<Option<Pending<R>>, anyhow::Error> {
         let Some(output) = self.denoise_submit_gpu()? else {
             return Ok(None);
         };
 
         // Start the readback right away, so the GPU-side copy is queued
         // before the caller dispatches the next frame's kernels.
-        //
-        // The future is wrapped in an `async move` that owns a cloned
-        // `ComputeClient`, which is cheap because it shares its
-        // internals. That owned client lives inside the future, so the
-        // future is genuinely `'static` and the `Pending` can outlive
-        // the denoiser without any lifetime tricks.
-        let client = self.client.clone();
-        let fut = Box::pin(async move { client.read_async(vec![output.handle]).await });
-
         let pixels = (self.width * self.height) as usize;
-        Ok(Some(Pending::new(
-            fut,
+        Ok(Some(start_readback(
+            &self.client,
+            output.handle,
             self.params.channels.count(),
             self.params.channels.storage_count(),
             pixels,
+            format,
         )))
     }
 
@@ -1761,7 +1762,12 @@ impl<R: Runtime> NlmDenoiser<R> {
         let Some(pending) = self.denoise_submit()? else {
             return Ok(None);
         };
-        pending.wait_into(&mut self.output_scratch)?;
+        // `denoise_submit` always asks for `f32`, so `wait_into` refills
+        // the very buffer handed to it and the scratch keeps its
+        // allocation.
+        let mut out = FrameOutput::F32(std::mem::take(&mut self.output_scratch));
+        pending.wait_into(&mut out)?;
+        self.output_scratch = out.into_f32().unwrap_or_default();
         Ok(Some(self.output_scratch.as_slice()))
     }
 

@@ -79,7 +79,8 @@ fn denoises_a_static_noisy_clip() {
     for frame in &noisy_frames {
         d.push_frame(frame);
         if let Some(pending) = d.denoise_submit().expect("denoise_submit failed") {
-            outputs.push(pending.wait().expect("readback failed"));
+            let frame = pending.wait().expect("readback failed");
+            outputs.push(frame.into_f32().expect("f32 output"));
         }
     }
     d.flush(|frame| outputs.push(frame.to_vec()))
@@ -128,7 +129,8 @@ fn denoises_at_the_widest_spatial_and_temporal_radius() {
     for frame in &noisy_frames {
         d.push_frame(frame);
         if let Some(pending) = d.denoise_submit().expect("denoise_submit failed") {
-            outputs.push(pending.wait().expect("readback failed"));
+            let frame = pending.wait().expect("readback failed");
+            outputs.push(frame.into_f32().expect("f32 output"));
         }
     }
     d.flush(|frame| outputs.push(frame.to_vec()))
@@ -211,7 +213,8 @@ fn survives_a_ring_size_that_would_overflow_a_single_zero_dispatch() {
     for frame in &noisy_frames {
         d.push_frame(frame);
         if let Some(pending) = d.denoise_submit().expect("denoise_submit failed") {
-            outputs.push(pending.wait().expect("readback failed"));
+            let frame = pending.wait().expect("readback failed");
+            outputs.push(frame.into_f32().expect("f32 output"));
         }
     }
     d.flush(|frame| outputs.push(frame.to_vec()))
@@ -318,7 +321,8 @@ fn output_carries_its_own_frames_marker_no_other_frame_has() {
     for frame in &frames {
         d.push_frame(frame);
         if let Some(pending) = d.denoise_submit().expect("denoise_submit failed") {
-            outputs.push(pending.wait().expect("readback failed"));
+            let frame = pending.wait().expect("readback failed");
+            outputs.push(frame.into_f32().expect("f32 output"));
         }
     }
 
@@ -533,7 +537,8 @@ fn temporal_grouping_beats_spatial_only_on_a_static_clip() {
     for frame in &noisy_frames {
         d.push_frame(frame);
         if let Some(pending) = d.denoise_submit().expect("denoise_submit failed") {
-            outputs.push(pending.wait().expect("readback failed"));
+            let frame = pending.wait().expect("readback failed");
+            outputs.push(frame.into_f32().expect("f32 output"));
         }
     }
     let temporal_out = outputs
@@ -610,7 +615,8 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
     for frame in &frames {
         d.push_frame(frame);
         if let Some(pending) = d.denoise_submit().expect("denoise_submit failed") {
-            outputs.push(pending.wait().expect("readback failed"));
+            let frame = pending.wait().expect("readback failed");
+            outputs.push(frame.into_f32().expect("f32 output"));
         }
     }
     let cross_frame_out = outputs

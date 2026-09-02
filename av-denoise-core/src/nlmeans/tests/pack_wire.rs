@@ -1,8 +1,20 @@
 use cubecl::prelude::*;
 
 use super::helpers::{R, make_client};
+#[cfg(feature = "vulkan")]
+use super::helpers::{ramp_frame, test_denoiser};
 use crate::Depth;
 use crate::nlmeans::kernels::gpu_pack_wire;
+#[cfg(feature = "vulkan")]
+use crate::{
+    ChannelMode,
+    Denoiser,
+    DenoiserOptions,
+    DenoisingMode,
+    OutputFormat,
+    accelerate::Accelerator,
+    device::Device,
+};
 
 const BLOCK: u32 = 256;
 
@@ -197,4 +209,182 @@ fn padding_lanes_are_skipped_at_ten_bit() {
     let want = crate::frame::f32_to_plane(&wanted, Depth::Ten);
 
     assert_eq!(got, want);
+}
+
+/// Builds a top-level [`Denoiser`] at temporal radius 1 over `mode`,
+/// collecting frames in `format`.
+#[cfg(feature = "vulkan")]
+fn denoiser(mode: ChannelMode, format: OutputFormat, w: u32, h: u32) -> Denoiser {
+    let opts = DenoiserOptions::builder()
+        .channel_mode(mode)
+        .mode(DenoisingMode::Temporal { radius: 1 })
+        .output_format(format)
+        .build();
+
+    Denoiser::create(&[Accelerator::Vulkan], &Device::Default, w, h, opts)
+        .expect("denoiser construction failed")
+}
+
+/// Pushes `count` deterministic frames into `d`, one per index.
+#[cfg(feature = "vulkan")]
+fn push_ramp(d: &mut Denoiser, w: u32, h: u32, count: usize) {
+    for i in 0..count {
+        d.push_frame(&ramp_frame(w, h, i)).expect("push failed");
+    }
+}
+
+/// The differential test the pack kernel lives or dies on. A kernel that
+/// silently compiled to nothing returns zeros, which `f32_to_plane` of a
+/// real frame never does.
+#[cfg(feature = "vulkan")]
+#[test]
+fn wire_mode_output_matches_the_f32_path() {
+    let (w, h) = (16u32, 16u32);
+
+    for depth in [Depth::Eight, Depth::Ten, Depth::Twelve] {
+        let mut f32_side = test_denoiser(1, w, h);
+        let mut wire_side = denoiser(ChannelMode::Luma, OutputFormat::Wire { depth }, w, h);
+
+        push_ramp(&mut f32_side, w, h, 3);
+        push_ramp(&mut wire_side, w, h, 3);
+
+        let want = f32_side
+            .recv_frame()
+            .expect("f32 recv failed")
+            .expect("a frame is ready")
+            .into_f32()
+            .expect("an f32 denoiser returns f32");
+
+        let got = wire_side
+            .recv_frame()
+            .expect("wire recv failed")
+            .expect("a frame is ready")
+            .into_wire()
+            .expect("a wire denoiser returns wire bytes");
+
+        assert_eq!(got, crate::frame::f32_to_plane(&want, depth), "depth {depth:?}");
+    }
+}
+
+/// A chroma pair goes out as U's whole region followed by V's, not
+/// interleaved, so it matches what a planar consumer writes.
+#[cfg(feature = "vulkan")]
+#[test]
+fn wire_mode_chroma_matches_unpack_uv_from_f32() {
+    let (w, h) = (16u32, 16u32);
+    let depth = Depth::Ten;
+
+    let mut f32_side = denoiser(ChannelMode::Chroma, OutputFormat::F32, w, h);
+    let mut wire_side = denoiser(ChannelMode::Chroma, OutputFormat::Wire { depth }, w, h);
+
+    // A chroma frame holds two channels per pixel, which `ramp_frame`
+    // covers by producing twice as many values.
+    push_ramp(&mut f32_side, w, h * 2, 3);
+    push_ramp(&mut wire_side, w, h * 2, 3);
+
+    let want = f32_side
+        .recv_frame()
+        .expect("f32 recv failed")
+        .expect("a frame is ready")
+        .into_f32()
+        .expect("an f32 denoiser returns f32");
+
+    let got = wire_side
+        .recv_frame()
+        .expect("wire recv failed")
+        .expect("a frame is ready")
+        .into_wire()
+        .expect("a wire denoiser returns wire bytes");
+
+    let (u, v) = crate::frame::unpack_uv_from_f32(&want, (w * h) as usize, depth);
+    let expected: Vec<u8> = u.into_iter().chain(v).collect();
+
+    assert_eq!(got, expected);
+}
+
+/// 13x3 luma is 39 samples, which is nine 8-bit words plus three bytes,
+/// so the kernel's last word is a partial one.
+#[cfg(feature = "vulkan")]
+#[test]
+fn wire_mode_handles_a_plane_that_is_not_a_whole_number_of_words() {
+    let (w, h) = (13u32, 3u32);
+    let depth = Depth::Eight;
+
+    let mut f32_side = test_denoiser(1, w, h);
+    let mut wire_side = denoiser(ChannelMode::Luma, OutputFormat::Wire { depth }, w, h);
+
+    push_ramp(&mut f32_side, w, h, 3);
+    push_ramp(&mut wire_side, w, h, 3);
+
+    let want = f32_side
+        .recv_frame()
+        .expect("f32 recv failed")
+        .expect("a frame is ready")
+        .into_f32()
+        .expect("an f32 denoiser returns f32");
+
+    let got = wire_side
+        .recv_frame()
+        .expect("wire recv failed")
+        .expect("a frame is ready")
+        .into_wire()
+        .expect("a wire denoiser returns wire bytes");
+
+    assert_eq!(got.len(), 39);
+    assert_eq!(got, crate::frame::f32_to_plane(&want, depth));
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+fn try_recv_frame_in_wire_mode_returns_none_when_nothing_is_in_flight() {
+    let mut d = denoiser(
+        ChannelMode::Luma,
+        OutputFormat::Wire { depth: Depth::Eight },
+        64,
+        64,
+    );
+    assert_eq!(d.try_recv_frame().unwrap(), None);
+}
+
+/// Wire mode must not quietly become blocking, and the bytes it polls
+/// out must be the ones the blocking path returns.
+#[cfg(feature = "vulkan")]
+#[test]
+fn try_wait_still_reports_not_ready_without_blocking_in_wire_mode() {
+    // A poll count is the wrong proxy for the wall-clock interval this
+    // test needs to cover (cold pipeline compile plus dispatch plus
+    // readback), since a faster CPU makes each poll cheaper and so
+    // needs *more* of them for the same GPU latency. A deadline covers
+    // both a slow GPU and a fast CPU the same way.
+    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+    let (w, h) = (64u32, 64u32);
+    let format = OutputFormat::Wire { depth: Depth::Eight };
+
+    // Two pushes at radius 1 prime the window and submit one denoise,
+    // leaving exactly one readback in flight.
+    let mut polled = denoiser(ChannelMode::Luma, format, w, h);
+    push_ramp(&mut polled, w, h, 2);
+
+    let start = std::time::Instant::now();
+    let mut got = None;
+    let mut polls = 0;
+    while start.elapsed() < DEADLINE {
+        polls += 1;
+        if let Some(frame) = polled.try_recv_frame().unwrap() {
+            got = Some(frame);
+            break;
+        }
+    }
+    let got = got.unwrap_or_else(|| panic!("readback never landed within {DEADLINE:?} ({polls} polls)"));
+
+    let mut blocking = denoiser(ChannelMode::Luma, format, w, h);
+    push_ramp(&mut blocking, w, h, 2);
+    let expected = blocking
+        .recv_frame()
+        .unwrap()
+        .expect("blocking denoiser should have a frame ready");
+
+    assert!(matches!(got, crate::FrameOutput::Wire(_)));
+    assert_eq!(got, expected);
 }
