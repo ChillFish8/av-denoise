@@ -11,6 +11,7 @@ readme = "README.md"
 
 [workspace.dependencies]
 anyhow = "1"
+crossbeam-channel = "0.5"
 thiserror = "2"
 tracing = "0.1"
 strum = "0.28"

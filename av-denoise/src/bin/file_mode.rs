@@ -259,7 +259,7 @@ fn encode_scenes(
         "frame buffer budget",
     );
 
-    let (worker_txs, worker_handles, out_rx) = spawn_workers(opts, scenes.layout, workers, budget);
+    let (job_tx, worker_handles, out_rx) = spawn_workers(opts, scenes.layout, workers, budget.output_depth);
     let coordinator = spawn_coordinator(
         scenes.layout,
         scenes.framerate,
@@ -269,13 +269,10 @@ fn encode_scenes(
         budget.peak_frames,
     );
 
-    dispatch_frames(input, scenes, &worker_txs)?;
+    dispatch_frames(input, scenes, &job_tx, budget.frame_depth)?;
 
-    for tx in &worker_txs {
-        let _ = tx.send(WorkerMsg::Eof);
-    }
-
-    drop(worker_txs);
+    // Closing the queue is what tells the workers there are no more scenes.
+    drop(job_tx);
 
     for h in worker_handles {
         h.join()
@@ -291,28 +288,34 @@ fn encode_scenes(
 
 type WorkerJoin = thread::JoinHandle<Result<(), anyhow::Error>>;
 
-/// Spawns `workers` worker threads.
+/// Spawns `workers` worker threads over one shared scene queue.
 ///
-/// Returns their input channels, their join handles, and the shared
-/// output channel they emit denoised frames on.
+/// The queue is a rendezvous, so a scene is only offered when a worker is
+/// free and at most `workers` scenes are ever in flight.
+///
+/// Returns the queue's sender, their join handles, and the shared output
+/// channel they emit denoised frames on.
 fn spawn_workers(
     opts: &PlaneOptions,
     layout: FrameLayout,
     workers: usize,
-    budget: ChannelBudget,
-) -> (Vec<SyncSender<WorkerMsg>>, Vec<WorkerJoin>, Receiver<OutputMsg>) {
-    let mut worker_txs: Vec<SyncSender<WorkerMsg>> = Vec::with_capacity(workers);
-    let (out_tx, out_rx) = sync_channel::<OutputMsg>(budget.output_depth);
+    output_depth: usize,
+) -> (
+    crossbeam_channel::Sender<SceneJob>,
+    Vec<WorkerJoin>,
+    Receiver<OutputMsg>,
+) {
+    let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
+    let (out_tx, out_rx) = sync_channel::<OutputMsg>(output_depth);
     let mut worker_handles: Vec<WorkerJoin> = Vec::with_capacity(workers);
 
     for worker_id in 0..workers {
-        let (frame_tx, frame_rx) = sync_channel::<WorkerMsg>(budget.frame_depth);
         let opts = opts.clone();
         let out_tx = out_tx.clone();
+        let job_rx = job_rx.clone();
 
-        worker_txs.push(frame_tx);
         worker_handles.push(thread::spawn(move || {
-            run_worker(worker_id, opts, layout, frame_rx, out_tx)
+            run_worker(worker_id, opts, layout, job_rx, out_tx)
         }));
     }
 
@@ -320,7 +323,7 @@ fn spawn_workers(
     // clone has terminated.
     drop(out_tx);
 
-    (worker_txs, worker_handles, out_rx)
+    (job_tx, worker_handles, out_rx)
 }
 
 fn spawn_coordinator(
@@ -334,35 +337,30 @@ fn spawn_coordinator(
     thread::spawn(move || run_coordinator(layout, framerate, rx, total_frames, visible, peak_frames))
 }
 
-/// Reads every frame in order and routes it to worker `scene_idx % N`.
+/// Reads every frame in order and offers each scene to the worker pool.
 ///
-/// The send blocks when a worker's channel fills, which gives the
-/// pipeline its backpressure.
-fn dispatch_frames(
-    input: &Path,
+/// A scene's frames go into a channel of their own. Dropping that
+/// channel's sender is what tells the claiming worker the scene has
+/// ended.
+fn stage_frames<I>(
+    frames: I,
     scenes: &SceneLayout,
-    worker_txs: &[SyncSender<WorkerMsg>],
-) -> Result<(), anyhow::Error> {
-    let mut decoder = Decoder::from_file(input)?;
-    let workers = worker_txs.len();
-
+    jobs: &crossbeam_channel::Sender<SceneJob>,
+    frame_depth: usize,
+) -> Result<(), anyhow::Error>
+where
+    I: Iterator<Item = Result<Planes, anyhow::Error>>,
+{
     let mut scene_idx = 0usize;
     let mut next_boundary = scenes.scene_starts[1];
     let mut g = 0u64;
+    let mut current: Option<(usize, crossbeam_channel::Sender<StagedFrame>)> = None;
 
-    for raw in 0..scenes.raw_frames {
-        // Every frame is read, phantom or not. The decoder walks the file in order and has
-        // no way to be told to skip one.
-        let planes = match scenes.layout.depth {
-            Depth::Eight => {
-                let frame = decoder.read_video_frame::<u8>()?;
-                planes_from_v_frame_u8(&frame, scenes.layout)?
-            },
-            Depth::Ten | Depth::Twelve => {
-                let frame = decoder.read_video_frame::<u16>()?;
-                planes_from_v_frame_u16(&frame, scenes.layout)?
-            },
-        };
+    // The iterator yields frames in raw decoder order, so position is the
+    // raw index. Every frame is read, phantom or not, because the decoder
+    // walks the file in order and cannot be told to skip one.
+    for (raw, planes) in frames.enumerate() {
+        let planes = planes?;
 
         // A phantom frame repeats one of its neighbours. Emitting it would lengthen the output
         // and shift everything after it, and feeding it to a worker would put a false
@@ -376,15 +374,33 @@ fn dispatch_frames(
             next_boundary = scenes.scene_starts[scene_idx + 1];
         }
 
-        let target = scene_idx % workers;
+        if !matches!(&current, Some((idx, _)) if *idx == scene_idx) {
+            let (tx, rx) = crossbeam_channel::bounded::<StagedFrame>(frame_depth);
 
-        worker_txs[target]
-            .send(WorkerMsg::Frame {
-                global_idx: g,
+            // Dropping the previous scene's sender ends that scene, which
+            // frees the worker holding it to claim this one. The queue is a
+            // rendezvous, so offering the job first would deadlock whenever
+            // every worker is busy.
+            drop(current.take());
+
+            jobs.send(SceneJob {
                 scene_idx: scene_idx as u32,
-                planes,
+                frames: rx,
             })
-            .map_err(|_| anyhow::anyhow!("worker {target} disconnected"))?;
+            .map_err(|_| anyhow::anyhow!("worker pool disconnected"))?;
+
+            current = Some((scene_idx, tx));
+        }
+
+        let (_, tx) = current
+            .as_ref()
+            .expect("a scene sender exists after the check above");
+
+        tx.send(StagedFrame {
+            global_idx: g,
+            planes,
+        })
+        .map_err(|_| anyhow::anyhow!("the worker holding scene {scene_idx} disconnected"))?;
 
         g += 1;
     }
@@ -392,13 +408,45 @@ fn dispatch_frames(
     Ok(())
 }
 
-enum WorkerMsg {
-    Frame {
-        global_idx: u64,
-        scene_idx: u32,
-        planes: Planes,
-    },
-    Eof,
+/// Opens the input and stages every frame it decodes.
+fn dispatch_frames(
+    input: &Path,
+    scenes: &SceneLayout,
+    jobs: &crossbeam_channel::Sender<SceneJob>,
+    frame_depth: usize,
+) -> Result<(), anyhow::Error> {
+    let mut decoder = Decoder::from_file(input)?;
+    let layout = scenes.layout;
+
+    let frames = (0..scenes.raw_frames).map(move |_| -> Result<Planes, anyhow::Error> {
+        match layout.depth {
+            Depth::Eight => {
+                let frame = decoder.read_video_frame::<u8>()?;
+                planes_from_v_frame_u8(&frame, layout)
+            },
+            Depth::Ten | Depth::Twelve => {
+                let frame = decoder.read_video_frame::<u16>()?;
+                planes_from_v_frame_u16(&frame, layout)
+            },
+        }
+    });
+
+    stage_frames(frames, scenes, jobs, frame_depth)
+}
+
+/// One decoded frame, staged for the worker that claims its scene.
+struct StagedFrame {
+    global_idx: u64,
+    planes: Planes,
+}
+
+/// One scene, offered to whichever worker is free.
+///
+/// `frames` closes when the scene has no more frames, which is how a
+/// worker knows to flush.
+struct SceneJob {
+    scene_idx: u32,
+    frames: crossbeam_channel::Receiver<StagedFrame>,
 }
 
 struct OutputMsg {
@@ -410,61 +458,50 @@ fn run_worker(
     worker_id: usize,
     opts: PlaneOptions,
     layout: FrameLayout,
-    rx: Receiver<WorkerMsg>,
+    jobs: crossbeam_channel::Receiver<SceneJob>,
     tx: SyncSender<OutputMsg>,
 ) -> Result<(), anyhow::Error> {
-    let mut current_scene: Option<u32> = None;
     let mut wd: Option<PlanarDenoiser> = None;
     // The cold-cache queue place this worker's denoiser holds, until its
     // first output frame proves the kernels are compiled and cached.
     let mut warm_up: Option<WarmUp> = None;
 
-    // Indices of pushed-but-not-yet-emitted frames, in push order.
-    let mut pending: std::collections::VecDeque<u64> = Default::default();
-
-    loop {
-        match rx.recv() {
-            Ok(WorkerMsg::Frame {
-                global_idx,
-                scene_idx,
-                planes,
-            }) => {
-                if current_scene != Some(scene_idx) {
-                    // Reuse the existing PlanarDenoiser across scenes, flushing the worker
-                    // will ensure there is no cross-scene blending during temporal workloads.
-                    if let Some(prev) = wd.as_mut() {
-                        flush_worker(prev, &mut warm_up, &mut pending, &tx)?;
-                    } else {
-                        let (denoiser, place) = create_denoiser(&opts, layout)?;
-                        wd = Some(denoiser);
-                        warm_up = place;
-                    }
-
-                    current_scene = Some(scene_idx);
-                    pending.clear();
-
-                    tracing::debug!(worker_id, scene_idx, "worker started scene");
-                }
-
-                let denoiser = wd.as_mut().expect("denoiser exists after new-scene init");
-
-                // Nothing is received straight after the push.
-                // `push_with_drain` handles backpressure through QueueFull
-                // when the 2-deep pending pipeline fills, and `flush_worker`
-                // drains the tail at the scene boundary. Receiving after
-                // every push would clamp the pipeline back to depth 1 and
-                // put the GPU readback in the critical path of the next
-                // push.
-                push_with_drain(denoiser, &mut warm_up, &mut pending, global_idx, &planes, &tx)?;
-            },
-            Ok(WorkerMsg::Eof) | Err(_) => {
-                if let Some(mut prev) = wd.take() {
-                    flush_worker(&mut prev, &mut warm_up, &mut pending, &tx)?;
-                }
-
-                break;
-            },
+    while let Ok(job) = jobs.recv() {
+        // Built on the first claimed scene, so a worker that never claims
+        // one never compiles.
+        if wd.is_none() {
+            let (denoiser, place) = create_denoiser(&opts, layout)?;
+            wd = Some(denoiser);
+            warm_up = place;
         }
+
+        let denoiser = wd.as_mut().expect("denoiser exists after the check above");
+
+        tracing::debug!(worker_id, scene_idx = job.scene_idx, "worker started scene");
+
+        // Indices of pushed-but-not-yet-emitted frames, in push order.
+        let mut pending: std::collections::VecDeque<u64> = Default::default();
+
+        // Nothing is received straight after the push.
+        // `push_with_drain` handles backpressure through QueueFull
+        // when the 2-deep pending pipeline fills, and `flush_worker`
+        // drains the tail below. Receiving after every push would clamp
+        // the pipeline back to depth 1 and put the GPU readback in the
+        // critical path of the next push.
+        for frame in job.frames {
+            push_with_drain(
+                denoiser,
+                &mut warm_up,
+                &mut pending,
+                frame.global_idx,
+                &frame.planes,
+                &tx,
+            )?;
+        }
+
+        // Reuse the PlanarDenoiser across scenes. Flushing here ensures
+        // no temporal window spans two of them.
+        flush_worker(denoiser, &mut warm_up, &mut pending, &tx)?;
     }
 
     Ok(())
@@ -771,6 +808,119 @@ mod tests {
             u: layout.neutral_chroma_plane(),
             v: layout.neutral_chroma_plane(),
         }
+    }
+
+    fn scene_layout(scene_starts: Vec<usize>, phantom: BTreeSet<usize>) -> SceneLayout {
+        let total_frames = *scene_starts
+            .last()
+            .expect("scene_starts ends with the frame count");
+
+        SceneLayout {
+            layout: tiny_layout(),
+            framerate: Rational32::new(30, 1),
+            total_frames,
+            raw_frames: total_frames + phantom.len(),
+            phantom,
+            scene_starts,
+        }
+    }
+
+    /// Drains every job the stager offers, returning each scene index with
+    /// the frame indices that scene carried.
+    ///
+    /// Runs on its own thread because the per-scene channel is bounded, so a
+    /// stager with more frames than depth blocks until someone reads.
+    fn collect_jobs(rx: crossbeam_channel::Receiver<SceneJob>) -> thread::JoinHandle<Vec<(u32, Vec<u64>)>> {
+        thread::spawn(move || {
+            let mut out = Vec::new();
+
+            while let Ok(job) = rx.recv() {
+                let idx = job.scene_idx;
+                let frames = job.frames.iter().map(|f| f.global_idx).collect();
+                out.push((idx, frames));
+            }
+
+            out
+        })
+    }
+
+    #[test]
+    fn stage_frames_offers_one_job_per_scene_in_order() {
+        let scenes = scene_layout(vec![0, 2, 4, 6], BTreeSet::new());
+        let planes = tiny_planes(scenes.layout);
+        let frames = (0..6).map(move |_| Ok(planes.clone()));
+
+        let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
+        let collector = collect_jobs(job_rx);
+
+        stage_frames(frames, &scenes, &job_tx, 2).expect("staging should succeed");
+        drop(job_tx);
+
+        let jobs = collector.join().expect("collector panicked");
+
+        assert_eq!(jobs, vec![(0, vec![0, 1]), (1, vec![2, 3]), (2, vec![4, 5])],);
+    }
+
+    #[test]
+    fn stage_frames_skips_phantom_frames_without_advancing_the_index() {
+        let scenes = scene_layout(vec![0, 4], BTreeSet::from([1, 3]));
+        let planes = tiny_planes(scenes.layout);
+        let frames = (0..6).map(move |_| Ok(planes.clone()));
+
+        let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
+        let collector = collect_jobs(job_rx);
+
+        stage_frames(frames, &scenes, &job_tx, 4).expect("staging should succeed");
+        drop(job_tx);
+
+        let jobs = collector.join().expect("collector panicked");
+
+        assert_eq!(jobs, vec![(0, vec![0, 1, 2, 3])]);
+    }
+
+    #[test]
+    fn a_scene_job_channel_closes_when_its_scene_ends() {
+        let scenes = scene_layout(vec![0, 2], BTreeSet::new());
+        let planes = tiny_planes(scenes.layout);
+        let frames = (0..2).map(move |_| Ok(planes.clone()));
+
+        let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
+        let claimed = thread::spawn(move || job_rx.recv().expect("one job is offered"));
+
+        stage_frames(frames, &scenes, &job_tx, 4).expect("staging should succeed");
+        drop(job_tx);
+
+        let job = claimed.join().expect("claimant panicked");
+
+        assert_eq!(job.frames.recv().map(|f| f.global_idx).ok(), Some(0));
+        assert_eq!(job.frames.recv().map(|f| f.global_idx).ok(), Some(1));
+        assert!(
+            job.frames.recv().is_err(),
+            "the scene's channel closes after its last frame"
+        );
+    }
+
+    /// A worker that claims a scene and dies without draining it must surface
+    /// as an error. Before the queue became a rendezvous, the dead worker's
+    /// job could sit in the queue keeping the scene channel alive, and the
+    /// stager blocked on it forever.
+    #[test]
+    fn staging_fails_rather_than_hanging_when_the_pool_dies() {
+        let scenes = scene_layout(vec![0, 10], BTreeSet::new());
+        let planes = tiny_planes(scenes.layout);
+        let frames = (0..10).map(move |_| Ok(planes.clone()));
+
+        let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
+        let pool = thread::spawn(move || drop(job_rx.recv()));
+
+        let err = stage_frames(frames, &scenes, &job_tx, 2).expect_err("staging must not hang");
+
+        pool.join().expect("pool panicked");
+
+        assert!(
+            err.to_string().contains("disconnect"),
+            "error should name the disconnect: {err}"
+        );
     }
 
     #[test]
