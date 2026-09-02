@@ -36,18 +36,8 @@ fn run_input(opts: &RunOptions, input: &InputSource, workers: Option<usize>) -> 
 }
 
 fn main() -> anyhow::Result<()> {
-    // cubecl spawns its per-device worker thread without asking for a
-    // stack size, so it gets Rust's default 2 MiB. GPU kernel codegen
-    // runs on that thread, and at a large --search-radius the (2R+1)^2
-    // unrolled body of the windowed NLM kernels in
-    // src/nlmeans/kernels/fused.rs overflows that stack.
-    //
-    // RUST_MIN_STACK is cached the first time it is read, so it has to
-    // be set here, before any GPU thread spawns.
-    if std::env::var_os("RUST_MIN_STACK").is_none() {
-        // SAFETY: still single-threaded, no other thread can race the env mutation.
-        unsafe { std::env::set_var("RUST_MIN_STACK", "16777216") };
-    }
+    // SAFETY: still single-threaded, no other thread can race the env mutation.
+    unsafe { av_denoise_core::raise_codegen_stack_limit() };
 
     let args = Args::parse();
 

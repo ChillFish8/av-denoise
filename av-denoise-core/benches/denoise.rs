@@ -166,13 +166,8 @@ fn bench_push_recv(
 }
 
 fn main() {
-    // Match the av-denoise binary: bump RUST_MIN_STACK so cubecl's DSD
-    // worker thread can codegen the (2R+1)²-unrolled windowed NLM kernels
-    // at large --search-radius. See src/bin/main.rs for the full rationale.
-    if std::env::var_os("RUST_MIN_STACK").is_none() {
-        // SAFETY: single-threaded at entry, no race possible.
-        unsafe { std::env::set_var("RUST_MIN_STACK", "16777216") };
-    }
+    // SAFETY: single-threaded at entry, no race possible.
+    unsafe { av_denoise_core::raise_codegen_stack_limit() };
 
     use clap::Parser;
     let cli = Cli::parse();

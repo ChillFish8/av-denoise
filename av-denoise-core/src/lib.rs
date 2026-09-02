@@ -16,6 +16,7 @@ pub mod nl4d;
 pub mod nlmeans;
 mod probe;
 pub mod sniff;
+pub mod stack;
 pub mod warmup;
 
 pub use cache::{
@@ -70,4 +71,5 @@ pub use nlmeans::{
     normalize,
     parse_prefilter,
 };
+pub use stack::{CODEGEN_STACK_BYTES, codegen_stack_is_sufficient, raise_codegen_stack_limit};
 pub use warmup::{WarmUp, kernel_key};

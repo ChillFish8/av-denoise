@@ -17,23 +17,6 @@ use vapoursynth::video_info::{Resolution, VideoInfo};
 use crate::frames::{pack_plane, unpack_plane_into, window_indices};
 use crate::params::{AlgorithmKind, RawFormat, RawParams, layout_from_format, plane_options_from};
 
-/// Raises the stack size cubecl's kernel codegen thread inherits.
-///
-/// Codegen unrolls the windowed NLM kernel body `(2R+1)^2` times, which
-/// overflows the default 2 MiB stack at a search radius of 5 or more and
-/// aborts the host process. `export_vapoursynth_plugin!` expands to the
-/// whole body of the plugin's entry point, so there is no earlier hook of
-/// ours to set this in. Setting it as the first statement of the shared
-/// filter-creation function is early enough: cubecl only spawns its
-/// codegen thread once a denoiser is created, later in this same function.
-pub(crate) fn raise_stack_limit() {
-    if std::env::var_os("RUST_MIN_STACK").is_none() {
-        // SAFETY: called before any denoiser thread spawns, and before any
-        // other thread in this process could be reading the environment.
-        unsafe { std::env::set_var("RUST_MIN_STACK", "16777216") };
-    }
-}
-
 /// The running pipeline and the output frame it last produced.
 ///
 /// VapourSynth may call `get_frame` from several threads, so the
@@ -105,7 +88,14 @@ impl<'core> Denoise<'core> {
         algorithm_kind: AlgorithmKind,
         raw: &RawParams,
     ) -> Result<Self, Error> {
-        raise_stack_limit();
+        // `export_vapoursynth_plugin!` expands to the whole body of the
+        // plugin's entry point, so there is no earlier hook of ours to
+        // raise the stack limit in.
+        // SAFETY: best-effort mutation at the earliest hook this plugin
+        // gets. The host may already have other threads touching the
+        // environment, so this cannot guarantee exclusive access, but the
+        // alternative is a hard abort during codegen.
+        unsafe { av_denoise_core::raise_codegen_stack_limit() };
 
         let info = source.info();
 

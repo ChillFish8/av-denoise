@@ -315,11 +315,11 @@ fn reject_mismatched_params(
 /// `strength` on nl4d or `lambda_ht` on nlmeans, rather than accepting
 /// and silently ignoring it. See [`reject_mismatched_params`].
 ///
-/// Then rejects `search_radius` above 4 when `RUST_MIN_STACK` is unset,
-/// since cubecl's kernel codegen overflows the default 2 MiB stack and
-/// aborts the process at that radius. `filter.rs` raises the stack
-/// before this runs in the real plugin, so this only ever fires when
-/// that step was skipped, and only for nlmeans, since nl4d never
+/// Then rejects `search_radius` above 4 when `RUST_MIN_STACK` is unset or
+/// too small, since cubecl's kernel codegen overflows the default 2 MiB
+/// stack and aborts the process at that radius. `filter.rs` raises the
+/// stack before this runs in the real plugin, so this only ever fires
+/// when that step was skipped, and only for nlmeans, since nl4d never
 /// reaches this check with a `search_radius` set at all.
 pub fn plane_options_from(
     raw: &RawParams,
@@ -349,7 +349,7 @@ pub fn plane_options_from(
 
     if let Some(radius) = raw.search_radius
         && radius > 4
-        && std::env::var_os("RUST_MIN_STACK").is_none()
+        && !av_denoise_core::codegen_stack_is_sufficient()
     {
         anyhow::bail!(
             "search_radius {radius} needs a raised stack, but RUST_MIN_STACK is not set. Values above 4 overflow the default 2 MiB stack during kernel codegen"

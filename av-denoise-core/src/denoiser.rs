@@ -749,16 +749,9 @@ impl Denoiser {
     /// `(2 * search_radius + 1)^2` times, so a `search_radius` of about
     /// 5 or more can overflow the 2 MiB default and abort the process.
     ///
-    /// Callers using a `search_radius` above 4 should set
-    /// `RUST_MIN_STACK` to at least 16 MiB before any cubecl thread
+    /// Callers using a `search_radius` above 4 should call
+    /// [`crate::raise_codegen_stack_limit`] before any cubecl thread
     /// spawns, usually right at the top of `main`.
-    ///
-    /// ```no_run
-    /// if std::env::var_os("RUST_MIN_STACK").is_none() {
-    ///     // SAFETY: single-threaded at startup.
-    ///     unsafe { std::env::set_var("RUST_MIN_STACK", "16777216") };
-    /// }
-    /// ```
     pub fn create(
         accelerators: &[Accelerator],
         device: &Device,
