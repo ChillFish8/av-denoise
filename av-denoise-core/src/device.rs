@@ -59,21 +59,39 @@ impl FromStr for Device {
 
     /// Accepts the same spellings as the bench CLI.
     ///
-    /// - `default`
-    /// - `discrete[:N]`, `integrated[:N]`, and `virtual[:N]`, where `N`
-    ///   defaults to 0
-    /// - `cpu`
+    /// - `default`, which takes no index
+    /// - `discrete[:N]`, `integrated[:N]`, and `virtual[:N]`, where `N` defaults to 0
+    /// - `cpu`, which takes no index
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (kind, idx) = s.split_once(':').unwrap_or((s, "0"));
-        let index: usize = idx
-            .parse()
-            .map_err(|_| format!("invalid device index '{idx}' in '{s}'"))?;
+        let (kind, suffix) = match s.split_once(':') {
+            Some((kind, idx)) => (kind, Some(idx)),
+            None => (s, None),
+        };
+
+        if matches!(kind, "default" | "cpu") && suffix.is_some() {
+            return Err(format!(
+                "device kind '{kind}' takes no index, got '{s}'. Only discrete, integrated, and virtual take an index"
+            ));
+        }
+
+        let parse_index = |idx: &str| -> Result<usize, String> {
+            idx.parse()
+                .map_err(|_| format!("invalid device index '{idx}' in '{s}'"))
+        };
+        let idx = suffix.unwrap_or("0");
+
         match kind {
             "default" => Ok(Device::Default),
-            "discrete" => Ok(Device::Discrete { index }),
-            "integrated" => Ok(Device::Integrated { index }),
-            "virtual" => Ok(Device::Virtual { index }),
             "cpu" => Ok(Device::Cpu),
+            "discrete" => Ok(Device::Discrete {
+                index: parse_index(idx)?,
+            }),
+            "integrated" => Ok(Device::Integrated {
+                index: parse_index(idx)?,
+            }),
+            "virtual" => Ok(Device::Virtual {
+                index: parse_index(idx)?,
+            }),
             other => Err(format!(
                 "unknown device kind '{other}', expected default, discrete[:N], integrated[:N], virtual[:N], or cpu"
             )),
@@ -177,6 +195,21 @@ mod tests {
     #[test]
     fn parse_rejects_non_numeric_index() {
         assert!("discrete:abc".parse::<Device>().is_err());
+    }
+
+    #[test]
+    fn parse_rejects_index_on_default_and_cpu() {
+        assert!("default:0".parse::<Device>().is_err());
+        assert!("default:1".parse::<Device>().is_err());
+        assert!("cpu:2".parse::<Device>().is_err());
+    }
+
+    #[test]
+    fn rejected_index_error_names_the_kind() {
+        let err = "default:1".parse::<Device>().unwrap_err();
+        assert!(err.contains("default"), "{err}");
+        let err = "cpu:2".parse::<Device>().unwrap_err();
+        assert!(err.contains("cpu"), "{err}");
     }
 
     #[test]
