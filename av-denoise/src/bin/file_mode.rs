@@ -346,11 +346,11 @@ fn dispatch_frames(
         let planes = match scenes.layout.depth {
             Depth::Eight => {
                 let frame = decoder.read_video_frame::<u8>()?;
-                planes_from_v_frame_u8(&frame, scenes.layout)
+                planes_from_v_frame_u8(&frame, scenes.layout)?
             },
             Depth::Ten | Depth::Twelve => {
                 let frame = decoder.read_video_frame::<u16>()?;
-                planes_from_v_frame_u16(&frame, scenes.layout)
+                planes_from_v_frame_u16(&frame, scenes.layout)?
             },
         };
 
@@ -618,36 +618,63 @@ fn emit_frames<W: std::io::Write>(
     Ok(())
 }
 
-fn planes_from_v_frame_u8(frame: &v_frame::frame::Frame<u8>, layout: FrameLayout) -> Planes {
-    Planes {
-        y: collect_plane_u8(&frame.y_plane),
-        u: frame
-            .u_plane
-            .as_ref()
-            .map(collect_plane_u8)
-            .unwrap_or_else(|| layout.neutral_chroma_plane()),
-        v: frame
-            .v_plane
-            .as_ref()
-            .map(collect_plane_u8)
-            .unwrap_or_else(|| layout.neutral_chroma_plane()),
+/// Checks each plane's byte length against the layout, failing with an error naming which plane
+/// is wrong, the length found and the length expected.
+fn check_plane_lens(planes: &Planes, layout: FrameLayout) -> Result<(), anyhow::Error> {
+    for (name, got, expected) in [
+        ("y", planes.y.len(), layout.luma_bytes()),
+        ("u", planes.u.len(), layout.chroma_bytes()),
+        ("v", planes.v.len(), layout.chroma_bytes()),
+    ] {
+        if got != expected {
+            anyhow::bail!("{name} plane is {got} bytes, expected {expected} from the frame layout");
+        }
     }
+    Ok(())
 }
 
-fn planes_from_v_frame_u16(frame: &v_frame::frame::Frame<u16>, layout: FrameLayout) -> Planes {
-    Planes {
-        y: collect_plane_u16(&frame.y_plane),
-        u: frame
-            .u_plane
-            .as_ref()
-            .map(collect_plane_u16)
-            .unwrap_or_else(|| layout.neutral_chroma_plane()),
-        v: frame
-            .v_plane
-            .as_ref()
-            .map(collect_plane_u16)
-            .unwrap_or_else(|| layout.neutral_chroma_plane()),
-    }
+fn planes_from_v_frame_u8(
+    frame: &v_frame::frame::Frame<u8>,
+    layout: FrameLayout,
+) -> Result<Planes, anyhow::Error> {
+    let y = collect_plane_u8(&frame.y_plane);
+    let u = frame
+        .u_plane
+        .as_ref()
+        .map(collect_plane_u8)
+        .unwrap_or_else(|| layout.neutral_chroma_plane());
+    let v = frame
+        .v_plane
+        .as_ref()
+        .map(collect_plane_u8)
+        .unwrap_or_else(|| layout.neutral_chroma_plane());
+
+    let planes = Planes { y, u, v };
+    check_plane_lens(&planes, layout)?;
+
+    Ok(planes)
+}
+
+fn planes_from_v_frame_u16(
+    frame: &v_frame::frame::Frame<u16>,
+    layout: FrameLayout,
+) -> Result<Planes, anyhow::Error> {
+    let y = collect_plane_u16(&frame.y_plane);
+    let u = frame
+        .u_plane
+        .as_ref()
+        .map(collect_plane_u16)
+        .unwrap_or_else(|| layout.neutral_chroma_plane());
+    let v = frame
+        .v_plane
+        .as_ref()
+        .map(collect_plane_u16)
+        .unwrap_or_else(|| layout.neutral_chroma_plane());
+
+    let planes = Planes { y, u, v };
+    check_plane_lens(&planes, layout)?;
+
+    Ok(planes)
 }
 
 fn collect_plane_u8(plane: &v_frame::plane::Plane<u8>) -> Vec<u8> {
@@ -655,10 +682,8 @@ fn collect_plane_u8(plane: &v_frame::plane::Plane<u8>) -> Vec<u8> {
     let height = plane.height().get();
     let mut out = Vec::with_capacity(width * height);
 
-    for y in 0..height {
-        if let Some(row) = plane.row(y) {
-            out.extend_from_slice(&row[..width]);
-        }
+    for row in plane.rows() {
+        out.extend_from_slice(row);
     }
 
     out
@@ -669,11 +694,9 @@ fn collect_plane_u16(plane: &v_frame::plane::Plane<u16>) -> Vec<u8> {
     let height = plane.height().get();
     let mut out = Vec::with_capacity(width * height * 2);
 
-    for y in 0..height {
-        if let Some(row) = plane.row(y) {
-            for &s in &row[..width] {
-                out.extend_from_slice(&s.to_le_bytes());
-            }
+    for row in plane.rows() {
+        for &s in row {
+            out.extend_from_slice(&s.to_le_bytes());
         }
     }
 
@@ -820,6 +843,101 @@ mod tests {
             bytes,
             vec![0x00, 0x00, 0x01, 0x00, 0x00, 0x02, 0xFF, 0x03],
             "samples must be little-endian"
+        );
+    }
+
+    #[test]
+    fn planes_from_v_frame_u8_matching_layout_succeeds() {
+        use std::num::{NonZeroU8, NonZeroUsize};
+
+        use v_frame::chroma::ChromaSubsampling;
+        use v_frame::frame::FrameBuilder;
+
+        let layout = FrameLayout {
+            width: 2,
+            height: 2,
+            subsampling: Subsampling::Yuv420,
+            depth: Depth::Eight,
+        };
+        let frame: v_frame::frame::Frame<u8> = FrameBuilder::new(
+            NonZeroUsize::new(2).expect("width is non-zero"),
+            NonZeroUsize::new(2).expect("height is non-zero"),
+            ChromaSubsampling::Yuv420,
+            NonZeroU8::new(8).expect("depth is non-zero"),
+        )
+        .build()
+        .expect("a 2x2 8-bit frame builds");
+
+        let planes = planes_from_v_frame_u8(&frame, layout).expect("matching layout should not error");
+
+        assert_eq!(planes.y.len(), layout.luma_bytes());
+        assert_eq!(planes.u.len(), layout.chroma_bytes());
+        assert_eq!(planes.v.len(), layout.chroma_bytes());
+    }
+
+    #[test]
+    fn planes_from_v_frame_u16_matching_layout_succeeds() {
+        use std::num::{NonZeroU8, NonZeroUsize};
+
+        use v_frame::chroma::ChromaSubsampling;
+        use v_frame::frame::FrameBuilder;
+
+        let layout = FrameLayout {
+            width: 2,
+            height: 2,
+            subsampling: Subsampling::Yuv420,
+            depth: Depth::Ten,
+        };
+        let frame: v_frame::frame::Frame<u16> = FrameBuilder::new(
+            NonZeroUsize::new(2).expect("width is non-zero"),
+            NonZeroUsize::new(2).expect("height is non-zero"),
+            ChromaSubsampling::Yuv420,
+            NonZeroU8::new(10).expect("depth is non-zero"),
+        )
+        .build()
+        .expect("a 2x2 10-bit frame builds");
+
+        let planes = planes_from_v_frame_u16(&frame, layout).expect("matching layout should not error");
+
+        assert_eq!(planes.y.len(), layout.luma_bytes());
+        assert_eq!(planes.u.len(), layout.chroma_bytes());
+        assert_eq!(planes.v.len(), layout.chroma_bytes());
+    }
+
+    #[test]
+    fn planes_from_v_frame_u8_mismatched_layout_errors() {
+        use std::num::{NonZeroU8, NonZeroUsize};
+
+        use v_frame::chroma::ChromaSubsampling;
+        use v_frame::frame::FrameBuilder;
+
+        let frame: v_frame::frame::Frame<u8> = FrameBuilder::new(
+            NonZeroUsize::new(2).expect("width is non-zero"),
+            NonZeroUsize::new(2).expect("height is non-zero"),
+            ChromaSubsampling::Yuv420,
+            NonZeroU8::new(8).expect("depth is non-zero"),
+        )
+        .build()
+        .expect("a 2x2 8-bit frame builds");
+
+        let layout = FrameLayout {
+            width: 4,
+            height: 4,
+            subsampling: Subsampling::Yuv420,
+            depth: Depth::Eight,
+        };
+
+        let err = planes_from_v_frame_u8(&frame, layout).expect_err("a smaller frame should not pass");
+        let msg = err.to_string();
+
+        assert!(msg.contains('y'), "error should name the plane: {msg}");
+        assert!(
+            msg.contains('4'),
+            "error should name the 2x2 plane's length (4): {msg}"
+        );
+        assert!(
+            msg.contains("16"),
+            "error should name the layout's expected length (16): {msg}"
         );
     }
 
