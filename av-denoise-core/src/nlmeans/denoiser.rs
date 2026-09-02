@@ -1563,44 +1563,18 @@ impl<R: Runtime> NlmDenoiser<R> {
         sigmas
     }
 
-    /// The smoothed per-channel sigma estimate from the low chain.
-    ///
-    /// This is `sigma_override` broadcast to every channel when HQ
-    /// pinned a fixed sigma, the same as [`Self::current_sigmas`]. There
-    /// is only one sigma once a fixed value is pinned, so the two chains
-    /// are indistinguishable in that case. Otherwise it is the low
-    /// chain's smoothed estimate once one has landed, and zeros before
-    /// that first estimate and on the fast path where no estimate ever
-    /// runs.
-    ///
-    /// See the "The estimator chains" section of [`Self::fold_noise_estimate`]
-    /// for why a consumer would want this instead of
-    /// [`Self::current_sigmas`].
-    pub fn current_sigmas_low(&self) -> [f32; 3] {
-        if let Some(sigma) = self.params.hq.and_then(|hq| hq.sigma_override) {
-            return [sigma; 3];
-        }
-
-        let channels = self.params.channels.count() as usize;
-        let mut sigmas = [0.0f32; 3];
-        if let Some(smoothed) = self.noise_estimator_low.current() {
-            sigmas[..channels].copy_from_slice(&smoothed[..channels]);
-        }
-        sigmas
-    }
-
     /// The smoothed per-channel sigma estimate from the low chain, with
     /// the correlation boost left out of its temporal reading.
     ///
     /// This is `sigma_override` broadcast to every channel when HQ
-    /// pinned a fixed sigma, the same as [`Self::current_sigmas_low`].
+    /// pinned a fixed sigma, the same as [`Self::current_sigmas`].
     /// Otherwise it is `noise_estimator_low_unboosted`'s smoothed
     /// estimate once one has landed, and zeros before that first
     /// estimate and on the fast path where no estimate ever runs.
     ///
     /// See the "The estimator chains" section of [`Self::fold_noise_estimate`]
     /// for why a consumer would want this instead of
-    /// [`Self::current_sigmas_low`].
+    /// [`Self::current_sigmas`].
     pub fn current_sigmas_low_unboosted(&self) -> [f32; 3] {
         if let Some(sigma) = self.params.hq.and_then(|hq| hq.sigma_override) {
             return [sigma; 3];
