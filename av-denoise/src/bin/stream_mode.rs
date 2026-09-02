@@ -1,7 +1,8 @@
 use std::io::{Read, Write, stdout};
 
-use av_denoise::{FrameLayout, PlanarDenoiser, PlaneOptions, Planes, push_needs_retry};
+use av_denoise::{FrameLayout, PlaneOptions, Planes, push_needs_retry};
 
+use crate::warm_start::{create_denoiser, finish_warm_up};
 use crate::y4m_format::{subsampling_from_y4m, subsampling_to_y4m, y4m_vendor_extensions};
 
 /// Denoises a y4m stream frame by frame, writing y4m on stdout.
@@ -35,7 +36,7 @@ pub fn run_stream<R: Read>(opts: &PlaneOptions, reader: R) -> Result<(), anyhow:
     }
     let mut encoder = builder.write_header(stdout.lock())?;
 
-    let mut wd = PlanarDenoiser::create(opts, layout)?;
+    let (mut wd, mut warm_up) = create_denoiser(opts, layout)?;
 
     tracing::info!(
         accelerator = ?opts.accelerators,
@@ -62,6 +63,7 @@ pub fn run_stream<R: Read>(opts: &PlaneOptions, reader: R) -> Result<(), anyhow:
         if push_needs_retry(wd.push(&planes))? {
             if let Some(out) = wd.recv()? {
                 write_planes(&mut encoder, &out)?;
+                finish_warm_up(&mut warm_up);
             }
 
             wd.push(&planes)?;
@@ -69,6 +71,7 @@ pub fn run_stream<R: Read>(opts: &PlaneOptions, reader: R) -> Result<(), anyhow:
 
         if let Some(out) = wd.recv()? {
             write_planes(&mut encoder, &out)?;
+            finish_warm_up(&mut warm_up);
         }
     }
 
@@ -76,6 +79,7 @@ pub fn run_stream<R: Read>(opts: &PlaneOptions, reader: R) -> Result<(), anyhow:
         if let Err(e) = write_planes(&mut encoder, &out) {
             tracing::error!(error = ?e, "failed to write flushed frame");
         }
+        finish_warm_up(&mut warm_up);
     })?;
 
     Ok(())

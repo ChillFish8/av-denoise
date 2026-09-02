@@ -6,6 +6,7 @@ mod file_mode;
 mod frame_index;
 mod progress;
 mod stream_mode;
+mod warm_start;
 mod y4m_format;
 
 use cli::{Args, Command, InputSource, RunOptions, run_list_devices};

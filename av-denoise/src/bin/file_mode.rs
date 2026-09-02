@@ -6,7 +6,16 @@ use std::thread;
 use std::time::Duration;
 
 use av_decoders::{Decoder, Rational32};
-use av_denoise::{Depth, FrameLayout, PlanarDenoiser, PlaneOptions, Planes, Subsampling, push_needs_retry};
+use av_denoise::{
+    Depth,
+    FrameLayout,
+    PlanarDenoiser,
+    PlaneOptions,
+    Planes,
+    Subsampling,
+    WarmUp,
+    push_needs_retry,
+};
 use av_scenechange::{DetectionOptions, detect_scene_changes};
 use indicatif::ProgressBar;
 use y4m::Frame as Y4mFrame;
@@ -14,6 +23,7 @@ use y4m::Frame as Y4mFrame;
 use crate::cli::RunOptions;
 use crate::frame_index;
 use crate::progress::{self, denoise_bar_visible, denoise_progress_bar, scene_progress_bar};
+use crate::warm_start::{create_denoiser, finish_warm_up};
 use crate::y4m_format::subsampling_to_y4m;
 
 /// Target ceiling for CPU-side frame buffers held in flight. Channel
@@ -405,6 +415,9 @@ fn run_worker(
 ) -> Result<(), anyhow::Error> {
     let mut current_scene: Option<u32> = None;
     let mut wd: Option<PlanarDenoiser> = None;
+    // The cold-cache queue place this worker's denoiser holds, until its
+    // first output frame proves the kernels are compiled and cached.
+    let mut warm_up: Option<WarmUp> = None;
 
     // Indices of pushed-but-not-yet-emitted frames, in push order.
     let mut pending: std::collections::VecDeque<u64> = Default::default();
@@ -420,9 +433,11 @@ fn run_worker(
                     // Reuse the existing PlanarDenoiser across scenes, flushing the worker
                     // will ensure there is no cross-scene blending during temporal workloads.
                     if let Some(prev) = wd.as_mut() {
-                        flush_worker(prev, &mut pending, &tx)?;
+                        flush_worker(prev, &mut warm_up, &mut pending, &tx)?;
                     } else {
-                        wd = Some(PlanarDenoiser::create(&opts, layout)?);
+                        let (denoiser, place) = create_denoiser(&opts, layout)?;
+                        wd = Some(denoiser);
+                        warm_up = place;
                     }
 
                     current_scene = Some(scene_idx);
@@ -440,11 +455,11 @@ fn run_worker(
                 // every push would clamp the pipeline back to depth 1 and
                 // put the GPU readback in the critical path of the next
                 // push.
-                push_with_drain(denoiser, &mut pending, global_idx, &planes, &tx)?;
+                push_with_drain(denoiser, &mut warm_up, &mut pending, global_idx, &planes, &tx)?;
             },
             Ok(WorkerMsg::Eof) | Err(_) => {
                 if let Some(mut prev) = wd.take() {
-                    flush_worker(&mut prev, &mut pending, &tx)?;
+                    flush_worker(&mut prev, &mut warm_up, &mut pending, &tx)?;
                 }
 
                 break;
@@ -458,6 +473,7 @@ fn run_worker(
 /// Push one frame, draining any pending output first if the queue is full.
 fn push_with_drain(
     denoiser: &mut PlanarDenoiser,
+    warm_up: &mut Option<WarmUp>,
     pending: &mut std::collections::VecDeque<u64>,
     global_idx: u64,
     planes: &Planes,
@@ -471,6 +487,7 @@ fn push_with_drain(
                 .pop_front()
                 .expect("pending has at least one entry on QueueFull recv");
             send_output(tx, g, out)?;
+            finish_warm_up(warm_up);
         }
 
         denoiser.push(planes)?;
@@ -486,6 +503,7 @@ fn send_output(tx: &SyncSender<OutputMsg>, global_idx: u64, planes: Planes) -> R
 
 fn flush_worker(
     wd: &mut PlanarDenoiser,
+    warm_up: &mut Option<WarmUp>,
     pending: &mut std::collections::VecDeque<u64>,
     tx: &SyncSender<OutputMsg>,
 ) -> Result<(), anyhow::Error> {
@@ -502,7 +520,9 @@ fn flush_worker(
                 planes: out,
             };
             let did_send = tx.send(msg).is_ok();
-            if !did_send {
+            if did_send {
+                finish_warm_up(warm_up);
+            } else {
                 disconnected = true;
             }
         } else {
@@ -961,7 +981,8 @@ mod tests {
         let (tx, rx) = sync_channel::<OutputMsg>(4);
         drop(rx);
 
-        let err = flush_worker(&mut wd, &mut pending, &tx)
+        let mut warm_up = None;
+        let err = flush_worker(&mut wd, &mut warm_up, &mut pending, &tx)
             .expect_err("expected the coordinator disconnect to surface as an error");
 
         assert!(
