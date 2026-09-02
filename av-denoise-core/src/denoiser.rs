@@ -17,6 +17,7 @@ use crate::nlmeans::{
     NlmParams,
     Pending,
     PrefilterMode,
+    TryWait,
     hq_default_strength,
     validate_dimensions,
 };
@@ -636,6 +637,28 @@ impl BackendPending {
             Self::Wgpu(p) => p.wait(),
         }
     }
+
+    /// Polls the readback once. `Ok(Ok(frame))` is a landed frame,
+    /// `Ok(Err(self))` is a readback still in flight.
+    fn try_wait(self) -> Result<Result<Vec<f32>, Self>, anyhow::Error> {
+        match self {
+            #[cfg(feature = "cuda")]
+            Self::Cuda(p) => match p.try_wait()? {
+                TryWait::Ready(frame) => Ok(Ok(frame)),
+                TryWait::NotReady(p) => Ok(Err(Self::Cuda(p))),
+            },
+            #[cfg(feature = "rocm")]
+            Self::Rocm(p) => match p.try_wait()? {
+                TryWait::Ready(frame) => Ok(Ok(frame)),
+                TryWait::NotReady(p) => Ok(Err(Self::Rocm(p))),
+            },
+            #[cfg(any(feature = "vulkan", feature = "metal"))]
+            Self::Wgpu(p) => match p.try_wait()? {
+                TryWait::Ready(frame) => Ok(Ok(frame)),
+                TryWait::NotReady(p) => Ok(Err(Self::Wgpu(p))),
+            },
+        }
+    }
 }
 
 /// How many readbacks the high-level [`Denoiser`] keeps in flight at
@@ -934,13 +957,29 @@ impl Denoiser {
         Ok(Some(pending.wait()?))
     }
 
-    /// Collects the in-flight denoise if one is ready.
+    /// Polls the in-flight denoise once.
     ///
-    /// This can still block for a moment while the runtime confirms the
-    /// readback has landed. When the kernels have already finished the
-    /// wait is effectively nothing.
+    /// Returns `Ok(None)` both when nothing is in flight and when the in-flight readback
+    /// has not landed yet, so `None` alone does not tell those two cases apart.
+    ///
+    /// A caller that needs the frame rather than just checking on it should
+    /// use [`Self::recv_frame`] instead.
+    ///
+    /// This only avoids blocking on the wgpu backends, meaning Vulkan and Metal.
+    /// On CUDA and ROCm the readback completes synchronously on its first poll,
+    /// so this call blocks until the readback lands there, the same as `recv_frame`.
     pub fn try_recv_frame(&mut self) -> Result<Option<Vec<f32>>, DenoiserError> {
-        self.recv_frame()
+        let Some(pending) = self.pending.pop_front() else {
+            return Ok(None);
+        };
+
+        match pending.try_wait()? {
+            Ok(frame) => Ok(Some(frame)),
+            Err(pending) => {
+                self.pending.push_front(pending);
+                Ok(None)
+            },
+        }
     }
 
     /// Drains the in-flight frames and the trailing temporal tail,

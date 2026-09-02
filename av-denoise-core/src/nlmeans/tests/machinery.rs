@@ -232,3 +232,58 @@ fn priming_pushes_then_one_submit_matches_the_streaming_centre() {
     assert_eq!(emitted.len(), (r + 1) as usize);
     assert_eq!(got, emitted[r as usize]);
 }
+
+#[cfg(feature = "vulkan")]
+#[test]
+fn try_recv_frame_returns_none_when_nothing_is_in_flight() {
+    let mut d = test_denoiser(2, 64, 64);
+    assert_eq!(d.try_recv_frame().unwrap(), None);
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+fn try_recv_frame_observes_a_landed_readback_within_a_bounded_poll() {
+    // A poll count is the wrong proxy for the wall-clock interval this
+    // test needs to cover (cold pipeline compile plus dispatch plus
+    // readback), since a faster CPU makes each poll cheaper and so
+    // needs *more* of them for the same GPU latency. A deadline covers
+    // both a slow GPU and a fast CPU the same way.
+    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+    let r = 2u32;
+    // `temporal_radius + 1` pushes is exactly enough to prime the window
+    // and submit one denoise, leaving exactly one readback in flight.
+    let window: Vec<Vec<f32>> = (0..(r + 1) as usize).map(|i| ramp_frame(64, 64, i)).collect();
+
+    let mut polled = test_denoiser(r, 64, 64);
+    for frame in &window {
+        polled.push_frame(frame).unwrap();
+    }
+
+    let start = std::time::Instant::now();
+    let mut got = None;
+    let mut polls = 0;
+    while start.elapsed() < DEADLINE {
+        polls += 1;
+        if let Some(frame) = polled.try_recv_frame().unwrap() {
+            got = Some(frame);
+            break;
+        }
+    }
+    let got = got.unwrap_or_else(|| panic!("readback never landed within {DEADLINE:?} ({polls} polls)"));
+    eprintln!(
+        "try_recv_frame landed after {polls} poll(s), {:?}",
+        start.elapsed()
+    );
+
+    let mut blocking = test_denoiser(r, 64, 64);
+    for frame in &window {
+        blocking.push_frame(frame).unwrap();
+    }
+    let expected = blocking
+        .recv_frame()
+        .unwrap()
+        .expect("blocking denoiser should have a frame ready");
+
+    assert_eq!(got, expected);
+}

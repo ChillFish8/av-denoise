@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
+use std::task::{Context, Poll, Waker};
 
 use cubecl::bytes::Bytes;
 use cubecl::prelude::*;
@@ -55,23 +56,65 @@ impl<R: Runtime> Pending<R> {
         Ok(out)
     }
 
-    /// Blocks until the readback finishes and writes the result into
-    /// `dst`, which is cleared first.
+    /// Blocks until the readback finishes and writes the result into `dst`, 
+    /// which is cleared first.
     ///
-    /// This lets a caller reuse one allocation when running frame after
-    /// frame.
+    /// This lets a caller reuse one allocation when running frame after frame.
     pub fn wait_into(self, dst: &mut Vec<f32>) -> Result<(), anyhow::Error> {
         let bytes = cubecl::future::block_on(self.fut)?.remove(0);
-        let data = f32::from_bytes(&bytes);
-        unpack_frame(
-            data,
-            self.pixels,
-            self.channels as usize,
-            self.stored_ch as usize,
-            dst,
-        );
+        unpack_bytes_into(&bytes, self.pixels, self.channels, self.stored_ch, dst);
         Ok(())
     }
+
+    /// Polls the readback once.
+    ///
+    /// `TryWait::NotReady` hands the same `Pending` back unchanged, so a
+    /// caller that gets it can only poll again by calling `try_wait` on
+    /// that returned value. There is no way to poll a future that has
+    /// already produced its result. The poll uses a no-op waker, so
+    /// nothing ever wakes a caller when the readback lands. A caller
+    /// that wants the frame has to keep calling `try_wait` again itself,
+    /// on whatever `NotReady` the previous call returned.
+    ///
+    /// This only avoids blocking on the wgpu backends, meaning Vulkan and Metal, 
+    /// where readiness is external state a discarded wakeup does not lose. 
+    /// 
+    /// On CUDA and ROCm the readback future's first poll runs a blocking driver wait 
+    /// internally, so `try_wait` blocks for the full kernel and readback latency there 
+    /// and `NotReady` is never actually returned.
+    pub fn try_wait(mut self) -> Result<TryWait<R>, anyhow::Error> {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        match self.fut.as_mut().poll(&mut cx) {
+            Poll::Ready(Ok(mut bytes)) => {
+                let bytes = bytes.remove(0);
+                let mut out = Vec::with_capacity(self.pixels * self.channels as usize);
+                unpack_bytes_into(&bytes, self.pixels, self.channels, self.stored_ch, &mut out);
+                Ok(TryWait::Ready(out))
+            },
+            Poll::Ready(Err(e)) => Err(e.into()),
+            Poll::Pending => Ok(TryWait::NotReady(self)),
+        }
+    }
+}
+
+/// The outcome of polling a [`Pending`] without blocking.
+pub enum TryWait<R: Runtime> {
+    /// The readback landed. This is the denoised frame.
+    Ready(Vec<f32>),
+    /// The readback has not landed. This is the same `Pending`, unchanged
+    /// and still in flight.
+    NotReady(Pending<R>),
+}
+
+/// Unpacks a raw readback buffer straight into `dst`, stripping the padding lanes 
+/// between `channels` and `stored_ch`.
+///
+/// This is the shared step behind `wait_into` and `try_wait`, so the blocking and 
+/// non-blocking paths cannot drift apart.
+fn unpack_bytes_into(bytes: &Bytes, pixels: usize, channels: u32, stored_ch: u32, dst: &mut Vec<f32>) {
+    let data = f32::from_bytes(bytes);
+    unpack_frame(data, pixels, channels as usize, stored_ch as usize, dst);
 }
 
 /// Copies `channels` values out of every pixel in `data` into `dst`,
