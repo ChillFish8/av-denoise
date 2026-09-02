@@ -201,6 +201,12 @@ fn detect_scenes(input: &Path, visible: bool) -> Result<SceneLayout, anyhow::Err
     // Detection ran over every frame the decoder offers, so both the count and the boundaries
     // are in decoder frame numbers. Both move into emitted frame numbers together.
     let raw_frames = detection.frame_count;
+
+    // The index lists every entry the container holds, while detection counts
+    // what the decoder handed over. A decode that stops early leaves entries
+    // above the last frame read, and those match no frame this run sees.
+    let phantom: BTreeSet<usize> = phantom.into_iter().take_while(|&raw| raw < raw_frames).collect();
+
     scene_starts.push(raw_frames);
 
     let scene_starts = frame_index::remap_scene_starts(&scene_starts, &phantom);
