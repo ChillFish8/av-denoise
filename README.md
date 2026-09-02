@@ -245,8 +245,9 @@ backend for those devices. It should be more or less the same performance, witho
 Compiling the kernels takes about ten seconds when you first start the denoising pipeline. 
 These compiled kernels get cached on disk, which makes that a cost paid once per machine rather than once per run.
 
-By default, the cache lives in `$XDG_CACHE_HOME/av-denoise`, or `~/.cache/av-denoise` when `XDG_CACHE_HOME` is
-unset (`~/Library/Caches/av-denoise` on macOS).
+By default, the cache lives in `av-denoise` inside the platform cache directory, which is `$XDG_CACHE_HOME` or
+`~/.cache` on Linux and macOS, and `%LOCALAPPDATA%` on Windows. With no platform cache directory at all, it falls
+back to `av-denoise` inside the temporary directory and warns.
 
 - `AV_DENOISE_COMPILATION_CACHE=/some/dir` puts the compiled-kernel and autotune caches somewhere else, which is
   what CI runs and containers use to keep the cache on a mounted volume. It overrides whatever is in `cubecl.toml`.
@@ -257,4 +258,6 @@ If the cache directory cannot be created, `av-denoise` logs a warning and carrie
 
 Library users can call `av_denoise::install_compilation_cache()` before `Denoiser::create` to get the same
 behaviour in their own binary. It has to run before the first `Denoiser` exists, because building a CubeCL client
-locks the global config.
+locks the global config. An embedder that wants to choose the cache directory itself can call
+`av_denoise::default_cache_dir()` to get the same default this crate uses, and
+`av_denoise::install_compilation_cache_at()` to install it, or any other directory, directly.

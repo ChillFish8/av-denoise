@@ -73,7 +73,7 @@ fn main() -> anyhow::Result<()> {
             "kernel caching is off, every run recompiles. Unset {} to turn it back on.",
             av_denoise::COMPILATION_CACHE_ENV,
         ),
-        Err(_) => anyhow::bail!("unable to install the kernel cache, this is a bug."),
+        Err(err) => return Err(anyhow::Error::new(err).context("unable to install the kernel cache")),
     }
 
     let (opts, input, workers) = match &args.command {

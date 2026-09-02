@@ -21,9 +21,11 @@ pub mod warmup;
 
 pub use cache::{
     COMPILATION_CACHE_ENV,
-    CacheAlreadyInitialisedError,
+    CacheError,
     compilation_cache_dir,
+    default_cache_dir,
     install_compilation_cache,
+    install_compilation_cache_at,
     install_compilation_cache_once,
 };
 pub use denoiser::{
