@@ -25,10 +25,12 @@ pub enum Subsampling {
 }
 
 impl Subsampling {
+    /// Halved axes round up, so an odd dimension keeps the extra sample,
+    /// matching what y4m and ffmpeg do.
     pub fn chroma_dims(self, w: u32, h: u32) -> (u32, u32) {
         match self {
-            Subsampling::Yuv420 => (w / 2, h / 2),
-            Subsampling::Yuv422 => (w / 2, h),
+            Subsampling::Yuv420 => (w.div_ceil(2), h.div_ceil(2)),
+            Subsampling::Yuv422 => (w.div_ceil(2), h),
             Subsampling::Yuv444 => (w, h),
         }
     }
@@ -1563,6 +1565,51 @@ mod layout_tests {
     fn black_luma_fill_is_zero_at_the_right_length() {
         assert_eq!(layout(Depth::Eight).black_luma_plane(), vec![0u8; 16]);
         assert_eq!(layout(Depth::Ten).black_luma_plane(), vec![0u8; 32]);
+    }
+}
+
+#[cfg(test)]
+mod chroma_dims_tests {
+    use super::*;
+
+    #[test]
+    fn yuv420_even_dims_halve() {
+        assert_eq!(Subsampling::Yuv420.chroma_dims(1920, 1080), (960, 540));
+    }
+
+    #[test]
+    fn yuv420_odd_width_rounds_up() {
+        assert_eq!(Subsampling::Yuv420.chroma_dims(1919, 1080), (960, 540));
+    }
+
+    #[test]
+    fn yuv420_odd_height_rounds_up() {
+        assert_eq!(Subsampling::Yuv420.chroma_dims(1920, 1079), (960, 540));
+    }
+
+    #[test]
+    fn yuv420_odd_both_dims_round_up() {
+        assert_eq!(Subsampling::Yuv420.chroma_dims(1919, 1079), (960, 540));
+    }
+
+    #[test]
+    fn yuv422_even_width_halves() {
+        assert_eq!(Subsampling::Yuv422.chroma_dims(1920, 1080), (960, 1080));
+    }
+
+    #[test]
+    fn yuv422_odd_width_rounds_up() {
+        assert_eq!(Subsampling::Yuv422.chroma_dims(1919, 1080), (960, 1080));
+    }
+
+    #[test]
+    fn yuv444_passes_even_dims_through() {
+        assert_eq!(Subsampling::Yuv444.chroma_dims(1920, 1080), (1920, 1080));
+    }
+
+    #[test]
+    fn yuv444_passes_odd_dims_through() {
+        assert_eq!(Subsampling::Yuv444.chroma_dims(1919, 1079), (1919, 1079));
     }
 }
 
