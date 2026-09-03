@@ -187,6 +187,7 @@ dependencies = [
  "av-decoders",
  "av-denoise-core",
  "av-scenechange",
+ "bytesize",
  "clap",
  "crossbeam-channel",
  "ffms2-sys",
@@ -414,6 +415,12 @@ name = "bytes"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
+
+[[package]]
+name = "bytesize"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7354288c522e7e980fafd2075d63d1285794c3a6a16cdd492f189ea406e5f18b"
 
 [[package]]
 name = "c2rust-bitfields"

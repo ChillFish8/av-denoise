@@ -820,6 +820,18 @@ impl<R: Runtime> NlmDenoiser<R> {
             planes.len()
         );
 
+        // Ten and Twelve share a byte width, so the plane-length check
+        // below cannot tell them apart. A wrong depth here divides by the
+        // wrong maximum and darkens the whole frame without failing
+        // anything else, so it is pinned against the depth this denoiser
+        // returns frames in.
+        if let OutputFormat::Wire { depth: out_depth } = self.output_format {
+            assert_eq!(
+                depth, out_depth,
+                "wire push depth {depth:?} does not match the denoiser's output depth {out_depth:?}"
+            );
+        }
+
         self.upload_scratch.clear();
         for plane in planes {
             assert_eq!(

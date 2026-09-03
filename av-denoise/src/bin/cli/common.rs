@@ -37,4 +37,31 @@ pub struct CommonArgs {
     /// Ignored for piped input, which cannot be split by scene.
     #[arg(short = 'W', long)]
     pub workers: Option<usize>,
+
+    /// How much memory frames in flight may occupy.
+    ///
+    /// A frame counts against this from the moment it is decoded until
+    /// it has been written, so the budget covers the staging queues,
+    /// each worker's GPU pipeline, and the reordering buffer together.
+    ///
+    /// Takes a size such as `8GB`, `4.5GiB`, or `512MB`, or a plain
+    /// byte count. `GB` is 10^9 while `GiB` is 2^30, and the two differ
+    /// by 7%.
+    ///
+    /// Lower it when several `av-denoise` processes share a machine, as
+    /// Av1an chunking does. Raise it when one run has the machine to
+    /// itself and the decoder is the bottleneck.
+    ///
+    /// Defaults to 1GiB when unset.
+    ///
+    /// Ignored for piped input, which cannot be split by scene.
+    #[arg(long, value_name = "SIZE", value_parser = parse_frame_budget)]
+    pub frame_budget: Option<u64>,
+}
+
+/// Reads a size string such as `8GB` into a byte count.
+fn parse_frame_budget(raw: &str) -> Result<u64, String> {
+    raw.parse::<bytesize::ByteSize>().map(|size| size.as_u64()).map_err(|_| {
+        format!("invalid frame budget '{raw}'. Give a size such as 8GB, 4.5GiB, or 512MB, or a plain byte count")
+    })
 }

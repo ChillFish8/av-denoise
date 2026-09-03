@@ -26,19 +26,75 @@ use crate::progress::{self, denoise_bar_visible, denoise_progress_bar, scene_pro
 use crate::warm_start::{create_denoiser, finish_warm_up};
 use crate::y4m_format::subsampling_to_y4m;
 
-/// Target ceiling for CPU-side frame buffers held in flight. The permit
-/// count is how many frames that affords.
-const FRAME_MEMORY_BUDGET_BYTES: usize = 1 << 30;
-
 /// Frames in flight this run allows.
-fn frame_permits(budget_bytes: usize, frame_bytes: usize, workers: usize, radius: u32) -> usize {
+fn frame_permits(budget_bytes: u64, frame_bytes: usize, workers: usize, radius: u32) -> usize {
     // A worker emits nothing until `push` first returns QueueFull, which
     // takes `radius + MAX_PENDING + 1` pushes. Fewer permits than that
     // and its scene can never return one, so the dispatcher waits on a
     // permit the worker cannot release.
     let floor = workers * (radius as usize + av_denoise::MAX_PENDING + 2);
 
-    (budget_bytes / frame_bytes.max(1)).max(floor)
+    frames_afforded(budget_bytes, frame_bytes).max(floor)
+}
+
+/// Frames the budget pays for at this frame size.
+fn frames_afforded(budget_bytes: u64, frame_bytes: usize) -> usize {
+    let per_frame = (frame_bytes as u64).max(1);
+
+    usize::try_from(budget_bytes / per_frame).unwrap_or(usize::MAX)
+}
+
+/// Renders a byte count in the decimal units `--frame-budget` accepts.
+///
+/// The space `ByteSize` puts before the unit goes, so the result is one
+/// shell argument a caller can paste straight back into the flag.
+fn size_string(bytes: u64) -> String {
+    bytesize::ByteSize::b(bytes)
+        .display()
+        .si()
+        .to_string()
+        .replace(' ', "")
+}
+
+/// Rounds a byte count up to the precision [`size_string`] prints at.
+///
+/// The rendering keeps one decimal place, so a raw minimum can round
+/// down to a size that still fails the budget check.
+fn suggested_budget(bytes: u64) -> String {
+    let unit = [bytesize::GB, bytesize::MB, bytesize::KB]
+        .into_iter()
+        .find(|&unit| bytes >= unit)
+        .unwrap_or(1);
+    let step = (unit / 10).max(1);
+
+    size_string(bytes.div_ceil(step) * step)
+}
+
+/// Frames in flight this run allows, refusing a budget below the floor.
+///
+/// A budget the floor has to raise serialises the pipeline, so it fails
+/// here rather than running on with too few frames in flight.
+fn checked_frame_permits(
+    budget_bytes: u64,
+    frame_bytes: usize,
+    workers: usize,
+    radius: u32,
+) -> Result<usize, anyhow::Error> {
+    let afforded = frames_afforded(budget_bytes, frame_bytes);
+    let permits = frame_permits(budget_bytes, frame_bytes, workers, radius);
+
+    if permits > afforded {
+        let suggestion = suggested_budget(permits as u64 * frame_bytes as u64);
+
+        anyhow::bail!(
+            "--frame-budget {budget} affords {afforded} frames at {frame_bytes} bytes per frame, \
+             but {workers} workers at temporal radius {radius} need at least {permits}. Pass at \
+             least --frame-budget {suggestion}.",
+            budget = size_string(budget_bytes),
+        );
+    }
+
+    Ok(permits)
 }
 
 /// Builds a counting semaphore holding `count` permits.
@@ -81,7 +137,12 @@ impl SceneLayout {
     }
 }
 
-pub fn run_file(opts: &RunOptions, input: &Path, workers: usize) -> Result<(), anyhow::Error> {
+pub fn run_file(
+    opts: &RunOptions,
+    input: &Path,
+    workers: usize,
+    frame_budget_bytes: u64,
+) -> Result<(), anyhow::Error> {
     if workers == 0 {
         anyhow::bail!("--workers must be at least 1");
     }
@@ -106,6 +167,7 @@ pub fn run_file(opts: &RunOptions, input: &Path, workers: usize) -> Result<(), a
         &scenes,
         workers,
         denoise_bar_visible(opts.progress, is_terminal),
+        frame_budget_bytes,
     )
 }
 
@@ -210,6 +272,7 @@ fn encode_scenes(
     scenes: &SceneLayout,
     workers: usize,
     visible: bool,
+    frame_budget_bytes: u64,
 ) -> Result<(), anyhow::Error> {
     let radius = match opts.mode {
         DenoisingMode::Temporal { radius } => radius,
@@ -217,7 +280,8 @@ fn encode_scenes(
     };
 
     let frame_bytes = scenes.layout.luma_bytes() + 2 * scenes.layout.chroma_bytes();
-    let permits = frame_permits(FRAME_MEMORY_BUDGET_BYTES, frame_bytes, workers, radius);
+    let permits = checked_frame_permits(frame_budget_bytes, frame_bytes, workers, radius)?;
+
     let (give, take) = frame_permit_channel(permits);
 
     tracing::info!(
@@ -911,6 +975,27 @@ mod tests {
 
         // A 4K 10-bit frame is 24,883,200 bytes, so 1 MiB affords none.
         assert_eq!(frame_permits(1 << 20, 24_883_200, 4, 0), floor);
+    }
+
+    #[test]
+    fn a_budget_below_the_floor_is_rejected() {
+        // A 4K 10-bit frame is 24,883,200 bytes, so 1 MB affords none.
+        let err = checked_frame_permits(1_000_000, 24_883_200, 4, 8)
+            .expect_err("1 MB cannot feed 4 workers at radius 8");
+        let msg = err.to_string();
+
+        let floor = 4 * (8 + av_denoise::MAX_PENDING + 2);
+
+        assert!(msg.contains("affords 0 frames"), "got {msg}");
+        assert!(msg.contains(&format!("at least {floor}")), "got {msg}");
+        assert!(msg.contains("Pass at least --frame-budget 1.2GB"), "got {msg}");
+    }
+
+    #[test]
+    fn a_budget_that_clears_the_floor_is_accepted() {
+        let permits = checked_frame_permits(1 << 30, 3_110_400, 4, 0).expect("1 GiB clears the floor");
+
+        assert_eq!(permits, 345);
     }
 
     #[test]

@@ -835,4 +835,43 @@ mod tests {
         let nlm = parse_input(&["-i", "noisy.mkv", "--workers", "4"]);
         assert_eq!(nlm.common.workers, Some(4));
     }
+
+    #[test]
+    fn frame_budget_is_unset_by_default() {
+        let nlm = parse_input(&["-i", "noisy.mkv"]);
+        assert_eq!(nlm.common.frame_budget, None);
+    }
+
+    #[test]
+    fn frame_budget_reads_decimal_and_binary_units_apart() {
+        let decimal = parse_input(&["-i", "noisy.mkv", "--frame-budget", "8GB"]);
+        assert_eq!(decimal.common.frame_budget, Some(8_000_000_000));
+
+        let binary = parse_input(&["-i", "noisy.mkv", "--frame-budget", "8GiB"]);
+        assert_eq!(binary.common.frame_budget, Some(8_589_934_592));
+    }
+
+    #[test]
+    fn frame_budget_reads_a_bare_number_as_bytes() {
+        let nlm = parse_input(&["-i", "noisy.mkv", "--frame-budget", "512"]);
+        assert_eq!(nlm.common.frame_budget, Some(512));
+    }
+
+    #[test]
+    fn a_malformed_frame_budget_is_rejected() {
+        let err = Args::try_parse_from([
+            "av-denoise",
+            "nlmeans",
+            "-i",
+            "noisy.mkv",
+            "--frame-budget",
+            "banana",
+        ])
+        .expect_err("banana is not a size");
+
+        assert!(
+            err.to_string().contains("banana"),
+            "error should name the value: {err}"
+        );
+    }
 }

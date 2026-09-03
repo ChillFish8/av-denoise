@@ -813,6 +813,9 @@ fn quantise(v: f32, max: f32) -> u16 {
 }
 
 /// Converts one wire-byte plane to normalised f32.
+///
+/// `gpu_unpack_wire` does this on the device now. This host version is
+/// the oracle that kernel is checked against.
 pub fn plane_to_f32(plane: &[u8], depth: Depth) -> Vec<f32> {
     let max = depth.max_value();
 
@@ -849,6 +852,9 @@ pub fn f32_to_plane(plane: &[f32], depth: Depth) -> Vec<u8> {
 /// `[Y0, U0, V0, Y1, U1, V1, ...]` as f32 in `[0, 1]`.
 ///
 /// This is the layout the library's fused three-channel kernel expects.
+///
+/// `gpu_unpack_wire` does this on the device now. This host version is
+/// the oracle that kernel is checked against.
 pub fn interleave_yuv_to_f32(y: &[u8], u: &[u8], v: &[u8], depth: Depth) -> Vec<f32> {
     debug_assert_eq!(y.len(), u.len());
     debug_assert_eq!(u.len(), v.len());
@@ -876,6 +882,9 @@ pub fn interleave_yuv_to_f32(y: &[u8], u: &[u8], v: &[u8], depth: Depth) -> Vec<
 
 /// Interleaves separate U and V planes into `[U, V, U, V, ...]` as f32
 /// in `[0, 1]`.
+///
+/// `gpu_unpack_wire` does this on the device now. This host version is
+/// the oracle that kernel is checked against.
 pub fn interleave_uv_to_f32(u: &[u8], v: &[u8], depth: Depth) -> Vec<f32> {
     debug_assert_eq!(u.len(), v.len());
 

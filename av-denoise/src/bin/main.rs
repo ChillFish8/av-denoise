@@ -17,16 +17,33 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// Scene workers used when `--workers` is not given.
 const DEFAULT_WORKERS: usize = 2;
 
+/// Frame budget in bytes used when `--frame-budget` is not given. (1GB)
+const DEFAULT_FRAME_BUDGET_BYTES: u64 = 1 << 30;
+
 /// Routes an input source to the pipeline that fits it.
 ///
 /// A path is opened with ffms2 and split across scenes. Anything piped
 /// streams y4m frame by frame with no scene detection.
-fn run_input(opts: &RunOptions, input: &InputSource, workers: Option<usize>) -> Result<(), anyhow::Error> {
+fn run_input(
+    opts: &RunOptions,
+    input: &InputSource,
+    workers: Option<usize>,
+    frame_budget: Option<u64>,
+) -> Result<(), anyhow::Error> {
     match input {
-        InputSource::File(path) => file_mode::run_file(opts, path, workers.unwrap_or(DEFAULT_WORKERS)),
+        InputSource::File(path) => file_mode::run_file(
+            opts,
+            path,
+            workers.unwrap_or(DEFAULT_WORKERS),
+            frame_budget.unwrap_or(DEFAULT_FRAME_BUDGET_BYTES),
+        ),
         stream @ (InputSource::Stdin | InputSource::Fd(_)) => {
             if workers.is_some() {
                 tracing::warn!("--workers is ignored for piped input, which cannot be split by scene");
+            }
+
+            if frame_budget.is_some() {
+                tracing::warn!("--frame-budget is ignored for piped input, which holds one frame at a time");
             }
 
             tracing::info!(input = %stream, "reading a y4m stream");
@@ -77,16 +94,22 @@ fn main() -> anyhow::Result<()> {
         Err(err) => return Err(anyhow::Error::new(err).context("unable to install the kernel cache")),
     }
 
-    let (opts, input, workers) = match &args.command {
-        Command::Nlmeans(nlm) => (nlm.build_options(&args)?, &nlm.common.input, nlm.common.workers),
+    let (opts, input, workers, frame_budget) = match &args.command {
+        Command::Nlmeans(nlm) => (
+            nlm.build_options(&args)?,
+            &nlm.common.input,
+            nlm.common.workers,
+            nlm.common.frame_budget,
+        ),
         Command::Nl4d(nl4d) => (
             nl4d.build_options(&args)?,
             &nl4d.common.input,
             nl4d.common.workers,
+            nl4d.common.frame_budget,
         ),
         // Handled above, before any denoising options are built.
         Command::ListDevices => unreachable!(),
     };
 
-    run_input(&opts, input, workers)
+    run_input(&opts, input, workers, frame_budget)
 }
