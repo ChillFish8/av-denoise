@@ -2124,6 +2124,8 @@ fn wire_samples_in_range(plane: &[u8], depth: Depth) -> bool {
 
     let max = depth.max_value() as u32;
     plane
-        .chunks_exact(2)
-        .all(|s| u32::from(u16::from_le_bytes([s[0], s[1]])) <= max)
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .all(|&s| u32::from(u16::from_le_bytes(s)) <= max)
 }

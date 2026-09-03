@@ -284,8 +284,10 @@ fn codes(frame: &[f32], depth: Depth) -> Vec<u32> {
     match depth.bytes_per_sample() {
         1 => wire.iter().map(|&b| u32::from(b)).collect(),
         _ => wire
-            .chunks_exact(2)
-            .map(|s| u32::from(u16::from_le_bytes([s[0], s[1]])))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&s| u32::from(u16::from_le_bytes(s)))
             .collect(),
     }
 }
