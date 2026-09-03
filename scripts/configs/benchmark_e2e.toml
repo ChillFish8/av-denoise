@@ -1,0 +1,73 @@
+# End-to-end throughput benchmark. Run it with:
+#
+#   just benchmark-e2e
+#   just benchmark-e2e --group 1080p --only nl4d_base --repeats 1
+#
+# Every variant is a shell command run from the repo root. `{{input}}` is
+# replaced with the group's input and `{{output}}` with a per-variant file
+# under `output_dir`. A variant that names no `{{output}}`, like the ones
+# below, writes nothing and is measured against ffmpeg's null sink.
+#
+# fps is amortized. It divides the frames a run reported by the wall clock,
+# so startup, shader compilation, scene detection and the sink all count.
+
+repeats = 1
+warmup = false
+
+# Where `{{output}}` files go. Commented out, so they land in a temporary
+# directory that is deleted when the run finishes.
+# output_dir = "data/benchmark_e2e"
+
+[[groups]]
+name = "1080p"
+input = "data/benchmark-samples/clevatess-ep3-1080p-8bit.mkv"
+
+  [[groups.variants]]
+  name = "nlmeans_base"
+  command = """
+  cargo run --release --bin av-denoise --features clap,vulkan,binary -- \
+    -A vulkan --device discrete:1 nlmeans --workers 2 --input {{input}} \
+  | ffmpeg -hide_banner -loglevel info -stats -stats_period 0.5 -y \
+      -f yuv4mpegpipe -i - -f null -
+  """
+
+  [[groups.variants]]
+  name = "nl4d_base"
+  command = """
+  cargo run --release --bin av-denoise --features clap,vulkan,binary -- \
+    -A vulkan --device discrete:1 nl4d --workers 2 --input {{input}} \
+  | ffmpeg -hide_banner -loglevel info -stats -stats_period 0.5 -y \
+      -f yuv4mpegpipe -i - -f null -
+  """
+
+  # An arm that keeps its output. ffv1 is lossless, so the file is large.
+  # [[groups.variants]]
+  # name = "nl4d_base_encoded"
+  # command = """
+  # cargo run --release --bin av-denoise --features clap,vulkan,binary -- \
+  #   -A vulkan --device discrete:1 nl4d --workers 2 --input {{input}} \
+  # | ffmpeg -hide_banner -loglevel info -stats -stats_period 0.5 -y \
+  #     -f yuv4mpegpipe -i - -c:v ffv1 {{output}}
+  # """
+
+[[groups]]
+name = "4k"
+input = "data/benchmark-samples/dune-4k-10bit.mkv"
+
+  [[groups.variants]]
+  name = "nlmeans_base"
+  command = """
+  cargo run --release --bin av-denoise --features clap,vulkan,binary -- \
+    -A vulkan --device discrete:1 nlmeans --workers 2 --input {{input}} \
+  | ffmpeg -hide_banner -loglevel info -stats -stats_period 0.5 -y \
+      -f yuv4mpegpipe -i - -f null -
+  """
+
+  [[groups.variants]]
+  name = "nl4d_base"
+  command = """
+  cargo run --release --bin av-denoise --features clap,vulkan,binary -- \
+    -A vulkan --device discrete:1 nl4d --workers 2 --input {{input}} \
+  | ffmpeg -hide_banner -loglevel info -stats -stats_period 0.5 -y \
+      -f yuv4mpegpipe -i - -f null -
+  """
