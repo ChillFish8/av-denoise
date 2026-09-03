@@ -55,7 +55,10 @@ pub(crate) fn thsad(blksize: u32, thsad_scale: f32) -> f32 {
 /// neighbour. The motion vector the kernel also produces is thrown away
 /// into `mv_scratch`, because with motion compensation off nothing would
 /// use it.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the dispatch threads through every buffer and shape the kernel binds"
+)]
 pub(crate) fn run_confidence_for_neighbour<R: Runtime>(
     client: &ComputeClient<R>,
     ctx: &MotionCtx,

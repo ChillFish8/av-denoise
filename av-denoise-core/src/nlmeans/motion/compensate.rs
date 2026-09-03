@@ -9,7 +9,10 @@ use crate::nlmeans::kernels::motion::nlm_mc_warp;
 ///
 /// The result is a full frame written into `compensated` at the
 /// neighbour's slot.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the dispatch threads through every buffer and shape the kernel binds"
+)]
 pub(crate) fn run_compensate<R: Runtime>(
     client: &ComputeClient<R>,
     mc: &MotionCtx,

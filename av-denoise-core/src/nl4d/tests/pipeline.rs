@@ -383,7 +383,10 @@ fn flush_emits_exactly_the_pushed_frame_count() {
 /// identical filter (hard threshold, same `lambda_ht`), identical noise
 /// floor and `c_min`, with the only difference being that no temporal
 /// candidates exist to search.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the test helper takes the full set of parameters its cases vary"
+)]
 fn run_spatial_only(
     client: &ComputeClient<R>,
     noisy_centre: &[f32],

@@ -46,7 +46,10 @@ pub(crate) fn confidence_byte_offset(mc: &MotionCtx, neighbour_idx: u32) -> u64 
 /// When it is false, `confidence` is never indexed. Callers that do not
 /// need the score can pass a small placeholder buffer and leave both
 /// scalars at 0.0.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the dispatch threads through every buffer and shape the kernel binds"
+)]
 pub(crate) fn run_analyse<R: Runtime>(
     client: &ComputeClient<R>,
     mc: &MotionCtx,
@@ -202,7 +205,10 @@ pub(crate) fn run_analyse<R: Runtime>(
 /// of the direct path's `mc.search_radius`. Every other argument matches
 /// the fine-pass call in `run_analyse`, including how confidence is
 /// written.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the dispatch threads through every buffer and shape the kernel binds"
+)]
 pub(crate) fn run_seeded_refine<R: Runtime>(
     client: &ComputeClient<R>,
     mc: &MotionCtx,

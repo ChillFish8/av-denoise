@@ -528,7 +528,10 @@ pub(crate) fn pair_ring_slot_count(temporal_radius: u32) -> u32 {
 ///
 /// This is a thin wrapper around [`run_pyramid_build`], which already
 /// handles both cases itself.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the dispatch threads through every buffer and shape the kernel binds"
+)]
 pub(crate) fn build_pyramid_for_slot<R: Runtime>(
     client: &ComputeClient<R>,
     mc: &MotionCtx,

@@ -76,7 +76,10 @@ pub fn sniff_best_accelerator(enable: &[Accelerator], device: &Device) -> Option
             // the match exhaustive there and is never reached at
             // runtime.
             #[cfg(docsrs)]
-            #[allow(unreachable_patterns)]
+            #[expect(
+                unreachable_patterns,
+                reason = "the arm only keeps the match exhaustive on docs.rs"
+            )]
             _ => unreachable!(),
         };
 

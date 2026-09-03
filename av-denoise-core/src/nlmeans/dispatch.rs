@@ -698,7 +698,10 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// which does not, can share it without either duplicating the
     /// estimate branch or paying for a shift neither one of them wants
     /// in the other's place.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the dispatch threads through every buffer and shape the kernel binds"
+    )]
     fn run_motion_estimate(
         &self,
         mc: &MotionCtx,
@@ -1286,7 +1289,10 @@ impl<R: Runtime> NlmDenoiser<R> {
 ///
 /// Both rings are bound whole and the kernel picks the slot itself, for
 /// the alignment reason [`NlmDenoiser::copy_frame_into_slot`] explains.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the dispatch threads through every buffer and shape the kernel binds"
+)]
 fn copy_frame_into_slot_handle<R: Runtime>(
     client: &ComputeClient<R>,
     src: &Handle,

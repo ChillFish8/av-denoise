@@ -73,7 +73,10 @@ pub fn level_dims(width: u32, height: u32, level: u32) -> (u32, u32) {
 ///
 /// Level 0 is the luma plane on its own. Each level after that is the
 /// one before it at half size, averaged 2x2.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the dispatch threads through every buffer and shape the kernel binds"
+)]
 pub(crate) fn run_pyramid_build<R: Runtime>(
     client: &ComputeClient<R>,
     mc: &MotionCtx,
@@ -103,7 +106,10 @@ pub(crate) fn run_pyramid_build<R: Runtime>(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the dispatch threads through every buffer and shape the kernel binds"
+)]
 fn extract_luma<R: Runtime>(
     client: &ComputeClient<R>,
     full_res: &Handle,
@@ -146,7 +152,10 @@ fn extract_luma<R: Runtime>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the dispatch threads through every buffer and shape the kernel binds"
+)]
 fn downscale_level<R: Runtime>(
     client: &ComputeClient<R>,
     pyramid: &Handle,

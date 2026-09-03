@@ -12,7 +12,11 @@ use av_denoise_core::nlmeans::{
 };
 use cubecl::prelude::*;
 
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the shared kernel module is included by several bench binaries, each of which uses \
+              only part of it"
+)]
 #[path = "kernels/mod.rs"]
 mod kernels;
 

@@ -99,7 +99,10 @@ struct Measurement {
 /// input noise, so the sigma ratio and the input frame's own
 /// correlation are measured on the exact same noise realisation the
 /// output derives from.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the test helper takes the full set of parameters its cases vary"
+)]
 fn measure(
     client: &cubecl::prelude::ComputeClient<R>,
     w: u32,
@@ -472,7 +475,10 @@ fn std_dev_rect(field: &[f32], w: u32, x0: u32, y0: u32, x1: u32, y1: u32) -> f6
 /// frame that produced that center. A generalisation of the sweep
 /// above's inlined push loop, parameterised over `clean` and
 /// `patch_radius` so it can drive both a flat and a textured reference.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the test helper takes the full set of parameters its cases vary"
+)]
 fn run_front_end(
     client: &cubecl::prelude::ComputeClient<R>,
     w: u32,
@@ -534,7 +540,10 @@ struct Sample {
 /// nothing but noise-driven averaging can separate the output from the
 /// clean value it started from. Same measurement `measure` above makes,
 /// generalised over an arbitrary flat `clean` and `patch_radius`.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the test helper takes the full set of parameters its cases vary"
+)]
 fn measure_flat(
     client: &cubecl::prelude::ComputeClient<R>,
     w: u32,
@@ -596,7 +605,10 @@ fn measure_flat(
 /// deviation is `sqrt(2)` times a single realisation's, so `sigma_ratio`
 /// divides that back out before comparing against the input noise's own
 /// standard deviation.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the test helper takes the full set of parameters its cases vary"
+)]
 fn measure_diff(
     client: &cubecl::prelude::ComputeClient<R>,
     w: u32,
@@ -650,7 +662,10 @@ fn measure_diff(
 /// sub-rectangles of the frame instead of the whole field, so a single
 /// frame containing both flat and textured regions can be checked for
 /// whether its residual correlation actually differs between them.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the test helper takes the full set of parameters its cases vary"
+)]
 fn measure_diff_two_regions(
     client: &cubecl::prelude::ComputeClient<R>,
     w: u32,

@@ -189,14 +189,22 @@ pub fn nlm_mc_block_match_coarse(
     let mvy_fine = best_dy * level_scale as i32;
 
     let fbx_start = (bx * step * level_scale / fine_step).min(fine_blocks_x);
-    #[allow(clippy::useless_conversion)]
+    #[expect(
+        clippy::useless_conversion,
+        reason = "both branches have to expand to the same cubecl native type, which the \
+                  conversion supplies"
+    )]
     let fbx_end = if bx == CUBE_COUNT_X - 1 {
         fine_blocks_x.into()
     } else {
         ((bx + 1) * step * level_scale / fine_step).min(fine_blocks_x)
     };
     let fby_start = (by * step * level_scale / fine_step).min(fine_blocks_y);
-    #[allow(clippy::useless_conversion)]
+    #[expect(
+        clippy::useless_conversion,
+        reason = "both branches have to expand to the same cubecl native type, which the \
+                  conversion supplies"
+    )]
     let fby_end = if by == CUBE_COUNT_Y - 1 {
         fine_blocks_y.into()
     } else {
@@ -274,13 +282,21 @@ pub fn nlm_mc_block_match_fine(
     // required. Both `if` branches have to produce the same cubecl
     // `NativeExpand<i32>` type, and a bare `0i32` literal does not
     // coerce inside the cube macro.
-    #[allow(clippy::useless_conversion)]
+    #[expect(
+        clippy::useless_conversion,
+        reason = "both branches have to expand to the same cubecl native type, which the \
+                  conversion supplies"
+    )]
     let seed_dx = if use_seed == 1u32 {
         mv_field[mv_slot]
     } else {
         0i32.into()
     };
-    #[allow(clippy::useless_conversion)]
+    #[expect(
+        clippy::useless_conversion,
+        reason = "both branches have to expand to the same cubecl native type, which the \
+                  conversion supplies"
+    )]
     let seed_dy = if use_seed == 1u32 {
         mv_field[mv_slot + 1]
     } else {

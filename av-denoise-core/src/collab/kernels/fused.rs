@@ -285,7 +285,10 @@ pub(crate) const MEMBER_SIGMA2_CAP: f32 = 64.0;
 /// of the register-resident design, not a bug to fix by shrinking the
 /// unroll.
 #[cube(launch_unchecked)]
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a buffer or comptime shape the kernel binds"
+)]
 #[expect(
     clippy::collapsible_if,
     reason = "the outer condition of the group-DC exception is comptime, so nesting elides the \

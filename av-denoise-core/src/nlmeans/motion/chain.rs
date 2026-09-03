@@ -38,7 +38,10 @@ pub(crate) fn pair_byte_offset(mc: &MotionCtx, pair_slot: u32, direction: u32) -
 /// Nothing reads confidence at the pair level, so both directions turn
 /// the fine kernel's confidence output off and pass `confidence_dummy`
 /// as the placeholder target.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the dispatch threads through every buffer and shape the kernel binds"
+)]
 pub(crate) fn run_pair_analyse<R: Runtime>(
     client: &ComputeClient<R>,
     mc: &MotionCtx,
@@ -135,7 +138,10 @@ pub(crate) fn zero_pair_slot<R: Runtime>(
 /// The padded per-direction and per-slot strides are passed through
 /// explicitly, because the kernel reads the whole pair ring as one array
 /// and has to step through it the same way `pair_byte_offset` does.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the dispatch threads through every buffer and shape the kernel binds"
+)]
 fn dispatch_chain_compose<R: Runtime>(
     client: &ComputeClient<R>,
     mc: &MotionCtx,

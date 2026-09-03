@@ -187,13 +187,21 @@ pub fn nlm_temporal_noise_stats<N: Size>(
     // The `.into()` calls are what let cubecl unify the two branches,
     // because both arms have to expand to the same `NativeExpand<f32>`.
     // Clippy cannot see that requirement.
-    #[allow(clippy::useless_conversion)]
+    #[expect(
+        clippy::useless_conversion,
+        reason = "both branches have to expand to the same cubecl native type, which the \
+                  conversion supplies"
+    )]
     let d0 = if valid { d[0] } else { 0.0f32.into() };
     d0_tile[tid as usize] = d0;
 
     #[unroll]
     for ch in 0..stored_ch {
-        #[allow(clippy::useless_conversion)]
+        #[expect(
+            clippy::useless_conversion,
+            reason = "both branches have to expand to the same cubecl native type, which the \
+                      conversion supplies"
+        )]
         let v = if valid { d[ch as usize] } else { 0.0f32.into() };
         scratch[(tid * record_len + ch) as usize] = v;
         scratch[(tid * record_len + stored_ch + ch) as usize] = v * v;
@@ -208,7 +216,11 @@ pub fn nlm_temporal_noise_stats<N: Size>(
     // from a fixed block size.
     let block_w = u32::min(block, width - block_origin_x);
     let pair_valid = valid && local_x + 1 < block_w;
-    #[allow(clippy::useless_conversion)]
+    #[expect(
+        clippy::useless_conversion,
+        reason = "both branches have to expand to the same cubecl native type, which the \
+                  conversion supplies"
+    )]
     let lag = if pair_valid {
         d0 * d0_tile[(tid + 1) as usize]
     } else {

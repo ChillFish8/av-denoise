@@ -55,7 +55,10 @@ pub fn enumerate_devices(enable: &[Accelerator]) -> Vec<BackendDevices> {
             // widens the `Accelerator` enum to include variants whose
             // backend feature is not enabled. Never reached at runtime.
             #[cfg(docsrs)]
-            #[allow(unreachable_patterns)]
+            #[expect(
+                unreachable_patterns,
+                reason = "the arm only keeps the match exhaustive on docs.rs"
+            )]
             _ => unreachable!(),
         })
         .collect()

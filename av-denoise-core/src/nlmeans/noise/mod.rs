@@ -351,7 +351,10 @@ pub(super) fn zero_temporal_stats_slot<R: Runtime>(
 ///
 /// The shared ring handle is sliced by byte offset, so the transfer only
 /// covers one slot rather than the whole ring.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the dispatch threads through every buffer and shape the kernel binds"
+)]
 pub(super) fn read_temporal_stats_slot<R: Runtime>(
     client: &ComputeClient<R>,
     stats_buf: &Handle,

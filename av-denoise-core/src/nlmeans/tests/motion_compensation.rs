@@ -46,7 +46,6 @@ fn frame_with_square(
 /// = blocks_y = 1`, `use_seed = 0`), returning the winning MV and
 /// confidence score. Exercises the kernel's SAD reduction and argmin
 /// directly, without `run_analyse`'s pyramid/geometry plumbing.
-#[allow(clippy::too_many_arguments)]
 fn run_fine_block_match_single_block(
     blksize: u32,
     search_radius: u32,
@@ -693,7 +692,6 @@ fn motion_compensation_1080_square_odd_block_count_chained_dispatch_succeeds() {
 /// shifting (via `shift_clamped`) keeps each half's content a
 /// self-contained translation, so a block deep inside one half never
 /// legitimately depends on the other half's content.
-#[allow(clippy::too_many_arguments)]
 fn split_half_frame(
     w: u32,
     h: u32,

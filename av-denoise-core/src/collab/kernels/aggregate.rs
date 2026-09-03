@@ -219,7 +219,10 @@ pub fn to_fixed_weight(weight: f32, scale: f32) -> i32 {
 /// at [`WEIGHT_GAIN`] times that scale, which [`collab_normalise`]
 /// multiplies back out.
 #[cube]
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a buffer or comptime shape the kernel binds"
+)]
 pub fn scatter_patch(
     accum: &mut Array<Atomic<i32>>,
     wsum: &mut Array<Atomic<i32>>,
@@ -315,7 +318,10 @@ pub fn collab_zero_accum(
 /// If the weight sum ever were to be zero anyway, the guard below returns
 /// the accumulator untouched rather than a NaN or an infinity.
 #[cube(launch_unchecked)]
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a buffer or comptime shape the kernel binds"
+)]
 pub fn collab_normalise<N: Size>(
     accum: &Array<i32>,
     wsum: &Array<i32>,
