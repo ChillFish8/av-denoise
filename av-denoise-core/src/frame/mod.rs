@@ -1220,8 +1220,12 @@ mod cli_options_tests {
             None,
         );
 
-        let luma_params: NlmParams = opts.denoiser_options(ChannelMode::Luma, Depth::Eight).to_nlm_params();
-        let chroma_params: NlmParams = opts.denoiser_options(ChannelMode::Chroma, Depth::Eight).to_nlm_params();
+        let luma_params: NlmParams = opts
+            .denoiser_options(ChannelMode::Luma, Depth::Eight)
+            .to_nlm_params();
+        let chroma_params: NlmParams = opts
+            .denoiser_options(ChannelMode::Chroma, Depth::Eight)
+            .to_nlm_params();
 
         assert!(
             (luma_params.strength - 0.35).abs() < f32::EPSILON,

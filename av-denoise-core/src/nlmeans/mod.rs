@@ -42,7 +42,6 @@ mod pending;
 mod tests;
 
 pub(crate) use denoiser::RingView;
-pub(crate) use pending::start_readback;
 pub use denoiser::{GpuOutput, NlmDenoiser};
 pub use motion::{MotionCompensationMode, MotionEstimation, MotionSearch};
 pub use params::{
@@ -56,6 +55,7 @@ pub use params::{
     hq_default_strength,
     validate_dimensions,
 };
+pub(crate) use pending::start_readback;
 pub use pending::{Pending, TryWait};
 pub use prefilter::{DEFAULT_PILOT_STRENGTH_SCALE, PrefilterMode, parse_prefilter};
 
