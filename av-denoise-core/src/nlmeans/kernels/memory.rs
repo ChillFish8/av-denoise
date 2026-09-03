@@ -131,3 +131,85 @@ pub fn gpu_pack_wire(
         word += total_threads;
     }
 }
+
+/// Normalises a wire-byte frame into one ring slot, interleaving its
+/// planes and zeroing the padding lanes.
+///
+/// `src` holds the planes concatenated in channel order, each `pixels`
+/// samples long, packed `samples_per_word` to a `u32`. So a sample sits
+/// at index `channel * pixels + pixel`.
+///
+/// `src` reads whole words, so a plane whose sample count is not a whole
+/// number of words needs its last word backed by real storage. The caller
+/// pads the upload up to a multiple of four bytes, otherwise the kernel
+/// reads past the allocation.
+///
+/// `dst` is the ring buffer. This launch writes `elements` values from
+/// `dst_offset`, which is the slot's own base.
+///
+/// `lut` holds one normalised value per possible sample, which
+/// [`crate::nlmeans::normalisation_table`] builds. A sample indexes it
+/// rather than being divided by the depth's maximum, so the result is
+/// exactly the float the host converter produces. A GPU divide lowers to
+/// a reciprocal that is not correctly rounded and lands up to one unit in
+/// the last place away.
+///
+/// `max_sample` is the table's last index, which
+/// [`crate::nlmeans::NormalisationTable::max_sample`] reports. The two
+/// travel together, since a smaller value darkens every bright sample and
+/// a larger one reads past the table.
+///
+/// A channel at or above `channels` is a padding lane and comes out zero,
+/// which is what keeps a `Yuv` frame's fourth lane from carrying a
+/// previous frame's value.
+///
+/// Every index is clamped rather than guarded by a branch. A
+/// branch-derived index inside an unrolled loop makes cubecl's GVN pass
+/// panic while compiling the shader, after which the launch silently
+/// writes nothing.
+///
+/// The loop is strided so the grid can stay under the dispatch limit.
+#[cube(launch_unchecked)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a comptime shape the kernel specialises on"
+)]
+pub fn gpu_unpack_wire(
+    src: &Array<u32>,
+    lut: &Array<f32>,
+    dst: &mut Array<f32>,
+    dst_offset: u32,
+    #[comptime] pixels: u32,
+    #[comptime] channels: u32,
+    #[comptime] stored_ch: u32,
+    #[comptime] samples_per_word: u32,
+    #[comptime] max_sample: u32,
+    #[comptime] elements: u32,
+    #[comptime] total_threads: u32,
+) {
+    let bits = comptime![32u32 / samples_per_word];
+    let mask = comptime![(1u32 << (32u32 / samples_per_word)) - 1];
+    let wire_samples = comptime![pixels * channels];
+
+    let mut idx = ABSOLUTE_POS_X;
+
+    while idx < elements {
+        let pixel = idx / stored_ch;
+        let ch = idx % stored_ch;
+
+        // Clamped, never branched. A padding lane still reads a real
+        // sample and then discards it below.
+        let s = u32::min(ch * pixels + pixel, wire_samples - 1);
+
+        let word = src[(s / samples_per_word) as usize];
+        let sample = (word >> ((s % samples_per_word) * bits)) & mask;
+
+        // The lane mask is wider than the table above 8-bit, where a
+        // 16-bit lane carries a 10 or 12-bit sample, so a malformed high
+        // bit would otherwise index past the table.
+        let v = lut[u32::min(sample, max_sample) as usize];
+        dst[(dst_offset + idx) as usize] = select(ch < channels, v, 0.0f32);
+
+        idx += total_threads;
+    }
+}

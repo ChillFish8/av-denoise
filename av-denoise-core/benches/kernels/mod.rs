@@ -29,6 +29,7 @@ pub mod nl4d_geometry;
 pub mod noise_partial;
 pub mod pack_wire;
 pub mod temporal_noise_stats;
+pub mod unpack_wire;
 pub mod vertical_weight;
 pub mod vweight_pair_accumulate;
 pub mod zero;

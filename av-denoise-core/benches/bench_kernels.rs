@@ -32,6 +32,7 @@ use kernels::mc_warp::WarpBench;
 use kernels::noise_partial::NoisePartialBench;
 use kernels::pack_wire::PackWireBench;
 use kernels::temporal_noise_stats::TemporalNoiseStatsBench;
+use kernels::unpack_wire::UnpackWireBench;
 use kernels::vertical_weight::VWeightBench;
 use kernels::vweight_pair_accumulate::VWeightPairAccBench;
 use kernels::zero::ZeroBench;
@@ -54,6 +55,16 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
     for &(ch, ch_name) in CHANNELS {
         for depth in [Depth::Eight, Depth::Ten] {
             run(PackWireBench {
+                client: client.clone(),
+                ch,
+                ch_name,
+                depth,
+            });
+        }
+    }
+    for &(ch, ch_name) in CHANNELS {
+        for depth in [Depth::Eight, Depth::Ten] {
+            run(UnpackWireBench {
                 client: client.clone(),
                 ch,
                 ch_name,
