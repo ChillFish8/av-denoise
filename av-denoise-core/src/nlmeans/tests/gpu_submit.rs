@@ -127,7 +127,7 @@ fn compare_flush_paths(radius: u32, pushes: usize) {
 
     let mut expected = Vec::new();
     via_flush
-        .flush(|frame| expected.push(frame.to_vec()))
+        .flush(|frame| expected.push(frame.as_f32().expect("f32 denoiser").to_vec()))
         .expect("flush failed");
 
     let target = via_step.flush_target();
@@ -234,7 +234,7 @@ fn flush_step_gpu_emits_the_same_count_and_frames_mixed_phase_stream() {
 
     let mut expected = Vec::new();
     via_flush
-        .flush(|frame| expected.push(frame.to_vec()))
+        .flush(|frame| expected.push(frame.as_f32().expect("f32 denoiser").to_vec()))
         .expect("flush failed");
 
     let mut actual = Vec::new();

@@ -42,7 +42,7 @@ mod pending;
 mod tests;
 
 pub(crate) use denoiser::RingView;
-pub(crate) use pending::{f32_frame_to_wire, start_readback};
+pub(crate) use pending::start_readback;
 pub use denoiser::{GpuOutput, NlmDenoiser};
 pub use motion::{MotionCompensationMode, MotionEstimation, MotionSearch};
 pub use params::{

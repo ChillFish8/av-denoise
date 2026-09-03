@@ -24,7 +24,13 @@ fn separable_uniform_passthrough() {
     assert!(denoiser.use_separable, "should use separable for patch_radius=9");
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap().to_vec();
+    let result = denoiser
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
 
     for (i, &v) in result.iter().enumerate() {
         assert!(
@@ -57,7 +63,13 @@ fn separable_yuv_passthrough() {
     assert!(denoiser.use_separable);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap().to_vec();
+    let result = denoiser
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
     assert_eq!(result.len(), (w * h * 3) as usize);
 
     for (i, &v) in result.iter().enumerate() {
@@ -98,7 +110,13 @@ fn separable_symmetry_preserved() {
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap().to_vec();
+    let result = denoiser
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
 
     for y in 0..h {
         for x in 0..(w / 2) {

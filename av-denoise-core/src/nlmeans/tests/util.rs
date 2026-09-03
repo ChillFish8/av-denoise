@@ -37,7 +37,13 @@ fn extreme_params_produce_finite_output() {
 
     let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
     d.push_frame(&frame);
-    let result = d.denoise().unwrap().unwrap().to_vec();
+    let result = d
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
 
     for (i, &v) in result.iter().enumerate() {
         assert!(v.is_finite(), "pixel {i}: non-finite output {v}");

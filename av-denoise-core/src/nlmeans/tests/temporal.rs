@@ -59,7 +59,13 @@ fn temporal_denoise_uniform() {
     denoiser.push_frame(&frame);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap().to_vec();
+    let result = denoiser
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
 
     for (i, &v) in result.iter().enumerate() {
         assert!(
@@ -95,7 +101,13 @@ fn temporal_with_noisy_center_frame() {
     denoiser.push_frame(&noisy);
     denoiser.push_frame(&clean);
 
-    let result = denoiser.denoise().unwrap().unwrap().to_vec();
+    let result = denoiser
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
 
     let center_val = result[(8 * w + 8) as usize];
     assert!(
@@ -137,7 +149,13 @@ fn temporal_asymmetric_frames_correct_weights() {
     denoiser.push_frame(&frame1);
     denoiser.push_frame(&frame2);
 
-    let result = denoiser.denoise().unwrap().unwrap().to_vec();
+    let result = denoiser
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
 
     let center_val = result[(8 * w + 8) as usize];
     assert!(
@@ -169,7 +187,9 @@ fn flush_produces_remaining_frames() {
     }
 
     let mut remaining: Vec<Vec<f32>> = Vec::new();
-    denoiser.flush(|frame| remaining.push(frame.to_vec())).unwrap();
+    denoiser
+        .flush(|frame| remaining.push(frame.as_f32().expect("f32 denoiser").to_vec()))
+        .unwrap();
     assert_eq!(
         remaining.len(),
         1,
@@ -298,14 +318,26 @@ fn windowed_vs_separable_psnr(
     for frame in frames {
         windowed.push_frame(frame);
     }
-    let windowed_result = windowed.denoise().unwrap().unwrap().to_vec();
+    let windowed_result = windowed
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
 
     let mut separable = NlmDenoiser::<R>::new(client, params.clone(), w, h);
     separable.use_separable = true;
     for frame in frames {
         separable.push_frame(frame);
     }
-    let separable_result = separable.denoise().unwrap().unwrap().to_vec();
+    let separable_result = separable
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
 
     (psnr(base, &windowed_result), psnr(base, &separable_result))
 }
@@ -462,7 +494,13 @@ fn temporal_uniform_passthrough_search_5_and_6() {
         for _ in 0..5 {
             denoiser.push_frame(&frame);
         }
-        let result = denoiser.denoise().unwrap().unwrap().to_vec();
+        let result = denoiser
+            .denoise()
+            .unwrap()
+            .unwrap()
+            .as_f32()
+            .expect("f32 denoiser")
+            .to_vec();
 
         for (i, &v) in result.iter().enumerate() {
             assert!(

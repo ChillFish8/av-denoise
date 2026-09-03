@@ -122,7 +122,7 @@ impl<R: Runtime> Pending<R> {
 }
 
 /// An empty buffer of `format`, sized for one frame.
-fn empty_output(pixels: usize, channels: u32, format: OutputFormat) -> FrameOutput {
+pub(super) fn empty_output(pixels: usize, channels: u32, format: OutputFormat) -> FrameOutput {
     let samples = pixels * channels as usize;
     match format {
         OutputFormat::F32 => FrameOutput::F32(Vec::with_capacity(samples)),
@@ -270,19 +270,6 @@ fn pack_wire<R: Runtime>(
 /// consumer already reads.
 pub(crate) fn wire_splits_planes(channels: u32) -> bool {
     channels == 2
-}
-
-/// Quantises a denoised `f32` frame into the same wire bytes
-/// [`gpu_pack_wire`] would produce for it.
-///
-/// This is the host fallback for the trailing tail frames, which the
-/// algorithms read back themselves rather than through a [`Pending`].
-pub(crate) fn f32_frame_to_wire(frame: &[f32], channels: u32, depth: Depth) -> Vec<u8> {
-    if wire_splits_planes(channels) {
-        let (u, v) = crate::frame::unpack_uv_from_f32(frame, frame.len() / 2, depth);
-        return u.into_iter().chain(v).collect();
-    }
-    crate::frame::f32_to_plane(frame, depth)
 }
 
 /// Copies the first `len` bytes of a readback buffer into `dst`, which is

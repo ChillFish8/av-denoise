@@ -134,7 +134,7 @@ fn measure(
         denoiser.push_frame(&frame);
         let result = denoiser.denoise().unwrap();
         if i == n_push - 1 {
-            output = result.map(|o| o.to_vec());
+            output = result.map(|o| o.as_f32().expect("f32 denoiser").to_vec());
         }
     }
 
@@ -509,7 +509,7 @@ fn run_front_end(
         denoiser.push_frame(&frame);
         let result = denoiser.denoise().unwrap();
         if i == n_push - 1 {
-            output = result.map(|o| o.to_vec());
+            output = result.map(|o| o.as_f32().expect("f32 denoiser").to_vec());
         }
     }
 

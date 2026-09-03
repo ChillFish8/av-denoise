@@ -24,7 +24,7 @@ use super::noise::{
     zero_temporal_stats_slot,
 };
 use super::params::{NlmParams, SEPARABLE_THRESHOLD, sigma_eff, validate_dimensions};
-use super::pending::{Pending, start_readback, unpack_frame};
+use super::pending::{Pending, empty_output, start_readback};
 use super::prefilter::{PrefilterCtx, PrefilterMode, run_prefilter};
 use super::{BLOCK_1D, MAX_GRID_1D};
 use crate::denoiser::{DenoiserError, FrameOutput, OutputFormat};
@@ -149,9 +149,12 @@ pub struct NlmDenoiser<R: Runtime> {
     /// only in wire mode. They rotate on the same slot counter, so each
     /// is free again exactly when the `f32` slot it is packed from is.
     pub(super) wire_outputs: Option<[Handle; 2]>,
-    /// CPU scratch the blocking `denoise()` path reuses through
-    /// `Pending::wait_into`, so it does not allocate per frame.
-    pub(super) output_scratch: Vec<f32>,
+    /// CPU scratch the blocking `denoise()` and `flush()` paths reuse
+    /// through `Pending::wait_into`, so they do not allocate per frame.
+    ///
+    /// It holds `output_format`'s variant, so `wait_into` keeps its
+    /// allocation rather than replacing it.
+    pub(super) output_scratch: FrameOutput,
 
     pub(super) h2_inv_norm: f32,
     /// The distance floor the main pass subtracts before weighting.
@@ -440,9 +443,9 @@ impl<R: Runtime> NlmDenoiser<R> {
             PrefilterMode::NlmSpatial { .. } => 0.0,
             _ => input_noise_offset,
         };
+        let output_scratch = empty_output(pixels, params.channels.count(), output_format);
         let use_separable = params.patch_radius > SEPARABLE_THRESHOLD;
         let use_reference = params.prefilter.needs_reference_buf();
-        let output_scratch_cap = pixels * params.channels.count() as usize;
 
         // This stays unset until the first temporal sample lands, so
         // the initial table matches the flat `noise_offset` scalar it
@@ -622,7 +625,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             next_output_slot: 0,
             output_format,
             wire_outputs,
-            output_scratch: Vec::with_capacity(output_scratch_cap),
+            output_scratch,
             h2_inv_norm,
             noise_offset,
             input_noise_offset,
@@ -1798,24 +1801,19 @@ impl<R: Runtime> NlmDenoiser<R> {
     ///
     /// Returns `Ok(None)` while not enough frames have been pushed.
     ///
-    /// On success the returned slice borrows a reusable internal buffer.
-    /// Copy it out if the data has to survive another call into the
-    /// denoiser.
+    /// The frame comes back in the [`OutputFormat`] this denoiser was
+    /// built with.
     ///
-    /// # Panics
-    ///
-    /// Panics on a denoiser built with [`OutputFormat::Wire`], whose
-    /// readbacks carry packed bytes rather than `f32` samples.
-    pub fn denoise(&mut self) -> Result<Option<&[f32]>, anyhow::Error> {
+    /// On success the return borrows a reusable internal buffer. Copy it
+    /// out if the data has to survive another call into the denoiser.
+    pub fn denoise(&mut self) -> Result<Option<&FrameOutput>, anyhow::Error> {
         let Some(pending) = self.denoise_submit()? else {
             return Ok(None);
         };
-        // In `f32` mode `wait_into` refills the very buffer handed to
-        // it, so the scratch keeps its allocation.
-        let mut out = FrameOutput::F32(std::mem::take(&mut self.output_scratch));
-        pending.wait_into(&mut out)?;
-        self.output_scratch = out.into_f32().expect("submitted as f32");
-        Ok(Some(self.output_scratch.as_slice()))
+        // The scratch already holds this denoiser's format, so
+        // `wait_into` refills it and it keeps its allocation.
+        pending.wait_into(&mut self.output_scratch)?;
+        Ok(Some(&self.output_scratch))
     }
 
     /// How many tail frames a call to [`Self::flush`] must emit for the
@@ -1886,28 +1884,32 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// For the last few frames the temporal window is kept full by
     /// repeating the final frame.
     ///
-    /// `sink` is called once per frame produced, and the slice it
-    /// receives is only valid for that call.
-    pub fn flush(&mut self, mut sink: impl FnMut(&[f32])) -> Result<(), anyhow::Error> {
+    /// `sink` is called once per frame produced, and the frame it
+    /// receives is only valid for that call. It arrives in the
+    /// [`OutputFormat`] this denoiser was built with, quantised by the
+    /// same pack kernel as every streaming frame.
+    pub fn flush(&mut self, mut sink: impl FnMut(&FrameOutput)) -> Result<(), anyhow::Error> {
         let target = self.flush_target();
         let mut emitted = 0usize;
+        let pixels = (self.width * self.height) as usize;
 
+        // Every output slot is free here. A caller reaches a flush only
+        // once its streaming readbacks have landed, and the readback
+        // below blocks, so no other readback is ever reading the slot
+        // this step is handed.
         while emitted < target {
             if let Some(output) = self.flush_step_gpu()? {
-                let bytes = self
-                    .client
-                    .read_one(output.handle)
-                    .map_err(|e| anyhow::anyhow!("flush readback failed: {e}"))?;
-                let data = f32::from_bytes(&bytes);
-                let pixels = (self.width * self.height) as usize;
-                unpack_frame(
-                    data,
+                let pending = start_readback(
+                    &self.client,
+                    output.handle,
+                    self.wire_outputs.as_ref().map(|w| &w[output.slot]),
+                    self.params.channels.count(),
+                    self.params.channels.storage_count(),
                     pixels,
-                    self.params.channels.count() as usize,
-                    self.params.channels.storage_count() as usize,
-                    &mut self.output_scratch,
+                    self.output_format,
                 );
-                sink(self.output_scratch.as_slice());
+                pending.wait_into(&mut self.output_scratch)?;
+                sink(&self.output_scratch);
                 emitted += 1;
             }
         }

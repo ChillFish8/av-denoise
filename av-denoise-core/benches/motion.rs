@@ -157,7 +157,7 @@ fn bench_eager<R: Runtime>(
 
     run_pipeline_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
         denoiser.push_frame(&frame);
-        let result = denoiser.denoise().unwrap().unwrap();
+        let result = denoiser.denoise().unwrap().unwrap().as_f32().expect("f32 denoiser");
         black_box(&result);
     })
 }

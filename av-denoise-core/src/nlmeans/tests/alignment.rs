@@ -32,7 +32,13 @@ fn denoise_uniform(w: u32, h: u32, params: NlmParams) {
     for _ in 0..5 {
         d.push_frame(&frame);
     }
-    let result = d.denoise().unwrap().unwrap().to_vec();
+    let result = d
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
 
     assert_eq!(result.len(), (w * h) as usize);
     for (i, &v) in result.iter().enumerate() {

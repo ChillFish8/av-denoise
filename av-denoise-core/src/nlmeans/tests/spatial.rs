@@ -23,7 +23,13 @@ fn uniform_image_passthrough() {
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap().to_vec();
+    let result = denoiser
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
 
     for (i, &v) in result.iter().enumerate() {
         assert!((v - 0.5).abs() < 1e-5, "pixel {i}: expected 0.5, got {v}");
@@ -52,7 +58,13 @@ fn uniform_yuv_passthrough() {
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap().to_vec();
+    let result = denoiser
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
     assert_eq!(result.len(), (w * h * 3) as usize);
 
     for (i, &v) in result.iter().enumerate() {
@@ -82,7 +94,13 @@ fn uniform_chroma_passthrough() {
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap().to_vec();
+    let result = denoiser
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
     assert_eq!(result.len(), (w * h * 2) as usize);
 
     for (i, &v) in result.iter().enumerate() {
@@ -113,7 +131,13 @@ fn noisy_region_suppressed() {
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap().to_vec();
+    let result = denoiser
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
 
     let noisy_idx = (16 * w + 16) as usize;
     let denoised = result[noisy_idx];
@@ -153,7 +177,13 @@ fn high_strength_smooths_heavily() {
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap().to_vec();
+    let result = denoiser
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
 
     let center = result[(8 * w + 8) as usize];
     assert!(
@@ -186,7 +216,13 @@ fn low_strength_preserves_original() {
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap().to_vec();
+    let result = denoiser
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
 
     let pixel = result[(8 * w + 8) as usize];
     assert!(
@@ -218,7 +254,13 @@ fn self_weight_zero_uniform() {
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap().to_vec();
+    let result = denoiser
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
 
     for (i, &v) in result.iter().enumerate() {
         assert!((v - 0.5).abs() < 1e-5, "pixel {i}: expected ~0.5, got {v}");
@@ -274,7 +316,13 @@ fn symmetry_preserved() {
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap().to_vec();
+    let result = denoiser
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
 
     for y in 0..h {
         for x in 0..(w / 2) {
@@ -311,7 +359,13 @@ fn clamp_to_edge_no_darkening() {
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
 
-    let result = denoiser.denoise().unwrap().unwrap().to_vec();
+    let result = denoiser
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
 
     let corner = result[0];
     assert!(

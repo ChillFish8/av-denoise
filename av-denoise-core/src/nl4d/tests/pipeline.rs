@@ -83,7 +83,7 @@ fn denoises_a_static_noisy_clip() {
             outputs.push(frame.into_f32().expect("f32 output"));
         }
     }
-    d.flush(|frame| outputs.push(frame.to_vec()))
+    d.flush(|frame| outputs.push(frame.as_f32().expect("f32 denoiser").to_vec()))
         .expect("flush failed");
 
     assert_eq!(outputs.len(), n, "expected one emitted frame per pushed frame");
@@ -133,7 +133,7 @@ fn denoises_at_the_widest_spatial_and_temporal_radius() {
             outputs.push(frame.into_f32().expect("f32 output"));
         }
     }
-    d.flush(|frame| outputs.push(frame.to_vec()))
+    d.flush(|frame| outputs.push(frame.as_f32().expect("f32 denoiser").to_vec()))
         .expect("flush failed");
 
     assert_eq!(outputs.len(), n, "expected one emitted frame per pushed frame");
@@ -217,7 +217,7 @@ fn survives_a_ring_size_that_would_overflow_a_single_zero_dispatch() {
             outputs.push(frame.into_f32().expect("f32 output"));
         }
     }
-    d.flush(|frame| outputs.push(frame.to_vec()))
+    d.flush(|frame| outputs.push(frame.as_f32().expect("f32 denoiser").to_vec()))
         .expect("flush failed");
 
     assert_eq!(outputs.len(), n, "expected one emitted frame per pushed frame");

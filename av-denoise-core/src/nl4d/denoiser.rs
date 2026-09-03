@@ -12,7 +12,7 @@ use crate::collab::kernels::aggregate::{
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, PATCH_SIZE};
-use crate::denoiser::{DenoiserError, OutputFormat};
+use crate::denoiser::{DenoiserError, FrameOutput, OutputFormat};
 use crate::nlmeans::{
     BLOCK_X,
     BLOCK_Y,
@@ -286,15 +286,13 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// Prefer [`Self::denoise_submit`] when the caller can hold a frame
     /// in flight.
     ///
-    /// # Panics
-    ///
-    /// Panics on a denoiser built with [`OutputFormat::Wire`], whose
-    /// readbacks carry packed bytes rather than `f32` samples.
-    pub fn denoise(&mut self) -> Result<Option<Vec<f32>>, DenoiserError> {
+    /// The frame comes back in the [`OutputFormat`] this denoiser was
+    /// built with.
+    pub fn denoise(&mut self) -> Result<Option<FrameOutput>, DenoiserError> {
         let Some(pending) = self.denoise_submit()? else {
             return Ok(None);
         };
-        Ok(Some(pending.wait()?.into_f32().expect("submitted as f32")))
+        Ok(Some(pending.wait()?))
     }
 
     /// Produces the frames still held at the end of a stream.
@@ -302,7 +300,9 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// For the last few frames the front end keeps its temporal window
     /// full by repeating the final pushed frame, exactly as
     /// [`NlmDenoiser::flush`] does. `sink` is called once per frame
-    /// produced, and the slice it receives is only valid for that call.
+    /// produced, and the frame it receives is only valid for that call.
+    /// It arrives in the [`OutputFormat`] this denoiser was built with,
+    /// quantised by the same pack kernel as every streaming frame.
     ///
     /// This drives [`NlmDenoiser::flush_step_machinery`] for
     /// [`Self::flush_target`] emissions, which is `2 * temporal_radius`
@@ -318,16 +318,21 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// A call to [`NlmDenoiser::flush_step_machinery`] runs a pass
     /// whether or not it emits, so the loop below keeps calling it until
     /// enough passes have actually emitted.
-    pub fn flush(&mut self, mut sink: impl FnMut(&[f32])) -> Result<(), DenoiserError> {
+    pub fn flush(&mut self, mut sink: impl FnMut(&FrameOutput)) -> Result<(), DenoiserError> {
         let target = self.flush_target();
         let mut emitted = 0usize;
 
+        // Every output slot is free here. A caller reaches a flush only
+        // once its streaming readbacks have landed, and the readback
+        // below blocks, so no other readback is ever reading the slot
+        // this step is handed.
         while emitted < target {
             if let Some(view) = self.front.flush_step_machinery()?
-                && let Some((handle, _slot)) = self.run_collab_stage(&view)?
+                && let Some((handle, slot)) = self.run_collab_stage(&view)?
             {
-                let pending = self.start_readback(handle, None, OutputFormat::F32);
-                let frame = pending.wait()?.into_f32().expect("submitted as f32");
+                let wire_dst = self.wire_outputs.as_ref().map(|w| &w[slot]);
+                let pending = self.start_readback(handle, wire_dst, self.output_format);
+                let frame = pending.wait()?;
                 sink(&frame);
                 emitted += 1;
             }

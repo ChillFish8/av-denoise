@@ -371,7 +371,7 @@ fn bench_denoise_spatial<R: Runtime>(
 
     run_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
         push_frame_for_prefilter(&mut denoiser, &frame, supply_reference);
-        let result = denoiser.denoise().unwrap().unwrap();
+        let result = denoiser.denoise().unwrap().unwrap().as_f32().expect("f32 denoiser");
         black_box(&result);
     })
 }
@@ -402,7 +402,7 @@ fn bench_denoise_temporal<R: Runtime>(
 
     run_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
         push_frame_for_prefilter(&mut denoiser, &frame, supply_reference);
-        let result = denoiser.denoise().unwrap().unwrap();
+        let result = denoiser.denoise().unwrap().unwrap().as_f32().expect("f32 denoiser");
         black_box(&result);
     })
 }

@@ -334,6 +334,136 @@ fn wire_mode_handles_a_plane_that_is_not_a_whole_number_of_words() {
     assert_eq!(got, crate::frame::f32_to_plane(&want, depth));
 }
 
+/// The flush tail must come back quantised by the same kernel as every
+/// other frame, not by a host converter that could drift from it.
+#[cfg(feature = "vulkan")]
+#[test]
+fn a_wire_flush_matches_an_f32_flush_at_every_depth() {
+    let (w, h) = (16u32, 16u32);
+
+    for depth in [Depth::Eight, Depth::Ten, Depth::Twelve] {
+        let mut f32_side = denoiser(ChannelMode::Luma, OutputFormat::F32, w, h);
+        let mut wire_side = denoiser(ChannelMode::Luma, OutputFormat::Wire { depth }, w, h);
+
+        push_ramp(&mut f32_side, w, h, 3);
+        push_ramp(&mut wire_side, w, h, 3);
+
+        let mut want = Vec::new();
+        f32_side
+            .flush(|out| {
+                want.push(crate::frame::f32_to_plane(
+                    out.as_f32().expect("f32 denoiser flushes f32"),
+                    depth,
+                ))
+            })
+            .expect("f32 flush failed");
+
+        let mut got = Vec::new();
+        wire_side
+            .flush(|out| got.push(out.as_wire().expect("wire denoiser flushes wire").to_vec()))
+            .expect("wire flush failed");
+
+        assert!(!got.is_empty(), "flush emitted nothing at depth {depth:?}");
+        assert_eq!(got, want, "depth {depth:?}");
+    }
+}
+
+/// A flushed chroma pair splits into U's whole region followed by V's,
+/// the same way a streaming one does.
+#[cfg(feature = "vulkan")]
+#[test]
+fn a_wire_chroma_flush_matches_unpack_uv_from_f32() {
+    let (w, h) = (16u32, 16u32);
+    let depth = Depth::Ten;
+
+    let mut f32_side = denoiser(ChannelMode::Chroma, OutputFormat::F32, w, h);
+    let mut wire_side = denoiser(ChannelMode::Chroma, OutputFormat::Wire { depth }, w, h);
+
+    // A chroma frame holds two channels per pixel, which `ramp_frame`
+    // covers by producing twice as many values.
+    push_ramp(&mut f32_side, w, h * 2, 3);
+    push_ramp(&mut wire_side, w, h * 2, 3);
+
+    let mut want = Vec::new();
+    f32_side
+        .flush(|out| {
+            let (u, v) = crate::frame::unpack_uv_from_f32(
+                out.as_f32().expect("f32 denoiser flushes f32"),
+                (w * h) as usize,
+                depth,
+            );
+            want.push(u.into_iter().chain(v).collect::<Vec<u8>>());
+        })
+        .expect("f32 flush failed");
+
+    let mut got = Vec::new();
+    wire_side
+        .flush(|out| got.push(out.as_wire().expect("wire denoiser flushes wire").to_vec()))
+        .expect("wire flush failed");
+
+    assert!(!got.is_empty(), "flush emitted nothing");
+    assert_eq!(got, want);
+}
+
+/// A flush takes the same wire slots streaming does, so one that begins
+/// while a submitted readback is still in flight would be handed a slot
+/// that readback is still reading.
+///
+/// The push after the single drain leaves a readback outstanding at the
+/// moment `flush` is called, which draining to empty first would hide.
+#[cfg(feature = "vulkan")]
+#[test]
+fn flushing_with_a_readback_in_flight_matches_the_f32_path() {
+    let (w, h) = (16u32, 16u32);
+    let depth = Depth::Ten;
+
+    let mut f32_side = denoiser(ChannelMode::Luma, OutputFormat::F32, w, h);
+    let mut wire_side = denoiser(ChannelMode::Luma, OutputFormat::Wire { depth }, w, h);
+
+    let mut want = Vec::new();
+    let mut got = Vec::new();
+
+    push_ramp(&mut f32_side, w, h, 3);
+    push_ramp(&mut wire_side, w, h, 3);
+
+    want.push(crate::frame::f32_to_plane(
+        &f32_side
+            .recv_frame()
+            .expect("f32 recv failed")
+            .expect("a frame is ready")
+            .into_f32()
+            .expect("an f32 denoiser returns f32"),
+        depth,
+    ));
+    got.push(
+        wire_side
+            .recv_frame()
+            .expect("wire recv failed")
+            .expect("a frame is ready")
+            .into_wire()
+            .expect("a wire denoiser returns wire bytes"),
+    );
+
+    let frame = ramp_frame(w, h, 3);
+    f32_side.push_frame(&frame).expect("f32 push failed");
+    wire_side.push_frame(&frame).expect("wire push failed");
+
+    f32_side
+        .flush(|out| {
+            want.push(crate::frame::f32_to_plane(
+                out.as_f32().expect("f32 denoiser flushes f32"),
+                depth,
+            ))
+        })
+        .expect("f32 flush failed");
+    wire_side
+        .flush(|out| got.push(out.as_wire().expect("wire denoiser flushes wire").to_vec()))
+        .expect("wire flush failed");
+
+    assert_eq!(got.len(), 4, "four pushes at radius 1 emit four frames");
+    assert_eq!(got, want);
+}
+
 /// A wire buffer handed out while its own readback is still reading it
 /// would let one frame's bytes appear in another's.
 ///

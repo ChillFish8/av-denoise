@@ -48,12 +48,24 @@ fn rho_attenuation_changes_spatial_weighting_on_correlated_content() {
 
     let mut rho_zero = NlmDenoiser::<R>::new(&client, params.clone(), w, h);
     rho_zero.push_frame(&frame);
-    let rho_zero_out = rho_zero.denoise().unwrap().unwrap().to_vec();
+    let rho_zero_out = rho_zero
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
 
     let mut rho_high = NlmDenoiser::<R>::new(&client, params, w, h);
     rho_high.rho_smoothed = Some(0.65);
     rho_high.push_frame(&frame);
-    let rho_high_out = rho_high.denoise().unwrap().unwrap().to_vec();
+    let rho_high_out = rho_high
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
 
     let mut max_diff = 0.0f32;
     for (i, (&a, &b)) in rho_zero_out.iter().zip(rho_high_out.iter()).enumerate() {
@@ -109,13 +121,25 @@ fn windowed_and_separable_agree_under_rho_attenuation() {
         let mut windowed = NlmDenoiser::<R>::new(&client, params.clone(), w, h);
         windowed.rho_smoothed = Some(rho);
         windowed.push_frame(&frame);
-        let windowed_out = windowed.denoise().unwrap().unwrap().to_vec();
+        let windowed_out = windowed
+            .denoise()
+            .unwrap()
+            .unwrap()
+            .as_f32()
+            .expect("f32 denoiser")
+            .to_vec();
 
         let mut separable = NlmDenoiser::<R>::new(&client, params.clone(), w, h);
         separable.use_separable = true;
         separable.rho_smoothed = Some(rho);
         separable.push_frame(&frame);
-        let separable_out = separable.denoise().unwrap().unwrap().to_vec();
+        let separable_out = separable
+            .denoise()
+            .unwrap()
+            .unwrap()
+            .as_f32()
+            .expect("f32 denoiser")
+            .to_vec();
 
         let mut max_diff_interior = 0.0f32;
         for y in margin..(h as usize - margin) {

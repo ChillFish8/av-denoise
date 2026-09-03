@@ -19,7 +19,6 @@ use crate::nlmeans::{
     Pending,
     PrefilterMode,
     TryWait,
-    f32_frame_to_wire,
     hq_default_strength,
     validate_dimensions,
 };
@@ -85,6 +84,24 @@ impl FrameOutput {
 
     /// The wire bytes, or `None` if this came from an `f32`-mode denoiser.
     pub fn into_wire(self) -> Option<Vec<u8>> {
+        match self {
+            Self::Wire(v) => Some(v),
+            Self::F32(_) => None,
+        }
+    }
+
+    /// Borrows the `f32` frame, or `None` if this came from a wire-mode
+    /// denoiser.
+    pub fn as_f32(&self) -> Option<&[f32]> {
+        match self {
+            Self::F32(v) => Some(v),
+            Self::Wire(_) => None,
+        }
+    }
+
+    /// Borrows the wire bytes, or `None` if this came from an `f32`-mode
+    /// denoiser.
+    pub fn as_wire(&self) -> Option<&[u8]> {
         match self {
             Self::Wire(v) => Some(v),
             Self::F32(_) => None,
@@ -592,7 +609,7 @@ impl<R: Runtime> Engine<R> {
         }
     }
 
-    fn flush(&mut self, sink: impl FnMut(&[f32])) -> Result<(), anyhow::Error> {
+    fn flush(&mut self, sink: impl FnMut(&FrameOutput)) -> Result<(), anyhow::Error> {
         match self {
             Self::Nlm(d) => d.flush(sink),
             Self::Nl4d(d) => d.flush(sink).map_err(anyhow::Error::from),
@@ -826,7 +843,6 @@ pub struct Denoiser {
     accelerator: Accelerator,
     width: u32,
     height: u32,
-    channels: u32,
     temporal_radius: u32,
     output_format: OutputFormat,
     frames_pushed: u32,
@@ -872,7 +888,6 @@ impl Denoiser {
         params.validate()?;
         validate_dimensions(width, height)?;
 
-        let channels = params.channels.count();
         let temporal_radius = params.temporal_radius;
         let backend = build_backend(
             accelerator,
@@ -890,7 +905,6 @@ impl Denoiser {
             accelerator,
             width,
             height,
-            channels,
             temporal_radius,
             output_format: options.output_format,
             frames_pushed: 0,
@@ -1146,38 +1160,23 @@ impl Denoiser {
 
     fn flush_inner(&mut self, mut sink: impl FnMut(FrameOutput)) -> Result<(), DenoiserError> {
         // Drain the whole pending pipeline, up to MAX_PENDING frames,
-        // before submitting the trailing-tail mirrors.
+        // before submitting the trailing-tail mirrors. This also leaves
+        // every output slot free, so the tail's own readbacks cannot be
+        // handed a slot a streaming readback is still reading.
         while let Some(frame) = self.recv_frame_inner()? {
             sink(frame);
         }
 
-        let pixels = (self.width * self.height) as usize;
-        let channels = self.channels;
-        let scratch_cap = pixels * channels as usize;
-        let format = self.output_format;
-
         // The tail frames come back through each algorithm's own
-        // blocking readback rather than a `Pending`, so wire mode
-        // quantises them on the host. There are only `2 * radius` of
-        // them at the very end of a stream.
-        let emit = |slice: &[f32], sink: &mut dyn FnMut(FrameOutput)| match format {
-            OutputFormat::F32 => {
-                let mut v = Vec::with_capacity(scratch_cap);
-                v.extend_from_slice(slice);
-                sink(FrameOutput::F32(v));
-            },
-            OutputFormat::Wire { depth } => {
-                sink(FrameOutput::Wire(f32_frame_to_wire(slice, channels, depth)));
-            },
-        };
-
+        // blocking readback, in the same format as every streaming
+        // frame, so they are quantised by the same pack kernel.
         match &mut self.backend {
             #[cfg(feature = "cuda")]
-            Backend::Cuda(d) => d.flush(|slice| emit(slice, &mut sink))?,
+            Backend::Cuda(d) => d.flush(|frame| sink(frame.clone()))?,
             #[cfg(feature = "rocm")]
-            Backend::Rocm(d) => d.flush(|slice| emit(slice, &mut sink))?,
+            Backend::Rocm(d) => d.flush(|frame| sink(frame.clone()))?,
             #[cfg(any(feature = "vulkan", feature = "metal"))]
-            Backend::Wgpu(d) => d.flush(|slice| emit(slice, &mut sink))?,
+            Backend::Wgpu(d) => d.flush(|frame| sink(frame.clone()))?,
         }
 
         // The backend has already reset its own stream indices. Reset

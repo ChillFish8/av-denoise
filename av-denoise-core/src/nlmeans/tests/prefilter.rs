@@ -64,7 +64,12 @@ fn external_reference_equals_input_matches_baseline() {
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
         d.push_frame(&frame);
-        d.denoise().unwrap().unwrap().to_vec()
+        d.denoise()
+            .unwrap()
+            .unwrap()
+            .as_f32()
+            .expect("f32 denoiser")
+            .to_vec()
     };
 
     let with_ref = {
@@ -81,7 +86,12 @@ fn external_reference_equals_input_matches_baseline() {
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
         d.push_frame_with_reference(&frame, &frame);
-        d.denoise().unwrap().unwrap().to_vec()
+        d.denoise()
+            .unwrap()
+            .unwrap()
+            .as_f32()
+            .expect("f32 denoiser")
+            .to_vec()
     };
 
     assert_eq!(baseline.len(), with_ref.len());
@@ -155,7 +165,12 @@ fn external_reference_separable_matches_baseline() {
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
         d.push_frame(&frame);
-        d.denoise().unwrap().unwrap().to_vec()
+        d.denoise()
+            .unwrap()
+            .unwrap()
+            .as_f32()
+            .expect("f32 denoiser")
+            .to_vec()
     };
 
     let with_ref = {
@@ -172,7 +187,12 @@ fn external_reference_separable_matches_baseline() {
         };
         let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
         d.push_frame_with_reference(&frame, &frame);
-        d.denoise().unwrap().unwrap().to_vec()
+        d.denoise()
+            .unwrap()
+            .unwrap()
+            .as_f32()
+            .expect("f32 denoiser")
+            .to_vec()
     };
 
     for (i, (a, b)) in baseline.iter().zip(with_ref.iter()).enumerate() {
@@ -207,7 +227,12 @@ fn external_reference_temporal_matches_baseline() {
         for f in &frames {
             d.push_frame(f);
         }
-        d.denoise().unwrap().unwrap().to_vec()
+        d.denoise()
+            .unwrap()
+            .unwrap()
+            .as_f32()
+            .expect("f32 denoiser")
+            .to_vec()
     };
 
     let with_ref = {
@@ -226,7 +251,12 @@ fn external_reference_temporal_matches_baseline() {
         for f in &frames {
             d.push_frame_with_reference(f, f);
         }
-        d.denoise().unwrap().unwrap().to_vec()
+        d.denoise()
+            .unwrap()
+            .unwrap()
+            .as_f32()
+            .expect("f32 denoiser")
+            .to_vec()
     };
 
     for (i, (a, b)) in baseline.iter().zip(with_ref.iter()).enumerate() {
@@ -261,7 +291,13 @@ fn bilateral_uniform_image_passthrough() {
 
     let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
     d.push_frame(&frame);
-    let result = d.denoise().unwrap().unwrap().to_vec();
+    let result = d
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
 
     for (i, &v) in result.iter().enumerate() {
         assert!((v - 0.5).abs() < 1e-4, "pixel {i}: expected 0.5, got {v}");
@@ -295,7 +331,13 @@ fn bilateral_noisy_image_finite() {
 
     let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
     d.push_frame(&frame);
-    let result = d.denoise().unwrap().unwrap().to_vec();
+    let result = d
+        .denoise()
+        .unwrap()
+        .unwrap()
+        .as_f32()
+        .expect("f32 denoiser")
+        .to_vec();
 
     for (i, &v) in result.iter().enumerate() {
         assert!(v.is_finite(), "pixel {i}: non-finite output {v}");
