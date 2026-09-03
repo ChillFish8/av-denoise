@@ -334,6 +334,55 @@ fn wire_mode_handles_a_plane_that_is_not_a_whole_number_of_words() {
     assert_eq!(got, crate::frame::f32_to_plane(&want, depth));
 }
 
+/// A wire buffer handed out while its own readback is still reading it
+/// would let one frame's bytes appear in another's.
+///
+/// Both pushes land before either drain, so two readbacks are in flight
+/// at once and the second occupies the slot the first has not released.
+/// Draining after every push would leave one readback live at a time,
+/// where a wrong slot index cannot be observed at all.
+#[cfg(feature = "vulkan")]
+#[test]
+fn reusing_the_wire_slots_keeps_every_frame_distinct() {
+    let (w, h) = (16u32, 16u32);
+    let depth = Depth::Eight;
+
+    let mut f32_side = denoiser(ChannelMode::Luma, OutputFormat::F32, w, h);
+    let mut wire_side = denoiser(ChannelMode::Luma, OutputFormat::Wire { depth }, w, h);
+
+    let mut got = Vec::new();
+    let mut want = Vec::new();
+
+    for pair in 0..3 {
+        for k in 0..2 {
+            let frame = ramp_frame(w, h, pair * 2 + k);
+            f32_side.push_frame(&frame).expect("f32 push failed");
+            wire_side.push_frame(&frame).expect("wire push failed");
+        }
+
+        while let Some(out) = f32_side.recv_frame().expect("f32 recv failed") {
+            want.push(crate::frame::f32_to_plane(
+                &out.into_f32().expect("f32 denoiser returns f32"),
+                depth,
+            ));
+        }
+
+        while let Some(out) = wire_side.recv_frame().expect("wire recv failed") {
+            got.push(out.into_wire().expect("wire denoiser returns wire bytes"));
+        }
+    }
+
+    assert_eq!(got.len(), 5, "six pushes at radius 1 emit five frames");
+    assert_eq!(got, want);
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+fn an_f32_denoiser_allocates_no_wire_buffers() {
+    let d = denoiser(ChannelMode::Luma, OutputFormat::F32, 16, 16);
+    assert!(d.wire_outputs_for_test().is_none());
+}
+
 #[cfg(feature = "vulkan")]
 #[test]
 fn try_recv_frame_in_wire_mode_returns_none_when_nothing_is_in_flight() {

@@ -143,6 +143,12 @@ pub struct NlmDenoiser<R: Runtime> {
     pub(super) outputs: [Handle; 2],
     /// Which output slot the next submit writes into.
     pub(super) next_output_slot: usize,
+    /// The format every readback this denoiser starts comes back in.
+    pub(super) output_format: OutputFormat,
+    /// Packed-word destinations, one per entry of `outputs`, allocated
+    /// only in wire mode. They rotate on the same slot counter, so each
+    /// is free again exactly when the `f32` slot it is packed from is.
+    pub(super) wire_outputs: Option<[Handle; 2]>,
     /// CPU scratch the blocking `denoise()` path reuses through
     /// `Pending::wait_into`, so it does not allocate per frame.
     pub(super) output_scratch: Vec<f32>,
@@ -356,6 +362,26 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// reports them as a `Result`, so most callers should use that
     /// instead.
     pub fn new(client: &ComputeClient<R>, params: NlmParams, width: u32, height: u32) -> Self {
+        Self::with_output_format(client, params, width, height, OutputFormat::F32)
+    }
+
+    /// Builds a new denoiser whose readbacks come back in
+    /// `output_format`.
+    ///
+    /// [`OutputFormat::Wire`] gives the denoiser a packed-word buffer
+    /// per output slot, so a readback quantises on the GPU and only the
+    /// wire bytes cross the bus.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the same conditions as [`Self::new`].
+    pub fn with_output_format(
+        client: &ComputeClient<R>,
+        params: NlmParams,
+        width: u32,
+        height: u32,
+        output_format: OutputFormat,
+    ) -> Self {
         params
             .validate()
             .expect("invalid NlmParams, call params.validate() first to get this as a Result");
@@ -391,6 +417,17 @@ impl<R: Runtime> NlmDenoiser<R> {
         let tmp_hsum = client.empty(scalar_bytes);
         let tmp_hsum_bwd = client.empty(scalar_bytes);
         let outputs = [client.empty(frame_bytes), client.empty(frame_bytes)];
+        let wire_outputs = match output_format {
+            OutputFormat::F32 => None,
+            OutputFormat::Wire { depth } => {
+                let samples = pixels as u32 * params.channels.count();
+                let words = samples.div_ceil(depth.wire_pack().samples_per_word()) as usize;
+                Some([
+                    client.empty(words * size_of::<u32>()),
+                    client.empty(words * size_of::<u32>()),
+                ])
+            },
+        };
 
         let h2_inv_norm = params.h2_inv_norm();
         let input_noise_offset = params.noise_offset();
@@ -583,6 +620,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             tmp_hsum_bwd,
             outputs,
             next_output_slot: 0,
+            output_format,
+            wire_outputs,
             output_scratch: Vec::with_capacity(output_scratch_cap),
             h2_inv_norm,
             noise_offset,
@@ -1517,16 +1556,13 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// [`crate::Denoiser`] holds callers to that limit through its
     /// `MAX_PENDING` constant.
     ///
+    /// The frame comes back in the [`OutputFormat`] this denoiser was
+    /// built with. [`OutputFormat::Wire`] quantises and packs the frame
+    /// on the GPU before the readback, so only the wire bytes cross the
+    /// bus.
+    ///
     /// Returns `Ok(None)` while the temporal window is still filling.
     pub fn denoise_submit(&mut self) -> Result<Option<Pending<R>>, anyhow::Error> {
-        self.denoise_submit_as(OutputFormat::F32)
-    }
-
-    /// [`Self::denoise_submit`] in a chosen output format.
-    ///
-    /// [`OutputFormat::Wire`] quantises and packs the frame on the GPU
-    /// before the readback, so only the wire bytes cross the bus.
-    pub fn denoise_submit_as(&mut self, format: OutputFormat) -> Result<Option<Pending<R>>, anyhow::Error> {
         let Some(output) = self.denoise_submit_gpu()? else {
             return Ok(None);
         };
@@ -1537,11 +1573,18 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(Some(start_readback(
             &self.client,
             output.handle,
+            self.wire_outputs.as_ref().map(|w| &w[output.slot]),
             self.params.channels.count(),
             self.params.channels.storage_count(),
             pixels,
-            format,
+            self.output_format,
         )))
+    }
+
+    /// The packed-word destinations, which are `Some` only in wire mode.
+    #[cfg(test)]
+    pub(crate) fn wire_outputs_for_test(&self) -> Option<&[Handle; 2]> {
+        self.wire_outputs.as_ref()
     }
 
     /// The smoothed per-channel sigma estimate NLMeans is currently
@@ -1758,13 +1801,17 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// On success the returned slice borrows a reusable internal buffer.
     /// Copy it out if the data has to survive another call into the
     /// denoiser.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a denoiser built with [`OutputFormat::Wire`], whose
+    /// readbacks carry packed bytes rather than `f32` samples.
     pub fn denoise(&mut self) -> Result<Option<&[f32]>, anyhow::Error> {
         let Some(pending) = self.denoise_submit()? else {
             return Ok(None);
         };
-        // `denoise_submit` always asks for `f32`, so `wait_into` refills
-        // the very buffer handed to it and the scratch keeps its
-        // allocation.
+        // In `f32` mode `wait_into` refills the very buffer handed to
+        // it, so the scratch keeps its allocation.
         let mut out = FrameOutput::F32(std::mem::take(&mut self.output_scratch));
         pending.wait_into(&mut out)?;
         self.output_scratch = out.into_f32().expect("submitted as f32");

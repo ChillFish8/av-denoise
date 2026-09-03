@@ -573,14 +573,22 @@ impl<R: Runtime> Engine<R> {
         }
     }
 
-    fn denoise_submit(&mut self, format: OutputFormat) -> Result<Option<Pending<R>>, anyhow::Error> {
+    fn denoise_submit(&mut self) -> Result<Option<Pending<R>>, anyhow::Error> {
         match self {
-            Self::Nlm(d) => d.denoise_submit_as(format),
-            // `Nl4dDenoiser::denoise_submit_as` already returns
+            Self::Nlm(d) => d.denoise_submit(),
+            // `Nl4dDenoiser::denoise_submit` already returns
             // `DenoiserError` rather than `anyhow::Error`, so this leans
             // on `DenoiserError`'s own `anyhow::Error` conversion instead
             // of re-wrapping it.
-            Self::Nl4d(d) => d.denoise_submit_as(format).map_err(anyhow::Error::from),
+            Self::Nl4d(d) => d.denoise_submit().map_err(anyhow::Error::from),
+        }
+    }
+
+    #[cfg(test)]
+    fn wire_outputs(&self) -> Option<&[cubecl::server::Handle; 2]> {
+        match self {
+            Self::Nlm(d) => d.wire_outputs_for_test(),
+            Self::Nl4d(d) => d.wire_outputs_for_test(),
         }
     }
 
@@ -614,6 +622,7 @@ fn build_engine<R: Runtime>(
     params: NlmParams,
     width: u32,
     height: u32,
+    output_format: OutputFormat,
 ) -> Result<Engine<R>, DenoiserError> {
     match algorithm {
         Algorithm::Nl4d(opts) => {
@@ -638,13 +647,14 @@ fn build_engine<R: Runtime>(
                 mismatch_scale: opts.mismatch_scale,
                 confidence_variance: opts.confidence_variance,
             };
-            let denoiser = Nl4dDenoiser::new(client, nl4d_params, width, height)
-                .map_err(|e| DenoiserError::Other(anyhow::anyhow!(e)))?;
+            let denoiser =
+                Nl4dDenoiser::with_output_format(client, nl4d_params, width, height, output_format)
+                    .map_err(|e| DenoiserError::Other(anyhow::anyhow!(e)))?;
             Ok(Engine::Nl4d(Box::new(denoiser)))
         },
-        Algorithm::Nlmeans(_) | Algorithm::NlmeansHq(_) => Ok(Engine::Nlm(Box::new(NlmDenoiser::new(
-            client, params, width, height,
-        )))),
+        Algorithm::Nlmeans(_) | Algorithm::NlmeansHq(_) => Ok(Engine::Nlm(Box::new(
+            NlmDenoiser::with_output_format(client, params, width, height, output_format),
+        ))),
     }
 }
 
@@ -666,6 +676,18 @@ impl Backend {
             Self::Rocm(e) => e.is_nl4d(),
             #[cfg(any(feature = "vulkan", feature = "metal"))]
             Self::Wgpu(e) => e.is_nl4d(),
+        }
+    }
+
+    #[cfg(test)]
+    fn wire_outputs(&self) -> Option<&[cubecl::server::Handle; 2]> {
+        match self {
+            #[cfg(feature = "cuda")]
+            Self::Cuda(e) => e.wire_outputs(),
+            #[cfg(feature = "rocm")]
+            Self::Rocm(e) => e.wire_outputs(),
+            #[cfg(any(feature = "vulkan", feature = "metal"))]
+            Self::Wgpu(e) => e.wire_outputs(),
         }
     }
 }
@@ -852,7 +874,15 @@ impl Denoiser {
 
         let channels = params.channels.count();
         let temporal_radius = params.temporal_radius;
-        let backend = build_backend(accelerator, device, &options.algorithm, params, width, height)?;
+        let backend = build_backend(
+            accelerator,
+            device,
+            &options.algorithm,
+            params,
+            width,
+            height,
+            options.output_format,
+        )?;
 
         Ok(Self {
             backend,
@@ -961,26 +991,25 @@ impl Denoiser {
             return Err(DenoiserError::QueueFull);
         }
 
-        let format = self.output_format;
         match &mut self.backend {
             #[cfg(feature = "cuda")]
             Backend::Cuda(d) => {
                 d.push_frame(frame);
-                if let Some(p) = d.denoise_submit(format)? {
+                if let Some(p) = d.denoise_submit()? {
                     self.pending.push_back(BackendPending::Cuda(p));
                 }
             },
             #[cfg(feature = "rocm")]
             Backend::Rocm(d) => {
                 d.push_frame(frame);
-                if let Some(p) = d.denoise_submit(format)? {
+                if let Some(p) = d.denoise_submit()? {
                     self.pending.push_back(BackendPending::Rocm(p));
                 }
             },
             #[cfg(any(feature = "vulkan", feature = "metal"))]
             Backend::Wgpu(d) => {
                 d.push_frame(frame);
-                if let Some(p) = d.denoise_submit(format)? {
+                if let Some(p) = d.denoise_submit()? {
                     self.pending.push_back(BackendPending::Wgpu(p));
                 }
             },
@@ -1166,6 +1195,13 @@ impl Denoiser {
     pub(crate) fn poison_for_test(&mut self) {
         self.poisoned = true;
     }
+
+    /// The backend's packed-word output buffers, which only exist in
+    /// wire mode.
+    #[cfg(test)]
+    pub(crate) fn wire_outputs_for_test(&self) -> Option<&[cubecl::server::Handle; 2]> {
+        self.backend.wire_outputs()
+    }
 }
 
 fn build_backend(
@@ -1175,6 +1211,7 @@ fn build_backend(
     params: NlmParams,
     width: u32,
     height: u32,
+    output_format: OutputFormat,
 ) -> Result<Backend, DenoiserError> {
     match accel {
         #[cfg(feature = "cuda")]
@@ -1182,7 +1219,12 @@ fn build_backend(
             let dev = device.to_cuda()?;
             let client = <cubecl::cuda::CudaRuntime as Runtime>::client(&dev);
             Ok(Backend::Cuda(build_engine(
-                &client, algorithm, params, width, height,
+                &client,
+                algorithm,
+                params,
+                width,
+                height,
+                output_format,
             )?))
         },
         #[cfg(feature = "rocm")]
@@ -1190,7 +1232,12 @@ fn build_backend(
             let dev = device.to_amd()?;
             let client = <cubecl::hip::HipRuntime as Runtime>::client(&dev);
             Ok(Backend::Rocm(build_engine(
-                &client, algorithm, params, width, height,
+                &client,
+                algorithm,
+                params,
+                width,
+                height,
+                output_format,
             )?))
         },
         #[cfg(feature = "vulkan")]
@@ -1198,7 +1245,12 @@ fn build_backend(
             let dev = device.to_wgpu()?;
             let client = <cubecl::wgpu::WgpuRuntime as Runtime>::client(&dev);
             Ok(Backend::Wgpu(build_engine(
-                &client, algorithm, params, width, height,
+                &client,
+                algorithm,
+                params,
+                width,
+                height,
+                output_format,
             )?))
         },
         #[cfg(feature = "metal")]
@@ -1206,7 +1258,12 @@ fn build_backend(
             let dev = device.to_wgpu()?;
             let client = <cubecl::wgpu::WgpuRuntime as Runtime>::client(&dev);
             Ok(Backend::Wgpu(build_engine(
-                &client, algorithm, params, width, height,
+                &client,
+                algorithm,
+                params,
+                width,
+                height,
+                output_format,
             )?))
         },
         // Keeps the match exhaustive on docs.rs, where `cfg(docsrs)`

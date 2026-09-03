@@ -179,9 +179,10 @@ pub enum TryWait<R: Runtime> {
 /// Starts the readback of a denoised frame sitting in `handle`, in
 /// whichever format the caller asked for.
 ///
-/// In `Wire` mode this first queues [`gpu_pack_wire`] against a fresh
-/// word buffer and reads that back instead, so the quantised bytes cross
-/// the bus rather than four times as many `f32`s.
+/// In `Wire` mode this first queues [`gpu_pack_wire`] against
+/// `wire_dst` and reads that back instead, so the quantised bytes cross
+/// the bus rather than four times as many `f32`s. `wire_dst` is the
+/// caller's own word buffer for the slot `handle` came from.
 ///
 /// No sync sits between the pack launch and the read. `read_async`
 /// submits its copy descriptors on the same stream as the launches ahead
@@ -193,14 +194,21 @@ pub enum TryWait<R: Runtime> {
 pub(crate) fn start_readback<R: Runtime>(
     client: &ComputeClient<R>,
     handle: Handle,
+    wire_dst: Option<&Handle>,
     channels: u32,
     stored_ch: u32,
     pixels: usize,
     format: OutputFormat,
 ) -> Pending<R> {
-    let handle = match format {
-        OutputFormat::F32 => handle,
-        OutputFormat::Wire { depth } => pack_wire(client, &handle, channels, stored_ch, pixels, depth),
+    let handle = match (format, wire_dst) {
+        (OutputFormat::F32, _) => handle,
+        (OutputFormat::Wire { depth }, Some(dst)) => {
+            pack_wire(client, &handle, dst, channels, stored_ch, pixels, depth);
+            dst.clone()
+        },
+        (OutputFormat::Wire { .. }, None) => {
+            unreachable!("a wire-mode denoiser allocates its wire buffers at construction")
+        },
     };
 
     // The future is wrapped in an `async move` that owns a cloned
@@ -214,16 +222,16 @@ pub(crate) fn start_readback<R: Runtime>(
     Pending::new(fut, channels, stored_ch, pixels, format)
 }
 
-/// Queues [`gpu_pack_wire`] over `src` and returns the word buffer it
-/// writes.
+/// Queues [`gpu_pack_wire`] over `src`, writing the packed words into `dst`.
 fn pack_wire<R: Runtime>(
     client: &ComputeClient<R>,
     src: &Handle,
+    dst: &Handle,
     channels: u32,
     stored_ch: u32,
     pixels: usize,
     depth: Depth,
-) -> Handle {
+) {
     let pack = depth.wire_pack();
     let samples = pixels as u32 * channels;
     let words = samples.div_ceil(pack.samples_per_word());
@@ -233,8 +241,6 @@ fn pack_wire<R: Runtime>(
 
     let grid = words.div_ceil(BLOCK_1D).clamp(1, MAX_GRID_1D);
     let total_threads = grid * BLOCK_1D;
-
-    let dst = client.empty(words as usize * size_of::<u32>());
 
     unsafe {
         gpu_pack_wire::launch_unchecked::<R>(
@@ -254,8 +260,6 @@ fn pack_wire<R: Runtime>(
             total_threads,
         );
     }
-
-    dst
 }
 
 /// Whether a frame with this many channels goes out as one contiguous

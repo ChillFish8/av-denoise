@@ -980,12 +980,18 @@ mod tests {
 
         let consumer = thread::spawn(move || {
             let first = job_rx.recv().expect("scene 0 is offered");
-            let offered_while_backlogged = job_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+
+            // Held rather than discarded. Dropping a job closes its frame
+            // channel, and the stager is still filling scene 1's.
+            let second = job_rx.recv_timeout(Duration::from_secs(5)).ok();
+            let offered_while_backlogged = second.is_some();
 
             // Drain everything either way, so a failing run finishes and
-            // reports instead of hanging.
+            // reports instead of hanging. The second job outlives this, so
+            // staging never sees its channel close early.
             for _ in first.frames.iter() {}
             while job_rx.recv().is_ok() {}
+            drop(second);
 
             offered_while_backlogged
         });
