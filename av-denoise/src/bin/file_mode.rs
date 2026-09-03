@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{IsTerminal, stdout};
 use std::path::Path;
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
 use std::time::Duration;
 
 use av_decoders::{Decoder, Rational32};
 use av_denoise::{
+    DenoisingMode,
     Depth,
     FrameLayout,
     PlanarDenoiser,
@@ -26,70 +26,34 @@ use crate::progress::{self, denoise_bar_visible, denoise_progress_bar, scene_pro
 use crate::warm_start::{create_denoiser, finish_warm_up};
 use crate::y4m_format::subsampling_to_y4m;
 
-/// Target ceiling for CPU-side frame buffers held in flight. Channel
-/// depths shrink to stay under this when frames are large.
+/// Target ceiling for CPU-side frame buffers held in flight. The permit
+/// count is how many frames that affords.
 const FRAME_MEMORY_BUDGET_BYTES: usize = 1 << 30;
 
-/// Channel depths used when frames are small enough to afford them.
-const FRAME_CHANNEL_DEPTH_MAX: usize = 8;
-const OUTPUT_CHANNEL_DEPTH_MAX: usize = 32;
+/// Frames in flight this run allows.
+fn frame_permits(budget_bytes: usize, frame_bytes: usize, workers: usize, radius: u32) -> usize {
+    // A worker emits nothing until `push` first returns QueueFull, which
+    // takes `radius + MAX_PENDING + 1` pushes. Fewer permits than that
+    // and its scene can never return one, so the dispatcher waits on a
+    // permit the worker cannot release.
+    let floor = workers * (radius as usize + av_denoise::MAX_PENDING + 2);
 
-/// Floors that keep the pipeline from starving no matter the frame size.
-const FRAME_CHANNEL_DEPTH_MIN: usize = 2;
-const OUTPUT_CHANNEL_DEPTH_MIN: usize = 4;
-
-/// Channel depths for one run, with the frame counts they imply.
-#[derive(Debug, Clone, Copy)]
-struct ChannelBudget {
-    frame_depth: usize,
-    output_depth: usize,
-    /// Frames held in the channels. This is what the budget scales, and
-    /// it stays under [`FRAME_MEMORY_BUDGET_BYTES`] whenever the depth
-    /// floors allow it.
-    ceiling_frames: usize,
-    /// Frames alive anywhere, including the ones each worker holds
-    /// inside its GPU pipeline. Larger than `ceiling_frames`, and the
-    /// figure the reorder high-water mark is judged against.
-    peak_frames: usize,
+    (budget_bytes / frame_bytes.max(1)).max(floor)
 }
 
-/// Picks channel depths so the frames held in flight stay near
-/// [`FRAME_MEMORY_BUDGET_BYTES`].
+/// Builds a counting semaphore holding `count` permits.
 ///
-/// Small frames keep the maximum depths. Large frames scale both depths
-/// down together, never below their floors.
-fn channel_budget(layout: FrameLayout, workers: usize) -> ChannelBudget {
-    let frame_bytes = layout.luma_bytes() + 2 * layout.chroma_bytes();
-    let max_frames = workers * FRAME_CHANNEL_DEPTH_MAX + OUTPUT_CHANNEL_DEPTH_MAX;
+/// Returns the giving end and the taking end. The coordinator holds the
+/// giving end, so if it dies the dispatcher's next take fails instead of
+/// blocking forever.
+fn frame_permit_channel(count: usize) -> (crossbeam_channel::Sender<()>, crossbeam_channel::Receiver<()>) {
+    let (give, take) = crossbeam_channel::bounded::<()>(count);
 
-    let affordable = FRAME_MEMORY_BUDGET_BYTES / frame_bytes.max(1);
-
-    let (frame_depth, output_depth) = if max_frames <= affordable {
-        (FRAME_CHANNEL_DEPTH_MAX, OUTPUT_CHANNEL_DEPTH_MAX)
-    } else {
-        let scale = affordable as f64 / max_frames as f64;
-        let frame_depth =
-            ((FRAME_CHANNEL_DEPTH_MAX as f64 * scale).floor() as usize).max(FRAME_CHANNEL_DEPTH_MIN);
-        let output_depth =
-            ((OUTPUT_CHANNEL_DEPTH_MAX as f64 * scale).floor() as usize).max(OUTPUT_CHANNEL_DEPTH_MIN);
-        (frame_depth, output_depth)
-    };
-
-    // Each worker also holds frames the channels never see, being the
-    // readbacks in flight inside its denoiser plus the one it is
-    // pushing.
-    //
-    // Those count toward real memory, and toward how far the reorder
-    // map can legitimately run ahead, so they belong in the peak even
-    // though the budget only scales channel capacity.
-    let per_worker_pipeline = av_denoise::MAX_PENDING + 1;
-
-    ChannelBudget {
-        frame_depth,
-        output_depth,
-        ceiling_frames: workers * frame_depth + output_depth,
-        peak_frames: workers * (frame_depth + per_worker_pipeline) + output_depth,
+    for _ in 0..count {
+        give.send(()).expect("the channel holds exactly `count` permits");
     }
+
+    (give, take)
 }
 
 /// Scene boundaries plus the video metadata needed to build the output
@@ -247,29 +211,33 @@ fn encode_scenes(
     workers: usize,
     visible: bool,
 ) -> Result<(), anyhow::Error> {
-    let budget = channel_budget(scenes.layout, workers);
+    let radius = match opts.mode {
+        DenoisingMode::Temporal { radius } => radius,
+        DenoisingMode::Spacial => 0,
+    };
+
     let frame_bytes = scenes.layout.luma_bytes() + 2 * scenes.layout.chroma_bytes();
+    let permits = frame_permits(FRAME_MEMORY_BUDGET_BYTES, frame_bytes, workers, radius);
+    let (give, take) = frame_permit_channel(permits);
 
     tracing::info!(
-        frame_depth = budget.frame_depth,
-        output_depth = budget.output_depth,
-        ceiling_frames = budget.ceiling_frames,
-        peak_frames = budget.peak_frames,
-        peak_mib = (budget.peak_frames * frame_bytes) / (1 << 20),
+        permits,
+        frame_bytes,
+        ceiling_mib = (permits * frame_bytes) / (1 << 20),
         "frame buffer budget",
     );
 
-    let (job_tx, worker_handles, out_rx) = spawn_workers(opts, scenes.layout, workers, budget.output_depth);
+    let (job_tx, worker_handles, out_rx) = spawn_workers(opts, scenes.layout, workers);
     let coordinator = spawn_coordinator(
         scenes.layout,
         scenes.framerate,
         out_rx,
         scenes.total_frames,
         visible,
-        budget.peak_frames,
+        give,
     );
 
-    dispatch_frames(input, scenes, &job_tx, budget.frame_depth)?;
+    dispatch_frames(input, scenes, &job_tx, &take)?;
 
     // Closing the queue is what tells the workers there are no more scenes.
     drop(job_tx);
@@ -299,14 +267,13 @@ fn spawn_workers(
     opts: &PlaneOptions,
     layout: FrameLayout,
     workers: usize,
-    output_depth: usize,
 ) -> (
     crossbeam_channel::Sender<SceneJob>,
     Vec<WorkerJoin>,
-    Receiver<OutputMsg>,
+    crossbeam_channel::Receiver<OutputMsg>,
 ) {
     let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
-    let (out_tx, out_rx) = sync_channel::<OutputMsg>(output_depth);
+    let (out_tx, out_rx) = crossbeam_channel::unbounded::<OutputMsg>();
     let mut worker_handles: Vec<WorkerJoin> = Vec::with_capacity(workers);
 
     for worker_id in 0..workers {
@@ -329,12 +296,12 @@ fn spawn_workers(
 fn spawn_coordinator(
     layout: FrameLayout,
     framerate: Rational32,
-    rx: Receiver<OutputMsg>,
+    rx: crossbeam_channel::Receiver<OutputMsg>,
     total_frames: usize,
     visible: bool,
-    peak_frames: usize,
+    permits: crossbeam_channel::Sender<()>,
 ) -> thread::JoinHandle<Result<(), anyhow::Error>> {
-    thread::spawn(move || run_coordinator(layout, framerate, rx, total_frames, visible, peak_frames))
+    thread::spawn(move || run_coordinator(layout, framerate, rx, total_frames, visible, permits))
 }
 
 /// Reads every frame in order and offers each scene to the worker pool.
@@ -342,11 +309,17 @@ fn spawn_coordinator(
 /// A scene's frames go into a channel of their own. Dropping that
 /// channel's sender is what tells the claiming worker the scene has
 /// ended.
+///
+/// Each staged frame holds a permit from here until the coordinator has
+/// written it, which is the only bound on frames in flight. The permit
+/// is taken just before the send rather than before the decode, so a
+/// phantom frame never takes one and at most one decoded frame is
+/// transient outside the budget.
 fn stage_frames<I>(
     frames: I,
     scenes: &SceneLayout,
     jobs: &crossbeam_channel::Sender<SceneJob>,
-    frame_depth: usize,
+    permits: &crossbeam_channel::Receiver<()>,
 ) -> Result<(), anyhow::Error>
 where
     I: Iterator<Item = Result<Planes, anyhow::Error>>,
@@ -375,7 +348,7 @@ where
         }
 
         if !matches!(&current, Some((idx, _)) if *idx == scene_idx) {
-            let (tx, rx) = crossbeam_channel::bounded::<StagedFrame>(frame_depth);
+            let (tx, rx) = crossbeam_channel::unbounded::<StagedFrame>();
 
             // Dropping the previous scene's sender ends that scene, which
             // frees the worker holding it to claim this one. The queue is a
@@ -391,6 +364,13 @@ where
 
             current = Some((scene_idx, tx));
         }
+
+        // Taken here rather than before the decode, so a phantom frame
+        // never takes one. At most one decoded frame is transient outside
+        // the budget.
+        permits
+            .recv()
+            .map_err(|_| anyhow::anyhow!("the coordinator stopped before the stream finished"))?;
 
         let (_, tx) = current
             .as_ref()
@@ -413,7 +393,7 @@ fn dispatch_frames(
     input: &Path,
     scenes: &SceneLayout,
     jobs: &crossbeam_channel::Sender<SceneJob>,
-    frame_depth: usize,
+    permits: &crossbeam_channel::Receiver<()>,
 ) -> Result<(), anyhow::Error> {
     let mut decoder = Decoder::from_file(input)?;
     let layout = scenes.layout;
@@ -431,7 +411,7 @@ fn dispatch_frames(
         }
     });
 
-    stage_frames(frames, scenes, jobs, frame_depth)
+    stage_frames(frames, scenes, jobs, permits)
 }
 
 /// One decoded frame, staged for the worker that claims its scene.
@@ -459,7 +439,7 @@ fn run_worker(
     opts: PlaneOptions,
     layout: FrameLayout,
     jobs: crossbeam_channel::Receiver<SceneJob>,
-    tx: SyncSender<OutputMsg>,
+    tx: crossbeam_channel::Sender<OutputMsg>,
 ) -> Result<(), anyhow::Error> {
     let mut wd: Option<PlanarDenoiser> = None;
     // The cold-cache queue place this worker's denoiser holds, until its
@@ -514,7 +494,7 @@ fn push_with_drain(
     pending: &mut std::collections::VecDeque<u64>,
     global_idx: u64,
     planes: &Planes,
-    tx: &SyncSender<OutputMsg>,
+    tx: &crossbeam_channel::Sender<OutputMsg>,
 ) -> Result<(), anyhow::Error> {
     pending.push_back(global_idx);
 
@@ -533,7 +513,11 @@ fn push_with_drain(
     Ok(())
 }
 
-fn send_output(tx: &SyncSender<OutputMsg>, global_idx: u64, planes: Planes) -> Result<(), anyhow::Error> {
+fn send_output(
+    tx: &crossbeam_channel::Sender<OutputMsg>,
+    global_idx: u64,
+    planes: Planes,
+) -> Result<(), anyhow::Error> {
     tx.send(OutputMsg { global_idx, planes })
         .map_err(|_| anyhow::anyhow!("coordinator disconnected"))
 }
@@ -542,7 +526,7 @@ fn flush_worker(
     wd: &mut PlanarDenoiser,
     warm_up: &mut Option<WarmUp>,
     pending: &mut std::collections::VecDeque<u64>,
-    tx: &SyncSender<OutputMsg>,
+    tx: &crossbeam_channel::Sender<OutputMsg>,
 ) -> Result<(), anyhow::Error> {
     let mut disconnected = false;
 
@@ -577,10 +561,10 @@ fn flush_worker(
 fn run_coordinator(
     layout: FrameLayout,
     framerate: Rational32,
-    rx: Receiver<OutputMsg>,
+    rx: crossbeam_channel::Receiver<OutputMsg>,
     total_frames: usize,
     visible: bool,
-    peak_frames: usize,
+    permits: crossbeam_channel::Sender<()>,
 ) -> Result<(), anyhow::Error> {
     let stdout = stdout();
     let lock = stdout.lock();
@@ -607,7 +591,7 @@ fn run_coordinator(
     // away and keeps its elapsed time moving until then.
     pb.enable_steady_tick(Duration::from_millis(250));
 
-    let result = emit_frames(&mut encoder, &rx, total_frames as u64, &pb, peak_frames);
+    let result = emit_frames(&mut encoder, &rx, total_frames as u64, &pb, &permits);
 
     progress::finish(&pb);
 
@@ -622,16 +606,13 @@ fn run_coordinator(
 /// many were written and how many were expected.
 fn emit_frames<W: std::io::Write>(
     encoder: &mut y4m::Encoder<W>,
-    rx: &Receiver<OutputMsg>,
+    rx: &crossbeam_channel::Receiver<OutputMsg>,
     total: u64,
     pb: &ProgressBar,
-    peak_frames: usize,
+    permits: &crossbeam_channel::Sender<()>,
 ) -> Result<(), anyhow::Error> {
     let mut pending: BTreeMap<u64, Planes> = BTreeMap::new();
     let mut next_emit: u64 = 0;
-
-    let mut high_water = 0usize;
-    let mut warned = false;
 
     while next_emit < total {
         let msg = match rx.recv() {
@@ -641,29 +622,21 @@ fn emit_frames<W: std::io::Write>(
 
         pending.insert(msg.global_idx, msg.planes);
 
-        if pending.len() > high_water {
-            high_water = pending.len();
-
-            if high_water > peak_frames && !warned {
-                warned = true;
-                tracing::warn!(
-                    high_water,
-                    peak_frames,
-                    "reorder buffer exceeded its predicted peak, frame memory may run high"
-                );
-            }
-        }
-
         while let Some(planes) = pending.remove(&next_emit) {
             let frame = Y4mFrame::new([&planes.y, &planes.u, &planes.v], None);
             encoder.write_frame(&frame)?;
             next_emit += 1;
+
+            // Returning the permit is what lets the decoder run further
+            // ahead. The send never blocks, because permits held plus
+            // permits waiting is always the channel's capacity. The
+            // result is discarded because it fails once the dispatcher
+            // has already errored out and dropped its receiver.
+            let _ = permits.send(());
         }
 
         pb.set_position(next_emit);
     }
-
-    tracing::debug!(high_water, peak_frames, "reorder buffer high-water mark");
 
     if next_emit != total {
         anyhow::bail!(
@@ -778,15 +751,14 @@ fn subsampling_from_av_decoders(
 #[cfg(test)]
 mod tests {
     // `temporal_opts` and the one test that uses it are the only things
-    // naming `Accelerator::Vulkan`, `Algorithm`, `DenoisingMode`,
-    // `Device`, `MotionCompensationMode`, and `ChannelIntent`.
-    // Their imports are gated the same way to keep cpu-only builds free
-    // of unused-import warnings.
+    // naming `Accelerator::Vulkan`, `Algorithm`, `Device`, and
+    // `ChannelIntent`. Their imports are gated the same way to keep
+    // cpu-only builds free of unused-import warnings.
     #[cfg(feature = "vulkan")]
     use av_denoise::accelerate::Accelerator;
     use av_denoise::frame::fill_plane;
     #[cfg(feature = "vulkan")]
-    use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Device};
+    use av_denoise::{Algorithm, ChannelIntent, Device};
     use indicatif::ProgressBar;
 
     use super::*;
@@ -828,8 +800,8 @@ mod tests {
     /// Drains every job the stager offers, returning each scene index with
     /// the frame indices that scene carried.
     ///
-    /// Runs on its own thread because the per-scene channel is bounded, so a
-    /// stager with more frames than depth blocks until someone reads.
+    /// Runs on its own thread because the scene queue is a rendezvous, so the
+    /// stager blocks until someone claims each job.
     fn collect_jobs(rx: crossbeam_channel::Receiver<SceneJob>) -> thread::JoinHandle<Vec<(u32, Vec<u64>)>> {
         thread::spawn(move || {
             let mut out = Vec::new();
@@ -850,10 +822,11 @@ mod tests {
         let planes = tiny_planes(scenes.layout);
         let frames = (0..6).map(move |_| Ok(planes.clone()));
 
+        let (_give, take) = frame_permit_channel(8);
         let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
         let collector = collect_jobs(job_rx);
 
-        stage_frames(frames, &scenes, &job_tx, 2).expect("staging should succeed");
+        stage_frames(frames, &scenes, &job_tx, &take).expect("staging should succeed");
         drop(job_tx);
 
         let jobs = collector.join().expect("collector panicked");
@@ -867,10 +840,11 @@ mod tests {
         let planes = tiny_planes(scenes.layout);
         let frames = (0..6).map(move |_| Ok(planes.clone()));
 
+        let (_give, take) = frame_permit_channel(8);
         let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
         let collector = collect_jobs(job_rx);
 
-        stage_frames(frames, &scenes, &job_tx, 4).expect("staging should succeed");
+        stage_frames(frames, &scenes, &job_tx, &take).expect("staging should succeed");
         drop(job_tx);
 
         let jobs = collector.join().expect("collector panicked");
@@ -884,10 +858,11 @@ mod tests {
         let planes = tiny_planes(scenes.layout);
         let frames = (0..2).map(move |_| Ok(planes.clone()));
 
+        let (_give, take) = frame_permit_channel(8);
         let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
         let claimed = thread::spawn(move || job_rx.recv().expect("one job is offered"));
 
-        stage_frames(frames, &scenes, &job_tx, 4).expect("staging should succeed");
+        stage_frames(frames, &scenes, &job_tx, &take).expect("staging should succeed");
         drop(job_tx);
 
         let job = claimed.join().expect("claimant panicked");
@@ -910,10 +885,11 @@ mod tests {
         let planes = tiny_planes(scenes.layout);
         let frames = (0..10).map(move |_| Ok(planes.clone()));
 
+        let (_give, take) = frame_permit_channel(16);
         let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
         let pool = thread::spawn(move || drop(job_rx.recv()));
 
-        let err = stage_frames(frames, &scenes, &job_tx, 2).expect_err("staging must not hang");
+        let err = stage_frames(frames, &scenes, &job_tx, &take).expect_err("staging must not hang");
 
         pool.join().expect("pool panicked");
 
@@ -924,9 +900,111 @@ mod tests {
     }
 
     #[test]
+    fn frame_permits_follows_the_budget_when_it_clears_the_floor() {
+        // A 1080p 8-bit 4:2:0 frame is 3,110,400 bytes, so 1 GiB affords 345.
+        assert_eq!(frame_permits(1 << 30, 3_110_400, 4, 0), 345);
+    }
+
+    #[test]
+    fn frame_permits_applies_the_floor_when_the_budget_is_too_small() {
+        let floor = 4 * (av_denoise::MAX_PENDING + 2);
+
+        // A 4K 10-bit frame is 24,883,200 bytes, so 1 MiB affords none.
+        assert_eq!(frame_permits(1 << 20, 24_883_200, 4, 0), floor);
+    }
+
+    #[test]
+    fn the_floor_covers_a_workers_first_output_at_every_radius() {
+        // A budget far too small for any real frame, so the floor decides.
+        for radius in [0u32, 1, 4, 8] {
+            let permits = frame_permits(1, 199_065_600, 1, radius);
+
+            // Pushes a worker needs before `push` first returns QueueFull,
+            // which is the first point it can emit and return a permit.
+            let first_output = radius as usize + av_denoise::MAX_PENDING + 1;
+
+            assert!(
+                permits >= first_output,
+                "radius {radius} needs {first_output} permits before a worker emits, got {permits}",
+            );
+        }
+    }
+
+    #[test]
+    fn every_permit_is_accounted_for_once_staging_finishes() {
+        let scenes = scene_layout(vec![0, 3, 6], BTreeSet::new());
+        let planes = tiny_planes(scenes.layout);
+        let frames = (0..6).map(move |_| Ok(planes.clone()));
+
+        let (give, take) = frame_permit_channel(8);
+        let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
+
+        let drained = thread::spawn(move || {
+            let mut n = 0usize;
+            while let Ok(job) = job_rx.recv() {
+                n += job.frames.iter().count();
+            }
+            n
+        });
+
+        stage_frames(frames, &scenes, &job_tx, &take).expect("staging should succeed");
+        drop(job_tx);
+
+        assert_eq!(drained.join().expect("drain panicked"), 6);
+        assert_eq!(take.len(), 2, "6 of 8 permits are out, since nothing was written");
+
+        for _ in 0..6 {
+            give.send(()).expect("returning a permit never blocks");
+        }
+
+        assert_eq!(take.len(), 8);
+    }
+
+    /// A worker that claims a scene and stops reading it must not stop
+    /// later scenes being offered to anyone else.
+    ///
+    /// Scene 0 holds ten frames that nobody drains. Only the permit budget
+    /// bounds staging, and it counts the whole pipeline rather than one
+    /// scene, so the stager runs past scene 0 and offers scene 1 to a free
+    /// worker. Bounding each scene's channel instead would block the stager
+    /// inside scene 0 and starve every idle worker behind it, which is the
+    /// stall this pins.
+    #[test]
+    fn a_backlogged_scene_does_not_stop_later_scenes_being_offered() {
+        let scenes = scene_layout(vec![0, 10, 12], BTreeSet::new());
+        let planes = tiny_planes(scenes.layout);
+        let frames = (0..12).map(move |_| Ok(planes.clone()));
+
+        let (give, take) = frame_permit_channel(64);
+        let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
+
+        let consumer = thread::spawn(move || {
+            let first = job_rx.recv().expect("scene 0 is offered");
+            let offered_while_backlogged = job_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+
+            // Drain everything either way, so a failing run finishes and
+            // reports instead of hanging.
+            for _ in first.frames.iter() {}
+            while job_rx.recv().is_ok() {}
+
+            offered_while_backlogged
+        });
+
+        stage_frames(frames, &scenes, &job_tx, &take).expect("staging should not stall");
+        drop(job_tx);
+
+        assert!(
+            consumer.join().expect("consumer panicked"),
+            "scene 1 must be offered while scene 0 is still backlogged",
+        );
+
+        drop(give);
+    }
+
+    #[test]
     fn emit_frames_errors_when_a_frame_index_is_lost() {
         let layout = tiny_layout();
-        let (tx, rx) = sync_channel::<OutputMsg>(4);
+        let (tx, rx) = crossbeam_channel::unbounded::<OutputMsg>();
         let planes = tiny_planes(layout);
 
         // Frame 1 is never sent, as if its index was lost somewhere
@@ -955,7 +1033,14 @@ mod tests {
         .expect("header write failed");
 
         let pb = ProgressBar::hidden();
-        let err = emit_frames(&mut encoder, &rx, 3, &pb, 4).expect_err("expected a lost-frame error");
+        // Two permits stand in for the two staged frames, so returning
+        // one has somewhere to go. A full permit channel would block the
+        // return, which cannot happen in a real run.
+        let (give, take) = frame_permit_channel(4);
+        take.recv().expect("a permit is available");
+        take.recv().expect("a permit is available");
+
+        let err = emit_frames(&mut encoder, &rx, 3, &pb, &give).expect_err("expected a lost-frame error");
 
         let msg = err.to_string();
         assert!(
@@ -1128,7 +1213,7 @@ mod tests {
         let mut pending: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
         pending.push_back(0);
 
-        let (tx, rx) = sync_channel::<OutputMsg>(4);
+        let (tx, rx) = crossbeam_channel::unbounded::<OutputMsg>();
         drop(rx);
 
         let mut warm_up = None;
@@ -1139,79 +1224,5 @@ mod tests {
             err.to_string().contains("disconnect"),
             "error should mention the coordinator disconnect: {err}"
         );
-    }
-}
-
-#[cfg(test)]
-mod budget_tests {
-    use super::*;
-
-    fn layout(width: u32, height: u32, depth: Depth) -> FrameLayout {
-        FrameLayout {
-            width,
-            height,
-            subsampling: Subsampling::Yuv420,
-            depth,
-        }
-    }
-
-    /// The common case must keep today's depths exactly, so 8-bit 1080p
-    /// behaviour does not change.
-    #[test]
-    fn small_frames_keep_the_maximum_depths() {
-        let b = channel_budget(layout(1920, 1080, Depth::Eight), 2);
-
-        assert_eq!(b.frame_depth, FRAME_CHANNEL_DEPTH_MAX);
-        assert_eq!(b.output_depth, OUTPUT_CHANNEL_DEPTH_MAX);
-    }
-
-    /// Pins the exact output of the scaling branch.
-    ///
-    /// Relative assertions like "large <= small" pass even if the shrink
-    /// path never runs, so this names the numbers instead.
-    ///
-    /// A 4K 10-bit 4:2:0 frame is 24,883,200 bytes, so the 1 GiB budget
-    /// affords 43 frames against a 96-frame request. That gives a scale
-    /// of 43/96.
-    #[test]
-    fn large_frames_shrink_the_depths() {
-        let small = channel_budget(layout(1920, 1080, Depth::Eight), 8);
-        let large = channel_budget(layout(3840, 2160, Depth::Ten), 8);
-
-        assert_eq!(
-            (small.frame_depth, small.output_depth),
-            (FRAME_CHANNEL_DEPTH_MAX, OUTPUT_CHANNEL_DEPTH_MAX),
-            "1080p 8-bit at 8 workers still fits the budget"
-        );
-
-        assert_eq!(large.frame_depth, 3, "floor(8 * 43/96)");
-        assert_eq!(large.output_depth, 14, "floor(32 * 43/96)");
-        assert_eq!(large.ceiling_frames, 38, "8 * 3 + 14");
-        assert_eq!(large.peak_frames, 62, "8 * (3 + 3) + 14");
-    }
-
-    #[test]
-    fn depths_never_fall_below_the_minimum() {
-        // Deliberately absurd frame size, far past any budget.
-        let b = channel_budget(layout(15360, 8640, Depth::Twelve), 16);
-
-        assert!(b.frame_depth >= FRAME_CHANNEL_DEPTH_MIN);
-        assert!(b.output_depth >= OUTPUT_CHANNEL_DEPTH_MIN);
-    }
-
-    #[test]
-    fn budget_is_respected_where_the_minimums_allow_it() {
-        let l = layout(3840, 2160, Depth::Ten);
-        let b = channel_budget(l, 8);
-        let frame_bytes = l.luma_bytes() + 2 * l.chroma_bytes();
-
-        let floor_frames = 8 * FRAME_CHANNEL_DEPTH_MIN + OUTPUT_CHANNEL_DEPTH_MIN;
-        if floor_frames * frame_bytes <= FRAME_MEMORY_BUDGET_BYTES {
-            assert!(
-                b.ceiling_frames * frame_bytes <= FRAME_MEMORY_BUDGET_BYTES,
-                "ceiling {} frames x {frame_bytes} bytes exceeds the budget",
-                b.ceiling_frames
-            );
-        }
     }
 }
