@@ -326,6 +326,11 @@ fn split_uv_wire(wire: &[u8]) -> (Vec<u8>, Vec<u8>) {
     (u.to_vec(), v.to_vec())
 }
 
+/// The push a [`PlanarDenoiser`] runs against each enabled half, either
+/// [`Denoiser::push_frame_wire`] or
+/// [`Denoiser::push_frame_wire_priming`].
+type WirePush = fn(&mut Denoiser, &[&[u8]], Depth) -> Result<(), DenoiserError>;
+
 /// Wraps the luma and chroma `Denoiser` instances needed for one
 /// subsampled YUV source.
 ///
@@ -452,11 +457,11 @@ impl PlanarDenoiser {
     ///
     /// So the two halves always enter this function with the same frame
     /// count and the same pending depth, and the `QueueFull` check
-    /// inside `push_frame` answers the same way for each. If the luma
+    /// inside `push_frame_wire` answers the same way for each. If the luma
     /// push succeeds then the chroma push succeeds too, which makes the
     /// duplicate unreachable.
     pub fn push(&mut self, planes: &Planes) -> Result<(), DenoiserError> {
-        self.push_with(planes, Denoiser::push_frame)
+        self.push_with(planes, Denoiser::push_frame_wire)
     }
 
     /// Uploads one planar frame into the temporal window without starting
@@ -467,33 +472,31 @@ impl PlanarDenoiser {
     /// This is how [`Self::reseed`] fills the window from an explicit
     /// window of frames before the one real push that starts a denoise.
     fn push_priming(&mut self, planes: &Planes) -> Result<(), DenoiserError> {
-        self.push_with(planes, Denoiser::push_frame_priming)
+        self.push_with(planes, Denoiser::push_frame_wire_priming)
     }
 
     /// Shared body of [`Self::push`] and [`Self::push_priming`].
     ///
-    /// `push_frame` is [`Denoiser::push_frame`] for a real push or
-    /// [`Denoiser::push_frame_priming`] for a priming one, run against
-    /// whichever of `yuv`, `luma`, and `chroma` is enabled.
-    fn push_with(
-        &mut self,
-        planes: &Planes,
-        push_frame: fn(&mut Denoiser, &[f32]) -> Result<(), DenoiserError>,
-    ) -> Result<(), DenoiserError> {
+    /// `push_frame` is [`Denoiser::push_frame_wire`] for a real push or
+    /// [`Denoiser::push_frame_wire_priming`] for a priming one, run
+    /// against whichever of `yuv`, `luma`, and `chroma` is enabled.
+    ///
+    /// The planes go over as wire bytes, so the normalisation and the
+    /// channel interleave both happen on the GPU.
+    fn push_with(&mut self, planes: &Planes, push_frame: WirePush) -> Result<(), DenoiserError> {
+        let depth = self.layout.depth;
+
         if let Some(d) = self.yuv.as_mut() {
-            let buf = interleave_yuv_to_f32(&planes.y, &planes.u, &planes.v, self.layout.depth);
-            push_frame(d, &buf)?;
+            push_frame(d, &[&planes.y, &planes.u, &planes.v], depth)?;
             return Ok(());
         }
 
         if let Some(d) = self.luma.as_mut() {
-            let buf = plane_to_f32(&planes.y, self.layout.depth);
-            push_frame(d, &buf)?;
+            push_frame(d, &[&planes.y], depth)?;
         }
 
         if let Some(d) = self.chroma.as_mut() {
-            let buf = interleave_uv_to_f32(&planes.u, &planes.v, self.layout.depth);
-            push_frame(d, &buf)?;
+            push_frame(d, &[&planes.u, &planes.v], depth)?;
         }
 
         if self.luma.is_none() {

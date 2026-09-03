@@ -1,6 +1,5 @@
 use av_denoise_core::Depth;
 use av_denoise_core::nlmeans::kernels::gpu_unpack_wire;
-use av_denoise_core::nlmeans::normalisation_table;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -10,10 +9,6 @@ use super::{BLOCK_1D, COPY_GRID_1D, H, W, block_sync, shapes_with_ch, stored_cha
 #[derive(Clone)]
 pub struct UnpackWireInput {
     src: Handle,
-    /// Built once here so the run times the table read, not the table.
-    lut: Handle,
-    lut_len: usize,
-    max_sample: u32,
     dst: Handle,
 }
 
@@ -39,17 +34,15 @@ impl<R: Runtime> UnpackWireBench<R> {
     }
 
     /// Wire bytes whose samples spread over the depth's whole range, so
-    /// the run measures a scattered table read rather than every lane in
-    /// a wave landing on one cache line.
+    /// the run measures a realistic spread of values rather than every
+    /// lane in a wave decoding to the same one.
     fn wire(&self) -> Vec<u8> {
         let bytes = self.depth.bytes_per_sample();
         let mask = (1u32 << self.depth.bits()) - 1;
         let mut wire = vec![0u8; self.words() as usize * size_of::<u32>()];
 
         // An xorshift rather than a multiply, so the samples are not all
-        // even and the read reaches every entry of the table. A fill that
-        // repeats one value keeps the whole wave on one cache line and
-        // flatters the lookup.
+        // even and the fill reaches every value the depth can express.
         for (i, chunk) in wire.chunks_exact_mut(bytes).enumerate() {
             let mut hash = i as u32 ^ 0x9E37_79B9;
             hash ^= hash << 13;
@@ -68,18 +61,9 @@ impl<R: Runtime> Benchmark for UnpackWireBench<R> {
 
     fn prepare(&self) -> Self::Input {
         let wire = self.wire();
-        let table = normalisation_table(self.depth);
-
         let src = self.client.create_from_slice(&wire);
-        let lut = self.client.create_from_slice(f32::as_bytes(table.values()));
         let dst = self.client.empty(self.elements() as usize * size_of::<f32>());
-        UnpackWireInput {
-            src,
-            lut,
-            lut_len: table.values().len(),
-            max_sample: table.max_sample(),
-            dst,
-        }
+        UnpackWireInput { src, dst }
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
@@ -96,14 +80,13 @@ impl<R: Runtime> Benchmark for UnpackWireBench<R> {
                 CubeCount::new_1d(COPY_GRID_1D),
                 CubeDim::new_1d(BLOCK_1D),
                 ArrayArg::from_raw_parts(args.src.clone(), self.words() as usize),
-                ArrayArg::from_raw_parts(args.lut.clone(), args.lut_len),
                 ArrayArg::from_raw_parts(args.dst.clone(), self.elements() as usize),
+                pack.max(),
                 0u32,
                 pixels,
                 self.ch,
                 stored_ch,
                 pack.samples_per_word(),
-                args.max_sample,
                 self.elements(),
                 total_threads,
             );

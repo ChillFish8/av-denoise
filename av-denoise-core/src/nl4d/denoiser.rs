@@ -17,6 +17,7 @@ use crate::nlmeans::{
     BLOCK_X,
     BLOCK_Y,
     ChannelMode,
+    Depth,
     MAX_GRID_1D,
     NlmDenoiser,
     Pending,
@@ -250,6 +251,15 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// `[0, 1]`, matching [`NlmDenoiser::push_frame`].
     pub fn push_frame(&mut self, frame: &[f32]) {
         self.front.push_frame(frame);
+    }
+
+    /// Pushes a new frame held as wire bytes into the front end's ring
+    /// buffer.
+    ///
+    /// `planes` holds one `width * height` plane per channel at `depth`,
+    /// matching [`NlmDenoiser::push_frame_wire`].
+    pub fn push_frame_wire(&mut self, planes: &[&[u8]], depth: Depth) {
+        self.front.push_frame_wire(planes, depth);
     }
 
     /// Runs one submit's worth of grouping, filtering, and aggregation,

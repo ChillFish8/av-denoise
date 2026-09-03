@@ -1,9 +1,14 @@
 use cubecl::prelude::*;
 
+#[cfg(feature = "vulkan")]
+use super::helpers::ramp_frame;
 use super::helpers::{R, make_client};
+#[cfg(feature = "vulkan")]
+use super::pack_wire::denoiser;
 use crate::Depth;
 use crate::nlmeans::kernels::gpu_unpack_wire;
-use crate::nlmeans::normalisation_table;
+#[cfg(feature = "vulkan")]
+use crate::{ChannelMode, OutputFormat};
 
 const BLOCK: u32 = 256;
 
@@ -62,11 +67,9 @@ fn launch(
     let mut padded = wire.to_vec();
     padded.resize(wire.len().div_ceil(4) * 4, 0);
 
-    let table = normalisation_table(depth);
     let seed = vec![SENTINEL; dst_len as usize];
 
     let src = client.create_from_slice(&padded);
-    let lut = client.create_from_slice(f32::as_bytes(table.values()));
     let dst = client.create_from_slice(f32::as_bytes(&seed));
 
     unsafe {
@@ -75,14 +78,13 @@ fn launch(
             CubeCount::new_1d(grid),
             CubeDim::new_1d(BLOCK),
             ArrayArg::from_raw_parts(src, padded.len() / 4),
-            ArrayArg::from_raw_parts(lut, table.values().len()),
             ArrayArg::from_raw_parts(dst.clone(), dst_len as usize),
+            pack.max(),
             dst_offset,
             pixels,
             channels,
             stored_ch,
             pack.samples_per_word(),
-            table.max_sample(),
             elements,
             total_threads,
         );
@@ -95,6 +97,21 @@ fn launch(
 /// Turns normalised samples into the wire bytes the kernel reads.
 fn wire_bytes(samples: &[f32], depth: Depth) -> Vec<u8> {
     crate::frame::f32_to_plane(samples, depth)
+}
+
+/// The GPU divide is not correctly rounded, so a normalised sample can
+/// land one representable step either side of the host's value.
+fn within_one_ulp(a: f32, b: f32) -> bool {
+    (a.to_bits() as i64 - b.to_bits() as i64).abs() <= 1
+}
+
+/// Compares whole frames, reporting the first sample that drifts further
+/// than the divide can account for.
+fn assert_frame(got: &[f32], want: &[f32], what: &str) {
+    assert_eq!(got.len(), want.len(), "length mismatch, {what}");
+    for (i, (&g, &w)) in got.iter().zip(want).enumerate() {
+        assert!(within_one_ulp(g, w), "{what}, sample {i}, got {g} want {w}");
+    }
 }
 
 /// A ramp over the whole range, so every test covers both ends.
@@ -113,7 +130,7 @@ fn luma_matches_the_host_converter_at_every_depth() {
         let got = unpack(&wire, pixels, 1, 1, depth);
         let want = crate::frame::plane_to_f32(&wire, depth);
 
-        assert_eq!(got, want, "depth {depth:?}");
+        assert_frame(&got, &want, &format!("depth {depth:?}"));
     }
 }
 
@@ -132,7 +149,7 @@ fn chroma_matches_interleave_uv_from_the_host_at_every_depth() {
         let got = unpack(&wire, pixels, 2, 2, depth);
         let want = crate::frame::interleave_uv_to_f32(&u_wire, &v_wire, depth);
 
-        assert_eq!(got, want, "depth {depth:?}");
+        assert_frame(&got, &want, &format!("depth {depth:?}"));
     }
 }
 
@@ -164,10 +181,10 @@ fn yuv_matches_the_host_and_zeroes_the_padding_lane() {
 
         for p in 0..pixels as usize {
             for c in 0..3usize {
-                assert_eq!(
-                    got[p * 4 + c],
-                    want[p * 3 + c],
-                    "depth {depth:?} pixel {p} channel {c}"
+                let (g, w) = (got[p * 4 + c], want[p * 3 + c]);
+                assert!(
+                    within_one_ulp(g, w),
+                    "depth {depth:?} pixel {p} channel {c}, got {g} want {w}"
                 );
             }
             assert_eq!(got[p * 4 + 3], 0.0, "the padding lane must be zero");
@@ -186,7 +203,7 @@ fn a_non_zero_dst_offset_writes_its_own_slot_and_leaves_the_others_alone() {
         let got = launch(&wire, pixels, 1, 1, depth, None, pixels, pixels * 2);
         let want = crate::frame::plane_to_f32(&wire, depth);
 
-        assert_eq!(&got[pixels as usize..], &want[..], "depth {depth:?}");
+        assert_frame(&got[pixels as usize..], &want, &format!("depth {depth:?}"));
         assert_eq!(
             &got[..pixels as usize],
             &vec![SENTINEL; pixels as usize][..],
@@ -207,7 +224,7 @@ fn a_sample_count_that_is_not_a_whole_number_of_words_reads_its_tail() {
         let got = unpack(&wire, pixels, 1, 1, depth);
         let want = crate::frame::plane_to_f32(&wire, depth);
 
-        assert_eq!(got, want, "depth {depth:?}");
+        assert_frame(&got, &want, &format!("depth {depth:?}"));
     }
 }
 
@@ -225,33 +242,125 @@ fn the_strided_loop_covers_every_element_when_the_grid_is_small() {
         let got = unpack_with_grid(&wire, pixels, 1, 1, depth, 1);
         let want = crate::frame::plane_to_f32(&wire, depth);
 
-        assert_eq!(got, want, "depth {depth:?}");
+        assert_frame(&got, &want, &format!("depth {depth:?}"));
     }
 }
 
-/// Walks every sample value at every depth, which the GPU tests only
-/// sample. Exactness rests on the table holding the host converter's own
-/// results, so the two must be checked against each other directly.
-#[test]
-fn the_table_holds_the_host_converters_result_for_every_sample() {
-    for depth in [Depth::Eight, Depth::Ten, Depth::Twelve] {
-        let table = normalisation_table(depth);
-        let samples = 1usize << depth.bits();
+/// One frame's worth of wire planes, plus the densely interleaved `f32`
+/// frame holding exactly the same quantised values.
+///
+/// Both sides start from the wire bytes, so the comparison turns on the
+/// kernel rather than on host rounding.
+#[cfg(feature = "vulkan")]
+fn wire_and_f32_frame(w: u32, h: u32, channels: usize, i: usize, depth: Depth) -> (Vec<Vec<u8>>, Vec<f32>) {
+    let pixels = (w * h) as usize;
 
-        assert_eq!(table.values().len(), samples, "depth {depth:?}");
-        assert_eq!(table.max_sample() as usize, samples - 1, "depth {depth:?}");
+    let wire: Vec<Vec<u8>> = (0..channels)
+        .map(|c| crate::frame::f32_to_plane(&ramp_frame(w, h, i * channels + c), depth))
+        .collect();
 
-        // One wire plane holding every sample the depth can express,
-        // which the host converter then normalises.
-        let mut wire = vec![0u8; samples * depth.bytes_per_sample()];
-        for (s, chunk) in wire.chunks_exact_mut(depth.bytes_per_sample()).enumerate() {
-            chunk.copy_from_slice(&(s as u32).to_le_bytes()[..depth.bytes_per_sample()]);
+    let normalised: Vec<Vec<f32>> = wire
+        .iter()
+        .map(|plane| crate::frame::plane_to_f32(plane, depth))
+        .collect();
+
+    let mut dense = Vec::with_capacity(pixels * channels);
+    for p in 0..pixels {
+        for plane in &normalised {
+            dense.push(plane[p]);
         }
-
-        assert_eq!(
-            table.values(),
-            crate::frame::plane_to_f32(&wire, depth),
-            "depth {depth:?}"
-        );
     }
+
+    (wire, dense)
+}
+
+/// The quantised codes a frame lands on at `depth`.
+///
+/// The comparison runs in codes rather than raw `f32`, since one code is
+/// the smallest difference the output can carry.
+#[cfg(feature = "vulkan")]
+fn codes(frame: &[f32], depth: Depth) -> Vec<u32> {
+    let wire = crate::frame::f32_to_plane(frame, depth);
+    match depth.bytes_per_sample() {
+        1 => wire.iter().map(|&b| u32::from(b)).collect(),
+        _ => wire
+            .chunks_exact(2)
+            .map(|s| u32::from(u16::from_le_bytes([s[0], s[1]])))
+            .collect(),
+    }
+}
+
+/// The differential test the whole push path rests on. A kernel that
+/// silently compiled to nothing writes zeros, which the `f32` push of a
+/// real frame never produces.
+///
+/// The GPU divide is not correctly rounded, so a normalised sample can
+/// land one representable step either side of the host's value. That
+/// moves a denoised sample by at most one code and never further.
+#[cfg(feature = "vulkan")]
+#[test]
+fn a_wire_push_denoises_within_one_code_of_an_f32_push() {
+    let (w, h) = (16u32, 16u32);
+    let modes = [
+        (ChannelMode::Luma, 1usize),
+        (ChannelMode::Chroma, 2),
+        (ChannelMode::Yuv, 3),
+    ];
+
+    for depth in [Depth::Eight, Depth::Ten, Depth::Twelve] {
+        for (mode, channels) in modes {
+            let mut f32_side = denoiser(mode, OutputFormat::F32, w, h);
+            let mut wire_side = denoiser(mode, OutputFormat::F32, w, h);
+
+            for i in 0..3 {
+                let (wire, dense) = wire_and_f32_frame(w, h, channels, i, depth);
+                let planes: Vec<&[u8]> = wire.iter().map(Vec::as_slice).collect();
+
+                f32_side.push_frame(&dense).expect("f32 push failed");
+                wire_side
+                    .push_frame_wire(&planes, depth)
+                    .expect("wire push failed");
+            }
+
+            let want = f32_side
+                .recv_frame()
+                .expect("f32 recv failed")
+                .expect("a frame is ready")
+                .into_f32()
+                .expect("an f32 denoiser returns f32");
+
+            let got = wire_side
+                .recv_frame()
+                .expect("wire recv failed")
+                .expect("a frame is ready")
+                .into_f32()
+                .expect("an f32 denoiser returns f32");
+
+            let want = codes(&want, depth);
+            let got = codes(&got, depth);
+
+            assert_eq!(got.len(), want.len(), "depth {depth:?} mode {mode:?}");
+            for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
+                let drift = g.abs_diff(w);
+                assert!(
+                    drift <= 1,
+                    "depth {depth:?} mode {mode:?}, sample {i} moved {drift} codes, \
+                     got {g} want {w}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[should_panic(expected = "plane count mismatch")]
+fn a_plane_count_that_disagrees_with_the_channel_mode_is_rejected() {
+    let (w, h) = (16u32, 16u32);
+    let depth = Depth::Eight;
+
+    let mut d = denoiser(ChannelMode::Luma, OutputFormat::F32, w, h);
+    let plane = crate::frame::f32_to_plane(&ramp_frame(w, h, 0), depth);
+
+    let _ = d.push_frame_wire(&[&plane, &plane], depth);
 }

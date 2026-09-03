@@ -173,48 +173,6 @@ impl WirePack {
     }
 }
 
-/// The host converter's result for every possible sample value at this
-/// depth, in sample order.
-///
-/// [`crate::nlmeans::kernels::gpu_unpack_wire`] indexes this instead of
-/// dividing, which is what makes its output bit-identical to
-/// [`crate::frame::plane_to_f32`]. Each entry uses that function's own
-/// expression, so the two cannot drift apart.
-///
-/// The table is `max + 1` entries, so 256 at 8-bit and 4096 at 12-bit.
-pub fn normalisation_table(depth: Depth) -> NormalisationTable {
-    let max = depth.max_value();
-    NormalisationTable {
-        values: (0..=(1u32 << depth.bits()) - 1).map(|s| s as f32 / max).collect(),
-    }
-}
-
-/// The normalisation table one launch of `gpu_unpack_wire` reads, and the
-/// largest index into it.
-///
-/// The kernel clamps a sample against `max_sample` before indexing, so a
-/// value smaller than the table's last index darkens every bright sample
-/// and a larger one reads past the table. Both come from one
-/// [`normalisation_table`] call, which makes that pairing impossible to
-/// get wrong.
-#[derive(Debug, Clone, PartialEq)]
-pub struct NormalisationTable {
-    values: Vec<f32>,
-}
-
-impl NormalisationTable {
-    /// The normalised value for every sample, in sample order.
-    pub fn values(&self) -> &[f32] {
-        &self.values
-    }
-
-    /// The largest index `values` holds, which is the kernel's
-    /// `max_sample`.
-    pub fn max_sample(&self) -> u32 {
-        self.values.len() as u32 - 1
-    }
-}
-
 /// Scales native-depth samples into normalised `[0, 1]` f32.
 pub fn normalize(input: &[u16], depth: Depth) -> Vec<f32> {
     let max = depth.max_value();

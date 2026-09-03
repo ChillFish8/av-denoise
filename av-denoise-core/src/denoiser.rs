@@ -590,6 +590,13 @@ impl<R: Runtime> Engine<R> {
         }
     }
 
+    fn push_frame_wire(&mut self, planes: &[&[u8]], depth: Depth) {
+        match self {
+            Self::Nlm(d) => d.push_frame_wire(planes, depth),
+            Self::Nl4d(d) => d.push_frame_wire(planes, depth),
+        }
+    }
+
     fn denoise_submit(&mut self) -> Result<Option<Pending<R>>, anyhow::Error> {
         match self {
             Self::Nlm(d) => d.denoise_submit(),
@@ -1027,6 +1034,81 @@ impl Denoiser {
                     self.pending.push_back(BackendPending::Wgpu(p));
                 }
             },
+        }
+
+        self.frames_pushed = self.frames_pushed.saturating_add(1);
+        Ok(())
+    }
+
+    /// Uploads one frame held as wire bytes into the temporal window.
+    ///
+    /// `planes` holds one `width * height` plane per channel at `depth`,
+    /// which the GPU normalises and interleaves. The planes run Y, U, V
+    /// for a fused frame and U, V for a chroma pair.
+    ///
+    /// Queueing, poisoning, and the `QueueFull` retry signal work exactly
+    /// as they do for [`Self::push_frame`].
+    pub fn push_frame_wire(&mut self, planes: &[&[u8]], depth: Depth) -> Result<(), DenoiserError> {
+        if self.poisoned {
+            return Err(DenoiserError::Poisoned);
+        }
+        self.push_frame_wire_inner(planes, depth).inspect_err(|err| {
+            if !matches!(err, DenoiserError::QueueFull) {
+                self.poisoned = true;
+            }
+        })
+    }
+
+    fn push_frame_wire_inner(&mut self, planes: &[&[u8]], depth: Depth) -> Result<(), DenoiserError> {
+        // The same window accounting `push_frame_inner` does.
+        let window_full = self.frames_pushed > self.temporal_radius;
+        if window_full && self.pending.len() >= MAX_PENDING {
+            return Err(DenoiserError::QueueFull);
+        }
+
+        match &mut self.backend {
+            #[cfg(feature = "cuda")]
+            Backend::Cuda(d) => {
+                d.push_frame_wire(planes, depth);
+                if let Some(p) = d.denoise_submit()? {
+                    self.pending.push_back(BackendPending::Cuda(p));
+                }
+            },
+            #[cfg(feature = "rocm")]
+            Backend::Rocm(d) => {
+                d.push_frame_wire(planes, depth);
+                if let Some(p) = d.denoise_submit()? {
+                    self.pending.push_back(BackendPending::Rocm(p));
+                }
+            },
+            #[cfg(any(feature = "vulkan", feature = "metal"))]
+            Backend::Wgpu(d) => {
+                d.push_frame_wire(planes, depth);
+                if let Some(p) = d.denoise_submit()? {
+                    self.pending.push_back(BackendPending::Wgpu(p));
+                }
+            },
+        }
+
+        self.frames_pushed = self.frames_pushed.saturating_add(1);
+        Ok(())
+    }
+
+    /// Uploads one frame held as wire bytes into the temporal window
+    /// without starting a denoise.
+    ///
+    /// The wire counterpart of [`Self::push_frame_priming`].
+    pub fn push_frame_wire_priming(&mut self, planes: &[&[u8]], depth: Depth) -> Result<(), DenoiserError> {
+        if self.poisoned {
+            return Err(DenoiserError::Poisoned);
+        }
+        match &mut self.backend {
+            #[cfg(feature = "cuda")]
+            Backend::Cuda(d) => d.push_frame_wire(planes, depth),
+            #[cfg(feature = "rocm")]
+            Backend::Rocm(d) => d.push_frame_wire(planes, depth),
+            #[cfg(any(feature = "vulkan", feature = "metal"))]
+            Backend::Wgpu(d) => d.push_frame_wire(planes, depth),
         }
 
         self.frames_pushed = self.frames_pushed.saturating_add(1);

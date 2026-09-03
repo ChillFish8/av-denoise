@@ -214,7 +214,7 @@ fn padding_lanes_are_skipped_at_ten_bit() {
 /// Builds a top-level [`Denoiser`] at temporal radius 1 over `mode`,
 /// collecting frames in `format`.
 #[cfg(feature = "vulkan")]
-fn denoiser(mode: ChannelMode, format: OutputFormat, w: u32, h: u32) -> Denoiser {
+pub(super) fn denoiser(mode: ChannelMode, format: OutputFormat, w: u32, h: u32) -> Denoiser {
     let opts = DenoiserOptions::builder()
         .channel_mode(mode)
         .mode(DenoisingMode::Temporal { radius: 1 })
@@ -227,7 +227,7 @@ fn denoiser(mode: ChannelMode, format: OutputFormat, w: u32, h: u32) -> Denoiser
 
 /// Pushes `count` deterministic frames into `d`, one per index.
 #[cfg(feature = "vulkan")]
-fn push_ramp(d: &mut Denoiser, w: u32, h: u32, count: usize) {
+pub(super) fn push_ramp(d: &mut Denoiser, w: u32, h: u32, count: usize) {
     for i in 0..count {
         d.push_frame(&ramp_frame(w, h, i)).expect("push failed");
     }

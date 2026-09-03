@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::align::StorageAlign;
-use super::kernels::gpu_copy;
+use super::kernels::{gpu_copy, gpu_unpack_wire};
 use super::motion::{self, MotionCtx, MotionEstimation, build_pyramid_for_slot, run_pyramid_build};
 use super::noise::{
     EMA_ALPHA,
@@ -26,7 +26,7 @@ use super::noise::{
 use super::params::{NlmParams, SEPARABLE_THRESHOLD, sigma_eff, validate_dimensions};
 use super::pending::{Pending, empty_output, start_readback};
 use super::prefilter::{PrefilterCtx, PrefilterMode, run_prefilter};
-use super::{BLOCK_1D, MAX_GRID_1D};
+use super::{BLOCK_1D, Depth, MAX_GRID_1D};
 use crate::denoiser::{DenoiserError, FrameOutput, OutputFormat};
 
 /// A denoised frame that has finished its kernels but is still resident
@@ -118,6 +118,10 @@ pub struct NlmDenoiser<R: Runtime> {
     /// CPU scratch for repacking 3-channel YUV into 4 lanes. Empty when
     /// no padding is needed.
     pub(super) padding_scratch: Vec<f32>,
+    /// CPU scratch the wire push concatenates its planes into, so one
+    /// push costs one transfer whatever the channel mode. Reused, so it
+    /// allocates nothing after the first frame.
+    pub(super) upload_scratch: Vec<u8>,
     /// The weighted-pixel accumulator, one entry per stored channel per
     /// pixel.
     pub(super) accum: Handle,
@@ -613,6 +617,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             input_buf,
             reference_buf,
             padding_scratch,
+            upload_scratch: Vec::new(),
             accum,
             weight_sum,
             max_weight,
@@ -671,7 +676,30 @@ impl<R: Runtime> NlmDenoiser<R> {
         );
 
         let slot = self.upload_into(&self.input_buf.clone(), frame);
+        self.run_post_upload_stages(slot);
+    }
 
+    /// Pushes a new frame held as wire bytes, one slice per channel.
+    ///
+    /// Each plane holds `width * height` samples at `depth`, and the GPU
+    /// normalises them and interleaves the planes. `planes` runs Y, U, V
+    /// for a fused frame and U, V for a chroma pair.
+    ///
+    /// For `PrefilterMode::External` use
+    /// [`Self::push_frame_with_reference`] instead.
+    pub fn push_frame_wire(&mut self, planes: &[&[u8]], depth: Depth) {
+        assert!(
+            !matches!(self.params.prefilter, PrefilterMode::External),
+            "push_frame_with_reference is required when prefilter == External"
+        );
+
+        let slot = self.upload_wire_into(&self.input_buf.clone(), planes, depth);
+        self.run_post_upload_stages(slot);
+    }
+
+    /// The work every push runs once its frame is in `slot`, from the
+    /// noise estimate through to the ring advance.
+    fn run_post_upload_stages(&mut self, slot: usize) {
         self.run_noise_estimate_for_slot(slot as u32);
         self.run_temporal_stats_for_slot(slot as u32);
         self.seed_noise_estimate_if_first_frame(slot as u32);
@@ -763,6 +791,83 @@ impl<R: Runtime> NlmDenoiser<R> {
         };
 
         self.copy_frame_into_slot(dst, slot, &staging, 0, 1);
+    }
+
+    /// Uploads one wire-byte frame into the next ring slot of `dst` and
+    /// returns the physical slot it wrote.
+    ///
+    /// The planes are concatenated into `upload_scratch` and uploaded as
+    /// one buffer, so a push costs one transfer whatever the channel
+    /// mode. The scratch is reused, so the concatenation allocates
+    /// nothing after the first frame.
+    fn upload_wire_into(&mut self, dst: &Handle, planes: &[&[u8]], depth: Depth) -> usize {
+        let total_frames = self.params.total_frames() as usize;
+        let slot = self.ring_head % total_frames;
+        self.upload_wire_into_slot(dst, planes, depth, slot);
+        slot
+    }
+
+    fn upload_wire_into_slot(&mut self, dst: &Handle, planes: &[&[u8]], depth: Depth, slot: usize) {
+        let channels = self.params.channels.count();
+        let stored_ch = self.params.channels.storage_count();
+        let pixels = self.width * self.height;
+        let plane_bytes = pixels as usize * depth.bytes_per_sample();
+
+        assert_eq!(
+            planes.len(),
+            channels as usize,
+            "plane count mismatch: expected {channels}, got {}",
+            planes.len()
+        );
+
+        self.upload_scratch.clear();
+        for plane in planes {
+            assert_eq!(
+                plane.len(),
+                plane_bytes,
+                "plane size mismatch: expected {plane_bytes}, got {}",
+                plane.len()
+            );
+            debug_assert!(
+                wire_samples_in_range(plane, depth),
+                "a sample is larger than {depth:?} can express"
+            );
+            self.upload_scratch.extend_from_slice(plane);
+        }
+
+        // The kernel reads whole words, so a plane that ends mid-word
+        // needs its last word backed by real storage.
+        let words = self.upload_scratch.len().div_ceil(size_of::<u32>());
+        self.upload_scratch.resize(words * size_of::<u32>(), 0);
+
+        let src = self.client.create_from_slice(&self.upload_scratch);
+
+        let elements = pixels * stored_ch;
+        let total_frames = self.params.total_frames() as usize;
+        let grid = elements.div_ceil(BLOCK_1D).clamp(1, MAX_GRID_1D);
+        let total_threads = grid * BLOCK_1D;
+
+        // One `wire_pack` for both, since a hand-paired maximum and lane
+        // width decode the wrong bits.
+        let pack = depth.wire_pack();
+
+        unsafe {
+            gpu_unpack_wire::launch_unchecked::<R>(
+                &self.client,
+                CubeCount::new_1d(grid),
+                CubeDim::new_1d(BLOCK_1D),
+                ArrayArg::from_raw_parts(src, words),
+                ArrayArg::from_raw_parts(dst.clone(), total_frames * elements as usize),
+                pack.max(),
+                slot as u32 * elements,
+                pixels,
+                channels,
+                stored_ch,
+                pack.samples_per_word(),
+                elements,
+                total_threads,
+            )
+        };
     }
 
     fn run_prefilter_for_slot(&self, slot: usize) {
@@ -1991,4 +2096,22 @@ impl<R: Runtime> NlmDenoiser<R> {
         let n = 2 * radius;
         ((self.ring_head as i32 + gap_index).rem_euclid(n)) as u32
     }
+}
+
+/// True when every sample in `plane` fits the range `depth` expresses.
+///
+/// `gpu_unpack_wire` is branch-free and divides every sample by the
+/// depth's maximum, so a larger sample normalises above 1.0 and reaches
+/// the filter as a value no clean frame can hold. Only 10 and 12-bit can
+/// carry one, in the unused high bits of a 16-bit lane, so 8-bit is
+/// always in range.
+fn wire_samples_in_range(plane: &[u8], depth: Depth) -> bool {
+    if depth.bytes_per_sample() == 1 {
+        return true;
+    }
+
+    let max = depth.max_value() as u32;
+    plane
+        .chunks_exact(2)
+        .all(|s| u32::from(u16::from_le_bytes([s[0], s[1]])) <= max)
 }
