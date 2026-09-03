@@ -62,7 +62,7 @@ docker run --rm \
     --device /dev/kfd --device /dev/dri \
     --group-add video --group-add render \
     -v "$PWD:/in:ro" \
-    ghcr.io/chillfish8/av-denoise:vulkan-0.4.0-alpha4 \
+    ghcr.io/chillfish8/av-denoise:vulkan-0.4.0-alpha5 \
     nl4d --input /in/noisy.mkv \
   | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
