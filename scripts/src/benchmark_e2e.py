@@ -99,9 +99,7 @@ class Config(BaseModel):
                 raise ValueError(f"two groups are named {group.name!r}")
             seen.add(group.name)
             if group.input is None and self.input is None:
-                raise ValueError(
-                    f"group {group.name!r} has no `input` and there is no top-level `input`"
-                )
+                raise ValueError(f"group {group.name!r} has no `input` and there is no top-level `input`")
             for variant in group.variants:
                 if variant.input is None and group.input is None and self.input is None:
                     raise ValueError(f"variant {variant.name!r} has no input to run against")
@@ -412,10 +410,7 @@ def print_report(results: list[Measurement]) -> None:
         print("─" * len(header))
         for cell in cells:
             print(
-                "  ".join(
-                    c.ljust(w) if i == 0 else c.rjust(w)
-                    for i, (c, w) in enumerate(zip(cell, widths))
-                )
+                "  ".join(c.ljust(w) if i == 0 else c.rjust(w) for i, (c, w) in enumerate(zip(cell, widths)))
             )
 
 

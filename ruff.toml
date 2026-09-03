@@ -4,10 +4,7 @@ line-length = 110
 # floor among the checked files. The vs-avd package itself needs 3.12.
 target-version = "py311"
 
-# scripts/ holds one-off measurement and harness scripts, written to answer a
-# question and kept as a record of how a number was produced. They are not
-# shipped, so they are not held to the shipped code's formatting or lints.
-extend-exclude = ["scripts"]
+extend-include = ["*.vpy"]
 
 [lint]
 select = ["E", "F", "I", "W"]
