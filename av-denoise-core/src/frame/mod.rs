@@ -15,6 +15,7 @@ use crate::{
     NlmTuning,
     NlmeansHqOptions,
     NlmeansOptions,
+    OutputFormat,
     WindowSpan,
 };
 
@@ -234,11 +235,14 @@ impl PlaneOptions {
         }
     }
 
-    fn denoiser_options(&self, channels: ChannelMode) -> DenoiserOptions {
+    /// `depth` is the source's wire depth, which every denoiser
+    /// quantises to on the GPU.
+    fn denoiser_options(&self, channels: ChannelMode, depth: Depth) -> DenoiserOptions {
         DenoiserOptions::builder()
             .channel_mode(channels)
             .mode(self.mode)
             .algorithm(self.algorithm_for(channels))
+            .output_format(OutputFormat::Wire { depth })
             .build()
     }
 }
@@ -284,11 +288,42 @@ pub fn push_needs_retry(result: Result<(), DenoiserError>) -> Result<bool, anyho
 /// Unwraps a denoised frame from one of the `Denoiser`s
 /// [`PlanarDenoiser`] builds.
 ///
-/// Those are always built in [`crate::OutputFormat::F32`], so the other
+/// Those are always built in [`crate::OutputFormat::Wire`], so the other
 /// variant never reaches here.
-fn expect_f32(out: FrameOutput) -> Vec<f32> {
-    out.into_f32()
-        .expect("PlanarDenoiser builds every Denoiser in f32 output format")
+fn expect_wire(out: FrameOutput) -> Vec<u8> {
+    out.into_wire()
+        .expect("PlanarDenoiser builds every Denoiser in wire output format")
+}
+
+/// Splits a fused YUV444 wire frame into its three planes.
+///
+/// The pack kernel leaves a three-channel frame interleaved, so this is
+/// the byte-level counterpart of the host converter it replaced. That one
+/// lives in `converter_tests` now, as the oracle this is checked against.
+fn split_yuv_wire(wire: &[u8], depth: Depth) -> Planes {
+    let bytes = depth.bytes_per_sample();
+    let pixels = wire.len() / (3 * bytes);
+
+    let mut y = Vec::with_capacity(pixels * bytes);
+    let mut u = Vec::with_capacity(pixels * bytes);
+    let mut v = Vec::with_capacity(pixels * bytes);
+
+    for pixel in wire.chunks_exact(3 * bytes) {
+        y.extend_from_slice(&pixel[..bytes]);
+        u.extend_from_slice(&pixel[bytes..2 * bytes]);
+        v.extend_from_slice(&pixel[2 * bytes..]);
+    }
+
+    Planes { y, u, v }
+}
+
+/// Splits a chroma wire frame into its U and V planes.
+///
+/// The pack kernel writes U's whole region first and V's after it, so
+/// each plane is one contiguous half of the buffer.
+fn split_uv_wire(wire: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let (u, v) = wire.split_at(wire.len() / 2);
+    (u.to_vec(), v.to_vec())
 }
 
 /// Wraps the luma and chroma `Denoiser` instances needed for one
@@ -343,7 +378,7 @@ impl PlanarDenoiser {
                     &opts.device,
                     layout.width,
                     layout.height,
-                    opts.denoiser_options(ChannelMode::Luma),
+                    opts.denoiser_options(ChannelMode::Luma, layout.depth),
                 )
             })
             .transpose()?;
@@ -355,7 +390,7 @@ impl PlanarDenoiser {
                     &opts.device,
                     chroma_w,
                     chroma_h,
-                    opts.denoiser_options(ChannelMode::Chroma),
+                    opts.denoiser_options(ChannelMode::Chroma, layout.depth),
                 )
             })
             .transpose()?;
@@ -367,7 +402,7 @@ impl PlanarDenoiser {
                     &opts.device,
                     layout.width,
                     layout.height,
-                    opts.denoiser_options(ChannelMode::Yuv),
+                    opts.denoiser_options(ChannelMode::Yuv, layout.depth),
                 )
             })
             .transpose()?;
@@ -480,11 +515,7 @@ impl PlanarDenoiser {
     pub fn recv(&mut self) -> Result<Option<Planes>, anyhow::Error> {
         if let Some(d) = self.yuv.as_mut() {
             return match d.recv_frame()? {
-                Some(packed) => Ok(Some(unpack_yuv_from_f32(
-                    &expect_f32(packed),
-                    self.layout.luma_pixels(),
-                    self.layout.depth,
-                ))),
+                Some(packed) => Ok(Some(split_yuv_wire(&expect_wire(packed), self.layout.depth))),
                 None => Ok(None),
             };
         }
@@ -495,7 +526,7 @@ impl PlanarDenoiser {
             .map(|d| d.recv_frame())
             .transpose()?
             .flatten()
-            .map(expect_f32);
+            .map(expect_wire);
 
         let chroma_out = self
             .chroma
@@ -503,7 +534,7 @@ impl PlanarDenoiser {
             .map(|d| d.recv_frame())
             .transpose()?
             .flatten()
-            .map(expect_f32);
+            .map(expect_wire);
 
         // A disabled side has no Denoiser to query. When the enabled side
         // produced output, pop the matching source plane from the
@@ -534,23 +565,20 @@ impl PlanarDenoiser {
     /// `sink` is called once per emitted planar frame.
     pub fn flush(&mut self, mut sink: impl FnMut(Planes)) -> Result<(), anyhow::Error> {
         if let Some(d) = self.yuv.as_mut() {
-            let pixels = self.layout.luma_pixels();
             let depth = self.layout.depth;
-            d.flush(|packed| sink(unpack_yuv_from_f32(&expect_f32(packed), pixels, depth)))?;
+            d.flush(|packed| sink(split_yuv_wire(&expect_wire(packed), depth)))?;
             return Ok(());
         }
 
-        let chroma_pixels = self.layout.chroma_pixels();
-
-        let mut luma_buf: Vec<Vec<f32>> = Vec::new();
-        let mut chroma_buf: Vec<Vec<f32>> = Vec::new();
+        let mut luma_buf: Vec<Vec<u8>> = Vec::new();
+        let mut chroma_buf: Vec<Vec<u8>> = Vec::new();
 
         if let Some(d) = self.luma.as_mut() {
-            d.flush(|v| luma_buf.push(expect_f32(v)))?;
+            d.flush(|v| luma_buf.push(expect_wire(v)))?;
         }
 
         if let Some(d) = self.chroma.as_mut() {
-            d.flush(|v| chroma_buf.push(expect_f32(v)))?;
+            d.flush(|v| chroma_buf.push(expect_wire(v)))?;
         }
 
         // The two halves run in lockstep, so they flush the same number
@@ -560,8 +588,8 @@ impl PlanarDenoiser {
         let count = luma_buf.len().max(chroma_buf.len());
 
         for i in 0..count {
-            let y = if let Some(buf) = luma_buf.get(i) {
-                f32_to_plane(buf, self.layout.depth)
+            let y = if let Some(buf) = luma_buf.get_mut(i) {
+                std::mem::take(buf)
             } else if let Some(src) = self.luma_passthrough.pop_front() {
                 src
             } else {
@@ -569,7 +597,7 @@ impl PlanarDenoiser {
             };
 
             let (u, v) = if let Some(packed) = chroma_buf.get(i) {
-                unpack_uv_from_f32(packed, chroma_pixels, self.layout.depth)
+                split_uv_wire(packed)
             } else if let Some((src_u, src_v)) = self.chroma_passthrough.pop_front() {
                 (src_u, src_v)
             } else {
@@ -706,21 +734,19 @@ impl PlanarDenoiser {
 
     fn assemble(
         &self,
-        luma: Option<Vec<f32>>,
-        chroma: Option<Vec<f32>>,
+        luma: Option<Vec<u8>>,
+        chroma: Option<Vec<u8>>,
         luma_passthrough: Option<Vec<u8>>,
         chroma_passthrough: Option<(Vec<u8>, Vec<u8>)>,
     ) -> Planes {
-        let chroma_pixels = self.layout.chroma_pixels();
-
         let y = match (luma, luma_passthrough) {
-            (Some(v), _) => f32_to_plane(&v, self.layout.depth),
+            (Some(v), _) => v,
             (None, Some(src)) => src,
             (None, None) => self.layout.black_luma_plane(),
         };
 
         let (u, v) = match (chroma, chroma_passthrough) {
-            (Some(packed), _) => unpack_uv_from_f32(&packed, chroma_pixels, self.layout.depth),
+            (Some(packed), _) => split_uv_wire(&packed),
             (None, Some(src)) => src,
             (None, None) => (
                 self.layout.neutral_chroma_plane(),
@@ -845,32 +871,6 @@ pub fn interleave_yuv_to_f32(y: &[u8], u: &[u8], v: &[u8], depth: Depth) -> Vec<
     }
 }
 
-/// Reverse of [`interleave_yuv_to_f32`].
-pub fn unpack_yuv_from_f32(packed: &[f32], pixels: usize, depth: Depth) -> Planes {
-    debug_assert_eq!(packed.len(), 3 * pixels);
-
-    let max = depth.max_value();
-
-    fn run<C: SampleCodec>(packed: &[f32], pixels: usize, max: f32) -> Planes {
-        let mut y = vec![0u8; pixels * C::BYTES];
-        let mut u = vec![0u8; pixels * C::BYTES];
-        let mut v = vec![0u8; pixels * C::BYTES];
-
-        for (i, chunk) in packed.as_chunks::<3>().0.iter().enumerate() {
-            C::write(&mut y, i, quantise(chunk[0], max));
-            C::write(&mut u, i, quantise(chunk[1], max));
-            C::write(&mut v, i, quantise(chunk[2], max));
-        }
-
-        Planes { y, u, v }
-    }
-
-    match depth.bytes_per_sample() {
-        1 => run::<Narrow>(packed, pixels, max),
-        _ => run::<Wide>(packed, pixels, max),
-    }
-}
-
 /// Interleaves separate U and V planes into `[U, V, U, V, ...]` as f32
 /// in `[0, 1]`.
 pub fn interleave_uv_to_f32(u: &[u8], v: &[u8], depth: Depth) -> Vec<f32> {
@@ -923,6 +923,38 @@ pub fn unpack_uv_from_f32(packed: &[f32], chroma_pixels: usize, depth: Depth) ->
 #[cfg(test)]
 mod converter_tests {
     use super::*;
+
+    /// Reverse of [`interleave_yuv_to_f32`], and the oracle
+    /// `split_yuv_wire` is checked against.
+    ///
+    /// Production splits a fused YUV frame from the wire bytes the GPU
+    /// already quantised. This host version stays because cubecl can
+    /// compile a kernel to nothing without reporting an error, and a
+    /// kernel compared against itself compares zeros to zeros.
+    fn unpack_yuv_from_f32(packed: &[f32], pixels: usize, depth: Depth) -> Planes {
+        debug_assert_eq!(packed.len(), 3 * pixels);
+
+        let max = depth.max_value();
+
+        fn run<C: SampleCodec>(packed: &[f32], pixels: usize, max: f32) -> Planes {
+            let mut y = vec![0u8; pixels * C::BYTES];
+            let mut u = vec![0u8; pixels * C::BYTES];
+            let mut v = vec![0u8; pixels * C::BYTES];
+
+            for (i, chunk) in packed.as_chunks::<3>().0.iter().enumerate() {
+                C::write(&mut y, i, quantise(chunk[0], max));
+                C::write(&mut u, i, quantise(chunk[1], max));
+                C::write(&mut v, i, quantise(chunk[2], max));
+            }
+
+            Planes { y, u, v }
+        }
+
+        match depth.bytes_per_sample() {
+            1 => run::<Narrow>(packed, pixels, max),
+            _ => run::<Wide>(packed, pixels, max),
+        }
+    }
 
     /// Encodes native-depth samples into wire bytes, the inverse of what
     /// the converters read.
@@ -1004,6 +1036,42 @@ mod converter_tests {
             assert_eq!(out.y, y_bytes, "Y round trip failed at {depth:?}");
             assert_eq!(out.u, u_bytes, "U round trip failed at {depth:?}");
             assert_eq!(out.v, v_bytes, "V round trip failed at {depth:?}");
+        }
+    }
+
+    #[test]
+    fn split_uv_wire_matches_unpack_uv_from_f32() {
+        let u_src = [0.0, 0.25, 0.5, 1.0];
+        let v_src = [1.0, 0.75, 0.5, 0.0];
+
+        for depth in [Depth::Eight, Depth::Ten, Depth::Twelve] {
+            let packed: Vec<f32> = u_src.iter().zip(&v_src).flat_map(|(&u, &v)| [u, v]).collect();
+            let (want_u, want_v) = unpack_uv_from_f32(&packed, 4, depth);
+
+            // The kernel lays a chroma frame out as U's whole region
+            // followed by V's.
+            let wire: Vec<u8> = f32_to_plane(&u_src, depth)
+                .into_iter()
+                .chain(f32_to_plane(&v_src, depth))
+                .collect();
+
+            let (u, v) = split_uv_wire(&wire);
+            assert_eq!(u, want_u, "U disagreed at {depth:?}");
+            assert_eq!(v, want_v, "V disagreed at {depth:?}");
+        }
+    }
+
+    #[test]
+    fn split_yuv_wire_matches_unpack_yuv_from_f32() {
+        for depth in [Depth::Eight, Depth::Ten, Depth::Twelve] {
+            let packed: Vec<f32> = (0..9).map(|i| i as f32 / 9.0).collect();
+
+            let want = unpack_yuv_from_f32(&packed, 3, depth);
+            let got = split_yuv_wire(&f32_to_plane(&packed, depth), depth);
+
+            assert_eq!(got.y, want.y, "Y disagreed at {depth:?}");
+            assert_eq!(got.u, want.u, "U disagreed at {depth:?}");
+            assert_eq!(got.v, want.v, "V disagreed at {depth:?}");
         }
     }
 
@@ -1096,8 +1164,8 @@ mod cli_options_tests {
     fn luma_strength_alone_overrides_only_the_luma_plane() {
         let opts = base_opts(DenoisingMode::Spacial, Algorithm::default(), Some(0.7), None);
 
-        let luma = expect_nlmeans(opts.denoiser_options(ChannelMode::Luma).algorithm);
-        let chroma = expect_nlmeans(opts.denoiser_options(ChannelMode::Chroma).algorithm);
+        let luma = expect_nlmeans(opts.denoiser_options(ChannelMode::Luma, Depth::Eight).algorithm);
+        let chroma = expect_nlmeans(opts.denoiser_options(ChannelMode::Chroma, Depth::Eight).algorithm);
 
         assert!(
             matches!(luma.tuning.strength, Some(s) if (s - 0.7).abs() < f32::EPSILON),
@@ -1114,8 +1182,8 @@ mod cli_options_tests {
     fn both_per_plane_strengths_set_independently() {
         let opts = base_opts(DenoisingMode::Spacial, Algorithm::default(), Some(0.7), Some(0.3));
 
-        let luma = expect_nlmeans(opts.denoiser_options(ChannelMode::Luma).algorithm);
-        let chroma = expect_nlmeans(opts.denoiser_options(ChannelMode::Chroma).algorithm);
+        let luma = expect_nlmeans(opts.denoiser_options(ChannelMode::Luma, Depth::Eight).algorithm);
+        let chroma = expect_nlmeans(opts.denoiser_options(ChannelMode::Chroma, Depth::Eight).algorithm);
 
         assert!(
             matches!(luma.tuning.strength, Some(s) if (s - 0.7).abs() < f32::EPSILON),
@@ -1140,8 +1208,8 @@ mod cli_options_tests {
             None,
         );
 
-        let luma_params: NlmParams = opts.denoiser_options(ChannelMode::Luma).to_nlm_params();
-        let chroma_params: NlmParams = opts.denoiser_options(ChannelMode::Chroma).to_nlm_params();
+        let luma_params: NlmParams = opts.denoiser_options(ChannelMode::Luma, Depth::Eight).to_nlm_params();
+        let chroma_params: NlmParams = opts.denoiser_options(ChannelMode::Chroma, Depth::Eight).to_nlm_params();
 
         assert!(
             (luma_params.strength - 0.35).abs() < f32::EPSILON,
