@@ -66,7 +66,11 @@ test-py-fast: _rebuild-vs-plugin
 _rebuild-vs-plugin:
     uv sync --directory packages/vs-avd --group test --reinstall-package vsavd
 
-# End-to-end throughput benchmark. Runs every variant in scripts/benchmark_e2e.toml
-# and reports wall-clock timings and amortized fps per group.
-benchmark-e2e *ARGS:
+# End-to-end throughput benchmark. Runs every variant in scripts/configs/benchmark_e2e.toml
+# and reports wall-clock timings and amortized fps per group. The variants run
+# `target/release/av-denoise` directly, so compiling is never timed.
+benchmark-e2e *ARGS: _build-benchmark-bin
     uv run --directory scripts src/benchmark_e2e.py {{ARGS}}
+
+_build-benchmark-bin:
+    cargo build --release --bin av-denoise --features vulkan,binary

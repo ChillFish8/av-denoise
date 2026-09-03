@@ -17,7 +17,7 @@ from typing import IO
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG = REPO_ROOT / "scripts" / "benchmark_e2e.toml"
+DEFAULT_CONFIG = REPO_ROOT / "scripts" / "configs" / "benchmark_e2e.toml"
 
 PLACEHOLDER_RE = re.compile(r"\{\{\s*(\w+)\s*\}\}")
 FRAME_RE = re.compile(r"frame=\s*(\d+)")
@@ -272,7 +272,7 @@ class StderrTail:
     def __init__(self, stream: IO[bytes], label: str) -> None:
         self.stream = stream
         self.label = label
-        self.last_frames: int | None = None
+        self.last_frames: int | None = None  # highest `frame=` seen
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self) -> None:
@@ -296,7 +296,9 @@ class StderrTail:
     def _emit(self, raw: bytes) -> None:
         line = raw.decode("utf-8", errors="replace")
         if match := FRAME_RE.search(line):
-            self.last_frames = int(match.group(1))
+            frames = int(match.group(1))
+            if self.last_frames is None or frames > self.last_frames:
+                self.last_frames = frames
         sys.stderr.write(f"[{self.label}] {line}\n")
         sys.stderr.flush()
 
