@@ -1767,7 +1767,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         // allocation.
         let mut out = FrameOutput::F32(std::mem::take(&mut self.output_scratch));
         pending.wait_into(&mut out)?;
-        self.output_scratch = out.into_f32().unwrap_or_default();
+        self.output_scratch = out.into_f32().expect("submitted as f32");
         Ok(Some(self.output_scratch.as_slice()))
     }
 

@@ -41,11 +41,6 @@ impl<R: Runtime> Pending<R> {
     /// In `F32` mode `wait` and `wait_into` strip the padding lanes
     /// between `channels` and `stored_ch`. In `Wire` mode the pack kernel
     /// has already done that on the GPU.
-    ///
-    /// This exists so code outside `nlmeans` that reads back its own GPU
-    /// buffer, such as the collaborative filter that runs after this
-    /// denoiser, can hand callers the same `Pending` type this module
-    /// produces.
     pub(crate) fn new(
         fut: ReadFuture,
         channels: u32,

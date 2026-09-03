@@ -1,3 +1,4 @@
+use av_denoise_core::Depth;
 use av_denoise_core::nlmeans::kernels::gpu_pack_wire;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
@@ -15,9 +16,8 @@ pub struct PackWireBench<R: Runtime> {
     pub client: ComputeClient<R>,
     pub ch: u32,
     pub ch_name: &'static str,
-    /// Wire bytes per sample, so the bench covers both codecs.
-    pub bytes_per_sample: u32,
-    pub depth_name: &'static str,
+    /// Covers both wire codecs, 4 samples per word at 8-bit and 2 above it.
+    pub depth: Depth,
 }
 
 impl<R: Runtime> PackWireBench<R> {
@@ -26,7 +26,7 @@ impl<R: Runtime> PackWireBench<R> {
     }
 
     fn words(&self) -> u32 {
-        self.samples().div_ceil(4 / self.bytes_per_sample)
+        self.samples().div_ceil(self.depth.wire_pack().samples_per_word())
     }
 }
 
@@ -44,7 +44,9 @@ impl<R: Runtime> Benchmark for PackWireBench<R> {
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let pixels = W * H;
         let stored_ch = stored_channels(self.ch);
-        let samples_per_word = 4 / self.bytes_per_sample;
+        // One `Depth` yields both, so the bench cannot pair a scale with
+        // the wrong lane count the way hand-written literals could.
+        let pack = self.depth.wire_pack();
         let total_threads = COPY_GRID_1D * BLOCK_1D;
 
         unsafe {
@@ -54,13 +56,13 @@ impl<R: Runtime> Benchmark for PackWireBench<R> {
                 CubeDim::new_1d(BLOCK_1D),
                 ArrayArg::from_raw_parts(args.src.clone(), (pixels * stored_ch) as usize),
                 ArrayArg::from_raw_parts(args.dst.clone(), self.words() as usize),
-                255.0f32,
+                pack.max(),
                 pixels,
                 self.ch,
                 stored_ch,
                 self.ch,
                 false,
-                samples_per_word,
+                pack.samples_per_word(),
                 self.words(),
                 total_threads,
             );
@@ -69,7 +71,7 @@ impl<R: Runtime> Benchmark for PackWireBench<R> {
     }
 
     fn name(&self) -> String {
-        format!("gpu_pack_wire_1080p_{}_{}", self.depth_name, self.ch_name)
+        format!("gpu_pack_wire_1080p_{:?}_{}", self.depth, self.ch_name)
     }
     fn sync(&self) {
         block_sync(&self.client);

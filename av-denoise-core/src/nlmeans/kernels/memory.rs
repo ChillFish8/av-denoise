@@ -56,7 +56,7 @@ pub fn gpu_zero_buffers(
     }
 }
 
-/// Quantizes a denoised frame into wire bytes, packed into `u32` words.
+/// Quantises a denoised frame into wire bytes, packed into `u32` words.
 ///
 /// `src` holds `pixels * stored_ch` values. The lanes between `channels`
 /// and `stored_ch` are padding and are skipped here, so the host reads

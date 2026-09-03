@@ -1,3 +1,4 @@
+use av_denoise_core::Depth;
 use cubecl::prelude::*;
 
 mod kernels;
@@ -51,13 +52,12 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         });
     }
     for &(ch, ch_name) in CHANNELS {
-        for &(bytes_per_sample, depth_name) in &[(1u32, "8bit"), (2u32, "16bit")] {
+        for depth in [Depth::Eight, Depth::Ten] {
             run(PackWireBench {
                 client: client.clone(),
                 ch,
                 ch_name,
-                bytes_per_sample,
-                depth_name,
+                depth,
             });
         }
     }

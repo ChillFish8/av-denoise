@@ -248,7 +248,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let Some(pending) = self.denoise_submit()? else {
             return Ok(None);
         };
-        Ok(Some(pending.wait()?.into_f32().unwrap_or_default()))
+        Ok(Some(pending.wait()?.into_f32().expect("submitted as f32")))
     }
 
     /// Produces the frames still held at the end of a stream.
@@ -281,7 +281,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 && let Some(handle) = self.run_collab_stage(&view)?
             {
                 let pending = self.start_readback(handle, OutputFormat::F32);
-                let frame = pending.wait()?.into_f32().unwrap_or_default();
+                let frame = pending.wait()?.into_f32().expect("submitted as f32");
                 sink(&frame);
                 emitted += 1;
             }
