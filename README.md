@@ -215,6 +215,11 @@ The project supports the following accelerators/gpus:
 Run `av-denoise list-devices` to see which of these your machine offers and what to pass to
 `--device`.
 
+Every global flag also reads an environment variable named after it with an `AVD_` prefix, so
+`AVD_DEVICE=discrete:1` pins a card for a whole shell. `AVD_ACCELERATORS`, `AVD_PRESET`,
+`AVD_CHANNEL_MODE` and `AVD_PROGRESS` work the same way. A flag given on the command line wins
+over its variable.
+
 There is no software backend. The collaborative filter aggregates its filtered patches through
 atomic floating-point adds, and CubeCL's CPU runtime does not implement atomics. A software
 *device* is still reachable with `--device cpu` where the platform provides one, such as lavapipe

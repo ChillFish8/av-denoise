@@ -87,7 +87,7 @@ pub struct Args {
     /// `veryslow` widen its search radius.
     ///
     /// `base` is the default.
-    #[arg(long, default_value = "base", global = true)]
+    #[arg(long, env = "AVD_PRESET", default_value = "base", global = true)]
     pub preset: Preset,
 
     /// Which hardware backends to try, in order of preference.
@@ -96,7 +96,14 @@ pub struct Args {
     /// program exits with an error.
     ///
     /// The list is comma-separated, for example `cuda,vulkan`.
-    #[arg(short = 'A', long, value_delimiter = ',', default_values_t = get_default_accelerators(), global = true)]
+    #[arg(
+        short = 'A',
+        long,
+        env = "AVD_ACCELERATORS",
+        value_delimiter = ',',
+        default_values_t = get_default_accelerators(),
+        global = true
+    )]
     pub accelerators: Vec<Accelerator>,
 
     /// Which device to use on the chosen backend.
@@ -113,7 +120,7 @@ pub struct Args {
     /// `cpu` picks a software device where the platform offers one,
     /// such as lavapipe under Vulkan. It is for testing the pipeline,
     /// not for real encodes.
-    #[arg(short, long, default_value = "default", global = true)]
+    #[arg(short, long, env = "AVD_DEVICE", default_value = "default", global = true)]
     pub device: Device,
 
     /// Which planes of the video to clean (comma-separated).
@@ -132,6 +139,7 @@ pub struct Args {
     /// other modes.
     #[arg(
         long,
+        env = "AVD_CHANNEL_MODE",
         value_enum,
         value_delimiter = ',',
         default_value = "luma,chroma",
@@ -150,7 +158,7 @@ pub struct Args {
     ///
     /// Neither bar is drawn unless stderr is a terminal, and there is
     /// nothing to show a bar for on piped input.
-    #[arg(long, global = true)]
+    #[arg(long, env = "AVD_PROGRESS", global = true)]
     pub progress: bool,
 
     #[command(subcommand)]
