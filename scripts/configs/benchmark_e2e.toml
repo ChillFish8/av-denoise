@@ -6,12 +6,14 @@
 # Every variant is a shell command run from the repo root. `{{input}}` is
 # replaced with the group's input and `{{output}}` with a per-variant file
 # under `output_dir`. A variant that names no `{{output}}`, like the ones
-# below, writes nothing and is measured against ffmpeg's null sink.
+# below, keeps nothing and sends its frames to /dev/null.
 #
 # fps is amortized. It divides the clip's frame count by the wall clock, so
-# startup, shader compilation, scene detection and the sink all count. The
-# sinks run `-nostats -loglevel error` to keep the terminal readable, so the
-# count comes from a probe of the input rather than from ffmpeg's progress.
+# startup, shader compilation and scene detection all count. Frames are
+# discarded straight to /dev/null rather than through an encoder, so what is
+# measured is the denoiser and its y4m output, with nothing downstream. The
+# frame count comes from a probe of the input, since a run prints no
+# progress of its own to scrape.
 # The av-denoise arms run `target/release/av-denoise` directly rather than
 # through `cargo run`, so compilation is never part of a measurement. The
 # `just benchmark-e2e` recipe builds that binary first.
@@ -72,52 +74,40 @@ input = "data/benchmark-samples/1080p-8bit.mkv"
   command = """
   ./target/release/av-denoise -A vulkan nlmeans --preset veryfast \
     --strength 1.0 --patch-radius 3 --search-radius 7 \
-    --workers 2 --input {{input}} \
-  | ffmpeg -hide_banner -nostats -loglevel error -y \
-      -f yuv4mpegpipe -i - -f null -
+    --workers 2 --input {{input}} > /dev/null
   """
 
   [[groups.variants]]
   name = "avd_nlmeans_base"
   command = """
-  ./target/release/av-denoise -A vulkan nlmeans --workers 2 --input {{input}} \
-  | ffmpeg -hide_banner -nostats -loglevel error -y \
-      -f yuv4mpegpipe -i - -f null -
+  ./target/release/av-denoise -A vulkan nlmeans --workers 2 --input {{input}} > /dev/null
   """
 
   [[groups.variants]]
   name = "avd_nl4d_base"
   command = """
-  ./target/release/av-denoise -A vulkan nl4d --workers 2 --input {{input}} \
-  | ffmpeg -hide_banner -nostats -loglevel error -y \
-      -f yuv4mpegpipe -i - -f null -
+  ./target/release/av-denoise -A vulkan nl4d --workers 2 --input {{input}} > /dev/null
   """
 
   [[groups.variants]]
   name = "vbm3d_normal"
   command = """
   uv run --directory scripts --group vs vspipe \
-    --arg src={{input}} --arg device=${BENCH_HIP_DEVICE:-0} --arg profile=normal vs/vbm3d_denoise.vpy - -c y4m \
-  | ffmpeg -hide_banner -nostats -loglevel error -y \
-      -f yuv4mpegpipe -i - -f null -
+    --arg src={{input}} --arg device=${BENCH_HIP_DEVICE:-0} --arg profile=normal vs/vbm3d_denoise.vpy - -c y4m > /dev/null
   """
 
   [[groups.variants]]
   name = "vbm3d_fast"
   command = """
   uv run --directory scripts --group vs vspipe \
-    --arg src={{input}} --arg device=${BENCH_HIP_DEVICE:-0} --arg profile=fast vs/vbm3d_denoise.vpy - -c y4m \
-  | ffmpeg -hide_banner -nostats -loglevel error -y \
-      -f yuv4mpegpipe -i - -f null -
+    --arg src={{input}} --arg device=${BENCH_HIP_DEVICE:-0} --arg profile=fast vs/vbm3d_denoise.vpy - -c y4m > /dev/null
   """
 
   [[groups.variants]]
   name = "vbm3d_lc"
   command = """
   uv run --directory scripts --group vs vspipe \
-    --arg src={{input}} --arg device=${BENCH_HIP_DEVICE:-0} --arg profile=lc vs/vbm3d_denoise.vpy - -c y4m \
-  | ffmpeg -hide_banner -nostats -loglevel error -y \
-      -f yuv4mpegpipe -i - -f null -
+    --arg src={{input}} --arg device=${BENCH_HIP_DEVICE:-0} --arg profile=lc vs/vbm3d_denoise.vpy - -c y4m > /dev/null
   """
 
 # The 4K clip is 10-bit, and ffmpeg's OpenCL NLMeans rejects every 10-bit
@@ -133,50 +123,38 @@ input = "data/benchmark-samples/4k-10bit.mkv"
   command = """
   ./target/release/av-denoise -A vulkan nlmeans --preset veryfast \
     --strength 1.0 --patch-radius 3 --search-radius 7 \
-    --workers 2 --input {{input}} \
-  | ffmpeg -hide_banner -nostats -loglevel error -y \
-      -f yuv4mpegpipe -i - -f null -
+    --workers 2 --input {{input}} > /dev/null
   """
 
   [[groups.variants]]
   name = "avd_nlmeans_base"
   command = """
-  ./target/release/av-denoise -A vulkan nlmeans --workers 2 --input {{input}} \
-  | ffmpeg -hide_banner -nostats -loglevel error -y \
-      -f yuv4mpegpipe -i - -f null -
+  ./target/release/av-denoise -A vulkan nlmeans --workers 2 --input {{input}} > /dev/null
   """
 
   [[groups.variants]]
   name = "avd_nl4d_base"
   command = """
-  ./target/release/av-denoise -A vulkan nl4d --workers 2 --input {{input}} \
-  | ffmpeg -hide_banner -nostats -loglevel error -y \
-      -f yuv4mpegpipe -i - -f null -
+  ./target/release/av-denoise -A vulkan nl4d --workers 2 --input {{input}} > /dev/null
   """
 
   [[groups.variants]]
   name = "vbm3d_normal"
   command = """
   uv run --directory scripts --group vs vspipe \
-    --arg src={{input}} --arg device=${BENCH_HIP_DEVICE:-0} --arg profile=normal vs/vbm3d_denoise.vpy - -c y4m \
-  | ffmpeg -hide_banner -nostats -loglevel error -y \
-      -f yuv4mpegpipe -i - -f null -
+    --arg src={{input}} --arg device=${BENCH_HIP_DEVICE:-0} --arg profile=normal vs/vbm3d_denoise.vpy - -c y4m > /dev/null
   """
 
   [[groups.variants]]
   name = "vbm3d_fast"
   command = """
   uv run --directory scripts --group vs vspipe \
-    --arg src={{input}} --arg device=${BENCH_HIP_DEVICE:-0} --arg profile=fast vs/vbm3d_denoise.vpy - -c y4m \
-  | ffmpeg -hide_banner -nostats -loglevel error -y \
-      -f yuv4mpegpipe -i - -f null -
+    --arg src={{input}} --arg device=${BENCH_HIP_DEVICE:-0} --arg profile=fast vs/vbm3d_denoise.vpy - -c y4m > /dev/null
   """
 
   [[groups.variants]]
   name = "vbm3d_lc"
   command = """
   uv run --directory scripts --group vs vspipe \
-    --arg src={{input}} --arg device=${BENCH_HIP_DEVICE:-0} --arg profile=lc vs/vbm3d_denoise.vpy - -c y4m \
-  | ffmpeg -hide_banner -nostats -loglevel error -y \
-      -f yuv4mpegpipe -i - -f null -
+    --arg src={{input}} --arg device=${BENCH_HIP_DEVICE:-0} --arg profile=lc vs/vbm3d_denoise.vpy - -c y4m > /dev/null
   """
