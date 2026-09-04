@@ -14,6 +14,7 @@
 # measured is the denoiser and its y4m output, with nothing downstream. The
 # frame count comes from a probe of the input, since a run prints no
 # progress of its own to scrape.
+#
 # The av-denoise arms run `target/release/av-denoise` directly rather than
 # through `cargo run`, so compilation is never part of a measurement. The
 # `just benchmark-e2e` recipe builds that binary first.
@@ -22,9 +23,12 @@
 # environment variable, and every one of them counts the cards in PCI order,
 # so the same index means the same card in all three:
 #
-#   AVD_DEVICE=discrete:1     av-denoise, through Vulkan
+#   AVD_DEVICE=discrete:1     av-denoise, both the CLI and the plugin arms
 #   BENCH_OCL_DEVICE=1        ffmpeg, the device half of `ocl:0.N`
 #   BENCH_HIP_DEVICE=1        V-BM3D, through HIP
+#
+# The CLI reads `AVD_DEVICE` itself. The plugin does not, so the plugin arms
+# read it in the shell and pass it through as `--arg device=`.
 #
 # Running the whole thing on the second card is therefore:
 #
@@ -42,14 +46,29 @@
 #   avd_nlmeans_ffmpeg_match   our NLMeans set to those same defaults
 #   avd_nlmeans_base           our NLMeans on `--preset base`
 #   avd_nl4d_base              our NL4D on `--preset base`
+#   avd_vs_nl4d_base           our three denoisers reached through the
+#   avd_vs_nlmhq_base          VapourSynth plugin instead of the CLI, so what
+#   avd_vs_nlm_base            each front end costs is readable
 #   vbm3d_normal/fast/lc       V-BM3D through VapourSynth on its three
 #                              cheapest profiles
 #
-# The V-BM3D arms need the `vs` dependency group, which `uv run` installs on
-# first use, and bestsource indexes the clip before the first frame comes
-# out. Pass `--warmup` to keep that indexing pass out of the timings.
+# `avd_vs_nlmhq_base` is the plugin's counterpart to `avd_nlmeans_base`, since
+# the CLI's `base` preset resolves `nlmeans` to the `hq` variant.
+# `avd_vs_nlm_base` runs the `fast` variant that no CLI arm here covers at
+# `base`.
+#
+# The plugin arms are driven by vspipe on its own defaults, with no `--requests`
+# flag, so what they measure is what a VapourSynth user gets. Frames reaching
+# the filter out of order cost it a lot of throughput, and pinning the request
+# count would hide that.
+#
+# The VapourSynth arms need the `vs` dependency group, which `uv run` installs
+# on first use, and bestsource indexes the clip before the first frame comes
+# out. Pass `--warmup` to keep that indexing pass out of the timings. That group
+# takes the plugin from `packages/vs-avd` rather than PyPI, so both front ends
+# measure the same working tree.
 
-repeats = 1
+repeats = 3
 warmup = false
 
 # Where `{{output}}` files go. Commented out, so they land in a temporary
@@ -87,6 +106,30 @@ input = "data/benchmark-samples/1080p-8bit.mkv"
   name = "avd_nl4d_base"
   command = """
   ./target/release/av-denoise -A vulkan nl4d --workers 2 --input {{input}} > /dev/null
+  """
+
+  [[groups.variants]]
+  name = "avd_vs_nl4d_base"
+  command = """
+  uv run --directory scripts --group vs vspipe \
+    --arg src={{input}} --arg algo=nl4d --arg accelerators=vulkan \
+    --arg device=${AVD_DEVICE:-default} vs/avd_denoise.vpy - -c y4m > /dev/null
+  """
+
+  [[groups.variants]]
+  name = "avd_vs_nlmhq_base"
+  command = """
+  uv run --directory scripts --group vs vspipe \
+    --arg src={{input}} --arg algo=nlmhq --arg accelerators=vulkan \
+    --arg device=${AVD_DEVICE:-default} vs/avd_denoise.vpy - -c y4m > /dev/null
+  """
+
+  [[groups.variants]]
+  name = "avd_vs_nlm_base"
+  command = """
+  uv run --directory scripts --group vs vspipe \
+    --arg src={{input}} --arg algo=nlm --arg accelerators=vulkan \
+    --arg device=${AVD_DEVICE:-default} vs/avd_denoise.vpy - -c y4m > /dev/null
   """
 
   [[groups.variants]]
@@ -136,6 +179,30 @@ input = "data/benchmark-samples/4k-10bit.mkv"
   name = "avd_nl4d_base"
   command = """
   ./target/release/av-denoise -A vulkan nl4d --workers 2 --input {{input}} > /dev/null
+  """
+
+  [[groups.variants]]
+  name = "avd_vs_nl4d_base"
+  command = """
+  uv run --directory scripts --group vs vspipe \
+    --arg src={{input}} --arg algo=nl4d --arg accelerators=vulkan \
+    --arg device=${AVD_DEVICE:-default} vs/avd_denoise.vpy - -c y4m > /dev/null
+  """
+
+  [[groups.variants]]
+  name = "avd_vs_nlmhq_base"
+  command = """
+  uv run --directory scripts --group vs vspipe \
+    --arg src={{input}} --arg algo=nlmhq --arg accelerators=vulkan \
+    --arg device=${AVD_DEVICE:-default} vs/avd_denoise.vpy - -c y4m > /dev/null
+  """
+
+  [[groups.variants]]
+  name = "avd_vs_nlm_base"
+  command = """
+  uv run --directory scripts --group vs vspipe \
+    --arg src={{input}} --arg algo=nlm --arg accelerators=vulkan \
+    --arg device=${AVD_DEVICE:-default} vs/avd_denoise.vpy - -c y4m > /dev/null
   """
 
   [[groups.variants]]

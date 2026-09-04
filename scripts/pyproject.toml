@@ -6,12 +6,13 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = ["pydantic>=2.9"]
 
-# The V-BM3D reference arm of the end-to-end benchmark runs under
-# VapourSynth. It is a group rather than a dependency because the rest of
-# the scripts here need none of it, and the stack is large.
+# The VapourSynth arms of the end-to-end benchmark, our own plugin and the
+# V-BM3D reference. It is a group rather than a dependency because the rest
+# of the scripts here need none of it, and the stack is large.
 [dependency-groups]
 vs = [
     "vapoursynth>=79",
+    "vsavd",
     # Pinned: 2.17.x bundles HIP 7.14, whose bitcode needs symbols this
     # machine's ROCm does not carry, and every BM3D call fails with an
     # undefined `__amd_streamOpsDecrement` reported as
@@ -20,6 +21,13 @@ vs = [
     "vapoursynth-bm3dhip==2.16",
     "vsjetpack[amd,denoise]>=2.2.4",
 ]
+
+# The local crate rather than the published wheel, so the plugin arms of the
+# benchmark measure the same working tree the CLI arms do. `uv sync` builds
+# the cdylib through setuptools-rust the first time, and after a Rust change
+# `just benchmark-e2e` reinstalls it so a stale build is never measured.
+[tool.uv.sources]
+vsavd = { path = "../packages/vs-avd", editable = true }
 
 [[tool.uv.index]]
 url = "https://jaded-encoding-thaumaturgy.github.io/vs-wheels/simple"

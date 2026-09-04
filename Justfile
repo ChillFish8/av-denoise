@@ -69,8 +69,15 @@ _rebuild-vs-plugin:
 # End-to-end throughput benchmark. Runs every variant in scripts/configs/benchmark_e2e.toml
 # and reports wall-clock timings and amortized fps per group. The variants run
 # `target/release/av-denoise` directly, so compiling is never timed.
-benchmark-e2e *ARGS: _build-benchmark-bin
+benchmark-e2e *ARGS: _build-benchmark-bin _rebuild-benchmark-vs-plugin
     uv run --directory scripts src/benchmark_e2e.py {{ARGS}}
 
 _build-benchmark-bin:
     cargo build --release --bin av-denoise --features vulkan,binary
+
+# The benchmark's plugin arms take vsavd from `packages/vs-avd` as an editable
+# install, and `uv run` does not rebuild the cdylib after a Rust change, so they
+# would otherwise measure a stale build against a freshly built CLI. Cargo is
+# incremental, so this costs about a second when nothing has moved.
+_rebuild-benchmark-vs-plugin:
+    uv sync --directory scripts --group vs --reinstall-package vsavd

@@ -756,6 +756,7 @@ dependencies = [
 vs = [
     { name = "vapoursynth" },
     { name = "vapoursynth-bm3dhip" },
+    { name = "vsavd" },
     { name = "vsjetpack", extra = ["amd", "denoise"] },
 ]
 
@@ -766,6 +767,7 @@ requires-dist = [{ name = "pydantic", specifier = ">=2.9" }]
 vs = [
     { name = "vapoursynth", specifier = ">=79" },
     { name = "vapoursynth-bm3dhip", specifier = "==2.16" },
+    { name = "vsavd", editable = "../packages/vs-avd" },
     { name = "vsjetpack", extras = ["amd", "denoise"], specifier = ">=2.2.4" },
 ]
 
@@ -1464,6 +1466,20 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/5c/fc/d8ddcb0c70cee45f120db5de79fbbe9c997aa753baabc567b182ec66987d/vs_placebo-2.0.4-py3-none-musllinux_1_2_x86_64.whl", hash = "sha256:3bea36e10f391ce8a3c5afd5ccac16e64d4435b80a6825015f8d2a5c745be119", size = 6098216, upload-time = "2026-07-14T10:29:58.047Z" },
     { url = "https://files.pythonhosted.org/packages/12/ee/74abc0bad6ebc107e6182749837cb2e2ddcf70617a72a23aa245bb46888d/vs_placebo-2.0.4-py3-none-win_amd64.whl", hash = "sha256:3715ee44db698a52334a9a4be61ef29bd6d06d3d491eb905b2af7a4193d27411", size = 6274904, upload-time = "2026-07-14T10:30:00.258Z" },
 ]
+
+[[package]]
+name = "vsavd"
+source = { editable = "../packages/vs-avd" }
+dependencies = [
+    { name = "vapoursynth" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "vapoursynth" }]
+
+[package.metadata.requires-dev]
+dev = [{ name = "mypy" }]
+test = [{ name = "pytest" }]
 
 [[package]]
 name = "vsjetpack"
