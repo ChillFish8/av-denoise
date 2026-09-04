@@ -42,12 +42,6 @@ pub enum Accelerator {
     ///
     /// Nvidia GPUs only.
     Cuda,
-    #[cfg(any(feature = "rocm", docsrs))]
-    #[cfg_attr(docsrs, doc(cfg(feature = "rocm")))]
-    /// Runs kernels through the AMD ROCm backend.
-    ///
-    /// AMD GPUs only.
-    Rocm,
     #[cfg(any(feature = "vulkan", docsrs))]
     #[cfg_attr(docsrs, doc(cfg(feature = "vulkan")))]
     /// Runs kernels through the wgpu Vulkan backend.
@@ -61,6 +55,16 @@ pub enum Accelerator {
     ///
     /// This is the only option on Apple Silicon.
     Metal,
+    #[cfg(any(feature = "rocm", docsrs))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "rocm")))]
+    /// Runs kernels through the AMD ROCm backend.
+    ///
+    /// WARNING: ROCm is *not* the recommended backend for AMD GPUs, it is slower and often
+    /// plagued with issues from drivers, vulkan will almost certainly be faster and
+    /// less buggy.
+    ///
+    /// AMD GPUs only.
+    Rocm,
 }
 
 /// Returns every accelerator this build enables, in the order to try
