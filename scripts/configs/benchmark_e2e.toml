@@ -61,15 +61,9 @@
 # flag, so what they measure is what a VapourSynth user gets. Frames reaching
 # the filter out of order cost it a lot of throughput, and pinning the request
 # count would hide that.
-#
-# The VapourSynth arms need the `vs` dependency group, which `uv run` installs
-# on first use, and bestsource indexes the clip before the first frame comes
-# out. Pass `--warmup` to keep that indexing pass out of the timings. That group
-# takes the plugin from `packages/vs-avd` rather than PyPI, so both front ends
-# measure the same working tree.
 
-repeats = 3
-warmup = false
+repeats = 1
+warmup = true
 
 # Where `{{output}}` files go. Commented out, so they land in a temporary
 # directory that is deleted when the run finishes.
