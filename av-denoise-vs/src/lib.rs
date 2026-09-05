@@ -5,6 +5,7 @@ pub mod frames;
 pub mod params;
 
 use anyhow::Error;
+use tracing_subscriber::EnvFilter;
 use vapoursynth::core::CoreRef;
 use vapoursynth::plugins::{Filter, FilterArgument, Metadata};
 use vapoursynth::prelude::{API, Node};
@@ -12,6 +13,19 @@ use vapoursynth::{export_vapoursynth_plugin, make_filter_function};
 
 use crate::filter::Denoise;
 use crate::params::{AlgorithmKind, RawParams};
+
+/// Installs the tracing subscriber that writes the plugin's logs to stderr.
+///
+/// `RUST_LOG` picks what is printed, and without it the plugin logs at `warn` so
+/// an ordinary render stays quiet.
+fn init_logging() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
+}
 
 /// Reads one optional UTF-8 script argument, naming `field` in the error
 /// when the bytes are not valid UTF-8.

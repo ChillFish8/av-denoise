@@ -15,6 +15,7 @@ use vapoursynth::prelude::{API, FrameRef, FrameRefMut, Node, Property};
 use vapoursynth::video_info::{Resolution, VideoInfo};
 
 use crate::frames::{pack_plane, unpack_plane_into, window_indices};
+use crate::init_logging;
 use crate::params::{AlgorithmKind, RawFormat, RawParams, layout_from_format, plane_options_from};
 
 /// The running pipeline and the output frame it last produced.
@@ -88,6 +89,8 @@ impl<'core> Denoise<'core> {
         algorithm_kind: AlgorithmKind,
         raw: &RawParams,
     ) -> Result<Self, Error> {
+        init_logging();
+
         // `export_vapoursynth_plugin!` expands to the whole body of the
         // plugin's entry point, so there is no earlier hook of ours to
         // raise the stack limit in.
