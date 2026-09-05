@@ -10,7 +10,7 @@ use super::helpers::{
     plant_patch,
 };
 use crate::collab::geometry::{fused_cubes_x, ref_count, ref_pos, refs_along};
-use crate::collab::kernels::aggregate::{WEIGHT_GAIN, cross_frame_accum_scale, weight_scale};
+use crate::collab::kernels::aggregate::{WEIGHT_GAIN, cross_frame_accum_scale, kaiser_window, weight_scale};
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, STEP};
@@ -105,6 +105,9 @@ struct Setup {
     /// [`dct_noise_profile`]. The weight scale still follows whatever
     /// profile is in force.
     profile_override: Option<[f32; 8]>,
+    /// The aggregation window's `beta`. `0.0`, what every run here uses
+    /// unless it says otherwise, is uniform aggregation.
+    kaiser_beta: f32,
 }
 
 impl Setup {
@@ -138,6 +141,7 @@ impl Setup {
             rho: 0.0,
             thsad: THSAD,
             profile_override: None,
+            kaiser_beta: 0.0,
         }
     }
 
@@ -347,6 +351,7 @@ struct Buffers {
     neighbour_slots: Handle,
     sigma: Handle,
     dct_profile: Handle,
+    kaiser: Handle,
     accum: Handle,
     wsum: Handle,
     group_weight: Handle,
@@ -377,6 +382,7 @@ fn buffers(s: &Setup) -> Buffers {
         neighbour_slots: client.create_from_slice(u32::as_bytes(&s.neighbour_slots)),
         sigma: client.create_from_slice(f32::as_bytes(&[s.sigma])),
         dct_profile: client.create_from_slice(f32::as_bytes(&s.profile())),
+        kaiser: client.create_from_slice(f32::as_bytes(&kaiser_window(s.kaiser_beta))),
         // Zeroed here rather than by `collab_zero_accum`, since the
         // scatter is the only thing writing them in these runs.
         accum: client.create_from_slice(i32::as_bytes(&vec![0i32; accum_len])),
@@ -425,6 +431,7 @@ fn run_fused(s: &Setup) -> Aggregated {
             ArrayArg::from_raw_parts(b.neighbour_slots.clone(), s.neighbour_slots.len()),
             ArrayArg::from_raw_parts(b.sigma.clone(), 1),
             ArrayArg::from_raw_parts(b.dct_profile.clone(), 8),
+            ArrayArg::from_raw_parts(b.kaiser.clone(), PATCH_SIZE as usize),
             ArrayArg::from_raw_parts(b.accum.clone(), b.accum_len),
             ArrayArg::from_raw_parts(b.wsum.clone(), b.wsum_len),
             ArrayArg::from_raw_parts(b.group_weight.clone(), b.refs),
@@ -970,6 +977,37 @@ fn a_badly_matched_group_still_reaches_the_accumulators() {
                 got.wsum[base + idx] > 0,
                 "thsad scale {scale}: {count} references cover pixel {idx} and its weight \
                  sum is still {}",
+                got.wsum[base + idx],
+            );
+        }
+    }
+}
+
+/// A patch corner is weighted by the square of the window's end tap,
+/// `0.193` at `beta = 2`, so the smallest weight the fixed point has to
+/// resolve drops about fivefold against the uniform case.
+#[test]
+fn a_windowed_badly_matched_group_still_reaches_the_accumulators() {
+    let (w, h) = (32u32, 32u32);
+    let counts = reference_cover_counts(w, h);
+
+    for scale in [1.0f32, 64.0, 1024.0, 4096.0] {
+        let mut s = cross_frame_setup(w, h, 2);
+        s.spatial_radius = 9;
+        s.confidence.fill(0.0);
+        s.c_min = 0.0;
+        s.thsad = THSAD * scale;
+        s.kaiser_beta = 2.0;
+
+        let got = run_fused(&s);
+        let base = s.centre_slot as usize * s.pixels();
+        for (idx, &count) in counts.iter().enumerate() {
+            if count == 0 {
+                continue;
+            }
+            assert!(
+                got.wsum[base + idx] > 0,
+                "thsad scale {scale}: {count} references cover pixel {idx} and its weight                  sum is still {} with the window on",
                 got.wsum[base + idx],
             );
         }

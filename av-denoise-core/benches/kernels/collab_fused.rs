@@ -1,5 +1,6 @@
+use av_denoise_core::collab::PATCH_SIZE;
 use av_denoise_core::collab::geometry::{fused_cubes_x, ref_count, refs_along};
-use av_denoise_core::collab::kernels::aggregate::{cross_frame_accum_scale, weight_scale};
+use av_denoise_core::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
 use av_denoise_core::collab::kernels::fused::collab_fused;
 use av_denoise_core::collab::kernels::transforms::dct_noise_profile;
 use cubecl::benchmark::Benchmark;
@@ -52,6 +53,9 @@ pub struct CollabFusedInput {
     pub neighbour_slots: Handle,
     pub sigma: Handle,
     pub dct_profile: Handle,
+    /// The uniform aggregation window. The bench measures the kernel's
+    /// own cost, and a taper changes none of the work it does.
+    pub kaiser: Handle,
     pub accum: Handle,
     pub wsum: Handle,
     pub group_weight: Handle,
@@ -93,6 +97,7 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
         let dct_profile = self
             .client
             .create_from_slice(f32::as_bytes(&dct_noise_profile(0.0)));
+        let kaiser = self.client.create_from_slice(f32::as_bytes(&kaiser_window(0.0)));
 
         // One accumulator region per ring slot, the same shape
         // `Nl4dDenoiser` allocates, so the scatter crosses the same
@@ -110,6 +115,7 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
             neighbour_slots,
             sigma,
             dct_profile,
+            kaiser,
             accum,
             wsum,
             group_weight,
@@ -146,6 +152,7 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
                 ArrayArg::from_raw_parts(args.neighbour_slots.clone(), NEIGHBOUR_SLOTS.len()),
                 ArrayArg::from_raw_parts(args.sigma.clone(), stored_ch as usize),
                 ArrayArg::from_raw_parts(args.dct_profile.clone(), 8),
+                ArrayArg::from_raw_parts(args.kaiser.clone(), PATCH_SIZE as usize),
                 ArrayArg::from_raw_parts(args.accum.clone(), frame_len * N_FRAMES as usize),
                 ArrayArg::from_raw_parts(args.wsum.clone(), pixels * N_FRAMES as usize),
                 ArrayArg::from_raw_parts(args.group_weight.clone(), refs),

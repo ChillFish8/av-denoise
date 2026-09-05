@@ -177,6 +177,17 @@ pub struct Nl4dArgs {
     #[arg(long)]
     pub c_min: Option<f32>,
 
+    /// Tapers each filtered patch toward its edges as it is blended
+    /// back into the frame, with a Kaiser window of this `beta`.
+    ///
+    /// Between `0` and `8`. Library default is 2, BM3D's own value. A
+    /// pixel is covered by many patches, each of which made its own
+    /// threshold decision, and a taper blends those decisions instead of
+    /// letting each one reach its patch boundary at full strength.
+    /// Larger tapers harder. `0` blends every patch uniformly.
+    #[arg(long)]
+    pub kaiser_beta: Option<f32>,
+
     /// Stops a poorly matched patch from being trusted less than a well
     /// matched one.
     ///
@@ -274,6 +285,7 @@ impl Nl4dArgs {
                     c_min: self.c_min.unwrap_or(defaults.c_min),
                     mismatch_scale: self.mismatch_scale.unwrap_or(defaults.mismatch_scale),
                     confidence_variance: !self.no_confidence_variance,
+                    kaiser_beta: self.kaiser_beta.unwrap_or(defaults.kaiser_beta),
                     // The CLI keeps the temporal EMA every calibrated
                     // preset assumes by default. Only `av-denoise-vs`
                     // needs window-local estimation, for random-access

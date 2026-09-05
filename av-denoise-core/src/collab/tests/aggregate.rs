@@ -1,12 +1,14 @@
 use cubecl::prelude::*;
 
 use super::helpers::{R, make_client, noisy_field_over};
+use crate::collab::PATCH_SIZE;
 use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use crate::collab::kernels::aggregate::{
     ACCUM_SCALE,
     WEIGHT_GAIN,
     collab_normalise,
     collab_zero_accum,
+    kaiser_window,
     weight_scale,
 };
 use crate::collab::kernels::fused::collab_fused;
@@ -201,6 +203,18 @@ fn zero_accum_clears_every_slot_of_a_buffer_past_the_grid_clamp() {
 /// neighbours, so this covers the single-frame scatter path the
 /// aggregation kernels are being checked on here.
 fn run_scatter_stage(frame: &[f32], width: u32, height: u32, sigma: f32) -> (Vec<f32>, Vec<i32>) {
+    run_scatter_stage_windowed(frame, width, height, sigma, 0.0)
+}
+
+/// [`run_scatter_stage`] with the aggregation window's `beta` chosen by
+/// the caller. `0.0` is the uniform blend every other run here uses.
+fn run_scatter_stage_windowed(
+    frame: &[f32],
+    width: u32,
+    height: u32,
+    sigma: f32,
+    kaiser_beta: f32,
+) -> (Vec<f32>, Vec<i32>) {
     let client = make_client();
     let refs_y = refs_along(height);
     let refs = ref_count(width, height);
@@ -217,6 +231,7 @@ fn run_scatter_stage(frame: &[f32], width: u32, height: u32, sigma: f32) -> (Vec
     let sigma_buf = client.create_from_slice(f32::as_bytes(&[sigma]));
     let profile = dct_noise_profile(0.0);
     let profile_buf = client.create_from_slice(f32::as_bytes(&profile));
+    let kaiser_buf = client.create_from_slice(f32::as_bytes(&kaiser_window(kaiser_beta)));
     let output = client.empty(pixels * size_of::<f32>());
 
     let floor = 2.0 * 3.0 * sigma * sigma * 64.0;
@@ -246,6 +261,7 @@ fn run_scatter_stage(frame: &[f32], width: u32, height: u32, sigma: f32) -> (Vec
             ArrayArg::from_raw_parts(slots_dummy, 1),
             ArrayArg::from_raw_parts(sigma_buf, 1),
             ArrayArg::from_raw_parts(profile_buf, 8),
+            ArrayArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
             ArrayArg::from_raw_parts(accum.clone(), pixels),
             ArrayArg::from_raw_parts(wsum.clone(), pixels),
             ArrayArg::from_raw_parts(group_weight, refs),
@@ -374,5 +390,50 @@ fn every_member_reaches_the_weight_sum_not_only_the_reference_patch() {
         "expected some interior pixel to collect more than the nine covering reference \
          patches a member-0-only writeback could manage, got a spread of {}",
         biggest / per_patch,
+    );
+}
+
+/// A window applied to the value but not to the weight would pull every
+/// pixel toward zero, hardest at the patch edges where the taper is
+/// deepest. Flat content is where that shows up exactly, because the
+/// weighted mean of one value is that value however the weights fall.
+#[test]
+fn the_aggregation_window_leaves_flat_content_flat() {
+    let (w, h) = (64u32, 64u32);
+    let level = 0.5f32;
+    let frame = vec![level; (w * h) as usize];
+
+    let (out, wsum) = run_scatter_stage_windowed(&frame, w, h, 0.02, 2.0);
+
+    for (idx, (&got, &weight)) in out.iter().zip(wsum.iter()).enumerate() {
+        assert!(weight > 0, "pixel {idx} collected no weight at all");
+        assert!(
+            (got - level).abs() < 1e-3,
+            "pixel {idx} came back at {got}, not the {level} every patch carried",
+        );
+    }
+}
+
+/// The window enters only at the scatter, so the groups, the threshold
+/// and every filtered value are identical across the two runs and the
+/// difference between them is the taper alone.
+#[test]
+fn the_aggregation_window_reweights_the_blend() {
+    let (w, h) = (64u32, 64u32);
+    let frame = noisy_field_over(w, h, 0.5, 0.05);
+
+    let (uniform, _) = run_scatter_stage_windowed(&frame, w, h, 0.02, 0.0);
+    let (windowed, _) = run_scatter_stage_windowed(&frame, w, h, 0.02, 2.0);
+
+    let moved = uniform
+        .iter()
+        .zip(windowed.iter())
+        .filter(|(a, b)| (*a - *b).abs() > 1e-4)
+        .count();
+    assert!(
+        moved > uniform.len() / 100,
+        "expected the taper to move a real share of the plane, only {moved} of {} pixels \
+         moved at all",
+        uniform.len(),
     );
 }

@@ -244,6 +244,10 @@ pub struct Nl4dOptions {
     /// hard-threshold shrinkage at all. Defaults to `true`. See
     /// [`crate::nl4d::Nl4dParams::confidence_variance`].
     pub confidence_variance: bool,
+    /// The `beta` of the Kaiser window each filtered patch is tapered
+    /// with as it is aggregated. Defaults to 2.0. `0.0` is uniform
+    /// aggregation. See [`crate::nl4d::Nl4dParams::kaiser_beta`].
+    pub kaiser_beta: f32,
     /// Estimates noise fresh from each frame's own window instead of
     /// smoothing it across the whole stream's history. Defaults to
     /// `false`, matching every calibrated preset.
@@ -275,6 +279,7 @@ impl Default for Nl4dOptions {
             c_min: defaults.c_min,
             mismatch_scale: defaults.mismatch_scale,
             confidence_variance: defaults.confidence_variance,
+            kaiser_beta: defaults.kaiser_beta,
             windowed_noise_estimation: false,
         }
     }
@@ -670,6 +675,7 @@ fn build_engine<R: Runtime>(
                 c_min: opts.c_min,
                 mismatch_scale: opts.mismatch_scale,
                 confidence_variance: opts.confidence_variance,
+                kaiser_beta: opts.kaiser_beta,
             };
             let denoiser =
                 Nl4dDenoiser::with_output_format(client, nl4d_params, width, height, output_format)

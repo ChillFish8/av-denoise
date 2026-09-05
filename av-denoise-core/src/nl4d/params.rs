@@ -10,6 +10,16 @@ use crate::nlmeans::{ChannelMode, HqParams, MotionCompensationMode, MotionEstima
 /// accepting it would only promise a range that is not there.
 pub const MAX_MISMATCH_SCALE: f32 = 16.0;
 
+/// The largest [`Nl4dParams::kaiser_beta`] worth accepting.
+///
+/// A Kaiser window's taps fall off faster the larger `beta` is. By 8 the
+/// end tap is under a fiftieth of the centre, so a patch's edge pixels
+/// contribute almost nothing and the step-4 grid is left covering each
+/// pixel with a handful of centres rather than a blend. Past that the
+/// window stops being a taper and starts being a mask, and the smallest
+/// weights fall under what the fixed-point accumulators resolve.
+pub const MAX_KAISER_BETA: f32 = 8.0;
+
 /// Tuning for [`super::Nl4dDenoiser`].
 ///
 /// `nlm` supplies the front end that builds the frame ring, the motion
@@ -60,6 +70,18 @@ pub struct Nl4dParams {
     /// between 3 and 13 depending on how noisy the source is, so raising
     /// this past that point stops changing anything.
     pub mismatch_scale: f32,
+    /// The `beta` of the Kaiser window each filtered patch is tapered
+    /// with as it is aggregated, in `0..=8`.
+    ///
+    /// A pixel is covered by many patches, each of which made its own
+    /// threshold decision. Tapering a patch toward its edges blends
+    /// those decisions rather than letting each reach its boundary at
+    /// full strength. Larger tapers harder. BM3D uses 2.0.
+    ///
+    /// Defaults to 2.0, BM3D's own value. `0.0` is exactly uniform
+    /// aggregation, which is what this did before the window existed.
+    /// See [`crate::collab::kernels::aggregate::kaiser_window`].
+    pub kaiser_beta: f32,
     /// Whether a temporal member's mismatch variance reaches the
     /// hard-threshold shrinkage.
     ///
@@ -92,6 +114,7 @@ impl Default for Nl4dParams {
             lambda_ht: 5.3,
             c_min: 0.05,
             mismatch_scale: 1.0,
+            kaiser_beta: 2.0,
             confidence_variance: true,
         }
     }
@@ -160,6 +183,13 @@ impl Nl4dParams {
             return Err(format!(
                 "mismatch_scale must be finite and in [0, {MAX_MISMATCH_SCALE}], got {}",
                 self.mismatch_scale
+            ));
+        }
+
+        if !(self.kaiser_beta.is_finite() && (0.0..=MAX_KAISER_BETA).contains(&self.kaiser_beta)) {
+            return Err(format!(
+                "kaiser_beta must be finite and in 0..={MAX_KAISER_BETA}, got {}",
+                self.kaiser_beta
             ));
         }
 

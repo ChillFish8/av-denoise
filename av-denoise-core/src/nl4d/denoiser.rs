@@ -7,6 +7,7 @@ use crate::collab::kernels::aggregate::{
     collab_normalise,
     collab_zero_accum,
     cross_frame_accum_scale,
+    kaiser_window,
     weight_scale,
 };
 use crate::collab::kernels::fused::collab_fused;
@@ -76,6 +77,9 @@ pub struct Nl4dDenoiser<R: Runtime> {
     group_weight: Handle,
     sigma_buf: Handle,
     dct_profile_buf: Handle,
+    /// The aggregation window's 8 taps, built once from the caller's
+    /// `kaiser_beta`. Eight ones when that is 0.
+    kaiser_buf: Handle,
     /// The correlation profile kept on the host too, so the weight
     /// normalisation can be derived from it every submit without a
     /// device readback.
@@ -193,6 +197,10 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         // white-noise default rather than every submit.
         let dct_profile = dct_noise_profile(0.0);
         let dct_profile_buf = client.create_from_slice(f32::as_bytes(&dct_profile));
+        // The window depends only on `kaiser_beta`, which cannot change
+        // over a denoiser's life, so it is built here rather than every
+        // submit.
+        let kaiser_buf = client.create_from_slice(f32::as_bytes(&kaiser_window(params.kaiser_beta)));
         // One region per physical ring slot of the front end's own frame
         // ring, `1 + 2 * temporal_radius` of them, see the `accum` field
         // doc for why. The ring is zeroed in full by pass 0 rather than
@@ -235,6 +243,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             sigma_buf,
             dct_profile_buf,
             dct_profile,
+            kaiser_buf,
             accum,
             wsum,
             outputs,
@@ -558,6 +567,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 ArrayArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
                 ArrayArg::from_raw_parts(self.sigma_buf.clone(), stored_ch as usize),
                 ArrayArg::from_raw_parts(self.dct_profile_buf.clone(), 8),
+                ArrayArg::from_raw_parts(self.kaiser_buf.clone(), PATCH_SIZE as usize),
                 ArrayArg::from_raw_parts(self.accum.clone(), accum_ring_len),
                 ArrayArg::from_raw_parts(self.wsum.clone(), wsum_ring_len),
                 ArrayArg::from_raw_parts(self.group_weight.clone(), refs),

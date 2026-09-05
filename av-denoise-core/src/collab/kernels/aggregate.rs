@@ -140,6 +140,65 @@ pub fn weight_scale(sigma: f32, dct_profile: &[f32; 8]) -> f32 {
     }
 }
 
+/// The zeroth-order modified Bessel function of the first kind, from its own power series.
+///
+/// `I0(x) = sum_k ((x / 2)^k / k!)^2`.
+///
+/// The terms fall off by more than a factor of `x^2 / (4 k^2)` each time, so the series
+/// is short and exact to `f64` well before the loop bound for every `beta`
+/// [`kaiser_window`] accepts.
+fn bessel_i0(x: f64) -> f64 {
+    let half = x / 2.0;
+    let mut term = 1.0f64;
+    let mut sum = 1.0f64;
+    for k in 1..32 {
+        term *= half / k as f64;
+        sum += term * term;
+    }
+    sum
+}
+
+/// The separable 8-tap Kaiser window [`scatter_patch`] tapers a patch's contribution with.
+///
+/// A patch is one of many covering each pixel, and every one of them
+/// made its own threshold decision. Weighting a patch's edge pixels less
+/// than its centre blends those decisions together instead of letting
+/// each patch's own decision reach its boundary at full strength, which
+/// is what BM3D's aggregation window is for. The window is separable, so
+/// eight taps cover the whole 8x8 patch: pixel `(i, j)` takes `w[i] * w[j]`.
+///
+/// `w[i] = I0(beta * sqrt(1 - (2i / 7 - 1)^2)) / I0(beta)`, the standard
+/// Kaiser window over 8 points, normalised so its peak is 1. Larger
+/// `beta` tapers harder. BM3D uses 2.0.
+///
+/// `beta = 0` returns all ones, because the numerator and denominator
+/// are both `I0(0)`. That is the off switch, and it is exactly uniform
+/// rather than nearly so, so a caller that wants no window gets the same
+/// arithmetic the kernel did before this existed.
+///
+/// Every tap is above zero and at most 1, so the window can only shrink a
+/// contribution. [`WEIGHT_CLAMP`]'s bound of 1 on a weight and the
+/// worst-case accumulator value both still hold, and neither
+/// [`ACCUM_SCALE`] nor [`cross_frame_accum_scale`] needs rederiving.
+///
+/// What the window does narrow is the other end of the range. The
+/// smallest weight the fixed point has to resolve is scaled by the
+/// smallest tap product, `w[0]^2`, which is `0.193` at `beta = 2`. A
+/// badly matched group's weight lands around 9.8 units of `wsum` before
+/// the window and around 1.9 after it, so it still survives the rounding
+/// [`WEIGHT_GAIN`] exists to keep it above, with about a fifth of the
+/// margin.
+pub fn kaiser_window(beta: f32) -> [f32; PATCH_SIZE as usize] {
+    let denom = bessel_i0(beta as f64);
+    let last = (PATCH_SIZE - 1) as f64;
+    let mut window = [0.0f32; PATCH_SIZE as usize];
+    for (i, tap) in window.iter_mut().enumerate() {
+        let position = 2.0 * i as f64 / last - 1.0;
+        *tap = (bessel_i0(beta as f64 * (1.0 - position * position).sqrt()) / denom) as f32;
+    }
+    window
+}
+
 /// The magnitude a group weight is clamped to before it enters `wsum`.
 ///
 /// A normalised weight is `weight_scale / sum`, and [`weight_scale`]
@@ -201,6 +260,10 @@ pub fn to_fixed_weight(weight: f32, scale: f32) -> i32 {
 /// the cube owns one of the patch's 64 pixels, so one call per member
 /// scatters the whole patch.
 ///
+/// `kaiser` holds [`kaiser_window`]'s 8 taps, which taper the patch's
+/// contribution toward its edges. A caller that wants no taper passes
+/// eight ones, which [`kaiser_window`] returns at `beta = 0`.
+///
 /// `accum`/`wsum` hold one region per frame in a caller's window, each
 /// `frame_pixels` (`width * height`) pixels wide, laid out back to back
 /// in ring-slot order. `frame_slot` selects the region this member's own
@@ -226,6 +289,7 @@ pub fn to_fixed_weight(weight: f32, scale: f32) -> i32 {
 pub fn scatter_patch(
     accum: &mut Array<Atomic<i32>>,
     wsum: &mut Array<Atomic<i32>>,
+    kaiser: &Array<f32>,
     value: f32,
     weight: f32,
     patch_x: u32,
@@ -239,8 +303,16 @@ pub fn scatter_patch(
     #[comptime] frame_pixels: u32,
     accum_scale: f32,
 ) {
-    let local_pixel = (patch_y + tid / PATCH_SIZE) * width + patch_x + tid % PATCH_SIZE;
+    let row = tid / PATCH_SIZE;
+    let col = tid % PATCH_SIZE;
+    let local_pixel = (patch_y + row) * width + patch_x + col;
     let pixel = frame_slot * frame_pixels + local_pixel;
+    // The window multiplies the value and the weight by the same factor.
+    // `collab_normalise` divides one accumulator by the other, so it
+    // cancels wherever the coverage is uniform and reweights the blend
+    // where it is not, rather than shifting the pixel's level.
+    let window = kaiser[row as usize] * kaiser[col as usize];
+    let weight = weight * window;
     Atomic::fetch_add(
         &accum[(pixel * stored_ch + channel) as usize],
         to_fixed(value * weight, accum_scale),
@@ -373,6 +445,7 @@ const _: () = assert!(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nl4d::MAX_KAISER_BETA;
 
     /// A filtered value is never negative, so a toward-zero cast biases
     /// every contribution the same way. Rounding is what keeps the
@@ -461,6 +534,52 @@ mod tests {
             "derived scale {derived} at the defaults (spatial_radius=9, temporal_radius=2) \
              should be at least {floor}",
         );
+    }
+
+    #[test]
+    fn kaiser_window_at_beta_zero_is_exactly_one_everywhere() {
+        assert_eq!(kaiser_window(0.0), [1.0f32; PATCH_SIZE as usize]);
+    }
+
+    /// An even tap count puts the centre of the span between taps 3 and
+    /// 4, so those two are equal rather than one being above the other,
+    /// and the rise is checked up to that pair.
+    #[test]
+    fn kaiser_window_is_symmetric_and_rises_to_the_centre() {
+        for beta in [1.0f32, 2.0, 4.0, MAX_KAISER_BETA] {
+            let w = kaiser_window(beta);
+            for i in 0..4 {
+                assert!(
+                    (w[i] - w[7 - i]).abs() < 1e-6,
+                    "beta {beta}: tap {i} is {} and its mirror {}",
+                    w[i],
+                    w[7 - i],
+                );
+                if i < 3 {
+                    assert!(w[i + 1] > w[i], "beta {beta}: tap {} is not above tap {i}", i + 1,);
+                }
+            }
+            assert!(
+                w.iter().all(|&t| t > 0.0 && t <= 1.0),
+                "beta {beta}: a tap is not above zero and at most 1, {w:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn kaiser_window_end_taps_are_the_bessel_ratio() {
+        for beta in [1.0f32, 2.0, 4.0] {
+            let w = kaiser_window(beta);
+            let expected = (1.0 / bessel_i0(beta as f64)) as f32;
+            assert!(
+                (w[0] - expected).abs() < 1e-6,
+                "beta {beta}: end tap {} against the ratio {expected}",
+                w[0],
+            );
+            assert!((w[7] - expected).abs() < 1e-6);
+        }
+        // The figure the doc's margin arithmetic uses.
+        assert!((kaiser_window(2.0)[0] - 0.4388).abs() < 1e-3);
     }
 
     /// Ties the `392`-contribution figure in [`ACCUM_SCALE`]'s docs to

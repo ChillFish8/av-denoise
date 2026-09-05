@@ -199,6 +199,9 @@ fn mismatch_scale_test_params(
         c_min: 0.05,
         mismatch_scale,
         confidence_variance,
+        // The shipped default, so these run the aggregation a real
+        // caller gets.
+        kaiser_beta: 2.0,
     }
 }
 

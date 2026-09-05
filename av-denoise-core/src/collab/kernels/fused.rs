@@ -265,6 +265,9 @@ pub(crate) const MEMBER_SIGMA2_CAP: f32 = 64.0;
 /// `group_weight` holds one weight per reference, and `sigma` one value
 /// per stored channel.
 ///
+/// `kaiser` holds [`crate::collab::kernels::aggregate::kaiser_window`]'s 8 taps, which
+/// taper each scattered patch toward its edges. Eight ones leave the aggregation uniform.
+///
 /// `dct_profile` holds
 /// [`crate::collab::kernels::transforms::dct_noise_profile`]'s 8 values.
 /// Every member's coefficient variance at DCT position `(u, v)` scales
@@ -302,6 +305,7 @@ pub fn collab_fused<N: Size>(
     neighbour_slots: &Array<u32>,
     sigma: &Array<f32>,
     dct_profile: &Array<f32>,
+    kaiser: &Array<f32>,
     accum: &mut Array<Atomic<i32>>,
     wsum: &mut Array<Atomic<i32>>,
     group_weight: &mut Array<f32>,
@@ -729,6 +733,7 @@ pub fn collab_fused<N: Size>(
                     scatter_patch(
                         accum,
                         wsum,
+                        kaiser,
                         stack[(m * PATCH_SIZE + r) as usize],
                         gw,
                         mx,

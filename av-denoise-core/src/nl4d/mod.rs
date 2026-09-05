@@ -22,4 +22,4 @@ mod params;
 mod tests;
 
 pub use denoiser::Nl4dDenoiser;
-pub use params::{MAX_MISMATCH_SCALE, Nl4dParams};
+pub use params::{MAX_KAISER_BETA, MAX_MISMATCH_SCALE, Nl4dParams};

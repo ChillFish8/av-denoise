@@ -9,11 +9,11 @@ use super::helpers::{
     noisy_ring,
     planted_ring,
 };
-use crate::collab::STEP;
 use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
-use crate::collab::kernels::aggregate::{cross_frame_accum_scale, weight_scale};
+use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
+use crate::collab::{PATCH_SIZE, STEP};
 
 /// The motion block side length these fixtures score confidence and
 /// mismatch variance against, distinct from [`BLK_STEP`], which stays
@@ -98,6 +98,7 @@ fn run_fused_over(fx: &RingFixture, k: Knobs) -> FusedRun {
     let slots_buf = client.create_from_slice(u32::as_bytes(&fx.neighbour_slots));
     let sigma_buf = client.create_from_slice(f32::as_bytes(&[k.sigma]));
     let profile_buf = client.create_from_slice(f32::as_bytes(&profile));
+    let kaiser_buf = client.create_from_slice(f32::as_bytes(&kaiser_window(0.0)));
     let accum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels * frames]));
     let wsum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels * frames]));
     let group_weight = client.empty(refs * size_of::<f32>());
@@ -114,6 +115,7 @@ fn run_fused_over(fx: &RingFixture, k: Knobs) -> FusedRun {
             ArrayArg::from_raw_parts(slots_buf, fx.neighbour_slots.len()),
             ArrayArg::from_raw_parts(sigma_buf, 1),
             ArrayArg::from_raw_parts(profile_buf, 8),
+            ArrayArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
             ArrayArg::from_raw_parts(accum, pixels * frames),
             ArrayArg::from_raw_parts(wsum.clone(), pixels * frames),
             ArrayArg::from_raw_parts(group_weight.clone(), refs),

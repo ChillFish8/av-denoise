@@ -1,17 +1,18 @@
 use cubecl::prelude::*;
 
 use super::helpers::{R, make_client, noisy_copy_of, psnr, textured_base};
-use crate::collab::MAX_K;
 use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use crate::collab::kernels::aggregate::{
     ACCUM_SCALE,
     collab_normalise,
     collab_zero_accum,
     cross_frame_accum_scale,
+    kaiser_window,
     weight_scale,
 };
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
+use crate::collab::{MAX_K, PATCH_SIZE};
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::{
     ChannelMode,
@@ -54,6 +55,9 @@ fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
         c_min: C_MIN,
         mismatch_scale: 1.0,
         confidence_variance: true,
+        // The shipped default, so these run the aggregation a real
+        // caller gets.
+        kaiser_beta: 2.0,
     }
 }
 
@@ -415,6 +419,7 @@ fn run_spatial_only(
     let sigma_buf = client.create_from_slice(f32::as_bytes(&[sigma]));
     let dct_profile = dct_noise_profile(0.0);
     let dct_profile_buf = client.create_from_slice(f32::as_bytes(&dct_profile));
+    let kaiser_buf = client.create_from_slice(f32::as_bytes(&kaiser_window(0.0)));
     let accum = client.empty(frame_len * size_of::<i32>());
     let wsum = client.empty(pixels * size_of::<i32>());
     let output = client.empty(frame_len * size_of::<f32>());
@@ -455,6 +460,7 @@ fn run_spatial_only(
             ArrayArg::from_raw_parts(neighbour_slots_dummy, 1),
             ArrayArg::from_raw_parts(sigma_buf, stored_ch as usize),
             ArrayArg::from_raw_parts(dct_profile_buf, 8),
+            ArrayArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
             ArrayArg::from_raw_parts(accum.clone(), frame_len),
             ArrayArg::from_raw_parts(wsum.clone(), pixels),
             ArrayArg::from_raw_parts(group_weight, refs),
@@ -663,6 +669,7 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
         let sigma_buf = client.create_from_slice(f32::as_bytes(&[sigmas[0]]));
         let profile = dct_noise_profile(0.0);
         let profile_buf = client.create_from_slice(f32::as_bytes(&profile));
+        let kaiser_buf = client.create_from_slice(f32::as_bytes(&kaiser_window(0.0)));
         let wnorm = weight_scale(sigmas[0], &profile);
         let accum_scale = cross_frame_accum_scale(SPATIAL_RADIUS, radius);
 
@@ -689,6 +696,7 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 ArrayArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
                 ArrayArg::from_raw_parts(sigma_buf, 1),
                 ArrayArg::from_raw_parts(profile_buf, 8),
+                ArrayArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
                 ArrayArg::from_raw_parts(accum.clone(), pixels * total_frames as usize),
                 ArrayArg::from_raw_parts(wsum.clone(), pixels * total_frames as usize),
                 ArrayArg::from_raw_parts(group_weight, refs),
