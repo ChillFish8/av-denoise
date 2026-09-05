@@ -311,21 +311,24 @@ impl Nl4dOptions {
 /// noise and more fine detail with it, so the value is a trade rather
 /// than an optimum.
 ///
-/// Luma gets 5.3, picked by eye from rendered comparisons on real grain
-/// and deliberately biased toward keeping detail. Higher values remove
-/// visibly more noise, but not enough to be worth what they cost in
-/// texture.
+/// Luma gets 4.24. An earlier eye-picked value was deliberately biased
+/// toward keeping detail over removing visibly more noise, and this
+/// number is a numerical re-anchoring of that judgement, calibrated so a
+/// later change to how the filter measures noise did not shift the
+/// shipped strength away from where the eye picked it.
 ///
 /// `ChannelMode::Yuv` reads the luma value, on the same "a fused pass is
 /// dominated by luma" assumption [`hq_default_strength`]
 /// makes for its own Yuv case.
 ///
-/// Chroma gets 4.2, picked the same way from the chroma residuals with
-/// luma pinned at 5.3.
+/// Chroma gets 3.36, carrying luma's re-anchoring factor across rather
+/// than measuring chroma's own. The two reference clips this was
+/// checked against disagree on the right chroma value by roughly a
+/// factor of two, so this number is provisional and likely to move.
 pub fn nl4d_default_lambda_ht(channels: ChannelMode) -> f32 {
     match channels {
-        ChannelMode::Luma | ChannelMode::Yuv => 5.3,
-        ChannelMode::Chroma => 4.2,
+        ChannelMode::Luma | ChannelMode::Yuv => 4.24,
+        ChannelMode::Chroma => 3.36,
     }
 }
 
@@ -1407,8 +1410,8 @@ mod options_tests {
         let luma = nl4d_default_lambda_ht(ChannelMode::Luma);
         let chroma = nl4d_default_lambda_ht(ChannelMode::Chroma);
 
-        assert!((luma - 5.3).abs() < f32::EPSILON);
-        assert!((chroma - 4.2).abs() < f32::EPSILON);
+        assert!((luma - 4.24).abs() < f32::EPSILON);
+        assert!((chroma - 3.36).abs() < f32::EPSILON);
         assert!(
             (chroma - luma).abs() > f32::EPSILON,
             "the two planes should not resolve to the same default"
@@ -1430,8 +1433,8 @@ mod options_tests {
         let luma = resolve_lambda_ht(&opts, ChannelMode::Luma).expect("the default scale is in range");
         let chroma = resolve_lambda_ht(&opts, ChannelMode::Chroma).expect("the default scale is in range");
 
-        assert!((luma - 5.3).abs() < f32::EPSILON, "got {luma}");
-        assert!((chroma - 4.2).abs() < f32::EPSILON, "got {chroma}");
+        assert!((luma - 4.24).abs() < f32::EPSILON, "got {luma}");
+        assert!((chroma - 3.36).abs() < f32::EPSILON, "got {chroma}");
     }
 
     #[test]

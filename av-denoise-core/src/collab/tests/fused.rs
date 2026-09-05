@@ -29,17 +29,14 @@ const SPATIAL_RADIUS: u32 = 4;
 /// for.
 const K_MAX: u32 = 8;
 
-/// Motion-block side length, the value the mismatch variance is scored
-/// against.
+/// Motion-block side length. The kernel keeps this parameter for a
+/// later covering-block search and does not score the mismatch
+/// variance against it.
 const BLKSIZE: u32 = 16;
 
 /// Motion-block stride. It stays at `PATCH_SIZE` so a block boundary
 /// lines up with a patch boundary.
 const BLK_STEP: u32 = 8;
-
-/// `thsad(BLKSIZE, 1.0)` in normalised SAD units, the same value a real
-/// caller gets at this block size and the default scale.
-const THSAD: f32 = (BLKSIZE * BLKSIZE) as f32 * 0.02;
 
 /// The noise level the filter is told to shrink against.
 ///
@@ -48,7 +45,11 @@ const THSAD: f32 = (BLKSIZE * BLKSIZE) as f32 * 0.02;
 /// sides of the keep decision are exercised.
 const SIGMA: f32 = 0.02;
 
+/// A fixed hard-threshold multiplier, pinned independently of
 /// `Nl4dParams::default().lambda_ht`.
+///
+/// Several tests in this file recorded their expected output at this
+/// value, so it stays fixed even when the shipped default moves.
 const LAMBDA_HT: f32 = 5.3;
 
 /// [`make_unique_frame`] rescaled into `[0, 1]`.
@@ -90,17 +91,16 @@ struct Setup {
     k_max: u32,
     sigma: f32,
     lambda_ht: f32,
-    /// Whether a temporal member's motion-block confidence inflates its
-    /// own noise variance.
+    /// Whether a temporal member's own match distance inflates its
+    /// noise variance.
     confidence_variance: bool,
     /// Residual correlation the noise profile is built for. `0.0` gives
     /// the all-ones profile most runs use.
     rho: f32,
-    /// The SAD threshold a temporal member's mismatch variance is derived
-    /// from. [`THSAD`] is what a real caller passes at the default block
-    /// size, and raising it is how a run drives that variance far above
-    /// the channel sigma.
-    thsad: f32,
+    /// The multiplier on a temporal member's mismatch variance, `1.0` at
+    /// its default. Squared before it reaches the kernel, see
+    /// [`crate::nl4d::params::Nl4dParams::mismatch_scale`].
+    mismatch_scale: f32,
     /// A profile buffer supplied outright, bypassing
     /// [`dct_noise_profile`]. The weight scale still follows whatever
     /// profile is in force.
@@ -139,7 +139,7 @@ impl Setup {
             lambda_ht: LAMBDA_HT,
             confidence_variance: true,
             rho: 0.0,
-            thsad: THSAD,
+            mismatch_scale: 1.0,
             profile_override: None,
             kaiser_beta: 0.0,
         }
@@ -438,7 +438,7 @@ fn run_fused(s: &Setup) -> Aggregated {
             s.centre_slot,
             s.noise_floor,
             s.c_min,
-            s.thsad,
+            s.mismatch_scale * s.mismatch_scale,
             s.lambda_ht,
             weight_scale(s.sigma, &profile),
             s.accum_scale(),
@@ -740,8 +740,15 @@ fn cross_frame_setup(width: u32, height: u32, radius: u32) -> Setup {
 }
 
 /// The whole temporal path at once: the `c_min` skip, the per-member
-/// mismatch variance derived from a packed neighbour index, and the
-/// scatter into each member's own region of the accumulator ring.
+/// mismatch variance derived from the member's own match distance, and
+/// the scatter into each member's own region of the accumulator ring.
+///
+/// Re-recorded for the switch from motion-block confidence to a
+/// member's own match distance. The digest below comes from this
+/// kernel's own output, not a second implementation, because none
+/// exists for the new mechanism. [`assert_matches_recorded`]'s warning
+/// about comparing a kernel to itself is about a silently-broken shader
+/// producing zeros, and this recording carries real, non-zero coverage.
 #[test]
 fn fused_reproduces_recorded_output_across_frames() {
     let s = cross_frame_setup(64, 64, 2);
@@ -750,15 +757,15 @@ fn fused_reproduces_recorded_output_across_frames() {
         &run_fused(&s),
         &Digest {
             covered: 12928,
-            pixel_mean: 0.319278212107,
-            pixel_rms: 0.462380832227,
-            weight_mean: 1149.191924642,
+            pixel_mean: 0.319278942067,
+            pixel_rms: 0.462380521418,
+            weight_mean: 1209.648813477,
             probes: [
-                0.839722565729,
-                0.574316714978,
-                0.298724122489,
+                0.839717775591,
+                0.574345446233,
+                0.298728991636,
                 0.000000000000,
-                0.774649096602,
+                0.774443924886,
                 0.000000000000,
                 0.000000000000,
                 0.000000000000,
@@ -934,22 +941,17 @@ fn zero_sigma_hands_every_member_back_unchanged() {
 }
 
 /// A temporal member's mismatch variance has no relation to the channel
-/// sigma the group weight is normalised against, so a badly matched group
-/// has no lower bound on its weight (see
+/// sigma the group weight is normalised against, so a badly matched
+/// group has no lower bound on its weight (see
 /// [`crate::collab::kernels::aggregate::weight_scale`]). Push that
 /// variance up far enough and the weight stops being representable at
 /// all, and a group that reaches the accumulators as nothing leaves a
 /// covered pixel with an empty weight sum, which normalisation can only
 /// render as black.
 ///
-/// Zero confidence is the worst case `mismatch_sigma2` models, and
-/// `thsad` scales the variance it implies. The radii are the shipped
-/// defaults, so the run counts in the same fixed point a real cross-frame
-/// pass does rather than the finer one a small search would pick. Every
-/// pixel a reference covers has to keep carrying weight across all of it.
-///
-/// The last two rungs are past anything a caller would ask for, which is
-/// the point: they run the mismatch variance so far past
+/// Every neighbour here holds content unrelated to the centre, so every
+/// temporal member's distance is large, and `mismatch_scale` multiplies
+/// the variance it implies. The last rungs run it so far past
 /// [`crate::collab::kernels::fused::MEMBER_SIGMA2_CAP`] that only the cap
 /// is holding the weight inside the fixed point at all.
 #[test]
@@ -957,15 +959,11 @@ fn a_badly_matched_group_still_reaches_the_accumulators() {
     let (w, h) = (32u32, 32u32);
     let counts = reference_cover_counts(w, h);
 
-    for scale in [1.0f32, 64.0, 1024.0, 4096.0] {
+    for scale in [1.0f32, 8.0, 32.0, 64.0] {
         let mut s = cross_frame_setup(w, h, 2);
         s.spatial_radius = 9;
-        s.confidence.fill(0.0);
-        // The confidence floor has to come down with it, or the groups
-        // are skipped before they are ever scored and the run says
-        // nothing about their weights.
         s.c_min = 0.0;
-        s.thsad = THSAD * scale;
+        s.mismatch_scale = scale;
 
         let got = run_fused(&s);
         let base = s.centre_slot as usize * s.pixels();
@@ -975,7 +973,7 @@ fn a_badly_matched_group_still_reaches_the_accumulators() {
             }
             assert!(
                 got.wsum[base + idx] > 0,
-                "thsad scale {scale}: {count} references cover pixel {idx} and its weight \
+                "mismatch scale {scale}: {count} references cover pixel {idx} and its weight \
                  sum is still {}",
                 got.wsum[base + idx],
             );
@@ -991,12 +989,11 @@ fn a_windowed_badly_matched_group_still_reaches_the_accumulators() {
     let (w, h) = (32u32, 32u32);
     let counts = reference_cover_counts(w, h);
 
-    for scale in [1.0f32, 64.0, 1024.0, 4096.0] {
+    for scale in [1.0f32, 8.0, 32.0, 64.0] {
         let mut s = cross_frame_setup(w, h, 2);
         s.spatial_radius = 9;
-        s.confidence.fill(0.0);
         s.c_min = 0.0;
-        s.thsad = THSAD * scale;
+        s.mismatch_scale = scale;
         s.kaiser_beta = 2.0;
 
         let got = run_fused(&s);
@@ -1007,7 +1004,8 @@ fn a_windowed_badly_matched_group_still_reaches_the_accumulators() {
             }
             assert!(
                 got.wsum[base + idx] > 0,
-                "thsad scale {scale}: {count} references cover pixel {idx} and its weight                  sum is still {} with the window on",
+                "mismatch scale {scale}: {count} references cover pixel {idx} and its weight \
+                 sum is still {} with the window on",
                 got.wsum[base + idx],
             );
         }
@@ -1456,12 +1454,10 @@ fn higher_rho_retains_more_noise_on_a_flat_field() {
 /// A centre-frame member never picks up a mismatch variance.
 ///
 /// Every neighbour here is gated out by `c_min`, so every member of
-/// every group comes from the centre frame, and the confidence buffer
-/// holds `0.0`, the value that derives the largest mismatch variance
-/// there is. Turning `confidence_variance` on must therefore change
-/// nothing at all. A kernel that fed a centre-frame member through
-/// [`crate::collab::kernels::fused::mismatch_sigma2`] would inflate
-/// every threshold in the frame and move every pixel.
+/// every group comes from the centre frame. Turning `confidence_variance`
+/// on must therefore change nothing at all. A kernel that computed a
+/// mismatch variance for a centre-frame member would inflate every
+/// threshold in the frame and move every pixel.
 #[test]
 fn centre_frame_members_ignore_the_confidence_field() {
     let (w, h) = (64u32, 64u32);

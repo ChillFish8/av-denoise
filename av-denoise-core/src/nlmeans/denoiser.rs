@@ -1643,18 +1643,6 @@ impl<R: Runtime> NlmDenoiser<R> {
             .expect("motion_ctx called without motion compensation active")
     }
 
-    /// `thsad(blksize, thsad_scale)` in normalised SAD units, the same
-    /// threshold [`Self::submit_machinery`] scores confidence against.
-    ///
-    /// # Panics
-    ///
-    /// Panics under the same condition as [`Self::motion_ctx`].
-    pub(crate) fn thsad_value(&self) -> f32 {
-        let blksize = self.motion_ctx().blksize;
-        let thsad_scale = self.params.hq.map_or(1.0, |hq| hq.thsad_scale);
-        motion::thsad(blksize, thsad_scale)
-    }
-
     /// The compute client this denoiser dispatches kernels through, for
     /// a collaborative stage that reads a [`RingView`]'s handles back or
     /// launches its own kernels against them.

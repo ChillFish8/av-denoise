@@ -13,18 +13,13 @@ use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{PATCH_SIZE, STEP};
+use crate::collab::{PATCH_AREA, PATCH_SIZE, STEP};
 
-/// The motion block side length these fixtures score confidence and
-/// mismatch variance against, distinct from [`BLK_STEP`], which stays
-/// at `PATCH_SIZE` so a block boundary lines up with a patch boundary.
+/// The motion block side length these fixtures score confidence
+/// against, distinct from [`BLK_STEP`], which stays at `PATCH_SIZE` so
+/// a block boundary lines up with a patch boundary. The mismatch
+/// variance is scored against a member's own match distance instead.
 pub(super) const BLKSIZE: u32 = 16;
-
-/// `thsad(BLKSIZE, 1.0)` in normalised SAD units, the same value real
-/// callers get from `NlmDenoiser::thsad_value` at this block size and
-/// the default `thsad_scale`. Duplicated here rather than imported,
-/// since `motion::thsad` is crate-private to `nlmeans`.
-pub(super) const THSAD: f32 = (BLKSIZE * BLKSIZE) as f32 * 0.02;
 
 const REFINE: u32 = 2;
 const K_MAX: u32 = 8;
@@ -36,6 +31,21 @@ struct Knobs {
     k_max: u32,
     sigma: f32,
     lambda_ht: f32,
+    mismatch_scale: f32,
+    /// Whether a temporal member's own match distance inflates its
+    /// noise variance. Every other test in this file relies on a
+    /// uniform `sigma^2` across the whole group, so this defaults off
+    /// and only the mismatch-variance test itself turns it on.
+    use_member_sigma: bool,
+    /// Half-width of each neighbour's refine window, defaulting to the
+    /// module's [`REFINE`].
+    refine: u32,
+    /// The expected distance two noisy copies of the same content show
+    /// by chance, subtracted from a member's raw match distance before
+    /// it becomes mismatch variance. Every other test in this file
+    /// leaves this at `0.0`, so a member's raw distance passes through
+    /// unchanged.
+    noise_floor: f32,
 }
 
 impl Default for Knobs {
@@ -45,6 +55,10 @@ impl Default for Knobs {
             k_max: K_MAX,
             sigma: 0.02,
             lambda_ht: 2.7,
+            mismatch_scale: 1.0,
+            use_member_sigma: false,
+            refine: REFINE,
+            noise_floor: 0.0,
         }
     }
 }
@@ -120,15 +134,15 @@ fn run_fused_over(fx: &RingFixture, k: Knobs) -> FusedRun {
             ArrayArg::from_raw_parts(wsum.clone(), pixels * frames),
             ArrayArg::from_raw_parts(group_weight.clone(), refs),
             fx.centre_slot,
-            0.0f32,
+            k.noise_floor,
             k.c_min,
-            THSAD,
+            k.mismatch_scale * k.mismatch_scale,
             k.lambda_ht,
             weight_scale(k.sigma, &profile),
             cross_frame_accum_scale(SPATIAL_RADIUS, fx.radius),
-            false,
+            k.use_member_sigma,
             fx.radius,
-            REFINE,
+            k.refine,
             fx.mv_stride,
             fx.conf_stride,
             BLK_STEP,
@@ -280,5 +294,158 @@ fn no_admission_gate_means_the_group_always_fills() {
         one * K_MAX as i64,
         "expected every group to carry {K_MAX} members, so {K_MAX}x the weight the \
          one-member run deposited"
+    );
+}
+
+/// A temporal member's extra variance is its own match distance, per
+/// channel and per pixel, times the scale squared.
+///
+/// `planted_ring` puts exact copies of the reference patch in every
+/// neighbour. Adding a uniform offset `d` to each copy gives every
+/// temporal member the distance `3 * 64 * d^2` and so the variance
+/// `d^2 * scale^2`. With `lambda_ht` huge only the group DC survives,
+/// whose variance is the ladder's level 0, and the group weight is its
+/// reciprocal. `haar_variance_ladder` is the host mirror the GPU ladder
+/// is already pinned against.
+///
+/// The run uses `refine: 0`, which collapses each neighbour's window to
+/// its single motion-predicted position, exactly where `planted_ring`
+/// puts the copy. That makes the group composition exact — self, the
+/// four planted copies, and three centre-frame spatial members with no
+/// mismatch variance of their own — so the expected variance below can
+/// be written down at all. A wider window admits near-miss candidates
+/// that tie with genuine spatial ones and leak mismatch variance into
+/// what should be a clean baseline.
+#[test]
+fn a_temporal_member_carries_its_own_match_distance_as_variance() {
+    use crate::collab::kernels::transforms::haar_variance_ladder;
+
+    let (w, h) = (96u32, 96u32);
+    let radius = 2u32;
+    let ref_pos = (64u32, 64u32);
+    let patch = deterministic_texture(5);
+    let sigma = 0.02f32;
+    let refs_x = refs_along(w);
+    let ref_idx = ((ref_pos.1 / STEP) * refs_x + (ref_pos.0 / STEP)) as usize;
+
+    for (d, scale) in [(0.0f32, 1.0f32), (0.05, 1.0), (0.05, 2.0), (0.1, 1.0)] {
+        let mut fx = planted_ring(w, h, radius, ref_pos, 3, &patch, 0.2, |_| 1.0);
+        // Offset every neighbour copy by d. The neighbour slots are
+        // every slot but the centre.
+        let pixels = (w * h) as usize;
+        for slot in 0..(2 * radius + 1) {
+            if slot == fx.centre_slot {
+                continue;
+            }
+            let frame = &mut fx.ring[slot as usize * pixels..(slot as usize + 1) * pixels];
+            for v in frame.iter_mut() {
+                if *v > 0.5 {
+                    *v += d;
+                }
+            }
+        }
+
+        let run = run_fused_over(
+            &fx,
+            Knobs {
+                sigma,
+                lambda_ht: 1.0e6,
+                mismatch_scale: scale,
+                use_member_sigma: true,
+                refine: 0,
+                ..Knobs::default()
+            },
+        );
+
+        // Members sort by distance: self, then the four temporal
+        // copies at 3 * 64 * d^2 each, then three flat spatial patches.
+        let base = sigma * sigma;
+        let mut v = [base; 8];
+        for m in v.iter_mut().take(5).skip(1) {
+            *m = base + d * d * scale * scale;
+        }
+        let expected = 1.0 / haar_variance_ladder(&v, 8)[0];
+        let got = run.group_weight[ref_idx];
+        assert!(
+            (got - expected).abs() <= expected * 1e-3,
+            "d={d} scale={scale}: expected group weight {expected}, got {got}"
+        );
+    }
+}
+
+/// A non-zero `noise_floor` subtracts from a temporal member's raw
+/// match distance before it becomes variance, so a larger floor lowers
+/// the member's variance.
+///
+/// Same fixture and offset as
+/// [`a_temporal_member_carries_its_own_match_distance_as_variance`], at
+/// `d = 0.1` and `scale = 1.0`, so each temporal member's raw distance
+/// is `3 * 64 * d^2 = 1.92`. A floor of `0.96`, half that distance,
+/// leaves excess `0.96` and so variance `0.96 / (3 * 64) = 0.005`, half
+/// of the `d^2 = 0.01` a zero floor would give.
+#[test]
+fn a_noise_floor_lowers_a_temporal_members_variance_by_the_expected_amount() {
+    use crate::collab::kernels::transforms::haar_variance_ladder;
+
+    let (w, h) = (96u32, 96u32);
+    let radius = 2u32;
+    let ref_pos = (64u32, 64u32);
+    let patch = deterministic_texture(5);
+    let sigma = 0.02f32;
+    let d = 0.1f32;
+    let refs_x = refs_along(w);
+    let ref_idx = ((ref_pos.1 / STEP) * refs_x + (ref_pos.0 / STEP)) as usize;
+
+    let mut fx = planted_ring(w, h, radius, ref_pos, 3, &patch, 0.2, |_| 1.0);
+    let pixels = (w * h) as usize;
+    for slot in 0..(2 * radius + 1) {
+        if slot == fx.centre_slot {
+            continue;
+        }
+        let frame = &mut fx.ring[slot as usize * pixels..(slot as usize + 1) * pixels];
+        for v in frame.iter_mut() {
+            if *v > 0.5 {
+                *v += d;
+            }
+        }
+    }
+
+    let raw_distance = 3.0 * PATCH_AREA as f32 * d * d;
+    let noise_floor = raw_distance / 2.0;
+
+    let run = run_fused_over(
+        &fx,
+        Knobs {
+            sigma,
+            lambda_ht: 1.0e6,
+            use_member_sigma: true,
+            refine: 0,
+            noise_floor,
+            ..Knobs::default()
+        },
+    );
+
+    let base = sigma * sigma;
+    let excess = (raw_distance - noise_floor).max(0.0);
+    let member_variance = excess / (3.0 * PATCH_AREA as f32);
+    let mut v = [base; 8];
+    for m in v.iter_mut().take(5).skip(1) {
+        *m = base + member_variance;
+    }
+    let expected = 1.0 / haar_variance_ladder(&v, 8)[0];
+    let got = run.group_weight[ref_idx];
+    assert!(
+        (got - expected).abs() <= expected * 1e-3,
+        "noise_floor={noise_floor}: expected group weight {expected} (member variance \
+         {member_variance}), got {got}"
+    );
+
+    // The floor must actually have lowered the variance, not left it at
+    // the zero-floor value the previous test measured at this same d.
+    assert!(
+        member_variance < d * d,
+        "expected the floor to lower the member variance below the zero-floor value {}, got {}",
+        d * d,
+        member_variance
     );
 }

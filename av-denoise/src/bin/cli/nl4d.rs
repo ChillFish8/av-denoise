@@ -99,16 +99,17 @@ pub struct Nl4dArgs {
 
     /// How much a poorly matched neighbour patch is distrusted.
     ///
-    /// A neighbour block that motion tracking matched badly is treated
-    /// as a noisier view of the same content, and this scales how much
-    /// noisier. `1.0` (the library default) is the shipped calibration.
-    /// `0` matches `--no-confidence-variance`.
+    /// A patch matched in a neighbour frame is treated as a noisier view
+    /// of the same content, as noisy as its own match residual says, and
+    /// this scales how much noisier. `1.0` (the library default) is the
+    /// shipped calibration. `0` matches `--no-confidence-variance`.
     ///
     /// The variance grows with the square of this, so `2` distrusts a
-    /// bad match four times as much. The effect saturates somewhere
-    /// between `3` and `13` depending on how noisy the source is, and
-    /// values above `16` are rejected because nothing up there can
-    /// change a pixel.
+    /// bad match four times as much. The effect saturates. It saturates
+    /// sooner the worse the patch matched, because the variance the
+    /// mechanism derives is capped at 64 times the channel's own
+    /// variance, and values above `16` are rejected because nothing up
+    /// there can change a pixel.
     ///
     /// Setting this applies one value to both planes, unless
     /// `--luma-mismatch-scale` or `--chroma-mismatch-scale` overrides

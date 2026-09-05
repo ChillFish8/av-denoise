@@ -49,53 +49,15 @@ const _: () = assert!(
 // all of those as compile-time-only, and the shift-insert needs genuine
 // mutable runtime variables.
 
-/// The extra per-member variance a temporal candidate's motion-block
-/// confidence implies, which [`collab_fused`] folds into that member's
-/// own noise variance before the threshold reads it.
-///
-/// A poorly matched motion block is treated as a noisier observation of
-/// the true patch rather than a different patch, so its confidence `c`
-/// turns into extra variance instead of an admission decision.
-///
-/// `mismatch_thsad` is the SAD threshold that block's confidence score
-/// was derived from (see [`crate::nlmeans::motion::thsad`]), multiplied
-/// by the caller's `mismatch_scale`, in normalised SAD units.
-/// `blksize_area` is the motion block's area in pixels.
-///
-/// ```text
-/// E^2      = mismatch_thsad^2 * (1 - c) / (1 + c)
-/// eps      = E / blksize_area
-/// sigma_m2 = (pi / 2) * eps^2
-/// ```
-///
-/// The scale is folded into the threshold on the host rather than
-/// carried separately, because the two only ever appear multiplied
-/// together. It is a scale on the mismatch model alone, not on the
-/// confidence score, which stays derived from the unscaled threshold.
-///
-/// `c = 1`, a perfect match, gives `sigma_m2 = 0` exactly. Lower
-/// confidence inflates it.
-///
-/// This never runs for a centre-frame member. Those are not
-/// motion-predicted, so there is no mismatch to model, and
-/// [`collab_fused`] takes that branch before calling this.
-#[cube]
-pub(crate) fn mismatch_sigma2(confidence: f32, mismatch_thsad: f32, blksize_area: f32) -> f32 {
-    let ratio = (1.0f32 - confidence) / (1.0f32 + confidence);
-    let e2 = mismatch_thsad * mismatch_thsad * ratio;
-    let eps = f32::sqrt(e2) / blksize_area;
-    std::f32::consts::FRAC_PI_2 * eps * eps
-}
-
 /// The most extra variance a temporal member's mismatch may carry,
 /// as a multiple of the channel's own variance.
 ///
-/// [`mismatch_sigma2`] derives its result from `mismatch_thsad` and a confidence
-/// score, neither of which has any relation to the channel sigma the
-/// group weight is normalised against. Left uncapped it makes the
-/// retained variance sum, and so the weight, unbounded below, and a
-/// weight small enough to round away in the accumulators takes its
-/// pixel's only information with it. See
+/// A member's extra variance is its own match distance, which on a
+/// badly matched patch has no relation to the channel sigma the group
+/// weight is normalised against. Left uncapped it makes the retained
+/// variance sum, and so the weight, unbounded below, and a weight small
+/// enough to round away in the accumulators takes its pixel's only
+/// information with it. See
 /// [`crate::collab::kernels::aggregate::weight_scale`].
 ///
 /// Capping restores the bound. A member here is already a 64 times
@@ -169,9 +131,11 @@ pub(crate) const MEMBER_SIGMA2_CAP: f32 = 64.0;
 /// differences over the whole patch, minus `noise_floor`. `noise_floor`
 /// is the distance two noisy copies of the same content show by chance,
 /// so a genuine match is not penalised for the noise it carries. The
-/// result is not clamped at zero, because subtracting a constant from
-/// every candidate shifts them all equally and leaves the ranking
-/// unchanged.
+/// result is not clamped at zero for ranking, because subtracting a
+/// constant from every candidate shifts them all equally. It is clamped
+/// at zero where it becomes a member's mismatch variance below, so
+/// `noise_floor` has to be the real expected distance of two noisy
+/// copies, `channel_scale * 2 * PATCH_AREA * sum(sigma_c^2)`.
 ///
 /// # No admission gate
 ///
@@ -225,8 +189,11 @@ pub(crate) const MEMBER_SIGMA2_CAP: f32 = 64.0;
 /// members carry lands in the higher ones. A coefficient survives a hard
 /// threshold when its magnitude reaches `lambda_ht` standard deviations
 /// of its own propagated noise, with [`variance_reg_level`] propagating
-/// the per-member variance to each stack level. Both transforms then
-/// invert.
+/// the per-member variance to each stack level. A member matched in a
+/// neighbour frame carries its own match distance as extra variance,
+/// `mismatch_scale2 * max(distance, 0) / (3 * PATCH_AREA)`, which is
+/// the per-channel, per-pixel mean square of its mismatch, so a poorer
+/// match is a noisier observation. Both transforms then invert.
 ///
 /// The spatial pass runs as a column DCT in registers, a transpose, and
 /// a row DCT in registers, because a lane owns a column and the row pass
@@ -312,7 +279,7 @@ pub fn collab_fused<N: Size>(
     centre_slot: u32,
     noise_floor: f32,
     c_min: f32,
-    mismatch_thsad: f32,
+    mismatch_scale2: f32,
     lambda_ht: f32,
     weight_scale: f32,
     accum_scale: f32,
@@ -322,7 +289,12 @@ pub fn collab_fused<N: Size>(
     #[comptime] mv_stride: u32,
     #[comptime] conf_stride: u32,
     #[comptime] blk_step: u32,
-    #[comptime] blksize: u32,
+    #[expect(
+        unused_variables,
+        reason = "kept for the covering-block search a later task adds to this kernel"
+    )]
+    #[comptime]
+    blksize: u32,
     #[comptime] blocks_x: u32,
     #[comptime] blocks_y: u32,
     #[comptime] width: u32,
@@ -499,7 +471,6 @@ pub fn collab_fused<N: Size>(
     // member hands every lane every position, once for the whole filter
     // rather than once per channel.
     let ref_idx = CUBE_POS_Y * refs_x + ref_x_clamped;
-    let blksize_area = comptime!(blksize * blksize) as f32;
 
     let mut k_use = 1u32;
     while k_use * 2u32 <= n_live && k_use * 2u32 <= k_max {
@@ -538,11 +509,11 @@ pub fn collab_fused<N: Size>(
             // A centre-frame member is not motion-predicted, so there is
             // no mismatch to model and it keeps the plain `sigma^2`.
             if mt > 0u32 {
-                sig2 = mismatch_sigma2(
-                    confidence[(n * conf_stride + block) as usize],
-                    mismatch_thsad,
-                    blksize_area,
-                );
+                // The member's own distance, floor removed, in the search's
+                // three-channel-sum units. Per channel and per pixel that
+                // is the mean square of its mismatch.
+                let excess = f32::max(plane_shuffle(best_d, base + m), 0.0f32);
+                sig2 = mismatch_scale2 * excess / comptime!(3 * PATCH_AREA) as f32;
             }
         }
         member_sig2[m as usize] = sig2;

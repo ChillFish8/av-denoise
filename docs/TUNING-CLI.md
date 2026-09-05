@@ -45,10 +45,11 @@ before you consider going up a preset.
 You should try this parameter before touching the absolute values, since luma and chroma start
 from different defaults and the scale keeps that separation.
 
-**`--lambda-ht` sets those thresholds outright.** The defaults, 5.3 for luma and 4.2 for chroma,
-were tuned and deliberately biased toward keeping detail. A single value here flattens both planes 
-onto the same number, so prefer the scale unless you have a figure you want. 
-`--luma-lambda-ht` and `--chroma-lambda-ht` pin one plane without touching the other, and `--lambda-ht-scale` still 
+**`--lambda-ht` sets those thresholds outright.** The defaults are 4.24 for luma and 3.36 for
+chroma. Luma's value was tuned and deliberately biased toward keeping detail. Chroma's carries
+that same bias over rather than being tuned on its own. A single value here flattens both planes
+onto the same number, so prefer the scale unless you have a figure you want.
+`--luma-lambda-ht` and `--chroma-lambda-ht` pin one plane without touching the other, and `--lambda-ht-scale` still
 applies on top of whatever is pinned.
 
 **`--sigma-scale` is the other one**, and it does something different. The lambda dials decide how
@@ -70,10 +71,12 @@ is exactly what `--preset veryfast` does.
   admitted once they are scored, so it is not a quality dial.
 - **`--no-confidence-variance`** stops a poorly matched patch from being trusted less than a
   well-matched one. It exists to isolate that mechanism in testing and calibration, not to improve output.
-- **`--mismatch-scale`** sets how much less a poorly matched patch is trusted, rather than whether it is.
+- **`--mismatch-scale`** sets how much less a poorly matched patch is trusted, rather than whether it
+  is, judged by the patch's own match residual rather than the motion block's score.
   The variance it controls grows with the square of the value, so `2` distrusts a bad match four times
-  as much. The effect saturates somewhere between `3` and `13` depending on how noisy the source is,
-  and `0` is the same thing as `--no-confidence-variance`.
+  as much. The effect saturates. It saturates sooner the worse the patch matched, because the
+  variance the mechanism derives is capped at 64 times the channel's own variance, and `0` is the
+  same thing as `--no-confidence-variance`.
 - **`--thsad-scale`, `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels`** tune
   the motion machinery's internals, changing any of these will likely invalidate all other defaults.
 

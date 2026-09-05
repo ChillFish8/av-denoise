@@ -1,14 +1,14 @@
 use cubecl::prelude::*;
 
-use super::helpers::{make_client, noisy_copy_of, psnr, textured_base, R};
+use super::helpers::{R, make_client, noisy_copy_of, psnr, textured_base};
 use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use crate::collab::kernels::aggregate::{
+    ACCUM_SCALE,
     collab_normalise,
     collab_zero_accum,
     cross_frame_accum_scale,
     kaiser_window,
     weight_scale,
-    ACCUM_SCALE,
 };
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
@@ -703,7 +703,9 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 centre_slot,
                 0.0f32,
                 C_MIN,
-                front.thsad_value(),
+                // `use_member_sigma` is off below, so this never reaches
+                // a threshold and any value is exact.
+                1.0f32,
                 LAMBDA_HT,
                 wnorm,
                 accum_scale,

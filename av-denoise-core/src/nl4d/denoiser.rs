@@ -13,8 +13,9 @@ use crate::collab::kernels::aggregate::{
 };
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{MAX_K, PATCH_SIZE};
+use crate::collab::{MAX_K, PATCH_AREA, PATCH_SIZE};
 use crate::denoiser::{DenoiserError, FrameOutput, OutputFormat};
+use crate::nlmeans::kernels::helpers::channel_scale_host;
 use crate::nlmeans::{
     BLOCK_X,
     BLOCK_Y,
@@ -524,11 +525,14 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let blksize = mc.blksize;
         let blocks_x = mc.blocks_x;
         let blocks_y = mc.blocks_y;
-        // The kernel takes the two multiplied together, see
-        // `mismatch_sigma2`. The confidence score itself stays derived
-        // from the unscaled threshold, which is why this is applied here
-        // rather than inside the front end.
-        let mismatch_thsad = self.front.thsad_value() * self.mismatch_scale;
+        // The variance grows with the square of the scale, see
+        // `Nl4dParams::mismatch_scale`.
+        let mismatch_scale2 = self.mismatch_scale * self.mismatch_scale;
+        // The distance two noisy copies of one patch show by chance, in
+        // the search's channel-scaled units. A member's mismatch
+        // variance is its distance past this.
+        let sigma2_sum: f32 = sigma_host[..channels_count as usize].iter().map(|s| s * s).sum();
+        let noise_floor = channel_scale_host(channels_count) * 2.0 * PATCH_AREA as f32 * sigma2_sum;
 
         // See the doc comment above for why these two slots are what
         // this pass clears and completes. `total_frames` is added
@@ -606,14 +610,9 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 ArrayArg::from_raw_parts(self.wsum.clone(), wsum_ring_len),
                 ArrayArg::from_raw_parts(self.group_weight.clone(), refs),
                 centre_slot,
-                // `collab_fused` has no admission gate (see its own doc
-                // comment), so a constant subtracted from every
-                // candidate's distance can never change which ones the
-                // selection picks. Any value is exact here; 0.0 is the
-                // simplest one that says so.
-                0.0f32,
+                noise_floor,
                 self.c_min,
-                mismatch_thsad,
+                mismatch_scale2,
                 self.lambda_ht,
                 wnorm,
                 self.accum_scale,

@@ -2,12 +2,14 @@ use crate::nlmeans::{ChannelMode, HqParams, MotionCompensationMode, MotionEstima
 
 /// The largest [`Nl4dParams::mismatch_scale`] worth accepting.
 ///
-/// The mismatch variance is capped at
-/// [`crate::collab::kernels::fused::MEMBER_SIGMA2_CAP`] times the channel
-/// variance, and the worst-matched blocks reach that cap at a scale of
-/// roughly `319 * sigma`. Even a source noisy enough to measure `sigma =
-/// 0.05` saturates below 16, so nothing above this can move a pixel and
-/// accepting it would only promise a range that is not there.
+/// A member's own match distance never exceeds `3 * PATCH_AREA` in the
+/// search's units, so its mismatch variance never exceeds
+/// `mismatch_scale^2` in absolute pixel-value units. The mechanism caps
+/// at [`crate::collab::kernels::fused::MEMBER_SIGMA2_CAP`] times the
+/// channel variance, so even the worst possible mismatch saturates by a
+/// scale of `8 * sigma`. Even a source noisy enough to measure `sigma =
+/// 0.05` saturates well under 1, so nothing above this can move a pixel
+/// and accepting it would only promise a range that is not there.
 pub const MAX_MISMATCH_SCALE: f32 = 16.0;
 
 /// The largest [`Nl4dParams::kaiser_beta`] worth accepting.
@@ -48,7 +50,7 @@ pub struct Nl4dParams {
     /// Higher shrinks more coefficients, so it removes more noise and
     /// more fine detail.
     ///
-    /// Defaults to 5.3, the luma value. Chroma wants a different one, and
+    /// Defaults to 4.24, the luma value. Chroma wants a different one, and
     /// callers building `Nl4dParams` directly get no per-plane
     /// resolution. See [`crate::nl4d_default_lambda_ht`].
     pub lambda_ht: f32,
@@ -57,18 +59,20 @@ pub struct Nl4dParams {
     /// compute a submit spends, never which candidates are admitted once
     /// they are scored.
     pub c_min: f32,
-    /// A multiplier on the mismatch variance a poorly matched temporal
-    /// member carries into the hard threshold.
+    /// A multiplier on the mismatch variance a temporal member carries
+    /// into the hard threshold.
     ///
-    /// The variance grows with the square of this, so `2.0` is a
-    /// four-fold increase. `1.0`, the default, is the shipped
+    /// A member matched in a neighbour frame is treated as a noisier
+    /// observation of the reference, and its extra variance is its own
+    /// match distance, per channel and per pixel, with the noise floor
+    /// removed. The variance grows with the square of this, so `2.0` is
+    /// a four-fold increase. `1.0`, the default, is the shipped
     /// calibration. `0.0` matches `confidence_variance: false`.
     ///
     /// The mechanism saturates. A member's extra variance is capped at
     /// [`crate::collab::kernels::fused::MEMBER_SIGMA2_CAP`] times the
-    /// channel variance, which the worst-matched blocks reach somewhere
-    /// between 3 and 13 depending on how noisy the source is, so raising
-    /// this past that point stops changing anything.
+    /// channel variance, so raising this past the point where a
+    /// member's distance reaches the cap stops changing anything.
     pub mismatch_scale: f32,
     /// The `beta` of the Kaiser window each filtered patch is tapered
     /// with as it is aggregated, in `0..=8`.
@@ -111,7 +115,7 @@ impl Default for Nl4dParams {
             temporal_radius: 2,
             refine: 2,
             spatial_radius: 9,
-            lambda_ht: 5.3,
+            lambda_ht: 4.24,
             c_min: 0.05,
             mismatch_scale: 1.0,
             kaiser_beta: 2.0,
