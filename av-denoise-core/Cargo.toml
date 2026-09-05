@@ -71,3 +71,7 @@ harness = false
 [[bench]]
 name = "reseed"
 harness = false
+
+[[bench]]
+name = "mc_accuracy"
+harness = false

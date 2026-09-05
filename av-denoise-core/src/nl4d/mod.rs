@@ -13,7 +13,9 @@
 //! a single-frame search can.
 
 mod denoiser;
+pub mod harness;
 mod params;
+mod snapshot;
 
 // Every test in this tree runs against a real GPU runtime, see
 // `tests::helpers::R`, so it only builds when a wgpu-backed feature is
@@ -23,3 +25,4 @@ mod tests;
 
 pub use denoiser::Nl4dDenoiser;
 pub use params::{MAX_KAISER_BETA, MAX_MISMATCH_SCALE, Nl4dParams};
+pub use snapshot::MotionSnapshot;

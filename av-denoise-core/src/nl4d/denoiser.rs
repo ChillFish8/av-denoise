@@ -2,6 +2,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::params::Nl4dParams;
+use super::snapshot::{LastFields, MotionSnapshot, read_snapshot};
 use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use crate::collab::kernels::aggregate::{
     collab_normalise,
@@ -129,6 +130,9 @@ pub struct Nl4dDenoiser<R: Runtime> {
     /// [`Self::run_collab_stage`]'s return value rather than checking it
     /// themselves.
     passes_run: u32,
+    /// The field buffers the last pass handed the fused kernel, for
+    /// [`Self::motion_snapshot`].
+    last_fields: Option<LastFields>,
 }
 
 impl<R: Runtime> Nl4dDenoiser<R> {
@@ -251,6 +255,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             output_format,
             wire_outputs,
             passes_run: 0,
+            last_fields: None,
         })
     }
 
@@ -373,6 +378,27 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         self.front.reset_stream_state();
         self.next_output_slot = 0;
         self.passes_run = 0;
+        self.last_fields = None;
+    }
+
+    /// The motion field and confidence the last pass gave the fused
+    /// kernel, or `None` before any pass has run.
+    ///
+    /// This is a synchronous readback for measurement tooling, not a
+    /// stable interface.
+    #[doc(hidden)]
+    pub fn motion_snapshot(&self) -> Option<MotionSnapshot> {
+        let fields = self.last_fields.as_ref()?;
+        let mc = self.front.motion_ctx();
+        Some(read_snapshot(
+            self.front.compute_client(),
+            fields,
+            self.temporal_radius,
+            mc.blocks_x,
+            mc.blocks_y,
+            mc.step,
+            mc.blksize,
+        ))
     }
 
     /// How many tail frames [`Self::flush`] must emit for the stream
@@ -514,6 +540,14 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
         let pass_index = self.passes_run;
         self.passes_run += 1;
+
+        self.last_fields = Some(LastFields {
+            mv_field: view.mv_field.clone(),
+            confidence: view.confidence.clone(),
+            mv_stride: view.mv_stride,
+            conf_stride: view.conf_stride,
+            neighbours,
+        });
 
         unsafe {
             if pass_index == 0 {

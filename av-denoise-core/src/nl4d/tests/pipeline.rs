@@ -1,14 +1,14 @@
 use cubecl::prelude::*;
 
-use super::helpers::{R, make_client, noisy_copy_of, psnr, textured_base};
+use super::helpers::{make_client, noisy_copy_of, psnr, textured_base, R};
 use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use crate::collab::kernels::aggregate::{
-    ACCUM_SCALE,
     collab_normalise,
     collab_zero_accum,
     cross_frame_accum_scale,
     kaiser_window,
     weight_scale,
+    ACCUM_SCALE,
 };
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
@@ -769,4 +769,54 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
         "expected cross-frame aggregation to remove more noise than centre-only at the same \
          lambda_ht, got cross-frame={cross_frame_psnr:.4} dB centre-only={centre_only_psnr:.4} dB"
     );
+}
+
+/// The snapshot reports the field the fused kernel was given. A clip
+/// whose every frame is the previous one shifted right by 2 pixels must
+/// report `[2 * k, 0]` toward the neighbour at offset `k`, at an
+/// interior block, once the first pass has run.
+#[test]
+fn motion_snapshot_reports_the_field_the_pass_used() {
+    let client = make_client();
+    let (w, h) = (96u32, 96u32);
+    let radius = 2u32;
+    let base = textured_base(w, h);
+    let frames: Vec<Vec<f32>> = (0..5i32)
+        .map(|k| {
+            let mut f = vec![0.0f32; (w * h) as usize];
+            for y in 0..h {
+                for x in 0..w {
+                    let sx = (x as i32 - 2 * (k - 2)).clamp(0, w as i32 - 1) as u32;
+                    f[(y * w + x) as usize] = base[(y * w + sx) as usize];
+                }
+            }
+            f
+        })
+        .collect();
+
+    let mut d =
+        Nl4dDenoiser::<R>::new(&client, static_clip_params(radius), w, h).expect("construction failed");
+    assert!(d.motion_snapshot().is_none(), "no pass has run yet");
+    for frame in &frames {
+        d.push_frame(frame);
+        let _ = d.denoise_submit().expect("denoise_submit failed");
+    }
+
+    let snap = d.motion_snapshot().expect("a pass has run");
+    assert_eq!(snap.offsets, vec![-2, -1, 1, 2]);
+    assert_eq!(snap.step, 8);
+    assert_eq!(snap.blksize, 16);
+    // Block (3, 3) covers pixels 24..40, well inside the frame.
+    let block = (3 * snap.blocks_x + 3) as usize;
+    for (t, &k) in snap.offsets.iter().enumerate() {
+        assert_eq!(
+            snap.vectors[t][block],
+            [2 * k, 0],
+            "neighbour k={k} should be tracked as a 2*k pixel shift"
+        );
+        assert!(
+            snap.confidence[t][block] > 0.5,
+            "a clean shift must score confidently"
+        );
+    }
 }
