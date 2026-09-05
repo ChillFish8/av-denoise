@@ -561,7 +561,10 @@ pub enum DenoiserError {
     /// An earlier call failed, so how many frames are in flight is no
     /// longer known and later output would not line up with its input.
     ///
-    /// Call [`Denoiser::reset_stream`] to start a fresh stream, or drop the denoiser.
+    /// Call [`Denoiser::reset_stream`] to start a fresh stream, or drop
+    /// the denoiser. Either one settles a frame that
+    /// [`Denoiser::try_recv_frame`] has already polled, so it can block
+    /// for that readback's remaining latency.
     #[error("denoiser failed earlier, reset the stream before using it again")]
     Poisoned,
     /// None of the accelerators in the priority list could be started.
@@ -1152,9 +1155,15 @@ impl Denoiser {
     /// Drops the current stream and returns to the state a fresh
     /// denoiser starts in, keeping every GPU allocation.
     ///
-    /// Anything still in flight is discarded. This also clears the
-    /// poison an earlier failure left, so it is the recovery path for
-    /// [`DenoiserError::Poisoned`].
+    /// Frames still in flight are dropped without being read. A frame
+    /// that [`Self::try_recv_frame`] has already polled is the one
+    /// exception. Its readback is settled first, which blocks for the
+    /// rest of that readback's latency and fails the way a
+    /// [`Self::recv_frame`] on it would. At most one frame is ever in
+    /// that state.
+    ///
+    /// This also clears the poison an earlier failure left, so it is the
+    /// recovery path for [`DenoiserError::Poisoned`].
     pub fn reset_stream(&mut self) {
         self.pending.clear();
         self.frames_pushed = 0;
@@ -1203,6 +1212,13 @@ impl Denoiser {
     /// This only avoids blocking on the wgpu backends, meaning Vulkan and Metal.
     /// On CUDA and ROCm the readback completes synchronously on its first poll,
     /// so this call blocks until the readback lands there, the same as `recv_frame`.
+    ///
+    /// A poll that returns `None` for an in-flight frame commits the
+    /// denoiser to finishing that readback. Dropping the denoiser or
+    /// calling [`Self::reset_stream`] before it lands blocks until it
+    /// does. On the wgpu backends the first poll maps a staging buffer
+    /// that only the finished readback can unmap, and abandoning it
+    /// would break every later call on the device.
     ///
     /// A failure poisons the denoiser, so every further call returns
     /// [`DenoiserError::Poisoned`] until [`Self::reset_stream`] clears it.

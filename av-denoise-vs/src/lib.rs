@@ -32,20 +32,25 @@ fn init_logging() {
 /// VapourSynth unloads every plugin library when it frees a core, and
 /// vspipe frees its core right before exiting. The GPU runtime this
 /// plugin builds spawns a device thread per accelerator, plus a
-/// polling thread on the wgpu backends, and those threads run for the
-/// rest of the process. They loop on a short sleep rather than blocking,
-/// so on Windows the first one to wake after `FreeLibrary` returns into
-/// unmapped code and the process dies with an access violation, after
-/// every frame was already written.
+/// polling thread per stream on the wgpu backends, and those threads
+/// run for the rest of the process. The device thread never blocks. It
+/// spins, yields, then sleeps briefly, over and over. On Windows its
+/// first wake after `FreeLibrary` returns into unmapped code and the
+/// process dies with an access violation, after every frame was
+/// already written. The polling thread parks or waits in the driver,
+/// and dies the same way once anything wakes it.
 ///
 /// Pinning the module makes the unload a no-op, so the threads stay
 /// valid until process exit terminates them. On Linux the loader
 /// already refuses to unload a library that registered thread-local
 /// destructors, which is what happens as soon as this plugin's threads
-/// start, so nothing needs doing there.
+/// start, so nothing needs doing there. macOS is not covered and has
+/// not been tested.
 ///
-/// This runs once, on the first filter creation, which is the earliest
-/// hook the plugin has and comes before any device thread exists.
+/// This runs once, on the first filter creation. That is before any
+/// device thread exists, since only a filter builds a denoiser. The
+/// plugin's init function runs earlier, but the export macro owns its
+/// body and this plugin has no code of its own in it.
 fn pin_plugin_library() {
     static PIN: std::sync::Once = std::sync::Once::new();
     PIN.call_once(|| {

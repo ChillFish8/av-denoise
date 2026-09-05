@@ -141,11 +141,10 @@ fn bench_push_recv(
         times.push(start.elapsed());
     }
 
-    // Drain trailing temporal frames before the denoiser drops.
-    // Otherwise outstanding `Pending` readbacks die in flight while
-    // their GPU buffers are still mapped, which wgpu's validation
-    // layer rejects on the next `Denoiser::create` for the next
-    // config (manifests as a `Buffer ... is still mapped` panic).
+    // Drain the temporal tail so every pushed frame is accounted for
+    // before the denoiser drops. An unpolled `Pending` has started no
+    // readback and is free to drop, so this is bookkeeping rather than
+    // a safety requirement.
     denoiser.flush(|_| {})?;
 
     let total: Duration = times.iter().sum();

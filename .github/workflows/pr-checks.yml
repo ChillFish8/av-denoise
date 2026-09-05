@@ -80,7 +80,7 @@ jobs:
 
       # The VS plugin has a `#[cfg(windows)]` block that the Linux clippy job
       # never compiles. `cargo check` needs no linker, so this catches a broken
-      # signature or flag before a release build does. Same as `just check-vs-windows`.
+      # signature or flag before a release build does.
       - name: Check
         run: cargo check -p av-denoise-vs --features vulkan --target x86_64-pc-windows-msvc
 

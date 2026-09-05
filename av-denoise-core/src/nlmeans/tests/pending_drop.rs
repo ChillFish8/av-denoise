@@ -11,17 +11,18 @@
 use super::helpers::*;
 use crate::nlmeans::*;
 
-/// Heavy enough that the GPU cannot have finished by the time the
-/// first poll runs, a few microseconds after submit. The readback
-/// itself is also large, so its staging page is not one a smaller
-/// read would pick.
-const SIZE: u32 = 1536;
+/// Large enough that the GPU cannot have finished by the time the
+/// first poll runs, a few microseconds after submit. The readback is
+/// large too, so its staging page is not one a smaller read would pick.
+/// The radii stay small because a wide kernel is what costs codegen
+/// stack, and this test is about the readback, not the kernel.
+const SIZE: u32 = 2048;
 
 fn params() -> NlmParams {
     NlmParams {
         temporal_radius: 0,
-        search_radius: 8,
-        patch_radius: 3,
+        search_radius: 3,
+        patch_radius: 2,
         strength: 1.2,
         self_weight: 1.0,
         channels: ChannelMode::Luma,

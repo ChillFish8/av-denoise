@@ -18,6 +18,12 @@ pub(crate) type ReadFuture = Pin<Box<dyn Future<Output = Result<Vec<Bytes>, Serv
 ///
 /// The kernels are queued, the GPU may still be working on them, and the
 /// readback to the host has not finished.
+///
+/// The readback only starts on the first poll, so a `Pending` that was
+/// never polled costs nothing to drop. One that [`Self::try_wait`] has
+/// polled owns a mapped staging buffer on the wgpu backends until it
+/// lands, so dropping it blocks until the readback finishes. See the
+/// `Drop` impl.
 pub struct Pending<R: Runtime> {
     pub(super) fut: ReadFuture,
     /// Set once `fut` has been polled and cleared again once it has
@@ -92,13 +98,13 @@ impl<R: Runtime> Pending<R> {
 
     /// Polls the readback once.
     ///
-    /// `TryWait::NotReady` hands the same `Pending` back unchanged, so a
-    /// caller that gets it can only poll again by calling `try_wait` on
-    /// that returned value. There is no way to poll a future that has
-    /// already produced its result. The poll uses a no-op waker, so
-    /// nothing ever wakes a caller when the readback lands. A caller
-    /// that wants the frame has to keep calling `try_wait` again itself,
-    /// on whatever `NotReady` the previous call returned.
+    /// `TryWait::NotReady` hands the same `Pending` back, so a caller
+    /// that gets it can only poll again by calling `try_wait` on that
+    /// returned value. There is no way to poll a future that has already
+    /// produced its result. The poll uses a no-op waker, so nothing ever
+    /// wakes a caller when the readback lands. A caller that wants the
+    /// frame has to keep calling `try_wait` again itself, on whatever
+    /// `NotReady` the previous call returned.
     ///
     /// This only avoids blocking on the wgpu backends, meaning Vulkan and Metal,
     /// where readiness is external state a discarded wakeup does not lose.
@@ -107,8 +113,10 @@ impl<R: Runtime> Pending<R> {
     /// internally, so `try_wait` blocks for the full kernel and readback latency there
     /// and `NotReady` is never actually returned.
     ///
-    /// Dropping a `NotReady` instead of polling it again blocks until
-    /// the readback lands, see the `Drop` impl.
+    /// The first poll starts the readback, and from then on the
+    /// `Pending` is committed to it. Dropping a `NotReady` instead of
+    /// polling it again blocks until the readback lands. See the `Drop`
+    /// impl.
     pub fn try_wait(mut self) -> Result<TryWait<R>, anyhow::Error> {
         let waker = Waker::noop();
         let mut cx = Context::from_waker(waker);
@@ -210,8 +218,9 @@ fn unpack_into(
 pub enum TryWait<R: Runtime> {
     /// The readback landed. This is the denoised frame.
     Ready(FrameOutput),
-    /// The readback has not landed. This is the same `Pending`, unchanged
-    /// and still in flight.
+    /// The readback has not landed. This is the same `Pending`, still in
+    /// flight and now committed to finishing. Dropping it blocks until
+    /// the readback lands rather than abandoning it.
     NotReady(Pending<R>),
 }
 
