@@ -46,6 +46,9 @@ struct Knobs {
     /// leaves this at `0.0`, so a member's raw distance passes through
     /// unchanged.
     noise_floor: f32,
+    /// The motion block side length, defaulting to the module's
+    /// [`BLKSIZE`]. At [`BLK_STEP`] exactly one block covers a patch.
+    blksize: u32,
 }
 
 impl Default for Knobs {
@@ -59,6 +62,7 @@ impl Default for Knobs {
             use_member_sigma: false,
             refine: REFINE,
             noise_floor: 0.0,
+            blksize: BLKSIZE,
         }
     }
 }
@@ -146,7 +150,7 @@ fn run_fused_over(fx: &RingFixture, k: Knobs) -> FusedRun {
             fx.mv_stride,
             fx.conf_stride,
             BLK_STEP,
-            BLKSIZE,
+            k.blksize,
             fx.blocks_x,
             fx.blocks_y,
             w,
@@ -447,5 +451,187 @@ fn a_noise_floor_lowers_a_temporal_members_variance_by_the_expected_amount() {
         "expected the floor to lower the member variance below the zero-floor value {}, got {}",
         d * d,
         member_variance
+    );
+}
+
+/// Sets one block's vector toward neighbour `t`.
+fn set_block_mv(fx: &mut RingFixture, t: u32, bx: u32, by: u32, mv: [i32; 2]) {
+    let block = by * fx.blocks_x + bx;
+    let base = (t * fx.mv_stride + block * 2) as usize;
+    fx.mv_field[base] = mv[0];
+    fx.mv_field[base + 1] = mv[1];
+}
+
+/// Writes an 8x8 patch into ring slot `slot` at `(px, py)`.
+fn plant_in_slot(fx: &mut RingFixture, slot: u32, px: u32, py: u32, patch: &[f32; 64]) {
+    let pixels = (fx.width * fx.height) as usize;
+    let frame = &mut fx.ring[slot as usize * pixels..(slot as usize + 1) * pixels];
+    for row in 0..8u32 {
+        for col in 0..8u32 {
+            frame[((py + row) * fx.width + px + col) as usize] = patch[(row * 8 + col) as usize];
+        }
+    }
+}
+
+/// Moves each neighbour's copy of the reference patch 20 pixels right,
+/// leaving flat background where the reference sits, and points one
+/// block's vector at the copy.
+///
+/// `planted_ring` at a zero shift puts a copy at the reference position
+/// in every frame, so the copy there is erased first. Every block but
+/// `(bx, by)` then holds the zeroed vector `planted_ring` left, which
+/// points at flat background, so the copy is reachable only through
+/// `(bx, by)`.
+fn only_reachable_through(
+    fx: &mut RingFixture,
+    ref_pos: (u32, u32),
+    patch: &[f32; 64],
+    (bx, by): (u32, u32),
+) {
+    let flat = [0.2f32; 64];
+    for t in 0..fx.neighbour_slots.len() as u32 {
+        let slot = fx.neighbour_slots[t as usize];
+        plant_in_slot(fx, slot, ref_pos.0, ref_pos.1, &flat);
+        plant_in_slot(fx, slot, ref_pos.0 + 20, ref_pos.1, patch);
+        set_block_mv(fx, t, 8, 8, [0, 0]);
+        set_block_mv(fx, t, bx, by, [20, 0]);
+    }
+}
+
+/// The corner block's vector points at flat background, and only a
+/// neighbouring covering block's vector points at the planted copy.
+///
+/// The reference at (64, 64) sits on the corner of block (8, 8) and is
+/// also covered by blocks (7, 7), (8, 7) and (7, 8), since a 16-pixel
+/// block at an 8-pixel step covers two patches per axis. A search that
+/// reads only the corner block never sees the copy.
+///
+/// Each of the three non-corner covering blocks is tried on its own,
+/// `(7, 7)` diagonally, `(8, 7)` above and `(7, 8)` to the left, so a
+/// kernel that read only the corner and the diagonal fails on two of
+/// the three.
+///
+/// The ring runs at radius 2, so four neighbours each hold a copy the
+/// covering block reaches. Half the group is then an exact copy of the
+/// reference, against a group of near-background patches when only the
+/// corner block is read, and the group weight separates the two by a
+/// wide margin. The control leaves every block on the corner's zeroed
+/// vector, so no rectangle reaches the copy however many blocks are
+/// read.
+#[test]
+fn a_covering_block_other_than_the_corner_finds_the_match() {
+    let (w, h) = (96u32, 96u32);
+    let radius = 2u32;
+    let ref_pos = (64u32, 64u32);
+    let patch = deterministic_texture(13);
+    let refs_x = refs_along(w);
+    let ref_idx = ((ref_pos.1 / STEP) * refs_x + (ref_pos.0 / STEP)) as usize;
+
+    // The same ring with every vector zeroed, so no block's rectangle
+    // reaches the copy however many blocks are read.
+    let mut corner_only = planted_ring(w, h, radius, ref_pos, 0, &patch, 0.2, |_| 1.0);
+    only_reachable_through(&mut corner_only, ref_pos, &patch, (8, 8));
+    corner_only.mv_field.fill(0);
+    let without = run_fused_over(&corner_only, Knobs::default()).group_weight[ref_idx];
+
+    for block in [(7u32, 7u32), (8, 7), (7, 8)] {
+        let mut fx = planted_ring(w, h, radius, ref_pos, 0, &patch, 0.2, |_| 1.0);
+        only_reachable_through(&mut fx, ref_pos, &patch, block);
+        let with_covering = run_fused_over(&fx, Knobs::default()).group_weight[ref_idx];
+
+        assert!(
+            with_covering > without * 1.5,
+            "the copies are only reachable through block {block:?}'s vector, expected a far \
+             better group with it, got {with_covering} against {without}"
+        );
+    }
+}
+
+/// Two covering blocks whose vectors differ by one pixel give
+/// overlapping rectangles, and a position inside both is scored once.
+///
+/// A copy planted where both rectangles reach it would otherwise enter
+/// the group twice. With `lambda_ht` huge every member deposits the
+/// same weight, so the planted patch's pixels receive exactly the
+/// weight they receive when only one block points at it.
+#[test]
+fn overlapping_covering_rectangles_score_each_position_once() {
+    let (w, h) = (96u32, 96u32);
+    let radius = 1u32;
+    let ref_pos = (64u32, 64u32);
+    let patch = deterministic_texture(17);
+    let pixels = (w * h) as usize;
+    let knobs = || Knobs {
+        lambda_ht: 1.0e6,
+        ..Knobs::default()
+    };
+
+    let build = |second_vector: Option<[i32; 2]>| {
+        let mut fx = planted_ring(w, h, radius, ref_pos, 0, &patch, 0.2, |_| 1.0);
+        for t in 0..2u32 {
+            let slot = fx.neighbour_slots[t as usize];
+            plant_in_slot(&mut fx, slot, ref_pos.0 + 20, ref_pos.1, &patch);
+            set_block_mv(&mut fx, t, 8, 8, [20, 0]);
+            if let Some(v) = second_vector {
+                set_block_mv(&mut fx, t, 7, 7, v);
+            }
+        }
+        fx
+    };
+
+    let one = run_fused_over(&build(None), knobs());
+    let two = run_fused_over(&build(Some([21, 0])), knobs());
+
+    let frames = one.wsum.len() / pixels;
+    let planted_centre =
+        |run: &FusedRun, s: usize| run.wsum[s * pixels + ((ref_pos.1 + 4) * w + ref_pos.0 + 20 + 4) as usize];
+    for s in 0..frames {
+        if s as u32 == 1 {
+            continue;
+        }
+        assert_eq!(
+            planted_centre(&two, s),
+            planted_centre(&one, s),
+            "slot {s}: the planted copy must carry the same weight whether one or two covering \
+             blocks reach it"
+        );
+    }
+    assert!(
+        planted_centre(&one, 0) > 0,
+        "the copy must be a member in the first place"
+    );
+}
+
+/// With `blksize == step` exactly one block covers a patch, so a
+/// neighbouring block's vector is never consulted.
+///
+/// The copy is reachable only through block `(7, 7)`, which covers the
+/// patch at `blksize = 16` and does not at `blksize = 8`.
+#[test]
+fn a_block_size_equal_to_the_step_reads_only_the_corner_block() {
+    let (w, h) = (96u32, 96u32);
+    let radius = 2u32;
+    let ref_pos = (64u32, 64u32);
+    let patch = deterministic_texture(19);
+    let refs_x = refs_along(w);
+    let ref_idx = ((ref_pos.1 / STEP) * refs_x + (ref_pos.0 / STEP)) as usize;
+
+    let mut fx = planted_ring(w, h, radius, ref_pos, 0, &patch, 0.2, |_| 1.0);
+    only_reachable_through(&mut fx, ref_pos, &patch, (7, 7));
+
+    let covering = run_fused_over(&fx, Knobs::default()).group_weight[ref_idx];
+    let single = run_fused_over(
+        &fx,
+        Knobs {
+            blksize: BLK_STEP,
+            ..Knobs::default()
+        },
+    )
+    .group_weight[ref_idx];
+
+    assert!(
+        covering > single * 1.5,
+        "at blksize == step the copy is unreachable, got {single} against {covering} with \
+         covering blocks"
     );
 }

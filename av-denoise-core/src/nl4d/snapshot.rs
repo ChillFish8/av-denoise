@@ -8,7 +8,7 @@ use cubecl::server::Handle;
 /// in pixels, and `confidence[t][block]` that block's confidence in
 /// `[0, 1]`. `offsets[t]` is neighbour `t`'s temporal offset from the
 /// centre frame. Blocks run row-major over `blocks_x * blocks_y`, and
-/// block `(bx, by)` covers pixels `[bx * step, bx * step + blksize)` on
+/// block `(bx, by)` covers `blksize` pixels starting at `bx * step` on
 /// each axis.
 ///
 /// This exists for measurement tooling. It is not a stable interface.

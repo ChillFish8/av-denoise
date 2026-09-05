@@ -29,8 +29,8 @@ const SPATIAL_RADIUS: u32 = 4;
 /// for.
 const K_MAX: u32 = 8;
 
-/// Motion-block side length. The kernel keeps this parameter for a
-/// later covering-block search and does not score the mismatch
+/// Motion-block side length. The kernel searches every block whose
+/// `blksize` span contains a patch, and does not score the mismatch
 /// variance against it.
 const BLKSIZE: u32 = 16;
 
@@ -743,6 +743,11 @@ fn cross_frame_setup(width: u32, height: u32, radius: u32) -> Setup {
 /// mismatch variance derived from the member's own match distance, and
 /// the scatter into each member's own region of the accumulator ring.
 ///
+/// Recorded with the covering-block search, every block covering a
+/// patch contributes a rectangle. `cross_frame_setup` gives every block
+/// its own vector, so the search reaches positions the corner block
+/// alone never pointed at.
+///
 /// Re-recorded for the switch from motion-block confidence to a
 /// member's own match distance. The digest below comes from this
 /// kernel's own output, not a second implementation, because none
@@ -756,19 +761,19 @@ fn fused_reproduces_recorded_output_across_frames() {
         "cross frame",
         &run_fused(&s),
         &Digest {
-            covered: 12928,
-            pixel_mean: 0.319278942067,
-            pixel_rms: 0.462380521418,
-            weight_mean: 1209.648813477,
+            covered: 15800,
+            pixel_mean: 0.398917931934,
+            pixel_rms: 0.518592139022,
+            weight_mean: 1199.919938422,
             probes: [
-                0.839717775591,
-                0.574345446233,
-                0.298728991636,
+                0.838003113388,
+                0.574141517596,
+                0.299827186817,
                 0.000000000000,
-                0.774443924886,
+                0.774458945874,
                 0.000000000000,
-                0.000000000000,
-                0.000000000000,
+                0.236727453142,
+                0.979726340630,
             ],
         },
     );
@@ -779,6 +784,9 @@ fn fused_reproduces_recorded_output_across_frames() {
 /// `use_member_sigma` is a `#[comptime]` flag, so it compiles a second
 /// program, and the arm with it off is the one that checks the threshold
 /// still reads a plain `sigma^2` per member.
+///
+/// Recorded with the covering-block search, every block covering a
+/// patch contributes a rectangle.
 #[test]
 fn fused_reproduces_recorded_output_without_the_mismatch_variance() {
     let mut s = cross_frame_setup(64, 64, 2);
@@ -787,19 +795,19 @@ fn fused_reproduces_recorded_output_without_the_mismatch_variance() {
         "cross frame, flat sigma",
         &run_fused(&s),
         &Digest {
-            covered: 12928,
-            pixel_mean: 0.319277061395,
-            pixel_rms: 0.462378164801,
-            weight_mean: 1242.592593316,
+            covered: 15800,
+            pixel_mean: 0.398918693763,
+            pixel_rms: 0.518592557620,
+            weight_mean: 1244.444444987,
             probes: [
-                0.839714050293,
-                0.574348068237,
-                0.298727416992,
+                0.838030815125,
+                0.574148050944,
+                0.299845377604,
                 0.000000000000,
-                0.774412972586,
+                0.774438040597,
                 0.000000000000,
-                0.000000000000,
-                0.000000000000,
+                0.236724853516,
+                0.979728698730,
             ],
         },
     );

@@ -225,6 +225,15 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
             client: client.clone(),
             ch,
             ch_name,
+            split_mv: false,
+        });
+    }
+    for &(ch, ch_name) in CHANNELS {
+        run(CollabFusedBench {
+            client: client.clone(),
+            ch,
+            ch_name,
+            split_mv: true,
         });
     }
     for &(ch, ch_name) in CHANNELS {

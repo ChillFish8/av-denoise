@@ -1,10 +1,10 @@
 use super::synth::Clip;
-use crate::collab::geometry::{ref_pos, refs_along};
 use crate::collab::PATCH_SIZE;
+use crate::collab::geometry::{ref_pos, refs_along};
 use crate::nl4d::MotionSnapshot;
 
-/// The inclusive range of blocks whose `[b * step, b * step + blksize)`
-/// span contains the patch `[p, p + PATCH_SIZE)`, clamped to the grid.
+/// The inclusive range of blocks whose `b * step..b * step + blksize`
+/// span contains the patch `p..p + PATCH_SIZE`, clamped to the grid.
 ///
 /// When `step == blksize` and the patch straddles a tile boundary, no
 /// block fully contains it. The corner block is returned as the best
@@ -231,8 +231,8 @@ mod tests {
 
     #[test]
     fn a_straddling_patch_at_step_equal_blksize_falls_back_to_the_corner_block() {
-        // blksize 16, step 16: block 0 spans [0, 16), block 1 spans
-        // [16, 32). The patch at p = 10 spans [10, 18), which no single
+        // blksize 16, step 16: block 0 spans 0..16, block 1 spans
+        // 16..32. The patch at p = 10 spans 10..18, which no single
         // block fully contains. No range is empty here, so the corner
         // block (the one the patch's start pixel sits in) is returned
         // as the best available search target, matching what the corner

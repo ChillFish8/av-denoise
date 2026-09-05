@@ -22,6 +22,20 @@ pub const MAX_MISMATCH_SCALE: f32 = 16.0;
 /// weights fall under what the fixed-point accumulators resolve.
 pub const MAX_KAISER_BETA: f32 = 8.0;
 
+/// The most motion blocks that may cover a reference patch on one axis.
+///
+/// A block grid at a step below `blksize` puts several blocks over one
+/// patch, and
+/// [`crate::collab::kernels::fused::collab_fused`] searches all of them.
+/// It unrolls its per-neighbour duplicate-rectangle arrays over the
+/// square of this bound, so the bound is what caps the shader's register
+/// footprint. At 4 the arrays hold 16 rectangles and the shipped
+/// geometry, `blksize = 16` at `overlap = 8`, uses 2.
+///
+/// The step is `blksize - overlap`, so 4 admits an overlap of up to
+/// three quarters of the block size.
+pub const MAX_COVERING_BLOCKS: u32 = 4;
+
 /// Tuning for [`super::Nl4dDenoiser`].
 ///
 /// `nlm` supplies the front end that builds the frame ring, the motion
@@ -153,6 +167,19 @@ impl Nl4dParams {
             );
         }
 
+        if let MotionCompensationMode::Mvtools { blksize, overlap, .. } = self.nlm.motion_compensation {
+            let step = blksize.saturating_sub(overlap).max(1);
+            let covers = blksize.div_ceil(step);
+            if covers > MAX_COVERING_BLOCKS {
+                return Err(format!(
+                    "nlm.motion_compensation blksize={blksize} at overlap={overlap} gives a step \
+                     of {step}, so {covers} blocks cover a patch on each axis, past the \
+                     {MAX_COVERING_BLOCKS} the temporal grouping kernel unrolls its search over. \
+                     Raise the step by lowering the overlap."
+                ));
+            }
+        }
+
         if !(1..=crate::collab::MAX_TEMPORAL_RADIUS).contains(&self.temporal_radius) {
             return Err(format!(
                 "temporal_radius={} must be in 1..={}",
@@ -240,6 +267,65 @@ mod tests {
             assert!(
                 err.contains("mismatch_scale"),
                 "error should name mismatch_scale, got {err}"
+            );
+        }
+    }
+
+    /// A block geometry with `blksize / step` at or under
+    /// [`MAX_COVERING_BLOCKS`] is what the grouping kernel unrolls its
+    /// search over.
+    ///
+    /// The shipped geometry gives a step of 8 and so 2 covering blocks.
+    /// An overlap of three quarters of the block size gives a step of 4
+    /// and exactly 4, the boundary.
+    #[test]
+    fn validate_accepts_block_geometries_up_to_the_covering_bound() {
+        for (blksize, overlap, covers) in [(16u32, 8u32, 2u32), (16, 12, 4), (32, 24, 4), (8, 4, 2)] {
+            let params = Nl4dParams {
+                nlm: NlmParams {
+                    motion_compensation: MotionCompensationMode::Mvtools {
+                        blksize,
+                        overlap,
+                        search_radius: 4,
+                        pyramid_levels: 2,
+                        estimation: MotionEstimation::Auto,
+                    },
+                    ..Nl4dParams::default().nlm
+                },
+                ..Nl4dParams::default()
+            };
+            assert!(
+                params.validate().is_ok(),
+                "blksize={blksize} overlap={overlap} covers {covers} blocks and should be accepted"
+            );
+        }
+    }
+
+    /// Past the bound the kernel would unroll a far larger duplicate
+    /// check and hold far more rectangles in registers, so the
+    /// configuration is refused rather than compiled.
+    #[test]
+    fn validate_rejects_a_block_geometry_past_the_covering_bound() {
+        for (blksize, overlap) in [(16u32, 13u32), (16, 14), (32, 31), (32, 25)] {
+            let params = Nl4dParams {
+                nlm: NlmParams {
+                    motion_compensation: MotionCompensationMode::Mvtools {
+                        blksize,
+                        overlap,
+                        search_radius: 4,
+                        pyramid_levels: 2,
+                        estimation: MotionEstimation::Auto,
+                    },
+                    ..Nl4dParams::default().nlm
+                },
+                ..Nl4dParams::default()
+            };
+            let err = params
+                .validate()
+                .expect_err("a step this small should be rejected");
+            assert!(
+                err.contains(&format!("blksize={blksize}")) && err.contains(&format!("overlap={overlap}")),
+                "error should name the offending blksize and overlap, got {err}"
             );
         }
     }

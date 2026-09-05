@@ -67,6 +67,20 @@ const _: () = assert!(
 /// weight that always survives the conversion to fixed point.
 pub(crate) const MEMBER_SIGMA2_CAP: f32 = 64.0;
 
+/// The lowest block index whose span contains the patch at `p` on one axis.
+///
+/// Block `b` spans `b * step..b * step + blksize`, so the patch
+/// `p..p + PATCH_SIZE` needs `b * step + blksize >= p + PATCH_SIZE`.
+/// The highest such block is `p / step`, which the caller clamps to the
+/// grid and uses as the low end's ceiling.
+///
+/// This mirrors `crate::nl4d::harness::score::covering_blocks`.
+#[cube]
+fn covering_lo(p: u32, #[comptime] blksize: u32, #[comptime] step: u32) -> u32 {
+    let past = u32::max(p + PATCH_SIZE, blksize) - blksize;
+    past.div_ceil(step)
+}
+
 /// Groups each reference patch with the patches most similar to it,
 /// filters the whole group jointly with a hard threshold in the
 /// transform domain, and scatters every filtered member back into its
@@ -116,14 +130,24 @@ pub(crate) const MEMBER_SIGMA2_CAP: f32 = 64.0;
 ///
 /// The centre frame contributes the `spatial_radius` rectangle around
 /// the reference patch, clipped to the frame. Each neighbour
-/// contributes the `refine` rectangle around the position the motion
-/// field predicts the reference patch moved to, clipped the same way.
+/// contributes one `refine` rectangle per motion block whose span
+/// contains the reference patch, each around the position that block's
+/// vector predicts the patch moved to, clipped the same way. A block
+/// grid at a step below `blksize` gives several such blocks, and taking
+/// all of them means a patch is searched wherever any block covering it
+/// points rather than only where its corner block points.
 ///
-/// Clipping the rectangle once is what keeps every candidate a distinct
-/// position. Clamping each offset in turn would land several offsets on
-/// the same edge position, and admitting a position twice would let one
-/// physical patch count as two and look like stronger agreement than
-/// the group has.
+/// Rectangles from different blocks of one neighbour overlap when their
+/// vectors are close. A position reached by more than one of them is
+/// scored once, by the first rectangle that reaches it, and the later
+/// rectangles skip it.
+///
+/// Clipping the rectangle once is what keeps every candidate within it a
+/// distinct position. Clamping each offset in turn would land several
+/// offsets on the same edge position, and admitting a position twice
+/// would let one physical patch count as two and look like stronger
+/// agreement than the group has. The overlap check across rectangles is
+/// the same property held across the blocks of one neighbour.
 ///
 /// # Distance
 ///
@@ -141,11 +165,12 @@ pub(crate) const MEMBER_SIGMA2_CAP: f32 = 64.0;
 ///
 /// Every candidate stays in the running whatever its distance, so a
 /// group fills to `k_max` wherever the search space is that large.
-/// `c_min` is a compute saving rather than an admission threshold. A
-/// neighbour whose block confidence sits below it never runs the pixel
-/// comparison, and its whole rectangle is skipped. The confidence comes
-/// from one motion block that every lane of the group shares, so the
-/// skip is uniform across the group.
+/// `c_min` is a compute saving rather than an admission threshold. The
+/// skip is per block. A covering block whose confidence sits below
+/// `c_min` never runs the pixel comparison, and its whole rectangle is
+/// skipped, while the neighbour's other covering blocks still search.
+/// The confidence comes from a motion block that every lane of the
+/// group shares, so the skip is uniform across the group.
 ///
 /// # Selection
 ///
@@ -289,12 +314,7 @@ pub fn collab_fused<N: Size>(
     #[comptime] mv_stride: u32,
     #[comptime] conf_stride: u32,
     #[comptime] blk_step: u32,
-    #[expect(
-        unused_variables,
-        reason = "kept for the covering-block search a later task adds to this kernel"
-    )]
-    #[comptime]
-    blksize: u32,
+    #[comptime] blksize: u32,
     #[comptime] blocks_x: u32,
     #[comptime] blocks_y: u32,
     #[comptime] width: u32,
@@ -353,16 +373,21 @@ pub fn collab_fused<N: Size>(
     // difference.
     let scale = channel_scale(channels);
 
-    // The block a temporal candidate reads its motion vector and
-    // confidence from depends only on `rx` and `ry`, which are the same
-    // for every candidate this group scores, so it is worked out once.
-    let bx = (rx / blk_step).min(blocks_x - 1);
-    let by = (ry / blk_step).min(blocks_y - 1);
-    let block = by * blocks_x + bx;
+    // The blocks a temporal candidate reads its motion vectors and
+    // confidences from depend only on `rx` and `ry`, which are the same
+    // for every candidate this group scores, so the range is worked out
+    // once. The corner block, the one the patch's own top-left pixel
+    // sits in, is `(bx_hi, by_hi)`, and a range whose low end equals its
+    // high end searches that block alone.
+    let bx_hi = (rx / blk_step).min(blocks_x - 1);
+    let by_hi = (ry / blk_step).min(blocks_y - 1);
+    let bx_lo = u32::min(covering_lo(rx, blksize, blk_step), bx_hi);
+    let by_lo = u32::min(covering_lo(ry, blksize, blk_step), by_hi);
 
-    // The size of the search space, which fixes the group size below.
-    // Every rectangle contributes distinct positions, and rectangles in
-    // different frames cannot collide, so this is a plain sum.
+    // The number of positions actually scored, which fixes the group
+    // size below. Rectangles in different frames cannot collide, and
+    // within a frame a repeated position is counted once, so every
+    // increment is a distinct position.
     let mut n_live = 0u32;
 
     // The spatial rectangle, clipped once.
@@ -409,59 +434,110 @@ pub fn collab_fused<N: Size>(
         cy += 1u32;
     }
 
-    // One clipped rectangle per neighbour, around its motion-predicted
-    // centre.
+    // One clipped rectangle per covering block per neighbour, around
+    // that block's motion-predicted centre.
     let n_neighbours = comptime!(2 * radius);
+    // The widest block range `covering_lo` can produce on one axis, so
+    // the block loops unroll and every `seen_*` index is a constant.
+    let covers = comptime!(blksize.div_ceil(blk_step));
+    let max_rects = comptime!(covers * covers);
     let mut t = 0u32;
     while t < n_neighbours {
-        let conf = confidence[(t * conf_stride + block) as usize];
-        // Uniform across the group, because `block` is, so a skipped
-        // neighbour costs no lane its share of the reduction. No barrier
-        // sits inside this branch either, so a group that skips a
-        // neighbour a neighbouring group scores strands nothing.
-        if conf >= c_min {
-            let slot = neighbour_slots[t as usize];
-            let mv = (t * mv_stride + block * 2u32) as usize;
-            let px0 = rx as i32 + mv_field[mv];
-            let py0 = ry as i32 + mv_field[mv + 1];
+        let slot = neighbour_slots[t as usize];
+        // `t + 1` is the neighbour field's value, one past the centre
+        // frame's 0. The module-level assert above bounds it well inside
+        // the six bits `pack_pos_t` gives it.
+        let packed_t = t + 1u32;
 
-            let t_left = clamp_top_left(px0 - refine as i32, max_x);
-            let t_right = clamp_top_left(px0 + refine as i32, max_x);
-            let t_top = clamp_top_left(py0 - refine as i32, max_y);
-            let t_bot = clamp_top_left(py0 + refine as i32, max_y);
-            n_live += (t_right - t_left + 1u32) * (t_bot - t_top + 1u32);
+        // The rectangles already searched for this neighbour, one slot
+        // per covering block in visiting order. A slot starts empty,
+        // `left` above `right`, which no position matches, so a slot
+        // whose block the scan has not reached yet hides nothing and a
+        // block the range or `c_min` skips leaves its slot empty.
+        let mut seen_left = Array::<u32>::new(max_rects as usize);
+        let mut seen_right = Array::<u32>::new(max_rects as usize);
+        let mut seen_top = Array::<u32>::new(max_rects as usize);
+        let mut seen_bot = Array::<u32>::new(max_rects as usize);
+        #[unroll]
+        for s in 0..max_rects {
+            seen_left[s as usize] = 1u32;
+            seen_right[s as usize] = 0u32;
+            seen_top[s as usize] = 1u32;
+            seen_bot[s as usize] = 0u32;
+        }
 
-            // `t + 1` is the neighbour field's value, one past the
-            // centre frame's 0. The module-level assert above bounds it
-            // well inside the six bits `pack_pos_t` gives it.
-            let packed_t = t + 1u32;
+        #[unroll]
+        for iy in 0..covers {
+            #[unroll]
+            for ix in 0..covers {
+                let cbx = bx_lo + ix;
+                let cby = by_lo + iy;
+                if cbx <= bx_hi && cby <= by_hi {
+                    let block = cby * blocks_x + cbx;
+                    let conf = confidence[(t * conf_stride + block) as usize];
+                    // Uniform across the group, because `block` is, so a
+                    // skipped block costs no lane its share of the
+                    // reduction. No barrier sits inside this branch
+                    // either, so a group that skips a block a
+                    // neighbouring group scores strands nothing.
+                    if conf >= c_min {
+                        let mv = (t * mv_stride + block * 2u32) as usize;
+                        let px0 = rx as i32 + mv_field[mv];
+                        let py0 = ry as i32 + mv_field[mv + 1];
 
-            let mut ny = t_top;
-            while ny <= t_bot {
-                let mut nx = t_left;
-                while nx <= t_right {
-                    let mut partial = 0.0f32;
-                    #[unroll]
-                    for r in 0..PATCH_SIZE {
-                        let px = read_line(ring, nx + sub, ny + r, slot, width, height);
-                        #[unroll]
-                        for c in 0..channels {
-                            let d = current[(r * channels + c) as usize] - px[c as usize];
-                            partial += d * d;
+                        let t_left = clamp_top_left(px0 - refine as i32, max_x);
+                        let t_right = clamp_top_left(px0 + refine as i32, max_x);
+                        let t_top = clamp_top_left(py0 - refine as i32, max_y);
+                        let t_bot = clamp_top_left(py0 + refine as i32, max_y);
+
+                        let mut ny = t_top;
+                        while ny <= t_bot {
+                            let mut nx = t_left;
+                            while nx <= t_right {
+                                let mut covered = false;
+                                #[unroll]
+                                for s in 0..max_rects {
+                                    if nx >= seen_left[s as usize]
+                                        && nx <= seen_right[s as usize]
+                                        && ny >= seen_top[s as usize]
+                                        && ny <= seen_bot[s as usize]
+                                    {
+                                        covered = true;
+                                    }
+                                }
+                                if !covered {
+                                    n_live += 1u32;
+                                    let mut partial = 0.0f32;
+                                    #[unroll]
+                                    for r in 0..PATCH_SIZE {
+                                        let px = read_line(ring, nx + sub, ny + r, slot, width, height);
+                                        #[unroll]
+                                        for c in 0..channels {
+                                            let d = current[(r * channels + c) as usize] - px[c as usize];
+                                            partial += d * d;
+                                        }
+                                    }
+                                    let dist = plane_ssd_reduce8(partial) * scale - noise_floor;
+                                    shift_insert8_gated(
+                                        &mut best_d,
+                                        &mut best_pos,
+                                        dist,
+                                        pack_pos_t(nx, ny, packed_t),
+                                        sub,
+                                        base,
+                                    );
+                                }
+                                nx += 1u32;
+                            }
+                            ny += 1u32;
                         }
+
+                        seen_left[(iy * covers + ix) as usize] = t_left;
+                        seen_right[(iy * covers + ix) as usize] = t_right;
+                        seen_top[(iy * covers + ix) as usize] = t_top;
+                        seen_bot[(iy * covers + ix) as usize] = t_bot;
                     }
-                    let dist = plane_ssd_reduce8(partial) * scale - noise_floor;
-                    shift_insert8_gated(
-                        &mut best_d,
-                        &mut best_pos,
-                        dist,
-                        pack_pos_t(nx, ny, packed_t),
-                        sub,
-                        base,
-                    );
-                    nx += 1u32;
                 }
-                ny += 1u32;
             }
         }
         t += 1u32;
