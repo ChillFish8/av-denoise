@@ -3,9 +3,9 @@ name: Release binaries
 on:
   release:
     types: [published]
-  # A dispatch run is a dry run. It builds, smoke tests and uploads the binaries as
-  # workflow artifacts, but never attaches them to a release. Leave `version` empty
-  # to just check that the three targets still compile.
+  # A dispatch run is a dry run. It builds and smoke tests the CLI binaries, packages
+  # the VapourSynth plugin, and uploads both as workflow artifacts, but never attaches
+  # them to a release. Leave `version` empty to just check that everything still compiles.
   workflow_dispatch:
     inputs:
       version:
@@ -72,7 +72,7 @@ jobs:
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
   build:
-    name: ${{ matrix.artifact }}
+    name: ${{ matrix.platform }}
     needs: resolve-version
     runs-on: ${{ matrix.os }}
     strategy:
@@ -83,21 +83,38 @@ jobs:
         # and ash load their driver libraries at runtime, so a vulkan+cuda binary
         # runs on a host that has only one of them and `--accelerators` still picks.
         # Linux builds on 22.04 for the older glibc floor.
+        #
+        # The VapourSynth plugin ships from the same job, built from the same tree
+        # with the same backends. `rocm` is left out of `plugin_features` for the
+        # reason the wheels leave it out: it hard-links the ROCm libraries, so a
+        # plugin carrying it fails to load on a host without ROCm installed.
         include:
           - os: ubuntu-22.04
+            platform: linux-x86
             features: vulkan,cuda,binary
             artifact: av-denoise-dynamic-linux-x86
             binary: av-denoise
+            plugin_features: vulkan,cuda
+            plugin_library: libav_denoise_vs.so
+            plugin_archive: av-denoise-vs-linux-x86.tar.gz
           - os: windows-latest
+            platform: win64-x86
             features: vulkan,cuda,binary
             artifact: av-denoise-dynamic-win64-x86.exe
             binary: av-denoise.exe
+            plugin_features: vulkan,cuda
+            plugin_library: av_denoise_vs.dll
+            plugin_archive: av-denoise-vs-win64-x86.zip
           - os: macos-14
+            platform: macos-aarch64
             features: metal,binary
             artifact: av-denoise-dynamic-macos-aarch64
             binary: av-denoise
+            plugin_features: metal
+            plugin_library: libav_denoise_vs.dylib
+            plugin_archive: av-denoise-vs-macos-aarch64.zip
     concurrency:
-      group: release-binaries-${{ matrix.artifact }}-${{ github.event.release.tag_name || inputs.version || github.run_id }}
+      group: release-binaries-${{ matrix.platform }}-${{ github.event.release.tag_name || inputs.version || github.run_id }}
       cancel-in-progress: false
     steps:
       - name: Checkout
@@ -139,7 +156,7 @@ jobs:
           "FFMS_LIB_DIR=$root\x64" | Out-File -FilePath $env:GITHUB_ENV -Append
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Build
+      - name: Build the CLI
         run: cargo build --release -p av-denoise --no-default-features --features ${{ matrix.features }}
 
       # Hosted runners have no accelerator, so this only proves the binary's own
@@ -159,6 +176,34 @@ jobs:
           path: ${{ matrix.artifact }}
           if-no-files-found: error
 
+      - name: Build the VapourSynth plugin
+        run: cargo build --release -p av-denoise-vs --no-default-features --features ${{ matrix.plugin_features }}
+
+      # The archive holds the shared library alone, so it drops straight into a
+      # VapourSynth autoload directory once unpacked. Linux gets a tarball to keep
+      # the file mode, the other two get a zip.
+      - name: Package the VapourSynth plugin
+        shell: bash
+        env:
+          PLUGIN_LIBRARY: ${{ matrix.plugin_library }}
+          PLUGIN_ARCHIVE: ${{ matrix.plugin_archive }}
+        run: |
+          set -euo pipefail
+          test -f "target/release/${PLUGIN_LIBRARY}"
+          cd target/release
+          case "${RUNNER_OS}" in
+            Linux) tar -czf "${GITHUB_WORKSPACE}/${PLUGIN_ARCHIVE}" "${PLUGIN_LIBRARY}" ;;
+            macOS) zip -j "${GITHUB_WORKSPACE}/${PLUGIN_ARCHIVE}" "${PLUGIN_LIBRARY}" ;;
+            Windows) 7z a -tzip "${GITHUB_WORKSPACE}/${PLUGIN_ARCHIVE}" "${PLUGIN_LIBRARY}" ;;
+          esac
+
+      - name: Upload VapourSynth plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-${{ matrix.plugin_archive }}
+          path: ${{ matrix.plugin_archive }}
+          if-no-files-found: error
+
   publish:
     name: Publish release binaries
     needs: [resolve-version, build]
@@ -170,17 +215,24 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: binary-*
-          path: binaries
+          path: release-assets
           merge-multiple: true
 
-      - name: List downloaded binaries
-        run: ls -la binaries
+      - name: Download VapourSynth plugin artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: plugin-*
+          path: release-assets
+          merge-multiple: true
 
-      - name: Attach binaries to the GitHub Release
+      - name: List downloaded release assets
+        run: ls -la release-assets
+
+      - name: Attach release assets to the GitHub Release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: binaries/*
+          files: release-assets/*
 
       - name: Report the dry run
         if: github.event_name != 'release'
@@ -191,6 +243,7 @@ jobs:
           {
             echo "### Dry run"
             echo
-            echo "All three targets built and passed their \`--help\` smoke test at version \`${VERSION}\`."
-            echo "Nothing was attached to a release. The binaries are on this run as workflow artifacts."
+            echo "All three targets built their CLI binary and VapourSynth plugin at version \`${VERSION}\`,"
+            echo "and each binary passed its \`--help\` smoke test."
+            echo "Nothing was attached to a release. The binaries and plugin archives are on this run as workflow artifacts."
           } >> "${GITHUB_STEP_SUMMARY}"
