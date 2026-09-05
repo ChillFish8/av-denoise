@@ -20,6 +20,9 @@ pub(crate) type ReadFuture = Pin<Box<dyn Future<Output = Result<Vec<Bytes>, Serv
 /// readback to the host has not finished.
 pub struct Pending<R: Runtime> {
     pub(super) fut: ReadFuture,
+    /// Set once `fut` has been polled and cleared again once it has
+    /// produced its result. See the `Drop` impl for why this matters.
+    polled: bool,
     pub(super) channels: u32,
     pub(super) stored_ch: u32,
     pub(super) pixels: usize,
@@ -50,6 +53,7 @@ impl<R: Runtime> Pending<R> {
     ) -> Self {
         Self {
             fut,
+            polled: false,
             channels,
             stored_ch,
             pixels,
@@ -75,9 +79,13 @@ impl<R: Runtime> Pending<R> {
     /// `dst` keeps its allocation when it already holds this `Pending`'s
     /// output format, so a caller can reuse one buffer when running frame
     /// after frame.
-    pub fn wait_into(self, dst: &mut FrameOutput) -> Result<(), anyhow::Error> {
+    pub fn wait_into(mut self, dst: &mut FrameOutput) -> Result<(), anyhow::Error> {
         let (pixels, channels, stored_ch, format) = (self.pixels, self.channels, self.stored_ch, self.format);
-        let bytes = cubecl::future::block_on(self.fut)?.remove(0);
+        let result = cubecl::future::block_on(self.fut.as_mut());
+        // The future has produced its result either way, so there is
+        // nothing left for `Drop` to settle.
+        self.polled = false;
+        let bytes = result?.remove(0);
         unpack_into(&bytes, pixels, channels, stored_ch, format, dst);
         Ok(())
     }
@@ -98,10 +106,18 @@ impl<R: Runtime> Pending<R> {
     /// On CUDA and ROCm the readback future's first poll runs a blocking driver wait
     /// internally, so `try_wait` blocks for the full kernel and readback latency there
     /// and `NotReady` is never actually returned.
+    ///
+    /// Dropping a `NotReady` instead of polling it again blocks until
+    /// the readback lands, see the `Drop` impl.
     pub fn try_wait(mut self) -> Result<TryWait<R>, anyhow::Error> {
         let waker = Waker::noop();
         let mut cx = Context::from_waker(waker);
-        match self.fut.as_mut().poll(&mut cx) {
+        self.polled = true;
+        let poll = self.fut.as_mut().poll(&mut cx);
+        if poll.is_ready() {
+            self.polled = false;
+        }
+        match poll {
             Poll::Ready(Ok(mut bytes)) => {
                 let bytes = bytes.remove(0);
                 let mut out = empty_output(self.pixels, self.channels, self.format);
@@ -118,6 +134,29 @@ impl<R: Runtime> Pending<R> {
             Poll::Ready(Err(e)) => Err(e.into()),
             Poll::Pending => Ok(TryWait::NotReady(self)),
         }
+    }
+}
+
+impl<R: Runtime> Drop for Pending<R> {
+    /// Settles a readback that was polled but never landed.
+    ///
+    /// On the wgpu backends the first poll reserves a staging buffer,
+    /// records the copy into it and maps it. The buffer is only unmapped
+    /// when the `Bytes` the future resolves to is dropped. Dropping the
+    /// future before that hands the still-mapped buffer back to the
+    /// device's staging pool, and the next submit that touches it fails
+    /// with "buffer is still mapped" on cubecl's device thread, which
+    /// takes every later call on that device down with it.
+    ///
+    /// Blocking on the future here resolves it to its `Bytes`, which are
+    /// dropped straight away and unmap the buffer. An unpolled future
+    /// has reserved nothing, so it is left alone. A future that already
+    /// produced its result cannot be polled again, so it is skipped too.
+    fn drop(&mut self) {
+        if !self.polled || std::thread::panicking() {
+            return;
+        }
+        let _ = cubecl::future::block_on(self.fut.as_mut());
     }
 }
 

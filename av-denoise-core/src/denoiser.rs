@@ -2245,4 +2245,42 @@ mod tests {
             );
         }
     }
+
+    /// A `Pending` that was polled and then dropped has to settle its
+    /// readback first. On the wgpu backends the first poll maps a
+    /// staging buffer that only the finished readback unmaps, and a
+    /// still-mapped buffer back in the pool makes the next submit on
+    /// the device fail on cubecl's device thread, after which every
+    /// call on that device errors.
+    #[test]
+    fn dropping_a_polled_pending_frame_does_not_poison_the_device() {
+        let new = || {
+            Denoiser::create(
+                &[Accelerator::Vulkan],
+                &Device::Default,
+                64,
+                64,
+                opts(DenoisingMode::Spacial),
+            )
+            .unwrap()
+        };
+
+        let mut d = new();
+        d.push_frame(&frame(64, 64)).unwrap();
+        // One poll starts the readback. Whether it lands on this poll
+        // depends on the GPU, and both outcomes must survive the drop.
+        let _ = d.try_recv_frame().unwrap();
+        drop(d);
+
+        // The staging pool is per device, so a fresh denoiser on the
+        // same device is handed the same buffers.
+        let mut d = new();
+        for _ in 0..4 {
+            d.push_frame(&frame(64, 64)).unwrap();
+            d.recv_frame()
+                .expect("readback after a dropped polled frame should not fail")
+                .expect("spatial mode emits one frame per push");
+        }
+        d.flush(|_| {}).unwrap();
+    }
 }
