@@ -45,10 +45,7 @@ before you consider going up a preset.
 You should try this parameter before touching the absolute values, since luma and chroma start
 from different defaults and the scale keeps that separation.
 
-**`--lambda-ht` sets those thresholds outright.** The defaults are 3.6 for luma and 3.36 for
-chroma. Luma's value was tuned and deliberately biased toward keeping detail. Chroma's carries
-that same bias over rather than being tuned on its own. A single value here flattens both planes
-onto the same number, so prefer the scale unless you have a figure you want.
+**`--lambda-ht` sets those thresholds outright.** The defaults are 5.2 for luma and 3.4 for chroma.
 `--luma-lambda-ht` and `--chroma-lambda-ht` pin one plane without touching the other, and `--lambda-ht-scale` still
 applies on top of whatever is pinned.
 
