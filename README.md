@@ -9,6 +9,8 @@ experience and eventually growing beyond NLMeans.
 av-denoise features **NLMeans**, **NLMeans-HQ** and **NL4D** algorithms offering significant advantages over existing
 denoising tools.
 
+![CLI benchmark results RX9700](assets/cli-bench-results-1080p-amd-rx9700.png)
+
 ## Features
 
 - **Simple tuning presets** - the `--preset` ladder (`veryfast` → `veryslow`) automatically adjusts denoiser settings
@@ -29,6 +31,11 @@ denoising tools.
   across bit-depth.
 - _**Fast!**_ - around **2x** FFmpeg's `nlmeans_opencl` at matched settings and **~1.3x** faster than V-BM3DHIP.
   - Piped input can't parallelize across scenes, so file input makes the best use of big GPUs.
+- **VapourSynth Plugin** - [Available on PyPi](https://pypi.org/project/vsavd/) for integrating within your existing
+  pipelines.
+  - Please be aware that due to VS API limitations the NLMeans-HQ and NL4D algorithms are very heavily limited and
+    performance is suboptimal from what it could be. For best performance we recommend using the CLI and then feeding
+    the output into VS separately.
 
 ---
 
@@ -83,124 +90,6 @@ don't already do what you want.
 
 #### [Tuning guide for VapourSynth](https://github.com/ChillFish8/av-denoise/blob/HEAD/docs/TUNING-VS.md)
 
-
-## Benchmarks
-
-Numbers below come from `scripts/bench_runs.py` (`just compare-perf`), which pipes
-each tool to `ffmpeg -f null -` so the encoder is not measured. Throughput is
-total frames divided by wall-clock elapsed.
-
-- Input is a 3,450-frame 1080p FFV1 clip.
-- `av-denoise` using the `vulkan` backend.
-- Running on a `AMD AI Pro R9700` (AMD 9070XT equivalent) GPU.
-- Elapsed time is measured around the whole process, so the one-off scene detection
-  pass is inside every number.
-- Take these numbers with a pinch of salt.
-
----
-
-### Algorithm defaults
-
-Every row uses `--channel-mode luma,chroma` and no tuning beyond the preset, so the
-rows are directly comparable. NL4D always tracks motion, which is why the
-motion-compensated NLMeans-HQ row is here — that is the like-for-like comparison, not
-the plain one.
-
-| run                                          | preset |       fps | denoising   | detail retention | notes                                                                     |
-|----------------------------------------------|--------|----------:|-------------|------------------|---------------------------------------------------------------------------|
-| `nlmeans --variant fast`                     | `base` | **58.91** | low         | low              | Traditional NLMeans algorithm                                             |
-| `nl4d --preset fast`                         | `fast` |     48.04 | high        | higher           | Better detail retention compared to V-BM3D (r=1)                          |
-| `nlmeans --variant hq`                       | `base` |     47.34 | medium      | medium           | NLMeans with adaptive noise estimation and motion confidence (NLMeans-HQ) |
-| `nlmeans --variant hq --motion-compensation` | `base` |     42.48 | medium      | medium           | NLMeans-HQ + block matching motion compensation                           |
-| `nl4d`                                       | `base` |     42.39 | **highest** | **highest**      | Better detail retention compared to V-BM3D (r=2) and all NLMeans variants |
-
-The two quality columns are not objective, they exist to give you an idea more of what sort of configuration
-fits your situation best.
-
-Grouping patches across the temporal window costs about what motion-compensated
-NLMeans-HQ costs at the same window size. One rung down the ladder, `nl4d --preset
-fast` halves the window to 3 frames and lands on plain NLMeans-HQ throughput while
-still tracking motion.
-
-All five ran back to back in one session. Repeat passes agreed within 2% on every row
-except `nlmeans --variant fast`, the least GPU-bound run of the five, which came in 12%
-low on one pass out of four under background load.
-
-Reproduce with (add `--device discrete:N` to pin a particular GPU):
-
-```bash
-just compare-perf -- --accelerators vulkan \
-  --only av_default_nlmeans_fast,av_default_nlmeans_hq,av_default_nlmeans_hq_mc,av_fast_nl4d,av_default_nl4d
-```
-
-### NL4D vs V-BM3D
-
-NL4D groups patches across the temporal window the way V-BM3D does, so the closest
-external reference is a real V-BM3D. This runs [V-BM3DHIP](https://github.com/WolframRhodium/VapourSynth-BM3DCUDA)
-on the GPU through VapourSynth (the `vapoursynth-bm3dhip` package), at NL4D's own
-window size so both search five frames.
-
-| run                  |       fps | vs NL4D      |
-|----------------------|----------:|--------------|
-| NL4D (`base` preset) | **38.65** | —            |
-| V-BM3DHIP (radius 2) |     28.69 | 1.35x slower |
-
-> [!NOTE]
-> V-BM3DHIP has no automatic noise estimation, so its sigma is pinned. That changes what the 
-> result looks like, not how much work it does. 
-
-```bash
-just compare-perf -- --accelerators vulkan --only av_default_nl4d,bm3dhip_r2
-```
-
-### Apples-to-apples spatial NL-means (strength 1.0)
-
-The two tables below pin `--variant fast` at `veryfast`-preset settings, not the `base`
-default, so they isolate one feature at a time rather than measuring a shipping config.
-
-Matched patch and search sizes on both tools, av-denoise uses radii compared to
-ffmpeg which takes the absolute size.
-
-| patch / search | av-denoise (fps) | ffmpeg nlmeans_opencl (fps) | speedup |
-|----------------|-----------------:|----------------------------:|--------:|
-| p=5, r=11      |        **72.57** |                       30.25 |  ~2.40x |
-| p=7, r=15      |        **42.41** |                       16.33 |  ~2.60x |
-| p=9, r=15      |        **41.84** |                       16.26 |  ~2.57x |
-
-> [!NOTE]
-> av-denoise uses more sensible defaults compared to ffmpeg and enables the high-quality modes by default so
-> the numbers you see here will not map directly to your own experience unless you explicitly configure it to
-> match the settings to ffmpeg. (_NOT ADVISED_)
-
-### av-denoise feature cost (strength 1.0, default patch/search)
-
-All luma+chroma. Spatial baseline is the reference. _Lower fps = more work._
-
-| run                              |   fps | notes                               |
-|----------------------------------|------:|-------------------------------------|
-| spatial baseline                 | 97.25 | `--temporal-radius 0`               |
-| spatial + bilateral prefilter    | 93.50 | adds one on-GPU pass per frame      |
-| temporal r=1                     | 72.73 | 3-frame window                      |
-| temporal r=2                     | 62.07 | 5-frame window                      |
-| temporal r=1 + motion comp       | 64.03 | hierarchical block matching enabled |
-| temporal r=2 + motion comp       | 54.29 |                                     |
-| temporal r=1 + prefilter         | 69.58 |                                     |
-| full r=1 (temporal+MC+prefilter) | 60.97 |                                     |
-| full r=2 (temporal+MC+prefilter) | 52.18 |                                     |
-
-Reproduce with `just compare-perf` (config: `scripts/bench_runs.toml`).
-
-### Bit depth cost
-
-Same clip, same settings, differing only in source depth. 10-bit moves twice
-the bytes through decode, conversion, and the y4m output, so some of the gap is
-I/O rather than denoising.
-
-| source depth |       fps |
-|--------------|----------:|
-| 8-bit        | **91.19** |
-| 10-bit       |     73.57 |
-
 ---
 
 ## Hardware support
@@ -224,6 +113,24 @@ There is no software backend. The collaborative filter aggregates its filtered p
 atomic floating-point adds, and CubeCL's CPU runtime does not implement atomics. A software
 *device* is still reachable with `--device cpu` where the platform provides one, such as lavapipe
 under Vulkan.
+
+## Benchmarks
+
+### CLI - 1080p 8-bit
+
+![CLI benchmark results RX9700](assets/cli-bench-results-1080p-amd-rx9700.png)
+
+### CLI - 4K 10-bit
+
+![CLI benchmark results RX9700](assets/cli-bench-results-4k-amd-rx9700.png)
+
+### VS Plugin  - 1080p 8-bit
+
+![VS benchmark results RX9700](assets/vs-plugin-bench-results-1080p-amd-rx9700.png)
+
+### VS Plugin  - 4K 10-bit
+
+![VS benchmark results RX9700](assets/vs-plugin-bench-results-4k-amd-rx9700.png)
 
 ### Notes about the JIT
 
