@@ -319,11 +319,13 @@ impl Nl4dOptions {
 /// noise on heavy grain. Separately confirmed not to over-filter near-clean
 /// animation. The reason why we're going a bit heavier on high noise is because
 /// the encoders end up reducing that detail _more_ than the denoiser does if
-/// that extra entropy is less and overall produces a worse final image.
+/// that extra entropy remains in and overall produces a worse final image.
 ///
 /// `ChannelMode::Yuv` reads the luma value, on the same "a fused pass is
 /// dominated by luma" assumption [`hq_default_strength`]
 /// makes for its own Yuv case.
+///
+/// Luma and the fused Yuv mode use 5.2, and chroma uses 3.4.
 pub fn nl4d_default_lambda_ht(channels: ChannelMode) -> f32 {
     match channels {
         ChannelMode::Luma | ChannelMode::Yuv => 5.2,

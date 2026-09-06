@@ -116,6 +116,18 @@ pub fn score(clip: &Clip, snap: &MotionSnapshot, refine: u32) -> Score {
     let (w, h) = (clip.width, clip.height);
     let mut out = Score::default();
 
+    assert_eq!(
+        snap.vectors.len(),
+        snap.confidence.len(),
+        "vectors and confidence must carry the same neighbour count and convention"
+    );
+    assert_eq!(
+        snap.vectors.len(),
+        clip.truth.len(),
+        "the snapshot's neighbour count must match the clip's truth, which both index by \
+         `neighbour_idx_for_k`"
+    );
+
     for (t, truth) in clip.truth.iter().enumerate() {
         let occluded = &clip.occluded[t];
         for ry in 0..refs_along(h) {
@@ -214,6 +226,26 @@ mod tests {
             vectors: vec![vec![[-vx, -vy]; blocks], vec![[vx, vy]; blocks]],
             confidence: vec![vec![0.9; blocks]; 2],
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "neighbour count must match")]
+    fn score_asserts_the_snapshots_neighbour_count_matches_the_clips_truth() {
+        // The clip carries truth for both neighbours (k = -1, +1) but
+        // the snapshot only carries one, so the two disagree on how
+        // many neighbours `neighbour_idx_for_k` indexes.
+        let mut snap = uniform_snapshot(3, 1);
+        snap.vectors.truncate(1);
+        snap.confidence.truncate(1);
+        score(&uniform_clip(), &snap, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "same neighbour count and convention")]
+    fn score_asserts_vectors_and_confidence_carry_the_same_neighbour_count() {
+        let mut snap = uniform_snapshot(3, 1);
+        snap.confidence.pop();
+        score(&uniform_clip(), &snap, 2);
     }
 
     #[test]

@@ -40,7 +40,19 @@ impl Still {
         // Exactly one whitespace byte separates maxval from the data.
         pos += 1;
         let (width, height, maxval) = (fields[0], fields[1], fields[2]);
-        let n = (width * height) as usize;
+        // Widened to 64 bits so a header claiming huge dimensions cannot
+        // wrap back into a small `usize` on a 32-bit target and slip
+        // past the bounds check below.
+        let n64 = width as u64 * height as u64;
+        let bytes_per_sample: u64 = if maxval > 255 { 2 } else { 1 };
+        let available = (bytes.len() - pos.min(bytes.len())) as u64;
+        if n64 * bytes_per_sample > available {
+            return Err(format!(
+                "pgm data truncated: header claims {width}x{height} at {bytes_per_sample} bytes/sample, \
+                 only {available} bytes remain"
+            ));
+        }
+        let n = n64 as usize;
         let luma = if maxval > 255 {
             let data = bytes.get(pos..pos + 2 * n).ok_or("pgm data truncated")?;
             data.as_chunks::<2>()
@@ -410,5 +422,26 @@ mod tests {
         p16.extend_from_slice(&[0xFF, 0xFF, 0x00, 0x00]);
         let s = Still::from_pgm(&p16).expect("16-bit parse");
         assert_eq!(s.luma, vec![1.0, 0.0]);
+    }
+
+    #[test]
+    fn a_header_claiming_more_data_than_is_present_is_rejected() {
+        // The header claims a 100x100 plane, but only 4 sample bytes
+        // follow. Also exercises the overflow-safe path: `width *
+        // height` for a header this large already overflows `u32`.
+        let mut p8 = b"P5\n100 100\n255\n".to_vec();
+        p8.extend_from_slice(&[0, 128, 255, 64]);
+        let err = Still::from_pgm(&p8).expect_err("truncated data must be rejected");
+        assert!(err.contains("truncated"), "got {err}");
+    }
+
+    #[test]
+    fn a_header_with_dimensions_that_overflow_u32_is_rejected_not_wrapped() {
+        // `width * height` overflows `u32` here; widening to `u64`
+        // before multiplying must catch this as truncated data rather
+        // than wrapping to a small value that a short buffer satisfies.
+        let p8 = b"P5\n70000 70000\n255\n".to_vec();
+        let err = Still::from_pgm(&p8).expect_err("an overflowing header must be rejected");
+        assert!(err.contains("truncated"), "got {err}");
     }
 }

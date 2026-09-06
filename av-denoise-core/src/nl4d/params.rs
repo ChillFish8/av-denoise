@@ -180,8 +180,15 @@ impl Nl4dParams {
             );
         }
 
-        if let MotionCompensationMode::Mvtools { blksize, overlap, .. } = self.nlm.motion_compensation {
-            let step = blksize.saturating_sub(overlap).max(1);
+        // Only checked once the geometry itself is sound. An overlap at
+        // or past blksize gives a step of 0, which `nlm.validate()`
+        // rejects on its own terms below with the real fault named. Left
+        // unguarded, that same case saturates the step to 1 here and
+        // reports a nonsensical covering-block count instead.
+        if let MotionCompensationMode::Mvtools { blksize, overlap, .. } = self.nlm.motion_compensation
+            && overlap < blksize
+        {
+            let step = blksize - overlap;
             let covers = blksize.div_ceil(step);
             if covers > MAX_COVERING_BLOCKS {
                 return Err(format!(
@@ -348,6 +355,47 @@ mod tests {
                 "error should name the offending blksize and overlap, got {err}"
             );
         }
+    }
+
+    /// An overlap equal to blksize gives a step of 0, which is really a
+    /// `nlm.validate()` fault, not a covering-block one. `Nl4dParams`'s
+    /// own check has to stay quiet about it, mirroring how construction
+    /// runs both validations in sequence, so the caller sees the overlap
+    /// constraint named rather than a nonsensical covering-block count
+    /// computed from a saturated step.
+    #[test]
+    fn overlap_equal_to_blksize_reports_the_overlap_constraint_not_covering_blocks() {
+        let params = Nl4dParams {
+            nlm: NlmParams {
+                motion_compensation: MotionCompensationMode::Mvtools {
+                    blksize: 16,
+                    overlap: 16,
+                    search_radius: 4,
+                    pyramid_levels: 2,
+                    estimation: MotionEstimation::Auto,
+                },
+                ..Nl4dParams::default().nlm
+            },
+            ..Nl4dParams::default()
+        };
+        assert!(
+            params.validate().is_ok(),
+            "the covering-block check must not fire on a geometry nlm.validate() rejects on its \
+             own terms"
+        );
+        let err = params
+            .nlm
+            .validate()
+            .expect_err("overlap == blksize must be rejected")
+            .to_string();
+        assert!(
+            err.contains("overlap") && err.contains("blksize"),
+            "error should name the overlap constraint, got {err}"
+        );
+        assert!(
+            !err.contains("cover a patch"),
+            "error should not be the covering-block message, got {err}"
+        );
     }
 
     #[test]

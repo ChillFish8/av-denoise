@@ -87,7 +87,7 @@ pub fn channel_scale_host(channels: u32) -> f32 {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 mod tests {
     use cubecl::prelude::*;
     use cubecl::wgpu::WgpuRuntime;

@@ -20,3 +20,8 @@ strum_macros = "0.28"
 bon = "3"
 cubecl = { version = "0.10", features = ["std"] }
 av-denoise-core = { path = "av-denoise-core", version = "0.4.0-alpha7", default-features = false }
+
+[profile.test]
+opt-level = 3
+debug-assertions = true
+overflow-checks = true

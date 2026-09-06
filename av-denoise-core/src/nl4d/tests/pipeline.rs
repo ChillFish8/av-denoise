@@ -888,3 +888,108 @@ fn field_regularisation_reaches_the_snapshot() {
     assert_eq!(off.vectors[t_plus][textured_block], [3, 0]);
     assert_eq!(on.vectors[t_plus][textured_block], [3, 0]);
 }
+
+/// `Nl4dParams::default()`, changing only `channels`, which has to
+/// switch to `Luma` because this file's helpers only ever synthesise a
+/// single plane. Every other test in this file pins `field_lambda:
+/// 0.0` so its recorded values stay stable, but the shipped default is
+/// `1.0`, meaning a real caller always runs the field-regularisation
+/// pass this configuration exercises.
+fn shipped_default_params() -> Nl4dParams {
+    let params = Nl4dParams {
+        nlm: NlmParams {
+            channels: ChannelMode::Luma,
+            ..Nl4dParams::default().nlm
+        },
+        ..Nl4dParams::default()
+    };
+    assert_eq!(
+        params.field_lambda, 1.0,
+        "this helper exists to exercise the shipped default, not an override"
+    );
+    params
+}
+
+/// Runs the pipeline at the true shipped defaults, in two phases.
+///
+/// The first phase pushes a static, clean (noiseless) clip and checks
+/// the field-regularisation pass leaves an interior block's vector at
+/// exactly zero. A static clip's true motion is zero everywhere, so a
+/// correctly regularised field has nothing to pull a well-textured
+/// interior block's vector away from zero toward: every neighbouring
+/// block's vector is also zero, so their median is zero, which is
+/// already where the block sits. A field-regularisation dispatch that
+/// reads the wrong pyramid slot, indexes the wrong neighbour, or
+/// strides into a different block's data instead of its own would
+/// instead pull in whatever mismatched vector sits there, and a real
+/// motion vector would show up in a scene where nothing ever moved.
+/// This phase carries no noise, because the estimator's own
+/// noise-driven wobble would otherwise mask exactly the kind of small,
+/// wrong-source displacement it exists to catch.
+///
+/// The second phase pushes a static, noisy clip through a fresh
+/// denoiser at the same defaults and checks every emitted frame comes
+/// out well above the noisy input's own PSNR, the same property
+/// [`denoises_a_static_noisy_clip`] checks at `field_lambda: 0.0`. A
+/// field-regularisation dispatch bug severe enough to corrupt the
+/// motion field would feed the temporal grouping kernel the wrong
+/// candidates and show up here as a smaller improvement, or none at
+/// all.
+#[test]
+fn shipped_defaults_denoise_a_static_clip_and_regularise_its_field_to_zero() {
+    let client = make_client();
+    let (w, h) = (96u32, 96u32);
+    let base = textured_base(w, h);
+    let radius = shipped_default_params().temporal_radius;
+    let n = (3 * radius + 1) as usize;
+
+    // Phase 1: a clean, static clip, checking the regularised field.
+    let mut clean_d = Nl4dDenoiser::<R>::new(&client, shipped_default_params(), w, h)
+        .expect("construction failed for the clean phase");
+    for _ in 0..n {
+        clean_d.push_frame(&base);
+        let _ = clean_d.denoise_submit().expect("denoise_submit failed");
+    }
+    let snap = clean_d.motion_snapshot().expect("a pass ran");
+    // Block (2, 2) spans pixels 16..32 on both axes, well inside the
+    // frame and away from any edge-clamping effects.
+    let interior_block = (2 * snap.blocks_x + 2) as usize;
+    for (t, &k) in snap.offsets.iter().enumerate() {
+        assert_eq!(
+            snap.vectors[t][interior_block],
+            [0, 0],
+            "neighbour k={k}: a static, noiseless clip's regularised field must read exactly \
+             zero at an interior block; a nonzero vector here is what a wrong pyramid slot, \
+             neighbour index, or stride in the smoothing dispatch looks like"
+        );
+    }
+
+    // Phase 2: a noisy version of the same clip, checking the output.
+    let frames: Vec<Vec<f32>> = (0..n as u32)
+        .map(|seed| noisy_copy_of(&base, w, h, SIGMA, seed))
+        .collect();
+    let mut noisy_d = Nl4dDenoiser::<R>::new(&client, shipped_default_params(), w, h)
+        .expect("construction failed for the noisy phase");
+    let mut outputs: Vec<Vec<f32>> = Vec::new();
+    for frame in &frames {
+        noisy_d.push_frame(frame);
+        if let Some(pending) = noisy_d.denoise_submit().expect("denoise_submit failed") {
+            let frame = pending.wait().expect("readback failed");
+            outputs.push(frame.into_f32().expect("f32 output"));
+        }
+    }
+    noisy_d
+        .flush(|frame| outputs.push(frame.as_f32().expect("f32 denoiser").to_vec()))
+        .expect("flush failed");
+
+    assert_eq!(outputs.len(), n, "expected one emitted frame per pushed frame");
+    for (i, out) in outputs.iter().enumerate() {
+        let noisy_psnr = psnr(&frames[i], &base);
+        let out_psnr = psnr(out, &base);
+        assert!(
+            out_psnr > noisy_psnr + 6.0,
+            "frame {i}: expected at least a 6 dB PSNR improvement over the noisy input at the \
+             shipped defaults, got noisy={noisy_psnr:.4} dB denoised={out_psnr:.4} dB"
+        );
+    }
+}

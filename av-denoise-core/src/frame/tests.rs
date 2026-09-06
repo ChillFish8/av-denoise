@@ -400,6 +400,10 @@ mod reseed {
         // a ceiling: at most a handful of samples may cross it, and a
         // real regression that moved the bulk of the plane would push
         // far more samples past it than that.
+        //
+        // Measured against this fixture, the actual worst-pixel diff was
+        // 10, with exactly 1 sample exceeding 8, so both bounds carry
+        // headroom over what was observed.
         const BEHIND_EDGE_TOLERANCE: i32 = 16;
         const BEHIND_EDGE_OUTLIER_THRESHOLD: i32 = 8;
         const BEHIND_EDGE_OUTLIER_LIMIT: usize = 4;

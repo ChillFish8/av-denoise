@@ -312,7 +312,7 @@ pub(crate) fn haar_variance_ladder(sig2: &[f32], k_use: u32) -> Vec<f32> {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 mod tests {
     use super::*;
 

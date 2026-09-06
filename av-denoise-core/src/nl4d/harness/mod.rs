@@ -9,5 +9,5 @@
 mod score;
 mod synth;
 
-pub use score::{score, KindScore, Score};
-pub use synth::{synthesise, Clip, MotionClass, Still};
+pub use score::{KindScore, Score, score};
+pub use synth::{Clip, MotionClass, Still, synthesise};

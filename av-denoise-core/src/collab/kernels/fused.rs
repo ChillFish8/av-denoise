@@ -74,9 +74,19 @@ pub(crate) const MEMBER_SIGMA2_CAP: f32 = 64.0;
 /// The highest such block is `p / step`, which the caller clamps to the
 /// grid and uses as the low end's ceiling.
 ///
-/// This mirrors `crate::nl4d::harness::score::covering_blocks`.
+/// This mirrors `covering_blocks` in the `mc_accuracy` bench's harness
+/// module (`av-denoise-core/benches/harness/score.rs`), which the tests
+/// below reproduce on the host to check the two stay in step.
 #[cube]
 fn covering_lo(p: u32, #[comptime] blksize: u32, #[comptime] step: u32) -> u32 {
+    let past = u32::max(p + PATCH_SIZE, blksize) - blksize;
+    past.div_ceil(step)
+}
+
+/// The host mirror of [`covering_lo`], for tests that cannot launch a
+/// kernel.
+#[cfg(test)]
+fn covering_lo_host(p: u32, blksize: u32, step: u32) -> u32 {
     let past = u32::max(p + PATCH_SIZE, blksize) - blksize;
     past.div_ceil(step)
 }
@@ -795,6 +805,49 @@ pub fn collab_fused<N: Size>(
                         accum_scale,
                     );
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::covering_lo_host;
+
+    /// The host mirror of `covering_blocks` in the `mc_accuracy` bench's
+    /// harness (`benches/harness/score.rs`). Reproduced here, rather than
+    /// imported, because that module lives outside the crate as bench-only
+    /// code and cannot be a test dependency of the library.
+    ///
+    /// This pins the kernel's arithmetic against the harness's read of the
+    /// same geometry rather than launching a real kernel, so it catches the
+    /// two formulas drifting apart on paper but says nothing about whether
+    /// [`super::covering_lo`] compiles or runs correctly on a GPU; the
+    /// integration tests in `nl4d::tests` cover that by driving the whole
+    /// pipeline.
+    fn covering_blocks_host(p: u32, blksize: u32, step: u32, blocks: u32) -> (u32, u32) {
+        let hi = (p / step).min(blocks - 1);
+        let lo = if p + super::PATCH_SIZE <= blksize {
+            0
+        } else {
+            (p + super::PATCH_SIZE - blksize).div_ceil(step)
+        };
+        (lo.min(hi), hi)
+    }
+
+    #[test]
+    fn covering_lo_matches_the_harness_across_a_range_of_geometries() {
+        for (blksize, overlap) in [(16u32, 8u32), (16, 12), (32, 24), (8, 4), (16, 0)] {
+            let step = blksize - overlap;
+            let blocks = 8u32;
+            for p in (0..blocks * step).step_by(3) {
+                let (expect_lo, hi) = covering_blocks_host(p, blksize, step, blocks);
+                let got_lo = covering_lo_host(p, blksize, step).min(hi);
+                assert_eq!(
+                    got_lo, expect_lo,
+                    "blksize={blksize} step={step} p={p}: covering_lo disagrees with the \
+                     harness's covering_blocks"
+                );
             }
         }
     }
