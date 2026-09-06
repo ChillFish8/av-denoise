@@ -1,3 +1,8 @@
+# Feature set for the end-to-end benchmark binary. Override to build against another
+# backend, e.g. `AVD_BENCH_FEATURES="vulkan,cuda" just benchmark-e2e`. The `binary`
+# feature is always added, without it Cargo skips the CLI target.
+bench_features := env("AVD_BENCH_FEATURES", "vulkan") + ",binary"
+
 hello:
 
 # Prefer `rustfmt +nightly <file>` for targeted edits; this formats the whole workspace.
@@ -73,7 +78,7 @@ benchmark-e2e *ARGS: _build-benchmark-bin _rebuild-benchmark-vs-plugin
     uv run --directory scripts src/benchmark_e2e.py {{ARGS}}
 
 _build-benchmark-bin:
-    cargo build --release --bin av-denoise --features vulkan,binary
+    cargo build --release --bin av-denoise --features {{bench_features}}
 
 # The benchmark's plugin arms take vsavd from `packages/vs-avd` as an editable
 # install, and `uv run` does not rebuild the cdylib after a Rust change, so they
