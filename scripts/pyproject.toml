@@ -20,6 +20,12 @@ vs = [
     # and works. Re-check this pin if the system ROCm is upgraded.
     "vapoursynth-bm3dhip==2.16",
     "vsjetpack[amd,denoise]>=2.2.4",
+    # The NVIDIA half of the same pair, so the BM3D backend `vbm3d_denoise.vpy`
+    # picks is a property of the machine rather than of this file. The whole
+    # `vsjetpack[nvidia]` extra does not resolve, and none of the rest of it is
+    # needed here. VapourSynth skips a plugin it cannot dlopen, so the wheel of
+    # whichever vendor is absent sits inert.
+    "vapoursynth-bm3dcuda",
 ]
 
 # The local crate rather than the published wheel, so the plugin arms of the

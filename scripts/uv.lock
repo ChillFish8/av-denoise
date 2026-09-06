@@ -755,6 +755,7 @@ dependencies = [
 [package.dev-dependencies]
 vs = [
     { name = "vapoursynth" },
+    { name = "vapoursynth-bm3dcuda" },
     { name = "vapoursynth-bm3dhip" },
     { name = "vsavd" },
     { name = "vsjetpack", extra = ["amd", "denoise"] },
@@ -766,6 +767,7 @@ requires-dist = [{ name = "pydantic", specifier = ">=2.9" }]
 [package.metadata.requires-dev]
 vs = [
     { name = "vapoursynth", specifier = ">=79" },
+    { name = "vapoursynth-bm3dcuda" },
     { name = "vapoursynth-bm3dhip", specifier = "==2.16" },
     { name = "vsavd", editable = "../packages/vs-avd" },
     { name = "vsjetpack", extras = ["amd", "denoise"], specifier = ">=2.2.4" },
@@ -936,6 +938,20 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ae/05/f6db2285c7c84a12fbdb0fa77b243e2848fdc0b44b5ed6e3ac0a30c7986f/vapoursynth_bm3dcpu-2.17-py3-none-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:68b35426b720e71eac5d4285efc18300d73b113a5a563bbedf9dfca50d067905", size = 70253, upload-time = "2026-07-01T20:12:52.228Z" },
     { url = "https://files.pythonhosted.org/packages/7e/cc/b35afdd95b7c6e389dfd9b5abf346e5630f1cdd0c399de0cc8bd7d1ba80b/vapoursynth_bm3dcpu-2.17-py3-none-musllinux_1_2_x86_64.whl", hash = "sha256:5c7ebe5f8ba8388fc7140204e49a61e0e58fac4b85160d6e1ca26a1d60a5d81c", size = 1101586, upload-time = "2026-07-01T20:12:53.875Z" },
     { url = "https://files.pythonhosted.org/packages/d6/dc/3a833846c834ec1c2021d381784bf0a51a91d05b6bda9680aac978c04170/vapoursynth_bm3dcpu-2.17-py3-none-win_amd64.whl", hash = "sha256:2415584ad6b3c540a2bdb463db18e2cb3073d817c69ffa745d62bca9fe4fab30", size = 195194, upload-time = "2026-07-01T20:12:55.42Z" },
+]
+
+[[package]]
+name = "vapoursynth-bm3dcuda"
+version = "2.17"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "vapoursynth" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/71/2a/8032844f8b81ff27cae28aba9fe2eaf8dfcd6ca7acc6f6c6604bb39af74c/vapoursynth_bm3dcuda-2.17.tar.gz", hash = "sha256:da6497f7da618b425bebdfbbeb29937492fb5d1c1ef2687fc2ac2b8de03b79de", size = 625434, upload-time = "2026-07-01T20:14:57.231Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/f3/c8a466eb2206a71c2a613d18a44ccbbd1fc764e02003ea0d382fdfe0b5c1/vapoursynth_bm3dcuda-2.17-py3-none-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:3d1dd9a6e20328d888d7622dd3eca5d50a74054f57660e6293c14912e8c51996", size = 51872459, upload-time = "2026-07-01T20:14:46.599Z" },
+    { url = "https://files.pythonhosted.org/packages/b4/65/ce55bdc37f4561a478711f3eb1d00a7eb46926021932c365285337442bb7/vapoursynth_bm3dcuda-2.17-py3-none-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:507adca6731b79beb85dbf33cb33765fb74dd5a05653df94f2cdfcfd2fb02605", size = 54435129, upload-time = "2026-07-01T20:14:50.337Z" },
+    { url = "https://files.pythonhosted.org/packages/25/d8/701f7557602b18852df89ef78173fcb76ecec215951762acfdf17f9a18c5/vapoursynth_bm3dcuda-2.17-py3-none-win_amd64.whl", hash = "sha256:27a37e0282ccea45518e731cccb1407f10c805413ff6beb9ca9a149dbcea2a7f", size = 48263199, upload-time = "2026-07-01T20:14:54.371Z" },
 ]
 
 [[package]]

@@ -55,7 +55,9 @@ up by hand.
   the CLI arms measure the same working tree. `just benchmark-e2e`
   reinstalls it, so a Rust change is never measured against a stale build.
 - `vs/vbm3d_denoise.vpy` runs the V-BM3D reference, with `--arg profile=`
-  picking one of its profiles.
+  picking one of its profiles. It picks its own backend by rendering a
+  probe frame through each GPU BM3D plugin in turn, so it runs on HIP on an
+  AMD box and CUDA on an NVIDIA one. `--arg backend=` forces one.
 
 See `configs/benchmark_e2e.toml` for the config the recipe runs by
 default. It measures ten variants against a 1080p clip and nine against a
