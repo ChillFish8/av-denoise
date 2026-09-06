@@ -73,7 +73,7 @@ values, since luma and chroma start from different defaults and the scale keeps 
 clean = avd.Nl4d(clip, lambda_ht_scale=1.1)
 ```
 
-**`lambda_ht` sets those thresholds outright.** The defaults are 4.24 for luma and 3.36 for chroma.
+**`lambda_ht` sets those thresholds outright.** The defaults are 3.6 for luma and 3.36 for chroma.
 Luma's value was tuned and deliberately biased toward keeping detail. Chroma's carries that same
 bias over rather than being tuned on its own. A single value here flattens both planes onto the
 same number, so prefer the scale unless you have a figure you want. `luma_lambda_ht` and

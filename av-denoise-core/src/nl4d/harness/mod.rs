@@ -9,5 +9,5 @@
 mod score;
 mod synth;
 
-pub use score::{covering_blocks, score, KindScore, PatchKind, Score};
+pub use score::{score, KindScore, Score};
 pub use synth::{synthesise, Clip, MotionClass, Still};

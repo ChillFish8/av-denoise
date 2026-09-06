@@ -191,18 +191,19 @@ pub struct Nl4dArgs {
 
     /// How strongly motion vectors are pulled toward their neighbours.
     ///
-    /// `0` (the library default) leaves the tracked field as it is.
-    /// Raise it to smooth out stray vectors on noisy or flat content,
-    /// at the cost of following small objects less closely.
+    /// `1.0` (the library default) is the shipped calibration and
+    /// smooths the tracked field. Raise it to smooth out stray vectors
+    /// on noisy or flat content, at the cost of following small
+    /// objects less closely. `0` leaves the tracked field as it is.
     #[arg(long)]
     pub field_lambda: Option<f32>,
 
     /// Stops a poorly matched patch from being trusted less than a well
     /// matched one.
     ///
-    /// On by default, the shrinkage treats a patch matched across frames
-    /// with low motion confidence as a noisier observation. This flag
-    /// gives every patch the same noise estimate instead.
+    /// On by default, the shrinkage treats a patch matched with a large
+    /// match distance as a noisier observation. This flag gives every
+    /// patch the same noise estimate instead.
     #[arg(long)]
     pub no_confidence_variance: bool,
 

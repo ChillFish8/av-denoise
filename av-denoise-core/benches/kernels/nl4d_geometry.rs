@@ -14,7 +14,7 @@ pub const SPATIAL_RADIUS: u32 = 9;
 /// `collab::MAX_K`, the group size the filter runs at.
 pub const K_MAX: u32 = 8;
 /// `Nl4dParams::default().lambda_ht`.
-pub const LAMBDA_HT: f32 = 4.24;
+pub const LAMBDA_HT: f32 = 3.6;
 /// `Nl4dParams::default().confidence_variance`, the `use_member_sigma`
 /// flag `collab_fused` compiles against.
 pub const CONFIDENCE_VARIANCE: bool = true;

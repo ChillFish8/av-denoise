@@ -45,7 +45,7 @@ before you consider going up a preset.
 You should try this parameter before touching the absolute values, since luma and chroma start
 from different defaults and the scale keeps that separation.
 
-**`--lambda-ht` sets those thresholds outright.** The defaults are 4.24 for luma and 3.36 for
+**`--lambda-ht` sets those thresholds outright.** The defaults are 3.6 for luma and 3.36 for
 chroma. Luma's value was tuned and deliberately biased toward keeping detail. Chroma's carries
 that same bias over rather than being tuned on its own. A single value here flattens both planes
 onto the same number, so prefer the scale unless you have a figure you want.
@@ -61,6 +61,11 @@ are happy with the level and just want to adjust how much noise is removed vs de
 **`--spatial-radius` is the speed dial.** The centre-frame search covers `(2 * radius + 1)^2`
 positions, so it dominates the work. Dropping it from 9 to 6 roughly halves the candidates, which
 is exactly what `--preset veryfast` does.
+
+**`--field-lambda` pulls each block's motion vector toward its neighbours.** `1.0` (the library
+default) is the shipped calibration and smooths the tracked field. Raise it further on noisy or
+flat content where vectors wander, at the cost of following small objects less closely. `0` turns
+the smoothing off and leaves the tracked field as it is.
 
 ### What not to touch in NL4D
 
@@ -79,8 +84,6 @@ is exactly what `--preset veryfast` does.
   same thing as `--no-confidence-variance`.
 - **`--thsad-scale`, `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels`** tune
   the motion machinery's internals, changing any of these will likely invalidate all other defaults.
-- **`--field-lambda`** pulls each block's motion vector toward its neighbours. `0` is off. Raise it
-  on noisy or flat content where vectors wander.
 
 ## NLMeans
 

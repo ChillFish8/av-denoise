@@ -61,7 +61,8 @@ const N_FRAMES: u32 = 2 * RADIUS + 1;
 const CENTRE_SLOT: u32 = RADIUS;
 const NEIGHBOUR_SLOTS: [u32; 4] = [0, 1, 3, 4];
 const SIGMA: f32 = 0.02;
-const LAMBDA_HT: f32 = 5.3;
+/// `Nl4dParams::default().lambda_ht`.
+const LAMBDA_HT: f32 = 3.6;
 
 fn frame_data(g: Geom) -> Vec<f32> {
     let mut data = Vec::with_capacity((g.w * g.h * g.stored) as usize);
