@@ -35,7 +35,7 @@ denoising tools.
   pipelines.
   - Please be aware that due to VS API limitations the NLMeans-HQ and NL4D algorithms are very heavily limited and
     performance is suboptimal from what it could be. For best performance we recommend using the CLI and then feeding
-    the output into VS seperately.
+    the output into VS separately.
 
 ---
 
