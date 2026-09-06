@@ -99,16 +99,17 @@ pub struct Nl4dArgs {
 
     /// How much a poorly matched neighbour patch is distrusted.
     ///
-    /// A neighbour block that motion tracking matched badly is treated
-    /// as a noisier view of the same content, and this scales how much
-    /// noisier. `1.0` (the library default) is the shipped calibration.
-    /// `0` matches `--no-confidence-variance`.
+    /// A patch matched in a neighbour frame is treated as a noisier view
+    /// of the same content, as noisy as its own match residual says, and
+    /// this scales how much noisier. `1.0` (the library default) is the
+    /// shipped calibration. `0` matches `--no-confidence-variance`.
     ///
     /// The variance grows with the square of this, so `2` distrusts a
-    /// bad match four times as much. The effect saturates somewhere
-    /// between `3` and `13` depending on how noisy the source is, and
-    /// values above `16` are rejected because nothing up there can
-    /// change a pixel.
+    /// bad match four times as much. The effect saturates. It saturates
+    /// sooner the worse the patch matched, because the variance the
+    /// mechanism derives is capped at 64 times the channel's own
+    /// variance, and values above `16` are rejected because nothing up
+    /// there can change a pixel.
     ///
     /// Setting this applies one value to both planes, unless
     /// `--luma-mismatch-scale` or `--chroma-mismatch-scale` overrides
@@ -188,12 +189,21 @@ pub struct Nl4dArgs {
     #[arg(long)]
     pub kaiser_beta: Option<f32>,
 
+    /// How strongly motion vectors are pulled toward their neighbours.
+    ///
+    /// `1.0` (the library default) is the shipped calibration and
+    /// smooths the tracked field. Raise it to smooth out stray vectors
+    /// on noisy or flat content, at the cost of following small
+    /// objects less closely. `0` leaves the tracked field as it is.
+    #[arg(long)]
+    pub field_lambda: Option<f32>,
+
     /// Stops a poorly matched patch from being trusted less than a well
     /// matched one.
     ///
-    /// On by default, the shrinkage treats a patch matched across frames
-    /// with low motion confidence as a noisier observation. This flag
-    /// gives every patch the same noise estimate instead.
+    /// On by default, the shrinkage treats a patch matched with a large
+    /// match distance as a noisier observation. This flag gives every
+    /// patch the same noise estimate instead.
     #[arg(long)]
     pub no_confidence_variance: bool,
 
@@ -286,6 +296,7 @@ impl Nl4dArgs {
                     mismatch_scale: self.mismatch_scale.unwrap_or(defaults.mismatch_scale),
                     confidence_variance: !self.no_confidence_variance,
                     kaiser_beta: self.kaiser_beta.unwrap_or(defaults.kaiser_beta),
+                    field_lambda: self.field_lambda.unwrap_or(defaults.field_lambda),
                     // The CLI keeps the temporal EMA every calibrated
                     // preset assumes by default. Only `av-denoise-vs`
                     // needs window-local estimation, for random-access
@@ -452,6 +463,25 @@ mod tests {
         let defaults = Nl4dOptions::default();
 
         assert!((expect_nl4d(&opts).lambda_ht_scale - defaults.lambda_ht_scale).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn field_lambda_flows_into_the_nl4d_algorithm() {
+        let (args, nl4d) = parse(&["--field-lambda", "0.7"]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+
+        assert!((nl4d.field_lambda.unwrap() - 0.7).abs() < f32::EPSILON);
+        assert!((expect_nl4d(&opts).field_lambda - 0.7).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn unset_field_lambda_resolves_to_the_library_default() {
+        let (args, nl4d) = parse(&[]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let defaults = Nl4dOptions::default();
+
+        assert_eq!(nl4d.field_lambda, None);
+        assert!((expect_nl4d(&opts).field_lambda - defaults.field_lambda).abs() < f32::EPSILON);
     }
 
     /// nl4d never runs an NLM weighting pass, so the flags that only

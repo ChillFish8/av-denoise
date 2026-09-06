@@ -54,12 +54,15 @@ const SPATIAL_RADIUS: u32 = 9;
 const K_MAX: u32 = 8;
 const BLK_STEP: u32 = 8;
 const BLKSIZE: u32 = 16;
-const THSAD: f32 = (BLKSIZE * BLKSIZE) as f32 * 0.02;
+/// `Nl4dParams::default().mismatch_scale` squared, the kernel's
+/// `mismatch_scale2` argument.
+const MISMATCH_SCALE2: f32 = 1.0;
 const N_FRAMES: u32 = 2 * RADIUS + 1;
 const CENTRE_SLOT: u32 = RADIUS;
 const NEIGHBOUR_SLOTS: [u32; 4] = [0, 1, 3, 4];
 const SIGMA: f32 = 0.02;
-const LAMBDA_HT: f32 = 5.3;
+/// `Nl4dParams::default().lambda_ht`.
+const LAMBDA_HT: f32 = 5.2;
 
 fn frame_data(g: Geom) -> Vec<f32> {
     let mut data = Vec::with_capacity((g.w * g.h * g.stored) as usize);
@@ -210,7 +213,7 @@ impl<R: Runtime> Rig<R> {
                 CENTRE_SLOT,
                 0.0f32,
                 0.0f32,
-                THSAD,
+                MISMATCH_SCALE2,
                 LAMBDA_HT,
                 weight_scale(SIGMA, &dct_noise_profile(0.0)),
                 cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS),

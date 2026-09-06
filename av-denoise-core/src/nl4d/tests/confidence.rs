@@ -1,119 +1,11 @@
 use cubecl::prelude::*;
 
-use super::grouping::{BLKSIZE, THSAD};
 use super::helpers::{R, make_client, noisy_copy_of, textured_base};
-use crate::collab::kernels::fused::mismatch_sigma2;
 use crate::collab::kernels::transforms::haar_variance_ladder;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::{ChannelMode, HqParams, MotionCompensationMode, MotionEstimation, NlmParams};
 
 const REFINE: u32 = 2;
-
-/// The formula [`mismatch_sigma2`] runs on the GPU, mirrored on the host
-/// for these tests, with the same argument order and the same
-/// operations, so floating-point rounding matches to well within the
-/// tolerances below.
-fn expected_mismatch_sigma2(confidence: f32, thsad: f32, blksize: u32) -> f32 {
-    let blksize_area = (blksize * blksize) as f32;
-    let ratio = (1.0 - confidence) / (1.0 + confidence);
-    let e2 = thsad * thsad * ratio;
-    let eps = e2.sqrt() / blksize_area;
-    std::f32::consts::FRAC_PI_2 * eps * eps
-}
-
-/// Runs [`mismatch_sigma2`] on the GPU, one confidence per thread, so
-/// the host mirror above is checked against the code the filter
-/// actually calls rather than against itself.
-#[cube(launch_unchecked)]
-fn mismatch_sigma2_probe(
-    confidence: &Array<f32>,
-    thsad: f32,
-    blksize_area: f32,
-    out: &mut Array<f32>,
-    #[comptime] n: u32,
-) {
-    let i = ABSOLUTE_POS_X;
-    if i < n {
-        out[i as usize] = mismatch_sigma2(confidence[i as usize], thsad, blksize_area);
-    }
-}
-
-fn run_mismatch_sigma2(confidences: &[f32], thsad: f32, blksize: u32) -> Vec<f32> {
-    let client = make_client();
-    let n = confidences.len();
-    let conf_buf = client.create_from_slice(f32::as_bytes(confidences));
-    // One output slot per confidence. `size_of_val(confidences)` reaches
-    // the same number but ties the output's size to the input's slice.
-    #[expect(
-        clippy::manual_slice_size_calculation,
-        reason = "n is the element count this output holds, not the input's byte length"
-    )]
-    let out_buf = client.empty(n * size_of::<f32>());
-
-    unsafe {
-        mismatch_sigma2_probe::launch_unchecked::<R>(
-            &client,
-            CubeCount::new_1d(1),
-            CubeDim::new_1d(64),
-            ArrayArg::from_raw_parts(conf_buf, n),
-            thsad,
-            (blksize * blksize) as f32,
-            ArrayArg::from_raw_parts(out_buf.clone(), n),
-            n as u32,
-        );
-    }
-
-    let bytes = client.read_one(out_buf).expect("mismatch_sigma2 readback failed");
-    f32::from_bytes(&bytes)[..n].to_vec()
-}
-
-/// `c = 1.0`, a perfect motion match, must give `sigma_m2 = 0.0`
-/// exactly, whatever `thsad` is.
-#[test]
-fn confidence_one_gives_zero_mismatch_variance() {
-    for thsad in [THSAD, 0.5, 12.0] {
-        let out = run_mismatch_sigma2(&[1.0f32], thsad, BLKSIZE);
-        assert_eq!(
-            out[0], 0.0,
-            "a perfect match must carry no mismatch variance at thsad={thsad}, got {}",
-            out[0]
-        );
-    }
-}
-
-/// A known confidence must produce exactly the variance
-/// [`expected_mismatch_sigma2`] derives, over the whole range the
-/// confidence field can hold.
-#[test]
-fn low_confidence_produces_the_derived_mismatch_variance() {
-    let confidences = [0.0f32, 0.05, 0.2, 0.5, 0.8, 0.95];
-    let out = run_mismatch_sigma2(&confidences, THSAD, BLKSIZE);
-
-    for (idx, &c) in confidences.iter().enumerate() {
-        let expected = expected_mismatch_sigma2(c, THSAD, BLKSIZE);
-        assert!(
-            (out[idx] - expected).abs() < 1e-9,
-            "expected sigma_m2 {expected} for confidence {c}, got {}",
-            out[idx]
-        );
-    }
-
-    // Sanity: a low confidence must actually derive a value far from
-    // zero, or the assertions above would pass trivially against a
-    // broken formula that always returns ~0.
-    let low = expected_mismatch_sigma2(0.2, THSAD, BLKSIZE);
-    assert!(low > 1e-4, "expected a non-trivial mismatch variance, got {low}");
-}
-
-// The mismatch variance only ever reaches a motion-predicted member.
-// A centre-frame member is not motion-predicted, so there is no
-// mismatch to model and it keeps the plain `sigma^2` whatever the
-// confidence field holds.
-// `collab::tests::fused::centre_frame_members_ignore_the_confidence_field`
-// runs the filter with every neighbour gated out, leaving nothing but
-// centre-frame members, and shows the `confidence_variance` flag then
-// changes nothing at all even with the confidence buffer at 0.0, the
-// worst value the formula above can see.
 
 /// Inflating exactly one member's variance must raise exactly the stack
 /// rows that member participates in and leave every other row
@@ -202,6 +94,7 @@ fn mismatch_scale_test_params(
         // The shipped default, so these run the aggregation a real
         // caller gets.
         kaiser_beta: 2.0,
+        field_lambda: 0.0,
     }
 }
 

@@ -25,6 +25,7 @@ use kernels::mc_block_match_fine::BlockMatchFineBench;
 use kernels::mc_confidence::McConfidenceBench;
 use kernels::mc_downscale::DownscaleBench;
 use kernels::mc_warp::WarpBench;
+use kernels::mv_regularise::MvRegulariseBench;
 use kernels::{CHANNELS, print_header, run};
 
 const W: u32 = 1920;
@@ -227,6 +228,9 @@ fn run_kernels<R: Runtime>(backend: &str, client: &ComputeClient<R>) {
         client: client.clone(),
     });
     run(McConfidenceBench {
+        client: client.clone(),
+    });
+    run(MvRegulariseBench {
         client: client.clone(),
     });
     for &(ch, ch_name) in CHANNELS {

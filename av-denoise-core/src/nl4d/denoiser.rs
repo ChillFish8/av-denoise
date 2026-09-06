@@ -2,6 +2,8 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::params::Nl4dParams;
+use super::regularise::run_regularise;
+use super::snapshot::{LastFields, MotionSnapshot, read_snapshot};
 use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use crate::collab::kernels::aggregate::{
     collab_normalise,
@@ -12,8 +14,9 @@ use crate::collab::kernels::aggregate::{
 };
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{MAX_K, PATCH_SIZE};
+use crate::collab::{MAX_K, PATCH_AREA, PATCH_SIZE};
 use crate::denoiser::{DenoiserError, FrameOutput, OutputFormat};
+use crate::nlmeans::kernels::helpers::channel_scale_host;
 use crate::nlmeans::{
     BLOCK_X,
     BLOCK_Y,
@@ -129,6 +132,15 @@ pub struct Nl4dDenoiser<R: Runtime> {
     /// [`Self::run_collab_stage`]'s return value rather than checking it
     /// themselves.
     passes_run: u32,
+    /// The field buffers the last pass handed the fused kernel, for
+    /// [`Self::motion_snapshot`].
+    last_fields: Option<LastFields>,
+    /// See [`Nl4dParams::field_lambda`].
+    field_lambda: f32,
+    /// The regularised motion field and confidence, laid out like the
+    /// front end's own, allocated only when `field_lambda > 0.0`.
+    reg_mv: Option<Handle>,
+    reg_conf: Option<Handle>,
 }
 
 impl<R: Runtime> Nl4dDenoiser<R> {
@@ -225,6 +237,19 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             },
         };
 
+        // `motion_ctx()` panics without motion compensation, and
+        // `validate` above already requires it, so this is safe here.
+        let (reg_mv, reg_conf) = if params.field_lambda > 0.0 {
+            let mc = front.motion_ctx();
+            let neighbours = 2 * params.temporal_radius as u64;
+            (
+                Some(client.empty((neighbours * mc.mv_field_bytes_per_neighbour()) as usize)),
+                Some(client.empty((neighbours * mc.confidence_bytes_per_neighbour()) as usize)),
+            )
+        } else {
+            (None, None)
+        };
+
         Ok(Self {
             front,
             width,
@@ -251,6 +276,10 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             output_format,
             wire_outputs,
             passes_run: 0,
+            last_fields: None,
+            field_lambda: params.field_lambda,
+            reg_mv,
+            reg_conf,
         })
     }
 
@@ -373,6 +402,27 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         self.front.reset_stream_state();
         self.next_output_slot = 0;
         self.passes_run = 0;
+        self.last_fields = None;
+    }
+
+    /// The motion field and confidence the last pass gave the fused
+    /// kernel, or `None` before any pass has run.
+    ///
+    /// This is a synchronous readback for measurement tooling, not a
+    /// stable interface.
+    #[doc(hidden)]
+    pub fn motion_snapshot(&self) -> Option<MotionSnapshot> {
+        let fields = self.last_fields.as_ref()?;
+        let mc = self.front.motion_ctx();
+        Some(read_snapshot(
+            self.front.compute_client(),
+            fields,
+            self.temporal_radius,
+            mc.blocks_x,
+            mc.blocks_y,
+            mc.step,
+            mc.blksize,
+        ))
     }
 
     /// How many tail frames [`Self::flush`] must emit for the stream
@@ -498,11 +548,14 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let blksize = mc.blksize;
         let blocks_x = mc.blocks_x;
         let blocks_y = mc.blocks_y;
-        // The kernel takes the two multiplied together, see
-        // `mismatch_sigma2`. The confidence score itself stays derived
-        // from the unscaled threshold, which is why this is applied here
-        // rather than inside the front end.
-        let mismatch_thsad = self.front.thsad_value() * self.mismatch_scale;
+        // The variance grows with the square of the scale, see
+        // `Nl4dParams::mismatch_scale`.
+        let mismatch_scale2 = self.mismatch_scale * self.mismatch_scale;
+        // The distance two noisy copies of one patch show by chance, in
+        // the search's channel-scaled units. A member's mismatch
+        // variance is its distance past this.
+        let sigma2_sum: f32 = sigma_host[..channels_count as usize].iter().map(|s| s * s).sum();
+        let noise_floor = channel_scale_host(channels_count) * 2.0 * PATCH_AREA as f32 * sigma2_sum;
 
         // See the doc comment above for why these two slots are what
         // this pass clears and completes. `total_frames` is added
@@ -514,6 +567,36 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
         let pass_index = self.passes_run;
         self.passes_run += 1;
+
+        // The field the fused kernel reads, the regularised one when the
+        // pass is on.
+        let (mv_field, confidence) = match (self.reg_mv.as_ref(), self.reg_conf.as_ref()) {
+            (Some(mv), Some(conf)) => {
+                run_regularise::<R>(
+                    &client,
+                    mc,
+                    view,
+                    self.width,
+                    self.height,
+                    self.field_lambda,
+                    self.front.sad_noise_floor_value(),
+                    self.front.thsad_value(),
+                    mv,
+                    conf,
+                )
+                .map_err(DenoiserError::Other)?;
+                (mv.clone(), conf.clone())
+            },
+            _ => (view.mv_field.clone(), view.confidence.clone()),
+        };
+
+        self.last_fields = Some(LastFields {
+            mv_field: mv_field.clone(),
+            confidence: confidence.clone(),
+            mv_stride: view.mv_stride,
+            conf_stride: view.conf_stride,
+            neighbours,
+        });
 
         unsafe {
             if pass_index == 0 {
@@ -562,8 +645,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 collab_dim,
                 stored_ch as usize,
                 ArrayArg::from_raw_parts(view.input.clone(), ring_len),
-                ArrayArg::from_raw_parts(view.mv_field.clone(), mv_len.max(1)),
-                ArrayArg::from_raw_parts(view.confidence.clone(), conf_len.max(1)),
+                ArrayArg::from_raw_parts(mv_field.clone(), mv_len.max(1)),
+                ArrayArg::from_raw_parts(confidence.clone(), conf_len.max(1)),
                 ArrayArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
                 ArrayArg::from_raw_parts(self.sigma_buf.clone(), stored_ch as usize),
                 ArrayArg::from_raw_parts(self.dct_profile_buf.clone(), 8),
@@ -572,14 +655,9 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 ArrayArg::from_raw_parts(self.wsum.clone(), wsum_ring_len),
                 ArrayArg::from_raw_parts(self.group_weight.clone(), refs),
                 centre_slot,
-                // `collab_fused` has no admission gate (see its own doc
-                // comment), so a constant subtracted from every
-                // candidate's distance can never change which ones the
-                // selection picks. Any value is exact here; 0.0 is the
-                // simplest one that says so.
-                0.0f32,
+                noise_floor,
                 self.c_min,
-                mismatch_thsad,
+                mismatch_scale2,
                 self.lambda_ht,
                 wnorm,
                 self.accum_scale,

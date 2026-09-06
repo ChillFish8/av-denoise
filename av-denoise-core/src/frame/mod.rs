@@ -1401,12 +1401,12 @@ mod cli_options_tests {
         // ...but resolving each through the same function construction
         // uses (`nl4d_default_lambda_ht`, see `src/denoiser.rs`) gives
         // luma and chroma different values, which is the whole point of
-        // a caller passing no flags at all getting both calibrated
+        // a caller passing no flags at all getting both per-plane
         // defaults.
         let luma_default = crate::nl4d_default_lambda_ht(ChannelMode::Luma);
         let chroma_default = crate::nl4d_default_lambda_ht(ChannelMode::Chroma);
-        assert!((luma_default - 5.3).abs() < f32::EPSILON);
-        assert!((chroma_default - 4.2).abs() < f32::EPSILON);
+        assert!((luma_default - 5.2).abs() < f32::EPSILON);
+        assert!((chroma_default - 3.4).abs() < f32::EPSILON);
         assert!((chroma_default - luma_default).abs() > f32::EPSILON);
     }
 }

@@ -14,7 +14,7 @@ pub const SPATIAL_RADIUS: u32 = 9;
 /// `collab::MAX_K`, the group size the filter runs at.
 pub const K_MAX: u32 = 8;
 /// `Nl4dParams::default().lambda_ht`.
-pub const LAMBDA_HT: f32 = 5.3;
+pub const LAMBDA_HT: f32 = 5.2;
 /// `Nl4dParams::default().confidence_variance`, the `use_member_sigma`
 /// flag `collab_fused` compiles against.
 pub const CONFIDENCE_VARIANCE: bool = true;
@@ -26,10 +26,9 @@ pub const BLK_STEP: u32 = 8;
 /// (`MotionCompensationMode::Mvtools`'s `blksize`), distinct from
 /// [`BLK_STEP`] above.
 pub const BLKSIZE: u32 = 16;
-/// `thsad(BLKSIZE, 1.0)` in normalised SAD units (block_area *
-/// THSAD_PIXEL, see `crate::nlmeans::motion::thsad`), hand-computed
-/// here since that function is crate-private.
-pub const THSAD: f32 = (BLKSIZE * BLKSIZE) as f32 * 0.02;
+/// `Nl4dParams::default().mismatch_scale` squared, the kernel's
+/// `mismatch_scale2` argument.
+pub const MISMATCH_SCALE2: f32 = 1.0;
 
 /// Frames in the ring a pass reads.
 pub const N_FRAMES: u32 = 2 * RADIUS + 1;

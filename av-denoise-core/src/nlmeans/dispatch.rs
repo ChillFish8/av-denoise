@@ -138,7 +138,7 @@ const BILATERAL_RESIDUAL_FRACTION: f32 = 0.0;
 /// An `External` reference comes from the caller with unknown noise, and
 /// is not something this crate denoised, so it keeps the raw sigma just
 /// as `PrefilterMode::None` does.
-fn mc_sad_noise_floor_sigma(prefilter: PrefilterMode, sigma_y: f32) -> f32 {
+pub(super) fn mc_sad_noise_floor_sigma(prefilter: PrefilterMode, sigma_y: f32) -> f32 {
     match prefilter {
         PrefilterMode::NlmSpatial { .. } => sigma_y * NLM_SPATIAL_RESIDUAL_FRACTION,
         PrefilterMode::Bilateral { .. } => sigma_y * BILATERAL_RESIDUAL_FRACTION,

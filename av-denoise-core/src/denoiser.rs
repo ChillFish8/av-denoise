@@ -258,6 +258,8 @@ pub struct Nl4dOptions {
     /// estimation breaks that guarantee under random access. See
     /// [`HqParams::windowed_noise_estimation`].
     pub windowed_noise_estimation: bool,
+    /// See [`crate::nl4d::Nl4dParams::field_lambda`].
+    pub field_lambda: f32,
 }
 
 impl Default for Nl4dOptions {
@@ -281,6 +283,7 @@ impl Default for Nl4dOptions {
             confidence_variance: defaults.confidence_variance,
             kaiser_beta: defaults.kaiser_beta,
             windowed_noise_estimation: false,
+            field_lambda: defaults.field_lambda,
         }
     }
 }
@@ -311,21 +314,22 @@ impl Nl4dOptions {
 /// noise and more fine detail with it, so the value is a trade rather
 /// than an optimum.
 ///
-/// Luma gets 5.3, picked by eye from rendered comparisons on real grain
-/// and deliberately biased toward keeping detail. Higher values remove
-/// visibly more noise, but not enough to be worth what they cost in
-/// texture.
+/// Luma and chroma values are picked by eye from a ladder of renders against real
+/// film grain, accepting more lost detail in exchange for less remaining
+/// noise on heavy grain. Separately confirmed not to over-filter near-clean
+/// animation. The reason why we're going a bit heavier on high noise is because
+/// the encoders end up reducing that detail _more_ than the denoiser does if
+/// that extra entropy remains in and overall produces a worse final image.
 ///
 /// `ChannelMode::Yuv` reads the luma value, on the same "a fused pass is
 /// dominated by luma" assumption [`hq_default_strength`]
 /// makes for its own Yuv case.
 ///
-/// Chroma gets 4.2, picked the same way from the chroma residuals with
-/// luma pinned at 5.3.
+/// Luma and the fused Yuv mode use 5.2, and chroma uses 3.4.
 pub fn nl4d_default_lambda_ht(channels: ChannelMode) -> f32 {
     match channels {
-        ChannelMode::Luma | ChannelMode::Yuv => 5.3,
-        ChannelMode::Chroma => 4.2,
+        ChannelMode::Luma | ChannelMode::Yuv => 5.2,
+        ChannelMode::Chroma => 3.4,
     }
 }
 
@@ -679,6 +683,7 @@ fn build_engine<R: Runtime>(
                 mismatch_scale: opts.mismatch_scale,
                 confidence_variance: opts.confidence_variance,
                 kaiser_beta: opts.kaiser_beta,
+                field_lambda: opts.field_lambda,
             };
             let denoiser =
                 Nl4dDenoiser::with_output_format(client, nl4d_params, width, height, output_format)
@@ -1407,8 +1412,8 @@ mod options_tests {
         let luma = nl4d_default_lambda_ht(ChannelMode::Luma);
         let chroma = nl4d_default_lambda_ht(ChannelMode::Chroma);
 
-        assert!((luma - 5.3).abs() < f32::EPSILON);
-        assert!((chroma - 4.2).abs() < f32::EPSILON);
+        assert!((luma - 5.2).abs() < f32::EPSILON);
+        assert!((chroma - 3.4).abs() < f32::EPSILON);
         assert!(
             (chroma - luma).abs() > f32::EPSILON,
             "the two planes should not resolve to the same default"
@@ -1430,8 +1435,8 @@ mod options_tests {
         let luma = resolve_lambda_ht(&opts, ChannelMode::Luma).expect("the default scale is in range");
         let chroma = resolve_lambda_ht(&opts, ChannelMode::Chroma).expect("the default scale is in range");
 
-        assert!((luma - 5.3).abs() < f32::EPSILON, "got {luma}");
-        assert!((chroma - 4.2).abs() < f32::EPSILON, "got {chroma}");
+        assert!((luma - 5.2).abs() < f32::EPSILON, "got {luma}");
+        assert!((chroma - 3.4).abs() < f32::EPSILON, "got {chroma}");
     }
 
     #[test]

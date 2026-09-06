@@ -78,6 +78,66 @@ pub(crate) fn channel_scale(#[comptime] channels: u32) -> f32 {
     scale
 }
 
+/// The host mirror of [`channel_scale`].
+pub fn channel_scale_host(channels: u32) -> f32 {
+    match channels {
+        1 => 3.0,
+        2 => 1.5,
+        _ => 1.0,
+    }
+}
+
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+mod tests {
+    use cubecl::prelude::*;
+    use cubecl::wgpu::WgpuRuntime;
+
+    use super::{channel_scale, channel_scale_host};
+
+    type R = WgpuRuntime;
+
+    fn make_client() -> ComputeClient<R> {
+        let device = <R as Runtime>::Device::default();
+        R::client(&device)
+    }
+
+    /// Runs [`channel_scale`] on the GPU for all three channel counts it
+    /// ever runs with, so the host mirror is checked against the code
+    /// the filter actually calls rather than against itself.
+    #[cube(launch_unchecked)]
+    fn channel_scale_probe(out: &mut Array<f32>) {
+        out[0] = channel_scale(1u32);
+        out[1] = channel_scale(2u32);
+        out[2] = channel_scale(3u32);
+    }
+
+    #[test]
+    fn channel_scale_host_matches_the_kernel_mirror() {
+        let client = make_client();
+        let out_buf = client.empty(3 * size_of::<f32>());
+
+        unsafe {
+            channel_scale_probe::launch_unchecked::<R>(
+                &client,
+                CubeCount::new_1d(1),
+                CubeDim::new_1d(1),
+                ArrayArg::from_raw_parts(out_buf.clone(), 3),
+            );
+        }
+
+        let bytes = client.read_one(out_buf).expect("channel_scale readback failed");
+        let got = f32::from_bytes(&bytes)[..3].to_vec();
+
+        for (idx, channels) in [1u32, 2, 3].into_iter().enumerate() {
+            assert_eq!(
+                got[idx],
+                channel_scale_host(channels),
+                "channels={channels}: host mirror disagrees with the GPU kernel"
+            );
+        }
+    }
+}
+
 /// The Welsch weight for a box-summed patch distance.
 ///
 /// `noise_offset` is the distance two noisy copies of the same content

@@ -73,11 +73,10 @@ values, since luma and chroma start from different defaults and the scale keeps 
 clean = avd.Nl4d(clip, lambda_ht_scale=1.1)
 ```
 
-**`lambda_ht` sets those thresholds outright.** The defaults, 5.3 for luma and 4.2 for chroma,
-were tuned and deliberately biased toward keeping detail. A single value here flattens both planes
-onto the same number, so prefer the scale unless you have a figure you want. `luma_lambda_ht` and
-`chroma_lambda_ht`, both reachable by name, pin one plane without touching the other, and
-`lambda_ht_scale` still applies on top of whatever is pinned.
+**`lambda_ht` sets those thresholds outright.** The defaults are 5.2 for luma and 3.4 for chroma.
+A single value here flattens both planes onto the same number, so prefer the scale unless you 
+have a figure you want. `luma_lambda_ht` and `chroma_lambda_ht`, both reachable by name, pin one 
+plane without touching the other, and `lambda_ht_scale` still applies on top of whatever is pinned.
 
 ```python
 clean = avd.Nl4d(clip, luma_lambda_ht=5.0, lambda_ht_scale=1.05)
@@ -100,9 +99,11 @@ is exactly what `preset="veryfast"` does.
   entirely. `sigma_scale` keeps the measurement and nudges it, which is almost always what you
   actually want.
 - **`luma_mismatch_scale` and `chroma_mismatch_scale`** set how much less a poorly matched patch is
-  trusted, rather than whether it is. The variance they control grows with the square of the value,
-  so `2` distrusts a bad match four times as much. The effect saturates somewhere between `3` and
-  `13` depending on how noisy the source is, and `0` turns the mechanism off.
+  trusted, rather than whether it is, judged by the patch's own match residual rather than the
+  motion block's score. The variance they control grows with the square of the value,
+  so `2` distrusts a bad match four times as much. The effect saturates. It saturates sooner the
+  worse the patch matched, because the variance the mechanism derives is capped at 64 times the
+  channel's own variance, and `0` turns the mechanism off.
 - **`temporal_radius`** is what `preset` mostly exists to resolve. Setting it by hand is fine, but
   it is the same lever the preset ladder pulls, so reach for the ladder first.
 

@@ -14,13 +14,13 @@ use super::nl4d_geometry::{
     CONFIDENCE_VARIANCE,
     K_MAX,
     LAMBDA_HT,
+    MISMATCH_SCALE2,
     N_FRAMES,
     NEIGHBOUR_SLOTS,
     RADIUS,
     REFINE,
     SIGMA,
     SPATIAL_RADIUS,
-    THSAD,
     conf_stride,
     mv_stride,
 };
@@ -39,11 +39,36 @@ use super::{H, W, block_sync, make_padded_frame, shapes_with_ch, stored_channels
 /// block skips its comparisons entirely, so leaving it always open here
 /// measures the worst case. A bench that gates freely would report a
 /// time well under the real one.
+///
+/// `split_mv` picks which of the two motion fields the arm runs on, and
+/// the two bracket the real cost of the covering-block search.
+///
+/// `false` gives a zeroed field. Every block covering a patch then
+/// predicts the same position, all four rectangles coincide, three of
+/// them are dropped by the duplicate check and no extra pixel
+/// comparison runs. That arm measures the duplicate check on its own.
+///
+/// `true` gives each block a vector from its own grid parity, spaced
+/// eight pixels apart, which is further than the refine window is wide.
+/// The four rectangles covering a patch are then disjoint, nothing
+/// deduplicates, and the neighbour search scores four times the
+/// positions. That arm is the worst case, and a real motion field lands
+/// between the two.
 pub struct CollabFusedBench<R: Runtime> {
     pub client: ComputeClient<R>,
     pub ch: u32,
     pub ch_name: &'static str,
+    pub split_mv: bool,
 }
+
+/// How far apart two neighbouring blocks' vectors sit in the split
+/// field, in pixels.
+///
+/// `REFINE` is the rectangle's half-width, so two rectangles stay
+/// disjoint once their centres are more than `2 * REFINE` apart. Eight
+/// clears that with room and keeps every predicted position well inside
+/// a 1080p frame.
+const SPLIT_MV_SPACING: i32 = 8;
 
 #[derive(Clone)]
 pub struct CollabFusedInput {
@@ -83,7 +108,18 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
         let mv_stride = mv_stride(blocks_x, blocks_y, align);
         let conf_stride = conf_stride(blocks_x, blocks_y, align);
 
-        let mv_data = vec![0i32; (2 * RADIUS * mv_stride) as usize];
+        let mut mv_data = vec![0i32; (2 * RADIUS * mv_stride) as usize];
+        if self.split_mv {
+            for t in 0..2 * RADIUS {
+                for by in 0..blocks_y {
+                    for bx in 0..blocks_x {
+                        let base = (t * mv_stride + (by * blocks_x + bx) * 2) as usize;
+                        mv_data[base] = (bx % 2) as i32 * SPLIT_MV_SPACING;
+                        mv_data[base + 1] = (by % 2) as i32 * SPLIT_MV_SPACING;
+                    }
+                }
+            }
+        }
         let mv_field = self.client.create_from_slice(i32::as_bytes(&mv_data));
         let conf_data = vec![1.0f32; (2 * RADIUS * conf_stride) as usize];
         let confidence = self.client.create_from_slice(f32::as_bytes(&conf_data));
@@ -159,7 +195,7 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
                 CENTRE_SLOT,
                 0.0f32,
                 0.0f32,
-                THSAD,
+                MISMATCH_SCALE2,
                 LAMBDA_HT,
                 weight_scale(SIGMA, &dct_noise_profile(0.0)),
                 cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS),
@@ -185,7 +221,8 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
     }
 
     fn name(&self) -> String {
-        format!("collab_fused_1080p_{}", self.ch_name)
+        let field = if self.split_mv { "_split_mv" } else { "" };
+        format!("collab_fused_1080p_{}{field}", self.ch_name)
     }
 
     fn sync(&self) {

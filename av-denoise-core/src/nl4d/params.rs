@@ -2,12 +2,14 @@ use crate::nlmeans::{ChannelMode, HqParams, MotionCompensationMode, MotionEstima
 
 /// The largest [`Nl4dParams::mismatch_scale`] worth accepting.
 ///
-/// The mismatch variance is capped at
-/// [`crate::collab::kernels::fused::MEMBER_SIGMA2_CAP`] times the channel
-/// variance, and the worst-matched blocks reach that cap at a scale of
-/// roughly `319 * sigma`. Even a source noisy enough to measure `sigma =
-/// 0.05` saturates below 16, so nothing above this can move a pixel and
-/// accepting it would only promise a range that is not there.
+/// A member's own match distance never exceeds `3 * PATCH_AREA` in the
+/// search's units, so its mismatch variance never exceeds
+/// `mismatch_scale^2` in absolute pixel-value units. The mechanism caps
+/// at [`crate::collab::kernels::fused::MEMBER_SIGMA2_CAP`] times the
+/// channel variance, so even the worst possible mismatch saturates by a
+/// scale of `8 * sigma`. Even a source noisy enough to measure `sigma =
+/// 0.05` saturates well under 1, so nothing above this can move a pixel
+/// and accepting it would only promise a range that is not there.
 pub const MAX_MISMATCH_SCALE: f32 = 16.0;
 
 /// The largest [`Nl4dParams::kaiser_beta`] worth accepting.
@@ -19,6 +21,20 @@ pub const MAX_MISMATCH_SCALE: f32 = 16.0;
 /// window stops being a taper and starts being a mask, and the smallest
 /// weights fall under what the fixed-point accumulators resolve.
 pub const MAX_KAISER_BETA: f32 = 8.0;
+
+/// The most motion blocks that may cover a reference patch on one axis.
+///
+/// A block grid at a step below `blksize` puts several blocks over one
+/// patch, and
+/// [`crate::collab::kernels::fused::collab_fused`] searches all of them.
+/// It unrolls its per-neighbour duplicate-rectangle arrays over the
+/// square of this bound, so the bound is what caps the shader's register
+/// footprint. At 4 the arrays hold 16 rectangles and the shipped
+/// geometry, `blksize = 16` at `overlap = 8`, uses 2.
+///
+/// The step is `blksize - overlap`, so 4 admits an overlap of up to
+/// three quarters of the block size.
+pub const MAX_COVERING_BLOCKS: u32 = 4;
 
 /// Tuning for [`super::Nl4dDenoiser`].
 ///
@@ -48,27 +64,28 @@ pub struct Nl4dParams {
     /// Higher shrinks more coefficients, so it removes more noise and
     /// more fine detail.
     ///
-    /// Defaults to 5.3, the luma value. Chroma wants a different one, and
-    /// callers building `Nl4dParams` directly get no per-plane
-    /// resolution. See [`crate::nl4d_default_lambda_ht`].
+    /// Defaults to 5.2. Note that in reality luma and chroma want separately
+    /// tuned values. See [nl4d_default_lambda_ht](crate::nl4d_default_lambda_ht).
     pub lambda_ht: f32,
     /// The confidence floor below which a whole neighbour block is
     /// skipped rather than scored, in `[0, 1)`. Only affects how much
     /// compute a submit spends, never which candidates are admitted once
     /// they are scored.
     pub c_min: f32,
-    /// A multiplier on the mismatch variance a poorly matched temporal
-    /// member carries into the hard threshold.
+    /// A multiplier on the mismatch variance a temporal member carries
+    /// into the hard threshold.
     ///
-    /// The variance grows with the square of this, so `2.0` is a
-    /// four-fold increase. `1.0`, the default, is the shipped
+    /// A member matched in a neighbour frame is treated as a noisier
+    /// observation of the reference, and its extra variance is its own
+    /// match distance, per channel and per pixel, with the noise floor
+    /// removed. The variance grows with the square of this, so `2.0` is
+    /// a four-fold increase. `1.0`, the default, is the shipped
     /// calibration. `0.0` matches `confidence_variance: false`.
     ///
     /// The mechanism saturates. A member's extra variance is capped at
     /// [`crate::collab::kernels::fused::MEMBER_SIGMA2_CAP`] times the
-    /// channel variance, which the worst-matched blocks reach somewhere
-    /// between 3 and 13 depending on how noisy the source is, so raising
-    /// this past that point stops changing anything.
+    /// channel variance, so raising this past the point where a
+    /// member's distance reaches the cap stops changing anything.
     pub mismatch_scale: f32,
     /// The `beta` of the Kaiser window each filtered patch is tapered
     /// with as it is aggregated, in `0..=8`.
@@ -90,6 +107,19 @@ pub struct Nl4dParams {
     /// member the plain channel sigma instead, which is what an ablation
     /// needs to isolate the effect of this mechanism.
     pub confidence_variance: bool,
+    /// The penalty on a block's vector deviating from its
+    /// neighbourhood's median, in the field regularisation pass.
+    ///
+    /// The pass re-scores each block's vector against the median of its
+    /// neighbours, the four adjacent blocks' vectors and zero, adding
+    /// this times the distance from the median, in pixels, scaled so
+    /// `1.0` weighs one pixel of deviation like a 5/255 per-pixel
+    /// mismatch. Defaults to `1.0`, calibrated with a `field_lambda`
+    /// sweep on the `mc_accuracy` bench. The pass gains most of its
+    /// accuracy by a moderate penalty and further increases add little,
+    /// so `1.0` sits inside that plateau rather than at its edge. `0.0`
+    /// skips the pass.
+    pub field_lambda: f32,
 }
 
 impl Default for Nl4dParams {
@@ -111,11 +141,12 @@ impl Default for Nl4dParams {
             temporal_radius: 2,
             refine: 2,
             spatial_radius: 9,
-            lambda_ht: 5.3,
+            lambda_ht: 5.2,
             c_min: 0.05,
             mismatch_scale: 1.0,
             kaiser_beta: 2.0,
             confidence_variance: true,
+            field_lambda: 1.0,
         }
     }
 }
@@ -147,6 +178,26 @@ impl Nl4dParams {
                  unless both motion compensation and the confidence buffer are active"
                     .to_string(),
             );
+        }
+
+        // Only checked once the geometry itself is sound. An overlap at
+        // or past blksize gives a step of 0, which `nlm.validate()`
+        // rejects on its own terms below with the real fault named. Left
+        // unguarded, that same case saturates the step to 1 here and
+        // reports a nonsensical covering-block count instead.
+        if let MotionCompensationMode::Mvtools { blksize, overlap, .. } = self.nlm.motion_compensation
+            && overlap < blksize
+        {
+            let step = blksize - overlap;
+            let covers = blksize.div_ceil(step);
+            if covers > MAX_COVERING_BLOCKS {
+                return Err(format!(
+                    "nlm.motion_compensation blksize={blksize} at overlap={overlap} gives a step \
+                     of {step}, so {covers} blocks cover a patch on each axis, past the \
+                     {MAX_COVERING_BLOCKS} the temporal grouping kernel unrolls its search over. \
+                     Raise the step by lowering the overlap."
+                ));
+            }
         }
 
         if !(1..=crate::collab::MAX_TEMPORAL_RADIUS).contains(&self.temporal_radius) {
@@ -190,6 +241,13 @@ impl Nl4dParams {
             return Err(format!(
                 "kaiser_beta must be finite and in 0..={MAX_KAISER_BETA}, got {}",
                 self.kaiser_beta
+            ));
+        }
+
+        if !(self.field_lambda.is_finite() && self.field_lambda >= 0.0) {
+            return Err(format!(
+                "field_lambda must be finite and at least 0, got {}",
+                self.field_lambda
             ));
         }
 
@@ -238,6 +296,106 @@ mod tests {
                 "error should name mismatch_scale, got {err}"
             );
         }
+    }
+
+    /// A block geometry with `blksize / step` at or under
+    /// [`MAX_COVERING_BLOCKS`] is what the grouping kernel unrolls its
+    /// search over.
+    ///
+    /// The shipped geometry gives a step of 8 and so 2 covering blocks.
+    /// An overlap of three quarters of the block size gives a step of 4
+    /// and exactly 4, the boundary.
+    #[test]
+    fn validate_accepts_block_geometries_up_to_the_covering_bound() {
+        for (blksize, overlap, covers) in [(16u32, 8u32, 2u32), (16, 12, 4), (32, 24, 4), (8, 4, 2)] {
+            let params = Nl4dParams {
+                nlm: NlmParams {
+                    motion_compensation: MotionCompensationMode::Mvtools {
+                        blksize,
+                        overlap,
+                        search_radius: 4,
+                        pyramid_levels: 2,
+                        estimation: MotionEstimation::Auto,
+                    },
+                    ..Nl4dParams::default().nlm
+                },
+                ..Nl4dParams::default()
+            };
+            assert!(
+                params.validate().is_ok(),
+                "blksize={blksize} overlap={overlap} covers {covers} blocks and should be accepted"
+            );
+        }
+    }
+
+    /// Past the bound the kernel would unroll a far larger duplicate
+    /// check and hold far more rectangles in registers, so the
+    /// configuration is refused rather than compiled.
+    #[test]
+    fn validate_rejects_a_block_geometry_past_the_covering_bound() {
+        for (blksize, overlap) in [(16u32, 13u32), (16, 14), (32, 31), (32, 25)] {
+            let params = Nl4dParams {
+                nlm: NlmParams {
+                    motion_compensation: MotionCompensationMode::Mvtools {
+                        blksize,
+                        overlap,
+                        search_radius: 4,
+                        pyramid_levels: 2,
+                        estimation: MotionEstimation::Auto,
+                    },
+                    ..Nl4dParams::default().nlm
+                },
+                ..Nl4dParams::default()
+            };
+            let err = params
+                .validate()
+                .expect_err("a step this small should be rejected");
+            assert!(
+                err.contains(&format!("blksize={blksize}")) && err.contains(&format!("overlap={overlap}")),
+                "error should name the offending blksize and overlap, got {err}"
+            );
+        }
+    }
+
+    /// An overlap equal to blksize gives a step of 0, which is really a
+    /// `nlm.validate()` fault, not a covering-block one. `Nl4dParams`'s
+    /// own check has to stay quiet about it, mirroring how construction
+    /// runs both validations in sequence, so the caller sees the overlap
+    /// constraint named rather than a nonsensical covering-block count
+    /// computed from a saturated step.
+    #[test]
+    fn overlap_equal_to_blksize_reports_the_overlap_constraint_not_covering_blocks() {
+        let params = Nl4dParams {
+            nlm: NlmParams {
+                motion_compensation: MotionCompensationMode::Mvtools {
+                    blksize: 16,
+                    overlap: 16,
+                    search_radius: 4,
+                    pyramid_levels: 2,
+                    estimation: MotionEstimation::Auto,
+                },
+                ..Nl4dParams::default().nlm
+            },
+            ..Nl4dParams::default()
+        };
+        assert!(
+            params.validate().is_ok(),
+            "the covering-block check must not fire on a geometry nlm.validate() rejects on its \
+             own terms"
+        );
+        let err = params
+            .nlm
+            .validate()
+            .expect_err("overlap == blksize must be rejected")
+            .to_string();
+        assert!(
+            err.contains("overlap") && err.contains("blksize"),
+            "error should name the overlap constraint, got {err}"
+        );
+        assert!(
+            !err.contains("cover a patch"),
+            "error should not be the covering-block message, got {err}"
+        );
     }
 
     #[test]
@@ -351,6 +509,37 @@ mod tests {
                 ..Nl4dParams::default()
             };
             assert!(params.validate().is_err(), "c_min={bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_zero_and_positive_field_lambda() {
+        for lambda in [0.0, 0.5, 4.0] {
+            let params = Nl4dParams {
+                field_lambda: lambda,
+                ..Nl4dParams::default()
+            };
+            assert!(
+                params.validate().is_ok(),
+                "field_lambda={lambda} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_negative_or_non_finite_field_lambda() {
+        for lambda in [-0.1, f32::NAN, f32::INFINITY] {
+            let params = Nl4dParams {
+                field_lambda: lambda,
+                ..Nl4dParams::default()
+            };
+            let err = params
+                .validate()
+                .expect_err("field_lambda={lambda} should be rejected");
+            assert!(
+                err.contains("field_lambda"),
+                "error should name field_lambda, got {err}"
+            );
         }
     }
 }
