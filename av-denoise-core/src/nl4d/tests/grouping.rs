@@ -13,7 +13,7 @@ use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{PATCH_AREA, PATCH_SIZE, STEP};
+use crate::collab::{PATCH_AREA, PATCH_SIZE, STEP, needs_warp_uniform_search};
 
 /// The motion block side length these fixtures score confidence
 /// against, distinct from [`BLK_STEP`], which stays at `PATCH_SIZE` so
@@ -145,6 +145,7 @@ fn run_fused_over(fx: &RingFixture, k: Knobs) -> FusedRun {
             weight_scale(k.sigma, &profile),
             cross_frame_accum_scale(SPATIAL_RADIUS, fx.radius),
             k.use_member_sigma,
+            needs_warp_uniform_search(&client),
             fx.radius,
             k.refine,
             fx.mv_stride,

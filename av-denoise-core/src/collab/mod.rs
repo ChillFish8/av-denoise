@@ -13,6 +13,27 @@
 pub mod geometry;
 pub mod kernels;
 
+use cubecl::prelude::*;
+
+/// Whether `R` needs [`kernels::fused::collab_fused`]'s warp-uniform
+/// search.
+///
+/// That kernel's searches are group-scoped: eight lanes share one
+/// reference patch and complete every distance with a shuffle across
+/// just those eight. The CUDA backend still lowers each shuffle to a
+/// `__shfl_*_sync` over the whole 32-lane warp, which on Volta and later
+/// waits for every lane it names. Groups that leave the search early
+/// never come back to release the ones still in it, so the warp
+/// deadlocks and the launch never retires a frame.
+///
+/// The wgpu backends emit subgroup operations that reconverge on their
+/// own, so they run the cheaper path that walks only the clipped
+/// rectangles. See the `warp_uniform` argument for what the other path
+/// changes.
+pub fn needs_warp_uniform_search<R: Runtime>(client: &ComputeClient<R>) -> bool {
+    R::name(client) == "cuda"
+}
+
 // Every test in this tree runs against a real GPU runtime, see
 // `tests::helpers::R`, so it only builds when a wgpu-backed feature is
 // enabled. A cpu-only build skips it entirely.

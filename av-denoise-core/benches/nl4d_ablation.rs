@@ -6,7 +6,6 @@
 //! full resolution would report four times the real work. Both planes are
 //! measured here and summed, so the total is one frame's kernel cost.
 
-use av_denoise_core::collab::PATCH_SIZE;
 use av_denoise_core::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use av_denoise_core::collab::kernels::aggregate::{
     collab_normalise,
@@ -17,6 +16,7 @@ use av_denoise_core::collab::kernels::aggregate::{
 };
 use av_denoise_core::collab::kernels::fused::collab_fused;
 use av_denoise_core::collab::kernels::transforms::dct_noise_profile;
+use av_denoise_core::collab::{PATCH_SIZE, needs_warp_uniform_search};
 use av_denoise_core::nlmeans::{BLOCK_X, BLOCK_Y};
 use cubecl::benchmark::{Benchmark, BenchmarkComputations, TimingMethod};
 use cubecl::prelude::*;
@@ -218,6 +218,7 @@ impl<R: Runtime> Rig<R> {
                 weight_scale(SIGMA, &dct_noise_profile(0.0)),
                 cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS),
                 true,
+                needs_warp_uniform_search(&self.client),
                 RADIUS,
                 REFINE,
                 self.mv_stride,

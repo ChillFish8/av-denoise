@@ -12,7 +12,7 @@ use crate::collab::kernels::aggregate::{
 };
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{MAX_K, PATCH_SIZE};
+use crate::collab::{MAX_K, PATCH_SIZE, needs_warp_uniform_search};
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::{
     ChannelMode,
@@ -402,6 +402,7 @@ fn run_spatial_only(
     c_min: f32,
     lambda_ht: f32,
     sigma: f32,
+    warp_uniform: bool,
 ) -> Vec<f32> {
     let k_max = MAX_K;
     let stored_ch = 1u32;
@@ -475,6 +476,7 @@ fn run_spatial_only(
             wnorm,
             ACCUM_SCALE,
             false,
+            warp_uniform,
             0u32,
             refine,
             1u32,
@@ -566,6 +568,7 @@ fn temporal_grouping_beats_spatial_only_on_a_static_clip() {
         C_MIN,
         LAMBDA_HT,
         SIGMA,
+        needs_warp_uniform_search(&client),
     );
 
     let temporal_psnr = psnr(&temporal_out, &base);
@@ -711,6 +714,7 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 wnorm,
                 accum_scale,
                 false,
+                needs_warp_uniform_search(&client),
                 radius,
                 REFINE,
                 view.mv_stride,

@@ -1,7 +1,6 @@
 use cubecl::prelude::*;
 
 use super::helpers::{R, make_client, noisy_field_over};
-use crate::collab::PATCH_SIZE;
 use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use crate::collab::kernels::aggregate::{
     ACCUM_SCALE,
@@ -13,6 +12,7 @@ use crate::collab::kernels::aggregate::{
 };
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
+use crate::collab::{PATCH_SIZE, needs_warp_uniform_search};
 use crate::nlmeans::{BLOCK_X, BLOCK_Y};
 
 /// Runs [`collab_normalise`] over hand-built accumulators.
@@ -273,6 +273,7 @@ fn run_scatter_stage_windowed(
             weight_scale(sigma, &profile),
             ACCUM_SCALE,
             false,
+            needs_warp_uniform_search(&client),
             0u32,
             0u32,
             2u32,

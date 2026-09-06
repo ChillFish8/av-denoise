@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 
 use super::aggregate::scatter_patch;
 use super::group::{clamp_top_left, pack_pos_t, unpack_t};
-use super::plane_ops::{group_base, plane_ssd_reduce8, shift_insert8_gated, transpose8};
+use super::plane_ops::{group_base, plane_ssd_reduce8, shift_insert8, shift_insert8_gated, transpose8};
 use super::transforms::{
     RECIPROCAL_FLOOR,
     dct8_reg_fwd,
@@ -280,6 +280,37 @@ fn covering_lo_host(p: u32, blksize: u32, step: u32) -> u32 {
 /// into its own noise variance. False leaves every member on the plain
 /// `sigma[c]^2`.
 ///
+/// # Warp-uniform search
+///
+/// `warp_uniform` decides how the two candidate searches are walked.
+///
+/// Both searches are group-scoped work: each 8-lane group owns one
+/// reference patch, and every distance is completed by a shuffle across
+/// just those eight lanes. Nothing in the algorithm needs the other
+/// groups sharing a warp to keep step.
+///
+/// The CUDA backend nevertheless lowers each of those shuffles to a
+/// `__shfl_*_sync` naming the whole 32-lane warp. On Volta and later
+/// such a shuffle waits for every lane it names, so a group still
+/// searching blocks on groups that have already left the loop, and those
+/// never come back. The clipped rectangles and the `c_min` skip both
+/// give neighbouring groups different trip counts, so the warp
+/// deadlocks and the launch never retires a frame.
+///
+/// Setting `warp_uniform` walks fixed, comptime-sized rectangles
+/// instead and masks the positions falling outside the clipped one, so
+/// every group in a warp takes the same number of turns through the
+/// same shuffles. The masked turns score nothing: a candidate that is
+/// not live carries the same `3.0e38` an unfilled slot holds, so it can
+/// never displace one.
+///
+/// The candidates that do score, and the order they are offered in, are
+/// exactly the ones the unset path visits, so both settings produce the
+/// same group. Leave it unset on the wgpu backends, whose subgroup
+/// operations reconverge on their own and which would only pay for the
+/// dead turns. [`crate::collab::needs_warp_uniform_search`] is what
+/// picks it per runtime.
+///
 /// # Compilation cost
 ///
 /// The group stays in registers because the transform loops unroll
@@ -289,6 +320,43 @@ fn covering_lo_host(p: u32, blksize: u32, step: u32) -> u32 {
 /// 9.5 s compiling the two of them at startup. That cost is the price
 /// of the register-resident design, not a bug to fix by shrinking the
 /// unroll.
+/// The distance from the reference patch to the candidate whose
+/// top-left pixel is `(x, y)` in frame `slot`.
+///
+/// Each lane holds one column of the reference patch and reads the
+/// matching column of the candidate, so the eight per-lane partials
+/// only become a whole-patch distance through
+/// [`plane_ssd_reduce8`]. That reduction shuffles, so every lane of the
+/// group has to reach it. Callers that end up discarding the result
+/// still call this and drop the value afterwards rather than branching
+/// around it.
+#[cube]
+fn candidate_distance<N: Size>(
+    ring: &Array<Vector<f32, N>>,
+    current: &Array<f32>,
+    x: u32,
+    y: u32,
+    slot: u32,
+    sub: u32,
+    scale: f32,
+    noise_floor: f32,
+    #[comptime] width: u32,
+    #[comptime] height: u32,
+    #[comptime] channels: u32,
+) -> f32 {
+    let mut partial = 0.0f32;
+    #[unroll]
+    for r in 0..PATCH_SIZE {
+        let px = read_line(ring, x + sub, y + r, slot, width, height);
+        #[unroll]
+        for c in 0..channels {
+            let d = current[(r * channels + c) as usize] - px[c as usize];
+            partial += d * d;
+        }
+    }
+    plane_ssd_reduce8(partial) * scale - noise_floor
+}
+
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
@@ -319,6 +387,7 @@ pub fn collab_fused<N: Size>(
     weight_scale: f32,
     accum_scale: f32,
     #[comptime] use_member_sigma: bool,
+    #[comptime] warp_uniform: bool,
     #[comptime] radius: u32,
     #[comptime] refine: u32,
     #[comptime] mv_stride: u32,
@@ -407,41 +476,90 @@ pub fn collab_fused<N: Size>(
     let s_bot = clamp_top_left(ry as i32 + spatial_radius as i32, max_y);
     n_live += (s_right - s_left + 1u32) * (s_bot - s_top + 1u32);
 
-    let mut cy = s_top;
-    while cy <= s_bot {
-        let mut cx = s_left;
-        while cx <= s_right {
-            let mut partial = 0.0f32;
-            #[unroll]
-            for r in 0..PATCH_SIZE {
-                let px = read_line(ring, cx + sub, cy + r, centre_slot, width, height);
-                #[unroll]
-                for c in 0..channels {
-                    let d = current[(r * channels + c) as usize] - px[c as usize];
-                    partial += d * d;
+    // The reference patch scores the lowest distance there is, which on
+    // textured content is enough to reach slot 0 on its own. On flat
+    // content every candidate scores that same distance, and
+    // `shift_insert8` leaves a tie with whichever candidate reached the
+    // slot first. A sentinel below every real distance pins the
+    // self-match whatever ties around it.
+    if warp_uniform {
+        // The clipped rectangle is never wider than the unclipped one,
+        // so walking the unclipped span covers every position the other
+        // path visits, in the same order, and the rest are masked. The
+        // span is comptime, so every group in the warp takes the same
+        // number of turns.
+        let span = comptime!(2 * spatial_radius + 1);
+        for dy in 0..span {
+            for dx in 0..span {
+                let wanted_y = s_top + dy;
+                let wanted_x = s_left + dx;
+                let live_pos = wanted_x <= s_right && wanted_y <= s_bot;
+                // A masked turn still reads, so it is pinned to the last
+                // live position rather than left to run off the frame.
+                let cx = u32::min(wanted_x, s_right);
+                let cy = u32::min(wanted_y, s_bot);
+
+                let scored = candidate_distance(
+                    ring,
+                    &current,
+                    cx,
+                    cy,
+                    centre_slot,
+                    sub,
+                    scale,
+                    noise_floor,
+                    width,
+                    height,
+                    channels,
+                );
+                // Only the branchless part of the insert is shared. The
+                // gated form tests a group-local distance before it
+                // shuffles, which is exactly the divergence this path
+                // exists to avoid.
+                let mut dist = select(live_pos, scored, 3.0e38f32);
+                // A masked turn can land on the reference's own position
+                // once it has been pinned, so `live_pos` has to gate the
+                // sentinel too, or a dead turn would plant a second
+                // self-match in the group.
+                if live_pos && cx == rx && cy == ry {
+                    dist = -1.0e38f32;
                 }
+                shift_insert8(&mut best_d, &mut best_pos, dist, pack_pos_t(cx, cy, 0u32), sub);
             }
-            let mut dist = plane_ssd_reduce8(partial) * scale - noise_floor;
-            // The reference patch scores the lowest distance there is,
-            // which on textured content is enough to reach slot 0 on its
-            // own. On flat content every candidate scores that same
-            // distance, and `shift_insert8` leaves a tie with whichever
-            // candidate reached the slot first. A sentinel below every
-            // real distance pins the self-match whatever ties around it.
-            if cx == rx && cy == ry {
-                dist = -1.0e38f32;
-            }
-            shift_insert8_gated(
-                &mut best_d,
-                &mut best_pos,
-                dist,
-                pack_pos_t(cx, cy, 0u32),
-                sub,
-                base,
-            );
-            cx += 1u32;
         }
-        cy += 1u32;
+    } else {
+        let mut cy = s_top;
+        while cy <= s_bot {
+            let mut cx = s_left;
+            while cx <= s_right {
+                let mut dist = candidate_distance(
+                    ring,
+                    &current,
+                    cx,
+                    cy,
+                    centre_slot,
+                    sub,
+                    scale,
+                    noise_floor,
+                    width,
+                    height,
+                    channels,
+                );
+                if cx == rx && cy == ry {
+                    dist = -1.0e38f32;
+                }
+                shift_insert8_gated(
+                    &mut best_d,
+                    &mut best_pos,
+                    dist,
+                    pack_pos_t(cx, cy, 0u32),
+                    sub,
+                    base,
+                );
+                cx += 1u32;
+            }
+            cy += 1u32;
+        }
     }
 
     // One clipped rectangle per covering block per neighbour, around
@@ -480,76 +598,162 @@ pub fn collab_fused<N: Size>(
         for iy in 0..covers {
             #[unroll]
             for ix in 0..covers {
-                let cbx = bx_lo + ix;
-                let cby = by_lo + iy;
-                if cbx <= bx_hi && cby <= by_hi {
+                let wanted_bx = bx_lo + ix;
+                let wanted_by = by_lo + iy;
+                let block_live = wanted_bx <= bx_hi && wanted_by <= by_hi;
+
+                if warp_uniform {
+                    // Both the block range and the `c_min` test decide
+                    // per group, so neither can gate a shuffle here.
+                    // The block is pinned into range, read either way,
+                    // and what it found is folded into `live_pos` below.
+                    let cbx = u32::min(wanted_bx, bx_hi);
+                    let cby = u32::min(wanted_by, by_hi);
                     let block = cby * blocks_x + cbx;
                     let conf = confidence[(t * conf_stride + block) as usize];
-                    // Uniform across the group, because `block` is, so a
-                    // skipped block costs no lane its share of the
-                    // reduction. No barrier sits inside this branch
-                    // either, so a group that skips a block a
-                    // neighbouring group scores strands nothing.
-                    if conf >= c_min {
-                        let mv = (t * mv_stride + block * 2u32) as usize;
-                        let px0 = rx as i32 + mv_field[mv];
-                        let py0 = ry as i32 + mv_field[mv + 1];
+                    let block_scored = block_live && conf >= c_min;
 
-                        let t_left = clamp_top_left(px0 - refine as i32, max_x);
-                        let t_right = clamp_top_left(px0 + refine as i32, max_x);
-                        let t_top = clamp_top_left(py0 - refine as i32, max_y);
-                        let t_bot = clamp_top_left(py0 + refine as i32, max_y);
+                    let mv = (t * mv_stride + block * 2u32) as usize;
+                    let px0 = rx as i32 + mv_field[mv];
+                    let py0 = ry as i32 + mv_field[mv + 1];
 
-                        let mut ny = t_top;
-                        while ny <= t_bot {
-                            let mut nx = t_left;
-                            while nx <= t_right {
-                                let mut covered = false;
-                                #[unroll]
-                                for s in 0..max_rects {
-                                    if nx >= seen_left[s as usize]
-                                        && nx <= seen_right[s as usize]
-                                        && ny >= seen_top[s as usize]
-                                        && ny <= seen_bot[s as usize]
-                                    {
-                                        covered = true;
-                                    }
+                    let t_left = clamp_top_left(px0 - refine as i32, max_x);
+                    let t_right = clamp_top_left(px0 + refine as i32, max_x);
+                    let t_top = clamp_top_left(py0 - refine as i32, max_y);
+                    let t_bot = clamp_top_left(py0 + refine as i32, max_y);
+
+                    let span = comptime!(2 * refine + 1);
+                    for dy in 0..span {
+                        for dx in 0..span {
+                            let wanted_y = t_top + dy;
+                            let wanted_x = t_left + dx;
+                            let in_rect = wanted_x <= t_right && wanted_y <= t_bot;
+                            let nx = u32::min(wanted_x, t_right);
+                            let ny = u32::min(wanted_y, t_bot);
+
+                            let mut covered = false;
+                            #[unroll]
+                            for s in 0..max_rects {
+                                if nx >= seen_left[s as usize]
+                                    && nx <= seen_right[s as usize]
+                                    && ny >= seen_top[s as usize]
+                                    && ny <= seen_bot[s as usize]
+                                {
+                                    covered = true;
                                 }
-                                if !covered {
-                                    n_live += 1u32;
-                                    let mut partial = 0.0f32;
+                            }
+
+                            let live_pos = block_scored && in_rect && !covered;
+                            if live_pos {
+                                n_live += 1u32;
+                            }
+
+                            let scored = candidate_distance(
+                                ring,
+                                &current,
+                                nx,
+                                ny,
+                                slot,
+                                sub,
+                                scale,
+                                noise_floor,
+                                width,
+                                height,
+                                channels,
+                            );
+                            shift_insert8(
+                                &mut best_d,
+                                &mut best_pos,
+                                select(live_pos, scored, 3.0e38f32),
+                                pack_pos_t(nx, ny, packed_t),
+                                sub,
+                            );
+                        }
+                    }
+
+                    // A block the range or `c_min` skipped has to leave
+                    // its slot empty, the way the other path leaves it
+                    // untouched, or it would hide positions a later
+                    // block still owes the search.
+                    seen_left[(iy * covers + ix) as usize] = select(block_scored, t_left, 1u32);
+                    seen_right[(iy * covers + ix) as usize] = select(block_scored, t_right, 0u32);
+                    seen_top[(iy * covers + ix) as usize] = select(block_scored, t_top, 1u32);
+                    seen_bot[(iy * covers + ix) as usize] = select(block_scored, t_bot, 0u32);
+                } else {
+                    let cbx = wanted_bx;
+                    let cby = wanted_by;
+                    if block_live {
+                        let block = cby * blocks_x + cbx;
+                        let conf = confidence[(t * conf_stride + block) as usize];
+                        // Uniform across the group, because `block` is, so a
+                        // skipped block costs no lane its share of the
+                        // reduction. No barrier sits inside this branch
+                        // either, so a group that skips a block a
+                        // neighbouring group scores strands nothing.
+                        if conf >= c_min {
+                            let mv = (t * mv_stride + block * 2u32) as usize;
+                            let px0 = rx as i32 + mv_field[mv];
+                            let py0 = ry as i32 + mv_field[mv + 1];
+
+                            let t_left = clamp_top_left(px0 - refine as i32, max_x);
+                            let t_right = clamp_top_left(px0 + refine as i32, max_x);
+                            let t_top = clamp_top_left(py0 - refine as i32, max_y);
+                            let t_bot = clamp_top_left(py0 + refine as i32, max_y);
+
+                            let mut ny = t_top;
+                            while ny <= t_bot {
+                                let mut nx = t_left;
+                                while nx <= t_right {
+                                    let mut covered = false;
                                     #[unroll]
-                                    for r in 0..PATCH_SIZE {
-                                        let px = read_line(ring, nx + sub, ny + r, slot, width, height);
-                                        #[unroll]
-                                        for c in 0..channels {
-                                            let d = current[(r * channels + c) as usize] - px[c as usize];
-                                            partial += d * d;
+                                    for s in 0..max_rects {
+                                        if nx >= seen_left[s as usize]
+                                            && nx <= seen_right[s as usize]
+                                            && ny >= seen_top[s as usize]
+                                            && ny <= seen_bot[s as usize]
+                                        {
+                                            covered = true;
                                         }
                                     }
-                                    let dist = plane_ssd_reduce8(partial) * scale - noise_floor;
-                                    shift_insert8_gated(
-                                        &mut best_d,
-                                        &mut best_pos,
-                                        dist,
-                                        pack_pos_t(nx, ny, packed_t),
-                                        sub,
-                                        base,
-                                    );
+                                    if !covered {
+                                        n_live += 1u32;
+                                        let dist = candidate_distance(
+                                            ring,
+                                            &current,
+                                            nx,
+                                            ny,
+                                            slot,
+                                            sub,
+                                            scale,
+                                            noise_floor,
+                                            width,
+                                            height,
+                                            channels,
+                                        );
+                                        shift_insert8_gated(
+                                            &mut best_d,
+                                            &mut best_pos,
+                                            dist,
+                                            pack_pos_t(nx, ny, packed_t),
+                                            sub,
+                                            base,
+                                        );
+                                    }
+                                    nx += 1u32;
                                 }
-                                nx += 1u32;
+                                ny += 1u32;
                             }
-                            ny += 1u32;
-                        }
 
-                        seen_left[(iy * covers + ix) as usize] = t_left;
-                        seen_right[(iy * covers + ix) as usize] = t_right;
-                        seen_top[(iy * covers + ix) as usize] = t_top;
-                        seen_bot[(iy * covers + ix) as usize] = t_bot;
+                            seen_left[(iy * covers + ix) as usize] = t_left;
+                            seen_right[(iy * covers + ix) as usize] = t_right;
+                            seen_top[(iy * covers + ix) as usize] = t_top;
+                            seen_bot[(iy * covers + ix) as usize] = t_bot;
+                        }
                     }
                 }
             }
         }
+
         t += 1u32;
     }
 
@@ -592,14 +796,26 @@ pub fn collab_fused<N: Size>(
 
         let mut sig2 = 0.0f32;
         if use_member_sigma {
-            // A centre-frame member is not motion-predicted, so there is
-            // no mismatch to model and it keeps the plain `sigma^2`.
-            if mt > 0u32 {
-                // The member's own distance, floor removed, in the search's
-                // three-channel-sum units. Per channel and per pixel that
-                // is the mean square of its mismatch.
+            if warp_uniform {
+                // `mt` is the member's own frame, so this test decides
+                // per member and per group, and the broadcast under it
+                // is warp-wide once CUDA has lowered it. Reading the
+                // distance first and discarding it afterwards keeps
+                // every lane on the same broadcast; `select` is what
+                // makes a centre-frame member ignore what it read.
                 let excess = f32::max(plane_shuffle(best_d, base + m), 0.0f32);
-                sig2 = mismatch_scale2 * excess / comptime!(3 * PATCH_AREA) as f32;
+                let mismatch = mismatch_scale2 * excess / comptime!(3 * PATCH_AREA) as f32;
+                sig2 = select(mt > 0u32, mismatch, 0.0f32);
+            } else {
+                // A centre-frame member is not motion-predicted, so there is
+                // no mismatch to model and it keeps the plain `sigma^2`.
+                if mt > 0u32 {
+                    // The member's own distance, floor removed, in the search's
+                    // three-channel-sum units. Per channel and per pixel that
+                    // is the mean square of its mismatch.
+                    let excess = f32::max(plane_shuffle(best_d, base + m), 0.0f32);
+                    sig2 = mismatch_scale2 * excess / comptime!(3 * PATCH_AREA) as f32;
+                }
             }
         }
         member_sig2[m as usize] = sig2;

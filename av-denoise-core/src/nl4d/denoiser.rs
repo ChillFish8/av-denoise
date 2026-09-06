@@ -14,7 +14,7 @@ use crate::collab::kernels::aggregate::{
 };
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{MAX_K, PATCH_AREA, PATCH_SIZE};
+use crate::collab::{MAX_K, PATCH_AREA, PATCH_SIZE, needs_warp_uniform_search};
 use crate::denoiser::{DenoiserError, FrameOutput, OutputFormat};
 use crate::nlmeans::kernels::helpers::channel_scale_host;
 use crate::nlmeans::{
@@ -68,6 +68,10 @@ pub struct Nl4dDenoiser<R: Runtime> {
     mismatch_scale: f32,
     confidence_variance: bool,
     k_max: u32,
+    /// Whether [`collab_fused`] runs its warp-uniform search, decided
+    /// once from the runtime this denoiser was built on. See
+    /// [`needs_warp_uniform_search`].
+    warp_uniform: bool,
     /// The fixed-point scale the cross-frame accumulator ring counts in,
     /// from
     /// [`crate::collab::kernels::aggregate::cross_frame_accum_scale`].
@@ -263,6 +267,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             mismatch_scale: params.mismatch_scale,
             confidence_variance: params.confidence_variance,
             k_max,
+            warp_uniform: needs_warp_uniform_search(client),
             accum_scale: cross_frame_accum_scale(params.spatial_radius, params.temporal_radius),
             group_weight,
             sigma_buf,
@@ -662,6 +667,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 wnorm,
                 self.accum_scale,
                 self.confidence_variance,
+                self.warp_uniform,
                 self.temporal_radius,
                 self.refine,
                 view.mv_stride,
