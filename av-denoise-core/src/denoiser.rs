@@ -258,6 +258,8 @@ pub struct Nl4dOptions {
     /// estimation breaks that guarantee under random access. See
     /// [`HqParams::windowed_noise_estimation`].
     pub windowed_noise_estimation: bool,
+    /// See [`crate::nl4d::Nl4dParams::field_lambda`].
+    pub field_lambda: f32,
 }
 
 impl Default for Nl4dOptions {
@@ -281,6 +283,7 @@ impl Default for Nl4dOptions {
             confidence_variance: defaults.confidence_variance,
             kaiser_beta: defaults.kaiser_beta,
             windowed_noise_estimation: false,
+            field_lambda: defaults.field_lambda,
         }
     }
 }
@@ -682,6 +685,7 @@ fn build_engine<R: Runtime>(
                 mismatch_scale: opts.mismatch_scale,
                 confidence_variance: opts.confidence_variance,
                 kaiser_beta: opts.kaiser_beta,
+                field_lambda: opts.field_lambda,
             };
             let denoiser =
                 Nl4dDenoiser::with_output_format(client, nl4d_params, width, height, output_format)

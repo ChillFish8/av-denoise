@@ -58,6 +58,7 @@ fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
         // The shipped default, so these run the aggregation a real
         // caller gets.
         kaiser_beta: 2.0,
+        field_lambda: 0.0,
     }
 }
 
@@ -821,4 +822,69 @@ fn motion_snapshot_reports_the_field_the_pass_used() {
             "a clean shift must score confidently"
         );
     }
+}
+
+/// A panning clip with one flat block. The estimator ties on the flat
+/// block and leaves it at the seed, so its vector differs from its
+/// neighbours'. With `field_lambda` on, the pass pulls it to the
+/// neighbourhood's vector, and the snapshot shows the regularised
+/// field. With it off the field is the estimator's.
+#[test]
+fn field_regularisation_reaches_the_snapshot() {
+    let client = make_client();
+    let (w, h) = (128u32, 96u32);
+    let radius = 1u32;
+    let mut base = textured_base(w, h);
+    // Flatten a 24x24 region centred on block (7, 5)'s own footprint,
+    // 52..76 x 36..60. Large enough to tie both the fine-level search and
+    // the coarse pyramid level for that one block, but small enough that
+    // its overlapping neighbours still see enough texture past the
+    // region's edge to estimate correctly, so only the centre block ties.
+    for y in 36..60u32 {
+        for x in 52..76u32 {
+            base[(y * w + x) as usize] = 0.5;
+        }
+    }
+    let frames: Vec<Vec<f32>> = (0..3i32)
+        .map(|k| {
+            let mut f = vec![0.0f32; (w * h) as usize];
+            for y in 0..h {
+                for x in 0..w {
+                    let sx = (x as i32 - 3 * (k - 1)).clamp(0, w as i32 - 1) as u32;
+                    f[(y * w + x) as usize] = base[(y * w + sx) as usize];
+                }
+            }
+            f
+        })
+        .collect();
+
+    let run = |lambda: f32| {
+        let params = Nl4dParams {
+            field_lambda: lambda,
+            ..static_clip_params(radius)
+        };
+        let mut d = Nl4dDenoiser::<R>::new(&client, params, w, h).expect("construction failed");
+        for frame in &frames {
+            d.push_frame(frame);
+            let _ = d.denoise_submit().expect("denoise_submit failed");
+        }
+        d.motion_snapshot().expect("a pass ran")
+    };
+
+    let off = run(0.0);
+    let on = run(1.0);
+    // The block at (7, 5) spans pixels 56..72 x 40..56, inside the flat
+    // region on every frame.
+    let flat_block = (5 * off.blocks_x + 7) as usize;
+    let t_plus = 1usize;
+    assert_ne!(
+        off.vectors[t_plus][flat_block],
+        [3, 0],
+        "the flat block must not be tracked without help, or this test proves nothing"
+    );
+    assert_eq!(on.vectors[t_plus][flat_block], [3, 0]);
+    // A textured block is unchanged by the pass.
+    let textured_block = (2 * off.blocks_x + 2) as usize;
+    assert_eq!(off.vectors[t_plus][textured_block], [3, 0]);
+    assert_eq!(on.vectors[t_plus][textured_block], [3, 0]);
 }

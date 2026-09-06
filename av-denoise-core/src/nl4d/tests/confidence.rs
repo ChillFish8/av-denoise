@@ -94,6 +94,7 @@ fn mismatch_scale_test_params(
         // The shipped default, so these run the aggregation a real
         // caller gets.
         kaiser_beta: 2.0,
+        field_lambda: 0.0,
     }
 }
 

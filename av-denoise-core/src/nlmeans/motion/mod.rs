@@ -30,18 +30,15 @@ mod compensate;
 mod confidence;
 mod pyramid;
 
-#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-pub(crate) use analyse::mv_field_byte_offset;
-pub(crate) use analyse::{confidence_byte_offset, run_analyse, run_seeded_refine};
-pub(crate) use chain::neighbour_idx_for_k;
+pub(crate) use analyse::{confidence_byte_offset, mv_field_byte_offset, run_analyse, run_seeded_refine};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use chain::pair_byte_offset;
-pub(crate) use chain::{run_pair_analyse, zero_pair_slot};
+pub(crate) use chain::{neighbour_idx_for_k, run_pair_analyse, zero_pair_slot};
 pub(crate) use compensate::run_compensate;
-pub(crate) use confidence::{run_confidence_for_neighbour, sad_noise_floor, thsad};
+pub(crate) use confidence::{THSAD_PIXEL, run_confidence_for_neighbour, sad_noise_floor, thsad};
 use cubecl::prelude::*;
 use cubecl::server::Handle;
-pub(crate) use pyramid::{pyramid_pixels_per_frame, run_pyramid_build};
+pub(crate) use pyramid::{level_dims, pyramid_pixels_per_frame, pyramid_slot_byte_offset, run_pyramid_build};
 
 use crate::nlmeans::align::StorageAlign;
 

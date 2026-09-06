@@ -151,6 +151,30 @@ fn submit_machinery_reports_ring_view_with_correct_motion_and_confidence() {
     );
 }
 
+/// The ring view carries the pyramid the estimator analysed and the
+/// window size, and the front end reports the SAD noise floor it scored
+/// confidence with.
+#[test]
+fn ring_view_exposes_the_analysed_pyramid_and_the_noise_floor() {
+    let client = make_client();
+    let mut d = push_translating_sequence(&client);
+    let view = d
+        .submit_machinery()
+        .expect("submit_machinery dispatch failed")
+        .expect("window is exactly full, submit_machinery should report Some");
+
+    let frames = machinery_params().total_frames();
+    assert_eq!(view.frame_count, frames);
+    // The pyramid holds every level of every slot, so it is at least
+    // one full-resolution luma plane per slot.
+    let bytes = client
+        .read_one(view.pyramid.clone())
+        .expect("pyramid readback failed");
+    let plane = bytes.len() / (frames as usize * size_of::<f32>());
+    assert!(plane > 0, "the pyramid must hold at least one plane per slot");
+    assert!(d.sad_noise_floor_value() >= 0.0);
+}
+
 /// A window that has not filled yet reports `None`, the same convention
 /// `denoise_submit_gpu` uses.
 #[test]

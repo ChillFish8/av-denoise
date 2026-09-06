@@ -79,6 +79,8 @@ is exactly what `--preset veryfast` does.
   same thing as `--no-confidence-variance`.
 - **`--thsad-scale`, `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels`** tune
   the motion machinery's internals, changing any of these will likely invalidate all other defaults.
+- **`--field-lambda`** pulls each block's motion vector toward its neighbours. `0` is off. Raise it
+  on noisy or flat content where vectors wander.
 
 ## NLMeans
 

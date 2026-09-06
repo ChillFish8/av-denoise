@@ -108,6 +108,19 @@ pub struct Nl4dParams {
     /// member the plain channel sigma instead, which is what an ablation
     /// needs to isolate the effect of this mechanism.
     pub confidence_variance: bool,
+    /// The penalty on a block's vector deviating from its
+    /// neighbourhood's median, in the field regularisation pass.
+    ///
+    /// The pass re-scores each block's vector against the median of its
+    /// neighbours, the four adjacent blocks' vectors and zero, adding
+    /// this times the distance from the median, in pixels, scaled so
+    /// `1.0` weighs one pixel of deviation like a 5/255 per-pixel
+    /// mismatch. Defaults to `1.0`, calibrated with a `field_lambda`
+    /// sweep on the `mc_accuracy` bench. The pass gains most of its
+    /// accuracy by a moderate penalty and further increases add little,
+    /// so `1.0` sits inside that plateau rather than at its edge. `0.0`
+    /// skips the pass.
+    pub field_lambda: f32,
 }
 
 impl Default for Nl4dParams {
@@ -134,6 +147,7 @@ impl Default for Nl4dParams {
             mismatch_scale: 1.0,
             kaiser_beta: 2.0,
             confidence_variance: true,
+            field_lambda: 1.0,
         }
     }
 }
@@ -221,6 +235,13 @@ impl Nl4dParams {
             return Err(format!(
                 "kaiser_beta must be finite and in 0..={MAX_KAISER_BETA}, got {}",
                 self.kaiser_beta
+            ));
+        }
+
+        if !(self.field_lambda.is_finite() && self.field_lambda >= 0.0) {
+            return Err(format!(
+                "field_lambda must be finite and at least 0, got {}",
+                self.field_lambda
             ));
         }
 
@@ -441,6 +462,37 @@ mod tests {
                 ..Nl4dParams::default()
             };
             assert!(params.validate().is_err(), "c_min={bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_zero_and_positive_field_lambda() {
+        for lambda in [0.0, 0.5, 4.0] {
+            let params = Nl4dParams {
+                field_lambda: lambda,
+                ..Nl4dParams::default()
+            };
+            assert!(
+                params.validate().is_ok(),
+                "field_lambda={lambda} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_negative_or_non_finite_field_lambda() {
+        for lambda in [-0.1, f32::NAN, f32::INFINITY] {
+            let params = Nl4dParams {
+                field_lambda: lambda,
+                ..Nl4dParams::default()
+            };
+            let err = params
+                .validate()
+                .expect_err("field_lambda={lambda} should be rejected");
+            assert!(
+                err.contains("field_lambda"),
+                "error should name field_lambda, got {err}"
+            );
         }
     }
 }

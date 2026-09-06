@@ -29,6 +29,7 @@ use kernels::mc_chain_compose::ChainComposeBench;
 use kernels::mc_confidence::McConfidenceBench;
 use kernels::mc_downscale::DownscaleBench;
 use kernels::mc_warp::WarpBench;
+use kernels::mv_regularise::MvRegulariseBench;
 use kernels::noise_partial::NoisePartialBench;
 use kernels::pack_wire::PackWireBench;
 use kernels::temporal_noise_stats::TemporalNoiseStatsBench;
@@ -218,6 +219,9 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         client: client.clone(),
     });
     run(ChainComposeBench {
+        client: client.clone(),
+    });
+    run(MvRegulariseBench {
         client: client.clone(),
     });
     for &(ch, ch_name) in CHANNELS {

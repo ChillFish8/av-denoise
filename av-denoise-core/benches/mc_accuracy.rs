@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use av_denoise_core::nl4d::harness::{score, synthesise, Clip, KindScore, MotionClass, Score, Still};
+use av_denoise_core::nl4d::harness::{Clip, KindScore, MotionClass, Score, Still, score, synthesise};
 use av_denoise_core::nl4d::{Nl4dDenoiser, Nl4dParams};
 use av_denoise_core::nlmeans::{ChannelMode, NlmParams};
 use cubecl::prelude::*;
@@ -42,11 +42,71 @@ fn baseline_params() -> Nl4dParams {
     }
 }
 
+/// `baseline_params` with `field_lambda` overridden, for the lambda
+/// ladder. Building from `Nl4dParams::default()` directly would panic
+/// with the three-channel default the harness cannot feed.
+fn with_lambda_0_25() -> Nl4dParams {
+    Nl4dParams {
+        field_lambda: 0.25,
+        ..baseline_params()
+    }
+}
+
+fn with_lambda_0_5() -> Nl4dParams {
+    Nl4dParams {
+        field_lambda: 0.5,
+        ..baseline_params()
+    }
+}
+
+fn with_lambda_1() -> Nl4dParams {
+    Nl4dParams {
+        field_lambda: 1.0,
+        ..baseline_params()
+    }
+}
+
+fn with_lambda_2() -> Nl4dParams {
+    Nl4dParams {
+        field_lambda: 2.0,
+        ..baseline_params()
+    }
+}
+
+fn with_lambda_4() -> Nl4dParams {
+    Nl4dParams {
+        field_lambda: 4.0,
+        ..baseline_params()
+    }
+}
+
 fn arms() -> Vec<Arm> {
-    vec![Arm {
-        name: "baseline",
-        params: baseline_params,
-    }]
+    vec![
+        Arm {
+            name: "baseline",
+            params: baseline_params,
+        },
+        Arm {
+            name: "lambda_0.25",
+            params: with_lambda_0_25,
+        },
+        Arm {
+            name: "lambda_0.5",
+            params: with_lambda_0_5,
+        },
+        Arm {
+            name: "lambda_1",
+            params: with_lambda_1,
+        },
+        Arm {
+            name: "lambda_2",
+            params: with_lambda_2,
+        },
+        Arm {
+            name: "lambda_4",
+            params: with_lambda_4,
+        },
+    ]
 }
 
 fn parse_still(spec: &str) -> Result<NamedStill, String> {

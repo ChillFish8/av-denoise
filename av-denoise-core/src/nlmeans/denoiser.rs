@@ -80,6 +80,13 @@ pub(crate) struct RingView {
     pub mv_stride: u32,
     /// `f32` element stride between neighbours in `confidence`.
     pub conf_stride: u32,
+    /// The luma pyramid the motion estimator analysed, the reference
+    /// ring's when a prefilter is active and the input ring's
+    /// otherwise. Level 0 of slot `s` starts at
+    /// `pyramid_slot_byte_offset(width, height, frame_count, 0, s, align)`.
+    pub pyramid: Handle,
+    /// How many frames the ring holds.
+    pub frame_count: u32,
 }
 
 /// The stateful NLMeans denoiser that owns the GPU buffers.
@@ -1599,6 +1606,12 @@ impl<R: Runtime> NlmDenoiser<R> {
                 ))
             })?
             .clone();
+        let pyramid = self
+            .pyramid_reference
+            .as_ref()
+            .or(self.pyramid_input.as_ref())
+            .expect("pyramid allocated when mc_ctx is Some")
+            .clone();
 
         Ok(Some(RingView {
             input: self.input_buf.clone(),
@@ -1608,6 +1621,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             neighbour_slots,
             mv_stride: (mc.mv_field_bytes_per_neighbour() / size_of::<i32>() as u64) as u32,
             conf_stride: (mc.confidence_bytes_per_neighbour() / size_of::<f32>() as u64) as u32,
+            pyramid,
+            frame_count: self.params.total_frames(),
         }))
     }
 
@@ -1641,6 +1656,31 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.mc_ctx
             .as_ref()
             .expect("motion_ctx called without motion compensation active")
+    }
+
+    /// The SAD two noisy copies of one block show by chance, the floor
+    /// [`Self::submit_machinery`] scored confidence against.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the same condition as [`Self::motion_ctx`].
+    pub(crate) fn sad_noise_floor_value(&self) -> f32 {
+        let blksize = self.motion_ctx().blksize;
+        let sigma = crate::nlmeans::dispatch::mc_sad_noise_floor_sigma(self.params.prefilter, self.sigma_y);
+        motion::sad_noise_floor(blksize, sigma)
+    }
+
+    /// The SAD threshold [`Self::submit_machinery`] scored confidence
+    /// against, the same one [`Self::sad_noise_floor_value`] is measured
+    /// past.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the same condition as [`Self::motion_ctx`].
+    pub(crate) fn thsad_value(&self) -> f32 {
+        let blksize = self.motion_ctx().blksize;
+        let thsad_scale = self.params.hq.map_or(1.0, |hq| hq.thsad_scale);
+        motion::thsad(blksize, thsad_scale)
     }
 
     /// The compute client this denoiser dispatches kernels through, for

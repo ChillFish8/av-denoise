@@ -2,6 +2,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::params::Nl4dParams;
+use super::regularise::run_regularise;
 use super::snapshot::{LastFields, MotionSnapshot, read_snapshot};
 use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use crate::collab::kernels::aggregate::{
@@ -134,6 +135,12 @@ pub struct Nl4dDenoiser<R: Runtime> {
     /// The field buffers the last pass handed the fused kernel, for
     /// [`Self::motion_snapshot`].
     last_fields: Option<LastFields>,
+    /// See [`Nl4dParams::field_lambda`].
+    field_lambda: f32,
+    /// The regularised motion field and confidence, laid out like the
+    /// front end's own, allocated only when `field_lambda > 0.0`.
+    reg_mv: Option<Handle>,
+    reg_conf: Option<Handle>,
 }
 
 impl<R: Runtime> Nl4dDenoiser<R> {
@@ -230,6 +237,19 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             },
         };
 
+        // `motion_ctx()` panics without motion compensation, and
+        // `validate` above already requires it, so this is safe here.
+        let (reg_mv, reg_conf) = if params.field_lambda > 0.0 {
+            let mc = front.motion_ctx();
+            let neighbours = 2 * params.temporal_radius as u64;
+            (
+                Some(client.empty((neighbours * mc.mv_field_bytes_per_neighbour()) as usize)),
+                Some(client.empty((neighbours * mc.confidence_bytes_per_neighbour()) as usize)),
+            )
+        } else {
+            (None, None)
+        };
+
         Ok(Self {
             front,
             width,
@@ -257,6 +277,9 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             wire_outputs,
             passes_run: 0,
             last_fields: None,
+            field_lambda: params.field_lambda,
+            reg_mv,
+            reg_conf,
         })
     }
 
@@ -545,9 +568,31 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let pass_index = self.passes_run;
         self.passes_run += 1;
 
+        // The field the fused kernel reads, the regularised one when the
+        // pass is on.
+        let (mv_field, confidence) = match (self.reg_mv.as_ref(), self.reg_conf.as_ref()) {
+            (Some(mv), Some(conf)) => {
+                run_regularise::<R>(
+                    &client,
+                    mc,
+                    view,
+                    self.width,
+                    self.height,
+                    self.field_lambda,
+                    self.front.sad_noise_floor_value(),
+                    self.front.thsad_value(),
+                    mv,
+                    conf,
+                )
+                .map_err(DenoiserError::Other)?;
+                (mv.clone(), conf.clone())
+            },
+            _ => (view.mv_field.clone(), view.confidence.clone()),
+        };
+
         self.last_fields = Some(LastFields {
-            mv_field: view.mv_field.clone(),
-            confidence: view.confidence.clone(),
+            mv_field: mv_field.clone(),
+            confidence: confidence.clone(),
             mv_stride: view.mv_stride,
             conf_stride: view.conf_stride,
             neighbours,
@@ -600,8 +645,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 collab_dim,
                 stored_ch as usize,
                 ArrayArg::from_raw_parts(view.input.clone(), ring_len),
-                ArrayArg::from_raw_parts(view.mv_field.clone(), mv_len.max(1)),
-                ArrayArg::from_raw_parts(view.confidence.clone(), conf_len.max(1)),
+                ArrayArg::from_raw_parts(mv_field.clone(), mv_len.max(1)),
+                ArrayArg::from_raw_parts(confidence.clone(), conf_len.max(1)),
                 ArrayArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
                 ArrayArg::from_raw_parts(self.sigma_buf.clone(), stored_ch as usize),
                 ArrayArg::from_raw_parts(self.dct_profile_buf.clone(), 8),

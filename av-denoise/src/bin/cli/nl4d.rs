@@ -189,6 +189,14 @@ pub struct Nl4dArgs {
     #[arg(long)]
     pub kaiser_beta: Option<f32>,
 
+    /// How strongly motion vectors are pulled toward their neighbours.
+    ///
+    /// `0` (the library default) leaves the tracked field as it is.
+    /// Raise it to smooth out stray vectors on noisy or flat content,
+    /// at the cost of following small objects less closely.
+    #[arg(long)]
+    pub field_lambda: Option<f32>,
+
     /// Stops a poorly matched patch from being trusted less than a well
     /// matched one.
     ///
@@ -287,6 +295,7 @@ impl Nl4dArgs {
                     mismatch_scale: self.mismatch_scale.unwrap_or(defaults.mismatch_scale),
                     confidence_variance: !self.no_confidence_variance,
                     kaiser_beta: self.kaiser_beta.unwrap_or(defaults.kaiser_beta),
+                    field_lambda: self.field_lambda.unwrap_or(defaults.field_lambda),
                     // The CLI keeps the temporal EMA every calibrated
                     // preset assumes by default. Only `av-denoise-vs`
                     // needs window-local estimation, for random-access
@@ -453,6 +462,25 @@ mod tests {
         let defaults = Nl4dOptions::default();
 
         assert!((expect_nl4d(&opts).lambda_ht_scale - defaults.lambda_ht_scale).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn field_lambda_flows_into_the_nl4d_algorithm() {
+        let (args, nl4d) = parse(&["--field-lambda", "0.7"]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+
+        assert!((nl4d.field_lambda.unwrap() - 0.7).abs() < f32::EPSILON);
+        assert!((expect_nl4d(&opts).field_lambda - 0.7).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn unset_field_lambda_resolves_to_the_library_default() {
+        let (args, nl4d) = parse(&[]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let defaults = Nl4dOptions::default();
+
+        assert_eq!(nl4d.field_lambda, None);
+        assert!((expect_nl4d(&opts).field_lambda - defaults.field_lambda).abs() < f32::EPSILON);
     }
 
     /// nl4d never runs an NLM weighting pass, so the flags that only

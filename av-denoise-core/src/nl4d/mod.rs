@@ -14,7 +14,9 @@
 
 mod denoiser;
 pub mod harness;
+pub mod kernels;
 mod params;
+mod regularise;
 mod snapshot;
 
 // Every test in this tree runs against a real GPU runtime, see
