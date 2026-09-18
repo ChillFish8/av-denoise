@@ -381,8 +381,9 @@ pub(super) fn read_temporal_stats_slot<R: Runtime>(
 /// One centre slot's aggregated temporal-residual noise measurement.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct TemporalNoiseSample {
-    /// The per-channel sigma, taken as the median over static blocks, in
-    /// normalised units. Entries past the active channel count stay 0.
+    /// The per-channel sigma, taken as the median over the static blocks
+    /// with measurable noise, in normalised units. Entries past the active
+    /// channel count stay 0.
     pub sigma: [f32; 3],
     /// The same per-channel sigma taken at the lower quartile instead of
     /// the median, in normalised units.
@@ -396,7 +397,7 @@ pub(super) struct TemporalNoiseSample {
     /// It is the median, over the static blocks with measurable noise,
     /// of how strongly each residual matches the one beside it.
     pub rho: f32,
-    /// What fraction of blocks counted as static.
+    /// What fraction of blocks counted as static with measurable noise.
     pub static_fraction: f32,
 }
 
@@ -405,16 +406,19 @@ pub(super) struct TemporalNoiseSample {
 ///
 /// A block above this is treated as moving content rather than as noise.
 const STATIC_GATE: f32 = 1.5 / 255.0;
-/// The smallest block sigma that still counts toward the correlation
-/// median.
+/// The smallest block sigma that still counts as measurable noise.
+///
+/// It gates the correlation median, the ceiling's reference set and the
+/// measured sigma population behind `sigma` and `sigma_low`.
 ///
 /// Below this a block carries too little signal for its correlation
 /// reading to mean anything.
 const RHO_SIGMA_GATE: f32 = 0.3 / 255.0;
 /// The smallest fraction of static blocks a sample needs to be trusted.
 ///
-/// Below this, motion or a scene change dominates the frame and the
-/// Immerkær estimate is the only usable reading.
+/// Below this, motion, a scene change, or too little measurable noise
+/// dominates the frame, and the Immerkær estimate is the only usable
+/// reading.
 const STATIC_FRACTION_MIN: f32 = 0.05;
 /// How far above the surviving blocks' own lower quartile a block's
 /// sigma may sit before it is treated as moving texture rather than
@@ -443,6 +447,9 @@ const STATIC_FRACTION_MIN: f32 = 0.05;
 /// read a sigma of exactly 0, and leaving them in can drag the quartile
 /// itself to 0, which would reject every block carrying real noise
 /// rather than just the outliers.
+///
+/// The measured population sits behind the same gate, so those regions
+/// cannot drag the reported sigma down either.
 ///
 /// That exclusion only holds up while a genuinely low population remains
 /// to anchor the quartile. [`aggregate_temporal_noise_stats`] covers
@@ -498,6 +505,10 @@ struct StaticGateCandidate {
 /// That quartile looks only at blocks clearing [`RHO_SIGMA_GATE`], so a
 /// perfectly static region such as a letterbox bar cannot drag the
 /// ceiling to 0 and reject every noisy block with it.
+///
+/// A third filter drops any surviving block whose own sigma sits below
+/// [`RHO_SIGMA_GATE`]. Such a block carries no measurable noise, so it
+/// joins neither the reported sigma nor the static count.
 ///
 /// # When the ceiling cannot be trusted
 ///
@@ -649,13 +660,25 @@ pub(super) fn aggregate_temporal_noise_stats(
         if candidate.sigma_ch0 > sigma_ceiling {
             continue;
         }
+
+        // A perfectly static block, such as a letterbox bar or a
+        // duplicate frame, reads a sigma of 0 and clears STATIC_GATE
+        // without effort. It carries no measurable noise, so it says
+        // nothing about the frame's noise level.
+        //
+        // Left in, a population of them drags the lower quartile to 0,
+        // and nl4d reads that quartile as its whole noise estimate.
+        if candidate.sigma_ch0 <= RHO_SIGMA_GATE {
+            continue;
+        }
+
         static_count += 1;
 
         for (c, sigmas) in static_sigmas.iter_mut().enumerate().take(channels) {
             sigmas.push(candidate.sigmas[c]);
         }
 
-        if candidate.sigma_ch0 > RHO_SIGMA_GATE && candidate.n_pairs > 0.0 {
+        if candidate.n_pairs > 0.0 {
             let rho = (candidate.mean_lag - candidate.mean0 * candidate.mean0) / candidate.var_ch0;
             rho_samples.push(rho.clamp(0.0, 1.0));
         }
@@ -1133,8 +1156,55 @@ mod tests {
         );
     }
 
-    /// Five static blocks, each with its own sigma, and four of them
-    /// with their own correlation reading too.
+    /// Three perfectly static blocks, the letterbox shape, alongside five
+    /// carrying real noise.
+    ///
+    /// The static blocks are over a quarter of the population, so an
+    /// ungated lower quartile lands on zero.
+    #[test]
+    fn aggregate_excludes_perfectly_static_blocks_from_the_population() {
+        let width = 16 * 8;
+        let height = 16;
+        let stored_ch = 1;
+        let channels = 1;
+        let n = 256.0f32;
+        let n_pairs = 240.0f32;
+        let rho_target = 0.5f32;
+
+        let sigmas_255 = [0.0f32, 0.0, 0.0, 2.0, 2.5, 3.0, 3.5, 4.0];
+
+        let mut records = Vec::new();
+        for sigma_255 in sigmas_255.iter() {
+            let sigma = sigma_255 / 255.0;
+            let var = 2.0 * sigma * sigma;
+            let sum_d2 = n * var;
+            let sum_lag = n_pairs * rho_target * var;
+            records.extend_from_slice(&[0.0, sum_d2, sum_lag]);
+        }
+
+        let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+            .expect("five blocks clear the gate");
+
+        assert!(
+            (sample.static_fraction - 0.625).abs() < 1e-6,
+            "expected 5 of 8 blocks counted, got {}",
+            sample.static_fraction
+        );
+        assert!(
+            (sample.sigma[0] - 3.0 / 255.0).abs() < 1e-4,
+            "expected median sigma 3/255 over [2,2.5,3,3.5,4], got {}",
+            sample.sigma[0]
+        );
+        assert!(
+            (sample.sigma_low[0] - 2.5 / 255.0).abs() < 1e-4,
+            "expected lower-quartile sigma 2.5/255, not a zero dragged down by the static blocks, \
+             got {}",
+            sample.sigma_low[0]
+        );
+    }
+
+    /// Five static blocks, each with its own sigma, four of which carry
+    /// real noise.
     ///
     /// That covers the odd-count median, the even-count median, and the
     /// lower quartile in one pass.
@@ -1147,8 +1217,8 @@ mod tests {
         let n = 256.0f32;
         let n_pairs = 240.0f32;
 
-        // Block 0's sigma sits below RHO_SIGMA_GATE, so its correlation
-        // reading never enters the set. The other four all clear it.
+        // Block 0's sigma sits below RHO_SIGMA_GATE, so it carries no
+        // measurable noise and never enters the population.
         let sigmas_255 = [0.1f32, 2.0, 3.0, 4.0, 5.0];
         let rhos = [0.0f32, 0.1, 0.3, 0.5, 0.7];
 
@@ -1164,15 +1234,15 @@ mod tests {
         let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
             .expect("all five blocks are static");
 
-        assert!((sample.static_fraction - 1.0).abs() < 1e-6);
+        assert!((sample.static_fraction - 0.8).abs() < 1e-6);
         assert!(
-            (sample.sigma[0] - 3.0 / 255.0).abs() < 1e-4,
-            "expected median sigma 3/255 (middle of [0.1,2,3,4,5]), got {}",
+            (sample.sigma[0] - 3.5 / 255.0).abs() < 1e-4,
+            "expected median sigma 3.5/255 (middle of [2,3,4,5]), got {}",
             sample.sigma[0]
         );
         assert!(
-            (sample.sigma_low[0] - 2.0 / 255.0).abs() < 1e-4,
-            "expected lower-quartile sigma 2/255 (index 0.25*4=1.0 of [0.1,2,3,4,5]), got {}",
+            (sample.sigma_low[0] - 2.75 / 255.0).abs() < 1e-4,
+            "expected lower-quartile sigma 2.75/255 (index 0.25*3=0.75 of [2,3,4,5]), got {}",
             sample.sigma_low[0]
         );
         assert!(
@@ -1505,8 +1575,9 @@ mod tests {
     /// 14 across the five levels, with the remainder falling to the
     /// earliest ones.
     ///
-    /// With the 26 zero blocks sorted first, the median of all 100 lands
-    /// squarely inside the second level's run, so the expected sigma is
+    /// The 26 zero blocks sit below [`RHO_SIGMA_GATE`], so they never
+    /// enter the population. The median of the remaining 74 lands
+    /// squarely inside the third level's run, so the expected sigma is
     /// exactly that level rather than an approximation.
     #[test]
     fn aggregate_returns_correct_sigma_with_letterbox_zero_population() {
@@ -1530,7 +1601,7 @@ mod tests {
         let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
             .expect("74 of 100 blocks carry real static noise, far above the 5% floor");
 
-        let expected_sigma = 3.9 / 255.0;
+        let expected_sigma = 4.0 / 255.0;
         assert!(
             (sample.sigma[0] - expected_sigma).abs() < 1e-4,
             "expected the letterbox bars to leave the real noise floor near {expected_sigma} intact, got {}",
@@ -1587,7 +1658,9 @@ mod tests {
     /// letterbox-style zero-sigma population mixed in.
     ///
     /// The outlier check must still pick out the real noise floor from
-    /// the texture majority, and the zero blocks must not disturb it.
+    /// the texture majority, and the zero blocks must not disturb it. The
+    /// zero blocks themselves carry no measurable noise, so they never
+    /// join the survivors.
     #[test]
     fn aggregate_rejects_texture_outliers_with_zero_population_present() {
         let width = 64;
@@ -1621,8 +1694,9 @@ mod tests {
             sample.sigma[0]
         );
         assert!(
-            (sample.static_fraction - 10.0 / 20.0).abs() < 1e-4,
-            "expected the 6 background blocks and 4 zero blocks to survive, got static_fraction={}",
+            (sample.static_fraction - 6.0 / 20.0).abs() < 1e-4,
+            "expected only the 6 background blocks to survive, the zero blocks carry no \
+             measurable noise, got static_fraction={}",
             sample.static_fraction
         );
         assert!(
@@ -1637,7 +1711,9 @@ mod tests {
     /// with a letterbox-style zero-sigma population mixed in.
     ///
     /// A real spread of noise across the frame must still survive the
-    /// outlier check, and the zero blocks must not trip it either.
+    /// outlier check, and the zero blocks must not trip it either. The
+    /// zero blocks themselves carry no measurable noise, so they never
+    /// join the survivors.
     #[test]
     fn aggregate_keeps_static_spread_with_zero_population_present() {
         let width = 64;
@@ -1664,9 +1740,9 @@ mod tests {
             .expect("every non-zero block is static");
 
         assert!(
-            (sample.static_fraction - 1.0).abs() < 1e-6,
+            (sample.static_fraction - 0.8).abs() < 1e-6,
             "a real 3x spatial sigma spread plus a zero population must not trip the outlier \
-             gate, got static_fraction={}",
+             gate, and the 4 zero blocks carry no measurable noise, got static_fraction={}",
             sample.static_fraction
         );
     }
