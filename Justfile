@@ -51,9 +51,9 @@ test: test-rust test-py
 
 # Every Rust test across the three crates.
 test-rust:
-    cargo nextest run -p av-denoise-core --features vulkan
-    cargo nextest run -p av-denoise --features vulkan,binary
-    cargo nextest run -p av-denoise-vs --features vulkan
+    cargo nextest run --release -p av-denoise-core --features vulkan
+    cargo nextest run --release -p av-denoise --features vulkan,binary
+    cargo nextest run --release -p av-denoise-vs --features vulkan
     cargo test --doc -p av-denoise-core --features vulkan
     cargo check --workspace
 
