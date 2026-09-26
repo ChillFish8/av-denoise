@@ -16,7 +16,7 @@ use av_denoise_core::collab::kernels::aggregate::{
 };
 use av_denoise_core::collab::kernels::fused::collab_fused;
 use av_denoise_core::collab::kernels::transforms::dct_noise_profile;
-use av_denoise_core::collab::{PATCH_SIZE, needs_warp_uniform_search};
+use av_denoise_core::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use av_denoise_core::nlmeans::{BLOCK_X, BLOCK_Y};
 use cubecl::benchmark::{Benchmark, BenchmarkComputations, TimingMethod};
 use cubecl::prelude::*;
@@ -54,9 +54,6 @@ const SPATIAL_RADIUS: u32 = 9;
 const K_MAX: u32 = 8;
 const BLK_STEP: u32 = 8;
 const BLKSIZE: u32 = 16;
-/// `Nl4dParams::default().mismatch_scale` squared, the kernel's
-/// `mismatch_scale2` argument.
-const MISMATCH_SCALE2: f32 = 1.0;
 const N_FRAMES: u32 = 2 * RADIUS + 1;
 const CENTRE_SLOT: u32 = RADIUS;
 const NEIGHBOUR_SLOTS: [u32; 4] = [0, 1, 3, 4];
@@ -212,14 +209,12 @@ impl<R: Runtime> Rig<R> {
                 ArrayArg::from_raw_parts(self.group_weight.clone(), refs),
                 CENTRE_SLOT,
                 0.0f32,
-                0.0f32,
-                MISMATCH_SCALE2,
                 LAMBDA_HT,
                 weight_scale(SIGMA, &dct_noise_profile(0.0)),
                 cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS),
-                true,
                 needs_warp_uniform_search(&self.client),
                 RADIUS,
+                grid_frames(RADIUS),
                 REFINE,
                 self.mv_stride,
                 self.conf_stride,

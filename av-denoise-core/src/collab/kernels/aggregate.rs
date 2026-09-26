@@ -108,20 +108,14 @@ pub const ACCUM_CLAMP: f32 = 5.0;
 /// whatever `sigma` and whatever correlation shaping is in use, which is
 /// what [`WEIGHT_CLAMP`] relies on.
 ///
-/// The bound below is not `1/512`, the figure a group of 512 coefficients
-/// each carrying the plain `sigma^2` would give. `collab_fused` also
-/// gives a temporal member the extra variance its motion block's
-/// confidence implies, and that has no relation to `sigma`, so the sum
-/// runs above `512 * sigma^2 * g_max^2` by however much that extra
-/// variance is worth. What keeps the bound finite is
-/// [`crate::collab::kernels::fused::MEMBER_SIGMA2_CAP`], which holds a
-/// member's own variance to a fixed multiple of the channel's, putting
-/// the weight in `[1 / (512 * (1 + cap)), 1]`.
+/// The bound below is `1/512`. Every member carries the plain `sigma^2`,
+/// so a group of 512 coefficients sums to at most `512 * sigma^2 * g_max^2`,
+/// which puts the normalised weight between `1/512` and 1.
 ///
 /// That range still does not fit `accum`'s fixed point with room to
 /// spare, which is why `wsum` counts at [`WEIGHT_GAIN`] times its scale.
-/// Without both the cap and the gain, a poorly matched group rounds away
-/// to nothing and takes its pixel with it.
+/// Without the gain, a group that keeps most of its coefficients rounds
+/// away to nothing and takes its pixel with it.
 ///
 /// The [`RECIPROCAL_FLOOR`] fallback covers a `sigma` small enough that
 /// `sigma^2 * g_max^2` falls under it, zero included. The filter builds
@@ -383,9 +377,8 @@ pub fn collab_zero_accum(
 /// one and nine times over, since they sit on a grid of stride `STEP` and
 /// are `PATCH_SIZE` wide. Coverage alone is not enough, because a weight
 /// small enough to round to nothing would leave a covered pixel with an
-/// empty weight sum. [`WEIGHT_GAIN`] and
-/// [`crate::collab::kernels::fused::MEMBER_SIGMA2_CAP`] together keep
-/// every group's weight above that point.
+/// empty weight sum. [`WEIGHT_GAIN`] keeps every group's weight above
+/// that point.
 ///
 /// If the weight sum ever were to be zero anyway, the guard below returns
 /// the accumulator untouched rather than a NaN or an infinity.

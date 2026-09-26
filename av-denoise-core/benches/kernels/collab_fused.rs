@@ -2,7 +2,7 @@ use av_denoise_core::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use av_denoise_core::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
 use av_denoise_core::collab::kernels::fused::collab_fused;
 use av_denoise_core::collab::kernels::transforms::dct_noise_profile;
-use av_denoise_core::collab::{PATCH_SIZE, needs_warp_uniform_search};
+use av_denoise_core::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -11,10 +11,8 @@ use super::nl4d_geometry::{
     BLK_STEP,
     BLKSIZE,
     CENTRE_SLOT,
-    CONFIDENCE_VARIANCE,
     K_MAX,
     LAMBDA_HT,
-    MISMATCH_SCALE2,
     N_FRAMES,
     NEIGHBOUR_SLOTS,
     RADIUS,
@@ -194,14 +192,12 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
                 ArrayArg::from_raw_parts(args.group_weight.clone(), refs),
                 CENTRE_SLOT,
                 0.0f32,
-                0.0f32,
-                MISMATCH_SCALE2,
                 LAMBDA_HT,
                 weight_scale(SIGMA, &dct_noise_profile(0.0)),
                 cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS),
-                CONFIDENCE_VARIANCE,
                 needs_warp_uniform_search(&self.client),
                 RADIUS,
+                grid_frames(RADIUS),
                 REFINE,
                 mv_stride,
                 conf_stride,

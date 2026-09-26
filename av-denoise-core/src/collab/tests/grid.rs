@@ -1,6 +1,6 @@
 use cubecl::prelude::*;
 
-use super::helpers::{make_client, R};
+use super::helpers::{R, make_client};
 use crate::collab::kernels::fused::grid::{
     grid_fwd,
     grid_fwd_host,
@@ -9,7 +9,7 @@ use crate::collab::kernels::fused::grid::{
     grid_variance,
     grid_variance_host,
 };
-use crate::collab::{MAX_K, PATCH_AREA, PATCH_SIZE};
+use crate::collab::{MAX_K, MAX_TEMPORAL_RADIUS, PATCH_AREA, PATCH_SIZE, grid_frames};
 
 #[cube(launch_unchecked)]
 fn grid_probe(
@@ -217,4 +217,12 @@ fn a_volume_constant_in_time_has_no_temporal_detail() {
             }
         }
     }
+}
+
+#[test]
+fn grid_frames_follows_the_temporal_radius() {
+    assert_eq!(grid_frames(0), 1);
+    assert_eq!(grid_frames(1), 2);
+    assert_eq!(grid_frames(2), 4);
+    assert_eq!(grid_frames(MAX_TEMPORAL_RADIUS), 4);
 }

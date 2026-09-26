@@ -1,11 +1,11 @@
 use super::{
-    assert_matches_recorded,
-    cross_frame_setup,
-    run_fused,
-    three_frame_ring_with_a_planted_match,
-    unique_frame,
     Digest,
     Setup,
+    assert_matches_recorded,
+    cross_frame_setup,
+    five_frame_ring_with_jittered_copies,
+    run_fused,
+    unique_frame,
 };
 use crate::collab::tests::helpers::noisy_field_over;
 
@@ -219,21 +219,20 @@ fn fused_reproduces_recorded_output_under_correlation_shaping() {
     );
 }
 
-/// The whole temporal path at once: the `c_min` skip, the per-member
-/// mismatch variance derived from the member's own match distance, and
-/// the scatter into each member's own region of the accumulator ring.
+/// The whole temporal path at once: the `c_min` skip, the volume grid
+/// with its single-frame fallback, and the scatter into each member's
+/// own region of the accumulator ring.
 ///
-/// Recorded with the covering-block search, every block covering a
-/// patch contributes a rectangle. `cross_frame_setup` gives every block
-/// its own vector, so the search reaches positions the corner block
-/// alone never pointed at.
+/// `cross_frame_setup` gives every block its own vector, so the search
+/// reaches positions the corner block alone never pointed at, and its
+/// confidences straddle `c_min`, so some groups build a grid and others
+/// fall back.
 ///
-/// Re-recorded for the switch from motion-block confidence to a
-/// member's own match distance. The digest below comes from this
-/// kernel's own output, not a second implementation, because none
-/// exists for the new mechanism. [assert_matches_recorded]'s warning
-/// about comparing a kernel to itself is about a silently-broken shader
-/// producing zeros, and this recording carries real, non-zero coverage.
+/// Re-recorded for the volume grid on 2026-09-26, from this kernel's own
+/// output, because no second implementation exists for it.
+/// [assert_matches_recorded]'s warning about comparing a kernel to
+/// itself is about a silently-broken shader producing zeros, and this
+/// recording carries real, non-zero coverage.
 #[test]
 fn fused_reproduces_recorded_output_across_frames() {
     let s = cross_frame_setup(64, 64, 2);
@@ -241,53 +240,19 @@ fn fused_reproduces_recorded_output_across_frames() {
         "cross frame",
         &run_fused(&s),
         &Digest {
-            covered: 15800,
-            pixel_mean: 0.398917931934,
-            pixel_rms: 0.518592139022,
-            weight_mean: 1199.919938422,
+            covered: 16453,
+            pixel_mean: 0.441598762473,
+            pixel_rms: 0.546715666545,
+            weight_mean: 1045.608471951,
             probes: [
-                0.838003113388,
-                0.574141517596,
-                0.299827186817,
+                0.837928771973,
+                0.574595237938,
+                0.300403234153,
                 0.000000000000,
-                0.774458945874,
+                0.775989927049,
                 0.000000000000,
-                0.236727453142,
-                0.979726340630,
-            ],
-        },
-    );
-}
-
-/// The same cross-frame run with the mismatch variance off.
-///
-/// `use_member_sigma` is a `#[comptime]` flag, so it compiles a second
-/// program, and the arm with it off is the one that checks the threshold
-/// still reads a plain `sigma^2` per member.
-///
-/// Recorded with the covering-block search, every block covering a
-/// patch contributes a rectangle.
-#[test]
-fn fused_reproduces_recorded_output_without_the_mismatch_variance() {
-    let mut s = cross_frame_setup(64, 64, 2);
-    s.confidence_variance = false;
-    assert_matches_recorded(
-        "cross frame, flat sigma",
-        &run_fused(&s),
-        &Digest {
-            covered: 15800,
-            pixel_mean: 0.398918693763,
-            pixel_rms: 0.518592557620,
-            weight_mean: 1244.444444987,
-            probes: [
-                0.838030815125,
-                0.574148050944,
-                0.299845377604,
-                0.000000000000,
-                0.774438040597,
-                0.000000000000,
-                0.236724853516,
-                0.979728698730,
+                0.237124125163,
+                0.979660034180,
             ],
         },
     );
@@ -296,15 +261,19 @@ fn fused_reproduces_recorded_output_without_the_mismatch_variance() {
 /// A group with members in neighbour frames must scatter into those
 /// frames' regions of the ring, not collapse onto the centre frame.
 ///
-/// This is the cross-frame aggregation the temporal path exists for, and
-/// it is easy to lose, because the frame a member came from is never
-/// written down anywhere between the match and the scatter.
+/// Each of the four neighbours holds the centre plus its own jitter, so
+/// every volume keeps a different three of them and every slot of the
+/// five-frame ring receives members somewhere. The frame a member came
+/// from is never written down between the match and the scatter, which
+/// is what makes this easy to lose.
+///
+/// Re-recorded for the volume grid on 2026-09-26, from this kernel's own
+/// output, because no second implementation exists for it.
 #[test]
 fn fused_scatters_into_every_member_frame() {
-    let (w, h) = (64u32, 64u32);
-    let s = three_frame_ring_with_a_planted_match(w, h);
+    let s = five_frame_ring_with_jittered_copies(64, 64);
     let got = run_fused(&s);
-    for slot in 0..3 {
+    for slot in 0..5 {
         assert!(
             got.frame_weight_sum(slot) > 0,
             "ring slot {slot} received nothing"
@@ -314,19 +283,19 @@ fn fused_scatters_into_every_member_frame() {
         "planted cross-frame match",
         &got,
         &Digest {
-            covered: 12288,
-            pixel_mean: 0.500274434257,
-            pixel_rms: 0.577655447440,
-            weight_mean: 1246.296296658,
+            covered: 19992,
+            pixel_mean: 0.488864379137,
+            pixel_rms: 0.570867709963,
+            weight_mean: 1233.333334961,
             probes: [
-                0.836406707764,
-                0.573966026306,
-                0.301191602434,
-                0.036788940430,
-                0.774992261614,
-                0.509891510010,
-                0.239036560059,
-                0.979254982688,
+                0.836363474528,
+                0.574619293213,
+                0.300458908081,
+                0.034561157227,
+                0.774574279785,
+                0.513134002686,
+                0.238787333171,
+                0.979087829590,
             ],
         },
     );

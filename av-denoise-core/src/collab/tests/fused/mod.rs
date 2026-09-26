@@ -5,12 +5,12 @@ mod walks;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::helpers::{make_client, make_unique_frame, noisy_field_over, R};
+use super::helpers::{R, make_client, make_unique_frame, noisy_field_over};
 use crate::collab::geometry::{fused_cubes_x, ref_count, ref_pos, refs_along};
-use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale, WEIGHT_GAIN};
+use crate::collab::kernels::aggregate::{WEIGHT_GAIN, cross_frame_accum_scale, kaiser_window, weight_scale};
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{needs_warp_uniform_search, PATCH_SIZE};
+use crate::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 
 /// The spatial search radius most runs below use.
 ///
@@ -27,8 +27,7 @@ const SPATIAL_RADIUS: u32 = 4;
 const K_MAX: u32 = 8;
 
 /// Motion-block side length. The kernel searches every block whose
-/// `blksize` span contains a patch, and does not score the mismatch
-/// variance against it.
+/// `blksize` span contains a patch.
 const BLKSIZE: u32 = 16;
 
 /// Motion-block stride. It stays at `PATCH_SIZE` so a block boundary
@@ -74,7 +73,6 @@ pub(super) struct Setup {
     pub(super) confidence: Vec<f32>,
     pub(super) neighbour_slots: Vec<u32>,
     pub(super) centre_slot: u32,
-    pub(super) noise_floor: f32,
     pub(super) c_min: f32,
     pub(super) radius: u32,
     pub(super) refine: u32,
@@ -88,16 +86,9 @@ pub(super) struct Setup {
     pub(super) k_max: u32,
     pub(super) sigma: f32,
     pub(super) lambda_ht: f32,
-    /// Whether a temporal member's own match distance inflates its
-    /// noise variance.
-    pub(super) confidence_variance: bool,
     /// Residual correlation the noise profile is built for. `0.0` gives
     /// the all-ones profile most runs use.
     pub(super) rho: f32,
-    /// The multiplier on a temporal member's mismatch variance, `1.0` at
-    /// its default. Squared before it reaches the kernel, see
-    /// [`crate::nl4d::params::Nl4dParams::mismatch_scale`].
-    pub(super) mismatch_scale: f32,
     /// A profile buffer supplied outright, bypassing
     /// [`dct_noise_profile`]. The weight scale still follows whatever
     /// profile is in force.
@@ -120,7 +111,6 @@ impl Setup {
             confidence: vec![1.0f32],
             neighbour_slots: vec![0u32],
             centre_slot: 0,
-            noise_floor: 0.0,
             c_min: 0.0,
             radius: 0,
             refine: 0,
@@ -134,9 +124,7 @@ impl Setup {
             k_max: K_MAX,
             sigma: SIGMA,
             lambda_ht: LAMBDA_HT,
-            confidence_variance: true,
             rho: 0.0,
-            mismatch_scale: 1.0,
             profile_override: None,
             kaiser_beta: 0.0,
         }
@@ -442,15 +430,13 @@ pub(super) fn run_fused_walk(s: &Setup, warp_uniform: Option<bool>) -> Aggregate
             ArrayArg::from_raw_parts(b.wsum.clone(), b.wsum_len),
             ArrayArg::from_raw_parts(b.group_weight.clone(), b.refs),
             s.centre_slot,
-            s.noise_floor,
             s.c_min,
-            s.mismatch_scale * s.mismatch_scale,
             s.lambda_ht,
             weight_scale(s.sigma, &profile),
             s.accum_scale(),
-            s.confidence_variance,
             warp_uniform.unwrap_or_else(|| needs_warp_uniform_search(&b.client)),
             s.radius,
+            grid_frames(s.radius),
             s.refine,
             s.mv_stride,
             s.conf_stride,
@@ -479,9 +465,8 @@ pub(super) fn run_fused_walk(s: &Setup, warp_uniform: Option<bool>) -> Aggregate
 /// taller image fills the whole ring with content no two 8x8 windows
 /// share, across frames as well as within one.
 ///
-/// The confidences run from below `c_min` to 1.0, so some neighbours
-/// have their whole window skipped and the rest produce a spread of
-/// mismatch variances rather than one repeated value.
+/// The confidences run from below `c_min` to 1.0, so some blocks have
+/// their whole window skipped and the rest are searched.
 pub(super) fn cross_frame_setup(width: u32, height: u32, radius: u32) -> Setup {
     let frames = 2 * radius + 1;
     let blocks_x = width.div_ceil(BLK_STEP);
@@ -532,10 +517,11 @@ pub(super) fn cross_frame_setup(width: u32, height: u32, radius: u32) -> Setup {
 /// frame, at the position the zero motion field predicts.
 ///
 /// An exact copy scores distance zero, which every other candidate on
-/// this content loses to, so members 1 and 2 of every group come from
-/// the two neighbour slots. `refine = 0` narrows each neighbour's
-/// rectangle to that one predicted position, so there is nothing else in
-/// a neighbour for the group to pick instead.
+/// this content loses to. At radius 1 the group is four volumes of two
+/// frames, and each volume's second frame is neighbour 0, which wins
+/// every tie. `refine = 0` narrows each neighbour's rectangle to that
+/// one predicted position, so there is nothing else in a neighbour for
+/// a volume to pick instead.
 pub(super) fn three_frame_ring_with_a_planted_match(width: u32, height: u32) -> Setup {
     let frame = unique_frame(width, height);
     let mut ring = Vec::with_capacity(frame.len() * 3);
@@ -564,6 +550,54 @@ pub(super) fn three_frame_ring_with_a_planted_match(width: u32, height: u32) -> 
     }
 }
 
+/// A five-frame ring whose neighbours hold the centre frame plus a small jitter of their own.
+///
+/// The jitter differs per neighbour and per pixel, so which three of the four neighbours a volume
+/// keeps varies from group to group, and across a frame every neighbour is kept somewhere. The
+/// motion field is zero and `refine` is 0, so each neighbour offers exactly one position.
+pub(super) fn five_frame_ring_with_jittered_copies(width: u32, height: u32) -> Setup {
+    let radius = 2u32;
+    let frame = unique_frame(width, height);
+    let jitter = noisy_field_over(width, height * 4, 0.5, 0.002);
+    let pixels = (width * height) as usize;
+
+    let mut ring = Vec::with_capacity(pixels * 5);
+    for slot in 0..5usize {
+        if slot == radius as usize {
+            ring.extend_from_slice(&frame);
+            continue;
+        }
+
+        let neighbour = if slot < radius as usize { slot } else { slot - 1 };
+        let offsets = &jitter[neighbour * pixels..(neighbour + 1) * pixels];
+        let copy = frame
+            .iter()
+            .zip(offsets)
+            .map(|(&value, &offset)| value + offset - 0.5);
+        ring.extend(copy);
+    }
+
+    let blocks_x = width.div_ceil(BLK_STEP);
+    let blocks_y = height.div_ceil(BLK_STEP);
+    let conf_stride = blocks_x * blocks_y;
+    let mv_stride = conf_stride * 2;
+
+    Setup {
+        ring,
+        mv_field: vec![0i32; (2 * radius * mv_stride) as usize],
+        confidence: vec![1.0f32; (2 * radius * conf_stride) as usize],
+        neighbour_slots: vec![0u32, 1, 3, 4],
+        centre_slot: radius,
+        radius,
+        refine: 0,
+        mv_stride,
+        conf_stride,
+        blocks_x,
+        blocks_y,
+        ..Setup::spatial_only(vec![0.0f32; pixels], width, height)
+    }
+}
+
 /// How many reference patches cover each pixel of a `width` by `height`
 /// frame, on the same grid [`ref_pos`] lays out.
 pub(super) fn reference_cover_counts(width: u32, height: u32) -> Vec<i64> {
@@ -580,15 +614,6 @@ pub(super) fn reference_cover_counts(width: u32, height: u32) -> Vec<i64> {
         }
     }
     counts
-}
-
-/// Writes a flat 8x8 block into `frame` at `(px, py)`.
-pub(super) fn flat_block(frame: &mut [f32], w: u32, px: u32, py: u32, value: f32) {
-    for row in 0..PATCH_SIZE {
-        for col in 0..PATCH_SIZE {
-            frame[((py + row) * w + px + col) as usize] = value;
-        }
-    }
 }
 
 pub(super) fn patch_pool_variance(frame: &[f32], w: u32, h: u32) -> f64 {
@@ -622,9 +647,5 @@ pub(super) fn flat_noise_setup(w: u32, h: u32, sigma: f32) -> Setup {
     s.spatial_radius = 9;
     s.sigma = sigma;
     s.lambda_ht = 2.7;
-    // The channel-scaled expected SSD between two independent noisy
-    // copies of the same flat content, which is what a real match on
-    // this frame costs.
-    s.noise_floor = 2.0 * 3.0 * sigma * sigma * 64.0;
     s
 }

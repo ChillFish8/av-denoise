@@ -12,7 +12,7 @@ use crate::collab::kernels::aggregate::{
 };
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{MAX_K, PATCH_SIZE, needs_warp_uniform_search};
+use crate::collab::{MAX_K, PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::{
     ChannelMode,
@@ -467,17 +467,13 @@ fn run_spatial_only(
             ArrayArg::from_raw_parts(wsum.clone(), pixels),
             ArrayArg::from_raw_parts(group_weight, refs),
             centre_slot,
-            0.0f32,
             c_min,
-            // `radius` is 0 below, so no temporal candidate is ever
-            // scored and this runtime scalar is never read.
-            0.0f32,
             lambda_ht,
             wnorm,
             ACCUM_SCALE,
-            false,
             warp_uniform,
             0u32,
+            grid_frames(0),
             refine,
             1u32,
             1u32,
@@ -705,17 +701,13 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 ArrayArg::from_raw_parts(wsum.clone(), pixels * total_frames as usize),
                 ArrayArg::from_raw_parts(group_weight, refs),
                 centre_slot,
-                0.0f32,
                 C_MIN,
-                // `use_member_sigma` is off below, so this never reaches
-                // a threshold and any value is exact.
-                1.0f32,
                 LAMBDA_HT,
                 wnorm,
                 accum_scale,
-                false,
                 needs_warp_uniform_search(&client),
                 radius,
+                grid_frames(radius),
                 REFINE,
                 view.mv_stride,
                 view.conf_stride,

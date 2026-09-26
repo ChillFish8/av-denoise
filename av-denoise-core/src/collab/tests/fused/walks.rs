@@ -1,4 +1,4 @@
-use super::{cross_frame_setup, run_fused_walk, unique_frame, Setup};
+use super::{Setup, cross_frame_setup, run_fused_walk, unique_frame};
 
 /// Asserts the two search walks aggregated the same thing, byte for
 /// byte.
@@ -77,4 +77,12 @@ fn warp_uniform_search_matches_the_clipped_search_when_every_neighbour_is_gated(
     s.c_min = 2.0;
 
     assert_walks_agree("all gated", &s);
+}
+
+/// The same equivalence at radius 1, where the grid is four volumes of two frames.
+#[test]
+fn warp_uniform_search_matches_the_clipped_search_at_radius_one() {
+    let s = cross_frame_setup(64, 64, 1);
+
+    assert_walks_agree("radius one", &s);
 }

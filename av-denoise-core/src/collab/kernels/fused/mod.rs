@@ -3,11 +3,13 @@ pub(crate) mod search;
 
 use cubecl::prelude::*;
 
-use self::search::{candidate_distance, covering_lo, spatial_search};
+use self::grid::{grid_fwd, grid_inv, grid_variance};
+use self::search::{spatial_search, trajectory_search};
 use super::aggregate::scatter_patch;
-use super::group::{clamp_top_left, pack_pos_t, unpack_t};
-use super::plane_ops::{group_base, plane_ssd_reduce8, shift_insert8, shift_insert8_gated, transpose8};
+use super::group::unpack_t;
+use super::plane_ops::{group_base, plane_ssd_reduce8, transpose8};
 use super::transforms::{
+    RECIPROCAL_FLOOR,
     dct8_reg_fwd,
     dct8_reg_inv,
     fill_dct8_basis,
@@ -15,7 +17,6 @@ use super::transforms::{
     haar_reg_inv_level,
     safe_reciprocal,
     variance_reg_level,
-    RECIPROCAL_FLOOR,
 };
 use crate::collab::{MAX_K, MAX_TEMPORAL_RADIUS, PATCH_AREA, PATCH_SIZE, STEP};
 use crate::nlmeans::kernels::helpers::{channel_scale, read_line};
@@ -52,24 +53,6 @@ const _: () = assert!(
 // literals rather than consts or `f32::INFINITY` because cubecl treats
 // all of those as compile-time-only, and the shift-insert needs genuine
 // mutable runtime variables.
-
-/// The most extra variance a temporal member's mismatch may carry,
-/// as a multiple of the channel's own variance.
-///
-/// A member's extra variance is its own match distance, which on a
-/// badly matched patch has no relation to the channel sigma the group
-/// weight is normalised against. Left uncapped it makes the retained
-/// variance sum, and so the weight, unbounded below, and a weight small
-/// enough to round away in the accumulators takes its pixel's only
-/// information with it. See
-/// [`crate::collab::kernels::aggregate::weight_scale`].
-///
-/// Capping restores the bound. A member here is already a 64 times
-/// noisier observation than the channel it came from, which the
-/// threshold treats as carrying almost nothing, so holding it at that
-/// rather than letting it run further costs no filtering and buys a
-/// weight that always survives the conversion to fixed point.
-pub(crate) const MEMBER_SIGMA2_CAP: f32 = 64.0;
 
 /// Groups each reference patch with the patches most similar to it,
 /// filters the whole group jointly with a hard threshold in the
@@ -119,106 +102,87 @@ pub(crate) const MEMBER_SIGMA2_CAP: f32 = 64.0;
 /// # Search space
 ///
 /// The centre frame contributes the `spatial_radius` rectangle around
-/// the reference patch, clipped to the frame. Each neighbour
-/// contributes one `refine` rectangle per motion block whose span
-/// contains the reference patch, each around the position that block's
-/// vector predicts the patch moved to, clipped the same way. A block
-/// grid at a step below `blksize` gives several such blocks, and taking
-/// all of them means a patch is searched wherever any block covering it
-/// points rather than only where its corner block points.
+/// the reference patch, clipped to the frame.
 ///
-/// Rectangles from different blocks of one neighbour overlap when their
-/// vectors are close. A position reached by more than one of them is
-/// scored once, by the first rectangle that reaches it, and the later
-/// rectangles skip it.
+/// Each volume anchor then searches every neighbour frame. It contributes
+/// one `refine` rectangle per motion block whose span contains the
+/// anchor, each around the position that block's vector predicts the
+/// anchor moved to, clipped the same way. A block grid at a step below
+/// `blksize` gives several such blocks, so an anchor is searched wherever
+/// any block covering it points. A position reached by more than one of
+/// them is scored once, by the first rectangle that reaches it.
 ///
-/// Clipping the rectangle once is what keeps every candidate within it a
+/// Clipping each rectangle once keeps every candidate within it a
 /// distinct position. Clamping each offset in turn would land several
-/// offsets on the same edge position, and admitting a position twice
-/// would let one physical patch count as two and look like stronger
-/// agreement than the group has. The overlap check across rectangles is
-/// the same property held across the blocks of one neighbour.
+/// offsets on the same edge position and let one physical patch count as
+/// two.
 ///
 /// # Distance
 ///
 /// A candidate's distance is the channel-scaled sum of squared pixel
-/// differences over the whole patch, minus `noise_floor`. `noise_floor`
-/// is the distance two noisy copies of the same content show by chance,
-/// so a genuine match is not penalised for the noise it carries. The
-/// result is not clamped at zero for ranking, because subtracting a
-/// constant from every candidate shifts them all equally. It is clamped
-/// at zero where it becomes a member's mismatch variance below, so
-/// `noise_floor` has to be the real expected distance of two noisy
-/// copies, `channel_scale * 2 * PATCH_AREA * sum(sigma_c^2)`.
+/// differences over the whole patch.
 ///
 /// # No admission gate
 ///
 /// Every candidate stays in the running whatever its distance, so a
-/// group fills to `k_max` wherever the search space is that large.
-/// `c_min` is a compute saving rather than an admission threshold. The
-/// skip is per block. A covering block whose confidence sits below
-/// `c_min` never runs the pixel comparison, and its whole rectangle is
-/// skipped, while the neighbour's other covering blocks still search.
-/// The confidence comes from a motion block that every lane of the
-/// group shares, so the skip is uniform across the group.
+/// group fills wherever the search space is large enough. `c_min` is a
+/// compute saving rather than an admission threshold. A covering block
+/// whose confidence sits below `c_min` never runs the pixel comparison,
+/// while the frame's other covering blocks still search. The confidence
+/// comes from a motion block every lane of the group shares, so the skip
+/// is uniform across the group.
 ///
 /// # Selection
 ///
-/// The eight best candidates live one per lane, ascending, and each
-/// candidate is offered to [`shift_insert8_gated`] as it is scored. A
-/// candidate that ties an incumbent does not displace it, so the first
-/// candidate seen at a given distance keeps its slot. The self-match is
-/// scored with a sentinel distance below every real one, which pins it
-/// into slot 0 without a special case in the loop.
+/// The spatial search keeps the eight best centre-frame positions, one
+/// per lane, ascending, through
+/// [shift_insert8_gated](crate::collab::kernels::plane_ops::shift_insert8_gated).
+/// A tie never displaces an incumbent, and the self-match scores a
+/// sentinel below every real distance, which pins it into slot 0.
+///
+/// The first `MAX_K / grid_frames` of those become volume anchors. Each
+/// anchor keeps its best match in every neighbour frame, and the volume
+/// keeps the `grid_frames - 1` best of those in ascending order. A
+/// position an earlier volume already holds is skipped, so no patch
+/// enters the group twice.
 ///
 /// # Members
 ///
-/// A member is a `(distance, position)` pair for the whole search, and
-/// nothing else rides along. The position packs the neighbour it came
-/// from into the bits above the coordinates, so the frame it was matched
-/// in and its motion-block confidence are both recovered from the packed
-/// word when matching ends. Carrying either through the insert would
-/// cost a shuffle on every candidate.
-///
-/// The member set never leaves the kernel. Lane `i` holds member `i`, so
-/// one broadcast per member is all the filter stage needs to give every
-/// lane every position.
+/// A member is a packed position. The neighbour it came from sits in the
+/// bits above the coordinates, so the frame it was matched in is
+/// recovered from the packed word when matching ends. Member
+/// `s * grid_frames + t` is frame `t` of volume `s`, with the anchor at
+/// `t = 0`.
 ///
 /// # Group size
 ///
-/// The member count is the search space size rounded down to the
-/// nearest power of two, capped at `k_max`. The stack transform is only
-/// defined for power-of-two stack sizes, so a count of 5, 6, or 7 keeps
-/// only 4 members. Every rectangle this kernel searches at shipped
-/// settings is far larger than `k_max`, so the rounding only bites on
-/// frames small enough for the clipped rectangle to hold fewer than
-/// eight positions.
+/// A group uses the grid when the spatial search held at least `MAX_K`
+/// positions, `k_max` is `MAX_K`, and every volume filled all of its
+/// frames. Otherwise it falls back to the single-frame group, the
+/// spatial search's positions rounded down to a power of two and capped
+/// at `k_max`. The decision is uniform across the group.
 ///
 /// # What the filter does
 ///
 /// For each active channel, every member's patch runs through a 2D DCT,
 /// so each patch is described by 64 frequency coefficients instead of 64
-/// pixel values. A Haar transform then runs across the stack axis, at
-/// each spatial position independently, so content the group agrees on
-/// collects into the low stack levels and content only one or two
-/// members carry lands in the higher ones. A coefficient survives a hard
+/// pixel values. A grid group then runs a Haar along time within each
+/// volume and a Haar across the volumes, at each spatial position. A
+/// fallback group runs a Haar across its stack instead. Content the group
+/// agrees on collects into the low levels. A coefficient survives a hard
 /// threshold when its magnitude reaches `lambda_ht` standard deviations
-/// of its own propagated noise, with [`variance_reg_level`] propagating
-/// the per-member variance to each stack level. A member matched in a
-/// neighbour frame carries its own match distance as extra variance,
-/// `mismatch_scale2 * max(distance, 0) / (3 * PATCH_AREA)`, which is
-/// the per-channel, per-pixel mean square of its mismatch, so a poorer
-/// match is a noisier observation. Both transforms then invert.
+/// of its own propagated noise, where every member carries the plain
+/// `sigma[c]^2`. Both transforms then invert.
 ///
 /// The spatial pass runs as a column DCT in registers, a transpose, and
 /// a row DCT in registers, because a lane owns a column and the row pass
 /// needs a row. The inverse runs the same three steps backwards, which
 /// leaves the lane holding a column again in time for the scatter.
 ///
-/// The one coefficient that is both the group average (Haar level 0) and
-/// the patch's spatial DC (DCT position 0) always survives the
-/// threshold, whatever its magnitude. A group's mean brightness is
-/// signal, not something a noise threshold should be able to zero out.
+/// The one coefficient that is both the group average and the patch's
+/// spatial DC always survives the threshold, whatever its magnitude. A
+/// group's mean brightness is signal, not something a noise threshold
+/// should be able to zero out.
 ///
 /// # Group weight
 ///
@@ -256,13 +220,14 @@ pub(crate) const MEMBER_SIGMA2_CAP: f32 = 64.0;
 /// by `dct_profile[u] * dct_profile[v]` before the threshold reads it.
 /// At `rho = 0` every entry is `1.0` and the multiply is a no-op.
 ///
-/// `use_member_sigma` folds each temporal member's mismatch variance
-/// into its own noise variance. False leaves every member on the plain
-/// `sigma[c]^2`.
+/// `grid_frames` is the frames per volume, from
+/// [grid_frames](crate::collab::grid_frames). At 1 the grid compiles out
+/// and every group is a single-frame one.
 ///
 /// # Warp-uniform search
 ///
-/// `warp_uniform` decides how the two candidate searches are walked.
+/// `warp_uniform` decides how the spatial and trajectory searches are
+/// walked.
 ///
 /// Both searches are group-scoped work: each 8-lane group owns one
 /// reference patch, and every distance is completed by a shuffle across
@@ -278,11 +243,11 @@ pub(crate) const MEMBER_SIGMA2_CAP: f32 = 64.0;
 /// deadlocks and the launch never retires a frame.
 ///
 /// Setting `warp_uniform` walks fixed, comptime-sized rectangles
-/// instead and masks the positions falling outside the clipped one, so
-/// every group in a warp takes the same number of turns through the
-/// same shuffles. The masked turns score nothing: a candidate that is
-/// not live carries the same `3.0e38` an unfilled slot holds, so it can
-/// never displace one.
+/// instead, in both searches, and masks every position the other walk
+/// skips, whether clipped, gated, already scored or already claimed.
+/// Every group in a warp then takes the same number of turns through the
+/// same shuffles. A masked turn carries the same `3.0e38` an unfilled slot
+/// holds, so it can never displace one.
 ///
 /// The candidates that do score, and the order they are offered in, are
 /// exactly the ones the unset path visits, so both settings produce the
@@ -293,13 +258,7 @@ pub(crate) const MEMBER_SIGMA2_CAP: f32 = 64.0;
 ///
 /// # Compilation cost
 ///
-/// The group stays in registers because the transform loops unroll
-/// fully rather than looping at run time. That unrolling is expensive
-/// to compile, the unrolled IR is 6,513 instructions for the luma
-/// variant and 11,903 for the chroma variant, and cubecl spends about
-/// 9.5 s compiling the two of them at startup. That cost is the price
-/// of the register-resident design, not a bug to fix by shrinking the
-/// unroll.
+/// The transforms unroll fully, which keeps the whole group in registers.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
@@ -323,15 +282,13 @@ pub fn collab_fused<N: Size>(
     wsum: &mut Array<Atomic<i32>>,
     group_weight: &mut Array<f32>,
     centre_slot: u32,
-    noise_floor: f32,
     c_min: f32,
-    mismatch_scale2: f32,
     lambda_ht: f32,
     weight_scale: f32,
     accum_scale: f32,
-    #[comptime] use_member_sigma: bool,
     #[comptime] warp_uniform: bool,
     #[comptime] radius: u32,
+    #[comptime] grid_frames: u32,
     #[comptime] refine: u32,
     #[comptime] mv_stride: u32,
     #[comptime] conf_stride: u32,
@@ -395,22 +352,9 @@ pub fn collab_fused<N: Size>(
     // difference.
     let scale = channel_scale(channels);
 
-    // The blocks a temporal candidate reads its motion vectors and
-    // confidences from depend only on `rx` and `ry`, which are the same
-    // for every candidate this group scores, so the range is worked out
-    // once. The corner block, the one the patch's own top-left pixel
-    // sits in, is `(bx_hi, by_hi)`, and a range whose low end equals its
-    // high end searches that block alone.
-    let bx_hi = (rx / blk_step).min(blocks_x - 1);
-    let by_hi = (ry / blk_step).min(blocks_y - 1);
-    let bx_lo = u32::min(covering_lo(rx, blksize, blk_step), bx_hi);
-    let by_lo = u32::min(covering_lo(ry, blksize, blk_step), by_hi);
-
-    // The number of positions actually scored, which fixes the group
-    // size below. Rectangles in different frames cannot collide, and
-    // within a frame a repeated position is counted once, so every
-    // increment is a distinct position.
-    let mut n_live = spatial_search(
+    // The number of positions the spatial rectangle holds, which fixes the fallback group size
+    // below.
+    let n_live = spatial_search(
         ring,
         &current,
         rx,
@@ -419,7 +363,6 @@ pub fn collab_fused<N: Size>(
         sub,
         base,
         scale,
-        noise_floor,
         &mut best_d,
         &mut best_pos,
         warp_uniform,
@@ -429,204 +372,6 @@ pub fn collab_fused<N: Size>(
         channels,
     );
 
-    // One clipped rectangle per covering block per neighbour, around
-    // that block's motion-predicted centre.
-    let n_neighbours = comptime!(2 * radius);
-    // The widest block range `covering_lo` can produce on one axis, so
-    // the block loops unroll and every `seen_*` index is a constant.
-    let covers = comptime!(blksize.div_ceil(blk_step));
-    let max_rects = comptime!(covers * covers);
-    let mut t = 0u32;
-    while t < n_neighbours {
-        let slot = neighbour_slots[t as usize];
-        // `t + 1` is the neighbour field's value, one past the centre
-        // frame's 0. The module-level assert above bounds it well inside
-        // the six bits `pack_pos_t` gives it.
-        let packed_t = t + 1u32;
-
-        // The rectangles already searched for this neighbour, one slot
-        // per covering block in visiting order. A slot starts empty,
-        // `left` above `right`, which no position matches, so a slot
-        // whose block the scan has not reached yet hides nothing and a
-        // block the range or `c_min` skips leaves its slot empty.
-        let mut seen_left = Array::<u32>::new(max_rects as usize);
-        let mut seen_right = Array::<u32>::new(max_rects as usize);
-        let mut seen_top = Array::<u32>::new(max_rects as usize);
-        let mut seen_bot = Array::<u32>::new(max_rects as usize);
-        #[unroll]
-        for s in 0..max_rects {
-            seen_left[s as usize] = 1u32;
-            seen_right[s as usize] = 0u32;
-            seen_top[s as usize] = 1u32;
-            seen_bot[s as usize] = 0u32;
-        }
-
-        #[unroll]
-        for iy in 0..covers {
-            #[unroll]
-            for ix in 0..covers {
-                let wanted_bx = bx_lo + ix;
-                let wanted_by = by_lo + iy;
-                let block_live = wanted_bx <= bx_hi && wanted_by <= by_hi;
-
-                if warp_uniform {
-                    // Both the block range and the `c_min` test decide
-                    // per group, so neither can gate a shuffle here.
-                    // The block is pinned into range, read either way,
-                    // and what it found is folded into `live_pos` below.
-                    let cbx = u32::min(wanted_bx, bx_hi);
-                    let cby = u32::min(wanted_by, by_hi);
-                    let block = cby * blocks_x + cbx;
-                    let conf = confidence[(t * conf_stride + block) as usize];
-                    let block_scored = block_live && conf >= c_min;
-
-                    let mv = (t * mv_stride + block * 2u32) as usize;
-                    let px0 = rx as i32 + mv_field[mv];
-                    let py0 = ry as i32 + mv_field[mv + 1];
-
-                    let t_left = clamp_top_left(px0 - refine as i32, max_x);
-                    let t_right = clamp_top_left(px0 + refine as i32, max_x);
-                    let t_top = clamp_top_left(py0 - refine as i32, max_y);
-                    let t_bot = clamp_top_left(py0 + refine as i32, max_y);
-
-                    let span = comptime!(2 * refine + 1);
-                    for dy in 0..span {
-                        for dx in 0..span {
-                            let wanted_y = t_top + dy;
-                            let wanted_x = t_left + dx;
-                            let in_rect = wanted_x <= t_right && wanted_y <= t_bot;
-                            let nx = u32::min(wanted_x, t_right);
-                            let ny = u32::min(wanted_y, t_bot);
-
-                            let mut covered = false;
-                            #[unroll]
-                            for s in 0..max_rects {
-                                if nx >= seen_left[s as usize]
-                                    && nx <= seen_right[s as usize]
-                                    && ny >= seen_top[s as usize]
-                                    && ny <= seen_bot[s as usize]
-                                {
-                                    covered = true;
-                                }
-                            }
-
-                            let live_pos = block_scored && in_rect && !covered;
-                            if live_pos {
-                                n_live += 1u32;
-                            }
-
-                            let scored = candidate_distance(
-                                ring,
-                                &current,
-                                nx,
-                                ny,
-                                slot,
-                                sub,
-                                scale,
-                                noise_floor,
-                                width,
-                                height,
-                                channels,
-                            );
-                            shift_insert8(
-                                &mut best_d,
-                                &mut best_pos,
-                                select(live_pos, scored, 3.0e38f32),
-                                pack_pos_t(nx, ny, packed_t),
-                                sub,
-                            );
-                        }
-                    }
-
-                    // A block the range or `c_min` skipped has to leave
-                    // its slot empty, the way the other path leaves it
-                    // untouched, or it would hide positions a later
-                    // block still owes the search.
-                    seen_left[(iy * covers + ix) as usize] = select(block_scored, t_left, 1u32);
-                    seen_right[(iy * covers + ix) as usize] = select(block_scored, t_right, 0u32);
-                    seen_top[(iy * covers + ix) as usize] = select(block_scored, t_top, 1u32);
-                    seen_bot[(iy * covers + ix) as usize] = select(block_scored, t_bot, 0u32);
-                } else {
-                    let cbx = wanted_bx;
-                    let cby = wanted_by;
-                    if block_live {
-                        let block = cby * blocks_x + cbx;
-                        let conf = confidence[(t * conf_stride + block) as usize];
-                        // Uniform across the group, because `block` is, so a
-                        // skipped block costs no lane its share of the
-                        // reduction. No barrier sits inside this branch
-                        // either, so a group that skips a block a
-                        // neighbouring group scores strands nothing.
-                        if conf >= c_min {
-                            let mv = (t * mv_stride + block * 2u32) as usize;
-                            let px0 = rx as i32 + mv_field[mv];
-                            let py0 = ry as i32 + mv_field[mv + 1];
-
-                            let t_left = clamp_top_left(px0 - refine as i32, max_x);
-                            let t_right = clamp_top_left(px0 + refine as i32, max_x);
-                            let t_top = clamp_top_left(py0 - refine as i32, max_y);
-                            let t_bot = clamp_top_left(py0 + refine as i32, max_y);
-
-                            let mut ny = t_top;
-                            while ny <= t_bot {
-                                let mut nx = t_left;
-                                while nx <= t_right {
-                                    let mut covered = false;
-                                    #[unroll]
-                                    for s in 0..max_rects {
-                                        if nx >= seen_left[s as usize]
-                                            && nx <= seen_right[s as usize]
-                                            && ny >= seen_top[s as usize]
-                                            && ny <= seen_bot[s as usize]
-                                        {
-                                            covered = true;
-                                        }
-                                    }
-                                    if !covered {
-                                        n_live += 1u32;
-                                        let dist = candidate_distance(
-                                            ring,
-                                            &current,
-                                            nx,
-                                            ny,
-                                            slot,
-                                            sub,
-                                            scale,
-                                            noise_floor,
-                                            width,
-                                            height,
-                                            channels,
-                                        );
-                                        shift_insert8_gated(
-                                            &mut best_d,
-                                            &mut best_pos,
-                                            dist,
-                                            pack_pos_t(nx, ny, packed_t),
-                                            sub,
-                                            base,
-                                        );
-                                    }
-                                    nx += 1u32;
-                                }
-                                ny += 1u32;
-                            }
-
-                            seen_left[(iy * covers + ix) as usize] = t_left;
-                            seen_right[(iy * covers + ix) as usize] = t_right;
-                            seen_top[(iy * covers + ix) as usize] = t_top;
-                            seen_bot[(iy * covers + ix) as usize] = t_bot;
-                        }
-                    }
-                }
-            }
-        }
-
-        t += 1u32;
-    }
-
-    // Retire the group. Lane `i` holds member `i`, so one broadcast per
-    // member hands every lane every position, once for the whole filter
-    // rather than once per channel.
     let ref_idx = CUBE_POS_Y * refs_x + ref_x_clamped;
 
     let mut k_use = 1u32;
@@ -634,58 +379,113 @@ pub fn collab_fused<N: Size>(
         k_use *= 2u32;
     }
 
-    // Where each member sits, which frame it sits in, and the extra
-    // variance its motion block's confidence implies. All three come out
-    // of the one packed word, once, before the channel loop.
-    //
-    // The frame is picked with [`select`] rather than a branch. A frame
-    // index that reaches [`read_line`] through a branch trips a bug in
-    // cubecl 0.10's global value numbering, which panics while compiling
-    // the shader and leaves the launch to do nothing at all.
+    // The single-frame group, which is also the fallback. Lane `i` holds member `i`.
     let mut member_pos = Array::<u32>::new(MAX_K as usize);
-    let mut member_slot = Array::<u32>::new(MAX_K as usize);
-    let mut member_sig2 = Array::<f32>::new(MAX_K as usize);
+    let mut member_d = Array::<f32>::new(MAX_K as usize);
     #[unroll]
     for m in 0..MAX_K {
-        let packed = plane_shuffle(best_pos, base + m);
-        let mt = unpack_t(packed);
-        // Clamped so the read below stays in range for a centre-frame
-        // member, whose value `select` then discards. The clamp lands on
-        // index 0, so it needs `neighbour_slots` to hold at least one
-        // entry. That is what every caller actually supplies, including
-        // `radius = 0` launches such as `Setup::spatial_only` and the
-        // standalone launch documented at `nl4d::tests::pipeline`,
-        // which still pass a one-element `neighbour_slots` even though
-        // there is no real neighbour to read.
-        let n = u32::max(mt, 1u32) - 1u32;
-        member_pos[m as usize] = packed;
-        member_slot[m as usize] = select(mt > 0u32, neighbour_slots[n as usize], centre_slot);
+        member_pos[m as usize] = plane_shuffle(best_pos, base + m);
+        member_d[m as usize] = 0.0f32;
+    }
 
-        let mut sig2 = 0.0f32;
-        if use_member_sigma {
-            if warp_uniform {
-                // `mt` is the member's own frame, so this test decides
-                // per member and per group, and the broadcast under it
-                // is warp-wide once CUDA has lowered it. Reading the
-                // distance first and discarding it afterwards keeps
-                // every lane on the same broadcast; `select` is what
-                // makes a centre-frame member ignore what it read.
-                let excess = f32::max(plane_shuffle(best_d, base + m), 0.0f32);
-                let mismatch = mismatch_scale2 * excess / comptime!(3 * PATCH_AREA) as f32;
-                sig2 = select(mt > 0u32, mismatch, 0.0f32);
-            } else {
-                // A centre-frame member is not motion-predicted, so there is
-                // no mismatch to model and it keeps the plain `sigma^2`.
-                if mt > 0u32 {
-                    // The member's own distance, floor removed, in the search's
-                    // three-channel-sum units. Per channel and per pixel that
-                    // is the mean square of its mismatch.
-                    let excess = f32::max(plane_shuffle(best_d, base + m), 0.0f32);
-                    sig2 = mismatch_scale2 * excess / comptime!(3 * PATCH_AREA) as f32;
+    let mut use_grid = false;
+    if comptime!(grid_frames > 1 && k_max == MAX_K) {
+        let volumes = comptime!(MAX_K / grid_frames);
+        let tail = comptime!(grid_frames - 1);
+
+        let mut grid_pos = Array::<u32>::new(MAX_K as usize);
+        let mut grid_d = Array::<f32>::new(MAX_K as usize);
+
+        #[unroll]
+        for volume in 0..volumes {
+            let first = comptime!(volume * grid_frames);
+            let anchor_packed = member_pos[volume as usize];
+            let anchor_x = anchor_packed & 0x1FFFu32;
+            let anchor_y = (anchor_packed >> 13u32) & 0x1FFFu32;
+
+            grid_pos[first as usize] = anchor_packed;
+            grid_d[first as usize] = 0.0f32;
+            #[unroll]
+            for j in 0..tail {
+                grid_pos[comptime!(first + 1 + j) as usize] = 0u32;
+                grid_d[comptime!(first + 1 + j) as usize] = 3.0e38f32;
+            }
+
+            let mut anchor = Array::<f32>::new(comptime!(PATCH_SIZE * channels) as usize);
+            #[unroll]
+            for r in 0..PATCH_SIZE {
+                let px = read_line(ring, anchor_x + sub, anchor_y + r, centre_slot, width, height);
+                #[unroll]
+                for c in 0..channels {
+                    anchor[(r * channels + c) as usize] = px[c as usize];
                 }
             }
+
+            trajectory_search(
+                ring,
+                mv_field,
+                confidence,
+                neighbour_slots,
+                &anchor,
+                anchor_x,
+                anchor_y,
+                sub,
+                scale,
+                c_min,
+                &mut grid_d,
+                &mut grid_pos,
+                comptime!(first + 1),
+                tail,
+                warp_uniform,
+                radius,
+                refine,
+                mv_stride,
+                conf_stride,
+                blk_step,
+                blksize,
+                blocks_x,
+                blocks_y,
+                width,
+                height,
+                channels,
+            );
         }
-        member_sig2[m as usize] = sig2;
+
+        // A grid needs a full spatial search for its anchors and every volume's last frame
+        // filled. The list is ascending, so a filled last slot means the whole volume is.
+        use_grid = k_use == MAX_K;
+        #[unroll]
+        for volume in 0..volumes {
+            let last = comptime!(volume * grid_frames + tail) as usize;
+            use_grid = use_grid && grid_d[last] < 1.0e38f32;
+        }
+
+        #[unroll]
+        for m in 0..MAX_K {
+            member_pos[m as usize] = select(use_grid, grid_pos[m as usize], member_pos[m as usize]);
+            member_d[m as usize] = select(use_grid, grid_d[m as usize], member_d[m as usize]);
+        }
+        k_use = select(use_grid, MAX_K, k_use);
+    }
+
+    // The frame each member sits in, from its packed word, once before the channel loop.
+    //
+    // The frame is picked with [`select`] rather than a branch. A frame index that reaches
+    // [`read_line`] through a branch trips a bug in cubecl 0.10's global value numbering, which
+    // panics while compiling the shader and leaves the launch to do nothing at all.
+    let mut member_slot = Array::<u32>::new(MAX_K as usize);
+    #[unroll]
+    for m in 0..MAX_K {
+        let packed = member_pos[m as usize];
+        let mt = unpack_t(packed);
+        // Clamped so the read below stays in range for a centre-frame member, whose value
+        // `select` then discards. The clamp lands on index 0, so it needs `neighbour_slots` to
+        // hold at least one entry. That is what every caller actually supplies, including
+        // `radius = 0` launches such as `Setup::spatial_only` and the standalone launch
+        // documented at `nl4d::tests::pipeline`, which still pass a one-element
+        // `neighbour_slots` even though there is no real neighbour to read.
+        let neighbour = u32::max(mt, 1u32) - 1u32;
+        member_slot[m as usize] = select(mt > 0u32, neighbour_slots[neighbour as usize], centre_slot);
     }
 
     // The correlation profile is separable and the same for every
@@ -714,11 +514,7 @@ pub fn collab_fused<N: Size>(
             let mx = packed & 0x1FFFu32;
             let my = (packed >> 13u32) & 0x1FFFu32;
             let src_slot = member_slot[m as usize];
-            // Capped against this channel's own variance, so the
-            // retained sum stays within a known factor of the smallest
-            // one `weight_scale` normalises by. See `MEMBER_SIGMA2_CAP`.
-            let extra = f32::min(member_sig2[m as usize], MEMBER_SIGMA2_CAP * base_sig2);
-            v[m as usize] = base_sig2 + extra;
+            v[m as usize] = base_sig2;
             #[unroll]
             for r in 0..PATCH_SIZE {
                 let px = read_line(ring, mx + sub, my + r, src_slot, width, height);
@@ -730,14 +526,14 @@ pub fn collab_fused<N: Size>(
         // per-stack-level variance. The spatial profile is a constant
         // factor across the stack axis and the ladder only averages, so
         // it multiplies in at the threshold instead of here.
-        if k_use >= 8u32 {
-            variance_reg_level(&mut v, 8u32);
-        }
-        if k_use >= 4u32 {
-            variance_reg_level(&mut v, 4u32);
-        }
-        if k_use >= 2u32 {
-            variance_reg_level(&mut v, 2u32);
+        if comptime!(grid_frames > 1) {
+            if use_grid {
+                grid_variance(&mut v, grid_frames);
+            } else {
+                stack_variance_ladder(&mut v, k_use);
+            }
+        } else {
+            stack_variance_ladder(&mut v, k_use);
         }
 
         // 2D DCT forward, independently for each member's patch. The
@@ -764,14 +560,14 @@ pub fn collab_fused<N: Size>(
         // Haar transform along the stack axis, at each of the lane's
         // eight spatial positions. A lane owns every member at every
         // position it holds, so nothing crosses lanes here.
-        if k_use >= 8u32 {
-            haar_reg_fwd_level(&mut stack, 8u32);
-        }
-        if k_use >= 4u32 {
-            haar_reg_fwd_level(&mut stack, 4u32);
-        }
-        if k_use >= 2u32 {
-            haar_reg_fwd_level(&mut stack, 2u32);
+        if comptime!(grid_frames > 1) {
+            if use_grid {
+                grid_fwd(&mut stack, grid_frames);
+            } else {
+                stack_haar_fwd(&mut stack, k_use);
+            }
+        } else {
+            stack_haar_fwd(&mut stack, k_use);
         }
 
         // Hard threshold, and the group-DC exception described above.
@@ -820,9 +616,6 @@ pub fn collab_fused<N: Size>(
             // in. Aggregation normalises by the weight sum, so scaling
             // every weight by the same constant leaves the result
             // exactly as it would have been.
-            //
-            // The band's lower bound is what `MEMBER_SIGMA2_CAP` exists
-            // to restore, see its doc.
             gw = w * weight_scale;
         }
 
@@ -830,14 +623,14 @@ pub fn collab_fused<N: Size>(
         // coefficients, then the spatial inverse in the opposite order
         // to the forward pass. The lane holds a column again by the end
         // of it, which is what makes the scatter below coalesced.
-        if k_use >= 2u32 {
-            haar_reg_inv_level(&mut stack, 2u32);
-        }
-        if k_use >= 4u32 {
-            haar_reg_inv_level(&mut stack, 4u32);
-        }
-        if k_use >= 8u32 {
-            haar_reg_inv_level(&mut stack, 8u32);
+        if comptime!(grid_frames > 1) {
+            if use_grid {
+                grid_inv(&mut stack, grid_frames);
+            } else {
+                stack_haar_inv(&mut stack, k_use);
+            }
+        } else {
+            stack_haar_inv(&mut stack, k_use);
         }
 
         #[unroll]
@@ -890,5 +683,47 @@ pub fn collab_fused<N: Size>(
                 }
             }
         }
+    }
+}
+
+/// The stack variance ladder for a single-frame group of `k_use` members.
+#[cube]
+fn stack_variance_ladder(v: &mut Array<f32>, k_use: u32) {
+    if k_use >= 8u32 {
+        variance_reg_level(v, 8u32);
+    }
+    if k_use >= 4u32 {
+        variance_reg_level(v, 4u32);
+    }
+    if k_use >= 2u32 {
+        variance_reg_level(v, 2u32);
+    }
+}
+
+/// The stack Haar for a single-frame group of `k_use` members.
+#[cube]
+fn stack_haar_fwd(stack: &mut Array<f32>, k_use: u32) {
+    if k_use >= 8u32 {
+        haar_reg_fwd_level(stack, 8u32);
+    }
+    if k_use >= 4u32 {
+        haar_reg_fwd_level(stack, 4u32);
+    }
+    if k_use >= 2u32 {
+        haar_reg_fwd_level(stack, 2u32);
+    }
+}
+
+/// The inverse of [stack_haar_fwd].
+#[cube]
+fn stack_haar_inv(stack: &mut Array<f32>, k_use: u32) {
+    if k_use >= 2u32 {
+        haar_reg_inv_level(stack, 2u32);
+    }
+    if k_use >= 4u32 {
+        haar_reg_inv_level(stack, 4u32);
+    }
+    if k_use >= 8u32 {
+        haar_reg_inv_level(stack, 8u32);
     }
 }

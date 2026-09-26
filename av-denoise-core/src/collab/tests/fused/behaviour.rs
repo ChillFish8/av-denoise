@@ -1,6 +1,6 @@
 use super::{
+    Setup,
     cross_frame_setup,
-    flat_block,
     flat_noise_setup,
     output_variance,
     patch_pool_variance,
@@ -8,12 +8,11 @@ use super::{
     run_fused,
     three_frame_ring_with_a_planted_match,
     unique_frame,
-    Setup,
 };
+use crate::collab::STEP;
 use crate::collab::geometry::refs_along;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::tests::helpers::{deterministic_texture, plant_patch};
-use crate::collab::STEP;
 
 /// At `sigma = 0` every threshold is zero, so nothing is discarded and
 /// the transform chain must hand every member's own pixels back
@@ -52,75 +51,60 @@ fn zero_sigma_hands_every_member_back_unchanged() {
     }
 }
 
-/// A temporal member's mismatch variance has no relation to the channel
-/// sigma the group weight is normalised against, so a badly matched
-/// group has no lower bound on its weight (see
-/// [crate::collab::kernels::aggregate::weight_scale]). Push that
-/// variance up far enough and the weight stops being representable at
-/// all, and a group that reaches the accumulators as nothing leaves a
-/// covered pixel with an empty weight sum, which normalisation can only
-/// render as black.
+/// A covered pixel never ends with an empty weight sum, even when every neighbour holds content
+/// unrelated to the centre.
 ///
-/// Every neighbour here holds content unrelated to the centre, so every
-/// temporal member's distance is large, and `mismatch_scale` multiplies
-/// the variance it implies. The last rungs run it so far past
-/// [crate::collab::kernels::fused::MEMBER_SIGMA2_CAP] that only the cap
-/// is holding the weight inside the fixed point at all.
+/// A group that reached the accumulators as nothing would leave such a pixel, which normalisation
+/// can only render as black.
 #[test]
 fn a_badly_matched_group_still_reaches_the_accumulators() {
     let (w, h) = (32u32, 32u32);
     let counts = reference_cover_counts(w, h);
 
-    for scale in [1.0f32, 8.0, 32.0, 64.0] {
-        let mut s = cross_frame_setup(w, h, 2);
-        s.spatial_radius = 9;
-        s.c_min = 0.0;
-        s.mismatch_scale = scale;
+    let mut s = cross_frame_setup(w, h, 2);
+    s.spatial_radius = 9;
+    s.c_min = 0.0;
 
-        let got = run_fused(&s);
-        let base = s.centre_slot as usize * s.pixels();
-        for (idx, &count) in counts.iter().enumerate() {
-            if count == 0 {
-                continue;
-            }
-            assert!(
-                got.wsum[base + idx] > 0,
-                "mismatch scale {scale}: {count} references cover pixel {idx} and its weight \
-                 sum is still {}",
-                got.wsum[base + idx],
-            );
+    let got = run_fused(&s);
+    let base = s.centre_slot as usize * s.pixels();
+    for (idx, &count) in counts.iter().enumerate() {
+        if count == 0 {
+            continue;
         }
+        assert!(
+            got.wsum[base + idx] > 0,
+            "{count} references cover pixel {idx} and its weight sum is still {}",
+            got.wsum[base + idx],
+        );
     }
 }
 
-/// A patch corner is weighted by the square of the window's end tap,
-/// `0.193` at `beta = 2`, so the smallest weight the fixed point has to
-/// resolve drops about fivefold against the uniform case.
+/// The same invariant with the aggregation window on.
+///
+/// A patch corner is weighted by the square of the window's end tap, `0.193` at `beta = 2`, so the
+/// smallest weight the fixed point has to resolve drops about fivefold against the uniform case.
 #[test]
 fn a_windowed_badly_matched_group_still_reaches_the_accumulators() {
     let (w, h) = (32u32, 32u32);
     let counts = reference_cover_counts(w, h);
 
-    for scale in [1.0f32, 8.0, 32.0, 64.0] {
-        let mut s = cross_frame_setup(w, h, 2);
-        s.spatial_radius = 9;
-        s.c_min = 0.0;
-        s.mismatch_scale = scale;
-        s.kaiser_beta = 2.0;
+    let mut s = cross_frame_setup(w, h, 2);
+    s.spatial_radius = 9;
+    s.c_min = 0.0;
+    s.kaiser_beta = 2.0;
 
-        let got = run_fused(&s);
-        let base = s.centre_slot as usize * s.pixels();
-        for (idx, &count) in counts.iter().enumerate() {
-            if count == 0 {
-                continue;
-            }
-            assert!(
-                got.wsum[base + idx] > 0,
-                "mismatch scale {scale}: {count} references cover pixel {idx} and its weight \
-                 sum is still {} with the window on",
-                got.wsum[base + idx],
-            );
+    let got = run_fused(&s);
+    let base = s.centre_slot as usize * s.pixels();
+    for (idx, &count) in counts.iter().enumerate() {
+        if count == 0 {
+            continue;
         }
+        assert!(
+            got.wsum[base + idx] > 0,
+            "{count} references cover pixel {idx} and its weight sum is still {} with the \
+             window on",
+            got.wsum[base + idx],
+        );
     }
 }
 
@@ -213,69 +197,6 @@ fn group_size_rounds_down_to_a_power_of_two() {
     );
 }
 
-/// A subtracted noise floor is never clamped at zero, so it shifts every
-/// candidate equally and changes nothing.
-///
-/// Four flat blocks sit at four widely separated distances from a flat
-/// reference block, all of them far below the floor this run uses. If
-/// the kernel clamped, all four would collapse onto the same `0.0`,
-/// every insert would be a tie, and the first candidate raster order
-/// reached would win instead of the closest one. The blocks are placed
-/// so raster order reaches them worst-first, so a clamp would keep the
-/// worst and drop the best.
-///
-/// The whole output is compared rather than a member list, because a
-/// changed member set moves both the filtered pixels and the group
-/// weight.
-#[test]
-fn a_noise_floor_shifts_every_distance_equally() {
-    let (w, h) = (64u32, 64u32);
-    let (rx, ry) = (40u32, 40u32);
-    let ref_value = 0.7f32;
-
-    // The background sits far from every planted block, so any 8x8
-    // window carrying even one background pixel scores hundreds and
-    // cannot compete for a slot.
-    let mut frame = vec![0.05f32; (w * h) as usize];
-    flat_block(&mut frame, w, rx, ry, ref_value);
-    // Raster order reaches these worst-first, which is the order a
-    // clamped distance would keep them in.
-    flat_block(&mut frame, w, rx - 8, ry - 16, ref_value + 0.15);
-    flat_block(&mut frame, w, rx + 8, ry - 16, ref_value + 0.01);
-    flat_block(&mut frame, w, rx - 8, ry + 16, ref_value + 0.02);
-    flat_block(&mut frame, w, rx + 8, ry + 16, ref_value + 0.03);
-
-    let mut without = Setup::spatial_only(frame.clone(), w, h);
-    without.spatial_radius = 16;
-    without.k_max = 4;
-    let mut with = Setup::spatial_only(frame, w, h);
-    with.spatial_radius = 16;
-    with.k_max = 4;
-    // Every planted distance is under 4.4, so this floor drives all four
-    // of them negative.
-    with.noise_floor = 10.0;
-
-    let without = run_fused(&without);
-    let with = run_fused(&with);
-
-    assert!(
-        without.group_weight.iter().any(|&w| w != 0.0),
-        "the kernel must actually have written output for this comparison to mean anything"
-    );
-    assert_eq!(
-        without.group_weight, with.group_weight,
-        "a noise floor must leave every group weight exactly where it was"
-    );
-    assert_eq!(
-        without.accum, with.accum,
-        "a noise floor must leave the accumulator exactly where it was"
-    );
-    assert_eq!(
-        without.wsum, with.wsum,
-        "a noise floor must leave the weight sum exactly where it was"
-    );
-}
-
 /// A group that finds a genuine twin agrees with itself, and a group
 /// that does not carries far more detail into the threshold.
 ///
@@ -332,30 +253,32 @@ fn a_planted_twin_is_found() {
 /// the accumulator ring stays untouched.
 ///
 /// The confidence field is uniform per neighbour here, so the skip is
-/// the same decision for every group in the frame. A slot that received
-/// even one member would show a non-zero weight sum.
+/// the same decision for every group in the frame. Both neighbours hold
+/// an exact copy, so neighbour 0 wins every tie. Gating it is what moves
+/// every volume's match onto neighbour 1, and a slot that received even
+/// one member would show a non-zero weight sum.
 #[test]
 fn a_gated_neighbour_receives_no_scatter() {
     let (w, h) = (64u32, 64u32);
     let mut s = three_frame_ring_with_a_planted_match(w, h);
     // Neighbour 0 is ring slot 0 and neighbour 1 is ring slot 2, so this
-    // gates the second of the two.
+    // gates the first of the two.
     let blocks = s.conf_stride as usize;
-    s.confidence[..blocks].fill(1.0);
-    s.confidence[blocks..].fill(0.0);
+    s.confidence[..blocks].fill(0.0);
+    s.confidence[blocks..].fill(1.0);
     s.c_min = 0.5;
 
     let got = run_fused(&s);
 
-    assert!(
-        got.frame_weight_sum(0) > 0,
-        "the ungated neighbour's slot received nothing"
-    );
-    assert!(got.frame_weight_sum(1) > 0, "the centre slot received nothing");
     assert_eq!(
-        got.frame_weight_sum(2),
+        got.frame_weight_sum(0),
         0,
         "the gated neighbour's slot must receive no scatter at all"
+    );
+    assert!(got.frame_weight_sum(1) > 0, "the centre slot received nothing");
+    assert!(
+        got.frame_weight_sum(2) > 0,
+        "the ungated neighbour's slot received nothing"
     );
 }
 
@@ -514,44 +437,24 @@ fn higher_rho_retains_more_noise_on_a_flat_field() {
     );
 }
 
-/// A centre-frame member never picks up a mismatch variance.
+/// At radius 1 each volume keeps one neighbour frame, and the first-listed neighbour wins a tie.
 ///
-/// Every neighbour here is gated out by `c_min`, so every member of
-/// every group comes from the centre frame. Turning `confidence_variance`
-/// on must therefore change nothing at all. A kernel that computed a
-/// mismatch variance for a centre-frame member would inflate every
-/// threshold in the frame and move every pixel.
+/// Both neighbours hold an exact copy of the centre, so every volume's two candidates tie at zero
+/// and slot 0, neighbour 0, takes every match. A radius-1 group falling back to a single frame
+/// would leave slot 0 empty as well.
 #[test]
-fn centre_frame_members_ignore_the_confidence_field() {
-    let (w, h) = (64u32, 64u32);
-    let mut off = three_frame_ring_with_a_planted_match(w, h);
-    off.confidence.fill(0.0);
-    off.c_min = 0.5;
-    off.confidence_variance = false;
-    let mut on = three_frame_ring_with_a_planted_match(w, h);
-    on.confidence.fill(0.0);
-    on.c_min = 0.5;
-    on.confidence_variance = true;
-
-    let off = run_fused(&off);
-    let on = run_fused(&on);
+fn radius_one_keeps_one_neighbour_per_volume() {
+    let s = three_frame_ring_with_a_planted_match(64, 64);
+    let got = run_fused(&s);
 
     assert!(
-        off.group_weight.iter().any(|&w| w != 0.0),
-        "the kernel must actually have written output for this comparison to mean anything"
+        got.frame_weight_sum(0) > 0,
+        "neighbour 0 must hold every volume's frame"
     );
+    assert!(got.frame_weight_sum(1) > 0, "the centre slot received nothing");
     assert_eq!(
-        off.frame_weight_sum(0),
+        got.frame_weight_sum(2),
         0,
-        "both neighbours must be gated for this to test centre-frame members"
-    );
-    assert_eq!(off.frame_weight_sum(2), 0, "both neighbours must be gated");
-    assert_eq!(
-        off.group_weight, on.group_weight,
-        "the mismatch variance must not reach a centre-frame member"
-    );
-    assert_eq!(
-        off.accum, on.accum,
-        "the mismatch variance must not reach a centre-frame member"
+        "a 2x4 volume keeps one neighbour, so the tied second neighbour must receive nothing"
     );
 }

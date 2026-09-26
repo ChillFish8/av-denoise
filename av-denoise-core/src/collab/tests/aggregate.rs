@@ -12,7 +12,7 @@ use crate::collab::kernels::aggregate::{
 };
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{PATCH_SIZE, needs_warp_uniform_search};
+use crate::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use crate::nlmeans::{BLOCK_X, BLOCK_Y};
 
 /// Runs [`collab_normalise`] over hand-built accumulators.
@@ -234,8 +234,6 @@ fn run_scatter_stage_windowed(
     let kaiser_buf = client.create_from_slice(f32::as_bytes(&kaiser_window(kaiser_beta)));
     let output = client.empty(pixels * size_of::<f32>());
 
-    let floor = 2.0 * 3.0 * sigma * sigma * 64.0;
-
     let zero_dim = 256u32;
     unsafe {
         let zero_grid = (pixels as u32).div_ceil(zero_dim);
@@ -266,15 +264,13 @@ fn run_scatter_stage_windowed(
             ArrayArg::from_raw_parts(wsum.clone(), pixels),
             ArrayArg::from_raw_parts(group_weight, refs),
             0u32,
-            floor,
             0.0f32,
-            1.0f32,
             2.7f32,
             weight_scale(sigma, &profile),
             ACCUM_SCALE,
-            false,
             needs_warp_uniform_search(&client),
             0u32,
+            grid_frames(0),
             0u32,
             2u32,
             1u32,

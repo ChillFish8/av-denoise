@@ -131,7 +131,6 @@ fn variance_strided(
 /// Member `s * grid_frames + t` is frame `t` of volume `s`. Each volume is transformed along time,
 /// then every temporal coefficient is transformed across the volumes.
 #[cube]
-#[expect(dead_code, reason = "collab_fused adopts the grid in the next change")]
 pub(crate) fn grid_fwd(stack: &mut Array<f32>, #[comptime] grid_frames: u32) {
     let volumes = comptime!(MAX_K / grid_frames);
 
@@ -162,7 +161,6 @@ pub(crate) fn grid_fwd(stack: &mut Array<f32>, #[comptime] grid_frames: u32) {
 
 /// The inverse of [grid_fwd].
 #[cube]
-#[expect(dead_code, reason = "collab_fused adopts the grid in the next change")]
 pub(crate) fn grid_inv(stack: &mut Array<f32>, #[comptime] grid_frames: u32) {
     let volumes = comptime!(MAX_K / grid_frames);
 
@@ -193,7 +191,6 @@ pub(crate) fn grid_inv(stack: &mut Array<f32>, #[comptime] grid_frames: u32) {
 
 /// Propagates each member's variance to the coefficient it lands on under [grid_fwd].
 #[cube]
-#[expect(dead_code, reason = "collab_fused adopts the grid in the next change")]
 pub(crate) fn grid_variance(v: &mut Array<f32>, #[comptime] grid_frames: u32) {
     let volumes = comptime!(MAX_K / grid_frames);
 

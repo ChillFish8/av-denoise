@@ -13,12 +13,12 @@ use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{PATCH_AREA, PATCH_SIZE, STEP, needs_warp_uniform_search};
+use crate::collab::{PATCH_SIZE, STEP, grid_frames, needs_warp_uniform_search};
+use crate::nlmeans::motion::neighbour_idx_for_k;
 
 /// The motion block side length these fixtures score confidence
 /// against, distinct from [`BLK_STEP`], which stays at `PATCH_SIZE` so
-/// a block boundary lines up with a patch boundary. The mismatch
-/// variance is scored against a member's own match distance instead.
+/// a block boundary lines up with a patch boundary.
 pub(super) const BLKSIZE: u32 = 16;
 
 const REFINE: u32 = 2;
@@ -31,21 +31,12 @@ struct Knobs {
     k_max: u32,
     sigma: f32,
     lambda_ht: f32,
-    mismatch_scale: f32,
-    /// Whether a temporal member's own match distance inflates its
-    /// noise variance. Every other test in this file relies on a
-    /// uniform `sigma^2` across the whole group, so this defaults off
-    /// and only the mismatch-variance test itself turns it on.
-    use_member_sigma: bool,
     /// Half-width of each neighbour's refine window, defaulting to the
     /// module's [`REFINE`].
     refine: u32,
-    /// The expected distance two noisy copies of the same content show
-    /// by chance, subtracted from a member's raw match distance before
-    /// it becomes mismatch variance. Every other test in this file
-    /// leaves this at `0.0`, so a member's raw distance passes through
-    /// unchanged.
-    noise_floor: f32,
+    /// Half-width of the centre frame's search window, defaulting to the
+    /// module's [SPATIAL_RADIUS].
+    spatial_radius: u32,
     /// The motion block side length, defaulting to the module's
     /// [`BLKSIZE`]. At [`BLK_STEP`] exactly one block covers a patch.
     blksize: u32,
@@ -58,10 +49,8 @@ impl Default for Knobs {
             k_max: K_MAX,
             sigma: 0.02,
             lambda_ht: 2.7,
-            mismatch_scale: 1.0,
-            use_member_sigma: false,
             refine: REFINE,
-            noise_floor: 0.0,
+            spatial_radius: SPATIAL_RADIUS,
             blksize: BLKSIZE,
         }
     }
@@ -138,15 +127,13 @@ fn run_fused_over(fx: &RingFixture, k: Knobs) -> FusedRun {
             ArrayArg::from_raw_parts(wsum.clone(), pixels * frames),
             ArrayArg::from_raw_parts(group_weight.clone(), refs),
             fx.centre_slot,
-            k.noise_floor,
             k.c_min,
-            k.mismatch_scale * k.mismatch_scale,
             k.lambda_ht,
             weight_scale(k.sigma, &profile),
-            cross_frame_accum_scale(SPATIAL_RADIUS, fx.radius),
-            k.use_member_sigma,
+            cross_frame_accum_scale(k.spatial_radius, fx.radius),
             needs_warp_uniform_search(&client),
             fx.radius,
+            grid_frames(fx.radius),
             k.refine,
             fx.mv_stride,
             fx.conf_stride,
@@ -159,7 +146,7 @@ fn run_fused_over(fx: &RingFixture, k: Knobs) -> FusedRun {
             1u32,
             k.k_max,
             1u32,
-            SPATIAL_RADIUS,
+            k.spatial_radius,
             refs_x,
         );
     }
@@ -220,17 +207,19 @@ fn temporal_members_are_found_at_the_mv_prediction() {
 /// The confidence is uniform across every block of a neighbour's plane
 /// here, so the skip is the same decision for every group in the frame
 /// and that neighbour's whole region of the accumulator ring has to stay
-/// exactly zero. A single admitted member anywhere would show up as a
-/// non-zero weight sum.
+/// exactly zero. The gated neighbour is k = -2, the first one searched,
+/// which wins every tie on this fixture. Gating one of four neighbours
+/// leaves every volume its three frames, so every other neighbour still
+/// receives members.
 #[test]
 fn low_confidence_neighbours_contribute_no_candidates() {
     let (w, h) = (96u32, 96u32);
     let radius = 2u32;
     let ref_pos = (64u32, 64u32);
     let patch = deterministic_texture(11);
-    // Confidence 0.0 for k = +1 and +2, 1.0 for k = -1 and -2.
+    // Confidence 0.0 for k = -2, 1.0 for every other neighbour.
     let fx = planted_ring(w, h, radius, ref_pos, 3, &patch, 0.2, |k| {
-        if k > 0 { 0.0 } else { 1.0 }
+        if k == -2 { 0.0 } else { 1.0 }
     });
 
     let run = run_fused_over(&fx, Knobs::default());
@@ -238,7 +227,7 @@ fn low_confidence_neighbours_contribute_no_candidates() {
     for k in -(radius as i32)..=(radius as i32) {
         let slot = (k + radius as i32) as u32;
         let weight = run.frame_weight_sum(slot);
-        if k > 0 {
+        if k == -2 {
             assert_eq!(
                 weight, 0,
                 "slot {slot} (k={k}) is gated by c_min, so it must receive no scatter at all"
@@ -249,6 +238,34 @@ fn low_confidence_neighbours_contribute_no_candidates() {
                 "slot {slot} (k={k}) is ungated, so it must receive members"
             );
         }
+    }
+}
+
+/// Gating two of four neighbours leaves every volume short of three frames, so every group falls
+/// back to a single frame and no neighbour slot receives any scatter.
+#[test]
+fn a_volume_short_of_frames_sends_the_group_to_the_fallback() {
+    let radius = 2u32;
+    let patch = deterministic_texture(11);
+    let fx = planted_ring(96, 96, radius, (64, 64), 3, &patch, 0.2, |k| {
+        if k > 0 { 0.0 } else { 1.0 }
+    });
+
+    let run = run_fused_over(&fx, Knobs::default());
+
+    assert!(
+        run.frame_weight_sum(fx.centre_slot) > 0,
+        "the centre slot received nothing"
+    );
+    for slot in 0..(2 * radius + 1) {
+        if slot == fx.centre_slot {
+            continue;
+        }
+        assert_eq!(
+            run.frame_weight_sum(slot),
+            0,
+            "slot {slot} must receive nothing once every group falls back"
+        );
     }
 }
 
@@ -299,159 +316,6 @@ fn no_admission_gate_means_the_group_always_fills() {
         one * K_MAX as i64,
         "expected every group to carry {K_MAX} members, so {K_MAX}x the weight the \
          one-member run deposited"
-    );
-}
-
-/// A temporal member's extra variance is its own match distance, per
-/// channel and per pixel, times the scale squared.
-///
-/// `planted_ring` puts exact copies of the reference patch in every
-/// neighbour. Adding a uniform offset `d` to each copy gives every
-/// temporal member the distance `3 * 64 * d^2` and so the variance
-/// `d^2 * scale^2`. With `lambda_ht` huge only the group DC survives,
-/// whose variance is the ladder's level 0, and the group weight is its
-/// reciprocal. `haar_variance_ladder` is the host mirror the GPU ladder
-/// is already pinned against.
-///
-/// The run uses `refine: 0`, which collapses each neighbour's window to
-/// its single motion-predicted position, exactly where `planted_ring`
-/// puts the copy. That makes the group composition exact — self, the
-/// four planted copies, and three centre-frame spatial members with no
-/// mismatch variance of their own — so the expected variance below can
-/// be written down at all. A wider window admits near-miss candidates
-/// that tie with genuine spatial ones and leak mismatch variance into
-/// what should be a clean baseline.
-#[test]
-fn a_temporal_member_carries_its_own_match_distance_as_variance() {
-    use crate::collab::kernels::transforms::haar_variance_ladder;
-
-    let (w, h) = (96u32, 96u32);
-    let radius = 2u32;
-    let ref_pos = (64u32, 64u32);
-    let patch = deterministic_texture(5);
-    let sigma = 0.02f32;
-    let refs_x = refs_along(w);
-    let ref_idx = ((ref_pos.1 / STEP) * refs_x + (ref_pos.0 / STEP)) as usize;
-
-    for (d, scale) in [(0.0f32, 1.0f32), (0.05, 1.0), (0.05, 2.0), (0.1, 1.0)] {
-        let mut fx = planted_ring(w, h, radius, ref_pos, 3, &patch, 0.2, |_| 1.0);
-        // Offset every neighbour copy by d. The neighbour slots are
-        // every slot but the centre.
-        let pixels = (w * h) as usize;
-        for slot in 0..(2 * radius + 1) {
-            if slot == fx.centre_slot {
-                continue;
-            }
-            let frame = &mut fx.ring[slot as usize * pixels..(slot as usize + 1) * pixels];
-            for v in frame.iter_mut() {
-                if *v > 0.5 {
-                    *v += d;
-                }
-            }
-        }
-
-        let run = run_fused_over(
-            &fx,
-            Knobs {
-                sigma,
-                lambda_ht: 1.0e6,
-                mismatch_scale: scale,
-                use_member_sigma: true,
-                refine: 0,
-                ..Knobs::default()
-            },
-        );
-
-        // Members sort by distance: self, then the four temporal
-        // copies at 3 * 64 * d^2 each, then three flat spatial patches.
-        let base = sigma * sigma;
-        let mut v = [base; 8];
-        for m in v.iter_mut().take(5).skip(1) {
-            *m = base + d * d * scale * scale;
-        }
-        let expected = 1.0 / haar_variance_ladder(&v, 8)[0];
-        let got = run.group_weight[ref_idx];
-        assert!(
-            (got - expected).abs() <= expected * 1e-3,
-            "d={d} scale={scale}: expected group weight {expected}, got {got}"
-        );
-    }
-}
-
-/// A non-zero `noise_floor` subtracts from a temporal member's raw
-/// match distance before it becomes variance, so a larger floor lowers
-/// the member's variance.
-///
-/// Same fixture and offset as
-/// [`a_temporal_member_carries_its_own_match_distance_as_variance`], at
-/// `d = 0.1` and `scale = 1.0`, so each temporal member's raw distance
-/// is `3 * 64 * d^2 = 1.92`. A floor of `0.96`, half that distance,
-/// leaves excess `0.96` and so variance `0.96 / (3 * 64) = 0.005`, half
-/// of the `d^2 = 0.01` a zero floor would give.
-#[test]
-fn a_noise_floor_lowers_a_temporal_members_variance_by_the_expected_amount() {
-    use crate::collab::kernels::transforms::haar_variance_ladder;
-
-    let (w, h) = (96u32, 96u32);
-    let radius = 2u32;
-    let ref_pos = (64u32, 64u32);
-    let patch = deterministic_texture(5);
-    let sigma = 0.02f32;
-    let d = 0.1f32;
-    let refs_x = refs_along(w);
-    let ref_idx = ((ref_pos.1 / STEP) * refs_x + (ref_pos.0 / STEP)) as usize;
-
-    let mut fx = planted_ring(w, h, radius, ref_pos, 3, &patch, 0.2, |_| 1.0);
-    let pixels = (w * h) as usize;
-    for slot in 0..(2 * radius + 1) {
-        if slot == fx.centre_slot {
-            continue;
-        }
-        let frame = &mut fx.ring[slot as usize * pixels..(slot as usize + 1) * pixels];
-        for v in frame.iter_mut() {
-            if *v > 0.5 {
-                *v += d;
-            }
-        }
-    }
-
-    let raw_distance = 3.0 * PATCH_AREA as f32 * d * d;
-    let noise_floor = raw_distance / 2.0;
-
-    let run = run_fused_over(
-        &fx,
-        Knobs {
-            sigma,
-            lambda_ht: 1.0e6,
-            use_member_sigma: true,
-            refine: 0,
-            noise_floor,
-            ..Knobs::default()
-        },
-    );
-
-    let base = sigma * sigma;
-    let excess = (raw_distance - noise_floor).max(0.0);
-    let member_variance = excess / (3.0 * PATCH_AREA as f32);
-    let mut v = [base; 8];
-    for m in v.iter_mut().take(5).skip(1) {
-        *m = base + member_variance;
-    }
-    let expected = 1.0 / haar_variance_ladder(&v, 8)[0];
-    let got = run.group_weight[ref_idx];
-    assert!(
-        (got - expected).abs() <= expected * 1e-3,
-        "noise_floor={noise_floor}: expected group weight {expected} (member variance \
-         {member_variance}), got {got}"
-    );
-
-    // The floor must actually have lowered the variance, not left it at
-    // the zero-floor value the previous test measured at this same d.
-    assert!(
-        member_variance < d * d,
-        "expected the floor to lower the member variance below the zero-floor value {}, got {}",
-        d * d,
-        member_variance
     );
 }
 
@@ -512,13 +376,13 @@ fn only_reachable_through(
 /// kernel that read only the corner and the diagonal fails on two of
 /// the three.
 ///
-/// The ring runs at radius 2, so four neighbours each hold a copy the
-/// covering block reaches. Half the group is then an exact copy of the
-/// reference, against a group of near-background patches when only the
-/// corner block is read, and the group weight separates the two by a
-/// wide margin. The control leaves every block on the corner's zeroed
-/// vector, so no rectangle reaches the copy however many blocks are
-/// read.
+/// The ring runs at radius 2, so the reference's volume keeps three of
+/// the four copies the covering block reaches. A static twin at
+/// [TWIN_POS] anchors the second volume on the same patch in every
+/// frame, so that volume is identical in every run and the group weight
+/// only moves with the reference's own volume. The control leaves every
+/// block on the corner's zeroed vector, so no rectangle reaches the copy
+/// however many blocks are read.
 #[test]
 fn a_covering_block_other_than_the_corner_finds_the_match() {
     let (w, h) = (96u32, 96u32);
@@ -532,13 +396,15 @@ fn a_covering_block_other_than_the_corner_finds_the_match() {
     // reaches the copy however many blocks are read.
     let mut corner_only = planted_ring(w, h, radius, ref_pos, 0, &patch, 0.2, |_| 1.0);
     only_reachable_through(&mut corner_only, ref_pos, &patch, (8, 8));
+    plant_static_twins(&mut corner_only, &[TWIN_POS], &patch);
     corner_only.mv_field.fill(0);
-    let without = run_fused_over(&corner_only, Knobs::default()).group_weight[ref_idx];
+    let without = run_fused_over(&corner_only, twin_knobs()).group_weight[ref_idx];
 
     for block in [(7u32, 7u32), (8, 7), (7, 8)] {
         let mut fx = planted_ring(w, h, radius, ref_pos, 0, &patch, 0.2, |_| 1.0);
         only_reachable_through(&mut fx, ref_pos, &patch, block);
-        let with_covering = run_fused_over(&fx, Knobs::default()).group_weight[ref_idx];
+        plant_static_twins(&mut fx, &[TWIN_POS], &patch);
+        let with_covering = run_fused_over(&fx, twin_knobs()).group_weight[ref_idx];
 
         assert!(
             with_covering > without * 1.5,
@@ -549,28 +415,33 @@ fn a_covering_block_other_than_the_corner_finds_the_match() {
 }
 
 /// Two covering blocks whose vectors differ by one pixel give
-/// overlapping rectangles, and a position inside both is scored once.
+/// overlapping rectangles, and the reference's volume still finds the
+/// copy they both reach.
 ///
-/// A copy planted where both rectangles reach it would otherwise enter
-/// the group twice. With `lambda_ht` huge every member deposits the
-/// same weight, so the planted patch's pixels receive exactly the
-/// weight they receive when only one block points at it.
+/// Block `(7, 7)` is visited first, so with a second vector its
+/// rectangle reaches the copy and block `(8, 8)` then skips the overlap.
+/// The reference's volume must hold the same copy either way. Three
+/// static twins anchor the other three volumes on the same patch in
+/// every frame, so the group weight only moves with the reference's own
+/// volume, and two runs holding the same patches carry the same weight.
+/// The control points no block at the copy, which shows the weight can
+/// see the copy go missing.
 #[test]
-fn overlapping_covering_rectangles_score_each_position_once() {
+fn overlapping_covering_rectangles_still_find_the_match() {
     let (w, h) = (96u32, 96u32);
     let radius = 1u32;
     let ref_pos = (64u32, 64u32);
     let patch = deterministic_texture(17);
-    let pixels = (w * h) as usize;
-    let knobs = || Knobs {
-        lambda_ht: 1.0e6,
-        ..Knobs::default()
-    };
+    let refs_x = refs_along(w);
+    let ref_idx = ((ref_pos.1 / STEP) * refs_x + (ref_pos.0 / STEP)) as usize;
+    let flat = [0.2f32; 64];
 
     let build = |second_vector: Option<[i32; 2]>| {
         let mut fx = planted_ring(w, h, radius, ref_pos, 0, &patch, 0.2, |_| 1.0);
+        plant_static_twins(&mut fx, &[(64, 48), (48, 64), (48, 48)], &patch);
         for t in 0..2u32 {
             let slot = fx.neighbour_slots[t as usize];
+            plant_in_slot(&mut fx, slot, ref_pos.0, ref_pos.1, &flat);
             plant_in_slot(&mut fx, slot, ref_pos.0 + 20, ref_pos.1, &patch);
             set_block_mv(&mut fx, t, 8, 8, [20, 0]);
             if let Some(v) = second_vector {
@@ -580,27 +451,36 @@ fn overlapping_covering_rectangles_score_each_position_once() {
         fx
     };
 
-    let one = run_fused_over(&build(None), knobs());
-    let two = run_fused_over(&build(Some([21, 0])), knobs());
+    let mut unreachable = build(None);
+    unreachable.mv_field.fill(0);
 
-    let frames = one.wsum.len() / pixels;
-    let planted_centre =
-        |run: &FusedRun, s: usize| run.wsum[s * pixels + ((ref_pos.1 + 4) * w + ref_pos.0 + 20 + 4) as usize];
-    for s in 0..frames {
-        if s as u32 == 1 {
-            continue;
-        }
-        assert_eq!(
-            planted_centre(&two, s),
-            planted_centre(&one, s),
-            "slot {s}: the planted copy must carry the same weight whether one or two covering \
-             blocks reach it"
-        );
-    }
-    assert!(
-        planted_centre(&one, 0) > 0,
-        "the copy must be a member in the first place"
+    let one = run_fused_over(&build(None), twin_knobs()).group_weight[ref_idx];
+    let two = run_fused_over(&build(Some([21, 0])), twin_knobs()).group_weight[ref_idx];
+    let none = run_fused_over(&unreachable, twin_knobs()).group_weight[ref_idx];
+
+    assert_eq!(
+        two, one,
+        "the reference's volume must hold the same copy whether one or two covering blocks \
+         reach it"
     );
+    assert!(
+        one > none * 1.5,
+        "the copy must be a member in the first place, got {one} against {none} with no block \
+         reaching it"
+    );
+}
+
+/// Plants `patch` at each of `positions` in every slot of the ring.
+///
+/// Each becomes an exact spatial twin of a reference carrying the same patch, and its volume holds
+/// that patch in every frame as long as its covering blocks carry a zero vector.
+fn plant_static_twins(fx: &mut RingFixture, positions: &[(u32, u32)], patch: &[f32; 64]) {
+    let frames = 2 * fx.radius + 1;
+    for slot in 0..frames {
+        for &(px, py) in positions {
+            plant_in_slot(fx, slot, px, py, patch);
+        }
+    }
 }
 
 /// With `blksize == step` exactly one block covers a patch, so a
@@ -634,5 +514,157 @@ fn a_block_size_equal_to_the_step_reads_only_the_corner_block() {
         covering > single * 1.5,
         "at blksize == step the copy is unreachable, got {single} against {covering} with \
          covering blocks"
+    );
+}
+
+/// Where [twin_ring] plants the reference's spatial twin in the centre frame.
+const TWIN_POS: (u32, u32) = (64, 48);
+
+/// A radius-2 ring whose centre frame holds the reference texture at (64, 64) and an exact twin
+/// at [TWIN_POS], so the spatial search anchors the second volume on the twin.
+///
+/// Every block moves the reference's copy by `(3k, 0)`, as `planted_ring` places it. The four
+/// blocks covering the twin, `(7..=8, 5..=6)`, carry `twin_mv(k)` instead, and a copy of the twin
+/// sits at `TWIN_POS + twin_copy(k)` in each neighbour. The two can differ, so a test can point
+/// the twin's motion away from its copies.
+fn twin_ring(
+    patch: &[f32; 64],
+    twin_mv: impl Fn(i32) -> [i32; 2],
+    twin_copy: impl Fn(i32) -> [i32; 2],
+) -> RingFixture {
+    let radius = 2u32;
+    let mut fx = planted_ring(96, 96, radius, (64, 64), 3, patch, 0.2, |_| 1.0);
+    let centre_slot = fx.centre_slot;
+    plant_in_slot(&mut fx, centre_slot, TWIN_POS.0, TWIN_POS.1, patch);
+
+    for k in [-2i32, -1, 1, 2] {
+        let t = neighbour_idx_for_k(radius, k);
+        let slot = fx.neighbour_slots[t as usize];
+
+        for by in 0..fx.blocks_y {
+            for bx in 0..fx.blocks_x {
+                set_block_mv(&mut fx, t, bx, by, [3 * k, 0]);
+            }
+        }
+
+        for by in 5..=6u32 {
+            for bx in 7..=8u32 {
+                set_block_mv(&mut fx, t, bx, by, twin_mv(k));
+            }
+        }
+
+        let [copy_dx, copy_dy] = twin_copy(k);
+        let copy_x = (TWIN_POS.0 as i32 + copy_dx) as u32;
+        let copy_y = (TWIN_POS.1 as i32 + copy_dy) as u32;
+        plant_in_slot(&mut fx, slot, copy_x, copy_y, patch);
+    }
+
+    fx
+}
+
+/// The knobs every twin-ring run shares, a spatial window wide enough to reach the twin.
+fn twin_knobs() -> Knobs {
+    Knobs {
+        spatial_radius: 16,
+        ..Knobs::default()
+    }
+}
+
+/// The second volume follows its own anchor's vector, not the reference's.
+///
+/// The twin's copies sit at `(0, 2k)` from it. With its blocks carrying that vector, its volume
+/// holds three exact copies and the group agrees strongly. With the reference's `(3k, 0)` instead
+/// its volume lands on flat background and the group weight collapses.
+#[test]
+fn each_volume_follows_its_own_anchors_motion() {
+    let patch = deterministic_texture(23);
+    let refs_x = refs_along(96);
+    let ref_idx = ((64 / STEP) * refs_x + (64 / STEP)) as usize;
+
+    let own = twin_ring(&patch, |k| [0, 2 * k], |k| [0, 2 * k]);
+    let borrowed = twin_ring(&patch, |k| [3 * k, 0], |k| [0, 2 * k]);
+
+    let with_own = run_fused_over(&own, twin_knobs()).group_weight[ref_idx];
+    let with_borrowed = run_fused_over(&borrowed, twin_knobs()).group_weight[ref_idx];
+
+    assert!(
+        with_own > with_borrowed * 1.5,
+        "the twin's volume should find its copies through its own vector, got {with_own} against \
+         {with_borrowed}"
+    );
+}
+
+/// A volume keeps its three best frames out of four.
+///
+/// Offsetting the copies of k = -2, the first neighbour searched and so the one that wins every
+/// tie, must leave the group untouched, because both volumes skip that frame for the three exact
+/// ones. A volume that kept its first three frames would hold the offset one instead. Two groups
+/// holding the same patches carry the same weight, so the weight equals the run with no offset.
+/// Offsetting k = -1 as well forces an offset frame into each volume, which moves the weight and
+/// shows the comparison can see a change.
+#[test]
+fn a_volume_keeps_its_best_frames() {
+    let patch = deterministic_texture(29);
+    let refs_x = refs_along(96);
+    let ref_idx = ((64 / STEP) * refs_x + (64 / STEP)) as usize;
+
+    let clean = twin_ring(&patch, |k| [0, 2 * k], |k| [0, 2 * k]);
+    let mut one_offset = twin_ring(&patch, |k| [0, 2 * k], |k| [0, 2 * k]);
+    offset_copies(&mut one_offset, -2);
+    let mut two_offset = twin_ring(&patch, |k| [0, 2 * k], |k| [0, 2 * k]);
+    offset_copies(&mut two_offset, -2);
+    offset_copies(&mut two_offset, -1);
+
+    let clean_weight = run_fused_over(&clean, twin_knobs()).group_weight[ref_idx];
+    let one_weight = run_fused_over(&one_offset, twin_knobs()).group_weight[ref_idx];
+    let two_weight = run_fused_over(&two_offset, twin_knobs()).group_weight[ref_idx];
+
+    assert_eq!(
+        one_weight, clean_weight,
+        "one offset neighbour must be skipped, leaving the group identical to the clean run"
+    );
+    assert!(
+        (two_weight - clean_weight).abs() > clean_weight * 1e-3,
+        "two offset neighbours force one into each volume, so the weight must move, got \
+         {two_weight} against {clean_weight}"
+    );
+}
+
+/// Raises every texture pixel of neighbour `k`'s frame by 0.1, leaving the background alone.
+fn offset_copies(fx: &mut RingFixture, k: i32) {
+    let pixels = (fx.width * fx.height) as usize;
+    let t = neighbour_idx_for_k(fx.radius, k);
+    let slot = fx.neighbour_slots[t as usize] as usize;
+    let frame = &mut fx.ring[slot * pixels..(slot + 1) * pixels];
+    for value in frame.iter_mut() {
+        if *value > 0.5 {
+            *value += 0.1;
+        }
+    }
+}
+
+/// A neighbour patch the first volume took is not reused by the second.
+///
+/// The twin's blocks point at the reference's copies, which match the twin exactly. Reusing them
+/// would make the twin's volume hold the same pixels as the control's, where the twin follows its
+/// own exact copies, and the two weights would be equal. Skipping them leaves the twin's volume one
+/// unclaimed copy and two near misses, so its weight drops below the control's.
+#[test]
+fn a_position_claimed_by_an_earlier_volume_is_not_reused() {
+    let patch = deterministic_texture(31);
+    let refs_x = refs_along(96);
+    let ref_idx = ((64 / STEP) * refs_x + (64 / STEP)) as usize;
+
+    // The twin's vector lands on the reference's copy at (64 + 3k, 64).
+    let bait = twin_ring(&patch, |k| [3 * k, 16], |k| [3 * k, 16]);
+    let control = twin_ring(&patch, |k| [0, 2 * k], |k| [0, 2 * k]);
+
+    let with_bait = run_fused_over(&bait, twin_knobs()).group_weight[ref_idx];
+    let with_control = run_fused_over(&control, twin_knobs()).group_weight[ref_idx];
+
+    assert!(
+        with_bait < with_control * 0.99,
+        "the twin's volume must not reuse the reference's copies, got {with_bait} against \
+         {with_control}"
     );
 }

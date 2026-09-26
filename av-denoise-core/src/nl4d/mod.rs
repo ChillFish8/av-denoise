@@ -3,14 +3,12 @@
 //!
 //! [`crate::collab`] groups similar 8x8 patches within one frame and
 //! denoises each group jointly. This module extends that search across a
-//! motion-compensated window of frames. For each reference patch it
-//! searches the centre frame spatially, and also searches each neighbour
-//! frame in a small window around where the motion field predicts that
-//! patch moved.
+//! motion-compensated window of frames.
 //!
-//! Patches matched in different frames carry independent grain, so
-//! grouping them lets the collaborative transform cancel more of it than
-//! a single-frame search can.
+//! Each group is a few centre-frame patches, each followed through its
+//! best-matching neighbour frames along its own motion vector. Patches
+//! followed through time carry independent grain, so the transform along
+//! time separates it from the texture they share.
 
 mod denoiser;
 pub mod harness;

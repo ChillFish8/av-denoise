@@ -15,9 +15,6 @@ pub const SPATIAL_RADIUS: u32 = 9;
 pub const K_MAX: u32 = 8;
 /// `Nl4dParams::default().lambda_ht`.
 pub const LAMBDA_HT: f32 = 5.2;
-/// `Nl4dParams::default().confidence_variance`, the `use_member_sigma`
-/// flag `collab_fused` compiles against.
-pub const CONFIDENCE_VARIANCE: bool = true;
 
 /// The motion field's block stride. Held at `collab::PATCH_SIZE` so a
 /// block boundary lines up with a patch boundary.
@@ -26,9 +23,6 @@ pub const BLK_STEP: u32 = 8;
 /// (`MotionCompensationMode::Mvtools`'s `blksize`), distinct from
 /// [`BLK_STEP`] above.
 pub const BLKSIZE: u32 = 16;
-/// `Nl4dParams::default().mismatch_scale` squared, the kernel's
-/// `mismatch_scale2` argument.
-pub const MISMATCH_SCALE2: f32 = 1.0;
 
 /// Frames in the ring a pass reads.
 pub const N_FRAMES: u32 = 2 * RADIUS + 1;

@@ -14,9 +14,8 @@ use crate::collab::kernels::aggregate::{
 };
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{MAX_K, PATCH_AREA, PATCH_SIZE, needs_warp_uniform_search};
+use crate::collab::{MAX_K, PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use crate::denoiser::{DenoiserError, FrameOutput, OutputFormat};
-use crate::nlmeans::kernels::helpers::channel_scale_host;
 use crate::nlmeans::{
     BLOCK_X,
     BLOCK_Y,
@@ -64,9 +63,6 @@ pub struct Nl4dDenoiser<R: Runtime> {
     spatial_radius: u32,
     lambda_ht: f32,
     c_min: f32,
-    /// See [`Nl4dParams::mismatch_scale`].
-    mismatch_scale: f32,
-    confidence_variance: bool,
     k_max: u32,
     /// Whether [`collab_fused`] runs its warp-uniform search, decided
     /// once from the runtime this denoiser was built on. See
@@ -264,8 +260,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             spatial_radius: params.spatial_radius,
             lambda_ht: params.lambda_ht,
             c_min: params.c_min,
-            mismatch_scale: params.mismatch_scale,
-            confidence_variance: params.confidence_variance,
             k_max,
             warp_uniform: needs_warp_uniform_search(client),
             accum_scale: cross_frame_accum_scale(params.spatial_radius, params.temporal_radius),
@@ -553,14 +547,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let blksize = mc.blksize;
         let blocks_x = mc.blocks_x;
         let blocks_y = mc.blocks_y;
-        // The variance grows with the square of the scale, see
-        // `Nl4dParams::mismatch_scale`.
-        let mismatch_scale2 = self.mismatch_scale * self.mismatch_scale;
-        // The distance two noisy copies of one patch show by chance, in
-        // the search's channel-scaled units. A member's mismatch
-        // variance is its distance past this.
-        let sigma2_sum: f32 = sigma_host[..channels_count as usize].iter().map(|s| s * s).sum();
-        let noise_floor = channel_scale_host(channels_count) * 2.0 * PATCH_AREA as f32 * sigma2_sum;
 
         // See the doc comment above for why these two slots are what
         // this pass clears and completes. `total_frames` is added
@@ -660,15 +646,13 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 ArrayArg::from_raw_parts(self.wsum.clone(), wsum_ring_len),
                 ArrayArg::from_raw_parts(self.group_weight.clone(), refs),
                 centre_slot,
-                noise_floor,
                 self.c_min,
-                mismatch_scale2,
                 self.lambda_ht,
                 wnorm,
                 self.accum_scale,
-                self.confidence_variance,
                 self.warp_uniform,
                 self.temporal_radius,
+                grid_frames(self.temporal_radius),
                 self.refine,
                 view.mv_stride,
                 view.conf_stride,
