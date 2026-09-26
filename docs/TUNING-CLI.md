@@ -69,8 +69,9 @@ the smoothing off and leaves the tracked field as it is.
 - **`--sigma`** pins the noise level to a fixed value and turns the per-scene measurement off
   entirely. `--sigma-scale` keeps the measurement and nudges it, which is almost always what you
   actually want.
-- **`--c-min`** only decides how much compute a frame costs. It never changes which patches are
-  admitted once they are scored, so it is not a quality dial.
+- **`--c-min`** skips a neighbour block below its confidence floor entirely. A skip that leaves a
+  volume short of frames makes its group filter from the centre frame alone, so this can change
+  the output.
 - **`--thsad-scale`, `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels`** tune
   the motion machinery's internals, changing any of these will likely invalidate all other defaults.
 

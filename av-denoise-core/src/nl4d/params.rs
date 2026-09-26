@@ -56,9 +56,9 @@ pub struct Nl4dParams {
     /// tuned values. See [nl4d_default_lambda_ht](crate::nl4d_default_lambda_ht).
     pub lambda_ht: f32,
     /// The confidence floor below which a whole neighbour block is
-    /// skipped rather than scored, in `[0, 1)`. Only affects how much
-    /// compute a submit spends, never which candidates are admitted once
-    /// they are scored.
+    /// skipped rather than scored, in `[0, 1)`. A block below the floor
+    /// is never scored, and a volume left short of frames by the skip
+    /// makes its group filter from the centre frame alone.
     pub c_min: f32,
     /// The `beta` of the Kaiser window each filtered patch is tapered
     /// with as it is aggregated, in `0..=8`.

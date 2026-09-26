@@ -219,20 +219,19 @@ fn fused_reproduces_recorded_output_under_correlation_shaping() {
     );
 }
 
-/// The whole temporal path at once: the `c_min` skip, the volume grid
-/// with its single-frame fallback, and the scatter into each member's
-/// own region of the accumulator ring.
+/// The whole temporal path at once. It covers the `c_min` skip, the
+/// volume grid with its single-frame fallback, and the scatter into each
+/// member's own region of the accumulator ring.
 ///
 /// `cross_frame_setup` gives every block its own vector, so the search
 /// reaches positions the corner block alone never pointed at, and its
 /// confidences straddle `c_min`, so some groups build a grid and others
 /// fall back.
 ///
-/// Re-recorded for the volume grid on 2026-09-26, from this kernel's own
-/// output, because no second implementation exists for it.
-/// [assert_matches_recorded]'s warning about comparing a kernel to
-/// itself is about a silently-broken shader producing zeros, and this
-/// recording carries real, non-zero coverage.
+/// The digest comes from this kernel's own output, because no second
+/// implementation exists for it. [assert_matches_recorded]'s warning
+/// about comparing a kernel to itself is about a silently-broken shader
+/// producing zeros, and this recording carries real, non-zero coverage.
 #[test]
 fn fused_reproduces_recorded_output_across_frames() {
     let s = cross_frame_setup(64, 64, 2);
@@ -267,8 +266,8 @@ fn fused_reproduces_recorded_output_across_frames() {
 /// from is never written down between the match and the scatter, which
 /// is what makes this easy to lose.
 ///
-/// Re-recorded for the volume grid on 2026-09-26, from this kernel's own
-/// output, because no second implementation exists for it.
+/// The digest comes from this kernel's own output, because no second
+/// implementation exists for it.
 #[test]
 fn fused_scatters_into_every_member_frame() {
     let s = five_frame_ring_with_jittered_copies(64, 64);

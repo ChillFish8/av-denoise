@@ -122,15 +122,17 @@ const _: () = assert!(
 /// A candidate's distance is the channel-scaled sum of squared pixel
 /// differences over the whole patch.
 ///
-/// # No admission gate
+/// # Confidence gate
 ///
 /// Every candidate stays in the running whatever its distance, so a
-/// group fills wherever the search space is large enough. `c_min` is a
-/// compute saving rather than an admission threshold. A covering block
-/// whose confidence sits below `c_min` never runs the pixel comparison,
-/// while the frame's other covering blocks still search. The confidence
-/// comes from a motion block every lane of the group shares, so the skip
-/// is uniform across the group.
+/// group fills wherever the search space is large enough. A covering
+/// block whose confidence sits below `c_min` never runs the pixel
+/// comparison, while the frame's other covering blocks still search.
+/// The confidence comes from a motion block every lane of the group
+/// shares, so the skip is uniform across the group. A volume left short
+/// of frames by this gate makes the whole group fall back to the
+/// single-frame group centred on the reference frame, so `c_min` can
+/// change the output.
 ///
 /// # Selection
 ///
@@ -381,11 +383,9 @@ pub fn collab_fused<N: Size>(
 
     // The single-frame group, which is also the fallback. Lane `i` holds member `i`.
     let mut member_pos = Array::<u32>::new(MAX_K as usize);
-    let mut member_d = Array::<f32>::new(MAX_K as usize);
     #[unroll]
     for m in 0..MAX_K {
         member_pos[m as usize] = plane_shuffle(best_pos, base + m);
-        member_d[m as usize] = 0.0f32;
     }
 
     let mut use_grid = false;
@@ -463,7 +463,6 @@ pub fn collab_fused<N: Size>(
         #[unroll]
         for m in 0..MAX_K {
             member_pos[m as usize] = select(use_grid, grid_pos[m as usize], member_pos[m as usize]);
-            member_d[m as usize] = select(use_grid, grid_d[m as usize], member_d[m as usize]);
         }
         k_use = select(use_grid, MAX_K, k_use);
     }

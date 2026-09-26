@@ -177,11 +177,11 @@ fn bessel_i0(x: f64) -> f64 {
 ///
 /// What the window does narrow is the other end of the range. The
 /// smallest weight the fixed point has to resolve is scaled by the
-/// smallest tap product, `w[0]^2`, which is `0.193` at `beta = 2`. A
-/// badly matched group's weight lands around 9.8 units of `wsum` before
-/// the window and around 1.9 after it, so it still survives the rounding
-/// [`WEIGHT_GAIN`] exists to keep it above, with about a fifth of the
-/// margin.
+/// smallest tap product, `w[0]^2`, which is `0.193` at `beta = 2`. The
+/// weight floor lands around 640 units of `wsum` at the default geometry,
+/// and around 124 after the corner's taper, so it still survives the
+/// rounding [`WEIGHT_GAIN`] exists to keep it above. Match quality no
+/// longer moves this number, only the geometry does.
 pub fn kaiser_window(beta: f32) -> [f32; PATCH_SIZE as usize] {
     let denom = bessel_i0(beta as f64);
     let last = (PATCH_SIZE - 1) as f64;
@@ -210,11 +210,12 @@ pub const WEIGHT_CLAMP: f32 = 1.0;
 /// this multiple of the value's scale spends exactly the same `i32`
 /// budget while resolving weights this many times finer.
 ///
-/// The resolution matters because a group weight spans a far wider range
-/// than [`weight_scale`]'s own doc used to claim, see the note there. A
-/// weight that falls below half a fixed-point unit contributes nothing at
-/// all to either accumulator, and this is part of what keeps a poorly
-/// matched group above that point.
+/// The resolution matters because every coefficient's variance is at
+/// most `sigma^2 * g_max^2`, so a group of up to 512 of them can push
+/// the normalised weight down to `1/512`. A weight that falls below half
+/// a fixed-point unit contributes nothing at all to either accumulator,
+/// and this is part of what keeps a poorly matched group above that
+/// point.
 ///
 /// [`collab_normalise`] multiplies it back out, so it never reaches a
 /// finished pixel.

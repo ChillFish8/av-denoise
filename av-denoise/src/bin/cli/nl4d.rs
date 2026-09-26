@@ -133,8 +133,9 @@ pub struct Nl4dArgs {
     /// skipped rather than scored.
     ///
     /// Between `0` and `1`, not including `1`. Library default is
-    /// 0.05. Only affects how much compute a submit spends, never
-    /// which candidates are admitted once they are scored.
+    /// 0.05. A block below the floor is never scored, and a volume
+    /// left short of frames by the skip makes its group filter from
+    /// the centre frame alone.
     #[arg(long)]
     pub c_min: Option<f32>,
 

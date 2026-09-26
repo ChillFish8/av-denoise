@@ -229,9 +229,10 @@ pub struct Nl4dOptions {
     /// be finite and in `[0.1, 10.0]`.
     pub lambda_ht_scale: f32,
     /// The confidence floor below which a whole neighbour block is
-    /// skipped rather than scored, in `[0, 1)`. Defaults to 0.05. Only
-    /// affects how much compute a submit spends, never which candidates
-    /// are admitted once they are scored.
+    /// skipped rather than scored, in `[0, 1)`. Defaults to 0.05. A
+    /// block below the floor is never scored, and a volume left short
+    /// of frames by the skip makes its group filter from the centre
+    /// frame alone.
     pub c_min: f32,
     /// The `beta` of the Kaiser window each filtered patch is tapered
     /// with as it is aggregated. Defaults to 2.0. `0.0` is uniform
@@ -303,8 +304,7 @@ impl Nl4dOptions {
 ///
 /// Luma and chroma values are picked by eye from a ladder of renders against real
 /// film grain, accepting more lost detail in exchange for less remaining
-/// noise on heavy grain. Separately confirmed not to over-filter near-clean
-/// animation. The reason why we're going a bit heavier on high noise is because
+/// noise on heavy grain. The reason why we're going a bit heavier on high noise is because
 /// the encoders end up reducing that detail _more_ than the denoiser does if
 /// that extra entropy remains in and overall produces a worse final image.
 ///

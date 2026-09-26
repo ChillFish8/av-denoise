@@ -40,6 +40,9 @@ struct Knobs {
     /// The motion block side length, defaulting to the module's
     /// [`BLKSIZE`]. At [`BLK_STEP`] exactly one block covers a patch.
     blksize: u32,
+    /// Pins the search walk rather than taking it from the runtime.
+    /// `None`, the default, follows [`needs_warp_uniform_search`].
+    warp_uniform: Option<bool>,
 }
 
 impl Default for Knobs {
@@ -52,6 +55,7 @@ impl Default for Knobs {
             refine: REFINE,
             spatial_radius: SPATIAL_RADIUS,
             blksize: BLKSIZE,
+            warp_uniform: None,
         }
     }
 }
@@ -131,7 +135,8 @@ fn run_fused_over(fx: &RingFixture, k: Knobs) -> FusedRun {
             k.lambda_ht,
             weight_scale(k.sigma, &profile),
             cross_frame_accum_scale(k.spatial_radius, fx.radius),
-            needs_warp_uniform_search(&client),
+            k.warp_uniform
+                .unwrap_or_else(|| needs_warp_uniform_search(&client)),
             fx.radius,
             grid_frames(fx.radius),
             k.refine,
@@ -454,8 +459,11 @@ fn overlapping_covering_rectangles_still_find_the_match() {
     let mut unreachable = build(None);
     unreachable.mv_field.fill(0);
 
-    let one = run_fused_over(&build(None), twin_knobs()).group_weight[ref_idx];
-    let two = run_fused_over(&build(Some([21, 0])), twin_knobs()).group_weight[ref_idx];
+    let one_covering_block = build(None);
+    let two_covering_blocks = build(Some([21, 0]));
+
+    let one = run_fused_over(&one_covering_block, twin_knobs()).group_weight[ref_idx];
+    let two = run_fused_over(&two_covering_blocks, twin_knobs()).group_weight[ref_idx];
     let none = run_fused_over(&unreachable, twin_knobs()).group_weight[ref_idx];
 
     assert_eq!(
@@ -666,5 +674,43 @@ fn a_position_claimed_by_an_earlier_volume_is_not_reused() {
         with_bait < with_control * 0.99,
         "the twin's volume must not reuse the reference's copies, got {with_bait} against \
          {with_control}"
+    );
+}
+
+/// The bait fixture above under both search walks, so the position skip
+/// it relies on is not an artefact of whichever walk the runtime happens
+/// to pick.
+///
+/// The bait's claimed positions are exactly where the two walks take
+/// different turns to reach the same candidates, which is where a walk
+/// that skipped the claim check differently would show up.
+#[test]
+fn a_position_claimed_by_an_earlier_volume_agrees_across_search_walks() {
+    let patch = deterministic_texture(31);
+    let bait = twin_ring(&patch, |k| [3 * k, 16], |k| [3 * k, 16]);
+
+    let clipped_knobs = Knobs {
+        warp_uniform: Some(false),
+        ..twin_knobs()
+    };
+    let uniform_knobs = Knobs {
+        warp_uniform: Some(true),
+        ..twin_knobs()
+    };
+
+    let clipped = run_fused_over(&bait, clipped_knobs);
+    let uniform = run_fused_over(&bait, uniform_knobs);
+
+    assert_eq!(
+        clipped.group_weight, uniform.group_weight,
+        "the two search walks retired different groups"
+    );
+    assert_eq!(
+        clipped.wsum, uniform.wsum,
+        "the two search walks scattered different weights"
+    );
+    assert!(
+        uniform.group_weight.iter().any(|&w| w > 0.0),
+        "neither walk aggregated anything, so agreeing proves nothing"
     );
 }

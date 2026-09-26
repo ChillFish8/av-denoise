@@ -235,8 +235,10 @@ pub(crate) fn trajectory_search<N: Size>(
 
     let bx_hi = (anchor_x / blk_step).min(blocks_x - 1);
     let by_hi = (anchor_y / blk_step).min(blocks_y - 1);
-    let bx_lo = u32::min(covering_lo(anchor_x, blksize, blk_step), bx_hi);
-    let by_lo = u32::min(covering_lo(anchor_y, blksize, blk_step), by_hi);
+    let bx_lo_covering = covering_lo(anchor_x, blksize, blk_step);
+    let by_lo_covering = covering_lo(anchor_y, blksize, blk_step);
+    let bx_lo = u32::min(bx_lo_covering, bx_hi);
+    let by_lo = u32::min(by_lo_covering, by_hi);
 
     let mut t = 0u32;
     while t < n_neighbours {
