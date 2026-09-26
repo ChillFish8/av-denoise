@@ -269,7 +269,7 @@ pub struct NlmDenoiser<R: Runtime> {
     ///
     /// It is inert under the same condition as `noise_estimator`.
     pub(super) noise_estimator_low_unboosted: NoiseEstimator,
-    /// Smooths the temporal reading on its own, with no maximum taken
+    /// Smooths the temporal median on its own, with no maximum taken
     /// against an Immerkær spatial reading and no correlation boost.
     ///
     /// It only updates on a fold that has a temporal sample trustworthy
@@ -1256,7 +1256,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// already tracks that grain directly.
     ///
     /// A fourth estimator, `noise_estimator_temporal_only`, folds the
-    /// temporal reading by itself, with neither the maximum against the
+    /// temporal median by itself, with neither the maximum against the
     /// Immerkær spatial reading nor the correlation boost. It exists for
     /// the same squaring consumer, for a stronger reason than the boost
     /// alone: a spatial mask reads regularly repeating texture the same
@@ -1321,7 +1321,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                 raw_low[c] = raw_low[c].max(sample.sigma_low[c] * factor);
                 raw_low_unboosted[c] = raw_low_unboosted[c].max(sample.sigma_low[c]);
             }
-            raw_temporal_only = Some(sample.sigma_low);
+            raw_temporal_only = Some(sample.sigma);
             self.rho_smoothed = Some(
                 if windowed {
                     sample.rho
@@ -1780,7 +1780,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         sigmas
     }
 
-    /// The smoothed per-channel sigma estimate from the temporal reading
+    /// The smoothed per-channel sigma estimate from the temporal median
     /// alone, with no maximum taken against an Immerkær spatial reading
     /// and no correlation boost.
     ///
