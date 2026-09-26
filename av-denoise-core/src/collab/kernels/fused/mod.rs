@@ -1,3 +1,4 @@
+pub(crate) mod grid;
 pub(crate) mod search;
 
 use cubecl::prelude::*;
