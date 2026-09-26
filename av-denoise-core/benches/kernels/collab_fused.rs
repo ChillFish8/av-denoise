@@ -158,11 +158,12 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
         let phase_ring = (self.subpel > 0).then(|| {
             let planes = self.client.empty(ring_len * 4 * size_of::<f32>());
             let taps = self.client.create_from_slice(f32::as_bytes(&HALF_PEL_TAPS));
+            let grid = CubeCount::new_2d(W.div_ceil(BLOCK_X), H.div_ceil(BLOCK_Y));
             for slot in 0..N_FRAMES {
                 unsafe {
                     nl4d_phase_planes::launch_unchecked::<R>(
                         &self.client,
-                        CubeCount::new_2d(W.div_ceil(BLOCK_X), H.div_ceil(BLOCK_Y)),
+                        grid.clone(),
                         CubeDim::new_2d(BLOCK_X, BLOCK_Y),
                         stored_ch as usize,
                         ArrayArg::from_raw_parts(ring.clone(), ring_len),

@@ -4,7 +4,7 @@ use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::{H, W, block_sync, make_synthetic_frame, shapes_with_ch};
+use super::{BLOCK_X, BLOCK_Y, H, W, block_sync, make_synthetic_frame, shapes_with_ch};
 
 /// The nl4d phase-plane rebuild for one ring slot at 1080p.
 pub struct PhasePlanesBench<R: Runtime> {
@@ -37,11 +37,12 @@ impl<R: Runtime> Benchmark for PhasePlanesBench<R> {
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let pixels = (W * H) as usize;
+        let grid = CubeCount::new_2d(W.div_ceil(BLOCK_X), H.div_ceil(BLOCK_Y));
         unsafe {
             nl4d_phase_planes::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::new_2d(W.div_ceil(super::BLOCK_X), H.div_ceil(super::BLOCK_Y)),
-                CubeDim::new_2d(super::BLOCK_X, super::BLOCK_Y),
+                grid,
+                CubeDim::new_2d(BLOCK_X, BLOCK_Y),
                 1,
                 ArrayArg::from_raw_parts(args.ring.clone(), pixels),
                 ArrayArg::from_raw_parts(args.phase_ring.clone(), 4 * pixels),

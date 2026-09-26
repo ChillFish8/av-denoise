@@ -56,8 +56,8 @@ fn claim_probe(
     out[0] = select(claimed, 1u32, 0u32);
 }
 
-/// A textured frame with values in `[0.25, 0.75]`, small enough that
-/// f32 rounding never threatens the tolerances below.
+/// A textured frame with values between 0.25 and 0.75, small enough
+/// that f32 rounding never threatens the tolerances below.
 fn textured_frame(width: u32, height: u32) -> Vec<f32> {
     let mut frame = vec![0.0f32; (width * height) as usize];
     for y in 0..height {
@@ -260,13 +260,13 @@ fn run_claim_probe(member_pos: &[u32; 2], member_phase: &[u32; 2], packed: u32, 
 
 #[test]
 fn a_position_is_claimed_only_at_the_same_phase() {
-    let p = 0x1000u32;
-    let q = 0x2000u32;
-    let member_pos = [p, q];
+    let first_pos = 0x1000u32;
+    let second_pos = 0x2000u32;
+    let member_pos = [first_pos, second_pos];
     let member_phase = [0u32, 2u32];
 
-    assert!(run_claim_probe(&member_pos, &member_phase, p, 0));
-    assert!(!run_claim_probe(&member_pos, &member_phase, p, 2));
-    assert!(run_claim_probe(&member_pos, &member_phase, q, 2));
-    assert!(!run_claim_probe(&member_pos, &member_phase, q, 0));
+    assert!(run_claim_probe(&member_pos, &member_phase, first_pos, 0));
+    assert!(!run_claim_probe(&member_pos, &member_phase, first_pos, 2));
+    assert!(run_claim_probe(&member_pos, &member_phase, second_pos, 2));
+    assert!(!run_claim_probe(&member_pos, &member_phase, second_pos, 0));
 }

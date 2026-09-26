@@ -65,7 +65,8 @@ flat content where vectors wander, at the cost of following small objects less c
 the smoothing off and leaves the tracked field as it is.
 
 **`--subpel` aligns temporal matches between whole pixels.** `off` (the default), `half` or
-`quarter`. Finer alignment keeps more detail on slow pans, at a cost in speed and GPU memory.
+`quarter`. Finer alignment makes matches line up more closely on slow sub-pixel pans, at a
+cost in speed and GPU memory.
 
 ### What not to touch in NL4D
 

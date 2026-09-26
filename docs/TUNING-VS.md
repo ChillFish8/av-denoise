@@ -61,7 +61,6 @@ instead, since NL4D has nothing to group without neighbours.
 | Fine texture getting scrubbed         | `lambda_ht_scale` down a little | `sigma_scale=0.9` |
 | Result looks under-cleaned everywhere | `sigma_scale=1.1`               | one preset higher |
 | Smearing or ghosting on motion        | one preset lower                | `refine` up       |
-| Fine texture softened on slow pans    | `subpel="half"` or `"quarter"`  | one preset higher |
 | Too slow                              | `spatial_radius` down           | one preset lower  |
 
 **`lambda_ht_scale` is the main dial.** The threshold it scales is how many standard deviations
@@ -95,7 +94,8 @@ positions, so it dominates the work. Dropping it from 9 to 6 roughly halves the 
 is exactly what `preset="veryfast"` does.
 
 **`subpel` aligns temporal matches between whole pixels.** `off` (the default), `half` or
-`quarter` keep more detail on slow pans, at a cost in speed and GPU memory.
+`quarter` make matches line up more closely on slow sub-pixel pans, at a cost in speed and
+GPU memory.
 
 ```python
 clean = avd.Nl4d(clip, subpel="half")

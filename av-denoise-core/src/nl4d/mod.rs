@@ -24,8 +24,12 @@ pub(crate) mod subpel;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 mod tests;
 
-pub use denoiser::Nl4dDenoiser;
-pub use params::{MAX_KAISER_BETA, Nl4dParams};
-pub use snapshot::MotionSnapshot;
+pub use self::denoiser::Nl4dDenoiser;
+pub use self::params::{MAX_KAISER_BETA, Nl4dParams};
+pub use self::snapshot::MotionSnapshot;
+pub use self::subpel::SubpelPrecision;
 
-pub use self::subpel::{HALF_PEL_TAPS, SubpelPrecision, phase_gains};
+/// Re-exported only for the bench crates, which exercise the phase-plane
+/// kernel directly outside `Nl4dDenoiser`.
+#[doc(hidden)]
+pub use self::subpel::{HALF_PEL_TAPS, phase_gains};

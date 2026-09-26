@@ -162,8 +162,9 @@ pub struct Nl4dArgs {
 
     /// Aligns temporal matches between whole pixels.
     ///
-    /// `off` (the default), `half` or `quarter`. Finer alignment keeps
-    /// more detail on slow pans, at a cost in speed and GPU memory.
+    /// `off` (the default), `half` or `quarter`. Finer alignment makes
+    /// matches line up more closely on slow sub-pixel pans, at a cost
+    /// in speed and GPU memory.
     #[arg(long)]
     pub subpel: Option<SubpelPrecision>,
 
