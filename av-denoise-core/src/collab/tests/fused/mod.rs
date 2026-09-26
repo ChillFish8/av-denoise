@@ -11,6 +11,7 @@ use crate::collab::kernels::aggregate::{WEIGHT_GAIN, cross_frame_accum_scale, ka
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
+use crate::nl4d::subpel::phase_gains;
 
 /// The spatial search radius most runs below use.
 ///
@@ -412,6 +413,7 @@ pub(super) fn run_fused(s: &Setup) -> Aggregated {
 pub(super) fn run_fused_walk(s: &Setup, warp_uniform: Option<bool>) -> Aggregated {
     let b = buffers(s);
     let profile = s.profile();
+    let gain_buf = b.client.create_from_slice(f32::as_bytes(&phase_gains()));
 
     unsafe {
         collab_fused::launch_unchecked::<R>(
@@ -420,6 +422,8 @@ pub(super) fn run_fused_walk(s: &Setup, warp_uniform: Option<bool>) -> Aggregate
             CubeDim::new_1d(64),
             STORED_CH as usize,
             ArrayArg::from_raw_parts(b.ring.clone(), s.ring.len()),
+            ArrayArg::from_raw_parts(b.ring.clone(), s.ring.len()),
+            ArrayArg::from_raw_parts(gain_buf, 16),
             ArrayArg::from_raw_parts(b.mv_field.clone(), s.mv_field.len()),
             ArrayArg::from_raw_parts(b.confidence.clone(), s.confidence.len()),
             ArrayArg::from_raw_parts(b.neighbour_slots.clone(), s.neighbour_slots.len()),
@@ -435,6 +439,7 @@ pub(super) fn run_fused_walk(s: &Setup, warp_uniform: Option<bool>) -> Aggregate
             weight_scale(s.sigma, &profile),
             s.accum_scale(),
             warp_uniform.unwrap_or_else(|| needs_warp_uniform_search(&b.client)),
+            0u32,
             s.radius,
             grid_frames(s.radius),
             s.refine,

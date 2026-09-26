@@ -3,6 +3,7 @@ use av_denoise_core::collab::kernels::aggregate::{cross_frame_accum_scale, kaise
 use av_denoise_core::collab::kernels::fused::collab_fused;
 use av_denoise_core::collab::kernels::transforms::dct_noise_profile;
 use av_denoise_core::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
+use av_denoise_core::nl4d::phase_gains;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -83,6 +84,9 @@ pub struct CollabFusedInput {
     pub wsum: Handle,
     pub group_weight: Handle,
     pub ring_len: usize,
+    /// The 16 phase gains, passed under `subpel = 0` where the kernel
+    /// never reads them.
+    pub phase_gain: Handle,
 }
 
 impl<R: Runtime> Benchmark for CollabFusedBench<R> {
@@ -141,6 +145,7 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
             .empty(frame_len * N_FRAMES as usize * size_of::<i32>());
         let wsum = self.client.empty(pixels * N_FRAMES as usize * size_of::<i32>());
         let group_weight = self.client.empty(ref_count(W, H) * size_of::<f32>());
+        let phase_gain = self.client.create_from_slice(f32::as_bytes(&phase_gains()));
 
         CollabFusedInput {
             ring,
@@ -154,6 +159,7 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
             wsum,
             group_weight,
             ring_len: ring_data.len(),
+            phase_gain,
         }
     }
 
@@ -181,6 +187,8 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
                 dim,
                 stored_ch as usize,
                 ArrayArg::from_raw_parts(args.ring.clone(), args.ring_len),
+                ArrayArg::from_raw_parts(args.ring.clone(), args.ring_len),
+                ArrayArg::from_raw_parts(args.phase_gain.clone(), 16),
                 ArrayArg::from_raw_parts(args.mv_field.clone(), (2 * RADIUS * mv_stride) as usize),
                 ArrayArg::from_raw_parts(args.confidence.clone(), (2 * RADIUS * conf_stride) as usize),
                 ArrayArg::from_raw_parts(args.neighbour_slots.clone(), NEIGHBOUR_SLOTS.len()),
@@ -196,6 +204,7 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
                 weight_scale(SIGMA, &dct_noise_profile(0.0)),
                 cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS),
                 needs_warp_uniform_search(&self.client),
+                0u32,
                 RADIUS,
                 grid_frames(RADIUS),
                 REFINE,

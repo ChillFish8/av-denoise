@@ -14,6 +14,7 @@ use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, 
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, STEP, grid_frames, needs_warp_uniform_search};
+use crate::nl4d::subpel::phase_gains;
 use crate::nlmeans::motion::neighbour_idx_for_k;
 
 /// The motion block side length these fixtures score confidence
@@ -104,6 +105,7 @@ fn run_fused_over(fx: &RingFixture, k: Knobs) -> FusedRun {
     let profile = dct_noise_profile(0.0);
 
     let ring_buf = client.create_from_slice(f32::as_bytes(&fx.ring));
+    let gain_buf = client.create_from_slice(f32::as_bytes(&phase_gains()));
     let mv_buf = client.create_from_slice(i32::as_bytes(&fx.mv_field));
     let conf_buf = client.create_from_slice(f32::as_bytes(&fx.confidence));
     let slots_buf = client.create_from_slice(u32::as_bytes(&fx.neighbour_slots));
@@ -120,7 +122,9 @@ fn run_fused_over(fx: &RingFixture, k: Knobs) -> FusedRun {
             CubeCount::new_2d(fused_cubes_x(w), refs_along(h)),
             CubeDim::new_1d(64),
             1usize,
+            ArrayArg::from_raw_parts(ring_buf.clone(), fx.ring.len()),
             ArrayArg::from_raw_parts(ring_buf, fx.ring.len()),
+            ArrayArg::from_raw_parts(gain_buf, 16),
             ArrayArg::from_raw_parts(mv_buf, fx.mv_field.len()),
             ArrayArg::from_raw_parts(conf_buf, fx.confidence.len()),
             ArrayArg::from_raw_parts(slots_buf, fx.neighbour_slots.len()),
@@ -137,6 +141,7 @@ fn run_fused_over(fx: &RingFixture, k: Knobs) -> FusedRun {
             cross_frame_accum_scale(k.spatial_radius, fx.radius),
             k.warp_uniform
                 .unwrap_or_else(|| needs_warp_uniform_search(&client)),
+            0u32,
             fx.radius,
             grid_frames(fx.radius),
             k.refine,

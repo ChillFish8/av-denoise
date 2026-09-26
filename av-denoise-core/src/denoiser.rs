@@ -5,7 +5,7 @@ use cubecl::prelude::ComputeClient;
 
 use crate::accelerate::Accelerator;
 use crate::device::Device;
-use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
+use crate::nl4d::{Nl4dDenoiser, Nl4dParams, SubpelPrecision};
 #[cfg(test)]
 use crate::nlmeans::MotionEstimation;
 use crate::nlmeans::{
@@ -250,6 +250,8 @@ pub struct Nl4dOptions {
     pub windowed_noise_estimation: bool,
     /// See [`crate::nl4d::Nl4dParams::field_lambda`].
     pub field_lambda: f32,
+    /// See [crate::nl4d::Nl4dParams::subpel].
+    pub subpel: SubpelPrecision,
 }
 
 impl Default for Nl4dOptions {
@@ -272,6 +274,7 @@ impl Default for Nl4dOptions {
             kaiser_beta: defaults.kaiser_beta,
             windowed_noise_estimation: false,
             field_lambda: defaults.field_lambda,
+            subpel: defaults.subpel,
         }
     }
 }
@@ -669,6 +672,7 @@ fn build_engine<R: Runtime>(
                 c_min: opts.c_min,
                 kaiser_beta: opts.kaiser_beta,
                 field_lambda: opts.field_lambda,
+                subpel: opts.subpel,
             };
             let denoiser =
                 Nl4dDenoiser::with_output_format(client, nl4d_params, width, height, output_format)

@@ -205,6 +205,12 @@ const _: () = assert!(
 /// centred on and `neighbour_slots` maps a packed neighbour index onto
 /// its physical slot.
 ///
+/// `phase_ring` holds four phase planes per ring slot, the layout
+/// [nl4d_phase_planes](crate::nl4d::kernels::nl4d_phase_planes) writes,
+/// and `phase_gain` the 16 noise gains
+/// [phase_gains](crate::nl4d::phase_gains) builds. Both are read only
+/// when `subpel` is above 0.
+///
 /// `accum` and `wsum` hold one region per ring slot, the layout
 /// [`scatter_patch`] addresses, so a member matched in a neighbour frame
 /// scatters into that frame's own region rather than the centre's.
@@ -274,6 +280,8 @@ const _: () = assert!(
 )]
 pub fn collab_fused<N: Size>(
     ring: &Array<Vector<f32, N>>,
+    phase_ring: &Array<Vector<f32, N>>,
+    phase_gain: &Array<f32>,
     mv_field: &Array<i32>,
     confidence: &Array<f32>,
     neighbour_slots: &Array<u32>,
@@ -289,6 +297,7 @@ pub fn collab_fused<N: Size>(
     weight_scale: f32,
     accum_scale: f32,
     #[comptime] warp_uniform: bool,
+    #[comptime] subpel: u32,
     #[comptime] radius: u32,
     #[comptime] grid_frames: u32,
     #[comptime] refine: u32,
@@ -306,6 +315,11 @@ pub fn collab_fused<N: Size>(
     #[comptime] spatial_radius: u32,
     #[comptime] refs_x: u32,
 ) {
+    // Neither buffer nor the mode selector is read yet, since
+    // `trajectory_search` still ignores `subpel`.
+    let _ = (&phase_ring, &phase_gain);
+    let _ = subpel;
+
     let tid = UNIT_POS_X;
     let grp = tid / 8u32;
     let sub = tid % 8u32;

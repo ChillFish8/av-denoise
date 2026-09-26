@@ -16,6 +16,7 @@ pub mod kernels;
 mod params;
 mod regularise;
 mod snapshot;
+pub(crate) mod subpel;
 
 // Every test in this tree runs against a real GPU runtime, see
 // `tests::helpers::R`, so it only builds when a wgpu-backed feature is
@@ -26,3 +27,5 @@ mod tests;
 pub use denoiser::Nl4dDenoiser;
 pub use params::{MAX_KAISER_BETA, Nl4dParams};
 pub use snapshot::MotionSnapshot;
+
+pub use self::subpel::{HALF_PEL_TAPS, SubpelPrecision, phase_gains};

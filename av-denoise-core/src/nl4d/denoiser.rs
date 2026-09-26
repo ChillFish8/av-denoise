@@ -4,6 +4,14 @@ use cubecl::server::Handle;
 use super::params::Nl4dParams;
 use super::regularise::run_regularise;
 use super::snapshot::{LastFields, MotionSnapshot, read_snapshot};
+use super::subpel::{
+    HALF_PEL_TAPS,
+    PhasePlaneCtx,
+    SubpelPrecision,
+    phase_gains,
+    run_phase_planes,
+    weight_floor_gain,
+};
 use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use crate::collab::kernels::aggregate::{
     collab_normalise,
@@ -141,6 +149,19 @@ pub struct Nl4dDenoiser<R: Runtime> {
     /// front end's own, allocated only when `field_lambda > 0.0`.
     reg_mv: Option<Handle>,
     reg_conf: Option<Handle>,
+    /// How finely a temporal match is aligned between whole pixels. See
+    /// [Nl4dParams::subpel](crate::nl4d::Nl4dParams::subpel).
+    subpel: SubpelPrecision,
+    /// Four phase planes per ring slot, rebuilt from that slot's current
+    /// frame whenever it changes, or `None` when `subpel` is
+    /// [SubpelPrecision::Off](crate::nl4d::SubpelPrecision::Off).
+    phase_ring: Option<Handle>,
+    /// The 16 quarter-pel noise gains from
+    /// [phase_gains](crate::nl4d::phase_gains).
+    phase_gain_buf: Handle,
+    /// The 8 half-sample filter taps from
+    /// [HALF_PEL_TAPS](crate::nl4d::HALF_PEL_TAPS).
+    half_taps_buf: Handle,
 }
 
 impl<R: Runtime> Nl4dDenoiser<R> {
@@ -178,6 +199,14 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 "frame dimensions {width}x{height} must be at least {p}x{p} for the \
                  collaborative filter's patch grid",
                 p = PATCH_SIZE,
+            ));
+        }
+
+        let subpel_margin = PATCH_SIZE + 2;
+        if params.subpel != SubpelPrecision::Off && (width < subpel_margin || height < subpel_margin) {
+            return Err(format!(
+                "frame dimensions {width}x{height} must be at least {subpel_margin}x{subpel_margin} \
+                 with subpel on, which reads one pixel beyond each patch edge"
             ));
         }
 
@@ -250,6 +279,11 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             (None, None)
         };
 
+        let phase_ring = (params.subpel != SubpelPrecision::Off)
+            .then(|| client.empty(frame_len * ring_frames as usize * 4 * size_of::<f32>()));
+        let phase_gain_buf = client.create_from_slice(f32::as_bytes(&phase_gains()));
+        let half_taps_buf = client.create_from_slice(f32::as_bytes(&HALF_PEL_TAPS));
+
         Ok(Self {
             front,
             width,
@@ -279,6 +313,10 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             field_lambda: params.field_lambda,
             reg_mv,
             reg_conf,
+            subpel: params.subpel,
+            phase_ring,
+            phase_gain_buf,
+            half_taps_buf,
         })
     }
 
@@ -424,6 +462,18 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         ))
     }
 
+    /// The phase ring buffer, or `None` when `subpel` is off.
+    #[cfg(test)]
+    pub(crate) fn phase_ring_for_test(&self) -> Option<&Handle> {
+        self.phase_ring.as_ref()
+    }
+
+    /// The front end this denoiser drives.
+    #[cfg(test)]
+    pub(crate) fn front_for_test(&self) -> &NlmDenoiser<R> {
+        &self.front
+    }
+
     /// How many tail frames [`Self::flush`] must emit for the stream
     /// pushed so far.
     ///
@@ -516,7 +566,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let mut sigma_host = vec![0.0f32; stored_ch as usize];
         sigma_host[..channels_count as usize].copy_from_slice(&sigmas[..channels_count as usize]);
         self.sigma_buf = client.create_from_slice(f32::as_bytes(&sigma_host));
-        let wnorm = weight_scale(sigma_host[0], &self.dct_profile);
+        let wnorm = weight_scale(sigma_host[0], &self.dct_profile) * weight_floor_gain(self.subpel);
 
         let refs_x = refs_along(self.width);
         let refs_y = refs_along(self.height);
@@ -589,6 +639,29 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             neighbours,
         });
 
+        // A slot's planes are rebuilt when its frame arrives. Pass 0 has
+        // no earlier pass to have built any of them, so it builds every
+        // slot.
+        if let Some(phase_ring) = self.phase_ring.as_ref() {
+            let ctx = PhasePlaneCtx {
+                ring: &view.input,
+                phase_ring,
+                taps: &self.half_taps_buf,
+                total_frames,
+                width: self.width,
+                height: self.height,
+                stored_ch,
+            };
+
+            if pass_index == 0 {
+                for slot in 0..total_frames {
+                    run_phase_planes::<R>(&client, &ctx, slot);
+                }
+            } else {
+                run_phase_planes::<R>(&client, &ctx, newest_slot);
+            }
+        }
+
         unsafe {
             if pass_index == 0 {
                 // Clearing the whole ring in one dispatch would need
@@ -630,12 +703,19 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 );
             }
 
+            let (phase_ring, phase_ring_len) = match self.phase_ring.as_ref() {
+                Some(ring) => (ring.clone(), ring_len * 4),
+                None => (view.input.clone(), ring_len),
+            };
+
             collab_fused::launch_unchecked::<R>(
                 &client,
                 collab_grid,
                 collab_dim,
                 stored_ch as usize,
                 ArrayArg::from_raw_parts(view.input.clone(), ring_len),
+                ArrayArg::from_raw_parts(phase_ring, phase_ring_len),
+                ArrayArg::from_raw_parts(self.phase_gain_buf.clone(), 16),
                 ArrayArg::from_raw_parts(mv_field.clone(), mv_len.max(1)),
                 ArrayArg::from_raw_parts(confidence.clone(), conf_len.max(1)),
                 ArrayArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
@@ -651,6 +731,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 wnorm,
                 self.accum_scale,
                 self.warp_uniform,
+                self.subpel.kernel_mode(),
                 self.temporal_radius,
                 grid_frames(self.temporal_radius),
                 self.refine,

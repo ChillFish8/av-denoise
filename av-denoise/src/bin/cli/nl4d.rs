@@ -253,6 +253,7 @@ impl Nl4dArgs {
                     // determinism. `--windowed-noise-estimation` exists
                     // to measure the difference on real footage.
                     windowed_noise_estimation: self.windowed_noise_estimation,
+                    subpel: defaults.subpel,
                 }),
                 // nl4d has no NLM weighting pass for a strength to apply to.
                 luma_strength: None,

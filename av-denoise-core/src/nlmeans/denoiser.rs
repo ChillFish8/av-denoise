@@ -1735,6 +1735,12 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.wire_outputs.as_ref()
     }
 
+    /// The frame ring, one physical slot per ring position.
+    #[cfg(test)]
+    pub(crate) fn input_ring_for_test(&self) -> &Handle {
+        &self.input_buf
+    }
+
     /// The smoothed per-channel sigma estimate NLMeans is currently
     /// filtering with.
     ///
