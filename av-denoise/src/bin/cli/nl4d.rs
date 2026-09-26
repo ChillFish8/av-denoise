@@ -97,46 +97,6 @@ pub struct Nl4dArgs {
     #[arg(long)]
     pub lambda_ht_scale: Option<f32>,
 
-    /// How much a poorly matched neighbour patch is distrusted.
-    ///
-    /// A patch matched in a neighbour frame is treated as a noisier view
-    /// of the same content, as noisy as its own match residual says, and
-    /// this scales how much noisier. `1.0` (the library default) is the
-    /// shipped calibration. `0` matches `--no-confidence-variance`.
-    ///
-    /// The variance grows with the square of this, so `2` distrusts a
-    /// bad match four times as much. The effect saturates. It saturates
-    /// sooner the worse the patch matched, because the variance the
-    /// mechanism derives is capped at 64 times the channel's own
-    /// variance, and values above `16` are rejected because nothing up
-    /// there can change a pixel.
-    ///
-    /// Setting this applies one value to both planes, unless
-    /// `--luma-mismatch-scale` or `--chroma-mismatch-scale` overrides
-    /// it.
-    #[arg(long)]
-    pub mismatch_scale: Option<f32>,
-
-    /// `--mismatch-scale` override for the brightness plane only.
-    ///
-    /// Falls back to `--mismatch-scale`, or to the library default, when
-    /// not set.
-    ///
-    /// Ignored when luma is not being denoised, or when `--channel-mode
-    /// yuv` is used.
-    #[arg(long)]
-    pub luma_mismatch_scale: Option<f32>,
-
-    /// `--mismatch-scale` override for the colour planes only.
-    ///
-    /// Falls back to `--mismatch-scale`, or to the library default, when
-    /// not set.
-    ///
-    /// Ignored when chroma is not being denoised, or when
-    /// `--channel-mode yuv` is used.
-    #[arg(long)]
-    pub chroma_mismatch_scale: Option<f32>,
-
     /// How noisy the source is. Leave it unset for almost all uses.
     ///
     /// The noise level is measured automatically per scene when this
@@ -197,15 +157,6 @@ pub struct Nl4dArgs {
     /// objects less closely. `0` leaves the tracked field as it is.
     #[arg(long)]
     pub field_lambda: Option<f32>,
-
-    /// Stops a poorly matched patch from being trusted less than a well
-    /// matched one.
-    ///
-    /// On by default, the shrinkage treats a patch matched with a large
-    /// match distance as a noisier observation. This flag gives every
-    /// patch the same noise estimate instead.
-    #[arg(long)]
-    pub no_confidence_variance: bool,
 
     /// Estimates noise from a local window instead of a temporal EMA
     /// over stream history.
@@ -293,8 +244,6 @@ impl Nl4dArgs {
                     lambda_ht: self.lambda_ht,
                     lambda_ht_scale: self.lambda_ht_scale.unwrap_or(defaults.lambda_ht_scale),
                     c_min: self.c_min.unwrap_or(defaults.c_min),
-                    mismatch_scale: self.mismatch_scale.unwrap_or(defaults.mismatch_scale),
-                    confidence_variance: !self.no_confidence_variance,
                     kaiser_beta: self.kaiser_beta.unwrap_or(defaults.kaiser_beta),
                     field_lambda: self.field_lambda.unwrap_or(defaults.field_lambda),
                     // The CLI keeps the temporal EMA every calibrated
@@ -309,8 +258,6 @@ impl Nl4dArgs {
                 chroma_strength: None,
                 luma_lambda_ht: self.luma_lambda_ht,
                 chroma_lambda_ht: self.chroma_lambda_ht,
-                luma_mismatch_scale: self.luma_mismatch_scale,
-                chroma_mismatch_scale: self.chroma_mismatch_scale,
             },
             progress: globals.progress,
         })
@@ -329,24 +276,6 @@ impl Nl4dArgs {
             ChannelIntent::YuvFused if self.luma_lambda_ht.is_some() || self.chroma_lambda_ht.is_some() => {
                 tracing::warn!(
                     "--luma-lambda-ht and --chroma-lambda-ht are ignored when --channel-mode yuv is used"
-                );
-            },
-            _ => {},
-        }
-
-        match intent {
-            ChannelIntent::Luma if self.chroma_mismatch_scale.is_some() => {
-                tracing::warn!("--chroma-mismatch-scale is ignored when chroma is not being denoised");
-            },
-            ChannelIntent::Chroma if self.luma_mismatch_scale.is_some() => {
-                tracing::warn!("--luma-mismatch-scale is ignored when luma is not being denoised");
-            },
-            ChannelIntent::YuvFused
-                if self.luma_mismatch_scale.is_some() || self.chroma_mismatch_scale.is_some() =>
-            {
-                tracing::warn!(
-                    "--luma-mismatch-scale and --chroma-mismatch-scale are ignored when \
-                     --channel-mode yuv is used"
                 );
             },
             _ => {},
@@ -408,7 +337,6 @@ mod tests {
         assert_eq!(nl4d.sigma_scale, None);
         assert_eq!(nl4d.thsad_scale, None);
         assert_eq!(nl4d.c_min, None);
-        assert!(!nl4d.no_confidence_variance);
         assert!(!nl4d.motion.any_set());
     }
 
@@ -433,7 +361,6 @@ mod tests {
             "0.8",
             "--c-min",
             "0.1",
-            "--no-confidence-variance",
         ]);
 
         assert_eq!(nl4d.temporal_radius, Some(3));
@@ -445,7 +372,6 @@ mod tests {
         assert!((nl4d.sigma_scale.unwrap() - 1.1).abs() < f32::EPSILON);
         assert!((nl4d.thsad_scale.unwrap() - 0.8).abs() < f32::EPSILON);
         assert!((nl4d.c_min.unwrap() - 0.1).abs() < f32::EPSILON);
-        assert!(nl4d.no_confidence_variance);
     }
 
     #[test]
@@ -523,6 +449,23 @@ mod tests {
                 err.kind(),
                 clap::error::ErrorKind::UnknownArgument,
                 "{flag} should not exist under nl4d, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_removed_mismatch_options_are_rejected() {
+        for flag in [
+            "--no-confidence-variance",
+            "--mismatch-scale=1.0",
+            "--luma-mismatch-scale=1.0",
+            "--chroma-mismatch-scale=1.0",
+        ] {
+            let err = parse_err(&[flag]);
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{flag} must no longer parse, got {err}"
             );
         }
     }
@@ -650,7 +593,6 @@ mod tests {
             "unset --lambda-ht should stay None here, resolved later per plane"
         );
         assert!((nl4d_opts.c_min - defaults.c_min).abs() < f32::EPSILON);
-        assert_eq!(nl4d_opts.confidence_variance, defaults.confidence_variance);
     }
 
     #[test]
@@ -696,67 +638,6 @@ mod tests {
 
         assert!((nl4d_opts.sigma_scale - 1.2).abs() < f32::EPSILON);
         assert!((nl4d_opts.thsad_scale - 0.7).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn no_confidence_variance_flows_into_the_nl4d_algorithm() {
-        let (args, nl4d) = parse(&["--no-confidence-variance"]);
-        let opts = nl4d.build_options(&args).expect("build_options should succeed");
-
-        assert!(!expect_nl4d(&opts).confidence_variance);
-    }
-
-    #[test]
-    fn mismatch_scale_flows_into_the_nl4d_algorithm() {
-        let (args, nl4d) = parse(&["--mismatch-scale", "4.0"]);
-        let opts = nl4d.build_options(&args).expect("build_options should succeed");
-
-        assert!((expect_nl4d(&opts).mismatch_scale - 4.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn unset_mismatch_scale_resolves_to_the_library_default() {
-        let (args, nl4d) = parse(&[]);
-        let opts = nl4d.build_options(&args).expect("build_options should succeed");
-        let defaults = Nl4dOptions::default();
-
-        assert!((expect_nl4d(&opts).mismatch_scale - defaults.mismatch_scale).abs() < f32::EPSILON);
-    }
-
-    /// `build_options` carries the two per-plane `mismatch_scale`
-    /// overrides straight through onto `PlaneOptions`, unresolved, the
-    /// same way it carries the `lambda_ht` pair.
-    /// `PlaneOptions::algorithm_for` (`av-denoise-core/src/frame/mod.rs`)
-    /// is what resolves them per plane.
-    #[test]
-    fn per_plane_mismatch_scale_flags_flow_into_cli_options_independently() {
-        let (args, nl4d) = parse(&["--luma-mismatch-scale", "4.0"]);
-        let opts = nl4d.build_options(&args).expect("build_options should succeed");
-        assert!((opts.planes.luma_mismatch_scale.unwrap() - 4.0).abs() < f32::EPSILON);
-        assert_eq!(opts.planes.chroma_mismatch_scale, None);
-
-        let (args, nl4d) = parse(&["--chroma-mismatch-scale", "2.5"]);
-        let opts = nl4d.build_options(&args).expect("build_options should succeed");
-        assert!((opts.planes.chroma_mismatch_scale.unwrap() - 2.5).abs() < f32::EPSILON);
-        assert_eq!(opts.planes.luma_mismatch_scale, None);
-
-        let (args, nl4d) = parse(&["--luma-mismatch-scale", "4.0", "--chroma-mismatch-scale", "2.5"]);
-        let opts = nl4d.build_options(&args).expect("build_options should succeed");
-        assert!((opts.planes.luma_mismatch_scale.unwrap() - 4.0).abs() < f32::EPSILON);
-        assert!((opts.planes.chroma_mismatch_scale.unwrap() - 2.5).abs() < f32::EPSILON);
-    }
-
-    /// The shared flag is what a per-plane override falls back to, so
-    /// setting one plane must leave the other on the shared value rather
-    /// than on the library default.
-    #[test]
-    fn a_per_plane_mismatch_scale_leaves_the_shared_value_for_the_other_plane() {
-        let (args, nl4d) = parse(&["--mismatch-scale", "2.0", "--luma-mismatch-scale", "8.0"]);
-        let opts = nl4d.build_options(&args).expect("build_options should succeed");
-
-        assert!((expect_nl4d(&opts).mismatch_scale - 2.0).abs() < f32::EPSILON);
-        assert!((opts.planes.luma_mismatch_scale.unwrap() - 8.0).abs() < f32::EPSILON);
-        assert_eq!(opts.planes.chroma_mismatch_scale, None);
     }
 
     #[test]

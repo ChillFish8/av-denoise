@@ -45,8 +45,6 @@ mod tests {
             chroma_strength: None,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
-            luma_mismatch_scale: None,
-            chroma_mismatch_scale: None,
         };
         // Zero width collapses the 4:2:0 chroma plane to nothing, which
         // `PlanarDenoiser::create` rejects before touching the GPU.

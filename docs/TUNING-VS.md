@@ -98,12 +98,6 @@ is exactly what `preset="veryfast"` does.
 - **`sigma`** pins the noise level to a fixed value and turns the per-frame measurement off
   entirely. `sigma_scale` keeps the measurement and nudges it, which is almost always what you
   actually want.
-- **`luma_mismatch_scale` and `chroma_mismatch_scale`** set how much less a poorly matched patch is
-  trusted, rather than whether it is, judged by the patch's own match residual rather than the
-  motion block's score. The variance they control grows with the square of the value,
-  so `2` distrusts a bad match four times as much. The effect saturates. It saturates sooner the
-  worse the patch matched, because the variance the mechanism derives is capped at 64 times the
-  channel's own variance, and `0` turns the mechanism off.
 - **`temporal_radius`** is what `preset` mostly exists to resolve. Setting it by hand is fine, but
   it is the same lever the preset ladder pulls, so reach for the ladder first.
 

@@ -1,17 +1,5 @@
 use crate::nlmeans::{ChannelMode, HqParams, MotionCompensationMode, MotionEstimation, NlmParams};
 
-/// The largest [`Nl4dParams::mismatch_scale`] worth accepting.
-///
-/// A member's own match distance never exceeds `3 * PATCH_AREA` in the
-/// search's units, so its mismatch variance never exceeds
-/// `mismatch_scale^2` in absolute pixel-value units. The mechanism caps
-/// at [`crate::collab::kernels::fused::MEMBER_SIGMA2_CAP`] times the
-/// channel variance, so even the worst possible mismatch saturates by a
-/// scale of `8 * sigma`. Even a source noisy enough to measure `sigma =
-/// 0.05` saturates well under 1, so nothing above this can move a pixel
-/// and accepting it would only promise a range that is not there.
-pub const MAX_MISMATCH_SCALE: f32 = 16.0;
-
 /// The largest [`Nl4dParams::kaiser_beta`] worth accepting.
 ///
 /// A Kaiser window's taps fall off faster the larger `beta` is. By 8 the
@@ -72,21 +60,6 @@ pub struct Nl4dParams {
     /// compute a submit spends, never which candidates are admitted once
     /// they are scored.
     pub c_min: f32,
-    /// A multiplier on the mismatch variance a temporal member carries
-    /// into the hard threshold.
-    ///
-    /// A member matched in a neighbour frame is treated as a noisier
-    /// observation of the reference, and its extra variance is its own
-    /// match distance, per channel and per pixel, with the noise floor
-    /// removed. The variance grows with the square of this, so `2.0` is
-    /// a four-fold increase. `1.0`, the default, is the shipped
-    /// calibration. `0.0` matches `confidence_variance: false`.
-    ///
-    /// The mechanism saturates. A member's extra variance is capped at
-    /// [`crate::collab::kernels::fused::MEMBER_SIGMA2_CAP`] times the
-    /// channel variance, so raising this past the point where a
-    /// member's distance reaches the cap stops changing anything.
-    pub mismatch_scale: f32,
     /// The `beta` of the Kaiser window each filtered patch is tapered
     /// with as it is aggregated, in `0..=8`.
     ///
@@ -99,14 +72,6 @@ pub struct Nl4dParams {
     /// aggregation, which is what this did before the window existed.
     /// See [`crate::collab::kernels::aggregate::kaiser_window`].
     pub kaiser_beta: f32,
-    /// Whether a temporal member's mismatch variance reaches the
-    /// hard-threshold shrinkage.
-    ///
-    /// `true`, the default, treats a poorly matched member as a noisier
-    /// observation, so the threshold trusts it less. `false` gives every
-    /// member the plain channel sigma instead, which is what an ablation
-    /// needs to isolate the effect of this mechanism.
-    pub confidence_variance: bool,
     /// The penalty on a block's vector deviating from its
     /// neighbourhood's median, in the field regularisation pass.
     ///
@@ -143,9 +108,7 @@ impl Default for Nl4dParams {
             spatial_radius: 9,
             lambda_ht: 5.2,
             c_min: 0.05,
-            mismatch_scale: 1.0,
             kaiser_beta: 2.0,
-            confidence_variance: true,
             field_lambda: 1.0,
         }
     }
@@ -230,13 +193,6 @@ impl Nl4dParams {
             return Err(format!("c_min must be finite and in [0, 1), got {}", self.c_min));
         }
 
-        if !(self.mismatch_scale.is_finite() && (0.0..=MAX_MISMATCH_SCALE).contains(&self.mismatch_scale)) {
-            return Err(format!(
-                "mismatch_scale must be finite and in [0, {MAX_MISMATCH_SCALE}], got {}",
-                self.mismatch_scale
-            ));
-        }
-
         if !(self.kaiser_beta.is_finite() && (0.0..=MAX_KAISER_BETA).contains(&self.kaiser_beta)) {
             return Err(format!(
                 "kaiser_beta must be finite and in 0..={MAX_KAISER_BETA}, got {}",
@@ -262,40 +218,6 @@ mod tests {
     #[test]
     fn validate_accepts_default() {
         assert!(Nl4dParams::default().validate().is_ok());
-    }
-
-    #[test]
-    fn validate_accepts_the_whole_mismatch_scale_range() {
-        for scale in [0.0, 1.0, 8.0, MAX_MISMATCH_SCALE] {
-            let params = Nl4dParams {
-                mismatch_scale: scale,
-                ..Nl4dParams::default()
-            };
-            assert!(
-                params.validate().is_ok(),
-                "mismatch_scale={scale} should be accepted"
-            );
-        }
-    }
-
-    /// Past the saturation point the dial cannot move a pixel, so a
-    /// caller asking for more is asking for something that does not
-    /// exist and should hear so rather than see no effect.
-    #[test]
-    fn validate_rejects_a_mismatch_scale_past_saturation_or_below_zero() {
-        for scale in [-1.0, MAX_MISMATCH_SCALE + 0.1, f32::NAN, f32::INFINITY] {
-            let params = Nl4dParams {
-                mismatch_scale: scale,
-                ..Nl4dParams::default()
-            };
-            let err = params
-                .validate()
-                .expect_err("mismatch_scale={scale} should be rejected");
-            assert!(
-                err.contains("mismatch_scale"),
-                "error should name mismatch_scale, got {err}"
-            );
-        }
     }
 
     /// A block geometry with `blksize / step` at or under

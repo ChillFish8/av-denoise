@@ -233,17 +233,6 @@ pub struct Nl4dOptions {
     /// affects how much compute a submit spends, never which candidates
     /// are admitted once they are scored.
     pub c_min: f32,
-    /// A multiplier on the mismatch variance a poorly matched temporal
-    /// member carries into the hard threshold. Defaults to 1.0.
-    ///
-    /// The variance grows with the square of this. The mechanism
-    /// saturates well before the top of its accepted range, see
-    /// [`crate::nl4d::Nl4dParams::mismatch_scale`].
-    pub mismatch_scale: f32,
-    /// Whether a temporal member's mismatch variance reaches the
-    /// hard-threshold shrinkage at all. Defaults to `true`. See
-    /// [`crate::nl4d::Nl4dParams::confidence_variance`].
-    pub confidence_variance: bool,
     /// The `beta` of the Kaiser window each filtered patch is tapered
     /// with as it is aggregated. Defaults to 2.0. `0.0` is uniform
     /// aggregation. See [`crate::nl4d::Nl4dParams::kaiser_beta`].
@@ -279,8 +268,6 @@ impl Default for Nl4dOptions {
             lambda_ht: None,
             lambda_ht_scale: 1.0,
             c_min: defaults.c_min,
-            mismatch_scale: defaults.mismatch_scale,
-            confidence_variance: defaults.confidence_variance,
             kaiser_beta: defaults.kaiser_beta,
             windowed_noise_estimation: false,
             field_lambda: defaults.field_lambda,
@@ -680,8 +667,6 @@ fn build_engine<R: Runtime>(
                 spatial_radius: opts.spatial_radius,
                 lambda_ht,
                 c_min: opts.c_min,
-                mismatch_scale: opts.mismatch_scale,
-                confidence_variance: opts.confidence_variance,
                 kaiser_beta: opts.kaiser_beta,
                 field_lambda: opts.field_lambda,
             };
@@ -1715,7 +1700,6 @@ mod options_tests {
         assert_eq!(opts.refine, params.refine);
         assert_eq!(opts.spatial_radius, params.spatial_radius);
         assert!((opts.c_min - params.c_min).abs() < f32::EPSILON);
-        assert_eq!(opts.confidence_variance, params.confidence_variance);
         // The two `lambda_ht` fields hold different things, so they are
         // not compared. `opts.lambda_ht` stays `None` and is deferred to
         // `nl4d_default_lambda_ht` once the plane is known (see

@@ -71,14 +71,6 @@ the smoothing off and leaves the tracked field as it is.
   actually want.
 - **`--c-min`** only decides how much compute a frame costs. It never changes which patches are
   admitted once they are scored, so it is not a quality dial.
-- **`--no-confidence-variance`** stops a poorly matched patch from being trusted less than a
-  well-matched one. It exists to isolate that mechanism in testing and calibration, not to improve output.
-- **`--mismatch-scale`** sets how much less a poorly matched patch is trusted, rather than whether it
-  is, judged by the patch's own match residual rather than the motion block's score.
-  The variance it controls grows with the square of the value, so `2` distrusts a bad match four times
-  as much. The effect saturates. It saturates sooner the worse the patch matched, because the
-  variance the mechanism derives is capped at 64 times the channel's own variance, and `0` is the
-  same thing as `--no-confidence-variance`.
 - **`--thsad-scale`, `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels`** tune
   the motion machinery's internals, changing any of these will likely invalidate all other defaults.
 
