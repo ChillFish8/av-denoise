@@ -14,7 +14,7 @@ pub const SPATIAL_RADIUS: u32 = 9;
 /// `collab::MAX_K`, the group size the filter runs at.
 pub const K_MAX: u32 = 8;
 /// `Nl4dParams::default().lambda_ht`.
-pub const LAMBDA_HT: f32 = 5.2;
+pub const LAMBDA_HT: f32 = 3.6;
 
 /// The motion field's block stride. Held at `collab::PATCH_SIZE` so a
 /// block boundary lines up with a patch boundary.

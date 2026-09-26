@@ -52,7 +52,7 @@ pub struct Nl4dParams {
     /// Higher shrinks more coefficients, so it removes more noise and
     /// more fine detail.
     ///
-    /// Defaults to 5.2. Note that in reality luma and chroma want separately
+    /// Defaults to 3.6. Note that in reality luma and chroma want separately
     /// tuned values. See [nl4d_default_lambda_ht](crate::nl4d_default_lambda_ht).
     pub lambda_ht: f32,
     /// The confidence floor below which a whole neighbour block is
@@ -106,7 +106,7 @@ impl Default for Nl4dParams {
             temporal_radius: 2,
             refine: 2,
             spatial_radius: 9,
-            lambda_ht: 5.2,
+            lambda_ht: 3.6,
             c_min: 0.05,
             kaiser_beta: 2.0,
             field_lambda: 1.0,
