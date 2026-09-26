@@ -3,7 +3,8 @@ use av_denoise_core::collab::kernels::aggregate::{cross_frame_accum_scale, kaise
 use av_denoise_core::collab::kernels::fused::collab_fused;
 use av_denoise_core::collab::kernels::transforms::dct_noise_profile;
 use av_denoise_core::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
-use av_denoise_core::nl4d::phase_gains;
+use av_denoise_core::nl4d::kernels::nl4d_phase_planes;
+use av_denoise_core::nl4d::{HALF_PEL_TAPS, phase_gains};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -23,7 +24,7 @@ use super::nl4d_geometry::{
     conf_stride,
     mv_stride,
 };
-use super::{H, W, block_sync, make_padded_frame, shapes_with_ch, stored_channels};
+use super::{BLOCK_X, BLOCK_Y, H, W, block_sync, make_padded_frame, shapes_with_ch, stored_channels};
 
 /// The fused collaborative kernel at the library's default search
 /// geometry, over a 1080p frame ring. One 64-lane cube carries eight
@@ -58,6 +59,9 @@ pub struct CollabFusedBench<R: Runtime> {
     pub ch: u32,
     pub ch_name: &'static str,
     pub split_mv: bool,
+    /// The kernel's `subpel` comptime selector: 0 is off, 1 is half-pel,
+    /// 2 is quarter-pel.
+    pub subpel: u32,
 }
 
 /// How far apart two neighbouring blocks' vectors sit in the split
@@ -87,6 +91,9 @@ pub struct CollabFusedInput {
     /// The 16 phase gains, passed under `subpel = 0` where the kernel
     /// never reads them.
     pub phase_gain: Handle,
+    /// The phase ring, built when `subpel > 0`. Left unset under `Off`,
+    /// where the kernel reads `ring` in its place.
+    pub phase_ring: Option<Handle>,
 }
 
 impl<R: Runtime> Benchmark for CollabFusedBench<R> {
@@ -147,6 +154,29 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
         let group_weight = self.client.empty(ref_count(W, H) * size_of::<f32>());
         let phase_gain = self.client.create_from_slice(f32::as_bytes(&phase_gains()));
 
+        let ring_len = ring_data.len();
+        let phase_ring = (self.subpel > 0).then(|| {
+            let planes = self.client.empty(ring_len * 4 * size_of::<f32>());
+            let taps = self.client.create_from_slice(f32::as_bytes(&HALF_PEL_TAPS));
+            for slot in 0..N_FRAMES {
+                unsafe {
+                    nl4d_phase_planes::launch_unchecked::<R>(
+                        &self.client,
+                        CubeCount::new_2d(W.div_ceil(BLOCK_X), H.div_ceil(BLOCK_Y)),
+                        CubeDim::new_2d(BLOCK_X, BLOCK_Y),
+                        stored_ch as usize,
+                        ArrayArg::from_raw_parts(ring.clone(), ring_len),
+                        ArrayArg::from_raw_parts(planes.clone(), ring_len * 4),
+                        ArrayArg::from_raw_parts(taps.clone(), 8),
+                        slot,
+                        W,
+                        H,
+                    );
+                }
+            }
+            planes
+        });
+
         CollabFusedInput {
             ring,
             mv_field,
@@ -158,8 +188,9 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
             accum,
             wsum,
             group_weight,
-            ring_len: ring_data.len(),
+            ring_len,
             phase_gain,
+            phase_ring,
         }
     }
 
@@ -180,6 +211,11 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
         let grid = CubeCount::new_2d(fused_cubes_x(W), refs_y);
         let dim = CubeDim::new_1d(64);
 
+        let (phase_ring, phase_ring_len) = match args.phase_ring.as_ref() {
+            Some(planes) => (planes.clone(), args.ring_len * 4),
+            None => (args.ring.clone(), args.ring_len),
+        };
+
         unsafe {
             collab_fused::launch_unchecked::<R>(
                 &self.client,
@@ -187,7 +223,7 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
                 dim,
                 stored_ch as usize,
                 ArrayArg::from_raw_parts(args.ring.clone(), args.ring_len),
-                ArrayArg::from_raw_parts(args.ring.clone(), args.ring_len),
+                ArrayArg::from_raw_parts(phase_ring, phase_ring_len),
                 ArrayArg::from_raw_parts(args.phase_gain.clone(), 16),
                 ArrayArg::from_raw_parts(args.mv_field.clone(), (2 * RADIUS * mv_stride) as usize),
                 ArrayArg::from_raw_parts(args.confidence.clone(), (2 * RADIUS * conf_stride) as usize),
@@ -204,7 +240,7 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
                 weight_scale(SIGMA, &dct_noise_profile(0.0)),
                 cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS),
                 needs_warp_uniform_search(&self.client),
-                0u32,
+                self.subpel,
                 RADIUS,
                 grid_frames(RADIUS),
                 REFINE,
@@ -228,7 +264,12 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
 
     fn name(&self) -> String {
         let field = if self.split_mv { "_split_mv" } else { "" };
-        format!("collab_fused_1080p_{}{field}", self.ch_name)
+        let subpel = match self.subpel {
+            1 => "_subpel_half",
+            2 => "_subpel_quarter",
+            _ => "",
+        };
+        format!("collab_fused_1080p_{}{field}{subpel}", self.ch_name)
     }
 
     fn sync(&self) {

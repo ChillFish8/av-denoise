@@ -1,10 +1,24 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::helpers::{R, make_client, noisy_copy_of, textured_base};
+use super::helpers::{R, make_client, noisy_copy_of, psnr, smooth_texture_at, textured_base};
+use crate::accelerate::Accelerator;
 use crate::denoiser::FrameOutput;
 use crate::nl4d::subpel::{HALF_PEL_TAPS, PhasePlaneCtx, phase_planes_host, run_phase_planes};
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams, SubpelPrecision};
+use crate::{
+    Algorithm,
+    ChannelIntent,
+    DenoisingMode,
+    Depth,
+    Device,
+    FrameLayout,
+    Nl4dOptions,
+    PlanarDenoiser,
+    PlaneOptions,
+    Planes,
+    Subsampling,
+};
 
 /// Runs the phase-plane kernel over every slot of `ring` and reads the
 /// whole phase ring back.
@@ -215,4 +229,167 @@ fn phase_ring_tracks_the_input_ring_through_flush_and_reset() {
         let _ = denoiser.denoise_submit().unwrap();
     }
     assert_phase_ring_in_sync(&denoiser, width, height, total_frames);
+}
+
+const CLIP_FRAMES: usize = 12;
+const CLIP_SIGMA: f32 = 0.03;
+const TEN_BIT_MAX: f32 = 1023.0;
+
+/// One plane of frame `frame_idx`, panning half a pixel per frame.
+fn clean_plane(width: u32, height: u32, frame_idx: usize) -> Vec<f32> {
+    let shift = -0.5 * frame_idx as f32;
+    smooth_texture_at(width, height, shift)
+}
+
+fn to_ten_bit(plane: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(plane.len() * 2);
+    for &value in plane {
+        let code = (value.clamp(0.0, 1.0) * TEN_BIT_MAX).round() as u16;
+        let pair = code.to_le_bytes();
+        bytes.extend(pair);
+    }
+    bytes
+}
+
+fn from_ten_bit(bytes: &[u8]) -> Vec<f32> {
+    let (pairs, _) = bytes.as_chunks::<2>();
+    pairs
+        .iter()
+        .map(|&pair| {
+            let code = u16::from_le_bytes(pair);
+            code as f32 / TEN_BIT_MAX
+        })
+        .collect()
+}
+
+/// The clean and noisy 10-bit clips, frame by frame.
+fn panning_clip(layout: &FrameLayout) -> (Vec<Vec<f32>>, Vec<Planes>) {
+    let (chroma_w, chroma_h) = layout.chroma_dims();
+    let mut clean_luma = Vec::with_capacity(CLIP_FRAMES);
+    let mut noisy = Vec::with_capacity(CLIP_FRAMES);
+
+    for frame_idx in 0..CLIP_FRAMES {
+        let seed = frame_idx as u32 * 3;
+        let luma = clean_plane(layout.width, layout.height, frame_idx);
+        let chroma = clean_plane(chroma_w, chroma_h, frame_idx);
+        let noisy_y = noisy_copy_of(&luma, layout.width, layout.height, CLIP_SIGMA, seed);
+        let noisy_u = noisy_copy_of(&chroma, chroma_w, chroma_h, CLIP_SIGMA, seed + 1);
+        let noisy_v = noisy_copy_of(&chroma, chroma_w, chroma_h, CLIP_SIGMA, seed + 2);
+
+        noisy.push(Planes {
+            y: to_ten_bit(&noisy_y),
+            u: to_ten_bit(&noisy_u),
+            v: to_ten_bit(&noisy_v),
+        });
+        clean_luma.push(luma);
+    }
+
+    (clean_luma, noisy)
+}
+
+fn subpel_plane_options(intent: ChannelIntent, precision: SubpelPrecision) -> PlaneOptions {
+    let nl4d = Nl4dOptions {
+        subpel: precision,
+        ..Nl4dOptions::default()
+    };
+    PlaneOptions {
+        accelerators: vec![Accelerator::Vulkan],
+        device: Device::Default,
+        intent,
+        mode: DenoisingMode::Temporal { radius: 2 },
+        algorithm: Algorithm::Nl4d(nl4d),
+        luma_strength: None,
+        chroma_strength: None,
+        luma_lambda_ht: None,
+        chroma_lambda_ht: None,
+    }
+}
+
+fn stream_clip(opts: &PlaneOptions, layout: FrameLayout, frames: &[Planes]) -> Vec<Planes> {
+    let mut denoiser = PlanarDenoiser::create(opts, layout).unwrap();
+    let mut out = Vec::new();
+    for frame in frames {
+        denoiser.push(frame).unwrap();
+        if let Some(planes) = denoiser.recv().unwrap() {
+            out.push(planes);
+        }
+    }
+
+    denoiser.flush(|planes| out.push(planes)).unwrap();
+    out
+}
+
+fn luma_psnr(clean: &[Vec<f32>], frames: &[Planes]) -> f64 {
+    let clean_all: Vec<f32> = clean.iter().flatten().copied().collect();
+    let frames_all: Vec<f32> = frames.iter().flat_map(|planes| from_ten_bit(&planes.y)).collect();
+    psnr(&clean_all, &frames_all)
+}
+
+/// Streams the panning clip through `intent` at `precision`, and checks
+/// every code stays within 10 bits and luma PSNR beats the noisy input.
+fn assert_subpel_denoises(intent: ChannelIntent, subsampling: Subsampling, precision: SubpelPrecision) {
+    let layout = FrameLayout {
+        width: 64,
+        height: 64,
+        subsampling,
+        depth: Depth::Ten,
+    };
+    let (clean, noisy) = panning_clip(&layout);
+    let noisy_psnr = luma_psnr(&clean, &noisy);
+
+    let opts = subpel_plane_options(intent, precision);
+    let output = stream_clip(&opts, layout, &noisy);
+    assert_eq!(output.len(), CLIP_FRAMES, "{intent:?} {precision:?}");
+
+    for planes in &output {
+        for plane in [&planes.y, &planes.u, &planes.v] {
+            let values = from_ten_bit(plane);
+            let in_range = values.iter().all(|value| (0.0..=1.0).contains(value));
+            assert!(in_range, "{intent:?} {precision:?} wrote a code above 10 bits");
+        }
+    }
+
+    let denoised_psnr = luma_psnr(&clean, &output);
+    assert!(
+        denoised_psnr > noisy_psnr,
+        "{intent:?} {precision:?}: denoised {denoised_psnr:.2} dB should beat noisy \
+         {noisy_psnr:.2} dB"
+    );
+}
+
+#[test]
+fn half_pel_denoises_end_to_end_in_luma_chroma_mode() {
+    assert_subpel_denoises(
+        ChannelIntent::LumaChroma,
+        Subsampling::Yuv420,
+        SubpelPrecision::Half,
+    );
+}
+
+#[test]
+fn quarter_pel_denoises_end_to_end_in_luma_chroma_mode() {
+    assert_subpel_denoises(
+        ChannelIntent::LumaChroma,
+        Subsampling::Yuv420,
+        SubpelPrecision::Quarter,
+    );
+}
+
+/// The fused mode only accepts a 4:4:4 source.
+#[test]
+fn half_pel_denoises_end_to_end_in_yuv_mode() {
+    assert_subpel_denoises(
+        ChannelIntent::YuvFused,
+        Subsampling::Yuv444,
+        SubpelPrecision::Half,
+    );
+}
+
+#[test]
+fn quarter_pel_denoises_end_to_end_in_yuv_mode() {
+    assert_subpel_denoises(
+        ChannelIntent::YuvFused,
+        Subsampling::Yuv444,
+        SubpelPrecision::Quarter,
+    );
 }

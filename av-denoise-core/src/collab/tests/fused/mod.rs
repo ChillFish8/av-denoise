@@ -1,5 +1,6 @@
 mod behaviour;
 mod recorded;
+mod subpel;
 mod walks;
 
 use cubecl::prelude::*;

@@ -85,3 +85,15 @@ pub(crate) fn clamp_top_left(v: i32, max_pos: u32) -> u32 {
     }
     result as u32
 }
+
+/// Clamps a candidate top-left coordinate to `lo..=hi`.
+#[cube]
+pub(crate) fn clamp_top_left_within(v: i32, #[comptime] lo: u32, #[comptime] hi: u32) -> u32 {
+    let mut result = v;
+    if result < lo as i32 {
+        result = lo as i32;
+    } else if result > hi as i32 {
+        result = hi as i32;
+    }
+    result as u32
+}

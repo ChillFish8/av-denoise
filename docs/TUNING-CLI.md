@@ -64,6 +64,9 @@ default) is the shipped calibration and smooths the tracked field. Raise it furt
 flat content where vectors wander, at the cost of following small objects less closely. `0` turns
 the smoothing off and leaves the tracked field as it is.
 
+**`--subpel` aligns temporal matches between whole pixels.** `off` (the default), `half` or
+`quarter`. Finer alignment keeps more detail on slow pans, at a cost in speed and GPU memory.
+
 ### What not to touch in NL4D
 
 - **`--sigma`** pins the noise level to a fixed value and turns the per-scene measurement off

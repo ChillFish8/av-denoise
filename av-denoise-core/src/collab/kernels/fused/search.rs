@@ -1,7 +1,8 @@
 use cubecl::prelude::*;
 
+use super::subpel::{already_claimed, refine_subpel};
 use crate::collab::PATCH_SIZE;
-use crate::collab::kernels::group::{clamp_top_left, pack_pos_t};
+use crate::collab::kernels::group::{clamp_top_left, clamp_top_left_within, pack_pos_t};
 use crate::collab::kernels::plane_ops::{plane_ssd_reduce8, shift_insert8, shift_insert8_gated};
 use crate::nlmeans::kernels::helpers::read_line;
 
@@ -187,9 +188,14 @@ pub(crate) fn spatial_search<N: Size>(
 /// `tail` lowest of those per-frame matches land in `member_d` and `member_pos` at
 /// `first..first + tail`, ascending. A slot no frame filled keeps the `3.0e38` it starts with.
 ///
-/// A position already held in `member_pos[..first]` is skipped, so no patch enters the group
-/// twice. A block below `c_min` is skipped too, and a position reached by two covering blocks
-/// is scored once.
+/// A position already held in `member_pos[..first]` at the same phase is skipped, so no patch
+/// enters the group twice. A block below `c_min` is skipped too, and a position reached by two
+/// covering blocks is scored once.
+///
+/// With `subpel` above 0 each frame's match is then refined through
+/// [refine_subpel](crate::collab::kernels::fused::subpel::refine_subpel), and its phase lands in
+/// `member_phase` beside its position. The refine rectangles keep one pixel clear of every edge,
+/// so each interpolated read stays in frame.
 ///
 /// With `warp_uniform` the rectangles are walked at their full comptime span and skipped
 /// positions are masked rather than branched around, so every group in a warp takes the same
@@ -201,6 +207,8 @@ pub(crate) fn spatial_search<N: Size>(
 )]
 pub(crate) fn trajectory_search<N: Size>(
     ring: &Array<Vector<f32, N>>,
+    phase_ring: &Array<Vector<f32, N>>,
+    phase_gain: &Array<f32>,
     mv_field: &Array<i32>,
     confidence: &Array<f32>,
     neighbour_slots: &Array<u32>,
@@ -210,11 +218,14 @@ pub(crate) fn trajectory_search<N: Size>(
     sub: u32,
     scale: f32,
     c_min: f32,
+    noise_px: f32,
     member_d: &mut Array<f32>,
     member_pos: &mut Array<u32>,
+    member_phase: &mut Array<u32>,
     #[comptime] first: u32,
     #[comptime] tail: u32,
     #[comptime] warp_uniform: bool,
+    #[comptime] subpel: u32,
     #[comptime] radius: u32,
     #[comptime] refine: u32,
     #[comptime] mv_stride: u32,
@@ -232,6 +243,9 @@ pub(crate) fn trajectory_search<N: Size>(
     let n_neighbours = comptime!(2 * radius);
     let covers = comptime!(blksize.div_ceil(blk_step));
     let max_rects = comptime!(covers * covers);
+    let edge = comptime!(if subpel > 0 { 1u32 } else { 0u32 });
+    let rect_max_x = comptime!(max_x - edge);
+    let rect_max_y = comptime!(max_y - edge);
 
     let bx_hi = (anchor_x / blk_step).min(blocks_x - 1);
     let by_hi = (anchor_y / blk_step).min(blocks_y - 1);
@@ -247,6 +261,7 @@ pub(crate) fn trajectory_search<N: Size>(
 
         let mut frame_d = 3.0e38f32;
         let mut frame_pos = 0u32;
+        let mut frame_phase = 0u32;
 
         let mut seen_left = Array::<u32>::new(max_rects as usize);
         let mut seen_right = Array::<u32>::new(max_rects as usize);
@@ -279,10 +294,10 @@ pub(crate) fn trajectory_search<N: Size>(
                     let px0 = anchor_x as i32 + mv_field[mv];
                     let py0 = anchor_y as i32 + mv_field[mv + 1];
 
-                    let t_left = clamp_top_left(px0 - refine as i32, max_x);
-                    let t_right = clamp_top_left(px0 + refine as i32, max_x);
-                    let t_top = clamp_top_left(py0 - refine as i32, max_y);
-                    let t_bot = clamp_top_left(py0 + refine as i32, max_y);
+                    let t_left = clamp_top_left_within(px0 - refine as i32, edge, rect_max_x);
+                    let t_right = clamp_top_left_within(px0 + refine as i32, edge, rect_max_x);
+                    let t_top = clamp_top_left_within(py0 - refine as i32, edge, rect_max_y);
+                    let t_bot = clamp_top_left_within(py0 + refine as i32, edge, rect_max_y);
 
                     let span = comptime!(2 * refine + 1);
                     for dy in 0..span {
@@ -305,11 +320,8 @@ pub(crate) fn trajectory_search<N: Size>(
                                     skipped = true;
                                 }
                             }
-                            #[unroll]
-                            for k in 0..first {
-                                if member_pos[k as usize] == packed {
-                                    skipped = true;
-                                }
+                            if already_claimed(member_pos, member_phase, packed, 0u32, first) {
+                                skipped = true;
                             }
 
                             let live_pos = block_scored && in_rect && !skipped;
@@ -336,10 +348,10 @@ pub(crate) fn trajectory_search<N: Size>(
                         let px0 = anchor_x as i32 + mv_field[mv];
                         let py0 = anchor_y as i32 + mv_field[mv + 1];
 
-                        let t_left = clamp_top_left(px0 - refine as i32, max_x);
-                        let t_right = clamp_top_left(px0 + refine as i32, max_x);
-                        let t_top = clamp_top_left(py0 - refine as i32, max_y);
-                        let t_bot = clamp_top_left(py0 + refine as i32, max_y);
+                        let t_left = clamp_top_left_within(px0 - refine as i32, edge, rect_max_x);
+                        let t_right = clamp_top_left_within(px0 + refine as i32, edge, rect_max_x);
+                        let t_top = clamp_top_left_within(py0 - refine as i32, edge, rect_max_y);
+                        let t_bot = clamp_top_left_within(py0 + refine as i32, edge, rect_max_y);
 
                         let mut ny = t_top;
                         while ny <= t_bot {
@@ -358,11 +370,8 @@ pub(crate) fn trajectory_search<N: Size>(
                                         skipped = true;
                                     }
                                 }
-                                #[unroll]
-                                for k in 0..first {
-                                    if member_pos[k as usize] == packed {
-                                        skipped = true;
-                                    }
+                                if already_claimed(member_pos, member_phase, packed, 0u32, first) {
+                                    skipped = true;
                                 }
 
                                 if !skipped {
@@ -390,19 +399,54 @@ pub(crate) fn trajectory_search<N: Size>(
             }
         }
 
+        if comptime!(subpel > 0) {
+            let found = frame_d < 1.0e38f32;
+            let inner_x = u32::max(anchor_x, 1u32);
+            let inner_y = u32::max(anchor_y, 1u32);
+            let safe_x = u32::min(inner_x, comptime!(max_x - 1));
+            let safe_y = u32::min(inner_y, comptime!(max_y - 1));
+            refine_subpel(
+                phase_ring,
+                phase_gain,
+                anchor,
+                member_pos,
+                member_phase,
+                found,
+                safe_x,
+                safe_y,
+                slot,
+                packed_t,
+                sub,
+                scale,
+                noise_px,
+                &mut frame_d,
+                &mut frame_pos,
+                &mut frame_phase,
+                first,
+                subpel,
+                width,
+                height,
+                channels,
+            );
+        }
+
         // The frame's match joins the volume's ascending list and pushes the worst out.
         let mut carry_d = frame_d;
         let mut carry_pos = frame_pos;
+        let mut carry_phase = frame_phase;
         #[unroll]
         for j in 0..tail {
             let slot_index = comptime!(first + j) as usize;
             let held_d = member_d[slot_index];
             let held_pos = member_pos[slot_index];
+            let held_phase = member_phase[slot_index];
             let smaller = carry_d < held_d;
             member_d[slot_index] = select(smaller, carry_d, held_d);
             member_pos[slot_index] = select(smaller, carry_pos, held_pos);
+            member_phase[slot_index] = select(smaller, carry_phase, held_phase);
             carry_d = select(smaller, held_d, carry_d);
             carry_pos = select(smaller, held_pos, carry_pos);
+            carry_phase = select(smaller, held_phase, carry_phase);
         }
 
         t += 1u32;

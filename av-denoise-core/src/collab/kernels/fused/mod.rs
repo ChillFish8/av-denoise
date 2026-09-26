@@ -1,10 +1,12 @@
 pub(crate) mod grid;
 pub(crate) mod search;
+pub(crate) mod subpel;
 
 use cubecl::prelude::*;
 
 use self::grid::{grid_fwd, grid_inv, grid_variance};
 use self::search::{spatial_search, trajectory_search};
+use self::subpel::quarter_sample;
 use super::aggregate::scatter_patch;
 use super::group::unpack_t;
 use super::plane_ops::{group_base, plane_ssd_reduce8, transpose8};
@@ -117,6 +119,15 @@ const _: () = assert!(
 /// offsets on the same edge position and let one physical patch count as
 /// two.
 ///
+/// With `subpel` above 0 each neighbour frame's match is then refined to
+/// the half-pel positions around it, and at 2 to the quarter-pel
+/// positions around the half-pel winner, read from `phase_ring`. Each
+/// candidate's distance has the noise its interpolation removed added
+/// back, so every phase is compared at the same noise floor. A
+/// fractional candidate wins only when it clears the incumbent by a
+/// margin. The rectangles then keep one pixel clear of every edge, so
+/// every interpolated read stays in frame.
+///
 /// # Distance
 ///
 /// A candidate's distance is the channel-scaled sum of squared pixel
@@ -145,8 +156,8 @@ const _: () = assert!(
 /// The first `MAX_K / grid_frames` of those become volume anchors. Each
 /// anchor keeps its best match in every neighbour frame, and the volume
 /// keeps the `grid_frames - 1` best of those in ascending order. A
-/// position an earlier volume already holds is skipped, so no patch
-/// enters the group twice.
+/// position an earlier volume already holds at the same phase is
+/// skipped, so no patch enters the group twice.
 ///
 /// # Members
 ///
@@ -155,6 +166,10 @@ const _: () = assert!(
 /// recovered from the packed word when matching ends. Member
 /// `s * grid_frames + t` is frame `t` of volume `s`, with the anchor at
 /// `t = 0`.
+///
+/// A member also has a quarter-pel phase, 0 on the whole-pixel grid. It
+/// rides in the high bits of the member's slot word, above the ring slot
+/// its frame sits in. Centre-frame members are always whole-pixel.
 ///
 /// # Group size
 ///
@@ -173,13 +188,17 @@ const _: () = assert!(
 /// fallback group runs a Haar across its stack instead. Content the group
 /// agrees on collects into the low levels. A coefficient survives a hard
 /// threshold when its magnitude reaches `lambda_ht` standard deviations
-/// of its own propagated noise, where every member carries the plain
-/// `sigma[c]^2`. Both transforms then invert.
+/// of its own propagated noise, where every member carries
+/// `sigma[c]^2` scaled by its phase's `phase_gain`. Both transforms then
+/// invert.
 ///
 /// The spatial pass runs as a column DCT in registers, a transpose, and
 /// a row DCT in registers, because a lane owns a column and the row pass
 /// needs a row. The inverse runs the same three steps backwards, which
 /// leaves the lane holding a column again in time for the scatter.
+///
+/// A member off the whole-pixel grid takes part in filtering but is not
+/// scattered.
 ///
 /// The one coefficient that is both the group average and the patch's
 /// spatial DC always survives the threshold, whatever its magnitude. A
@@ -315,11 +334,6 @@ pub fn collab_fused<N: Size>(
     #[comptime] spatial_radius: u32,
     #[comptime] refs_x: u32,
 ) {
-    // Neither buffer nor the mode selector is read yet, since
-    // `trajectory_search` still ignores `subpel`.
-    let _ = (&phase_ring, &phase_gain);
-    let _ = subpel;
-
     let tid = UNIT_POS_X;
     let grp = tid / 8u32;
     let sub = tid % 8u32;
@@ -368,6 +382,16 @@ pub fn collab_fused<N: Size>(
     // difference.
     let scale = channel_scale(channels);
 
+    // The distance a whole-pixel match's noise alone contributes, which
+    // the sub-pixel search compensates and margins against.
+    let mut sigma_sq_sum = 0.0f32;
+    #[unroll]
+    for c in 0..channels {
+        let sigma_c = sigma[c as usize];
+        sigma_sq_sum += sigma_c * sigma_c;
+    }
+    let noise_px = scale * comptime!(PATCH_AREA as f32) * sigma_sq_sum;
+
     // The number of positions the spatial rectangle holds, which fixes the fallback group size
     // below.
     let n_live = spatial_search(
@@ -402,6 +426,13 @@ pub fn collab_fused<N: Size>(
         member_pos[m as usize] = plane_shuffle(best_pos, base + m);
     }
 
+    // Each member's quarter-pel phase, 0 for a whole-pixel member.
+    let mut member_phase = Array::<u32>::new(MAX_K as usize);
+    #[unroll]
+    for m in 0..MAX_K {
+        member_phase[m as usize] = 0u32;
+    }
+
     let mut use_grid = false;
     if comptime!(grid_frames > 1 && k_max == MAX_K) {
         let volumes = comptime!(MAX_K / grid_frames);
@@ -409,6 +440,7 @@ pub fn collab_fused<N: Size>(
 
         let mut grid_pos = Array::<u32>::new(MAX_K as usize);
         let mut grid_d = Array::<f32>::new(MAX_K as usize);
+        let mut grid_phase = Array::<u32>::new(MAX_K as usize);
 
         #[unroll]
         for volume in 0..volumes {
@@ -419,10 +451,12 @@ pub fn collab_fused<N: Size>(
 
             grid_pos[first as usize] = anchor_packed;
             grid_d[first as usize] = 0.0f32;
+            grid_phase[first as usize] = 0u32;
             #[unroll]
             for j in 0..tail {
                 grid_pos[comptime!(first + 1 + j) as usize] = 0u32;
                 grid_d[comptime!(first + 1 + j) as usize] = 3.0e38f32;
+                grid_phase[comptime!(first + 1 + j) as usize] = 0u32;
             }
 
             let mut anchor = Array::<f32>::new(comptime!(PATCH_SIZE * channels) as usize);
@@ -437,6 +471,8 @@ pub fn collab_fused<N: Size>(
 
             trajectory_search(
                 ring,
+                phase_ring,
+                phase_gain,
                 mv_field,
                 confidence,
                 neighbour_slots,
@@ -446,11 +482,14 @@ pub fn collab_fused<N: Size>(
                 sub,
                 scale,
                 c_min,
+                noise_px,
                 &mut grid_d,
                 &mut grid_pos,
+                &mut grid_phase,
                 comptime!(first + 1),
                 tail,
                 warp_uniform,
+                subpel,
                 radius,
                 refine,
                 mv_stride,
@@ -477,11 +516,13 @@ pub fn collab_fused<N: Size>(
         #[unroll]
         for m in 0..MAX_K {
             member_pos[m as usize] = select(use_grid, grid_pos[m as usize], member_pos[m as usize]);
+            member_phase[m as usize] = select(use_grid, grid_phase[m as usize], 0u32);
         }
         k_use = select(use_grid, MAX_K, k_use);
     }
 
-    // The frame each member sits in, from its packed word, once before the channel loop.
+    // The frame each member sits in, from its packed word, once before the channel loop. The
+    // slot takes bits 0-15 of the word and the member's phase bits 16-19.
     //
     // The frame is picked with [`select`] rather than a branch. A frame index that reaches
     // [`read_line`] through a branch trips a bug in cubecl 0.10's global value numbering, which
@@ -498,7 +539,8 @@ pub fn collab_fused<N: Size>(
         // documented at `nl4d::tests::pipeline`, which still pass a one-element
         // `neighbour_slots` even though there is no real neighbour to read.
         let neighbour = u32::max(mt, 1u32) - 1u32;
-        member_slot[m as usize] = select(mt > 0u32, neighbour_slots[neighbour as usize], centre_slot);
+        let slot_value = select(mt > 0u32, neighbour_slots[neighbour as usize], centre_slot);
+        member_slot[m as usize] = slot_value | (member_phase[m as usize] << 16u32);
     }
 
     // The correlation profile is separable and the same for every
@@ -526,12 +568,25 @@ pub fn collab_fused<N: Size>(
             let packed = member_pos[m as usize];
             let mx = packed & 0x1FFFu32;
             let my = (packed >> 13u32) & 0x1FFFu32;
-            let src_slot = member_slot[m as usize];
-            v[m as usize] = base_sig2;
-            #[unroll]
-            for r in 0..PATCH_SIZE {
-                let px = read_line(ring, mx + sub, my + r, src_slot, width, height);
-                stack[(m * PATCH_SIZE + r) as usize] = px[c as usize];
+            let word = member_slot[m as usize];
+            let src_slot = word & 0xFFFFu32;
+            let phase = word >> 16u32;
+            if comptime!(subpel > 0) {
+                v[m as usize] = phase_gain[phase as usize] * base_sig2;
+                let qx = 4u32 * (mx + sub) + (phase & 3u32);
+                #[unroll]
+                for r in 0..PATCH_SIZE {
+                    let qy = 4u32 * (my + r) + (phase >> 2u32);
+                    let px = quarter_sample(phase_ring, qx, qy, src_slot, width, height);
+                    stack[(m * PATCH_SIZE + r) as usize] = px[c as usize];
+                }
+            } else {
+                v[m as usize] = base_sig2;
+                #[unroll]
+                for r in 0..PATCH_SIZE {
+                    let px = read_line(ring, mx + sub, my + r, src_slot, width, height);
+                    stack[(m * PATCH_SIZE + r) as usize] = px[c as usize];
+                }
             }
         }
 
@@ -662,18 +717,20 @@ pub fn collab_fused<N: Size>(
             }
         }
 
-        // Every member of the group is written back, not just the
-        // reference patch, and each lands in its own frame's region of
-        // the accumulators. A neighbour-frame member therefore feeds the
-        // caller's cross-frame ring rather than being discarded once it
-        // has served the group's shared statistics.
+        // Every whole-pixel member of the group is written back, not
+        // just the reference patch, and each lands in its own frame's
+        // region of the accumulators. A neighbour-frame member therefore
+        // feeds the caller's cross-frame ring rather than being discarded
+        // once it has served the group's shared statistics.
         #[unroll]
         for m in 0..MAX_K {
-            if live && m < k_use {
+            let word = member_slot[m as usize];
+            let whole_pixel = comptime!(subpel == 0) || (word >> 16u32) == 0u32;
+            if live && m < k_use && whole_pixel {
                 let packed = member_pos[m as usize];
                 let mx = packed & 0x1FFFu32;
                 let my = (packed >> 13u32) & 0x1FFFu32;
-                let dst_slot = member_slot[m as usize];
+                let dst_slot = word & 0xFFFFu32;
                 #[unroll]
                 for r in 0..PATCH_SIZE {
                     scatter_patch(

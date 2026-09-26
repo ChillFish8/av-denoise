@@ -5,6 +5,7 @@ use super::helpers::{
     R,
     RingFixture,
     deterministic_texture,
+    fractional_pan_ring,
     make_client,
     noisy_ring,
     planted_ring,
@@ -14,7 +15,7 @@ use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, 
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, STEP, grid_frames, needs_warp_uniform_search};
-use crate::nl4d::subpel::phase_gains;
+use crate::nl4d::subpel::{phase_gains, phase_planes_host};
 use crate::nlmeans::motion::neighbour_idx_for_k;
 
 /// The motion block side length these fixtures score confidence
@@ -44,6 +45,9 @@ struct Knobs {
     /// Pins the search walk rather than taking it from the runtime.
     /// `None`, the default, follows [`needs_warp_uniform_search`].
     warp_uniform: Option<bool>,
+    /// The kernel's sub-pixel mode, where 0 is off, 1 half-pel and 2
+    /// quarter-pel.
+    subpel: u32,
 }
 
 impl Default for Knobs {
@@ -57,6 +61,7 @@ impl Default for Knobs {
             spatial_radius: SPATIAL_RADIUS,
             blksize: BLKSIZE,
             warp_uniform: None,
+            subpel: 0,
         }
     }
 }
@@ -66,6 +71,8 @@ struct FusedRun {
     wsum: Vec<i32>,
     group_weight: Vec<f32>,
     pixels: usize,
+    /// The factor the launch multiplied `weight_scale` by.
+    weight_floor: f32,
 }
 
 impl FusedRun {
@@ -77,6 +84,14 @@ impl FusedRun {
             .iter()
             .map(|&v| v as i64)
             .sum()
+    }
+
+    /// [frame_weight_sum](FusedRun::frame_weight_sum) with the weight
+    /// floor divided back out, so runs with subpel on and off compare
+    /// directly.
+    fn unscaled_frame_weight(&self, slot: u32) -> f64 {
+        let weight = self.frame_weight_sum(slot) as f64;
+        weight / self.weight_floor as f64
     }
 
     /// The total weight the whole ring received. Every group contributes
@@ -103,8 +118,17 @@ fn run_fused_over(fx: &RingFixture, k: Knobs) -> FusedRun {
     let refs = ref_count(w, h);
     let refs_x = refs_along(w);
     let profile = dct_noise_profile(0.0);
+    let floor = if k.subpel > 0 {
+        phase_gains().into_iter().fold(f32::MAX, f32::min)
+    } else {
+        1.0
+    };
+    let scaled_weight = weight_scale(k.sigma, &profile) * floor;
 
     let ring_buf = client.create_from_slice(f32::as_bytes(&fx.ring));
+    let phase_ring = phase_ring_for(fx, k.subpel);
+    let phase_bytes = f32::as_bytes(&phase_ring);
+    let phase_buf = client.create_from_slice(phase_bytes);
     let gain_buf = client.create_from_slice(f32::as_bytes(&phase_gains()));
     let mv_buf = client.create_from_slice(i32::as_bytes(&fx.mv_field));
     let conf_buf = client.create_from_slice(f32::as_bytes(&fx.confidence));
@@ -122,8 +146,8 @@ fn run_fused_over(fx: &RingFixture, k: Knobs) -> FusedRun {
             CubeCount::new_2d(fused_cubes_x(w), refs_along(h)),
             CubeDim::new_1d(64),
             1usize,
-            ArrayArg::from_raw_parts(ring_buf.clone(), fx.ring.len()),
             ArrayArg::from_raw_parts(ring_buf, fx.ring.len()),
+            ArrayArg::from_raw_parts(phase_buf, phase_ring.len()),
             ArrayArg::from_raw_parts(gain_buf, 16),
             ArrayArg::from_raw_parts(mv_buf, fx.mv_field.len()),
             ArrayArg::from_raw_parts(conf_buf, fx.confidence.len()),
@@ -137,11 +161,11 @@ fn run_fused_over(fx: &RingFixture, k: Knobs) -> FusedRun {
             fx.centre_slot,
             k.c_min,
             k.lambda_ht,
-            weight_scale(k.sigma, &profile),
+            scaled_weight,
             cross_frame_accum_scale(k.spatial_radius, fx.radius),
             k.warp_uniform
                 .unwrap_or_else(|| needs_warp_uniform_search(&client)),
-            0u32,
+            k.subpel,
             fx.radius,
             grid_frames(fx.radius),
             k.refine,
@@ -170,7 +194,26 @@ fn run_fused_over(fx: &RingFixture, k: Knobs) -> FusedRun {
         wsum: i32::from_bytes(&wsum_bytes)[..pixels * frames].to_vec(),
         group_weight: f32::from_bytes(&weight_bytes)[..refs].to_vec(),
         pixels,
+        weight_floor: floor,
     }
+}
+
+/// The phase ring the kernel reads, four host-built planes per frame when
+/// `subpel` is on and the plain ring otherwise.
+fn phase_ring_for(fx: &RingFixture, subpel: u32) -> Vec<f32> {
+    if subpel == 0 {
+        return fx.ring.clone();
+    }
+
+    let pixels = (fx.width * fx.height) as usize;
+    let mut phase_ring = Vec::with_capacity(fx.ring.len() * 4);
+    for frame in fx.ring.chunks(pixels) {
+        let planes = phase_planes_host(frame, fx.width, fx.height, 1);
+        for plane in planes {
+            phase_ring.extend(plane);
+        }
+    }
+    phase_ring
 }
 
 /// The temporal search looks where the motion field points.
@@ -718,4 +761,183 @@ fn a_position_claimed_by_an_earlier_volume_agrees_across_search_walks() {
         uniform.group_weight.iter().any(|&w| w > 0.0),
         "neither walk aggregated anything, so agreeing proves nothing"
     );
+}
+
+/// At 2.5 px per frame the neighbours one frame away sit exactly half a
+/// pixel off the whole-pixel grid. With subpel on, their matches land at
+/// the half phase, so those frames stop receiving scatter while the group
+/// agrees better.
+#[test]
+fn a_half_pixel_pan_is_matched_at_the_half_phase() {
+    let sigma = 0.004;
+    let fixture = fractional_pan_ring(96, 96, 2, 2.5, sigma);
+    let off_knobs = Knobs {
+        sigma,
+        ..Knobs::default()
+    };
+    let half_knobs = Knobs {
+        sigma,
+        subpel: 1,
+        ..Knobs::default()
+    };
+    let off = run_fused_over(&fixture, off_knobs);
+    let half = run_fused_over(&fixture, half_knobs);
+
+    for k in [-1i32, 1] {
+        let t = neighbour_idx_for_k(fixture.radius, k);
+        let slot = fixture.neighbour_slots[t as usize];
+        let off_weight = off.unscaled_frame_weight(slot);
+        let half_weight = half.unscaled_frame_weight(slot);
+        assert!(
+            half_weight * 5.0 <= off_weight,
+            "k={k}: half {half_weight} should be under a fifth of off {off_weight}"
+        );
+    }
+
+    // The frames two away move a whole 5 px, so they keep their scatter.
+    for k in [-2i32, 2] {
+        let t = neighbour_idx_for_k(fixture.radius, k);
+        let slot = fixture.neighbour_slots[t as usize];
+        let off_weight = off.unscaled_frame_weight(slot);
+        let half_weight = half.unscaled_frame_weight(slot);
+        assert!(
+            half_weight >= 0.9 * off_weight,
+            "k={k}: half {half_weight} fell below 90% of off {off_weight}"
+        );
+    }
+
+    let off_mean = mean_group_weight(&off);
+    let half_mean = mean_group_weight(&half);
+    assert!(
+        half_mean > off_mean,
+        "half {half_mean} should beat off {off_mean}"
+    );
+}
+
+/// Whole-pixel motion over noisy content keeps its members on the whole
+/// grid, so neighbour frames keep nearly all their scatter.
+#[test]
+fn whole_pixel_motion_keeps_whole_pixel_members() {
+    let sigma = 0.02;
+    let fixture = fractional_pan_ring(96, 96, 2, 3.0, sigma);
+    assert_quarter_keeps_neighbour_scatter(&fixture, sigma);
+}
+
+/// Flat noisy content has no alignment to gain, so sub-pixel phases must
+/// not win on noise alone.
+///
+/// `noisy_ring` is uniform noise around a flat 0.5, so the kernel is told
+/// that noise's standard deviation, `1 / sqrt(12)`.
+#[test]
+fn flat_noise_keeps_whole_pixel_members() {
+    let fixture = noisy_ring(96, 96, 2, 1.0);
+    let sigma = (1.0f32 / 12.0).sqrt();
+    assert_quarter_keeps_neighbour_scatter(&fixture, sigma);
+}
+
+#[test]
+fn subpel_search_is_identical_under_the_warp_uniform_walk() {
+    let sigma = 0.01;
+    let fixture = fractional_pan_ring(96, 96, 2, 2.5, sigma);
+    let plain_knobs = Knobs {
+        sigma,
+        subpel: 2,
+        warp_uniform: Some(false),
+        ..Knobs::default()
+    };
+    let uniform_knobs = Knobs {
+        sigma,
+        subpel: 2,
+        warp_uniform: Some(true),
+        ..Knobs::default()
+    };
+    let off_knobs = Knobs {
+        sigma,
+        ..Knobs::default()
+    };
+    let plain = run_fused_over(&fixture, plain_knobs);
+    let uniform = run_fused_over(&fixture, uniform_knobs);
+    let off = run_fused_over(&fixture, off_knobs);
+
+    assert_eq!(plain.wsum, uniform.wsum);
+    assert_eq!(plain.group_weight, uniform.group_weight);
+
+    let any_aggregated = plain.group_weight.iter().any(|&weight| weight > 0.0);
+    assert!(any_aggregated, "neither walk aggregated anything");
+
+    // A neighbour frame losing most of its scatter shows fractional
+    // members were chosen, so the walks agreed on a real subpel group.
+    let fractional_slots = fixture
+        .neighbour_slots
+        .iter()
+        .filter(|&&slot| {
+            let plain_weight = plain.unscaled_frame_weight(slot);
+            let off_weight = off.unscaled_frame_weight(slot);
+            plain_weight < 0.5 * off_weight
+        })
+        .count();
+    assert!(
+        fractional_slots > 0,
+        "no neighbour frame lost scatter, so no fractional member was chosen"
+    );
+}
+
+/// Motion that drives every refine rectangle into the right and bottom
+/// edges still reads inside the frame.
+#[test]
+fn subpel_search_at_the_frame_edges_stays_finite() {
+    let sigma = 0.01;
+    let mut fixture = fractional_pan_ring(64, 48, 2, 2.5, sigma);
+    for vector in fixture.mv_field.chunks_mut(2) {
+        vector[0] = 40;
+        vector[1] = 40;
+    }
+
+    let knobs = Knobs {
+        sigma,
+        subpel: 2,
+        ..Knobs::default()
+    };
+
+    let run = run_fused_over(&fixture, knobs);
+
+    let all_finite = run.group_weight.iter().all(|weight| weight.is_finite());
+    let all_non_negative = run.wsum.iter().all(|&weight| weight >= 0);
+    let any_aggregated = run.group_weight.iter().any(|&weight| weight > 0.0);
+    assert!(all_finite);
+    assert!(all_non_negative);
+    assert!(
+        any_aggregated,
+        "nothing aggregated, so the launch may have written nothing"
+    );
+}
+
+fn mean_group_weight(run: &FusedRun) -> f32 {
+    let total: f32 = run.group_weight.iter().sum();
+    total / run.group_weight.len() as f32
+}
+
+/// Runs the fixture with subpel off and at quarter-pel, and checks every
+/// neighbour frame keeps at least 90% of the scatter it had with it off.
+fn assert_quarter_keeps_neighbour_scatter(fixture: &RingFixture, sigma: f32) {
+    let off_knobs = Knobs {
+        sigma,
+        ..Knobs::default()
+    };
+    let quarter_knobs = Knobs {
+        sigma,
+        subpel: 2,
+        ..Knobs::default()
+    };
+    let off = run_fused_over(fixture, off_knobs);
+    let quarter = run_fused_over(fixture, quarter_knobs);
+
+    for &slot in &fixture.neighbour_slots {
+        let off_weight = off.unscaled_frame_weight(slot);
+        let quarter_weight = quarter.unscaled_frame_weight(slot);
+        assert!(
+            quarter_weight >= 0.9 * off_weight,
+            "slot {slot}: quarter {quarter_weight} fell below 90% of off {off_weight}"
+        );
+    }
 }

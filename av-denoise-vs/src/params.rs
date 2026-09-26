@@ -27,6 +27,7 @@ use av_denoise_core::{
     PlaneOptions,
     PrefilterMode,
     Preset,
+    SubpelPrecision,
     Subsampling,
     nl4d_spatial_radius_for,
     nl4d_temporal_radius_for,
@@ -181,6 +182,7 @@ pub struct RawParams {
     pub lambda_ht_scale: Option<f64>,
     pub spatial_radius: Option<i64>,
     pub refine: Option<i64>,
+    pub subpel: Option<String>,
 }
 
 /// Turns a nonnegative script integer into a `u32`, naming `field` in
@@ -266,6 +268,7 @@ fn reject_mismatched_params(
         ("lambda_ht_scale", raw.lambda_ht_scale.is_some()),
         ("spatial_radius", raw.spatial_radius.is_some()),
         ("refine", raw.refine.is_some()),
+        ("subpel", raw.subpel.is_some()),
     ];
 
     match algorithm_kind {
@@ -494,6 +497,10 @@ pub fn plane_options_from(
             refine: match raw.refine {
                 Some(r) => nonnegative(r, "refine")?,
                 None => Nl4dOptions::default().refine,
+            },
+            subpel: match &raw.subpel {
+                Some(value) => value.parse::<SubpelPrecision>().map_err(anyhow::Error::msg)?,
+                None => Nl4dOptions::default().subpel,
             },
             ..Nl4dOptions::default()
         }),

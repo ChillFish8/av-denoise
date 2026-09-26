@@ -234,6 +234,7 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
             ch,
             ch_name,
             split_mv: false,
+            subpel: 0,
         });
     }
     for &(ch, ch_name) in CHANNELS {
@@ -242,6 +243,16 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
             ch,
             ch_name,
             split_mv: true,
+            subpel: 0,
+        });
+    }
+    for subpel in [1, 2] {
+        run(CollabFusedBench {
+            client: client.clone(),
+            ch: 1,
+            ch_name: "luma",
+            split_mv: false,
+            subpel,
         });
     }
     for &(ch, ch_name) in CHANNELS {

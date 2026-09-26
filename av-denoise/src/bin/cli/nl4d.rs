@@ -4,6 +4,7 @@ use av_denoise::{
     DenoisingMode,
     Nl4dOptions,
     PlaneOptions,
+    SubpelPrecision,
     nl4d_spatial_radius_for,
     nl4d_temporal_radius_for,
 };
@@ -159,6 +160,13 @@ pub struct Nl4dArgs {
     #[arg(long)]
     pub field_lambda: Option<f32>,
 
+    /// Aligns temporal matches between whole pixels.
+    ///
+    /// `off` (the default), `half` or `quarter`. Finer alignment keeps
+    /// more detail on slow pans, at a cost in speed and GPU memory.
+    #[arg(long)]
+    pub subpel: Option<SubpelPrecision>,
+
     /// Estimates noise from a local window instead of a temporal EMA
     /// over stream history.
     ///
@@ -253,7 +261,7 @@ impl Nl4dArgs {
                     // determinism. `--windowed-noise-estimation` exists
                     // to measure the difference on real footage.
                     windowed_noise_estimation: self.windowed_noise_estimation,
-                    subpel: defaults.subpel,
+                    subpel: self.subpel.unwrap_or(defaults.subpel),
                 }),
                 // nl4d has no NLM weighting pass for a strength to apply to.
                 luma_strength: None,
@@ -410,6 +418,20 @@ mod tests {
 
         assert_eq!(nl4d.field_lambda, None);
         assert!((expect_nl4d(&opts).field_lambda - defaults.field_lambda).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn subpel_defaults_to_off() {
+        let (args, nl4d) = parse(&[]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        assert_eq!(expect_nl4d(&opts).subpel, SubpelPrecision::Off);
+    }
+
+    #[test]
+    fn subpel_flag_selects_quarter() {
+        let (args, nl4d) = parse(&["--subpel", "quarter"]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        assert_eq!(expect_nl4d(&opts).subpel, SubpelPrecision::Quarter);
     }
 
     /// nl4d never runs an NLM weighting pass, so the flags that only

@@ -88,6 +88,7 @@ clean.set_output()
 | `refine`          | int             | `--refine`              | yes                    |
 | `spatial_radius`  | int             | `--spatial-radius`      | yes, the speed dial    |
 | `lambda_ht`       | float           | `--lambda-ht`           | situational, see below |
+| `subpel`          | string          | `--subpel`              | situational, see below |
 | `channel_mode`    | string          | channel-mode flags      | situational            |
 | `device`          | string          | `--device`              | situational            |
 | `accelerators`    | list of strings | `-A`, `--accelerators`  | situational            |
@@ -105,6 +106,9 @@ Dropping it is the fastest way to speed a run up.
 
 `refine` is the half-width of the window searched around each neighbour frame's
 motion-predicted position. Raise it when motion tracking lands close but not exact.
+
+`subpel` aligns temporal matches between whole pixels. `off` (the default), `half` or
+`quarter` keep more detail on slow pans, at a cost in speed and GPU memory.
 
 `sigma_scale` keeps the per-scene noise measurement and nudges it, which is almost
 always what you actually want.
