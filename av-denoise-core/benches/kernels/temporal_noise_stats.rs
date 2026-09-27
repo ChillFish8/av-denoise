@@ -33,12 +33,13 @@ fn blocks() -> (u32, u32) {
     (W.div_ceil(TEMPORAL_BLOCK), H.div_ceil(TEMPORAL_BLOCK))
 }
 
-/// Matches `nlmeans::noise::temporal_stats_record_len`: a sum and a sum
-/// of squares per stored channel, one lag-1 total, and four luma-only
-/// fields.
+/// Matches `nlmeans::noise::temporal_stats_record_len`.
+///
+/// That is a sum and a sum of squares per stored channel, one lag-1
+/// total, and four quarter records of six fields each.
 fn stats_len() -> usize {
     let (bx, by) = blocks();
-    (bx * by * (2 * TEMPORAL_STORED_CH + 5)) as usize
+    (bx * by * (2 * TEMPORAL_STORED_CH + 25)) as usize
 }
 
 impl<R: Runtime> Benchmark for TemporalNoiseStatsBench<R> {
