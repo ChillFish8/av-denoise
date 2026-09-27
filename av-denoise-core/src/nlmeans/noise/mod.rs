@@ -35,13 +35,9 @@ mod curve;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-#[expect(
-    unused_imports,
-    reason = "no caller reads the bin count yet, it is exposed for the kernel upload a later task adds"
-)]
-pub(crate) use self::curve::NOISE_CURVE_BINS;
-pub(crate) use self::curve::NoiseCurve;
 pub(super) use self::curve::build_noise_curve;
+pub use self::curve::NOISE_CURVE_BINS;
+pub(crate) use self::curve::NoiseCurve;
 use super::align::StorageAlign;
 use super::kernels::{
     nlm_noise_partial,

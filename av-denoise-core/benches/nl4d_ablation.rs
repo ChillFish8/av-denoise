@@ -18,7 +18,7 @@ use av_denoise_core::collab::kernels::fused::collab_fused;
 use av_denoise_core::collab::kernels::transforms::dct_noise_profile;
 use av_denoise_core::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use av_denoise_core::nl4d::phase_gains;
-use av_denoise_core::nlmeans::{BLOCK_X, BLOCK_Y};
+use av_denoise_core::nlmeans::{BLOCK_X, BLOCK_Y, NOISE_CURVE_BINS};
 use cubecl::benchmark::{Benchmark, BenchmarkComputations, TimingMethod};
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -107,6 +107,9 @@ struct Rig<R: Runtime> {
     /// The 16 phase gains, passed under `subpel = 0` where the kernel
     /// never reads them.
     phase_gain: Handle,
+    /// An all-zero noise curve, passed with `curve_valid = 0` where the
+    /// kernel never applies it.
+    zero_curve: Handle,
     /// The uniform aggregation window, which the `fused` row runs with.
     kaiser_off: Handle,
     /// A `beta = 2` window, which the `fused_kaiser` row runs with. The
@@ -162,6 +165,7 @@ impl<R: Runtime> Rig<R> {
             sigma: client.create_from_slice(f32::as_bytes(&sigma_host)),
             dct_profile: client.create_from_slice(f32::as_bytes(&dct_noise_profile(0.0))),
             phase_gain: client.create_from_slice(f32::as_bytes(&phase_gains())),
+            zero_curve: client.create_from_slice(f32::as_bytes(&[0.0f32; NOISE_CURVE_BINS])),
             kaiser_off: client.create_from_slice(f32::as_bytes(&kaiser_window(0.0))),
             kaiser_on: client.create_from_slice(f32::as_bytes(&kaiser_window(2.0))),
             ring_len: ring_data.len(),
@@ -209,6 +213,7 @@ impl<R: Runtime> Rig<R> {
                 ArrayArg::from_raw_parts(self.confidence.clone(), self.conf_len),
                 ArrayArg::from_raw_parts(self.neighbour_slots.clone(), NEIGHBOUR_SLOTS.len()),
                 ArrayArg::from_raw_parts(self.sigma.clone(), g.stored as usize),
+                ArrayArg::from_raw_parts(self.zero_curve.clone(), NOISE_CURVE_BINS),
                 ArrayArg::from_raw_parts(self.dct_profile.clone(), 8),
                 ArrayArg::from_raw_parts(kaiser.clone(), PATCH_SIZE as usize),
                 ArrayArg::from_raw_parts(self.accum.clone(), frame_len * N_FRAMES as usize),
@@ -217,6 +222,7 @@ impl<R: Runtime> Rig<R> {
                 CENTRE_SLOT,
                 0.0f32,
                 LAMBDA_HT,
+                0u32,
                 weight_scale(SIGMA, &dct_noise_profile(0.0)),
                 cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS),
                 needs_warp_uniform_search(&self.client),

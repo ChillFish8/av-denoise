@@ -1,3 +1,4 @@
+use super::noise_curve::stepped_curve;
 use super::{Setup, cross_frame_setup, run_fused_walk, unique_frame};
 
 /// Asserts the two search walks aggregated the same thing, byte for
@@ -85,4 +86,12 @@ fn warp_uniform_search_matches_the_clipped_search_at_radius_one() {
     let s = cross_frame_setup(64, 64, 1);
 
     assert_walks_agree("radius one", &s);
+}
+
+#[test]
+fn warp_uniform_search_matches_the_clipped_search_with_a_noise_curve() {
+    let mut s = cross_frame_setup(64, 64, 2);
+    s.noise_curve = Some(stepped_curve());
+
+    assert_walks_agree("noise curve", &s);
 }

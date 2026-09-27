@@ -1,4 +1,5 @@
 mod behaviour;
+mod noise_curve;
 mod recorded;
 mod subpel;
 mod walks;
@@ -13,6 +14,7 @@ use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use crate::nl4d::subpel::phase_gains;
+use crate::nlmeans::NOISE_CURVE_BINS;
 
 /// The spatial search radius most runs below use.
 ///
@@ -98,6 +100,9 @@ pub(super) struct Setup {
     /// The aggregation window's `beta`. `0.0`, what every run here uses
     /// unless it says otherwise, is uniform aggregation.
     pub(super) kaiser_beta: f32,
+    /// The frame's noise curve. `None` launches with `curve_valid = 0`
+    /// and a zeroed buffer.
+    pub(super) noise_curve: Option<[f32; NOISE_CURVE_BINS]>,
 }
 
 impl Setup {
@@ -129,6 +134,7 @@ impl Setup {
             rho: 0.0,
             profile_override: None,
             kaiser_beta: 0.0,
+            noise_curve: None,
         }
     }
 
@@ -415,6 +421,9 @@ pub(super) fn run_fused_walk(s: &Setup, warp_uniform: Option<bool>) -> Aggregate
     let b = buffers(s);
     let profile = s.profile();
     let gain_buf = b.client.create_from_slice(f32::as_bytes(&phase_gains()));
+    let curve = s.noise_curve.unwrap_or([0.0f32; NOISE_CURVE_BINS]);
+    let curve_buf = b.client.create_from_slice(f32::as_bytes(&curve));
+    let curve_valid = u32::from(s.noise_curve.is_some());
 
     unsafe {
         collab_fused::launch_unchecked::<R>(
@@ -429,6 +438,7 @@ pub(super) fn run_fused_walk(s: &Setup, warp_uniform: Option<bool>) -> Aggregate
             ArrayArg::from_raw_parts(b.confidence.clone(), s.confidence.len()),
             ArrayArg::from_raw_parts(b.neighbour_slots.clone(), s.neighbour_slots.len()),
             ArrayArg::from_raw_parts(b.sigma.clone(), 1),
+            ArrayArg::from_raw_parts(curve_buf, NOISE_CURVE_BINS),
             ArrayArg::from_raw_parts(b.dct_profile.clone(), 8),
             ArrayArg::from_raw_parts(b.kaiser.clone(), PATCH_SIZE as usize),
             ArrayArg::from_raw_parts(b.accum.clone(), b.accum_len),
@@ -437,6 +447,7 @@ pub(super) fn run_fused_walk(s: &Setup, warp_uniform: Option<bool>) -> Aggregate
             s.centre_slot,
             s.c_min,
             s.lambda_ht,
+            curve_valid,
             weight_scale(s.sigma, &profile),
             s.accum_scale(),
             warp_uniform.unwrap_or_else(|| needs_warp_uniform_search(&b.client)),

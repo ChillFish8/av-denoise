@@ -30,6 +30,7 @@ use crate::nlmeans::{
     ChannelMode,
     Depth,
     MAX_GRID_1D,
+    NOISE_CURVE_BINS,
     NlmDenoiser,
     Pending,
     RingView,
@@ -567,6 +568,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         sigma_host[..channels_count as usize].copy_from_slice(&sigmas[..channels_count as usize]);
         self.sigma_buf = client.create_from_slice(f32::as_bytes(&sigma_host));
         let wnorm = weight_scale(sigma_host[0], &self.dct_profile) * weight_floor_gain(self.subpel);
+        let noise_curve_buf = client.create_from_slice(f32::as_bytes(&[0.0f32; NOISE_CURVE_BINS]));
 
         let refs_x = refs_along(self.width);
         let refs_y = refs_along(self.height);
@@ -720,6 +722,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 ArrayArg::from_raw_parts(confidence.clone(), conf_len.max(1)),
                 ArrayArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
                 ArrayArg::from_raw_parts(self.sigma_buf.clone(), stored_ch as usize),
+                ArrayArg::from_raw_parts(noise_curve_buf, NOISE_CURVE_BINS),
                 ArrayArg::from_raw_parts(self.dct_profile_buf.clone(), 8),
                 ArrayArg::from_raw_parts(self.kaiser_buf.clone(), PATCH_SIZE as usize),
                 ArrayArg::from_raw_parts(self.accum.clone(), accum_ring_len),
@@ -728,6 +731,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 centre_slot,
                 self.c_min,
                 self.lambda_ht,
+                0u32,
                 wnorm,
                 self.accum_scale,
                 self.warp_uniform,

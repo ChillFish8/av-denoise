@@ -10,7 +10,7 @@ use super::{
 };
 
 /// How many luma bins the noise curve spans.
-pub(crate) const NOISE_CURVE_BINS: usize = 16;
+pub const NOISE_CURVE_BINS: usize = 16;
 /// The fewest blocks a bin needs before its median is trusted.
 const MIN_BLOCKS_PER_BIN: usize = 32;
 /// The fewest populated bins a frame needs before it gets a curve.

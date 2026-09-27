@@ -21,7 +21,14 @@ use super::transforms::{
     variance_reg_level,
 };
 use crate::collab::{MAX_K, MAX_TEMPORAL_RADIUS, PATCH_AREA, PATCH_SIZE, STEP};
+use crate::nlmeans::NOISE_CURVE_BINS;
 use crate::nlmeans::kernels::helpers::{channel_scale, read_line};
+
+/// The smallest factor the noise curve may scale the luma threshold by.
+const NOISE_CURVE_SCALE_MIN: f32 = 0.33;
+
+/// The largest factor the noise curve may scale the luma threshold by.
+const NOISE_CURVE_SCALE_MAX: f32 = 3.0;
 
 // The widest neighbour index this kernel ever packs is `2 * radius`,
 // one past the last neighbour, and `radius` is capped at
@@ -200,6 +207,10 @@ const _: () = assert!(
 /// A member off the whole-pixel grid takes part in filtering but is not
 /// scattered.
 ///
+/// Channel 0's threshold is scaled by the frame's noise curve at the
+/// reference patch's mean luma, clamped to 0.33..=3. The group weight
+/// keeps the plain sigma. With no curve the threshold is unchanged.
+///
 /// The one coefficient that is both the group average and the patch's
 /// spatial DC always survives the threshold, whatever its magnitude. A
 /// group's mean brightness is signal, not something a noise threshold
@@ -237,6 +248,11 @@ const _: () = assert!(
 ///
 /// `group_weight` holds one weight per reference, and `sigma` one value
 /// per stored channel.
+///
+/// `noise_curve` holds `NOISE_CURVE_BINS` luma threshold ratios, each
+/// sampled at the centre of an equal-width slice of the luma range. The
+/// kernel interpolates between neighbouring centres. The curve only takes
+/// effect when `curve_valid` is not 0.
 ///
 /// `kaiser` holds [`crate::collab::kernels::aggregate::kaiser_window`]'s 8 taps, which
 /// taper each scattered patch toward its edges. Eight ones leave the aggregation uniform.
@@ -305,6 +321,7 @@ pub fn collab_fused<N: Size>(
     confidence: &Array<f32>,
     neighbour_slots: &Array<u32>,
     sigma: &Array<f32>,
+    noise_curve: &Array<f32>,
     dct_profile: &Array<f32>,
     kaiser: &Array<f32>,
     accum: &mut Array<Atomic<i32>>,
@@ -313,6 +330,7 @@ pub fn collab_fused<N: Size>(
     centre_slot: u32,
     c_min: f32,
     lambda_ht: f32,
+    curve_valid: u32,
     weight_scale: f32,
     accum_scale: f32,
     #[comptime] warp_uniform: bool,
@@ -549,6 +567,26 @@ pub fn collab_fused<N: Size>(
     // frequency, see the transform order below.
     let prof_sub = dct_profile[sub as usize];
 
+    // The reference patch's mean luma picks its place on the frame's noise curve. Every lane
+    // reaches the reduction, so the group stays converged.
+    let mut column_luma = 0.0f32;
+    #[unroll]
+    for r in 0..PATCH_SIZE {
+        column_luma += current[(r * channels) as usize];
+    }
+
+    let patch_luma = plane_ssd_reduce8(column_luma) / comptime!(PATCH_AREA as f32);
+    let bins = comptime!(NOISE_CURVE_BINS as f32);
+    let unclamped_pos = patch_luma * bins - 0.5f32;
+    let curve_pos = f32::clamp(unclamped_pos, 0.0f32, bins - 1.0f32);
+    let lower_bin = u32::min(curve_pos as u32, comptime!(NOISE_CURVE_BINS as u32 - 2));
+    let fraction = curve_pos - lower_bin as f32;
+    let lower_ratio = noise_curve[lower_bin as usize];
+    let upper_ratio = noise_curve[(lower_bin + 1u32) as usize];
+    let ratio = lower_ratio + (upper_ratio - lower_ratio) * fraction;
+    let curve_scale = f32::clamp(ratio, NOISE_CURVE_SCALE_MIN, NOISE_CURVE_SCALE_MAX);
+    let luma_lambda = select(curve_valid != 0u32, lambda_ht * curve_scale, lambda_ht);
+
     // The group's normalised weight, computed from channel 0 and reused
     // by every later channel's scatter.
     let mut gw = 0.0f32;
@@ -641,6 +679,11 @@ pub fn collab_fused<N: Size>(
         // Hard threshold, and the group-DC exception described above.
         // The lane's retained variance is summed here and folded across
         // the group below.
+        let channel_lambda = if comptime!(c == 0u32) {
+            luma_lambda
+        } else {
+            lambda_ht
+        };
         let mut retained_v = 0.0f32;
         #[unroll]
         for i in 0..PATCH_SIZE {
@@ -650,7 +693,7 @@ pub fn collab_fused<N: Size>(
                 if j < k_use {
                     let vj = v[j as usize] * factor;
                     let slot = (j * PATCH_SIZE + i) as usize;
-                    let mut keep = f32::abs(stack[slot]) >= lambda_ht * f32::sqrt(vj);
+                    let mut keep = f32::abs(stack[slot]) >= channel_lambda * f32::sqrt(vj);
                     if comptime!(j == 0u32 && i == 0u32) {
                         if sub == 0u32 {
                             keep = true;

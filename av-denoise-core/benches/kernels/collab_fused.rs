@@ -5,6 +5,7 @@ use av_denoise_core::collab::kernels::transforms::dct_noise_profile;
 use av_denoise_core::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use av_denoise_core::nl4d::kernels::nl4d_phase_planes;
 use av_denoise_core::nl4d::{HALF_PEL_TAPS, phase_gains};
+use av_denoise_core::nlmeans::NOISE_CURVE_BINS;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -62,6 +63,16 @@ pub struct CollabFusedBench<R: Runtime> {
     /// The kernel's `subpel` comptime selector: 0 is off, 1 is half-pel,
     /// 2 is quarter-pel.
     pub subpel: u32,
+    /// Launches with a stepped noise curve and `curve_valid = 1`.
+    pub noise_curve: bool,
+}
+
+/// A curve that doubles the luma threshold in the darker half and halves it
+/// in the brighter one.
+fn stepped_curve() -> [f32; NOISE_CURVE_BINS] {
+    let mut curve = [2.0f32; NOISE_CURVE_BINS];
+    curve[NOISE_CURVE_BINS / 2..].fill(0.5);
+    curve
 }
 
 /// How far apart two neighbouring blocks' vectors sit in the split
@@ -94,6 +105,8 @@ pub struct CollabFusedInput {
     /// The phase ring, built when `subpel > 0`. Left unset under `Off`,
     /// where the kernel reads `ring` in its place.
     pub phase_ring: Option<Handle>,
+    /// The noise curve, all zeros unless the arm runs one.
+    pub noise_curve: Handle,
 }
 
 impl<R: Runtime> Benchmark for CollabFusedBench<R> {
@@ -153,6 +166,12 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
         let wsum = self.client.empty(pixels * N_FRAMES as usize * size_of::<i32>());
         let group_weight = self.client.empty(ref_count(W, H) * size_of::<f32>());
         let phase_gain = self.client.create_from_slice(f32::as_bytes(&phase_gains()));
+        let curve_host = if self.noise_curve {
+            stepped_curve()
+        } else {
+            [0.0f32; NOISE_CURVE_BINS]
+        };
+        let noise_curve = self.client.create_from_slice(f32::as_bytes(&curve_host));
 
         let ring_len = ring_data.len();
         let phase_ring = (self.subpel > 0).then(|| {
@@ -192,6 +211,7 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
             ring_len,
             phase_gain,
             phase_ring,
+            noise_curve,
         }
     }
 
@@ -230,6 +250,7 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
                 ArrayArg::from_raw_parts(args.confidence.clone(), (2 * RADIUS * conf_stride) as usize),
                 ArrayArg::from_raw_parts(args.neighbour_slots.clone(), NEIGHBOUR_SLOTS.len()),
                 ArrayArg::from_raw_parts(args.sigma.clone(), stored_ch as usize),
+                ArrayArg::from_raw_parts(args.noise_curve.clone(), NOISE_CURVE_BINS),
                 ArrayArg::from_raw_parts(args.dct_profile.clone(), 8),
                 ArrayArg::from_raw_parts(args.kaiser.clone(), PATCH_SIZE as usize),
                 ArrayArg::from_raw_parts(args.accum.clone(), frame_len * N_FRAMES as usize),
@@ -238,6 +259,7 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
                 CENTRE_SLOT,
                 0.0f32,
                 LAMBDA_HT,
+                u32::from(self.noise_curve),
                 weight_scale(SIGMA, &dct_noise_profile(0.0)),
                 cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS),
                 needs_warp_uniform_search(&self.client),
@@ -270,7 +292,8 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
             2 => "_subpel_quarter",
             _ => "",
         };
-        format!("collab_fused_1080p_{}{field}{subpel}", self.ch_name)
+        let curve = if self.noise_curve { "_noise_curve" } else { "" };
+        format!("collab_fused_1080p_{}{field}{subpel}{curve}", self.ch_name)
     }
 
     fn sync(&self) {

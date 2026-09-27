@@ -20,6 +20,7 @@ use crate::nlmeans::{
     HqParams,
     MotionCompensationMode,
     MotionEstimation,
+    NOISE_CURVE_BINS,
     NlmDenoiser,
     NlmParams,
 };
@@ -423,6 +424,7 @@ fn run_spatial_only(
     let dct_profile = dct_noise_profile(0.0);
     let dct_profile_buf = client.create_from_slice(f32::as_bytes(&dct_profile));
     let kaiser_buf = client.create_from_slice(f32::as_bytes(&kaiser_window(0.0)));
+    let zero_curve = client.create_from_slice(f32::as_bytes(&[0.0f32; NOISE_CURVE_BINS]));
     let accum = client.empty(frame_len * size_of::<i32>());
     let wsum = client.empty(pixels * size_of::<i32>());
     let output = client.empty(frame_len * size_of::<f32>());
@@ -464,6 +466,7 @@ fn run_spatial_only(
             ArrayArg::from_raw_parts(conf_dummy, 1),
             ArrayArg::from_raw_parts(neighbour_slots_dummy, 1),
             ArrayArg::from_raw_parts(sigma_buf, stored_ch as usize),
+            ArrayArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
             ArrayArg::from_raw_parts(dct_profile_buf, 8),
             ArrayArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
             ArrayArg::from_raw_parts(accum.clone(), frame_len),
@@ -472,6 +475,7 @@ fn run_spatial_only(
             centre_slot,
             c_min,
             lambda_ht,
+            0u32,
             wnorm,
             ACCUM_SCALE,
             warp_uniform,
@@ -674,6 +678,7 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
         let profile = dct_noise_profile(0.0);
         let profile_buf = client.create_from_slice(f32::as_bytes(&profile));
         let kaiser_buf = client.create_from_slice(f32::as_bytes(&kaiser_window(0.0)));
+        let zero_curve = client.create_from_slice(f32::as_bytes(&[0.0f32; NOISE_CURVE_BINS]));
         let wnorm = weight_scale(sigmas[0], &profile);
         let accum_scale = cross_frame_accum_scale(SPATIAL_RADIUS, radius);
 
@@ -702,6 +707,7 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 ArrayArg::from_raw_parts(view.confidence.clone(), conf_len.max(1)),
                 ArrayArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
                 ArrayArg::from_raw_parts(sigma_buf, 1),
+                ArrayArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
                 ArrayArg::from_raw_parts(profile_buf, 8),
                 ArrayArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
                 ArrayArg::from_raw_parts(accum.clone(), pixels * total_frames as usize),
@@ -710,6 +716,7 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 centre_slot,
                 C_MIN,
                 LAMBDA_HT,
+                0u32,
                 wnorm,
                 accum_scale,
                 needs_warp_uniform_search(&client),
