@@ -64,10 +64,6 @@ default) is the shipped calibration and smooths the tracked field. Raise it furt
 flat content where vectors wander, at the cost of following small objects less closely. `0` turns
 the smoothing off and leaves the tracked field as it is.
 
-**`--subpel` aligns temporal matches between whole pixels.** `off` (the default), `half` or
-`quarter`. Finer alignment makes matches line up more closely on slow sub-pixel pans, at a
-cost in speed and GPU memory.
-
 **`--no-noise-map` turns off the luma noise map.** The noise map is on by default. It scales the
 luma threshold by how noisy each brightness level is, filtering noisy levels harder and clean ones
 more lightly.

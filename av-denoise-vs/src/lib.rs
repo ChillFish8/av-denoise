@@ -151,7 +151,6 @@ fn raw_params(
     lambda_ht_scale: Option<f64>,
     spatial_radius: Option<i64>,
     refine: Option<i64>,
-    subpel: Option<&[u8]>,
     noise_map: Option<i64>,
 ) -> Result<RawParams, Error> {
     Ok(RawParams {
@@ -176,7 +175,6 @@ fn raw_params(
         lambda_ht_scale,
         spatial_radius,
         refine,
-        subpel: opt_string(subpel, "subpel")?,
         noise_map: opt_bool(noise_map),
     })
 }
@@ -228,7 +226,6 @@ make_filter_function! {
             None,
             None,
             None,
-            None,
         )?;
         let filter = Denoise::create(api, core, clip, AlgorithmKind::Nlmeans, &raw)?;
         Ok(Some(Box::new(filter)))
@@ -263,7 +260,6 @@ make_filter_function! {
         lambda_ht_scale: Option<f64>,
         spatial_radius: Option<i64>,
         refine: Option<i64>,
-        subpel: Option<&[u8]>,
         noise_map: Option<i64>,
     ) -> Result<Option<Box<dyn Filter<'core> + 'core>>, Error> {
         let raw = raw_params(
@@ -288,7 +284,6 @@ make_filter_function! {
             lambda_ht_scale,
             spatial_radius,
             refine,
-            subpel,
             noise_map,
         )?;
         let filter = Denoise::create(api, core, clip, AlgorithmKind::Nl4d, &raw)?;

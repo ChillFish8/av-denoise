@@ -63,7 +63,6 @@ pub use frame::{
     Subsampling,
     push_needs_retry,
 };
-pub use nl4d::SubpelPrecision;
 pub use nlmeans::{
     ChannelMode,
     DEFAULT_PILOT_STRENGTH_SCALE,

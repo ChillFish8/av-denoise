@@ -93,14 +93,6 @@ are happy with the level and just want to adjust how much noise is removed vs de
 positions, so it dominates the work. Dropping it from 9 to 6 roughly halves the candidates, which
 is exactly what `preset="veryfast"` does.
 
-**`subpel` aligns temporal matches between whole pixels.** `off` (the default), `half` or
-`quarter` make matches line up more closely on slow sub-pixel pans, at a cost in speed and
-GPU memory.
-
-```python
-clean = avd.Nl4d(clip, subpel="half")
-```
-
 **`noise_map=False` turns off the luma noise map.** The noise map is on by default. It scales the
 luma threshold by how noisy each brightness level is, filtering noisy levels harder and clean ones
 more lightly.

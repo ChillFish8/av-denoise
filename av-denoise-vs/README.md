@@ -88,7 +88,6 @@ clean.set_output()
 | `refine`          | int             | `--refine`              | yes                    |
 | `spatial_radius`  | int             | `--spatial-radius`      | yes, the speed dial    |
 | `lambda_ht`       | float           | `--lambda-ht`           | situational, see below |
-| `subpel`          | string          | `--subpel`              | situational, see below |
 | `noise_map`       | bool            | `--no-noise-map`        | situational, see below |
 | `channel_mode`    | string          | channel-mode flags      | situational            |
 | `device`          | string          | `--device`              | situational            |
@@ -107,10 +106,6 @@ Dropping it is the fastest way to speed a run up.
 
 `refine` is the half-width of the window searched around each neighbour frame's
 motion-predicted position. Raise it when motion tracking lands close but not exact.
-
-`subpel` aligns temporal matches between whole pixels. `off` is exact whole-pixel matching, and
-`half` or `quarter` make matches line up more closely on slow sub-pixel pans, at a cost in speed
-and GPU memory.
 
 `noise_map` scales the luma threshold by how noisy each brightness level is, filtering noisy
 levels harder and clean ones more lightly. It is on by default, and `noise_map=False` turns it off.

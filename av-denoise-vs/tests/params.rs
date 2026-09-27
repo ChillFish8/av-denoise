@@ -6,7 +6,6 @@ use av_denoise_core::{
     NlmeansVariant,
     PrefilterMode,
     Preset,
-    SubpelPrecision,
     nl4d_spatial_radius_for,
     nl4d_temporal_radius_for,
     nlmeans_search_radius_for,
@@ -808,35 +807,6 @@ fn refine_reaches_nl4d_options() {
 }
 
 #[test]
-fn subpel_half_resolves_to_subpel_precision_half() {
-    let raw = RawParams {
-        subpel: Some("half".to_string()),
-        ..RawParams::default()
-    };
-    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
-    match plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
-        .unwrap()
-        .algorithm
-    {
-        av_denoise_core::Algorithm::Nl4d(nl4d) => assert_eq!(nl4d.subpel, SubpelPrecision::Half),
-        other => panic!("expected Nl4d, got {other:?}"),
-    }
-}
-
-#[test]
-fn an_unrecognised_subpel_errors_clearly() {
-    let raw = RawParams {
-        subpel: Some("eighth".to_string()),
-        ..RawParams::default()
-    };
-    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
-    let err = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("off, half or quarter"), "got {err}");
-}
-
-#[test]
 fn noise_map_defaults_to_on() {
     let raw = RawParams::default();
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
@@ -879,7 +849,7 @@ fn noise_map_is_rejected_for_nlmeans() {
 }
 
 #[test]
-fn the_five_nl4d_dials_are_rejected_for_nlmeans() {
+fn the_four_nl4d_dials_are_rejected_for_nlmeans() {
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
     for (name, raw) in [
         (
@@ -907,13 +877,6 @@ fn the_five_nl4d_dials_are_rejected_for_nlmeans() {
             "refine",
             RawParams {
                 refine: Some(3),
-                ..RawParams::default()
-            },
-        ),
-        (
-            "subpel",
-            RawParams {
-                subpel: Some("half".to_string()),
                 ..RawParams::default()
             },
         ),
