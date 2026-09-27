@@ -161,6 +161,10 @@ By default, the cache lives in `av-denoise` inside the platform cache directory,
 `~/.cache` on Linux and macOS, and `%LOCALAPPDATA%` on Windows. With no platform cache directory at all, it falls
 back to `av-denoise` inside the temporary directory and warns.
 
+The cache directory holds one subdirectory per build of the kernels, named by a hash of their sources. A new build
+compiles its kernels once into its own subdirectory, and subdirectories left by other builds are removed after a week
+without use.
+
 - `AV_DENOISE_COMPILATION_CACHE=/some/dir` puts the compiled-kernel and autotune caches somewhere else, which is
   what CI runs and containers use to keep the cache on a mounted volume. It overrides whatever is in `cubecl.toml`.
 - `AV_DENOISE_COMPILATION_CACHE=off` disables caching entirely. Use this when benchmarking, because a warm cache

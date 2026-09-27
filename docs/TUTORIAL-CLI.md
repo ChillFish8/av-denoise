@@ -153,13 +153,13 @@ What `--preset` fills in:
 | `slow`     | 4               | 9              |
 | `veryslow` | 8               | 9              |
 
-| Flag                    | What it does                                                                                                                                                                                                         | Default              |
-|-------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------|
-| `--temporal-radius <N>` | How many neighbouring frames to search on each side, between 1 and 8. More frames means more patches to group.                                                                                                       | from `--preset`      |
-| `--lambda-ht <f>`       | How aggressively small transform coefficients are zeroed out. Higher removes more noise and more fine detail with it. `--luma-lambda-ht` and `--chroma-lambda-ht` override one plane.                                | 3.6 luma, 2.8 chroma |
-| `--lambda-ht-scale <f>` | Multiplies the `--lambda-ht` in effect for each plane. The main quality dial, since luma and chroma start from different defaults and this moves both together.                                                      | `1.0`                |
-| `--spatial-radius <N>`  | Half-width of the candidate search inside the centre frame, between 1 and 16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                       | from `--preset`      |
-| `--sigma-scale <f>`     | Nudges the measured noise level, the same dial NLMeans spells `--hq-sigma-scale`.                                                                                                                                    | `1.0`                |
+| Flag                    | What it does                                                                                                                                                                                                         | Default                |
+|-------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------|
+| `--temporal-radius <N>` | How many neighbouring frames to search on each side, between 1 and 8. More frames means more patches to group.                                                                                                       | from `--preset`        |
+| `--lambda-ht <f>`       | How aggressively small transform coefficients are zeroed out. Higher removes more noise and more fine detail with it. `--luma-lambda-ht` and `--chroma-lambda-ht` override one plane.                                | 3.78 luma, 2.94 chroma |
+| `--lambda-ht-scale <f>` | Multiplies the `--lambda-ht` in effect for each plane. The main quality dial, since luma and chroma start from different defaults and this moves both together.                                                      | `1.0`                  |
+| `--spatial-radius <N>`  | Half-width of the candidate search inside the centre frame, between 1 and 16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                       | from `--preset`        |
+| `--sigma-scale <f>`     | Nudges the measured noise level, the same dial NLMeans spells `--hq-sigma-scale`.                                                                                                                                    | `1.0`                  |
 
 <details>
 <summary><b>Expert flags</b> — calibration and debugging, not everyday tuning</summary>
