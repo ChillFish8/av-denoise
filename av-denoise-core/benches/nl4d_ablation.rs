@@ -17,7 +17,6 @@ use av_denoise_core::collab::kernels::aggregate::{
 use av_denoise_core::collab::kernels::fused::collab_fused;
 use av_denoise_core::collab::kernels::transforms::dct_noise_profile;
 use av_denoise_core::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
-use av_denoise_core::nl4d::phase_gains;
 use av_denoise_core::nlmeans::{BLOCK_X, BLOCK_Y, NOISE_CURVE_BINS};
 use cubecl::benchmark::{Benchmark, BenchmarkComputations, TimingMethod};
 use cubecl::prelude::*;
@@ -104,9 +103,6 @@ struct Rig<R: Runtime> {
     group_weight: Handle,
     sigma: Handle,
     dct_profile: Handle,
-    /// The 16 phase gains, passed under `subpel = 0` where the kernel
-    /// never reads them.
-    phase_gain: Handle,
     /// An all-zero noise curve, passed with `curve_valid = 0` where the
     /// kernel never applies it.
     zero_curve: Handle,
@@ -164,7 +160,6 @@ impl<R: Runtime> Rig<R> {
             group_weight: client.empty(refs * size_of::<f32>()),
             sigma: client.create_from_slice(f32::as_bytes(&sigma_host)),
             dct_profile: client.create_from_slice(f32::as_bytes(&dct_noise_profile(0.0))),
-            phase_gain: client.create_from_slice(f32::as_bytes(&phase_gains())),
             zero_curve: client.create_from_slice(f32::as_bytes(&[0.0f32; NOISE_CURVE_BINS])),
             kaiser_off: client.create_from_slice(f32::as_bytes(&kaiser_window(0.0))),
             kaiser_on: client.create_from_slice(f32::as_bytes(&kaiser_window(2.0))),
@@ -207,8 +202,6 @@ impl<R: Runtime> Rig<R> {
                 CubeDim::new_1d(64),
                 g.stored as usize,
                 ArrayArg::from_raw_parts(self.ring.clone(), self.ring_len),
-                ArrayArg::from_raw_parts(self.ring.clone(), self.ring_len),
-                ArrayArg::from_raw_parts(self.phase_gain.clone(), 16),
                 ArrayArg::from_raw_parts(self.mv_field.clone(), self.mv_len),
                 ArrayArg::from_raw_parts(self.confidence.clone(), self.conf_len),
                 ArrayArg::from_raw_parts(self.neighbour_slots.clone(), NEIGHBOUR_SLOTS.len()),
@@ -226,7 +219,6 @@ impl<R: Runtime> Rig<R> {
                 weight_scale(SIGMA, &dct_noise_profile(0.0)),
                 cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS),
                 needs_warp_uniform_search(&self.client),
-                0u32,
                 RADIUS,
                 grid_frames(RADIUS),
                 REFINE,

@@ -13,7 +13,6 @@ use crate::collab::kernels::aggregate::{
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
-use crate::nl4d::subpel::phase_gains;
 use crate::nlmeans::{BLOCK_X, BLOCK_Y, NOISE_CURVE_BINS};
 
 /// Runs [`collab_normalise`] over hand-built accumulators.
@@ -223,7 +222,6 @@ fn run_scatter_stage_windowed(
     let pixels = (width * height) as usize;
 
     let input = client.create_from_slice(f32::as_bytes(frame));
-    let gain_buf = client.create_from_slice(f32::as_bytes(&phase_gains()));
     let mv_dummy = client.create_from_slice(i32::as_bytes(&[0i32, 0i32]));
     let conf_dummy = client.create_from_slice(f32::as_bytes(&[1.0f32]));
     let slots_dummy = client.create_from_slice(u32::as_bytes(&[0u32]));
@@ -257,8 +255,6 @@ fn run_scatter_stage_windowed(
             CubeDim::new_1d(64),
             1usize,
             ArrayArg::from_raw_parts(input.clone(), pixels),
-            ArrayArg::from_raw_parts(input.clone(), pixels),
-            ArrayArg::from_raw_parts(gain_buf, 16),
             ArrayArg::from_raw_parts(mv_dummy, 2),
             ArrayArg::from_raw_parts(conf_dummy, 1),
             ArrayArg::from_raw_parts(slots_dummy, 1),
@@ -276,7 +272,6 @@ fn run_scatter_stage_windowed(
             weight_scale(sigma, &profile),
             ACCUM_SCALE,
             needs_warp_uniform_search(&client),
-            0u32,
             0u32,
             grid_frames(0),
             0u32,

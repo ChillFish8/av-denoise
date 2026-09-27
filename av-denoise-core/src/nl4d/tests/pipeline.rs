@@ -25,7 +25,6 @@ use crate::collab::kernels::aggregate::{
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, PATCH_SIZE, grid_frames, needs_warp_uniform_search};
-use crate::nl4d::subpel::phase_gains;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS, NlmDenoiser, NlmParams};
 
@@ -380,7 +379,6 @@ fn run_spatial_only(
     let frame_len = pixels;
 
     let ring_buf = client.create_from_slice(f32::as_bytes(noisy_centre));
-    let gain_buf = client.create_from_slice(f32::as_bytes(&phase_gains()));
     let mv_dummy = client.empty(size_of::<i32>());
     let conf_dummy = client.empty(size_of::<f32>());
     let neighbour_slots_dummy = client.empty(size_of::<u32>());
@@ -424,9 +422,7 @@ fn run_spatial_only(
             CubeCount::new_2d(fused_cubes_x(w), refs_y),
             CubeDim::new_1d(64),
             stored_ch as usize,
-            ArrayArg::from_raw_parts(ring_buf.clone(), noisy_centre.len()),
             ArrayArg::from_raw_parts(ring_buf, noisy_centre.len()),
-            ArrayArg::from_raw_parts(gain_buf, 16),
             ArrayArg::from_raw_parts(mv_dummy, 1),
             ArrayArg::from_raw_parts(conf_dummy, 1),
             ArrayArg::from_raw_parts(neighbour_slots_dummy, 1),
@@ -444,7 +440,6 @@ fn run_spatial_only(
             wnorm,
             ACCUM_SCALE,
             warp_uniform,
-            0u32,
             0u32,
             grid_frames(0),
             refine,
@@ -656,7 +651,6 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
         let output = client.empty(pixels * size_of::<f32>());
 
         let mc = front.motion_ctx();
-        let gain_buf = client.create_from_slice(f32::as_bytes(&phase_gains()));
 
         unsafe {
             collab_fused::launch_unchecked::<R>(
@@ -665,8 +659,6 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 CubeDim::new_1d(64),
                 1usize,
                 ArrayArg::from_raw_parts(view.input.clone(), ring_len),
-                ArrayArg::from_raw_parts(view.input.clone(), ring_len),
-                ArrayArg::from_raw_parts(gain_buf, 16),
                 ArrayArg::from_raw_parts(view.mv_field.clone(), mv_len.max(1)),
                 ArrayArg::from_raw_parts(view.confidence.clone(), conf_len.max(1)),
                 ArrayArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
@@ -684,7 +676,6 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 wnorm,
                 accum_scale,
                 needs_warp_uniform_search(&client),
-                0u32,
                 radius,
                 grid_frames(radius),
                 REFINE,

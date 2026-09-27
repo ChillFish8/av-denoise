@@ -28,8 +28,3 @@ pub use self::denoiser::Nl4dDenoiser;
 pub use self::params::{MAX_KAISER_BETA, Nl4dParams};
 pub use self::snapshot::MotionSnapshot;
 pub use self::subpel::SubpelPrecision;
-
-/// Re-exported only for the bench crates, which exercise the phase-plane
-/// kernel directly outside `Nl4dDenoiser`.
-#[doc(hidden)]
-pub use self::subpel::{HALF_PEL_TAPS, phase_gains};

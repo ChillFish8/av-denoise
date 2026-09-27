@@ -250,7 +250,7 @@ pub struct Nl4dOptions {
     pub windowed_noise_estimation: bool,
     /// See [`crate::nl4d::Nl4dParams::field_lambda`].
     pub field_lambda: f32,
-    /// See [crate::nl4d::Nl4dParams::subpel].
+    /// Has no effect.
     pub subpel: SubpelPrecision,
     /// See [crate::nl4d::Nl4dParams::noise_map].
     pub noise_map: bool,
@@ -276,7 +276,7 @@ impl Default for Nl4dOptions {
             kaiser_beta: defaults.kaiser_beta,
             windowed_noise_estimation: false,
             field_lambda: defaults.field_lambda,
-            subpel: defaults.subpel,
+            subpel: SubpelPrecision::Off,
             noise_map: defaults.noise_map,
         }
     }
@@ -681,7 +681,6 @@ fn build_engine<R: Runtime>(
                 c_min: opts.c_min,
                 kaiser_beta: opts.kaiser_beta,
                 field_lambda: opts.field_lambda,
-                subpel: opts.subpel,
                 noise_map: opts.noise_map,
             };
             let denoiser =

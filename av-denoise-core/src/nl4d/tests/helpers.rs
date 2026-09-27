@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 use cubecl::wgpu::WgpuRuntime;
 
-use crate::nl4d::{Nl4dParams, SubpelPrecision};
+use crate::nl4d::Nl4dParams;
 use crate::nlmeans::motion::neighbour_idx_for_k;
 use crate::nlmeans::{
     ChannelMode,
@@ -47,7 +47,6 @@ pub(super) fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
         // caller gets.
         kaiser_beta: 2.0,
         field_lambda: 0.0,
-        subpel: SubpelPrecision::Off,
         // No effect here, since sigma is pinned.
         noise_map: true,
     }
@@ -285,83 +284,6 @@ pub(super) fn noisy_ring(w: u32, h: u32, radius: u32, confidence_value: f32) -> 
         }
         let t = neighbour_idx_for_k(radius, k);
         neighbour_slots[t as usize] = (k + radius as i32) as u32;
-    }
-
-    RingFixture {
-        ring,
-        mv_field,
-        confidence,
-        neighbour_slots,
-        centre_slot,
-        radius,
-        blocks_x,
-        blocks_y,
-        mv_stride,
-        conf_stride,
-        width: w,
-        height: h,
-    }
-}
-
-/// A smooth two-tone texture sampled at `(x + shift_x, y)`, so a
-/// fractional shift is exact rather than interpolated.
-pub(super) fn smooth_texture_at(w: u32, h: u32, shift_x: f32) -> Vec<f32> {
-    let tau = std::f32::consts::TAU;
-    let mut frame = vec![0.0f32; (w * h) as usize];
-    for y in 0..h {
-        for x in 0..w {
-            let fx = x as f32 + shift_x;
-            let fy = y as f32;
-            let broad = 0.15 * (fx * tau / 9.0).sin() * (fy * tau / 11.0).cos();
-            let fine = 0.1 * (fx * tau / 5.5).cos();
-            frame[(y * w + x) as usize] = 0.5 + broad + fine;
-        }
-    }
-    frame
-}
-
-/// A ring whose neighbour at offset `k` shows the centre's content moved
-/// by `velocity * k` pixels along x.
-///
-/// Every block's vector predicts the nearest whole-pixel shift at full
-/// confidence, so a fractional velocity leaves the true match between
-/// two whole pixels.
-pub(super) fn fractional_pan_ring(w: u32, h: u32, radius: u32, velocity: f32, sigma: f32) -> RingFixture {
-    let n_frames = 2 * radius + 1;
-    let centre_slot = radius;
-    let blocks_x = w.div_ceil(BLK_STEP);
-    let blocks_y = h.div_ceil(BLK_STEP);
-    let blocks = blocks_x * blocks_y;
-    let mv_stride = blocks * 2;
-    let conf_stride = blocks;
-
-    let mut ring = Vec::with_capacity((n_frames * w * h) as usize);
-    for slot in 0..n_frames {
-        let k = slot as i32 - radius as i32;
-        let clean = smooth_texture_at(w, h, -velocity * k as f32);
-        let seed = (k + 50) as u32;
-        let noisy = noisy_copy_of(&clean, w, h, sigma, seed);
-        ring.extend(noisy);
-    }
-
-    let mut mv_field = vec![0i32; (2 * radius * mv_stride) as usize];
-    let confidence = vec![1.0f32; (2 * radius * conf_stride) as usize];
-    let mut neighbour_slots = vec![0u32; (2 * radius) as usize];
-    for k in -(radius as i32)..=(radius as i32) {
-        if k == 0 {
-            continue;
-        }
-
-        let t = neighbour_idx_for_k(radius, k);
-        neighbour_slots[t as usize] = (k + radius as i32) as u32;
-
-        let whole_shift = (velocity * k as f32).round() as i32;
-        let plane_start = (t * mv_stride) as usize;
-        let plane = &mut mv_field[plane_start..plane_start + mv_stride as usize];
-        for vector in plane.chunks_mut(2) {
-            vector[0] = whole_shift;
-            vector[1] = 0;
-        }
     }
 
     RingFixture {

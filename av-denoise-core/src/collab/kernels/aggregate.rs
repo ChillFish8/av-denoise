@@ -111,13 +111,9 @@ pub const ACCUM_CLAMP: f32 = 5.0;
 /// whatever `sigma` and whatever correlation shaping is in use, which is
 /// what [`WEIGHT_CLAMP`] relies on.
 ///
-/// The bound below is `1/512`. A member's variance is at most `sigma^2`,
-/// since sub-pixel interpolation can only lower it, so a group of 512
-/// coefficients sums to at most `512 * sigma^2 * g_max^2`, which puts the
-/// normalised weight between `1/512` and 1. When members carry a lower
-/// variance, the caller scales this result down by the smallest such
-/// factor, so the bound still holds and the smallest weight shrinks by
-/// that same factor.
+/// The bound below is `1/512`. Every member carries the plain `sigma^2`,
+/// so a group of 512 coefficients sums to at most `512 * sigma^2 * g_max^2`,
+/// which puts the normalised weight between `1/512` and 1.
 ///
 /// That range still does not fit `accum`'s fixed point with room to
 /// spare, which is why `wsum` counts at [`WEIGHT_GAIN`] times its scale.
@@ -187,11 +183,8 @@ fn bessel_i0(x: f64) -> f64 {
 /// smallest tap product, `w[0]^2`, which is `0.193` at `beta = 2`. The
 /// weight floor lands around 640 units of `wsum` at the default geometry,
 /// and around 124 after the corner's taper, so it still survives the
-/// rounding [`WEIGHT_GAIN`] exists to keep it above. Sub-pixel
-/// interpolation shrinks members' variance below `sigma^2` and
-/// [weight_scale] scales down to match, which shrinks this floor by
-/// the same factor, so the geometry above is the worst case at
-/// full-pixel precision.
+/// rounding [`WEIGHT_GAIN`] exists to keep it above. Only the geometry
+/// moves this number, not match quality.
 pub fn kaiser_window(beta: f32) -> [f32; PATCH_SIZE as usize] {
     let denom = bessel_i0(beta as f64);
     let last = (PATCH_SIZE - 1) as f64;

@@ -30,7 +30,6 @@ use kernels::mc_confidence::McConfidenceBench;
 use kernels::mc_downscale::DownscaleBench;
 use kernels::mc_warp::WarpBench;
 use kernels::mv_regularise::MvRegulariseBench;
-use kernels::nl4d_phase_planes::PhasePlanesBench;
 use kernels::noise_partial::NoisePartialBench;
 use kernels::pack_wire::PackWireBench;
 use kernels::temporal_noise_stats::TemporalNoiseStatsBench;
@@ -232,16 +231,12 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
     run(MvRegulariseBench {
         client: client.clone(),
     });
-    run(PhasePlanesBench {
-        client: client.clone(),
-    });
     for &(ch, ch_name) in CHANNELS {
         run(CollabFusedBench {
             client: client.clone(),
             ch,
             ch_name,
             split_mv: false,
-            subpel: 0,
             noise_curve: false,
         });
     }
@@ -250,7 +245,6 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         ch: 1,
         ch_name: "luma",
         split_mv: false,
-        subpel: 0,
         noise_curve: true,
     });
     for &(ch, ch_name) in CHANNELS {
@@ -259,17 +253,6 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
             ch,
             ch_name,
             split_mv: true,
-            subpel: 0,
-            noise_curve: false,
-        });
-    }
-    for subpel in [1, 2] {
-        run(CollabFusedBench {
-            client: client.clone(),
-            ch: 1,
-            ch_name: "luma",
-            split_mv: false,
-            subpel,
             noise_curve: false,
         });
     }

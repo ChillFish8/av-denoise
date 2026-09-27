@@ -1,4 +1,3 @@
-use super::subpel::SubpelPrecision;
 use crate::nlmeans::{ChannelMode, HqParams, MotionCompensationMode, MotionEstimation, NlmParams};
 
 /// The largest [`Nl4dParams::kaiser_beta`] worth accepting.
@@ -86,10 +85,6 @@ pub struct Nl4dParams {
     /// so `1.0` sits inside that plateau rather than at its edge. `0.0`
     /// skips the pass.
     pub field_lambda: f32,
-    /// How finely a temporal match is aligned between whole pixels.
-    ///
-    /// Defaults to [SubpelPrecision::Off](crate::nl4d::SubpelPrecision::Off).
-    pub subpel: SubpelPrecision,
     /// Scales the luma threshold by how noisy each brightness level is in the current frame.
     ///
     /// On by default.
@@ -119,7 +114,6 @@ impl Default for Nl4dParams {
             c_min: 0.05,
             kaiser_beta: 2.0,
             field_lambda: 1.0,
-            subpel: SubpelPrecision::Off,
             noise_map: true,
         }
     }
