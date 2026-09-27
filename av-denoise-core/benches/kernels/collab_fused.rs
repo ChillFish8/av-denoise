@@ -2,7 +2,8 @@ use av_denoise_core::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use av_denoise_core::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
 use av_denoise_core::collab::kernels::fused::collab_fused;
 use av_denoise_core::collab::kernels::transforms::dct_noise_profile;
-use av_denoise_core::collab::{PATCH_SIZE, needs_warp_uniform_search};
+use av_denoise_core::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
+use av_denoise_core::nlmeans::NOISE_CURVE_BINS;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -11,10 +12,8 @@ use super::nl4d_geometry::{
     BLK_STEP,
     BLKSIZE,
     CENTRE_SLOT,
-    CONFIDENCE_VARIANCE,
     K_MAX,
     LAMBDA_HT,
-    MISMATCH_SCALE2,
     N_FRAMES,
     NEIGHBOUR_SLOTS,
     RADIUS,
@@ -59,6 +58,16 @@ pub struct CollabFusedBench<R: Runtime> {
     pub ch: u32,
     pub ch_name: &'static str,
     pub split_mv: bool,
+    /// Launches with a stepped noise curve and `curve_valid = 1`.
+    pub noise_curve: bool,
+}
+
+/// A curve that doubles the luma threshold in the darker half and halves it
+/// in the brighter one.
+fn stepped_curve() -> [f32; NOISE_CURVE_BINS] {
+    let mut curve = [2.0f32; NOISE_CURVE_BINS];
+    curve[NOISE_CURVE_BINS / 2..].fill(0.5);
+    curve
 }
 
 /// How far apart two neighbouring blocks' vectors sit in the split
@@ -85,6 +94,8 @@ pub struct CollabFusedInput {
     pub wsum: Handle,
     pub group_weight: Handle,
     pub ring_len: usize,
+    /// The noise curve, all zeros unless the arm runs one.
+    pub noise_curve: Handle,
 }
 
 impl<R: Runtime> Benchmark for CollabFusedBench<R> {
@@ -143,6 +154,12 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
             .empty(frame_len * N_FRAMES as usize * size_of::<i32>());
         let wsum = self.client.empty(pixels * N_FRAMES as usize * size_of::<i32>());
         let group_weight = self.client.empty(ref_count(W, H) * size_of::<f32>());
+        let curve_host = if self.noise_curve {
+            stepped_curve()
+        } else {
+            [0.0f32; NOISE_CURVE_BINS]
+        };
+        let noise_curve = self.client.create_from_slice(f32::as_bytes(&curve_host));
 
         CollabFusedInput {
             ring,
@@ -156,6 +173,7 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
             wsum,
             group_weight,
             ring_len: ring_data.len(),
+            noise_curve,
         }
     }
 
@@ -187,6 +205,7 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
                 ArrayArg::from_raw_parts(args.confidence.clone(), (2 * RADIUS * conf_stride) as usize),
                 ArrayArg::from_raw_parts(args.neighbour_slots.clone(), NEIGHBOUR_SLOTS.len()),
                 ArrayArg::from_raw_parts(args.sigma.clone(), stored_ch as usize),
+                ArrayArg::from_raw_parts(args.noise_curve.clone(), NOISE_CURVE_BINS),
                 ArrayArg::from_raw_parts(args.dct_profile.clone(), 8),
                 ArrayArg::from_raw_parts(args.kaiser.clone(), PATCH_SIZE as usize),
                 ArrayArg::from_raw_parts(args.accum.clone(), frame_len * N_FRAMES as usize),
@@ -194,14 +213,13 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
                 ArrayArg::from_raw_parts(args.group_weight.clone(), refs),
                 CENTRE_SLOT,
                 0.0f32,
-                0.0f32,
-                MISMATCH_SCALE2,
                 LAMBDA_HT,
+                u32::from(self.noise_curve),
                 weight_scale(SIGMA, &dct_noise_profile(0.0)),
                 cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS),
-                CONFIDENCE_VARIANCE,
                 needs_warp_uniform_search(&self.client),
                 RADIUS,
+                grid_frames(RADIUS),
                 REFINE,
                 mv_stride,
                 conf_stride,
@@ -223,7 +241,8 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
 
     fn name(&self) -> String {
         let field = if self.split_mv { "_split_mv" } else { "" };
-        format!("collab_fused_1080p_{}{field}", self.ch_name)
+        let curve = if self.noise_curve { "_noise_curve" } else { "" };
+        format!("collab_fused_1080p_{}{field}{curve}", self.ch_name)
     }
 
     fn sync(&self) {

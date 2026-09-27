@@ -229,21 +229,11 @@ pub struct Nl4dOptions {
     /// be finite and in `[0.1, 10.0]`.
     pub lambda_ht_scale: f32,
     /// The confidence floor below which a whole neighbour block is
-    /// skipped rather than scored, in `[0, 1)`. Defaults to 0.05. Only
-    /// affects how much compute a submit spends, never which candidates
-    /// are admitted once they are scored.
+    /// skipped rather than scored, in `[0, 1)`. Defaults to 0.05. A
+    /// block below the floor is never scored, and a volume left short
+    /// of frames by the skip makes its group filter from the centre
+    /// frame alone.
     pub c_min: f32,
-    /// A multiplier on the mismatch variance a poorly matched temporal
-    /// member carries into the hard threshold. Defaults to 1.0.
-    ///
-    /// The variance grows with the square of this. The mechanism
-    /// saturates well before the top of its accepted range, see
-    /// [`crate::nl4d::Nl4dParams::mismatch_scale`].
-    pub mismatch_scale: f32,
-    /// Whether a temporal member's mismatch variance reaches the
-    /// hard-threshold shrinkage at all. Defaults to `true`. See
-    /// [`crate::nl4d::Nl4dParams::confidence_variance`].
-    pub confidence_variance: bool,
     /// The `beta` of the Kaiser window each filtered patch is tapered
     /// with as it is aggregated. Defaults to 2.0. `0.0` is uniform
     /// aggregation. See [`crate::nl4d::Nl4dParams::kaiser_beta`].
@@ -260,6 +250,8 @@ pub struct Nl4dOptions {
     pub windowed_noise_estimation: bool,
     /// See [`crate::nl4d::Nl4dParams::field_lambda`].
     pub field_lambda: f32,
+    /// See [crate::nl4d::Nl4dParams::noise_map].
+    pub noise_map: bool,
 }
 
 impl Default for Nl4dOptions {
@@ -279,11 +271,10 @@ impl Default for Nl4dOptions {
             lambda_ht: None,
             lambda_ht_scale: 1.0,
             c_min: defaults.c_min,
-            mismatch_scale: defaults.mismatch_scale,
-            confidence_variance: defaults.confidence_variance,
             kaiser_beta: defaults.kaiser_beta,
             windowed_noise_estimation: false,
             field_lambda: defaults.field_lambda,
+            noise_map: defaults.noise_map,
         }
     }
 }
@@ -316,8 +307,7 @@ impl Nl4dOptions {
 ///
 /// Luma and chroma values are picked by eye from a ladder of renders against real
 /// film grain, accepting more lost detail in exchange for less remaining
-/// noise on heavy grain. Separately confirmed not to over-filter near-clean
-/// animation. The reason why we're going a bit heavier on high noise is because
+/// noise on heavy grain. The reason why we're going a bit heavier on high noise is because
 /// the encoders end up reducing that detail _more_ than the denoiser does if
 /// that extra entropy remains in and overall produces a worse final image.
 ///
@@ -325,11 +315,11 @@ impl Nl4dOptions {
 /// dominated by luma" assumption [`hq_default_strength`]
 /// makes for its own Yuv case.
 ///
-/// Luma and the fused Yuv mode use 5.2, and chroma uses 3.4.
+/// Luma and the fused Yuv mode use 3.78, and chroma uses 2.94.
 pub fn nl4d_default_lambda_ht(channels: ChannelMode) -> f32 {
     match channels {
-        ChannelMode::Luma | ChannelMode::Yuv => 5.2,
-        ChannelMode::Chroma => 3.4,
+        ChannelMode::Luma | ChannelMode::Yuv => 3.78,
+        ChannelMode::Chroma => 2.94,
     }
 }
 
@@ -595,6 +585,12 @@ impl<R: Runtime> Engine<R> {
         matches!(self, Self::Nl4d(_))
     }
 
+    fn mark_continuation(&mut self) {
+        if let Self::Nl4d(d) = self {
+            d.mark_continuation();
+        }
+    }
+
     fn push_frame(&mut self, frame: &[f32]) {
         match self {
             Self::Nlm(d) => d.push_frame(frame),
@@ -680,10 +676,9 @@ fn build_engine<R: Runtime>(
                 spatial_radius: opts.spatial_radius,
                 lambda_ht,
                 c_min: opts.c_min,
-                mismatch_scale: opts.mismatch_scale,
-                confidence_variance: opts.confidence_variance,
                 kaiser_beta: opts.kaiser_beta,
                 field_lambda: opts.field_lambda,
+                noise_map: opts.noise_map,
             };
             let denoiser =
                 Nl4dDenoiser::with_output_format(client, nl4d_params, width, height, output_format)
@@ -714,6 +709,17 @@ impl Backend {
             Self::Rocm(e) => e.is_nl4d(),
             #[cfg(any(feature = "vulkan", feature = "metal"))]
             Self::Wgpu(e) => e.is_nl4d(),
+        }
+    }
+
+    fn mark_continuation(&mut self) {
+        match self {
+            #[cfg(feature = "cuda")]
+            Self::Cuda(e) => e.mark_continuation(),
+            #[cfg(feature = "rocm")]
+            Self::Rocm(e) => e.mark_continuation(),
+            #[cfg(any(feature = "vulkan", feature = "metal"))]
+            Self::Wgpu(e) => e.mark_continuation(),
         }
     }
 
@@ -798,6 +804,17 @@ pub struct WindowSpan {
     pub behind: usize,
     /// How many frames newer than the target the window must include.
     pub ahead: usize,
+    /// How the window is filled where it runs past a clip's ends.
+    pub edges: EdgePadding,
+}
+
+/// How a windowed algorithm fills a window that runs past a clip's ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgePadding {
+    /// Repeat the boundary frame, so every window has the same length.
+    Repeat,
+    /// Stop at the clip's ends and let the denoiser run off-centre passes there.
+    Shifted,
 }
 
 impl WindowSpan {
@@ -975,16 +992,23 @@ impl Denoiser {
     /// `radius` more frames behind it again. So nl4d needs the target's
     /// own `radius`-wide neighbourhood doubled on both sides:
     /// `WindowSpan { behind: 2 * radius, ahead: 2 * radius }`.
+    ///
+    /// nl4d's windows stop at a clip's ends, while the NLM algorithms
+    /// repeat the boundary frame.
     pub fn window_span(&self) -> WindowSpan {
         let radius = self.temporal_radius as usize;
-        let span = if self.backend.is_nl4d() {
-            2 * radius
+        let is_nl4d = self.backend.is_nl4d();
+        let span = if is_nl4d { 2 * radius } else { radius };
+        let edges = if is_nl4d {
+            EdgePadding::Shifted
         } else {
-            radius
+            EdgePadding::Repeat
         };
+
         WindowSpan {
             behind: span,
             ahead: span,
+            edges,
         }
     }
 
@@ -1112,10 +1136,17 @@ impl Denoiser {
     /// without starting a denoise.
     ///
     /// The wire counterpart of [`Self::push_frame_priming`].
+    ///
+    /// A stream that starts with a priming push picks up mid-clip, so nl4d runs no head passes for it.
     pub fn push_frame_wire_priming(&mut self, planes: &[&[u8]], depth: Depth) -> Result<(), DenoiserError> {
         if self.poisoned {
             return Err(DenoiserError::Poisoned);
         }
+
+        if self.frames_pushed == 0 {
+            self.backend.mark_continuation();
+        }
+
         match &mut self.backend {
             #[cfg(feature = "cuda")]
             Backend::Cuda(d) => d.push_frame_wire(planes, depth),
@@ -1138,12 +1169,19 @@ impl Denoiser {
     /// window at once, rather than a strictly ordered stream, fills the
     /// window in one go and lets only the last push in it submit.
     ///
+    /// A stream that starts with a priming push picks up mid-clip, so nl4d runs no head passes for it.
+    ///
     /// A failure elsewhere poisons the denoiser, so this refuses to run
     /// until [`Self::reset_stream`] clears it.
     pub fn push_frame_priming(&mut self, frame: &[f32]) -> Result<(), DenoiserError> {
         if self.poisoned {
             return Err(DenoiserError::Poisoned);
         }
+
+        if self.frames_pushed == 0 {
+            self.backend.mark_continuation();
+        }
+
         match &mut self.backend {
             #[cfg(feature = "cuda")]
             Backend::Cuda(d) => d.push_frame(frame),
@@ -1412,8 +1450,8 @@ mod options_tests {
         let luma = nl4d_default_lambda_ht(ChannelMode::Luma);
         let chroma = nl4d_default_lambda_ht(ChannelMode::Chroma);
 
-        assert!((luma - 5.2).abs() < f32::EPSILON);
-        assert!((chroma - 3.4).abs() < f32::EPSILON);
+        assert!((luma - 3.78).abs() < f32::EPSILON);
+        assert!((chroma - 2.94).abs() < f32::EPSILON);
         assert!(
             (chroma - luma).abs() > f32::EPSILON,
             "the two planes should not resolve to the same default"
@@ -1435,8 +1473,8 @@ mod options_tests {
         let luma = resolve_lambda_ht(&opts, ChannelMode::Luma).expect("the default scale is in range");
         let chroma = resolve_lambda_ht(&opts, ChannelMode::Chroma).expect("the default scale is in range");
 
-        assert!((luma - 5.2).abs() < f32::EPSILON, "got {luma}");
-        assert!((chroma - 3.4).abs() < f32::EPSILON, "got {chroma}");
+        assert!((luma - 3.78).abs() < f32::EPSILON, "got {luma}");
+        assert!((chroma - 2.94).abs() < f32::EPSILON, "got {chroma}");
     }
 
     #[test]
@@ -1715,7 +1753,6 @@ mod options_tests {
         assert_eq!(opts.refine, params.refine);
         assert_eq!(opts.spatial_radius, params.spatial_radius);
         assert!((opts.c_min - params.c_min).abs() < f32::EPSILON);
-        assert_eq!(opts.confidence_variance, params.confidence_variance);
         // The two `lambda_ht` fields hold different things, so they are
         // not compared. `opts.lambda_ht` stays `None` and is deferred to
         // `nl4d_default_lambda_ht` once the plane is known (see
@@ -1993,6 +2030,7 @@ mod tests {
         let span = d.window_span();
         assert_eq!(span.behind, 3, "behind should equal the temporal radius");
         assert_eq!(span.ahead, 3, "ahead should equal the temporal radius");
+        assert_eq!(span.edges, EdgePadding::Repeat);
     }
 
     /// nl4d's cross-frame accumulator needs the target's own `radius`
@@ -2011,6 +2049,7 @@ mod tests {
         let span = d.window_span();
         assert_eq!(span.behind, 6, "behind should equal 2 * the temporal radius");
         assert_eq!(span.ahead, 6, "ahead should equal 2 * the temporal radius");
+        assert_eq!(span.edges, EdgePadding::Shifted);
     }
 
     #[test]

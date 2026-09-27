@@ -1,12 +1,61 @@
 use cubecl::prelude::*;
 use cubecl::wgpu::WgpuRuntime;
 
+use crate::nl4d::Nl4dParams;
 use crate::nlmeans::motion::neighbour_idx_for_k;
+use crate::nlmeans::{
+    ChannelMode,
+    HqParams,
+    MotionCompensationMode,
+    MotionEstimation,
+    NlmParams,
+    PrefilterMode,
+};
+
+pub(super) const SIGMA: f32 = 6.0 / 255.0;
+pub(super) const SPATIAL_RADIUS: u32 = 9;
+pub(super) const REFINE: u32 = 2;
+pub(super) const C_MIN: f32 = 0.05;
+pub(super) const LAMBDA_HT: f32 = 2.7;
+
+/// Parameters for a still clip with sigma pinned to [SIGMA].
+pub(super) fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
+    Nl4dParams {
+        nlm: NlmParams {
+            temporal_radius,
+            search_radius: 2,
+            patch_radius: 2,
+            strength: 1.2,
+            self_weight: 1.0,
+            channels: ChannelMode::Luma,
+            prefilter: PrefilterMode::None,
+            motion_compensation: MotionCompensationMode::Mvtools {
+                blksize: 16,
+                overlap: 8,
+                search_radius: 4,
+                pyramid_levels: 2,
+                estimation: MotionEstimation::Auto,
+            },
+            hq: Some(HqParams::with_sigma(SIGMA)),
+        },
+        temporal_radius,
+        refine: REFINE,
+        spatial_radius: SPATIAL_RADIUS,
+        lambda_ht: LAMBDA_HT,
+        c_min: C_MIN,
+        // The shipped default, so these run the aggregation a real
+        // caller gets.
+        kaiser_beta: 2.0,
+        field_lambda: 0.0,
+        // No effect here, since sigma is pinned.
+        noise_map: true,
+    }
+}
 
 /// A non-flat luma field, built from two out-of-phase sine waves rather
 /// than noise, so it carries real spatial structure a denoiser can
 /// either preserve or destroy.
-pub(super) fn textured_base(w: u32, h: u32) -> Vec<f32> {
+pub(crate) fn textured_base(w: u32, h: u32) -> Vec<f32> {
     let mut frame = vec![0.0f32; (w * h) as usize];
     for y in 0..h {
         for x in 0..w {
@@ -23,23 +72,30 @@ pub(super) fn textured_base(w: u32, h: u32) -> Vec<f32> {
 /// Adds independent pseudo-Gaussian noise to `base`, decorrelated across
 /// `seed` so different seeds over the same base give independently
 /// noisy copies of the same clean content.
-pub(super) fn noisy_copy_of(base: &[f32], w: u32, h: u32, sigma: f32, seed: u32) -> Vec<f32> {
-    let unit_std = (1.0f32 / 3.0f32).sqrt();
+pub(crate) fn noisy_copy_of(base: &[f32], w: u32, h: u32, sigma: f32, seed: u32) -> Vec<f32> {
     let mut frame = vec![0.0f32; base.len()];
     for idx in 0..(w * h) {
-        let mut sum = 0.0f32;
-        for k in 0..4u32 {
-            let mut hash = (idx * 4 + k)
-                .wrapping_mul(2654435761)
-                .wrapping_add(seed.wrapping_mul(0x9E37_79B9).wrapping_add(k));
-            hash ^= hash >> 15;
-            hash = hash.wrapping_mul(0x85EB_CA6B);
-            hash ^= hash >> 13;
-            sum += (hash as f32 / u32::MAX as f32) - 0.5;
-        }
-        frame[idx as usize] = (base[idx as usize] + (sum / unit_std) * sigma).clamp(0.0, 1.0);
+        let noise = unit_noise(idx, seed);
+        frame[idx as usize] = (base[idx as usize] + noise * sigma).clamp(0.0, 1.0);
     }
     frame
+}
+
+/// A pseudo-Gaussian sample with unit standard deviation for pixel `idx`
+/// under `seed`.
+pub(super) fn unit_noise(idx: u32, seed: u32) -> f32 {
+    let unit_std = (1.0f32 / 3.0f32).sqrt();
+    let mut sum = 0.0f32;
+    for k in 0..4u32 {
+        let mut hash = (idx * 4 + k)
+            .wrapping_mul(2654435761)
+            .wrapping_add(seed.wrapping_mul(0x9E37_79B9).wrapping_add(k));
+        hash ^= hash >> 15;
+        hash = hash.wrapping_mul(0x85EB_CA6B);
+        hash ^= hash >> 13;
+        sum += (hash as f32 / u32::MAX as f32) - 0.5;
+    }
+    sum / unit_std
 }
 
 /// PSNR between two equal-length planes, in dB.

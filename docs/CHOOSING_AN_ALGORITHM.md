@@ -35,18 +35,15 @@ knowing what is truly noise, or just fine detail.
 NL4D instead transforms the whole group into frequency coefficients, sorted so that content every member agrees 
 on goes into one bucket and content that only one or two members carry lands in another. Noise is what 
 the members do not agree on. Real detail, even faint and very fine detail, is what they do agree on.
+The group is built as short tracks of the same patch followed through time, so grain, which changes every frame,
+separates from detail, which does not.
 Each coefficient is then kept or discarded depending on whether it stands far enough above the noise level _measured in 
 that frame_, and what survives is transformed back into pixels.
-
-One detail matters here though, not every member is trusted equally. A patch pulled from a neighbouring frame that 
-only roughly matched is treated as a noisier observation of the same content, which raises the bar its disagreement 
-with the other patches has to clear. A bad match therefore cannot pass itself off as detail the group found. This 
-is one of the key differences from how the BM3D and BM4D families handles the same problem.
 
 The practical effect is two-fold. Against NLMeans, NL4D can remove noise that averaging can only smooth over, because
 it makes a decision about each piece of the signal separately rather than one blended compromise about
 the pixel as a whole. Against BM3D (and V-BM3D), which makes those same per-coefficient decisions, the gain is 
-they are better decisions.
+that each decision sees the same patch tracked through time, where grain changes and detail holds still.
 
 </details>
 

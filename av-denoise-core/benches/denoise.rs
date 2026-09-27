@@ -110,11 +110,11 @@ fn bench_push_recv(
     let accelerator = denoiser.selected_accelerator();
 
     // Fill the temporal window so subsequent push/recv steady-state
-    // lines up. The library auto-mirrors the first pushed frame into
-    // the leading `R` ring slots (`prime_leading_edge_if_first`), so
-    // pushing `window - 1` frames overshoots and trips `QueueFull`
-    // at radius ≥ 2. Use a defensive push that drains a pending if
-    // the queue is full, then drain everything before steady-state.
+    // lines up. NLMeans mirrors the first pushed frame into the leading
+    // `R` ring slots, so it emits early and pushing `window - 1` frames
+    // can trip `QueueFull` at radius ≥ 2. nl4d fills its ring with real
+    // frames instead. Use a defensive push that drains a pending if the
+    // queue is full, then drain everything before steady-state.
     let temporal_radius = match mode {
         DenoisingMode::Spacial => 0,
         DenoisingMode::Temporal { radius } => radius,

@@ -29,6 +29,7 @@ pub mod prefilter;
 mod align;
 mod denoiser;
 mod dispatch;
+mod edges;
 mod noise;
 mod params;
 mod pending;
@@ -58,6 +59,8 @@ pub use params::{
 pub(crate) use pending::start_readback;
 pub use pending::{Pending, TryWait};
 pub use prefilter::{DEFAULT_PILOT_STRENGTH_SCALE, PrefilterMode, parse_prefilter};
+
+pub use self::noise::NOISE_CURVE_BINS;
 
 /// Cube X dimension for tile-heavy fused/separable kernels.
 pub const BLOCK_X: u32 = 32;

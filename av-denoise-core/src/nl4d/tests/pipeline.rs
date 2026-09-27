@@ -1,6 +1,18 @@
 use cubecl::prelude::*;
 
-use super::helpers::{R, make_client, noisy_copy_of, psnr, textured_base};
+use super::helpers::{
+    C_MIN,
+    LAMBDA_HT,
+    R,
+    REFINE,
+    SIGMA,
+    SPATIAL_RADIUS,
+    make_client,
+    noisy_copy_of,
+    psnr,
+    static_clip_params,
+    textured_base,
+};
 use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use crate::collab::kernels::aggregate::{
     ACCUM_SCALE,
@@ -12,55 +24,9 @@ use crate::collab::kernels::aggregate::{
 };
 use crate::collab::kernels::fused::collab_fused;
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{MAX_K, PATCH_SIZE, needs_warp_uniform_search};
+use crate::collab::{MAX_K, PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
-use crate::nlmeans::{
-    ChannelMode,
-    HqParams,
-    MotionCompensationMode,
-    MotionEstimation,
-    NlmDenoiser,
-    NlmParams,
-};
-
-const SIGMA: f32 = 6.0 / 255.0;
-const SPATIAL_RADIUS: u32 = 9;
-const REFINE: u32 = 2;
-const C_MIN: f32 = 0.05;
-const LAMBDA_HT: f32 = 2.7;
-
-fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
-    Nl4dParams {
-        nlm: NlmParams {
-            temporal_radius,
-            search_radius: 2,
-            patch_radius: 2,
-            strength: 1.2,
-            self_weight: 1.0,
-            channels: ChannelMode::Luma,
-            prefilter: crate::nlmeans::PrefilterMode::None,
-            motion_compensation: MotionCompensationMode::Mvtools {
-                blksize: 16,
-                overlap: 8,
-                search_radius: 4,
-                pyramid_levels: 2,
-                estimation: MotionEstimation::Auto,
-            },
-            hq: Some(HqParams::with_sigma(SIGMA)),
-        },
-        temporal_radius,
-        refine: REFINE,
-        spatial_radius: SPATIAL_RADIUS,
-        lambda_ht: LAMBDA_HT,
-        c_min: C_MIN,
-        mismatch_scale: 1.0,
-        confidence_variance: true,
-        // The shipped default, so these run the aggregation a real
-        // caller gets.
-        kaiser_beta: 2.0,
-        field_lambda: 0.0,
-    }
-}
+use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS, NlmDenoiser, NlmParams};
 
 /// A static clip, camera and content both still, with independent
 /// per-frame noise. Every emitted frame must come out well above the
@@ -165,7 +131,7 @@ fn denoises_at_the_widest_spatial_and_temporal_radius() {
     }
 }
 
-/// Guards `run_collab_stage`'s pass-0 accumulator zero against the GPU's
+/// Guards `run_pass`'s whole-ring accumulator zero against the GPU's
 /// per-dimension dispatch limit.
 ///
 /// A single 1D dispatch has to stay at or under 65,535 workgroups on
@@ -245,7 +211,7 @@ fn survives_a_ring_size_that_would_overflow_a_single_zero_dispatch() {
     }
 }
 
-/// Guards the `centre_slot` contract `run_collab_stage` depends on. The
+/// Guards the `centre_slot` contract `run_pass` depends on. The
 /// slot the pass is centred on is what the reference patch is read from
 /// and what an untouched member scatters back into, and nothing in the
 /// type system pins it to the frame the caller means, so this test
@@ -262,15 +228,14 @@ fn survives_a_ring_size_that_would_overflow_a_single_zero_dispatch() {
 /// all, and the marker would be attenuated or absent from its frame's
 /// own completed output.
 ///
-/// Emission now lags `temporal_radius` passes behind the pass a frame is
-/// the centre of (see [`Nl4dDenoiser::run_collab_stage`]), so this
+/// Emission lags `temporal_radius` passes behind the pass a frame is
+/// the centre of (see [`Nl4dDenoiser::denoise_submit`]), so this
 /// pushes `3 * radius + 1` frames, interleaving a `denoise_submit` after
 /// every push the way a real caller does, and collects every emitted
 /// output in order. Emitted output `k` is always real frame `k`'s own
 /// completed region (see that same doc comment for why), so the marker,
 /// planted on real frame `radius`, is checked against emitted output
-/// `radius`, not the first or only output the way a single-pass design
-/// would have let this test check.
+/// `radius`.
 ///
 /// The marker is a big flat block, not fine detail, so ordinary
 /// shrinkage cannot legitimately remove it, and the assertion checks a
@@ -382,7 +347,7 @@ fn flush_emits_exactly_the_pushed_frame_count() {
 }
 
 /// Launches the same collaborative and aggregation kernels
-/// [`Nl4dDenoiser::run_collab_stage`] runs, standalone, for a
+/// [`Nl4dDenoiser::run_pass`] runs, standalone, for a
 /// single-frame ring at `radius = 0`. This is the "spatial-only" arm of
 /// the hypothesis test below: identical grouping (no admission gate),
 /// identical filter (hard threshold, same `lambda_ht`), identical noise
@@ -422,6 +387,7 @@ fn run_spatial_only(
     let dct_profile = dct_noise_profile(0.0);
     let dct_profile_buf = client.create_from_slice(f32::as_bytes(&dct_profile));
     let kaiser_buf = client.create_from_slice(f32::as_bytes(&kaiser_window(0.0)));
+    let zero_curve = client.create_from_slice(f32::as_bytes(&[0.0f32; NOISE_CURVE_BINS]));
     let accum = client.empty(frame_len * size_of::<i32>());
     let wsum = client.empty(pixels * size_of::<i32>());
     let output = client.empty(frame_len * size_of::<f32>());
@@ -461,23 +427,21 @@ fn run_spatial_only(
             ArrayArg::from_raw_parts(conf_dummy, 1),
             ArrayArg::from_raw_parts(neighbour_slots_dummy, 1),
             ArrayArg::from_raw_parts(sigma_buf, stored_ch as usize),
+            ArrayArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
             ArrayArg::from_raw_parts(dct_profile_buf, 8),
             ArrayArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
             ArrayArg::from_raw_parts(accum.clone(), frame_len),
             ArrayArg::from_raw_parts(wsum.clone(), pixels),
             ArrayArg::from_raw_parts(group_weight, refs),
             centre_slot,
-            0.0f32,
             c_min,
-            // `radius` is 0 below, so no temporal candidate is ever
-            // scored and this runtime scalar is never read.
-            0.0f32,
             lambda_ht,
+            0u32,
             wnorm,
             ACCUM_SCALE,
-            false,
             warp_uniform,
             0u32,
+            grid_frames(0),
             refine,
             1u32,
             1u32,
@@ -527,10 +491,9 @@ fn run_spatial_only(
 /// `denoise_submit` is called after every push, exactly the way a real
 /// caller drives this denoiser, and every emitted output is collected in
 /// order. Emitted output `k` is real frame `k`'s own completed region
-/// (see [`Nl4dDenoiser::run_collab_stage`]'s scheduling), which is only
+/// (see [`Nl4dDenoiser::denoise_submit`]'s scheduling), which is only
 /// ready `radius` passes after the pass centred on frame `k` itself, so
-/// `3 * radius + 1` frames are pushed rather than the `2 * radius + 1` a
-/// single-pass design would have needed.
+/// `3 * radius + 1` frames are pushed.
 #[test]
 fn temporal_grouping_beats_spatial_only_on_a_static_clip() {
     let client = make_client();
@@ -654,7 +617,7 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
     let mut pass_index = 0u32;
     for frame in &frames {
         front.push_frame(frame);
-        let Some(view) = front.submit_machinery().expect("submit_machinery failed") else {
+        let Some(view) = front.submit_machinery(radius).expect("submit_machinery failed") else {
             continue;
         };
         if pass_index != radius {
@@ -674,6 +637,7 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
         let profile = dct_noise_profile(0.0);
         let profile_buf = client.create_from_slice(f32::as_bytes(&profile));
         let kaiser_buf = client.create_from_slice(f32::as_bytes(&kaiser_window(0.0)));
+        let zero_curve = client.create_from_slice(f32::as_bytes(&[0.0f32; NOISE_CURVE_BINS]));
         let wnorm = weight_scale(sigmas[0], &profile);
         let accum_scale = cross_frame_accum_scale(SPATIAL_RADIUS, radius);
 
@@ -699,23 +663,21 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 ArrayArg::from_raw_parts(view.confidence.clone(), conf_len.max(1)),
                 ArrayArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
                 ArrayArg::from_raw_parts(sigma_buf, 1),
+                ArrayArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
                 ArrayArg::from_raw_parts(profile_buf, 8),
                 ArrayArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
                 ArrayArg::from_raw_parts(accum.clone(), pixels * total_frames as usize),
                 ArrayArg::from_raw_parts(wsum.clone(), pixels * total_frames as usize),
                 ArrayArg::from_raw_parts(group_weight, refs),
                 centre_slot,
-                0.0f32,
                 C_MIN,
-                // `use_member_sigma` is off below, so this never reaches
-                // a threshold and any value is exact.
-                1.0f32,
                 LAMBDA_HT,
+                0u32,
                 wnorm,
                 accum_scale,
-                false,
                 needs_warp_uniform_search(&client),
                 radius,
+                grid_frames(radius),
                 REFINE,
                 view.mv_stride,
                 view.conf_stride,

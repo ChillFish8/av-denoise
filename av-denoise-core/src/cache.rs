@@ -16,6 +16,11 @@
 //! which is what benchmarking wants, because a warm cache hides the
 //! compilation cost that a first run pays.
 //!
+//! The cache root holds one subdirectory per build of this crate's
+//! sources, named by a hash of them. A build only reads kernels it
+//! compiled itself, and installing removes other builds' subdirectories
+//! once they have gone unused for a week.
+//!
 //! [`install_compilation_cache`] has to run before the first
 //! [`Denoiser`](crate::Denoiser) is created, because building a CubeCL
 //! client locks the global config.
@@ -35,8 +40,10 @@
 //! ```
 
 use std::ffi::OsStr;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Once, OnceLock};
+use std::time::{Duration, SystemTime};
 
 use cubecl::config::cache::CacheConfig;
 use cubecl::config::{CubeClRuntimeConfig, RuntimeConfig};
@@ -51,6 +58,17 @@ static CACHE_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 /// The directory name this crate uses inside the user's cache directory.
 const CACHE_DIR_NAME: &str = "av-denoise";
+
+/// A hash of this crate's sources, naming this build's subdirectory of
+/// the cache root.
+///
+/// CubeCL keys cached kernels by their signature rather than their body,
+/// so each build of the kernels needs a directory of its own.
+pub(crate) const KERNEL_HASH: &str = env!("AV_DENOISE_KERNEL_HASH");
+
+/// How long another build's subdirectory goes unused before an install
+/// removes it.
+const STALE_BUILD_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// The values of [`COMPILATION_CACHE_ENV`] that turn caching off.
 ///
@@ -128,41 +146,44 @@ pub(crate) fn resolve_cache_location(
     CacheLocation::Dir(default())
 }
 
-/// Points CubeCL's compilation and autotune caches at `dir`, creating it
-/// if it does not exist.
+/// Points CubeCL's compilation and autotune caches at this build's
+/// subdirectory of `dir`, creating it if it does not exist.
 ///
 /// This is the entry point for a caller using this crate directly.
 pub fn install_compilation_cache_at(dir: &Path) -> Result<(), CacheError> {
-    if let Err(source) = std::fs::create_dir_all(dir) {
+    let build_dir = build_cache_dir(dir);
+    if let Err(source) = std::fs::create_dir_all(&build_dir) {
         return Err(CacheError::Create {
-            path: dir.to_path_buf(),
+            path: build_dir,
             source,
         });
     }
 
-    set_runtime_config(dir)?;
-    let _ = CACHE_DIR.set(Some(dir.to_path_buf()));
+    set_runtime_config(&build_dir)?;
+    tidy_cache_root(dir, &build_dir);
+
+    let _ = CACHE_DIR.set(Some(build_dir));
     Ok(())
 }
 
 /// Installs the cache at [`default_cache_dir`], or the directory
 /// [`COMPILATION_CACHE_ENV`] names, unless that variable turns caching off.
 ///
-/// Returns `Ok(None)` only when the variable disables caching.
+/// Returns this build's subdirectory of that root, or `Ok(None)` only
+/// when the variable disables caching.
 ///
 /// A directory that cannot be created is reported through `tracing` logs and then
 /// ignored, because denoising works without a cache. A caller that wants a
 /// creation failure reported should use [`install_compilation_cache_at`].
 pub fn install_compilation_cache() -> Result<Option<PathBuf>, CacheError> {
-    let location = resolve_cache_location(
-        std::env::var_os(COMPILATION_CACHE_ENV).as_deref(),
-        default_cache_dir,
-    );
+    let env_override = std::env::var_os(COMPILATION_CACHE_ENV);
+    let location = resolve_cache_location(env_override.as_deref(), default_cache_dir);
 
-    let CacheLocation::Dir(path) = location else {
+    let CacheLocation::Dir(root) = location else {
         return Ok(None);
     };
 
+    let path = build_cache_dir(&root);
     if let Err(err) = std::fs::create_dir_all(&path) {
         tracing::warn!(
             ?path,
@@ -173,6 +194,7 @@ pub fn install_compilation_cache() -> Result<Option<PathBuf>, CacheError> {
     }
 
     set_runtime_config(&path)?;
+    tidy_cache_root(&root, &path);
 
     // Only an install that reached the config has a directory worth
     // recording. A directory that could not be created has already
@@ -211,7 +233,7 @@ pub fn install_compilation_cache_once() -> Option<&'static Path> {
     compilation_cache_dir()
 }
 
-/// The directory compiled kernels are cached in.
+/// This build's directory of cached kernels.
 ///
 /// `None` until an install succeeds, and `None` for good when caching is
 /// off. Callers that want to sit alongside the cache, such as
@@ -239,6 +261,65 @@ fn set_runtime_config(path: &Path) -> Result<(), CacheError> {
         CubeClRuntimeConfig::set(cfg);
     }))
     .map_err(|_| CacheError::AlreadyInitialised)
+}
+
+fn build_cache_dir(root: &Path) -> PathBuf {
+    root.join(KERNEL_HASH)
+}
+
+/// Marks this build's subdirectory as used and removes stale ones from
+/// other builds.
+///
+/// Both steps are best effort, because a cache that is tidied late still
+/// works.
+fn tidy_cache_root(root: &Path, build_dir: &Path) {
+    let now = SystemTime::now();
+
+    if let Ok(handle) = File::open(build_dir) {
+        let _ = handle.set_modified(now);
+    }
+
+    prune_stale_builds(root, KERNEL_HASH, now);
+}
+
+/// Removes subdirectories of `root` left by other builds that have gone
+/// unused for longer than [STALE_BUILD_AGE](crate::cache::STALE_BUILD_AGE).
+///
+/// Only directories named like a build hash are candidates, so anything
+/// else in the root is left alone. Every error is ignored.
+fn prune_stale_builds(root: &Path, current_hash: &str, now: SystemTime) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+
+        if name == current_hash || !is_build_hash(name) {
+            continue;
+        }
+
+        // `DirEntry::metadata` does not follow symlinks, so a link is
+        // never mistaken for a build directory.
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+
+        let age = now.duration_since(modified).unwrap_or_default();
+        if metadata.is_dir() && age > STALE_BUILD_AGE {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+fn is_build_hash(name: &str) -> bool {
+    name.len() == 16 && name.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 #[cfg(test)]
@@ -343,5 +424,96 @@ mod tests {
             resolve_default_dir(None, PathBuf::from("/tmp")),
             PathBuf::from("/tmp/av-denoise"),
         );
+    }
+
+    #[test]
+    fn the_build_cache_dir_is_the_root_joined_with_the_kernel_hash() {
+        let root = PathBuf::from("/home/u/.cache/av-denoise");
+        let expected = root.join(KERNEL_HASH);
+        assert_eq!(build_cache_dir(&root), expected);
+    }
+
+    #[test]
+    fn the_kernel_hash_is_sixteen_lowercase_hex_chars() {
+        assert!(is_build_hash(KERNEL_HASH), "{KERNEL_HASH} is not a build hash");
+    }
+
+    #[test]
+    fn is_build_hash_rejects_other_names() {
+        for name in [
+            "vulkan",
+            "0123456789ABCDEF",
+            "0123456789abcde",
+            "0123456789abcdef0",
+            "warm-0123456789ab",
+        ] {
+            assert!(!is_build_hash(name), "{name} should not look like a build hash");
+        }
+    }
+
+    /// Opening a directory as a `File` to set its times only works on Unix.
+    #[cfg(unix)]
+    #[test]
+    fn pruning_removes_only_stale_builds_of_other_hashes() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let now = SystemTime::now();
+        let long_ago = now - STALE_BUILD_AGE - Duration::from_secs(60);
+
+        let current = "aaaaaaaaaaaaaaaa";
+        let stale = "bbbbbbbbbbbbbbbb";
+        let fresh = "cccccccccccccccc";
+        let non_hash_dirs = ["vulkan", "hip", "warm-1234"];
+
+        let old_dirs = [current, stale].into_iter().chain(non_hash_dirs);
+        for name in old_dirs {
+            let path = root.path().join(name);
+            std::fs::create_dir(&path).expect("create dir");
+
+            let handle = File::open(&path).expect("open dir");
+            handle.set_modified(long_ago).expect("set mtime");
+        }
+
+        let fresh_path = root.path().join(fresh);
+        std::fs::create_dir(&fresh_path).expect("create dir");
+
+        let stale_file = root.path().join("dddddddddddddddd");
+        let handle = File::create(&stale_file).expect("create file");
+        handle.set_modified(long_ago).expect("set mtime");
+
+        prune_stale_builds(root.path(), current, now);
+
+        assert!(!root.path().join(stale).exists(), "stale build should be removed");
+        assert!(root.path().join(current).exists(), "current build should be kept");
+        assert!(fresh_path.exists(), "fresh build should be kept");
+        assert!(stale_file.exists(), "a file named like a hash should be kept");
+        for name in non_hash_dirs {
+            assert!(root.path().join(name).exists(), "{name} should be kept");
+        }
+    }
+
+    #[test]
+    fn pruning_a_missing_root_does_nothing() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let missing = root.path().join("missing");
+        prune_stale_builds(&missing, KERNEL_HASH, SystemTime::now());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tidying_marks_the_current_build_as_recently_used() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let build_dir = build_cache_dir(root.path());
+        std::fs::create_dir(&build_dir).expect("create dir");
+
+        let long_ago = SystemTime::now() - STALE_BUILD_AGE - Duration::from_secs(60);
+        let handle = File::open(&build_dir).expect("open dir");
+        handle.set_modified(long_ago).expect("set mtime");
+
+        tidy_cache_root(root.path(), &build_dir);
+
+        let metadata = std::fs::metadata(&build_dir).expect("build dir metadata");
+        let modified = metadata.modified().expect("mtime");
+        let age = SystemTime::now().duration_since(modified).unwrap_or_default();
+        assert!(age < Duration::from_secs(60), "build dir mtime is {age:?} old");
     }
 }

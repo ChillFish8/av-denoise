@@ -198,9 +198,16 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         client: client.clone(),
     });
 
-    // Temporal-residual noise-stats kernel.
+    // Temporal-residual noise-stats kernel, the default `luma_fields`
+    // off variant every caller but nl4d's luma pass uses, and the on
+    // variant that pass will enable.
     run(TemporalNoiseStatsBench {
         client: client.clone(),
+        luma_fields: false,
+    });
+    run(TemporalNoiseStatsBench {
+        client: client.clone(),
+        luma_fields: true,
     });
 
     // Motion-compensation kernels. Pyramid build and analyse are
@@ -230,14 +237,23 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
             ch,
             ch_name,
             split_mv: false,
+            noise_curve: false,
         });
     }
+    run(CollabFusedBench {
+        client: client.clone(),
+        ch: 1,
+        ch_name: "luma",
+        split_mv: false,
+        noise_curve: true,
+    });
     for &(ch, ch_name) in CHANNELS {
         run(CollabFusedBench {
             client: client.clone(),
             ch,
             ch_name,
             split_mv: true,
+            noise_curve: false,
         });
     }
     for &(ch, ch_name) in CHANNELS {

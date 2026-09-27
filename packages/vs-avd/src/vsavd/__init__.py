@@ -178,6 +178,7 @@ def Nl4d(
     sigma_scale: float | None = None,
     spatial_radius: int | None = None,
     refine: int | None = None,
+    noise_map: bool | None = None,
     accelerators: list[Accelerators] | None = None,
     **kwargs: Any,
 ) -> "vs.VideoNode":
@@ -205,6 +206,8 @@ def Nl4d(
             so it dominates the work, lowering it is the fastest way to speed a run-up.
         refine: Half-width of the window searched around each neighbour frame's motion-predicted position.
             Raise it when motion tracking lands close but not exact.
+        noise_map: Whether to scale the luma threshold by how noisy each brightness level is.
+            On by default, `False` turns it off.
         accelerators: The accelerators to try and use in the order to attempt.
         **kwargs: Further parameters reachable by name, documented in the
             `av-denoise` CLI documentation under their flag names.
@@ -232,6 +235,7 @@ def Nl4d(
         sigma_scale=sigma_scale,
         spatial_radius=spatial_radius,
         refine=refine,
+        noise_map=noise_map,
         accelerators=accelerators_string,
         **kwargs,
     )

@@ -88,6 +88,7 @@ clean.set_output()
 | `refine`          | int             | `--refine`              | yes                    |
 | `spatial_radius`  | int             | `--spatial-radius`      | yes, the speed dial    |
 | `lambda_ht`       | float           | `--lambda-ht`           | situational, see below |
+| `noise_map`       | bool            | `--no-noise-map`        | situational, see below |
 | `channel_mode`    | string          | channel-mode flags      | situational            |
 | `device`          | string          | `--device`              | situational            |
 | `accelerators`    | list of strings | `-A`, `--accelerators`  | situational            |
@@ -95,9 +96,8 @@ clean.set_output()
 `lambda_ht_scale` is the threshold multiplier a transform coefficient's estimated-noise
 standard deviations must clear to survive. Raising it removes more noise and takes more
 fine detail with it. Try it in steps of about 0.05 before reaching for `lambda_ht`,
-which pins luma and chroma's thresholds (5.2 and 3.4 by default, these values have been
-manually tuned to provide the subjectively best image for a given grain strength across
-real clips rather than synthetic benchmarks).
+which pins luma and chroma's thresholds (3.78 and 2.94 by default, chosen by eye from
+rendered comparisons).
 
 `spatial_radius` is the speed dial. `preset` already resolves it, so setting
 `spatial_radius` explicitly overrides whatever the preset would have picked. The
@@ -106,6 +106,9 @@ Dropping it is the fastest way to speed a run up.
 
 `refine` is the half-width of the window searched around each neighbour frame's
 motion-predicted position. Raise it when motion tracking lands close but not exact.
+
+`noise_map` scales the luma threshold by how noisy each brightness level is, filtering noisy
+levels harder and clean ones more lightly. It is on by default, and `noise_map=False` turns it off.
 
 `sigma_scale` keeps the per-scene noise measurement and nudges it, which is almost
 always what you actually want.

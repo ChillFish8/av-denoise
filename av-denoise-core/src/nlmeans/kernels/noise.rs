@@ -1,6 +1,17 @@
 use cubecl::prelude::*;
 
 use super::helpers::read_line;
+use crate::nlmeans::noise::{
+    QUARTER_FLATNESS,
+    QUARTER_LUMA_MAX,
+    QUARTER_LUMA_MIN,
+    QUARTER_LUMA_SUM,
+    QUARTER_SUM_D,
+    QUARTER_SUM_D2,
+    TEMPORAL_QUARTER_BASE,
+    TEMPORAL_QUARTER_FIELDS,
+    TEMPORAL_QUARTERS,
+};
 
 /// The per-block stage of the Immerkær noise estimate.
 ///
@@ -126,11 +137,23 @@ pub fn nlm_noise_reduce(
 ///
 /// For every pixel it computes the difference between the new slot and
 /// the previous one, then reduces those differences into a single
-/// record.
+/// record. The lag-1 product of neighbouring channel-0 differences is
+/// what reveals grain correlated across nearby pixels.
 ///
-/// Each record holds `sum_d` and `sum_d2` per stored channel, plus the
-/// summed lag-1 product of neighbouring channel-0 differences. That last
-/// figure is what reveals grain correlated across nearby pixels.
+/// Each record also carries six fields per 8x8 quarter of the block, in
+/// top-left, top-right, bottom-left, bottom-right order. Every quarter
+/// field reads channel 0 over the quarter's valid pixels.
+///
+/// - `sum_d` and `sum_d2` of the residual.
+/// - `luma_sum`, `luma_min` and `luma_max` of the new frame.
+/// - `flatness`, the mean squared neighbour difference of a 4x4 grid.
+///   Each grid cell averages a 2x2 group of pixels, and each pixel
+///   averages the new and previous frames. A quarter smaller than 8x8
+///   writes `3.0e38` instead, so a flat gate downstream always rejects
+///   it.
+///
+/// With `luma_fields` off, the kernel skips every quarter tile, barrier
+/// and reduction, and writes 0 to each quarter lane instead.
 ///
 /// A block that runs past the frame edge uses only its in-frame part.
 /// Pixels outside the frame contribute nothing, and a pair only forms
@@ -140,8 +163,12 @@ pub fn nlm_noise_reduce(
 /// # Layout
 ///
 /// Records go into `stats` one per block, at
-/// `stats[block_index * (2 * stored_ch + 1) ..]`, laid out as every
-/// `sum_d`, then every `sum_d2`, then `sum_lag`.
+/// `stats[block_index * (2 * stored_ch + 25) ..]`, laid out as every
+/// `sum_d`, then every `sum_d2`, then `sum_lag`. Quarter `q` follows at
+/// `2 * stored_ch + 1 + 6 * q`, with its fields at the offsets from
+/// [QUARTER_SUM_D](crate::nlmeans::noise::QUARTER_SUM_D) to
+/// [QUARTER_LUMA_MAX](crate::nlmeans::noise::QUARTER_LUMA_MAX). That
+/// stride never depends on `luma_fields`.
 ///
 /// `stats` should already be sliced down to the new slot's own region of
 /// the larger ring buffer. See `noise::run_temporal_noise_stats`.
@@ -159,11 +186,18 @@ pub fn nlm_temporal_noise_stats<N: Size>(
     #[comptime] height: u32,
     #[comptime] stored_ch: u32,
     #[comptime] block: u32,
+    #[comptime] luma_fields: bool,
 ) {
-    let record_len = comptime!(2 * stored_ch + 1);
+    // `record_len` is only ever used for `stats`' own output stride. The
+    // reduction scratch below only ever holds the `sum_d`, `sum_d2` and
+    // `sum_lag` lanes, so it is sized by `scratch_len` instead, or its
+    // unwritten tail would enter the reduction as uninitialised memory.
+    let quarter_lanes = comptime!(TEMPORAL_QUARTERS * TEMPORAL_QUARTER_FIELDS);
+    let record_len = comptime!(2 * stored_ch + TEMPORAL_QUARTER_BASE + quarter_lanes);
+    let scratch_len = comptime!(2 * stored_ch + 1);
     let threads = comptime!(block * block);
 
-    let mut scratch = SharedMemory::<f32>::new(comptime!(threads * record_len) as usize);
+    let mut scratch = SharedMemory::<f32>::new(comptime!(threads * scratch_len) as usize);
     let mut d0_tile = SharedMemory::<f32>::new(threads as usize);
 
     let local_x = UNIT_POS_X;
@@ -177,11 +211,42 @@ pub fn nlm_temporal_noise_stats<N: Size>(
 
     let valid = gx < width && gy < height;
 
+    // The in-block extent, truncated so a pair never reaches past this
+    // block's own slice of the frame. Ragged right and bottom edges use
+    // the truncated extent, the same way the block matcher's coarse
+    // kernel seeds its ragged last block from its position rather than
+    // from a fixed block size.
+    let block_w = u32::min(block, width - block_origin_x);
+    let block_h = u32::min(block, height - block_origin_y);
+
+    // These four stay at their harmless defaults, and are never read,
+    // when `luma_fields` is off. Declaring them either way costs a few
+    // registers at most, so only the real resource cost, the luma
+    // tiles below, is behind the flag.
+    let mut new_luma_raw = 0.0f32;
+    let mut mean_luma_raw = 0.0f32;
+    // Sentinels far above and far below any normalised luma value
+    // (luma runs between 0 and 1), so an invalid pixel never wins the
+    // min or max reduction below. The negative one is built from a `mut`
+    // variable and a later compound assignment rather than a negative
+    // literal initializer. cubecl folds a negative literal used as a
+    // `let` initializer into a plain Rust constant. That constant cannot
+    // unify with the `f32::min`/`f32::max` calls below.
+    let mut min_seed = 1.0e30f32;
+    let mut max_seed = 1.0e30f32;
+    max_seed -= 2.0e30f32;
+
     let mut d = Vector::<f32, N>::empty();
     if valid {
         let c = read_line(input, gx, gy, slot_new, width, height);
         let p = read_line(input, gx, gy, slot_prev, width, height);
         d = c - p;
+        if comptime!(luma_fields) {
+            new_luma_raw = c[0];
+            mean_luma_raw = 0.5f32 * (c[0] + p[0]);
+            min_seed = c[0];
+            max_seed = c[0];
+        }
     }
 
     // The `.into()` calls are what let cubecl unify the two branches,
@@ -203,18 +268,12 @@ pub fn nlm_temporal_noise_stats<N: Size>(
                       conversion supplies"
         )]
         let v = if valid { d[ch as usize] } else { 0.0f32.into() };
-        scratch[(tid * record_len + ch) as usize] = v;
-        scratch[(tid * record_len + stored_ch + ch) as usize] = v * v;
+        scratch[(tid * scratch_len + ch) as usize] = v;
+        scratch[(tid * scratch_len + stored_ch + ch) as usize] = v * v;
     }
 
     sync_cube();
 
-    // The in-block width, truncated so a pair never reaches past this
-    // block's own slice of the frame. Ragged right and bottom edges use
-    // the truncated extent, the same way the block matcher's coarse
-    // kernel seeds its ragged last block from its position rather than
-    // from a fixed block size.
-    let block_w = u32::min(block, width - block_origin_x);
     let pair_valid = valid && local_x + 1 < block_w;
     #[expect(
         clippy::useless_conversion,
@@ -226,7 +285,7 @@ pub fn nlm_temporal_noise_stats<N: Size>(
     } else {
         0.0f32.into()
     };
-    scratch[(tid * record_len + 2 * stored_ch) as usize] = lag;
+    scratch[(tid * scratch_len + 2 * stored_ch) as usize] = lag;
 
     sync_cube();
 
@@ -235,12 +294,157 @@ pub fn nlm_temporal_noise_stats<N: Size>(
         let out_base = block_index * record_len;
 
         #[unroll]
-        for lane in 0..record_len {
+        for lane in 0..scratch_len {
             let mut total = 0.0f32;
             for t in 0..threads {
-                total += scratch[(t * record_len + lane) as usize];
+                total += scratch[(t * scratch_len + lane) as usize];
             }
             stats[(out_base + lane) as usize] = total;
+        }
+
+        // With `luma_fields` off, the quarter lanes get an explicit 0
+        // rather than whatever `stats` already held there, so a reader
+        // never sees stale data left over from an earlier frame's slot.
+        if comptime!(!luma_fields) {
+            let quarters_start = out_base + 2 * stored_ch + TEMPORAL_QUARTER_BASE;
+
+            #[unroll]
+            for lane in 0..quarter_lanes {
+                stats[(quarters_start + lane) as usize] = 0.0f32;
+            }
+        }
+    }
+
+    // Everything from here on computes the quarter lanes. With
+    // `luma_fields` off, none of it is compiled. `luma_fields` never
+    // varies within a launch, so every thread takes this branch
+    // identically and reaches every barrier inside it.
+    if comptime!(luma_fields) {
+        // Each quarter's 64 pixels sit in one contiguous 64-slot segment
+        // of the reduction tiles, so one tree reduction folds all four
+        // quarters at once.
+        let quarter = (local_y / 8u32) * 2u32 + local_x / 8u32;
+        let quarter_pos = (local_y % 8u32) * 8u32 + local_x % 8u32;
+        let slot = quarter * 64u32 + quarter_pos;
+
+        let mut sum_tile = SharedMemory::<f32>::new(threads as usize);
+        let mut min_tile = SharedMemory::<f32>::new(threads as usize);
+        let mut max_tile = SharedMemory::<f32>::new(threads as usize);
+        let mut residual_tile = SharedMemory::<f32>::new(threads as usize);
+        let mut residual_sq_tile = SharedMemory::<f32>::new(threads as usize);
+        let mut cells = SharedMemory::<f32>::new(64usize);
+        let mut pair_tile = SharedMemory::<f32>::new(64usize);
+
+        sum_tile[slot as usize] = new_luma_raw;
+        min_tile[slot as usize] = min_seed;
+        max_tile[slot as usize] = max_seed;
+        residual_tile[slot as usize] = d0;
+        residual_sq_tile[slot as usize] = d0 * d0;
+        // The lag pairs above are done with `d0_tile`, so it holds the
+        // temporal mean instead. A separate tile costs about 40% of this
+        // variant's throughput, because the extra shared memory lowers
+        // how many workgroups run at once.
+        d0_tile[tid as usize] = mean_luma_raw;
+
+        sync_cube();
+
+        // Six halving rounds reduce each 64-slot segment to its first
+        // slot. `stride` is a per-round compile-time constant, because
+        // cubecl panics at JIT time on a `mut` seeded from a comptime
+        // value. The halving only guards which threads update a slot, so
+        // every thread reaches every `sync_cube()`.
+        #[unroll]
+        for step in 0..6u32 {
+            let stride = comptime!(32u32 >> step);
+            if quarter_pos < stride {
+                let here = slot as usize;
+                let partner = (slot + stride) as usize;
+                sum_tile[here] += sum_tile[partner];
+                residual_tile[here] += residual_tile[partner];
+                residual_sq_tile[here] += residual_sq_tile[partner];
+                min_tile[here] = f32::min(min_tile[here], min_tile[partner]);
+                max_tile[here] = f32::max(max_tile[here], max_tile[partner]);
+            }
+            sync_cube();
+        }
+
+        // 64 threads each average their own 2x2 group of `d0_tile` into
+        // one cell of an 8x8 grid, laid out row-major.
+        if tid < 64u32 {
+            let cell_y = tid / 8u32;
+            let cell_x = tid % 8u32;
+            let mut cell = 0.0f32;
+            #[unroll]
+            for dy in 0..2u32 {
+                #[unroll]
+                for dx in 0..2u32 {
+                    let idx = (2u32 * cell_y + dy) * block + (2u32 * cell_x + dx);
+                    cell += d0_tile[idx as usize];
+                }
+            }
+            cells[tid as usize] = cell / 4.0f32;
+        }
+        sync_cube();
+
+        // The same 64 threads each score their cell's right and down
+        // neighbour. A pair that would cross into another quarter is
+        // skipped, which leaves 24 pairs per quarter. The scores are
+        // stored quarter-major, 16 cells per quarter.
+        if tid < 64u32 {
+            let cell_y = tid / 8u32;
+            let cell_x = tid % 8u32;
+            let here = cells[tid as usize];
+            let mut local_energy = 0.0f32;
+            if cell_x % 4u32 != 3u32 {
+                let right = cells[(tid + 1u32) as usize];
+                local_energy += (here - right) * (here - right);
+            }
+
+            if cell_y % 4u32 != 3u32 {
+                let below = cells[(tid + 8u32) as usize];
+                local_energy += (here - below) * (here - below);
+            }
+
+            let cell_quarter = (cell_y / 4u32) * 2u32 + cell_x / 4u32;
+            let cell_pos = (cell_y % 4u32) * 4u32 + cell_x % 4u32;
+            pair_tile[(cell_quarter * 16u32 + cell_pos) as usize] = local_energy;
+        }
+        sync_cube();
+
+        // Four halving rounds reduce each quarter's 16 scores to its
+        // first slot.
+        #[unroll]
+        for step in 0..4u32 {
+            let energy_stride = comptime!(8u32 >> step);
+            if tid < 64u32 && tid % 16u32 < energy_stride {
+                pair_tile[tid as usize] += pair_tile[(tid + energy_stride) as usize];
+            }
+            sync_cube();
+        }
+
+        // The first thread of each quarter writes that quarter's record.
+        if quarter_pos == 0u32 {
+            let quarter_x = quarter % 2u32;
+            let quarter_y = quarter / 2u32;
+            let full_width = block_w >= (quarter_x + 1u32) * 8u32;
+            let full_height = block_h >= (quarter_y + 1u32) * 8u32;
+
+            // A quarter smaller than 8x8 keeps this sentinel, far above
+            // any real gradient energy, so a flat gate always rejects it.
+            let mut flatness = 3.0e38f32;
+            if full_width && full_height {
+                flatness = pair_tile[(quarter * 16u32) as usize] / 24.0f32;
+            }
+
+            let block_index = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
+            let quarter_offset = TEMPORAL_QUARTER_BASE + quarter * TEMPORAL_QUARTER_FIELDS;
+            let out_base = block_index * record_len + 2 * stored_ch + quarter_offset;
+            stats[(out_base + QUARTER_SUM_D) as usize] = residual_tile[slot as usize];
+            stats[(out_base + QUARTER_SUM_D2) as usize] = residual_sq_tile[slot as usize];
+            stats[(out_base + QUARTER_LUMA_SUM) as usize] = sum_tile[slot as usize];
+            stats[(out_base + QUARTER_FLATNESS) as usize] = flatness;
+            stats[(out_base + QUARTER_LUMA_MIN) as usize] = min_tile[slot as usize];
+            stats[(out_base + QUARTER_LUMA_MAX) as usize] = max_tile[slot as usize];
         }
     }
 }

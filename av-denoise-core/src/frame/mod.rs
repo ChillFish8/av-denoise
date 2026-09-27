@@ -1,5 +1,8 @@
+mod reseed;
+
 use std::collections::VecDeque;
 
+pub use self::reseed::ReseedWindow;
 use crate::accelerate::Accelerator;
 use crate::{
     Algorithm,
@@ -177,14 +180,6 @@ pub struct PlaneOptions {
     /// has an effect when `algorithm` is `Algorithm::Nl4d`, where it
     /// pins the temporal grouping stage's hard threshold.
     pub chroma_lambda_ht: Option<f32>,
-    /// Per-plane override for `mismatch_scale`, luma. Takes precedence
-    /// over `algorithm`'s value when set. Only has an effect when
-    /// `algorithm` is `Algorithm::Nl4d`.
-    pub luma_mismatch_scale: Option<f32>,
-    /// Per-plane override for `mismatch_scale`, chroma. Takes precedence
-    /// over `algorithm`'s value when set. Only has an effect when
-    /// `algorithm` is `Algorithm::Nl4d`.
-    pub chroma_mismatch_scale: Option<f32>,
 }
 
 impl PlaneOptions {
@@ -214,11 +209,6 @@ impl PlaneOptions {
                 // default depends on the plane, which
                 // `nl4d_default_lambda_ht` resolves at construction.
                 lambda_ht: per_plane(self.luma_lambda_ht, self.chroma_lambda_ht).or(nl4d.lambda_ht),
-                // Unlike `lambda_ht` this has one default for both
-                // planes, so an unset override simply leaves the shared
-                // value in place rather than deferring to construction.
-                mismatch_scale: per_plane(self.luma_mismatch_scale, self.chroma_mismatch_scale)
-                    .unwrap_or(nl4d.mismatch_scale),
                 ..nl4d
             }),
             Algorithm::Nlmeans(nlm) => {
@@ -259,13 +249,6 @@ fn with_plane_strength(nlm: NlmeansOptions, strength: Option<f32>) -> NlmeansOpt
             },
             ..nlm
         },
-    }
-}
-
-/// Pops up to `count` entries off the front of `queue`, discarding them.
-fn drop_leading<T>(queue: &mut VecDeque<T>, count: usize) {
-    for _ in 0..count.min(queue.len()) {
-        queue.pop_front();
     }
 }
 
@@ -469,8 +452,8 @@ impl PlanarDenoiser {
     ///
     /// Mirrors [`Self::push`], down to queueing the disabled side's
     /// passthrough plane, but no output is ever produced for this call.
-    /// This is how [`Self::reseed`] fills the window from an explicit
-    /// window of frames before the one real push that starts a denoise.
+    /// This is how the reseed paths fill a window's leading frames before
+    /// its real pushes start.
     fn push_priming(&mut self, planes: &Planes) -> Result<(), DenoiserError> {
         self.push_with(planes, Denoiser::push_frame_wire_priming)
     }
@@ -639,100 +622,6 @@ impl PlanarDenoiser {
             .or(self.chroma.as_ref())
             .expect("PlanarDenoiser always keeps at least one Denoiser")
             .window_span()
-    }
-
-    /// Denoises the target frame of an explicit window, sized and
-    /// shaped exactly as [`Self::window_span`] reports for whichever
-    /// algorithm this `PlanarDenoiser` runs.
-    ///
-    /// This abandons whatever stream was running and starts a new one
-    /// from the window, keeping every GPU allocation. When it returns,
-    /// the stream sits exactly where it would be had the window been
-    /// pushed frame by frame, so the caller can carry on with
-    /// [`Self::push`] and [`Self::recv`] for the frame after the target.
-    ///
-    /// Callers clamp the window's indices at the clip's ends, matching
-    /// how the streaming path repeats the first and last frames.
-    ///
-    /// # Why the window is wider than `2r+1` for some algorithms
-    ///
-    /// The two NLM algorithms produce one output per submit once their
-    /// own `2r+1`-frame window is full, so a symmetric window centred
-    /// on the target frame is enough.
-    ///
-    /// nl4d scatters every pass's contribution across the `2r+1`
-    /// frames that pass reaches, and a target frame's own region only
-    /// starts collecting contributions once the earliest pass able to
-    /// reach it, the one centred `r` frames behind the target, has
-    /// actually run, which itself needs the front end's own window
-    /// full at that earlier centre. Both of those requirements push
-    /// the target's own `r`-wide neighbourhood back by another `r`, on
-    /// both sides, which is exactly what [`Self::window_span`] reports
-    /// through nl4d's doubled `behind` and `ahead`. This is bit-exact
-    /// with the streaming path because every frame the window supplies
-    /// is real, distinct content, run through the same sequence of
-    /// passes streaming would have run to reach the target frame.
-    pub fn reseed(&mut self, window: &[Planes]) -> Result<Planes, anyhow::Error> {
-        let span = self.window_span();
-        let expected = span.frame_count();
-        if window.len() != expected {
-            anyhow::bail!("reseed needs a window of {expected} frames, got {}", window.len());
-        }
-
-        self.luma_passthrough.clear();
-        self.chroma_passthrough.clear();
-
-        for d in [self.yuv.as_mut(), self.luma.as_mut(), self.chroma.as_mut()]
-            .into_iter()
-            .flatten()
-        {
-            d.reset_stream();
-        }
-
-        // Prime the first `2 * temporal_radius` frames, filling the
-        // underlying denoiser's own window without submitting anything,
-        // exactly as streaming would have primed it. This count comes
-        // from the front end's own window size, not from `span`, so it
-        // stays the same for every algorithm. Every remaining frame is
-        // then a real push, one submit per frame.
-        let radius = self.temporal_radius as usize;
-        let priming_count = 2 * radius;
-        let (head, tail) = window.split_at(priming_count);
-        for planes in head {
-            self.push_priming(planes)?;
-        }
-
-        // Priming queues one passthrough entry per frame, just as a
-        // real push does. `nlmeans`'s single real push, below, always
-        // emits and pairs with the target's own entry once `radius` of
-        // these leading ones are out of the way, exactly as before.
-        //
-        // nl4d's real pushes below emit more than once: nl4d's own
-        // gate gives every push once its own window is full a real
-        // output, but only the last `ahead - behind + 1` of them
-        // complete a region as new as the target's, the earlier ones
-        // complete regions further behind it that this call has no use
-        // for. Draining after every real push, not only the last,
-        // keeps the pending queue from ever holding more than one
-        // frame at a time, and it walks the passthrough queue forward
-        // by exactly one entry per region completed, so by the time
-        // the target's own region completes, its entry is the one at
-        // the front to pop. The same `radius` leading drop lines that
-        // front up correctly beforehand for both algorithms, because
-        // nl4d's own gate width is `radius` regardless of how wide
-        // `span` is.
-        drop_leading(&mut self.luma_passthrough, radius);
-        drop_leading(&mut self.chroma_passthrough, radius);
-
-        let mut result = None;
-        for planes in tail {
-            self.push(planes)?;
-            if let Some(out) = self.recv()? {
-                result = Some(out);
-            }
-        }
-
-        result.ok_or_else(|| anyhow::anyhow!("a full window produced no frame, this is a bug"))
     }
 
     fn assemble(
@@ -1167,8 +1056,6 @@ mod cli_options_tests {
             chroma_strength,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
-            luma_mismatch_scale: None,
-            chroma_mismatch_scale: None,
         }
     }
 
@@ -1253,8 +1140,6 @@ mod cli_options_tests {
             chroma_strength: None,
             luma_lambda_ht,
             chroma_lambda_ht,
-            luma_mismatch_scale: None,
-            chroma_mismatch_scale: None,
         }
     }
 
@@ -1274,61 +1159,6 @@ mod cli_options_tests {
             Algorithm::Nl4d(n) => n,
             other => panic!("expected Algorithm::Nl4d, got {other:?}"),
         }
-    }
-
-    /// A `PlaneOptions` running `Algorithm::Nl4d` with a shared
-    /// `mismatch_scale` and the two per-plane overrides under test.
-    fn nl4d_mismatch_opts(
-        shared: f32,
-        luma_mismatch_scale: Option<f32>,
-        chroma_mismatch_scale: Option<f32>,
-    ) -> PlaneOptions {
-        PlaneOptions {
-            algorithm: Algorithm::Nl4d(Nl4dOptions {
-                mismatch_scale: shared,
-                ..Nl4dOptions::default()
-            }),
-            luma_mismatch_scale,
-            chroma_mismatch_scale,
-            ..nl4d_opts(None, None)
-        }
-    }
-
-    /// The same routing property the `lambda_ht` pair is checked for,
-    /// applied to `mismatch_scale`. An override aimed at one plane must
-    /// leave the other on the shared value, which for this field is a
-    /// resolved number rather than a deferred `None`.
-    #[test]
-    fn a_per_plane_mismatch_scale_overrides_only_its_own_instance_for_nl4d() {
-        let luma_only = nl4d_mismatch_opts(2.0, Some(8.0), None);
-        let luma = expect_nl4d(luma_only.algorithm_for(ChannelMode::Luma));
-        let chroma = expect_nl4d(luma_only.algorithm_for(ChannelMode::Chroma));
-        assert!((luma.mismatch_scale - 8.0).abs() < f32::EPSILON);
-        assert!(
-            (chroma.mismatch_scale - 2.0).abs() < f32::EPSILON,
-            "chroma should keep the shared value, got {}",
-            chroma.mismatch_scale
-        );
-
-        let chroma_only = nl4d_mismatch_opts(2.0, None, Some(8.0));
-        let luma = expect_nl4d(chroma_only.algorithm_for(ChannelMode::Luma));
-        let chroma = expect_nl4d(chroma_only.algorithm_for(ChannelMode::Chroma));
-        assert!((chroma.mismatch_scale - 8.0).abs() < f32::EPSILON);
-        assert!(
-            (luma.mismatch_scale - 2.0).abs() < f32::EPSILON,
-            "luma should keep the shared value, got {}",
-            luma.mismatch_scale
-        );
-    }
-
-    /// A fused Yuv pass has no plane to pick, so neither override
-    /// applies and the shared value stands.
-    #[test]
-    fn a_yuv_instance_ignores_both_per_plane_mismatch_scales() {
-        let opts = nl4d_mismatch_opts(2.0, Some(8.0), Some(4.0));
-        let yuv = expect_nl4d(opts.algorithm_for(ChannelMode::Yuv));
-
-        assert!((yuv.mismatch_scale - 2.0).abs() < f32::EPSILON);
     }
 
     /// The routing property that matters most for a shared field: an
@@ -1405,8 +1235,8 @@ mod cli_options_tests {
         // defaults.
         let luma_default = crate::nl4d_default_lambda_ht(ChannelMode::Luma);
         let chroma_default = crate::nl4d_default_lambda_ht(ChannelMode::Chroma);
-        assert!((luma_default - 5.2).abs() < f32::EPSILON);
-        assert!((chroma_default - 3.4).abs() < f32::EPSILON);
+        assert!((luma_default - 3.78).abs() < f32::EPSILON);
+        assert!((chroma_default - 2.94).abs() < f32::EPSILON);
         assert!((chroma_default - luma_default).abs() > f32::EPSILON);
     }
 }
@@ -1437,8 +1267,6 @@ mod passthrough_retry_tests {
             chroma_strength: None,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
-            luma_mismatch_scale: None,
-            chroma_mismatch_scale: None,
         }
     }
 
@@ -1521,8 +1349,6 @@ mod lumachroma_lockstep_tests {
             chroma_strength: None,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
-            luma_mismatch_scale: None,
-            chroma_mismatch_scale: None,
         }
     }
 

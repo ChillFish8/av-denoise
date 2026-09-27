@@ -3,7 +3,17 @@ use cubecl::prelude::*;
 use super::helpers::*;
 use crate::nlmeans::noise::{
     NoiseCtx,
+    QUARTER_FLATNESS,
+    QUARTER_LUMA_MAX,
+    QUARTER_LUMA_MIN,
+    QUARTER_LUMA_SUM,
+    QUARTER_SUM_D,
+    QUARTER_SUM_D2,
     TEMPORAL_NOISE_BLOCK,
+    TEMPORAL_QUARTER_BASE,
+    TEMPORAL_QUARTER_FIELDS,
+    TEMPORAL_QUARTER_SIZE,
+    TEMPORAL_QUARTERS,
     TemporalStatsCtx,
     aggregate_temporal_noise_stats,
     correlation_factor,
@@ -22,7 +32,30 @@ use crate::nlmeans::*;
 /// channel padding needed by these tests) as ring slots 0 and 1, runs
 /// the temporal-residual stats kernel diffing slot 1 against slot 0,
 /// and returns slot 1's stats region.
-fn run_temporal_stats(w: u32, h: u32, stored_ch: u32, prev: &[f32], new: &[f32]) -> Vec<f32> {
+///
+/// The stats buffer starts out full of garbage, so a lane the kernel
+/// never writes shows up as a mismatch.
+fn run_temporal_stats(
+    w: u32,
+    h: u32,
+    stored_ch: u32,
+    prev: &[f32],
+    new: &[f32],
+    luma_fields: bool,
+) -> Vec<f32> {
+    run_temporal_stats_prefilled(w, h, stored_ch, prev, new, luma_fields, -7.0)
+}
+
+/// [run_temporal_stats] over a stats buffer first filled with `fill`.
+fn run_temporal_stats_prefilled(
+    w: u32,
+    h: u32,
+    stored_ch: u32,
+    prev: &[f32],
+    new: &[f32],
+    luma_fields: bool,
+    fill: f32,
+) -> Vec<f32> {
     let client = make_client();
     let frame_count = 2u32;
     let frame_len = (w * h * stored_ch) as usize;
@@ -35,7 +68,9 @@ fn run_temporal_stats(w: u32, h: u32, stored_ch: u32, prev: &[f32], new: &[f32])
 
     let input_buf = client.create_from_slice(f32::as_bytes(&ring));
     let align = test_align();
-    let stats_buf = client.empty(temporal_stats_buf_bytes(w, h, stored_ch, frame_count, align));
+    let stats_bytes = temporal_stats_buf_bytes(w, h, stored_ch, frame_count, align);
+    let stats_fill = vec![fill; stats_bytes / size_of::<f32>()];
+    let stats_buf = client.create_from_slice(f32::as_bytes(&stats_fill));
 
     let ctx = TemporalStatsCtx {
         width: w,
@@ -48,7 +83,7 @@ fn run_temporal_stats(w: u32, h: u32, stored_ch: u32, prev: &[f32], new: &[f32])
         stats_buf: &stats_buf,
         align,
     };
-    run_temporal_noise_stats::<R>(&client, &ctx).expect("temporal noise stats dispatch failed");
+    run_temporal_noise_stats::<R>(&client, &ctx, luma_fields).expect("temporal noise stats dispatch failed");
 
     read_temporal_stats_slot::<R>(&client, &stats_buf, w, h, stored_ch, frame_count, 1, align)
         .expect("readback failed")
@@ -58,6 +93,11 @@ fn run_temporal_stats(w: u32, h: u32, stored_ch: u32, prev: &[f32], new: &[f32])
 /// and summation independently of the kernel, so the kernel-unit
 /// tests cross-check the GPU output against a from-scratch
 /// implementation rather than a hand-derived closed form.
+///
+/// Only valid for single-channel (`stored_ch == 1`) `new`/`prev` frames,
+/// because the quarter records always read channel 0 at a stride of
+/// `stored_ch`, matching `sch` below only in that case. Every caller in
+/// this file passes `stored_ch == 1`.
 fn reference_temporal_stats(w: u32, h: u32, stored_ch: u32, prev: &[f32], new: &[f32]) -> Vec<f32> {
     let sch = stored_ch as usize;
     let (blocks_x, blocks_y) = temporal_stats_blocks(w, h);
@@ -100,10 +140,105 @@ fn reference_temporal_stats(w: u32, h: u32, stored_ch: u32, prev: &[f32], new: &
             out[base..base + sch].copy_from_slice(&sum_d);
             out[base + sch..base + 2 * sch].copy_from_slice(&sum_d2);
             out[base + 2 * sch] = sum_lag;
+
+            for quarter in 0..TEMPORAL_QUARTERS {
+                let fields = quarter_fields_host(new, prev, w, h, bx, by, quarter);
+                let quarter_start = base + quarter_offset(stored_ch, quarter);
+                let quarter_end = quarter_start + TEMPORAL_QUARTER_FIELDS as usize;
+                out[quarter_start..quarter_end].copy_from_slice(&fields);
+            }
         }
     }
 
     out
+}
+
+/// Where quarter `quarter`'s record starts within one block record.
+fn quarter_offset(stored_ch: u32, quarter: u32) -> usize {
+    (2 * stored_ch + TEMPORAL_QUARTER_BASE + quarter * TEMPORAL_QUARTER_FIELDS) as usize
+}
+
+/// The six fields one quarter's record carries, computed on the host.
+///
+/// `new` and `prev` are densely packed single-channel frames, matching
+/// every caller in this file. An empty quarter keeps the kernel's min
+/// and max seeds.
+fn quarter_fields_host(
+    new: &[f32],
+    prev: &[f32],
+    width: u32,
+    height: u32,
+    bx: u32,
+    by: u32,
+    quarter: u32,
+) -> [f32; 6] {
+    let size = TEMPORAL_QUARTER_SIZE;
+    let origin_x = bx * TEMPORAL_NOISE_BLOCK + (quarter % 2) * size;
+    let origin_y = by * TEMPORAL_NOISE_BLOCK + (quarter / 2) * size;
+    let quarter_w = size.min(width.saturating_sub(origin_x));
+    let quarter_h = size.min(height.saturating_sub(origin_y));
+
+    let mut sum_d = 0.0f32;
+    let mut sum_d2 = 0.0f32;
+    let mut luma_sum = 0.0f32;
+    let mut luma_min = 1.0e30f32;
+    let mut luma_max = -1.0e30f32;
+    for y in 0..quarter_h {
+        for x in 0..quarter_w {
+            let idx = ((origin_y + y) * width + origin_x + x) as usize;
+            let residual = new[idx] - prev[idx];
+            sum_d += residual;
+            sum_d2 += residual * residual;
+            luma_sum += new[idx];
+            luma_min = luma_min.min(new[idx]);
+            luma_max = luma_max.max(new[idx]);
+        }
+    }
+
+    let full = quarter_w == size && quarter_h == size;
+    let flatness = if full {
+        let mut cells = [0.0f32; 16];
+        for cy in 0..4u32 {
+            for cx in 0..4u32 {
+                let mut cell = 0.0f32;
+                for dy in 0..2u32 {
+                    for dx in 0..2u32 {
+                        let idx = ((origin_y + 2 * cy + dy) * width + origin_x + 2 * cx + dx) as usize;
+                        cell += 0.5 * (new[idx] + prev[idx]);
+                    }
+                }
+                cells[(cy * 4 + cx) as usize] = cell / 4.0;
+            }
+        }
+
+        let mut energy = 0.0f32;
+        for cy in 0..4usize {
+            for cx in 0..4usize {
+                let here = cells[cy * 4 + cx];
+                if cx + 1 < 4 {
+                    let right = cells[cy * 4 + cx + 1];
+                    energy += (here - right) * (here - right);
+                }
+
+                if cy + 1 < 4 {
+                    let below = cells[(cy + 1) * 4 + cx];
+                    energy += (here - below) * (here - below);
+                }
+            }
+        }
+        energy / 24.0
+    } else {
+        3.0e38
+    };
+
+    let mut fields = [0.0f32; 6];
+    fields[QUARTER_SUM_D as usize] = sum_d;
+    fields[QUARTER_SUM_D2 as usize] = sum_d2;
+    fields[QUARTER_LUMA_SUM as usize] = luma_sum;
+    fields[QUARTER_FLATNESS as usize] = flatness;
+    fields[QUARTER_LUMA_MIN as usize] = luma_min;
+    fields[QUARTER_LUMA_MAX as usize] = luma_max;
+    fields
 }
 
 fn assert_close(actual: &[f32], expected: &[f32], tol: f32, msg: &str) {
@@ -133,11 +268,12 @@ fn kernel_uniform_diff_exact_sums() {
     let n_pairs = 240.0f32;
     let expected_block = [n * k, n * k * k, n_pairs * k * k];
 
-    let got = run_temporal_stats(w, h, 1, &prev, &new);
+    let got = run_temporal_stats(w, h, 1, &prev, &new, true);
     let oracle = reference_temporal_stats(w, h, 1, &prev, &new);
 
+    let record_len = temporal_stats_record_len(1) as usize;
     for block in 0..4 {
-        let rec = &got[block * 3..block * 3 + 3];
+        let rec = &got[block * record_len..block * record_len + 3];
         assert_close(rec, &expected_block, 1e-4, &format!("block {block}"));
     }
     assert_close(&got, &oracle, 1e-4, "kernel vs CPU oracle");
@@ -162,7 +298,7 @@ fn kernel_gradient_diff_exact_sums() {
     // Keep `prev` at zero so `d = new`.
     prev.fill(0.0);
 
-    let got = run_temporal_stats(w, h, 1, &prev, &new);
+    let got = run_temporal_stats(w, h, 1, &prev, &new, true);
     let oracle = reference_temporal_stats(w, h, 1, &prev, &new);
     assert_close(&got, &oracle, 1e-2, "kernel vs CPU oracle (gradient diff)");
 }
@@ -186,9 +322,14 @@ fn kernel_ragged_block_dims() {
     let (blocks_x, blocks_y) = temporal_stats_blocks(w, h);
     assert_eq!((blocks_x, blocks_y), (3, 2));
 
-    let got = run_temporal_stats(w, h, 1, &prev, &new);
+    let got = run_temporal_stats(w, h, 1, &prev, &new, true);
     let oracle = reference_temporal_stats(w, h, 1, &prev, &new);
-    assert_close(&got, &oracle, 1e-4, "kernel vs CPU oracle (ragged)");
+    // `luma_sum` reduces on the device through a shared-memory tree,
+    // rather than the oracle's plain sequential loop. Summing the same
+    // 256 copies of a value like 0.2, which float32 cannot hold exactly,
+    // in a different order picks up its own small rounding error, so
+    // this needs a little more slack than the other lanes.
+    assert_close(&got, &oracle, 5e-4, "kernel vs CPU oracle (ragged)");
 
     for by in 0..blocks_y {
         for bx in 0..blocks_x {
@@ -199,7 +340,8 @@ fn kernel_ragged_block_dims() {
             let expected = [n * k, n * k * k, n_pairs * k * k];
 
             let block = (by * blocks_x + bx) as usize;
-            let rec = &got[block * 3..block * 3 + 3];
+            let record_len = temporal_stats_record_len(1) as usize;
+            let rec = &got[block * record_len..block * record_len + 3];
             // A looser tolerance than the reference comparison above.
             // This is a hand-derived closed form summing up to 256
             // copies of a value f32 cannot hold exactly, so it picks up
@@ -215,6 +357,210 @@ fn kernel_ragged_block_dims() {
     }
 }
 
+fn assert_relative(actual: f32, expected: f32, tol: f32, msg: &str) {
+    let rel_err = (actual - expected).abs() / expected.abs().max(1e-8);
+    assert!(
+        rel_err <= tol,
+        "{msg}: got {actual}, expected {expected} (rel err {rel_err})"
+    );
+}
+
+/// A textured frame with a small, pixel-varying residual.
+fn textured_pair(w: u32, h: u32) -> (Vec<f32>, Vec<f32>) {
+    let mut new = vec![0.0f32; (w * h) as usize];
+    let mut prev = vec![0.0f32; (w * h) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let idx = (y * w + x) as usize;
+            let value = 0.2 + 0.6 * ((x * 7 + y * 13) % 17) as f32 / 17.0;
+            new[idx] = value;
+            let offset = 0.02 * (((x + y) % 3) as f32 - 1.0);
+            prev[idx] = (value + offset).clamp(0.0, 1.0);
+        }
+    }
+    (prev, new)
+}
+
+fn assert_field_close(actual: f32, expected: f32, msg: &str) {
+    let tol = 1e-4 * expected.abs().max(1.0);
+    assert!(
+        (actual - expected).abs() <= tol,
+        "{msg}: got {actual}, expected {expected} (tol {tol})"
+    );
+}
+
+/// Checks every quarter record of a single-channel run against the host
+/// mirror, and returns how many quarters carried real flatness.
+fn assert_quarters_match_mirror(w: u32, h: u32, prev: &[f32], new: &[f32]) -> usize {
+    let stored_ch = 1u32;
+    let got = run_temporal_stats(w, h, stored_ch, prev, new, true);
+    let record_len = temporal_stats_record_len(stored_ch) as usize;
+    let (blocks_x, blocks_y) = temporal_stats_blocks(w, h);
+
+    let mut real_flatness = 0;
+    for by in 0..blocks_y {
+        for bx in 0..blocks_x {
+            let block_index = (by * blocks_x + bx) as usize;
+            let record = &got[block_index * record_len..(block_index + 1) * record_len];
+
+            for quarter in 0..TEMPORAL_QUARTERS {
+                let expected = quarter_fields_host(new, prev, w, h, bx, by, quarter);
+                let offset = quarter_offset(stored_ch, quarter);
+                let fields = &record[offset..offset + TEMPORAL_QUARTER_FIELDS as usize];
+                let label = format!("{w}x{h} block ({bx},{by}) quarter {quarter}");
+
+                for field in [QUARTER_SUM_D, QUARTER_SUM_D2, QUARTER_LUMA_SUM] {
+                    let index = field as usize;
+                    assert_field_close(fields[index], expected[index], &format!("{label} field {field}"));
+                }
+
+                let min_index = QUARTER_LUMA_MIN as usize;
+                let max_index = QUARTER_LUMA_MAX as usize;
+                assert_eq!(fields[min_index], expected[min_index], "{label}: luma_min");
+                assert_eq!(fields[max_index], expected[max_index], "{label}: luma_max");
+
+                let flatness_index = QUARTER_FLATNESS as usize;
+                let expected_flatness = expected[flatness_index];
+                let got_flatness = fields[flatness_index];
+                if expected_flatness == 3.0e38 {
+                    assert_eq!(got_flatness, 3.0e38, "{label}: flatness sentinel");
+                } else {
+                    assert_relative(
+                        got_flatness,
+                        expected_flatness,
+                        1e-4,
+                        &format!("{label} flatness"),
+                    );
+                    real_flatness += 1;
+                }
+            }
+        }
+    }
+
+    // The scalar lanes stay exactly as the 16x16 oracle computes them.
+    let oracle = reference_temporal_stats(w, h, stored_ch, prev, new);
+    for block in 0..(blocks_x * blocks_y) as usize {
+        let got_rec = &got[block * record_len..block * record_len + 3];
+        let oracle_rec = &oracle[block * record_len..block * record_len + 3];
+        assert_close(
+            got_rec,
+            oracle_rec,
+            1e-4,
+            &format!("block {block} sum_d/sum_d2/lag"),
+        );
+    }
+
+    real_flatness
+}
+
+#[test]
+fn quarter_records_match_the_host_mirror_on_texture() {
+    let w = 48u32;
+    let h = 32u32;
+    let (prev, new) = textured_pair(w, h);
+
+    let real_flatness = assert_quarters_match_mirror(w, h, &prev, &new);
+
+    assert_eq!(real_flatness, 24, "every quarter of six full blocks is full");
+}
+
+#[test]
+fn quarter_records_match_the_host_mirror_on_flat_noise() {
+    let size = 32u32;
+    let prev = noisy_copy(size, 0.5, 0.01, 1);
+    let new = noisy_copy(size, 0.5, 0.01, 2);
+
+    let real_flatness = assert_quarters_match_mirror(size, size, &prev, &new);
+
+    assert_eq!(real_flatness, 16);
+}
+
+/// A 45x29 frame leaves the last column 13 pixels wide and the last row
+/// 13 pixels tall, so each ragged block holds full and partial quarters.
+#[test]
+fn quarter_records_match_the_host_mirror_on_ragged_edges() {
+    let w = 45u32;
+    let h = 29u32;
+    let (prev, new) = textured_pair(w, h);
+
+    let real_flatness = assert_quarters_match_mirror(w, h, &prev, &new);
+
+    // Block (0,0) has 4 full quarters, block (1,0) 4, block (2,0) 2,
+    // block (0,1) 2, block (1,1) 2 and block (2,1) 1.
+    assert_eq!(real_flatness, 15);
+}
+
+/// A 40x24 frame leaves the last column and row exactly 8 pixels, so
+/// some quarters lie entirely outside the frame.
+#[test]
+fn quarter_records_match_the_host_mirror_with_empty_quarters() {
+    let w = 40u32;
+    let h = 24u32;
+    let (prev, new) = textured_pair(w, h);
+
+    let real_flatness = assert_quarters_match_mirror(w, h, &prev, &new);
+
+    assert_eq!(real_flatness, 4 + 4 + 2 + 2 + 2 + 1);
+}
+
+/// A full block of a constant base plus independent noise in each frame
+/// has to read low flatness in every quarter, showing the
+/// smoothed-temporal-mean gate does not mistake the noise for texture.
+#[test]
+fn flat_noisy_block_reads_low_flatness_in_every_quarter() {
+    let size = 16u32;
+    let sigma = 0.01f32;
+    let stored_ch = 1u32;
+    let prev = noisy_copy(size, 0.5, sigma, 1);
+    let new = noisy_copy(size, 0.5, sigma, 2);
+
+    let got = run_temporal_stats(size, size, stored_ch, &prev, &new, true);
+
+    for quarter in 0..TEMPORAL_QUARTERS {
+        let offset = quarter_offset(stored_ch, quarter);
+        let flatness = got[offset + QUARTER_FLATNESS as usize];
+        assert!(
+            flatness < 0.5 * sigma * sigma,
+            "quarter {quarter}: expected low flatness on pure noise, got {flatness}"
+        );
+    }
+}
+
+/// With `luma_fields` off, the 24 quarter lanes read 0 even over a
+/// buffer full of garbage, and every other lane matches the on run bit
+/// for bit.
+#[test]
+fn luma_fields_off_leaves_the_quarter_lanes_zero_and_the_rest_unchanged() {
+    let w = 45u32;
+    let h = 29u32;
+    let stored_ch = 1u32;
+    let (prev, new) = textured_pair(w, h);
+
+    let with_luma = run_temporal_stats(w, h, stored_ch, &prev, &new, true);
+    let without_luma = run_temporal_stats_prefilled(w, h, stored_ch, &prev, &new, false, 123.0);
+
+    let record_len = temporal_stats_record_len(stored_ch) as usize;
+    let scalar_len = 2 * stored_ch as usize + 1;
+    let (blocks_x, blocks_y) = temporal_stats_blocks(w, h);
+
+    for block in 0..(blocks_x * blocks_y) as usize {
+        let base = block * record_len;
+        let with_rec = &with_luma[base..base + scalar_len];
+        let without_rec = &without_luma[base..base + scalar_len];
+        assert_eq!(
+            with_rec, without_rec,
+            "block {block}: sum_d/sum_d2/lag must not depend on luma_fields"
+        );
+
+        let quarter_lanes = &without_luma[base + scalar_len..base + record_len];
+        assert_eq!(quarter_lanes.len(), 24);
+        assert!(
+            quarter_lanes.iter().all(|&value| value == 0.0),
+            "block {block}: quarter lanes must read 0 with luma_fields off, got {quarter_lanes:?}"
+        );
+    }
+}
+
 #[test]
 fn white_noise_pair_recovers_known_sigma() {
     let size = 256;
@@ -223,7 +569,7 @@ fn white_noise_pair_recovers_known_sigma() {
     let prev = noisy_copy(size, 0.5, true_sigma, 1);
     let new = noisy_copy(size, 0.5, true_sigma, 2);
 
-    let records = run_temporal_stats(size, size, 1, &prev, &new);
+    let records = run_temporal_stats(size, size, 1, &prev, &new, true);
     let sample = aggregate_temporal_noise_stats(&records, 1, 1, size, size)
         .expect("a static white-noise pair should clear the static-block floor");
 
@@ -258,7 +604,7 @@ fn correlated_noise_pair_recovers_marginal_sigma_and_rho() {
     let prev = correlated_noisy_frame(w, h, 0.5, sigma_pre, 11);
     let new = correlated_noisy_frame(w, h, 0.5, sigma_pre, 12);
 
-    let records = run_temporal_stats(w, h, 1, &prev, &new);
+    let records = run_temporal_stats(w, h, 1, &prev, &new, true);
     let sample = aggregate_temporal_noise_stats(&records, 1, 1, w, h)
         .expect("a static correlated-noise pair should clear the static-block floor");
 
@@ -300,7 +646,7 @@ fn moving_content_pair_mostly_non_static() {
         }
     }
 
-    let records = run_temporal_stats(w, h, 1, &prev, &new);
+    let records = run_temporal_stats(w, h, 1, &prev, &new, true);
     let sample = aggregate_temporal_noise_stats(&records, 1, 1, w, h);
     let static_fraction = sample.map(|s| s.static_fraction).unwrap_or(0.0);
 
@@ -510,7 +856,7 @@ fn moving_texture_pair_near_zero_mean_residual_recovers_true_sigma() {
     let prev = noisy_field_over(&clean_prev, w, h, true_sigma, 11);
     let new = noisy_field_over(&clean_new, w, h, true_sigma, 12);
 
-    let records = run_temporal_stats(w, h, 1, &prev, &new);
+    let records = run_temporal_stats(w, h, 1, &prev, &new, true);
     let sample = aggregate_temporal_noise_stats(&records, 1, 1, w, h)
         .expect("the static top half should clear STATIC_FRACTION_MIN on its own");
 

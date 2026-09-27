@@ -720,7 +720,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let neighbour_slot = self.phys_frame(center_t as i32 + k);
 
         if self.is_chained() {
-            self.run_chain_compose(center_t, k)?;
+            self.run_chain_compose(center_t, k, neighbour_idx)?;
             let refine_radius = match self
                 .params
                 .motion_compensation
@@ -774,9 +774,10 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// the temporal window, but shifts nothing into the compensated
     /// buffers.
     ///
-    /// Returns each neighbour's physical ring slot, in the same
-    /// furthest-behind-to-furthest-ahead order their motion-field
-    /// indices already follow, which is also the order
+    /// Returns each neighbour's physical ring slot, in logical ring
+    /// order around `center_t`, skipping the centre itself. For
+    /// `center_t = temporal_radius` this runs from the furthest-behind
+    /// neighbour to the furthest-ahead, which is also the order
     /// `NlmDenoiser::submit_machinery` hands back through
     /// `RingView::neighbour_slots`.
     ///
@@ -819,14 +820,14 @@ impl<R: Runtime> NlmDenoiser<R> {
         // `run_motion_compensation`.
         let analyse_pyramid = self.pyramid_reference.as_ref().unwrap_or(pyramid_input);
 
-        let radius = temporal_radius as i32;
         let mut neighbour_idx: u32 = 0;
-        let mut slots = Vec::with_capacity((2 * temporal_radius) as usize);
-        for k in -radius..=radius {
-            if k == 0 {
+        let mut slots = Vec::with_capacity((frame_count - 1) as usize);
+        for logical in 0..frame_count {
+            if logical == center_t {
                 continue;
             }
 
+            let k = logical as i32 - center_t as i32;
             let neighbour_slot = self.run_motion_estimate(
                 mc,
                 analyse_pyramid,

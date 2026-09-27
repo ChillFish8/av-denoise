@@ -62,7 +62,7 @@ docker run --rm \
     --device /dev/kfd --device /dev/dri \
     --group-add video --group-add render \
     -v "$PWD:/in:ro" \
-    ghcr.io/chillfish8/av-denoise:vulkan-0.4.1 \
+    ghcr.io/chillfish8/av-denoise:vulkan-0.5.0-alpha1 \
     nl4d --input /in/noisy.mkv \
   | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
@@ -153,13 +153,13 @@ What `--preset` fills in:
 | `slow`     | 4               | 9              |
 | `veryslow` | 8               | 9              |
 
-| Flag                    | What it does                                                                                                                                                                                                         | Default              |
-|-------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------|
-| `--temporal-radius <N>` | How many neighbouring frames to search on each side, between 1 and 8. More frames means more patches to group.                                                                                                       | from `--preset`      |
-| `--lambda-ht <f>`       | How aggressively small transform coefficients are zeroed out. Higher removes more noise and more fine detail with it. `--luma-lambda-ht` and `--chroma-lambda-ht` override one plane.                                | 5.2 luma, 3.4 chroma |
-| `--lambda-ht-scale <f>` | Multiplies the `--lambda-ht` in effect for each plane. The main quality dial, since luma and chroma start from different defaults and this moves both together.                                                      | `1.0`                |
-| `--spatial-radius <N>`  | Half-width of the candidate search inside the centre frame, between 1 and 16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                       | from `--preset`      |
-| `--sigma-scale <f>`     | Nudges the measured noise level, the same dial NLMeans spells `--hq-sigma-scale`.                                                                                                                                    | `1.0`                |
+| Flag                    | What it does                                                                                                                                                                                                         | Default                |
+|-------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------|
+| `--temporal-radius <N>` | How many neighbouring frames to search on each side, between 1 and 8. More frames means more patches to group.                                                                                                       | from `--preset`        |
+| `--lambda-ht <f>`       | How aggressively small transform coefficients are zeroed out. Higher removes more noise and more fine detail with it. `--luma-lambda-ht` and `--chroma-lambda-ht` override one plane.                                | 3.78 luma, 2.94 chroma |
+| `--lambda-ht-scale <f>` | Multiplies the `--lambda-ht` in effect for each plane. The main quality dial, since luma and chroma start from different defaults and this moves both together.                                                      | `1.0`                  |
+| `--spatial-radius <N>`  | Half-width of the candidate search inside the centre frame, between 1 and 16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                       | from `--preset`        |
+| `--sigma-scale <f>`     | Nudges the measured noise level, the same dial NLMeans spells `--hq-sigma-scale`.                                                                                                                                    | `1.0`                  |
 
 <details>
 <summary><b>Expert flags</b> — calibration and debugging, not everyday tuning</summary>
@@ -169,9 +169,8 @@ What `--preset` fills in:
 | `--refine <N>`                                                       | Half-width of the window searched around each neighbour frame's motion-predicted position, between 1 and 4. Raise it when motion tracking lands close but not exact.                                                                                              | `2`                 |
 | `--sigma <f>`                                                        | Pins the noise level in 8-bit units, turning the per-scene measurement off entirely.                                                                                                                                                                              | measured            |
 | `--thsad-scale <f>`                                                  | How badly a neighbour frame may match before its patches stop being trusted.                                                                                                                                                                                      | `1.0`               |
-| `--c-min <f>`                                                        | Confidence floor below which a whole neighbour block is skipped rather than scored. Only changes how much compute a frame costs, never which patches are admitted once scored.                                                                                    | `0.05`              |
-| `--no-confidence-variance`                                           | Gives every patch the same noise estimate, instead of trusting a poorly matched one less.                                                                                                                                                                         | off                 |
-| `--mismatch-scale <f>`                                               | How much less a poorly matched patch is trusted. The variance grows with the square of it, and the effect saturates between roughly 3 and 13 depending on source noise. `0` matches `--no-confidence-variance`. Per-plane as `--luma-`/`--chroma-mismatch-scale`. | `1.0`               |
+| `--c-min <f>`                                                        | Confidence floor below which a whole neighbour block is skipped rather than scored. A volume left short of frames by the skip makes its group filter from the centre frame alone.                                                                                    | `0.05`              |
+| `--no-noise-map`                                                     | Turns off the luma noise map, which scales the luma threshold by how noisy each brightness level is.                                                                                                                                                              | map on              |
 | `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels` | Motion-search geometry. NL4D always tracks motion, so these are always live.                                                                                                                                                                                      | `16`, `8`, `4`, `2` |
 
 </details>

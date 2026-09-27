@@ -1,6 +1,7 @@
-mod helpers;
+pub(crate) mod helpers;
 
-mod confidence;
+mod edges;
 mod grouping;
+mod noise_map;
 mod pipeline;
 mod regularise;

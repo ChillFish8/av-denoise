@@ -1219,12 +1219,11 @@ fn push_constant_velocity(client: &ComputeClient<R>, radius: u32, v: i32) -> Nlm
 
 /// Runs `run_chain_compose` for neighbour offset `k` and reads back the
 /// composed MV at the block nearest the frame's centre.
-fn composed_centre_mv(d: &NlmDenoiser<R>, radius: u32, k: i32) -> (i32, i32) {
-    d.run_chain_compose(radius, k)
+fn composed_centre_mv(d: &NlmDenoiser<R>, center_t: u32, k: i32, neighbour_idx: u32) -> (i32, i32) {
+    d.run_chain_compose(center_t, k, neighbour_idx)
         .expect("chain compose dispatch failed");
 
     let mc = MotionCtx::new(d.params.motion_compensation, d.width, d.height, d.align).unwrap();
-    let neighbour_idx = neighbour_idx_for_k(radius, k);
     let mv_field = d
         .mv_field_buf
         .as_ref()
@@ -1277,13 +1276,15 @@ fn chain_compose_zero_motion_gives_zero_mv() {
     let d = push_constant_velocity(&client, radius, 0);
 
     for k in 1..=radius as i32 {
+        let forward_idx = neighbour_idx_for_k(radius, k);
         assert_eq!(
-            composed_centre_mv(&d, radius, k),
+            composed_centre_mv(&d, radius, k, forward_idx),
             (0, 0),
             "forward k={k} should compose to zero motion on a static sequence"
         );
+        let backward_idx = neighbour_idx_for_k(radius, -k);
         assert_eq!(
-            composed_centre_mv(&d, radius, -k),
+            composed_centre_mv(&d, radius, -k, backward_idx),
             (0, 0),
             "backward k={k} should compose to zero motion on a static sequence"
         );
@@ -1307,14 +1308,33 @@ fn chain_compose_constant_velocity_matches_k_times_v() {
     let d = push_constant_velocity(&client, radius, v);
 
     for k in 1..=radius as i32 {
+        let forward_idx = neighbour_idx_for_k(radius, k);
         assert_eq!(
-            composed_centre_mv(&d, radius, k),
+            composed_centre_mv(&d, radius, k, forward_idx),
             (k * v, k * v),
             "forward k={k} should compose to exactly k*v = ({}, {})",
             k * v,
             k * v
         );
     }
+}
+
+/// From centre 0, a chained walk out to `k = 2 * radius` reaches every
+/// pair the constant-velocity fixture ever wrote, the far end of the
+/// ring rather than the temporal radius. The composed MV must still
+/// equal `k * v`, this time landing in the last neighbour slot,
+/// `2 * radius - 1`.
+#[test]
+fn chain_compose_reaches_twice_the_radius_from_the_ring_start() {
+    let client = make_client();
+    let radius = CHAIN_TEST_RADIUS;
+    let v = 2;
+    let d = push_constant_velocity(&client, radius, v);
+    let far = 2 * radius as i32;
+
+    let composed = composed_centre_mv(&d, 0, far, 2 * radius - 1);
+
+    assert_eq!(composed, (far * v, far * v));
 }
 
 /// Same constant-velocity sequence walked backward. The composed MV to
@@ -1330,8 +1350,9 @@ fn chain_compose_backward_direction_matches_negative_k_times_v() {
     let d = push_constant_velocity(&client, radius, v);
 
     for k in 1..=radius as i32 {
+        let backward_idx = neighbour_idx_for_k(radius, -k);
         assert_eq!(
-            composed_centre_mv(&d, radius, -k),
+            composed_centre_mv(&d, radius, -k, backward_idx),
             (-k * v, -k * v),
             "backward k={k} should compose to exactly -k*v = ({}, {})",
             -k * v,

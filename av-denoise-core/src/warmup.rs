@@ -84,14 +84,13 @@ fn release_key(key: u128) {
 /// sharing. That costs one extra warm-up and is the safe direction to
 /// err in.
 ///
-/// This crate's version goes into the key as well, because a release
-/// that changes a kernel changes what CubeCL caches under it, and
-/// CubeCL files its own cache under the CubeCL version on top of that.
-/// Without the version a stamp written before an upgrade would tell
-/// every process after it that a cache emptied by that upgrade is warm,
-/// and the whole first wave would compile at once again with nothing
-/// said about it. Rebuilding a kernel without changing the version is
-/// the one case this misses, and deleting the cache directory clears it.
+/// This crate's version goes into the key as well, because a release can
+/// upgrade CubeCL, which files its own cache under the CubeCL version.
+/// Without the version a stamp written before an upgrade would tell every
+/// process after it that a cache emptied by that upgrade is warm, and the
+/// whole first wave would compile at once again with nothing said about
+/// it. A rebuild of the kernel sources needs nothing here, because the
+/// stamps live in that build's own cache directory.
 pub fn kernel_key(options: &PlaneOptions, layout: FrameLayout) -> u128 {
     StableHasher::hash_one(&format!("{}|{options:?}|{layout:?}", env!("CARGO_PKG_VERSION")))
 }
@@ -344,8 +343,6 @@ mod tests {
             chroma_strength: None,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
-            luma_mismatch_scale: None,
-            chroma_mismatch_scale: None,
         }
     }
 

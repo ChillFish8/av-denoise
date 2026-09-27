@@ -4,4 +4,4 @@
 
 mod regularise;
 
-pub use regularise::nl4d_mv_regularise;
+pub use self::regularise::nl4d_mv_regularise;

@@ -1,6 +1,11 @@
 //! Converts between VapourSynth's strided plane buffers and the tightly
 //! packed rows core's converters accept, plus the frame window core
-//! windowed algorithms request around each output frame.
+//! windowed algorithms request around each output frame, including the
+//! shifted window nl4d uses at a clip's edges.
+
+use std::ops::RangeInclusive;
+
+use av_denoise_core::Planes;
 
 /// Copies `src`, a plane with row stride `stride` bytes, into a new
 /// tightly packed buffer of `width_bytes * height` bytes.
@@ -39,10 +44,46 @@ pub fn unpack_plane_into(dst: &mut [u8], stride: usize, width_bytes: usize, heig
 /// correct for whichever algorithm the denoiser is running rather than
 /// assuming every algorithm needs the same symmetric window.
 ///
-/// Frame requests and window builds both call this, so the two always
-/// agree on which frames a window at `n` pulls in.
+/// Under repeated edges, frame requests and window builds both call this, so
+/// the two always agree on which frames a window at `n` pulls in.
 pub fn window_indices(n: usize, behind: usize, ahead: usize, last_frame: usize) -> Vec<usize> {
     (0..=behind + ahead)
         .map(|i| (n + i).saturating_sub(behind).min(last_frame))
         .collect()
+}
+
+/// The source frame range for output frame `n` under shifted edges.
+///
+/// It is `behind` older and `ahead` newer frames, cut short at either
+/// end of a clip whose last valid index is `last_frame` rather than
+/// repeating a boundary frame.
+pub fn shifted_window_range(
+    n: usize,
+    behind: usize,
+    ahead: usize,
+    last_frame: usize,
+) -> RangeInclusive<usize> {
+    let first = n.saturating_sub(behind);
+    let last = (n + ahead).min(last_frame);
+    first..=last
+}
+
+/// Denoised frames from a clip's final flush, held for the requests that follow.
+///
+/// Each frame is handed out at most once, and a request for any other index misses.
+pub struct TailCache {
+    first: usize,
+    frames: Vec<Option<Planes>>,
+}
+
+impl TailCache {
+    pub fn new(first: usize, frames: Vec<Planes>) -> Self {
+        let frames = frames.into_iter().map(Some).collect();
+        Self { first, frames }
+    }
+
+    pub fn take(&mut self, n: usize) -> Option<Planes> {
+        let index = n.checked_sub(self.first)?;
+        self.frames.get_mut(index)?.take()
+    }
 }

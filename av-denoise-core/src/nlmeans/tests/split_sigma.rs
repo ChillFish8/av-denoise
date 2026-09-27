@@ -190,3 +190,59 @@ fn partials_ring_isolates_slots_between_push_and_fold() {
          to reflect it (low1={low1}, low2={low2})"
     );
 }
+
+/// A frame whose top `split_rows` rows carry `sigma_top` noise and whose
+/// remaining rows carry `sigma_bottom`, over a flat mid-grey field.
+fn row_split_noisy_frame(
+    w: u32,
+    h: u32,
+    split_rows: u32,
+    sigma_top: f32,
+    sigma_bottom: f32,
+    seed: u32,
+) -> Vec<f32> {
+    let clean = vec![0.5f32; (w * h) as usize];
+    let top = noisy_field_over(&clean, w, h, sigma_top, seed);
+    let bottom = noisy_field_over(&clean, w, h, sigma_bottom, seed);
+
+    let split = (split_rows * w) as usize;
+    let mut frame = bottom;
+    frame[..split].copy_from_slice(&top[..split]);
+    frame
+}
+
+/// Three eighths of the blocks carry a low sigma and the rest a higher
+/// one, so the lower quartile of block sigmas lands on the low group
+/// while the median lands on the high group.
+#[test]
+fn temporal_only_chain_reads_the_median_block_sigma() {
+    let client = make_client();
+    let w = 128;
+    let h = 128;
+    let sigma_low = 3.0 / 255.0;
+    let sigma_high = 9.0 / 255.0;
+
+    let params = NlmParams {
+        temporal_radius: 2,
+        ..auto_params_k0()
+    };
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+
+    for seed in 0..8 {
+        let frame = row_split_noisy_frame(w, h, 48, sigma_low, sigma_high, 300 + seed);
+        denoiser.push_frame(&frame);
+        let _ = denoiser.denoise().unwrap();
+    }
+
+    let temporal_only = denoiser
+        .noise_estimator_temporal_only
+        .current()
+        .expect("a temporal sample should have folded by now")[0];
+
+    let rel_err = (temporal_only - sigma_high).abs() / sigma_high;
+    assert!(
+        rel_err <= 0.15,
+        "temporal-only chain {temporal_only} should read the median block sigma near {sigma_high} \
+         (rel err {rel_err:.3})"
+    );
+}

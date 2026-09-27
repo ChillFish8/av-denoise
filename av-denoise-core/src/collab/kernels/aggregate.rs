@@ -50,9 +50,12 @@ const CROSS_FRAME_SAFETY_FACTOR: f64 = 2.0;
 /// ```
 ///
 /// of them can reach it. Squaring for both axes and taking every one of
-/// `MAX_K` members gives one pass's contribution count, and a cross-frame
-/// ring collects that from `2 * temporal_radius + 1` passes before
-/// [`crate::nl4d::Nl4dDenoiser::run_collab_stage`] reads it back. Each
+/// `MAX_K` members gives one pass's contribution count. A cross-frame
+/// region collects that from `2 * temporal_radius + 1` passes in steady
+/// state. A region can collect up to `4 * temporal_radius + 1`, the steady
+/// `2 * temporal_radius + 1` plus `temporal_radius` head and
+/// `temporal_radius` tail passes when a scene is short enough for one
+/// frame to sit in both edge rings. Each
 /// contribution is weighted by at most 1 (see [`weight_scale`]) and
 /// clamped to [`ACCUM_CLAMP`]. The same figure sizes `wsum`, whose
 /// contributions are bounded by [`WEIGHT_CLAMP`] instead but counted at
@@ -63,7 +66,7 @@ const CROSS_FRAME_SAFETY_FACTOR: f64 = 2.0;
 pub fn cross_frame_accum_scale(spatial_radius: u32, temporal_radius: u32) -> f32 {
     let refs_per_axis = ((PATCH_SIZE - 1) + 2 * spatial_radius) / STEP + 1;
     let contribs_per_pass = refs_per_axis as f64 * refs_per_axis as f64 * MAX_K as f64;
-    let passes = (2 * temporal_radius + 1) as f64;
+    let passes = (4 * temporal_radius + 1) as f64;
     let max_raw_value = contribs_per_pass * passes * ACCUM_CLAMP as f64;
 
     let budget = i32::MAX as f64 / CROSS_FRAME_SAFETY_FACTOR;
@@ -108,20 +111,14 @@ pub const ACCUM_CLAMP: f32 = 5.0;
 /// whatever `sigma` and whatever correlation shaping is in use, which is
 /// what [`WEIGHT_CLAMP`] relies on.
 ///
-/// The bound below is not `1/512`, the figure a group of 512 coefficients
-/// each carrying the plain `sigma^2` would give. `collab_fused` also
-/// gives a temporal member the extra variance its motion block's
-/// confidence implies, and that has no relation to `sigma`, so the sum
-/// runs above `512 * sigma^2 * g_max^2` by however much that extra
-/// variance is worth. What keeps the bound finite is
-/// [`crate::collab::kernels::fused::MEMBER_SIGMA2_CAP`], which holds a
-/// member's own variance to a fixed multiple of the channel's, putting
-/// the weight in `[1 / (512 * (1 + cap)), 1]`.
+/// The bound below is `1/512`. Every member carries the plain `sigma^2`,
+/// so a group of 512 coefficients sums to at most `512 * sigma^2 * g_max^2`,
+/// which puts the normalised weight between `1/512` and 1.
 ///
 /// That range still does not fit `accum`'s fixed point with room to
 /// spare, which is why `wsum` counts at [`WEIGHT_GAIN`] times its scale.
-/// Without both the cap and the gain, a poorly matched group rounds away
-/// to nothing and takes its pixel with it.
+/// Without the gain, a group that keeps most of its coefficients rounds
+/// away to nothing and takes its pixel with it.
 ///
 /// The [`RECIPROCAL_FLOOR`] fallback covers a `sigma` small enough that
 /// `sigma^2 * g_max^2` falls under it, zero included. The filter builds
@@ -183,11 +180,11 @@ fn bessel_i0(x: f64) -> f64 {
 ///
 /// What the window does narrow is the other end of the range. The
 /// smallest weight the fixed point has to resolve is scaled by the
-/// smallest tap product, `w[0]^2`, which is `0.193` at `beta = 2`. A
-/// badly matched group's weight lands around 9.8 units of `wsum` before
-/// the window and around 1.9 after it, so it still survives the rounding
-/// [`WEIGHT_GAIN`] exists to keep it above, with about a fifth of the
-/// margin.
+/// smallest tap product, `w[0]^2`, which is `0.193` at `beta = 2`. The
+/// weight floor lands around 640 units of `wsum` at the default geometry,
+/// and around 124 after the corner's taper, so it still survives the
+/// rounding [`WEIGHT_GAIN`] exists to keep it above. Only the geometry
+/// moves this number, not match quality.
 pub fn kaiser_window(beta: f32) -> [f32; PATCH_SIZE as usize] {
     let denom = bessel_i0(beta as f64);
     let last = (PATCH_SIZE - 1) as f64;
@@ -216,11 +213,12 @@ pub const WEIGHT_CLAMP: f32 = 1.0;
 /// this multiple of the value's scale spends exactly the same `i32`
 /// budget while resolving weights this many times finer.
 ///
-/// The resolution matters because a group weight spans a far wider range
-/// than [`weight_scale`]'s own doc used to claim, see the note there. A
-/// weight that falls below half a fixed-point unit contributes nothing at
-/// all to either accumulator, and this is part of what keeps a poorly
-/// matched group above that point.
+/// The resolution matters because every coefficient's variance is at
+/// most `sigma^2 * g_max^2`, so a group of up to 512 of them can push
+/// the normalised weight down to `1/512`. A weight that falls below half
+/// a fixed-point unit contributes nothing at all to either accumulator,
+/// and this is part of what keeps a poorly matched group above that
+/// point.
 ///
 /// [`collab_normalise`] multiplies it back out, so it never reaches a
 /// finished pixel.
@@ -383,9 +381,8 @@ pub fn collab_zero_accum(
 /// one and nine times over, since they sit on a grid of stride `STEP` and
 /// are `PATCH_SIZE` wide. Coverage alone is not enough, because a weight
 /// small enough to round to nothing would leave a covered pixel with an
-/// empty weight sum. [`WEIGHT_GAIN`] and
-/// [`crate::collab::kernels::fused::MEMBER_SIGMA2_CAP`] together keep
-/// every group's weight above that point.
+/// empty weight sum. [`WEIGHT_GAIN`] keeps every group's weight above
+/// that point.
 ///
 /// If the weight sum ever were to be zero anyway, the guard below returns
 /// the accumulator untouched rather than a NaN or an infinity.
@@ -499,7 +496,7 @@ mod tests {
             for temporal_radius in TEMPORAL_RADIUS_RANGE {
                 let refs_per_axis = ((PATCH_SIZE - 1) + 2 * spatial_radius) / STEP + 1;
                 let contribs_per_pass = refs_per_axis as f64 * refs_per_axis as f64 * MAX_K as f64;
-                let passes = (2 * temporal_radius + 1) as f64;
+                let passes = (4 * temporal_radius + 1) as f64;
                 let max_raw_value = contribs_per_pass * passes * ACCUM_CLAMP as f64;
 
                 let scale = cross_frame_accum_scale(spatial_radius, temporal_radius) as f64;

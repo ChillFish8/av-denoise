@@ -122,12 +122,7 @@ fn opt_accelerators(bytes: Option<&[u8]>) -> Result<Option<Vec<String>>, Error> 
     Ok(Some(names))
 }
 
-/// Reads the optional `motion_compensation` script argument.
-///
-/// VapourSynth script arguments have no native boolean type, so this
-/// takes the plain `int` type every other on/off knob in the wider
-/// VapourSynth ecosystem uses, and reads it the same way: `0` is off,
-/// anything else is on.
+/// Reads an optional on/off script argument.
 fn opt_bool(value: Option<i64>) -> Option<bool> {
     value.map(|v| v != 0)
 }
@@ -144,8 +139,6 @@ fn raw_params(
     chroma_strength: Option<f64>,
     luma_lambda_ht: Option<f64>,
     chroma_lambda_ht: Option<f64>,
-    luma_mismatch_scale: Option<f64>,
-    chroma_mismatch_scale: Option<f64>,
     device: Option<&[u8]>,
     accelerators: Option<&[u8]>,
     search_radius: Option<i64>,
@@ -158,6 +151,7 @@ fn raw_params(
     lambda_ht_scale: Option<f64>,
     spatial_radius: Option<i64>,
     refine: Option<i64>,
+    noise_map: Option<i64>,
 ) -> Result<RawParams, Error> {
     Ok(RawParams {
         strength,
@@ -169,8 +163,6 @@ fn raw_params(
         chroma_strength,
         luma_lambda_ht,
         chroma_lambda_ht,
-        luma_mismatch_scale,
-        chroma_mismatch_scale,
         device: opt_string(device, "device")?,
         accelerators: opt_accelerators(accelerators)?,
         search_radius,
@@ -183,6 +175,7 @@ fn raw_params(
         lambda_ht_scale,
         spatial_radius,
         refine,
+        noise_map: opt_bool(noise_map),
     })
 }
 
@@ -220,8 +213,6 @@ make_filter_function! {
             chroma_strength,
             None,
             None,
-            None,
-            None,
             device,
             accelerators,
             search_radius,
@@ -230,6 +221,7 @@ make_filter_function! {
             sigma,
             sigma_scale,
             motion_compensation,
+            None,
             None,
             None,
             None,
@@ -248,14 +240,6 @@ make_filter_function! {
     /// stream, so a frame denoises to the same pixels no matter what
     /// order VapourSynth requests frames in. Passing `sigma` pins the
     /// noise level and skips that estimator entirely.
-    ///
-    /// The first few frames of a clip may differ slightly from the CLI's
-    /// output for the same parameters. The plugin fills a clip's
-    /// leading edge by repeating its first frame across the whole
-    /// temporal window, while the CLI's streaming mode primes a
-    /// narrower repeat before real frames start arriving. The
-    /// difference is bounded, small, and confined to a clip's first
-    /// `2 * temporal_radius` frames.
     #[expect(clippy::too_many_arguments)]
     fn create_nl4d<'core>(
         api: API,
@@ -267,8 +251,6 @@ make_filter_function! {
         chroma_strength: Option<f64>,
         luma_lambda_ht: Option<f64>,
         chroma_lambda_ht: Option<f64>,
-        luma_mismatch_scale: Option<f64>,
-        chroma_mismatch_scale: Option<f64>,
         device: Option<&[u8]>,
         accelerators: Option<&[u8]>,
         temporal_radius: Option<i64>,
@@ -278,6 +260,7 @@ make_filter_function! {
         lambda_ht_scale: Option<f64>,
         spatial_radius: Option<i64>,
         refine: Option<i64>,
+        noise_map: Option<i64>,
     ) -> Result<Option<Box<dyn Filter<'core> + 'core>>, Error> {
         let raw = raw_params(
             None,
@@ -289,8 +272,6 @@ make_filter_function! {
             chroma_strength,
             luma_lambda_ht,
             chroma_lambda_ht,
-            luma_mismatch_scale,
-            chroma_mismatch_scale,
             device,
             accelerators,
             None,
@@ -303,6 +284,7 @@ make_filter_function! {
             lambda_ht_scale,
             spatial_radius,
             refine,
+            noise_map,
         )?;
         let filter = Denoise::create(api, core, clip, AlgorithmKind::Nl4d, &raw)?;
         Ok(Some(Box::new(filter)))

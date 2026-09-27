@@ -73,7 +73,7 @@ values, since luma and chroma start from different defaults and the scale keeps 
 clean = avd.Nl4d(clip, lambda_ht_scale=1.1)
 ```
 
-**`lambda_ht` sets those thresholds outright.** The defaults are 5.2 for luma and 3.4 for chroma.
+**`lambda_ht` sets those thresholds outright.** The defaults are 3.78 for luma and 2.94 for chroma.
 A single value here flattens both planes onto the same number, so prefer the scale unless you 
 have a figure you want. `luma_lambda_ht` and `chroma_lambda_ht`, both reachable by name, pin one 
 plane without touching the other, and `lambda_ht_scale` still applies on top of whatever is pinned.
@@ -93,17 +93,19 @@ are happy with the level and just want to adjust how much noise is removed vs de
 positions, so it dominates the work. Dropping it from 9 to 6 roughly halves the candidates, which
 is exactly what `preset="veryfast"` does.
 
+**`noise_map=False` turns off the luma noise map.** The noise map is on by default. It scales the
+luma threshold by how noisy each brightness level is, filtering noisy levels harder and clean ones
+more lightly.
+
+```python
+clean = avd.Nl4d(clip, noise_map=False)
+```
+
 ### What not to touch in NL4D
 
 - **`sigma`** pins the noise level to a fixed value and turns the per-frame measurement off
   entirely. `sigma_scale` keeps the measurement and nudges it, which is almost always what you
   actually want.
-- **`luma_mismatch_scale` and `chroma_mismatch_scale`** set how much less a poorly matched patch is
-  trusted, rather than whether it is, judged by the patch's own match residual rather than the
-  motion block's score. The variance they control grows with the square of the value,
-  so `2` distrusts a bad match four times as much. The effect saturates. It saturates sooner the
-  worse the patch matched, because the variance the mechanism derives is capped at 64 times the
-  channel's own variance, and `0` turns the mechanism off.
 - **`temporal_radius`** is what `preset` mostly exists to resolve. Setting it by hand is fine, but
   it is the same lever the preset ladder pulls, so reach for the ladder first.
 

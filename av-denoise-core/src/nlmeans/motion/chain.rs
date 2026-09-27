@@ -214,24 +214,28 @@ pub(crate) fn neighbour_idx_for_k(radius: u32, k: i32) -> u32 {
 
 impl<R: Runtime> NlmDenoiser<R> {
     /// Joins the adjacent-frame fields into one motion field for the
-    /// neighbour at temporal offset `k`, writing it to the same slot the
-    /// direct path fills.
+    /// neighbour at temporal offset `k`, writing it to field index
+    /// `neighbour_idx`.
     ///
-    /// `k` must be nonzero and no further out than the temporal radius.
+    /// `k` must be nonzero and inside the ring, at most twice the
+    /// temporal radius either way.
     ///
     /// The walk takes one hop per step out from the centre, following
     /// the older-to-newer field for a positive `k` and the
     /// newer-to-older field for a negative one.
     ///
-    /// `center_t` is the centre frame's index within the window. Every
-    /// caller passes the temporal radius, which is the convention
-    /// `dispatch::run_motion_compensation` sets.
+    /// `center_t` is the centre frame's logical position in the ring.
     ///
     /// This does nothing unless `Chained` estimation is active. When it
     /// is, `dispatch::run_motion_compensation` calls it once per
     /// neighbour on every submit and then cleans up the seed with
     /// `run_seeded_refine`. Tests call it directly as well.
-    pub(crate) fn run_chain_compose(&self, center_t: u32, k: i32) -> Result<(), anyhow::Error> {
+    pub(crate) fn run_chain_compose(
+        &self,
+        center_t: u32,
+        k: i32,
+        neighbour_idx: u32,
+    ) -> Result<(), anyhow::Error> {
         let Some(mc) = self.mc_ctx.as_ref() else {
             return Ok(());
         };
@@ -240,9 +244,15 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
 
         let radius = self.params.temporal_radius;
+        let far_edge = 2 * radius as i32;
         debug_assert!(
-            k.unsigned_abs() <= radius,
-            "k={k} outside the temporal window ±{radius}"
+            (0..=far_edge).contains(&(center_t as i32 + k)),
+            "center_t={center_t} k={k} lands outside the ring 0..={far_edge}"
+        );
+        debug_assert!(
+            neighbour_idx < 2 * radius,
+            "neighbour_idx={neighbour_idx} outside the field, which holds {} neighbours",
+            2 * radius,
         );
 
         let pair_ring = self
@@ -264,7 +274,6 @@ impl<R: Runtime> NlmDenoiser<R> {
         let start_pair_slot = self.pair_slot(start_gap);
         let pair_ring_slots = super::pair_ring_slot_count(radius);
         let pair_ring_len = pair_ring_slots as usize * mc.pair_slot_stride() as usize;
-        let neighbour_idx = neighbour_idx_for_k(radius, k);
 
         dispatch_chain_compose::<R>(
             &self.client,

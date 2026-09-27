@@ -34,6 +34,7 @@ pub use denoiser::{
     DenoiserError,
     DenoiserOptions,
     DenoisingMode,
+    EdgePadding,
     FrameOutput,
     MAX_PENDING,
     Nl4dOptions,
@@ -58,6 +59,7 @@ pub use frame::{
     PlanarDenoiser,
     PlaneOptions,
     Planes,
+    ReseedWindow,
     Subsampling,
     push_needs_retry,
 };

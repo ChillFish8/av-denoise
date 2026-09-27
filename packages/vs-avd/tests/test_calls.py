@@ -58,6 +58,13 @@ def test_set_parameters_are_forwarded(fake, monkeypatch):
     assert kwargs == {"preset": "slow", "lambda_ht_scale": 1.1}
 
 
+def test_nl4d_forwards_noise_map_as_a_bool(fake, monkeypatch):
+    monkeypatch.setattr("vsavd._nl4d_filter", lambda: fake)
+    Nl4d("clip", noise_map=False)
+    _, kwargs = fake.calls[0]
+    assert kwargs == {"noise_map": False}
+
+
 def test_kwargs_pass_through_verbatim(fake, monkeypatch):
     monkeypatch.setattr("vsavd._nl4d_filter", lambda: fake)
     Nl4d("clip", sigma=0.5, temporal_radius=3)

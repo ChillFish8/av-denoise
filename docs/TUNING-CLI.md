@@ -45,7 +45,7 @@ before you consider going up a preset.
 You should try this parameter before touching the absolute values, since luma and chroma start
 from different defaults and the scale keeps that separation.
 
-**`--lambda-ht` sets those thresholds outright.** The defaults are 5.2 for luma and 3.4 for chroma.
+**`--lambda-ht` sets those thresholds outright.** The defaults are 3.78 for luma and 2.94 for chroma.
 `--luma-lambda-ht` and `--chroma-lambda-ht` pin one plane without touching the other, and `--lambda-ht-scale` still
 applies on top of whatever is pinned.
 
@@ -64,21 +64,18 @@ default) is the shipped calibration and smooths the tracked field. Raise it furt
 flat content where vectors wander, at the cost of following small objects less closely. `0` turns
 the smoothing off and leaves the tracked field as it is.
 
+**`--no-noise-map` turns off the luma noise map.** The noise map is on by default. It scales the
+luma threshold by how noisy each brightness level is, filtering noisy levels harder and clean ones
+more lightly.
+
 ### What not to touch in NL4D
 
 - **`--sigma`** pins the noise level to a fixed value and turns the per-scene measurement off
   entirely. `--sigma-scale` keeps the measurement and nudges it, which is almost always what you
   actually want.
-- **`--c-min`** only decides how much compute a frame costs. It never changes which patches are
-  admitted once they are scored, so it is not a quality dial.
-- **`--no-confidence-variance`** stops a poorly matched patch from being trusted less than a
-  well-matched one. It exists to isolate that mechanism in testing and calibration, not to improve output.
-- **`--mismatch-scale`** sets how much less a poorly matched patch is trusted, rather than whether it
-  is, judged by the patch's own match residual rather than the motion block's score.
-  The variance it controls grows with the square of the value, so `2` distrusts a bad match four times
-  as much. The effect saturates. It saturates sooner the worse the patch matched, because the
-  variance the mechanism derives is capped at 64 times the channel's own variance, and `0` is the
-  same thing as `--no-confidence-variance`.
+- **`--c-min`** skips a neighbour block below its confidence floor entirely. A skip that leaves a
+  volume short of frames makes its group filter from the centre frame alone, so this can change
+  the output.
 - **`--thsad-scale`, `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels`** tune
   the motion machinery's internals, changing any of these will likely invalidate all other defaults.
 

@@ -30,9 +30,14 @@
 //! drives the distance floor. Reading that too high scrubs fine texture,
 //! so it is deliberately the more conservative of the two.
 
+mod curve;
+
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
+pub use self::curve::NOISE_CURVE_BINS;
+pub(crate) use self::curve::NoiseCurve;
+pub(super) use self::curve::build_noise_curve;
 use super::align::StorageAlign;
 use super::kernels::{
     nlm_noise_partial,
@@ -209,11 +214,38 @@ pub(super) fn sigma_block_p25_from_partials(
 /// GPU block per square of this size.
 pub(super) const TEMPORAL_NOISE_BLOCK: u32 = 16;
 
-/// How many `f32`s one block's stats record holds, being a sum and a
-/// sum of squares per stored channel plus one lag-1 total.
+/// How many `f32`s one block's stats record holds.
+///
+/// That is a sum and a sum of squares per stored channel, one lag-1
+/// total, and one record for each of the block's four 8x8 quarters.
 pub(super) fn temporal_stats_record_len(stored_ch: u32) -> u32 {
-    2 * stored_ch + 1
+    2 * stored_ch + TEMPORAL_QUARTER_BASE + TEMPORAL_QUARTERS * TEMPORAL_QUARTER_FIELDS
 }
+
+/// How many 8x8 quarters one block record holds.
+pub(super) const TEMPORAL_QUARTERS: u32 = 4;
+/// The side length of one quarter, in pixels.
+pub(super) const TEMPORAL_QUARTER_SIZE: u32 = TEMPORAL_NOISE_BLOCK / 2;
+/// Offset, past `2 * stored_ch`, of the first quarter record.
+///
+/// Quarter `q` starts at `2 * stored_ch + 1 + 6 * q`, in top-left,
+/// top-right, bottom-left, bottom-right order.
+pub(super) const TEMPORAL_QUARTER_BASE: u32 = 1;
+/// How many `f32`s one quarter record holds.
+pub(super) const TEMPORAL_QUARTER_FIELDS: u32 = 6;
+/// Offset, within a quarter record, of channel 0's summed residual.
+pub(super) const QUARTER_SUM_D: u32 = 0;
+/// Offset, within a quarter record, of channel 0's summed squared residual.
+pub(super) const QUARTER_SUM_D2: u32 = 1;
+/// Offset, within a quarter record, of the new frame's summed luma.
+pub(super) const QUARTER_LUMA_SUM: u32 = 2;
+/// Offset, within a quarter record, of the smoothed temporal mean's
+/// gradient energy, or `3.0e38` on a quarter smaller than 8x8.
+pub(super) const QUARTER_FLATNESS: u32 = 3;
+/// Offset, within a quarter record, of the new frame's minimum luma.
+pub(super) const QUARTER_LUMA_MIN: u32 = 4;
+/// Offset, within a quarter record, of the new frame's maximum luma.
+pub(super) const QUARTER_LUMA_MAX: u32 = 5;
 
 /// The block grid covering a frame, laid out row-major.
 ///
@@ -281,9 +313,14 @@ pub(super) struct TemporalStatsCtx<'a> {
 /// The kernel only ever addresses within its own slice, so it needs to
 /// know nothing about the ring's other slots or the padding between
 /// them.
+///
+/// `luma_fields` gates the kernel's four luma-only lanes. With it off,
+/// those lanes read 0 and the dispatch costs the same as before they
+/// existed. See [nlm_temporal_noise_stats].
 pub(super) fn run_temporal_noise_stats<R: Runtime>(
     client: &ComputeClient<R>,
     ctx: &TemporalStatsCtx<'_>,
+    luma_fields: bool,
 ) -> Result<(), anyhow::Error> {
     let total_input = (ctx.frame_count * ctx.height * ctx.width * ctx.stored_ch) as usize;
     let (blocks_x, blocks_y) = temporal_stats_blocks(ctx.width, ctx.height);
@@ -305,6 +342,7 @@ pub(super) fn run_temporal_noise_stats<R: Runtime>(
             ctx.height,
             ctx.stored_ch,
             TEMPORAL_NOISE_BLOCK,
+            luma_fields,
         );
     }
 
@@ -460,6 +498,9 @@ const SIGMA_OUTLIER_FACTOR: f32 = 5.0;
 /// work out the reference the outlier check needs before deciding which
 /// blocks are really static.
 struct StaticGateCandidate {
+    index: usize,
+    width: u32,
+    height: u32,
     sigmas: [f32; 3],
     sigma_ch0: f32,
     var_ch0: f32,
@@ -468,24 +509,44 @@ struct StaticGateCandidate {
     n_pairs: f32,
 }
 
-/// Combines one centre slot's per-block records into a single
-/// [`TemporalNoiseSample`].
+/// One block [accepted_static_blocks] counted as static noise.
+///
+/// It carries everything both [temporal_noise_reading] and
+/// [build_noise_curve] need. `index` places it back in `records`, and
+/// `width` and `height` give the extent of each of its quarters.
+pub(super) struct AcceptedBlock {
+    /// This block's position in `records`, in units of one record.
+    pub(super) index: usize,
+    /// The block's in-frame width, in pixels.
+    pub(super) width: u32,
+    /// The block's in-frame height, in pixels.
+    pub(super) height: u32,
+    /// The per-channel sigma, as [temporal_noise_reading]
+    /// computes it. Entries past the active channel count stay 0.
+    pub(super) sigmas: [f32; 3],
+    /// Channel 0's mean residual over the block.
+    pub(super) mean0: f32,
+    /// Channel 0's mean lag-1 product over the block's adjacent pixel
+    /// pairs.
+    pub(super) mean_lag: f32,
+    /// Channel 0's residual variance over the block.
+    pub(super) var_ch0: f32,
+    /// How many adjacent pixel pairs the block holds.
+    pub(super) n_pairs: f32,
+}
+
+/// Picks out the blocks a centre slot's records count as static noise.
 ///
 /// `records` holds exactly one slot's region, laid out block by block as
 /// [`nlm_temporal_noise_stats`] documents.
 ///
-/// # When no sample is produced
+/// [temporal_noise_reading] builds both the scalar sample and the curve
+/// from this same selection, so they cannot drift apart.
 ///
-/// This returns `None` in three cases.
+/// # When this returns `None`
 ///
-/// Too few blocks counted as static, below [`STATIC_FRACTION_MIN`], so
-/// motion dominates the frame and nothing here can be trusted.
-///
-/// No static block carried measurable noise, so the correlation median
-/// would be undefined. A zero-filled duplicate slot produces exactly
-/// this.
-///
-/// The outlier check below had no way to validate its own ceiling.
+/// The outlier check below had no way to validate its own ceiling. See
+/// "When the ceiling cannot be trusted".
 ///
 /// # Deciding which blocks are static
 ///
@@ -529,13 +590,13 @@ struct StaticGateCandidate {
 ///
 /// In that case this reports `None` rather than a confident sigma that
 /// may be inflated by texture.
-pub(super) fn aggregate_temporal_noise_stats(
+pub(super) fn accepted_static_blocks(
     records: &[f32],
     channels: u32,
     stored_ch: u32,
     width: u32,
     height: u32,
-) -> Option<TemporalNoiseSample> {
+) -> Option<Vec<AcceptedBlock>> {
     let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
     let total_blocks = (blocks_x * blocks_y) as usize;
     if total_blocks == 0 {
@@ -586,6 +647,9 @@ pub(super) fn aggregate_temporal_noise_stats(
             };
 
             candidates.push(StaticGateCandidate {
+                index: block_index,
+                width: block_w,
+                height: block_h,
                 sigmas,
                 sigma_ch0,
                 var_ch0,
@@ -652,11 +716,9 @@ pub(super) fn aggregate_temporal_noise_stats(
         lower_quartile(&reference_sigma_ch0) * SIGMA_OUTLIER_FACTOR
     };
 
-    let mut static_sigmas: Vec<Vec<f32>> = vec![Vec::new(); channels];
-    let mut rho_samples = Vec::new();
-    let mut static_count = 0usize;
+    let mut accepted = Vec::new();
 
-    for candidate in &candidates {
+    for candidate in candidates {
         if candidate.sigma_ch0 > sigma_ceiling {
             continue;
         }
@@ -672,21 +734,115 @@ pub(super) fn aggregate_temporal_noise_stats(
             continue;
         }
 
-        static_count += 1;
+        accepted.push(AcceptedBlock {
+            index: candidate.index,
+            width: candidate.width,
+            height: candidate.height,
+            sigmas: candidate.sigmas,
+            mean0: candidate.mean0,
+            mean_lag: candidate.mean_lag,
+            var_ch0: candidate.var_ch0,
+            n_pairs: candidate.n_pairs,
+        });
+    }
 
-        for (c, sigmas) in static_sigmas.iter_mut().enumerate().take(channels) {
-            sigmas.push(candidate.sigmas[c]);
-        }
+    Some(accepted)
+}
 
-        if candidate.n_pairs > 0.0 {
-            let rho = (candidate.mean_lag - candidate.mean0 * candidate.mean0) / candidate.var_ch0;
+/// Combines one centre slot's per-block records into a single
+/// [TemporalNoiseSample].
+///
+/// This is a thin wrapper over [temporal_noise_reading], kept for the
+/// callers that only ever want the scalar sample.
+///
+/// # When no sample is produced
+///
+/// This returns `None` in three cases.
+///
+/// [accepted_static_blocks] found no trustworthy way to set its own
+/// outlier ceiling.
+///
+/// Too few blocks counted as static, below [STATIC_FRACTION_MIN], so
+/// motion dominates the frame and nothing here can be trusted.
+///
+/// No static block carried measurable noise, so the correlation median
+/// would be undefined. A zero-filled duplicate slot produces exactly
+/// this.
+///
+/// No production code calls this any more. `NlmDenoiser::read_temporal_noise`
+/// calls [temporal_noise_reading] directly instead, and this stays
+/// available only for the tests that pin it against the shared
+/// selection.
+#[cfg(test)]
+pub(super) fn aggregate_temporal_noise_stats(
+    records: &[f32],
+    channels: u32,
+    stored_ch: u32,
+    width: u32,
+    height: u32,
+) -> Option<TemporalNoiseSample> {
+    temporal_noise_reading(records, channels, stored_ch, width, height, false).sample
+}
+
+/// One centre slot's temporal-noise reading, combining the scalar sample
+/// with the curve built from the same accepted blocks.
+pub(super) struct TemporalNoiseReading {
+    /// The scalar sample, as [temporal_noise_reading] computes it.
+    pub(super) sample: Option<TemporalNoiseSample>,
+    /// The per-frame luma noise curve, present only when `with_curve` was
+    /// set and a sample was produced.
+    pub(super) curve: Option<NoiseCurve>,
+}
+
+/// Builds one centre slot's [TemporalNoiseReading].
+///
+/// This calls [accepted_static_blocks] once and shares its result
+/// between the scalar sample and the curve, so the two can never
+/// disagree about which blocks count as static noise.
+///
+/// `with_curve` gates the curve. It stays `None` whenever `with_curve`
+/// is off or no sample was produced, since a frame too unreliable for a
+/// scalar sample is too unreliable for a curve.
+pub(super) fn temporal_noise_reading(
+    records: &[f32],
+    channels: u32,
+    stored_ch: u32,
+    width: u32,
+    height: u32,
+    with_curve: bool,
+) -> TemporalNoiseReading {
+    let none = TemporalNoiseReading {
+        sample: None,
+        curve: None,
+    };
+
+    let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
+    let total_blocks = (blocks_x * blocks_y) as usize;
+
+    let Some(accepted) = accepted_static_blocks(records, channels, stored_ch, width, height) else {
+        return none;
+    };
+
+    let channels = channels as usize;
+
+    let mut rho_samples = Vec::new();
+    for block in &accepted {
+        if block.n_pairs > 0.0 {
+            let rho = (block.mean_lag - block.mean0 * block.mean0) / block.var_ch0;
             rho_samples.push(rho.clamp(0.0, 1.0));
         }
     }
 
-    let static_fraction = static_count as f32 / total_blocks as f32;
+    let static_fraction = accepted.len() as f32 / total_blocks as f32;
     if static_fraction < STATIC_FRACTION_MIN || rho_samples.is_empty() {
-        return None;
+        return none;
+    }
+
+    let mut static_sigmas: Vec<Vec<f32>> = vec![Vec::new(); channels];
+    for block in &accepted {
+        for (c, sigmas) in static_sigmas.iter_mut().enumerate().take(channels) {
+            sigmas.push(block.sigmas[c]);
+        }
     }
 
     let mut sigma = [0.0f32; 3];
@@ -699,19 +855,30 @@ pub(super) fn aggregate_temporal_noise_stats(
     sort_ascending(&mut rho_samples);
     let rho = median(&rho_samples);
 
-    Some(TemporalNoiseSample {
+    let sample = TemporalNoiseSample {
         sigma,
         sigma_low,
         rho,
         static_fraction,
-    })
+    };
+
+    let curve = if with_curve {
+        build_noise_curve(records, stored_ch, &accepted, sample.sigma[0])
+    } else {
+        None
+    };
+
+    TemporalNoiseReading {
+        sample: Some(sample),
+        curve,
+    }
 }
 
 /// Sorts `values` into ascending order in place.
 ///
 /// Both [`median`] and [`lower_quartile`] need this first, so a caller
 /// wanting both sorts once and passes the same slice to each.
-fn sort_ascending(values: &mut [f32]) {
+pub(super) fn sort_ascending(values: &mut [f32]) {
     values.sort_by(|a, b| a.partial_cmp(b).expect("noise stats are never NaN"));
 }
 
@@ -719,7 +886,7 @@ fn sort_ascending(values: &mut [f32]) {
 /// elements when the count is even.
 ///
 /// Callers only ever pass a non-empty slice.
-fn median(values: &[f32]) -> f32 {
+pub(super) fn median(values: &[f32]) -> f32 {
     let n = values.len();
     if n % 2 == 1 {
         values[n / 2]
@@ -914,6 +1081,17 @@ impl NoiseEstimator {
 mod tests {
     use super::*;
 
+    /// One single-channel block record with the given scalar lanes and
+    /// every quarter lane at 0.
+    fn scalar_record(sum_d: f32, sum_d2: f32, sum_lag: f32) -> Vec<f32> {
+        let record_len = temporal_stats_record_len(1) as usize;
+        let mut record = vec![0.0f32; record_len];
+        record[0] = sum_d;
+        record[1] = sum_d2;
+        record[2] = sum_lag;
+        record
+    }
+
     #[test]
     fn first_sample_initializes_state() {
         let mut est = NoiseEstimator::default();
@@ -1083,9 +1261,9 @@ mod tests {
     fn temporal_stats_blocks_and_slot_len() {
         assert_eq!(temporal_stats_blocks(32, 16), (2, 1));
         assert_eq!(temporal_stats_blocks(33, 17), (3, 2)); // ragged on both axes
-        assert_eq!(temporal_stats_record_len(1), 3);
-        assert_eq!(temporal_stats_record_len(4), 9);
-        assert_eq!(temporal_stats_slot_len(32, 16, 1), 6); // 2 blocks x record_len 3
+        assert_eq!(temporal_stats_record_len(1), 27);
+        assert_eq!(temporal_stats_record_len(4), 33);
+        assert_eq!(temporal_stats_slot_len(32, 16, 1), 54); // 2 blocks x record_len 27
     }
 
     #[test]
@@ -1134,11 +1312,9 @@ mod tests {
         let mean0_bad = 10.0 / 255.0;
         let sum_d_bad = n * mean0_bad;
 
-        #[rustfmt::skip]
-        let records = vec![
-            0.0, sum_d2_static, sum_lag_static, // block 0: static
-            sum_d_bad, 0.0, 0.0,                // block 1: fails the gate
-        ];
+        let static_block = scalar_record(0.0, sum_d2_static, sum_lag_static);
+        let moving_block = scalar_record(sum_d_bad, 0.0, 0.0);
+        let records = [static_block, moving_block].concat();
 
         let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
             .expect("one of two blocks passes the static gate, above the 5% floor");
@@ -1179,7 +1355,8 @@ mod tests {
             let var = 2.0 * sigma * sigma;
             let sum_d2 = n * var;
             let sum_lag = n_pairs * rho_target * var;
-            records.extend_from_slice(&[0.0, sum_d2, sum_lag]);
+            let record = scalar_record(0.0, sum_d2, sum_lag);
+            records.extend(record);
         }
 
         let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
@@ -1228,7 +1405,8 @@ mod tests {
             let var = 2.0 * sigma * sigma;
             let sum_d2 = n * var;
             let sum_lag = n_pairs * rho * var;
-            records.extend_from_slice(&[0.0, sum_d2, sum_lag]);
+            let record = scalar_record(0.0, sum_d2, sum_lag);
+            records.extend(record);
         }
 
         let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
@@ -1265,10 +1443,11 @@ mod tests {
         let channels = 1;
         let n = 256.0f32;
 
-        let mut records = vec![0.0f32; 25 * 3];
+        let record_len = temporal_stats_record_len(stored_ch) as usize;
+        let mut records = vec![0.0f32; 25 * record_len];
         let mean0_bad = 10.0 / 255.0;
         for block in 1..25 {
-            records[block * 3] = n * mean0_bad;
+            records[block * record_len] = n * mean0_bad;
         }
         let sigma = 4.0 / 255.0;
         let var = 2.0 * sigma * sigma;
@@ -1317,7 +1496,8 @@ mod tests {
         let sigmas_255 = [2.0f32, 4.0, 6.0];
         let rho_target = 0.6f32;
 
-        let mut record = vec![0.0f32; 9];
+        let record_len = temporal_stats_record_len(stored_ch) as usize;
+        let mut record = vec![0.0f32; record_len];
         let mut var0 = 0.0f32;
         for (c, sigma_255) in sigmas_255.iter().enumerate() {
             let sigma = sigma_255 / 255.0;
@@ -1349,12 +1529,12 @@ mod tests {
     ///
     /// The outlier tests below share this and only vary each block's
     /// sigma.
-    fn zero_mean_block_record(sigma_255: f32, rho: f32) -> [f32; 3] {
+    fn zero_mean_block_record(sigma_255: f32, rho: f32) -> Vec<f32> {
         let n = 256.0f32;
         let n_pairs = 240.0f32;
         let sigma = sigma_255 / 255.0;
         let var = 2.0 * sigma * sigma;
-        [0.0, n * var, n_pairs * rho * var]
+        scalar_record(0.0, n * var, n_pairs * rho * var)
     }
 
     /// A 64x64 frame of 16 blocks where most stand in for panning
@@ -1788,7 +1968,7 @@ mod tests {
             "construction must clear the rho-sample sigma gate"
         );
 
-        let records = [sum_d, sum_d2, sum_lag];
+        let records = scalar_record(sum_d, sum_d2, sum_lag);
         let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
             .expect("the single block clears both gates");
 
