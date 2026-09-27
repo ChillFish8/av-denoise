@@ -1,5 +1,8 @@
+mod reseed;
+
 use std::collections::VecDeque;
 
+pub use self::reseed::ReseedWindow;
 use crate::accelerate::Accelerator;
 use crate::{
     Algorithm,
@@ -249,13 +252,6 @@ fn with_plane_strength(nlm: NlmeansOptions, strength: Option<f32>) -> NlmeansOpt
     }
 }
 
-/// Pops up to `count` entries off the front of `queue`, discarding them.
-fn drop_leading<T>(queue: &mut VecDeque<T>, count: usize) {
-    for _ in 0..count.min(queue.len()) {
-        queue.pop_front();
-    }
-}
-
 /// Reads the result of a `PlanarDenoiser::push` call for the
 /// push-then-drain-then-retry loop that `file_mode.rs` and
 /// `stream_mode.rs` both use.
@@ -456,8 +452,8 @@ impl PlanarDenoiser {
     ///
     /// Mirrors [`Self::push`], down to queueing the disabled side's
     /// passthrough plane, but no output is ever produced for this call.
-    /// This is how [`Self::reseed`] fills the window from an explicit
-    /// window of frames before the one real push that starts a denoise.
+    /// This is how the reseed paths fill a window's leading frames before
+    /// its real pushes start.
     fn push_priming(&mut self, planes: &Planes) -> Result<(), DenoiserError> {
         self.push_with(planes, Denoiser::push_frame_wire_priming)
     }
@@ -626,100 +622,6 @@ impl PlanarDenoiser {
             .or(self.chroma.as_ref())
             .expect("PlanarDenoiser always keeps at least one Denoiser")
             .window_span()
-    }
-
-    /// Denoises the target frame of an explicit window, sized and
-    /// shaped exactly as [`Self::window_span`] reports for whichever
-    /// algorithm this `PlanarDenoiser` runs.
-    ///
-    /// This abandons whatever stream was running and starts a new one
-    /// from the window, keeping every GPU allocation. When it returns,
-    /// the stream sits exactly where it would be had the window been
-    /// pushed frame by frame, so the caller can carry on with
-    /// [`Self::push`] and [`Self::recv`] for the frame after the target.
-    ///
-    /// Callers clamp the window's indices at the clip's ends, matching
-    /// how the streaming path repeats the first and last frames.
-    ///
-    /// # Why the window is wider than `2r+1` for some algorithms
-    ///
-    /// The two NLM algorithms produce one output per submit once their
-    /// own `2r+1`-frame window is full, so a symmetric window centred
-    /// on the target frame is enough.
-    ///
-    /// nl4d scatters every pass's contribution across the `2r+1`
-    /// frames that pass reaches, and a target frame's own region only
-    /// starts collecting contributions once the earliest pass able to
-    /// reach it, the one centred `r` frames behind the target, has
-    /// actually run, which itself needs the front end's own window
-    /// full at that earlier centre. Both of those requirements push
-    /// the target's own `r`-wide neighbourhood back by another `r`, on
-    /// both sides, which is exactly what [`Self::window_span`] reports
-    /// through nl4d's doubled `behind` and `ahead`. This is bit-exact
-    /// with the streaming path because every frame the window supplies
-    /// is real, distinct content, run through the same sequence of
-    /// passes streaming would have run to reach the target frame.
-    pub fn reseed(&mut self, window: &[Planes]) -> Result<Planes, anyhow::Error> {
-        let span = self.window_span();
-        let expected = span.frame_count();
-        if window.len() != expected {
-            anyhow::bail!("reseed needs a window of {expected} frames, got {}", window.len());
-        }
-
-        self.luma_passthrough.clear();
-        self.chroma_passthrough.clear();
-
-        for d in [self.yuv.as_mut(), self.luma.as_mut(), self.chroma.as_mut()]
-            .into_iter()
-            .flatten()
-        {
-            d.reset_stream();
-        }
-
-        // Prime the first `2 * temporal_radius` frames, filling the
-        // underlying denoiser's own window without submitting anything,
-        // exactly as streaming would have primed it. This count comes
-        // from the front end's own window size, not from `span`, so it
-        // stays the same for every algorithm. Every remaining frame is
-        // then a real push, one submit per frame.
-        let radius = self.temporal_radius as usize;
-        let priming_count = 2 * radius;
-        let (head, tail) = window.split_at(priming_count);
-        for planes in head {
-            self.push_priming(planes)?;
-        }
-
-        // Priming queues one passthrough entry per frame, just as a
-        // real push does. `nlmeans`'s single real push, below, always
-        // emits and pairs with the target's own entry once `radius` of
-        // these leading ones are out of the way, exactly as before.
-        //
-        // nl4d's real pushes below emit more than once: nl4d's own
-        // gate gives every push once its own window is full a real
-        // output, but only the last `ahead - behind + 1` of them
-        // complete a region as new as the target's, the earlier ones
-        // complete regions further behind it that this call has no use
-        // for. Draining after every real push, not only the last,
-        // keeps the pending queue from ever holding more than one
-        // frame at a time, and it walks the passthrough queue forward
-        // by exactly one entry per region completed, so by the time
-        // the target's own region completes, its entry is the one at
-        // the front to pop. The same `radius` leading drop lines that
-        // front up correctly beforehand for both algorithms, because
-        // nl4d's own gate width is `radius` regardless of how wide
-        // `span` is.
-        drop_leading(&mut self.luma_passthrough, radius);
-        drop_leading(&mut self.chroma_passthrough, radius);
-
-        let mut result = None;
-        for planes in tail {
-            self.push(planes)?;
-            if let Some(out) = self.recv()? {
-                result = Some(out);
-            }
-        }
-
-        result.ok_or_else(|| anyhow::anyhow!("a full window produced no frame, this is a bug"))
     }
 
     fn assemble(

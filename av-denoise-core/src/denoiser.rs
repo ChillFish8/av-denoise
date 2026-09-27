@@ -808,6 +808,17 @@ pub struct WindowSpan {
     pub behind: usize,
     /// How many frames newer than the target the window must include.
     pub ahead: usize,
+    /// How the window is filled where it runs past a clip's ends.
+    pub edges: EdgePadding,
+}
+
+/// How a windowed algorithm fills a window that runs past a clip's ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgePadding {
+    /// Repeat the boundary frame, so every window has the same length.
+    Repeat,
+    /// Stop at the clip's ends and let the denoiser run off-centre passes there.
+    Shifted,
 }
 
 impl WindowSpan {
@@ -985,16 +996,23 @@ impl Denoiser {
     /// `radius` more frames behind it again. So nl4d needs the target's
     /// own `radius`-wide neighbourhood doubled on both sides:
     /// `WindowSpan { behind: 2 * radius, ahead: 2 * radius }`.
+    ///
+    /// nl4d's windows stop at a clip's ends, while the NLM algorithms
+    /// repeat the boundary frame.
     pub fn window_span(&self) -> WindowSpan {
         let radius = self.temporal_radius as usize;
-        let span = if self.backend.is_nl4d() {
-            2 * radius
+        let is_nl4d = self.backend.is_nl4d();
+        let span = if is_nl4d { 2 * radius } else { radius };
+        let edges = if is_nl4d {
+            EdgePadding::Shifted
         } else {
-            radius
+            EdgePadding::Repeat
         };
+
         WindowSpan {
             behind: span,
             ahead: span,
+            edges,
         }
     }
 
@@ -2016,6 +2034,7 @@ mod tests {
         let span = d.window_span();
         assert_eq!(span.behind, 3, "behind should equal the temporal radius");
         assert_eq!(span.ahead, 3, "ahead should equal the temporal radius");
+        assert_eq!(span.edges, EdgePadding::Repeat);
     }
 
     /// nl4d's cross-frame accumulator needs the target's own `radius`
@@ -2034,6 +2053,7 @@ mod tests {
         let span = d.window_span();
         assert_eq!(span.behind, 6, "behind should equal 2 * the temporal radius");
         assert_eq!(span.ahead, 6, "ahead should equal 2 * the temporal radius");
+        assert_eq!(span.edges, EdgePadding::Shifted);
     }
 
     #[test]
