@@ -6,7 +6,7 @@ use crate::nlmeans::motion::neighbour_idx_for_k;
 /// A non-flat luma field, built from two out-of-phase sine waves rather
 /// than noise, so it carries real spatial structure a denoiser can
 /// either preserve or destroy.
-pub(super) fn textured_base(w: u32, h: u32) -> Vec<f32> {
+pub(crate) fn textured_base(w: u32, h: u32) -> Vec<f32> {
     let mut frame = vec![0.0f32; (w * h) as usize];
     for y in 0..h {
         for x in 0..w {
@@ -23,7 +23,7 @@ pub(super) fn textured_base(w: u32, h: u32) -> Vec<f32> {
 /// Adds independent pseudo-Gaussian noise to `base`, decorrelated across
 /// `seed` so different seeds over the same base give independently
 /// noisy copies of the same clean content.
-pub(super) fn noisy_copy_of(base: &[f32], w: u32, h: u32, sigma: f32, seed: u32) -> Vec<f32> {
+pub(crate) fn noisy_copy_of(base: &[f32], w: u32, h: u32, sigma: f32, seed: u32) -> Vec<f32> {
     let mut frame = vec![0.0f32; base.len()];
     for idx in 0..(w * h) {
         let noise = unit_noise(idx, seed);

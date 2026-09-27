@@ -22,7 +22,7 @@ pub(crate) mod subpel;
 // `tests::helpers::R`, so it only builds when a wgpu-backed feature is
 // enabled. A cpu-only build skips it entirely.
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-mod tests;
+pub(crate) mod tests;
 
 pub use self::denoiser::Nl4dDenoiser;
 pub use self::params::{MAX_KAISER_BETA, Nl4dParams};

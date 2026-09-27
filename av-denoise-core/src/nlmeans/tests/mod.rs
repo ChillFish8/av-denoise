@@ -2,6 +2,7 @@ mod helpers;
 
 mod alignment;
 mod confidence;
+mod edges;
 mod gpu_submit;
 mod hq;
 mod machinery;

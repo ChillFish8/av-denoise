@@ -380,6 +380,12 @@ pub struct NlmDenoiser<R: Runtime> {
     /// only way to change it. Leaving it off roughly halves the stats
     /// kernel's cost at 1080p.
     pub(super) luma_noise_fields: bool,
+
+    /// Whether the stream's edges run off-centre passes instead of copied padding.
+    ///
+    /// Set by nl4d. With it on, a stream gets no leading copies and a
+    /// centre with no temporal reading borrows the nearest one ahead.
+    pub(super) shifted_edges: bool,
 }
 
 impl<R: Runtime> NlmDenoiser<R> {
@@ -683,6 +689,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             confidence_dummy,
             sigma_y,
             luma_noise_fields: false,
+            shifted_edges: false,
         }
     }
 
@@ -1132,10 +1139,9 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// Queues the temporal residual statistics for `slot`, comparing it
     /// against the slot immediately before it in the ring.
     ///
-    /// This does nothing unless the temporal estimator is active, and it
-    /// also does nothing for a stream's very first frame, which has no
-    /// predecessor to compare against. That matches the check in
-    /// [`Self::run_pair_analyse_for_slot`].
+    /// This does nothing unless the temporal estimator is active. A
+    /// stream's very first frame has no predecessor, so its record is
+    /// zeroed instead.
     ///
     /// The centre slot's statistics are read back and combined later, in
     /// [`Self::update_noise_estimate`].
@@ -1144,6 +1150,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             return;
         };
         if self.ring_head == 0 {
+            self.zero_temporal_stats_for_slot(slot);
             return;
         }
 
@@ -1236,9 +1243,9 @@ impl<R: Runtime> NlmDenoiser<R> {
             .expect("noise-estimate seed readback failed");
         let data = f32::from_bytes(&bytes);
 
-        // The stream's first frame has no predecessor, so
-        // `run_temporal_stats_for_slot` never ran for it and this
-        // slot's stats region is unwritten. Seed from Immerkær alone.
+        // The stream's first frame has no predecessor, so its stats
+        // record is zeroed rather than measured. Seed from Immerkær
+        // alone.
         let imm_low = self
             .read_noise_partials_low(slot)
             .expect("noise-partials seed readback failed");
@@ -1492,6 +1499,10 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// [`Self::flush`] does the same thing at the other end of the
     /// stream.
     fn prime_leading_edge_if_first(&mut self) {
+        if self.shifted_edges {
+            return;
+        }
+
         let r = self.params.temporal_radius as usize;
 
         if r == 0 || self.frames_loaded != 1 {
@@ -1513,7 +1524,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     ///
     /// The reference ring is copied in step when it exists, so the
     /// weights are never computed from a stale slot.
-    fn duplicate_last_frame(&mut self) {
+    pub(super) fn duplicate_last_frame(&mut self) {
         let total_frames = self.params.total_frames() as usize;
         let last_slot = (self.ring_head - 1) % total_frames;
         let next_slot = self.ring_head % total_frames;
@@ -1893,7 +1904,7 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         let center_slot = self.phys_frame(center_t as i32) as usize;
 
-        let reading = self.read_temporal_noise(center_slot as u32)?;
+        let reading = self.borrow_reading_ahead(center_t)?;
         let imm_low = self.read_noise_partials_low(center_slot as u32)?;
 
         // The curve tracks the sample it was built alongside, so it only
@@ -1958,7 +1969,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// The curve is only built when `luma_noise_fields` is on, since it
     /// needs the stats kernel's luma-only lanes. See
     /// [Self::set_luma_noise_fields].
-    fn read_temporal_noise(&self, slot: u32) -> Result<TemporalNoiseReading, anyhow::Error> {
+    pub(super) fn read_temporal_noise(&self, slot: u32) -> Result<TemporalNoiseReading, anyhow::Error> {
         let Some(stats_buf) = self.temporal_stats_buf.as_ref() else {
             return Ok(TemporalNoiseReading {
                 sample: None,
