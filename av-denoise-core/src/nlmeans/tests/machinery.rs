@@ -1,4 +1,4 @@
-//! `submit_machinery` and `flush_step_machinery` run the NLM denoiser's
+//! `submit_machinery` runs the NLM denoiser's
 //! ring, motion, and confidence machinery without launching any NLM
 //! denoising kernel, so a separate collaborative stage can read the same
 //! ring, motion fields, and confidence scores the NLM path builds.
@@ -261,36 +261,6 @@ fn submit_machinery_none_while_window_is_filling() {
         result.is_none(),
         "a partially-filled window must report None, the same as denoise_submit_gpu"
     );
-}
-
-/// `flush_step_machinery` drains the trailing frames the same way
-/// `flush_step_gpu` does, minus the NLM launches, reporting `Some` at
-/// every step once the window has ever been full.
-#[test]
-fn flush_step_machinery_drains_the_tail() {
-    let client = make_client();
-    let mut d = push_translating_sequence(&client);
-
-    // Consume the one output the fully-loaded window already owes,
-    // mirroring how a real caller drains `submit_machinery` during
-    // pushing before it ever reaches `flush`.
-    d.submit_machinery(RADIUS)
-        .expect("submit_machinery dispatch failed")
-        .expect("window is exactly full, submit_machinery should report Some");
-
-    let target = d.flush_target();
-    assert_eq!(
-        target, RADIUS as usize,
-        "flush_target should ask for exactly RADIUS trailing frames"
-    );
-
-    for _ in 0..target {
-        let view = d
-            .flush_step_machinery()
-            .expect("flush_step_machinery dispatch failed")
-            .expect("every flush step past the initial fill should report Some");
-        assert_eq!(view.neighbour_slots.len(), (2 * RADIUS) as usize);
-    }
 }
 
 /// Priming a whole window with [`Denoiser::push_frame_priming`], then

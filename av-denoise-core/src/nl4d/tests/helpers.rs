@@ -1,7 +1,50 @@
 use cubecl::prelude::*;
 use cubecl::wgpu::WgpuRuntime;
 
+use crate::nl4d::{Nl4dParams, SubpelPrecision};
 use crate::nlmeans::motion::neighbour_idx_for_k;
+use crate::nlmeans::{ChannelMode, HqParams, MotionCompensationMode, MotionEstimation, NlmParams};
+
+pub(super) const SIGMA: f32 = 6.0 / 255.0;
+pub(super) const SPATIAL_RADIUS: u32 = 9;
+pub(super) const REFINE: u32 = 2;
+pub(super) const C_MIN: f32 = 0.05;
+pub(super) const LAMBDA_HT: f32 = 2.7;
+
+/// Parameters for a still clip with sigma pinned to [SIGMA].
+pub(super) fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
+    Nl4dParams {
+        nlm: NlmParams {
+            temporal_radius,
+            search_radius: 2,
+            patch_radius: 2,
+            strength: 1.2,
+            self_weight: 1.0,
+            channels: ChannelMode::Luma,
+            prefilter: crate::nlmeans::PrefilterMode::None,
+            motion_compensation: MotionCompensationMode::Mvtools {
+                blksize: 16,
+                overlap: 8,
+                search_radius: 4,
+                pyramid_levels: 2,
+                estimation: MotionEstimation::Auto,
+            },
+            hq: Some(HqParams::with_sigma(SIGMA)),
+        },
+        temporal_radius,
+        refine: REFINE,
+        spatial_radius: SPATIAL_RADIUS,
+        lambda_ht: LAMBDA_HT,
+        c_min: C_MIN,
+        // The shipped default, so these run the aggregation a real
+        // caller gets.
+        kaiser_beta: 2.0,
+        field_lambda: 0.0,
+        subpel: SubpelPrecision::Off,
+        // No effect here, since sigma is pinned.
+        noise_map: true,
+    }
+}
 
 /// A non-flat luma field, built from two out-of-phase sine waves rather
 /// than noise, so it carries real spatial structure a denoiser can

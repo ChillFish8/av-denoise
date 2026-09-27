@@ -50,9 +50,12 @@ const CROSS_FRAME_SAFETY_FACTOR: f64 = 2.0;
 /// ```
 ///
 /// of them can reach it. Squaring for both axes and taking every one of
-/// `MAX_K` members gives one pass's contribution count, and a cross-frame
-/// ring collects that from `2 * temporal_radius + 1` passes before
-/// [`crate::nl4d::Nl4dDenoiser::run_collab_stage`] reads it back. Each
+/// `MAX_K` members gives one pass's contribution count. A cross-frame
+/// region collects that from `2 * temporal_radius + 1` passes in steady
+/// state. A region can collect up to `4 * temporal_radius + 1`, the steady
+/// `2 * temporal_radius + 1` plus `temporal_radius` head and
+/// `temporal_radius` tail passes when a scene is short enough for one
+/// frame to sit in both edge rings. Each
 /// contribution is weighted by at most 1 (see [`weight_scale`]) and
 /// clamped to [`ACCUM_CLAMP`]. The same figure sizes `wsum`, whose
 /// contributions are bounded by [`WEIGHT_CLAMP`] instead but counted at
@@ -63,7 +66,7 @@ const CROSS_FRAME_SAFETY_FACTOR: f64 = 2.0;
 pub fn cross_frame_accum_scale(spatial_radius: u32, temporal_radius: u32) -> f32 {
     let refs_per_axis = ((PATCH_SIZE - 1) + 2 * spatial_radius) / STEP + 1;
     let contribs_per_pass = refs_per_axis as f64 * refs_per_axis as f64 * MAX_K as f64;
-    let passes = (2 * temporal_radius + 1) as f64;
+    let passes = (4 * temporal_radius + 1) as f64;
     let max_raw_value = contribs_per_pass * passes * ACCUM_CLAMP as f64;
 
     let budget = i32::MAX as f64 / CROSS_FRAME_SAFETY_FACTOR;
@@ -500,7 +503,7 @@ mod tests {
             for temporal_radius in TEMPORAL_RADIUS_RANGE {
                 let refs_per_axis = ((PATCH_SIZE - 1) + 2 * spatial_radius) / STEP + 1;
                 let contribs_per_pass = refs_per_axis as f64 * refs_per_axis as f64 * MAX_K as f64;
-                let passes = (2 * temporal_radius + 1) as f64;
+                let passes = (4 * temporal_radius + 1) as f64;
                 let max_raw_value = contribs_per_pass * passes * ACCUM_CLAMP as f64;
 
                 let scale = cross_frame_accum_scale(spatial_radius, temporal_radius) as f64;

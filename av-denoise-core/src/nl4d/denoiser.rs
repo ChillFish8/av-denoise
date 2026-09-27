@@ -37,12 +37,32 @@ use crate::nlmeans::{
     start_readback,
 };
 
+/// Which accumulator regions a pass zeroes before scattering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AccumClear {
+    /// Every region, on a stream's first pass.
+    WholeRing,
+    /// Only the region about to be reused by the newest frame.
+    NewestRegion,
+    /// None, for edge passes whose regions already hold live contributions.
+    Nothing,
+}
+
+/// How the current stream began.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamStart {
+    /// The stream starts a scene, so its first frames get off-centre head passes.
+    SceneStart,
+    /// The stream picks up mid-clip from priming pushes, so it runs no head passes.
+    Continuation,
+}
+
 /// Groups similar 8x8 patches across a motion-compensated temporal
 /// window and denoises each group jointly.
 ///
 /// This drives the NLMeans front end, but only for its machinery, the
 /// frame ring, the motion field, and the confidence scores built by
-/// [`NlmDenoiser::submit_machinery`]/[`NlmDenoiser::flush_step_machinery`].
+/// [`NlmDenoiser::submit_machinery`].
 /// No NLM weighting kernel ever runs. Instead, every submit hands the
 /// noisy ring to [`collab_fused`], which groups patches by searching
 /// both the centre frame spatially and each neighbour frame around
@@ -54,14 +74,12 @@ use crate::nlmeans::{
 ///
 /// Every pass scatters its filtered members into whichever frame each one
 /// came from, not only the centre frame, so a frame's own output finishes
-/// only once every pass that can reach it has run, which is
-/// `temporal_radius` passes on either side of it.
+/// only once every pass that can reach it has run.
 ///
-/// Latency is therefore `2 * temporal_radius` pushes, twice the front
-/// end's own window depth. [`Self::denoise_submit`] returns `None` while
-/// the front end's window is still filling and for the further passes
-/// this cross-frame accumulation needs, and [`Self::flush`] drains the
-/// frames still held once the input stream ends.
+/// Latency is `2 * temporal_radius` pushes, twice the front end's own
+/// window depth. [`Self::denoise_submit`] returns `None` while the front
+/// end's window is still filling, and [`Self::flush`] drains the frames
+/// still held once the input stream ends.
 pub struct Nl4dDenoiser<R: Runtime> {
     front: NlmDenoiser<R>,
     width: u32,
@@ -83,7 +101,7 @@ pub struct Nl4dDenoiser<R: Runtime> {
     ///
     /// Both radii it derives from are fixed for the denoiser's lifetime,
     /// so this is worked out once here rather than on every
-    /// [`Self::run_collab_stage`] call.
+    /// [`Self::run_pass`] call.
     accum_scale: f32,
 
     group_weight: Handle,
@@ -103,11 +121,9 @@ pub struct Nl4dDenoiser<R: Runtime> {
     /// to back, one region per physical ring slot of the front end's own
     /// frame ring.
     ///
-    /// A pass centred on frame `u` contributes to every frame in
-    /// `u - temporal_radius ..= u + temporal_radius`, so a frame's region
-    /// stays live across that many consecutive passes before
-    /// [`Self::run_collab_stage`] reads it back and clears it for reuse.
-    /// See that method for the exact scheduling.
+    /// A pass contributes to every frame in the ring, so a frame's region
+    /// stays live across every pass run while it sits in the ring. See
+    /// [`Self::denoise_submit`] for when a region is read back.
     accum: Handle,
     wsum: Handle,
     /// Two output buffers, alternated so one frame's kernels can overlap
@@ -122,25 +138,14 @@ pub struct Nl4dDenoiser<R: Runtime> {
     /// These buffers rotate on the same slot counter, so each is free again exactly
     /// when the `f32` slot it is packed from is free.
     wire_outputs: Option<[Handle; 2]>,
-    /// How many passes [`Self::run_collab_stage`] has run for the
-    /// current stream.
+    /// How many passes [`Self::run_pass`] has run for the current stream.
     ///
-    /// Pass 0 also full-zeroes `accum`/`wsum`, since every later pass
-    /// only zeroes the one region it is about to reuse (see
-    /// [`Self::run_collab_stage`]). This therefore doubles as "does the
-    /// ring still hold a previous stream's stale contributions". It
-    /// resets to 0 at the end of [`Self::flush`], alongside the front
-    /// end's own stream state.
-    ///
-    /// A pass emits an output only once `passes_run > temporal_radius`.
-    /// The earliest a frame's region has contributions from every pass
-    /// that can reach it is `temporal_radius` passes after the pass
-    /// centred on that frame.
-    ///
-    /// [`Self::denoise_submit`] and [`Self::flush`] read this through
-    /// [`Self::run_collab_stage`]'s return value rather than checking it
-    /// themselves.
+    /// The stream's first pass zeroes the whole of `accum`/`wsum`, so a
+    /// zero here also means the ring may hold a previous stream's stale
+    /// contributions. It resets to 0 in [`Self::reset_stream`].
     passes_run: u32,
+    /// How the current stream began, set by [`Self::mark_continuation`].
+    stream_start: StreamStart,
     /// The field buffers the last pass handed the fused kernel, for
     /// [`Self::motion_snapshot`].
     last_fields: Option<LastFields>,
@@ -233,6 +238,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let channels = params.nlm.channels;
         let apply_noise_map = params.noise_map && channels != ChannelMode::Chroma;
         front.set_luma_noise_fields(apply_noise_map);
+        front.set_shifted_edges(true);
 
         let stored_ch = channels.storage_count();
         let k_max = MAX_K;
@@ -253,8 +259,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let kaiser_buf = client.create_from_slice(f32::as_bytes(&kaiser_window(params.kaiser_beta)));
         // One region per physical ring slot of the front end's own frame
         // ring, `1 + 2 * temporal_radius` of them, see the `accum` field
-        // doc for why. The ring is zeroed in full by pass 0 rather than
-        // here, since `client.empty` gives no guarantee its memory
+        // doc for why. The ring is zeroed in full by a stream's first pass
+        // rather than here, since `client.empty` gives no guarantee its memory
         // starts zeroed.
         let ring_frames = 1 + 2 * params.temporal_radius;
         let accum = client.empty(frame_len * ring_frames as usize * size_of::<i32>());
@@ -318,6 +324,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             output_format,
             wire_outputs,
             passes_run: 0,
+            stream_start: StreamStart::SceneStart,
             last_fields: None,
             field_lambda: params.field_lambda,
             reg_mv,
@@ -350,12 +357,19 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// Runs one submit's worth of grouping, filtering, and aggregation,
     /// and starts the readback.
     ///
-    /// Returns `Ok(None)` while the front end's temporal window is still
-    /// filling, and also for `temporal_radius` further submits after
-    /// that, while the earliest frames' cross-frame accumulation is
-    /// still gathering contributions from passes that have not run yet.
-    /// End-to-end latency is therefore `2 * temporal_radius` pushes, not
-    /// `temporal_radius`, see [`Self::run_collab_stage`].
+    /// Returns `Ok(None)` while the front end's ring is still filling.
+    ///
+    /// The push that fills a scene's ring runs head passes centred on the
+    /// ring's first `temporal_radius` frames, then the pass centred on its
+    /// middle frame. Every later submit runs one pass centred on the
+    /// ring's middle frame.
+    ///
+    /// Once more than `temporal_radius` passes have run, each pass centred
+    /// on the ring's middle completes the region `temporal_radius` frames
+    /// behind it, and that region is read back. A continuation stream
+    /// skips the head passes, so its first `temporal_radius` submits after
+    /// the ring fills return `Ok(None)`. Latency stays
+    /// `2 * temporal_radius` pushes for a scene start.
     ///
     /// There are two output slots, so at most two [`Pending`]s from this
     /// denoiser may be outstanding at once. A third concurrent submit
@@ -366,14 +380,56 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// on the GPU before the readback, so only the wire bytes cross the
     /// bus.
     pub fn denoise_submit(&mut self) -> Result<Option<Pending<R>>, DenoiserError> {
-        let Some(view) = self.front.submit_machinery(self.temporal_radius)? else {
+        if !self.front.window_ready() {
             return Ok(None);
+        }
+
+        let radius = self.temporal_radius;
+        let opens_scene = self.passes_run == 0 && self.stream_start == StreamStart::SceneStart;
+        let mut clear = if self.passes_run == 0 {
+            AccumClear::WholeRing
+        } else {
+            AccumClear::NewestRegion
         };
-        let Some((handle, slot)) = self.run_collab_stage(&view)? else {
+
+        if opens_scene {
+            for centre in 0..radius {
+                let view = self.machinery_at(centre)?;
+                self.run_pass(&view, clear)?;
+                clear = AccumClear::Nothing;
+            }
+        }
+
+        let view = self.machinery_at(radius)?;
+        self.run_pass(&view, clear)?;
+
+        if self.passes_run <= radius {
             return Ok(None);
-        };
-        let wire_dst = self.wire_outputs.as_ref().map(|w| &w[slot]);
-        Ok(Some(self.start_readback(handle, wire_dst, self.output_format)))
+        }
+
+        let total_frames = 1 + 2 * radius;
+        let completed_slot = (view.centre_slot + total_frames - radius) % total_frames;
+        let (handle, slot) = self.normalise_region(completed_slot);
+        let wire_dst = self.wire_outputs.as_ref().map(|outputs| &outputs[slot]);
+        let pending = self.start_readback(handle, wire_dst, self.output_format);
+
+        Ok(Some(pending))
+    }
+
+    /// Marks the current stream as picking up mid-clip, so it runs no head passes.
+    ///
+    /// Only has an effect before the stream's first pass.
+    pub(crate) fn mark_continuation(&mut self) {
+        if self.passes_run == 0 {
+            self.stream_start = StreamStart::Continuation;
+        }
+    }
+
+    /// Runs the front end's motion and noise machinery for a pass centred on logical ring position `centre`.
+    fn machinery_at(&mut self, centre: u32) -> Result<RingView, DenoiserError> {
+        let view = self.front.submit_machinery(centre)?;
+        let view = view.expect("the ring is full whenever a pass runs");
+        Ok(view)
     }
 
     /// Submits and waits for the result in one call.
@@ -392,45 +448,60 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
     /// Produces the frames still held at the end of a stream.
     ///
-    /// For the last few frames the front end keeps its temporal window
-    /// full by repeating the final pushed frame, exactly as
-    /// [`NlmDenoiser::flush`] does. `sink` is called once per frame
-    /// produced, and the frame it receives is only valid for that call.
-    /// It arrives in the [`OutputFormat`] this denoiser was built with,
-    /// quantised by the same pack kernel as every streaming frame.
+    /// A stream that filled its ring runs off-centre passes centred on its
+    /// last `temporal_radius` frames, then reads out the last
+    /// `2 * temporal_radius` frames' regions. A stream too short to fill
+    /// its ring pads the ring with copies of its last frame, runs every
+    /// real frame as a centre, then reads out every real frame.
     ///
-    /// This drives [`NlmDenoiser::flush_step_machinery`] for
-    /// [`Self::flush_target`] emissions, which is `2 * temporal_radius`
-    /// duplicate-driven passes for a long enough stream, twice what the
-    /// front end's own [`NlmDenoiser::flush_target`] would give.
-    ///
-    /// The front end only has to let every real frame finish a turn as a
-    /// pass's own centre. This cross-frame stage also has to let every
-    /// real frame finish gathering the `temporal_radius` trailing passes
-    /// its own accumulation needs, which is another `temporal_radius`
-    /// pushes' worth of passes.
-    ///
-    /// A call to [`NlmDenoiser::flush_step_machinery`] runs a pass
-    /// whether or not it emits, so the loop below keeps calling it until
-    /// enough passes have actually emitted.
+    /// `sink` is called once per frame, in order, and the frame it
+    /// receives is only valid for that call. It arrives in the
+    /// [`OutputFormat`] this denoiser was built with, quantised by the
+    /// same pack kernel as every streaming frame.
     pub fn flush(&mut self, mut sink: impl FnMut(&FrameOutput)) -> Result<(), DenoiserError> {
-        let target = self.flush_target();
-        let mut emitted = 0usize;
+        let emit = self.flush_target() as u32;
+        if emit == 0 {
+            self.reset_stream();
+            return Ok(());
+        }
+
+        let radius = self.temporal_radius;
+        let total_frames = 1 + 2 * radius;
+        let short_stream = self.front.real_pushes() < total_frames as usize;
+        if short_stream {
+            self.front.fill_ring_with_last_frame();
+        } else {
+            debug_assert!(self.passes_run > 0, "a full ring reached flush with no pass run");
+        }
+
+        let (centres, last_real) = if short_stream {
+            (0..emit, emit - 1)
+        } else {
+            (radius + 1..2 * radius + 1, 2 * radius)
+        };
+
+        let mut clear = if short_stream {
+            AccumClear::WholeRing
+        } else {
+            AccumClear::Nothing
+        };
+        for centre in centres {
+            let view = self.machinery_at(centre)?;
+            self.run_pass(&view, clear)?;
+            clear = AccumClear::Nothing;
+        }
 
         // Every output slot is free here. A caller reaches a flush only
-        // once its streaming readbacks have landed, and the readback
-        // below blocks, so no other readback is ever reading the slot
-        // this step is handed.
-        while emitted < target {
-            if let Some(view) = self.front.flush_step_machinery()?
-                && let Some((handle, slot)) = self.run_collab_stage(&view)?
-            {
-                let wire_dst = self.wire_outputs.as_ref().map(|w| &w[slot]);
-                let pending = self.start_readback(handle, wire_dst, self.output_format);
-                let frame = pending.wait()?;
-                sink(&frame);
-                emitted += 1;
-            }
+        // once its streaming readbacks have landed, and each readback
+        // below blocks before the next region reuses a slot.
+        let first_region = last_real + 1 - emit;
+        for logical in first_region..=last_real {
+            let region_slot = self.front.ring_slot(logical);
+            let (handle, slot) = self.normalise_region(region_slot);
+            let wire_dst = self.wire_outputs.as_ref().map(|outputs| &outputs[slot]);
+            let pending = self.start_readback(handle, wire_dst, self.output_format);
+            let frame = pending.wait()?;
+            sink(&frame);
         }
 
         self.reset_stream();
@@ -444,11 +515,13 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// Clears the front end's own stream state plus the cross-frame
     /// accumulator's pass counter and output slot, so a window primed
     /// after this call never reads a previous window's stale
-    /// contributions out of the fixed-point `accum`/`wsum` ring.
+    /// contributions out of the fixed-point `accum`/`wsum` ring. The next
+    /// stream starts a scene unless it is marked a continuation.
     pub fn reset_stream(&mut self) {
         self.front.reset_stream_state();
         self.next_output_slot = 0;
         self.passes_run = 0;
+        self.stream_start = StreamStart::SceneStart;
         self.last_fields = None;
     }
 
@@ -487,14 +560,9 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// How many tail frames [`Self::flush`] must emit for the stream
     /// pushed so far.
     ///
-    /// Mirrors [`NlmDenoiser::flush_target`]'s shape exactly, `real
-    /// pushes so far, capped at a fixed multiple of the radius`, but at
-    /// `2 * temporal_radius` rather than `temporal_radius`. The front
-    /// end's own target only accounts for letting every real frame run
-    /// as a pass's centre; this stage also needs every real frame to
-    /// finish gathering its own `temporal_radius` trailing passes once
-    /// it has been a centre, which doubles how many duplicate-driven
-    /// passes the tail needs.
+    /// A stream that filled its ring holds `2 * temporal_radius` frames
+    /// whose regions are not yet read out. A shorter stream holds every
+    /// frame it pushed.
     fn flush_target(&self) -> usize {
         let real_pushes = self.front.real_pushes();
         if real_pushes == 0 {
@@ -504,48 +572,23 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         }
     }
 
-    /// Runs the grouping, filtering, and aggregation kernels for one
-    /// pass, and returns the handle of whichever output slot the
-    /// completed frame landed in along with that slot's index, once one
-    /// has completed.
+    /// Runs the grouping, filtering, and aggregation kernels for one pass.
     ///
-    /// # Scheduling
+    /// The pass is centred on the physical ring slot `view.centre_slot`.
+    /// It groups the centre frame against every other frame in the ring,
+    /// and each filtered member scatters into the region of
+    /// `self.accum`/`self.wsum` for the frame it came from (see
+    /// [`collab_fused`]'s scatter). So one pass adds to every region in
+    /// the ring, not just the centre's.
     ///
-    /// A pass is centred on one physical ring slot, `view.centre_slot`,
-    /// and every member it groups and filters scatters into its own
-    /// frame's region of `self.accum`/`self.wsum`, whichever physical
-    /// slot that member actually came from (see [`collab_fused`]'s
-    /// scatter). Since this pass searches the centre frame
-    /// spatially and each of the `temporal_radius` frames on either side
-    /// of it, this pass's own contributions land across every region in
-    /// `centre_slot - temporal_radius ..= centre_slot + temporal_radius`
-    /// (mod the ring length), not just the centre's own region.
-    ///
-    /// A region only receives its full set of contributions once every
-    /// pass that can reach it has run, which for the region at
-    /// `centre_slot - temporal_radius` is this pass itself, the last and
-    /// latest of the `1 + 2 * temporal_radius` passes able to write into
-    /// it. That region is therefore exactly what this pass completes,
-    /// and is read back into `output` and cleared for its next
-    /// occupant. The region at `centre_slot + temporal_radius`, this
-    /// pass's own newest edge, is symmetrically the one about to be
-    /// reused for the first time since it was last completed, so it is
-    /// the one this pass clears ahead of scattering into it, rather than
-    /// clearing the whole ring on every call.
-    ///
-    /// [`self.passes_run`](Self::passes_run) counts how many passes have
-    /// run for the current stream, including this one. Pass 0 clears the
-    /// whole ring rather than only its newest edge, because nothing else
-    /// has ever cleared the rest of it, whether this is the denoiser's
-    /// first stream or a later one reusing the same buffers (see
-    /// [`Self::flush`], which resets the counter but leaves the GPU
-    /// buffers as they were). A pass only has every contribution its
-    /// completed region can ever receive once `temporal_radius` further
-    /// passes have run beyond the one centred on that region, so this
-    /// returns `None` for the first `temporal_radius` passes of a
-    /// stream, whose completed region is still short of contributions
-    /// from passes that have not run yet.
-    fn run_collab_stage(&mut self, view: &RingView) -> Result<Option<(Handle, usize)>, DenoiserError> {
+    /// Before scattering, `clear` picks which regions to zero.
+    /// [`AccumClear::WholeRing`] zeroes and builds phase planes for every
+    /// slot, since nothing has cleared a new stream's ring.
+    /// [`AccumClear::NewestRegion`] does the same for the slot
+    /// `temporal_radius` ahead of the centre, which the newest frame has
+    /// just taken over. [`AccumClear::Nothing`] leaves every region as it
+    /// is, for an edge pass that sees no new frame.
+    fn run_pass(&mut self, view: &RingView, clear: AccumClear) -> Result<(), DenoiserError> {
         // The frame-slot contract: `collab_fused`'s `centre_slot` and
         // the ring view's own centre must be the same physical slot, or
         // a member gets grouped against one frame and scattered as
@@ -590,12 +633,9 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         // its grid is an eighth as wide as the reference grid along x.
         let collab_grid = CubeCount::new_2d(fused_cubes_x(self.width), refs_y);
         let collab_dim = CubeDim::new_1d(64);
-        let agg_grid = CubeCount::new_2d(self.width.div_ceil(BLOCK_X), self.height.div_ceil(BLOCK_Y));
-        let agg_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
         let zero_dim = 256u32;
-        // Sized for one frame's worth of the ring, the region a
-        // steady-state pass clears. Pass 0 issues this same dispatch once
-        // per ring slot, see the `pass_index == 0` branch below.
+        // Sized for one frame's worth of the ring, and issued once per
+        // region the pass clears.
         //
         // Still clamped to the GPU's 65,535-workgroups-per-dimension
         // limit, because one frame alone can exceed it. A 4:4:4 4K frame
@@ -612,15 +652,17 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let blocks_x = mc.blocks_x;
         let blocks_y = mc.blocks_y;
 
-        // See the doc comment above for why these two slots are what
-        // this pass clears and completes. `total_frames` is added
-        // before the subtraction so the operands to `%` stay
-        // non-negative regardless of how `centre_slot` and
-        // `temporal_radius` compare.
-        let newest_slot = (centre_slot + self.temporal_radius) % total_frames;
-        let completed_slot = (centre_slot + total_frames - self.temporal_radius) % total_frames;
+        // The physical slots whose regions and phase planes this pass
+        // resets before scattering.
+        let cleared_slots = match clear {
+            AccumClear::WholeRing => 0..total_frames,
+            AccumClear::NewestRegion => {
+                let newest_slot = (centre_slot + self.temporal_radius) % total_frames;
+                newest_slot..newest_slot + 1
+            },
+            AccumClear::Nothing => 0..0,
+        };
 
-        let pass_index = self.passes_run;
         self.passes_run += 1;
 
         // The field the fused kernel reads, the regularised one when the
@@ -653,9 +695,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             neighbours,
         });
 
-        // A slot's planes are rebuilt when its frame arrives. Pass 0 has
-        // no earlier pass to have built any of them, so it builds every
-        // slot.
+        // A slot's planes are rebuilt when its frame arrives, which is
+        // exactly when its region is cleared.
         if let Some(phase_ring) = self.phase_ring.as_ref() {
             let ctx = PhasePlaneCtx {
                 ring: &view.input,
@@ -667,50 +708,28 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 stored_ch,
             };
 
-            if pass_index == 0 {
-                for slot in 0..total_frames {
-                    run_phase_planes::<R>(&client, &ctx, slot);
-                }
-            } else {
-                run_phase_planes::<R>(&client, &ctx, newest_slot);
+            for slot in cleared_slots.clone() {
+                run_phase_planes::<R>(&client, &ctx, slot);
             }
         }
 
         unsafe {
-            if pass_index == 0 {
-                // Clearing the whole ring in one dispatch would need
-                // `accum_ring_len.div_ceil(zero_dim)` workgroups, which
-                // grows with `total_frames`. At `temporal_radius = 4` a
-                // 1080p luma plane alone needs 72,900, already over the
-                // GPU's 65,535 limit. A rejected dispatch would leave the
-                // ring holding `client.empty`'s undefined memory instead
-                // of zero, which a fresh stream's first frames would then
-                // aggregate as though it were real.
-                //
-                // Issuing `zero_grid_one_frame` once per ring slot keeps
-                // every dispatch the size the steady-state branch below
-                // already relies on, whatever `total_frames` is.
-                for slot in 0..total_frames {
-                    collab_zero_accum::launch_unchecked::<R>(
-                        &client,
-                        zero_grid_one_frame.clone(),
-                        CubeDim::new_1d(zero_dim),
-                        ArrayArg::from_raw_parts(self.accum.clone(), accum_ring_len),
-                        ArrayArg::from_raw_parts(self.wsum.clone(), wsum_ring_len),
-                        slot * pixels as u32,
-                        pixels as u32,
-                        stored_ch,
-                        zero_total_threads_one_frame,
-                    );
-                }
-            } else {
+            // Clearing the whole ring in one dispatch would need
+            // `accum_ring_len.div_ceil(zero_dim)` workgroups, which grows
+            // with `total_frames`. At `temporal_radius = 4` a 1080p luma
+            // plane alone needs 72,900, already over the GPU's 65,535
+            // limit. A rejected dispatch would leave the ring holding
+            // `client.empty`'s undefined memory instead of zero, which a
+            // fresh stream's first frames would then aggregate as though
+            // it were real. So each cleared region gets its own dispatch.
+            for slot in cleared_slots {
                 collab_zero_accum::launch_unchecked::<R>(
                     &client,
-                    zero_grid_one_frame,
+                    zero_grid_one_frame.clone(),
                     CubeDim::new_1d(zero_dim),
                     ArrayArg::from_raw_parts(self.accum.clone(), accum_ring_len),
                     ArrayArg::from_raw_parts(self.wsum.clone(), wsum_ring_len),
-                    newest_slot * pixels as u32,
+                    slot * pixels as u32,
                     pixels as u32,
                     stored_ch,
                     zero_total_threads_one_frame,
@@ -767,14 +786,23 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             );
         }
 
-        // Every pass scatters its contributions regardless, but the
-        // region it completes, `completed_slot`, only holds every
-        // contribution it will ever receive once `temporal_radius`
-        // further passes have run beyond the one centred on it. See the
-        // doc comment above for the full argument.
-        if pass_index < self.temporal_radius {
-            return Ok(None);
-        }
+        Ok(())
+    }
+
+    /// Normalises the accumulator region at physical slot `region_slot` into the next output buffer.
+    ///
+    /// Returns the output buffer and its index. The region is left as it
+    /// was, and a later pass clears it before reuse.
+    fn normalise_region(&mut self, region_slot: u32) -> (Handle, usize) {
+        let client = self.front.compute_client().clone();
+        let stored_ch = self.channels.storage_count();
+        let pixels = (self.width * self.height) as usize;
+        let frame_len = pixels * stored_ch as usize;
+        let total_frames = 1 + 2 * self.temporal_radius;
+        let accum_ring_len = frame_len * total_frames as usize;
+        let wsum_ring_len = pixels * total_frames as usize;
+        let agg_grid = CubeCount::new_2d(self.width.div_ceil(BLOCK_X), self.height.div_ceil(BLOCK_Y));
+        let agg_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
 
         let slot = self.next_output_slot;
         self.next_output_slot = (slot + 1) % self.outputs.len();
@@ -788,15 +816,15 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 ArrayArg::from_raw_parts(self.accum.clone(), accum_ring_len),
                 ArrayArg::from_raw_parts(self.wsum.clone(), wsum_ring_len),
                 ArrayArg::from_raw_parts(self.outputs[slot].clone(), frame_len),
-                completed_slot * pixels as u32,
+                region_slot * pixels as u32,
                 self.width,
                 self.height,
-                channels_count,
+                self.channels.count(),
                 stored_ch,
             );
         }
 
-        Ok(Some((self.outputs[slot].clone(), slot)))
+        (self.outputs[slot].clone(), slot)
     }
 
     /// Starts an async readback of `handle`, wrapped in the same

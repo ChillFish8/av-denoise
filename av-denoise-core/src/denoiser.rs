@@ -588,6 +588,12 @@ impl<R: Runtime> Engine<R> {
         matches!(self, Self::Nl4d(_))
     }
 
+    fn mark_continuation(&mut self) {
+        if let Self::Nl4d(d) = self {
+            d.mark_continuation();
+        }
+    }
+
     fn push_frame(&mut self, frame: &[f32]) {
         match self {
             Self::Nlm(d) => d.push_frame(frame),
@@ -707,6 +713,17 @@ impl Backend {
             Self::Rocm(e) => e.is_nl4d(),
             #[cfg(any(feature = "vulkan", feature = "metal"))]
             Self::Wgpu(e) => e.is_nl4d(),
+        }
+    }
+
+    fn mark_continuation(&mut self) {
+        match self {
+            #[cfg(feature = "cuda")]
+            Self::Cuda(e) => e.mark_continuation(),
+            #[cfg(feature = "rocm")]
+            Self::Rocm(e) => e.mark_continuation(),
+            #[cfg(any(feature = "vulkan", feature = "metal"))]
+            Self::Wgpu(e) => e.mark_continuation(),
         }
     }
 
@@ -1105,10 +1122,17 @@ impl Denoiser {
     /// without starting a denoise.
     ///
     /// The wire counterpart of [`Self::push_frame_priming`].
+    ///
+    /// A stream that starts with a priming push picks up mid-clip, so nl4d runs no head passes for it.
     pub fn push_frame_wire_priming(&mut self, planes: &[&[u8]], depth: Depth) -> Result<(), DenoiserError> {
         if self.poisoned {
             return Err(DenoiserError::Poisoned);
         }
+
+        if self.frames_pushed == 0 {
+            self.backend.mark_continuation();
+        }
+
         match &mut self.backend {
             #[cfg(feature = "cuda")]
             Backend::Cuda(d) => d.push_frame_wire(planes, depth),
@@ -1131,12 +1155,19 @@ impl Denoiser {
     /// window at once, rather than a strictly ordered stream, fills the
     /// window in one go and lets only the last push in it submit.
     ///
+    /// A stream that starts with a priming push picks up mid-clip, so nl4d runs no head passes for it.
+    ///
     /// A failure elsewhere poisons the denoiser, so this refuses to run
     /// until [`Self::reset_stream`] clears it.
     pub fn push_frame_priming(&mut self, frame: &[f32]) -> Result<(), DenoiserError> {
         if self.poisoned {
             return Err(DenoiserError::Poisoned);
         }
+
+        if self.frames_pushed == 0 {
+            self.backend.mark_continuation();
+        }
+
         match &mut self.backend {
             #[cfg(feature = "cuda")]
             Backend::Cuda(d) => d.push_frame(frame),

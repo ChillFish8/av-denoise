@@ -365,11 +365,11 @@ mod tests {
         );
     }
 
-    /// The latent precondition `submit_machinery`/`flush_step_machinery`
-    /// enforce at submit time. Both motion compensation and the
-    /// confidence buffer have to be active, or those calls return an
-    /// error. `validate` has to catch a configuration that would hit
-    /// that error before construction ever gets that far.
+    /// The latent precondition `submit_machinery` enforces at submit
+    /// time. Both motion compensation and the confidence buffer have to
+    /// be active, or that call returns an error. `validate` has to catch
+    /// a configuration that would hit that error before construction ever
+    /// gets that far.
     #[test]
     fn validate_rejects_missing_temporal_confidence() {
         let params = Nl4dParams {

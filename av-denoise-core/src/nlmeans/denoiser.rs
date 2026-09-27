@@ -53,8 +53,7 @@ pub struct GpuOutput {
 
 /// Handles and geometry a collaborative stage needs to read the ring.
 ///
-/// [`NlmDenoiser::submit_machinery`] and
-/// [`NlmDenoiser::flush_step_machinery`] build this instead of running
+/// [`NlmDenoiser::submit_machinery`] builds this instead of running
 /// any NLM denoising kernel, so a caller that wants the frame ring, the
 /// motion fields, and the confidence scores without the NLM weighting
 /// itself can read them straight from here.
@@ -1676,26 +1675,8 @@ impl<R: Runtime> NlmDenoiser<R> {
         }))
     }
 
-    /// Flush-mode counterpart of [`Self::submit_machinery`], duplicating
-    /// the trailing frame the same way [`Self::flush_step_gpu`] does,
-    /// minus the NLM launches.
-    ///
-    /// Returns `Ok(None)` while the very first duplicates are still
-    /// filling out a window that never reached its full size during
-    /// pushing, the same condition [`Self::flush_step_gpu`] documents.
-    pub(crate) fn flush_step_machinery(&mut self) -> Result<Option<RingView>, DenoiserError> {
-        let total_frames = self.params.total_frames() as usize;
-
-        self.duplicate_last_frame();
-        if self.frames_loaded < total_frames {
-            self.frames_loaded += 1;
-        }
-
-        self.submit_machinery(self.params.temporal_radius)
-    }
-
     /// The motion-compensation geometry the last [`Self::submit_machinery`]
-    /// or [`Self::flush_step_machinery`] call used.
+    /// call used.
     ///
     /// # Panics
     ///

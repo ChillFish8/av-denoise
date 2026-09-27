@@ -209,7 +209,7 @@ fn phase_ring_tracks_the_input_ring_through_flush_and_reset() {
 
     // `flush` holds `&mut denoiser` for its whole run and resets the
     // stream itself before returning, so there is no moment after it
-    // returns where the ring still reflects its duplicate-frame passes.
+    // returns where the ring still reflects its tail passes.
     // The handles below are cloned first, so the closure can read each
     // pass's own up-to-date ring contents without borrowing `denoiser`
     // again while it is already borrowed.
@@ -223,7 +223,7 @@ fn phase_ring_tracks_the_input_ring_through_flush_and_reset() {
     };
     denoiser.flush(&mut sink).unwrap();
 
-    for seed in 100..104u32 {
+    for seed in 100..100 + total_frames {
         let frame = noisy_copy_of(&base, width, height, 0.05, seed);
         denoiser.push_frame(&frame);
         let _ = denoiser.denoise_submit().unwrap();
