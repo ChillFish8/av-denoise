@@ -149,6 +149,54 @@ fn edge_frames_are_denoised_as_strongly_as_mid_scene() {
     assert!(last <= 1.10 * middle, "last {last} vs middle {middle}");
 }
 
+/// A caller that primes a full ring with priming pushes and never
+/// submits reaches `flush` with `passes_run == 0`, so the tail path's
+/// accumulators were never cleared for this ring. That must not scatter
+/// stale contributions into the output.
+#[test]
+fn a_full_ring_primed_without_any_submit_flushes_without_black_output() {
+    let radius = 2;
+    let client = make_client();
+    let params = static_clip_params(radius);
+    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, SIZE, SIZE).expect("construction failed");
+    let base = textured_base(SIZE, SIZE);
+    let clean = base.clone();
+
+    denoiser.mark_continuation();
+    for seed in 0..(2 * radius + 1) {
+        let frame = noisy_copy_of(&base, SIZE, SIZE, SIGMA, seed);
+        denoiser.push_frame(&frame);
+    }
+
+    let mut outputs = Vec::new();
+    denoiser
+        .flush(|frame| {
+            let values = frame.as_f32().expect("f32 output").to_vec();
+            outputs.push(values);
+        })
+        .expect("flush failed");
+
+    assert_eq!(outputs.len(), 2 * radius as usize);
+
+    // Only two tail passes ever run here (no real pass warmed the ring
+    // first), so coverage per output frame is uneven and a couple of
+    // them sit above `SIGMA` rather than clearing it outright. The
+    // point of this test is that the fix stops the tail path from
+    // scattering into an uncleared accumulator, not that a never-warmed
+    // ring denoises as strongly as a normal stream, so the bound is
+    // looser than [residual_std] gets elsewhere in this file.
+    for (index, output) in outputs.iter().enumerate() {
+        let mean = output.iter().sum::<f32>() / output.len() as f32;
+        assert!(mean > 0.1, "frame {index} came out black");
+
+        let residual = residual_std(output, &clean);
+        assert!(
+            residual < 1.6 * SIGMA,
+            "frame {index} residual {residual} exceeds 1.6x sigma"
+        );
+    }
+}
+
 #[test]
 fn a_second_scene_after_a_continuation_stream_runs_head_passes() {
     let radius = 2;

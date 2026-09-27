@@ -91,7 +91,18 @@ mod reseed {
 
     /// Renders `count` frames through the streaming path.
     fn stream_all(opts: &PlaneOptions, frames: &[Planes]) -> Vec<Planes> {
-        let mut d = PlanarDenoiser::create(opts, layout()).unwrap();
+        stream_all_with_layout(opts, layout(), frames)
+    }
+
+    /// [`stream_all`] over a caller-chosen layout, for option sets that
+    /// need a source layout other than [`layout`], such as
+    /// `ChannelIntent::YuvFused`'s 4:4:4 requirement.
+    fn stream_all_with_layout(
+        opts: &PlaneOptions,
+        frame_layout: FrameLayout,
+        frames: &[Planes],
+    ) -> Vec<Planes> {
+        let mut d = PlanarDenoiser::create(opts, frame_layout).unwrap();
         let mut out = Vec::new();
         for f in frames {
             d.push(f).unwrap();
@@ -395,6 +406,7 @@ mod reseed {
             nl4d_plane_options(2),
             nl4d_windowed_plane_options(2),
             nl4d_plane_options_with_intent(2, ChannelIntent::Luma),
+            nl4d_plane_options_with_intent(2, ChannelIntent::Chroma),
         ];
         for opts in option_sets {
             for clip_len in [3usize, 7, 12] {
@@ -424,6 +436,48 @@ mod reseed {
                             "len={clip_len} k={k} frame {index} v"
                         );
                     }
+                }
+            }
+        }
+    }
+
+    /// [`ChannelIntent::YuvFused`] needs a 4:4:4 source, so this runs
+    /// the same match-streaming check as
+    /// [`nl4d_reseed_window_matches_streaming_at_every_frame`] over its
+    /// own 4:4:4 layout rather than sharing the 4:2:0 one.
+    #[test]
+    fn nl4d_reseed_window_matches_streaming_at_every_frame_in_yuv_fused_mode() {
+        let fused_layout = FrameLayout {
+            subsampling: Subsampling::Yuv444,
+            ..layout()
+        };
+        let opts = nl4d_plane_options_with_intent(2, ChannelIntent::YuvFused);
+        for clip_len in [3usize, 7, 12] {
+            let frames = ramp_clip(&fused_layout, clip_len);
+            let streamed = stream_all_with_layout(&opts, fused_layout, &frames);
+            assert_eq!(streamed.len(), clip_len);
+
+            for k in 0..clip_len {
+                let mut denoiser = PlanarDenoiser::create(&opts, fused_layout).unwrap();
+                let got = reseed_shifted(&mut denoiser, &frames, k);
+
+                let expected_len = got_len_for(&denoiser, clip_len, k);
+                assert_eq!(got.len(), expected_len, "len={clip_len} k={k}");
+
+                for (offset, planes) in got.iter().enumerate() {
+                    let index = k + offset;
+                    assert_eq!(
+                        planes.y, streamed[index].y,
+                        "len={clip_len} k={k} frame {index} luma"
+                    );
+                    assert_eq!(
+                        planes.u, streamed[index].u,
+                        "len={clip_len} k={k} frame {index} u"
+                    );
+                    assert_eq!(
+                        planes.v, streamed[index].v,
+                        "len={clip_len} k={k} frame {index} v"
+                    );
                 }
             }
         }

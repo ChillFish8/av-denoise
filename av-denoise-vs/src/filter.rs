@@ -203,6 +203,7 @@ impl<'core> Denoise<'core> {
             state.last = Some(n);
             return Ok(out);
         }
+
         state.tail = None;
 
         let ahead = n + self.span.ahead;
@@ -246,7 +247,9 @@ impl<'core> Denoise<'core> {
 
         let out = if shifted {
             let first = indices[0];
-            let last_index = indices[indices.len() - 1];
+            let last_index = *indices
+                .last()
+                .ok_or_else(|| anyhow!("window produced no frame indices"))?;
             let request = ReseedWindow {
                 frames: &window,
                 target: n - first,

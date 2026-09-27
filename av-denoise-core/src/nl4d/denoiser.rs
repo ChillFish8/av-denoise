@@ -470,8 +470,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let short_stream = self.front.real_pushes() < total_frames as usize;
         if short_stream {
             self.front.fill_ring_with_last_frame();
-        } else {
-            debug_assert!(self.passes_run > 0, "a full ring reached flush with no pass run");
         }
 
         let (centres, last_real) = if short_stream {
@@ -480,7 +478,12 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             (radius + 1..2 * radius + 1, 2 * radius)
         };
 
-        let mut clear = if short_stream {
+        // A full ring with no pass run means a caller primed every slot
+        // through pushes alone and never called `denoise_submit`, so
+        // `accum`/`wsum` are still whatever the last stream, or nothing
+        // at all, left in them. The tail path's first pass has to clear
+        // the whole ring in that case, the same as a short stream does.
+        let mut clear = if short_stream || self.passes_run == 0 {
             AccumClear::WholeRing
         } else {
             AccumClear::Nothing

@@ -1,7 +1,7 @@
-//! `submit_machinery` runs the NLM denoiser's
-//! ring, motion, and confidence machinery without launching any NLM
-//! denoising kernel, so a separate collaborative stage can read the same
-//! ring, motion fields, and confidence scores the NLM path builds.
+//! `submit_machinery` runs the NLM denoiser's ring, motion, and
+//! confidence machinery without launching any NLM denoising kernel, so
+//! a separate collaborative stage can read the same ring, motion
+//! fields, and confidence scores the NLM path builds.
 //!
 //! These tests pin that the returned [`RingView`] geometry and content
 //! line up with what a real, non-trivial motion sequence produces.

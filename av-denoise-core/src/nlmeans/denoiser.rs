@@ -70,8 +70,8 @@ pub(crate) struct RingView {
     pub confidence: Handle,
     /// Physical ring slot of the centre frame.
     pub centre_slot: u32,
-    /// Physical ring slot per logical offset k, indexed by
-    /// `neighbour_idx_for_k(radius, k)`.
+    /// Physical ring slot per neighbour, in logical ring order around
+    /// the centre frame, skipping the centre itself.
     ///
     /// This stays a host `Vec` rather than a GPU buffer, because the
     /// grouping kernel that consumes it indexes it per candidate on the
@@ -1496,7 +1496,8 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// the opening frames.
     ///
     /// [`Self::flush`] does the same thing at the other end of the
-    /// stream.
+    /// stream. Does nothing with shifted edges on, since that mode
+    /// stops windows at the clip start instead of padding them.
     fn prime_leading_edge_if_first(&mut self) {
         if self.shifted_edges {
             return;

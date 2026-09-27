@@ -243,14 +243,6 @@ make_filter_function! {
     /// stream, so a frame denoises to the same pixels no matter what
     /// order VapourSynth requests frames in. Passing `sigma` pins the
     /// noise level and skips that estimator entirely.
-    ///
-    /// The first few frames of a clip may differ slightly from the CLI's
-    /// output for the same parameters. The plugin fills a clip's
-    /// leading edge by repeating its first frame across the whole
-    /// temporal window, while the CLI's streaming mode primes a
-    /// narrower repeat before real frames start arriving. The
-    /// difference is bounded, small, and confined to a clip's first
-    /// `2 * temporal_radius` frames.
     #[expect(clippy::too_many_arguments)]
     fn create_nl4d<'core>(
         api: API,

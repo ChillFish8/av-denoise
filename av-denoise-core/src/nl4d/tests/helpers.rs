@@ -3,7 +3,14 @@ use cubecl::wgpu::WgpuRuntime;
 
 use crate::nl4d::{Nl4dParams, SubpelPrecision};
 use crate::nlmeans::motion::neighbour_idx_for_k;
-use crate::nlmeans::{ChannelMode, HqParams, MotionCompensationMode, MotionEstimation, NlmParams};
+use crate::nlmeans::{
+    ChannelMode,
+    HqParams,
+    MotionCompensationMode,
+    MotionEstimation,
+    NlmParams,
+    PrefilterMode,
+};
 
 pub(super) const SIGMA: f32 = 6.0 / 255.0;
 pub(super) const SPATIAL_RADIUS: u32 = 9;
@@ -21,7 +28,7 @@ pub(super) fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
             strength: 1.2,
             self_weight: 1.0,
             channels: ChannelMode::Luma,
-            prefilter: crate::nlmeans::PrefilterMode::None,
+            prefilter: PrefilterMode::None,
             motion_compensation: MotionCompensationMode::Mvtools {
                 blksize: 16,
                 overlap: 8,
