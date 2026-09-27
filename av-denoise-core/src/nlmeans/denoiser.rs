@@ -364,6 +364,14 @@ pub struct NlmDenoiser<R: Runtime> {
     /// at construction, while automatic estimation refreshes it every
     /// submit.
     pub(super) sigma_y: f32,
+
+    /// Whether `run_temporal_stats_for_slot` asks the stats kernel for
+    /// its four luma-only lanes.
+    ///
+    /// It defaults to off, and [Self::set_luma_noise_fields] is the
+    /// only way to change it. Leaving it off roughly halves the stats
+    /// kernel's cost at 1080p.
+    pub(super) luma_noise_fields: bool,
 }
 
 impl<R: Runtime> NlmDenoiser<R> {
@@ -665,6 +673,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             confidence_mv_scratch,
             confidence_dummy,
             sigma_y,
+            luma_noise_fields: false,
         }
     }
 
@@ -1144,7 +1153,19 @@ impl<R: Runtime> NlmDenoiser<R> {
             align: self.align,
         };
 
-        run_temporal_noise_stats::<R>(&self.client, &ctx).expect("temporal noise stats dispatch failed");
+        run_temporal_noise_stats::<R>(&self.client, &ctx, self.luma_noise_fields)
+            .expect("temporal noise stats dispatch failed");
+    }
+
+    /// Turns the temporal-stats kernel's four luma-only lanes on or off.
+    ///
+    /// It defaults to off.
+    #[expect(
+        dead_code,
+        reason = "no caller turns this on yet, it is exposed for a later caller to use"
+    )]
+    pub(crate) fn set_luma_noise_fields(&mut self, on: bool) {
+        self.luma_noise_fields = on;
     }
 
     /// Fills a duplicated slot's temporal-stats region with zeroes.

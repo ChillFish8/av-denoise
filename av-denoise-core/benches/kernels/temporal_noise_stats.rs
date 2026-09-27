@@ -15,8 +15,12 @@ const TEMPORAL_BLOCK: u32 = 16;
 /// The temporal-residual noise-stats kernel, diffing two 1080p YUV
 /// ring slots against each other and reducing every `16 × 16` block
 /// into its stats record.
+///
+/// `luma_fields` picks which of the kernel's two compiled variants this
+/// row times, matching `nlm_temporal_noise_stats`'s own flag.
 pub struct TemporalNoiseStatsBench<R: Runtime> {
     pub client: ComputeClient<R>,
+    pub luma_fields: bool,
 }
 
 #[derive(Clone)]
@@ -29,9 +33,12 @@ fn blocks() -> (u32, u32) {
     (W.div_ceil(TEMPORAL_BLOCK), H.div_ceil(TEMPORAL_BLOCK))
 }
 
+/// Matches `nlmeans::noise::temporal_stats_record_len`: a sum and a sum
+/// of squares per stored channel, one lag-1 total, and four luma-only
+/// fields.
 fn stats_len() -> usize {
     let (bx, by) = blocks();
-    (bx * by * (2 * TEMPORAL_STORED_CH + 1)) as usize
+    (bx * by * (2 * TEMPORAL_STORED_CH + 5)) as usize
 }
 
 impl<R: Runtime> Benchmark for TemporalNoiseStatsBench<R> {
@@ -68,6 +75,7 @@ impl<R: Runtime> Benchmark for TemporalNoiseStatsBench<R> {
                 H,
                 TEMPORAL_STORED_CH,
                 TEMPORAL_BLOCK,
+                self.luma_fields,
             );
         }
 
@@ -75,7 +83,11 @@ impl<R: Runtime> Benchmark for TemporalNoiseStatsBench<R> {
     }
 
     fn name(&self) -> String {
-        "temporal_noise_stats_1080p_yuv".to_string()
+        if self.luma_fields {
+            "temporal_noise_stats_1080p_yuv_luma_fields_on".to_string()
+        } else {
+            "temporal_noise_stats_1080p_yuv".to_string()
+        }
     }
 
     fn sync(&self) {

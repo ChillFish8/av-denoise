@@ -210,10 +210,24 @@ pub(super) fn sigma_block_p25_from_partials(
 pub(super) const TEMPORAL_NOISE_BLOCK: u32 = 16;
 
 /// How many `f32`s one block's stats record holds, being a sum and a
-/// sum of squares per stored channel plus one lag-1 total.
+/// sum of squares per stored channel, one lag-1 total, and four
+/// luma-only fields: `luma_sum`, `flatness`, `luma_min` and `luma_max`.
 pub(super) fn temporal_stats_record_len(stored_ch: u32) -> u32 {
-    2 * stored_ch + 1
+    2 * stored_ch + 5
 }
+
+/// Offset, past `2 * stored_ch`, of the new frame's summed channel-0
+/// luma over a block's valid pixels.
+pub(super) const TEMPORAL_LUMA_SUM: u32 = 1;
+/// Offset, past `2 * stored_ch`, of the smoothed temporal mean's
+/// gradient energy over a full block, or `3.0e38` on a ragged one.
+pub(super) const TEMPORAL_LUMA_FLATNESS: u32 = 2;
+/// Offset, past `2 * stored_ch`, of the new frame's minimum channel-0
+/// luma over a block's valid pixels.
+pub(super) const TEMPORAL_LUMA_MIN: u32 = 3;
+/// Offset, past `2 * stored_ch`, of the new frame's maximum channel-0
+/// luma over a block's valid pixels.
+pub(super) const TEMPORAL_LUMA_MAX: u32 = 4;
 
 /// The block grid covering a frame, laid out row-major.
 ///
@@ -281,9 +295,14 @@ pub(super) struct TemporalStatsCtx<'a> {
 /// The kernel only ever addresses within its own slice, so it needs to
 /// know nothing about the ring's other slots or the padding between
 /// them.
+///
+/// `luma_fields` gates the kernel's four luma-only lanes. With it off,
+/// those lanes read 0 and the dispatch costs the same as before they
+/// existed. See [nlm_temporal_noise_stats].
 pub(super) fn run_temporal_noise_stats<R: Runtime>(
     client: &ComputeClient<R>,
     ctx: &TemporalStatsCtx<'_>,
+    luma_fields: bool,
 ) -> Result<(), anyhow::Error> {
     let total_input = (ctx.frame_count * ctx.height * ctx.width * ctx.stored_ch) as usize;
     let (blocks_x, blocks_y) = temporal_stats_blocks(ctx.width, ctx.height);
@@ -305,6 +324,7 @@ pub(super) fn run_temporal_noise_stats<R: Runtime>(
             ctx.height,
             ctx.stored_ch,
             TEMPORAL_NOISE_BLOCK,
+            luma_fields,
         );
     }
 
@@ -1083,9 +1103,9 @@ mod tests {
     fn temporal_stats_blocks_and_slot_len() {
         assert_eq!(temporal_stats_blocks(32, 16), (2, 1));
         assert_eq!(temporal_stats_blocks(33, 17), (3, 2)); // ragged on both axes
-        assert_eq!(temporal_stats_record_len(1), 3);
-        assert_eq!(temporal_stats_record_len(4), 9);
-        assert_eq!(temporal_stats_slot_len(32, 16, 1), 6); // 2 blocks x record_len 3
+        assert_eq!(temporal_stats_record_len(1), 7);
+        assert_eq!(temporal_stats_record_len(4), 13);
+        assert_eq!(temporal_stats_slot_len(32, 16, 1), 14); // 2 blocks x record_len 7
     }
 
     #[test]
@@ -1134,10 +1154,13 @@ mod tests {
         let mean0_bad = 10.0 / 255.0;
         let sum_d_bad = n * mean0_bad;
 
+        // Each block pads out to the full record length with the four
+        // unused luma fields, which `aggregate_temporal_noise_stats`
+        // never reads.
         #[rustfmt::skip]
         let records = vec![
-            0.0, sum_d2_static, sum_lag_static, // block 0: static
-            sum_d_bad, 0.0, 0.0,                // block 1: fails the gate
+            0.0, sum_d2_static, sum_lag_static, 0.0, 0.0, 0.0, 0.0, // block 0: static
+            sum_d_bad, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,                // block 1: fails the gate
         ];
 
         let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
@@ -1179,7 +1202,7 @@ mod tests {
             let var = 2.0 * sigma * sigma;
             let sum_d2 = n * var;
             let sum_lag = n_pairs * rho_target * var;
-            records.extend_from_slice(&[0.0, sum_d2, sum_lag]);
+            records.extend_from_slice(&[0.0, sum_d2, sum_lag, 0.0, 0.0, 0.0, 0.0]);
         }
 
         let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
@@ -1228,7 +1251,7 @@ mod tests {
             let var = 2.0 * sigma * sigma;
             let sum_d2 = n * var;
             let sum_lag = n_pairs * rho * var;
-            records.extend_from_slice(&[0.0, sum_d2, sum_lag]);
+            records.extend_from_slice(&[0.0, sum_d2, sum_lag, 0.0, 0.0, 0.0, 0.0]);
         }
 
         let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
@@ -1265,10 +1288,10 @@ mod tests {
         let channels = 1;
         let n = 256.0f32;
 
-        let mut records = vec![0.0f32; 25 * 3];
+        let mut records = vec![0.0f32; 25 * 7];
         let mean0_bad = 10.0 / 255.0;
         for block in 1..25 {
-            records[block * 3] = n * mean0_bad;
+            records[block * 7] = n * mean0_bad;
         }
         let sigma = 4.0 / 255.0;
         let var = 2.0 * sigma * sigma;
@@ -1317,7 +1340,7 @@ mod tests {
         let sigmas_255 = [2.0f32, 4.0, 6.0];
         let rho_target = 0.6f32;
 
-        let mut record = vec![0.0f32; 9];
+        let mut record = vec![0.0f32; 13];
         let mut var0 = 0.0f32;
         for (c, sigma_255) in sigmas_255.iter().enumerate() {
             let sigma = sigma_255 / 255.0;
@@ -1349,12 +1372,14 @@ mod tests {
     ///
     /// The outlier tests below share this and only vary each block's
     /// sigma.
-    fn zero_mean_block_record(sigma_255: f32, rho: f32) -> [f32; 3] {
+    fn zero_mean_block_record(sigma_255: f32, rho: f32) -> [f32; 7] {
         let n = 256.0f32;
         let n_pairs = 240.0f32;
         let sigma = sigma_255 / 255.0;
         let var = 2.0 * sigma * sigma;
-        [0.0, n * var, n_pairs * rho * var]
+        // The four trailing zeros stand in for the unused luma fields,
+        // which `aggregate_temporal_noise_stats` never reads.
+        [0.0, n * var, n_pairs * rho * var, 0.0, 0.0, 0.0, 0.0]
     }
 
     /// A 64x64 frame of 16 blocks where most stand in for panning
@@ -1788,7 +1813,7 @@ mod tests {
             "construction must clear the rho-sample sigma gate"
         );
 
-        let records = [sum_d, sum_d2, sum_lag];
+        let records = [sum_d, sum_d2, sum_lag, 0.0, 0.0, 0.0, 0.0];
         let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
             .expect("the single block clears both gates");
 
