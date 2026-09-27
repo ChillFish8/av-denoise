@@ -87,7 +87,7 @@ fn submit_machinery_reports_ring_view_with_correct_motion_and_confidence() {
     let mut d = push_translating_sequence(&client);
 
     let view = d
-        .submit_machinery()
+        .submit_machinery(RADIUS)
         .expect("submit_machinery dispatch failed")
         .expect("window is exactly full, submit_machinery should report Some");
 
@@ -151,6 +151,72 @@ fn submit_machinery_reports_ring_view_with_correct_motion_and_confidence() {
     );
 }
 
+#[test]
+fn submit_machinery_at_centre_zero_lists_every_later_slot() {
+    let client = make_client();
+    let mut d = push_translating_sequence(&client);
+    let total_frames = 2 * RADIUS + 1;
+
+    let view = d
+        .submit_machinery(0)
+        .expect("submit_machinery dispatch failed")
+        .expect("window is exactly full");
+
+    let expected: Vec<u32> = (1..total_frames).map(|logical| d.ring_slot(logical)).collect();
+    assert_eq!(view.centre_slot, d.ring_slot(0));
+    assert_eq!(view.neighbour_slots, expected);
+}
+
+#[test]
+fn submit_machinery_at_the_last_slot_lists_every_earlier_slot() {
+    let client = make_client();
+    let mut d = push_translating_sequence(&client);
+    let last = 2 * RADIUS;
+
+    let view = d
+        .submit_machinery(last)
+        .expect("submit_machinery dispatch failed")
+        .expect("window is exactly full");
+
+    let expected: Vec<u32> = (0..last).map(|logical| d.ring_slot(logical)).collect();
+    assert_eq!(view.centre_slot, d.ring_slot(last));
+    assert_eq!(view.neighbour_slots, expected);
+}
+
+/// From centre 0 the translating world moves one pixel right per frame,
+/// so the neighbour at logical `2 * RADIUS` sits `2 * RADIUS` frames
+/// ahead. That neighbour is the last one submitted, landing at field
+/// index `2 * RADIUS - 1`.
+#[test]
+fn submit_machinery_at_centre_zero_finds_motion_at_the_far_offset() {
+    let client = make_client();
+    let mut d = push_translating_sequence(&client);
+    let far = 2 * RADIUS;
+
+    let view = d
+        .submit_machinery(0)
+        .expect("submit_machinery dispatch failed")
+        .expect("window is exactly full");
+
+    let mc = d.motion_ctx();
+    let bx = (64 / mc.step).min(mc.blocks_x - 1);
+    let by = (64 / mc.step).min(mc.blocks_y - 1);
+
+    let neighbour_idx = far - 1;
+    let mv_idx = (neighbour_idx * view.mv_stride + (by * mc.blocks_x + bx) * 2) as usize;
+    let mv_bytes = d
+        .compute_client()
+        .read_one(view.mv_field.clone())
+        .expect("mv_field readback failed");
+    let mv = i32::from_bytes(&mv_bytes);
+
+    assert!(
+        (mv[mv_idx] - far as i32).abs() <= 1,
+        "expected mv.x within 1px of the planted shift of {far}, got {}",
+        mv[mv_idx]
+    );
+}
+
 /// The ring view carries the pyramid the estimator analysed and the
 /// window size, and the front end reports the SAD noise floor it scored
 /// confidence with.
@@ -159,7 +225,7 @@ fn ring_view_exposes_the_analysed_pyramid_and_the_noise_floor() {
     let client = make_client();
     let mut d = push_translating_sequence(&client);
     let view = d
-        .submit_machinery()
+        .submit_machinery(RADIUS)
         .expect("submit_machinery dispatch failed")
         .expect("window is exactly full, submit_machinery should report Some");
 
@@ -188,7 +254,9 @@ fn submit_machinery_none_while_window_is_filling() {
         d.push_frame(&frame);
     }
 
-    let result = d.submit_machinery().expect("submit_machinery dispatch failed");
+    let result = d
+        .submit_machinery(RADIUS)
+        .expect("submit_machinery dispatch failed");
     assert!(
         result.is_none(),
         "a partially-filled window must report None, the same as denoise_submit_gpu"
@@ -206,7 +274,7 @@ fn flush_step_machinery_drains_the_tail() {
     // Consume the one output the fully-loaded window already owes,
     // mirroring how a real caller drains `submit_machinery` during
     // pushing before it ever reaches `flush`.
-    d.submit_machinery()
+    d.submit_machinery(RADIUS)
         .expect("submit_machinery dispatch failed")
         .expect("window is exactly full, submit_machinery should report Some");
 

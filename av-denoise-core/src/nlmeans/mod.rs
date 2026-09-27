@@ -29,6 +29,7 @@ pub mod prefilter;
 mod align;
 mod denoiser;
 mod dispatch;
+mod edges;
 mod noise;
 mod params;
 mod pending;

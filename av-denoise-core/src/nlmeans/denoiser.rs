@@ -1571,7 +1571,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
 
         if self.noise_results.is_some() {
-            self.update_noise_estimate()?;
+            self.update_noise_estimate(self.params.temporal_radius)?;
         }
         self.rebuild_spatial_offset_lut();
 
@@ -1601,22 +1601,29 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// Returns `Ok(None)` while the temporal window is still filling, the
     /// same condition [`Self::denoise_submit_gpu`] checks.
     ///
+    /// The returned [`RingView`] is centred on logical ring position
+    /// `center_t`.
+    ///
     /// # Errors
     ///
     /// Returns an error if the denoiser was not built with motion
     /// compensation and temporal confidence both active, since a
     /// [`RingView`] has nothing meaningful to hand back otherwise.
-    pub(crate) fn submit_machinery(&mut self) -> Result<Option<RingView>, DenoiserError> {
+    pub(crate) fn submit_machinery(&mut self, center_t: u32) -> Result<Option<RingView>, DenoiserError> {
+        debug_assert!(
+            center_t < self.params.total_frames(),
+            "center_t must be a logical ring position"
+        );
+
         let total_frames = self.params.total_frames() as usize;
         if self.frames_loaded < total_frames {
             return Ok(None);
         }
 
         if self.noise_results.is_some() {
-            self.update_noise_estimate()?;
+            self.update_noise_estimate(center_t)?;
         }
 
-        let center_t = self.params.temporal_radius;
         let neighbour_slots = self.run_motion_machinery(center_t)?;
 
         let mc = self.mc_ctx.as_ref().ok_or_else(|| {
@@ -1673,7 +1680,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             self.frames_loaded += 1;
         }
 
-        self.submit_machinery()
+        self.submit_machinery(self.params.temporal_radius)
     }
 
     /// The motion-compensation geometry the last [`Self::submit_machinery`]
@@ -1866,7 +1873,12 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// The blocking read therefore lands on work the GPU has already
     /// finished, rather than stalling the pipeline behind a fresh
     /// dispatch.
-    fn update_noise_estimate(&mut self) -> Result<(), anyhow::Error> {
+    fn update_noise_estimate(&mut self, center_t: u32) -> Result<(), anyhow::Error> {
+        debug_assert!(
+            center_t < self.params.total_frames(),
+            "center_t must be a logical ring position"
+        );
+
         let results_buf = self
             .noise_results
             .as_ref()
@@ -1879,7 +1891,6 @@ impl<R: Runtime> NlmDenoiser<R> {
             .map_err(|e| anyhow::anyhow!("noise-estimate results readback failed: {e}"))?;
         let data = f32::from_bytes(&bytes);
 
-        let center_t = self.params.temporal_radius;
         let center_slot = self.phys_frame(center_t as i32) as usize;
 
         let reading = self.read_temporal_noise(center_slot as u32)?;

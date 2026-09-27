@@ -660,7 +660,7 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
     let mut pass_index = 0u32;
     for frame in &frames {
         front.push_frame(frame);
-        let Some(view) = front.submit_machinery().expect("submit_machinery failed") else {
+        let Some(view) = front.submit_machinery(radius).expect("submit_machinery failed") else {
             continue;
         };
         if pass_index != radius {

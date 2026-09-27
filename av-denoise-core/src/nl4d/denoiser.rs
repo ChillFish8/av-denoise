@@ -366,7 +366,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// on the GPU before the readback, so only the wire bytes cross the
     /// bus.
     pub fn denoise_submit(&mut self) -> Result<Option<Pending<R>>, DenoiserError> {
-        let Some(view) = self.front.submit_machinery()? else {
+        let Some(view) = self.front.submit_machinery(self.temporal_radius)? else {
             return Ok(None);
         };
         let Some((handle, slot)) = self.run_collab_stage(&view)? else {
