@@ -8,13 +8,13 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use anyhow::{Error, Result, anyhow};
-use av_denoise_core::{FrameLayout, PlanarDenoiser, Planes, WarmUp, WindowSpan};
+use av_denoise_core::{EdgePadding, FrameLayout, PlanarDenoiser, Planes, ReseedWindow, WarmUp, WindowSpan};
 use vapoursynth::core::CoreRef;
 use vapoursynth::plugins::{Filter, FrameContext};
 use vapoursynth::prelude::{API, FrameRef, FrameRefMut, Node, Property};
 use vapoursynth::video_info::{Resolution, VideoInfo};
 
-use crate::frames::{pack_plane, unpack_plane_into, window_indices};
+use crate::frames::{TailCache, pack_plane, shifted_window_range, unpack_plane_into, window_indices};
 use crate::params::{AlgorithmKind, RawFormat, RawParams, layout_from_format, plane_options_from};
 use crate::{init_logging, pin_plugin_library};
 
@@ -25,7 +25,7 @@ use crate::{init_logging, pin_plugin_library};
 /// is enough because the GPU is the bottleneck.
 struct State {
     denoiser: PlanarDenoiser,
-    /// The output frame index the pipeline is positioned after.
+    /// The output frame index last served.
     last: Option<usize>,
     /// The cold-cache queue place this filter holds, until the first
     /// frame proves the kernels are compiled and cached.
@@ -40,6 +40,8 @@ struct State {
     /// process holding a node it never pulls a frame from, which is rare
     /// enough to accept.
     warm_up: Option<WarmUp>,
+    /// Outputs from the clip's final flush that no request has taken yet.
+    tail: Option<TailCache>,
 }
 
 impl State {
@@ -141,23 +143,33 @@ impl<'core> Denoise<'core> {
                 denoiser,
                 last: None,
                 warm_up,
+                tail: None,
             }),
         })
     }
 
-    /// The full, ordered source indices around output frame `n`,
-    /// exactly as `reseed` needs them, boundary repeats included.
+    /// The ordered source indices `reseed` or `reseed_window` needs for output frame `n`.
+    ///
+    /// `EdgePadding::Repeat` repeats the boundary frame so `reseed` sees the exact
+    /// window length it expects. `EdgePadding::Shifted` stops at either end of the
+    /// clip instead, with no repeats, for `reseed_window`.
     fn window(&self, n: usize) -> Vec<usize> {
-        window_indices(n, self.span.behind, self.span.ahead, self.source_len - 1)
+        let last_frame = self.source_len - 1;
+        match self.span.edges {
+            EdgePadding::Repeat => window_indices(n, self.span.behind, self.span.ahead, last_frame),
+            EdgePadding::Shifted => {
+                let range = shifted_window_range(n, self.span.behind, self.span.ahead, last_frame);
+                range.collect()
+            },
+        }
     }
 
     /// The source indices output frame `n` needs, deduplicated so each
     /// one is requested and fetched from VapourSynth only once.
     ///
-    /// A window near either end of the clip repeats its boundary frame,
-    /// which [`Self::window`] preserves since `reseed` needs the exact
-    /// count. This is sorted since `window_indices` is already
-    /// non-decreasing, so sorting is a no-op kept for clarity.
+    /// Only `EdgePadding::Repeat` windows can repeat an index, at either end of the
+    /// clip. This is sorted since [`Self::window`] is already non-decreasing, so
+    /// sorting is a no-op kept for clarity.
     fn unique_window(&self, n: usize) -> Vec<usize> {
         let mut indices = self.window(n);
         indices.sort_unstable();
@@ -167,26 +179,57 @@ impl<'core> Denoise<'core> {
 
     /// Renders one output frame, applying the hybrid fast/rebuild policy.
     ///
-    /// A request for the frame straight after the last one produced
-    /// pushes a single frame through the running stream. Anything else,
-    /// including frame 0, abandons the stream and rebuilds it from an
-    /// explicit window, which costs more but is correct from any
-    /// starting point.
+    /// A sequential request, straight after the last frame produced, pushes one
+    /// frame through the running stream. Under shifted edges, the request that
+    /// reaches the clip's end instead flushes the stream once, and the frames
+    /// after it are served from the tail cache. Anything else, including frame
+    /// 0, abandons the stream and rebuilds it from an explicit window, which
+    /// costs more but is correct from any starting point.
     fn render(&self, n: usize, fetch: impl Fn(usize) -> Result<Planes, Error>) -> Result<Planes, Error> {
         let mut state = self.state.lock().expect("denoiser mutex poisoned");
         let last_frame = self.source_len - 1;
+        let shifted = self.span.edges == EdgePadding::Shifted;
 
         // Read the anchor, then clear it before anything touches the pipeline.
         //
         // Every path below either reaches a `state.last = Some(n)` or leaves through `?`,
-        // so an error out of `fetch`, `push`, `recv`, or `reseed` can never leave the
-        // anchor claiming a position the stream has moved past.
+        // so an error out of `fetch`, `push`, `recv`, `flush`, or `reseed` can never leave
+        // the anchor claiming a position the stream has moved past.
         let sequential = state.last == Some(n.wrapping_sub(1)) && n > 0;
         state.last = None;
 
-        if sequential {
-            let ahead = (n + self.span.ahead).min(last_frame);
-            state.denoiser.push(&fetch(ahead)?)?;
+        let cached = state.tail.as_mut().and_then(|tail| tail.take(n));
+        if let Some(out) = cached {
+            state.last = Some(n);
+            return Ok(out);
+        }
+        state.tail = None;
+
+        let ahead = n + self.span.ahead;
+
+        // This request is the first whose window would run past the clip's last
+        // frame. The previous request pushed that last frame into a live stream,
+        // and no tail cache covers this index, so flushing the stream yields this
+        // frame and every later one.
+        if sequential && shifted && ahead == last_frame + 1 {
+            let mut outputs = Vec::new();
+            state.denoiser.flush(|planes| outputs.push(planes))?;
+
+            let mut outputs = outputs.into_iter();
+            let out = outputs
+                .next()
+                .ok_or_else(|| anyhow!("the clip's final flush produced no frame"))?;
+            let rest: Vec<Planes> = outputs.collect();
+            state.tail = Some(TailCache::new(n + 1, rest));
+            state.last = Some(n);
+            state.finish_warm_up();
+            return Ok(out);
+        }
+
+        if sequential && (!shifted || ahead <= last_frame) {
+            let next = ahead.min(last_frame);
+            let frame = fetch(next)?;
+            state.denoiser.push(&frame)?;
             if let Some(out) = state.denoiser.recv()? {
                 state.last = Some(n);
                 state.finish_warm_up();
@@ -195,9 +238,34 @@ impl<'core> Denoise<'core> {
             // The stream did not yield, so fall through and rebuild.
         }
 
-        let window: Vec<Planes> = self.window(n).into_iter().map(fetch).collect::<Result<_, _>>()?;
+        let indices = self.window(n);
+        let window: Vec<Planes> = indices
+            .iter()
+            .map(|&index| fetch(index))
+            .collect::<Result<_, _>>()?;
 
-        let out = state.denoiser.reseed(&window)?;
+        let out = if shifted {
+            let first = indices[0];
+            let last_index = indices[indices.len() - 1];
+            let request = ReseedWindow {
+                frames: &window,
+                target: n - first,
+                at_clip_start: first == 0,
+                at_clip_end: last_index == last_frame,
+            };
+            let mut outputs = state.denoiser.reseed_window(request)?.into_iter();
+            let out = outputs
+                .next()
+                .ok_or_else(|| anyhow!("reseed produced no frame"))?;
+            let rest: Vec<Planes> = outputs.collect();
+            if !rest.is_empty() {
+                state.tail = Some(TailCache::new(n + 1, rest));
+            }
+            out
+        } else {
+            state.denoiser.reseed(&window)?
+        };
+
         state.last = Some(n);
         state.finish_warm_up();
         Ok(out)
