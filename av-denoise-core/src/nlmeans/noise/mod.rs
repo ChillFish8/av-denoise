@@ -35,9 +35,9 @@ mod curve;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-pub(super) use self::curve::build_noise_curve;
 pub use self::curve::NOISE_CURVE_BINS;
 pub(crate) use self::curve::NoiseCurve;
+pub(super) use self::curve::build_noise_curve;
 use super::align::StorageAlign;
 use super::kernels::{
     nlm_noise_partial,
