@@ -101,6 +101,14 @@ GPU memory.
 clean = avd.Nl4d(clip, subpel="half")
 ```
 
+**`noise_map=False` turns off the luma noise map.** The noise map is on by default. It scales the
+luma threshold by how noisy each brightness level is, filtering noisy levels harder and clean ones
+more lightly.
+
+```python
+clean = avd.Nl4d(clip, noise_map=False)
+```
+
 ### What not to touch in NL4D
 
 - **`sigma`** pins the noise level to a fixed value and turns the per-frame measurement off

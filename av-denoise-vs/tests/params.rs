@@ -837,6 +837,48 @@ fn an_unrecognised_subpel_errors_clearly() {
 }
 
 #[test]
+fn noise_map_defaults_to_on() {
+    let raw = RawParams::default();
+    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+    match plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+        .unwrap()
+        .algorithm
+    {
+        av_denoise_core::Algorithm::Nl4d(nl4d) => assert!(nl4d.noise_map),
+        other => panic!("expected Nl4d, got {other:?}"),
+    }
+}
+
+#[test]
+fn noise_map_false_turns_it_off() {
+    let raw = RawParams {
+        noise_map: Some(false),
+        ..RawParams::default()
+    };
+    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+    match plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+        .unwrap()
+        .algorithm
+    {
+        av_denoise_core::Algorithm::Nl4d(nl4d) => assert!(!nl4d.noise_map),
+        other => panic!("expected Nl4d, got {other:?}"),
+    }
+}
+
+#[test]
+fn noise_map_is_rejected_for_nlmeans() {
+    let raw = RawParams {
+        noise_map: Some(true),
+        ..RawParams::default()
+    };
+    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("noise_map"), "got {err}");
+}
+
+#[test]
 fn the_five_nl4d_dials_are_rejected_for_nlmeans() {
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
     for (name, raw) in [

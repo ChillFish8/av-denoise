@@ -163,6 +163,11 @@ pub struct Nl4dDenoiser<R: Runtime> {
     /// The 8 half-sample filter taps from
     /// [HALF_PEL_TAPS](crate::nl4d::HALF_PEL_TAPS).
     half_taps_buf: Handle,
+    /// Whether passes apply the luma noise curve.
+    ///
+    /// Set when [Nl4dParams::noise_map](crate::nl4d::Nl4dParams::noise_map)
+    /// is on and the denoiser filters luma.
+    apply_noise_map: bool,
 }
 
 impl<R: Runtime> Nl4dDenoiser<R> {
@@ -222,10 +227,13 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         // confidence scores the collaborative stage reads. Its own
         // buffers never leave the GPU, so it stays in `f32` whatever
         // format this denoiser hands back.
-        let front =
+        let mut front =
             NlmDenoiser::with_output_format(client, params.nlm.clone(), width, height, OutputFormat::F32);
 
         let channels = params.nlm.channels;
+        let apply_noise_map = params.noise_map && channels != ChannelMode::Chroma;
+        front.set_luma_noise_fields(apply_noise_map);
+
         let stored_ch = channels.storage_count();
         let k_max = MAX_K;
         let refs = ref_count(width, height);
@@ -318,6 +326,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             phase_ring,
             phase_gain_buf,
             half_taps_buf,
+            apply_noise_map,
         })
     }
 
@@ -568,7 +577,10 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         sigma_host[..channels_count as usize].copy_from_slice(&sigmas[..channels_count as usize]);
         self.sigma_buf = client.create_from_slice(f32::as_bytes(&sigma_host));
         let wnorm = weight_scale(sigma_host[0], &self.dct_profile) * weight_floor_gain(self.subpel);
-        let noise_curve_buf = client.create_from_slice(f32::as_bytes(&[0.0f32; NOISE_CURVE_BINS]));
+
+        let curve_ratios = self.front.current_noise_curve().map(|curve| curve.ratios);
+        let (ratios, curve_valid) = noise_curve_upload(curve_ratios, self.apply_noise_map);
+        let noise_curve_buf = client.create_from_slice(f32::as_bytes(&ratios));
 
         let refs_x = refs_along(self.width);
         let refs_y = refs_along(self.height);
@@ -731,7 +743,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 centre_slot,
                 self.c_min,
                 self.lambda_ht,
-                0u32,
+                curve_valid,
                 wnorm,
                 self.accum_scale,
                 self.warp_uniform,
@@ -809,5 +821,18 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     #[cfg(test)]
     pub(crate) fn wire_outputs_for_test(&self) -> Option<&[Handle; 2]> {
         self.wire_outputs.as_ref()
+    }
+}
+
+/// The noise curve a pass uploads, and the flag that tells the kernel to apply it.
+///
+/// A missing curve, or one that does not apply, uploads zeroes with the flag at 0.
+pub(super) fn noise_curve_upload(
+    ratios: Option<[f32; NOISE_CURVE_BINS]>,
+    applies: bool,
+) -> ([f32; NOISE_CURVE_BINS], u32) {
+    match ratios {
+        Some(ratios) if applies => (ratios, 1),
+        _ => ([0.0f32; NOISE_CURVE_BINS], 0),
     }
 }

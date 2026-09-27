@@ -122,12 +122,7 @@ fn opt_accelerators(bytes: Option<&[u8]>) -> Result<Option<Vec<String>>, Error> 
     Ok(Some(names))
 }
 
-/// Reads the optional `motion_compensation` script argument.
-///
-/// VapourSynth script arguments have no native boolean type, so this
-/// takes the plain `int` type every other on/off knob in the wider
-/// VapourSynth ecosystem uses, and reads it the same way: `0` is off,
-/// anything else is on.
+/// Reads an optional on/off script argument.
 fn opt_bool(value: Option<i64>) -> Option<bool> {
     value.map(|v| v != 0)
 }
@@ -157,6 +152,7 @@ fn raw_params(
     spatial_radius: Option<i64>,
     refine: Option<i64>,
     subpel: Option<&[u8]>,
+    noise_map: Option<i64>,
 ) -> Result<RawParams, Error> {
     Ok(RawParams {
         strength,
@@ -181,6 +177,7 @@ fn raw_params(
         spatial_radius,
         refine,
         subpel: opt_string(subpel, "subpel")?,
+        noise_map: opt_bool(noise_map),
     })
 }
 
@@ -231,6 +228,7 @@ make_filter_function! {
             None,
             None,
             None,
+            None,
         )?;
         let filter = Denoise::create(api, core, clip, AlgorithmKind::Nlmeans, &raw)?;
         Ok(Some(Box::new(filter)))
@@ -274,6 +272,7 @@ make_filter_function! {
         spatial_radius: Option<i64>,
         refine: Option<i64>,
         subpel: Option<&[u8]>,
+        noise_map: Option<i64>,
     ) -> Result<Option<Box<dyn Filter<'core> + 'core>>, Error> {
         let raw = raw_params(
             None,
@@ -298,6 +297,7 @@ make_filter_function! {
             spatial_radius,
             refine,
             subpel,
+            noise_map,
         )?;
         let filter = Denoise::create(api, core, clip, AlgorithmKind::Nl4d, &raw)?;
         Ok(Some(Box::new(filter)))

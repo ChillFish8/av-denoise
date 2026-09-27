@@ -168,6 +168,11 @@ pub struct Nl4dArgs {
     #[arg(long)]
     pub subpel: Option<SubpelPrecision>,
 
+    /// Turns off the luma noise map, which scales the threshold by how noisy each brightness
+    /// level is.
+    #[arg(long)]
+    pub no_noise_map: bool,
+
     /// Estimates noise from a local window instead of a temporal EMA
     /// over stream history.
     ///
@@ -263,6 +268,7 @@ impl Nl4dArgs {
                     // to measure the difference on real footage.
                     windowed_noise_estimation: self.windowed_noise_estimation,
                     subpel: self.subpel.unwrap_or(defaults.subpel),
+                    noise_map: defaults.noise_map && !self.no_noise_map,
                 }),
                 // nl4d has no NLM weighting pass for a strength to apply to.
                 luma_strength: None,
@@ -433,6 +439,26 @@ mod tests {
         let (args, nl4d) = parse(&["--subpel", "quarter"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
         assert_eq!(expect_nl4d(&opts).subpel, SubpelPrecision::Quarter);
+    }
+
+    #[test]
+    fn noise_map_defaults_to_on() {
+        let (args, nl4d) = parse(&[]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        assert!(expect_nl4d(&opts).noise_map);
+    }
+
+    #[test]
+    fn no_noise_map_turns_it_off() {
+        let (args, nl4d) = parse(&["--no-noise-map"]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        assert!(!expect_nl4d(&opts).noise_map);
+    }
+
+    #[test]
+    fn there_is_no_positive_noise_map_flag() {
+        let err = parse_err(&["--noise-map"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     /// nl4d never runs an NLM weighting pass, so the flags that only

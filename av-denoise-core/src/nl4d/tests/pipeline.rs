@@ -60,6 +60,8 @@ fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
         kaiser_beta: 2.0,
         field_lambda: 0.0,
         subpel: SubpelPrecision::Off,
+        // No effect here, since sigma is pinned.
+        noise_map: true,
     }
 }
 

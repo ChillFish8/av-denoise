@@ -89,6 +89,7 @@ clean.set_output()
 | `spatial_radius`  | int             | `--spatial-radius`      | yes, the speed dial    |
 | `lambda_ht`       | float           | `--lambda-ht`           | situational, see below |
 | `subpel`          | string          | `--subpel`              | situational, see below |
+| `noise_map`       | bool            | `--no-noise-map`        | situational, see below |
 | `channel_mode`    | string          | channel-mode flags      | situational            |
 | `device`          | string          | `--device`              | situational            |
 | `accelerators`    | list of strings | `-A`, `--accelerators`  | situational            |
@@ -110,6 +111,9 @@ motion-predicted position. Raise it when motion tracking lands close but not exa
 `subpel` aligns temporal matches between whole pixels. `off` is exact whole-pixel matching, and
 `half` or `quarter` make matches line up more closely on slow sub-pixel pans, at a cost in speed
 and GPU memory.
+
+`noise_map` scales the luma threshold by how noisy each brightness level is, filtering noisy
+levels harder and clean ones more lightly. It is on by default, and `noise_map=False` turns it off.
 
 `sigma_scale` keeps the per-scene noise measurement and nudges it, which is almost
 always what you actually want.

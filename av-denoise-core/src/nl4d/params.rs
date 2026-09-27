@@ -90,6 +90,10 @@ pub struct Nl4dParams {
     ///
     /// Defaults to [SubpelPrecision::Off](crate::nl4d::SubpelPrecision::Off).
     pub subpel: SubpelPrecision,
+    /// Scales the luma threshold by how noisy each brightness level is in the current frame.
+    ///
+    /// On by default.
+    pub noise_map: bool,
 }
 
 impl Default for Nl4dParams {
@@ -116,6 +120,7 @@ impl Default for Nl4dParams {
             kaiser_beta: 2.0,
             field_lambda: 1.0,
             subpel: SubpelPrecision::Off,
+            noise_map: true,
         }
     }
 }
@@ -224,6 +229,11 @@ mod tests {
     #[test]
     fn validate_accepts_default() {
         assert!(Nl4dParams::default().validate().is_ok());
+    }
+
+    #[test]
+    fn the_noise_map_is_on_by_default() {
+        assert!(Nl4dParams::default().noise_map);
     }
 
     /// A block geometry with `blksize / step` at or under

@@ -183,6 +183,7 @@ pub struct RawParams {
     pub spatial_radius: Option<i64>,
     pub refine: Option<i64>,
     pub subpel: Option<String>,
+    pub noise_map: Option<bool>,
 }
 
 /// Turns a nonnegative script integer into a `u32`, naming `field` in
@@ -269,6 +270,7 @@ fn reject_mismatched_params(
         ("spatial_radius", raw.spatial_radius.is_some()),
         ("refine", raw.refine.is_some()),
         ("subpel", raw.subpel.is_some()),
+        ("noise_map", raw.noise_map.is_some()),
     ];
 
     match algorithm_kind {
@@ -501,6 +503,10 @@ pub fn plane_options_from(
             subpel: match &raw.subpel {
                 Some(value) => value.parse::<SubpelPrecision>().map_err(anyhow::Error::msg)?,
                 None => Nl4dOptions::default().subpel,
+            },
+            noise_map: match raw.noise_map {
+                Some(enabled) => enabled,
+                None => Nl4dOptions::default().noise_map,
             },
             ..Nl4dOptions::default()
         }),

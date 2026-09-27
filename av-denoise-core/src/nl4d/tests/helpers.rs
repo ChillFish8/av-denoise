@@ -24,22 +24,29 @@ pub(super) fn textured_base(w: u32, h: u32) -> Vec<f32> {
 /// `seed` so different seeds over the same base give independently
 /// noisy copies of the same clean content.
 pub(super) fn noisy_copy_of(base: &[f32], w: u32, h: u32, sigma: f32, seed: u32) -> Vec<f32> {
-    let unit_std = (1.0f32 / 3.0f32).sqrt();
     let mut frame = vec![0.0f32; base.len()];
     for idx in 0..(w * h) {
-        let mut sum = 0.0f32;
-        for k in 0..4u32 {
-            let mut hash = (idx * 4 + k)
-                .wrapping_mul(2654435761)
-                .wrapping_add(seed.wrapping_mul(0x9E37_79B9).wrapping_add(k));
-            hash ^= hash >> 15;
-            hash = hash.wrapping_mul(0x85EB_CA6B);
-            hash ^= hash >> 13;
-            sum += (hash as f32 / u32::MAX as f32) - 0.5;
-        }
-        frame[idx as usize] = (base[idx as usize] + (sum / unit_std) * sigma).clamp(0.0, 1.0);
+        let noise = unit_noise(idx, seed);
+        frame[idx as usize] = (base[idx as usize] + noise * sigma).clamp(0.0, 1.0);
     }
     frame
+}
+
+/// A pseudo-Gaussian sample with unit standard deviation for pixel `idx`
+/// under `seed`.
+pub(super) fn unit_noise(idx: u32, seed: u32) -> f32 {
+    let unit_std = (1.0f32 / 3.0f32).sqrt();
+    let mut sum = 0.0f32;
+    for k in 0..4u32 {
+        let mut hash = (idx * 4 + k)
+            .wrapping_mul(2654435761)
+            .wrapping_add(seed.wrapping_mul(0x9E37_79B9).wrapping_add(k));
+        hash ^= hash >> 15;
+        hash = hash.wrapping_mul(0x85EB_CA6B);
+        hash ^= hash >> 13;
+        sum += (hash as f32 / u32::MAX as f32) - 0.5;
+    }
+    sum / unit_std
 }
 
 /// PSNR between two equal-length planes, in dB.

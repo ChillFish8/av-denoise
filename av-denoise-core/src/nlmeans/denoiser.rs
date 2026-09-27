@@ -1169,26 +1169,12 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// Turns the temporal-stats kernel's four luma-only lanes on or off.
     ///
     /// It defaults to off.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no non-test caller turns this on yet, it is exposed for a later caller to use"
-        )
-    )]
     pub(crate) fn set_luma_noise_fields(&mut self, on: bool) {
         self.luma_noise_fields = on;
     }
 
     /// The latest frame's luma noise curve, or `None` when no curve is
     /// available.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no non-test caller reads the curve yet, it is exposed for a later caller to use"
-        )
-    )]
     pub(crate) fn current_noise_curve(&self) -> Option<NoiseCurve> {
         self.noise_curve
     }

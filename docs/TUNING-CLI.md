@@ -68,6 +68,10 @@ the smoothing off and leaves the tracked field as it is.
 `quarter`. Finer alignment makes matches line up more closely on slow sub-pixel pans, at a
 cost in speed and GPU memory.
 
+**`--no-noise-map` turns off the luma noise map.** The noise map is on by default. It scales the
+luma threshold by how noisy each brightness level is, filtering noisy levels harder and clean ones
+more lightly.
+
 ### What not to touch in NL4D
 
 - **`--sigma`** pins the noise level to a fixed value and turns the per-scene measurement off
