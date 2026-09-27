@@ -7,6 +7,7 @@ mod hq;
 mod machinery;
 mod motion_compensation;
 mod noise;
+mod noise_curve;
 mod pack_wire;
 mod pending_drop;
 mod pending_outlives;

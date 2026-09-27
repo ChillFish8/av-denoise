@@ -7,10 +7,11 @@ use super::motion::{self, MotionCtx, MotionEstimation, build_pyramid_for_slot, r
 use super::noise::{
     EMA_ALPHA,
     NoiseCtx,
+    NoiseCurve,
     NoiseEstimator,
+    TemporalNoiseReading,
     TemporalNoiseSample,
     TemporalStatsCtx,
-    aggregate_temporal_noise_stats,
     build_spatial_offset_lut,
     correlation_factor,
     noise_partials_slot_stride_bytes,
@@ -20,6 +21,7 @@ use super::noise::{
     run_temporal_noise_stats,
     sigma_block_p25_from_partials,
     sigma_from_abs_sum,
+    temporal_noise_reading,
     temporal_stats_buf_bytes,
     zero_temporal_stats_slot,
 };
@@ -289,6 +291,12 @@ pub struct NlmDenoiser<R: Runtime> {
     ///
     /// It is inert under the same condition as `noise_estimator`.
     pub(super) noise_estimator_temporal_only: NoiseEstimator,
+    /// The latest centre frame's luma noise curve, or `None` when no
+    /// curve could be built.
+    ///
+    /// [Self::update_noise_estimate] updates it alongside the estimator
+    /// chains, and [Self::reset_stream_state] clears it.
+    pub(super) noise_curve: Option<NoiseCurve>,
 
     /// The motion-compensation geometry, present while motion
     /// compensation is active.
@@ -660,6 +668,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             noise_estimator_low: NoiseEstimator::default(),
             noise_estimator_low_unboosted: NoiseEstimator::default(),
             noise_estimator_temporal_only: NoiseEstimator::default(),
+            noise_curve: None,
             mc_ctx,
             compensated_input_buf,
             compensated_reference_buf,
@@ -1160,12 +1169,28 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// Turns the temporal-stats kernel's four luma-only lanes on or off.
     ///
     /// It defaults to off.
-    #[expect(
-        dead_code,
-        reason = "no caller turns this on yet, it is exposed for a later caller to use"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no non-test caller turns this on yet, it is exposed for a later caller to use"
+        )
     )]
     pub(crate) fn set_luma_noise_fields(&mut self, on: bool) {
         self.luma_noise_fields = on;
+    }
+
+    /// The latest frame's luma noise curve, or `None` when no curve is
+    /// available.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no non-test caller reads the curve yet, it is exposed for a later caller to use"
+        )
+    )]
+    pub(crate) fn current_noise_curve(&self) -> Option<NoiseCurve> {
+        self.noise_curve
     }
 
     /// Fills a duplicated slot's temporal-stats region with zeroes.
@@ -1871,10 +1896,23 @@ impl<R: Runtime> NlmDenoiser<R> {
         let center_t = self.params.temporal_radius;
         let center_slot = self.phys_frame(center_t as i32) as usize;
 
-        let temporal = self.read_temporal_noise_sample(center_slot as u32)?;
+        let reading = self.read_temporal_noise(center_slot as u32)?;
         let imm_low = self.read_noise_partials_low(center_slot as u32)?;
 
-        self.fold_noise_estimate(data, center_slot, temporal, imm_low);
+        // The curve tracks the sample it was built alongside, so it only
+        // ever changes on a fold that produced a trustworthy sample.
+        // Under windowed estimation a fold with no sample clears it, the
+        // same way `noise_estimator_temporal_only` clears rather than
+        // coasts on an older window's reading. See
+        // `HqParams::windowed_noise_estimation`.
+        let windowed = self.params.hq.is_some_and(|hq| hq.windowed_noise_estimation);
+        match (&reading.sample, reading.curve) {
+            (Some(_), curve) => self.noise_curve = curve,
+            (None, _) if windowed => self.noise_curve = None,
+            (None, _) => {},
+        }
+
+        self.fold_noise_estimate(data, center_slot, reading.sample, imm_low);
 
         Ok(())
     }
@@ -1913,15 +1951,22 @@ impl<R: Runtime> NlmDenoiser<R> {
     }
 
     /// Reads the centre slot's temporal residual statistics back and
-    /// combines them into one sample.
+    /// combines them into one reading.
     ///
-    /// Returns `None` when the temporal estimator is inactive, which
-    /// happens at a temporal radius of 0 or with a fixed sigma, and also
-    /// when the combining step itself declines to produce a sample. See
-    /// [`aggregate_temporal_noise_stats`].
-    fn read_temporal_noise_sample(&self, slot: u32) -> Result<Option<TemporalNoiseSample>, anyhow::Error> {
+    /// Both the sample and the curve are `None` when the temporal
+    /// estimator is inactive, which happens at a temporal radius of 0 or
+    /// with a fixed sigma, and also when the combining step itself
+    /// declines to produce a sample. See [temporal_noise_reading].
+    ///
+    /// The curve is only built when `luma_noise_fields` is on, since it
+    /// needs the stats kernel's luma-only lanes. See
+    /// [Self::set_luma_noise_fields].
+    fn read_temporal_noise(&self, slot: u32) -> Result<TemporalNoiseReading, anyhow::Error> {
         let Some(stats_buf) = self.temporal_stats_buf.as_ref() else {
-            return Ok(None);
+            return Ok(TemporalNoiseReading {
+                sample: None,
+                curve: None,
+            });
         };
 
         let stored_ch = self.params.channels.storage_count();
@@ -1939,12 +1984,13 @@ impl<R: Runtime> NlmDenoiser<R> {
             self.align,
         )?;
 
-        Ok(aggregate_temporal_noise_stats(
+        Ok(temporal_noise_reading(
             &records,
             channels,
             stored_ch,
             self.width,
             self.height,
+            self.luma_noise_fields,
         ))
     }
 
@@ -2115,6 +2161,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.noise_estimator_low.reset();
         self.noise_estimator_low_unboosted.reset();
         self.noise_estimator_temporal_only.reset();
+        self.noise_curve = None;
         self.rho_smoothed = None;
     }
 
