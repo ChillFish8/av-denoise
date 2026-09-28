@@ -24,9 +24,9 @@ const MIN_QUARTERS_PER_BIN: usize = 32;
 /// The fewest populated bins a frame needs before it gets a curve.
 const MIN_POPULATED_BINS: usize = 3;
 /// A quarter with a pixel at or below this luma may be clipped, so its noise reads low.
-const CLIP_LOW: f32 = 4.0 / 255.0;
+pub(super) const CLIP_LOW: f32 = 4.0 / 255.0;
 /// A quarter with a pixel at or above this luma may be clipped, so its noise reads low.
-const CLIP_HIGH: f32 = 251.0 / 255.0;
+pub(super) const CLIP_HIGH: f32 = 251.0 / 255.0;
 /// How much texture a quarter may carry, as a fraction of the frame's noise variance.
 const FLAT_FACTOR: f32 = 0.5;
 /// The flat gate never tightens below one code of squared gradient.
@@ -36,7 +36,7 @@ const FLAT_FLOOR: f32 = (1.0 / 255.0) * (1.0 / 255.0);
 /// A quarter averages 64 pixels rather than a block's 256, so the noise in its mean is twice as
 /// large. The gate is widened by the same factor of 2 so static quarters pass as often as
 /// static blocks.
-const QUARTER_STATIC_GATE: f32 = 2.0 * STATIC_GATE;
+pub(super) const QUARTER_STATIC_GATE: f32 = 2.0 * STATIC_GATE;
 
 /// How much noisier each brightness level is than the frame's median quarter.
 ///
@@ -44,6 +44,26 @@ const QUARTER_STATIC_GATE: f32 = 2.0 * STATIC_GATE;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct NoiseCurve {
     pub(crate) ratios: [f32; NOISE_CURVE_BINS],
+    /// The median sigma of the quarters the curve was built from, which every ratio is relative to.
+    pub(crate) sigma_quarter_median: f32,
+}
+
+impl NoiseCurve {
+    /// The ratio at `luma`, interpolated between bin centres the same way the fused kernel reads it.
+    pub(crate) fn ratio_at(&self, luma: f32) -> f32 {
+        let bins = NOISE_CURVE_BINS as f32;
+        let position = (luma * bins - 0.5).clamp(0.0, bins - 1.0);
+        let lower = (position as usize).min(NOISE_CURVE_BINS - 2);
+        let fraction = position - lower as f32;
+        let lower_ratio = self.ratios[lower];
+        let upper_ratio = self.ratios[lower + 1];
+        lower_ratio + (upper_ratio - lower_ratio) * fraction
+    }
+
+    /// The noise sigma the curve predicts at `luma`.
+    pub(crate) fn sigma_at(&self, luma: f32) -> f32 {
+        self.ratio_at(luma) * self.sigma_quarter_median
+    }
 }
 
 /// One 8x8 quarter that passed its own static gates.
@@ -116,7 +136,10 @@ pub(in crate::nlmeans) fn build_noise_curve(
         *ratio = sigma / sigma_quarter_median;
     }
 
-    Some(NoiseCurve { ratios })
+    Some(NoiseCurve {
+        ratios,
+        sigma_quarter_median,
+    })
 }
 
 /// The quarters of `accepted` whose own mean residual and sigma pass the static gates.

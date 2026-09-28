@@ -19,17 +19,17 @@ use crate::nlmeans::*;
 
 /// One synthetic 8x8 quarter, as the stats kernel would record it.
 #[derive(Clone, Copy)]
-struct SyntheticQuarter {
-    sigma: f32,
-    mean_residual: f32,
-    mean_luma: f32,
-    flatness: f32,
-    luma_min: f32,
-    luma_max: f32,
+pub(super) struct SyntheticQuarter {
+    pub(super) sigma: f32,
+    pub(super) mean_residual: f32,
+    pub(super) mean_luma: f32,
+    pub(super) flatness: f32,
+    pub(super) luma_min: f32,
+    pub(super) luma_max: f32,
 }
 
 /// A static, flat, unclipped quarter at `luma` with `sigma`.
-fn quarter_at(luma: f32, sigma: f32) -> SyntheticQuarter {
+pub(super) fn quarter_at(luma: f32, sigma: f32) -> SyntheticQuarter {
     SyntheticQuarter {
         sigma,
         mean_residual: 0.0,
@@ -40,14 +40,19 @@ fn quarter_at(luma: f32, sigma: f32) -> SyntheticQuarter {
     }
 }
 
-fn quarters_at(luma: f32, sigma: f32, count: usize) -> Vec<SyntheticQuarter> {
+pub(super) fn quarters_at(luma: f32, sigma: f32, count: usize) -> Vec<SyntheticQuarter> {
     vec![quarter_at(luma, sigma); count]
 }
 
 /// Writes `quarter` into a luma-only block record as a quarter of `pixels` pixels.
 ///
 /// The block's scalar lanes gain the quarter's sums, so they stay the sums of its quarters.
-fn write_quarter(record: &mut [f32], quarter_index: usize, quarter: &SyntheticQuarter, pixels: f32) {
+pub(super) fn write_quarter(
+    record: &mut [f32],
+    quarter_index: usize,
+    quarter: &SyntheticQuarter,
+    pixels: f32,
+) {
     let stored_ch = 1u32;
     let variance = 2.0 * quarter.sigma * quarter.sigma;
     let mean = quarter.mean_residual;
@@ -70,7 +75,7 @@ fn write_quarter(record: &mut [f32], quarter_index: usize, quarter: &SyntheticQu
 ///
 /// Every four quarters form one block, in top-left, top-right,
 /// bottom-left, bottom-right order.
-fn synthetic_records(quarters: &[SyntheticQuarter]) -> Vec<f32> {
+pub(super) fn synthetic_records(quarters: &[SyntheticQuarter]) -> Vec<f32> {
     assert_eq!(quarters.len() % 4, 0, "quarters must fill whole blocks");
 
     let quarter_pixels = 64.0f32;
@@ -90,7 +95,7 @@ fn synthetic_records(quarters: &[SyntheticQuarter]) -> Vec<f32> {
 }
 
 /// A single row of full 16x16 blocks, one block per four quarters.
-fn frame_dims(quarter_count: usize) -> (u32, u32) {
+pub(super) fn frame_dims(quarter_count: usize) -> (u32, u32) {
     let block_count = quarter_count / 4;
     (16 * block_count as u32, 16)
 }

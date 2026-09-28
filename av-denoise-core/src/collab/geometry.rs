@@ -27,6 +27,16 @@ pub fn ref_count(width: u32, height: u32) -> usize {
     refs_along(width) as usize * refs_along(height) as usize
 }
 
+/// Columns and rows of a strength map.
+///
+/// The map holds one entry per 8x8 quarter of the noise estimator's 16x16 blocks, so a ragged
+/// frame edge rounds up to a whole block.
+pub fn strength_map_dims(width: u32, height: u32) -> (u32, u32) {
+    let cols = 2 * width.div_ceil(16);
+    let rows = 2 * height.div_ceil(16);
+    (cols, rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +97,13 @@ mod tests {
             ref_count(1920, 1080),
             refs_along(1920) as usize * refs_along(1080) as usize
         );
+    }
+
+    #[test]
+    fn strength_map_dims_round_up_to_whole_blocks() {
+        assert_eq!(strength_map_dims(1920, 1080), (240, 136));
+        assert_eq!(strength_map_dims(960, 540), (120, 68));
+        assert_eq!(strength_map_dims(70, 54), (10, 8));
+        assert_eq!(strength_map_dims(16, 16), (2, 2));
     }
 }

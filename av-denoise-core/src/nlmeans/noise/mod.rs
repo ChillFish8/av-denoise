@@ -31,6 +31,7 @@
 //! so it is deliberately the more conservative of the two.
 
 mod curve;
+mod strength_map;
 
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -38,6 +39,8 @@ use cubecl::server::Handle;
 pub use self::curve::NOISE_CURVE_BINS;
 pub(crate) use self::curve::NoiseCurve;
 pub(super) use self::curve::build_noise_curve;
+pub(super) use self::strength_map::classify_quarters;
+pub(crate) use self::strength_map::{QuarterClass, QuarterClasses, StrengthMapParams};
 use super::align::StorageAlign;
 use super::kernels::{
     nlm_noise_partial,
