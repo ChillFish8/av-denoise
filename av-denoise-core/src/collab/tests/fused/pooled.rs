@@ -2,7 +2,6 @@ use cubecl::prelude::*;
 
 use super::{Setup, cross_frame_setup, run_fused, run_fused_walk, unique_frame};
 use crate::collab::kernels::fused::pooled::pooled_threshold;
-use crate::collab::kernels::plane_ops::group_base;
 use crate::collab::tests::helpers::{R, make_client};
 use crate::collab::{PATCH_AREA, PATCH_SIZE};
 
@@ -25,7 +24,6 @@ fn pooled_kernel(
     dc_lambda: f32,
 ) {
     let sub = UNIT_POS_X;
-    let base = group_base();
 
     let mut stack = Array::<f32>::new(PATCH_AREA as usize);
     #[unroll]
@@ -35,7 +33,7 @@ fn pooled_kernel(
 
     let prof_sub = profile[sub as usize];
     let kept = pooled_threshold(
-        &mut stack, variances, profile, prof_sub, sub, base, k_use, threshold, dc_lambda,
+        &mut stack, variances, profile, prof_sub, sub, k_use, threshold, dc_lambda,
     );
 
     #[unroll]
@@ -109,9 +107,12 @@ fn reference(
     dc_lambda: f32,
 ) -> (Group, f32) {
     let variance = |sub: usize, j: usize, i: usize| variances[j] * profile[i] * profile[sub];
+    // The row's variance and the column's profile are floored and inverted separately.
     let energy = |sub: usize, j: usize, i: usize| {
         let coeff = group[sub][j][i];
-        coeff * coeff / variance(sub, j, i).max(FLOOR)
+        let row_inverse = 1.0 / (variances[j] * profile[sub]).max(FLOOR);
+        let column_inverse = 1.0 / profile[i].max(FLOOR);
+        coeff * coeff * row_inverse * column_inverse
     };
 
     let mut result = *group;

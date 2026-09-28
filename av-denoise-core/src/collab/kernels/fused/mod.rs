@@ -654,7 +654,6 @@ pub fn collab_fused<N: Size>(
                 dct_profile,
                 prof_sub,
                 sub,
-                base,
                 k_use,
                 threshold,
                 channel_lambda,
