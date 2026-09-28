@@ -90,27 +90,28 @@ pub(crate) fn pooled_threshold(
                 sum += next;
             }
 
-            let mut column_bar = middle_column_bar;
-            if comptime!(i == 0u32) {
-                column_bar = first_column_bar;
-            }
-            if comptime!(i == 1u32) {
-                column_bar = second_column_bar;
-            }
-            if comptime!(i == 7u32) {
-                column_bar = last_column_bar;
-            }
+            let column_bar = if comptime!(i == 0u32) {
+                first_column_bar
+            } else if comptime!(i == 1u32) {
+                second_column_bar
+            } else if comptime!(i == 7u32) {
+                last_column_bar
+            } else {
+                middle_column_bar
+            };
 
             // Multiplied out rather than divided, so an exact tie at the bar is not lost
             // to the GPU's inexact division.
             let mut keep = sum >= column_bar;
+
             if comptime!(i == 0u32) {
                 let dc_variance = lane_variance * profile;
                 let own_test = f32::abs(coeff) >= dc_lambda * f32::sqrt(dc_variance);
                 keep = select(dc_lane, own_test, keep);
-            }
-            if comptime!(j == 0u32 && i == 0u32) {
-                keep = keep || dc_lane;
+
+                if comptime!(j == 0u32) {
+                    keep = keep || dc_lane;
+                }
             }
 
             let live = j < k_use;

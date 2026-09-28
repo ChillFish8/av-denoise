@@ -252,12 +252,17 @@ fn the_spatial_dc_keeps_its_own_test_and_is_never_a_neighbour() {
     group[0][1][1] = 0.9;
     group[0][2][1] = 0.9;
     group[0][2][0] = 100.0;
+    group[1][2][0] = 0.9;
 
     let (got, _) = run_kernel(&group, &UNIT, &UNIT, 8, 1.0, 1.0);
 
     assert_eq!(got[0][1][0], 0.0, "a weak spatial DC fails its own test");
     assert_eq!(got[0][2][0], 100.0, "a strong spatial DC passes its own test");
     assert_eq!(got[0][2][1], 0.0, "a huge spatial DC does not lift its neighbour");
+    assert_eq!(
+        got[1][2][0], 0.0,
+        "a huge spatial DC does not lift lane 1's upper neighbour in column 0"
+    );
 }
 
 #[test]

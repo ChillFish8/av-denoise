@@ -39,12 +39,16 @@ fn denoise(params: Nl4dParams, frames: &[Vec<f32>]) -> Vec<Vec<f32>> {
         let pending = denoiser.denoise_submit().expect("denoise_submit failed");
         if let Some(pending) = pending {
             let output = pending.wait().expect("readback failed");
-            outputs.push(output.into_f32().expect("f32 output"));
+            let output_frame = output.into_f32().expect("f32 output");
+            outputs.push(output_frame);
         }
     }
 
     denoiser
-        .flush(|frame| outputs.push(frame.as_f32().expect("f32 denoiser").to_vec()))
+        .flush(|frame| {
+            let output_frame = frame.as_f32().expect("f32 denoiser").to_vec();
+            outputs.push(output_frame);
+        })
         .expect("flush failed");
     outputs
 }

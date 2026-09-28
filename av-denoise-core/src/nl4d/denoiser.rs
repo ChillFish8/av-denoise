@@ -726,6 +726,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 );
             }
 
+            let pool_ratio = nl4d_pool_ratio(self.channels);
+
             collab_fused::launch_unchecked::<R>(
                 &client,
                 collab_grid,
@@ -769,7 +771,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 refs_x,
                 self.map_cols,
                 self.map_rows,
-                nl4d_pool_ratio(self.channels),
+                pool_ratio,
                 self.pooled_threshold,
             );
         }

@@ -167,7 +167,7 @@ pub struct Nl4dArgs {
     /// Turns off the pooled threshold, which judges each frequency together with its neighbours
     /// so faint texture survives.
     ///
-    /// Without it, `--flat-boost 1.5` gives the output of earlier releases.
+    /// With this flag and `--flat-boost 1.5`, the output matches earlier releases.
     #[arg(long)]
     pub no_pooled_threshold: bool,
 
