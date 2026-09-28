@@ -15,7 +15,7 @@ use crate::collab::kernels::aggregate::{
 use crate::collab::kernels::fused::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, PATCH_SIZE, grid_frames, needs_warp_uniform_search};
-use crate::denoiser::{DenoiserError, FrameOutput, OutputFormat};
+use crate::denoiser::{DenoiserError, FrameOutput, OutputFormat, nl4d_pool_ratio};
 use crate::nlmeans::{
     BLOCK_X,
     BLOCK_Y,
@@ -79,6 +79,8 @@ pub struct Nl4dDenoiser<R: Runtime> {
     width: u32,
     height: u32,
     channels: ChannelMode,
+    /// Whether the threshold pools each coefficient with its neighbours.
+    pooled_threshold: bool,
     temporal_radius: u32,
     refine: u32,
     spatial_radius: u32,
@@ -294,6 +296,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             width,
             height,
             channels,
+            pooled_threshold: params.pooled_threshold,
             temporal_radius: params.temporal_radius,
             refine: params.refine,
             spatial_radius: params.spatial_radius,
@@ -766,8 +769,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 refs_x,
                 self.map_cols,
                 self.map_rows,
-                0.0f32,
-                false,
+                nl4d_pool_ratio(self.channels),
+                self.pooled_threshold,
             );
         }
 

@@ -92,7 +92,7 @@ pub struct Nl4dParams {
     /// How much harder flat, grainy 8x8 areas are filtered, as a multiplier on the luma threshold.
     ///
     /// An area counts as flat when its texture is small next to its own grain. Only takes effect
-    /// with `noise_map` on. `1.0` turns it off. Between 1.0 and 3.0, defaults to 1.5.
+    /// with `noise_map` on. `1.0` turns it off. Between 1.0 and 3.0, defaults to 1.75.
     pub flat_boost: f32,
     /// [Self::flat_boost] for the chroma planes, with flatness measured on the first chroma plane.
     ///
@@ -105,6 +105,11 @@ pub struct Nl4dParams {
     /// It applies in full at or below luma 128 of 255 and fades back to 1.0 by 160. Only takes
     /// effect with `noise_map` on. `1.0` turns it off. Between 0.1 and 1.0, defaults to 0.65.
     pub shadow_soften: f32,
+    /// Judges each transform coefficient together with its frequency neighbours instead of alone.
+    ///
+    /// Faint texture spreads over several neighbouring frequencies, so it survives where each
+    /// coefficient alone would fall under the threshold. On by default.
+    pub pooled_threshold: bool,
 }
 
 impl Default for Nl4dParams {
@@ -131,9 +136,10 @@ impl Default for Nl4dParams {
             kaiser_beta: 2.0,
             field_lambda: 1.0,
             noise_map: true,
-            flat_boost: 1.5,
+            flat_boost: 1.75,
             chroma_flat_boost: 1.5,
             shadow_soften: 0.65,
+            pooled_threshold: true,
         }
     }
 }
@@ -268,9 +274,10 @@ mod tests {
     #[test]
     fn the_strength_map_defaults_are_the_settled_config() {
         let params = Nl4dParams::default();
-        assert_eq!(params.flat_boost, 1.5);
+        assert_eq!(params.flat_boost, 1.75);
         assert_eq!(params.chroma_flat_boost, 1.5);
         assert_eq!(params.shadow_soften, 0.65);
+        assert!(params.pooled_threshold);
     }
 
     #[test]

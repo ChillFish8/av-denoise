@@ -258,6 +258,8 @@ pub struct Nl4dOptions {
     pub chroma_flat_boost: f32,
     /// See [crate::nl4d::Nl4dParams::shadow_soften].
     pub shadow_soften: f32,
+    /// See [crate::nl4d::Nl4dParams::pooled_threshold].
+    pub pooled_threshold: bool,
 }
 
 impl Default for Nl4dOptions {
@@ -284,6 +286,7 @@ impl Default for Nl4dOptions {
             flat_boost: defaults.flat_boost,
             chroma_flat_boost: defaults.chroma_flat_boost,
             shadow_soften: defaults.shadow_soften,
+            pooled_threshold: defaults.pooled_threshold,
         }
     }
 }
@@ -330,6 +333,17 @@ pub fn nl4d_default_lambda_ht(channels: ChannelMode) -> f32 {
         ChannelMode::Luma | ChannelMode::Yuv => 3.78,
         ChannelMode::Chroma => 2.94,
     }
+}
+
+/// The pooled threshold at each plane's default lambda, calibrated on real grain.
+const NL4D_POOLED_THRESHOLD: f32 = 2.2;
+
+/// The ratio of nl4d's pooled threshold to its lambda for one plane.
+///
+/// At the default lambda this gives the calibrated pooled threshold, and it scales with any
+/// other lambda.
+pub fn nl4d_pool_ratio(channels: ChannelMode) -> f32 {
+    NL4D_POOLED_THRESHOLD / nl4d_default_lambda_ht(channels)
 }
 
 /// Resolves `Nl4dOptions.lambda_ht` for one plane, falling back to
@@ -691,6 +705,7 @@ fn build_engine<R: Runtime>(
                 flat_boost: opts.flat_boost,
                 chroma_flat_boost: opts.chroma_flat_boost,
                 shadow_soften: opts.shadow_soften,
+                pooled_threshold: opts.pooled_threshold,
             };
             let denoiser =
                 Nl4dDenoiser::with_output_format(client, nl4d_params, width, height, output_format)
@@ -1476,6 +1491,24 @@ mod options_tests {
         let luma = nl4d_default_lambda_ht(ChannelMode::Luma);
 
         assert!((yuv - luma).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn nl4d_pool_ratio_gives_the_calibrated_threshold_at_each_default_lambda() {
+        for channels in [ChannelMode::Luma, ChannelMode::Yuv, ChannelMode::Chroma] {
+            let threshold = nl4d_pool_ratio(channels) * nl4d_default_lambda_ht(channels);
+            assert!((threshold - 2.2).abs() < 1.0e-6, "{channels:?} gives {threshold}");
+        }
+
+        assert_eq!(
+            nl4d_pool_ratio(ChannelMode::Yuv),
+            nl4d_pool_ratio(ChannelMode::Luma)
+        );
+    }
+
+    #[test]
+    fn nl4d_options_default_to_pooling_on() {
+        assert!(Nl4dOptions::default().pooled_threshold);
     }
 
     #[test]
