@@ -214,6 +214,7 @@ def Nl4d(
         flat_boost: How much harder flat, grainy areas are filtered, as a multiplier on the luma
             threshold. Between 1.0 and 3.0, 1.5 by default. `1.0` turns it off. Needs `noise_map`.
         chroma_flat_boost: The same for the colour planes. Between 1.0 and 3.0, 1.5 by default.
+            `1.0` turns it off. Needs `noise_map`.
         shadow_soften: How much more gently textured dark areas are filtered, as a multiplier on
             the luma threshold. Between 0.1 and 1.0, 0.65 by default. `1.0` turns it off. Needs
             `noise_map`.

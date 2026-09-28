@@ -70,6 +70,7 @@ more lightly.
 
 **`--flat-boost`, `--chroma-flat-boost` and `--shadow-soften` adjust the noise map by area.** Flat,
 grainy areas such as skies are filtered harder, 1.5 times by default on both luma and chroma.
+The chroma boost applies when chroma is denoised in its own pass, not under `--channel-mode yuv`.
 Textured dark areas are filtered more gently, at 0.65 times by default, fading out between luma
 128 and 160. `1` turns each one off, and `--no-noise-map` turns all three off.
 

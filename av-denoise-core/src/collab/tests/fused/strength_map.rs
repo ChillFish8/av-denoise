@@ -1,12 +1,12 @@
 use cubecl::prelude::*;
 
 use super::noise_curve::{assert_columns_identical, assert_identical, columns_differ};
-use super::{Setup, cross_frame_setup, run_fused, run_fused_walk};
+use super::{Aggregated, Setup, cross_frame_setup, run_fused, run_fused_walk};
 use crate::collab::geometry::{ref_pos, refs_along, strength_map_dims};
 use crate::collab::kernels::fused::strength_map::strength_map_scale;
 use crate::collab::kernels::fused::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA};
 use crate::collab::tests::helpers::{R, make_client, noisy_field_over};
-use crate::nlmeans::NOISE_CURVE_BINS;
+use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS};
 
 const FRAME_SIDE: u32 = 64;
 const LAMBDA: f32 = 1.0;
@@ -85,39 +85,42 @@ fn the_map_scale_is_the_mean_of_the_overlapped_quarters_on_a_ragged_frame() {
     }
 }
 
-fn unit_map(width: u32, height: u32, value: f32) -> Vec<f32> {
+fn uniform_map(width: u32, height: u32, value: f32) -> Vec<f32> {
     let (cols, rows) = strength_map_dims(width, height);
     vec![value; (cols * rows) as usize]
 }
 
 #[test]
 fn a_unit_map_changes_nothing_in_either_mode() {
-    let mut plain = cross_frame_setup(64, 64, 2);
+    let mut plain = cross_frame_setup(FRAME_SIDE, FRAME_SIDE, 2);
     plain.noise_curve = Some([1.5; NOISE_CURVE_BINS]);
     let want = run_fused(&plain);
 
-    let mut luma = cross_frame_setup(64, 64, 2);
+    let mut luma = cross_frame_setup(FRAME_SIDE, FRAME_SIDE, 2);
     luma.noise_curve = Some([1.5; NOISE_CURVE_BINS]);
-    luma.strength_map = Some((unit_map(64, 64, 1.0), STRENGTH_MAP_LUMA));
+    let luma_map = uniform_map(FRAME_SIDE, FRAME_SIDE, 1.0);
+    luma.strength_map = Some((luma_map, STRENGTH_MAP_LUMA));
     let got_luma = run_fused(&luma);
     assert_identical("unit luma map", &got_luma, &want);
 
-    let plain_no_curve = cross_frame_setup(64, 64, 2);
+    let plain_no_curve = cross_frame_setup(FRAME_SIDE, FRAME_SIDE, 2);
     let want_no_curve = run_fused(&plain_no_curve);
-    let mut all = cross_frame_setup(64, 64, 2);
-    all.strength_map = Some((unit_map(64, 64, 1.0), STRENGTH_MAP_ALL));
+    let mut all = cross_frame_setup(FRAME_SIDE, FRAME_SIDE, 2);
+    let all_map = uniform_map(FRAME_SIDE, FRAME_SIDE, 1.0);
+    all.strength_map = Some((all_map, STRENGTH_MAP_ALL));
     let got_all = run_fused(&all);
     assert_identical("unit all-channel map", &got_all, &want_no_curve);
 }
 
 #[test]
 fn a_uniform_luma_map_equals_scaling_lambda() {
-    let mut mapped = cross_frame_setup(64, 64, 2);
+    let mut mapped = cross_frame_setup(FRAME_SIDE, FRAME_SIDE, 2);
     mapped.noise_curve = Some([1.0; NOISE_CURVE_BINS]);
-    mapped.strength_map = Some((unit_map(64, 64, 1.5), STRENGTH_MAP_LUMA));
+    let map = uniform_map(FRAME_SIDE, FRAME_SIDE, 1.5);
+    mapped.strength_map = Some((map, STRENGTH_MAP_LUMA));
     let got = run_fused(&mapped);
 
-    let mut scaled = cross_frame_setup(64, 64, 2);
+    let mut scaled = cross_frame_setup(FRAME_SIDE, FRAME_SIDE, 2);
     scaled.noise_curve = Some([1.0; NOISE_CURVE_BINS]);
     scaled.lambda_ht *= 1.5;
     let want = run_fused(&scaled);
@@ -127,11 +130,12 @@ fn a_uniform_luma_map_equals_scaling_lambda() {
 
 #[test]
 fn a_uniform_all_channel_map_equals_scaling_lambda() {
-    let mut mapped = cross_frame_setup(64, 64, 2);
-    mapped.strength_map = Some((unit_map(64, 64, 0.5), STRENGTH_MAP_ALL));
+    let mut mapped = cross_frame_setup(FRAME_SIDE, FRAME_SIDE, 2);
+    let map = uniform_map(FRAME_SIDE, FRAME_SIDE, 0.5);
+    mapped.strength_map = Some((map, STRENGTH_MAP_ALL));
     let got = run_fused(&mapped);
 
-    let mut scaled = cross_frame_setup(64, 64, 2);
+    let mut scaled = cross_frame_setup(FRAME_SIDE, FRAME_SIDE, 2);
     scaled.lambda_ht *= 0.5;
     let want = run_fused(&scaled);
 
@@ -140,12 +144,13 @@ fn a_uniform_all_channel_map_equals_scaling_lambda() {
 
 #[test]
 fn the_luma_map_is_clamped_with_the_curve() {
-    let mut mapped = cross_frame_setup(64, 64, 2);
+    let mut mapped = cross_frame_setup(FRAME_SIDE, FRAME_SIDE, 2);
     mapped.noise_curve = Some([2.0; NOISE_CURVE_BINS]);
-    mapped.strength_map = Some((unit_map(64, 64, 3.0), STRENGTH_MAP_LUMA));
+    let map = uniform_map(FRAME_SIDE, FRAME_SIDE, 3.0);
+    mapped.strength_map = Some((map, STRENGTH_MAP_LUMA));
     let got = run_fused(&mapped);
 
-    let mut ceiling = cross_frame_setup(64, 64, 2);
+    let mut ceiling = cross_frame_setup(FRAME_SIDE, FRAME_SIDE, 2);
     ceiling.noise_curve = Some([3.0; NOISE_CURVE_BINS]);
     let want = run_fused(&ceiling);
 
@@ -189,9 +194,9 @@ fn a_two_region_map_thresholds_each_region_by_its_own_multiplier() {
 
 #[test]
 fn both_walks_agree_with_a_map_active() {
-    let mut setup = cross_frame_setup(64, 64, 2);
+    let mut setup = cross_frame_setup(FRAME_SIDE, FRAME_SIDE, 2);
     setup.noise_curve = Some([1.2; NOISE_CURVE_BINS]);
-    let (cols, rows) = strength_map_dims(64, 64);
+    let (cols, rows) = strength_map_dims(FRAME_SIDE, FRAME_SIDE);
     let map: Vec<f32> = (0..cols * rows)
         .map(|index| if index % 3 == 0 { 1.5 } else { 0.65 })
         .collect();
@@ -201,4 +206,58 @@ fn both_walks_agree_with_a_map_active() {
     let branching = run_fused_walk(&setup, Some(false));
 
     assert_identical("walks with a map", &uniform, &branching);
+}
+
+/// A single-frame 3-channel ring, each channel carrying its own noise.
+fn three_channel_setup() -> Setup {
+    let pixels = (FRAME_SIDE * FRAME_SIDE) as usize;
+    let noise = noisy_field_over(FRAME_SIDE, FRAME_SIDE * 3, 0.5, 0.02);
+    let stored_ch = ChannelMode::Yuv.storage_count() as usize;
+
+    let mut ring = vec![0.0f32; pixels * stored_ch];
+    for pixel in 0..pixels {
+        for channel in 0..3 {
+            ring[pixel * stored_ch + channel] = noise[channel * pixels + pixel];
+        }
+    }
+
+    let luma_placeholder = vec![0.0f32; pixels];
+    let mut setup = Setup::spatial_only(luma_placeholder, FRAME_SIDE, FRAME_SIDE);
+    setup.ring = ring;
+    setup.channel_mode = ChannelMode::Yuv;
+    setup.lambda_ht = LAMBDA;
+    setup
+}
+
+/// Whether any accumulator of `channel` differs between two single-frame runs.
+fn channel_differs(first: &Aggregated, second: &Aggregated, channel: usize) -> bool {
+    let stored_ch = ChannelMode::Yuv.storage_count() as usize;
+    let first_values = first.accum.iter().skip(channel).step_by(stored_ch);
+    let second_values = second.accum.iter().skip(channel).step_by(stored_ch);
+    first_values
+        .zip(second_values)
+        .any(|(first_value, second_value)| first_value != second_value)
+}
+
+#[test]
+fn a_luma_map_scales_only_channel_zero() {
+    let mut luma_mapped = three_channel_setup();
+    luma_mapped.noise_curve = Some([1.0; NOISE_CURVE_BINS]);
+    let luma_map = uniform_map(FRAME_SIDE, FRAME_SIDE, 1.5);
+    luma_mapped.strength_map = Some((luma_map, STRENGTH_MAP_LUMA));
+    let got = run_fused(&luma_mapped);
+
+    let mut curve_scaled = three_channel_setup();
+    curve_scaled.noise_curve = Some([1.5; NOISE_CURVE_BINS]);
+    let want = run_fused(&curve_scaled);
+
+    assert_identical("luma map on three channels", &got, &want);
+
+    let mut all_mapped = three_channel_setup();
+    let all_map = uniform_map(FRAME_SIDE, FRAME_SIDE, 1.5);
+    all_mapped.strength_map = Some((all_map, STRENGTH_MAP_ALL));
+    let all_channels = run_fused(&all_mapped);
+
+    assert!(channel_differs(&all_channels, &got, 1));
+    assert!(channel_differs(&all_channels, &got, 2));
 }

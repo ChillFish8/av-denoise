@@ -3,6 +3,7 @@ use super::noise_curve::{
     SyntheticQuarter,
     frame_dims,
     quarter_at,
+    quarters_at,
     ramp_frame,
     synthetic_records,
     write_quarter,
@@ -248,9 +249,9 @@ fn a_quarter_past_the_frame_edge_gets_one() {
 
 #[test]
 fn a_reading_carries_classes_exactly_when_it_carries_a_curve() {
-    let mut quarters = super::noise_curve::quarters_at(0.15, 0.02, 160);
-    quarters.extend(super::noise_curve::quarters_at(0.35, 0.01, 160));
-    quarters.extend(super::noise_curve::quarters_at(0.6, 0.005, 160));
+    let mut quarters = quarters_at(0.15, 0.02, 160);
+    quarters.extend(quarters_at(0.35, 0.01, 160));
+    quarters.extend(quarters_at(0.6, 0.005, 160));
     let (width, height) = frame_dims(quarters.len());
     let records = synthetic_records(&quarters);
 

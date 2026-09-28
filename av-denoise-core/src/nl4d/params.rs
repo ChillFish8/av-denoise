@@ -96,7 +96,8 @@ pub struct Nl4dParams {
     pub flat_boost: f32,
     /// [Self::flat_boost] for the chroma planes, with flatness measured on the first chroma plane.
     ///
-    /// Between 1.0 and 3.0, defaults to 1.5.
+    /// Only takes effect with `noise_map` on. `1.0` turns it off. Between 1.0 and 3.0, defaults
+    /// to 1.5.
     pub chroma_flat_boost: f32,
     /// How much more gently textured dark areas are filtered, as a multiplier on the luma
     /// threshold.

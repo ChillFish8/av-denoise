@@ -12,8 +12,7 @@ const MAP_QUARTER: u32 = 8;
 
 /// The mean of the four map quarters a reference patch at `(rx, ry)` overlaps.
 ///
-/// A patch on the 8-pixel grid reads one quarter four times. The sum always runs in the same order,
-/// so a host copy of it reproduces the result exactly.
+/// A patch on the 8-pixel grid reads one quarter four times.
 #[cube]
 pub(crate) fn strength_map_scale(
     map: &Array<f32>,
@@ -34,5 +33,5 @@ pub(crate) fn strength_map_scale(
     let bottom_left = map[(row_hi * map_cols + col_lo) as usize];
     let bottom_right = map[(row_hi * map_cols + col_hi) as usize];
     let sum = top_left + top_right + bottom_left + bottom_right;
-    sum / 4.0f32
+    sum * 0.25f32
 }
