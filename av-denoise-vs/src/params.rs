@@ -182,6 +182,9 @@ pub struct RawParams {
     pub spatial_radius: Option<i64>,
     pub refine: Option<i64>,
     pub noise_map: Option<bool>,
+    pub flat_boost: Option<f64>,
+    pub chroma_flat_boost: Option<f64>,
+    pub shadow_soften: Option<f64>,
 }
 
 /// Turns a nonnegative script integer into a `u32`, naming `field` in
@@ -268,6 +271,9 @@ fn reject_mismatched_params(
         ("spatial_radius", raw.spatial_radius.is_some()),
         ("refine", raw.refine.is_some()),
         ("noise_map", raw.noise_map.is_some()),
+        ("flat_boost", raw.flat_boost.is_some()),
+        ("chroma_flat_boost", raw.chroma_flat_boost.is_some()),
+        ("shadow_soften", raw.shadow_soften.is_some()),
     ];
 
     match algorithm_kind {
@@ -501,6 +507,18 @@ pub fn plane_options_from(
                 Some(enabled) => enabled,
                 None => Nl4dOptions::default().noise_map,
             },
+            flat_boost: raw
+                .flat_boost
+                .map(|v| v as f32)
+                .unwrap_or_else(|| Nl4dOptions::default().flat_boost),
+            chroma_flat_boost: raw
+                .chroma_flat_boost
+                .map(|v| v as f32)
+                .unwrap_or_else(|| Nl4dOptions::default().chroma_flat_boost),
+            shadow_soften: raw
+                .shadow_soften
+                .map(|v| v as f32)
+                .unwrap_or_else(|| Nl4dOptions::default().shadow_soften),
             ..Nl4dOptions::default()
         }),
     };

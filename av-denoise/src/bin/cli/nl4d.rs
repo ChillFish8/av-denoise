@@ -164,6 +164,28 @@ pub struct Nl4dArgs {
     #[arg(long)]
     pub no_noise_map: bool,
 
+    /// Filters flat, grainy areas harder, as a multiplier on the luma threshold.
+    ///
+    /// Between `1` and `3`. Library default is 1.5. `1` turns it off. Has no effect with
+    /// `--no-noise-map`.
+    #[arg(long)]
+    pub flat_boost: Option<f32>,
+
+    /// Filters flat, grainy areas of the colour planes harder, as a multiplier on the chroma
+    /// threshold.
+    ///
+    /// Between `1` and `3`. Library default is 1.5. `1` turns it off. Has no effect with
+    /// `--no-noise-map`.
+    #[arg(long)]
+    pub chroma_flat_boost: Option<f32>,
+
+    /// Filters textured dark areas more gently, as a multiplier on the luma threshold.
+    ///
+    /// Between `0.1` and `1`. Library default is 0.65. It applies in full at or below luma 128 of
+    /// 255 and fades out by 160. `1` turns it off. Has no effect with `--no-noise-map`.
+    #[arg(long)]
+    pub shadow_soften: Option<f32>,
+
     /// Estimates noise from a local window instead of a temporal EMA
     /// over stream history.
     ///
@@ -259,9 +281,9 @@ impl Nl4dArgs {
                     // to measure the difference on real footage.
                     windowed_noise_estimation: self.windowed_noise_estimation,
                     noise_map: defaults.noise_map && !self.no_noise_map,
-                    flat_boost: defaults.flat_boost,
-                    chroma_flat_boost: defaults.chroma_flat_boost,
-                    shadow_soften: defaults.shadow_soften,
+                    flat_boost: self.flat_boost.unwrap_or(defaults.flat_boost),
+                    chroma_flat_boost: self.chroma_flat_boost.unwrap_or(defaults.chroma_flat_boost),
+                    shadow_soften: self.shadow_soften.unwrap_or(defaults.shadow_soften),
                 }),
                 // nl4d has no NLM weighting pass for a strength to apply to.
                 luma_strength: None,
@@ -716,5 +738,35 @@ mod tests {
 
         assert_eq!(opts.planes.luma_lambda_ht, None);
         assert_eq!(opts.planes.chroma_lambda_ht, None);
+    }
+
+    #[test]
+    fn the_strength_map_flags_flow_into_the_nl4d_algorithm() {
+        let (args, nl4d) = parse(&[
+            "--flat-boost",
+            "2.0",
+            "--chroma-flat-boost",
+            "1.2",
+            "--shadow-soften",
+            "0.8",
+        ]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let algorithm = expect_nl4d(&opts);
+
+        assert_eq!(algorithm.flat_boost, 2.0);
+        assert_eq!(algorithm.chroma_flat_boost, 1.2);
+        assert_eq!(algorithm.shadow_soften, 0.8);
+    }
+
+    #[test]
+    fn unset_strength_map_flags_resolve_to_the_library_defaults() {
+        let (args, nl4d) = parse(&[]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let algorithm = expect_nl4d(&opts);
+        let defaults = Nl4dOptions::default();
+
+        assert_eq!(algorithm.flat_boost, defaults.flat_boost);
+        assert_eq!(algorithm.chroma_flat_boost, defaults.chroma_flat_boost);
+        assert_eq!(algorithm.shadow_soften, defaults.shadow_soften);
     }
 }

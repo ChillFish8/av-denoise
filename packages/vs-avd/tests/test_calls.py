@@ -72,6 +72,13 @@ def test_kwargs_pass_through_verbatim(fake, monkeypatch):
     assert kwargs == {"sigma": 0.5, "temporal_radius": 3}
 
 
+def test_nl4d_forwards_the_strength_map_settings(fake, monkeypatch):
+    monkeypatch.setattr("vsavd._nl4d_filter", lambda: fake)
+    Nl4d("clip", flat_boost=2.0, chroma_flat_boost=1.2, shadow_soften=0.8)
+    _, kwargs = fake.calls[0]
+    assert kwargs == {"flat_boost": 2.0, "chroma_flat_boost": 1.2, "shadow_soften": 0.8}
+
+
 def test_sigma_is_not_a_typed_parameter():
     """sigma is reachable through kwargs but must not be in any signature.
 

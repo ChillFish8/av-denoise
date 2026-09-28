@@ -889,6 +889,80 @@ fn the_four_nl4d_dials_are_rejected_for_nlmeans() {
 }
 
 #[test]
+fn strength_map_params_reach_nl4d_options() {
+    let raw = RawParams {
+        flat_boost: Some(2.0),
+        chroma_flat_boost: Some(1.2),
+        shadow_soften: Some(0.8),
+        ..RawParams::default()
+    };
+    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+    match plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+        .unwrap()
+        .algorithm
+    {
+        av_denoise_core::Algorithm::Nl4d(nl4d) => {
+            assert_eq!(nl4d.flat_boost, 2.0);
+            assert_eq!(nl4d.chroma_flat_boost, 1.2);
+            assert_eq!(nl4d.shadow_soften, 0.8);
+        },
+        other => panic!("expected Nl4d, got {other:?}"),
+    }
+}
+
+#[test]
+fn strength_map_params_default_to_the_library_values() {
+    let raw = RawParams::default();
+    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+    let defaults = av_denoise_core::Nl4dOptions::default();
+    match plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+        .unwrap()
+        .algorithm
+    {
+        av_denoise_core::Algorithm::Nl4d(nl4d) => {
+            assert_eq!(nl4d.flat_boost, defaults.flat_boost);
+            assert_eq!(nl4d.chroma_flat_boost, defaults.chroma_flat_boost);
+            assert_eq!(nl4d.shadow_soften, defaults.shadow_soften);
+        },
+        other => panic!("expected Nl4d, got {other:?}"),
+    }
+}
+
+#[test]
+fn strength_map_params_are_rejected_for_nlmeans() {
+    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+    let cases = [
+        (
+            "flat_boost",
+            RawParams {
+                flat_boost: Some(1.5),
+                ..RawParams::default()
+            },
+        ),
+        (
+            "chroma_flat_boost",
+            RawParams {
+                chroma_flat_boost: Some(1.5),
+                ..RawParams::default()
+            },
+        ),
+        (
+            "shadow_soften",
+            RawParams {
+                shadow_soften: Some(0.65),
+                ..RawParams::default()
+            },
+        ),
+    ];
+    for (name, raw) in cases {
+        let err = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(name), "{name}: got {err}");
+    }
+}
+
+#[test]
 fn a_negative_spatial_radius_is_rejected() {
     let raw = RawParams {
         spatial_radius: Some(-1),

@@ -179,6 +179,9 @@ def Nl4d(
     spatial_radius: int | None = None,
     refine: int | None = None,
     noise_map: bool | None = None,
+    flat_boost: float | None = None,
+    chroma_flat_boost: float | None = None,
+    shadow_soften: float | None = None,
     accelerators: list[Accelerators] | None = None,
     **kwargs: Any,
 ) -> "vs.VideoNode":
@@ -208,6 +211,12 @@ def Nl4d(
             Raise it when motion tracking lands close but not exact.
         noise_map: Whether to scale the luma threshold by how noisy each brightness level is.
             On by default, `False` turns it off.
+        flat_boost: How much harder flat, grainy areas are filtered, as a multiplier on the luma
+            threshold. Between 1.0 and 3.0, 1.5 by default. `1.0` turns it off. Needs `noise_map`.
+        chroma_flat_boost: The same for the colour planes. Between 1.0 and 3.0, 1.5 by default.
+        shadow_soften: How much more gently textured dark areas are filtered, as a multiplier on
+            the luma threshold. Between 0.1 and 1.0, 0.65 by default. `1.0` turns it off. Needs
+            `noise_map`.
         accelerators: The accelerators to try and use in the order to attempt.
         **kwargs: Further parameters reachable by name, documented in the
             `av-denoise` CLI documentation under their flag names.
@@ -236,6 +245,9 @@ def Nl4d(
         spatial_radius=spatial_radius,
         refine=refine,
         noise_map=noise_map,
+        flat_boost=flat_boost,
+        chroma_flat_boost=chroma_flat_boost,
+        shadow_soften=shadow_soften,
         accelerators=accelerators_string,
         **kwargs,
     )

@@ -68,6 +68,11 @@ the smoothing off and leaves the tracked field as it is.
 luma threshold by how noisy each brightness level is, filtering noisy levels harder and clean ones
 more lightly.
 
+**`--flat-boost`, `--chroma-flat-boost` and `--shadow-soften` adjust the noise map by area.** Flat,
+grainy areas such as skies are filtered harder, 1.5 times by default on both luma and chroma.
+Textured dark areas are filtered more gently, at 0.65 times by default, fading out between luma
+128 and 160. `1` turns each one off, and `--no-noise-map` turns all three off.
+
 ### What not to touch in NL4D
 
 - **`--sigma`** pins the noise level to a fixed value and turns the per-scene measurement off
