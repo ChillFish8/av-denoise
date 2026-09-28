@@ -165,6 +165,8 @@ fn run_fused_over(fx: &RingFixture, k: Knobs) -> FusedRun {
             refs_x,
             map_cols,
             map_rows,
+            0.0f32,
+            false,
         );
     }
 

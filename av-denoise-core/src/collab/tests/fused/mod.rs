@@ -105,6 +105,8 @@ pub(super) struct Setup {
     pub(super) noise_curve: Option<[f32; NOISE_CURVE_BINS]>,
     /// A strength map and the mode it applies in. `None` launches a unit map with the map off.
     pub(super) strength_map: Option<(Vec<f32>, u32)>,
+    /// The pooled threshold's ratio to lambda. `None` launches the plain per-coefficient test.
+    pub(super) pooled: Option<f32>,
     /// The channels the ring interleaves per pixel, laid out at
     /// [ChannelMode::storage_count](crate::nlmeans::ChannelMode::storage_count) floats each.
     pub(super) channel_mode: ChannelMode,
@@ -141,6 +143,7 @@ impl Setup {
             kaiser_beta: 0.0,
             noise_curve: None,
             strength_map: None,
+            pooled: None,
             channel_mode: ChannelMode::Luma,
         }
     }
@@ -497,6 +500,8 @@ pub(super) fn run_fused_walk(s: &Setup, warp_uniform: Option<bool>) -> Aggregate
             b.refs_x,
             map_cols,
             map_rows,
+            s.pooled.unwrap_or(0.0),
+            s.pooled.is_some(),
         );
     }
 

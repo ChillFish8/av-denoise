@@ -766,6 +766,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 refs_x,
                 self.map_cols,
                 self.map_rows,
+                0.0f32,
+                false,
             );
         }
 

@@ -464,6 +464,8 @@ fn run_spatial_only(
             refs_x,
             map_cols,
             map_rows,
+            0.0f32,
+            false,
         );
 
         collab_normalise::launch_unchecked::<R>(
@@ -708,6 +710,8 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 refs_x,
                 map_cols,
                 map_rows,
+                0.0f32,
+                false,
             );
 
             collab_normalise::launch_unchecked::<R>(

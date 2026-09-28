@@ -6,6 +6,7 @@ pub(crate) mod strength_map;
 use cubecl::prelude::*;
 
 use self::grid::{grid_fwd, grid_inv, grid_variance};
+use self::pooled::pooled_threshold;
 use self::search::{spatial_search, trajectory_search};
 use self::strength_map::strength_map_scale;
 pub use self::strength_map::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
@@ -202,6 +203,10 @@ const _: () = assert!(
 /// [STRENGTH_MAP_ALL] it scales every channel's threshold when there is no curve. With a curve,
 /// channel 0 keeps its curve threshold. [STRENGTH_MAP_OFF] leaves every threshold as it is.
 ///
+/// With `pooled` set, a coefficient is kept on the mean energy of itself and its four frequency
+/// neighbours instead of its own, against `channel_lambda * pool_ratio`. See
+/// [pooled_threshold](crate::collab::kernels::fused::pooled::pooled_threshold).
+///
 /// The one coefficient that is both the group average and the patch's
 /// spatial DC always survives the threshold, whatever its magnitude. A
 /// group's mean brightness is signal, not something a noise threshold
@@ -254,6 +259,9 @@ const _: () = assert!(
 /// `grid_frames` is the frames per volume, from
 /// [grid_frames](crate::collab::grid_frames). At 1 the grid compiles out
 /// and every group is a single-frame one.
+///
+/// `pool_ratio` scales each channel's lambda into the pooled threshold. It is only read with
+/// `pooled` set.
 ///
 /// # Warp-uniform search
 ///
@@ -340,6 +348,8 @@ pub fn collab_fused<N: Size>(
     #[comptime] refs_x: u32,
     #[comptime] map_cols: u32,
     #[comptime] map_rows: u32,
+    pool_ratio: f32,
+    #[comptime] pooled: bool,
 ) {
     let tid = UNIT_POS_X;
     let grp = tid / 8u32;
@@ -636,24 +646,39 @@ pub fn collab_fused<N: Size>(
             other_lambda
         };
         let mut retained_v = 0.0f32;
-        #[unroll]
-        for i in 0..PATCH_SIZE {
-            let factor = dct_profile[i as usize] * prof_sub;
+        if comptime!(pooled) {
+            let threshold = channel_lambda * pool_ratio;
+            retained_v = pooled_threshold(
+                &mut stack,
+                &v,
+                dct_profile,
+                prof_sub,
+                sub,
+                base,
+                k_use,
+                threshold,
+                channel_lambda,
+            );
+        } else {
             #[unroll]
-            for j in 0..MAX_K {
-                if j < k_use {
-                    let vj = v[j as usize] * factor;
-                    let slot = (j * PATCH_SIZE + i) as usize;
-                    let mut keep = f32::abs(stack[slot]) >= channel_lambda * f32::sqrt(vj);
-                    if comptime!(j == 0u32 && i == 0u32) {
-                        if sub == 0u32 {
-                            keep = true;
+            for i in 0..PATCH_SIZE {
+                let factor = dct_profile[i as usize] * prof_sub;
+                #[unroll]
+                for j in 0..MAX_K {
+                    if j < k_use {
+                        let vj = v[j as usize] * factor;
+                        let slot = (j * PATCH_SIZE + i) as usize;
+                        let mut keep = f32::abs(stack[slot]) >= channel_lambda * f32::sqrt(vj);
+                        if comptime!(j == 0u32 && i == 0u32) {
+                            if sub == 0u32 {
+                                keep = true;
+                            }
                         }
-                    }
-                    if keep {
-                        retained_v += vj;
-                    } else {
-                        stack[slot] = 0.0f32;
+                        if keep {
+                            retained_v += vj;
+                        } else {
+                            stack[slot] = 0.0f32;
+                        }
                     }
                 }
             }

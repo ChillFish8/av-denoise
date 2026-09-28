@@ -1,5 +1,6 @@
 use cubecl::prelude::*;
 
+use super::{Setup, cross_frame_setup, run_fused, run_fused_walk, unique_frame};
 use crate::collab::kernels::fused::pooled::pooled_threshold;
 use crate::collab::kernels::plane_ops::group_base;
 use crate::collab::tests::helpers::{R, make_client};
@@ -290,4 +291,78 @@ fn zero_noise_variance_stays_finite() {
 
     assert!(got.iter().flatten().flatten().all(|value| value.is_finite()));
     assert!(retained.is_finite());
+}
+
+/// The luma ratio at the default lambda, pinned here so the kernel tests don't move with the default.
+const RATIO: f32 = 2.2 / 3.78;
+
+#[test]
+fn pooling_changes_the_output() {
+    let mut setup = cross_frame_setup(64, 48, 2);
+    let plain = run_fused(&setup);
+    setup.pooled = Some(RATIO);
+    let pooled = run_fused(&setup);
+
+    assert_ne!(plain.accum, pooled.accum);
+}
+
+#[test]
+fn both_walks_agree_with_pooling_on() {
+    let mut setup = cross_frame_setup(64, 48, 2);
+    setup.pooled = Some(RATIO);
+
+    let divergent = run_fused_walk(&setup, Some(false));
+    let uniform = run_fused_walk(&setup, Some(true));
+
+    assert_eq!(divergent.accum, uniform.accum);
+    assert_eq!(divergent.wsum, uniform.wsum);
+    assert_eq!(divergent.group_weight, uniform.group_weight);
+}
+
+#[test]
+fn a_ragged_frame_with_pooling_on_completes_and_both_walks_agree() {
+    let mut setup = Setup::spatial_only(unique_frame(70, 54), 70, 54);
+    setup.pooled = Some(RATIO);
+
+    let divergent = run_fused_walk(&setup, Some(false));
+    let uniform = run_fused_walk(&setup, Some(true));
+
+    assert_eq!(divergent.accum, uniform.accum);
+    assert!(
+        divergent.frame_weight_sum(0) > 0,
+        "the frame should receive weight"
+    );
+    let covered = (0..setup.pixels()).all(|idx| divergent.wsum[idx] > 0);
+    assert!(covered, "every pixel of a ragged frame should be covered");
+}
+
+#[test]
+fn a_small_fallback_group_with_pooling_on_stays_finite() {
+    let mut setup = Setup::spatial_only(unique_frame(64, 48), 64, 48);
+    setup.k_max = 4;
+    setup.pooled = Some(RATIO);
+
+    let pooled = run_fused(&setup);
+
+    assert!(
+        pooled
+            .group_weight
+            .iter()
+            .all(|weight| weight.is_finite() && *weight > 0.0)
+    );
+}
+
+#[test]
+fn a_noiseless_flat_frame_passes_through_with_pooling_on() {
+    let mut setup = Setup::spatial_only(vec![0.4f32; 64 * 48], 64, 48);
+    setup.sigma = 1.0e-6;
+    setup.pooled = Some(RATIO);
+
+    let pooled = run_fused(&setup);
+
+    assert!(pooled.group_weight.iter().all(|weight| weight.is_finite()));
+    for idx in 0..setup.pixels() {
+        let value = pooled.pixel(idx);
+        assert!((value - 0.4).abs() < 1.0e-3, "pixel {idx} is {value}");
+    }
 }

@@ -296,6 +296,8 @@ fn run_scatter_stage_windowed(
             refs_along(width),
             map_cols,
             map_rows,
+            0.0f32,
+            false,
         );
         collab_normalise::launch_unchecked::<R>(
             &client,

@@ -62,7 +62,12 @@ pub struct CollabFusedBench<R: Runtime> {
     pub noise_curve: bool,
     /// Launches with a varied strength map in [STRENGTH_MAP_LUMA] mode.
     pub strength_map: bool,
+    /// Launches with the pooled threshold on.
+    pub pooled: bool,
 }
+
+/// The luma pool ratio at the default lambda. The kernel's cost does not depend on its value.
+const POOL_RATIO: f32 = 2.2 / 3.78;
 
 /// A curve that doubles the luma threshold in the darker half and halves it
 /// in the brighter one.
@@ -262,6 +267,8 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
                 refs_x,
                 map_cols,
                 map_rows,
+                POOL_RATIO,
+                self.pooled,
             );
         }
         Ok(())
@@ -271,7 +278,8 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
         let field = if self.split_mv { "_split_mv" } else { "" };
         let curve = if self.noise_curve { "_noise_curve" } else { "" };
         let map = if self.strength_map { "_strength_map" } else { "" };
-        format!("collab_fused_1080p_{}{field}{curve}{map}", self.ch_name)
+        let pool = if self.pooled { "_pooled" } else { "" };
+        format!("collab_fused_1080p_{}{field}{curve}{map}{pool}", self.ch_name)
     }
 
     fn sync(&self) {
