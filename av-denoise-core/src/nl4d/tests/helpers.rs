@@ -49,6 +49,9 @@ pub(super) fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
         field_lambda: 0.0,
         // No effect here, since sigma is pinned.
         noise_map: true,
+        flat_boost: 1.5,
+        chroma_flat_boost: 1.5,
+        shadow_soften: 0.65,
     }
 }
 

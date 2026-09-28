@@ -259,6 +259,9 @@ impl Nl4dArgs {
                     // to measure the difference on real footage.
                     windowed_noise_estimation: self.windowed_noise_estimation,
                     noise_map: defaults.noise_map && !self.no_noise_map,
+                    flat_boost: defaults.flat_boost,
+                    chroma_flat_boost: defaults.chroma_flat_boost,
+                    shadow_soften: defaults.shadow_soften,
                 }),
                 // nl4d has no NLM weighting pass for a strength to apply to.
                 luma_strength: None,

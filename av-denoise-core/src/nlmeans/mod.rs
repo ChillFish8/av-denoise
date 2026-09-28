@@ -61,7 +61,9 @@ pub use pending::{Pending, TryWait};
 pub use prefilter::{DEFAULT_PILOT_STRENGTH_SCALE, PrefilterMode, parse_prefilter};
 
 pub use self::noise::NOISE_CURVE_BINS;
-pub(crate) use self::noise::{QuarterClass, QuarterClasses, StrengthMapParams};
+#[cfg(test)]
+pub(crate) use self::noise::QuarterClass;
+pub(crate) use self::noise::{QuarterClasses, StrengthMapParams};
 
 /// Cube X dimension for tile-heavy fused/separable kernels.
 pub const BLOCK_X: u32 = 32;

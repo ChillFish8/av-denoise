@@ -5,3 +5,4 @@ mod grouping;
 mod noise_map;
 mod pipeline;
 mod regularise;
+mod strength_map;

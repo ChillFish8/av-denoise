@@ -252,6 +252,12 @@ pub struct Nl4dOptions {
     pub field_lambda: f32,
     /// See [crate::nl4d::Nl4dParams::noise_map].
     pub noise_map: bool,
+    /// See [crate::nl4d::Nl4dParams::flat_boost].
+    pub flat_boost: f32,
+    /// See [crate::nl4d::Nl4dParams::chroma_flat_boost].
+    pub chroma_flat_boost: f32,
+    /// See [crate::nl4d::Nl4dParams::shadow_soften].
+    pub shadow_soften: f32,
 }
 
 impl Default for Nl4dOptions {
@@ -275,6 +281,9 @@ impl Default for Nl4dOptions {
             windowed_noise_estimation: false,
             field_lambda: defaults.field_lambda,
             noise_map: defaults.noise_map,
+            flat_boost: defaults.flat_boost,
+            chroma_flat_boost: defaults.chroma_flat_boost,
+            shadow_soften: defaults.shadow_soften,
         }
     }
 }
@@ -679,6 +688,9 @@ fn build_engine<R: Runtime>(
                 kaiser_beta: opts.kaiser_beta,
                 field_lambda: opts.field_lambda,
                 noise_map: opts.noise_map,
+                flat_boost: opts.flat_boost,
+                chroma_flat_boost: opts.chroma_flat_boost,
+                shadow_soften: opts.shadow_soften,
             };
             let denoiser =
                 Nl4dDenoiser::with_output_format(client, nl4d_params, width, height, output_format)

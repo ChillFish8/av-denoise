@@ -39,8 +39,10 @@ use cubecl::server::Handle;
 pub use self::curve::NOISE_CURVE_BINS;
 pub(crate) use self::curve::NoiseCurve;
 pub(super) use self::curve::build_noise_curve;
+#[cfg(test)]
+pub(crate) use self::strength_map::QuarterClass;
 pub(super) use self::strength_map::classify_quarters;
-pub(crate) use self::strength_map::{QuarterClass, QuarterClasses, StrengthMapParams};
+pub(crate) use self::strength_map::{QuarterClasses, StrengthMapParams};
 use super::align::StorageAlign;
 use super::kernels::{
     nlm_noise_partial,

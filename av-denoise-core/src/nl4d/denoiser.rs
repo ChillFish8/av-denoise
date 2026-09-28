@@ -12,7 +12,7 @@ use crate::collab::kernels::aggregate::{
     kaiser_window,
     weight_scale,
 };
-use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
+use crate::collab::kernels::fused::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use crate::denoiser::{DenoiserError, FrameOutput, OutputFormat};
@@ -25,7 +25,9 @@ use crate::nlmeans::{
     NOISE_CURVE_BINS,
     NlmDenoiser,
     Pending,
+    QuarterClasses,
     RingView,
+    StrengthMapParams,
     start_readback,
 };
 
@@ -152,6 +154,15 @@ pub struct Nl4dDenoiser<R: Runtime> {
     /// Set when [Nl4dParams::noise_map](crate::nl4d::Nl4dParams::noise_map)
     /// is on and the denoiser filters luma.
     apply_noise_map: bool,
+    /// The luma map's multipliers, set when `apply_noise_map` is and they are not all 1.0.
+    luma_map: Option<StrengthMapParams>,
+    /// The flat boost a chroma denoiser applies, set when the noise map is on and the boost is not
+    /// 1.0.
+    chroma_map_boost: Option<f32>,
+    /// A strength map of all 1.0, bound by every pass with no map to apply.
+    unit_map: Handle,
+    map_cols: u32,
+    map_rows: u32,
 }
 
 impl<R: Runtime> Nl4dDenoiser<R> {
@@ -208,7 +219,15 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
         let channels = params.nlm.channels;
         let apply_noise_map = params.noise_map && channels != ChannelMode::Chroma;
-        front.set_luma_noise_fields(apply_noise_map);
+        let luma_map_params = StrengthMapParams {
+            flat_boost: params.flat_boost,
+            shadow_soften: params.shadow_soften,
+        };
+        let luma_map = (apply_noise_map && !luma_map_params.is_identity()).then_some(luma_map_params);
+        let chroma_map_applies =
+            params.noise_map && channels == ChannelMode::Chroma && params.chroma_flat_boost != 1.0;
+        let chroma_map_boost = chroma_map_applies.then_some(params.chroma_flat_boost);
+        front.set_luma_noise_fields(apply_noise_map || chroma_map_boost.is_some());
         front.set_shifted_edges(true);
 
         let stored_ch = channels.storage_count();
@@ -228,6 +247,11 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         // over a denoiser's life, so it is built here rather than every
         // submit.
         let kaiser_buf = client.create_from_slice(f32::as_bytes(&kaiser_window(params.kaiser_beta)));
+
+        let (map_cols, map_rows) = strength_map_dims(width, height);
+        let unit_map_host = vec![1.0f32; (map_cols * map_rows) as usize];
+        let unit_map = client.create_from_slice(f32::as_bytes(&unit_map_host));
+
         // One region per physical ring slot of the front end's own frame
         // ring, `1 + 2 * temporal_radius` of them, see the `accum` field
         // doc for why. The ring is zeroed in full by a stream's first pass
@@ -296,6 +320,11 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             reg_mv,
             reg_conf,
             apply_noise_map,
+            luma_map,
+            chroma_map_boost,
+            unit_map,
+            map_cols,
+            map_rows,
         })
     }
 
@@ -584,10 +613,22 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let (ratios, curve_valid) = noise_curve_upload(curve_ratios, self.apply_noise_map);
         let noise_curve_buf = client.create_from_slice(f32::as_bytes(&ratios));
 
-        let (map_cols, map_rows) = strength_map_dims(self.width, self.height);
-        let map_len = (map_cols * map_rows) as usize;
-        let unit_map = vec![1.0f32; map_len];
-        let unit_map_buf = client.create_from_slice(f32::as_bytes(&unit_map));
+        let classes = self.front.current_quarter_classes();
+        if let Some(classes) = classes {
+            let class_dims = (classes.cols(), classes.rows());
+            let map_dims = (self.map_cols as usize, self.map_rows as usize);
+            assert_eq!(
+                class_dims, map_dims,
+                "quarter classes must cover the strength map"
+            );
+        }
+
+        let map_upload = strength_map_upload(classes, curve_valid, self.luma_map, self.chroma_map_boost);
+        let (strength_map_buf, map_mode) = match map_upload {
+            Some((multipliers, mode)) => (client.create_from_slice(f32::as_bytes(&multipliers)), mode),
+            None => (self.unit_map.clone(), STRENGTH_MAP_OFF),
+        };
+        let map_len = (self.map_cols * self.map_rows) as usize;
 
         let refs_x = refs_along(self.width);
         let refs_y = refs_along(self.height);
@@ -693,7 +734,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 ArrayArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
                 ArrayArg::from_raw_parts(self.sigma_buf.clone(), stored_ch as usize),
                 ArrayArg::from_raw_parts(noise_curve_buf, NOISE_CURVE_BINS),
-                ArrayArg::from_raw_parts(unit_map_buf, map_len),
+                ArrayArg::from_raw_parts(strength_map_buf, map_len),
                 ArrayArg::from_raw_parts(self.dct_profile_buf.clone(), 8),
                 ArrayArg::from_raw_parts(self.kaiser_buf.clone(), PATCH_SIZE as usize),
                 ArrayArg::from_raw_parts(self.accum.clone(), accum_ring_len),
@@ -703,7 +744,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 self.c_min,
                 self.lambda_ht,
                 curve_valid,
-                STRENGTH_MAP_OFF,
+                map_mode,
                 wnorm,
                 self.accum_scale,
                 self.warp_uniform,
@@ -723,8 +764,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 stored_ch,
                 self.spatial_radius,
                 refs_x,
-                map_cols,
-                map_rows,
+                self.map_cols,
+                self.map_rows,
             );
         }
 
@@ -805,4 +846,28 @@ pub(super) fn noise_curve_upload(
         Some(ratios) if applies => (ratios, 1),
         _ => ([0.0f32; NOISE_CURVE_BINS], 0),
     }
+}
+
+/// The strength map a pass uploads, and the mode the kernel applies it in.
+///
+/// `None` binds the unit map with the map off. The luma map needs a curve the pass applies, and
+/// the chroma map needs only the quarter classes.
+pub(super) fn strength_map_upload(
+    classes: Option<&QuarterClasses>,
+    curve_valid: u32,
+    luma_map: Option<StrengthMapParams>,
+    chroma_map_boost: Option<f32>,
+) -> Option<(Vec<f32>, u32)> {
+    let classes = classes?;
+
+    if let Some(params) = luma_map
+        && curve_valid == 1
+    {
+        let multipliers = classes.luma_multipliers(params);
+        return Some((multipliers, STRENGTH_MAP_LUMA));
+    }
+
+    let boost = chroma_map_boost?;
+    let multipliers = classes.chroma_multipliers(boost);
+    Some((multipliers, STRENGTH_MAP_ALL))
 }
