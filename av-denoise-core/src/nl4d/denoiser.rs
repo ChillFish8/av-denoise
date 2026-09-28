@@ -4,7 +4,7 @@ use cubecl::server::Handle;
 use super::params::Nl4dParams;
 use super::regularise::run_regularise;
 use super::snapshot::{LastFields, MotionSnapshot, read_snapshot};
-use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
+use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{
     collab_normalise,
     collab_zero_accum,
@@ -12,7 +12,7 @@ use crate::collab::kernels::aggregate::{
     kaiser_window,
     weight_scale,
 };
-use crate::collab::kernels::fused::collab_fused;
+use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use crate::denoiser::{DenoiserError, FrameOutput, OutputFormat};
@@ -584,6 +584,11 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let (ratios, curve_valid) = noise_curve_upload(curve_ratios, self.apply_noise_map);
         let noise_curve_buf = client.create_from_slice(f32::as_bytes(&ratios));
 
+        let (map_cols, map_rows) = strength_map_dims(self.width, self.height);
+        let map_len = (map_cols * map_rows) as usize;
+        let unit_map = vec![1.0f32; map_len];
+        let unit_map_buf = client.create_from_slice(f32::as_bytes(&unit_map));
+
         let refs_x = refs_along(self.width);
         let refs_y = refs_along(self.height);
         let refs = ref_count(self.width, self.height);
@@ -688,6 +693,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 ArrayArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
                 ArrayArg::from_raw_parts(self.sigma_buf.clone(), stored_ch as usize),
                 ArrayArg::from_raw_parts(noise_curve_buf, NOISE_CURVE_BINS),
+                ArrayArg::from_raw_parts(unit_map_buf, map_len),
                 ArrayArg::from_raw_parts(self.dct_profile_buf.clone(), 8),
                 ArrayArg::from_raw_parts(self.kaiser_buf.clone(), PATCH_SIZE as usize),
                 ArrayArg::from_raw_parts(self.accum.clone(), accum_ring_len),
@@ -697,6 +703,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 self.c_min,
                 self.lambda_ht,
                 curve_valid,
+                STRENGTH_MAP_OFF,
                 wnorm,
                 self.accum_scale,
                 self.warp_uniform,
@@ -716,6 +723,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 stored_ch,
                 self.spatial_radius,
                 refs_x,
+                map_cols,
+                map_rows,
             );
         }
 

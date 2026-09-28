@@ -18,7 +18,7 @@ pub(super) fn stepped_curve() -> [f32; NOISE_CURVE_BINS] {
     curve
 }
 
-fn assert_identical(label: &str, got: &Aggregated, want: &Aggregated) {
+pub(super) fn assert_identical(label: &str, got: &Aggregated, want: &Aggregated) {
     assert_eq!(
         got.group_weight, want.group_weight,
         "{label}: group weights differ"
@@ -38,7 +38,7 @@ fn run_with_curve(curve: Option<[f32; NOISE_CURVE_BINS]>) -> Aggregated {
 }
 
 /// Asserts every pixel in columns `x_start..x_end` of a single-frame run matches exactly.
-fn assert_columns_identical(
+pub(super) fn assert_columns_identical(
     label: &str,
     got: &Aggregated,
     want: &Aggregated,
@@ -61,7 +61,13 @@ fn assert_columns_identical(
     }
 }
 
-fn columns_differ(first: &Aggregated, second: &Aggregated, side: u32, x_start: u32, x_end: u32) -> bool {
+pub(super) fn columns_differ(
+    first: &Aggregated,
+    second: &Aggregated,
+    side: u32,
+    x_start: u32,
+    x_end: u32,
+) -> bool {
     for y in 0..side {
         for x in x_start..x_end {
             let idx = (y * side + x) as usize;

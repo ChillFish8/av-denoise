@@ -1,10 +1,13 @@
 pub(crate) mod grid;
 pub(crate) mod search;
+pub(crate) mod strength_map;
 
 use cubecl::prelude::*;
 
 use self::grid::{grid_fwd, grid_inv, grid_variance};
 use self::search::{spatial_search, trajectory_search};
+use self::strength_map::strength_map_scale;
+pub use self::strength_map::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
 use super::aggregate::scatter_patch;
 use super::group::unpack_t;
 use super::plane_ops::{group_base, plane_ssd_reduce8, transpose8};
@@ -192,6 +195,12 @@ const _: () = assert!(
 /// reference patch's mean luma, clamped to 0.33..=3. The group weight
 /// keeps the plain sigma. With no curve the threshold is unchanged.
 ///
+/// A strength map scales thresholds further, one multiplier per 8x8 quarter. Each reference
+/// patch takes the mean of the four quarters it overlaps. With `map_mode` at
+/// [STRENGTH_MAP_LUMA] it scales channel 0's curve ratio before the clamp. With
+/// [STRENGTH_MAP_ALL] it scales every channel's threshold when there is no curve. With a curve,
+/// channel 0 keeps its curve threshold. [STRENGTH_MAP_OFF] leaves every threshold as it is.
+///
 /// The one coefficient that is both the group average and the patch's
 /// spatial DC always survives the threshold, whatever its magnitude. A
 /// group's mean brightness is signal, not something a noise threshold
@@ -228,6 +237,9 @@ const _: () = assert!(
 /// sampled at the centre of an equal-width slice of the luma range. The
 /// kernel interpolates between neighbouring centres. The curve only takes
 /// effect when `curve_valid` is not 0.
+///
+/// `strength_map` holds `map_cols * map_rows` multipliers, row-major, laid out by
+/// [strength_map_dims](crate::collab::geometry::strength_map_dims).
 ///
 /// `kaiser` holds [`crate::collab::kernels::aggregate::kaiser_window`]'s 8 taps, which
 /// taper each scattered patch toward its edges. Eight ones leave the aggregation uniform.
@@ -295,6 +307,7 @@ pub fn collab_fused<N: Size>(
     neighbour_slots: &Array<u32>,
     sigma: &Array<f32>,
     noise_curve: &Array<f32>,
+    strength_map: &Array<f32>,
     dct_profile: &Array<f32>,
     kaiser: &Array<f32>,
     accum: &mut Array<Atomic<i32>>,
@@ -304,6 +317,7 @@ pub fn collab_fused<N: Size>(
     c_min: f32,
     lambda_ht: f32,
     curve_valid: u32,
+    map_mode: u32,
     weight_scale: f32,
     accum_scale: f32,
     #[comptime] warp_uniform: bool,
@@ -323,6 +337,8 @@ pub fn collab_fused<N: Size>(
     #[comptime] stored_ch: u32,
     #[comptime] spatial_radius: u32,
     #[comptime] refs_x: u32,
+    #[comptime] map_cols: u32,
+    #[comptime] map_rows: u32,
 ) {
     let tid = UNIT_POS_X;
     let grp = tid / 8u32;
@@ -528,8 +544,11 @@ pub fn collab_fused<N: Size>(
     let lower_ratio = noise_curve[lower_bin as usize];
     let upper_ratio = noise_curve[(lower_bin + 1u32) as usize];
     let ratio = lower_ratio + (upper_ratio - lower_ratio) * fraction;
-    let curve_scale = f32::clamp(ratio, NOISE_CURVE_SCALE_MIN, NOISE_CURVE_SCALE_MAX);
-    let luma_lambda = select(curve_valid != 0u32, lambda_ht * curve_scale, lambda_ht);
+    let map_scale = strength_map_scale(strength_map, rx, ry, map_cols, map_rows);
+    let mapped_ratio = select(map_mode == STRENGTH_MAP_LUMA, ratio * map_scale, ratio);
+    let curve_scale = f32::clamp(mapped_ratio, NOISE_CURVE_SCALE_MIN, NOISE_CURVE_SCALE_MAX);
+    let other_lambda = select(map_mode == STRENGTH_MAP_ALL, lambda_ht * map_scale, lambda_ht);
+    let luma_lambda = select(curve_valid != 0u32, lambda_ht * curve_scale, other_lambda);
 
     // The group's normalised weight, computed from channel 0 and reused
     // by every later channel's scatter.
@@ -613,7 +632,7 @@ pub fn collab_fused<N: Size>(
         let channel_lambda = if comptime!(c == 0u32) {
             luma_lambda
         } else {
-            lambda_ht
+            other_lambda
         };
         let mut retained_v = 0.0f32;
         #[unroll]

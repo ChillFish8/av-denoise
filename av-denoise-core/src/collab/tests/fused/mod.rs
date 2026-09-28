@@ -1,15 +1,16 @@
 mod behaviour;
 mod noise_curve;
 mod recorded;
+mod strength_map;
 mod walks;
 
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::helpers::{R, make_client, make_unique_frame, noisy_field_over};
-use crate::collab::geometry::{fused_cubes_x, ref_count, ref_pos, refs_along};
+use crate::collab::geometry::{fused_cubes_x, ref_count, ref_pos, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{WEIGHT_GAIN, cross_frame_accum_scale, kaiser_window, weight_scale};
-use crate::collab::kernels::fused::collab_fused;
+use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use crate::nlmeans::NOISE_CURVE_BINS;
@@ -101,6 +102,8 @@ pub(super) struct Setup {
     /// The frame's noise curve. `None` launches with `curve_valid = 0`
     /// and a zeroed buffer.
     pub(super) noise_curve: Option<[f32; NOISE_CURVE_BINS]>,
+    /// A strength map and the mode it applies in. `None` launches a unit map with the map off.
+    pub(super) strength_map: Option<(Vec<f32>, u32)>,
 }
 
 impl Setup {
@@ -133,6 +136,7 @@ impl Setup {
             profile_override: None,
             kaiser_beta: 0.0,
             noise_curve: None,
+            strength_map: None,
         }
     }
 
@@ -422,6 +426,19 @@ pub(super) fn run_fused_walk(s: &Setup, warp_uniform: Option<bool>) -> Aggregate
     let curve_buf = b.client.create_from_slice(f32::as_bytes(&curve));
     let curve_valid = u32::from(s.noise_curve.is_some());
 
+    let (map_cols, map_rows) = strength_map_dims(s.width, s.height);
+    let map_len = (map_cols * map_rows) as usize;
+    let (map_values, map_mode) = match &s.strength_map {
+        Some((values, mode)) => (values.clone(), *mode),
+        None => (vec![1.0f32; map_len], STRENGTH_MAP_OFF),
+    };
+    assert_eq!(
+        map_values.len(),
+        map_len,
+        "a strength map must cover the frame's quarter grid"
+    );
+    let map_buf = b.client.create_from_slice(f32::as_bytes(&map_values));
+
     unsafe {
         collab_fused::launch_unchecked::<R>(
             &b.client,
@@ -434,6 +451,7 @@ pub(super) fn run_fused_walk(s: &Setup, warp_uniform: Option<bool>) -> Aggregate
             ArrayArg::from_raw_parts(b.neighbour_slots.clone(), s.neighbour_slots.len()),
             ArrayArg::from_raw_parts(b.sigma.clone(), 1),
             ArrayArg::from_raw_parts(curve_buf, NOISE_CURVE_BINS),
+            ArrayArg::from_raw_parts(map_buf, map_len),
             ArrayArg::from_raw_parts(b.dct_profile.clone(), 8),
             ArrayArg::from_raw_parts(b.kaiser.clone(), PATCH_SIZE as usize),
             ArrayArg::from_raw_parts(b.accum.clone(), b.accum_len),
@@ -443,6 +461,7 @@ pub(super) fn run_fused_walk(s: &Setup, warp_uniform: Option<bool>) -> Aggregate
             s.c_min,
             s.lambda_ht,
             curve_valid,
+            map_mode,
             weight_scale(s.sigma, &profile),
             s.accum_scale(),
             warp_uniform.unwrap_or_else(|| needs_warp_uniform_search(&b.client)),
@@ -462,6 +481,8 @@ pub(super) fn run_fused_walk(s: &Setup, warp_uniform: Option<bool>) -> Aggregate
             STORED_CH,
             s.spatial_radius,
             b.refs_x,
+            map_cols,
+            map_rows,
         );
     }
 

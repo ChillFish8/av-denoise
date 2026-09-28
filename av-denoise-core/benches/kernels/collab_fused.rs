@@ -1,6 +1,6 @@
-use av_denoise_core::collab::geometry::{fused_cubes_x, ref_count, refs_along};
+use av_denoise_core::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
 use av_denoise_core::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
-use av_denoise_core::collab::kernels::fused::collab_fused;
+use av_denoise_core::collab::kernels::fused::{STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF, collab_fused};
 use av_denoise_core::collab::kernels::transforms::dct_noise_profile;
 use av_denoise_core::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use av_denoise_core::nlmeans::NOISE_CURVE_BINS;
@@ -60,6 +60,8 @@ pub struct CollabFusedBench<R: Runtime> {
     pub split_mv: bool,
     /// Launches with a stepped noise curve and `curve_valid = 1`.
     pub noise_curve: bool,
+    /// Launches with a varied strength map in [STRENGTH_MAP_LUMA] mode.
+    pub strength_map: bool,
 }
 
 /// A curve that doubles the luma threshold in the darker half and halves it
@@ -96,6 +98,8 @@ pub struct CollabFusedInput {
     pub ring_len: usize,
     /// The noise curve, all zeros unless the arm runs one.
     pub noise_curve: Handle,
+    pub strength_map: Handle,
+    pub map_len: usize,
 }
 
 impl<R: Runtime> Benchmark for CollabFusedBench<R> {
@@ -161,6 +165,17 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
         };
         let noise_curve = self.client.create_from_slice(f32::as_bytes(&curve_host));
 
+        let (map_cols, map_rows) = strength_map_dims(W, H);
+        let map_len = (map_cols * map_rows) as usize;
+        let map_host: Vec<f32> = if self.strength_map {
+            (0..map_len)
+                .map(|index| if index % 3 == 0 { 1.5 } else { 0.65 })
+                .collect()
+        } else {
+            vec![1.0f32; map_len]
+        };
+        let strength_map = self.client.create_from_slice(f32::as_bytes(&map_host));
+
         CollabFusedInput {
             ring,
             mv_field,
@@ -174,6 +189,8 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
             group_weight,
             ring_len: ring_data.len(),
             noise_curve,
+            strength_map,
+            map_len,
         }
     }
 
@@ -191,6 +208,13 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
         let mv_stride = mv_stride(blocks_x, blocks_y, align);
         let conf_stride = conf_stride(blocks_x, blocks_y, align);
 
+        let (map_cols, map_rows) = strength_map_dims(W, H);
+        let map_mode = if self.strength_map {
+            STRENGTH_MAP_LUMA
+        } else {
+            STRENGTH_MAP_OFF
+        };
+
         let grid = CubeCount::new_2d(fused_cubes_x(W), refs_y);
         let dim = CubeDim::new_1d(64);
 
@@ -206,6 +230,7 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
                 ArrayArg::from_raw_parts(args.neighbour_slots.clone(), NEIGHBOUR_SLOTS.len()),
                 ArrayArg::from_raw_parts(args.sigma.clone(), stored_ch as usize),
                 ArrayArg::from_raw_parts(args.noise_curve.clone(), NOISE_CURVE_BINS),
+                ArrayArg::from_raw_parts(args.strength_map.clone(), args.map_len),
                 ArrayArg::from_raw_parts(args.dct_profile.clone(), 8),
                 ArrayArg::from_raw_parts(args.kaiser.clone(), PATCH_SIZE as usize),
                 ArrayArg::from_raw_parts(args.accum.clone(), frame_len * N_FRAMES as usize),
@@ -215,6 +240,7 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
                 0.0f32,
                 LAMBDA_HT,
                 u32::from(self.noise_curve),
+                map_mode,
                 weight_scale(SIGMA, &dct_noise_profile(0.0)),
                 cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS),
                 needs_warp_uniform_search(&self.client),
@@ -234,6 +260,8 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
                 stored_ch,
                 SPATIAL_RADIUS,
                 refs_x,
+                map_cols,
+                map_rows,
             );
         }
         Ok(())
@@ -242,7 +270,8 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
     fn name(&self) -> String {
         let field = if self.split_mv { "_split_mv" } else { "" };
         let curve = if self.noise_curve { "_noise_curve" } else { "" };
-        format!("collab_fused_1080p_{}{field}{curve}", self.ch_name)
+        let map = if self.strength_map { "_strength_map" } else { "" };
+        format!("collab_fused_1080p_{}{field}{curve}{map}", self.ch_name)
     }
 
     fn sync(&self) {
