@@ -1,4 +1,5 @@
 pub(crate) mod grid;
+pub(crate) mod pooled;
 pub(crate) mod search;
 pub(crate) mod strength_map;
 

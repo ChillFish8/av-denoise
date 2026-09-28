@@ -1,5 +1,6 @@
 mod behaviour;
 mod noise_curve;
+mod pooled;
 mod recorded;
 mod strength_map;
 mod walks;
