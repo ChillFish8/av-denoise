@@ -496,7 +496,7 @@ fn no_passing_quarter_gives_none() {
 
 /// A brightness ramp with static noise in each band, so a curve forms
 /// with at least three populated bins.
-fn ramp_frame(width: u32, height: u32, seed: u32) -> Vec<f32> {
+pub(super) fn ramp_frame(width: u32, height: u32, seed: u32) -> Vec<f32> {
     let band_height = height / 3;
     let mut clean = vec![0.0f32; (width * height) as usize];
     for y in 0..height {

@@ -795,6 +795,8 @@ pub(super) struct TemporalNoiseReading {
     /// The per-frame luma noise curve, present only when `with_curve` was
     /// set and a sample was produced.
     pub(super) curve: Option<NoiseCurve>,
+    /// The frame's quarter classes, built against `curve` and present exactly when it is.
+    pub(super) classes: Option<QuarterClasses>,
 }
 
 /// Builds one centre slot's [TemporalNoiseReading].
@@ -817,6 +819,7 @@ pub(super) fn temporal_noise_reading(
     let none = TemporalNoiseReading {
         sample: None,
         curve: None,
+        classes: None,
     };
 
     let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
@@ -871,9 +874,14 @@ pub(super) fn temporal_noise_reading(
         None
     };
 
+    let classes = curve
+        .as_ref()
+        .map(|curve| classify_quarters(records, stored_ch, width, height, curve));
+
     TemporalNoiseReading {
         sample: Some(sample),
         curve,
+        classes,
     }
 }
 

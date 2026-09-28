@@ -1,4 +1,12 @@
-use super::noise_curve::{SyntheticQuarter, frame_dims, quarter_at, synthetic_records, write_quarter};
+use super::helpers::{R, make_client};
+use super::noise_curve::{
+    SyntheticQuarter,
+    frame_dims,
+    quarter_at,
+    ramp_frame,
+    synthetic_records,
+    write_quarter,
+};
 use crate::collab::geometry::strength_map_dims;
 use crate::nlmeans::noise::{
     NOISE_CURVE_BINS,
@@ -7,8 +15,10 @@ use crate::nlmeans::noise::{
     QuarterClasses,
     StrengthMapParams,
     classify_quarters,
+    temporal_noise_reading,
     temporal_stats_record_len,
 };
+use crate::nlmeans::{ChannelMode, HqParams, MotionCompensationMode, NlmDenoiser, NlmParams, PrefilterMode};
 
 const SIGMA: f32 = 0.02;
 
@@ -234,4 +244,66 @@ fn a_quarter_past_the_frame_edge_gets_one() {
     for row in 0..classes.rows() {
         assert_eq!(multipliers[row * cols + 3], 1.0, "row {row}");
     }
+}
+
+#[test]
+fn a_reading_carries_classes_exactly_when_it_carries_a_curve() {
+    let mut quarters = super::noise_curve::quarters_at(0.15, 0.02, 160);
+    quarters.extend(super::noise_curve::quarters_at(0.35, 0.01, 160));
+    quarters.extend(super::noise_curve::quarters_at(0.6, 0.005, 160));
+    let (width, height) = frame_dims(quarters.len());
+    let records = synthetic_records(&quarters);
+
+    let with_curve = temporal_noise_reading(&records, 1, 1, width, height, true);
+    let without_curve = temporal_noise_reading(&records, 1, 1, width, height, false);
+
+    assert!(with_curve.curve.is_some());
+    assert!(with_curve.classes.is_some());
+    assert!(without_curve.curve.is_none());
+    assert!(without_curve.classes.is_none());
+}
+
+#[test]
+fn the_front_end_keeps_classes_beside_the_curve_and_resets_both() {
+    let client = make_client();
+    let width = 320;
+    let height = 240;
+    let params = NlmParams {
+        temporal_radius: 2,
+        search_radius: 2,
+        patch_radius: 2,
+        strength: 1.2,
+        self_weight: 1.0,
+        channels: ChannelMode::Luma,
+        prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
+        hq: Some(HqParams {
+            auto_strength: true,
+            noise_floor: true,
+            sigma_override: None,
+            temporal_confidence: false,
+            thsad_scale: 1.0,
+            sigma_scale: 1.0,
+            windowed_noise_estimation: false,
+        }),
+    };
+
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    denoiser.set_luma_noise_fields(true);
+
+    let mut classes_seen = false;
+    for i in 0..12u32 {
+        let frame = ramp_frame(width, height, 100 + i);
+        denoiser.push_frame(&frame);
+        let _ = denoiser.denoise().unwrap();
+
+        let curve_present = denoiser.current_noise_curve().is_some();
+        let classes_present = denoiser.current_quarter_classes().is_some();
+        assert_eq!(curve_present, classes_present, "push {i}");
+        classes_seen |= classes_present;
+    }
+    assert!(classes_seen, "expected classes to form over the brightness ramp");
+
+    denoiser.reset_stream_state();
+    assert!(denoiser.current_quarter_classes().is_none());
 }
