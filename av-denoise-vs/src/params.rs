@@ -185,6 +185,7 @@ pub struct RawParams {
     pub flat_boost: Option<f64>,
     pub chroma_flat_boost: Option<f64>,
     pub shadow_soften: Option<f64>,
+    pub pooled_threshold: Option<bool>,
 }
 
 /// Turns a nonnegative script integer into a `u32`, naming `field` in
@@ -274,6 +275,7 @@ fn reject_mismatched_params(
         ("flat_boost", raw.flat_boost.is_some()),
         ("chroma_flat_boost", raw.chroma_flat_boost.is_some()),
         ("shadow_soften", raw.shadow_soften.is_some()),
+        ("pooled_threshold", raw.pooled_threshold.is_some()),
     ];
 
     match algorithm_kind {
@@ -519,6 +521,10 @@ pub fn plane_options_from(
                 .shadow_soften
                 .map(|v| v as f32)
                 .unwrap_or_else(|| Nl4dOptions::default().shadow_soften),
+            pooled_threshold: match raw.pooled_threshold {
+                Some(enabled) => enabled,
+                None => Nl4dOptions::default().pooled_threshold,
+            },
             ..Nl4dOptions::default()
         }),
     };

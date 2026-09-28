@@ -65,6 +65,13 @@ def test_nl4d_forwards_noise_map_as_a_bool(fake, monkeypatch):
     assert kwargs == {"noise_map": False}
 
 
+def test_nl4d_forwards_pooled_threshold_as_a_bool(fake, monkeypatch):
+    monkeypatch.setattr("vsavd._nl4d_filter", lambda: fake)
+    Nl4d("clip", pooled_threshold=False)
+    _, kwargs = fake.calls[0]
+    assert kwargs == {"pooled_threshold": False}
+
+
 def test_kwargs_pass_through_verbatim(fake, monkeypatch):
     monkeypatch.setattr("vsavd._nl4d_filter", lambda: fake)
     Nl4d("clip", sigma=0.5, temporal_radius=3)

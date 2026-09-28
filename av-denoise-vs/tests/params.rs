@@ -849,6 +849,48 @@ fn noise_map_is_rejected_for_nlmeans() {
 }
 
 #[test]
+fn pooled_threshold_defaults_to_on() {
+    let raw = RawParams::default();
+    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+    match plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+        .unwrap()
+        .algorithm
+    {
+        av_denoise_core::Algorithm::Nl4d(nl4d) => assert!(nl4d.pooled_threshold),
+        other => panic!("expected Nl4d, got {other:?}"),
+    }
+}
+
+#[test]
+fn pooled_threshold_false_turns_it_off() {
+    let raw = RawParams {
+        pooled_threshold: Some(false),
+        ..RawParams::default()
+    };
+    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+    match plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+        .unwrap()
+        .algorithm
+    {
+        av_denoise_core::Algorithm::Nl4d(nl4d) => assert!(!nl4d.pooled_threshold),
+        other => panic!("expected Nl4d, got {other:?}"),
+    }
+}
+
+#[test]
+fn pooled_threshold_is_rejected_for_nlmeans() {
+    let raw = RawParams {
+        pooled_threshold: Some(true),
+        ..RawParams::default()
+    };
+    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("pooled_threshold"), "got {err}");
+}
+
+#[test]
 fn the_four_nl4d_dials_are_rejected_for_nlmeans() {
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
     for (name, raw) in [

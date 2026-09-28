@@ -164,9 +164,16 @@ pub struct Nl4dArgs {
     #[arg(long)]
     pub no_noise_map: bool,
 
+    /// Turns off the pooled threshold, which judges each frequency together with its neighbours
+    /// so faint texture survives.
+    ///
+    /// Without it, `--flat-boost 1.5` gives the output of earlier releases.
+    #[arg(long)]
+    pub no_pooled_threshold: bool,
+
     /// Filters flat, grainy areas harder, as a multiplier on the luma threshold.
     ///
-    /// Between `1` and `3`. Library default is 1.5. `1` turns it off. Has no effect with
+    /// Between `1` and `3`. Library default is 1.75. `1` turns it off. Has no effect with
     /// `--no-noise-map`.
     #[arg(long)]
     pub flat_boost: Option<f32>,
@@ -284,7 +291,7 @@ impl Nl4dArgs {
                     flat_boost: self.flat_boost.unwrap_or(defaults.flat_boost),
                     chroma_flat_boost: self.chroma_flat_boost.unwrap_or(defaults.chroma_flat_boost),
                     shadow_soften: self.shadow_soften.unwrap_or(defaults.shadow_soften),
-                    pooled_threshold: defaults.pooled_threshold,
+                    pooled_threshold: defaults.pooled_threshold && !self.no_pooled_threshold,
                 }),
                 // nl4d has no NLM weighting pass for a strength to apply to.
                 luma_strength: None,
@@ -460,6 +467,26 @@ mod tests {
     #[test]
     fn there_is_no_positive_noise_map_flag() {
         let err = parse_err(&["--noise-map"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn pooled_threshold_defaults_to_on() {
+        let (args, nl4d) = parse(&[]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        assert!(expect_nl4d(&opts).pooled_threshold);
+    }
+
+    #[test]
+    fn no_pooled_threshold_turns_it_off() {
+        let (args, nl4d) = parse(&["--no-pooled-threshold"]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        assert!(!expect_nl4d(&opts).pooled_threshold);
+    }
+
+    #[test]
+    fn there_is_no_positive_pooled_threshold_flag() {
+        let err = parse_err(&["--pooled-threshold"]);
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 

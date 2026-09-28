@@ -68,11 +68,17 @@ the smoothing off and leaves the tracked field as it is.
 luma threshold by how noisy each brightness level is, filtering noisy levels harder and clean ones
 more lightly.
 
+**`--no-pooled-threshold` turns off the pooled threshold.** It is on by default. Each frequency
+is judged together with its neighbours rather than alone, so faint lines and fine texture
+survive where each frequency on its own would fall under the threshold. Turn it off, and set
+`--flat-boost 1.5`, to get the output of earlier releases.
+
 **`--flat-boost`, `--chroma-flat-boost` and `--shadow-soften` adjust the noise map by area.** Flat,
-grainy areas such as skies are filtered harder, 1.5 times by default on both luma and chroma.
-The chroma boost applies when chroma is denoised in its own pass, not under `--channel-mode yuv`.
-Textured dark areas are filtered more gently, at 0.65 times by default, fading out between luma
-128 and 160. `1` turns each one off, and `--no-noise-map` turns all three off.
+grainy areas such as skies are filtered harder, 1.75 times by default on luma and 1.5 times on
+chroma. The chroma boost applies when chroma is denoised in its own pass, not under
+`--channel-mode yuv`. Textured dark areas are filtered more gently, at 0.65 times by default,
+fading out between luma 128 and 160. `1` turns each one off, and `--no-noise-map` turns all
+three off.
 
 ### What not to touch in NL4D
 

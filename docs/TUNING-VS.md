@@ -101,11 +101,17 @@ more lightly.
 clean = avd.Nl4d(clip, noise_map=False)
 ```
 
+**`pooled_threshold=False` turns off the pooled threshold.** It is on by default. Each frequency
+is judged together with its neighbours rather than alone, so faint lines and fine texture
+survive where each frequency on its own would fall under the threshold. Turn it off, and set
+`flat_boost=1.5`, to get the output of earlier releases.
+
 **`flat_boost`, `chroma_flat_boost` and `shadow_soften` adjust the noise map by area.** Flat,
-grainy areas such as skies are filtered harder, 1.5 times by default on both luma and chroma.
-The chroma boost applies when chroma is denoised in its own pass, not under `channel_mode="yuv"`.
-Textured dark areas are filtered more gently, at 0.65 times by default, fading out between luma
-128 and 160. `1` turns each one off, and `noise_map=False` turns all three off.
+grainy areas such as skies are filtered harder, 1.75 times by default on luma and 1.5 times on
+chroma. The chroma boost applies when chroma is denoised in its own pass, not under
+`channel_mode="yuv"`. Textured dark areas are filtered more gently, at 0.65 times by default,
+fading out between luma 128 and 160. `1` turns each one off, and `noise_map=False` turns all
+three off.
 
 ```python
 clean = avd.Nl4d(clip, shadow_soften=0.8)
