@@ -1,5 +1,6 @@
 mod convert;
 mod coordinator;
+mod decode;
 mod scenes;
 mod source;
 mod stage;

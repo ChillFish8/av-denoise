@@ -30,7 +30,6 @@ fn y4m_bytes(colorspace: y4m::Colorspace, extension: Option<&str>, frames: usize
         encoder.write_frame(&frame).expect("frame should write");
     }
 
-    drop(encoder);
     bytes
 }
 
@@ -77,11 +76,10 @@ fn a_pipe_has_no_phantom_frames_or_frame_estimate() {
 #[test]
 fn a_mono_pipe_is_rejected_without_panicking() {
     let mut bytes = Vec::new();
-    let encoder = y4m::encode(4, 4, y4m::Ratio::new(25, 1))
+    y4m::encode(4, 4, y4m::Ratio::new(25, 1))
         .with_colorspace(y4m::Colorspace::Cmono)
         .write_header(&mut bytes)
         .expect("header should write");
-    drop(encoder);
 
     let err = match open_y4m(reader(bytes)) {
         Ok(_) => panic!("a mono pipe must be rejected"),
