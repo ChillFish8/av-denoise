@@ -3,7 +3,7 @@ use std::io::{Cursor, Read};
 use av_denoise::{Depth, Subsampling};
 
 use crate::pipeline::convert::SourcePixel;
-use crate::pipeline::source::open_y4m;
+use crate::pipeline::source::{color_range_extension, open_y4m, pixel_aspect_from_sar};
 
 fn y4m_bytes(colorspace: y4m::Colorspace, extension: Option<&str>, frames: usize) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -108,4 +108,44 @@ fn a_mono_pipe_is_rejected_without_panicking() {
     };
 
     assert!(err.to_string().contains("Cmono"), "got {err}");
+}
+
+#[test]
+fn a_limited_range_maps_to_the_limited_tag() {
+    let extension = color_range_extension(1).expect("MPEG range is tagged");
+
+    assert_eq!(extension.value(), b"COLORRANGE=LIMITED");
+}
+
+#[test]
+fn a_full_range_maps_to_the_full_tag() {
+    let extension = color_range_extension(2).expect("JPEG range is tagged");
+
+    assert_eq!(extension.value(), b"COLORRANGE=FULL");
+}
+
+#[test]
+fn an_unspecified_or_unknown_range_adds_no_tag() {
+    for range in [0, 3, -1] {
+        assert!(
+            color_range_extension(range).is_none(),
+            "range {range} must add no tag"
+        );
+    }
+}
+
+#[test]
+fn a_positive_sar_becomes_the_pixel_aspect() {
+    let aspect = pixel_aspect_from_sar(32, 27).expect("32:27 is a valid SAR");
+
+    assert_eq!((aspect.num, aspect.den), (32, 27));
+}
+
+#[test]
+fn an_unset_or_invalid_sar_gives_no_pixel_aspect() {
+    for (numerator, denominator) in [(0, 0), (0, 1), (1, 0), (-4, 3)] {
+        let aspect = pixel_aspect_from_sar(numerator, denominator);
+
+        assert!(aspect.is_none(), "SAR {numerator}:{denominator} must give none");
+    }
 }
