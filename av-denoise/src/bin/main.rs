@@ -2,8 +2,8 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 mod cli;
-mod file_mode;
 mod frame_index;
+mod pipeline;
 mod progress;
 mod stream_mode;
 mod warm_start;
@@ -31,7 +31,7 @@ fn run_input(
     frame_budget: Option<u64>,
 ) -> Result<(), anyhow::Error> {
     match input {
-        InputSource::File(path) => file_mode::run_file(
+        InputSource::File(path) => pipeline::run_file(
             opts,
             path,
             workers.unwrap_or(DEFAULT_WORKERS),
