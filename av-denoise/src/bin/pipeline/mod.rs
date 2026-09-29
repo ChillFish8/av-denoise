@@ -13,13 +13,14 @@ use std::collections::BTreeSet;
 use std::io::IsTerminal;
 use std::path::Path;
 
-use av_decoders::{Decoder, Rational32};
+use av_decoders::{Decoder, VideoDetails};
 use av_denoise::{DenoisingMode, Depth, FrameLayout, PlaneOptions, Planes};
 use av_scenechange::{DetectionOptions, detect_scene_changes};
 
 use self::convert::{planes_from_v_frame_u8, planes_from_v_frame_u16, subsampling_from_av_decoders};
 use self::coordinator::spawn_coordinator;
-use self::stage::{SceneJob, checked_frame_permits, frame_permit_channel, stage_frames};
+use self::source::SourceInfo;
+use self::stage::{SceneJob, Stager, checked_frame_permits, frame_permit_channel};
 use self::worker::spawn_workers;
 use crate::cli::RunOptions;
 use crate::frame_index;
@@ -28,8 +29,8 @@ use crate::progress::{self, denoise_bar_visible, scene_progress_bar};
 /// Scene boundaries plus the video metadata needed to build the output
 /// y4m header.
 pub struct SceneLayout {
+    pub details: VideoDetails,
     pub layout: FrameLayout,
-    pub framerate: Rational32,
     /// Frames this run emits, being `raw_frames` less the phantom entries.
     pub total_frames: usize,
     /// Frames the decoder hands over, phantom entries included. Every
@@ -166,8 +167,8 @@ pub fn detect_scenes(input: &Path, visible: bool) -> Result<SceneLayout, anyhow:
     }
 
     Ok(SceneLayout {
+        details,
         layout,
-        framerate: details.frame_rate,
         total_frames,
         raw_frames,
         phantom,
@@ -205,16 +206,20 @@ pub fn encode_scenes(
     );
 
     let (job_tx, worker_handles, out_rx) = spawn_workers(opts, scenes.layout, workers);
-    let coordinator = spawn_coordinator(
-        scenes.layout,
-        scenes.framerate,
-        out_rx,
-        scenes.total_frames,
-        visible,
-        give,
-    );
+    let (staged_tx, staged_rx) = crossbeam_channel::bounded::<u64>(1);
+    let info = SourceInfo {
+        details: scenes.details,
+        layout: scenes.layout,
+        pixel_aspect: None,
+        vendor_extensions: Vec::new(),
+        estimated_frames: Some(scenes.total_frames),
+    };
+    let coordinator = spawn_coordinator(info, out_rx, staged_rx, visible, give, std::io::stdout());
 
-    dispatch_frames(input, scenes, &job_tx, &take)?;
+    let staged = dispatch_frames(input, scenes, &job_tx, &take)?;
+
+    // A closed channel means the coordinator failed, and it reports its own error when joined.
+    let _ = staged_tx.send(staged);
 
     // Closing the queue is what tells the workers there are no more scenes.
     drop(job_tx);
@@ -231,13 +236,13 @@ pub fn encode_scenes(
     Ok(())
 }
 
-/// Opens the input and stages every frame it decodes.
+/// Opens the input and stages every frame it decodes, returning how many were staged.
 pub fn dispatch_frames(
     input: &Path,
     scenes: &SceneLayout,
     jobs: &crossbeam_channel::Sender<SceneJob>,
     permits: &crossbeam_channel::Receiver<()>,
-) -> Result<(), anyhow::Error> {
+) -> Result<u64, anyhow::Error> {
     let mut decoder = Decoder::from_file(input)?;
     let layout = scenes.layout;
 
@@ -255,4 +260,47 @@ pub fn dispatch_frames(
     });
 
     stage_frames(frames, scenes, jobs, permits)
+}
+
+/// Reads every frame in order and stages the ones the scene layout keeps.
+///
+/// The permit is taken just before each frame is staged, so a phantom frame never takes one.
+fn stage_frames<I>(
+    frames: I,
+    scenes: &SceneLayout,
+    jobs: &crossbeam_channel::Sender<SceneJob>,
+    permits: &crossbeam_channel::Receiver<()>,
+) -> Result<u64, anyhow::Error>
+where
+    I: Iterator<Item = Result<Planes, anyhow::Error>>,
+{
+    let mut stager = Stager::new(jobs);
+    let mut emitted = 0usize;
+    let mut next_scene = 0usize;
+
+    // The iterator yields frames in raw decoder order, so position is the raw index. Every
+    // frame is read, phantom or not, because the decoder cannot be told to skip one.
+    for (raw, planes) in frames.enumerate() {
+        let planes = planes?;
+
+        // A phantom frame repeats one of its neighbours. Emitting it would lengthen the output
+        // and shift everything after it.
+        if scenes.phantom.contains(&raw) {
+            continue;
+        }
+
+        let starts_scene = scenes.scene_starts.get(next_scene) == Some(&emitted);
+
+        if starts_scene {
+            next_scene += 1;
+        }
+
+        permits
+            .recv()
+            .map_err(|_| anyhow::anyhow!("the coordinator stopped before the stream finished"))?;
+        stager.stage(planes, starts_scene)?;
+        emitted += 1;
+    }
+
+    Ok(stager.finish())
 }

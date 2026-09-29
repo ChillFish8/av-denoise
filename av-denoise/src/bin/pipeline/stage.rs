@@ -1,14 +1,22 @@
 use av_denoise::Planes;
 
-use super::SceneLayout;
+use super::decode::PREFETCH_FRAMES;
+use super::scenes::LOOKAHEAD_DISTANCE;
+
+/// Frames holding a permit that no worker has received yet.
+///
+/// These sit in the prefetch channel, the scene splitter's look-ahead window, or in the decode
+/// thread's hand while it waits to send.
+pub const IN_TRANSIT_FRAMES: usize = LOOKAHEAD_DISTANCE + 2 + PREFETCH_FRAMES + 1;
 
 /// Frames in flight this run allows.
 pub fn frame_permits(budget_bytes: u64, frame_bytes: usize, workers: usize, radius: u32) -> usize {
     // A worker emits nothing until `push` first returns QueueFull, which
-    // takes `radius + MAX_PENDING + 1` pushes. Fewer permits than that
-    // and its scene can never return one, so the dispatcher waits on a
-    // permit the worker cannot release.
-    let floor = workers * (radius as usize + av_denoise::MAX_PENDING + 2);
+    // takes `radius + MAX_PENDING + 1` pushes, and the frames upstream of
+    // the workers hold permits too. Fewer permits than that and the
+    // dispatcher waits on a permit nothing can release.
+    let per_worker = radius as usize + av_denoise::MAX_PENDING + 2;
+    let floor = workers * per_worker + IN_TRANSIT_FRAMES;
 
     frames_afforded(budget_bytes, frame_bytes).max(floor)
 }
@@ -90,88 +98,78 @@ pub fn frame_permit_channel(
     (give, take)
 }
 
-/// Reads every frame in order and offers each scene to the worker pool.
+/// Splits decided frames into scene jobs for the worker pool.
 ///
-/// A scene's frames go into a channel of their own. Dropping that
-/// channel's sender is what tells the claiming worker the scene has
-/// ended.
-///
-/// Each staged frame holds a permit from here until the coordinator has
-/// written it, which is the only bound on frames in flight. The permit
-/// is taken just before the send rather than before the decode, so a
-/// phantom frame never takes one and at most one decoded frame is
-/// transient outside the budget.
-pub fn stage_frames<I>(
-    frames: I,
-    scenes: &SceneLayout,
-    jobs: &crossbeam_channel::Sender<SceneJob>,
-    permits: &crossbeam_channel::Receiver<()>,
-) -> Result<(), anyhow::Error>
-where
-    I: Iterator<Item = Result<Planes, anyhow::Error>>,
-{
-    let mut scene_idx = 0usize;
-    let mut next_boundary = scenes.scene_starts[1];
-    let mut g = 0u64;
-    let mut current: Option<(usize, crossbeam_channel::Sender<StagedFrame>)> = None;
+/// A scene's frames go into a channel of their own. Dropping that channel's sender is what tells
+/// the claiming worker the scene has ended.
+pub struct Stager<'a> {
+    jobs: &'a crossbeam_channel::Sender<SceneJob>,
+    current: Option<crossbeam_channel::Sender<StagedFrame>>,
+    scene_count: u32,
+    staged: u64,
+}
 
-    // The iterator yields frames in raw decoder order, so position is the
-    // raw index. Every frame is read, phantom or not, because the decoder
-    // walks the file in order and cannot be told to skip one.
-    for (raw, planes) in frames.enumerate() {
-        let planes = planes?;
-
-        // A phantom frame repeats one of its neighbours. Emitting it would lengthen the output
-        // and shift everything after it, and feeding it to a worker would put a false
-        // still frame into the temporal window.
-        if scenes.phantom.contains(&raw) {
-            continue;
+impl<'a> Stager<'a> {
+    pub fn new(jobs: &'a crossbeam_channel::Sender<SceneJob>) -> Self {
+        Self {
+            jobs,
+            current: None,
+            scene_count: 0,
+            staged: 0,
         }
-
-        while g >= next_boundary as u64 && scene_idx + 1 < scenes.scene_count() {
-            scene_idx += 1;
-            next_boundary = scenes.scene_starts[scene_idx + 1];
-        }
-
-        if !matches!(&current, Some((idx, _)) if *idx == scene_idx) {
-            let (tx, rx) = crossbeam_channel::unbounded::<StagedFrame>();
-
-            // Dropping the previous scene's sender ends that scene, which
-            // frees the worker holding it to claim this one. The queue is a
-            // rendezvous, so offering the job first would deadlock whenever
-            // every worker is busy.
-            drop(current.take());
-
-            jobs.send(SceneJob {
-                scene_idx: scene_idx as u32,
-                frames: rx,
-            })
-            .map_err(|_| anyhow::anyhow!("worker pool disconnected"))?;
-
-            current = Some((scene_idx, tx));
-        }
-
-        // Taken here rather than before the decode, so a phantom frame
-        // never takes one. At most one decoded frame is transient outside
-        // the budget.
-        permits
-            .recv()
-            .map_err(|_| anyhow::anyhow!("the coordinator stopped before the stream finished"))?;
-
-        let (_, tx) = current
-            .as_ref()
-            .expect("a scene sender exists after the check above");
-
-        tx.send(StagedFrame {
-            global_idx: g,
-            planes,
-        })
-        .map_err(|_| anyhow::anyhow!("the worker holding scene {scene_idx} disconnected"))?;
-
-        g += 1;
     }
 
-    Ok(())
+    pub fn stage(&mut self, planes: Planes, starts_scene: bool) -> Result<(), anyhow::Error> {
+        if starts_scene || self.current.is_none() {
+            self.open_scene()?;
+        }
+
+        let scene_idx = self.scene_count - 1;
+        let sender = self
+            .current
+            .as_ref()
+            .expect("a scene is open after the check above");
+        let frame = StagedFrame {
+            global_idx: self.staged,
+            planes,
+        };
+
+        sender
+            .send(frame)
+            .map_err(|_| anyhow::anyhow!("the worker holding scene {scene_idx} disconnected"))?;
+
+        self.staged += 1;
+
+        Ok(())
+    }
+
+    /// Closes the last scene and returns how many frames were staged.
+    pub fn finish(self) -> u64 {
+        self.staged
+    }
+
+    fn open_scene(&mut self) -> Result<(), anyhow::Error> {
+        let (sender, receiver) = crossbeam_channel::unbounded::<StagedFrame>();
+
+        // Dropping the previous scene's sender frees the worker holding it to claim this one.
+        // The queue is a rendezvous, so offering the job first would deadlock whenever every
+        // worker is busy.
+        drop(self.current.take());
+
+        let job = SceneJob {
+            scene_idx: self.scene_count,
+            frames: receiver,
+        };
+
+        self.jobs
+            .send(job)
+            .map_err(|_| anyhow::anyhow!("worker pool disconnected"))?;
+
+        self.current = Some(sender);
+        self.scene_count += 1;
+
+        Ok(())
+    }
 }
 
 /// One decoded frame, staged for the worker that claims its scene.

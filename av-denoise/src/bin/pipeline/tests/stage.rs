@@ -1,32 +1,26 @@
-use std::collections::BTreeSet;
 use std::thread;
 use std::time::Duration;
 
-use av_decoders::Rational32;
-
 use super::{tiny_layout, tiny_planes};
-use crate::pipeline::SceneLayout;
-use crate::pipeline::stage::{
-    SceneJob,
-    checked_frame_permits,
-    frame_permit_channel,
-    frame_permits,
-    stage_frames,
-};
+use crate::pipeline::stage::{IN_TRANSIT_FRAMES, SceneJob, Stager, checked_frame_permits, frame_permits};
 
-fn scene_layout(scene_starts: Vec<usize>, phantom: BTreeSet<usize>) -> SceneLayout {
-    let total_frames = *scene_starts
-        .last()
-        .expect("scene_starts ends with the frame count");
+/// Stages one frame per flag, starting a new scene wherever a flag is set.
+fn stage_all(flags: &[bool], jobs: &crossbeam_channel::Sender<SceneJob>) -> Result<u64, anyhow::Error> {
+    let planes = tiny_planes(tiny_layout());
+    let mut stager = Stager::new(jobs);
 
-    SceneLayout {
-        layout: tiny_layout(),
-        framerate: Rational32::new(30, 1),
-        total_frames,
-        raw_frames: total_frames + phantom.len(),
-        phantom,
-        scene_starts,
+    for &starts_scene in flags {
+        stager.stage(planes.clone(), starts_scene)?;
     }
+
+    Ok(stager.finish())
+}
+
+fn flags(scene_lengths: &[usize]) -> Vec<bool> {
+    scene_lengths
+        .iter()
+        .flat_map(|&length| (0..length).map(|offset| offset == 0))
+        .collect()
 }
 
 /// Drains every job the stager offers, returning each scene index with
@@ -49,58 +43,31 @@ fn collect_jobs(rx: crossbeam_channel::Receiver<SceneJob>) -> thread::JoinHandle
 }
 
 #[test]
-fn stage_frames_offers_one_job_per_scene_in_order() {
-    let scenes = scene_layout(vec![0, 2, 4, 6], BTreeSet::new());
-    let planes = tiny_planes(scenes.layout);
-    let frames = (0..6).map(move |_| Ok(planes.clone()));
-
-    let (_give, take) = frame_permit_channel(8);
+fn the_stager_offers_one_job_per_scene_in_order() {
     let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
     let collector = collect_jobs(job_rx);
 
-    stage_frames(frames, &scenes, &job_tx, &take).expect("staging should succeed");
+    let staged = stage_all(&flags(&[2, 2, 2]), &job_tx).expect("staging should succeed");
     drop(job_tx);
 
     let jobs = collector.join().expect("collector panicked");
 
-    assert_eq!(jobs, vec![(0, vec![0, 1]), (1, vec![2, 3]), (2, vec![4, 5])],);
-}
-
-#[test]
-fn stage_frames_skips_phantom_frames_without_advancing_the_index() {
-    let scenes = scene_layout(vec![0, 4], BTreeSet::from([1, 3]));
-    let planes = tiny_planes(scenes.layout);
-    let frames = (0..6).map(move |_| Ok(planes.clone()));
-
-    let (_give, take) = frame_permit_channel(8);
-    let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
-    let collector = collect_jobs(job_rx);
-
-    stage_frames(frames, &scenes, &job_tx, &take).expect("staging should succeed");
-    drop(job_tx);
-
-    let jobs = collector.join().expect("collector panicked");
-
-    assert_eq!(jobs, vec![(0, vec![0, 1, 2, 3])]);
+    assert_eq!(staged, 6);
+    assert_eq!(jobs, vec![(0, vec![0, 1]), (1, vec![2, 3]), (2, vec![4, 5])]);
 }
 
 #[test]
 fn a_scene_job_channel_closes_when_its_scene_ends() {
-    let scenes = scene_layout(vec![0, 2], BTreeSet::new());
-    let planes = tiny_planes(scenes.layout);
-    let frames = (0..2).map(move |_| Ok(planes.clone()));
-
-    let (_give, take) = frame_permit_channel(8);
     let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
     let claimed = thread::spawn(move || job_rx.recv().expect("one job is offered"));
 
-    stage_frames(frames, &scenes, &job_tx, &take).expect("staging should succeed");
+    stage_all(&flags(&[2]), &job_tx).expect("staging should succeed");
     drop(job_tx);
 
     let job = claimed.join().expect("claimant panicked");
 
-    assert_eq!(job.frames.recv().map(|f| f.global_idx).ok(), Some(0));
-    assert_eq!(job.frames.recv().map(|f| f.global_idx).ok(), Some(1));
+    assert_eq!(job.frames.recv().map(|frame| frame.global_idx).ok(), Some(0));
+    assert_eq!(job.frames.recv().map(|frame| frame.global_idx).ok(), Some(1));
     assert!(
         job.frames.recv().is_err(),
         "the scene's channel closes after its last frame"
@@ -108,20 +75,13 @@ fn a_scene_job_channel_closes_when_its_scene_ends() {
 }
 
 /// A worker that claims a scene and dies without draining it must surface
-/// as an error. Before the queue became a rendezvous, the dead worker's
-/// job could sit in the queue keeping the scene channel alive, and the
-/// stager blocked on it forever.
+/// as an error rather than hanging the stager.
 #[test]
 fn staging_fails_rather_than_hanging_when_the_pool_dies() {
-    let scenes = scene_layout(vec![0, 10], BTreeSet::new());
-    let planes = tiny_planes(scenes.layout);
-    let frames = (0..10).map(move |_| Ok(planes.clone()));
-
-    let (_give, take) = frame_permit_channel(16);
     let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
     let pool = thread::spawn(move || drop(job_rx.recv()));
 
-    let err = stage_frames(frames, &scenes, &job_tx, &take).expect_err("staging must not hang");
+    let err = stage_all(&flags(&[10]), &job_tx).expect_err("staging must not hang");
 
     pool.join().expect("pool panicked");
 
@@ -132,6 +92,19 @@ fn staging_fails_rather_than_hanging_when_the_pool_dies() {
 }
 
 #[test]
+fn a_leading_frame_without_a_scene_flag_still_opens_a_scene() {
+    let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
+    let collector = collect_jobs(job_rx);
+
+    stage_all(&[false, false], &job_tx).expect("staging should succeed");
+    drop(job_tx);
+
+    let jobs = collector.join().expect("collector panicked");
+
+    assert_eq!(jobs, vec![(0, vec![0, 1])]);
+}
+
+#[test]
 fn frame_permits_follows_the_budget_when_it_clears_the_floor() {
     // A 1080p 8-bit 4:2:0 frame is 3,110,400 bytes, so 1 GiB affords 345.
     assert_eq!(frame_permits(1 << 30, 3_110_400, 4, 0), 345);
@@ -139,7 +112,7 @@ fn frame_permits_follows_the_budget_when_it_clears_the_floor() {
 
 #[test]
 fn frame_permits_applies_the_floor_when_the_budget_is_too_small() {
-    let floor = 4 * (av_denoise::MAX_PENDING + 2);
+    let floor = 4 * (av_denoise::MAX_PENDING + 2) + IN_TRANSIT_FRAMES;
 
     // A 4K 10-bit frame is 24,883,200 bytes, so 1 MiB affords none.
     assert_eq!(frame_permits(1 << 20, 24_883_200, 4, 0), floor);
@@ -152,11 +125,12 @@ fn a_budget_below_the_floor_is_rejected() {
         .expect_err("1 MB cannot feed 4 workers at radius 8");
     let msg = err.to_string();
 
-    let floor = 4 * (8 + av_denoise::MAX_PENDING + 2);
+    let floor = 4 * (8 + av_denoise::MAX_PENDING + 2) + IN_TRANSIT_FRAMES;
 
     assert!(msg.contains("affords 0 frames"), "got {msg}");
     assert!(msg.contains(&format!("at least {floor}")), "got {msg}");
-    assert!(msg.contains("Pass at least --frame-budget 1.2GB"), "got {msg}");
+    // 60 frames at 24,883,200 bytes is 1,492,992,000, rounded up to 1.5GB.
+    assert!(msg.contains("Pass at least --frame-budget 1.5GB"), "got {msg}");
 }
 
 #[test]
@@ -184,51 +158,24 @@ fn the_floor_covers_a_workers_first_output_at_every_radius() {
 }
 
 #[test]
-fn every_permit_is_accounted_for_once_staging_finishes() {
-    let scenes = scene_layout(vec![0, 3, 6], BTreeSet::new());
-    let planes = tiny_planes(scenes.layout);
-    let frames = (0..6).map(move |_| Ok(planes.clone()));
+fn the_floor_covers_the_look_ahead_and_prefetch() {
+    // A budget far too small for any real frame, so the floor decides.
+    let permits = frame_permits(1, 199_065_600, 1, 0);
+    let first_output = av_denoise::MAX_PENDING + 1;
+    let held_upstream =
+        crate::pipeline::scenes::LOOKAHEAD_DISTANCE + 2 + crate::pipeline::decode::PREFETCH_FRAMES + 1;
 
-    let (give, take) = frame_permit_channel(8);
-    let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
-
-    let drained = thread::spawn(move || {
-        let mut n = 0usize;
-        while let Ok(job) = job_rx.recv() {
-            n += job.frames.iter().count();
-        }
-        n
-    });
-
-    stage_frames(frames, &scenes, &job_tx, &take).expect("staging should succeed");
-    drop(job_tx);
-
-    assert_eq!(drained.join().expect("drain panicked"), 6);
-    assert_eq!(take.len(), 2, "6 of 8 permits are out, since nothing was written");
-
-    for _ in 0..6 {
-        give.send(()).expect("returning a permit never blocks");
-    }
-
-    assert_eq!(take.len(), 8);
+    assert!(permits >= first_output + held_upstream, "got {permits}");
 }
 
 /// A worker that claims a scene and stops reading it must not stop
 /// later scenes being offered to anyone else.
 ///
-/// Scene 0 holds ten frames that nobody drains. Only the permit budget
-/// bounds staging, and it counts the whole pipeline rather than one
-/// scene, so the stager runs past scene 0 and offers scene 1 to a free
-/// worker. Bounding each scene's channel instead would block the stager
-/// inside scene 0 and starve every idle worker behind it, which is the
-/// stall this pins.
+/// Scene 0 holds ten frames that nobody drains. Bounding each scene's
+/// channel would block the stager inside scene 0 and starve every idle
+/// worker behind it, which is the stall this pins.
 #[test]
 fn a_backlogged_scene_does_not_stop_later_scenes_being_offered() {
-    let scenes = scene_layout(vec![0, 10, 12], BTreeSet::new());
-    let planes = tiny_planes(scenes.layout);
-    let frames = (0..12).map(move |_| Ok(planes.clone()));
-
-    let (give, take) = frame_permit_channel(64);
     let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
 
     let consumer = thread::spawn(move || {
@@ -240,8 +187,7 @@ fn a_backlogged_scene_does_not_stop_later_scenes_being_offered() {
         let offered_while_backlogged = second.is_some();
 
         // Drain everything either way, so a failing run finishes and
-        // reports instead of hanging. The second job outlives this, so
-        // staging never sees its channel close early.
+        // reports instead of hanging.
         for _ in first.frames.iter() {}
         while job_rx.recv().is_ok() {}
         drop(second);
@@ -249,13 +195,11 @@ fn a_backlogged_scene_does_not_stop_later_scenes_being_offered() {
         offered_while_backlogged
     });
 
-    stage_frames(frames, &scenes, &job_tx, &take).expect("staging should not stall");
+    stage_all(&flags(&[10, 2]), &job_tx).expect("staging should not stall");
     drop(job_tx);
 
     assert!(
         consumer.join().expect("consumer panicked"),
         "scene 1 must be offered while scene 0 is still backlogged",
     );
-
-    drop(give);
 }
