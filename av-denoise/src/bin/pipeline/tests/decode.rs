@@ -32,7 +32,9 @@ fn phantom_frames_are_skipped_and_take_no_permit() {
     let (out_tx, out_rx) = crossbeam_channel::unbounded::<FrameMsg>();
     let phantom = BTreeSet::from([1, 3]);
 
-    pump_frames(frames(6), &phantom, &take, &out_tx).expect("pumping should succeed");
+    let decoded = frames(6);
+
+    pump_frames(decoded, &phantom, &take, &out_tx).expect("pumping should succeed");
     drop(out_tx);
 
     assert_eq!(out_rx.iter().count(), 4);
@@ -45,9 +47,12 @@ fn a_read_error_stops_pumping_after_earlier_frames() {
     let (out_tx, out_rx) = crossbeam_channel::unbounded::<FrameMsg>();
     let corrupt = Err(anyhow::anyhow!("corrupt packet"));
     let corrupt_frame = std::iter::once(corrupt);
-    let failing = frames(2).chain(corrupt_frame);
+    let leading = frames(2);
+    let failing = leading.chain(corrupt_frame);
 
-    let result = pump_frames(failing, &BTreeSet::new(), &take, &out_tx);
+    let phantom = BTreeSet::new();
+
+    let result = pump_frames(failing, &phantom, &take, &out_tx);
 
     assert!(result.is_err());
     assert_eq!(out_rx.len(), 2, "frames before the error are still sent");
@@ -59,7 +64,10 @@ fn pumping_stops_quietly_when_the_splitter_hangs_up() {
     let (out_tx, out_rx) = crossbeam_channel::bounded::<FrameMsg>(1);
     drop(out_rx);
 
-    pump_frames(frames(4), &BTreeSet::new(), &take, &out_tx).expect("a closed channel is not an error");
+    let decoded = frames(4);
+    let phantom = BTreeSet::new();
+
+    pump_frames(decoded, &phantom, &take, &out_tx).expect("a closed channel is not an error");
 }
 
 #[test]
@@ -68,7 +76,10 @@ fn pumping_fails_when_the_coordinator_drops_every_permit() {
     drop(give);
     let (out_tx, _out_rx) = crossbeam_channel::unbounded::<FrameMsg>();
 
-    let result = pump_frames(frames(4), &BTreeSet::new(), &take, &out_tx);
+    let decoded = frames(4);
+    let phantom = BTreeSet::new();
+
+    let result = pump_frames(decoded, &phantom, &take, &out_tx);
 
     assert!(result.is_err(), "a second frame cannot get a permit");
 }

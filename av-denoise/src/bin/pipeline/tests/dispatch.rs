@@ -1,4 +1,4 @@
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::sync::Arc;
 use std::thread;
 
@@ -12,7 +12,8 @@ use crate::pipeline::stage::SceneJob;
 #[test]
 fn dispatch_fails_on_a_forwarded_decode_error() {
     let bytes = y4m_clip(3);
-    let mut opened = open_y4m(Box::new(Cursor::new(bytes))).expect("the clip opens");
+    let reader: Box<dyn Read> = Box::new(Cursor::new(bytes));
+    let mut opened = open_y4m(reader).expect("the clip opens");
     let (frames_tx, frames_rx) = crossbeam_channel::unbounded::<FrameMsg>();
 
     for _ in 0..3 {

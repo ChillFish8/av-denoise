@@ -52,7 +52,7 @@ pub fn run_worker(
     jobs: crossbeam_channel::Receiver<SceneJob>,
     tx: crossbeam_channel::Sender<OutputMsg>,
 ) -> Result<(), anyhow::Error> {
-    let mut wd: Option<PlanarDenoiser> = None;
+    let mut denoiser_slot: Option<PlanarDenoiser> = None;
     // The cold-cache queue place this worker's denoiser holds, until its
     // first output frame proves the kernels are compiled and cached.
     let mut warm_up: Option<WarmUp> = None;
@@ -60,13 +60,15 @@ pub fn run_worker(
     while let Ok(job) = jobs.recv() {
         // Built on the first claimed scene, so a worker that never claims
         // one never compiles.
-        if wd.is_none() {
+        if denoiser_slot.is_none() {
             let (denoiser, place) = create_denoiser(&opts, layout)?;
-            wd = Some(denoiser);
+            denoiser_slot = Some(denoiser);
             warm_up = place;
         }
 
-        let denoiser = wd.as_mut().expect("denoiser exists after the check above");
+        let denoiser = denoiser_slot
+            .as_mut()
+            .expect("denoiser exists after the check above");
 
         tracing::debug!(worker_id, scene_idx = job.scene_idx, "worker started scene");
 
@@ -111,10 +113,10 @@ pub fn push_with_drain(
 
     if push_needs_retry(denoiser.push(planes))? {
         if let Some(out) = denoiser.recv()? {
-            let g = pending
+            let oldest_idx = pending
                 .pop_front()
                 .expect("pending has at least one entry on QueueFull recv");
-            send_output(tx, g, out)?;
+            send_output(tx, oldest_idx, out)?;
             finish_warm_up(warm_up);
         }
 
@@ -134,21 +136,21 @@ pub fn send_output(
 }
 
 pub fn flush_worker(
-    wd: &mut PlanarDenoiser,
+    denoiser: &mut PlanarDenoiser,
     warm_up: &mut Option<WarmUp>,
     pending: &mut std::collections::VecDeque<u64>,
     tx: &crossbeam_channel::Sender<OutputMsg>,
 ) -> Result<(), anyhow::Error> {
     let mut disconnected = false;
 
-    wd.flush(|out| {
+    denoiser.flush(|out| {
         if disconnected {
             return;
         }
 
-        if let Some(g) = pending.pop_front() {
+        if let Some(global_idx) = pending.pop_front() {
             let msg = OutputMsg {
-                global_idx: g,
+                global_idx,
                 planes: out,
             };
             let did_send = tx.send(msg).is_ok();

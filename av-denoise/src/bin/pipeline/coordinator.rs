@@ -45,8 +45,7 @@ pub fn run_coordinator<W: std::io::Write>(
         builder = builder.with_pixel_aspect(pixel_aspect);
     }
 
-    // Forwards the source's `X` params, `XCOLORRANGE=` being the common one. Files have none
-    // because `av_decoders::VideoDetails` does not surface a colour range for ffms2.
+    // Forwards the source's `X` params, `XCOLORRANGE=` being the common one.
     for extension in info.vendor_extensions {
         builder = builder.append_vendor_extension(extension);
     }

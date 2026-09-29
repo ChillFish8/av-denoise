@@ -20,7 +20,8 @@ fn encoder(buf: &mut Vec<u8>) -> y4m::Encoder<&mut Vec<u8>> {
 
 fn send_frames(indices: &[u64]) -> crossbeam_channel::Receiver<OutputMsg> {
     let (tx, rx) = crossbeam_channel::unbounded::<OutputMsg>();
-    let planes = tiny_planes(tiny_layout());
+    let layout = tiny_layout();
+    let planes = tiny_planes(layout);
 
     for &global_idx in indices {
         let message = OutputMsg {
@@ -53,8 +54,10 @@ fn emit_frames_errors_when_a_frame_index_is_lost() {
     take.recv().expect("a permit is available");
     take.recv().expect("a permit is available");
 
-    let err = emit_frames(&mut encoder, &rx, &staged, &ProgressBar::hidden(), &give)
-        .expect_err("expected a lost-frame error");
+    let progress = ProgressBar::hidden();
+
+    let err =
+        emit_frames(&mut encoder, &rx, &staged, &progress, &give).expect_err("expected a lost-frame error");
     let msg = err.to_string();
 
     assert!(
@@ -75,8 +78,9 @@ fn emit_frames_finishes_when_every_staged_frame_is_written() {
         take.recv().expect("a permit is available");
     }
 
-    emit_frames(&mut encoder, &rx, &staged, &ProgressBar::hidden(), &give)
-        .expect("three of three frames written");
+    let progress = ProgressBar::hidden();
+
+    emit_frames(&mut encoder, &rx, &staged, &progress, &give).expect("three of three frames written");
 
     assert_eq!(take.len(), 4, "every permit came back");
 }
@@ -90,6 +94,8 @@ fn emit_frames_leaves_the_error_to_a_dispatcher_that_sent_no_count() {
     let (give, take) = frame_permit_channel(2);
     take.recv().expect("a permit is available");
 
-    emit_frames(&mut encoder, &rx, &staged, &ProgressBar::hidden(), &give)
+    let progress = ProgressBar::hidden();
+
+    emit_frames(&mut encoder, &rx, &staged, &progress, &give)
         .expect("the dispatcher reports its own failure");
 }

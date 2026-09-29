@@ -38,7 +38,8 @@ fn temporal_opts() -> PlaneOptions {
 #[test]
 fn flush_worker_errors_when_coordinator_has_disconnected() {
     let layout = tiny_layout();
-    let mut wd = PlanarDenoiser::create(&temporal_opts(), layout).expect("denoiser construction failed");
+    let options = temporal_opts();
+    let mut wd = PlanarDenoiser::create(&options, layout).expect("denoiser construction failed");
     let planes = tiny_planes(layout);
 
     // One push into a temporal window leaves a trailing tail that

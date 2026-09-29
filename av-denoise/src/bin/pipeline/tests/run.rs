@@ -1,6 +1,6 @@
 #![cfg(feature = "vulkan")]
 
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::sync::{Arc, Mutex};
 
 use av_denoise::accelerate::Accelerator;
@@ -42,9 +42,13 @@ fn temporal_opts() -> PlaneOptions {
 
 fn run_over(bytes: Vec<u8>, workers: usize, budget: u64) -> Result<Vec<u8>, anyhow::Error> {
     let output = SharedBuffer::default();
-    let opener = move || open_y4m(Box::new(Cursor::new(bytes)));
+    let options = temporal_opts();
+    let opener = move || {
+        let reader: Box<dyn Read> = Box::new(Cursor::new(bytes));
+        open_y4m(reader)
+    };
 
-    run_with(&temporal_opts(), opener, workers, budget, false, output.clone())?;
+    run_with(&options, opener, workers, budget, false, output.clone())?;
 
     let written = output.0.lock().expect("buffer lock").clone();
     Ok(written)

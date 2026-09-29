@@ -6,7 +6,8 @@ use crate::pipeline::stage::{IN_TRANSIT_FRAMES, SceneJob, Stager, checked_frame_
 
 /// Stages one frame per flag, starting a new scene wherever a flag is set.
 fn stage_all(flags: &[bool], jobs: &crossbeam_channel::Sender<SceneJob>) -> Result<u64, anyhow::Error> {
-    let planes = tiny_planes(tiny_layout());
+    let layout = tiny_layout();
+    let planes = tiny_planes(layout);
     let mut stager = Stager::new(jobs);
 
     for &starts_scene in flags {
@@ -47,7 +48,9 @@ fn the_stager_offers_one_job_per_scene_in_order() {
     let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
     let collector = collect_jobs(job_rx);
 
-    let staged = stage_all(&flags(&[2, 2, 2]), &job_tx).expect("staging should succeed");
+    let scene_starts = flags(&[2, 2, 2]);
+
+    let staged = stage_all(&scene_starts, &job_tx).expect("staging should succeed");
     drop(job_tx);
 
     let jobs = collector.join().expect("collector panicked");
@@ -61,7 +64,9 @@ fn a_scene_job_channel_closes_when_its_scene_ends() {
     let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
     let claimed = thread::spawn(move || job_rx.recv().expect("one job is offered"));
 
-    stage_all(&flags(&[2]), &job_tx).expect("staging should succeed");
+    let scene_starts = flags(&[2]);
+
+    stage_all(&scene_starts, &job_tx).expect("staging should succeed");
     drop(job_tx);
 
     let job = claimed.join().expect("claimant panicked");
@@ -81,7 +86,9 @@ fn staging_fails_rather_than_hanging_when_the_pool_dies() {
     let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
     let pool = thread::spawn(move || drop(job_rx.recv()));
 
-    let err = stage_all(&flags(&[10]), &job_tx).expect_err("staging must not hang");
+    let scene_starts = flags(&[10]);
+
+    let err = stage_all(&scene_starts, &job_tx).expect_err("staging must not hang");
 
     pool.join().expect("pool panicked");
 
@@ -195,7 +202,9 @@ fn a_backlogged_scene_does_not_stop_later_scenes_being_offered() {
         offered_while_backlogged
     });
 
-    stage_all(&flags(&[10, 2]), &job_tx).expect("staging should not stall");
+    let scene_starts = flags(&[10, 2]);
+
+    stage_all(&scene_starts, &job_tx).expect("staging should not stall");
     drop(job_tx);
 
     assert!(

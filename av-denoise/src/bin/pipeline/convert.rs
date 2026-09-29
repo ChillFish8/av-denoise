@@ -66,6 +66,7 @@ pub fn check_plane_lens(planes: &Planes, layout: FrameLayout) -> Result<(), anyh
             anyhow::bail!("{name} plane is {got} bytes, expected {expected} from the frame layout");
         }
     }
+
     Ok(())
 }
 
@@ -131,8 +132,8 @@ pub fn collect_plane_u16(plane: &v_frame::plane::Plane<u16>) -> Vec<u8> {
     let mut out = Vec::with_capacity(width * height * 2);
 
     for row in plane.rows() {
-        for &s in row {
-            out.extend_from_slice(&s.to_le_bytes());
+        for &sample in row {
+            out.extend_from_slice(&sample.to_le_bytes());
         }
     }
 
@@ -140,11 +141,11 @@ pub fn collect_plane_u16(plane: &v_frame::plane::Plane<u16>) -> Vec<u8> {
 }
 
 pub fn subsampling_from_av_decoders(
-    cs: v_frame::chroma::ChromaSubsampling,
+    chroma_subsampling: v_frame::chroma::ChromaSubsampling,
 ) -> Result<Subsampling, anyhow::Error> {
     use v_frame::chroma::ChromaSubsampling;
 
-    match cs {
+    match chroma_subsampling {
         ChromaSubsampling::Yuv420 => Ok(Subsampling::Yuv420),
         ChromaSubsampling::Yuv422 => Ok(Subsampling::Yuv422),
         ChromaSubsampling::Yuv444 => Ok(Subsampling::Yuv444),

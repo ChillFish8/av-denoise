@@ -23,8 +23,11 @@ pub fn tiny_layout() -> FrameLayout {
 }
 
 pub fn tiny_planes(layout: FrameLayout) -> Planes {
+    let luma_pixels = layout.luma_pixels();
+    let neutral = layout.depth.neutral_chroma();
+
     Planes {
-        y: fill_plane(layout.luma_pixels(), layout.depth.neutral_chroma(), layout.depth),
+        y: fill_plane(luma_pixels, neutral, layout.depth),
         u: layout.neutral_chroma_plane(),
         v: layout.neutral_chroma_plane(),
     }

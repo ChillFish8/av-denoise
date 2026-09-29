@@ -40,7 +40,7 @@ pub fn size_string(bytes: u64) -> String {
         .replace(' ', "")
 }
 
-/// Rounds a byte count up to the precision [`size_string`] prints at.
+/// Rounds a byte count up to the precision [size_string] prints at.
 ///
 /// The rendering keeps one decimal place, so a raw minimum can round
 /// down to a size that still fails the budget check.

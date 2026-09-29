@@ -253,8 +253,7 @@ fn with_plane_strength(nlm: NlmeansOptions, strength: Option<f32>) -> NlmeansOpt
 }
 
 /// Reads the result of a `PlanarDenoiser::push` call for the
-/// push-then-drain-then-retry loop that `file_mode.rs` and
-/// `stream_mode.rs` both use.
+/// push-then-drain-then-retry loop.
 ///
 /// `Ok(false)` means the push landed. `Ok(true)` means the queue was
 /// full, so the caller should drain one output and push again.
@@ -1254,8 +1253,7 @@ mod passthrough_retry_tests {
     /// Chroma-only intent, so `luma` is the disabled passthrough half and
     /// `chroma` is the one that can report `QueueFull`.
     ///
-    /// That is what drives the retry loop in `push_with_drain` and in
-    /// `stream_mode.rs`.
+    /// That is what drives the retry loop in `push_with_drain`.
     fn chroma_only_opts() -> PlaneOptions {
         PlaneOptions {
             accelerators: vec![Accelerator::Vulkan],
@@ -1389,7 +1387,7 @@ mod lumachroma_lockstep_tests {
             let planes = marked_planes(layout, idx);
 
             // Mirror the retry loop in `push_with_drain` exactly, which
-            // is the sequence `file_mode.rs` and `stream_mode.rs` run.
+            // is the sequence the CLI workers run.
             if push_needs_retry(wd.push(&planes)).expect("push_needs_retry") {
                 if let Some(out) = wd.recv().expect("recv failed") {
                     outputs.push(out);
