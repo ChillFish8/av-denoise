@@ -95,14 +95,14 @@ These are global, so they work on either side of the subcommand.
 | `--channel-mode <luma,chroma,yuv>` | Which planes to clean. `yuv` is one fused pass and needs a YUV444 source.                                        | `luma,chroma` |
 | `-A, --accelerators <list>`        | Backends to try, in order. Comma-separated, for example `cuda,vulkan`.                                           | `vulkan`      |
 | `-d, --device <spec>`              | `default`, `discrete[:N]`, `integrated[:N]`, `virtual[:N]`, or `cpu`.                                            | `default`     |
-| `--progress`                       | Draws a progress bar for file input. Off by default, because anything else writing to the terminal scrambles it. | off           |
+| `--progress`                       | Draws a progress bar. Off by default, because anything else writing to the terminal scrambles it.                | off           |
 
 Both subcommands also take:
 
 | Flag                    | What it does                                                                                     | Default  |
 |-------------------------|--------------------------------------------------------------------------------------------------|----------|
-| `-i, --input <path\|->` | A path is opened with ffms2 and split by scene. `-` or `pipe:0` reads y4m from stdin.            | required |
-| `-W, --workers <N>`     | How many scenes to clean in parallel. Trades GPU memory for throughput. Ignored for piped input. | `2`      |
+| `-i, --input <path\|->` | A path is opened with ffms2. `-` or `pipe:0` reads y4m from stdin. Both are split by scene.      | required |
+| `-W, --workers <N>`     | How many scenes to clean in parallel. Trades GPU memory for throughput.                          | `2`      |
 
 ### Listing devices
 
@@ -233,8 +233,7 @@ ffmpeg -i noisy.mkv -pix_fmt yuv420p -f yuv4mpegpipe - \
   | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
 
-Piped input has no scene detection, so the temporal window slides across the whole stream and
-`--workers` does not apply.
+Piped input is split by scene just like a file, and `--workers` applies to both.
 
 ffmpeg will not write 10 or 12-bit y4m without `-strict -1`, so high-depth pipelines need it on
 the *producing* side:

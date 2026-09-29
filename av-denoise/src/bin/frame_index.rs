@@ -135,22 +135,6 @@ pub fn phantom_indices(index: &[IndexEntry]) -> BTreeSet<usize> {
     phantom
 }
 
-/// Rewrites scene boundaries from ffms2 index space into the output
-/// frame numbering that dropping `phantom` produces.
-///
-/// A boundary that lands on a dropped entry moves onto the next frame that survives,
-/// which can leave it equal to its neighbour. Those collapse, because a scene cannot
-/// start where the one before it does.
-pub fn remap_scene_starts(starts: &[usize], phantom: &BTreeSet<usize>) -> Vec<usize> {
-    let mut out: Vec<usize> = starts
-        .iter()
-        .map(|&raw| raw - phantom.range(..raw).count())
-        .collect();
-
-    out.dedup();
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,21 +244,5 @@ mod tests {
     #[test]
     fn repeated_pictures_at_regular_spacing_are_kept() {
         assert!(phantom_indices(&regular(2159)).is_empty());
-    }
-
-    #[test]
-    fn remap_shifts_boundaries_past_each_dropped_entry() {
-        let phantom = BTreeSet::from([1, 3]);
-
-        // Raw 0 stays put. Raw 2 loses the one phantom below it, raw 5
-        // loses both.
-        assert_eq!(remap_scene_starts(&[0, 2, 5], &phantom), vec![0, 1, 3]);
-    }
-
-    #[test]
-    fn remap_collapses_a_boundary_that_lands_on_a_dropped_entry() {
-        // Raw 1 is itself dropped, so it maps onto the same output
-        // frame as raw 2. The duplicate boundary must not survive.
-        assert_eq!(remap_scene_starts(&[0, 1, 2], &BTreeSet::from([1])), vec![0, 1]);
     }
 }

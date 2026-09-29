@@ -25,7 +25,7 @@ pub use self::nlmeans::NlmeansArgs;
 #[derive(Debug, Clone)]
 pub struct RunOptions {
     pub planes: PlaneOptions,
-    /// Draws the denoising progress bar for file input.
+    /// Draws the denoising progress bar.
     pub progress: bool,
 }
 
@@ -147,17 +147,13 @@ pub struct Args {
     )]
     pub channel_mode: Vec<CliChannelMode>,
 
-    /// Shows a progress bar for the denoising pass when `--input`
-    /// names a file.
+    /// Shows a progress bar for the denoising pass.
     ///
     /// Off by default because that bar runs for the whole encode, and
     /// anything else writing to the terminal, such as the ffmpeg the
-    /// output is usually piped into, scrambles it. Scene detection
-    /// shows its bar without this flag, since it finishes before any
-    /// output is written.
+    /// output is usually piped into, scrambles it.
     ///
-    /// Neither bar is drawn unless stderr is a terminal, and there is
-    /// nothing to show a bar for on piped input.
+    /// The bar is only drawn when stderr is a terminal.
     #[arg(long, env = "AVD_PROGRESS", global = true)]
     pub progress: bool,
 

@@ -25,12 +25,11 @@ denoising tools.
 - **Temporal denoising with motion awareness** - up to 17-frame windows, per-neighbour block-match confidence, 
   and opt-in on-GPU motion compensation.
 - **Luma, chroma, and YUV444 kernels** - spatial or temporal, each plane individually tunable.
-- **Library and binary** - y4m over a pipe, or direct file ingestion via FFMS2 with
+- **Library and binary** - y4m over a pipe or direct file ingestion via FFMS2, both with
   scene-parallel workers.
 - **8, 10, and 12-bit** - depth is detected from the source and preserved on output. Tuning parameters are normalized
   across bit-depth.
 - _**Fast!**_ - around **2x** FFmpeg's `nlmeans_opencl` at matched settings and **~1.3x** faster than V-BM3DHIP.
-  - Piped input can't parallelize across scenes, so file input makes the best use of big GPUs.
 - **VapourSynth Plugin** - [Available on PyPi](https://pypi.org/project/vsavd/) for integrating within your existing
   pipelines.
   - Please be aware that due to VS API limitations the NLMeans-HQ and NL4D algorithms are very heavily limited and

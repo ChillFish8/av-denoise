@@ -6,16 +6,15 @@ use super::InputSource;
 pub struct CommonArgs {
     /// Where to read frames from.
     ///
-    /// A path opens the file with ffms2 and splits the work by
-    /// scene. Any container or codec supported by ffmpeg works.
+    /// A path opens the file with ffms2. Any container or codec
+    /// supported by ffmpeg works.
     ///
     /// `-` or `pipe:0` reads a y4m stream from standard input.
     ///
     /// `pipe:N` for `N` of 3 or above reads a y4m stream from an
     /// inherited file descriptor.
     ///
-    /// Piped input has no scene detection, so the temporal window
-    /// slides across the whole stream.
+    /// Every input is split by scene, piped or not.
     ///
     /// A file whose name would otherwise be read as a pipe is
     /// reachable by prefixing it, for example `./-`.
@@ -33,8 +32,6 @@ pub struct CommonArgs {
     ///
     /// `1` is valid and useful for debugging. Defaults to 2 when
     /// unset.
-    ///
-    /// Ignored for piped input, which cannot be split by scene.
     #[arg(short = 'W', long)]
     pub workers: Option<usize>,
 
@@ -53,8 +50,6 @@ pub struct CommonArgs {
     /// itself and the decoder is the bottleneck.
     ///
     /// Defaults to 1GiB when unset.
-    ///
-    /// Ignored for piped input, which cannot be split by scene.
     #[arg(long, value_name = "SIZE", value_parser = parse_frame_budget)]
     pub frame_budget: Option<u64>,
 }
