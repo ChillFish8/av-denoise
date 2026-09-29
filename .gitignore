@@ -6,3 +6,5 @@ cubecl.log
 /.claude/
 /scripts/**/*.pyc
 /workspaces
+/.vcpkg/
+/vcpkg_installed/

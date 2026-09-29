@@ -56,6 +56,9 @@ indicatif = { version = "0.18", optional = true, default-features = false }
 tracing-indicatif = { version = "0.3", optional = true }
 tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter"] }
 
+[build-dependencies]
+pkg-config = { version = "0.3.34", optional = true }
+
 [features]
 vulkan = ["av-denoise-core/vulkan"]
 metal = ["av-denoise-core/metal"]
@@ -75,4 +78,6 @@ binary = [
     "tracing-indicatif",
     "tracing-subscriber",
 ]
+# Links ffms2 and FFmpeg statically from the vcpkg tree. See `just build-static`.
+static-ffms2 = ["binary", "av-decoders/ffms2_static", "dep:pkg-config"]
 default = ["vulkan"]

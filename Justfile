@@ -3,6 +3,10 @@
 # feature is always added, without it Cargo skips the CLI target.
 bench_features := env("AVD_BENCH_FEATURES", "vulkan") + ",binary"
 
+# The vcpkg triplet `static-deps` installs for. Override on Intel macOS.
+vcpkg_triplet := env("AVD_VCPKG_TRIPLET", if os() == "macos" { "arm64-osx-release" } else { "x64-linux-release" })
+static_features := if os() == "macos" { "metal" } else { "vulkan" }
+
 hello:
 
 # Prefer `rustfmt +nightly <file>` for targeted edits; this formats the whole workspace.
@@ -33,6 +37,31 @@ build *ARGS:
 
 run *ARGS:
     cargo run -p av-denoise {{ARGS}}
+
+# Builds the static ffms2 and FFmpeg tree from vcpkg.json into vcpkg_installed/.
+static-deps:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -d .vcpkg ]; then
+        git clone https://github.com/microsoft/vcpkg.git .vcpkg
+    fi
+    git -C .vcpkg fetch --quiet origin
+    baseline="$(jq -r '."builtin-baseline"' vcpkg.json)"
+    git -C .vcpkg checkout --quiet "$baseline"
+    if [ ! -x .vcpkg/vcpkg ]; then
+        .vcpkg/bootstrap-vcpkg.sh -disableMetrics
+    fi
+    .vcpkg/vcpkg install --triplet {{vcpkg_triplet}} --host-triplet {{vcpkg_triplet}}
+
+# Builds a release CLI with ffms2 and FFmpeg linked statically. Run `static-deps` first.
+build-static features=static_features:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    prefix="$PWD/vcpkg_installed/{{vcpkg_triplet}}"
+    export FFMS_INCLUDE_DIR="$prefix/include"
+    export FFMS_LIB_DIR="$prefix/lib"
+    export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
+    cargo build --release -p av-denoise --features {{features}},static-ffms2
 
 bench *ARGS:
     cargo bench -p av-denoise-core {{ARGS}}
