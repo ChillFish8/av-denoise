@@ -106,16 +106,22 @@ is judged together with its neighbours rather than alone, so faint lines and fin
 survive where each frequency on its own would fall under the threshold. Turn it off, and set
 `flat_boost=1.5`, to get the output of earlier releases.
 
-**`flat_boost`, `chroma_flat_boost` and `shadow_soften` adjust the noise map by area.** Flat,
-grainy areas such as skies are filtered harder, 1.75 times by default on luma and 1.5 times on
-chroma. The chroma boost applies when chroma is denoised in its own pass, not under
+**`flat_boost`, `chroma_flat_boost`, `shadow_soften` and `flat_texture_cut` adjust the noise map
+by area.** Flat, grainy areas such as skies are filtered harder, 1.75 times by default on luma and
+1.5 times on chroma. The chroma boost applies when chroma is denoised in its own pass, not under
 `channel_mode="yuv"`. Textured dark areas are filtered more gently, at 0.65 times by default,
 fading out between luma 128 and 160. `1` turns each one off, and `noise_map=False` turns all
-three off.
+four off.
 
 ```python
 clean = avd.Nl4d(clip, shadow_soften=0.8)
 ```
+
+**`flat_texture_cut` keeps faint texture out of the flat areas.** Grain points every which way,
+while faint lines and edges share one direction. An area whose surroundings line up at or above
+the cut, 0.21 by default, is filtered as texture rather than boosted as flat. Lower it to keep
+more faint texture in dark scenes, raise it to filter more areas as flat. It applies to luma
+only, and `1` turns it off.
 
 ### What not to touch in NL4D
 

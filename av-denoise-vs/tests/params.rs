@@ -936,6 +936,7 @@ fn strength_map_params_reach_nl4d_options() {
         flat_boost: Some(2.0),
         chroma_flat_boost: Some(1.2),
         shadow_soften: Some(0.8),
+        flat_texture_cut: Some(0.3),
         ..RawParams::default()
     };
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
@@ -947,6 +948,7 @@ fn strength_map_params_reach_nl4d_options() {
             assert_eq!(nl4d.flat_boost, 2.0);
             assert_eq!(nl4d.chroma_flat_boost, 1.2);
             assert_eq!(nl4d.shadow_soften, 0.8);
+            assert_eq!(nl4d.flat_texture_cut, 0.3);
         },
         other => panic!("expected Nl4d, got {other:?}"),
     }
@@ -965,6 +967,7 @@ fn strength_map_params_default_to_the_library_values() {
             assert_eq!(nl4d.flat_boost, defaults.flat_boost);
             assert_eq!(nl4d.chroma_flat_boost, defaults.chroma_flat_boost);
             assert_eq!(nl4d.shadow_soften, defaults.shadow_soften);
+            assert_eq!(nl4d.flat_texture_cut, defaults.flat_texture_cut);
         },
         other => panic!("expected Nl4d, got {other:?}"),
     }
@@ -992,6 +995,13 @@ fn strength_map_params_are_rejected_for_nlmeans() {
             "shadow_soften",
             RawParams {
                 shadow_soften: Some(0.65),
+                ..RawParams::default()
+            },
+        ),
+        (
+            "flat_texture_cut",
+            RawParams {
+                flat_texture_cut: Some(0.21),
                 ..RawParams::default()
             },
         ),

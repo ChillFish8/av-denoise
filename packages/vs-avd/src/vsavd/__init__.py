@@ -182,6 +182,7 @@ def Nl4d(
     flat_boost: float | None = None,
     chroma_flat_boost: float | None = None,
     shadow_soften: float | None = None,
+    flat_texture_cut: float | None = None,
     pooled_threshold: bool | None = None,
     accelerators: list[Accelerators] | None = None,
     **kwargs: Any,
@@ -219,6 +220,9 @@ def Nl4d(
         shadow_soften: How much more gently textured dark areas are filtered, as a multiplier on
             the luma threshold. Between 0.1 and 1.0, 0.65 by default. `1.0` turns it off. Needs
             `noise_map`.
+        flat_texture_cut: How strongly an area's surroundings may line up, like faint lines or
+            edges, before it stops counting as flat. Between 0.0 and 1.0, 0.21 by default.
+            Lower keeps more faint texture. `1.0` turns it off. Luma only. Needs `noise_map`.
         pooled_threshold: Whether to judge each frequency together with its neighbours, which
             keeps faint texture. On by default, `False` turns it off.
         accelerators: The accelerators to try and use in the order to attempt.
@@ -252,6 +256,7 @@ def Nl4d(
         flat_boost=flat_boost,
         chroma_flat_boost=chroma_flat_boost,
         shadow_soften=shadow_soften,
+        flat_texture_cut=flat_texture_cut,
         pooled_threshold=pooled_threshold,
         accelerators=accelerators_string,
         **kwargs,

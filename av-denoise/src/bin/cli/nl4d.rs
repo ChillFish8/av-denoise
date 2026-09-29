@@ -193,6 +193,14 @@ pub struct Nl4dArgs {
     #[arg(long)]
     pub shadow_soften: Option<f32>,
 
+    /// Stops flat areas whose surroundings line up like faint lines or edges from counting as flat.
+    ///
+    /// Between `0` and `1`. Library default is 0.21. Lower keeps more faint texture, higher
+    /// filters more areas as flat. `1` turns it off. Luma only. Has no effect with
+    /// `--no-noise-map`.
+    #[arg(long)]
+    pub flat_texture_cut: Option<f32>,
+
     /// Estimates noise from a local window instead of a temporal EMA
     /// over stream history.
     ///
@@ -291,7 +299,7 @@ impl Nl4dArgs {
                     flat_boost: self.flat_boost.unwrap_or(defaults.flat_boost),
                     chroma_flat_boost: self.chroma_flat_boost.unwrap_or(defaults.chroma_flat_boost),
                     shadow_soften: self.shadow_soften.unwrap_or(defaults.shadow_soften),
-                    flat_texture_cut: defaults.flat_texture_cut,
+                    flat_texture_cut: self.flat_texture_cut.unwrap_or(defaults.flat_texture_cut),
                     pooled_threshold: defaults.pooled_threshold && !self.no_pooled_threshold,
                 }),
                 // nl4d has no NLM weighting pass for a strength to apply to.
@@ -778,6 +786,8 @@ mod tests {
             "1.2",
             "--shadow-soften",
             "0.8",
+            "--flat-texture-cut",
+            "0.3",
         ]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
         let algorithm = expect_nl4d(&opts);
@@ -785,6 +795,7 @@ mod tests {
         assert_eq!(algorithm.flat_boost, 2.0);
         assert_eq!(algorithm.chroma_flat_boost, 1.2);
         assert_eq!(algorithm.shadow_soften, 0.8);
+        assert_eq!(algorithm.flat_texture_cut, 0.3);
     }
 
     #[test]
@@ -797,5 +808,6 @@ mod tests {
         assert_eq!(algorithm.flat_boost, defaults.flat_boost);
         assert_eq!(algorithm.chroma_flat_boost, defaults.chroma_flat_boost);
         assert_eq!(algorithm.shadow_soften, defaults.shadow_soften);
+        assert_eq!(algorithm.flat_texture_cut, defaults.flat_texture_cut);
     }
 }

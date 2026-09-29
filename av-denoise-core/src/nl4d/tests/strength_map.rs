@@ -126,6 +126,12 @@ fn clip_params(
     }
 }
 
+fn build_nl4d(channels: ChannelMode, mut params: Nl4dParams) -> Nl4dDenoiser<R> {
+    let client = make_client();
+    params.nlm.channels = channels;
+    Nl4dDenoiser::new(&client, params, 64, 64).expect("construction failed")
+}
+
 fn unit_params(channels: ChannelMode) -> Nl4dParams {
     clip_params(channels, 1.0, 1.0, 1.0)
 }
@@ -336,12 +342,6 @@ fn a_chroma_denoiser_boosts_its_second_channel() {
     let boosted_std = removed_channel_std(&frames, &boosted.outputs, 2, 1, right.clone(), 0..HEIGHT);
     let unboosted_std = removed_channel_std(&frames, &unboosted.outputs, 2, 1, right, 0..HEIGHT);
     assert!(boosted_std > unboosted_std, "{boosted_std} vs {unboosted_std}");
-}
-
-fn build_nl4d(channels: ChannelMode, mut params: Nl4dParams) -> Nl4dDenoiser<R> {
-    let client = make_client();
-    params.nlm.channels = channels;
-    Nl4dDenoiser::<R>::new(&client, params, 64, 64).expect("construction failed")
 }
 
 #[test]

@@ -155,6 +155,7 @@ fn raw_params(
     flat_boost: Option<f64>,
     chroma_flat_boost: Option<f64>,
     shadow_soften: Option<f64>,
+    flat_texture_cut: Option<f64>,
     pooled_threshold: Option<i64>,
 ) -> Result<RawParams, Error> {
     Ok(RawParams {
@@ -183,6 +184,7 @@ fn raw_params(
         flat_boost,
         chroma_flat_boost,
         shadow_soften,
+        flat_texture_cut,
         pooled_threshold: opt_bool(pooled_threshold),
     })
 }
@@ -238,6 +240,7 @@ make_filter_function! {
             None,
             None,
             None,
+            None,
         )?;
         let filter = Denoise::create(api, core, clip, AlgorithmKind::Nlmeans, &raw)?;
         Ok(Some(Box::new(filter)))
@@ -276,6 +279,7 @@ make_filter_function! {
         flat_boost: Option<f64>,
         chroma_flat_boost: Option<f64>,
         shadow_soften: Option<f64>,
+        flat_texture_cut: Option<f64>,
         pooled_threshold: Option<i64>,
     ) -> Result<Option<Box<dyn Filter<'core> + 'core>>, Error> {
         let raw = raw_params(
@@ -304,6 +308,7 @@ make_filter_function! {
             flat_boost,
             chroma_flat_boost,
             shadow_soften,
+            flat_texture_cut,
             pooled_threshold,
         )?;
         let filter = Denoise::create(api, core, clip, AlgorithmKind::Nl4d, &raw)?;

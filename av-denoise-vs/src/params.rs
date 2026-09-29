@@ -185,6 +185,7 @@ pub struct RawParams {
     pub flat_boost: Option<f64>,
     pub chroma_flat_boost: Option<f64>,
     pub shadow_soften: Option<f64>,
+    pub flat_texture_cut: Option<f64>,
     pub pooled_threshold: Option<bool>,
 }
 
@@ -275,6 +276,7 @@ fn reject_mismatched_params(
         ("flat_boost", raw.flat_boost.is_some()),
         ("chroma_flat_boost", raw.chroma_flat_boost.is_some()),
         ("shadow_soften", raw.shadow_soften.is_some()),
+        ("flat_texture_cut", raw.flat_texture_cut.is_some()),
         ("pooled_threshold", raw.pooled_threshold.is_some()),
     ];
 
@@ -521,6 +523,10 @@ pub fn plane_options_from(
                 .shadow_soften
                 .map(|v| v as f32)
                 .unwrap_or_else(|| Nl4dOptions::default().shadow_soften),
+            flat_texture_cut: raw
+                .flat_texture_cut
+                .map(|v| v as f32)
+                .unwrap_or_else(|| Nl4dOptions::default().flat_texture_cut),
             pooled_threshold: match raw.pooled_threshold {
                 Some(enabled) => enabled,
                 None => Nl4dOptions::default().pooled_threshold,
