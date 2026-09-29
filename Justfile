@@ -52,6 +52,16 @@ static-deps:
     fi
     .vcpkg/vcpkg install --triplet {{vcpkg_triplet}} --host-triplet {{vcpkg_triplet}}
 
+# Builds a release CLI with ffms2 and FFmpeg linked statically. Run `static-deps` first.
+build-static features="vulkan":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    prefix="$PWD/vcpkg_installed/{{vcpkg_triplet}}"
+    export FFMS_INCLUDE_DIR="$prefix/include"
+    export FFMS_LIB_DIR="$prefix/lib"
+    export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
+    cargo build --release -p av-denoise --features {{features}},static-ffms2
+
 bench *ARGS:
     cargo bench -p av-denoise-core {{ARGS}}
 
