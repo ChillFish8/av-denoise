@@ -54,6 +54,44 @@ fn with_flatness(fraction_of_variance: f32) -> SyntheticQuarter {
     }
 }
 
+fn flat_grid(cols: usize, rows: usize) -> QuarterClasses {
+    let class = Some(QuarterClass {
+        flat: true,
+        luma: 0.2,
+    });
+    QuarterClasses::from_classes(cols, rows, vec![class; cols * rows])
+}
+
+const ORIENTED: QuarterTensor = QuarterTensor {
+    xx: 1.0,
+    yy: 0.1,
+    xy: 0.0,
+};
+const ISOTROPIC: QuarterTensor = QuarterTensor {
+    xx: 1.0,
+    yy: 1.0,
+    xy: 0.0,
+};
+
+/// A flat block whose four quarters carry a strongly horizontal structure tensor.
+fn oriented_flat_block(cut: Option<f32>) -> QuarterClasses {
+    let quarter = SyntheticQuarter {
+        tensor_xx: 1.0,
+        tensor_yy: 0.1,
+        ..with_flatness(0.4)
+    };
+    let quarters = vec![quarter; 4];
+    let (width, height) = frame_dims(quarters.len());
+    let records = synthetic_records(&quarters);
+    let curve = flat_curve();
+    classify_quarters(&records, 1, width, height, &curve, cut)
+}
+
+fn all_flat(classes: &QuarterClasses) -> bool {
+    let multipliers = classes.chroma_multipliers(2.0);
+    multipliers.iter().all(|&multiplier| multiplier == 2.0)
+}
+
 #[test]
 fn a_flat_noisy_quarter_is_flat() {
     assert!(is_flat(with_flatness(0.4)));
@@ -310,25 +348,6 @@ fn the_front_end_keeps_classes_beside_the_curve_and_resets_both() {
     assert!(denoiser.current_quarter_classes().is_none());
 }
 
-fn flat_grid(cols: usize, rows: usize) -> QuarterClasses {
-    let class = Some(QuarterClass {
-        flat: true,
-        luma: 0.2,
-    });
-    QuarterClasses::from_classes(cols, rows, vec![class; cols * rows])
-}
-
-const ORIENTED: QuarterTensor = QuarterTensor {
-    xx: 1.0,
-    yy: 0.1,
-    xy: 0.0,
-};
-const ISOTROPIC: QuarterTensor = QuarterTensor {
-    xx: 1.0,
-    yy: 1.0,
-    xy: 0.0,
-};
-
 #[test]
 fn an_oriented_neighbourhood_is_vetoed() {
     let mut classes = flat_grid(3, 3);
@@ -336,13 +355,10 @@ fn an_oriented_neighbourhood_is_vetoed() {
 
     let counts = classes.veto_textured(&tensors, 0.5);
 
+    let multipliers = classes.chroma_multipliers(2.0);
+
     assert_eq!((counts.flat, counts.vetoed), (9, 9));
-    assert!(
-        classes
-            .chroma_multipliers(2.0)
-            .iter()
-            .all(|&multiplier| multiplier == 1.0)
-    );
+    assert!(multipliers.iter().all(|&multiplier| multiplier == 1.0));
 }
 
 #[test]
@@ -353,12 +369,7 @@ fn an_isotropic_neighbourhood_stays_flat() {
     let counts = classes.veto_textured(&tensors, 0.2);
 
     assert_eq!((counts.flat, counts.vetoed), (9, 0));
-    assert!(
-        classes
-            .chroma_multipliers(2.0)
-            .iter()
-            .all(|&multiplier| multiplier == 2.0)
-    );
+    assert!(all_flat(&classes));
 }
 
 #[test]
@@ -424,25 +435,6 @@ fn a_neighbourhood_with_no_gradient_is_not_vetoed() {
     let counts = classes.veto_textured(&tensors, 0.01);
 
     assert_eq!(counts.vetoed, 0);
-}
-
-/// A flat block whose four quarters carry a strongly horizontal structure tensor.
-fn oriented_flat_block(cut: Option<f32>) -> QuarterClasses {
-    let quarter = SyntheticQuarter {
-        tensor_xx: 1.0,
-        tensor_yy: 0.1,
-        ..with_flatness(0.4)
-    };
-    let quarters = vec![quarter; 4];
-    let (width, height) = frame_dims(quarters.len());
-    let records = synthetic_records(&quarters);
-    let curve = flat_curve();
-    classify_quarters(&records, 1, width, height, &curve, cut)
-}
-
-fn all_flat(classes: &QuarterClasses) -> bool {
-    let multipliers = classes.chroma_multipliers(2.0);
-    multipliers.iter().all(|&multiplier| multiplier == 2.0)
 }
 
 #[test]

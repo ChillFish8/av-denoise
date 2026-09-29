@@ -330,16 +330,16 @@ impl Nl4dOptions {
 /// dominated by luma" assumption [`hq_default_strength`]
 /// makes for its own Yuv case.
 ///
-/// Luma and the fused Yuv mode use 3.78, and chroma uses 2.94.
+/// Luma and the fused Yuv mode use 4.158, and chroma uses 3.234.
 pub fn nl4d_default_lambda_ht(channels: ChannelMode) -> f32 {
     match channels {
-        ChannelMode::Luma | ChannelMode::Yuv => 3.78,
-        ChannelMode::Chroma => 2.94,
+        ChannelMode::Luma | ChannelMode::Yuv => 4.158,
+        ChannelMode::Chroma => 3.234,
     }
 }
 
 /// The pooled threshold at each plane's default lambda, calibrated on real grain.
-const NL4D_POOLED_THRESHOLD: f32 = 2.2;
+const NL4D_POOLED_THRESHOLD: f32 = 2.42;
 
 /// The ratio of nl4d's pooled threshold to its lambda for one plane.
 ///
@@ -1481,8 +1481,8 @@ mod options_tests {
         let luma = nl4d_default_lambda_ht(ChannelMode::Luma);
         let chroma = nl4d_default_lambda_ht(ChannelMode::Chroma);
 
-        assert!((luma - 3.78).abs() < f32::EPSILON);
-        assert!((chroma - 2.94).abs() < f32::EPSILON);
+        assert!((luma - 4.158).abs() < f32::EPSILON);
+        assert!((chroma - 3.234).abs() < f32::EPSILON);
         assert!(
             (chroma - luma).abs() > f32::EPSILON,
             "the two planes should not resolve to the same default"
@@ -1501,7 +1501,10 @@ mod options_tests {
     fn nl4d_pool_ratio_gives_the_calibrated_threshold_at_each_default_lambda() {
         for channels in [ChannelMode::Luma, ChannelMode::Yuv, ChannelMode::Chroma] {
             let threshold = nl4d_pool_ratio(channels) * nl4d_default_lambda_ht(channels);
-            assert!((threshold - 2.2).abs() < 1.0e-6, "{channels:?} gives {threshold}");
+            assert!(
+                (threshold - 2.42).abs() < 1.0e-6,
+                "{channels:?} gives {threshold}"
+            );
         }
 
         assert_eq!(
@@ -1522,8 +1525,8 @@ mod options_tests {
         let luma = resolve_lambda_ht(&opts, ChannelMode::Luma).expect("the default scale is in range");
         let chroma = resolve_lambda_ht(&opts, ChannelMode::Chroma).expect("the default scale is in range");
 
-        assert!((luma - 3.78).abs() < f32::EPSILON, "got {luma}");
-        assert!((chroma - 2.94).abs() < f32::EPSILON, "got {chroma}");
+        assert!((luma - 4.158).abs() < f32::EPSILON, "got {luma}");
+        assert!((chroma - 3.234).abs() < f32::EPSILON, "got {chroma}");
     }
 
     #[test]

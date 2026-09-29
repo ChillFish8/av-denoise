@@ -153,7 +153,7 @@ impl QuarterClasses {
     /// Grain has no preferred direction, so its pooled coherence stays low, while faint lines and
     /// edges keep theirs. `tensors` holds one tensor per quarter, row-major. The neighbourhood is
     /// clamped at the frame edges and pools only quarters that have a class. A vetoed quarter keeps
-    /// its luma, so it takes the textured multiplier.
+    /// its luma.
     pub(crate) fn veto_textured(&mut self, tensors: &[QuarterTensor], cut: f32) -> VetoCounts {
         assert_eq!(tensors.len(), self.classes.len());
 

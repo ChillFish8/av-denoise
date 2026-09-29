@@ -1235,8 +1235,8 @@ mod cli_options_tests {
         // defaults.
         let luma_default = crate::nl4d_default_lambda_ht(ChannelMode::Luma);
         let chroma_default = crate::nl4d_default_lambda_ht(ChannelMode::Chroma);
-        assert!((luma_default - 3.78).abs() < f32::EPSILON);
-        assert!((chroma_default - 2.94).abs() < f32::EPSILON);
+        assert!((luma_default - 4.158).abs() < f32::EPSILON);
+        assert!((chroma_default - 3.234).abs() < f32::EPSILON);
         assert!((chroma_default - luma_default).abs() > f32::EPSILON);
     }
 }
