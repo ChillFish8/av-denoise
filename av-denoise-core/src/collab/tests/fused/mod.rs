@@ -1,18 +1,20 @@
 mod behaviour;
 mod noise_curve;
+mod pooled;
 mod recorded;
+mod strength_map;
 mod walks;
 
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::helpers::{R, make_client, make_unique_frame, noisy_field_over};
-use crate::collab::geometry::{fused_cubes_x, ref_count, ref_pos, refs_along};
+use crate::collab::geometry::{fused_cubes_x, ref_count, ref_pos, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{WEIGHT_GAIN, cross_frame_accum_scale, kaiser_window, weight_scale};
-use crate::collab::kernels::fused::collab_fused;
+use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
-use crate::nlmeans::NOISE_CURVE_BINS;
+use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS};
 
 /// The spatial search radius most runs below use.
 ///
@@ -101,6 +103,13 @@ pub(super) struct Setup {
     /// The frame's noise curve. `None` launches with `curve_valid = 0`
     /// and a zeroed buffer.
     pub(super) noise_curve: Option<[f32; NOISE_CURVE_BINS]>,
+    /// A strength map and the mode it applies in. `None` launches a unit map with the map off.
+    pub(super) strength_map: Option<(Vec<f32>, u32)>,
+    /// The pooled threshold's ratio to lambda. `None` launches the plain per-coefficient test.
+    pub(super) pooled: Option<f32>,
+    /// The channels the ring interleaves per pixel, laid out at
+    /// [ChannelMode::storage_count](crate::nlmeans::ChannelMode::storage_count) floats each.
+    pub(super) channel_mode: ChannelMode,
 }
 
 impl Setup {
@@ -133,13 +142,21 @@ impl Setup {
             profile_override: None,
             kaiser_beta: 0.0,
             noise_curve: None,
+            strength_map: None,
+            pooled: None,
+            channel_mode: ChannelMode::Luma,
         }
     }
 
     /// Ring slots in this setup's frame ring, which is also how many
     /// regions the accumulators carry.
     pub(super) fn frames(&self) -> u32 {
-        self.ring.len() as u32 / (self.width * self.height)
+        let frame_len = self.width * self.height * self.stored_channels();
+        self.ring.len() as u32 / frame_len
+    }
+
+    pub(super) fn stored_channels(&self) -> u32 {
+        self.channel_mode.storage_count()
     }
 
     pub(super) fn pixels(&self) -> usize {
@@ -353,25 +370,28 @@ pub(super) struct Buffers {
     refs_y: u32,
 }
 
-/// Luma always stores one channel per line, so `stored_ch` and the
-/// kernel's `Size` selector are both fixed at 1 across this file.
-const STORED_CH: u32 = 1;
-
 pub(super) fn buffers(s: &Setup) -> Buffers {
     let client = make_client();
     let refs_x = refs_along(s.width);
     let refs_y = refs_along(s.height);
     let refs = ref_count(s.width, s.height);
     let frames = s.frames() as usize;
-    let accum_len = s.pixels() * STORED_CH as usize * frames;
+    let stored_ch = s.stored_channels() as usize;
+    let accum_len = s.pixels() * stored_ch * frames;
     let wsum_len = s.pixels() * frames;
+
+    // Padding lanes past the live channels carry a zero sigma, as the
+    // denoiser uploads them.
+    let mut sigma = vec![0.0f32; stored_ch];
+    let live_channels = s.channel_mode.count() as usize;
+    sigma[..live_channels].fill(s.sigma);
 
     Buffers {
         ring: client.create_from_slice(f32::as_bytes(&s.ring)),
         mv_field: client.create_from_slice(i32::as_bytes(&s.mv_field)),
         confidence: client.create_from_slice(f32::as_bytes(&s.confidence)),
         neighbour_slots: client.create_from_slice(u32::as_bytes(&s.neighbour_slots)),
-        sigma: client.create_from_slice(f32::as_bytes(&[s.sigma])),
+        sigma: client.create_from_slice(f32::as_bytes(&sigma)),
         dct_profile: client.create_from_slice(f32::as_bytes(&s.profile())),
         kaiser: client.create_from_slice(f32::as_bytes(&kaiser_window(s.kaiser_beta))),
         // Zeroed here rather than by `collab_zero_accum`, since the
@@ -422,18 +442,33 @@ pub(super) fn run_fused_walk(s: &Setup, warp_uniform: Option<bool>) -> Aggregate
     let curve_buf = b.client.create_from_slice(f32::as_bytes(&curve));
     let curve_valid = u32::from(s.noise_curve.is_some());
 
+    let (map_cols, map_rows) = strength_map_dims(s.width, s.height);
+    let map_len = (map_cols * map_rows) as usize;
+    let (map_values, map_mode) = match &s.strength_map {
+        Some((values, mode)) => (values.clone(), *mode),
+        None => (vec![1.0f32; map_len], STRENGTH_MAP_OFF),
+    };
+    assert_eq!(
+        map_values.len(),
+        map_len,
+        "a strength map must cover the frame's quarter grid"
+    );
+    let map_buf = b.client.create_from_slice(f32::as_bytes(&map_values));
+    let stored_ch = s.stored_channels();
+
     unsafe {
         collab_fused::launch_unchecked::<R>(
             &b.client,
             CubeCount::new_2d(fused_cubes_x(s.width), b.refs_y),
             CubeDim::new_1d(64),
-            STORED_CH as usize,
+            stored_ch as usize,
             ArrayArg::from_raw_parts(b.ring.clone(), s.ring.len()),
             ArrayArg::from_raw_parts(b.mv_field.clone(), s.mv_field.len()),
             ArrayArg::from_raw_parts(b.confidence.clone(), s.confidence.len()),
             ArrayArg::from_raw_parts(b.neighbour_slots.clone(), s.neighbour_slots.len()),
-            ArrayArg::from_raw_parts(b.sigma.clone(), 1),
+            ArrayArg::from_raw_parts(b.sigma.clone(), stored_ch as usize),
             ArrayArg::from_raw_parts(curve_buf, NOISE_CURVE_BINS),
+            ArrayArg::from_raw_parts(map_buf, map_len),
             ArrayArg::from_raw_parts(b.dct_profile.clone(), 8),
             ArrayArg::from_raw_parts(b.kaiser.clone(), PATCH_SIZE as usize),
             ArrayArg::from_raw_parts(b.accum.clone(), b.accum_len),
@@ -443,6 +478,7 @@ pub(super) fn run_fused_walk(s: &Setup, warp_uniform: Option<bool>) -> Aggregate
             s.c_min,
             s.lambda_ht,
             curve_valid,
+            map_mode,
             weight_scale(s.sigma, &profile),
             s.accum_scale(),
             warp_uniform.unwrap_or_else(|| needs_warp_uniform_search(&b.client)),
@@ -457,11 +493,15 @@ pub(super) fn run_fused_walk(s: &Setup, warp_uniform: Option<bool>) -> Aggregate
             s.blocks_y,
             s.width,
             s.height,
-            1u32,
+            s.channel_mode.count(),
             s.k_max,
-            STORED_CH,
+            stored_ch,
             s.spatial_radius,
             b.refs_x,
+            map_cols,
+            map_rows,
+            s.pooled.unwrap_or(0.0),
+            s.pooled.is_some(),
         );
     }
 

@@ -238,6 +238,8 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
             ch_name,
             split_mv: false,
             noise_curve: false,
+            strength_map: false,
+            pooled: false,
         });
     }
     run(CollabFusedBench {
@@ -246,6 +248,26 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         ch_name: "luma",
         split_mv: false,
         noise_curve: true,
+        strength_map: false,
+        pooled: false,
+    });
+    run(CollabFusedBench {
+        client: client.clone(),
+        ch: 1,
+        ch_name: "luma",
+        split_mv: false,
+        noise_curve: true,
+        strength_map: true,
+        pooled: false,
+    });
+    run(CollabFusedBench {
+        client: client.clone(),
+        ch: 1,
+        ch_name: "luma",
+        split_mv: false,
+        noise_curve: true,
+        strength_map: true,
+        pooled: true,
     });
     for &(ch, ch_name) in CHANNELS {
         run(CollabFusedBench {
@@ -254,6 +276,8 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
             ch_name,
             split_mv: true,
             noise_curve: false,
+            strength_map: false,
+            pooled: false,
         });
     }
     for &(ch, ch_name) in CHANNELS {

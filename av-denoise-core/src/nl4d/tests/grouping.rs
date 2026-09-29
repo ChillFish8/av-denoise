@@ -9,9 +9,9 @@ use super::helpers::{
     noisy_ring,
     planted_ring,
 };
-use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
+use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
-use crate::collab::kernels::fused::collab_fused;
+use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, STEP, grid_frames, needs_warp_uniform_search};
 use crate::nlmeans::NOISE_CURVE_BINS;
@@ -112,6 +112,10 @@ fn run_fused_over(fx: &RingFixture, k: Knobs) -> FusedRun {
     let profile_buf = client.create_from_slice(f32::as_bytes(&profile));
     let kaiser_buf = client.create_from_slice(f32::as_bytes(&kaiser_window(0.0)));
     let zero_curve = client.create_from_slice(f32::as_bytes(&[0.0f32; NOISE_CURVE_BINS]));
+    let (map_cols, map_rows) = strength_map_dims(w, h);
+    let map_len = (map_cols * map_rows) as usize;
+    let unit_map = vec![1.0f32; map_len];
+    let unit_map_buf = client.create_from_slice(f32::as_bytes(&unit_map));
     let accum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels * frames]));
     let wsum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels * frames]));
     let group_weight = client.empty(refs * size_of::<f32>());
@@ -128,6 +132,7 @@ fn run_fused_over(fx: &RingFixture, k: Knobs) -> FusedRun {
             ArrayArg::from_raw_parts(slots_buf, fx.neighbour_slots.len()),
             ArrayArg::from_raw_parts(sigma_buf, 1),
             ArrayArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
+            ArrayArg::from_raw_parts(unit_map_buf, map_len),
             ArrayArg::from_raw_parts(profile_buf, 8),
             ArrayArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
             ArrayArg::from_raw_parts(accum, pixels * frames),
@@ -137,6 +142,7 @@ fn run_fused_over(fx: &RingFixture, k: Knobs) -> FusedRun {
             k.c_min,
             k.lambda_ht,
             0u32,
+            STRENGTH_MAP_OFF,
             weight_scale(k.sigma, &profile),
             cross_frame_accum_scale(k.spatial_radius, fx.radius),
             k.warp_uniform
@@ -157,6 +163,10 @@ fn run_fused_over(fx: &RingFixture, k: Knobs) -> FusedRun {
             1u32,
             k.spatial_radius,
             refs_x,
+            map_cols,
+            map_rows,
+            0.0f32,
+            false,
         );
     }
 

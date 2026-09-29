@@ -13,7 +13,7 @@ use super::helpers::{
     static_clip_params,
     textured_base,
 };
-use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
+use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{
     ACCUM_SCALE,
     collab_normalise,
@@ -22,7 +22,7 @@ use crate::collab::kernels::aggregate::{
     kaiser_window,
     weight_scale,
 };
-use crate::collab::kernels::fused::collab_fused;
+use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
@@ -388,6 +388,10 @@ fn run_spatial_only(
     let dct_profile_buf = client.create_from_slice(f32::as_bytes(&dct_profile));
     let kaiser_buf = client.create_from_slice(f32::as_bytes(&kaiser_window(0.0)));
     let zero_curve = client.create_from_slice(f32::as_bytes(&[0.0f32; NOISE_CURVE_BINS]));
+    let (map_cols, map_rows) = strength_map_dims(w, h);
+    let map_len = (map_cols * map_rows) as usize;
+    let unit_map = vec![1.0f32; map_len];
+    let unit_map_buf = client.create_from_slice(f32::as_bytes(&unit_map));
     let accum = client.empty(frame_len * size_of::<i32>());
     let wsum = client.empty(pixels * size_of::<i32>());
     let output = client.empty(frame_len * size_of::<f32>());
@@ -428,6 +432,7 @@ fn run_spatial_only(
             ArrayArg::from_raw_parts(neighbour_slots_dummy, 1),
             ArrayArg::from_raw_parts(sigma_buf, stored_ch as usize),
             ArrayArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
+            ArrayArg::from_raw_parts(unit_map_buf, map_len),
             ArrayArg::from_raw_parts(dct_profile_buf, 8),
             ArrayArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
             ArrayArg::from_raw_parts(accum.clone(), frame_len),
@@ -437,6 +442,7 @@ fn run_spatial_only(
             c_min,
             lambda_ht,
             0u32,
+            STRENGTH_MAP_OFF,
             wnorm,
             ACCUM_SCALE,
             warp_uniform,
@@ -456,6 +462,10 @@ fn run_spatial_only(
             stored_ch,
             spatial_radius,
             refs_x,
+            map_cols,
+            map_rows,
+            0.0f32,
+            false,
         );
 
         collab_normalise::launch_unchecked::<R>(
@@ -638,6 +648,10 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
         let profile_buf = client.create_from_slice(f32::as_bytes(&profile));
         let kaiser_buf = client.create_from_slice(f32::as_bytes(&kaiser_window(0.0)));
         let zero_curve = client.create_from_slice(f32::as_bytes(&[0.0f32; NOISE_CURVE_BINS]));
+        let (map_cols, map_rows) = strength_map_dims(w, h);
+        let map_len = (map_cols * map_rows) as usize;
+        let unit_map = vec![1.0f32; map_len];
+        let unit_map_buf = client.create_from_slice(f32::as_bytes(&unit_map));
         let wnorm = weight_scale(sigmas[0], &profile);
         let accum_scale = cross_frame_accum_scale(SPATIAL_RADIUS, radius);
 
@@ -664,6 +678,7 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 ArrayArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
                 ArrayArg::from_raw_parts(sigma_buf, 1),
                 ArrayArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
+                ArrayArg::from_raw_parts(unit_map_buf, map_len),
                 ArrayArg::from_raw_parts(profile_buf, 8),
                 ArrayArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
                 ArrayArg::from_raw_parts(accum.clone(), pixels * total_frames as usize),
@@ -673,6 +688,7 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 C_MIN,
                 LAMBDA_HT,
                 0u32,
+                STRENGTH_MAP_OFF,
                 wnorm,
                 accum_scale,
                 needs_warp_uniform_search(&client),
@@ -692,6 +708,10 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 1u32,
                 SPATIAL_RADIUS,
                 refs_x,
+                map_cols,
+                map_rows,
+                0.0f32,
+                false,
             );
 
             collab_normalise::launch_unchecked::<R>(

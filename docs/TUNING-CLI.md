@@ -45,7 +45,7 @@ before you consider going up a preset.
 You should try this parameter before touching the absolute values, since luma and chroma start
 from different defaults and the scale keeps that separation.
 
-**`--lambda-ht` sets those thresholds outright.** The defaults are 3.78 for luma and 2.94 for chroma.
+**`--lambda-ht` sets those thresholds outright.** The defaults are 4.158 for luma and 3.234 for chroma.
 `--luma-lambda-ht` and `--chroma-lambda-ht` pin one plane without touching the other, and `--lambda-ht-scale` still
 applies on top of whatever is pinned.
 
@@ -67,6 +67,24 @@ the smoothing off and leaves the tracked field as it is.
 **`--no-noise-map` turns off the luma noise map.** The noise map is on by default. It scales the
 luma threshold by how noisy each brightness level is, filtering noisy levels harder and clean ones
 more lightly.
+
+**`--no-pooled-threshold` turns off the pooled threshold.** It is on by default. Each frequency
+is judged together with its neighbours rather than alone, so faint lines and fine texture
+survive where each frequency on its own would fall under the threshold. Turn it off, and set
+`--flat-boost 1.5`, to get the output of earlier releases.
+
+**`--flat-boost`, `--chroma-flat-boost`, `--shadow-soften` and `--flat-texture-cut` adjust the
+noise map by area.** Flat, grainy areas such as skies are filtered harder, 1.75 times by default on
+luma and 1.5 times on chroma. The chroma boost applies when chroma is denoised in its own pass, not
+under `--channel-mode yuv`. Textured dark areas are filtered more gently, at 0.65 times by default,
+fading out between luma 128 and 160. `1` turns each one off, and `--no-noise-map` turns all
+four off.
+
+**`--flat-texture-cut` keeps faint texture out of the flat areas.** Grain points every which way,
+while faint lines and edges share one direction. An area whose surroundings line up at or above
+the cut, 0.21 by default, is filtered as texture rather than boosted as flat. Lower it to keep
+more faint texture in dark scenes, raise it to filter more areas as flat. It applies to luma
+only, and `1` turns it off.
 
 ### What not to touch in NL4D
 

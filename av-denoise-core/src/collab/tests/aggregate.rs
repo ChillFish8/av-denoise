@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 
 use super::helpers::{R, make_client, noisy_field_over};
-use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
+use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{
     ACCUM_SCALE,
     WEIGHT_GAIN,
@@ -10,7 +10,7 @@ use crate::collab::kernels::aggregate::{
     kaiser_window,
     weight_scale,
 };
-use crate::collab::kernels::fused::collab_fused;
+use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use crate::nlmeans::{BLOCK_X, BLOCK_Y, NOISE_CURVE_BINS};
@@ -233,6 +233,10 @@ fn run_scatter_stage_windowed(
     let profile_buf = client.create_from_slice(f32::as_bytes(&profile));
     let kaiser_buf = client.create_from_slice(f32::as_bytes(&kaiser_window(kaiser_beta)));
     let zero_curve = client.create_from_slice(f32::as_bytes(&[0.0f32; NOISE_CURVE_BINS]));
+    let (map_cols, map_rows) = strength_map_dims(width, height);
+    let map_len = (map_cols * map_rows) as usize;
+    let unit_map = vec![1.0f32; map_len];
+    let unit_map_buf = client.create_from_slice(f32::as_bytes(&unit_map));
     let output = client.empty(pixels * size_of::<f32>());
 
     let zero_dim = 256u32;
@@ -260,6 +264,7 @@ fn run_scatter_stage_windowed(
             ArrayArg::from_raw_parts(slots_dummy, 1),
             ArrayArg::from_raw_parts(sigma_buf, 1),
             ArrayArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
+            ArrayArg::from_raw_parts(unit_map_buf, map_len),
             ArrayArg::from_raw_parts(profile_buf, 8),
             ArrayArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
             ArrayArg::from_raw_parts(accum.clone(), pixels),
@@ -269,6 +274,7 @@ fn run_scatter_stage_windowed(
             0.0f32,
             2.7f32,
             0u32,
+            STRENGTH_MAP_OFF,
             weight_scale(sigma, &profile),
             ACCUM_SCALE,
             needs_warp_uniform_search(&client),
@@ -288,6 +294,10 @@ fn run_scatter_stage_windowed(
             1u32,
             9u32,
             refs_along(width),
+            map_cols,
+            map_rows,
+            0.0f32,
+            false,
         );
         collab_normalise::launch_unchecked::<R>(
             &client,

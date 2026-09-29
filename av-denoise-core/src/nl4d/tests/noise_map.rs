@@ -165,11 +165,15 @@ fn sigma_scale_still_scales_strength_with_the_noise_map_on() {
         // A lower threshold keeps both arms off the point where all the noise is removed.
         let mut full_params = ramp_params(ChannelMode::Luma, noise_map, 1.0);
         full_params.lambda_ht = 2.0;
+        full_params.flat_boost = 1.0;
+        full_params.shadow_soften = 1.0;
         let full = denoise_clip(full_params, &frames);
         assert_eq!(full.curve_seen, noise_map);
 
         let mut scaled_params = ramp_params(ChannelMode::Luma, noise_map, 0.8);
         scaled_params.lambda_ht = 2.0;
+        scaled_params.flat_boost = 1.0;
+        scaled_params.shadow_soften = 1.0;
         let scaled = denoise_clip(scaled_params, &frames);
 
         let full_std = residual_std(&frames, &full.outputs);
@@ -193,13 +197,15 @@ fn sigma_scale_still_scales_strength_with_the_noise_map_on() {
 }
 
 #[test]
-fn a_chroma_denoiser_never_applies_the_curve() {
+fn a_chroma_denoiser_without_a_flat_boost_never_builds_a_curve() {
     let frames = ramp_clip(2);
 
-    let map_on_params = ramp_params(ChannelMode::Chroma, true, 1.0);
+    let mut map_on_params = ramp_params(ChannelMode::Chroma, true, 1.0);
+    map_on_params.chroma_flat_boost = 1.0;
     let map_on = denoise_clip(map_on_params, &frames);
 
-    let map_off_params = ramp_params(ChannelMode::Chroma, false, 1.0);
+    let mut map_off_params = ramp_params(ChannelMode::Chroma, false, 1.0);
+    map_off_params.chroma_flat_boost = 1.0;
     let map_off = denoise_clip(map_off_params, &frames);
 
     assert!(!map_on.curve_seen, "a chroma denoiser should never build a curve");

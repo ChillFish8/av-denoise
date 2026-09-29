@@ -52,7 +52,7 @@ pub struct Nl4dParams {
     /// Higher shrinks more coefficients, so it removes more noise and
     /// more fine detail.
     ///
-    /// Defaults to 3.78. Note that in reality luma and chroma want separately
+    /// Defaults to 4.158. Note that in reality luma and chroma want separately
     /// tuned values. See [nl4d_default_lambda_ht](crate::nl4d_default_lambda_ht).
     pub lambda_ht: f32,
     /// The confidence floor below which a whole neighbour block is
@@ -89,6 +89,35 @@ pub struct Nl4dParams {
     ///
     /// On by default.
     pub noise_map: bool,
+    /// How much harder flat, grainy 8x8 areas are filtered, as a multiplier on the luma threshold.
+    ///
+    /// An area counts as flat when its texture is small next to its own grain. Only takes effect
+    /// with `noise_map` on. `1.0` turns it off. Between 1.0 and 3.0, defaults to 1.75.
+    pub flat_boost: f32,
+    /// [Self::flat_boost] for the chroma planes, with flatness measured on the first chroma plane.
+    ///
+    /// Only takes effect with `noise_map` on. `1.0` turns it off. Between 1.0 and 3.0, defaults
+    /// to 1.5.
+    pub chroma_flat_boost: f32,
+    /// How much more gently textured dark areas are filtered, as a multiplier on the luma
+    /// threshold.
+    ///
+    /// It applies in full at or below luma 128 of 255 and fades back to 1.0 by 160. Only takes
+    /// effect with `noise_map` on. `1.0` turns it off. Between 0.1 and 1.0, defaults to 0.65.
+    pub shadow_soften: f32,
+    /// How strongly the grain in a flat area may line up before the area counts as texture instead.
+    ///
+    /// Grain points every which way, while faint lines and edges share one direction. A flat area
+    /// whose surroundings line up at or above this cut loses the flat boost and is filtered as
+    /// texture. Lower keeps more texture, higher filters more areas as flat. Only takes effect
+    /// with `noise_map` on, and only on luma. `1.0` turns it off. Between 0.0 and 1.0, defaults
+    /// to 0.21.
+    pub flat_texture_cut: f32,
+    /// Judges each transform coefficient together with its frequency neighbours instead of alone.
+    ///
+    /// Faint texture spreads over several neighbouring frequencies, so it survives where each
+    /// coefficient alone would fall under the threshold. On by default.
+    pub pooled_threshold: bool,
 }
 
 impl Default for Nl4dParams {
@@ -110,11 +139,16 @@ impl Default for Nl4dParams {
             temporal_radius: 2,
             refine: 2,
             spatial_radius: 9,
-            lambda_ht: 3.78,
+            lambda_ht: 4.158,
             c_min: 0.05,
             kaiser_beta: 2.0,
             field_lambda: 1.0,
             noise_map: true,
+            flat_boost: 1.75,
+            chroma_flat_boost: 1.5,
+            shadow_soften: 0.65,
+            flat_texture_cut: 0.21,
+            pooled_threshold: true,
         }
     }
 }
@@ -212,6 +246,29 @@ impl Nl4dParams {
             ));
         }
 
+        for (name, value) in [
+            ("flat_boost", self.flat_boost),
+            ("chroma_flat_boost", self.chroma_flat_boost),
+        ] {
+            if !(value.is_finite() && (1.0..=3.0).contains(&value)) {
+                return Err(format!("{name} must be finite and in 1.0..=3.0, got {value}"));
+            }
+        }
+
+        if !(self.shadow_soften.is_finite() && (0.1..=1.0).contains(&self.shadow_soften)) {
+            return Err(format!(
+                "shadow_soften must be finite and in 0.1..=1.0, got {}",
+                self.shadow_soften
+            ));
+        }
+
+        if !(self.flat_texture_cut.is_finite() && (0.0..=1.0).contains(&self.flat_texture_cut)) {
+            return Err(format!(
+                "flat_texture_cut must be finite and in 0.0..=1.0, got {}",
+                self.flat_texture_cut
+            ));
+        }
+
         Ok(())
     }
 }
@@ -228,6 +285,83 @@ mod tests {
     #[test]
     fn the_noise_map_is_on_by_default() {
         assert!(Nl4dParams::default().noise_map);
+    }
+
+    #[test]
+    fn the_strength_map_defaults_are_the_settled_config() {
+        let params = Nl4dParams::default();
+        assert_eq!(params.flat_boost, 1.75);
+        assert_eq!(params.chroma_flat_boost, 1.5);
+        assert_eq!(params.shadow_soften, 0.65);
+        assert_eq!(params.flat_texture_cut, 0.21);
+        assert!(params.pooled_threshold);
+    }
+
+    #[test]
+    fn validate_accepts_the_strength_map_bounds() {
+        for (flat_boost, chroma_flat_boost, shadow_soften) in [(1.0, 1.0, 1.0), (3.0, 3.0, 0.1)] {
+            let params = Nl4dParams {
+                flat_boost,
+                chroma_flat_boost,
+                shadow_soften,
+                ..Nl4dParams::default()
+            };
+            assert!(
+                params.validate().is_ok(),
+                "{flat_boost} {chroma_flat_boost} {shadow_soften}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_strength_map_values_out_of_range() {
+        for bad in [0.99f32, 3.01, f32::NAN, f32::INFINITY] {
+            let flat = Nl4dParams {
+                flat_boost: bad,
+                ..Nl4dParams::default()
+            };
+            let err = flat.validate().expect_err("flat_boost out of range");
+            assert!(err.contains("flat_boost"), "got {err}");
+
+            let chroma = Nl4dParams {
+                chroma_flat_boost: bad,
+                ..Nl4dParams::default()
+            };
+            let err = chroma.validate().expect_err("chroma_flat_boost out of range");
+            assert!(err.contains("chroma_flat_boost"), "got {err}");
+        }
+
+        for bad in [0.05f32, 1.01, f32::NAN] {
+            let params = Nl4dParams {
+                shadow_soften: bad,
+                ..Nl4dParams::default()
+            };
+            let err = params.validate().expect_err("shadow_soften out of range");
+            assert!(err.contains("shadow_soften"), "got {err}");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_the_texture_cut_bounds() {
+        for flat_texture_cut in [0.0f32, 1.0] {
+            let params = Nl4dParams {
+                flat_texture_cut,
+                ..Nl4dParams::default()
+            };
+            assert!(params.validate().is_ok(), "{flat_texture_cut}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_texture_cuts_out_of_range() {
+        for bad in [-0.01f32, 1.01, f32::NAN, f32::INFINITY] {
+            let params = Nl4dParams {
+                flat_texture_cut: bad,
+                ..Nl4dParams::default()
+            };
+            let err = params.validate().expect_err("flat_texture_cut out of range");
+            assert!(err.contains("flat_texture_cut"), "got {err}");
+        }
     }
 
     /// A block geometry with `blksize / step` at or under

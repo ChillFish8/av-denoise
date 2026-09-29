@@ -96,7 +96,7 @@ clean.set_output()
 `lambda_ht_scale` is the threshold multiplier a transform coefficient's estimated-noise
 standard deviations must clear to survive. Raising it removes more noise and takes more
 fine detail with it. Try it in steps of about 0.05 before reaching for `lambda_ht`,
-which pins luma and chroma's thresholds (3.78 and 2.94 by default, chosen by eye from
+which pins luma and chroma's thresholds (4.158 and 3.234 by default, chosen by eye from
 rendered comparisons).
 
 `spatial_radius` is the speed dial. `preset` already resolves it, so setting

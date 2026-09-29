@@ -252,6 +252,16 @@ pub struct Nl4dOptions {
     pub field_lambda: f32,
     /// See [crate::nl4d::Nl4dParams::noise_map].
     pub noise_map: bool,
+    /// See [crate::nl4d::Nl4dParams::flat_boost].
+    pub flat_boost: f32,
+    /// See [crate::nl4d::Nl4dParams::chroma_flat_boost].
+    pub chroma_flat_boost: f32,
+    /// See [crate::nl4d::Nl4dParams::shadow_soften].
+    pub shadow_soften: f32,
+    /// See [crate::nl4d::Nl4dParams::flat_texture_cut].
+    pub flat_texture_cut: f32,
+    /// See [crate::nl4d::Nl4dParams::pooled_threshold].
+    pub pooled_threshold: bool,
 }
 
 impl Default for Nl4dOptions {
@@ -275,6 +285,11 @@ impl Default for Nl4dOptions {
             windowed_noise_estimation: false,
             field_lambda: defaults.field_lambda,
             noise_map: defaults.noise_map,
+            flat_boost: defaults.flat_boost,
+            chroma_flat_boost: defaults.chroma_flat_boost,
+            shadow_soften: defaults.shadow_soften,
+            flat_texture_cut: defaults.flat_texture_cut,
+            pooled_threshold: defaults.pooled_threshold,
         }
     }
 }
@@ -315,12 +330,23 @@ impl Nl4dOptions {
 /// dominated by luma" assumption [`hq_default_strength`]
 /// makes for its own Yuv case.
 ///
-/// Luma and the fused Yuv mode use 3.78, and chroma uses 2.94.
+/// Luma and the fused Yuv mode use 4.158, and chroma uses 3.234.
 pub fn nl4d_default_lambda_ht(channels: ChannelMode) -> f32 {
     match channels {
-        ChannelMode::Luma | ChannelMode::Yuv => 3.78,
-        ChannelMode::Chroma => 2.94,
+        ChannelMode::Luma | ChannelMode::Yuv => 4.158,
+        ChannelMode::Chroma => 3.234,
     }
+}
+
+/// The pooled threshold at each plane's default lambda, calibrated on real grain.
+const NL4D_POOLED_THRESHOLD: f32 = 2.42;
+
+/// The ratio of nl4d's pooled threshold to its lambda for one plane.
+///
+/// At the default lambda this gives the calibrated pooled threshold, and it scales with any
+/// other lambda.
+pub fn nl4d_pool_ratio(channels: ChannelMode) -> f32 {
+    NL4D_POOLED_THRESHOLD / nl4d_default_lambda_ht(channels)
 }
 
 /// Resolves `Nl4dOptions.lambda_ht` for one plane, falling back to
@@ -679,6 +705,11 @@ fn build_engine<R: Runtime>(
                 kaiser_beta: opts.kaiser_beta,
                 field_lambda: opts.field_lambda,
                 noise_map: opts.noise_map,
+                flat_boost: opts.flat_boost,
+                chroma_flat_boost: opts.chroma_flat_boost,
+                shadow_soften: opts.shadow_soften,
+                flat_texture_cut: opts.flat_texture_cut,
+                pooled_threshold: opts.pooled_threshold,
             };
             let denoiser =
                 Nl4dDenoiser::with_output_format(client, nl4d_params, width, height, output_format)
@@ -1450,8 +1481,8 @@ mod options_tests {
         let luma = nl4d_default_lambda_ht(ChannelMode::Luma);
         let chroma = nl4d_default_lambda_ht(ChannelMode::Chroma);
 
-        assert!((luma - 3.78).abs() < f32::EPSILON);
-        assert!((chroma - 2.94).abs() < f32::EPSILON);
+        assert!((luma - 4.158).abs() < f32::EPSILON);
+        assert!((chroma - 3.234).abs() < f32::EPSILON);
         assert!(
             (chroma - luma).abs() > f32::EPSILON,
             "the two planes should not resolve to the same default"
@@ -1467,14 +1498,35 @@ mod options_tests {
     }
 
     #[test]
+    fn nl4d_pool_ratio_gives_the_calibrated_threshold_at_each_default_lambda() {
+        for channels in [ChannelMode::Luma, ChannelMode::Yuv, ChannelMode::Chroma] {
+            let threshold = nl4d_pool_ratio(channels) * nl4d_default_lambda_ht(channels);
+            assert!(
+                (threshold - 2.42).abs() < 1.0e-6,
+                "{channels:?} gives {threshold}"
+            );
+        }
+
+        assert_eq!(
+            nl4d_pool_ratio(ChannelMode::Yuv),
+            nl4d_pool_ratio(ChannelMode::Luma)
+        );
+    }
+
+    #[test]
+    fn nl4d_options_default_to_pooling_on() {
+        assert!(Nl4dOptions::default().pooled_threshold);
+    }
+
+    #[test]
     fn resolve_lambda_ht_unset_uses_the_per_plane_default() {
         let opts = Nl4dOptions::default();
 
         let luma = resolve_lambda_ht(&opts, ChannelMode::Luma).expect("the default scale is in range");
         let chroma = resolve_lambda_ht(&opts, ChannelMode::Chroma).expect("the default scale is in range");
 
-        assert!((luma - 3.78).abs() < f32::EPSILON, "got {luma}");
-        assert!((chroma - 2.94).abs() < f32::EPSILON, "got {chroma}");
+        assert!((luma - 4.158).abs() < f32::EPSILON, "got {luma}");
+        assert!((chroma - 3.234).abs() < f32::EPSILON, "got {chroma}");
     }
 
     #[test]

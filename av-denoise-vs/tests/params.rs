@@ -849,6 +849,48 @@ fn noise_map_is_rejected_for_nlmeans() {
 }
 
 #[test]
+fn pooled_threshold_defaults_to_on() {
+    let raw = RawParams::default();
+    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+    match plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+        .unwrap()
+        .algorithm
+    {
+        av_denoise_core::Algorithm::Nl4d(nl4d) => assert!(nl4d.pooled_threshold),
+        other => panic!("expected Nl4d, got {other:?}"),
+    }
+}
+
+#[test]
+fn pooled_threshold_false_turns_it_off() {
+    let raw = RawParams {
+        pooled_threshold: Some(false),
+        ..RawParams::default()
+    };
+    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+    match plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+        .unwrap()
+        .algorithm
+    {
+        av_denoise_core::Algorithm::Nl4d(nl4d) => assert!(!nl4d.pooled_threshold),
+        other => panic!("expected Nl4d, got {other:?}"),
+    }
+}
+
+#[test]
+fn pooled_threshold_is_rejected_for_nlmeans() {
+    let raw = RawParams {
+        pooled_threshold: Some(true),
+        ..RawParams::default()
+    };
+    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("pooled_threshold"), "got {err}");
+}
+
+#[test]
 fn the_four_nl4d_dials_are_rejected_for_nlmeans() {
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
     for (name, raw) in [
@@ -885,6 +927,90 @@ fn the_four_nl4d_dials_are_rejected_for_nlmeans() {
             .unwrap_err()
             .to_string();
         assert!(err.contains(name), "error should name {name}, got {err}");
+    }
+}
+
+#[test]
+fn strength_map_params_reach_nl4d_options() {
+    let raw = RawParams {
+        flat_boost: Some(2.0),
+        chroma_flat_boost: Some(1.2),
+        shadow_soften: Some(0.8),
+        flat_texture_cut: Some(0.3),
+        ..RawParams::default()
+    };
+    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+    match plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+        .unwrap()
+        .algorithm
+    {
+        av_denoise_core::Algorithm::Nl4d(nl4d) => {
+            assert_eq!(nl4d.flat_boost, 2.0);
+            assert_eq!(nl4d.chroma_flat_boost, 1.2);
+            assert_eq!(nl4d.shadow_soften, 0.8);
+            assert_eq!(nl4d.flat_texture_cut, 0.3);
+        },
+        other => panic!("expected Nl4d, got {other:?}"),
+    }
+}
+
+#[test]
+fn strength_map_params_default_to_the_library_values() {
+    let raw = RawParams::default();
+    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+    let defaults = av_denoise_core::Nl4dOptions::default();
+    match plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+        .unwrap()
+        .algorithm
+    {
+        av_denoise_core::Algorithm::Nl4d(nl4d) => {
+            assert_eq!(nl4d.flat_boost, defaults.flat_boost);
+            assert_eq!(nl4d.chroma_flat_boost, defaults.chroma_flat_boost);
+            assert_eq!(nl4d.shadow_soften, defaults.shadow_soften);
+            assert_eq!(nl4d.flat_texture_cut, defaults.flat_texture_cut);
+        },
+        other => panic!("expected Nl4d, got {other:?}"),
+    }
+}
+
+#[test]
+fn strength_map_params_are_rejected_for_nlmeans() {
+    let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
+    let cases = [
+        (
+            "flat_boost",
+            RawParams {
+                flat_boost: Some(1.5),
+                ..RawParams::default()
+            },
+        ),
+        (
+            "chroma_flat_boost",
+            RawParams {
+                chroma_flat_boost: Some(1.5),
+                ..RawParams::default()
+            },
+        ),
+        (
+            "shadow_soften",
+            RawParams {
+                shadow_soften: Some(0.65),
+                ..RawParams::default()
+            },
+        ),
+        (
+            "flat_texture_cut",
+            RawParams {
+                flat_texture_cut: Some(0.21),
+                ..RawParams::default()
+            },
+        ),
+    ];
+    for (name, raw) in cases {
+        let err = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(name), "{name}: got {err}");
     }
 }
 

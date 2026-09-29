@@ -7,6 +7,9 @@ use crate::nlmeans::noise::{
     QUARTER_LUMA_SUM,
     QUARTER_SUM_D,
     QUARTER_SUM_D2,
+    QUARTER_TENSOR_XX,
+    QUARTER_TENSOR_XY,
+    QUARTER_TENSOR_YY,
     TEMPORAL_QUARTER_BASE,
     TEMPORAL_QUARTER_FIELDS,
     accepted_static_blocks,
@@ -19,17 +22,20 @@ use crate::nlmeans::*;
 
 /// One synthetic 8x8 quarter, as the stats kernel would record it.
 #[derive(Clone, Copy)]
-struct SyntheticQuarter {
-    sigma: f32,
-    mean_residual: f32,
-    mean_luma: f32,
-    flatness: f32,
-    luma_min: f32,
-    luma_max: f32,
+pub(super) struct SyntheticQuarter {
+    pub(super) sigma: f32,
+    pub(super) mean_residual: f32,
+    pub(super) mean_luma: f32,
+    pub(super) flatness: f32,
+    pub(super) luma_min: f32,
+    pub(super) luma_max: f32,
+    pub(super) tensor_xx: f32,
+    pub(super) tensor_yy: f32,
+    pub(super) tensor_xy: f32,
 }
 
 /// A static, flat, unclipped quarter at `luma` with `sigma`.
-fn quarter_at(luma: f32, sigma: f32) -> SyntheticQuarter {
+pub(super) fn quarter_at(luma: f32, sigma: f32) -> SyntheticQuarter {
     SyntheticQuarter {
         sigma,
         mean_residual: 0.0,
@@ -37,17 +43,25 @@ fn quarter_at(luma: f32, sigma: f32) -> SyntheticQuarter {
         flatness: 0.0,
         luma_min: luma - 0.02,
         luma_max: luma + 0.02,
+        tensor_xx: 0.0,
+        tensor_yy: 0.0,
+        tensor_xy: 0.0,
     }
 }
 
-fn quarters_at(luma: f32, sigma: f32, count: usize) -> Vec<SyntheticQuarter> {
+pub(super) fn quarters_at(luma: f32, sigma: f32, count: usize) -> Vec<SyntheticQuarter> {
     vec![quarter_at(luma, sigma); count]
 }
 
 /// Writes `quarter` into a luma-only block record as a quarter of `pixels` pixels.
 ///
 /// The block's scalar lanes gain the quarter's sums, so they stay the sums of its quarters.
-fn write_quarter(record: &mut [f32], quarter_index: usize, quarter: &SyntheticQuarter, pixels: f32) {
+pub(super) fn write_quarter(
+    record: &mut [f32],
+    quarter_index: usize,
+    quarter: &SyntheticQuarter,
+    pixels: f32,
+) {
     let stored_ch = 1u32;
     let variance = 2.0 * quarter.sigma * quarter.sigma;
     let mean = quarter.mean_residual;
@@ -64,13 +78,16 @@ fn write_quarter(record: &mut [f32], quarter_index: usize, quarter: &SyntheticQu
     record[base + QUARTER_FLATNESS as usize] = quarter.flatness;
     record[base + QUARTER_LUMA_MIN as usize] = quarter.luma_min;
     record[base + QUARTER_LUMA_MAX as usize] = quarter.luma_max;
+    record[base + QUARTER_TENSOR_XX as usize] = quarter.tensor_xx;
+    record[base + QUARTER_TENSOR_YY as usize] = quarter.tensor_yy;
+    record[base + QUARTER_TENSOR_XY as usize] = quarter.tensor_xy;
 }
 
 /// Records for a single row of full 16x16 blocks, luma only (`stored_ch` 1).
 ///
 /// Every four quarters form one block, in top-left, top-right,
 /// bottom-left, bottom-right order.
-fn synthetic_records(quarters: &[SyntheticQuarter]) -> Vec<f32> {
+pub(super) fn synthetic_records(quarters: &[SyntheticQuarter]) -> Vec<f32> {
     assert_eq!(quarters.len() % 4, 0, "quarters must fill whole blocks");
 
     let quarter_pixels = 64.0f32;
@@ -90,7 +107,7 @@ fn synthetic_records(quarters: &[SyntheticQuarter]) -> Vec<f32> {
 }
 
 /// A single row of full 16x16 blocks, one block per four quarters.
-fn frame_dims(quarter_count: usize) -> (u32, u32) {
+pub(super) fn frame_dims(quarter_count: usize) -> (u32, u32) {
     let block_count = quarter_count / 4;
     (16 * block_count as u32, 16)
 }
@@ -144,7 +161,7 @@ fn reading_sample_equals_the_scalar_aggregation() {
     let (width, height) = frame_dims(good_quarters.len() + 8);
 
     let sample_scalar = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height);
-    let reading = temporal_noise_reading(&records, channels, stored_ch, width, height, true);
+    let reading = temporal_noise_reading(&records, channels, stored_ch, width, height, true, None);
 
     assert!(sample_scalar.is_some());
     assert_eq!(reading.sample, sample_scalar);
@@ -491,7 +508,7 @@ fn no_passing_quarter_gives_none() {
 
 /// A brightness ramp with static noise in each band, so a curve forms
 /// with at least three populated bins.
-fn ramp_frame(width: u32, height: u32, seed: u32) -> Vec<f32> {
+pub(super) fn ramp_frame(width: u32, height: u32, seed: u32) -> Vec<f32> {
     let band_height = height / 3;
     let mut clean = vec![0.0f32; (width * height) as usize];
     for y in 0..height {

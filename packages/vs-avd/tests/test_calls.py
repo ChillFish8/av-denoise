@@ -44,6 +44,12 @@ def test_no_defaults_are_injected(fake, monkeypatch):
     assert set(kwargs) == {"variant"}, f"unexpected arguments forwarded: {kwargs}"
 
 
+def test_flat_texture_cut_is_a_typed_nl4d_parameter():
+    import inspect
+
+    assert "flat_texture_cut" in inspect.signature(Nl4d).parameters
+
+
 def test_nl4d_forwards_no_arguments_when_none_are_set(fake, monkeypatch):
     monkeypatch.setattr("vsavd._nl4d_filter", lambda: fake)
     Nl4d("clip")
@@ -65,11 +71,30 @@ def test_nl4d_forwards_noise_map_as_a_bool(fake, monkeypatch):
     assert kwargs == {"noise_map": False}
 
 
+def test_nl4d_forwards_pooled_threshold_as_a_bool(fake, monkeypatch):
+    monkeypatch.setattr("vsavd._nl4d_filter", lambda: fake)
+    Nl4d("clip", pooled_threshold=False)
+    _, kwargs = fake.calls[0]
+    assert kwargs == {"pooled_threshold": False}
+
+
 def test_kwargs_pass_through_verbatim(fake, monkeypatch):
     monkeypatch.setattr("vsavd._nl4d_filter", lambda: fake)
     Nl4d("clip", sigma=0.5, temporal_radius=3)
     _, kwargs = fake.calls[0]
     assert kwargs == {"sigma": 0.5, "temporal_radius": 3}
+
+
+def test_nl4d_forwards_the_strength_map_settings(fake, monkeypatch):
+    monkeypatch.setattr("vsavd._nl4d_filter", lambda: fake)
+    Nl4d("clip", flat_boost=2.0, chroma_flat_boost=1.2, shadow_soften=0.8, flat_texture_cut=0.3)
+    _, kwargs = fake.calls[0]
+    assert kwargs == {
+        "flat_boost": 2.0,
+        "chroma_flat_boost": 1.2,
+        "shadow_soften": 0.8,
+        "flat_texture_cut": 0.3,
+    }
 
 
 def test_sigma_is_not_a_typed_parameter():

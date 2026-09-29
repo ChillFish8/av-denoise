@@ -164,6 +164,43 @@ pub struct Nl4dArgs {
     #[arg(long)]
     pub no_noise_map: bool,
 
+    /// Turns off the pooled threshold, which judges each frequency together with its neighbours
+    /// so faint texture survives.
+    ///
+    /// With this flag and `--flat-boost 1.5`, the output matches earlier releases.
+    #[arg(long)]
+    pub no_pooled_threshold: bool,
+
+    /// Filters flat, grainy areas harder, as a multiplier on the luma threshold.
+    ///
+    /// Between `1` and `3`. Library default is 1.75. `1` turns it off. Has no effect with
+    /// `--no-noise-map`.
+    #[arg(long)]
+    pub flat_boost: Option<f32>,
+
+    /// Filters flat, grainy areas of the colour planes harder, as a multiplier on the chroma
+    /// threshold.
+    ///
+    /// Between `1` and `3`. Library default is 1.5. `1` turns it off. Has no effect with
+    /// `--no-noise-map`.
+    #[arg(long)]
+    pub chroma_flat_boost: Option<f32>,
+
+    /// Filters textured dark areas more gently, as a multiplier on the luma threshold.
+    ///
+    /// Between `0.1` and `1`. Library default is 0.65. It applies in full at or below luma 128 of
+    /// 255 and fades out by 160. `1` turns it off. Has no effect with `--no-noise-map`.
+    #[arg(long)]
+    pub shadow_soften: Option<f32>,
+
+    /// Stops flat areas whose surroundings line up like faint lines or edges from counting as flat.
+    ///
+    /// Between `0` and `1`. Library default is 0.21. Lower keeps more faint texture, higher
+    /// filters more areas as flat. `1` turns it off. Luma only. Has no effect with
+    /// `--no-noise-map`.
+    #[arg(long)]
+    pub flat_texture_cut: Option<f32>,
+
     /// Estimates noise from a local window instead of a temporal EMA
     /// over stream history.
     ///
@@ -259,6 +296,11 @@ impl Nl4dArgs {
                     // to measure the difference on real footage.
                     windowed_noise_estimation: self.windowed_noise_estimation,
                     noise_map: defaults.noise_map && !self.no_noise_map,
+                    flat_boost: self.flat_boost.unwrap_or(defaults.flat_boost),
+                    chroma_flat_boost: self.chroma_flat_boost.unwrap_or(defaults.chroma_flat_boost),
+                    shadow_soften: self.shadow_soften.unwrap_or(defaults.shadow_soften),
+                    flat_texture_cut: self.flat_texture_cut.unwrap_or(defaults.flat_texture_cut),
+                    pooled_threshold: defaults.pooled_threshold && !self.no_pooled_threshold,
                 }),
                 // nl4d has no NLM weighting pass for a strength to apply to.
                 luma_strength: None,
@@ -434,6 +476,26 @@ mod tests {
     #[test]
     fn there_is_no_positive_noise_map_flag() {
         let err = parse_err(&["--noise-map"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn pooled_threshold_defaults_to_on() {
+        let (args, nl4d) = parse(&[]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        assert!(expect_nl4d(&opts).pooled_threshold);
+    }
+
+    #[test]
+    fn no_pooled_threshold_turns_it_off() {
+        let (args, nl4d) = parse(&["--no-pooled-threshold"]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        assert!(!expect_nl4d(&opts).pooled_threshold);
+    }
+
+    #[test]
+    fn there_is_no_positive_pooled_threshold_flag() {
+        let err = parse_err(&["--pooled-threshold"]);
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
@@ -713,5 +775,39 @@ mod tests {
 
         assert_eq!(opts.planes.luma_lambda_ht, None);
         assert_eq!(opts.planes.chroma_lambda_ht, None);
+    }
+
+    #[test]
+    fn the_strength_map_flags_flow_into_the_nl4d_algorithm() {
+        let (args, nl4d) = parse(&[
+            "--flat-boost",
+            "2.0",
+            "--chroma-flat-boost",
+            "1.2",
+            "--shadow-soften",
+            "0.8",
+            "--flat-texture-cut",
+            "0.3",
+        ]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let algorithm = expect_nl4d(&opts);
+
+        assert_eq!(algorithm.flat_boost, 2.0);
+        assert_eq!(algorithm.chroma_flat_boost, 1.2);
+        assert_eq!(algorithm.shadow_soften, 0.8);
+        assert_eq!(algorithm.flat_texture_cut, 0.3);
+    }
+
+    #[test]
+    fn unset_strength_map_flags_resolve_to_the_library_defaults() {
+        let (args, nl4d) = parse(&[]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let algorithm = expect_nl4d(&opts);
+        let defaults = Nl4dOptions::default();
+
+        assert_eq!(algorithm.flat_boost, defaults.flat_boost);
+        assert_eq!(algorithm.chroma_flat_boost, defaults.chroma_flat_boost);
+        assert_eq!(algorithm.shadow_soften, defaults.shadow_soften);
+        assert_eq!(algorithm.flat_texture_cut, defaults.flat_texture_cut);
     }
 }

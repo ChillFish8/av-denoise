@@ -49,6 +49,14 @@ pub(super) fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
         field_lambda: 0.0,
         // No effect here, since sigma is pinned.
         noise_map: true,
+        flat_boost: 1.5,
+        chroma_flat_boost: 1.5,
+        shadow_soften: 0.65,
+        // Off, so the pipeline tests keep the flat map their expectations were recorded against.
+        flat_texture_cut: 1.0,
+        // Off, so the pipeline tests keep the per-coefficient kernel their expectations were
+        // recorded against. `nl4d::tests::pooled` covers the pooled path.
+        pooled_threshold: false,
     }
 }
 

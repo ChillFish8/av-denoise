@@ -4,4 +4,6 @@ mod edges;
 mod grouping;
 mod noise_map;
 mod pipeline;
+mod pooled;
 mod regularise;
+mod strength_map;

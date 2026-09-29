@@ -9,6 +9,7 @@ use super::noise::{
     NoiseCtx,
     NoiseCurve,
     NoiseEstimator,
+    QuarterClasses,
     TemporalNoiseReading,
     TemporalNoiseSample,
     TemporalStatsCtx,
@@ -296,6 +297,8 @@ pub struct NlmDenoiser<R: Runtime> {
     /// [Self::update_noise_estimate] updates it alongside the estimator
     /// chains, and [Self::reset_stream_state] clears it.
     pub(super) noise_curve: Option<NoiseCurve>,
+    /// The latest centre frame's quarter classes, present exactly when `noise_curve` is.
+    pub(super) quarter_classes: Option<QuarterClasses>,
 
     /// The motion-compensation geometry, present while motion
     /// compensation is active.
@@ -379,6 +382,9 @@ pub struct NlmDenoiser<R: Runtime> {
     /// only way to change it. Leaving it off roughly halves the stats
     /// kernel's cost at 1080p.
     pub(super) luma_noise_fields: bool,
+
+    /// The cut the luma flat map vetoes textured quarters at, or `None` for no veto.
+    pub(super) flat_texture_cut: Option<f32>,
 
     /// Whether the stream's edges run off-centre passes instead of copied padding.
     ///
@@ -674,6 +680,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             noise_estimator_low_unboosted: NoiseEstimator::default(),
             noise_estimator_temporal_only: NoiseEstimator::default(),
             noise_curve: None,
+            quarter_classes: None,
             mc_ctx,
             compensated_input_buf,
             compensated_reference_buf,
@@ -688,6 +695,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             confidence_dummy,
             sigma_y,
             luma_noise_fields: false,
+            flat_texture_cut: None,
             shifted_edges: false,
         }
     }
@@ -1179,10 +1187,28 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.luma_noise_fields = on;
     }
 
+    /// Sets the cut the luma flat map vetoes textured quarters at.
+    ///
+    /// It defaults to `None`, which leaves every flat quarter flat.
+    pub(crate) fn set_flat_texture_cut(&mut self, cut: Option<f32>) {
+        self.flat_texture_cut = cut;
+    }
+
     /// The latest frame's luma noise curve, or `None` when no curve is
     /// available.
     pub(crate) fn current_noise_curve(&self) -> Option<NoiseCurve> {
         self.noise_curve
+    }
+
+    /// The latest frame's quarter classes, present exactly when
+    /// [Self::current_noise_curve] is.
+    pub(crate) fn current_quarter_classes(&self) -> Option<&QuarterClasses> {
+        self.quarter_classes.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn flat_texture_cut(&self) -> Option<f32> {
+        self.flat_texture_cut
     }
 
     /// Fills a duplicated slot's temporal-stats region with zeroes.
@@ -1890,10 +1916,16 @@ impl<R: Runtime> NlmDenoiser<R> {
         // coasts on an older window's reading. See
         // `HqParams::windowed_noise_estimation`.
         let windowed = self.params.hq.is_some_and(|hq| hq.windowed_noise_estimation);
-        match (&reading.sample, reading.curve) {
-            (Some(_), curve) => self.noise_curve = curve,
-            (None, _) if windowed => self.noise_curve = None,
-            (None, _) => {},
+        match (&reading.sample, reading.curve, reading.classes) {
+            (Some(_), curve, classes) => {
+                self.noise_curve = curve;
+                self.quarter_classes = classes;
+            },
+            (None, _, _) if windowed => {
+                self.noise_curve = None;
+                self.quarter_classes = None;
+            },
+            (None, _, _) => {},
         }
 
         self.fold_noise_estimate(data, center_slot, reading.sample, imm_low);
@@ -1950,6 +1982,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             return Ok(TemporalNoiseReading {
                 sample: None,
                 curve: None,
+                classes: None,
             });
         };
 
@@ -1975,6 +2008,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             self.width,
             self.height,
             self.luma_noise_fields,
+            self.flat_texture_cut,
         ))
     }
 
@@ -2146,6 +2180,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.noise_estimator_low_unboosted.reset();
         self.noise_estimator_temporal_only.reset();
         self.noise_curve = None;
+        self.quarter_classes = None;
         self.rho_smoothed = None;
     }
 

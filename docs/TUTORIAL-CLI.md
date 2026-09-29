@@ -62,7 +62,7 @@ docker run --rm \
     --device /dev/kfd --device /dev/dri \
     --group-add video --group-add render \
     -v "$PWD:/in:ro" \
-    ghcr.io/chillfish8/av-denoise:vulkan-0.5.0-alpha1 \
+    ghcr.io/chillfish8/av-denoise:vulkan-0.5.0-alpha2 \
     nl4d --input /in/noisy.mkv \
   | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
@@ -153,13 +153,13 @@ What `--preset` fills in:
 | `slow`     | 4               | 9              |
 | `veryslow` | 8               | 9              |
 
-| Flag                    | What it does                                                                                                                                                                                                         | Default                |
-|-------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------|
-| `--temporal-radius <N>` | How many neighbouring frames to search on each side, between 1 and 8. More frames means more patches to group.                                                                                                       | from `--preset`        |
-| `--lambda-ht <f>`       | How aggressively small transform coefficients are zeroed out. Higher removes more noise and more fine detail with it. `--luma-lambda-ht` and `--chroma-lambda-ht` override one plane.                                | 3.78 luma, 2.94 chroma |
-| `--lambda-ht-scale <f>` | Multiplies the `--lambda-ht` in effect for each plane. The main quality dial, since luma and chroma start from different defaults and this moves both together.                                                      | `1.0`                  |
-| `--spatial-radius <N>`  | Half-width of the candidate search inside the centre frame, between 1 and 16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                       | from `--preset`        |
-| `--sigma-scale <f>`     | Nudges the measured noise level, the same dial NLMeans spells `--hq-sigma-scale`.                                                                                                                                    | `1.0`                  |
+| Flag                    | What it does                                                                                                                                                                                                         | Default                  |
+|-------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------|
+| `--temporal-radius <N>` | How many neighbouring frames to search on each side, between 1 and 8. More frames means more patches to group.                                                                                                       | from `--preset`          |
+| `--lambda-ht <f>`       | How aggressively small transform coefficients are zeroed out. Higher removes more noise and more fine detail with it. `--luma-lambda-ht` and `--chroma-lambda-ht` override one plane.                                | 4.158 luma, 3.234 chroma |
+| `--lambda-ht-scale <f>` | Multiplies the `--lambda-ht` in effect for each plane. The main quality dial, since luma and chroma start from different defaults and this moves both together.                                                      | `1.0`                    |
+| `--spatial-radius <N>`  | Half-width of the candidate search inside the centre frame, between 1 and 16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                       | from `--preset`          |
+| `--sigma-scale <f>`     | Nudges the measured noise level, the same dial NLMeans spells `--hq-sigma-scale`.                                                                                                                                    | `1.0`                    |
 
 <details>
 <summary><b>Expert flags</b> — calibration and debugging, not everyday tuning</summary>
@@ -171,6 +171,11 @@ What `--preset` fills in:
 | `--thsad-scale <f>`                                                  | How badly a neighbour frame may match before its patches stop being trusted.                                                                                                                                                                                      | `1.0`               |
 | `--c-min <f>`                                                        | Confidence floor below which a whole neighbour block is skipped rather than scored. A volume left short of frames by the skip makes its group filter from the centre frame alone.                                                                                    | `0.05`              |
 | `--no-noise-map`                                                     | Turns off the luma noise map, which scales the luma threshold by how noisy each brightness level is.                                                                                                                                                              | map on              |
+| `--no-pooled-threshold`                                              | Turns off the pooled threshold, which judges each frequency together with its neighbours so faint texture survives.                                                                                                                                               | pooling on          |
+| `--flat-boost <f>`                                                   | How much harder flat, grainy areas are filtered on luma, between 1 and 3. `1` turns it off.                                                                                                                                                                        | `1.75`              |
+| `--chroma-flat-boost <f>`                                            | The same for the colour planes.                                                                                                                                                                                                                                    | `1.5`               |
+| `--shadow-soften <f>`                                                | How much more gently textured dark areas are filtered, between 0.1 and 1. `1` turns it off.                                                                                                                                                                        | `0.65`              |
+| `--flat-texture-cut <f>`                                             | Keeps areas whose surroundings line up like faint lines or edges out of the flat boost, between 0 and 1. Lower keeps more texture. `1` turns it off.                                                                                                               | `0.21`              |
 | `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels` | Motion-search geometry. NL4D always tracks motion, so these are always live.                                                                                                                                                                                      | `16`, `8`, `4`, `2` |
 
 </details>
