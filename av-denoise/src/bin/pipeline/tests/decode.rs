@@ -5,6 +5,7 @@ use std::num::{NonZeroU8, NonZeroUsize};
 use v_frame::chroma::ChromaSubsampling;
 use v_frame::frame::{Frame, FrameBuilder};
 
+use super::y4m_clip;
 use crate::pipeline::convert::SourcePixel;
 use crate::pipeline::decode::{DecodeThread, FrameMsg, pump_frames};
 use crate::pipeline::source::open_y4m;
@@ -70,23 +71,6 @@ fn pumping_fails_when_the_coordinator_drops_every_permit() {
     let result = pump_frames(frames(4), &BTreeSet::new(), &take, &out_tx);
 
     assert!(result.is_err(), "a second frame cannot get a permit");
-}
-
-fn y4m_clip(frames: usize) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    let mut encoder = y4m::encode(4, 4, y4m::Ratio::new(25, 1))
-        .with_colorspace(y4m::Colorspace::C420)
-        .write_header(&mut bytes)
-        .expect("header should write");
-    let luma = vec![16u8; 16];
-    let chroma = vec![128u8; 4];
-
-    for _ in 0..frames {
-        let frame = y4m::Frame::new([&luma, &chroma, &chroma], None);
-        encoder.write_frame(&frame).expect("frame should write");
-    }
-
-    bytes
 }
 
 #[test]

@@ -5,7 +5,6 @@ mod cli;
 mod frame_index;
 mod pipeline;
 mod progress;
-mod stream_mode;
 mod warm_start;
 mod y4m_format;
 
@@ -20,37 +19,21 @@ const DEFAULT_WORKERS: usize = 2;
 /// Frame budget in bytes used when `--frame-budget` is not given. (1GB)
 const DEFAULT_FRAME_BUDGET_BYTES: u64 = 1 << 30;
 
-/// Routes an input source to the pipeline that fits it.
+/// Routes an input to the scene-parallel pipeline.
 ///
-/// A path is opened with ffms2 and split across scenes. Anything piped
-/// streams y4m frame by frame with no scene detection.
+/// A path opens with ffms2. A pipe reads a y4m stream.
 fn run_input(
     opts: &RunOptions,
     input: &InputSource,
     workers: Option<usize>,
     frame_budget: Option<u64>,
 ) -> Result<(), anyhow::Error> {
-    match input {
-        InputSource::File(path) => pipeline::run_file(
-            opts,
-            path,
-            workers.unwrap_or(DEFAULT_WORKERS),
-            frame_budget.unwrap_or(DEFAULT_FRAME_BUDGET_BYTES),
-        ),
-        stream @ (InputSource::Stdin | InputSource::Fd(_)) => {
-            if workers.is_some() {
-                tracing::warn!("--workers is ignored for piped input, which cannot be split by scene");
-            }
+    let workers = workers.unwrap_or(DEFAULT_WORKERS);
+    let frame_budget = frame_budget.unwrap_or(DEFAULT_FRAME_BUDGET_BYTES);
 
-            if frame_budget.is_some() {
-                tracing::warn!("--frame-budget is ignored for piped input, which holds one frame at a time");
-            }
+    tracing::info!(input = %input, "reading input");
 
-            tracing::info!(input = %stream, "reading a y4m stream");
-
-            stream_mode::run_stream(&opts.planes, stream.open_reader()?)
-        },
-    }
+    pipeline::run(opts, input, workers, frame_budget)
 }
 
 fn main() -> anyhow::Result<()> {

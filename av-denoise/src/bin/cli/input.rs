@@ -18,14 +18,14 @@ pub enum InputSource {
 impl InputSource {
     /// Opens the stream this source names.
     ///
-    /// Only the piped variants are readable here. A path goes through
-    /// the file pipeline, which opens it with ffms2 instead.
+    /// Only the piped variants are readable here. A path is opened
+    /// with ffms2 instead.
     pub fn open_reader(&self) -> Result<Box<dyn Read>, anyhow::Error> {
         match self {
             InputSource::Stdin => Ok(Box::new(std::io::stdin().lock())),
             InputSource::Fd(fd) => open_fd(*fd),
             InputSource::File(path) => anyhow::bail!(
-                "`{}` is a file path and is read through the file pipeline, not as a stream",
+                "`{}` is a file path and is opened with ffms2, not read as a stream",
                 path.display(),
             ),
         }
@@ -190,7 +190,7 @@ mod tests {
     fn open_reader_rejects_a_path() {
         // `Box<dyn Read>` isn't `Debug`, so `expect_err` can't be used here.
         let err = match InputSource::File(PathBuf::from("noisy.mkv")).open_reader() {
-            Ok(_) => panic!("paths go through the file pipeline"),
+            Ok(_) => panic!("paths are opened with ffms2, not read as a stream"),
             Err(e) => e,
         };
 

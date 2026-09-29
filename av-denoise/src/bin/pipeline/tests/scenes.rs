@@ -4,25 +4,11 @@ use std::sync::Arc;
 use av_decoders::{Decoder, DecoderImpl};
 use av_scenechange::{DetectionOptions, detect_scene_changes};
 
+use super::{SCENE_LENGTH, multi_scene_clip, pattern};
 use crate::pipeline::scenes::{Decided, LOOKAHEAD_DISTANCE, SceneSplitter};
 
 const WIDTH: usize = 128;
 const HEIGHT: usize = 128;
-
-/// A tiny xorshift so the clip is the same on every run.
-fn pattern(seed: u32, len: usize) -> Vec<u8> {
-    let mut state = seed.max(1);
-    let mut out = Vec::with_capacity(len);
-
-    for _ in 0..len {
-        state ^= state << 13;
-        state ^= state >> 17;
-        state ^= state << 5;
-        out.push((state & 0xff) as u8);
-    }
-
-    out
-}
 
 /// Builds an 8-bit 4:2:0 y4m clip where each entry of `scene_lengths` is one scene.
 fn clip(scene_lengths: &[usize]) -> Vec<u8> {
@@ -92,6 +78,16 @@ fn scene_starts(decided: &[Decided<u8>]) -> Vec<usize> {
         .filter(|(_, frame)| frame.starts_scene)
         .map(|(index, _)| index)
         .collect()
+}
+
+#[test]
+fn the_pipeline_clip_cuts_at_every_pattern_switch() {
+    let bytes = multi_scene_clip(40);
+    let decided = split(&bytes);
+    let expected_starts: Vec<usize> = (0..40).step_by(SCENE_LENGTH).collect();
+
+    assert_eq!(decided.len(), 40);
+    assert_eq!(scene_starts(&decided), expected_starts);
 }
 
 #[test]

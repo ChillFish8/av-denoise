@@ -2,6 +2,7 @@ use std::io::{Cursor, Read};
 
 use av_denoise::{Depth, Subsampling};
 
+use crate::pipeline::convert::SourcePixel;
 use crate::pipeline::source::open_y4m;
 
 fn y4m_bytes(colorspace: y4m::Colorspace, extension: Option<&str>, frames: usize) -> Vec<u8> {
@@ -62,6 +63,26 @@ fn a_ten_bit_pipe_reports_its_layout() {
     assert_eq!(opened.info.layout.width, 4);
     assert_eq!(opened.info.layout.subsampling, Subsampling::Yuv422);
     assert_eq!(opened.info.layout.depth, Depth::Ten);
+}
+
+#[test]
+fn ten_bit_stream_round_trips_header_and_plane_sizes() {
+    let bytes = y4m_bytes(y4m::Colorspace::C420p10, None, 2);
+    let mut opened = open_y4m(reader(bytes)).expect("a 10-bit 4:2:0 pipe opens");
+    let layout = opened.info.layout;
+
+    assert_eq!(layout.subsampling, Subsampling::Yuv420);
+    assert_eq!(layout.depth, Depth::Ten);
+
+    let frame = opened
+        .decoder
+        .read_video_frame::<u16>()
+        .expect("the pipe holds a frame");
+    let planes = u16::to_planes(&frame, layout).expect("the frame matches its layout");
+
+    assert_eq!(planes.y.len(), 4 * 4 * 2);
+    assert_eq!(planes.u.len(), 2 * 2 * 2);
+    assert_eq!(planes.v.len(), 2 * 2 * 2);
 }
 
 #[test]
