@@ -1,0 +1,19 @@
+{
+  "name": "ffms2",
+  "version": "5.0",
+  "description": "A cross-platform wrapper library around FFmpeg for frame accurate access.",
+  "homepage": "https://github.com/FFMS/ffms2",
+  "license": "MIT",
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": ["avcodec", "avformat", "swscale", "swresample"]
+    },
+    "zlib",
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    }
+  ]
+}

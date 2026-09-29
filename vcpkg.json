@@ -1,0 +1,17 @@
+{
+  "name": "av-denoise-static-deps",
+  "version-string": "0",
+  "builtin-baseline": "fe8971a72787a862d89588aedfef583c50e3b5a4",
+  "dependencies": [
+    "ffms2",
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": ["avcodec", "avformat", "swscale", "swresample", "dav1d", "zlib", "bzip2"]
+    },
+    {
+      "name": "pkgconf",
+      "host": true
+    }
+  ]
+}

@@ -3,6 +3,10 @@
 # feature is always added, without it Cargo skips the CLI target.
 bench_features := env("AVD_BENCH_FEATURES", "vulkan") + ",binary"
 
+# The vcpkg triplet `static-deps` installs for. Override on Linux arm or Intel macOS.
+vcpkg_triplet := env("AVD_VCPKG_TRIPLET", if os() == "macos" { "arm64-osx-release" } else { "x64-linux-release" })
+vcpkg_baseline := "fe8971a72787a862d89588aedfef583c50e3b5a4"
+
 hello:
 
 # Prefer `rustfmt +nightly <file>` for targeted edits; this formats the whole workspace.
@@ -33,6 +37,20 @@ build *ARGS:
 
 run *ARGS:
     cargo run -p av-denoise {{ARGS}}
+
+# Builds the static ffms2 and FFmpeg tree from vcpkg.json into vcpkg_installed/.
+static-deps:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -d .vcpkg ]; then
+        git clone https://github.com/microsoft/vcpkg.git .vcpkg
+    fi
+    git -C .vcpkg fetch --quiet origin
+    git -C .vcpkg checkout --quiet {{vcpkg_baseline}}
+    if [ ! -x .vcpkg/vcpkg ]; then
+        .vcpkg/bootstrap-vcpkg.sh -disableMetrics
+    fi
+    .vcpkg/vcpkg install --triplet {{vcpkg_triplet}} --host-triplet {{vcpkg_triplet}}
 
 bench *ARGS:
     cargo bench -p av-denoise-core {{ARGS}}
