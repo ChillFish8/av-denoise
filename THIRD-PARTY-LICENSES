@@ -11,7 +11,10 @@ https://ffmpeg.org
 License: LGPL-2.1-or-later
 
 FFmpeg is built without GPL or nonfree components. Its corresponding
-source is available at https://ffmpeg.org/releases/ for the version above.
+source is the release above from https://ffmpeg.org/releases/, with the
+patches in
+https://github.com/microsoft/vcpkg/tree/fe8971a72787a862d89588aedfef583c50e3b5a4/ports/ffmpeg
+applied.
 To relink av-denoise against a modified FFmpeg, build it from source with
 `just static-deps` and `just build-static`, replacing the ffmpeg port with
 your own through a vcpkg overlay port.
@@ -658,6 +661,9 @@ compatible with the LGPL.
 ffms2 5.0
 https://github.com/FFMS/ffms2
 License: MIT
+Copyright (c) 2007-2017 Fredrik Mellbin
+This build links ffms2 against LGPL-only FFmpeg, so the GPL note in the
+licence text below does not apply to it.
 
 The FFMS2 source is licensed under the MIT license, but its binaries
 are licensed under the GPL because GPL components of FFmpeg are

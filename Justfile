@@ -3,9 +3,9 @@
 # feature is always added, without it Cargo skips the CLI target.
 bench_features := env("AVD_BENCH_FEATURES", "vulkan") + ",binary"
 
-# The vcpkg triplet `static-deps` installs for. Override on Linux arm or Intel macOS.
+# The vcpkg triplet `static-deps` installs for. Override on Intel macOS.
 vcpkg_triplet := env("AVD_VCPKG_TRIPLET", if os() == "macos" { "arm64-osx-release" } else { "x64-linux-release" })
-vcpkg_baseline := "fe8971a72787a862d89588aedfef583c50e3b5a4"
+static_features := if os() == "macos" { "metal" } else { "vulkan" }
 
 hello:
 
@@ -46,14 +46,15 @@ static-deps:
         git clone https://github.com/microsoft/vcpkg.git .vcpkg
     fi
     git -C .vcpkg fetch --quiet origin
-    git -C .vcpkg checkout --quiet {{vcpkg_baseline}}
+    baseline="$(jq -r '."builtin-baseline"' vcpkg.json)"
+    git -C .vcpkg checkout --quiet "$baseline"
     if [ ! -x .vcpkg/vcpkg ]; then
         .vcpkg/bootstrap-vcpkg.sh -disableMetrics
     fi
     .vcpkg/vcpkg install --triplet {{vcpkg_triplet}} --host-triplet {{vcpkg_triplet}}
 
 # Builds a release CLI with ffms2 and FFmpeg linked statically. Run `static-deps` first.
-build-static features="vulkan":
+build-static features=static_features:
     #!/usr/bin/env bash
     set -euo pipefail
     prefix="$PWD/vcpkg_installed/{{vcpkg_triplet}}"

@@ -1,4 +1,6 @@
 fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+
     #[cfg(feature = "static-ffms2")]
     link_static_ffms2();
 }
