@@ -129,3 +129,26 @@ fn planes_from_v_frame_u8_mismatched_layout_errors() {
         "error should name the layout's expected length (16): {msg}"
     );
 }
+
+#[test]
+fn a_decoded_frame_only_unwraps_to_its_own_depth() {
+    use std::num::{NonZeroU8, NonZeroUsize};
+    use std::sync::Arc;
+
+    use v_frame::chroma::ChromaSubsampling;
+    use v_frame::frame::FrameBuilder;
+
+    use crate::pipeline::convert::SourcePixel;
+
+    let frame: v_frame::frame::Frame<u8> = FrameBuilder::new(
+        NonZeroUsize::new(2).expect("width is non-zero"),
+        NonZeroUsize::new(2).expect("height is non-zero"),
+        ChromaSubsampling::Yuv420,
+        NonZeroU8::new(8).expect("depth is non-zero"),
+    )
+    .build()
+    .expect("a 2x2 8-bit frame builds");
+    let decoded = u8::into_decoded(Arc::new(frame));
+
+    assert!(u16::from_decoded(decoded).is_none());
+}

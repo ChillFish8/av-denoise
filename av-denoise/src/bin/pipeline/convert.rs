@@ -1,4 +1,58 @@
+use std::sync::Arc;
+
 use av_denoise::{FrameLayout, Planes, Subsampling};
+use v_frame::frame::Frame;
+use v_frame::pixel::Pixel;
+
+/// A decoded frame at whichever sample width the source uses.
+pub enum DecodedFrame {
+    Eight(Arc<Frame<u8>>),
+    Wide(Arc<Frame<u16>>),
+}
+
+/// A sample type the pipeline can decode, detect scenes on and denoise.
+pub trait SourcePixel: Pixel {
+    fn into_decoded(frame: Arc<Frame<Self>>) -> DecodedFrame;
+
+    /// Returns `None` when the frame holds the other sample width.
+    fn from_decoded(frame: DecodedFrame) -> Option<Arc<Frame<Self>>>;
+
+    fn to_planes(frame: &Frame<Self>, layout: FrameLayout) -> Result<Planes, anyhow::Error>;
+}
+
+impl SourcePixel for u8 {
+    fn into_decoded(frame: Arc<Frame<Self>>) -> DecodedFrame {
+        DecodedFrame::Eight(frame)
+    }
+
+    fn from_decoded(frame: DecodedFrame) -> Option<Arc<Frame<Self>>> {
+        match frame {
+            DecodedFrame::Eight(frame) => Some(frame),
+            DecodedFrame::Wide(_) => None,
+        }
+    }
+
+    fn to_planes(frame: &Frame<Self>, layout: FrameLayout) -> Result<Planes, anyhow::Error> {
+        planes_from_v_frame_u8(frame, layout)
+    }
+}
+
+impl SourcePixel for u16 {
+    fn into_decoded(frame: Arc<Frame<Self>>) -> DecodedFrame {
+        DecodedFrame::Wide(frame)
+    }
+
+    fn from_decoded(frame: DecodedFrame) -> Option<Arc<Frame<Self>>> {
+        match frame {
+            DecodedFrame::Wide(frame) => Some(frame),
+            DecodedFrame::Eight(_) => None,
+        }
+    }
+
+    fn to_planes(frame: &Frame<Self>, layout: FrameLayout) -> Result<Planes, anyhow::Error> {
+        planes_from_v_frame_u16(frame, layout)
+    }
+}
 
 /// Checks each plane's byte length against the layout, failing with an error naming which plane
 /// is wrong, the length found and the length expected.
