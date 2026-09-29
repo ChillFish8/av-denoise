@@ -40,7 +40,7 @@ pub use self::curve::NOISE_CURVE_BINS;
 pub(crate) use self::curve::NoiseCurve;
 pub(super) use self::curve::build_noise_curve;
 #[cfg(test)]
-pub(crate) use self::strength_map::QuarterClass;
+pub(crate) use self::strength_map::{QuarterClass, QuarterTensor};
 pub(super) use self::strength_map::classify_quarters;
 pub(crate) use self::strength_map::{QuarterClasses, StrengthMapParams};
 use super::align::StorageAlign;
@@ -233,11 +233,11 @@ pub(super) const TEMPORAL_QUARTERS: u32 = 4;
 pub(super) const TEMPORAL_QUARTER_SIZE: u32 = TEMPORAL_NOISE_BLOCK / 2;
 /// Offset, past `2 * stored_ch`, of the first quarter record.
 ///
-/// Quarter `q` starts at `2 * stored_ch + 1 + 6 * q`, in top-left,
+/// Quarter `q` starts at `2 * stored_ch + 1 + 9 * q`, in top-left,
 /// top-right, bottom-left, bottom-right order.
 pub(super) const TEMPORAL_QUARTER_BASE: u32 = 1;
 /// How many `f32`s one quarter record holds.
-pub(super) const TEMPORAL_QUARTER_FIELDS: u32 = 6;
+pub(super) const TEMPORAL_QUARTER_FIELDS: u32 = 9;
 /// Offset, within a quarter record, of channel 0's summed residual.
 pub(super) const QUARTER_SUM_D: u32 = 0;
 /// Offset, within a quarter record, of channel 0's summed squared residual.
@@ -251,6 +251,15 @@ pub(super) const QUARTER_FLATNESS: u32 = 3;
 pub(super) const QUARTER_LUMA_MIN: u32 = 4;
 /// Offset, within a quarter record, of the new frame's maximum luma.
 pub(super) const QUARTER_LUMA_MAX: u32 = 5;
+/// Offset, within a quarter record, of the temporal mean's summed squared
+/// horizontal gradient.
+pub(super) const QUARTER_TENSOR_XX: u32 = 6;
+/// Offset, within a quarter record, of the temporal mean's summed squared
+/// vertical gradient.
+pub(super) const QUARTER_TENSOR_YY: u32 = 7;
+/// Offset, within a quarter record, of the temporal mean's summed
+/// horizontal times vertical gradient.
+pub(super) const QUARTER_TENSOR_XY: u32 = 8;
 
 /// The block grid covering a frame, laid out row-major.
 ///
@@ -786,7 +795,7 @@ pub(super) fn aggregate_temporal_noise_stats(
     width: u32,
     height: u32,
 ) -> Option<TemporalNoiseSample> {
-    temporal_noise_reading(records, channels, stored_ch, width, height, false).sample
+    temporal_noise_reading(records, channels, stored_ch, width, height, false, None).sample
 }
 
 /// One centre slot's temporal-noise reading, combining the scalar sample
@@ -810,6 +819,9 @@ pub(super) struct TemporalNoiseReading {
 /// `with_curve` gates the curve. It stays `None` whenever `with_curve`
 /// is off or no sample was produced, since a frame too unreliable for a
 /// scalar sample is too unreliable for a curve.
+///
+/// `texture_cut` is the cut [classify_quarters] vetoes textured flat quarters at, or `None` for no
+/// veto.
 pub(super) fn temporal_noise_reading(
     records: &[f32],
     channels: u32,
@@ -817,6 +829,7 @@ pub(super) fn temporal_noise_reading(
     width: u32,
     height: u32,
     with_curve: bool,
+    texture_cut: Option<f32>,
 ) -> TemporalNoiseReading {
     let none = TemporalNoiseReading {
         sample: None,
@@ -878,7 +891,7 @@ pub(super) fn temporal_noise_reading(
 
     let classes = curve
         .as_ref()
-        .map(|curve| classify_quarters(records, stored_ch, width, height, curve));
+        .map(|curve| classify_quarters(records, stored_ch, width, height, curve, texture_cut));
 
     TemporalNoiseReading {
         sample: Some(sample),
@@ -1274,9 +1287,9 @@ mod tests {
     fn temporal_stats_blocks_and_slot_len() {
         assert_eq!(temporal_stats_blocks(32, 16), (2, 1));
         assert_eq!(temporal_stats_blocks(33, 17), (3, 2)); // ragged on both axes
-        assert_eq!(temporal_stats_record_len(1), 27);
-        assert_eq!(temporal_stats_record_len(4), 33);
-        assert_eq!(temporal_stats_slot_len(32, 16, 1), 54); // 2 blocks x record_len 27
+        assert_eq!(temporal_stats_record_len(1), 39);
+        assert_eq!(temporal_stats_record_len(4), 45);
+        assert_eq!(temporal_stats_slot_len(32, 16, 1), 78); // 2 blocks x record_len 39
     }
 
     #[test]

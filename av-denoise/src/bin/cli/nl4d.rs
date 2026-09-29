@@ -291,6 +291,7 @@ impl Nl4dArgs {
                     flat_boost: self.flat_boost.unwrap_or(defaults.flat_boost),
                     chroma_flat_boost: self.chroma_flat_boost.unwrap_or(defaults.chroma_flat_boost),
                     shadow_soften: self.shadow_soften.unwrap_or(defaults.shadow_soften),
+                    flat_texture_cut: defaults.flat_texture_cut,
                     pooled_threshold: defaults.pooled_threshold && !self.no_pooled_threshold,
                 }),
                 // nl4d has no NLM weighting pass for a strength to apply to.

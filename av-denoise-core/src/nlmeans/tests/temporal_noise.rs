@@ -9,6 +9,9 @@ use crate::nlmeans::noise::{
     QUARTER_LUMA_SUM,
     QUARTER_SUM_D,
     QUARTER_SUM_D2,
+    QUARTER_TENSOR_XX,
+    QUARTER_TENSOR_XY,
+    QUARTER_TENSOR_YY,
     TEMPORAL_NOISE_BLOCK,
     TEMPORAL_QUARTER_BASE,
     TEMPORAL_QUARTER_FIELDS,
@@ -158,7 +161,7 @@ fn quarter_offset(stored_ch: u32, quarter: u32) -> usize {
     (2 * stored_ch + TEMPORAL_QUARTER_BASE + quarter * TEMPORAL_QUARTER_FIELDS) as usize
 }
 
-/// The six fields one quarter's record carries, computed on the host.
+/// The nine fields one quarter's record carries, computed on the host.
 ///
 /// `new` and `prev` are densely packed single-channel frames, matching
 /// every caller in this file. An empty quarter keeps the kernel's min
@@ -171,7 +174,7 @@ fn quarter_fields_host(
     bx: u32,
     by: u32,
     quarter: u32,
-) -> [f32; 6] {
+) -> [f32; 9] {
     let size = TEMPORAL_QUARTER_SIZE;
     let origin_x = bx * TEMPORAL_NOISE_BLOCK + (quarter % 2) * size;
     let origin_y = by * TEMPORAL_NOISE_BLOCK + (quarter / 2) * size;
@@ -231,13 +234,38 @@ fn quarter_fields_host(
         3.0e38
     };
 
-    let mut fields = [0.0f32; 6];
+    let mean_at = |x: u32, y: u32| {
+        let idx = ((origin_y + y) * width + origin_x + x) as usize;
+        0.5 * (new[idx] + prev[idx])
+    };
+
+    let mut tensor_xx = 0.0f32;
+    let mut tensor_yy = 0.0f32;
+    let mut tensor_xy = 0.0f32;
+    for y in 0..quarter_h.saturating_sub(1) {
+        for x in 0..quarter_w.saturating_sub(1) {
+            let top_left = mean_at(x, y);
+            let top_right = mean_at(x + 1, y);
+            let bottom_left = mean_at(x, y + 1);
+            let bottom_right = mean_at(x + 1, y + 1);
+            let grad_x = 0.5 * ((top_right + bottom_right) - (top_left + bottom_left));
+            let grad_y = 0.5 * ((bottom_left + bottom_right) - (top_left + top_right));
+            tensor_xx += grad_x * grad_x;
+            tensor_yy += grad_y * grad_y;
+            tensor_xy += grad_x * grad_y;
+        }
+    }
+
+    let mut fields = [0.0f32; 9];
     fields[QUARTER_SUM_D as usize] = sum_d;
     fields[QUARTER_SUM_D2 as usize] = sum_d2;
     fields[QUARTER_LUMA_SUM as usize] = luma_sum;
     fields[QUARTER_FLATNESS as usize] = flatness;
     fields[QUARTER_LUMA_MIN as usize] = luma_min;
     fields[QUARTER_LUMA_MAX as usize] = luma_max;
+    fields[QUARTER_TENSOR_XX as usize] = tensor_xx;
+    fields[QUARTER_TENSOR_YY as usize] = tensor_yy;
+    fields[QUARTER_TENSOR_XY as usize] = tensor_xy;
     fields
 }
 
@@ -409,7 +437,15 @@ fn assert_quarters_match_mirror(w: u32, h: u32, prev: &[f32], new: &[f32]) -> us
                 let fields = &record[offset..offset + TEMPORAL_QUARTER_FIELDS as usize];
                 let label = format!("{w}x{h} block ({bx},{by}) quarter {quarter}");
 
-                for field in [QUARTER_SUM_D, QUARTER_SUM_D2, QUARTER_LUMA_SUM] {
+                let exact_fields = [
+                    QUARTER_SUM_D,
+                    QUARTER_SUM_D2,
+                    QUARTER_LUMA_SUM,
+                    QUARTER_TENSOR_XX,
+                    QUARTER_TENSOR_YY,
+                    QUARTER_TENSOR_XY,
+                ];
+                for field in exact_fields {
                     let index = field as usize;
                     assert_field_close(fields[index], expected[index], &format!("{label} field {field}"));
                 }
@@ -526,7 +562,7 @@ fn flat_noisy_block_reads_low_flatness_in_every_quarter() {
     }
 }
 
-/// With `luma_fields` off, the 24 quarter lanes read 0 even over a
+/// With `luma_fields` off, the 36 quarter lanes read 0 even over a
 /// buffer full of garbage, and every other lane matches the on run bit
 /// for bit.
 #[test]
@@ -553,7 +589,7 @@ fn luma_fields_off_leaves_the_quarter_lanes_zero_and_the_rest_unchanged() {
         );
 
         let quarter_lanes = &without_luma[base + scalar_len..base + record_len];
-        assert_eq!(quarter_lanes.len(), 24);
+        assert_eq!(quarter_lanes.len(), 36);
         assert!(
             quarter_lanes.iter().all(|&value| value == 0.0),
             "block {block}: quarter lanes must read 0 with luma_fields off, got {quarter_lanes:?}"

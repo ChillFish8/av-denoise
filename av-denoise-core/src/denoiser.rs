@@ -258,6 +258,8 @@ pub struct Nl4dOptions {
     pub chroma_flat_boost: f32,
     /// See [crate::nl4d::Nl4dParams::shadow_soften].
     pub shadow_soften: f32,
+    /// See [crate::nl4d::Nl4dParams::flat_texture_cut].
+    pub flat_texture_cut: f32,
     /// See [crate::nl4d::Nl4dParams::pooled_threshold].
     pub pooled_threshold: bool,
 }
@@ -286,6 +288,7 @@ impl Default for Nl4dOptions {
             flat_boost: defaults.flat_boost,
             chroma_flat_boost: defaults.chroma_flat_boost,
             shadow_soften: defaults.shadow_soften,
+            flat_texture_cut: defaults.flat_texture_cut,
             pooled_threshold: defaults.pooled_threshold,
         }
     }
@@ -705,6 +708,7 @@ fn build_engine<R: Runtime>(
                 flat_boost: opts.flat_boost,
                 chroma_flat_boost: opts.chroma_flat_boost,
                 shadow_soften: opts.shadow_soften,
+                flat_texture_cut: opts.flat_texture_cut,
                 pooled_threshold: opts.pooled_threshold,
             };
             let denoiser =

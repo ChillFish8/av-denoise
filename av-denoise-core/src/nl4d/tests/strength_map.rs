@@ -337,3 +337,41 @@ fn a_chroma_denoiser_boosts_its_second_channel() {
     let unboosted_std = removed_channel_std(&frames, &unboosted.outputs, 2, 1, right, 0..HEIGHT);
     assert!(boosted_std > unboosted_std, "{boosted_std} vs {unboosted_std}");
 }
+
+fn build_nl4d(channels: ChannelMode, mut params: Nl4dParams) -> Nl4dDenoiser<R> {
+    let client = make_client();
+    params.nlm.channels = channels;
+    Nl4dDenoiser::<R>::new(&client, params, 64, 64).expect("construction failed")
+}
+
+#[test]
+fn the_luma_denoiser_passes_the_texture_cut_to_its_front() {
+    let denoiser = build_nl4d(ChannelMode::Luma, Nl4dParams::default());
+
+    assert_eq!(denoiser.front_for_test().flat_texture_cut(), Some(0.21));
+}
+
+#[test]
+fn the_fused_yuv_denoiser_passes_the_texture_cut_to_its_front() {
+    let denoiser = build_nl4d(ChannelMode::Yuv, Nl4dParams::default());
+
+    assert_eq!(denoiser.front_for_test().flat_texture_cut(), Some(0.21));
+}
+
+#[test]
+fn the_chroma_denoiser_never_gets_a_texture_cut() {
+    let denoiser = build_nl4d(ChannelMode::Chroma, Nl4dParams::default());
+
+    assert_eq!(denoiser.front_for_test().flat_texture_cut(), None);
+}
+
+#[test]
+fn a_texture_cut_of_one_is_not_passed_on() {
+    let params = Nl4dParams {
+        flat_texture_cut: 1.0,
+        ..Nl4dParams::default()
+    };
+    let denoiser = build_nl4d(ChannelMode::Luma, params);
+
+    assert_eq!(denoiser.front_for_test().flat_texture_cut(), None);
+}

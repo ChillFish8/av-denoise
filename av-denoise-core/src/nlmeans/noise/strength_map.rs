@@ -6,6 +6,9 @@ use super::{
     QUARTER_LUMA_SUM,
     QUARTER_SUM_D,
     QUARTER_SUM_D2,
+    QUARTER_TENSOR_XX,
+    QUARTER_TENSOR_XY,
+    QUARTER_TENSOR_YY,
     RHO_SIGMA_GATE,
     TEMPORAL_NOISE_BLOCK,
     TEMPORAL_QUARTER_BASE,
@@ -106,6 +109,107 @@ impl QuarterClasses {
     }
 }
 
+/// One quarter's structure tensor sums, from its temporal mean's pixel gradients.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct QuarterTensor {
+    pub(crate) xx: f32,
+    pub(crate) yy: f32,
+    pub(crate) xy: f32,
+}
+
+impl QuarterTensor {
+    fn add(&mut self, other: QuarterTensor) {
+        self.xx += other.xx;
+        self.yy += other.yy;
+        self.xy += other.xy;
+    }
+
+    /// How strongly the gradients share one direction, between 0 and 1.
+    ///
+    /// A tensor with no gradient energy reads 0.
+    pub(crate) fn coherence(&self) -> f32 {
+        let trace = self.xx + self.yy;
+        if trace <= 0.0 {
+            return 0.0;
+        }
+
+        let difference = self.xx - self.yy;
+        let spread = (difference * difference + 4.0 * self.xy * self.xy).sqrt();
+        spread / trace
+    }
+}
+
+/// How many quarters the veto saw as flat and how many it turned not flat.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct VetoCounts {
+    pub(crate) flat: usize,
+    pub(crate) vetoed: usize,
+}
+
+impl QuarterClasses {
+    /// Turns flat quarters not flat where their 3x3 neighbourhood's pooled tensor reads a coherence
+    /// at or above `cut`.
+    ///
+    /// Grain has no preferred direction, so its pooled coherence stays low, while faint lines and
+    /// edges keep theirs. `tensors` holds one tensor per quarter, row-major. The neighbourhood is
+    /// clamped at the frame edges and pools only quarters that have a class. A vetoed quarter keeps
+    /// its luma, so it takes the textured multiplier.
+    pub(crate) fn veto_textured(&mut self, tensors: &[QuarterTensor], cut: f32) -> VetoCounts {
+        assert_eq!(tensors.len(), self.classes.len());
+
+        let mut counts = VetoCounts { flat: 0, vetoed: 0 };
+        let mut vetoes = Vec::new();
+
+        for row in 0..self.rows {
+            for col in 0..self.cols {
+                let index = row * self.cols + col;
+                let Some(class) = self.classes[index] else {
+                    continue;
+                };
+
+                if !class.flat {
+                    continue;
+                }
+
+                counts.flat += 1;
+
+                let pooled = self.pooled_tensor(tensors, col, row);
+                if pooled.coherence() >= cut {
+                    vetoes.push(index);
+                }
+            }
+        }
+
+        counts.vetoed = vetoes.len();
+        for index in vetoes {
+            if let Some(class) = self.classes[index].as_mut() {
+                class.flat = false;
+            }
+        }
+
+        counts
+    }
+
+    fn pooled_tensor(&self, tensors: &[QuarterTensor], col: usize, row: usize) -> QuarterTensor {
+        let row_start = row.saturating_sub(1);
+        let row_end = (row + 1).min(self.rows - 1);
+        let col_start = col.saturating_sub(1);
+        let col_end = (col + 1).min(self.cols - 1);
+
+        let mut pooled = QuarterTensor::default();
+        for neighbour_row in row_start..=row_end {
+            for neighbour_col in col_start..=col_end {
+                let index = neighbour_row * self.cols + neighbour_col;
+                if self.classes[index].is_some() {
+                    pooled.add(tensors[index]);
+                }
+            }
+        }
+
+        pooled
+    }
+}
+
 fn shadow_multiplier(luma: f32, shadow_soften: f32) -> f32 {
     let span = SHADOW_HIGH - SHADOW_LOW;
     let progress = ((luma - SHADOW_LOW) / span).clamp(0.0, 1.0);
@@ -117,12 +221,16 @@ fn shadow_multiplier(luma: f32, shadow_soften: f32) -> f32 {
 /// A quarter is flat when it is static, carries grain, reads under [MOTION_FACTOR] times the noise
 /// `curve` predicts at its luma, is unclipped, and its texture is under [QUARTER_FLAT_FACTOR] of its
 /// own noise variance. Every quarter is classed, not only those of the blocks the curve accepted.
+///
+/// With `texture_cut` below 1.0, flat quarters then go through [QuarterClasses::veto_textured] at
+/// that cut.
 pub(in crate::nlmeans) fn classify_quarters(
     records: &[f32],
     stored_ch: u32,
     width: u32,
     height: u32,
     curve: &NoiseCurve,
+    texture_cut: Option<f32>,
 ) -> QuarterClasses {
     let record_len = temporal_stats_record_len(stored_ch) as usize;
     let quarters_base = (2 * stored_ch + TEMPORAL_QUARTER_BASE) as usize;
@@ -131,6 +239,7 @@ pub(in crate::nlmeans) fn classify_quarters(
     let cols = map_cols as usize;
     let rows = map_rows as usize;
     let mut classes = vec![None; cols * rows];
+    let mut tensors = vec![QuarterTensor::default(); cols * rows];
 
     for block_y in 0..blocks_y {
         for block_x in 0..blocks_x {
@@ -155,12 +264,24 @@ pub(in crate::nlmeans) fn classify_quarters(
 
                 let col = (2 * block_x + quarter_index % 2) as usize;
                 let row = (2 * block_y + quarter_index / 2) as usize;
-                classes[row * cols + col] = Some(class);
+                let index = row * cols + col;
+                classes[index] = Some(class);
+                tensors[index] = QuarterTensor {
+                    xx: fields[QUARTER_TENSOR_XX as usize],
+                    yy: fields[QUARTER_TENSOR_YY as usize],
+                    xy: fields[QUARTER_TENSOR_XY as usize],
+                };
             }
         }
     }
 
-    QuarterClasses { cols, rows, classes }
+    let mut quarter_classes = QuarterClasses { cols, rows, classes };
+    let active_cut = texture_cut.filter(|&cut| cut < 1.0);
+    if let Some(cut) = active_cut {
+        quarter_classes.veto_textured(&tensors, cut);
+    }
+
+    quarter_classes
 }
 
 fn classify_quarter(fields: &[f32], pixels: f32, curve: &NoiseCurve) -> QuarterClass {

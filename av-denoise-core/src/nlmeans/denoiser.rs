@@ -383,6 +383,9 @@ pub struct NlmDenoiser<R: Runtime> {
     /// kernel's cost at 1080p.
     pub(super) luma_noise_fields: bool,
 
+    /// The cut the luma flat map vetoes textured quarters at, or `None` for no veto.
+    pub(super) flat_texture_cut: Option<f32>,
+
     /// Whether the stream's edges run off-centre passes instead of copied padding.
     ///
     /// Set by nl4d. With it on, a stream gets no leading copies and a
@@ -692,6 +695,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             confidence_dummy,
             sigma_y,
             luma_noise_fields: false,
+            flat_texture_cut: None,
             shifted_edges: false,
         }
     }
@@ -1183,6 +1187,13 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.luma_noise_fields = on;
     }
 
+    /// Sets the cut the luma flat map vetoes textured quarters at.
+    ///
+    /// It defaults to `None`, which leaves every flat quarter flat.
+    pub(crate) fn set_flat_texture_cut(&mut self, cut: Option<f32>) {
+        self.flat_texture_cut = cut;
+    }
+
     /// The latest frame's luma noise curve, or `None` when no curve is
     /// available.
     pub(crate) fn current_noise_curve(&self) -> Option<NoiseCurve> {
@@ -1193,6 +1204,11 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// [Self::current_noise_curve] is.
     pub(crate) fn current_quarter_classes(&self) -> Option<&QuarterClasses> {
         self.quarter_classes.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn flat_texture_cut(&self) -> Option<f32> {
+        self.flat_texture_cut
     }
 
     /// Fills a duplicated slot's temporal-stats region with zeroes.
@@ -1992,6 +2008,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             self.width,
             self.height,
             self.luma_noise_fields,
+            self.flat_texture_cut,
         ))
     }
 

@@ -14,6 +14,7 @@ use crate::nlmeans::noise::{
     NoiseCurve,
     QuarterClass,
     QuarterClasses,
+    QuarterTensor,
     StrengthMapParams,
     classify_quarters,
     temporal_noise_reading,
@@ -37,7 +38,7 @@ fn classify_one(quarter: SyntheticQuarter) -> QuarterClasses {
     let (width, height) = frame_dims(quarters.len());
     let records = synthetic_records(&quarters);
     let curve = flat_curve();
-    classify_quarters(&records, 1, width, height, &curve)
+    classify_quarters(&records, 1, width, height, &curve, None)
 }
 
 fn is_flat(quarter: SyntheticQuarter) -> bool {
@@ -203,7 +204,7 @@ fn classes_match_the_kernel_map_dims_on_ragged_frames() {
         let records = vec![0.0f32; (blocks_x * blocks_y) as usize * record_len];
         let curve = flat_curve();
 
-        let classes = classify_quarters(&records, 1, width, height, &curve);
+        let classes = classify_quarters(&records, 1, width, height, &curve, None);
 
         let (cols, rows) = strength_map_dims(width, height);
         assert_eq!((classes.cols(), classes.rows()), (cols as usize, rows as usize));
@@ -238,7 +239,7 @@ fn a_quarter_past_the_frame_edge_gets_one() {
         shadow_soften: 0.65,
     };
 
-    let classes = classify_quarters(&records, 1, width, height, &curve);
+    let classes = classify_quarters(&records, 1, width, height, &curve, None);
     let multipliers = classes.luma_multipliers(params);
 
     let cols = classes.cols();
@@ -255,8 +256,8 @@ fn a_reading_carries_classes_exactly_when_it_carries_a_curve() {
     let (width, height) = frame_dims(quarters.len());
     let records = synthetic_records(&quarters);
 
-    let with_curve = temporal_noise_reading(&records, 1, 1, width, height, true);
-    let without_curve = temporal_noise_reading(&records, 1, 1, width, height, false);
+    let with_curve = temporal_noise_reading(&records, 1, 1, width, height, true, None);
+    let without_curve = temporal_noise_reading(&records, 1, 1, width, height, false, None);
 
     assert!(with_curve.curve.is_some());
     assert!(with_curve.classes.is_some());
@@ -307,4 +308,161 @@ fn the_front_end_keeps_classes_beside_the_curve_and_resets_both() {
 
     denoiser.reset_stream_state();
     assert!(denoiser.current_quarter_classes().is_none());
+}
+
+fn flat_grid(cols: usize, rows: usize) -> QuarterClasses {
+    let class = Some(QuarterClass {
+        flat: true,
+        luma: 0.2,
+    });
+    QuarterClasses::from_classes(cols, rows, vec![class; cols * rows])
+}
+
+const ORIENTED: QuarterTensor = QuarterTensor {
+    xx: 1.0,
+    yy: 0.1,
+    xy: 0.0,
+};
+const ISOTROPIC: QuarterTensor = QuarterTensor {
+    xx: 1.0,
+    yy: 1.0,
+    xy: 0.0,
+};
+
+#[test]
+fn an_oriented_neighbourhood_is_vetoed() {
+    let mut classes = flat_grid(3, 3);
+    let tensors = vec![ORIENTED; 9];
+
+    let counts = classes.veto_textured(&tensors, 0.5);
+
+    assert_eq!((counts.flat, counts.vetoed), (9, 9));
+    assert!(
+        classes
+            .chroma_multipliers(2.0)
+            .iter()
+            .all(|&multiplier| multiplier == 1.0)
+    );
+}
+
+#[test]
+fn an_isotropic_neighbourhood_stays_flat() {
+    let mut classes = flat_grid(3, 3);
+    let tensors = vec![ISOTROPIC; 9];
+
+    let counts = classes.veto_textured(&tensors, 0.2);
+
+    assert_eq!((counts.flat, counts.vetoed), (9, 0));
+    assert!(
+        classes
+            .chroma_multipliers(2.0)
+            .iter()
+            .all(|&multiplier| multiplier == 2.0)
+    );
+}
+
+#[test]
+fn the_veto_pools_the_three_by_three_neighbourhood() {
+    // The centre quarter alone is oriented, but its eight isotropic neighbours dilute it.
+    let mut classes = flat_grid(3, 3);
+    let mut tensors = vec![ISOTROPIC; 9];
+    tensors[4] = ORIENTED;
+
+    let counts = classes.veto_textured(&tensors, 0.5);
+
+    assert_eq!(counts.vetoed, 0);
+}
+
+#[test]
+fn the_veto_skips_quarters_without_a_class() {
+    // The oriented tensor sits on a quarter past the frame edge, so it must not pool in.
+    let flat = Some(QuarterClass {
+        flat: true,
+        luma: 0.2,
+    });
+    let mut classes = QuarterClasses::from_classes(2, 1, vec![flat, None]);
+    let huge_oriented = QuarterTensor {
+        xx: 100.0,
+        yy: 0.0,
+        xy: 0.0,
+    };
+    let tensors = vec![ISOTROPIC, huge_oriented];
+
+    let counts = classes.veto_textured(&tensors, 0.5);
+
+    assert_eq!((counts.flat, counts.vetoed), (1, 0));
+}
+
+#[test]
+fn a_vetoed_dark_quarter_takes_the_shadow_soften() {
+    let mut classes = flat_grid(1, 1);
+    let params = StrengthMapParams {
+        flat_boost: 1.75,
+        shadow_soften: 0.65,
+    };
+
+    classes.veto_textured(&[ORIENTED], 0.5);
+
+    assert_eq!(classes.luma_multipliers(params), vec![0.65]);
+}
+
+#[test]
+fn a_zero_cut_vetoes_every_flat_quarter() {
+    let mut classes = flat_grid(2, 2);
+    let tensors = vec![ISOTROPIC; 4];
+
+    let counts = classes.veto_textured(&tensors, 0.0);
+
+    assert_eq!((counts.flat, counts.vetoed), (4, 4));
+}
+
+#[test]
+fn a_neighbourhood_with_no_gradient_is_not_vetoed() {
+    let mut classes = flat_grid(3, 3);
+    let tensors = vec![QuarterTensor::default(); 9];
+
+    let counts = classes.veto_textured(&tensors, 0.01);
+
+    assert_eq!(counts.vetoed, 0);
+}
+
+/// A flat block whose four quarters carry a strongly horizontal structure tensor.
+fn oriented_flat_block(cut: Option<f32>) -> QuarterClasses {
+    let quarter = SyntheticQuarter {
+        tensor_xx: 1.0,
+        tensor_yy: 0.1,
+        ..with_flatness(0.4)
+    };
+    let quarters = vec![quarter; 4];
+    let (width, height) = frame_dims(quarters.len());
+    let records = synthetic_records(&quarters);
+    let curve = flat_curve();
+    classify_quarters(&records, 1, width, height, &curve, cut)
+}
+
+fn all_flat(classes: &QuarterClasses) -> bool {
+    let multipliers = classes.chroma_multipliers(2.0);
+    multipliers.iter().all(|&multiplier| multiplier == 2.0)
+}
+
+#[test]
+fn classify_quarters_vetoes_an_oriented_flat_block() {
+    let classes = oriented_flat_block(Some(0.21));
+
+    let multipliers = classes.chroma_multipliers(2.0);
+    assert!(multipliers.iter().all(|&multiplier| multiplier == 1.0));
+}
+
+#[test]
+fn classify_quarters_without_a_cut_leaves_an_oriented_flat_block_flat() {
+    let classes = oriented_flat_block(None);
+
+    assert!(all_flat(&classes));
+}
+
+#[test]
+fn a_cut_of_one_leaves_an_oriented_flat_block_flat() {
+    let classes = oriented_flat_block(Some(1.0));
+
+    assert!(all_flat(&classes));
 }

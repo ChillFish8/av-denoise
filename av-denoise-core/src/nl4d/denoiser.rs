@@ -230,6 +230,9 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             params.noise_map && channels == ChannelMode::Chroma && params.chroma_flat_boost != 1.0;
         let chroma_map_boost = chroma_map_applies.then_some(params.chroma_flat_boost);
         front.set_luma_noise_fields(apply_noise_map || chroma_map_boost.is_some());
+        let texture_cut_applies = apply_noise_map && params.flat_texture_cut < 1.0;
+        let texture_cut = texture_cut_applies.then_some(params.flat_texture_cut);
+        front.set_flat_texture_cut(texture_cut);
         front.set_shifted_edges(true);
 
         let stored_ch = channels.storage_count();
