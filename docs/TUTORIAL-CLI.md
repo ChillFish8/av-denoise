@@ -22,6 +22,14 @@ The following (non-accelerator) features are available:
     * This pulls in `ffms2` as hard dependencies. This means you must install `ffms2` before you can compile and link
       the binary.
 
+### Release binaries
+
+Each [GitHub release](https://github.com/ChillFish8/av-denoise/releases) carries a prebuilt CLI for
+Linux x86, Windows x86 and macOS on Apple Silicon. FFMS2 and FFmpeg are linked statically, so
+it is not required to have FFmpeg and FFMS2 installed on your host system, however, the JIT will still 
+attempt to dynamically load the CUDA headers and compiler system from your system if you attempt to use
+CUDA.
+
 ### Cargo install
 
 This builds the binary with the default accelerators enabled (`vulkan`)
