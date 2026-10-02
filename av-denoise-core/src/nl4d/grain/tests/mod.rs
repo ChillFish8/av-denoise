@@ -1,3 +1,4 @@
+mod export;
 mod fit;
 mod kernels;
 mod mirror;

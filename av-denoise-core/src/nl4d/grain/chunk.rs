@@ -1,4 +1,4 @@
-use crate::nl4d::grain::consts::{HIST_LEN, LAG_COUNT};
+use super::consts::{HIST_LEN, LAG_COUNT};
 
 /// The grain statistics of up to [CHUNK_FRAMES](crate::nl4d::grain::consts::CHUNK_FRAMES)
 /// consecutive completed frames of one scene.

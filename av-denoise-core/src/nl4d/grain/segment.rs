@@ -1,5 +1,5 @@
-use crate::nl4d::grain::chunk::GrainChunk;
-use crate::nl4d::grain::consts::{
+use super::chunk::GrainChunk;
+use super::consts::{
     AR_COEFFS,
     DRIFT,
     LAG_COUNT,
@@ -11,8 +11,8 @@ use crate::nl4d::grain::consts::{
     MIN_POPULATED_BINS,
     STD_BUCKETS,
 };
-use crate::nl4d::grain::fit::{bucket_edges, hist_median, quantise_ar, scaling_points, yule_walker};
-use crate::nl4d::grain::template::template_stats;
+use super::fit::{bucket_edges, hist_median, quantise_ar, scaling_points, yule_walker};
+use super::template::template_stats;
 
 /// The grain chunks of one scene, in frame order.
 #[derive(Debug, Clone, PartialEq)]

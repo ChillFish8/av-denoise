@@ -1,4 +1,4 @@
-use crate::nl4d::grain::consts::{AR_COEFFS, AR_OFFSETS, LAG_COUNT, LAGS, STD_BUCKETS, STD_MAX, STD_MIN};
+use super::consts::{AR_COEFFS, AR_OFFSETS, LAG_COUNT, LAGS, STD_BUCKETS, STD_MAX, STD_MIN};
 
 /// The 65 std bucket edges, log-spaced between `STD_MIN` and `STD_MAX`.
 pub(crate) fn bucket_edges() -> [f32; STD_BUCKETS + 1] {
@@ -12,6 +12,7 @@ pub(crate) fn bucket_edges() -> [f32; STD_BUCKETS + 1] {
 }
 
 /// The bucket a std falls in, with anything at or above the top edge in the last bucket.
+#[cfg(test)]
 pub(crate) fn bucket_of(std: f32, edges: &[f32]) -> usize {
     let mut bucket = 0;
     for (index, &edge) in edges.iter().enumerate().take(STD_BUCKETS).skip(1) {

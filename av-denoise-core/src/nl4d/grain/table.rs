@@ -1,7 +1,7 @@
 use std::fmt::Write;
 
-use crate::nl4d::grain::consts::AR_COEFFS;
-use crate::nl4d::grain::segment::{FittedEntry, SceneGrain, fit_scenes};
+use super::consts::AR_COEFFS;
+use super::segment::{FittedEntry, SceneGrain, fit_scenes};
 
 const TICKS_PER_SECOND: u128 = 10_000_000;
 

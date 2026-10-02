@@ -1,6 +1,7 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
+use super::grain::{GrainChunk, GrainExport, GrainGeometry};
 use super::params::Nl4dParams;
 use super::regularise::run_regularise;
 use super::snapshot::{LastFields, MotionSnapshot, read_snapshot};
@@ -165,6 +166,8 @@ pub struct Nl4dDenoiser<R: Runtime> {
     unit_map: Handle,
     map_cols: u32,
     map_rows: u32,
+    /// The grain measurement state, present only when grain export is on.
+    grain: Option<GrainExport>,
 }
 
 impl<R: Runtime> Nl4dDenoiser<R> {
@@ -294,6 +297,23 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             (None, None)
         };
 
+        let exports_grain = params.grain_export && channels != ChannelMode::Chroma;
+        let grain = if exports_grain {
+            let mc = front.motion_ctx();
+            let geometry = GrainGeometry {
+                width,
+                height,
+                stored_ch,
+                blocks_x: mc.blocks_x,
+                blocks_y: mc.blocks_y,
+                step: mc.step,
+                ring_frames,
+            };
+            Some(GrainExport::new(client, geometry))
+        } else {
+            None
+        };
+
         Ok(Self {
             front,
             width,
@@ -331,6 +351,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             unit_map,
             map_cols,
             map_rows,
+            grain,
         })
     }
 
@@ -393,12 +414,14 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             for centre in 0..radius {
                 let view = self.machinery_at(centre)?;
                 self.run_pass(&view, clear)?;
+                self.save_grain_vectors(view.centre_slot, centre, 2 * radius);
                 clear = AccumClear::Nothing;
             }
         }
 
         let view = self.machinery_at(radius)?;
         self.run_pass(&view, clear)?;
+        self.save_grain_vectors(view.centre_slot, radius, 2 * radius);
 
         if self.passes_run <= radius {
             return Ok(None);
@@ -407,6 +430,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let total_frames = 1 + 2 * radius;
         let completed_slot = (view.centre_slot + total_frames - radius) % total_frames;
         let (handle, slot) = self.normalise_region(completed_slot);
+        let next_slot = self.front.ring_slot(1);
+        self.measure_grain(completed_slot, Some(next_slot), slot);
         let wire_dst = self.wire_outputs.as_ref().map(|outputs| &outputs[slot]);
         let pending = self.start_readback(handle, wire_dst, self.output_format);
 
@@ -488,6 +513,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         for centre in centres {
             let view = self.machinery_at(centre)?;
             self.run_pass(&view, clear)?;
+            self.save_grain_vectors(view.centre_slot, centre, last_real);
             clear = AccumClear::Nothing;
         }
 
@@ -498,6 +524,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         for logical in first_region..=last_real {
             let region_slot = self.front.ring_slot(logical);
             let (handle, slot) = self.normalise_region(region_slot);
+            let next_slot = (logical < last_real).then(|| self.front.ring_slot(logical + 1));
+            self.measure_grain(region_slot, next_slot, slot);
             let wire_dst = self.wire_outputs.as_ref().map(|outputs| &outputs[slot]);
             let pending = self.start_readback(handle, wire_dst, self.output_format);
             let frame = pending.wait()?;
@@ -523,6 +551,10 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         self.passes_run = 0;
         self.stream_start = StreamStart::SceneStart;
         self.last_fields = None;
+
+        if let Some(grain) = self.grain.as_mut() {
+            grain.reset_stream();
+        }
     }
 
     /// The motion field and confidence the last pass gave the fused
@@ -543,6 +575,26 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             mc.step,
             mc.blksize,
         ))
+    }
+
+    /// Reads back the grain chunks measured since the last call. Empty when export is off.
+    pub fn drain_grain_chunks(&mut self) -> Vec<GrainChunk> {
+        let Some(grain) = self.grain.as_mut() else {
+            return Vec::new();
+        };
+
+        grain.drain(self.front.compute_client())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_grain_export(&self) -> bool {
+        self.grain.is_some()
+    }
+
+    /// How many measured frames had a saved grain entry to their next frame.
+    #[cfg(test)]
+    pub(crate) fn grain_measured_with_entry(&self) -> u32 {
+        self.grain.as_ref().map_or(0, |grain| grain.measured_with_entry())
     }
 
     /// The front end this denoiser drives.
@@ -780,6 +832,36 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         }
 
         Ok(())
+    }
+
+    /// Saves the last pass's vectors from the centre to the next frame for grain export.
+    ///
+    /// `centre` is the pass's logical ring position and `last_real` the last logical position
+    /// holding a real frame.
+    fn save_grain_vectors(&mut self, centre_slot: u32, centre: u32, last_real: u32) {
+        let Some(grain) = self.grain.as_mut() else {
+            return;
+        };
+
+        let fields = self
+            .last_fields
+            .as_ref()
+            .expect("a pass ran before its vectors are saved");
+        // The motion field numbers neighbours in logical order and skips the centre, so the
+        // frame at `centre + 1` is neighbour `centre`.
+        let next_neighbour = (centre < last_real).then_some(centre);
+        grain.save_vectors(self.front.compute_client(), fields, centre_slot, next_neighbour);
+    }
+
+    /// Measures the grain of the frame just normalised into `output_slot`.
+    fn measure_grain(&mut self, slot_t: u32, slot_next: Option<u32>, output_slot: usize) {
+        let Some(grain) = self.grain.as_mut() else {
+            return;
+        };
+
+        let client = self.front.compute_client();
+        let input = self.front.input_ring();
+        grain.measure(client, input, &self.outputs, slot_t, slot_next, output_slot);
     }
 
     /// Normalises the accumulator region at physical slot `region_slot` into the next output buffer.

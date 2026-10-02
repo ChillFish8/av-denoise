@@ -1748,6 +1748,11 @@ impl<R: Runtime> NlmDenoiser<R> {
         &self.client
     }
 
+    /// The whole input ring, indexable by physical frame slot.
+    pub(crate) fn input_ring(&self) -> &Handle {
+        &self.input_buf
+    }
+
     /// Queues the denoise kernels for the current window and starts the
     /// readback.
     ///

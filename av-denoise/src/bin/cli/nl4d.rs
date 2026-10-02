@@ -301,6 +301,7 @@ impl Nl4dArgs {
                     shadow_soften: self.shadow_soften.unwrap_or(defaults.shadow_soften),
                     flat_texture_cut: self.flat_texture_cut.unwrap_or(defaults.flat_texture_cut),
                     pooled_threshold: defaults.pooled_threshold && !self.no_pooled_threshold,
+                    grain_export: false,
                 }),
                 // nl4d has no NLM weighting pass for a strength to apply to.
                 luma_strength: None,

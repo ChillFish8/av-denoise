@@ -5,6 +5,7 @@ use cubecl::prelude::ComputeClient;
 
 use crate::accelerate::Accelerator;
 use crate::device::Device;
+use crate::nl4d::grain::GrainChunk;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 #[cfg(test)]
 use crate::nlmeans::MotionEstimation;
@@ -262,6 +263,8 @@ pub struct Nl4dOptions {
     pub flat_texture_cut: f32,
     /// See [crate::nl4d::Nl4dParams::pooled_threshold].
     pub pooled_threshold: bool,
+    /// See [crate::nl4d::Nl4dParams::grain_export].
+    pub grain_export: bool,
 }
 
 impl Default for Nl4dOptions {
@@ -290,6 +293,7 @@ impl Default for Nl4dOptions {
             shadow_soften: defaults.shadow_soften,
             flat_texture_cut: defaults.flat_texture_cut,
             pooled_threshold: defaults.pooled_threshold,
+            grain_export: defaults.grain_export,
         }
     }
 }
@@ -663,6 +667,13 @@ impl<R: Runtime> Engine<R> {
             Self::Nl4d(d) => d.reset_stream(),
         }
     }
+
+    fn drain_grain_chunks(&mut self) -> Vec<GrainChunk> {
+        match self {
+            Self::Nlm(_) => Vec::new(),
+            Self::Nl4d(d) => d.drain_grain_chunks(),
+        }
+    }
 }
 
 /// Builds whichever [`Engine`] `algorithm` calls for.
@@ -710,6 +721,7 @@ fn build_engine<R: Runtime>(
                 shadow_soften: opts.shadow_soften,
                 flat_texture_cut: opts.flat_texture_cut,
                 pooled_threshold: opts.pooled_threshold,
+                grain_export: opts.grain_export,
             };
             let denoiser =
                 Nl4dDenoiser::with_output_format(client, nl4d_params, width, height, output_format)
@@ -1363,6 +1375,20 @@ impl Denoiser {
         self.frames_pushed = 0;
 
         Ok(())
+    }
+
+    /// Reads back the grain chunks measured since the last call, in frame order.
+    ///
+    /// Call it after [Self::flush]. Empty unless grain export is on.
+    pub fn drain_grain_chunks(&mut self) -> Vec<GrainChunk> {
+        match &mut self.backend {
+            #[cfg(feature = "cuda")]
+            Backend::Cuda(d) => d.drain_grain_chunks(),
+            #[cfg(feature = "rocm")]
+            Backend::Rocm(d) => d.drain_grain_chunks(),
+            #[cfg(any(feature = "vulkan", feature = "metal"))]
+            Backend::Wgpu(d) => d.drain_grain_chunks(),
+        }
     }
 
     /// Sets the poison flag directly, without going through a failing

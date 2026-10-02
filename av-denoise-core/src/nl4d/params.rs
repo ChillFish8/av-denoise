@@ -118,6 +118,10 @@ pub struct Nl4dParams {
     /// Faint texture spreads over several neighbouring frequencies, so it survives where each
     /// coefficient alone would fall under the threshold. On by default.
     pub pooled_threshold: bool,
+    /// Whether the denoiser measures the source's film grain for an AV1 grain table.
+    ///
+    /// Off by default. Only a denoiser that filters luma measures. It never changes the output.
+    pub grain_export: bool,
 }
 
 impl Default for Nl4dParams {
@@ -149,6 +153,7 @@ impl Default for Nl4dParams {
             shadow_soften: 0.65,
             flat_texture_cut: 0.21,
             pooled_threshold: true,
+            grain_export: false,
         }
     }
 }

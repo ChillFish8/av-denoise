@@ -1,5 +1,5 @@
-use crate::nl4d::grain::consts::{AR_COEFFS, AR_OFFSETS, CELL, TEMPLATE_SEEDS};
-use crate::nl4d::grain::gaussian::GAUSSIAN_SEQUENCE;
+use super::consts::{AR_COEFFS, AR_OFFSETS, CELL, TEMPLATE_SEEDS};
+use super::gaussian::GAUSSIAN_SEQUENCE;
 
 const TEMPLATE_ROWS: usize = 73;
 const TEMPLATE_COLS: usize = 82;

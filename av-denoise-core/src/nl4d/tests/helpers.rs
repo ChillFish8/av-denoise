@@ -57,6 +57,7 @@ pub(super) fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
         // Off, so the pipeline tests keep the per-coefficient kernel their expectations were
         // recorded against. `nl4d::tests::pooled` covers the pooled path.
         pooled_threshold: false,
+        grain_export: false,
     }
 }
 
