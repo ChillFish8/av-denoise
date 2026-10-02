@@ -1,30 +1,14 @@
 #![cfg(feature = "vulkan")]
 
 use std::io::{Cursor, Read};
-use std::sync::{Arc, Mutex};
 
 use av_denoise::accelerate::Accelerator;
 use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Device, PlaneOptions};
 
-use super::{SCENE_CLIP_SIZE, multi_scene_clip};
+use super::{SCENE_CLIP_SIZE, SharedBuffer, multi_scene_clip};
 use crate::pipeline::run_with;
 use crate::pipeline::source::open_y4m;
 use crate::pipeline::stage::frame_permits;
-
-/// A writer the test can read back after the coordinator thread drops it.
-#[derive(Clone, Default)]
-struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for SharedBuffer {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().expect("buffer lock").extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
 
 fn temporal_opts() -> PlaneOptions {
     PlaneOptions {
@@ -48,7 +32,7 @@ fn run_over(bytes: Vec<u8>, workers: usize, budget: u64) -> Result<Vec<u8>, anyh
         open_y4m(reader)
     };
 
-    run_with(&options, opener, workers, budget, false, output.clone())?;
+    run_with(&options, opener, workers, budget, false, output.clone(), None)?;
 
     let written = output.0.lock().expect("buffer lock").clone();
     Ok(written)

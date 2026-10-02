@@ -86,6 +86,17 @@ the cut, 0.21 by default, is filtered as texture rather than boosted as flat. Lo
 more faint texture in dark scenes, raise it to filter more areas as flat. It applies to luma
 only, and `1` turns it off.
 
+**`--export-av1-fgs <PATH>` keeps the look of film grain.** It writes an AV1 film grain table to
+PATH. The table describes the source's luma grain, minus whatever the output
+still keeps. Pass it to SVT-AV1 with `--fgs-table`, or add it to a finished AV1 encode with
+`grav1synth apply`. The decoder then adds matching grain back, so the encode stays clean while the
+picture keeps its grain. The y4m output is the same with or without the flag. It is rejected with
+`--channel-mode chroma`, and a failed run leaves no table.
+
+The table's timestamps count this run's output frames from 0 at the source frame rate. It fits
+constant frame rate sources, and encodes of this run's output. It does not fit variable frame rate
+sources, or an encode of the original file when av-denoise dropped frames that carried no picture.
+
 ### What not to touch in NL4D
 
 - **`--sigma`** pins the noise level to a fixed value and turns the per-scene measurement off

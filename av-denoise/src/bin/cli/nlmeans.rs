@@ -395,6 +395,7 @@ impl NlmeansArgs {
                 chroma_lambda_ht: None,
             },
             progress: globals.progress,
+            grain_table: None,
         })
     }
 }
@@ -871,5 +872,21 @@ mod tests {
             err.to_string().contains("banana"),
             "error should name the value: {err}"
         );
+    }
+
+    #[test]
+    fn nlmeans_has_no_export_flag() {
+        let err = Args::try_parse_from(["av-denoise", "nlmeans", "-i", "-", "--export-av1-fgs", "x"])
+            .expect_err("only nl4d exports grain");
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn nlmeans_never_asks_for_a_grain_table() {
+        let (args, nlm) = parse(&[]);
+        let opts = nlm.build_options(&args).expect("build_options should succeed");
+
+        assert_eq!(opts.grain_table, None);
     }
 }

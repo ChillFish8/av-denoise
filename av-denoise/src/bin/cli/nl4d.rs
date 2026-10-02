@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use av_denoise::{
     Algorithm,
     ChannelIntent,
@@ -211,6 +213,15 @@ pub struct Nl4dArgs {
     #[arg(long, hide = true)]
     pub windowed_noise_estimation: bool,
 
+    /// Writes an AV1 film grain table for the grain this run removes.
+    ///
+    /// The table describes the source's luma grain, minus what the output still keeps, and is
+    /// read by SVT-AV1's `--fgs-table` and by `grav1synth apply`. Its timestamps follow this
+    /// run's output frames from 0, so it suits constant frame rate sources and encodes of this
+    /// output.
+    #[arg(long, value_name = "PATH")]
+    pub export_av1_fgs: Option<PathBuf>,
+
     #[command(flatten)]
     pub motion: MotionArgs,
 }
@@ -243,6 +254,11 @@ impl Nl4dArgs {
     pub fn build_options(&self, globals: &Args) -> Result<RunOptions, anyhow::Error> {
         let defaults = Nl4dOptions::default();
         let intent = resolve_channel_intent(&globals.channel_mode)?;
+
+        let exports_grain = self.export_av1_fgs.is_some();
+        if exports_grain && intent == ChannelIntent::Chroma {
+            anyhow::bail!("--export-av1-fgs measures luma grain, so it needs luma to be denoised");
+        }
 
         // Check the raw 8-bit value here so an out-of-range `--sigma`
         // reports the number the user typed. The library re-validates
@@ -301,7 +317,7 @@ impl Nl4dArgs {
                     shadow_soften: self.shadow_soften.unwrap_or(defaults.shadow_soften),
                     flat_texture_cut: self.flat_texture_cut.unwrap_or(defaults.flat_texture_cut),
                     pooled_threshold: defaults.pooled_threshold && !self.no_pooled_threshold,
-                    grain_export: false,
+                    grain_export: exports_grain,
                 }),
                 // nl4d has no NLM weighting pass for a strength to apply to.
                 luma_strength: None,
@@ -310,6 +326,7 @@ impl Nl4dArgs {
                 chroma_lambda_ht: self.chroma_lambda_ht,
             },
             progress: globals.progress,
+            grain_table: self.export_av1_fgs.clone(),
         })
     }
 
@@ -810,5 +827,42 @@ mod tests {
         assert_eq!(algorithm.chroma_flat_boost, defaults.chroma_flat_boost);
         assert_eq!(algorithm.shadow_soften, defaults.shadow_soften);
         assert_eq!(algorithm.flat_texture_cut, defaults.flat_texture_cut);
+    }
+
+    #[test]
+    fn export_flag_sets_the_table_and_turns_export_on() {
+        let (args, nl4d) = parse(&["--export-av1-fgs", "out.tbl"]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let expected = std::path::Path::new("out.tbl");
+
+        assert_eq!(opts.grain_table.as_deref(), Some(expected));
+        assert!(expect_nl4d(&opts).grain_export);
+    }
+
+    #[test]
+    fn export_works_with_a_fixed_sigma() {
+        let (args, nl4d) = parse(&["--sigma", "4", "--export-av1-fgs", "x"]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+
+        assert!(expect_nl4d(&opts).grain_export);
+    }
+
+    #[test]
+    fn export_is_off_without_the_flag() {
+        let (args, nl4d) = parse(&[]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+
+        assert_eq!(opts.grain_table, None);
+        assert!(!expect_nl4d(&opts).grain_export);
+    }
+
+    #[test]
+    fn export_rejects_chroma_only() {
+        let (args, nl4d) = parse(&["--channel-mode", "chroma", "--export-av1-fgs", "out.tbl"]);
+        let err = nl4d
+            .build_options(&args)
+            .expect_err("chroma only cannot export luma grain");
+
+        assert!(err.to_string().contains("--export-av1-fgs"), "got {err}");
     }
 }

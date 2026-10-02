@@ -1,12 +1,12 @@
 use std::thread;
 
-use av_denoise::{FrameLayout, PlanarDenoiser, PlaneOptions, Planes, WarmUp, push_needs_retry};
+use av_denoise::{FrameLayout, PlanarDenoiser, PlaneOptions, Planes, SceneGrain, WarmUp, push_needs_retry};
 
 use super::coordinator::OutputMsg;
 use super::stage::SceneJob;
 use crate::warm_start::{create_denoiser, finish_warm_up};
 
-pub type WorkerJoin = thread::JoinHandle<Result<(), anyhow::Error>>;
+pub type WorkerJoin = thread::JoinHandle<Result<Vec<SceneGrain>, anyhow::Error>>;
 
 /// Spawns `workers` worker threads over one shared scene queue.
 ///
@@ -51,7 +51,8 @@ pub fn run_worker(
     layout: FrameLayout,
     jobs: crossbeam_channel::Receiver<SceneJob>,
     tx: crossbeam_channel::Sender<OutputMsg>,
-) -> Result<(), anyhow::Error> {
+) -> Result<Vec<SceneGrain>, anyhow::Error> {
+    let mut scenes = Vec::new();
     let mut denoiser_slot: Option<PlanarDenoiser> = None;
     // The cold-cache queue place this worker's denoiser holds, until its
     // first output frame proves the kernels are compiled and cached.
@@ -74,6 +75,7 @@ pub fn run_worker(
 
         // Indices of pushed-but-not-yet-emitted frames, in push order.
         let mut pending: std::collections::VecDeque<u64> = Default::default();
+        let mut first_frame = None;
 
         // Nothing is received straight after the push.
         // `push_with_drain` handles backpressure through QueueFull
@@ -82,6 +84,7 @@ pub fn run_worker(
         // the pipeline back to depth 1 and put the GPU readback in the
         // critical path of the next push.
         for frame in job.frames {
+            first_frame.get_or_insert(frame.global_idx);
             push_with_drain(
                 denoiser,
                 &mut warm_up,
@@ -95,9 +98,16 @@ pub fn run_worker(
         // Reuse the PlanarDenoiser across scenes. Flushing here ensures
         // no temporal window spans two of them.
         flush_worker(denoiser, &mut warm_up, &mut pending, &tx)?;
+
+        let chunks = denoiser.drain_grain_chunks();
+        if let Some(first_frame) = first_frame
+            && !chunks.is_empty()
+        {
+            scenes.push(SceneGrain { first_frame, chunks });
+        }
     }
 
-    Ok(())
+    Ok(scenes)
 }
 
 /// Push one frame, draining any pending output first if the queue is full.
