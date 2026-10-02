@@ -1,0 +1,73 @@
+/// Side length of a measured block in pixels.
+pub(crate) const CELL: u32 = 8;
+pub(crate) const LUMA_BINS: usize = 16;
+pub(crate) const STD_BUCKETS: usize = 64;
+/// Counts in one histogram, luma bins by std buckets.
+pub(crate) const HIST_LEN: usize = LUMA_BINS * STD_BUCKETS;
+/// The 46 autocovariance lags, half-plane, `dy` in `0..=3` and `dx` in `-6..=6`.
+pub(crate) const LAG_COUNT: usize = 46;
+/// The lag sums plus the accepted pixel count.
+pub(crate) const AUTOCOV_LEN: usize = LAG_COUNT + 1;
+pub(crate) const MAX_LAG_Y: i32 = 3;
+pub(crate) const MAX_LAG_X: i32 = 6;
+pub(crate) const AR_COEFFS: usize = 24;
+
+/// The measured lags in record order, `dy` first and then `dx`.
+pub(crate) const LAGS: [(i32, i32); LAG_COUNT] = lag_table();
+
+/// AV1's 24 causal lag-3 offsets in coefficient order, as `(dy, dx)`.
+pub(crate) const AR_OFFSETS: [(i32, i32); AR_COEFFS] = ar_offset_table();
+
+pub(crate) const FLAT_RANGE: f32 = 5.0 / 255.0;
+pub(crate) const LUMA_LOW: f32 = 20.0 / 255.0;
+pub(crate) const LUMA_HIGH: f32 = 235.0 / 255.0;
+pub(crate) const CLIP_LOW: f32 = 4.0 / 255.0;
+pub(crate) const CLIP_HIGH: f32 = 251.0 / 255.0;
+pub(crate) const CONF_MIN: f32 = 0.8;
+pub(crate) const STD_MIN: f32 = 0.05 / 255.0;
+pub(crate) const STD_MAX: f32 = 32.0 / 255.0;
+
+pub(crate) const MIN_BLOCKS_PER_BIN: u64 = 200;
+pub(crate) const MIN_POPULATED_BINS: usize = 3;
+pub(crate) const MIN_AR_PIXELS: f64 = 50_000.0;
+pub(crate) const CHUNK_FRAMES: u32 = 24;
+pub(crate) const DRIFT: f64 = 1.15;
+pub(crate) const MIN_CHUNK_BLOCKS: u64 = 2_000;
+pub(crate) const TEMPLATE_SEEDS: u32 = 24;
+pub(crate) const MAX_POINTS: usize = 14;
+
+const fn lag_table() -> [(i32, i32); LAG_COUNT] {
+    let mut table = [(0, 0); LAG_COUNT];
+    let mut next = 0;
+    let mut dy = 0;
+    while dy <= MAX_LAG_Y {
+        let mut dx = -MAX_LAG_X;
+        while dx <= MAX_LAG_X {
+            if dy > 0 || dx >= 0 {
+                table[next] = (dy, dx);
+                next += 1;
+            }
+            dx += 1;
+        }
+        dy += 1;
+    }
+    table
+}
+
+const fn ar_offset_table() -> [(i32, i32); AR_COEFFS] {
+    let mut table = [(0, 0); AR_COEFFS];
+    let mut next = 0;
+    let mut dy = -3;
+    while dy <= 0 {
+        let mut dx = -3;
+        while dx <= 3 {
+            if dy < 0 || dx < 0 {
+                table[next] = (dy, dx);
+                next += 1;
+            }
+            dx += 1;
+        }
+        dy += 1;
+    }
+    table
+}

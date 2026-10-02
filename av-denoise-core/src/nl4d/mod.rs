@@ -12,6 +12,7 @@
 
 mod denoiser;
 pub mod harness;
+pub mod grain;
 pub mod kernels;
 mod params;
 mod regularise;
