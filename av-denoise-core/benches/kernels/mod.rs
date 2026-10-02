@@ -17,6 +17,7 @@ pub mod distance_pair_ref;
 pub mod distance_ref;
 pub mod finish;
 pub mod fused_window;
+pub mod grain;
 pub mod horizontal_sum;
 pub mod horizontal_sum_pair;
 pub mod mc_block_match_coarse;

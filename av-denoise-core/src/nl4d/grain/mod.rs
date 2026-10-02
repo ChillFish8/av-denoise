@@ -1,7 +1,7 @@
-#![expect(dead_code, reason = "consumed by the grain export tasks that follow")]
+#![cfg_attr(not(test), expect(dead_code, reason = "consumed by the grain export tasks that follow"))]
 
 mod chunk;
-mod consts;
+pub(crate) mod consts;
 mod fit;
 mod gaussian;
 mod segment;
