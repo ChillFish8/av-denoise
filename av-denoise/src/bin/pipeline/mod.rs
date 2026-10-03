@@ -1,6 +1,7 @@
 mod convert;
 mod coordinator;
 mod decode;
+mod grain_table;
 mod scenes;
 mod source;
 mod stage;
@@ -10,12 +11,14 @@ mod worker;
 mod tests;
 
 use std::io::{IsTerminal, stdout};
+use std::path::PathBuf;
 
-use av_denoise::{DenoisingMode, Depth, FrameLayout, PlaneOptions};
+use av_denoise::{DenoisingMode, Depth, FrameLayout, PlaneOptions, SceneGrain};
 
 use self::convert::SourcePixel;
 use self::coordinator::spawn_coordinator;
 use self::decode::{DecodeThread, FrameMsg};
+use self::grain_table::TablePath;
 use self::scenes::{Decided, SceneSplitter};
 use self::source::{OpenedSource, SourceInfo};
 use self::stage::{SceneJob, Stager, checked_frame_permits, frame_permit_channel};
@@ -42,12 +45,14 @@ pub fn run(
         frame_budget_bytes,
         visible,
         stdout(),
+        opts.grain_table.clone(),
     )
 }
 
 /// Denoises the source `opener` returns scene by scene, writing y4m into `output`.
 ///
-/// Blocks until every thread in the pipeline has finished.
+/// Blocks until every thread in the pipeline has finished. The grain table is written to
+/// `grain_table` only when every stage succeeds.
 pub fn run_with<W, F>(
     planes: &PlaneOptions,
     opener: F,
@@ -55,6 +60,7 @@ pub fn run_with<W, F>(
     frame_budget_bytes: u64,
     visible: bool,
     output: W,
+    grain_table: Option<PathBuf>,
 ) -> Result<(), anyhow::Error>
 where
     W: std::io::Write + Send + 'static,
@@ -63,6 +69,8 @@ where
     if workers == 0 {
         anyhow::bail!("--workers must be at least 1");
     }
+
+    let table = grain_table.as_deref().map(TablePath::create).transpose()?;
 
     let (decode_thread, info) = DecodeThread::spawn(opener)?;
     let layout = info.layout;
@@ -127,10 +135,21 @@ where
     // Root causes come first. A coordinator error is a failed write. A worker error only shows
     // elsewhere as the dispatcher's disconnect. Dispatch errors carry decode failures, which
     // never make a worker fail.
-    coordinator_joined?;
-    workers_joined?;
-    dispatched?;
-    decoder_joined
+    let outcome = coordinator_joined
+        .and(workers_joined)
+        .and_then(|scenes| dispatched.map(|_| scenes))
+        .and_then(|scenes| decoder_joined.map(|_| scenes));
+
+    // Returning early drops `table`, which removes its temporary file.
+    let scenes = outcome?;
+
+    if let Some(table) = table {
+        let rate = info.details.frame_rate;
+        let frame_rate = (*rate.numer() as u64, *rate.denom() as u64);
+        table.write(&scenes, frame_rate)?;
+    }
+
+    Ok(())
 }
 
 /// Feeds decoded frames through the scene splitter into scene jobs.
@@ -180,9 +199,12 @@ fn stage_decided<T: SourcePixel>(
     Ok(())
 }
 
-/// Joins every worker, logging each error or panic and returning the first.
-fn join_workers(handles: Vec<WorkerJoin>) -> Result<(), anyhow::Error> {
+/// Joins every worker and gathers the grain they measured.
+///
+/// Logs each error or panic and returns the first.
+fn join_workers(handles: Vec<WorkerJoin>) -> Result<Vec<SceneGrain>, anyhow::Error> {
     let mut first_error = None;
+    let mut scenes = Vec::new();
 
     for (worker_id, handle) in handles.into_iter().enumerate() {
         let result = handle
@@ -190,8 +212,12 @@ fn join_workers(handles: Vec<WorkerJoin>) -> Result<(), anyhow::Error> {
             .map_err(|panic| anyhow::anyhow!("worker panicked: {panic:?}"))
             .and_then(|result| result);
 
-        let Err(err) = result else {
-            continue;
+        let err = match result {
+            Ok(worker_scenes) => {
+                scenes.extend(worker_scenes);
+                continue;
+            },
+            Err(err) => err,
         };
 
         tracing::error!(worker_id, error = %err, "worker failed");
@@ -201,5 +227,5 @@ fn join_workers(handles: Vec<WorkerJoin>) -> Result<(), anyhow::Error> {
         }
     }
 
-    first_error.map_or(Ok(()), Err)
+    first_error.map_or(Ok(scenes), Err)
 }

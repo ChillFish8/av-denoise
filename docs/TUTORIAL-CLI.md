@@ -70,7 +70,7 @@ docker run --rm \
     --device /dev/kfd --device /dev/dri \
     --group-add video --group-add render \
     -v "$PWD:/in:ro" \
-    ghcr.io/chillfish8/av-denoise:vulkan-0.5.0-alpha2 \
+    ghcr.io/chillfish8/av-denoise:vulkan-0.5.0-alpha3 \
     nl4d --input /in/noisy.mkv \
   | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
@@ -161,13 +161,14 @@ What `--preset` fills in:
 | `slow`     | 4               | 9              |
 | `veryslow` | 8               | 9              |
 
-| Flag                    | What it does                                                                                                                                                                                                         | Default                  |
-|-------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------|
-| `--temporal-radius <N>` | How many neighbouring frames to search on each side, between 1 and 8. More frames means more patches to group.                                                                                                       | from `--preset`          |
-| `--lambda-ht <f>`       | How aggressively small transform coefficients are zeroed out. Higher removes more noise and more fine detail with it. `--luma-lambda-ht` and `--chroma-lambda-ht` override one plane.                                | 4.158 luma, 3.234 chroma |
-| `--lambda-ht-scale <f>` | Multiplies the `--lambda-ht` in effect for each plane. The main quality dial, since luma and chroma start from different defaults and this moves both together.                                                      | `1.0`                    |
-| `--spatial-radius <N>`  | Half-width of the candidate search inside the centre frame, between 1 and 16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                       | from `--preset`          |
-| `--sigma-scale <f>`     | Nudges the measured noise level, the same dial NLMeans spells `--hq-sigma-scale`.                                                                                                                                    | `1.0`                    |
+| Flag                               | What it does                                                                                                                                                                                                                    | Default                  |
+|------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------|
+| `--temporal-radius <N>`            | How many neighbouring frames to search on each side, between 1 and 8. More frames means more patches to group.                                                                                                                  | from `--preset`          |
+| `--lambda-ht <f>`                  | How aggressively small transform coefficients are zeroed out. Higher removes more noise and more fine detail with it. `--luma-lambda-ht` and `--chroma-lambda-ht` override one plane.                                           | 4.158 luma, 3.234 chroma |
+| `--lambda-ht-scale <f>`            | Multiplies the `--lambda-ht` in effect for each plane. The main quality dial, since luma and chroma start from different defaults and this moves both together.                                                                 | `1.0`                    |
+| `--spatial-radius <N>`             | Half-width of the candidate search inside the centre frame, between 1 and 16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                                  | from `--preset`          |
+| `--sigma-scale <f>`                | Nudges the measured noise level, the same dial NLMeans spells `--hq-sigma-scale`.                                                                                                                                               | `1.0`                    |
+| `--unstable-export-av1-fgs <PATH>` | Unstable, and may change between releases. Writes an AV1 film grain table to add with `grav1synth apply`. SVT-AV1 `--fgs-table` applies only its first entry, so it suits a single-scene table only. Needs luma to be denoised. | off                      |
 
 <details>
 <summary><b>Expert flags</b> — calibration and debugging, not everyday tuning</summary>

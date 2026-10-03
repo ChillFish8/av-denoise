@@ -5,6 +5,8 @@ mod motion;
 mod nl4d;
 mod nlmeans;
 
+use std::path::PathBuf;
+
 pub use av_denoise::Preset;
 use av_denoise::accelerate::{Accelerator, get_default_accelerators};
 use av_denoise::{ChannelIntent, Device, PlaneOptions};
@@ -27,6 +29,8 @@ pub struct RunOptions {
     pub planes: PlaneOptions,
     /// Draws the denoising progress bar.
     pub progress: bool,
+    /// Where to write the AV1 film grain table, when one was asked for.
+    pub grain_table: Option<PathBuf>,
 }
 
 /// Which planes to clean up.

@@ -2,14 +2,35 @@ mod convert;
 mod coordinator;
 mod decode;
 mod dispatch;
+mod grain_table;
 mod run;
 mod scenes;
 mod source;
 mod stage;
 mod worker;
 
+#[cfg(feature = "vulkan")]
+use std::sync::{Arc, Mutex};
+
 use av_denoise::frame::fill_plane;
 use av_denoise::{Depth, FrameLayout, Planes, Subsampling};
+
+/// A writer the test can read back after the coordinator thread drops it.
+#[cfg(feature = "vulkan")]
+#[derive(Clone, Default)]
+pub(super) struct SharedBuffer(pub(super) Arc<Mutex<Vec<u8>>>);
+
+#[cfg(feature = "vulkan")]
+impl std::io::Write for SharedBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("buffer lock").extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 pub fn tiny_layout() -> FrameLayout {
     // 4:2:0 chroma at this size is 4x4, clearing the denoiser's 3x3
@@ -95,6 +116,52 @@ pub fn multi_scene_clip(frames: usize) -> Vec<u8> {
         let luma: Vec<u8> = base
             .iter()
             .map(|&sample| sample.saturating_add(offset as u8))
+            .collect();
+        let frame = y4m::Frame::new([&luma, &chroma, &chroma], None);
+
+        encoder.write_frame(&frame).expect("frame should write");
+    }
+
+    bytes
+}
+
+/// Frames per scene in [grainy_clip].
+#[cfg(feature = "vulkan")]
+pub const GRAINY_SCENE_LENGTH: usize = 20;
+
+/// A 192x128 8-bit 4:2:0 clip of `frames` frames, made of three flat luma bands under fresh grain
+/// every frame.
+///
+/// The bands swap sides every [GRAINY_SCENE_LENGTH] frames, so each swap is a hard cut.
+#[cfg(feature = "vulkan")]
+pub fn grainy_clip(frames: usize) -> Vec<u8> {
+    let width = 192;
+    let height = 128;
+    let mut bytes = Vec::new();
+    let mut encoder = y4m::encode(width, height, y4m::Ratio::new(25, 1))
+        .with_colorspace(y4m::Colorspace::C420)
+        .write_header(&mut bytes)
+        .expect("header should write");
+    let chroma = vec![128u8; width * height / 4];
+
+    for index in 0..frames {
+        let scene = index / GRAINY_SCENE_LENGTH;
+        let levels: [u8; 3] = if scene.is_multiple_of(2) {
+            [60, 120, 180]
+        } else {
+            [180, 120, 60]
+        };
+        let seed = index as u32 * 7919 + 12345;
+        let grain = pattern(seed, width * height);
+
+        let luma: Vec<u8> = grain
+            .iter()
+            .enumerate()
+            .map(|(pixel, &sample)| {
+                let band = (pixel % width) * 3 / width;
+                let offset = (sample % 9) as i16 - 4;
+                (levels[band] as i16 + offset) as u8
+            })
             .collect();
         let frame = y4m::Frame::new([&luma, &chroma, &chroma], None);
 

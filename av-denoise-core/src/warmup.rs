@@ -381,6 +381,23 @@ mod tests {
     }
 
     #[test]
+    fn grain_export_gives_a_different_key() {
+        let exporting = PlaneOptions {
+            algorithm: crate::Algorithm::Nl4d(crate::Nl4dOptions {
+                grain_export: true,
+                ..crate::Nl4dOptions::default()
+            }),
+            ..options()
+        };
+        let plain = PlaneOptions {
+            algorithm: crate::Algorithm::Nl4d(crate::Nl4dOptions::default()),
+            ..options()
+        };
+
+        assert_ne!(kernel_key(&plain, layout()), kernel_key(&exporting, layout()));
+    }
+
+    #[test]
     fn different_kernels_do_not_wait_for_each_other() {
         let dir = tempfile::tempdir().unwrap();
 

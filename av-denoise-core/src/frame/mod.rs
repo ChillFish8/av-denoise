@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 
 pub use self::reseed::ReseedWindow;
 use crate::accelerate::Accelerator;
+use crate::nl4d::grain::GrainChunk;
 use crate::{
     Algorithm,
     ChannelMode,
@@ -209,6 +210,7 @@ impl PlaneOptions {
                 // default depends on the plane, which
                 // `nl4d_default_lambda_ht` resolves at construction.
                 lambda_ht: per_plane(self.luma_lambda_ht, self.chroma_lambda_ht).or(nl4d.lambda_ht),
+                grain_export: nl4d.grain_export && channels != ChannelMode::Chroma,
                 ..nl4d
             }),
             Algorithm::Nlmeans(nlm) => {
@@ -543,6 +545,20 @@ impl PlanarDenoiser {
         let planes = self.assemble(luma_out, chroma_out, luma_passthrough, chroma_passthrough);
 
         Ok(Some(planes))
+    }
+
+    /// Reads back the luma grain chunks measured since the last call, in frame order.
+    ///
+    /// Measured chunks stay on the GPU until drained, so callers drain after each flush.
+    pub fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, anyhow::Error> {
+        let source = self.luma.as_mut().or(self.yuv.as_mut());
+        let Some(denoiser) = source else {
+            return Ok(Vec::new());
+        };
+
+        let chunks = denoiser.drain_grain_chunks()?;
+
+        Ok(chunks)
     }
 
     /// Drains the temporal tail of both halves.
