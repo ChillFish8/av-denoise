@@ -876,8 +876,15 @@ mod tests {
 
     #[test]
     fn nlmeans_has_no_export_flag() {
-        let err = Args::try_parse_from(["av-denoise", "nlmeans", "-i", "-", "--export-av1-fgs", "x"])
-            .expect_err("only nl4d exports grain");
+        let err = Args::try_parse_from([
+            "av-denoise",
+            "nlmeans",
+            "-i",
+            "-",
+            "--unstable-export-av1-fgs",
+            "x",
+        ])
+        .expect_err("only nl4d exports grain");
 
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }

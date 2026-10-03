@@ -86,8 +86,8 @@ the cut, 0.21 by default, is filtered as texture rather than boosted as flat. Lo
 more faint texture in dark scenes, raise it to filter more areas as flat. It applies to luma
 only, and `1` turns it off.
 
-**`--export-av1-fgs <PATH>` keeps the look of film grain.** It writes an AV1 film grain table to
-PATH. The table describes the source's luma grain, minus whatever the output
+**`--unstable-export-av1-fgs <PATH>` keeps the look of film grain.** It writes an AV1 film grain
+table to PATH. The flag is unstable, so its name and output may change between releases. The table describes the source's luma grain, minus whatever the output
 still keeps. Add it to a finished AV1 encode with `grav1synth apply`. The decoder then adds
 matching grain back, so the encode stays clean while the picture keeps its grain. SVT-AV1's
 `--fgs-table` applies only the table's first entry to every frame, so it suits a single-scene

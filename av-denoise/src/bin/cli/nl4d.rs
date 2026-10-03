@@ -213,15 +213,15 @@ pub struct Nl4dArgs {
     #[arg(long, hide = true)]
     pub windowed_noise_estimation: bool,
 
-    /// Writes an AV1 film grain table for the grain this run removes.
+    /// Writes an AV1 film grain table for the grain this run removes. Unstable.
     ///
-    /// The table describes the source's luma grain, minus what the output still keeps. Add it
-    /// to an AV1 encode with `grav1synth apply`. SVT-AV1's `--fgs-table` applies only the
-    /// table's first entry, so it suits a single-scene table only. Its timestamps follow this
-    /// run's output frames from 0, so it suits constant frame rate sources and encodes of this
-    /// output.
+    /// The flag and its output may change between releases. The table describes the source's
+    /// luma grain, minus what the output still keeps. Add it to an AV1 encode with
+    /// `grav1synth apply`. SVT-AV1's `--fgs-table` applies only the table's first entry, so it
+    /// suits a single-scene table only. Its timestamps follow this run's output frames from 0,
+    /// so it suits constant frame rate sources and encodes of this output.
     #[arg(long, value_name = "PATH")]
-    pub export_av1_fgs: Option<PathBuf>,
+    pub unstable_export_av1_fgs: Option<PathBuf>,
 
     #[command(flatten)]
     pub motion: MotionArgs,
@@ -256,9 +256,16 @@ impl Nl4dArgs {
         let defaults = Nl4dOptions::default();
         let intent = resolve_channel_intent(&globals.channel_mode)?;
 
-        let exports_grain = self.export_av1_fgs.is_some();
+        let exports_grain = self.unstable_export_av1_fgs.is_some();
         if exports_grain && intent == ChannelIntent::Chroma {
-            anyhow::bail!("--export-av1-fgs measures luma grain, so it needs luma to be denoised");
+            anyhow::bail!("--unstable-export-av1-fgs measures luma grain, so it needs luma to be denoised");
+        }
+
+        if exports_grain {
+            tracing::warn!(
+                "--unstable-export-av1-fgs is unstable, its output and the flag itself may change \
+                 between releases"
+            );
         }
 
         // Check the raw 8-bit value here so an out-of-range `--sigma`
@@ -327,7 +334,7 @@ impl Nl4dArgs {
                 chroma_lambda_ht: self.chroma_lambda_ht,
             },
             progress: globals.progress,
-            grain_table: self.export_av1_fgs.clone(),
+            grain_table: self.unstable_export_av1_fgs.clone(),
         })
     }
 
@@ -832,7 +839,7 @@ mod tests {
 
     #[test]
     fn export_flag_sets_the_table_and_turns_export_on() {
-        let (args, nl4d) = parse(&["--export-av1-fgs", "out.tbl"]);
+        let (args, nl4d) = parse(&["--unstable-export-av1-fgs", "out.tbl"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
         let expected = std::path::Path::new("out.tbl");
 
@@ -842,7 +849,7 @@ mod tests {
 
     #[test]
     fn export_works_with_a_fixed_sigma() {
-        let (args, nl4d) = parse(&["--sigma", "4", "--export-av1-fgs", "x"]);
+        let (args, nl4d) = parse(&["--sigma", "4", "--unstable-export-av1-fgs", "x"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
 
         assert!(expect_nl4d(&opts).grain_export);
@@ -859,11 +866,11 @@ mod tests {
 
     #[test]
     fn export_rejects_chroma_only() {
-        let (args, nl4d) = parse(&["--channel-mode", "chroma", "--export-av1-fgs", "out.tbl"]);
+        let (args, nl4d) = parse(&["--channel-mode", "chroma", "--unstable-export-av1-fgs", "out.tbl"]);
         let err = nl4d
             .build_options(&args)
             .expect_err("chroma only cannot export luma grain");
 
-        assert!(err.to_string().contains("--export-av1-fgs"), "got {err}");
+        assert!(err.to_string().contains("--unstable-export-av1-fgs"), "got {err}");
     }
 }
