@@ -5,6 +5,7 @@ use cubecl::prelude::ComputeClient;
 
 use crate::accelerate::Accelerator;
 use crate::device::Device;
+use crate::engine::{EdgePadding, WindowSpan};
 use crate::nl4d::grain::GrainChunk;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 #[cfg(test)]
@@ -832,43 +833,6 @@ impl BackendPending {
 /// Going past it would reuse the oldest pending frame's output handle
 /// and quietly corrupt the results.
 pub const MAX_PENDING: usize = 2;
-
-/// How many source frames a windowed operation needs behind and ahead
-/// of its target frame, target frame itself not counted in either
-/// number.
-///
-/// `reseed` needs exactly `behind + 1 + ahead` frames, oldest first,
-/// with the target frame sitting at index `behind`. This is what tells
-/// a caller like `reseed` how wide a window to build, and it varies by
-/// algorithm because nl4d's own cross-frame accumulator needs more
-/// forward context than the NLM algorithms do. See
-/// [`Denoiser::window_span`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WindowSpan {
-    /// How many frames older than the target the window must include.
-    pub behind: usize,
-    /// How many frames newer than the target the window must include.
-    pub ahead: usize,
-    /// How the window is filled where it runs past a clip's ends.
-    pub edges: EdgePadding,
-}
-
-/// How a windowed algorithm fills a window that runs past a clip's ends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EdgePadding {
-    /// Repeat the boundary frame, so every window has the same length.
-    Repeat,
-    /// Stop at the clip's ends and let the denoiser run off-centre passes there.
-    Shifted,
-}
-
-impl WindowSpan {
-    /// The full window size this span describes, target frame
-    /// included: `behind + 1 + ahead`.
-    pub fn frame_count(&self) -> usize {
-        self.behind + 1 + self.ahead
-    }
-}
 
 /// A stateful denoiser that cleans a stream of frames.
 ///

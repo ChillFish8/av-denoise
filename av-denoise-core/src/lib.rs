@@ -8,7 +8,13 @@ pub mod cache;
 pub mod collab;
 mod denoiser;
 pub mod device;
+mod engine;
+#[doc(hidden)]
+pub mod engine_kernels {
+    pub use crate::engine::kernels::*;
+}
 pub mod enumerate;
+mod error;
 pub mod frame;
 #[doc(hidden)]
 pub mod nl4d;
@@ -34,7 +40,6 @@ pub use denoiser::{
     DenoiserError,
     DenoiserOptions,
     DenoisingMode,
-    EdgePadding,
     FrameOutput,
     MAX_PENDING,
     Nl4dOptions,
@@ -44,7 +49,6 @@ pub use denoiser::{
     NlmeansVariant,
     OutputFormat,
     Preset,
-    WindowSpan,
     nl4d_default_lambda_ht,
     nl4d_spatial_radius_for,
     nl4d_temporal_radius_for,
@@ -53,6 +57,8 @@ pub use denoiser::{
     nlmeans_variant_for,
 };
 pub use device::Device;
+pub use engine::{DevicePlane, EdgePadding, Engine, Geometry, SampleFormat, WindowSpan};
+pub use error::Error;
 pub use frame::{
     ChannelIntent,
     FrameLayout,

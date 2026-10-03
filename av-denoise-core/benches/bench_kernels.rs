@@ -14,6 +14,7 @@ use kernels::distance::DistanceBench;
 use kernels::distance_pair::DistancePairBench;
 use kernels::distance_pair_ref::DistancePairRefBench;
 use kernels::distance_ref::DistanceRefBench;
+use kernels::egress::{EgressBench, EgressFormat};
 use kernels::finish::FinishBench;
 use kernels::fused_window::{
     FusedPairWindowBench,
@@ -24,6 +25,7 @@ use kernels::fused_window::{
 use kernels::grain::{GRAIN_SIZES, GrainMeasureBench, GrainReducePartialsBench, GrainSaveVectorsBench};
 use kernels::horizontal_sum::HSumBench;
 use kernels::horizontal_sum_pair::HSumPairBench;
+use kernels::ingest::{IngestBench, IngestFormat};
 use kernels::mc_block_match_coarse::BlockMatchCoarseBench;
 use kernels::mc_block_match_fine::BlockMatchFineBench;
 use kernels::mc_chain_compose::ChainComposeBench;
@@ -73,6 +75,38 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
                 depth,
             });
         }
+    }
+    let ingest_cases = [
+        (1920, 1080, 1, "luma", IngestFormat::U8),
+        (960, 540, 2, "chroma", IngestFormat::U16Ten),
+        (1920, 1080, 3, "yuv", IngestFormat::U16Ten),
+        (1920, 1080, 1, "luma", IngestFormat::F32),
+    ];
+    for (width, height, ch, ch_name, format) in ingest_cases {
+        run(IngestBench {
+            client: client.clone(),
+            width,
+            height,
+            ch,
+            ch_name,
+            format,
+        });
+    }
+    let egress_cases = [
+        (1920, 1080, 1, "luma", EgressFormat::U8),
+        (960, 540, 2, "chroma", EgressFormat::U16Ten),
+        (1920, 1080, 3, "yuv", EgressFormat::U16Ten),
+        (1920, 1080, 1, "luma", EgressFormat::F32),
+    ];
+    for (width, height, ch, ch_name, format) in egress_cases {
+        run(EgressBench {
+            client: client.clone(),
+            width,
+            height,
+            ch,
+            ch_name,
+            format,
+        });
     }
     for &(ch, ch_name) in CHANNELS {
         run(ZeroBench {
