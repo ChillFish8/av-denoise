@@ -35,8 +35,9 @@ fn entries_end_one_tick_before_the_next_start() {
     let text = format_table(&[entry(0, 23), entry(24, 47)], NTSC);
     let starts = entry_lines(&text);
 
-    assert_eq!(starts[0], "E 0 9801457 1 40503 1");
+    assert_eq!(starts[0], "E 0 9801457 1 7391 1");
     assert!(starts[1].starts_with("E 9801458 "));
+    assert!(starts[1].ends_with(" 1 8628 1"));
 }
 
 #[test]
@@ -44,14 +45,14 @@ fn the_last_entry_ends_half_a_frame_after_its_last_frame() {
     let text = format_table(&[entry(0, 23)], NTSC);
     let first = text.lines().nth(1).expect("an entry line");
 
-    assert_eq!(first, "E 0 9801458 1 40503 1");
+    assert_eq!(first, "E 0 9801458 1 7391 1");
 }
 
 #[test]
 fn an_entry_has_the_exact_format() {
     let text = format_table(&[entry(0, 23)], NTSC);
     let expected = "filmgrn1\n\
-        E 0 9801458 1 40503 1\n\
+        E 0 9801458 1 7391 1\n\
         \tp 3 7 0 11 0 1 128 192 256 128 192 256\n\
         \tsY 2  24 35 120 110\n\
         \tsCb 2 0 0 255 0\n\
@@ -68,8 +69,17 @@ fn a_gap_between_entries_is_left_empty() {
     let text = format_table(&[entry(0, 23), entry(48, 71)], NTSC);
     let starts = entry_lines(&text);
 
-    assert_eq!(starts[0], "E 0 9801458 1 40503 1");
+    assert_eq!(starts[0], "E 0 9801458 1 7391 1");
     assert!(starts[1].starts_with("E 19811458 "));
+}
+
+#[test]
+fn the_54th_entry_seed_wraps_at_16_bits() {
+    let entries: Vec<FittedEntry> = (0..54).map(|index| entry(index * 2, index * 2)).collect();
+    let text = format_table(&entries, NTSC);
+    let starts = entry_lines(&text);
+
+    assert!(starts[53].ends_with(" 1 7416 1"));
 }
 
 #[test]

@@ -2,13 +2,22 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::chunk::GrainChunk;
-use super::consts::{AUTOCOV_LEN, CELL, CHUNK_FRAMES, HIST_LEN, LAG_COUNT, STD_BUCKETS};
+use super::consts::{
+    AUTOCOV_LEN,
+    CELL,
+    CHUNK_FRAMES,
+    GROUPED_AUTOCOV_LEN,
+    HIST_LEN,
+    LAG_COUNT,
+    PARTIAL_LEN,
+    REDUCE_THREADS,
+    STD_BUCKETS,
+};
 use super::fit::bucket_edges;
 use crate::nl4d::kernels::{grain_measure, grain_reduce_partials, grain_save_vectors};
 use crate::nl4d::snapshot::LastFields;
 
 const SAVE_THREADS: u32 = 256;
-const REDUCE_THREADS: u32 = 256;
 /// The std bucket edges, one more than the bucket count.
 const EDGES_LEN: usize = STD_BUCKETS + 1;
 
@@ -49,7 +58,7 @@ impl GrainGeometry {
     }
 
     fn partials_len(&self) -> usize {
-        self.cells() as usize * AUTOCOV_LEN
+        self.cells() as usize * PARTIAL_LEN
     }
 }
 
@@ -219,9 +228,8 @@ impl GrainExport {
                 CubeCount::new_1d(AUTOCOV_LEN as u32),
                 CubeDim::new_1d(REDUCE_THREADS),
                 ArrayArg::from_raw_parts(self.partials.clone(), geometry.partials_len()),
-                ArrayArg::from_raw_parts(chunk_autocov, AUTOCOV_LEN),
+                ArrayArg::from_raw_parts(chunk_autocov, GROUPED_AUTOCOV_LEN),
                 geometry.cells(),
-                AUTOCOV_LEN as u32,
             );
         }
 
@@ -241,7 +249,7 @@ impl GrainExport {
     fn open_chunk<R: Runtime>(&mut self, client: &ComputeClient<R>) -> (Handle, Handle) {
         if !self.chunk_open {
             let hist_host = vec![0i32; 2 * HIST_LEN];
-            let autocov_host = vec![0.0f32; AUTOCOV_LEN];
+            let autocov_host = vec![0.0f32; GROUPED_AUTOCOV_LEN];
             let hist = client.create_from_slice(i32::as_bytes(&hist_host));
             let autocov = client.create_from_slice(f32::as_bytes(&autocov_host));
             self.chunks.push(ChunkBuffers {
@@ -304,10 +312,16 @@ fn read_chunk<R: Runtime>(client: &ComputeClient<R>, buffer: ChunkBuffers) -> Gr
         *target = count as u32;
     }
 
-    for (target, &sum) in chunk.autocov.iter_mut().zip(&autocov[..LAG_COUNT]) {
-        *target = sum as f64;
+    let (records, _) = autocov.as_chunks::<AUTOCOV_LEN>();
+    let (targets, _) = chunk.autocov.as_chunks_mut::<LAG_COUNT>();
+    let groups = targets.iter_mut().zip(chunk.pixels.iter_mut());
+    for ((target, pixels), record) in groups.zip(records) {
+        for (sum, &value) in target.iter_mut().zip(&record[..LAG_COUNT]) {
+            *sum = value as f64;
+        }
+
+        *pixels = record[LAG_COUNT] as f64;
     }
 
-    chunk.pixels = autocov[LAG_COUNT] as f64;
     chunk
 }

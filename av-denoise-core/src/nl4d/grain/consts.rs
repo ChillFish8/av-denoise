@@ -8,6 +8,15 @@ pub(crate) const HIST_LEN: usize = LUMA_BINS * STD_BUCKETS;
 pub(crate) const LAG_COUNT: usize = 46;
 /// The lag sums plus the accepted pixel count.
 pub(crate) const AUTOCOV_LEN: usize = LAG_COUNT + 1;
+/// Groups of neighbouring std buckets, each with its own autocovariance record.
+pub(crate) const STRENGTH_GROUPS: usize = 16;
+pub(crate) const BUCKETS_PER_GROUP: usize = STD_BUCKETS / STRENGTH_GROUPS;
+/// One autocovariance record per strength group.
+pub(crate) const GROUPED_AUTOCOV_LEN: usize = STRENGTH_GROUPS * AUTOCOV_LEN;
+/// One cell's autocovariance record followed by its strength group.
+pub(crate) const PARTIAL_LEN: usize = AUTOCOV_LEN + 1;
+/// Threads per cube that reduce one lane of every cell's partial.
+pub(crate) const REDUCE_THREADS: u32 = 128;
 pub(crate) const MAX_LAG_Y: i32 = 3;
 pub(crate) const MAX_LAG_X: i32 = 6;
 pub(crate) const AR_COEFFS: usize = 24;

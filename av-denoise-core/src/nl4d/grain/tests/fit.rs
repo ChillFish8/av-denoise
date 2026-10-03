@@ -1,12 +1,24 @@
-use super::synthetic::{ar_field, autocov_of, gaussian_field};
+use super::synthetic::{ar_field, autocov_of, cell_mean_removed_record, gaussian_field};
 use crate::nl4d::grain::chunk::GrainChunk;
-use crate::nl4d::grain::consts::{AR_COEFFS, AR_OFFSETS, HIST_LEN, LAG_COUNT, STD_BUCKETS, STD_MAX, STD_MIN};
+use crate::nl4d::grain::consts::{
+    AR_COEFFS,
+    AR_OFFSETS,
+    HIST_LEN,
+    LAG_COUNT,
+    LAGS,
+    STD_BUCKETS,
+    STD_MAX,
+    STD_MIN,
+    STRENGTH_GROUPS,
+};
 use crate::nl4d::grain::fit::{
     bucket_edges,
     bucket_of,
     hist_median,
+    measured_lane,
     quantise_ar,
     scaling_points,
+    undo_mean_removal,
     yule_walker,
 };
 use crate::nl4d::grain::template::{median_of, sample_std, template_stats};
@@ -159,23 +171,88 @@ fn chunks_merge_by_adding() {
     let mut first = GrainChunk::empty();
     first.frames = 3;
     first.source_hist[5] = 2;
-    first.autocov[0] = 1.5;
-    first.pixels = 10.0;
+    first.autocov[LAG_COUNT] = 1.5;
+    first.pixels[1] = 10.0;
 
     let mut second = GrainChunk::empty();
     second.frames = 4;
     second.source_hist[5] = 1;
     second.kept_hist[2] = 7;
-    second.autocov[0] = 0.5;
-    second.pixels = 6.0;
+    second.autocov[LAG_COUNT] = 0.5;
+    second.pixels[1] = 6.0;
 
     first.merge(&second);
 
     assert_eq!(first.frames, 7);
     assert_eq!(first.source_hist[5], 3);
     assert_eq!(first.kept_hist[2], 7);
-    assert_eq!(first.autocov[0], 2.0);
-    assert_eq!(first.pixels, 16.0);
+    assert_eq!(first.group_autocov(1)[0], 2.0);
+    assert_eq!(first.pixels[1], 16.0);
+    assert_eq!(first.pixels.len(), STRENGTH_GROUPS);
     assert_eq!(first.source_hist.len(), HIST_LEN);
     assert_eq!(first.source_blocks(), 3);
+}
+
+/// The record's lag sums divided by its zero lag.
+fn correlation_of(record: &[f64]) -> Vec<f64> {
+    record[..LAG_COUNT].iter().map(|&sum| sum / record[0]).collect()
+}
+
+#[test]
+fn measured_lanes_follow_the_lag_order() {
+    for (lane, &(dy, dx)) in LAGS.iter().enumerate() {
+        assert_eq!(measured_lane(dy, dx), Some(lane));
+        assert_eq!(measured_lane(-dy, -dx), Some(lane));
+    }
+
+    assert_eq!(measured_lane(4, 0), None);
+    assert_eq!(measured_lane(0, 7), None);
+}
+
+#[test]
+fn mean_correction_gives_white_grain_zero_weights() {
+    let field = gaussian_field(600, 600, 21);
+    let record = cell_mean_removed_record(&field, 600, 600);
+    let corrected = undo_mean_removal(&record);
+
+    let raw_weights = yule_walker(&record).expect("a well-conditioned system");
+    let corrected_weights = yule_walker(&corrected).expect("a well-conditioned system");
+    let raw_sum: f64 = raw_weights.iter().sum();
+    let corrected_sum: f64 = corrected_weights.iter().sum();
+
+    assert!(raw_sum < -0.15, "raw sum {raw_sum}");
+    assert!(corrected_sum.abs() < 0.03, "corrected sum {corrected_sum}");
+}
+
+#[test]
+fn mean_correction_recovers_an_ar_fields_correlation() {
+    let size = 1016;
+    let mut weights = [0.0f64; AR_COEFFS];
+    set_weight(&mut weights, (0, -1), 0.3);
+    set_weight(&mut weights, (-1, 0), 0.3);
+    let field = ar_field(&weights, size, size, 3);
+    let full = autocov_of(&field, size, size);
+    let record = cell_mean_removed_record(&field, size, size);
+    let corrected = undo_mean_removal(&record);
+
+    let truth = correlation_of(&full);
+    let measured = correlation_of(&record);
+    let recovered = correlation_of(&corrected);
+    for lane in 0..LAG_COUNT {
+        let error = (recovered[lane] - truth[lane]).abs();
+        assert!(
+            error < 0.02,
+            "lane {lane}: {} vs {}",
+            recovered[lane],
+            truth[lane]
+        );
+    }
+
+    let full_weights = yule_walker(&full).expect("a well-conditioned system");
+    let corrected_weights = yule_walker(&corrected).expect("a well-conditioned system");
+    for (index, (&got, &want)) in corrected_weights.iter().zip(&full_weights).enumerate() {
+        assert!((got - want).abs() < 0.02, "weight {index}: {got} vs {want}");
+    }
+
+    assert!(truth[1] - measured[1] > 0.03, "{} vs {}", measured[1], truth[1]);
 }

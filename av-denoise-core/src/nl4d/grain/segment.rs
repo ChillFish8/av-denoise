@@ -1,6 +1,7 @@
 use super::chunk::GrainChunk;
 use super::consts::{
     AR_COEFFS,
+    BUCKETS_PER_GROUP,
     DRIFT,
     LAG_COUNT,
     LUMA_BINS,
@@ -10,8 +11,9 @@ use super::consts::{
     MIN_CHUNK_BLOCKS,
     MIN_POPULATED_BINS,
     STD_BUCKETS,
+    STRENGTH_GROUPS,
 };
-use super::fit::{bucket_edges, hist_median, quantise_ar, scaling_points, yule_walker};
+use super::fit::{bucket_edges, hist_median, quantise_ar, scaling_points, undo_mean_removal, yule_walker};
 use super::template::template_stats;
 
 /// The grain chunks of one scene, in frame order.
@@ -49,6 +51,11 @@ struct BinStrength {
 }
 
 type Texture = ([i32; AR_COEFFS], u32);
+
+/// The texture band's lower edge, as a multiple of the median source std.
+const BAND_LOW: f64 = 0.5;
+/// The texture band's upper edge, as a multiple of the median source std.
+const BAND_HIGH: f64 = 2.0;
 
 /// A segment's own measurements, either of which may be missing.
 struct Parts {
@@ -147,16 +154,37 @@ fn strength_of(stats: &GrainChunk, edges: &[f32]) -> Option<Vec<BinStrength>> {
     (bins.len() >= MIN_POPULATED_BINS).then_some(bins)
 }
 
-fn texture_of(stats: &GrainChunk) -> Option<Texture> {
-    if stats.pixels < MIN_AR_PIXELS {
+/// The texture solved from the strength groups near the median source std.
+///
+/// A group joins when its std range overlaps the band between [BAND_LOW] and [BAND_HIGH] times the
+/// median, so blocks far from the typical grain strength never shape the texture. The summed record
+/// has its cell-mean bias undone before the solve.
+fn texture_of(stats: &GrainChunk, edges: &[f32]) -> Option<Texture> {
+    let median = overall_median(&stats.source_hist, edges)?;
+    let band_low = BAND_LOW * median;
+    let band_high = BAND_HIGH * median;
+    let mut record = vec![0.0f64; LAG_COUNT + 1];
+
+    for group in 0..STRENGTH_GROUPS {
+        let group_low = edges[group * BUCKETS_PER_GROUP] as f64;
+        let group_high = edges[(group + 1) * BUCKETS_PER_GROUP] as f64;
+        if group_high < band_low || group_low > band_high {
+            continue;
+        }
+
+        for (sum, &extra) in record.iter_mut().zip(stats.group_autocov(group)) {
+            *sum += extra;
+        }
+
+        record[LAG_COUNT] += stats.pixels[group];
+    }
+
+    if record[LAG_COUNT] < MIN_AR_PIXELS {
         return None;
     }
 
-    let mut record = stats.autocov.clone();
-    record.push(stats.pixels);
-    debug_assert_eq!(record.len(), LAG_COUNT + 1);
-
-    let weights = yule_walker(&record)?;
+    let corrected = undo_mean_removal(&record);
+    let weights = yule_walker(&corrected)?;
     Some(quantise_ar(&weights))
 }
 
@@ -167,7 +195,7 @@ pub(crate) fn fit_scenes(scenes: &[SceneGrain]) -> Vec<FittedEntry> {
     for (scene_index, scene) in scenes.iter().enumerate() {
         for segment in segment_scene(scene) {
             let strength = strength_of(&segment.stats, &edges);
-            let texture = texture_of(&segment.stats);
+            let texture = texture_of(&segment.stats, &edges);
             parts.push(Parts {
                 first_frame: segment.first_frame,
                 last_frame: segment.last_frame,

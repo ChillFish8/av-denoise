@@ -12,8 +12,12 @@ const SAVE_THREADS: u32 = 256;
 const CELL: u32 = 8;
 /// Two histograms of 16 luma bins by 64 std buckets.
 const HIST_TOTAL: usize = 2 * 16 * 64;
-/// 46 lag sums and a pixel count per cell.
-const PARTIAL_LANES: usize = 47;
+/// 46 lag sums and a pixel count, the lanes of one autocovariance record.
+const RECORD_LANES: usize = 47;
+/// One record and a strength group per cell.
+const PARTIAL_LANES: usize = RECORD_LANES + 1;
+const STRENGTH_GROUPS: usize = 16;
+const REDUCE_THREADS: u32 = 128;
 const EDGE_COUNT: usize = 65;
 
 fn blocks() -> u32 {
@@ -189,7 +193,7 @@ impl<R: Runtime> Benchmark for GrainMeasureBench<R> {
     }
 }
 
-/// Adds every cell's partials of one 1080p frame into a chunk record.
+/// Adds every cell's partials of one 1080p frame into its strength group's chunk record.
 pub struct GrainReducePartialsBench<R: Runtime> {
     pub client: ComputeClient<R>,
 }
@@ -205,8 +209,14 @@ impl<R: Runtime> Benchmark for GrainReducePartialsBench<R> {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let partials_host = vec![0.5f32; cells() * PARTIAL_LANES];
-        let chunk_host = vec![0.0f32; PARTIAL_LANES];
+        // Cells spread over every strength group.
+        let mut partials_host = Vec::with_capacity(cells() * PARTIAL_LANES);
+        for cell in 0..cells() {
+            partials_host.extend_from_slice(&[0.5f32; RECORD_LANES]);
+            partials_host.push((cell % STRENGTH_GROUPS) as f32);
+        }
+
+        let chunk_host = vec![0.0f32; STRENGTH_GROUPS * RECORD_LANES];
 
         GrainReducePartialsInput {
             partials: self.client.create_from_slice(f32::as_bytes(&partials_host)),
@@ -218,12 +228,11 @@ impl<R: Runtime> Benchmark for GrainReducePartialsBench<R> {
         unsafe {
             grain_reduce_partials::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::new_1d(PARTIAL_LANES as u32),
-                CubeDim::new_1d(256),
+                CubeCount::new_1d(RECORD_LANES as u32),
+                CubeDim::new_1d(REDUCE_THREADS),
                 ArrayArg::from_raw_parts(args.partials, cells() * PARTIAL_LANES),
-                ArrayArg::from_raw_parts(args.chunk, PARTIAL_LANES),
+                ArrayArg::from_raw_parts(args.chunk, STRENGTH_GROUPS * RECORD_LANES),
                 cells() as u32,
-                PARTIAL_LANES as u32,
             );
         }
 

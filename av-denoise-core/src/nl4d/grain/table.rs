@@ -4,6 +4,8 @@ use super::consts::AR_COEFFS;
 use super::segment::{FittedEntry, SceneGrain, fit_scenes};
 
 const TICKS_PER_SECOND: u128 = 10_000_000;
+const SEED_BASE: u64 = 7391;
+const SEED_STEP: u64 = 1237;
 
 /// The tick half a frame before `frame`, clamped at 0, for a rate of `numerator / denominator` fps.
 pub(crate) fn boundary_ticks(frame: u64, frame_rate: (u64, u64)) -> u64 {
@@ -19,11 +21,11 @@ pub(crate) fn boundary_ticks(frame: u64, frame_rate: (u64, u64)) -> u64 {
     ((scaled + divisor / 2) / divisor) as u64
 }
 
-/// A fixed per-entry seed derived from the entry's first frame.
-fn seed_for(first_frame: u64) -> u16 {
-    let mixed = first_frame.wrapping_add(1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+/// The seed for the entry at `index` in the written table.
+fn seed_for(index: usize) -> u16 {
+    let mixed = SEED_BASE + SEED_STEP * index as u64;
 
-    (mixed >> 48) as u16
+    (mixed & 0xFFFF) as u16
 }
 
 fn join_values<T: ToString>(values: &[T]) -> String {
@@ -53,7 +55,7 @@ pub(crate) fn format_table(entries: &[FittedEntry], frame_rate: (u64, u64)) -> S
             .is_some_and(|next| next.first_frame == entry.last_frame + 1);
         let end = if touches_next { own_end - 1 } else { own_end };
 
-        let seed = seed_for(entry.first_frame);
+        let seed = seed_for(index);
         let points = join_points(&entry.points);
         let point_count = entry.points.len();
         let coeffs = join_values(&entry.ar_coeffs);

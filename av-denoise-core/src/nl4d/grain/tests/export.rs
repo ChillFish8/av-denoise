@@ -5,7 +5,7 @@ use cubecl::wgpu::WgpuRuntime;
 
 use super::synthetic::gaussian_field;
 use crate::nl4d::grain::chunk::GrainChunk;
-use crate::nl4d::grain::consts::{CHUNK_FRAMES, HIST_LEN, LUMA_BINS, STD_BUCKETS};
+use crate::nl4d::grain::consts::{CHUNK_FRAMES, HIST_LEN, LUMA_BINS, STD_BUCKETS, STRENGTH_GROUPS};
 use crate::nl4d::grain::fit::{bucket_edges, hist_median};
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::{
@@ -22,6 +22,9 @@ type R = WgpuRuntime;
 const WIDTH: u32 = 96;
 const HEIGHT: u32 = 64;
 const SIGMA: f32 = 3.0 / 255.0;
+const FLICKER: f32 = 2.0 / 255.0;
+/// The lane of lag `(0, 3)` in a record.
+const LAG_RIGHT_3: usize = 3;
 
 fn make_client() -> ComputeClient<R> {
     let device = <R as Runtime>::Device::default();
@@ -115,6 +118,20 @@ fn median_of(hist: &[u32]) -> f64 {
     hist_median(&all_bins, &edges).expect("some accepted blocks")
 }
 
+/// `R(0, 3) / R(0, 0)` with both lags summed over every strength group.
+fn lag_3_ratio(chunk: &GrainChunk) -> f64 {
+    let mut zero_lag = 0.0;
+    let mut lag_3 = 0.0;
+    for group in 0..STRENGTH_GROUPS {
+        let sums = chunk.group_autocov(group);
+        zero_lag += sums[0];
+        lag_3 += sums[LAG_RIGHT_3];
+    }
+
+    assert!(zero_lag > 0.0);
+    lag_3 / zero_lag
+}
+
 fn frames_counted(chunks: &[GrainChunk]) -> u32 {
     chunks.iter().map(|chunk| chunk.frames).sum()
 }
@@ -150,7 +167,32 @@ fn export_measures_the_source_grain() {
         (median / SIGMA as f64 - 1.0).abs() < 0.1,
         "median {median} vs sigma {SIGMA}"
     );
-    assert!(chunks.iter().any(|chunk| chunk.pixels > 0.0));
+    assert!(
+        chunks
+            .iter()
+            .any(|chunk| chunk.pixels.iter().any(|&pixels| pixels > 0.0))
+    );
+}
+
+#[test]
+fn flicker_keeps_the_strength_and_a_short_texture() {
+    let mut frames = grain_frames(SIGMA, 9);
+    for frame in frames.iter_mut().skip(1).step_by(2) {
+        for sample in frame.iter_mut() {
+            *sample += FLICKER;
+        }
+    }
+
+    let (_, chunks, _) = run(params(true), &frames);
+    let merged = merged(&chunks);
+    let median = median_of(&merged.source_hist);
+    let ratio = lag_3_ratio(&merged);
+
+    assert!(
+        (median / SIGMA as f64 - 1.0).abs() < 0.1,
+        "median {median} vs sigma {SIGMA}"
+    );
+    assert!(ratio < 0.1, "ratio {ratio}");
 }
 
 #[test]

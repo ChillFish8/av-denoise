@@ -2,11 +2,13 @@
 
 use crate::nl4d::grain::consts::{
     AUTOCOV_LEN,
+    BUCKETS_PER_GROUP,
     CELL,
     CLIP_HIGH,
     CLIP_LOW,
     CONF_MIN,
     FLAT_RANGE,
+    GROUPED_AUTOCOV_LEN,
     HIST_LEN,
     LAG_COUNT,
     LAGS,
@@ -41,6 +43,7 @@ pub(super) struct MirrorFrame<'a> {
 
 pub(super) struct MirrorRecord {
     pub hist: Vec<u32>,
+    /// One autocovariance record per strength group.
     pub autocov: Vec<f64>,
 }
 
@@ -97,22 +100,24 @@ fn hist_slot(mean: f32, std: f32, edges: &[f32]) -> usize {
     bin * STD_BUCKETS + bucket
 }
 
-/// Adds the cell's lag products to `autocov`, each pixel against its neighbour at every lag.
-fn add_lag_sums(frame: &MirrorFrame, x0: u32, y0: u32, autocov: &mut [f64]) {
+/// Adds the cell's lag products to `record`, each pixel against its neighbour at every lag.
+///
+/// `mean` is the cell's mean grain, taken off every pixel and neighbour first.
+fn add_lag_sums(frame: &MirrorFrame, x0: u32, y0: u32, mean: f32, record: &mut [f64]) {
     for y in y0..y0 + CELL {
         for x in x0..x0 + CELL {
-            let centre = source_grain(frame, x, y) as f64;
+            let centre = (source_grain(frame, x, y) - mean) as f64;
 
             for (lane, &(dy, dx)) in LAGS.iter().enumerate() {
                 let neighbour_y = (y as i32 + dy) as u32;
                 let neighbour_x = (x as i32 + dx) as u32;
-                let neighbour = source_grain(frame, neighbour_x, neighbour_y) as f64;
-                autocov[lane] += centre * neighbour;
+                let neighbour = (source_grain(frame, neighbour_x, neighbour_y) - mean) as f64;
+                record[lane] += centre * neighbour;
             }
         }
     }
 
-    autocov[LAG_COUNT] += (CELL * CELL) as f64;
+    record[LAG_COUNT] += (CELL * CELL) as f64;
 }
 
 /// Runs the measure kernel's maths on the host.
@@ -120,7 +125,7 @@ pub(super) fn mirror_measure(frame: &MirrorFrame, edges: &[f32]) -> MirrorRecord
     let cells_x = frame.width / CELL;
     let cells_y = frame.height / CELL;
     let mut hist = vec![0u32; 2 * HIST_LEN];
-    let mut autocov = vec![0.0f64; AUTOCOV_LEN];
+    let mut autocov = vec![0.0f64; GROUPED_AUTOCOV_LEN];
 
     for cell_y in 0..cells_y {
         for cell_x in 0..cells_x {
@@ -169,7 +174,10 @@ pub(super) fn mirror_measure(frame: &MirrorFrame, edges: &[f32]) -> MirrorRecord
             if source_ok {
                 let slot = hist_slot(clean_stats.mean, grain_stats.std, edges);
                 hist[slot] += 1;
-                add_lag_sums(frame, x0, y0, &mut autocov);
+
+                let group = bucket_of(grain_stats.std, edges) / BUCKETS_PER_GROUP;
+                let record = &mut autocov[group * AUTOCOV_LEN..(group + 1) * AUTOCOV_LEN];
+                add_lag_sums(frame, x0, y0, grain_stats.mean, record);
             }
 
             let kept_stats = stats_of(&kept);

@@ -2,6 +2,7 @@ use cubecl::prelude::*;
 
 use crate::nl4d::grain::consts::{
     AUTOCOV_LEN,
+    BUCKETS_PER_GROUP,
     CELL,
     CLIP_HIGH,
     CLIP_LOW,
@@ -11,8 +12,11 @@ use crate::nl4d::grain::consts::{
     LUMA_BINS,
     LUMA_HIGH,
     LUMA_LOW,
+    PARTIAL_LEN,
+    REDUCE_THREADS,
     STD_BUCKETS,
     STD_MIN,
+    STRENGTH_GROUPS,
 };
 
 const THREADS: u32 = 64;
@@ -23,8 +27,6 @@ const HALO_X: u32 = 6;
 const LAG_LANES: u32 = 46;
 /// Halving rounds that reduce `THREADS` values to one.
 const REDUCE_ROUNDS: u32 = THREADS.ilog2();
-/// Threads per cube that reduce one lane across cells.
-const REDUCE_THREADS: u32 = 256;
 /// Halving rounds that reduce `REDUCE_THREADS` values to one.
 const CHUNK_ROUNDS: u32 = REDUCE_THREADS.ilog2();
 /// Shared lanes for sums of the grain, its square and the clean luma.
@@ -167,8 +169,9 @@ fn std_of(sum: f32, sum_sq: f32) -> f32 {
 ///
 /// Source grain is the motion-compensated difference of noisy frames `t` and `t + 1`, and kept
 /// grain the same between outputs `t - 1` and `t`, both divided by sqrt 2. Each accepted cell adds
-/// one count to its histogram. An accepted source cell writes its 46 lag sums and pixel count to
-/// `partials`, and every other cell writes zeros there.
+/// one count to its histogram. An accepted source cell writes its 46 lag sums, pixel count and
+/// strength group to `partials`, and every other cell writes zeros there. The lag sums take the
+/// cell's mean source grain off every pixel and halo neighbour first.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
@@ -218,6 +221,7 @@ pub fn grain_measure<N: Size>(
     let block = block_for(cell_x, cell_y, blocks_x, blocks_y, step);
     let source_base = source_entry * blocks * 2;
     let kept_base = kept_entry * blocks * 2;
+    let mut group = 0u32;
 
     // Source grain over the cell and its halo, every coordinate clamped into the frame.
     let mut fill = tid;
@@ -320,6 +324,7 @@ pub fn grain_measure<N: Size>(
             accepted[0] = 1.0f32;
             let bucket = bucket_for(grain_std, edges);
             let slot = luma_bin(mean) * STD_BUCKETS as u32 + bucket;
+            group = bucket / BUCKETS_PER_GROUP as u32;
             Atomic::fetch_add(&hist[slot as usize], 1i32);
         }
     }
@@ -327,8 +332,9 @@ pub fn grain_measure<N: Size>(
     sync_cube();
 
     let take = accepted[0];
+    let grain_mean = sums[0] / THREADS as f32;
     let centre_index = local_y * TILE_W + local_x + HALO_X;
-    let centre = tile[centre_index as usize];
+    let centre = tile[centre_index as usize] - grain_mean;
 
     #[unroll]
     for dy in 0..4u32 {
@@ -337,7 +343,7 @@ pub fn grain_measure<N: Size>(
             if comptime!(dy > 0 || dx_index >= HALO_X) {
                 let lane = comptime!(lag_lane(dy, dx_index));
                 let neighbour_index = (local_y + dy) * TILE_W + local_x + dx_index;
-                let neighbour = tile[neighbour_index as usize];
+                let neighbour = tile[neighbour_index as usize] - grain_mean;
                 lags[(lane * THREADS + tid) as usize] = take * centre * neighbour;
             }
         }
@@ -362,7 +368,7 @@ pub fn grain_measure<N: Size>(
 
     if tid == 0 {
         let cell_index = cell_y * cells_x + cell_x;
-        let base = cell_index * AUTOCOV_LEN as u32;
+        let base = cell_index * PARTIAL_LEN as u32;
 
         #[unroll]
         for index in 0..LAG_LANES {
@@ -370,6 +376,7 @@ pub fn grain_measure<N: Size>(
         }
 
         partials[(base + LAG_LANES) as usize] = take * THREADS as f32;
+        partials[(base + AUTOCOV_LEN as u32) as usize] = group as f32;
     }
 
     // Kept grain on the same cell of output `t - 1`.
@@ -432,39 +439,50 @@ pub fn grain_measure<N: Size>(
     }
 }
 
-/// Adds every cell's partial for one lane into the chunk record, one cube per lane.
+/// Adds every cell's partial for one lane into its strength group's chunk record, one cube per lane.
+///
+/// Each thread adds its cells into its own column of a per-group scratch, and each group's column
+/// sums then reduce to one value.
 #[cube(launch_unchecked)]
-pub fn grain_reduce_partials(
-    partials: &Array<f32>,
-    chunk: &mut Array<f32>,
-    cells: u32,
-    #[comptime] lanes: u32,
-) {
-    let mut scratch = SharedMemory::<f32>::new(REDUCE_THREADS as usize);
+pub fn grain_reduce_partials(partials: &Array<f32>, chunk: &mut Array<f32>, cells: u32) {
+    let mut scratch = SharedMemory::<f32>::new((STRENGTH_GROUPS as u32 * REDUCE_THREADS) as usize);
     let lane = CUBE_POS_X;
     let tid = UNIT_POS_X;
 
-    let mut total = 0.0f32;
+    #[unroll]
+    for group in 0..STRENGTH_GROUPS as u32 {
+        scratch[(group * REDUCE_THREADS + tid) as usize] = 0.0f32;
+    }
+
     let mut cell = tid;
     while cell < cells {
-        total += partials[(cell * lanes + lane) as usize];
+        let base = cell * PARTIAL_LEN as u32;
+        let raw_group = u32::cast_from(partials[(base + AUTOCOV_LEN as u32) as usize]);
+        let group = u32::min(raw_group, comptime!(STRENGTH_GROUPS as u32 - 1));
+        let slot = (group * REDUCE_THREADS + tid) as usize;
+        scratch[slot] = scratch[slot] + partials[(base + lane) as usize];
         cell += REDUCE_THREADS;
     }
 
-    scratch[tid as usize] = total;
     sync_cube();
 
     #[unroll]
     for round in 0..CHUNK_ROUNDS {
         let stride = comptime!(REDUCE_THREADS >> (round + 1));
         if tid < stride {
-            scratch[tid as usize] = scratch[tid as usize] + scratch[(tid + stride) as usize];
+            #[unroll]
+            for group in 0..STRENGTH_GROUPS as u32 {
+                let here = (group * REDUCE_THREADS + tid) as usize;
+                let there = (group * REDUCE_THREADS + tid + stride) as usize;
+                scratch[here] = scratch[here] + scratch[there];
+            }
         }
 
         sync_cube();
     }
 
-    if tid == 0 {
-        chunk[lane as usize] = chunk[lane as usize] + scratch[0];
+    if tid < STRENGTH_GROUPS as u32 {
+        let target = (tid * AUTOCOV_LEN as u32 + lane) as usize;
+        chunk[target] = chunk[target] + scratch[(tid * REDUCE_THREADS) as usize];
     }
 }

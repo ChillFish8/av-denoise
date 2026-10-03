@@ -5,7 +5,15 @@ use cubecl::wgpu::WgpuRuntime;
 
 use super::mirror::{MirrorFrame, mirror_measure};
 use super::synthetic::gaussian_field;
-use crate::nl4d::grain::consts::{AUTOCOV_LEN, HIST_LEN, LAG_COUNT, STD_BUCKETS};
+use crate::nl4d::grain::consts::{
+    AUTOCOV_LEN,
+    GROUPED_AUTOCOV_LEN,
+    HIST_LEN,
+    PARTIAL_LEN,
+    REDUCE_THREADS,
+    STD_BUCKETS,
+    STRENGTH_GROUPS,
+};
 use crate::nl4d::grain::fit::{bucket_edges, hist_median};
 use crate::nl4d::kernels::{grain_measure, grain_reduce_partials, grain_save_vectors};
 
@@ -25,6 +33,9 @@ const RAGGED: Shape = Shape {
 };
 const SIGMA: f32 = 2.0 / 255.0;
 const KEPT_SIGMA: f32 = 0.4 / 255.0;
+const FLICKER: f32 = 2.0 / 255.0;
+/// The lane of lag `(0, 3)` in a record.
+const LAG_RIGHT_3: usize = 3;
 
 fn make_client() -> ComputeClient<R> {
     let device = <R as Runtime>::Device::default();
@@ -275,7 +286,7 @@ fn run_measure(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Ve
     let saved_conf = client.create_from_slice(f32::as_bytes(&saved_conf));
     let edges_buf = client.create_from_slice(f32::as_bytes(&edges));
     let hist = client.create_from_slice(i32::as_bytes(&hist_zeros));
-    let partials = client.empty(cells * AUTOCOV_LEN * size_of::<f32>());
+    let partials = client.empty(cells * PARTIAL_LEN * size_of::<f32>());
 
     unsafe {
         grain_measure::launch_unchecked::<R>(
@@ -290,7 +301,7 @@ fn run_measure(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Ve
             ArrayArg::from_raw_parts(saved_conf, 2 * blocks),
             ArrayArg::from_raw_parts(edges_buf, edges.len()),
             ArrayArg::from_raw_parts(hist.clone(), 2 * HIST_LEN),
-            ArrayArg::from_raw_parts(partials.clone(), cells * AUTOCOV_LEN),
+            ArrayArg::from_raw_parts(partials.clone(), cells * PARTIAL_LEN),
             0u32,
             1u32,
             0u32,
@@ -314,10 +325,12 @@ fn run_measure(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Ve
         .collect();
     let partials = f32::from_bytes(&partial_bytes);
 
-    let mut autocov = vec![0.0f64; AUTOCOV_LEN];
-    for cell in 0..cells {
+    let mut autocov = vec![0.0f64; GROUPED_AUTOCOV_LEN];
+    let (cell_partials, _) = partials.as_chunks::<PARTIAL_LEN>();
+    for partial in cell_partials {
+        let group = partial[AUTOCOV_LEN] as usize;
         for lane in 0..AUTOCOV_LEN {
-            autocov[lane] += partials[cell * AUTOCOV_LEN + lane] as f64;
+            autocov[group * AUTOCOV_LEN + lane] += partial[lane] as f64;
         }
     }
 
@@ -349,7 +362,7 @@ fn mirror_of(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Vec<
 }
 
 fn assert_autocov_close(gpu: &[f64], host: &[f64]) {
-    for lane in 0..LAG_COUNT + 1 {
+    for lane in 0..GROUPED_AUTOCOV_LEN {
         let tolerance = 1e-4 * host[lane].abs().max(1e-6);
         let difference = (gpu[lane] - host[lane]).abs();
         assert!(
@@ -367,7 +380,37 @@ fn assert_matches_mirror(scene: &Scene) -> Vec<u32> {
 
     assert_eq!(gpu_hist, host_hist);
     assert_autocov_close(&gpu_autocov, &host_autocov);
+    assert!(pixels_of(&gpu_autocov) > 0.0);
     gpu_hist
+}
+
+/// The pixel count summed over every strength group.
+fn pixels_of(autocov: &[f64]) -> f64 {
+    let (records, _) = autocov.as_chunks::<AUTOCOV_LEN>();
+    records.iter().map(|record| record[AUTOCOV_LEN - 1]).sum()
+}
+
+/// `R(0, 3) / R(0, 0)` with both lags summed over every strength group.
+fn lag_3_ratio(autocov: &[f64]) -> f64 {
+    let mut zero_lag = 0.0;
+    let mut lag_3 = 0.0;
+    let (records, _) = autocov.as_chunks::<AUTOCOV_LEN>();
+    for record in records {
+        zero_lag += record[0];
+        lag_3 += record[LAG_RIGHT_3];
+    }
+
+    assert!(zero_lag > 0.0);
+    lag_3 / zero_lag
+}
+
+/// Brightens every pixel of source frame `t + 1` by [FLICKER].
+fn with_flicker(mut scene: Scene) -> Scene {
+    for sample in &mut scene.source_next {
+        *sample += FLICKER;
+    }
+
+    scene
 }
 
 /// Sets every pixel of source frame `t` in the given row of cells to `value`.
@@ -404,6 +447,27 @@ fn measure_matches_the_mirror_on_a_ragged_frame() {
 
     assert!(source_total(&hist) > 0);
     assert!(kept_total(&hist) > 0);
+}
+
+#[test]
+fn flicker_leaves_the_record_unchanged() {
+    let steady = flat_scene((0, 0), &[]);
+    let flickered = with_flicker(flat_scene((0, 0), &[]));
+    let (steady_hist, steady_autocov) = run_measure(&steady, true, false);
+    let (flicker_hist, flicker_autocov) = run_measure(&flickered, true, false);
+    let (host_hist, host_autocov) = mirror_of(&flickered, true, false);
+    let steady_ratio = lag_3_ratio(&steady_autocov);
+    let flicker_ratio = lag_3_ratio(&flicker_autocov);
+
+    assert_eq!(flicker_hist, host_hist);
+    assert_autocov_close(&flicker_autocov, &host_autocov);
+    assert!(source_total(&steady_hist) > 0);
+    assert_eq!(flicker_hist, steady_hist);
+    assert!(
+        (flicker_ratio - steady_ratio).abs() < 0.02,
+        "{flicker_ratio} vs {steady_ratio}"
+    );
+    assert!(flicker_ratio < 0.1, "{flicker_ratio}");
 }
 
 #[test]
@@ -541,35 +605,62 @@ fn ten_bit_and_eight_bit_give_the_same_record() {
 }
 
 #[test]
-fn reduce_adds_every_cell_into_the_chunk() {
+fn reduce_adds_every_cell_into_its_group() {
     let client = make_client();
-    let cells = 1000u32;
-    let lanes = AUTOCOV_LEN as u32;
-    let partials_host: Vec<f32> = (0..cells * lanes).map(|i| (i % 17) as f32 * 0.25).collect();
-    let start: Vec<f32> = (0..lanes).map(|lane| lane as f32).collect();
+    let cells = 1000usize;
+    let groups_used = 13;
+    let mut partials_host = Vec::with_capacity(cells * PARTIAL_LEN);
+    for cell in 0..cells {
+        for lane in 0..AUTOCOV_LEN {
+            let value = ((cell + lane) % 17) as f32 * 0.25;
+            partials_host.push(value);
+        }
 
+        let group = (cell * 7) % groups_used + (STRENGTH_GROUPS - groups_used);
+        partials_host.push(group as f32);
+    }
+
+    let start: Vec<f32> = (0..GROUPED_AUTOCOV_LEN).map(|lane| lane as f32).collect();
     let partials = client.create_from_slice(f32::as_bytes(&partials_host));
     let chunk = client.create_from_slice(f32::as_bytes(&start));
 
     unsafe {
         grain_reduce_partials::launch_unchecked::<R>(
             &client,
-            CubeCount::new_1d(lanes),
-            CubeDim::new_1d(256),
+            CubeCount::new_1d(AUTOCOV_LEN as u32),
+            CubeDim::new_1d(REDUCE_THREADS),
             ArrayArg::from_raw_parts(partials, partials_host.len()),
-            ArrayArg::from_raw_parts(chunk.clone(), lanes as usize),
-            cells,
-            lanes,
+            ArrayArg::from_raw_parts(chunk.clone(), GROUPED_AUTOCOV_LEN),
+            cells as u32,
         );
+    }
+
+    let mut expected: Vec<f64> = start.iter().map(|&value| value as f64).collect();
+    let (cell_partials, _) = partials_host.as_chunks::<PARTIAL_LEN>();
+    for partial in cell_partials {
+        let group = partial[AUTOCOV_LEN] as usize;
+        for lane in 0..AUTOCOV_LEN {
+            expected[group * AUTOCOV_LEN + lane] += partial[lane] as f64;
+        }
     }
 
     let bytes = client.read_one(chunk).expect("readback");
     let reduced = f32::from_bytes(&bytes);
-    for lane in 0..lanes as usize {
-        let cell_sum: f32 = (0..cells as usize)
-            .map(|cell| partials_host[cell * lanes as usize + lane])
-            .sum();
-        let expected = start[lane] + cell_sum;
-        assert!((reduced[lane] - expected).abs() < 1e-2, "lane {lane}");
+    for index in 0..GROUPED_AUTOCOV_LEN {
+        let difference = (reduced[index] as f64 - expected[index]).abs();
+        assert!(
+            difference < 1e-2,
+            "index {index}: {} vs {}",
+            reduced[index],
+            expected[index]
+        );
     }
+
+    let unused = (STRENGTH_GROUPS - groups_used) * AUTOCOV_LEN;
+    let grew = reduced[unused..]
+        .iter()
+        .zip(&start[unused..])
+        .all(|(&sum, &first)| sum > first);
+    assert_eq!(&reduced[..unused], &start[..unused]);
+    assert!(grew);
 }
