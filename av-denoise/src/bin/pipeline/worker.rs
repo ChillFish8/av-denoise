@@ -99,7 +99,7 @@ pub fn run_worker(
         // no temporal window spans two of them.
         flush_worker(denoiser, &mut warm_up, &mut pending, &tx)?;
 
-        let chunks = denoiser.drain_grain_chunks();
+        let chunks = denoiser.drain_grain_chunks()?;
         if let Some(first_frame) = first_frame
             && !chunks.is_empty()
         {

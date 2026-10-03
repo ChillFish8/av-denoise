@@ -548,9 +548,17 @@ impl PlanarDenoiser {
     }
 
     /// Reads back the luma grain chunks measured since the last call, in frame order.
-    pub fn drain_grain_chunks(&mut self) -> Vec<GrainChunk> {
+    ///
+    /// Measured chunks stay on the GPU until drained, so callers drain after each flush.
+    pub fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, anyhow::Error> {
         let source = self.luma.as_mut().or(self.yuv.as_mut());
-        source.map_or_else(Vec::new, |denoiser| denoiser.drain_grain_chunks())
+        let Some(denoiser) = source else {
+            return Ok(Vec::new());
+        };
+
+        let chunks = denoiser.drain_grain_chunks()?;
+
+        Ok(chunks)
     }
 
     /// Drains the temporal tail of both halves.

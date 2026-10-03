@@ -264,6 +264,8 @@ pub struct Nl4dOptions {
     /// See [crate::nl4d::Nl4dParams::pooled_threshold].
     pub pooled_threshold: bool,
     /// See [crate::nl4d::Nl4dParams::grain_export].
+    ///
+    /// Measured chunks stay on the GPU until drained, so callers drain after each flush.
     pub grain_export: bool,
 }
 
@@ -668,9 +670,9 @@ impl<R: Runtime> Engine<R> {
         }
     }
 
-    fn drain_grain_chunks(&mut self) -> Vec<GrainChunk> {
+    fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, DenoiserError> {
         match self {
-            Self::Nlm(_) => Vec::new(),
+            Self::Nlm(_) => Ok(Vec::new()),
             Self::Nl4d(d) => d.drain_grain_chunks(),
         }
     }
@@ -1379,8 +1381,9 @@ impl Denoiser {
 
     /// Reads back the grain chunks measured since the last call, in frame order.
     ///
-    /// Call it after [Self::flush]. Empty unless grain export is on.
-    pub fn drain_grain_chunks(&mut self) -> Vec<GrainChunk> {
+    /// Call it after [Self::flush]. Measured chunks stay on the GPU until drained, so callers
+    /// drain after each flush. Empty unless grain export is on.
+    pub fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, DenoiserError> {
         match &mut self.backend {
             #[cfg(feature = "cuda")]
             Backend::Cuda(d) => d.drain_grain_chunks(),

@@ -168,7 +168,7 @@ What `--preset` fills in:
 | `--lambda-ht-scale <f>`   | Multiplies the `--lambda-ht` in effect for each plane. The main quality dial, since luma and chroma start from different defaults and this moves both together.                                                      | `1.0`                    |
 | `--spatial-radius <N>`    | Half-width of the candidate search inside the centre frame, between 1 and 16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                       | from `--preset`          |
 | `--sigma-scale <f>`       | Nudges the measured noise level, the same dial NLMeans spells `--hq-sigma-scale`.                                                                                                                                    | `1.0`                    |
-| `--export-av1-fgs <PATH>` | Writes an AV1 film grain table for SVT-AV1 `--fgs-table` or `grav1synth apply`. Needs luma to be denoised.                                                                                                           | off                      |
+| `--export-av1-fgs <PATH>` | Writes an AV1 film grain table to add with `grav1synth apply`. SVT-AV1 `--fgs-table` applies only its first entry, so it suits a single-scene table only. Needs luma to be denoised.                                 | off                      |
 
 <details>
 <summary><b>Expert flags</b> — calibration and debugging, not everyday tuning</summary>

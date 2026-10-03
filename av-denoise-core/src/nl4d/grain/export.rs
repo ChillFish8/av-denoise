@@ -277,27 +277,33 @@ impl GrainExport {
     }
 
     /// Reads every chunk back, in order, and forgets them.
-    pub(crate) fn drain<R: Runtime>(&mut self, client: &ComputeClient<R>) -> Vec<GrainChunk> {
+    pub(crate) fn drain<R: Runtime>(
+        &mut self,
+        client: &ComputeClient<R>,
+    ) -> Result<Vec<GrainChunk>, anyhow::Error> {
         let buffers = std::mem::take(&mut self.chunks);
         self.chunk_open = false;
 
         let mut chunks = Vec::with_capacity(buffers.len());
         for buffer in buffers {
-            let chunk = read_chunk(client, buffer);
+            let chunk = read_chunk(client, buffer)?;
             chunks.push(chunk);
         }
 
-        chunks
+        Ok(chunks)
     }
 }
 
-fn read_chunk<R: Runtime>(client: &ComputeClient<R>, buffer: ChunkBuffers) -> GrainChunk {
+fn read_chunk<R: Runtime>(
+    client: &ComputeClient<R>,
+    buffer: ChunkBuffers,
+) -> Result<GrainChunk, anyhow::Error> {
     let hist_bytes = client
         .read_one(buffer.hist)
-        .expect("grain histogram readback failed");
+        .map_err(|error| anyhow::anyhow!("grain histogram readback failed: {error}"))?;
     let autocov_bytes = client
         .read_one(buffer.autocov)
-        .expect("grain autocovariance readback failed");
+        .map_err(|error| anyhow::anyhow!("grain autocovariance readback failed: {error}"))?;
     let hist = i32::from_bytes(&hist_bytes);
     let autocov = f32::from_bytes(&autocov_bytes);
     let (source_counts, kept_counts) = hist.split_at(HIST_LEN);
@@ -323,5 +329,5 @@ fn read_chunk<R: Runtime>(client: &ComputeClient<R>, buffer: ChunkBuffers) -> Gr
         *pixels = record[LAG_COUNT] as f64;
     }
 
-    chunk
+    Ok(chunk)
 }

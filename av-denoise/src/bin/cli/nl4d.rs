@@ -215,8 +215,9 @@ pub struct Nl4dArgs {
 
     /// Writes an AV1 film grain table for the grain this run removes.
     ///
-    /// The table describes the source's luma grain, minus what the output still keeps, and is
-    /// read by SVT-AV1's `--fgs-table` and by `grav1synth apply`. Its timestamps follow this
+    /// The table describes the source's luma grain, minus what the output still keeps. Add it
+    /// to an AV1 encode with `grav1synth apply`. SVT-AV1's `--fgs-table` applies only the
+    /// table's first entry, so it suits a single-scene table only. Its timestamps follow this
     /// run's output frames from 0, so it suits constant frame rate sources and encodes of this
     /// output.
     #[arg(long, value_name = "PATH")]

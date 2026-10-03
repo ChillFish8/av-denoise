@@ -121,6 +121,7 @@ pub struct Nl4dParams {
     /// Whether the denoiser measures the source's film grain for an AV1 grain table.
     ///
     /// Off by default. Only a denoiser that filters luma measures. It never changes the output.
+    /// Measured chunks stay on the GPU until drained, so callers drain after each flush.
     pub grain_export: bool,
 }
 

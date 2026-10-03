@@ -52,11 +52,13 @@ fn save_vectors_copies_one_neighbour_into_its_entry() {
     let conf_host: Vec<f32> = (0..neighbours * blocks).map(|i| i as f32 * 0.01).collect();
     let saved_mv_len = (entries * blocks * 2) as usize;
     let saved_conf_len = (entries * blocks) as usize;
+    let saved_mv_zeros = vec![0i32; saved_mv_len];
+    let saved_conf_zeros = vec![0.0f32; saved_conf_len];
 
     let mv = client.create_from_slice(i32::as_bytes(&mv_host));
     let conf = client.create_from_slice(f32::as_bytes(&conf_host));
-    let saved_mv = client.create_from_slice(i32::as_bytes(&vec![0i32; saved_mv_len]));
-    let saved_conf = client.create_from_slice(f32::as_bytes(&vec![0.0f32; saved_conf_len]));
+    let saved_mv = client.create_from_slice(i32::as_bytes(&saved_mv_zeros));
+    let saved_conf = client.create_from_slice(f32::as_bytes(&saved_conf_zeros));
 
     let neighbour = 2u32;
     let entry = 1u32;
@@ -598,10 +600,96 @@ fn ten_bit_and_eight_bit_give_the_same_record() {
         *value = quantise_ten(*value);
     }
 
-    let (eight_hist, _) = run_measure(&eight, true, false);
-    let (ten_hist, _) = run_measure(&ten, true, false);
+    let (eight_hist, eight_autocov) = run_measure(&eight, true, false);
+    let (ten_hist, ten_autocov) = run_measure(&ten, true, false);
 
+    assert!(source_total(&eight_hist) > 0);
     assert_eq!(source_total(&eight_hist), source_total(&ten_hist));
+    assert_within_one_bucket(&eight_hist[..HIST_LEN], &ten_hist[..HIST_LEN]);
+    assert_groups_close(&eight_autocov, &ten_autocov, 0.05);
+}
+
+/// Checks every luma bin holds the same blocks, each moved by at most one std bucket.
+fn assert_within_one_bucket(first: &[u32], second: &[u32]) {
+    let (first_bins, _) = first.as_chunks::<STD_BUCKETS>();
+    let (second_bins, _) = second.as_chunks::<STD_BUCKETS>();
+
+    for (bin, (first_row, second_row)) in first_bins.iter().zip(second_bins).enumerate() {
+        let first_cumulative = cumulative(first_row);
+        let second_cumulative = cumulative(second_row);
+        let first_total = first_cumulative[STD_BUCKETS - 1];
+        let second_total = second_cumulative[STD_BUCKETS - 1];
+        assert_eq!(first_total, second_total, "bin {bin}");
+
+        for (bucket, &first_count) in first_cumulative.iter().enumerate() {
+            let below = bucket.saturating_sub(1);
+            let above = (bucket + 1).min(STD_BUCKETS - 1);
+            let second_low = second_cumulative[below];
+            let second_high = second_cumulative[above];
+            assert!(
+                (second_low..=second_high).contains(&first_count),
+                "bin {bin} bucket {bucket}: {first_count} outside {second_low}..={second_high}"
+            );
+        }
+    }
+}
+
+fn cumulative(row: &[u32]) -> Vec<u32> {
+    row.iter()
+        .scan(0u32, |total, &count| {
+            *total += count;
+            Some(*total)
+        })
+        .collect()
+}
+
+/// Checks the records hold the same pixels, with each group's per-pixel lags within `tolerance`.
+///
+/// Quantisation can move a block into a neighbouring std bucket, and so into the next group, so
+/// each group is compared per pixel and the pixel total over every group.
+fn assert_groups_close(first: &[f64], second: &[f64], tolerance: f64) {
+    let first_totals = summed_record(first);
+    let second_totals = summed_record(second);
+    let (first_records, _) = first.as_chunks::<AUTOCOV_LEN>();
+    let (second_records, _) = second.as_chunks::<AUTOCOV_LEN>();
+    let pixels_lane = AUTOCOV_LEN - 1;
+
+    assert!(first_totals[0] > 0.0);
+    assert_eq!(first_totals[pixels_lane], second_totals[pixels_lane]);
+
+    let groups = first_records.iter().zip(second_records).enumerate();
+    for (group, (first_record, second_record)) in groups {
+        let first_pixels = first_record[pixels_lane];
+        let second_pixels = second_record[pixels_lane];
+        if first_pixels == 0.0 || second_pixels == 0.0 {
+            assert_eq!(first_pixels, second_pixels, "group {group}");
+            continue;
+        }
+
+        let variance = first_record[0] / first_pixels;
+        for lane in 0..pixels_lane {
+            let first_lag = first_record[lane] / first_pixels;
+            let second_lag = second_record[lane] / second_pixels;
+            let difference = (first_lag - second_lag).abs();
+            assert!(
+                difference <= tolerance * variance,
+                "group {group} lane {lane}: {first_lag} vs {second_lag}"
+            );
+        }
+    }
+}
+
+/// Every strength group's record added into one.
+fn summed_record(autocov: &[f64]) -> Vec<f64> {
+    let mut summed = vec![0.0f64; AUTOCOV_LEN];
+    let (records, _) = autocov.as_chunks::<AUTOCOV_LEN>();
+    for record in records {
+        for (total, &value) in summed.iter_mut().zip(record) {
+            *total += value;
+        }
+    }
+
+    summed
 }
 
 #[test]

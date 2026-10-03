@@ -88,9 +88,10 @@ only, and `1` turns it off.
 
 **`--export-av1-fgs <PATH>` keeps the look of film grain.** It writes an AV1 film grain table to
 PATH. The table describes the source's luma grain, minus whatever the output
-still keeps. Pass it to SVT-AV1 with `--fgs-table`, or add it to a finished AV1 encode with
-`grav1synth apply`. The decoder then adds matching grain back, so the encode stays clean while the
-picture keeps its grain. The y4m output is the same with or without the flag. It is rejected with
+still keeps. Add it to a finished AV1 encode with `grav1synth apply`. The decoder then adds
+matching grain back, so the encode stays clean while the picture keeps its grain. SVT-AV1's
+`--fgs-table` applies only the table's first entry to every frame, so it suits a single-scene
+table only. The y4m output is the same with or without the flag. It is rejected with
 `--channel-mode chroma`, and a failed run leaves no table.
 
 The table's timestamps count this run's output frames from 0 at the source frame rate. It fits

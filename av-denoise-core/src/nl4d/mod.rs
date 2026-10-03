@@ -11,8 +11,8 @@
 //! time separates it from the texture they share.
 
 mod denoiser;
-pub mod harness;
 pub mod grain;
+pub mod harness;
 pub mod kernels;
 mod params;
 mod regularise;

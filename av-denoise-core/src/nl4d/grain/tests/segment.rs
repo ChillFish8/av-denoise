@@ -7,7 +7,7 @@ use super::synthetic::{
     grain_record,
 };
 use crate::nl4d::grain::chunk::GrainChunk;
-use crate::nl4d::grain::consts::{BUCKETS_PER_GROUP, CHUNK_FRAMES, STD_BUCKETS};
+use crate::nl4d::grain::consts::{BUCKETS_PER_GROUP, CHUNK_FRAMES, LUMA_BINS, MAX_POINTS, STD_BUCKETS};
 use crate::nl4d::grain::fit::{bucket_edges, bucket_of, hist_median};
 use crate::nl4d::grain::segment::{SceneGrain, fit_scenes, segment_scene};
 
@@ -17,6 +17,24 @@ const EDGE_BUCKET: usize = 37;
 fn sparse_chunk() -> GrainChunk {
     let mut chunk = GrainChunk::empty();
     chunk.frames = CHUNK_FRAMES;
+    chunk
+}
+
+/// A chunk with an AR record and 1500 blocks at `std_codes` in only two luma bins.
+///
+/// It holds enough blocks to start a segment, but too few populated bins for its own strength.
+fn narrow_chunk(std_codes: f32) -> GrainChunk {
+    let edges = bucket_edges();
+    let bucket = bucket_of(std_codes / 255.0, &edges);
+    let mut chunk = GrainChunk::empty();
+    chunk.frames = CHUNK_FRAMES;
+
+    for bin in 4..6 {
+        chunk.source_hist[bin * STD_BUCKETS + bucket] = 1500;
+    }
+
+    let record = grain_record();
+    add_group_record(&mut chunk, bucket / BUCKETS_PER_GROUP, &record);
     chunk
 }
 
@@ -238,4 +256,40 @@ fn a_group_past_the_band_gives_no_texture() {
     let entries = fit_scenes(&[scene_of(0, vec![chunk])]);
 
     assert!(entries.is_empty());
+}
+
+#[test]
+fn a_sparse_segment_borrows_from_its_own_scene_first() {
+    let own_scene = vec![chunk_at(2.0, 300, None), narrow_chunk(3.0), narrow_chunk(4.0)];
+    let scenes = vec![
+        scene_of(0, own_scene),
+        scene_of(3 * CHUNK_FRAMES as u64, vec![chunk_at(1.0, 300, None)]),
+    ];
+
+    let entries = fit_scenes(&scenes);
+
+    assert_eq!(entries.len(), 4);
+    assert_eq!(entries[2].first_frame, 2 * CHUNK_FRAMES as u64);
+    assert_eq!(entries[2].points, entries[0].points);
+    assert_ne!(entries[2].points, entries[3].points);
+}
+
+#[test]
+fn a_chunk_in_every_luma_bin_thins_to_the_point_limit() {
+    let edges = bucket_edges();
+    let bucket = bucket_of(2.0 / 255.0, &edges);
+    let mut chunk = chunk_at(2.0, 300, None);
+    for bin in 0..LUMA_BINS {
+        chunk.source_hist[bin * STD_BUCKETS + bucket] = 300;
+    }
+
+    let entries = fit_scenes(&[scene_of(0, vec![chunk])]);
+    let points = &entries[0].points;
+    let first_luma = points.first().expect("points").0;
+    let last_luma = points.last().expect("points").0;
+
+    assert_eq!(points.len(), MAX_POINTS);
+    assert!(points.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    assert_eq!(first_luma, 8);
+    assert_eq!(last_luma, 248);
 }

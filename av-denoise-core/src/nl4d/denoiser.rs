@@ -578,12 +578,16 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     }
 
     /// Reads back the grain chunks measured since the last call. Empty when export is off.
-    pub fn drain_grain_chunks(&mut self) -> Vec<GrainChunk> {
+    ///
+    /// Measured chunks stay on the GPU until drained, so callers drain after each flush.
+    pub fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, DenoiserError> {
         let Some(grain) = self.grain.as_mut() else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
 
-        grain.drain(self.front.compute_client())
+        let chunks = grain.drain(self.front.compute_client())?;
+
+        Ok(chunks)
     }
 
     #[cfg(test)]

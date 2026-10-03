@@ -21,7 +21,7 @@ use kernels::fused_window::{
     FusedSingleWindowBench,
     FusedSingleWindowRefBench,
 };
-use kernels::grain::{GrainMeasureBench, GrainReducePartialsBench, GrainSaveVectorsBench};
+use kernels::grain::{GRAIN_SIZES, GrainMeasureBench, GrainReducePartialsBench, GrainSaveVectorsBench};
 use kernels::horizontal_sum::HSumBench;
 use kernels::horizontal_sum_pair::HSumPairBench;
 use kernels::mc_block_match_coarse::BlockMatchCoarseBench;
@@ -232,15 +232,20 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
     run(MvRegulariseBench {
         client: client.clone(),
     });
-    run(GrainSaveVectorsBench {
-        client: client.clone(),
-    });
-    run(GrainMeasureBench {
-        client: client.clone(),
-    });
-    run(GrainReducePartialsBench {
-        client: client.clone(),
-    });
+    for &size in GRAIN_SIZES {
+        run(GrainSaveVectorsBench {
+            client: client.clone(),
+            size,
+        });
+        run(GrainMeasureBench {
+            client: client.clone(),
+            size,
+        });
+        run(GrainReducePartialsBench {
+            client: client.clone(),
+            size,
+        });
+    }
     for &(ch, ch_name) in CHANNELS {
         run(CollabFusedBench {
             client: client.clone(),

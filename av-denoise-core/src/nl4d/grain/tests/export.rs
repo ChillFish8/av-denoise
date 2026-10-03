@@ -21,6 +21,14 @@ type R = WgpuRuntime;
 
 const WIDTH: u32 = 96;
 const HEIGHT: u32 = 64;
+const PAN_WIDTH: u32 = 192;
+const PAN_HEIGHT: u32 = 128;
+/// How far the panning content moves each frame, in whole pixels.
+const PAN_STEP: (i32, i32) = (3, 2);
+/// Side length of each flat tile in the panning content.
+///
+/// Small enough that a vector off by a frame's motion pairs most flat cells across a tile edge.
+const PAN_TILE: i32 = 12;
 const SIGMA: f32 = 3.0 / 255.0;
 const FLICKER: f32 = 2.0 / 255.0;
 /// The lane of lag `(0, 3)` in a record.
@@ -69,6 +77,31 @@ fn grain_frames(sigma: f32, count: u32) -> Vec<Vec<f32>> {
         .collect()
 }
 
+/// Flat [PAN_TILE] tiles of 0.4 and 0.6 moving by [PAN_STEP] each frame, with fresh grain at `sigma`.
+fn panning_frames(sigma: f32, count: u32) -> Vec<Vec<f32>> {
+    (0..count)
+        .map(|frame_index| {
+            let offset_x = PAN_STEP.0 * frame_index as i32;
+            let offset_y = PAN_STEP.1 * frame_index as i32;
+            let field = gaussian_field(PAN_WIDTH as usize, PAN_HEIGHT as usize, frame_index as u64 + 200);
+            let mut frame = Vec::with_capacity(field.len());
+
+            for y in 0..PAN_HEIGHT as i32 {
+                for x in 0..PAN_WIDTH as i32 {
+                    let tile_x = (x - offset_x).div_euclid(PAN_TILE);
+                    let tile_y = (y - offset_y).div_euclid(PAN_TILE);
+                    let odd_tile = (tile_x + tile_y).rem_euclid(2) == 1;
+                    let base = if odd_tile { 0.6 } else { 0.4 };
+                    let sample = field[(y * PAN_WIDTH as i32 + x) as usize] as f32;
+                    frame.push(base + sigma * sample);
+                }
+            }
+
+            frame
+        })
+        .collect()
+}
+
 /// Denoises and flushes one stream, appending every output frame to `outputs`.
 fn denoise_stream(denoiser: &mut Nl4dDenoiser<R>, frames: &[Vec<f32>], outputs: &mut Vec<Vec<f32>>) {
     for frame in frames {
@@ -85,14 +118,23 @@ fn denoise_stream(denoiser: &mut Nl4dDenoiser<R>, frames: &[Vec<f32>], outputs: 
 }
 
 fn run(params: Nl4dParams, frames: &[Vec<f32>]) -> (Vec<Vec<f32>>, Vec<GrainChunk>, bool) {
+    run_sized(params, frames, WIDTH, HEIGHT)
+}
+
+fn run_sized(
+    params: Nl4dParams,
+    frames: &[Vec<f32>],
+    width: u32,
+    height: u32,
+) -> (Vec<Vec<f32>>, Vec<GrainChunk>, bool) {
     let client = make_client();
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, WIDTH, HEIGHT).expect("construction");
+    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, width, height).expect("construction");
     let has_export = denoiser.has_grain_export();
     let mut outputs = Vec::new();
 
     denoise_stream(&mut denoiser, frames, &mut outputs);
 
-    let chunks = denoiser.drain_grain_chunks();
+    let chunks = denoiser.drain_grain_chunks().expect("drain");
     (outputs, chunks, has_export)
 }
 
@@ -196,6 +238,22 @@ fn flicker_keeps_the_strength_and_a_short_texture() {
 }
 
 #[test]
+fn panning_content_measures_the_source_grain() {
+    let frames = panning_frames(SIGMA, 9);
+    let (outputs, chunks, _) = run_sized(params(true), &frames, PAN_WIDTH, PAN_HEIGHT);
+    let merged = merged(&chunks);
+    let accepted: u32 = merged.source_hist.iter().sum();
+    let median = median_of(&merged.source_hist);
+
+    assert_eq!(outputs.len(), 9);
+    assert!(accepted > 0);
+    assert!(
+        (median / SIGMA as f64 - 1.0).abs() < 0.1,
+        "median {median} vs sigma {SIGMA}"
+    );
+}
+
+#[test]
 fn kept_grain_is_weaker_than_source_grain() {
     let frames = grain_frames(SIGMA, 9);
     let (_, chunks, _) = run(params(true), &frames);
@@ -224,7 +282,7 @@ fn short_scene_measures_only_real_pairs() {
 
     denoise_stream(&mut denoiser, &frames, &mut outputs);
 
-    let chunks = denoiser.drain_grain_chunks();
+    let chunks = denoiser.drain_grain_chunks().expect("drain");
 
     assert_eq!(outputs.len(), 3);
     assert_eq!(frames_counted(&chunks), 3);
@@ -277,9 +335,9 @@ fn chunks_close_when_full_and_at_each_stream_end() {
     denoise_stream(&mut denoiser, &long_stream, &mut outputs);
     denoise_stream(&mut denoiser, &short_stream, &mut outputs);
 
-    let chunks = denoiser.drain_grain_chunks();
+    let chunks = denoiser.drain_grain_chunks().expect("drain");
     let frames: Vec<u32> = chunks.iter().map(|chunk| chunk.frames).collect();
-    let drained_again = denoiser.drain_grain_chunks();
+    let drained_again = denoiser.drain_grain_chunks().expect("drain");
 
     assert_eq!(frames, vec![CHUNK_FRAMES, 30 - CHUNK_FRAMES, 5]);
     assert!(drained_again.is_empty());

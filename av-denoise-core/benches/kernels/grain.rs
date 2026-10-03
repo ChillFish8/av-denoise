@@ -20,13 +20,45 @@ const STRENGTH_GROUPS: usize = 16;
 const REDUCE_THREADS: u32 = 128;
 const EDGE_COUNT: usize = 65;
 
-fn blocks() -> u32 {
-    W.div_ceil(STEP) * H.div_ceil(STEP)
+/// A frame size the grain benches run at.
+#[derive(Clone, Copy)]
+pub struct GrainSize {
+    pub width: u32,
+    pub height: u32,
+    pub label: &'static str,
 }
 
-/// Saves one neighbour's 1080p motion field into the grain export's vector ring.
+impl GrainSize {
+    fn pixels(&self) -> usize {
+        (self.width * self.height) as usize
+    }
+
+    fn blocks(&self) -> u32 {
+        self.width.div_ceil(STEP) * self.height.div_ceil(STEP)
+    }
+
+    fn cells(&self) -> usize {
+        ((self.width / CELL) * (self.height / CELL)) as usize
+    }
+}
+
+pub const GRAIN_SIZES: &[GrainSize] = &[
+    GrainSize {
+        width: W,
+        height: H,
+        label: "1080p",
+    },
+    GrainSize {
+        width: 3840,
+        height: 2160,
+        label: "4k",
+    },
+];
+
+/// Saves one neighbour's motion field into the grain export's vector ring.
 pub struct GrainSaveVectorsBench<R: Runtime> {
     pub client: ComputeClient<R>,
+    pub size: GrainSize,
 }
 
 #[derive(Clone)]
@@ -42,7 +74,7 @@ impl<R: Runtime> Benchmark for GrainSaveVectorsBench<R> {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let blocks = blocks() as usize;
+        let blocks = self.size.blocks() as usize;
         let mv_host = vec![1i32; NEIGHBOURS as usize * blocks * 2];
         let conf_host = vec![0.9f32; NEIGHBOURS as usize * blocks];
         let mv = self.client.create_from_slice(i32::as_bytes(&mv_host));
@@ -59,7 +91,7 @@ impl<R: Runtime> Benchmark for GrainSaveVectorsBench<R> {
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let blocks = blocks();
+        let blocks = self.size.blocks();
         let grid = blocks.div_ceil(SAVE_THREADS);
 
         unsafe {
@@ -83,7 +115,7 @@ impl<R: Runtime> Benchmark for GrainSaveVectorsBench<R> {
     }
 
     fn name(&self) -> String {
-        "grain_save_vectors_1080p".to_string()
+        format!("grain_save_vectors_{}", self.size.label)
     }
 
     fn sync(&self) {
@@ -91,9 +123,10 @@ impl<R: Runtime> Benchmark for GrainSaveVectorsBench<R> {
     }
 }
 
-/// Measures the source and kept grain of one 1080p luma frame.
+/// Measures the source and kept grain of one luma frame.
 pub struct GrainMeasureBench<R: Runtime> {
     pub client: ComputeClient<R>,
+    pub size: GrainSize,
 }
 
 #[derive(Clone)]
@@ -108,20 +141,17 @@ pub struct GrainMeasureInput {
     pub partials: Handle,
 }
 
-fn cells() -> usize {
-    ((W / CELL) * (H / CELL)) as usize
-}
-
 impl<R: Runtime> Benchmark for GrainMeasureBench<R> {
     type Input = GrainMeasureInput;
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let pixels = (W * H) as usize;
-        let blocks = blocks() as usize;
+        let pixels = self.size.pixels();
+        let blocks = self.size.blocks() as usize;
+        let cells = self.size.cells();
 
         // Two ring slots, a frame and a copy moved by one pixel, so every cell has per-pixel grain.
-        let frame = make_synthetic_frame(W, H, 1);
+        let frame = make_synthetic_frame(self.size.width, self.size.height, 1);
         let mut ring = frame.clone();
         ring.extend_from_slice(&frame[1..]);
         ring.push(frame[0]);
@@ -144,18 +174,21 @@ impl<R: Runtime> Benchmark for GrainMeasureBench<R> {
             saved_conf: self.client.create_from_slice(f32::as_bytes(&saved_conf_host)),
             edges: self.client.create_from_slice(f32::as_bytes(&edges_host)),
             hist: self.client.create_from_slice(i32::as_bytes(&hist_host)),
-            partials: self.client.empty(cells() * PARTIAL_LANES * size_of::<f32>()),
+            partials: self.client.empty(cells * PARTIAL_LANES * size_of::<f32>()),
         }
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let pixels = (W * H) as usize;
-        let blocks = blocks() as usize;
+        let width = self.size.width;
+        let height = self.size.height;
+        let pixels = self.size.pixels();
+        let blocks = self.size.blocks() as usize;
+        let cells = self.size.cells();
 
         unsafe {
             grain_measure::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::new_2d(W / CELL, H / CELL),
+                CubeCount::new_2d(width / CELL, height / CELL),
                 CubeDim::new_2d(CELL, CELL),
                 1usize,
                 ArrayArg::from_raw_parts(args.input, 2 * pixels),
@@ -165,18 +198,18 @@ impl<R: Runtime> Benchmark for GrainMeasureBench<R> {
                 ArrayArg::from_raw_parts(args.saved_conf, 2 * blocks),
                 ArrayArg::from_raw_parts(args.edges, EDGE_COUNT),
                 ArrayArg::from_raw_parts(args.hist, HIST_TOTAL),
-                ArrayArg::from_raw_parts(args.partials, cells() * PARTIAL_LANES),
+                ArrayArg::from_raw_parts(args.partials, cells * PARTIAL_LANES),
                 0u32,
                 1u32,
                 0u32,
                 1u32,
                 1u32,
                 1u32,
-                W,
-                H,
+                width,
+                height,
                 1u32,
-                W.div_ceil(STEP),
-                H.div_ceil(STEP),
+                width.div_ceil(STEP),
+                height.div_ceil(STEP),
                 STEP,
             );
         }
@@ -185,7 +218,7 @@ impl<R: Runtime> Benchmark for GrainMeasureBench<R> {
     }
 
     fn name(&self) -> String {
-        "grain_measure_1080p".to_string()
+        format!("grain_measure_{}", self.size.label)
     }
 
     fn sync(&self) {
@@ -193,9 +226,10 @@ impl<R: Runtime> Benchmark for GrainMeasureBench<R> {
     }
 }
 
-/// Adds every cell's partials of one 1080p frame into its strength group's chunk record.
+/// Adds every cell's partials of one frame into its strength group's chunk record.
 pub struct GrainReducePartialsBench<R: Runtime> {
     pub client: ComputeClient<R>,
+    pub size: GrainSize,
 }
 
 #[derive(Clone)]
@@ -210,8 +244,9 @@ impl<R: Runtime> Benchmark for GrainReducePartialsBench<R> {
 
     fn prepare(&self) -> Self::Input {
         // Cells spread over every strength group.
-        let mut partials_host = Vec::with_capacity(cells() * PARTIAL_LANES);
-        for cell in 0..cells() {
+        let cells = self.size.cells();
+        let mut partials_host = Vec::with_capacity(cells * PARTIAL_LANES);
+        for cell in 0..cells {
             partials_host.extend_from_slice(&[0.5f32; RECORD_LANES]);
             partials_host.push((cell % STRENGTH_GROUPS) as f32);
         }
@@ -225,14 +260,16 @@ impl<R: Runtime> Benchmark for GrainReducePartialsBench<R> {
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
+        let cells = self.size.cells();
+
         unsafe {
             grain_reduce_partials::launch_unchecked::<R>(
                 &self.client,
                 CubeCount::new_1d(RECORD_LANES as u32),
                 CubeDim::new_1d(REDUCE_THREADS),
-                ArrayArg::from_raw_parts(args.partials, cells() * PARTIAL_LANES),
+                ArrayArg::from_raw_parts(args.partials, cells * PARTIAL_LANES),
                 ArrayArg::from_raw_parts(args.chunk, STRENGTH_GROUPS * RECORD_LANES),
-                cells() as u32,
+                cells as u32,
             );
         }
 
@@ -240,7 +277,7 @@ impl<R: Runtime> Benchmark for GrainReducePartialsBench<R> {
     }
 
     fn name(&self) -> String {
-        "grain_reduce_partials_1080p".to_string()
+        format!("grain_reduce_partials_{}", self.size.label)
     }
 
     fn sync(&self) {
