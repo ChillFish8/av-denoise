@@ -56,6 +56,10 @@ indicatif = { version = "0.18", optional = true, default-features = false }
 tracing-indicatif = { version = "0.3", optional = true }
 tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter"] }
 
+[dev-dependencies]
+cubecl.workspace = true
+wgpu = "29"
+
 [build-dependencies]
 pkg-config = { version = "0.3.34", optional = true }
 

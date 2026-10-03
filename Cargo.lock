@@ -190,6 +190,7 @@ dependencies = [
  "bytesize",
  "clap",
  "crossbeam-channel",
+ "cubecl",
  "ffms2-sys",
  "indicatif",
  "mimalloc",
@@ -200,6 +201,7 @@ dependencies = [
  "tracing-indicatif",
  "tracing-subscriber",
  "v_frame",
+ "wgpu",
  "y4m",
 ]
 
