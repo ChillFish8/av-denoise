@@ -2,6 +2,7 @@ pub(crate) mod helpers;
 
 mod alignment;
 mod confidence;
+mod dispatch;
 mod edges;
 mod engine;
 mod gpu_submit;
@@ -11,6 +12,7 @@ mod motion_compensation;
 mod noise;
 mod noise_curve;
 mod options;
+mod params;
 mod prefilter;
 mod residual_correlation;
 mod separable;

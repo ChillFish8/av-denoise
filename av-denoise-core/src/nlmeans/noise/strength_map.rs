@@ -1,5 +1,5 @@
 use super::curve::{CLIP_HIGH, CLIP_LOW, NoiseCurve, QUARTER_STATIC_GATE};
-use super::{
+use super::temporal::{
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
     QUARTER_LUMA_MIN,
@@ -25,10 +25,13 @@ use crate::collab::geometry::strength_map_dims;
 ///
 /// Grain alone reads about 0.35 to 0.45 of it, so faint lines under heavy grain land above the cut.
 const QUARTER_FLAT_FACTOR: f32 = 0.55;
+
 /// A quarter noisier than this many times the curve at its luma is treated as motion, not grain.
 const MOTION_FACTOR: f32 = 2.5;
+
 /// The luma at and below which [StrengthMapParams::shadow_soften] applies in full.
 const SHADOW_LOW: f32 = 128.0 / 255.0;
+
 /// The luma at which the soften has faded back to 1.0.
 const SHADOW_HIGH: f32 = 160.0 / 255.0;
 
@@ -96,8 +99,9 @@ impl QuarterClasses {
             .collect()
     }
 
-    /// One chroma threshold multiplier per quarter, row-major. Flat quarters get `flat_boost`, and
-    /// every other quarter gets 1.0.
+    /// One chroma threshold multiplier per quarter, row-major.
+    ///
+    /// Flat quarters get `flat_boost`, and every other quarter gets 1.0.
     pub(crate) fn chroma_multipliers(&self, flat_boost: f32) -> Vec<f32> {
         self.classes
             .iter()
@@ -245,15 +249,15 @@ pub(in crate::nlmeans) fn classify_quarters(
         for block_x in 0..blocks_x {
             let block_index = (block_y * blocks_x + block_x) as usize;
             let record = &records[block_index * record_len..(block_index + 1) * record_len];
-            let block_w = (width - block_x * TEMPORAL_NOISE_BLOCK).min(TEMPORAL_NOISE_BLOCK);
-            let block_h = (height - block_y * TEMPORAL_NOISE_BLOCK).min(TEMPORAL_NOISE_BLOCK);
+            let block_width = (width - block_x * TEMPORAL_NOISE_BLOCK).min(TEMPORAL_NOISE_BLOCK);
+            let block_height = (height - block_y * TEMPORAL_NOISE_BLOCK).min(TEMPORAL_NOISE_BLOCK);
 
             for quarter_index in 0..TEMPORAL_QUARTERS {
                 let offset_x = (quarter_index % 2) * TEMPORAL_QUARTER_SIZE;
                 let offset_y = (quarter_index / 2) * TEMPORAL_QUARTER_SIZE;
-                let quarter_w = block_w.saturating_sub(offset_x).min(TEMPORAL_QUARTER_SIZE);
-                let quarter_h = block_h.saturating_sub(offset_y).min(TEMPORAL_QUARTER_SIZE);
-                let pixels = (quarter_w * quarter_h) as f32;
+                let quarter_width = block_width.saturating_sub(offset_x).min(TEMPORAL_QUARTER_SIZE);
+                let quarter_height = block_height.saturating_sub(offset_y).min(TEMPORAL_QUARTER_SIZE);
+                let pixels = (quarter_width * quarter_height) as f32;
                 if pixels == 0.0 {
                     continue;
                 }
@@ -276,6 +280,7 @@ pub(in crate::nlmeans) fn classify_quarters(
     }
 
     let mut quarter_classes = QuarterClasses { cols, rows, classes };
+
     let active_cut = texture_cut.filter(|&cut| cut < 1.0);
     if let Some(cut) = active_cut {
         quarter_classes.veto_textured(&tensors, cut);

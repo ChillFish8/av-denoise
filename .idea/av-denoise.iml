@@ -18,6 +18,7 @@
       <excludeFolder url="file://$MODULE_DIR$/target" />
       <excludeFolder url="file://$MODULE_DIR$/workspaces/vs-scripting/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/scripts/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/.claude/worktrees/group-net/workspaces/group-net/train/.venv" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />

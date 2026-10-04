@@ -14,7 +14,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.phys_frame(logical as i32)
     }
 
-    /// Turns the shifted-edge stream layout on or off. See the `shifted_edges` field.
+    /// Turns the shifted-edge stream layout on or off.
     pub(crate) fn set_shifted_edges(&mut self, on: bool) {
         self.shifted_edges = on;
     }
@@ -33,9 +33,9 @@ impl<R: Runtime> NlmDenoiser<R> {
 
     /// The temporal reading a pass centred on `center_t` folds.
     ///
-    /// This is the centre's own reading. With shifted edges on and no
-    /// usable sample at the centre, it is the first usable reading at a
-    /// later ring position, or the centre's empty one when there is none.
+    /// It is the centre's own reading, unless shifted edges are on and the centre has no usable
+    /// sample. Then it is the first usable reading at a later ring position, or the centre's empty
+    /// one when there is none.
     pub(super) fn borrow_reading_ahead(&self, center_t: u32) -> Result<TemporalNoiseReading, anyhow::Error> {
         let centre_slot = self.ring_slot(center_t);
         let own = self.read_temporal_noise(centre_slot)?;

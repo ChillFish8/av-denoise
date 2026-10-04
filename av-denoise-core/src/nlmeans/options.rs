@@ -6,19 +6,14 @@ use crate::options::Preset;
 pub struct NlmeansOptions {
     /// Which reference image the NLM weights are computed against.
     ///
-    /// `None`, the default, compares patches on the noisy input
-    /// directly. Every other mode costs one extra GPU pass per frame.
+    /// `None`, the default, compares patches on the noisy input. Every other mode costs one extra
+    /// GPU pass per frame.
     pub prefilter: PrefilterMode,
     /// Whether temporal denoising follows motion between frames.
     ///
-    /// `None`, the default, turns motion compensation off. `Mvtools`
-    /// warps temporal neighbours into line with the centre frame before
-    /// the NLM weighting runs.
-    ///
-    /// Only has an effect when `mode` is `Temporal { .. }`.
+    /// `None`, the default, turns it off. It only has an effect when `mode` is `Temporal { .. }`.
     pub motion_compensation: MotionCompensationMode,
-    /// Overrides for the NLM search radius, patch radius, strength, and
-    /// self-weight.
+    /// Overrides for the NLM search radius, patch radius, strength and self-weight.
     pub tuning: NlmTuning,
     /// Whether each frame is cleaned on its own or across a temporal window.
     pub mode: DenoisingMode,
@@ -37,19 +32,16 @@ pub struct NlmeansHqOptions {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, strum_macros::EnumString)]
 #[strum(ascii_case_insensitive)]
 pub enum NlmeansVariant {
-    /// The fast path. Fixed weighting, no noise measurement.
+    /// The fast path, with fixed weighting and no noise measurement.
     Fast,
-    /// Quality focused. Calibrates its weighting to the noise level,
-    /// measured automatically per frame.
+    /// The quality path, which calibrates its weighting to the noise measured in each frame.
     Hq,
 }
 
 /// Which nlmeans variant to build, with its settings.
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum NlmeansAlgorithm {
-    /// The fast variant.
     Fast(NlmeansOptions),
-    /// The quality variant.
     Hq(NlmeansHqOptions),
 }
 
@@ -62,7 +54,7 @@ impl NlmeansAlgorithm {
     }
 }
 
-/// Which [`NlmeansVariant`] a preset runs.
+/// Which [NlmeansVariant] a preset runs.
 pub fn nlmeans_variant_for(preset: Preset) -> NlmeansVariant {
     match preset {
         Preset::Veryfast => NlmeansVariant::Fast,
@@ -70,8 +62,7 @@ pub fn nlmeans_variant_for(preset: Preset) -> NlmeansVariant {
     }
 }
 
-/// How many neighbouring frames on each side `nlmeans` looks at, at a
-/// preset.
+/// How many neighbouring frames on each side `nlmeans` looks at, at a preset.
 pub fn nlmeans_temporal_radius_for(preset: Preset) -> u32 {
     match preset {
         Preset::Veryfast => 0,
@@ -82,8 +73,7 @@ pub fn nlmeans_temporal_radius_for(preset: Preset) -> u32 {
     }
 }
 
-/// How far `nlmeans` looks for similar patches inside a frame, at a
-/// preset.
+/// How far `nlmeans` looks for similar patches inside a frame, at a preset.
 pub fn nlmeans_search_radius_for(preset: Preset) -> u32 {
     match preset {
         Preset::Veryfast | Preset::Fast | Preset::Base => 2,
@@ -101,10 +91,7 @@ pub enum DenoisingMode {
     Temporal { radius: u32 },
 }
 
-/// NLM tuning knobs.
-///
-/// Every field is optional. Whatever is left unset falls back to the
-/// library default.
+/// Optional NLM tuning overrides, each falling back to the library default when unset.
 #[derive(Debug, Copy, Clone, Default, PartialEq)]
 pub struct NlmTuning {
     pub search_radius: Option<u32>,
@@ -115,7 +102,7 @@ pub struct NlmTuning {
 
 /// Resolves the options into the parameters a denoiser runs with.
 ///
-/// Calibrated defaults are filled in for `channels`. An explicit `strength` always wins.
+/// Calibrated defaults are filled in for `channels`, and an explicit `strength` always wins.
 pub(crate) fn resolve_params(algorithm: &NlmeansAlgorithm, channels: ChannelMode) -> NlmParams {
     let temporal_radius = match algorithm.mode() {
         DenoisingMode::Spacial => 0,
@@ -127,14 +114,14 @@ pub(crate) fn resolve_params(algorithm: &NlmeansAlgorithm, channels: ChannelMode
         NlmeansAlgorithm::Hq(options) => (options.nlm, Some(options.hq)),
     };
 
-    // With `auto_strength` on, HQ reads `strength` as a multiplier on the
-    // measured noise level, so it needs its own calibrated default. With
-    // it off, HQ reads an absolute value like the fast path does.
     let defaults = NlmParams::default();
-    let strength = options.tuning.strength.unwrap_or(match hq {
+    // With `auto_strength` on, HQ reads `strength` as a multiplier on the measured noise, so it
+    // needs its own calibrated default.
+    let default_strength = match hq {
         Some(hq) if hq.auto_strength => hq_default_strength(channels, temporal_radius),
         _ => defaults.strength,
-    });
+    };
+    let strength = options.tuning.strength.unwrap_or(default_strength);
 
     NlmParams {
         channels,

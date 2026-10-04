@@ -1,26 +1,11 @@
-//! The non-local means denoiser that sits behind [Nlmeans].
+//! Non-local means denoising on the GPU
 //!
-//! Non-local means cleans a pixel by finding patches elsewhere that look
-//! like the patch around it, then averaging them. Similar patches get a
-//! large weight and dissimilar ones get almost none, so flat areas
-//! smooth out while edges survive.
+//! A pixel is averaged with pixels whose surrounding patches look alike, within one frame or across
+//! a temporal window. The module provides:
 //!
-//! The search can reach across neighbouring frames as well as within one
-//! frame, which is what the temporal radius controls.
-//!
-//! # Layout
-//!
-//! `params` holds the tuning values and the calibrated defaults, and
-//! `NlmParams` is the single struct everything else is built from.
-//!
-//! `NlmDenoiser` owns the GPU buffers and the frame ring, and
-//! `dispatch` turns one set of parameters into the sequence of kernel
-//! launches that produces a frame.
-//!
-//! `kernels` holds the GPU code itself. `noise` measures how noisy a
-//! frame is, `motion` tracks movement between frames, and
-//! `prefilter` builds the cleaner reference image that patches are
-//! compared against.
+//! - [Nlmeans], the engine
+//! - the options and tuning parameters it is built from
+//! - noise estimation, motion compensation and prefilters
 
 pub(crate) mod denoiser;
 pub(crate) mod kernels;
@@ -35,9 +20,7 @@ mod engine;
 mod noise;
 mod options;
 
-// Every test in this tree runs against a real GPU runtime, see
-// `tests::helpers::R`, so it only builds when a wgpu-backed feature is
-// enabled. A cpu-only build skips it entirely.
+// The tests run against a real GPU runtime, so they need a wgpu-backed feature.
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) mod tests;
 
@@ -71,18 +54,15 @@ pub(crate) const BLOCK_X: u32 = 32;
 /// Cube Y dimension for tile-heavy fused/separable kernels.
 pub(crate) const BLOCK_Y: u32 = 8;
 
-/// Cube shape for the per-pixel `nlm_accumulate` kernel, which has no
-/// shared-memory tile.
+/// Cube shape for the per-pixel `nlm_accumulate` kernel, which has no shared-memory tile.
 ///
-/// On RDNA-class GPUs this shape benchmarks 10 to 25% faster than the
-/// tile-heavy default. The kernel waits on memory rather than compute,
-/// so the extra threads hide the load latency.
+/// On RDNA-class GPUs it benchmarks 10 to 25% faster than the tile-heavy default, because the
+/// kernel waits on memory and the extra threads hide the load latency.
 pub(crate) const BLOCK_X_THIN: u32 = 32;
 pub(crate) const BLOCK_Y_THIN: u32 = 16;
 
-/// Largest 1D grid a dispatch may ask for, set by the WebGPU and Vulkan
-/// limits.
+/// Largest 1D grid a dispatch may ask for, set by the WebGPU and Vulkan limits.
 pub(crate) const MAX_GRID_1D: u32 = 65535;
 
-/// Block size for 1D utility kernels (copy, zero).
+/// Block size for the 1D copy and zero kernels.
 pub(crate) const BLOCK_1D: u32 = 256;

@@ -1,31 +1,23 @@
 use cubecl::prelude::*;
 
-/// Byte alignment every buffer binding must start on, taken from the
-/// runtime the denoiser is running against.
+/// The byte alignment every per-slot buffer binding must start on, read from the runtime.
 ///
-/// A GPU rejects a bind group whose buffer offset is not a multiple of
-/// its `min_storage_buffer_offset_alignment`. Every buffer this crate
-/// slices into per-slot regions therefore pads its slot stride up to
-/// this value.
-///
-/// Each backend reports its own figure, 32 bytes on the Vulkan adapters
-/// we test against and up to 256 elsewhere, which is why the value is
-/// read from the runtime rather than assumed.
-///
-/// It is carried as its own type rather than a bare `u64` so it cannot
-/// be swapped by mistake with the width, height, or frame-count
-/// arguments it travels alongside.
+/// A GPU rejects a bind group whose offset is not a multiple of its
+/// `min_storage_buffer_offset_alignment`, so per-slot strides pad up to this value. Backends differ,
+/// from 32 bytes on the tested Vulkan adapters up to 256 elsewhere, so it is read rather than
+/// assumed. It is its own type so it cannot be swapped with the width, height or frame-count
+/// arguments it travels with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StorageAlign(u64);
 
 impl StorageAlign {
     /// The alignment `client`'s runtime requires.
     ///
-    /// cubecl aligns every allocation it hands out to this same value,
-    /// so a slot offset that is a multiple of it always lands on a
-    /// boundary the backend accepts.
+    /// cubecl aligns every allocation to the same value, so a slot offset that is a multiple of it
+    /// always lands on a boundary the backend accepts.
     pub(crate) fn from_client<R: Runtime>(client: &ComputeClient<R>) -> Self {
-        Self::new(client.properties().memory.alignment)
+        let alignment = client.properties().memory.alignment;
+        Self::new(alignment)
     }
 
     /// A fixed alignment, for tests that have no runtime to ask.
@@ -37,18 +29,13 @@ impl StorageAlign {
         Self(bytes.max(1))
     }
 
-    /// `bytes` rounded up to the next aligned boundary.
     pub(crate) fn pad_bytes(self, bytes: u64) -> u64 {
         bytes.next_multiple_of(self.0)
     }
 
-    /// A count of `T` rounded up so that many elements cover a whole
-    /// number of alignment boundaries.
+    /// A count of `T` rounded up so the elements cover whole alignment boundaries.
     ///
-    /// Alignments are powers of two, so for any `T` whose size divides
-    /// the alignment this lands exactly on a boundary. For a larger `T`
-    /// the elements are already aligned, so the count comes back
-    /// unchanged.
+    /// A `T` larger than the alignment is already aligned, so its count comes back unchanged.
     pub(crate) fn pad_elems<T>(self, elems: usize) -> usize {
         let per_boundary = (self.0 as usize).div_ceil(size_of::<T>()).max(1);
         elems.next_multiple_of(per_boundary)
@@ -80,8 +67,7 @@ mod tests {
 
     #[test]
     fn pad_elems_tracks_a_larger_alignment() {
-        // A 256-byte boundary holds 64 f32s, so the same element count
-        // pads eight times further than it does at 32 bytes.
+        // A 256-byte boundary holds 64 f32s.
         let align = StorageAlign::new(256);
         assert_eq!(align.pad_elems::<f32>(1), 64);
         assert_eq!(align.pad_elems::<f32>(64), 64);
