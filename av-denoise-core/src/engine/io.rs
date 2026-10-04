@@ -6,7 +6,6 @@ use super::{DevicePlane, SampleFormat};
 use crate::nlmeans::{BLOCK_1D, MAX_GRID_1D};
 
 /// Where an ingest writes, as a slot of an interleaved ring.
-#[cfg_attr(not(test), expect(dead_code, reason = "no engine calls this yet"))]
 pub(crate) struct IngestTarget<'a> {
     pub ring: &'a Handle,
     pub ring_len: usize,
@@ -17,7 +16,6 @@ pub(crate) struct IngestTarget<'a> {
 }
 
 /// The handle bound for plane `index`, falling back to `placeholder` for planes the kernel never reads.
-#[cfg_attr(not(test), expect(dead_code, reason = "no engine calls this yet"))]
 fn plane_or<'a>(planes: &[DevicePlane<'a>], index: usize, placeholder: &'a Handle) -> &'a Handle {
     match planes.get(index) {
         Some(plane) => plane.handle(),
@@ -25,7 +23,6 @@ fn plane_or<'a>(planes: &[DevicePlane<'a>], index: usize, placeholder: &'a Handl
     }
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "no engine calls this yet"))]
 fn grid(pixels: u32) -> (CubeCount, u32) {
     let groups = pixels.div_ceil(BLOCK_1D).clamp(1, MAX_GRID_1D);
     let total_threads = groups * BLOCK_1D;
@@ -35,7 +32,6 @@ fn grid(pixels: u32) -> (CubeCount, u32) {
 /// Queues the ingest of `planes` into one ring slot.
 ///
 /// The caller has validated `planes` against the engine's geometry.
-#[cfg_attr(not(test), expect(dead_code, reason = "no engine calls this yet"))]
 pub(crate) fn ingest<R: Runtime>(
     client: &ComputeClient<R>,
     planes: &[DevicePlane<'_>],
@@ -98,7 +94,6 @@ pub(crate) fn ingest<R: Runtime>(
 }
 
 /// A finished interleaved f32 frame to write out.
-#[cfg_attr(not(test), expect(dead_code, reason = "no engine calls this yet"))]
 pub(crate) struct EgressSource<'a> {
     pub frame: &'a Handle,
     pub pixels: u32,
@@ -109,7 +104,6 @@ pub(crate) struct EgressSource<'a> {
 /// Queues the write of `source` into `planes`.
 ///
 /// The caller has validated `planes` against the engine's geometry.
-#[cfg_attr(not(test), expect(dead_code, reason = "no engine calls this yet"))]
 pub(crate) fn egress<R: Runtime>(
     client: &ComputeClient<R>,
     source: EgressSource<'_>,

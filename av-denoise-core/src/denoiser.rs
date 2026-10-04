@@ -12,18 +12,21 @@ use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::MotionEstimation;
 use crate::nlmeans::{
     ChannelMode,
+    DenoisingMode,
     Depth,
     HqParams,
-    MotionCompensationMode,
     MotionSearch,
     NlmDenoiser,
     NlmParams,
+    NlmeansAlgorithm,
+    NlmeansHqOptions,
+    NlmeansOptions,
     Pending,
-    PrefilterMode,
     TryWait,
-    hq_default_strength,
+    resolve_params,
     validate_dimensions,
 };
+use crate::options::Preset;
 use crate::sniff::sniff_best_accelerator;
 
 /// How a [`Denoiser`] should be set up.
@@ -139,37 +142,6 @@ impl Default for Algorithm {
     fn default() -> Self {
         Self::Nlmeans(NlmeansOptions::default())
     }
-}
-
-/// Settings for [`Algorithm::Nlmeans`].
-#[derive(Debug, Copy, Clone, Default, PartialEq)]
-pub struct NlmeansOptions {
-    /// Which reference image the NLM weights are computed against.
-    ///
-    /// `None`, the default, compares patches on the noisy input
-    /// directly. Every other mode costs one extra GPU pass per frame.
-    pub prefilter: PrefilterMode,
-    /// Whether temporal denoising follows motion between frames.
-    ///
-    /// `None`, the default, turns motion compensation off. `Mvtools`
-    /// warps temporal neighbours into line with the centre frame before
-    /// the NLM weighting runs.
-    ///
-    /// Only has an effect when [`DenoiserOptions::mode`] is
-    /// `Temporal { .. }`.
-    pub motion_compensation: MotionCompensationMode,
-    /// Overrides for the NLM search radius, patch radius, strength, and
-    /// self-weight.
-    pub tuning: NlmTuning,
-}
-
-/// Settings for [`Algorithm::NlmeansHq`].
-#[derive(Debug, Copy, Clone, Default, PartialEq)]
-pub struct NlmeansHqOptions {
-    /// Everything the fast path takes, which HQ takes too.
-    pub nlm: NlmeansOptions,
-    /// The noise measurement and confidence weighting HQ adds on top.
-    pub hq: HqParams,
 }
 
 /// Settings for [`Algorithm::Nl4d`].
@@ -334,7 +306,7 @@ impl Nl4dOptions {
 /// that extra entropy remains in and overall produces a worse final image.
 ///
 /// `ChannelMode::Yuv` reads the luma value, on the same "a fused pass is
-/// dominated by luma" assumption [`hq_default_strength`]
+/// dominated by luma" assumption [hq_default_strength](crate::nlmeans::hq_default_strength)
 /// makes for its own Yuv case.
 ///
 /// Luma and the fused Yuv mode use 4.158, and chroma uses 3.234.
@@ -380,72 +352,6 @@ fn resolve_lambda_ht(opts: &Nl4dOptions, channels: ChannelMode) -> Result<f32, S
     Ok(lambda_ht * opts.lambda_ht_scale)
 }
 
-/// Speed vs quality dial.
-///
-/// Each denoising family reads the same dial and fills in its own knobs
-/// from it. For `nlmeans` that is [`nlmeans_variant_for`],
-/// [`nlmeans_temporal_radius_for`], and [`nlmeans_search_radius_for`].
-/// For `nl4d` it is [`nl4d_temporal_radius_for`] and
-/// [`nl4d_spatial_radius_for`].
-///
-/// Both front ends parse the same names from this one type, so a preset
-/// resolves to the same dials everywhere it is used.
-#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, strum_macros::EnumString)]
-#[strum(ascii_case_insensitive)]
-pub enum Preset {
-    /// Fastest and lowest quality.
-    Veryfast,
-    /// One step up from `veryfast`.
-    Fast,
-    /// The default, favouring quality over speed.
-    #[default]
-    Base,
-    /// One step down from `veryslow`.
-    Slow,
-    /// Slowest and highest quality.
-    Veryslow,
-}
-
-/// Which nlmeans implementation a preset, or an explicit choice, selects.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, strum_macros::EnumString)]
-#[strum(ascii_case_insensitive)]
-pub enum NlmeansVariant {
-    /// The fast path. Fixed weighting, no noise measurement.
-    Fast,
-    /// Quality focused. Calibrates its weighting to the noise level,
-    /// measured automatically per frame.
-    Hq,
-}
-
-/// Which [`NlmeansVariant`] a preset runs.
-pub fn nlmeans_variant_for(preset: Preset) -> NlmeansVariant {
-    match preset {
-        Preset::Veryfast => NlmeansVariant::Fast,
-        Preset::Fast | Preset::Base | Preset::Slow | Preset::Veryslow => NlmeansVariant::Hq,
-    }
-}
-
-/// How many neighbouring frames on each side `nlmeans` looks at, at a
-/// preset.
-pub fn nlmeans_temporal_radius_for(preset: Preset) -> u32 {
-    match preset {
-        Preset::Veryfast => 0,
-        Preset::Fast => 1,
-        Preset::Base => 2,
-        Preset::Slow => 4,
-        Preset::Veryslow => 8,
-    }
-}
-
-/// How far `nlmeans` looks for similar patches inside a frame, at a
-/// preset.
-pub fn nlmeans_search_radius_for(preset: Preset) -> u32 {
-    match preset {
-        Preset::Veryfast | Preset::Fast | Preset::Base => 2,
-        Preset::Slow | Preset::Veryslow => 4,
-    }
-}
-
 /// How far the temporal window reaches at each preset, for `nl4d`.
 ///
 /// Unlike `nlmeans`, `veryfast` keeps a 1-frame window rather than
@@ -479,27 +385,6 @@ pub fn nl4d_spatial_radius_for(preset: Preset) -> u32 {
     }
 }
 
-/// Whether a frame is cleaned on its own or alongside its neighbours.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum DenoisingMode {
-    /// Cleans each frame using only its own pixels.
-    Spacial,
-    /// Cleans each frame using a window of `2 * radius + 1` frames.
-    Temporal { radius: u32 },
-}
-
-/// NLM tuning knobs.
-///
-/// Every field is optional. Whatever is left unset falls back to the
-/// library default.
-#[derive(Debug, Copy, Clone, Default, PartialEq)]
-pub struct NlmTuning {
-    pub search_radius: Option<u32>,
-    pub patch_radius: Option<u32>,
-    pub strength: Option<f32>,
-    pub self_weight: Option<f32>,
-}
-
 impl DenoiserOptions {
     /// Turns this option set into the low-level [`NlmParams`] a backend
     /// denoiser is built from.
@@ -522,8 +407,21 @@ impl DenoiserOptions {
         };
 
         match self.algorithm {
-            Algorithm::Nlmeans(opts) => self.nlm_params_for(opts, None, temporal_radius),
-            Algorithm::NlmeansHq(opts) => self.nlm_params_for(opts.nlm, Some(opts.hq), temporal_radius),
+            Algorithm::Nlmeans(options) => {
+                let options = NlmeansOptions {
+                    mode: self.mode,
+                    ..options
+                };
+                self.nlm_params_for(NlmeansAlgorithm::Fast(options))
+            },
+            Algorithm::NlmeansHq(options) => {
+                let nlm = NlmeansOptions {
+                    mode: self.mode,
+                    ..options.nlm
+                };
+                let options = NlmeansHqOptions { nlm, ..options };
+                self.nlm_params_for(NlmeansAlgorithm::Hq(options))
+            },
             // nl4d never runs a weighting pass, so `strength`,
             // `search_radius`, `patch_radius`, and `self_weight` stay at
             // their library defaults and no prefilter is built.
@@ -538,40 +436,9 @@ impl DenoiserOptions {
     }
 
     /// [`Self::to_nlm_params`] for whichever of the two NLM algorithms
-    /// is running, with `hq` set only for the quality one.
-    fn nlm_params_for(&self, opts: NlmeansOptions, hq: Option<HqParams>, temporal_radius: u32) -> NlmParams {
-        // An explicit `strength` always wins, whether it came straight
-        // from `NlmTuning` or from a per-plane override the caller
-        // already folded in.
-        //
-        // Otherwise the default depends on `auto_strength`. With it on,
-        // HQ reads `strength` as a multiplier on the measured noise
-        // level, so it needs its own calibrated default rather than the
-        // fast path's absolute FFmpeg-style one. That calibrated default
-        // also varies with the temporal radius and with the plane
-        // `channel_mode` names, because each per-plane `Denoiser`
-        // carries its own channel mode.
-        //
-        // With auto-strength off, HQ reads `strength` as an absolute
-        // value just like the fast path, so it falls back to the same
-        // absolute default.
-        let strength = opts.tuning.strength.unwrap_or(match hq {
-            Some(hq) if hq.auto_strength => hq_default_strength(self.channel_mode, temporal_radius),
-            _ => NlmParams::default().strength,
-        });
-
-        let defaults = NlmParams::default();
-        NlmParams {
-            channels: self.channel_mode,
-            prefilter: opts.prefilter,
-            motion_compensation: opts.motion_compensation,
-            temporal_radius,
-            hq,
-            strength,
-            search_radius: opts.tuning.search_radius.unwrap_or(defaults.search_radius),
-            patch_radius: opts.tuning.patch_radius.unwrap_or(defaults.patch_radius),
-            self_weight: opts.tuning.self_weight.unwrap_or(defaults.self_weight),
-        }
+    /// is running.
+    fn nlm_params_for(&self, algorithm: NlmeansAlgorithm) -> NlmParams {
+        resolve_params(&algorithm, self.channel_mode)
     }
 }
 
@@ -1451,6 +1318,7 @@ fn build_backend(
 #[cfg(test)]
 mod options_tests {
     use super::*;
+    use crate::nlmeans::{MotionCompensationMode, NlmTuning, PrefilterMode, hq_default_strength};
 
     /// `Algorithm::NlmeansHq` with `hq` overridden and everything else
     /// left at its default.
@@ -1982,6 +1850,7 @@ mod options_tests {
 #[cfg(all(test, feature = "vulkan"))]
 mod tests {
     use super::*;
+    use crate::nlmeans::NlmTuning;
 
     fn opts(mode: DenoisingMode) -> DenoiserOptions {
         DenoiserOptions::builder()

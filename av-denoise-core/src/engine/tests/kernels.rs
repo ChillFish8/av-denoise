@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 use cubecl::wgpu::WgpuRuntime;
 
 use crate::engine::{DevicePlane, EgressSource, IngestTarget, SampleFormat, egress, ingest};
-use crate::nlmeans::kernels::{gpu_pack_wire, gpu_unpack_wire};
+use crate::nlmeans::kernels::gpu_pack_wire;
 use crate::nlmeans::{BLOCK_1D, Depth, MAX_GRID_1D};
 
 type R = WgpuRuntime;
@@ -203,92 +203,6 @@ fn run_f32_ingest(width: u32, height: u32) {
 
         assert_eq!(actual[pixel * 4 + 3], 0.0);
     }
-}
-
-#[test]
-fn ingest_matches_gpu_unpack_wire_bit_for_bit() {
-    assert_matches_unpack_wire(7, 5);
-}
-
-#[test]
-fn ingest_matches_gpu_unpack_wire_bit_for_bit_across_many_cubes() {
-    assert_matches_unpack_wire(300, 3);
-}
-
-fn assert_matches_unpack_wire(width: u32, height: u32) {
-    let client = client();
-    let (channels, stored_ch) = (3u32, 4u32);
-    let pixels = (width * height) as usize;
-    let format = SampleFormat::U16 { depth: 10 };
-    let max = format.max_value();
-
-    let channel_bytes: Vec<Vec<u8>> = (0..channels as u16)
-        .map(|channel| {
-            let channel_codes = codes(pixels, channel, max as u16);
-            encode(&channel_codes, format)
-        })
-        .collect();
-    let handles: Vec<_> = channel_bytes
-        .iter()
-        .map(|bytes| client.create_from_slice(bytes))
-        .collect();
-    let planes: Vec<_> = handles
-        .iter()
-        .map(|handle| DevicePlane::new(handle, width, height))
-        .collect();
-
-    let frame_len = pixels * stored_ch as usize;
-    let ring_values = vec![-1.0f32; frame_len];
-    let ingest_ring = client.create_from_slice(f32::as_bytes(&ring_values));
-    let placeholder = client.empty(4);
-    let target = IngestTarget {
-        ring: &ingest_ring,
-        ring_len: frame_len,
-        offset: 0,
-        pixels: pixels as u32,
-        channels,
-        stored_ch,
-    };
-    ingest(&client, &planes, format, &placeholder, target);
-
-    // The wire kernel reads the planes packed back to back in one buffer.
-    let mut wire: Vec<u8> = channel_bytes
-        .iter()
-        .flat_map(|bytes| bytes[..pixels * 2].to_vec())
-        .collect();
-    let padded = wire.len().div_ceil(4) * 4;
-    wire.resize(padded, 0);
-    let words = wire.len() / 4;
-    let wire_handle = client.create_from_slice(&wire);
-    let wire_ring = client.create_from_slice(f32::as_bytes(&ring_values));
-    let elements = frame_len as u32;
-    let pack = Depth::Ten.wire_pack();
-    let groups = elements.div_ceil(BLOCK_1D).clamp(1, MAX_GRID_1D);
-    let total_threads = groups * BLOCK_1D;
-
-    unsafe {
-        gpu_unpack_wire::launch_unchecked::<R>(
-            &client,
-            CubeCount::new_1d(groups),
-            CubeDim::new_1d(BLOCK_1D),
-            ArrayArg::from_raw_parts(wire_handle, words),
-            ArrayArg::from_raw_parts(wire_ring.clone(), frame_len),
-            pack.max(),
-            0u32,
-            pixels as u32,
-            channels,
-            stored_ch,
-            pack.samples_per_word(),
-            elements,
-            total_threads,
-        );
-    }
-
-    let ingest_bytes = client.read_one(ingest_ring).expect("read ingest ring");
-    let wire_bytes = client.read_one(wire_ring).expect("read wire ring");
-    let ingest_values = f32::from_bytes(&ingest_bytes);
-    let wire_values = f32::from_bytes(&wire_bytes);
-    assert_eq!(ingest_values, wire_values);
 }
 
 /// An interleaved frame whose first pixels hit below zero, zero, one, above one and the top two codes.

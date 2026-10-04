@@ -127,7 +127,7 @@ fn fill_ring_with_last_frame_makes_a_short_stream_ready() {
     let mut denoiser = shifted_denoiser(&client, false);
     push_grain(&mut denoiser, 2);
 
-    denoiser.fill_ring_with_last_frame();
+    denoiser.fill_ring_with_last_frame().expect("fill ring");
 
     assert!(denoiser.window_ready());
     assert_eq!(denoiser.real_pushes(), 2);

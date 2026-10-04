@@ -491,7 +491,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let total_frames = 1 + 2 * radius;
         let short_stream = self.front.real_pushes() < total_frames as usize;
         if short_stream {
-            self.front.fill_ring_with_last_frame();
+            self.front.fill_ring_with_last_frame()?;
         }
 
         let (centres, last_real) = if short_stream {

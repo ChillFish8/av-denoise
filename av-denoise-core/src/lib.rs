@@ -20,6 +20,7 @@ pub mod frame;
 pub mod nl4d;
 #[doc(hidden)]
 pub mod nlmeans;
+mod options;
 mod probe;
 pub mod sniff;
 pub mod stack;
@@ -39,22 +40,13 @@ pub use denoiser::{
     Denoiser,
     DenoiserError,
     DenoiserOptions,
-    DenoisingMode,
     FrameOutput,
     MAX_PENDING,
     Nl4dOptions,
-    NlmTuning,
-    NlmeansHqOptions,
-    NlmeansOptions,
-    NlmeansVariant,
     OutputFormat,
-    Preset,
     nl4d_default_lambda_ht,
     nl4d_spatial_radius_for,
     nl4d_temporal_radius_for,
-    nlmeans_search_radius_for,
-    nlmeans_temporal_radius_for,
-    nlmeans_variant_for,
 };
 pub use device::Device;
 pub use engine::{DevicePlane, EdgePadding, Engine, Geometry, SampleFormat, WindowSpan};
@@ -73,17 +65,28 @@ pub use nl4d::grain::{GrainChunk, SceneGrain, build_table};
 pub use nlmeans::{
     ChannelMode,
     DEFAULT_PILOT_STRENGTH_SCALE,
+    DenoisingMode,
     Depth,
     HqParams,
     MotionCompensationMode,
     MotionEstimation,
     MotionSearch,
+    NlmTuning,
+    Nlmeans,
+    NlmeansAlgorithm,
+    NlmeansHqOptions,
+    NlmeansOptions,
+    NlmeansVariant,
     PrefilterMode,
     UnsupportedDepthError,
     WirePack,
     denormalize,
+    nlmeans_search_radius_for,
+    nlmeans_temporal_radius_for,
+    nlmeans_variant_for,
     normalize,
     parse_prefilter,
 };
+pub use options::Preset;
 pub use stack::{CODEGEN_STACK_BYTES, codegen_stack_is_sufficient, raise_codegen_stack_limit};
 pub use warmup::{WarmUp, kernel_key};

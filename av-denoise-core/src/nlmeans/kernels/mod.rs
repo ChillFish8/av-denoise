@@ -38,7 +38,7 @@ pub use fused::{
     nlm_fused_single_window,
     nlm_fused_single_window_ref,
 };
-pub use memory::{gpu_copy, gpu_pack_wire, gpu_unpack_wire, gpu_zero_buffers};
+pub use memory::{gpu_copy, gpu_pack_wire, gpu_zero_buffers};
 pub use noise::{nlm_noise_partial, nlm_noise_reduce, nlm_temporal_noise_stats, nlm_temporal_stats_zero};
 pub use separable::{
     nlm_distance,

@@ -8,7 +8,6 @@ mod tests;
 use crate::error::Error;
 use crate::nl4d::grain::GrainChunk;
 
-#[cfg(test)]
 pub(crate) use self::io::{EgressSource, IngestTarget, egress, ingest};
 pub use self::plane::{DevicePlane, Geometry, SampleFormat};
 

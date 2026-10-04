@@ -454,12 +454,14 @@ pub fn plane_options_from(
                     prefilter,
                     motion_compensation,
                     tuning,
+                    mode,
                 }),
                 NlmeansVariant::Hq => Algorithm::NlmeansHq(NlmeansHqOptions {
                     nlm: NlmeansOptions {
                         prefilter,
                         motion_compensation,
                         tuning,
+                        mode,
                     },
                     hq: HqParams {
                         sigma_override: raw.sigma.map(|v| v as f32),

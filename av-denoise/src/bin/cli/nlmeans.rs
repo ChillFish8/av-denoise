@@ -378,6 +378,7 @@ impl NlmeansArgs {
                 strength: self.strength,
                 self_weight: self.self_weight,
             },
+            mode,
         };
 
         Ok(RunOptions {

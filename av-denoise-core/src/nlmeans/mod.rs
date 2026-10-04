@@ -30,7 +30,9 @@ mod align;
 mod denoiser;
 mod dispatch;
 mod edges;
+mod engine;
 mod noise;
+mod options;
 mod params;
 mod pending;
 
@@ -44,7 +46,19 @@ mod tests;
 
 pub(crate) use denoiser::RingView;
 pub use denoiser::{GpuOutput, NlmDenoiser};
+pub use self::engine::Nlmeans;
 pub use motion::{MotionCompensationMode, MotionEstimation, MotionSearch};
+pub use self::options::{
+    DenoisingMode,
+    NlmTuning,
+    NlmeansAlgorithm,
+    NlmeansHqOptions,
+    NlmeansOptions,
+    NlmeansVariant,
+    nlmeans_search_radius_for,
+    nlmeans_temporal_radius_for,
+    nlmeans_variant_for,
+};
 pub use params::{
     ChannelMode,
     HqParams,
@@ -59,6 +73,8 @@ pub use params::{
 pub(crate) use pending::start_readback;
 pub use pending::{Pending, TryWait};
 pub use prefilter::{DEFAULT_PILOT_STRENGTH_SCALE, PrefilterMode, parse_prefilter};
+
+pub(crate) use self::options::resolve_params;
 
 pub use self::noise::NOISE_CURVE_BINS;
 #[cfg(test)]

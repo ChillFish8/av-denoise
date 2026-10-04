@@ -1,8 +1,9 @@
+use anyhow::Context;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::align::StorageAlign;
-use super::kernels::{gpu_copy, gpu_unpack_wire};
+use super::kernels::gpu_copy;
 use super::motion::{self, MotionCtx, MotionEstimation, build_pyramid_for_slot, run_pyramid_build};
 use super::noise::{
     EMA_ALPHA,
@@ -31,6 +32,7 @@ use super::pending::{Pending, empty_output, start_readback};
 use super::prefilter::{PrefilterCtx, PrefilterMode, run_prefilter};
 use super::{BLOCK_1D, Depth, MAX_GRID_1D};
 use crate::denoiser::{DenoiserError, FrameOutput, OutputFormat};
+use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
 
 /// A denoised frame that has finished its kernels but is still resident
 /// on the GPU.
@@ -127,10 +129,8 @@ pub struct NlmDenoiser<R: Runtime> {
     /// CPU scratch for repacking 3-channel YUV into 4 lanes. Empty when
     /// no padding is needed.
     pub(super) padding_scratch: Vec<f32>,
-    /// CPU scratch the wire push concatenates its planes into, so one
-    /// push costs one transfer whatever the channel mode. Reused, so it
-    /// allocates nothing after the first frame.
-    pub(super) upload_scratch: Vec<u8>,
+    /// A 4-byte handle bound for the planes a kernel never reads.
+    pub(super) placeholder: Handle,
     /// The weighted-pixel accumulator, one entry per stored channel per
     /// pixel.
     pub(super) accum: Handle,
@@ -449,6 +449,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             Vec::new()
         };
 
+        let placeholder = client.empty(4);
         let accum = client.empty(frame_bytes);
         let weight_sum = client.empty(scalar_bytes);
         let max_weight = client.empty(scalar_bytes);
@@ -651,7 +652,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             input_buf,
             reference_buf,
             padding_scratch,
-            upload_scratch: Vec::new(),
+            placeholder,
             accum,
             weight_sum,
             max_weight,
@@ -714,8 +715,32 @@ impl<R: Runtime> NlmDenoiser<R> {
             "push_frame_with_reference is required when prefilter == External"
         );
 
-        let slot = self.upload_into(&self.input_buf.clone(), frame);
-        self.run_post_upload_stages(slot);
+        let channels = self.params.channels.count() as usize;
+        let pixels = self.width as usize * self.height as usize;
+        let expected = pixels * channels;
+
+        assert_eq!(
+            frame.len(),
+            expected,
+            "frame size mismatch: expected {expected}, got {}",
+            frame.len()
+        );
+
+        let mut handles = Vec::with_capacity(channels);
+        for channel in 0..channels {
+            let samples: Vec<f32> = frame.iter().skip(channel).step_by(channels).copied().collect();
+            let bytes = f32::as_bytes(&samples);
+            let handle = self.client.create_from_slice(bytes);
+            handles.push(handle);
+        }
+
+        let planes: Vec<DevicePlane<'_>> = handles
+            .iter()
+            .map(|handle| DevicePlane::new(handle, self.width, self.height))
+            .collect();
+
+        self.push_planes(&planes, SampleFormat::F32)
+            .expect("frame push failed");
     }
 
     /// Pushes a new frame held as wire bytes, one slice per channel.
@@ -732,30 +757,114 @@ impl<R: Runtime> NlmDenoiser<R> {
             "push_frame_with_reference is required when prefilter == External"
         );
 
-        let slot = self.upload_wire_into(&self.input_buf.clone(), planes, depth);
-        self.run_post_upload_stages(slot);
+        let channels = self.params.channels.count();
+        let pixels = self.width as usize * self.height as usize;
+        let plane_bytes = pixels * depth.bytes_per_sample();
+
+        assert_eq!(
+            planes.len(),
+            channels as usize,
+            "plane count mismatch: expected {channels}, got {}",
+            planes.len()
+        );
+
+        // Ten and Twelve share a byte width, so the plane-length check
+        // below cannot tell them apart. A wrong depth here divides by the
+        // wrong maximum and darkens the whole frame without failing
+        // anything else, so it is pinned against the depth this denoiser
+        // returns frames in.
+        if let OutputFormat::Wire { depth: out_depth } = self.output_format {
+            assert_eq!(
+                depth, out_depth,
+                "wire push depth {depth:?} does not match the denoiser's output depth {out_depth:?}"
+            );
+        }
+
+        let mut handles = Vec::with_capacity(planes.len());
+        for plane in planes {
+            assert_eq!(
+                plane.len(),
+                plane_bytes,
+                "plane size mismatch: expected {plane_bytes}, got {}",
+                plane.len()
+            );
+
+            debug_assert!(
+                wire_samples_in_range(plane, depth),
+                "a sample is larger than {depth:?} can express"
+            );
+
+            // The kernel reads whole words, so a plane that ends mid-word
+            // needs its last word backed by real storage.
+            let mut padded = plane.to_vec();
+            padded.resize(plane_bytes.next_multiple_of(size_of::<u32>()), 0);
+
+            let handle = self.client.create_from_slice(&padded);
+            handles.push(handle);
+        }
+
+        let planes: Vec<DevicePlane<'_>> = handles
+            .iter()
+            .map(|handle| DevicePlane::new(handle, self.width, self.height))
+            .collect();
+        let format = match depth {
+            Depth::Eight => SampleFormat::U8,
+            Depth::Ten => SampleFormat::U16 { depth: 10 },
+            Depth::Twelve => SampleFormat::U16 { depth: 12 },
+        };
+
+        self.push_planes(&planes, format).expect("frame push failed");
+    }
+
+    /// A 4-byte handle to bind for planes a kernel never reads.
+    pub(crate) fn placeholder(&self) -> &Handle {
+        &self.placeholder
+    }
+
+    /// Ingests `planes` into the next ring slot and runs every per-frame stage on it.
+    pub(crate) fn push_planes(
+        &mut self,
+        planes: &[DevicePlane<'_>],
+        format: SampleFormat,
+    ) -> Result<(), anyhow::Error> {
+        let total_frames = self.params.total_frames() as usize;
+        let slot = self.ring_head % total_frames;
+        let pixels = self.width * self.height;
+        let stored_ch = self.params.channels.storage_count();
+        let frame_len = pixels * stored_ch;
+        let target = IngestTarget {
+            ring: &self.input_buf,
+            ring_len: total_frames * frame_len as usize,
+            offset: slot as u32 * frame_len,
+            pixels,
+            channels: self.params.channels.count(),
+            stored_ch,
+        };
+
+        ingest(&self.client, planes, format, &self.placeholder, target);
+        self.run_post_upload_stages(slot)
     }
 
     /// The work every push runs once its frame is in `slot`, from the
     /// noise estimate through to the ring advance.
-    fn run_post_upload_stages(&mut self, slot: usize) {
-        self.run_noise_estimate_for_slot(slot as u32);
-        self.run_temporal_stats_for_slot(slot as u32);
-        self.seed_noise_estimate_if_first_frame(slot as u32);
+    fn run_post_upload_stages(&mut self, slot: usize) -> Result<(), anyhow::Error> {
+        self.run_noise_estimate_for_slot(slot as u32)?;
+        self.run_temporal_stats_for_slot(slot as u32)?;
+        self.seed_noise_estimate_if_first_frame(slot as u32)?;
 
         if let PrefilterMode::NlmSpatial { strength_scale } = self.params.prefilter {
             self.run_nlm_spatial_pilot(slot as u32, strength_scale)
-                .expect("nlm spatial pilot dispatch failed");
+                .context("nlm spatial pilot dispatch failed")?;
         } else if self.params.prefilter.is_gpu_internal() {
-            self.run_prefilter_for_slot(slot);
+            self.run_prefilter_for_slot(slot)?;
         }
 
-        self.build_pyramids_for_slot(slot as u32);
-        self.build_confidence_pyramid_for_slot(slot as u32);
-        self.run_pair_analyse_for_slot(slot as u32);
+        self.build_pyramids_for_slot(slot as u32)?;
+        self.build_confidence_pyramid_for_slot(slot as u32)?;
+        self.run_pair_analyse_for_slot(slot as u32)?;
 
         self.advance_ring();
-        self.prime_leading_edge_if_first();
+        self.prime_leading_edge_if_first()
     }
 
     /// Pushes a new frame together with a reference image the caller
@@ -782,16 +891,23 @@ impl<R: Runtime> NlmDenoiser<R> {
         // sigma. Building the pyramids only needs the reference upload
         // just above, not the noise estimate, so the ordering does not
         // change what either step sees.
-        self.run_noise_estimate_for_slot(slot as u32);
-        self.run_temporal_stats_for_slot(slot as u32);
-        self.seed_noise_estimate_if_first_frame(slot as u32);
+        self.run_noise_estimate_for_slot(slot as u32)
+            .expect("noise estimate dispatch failed");
+        self.run_temporal_stats_for_slot(slot as u32)
+            .expect("temporal noise stats dispatch failed");
+        self.seed_noise_estimate_if_first_frame(slot as u32)
+            .expect("noise seed readback failed");
 
-        self.build_pyramids_for_slot(slot as u32);
-        self.build_confidence_pyramid_for_slot(slot as u32);
-        self.run_pair_analyse_for_slot(slot as u32);
+        self.build_pyramids_for_slot(slot as u32)
+            .expect("pyramid build dispatch failed");
+        self.build_confidence_pyramid_for_slot(slot as u32)
+            .expect("confidence pyramid build dispatch failed");
+        self.run_pair_analyse_for_slot(slot as u32)
+            .expect("pair analyse dispatch failed");
 
         self.advance_ring();
-        self.prime_leading_edge_if_first();
+        self.prime_leading_edge_if_first()
+            .expect("leading edge priming failed");
     }
 
     /// Uploads `frame` into the next ring slot of `dst` and returns the
@@ -832,96 +948,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.copy_frame_into_slot(dst, slot, &staging, 0, 1);
     }
 
-    /// Uploads one wire-byte frame into the next ring slot of `dst` and
-    /// returns the physical slot it wrote.
-    ///
-    /// The planes are concatenated into `upload_scratch` and uploaded as
-    /// one buffer, so a push costs one transfer whatever the channel
-    /// mode. The scratch is reused, so the concatenation allocates
-    /// nothing after the first frame.
-    fn upload_wire_into(&mut self, dst: &Handle, planes: &[&[u8]], depth: Depth) -> usize {
-        let total_frames = self.params.total_frames() as usize;
-        let slot = self.ring_head % total_frames;
-        self.upload_wire_into_slot(dst, planes, depth, slot);
-        slot
-    }
-
-    fn upload_wire_into_slot(&mut self, dst: &Handle, planes: &[&[u8]], depth: Depth, slot: usize) {
-        let channels = self.params.channels.count();
-        let stored_ch = self.params.channels.storage_count();
-        let pixels = self.width * self.height;
-        let plane_bytes = pixels as usize * depth.bytes_per_sample();
-
-        assert_eq!(
-            planes.len(),
-            channels as usize,
-            "plane count mismatch: expected {channels}, got {}",
-            planes.len()
-        );
-
-        // Ten and Twelve share a byte width, so the plane-length check
-        // below cannot tell them apart. A wrong depth here divides by the
-        // wrong maximum and darkens the whole frame without failing
-        // anything else, so it is pinned against the depth this denoiser
-        // returns frames in.
-        if let OutputFormat::Wire { depth: out_depth } = self.output_format {
-            assert_eq!(
-                depth, out_depth,
-                "wire push depth {depth:?} does not match the denoiser's output depth {out_depth:?}"
-            );
-        }
-
-        self.upload_scratch.clear();
-        for plane in planes {
-            assert_eq!(
-                plane.len(),
-                plane_bytes,
-                "plane size mismatch: expected {plane_bytes}, got {}",
-                plane.len()
-            );
-            debug_assert!(
-                wire_samples_in_range(plane, depth),
-                "a sample is larger than {depth:?} can express"
-            );
-            self.upload_scratch.extend_from_slice(plane);
-        }
-
-        // The kernel reads whole words, so a plane that ends mid-word
-        // needs its last word backed by real storage.
-        let words = self.upload_scratch.len().div_ceil(size_of::<u32>());
-        self.upload_scratch.resize(words * size_of::<u32>(), 0);
-
-        let src = self.client.create_from_slice(&self.upload_scratch);
-
-        let elements = pixels * stored_ch;
-        let total_frames = self.params.total_frames() as usize;
-        let grid = elements.div_ceil(BLOCK_1D).clamp(1, MAX_GRID_1D);
-        let total_threads = grid * BLOCK_1D;
-
-        // One `wire_pack` for both, since a hand-paired maximum and lane
-        // width decode the wrong bits.
-        let pack = depth.wire_pack();
-
-        unsafe {
-            gpu_unpack_wire::launch_unchecked::<R>(
-                &self.client,
-                CubeCount::new_1d(grid),
-                CubeDim::new_1d(BLOCK_1D),
-                ArrayArg::from_raw_parts(src, words),
-                ArrayArg::from_raw_parts(dst.clone(), total_frames * elements as usize),
-                pack.max(),
-                slot as u32 * elements,
-                pixels,
-                channels,
-                stored_ch,
-                pack.samples_per_word(),
-                elements,
-                total_threads,
-            )
-        };
-    }
-
-    fn run_prefilter_for_slot(&self, slot: usize) {
+    fn run_prefilter_for_slot(&self, slot: usize) -> Result<(), anyhow::Error> {
         let reference_buf = self
             .reference_buf
             .as_ref()
@@ -938,16 +965,16 @@ impl<R: Runtime> NlmDenoiser<R> {
             reference_buf,
         };
 
-        run_prefilter::<R>(self.params.prefilter, &self.client, &ctx).expect("prefilter dispatch failed");
+        run_prefilter::<R>(self.params.prefilter, &self.client, &ctx).context("prefilter dispatch failed")
     }
 
     /// Builds the motion-estimation pyramid for `slot` on the input
     /// ring, and on the reference ring when there is one.
     ///
     /// This does nothing when motion compensation is off.
-    fn build_pyramids_for_slot(&self, slot: u32) {
+    fn build_pyramids_for_slot(&self, slot: u32) -> Result<(), anyhow::Error> {
         let Some(ctx) = self.mc_ctx.as_ref() else {
-            return;
+            return Ok(());
         };
 
         let stored_ch = self.params.channels.storage_count();
@@ -965,7 +992,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                 pyr,
                 stored_ch,
             )
-            .expect("input pyramid build dispatch failed");
+            .context("input pyramid build dispatch failed")?;
         }
 
         if let (Some(pyr_ref), Some(ref_buf)) = (self.pyramid_reference.as_ref(), self.reference_buf.as_ref())
@@ -981,8 +1008,10 @@ impl<R: Runtime> NlmDenoiser<R> {
                 pyr_ref,
                 stored_ch,
             )
-            .expect("reference pyramid build dispatch failed");
+            .context("reference pyramid build dispatch failed")?;
         }
+
+        Ok(())
     }
 
     /// Extracts the luma plane for `slot` into the pyramid the
@@ -999,9 +1028,9 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// motion-compensation pyramids, and its context is never present at
     /// the same time as this one, so it would return without building
     /// anything.
-    fn build_confidence_pyramid_for_slot(&self, slot: u32) {
+    fn build_confidence_pyramid_for_slot(&self, slot: u32) -> Result<(), anyhow::Error> {
         let (Some(ctx), Some(pyr)) = (self.confidence_ctx.as_ref(), self.confidence_pyramid.as_ref()) else {
-            return;
+            return Ok(());
         };
 
         run_pyramid_build::<R>(
@@ -1015,7 +1044,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             pyr,
             self.params.channels.storage_count(),
         )
-        .expect("confidence pyramid build dispatch failed");
+        .context("confidence pyramid build dispatch failed")
     }
 
     /// Whether `Chained` motion estimation is in use, either because it
@@ -1046,15 +1075,15 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// Composition covers that first gap by reading the priming
     /// duplicate's zero-filled pair instead. See
     /// [`Self::zero_pair_slot_for_duplicate`].
-    fn run_pair_analyse_for_slot(&self, newer_slot: u32) {
+    fn run_pair_analyse_for_slot(&self, newer_slot: u32) -> Result<(), anyhow::Error> {
         if self.ring_head == 0 {
-            return;
+            return Ok(());
         }
         let Some(mc) = self.mc_ctx.as_ref() else {
-            return;
+            return Ok(());
         };
         if !self.is_chained() {
-            return;
+            return Ok(());
         }
         let pair_ring = self
             .pair_ring_buf
@@ -1086,7 +1115,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             pair_ring,
             &self.confidence_dummy,
         )
-        .expect("pair analyse dispatch failed");
+        .context("pair analyse dispatch failed")
     }
 
     /// Fills the pair-ring slot for a duplicated frame with zeroes,
@@ -1117,11 +1146,11 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// [`Self::denoise_submit`], once `slot` reaches the centre of the
     /// temporal window. A stream's very first frame is read immediately
     /// as well. See [`Self::seed_noise_estimate_if_first_frame`].
-    fn run_noise_estimate_for_slot(&self, slot: u32) {
+    fn run_noise_estimate_for_slot(&self, slot: u32) -> Result<(), anyhow::Error> {
         let (Some(partials_buf), Some(results_buf)) =
             (self.noise_partials.as_ref(), self.noise_results.as_ref())
         else {
-            return;
+            return Ok(());
         };
 
         let stride = noise_partials_slot_stride_bytes(self.width, self.height, self.align);
@@ -1140,7 +1169,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             results_buf,
         };
 
-        run_noise_estimate::<R>(&self.client, &ctx).expect("noise estimate dispatch failed");
+        run_noise_estimate::<R>(&self.client, &ctx).context("noise estimate dispatch failed")
     }
 
     /// Queues the temporal residual statistics for `slot`, comparing it
@@ -1152,13 +1181,13 @@ impl<R: Runtime> NlmDenoiser<R> {
     ///
     /// The centre slot's statistics are read back and combined later, in
     /// [`Self::update_noise_estimate`].
-    fn run_temporal_stats_for_slot(&self, slot: u32) {
+    fn run_temporal_stats_for_slot(&self, slot: u32) -> Result<(), anyhow::Error> {
         let Some(stats_buf) = self.temporal_stats_buf.as_ref() else {
-            return;
+            return Ok(());
         };
         if self.ring_head == 0 {
             self.zero_temporal_stats_for_slot(slot);
-            return;
+            return Ok(());
         }
 
         let total_frames = self.params.total_frames();
@@ -1177,7 +1206,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         };
 
         run_temporal_noise_stats::<R>(&self.client, &ctx, self.luma_noise_fields)
-            .expect("temporal noise stats dispatch failed");
+            .context("temporal noise stats dispatch failed")
     }
 
     /// Turns the temporal-stats kernel's four luma-only lanes on or off.
@@ -1254,18 +1283,18 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// The first submit folds the same frame's estimate in a second
     /// time, which reproduces these values to within floating-point
     /// rounding rather than exactly.
-    fn seed_noise_estimate_if_first_frame(&mut self, slot: u32) {
+    fn seed_noise_estimate_if_first_frame(&mut self, slot: u32) -> Result<(), anyhow::Error> {
         if self.frames_loaded != 0 {
-            return;
+            return Ok(());
         }
         let Some(results_buf) = self.noise_results.as_ref() else {
-            return;
+            return Ok(());
         };
 
         let bytes = self
             .client
             .read_one(results_buf.clone())
-            .expect("noise-estimate seed readback failed");
+            .context("noise-estimate seed readback failed")?;
         let data = f32::from_bytes(&bytes);
 
         // The stream's first frame has no predecessor, so its stats
@@ -1273,8 +1302,10 @@ impl<R: Runtime> NlmDenoiser<R> {
         // alone.
         let imm_low = self
             .read_noise_partials_low(slot)
-            .expect("noise-partials seed readback failed");
+            .context("noise-partials seed readback failed")?;
         self.fold_noise_estimate(data, slot as usize, None, imm_low);
+
+        Ok(())
     }
 
     /// Folds one ring slot's noise totals into both estimator chains and
@@ -1524,21 +1555,23 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// [`Self::flush`] does the same thing at the other end of the
     /// stream. Does nothing with shifted edges on, since that mode
     /// stops windows at the clip start instead of padding them.
-    fn prime_leading_edge_if_first(&mut self) {
+    fn prime_leading_edge_if_first(&mut self) -> Result<(), anyhow::Error> {
         if self.shifted_edges {
-            return;
+            return Ok(());
         }
 
         let r = self.params.temporal_radius as usize;
 
         if r == 0 || self.frames_loaded != 1 {
-            return;
+            return Ok(());
         }
 
         for _ in 0..r {
-            self.duplicate_last_frame();
+            self.duplicate_last_frame()?;
             self.frames_loaded += 1;
         }
+
+        Ok(())
     }
 
     /// Copies the most recently pushed frame into the next ring slot.
@@ -1550,7 +1583,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     ///
     /// The reference ring is copied in step when it exists, so the
     /// weights are never computed from a stale slot.
-    pub(super) fn duplicate_last_frame(&mut self) {
+    pub(super) fn duplicate_last_frame(&mut self) -> Result<(), anyhow::Error> {
         let total_frames = self.params.total_frames() as usize;
         let last_slot = (self.ring_head - 1) % total_frames;
         let next_slot = self.ring_head % total_frames;
@@ -1577,11 +1610,11 @@ impl<R: Runtime> NlmDenoiser<R> {
         // wrote there.
         if let PrefilterMode::NlmSpatial { strength_scale } = self.params.prefilter {
             self.run_nlm_spatial_pilot(next_slot as u32, strength_scale)
-                .expect("nlm spatial pilot dispatch failed");
+                .context("nlm spatial pilot dispatch failed")?;
         }
-        self.build_pyramids_for_slot(next_slot as u32);
-        self.build_confidence_pyramid_for_slot(next_slot as u32);
-        self.run_noise_estimate_for_slot(next_slot as u32);
+        self.build_pyramids_for_slot(next_slot as u32)?;
+        self.build_confidence_pyramid_for_slot(next_slot as u32)?;
+        self.run_noise_estimate_for_slot(next_slot as u32)?;
         self.zero_temporal_stats_for_slot(next_slot as u32);
         // Runs before `ring_head` advances, so `pair_slot(0)` reads the
         // same pre-advance `ring_head` as `run_pair_analyse_for_slot`
@@ -1589,6 +1622,8 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.zero_pair_slot_for_duplicate();
 
         self.ring_head += 1;
+
+        Ok(())
     }
 
     /// Queues the denoise kernels for the current window, without
@@ -2112,7 +2147,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     pub(crate) fn flush_step_gpu(&mut self) -> Result<Option<GpuOutput>, anyhow::Error> {
         let total_frames = self.params.total_frames() as usize;
 
-        self.duplicate_last_frame();
+        self.duplicate_last_frame()?;
         if self.frames_loaded < total_frames {
             self.frames_loaded += 1;
         }
@@ -2238,7 +2273,7 @@ impl<R: Runtime> NlmDenoiser<R> {
 
 /// True when every sample in `plane` fits the range `depth` expresses.
 ///
-/// `gpu_unpack_wire` is branch-free and divides every sample by the
+/// The ingest kernel is branch-free and divides every sample by the
 /// depth's maximum, so a larger sample normalises above 1.0 and reaches
 /// the filter as a value no clean frame can hold. Only 10 and 12-bit can
 /// carry one, in the unused high bits of a 16-bit lane, so 8-bit is

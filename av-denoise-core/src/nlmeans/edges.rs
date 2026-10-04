@@ -22,11 +22,13 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// Copies the last pushed frame forward until every ring slot holds a frame.
     ///
     /// A stream shorter than the ring uses this at flush so its real frames can run as centres.
-    pub(crate) fn fill_ring_with_last_frame(&mut self) {
+    pub(crate) fn fill_ring_with_last_frame(&mut self) -> Result<(), anyhow::Error> {
         while !self.window_ready() {
-            self.duplicate_last_frame();
+            self.duplicate_last_frame()?;
             self.frames_loaded += 1;
         }
+
+        Ok(())
     }
 
     /// The temporal reading a pass centred on `center_t` folds.

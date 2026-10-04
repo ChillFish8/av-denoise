@@ -27,7 +27,6 @@ impl SampleFormat {
     }
 
     /// The largest sample value, which normalisation divides by.
-    #[cfg_attr(not(test), expect(dead_code, reason = "no engine calls this yet"))]
     pub(crate) fn max_value(self) -> f32 {
         match self {
             SampleFormat::U8 => 255.0,
@@ -96,20 +95,17 @@ pub struct Geometry {
 }
 
 impl Geometry {
-    #[expect(dead_code, reason = "no engine calls this yet")]
     pub(crate) fn validate(&self) -> Result<(), Error> {
         self.input.validate()?;
         self.output.validate()?;
         Ok(())
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "no engine calls this yet"))]
     pub(crate) fn pixels(&self) -> u32 {
         self.width * self.height
     }
 
     /// Checks plane count, dimensions, and that every handle covers its whole words.
-    #[cfg_attr(not(test), expect(dead_code, reason = "no engine calls this yet"))]
     pub(crate) fn check_planes(&self, planes: &[DevicePlane<'_>], format: SampleFormat) -> Result<(), Error> {
         let expected = self.channels.count() as usize;
         if planes.len() != expected {
