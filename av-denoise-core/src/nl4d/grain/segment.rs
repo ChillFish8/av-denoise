@@ -50,6 +50,7 @@ struct BinStrength {
     kept: f64,
 }
 
+/// Quantised AR weights and their shift.
 type Texture = ([i32; AR_COEFFS], u32);
 
 /// The texture band's lower edge, as a multiple of the median source std.
@@ -79,16 +80,16 @@ fn overall_median(hist: &[u32], edges: &[f32]) -> Option<f64> {
     hist_median(&merged, edges)
 }
 
-/// Splits a scene into segments, closing one when a chunk's grain drifts past `DRIFT`.
+/// Splits a scene into segments, closing one when a chunk's grain drifts past [DRIFT].
 pub(crate) fn segment_scene(scene: &SceneGrain) -> Vec<Segment> {
     let edges = bucket_edges();
     let mut segments: Vec<Segment> = Vec::new();
     let mut next_frame = scene.first_frame;
 
     for chunk in &scene.chunks {
-        let first = next_frame;
-        let last = first + chunk.frames as u64 - 1;
-        next_frame = last + 1;
+        let chunk_first = next_frame;
+        let chunk_last = chunk_first + chunk.frames as u64 - 1;
+        next_frame = chunk_last + 1;
 
         let starts_new = match segments.last() {
             None => true,
@@ -96,15 +97,15 @@ pub(crate) fn segment_scene(scene: &SceneGrain) -> Vec<Segment> {
         };
         if starts_new {
             segments.push(Segment {
-                first_frame: first,
-                last_frame: last,
+                first_frame: chunk_first,
+                last_frame: chunk_last,
                 stats: chunk.clone(),
             });
             continue;
         }
 
         let open = segments.last_mut().expect("a segment is open");
-        open.last_frame = last;
+        open.last_frame = chunk_last;
         open.stats.merge(chunk);
     }
 
@@ -237,6 +238,7 @@ fn borrow<T>(parts: &[Parts], index: usize, value: impl Fn(&Parts) -> Option<T>)
                 let Some(part) = parts.get(candidate) else {
                     continue;
                 };
+
                 if same_scene_only && part.scene != scene {
                     continue;
                 }
@@ -254,6 +256,8 @@ fn borrow<T>(parts: &[Parts], index: usize, value: impl Fn(&Parts) -> Option<T>)
 fn build_entry(part: &Parts, strength: &[BinStrength], texture: Texture) -> FittedEntry {
     let (coeffs, ar_shift) = texture;
     let (sigma_template, template_median) = template_stats(&coeffs, ar_shift);
+    // The measured stds are medians of mean-removed 8x8 blocks. The template's ratio of its
+    // whole-field std to its block median converts them to a whole-field std.
     let factor = sigma_template / template_median;
 
     let mut chosen: Vec<BinStrength> = strength.to_vec();
@@ -271,6 +275,7 @@ fn build_entry(part: &Parts, strength: &[BinStrength], texture: Texture) -> Fitt
         .map(|entry| {
             let sigma_source = entry.source * factor;
             let sigma_kept = entry.kept * factor;
+            // Only the grain the denoiser removed is synthesised, so the kept grain comes off.
             let variance = (sigma_source * sigma_source - sigma_kept * sigma_kept).max(0.0);
             let centre = (entry.bin as f64 + 0.5) * 256.0 / LUMA_BINS as f64;
             (centre.round() as u8, variance.sqrt())
@@ -278,6 +283,7 @@ fn build_entry(part: &Parts, strength: &[BinStrength], texture: Texture) -> Fitt
         .collect();
 
     let (points, scaling_shift) = scaling_points(&targets, sigma_template);
+
     FittedEntry {
         first_frame: part.first_frame,
         last_frame: part.last_frame,

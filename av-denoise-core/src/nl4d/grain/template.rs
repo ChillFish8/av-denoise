@@ -33,10 +33,10 @@ fn round2(value: i32, shift: u32) -> i32 {
 
 /// Builds the 73x82 luma grain template an 8-bit AV1 decoder makes for these weights and seed.
 pub(crate) fn luma_template(coeffs: &[i32; AR_COEFFS], ar_shift: u32, seed: u16) -> Vec<i32> {
-    let mut rng = Av1Random::new(seed);
+    let mut random = Av1Random::new(seed);
     let mut grain = vec![0i32; TEMPLATE_ROWS * TEMPLATE_COLS];
     for sample in grain.iter_mut() {
-        let index = rng.next(11) as usize;
+        let index = random.next(11) as usize;
         let gaussian = GAUSSIAN_SEQUENCE[index] as i32;
         *sample = round2(gaussian, 4);
     }
@@ -65,8 +65,7 @@ pub(crate) fn template_seed(index: u32) -> u16 {
 
 /// The grain std of these weights' templates, and the median std of their 8x8 blocks.
 ///
-/// Both read the 64x64 interior of [TEMPLATE_SEEDS](crate::nl4d::grain::consts::TEMPLATE_SEEDS)
-/// templates. A block's std removes its own mean.
+/// Both read the 64x64 interior of [TEMPLATE_SEEDS] templates. A block's std removes its own mean.
 pub(crate) fn template_stats(coeffs: &[i32; AR_COEFFS], ar_shift: u32) -> (f64, f64) {
     let capacity = TEMPLATE_SEEDS as usize * INTERIOR_SIZE * INTERIOR_SIZE;
     let mut samples = Vec::with_capacity(capacity);
@@ -75,7 +74,8 @@ pub(crate) fn template_stats(coeffs: &[i32; AR_COEFFS], ar_shift: u32) -> (f64, 
         let seed = template_seed(index);
         let template = luma_template(coeffs, ar_shift, seed);
         let interior = interior_of(&template);
-        block_stds.extend(block_stds_of(&interior));
+        let interior_block_stds = block_stds_of(&interior);
+        block_stds.extend(interior_block_stds);
         samples.extend(interior);
     }
 
@@ -89,8 +89,10 @@ fn interior_of(template: &[i32]) -> Vec<f64> {
     for y in INTERIOR_START..INTERIOR_START + INTERIOR_SIZE {
         let row_start = y * TEMPLATE_COLS + INTERIOR_START;
         let row = &template[row_start..row_start + INTERIOR_SIZE];
-        interior.extend(row.iter().map(|&value| value as f64));
+        let row_values = row.iter().map(|&value| value as f64);
+        interior.extend(row_values);
     }
+
     interior
 }
 
@@ -106,9 +108,11 @@ fn block_stds_of(interior: &[f64]) -> Vec<f64> {
                 block.extend_from_slice(&interior[start..start + cell]);
             }
 
-            stds.push(sample_std(&block));
+            let block_std = sample_std(&block);
+            stds.push(block_std);
         }
     }
+
     stds
 }
 

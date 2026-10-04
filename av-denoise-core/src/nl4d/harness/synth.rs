@@ -1,6 +1,6 @@
 use crate::nlmeans::motion::neighbour_idx_for_k;
 
-/// A clean luma plane, values in `[0, 1]`.
+/// A clean luma plane with values between 0 and 1.
 #[derive(Debug, Clone)]
 pub struct Still {
     pub width: u32,
@@ -16,54 +16,64 @@ impl Still {
         if bytes.len() < 2 || &bytes[..2] != b"P5" {
             return Err("not a P5 pgm".to_string());
         }
+
         pos += 2;
         while fields.len() < 3 {
             while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
                 pos += 1;
             }
+
             if pos < bytes.len() && bytes[pos] == b'#' {
                 while pos < bytes.len() && bytes[pos] != b'\n' {
                     pos += 1;
                 }
                 continue;
             }
+
             let start = pos;
             while pos < bytes.len() && bytes[pos].is_ascii_digit() {
                 pos += 1;
             }
+
             if start == pos {
                 return Err("malformed pgm header".to_string());
             }
-            let text = std::str::from_utf8(&bytes[start..pos]).map_err(|e| e.to_string())?;
-            fields.push(text.parse::<u32>().map_err(|e| e.to_string())?);
+
+            let text = std::str::from_utf8(&bytes[start..pos]).map_err(|error| error.to_string())?;
+            let field = text.parse::<u32>().map_err(|error| error.to_string())?;
+            fields.push(field);
         }
+
         // Exactly one whitespace byte separates maxval from the data.
         pos += 1;
         let (width, height, maxval) = (fields[0], fields[1], fields[2]);
-        // Widened to 64 bits so a header claiming huge dimensions cannot
-        // wrap back into a small `usize` on a 32-bit target and slip
-        // past the bounds check below.
-        let n64 = width as u64 * height as u64;
+        // Widened to 64 bits so huge header dimensions cannot wrap into a small `usize` on a 32-bit
+        // target and slip past the bounds check.
+        let sample_count_u64 = width as u64 * height as u64;
         let bytes_per_sample: u64 = if maxval > 255 { 2 } else { 1 };
         let available = (bytes.len() - pos.min(bytes.len())) as u64;
-        if n64 * bytes_per_sample > available {
+        if sample_count_u64 * bytes_per_sample > available {
             return Err(format!(
                 "pgm data truncated: header claims {width}x{height} at {bytes_per_sample} bytes/sample, \
                  only {available} bytes remain"
             ));
         }
-        let n = n64 as usize;
+
+        let sample_count = sample_count_u64 as usize;
         let luma = if maxval > 255 {
-            let data = bytes.get(pos..pos + 2 * n).ok_or("pgm data truncated")?;
+            let data = bytes
+                .get(pos..pos + 2 * sample_count)
+                .ok_or("pgm data truncated")?;
             data.as_chunks::<2>()
                 .0
                 .iter()
-                .map(|c| u16::from_be_bytes(*c) as f32 / maxval as f32)
+                .map(|chunk| u16::from_be_bytes(*chunk) as f32 / maxval as f32)
                 .collect()
         } else {
-            let data = bytes.get(pos..pos + n).ok_or("pgm data truncated")?;
-            data.iter().map(|&v| v as f32 / maxval as f32).collect()
+            let data = bytes.get(pos..pos + sample_count).ok_or("pgm data truncated")?;
+            data.iter().map(|&value| value as f32 / maxval as f32).collect()
         };
+
         Ok(Still { width, height, luma })
     }
 
@@ -72,44 +82,50 @@ impl Still {
         let mut luma = vec![0.0f32; (width * height) as usize];
         for y in 0..height {
             for x in 0..width {
-                let fx = x as f32 * 0.31;
-                let fy = y as f32 * 0.23;
-                let v = 0.5 + 0.2 * (fx.sin() * fy.cos()) + 0.1 * ((fx * 2.7).cos() + (fy * 3.1).sin());
-                luma[(y * width + x) as usize] = v.clamp(0.0, 1.0);
+                let phase_x = x as f32 * 0.31;
+                let phase_y = y as f32 * 0.23;
+                let value = 0.5
+                    + 0.2 * (phase_x.sin() * phase_y.cos())
+                    + 0.1 * ((phase_x * 2.7).cos() + (phase_y * 3.1).sin());
+                luma[(y * width + x) as usize] = value.clamp(0.0, 1.0);
             }
         }
+
         Still { width, height, luma }
     }
 
-    /// Samples the still at a fractional position with a Lanczos-3
-    /// kernel, clamping to the edge.
-    fn sample(&self, sx: f32, sy: f32) -> f32 {
+    /// Samples the still at a fractional position with a Lanczos-3 kernel, clamping to the edge.
+    fn sample(&self, sample_x: f32, sample_y: f32) -> f32 {
         const A: i32 = 3;
+
         let lanczos = |t: f32| -> f32 {
             if t == 0.0 {
                 1.0
             } else if t.abs() >= A as f32 {
                 0.0
             } else {
-                let pt = std::f32::consts::PI * t;
-                (A as f32 * pt.sin() * (pt / A as f32).sin()) / (pt * pt)
+                let pi_t = std::f32::consts::PI * t;
+                (A as f32 * pi_t.sin() * (pi_t / A as f32).sin()) / (pi_t * pi_t)
             }
         };
-        let x0 = sx.floor() as i32;
-        let y0 = sy.floor() as i32;
-        let mut acc = 0.0f32;
-        let mut wsum = 0.0f32;
+
+        let x0 = sample_x.floor() as i32;
+        let y0 = sample_y.floor() as i32;
+        let mut weighted_sum = 0.0f32;
+        let mut weight_sum = 0.0f32;
         for j in (y0 - A + 1)..=(y0 + A) {
-            let wy = lanczos(sy - j as f32);
-            let yy = j.clamp(0, self.height as i32 - 1) as u32;
+            let weight_y = lanczos(sample_y - j as f32);
+            let clamped_y = j.clamp(0, self.height as i32 - 1) as u32;
             for i in (x0 - A + 1)..=(x0 + A) {
-                let w = wy * lanczos(sx - i as f32);
-                let xx = i.clamp(0, self.width as i32 - 1) as u32;
-                acc += w * self.luma[(yy * self.width + xx) as usize];
-                wsum += w;
+                let weight_x = lanczos(sample_x - i as f32);
+                let weight = weight_y * weight_x;
+                let clamped_x = i.clamp(0, self.width as i32 - 1) as u32;
+                weighted_sum += weight * self.luma[(clamped_y * self.width + clamped_x) as usize];
+                weight_sum += weight;
             }
         }
-        (acc / wsum).clamp(0.0, 1.0)
+
+        (weighted_sum / weight_sum).clamp(0.0, 1.0)
     }
 }
 
@@ -152,14 +168,16 @@ impl MotionClass {
         }
     }
 
-    /// Top-left corner and side of the cut-out rectangle in the centre
-    /// frame, a square a third of the shorter side, left of centre so
-    /// its rightward motion stays inside the frame.
+    /// Top-left corner and side of the cut-out square in the centre frame.
+    ///
+    /// The square is a third of the shorter side, left of centre so its rightward motion stays
+    /// inside the frame.
     pub fn cut_out_rect(width: u32, height: u32) -> (u32, u32, u32) {
         let side = (width.min(height) / 3).max(8);
-        let x0 = width / 4;
-        let y0 = (height - side) / 2;
-        (x0, y0, side)
+        let rect_x = width / 4;
+        let rect_y = (height - side) / 2;
+
+        (rect_x, rect_y, side)
     }
 }
 
@@ -171,27 +189,28 @@ pub struct Clip {
     pub radius: u32,
     /// `frames[i]` is the frame at offset `k = i - radius`.
     pub frames: Vec<Vec<f32>>,
-    /// `truth[t][pixel]` is where the centre frame's pixel lies in
-    /// neighbour `t`, as a displacement in pixels.
+    /// `truth[t][pixel]` is where the centre frame's pixel lies in neighbour `t`, as a
+    /// displacement in pixels.
     pub truth: Vec<Vec<[f32; 2]>>,
-    /// `occluded[t][pixel]` is true when that pixel has no true match
-    /// in neighbour `t`.
+    /// `occluded[t][pixel]` is true when that pixel has no true match in neighbour `t`.
     pub occluded: Vec<Vec<bool>>,
 }
 
-/// Where the centre frame's pixel `(x, y)` sits in the frame at offset
-/// `k`, for the background of `class`.
+/// Where the centre frame's background pixel `(x, y)` sits in the frame at offset `k`.
 fn background_displacement(class: MotionClass, k: i32, x: u32, y: u32, width: u32, height: u32) -> [f32; 2] {
     match class {
         MotionClass::IntegerPan | MotionClass::HalfPelPan => {
-            let v = class.velocity();
-            [v[0] * k as f32, v[1] * k as f32]
+            let velocity = class.velocity();
+            [velocity[0] * k as f32, velocity[1] * k as f32]
         },
         MotionClass::Zoom => {
-            let s = ZOOM_PER_FRAME.powi(k);
-            let cx = width as f32 / 2.0;
-            let cy = height as f32 / 2.0;
-            [(x as f32 - cx) * (s - 1.0), (y as f32 - cy) * (s - 1.0)]
+            let scale = ZOOM_PER_FRAME.powi(k);
+            let centre_x = width as f32 / 2.0;
+            let centre_y = height as f32 / 2.0;
+            [
+                (x as f32 - centre_x) * (scale - 1.0),
+                (y as f32 - centre_y) * (scale - 1.0),
+            ]
         },
         MotionClass::CutOut => [0.0, 0.0],
     }
@@ -200,98 +219,109 @@ fn background_displacement(class: MotionClass, k: i32, x: u32, y: u32, width: u3
 /// Deterministic Gaussian grain from a hashed uniform pair.
 fn grain(idx: u32, seed: u32) -> f32 {
     let hash = |i: u32| -> f32 {
-        let mut h = i
+        let mut state = i
             .wrapping_mul(2654435761)
             .wrapping_add(seed.wrapping_mul(0x9E37_79B9));
-        h ^= h >> 15;
-        h = h.wrapping_mul(0x85EB_CA6B);
-        h ^= h >> 13;
-        (h as f32 + 1.0) / (u32::MAX as f32 + 2.0)
+        state ^= state >> 15;
+        state = state.wrapping_mul(0x85EB_CA6B);
+        state ^= state >> 13;
+        (state as f32 + 1.0) / (u32::MAX as f32 + 2.0)
     };
+
     let u1 = hash(idx * 2);
     let u2 = hash(idx * 2 + 1);
+
     (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
 }
 
-/// Builds the window of `2 * radius + 1` frames for `class`, with
-/// Gaussian grain of `sigma` on every frame, and the ground truth toward
-/// every neighbour.
+/// Builds the window of `2 * radius + 1` frames for `class` and the ground truth toward every
+/// neighbour.
+///
+/// Every frame carries its own Gaussian grain of `sigma`.
 pub fn synthesise(still: &Still, class: MotionClass, radius: u32, sigma: f32, seed: u32) -> Clip {
-    let (w, h) = (still.width, still.height);
-    let n = (w * h) as usize;
-    let (cx0, cy0, side) = MotionClass::cut_out_rect(w, h);
-    let v = class.velocity();
+    let (width, height) = (still.width, still.height);
+    let pixels = (width * height) as usize;
+    let (rect_x, rect_y, side) = MotionClass::cut_out_rect(width, height);
+    let velocity = class.velocity();
 
     let in_rect_at = |x: f32, y: f32, k: i32| -> bool {
-        let ox = cx0 as f32 + v[0] * k as f32;
-        let oy = cy0 as f32 + v[1] * k as f32;
-        x >= ox && x < ox + side as f32 && y >= oy && y < oy + side as f32
+        let origin_x = rect_x as f32 + velocity[0] * k as f32;
+        let origin_y = rect_y as f32 + velocity[1] * k as f32;
+        x >= origin_x && x < origin_x + side as f32 && y >= origin_y && y < origin_y + side as f32
     };
 
     let mut frames = Vec::with_capacity((2 * radius + 1) as usize);
     for i in 0..(2 * radius + 1) as i32 {
         let k = i - radius as i32;
-        let mut frame = vec![0.0f32; n];
-        for y in 0..h {
-            for x in 0..w {
-                let idx = (y * w + x) as usize;
+        let mut frame = vec![0.0f32; pixels];
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
                 let value = if class == MotionClass::CutOut && in_rect_at(x as f32, y as f32, k) {
                     // The rectangle's content, read from where it sat in the centre.
-                    still.sample(x as f32 - v[0] * k as f32, y as f32 - v[1] * k as f32)
+                    still.sample(
+                        x as f32 - velocity[0] * k as f32,
+                        y as f32 - velocity[1] * k as f32,
+                    )
                 } else {
-                    let d = background_displacement(class, k, x, y, w, h);
-                    // The frame at k shows the centre's pixel p at p + d, so
-                    // pixel (x, y) here comes from the centre's (x, y) - d.
-                    // For a pan and a zoom the inverse map is exact.
+                    let displacement = background_displacement(class, k, x, y, width, height);
+                    // The frame at k shows the centre's pixel p at p + d, so pixel (x, y) here
+                    // comes from the centre's (x, y) - d. For a pan and a zoom the inverse is exact.
                     match class {
                         MotionClass::Zoom => {
-                            let s = ZOOM_PER_FRAME.powi(k);
-                            let fx = w as f32 / 2.0 + (x as f32 - w as f32 / 2.0) / s;
-                            let fy = h as f32 / 2.0 + (y as f32 - h as f32 / 2.0) / s;
-                            still.sample(fx, fy)
+                            let scale = ZOOM_PER_FRAME.powi(k);
+                            let source_x = width as f32 / 2.0 + (x as f32 - width as f32 / 2.0) / scale;
+                            let source_y = height as f32 / 2.0 + (y as f32 - height as f32 / 2.0) / scale;
+                            still.sample(source_x, source_y)
                         },
-                        _ => still.sample(x as f32 - d[0], y as f32 - d[1]),
+                        _ => still.sample(x as f32 - displacement[0], y as f32 - displacement[1]),
                     }
                 };
                 let noise = if sigma > 0.0 {
-                    sigma * grain(idx as u32, seed.wrapping_add(1000 * (i as u32 + 1)))
+                    let frame_seed = seed.wrapping_add(1000 * (i as u32 + 1));
+                    sigma * grain(idx as u32, frame_seed)
                 } else {
                     0.0
                 };
                 frame[idx] = (value + noise).clamp(0.0, 1.0);
             }
         }
+
         frames.push(frame);
     }
 
     let neighbours = (2 * radius) as usize;
-    let mut truth = vec![vec![[0.0f32; 2]; n]; neighbours];
-    let mut occluded = vec![vec![false; n]; neighbours];
+    let mut truth = vec![vec![[0.0f32; 2]; pixels]; neighbours];
+    let mut occluded = vec![vec![false; pixels]; neighbours];
     for k in -(radius as i32)..=(radius as i32) {
         if k == 0 {
             continue;
         }
+
         let t = neighbour_idx_for_k(radius, k) as usize;
-        for y in 0..h {
-            for x in 0..w {
-                let idx = (y * w + x) as usize;
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
                 let foreground = class == MotionClass::CutOut && in_rect_at(x as f32, y as f32, 0);
-                let d = if foreground {
-                    [v[0] * k as f32, v[1] * k as f32]
+                let displacement = if foreground {
+                    [velocity[0] * k as f32, velocity[1] * k as f32]
                 } else {
-                    background_displacement(class, k, x, y, w, h)
+                    background_displacement(class, k, x, y, width, height)
                 };
-                truth[t][idx] = d;
+                truth[t][idx] = displacement;
+
                 if class == MotionClass::CutOut && !foreground {
-                    occluded[t][idx] = in_rect_at(x as f32 + d[0], y as f32 + d[1], k);
+                    let moved_x = x as f32 + displacement[0];
+                    let moved_y = y as f32 + displacement[1];
+                    occluded[t][idx] = in_rect_at(moved_x, moved_y, k);
                 }
             }
         }
     }
 
     Clip {
-        width: w,
-        height: h,
+        width,
+        height,
         radius,
         frames,
         truth,
@@ -305,15 +335,16 @@ mod tests {
 
     fn ramp_still() -> Still {
         // Distinct values everywhere, so a shift is visible in any pixel.
-        let (w, h) = (64u32, 48u32);
-        let luma = (0..w * h)
-            .map(|i| ((i % w) as f32 * 0.9 / w as f32 + (i / w) as f32 * 0.1 / h as f32).clamp(0.0, 1.0))
+        let (width, height) = (64u32, 48u32);
+        let luma = (0..width * height)
+            .map(|i| {
+                let ramp_x = (i % width) as f32 * 0.9 / width as f32;
+                let ramp_y = (i / width) as f32 * 0.1 / height as f32;
+                (ramp_x + ramp_y).clamp(0.0, 1.0)
+            })
             .collect();
-        Still {
-            width: w,
-            height: h,
-            luma,
-        }
+
+        Still { width, height, luma }
     }
 
     #[test]
@@ -321,21 +352,24 @@ mod tests {
         let still = ramp_still();
         let clip = synthesise(&still, MotionClass::IntegerPan, 1, 0.0, 1);
         assert_eq!(clip.frames.len(), 3);
-        let (w, h) = (clip.width, clip.height);
-        let v = MotionClass::IntegerPan.velocity();
-        // Frame k = +1 holds the still moved by +v. Check an interior pixel.
+
+        let (width, height) = (clip.width, clip.height);
+        let velocity = MotionClass::IntegerPan.velocity();
+        // Frame k = +1 holds the still moved by +velocity. Check an interior pixel.
         let (x, y) = (20u32, 20u32);
-        let moved = clip.frames[2][(y * w + x) as usize];
-        let source =
-            still.luma[((y as i32 - v[1] as i32) as u32 * w + (x as i32 - v[0] as i32) as u32) as usize];
+        let moved = clip.frames[2][(y * width + x) as usize];
+        let source_y = (y as i32 - velocity[1] as i32) as u32;
+        let source_x = (x as i32 - velocity[0] as i32) as u32;
+        let source = still.luma[(source_y * width + source_x) as usize];
         assert!(
             (moved - source).abs() < 1e-6,
             "an integer pan must copy pixels exactly"
         );
-        // Truth toward k = +1 (t = 1 at radius 1) is +v everywhere.
-        for idx in 0..(w * h) as usize {
-            assert_eq!(clip.truth[1][idx], v);
-            assert_eq!(clip.truth[0][idx], [-v[0], -v[1]]);
+
+        // Truth toward k = +1 (t = 1 at radius 1) is +velocity everywhere.
+        for idx in 0..(width * height) as usize {
+            assert_eq!(clip.truth[1][idx], velocity);
+            assert_eq!(clip.truth[0][idx], [-velocity[0], -velocity[1]]);
             assert!(!clip.occluded[1][idx]);
         }
     }
@@ -344,27 +378,29 @@ mod tests {
     fn half_pel_pan_truth_has_a_half_pixel_component() {
         let still = ramp_still();
         let clip = synthesise(&still, MotionClass::HalfPelPan, 1, 0.0, 1);
-        let v = MotionClass::HalfPelPan.velocity();
-        assert!((v[0].fract().abs() - 0.5).abs() < 1e-6 || (v[1].fract().abs() - 0.5).abs() < 1e-6);
-        assert_eq!(clip.truth[1][100], v);
+        let velocity = MotionClass::HalfPelPan.velocity();
+        let half_x = (velocity[0].fract().abs() - 0.5).abs() < 1e-6;
+        let half_y = (velocity[1].fract().abs() - 0.5).abs() < 1e-6;
+        assert!(half_x || half_y);
+        assert_eq!(clip.truth[1][100], velocity);
     }
 
     #[test]
     fn zoom_truth_grows_with_distance_from_the_centre() {
         let still = ramp_still();
         let clip = synthesise(&still, MotionClass::Zoom, 1, 0.0, 1);
-        let (w, h) = (clip.width, clip.height);
-        let centre = ((h / 2) * w + w / 2) as usize;
+        let (width, height) = (clip.width, clip.height);
+        let centre = ((height / 2) * width + width / 2) as usize;
         let corner = 0usize;
-        let dc = clip.truth[1][centre];
-        let dk = clip.truth[1][corner];
+        let centre_shift = clip.truth[1][centre];
+        let corner_shift = clip.truth[1][corner];
         assert!(
-            dc[0].abs() < 0.01 && dc[1].abs() < 0.01,
+            centre_shift[0].abs() < 0.01 && centre_shift[1].abs() < 0.01,
             "the centre does not move under a zoom"
         );
         assert!(
-            dk[0] < -0.1 && dk[1] < -0.1,
-            "the top-left corner moves outward, got {dk:?}"
+            corner_shift[0] < -0.1 && corner_shift[1] < -0.1,
+            "the top-left corner moves outward, got {corner_shift:?}"
         );
     }
 
@@ -372,17 +408,18 @@ mod tests {
     fn cut_out_marks_background_hidden_under_the_moved_rectangle() {
         let still = ramp_still();
         let clip = synthesise(&still, MotionClass::CutOut, 1, 0.0, 1);
-        let w = clip.width;
-        let (x0, y0, side) = MotionClass::cut_out_rect(clip.width, clip.height);
-        let v = MotionClass::CutOut.velocity();
+        let width = clip.width;
+        let (rect_x, rect_y, side) = MotionClass::cut_out_rect(clip.width, clip.height);
+        let velocity = MotionClass::CutOut.velocity();
+
         // A pixel inside the rectangle in the centre frame moves with it.
-        let inside = ((y0 + side / 2) * w + x0 + side / 2) as usize;
-        assert_eq!(clip.truth[1][inside], v);
+        let inside = ((rect_y + side / 2) * width + rect_x + side / 2) as usize;
+        assert_eq!(clip.truth[1][inside], velocity);
         assert!(!clip.occluded[1][inside]);
-        // A background pixel just to the right of the rectangle is
-        // covered once it moves right by v[0] pixels, so toward k = +1
-        // it is occluded, and toward k = -1 it is not.
-        let just_right = ((y0 + side / 2) * w + x0 + side + 1) as usize;
+
+        // A background pixel just right of the rectangle is covered once the rectangle moves
+        // right, so it is occluded toward k = +1 and not toward k = -1.
+        let just_right = ((rect_y + side / 2) * width + rect_x + side + 1) as usize;
         assert_eq!(clip.truth[1][just_right], [0.0, 0.0]);
         assert!(clip.occluded[1][just_right]);
         assert!(!clip.occluded[0][just_right]);
@@ -393,14 +430,14 @@ mod tests {
         let still = Still::synthetic(128, 128);
         let clip = synthesise(&still, MotionClass::IntegerPan, 1, 0.0, 1);
         let noisy = synthesise(&still, MotionClass::IntegerPan, 1, 6.0 / 255.0, 1);
-        let n = clip.frames[1].len() as f32;
-        let var: f32 = clip.frames[1]
+        let pixels = clip.frames[1].len() as f32;
+        let variance: f32 = clip.frames[1]
             .iter()
             .zip(&noisy.frames[1])
-            .map(|(a, b)| (a - b) * (a - b))
+            .map(|(clean, grainy)| (clean - grainy) * (clean - grainy))
             .sum::<f32>()
-            / n;
-        let sigma = var.sqrt();
+            / pixels;
+        let sigma = variance.sqrt();
         assert!(
             (sigma - 6.0 / 255.0).abs() < 0.1 * 6.0 / 255.0,
             "measured sigma {sigma}"
@@ -413,35 +450,30 @@ mod tests {
 
     #[test]
     fn pgm_parses_8_and_16_bit_planes() {
-        let mut p8 = b"P5\n# comment\n2 2\n255\n".to_vec();
-        p8.extend_from_slice(&[0, 128, 255, 64]);
-        let s = Still::from_pgm(&p8).expect("8-bit parse");
-        assert_eq!((s.width, s.height), (2, 2));
-        assert!((s.luma[1] - 128.0 / 255.0).abs() < 1e-6);
-        let mut p16 = b"P5 2 1 65535\n".to_vec();
-        p16.extend_from_slice(&[0xFF, 0xFF, 0x00, 0x00]);
-        let s = Still::from_pgm(&p16).expect("16-bit parse");
-        assert_eq!(s.luma, vec![1.0, 0.0]);
+        let mut pgm_8bit = b"P5\n# comment\n2 2\n255\n".to_vec();
+        pgm_8bit.extend_from_slice(&[0, 128, 255, 64]);
+        let parsed = Still::from_pgm(&pgm_8bit).expect("8-bit parse");
+        assert_eq!((parsed.width, parsed.height), (2, 2));
+        assert!((parsed.luma[1] - 128.0 / 255.0).abs() < 1e-6);
+
+        let mut pgm_16bit = b"P5 2 1 65535\n".to_vec();
+        pgm_16bit.extend_from_slice(&[0xFF, 0xFF, 0x00, 0x00]);
+        let parsed = Still::from_pgm(&pgm_16bit).expect("16-bit parse");
+        assert_eq!(parsed.luma, vec![1.0, 0.0]);
     }
 
     #[test]
     fn a_header_claiming_more_data_than_is_present_is_rejected() {
-        // The header claims a 100x100 plane, but only 4 sample bytes
-        // follow. Also exercises the overflow-safe path: `width *
-        // height` for a header this large already overflows `u32`.
-        let mut p8 = b"P5\n100 100\n255\n".to_vec();
-        p8.extend_from_slice(&[0, 128, 255, 64]);
-        let err = Still::from_pgm(&p8).expect_err("truncated data must be rejected");
+        let mut pgm = b"P5\n100 100\n255\n".to_vec();
+        pgm.extend_from_slice(&[0, 128, 255, 64]);
+        let err = Still::from_pgm(&pgm).expect_err("truncated data must be rejected");
         assert!(err.contains("truncated"), "got {err}");
     }
 
     #[test]
     fn a_header_with_dimensions_that_overflow_u32_is_rejected_not_wrapped() {
-        // `width * height` overflows `u32` here; widening to `u64`
-        // before multiplying must catch this as truncated data rather
-        // than wrapping to a small value that a short buffer satisfies.
-        let p8 = b"P5\n70000 70000\n255\n".to_vec();
-        let err = Still::from_pgm(&p8).expect_err("an overflowing header must be rejected");
+        let pgm = b"P5\n70000 70000\n255\n".to_vec();
+        let err = Still::from_pgm(&pgm).expect_err("an overflowing header must be rejected");
         assert!(err.contains("truncated"), "got {err}");
     }
 }

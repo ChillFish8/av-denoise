@@ -77,8 +77,8 @@ struct Completed {
 /// The grain measurement state of one nl4d denoiser.
 ///
 /// Each frame's vectors to the next frame are saved in a ring entry keyed by its physical ring
-/// slot. Each completed frame adds into the newest chunk record, which stays on the GPU until
-/// [Self::drain] reads every chunk back.
+/// slot. A frame's vectors must be saved before the frame is measured. Each completed frame adds
+/// into the newest chunk record, which stays on the GPU until [Self::drain] reads every chunk back.
 pub(crate) struct GrainExport {
     geometry: GrainGeometry,
     saved_mv: Handle,
@@ -100,10 +100,14 @@ impl GrainExport {
         let saved_mv_host = vec![0i32; geometry.saved_mv_len()];
         let saved_conf_host = vec![0.0f32; geometry.saved_conf_len()];
 
-        let saved_mv = client.create_from_slice(i32::as_bytes(&saved_mv_host));
-        let saved_conf = client.create_from_slice(f32::as_bytes(&saved_conf_host));
-        let edges = client.create_from_slice(f32::as_bytes(&edges_host));
-        let partials = client.empty(geometry.partials_len().max(1) * size_of::<f32>());
+        let saved_mv_bytes = i32::as_bytes(&saved_mv_host);
+        let saved_mv = client.create_from_slice(saved_mv_bytes);
+        let saved_conf_bytes = f32::as_bytes(&saved_conf_host);
+        let saved_conf = client.create_from_slice(saved_conf_bytes);
+        let edges_bytes = f32::as_bytes(&edges_host);
+        let edges = client.create_from_slice(edges_bytes);
+        let partials_bytes = geometry.partials_len().max(1) * size_of::<f32>();
+        let partials = client.empty(partials_bytes);
 
         Self {
             saved_valid: vec![false; geometry.ring_frames as usize],
@@ -163,20 +167,20 @@ impl GrainExport {
 
     /// Measures the frame that just completed into the newest chunk.
     ///
-    /// `slot_next` is the ring slot of the next real frame, `None` for a stream's last frame.
+    /// `next_slot` is the ring slot of the next real frame, `None` for a stream's last frame.
     pub(crate) fn measure<R: Runtime>(
         &mut self,
         client: &ComputeClient<R>,
         input: &Handle,
         outputs: &[Handle; 2],
-        slot_t: u32,
-        slot_next: Option<u32>,
+        frame_slot: u32,
+        next_slot: Option<u32>,
         output_slot: usize,
     ) {
-        let has_source = slot_next.is_some() && self.saved_valid[slot_t as usize];
+        let has_source = next_slot.is_some() && self.saved_valid[frame_slot as usize];
 
         #[cfg(test)]
-        if self.saved_valid[slot_t as usize] {
+        if self.saved_valid[frame_slot as usize] {
             self.measured_with_entry += 1;
         }
 
@@ -184,8 +188,8 @@ impl GrainExport {
             .last_completed
             .filter(|previous| self.saved_valid[previous.ring_slot as usize]);
         let has_kept = kept_from.is_some();
-        let next = slot_next.unwrap_or(slot_t);
-        let kept_entry = kept_from.map_or(slot_t, |previous| previous.ring_slot);
+        let next_or_own_slot = next_slot.unwrap_or(frame_slot);
+        let kept_entry = kept_from.map_or(frame_slot, |previous| previous.ring_slot);
         let prev_output = kept_from.map_or(output_slot, |previous| previous.output_slot);
 
         let (chunk_hist, chunk_autocov) = self.open_chunk(client);
@@ -209,9 +213,9 @@ impl GrainExport {
                 ArrayArg::from_raw_parts(self.edges.clone(), EDGES_LEN),
                 ArrayArg::from_raw_parts(chunk_hist, 2 * HIST_LEN),
                 ArrayArg::from_raw_parts(self.partials.clone(), geometry.partials_len()),
-                slot_t,
-                next,
-                slot_t,
+                frame_slot,
+                next_or_own_slot,
+                frame_slot,
                 kept_entry,
                 has_source as u32,
                 has_kept as u32,
@@ -240,7 +244,7 @@ impl GrainExport {
         }
 
         self.last_completed = Some(Completed {
-            ring_slot: slot_t,
+            ring_slot: frame_slot,
             output_slot,
         });
     }
@@ -250,8 +254,10 @@ impl GrainExport {
         if !self.chunk_open {
             let hist_host = vec![0i32; 2 * HIST_LEN];
             let autocov_host = vec![0.0f32; GROUPED_AUTOCOV_LEN];
-            let hist = client.create_from_slice(i32::as_bytes(&hist_host));
-            let autocov = client.create_from_slice(f32::as_bytes(&autocov_host));
+            let hist_bytes = i32::as_bytes(&hist_host);
+            let hist = client.create_from_slice(hist_bytes);
+            let autocov_bytes = f32::as_bytes(&autocov_host);
+            let autocov = client.create_from_slice(autocov_bytes);
             self.chunks.push(ChunkBuffers {
                 hist,
                 autocov,
@@ -310,6 +316,7 @@ fn read_chunk<R: Runtime>(
 
     let mut chunk = GrainChunk::empty();
     chunk.frames = buffer.frames;
+
     for (target, &count) in chunk.source_hist.iter_mut().zip(source_counts) {
         *target = count as u32;
     }

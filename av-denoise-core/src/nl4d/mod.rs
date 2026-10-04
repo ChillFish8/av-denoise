@@ -1,14 +1,12 @@
-//! nl4d groups patches across several noisy frames rather than within a
-//! single one.
+//! Collaborative denoising across a window of frames
 //!
-//! The collaborative filter groups similar 8x8 patches within one frame and
-//! denoises each group jointly. This module extends that search across a
-//! motion-compensated window of frames.
+//! Similar 8x8 patches are grouped and filtered together. Each group holds a few patches from the
+//! centre frame, each followed through its neighbour frames along its motion vector. Grain differs
+//! from frame to frame while texture stays, so a transform along time separates the two.
 //!
-//! Each group is a few centre-frame patches, each followed through its
-//! best-matching neighbour frames along its own motion vector. Patches
-//! followed through time carry independent grain, so the transform along
-//! time separates it from the texture they share.
+//! - [Nl4d], the engine
+//! - [Nl4dOptions] and the per-preset defaults it is built from
+//! - film grain measurement for AV1 grain tables
 
 pub(crate) mod denoiser;
 mod engine;
@@ -20,9 +18,7 @@ pub(crate) mod params;
 mod regularise;
 pub(crate) mod snapshot;
 
-// Every test in this tree runs against a real GPU runtime, see
-// `tests::helpers::R`, so it only builds when a wgpu-backed feature is
-// enabled. A cpu-only build skips it entirely.
+// The tests run against a real GPU runtime, so they need a wgpu-backed feature.
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) mod tests;
 

@@ -3,6 +3,7 @@ use std::fmt::Write;
 use super::consts::AR_COEFFS;
 use super::segment::{FittedEntry, SceneGrain, fit_scenes};
 
+/// Grain table timestamps count 100 ns ticks.
 const TICKS_PER_SECOND: u128 = 10_000_000;
 const SEED_BASE: u64 = 7391;
 const SEED_STEP: u64 = 1237;
@@ -61,6 +62,7 @@ pub(crate) fn format_table(entries: &[FittedEntry], frame_rate: (u64, u64)) -> S
         let coeffs = join_values(&entry.ar_coeffs);
 
         writeln!(text, "E {start} {end} 1 {seed} 1").expect("writing to a String");
+        // Lag 3, the AR and scaling shifts, and overlap on.
         writeln!(
             text,
             "\tp 3 {} 0 {} 0 1 128 192 256 128 192 256",
@@ -68,6 +70,7 @@ pub(crate) fn format_table(entries: &[FittedEntry], frame_rate: (u64, u64)) -> S
         )
         .expect("writing to a String");
         writeln!(text, "\tsY {point_count}  {points}").expect("writing to a String");
+        // Chroma scales to zero everywhere, so only luma gets grain.
         text.push_str("\tsCb 2 0 0 255 0\n");
         text.push_str("\tsCr 2 0 0 255 0\n");
         writeln!(text, "\tcY {coeffs}").expect("writing to a String");
