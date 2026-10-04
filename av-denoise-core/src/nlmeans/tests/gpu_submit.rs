@@ -1,6 +1,5 @@
-//! `denoise_submit_gpu` and `flush_step_gpu` skip the readback that
-//! `denoise_submit` and `flush` start automatically, handing back the
-//! raw GPU handle instead.
+//! `denoise_submit_gpu` and `flush_step_gpu` hand back the raw GPU
+//! handle instead of reading the frame back to the host.
 //!
 //! These tests pin that the GPU-resident path produces exactly the same
 //! frames, in the same order, as the readback path it is built from.
@@ -8,6 +7,7 @@
 use cubecl::prelude::*;
 
 use super::helpers::*;
+use crate::bench_api::{GpuOutput, HostIo};
 use crate::nlmeans::*;
 
 fn temporal_params(radius: u32) -> NlmParams {
@@ -48,18 +48,12 @@ fn submit_gpu_matches_submit() {
         via_readback.push_frame(&frame);
         via_gpu.push_frame(&frame);
 
-        let expected = via_readback.denoise_submit().expect("submit failed");
+        let expected = via_readback.denoise().expect("denoise failed");
         let actual = via_gpu.denoise_submit_gpu().expect("submit_gpu failed");
 
         match (expected, actual) {
             (None, None) => {},
-            (Some(pending), Some(output)) => {
-                let expected_frame = pending
-                    .wait()
-                    .expect("wait failed")
-                    .into_f32()
-                    .expect("f32 output");
-
+            (Some(expected_frame), Some(output)) => {
                 let bytes = client.read_one(output.handle).expect("gpu readback failed");
                 let actual_frame = f32::from_bytes(&bytes);
 
@@ -67,12 +61,12 @@ fn submit_gpu_matches_submit() {
                 for (i, (a, b)) in expected_frame.iter().zip(actual_frame.iter()).enumerate() {
                     assert!(
                         (a - b).abs() < 1e-6,
-                        "pixel {i}: denoise_submit gave {a}, denoise_submit_gpu gave {b}"
+                        "pixel {i}: denoise gave {a}, denoise_submit_gpu gave {b}"
                     );
                 }
             },
             (a, b) => panic!(
-                "denoise_submit and denoise_submit_gpu disagreed on readiness: {} vs {}",
+                "denoise and denoise_submit_gpu disagreed on readiness: {} vs {}",
                 a.is_some(),
                 b.is_some()
             ),
@@ -80,9 +74,8 @@ fn submit_gpu_matches_submit() {
     }
 }
 
-/// Reads a `GpuOutput` fully back to the host, the same way `flush`
-/// reads it back internally, so a test can compare it against a frame
-/// produced through the plain readback path.
+/// Reads a `GpuOutput` fully back to the host, so a test can compare it
+/// against a frame produced through the plain readback path.
 fn read_output(client: &ComputeClient<R>, output: GpuOutput) -> Vec<f32> {
     let bytes = client.read_one(output.handle).expect("gpu readback failed");
     f32::from_bytes(&bytes).to_vec()
@@ -127,7 +120,7 @@ fn compare_flush_paths(radius: u32, pushes: usize) {
 
     let mut expected = Vec::new();
     via_flush
-        .flush(|frame| expected.push(frame.as_f32().expect("f32 denoiser").to_vec()))
+        .flush(|frame| expected.push(frame.to_vec()))
         .expect("flush failed");
 
     let target = via_step.flush_target();
@@ -234,7 +227,7 @@ fn flush_step_gpu_emits_the_same_count_and_frames_mixed_phase_stream() {
 
     let mut expected = Vec::new();
     via_flush
-        .flush(|frame| expected.push(frame.as_f32().expect("f32 denoiser").to_vec()))
+        .flush(|frame| expected.push(frame.to_vec()))
         .expect("flush failed");
 
     let mut actual = Vec::new();

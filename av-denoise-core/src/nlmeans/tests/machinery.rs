@@ -9,6 +9,7 @@
 use cubecl::prelude::*;
 
 use super::helpers::*;
+use crate::bench_api::HostIo;
 use crate::nlmeans::motion::neighbour_idx_for_k;
 use crate::nlmeans::*;
 
@@ -263,12 +264,12 @@ fn submit_machinery_none_while_window_is_filling() {
     );
 }
 
-/// Priming a whole window with [`Denoiser::push_frame_priming`], then
-/// submitting only the last real push, must produce the same frame the
-/// streaming path emits for the window's centre. Filling the window this
-/// way is what a caller with random-order access to a fixed window, such
-/// as a VapourSynth plugin, needs to reseed on every frame request
-/// instead of pushing one frame at a time in order.
+/// Priming a whole window with pushes alone, then submitting only after
+/// the last real push, must produce the same frame the streaming path
+/// emits for the window's centre. Filling the window this way is what a
+/// caller with random-order access to a fixed window, such as a
+/// VapourSynth plugin, needs to reseed on every frame request instead of
+/// pushing one frame at a time in order.
 #[cfg(feature = "vulkan")]
 #[test]
 fn priming_pushes_then_one_submit_matches_the_streaming_centre() {
@@ -277,75 +278,22 @@ fn priming_pushes_then_one_submit_matches_the_streaming_centre() {
 
     let mut windowed = test_denoiser(r, 64, 64);
     for frame in &window[..(2 * r) as usize] {
-        windowed.push_frame_priming(frame).unwrap();
+        windowed.push_frame(frame);
     }
-    windowed.push_frame(&window[(2 * r) as usize]).unwrap();
-    let got = windowed.recv_frame().unwrap().expect("one frame");
+
+    windowed.push_frame(&window[(2 * r) as usize]);
+    let got = windowed.denoise().unwrap().expect("one frame");
 
     let mut streamed = test_denoiser(r, 64, 64);
     let mut emitted = Vec::new();
     for frame in &window {
-        streamed.push_frame(frame).unwrap();
-        if let Some(out) = streamed.recv_frame().unwrap() {
+        streamed.push_frame(frame);
+
+        if let Some(out) = streamed.denoise().unwrap() {
             emitted.push(out);
         }
     }
 
     assert_eq!(emitted.len(), (r + 1) as usize);
     assert_eq!(got, emitted[r as usize]);
-}
-
-#[cfg(feature = "vulkan")]
-#[test]
-fn try_recv_frame_returns_none_when_nothing_is_in_flight() {
-    let mut d = test_denoiser(2, 64, 64);
-    assert_eq!(d.try_recv_frame().unwrap(), None);
-}
-
-#[cfg(feature = "vulkan")]
-#[test]
-fn try_recv_frame_observes_a_landed_readback_within_a_bounded_poll() {
-    // A poll count is the wrong proxy for the wall-clock interval this
-    // test needs to cover (cold pipeline compile plus dispatch plus
-    // readback), since a faster CPU makes each poll cheaper and so
-    // needs *more* of them for the same GPU latency. A deadline covers
-    // both a slow GPU and a fast CPU the same way.
-    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
-
-    let r = 2u32;
-    // `temporal_radius + 1` pushes is exactly enough to prime the window
-    // and submit one denoise, leaving exactly one readback in flight.
-    let window: Vec<Vec<f32>> = (0..(r + 1) as usize).map(|i| ramp_frame(64, 64, i)).collect();
-
-    let mut polled = test_denoiser(r, 64, 64);
-    for frame in &window {
-        polled.push_frame(frame).unwrap();
-    }
-
-    let start = std::time::Instant::now();
-    let mut got = None;
-    let mut polls = 0;
-    while start.elapsed() < DEADLINE {
-        polls += 1;
-        if let Some(frame) = polled.try_recv_frame().unwrap() {
-            got = Some(frame);
-            break;
-        }
-    }
-    let got = got.unwrap_or_else(|| panic!("readback never landed within {DEADLINE:?} ({polls} polls)"));
-    eprintln!(
-        "try_recv_frame landed after {polls} poll(s), {:?}",
-        start.elapsed()
-    );
-
-    let mut blocking = test_denoiser(r, 64, 64);
-    for frame in &window {
-        blocking.push_frame(frame).unwrap();
-    }
-    let expected = blocking
-        .recv_frame()
-        .unwrap()
-        .expect("blocking denoiser should have a frame ready");
-
-    assert_eq!(got, expected);
 }

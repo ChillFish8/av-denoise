@@ -13,6 +13,7 @@ use super::helpers::{
     static_clip_params,
     textured_base,
 };
+use crate::bench_api::HostIo;
 use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{
     ACCUM_SCALE,
@@ -49,12 +50,11 @@ fn denoises_a_static_noisy_clip() {
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     for frame in &noisy_frames {
         d.push_frame(frame);
-        if let Some(pending) = d.denoise_submit().expect("denoise_submit failed") {
-            let frame = pending.wait().expect("readback failed");
-            outputs.push(frame.into_f32().expect("f32 output"));
+        if let Some(frame) = d.denoise().expect("denoise failed") {
+            outputs.push(frame);
         }
     }
-    d.flush(|frame| outputs.push(frame.as_f32().expect("f32 denoiser").to_vec()))
+    d.flush(|frame| outputs.push(frame.to_vec()))
         .expect("flush failed");
 
     assert_eq!(outputs.len(), n, "expected one emitted frame per pushed frame");
@@ -99,12 +99,11 @@ fn denoises_at_the_widest_spatial_and_temporal_radius() {
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     for frame in &noisy_frames {
         d.push_frame(frame);
-        if let Some(pending) = d.denoise_submit().expect("denoise_submit failed") {
-            let frame = pending.wait().expect("readback failed");
-            outputs.push(frame.into_f32().expect("f32 output"));
+        if let Some(frame) = d.denoise().expect("denoise failed") {
+            outputs.push(frame);
         }
     }
-    d.flush(|frame| outputs.push(frame.as_f32().expect("f32 denoiser").to_vec()))
+    d.flush(|frame| outputs.push(frame.to_vec()))
         .expect("flush failed");
 
     assert_eq!(outputs.len(), n, "expected one emitted frame per pushed frame");
@@ -183,12 +182,11 @@ fn survives_a_ring_size_that_would_overflow_a_single_zero_dispatch() {
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     for frame in &noisy_frames {
         d.push_frame(frame);
-        if let Some(pending) = d.denoise_submit().expect("denoise_submit failed") {
-            let frame = pending.wait().expect("readback failed");
-            outputs.push(frame.into_f32().expect("f32 output"));
+        if let Some(frame) = d.denoise().expect("denoise failed") {
+            outputs.push(frame);
         }
     }
-    d.flush(|frame| outputs.push(frame.as_f32().expect("f32 denoiser").to_vec()))
+    d.flush(|frame| outputs.push(frame.to_vec()))
         .expect("flush failed");
 
     assert_eq!(outputs.len(), n, "expected one emitted frame per pushed frame");
@@ -229,8 +227,8 @@ fn survives_a_ring_size_that_would_overflow_a_single_zero_dispatch() {
 /// own completed output.
 ///
 /// Emission lags `temporal_radius` passes behind the pass a frame is
-/// the centre of (see [`Nl4dDenoiser::denoise_submit`]), so this
-/// pushes `3 * radius + 1` frames, interleaving a `denoise_submit` after
+/// the centre of (see [`Nl4dDenoiser::submit_passes`]), so this
+/// pushes `3 * radius + 1` frames, interleaving a `denoise` after
 /// every push the way a real caller does, and collects every emitted
 /// output in order. Emitted output `k` is always real frame `k`'s own
 /// completed region (see that same doc comment for why), so the marker,
@@ -290,9 +288,8 @@ fn output_carries_its_own_frames_marker_no_other_frame_has() {
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     for frame in &frames {
         d.push_frame(frame);
-        if let Some(pending) = d.denoise_submit().expect("denoise_submit failed") {
-            let frame = pending.wait().expect("readback failed");
-            outputs.push(frame.into_f32().expect("f32 output"));
+        if let Some(frame) = d.denoise().expect("denoise failed") {
+            outputs.push(frame);
         }
     }
 
@@ -321,7 +318,7 @@ fn output_carries_its_own_frames_marker_no_other_frame_has() {
 }
 
 /// `flush` must emit exactly as many frames as were pushed, whatever mix
-/// of `denoise_submit` and `flush` produced them.
+/// of `denoise` and `flush` produced them.
 #[test]
 fn flush_emits_exactly_the_pushed_frame_count() {
     let client = make_client();
@@ -337,7 +334,7 @@ fn flush_emits_exactly_the_pushed_frame_count() {
     for seed in 0..n {
         let frame = noisy_copy_of(&base, w, h, SIGMA, seed);
         d.push_frame(&frame);
-        if d.denoise_submit().expect("denoise_submit failed").is_some() {
+        if d.denoise().expect("denoise failed").is_some() {
             emitted += 1;
         }
     }
@@ -498,10 +495,10 @@ fn run_spatial_only(
 /// centre frame. The only difference is whether the search has a
 /// temporal window to look in.
 ///
-/// `denoise_submit` is called after every push, exactly the way a real
+/// `denoise` is called after every push, exactly the way a real
 /// caller drives this denoiser, and every emitted output is collected in
 /// order. Emitted output `k` is real frame `k`'s own completed region
-/// (see [`Nl4dDenoiser::denoise_submit`]'s scheduling), which is only
+/// (see [`Nl4dDenoiser::submit_passes`]'s scheduling), which is only
 /// ready `radius` passes after the pass centred on frame `k` itself, so
 /// `3 * radius + 1` frames are pushed.
 #[test]
@@ -521,9 +518,8 @@ fn temporal_grouping_beats_spatial_only_on_a_static_clip() {
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     for frame in &noisy_frames {
         d.push_frame(frame);
-        if let Some(pending) = d.denoise_submit().expect("denoise_submit failed") {
-            let frame = pending.wait().expect("readback failed");
-            outputs.push(frame.into_f32().expect("f32 output"));
+        if let Some(frame) = d.denoise().expect("denoise failed") {
+            outputs.push(frame);
         }
     }
     let temporal_out = outputs
@@ -600,9 +596,8 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     for frame in &frames {
         d.push_frame(frame);
-        if let Some(pending) = d.denoise_submit().expect("denoise_submit failed") {
-            let frame = pending.wait().expect("readback failed");
-            outputs.push(frame.into_f32().expect("f32 output"));
+        if let Some(frame) = d.denoise().expect("denoise failed") {
+            outputs.push(frame);
         }
     }
     let cross_frame_out = outputs
@@ -788,7 +783,7 @@ fn motion_snapshot_reports_the_field_the_pass_used() {
     assert!(d.motion_snapshot().is_none(), "no pass has run yet");
     for frame in &frames {
         d.push_frame(frame);
-        let _ = d.denoise_submit().expect("denoise_submit failed");
+        let _ = d.denoise().expect("denoise failed");
     }
 
     let snap = d.motion_snapshot().expect("a pass has run");
@@ -852,7 +847,7 @@ fn field_regularisation_reaches_the_snapshot() {
         let mut d = Nl4dDenoiser::<R>::new(&client, params, w, h).expect("construction failed");
         for frame in &frames {
             d.push_frame(frame);
-            let _ = d.denoise_submit().expect("denoise_submit failed");
+            let _ = d.denoise().expect("denoise failed");
         }
         d.motion_snapshot().expect("a pass ran")
     };
@@ -934,7 +929,7 @@ fn shipped_defaults_denoise_a_static_clip_and_regularise_its_field_to_zero() {
         .expect("construction failed for the clean phase");
     for _ in 0..n {
         clean_d.push_frame(&base);
-        let _ = clean_d.denoise_submit().expect("denoise_submit failed");
+        let _ = clean_d.denoise().expect("denoise failed");
     }
     let snap = clean_d.motion_snapshot().expect("a pass ran");
     // Block (2, 2) spans pixels 16..32 on both axes, well inside the
@@ -959,13 +954,12 @@ fn shipped_defaults_denoise_a_static_clip_and_regularise_its_field_to_zero() {
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     for frame in &frames {
         noisy_d.push_frame(frame);
-        if let Some(pending) = noisy_d.denoise_submit().expect("denoise_submit failed") {
-            let frame = pending.wait().expect("readback failed");
-            outputs.push(frame.into_f32().expect("f32 output"));
+        if let Some(frame) = noisy_d.denoise().expect("denoise failed") {
+            outputs.push(frame);
         }
     }
     noisy_d
-        .flush(|frame| outputs.push(frame.as_f32().expect("f32 denoiser").to_vec()))
+        .flush(|frame| outputs.push(frame.to_vec()))
         .expect("flush failed");
 
     assert_eq!(outputs.len(), n, "expected one emitted frame per pushed frame");

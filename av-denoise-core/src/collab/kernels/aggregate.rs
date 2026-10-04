@@ -31,7 +31,7 @@ pub const ACCUM_SCALE: f32 = 524_288.0;
 /// single-pass case.
 const CROSS_FRAME_SAFETY_FACTOR: f64 = 2.0;
 
-/// The fixed-point scale [`crate::nl4d::Nl4dDenoiser`]'s cross-frame
+/// The fixed-point scale `Nl4dDenoiser`'s cross-frame
 /// accumulator ring counts in, in place of [`ACCUM_SCALE`].
 ///
 /// One fixed constant will not do. A large `spatial_radius` or

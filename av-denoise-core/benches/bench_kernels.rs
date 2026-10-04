@@ -1,8 +1,7 @@
-use av_denoise_core::Depth;
-use cubecl::prelude::*;
-
 mod kernels;
 
+use av_denoise_core::bench_api::Device;
+use cubecl::prelude::*;
 use kernels::accumulate::AccumulateBench;
 use kernels::bilateral::BilateralBench;
 use kernels::collab_aggregate::{CollabNormaliseBench, CollabZeroAccumBench};
@@ -34,7 +33,6 @@ use kernels::mc_downscale::DownscaleBench;
 use kernels::mc_warp::WarpBench;
 use kernels::mv_regularise::MvRegulariseBench;
 use kernels::noise_partial::NoisePartialBench;
-use kernels::pack_wire::PackWireBench;
 use kernels::temporal_noise_stats::TemporalNoiseStatsBench;
 use kernels::vertical_weight::VWeightBench;
 use kernels::vweight_pair_accumulate::VWeightPairAccBench;
@@ -54,16 +52,6 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
             ch,
             ch_name,
         });
-    }
-    for &(ch, ch_name) in CHANNELS {
-        for depth in [Depth::Eight, Depth::Ten] {
-            run(PackWireBench {
-                client: client.clone(),
-                ch,
-                ch_name,
-                depth,
-            });
-        }
     }
     let ingest_cases = [
         (1920, 1080, 1, "luma", IngestFormat::U8),
@@ -349,7 +337,7 @@ struct Cli {
     /// GPU device to bind to. Format: `default`, `discrete[:N]`,
     /// `integrated[:N]`, `virtual[:N]`, or `cpu`.
     #[arg(long, default_value = "default")]
-    device: av_denoise_core::Device,
+    device: Device,
 
     /// Swallowed: cargo passes this when invoking the bench binary.
     #[arg(long, hide = true)]

@@ -38,7 +38,7 @@ fn run_input(
 
 fn main() -> anyhow::Result<()> {
     // SAFETY: still single-threaded, no other thread can race the env mutation.
-    unsafe { av_denoise_core::raise_codegen_stack_limit() };
+    unsafe { av_denoise::raise_codegen_stack_limit() };
 
     let args = Args::parse();
 
@@ -66,7 +66,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Point CubeCL at a kernel cache. This has to run before
-    // Denoiser::create, because the first CubeCL client locks the global
+    // HostDenoiser::create, because the first CubeCL client locks the global
     // config the moment it is built.
     match av_denoise::install_compilation_cache() {
         Ok(Some(path)) => tracing::info!(?path, "caching compiled kernels"),

@@ -3,15 +3,15 @@ use crate::error::Error;
 use crate::nlmeans::{ChannelMode, HqParams, MotionSearch, NlmParams};
 use crate::options::Preset;
 
-/// Settings for [`Algorithm::Nl4d`](crate::Algorithm::Nl4d).
+/// Settings for [Nl4d](crate::Nl4d).
 ///
 /// nl4d runs the HQ front end only for its machinery, the frame ring,
 /// the motion field, and the noise estimate. Nothing weights or averages
 /// patches the NLM way, so the NLM knobs are absent here and the fields
 /// below are the whole surface.
 ///
-/// The temporal radius comes from [`DenoiserOptions::mode`](crate::DenoiserOptions::mode), which has to
-/// be `Temporal { .. }`. Motion tracking is always on, because the
+/// The temporal radius comes from `temporal_radius`, which has to be at
+/// least 1. Motion tracking is always on, because the
 /// grouping kernel reads the motion field and confidence scores it
 /// produces.
 ///
@@ -150,8 +150,8 @@ impl Default for Nl4dOptions {
 /// that extra entropy remains in and overall produces a worse final image.
 ///
 /// `ChannelMode::Yuv` reads the luma value, on the same "a fused pass is
-/// dominated by luma" assumption [hq_default_strength](crate::nlmeans::hq_default_strength)
-/// makes for its own Yuv case.
+/// dominated by luma" assumption `hq_default_strength` makes for its own
+/// Yuv case.
 ///
 /// Luma and the fused Yuv mode use 4.158, and chroma uses 3.234.
 pub fn nl4d_default_lambda_ht(channels: ChannelMode) -> f32 {

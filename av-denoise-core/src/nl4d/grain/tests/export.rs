@@ -4,6 +4,7 @@ use cubecl::prelude::*;
 use cubecl::wgpu::WgpuRuntime;
 
 use super::synthetic::gaussian_field;
+use crate::bench_api::HostIo;
 use crate::nl4d::grain::chunk::GrainChunk;
 use crate::nl4d::grain::consts::{CHUNK_FRAMES, HIST_LEN, LUMA_BINS, STD_BUCKETS, STRENGTH_GROUPS};
 use crate::nl4d::grain::fit::{bucket_edges, hist_median};
@@ -106,14 +107,14 @@ fn panning_frames(sigma: f32, count: u32) -> Vec<Vec<f32>> {
 fn denoise_stream(denoiser: &mut Nl4dDenoiser<R>, frames: &[Vec<f32>], outputs: &mut Vec<Vec<f32>>) {
     for frame in frames {
         denoiser.push_frame(frame);
-        if let Some(pending) = denoiser.denoise_submit().expect("submit") {
-            let output = pending.wait().expect("readback");
-            outputs.push(output.into_f32().expect("f32 output"));
+
+        if let Some(output) = denoiser.denoise().expect("denoise") {
+            outputs.push(output);
         }
     }
 
     denoiser
-        .flush(|frame| outputs.push(frame.as_f32().expect("f32 output").to_vec()))
+        .flush(|frame| outputs.push(frame.to_vec()))
         .expect("flush");
 }
 

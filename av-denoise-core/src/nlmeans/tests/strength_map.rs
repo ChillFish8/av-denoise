@@ -8,6 +8,7 @@ use super::noise_curve::{
     synthetic_records,
     write_quarter,
 };
+use crate::bench_api::HostIo;
 use crate::collab::geometry::strength_map_dims;
 use crate::nlmeans::noise::{
     NOISE_CURVE_BINS,

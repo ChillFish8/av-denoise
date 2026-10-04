@@ -4,8 +4,14 @@ use cubecl::wgpu::WgpuRuntime;
 
 use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
 pub(super) use crate::nlmeans::align::StorageAlign;
-#[cfg(feature = "vulkan")]
-use crate::{ChannelMode, Denoiser, DenoiserOptions, DenoisingMode, accelerate::Accelerator, device::Device};
+use crate::nlmeans::{
+    ChannelMode,
+    DenoisingMode,
+    NlmDenoiser,
+    NlmeansAlgorithm,
+    NlmeansOptions,
+    resolve_params,
+};
 
 pub(crate) type R = WgpuRuntime;
 
@@ -253,21 +259,18 @@ pub(super) fn make_gradient_frame(w: u32, h: u32, lo: f32, hi: f32) -> Vec<f32> 
     frame
 }
 
-/// Expands a densely packed `pixels * ch` frame into the padded
-/// `pixels * stored_ch` GPU storage layout used by `Vector`-typed
-/// kernel buffers (extra lanes zeroed). Mirrors the padding
-/// `NlmDenoiser::upload_into_slot` applies internally.
-/// Builds a top-level [`Denoiser`] at the given temporal radius over
-/// Luma, with every other option left at its default, on the Vulkan
-/// accelerator.
-#[cfg(feature = "vulkan")]
-pub(super) fn test_denoiser(radius: u32, w: u32, h: u32) -> Denoiser {
-    let opts = DenoiserOptions::builder()
-        .channel_mode(ChannelMode::Luma)
-        .mode(DenoisingMode::Temporal { radius })
-        .build();
-    Denoiser::create(&[Accelerator::Vulkan], &Device::Default, w, h, opts)
-        .expect("denoiser construction failed")
+/// Builds an [NlmDenoiser] at the given temporal radius over Luma, with
+/// every other option left at its default.
+pub(super) fn test_denoiser(radius: u32, w: u32, h: u32) -> NlmDenoiser<R> {
+    let options = NlmeansOptions {
+        mode: DenoisingMode::Temporal { radius },
+        ..NlmeansOptions::default()
+    };
+    let algorithm = NlmeansAlgorithm::Fast(options);
+    let params = resolve_params(&algorithm, ChannelMode::Luma);
+    let client = make_client();
+
+    NlmDenoiser::new(&client, params, w, h)
 }
 
 /// A deterministic frame whose pixels ramp from `0.2` to `0.8` across
@@ -284,6 +287,10 @@ pub(super) fn ramp_frame(w: u32, h: u32, i: usize) -> Vec<f32> {
     frame
 }
 
+/// Expands a densely packed `pixels * ch` frame into the padded
+/// `pixels * stored_ch` GPU storage layout used by `Vector`-typed
+/// kernel buffers (extra lanes zeroed). Mirrors the padding the ingest
+/// kernel applies.
 pub(super) fn pad_channels(dense: &[f32], pixels: usize, ch: u32, stored_ch: u32) -> Vec<f32> {
     if ch == stored_ch {
         return dense.to_vec();

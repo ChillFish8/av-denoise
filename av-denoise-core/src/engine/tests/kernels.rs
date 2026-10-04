@@ -2,8 +2,6 @@ use cubecl::prelude::*;
 use cubecl::wgpu::WgpuRuntime;
 
 use crate::engine::{DevicePlane, EgressSource, IngestTarget, SampleFormat, egress, ingest};
-use crate::nlmeans::kernels::gpu_pack_wire;
-use crate::nlmeans::{BLOCK_1D, Depth, MAX_GRID_1D};
 
 type R = WgpuRuntime;
 
@@ -245,7 +243,7 @@ fn bytes_per_sample(format: SampleFormat) -> usize {
     }
 }
 
-/// The host quantisation, which is `gpu_pack_wire`'s exact arithmetic.
+/// The host quantisation, a clamp then a round half up.
 fn quantise_planes(frame: &[f32], channels: u32, stored_ch: u32, format: SampleFormat) -> Vec<Vec<u8>> {
     let pixels = frame.len() / stored_ch as usize;
     let max = format.max_value();
@@ -402,98 +400,4 @@ fn assert_f32_egress_copies(width: u32, height: u32, channels: u32, stored_ch: u
             assert_eq!(values[pixel], frame[pixel * stored_ch as usize + channel]);
         }
     }
-}
-
-#[test]
-fn egress_matches_gpu_pack_wire_for_chroma_bit_for_bit() {
-    assert_matches_pack_wire(7, 5, 2, 2, SampleFormat::U8, Depth::Eight);
-    assert_matches_pack_wire(7, 5, 2, 2, SampleFormat::U16 { depth: 10 }, Depth::Ten);
-}
-
-#[test]
-fn egress_matches_gpu_pack_wire_for_chroma_across_many_cubes() {
-    assert_matches_pack_wire(300, 9, 2, 2, SampleFormat::U8, Depth::Eight);
-    assert_matches_pack_wire(300, 9, 2, 2, SampleFormat::U16 { depth: 12 }, Depth::Twelve);
-}
-
-#[test]
-fn egress_matches_gpu_pack_wire_for_yuv_bit_for_bit() {
-    assert_matches_pack_wire(7, 5, 3, 4, SampleFormat::U8, Depth::Eight);
-    assert_matches_pack_wire(7, 5, 3, 4, SampleFormat::U16 { depth: 10 }, Depth::Ten);
-}
-
-#[test]
-fn egress_matches_gpu_pack_wire_for_yuv_across_many_cubes() {
-    assert_matches_pack_wire(300, 9, 3, 4, SampleFormat::U8, Depth::Eight);
-    assert_matches_pack_wire(300, 9, 3, 4, SampleFormat::U16 { depth: 12 }, Depth::Twelve);
-}
-
-/// Launches `gpu_pack_wire` the way `pack_wire` does and splits its bytes back into planes.
-fn run_pack_wire(frame: &[f32], pixels: usize, channels: u32, stored_ch: u32, depth: Depth) -> Vec<Vec<u8>> {
-    let client = client();
-    let pack = depth.wire_pack();
-    let samples = pixels as u32 * channels;
-    let words = samples.div_ceil(pack.samples_per_word());
-    let split_planes = channels == 2;
-    let outer = if split_planes { pixels as u32 } else { channels };
-    let groups = words.div_ceil(BLOCK_1D).clamp(1, MAX_GRID_1D);
-    let total_threads = groups * BLOCK_1D;
-    let src = client.create_from_slice(f32::as_bytes(frame));
-    let dst = client.empty(words as usize * 4);
-
-    unsafe {
-        gpu_pack_wire::launch_unchecked::<R>(
-            &client,
-            CubeCount::new_1d(groups),
-            CubeDim::new_1d(BLOCK_1D),
-            ArrayArg::from_raw_parts(src, pixels * stored_ch as usize),
-            ArrayArg::from_raw_parts(dst.clone(), words as usize),
-            pack.max(),
-            pixels as u32,
-            channels,
-            stored_ch,
-            outer,
-            split_planes,
-            pack.samples_per_word(),
-            words,
-            total_threads,
-        );
-    }
-
-    let bytes_each = depth.bytes_per_sample();
-    let wire = client.read_one(dst).expect("read wire");
-    let wire = &wire[..samples as usize * bytes_each];
-
-    if split_planes {
-        // Each plane is one contiguous half.
-        return wire
-            .chunks_exact(pixels * bytes_each)
-            .map(<[u8]>::to_vec)
-            .collect();
-    }
-
-    // A fused frame stays interleaved, one pixel after another.
-    let mut planes = vec![Vec::new(); channels as usize];
-    for pixel in wire.chunks_exact(channels as usize * bytes_each) {
-        for (channel, sample) in pixel.chunks_exact(bytes_each).enumerate() {
-            planes[channel].extend_from_slice(sample);
-        }
-    }
-
-    planes
-}
-
-fn assert_matches_pack_wire(
-    width: u32,
-    height: u32,
-    channels: u32,
-    stored_ch: u32,
-    format: SampleFormat,
-    depth: Depth,
-) {
-    let pixels = (width * height) as usize;
-    let frame = egress_frame(pixels, channels, stored_ch, format);
-    let egressed = run_egress(&frame, width, height, channels, stored_ch, format);
-    let packed = run_pack_wire(&frame, pixels, channels, stored_ch, depth);
-    assert_eq!(egressed, packed);
 }

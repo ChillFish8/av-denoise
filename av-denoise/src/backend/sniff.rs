@@ -14,14 +14,14 @@
 //! on a card the caller did not choose both tests the wrong hardware and
 //! pays that card's first-time driver initialisation.
 //!
-//! [`Denoiser::create`](crate::Denoiser::create) calls this for you, so
+//! [`HostDenoiser::create`](crate::HostDenoiser::create) calls this for you, so
 //! reach for it directly only when you want to know the answer without
 //! building a denoiser.
 //!
 //! ```no_run
-//! use av_denoise_core::Device;
-//! use av_denoise_core::accelerate::get_default_accelerators;
-//! use av_denoise_core::sniff::sniff_best_accelerator;
+//! use av_denoise::Device;
+//! use av_denoise::accelerate::get_default_accelerators;
+//! use av_denoise::sniff::sniff_best_accelerator;
 //!
 //! match sniff_best_accelerator(&get_default_accelerators(), &Device::Default) {
 //!     Some(accelerator) => println!("running on {accelerator}"),
@@ -31,9 +31,9 @@
 
 use cubecl::prelude::*;
 
-use crate::accelerate::Accelerator;
-use crate::device::Device;
-use crate::probe::open_client;
+use super::accelerate::Accelerator;
+use super::device::Device;
+use super::probe::open_client;
 
 /// Tries each accelerator in turn and returns the first one whose client
 /// can be built and synchronised on `device`.
@@ -46,7 +46,7 @@ use crate::probe::open_client;
 /// unavailable and the search moves on. That is the same answer the
 /// caller would get from trying to build on it, one step earlier. So is
 /// a backend whose driver libraries are missing, however loudly it
-/// fails, see [`probe`](crate::probe).
+/// fails, see [`probe`](crate::backend::probe).
 pub fn sniff_best_accelerator(enable: &[Accelerator], device: &Device) -> Option<Accelerator> {
     for accelerator in enable {
         let is_enabled = match accelerator {

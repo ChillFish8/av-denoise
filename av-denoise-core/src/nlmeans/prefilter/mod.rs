@@ -20,9 +20,6 @@ pub enum PrefilterMode {
     /// This costs nothing extra.
     #[default]
     None,
-    /// The caller supplies the reference frame through
-    /// [`super::NlmDenoiser::push_frame_with_reference`].
-    External,
     /// A quick bilateral blur run on the GPU at push time.
     Bilateral { sigma_s: f32, sigma_r: f32 },
     /// A spatial NLM pilot pass.
@@ -48,8 +45,7 @@ impl PrefilterMode {
         !matches!(self, Self::None)
     }
 
-    /// Whether this mode builds its reference on the GPU during
-    /// `push_frame`, rather than taking one from the caller.
+    /// Whether this mode builds its reference on the GPU during a push.
     pub(crate) fn is_gpu_internal(self) -> bool {
         matches!(self, Self::Bilateral { .. } | Self::NlmSpatial { .. })
     }
@@ -65,10 +61,6 @@ impl PrefilterMode {
 /// [`DEFAULT_PILOT_STRENGTH_SCALE`].
 ///
 /// `"bilateral:<sigma_s>,<sigma_r>"` builds [`PrefilterMode::Bilateral`].
-///
-/// This never produces [`PrefilterMode::External`], since that mode has
-/// no string form: it requires the caller to supply a reference frame
-/// through [`super::NlmDenoiser::push_frame_with_reference`].
 pub fn parse_prefilter(s: &str) -> Result<PrefilterMode, anyhow::Error> {
     if s == "none" || s.is_empty() {
         return Ok(PrefilterMode::None);
@@ -109,7 +101,7 @@ pub fn parse_prefilter(s: &str) -> Result<PrefilterMode, anyhow::Error> {
 
 /// The inputs one prefilter dispatch needs.
 ///
-/// This lives only for the length of a single `push_frame`, which is
+/// This lives only for the length of a single push, which is
 /// what makes the borrows on the denoiser's buffers sound.
 pub(crate) struct PrefilterCtx<'a> {
     pub width: u32,
@@ -124,14 +116,14 @@ pub(crate) struct PrefilterCtx<'a> {
 
 /// Runs the GPU prefilter for the frame that was uploaded last.
 ///
-/// `None` and `External` do nothing here.
+/// `None` does nothing here.
 pub(crate) fn run_prefilter<R: Runtime>(
     mode: PrefilterMode,
     client: &ComputeClient<R>,
     ctx: &PrefilterCtx<'_>,
 ) -> Result<(), anyhow::Error> {
     match mode {
-        PrefilterMode::None | PrefilterMode::External => Ok(()),
+        PrefilterMode::None => Ok(()),
         // The pilot needs the full accumulator context, meaning accum,
         // weight_sum, max_weight, and h2_inv_norm, which `PrefilterCtx`
         // does not carry. `NlmDenoiser::run_nlm_spatial_pilot`
@@ -151,12 +143,6 @@ mod tests {
     fn none_requires_no_reference_buffer() {
         assert!(!PrefilterMode::None.needs_reference_buf());
         assert!(!PrefilterMode::None.is_gpu_internal());
-    }
-
-    #[test]
-    fn external_needs_buffer_but_not_gpu() {
-        assert!(PrefilterMode::External.needs_reference_buf());
-        assert!(!PrefilterMode::External.is_gpu_internal());
     }
 
     #[test]
@@ -232,24 +218,5 @@ mod tests {
     #[test]
     fn unknown_prefilter_is_rejected() {
         assert!(parse_prefilter("garbage").is_err());
-    }
-
-    #[test]
-    fn external_cannot_be_parsed_from_a_string() {
-        for s in [
-            "external",
-            "none",
-            "nlm",
-            "nlm:0.5",
-            "bilateral:3.0,0.02",
-            "garbage",
-        ] {
-            if let Ok(mode) = parse_prefilter(s) {
-                assert!(
-                    !matches!(mode, PrefilterMode::External),
-                    "parse_prefilter must never produce External, got it from '{s}'"
-                );
-            }
-        }
     }
 }

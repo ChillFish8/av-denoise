@@ -1,16 +1,16 @@
 use std::time::{Duration, Instant};
 
-use av_denoise_core::accelerate::Accelerator;
-use av_denoise_core::{
+use av_denoise::accelerate::Accelerator;
+use av_denoise::{
     Algorithm,
     ChannelIntent,
     ChannelMode,
-    Denoiser,
     DenoiserOptions,
     DenoisingMode,
     Depth,
     Device,
     FrameLayout,
+    HostDenoiser,
     PlanarDenoiser,
     PlaneOptions,
     Planes,
@@ -35,7 +35,7 @@ struct Cli {
 
     /// Accelerator priority list (comma-delimited). Defaults to all
     /// compiled-in accelerators.
-    #[arg(long, value_delimiter = ',', default_values_t = av_denoise_core::accelerate::get_default_accelerators())]
+    #[arg(long, value_delimiter = ',', default_values_t = av_denoise::accelerate::get_default_accelerators())]
     accelerators: Vec<Accelerator>,
 
     /// Swallowed: cargo passes this when invoking the bench binary.
@@ -119,7 +119,7 @@ fn selected_accelerator(accelerators: &[Accelerator], device: &Device) -> Result
         .mode(DenoisingMode::Spacial)
         .algorithm(Algorithm::default())
         .build();
-    let probe = Denoiser::create(accelerators, device, 4, 4, opts)?;
+    let probe = HostDenoiser::create(accelerators, device, 4, 4, opts)?;
     Ok(probe.selected_accelerator())
 }
 
@@ -244,7 +244,7 @@ fn bench_reseed(accelerators: &[Accelerator], device: &Device) -> Result<BenchRe
 
 fn main() {
     // SAFETY: single-threaded at entry, no race possible.
-    unsafe { av_denoise_core::raise_codegen_stack_limit() };
+    unsafe { av_denoise::raise_codegen_stack_limit() };
 
     use clap::Parser;
     let cli = Cli::parse();

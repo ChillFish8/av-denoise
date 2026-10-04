@@ -1,5 +1,5 @@
 //! Turns a VapourSynth clip's format and a filter's script arguments
-//! into the option types `av-denoise-core` denoises with.
+//! into the option types `av-denoise` denoises with.
 //!
 //! Everything here is a pure function over plain values, with no
 //! VapourSynth core and no GPU, so the whole accept/reject matrix is
@@ -8,8 +8,8 @@
 //! [`RawFormat`] of the plain fields it needs instead. The caller in
 //! `filter.rs` does the short extraction from a real `Format`.
 
-use av_denoise_core::accelerate::{Accelerator, get_default_accelerators};
-use av_denoise_core::{
+use av_denoise::accelerate::{Accelerator, get_default_accelerators};
+use av_denoise::{
     Algorithm,
     ChannelIntent,
     DenoisingMode,
@@ -63,7 +63,7 @@ pub struct RawFormat {
 ///
 /// Rejects GRAY too. Core's [`Subsampling`] has no "no chroma" variant,
 /// so a GRAY source would have to be represented as YUV444, which makes
-/// [`av_denoise_core::frame::FrameLayout::chroma_dims`] report
+/// [`av_denoise::FrameLayout::chroma_dims`] report
 /// full-resolution chroma planes that do not exist. The filter would
 /// then have to fabricate and push full-size neutral chroma every
 /// frame, four times the real data volume of true 4:2:0 chroma, purely
@@ -134,7 +134,7 @@ fn variant_name(variant: NlmeansVariant) -> &'static str {
 
 /// Resolves an explicit `variant` string into an [`NlmeansVariant`].
 ///
-/// Uses [`av_denoise_core`]'s own parser, the same one the CLI's
+/// Uses [`av_denoise`]'s own parser, the same one the CLI's
 /// `--variant` flag resolves through, so a name accepted on the CLI is
 /// accepted here too.
 fn parse_variant(raw: &str) -> Result<NlmeansVariant, anyhow::Error> {
@@ -144,7 +144,7 @@ fn parse_variant(raw: &str) -> Result<NlmeansVariant, anyhow::Error> {
 
 /// Resolves an explicit `preset` string into a [`Preset`].
 ///
-/// Uses [`av_denoise_core`]'s own parser, the same one the CLI's
+/// Uses [`av_denoise`]'s own parser, the same one the CLI's
 /// `--preset` flag resolves through, so a name accepted on the CLI is
 /// accepted here too.
 fn parse_preset(raw: &str) -> Result<Preset, anyhow::Error> {
@@ -317,7 +317,7 @@ fn reject_mismatched_params(
 }
 
 /// Validates `raw` against `layout` and builds the [`PlaneOptions`] a
-/// [`PlanarDenoiser`](av_denoise_core::PlanarDenoiser) is created from.
+/// [`PlanarDenoiser`](av_denoise::PlanarDenoiser) is created from.
 ///
 /// Rejects any parameter `algorithm_kind` does not read first, such as
 /// `strength` on nl4d or `lambda_ht` on nlmeans, rather than accepting
@@ -357,7 +357,7 @@ pub fn plane_options_from(
 
     if let Some(radius) = raw.search_radius
         && radius > 4
-        && !av_denoise_core::codegen_stack_is_sufficient()
+        && !av_denoise::codegen_stack_is_sufficient()
     {
         anyhow::bail!(
             "search_radius {radius} needs a raised stack, but RUST_MIN_STACK is not set. Values above 4 overflow the default 2 MiB stack during kernel codegen"
@@ -431,22 +431,7 @@ pub fn plane_options_from(
 
             let prefilter = match &raw.prefilter {
                 None => PrefilterMode::None,
-                Some(s) => {
-                    let mode = parse_prefilter(s)?;
-                    // `parse_prefilter`'s string grammar has no form
-                    // that produces `External`, but the check stays
-                    // here as a boundary guard rather than trusting
-                    // that invariant silently: `External` needs a
-                    // reference frame supplied through
-                    // `push_frame_with_reference`, which this plugin
-                    // has no way to call.
-                    if matches!(mode, PrefilterMode::External) {
-                        anyhow::bail!(
-                            "prefilter 'external' is not supported by av-denoise-vs, which has no way to supply a reference frame"
-                        );
-                    }
-                    mode
-                },
+                Some(s) => parse_prefilter(s)?,
             };
 
             match variant {

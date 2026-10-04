@@ -1,4 +1,4 @@
-use av_denoise_core::nl4d::kernels::nl4d_mv_regularise;
+use av_denoise_core::bench_api::nl4d_kernels::nl4d_mv_regularise;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;

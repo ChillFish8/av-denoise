@@ -1,4 +1,4 @@
-use av_denoise_core::Planes;
+use av_denoise::Planes;
 use av_denoise_vs::frames::{TailCache, pack_plane, shifted_window_range, unpack_plane_into, window_indices};
 
 /// A strided buffer whose padding bytes are all 0xAA, so a bug that

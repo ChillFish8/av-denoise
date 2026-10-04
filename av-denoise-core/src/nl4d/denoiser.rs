@@ -17,21 +17,17 @@ use crate::collab::kernels::aggregate::{
 use crate::collab::kernels::fused::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, PATCH_SIZE, grid_frames, needs_warp_uniform_search};
-use crate::denoiser::{DenoiserError, FrameOutput, OutputFormat};
 use crate::engine::{DevicePlane, SampleFormat};
 use crate::nlmeans::{
     BLOCK_X,
     BLOCK_Y,
     ChannelMode,
-    Depth,
     MAX_GRID_1D,
     NOISE_CURVE_BINS,
     NlmDenoiser,
-    Pending,
     QuarterClasses,
     RingView,
     StrengthMapParams,
-    start_readback,
 };
 
 /// Which accumulator regions a pass zeroes before scattering.
@@ -81,9 +77,9 @@ enum StreamStart {
 /// only once every pass that can reach it has run.
 ///
 /// Latency is `2 * temporal_radius` pushes, twice the front end's own
-/// window depth. [`Self::denoise_submit`] returns `None` while the front
-/// end's window is still filling, and [`Self::flush`] drains the frames
-/// still held once the input stream ends.
+/// window depth. `submit_passes` returns `None` while the front end's
+/// window is still filling, and `finish_passes` drains the frames still
+/// held once the input stream ends.
 pub struct Nl4dDenoiser<R: Runtime> {
     front: NlmDenoiser<R>,
     width: u32,
@@ -129,21 +125,13 @@ pub struct Nl4dDenoiser<R: Runtime> {
     ///
     /// A pass contributes to every frame in the ring, so a frame's region
     /// stays live across every pass run while it sits in the ring. See
-    /// [`Self::denoise_submit`] for when a region is read back.
+    /// [`Self::submit_passes`] for when a region is read back.
     accum: Handle,
     wsum: Handle,
     /// Two output buffers, alternated so one frame's kernels can overlap
     /// the previous frame's readback.
     outputs: [Handle; 2],
     next_output_slot: usize,
-    /// The format every readback this denoiser starts comes back in.
-    output_format: OutputFormat,
-    /// Packed-word destinations, one per entry of `outputs`, allocated
-    /// only in wire mode.
-    ///
-    /// These buffers rotate on the same slot counter, so each is free again exactly
-    /// when the `f32` slot it is packed from is free.
-    wire_outputs: Option<[Handle; 2]>,
     /// How many passes [`Self::run_pass`] has run for the current stream.
     ///
     /// The stream's first pass zeroes the whole of `accum`/`wsum`, so a
@@ -186,26 +174,9 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// frame smaller than one collaborative patch on either axis.
     pub fn new(
         client: &ComputeClient<R>,
-        params: Nl4dParams,
-        width: u32,
-        height: u32,
-    ) -> Result<Self, String> {
-        Self::with_output_format(client, params, width, height, OutputFormat::F32)
-    }
-
-    /// Builds a new denoiser whose readbacks come back in `output_format`.
-    ///
-    /// [`OutputFormat::Wire`] gives the denoiser a packed-word buffer
-    /// per output slot, so a readback quantises on the GPU and only the
-    /// wire bytes cross the bus.
-    ///
-    /// Rejects the same `params` and dimensions [`Self::new`] does.
-    pub fn with_output_format(
-        client: &ComputeClient<R>,
         mut params: Nl4dParams,
         width: u32,
         height: u32,
-        output_format: OutputFormat,
     ) -> Result<Self, String> {
         params.validate()?;
 
@@ -225,11 +196,9 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         params.nlm.validate().map_err(|e| e.to_string())?;
 
         // The front end only supplies the ring, motion field, and
-        // confidence scores the collaborative stage reads. Its own
-        // buffers never leave the GPU, so it stays in `f32` whatever
-        // format this denoiser hands back.
-        let mut front =
-            NlmDenoiser::with_output_format(client, params.nlm.clone(), width, height, OutputFormat::F32);
+        // confidence scores the collaborative stage reads.
+        let nlm_params = params.nlm.clone();
+        let mut front = NlmDenoiser::new(client, nlm_params, width, height);
 
         let channels = params.nlm.channels;
         let apply_noise_map = params.noise_map && channels != ChannelMode::Chroma;
@@ -281,17 +250,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             client.empty(frame_len * size_of::<f32>()),
             client.empty(frame_len * size_of::<f32>()),
         ];
-        let wire_outputs = match output_format {
-            OutputFormat::F32 => None,
-            OutputFormat::Wire { depth } => {
-                let samples = pixels as u32 * channels.count();
-                let words = samples.div_ceil(depth.wire_pack().samples_per_word()) as usize;
-                Some([
-                    client.empty(words * size_of::<u32>()),
-                    client.empty(words * size_of::<u32>()),
-                ])
-            },
-        };
 
         // `motion_ctx()` panics without motion compensation, and
         // `validate` above already requires it, so this is safe here.
@@ -346,8 +304,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             wsum,
             outputs,
             next_output_slot: 0,
-            output_format,
-            wire_outputs,
             passes_run: 0,
             stream_start: StreamStart::SceneStart,
             last_fields: None,
@@ -364,27 +320,10 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         })
     }
 
-    /// Pushes a new frame into the front end's ring buffer.
+    /// Runs the grouping passes a submit owes.
     ///
-    /// `frame` holds `width * height * channels` `f32` values in
-    /// `[0, 1]`, matching [`NlmDenoiser::push_frame`].
-    pub fn push_frame(&mut self, frame: &[f32]) {
-        self.front.push_frame(frame);
-    }
-
-    /// Pushes a new frame held as wire bytes into the front end's ring
-    /// buffer.
-    ///
-    /// `planes` holds one `width * height` plane per channel at `depth`,
-    /// matching [`NlmDenoiser::push_frame_wire`].
-    pub fn push_frame_wire(&mut self, planes: &[&[u8]], depth: Depth) {
-        self.front.push_frame_wire(planes, depth);
-    }
-
-    /// Runs one submit's worth of grouping, filtering, and aggregation,
-    /// and starts the readback.
-    ///
-    /// Returns `Ok(None)` while the front end's ring is still filling.
+    /// Returns the region the passes completed, or `None` while the ring is still filling or the
+    /// first regions are not yet complete.
     ///
     /// The push that fills a scene's ring runs head passes centred on the
     /// ring's first `temporal_radius` frames, then the pass centred on its
@@ -393,37 +332,11 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     ///
     /// Once more than `temporal_radius` passes have run, each pass centred
     /// on the ring's middle completes the region `temporal_radius` frames
-    /// behind it, and that region is read back. A continuation stream
-    /// skips the head passes, so its first `temporal_radius` submits after
-    /// the ring fills return `Ok(None)`. Latency stays
-    /// `2 * temporal_radius` pushes for a scene start.
-    ///
-    /// There are two output slots, so at most two [`Pending`]s from this
-    /// denoiser may be outstanding at once. A third concurrent submit
-    /// reuses the oldest one's slot and silently corrupts it.
-    ///
-    /// The frame comes back in the [`OutputFormat`] this denoiser was
-    /// built with. [`OutputFormat::Wire`] quantises and packs the frame
-    /// on the GPU before the readback, so only the wire bytes cross the
-    /// bus.
-    pub fn denoise_submit(&mut self) -> Result<Option<Pending<R>>, DenoiserError> {
-        let Some(region) = self.submit_passes()? else {
-            return Ok(None);
-        };
-
-        let output_slot = self.next_output_slot;
-        let handle = self.read_region(region);
-        let wire_dst = self.wire_outputs.as_ref().map(|outputs| &outputs[output_slot]);
-        let pending = self.start_readback(handle, wire_dst, self.output_format);
-
-        Ok(Some(pending))
-    }
-
-    /// Runs the grouping passes a submit owes.
-    ///
-    /// Returns the region the passes completed, or `None` while the ring is still filling or the
-    /// first regions are not yet complete.
-    pub(crate) fn submit_passes(&mut self) -> Result<Option<CompletedRegion>, DenoiserError> {
+    /// behind it. A continuation stream skips the head passes, so its
+    /// first `temporal_radius` submits after the ring fills return
+    /// `Ok(None)`. Latency stays `2 * temporal_radius` pushes for a scene
+    /// start.
+    pub(crate) fn submit_passes(&mut self) -> Result<Option<CompletedRegion>, anyhow::Error> {
         if !self.front.window_ready() {
             return Ok(None);
         }
@@ -482,6 +395,15 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         self.front.placeholder()
     }
 
+    pub(crate) fn compute_client(&self) -> &ComputeClient<R> {
+        self.front.compute_client()
+    }
+
+    /// The frame width, height and channel layout.
+    pub(crate) fn frame_shape(&self) -> (u32, u32, ChannelMode) {
+        (self.width, self.height, self.channels)
+    }
+
     /// Marks the current stream as picking up mid-clip, so it runs no head passes.
     ///
     /// Only has an effect before the stream's first pass.
@@ -492,60 +414,20 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     }
 
     /// Runs the front end's motion and noise machinery for a pass centred on logical ring position `centre`.
-    fn machinery_at(&mut self, centre: u32) -> Result<RingView, DenoiserError> {
+    fn machinery_at(&mut self, centre: u32) -> Result<RingView, anyhow::Error> {
         let view = self.front.submit_machinery(centre)?;
         let view = view.expect("the ring is full whenever a pass runs");
         Ok(view)
     }
 
-    /// Submits and waits for the result in one call.
-    ///
-    /// Prefer [`Self::denoise_submit`] when the caller can hold a frame
-    /// in flight.
-    ///
-    /// The frame comes back in the [`OutputFormat`] this denoiser was
-    /// built with.
-    pub fn denoise(&mut self) -> Result<Option<FrameOutput>, DenoiserError> {
-        let Some(pending) = self.denoise_submit()? else {
-            return Ok(None);
-        };
-        Ok(Some(pending.wait()?))
-    }
-
-    /// Produces the frames still held at the end of a stream.
+    /// Runs the passes a stream's end owes and returns the regions to read out, in emit order.
     ///
     /// A stream that filled its ring runs off-centre passes centred on its
     /// last `temporal_radius` frames, then reads out the last
     /// `2 * temporal_radius` frames' regions. A stream too short to fill
     /// its ring pads the ring with copies of its last frame, runs every
     /// real frame as a centre, then reads out every real frame.
-    ///
-    /// `sink` is called once per frame, in order, and the frame it
-    /// receives is only valid for that call. It arrives in the
-    /// [`OutputFormat`] this denoiser was built with, quantised by the
-    /// same pack kernel as every streaming frame.
-    pub fn flush(&mut self, mut sink: impl FnMut(&FrameOutput)) -> Result<(), DenoiserError> {
-        let regions = self.finish_passes()?;
-
-        // Every output slot is free here. A caller reaches a flush only
-        // once its streaming readbacks have landed, and each readback
-        // below blocks before the next region reuses a slot.
-        for region in regions {
-            let output_slot = self.next_output_slot;
-            let handle = self.read_region(region);
-            let wire_dst = self.wire_outputs.as_ref().map(|outputs| &outputs[output_slot]);
-            let pending = self.start_readback(handle, wire_dst, self.output_format);
-            let frame = pending.wait()?;
-            sink(&frame);
-        }
-
-        self.reset_stream();
-
-        Ok(())
-    }
-
-    /// Runs the passes a stream's end owes and returns the regions to read out, in emit order.
-    pub(crate) fn finish_passes(&mut self) -> Result<Vec<CompletedRegion>, DenoiserError> {
+    pub(crate) fn finish_passes(&mut self) -> Result<Vec<CompletedRegion>, anyhow::Error> {
         let emit = self.flush_target() as u32;
         if emit == 0 {
             return Ok(Vec::new());
@@ -565,7 +447,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         };
 
         // A full ring with no pass run means a caller primed every slot
-        // through pushes alone and never called `denoise_submit`, so
+        // through pushes alone and never called `submit_passes`, so
         // `accum`/`wsum` are still whatever the last stream, or nothing
         // at all, left in them. The tail path's first pass has to clear
         // the whole ring in that case, the same as a short stream does.
@@ -635,7 +517,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// Reads back the grain chunks measured since the last call. Empty when export is off.
     ///
     /// Measured chunks stay on the GPU until drained, so callers drain after each flush.
-    pub fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, DenoiserError> {
+    pub fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, anyhow::Error> {
         let Some(grain) = self.grain.as_mut() else {
             return Ok(Vec::new());
         };
@@ -662,8 +544,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         &self.front
     }
 
-    /// How many tail frames [`Self::flush`] must emit for the stream
-    /// pushed so far.
+    /// How many tail frames [`Self::finish_passes`] must emit for the
+    /// stream pushed so far.
     ///
     /// A stream that filled its ring holds `2 * temporal_radius` frames
     /// whose regions are not yet read out. A shorter stream holds every
@@ -693,7 +575,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// `temporal_radius` ahead of the centre, which the newest frame has
     /// just taken over. [`AccumClear::Nothing`] leaves every region as it
     /// is, for an edge pass that sees no new frame.
-    fn run_pass(&mut self, view: &RingView, clear: AccumClear) -> Result<(), DenoiserError> {
+    fn run_pass(&mut self, view: &RingView, clear: AccumClear) -> Result<(), anyhow::Error> {
         // The frame-slot contract: `collab_fused`'s `centre_slot` and
         // the ring view's own centre must be the same physical slot, or
         // a member gets grouped against one frame and scattered as
@@ -802,8 +684,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                     self.front.thsad_value(),
                     mv,
                     conf,
-                )
-                .map_err(DenoiserError::Other)?;
+                )?;
                 (mv.clone(), conf.clone())
             },
             _ => (view.mv_field.clone(), view.confidence.clone()),
@@ -959,30 +840,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         }
 
         (self.outputs[slot].clone(), slot)
-    }
-
-    /// Starts an async readback of `handle`, wrapped in the same
-    /// [`Pending`] type [`NlmDenoiser`] returns.
-    ///
-    /// `wire_dst` is the packed-word buffer belonging to the slot
-    /// `handle` came from, and is `None` for an `f32` readback.
-    fn start_readback(&self, handle: Handle, wire_dst: Option<&Handle>, format: OutputFormat) -> Pending<R> {
-        let pixels = (self.width * self.height) as usize;
-        start_readback(
-            self.front.compute_client(),
-            handle,
-            wire_dst,
-            self.channels.count(),
-            self.channels.storage_count(),
-            pixels,
-            format,
-        )
-    }
-
-    /// The packed-word destinations, which are `Some` only in wire mode.
-    #[cfg(test)]
-    pub(crate) fn wire_outputs_for_test(&self) -> Option<&[Handle; 2]> {
-        self.wire_outputs.as_ref()
     }
 }
 

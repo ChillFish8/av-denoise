@@ -1,4 +1,4 @@
-use av_denoise_core::engine_kernels::{ingest_f32, ingest_words};
+use av_denoise_core::bench_api::engine_kernels::{ingest_f32, ingest_words};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;

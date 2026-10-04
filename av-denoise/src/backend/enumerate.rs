@@ -1,9 +1,9 @@
 use cubecl::device::DeviceId;
 use cubecl::prelude::*;
 
-use crate::accelerate::Accelerator;
-use crate::device::Device;
-use crate::probe::open_client;
+use super::accelerate::Accelerator;
+use super::device::Device;
+use super::probe::open_client;
 
 /// What one backend reports about this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,7 +76,7 @@ fn unavailable(accelerator: Accelerator) -> BackendDevices {
 ///
 /// A backend that cannot open a client at all, because its driver
 /// libraries are missing, is reported as unavailable rather than
-/// allowed to take the process down. See [`probe`](crate::probe).
+/// allowed to take the process down. See [`probe`](crate::backend::probe).
 fn query_runtime<R: Runtime>(accelerator: Accelerator, device: &R::Device) -> BackendDevices {
     let Some(client) = open_client::<R>(accelerator, device) else {
         return unavailable(accelerator);

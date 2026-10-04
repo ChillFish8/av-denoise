@@ -1,4 +1,5 @@
 use super::helpers::{R, make_client, noisy_copy_of, static_clip_params};
+use crate::bench_api::HostIo;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 
 const WIDTH: u32 = 96;
@@ -36,17 +37,15 @@ fn denoise(params: Nl4dParams, frames: &[Vec<f32>]) -> Vec<Vec<f32>> {
     let mut outputs = Vec::new();
     for frame in frames {
         denoiser.push_frame(frame);
-        let pending = denoiser.denoise_submit().expect("denoise_submit failed");
-        if let Some(pending) = pending {
-            let output = pending.wait().expect("readback failed");
-            let output_frame = output.into_f32().expect("f32 output");
+        let output = denoiser.denoise().expect("denoise failed");
+        if let Some(output_frame) = output {
             outputs.push(output_frame);
         }
     }
 
     denoiser
         .flush(|frame| {
-            let output_frame = frame.as_f32().expect("f32 denoiser").to_vec();
+            let output_frame = frame.to_vec();
             outputs.push(output_frame);
         })
         .expect("flush failed");

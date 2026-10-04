@@ -1,4 +1,5 @@
 use super::helpers::{R, make_client, unit_noise};
+use crate::bench_api::HostIo;
 use crate::collab::kernels::fused::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA};
 use crate::nl4d::denoiser::strength_map_upload;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
@@ -154,19 +155,17 @@ fn denoise_clip(params: Nl4dParams, frames: &[Vec<f32>]) -> ClipRun {
     let mut classes_seen = false;
     for frame in frames {
         denoiser.push_frame(frame);
-        let pending = denoiser.denoise_submit().expect("denoise_submit failed");
+        let output = denoiser.denoise().expect("denoise failed");
         classes_seen |= denoiser.front_for_test().current_quarter_classes().is_some();
 
-        if let Some(pending) = pending {
-            let output = pending.wait().expect("readback failed");
-            let output_frame = output.into_f32().expect("f32 output");
+        if let Some(output_frame) = output {
             outputs.push(output_frame);
         }
     }
 
     denoiser
         .flush(|frame| {
-            let output_frame = frame.as_f32().expect("f32 denoiser").to_vec();
+            let output_frame = frame.to_vec();
             outputs.push(output_frame);
         })
         .expect("flush failed");

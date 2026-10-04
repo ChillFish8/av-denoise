@@ -8,9 +8,9 @@
 
 use std::path::PathBuf;
 
-use av_denoise_core::nl4d::harness::{Clip, KindScore, MotionClass, Score, Still, score, synthesise};
-use av_denoise_core::nl4d::{Nl4dDenoiser, Nl4dParams};
-use av_denoise_core::nlmeans::{ChannelMode, MotionCompensationMode, NlmParams};
+use av_denoise_core::bench_api::harness::{Clip, KindScore, MotionClass, Score, Still, score, synthesise};
+use av_denoise_core::bench_api::{Device, HostIo, Nl4dDenoiser, Nl4dParams, NlmParams};
+use av_denoise_core::{ChannelMode, MotionCompensationMode};
 use cubecl::prelude::*;
 
 /// Grain levels on the 8-bit scale.
@@ -95,7 +95,7 @@ fn run_clip<R: Runtime>(client: &ComputeClient<R>, params: Nl4dParams, clip: &Cl
     let mut d = Nl4dDenoiser::<R>::new(client, params, clip.width, clip.height).expect("construction failed");
     for frame in &clip.frames {
         d.push_frame(frame);
-        let _ = d.denoise_submit().expect("denoise_submit failed");
+        let _ = d.denoise().expect("denoise failed");
     }
     let snap = d.motion_snapshot().expect("a pass ran once the window filled");
     score(clip, &snap, refine)
@@ -143,7 +143,7 @@ struct Cli {
     /// GPU device to bind to. Format: `default`, `discrete[:N]`,
     /// `integrated[:N]`, `virtual[:N]`, or `cpu`.
     #[arg(long, default_value = "default")]
-    device: av_denoise_core::Device,
+    device: Device,
 
     /// A still to build clips from, as `name=path.pgm`. Repeatable.
     #[arg(long = "still")]

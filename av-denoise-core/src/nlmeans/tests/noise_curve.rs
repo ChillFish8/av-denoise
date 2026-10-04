@@ -1,4 +1,5 @@
 use super::helpers::*;
+use crate::bench_api::HostIo;
 use crate::nlmeans::noise::{
     NoiseCurve,
     QUARTER_FLATNESS,

@@ -309,7 +309,7 @@ def _parity_source_filter():
 PARITY_TEMPORAL_RADIUS = 2
 
 # nl4d's WindowSpan is `{behind: 2 * radius, ahead: 2 * radius}`
-# (av-denoise-core/src/denoiser.rs, `PlanarDenoiser::window_span`), so a
+# (av-denoise/src/planar/mod.rs, `PlanarDenoiser::window_span`), so a
 # window reaches `2 * radius` frames behind its centre. Those are the
 # only output frames close enough to the clip's start for the two front
 # ends' leading-edge padding to differ: `reseed` (what the plugin's
@@ -324,7 +324,7 @@ PARITY_LEADING_EDGE_FRAMES = 2 * PARITY_TEMPORAL_RADIUS
 
 # The bound the leading edge frames are allowed to drift within, the
 # same value and reasoning as `BEHIND_EDGE_TOLERANCE` in
-# av-denoise-core/src/frame/tests.rs: full-range luma codes span 255,
+# av-denoise/src/planar/tests/mod.rs: full-range luma codes span 255,
 # and the extra duplicated history moves the result by at most a
 # handful of 8-bit codes.
 PARITY_LEADING_EDGE_TOLERANCE = 8

@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::helpers::noisy_frames;
-use crate::denoiser::FrameOutput;
+use crate::bench_api::HostIo;
 use crate::engine::{DevicePlane, EdgePadding, Engine, Geometry, SampleFormat};
 use crate::error::Error;
 use crate::nl4d::grain::GrainChunk;
@@ -184,7 +184,9 @@ fn run_engine(options: Nl4dOptions, channels: ChannelMode, frames: &[Vec<f32>], 
 
     finish_and_emit(&mut engine, &client, count, &mut outputs);
 
-    let grain = engine.drain_grain_chunks().expect("grain");
+    // Drained through the trait object, the way the host layer reaches it.
+    let dyn_engine: &mut dyn Engine = &mut engine;
+    let grain = dyn_engine.drain_grain_chunks().expect("grain");
 
     Run {
         frames: outputs,
@@ -211,14 +213,13 @@ fn run_oracle(options: Nl4dOptions, channels: ChannelMode, frames: &[Vec<f32>], 
         }
 
         let output = denoiser.denoise().expect("denoise");
-        if let Some(output) = output {
-            let samples = output.as_f32().expect("f32").to_vec();
+        if let Some(samples) = output {
             outputs.push(samples);
         }
     }
 
-    let collect = |output: &FrameOutput| {
-        let samples = output.as_f32().expect("f32").to_vec();
+    let collect = |output: &[f32]| {
+        let samples = output.to_vec();
         outputs.push(samples);
     };
     denoiser.flush(collect).expect("flush");

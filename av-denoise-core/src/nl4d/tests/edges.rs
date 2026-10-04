@@ -1,4 +1,5 @@
 use super::helpers::{R, SIGMA, make_client, noisy_copy_of, static_clip_params, textured_base};
+use crate::bench_api::HostIo;
 use crate::nl4d::Nl4dDenoiser;
 
 const SIZE: u32 = 64;
@@ -17,19 +18,17 @@ fn run_stream(radius: u32, count: u32) -> (Vec<Vec<f32>>, Option<u32>) {
         let frame = noisy_copy_of(&base, SIZE, SIZE, SIGMA, seed);
         denoiser.push_frame(&frame);
 
-        let Some(pending) = denoiser.denoise_submit().expect("denoise_submit failed") else {
+        let Some(values) = denoiser.denoise().expect("denoise failed") else {
             continue;
         };
 
         first_output_at.get_or_insert(seed + 1);
-        let frame = pending.wait().expect("readback failed");
-        let values = frame.into_f32().expect("f32 output");
         outputs.push(values);
     }
 
     denoiser
         .flush(|frame| {
-            let values = frame.as_f32().expect("f32 output").to_vec();
+            let values = frame.to_vec();
             outputs.push(values);
         })
         .expect("flush failed");
@@ -64,8 +63,7 @@ fn first_output_push(denoiser: &mut Nl4dDenoiser<R>, count: u32, first_seed: u32
         let frame = noisy_copy_of(&base, SIZE, SIZE, SIGMA, first_seed + push);
         denoiser.push_frame(&frame);
 
-        if let Some(pending) = denoiser.denoise_submit().expect("denoise_submit failed") {
-            pending.wait().expect("readback failed");
+        if denoiser.denoise().expect("denoise failed").is_some() {
             first_output_at.get_or_insert(push + 1);
         }
     }
@@ -171,7 +169,7 @@ fn a_full_ring_primed_without_any_submit_flushes_without_black_output() {
     let mut outputs = Vec::new();
     denoiser
         .flush(|frame| {
-            let values = frame.as_f32().expect("f32 output").to_vec();
+            let values = frame.to_vec();
             outputs.push(values);
         })
         .expect("flush failed");

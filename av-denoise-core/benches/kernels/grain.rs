@@ -1,4 +1,4 @@
-use av_denoise_core::nl4d::kernels::{grain_measure, grain_reduce_partials, grain_save_vectors};
+use av_denoise_core::bench_api::nl4d_kernels::{grain_measure, grain_reduce_partials, grain_save_vectors};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;

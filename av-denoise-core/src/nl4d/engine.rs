@@ -7,7 +7,6 @@ use super::denoiser::{CompletedRegion, Nl4dDenoiser};
 use super::grain::GrainChunk;
 use super::options::{Nl4dOptions, resolve_params};
 use crate::collab::PATCH_SIZE;
-use crate::denoiser::OutputFormat;
 use crate::engine::{DevicePlane, EdgePadding, EgressSource, Engine, Geometry, WindowSpan, egress};
 use crate::error::Error;
 
@@ -40,13 +39,7 @@ impl<R: Runtime> Nl4d<R> {
         geometry.validate()?;
 
         let params = resolve_params(&options, geometry.channels)?;
-        let inner = Nl4dDenoiser::with_output_format(
-            client,
-            params,
-            geometry.width,
-            geometry.height,
-            OutputFormat::F32,
-        );
+        let inner = Nl4dDenoiser::new(client, params, geometry.width, geometry.height);
         let inner = inner.map_err(Error::InvalidOptions)?;
 
         Ok(Self {
@@ -59,16 +52,6 @@ impl<R: Runtime> Nl4d<R> {
             pushes: 0,
             poisoned: false,
         })
-    }
-
-    /// Takes the grain chunks measured since the last call.
-    pub fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, Error> {
-        self.check_usable()?;
-
-        let drained = self.inner.drain_grain_chunks();
-        let drained = drained.map_err(anyhow::Error::from);
-
-        self.guard(drained)
     }
 
     fn check_usable(&self) -> Result<(), Error> {
@@ -133,7 +116,6 @@ impl<R: Runtime> Engine for Nl4d<R> {
         self.guard(pushed)?;
 
         let submitted = self.inner.submit_passes();
-        let submitted = submitted.map_err(anyhow::Error::from);
         let region = self.guard(submitted)?;
         if let Some(region) = region {
             self.pending.push_back(region);
@@ -184,7 +166,6 @@ impl<R: Runtime> Engine for Nl4d<R> {
         self.check_nothing_pending()?;
 
         let finished = self.inner.finish_passes();
-        let finished = finished.map_err(anyhow::Error::from);
         let regions = self.guard(finished)?;
 
         let count = regions.len();
@@ -217,5 +198,12 @@ impl<R: Runtime> Engine for Nl4d<R> {
 
     fn max_held_frames(&self) -> usize {
         2 * self.temporal_radius as usize
+    }
+
+    fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, Error> {
+        self.check_usable()?;
+
+        let drained = self.inner.drain_grain_chunks();
+        self.guard(drained)
     }
 }

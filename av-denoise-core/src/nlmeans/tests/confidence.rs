@@ -1,6 +1,7 @@
 use cubecl::prelude::*;
 
 use super::helpers::*;
+use crate::bench_api::HostIo;
 use crate::nlmeans::kernels::motion::nlm_mc_block_match_fine;
 use crate::nlmeans::motion::{
     MotionCompensationMode,

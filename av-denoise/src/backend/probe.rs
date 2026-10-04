@@ -17,7 +17,7 @@ use std::sync::Mutex;
 use cubecl::client::ComputeClient;
 use cubecl::prelude::*;
 
-use crate::accelerate::Accelerator;
+use super::accelerate::Accelerator;
 
 /// Backends already reported as unavailable, and the lock guarding the
 /// panic hook.

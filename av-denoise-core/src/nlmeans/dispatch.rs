@@ -135,14 +135,12 @@ const BILATERAL_RESIDUAL_FRACTION: f32 = 0.0;
 /// 0 means the raw floor contributes nothing, and 1 is the old
 /// behaviour this replaced. Those are the sweep grid's two endpoints.
 ///
-/// An `External` reference comes from the caller with unknown noise, and
-/// is not something this crate denoised, so it keeps the raw sigma just
-/// as `PrefilterMode::None` does.
+/// `PrefilterMode::None` keeps the raw sigma.
 pub(super) fn mc_sad_noise_floor_sigma(prefilter: PrefilterMode, sigma_y: f32) -> f32 {
     match prefilter {
         PrefilterMode::NlmSpatial { .. } => sigma_y * NLM_SPATIAL_RESIDUAL_FRACTION,
         PrefilterMode::Bilateral { .. } => sigma_y * BILATERAL_RESIDUAL_FRACTION,
-        PrefilterMode::External | PrefilterMode::None => sigma_y,
+        PrefilterMode::None => sigma_y,
     }
 }
 
@@ -1423,9 +1421,8 @@ mod tests {
     }
 
     #[test]
-    fn mc_sad_noise_floor_sigma_keeps_raw_sigma_for_none_and_external() {
+    fn mc_sad_noise_floor_sigma_keeps_raw_sigma_for_none() {
         let raw = 0.02f32;
         assert_eq!(mc_sad_noise_floor_sigma(PrefilterMode::None, raw), raw);
-        assert_eq!(mc_sad_noise_floor_sigma(PrefilterMode::External, raw), raw);
     }
 }

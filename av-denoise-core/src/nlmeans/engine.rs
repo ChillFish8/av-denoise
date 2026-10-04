@@ -4,7 +4,6 @@ use cubecl::server::Handle;
 use super::denoiser::{GpuOutput, NlmDenoiser};
 use super::options::{NlmeansAlgorithm, resolve_params};
 use super::params::validate_dimensions;
-use crate::denoiser::OutputFormat;
 use crate::engine::{DevicePlane, EdgePadding, EgressSource, Engine, Geometry, WindowSpan, egress};
 use crate::error::Error;
 
@@ -41,13 +40,7 @@ impl<R: Runtime> Nlmeans<R> {
             Error::InvalidOptions(message)
         })?;
 
-        let front = NlmDenoiser::with_output_format(
-            client,
-            params,
-            geometry.width,
-            geometry.height,
-            OutputFormat::F32,
-        );
+        let front = NlmDenoiser::new(client, params, geometry.width, geometry.height);
 
         Ok(Self {
             front,

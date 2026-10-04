@@ -1,4 +1,4 @@
-use av_denoise_core::nlmeans::kernels::motion::nlm_mc_downscale;
+use av_denoise_core::bench_api::kernels::motion::nlm_mc_downscale;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;

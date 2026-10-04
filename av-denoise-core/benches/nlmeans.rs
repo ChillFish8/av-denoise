@@ -1,17 +1,19 @@
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use av_denoise_core::nlmeans::kernels::{nlm_accumulate, nlm_bilateral, nlm_dist_2d_weight, nlm_finish};
-use av_denoise_core::nlmeans::prefilter::bilateral_radius;
-use av_denoise_core::nlmeans::{
+use av_denoise_core::bench_api::kernels::{nlm_accumulate, nlm_bilateral, nlm_dist_2d_weight, nlm_finish};
+use av_denoise_core::bench_api::prefilter::bilateral_radius;
+use av_denoise_core::bench_api::{
     BLOCK_X,
     BLOCK_Y,
-    ChannelMode,
+    Device,
+    HostIo,
     NlmDenoiser,
     NlmParams,
-    Pending,
-    PrefilterMode,
+    start_read,
+    wait_read,
 };
+use av_denoise_core::{ChannelMode, PrefilterMode};
 use cubecl::prelude::*;
 
 const W: u32 = 1920;
@@ -333,21 +335,6 @@ fn denoise_params(channels: ChannelMode, temporal_radius: u32, prefilter: Prefil
     }
 }
 
-/// Push a frame (and, when needed, a matching reference) for the
-/// configured prefilter mode. Used by the streaming pipeline benches so
-/// the same push pattern works for `External` and non-`External` modes.
-fn push_frame_for_prefilter<R: Runtime>(
-    denoiser: &mut NlmDenoiser<R>,
-    frame: &[f32],
-    supply_reference: bool,
-) {
-    if supply_reference {
-        denoiser.push_frame_with_reference(frame, frame);
-    } else {
-        denoiser.push_frame(frame);
-    }
-}
-
 /// Steady-state streaming bench: every iteration pushes a fresh frame
 /// (the real per-frame cost: upload plus optional prefilter) and then
 /// calls the synchronous `denoise()` which waits for the readback. This
@@ -363,20 +350,14 @@ fn bench_denoise_spatial<R: Runtime>(
     let ch = channels.count();
     let params = denoise_params(channels, 0, prefilter);
     let frame = make_synthetic_frame(W, H, ch);
-    let supply_reference = matches!(prefilter, PrefilterMode::External);
     let name = format!("denoise_spatial{tag}_1080p_{ch_name}");
 
     let mut denoiser = NlmDenoiser::<R>::new(client, params, W, H);
     futures::executor::block_on(client.sync()).unwrap();
 
     run_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
-        push_frame_for_prefilter(&mut denoiser, &frame, supply_reference);
-        let result = denoiser
-            .denoise()
-            .unwrap()
-            .unwrap()
-            .as_f32()
-            .expect("f32 denoiser");
+        denoiser.push_frame(&frame);
+        let result = denoiser.denoise().unwrap().unwrap();
         black_box(&result);
     })
 }
@@ -396,23 +377,17 @@ fn bench_denoise_temporal<R: Runtime>(
     let params = denoise_params(channels, 1, prefilter);
     let frame = make_synthetic_frame(W, H, ch);
     let total_frames = 1 + 2 * params.temporal_radius as usize;
-    let supply_reference = matches!(prefilter, PrefilterMode::External);
     let name = format!("denoise_temporal{tag}_1080p_{ch_name}");
 
     let mut denoiser = NlmDenoiser::<R>::new(client, params, W, H);
     for _ in 0..total_frames - 1 {
-        push_frame_for_prefilter(&mut denoiser, &frame, supply_reference);
+        denoiser.push_frame(&frame);
     }
     futures::executor::block_on(client.sync()).unwrap();
 
     run_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
-        push_frame_for_prefilter(&mut denoiser, &frame, supply_reference);
-        let result = denoiser
-            .denoise()
-            .unwrap()
-            .unwrap()
-            .as_f32()
-            .expect("f32 denoiser");
+        denoiser.push_frame(&frame);
+        let result = denoiser.denoise().unwrap().unwrap();
         black_box(&result);
     })
 }
@@ -433,30 +408,33 @@ fn bench_denoise_temporal_pipelined<R: Runtime>(
     let params = denoise_params(channels, 1, prefilter);
     let frame = make_synthetic_frame(W, H, ch);
     let total_frames = 1 + 2 * params.temporal_radius as usize;
-    let supply_reference = matches!(prefilter, PrefilterMode::External);
     let name = format!("denoise_temporal_pipelined{tag}_1080p_{ch_name}");
 
     let mut denoiser = NlmDenoiser::<R>::new(client, params, W, H);
     for _ in 0..total_frames - 1 {
-        push_frame_for_prefilter(&mut denoiser, &frame, supply_reference);
+        denoiser.push_frame(&frame);
     }
     futures::executor::block_on(client.sync()).unwrap();
 
-    // Prime the pipeline with one outstanding `Pending` so every measured
+    // Prime the pipeline with one outstanding readback so every measured
     // iteration has previous work to wait on.
-    push_frame_for_prefilter(&mut denoiser, &frame, supply_reference);
-    let mut in_flight: Option<Pending<R>> = Some(denoiser.denoise_submit().unwrap().unwrap());
+    denoiser.push_frame(&frame);
+    let first = denoiser.denoise_submit_gpu().unwrap().unwrap();
+    let mut in_flight = Some(start_read(client, first.handle));
 
     let result = run_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
-        push_frame_for_prefilter(&mut denoiser, &frame, supply_reference);
-        let next = denoiser.denoise_submit().unwrap().unwrap();
-        let output = in_flight.take().unwrap().wait().unwrap();
+        denoiser.push_frame(&frame);
+        let next = denoiser.denoise_submit_gpu().unwrap().unwrap();
+        let next_read = start_read(client, next.handle);
+
+        let previous = in_flight.take().unwrap();
+        let output = wait_read(previous);
         black_box(&output);
-        in_flight = Some(next);
+        in_flight = Some(next_read);
     });
 
-    if let Some(pending) = in_flight.take() {
-        let _ = pending.wait().unwrap();
+    if let Some(read) = in_flight.take() {
+        let _ = wait_read(read);
     }
     result
 }
@@ -466,7 +444,6 @@ const BILATERAL_SIGMA_R: f32 = 0.02;
 
 const DENOISE_VARIANTS: &[(PrefilterMode, &str)] = &[
     (PrefilterMode::None, ""),
-    (PrefilterMode::External, "_rclip_external"),
     (
         PrefilterMode::Bilateral {
             sigma_s: BILATERAL_SIGMA_S,
@@ -520,9 +497,6 @@ fn run_all_benches<R: Runtime>(backend: &str, device: &R::Device) {
 
     for &(_, ch_name, mode) in &channels {
         for &(prefilter, tag) in DENOISE_VARIANTS {
-            if matches!(prefilter, PrefilterMode::External) {
-                continue;
-            }
             bench_denoise_temporal::<R>(&client, backend, mode, ch_name, prefilter, tag).print();
             bench_denoise_temporal_pipelined::<R>(&client, backend, mode, ch_name, prefilter, tag).print();
         }
@@ -538,7 +512,7 @@ struct Cli {
     /// GPU device to bind to. Format: `default`, `discrete[:N]`,
     /// `integrated[:N]`, `virtual[:N]`, or `cpu`.
     #[arg(long, default_value = "default")]
-    device: av_denoise_core::Device,
+    device: Device,
 
     /// Swallowed: cargo passes this when invoking the bench binary.
     #[arg(long, hide = true)]

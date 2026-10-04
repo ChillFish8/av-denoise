@@ -1,9 +1,13 @@
-use av_denoise_core::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
-use av_denoise_core::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
-use av_denoise_core::collab::kernels::fused::{STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF, collab_fused};
-use av_denoise_core::collab::kernels::transforms::dct_noise_profile;
-use av_denoise_core::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
-use av_denoise_core::nlmeans::NOISE_CURVE_BINS;
+use av_denoise_core::bench_api::NOISE_CURVE_BINS;
+use av_denoise_core::bench_api::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
+use av_denoise_core::bench_api::collab::kernels::aggregate::{
+    cross_frame_accum_scale,
+    kaiser_window,
+    weight_scale,
+};
+use av_denoise_core::bench_api::collab::kernels::fused::{STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF, collab_fused};
+use av_denoise_core::bench_api::collab::kernels::transforms::dct_noise_profile;
+use av_denoise_core::bench_api::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;

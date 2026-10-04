@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use anyhow::{Error, Result, anyhow};
-use av_denoise_core::{EdgePadding, FrameLayout, PlanarDenoiser, Planes, ReseedWindow, WarmUp, WindowSpan};
+use av_denoise::{EdgePadding, FrameLayout, PlanarDenoiser, Planes, ReseedWindow, WarmUp, WindowSpan};
 use vapoursynth::core::CoreRef;
 use vapoursynth::plugins::{Filter, FrameContext};
 use vapoursynth::prelude::{API, FrameRef, FrameRefMut, Node, Property};
@@ -101,7 +101,7 @@ impl<'core> Denoise<'core> {
         // gets. The host may already have other threads touching the
         // environment, so this cannot guarantee exclusive access, but the
         // alternative is a hard abort during codegen.
-        unsafe { av_denoise_core::raise_codegen_stack_limit() };
+        unsafe { av_denoise::raise_codegen_stack_limit() };
 
         let info = source.info();
 
@@ -128,8 +128,8 @@ impl<'core> Denoise<'core> {
         // chunk pays the ten seconds it takes to compile the kernels.
         // The queue below keeps the first wave of chunks from all paying
         // it at once.
-        av_denoise_core::install_compilation_cache_once();
-        let warm_up = WarmUp::begin(av_denoise_core::kernel_key(&plane_options, layout));
+        av_denoise::install_compilation_cache_once();
+        let warm_up = WarmUp::begin(av_denoise::kernel_key(&plane_options, layout));
 
         let denoiser = PlanarDenoiser::create(&plane_options, layout)?;
         let span = denoiser.window_span();

@@ -235,7 +235,7 @@ pub struct HqParams {
     /// `false`, the default, keeps the temporal EMA every calibrated
     /// preset assumes. `true` makes the automatic estimate depend only
     /// on the frames currently in the window, so a
-    /// [`crate::frame::PlanarDenoiser::reseed`] targeting frame `n` and
+    /// reseed targeting frame `n` and
     /// a continuous stream that reaches frame `n` compute the same
     /// sigma, regardless of how each got there. This does nothing when
     /// `sigma_override` pins a fixed value, because the estimator never

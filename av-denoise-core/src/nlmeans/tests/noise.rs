@@ -2,7 +2,6 @@ use cubecl::prelude::*;
 
 use super::helpers::*;
 use crate::nlmeans::noise::{NoiseCtx, partials_len, run_noise_estimate, sigma_from_abs_sum};
-use crate::nlmeans::{Depth, denormalize, normalize};
 
 /// Uploads `dense` (packed `pixels * ch`) as the padded GPU storage
 /// layout and runs both noise-estimate stages for a single frame in a
@@ -137,10 +136,15 @@ fn noise_estimate_gradient_bias_bounded() {
     );
 }
 
-/// Quantises a normalised frame through a given depth and back, the
-/// round trip a real source of that depth goes through.
-fn requantise(frame: &[f32], depth: Depth) -> Vec<f32> {
-    normalize(&denormalize(frame, depth), depth)
+/// Quantises a normalised frame to `bits` and back, the round trip a
+/// real source of that depth goes through.
+fn requantise(frame: &[f32], bits: u32) -> Vec<f32> {
+    let max = ((1u32 << bits) - 1) as f32;
+
+    frame
+        .iter()
+        .map(|&value| (value * max).round().clamp(0.0, max) / max)
+        .collect()
 }
 
 /// The same content at 8-bit and at 10-bit must yield the same measured
@@ -155,8 +159,8 @@ fn sigma_estimate_agrees_across_bit_depths() {
 
     let frame = make_noisy_gaussian_frame(w, h, 1, 0.5, &[true_sigma]);
 
-    let eight = requantise(&frame, Depth::Eight);
-    let ten = requantise(&frame, Depth::Ten);
+    let eight = requantise(&frame, 8);
+    let ten = requantise(&frame, 10);
 
     let sigma_eight = sigma_from_abs_sum(estimate_abs_sums(w, h, 1, 1, &eight)[0], w, h);
     let sigma_ten = sigma_from_abs_sum(estimate_abs_sums(w, h, 1, 1, &ten)[0], w, h);
@@ -188,8 +192,8 @@ fn fine_grain_survives_ten_bit_quantisation() {
     let true_sigma = 0.5 / 255.0;
 
     let frame = make_noisy_gaussian_frame(w, h, 1, 0.5, &[true_sigma]);
-    let ten = requantise(&frame, Depth::Ten);
-    let eight = requantise(&frame, Depth::Eight);
+    let ten = requantise(&frame, 10);
+    let eight = requantise(&frame, 8);
 
     let estimated = sigma_from_abs_sum(estimate_abs_sums(w, h, 1, 1, &ten)[0], w, h);
     let err = (estimated - true_sigma).abs() / true_sigma;

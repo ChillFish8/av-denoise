@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use cubecl::hash::StableHasher;
 
 use crate::cache::compilation_cache_dir;
-use crate::frame::{FrameLayout, PlaneOptions};
+use crate::planar::{FrameLayout, PlaneOptions};
 
 /// How long a process waits for the one ahead of it before giving up and
 /// compiling for itself.

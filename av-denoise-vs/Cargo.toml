@@ -10,15 +10,15 @@ description = "VapourSynth core low-level plugin for av-denoise providing fast, 
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-av-denoise-core.workspace = true
+av-denoise.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 vapoursynth = "0.5.6"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
-vulkan = ["av-denoise-core/vulkan"]
-metal = ["av-denoise-core/metal"]
-cuda = ["av-denoise-core/cuda"]
-rocm = ["av-denoise-core/rocm"]
+vulkan = ["av-denoise/vulkan"]
+metal = ["av-denoise/metal"]
+cuda = ["av-denoise/cuda"]
+rocm = ["av-denoise/rocm"]
 default = ["vulkan"]

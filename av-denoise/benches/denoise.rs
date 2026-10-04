@@ -1,13 +1,14 @@
 use std::time::{Duration, Instant};
 
-use av_denoise_core::accelerate::Accelerator;
-use av_denoise_core::{
+use av_denoise::accelerate::Accelerator;
+use av_denoise::{
     Algorithm,
     ChannelMode,
-    Denoiser,
+    DenoiserError,
     DenoiserOptions,
     DenoisingMode,
     Device,
+    HostDenoiser,
     MotionCompensationMode,
     NlmeansOptions,
     PrefilterMode,
@@ -32,7 +33,7 @@ struct Cli {
 
     /// Accelerator priority list (comma-delimited). Defaults to all
     /// compiled-in accelerators.
-    #[arg(long, value_delimiter = ',', default_values_t = av_denoise_core::accelerate::get_default_accelerators())]
+    #[arg(long, value_delimiter = ',', default_values_t = av_denoise::accelerate::get_default_accelerators())]
     accelerators: Vec<Accelerator>,
 
     /// Swallowed: cargo passes this when invoking the bench binary.
@@ -40,22 +41,27 @@ struct Cli {
     bench: bool,
 }
 
-fn make_synthetic_frame(w: u32, h: u32, ch: u32) -> Vec<f32> {
-    let mut data = Vec::with_capacity((w * h * ch) as usize);
+/// One 8-bit plane per channel, a smooth pattern plus hashed noise.
+fn make_synthetic_planes(w: u32, h: u32, ch: u32) -> Vec<Vec<u8>> {
+    let mut planes = vec![Vec::with_capacity((w * h) as usize); ch as usize];
+
     for y in 0..h {
         for x in 0..w {
             let base = 0.5 + 0.2 * (x as f32 * 0.05).sin() * (y as f32 * 0.03).cos();
-            for c in 0..ch {
-                let seed = (y * w + x) * ch + c;
+
+            for (c, plane) in planes.iter_mut().enumerate() {
+                let seed = (y * w + x) * ch + c as u32;
                 let hash = seed
                     .wrapping_mul(2654435761)
                     .wrapping_add(seed.wrapping_mul(340573321));
                 let noise = (hash as f32 / u32::MAX as f32 - 0.5) * 0.1;
-                data.push((base + noise).clamp(0.0, 1.0));
+                let value = (base + noise).clamp(0.0, 1.0);
+                plane.push((value * 255.0 + 0.5) as u8);
             }
         }
     }
-    data
+
+    planes
 }
 
 struct BenchResult {
@@ -104,9 +110,11 @@ fn bench_push_recv(
     algorithm: Algorithm,
 ) -> Result<BenchResult, anyhow::Error> {
     let ch = channel_mode.count();
-    let frame = make_synthetic_frame(W, H, ch);
+    let planes = make_synthetic_planes(W, H, ch);
+    let frame: Vec<&[u8]> = planes.iter().map(Vec::as_slice).collect();
 
-    let mut denoiser = Denoiser::create(accelerators, device, W, H, options(channel_mode, mode, algorithm))?;
+    let denoiser_options = options(channel_mode, mode, algorithm);
+    let mut denoiser = HostDenoiser::create(accelerators, device, W, H, denoiser_options)?;
     let accelerator = denoiser.selected_accelerator();
 
     // Fill the temporal window so subsequent push/recv steady-state
@@ -121,23 +129,23 @@ fn bench_push_recv(
     };
     let window = 2 * temporal_radius + 1;
     for _ in 0..window.saturating_sub(1) {
-        if let Err(av_denoise_core::DenoiserError::QueueFull) = denoiser.push_frame(&frame) {
-            let _ = denoiser.recv_frame()?;
-            denoiser.push_frame(&frame)?;
+        if let Err(DenoiserError::QueueFull) = denoiser.push(&frame) {
+            let _ = denoiser.recv()?;
+            denoiser.push(&frame)?;
         }
     }
-    while denoiser.recv_frame()?.is_some() {}
+    while denoiser.recv()?.is_some() {}
 
     for _ in 0..WARMUP {
-        denoiser.push_frame(&frame)?;
-        let _ = denoiser.recv_frame()?;
+        denoiser.push(&frame)?;
+        let _ = denoiser.recv()?;
     }
 
     let mut times = Vec::with_capacity(ITERS);
     for _ in 0..ITERS {
         let start = Instant::now();
-        denoiser.push_frame(&frame)?;
-        let _out = denoiser.recv_frame()?;
+        denoiser.push(&frame)?;
+        let _out = denoiser.recv()?;
         times.push(start.elapsed());
     }
 
@@ -166,7 +174,7 @@ fn bench_push_recv(
 
 fn main() {
     // SAFETY: single-threaded at entry, no race possible.
-    unsafe { av_denoise_core::raise_codegen_stack_limit() };
+    unsafe { av_denoise::raise_codegen_stack_limit() };
 
     use clap::Parser;
     let cli = Cli::parse();

@@ -1,11 +1,11 @@
-use av_denoise_core::frame::Subsampling;
-use av_denoise_core::{
+use av_denoise::{
     DenoisingMode,
     Depth,
     MotionCompensationMode,
     NlmeansVariant,
     PrefilterMode,
     Preset,
+    Subsampling,
     nl4d_spatial_radius_for,
     nl4d_temporal_radius_for,
     nlmeans_search_radius_for,
@@ -212,7 +212,7 @@ fn sigma_reaches_nl4d_options() {
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
     let opts = plane_options_from(&raw, AlgorithmKind::Nl4d, layout).unwrap();
     match opts.algorithm {
-        av_denoise_core::Algorithm::Nl4d(nl4d) => {
+        av_denoise::Algorithm::Nl4d(nl4d) => {
             assert_eq!(nl4d.sigma, Some(6.0_f32));
         },
         other => panic!("expected Nl4d algorithm, got {other:?}"),
@@ -247,7 +247,7 @@ fn sigma_reaches_hq_sigma_override_under_variant_hq() {
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
     let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
     match opts.algorithm {
-        av_denoise_core::Algorithm::NlmeansHq(hq) => {
+        av_denoise::Algorithm::NlmeansHq(hq) => {
             assert_eq!(hq.hq.sigma_override, Some(6.0_f32));
         },
         other => panic!("expected NlmeansHq algorithm, got {other:?}"),
@@ -263,7 +263,7 @@ fn variant_hq_produces_the_hq_algorithm() {
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
     let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
     assert!(
-        matches!(opts.algorithm, av_denoise_core::Algorithm::NlmeansHq(_)),
+        matches!(opts.algorithm, av_denoise::Algorithm::NlmeansHq(_)),
         "got {:?}",
         opts.algorithm
     );
@@ -278,7 +278,7 @@ fn variant_fast_produces_the_fast_algorithm() {
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
     let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
     assert!(
-        matches!(opts.algorithm, av_denoise_core::Algorithm::Nlmeans(_)),
+        matches!(opts.algorithm, av_denoise::Algorithm::Nlmeans(_)),
         "got {:?}",
         opts.algorithm
     );
@@ -290,7 +290,7 @@ fn no_variant_given_defaults_to_the_hq_algorithm() {
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
     let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
     assert!(
-        matches!(opts.algorithm, av_denoise_core::Algorithm::NlmeansHq(_)),
+        matches!(opts.algorithm, av_denoise::Algorithm::NlmeansHq(_)),
         "got {:?}",
         opts.algorithm
     );
@@ -341,7 +341,7 @@ fn the_hq_arm_sets_windowed_noise_estimation() {
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
     let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
     match opts.algorithm {
-        av_denoise_core::Algorithm::NlmeansHq(hq) => {
+        av_denoise::Algorithm::NlmeansHq(hq) => {
             assert!(hq.hq.windowed_noise_estimation);
         },
         other => panic!("expected NlmeansHq algorithm, got {other:?}"),
@@ -375,7 +375,7 @@ fn sigma_scale_reaches_hq_params_under_variant_hq() {
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
     let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
     match opts.algorithm {
-        av_denoise_core::Algorithm::NlmeansHq(hq) => {
+        av_denoise::Algorithm::NlmeansHq(hq) => {
             assert!((hq.hq.sigma_scale - 1.5).abs() < f32::EPSILON);
         },
         other => panic!("expected NlmeansHq algorithm, got {other:?}"),
@@ -391,7 +391,7 @@ fn sigma_scale_reaches_nl4d_options() {
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
     let opts = plane_options_from(&raw, AlgorithmKind::Nl4d, layout).unwrap();
     match opts.algorithm {
-        av_denoise_core::Algorithm::Nl4d(nl4d) => {
+        av_denoise::Algorithm::Nl4d(nl4d) => {
             assert!((nl4d.sigma_scale - 1.5).abs() < f32::EPSILON);
         },
         other => panic!("expected Nl4d algorithm, got {other:?}"),
@@ -428,7 +428,7 @@ fn prefilter_none_and_empty_parse() {
         let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
         let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
         match opts.algorithm {
-            av_denoise_core::Algorithm::NlmeansHq(hq) => {
+            av_denoise::Algorithm::NlmeansHq(hq) => {
                 assert!(matches!(hq.nlm.prefilter, PrefilterMode::None));
             },
             other => panic!("expected NlmeansHq algorithm, got {other:?}"),
@@ -445,7 +445,7 @@ fn prefilter_bilateral_parses() {
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
     let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
     match opts.algorithm {
-        av_denoise_core::Algorithm::NlmeansHq(hq) => match hq.nlm.prefilter {
+        av_denoise::Algorithm::NlmeansHq(hq) => match hq.nlm.prefilter {
             PrefilterMode::Bilateral { sigma_s, sigma_r } => {
                 assert!((sigma_s - 3.0).abs() < f32::EPSILON);
                 assert!((sigma_r - 0.02).abs() < f32::EPSILON);
@@ -465,7 +465,7 @@ fn prefilter_nlm_variants_parse() {
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
     let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
     match opts.algorithm {
-        av_denoise_core::Algorithm::NlmeansHq(hq) => match hq.nlm.prefilter {
+        av_denoise::Algorithm::NlmeansHq(hq) => match hq.nlm.prefilter {
             PrefilterMode::NlmSpatial { strength_scale } => {
                 assert!((strength_scale - 0.8).abs() < f32::EPSILON);
             },
@@ -488,10 +488,8 @@ fn prefilter_unknown_string_errors_clearly() {
     assert!(err.to_lowercase().contains("prefilter"), "got {err}");
 }
 
-/// `parse_prefilter`'s string grammar has no form that produces
-/// `External`, and the boundary in `plane_options_from` rejects it if it
-/// ever did, since this plugin has no way to supply the reference frame
-/// `External` needs.
+/// `parse_prefilter`'s string grammar has no `external` form, so the
+/// string fails as an unknown prefilter.
 #[test]
 fn prefilter_external_cannot_be_produced() {
     let raw = RawParams {
@@ -551,20 +549,20 @@ fn preset_resolves_the_same_dials_as_core_for_nlmeans() {
             "preset {name} resolved the wrong temporal radius"
         );
 
-        let got_variant_is_hq = matches!(opts.algorithm, av_denoise_core::Algorithm::NlmeansHq(_));
+        let got_variant_is_hq = matches!(opts.algorithm, av_denoise::Algorithm::NlmeansHq(_));
         assert_eq!(
             got_variant_is_hq,
             want_variant == NlmeansVariant::Hq,
             "preset {name} resolved the wrong variant"
         );
 
-        if let av_denoise_core::Algorithm::NlmeansHq(hq) = opts.algorithm {
+        if let av_denoise::Algorithm::NlmeansHq(hq) = opts.algorithm {
             assert_eq!(
                 hq.nlm.tuning.search_radius,
                 Some(want_search_radius),
                 "preset {name} resolved the wrong search radius"
             );
-        } else if let av_denoise_core::Algorithm::Nlmeans(nlm) = opts.algorithm {
+        } else if let av_denoise::Algorithm::Nlmeans(nlm) = opts.algorithm {
             assert_eq!(
                 nlm.tuning.search_radius,
                 Some(want_search_radius),
@@ -597,7 +595,7 @@ fn preset_resolves_the_same_dials_as_core_for_nl4d() {
         );
 
         match opts.algorithm {
-            av_denoise_core::Algorithm::Nl4d(nl4d) => {
+            av_denoise::Algorithm::Nl4d(nl4d) => {
                 assert_eq!(
                     nl4d.spatial_radius, want_spatial_radius,
                     "preset {name} resolved the wrong spatial radius"
@@ -658,7 +656,7 @@ fn explicit_variant_overrides_the_preset() {
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
     let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
     assert!(
-        matches!(opts.algorithm, av_denoise_core::Algorithm::Nlmeans(_)),
+        matches!(opts.algorithm, av_denoise::Algorithm::Nlmeans(_)),
         "got {:?}",
         opts.algorithm
     );
@@ -672,7 +670,7 @@ fn motion_compensation_defaults_to_false() {
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
     let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
     match opts.algorithm {
-        av_denoise_core::Algorithm::NlmeansHq(hq) => {
+        av_denoise::Algorithm::NlmeansHq(hq) => {
             assert!(matches!(hq.nlm.motion_compensation, MotionCompensationMode::None));
         },
         other => panic!("expected NlmeansHq algorithm, got {other:?}"),
@@ -688,7 +686,7 @@ fn motion_compensation_true_turns_it_on() {
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
     let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
     match opts.algorithm {
-        av_denoise_core::Algorithm::NlmeansHq(hq) => {
+        av_denoise::Algorithm::NlmeansHq(hq) => {
             assert!(matches!(
                 hq.nlm.motion_compensation,
                 MotionCompensationMode::Mvtools { .. }
@@ -707,7 +705,7 @@ fn motion_compensation_false_stays_off() {
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
     let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
     match opts.algorithm {
-        av_denoise_core::Algorithm::NlmeansHq(hq) => {
+        av_denoise::Algorithm::NlmeansHq(hq) => {
             assert!(matches!(hq.nlm.motion_compensation, MotionCompensationMode::None));
         },
         other => panic!("expected NlmeansHq algorithm, got {other:?}"),
@@ -737,7 +735,7 @@ fn lambda_ht_scale_reaches_nl4d_options() {
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
     let opts = plane_options_from(&raw, AlgorithmKind::Nl4d, layout).unwrap();
     match opts.algorithm {
-        av_denoise_core::Algorithm::Nl4d(nl4d) => {
+        av_denoise::Algorithm::Nl4d(nl4d) => {
             assert!((nl4d.lambda_ht_scale - 1.15).abs() < 1e-6)
         },
         other => panic!("expected Nl4d, got {other:?}"),
@@ -753,7 +751,7 @@ fn shared_lambda_ht_reaches_nl4d_options() {
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
     let opts = plane_options_from(&raw, AlgorithmKind::Nl4d, layout).unwrap();
     match opts.algorithm {
-        av_denoise_core::Algorithm::Nl4d(nl4d) => assert_eq!(nl4d.lambda_ht, Some(4.6)),
+        av_denoise::Algorithm::Nl4d(nl4d) => assert_eq!(nl4d.lambda_ht, Some(4.6)),
         other => panic!("expected Nl4d, got {other:?}"),
     }
 }
@@ -770,7 +768,7 @@ fn spatial_radius_overrides_the_preset() {
             .unwrap()
             .algorithm
         {
-            av_denoise_core::Algorithm::Nl4d(nl4d) => nl4d.spatial_radius,
+            av_denoise::Algorithm::Nl4d(nl4d) => nl4d.spatial_radius,
             other => panic!("expected Nl4d, got {other:?}"),
         }
     };
@@ -785,7 +783,7 @@ fn spatial_radius_overrides_the_preset() {
         .unwrap()
         .algorithm
     {
-        av_denoise_core::Algorithm::Nl4d(nl4d) => assert_eq!(nl4d.spatial_radius, from_preset + 1),
+        av_denoise::Algorithm::Nl4d(nl4d) => assert_eq!(nl4d.spatial_radius, from_preset + 1),
         other => panic!("expected Nl4d, got {other:?}"),
     }
 }
@@ -801,7 +799,7 @@ fn refine_reaches_nl4d_options() {
         .unwrap()
         .algorithm
     {
-        av_denoise_core::Algorithm::Nl4d(nl4d) => assert_eq!(nl4d.refine, 3),
+        av_denoise::Algorithm::Nl4d(nl4d) => assert_eq!(nl4d.refine, 3),
         other => panic!("expected Nl4d, got {other:?}"),
     }
 }
@@ -814,7 +812,7 @@ fn noise_map_defaults_to_on() {
         .unwrap()
         .algorithm
     {
-        av_denoise_core::Algorithm::Nl4d(nl4d) => assert!(nl4d.noise_map),
+        av_denoise::Algorithm::Nl4d(nl4d) => assert!(nl4d.noise_map),
         other => panic!("expected Nl4d, got {other:?}"),
     }
 }
@@ -830,7 +828,7 @@ fn noise_map_false_turns_it_off() {
         .unwrap()
         .algorithm
     {
-        av_denoise_core::Algorithm::Nl4d(nl4d) => assert!(!nl4d.noise_map),
+        av_denoise::Algorithm::Nl4d(nl4d) => assert!(!nl4d.noise_map),
         other => panic!("expected Nl4d, got {other:?}"),
     }
 }
@@ -856,7 +854,7 @@ fn pooled_threshold_defaults_to_on() {
         .unwrap()
         .algorithm
     {
-        av_denoise_core::Algorithm::Nl4d(nl4d) => assert!(nl4d.pooled_threshold),
+        av_denoise::Algorithm::Nl4d(nl4d) => assert!(nl4d.pooled_threshold),
         other => panic!("expected Nl4d, got {other:?}"),
     }
 }
@@ -872,7 +870,7 @@ fn pooled_threshold_false_turns_it_off() {
         .unwrap()
         .algorithm
     {
-        av_denoise_core::Algorithm::Nl4d(nl4d) => assert!(!nl4d.pooled_threshold),
+        av_denoise::Algorithm::Nl4d(nl4d) => assert!(!nl4d.pooled_threshold),
         other => panic!("expected Nl4d, got {other:?}"),
     }
 }
@@ -944,7 +942,7 @@ fn strength_map_params_reach_nl4d_options() {
         .unwrap()
         .algorithm
     {
-        av_denoise_core::Algorithm::Nl4d(nl4d) => {
+        av_denoise::Algorithm::Nl4d(nl4d) => {
             assert_eq!(nl4d.flat_boost, 2.0);
             assert_eq!(nl4d.chroma_flat_boost, 1.2);
             assert_eq!(nl4d.shadow_soften, 0.8);
@@ -958,12 +956,12 @@ fn strength_map_params_reach_nl4d_options() {
 fn strength_map_params_default_to_the_library_values() {
     let raw = RawParams::default();
     let layout = layout_from_format(test_format_yuv(1, 1, 8), 160, 120).unwrap();
-    let defaults = av_denoise_core::Nl4dOptions::default();
+    let defaults = av_denoise::Nl4dOptions::default();
     match plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
         .unwrap()
         .algorithm
     {
-        av_denoise_core::Algorithm::Nl4d(nl4d) => {
+        av_denoise::Algorithm::Nl4d(nl4d) => {
             assert_eq!(nl4d.flat_boost, defaults.flat_boost);
             assert_eq!(nl4d.chroma_flat_boost, defaults.chroma_flat_boost);
             assert_eq!(nl4d.shadow_soften, defaults.shadow_soften);

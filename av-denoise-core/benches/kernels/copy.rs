@@ -1,4 +1,4 @@
-use av_denoise_core::nlmeans::kernels::gpu_copy;
+use av_denoise_core::bench_api::kernels::gpu_copy;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;

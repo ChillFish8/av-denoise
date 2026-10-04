@@ -32,6 +32,10 @@ required-features = ["binary"]
 [dependencies]
 av-denoise-core.workspace = true
 anyhow.workspace = true
+bon.workspace = true
+cubecl.workspace = true
+etcetera = "0.11"
+thiserror.workspace = true
 tracing.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
@@ -57,17 +61,18 @@ tracing-indicatif = { version = "0.3", optional = true }
 tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter"] }
 
 [dev-dependencies]
-cubecl.workspace = true
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"
 wgpu = "29"
 
 [build-dependencies]
 pkg-config = { version = "0.3.34", optional = true }
 
 [features]
-vulkan = ["av-denoise-core/vulkan"]
-metal = ["av-denoise-core/metal"]
-cuda = ["av-denoise-core/cuda"]
-rocm = ["av-denoise-core/rocm"]
+vulkan = ["av-denoise-core/vulkan", "cubecl/vulkan"]
+metal = ["av-denoise-core/metal", "cubecl/metal"]
+cuda = ["av-denoise-core/cuda", "cubecl/cuda"]
+rocm = ["av-denoise-core/rocm", "cubecl/hip"]
 binary = [
     "bytesize",
     "clap",
@@ -85,3 +90,15 @@ binary = [
 # Links ffms2 and FFmpeg statically from the vcpkg tree. See `just build-static`.
 static-ffms2 = ["binary", "av-decoders/ffms2_static", "dep:pkg-config"]
 default = ["vulkan"]
+
+[[bench]]
+name = "denoise"
+harness = false
+
+[[bench]]
+name = "convert"
+harness = false
+
+[[bench]]
+name = "reseed"
+harness = false

@@ -1,6 +1,7 @@
 use cubecl::prelude::*;
 
 use super::helpers::*;
+use crate::bench_api::HostIo;
 use crate::nlmeans::*;
 
 /// Reads back a single-slot reference ring buffer (`temporal_radius: 0`,
@@ -43,227 +44,6 @@ fn mean_abs_neighbour_diff(frame: &[f32], w: u32, h: u32) -> f32 {
     sum / count as f32
 }
 
-#[test]
-fn external_reference_equals_input_matches_baseline() {
-    let client = make_client();
-    let w = 16;
-    let h = 16;
-    let frame = make_frame_with_noisy_region(w, h, 1, 0.3, 8, 8, 2, 0.7);
-
-    let baseline = {
-        let params = NlmParams {
-            temporal_radius: 0,
-            search_radius: 2,
-            patch_radius: 2,
-            strength: 1.2,
-            self_weight: 1.0,
-            channels: ChannelMode::Luma,
-            prefilter: PrefilterMode::None,
-            motion_compensation: MotionCompensationMode::None,
-            hq: None,
-        };
-        let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
-        d.push_frame(&frame);
-        d.denoise()
-            .unwrap()
-            .unwrap()
-            .as_f32()
-            .expect("f32 denoiser")
-            .to_vec()
-    };
-
-    let with_ref = {
-        let params = NlmParams {
-            temporal_radius: 0,
-            search_radius: 2,
-            patch_radius: 2,
-            strength: 1.2,
-            self_weight: 1.0,
-            channels: ChannelMode::Luma,
-            prefilter: PrefilterMode::External,
-            motion_compensation: MotionCompensationMode::None,
-            hq: None,
-        };
-        let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
-        d.push_frame_with_reference(&frame, &frame);
-        d.denoise()
-            .unwrap()
-            .unwrap()
-            .as_f32()
-            .expect("f32 denoiser")
-            .to_vec()
-    };
-
-    assert_eq!(baseline.len(), with_ref.len());
-    for (i, (a, b)) in baseline.iter().zip(with_ref.iter()).enumerate() {
-        assert!((a - b).abs() < 1e-5, "pixel {i}: baseline={a}, with_ref={b}");
-    }
-}
-
-/// `push_frame` seeds the noise estimator from the stream's first
-/// frame so any push-time GPU work that reads σ never sees the
-/// absolute-strength fallback (`seed_noise_estimate_if_first_frame`'s
-/// doc says this applies for every `temporal_radius`).
-/// `push_frame_with_reference` queues the same estimate but must reach
-/// the same seed, not leave the estimator unset until the first
-/// `denoise_submit` runs.
-#[test]
-fn push_frame_with_reference_seeds_noise_estimate_on_first_frame() {
-    let client = make_client();
-    let w = 32;
-    let h = 32;
-    let frame = make_noisy_gaussian_frame(w, h, 1, 0.5, &[8.0 / 255.0]);
-
-    let params = NlmParams {
-        temporal_radius: 0,
-        search_radius: 2,
-        patch_radius: 2,
-        strength: 1.2,
-        self_weight: 1.0,
-        channels: ChannelMode::Luma,
-        prefilter: PrefilterMode::External,
-        motion_compensation: MotionCompensationMode::None,
-        hq: Some(HqParams {
-            auto_strength: true,
-            noise_floor: true,
-            sigma_override: None,
-            temporal_confidence: true,
-            thsad_scale: 1.0,
-            sigma_scale: 1.0,
-            windowed_noise_estimation: false,
-        }),
-    };
-    let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
-    d.push_frame_with_reference(&frame, &frame);
-
-    assert!(
-        d.noise_estimator.current().is_some(),
-        "push_frame_with_reference must seed the noise estimator on the stream's first \
-         frame, the same as push_frame"
-    );
-}
-
-/// Separable path (patch_radius > 2) variant of the identity check.
-#[test]
-fn external_reference_separable_matches_baseline() {
-    let client = make_client();
-    let w = 16;
-    let h = 16;
-    let frame = make_frame_with_noisy_region(w, h, 1, 0.3, 8, 8, 2, 0.7);
-
-    let baseline = {
-        let params = NlmParams {
-            temporal_radius: 0,
-            search_radius: 2,
-            patch_radius: 4,
-            strength: 1.2,
-            self_weight: 1.0,
-            channels: ChannelMode::Luma,
-            prefilter: PrefilterMode::None,
-            motion_compensation: MotionCompensationMode::None,
-            hq: None,
-        };
-        let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
-        d.push_frame(&frame);
-        d.denoise()
-            .unwrap()
-            .unwrap()
-            .as_f32()
-            .expect("f32 denoiser")
-            .to_vec()
-    };
-
-    let with_ref = {
-        let params = NlmParams {
-            temporal_radius: 0,
-            search_radius: 2,
-            patch_radius: 4,
-            strength: 1.2,
-            self_weight: 1.0,
-            channels: ChannelMode::Luma,
-            prefilter: PrefilterMode::External,
-            motion_compensation: MotionCompensationMode::None,
-            hq: None,
-        };
-        let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
-        d.push_frame_with_reference(&frame, &frame);
-        d.denoise()
-            .unwrap()
-            .unwrap()
-            .as_f32()
-            .expect("f32 denoiser")
-            .to_vec()
-    };
-
-    for (i, (a, b)) in baseline.iter().zip(with_ref.iter()).enumerate() {
-        assert!((a - b).abs() < 1e-4, "pixel {i}: baseline={a}, with_ref={b}");
-    }
-}
-
-#[test]
-fn external_reference_temporal_matches_baseline() {
-    let client = make_client();
-    let w = 16;
-    let h = 16;
-    let frames = [
-        make_frame_with_noisy_region(w, h, 1, 0.3, 8, 8, 2, 0.7),
-        make_frame_with_noisy_region(w, h, 1, 0.3, 7, 8, 2, 0.65),
-        make_frame_with_noisy_region(w, h, 1, 0.3, 9, 8, 2, 0.75),
-    ];
-
-    let baseline = {
-        let params = NlmParams {
-            temporal_radius: 1,
-            search_radius: 2,
-            patch_radius: 2,
-            strength: 1.2,
-            self_weight: 1.0,
-            channels: ChannelMode::Luma,
-            prefilter: PrefilterMode::None,
-            motion_compensation: MotionCompensationMode::None,
-            hq: None,
-        };
-        let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
-        for f in &frames {
-            d.push_frame(f);
-        }
-        d.denoise()
-            .unwrap()
-            .unwrap()
-            .as_f32()
-            .expect("f32 denoiser")
-            .to_vec()
-    };
-
-    let with_ref = {
-        let params = NlmParams {
-            temporal_radius: 1,
-            search_radius: 2,
-            patch_radius: 2,
-            strength: 1.2,
-            self_weight: 1.0,
-            channels: ChannelMode::Luma,
-            prefilter: PrefilterMode::External,
-            motion_compensation: MotionCompensationMode::None,
-            hq: None,
-        };
-        let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
-        for f in &frames {
-            d.push_frame_with_reference(f, f);
-        }
-        d.denoise()
-            .unwrap()
-            .unwrap()
-            .as_f32()
-            .expect("f32 denoiser")
-            .to_vec()
-    };
-
-    for (i, (a, b)) in baseline.iter().zip(with_ref.iter()).enumerate() {
-        assert!((a - b).abs() < 1e-5, "pixel {i}: baseline={a}, with_ref={b}");
-    }
-}
-
 /// Bilateral prefilter on a uniform image must reproduce the uniform
 /// value exactly (weights sum to anything, but the weighted average of
 /// identical values is itself).
@@ -291,13 +71,7 @@ fn bilateral_uniform_image_passthrough() {
 
     let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
     d.push_frame(&frame);
-    let result = d
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let result = d.denoise().unwrap().unwrap();
 
     for (i, &v) in result.iter().enumerate() {
         assert!((v - 0.5).abs() < 1e-4, "pixel {i}: expected 0.5, got {v}");
@@ -331,13 +105,7 @@ fn bilateral_noisy_image_finite() {
 
     let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
     d.push_frame(&frame);
-    let result = d
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let result = d.denoise().unwrap().unwrap();
 
     for (i, &v) in result.iter().enumerate() {
         assert!(v.is_finite(), "pixel {i}: non-finite output {v}");

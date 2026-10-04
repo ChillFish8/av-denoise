@@ -22,7 +22,7 @@
 //! once they have gone unused for a week.
 //!
 //! [`install_compilation_cache`] has to run before the first
-//! [`Denoiser`](crate::Denoiser) is created, because building a CubeCL
+//! [`HostDenoiser`](crate::HostDenoiser) is created, because building a CubeCL
 //! client locks the global config.
 //!
 //! If using `av-denoise` as a library you may want to specify the cache directory
@@ -31,7 +31,7 @@
 //! ```no_run
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Call this at the top of `main`, before any denoiser exists.
-//! match av_denoise_core::install_compilation_cache()? {
+//! match av_denoise::install_compilation_cache()? {
 //!     Some(path) => println!("caching compiled kernels in {}", path.display()),
 //!     None => println!("kernel caching is off, every run recompiles"),
 //! }
@@ -59,12 +59,12 @@ static CACHE_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
 /// The directory name this crate uses inside the user's cache directory.
 const CACHE_DIR_NAME: &str = "av-denoise";
 
-/// A hash of this crate's sources, naming this build's subdirectory of
+/// A hash of the kernel sources, naming this build's subdirectory of
 /// the cache root.
 ///
 /// CubeCL keys cached kernels by their signature rather than their body,
 /// so each build of the kernels needs a directory of its own.
-pub(crate) const KERNEL_HASH: &str = env!("AV_DENOISE_KERNEL_HASH");
+pub(crate) const KERNEL_HASH: &str = av_denoise_core::KERNEL_HASH;
 
 /// How long another build's subdirectory goes unused before an install
 /// removes it.
@@ -82,7 +82,7 @@ const DISABLE_WORDS: [&str; 4] = ["off", "0", "false", "none"];
 pub enum CacheError {
     /// The CubeCL global config was already set up before this helper
     /// ran, so the cache directory can no longer be installed.
-    #[error("CubeCL global config already initialized. Install the cache before any Denoiser::create")]
+    #[error("CubeCL global config already initialized. Install the cache before any HostDenoiser::create")]
     AlreadyInitialised,
     /// The cache directory does not exist and could not be created.
     #[error("cannot create the kernel cache directory {path}", path = path.display())]

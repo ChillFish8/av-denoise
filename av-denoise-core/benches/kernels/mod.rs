@@ -1,5 +1,5 @@
-use av_denoise_core::nlmeans::NlmParams;
-pub use av_denoise_core::nlmeans::{BLOCK_X, BLOCK_Y};
+use av_denoise_core::bench_api::NlmParams;
+pub use av_denoise_core::bench_api::{BLOCK_X, BLOCK_Y};
 use cubecl::benchmark::{Benchmark, BenchmarkComputations, TimingMethod};
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -31,7 +31,6 @@ pub mod mc_warp;
 pub mod mv_regularise;
 pub mod nl4d_geometry;
 pub mod noise_partial;
-pub mod pack_wire;
 pub mod temporal_noise_stats;
 pub mod vertical_weight;
 pub mod vweight_pair_accumulate;

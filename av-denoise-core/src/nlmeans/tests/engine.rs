@@ -9,7 +9,7 @@ use super::helpers::{
     read_interleaved,
     upload_planes,
 };
-use crate::denoiser::FrameOutput;
+use crate::bench_api::HostIo;
 use crate::engine::{DevicePlane, Engine, Geometry, SampleFormat};
 use crate::error::Error;
 use crate::nlmeans::{
@@ -158,14 +158,13 @@ fn run_oracle(radius: u32, channels: ChannelMode, frames: &[Vec<f32>]) -> Vec<Ve
         denoiser.push_frame(frame);
 
         let output = denoiser.denoise().expect("denoise");
-        if let Some(output) = output {
-            let samples = output.as_f32().expect("f32").to_vec();
+        if let Some(samples) = output {
             outputs.push(samples);
         }
     }
 
-    let collect = |output: &FrameOutput| {
-        let samples = output.as_f32().expect("f32").to_vec();
+    let collect = |output: &[f32]| {
+        let samples = output.to_vec();
         outputs.push(samples);
     };
     denoiser.flush(collect).expect("flush");

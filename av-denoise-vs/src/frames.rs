@@ -5,7 +5,7 @@
 
 use std::ops::RangeInclusive;
 
-use av_denoise_core::Planes;
+use av_denoise::Planes;
 
 /// Copies `src`, a plane with row stride `stride` bytes, into a new
 /// tightly packed buffer of `width_bytes * height` bytes.
@@ -40,7 +40,7 @@ pub fn unpack_plane_into(dst: &mut [u8], stride: usize, width_bytes: usize, heig
 /// `last_frame`.
 ///
 /// `behind` and `ahead` come from the denoiser's own
-/// [`av_denoise_core::PlanarDenoiser::window_span`], so this stays
+/// [`av_denoise::PlanarDenoiser::window_span`], so this stays
 /// correct for whichever algorithm the denoiser is running rather than
 /// assuming every algorithm needs the same symmetric window.
 ///

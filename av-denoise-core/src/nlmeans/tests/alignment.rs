@@ -6,6 +6,7 @@
 //! sizes used to abort the whole pipeline instead of denoising.
 
 use super::helpers::*;
+use crate::bench_api::HostIo;
 use crate::nlmeans::*;
 
 fn luma_params(motion_compensation: MotionCompensationMode) -> NlmParams {
@@ -32,13 +33,7 @@ fn denoise_uniform(w: u32, h: u32, params: NlmParams) {
     for _ in 0..5 {
         d.push_frame(&frame);
     }
-    let result = d
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let result = d.denoise().unwrap().unwrap();
 
     assert_eq!(result.len(), (w * h) as usize);
     for (i, &v) in result.iter().enumerate() {

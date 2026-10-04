@@ -1,4 +1,5 @@
 use super::helpers::*;
+use crate::bench_api::HostIo;
 use crate::nlmeans::*;
 
 /// Shared HQ auto-estimation params, k=0 only, so the temporal chain

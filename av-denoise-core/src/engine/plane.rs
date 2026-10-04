@@ -44,7 +44,7 @@ impl SampleFormat {
     }
 
     /// Bytes a plane of `pixels` samples occupies, rounded up to whole words.
-    pub(crate) fn plane_bytes(self, pixels: u64) -> u64 {
+    pub fn plane_bytes(self, pixels: u64) -> u64 {
         let samples_per_word = self.samples_per_word() as u64;
         let words = pixels.div_ceil(samples_per_word);
         words * 4

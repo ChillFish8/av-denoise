@@ -1,4 +1,5 @@
 use super::helpers::*;
+use crate::bench_api::HostIo;
 use crate::nlmeans::*;
 
 /// Shared baseline for the fast path. Each test overrides just the
@@ -29,13 +30,7 @@ fn hq_disabled_features_match_fast_mode() {
 
     let mut fast = NlmDenoiser::<R>::new(&client, base_params(), w, h);
     fast.push_frame(&frame);
-    let fast_out = fast
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let fast_out = fast.denoise().unwrap().unwrap();
 
     let hq_params = NlmParams {
         hq: Some(HqParams {
@@ -51,13 +46,7 @@ fn hq_disabled_features_match_fast_mode() {
     };
     let mut hq = NlmDenoiser::<R>::new(&client, hq_params, w, h);
     hq.push_frame(&frame);
-    let hq_out = hq
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let hq_out = hq.denoise().unwrap().unwrap();
 
     assert_eq!(
         fast_out, hq_out,
@@ -89,13 +78,7 @@ fn hq_noise_floor_changes_output() {
 
     let mut fast = NlmDenoiser::<R>::new(&client, base_params(), w, h);
     fast.push_frame(&frame);
-    let fast_out = fast
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let fast_out = fast.denoise().unwrap().unwrap();
 
     let hq_params = NlmParams {
         hq: Some(HqParams {
@@ -111,13 +94,7 @@ fn hq_noise_floor_changes_output() {
     };
     let mut hq = NlmDenoiser::<R>::new(&client, hq_params, w, h);
     hq.push_frame(&frame);
-    let hq_out = hq
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let hq_out = hq.denoise().unwrap().unwrap();
 
     let mut max_diff = 0.0f32;
     for (i, (&f, &q)) in fast_out.iter().zip(hq_out.iter()).enumerate() {
@@ -150,13 +127,7 @@ fn hq_uniform_input_passthrough() {
 
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
-    let result = denoiser
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let result = denoiser.denoise().unwrap().unwrap();
 
     for (i, &v) in result.iter().enumerate() {
         assert!((v - 0.5).abs() < 1e-5, "pixel {i}: expected 0.5, got {v}");
@@ -192,14 +163,14 @@ fn hq_temporal_smoke() {
     for frame in &frames {
         denoiser.push_frame(frame);
         if let Some(result) = denoiser.denoise().unwrap() {
-            check(result.as_f32().expect("f32 denoiser"));
+            check(&result);
             emitted += 1;
         }
     }
 
     denoiser
         .flush(|frame| {
-            check(frame.as_f32().expect("f32 denoiser"));
+            check(frame);
             emitted += 1;
         })
         .unwrap();
@@ -237,13 +208,7 @@ fn hq_auto_sigma_denoises() {
 
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
     denoiser.push_frame(&frame);
-    let result = denoiser
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let result = denoiser.denoise().unwrap().unwrap();
 
     let mut max_diff = 0.0f32;
     for (i, (&input, &output)) in frame.iter().zip(result.iter()).enumerate() {
@@ -300,14 +265,14 @@ fn hq_auto_sigma_temporal_smoke() {
     for frame in &frames {
         denoiser.push_frame(frame);
         if let Some(result) = denoiser.denoise().unwrap() {
-            check(result.as_f32().expect("f32 denoiser"));
+            check(&result);
             emitted += 1;
         }
     }
 
     denoiser
         .flush(|frame| {
-            check(frame.as_f32().expect("f32 denoiser"));
+            check(frame);
             emitted += 1;
         })
         .unwrap();
@@ -430,14 +395,14 @@ fn hq_pilot_temporal_end_to_end() {
     for frame in &frames {
         denoiser.push_frame(frame);
         if let Some(result) = denoiser.denoise().unwrap() {
-            check(result.as_f32().expect("f32 denoiser"));
+            check(&result);
             emitted += 1;
         }
     }
 
     denoiser
         .flush(|frame| {
-            check(frame.as_f32().expect("f32 denoiser"));
+            check(frame);
             emitted += 1;
         })
         .unwrap();
@@ -476,13 +441,7 @@ fn hq_pilot_differs_from_unguided() {
 
     let mut unguided = NlmDenoiser::<R>::new(&client, hq_params(PrefilterMode::None), w, h);
     unguided.push_frame(&frame);
-    let unguided_out = unguided
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let unguided_out = unguided.denoise().unwrap().unwrap();
 
     let mut piloted = NlmDenoiser::<R>::new(
         &client,
@@ -491,13 +450,7 @@ fn hq_pilot_differs_from_unguided() {
         h,
     );
     piloted.push_frame(&frame);
-    let piloted_out = piloted
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let piloted_out = piloted.denoise().unwrap().unwrap();
 
     let mut max_diff = 0.0f32;
     for (i, (&a, &b)) in unguided_out.iter().zip(piloted_out.iter()).enumerate() {
@@ -577,12 +530,7 @@ fn hq_temporal_confidence_suppresses_mismatched_neighbour() {
         d.push_frame(&prev);
         d.push_frame(&center);
         d.push_frame(&next);
-        d.denoise()
-            .unwrap()
-            .unwrap()
-            .as_f32()
-            .expect("f32 denoiser")
-            .to_vec()
+        d.denoise().unwrap().unwrap()
     };
 
     let off = run(false);
@@ -644,12 +592,7 @@ fn hq_temporal_confidence_disabled_ignores_thsad_scale() {
         for frame in &frames {
             d.push_frame(frame);
         }
-        d.denoise()
-            .unwrap()
-            .unwrap()
-            .as_f32()
-            .expect("f32 denoiser")
-            .to_vec()
+        d.denoise().unwrap().unwrap()
     };
 
     let base = run(1.0);
@@ -702,14 +645,14 @@ fn hq_temporal_mc_confidence_smoke() {
     for frame in &frames {
         denoiser.push_frame(frame);
         if let Some(result) = denoiser.denoise().unwrap() {
-            check(result.as_f32().expect("f32 denoiser"));
+            check(&result);
             emitted += 1;
         }
     }
 
     denoiser
         .flush(|frame| {
-            check(frame.as_f32().expect("f32 denoiser"));
+            check(frame);
             emitted += 1;
         })
         .unwrap();

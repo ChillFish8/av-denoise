@@ -2,6 +2,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::helpers::*;
+use crate::bench_api::HostIo;
 use crate::nlmeans::kernels::motion::{nlm_mc_block_match_coarse, nlm_mc_block_match_fine};
 use crate::nlmeans::motion::{
     CHAINED_RADIUS_THRESHOLD,
@@ -379,13 +380,7 @@ fn motion_compensation_uniform_passthrough() {
     d.push_frame(&frame);
     d.push_frame(&frame);
     d.push_frame(&frame);
-    let result = d
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let result = d.denoise().unwrap().unwrap();
 
     assert_eq!(result.len(), (w * h) as usize);
     for (i, &v) in result.iter().enumerate() {
@@ -433,13 +428,7 @@ fn motion_compensation_with_bilateral_finite() {
     d.push_frame(&frame);
     d.push_frame(&frame);
     d.push_frame(&frame);
-    let result = d
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let result = d.denoise().unwrap().unwrap();
 
     assert_eq!(result.len(), (w * h) as usize);
     for (i, &v) in result.iter().enumerate() {
@@ -496,13 +485,7 @@ fn motion_compensation_translating_square_preserves_centre() {
     d.push_frame(&f0);
     d.push_frame(&f1);
     d.push_frame(&f2);
-    let result = d
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let result = d.denoise().unwrap().unwrap();
 
     assert_eq!(result.len(), (w * h) as usize);
     for (i, &v) in result.iter().enumerate() {
@@ -579,13 +562,7 @@ fn motion_compensation_1080_square_odd_block_count_dispatch_succeeds() {
     d.push_frame(&frame);
     d.push_frame(&frame);
     d.push_frame(&frame);
-    let result = d
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let result = d.denoise().unwrap().unwrap();
 
     assert_eq!(result.len(), (w * h) as usize);
     for (i, &v) in result.iter().enumerate() {
@@ -664,12 +641,12 @@ fn motion_compensation_1080_square_odd_block_count_chained_dispatch_succeeds() {
     for frame in &frames {
         d.push_frame(frame);
         if let Some(result) = d.denoise().unwrap() {
-            check(result.as_f32().expect("f32 denoiser"));
+            check(&result);
             emitted += 1;
         }
     }
     d.flush(|frame| {
-        check(frame.as_f32().expect("f32 denoiser"));
+        check(frame);
         emitted += 1;
     })
     .unwrap();
@@ -1465,14 +1442,14 @@ fn chained_end_to_end_finite(radius: u32) {
     for frame in &frames {
         denoiser.push_frame(frame);
         if let Some(result) = denoiser.denoise().unwrap() {
-            check(result.as_f32().expect("f32 denoiser"));
+            check(&result);
             emitted += 1;
         }
     }
 
     denoiser
         .flush(|frame| {
-            check(frame.as_f32().expect("f32 denoiser"));
+            check(frame);
             emitted += 1;
         })
         .unwrap();
@@ -1521,12 +1498,7 @@ fn direct_estimation_default_and_explicit_construction_match_bit_for_bit() {
         d.push_frame(&frame);
         d.push_frame(&frame);
         d.push_frame(&frame);
-        d.denoise()
-            .unwrap()
-            .unwrap()
-            .as_f32()
-            .expect("f32 denoiser")
-            .to_vec()
+        d.denoise().unwrap().unwrap()
     };
 
     let via_default = run(MotionCompensationMode::mvtools_default());

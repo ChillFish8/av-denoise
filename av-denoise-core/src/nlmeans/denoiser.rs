@@ -27,31 +27,25 @@ use super::noise::{
     temporal_stats_buf_bytes,
     zero_temporal_stats_slot,
 };
-use super::params::{NlmParams, SEPARABLE_THRESHOLD, sigma_eff, validate_dimensions};
-use super::pending::{Pending, empty_output, start_readback};
+use super::params::{ChannelMode, NlmParams, SEPARABLE_THRESHOLD, sigma_eff, validate_dimensions};
 use super::prefilter::{PrefilterCtx, PrefilterMode, run_prefilter};
-use super::{BLOCK_1D, Depth, MAX_GRID_1D};
-use crate::denoiser::{DenoiserError, FrameOutput, OutputFormat};
+use super::{BLOCK_1D, MAX_GRID_1D};
 use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
 
 /// A denoised frame that has finished its kernels but is still resident
 /// on the GPU.
 ///
-/// [`NlmDenoiser::denoise_submit_gpu`] returns this instead of starting a
-/// readback, for a caller that queues more GPU work against the frame
-/// rather than pulling it back to the host straight away.
+/// [`NlmDenoiser::denoise_submit_gpu`] returns this, for a caller that
+/// queues more GPU work against the frame.
 ///
 /// `handle` points at one of the denoiser's two output slots, and it
 /// stays valid only until that slot is reused. A denoiser only has two
-/// output slots, so at most two outstanding `GpuOutput`s (or
-/// [`Pending`]s, which are built from the same slots) may exist for one
-/// denoiser at a time. Submitting a third before an earlier one is
+/// output slots, so at most two outstanding `GpuOutput`s may exist for
+/// one denoiser at a time. Submitting a third before an earlier one is
 /// consumed reuses its slot and silently corrupts it.
 pub struct GpuOutput {
     /// The GPU buffer holding the denoised frame.
     pub handle: Handle,
-    /// Which of the denoiser's two output slots `handle` came from.
-    pub slot: usize,
 }
 
 /// Handles and geometry a collaborative stage needs to read the ring.
@@ -95,9 +89,9 @@ pub(crate) struct RingView {
 
 /// The stateful NLMeans denoiser that owns the GPU buffers.
 ///
-/// It keeps a ring of frames in `input_buf`. Each `push_frame` uploads
-/// one frame into the ring, and each `denoise` cleans the current centre
-/// frame using the neighbours around it.
+/// It keeps a ring of frames in `input_buf`. Each push ingests one frame
+/// into the ring, and each submit cleans the current centre frame using
+/// the neighbours around it.
 pub struct NlmDenoiser<R: Runtime> {
     pub(super) client: ComputeClient<R>,
     pub(super) params: NlmParams,
@@ -126,9 +120,6 @@ pub struct NlmDenoiser<R: Runtime> {
     /// It only exists when a prefilter is set, and it supplies the
     /// distances the `_ref` kernels read.
     pub(super) reference_buf: Option<Handle>,
-    /// CPU scratch for repacking 3-channel YUV into 4 lanes. Empty when
-    /// no padding is needed.
-    pub(super) padding_scratch: Vec<f32>,
     /// A 4-byte handle bound for the planes a kernel never reads.
     pub(super) placeholder: Handle,
     /// The weighted-pixel accumulator, one entry per stored channel per
@@ -156,18 +147,6 @@ pub struct NlmDenoiser<R: Runtime> {
     pub(super) outputs: [Handle; 2],
     /// Which output slot the next submit writes into.
     pub(super) next_output_slot: usize,
-    /// The format every readback this denoiser starts comes back in.
-    pub(super) output_format: OutputFormat,
-    /// Packed-word destinations, one per entry of `outputs`, allocated
-    /// only in wire mode. They rotate on the same slot counter, so each
-    /// is free again exactly when the `f32` slot it is packed from is.
-    pub(super) wire_outputs: Option<[Handle; 2]>,
-    /// CPU scratch the blocking `denoise()` and `flush()` paths reuse
-    /// through `Pending::wait_into`, so they do not allocate per frame.
-    ///
-    /// It holds `output_format`'s variant, so `wait_into` keeps its
-    /// allocation rather than replacing it.
-    pub(super) output_scratch: FrameOutput,
 
     pub(super) h2_inv_norm: f32,
     /// The distance floor the main pass subtracts before weighting.
@@ -399,30 +378,10 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// # Panics
     ///
     /// This panics if the parameters or the frame dimensions are
-    /// invalid. The high-level [`crate::Denoiser`] checks both first and
+    /// invalid. [Nlmeans](crate::Nlmeans) checks both first and
     /// reports them as a `Result`, so most callers should use that
     /// instead.
     pub fn new(client: &ComputeClient<R>, params: NlmParams, width: u32, height: u32) -> Self {
-        Self::with_output_format(client, params, width, height, OutputFormat::F32)
-    }
-
-    /// Builds a new denoiser whose readbacks come back in
-    /// `output_format`.
-    ///
-    /// [`OutputFormat::Wire`] gives the denoiser a packed-word buffer
-    /// per output slot, so a readback quantises on the GPU and only the
-    /// wire bytes cross the bus.
-    ///
-    /// # Panics
-    ///
-    /// Panics under the same conditions as [`Self::new`].
-    pub fn with_output_format(
-        client: &ComputeClient<R>,
-        params: NlmParams,
-        width: u32,
-        height: u32,
-        output_format: OutputFormat,
-    ) -> Self {
         params
             .validate()
             .expect("invalid NlmParams, call params.validate() first to get this as a Result");
@@ -443,12 +402,6 @@ impl<R: Runtime> NlmDenoiser<R> {
             None
         };
 
-        let padding_scratch = if params.channels.count() != stored_ch {
-            vec![0.0f32; pixels * stored_ch as usize]
-        } else {
-            Vec::new()
-        };
-
         let placeholder = client.empty(4);
         let accum = client.empty(frame_bytes);
         let weight_sum = client.empty(scalar_bytes);
@@ -459,17 +412,6 @@ impl<R: Runtime> NlmDenoiser<R> {
         let tmp_hsum = client.empty(scalar_bytes);
         let tmp_hsum_bwd = client.empty(scalar_bytes);
         let outputs = [client.empty(frame_bytes), client.empty(frame_bytes)];
-        let wire_outputs = match output_format {
-            OutputFormat::F32 => None,
-            OutputFormat::Wire { depth } => {
-                let samples = pixels as u32 * params.channels.count();
-                let words = samples.div_ceil(depth.wire_pack().samples_per_word()) as usize;
-                Some([
-                    client.empty(words * size_of::<u32>()),
-                    client.empty(words * size_of::<u32>()),
-                ])
-            },
-        };
 
         let h2_inv_norm = params.h2_inv_norm();
         let input_noise_offset = params.noise_offset();
@@ -482,7 +424,6 @@ impl<R: Runtime> NlmDenoiser<R> {
             PrefilterMode::NlmSpatial { .. } => 0.0,
             _ => input_noise_offset,
         };
-        let output_scratch = empty_output(pixels, params.channels.count(), output_format);
         let use_separable = params.patch_radius > SEPARABLE_THRESHOLD;
         let use_reference = params.prefilter.needs_reference_buf();
 
@@ -651,7 +592,6 @@ impl<R: Runtime> NlmDenoiser<R> {
             real_pushes: 0,
             input_buf,
             reference_buf,
-            padding_scratch,
             placeholder,
             accum,
             weight_sum,
@@ -663,9 +603,6 @@ impl<R: Runtime> NlmDenoiser<R> {
             tmp_hsum_bwd,
             outputs,
             next_output_slot: 0,
-            output_format,
-            wire_outputs,
-            output_scratch,
             h2_inv_norm,
             noise_offset,
             input_noise_offset,
@@ -699,121 +636,6 @@ impl<R: Runtime> NlmDenoiser<R> {
             flat_texture_cut: None,
             shifted_edges: false,
         }
-    }
-
-    /// Pushes a new frame into the ring buffer.
-    ///
-    /// `frame` holds `width * height * channels` `f32` values in
-    /// `[0, 1]`. A 3-channel frame is repacked into 4 lanes through a
-    /// reused CPU scratch buffer.
-    ///
-    /// For `PrefilterMode::External` use
-    /// [`Self::push_frame_with_reference`] instead.
-    pub fn push_frame(&mut self, frame: &[f32]) {
-        assert!(
-            !matches!(self.params.prefilter, PrefilterMode::External),
-            "push_frame_with_reference is required when prefilter == External"
-        );
-
-        let channels = self.params.channels.count() as usize;
-        let pixels = self.width as usize * self.height as usize;
-        let expected = pixels * channels;
-
-        assert_eq!(
-            frame.len(),
-            expected,
-            "frame size mismatch: expected {expected}, got {}",
-            frame.len()
-        );
-
-        let mut handles = Vec::with_capacity(channels);
-        for channel in 0..channels {
-            let samples: Vec<f32> = frame.iter().skip(channel).step_by(channels).copied().collect();
-            let bytes = f32::as_bytes(&samples);
-            let handle = self.client.create_from_slice(bytes);
-            handles.push(handle);
-        }
-
-        let planes: Vec<DevicePlane<'_>> = handles
-            .iter()
-            .map(|handle| DevicePlane::new(handle, self.width, self.height))
-            .collect();
-
-        self.push_planes(&planes, SampleFormat::F32)
-            .expect("frame push failed");
-    }
-
-    /// Pushes a new frame held as wire bytes, one slice per channel.
-    ///
-    /// Each plane holds `width * height` samples at `depth`, and the GPU
-    /// normalises them and interleaves the planes. `planes` runs Y, U, V
-    /// for a fused frame and U, V for a chroma pair.
-    ///
-    /// For `PrefilterMode::External` use
-    /// [`Self::push_frame_with_reference`] instead.
-    pub fn push_frame_wire(&mut self, planes: &[&[u8]], depth: Depth) {
-        assert!(
-            !matches!(self.params.prefilter, PrefilterMode::External),
-            "push_frame_with_reference is required when prefilter == External"
-        );
-
-        let channels = self.params.channels.count();
-        let pixels = self.width as usize * self.height as usize;
-        let plane_bytes = pixels * depth.bytes_per_sample();
-
-        assert_eq!(
-            planes.len(),
-            channels as usize,
-            "plane count mismatch: expected {channels}, got {}",
-            planes.len()
-        );
-
-        // Ten and Twelve share a byte width, so the plane-length check
-        // below cannot tell them apart. A wrong depth here divides by the
-        // wrong maximum and darkens the whole frame without failing
-        // anything else, so it is pinned against the depth this denoiser
-        // returns frames in.
-        if let OutputFormat::Wire { depth: out_depth } = self.output_format {
-            assert_eq!(
-                depth, out_depth,
-                "wire push depth {depth:?} does not match the denoiser's output depth {out_depth:?}"
-            );
-        }
-
-        let mut handles = Vec::with_capacity(planes.len());
-        for plane in planes {
-            assert_eq!(
-                plane.len(),
-                plane_bytes,
-                "plane size mismatch: expected {plane_bytes}, got {}",
-                plane.len()
-            );
-
-            debug_assert!(
-                wire_samples_in_range(plane, depth),
-                "a sample is larger than {depth:?} can express"
-            );
-
-            // The kernel reads whole words, so a plane that ends mid-word
-            // needs its last word backed by real storage.
-            let mut padded = plane.to_vec();
-            padded.resize(plane_bytes.next_multiple_of(size_of::<u32>()), 0);
-
-            let handle = self.client.create_from_slice(&padded);
-            handles.push(handle);
-        }
-
-        let planes: Vec<DevicePlane<'_>> = handles
-            .iter()
-            .map(|handle| DevicePlane::new(handle, self.width, self.height))
-            .collect();
-        let format = match depth {
-            Depth::Eight => SampleFormat::U8,
-            Depth::Ten => SampleFormat::U16 { depth: 10 },
-            Depth::Twelve => SampleFormat::U16 { depth: 12 },
-        };
-
-        self.push_planes(&planes, format).expect("frame push failed");
     }
 
     /// A 4-byte handle to bind for planes a kernel never reads.
@@ -865,87 +687,6 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         self.advance_ring();
         self.prime_leading_edge_if_first()
-    }
-
-    /// Pushes a new frame together with a reference image the caller
-    /// prefiltered itself.
-    ///
-    /// This is what `PrefilterMode::External` needs. Both slices hold
-    /// `width * height * channels` `f32` values in `[0, 1]`.
-    pub fn push_frame_with_reference(&mut self, frame: &[f32], reference: &[f32]) {
-        assert!(
-            matches!(self.params.prefilter, PrefilterMode::External),
-            "push_frame_with_reference requires prefilter == External"
-        );
-
-        let slot = self.upload_into(&self.input_buf.clone(), frame);
-        let reference_buf = self
-            .reference_buf
-            .as_ref()
-            .expect("reference buffer must exist for External prefilter")
-            .clone();
-        self.upload_into_slot(&reference_buf, reference, slot);
-
-        // The same order as `push_frame`. The noise estimate and its
-        // first-frame seed run before anything that could read the
-        // sigma. Building the pyramids only needs the reference upload
-        // just above, not the noise estimate, so the ordering does not
-        // change what either step sees.
-        self.run_noise_estimate_for_slot(slot as u32)
-            .expect("noise estimate dispatch failed");
-        self.run_temporal_stats_for_slot(slot as u32)
-            .expect("temporal noise stats dispatch failed");
-        self.seed_noise_estimate_if_first_frame(slot as u32)
-            .expect("noise seed readback failed");
-
-        self.build_pyramids_for_slot(slot as u32)
-            .expect("pyramid build dispatch failed");
-        self.build_confidence_pyramid_for_slot(slot as u32)
-            .expect("confidence pyramid build dispatch failed");
-        self.run_pair_analyse_for_slot(slot as u32)
-            .expect("pair analyse dispatch failed");
-
-        self.advance_ring();
-        self.prime_leading_edge_if_first()
-            .expect("leading edge priming failed");
-    }
-
-    /// Uploads `frame` into the next ring slot of `dst` and returns the
-    /// physical slot it wrote.
-    fn upload_into(&mut self, dst: &Handle, frame: &[f32]) -> usize {
-        let total_frames = self.params.total_frames() as usize;
-        let slot = self.ring_head % total_frames;
-        self.upload_into_slot(dst, frame, slot);
-        slot
-    }
-
-    fn upload_into_slot(&mut self, dst: &Handle, frame: &[f32], slot: usize) {
-        let channels = self.params.channels.count() as usize;
-        let stored_ch = self.params.channels.storage_count() as usize;
-        let pixels = self.width as usize * self.height as usize;
-        let expected = pixels * channels;
-
-        assert_eq!(
-            frame.len(),
-            expected,
-            "frame size mismatch: expected {expected}, got {}",
-            frame.len()
-        );
-
-        let staging = if channels == stored_ch {
-            self.client.create_from_slice(f32::as_bytes(frame))
-        } else {
-            for i in 0..pixels {
-                let dst_off = i * stored_ch;
-                let src_off = i * channels;
-                self.padding_scratch[dst_off..dst_off + channels]
-                    .copy_from_slice(&frame[src_off..src_off + channels]);
-            }
-            self.client
-                .create_from_slice(f32::as_bytes(&self.padding_scratch))
-        };
-
-        self.copy_frame_into_slot(dst, slot, &staging, 0, 1);
     }
 
     fn run_prefilter_for_slot(&self, slot: usize) -> Result<(), anyhow::Error> {
@@ -1143,7 +884,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// This does nothing unless automatic noise estimation is active.
     ///
     /// The results are normally read back later, in
-    /// [`Self::denoise_submit`], once `slot` reaches the centre of the
+    /// [`Self::denoise_submit_gpu`], once `slot` reaches the centre of the
     /// temporal window. A stream's very first frame is read immediately
     /// as well. See [`Self::seed_noise_estimate_if_first_frame`].
     fn run_noise_estimate_for_slot(&self, slot: u32) -> Result<(), anyhow::Error> {
@@ -1552,7 +1293,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// so the temporal window starts out balanced rather than dropping
     /// the opening frames.
     ///
-    /// [`Self::flush`] does the same thing at the other end of the
+    /// [`Self::flush_step_gpu`] does the same thing at the other end of the
     /// stream. Does nothing with shifted edges on, since that mode
     /// stops windows at the clip start instead of padding them.
     fn prime_leading_edge_if_first(&mut self) -> Result<(), anyhow::Error> {
@@ -1629,11 +1370,8 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// Queues the denoise kernels for the current window, without
     /// reading the result back.
     ///
-    /// Use this instead of [`Self::denoise_submit`] when the output has
-    /// more GPU work ahead of it, so the round trip to the host can be
-    /// skipped until the value the caller actually wants is ready. The
-    /// returned [`GpuOutput`] documents the lifetime the caller has to
-    /// respect.
+    /// The returned [`GpuOutput`] documents the lifetime the caller has
+    /// to respect.
     ///
     /// Returns `Ok(None)` while the temporal window is still filling.
     pub fn denoise_submit_gpu(&mut self) -> Result<Option<GpuOutput>, anyhow::Error> {
@@ -1654,7 +1392,6 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         Ok(Some(GpuOutput {
             handle: self.outputs[slot].clone(),
-            slot,
         }))
     }
 
@@ -1681,7 +1418,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// Returns an error if the denoiser was not built with motion
     /// compensation and temporal confidence both active, since a
     /// [`RingView`] has nothing meaningful to hand back otherwise.
-    pub(crate) fn submit_machinery(&mut self, center_t: u32) -> Result<Option<RingView>, DenoiserError> {
+    pub(crate) fn submit_machinery(&mut self, center_t: u32) -> Result<Option<RingView>, anyhow::Error> {
         debug_assert!(
             center_t < self.params.total_frames(),
             "center_t must be a logical ring position"
@@ -1698,11 +1435,10 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         let neighbour_slots = self.run_motion_machinery(center_t)?;
 
-        let mc = self.mc_ctx.as_ref().ok_or_else(|| {
-            DenoiserError::Other(anyhow::anyhow!(
-                "submit_machinery requires motion compensation to be active"
-            ))
-        })?;
+        let mc = self
+            .mc_ctx
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("submit_machinery requires motion compensation to be active"))?;
         let mv_field = self
             .mv_field_buf
             .as_ref()
@@ -1711,11 +1447,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let confidence = self
             .confidence_buf
             .as_ref()
-            .ok_or_else(|| {
-                DenoiserError::Other(anyhow::anyhow!(
-                    "submit_machinery requires HQ temporal confidence to be active"
-                ))
-            })?
+            .ok_or_else(|| anyhow::anyhow!("submit_machinery requires HQ temporal confidence to be active"))?
             .clone();
         let pyramid = self
             .pyramid_reference
@@ -1788,49 +1520,9 @@ impl<R: Runtime> NlmDenoiser<R> {
         &self.input_buf
     }
 
-    /// Queues the denoise kernels for the current window and starts the
-    /// readback.
-    ///
-    /// Returns a [`Pending`] whose `wait()` produces the denoised frame.
-    ///
-    /// There are two output handles, so a caller can keep two `Pending`s
-    /// in flight and let one frame's kernels overlap the previous
-    /// frame's readback.
-    ///
-    /// A third concurrent submit would reuse the oldest pending frame's
-    /// output handle and quietly corrupt the results. The high-level
-    /// [`crate::Denoiser`] holds callers to that limit through its
-    /// `MAX_PENDING` constant.
-    ///
-    /// The frame comes back in the [`OutputFormat`] this denoiser was
-    /// built with. [`OutputFormat::Wire`] quantises and packs the frame
-    /// on the GPU before the readback, so only the wire bytes cross the
-    /// bus.
-    ///
-    /// Returns `Ok(None)` while the temporal window is still filling.
-    pub fn denoise_submit(&mut self) -> Result<Option<Pending<R>>, anyhow::Error> {
-        let Some(output) = self.denoise_submit_gpu()? else {
-            return Ok(None);
-        };
-
-        // Start the readback right away, so the GPU-side copy is queued
-        // before the caller dispatches the next frame's kernels.
-        let pixels = (self.width * self.height) as usize;
-        Ok(Some(start_readback(
-            &self.client,
-            output.handle,
-            self.wire_outputs.as_ref().map(|w| &w[output.slot]),
-            self.params.channels.count(),
-            self.params.channels.storage_count(),
-            pixels,
-            self.output_format,
-        )))
-    }
-
-    /// The packed-word destinations, which are `Some` only in wire mode.
-    #[cfg(test)]
-    pub(crate) fn wire_outputs_for_test(&self) -> Option<&[Handle; 2]> {
-        self.wire_outputs.as_ref()
+    /// The frame width, height and channel layout.
+    pub(crate) fn frame_shape(&self) -> (u32, u32, ChannelMode) {
+        (self.width, self.height, self.params.channels)
     }
 
     /// The smoothed per-channel sigma estimate NLMeans is currently
@@ -2069,36 +1761,13 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.spatial_offset_lut = self.client.create_from_slice(f32::as_bytes(&lut));
     }
 
-    /// Submits the denoise and waits for it, all in one call.
-    ///
-    /// Prefer [`Self::denoise_submit`] when the caller can hold a frame
-    /// in flight, which lets one frame's kernels overlap the previous
-    /// frame's readback.
-    ///
-    /// Returns `Ok(None)` while not enough frames have been pushed.
-    ///
-    /// The frame comes back in the [`OutputFormat`] this denoiser was
-    /// built with.
-    ///
-    /// On success the return borrows a reusable internal buffer. Copy it
-    /// out if the data has to survive another call into the denoiser.
-    pub fn denoise(&mut self) -> Result<Option<&FrameOutput>, anyhow::Error> {
-        let Some(pending) = self.denoise_submit()? else {
-            return Ok(None);
-        };
-        // The scratch already holds this denoiser's format, so
-        // `wait_into` refills it and it keeps its allocation.
-        pending.wait_into(&mut self.output_scratch)?;
-        Ok(Some(&self.output_scratch))
-    }
-
-    /// How many tail frames a call to [`Self::flush`] must emit for the
+    /// How many tail frames the end-of-stream drain must emit for the
     /// stream pushed so far.
     ///
     /// While frames were being pushed the backend produced one output
     /// per push beyond the temporal radius, or none at all if the
     /// stream was shorter than that. This is the remaining difference,
-    /// so a caller driving [`Self::flush_step_gpu`] directly knows how
+    /// so a caller driving [`Self::flush_step_gpu`] knows how
     /// many `Some` results to collect before the stream is fully
     /// drained.
     ///
@@ -2114,10 +1783,9 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
     }
 
-    /// How many genuine `push_frame`/`push_frame_with_reference` calls
-    /// the current stream has seen, not counting the duplicates
-    /// [`Self::prime_leading_edge_if_first`] and [`Self::flush`] add at
-    /// either end.
+    /// How many genuine pushes the current stream has seen, not counting
+    /// the duplicates [`Self::prime_leading_edge_if_first`] and
+    /// [`Self::flush_step_gpu`] add at either end.
     ///
     /// A collaborative stage built on top of [`Self::submit_machinery`]
     /// reads this to size its own end-of-stream drain, the way
@@ -2136,11 +1804,6 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// so a caller has to stop on its own once it has collected
     /// [`Self::flush_target`] outputs, not on seeing `None` again.
     ///
-    /// [`Self::flush`] is a loop over this method. A caller that wants
-    /// the tail frames to stay on the GPU for further work, rather than
-    /// making a round trip through the host, can drive this directly
-    /// instead and check its own count against [`Self::flush_target`].
-    ///
     /// This assumes there is a frame to duplicate, which means
     /// `flush_target() > 0`. Calling it on spatial mode, or before any
     /// frame has been pushed, duplicates a frame that was never written.
@@ -2153,51 +1816,6 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
 
         self.denoise_submit_gpu()
-    }
-
-    /// Produces the frames still held at the end of a stream.
-    ///
-    /// For the last few frames the temporal window is kept full by
-    /// repeating the final frame.
-    ///
-    /// `sink` is called once per frame produced, and the frame it
-    /// receives is only valid for that call. It arrives in the
-    /// [`OutputFormat`] this denoiser was built with, quantised by the
-    /// same pack kernel as every streaming frame.
-    pub fn flush(&mut self, mut sink: impl FnMut(&FrameOutput)) -> Result<(), anyhow::Error> {
-        let target = self.flush_target();
-        let mut emitted = 0usize;
-        let pixels = (self.width * self.height) as usize;
-
-        // Every output slot is free here. A caller reaches a flush only
-        // once its streaming readbacks have landed, and the readback
-        // below blocks, so no other readback is ever reading the slot
-        // this step is handed.
-        while emitted < target {
-            if let Some(output) = self.flush_step_gpu()? {
-                let pending = start_readback(
-                    &self.client,
-                    output.handle,
-                    self.wire_outputs.as_ref().map(|w| &w[output.slot]),
-                    self.params.channels.count(),
-                    self.params.channels.storage_count(),
-                    pixels,
-                    self.output_format,
-                );
-                pending.wait_into(&mut self.output_scratch)?;
-                sink(&self.output_scratch);
-                emitted += 1;
-            }
-        }
-
-        // Leave the denoiser ready for a fresh stream of the same
-        // shape. The GPU buffers stay allocated and are overwritten one
-        // slot at a time as new frames arrive, and
-        // `prime_leading_edge_if_first` refills the leading edge as
-        // soon as the new stream's first frame lands.
-        self.reset_stream_state();
-
-        Ok(())
     }
 
     /// Resets the stream-tracking indices, so the next push starts a
@@ -2269,24 +1887,4 @@ impl<R: Runtime> NlmDenoiser<R> {
         let n = 2 * radius;
         ((self.ring_head as i32 + gap_index).rem_euclid(n)) as u32
     }
-}
-
-/// True when every sample in `plane` fits the range `depth` expresses.
-///
-/// The ingest kernel is branch-free and divides every sample by the
-/// depth's maximum, so a larger sample normalises above 1.0 and reaches
-/// the filter as a value no clean frame can hold. Only 10 and 12-bit can
-/// carry one, in the unused high bits of a 16-bit lane, so 8-bit is
-/// always in range.
-fn wire_samples_in_range(plane: &[u8], depth: Depth) -> bool {
-    if depth.bytes_per_sample() == 1 {
-        return true;
-    }
-
-    let max = depth.max_value() as u32;
-    plane
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .all(|&s| u32::from(u16::from_le_bytes(s)) <= max)
 }

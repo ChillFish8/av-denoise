@@ -1,7 +1,7 @@
 use super::{ChannelMode, HqParams, MotionCompensationMode, NlmParams, PrefilterMode, hq_default_strength};
 use crate::options::Preset;
 
-/// Settings for [`Algorithm::Nlmeans`](crate::Algorithm::Nlmeans).
+/// Settings for the fast [NlmeansAlgorithm] path.
 #[derive(Debug, Copy, Clone, Default, PartialEq)]
 pub struct NlmeansOptions {
     /// Which reference image the NLM weights are computed against.
@@ -15,8 +15,7 @@ pub struct NlmeansOptions {
     /// warps temporal neighbours into line with the centre frame before
     /// the NLM weighting runs.
     ///
-    /// Only has an effect when [`DenoiserOptions::mode`](crate::DenoiserOptions::mode) is
-    /// `Temporal { .. }`.
+    /// Only has an effect when `mode` is `Temporal { .. }`.
     pub motion_compensation: MotionCompensationMode,
     /// Overrides for the NLM search radius, patch radius, strength, and
     /// self-weight.
@@ -25,7 +24,7 @@ pub struct NlmeansOptions {
     pub mode: DenoisingMode,
 }
 
-/// Settings for [`Algorithm::NlmeansHq`](crate::Algorithm::NlmeansHq).
+/// Settings for the HQ [NlmeansAlgorithm] path.
 #[derive(Debug, Copy, Clone, Default, PartialEq)]
 pub struct NlmeansHqOptions {
     /// Everything the fast path takes, which HQ takes too.

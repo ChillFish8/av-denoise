@@ -1,6 +1,7 @@
 use cubecl::prelude::*;
 
 use super::helpers::*;
+use crate::bench_api::HostIo;
 use crate::nl4d::tests::helpers::{noisy_copy_of, textured_base};
 use crate::nlmeans::*;
 

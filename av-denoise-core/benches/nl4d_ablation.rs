@@ -6,18 +6,18 @@
 //! full resolution would report four times the real work. Both planes are
 //! measured here and summed, so the total is one frame's kernel cost.
 
-use av_denoise_core::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
-use av_denoise_core::collab::kernels::aggregate::{
+use av_denoise_core::bench_api::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
+use av_denoise_core::bench_api::collab::kernels::aggregate::{
     collab_normalise,
     collab_zero_accum,
     cross_frame_accum_scale,
     kaiser_window,
     weight_scale,
 };
-use av_denoise_core::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
-use av_denoise_core::collab::kernels::transforms::dct_noise_profile;
-use av_denoise_core::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
-use av_denoise_core::nlmeans::{BLOCK_X, BLOCK_Y, NOISE_CURVE_BINS};
+use av_denoise_core::bench_api::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
+use av_denoise_core::bench_api::collab::kernels::transforms::dct_noise_profile;
+use av_denoise_core::bench_api::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
+use av_denoise_core::bench_api::{BLOCK_X, BLOCK_Y, Device, NOISE_CURVE_BINS};
 use cubecl::benchmark::{Benchmark, BenchmarkComputations, TimingMethod};
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -347,7 +347,7 @@ impl<R: Runtime> Benchmark for Arm<'_, R> {
 #[derive(clap::Parser, Debug)]
 struct Cli {
     #[arg(long, default_value = "default")]
-    device: av_denoise_core::Device,
+    device: Device,
     #[arg(long, hide = true)]
     bench: bool,
 }

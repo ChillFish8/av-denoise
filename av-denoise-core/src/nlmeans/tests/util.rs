@@ -1,16 +1,6 @@
 use super::helpers::*;
+use crate::bench_api::HostIo;
 use crate::nlmeans::*;
-
-#[test]
-fn normalization_round_trips_across_the_full_range() {
-    for depth in [Depth::Eight, Depth::Ten, Depth::Twelve] {
-        let max = depth.max_value() as u16;
-        let original: Vec<u16> = (0..=max).collect();
-        let restored = denormalize(&normalize(&original, depth), depth);
-
-        assert_eq!(original, restored, "round trip failed at {depth:?}");
-    }
-}
 
 /// Drives most weights toward zero by combining a near-maximum search
 /// radius with extremely low strength (large `h2_inv_norm`), and on
@@ -37,13 +27,7 @@ fn extreme_params_produce_finite_output() {
 
     let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
     d.push_frame(&frame);
-    let result = d
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let result = d.denoise().unwrap().unwrap();
 
     for (i, &v) in result.iter().enumerate() {
         assert!(v.is_finite(), "pixel {i}: non-finite output {v}");

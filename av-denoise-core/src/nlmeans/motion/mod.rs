@@ -519,7 +519,7 @@ pub(crate) fn pair_ring_slot_count(temporal_radius: u32) -> u32 {
     2 * temporal_radius
 }
 
-/// Builds the pyramid for the slot `push_frame` just uploaded.
+/// Builds the pyramid for the slot a push just uploaded.
 ///
 /// Level 0 luma is always extracted, and the smaller levels follow when
 /// `pyramid_levels` is above 1.

@@ -8,12 +8,12 @@
 //! time, so a build without the `cuda` feature has no `Accelerator::Cuda`
 //! variant at all.
 //!
-//! [`Denoiser::create`](crate::Denoiser::create) takes a list of these
+//! [`HostDenoiser::create`](crate::HostDenoiser::create) takes a list of these
 //! and uses the first one that starts successfully, which lets a program
 //! prefer a fast backend and quietly fall back to a slower one.
 //!
 //! ```no_run
-//! use av_denoise_core::accelerate::get_default_accelerators;
+//! use av_denoise::accelerate::get_default_accelerators;
 //!
 //! // Every backend this build supports, in the order to try them.
 //! let preferred = get_default_accelerators();

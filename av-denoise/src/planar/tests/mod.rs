@@ -235,7 +235,7 @@ mod reseed {
     }
 
     /// `ChannelIntent::Luma` leaves chroma disabled, so its planes travel
-    /// through the passthrough queue instead of a `Denoiser`. A reseed's
+    /// through the passthrough queue instead of a `HostDenoiser`. A reseed's
     /// priming pushes queue one passthrough entry per window frame, and
     /// this checks the entry `recv` pairs with the denoised centre is the
     /// centre frame's own chroma, not a neighbour's.

@@ -1,6 +1,7 @@
 use cubecl::prelude::*;
 
 use super::helpers::*;
+use crate::bench_api::HostIo;
 use crate::nlmeans::noise::{
     NoiseCtx,
     QUARTER_FLATNESS,

@@ -1,4 +1,5 @@
 use super::helpers::*;
+use crate::bench_api::HostIo;
 use crate::nlmeans::*;
 
 /// Pearson correlation between a field and its neighbour one pixel to
@@ -137,7 +138,7 @@ fn measure(
         denoiser.push_frame(&frame);
         let result = denoiser.denoise().unwrap();
         if i == n_push - 1 {
-            output = result.map(|o| o.as_f32().expect("f32 denoiser").to_vec());
+            output = result;
         }
     }
 
@@ -515,7 +516,7 @@ fn run_front_end(
         denoiser.push_frame(&frame);
         let result = denoiser.denoise().unwrap();
         if i == n_push - 1 {
-            output = result.map(|o| o.as_f32().expect("f32 denoiser").to_vec());
+            output = result;
         }
     }
 

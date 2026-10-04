@@ -24,7 +24,7 @@ pub const MAX_KAISER_BETA: f32 = 8.0;
 /// three quarters of the block size.
 pub const MAX_COVERING_BLOCKS: u32 = 4;
 
-/// Tuning for [`super::Nl4dDenoiser`].
+/// Tuning for `Nl4dDenoiser`.
 ///
 /// `nlm` supplies the front end that builds the frame ring, the motion
 /// field, and the confidence scores the temporal grouping reads. Its own

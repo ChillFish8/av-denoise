@@ -1,17 +1,3 @@
-use std::hint::black_box;
-use std::time::{Duration, Instant};
-
-use av_denoise_core::nlmeans::{
-    ChannelMode,
-    MotionCompensationMode,
-    MotionEstimation,
-    NlmDenoiser,
-    NlmParams,
-    Pending,
-    PrefilterMode,
-};
-use cubecl::prelude::*;
-
 #[expect(
     dead_code,
     reason = "the shared kernel module is included by several bench binaries, each of which uses \
@@ -20,6 +6,12 @@ use cubecl::prelude::*;
 #[path = "kernels/mod.rs"]
 mod kernels;
 
+use std::hint::black_box;
+use std::time::{Duration, Instant};
+
+use av_denoise_core::bench_api::{Device, HostIo, NlmDenoiser, NlmParams, start_read, wait_read};
+use av_denoise_core::{ChannelMode, MotionCompensationMode, MotionEstimation, PrefilterMode};
+use cubecl::prelude::*;
 use kernels::mc_block_match_coarse::BlockMatchCoarseBench;
 use kernels::mc_block_match_fine::BlockMatchFineBench;
 use kernels::mc_confidence::McConfidenceBench;
@@ -162,12 +154,7 @@ fn bench_eager<R: Runtime>(
 
     run_pipeline_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
         denoiser.push_frame(&frame);
-        let result = denoiser
-            .denoise()
-            .unwrap()
-            .unwrap()
-            .as_f32()
-            .expect("f32 denoiser");
+        let result = denoiser.denoise().unwrap().unwrap();
         black_box(&result);
     })
 }
@@ -197,18 +184,22 @@ fn bench_pipelined<R: Runtime>(
     futures::executor::block_on(client.sync()).unwrap();
 
     denoiser.push_frame(&frame);
-    let mut in_flight: Option<Pending<R>> = Some(denoiser.denoise_submit().unwrap().unwrap());
+    let first = denoiser.denoise_submit_gpu().unwrap().unwrap();
+    let mut in_flight = Some(start_read(client, first.handle));
 
     let result = run_pipeline_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
         denoiser.push_frame(&frame);
-        let next = denoiser.denoise_submit().unwrap().unwrap();
-        let output = in_flight.take().unwrap().wait().unwrap();
+        let next = denoiser.denoise_submit_gpu().unwrap().unwrap();
+        let next_read = start_read(client, next.handle);
+
+        let previous = in_flight.take().unwrap();
+        let output = wait_read(previous);
         black_box(&output);
-        in_flight = Some(next);
+        in_flight = Some(next_read);
     });
 
-    if let Some(pending) = in_flight.take() {
-        let _ = pending.wait().unwrap();
+    if let Some(read) = in_flight.take() {
+        let _ = wait_read(read);
     }
     result
 }
@@ -300,7 +291,7 @@ struct Cli {
     /// GPU device to bind to. Format: `default`, `discrete[:N]`,
     /// `integrated[:N]`, `virtual[:N]`, or `cpu`.
     #[arg(long, default_value = "default")]
-    device: av_denoise_core::Device,
+    device: Device,
 
     /// Swallowed: cargo passes this when invoking the bench binary.
     #[arg(long, hide = true)]
