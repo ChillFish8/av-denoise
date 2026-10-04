@@ -29,7 +29,7 @@ fn haar_strided_level_fwd(
     }
 }
 
-/// The inverse of [haar_strided_level_fwd].
+/// The inverse of `haar_strided_level_fwd`.
 #[cube]
 fn haar_strided_level_inv(
     vals: &mut Array<f32>,
@@ -159,7 +159,7 @@ pub(crate) fn grid_fwd(stack: &mut Array<f32>, #[comptime] grid_frames: u32) {
     }
 }
 
-/// The inverse of [grid_fwd].
+/// The inverse of `grid_fwd`.
 #[cube]
 pub(crate) fn grid_inv(stack: &mut Array<f32>, #[comptime] grid_frames: u32) {
     let volumes = comptime!(MAX_K / grid_frames);
@@ -189,7 +189,7 @@ pub(crate) fn grid_inv(stack: &mut Array<f32>, #[comptime] grid_frames: u32) {
     }
 }
 
-/// Propagates each member's variance to the coefficient it lands on under [grid_fwd].
+/// Propagates each member's variance to the coefficient it lands on under `grid_fwd`.
 #[cube]
 pub(crate) fn grid_variance(v: &mut Array<f32>, #[comptime] grid_frames: u32) {
     let volumes = comptime!(MAX_K / grid_frames);
@@ -275,14 +275,14 @@ pub(crate) fn grid_inv_host(column: &[f32; 8], grid_frames: u32) -> [f32; 8] {
     vals
 }
 
-/// Propagates independent per-member variances through [grid_fwd_host].
+/// Propagates independent per-member variances through `grid_fwd_host`.
 ///
 /// Both outputs of a Haar pair carry the mean variance of its inputs.
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-pub(crate) fn grid_variance_host(v: &[f32; 8], grid_frames: u32) -> [f32; 8] {
+pub(crate) fn grid_variance_host(variances: &[f32; 8], grid_frames: u32) -> [f32; 8] {
     let frames = grid_frames as usize;
     let volumes = 8 / frames;
-    let mut vals = *v;
+    let mut vals = *variances;
     let average = |vals: &mut [f32; 8], start: usize, stride: usize, len: usize| {
         let half = len / 2;
         let snapshot: Vec<f32> = (0..len).map(|k| vals[start + k * stride]).collect();

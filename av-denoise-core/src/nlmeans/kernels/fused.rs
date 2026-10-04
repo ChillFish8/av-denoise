@@ -3,18 +3,11 @@ use cubecl::terminate;
 
 use super::helpers::{channel_scale, line_sum_sq, read_clamped_line, read_line, welsch_weight};
 
-/// Measures the distance, box-filters it over the patch, and turns the
-/// result into a Welsch weight, all in one kernel.
+/// Writes the Welsch weight of the patch distance between each pixel and its neighbour at `q`.
 ///
-/// The block first loads a `(block + 2 * patch_radius)^2` tile of
-/// per-pixel scaled distances into shared memory. Each thread then sums
-/// its own `(2 * patch_radius + 1)^2` patch and applies the Welsch
-/// kernel.
-///
-/// An `interior` flag picks unclamped reads when the whole tile, and its
-/// shifted twin, lie inside the image. Blocks near the border take the
-/// clamped path instead. The flag is the same for every thread in the
-/// block, so the branch costs nothing in divergence.
+/// The block caches a `(block + 2 * patch_radius)^2` tile of per-pixel distances in shared memory.
+/// Blocks whose tile and shifted tile lie inside the image skip clamping, and the branch never
+/// diverges because the whole block takes the same side.
 #[cube(launch_unchecked)]
 pub fn nlm_dist_2d_weight<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -105,6 +98,7 @@ pub fn nlm_dist_2d_weight<N: Size>(
     let center_tile_y = local_y + patch_radius;
     let patch_size = 2 * patch_radius + 1;
     let mut patch_sum = 0.0f32;
+
     for offset_y in 0..patch_size {
         for offset_x in 0..patch_size {
             let smem_idx = ((center_tile_y - patch_radius + offset_y) * tile_width + center_tile_x
@@ -119,12 +113,7 @@ pub fn nlm_dist_2d_weight<N: Size>(
 
 /// The reference-image version of `nlm_dist_2d_weight`.
 ///
-/// Distances are read from `reference`, a prefiltered or externally
-/// supplied image with the same layout as `input`. The weight output is
-/// unchanged.
-///
-/// This runs when a prefilter is active, so the weights are computed
-/// from a cleaner image than the noisy input.
+/// Distances are read from `reference`, a cleaner image with the same layout as the input.
 #[cube(launch_unchecked)]
 pub fn nlm_dist_2d_weight_ref<N: Size>(
     reference: &Array<Vector<f32, N>>,
@@ -215,6 +204,7 @@ pub fn nlm_dist_2d_weight_ref<N: Size>(
     let center_tile_y = local_y + patch_radius;
     let patch_size = 2 * patch_radius + 1;
     let mut patch_sum = 0.0f32;
+
     for offset_y in 0..patch_size {
         for offset_x in 0..patch_size {
             let smem_idx = ((center_tile_y - patch_radius + offset_y) * tile_width + center_tile_x
@@ -227,42 +217,15 @@ pub fn nlm_dist_2d_weight_ref<N: Size>(
     output[(global_y * width + global_x) as usize] = welsch_weight(patch_sum, h2_inv_norm, noise_offset);
 }
 
-/// Compares the centre frame against one pair of temporal neighbours,
-/// covering the whole search window in a single launch.
+/// Accumulates one pair of temporal neighbours over the whole search window in a single launch.
 ///
-/// The kernel loops over every offset in the search window for one
-/// temporal distance, keeping the running accumulator, weight sum, and
-/// max weight in registers. Those are written to global memory once at
-/// the end, which collapses `(2 * search_radius + 1)^2` launches into
-/// one.
+/// The running sums stay in registers and are added to `accum`, `weight_sum` and `max_weight`
+/// once at the end. The centre frame is cached once in a
+/// `(block + 2 * patch_radius + 2 * search_radius)^2` shared tile that both directions share.
 ///
-/// # Caching the centre frame
-///
-/// The centre frame is read once into a shared-memory tile of
-/// `(block + 2 * patch_radius + 2 * search_radius)^2` pixels, big enough
-/// to cover every neighbour offset the window can reach.
-///
-/// The forward and backward comparisons both centre on that same patch,
-/// so one cached tile serves both. Only the shifted neighbour pixels
-/// come from global memory each iteration.
-///
-/// That roughly halves the global read traffic compared with re-reading
-/// the centre frame for every offset.
-///
-/// The two distance tiles are reused across iterations, with a
-/// `sync_cube` between them.
-///
-/// # Confidence weighting
-///
-/// When `use_confidence` is true, each weight is multiplied by its
-/// block's confidence before it folds into the accumulators, using the
-/// same pixel-to-block mapping `nlm_mc_warp` uses.
-///
-/// The block index depends only on the pixel position, so it is the same
-/// for every offset in the window.
-///
-/// When `use_confidence` is false the lookup and the multiply are
-/// dropped at compile time, and the confidence buffers are never read.
+/// When `use_confidence` is set, each weight is scaled by its block's confidence from `conf_fwd`
+/// and `conf_bwd`. `step`, `blocks_x` and `blocks_y` describe the motion block grid, which pixels
+/// map onto the same way as in `nlm_mc_warp`. When it is unset the confidence buffers are never read.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_pair_accumulate_window<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -313,17 +276,16 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
     let expanded_x0 = fwd_tile_x0 - search_radius as i32;
     let expanded_y0 = fwd_tile_y0 - search_radius as i32;
 
-    // Cache `frame_t` once across the expanded tile that covers every
-    // forward and shifted-backward center position.
     let mut idx = thread_id;
     while idx < expanded_elems {
-        let ex = idx % expanded_width;
-        let ey = idx / expanded_width;
-        let src_x = expanded_x0 + ex as i32;
-        let src_y = expanded_y0 + ey as i32;
+        let expanded_x = idx % expanded_width;
+        let expanded_y = idx / expanded_width;
+        let src_x = expanded_x0 + expanded_x as i32;
+        let src_y = expanded_y0 + expanded_y as i32;
         smem_center[idx as usize] = read_clamped_line(input, src_x, src_y, frame_t, width, height);
         idx += threads;
     }
+
     sync_cube();
 
     let mut accum_reg = Vector::<f32, N>::empty();
@@ -344,12 +306,8 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
                 let tile_x = idx % tile_width;
                 let tile_y = idx / tile_width;
 
-                // Both the forward and backward centres sit at
-                // (tile_x + search_radius, tile_y + search_radius) in
-                // expanded-tile coordinates. The backward comparison is
-                // centred on the same output pixel as the forward one,
-                // mirroring it against `frame_bwd` at `-q` instead of
-                // `frame_fwd` at `+q`.
+                // The backward comparison mirrors the forward one against `frame_bwd` at `-q`, so
+                // both centre on the same cached patch.
                 let center_idx =
                     ((tile_y + search_radius) * expanded_width + (tile_x + search_radius)) as usize;
                 let center = smem_center[center_idx];
@@ -384,6 +342,7 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
                 let patch_size = 2 * patch_radius + 1;
                 let mut sum_fwd = 0.0f32;
                 let mut sum_bwd = 0.0f32;
+
                 for offset_y in 0..patch_size {
                     for offset_x in 0..patch_size {
                         let smem_idx = ((center_tile_y - patch_radius + offset_y) * tile_width
@@ -399,9 +358,9 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
                 let mut weight_bwd = welsch_weight(sum_bwd, h2_inv_norm, noise_offset);
 
                 if use_confidence {
-                    let bx = (global_x / step).min(blocks_x - 1);
-                    let by = (global_y / step).min(blocks_y - 1);
-                    let block_idx = (by * blocks_x + bx) as usize;
+                    let block_col = (global_x / step).min(blocks_x - 1);
+                    let block_row = (global_y / step).min(blocks_y - 1);
+                    let block_idx = (block_row * blocks_x + block_col) as usize;
                     weight_fwd *= conf_fwd[block_idx];
                     weight_bwd *= conf_bwd[block_idx];
                 }
@@ -431,8 +390,7 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
                 max_weight_reg = f32::max(max_weight_reg, f32::max(weight_fwd, weight_bwd));
             }
 
-            // Wait for every thread to finish reading the tiles before
-            // the next q overwrites them.
+            // The next offset overwrites the distance tiles.
             sync_cube();
         }
     }
@@ -447,30 +405,14 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
     }
 }
 
-/// Compares a frame against itself across the search window, which is
-/// the spatial-only case.
+/// Accumulates a frame against itself over the whole search window, the spatial-only case.
 ///
-/// The structure matches `nlm_fused_pair_accumulate_window`, but this
-/// kernel takes advantage of the weight map's symmetry. Patch distance
-/// reads the same in either direction, so walking the full window one
-/// way gives the same accumulator as the paired half-window version,
-/// with one distance tile and one neighbour read per offset.
+/// Patch distance is symmetric, so walking the full window one way gives the same result as the
+/// paired half-window, with one distance tile and one neighbour read per offset. The zero offset is
+/// skipped because `nlm_finish` adds it back through `wref * max_weight`.
 ///
-/// The centre frame is cached in the expanded shared-memory tile, so
-/// each offset only touches global memory for its shifted neighbour
-/// pixel.
-///
-/// The zero offset is skipped at compile time. `nlm_finish` folds that
-/// self-contribution back in through its `wref * max_weight` term.
-///
-/// # Spatial offset table
-///
-/// `spatial_offset_lut` holds one noise-floor offset per candidate, laid
-/// out row-major over the window.
-///
-/// Nearby candidates share more of the grain's spatial correlation, so
-/// their offset is reduced relative to distant ones. See
-/// `noise::build_spatial_offset_lut`.
+/// `spatial_offset_lut` holds one noise-floor offset per candidate, row-major over the window.
+/// Nearby candidates share more of the grain's spatial correlation, so their offsets are smaller.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_single_window<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -514,13 +456,14 @@ pub fn nlm_fused_single_window<N: Size>(
 
     let mut idx = thread_id;
     while idx < expanded_elems {
-        let ex = idx % expanded_width;
-        let ey = idx / expanded_width;
-        let src_x = expanded_x0 + ex as i32;
-        let src_y = expanded_y0 + ey as i32;
+        let expanded_x = idx % expanded_width;
+        let expanded_y = idx / expanded_width;
+        let src_x = expanded_x0 + expanded_x as i32;
+        let src_y = expanded_y0 + expanded_y as i32;
         smem_center[idx as usize] = read_clamped_line(input, src_x, src_y, frame_t, width, height);
         idx += threads;
     }
+
     sync_cube();
 
     let mut accum_reg = Vector::<f32, N>::empty();
@@ -536,17 +479,12 @@ pub fn nlm_fused_single_window<N: Size>(
             let q_x = q_xi as i32 - search_radius as i32;
             let q_y = q_yi as i32 - search_radius as i32;
             if comptime!(q_x == 0 && q_y == 0) {
-                // Skip the zero offset. `nlm_finish` puts that
-                // contribution back through `wref * max_weight`.
-                //
-                // CubeCL has no `continue` yet. This does not become a
-                // branch in the kernel, because it is optimised out at
-                // compile time.
+                // An empty comptime branch stands in for `continue`, which cubecl lacks.
             } else {
-                let mut tidx = thread_id;
-                while tidx < tile_elems {
-                    let tile_x = tidx % tile_width;
-                    let tile_y = tidx / tile_width;
+                let mut tile_idx = thread_id;
+                while tile_idx < tile_elems {
+                    let tile_x = tile_idx % tile_width;
+                    let tile_y = tile_idx / tile_width;
                     let center_idx =
                         ((tile_y + search_radius) * expanded_width + (tile_x + search_radius)) as usize;
                     let center = smem_center[center_idx];
@@ -558,9 +496,10 @@ pub fn nlm_fused_single_window<N: Size>(
                         width,
                         height,
                     );
-                    smem_dist[tidx as usize] = line_sum_sq(center - neighbor, channels) * scale;
-                    tidx += threads;
+                    smem_dist[tile_idx as usize] = line_sum_sq(center - neighbor, channels) * scale;
+                    tile_idx += threads;
                 }
+
                 sync_cube();
 
                 if in_image {
@@ -568,6 +507,7 @@ pub fn nlm_fused_single_window<N: Size>(
                     let center_tile_y = local_y + patch_radius;
                     let patch_size = 2 * patch_radius + 1;
                     let mut patch_sum = 0.0f32;
+
                     for offset_y in 0..patch_size {
                         for offset_x in 0..patch_size {
                             let smem_idx = ((center_tile_y - patch_radius + offset_y) * tile_width
@@ -577,6 +517,7 @@ pub fn nlm_fused_single_window<N: Size>(
                             patch_sum += smem_dist[smem_idx];
                         }
                     }
+
                     let lut_idx = (q_yi * window_side + q_xi) as usize;
                     let offset = spatial_offset_lut[lut_idx];
                     let weight = welsch_weight(patch_sum, h2_inv_norm, offset);
@@ -612,12 +553,7 @@ pub fn nlm_fused_single_window<N: Size>(
 
 /// The reference-image version of `nlm_fused_pair_accumulate_window`.
 ///
-/// Distances, both the cached centre tile and the per-offset
-/// neighbours, are read from `reference`. The pixels being accumulated
-/// still come from `input`, so the original values reach `accum` while
-/// the weights come from the cleaner reference frames.
-///
-/// Confidence weighting works the same way as in the plain version.
+/// Distances are read from `reference` while the accumulated pixels still come from `input`.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -669,16 +605,16 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
     let expanded_x0 = fwd_tile_x0 - search_radius as i32;
     let expanded_y0 = fwd_tile_y0 - search_radius as i32;
 
-    // Cache `reference[frame_t]` once.
     let mut idx = thread_id;
     while idx < expanded_elems {
-        let ex = idx % expanded_width;
-        let ey = idx / expanded_width;
-        let src_x = expanded_x0 + ex as i32;
-        let src_y = expanded_y0 + ey as i32;
+        let expanded_x = idx % expanded_width;
+        let expanded_y = idx / expanded_width;
+        let src_x = expanded_x0 + expanded_x as i32;
+        let src_y = expanded_y0 + expanded_y as i32;
         smem_center[idx as usize] = read_clamped_line(reference, src_x, src_y, frame_t, width, height);
         idx += threads;
     }
+
     sync_cube();
 
     let mut accum_reg = Vector::<f32, N>::empty();
@@ -699,9 +635,6 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
                 let tile_x = idx % tile_width;
                 let tile_y = idx / tile_width;
 
-                // Both the forward and backward comparisons centre on
-                // the same patch of the centre frame. The plain
-                // variant's doc comment explains why.
                 let center_idx =
                     ((tile_y + search_radius) * expanded_width + (tile_x + search_radius)) as usize;
                 let center = smem_center[center_idx];
@@ -736,6 +669,7 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
                 let patch_size = 2 * patch_radius + 1;
                 let mut sum_fwd = 0.0f32;
                 let mut sum_bwd = 0.0f32;
+
                 for offset_y in 0..patch_size {
                     for offset_x in 0..patch_size {
                         let smem_idx = ((center_tile_y - patch_radius + offset_y) * tile_width
@@ -751,14 +685,13 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
                 let mut weight_bwd = welsch_weight(sum_bwd, h2_inv_norm, noise_offset);
 
                 if use_confidence {
-                    let bx = (global_x / step).min(blocks_x - 1);
-                    let by = (global_y / step).min(blocks_y - 1);
-                    let block_idx = (by * blocks_x + bx) as usize;
+                    let block_col = (global_x / step).min(blocks_x - 1);
+                    let block_row = (global_y / step).min(blocks_y - 1);
+                    let block_idx = (block_row * blocks_x + block_col) as usize;
                     weight_fwd *= conf_fwd[block_idx];
                     weight_bwd *= conf_bwd[block_idx];
                 }
 
-                // Pixel accumulation reads from `input`, not `reference`.
                 let fwd_pixel = read_clamped_line(
                     input,
                     global_x as i32 + q_x,
@@ -798,12 +731,7 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
 
 /// The reference-image version of `nlm_fused_single_window`.
 ///
-/// Distances come from the reference image, both the cached centre and
-/// the per-offset neighbours, while the pixels being accumulated come
-/// from the input.
-///
-/// `spatial_offset_lut` has the same layout as in
-/// `nlm_fused_single_window`.
+/// Distances are read from `reference` while the accumulated pixels still come from `input`.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_single_window_ref<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -848,13 +776,14 @@ pub fn nlm_fused_single_window_ref<N: Size>(
 
     let mut idx = thread_id;
     while idx < expanded_elems {
-        let ex = idx % expanded_width;
-        let ey = idx / expanded_width;
-        let src_x = expanded_x0 + ex as i32;
-        let src_y = expanded_y0 + ey as i32;
+        let expanded_x = idx % expanded_width;
+        let expanded_y = idx / expanded_width;
+        let src_x = expanded_x0 + expanded_x as i32;
+        let src_y = expanded_y0 + expanded_y as i32;
         smem_center[idx as usize] = read_clamped_line(reference, src_x, src_y, frame_t, width, height);
         idx += threads;
     }
+
     sync_cube();
 
     let mut accum_reg = Vector::<f32, N>::empty();
@@ -870,14 +799,12 @@ pub fn nlm_fused_single_window_ref<N: Size>(
             let q_x = q_xi as i32 - search_radius as i32;
             let q_y = q_yi as i32 - search_radius as i32;
             if comptime!(q_x == 0 && q_y == 0) {
-                // CubeCL has no `continue` yet. This does not become a
-                // branch in the kernel, because it is optimised out at
-                // compile time.
+                // An empty comptime branch stands in for `continue`, which cubecl lacks.
             } else {
-                let mut tidx = thread_id;
-                while tidx < tile_elems {
-                    let tile_x = tidx % tile_width;
-                    let tile_y = tidx / tile_width;
+                let mut tile_idx = thread_id;
+                while tile_idx < tile_elems {
+                    let tile_x = tile_idx % tile_width;
+                    let tile_y = tile_idx / tile_width;
                     let center_idx =
                         ((tile_y + search_radius) * expanded_width + (tile_x + search_radius)) as usize;
                     let center = smem_center[center_idx];
@@ -889,9 +816,10 @@ pub fn nlm_fused_single_window_ref<N: Size>(
                         width,
                         height,
                     );
-                    smem_dist[tidx as usize] = line_sum_sq(center - neighbor, channels) * scale;
-                    tidx += threads;
+                    smem_dist[tile_idx as usize] = line_sum_sq(center - neighbor, channels) * scale;
+                    tile_idx += threads;
                 }
+
                 sync_cube();
 
                 if in_image {
@@ -899,6 +827,7 @@ pub fn nlm_fused_single_window_ref<N: Size>(
                     let center_tile_y = local_y + patch_radius;
                     let patch_size = 2 * patch_radius + 1;
                     let mut patch_sum = 0.0f32;
+
                     for offset_y in 0..patch_size {
                         for offset_x in 0..patch_size {
                             let smem_idx = ((center_tile_y - patch_radius + offset_y) * tile_width
@@ -908,6 +837,7 @@ pub fn nlm_fused_single_window_ref<N: Size>(
                             patch_sum += smem_dist[smem_idx];
                         }
                     }
+
                     let lut_idx = (q_yi * window_side + q_xi) as usize;
                     let offset = spatial_offset_lut[lut_idx];
                     let weight = welsch_weight(patch_sum, h2_inv_norm, offset);

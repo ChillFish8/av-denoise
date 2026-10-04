@@ -1,5 +1,3 @@
-//! GPU kernels that belong to nl4d alone.
-
 #![doc(hidden)]
 
 mod grain;

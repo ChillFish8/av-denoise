@@ -5,18 +5,13 @@ use super::helpers::{read_clamped_line, read_line};
 
 /// A bilateral prefilter that blurs a frame without crossing edges.
 ///
-/// Each neighbour's weight is the product of two Gaussians. One falls
-/// off with distance in pixels, the other with difference in colour, so
-/// a neighbour on the far side of an edge contributes almost nothing.
+/// Each neighbour is weighted by
+/// `exp(-(dx^2 + dy^2) * inv_two_sigma_s_sq - range_sq * inv_two_sigma_r_sq)`, so a neighbour
+/// across an edge contributes almost nothing. The block caches a `(block + 2 * radius)^2` tile in
+/// shared memory, one vector per pixel.
 ///
-/// The block first loads a `(block + 2 * radius)^2` tile of source
-/// pixels into shared memory, one vector per pixel, then each thread
-/// convolves over its patch using
-/// `w = exp(-(dx^2 + dy^2) * inv_two_sigma_s_sq - range_sq * inv_two_sigma_r_sq)`.
-///
-/// The output keeps the input's channel layout, with padding lanes
-/// copied straight through, so it can stand in for `input` in the `_ref`
-/// distance kernels.
+/// The output keeps the input's channel layout, so it can stand in as the reference image of the
+/// `_ref` distance kernels.
 #[cube(launch_unchecked)]
 pub fn nlm_bilateral<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -51,6 +46,7 @@ pub fn nlm_bilateral<N: Size>(
     let threads = block_x * block_y;
     let thread_id = local_y * block_x + local_x;
     let mut idx = thread_id;
+
     if interior {
         while idx < tile_elems {
             let tile_x = idx % tile_width;
@@ -83,7 +79,8 @@ pub fn nlm_bilateral<N: Size>(
 
     let patch_size = 2 * radius + 1;
     let mut weight_sum = 0.0f32;
-    let mut acc = Vector::<f32, N>::empty().fill(0.0f32);
+    let mut weighted_sum = Vector::<f32, N>::empty().fill(0.0f32);
+
     for offset_y in 0..patch_size {
         for offset_x in 0..patch_size {
             let dy = offset_y as i32 - radius as i32;
@@ -94,20 +91,22 @@ pub fn nlm_bilateral<N: Size>(
 
             let diff = neighbor - center;
             let mut range_sq = 0.0f32;
-            #[unroll]
-            for c in 0..channels {
-                range_sq += diff[c as usize] * diff[c as usize];
-            }
-            let spatial = (dx * dx + dy * dy) as f32 * inv_two_sigma_s_sq;
-            let w = f32::exp(-(spatial + range_sq * inv_two_sigma_r_sq));
 
-            let line_w = Vector::<f32, N>::empty().fill(w);
-            acc += neighbor * line_w;
-            weight_sum += w;
+            #[unroll]
+            for channel in 0..channels {
+                range_sq += diff[channel as usize] * diff[channel as usize];
+            }
+
+            let spatial = (dx * dx + dy * dy) as f32 * inv_two_sigma_s_sq;
+            let weight = f32::exp(-(spatial + range_sq * inv_two_sigma_r_sq));
+
+            let line_w = Vector::<f32, N>::empty().fill(weight);
+            weighted_sum += neighbor * line_w;
+            weight_sum += weight;
         }
     }
 
-    let inv = 1.0f32 / weight_sum;
-    let line_inv = Vector::<f32, N>::empty().fill(inv);
-    output[((frame * height + global_y) * width + global_x) as usize] = acc * line_inv;
+    let inv_weight_sum = 1.0f32 / weight_sum;
+    let line_inv = Vector::<f32, N>::empty().fill(inv_weight_sum);
+    output[((frame * height + global_y) * width + global_x) as usize] = weighted_sum * line_inv;
 }

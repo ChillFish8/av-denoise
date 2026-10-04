@@ -11,11 +11,9 @@ pub(super) fn clamp_coord(value: i32, #[comptime] limit: u32) -> u32 {
     result
 }
 
-/// Reads the pixel at `(x, y)` in `frame`, clamped to the image edges on
-/// both axes.
+/// Reads the pixel at `(x, y)` in `frame`, clamped to the image edges.
 ///
-/// The frame index is taken on trust, because callers always pass a
-/// physical slot that holds loaded data.
+/// Only the coordinates are clamped. `frame` must be a loaded physical slot.
 #[cube]
 pub(crate) fn read_clamped_line<N: Size>(
     buf: &Array<Vector<f32, N>>,
@@ -33,8 +31,7 @@ pub(crate) fn read_clamped_line<N: Size>(
 
 /// The unchecked version of `read_clamped_line`.
 ///
-/// The caller promises that `x` is inside `[0, width)` and `y` is inside
-/// `[0, height)`.
+/// `x` must be within `0..width` and `y` within `0..height`.
 #[cube]
 pub(crate) fn read_line<N: Size>(
     buf: &Array<Vector<f32, N>>,
@@ -48,25 +45,22 @@ pub(crate) fn read_line<N: Size>(
     buf[idx as usize]
 }
 
-/// Sums the squared differences across a vector's lanes.
-///
-/// The loop unrolls fully at compile time, because `channels` is known
-/// then.
+/// Sums the squared differences across the first `channels` lanes.
 #[cube]
 pub(crate) fn line_sum_sq<N: Size>(diff: Vector<f32, N>, #[comptime] channels: u32) -> f32 {
     let mut sum = 0.0f32;
+
     #[unroll]
-    for c in 0..channels {
-        sum += diff[c as usize] * diff[c as usize];
+    for channel in 0..channels {
+        sum += diff[channel as usize] * diff[channel as usize];
     }
+
     sum
 }
 
-/// The per-channel distance scale, which is 3 for luma, 1.5 for chroma,
-/// and 1 for full YUV.
+/// The per-channel distance scale, which is 3 for luma, 1.5 for chroma and 1 for full YUV.
 ///
-/// Scaling this way lets all three channel modes share one
-/// `h2_inv_norm`.
+/// Scaling this way lets all three channel modes share one `h2_inv_norm`.
 #[cube]
 pub(crate) fn channel_scale(#[comptime] channels: u32) -> f32 {
     let mut scale = 1.0f32;
@@ -80,26 +74,18 @@ pub(crate) fn channel_scale(#[comptime] channels: u32) -> f32 {
 
 /// The Welsch weight for a box-summed patch distance.
 ///
-/// `noise_offset` is the distance two noisy copies of the same content
-/// are expected to show. Subtracting it stops a good match being
-/// penalised for the noise it carries.
-///
-/// An offset of 0.0 gives exactly the plain weight, because the box sum
-/// is never negative.
+/// `noise_offset` is the distance two noisy copies of the same content are expected to show.
+/// Subtracting it stops a good match being penalised for its noise. An offset of 0 gives the plain
+/// weight, because the box sum is never negative.
 #[cube]
 pub(super) fn welsch_weight(sum: f32, h2_inv_norm: f32, noise_offset: f32) -> f32 {
     f32::exp(-f32::max(sum - noise_offset, 0.0) * h2_inv_norm)
 }
 
-/// Adds the forward and backward neighbour contributions at the thread's
-/// pixel.
+/// Adds the forward and backward neighbour contributions at the thread's pixel.
 ///
-/// The forward neighbour sits at `(global + q, frame_fwd)` with
-/// `weight_fwd`, and the backward one at `(global - q, frame_bwd)` with
-/// `weight_bwd`.
-///
-/// One interior check per thread covers both reads, falling back to
-/// clamped reads at the border.
+/// The forward neighbour sits at `global + q` in `frame_fwd` and the backward one at `global - q`
+/// in `frame_bwd`. Both reads fall back to clamped reads at the border.
 #[cube]
 pub(super) fn accumulate_pair<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -148,8 +134,8 @@ pub(super) fn accumulate_pair<N: Size>(
 
     let line_w_fwd = Vector::<f32, N>::empty().fill(weight_fwd);
     let line_w_bwd = Vector::<f32, N>::empty().fill(weight_bwd);
-    let cur = accum[pixel_idx];
-    accum[pixel_idx] = cur + fwd_pixel * line_w_fwd + bwd_pixel * line_w_bwd;
+    let cur_accum = accum[pixel_idx];
+    accum[pixel_idx] = cur_accum + fwd_pixel * line_w_fwd + bwd_pixel * line_w_bwd;
 
     weight_sum[pixel_idx] += weight_fwd + weight_bwd;
 }

@@ -2,8 +2,9 @@ use cubecl::prelude::*;
 
 /// Normalises word-packed planes into one interleaved ring slot.
 ///
-/// Each thread handles one pixel and writes all `stored_ch` lanes, with padding lanes set to zero.
-/// A plane is only read when `channels` covers it, so an unused plane can be a placeholder.
+/// `max` is the largest sample code, and `offset` is the slot's first element in `ring`. Threads
+/// stride over pixels by `total_threads` and write all `stored_ch` lanes, with padding lanes set to
+/// zero. A plane is only read when `channels` covers it, so an unused plane can be a placeholder.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
@@ -96,9 +97,11 @@ pub fn ingest_f32(
 
 /// Quantises an interleaved f32 frame into word-packed planes.
 ///
-/// Each thread packs and writes one word of every plane, so no two threads share a word. Lanes past the
-/// last pixel are written as zero. A plane is only written when `channels` covers it, so an unused plane
-/// can be a placeholder.
+/// Values are clamped to `0.0..=1.0` and rounded to the nearest code up to `max`. Each thread
+/// packs and writes whole words, so no two threads share a word. Lanes past the last pixel read a
+/// clamped index and are masked to zero, because a branch-derived index inside an unrolled loop
+/// makes cubecl's GVN pass panic and the launch then silently writes nothing. A plane is only
+/// written when `channels` covers it, so an unused plane can be a placeholder.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,

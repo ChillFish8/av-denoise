@@ -1,16 +1,10 @@
 use cubecl::prelude::*;
 
-/// Copies `length` elements from `src[src_offset..]` into
-/// `dst[dst_offset..]`, entirely on the GPU.
+/// Copies `length` elements from `src[src_offset..]` into `dst[dst_offset..]`.
 ///
-/// The loop is strided so the grid can stay under the 65,535 dispatch
-/// limit.
-///
-/// The offsets are kernel arguments rather than byte offsets on the
-/// bound handles, which lets a caller address any slot of a ring buffer
-/// whatever its stride. The GPU only accepts a buffer bound at a
-/// multiple of its `min_storage_buffer_offset_alignment`, and a
-/// `width * height * stored_ch` frame stride rarely lands on one.
+/// The loop is strided so the grid stays under the 65,535 workgroup limit. The offsets are kernel
+/// arguments because a buffer can only be bound at a multiple of
+/// `min_storage_buffer_offset_alignment`, and a ring slot's stride rarely lands on one.
 #[cube(launch_unchecked)]
 pub fn gpu_copy(
     src: &Array<f32>,
@@ -27,11 +21,10 @@ pub fn gpu_copy(
     }
 }
 
-/// Zeroes `accum`, `weight_sum`, and `max_weight` in one dispatch.
+/// Zeroes `accum`, `weight_sum` and `max_weight` in one dispatch.
 ///
-/// The main loop covers all three up to `weight_len`, then a tail loop
-/// finishes the channel-padded remainder of `accum`, which is always at
-/// least as long as the other two.
+/// `accum_len` must be at least `weight_len`, because a tail loop finishes the channel-padded
+/// remainder of `accum`.
 #[cube(launch_unchecked)]
 pub fn gpu_zero_buffers(
     accum: &mut Array<f32>,

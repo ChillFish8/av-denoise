@@ -7,38 +7,26 @@ use crate::nlmeans::kernels::helpers::read_line;
 
 /// The lowest block index whose span contains the patch at `p` on one axis.
 ///
-/// Block `b` spans `b * step..b * step + blksize`, so the patch
-/// `p..p + PATCH_SIZE` needs `b * step + blksize >= p + PATCH_SIZE`.
-/// The highest such block is `p / step`, which the caller clamps to the
-/// grid and uses as the low end's ceiling.
-///
-/// This mirrors `covering_blocks` in the `mc_accuracy` bench's harness
-/// module (`av-denoise-core/benches/harness/score.rs`), which the tests
-/// below reproduce on the host to check the two stay in step.
+/// Block `b` spans `b * step..b * step + blksize`, so it contains `p..p + PATCH_SIZE` when
+/// `b * step + blksize >= p + PATCH_SIZE`. The caller clamps the result to the highest covering
+/// block, `p / step`. It mirrors `covering_blocks` in `nl4d/harness/score.rs`.
 #[cube]
 pub(crate) fn covering_lo(p: u32, #[comptime] blksize: u32, #[comptime] step: u32) -> u32 {
-    let past = u32::max(p + PATCH_SIZE, blksize) - blksize;
-    past.div_ceil(step)
+    let overhang = u32::max(p + PATCH_SIZE, blksize) - blksize;
+    overhang.div_ceil(step)
 }
 
-/// The host mirror of [covering_lo], for tests that cannot launch a
-/// kernel.
+/// Host mirror of `covering_lo`.
 #[cfg(test)]
 fn covering_lo_host(p: u32, blksize: u32, step: u32) -> u32 {
-    let past = u32::max(p + PATCH_SIZE, blksize) - blksize;
-    past.div_ceil(step)
+    let overhang = u32::max(p + PATCH_SIZE, blksize) - blksize;
+    overhang.div_ceil(step)
 }
 
-/// The distance from the reference patch to the candidate whose
-/// top-left pixel is `(x, y)` in frame `slot`.
+/// The distance from the reference patch to the candidate with top-left `(x, y)` in frame `slot`.
 ///
-/// Each lane holds one column of the reference patch and reads the
-/// matching column of the candidate, so the eight per-lane partials
-/// only become a whole-patch distance through
-/// [plane_ssd_reduce8]. That reduction shuffles, so every lane of the
-/// group has to reach it. Callers that end up discarding the result
-/// still call this and drop the value afterwards rather than branching
-/// around it.
+/// Each lane sums its own column and `plane_ssd_reduce8` completes the distance with shuffles, so
+/// every lane of the group must call this, even when the result is discarded.
 #[cube]
 pub(crate) fn candidate_distance<N: Size>(
     ring: &Array<Vector<f32, N>>,
@@ -55,11 +43,11 @@ pub(crate) fn candidate_distance<N: Size>(
     let mut partial = 0.0f32;
     #[unroll]
     for r in 0..PATCH_SIZE {
-        let px = read_line(ring, x + sub, y + r, slot, width, height);
+        let pixel = read_line(ring, x + sub, y + r, slot, width, height);
         #[unroll]
         for c in 0..channels {
-            let d = current[(r * channels + c) as usize] - px[c as usize];
-            partial += d * d;
+            let diff = current[(r * channels + c) as usize] - pixel[c as usize];
+            partial += diff * diff;
         }
     }
     plane_ssd_reduce8(partial) * scale
@@ -100,34 +88,27 @@ pub(crate) fn spatial_search<N: Size>(
     let s_top = clamp_top_left(ry as i32 - spatial_radius as i32, max_y);
     let s_bot = clamp_top_left(ry as i32 + spatial_radius as i32, max_y);
 
-    // The reference patch scores the lowest distance there is, which on
-    // textured content is enough to reach slot 0 on its own. On flat
-    // content every candidate scores that same distance, and
-    // `shift_insert8` leaves a tie with whichever candidate reached the
-    // slot first. A sentinel below every real distance pins the
-    // self-match whatever ties around it.
+    // The self-match takes a sentinel below every real distance, so it holds slot 0 even on flat
+    // content where every candidate ties.
     if warp_uniform {
-        // The clipped rectangle is never wider than the unclipped one,
-        // so walking the unclipped span covers every position the other
-        // path visits, in the same order, and the rest are masked. The
-        // span is comptime, so every group in the warp takes the same
-        // number of turns.
+        // The unclipped span covers every position the clipped walk visits, in the same order, and
+        // its comptime size gives every group in the warp the same number of turns.
         let span = comptime!(2 * spatial_radius + 1);
         for dy in 0..span {
             for dx in 0..span {
                 let wanted_y = s_top + dy;
                 let wanted_x = s_left + dx;
                 let live_pos = wanted_x <= s_right && wanted_y <= s_bot;
-                // A masked turn still reads, so it is pinned to the last
-                // live position rather than left to run off the frame.
-                let cx = u32::min(wanted_x, s_right);
-                let cy = u32::min(wanted_y, s_bot);
+
+                // A masked turn still reads, so it is pinned to the last live position.
+                let candidate_x = u32::min(wanted_x, s_right);
+                let candidate_y = u32::min(wanted_y, s_bot);
 
                 let scored = candidate_distance(
                     ring,
                     current,
-                    cx,
-                    cy,
+                    candidate_x,
+                    candidate_y,
                     centre_slot,
                     sub,
                     scale,
@@ -135,31 +116,35 @@ pub(crate) fn spatial_search<N: Size>(
                     height,
                     channels,
                 );
-                // Only the branchless part of the insert is shared. The
-                // gated form tests a group-local distance before it
-                // shuffles, which is exactly the divergence this path
-                // exists to avoid.
+
+                // The gated insert branches on a group-local distance before it shuffles, which is
+                // the divergence this path avoids.
                 let mut dist = select(live_pos, scored, 3.0e38f32);
-                // A masked turn can land on the reference's own position
-                // once it has been pinned, so `live_pos` has to gate the
-                // sentinel too, or a dead turn would plant a second
-                // self-match in the group.
-                if live_pos && cx == rx && cy == ry {
+
+                // A masked turn pinned onto the reference would otherwise plant a second
+                // self-match.
+                if live_pos && candidate_x == rx && candidate_y == ry {
                     dist = -1.0e38f32;
                 }
-                shift_insert8(best_d, best_pos, dist, pack_pos_t(cx, cy, 0u32), sub);
+                shift_insert8(
+                    best_d,
+                    best_pos,
+                    dist,
+                    pack_pos_t(candidate_x, candidate_y, 0u32),
+                    sub,
+                );
             }
         }
     } else {
-        let mut cy = s_top;
-        while cy <= s_bot {
-            let mut cx = s_left;
-            while cx <= s_right {
+        let mut candidate_y = s_top;
+        while candidate_y <= s_bot {
+            let mut candidate_x = s_left;
+            while candidate_x <= s_right {
                 let mut dist = candidate_distance(
                     ring,
                     current,
-                    cx,
-                    cy,
+                    candidate_x,
+                    candidate_y,
                     centre_slot,
                     sub,
                     scale,
@@ -167,13 +152,20 @@ pub(crate) fn spatial_search<N: Size>(
                     height,
                     channels,
                 );
-                if cx == rx && cy == ry {
+                if candidate_x == rx && candidate_y == ry {
                     dist = -1.0e38f32;
                 }
-                shift_insert8_gated(best_d, best_pos, dist, pack_pos_t(cx, cy, 0u32), sub, base);
-                cx += 1u32;
+                shift_insert8_gated(
+                    best_d,
+                    best_pos,
+                    dist,
+                    pack_pos_t(candidate_x, candidate_y, 0u32),
+                    sub,
+                    base,
+                );
+                candidate_x += 1u32;
             }
-            cy += 1u32;
+            candidate_y += 1u32;
         }
     }
 
@@ -269,20 +261,20 @@ pub(crate) fn trajectory_search<N: Size>(
                 let block_live = wanted_bx <= bx_hi && wanted_by <= by_hi;
 
                 if warp_uniform {
-                    let cbx = u32::min(wanted_bx, bx_hi);
-                    let cby = u32::min(wanted_by, by_hi);
-                    let block = cby * blocks_x + cbx;
-                    let conf = confidence[(t * conf_stride + block) as usize];
-                    let block_scored = block_live && conf >= c_min;
+                    let clamped_bx = u32::min(wanted_bx, bx_hi);
+                    let clamped_by = u32::min(wanted_by, by_hi);
+                    let block = clamped_by * blocks_x + clamped_bx;
+                    let block_confidence = confidence[(t * conf_stride + block) as usize];
+                    let block_scored = block_live && block_confidence >= c_min;
 
-                    let mv = (t * mv_stride + block * 2u32) as usize;
-                    let px0 = anchor_x as i32 + mv_field[mv];
-                    let py0 = anchor_y as i32 + mv_field[mv + 1];
+                    let mv_index = (t * mv_stride + block * 2u32) as usize;
+                    let predicted_x = anchor_x as i32 + mv_field[mv_index];
+                    let predicted_y = anchor_y as i32 + mv_field[mv_index + 1];
 
-                    let t_left = clamp_top_left(px0 - refine as i32, max_x);
-                    let t_right = clamp_top_left(px0 + refine as i32, max_x);
-                    let t_top = clamp_top_left(py0 - refine as i32, max_y);
-                    let t_bot = clamp_top_left(py0 + refine as i32, max_y);
+                    let t_left = clamp_top_left(predicted_x - refine as i32, max_x);
+                    let t_right = clamp_top_left(predicted_x + refine as i32, max_x);
+                    let t_top = clamp_top_left(predicted_y - refine as i32, max_y);
+                    let t_bot = clamp_top_left(predicted_y + refine as i32, max_y);
 
                     let span = comptime!(2 * refine + 1);
                     for dy in 0..span {
@@ -290,21 +282,22 @@ pub(crate) fn trajectory_search<N: Size>(
                             let wanted_y = t_top + dy;
                             let wanted_x = t_left + dx;
                             let in_rect = wanted_x <= t_right && wanted_y <= t_bot;
-                            let nx = u32::min(wanted_x, t_right);
-                            let ny = u32::min(wanted_y, t_bot);
-                            let packed = pack_pos_t(nx, ny, packed_t);
+                            let candidate_x = u32::min(wanted_x, t_right);
+                            let candidate_y = u32::min(wanted_y, t_bot);
+                            let packed = pack_pos_t(candidate_x, candidate_y, packed_t);
 
                             let mut skipped = false;
                             #[unroll]
                             for s in 0..max_rects {
-                                if nx >= seen_left[s as usize]
-                                    && nx <= seen_right[s as usize]
-                                    && ny >= seen_top[s as usize]
-                                    && ny <= seen_bot[s as usize]
+                                if candidate_x >= seen_left[s as usize]
+                                    && candidate_x <= seen_right[s as usize]
+                                    && candidate_y >= seen_top[s as usize]
+                                    && candidate_y <= seen_bot[s as usize]
                                 {
                                     skipped = true;
                                 }
                             }
+
                             #[unroll]
                             for k in 0..first {
                                 if member_pos[k as usize] == packed {
@@ -314,7 +307,16 @@ pub(crate) fn trajectory_search<N: Size>(
 
                             let live_pos = block_scored && in_rect && !skipped;
                             let scored = candidate_distance(
-                                ring, anchor, nx, ny, slot, sub, scale, width, height, channels,
+                                ring,
+                                anchor,
+                                candidate_x,
+                                candidate_y,
+                                slot,
+                                sub,
+                                scale,
+                                width,
+                                height,
+                                channels,
                             );
                             let dist = select(live_pos, scored, 3.0e38f32);
                             let better = dist < frame_d;
@@ -330,34 +332,35 @@ pub(crate) fn trajectory_search<N: Size>(
                     seen_bot[rect] = select(block_scored, t_bot, 0u32);
                 } else if block_live {
                     let block = wanted_by * blocks_x + wanted_bx;
-                    let conf = confidence[(t * conf_stride + block) as usize];
-                    if conf >= c_min {
-                        let mv = (t * mv_stride + block * 2u32) as usize;
-                        let px0 = anchor_x as i32 + mv_field[mv];
-                        let py0 = anchor_y as i32 + mv_field[mv + 1];
+                    let block_confidence = confidence[(t * conf_stride + block) as usize];
+                    if block_confidence >= c_min {
+                        let mv_index = (t * mv_stride + block * 2u32) as usize;
+                        let predicted_x = anchor_x as i32 + mv_field[mv_index];
+                        let predicted_y = anchor_y as i32 + mv_field[mv_index + 1];
 
-                        let t_left = clamp_top_left(px0 - refine as i32, max_x);
-                        let t_right = clamp_top_left(px0 + refine as i32, max_x);
-                        let t_top = clamp_top_left(py0 - refine as i32, max_y);
-                        let t_bot = clamp_top_left(py0 + refine as i32, max_y);
+                        let t_left = clamp_top_left(predicted_x - refine as i32, max_x);
+                        let t_right = clamp_top_left(predicted_x + refine as i32, max_x);
+                        let t_top = clamp_top_left(predicted_y - refine as i32, max_y);
+                        let t_bot = clamp_top_left(predicted_y + refine as i32, max_y);
 
-                        let mut ny = t_top;
-                        while ny <= t_bot {
-                            let mut nx = t_left;
-                            while nx <= t_right {
-                                let packed = pack_pos_t(nx, ny, packed_t);
+                        let mut candidate_y = t_top;
+                        while candidate_y <= t_bot {
+                            let mut candidate_x = t_left;
+                            while candidate_x <= t_right {
+                                let packed = pack_pos_t(candidate_x, candidate_y, packed_t);
 
                                 let mut skipped = false;
                                 #[unroll]
                                 for s in 0..max_rects {
-                                    if nx >= seen_left[s as usize]
-                                        && nx <= seen_right[s as usize]
-                                        && ny >= seen_top[s as usize]
-                                        && ny <= seen_bot[s as usize]
+                                    if candidate_x >= seen_left[s as usize]
+                                        && candidate_x <= seen_right[s as usize]
+                                        && candidate_y >= seen_top[s as usize]
+                                        && candidate_y <= seen_bot[s as usize]
                                     {
                                         skipped = true;
                                     }
                                 }
+
                                 #[unroll]
                                 for k in 0..first {
                                     if member_pos[k as usize] == packed {
@@ -367,7 +370,16 @@ pub(crate) fn trajectory_search<N: Size>(
 
                                 if !skipped {
                                     let dist = candidate_distance(
-                                        ring, anchor, nx, ny, slot, sub, scale, width, height, channels,
+                                        ring,
+                                        anchor,
+                                        candidate_x,
+                                        candidate_y,
+                                        slot,
+                                        sub,
+                                        scale,
+                                        width,
+                                        height,
+                                        channels,
                                     );
                                     if dist < frame_d {
                                         frame_d = dist;
@@ -375,9 +387,9 @@ pub(crate) fn trajectory_search<N: Size>(
                                     }
                                 }
 
-                                nx += 1u32;
+                                candidate_x += 1u32;
                             }
-                            ny += 1u32;
+                            candidate_y += 1u32;
                         }
 
                         let rect = (iy * covers + ix) as usize;
@@ -411,27 +423,17 @@ pub(crate) fn trajectory_search<N: Size>(
 
 #[cfg(test)]
 mod tests {
-    use super::covering_lo_host;
+    use super::{PATCH_SIZE, covering_lo_host};
 
-    /// The host mirror of `covering_blocks` in the `mc_accuracy` bench's
-    /// harness (`benches/harness/score.rs`). Reproduced here, rather than
-    /// imported, because that module lives outside the crate as bench-only
-    /// code and cannot be a test dependency of the library.
-    ///
-    /// This pins the kernel's arithmetic against the harness's read of the
-    /// same geometry rather than launching a real kernel, so it catches the
-    /// two formulas drifting apart on paper but says nothing about whether
-    /// [super::covering_lo] compiles or runs correctly on a GPU; the
-    /// integration tests in `nl4d::tests` cover that by driving the whole
-    /// pipeline.
-    fn covering_blocks_host(p: u32, blksize: u32, step: u32, blocks: u32) -> (u32, u32) {
-        let hi = (p / step).min(blocks - 1);
-        let lo = if p + super::PATCH_SIZE <= blksize {
+    /// A copy of `covering_blocks` from `nl4d/harness/score.rs`, whose `score` module is private.
+    fn covering_blocks_host(patch_start: u32, blksize: u32, step: u32, blocks: u32) -> (u32, u32) {
+        let last_block = (patch_start / step).min(blocks - 1);
+        let first_block = if patch_start + PATCH_SIZE <= blksize {
             0
         } else {
-            (p + super::PATCH_SIZE - blksize).div_ceil(step)
+            (patch_start + PATCH_SIZE - blksize).div_ceil(step)
         };
-        (lo.min(hi), hi)
+        (first_block.min(last_block), last_block)
     }
 
     #[test]

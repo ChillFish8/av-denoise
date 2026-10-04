@@ -1,15 +1,10 @@
 use cubecl::prelude::*;
 use cubecl::terminate;
 
-/// Halves the size of a luma image by averaging each 2x2 group of
-/// pixels.
+/// Builds the next pyramid level by averaging each 2x2 group of luma pixels.
 ///
-/// The source is one pyramid level, either full resolution or an
-/// already-downscaled level, and the result goes into the next level's
-/// slot.
-///
-/// `src_frame` and `dst_frame` are slot indices inside the per-level
-/// frame rings.
+/// `src_frame` and `dst_frame` are slots in the per-level frame rings. An odd last row or column
+/// repeats its edge pixel.
 #[cube(launch_unchecked)]
 pub fn nlm_mc_downscale(
     src: &Array<f32>,
@@ -28,26 +23,22 @@ pub fn nlm_mc_downscale(
         terminate!();
     }
 
-    let sx = x * 2;
-    let sy = y * 2;
-    let sx1 = if sx + 1 < src_width { sx + 1 } else { sx };
-    let sy1 = if sy + 1 < src_height { sy + 1 } else { sy };
+    let src_x = x * 2;
+    let src_y = y * 2;
+    let src_x1 = if src_x + 1 < src_width { src_x + 1 } else { src_x };
+    let src_y1 = if src_y + 1 < src_height { src_y + 1 } else { src_y };
 
     let src_base = src_frame * src_width * src_height;
-    let s00 = src[(src_base + sy * src_width + sx) as usize];
-    let s10 = src[(src_base + sy * src_width + sx1) as usize];
-    let s01 = src[(src_base + sy1 * src_width + sx) as usize];
-    let s11 = src[(src_base + sy1 * src_width + sx1) as usize];
+    let top_left = src[(src_base + src_y * src_width + src_x) as usize];
+    let top_right = src[(src_base + src_y * src_width + src_x1) as usize];
+    let bottom_left = src[(src_base + src_y1 * src_width + src_x) as usize];
+    let bottom_right = src[(src_base + src_y1 * src_width + src_x1) as usize];
 
-    let avg = (s00 + s10 + s01 + s11) * 0.25f32;
+    let avg = (top_left + top_right + bottom_left + bottom_right) * 0.25f32;
     dst[(dst_frame * dst_width * dst_height + y * dst_width + x) as usize] = avg;
 }
 
-/// Copies the luma plane out of a packed input frame into a flat array,
-/// which becomes level 0 of the pyramid.
-///
-/// This lets the pyramid and analyse kernels work on luma alone, without
-/// knowing anything about the channel layout.
+/// Copies lane 0 of a packed frame into a flat luma array, which becomes level 0 of the pyramid.
 #[cube(launch_unchecked)]
 pub fn nlm_mc_extract_luma<N: Size>(
     src: &Array<Vector<f32, N>>,
