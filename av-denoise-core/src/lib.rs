@@ -42,11 +42,7 @@ pub use denoiser::{
     DenoiserOptions,
     FrameOutput,
     MAX_PENDING,
-    Nl4dOptions,
     OutputFormat,
-    nl4d_default_lambda_ht,
-    nl4d_spatial_radius_for,
-    nl4d_temporal_radius_for,
 };
 pub use device::Device;
 pub use engine::{DevicePlane, EdgePadding, Engine, Geometry, SampleFormat, WindowSpan};
@@ -62,6 +58,13 @@ pub use frame::{
     push_needs_retry,
 };
 pub use nl4d::grain::{GrainChunk, SceneGrain, build_table};
+pub use nl4d::{
+    Nl4d,
+    Nl4dOptions,
+    nl4d_default_lambda_ht,
+    nl4d_spatial_radius_for,
+    nl4d_temporal_radius_for,
+};
 pub use nlmeans::{
     ChannelMode,
     DEFAULT_PILOT_STRENGTH_SCALE,

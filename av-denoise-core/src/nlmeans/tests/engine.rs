@@ -1,7 +1,14 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::helpers::{R, make_client, make_noisy_gaussian_frame};
+use super::helpers::{
+    R,
+    make_client,
+    make_noisy_gaussian_frame,
+    normalise_with_ingest,
+    read_interleaved,
+    upload_planes,
+};
 use crate::denoiser::FrameOutput;
 use crate::engine::{DevicePlane, Engine, Geometry, SampleFormat};
 use crate::error::Error;
@@ -52,37 +59,6 @@ fn frames(count: usize, channels: u32) -> Vec<Vec<f32>> {
             make_noisy_gaussian_frame(WIDTH, HEIGHT, channels, base, &[0.03])
         })
         .collect()
-}
-
-/// Splits an interleaved host frame into one uploaded plane per channel.
-fn upload_planes(client: &ComputeClient<R>, frame: &[f32], channels: usize) -> Vec<Handle> {
-    (0..channels)
-        .map(|channel| {
-            let plane: Vec<f32> = frame.iter().skip(channel).step_by(channels).copied().collect();
-            let bytes = f32::as_bytes(&plane);
-            client.create_from_slice(bytes)
-        })
-        .collect()
-}
-
-fn read_interleaved(client: &ComputeClient<R>, planes: &[Handle]) -> Vec<f32> {
-    let channels: Vec<Vec<f32>> = planes
-        .iter()
-        .map(|handle| {
-            let bytes = client.read_one(handle.clone()).expect("read plane");
-            f32::from_bytes(&bytes).to_vec()
-        })
-        .collect();
-
-    let pixels = channels[0].len();
-    let mut interleaved = Vec::with_capacity(pixels * channels.len());
-    for pixel in 0..pixels {
-        for channel in &channels {
-            interleaved.push(channel[pixel]);
-        }
-    }
-
-    interleaved
 }
 
 fn emit(engine: &mut Nlmeans<R>, client: &ComputeClient<R>, channels: usize) -> Vec<f32> {
@@ -183,7 +159,8 @@ fn run_oracle(radius: u32, channels: ChannelMode, frames: &[Vec<f32>]) -> Vec<Ve
 
         let output = denoiser.denoise().expect("denoise");
         if let Some(output) = output {
-            outputs.push(output.as_f32().expect("f32").to_vec());
+            let samples = output.as_f32().expect("f32").to_vec();
+            outputs.push(samples);
         }
     }
 
@@ -419,37 +396,83 @@ fn reset_mid_stream_with_a_ready_frame_matches_a_fresh_engine() {
     assert_eq!(second, fresh);
 }
 
+/// Pushes each input, then the tail, emitting every frame as `u8` planes.
+fn drive_u8(engine: &mut Nlmeans<R>, client: &ComputeClient<R>, inputs: &[Handle]) -> Vec<Vec<u8>> {
+    let pixels = (WIDTH * HEIGHT) as usize;
+    let mut outputs = Vec::new();
+
+    for input in inputs {
+        let planes = [DevicePlane::new(input, WIDTH, HEIGHT)];
+        let ready = engine.push(&planes).expect("push");
+        emit_u8(engine, client, ready, pixels, &mut outputs);
+    }
+
+    let tail = engine.finish().expect("finish");
+    emit_u8(engine, client, tail, pixels, &mut outputs);
+
+    outputs
+}
+
+fn emit_u8(
+    engine: &mut Nlmeans<R>,
+    client: &ComputeClient<R>,
+    count: usize,
+    pixels: usize,
+    outputs: &mut Vec<Vec<u8>>,
+) {
+    for _ in 0..count {
+        let output = client.empty(pixels);
+        let planes = [DevicePlane::new(&output, WIDTH, HEIGHT)];
+        engine.emit_into(&planes).expect("emit");
+
+        let bytes = client.read_one(output).expect("read");
+        outputs.push(bytes.to_vec());
+    }
+}
+
 #[test]
-fn u8_planes_match_a_quantised_oracle() {
+fn u8_input_matches_f32_input_from_the_ingest_kernel() {
     let client = make_client();
-    let geometry = Geometry {
+    let codes: Vec<Vec<u8>> = (0..6)
+        .map(|frame| {
+            (0..WIDTH * HEIGHT)
+                .map(|index| ((index + frame * 7) % 251) as u8)
+                .collect()
+        })
+        .collect();
+    let u8_inputs: Vec<Handle> = codes
+        .iter()
+        .map(|frame| client.create_from_slice(frame))
+        .collect();
+    let f32_inputs: Vec<Handle> = codes
+        .iter()
+        .map(|frame| {
+            let normalised = normalise_with_ingest(&client, frame, WIDTH, HEIGHT);
+            let bytes = f32::as_bytes(&normalised);
+            client.create_from_slice(bytes)
+        })
+        .collect();
+
+    let u8_geometry = Geometry {
         width: WIDTH,
         height: HEIGHT,
         channels: ChannelMode::Luma,
         input: SampleFormat::U8,
         output: SampleFormat::U8,
     };
-    let algorithm = hq(0);
-    let mut engine = Nlmeans::new(&client, algorithm, geometry).expect("build");
-    let codes: Vec<u8> = (0..WIDTH * HEIGHT).map(|index| (index % 251) as u8).collect();
-    let input = client.create_from_slice(&codes);
-    let output = client.empty((WIDTH * HEIGHT) as usize);
-    let input_planes = [DevicePlane::new(&input, WIDTH, HEIGHT)];
-    let output_planes = [DevicePlane::new(&output, WIDTH, HEIGHT)];
+    let f32_geometry = Geometry {
+        input: SampleFormat::F32,
+        ..u8_geometry
+    };
+    let algorithm_a = hq(2);
+    let algorithm_b = hq(2);
+    let mut engine_a = Nlmeans::new(&client, algorithm_a, u8_geometry).expect("build u8");
+    let mut engine_b = Nlmeans::new(&client, algorithm_b, f32_geometry).expect("build f32");
 
-    let ready = engine.push(&input_planes).expect("push");
-    assert_eq!(ready, 1);
-
-    engine.emit_into(&output_planes).expect("emit");
-    let actual = client.read_one(output).expect("read");
-
-    let normalised: Vec<f32> = codes.iter().map(|&code| code as f32 / 255.0).collect();
-    let oracle = run_oracle(0, ChannelMode::Luma, &[normalised]);
-    let expected: Vec<u8> = oracle[0]
-        .iter()
-        .map(|&value| (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
-        .collect();
-    assert_eq!(actual.to_vec(), expected);
+    let frames_a = drive_u8(&mut engine_a, &client, &u8_inputs);
+    let frames_b = drive_u8(&mut engine_b, &client, &f32_inputs);
+    assert_eq!(frames_a.len(), 6);
+    assert_eq!(frames_a, frames_b);
 }
 
 #[test]

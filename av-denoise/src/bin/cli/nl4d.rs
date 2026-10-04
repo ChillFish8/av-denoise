@@ -284,16 +284,19 @@ impl Nl4dArgs {
 
         self.warn_on_dead_per_plane_flags(intent);
 
+        let temporal_radius = self.temporal_radius(globals.preset)?;
+
         Ok(RunOptions {
             planes: PlaneOptions {
                 accelerators: globals.accelerators.clone(),
                 device: globals.device.clone(),
                 intent,
                 mode: DenoisingMode::Temporal {
-                    radius: self.temporal_radius(globals.preset)?,
+                    radius: temporal_radius,
                 },
                 algorithm: Algorithm::Nl4d(Nl4dOptions {
                     motion: self.motion.to_motion_search(),
+                    temporal_radius,
                     sigma: self.sigma.map(|s| s / 255.0),
                     sigma_scale: self.sigma_scale.unwrap_or(defaults.sigma_scale),
                     thsad_scale: self.thsad_scale.unwrap_or(defaults.thsad_scale),

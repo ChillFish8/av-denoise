@@ -2,6 +2,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::grain::{GrainChunk, GrainExport, GrainGeometry};
+use super::nl4d_pool_ratio;
 use super::params::Nl4dParams;
 use super::regularise::run_regularise;
 use super::snapshot::{LastFields, MotionSnapshot, read_snapshot};
@@ -16,7 +17,8 @@ use crate::collab::kernels::aggregate::{
 use crate::collab::kernels::fused::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, PATCH_SIZE, grid_frames, needs_warp_uniform_search};
-use crate::denoiser::{DenoiserError, FrameOutput, OutputFormat, nl4d_pool_ratio};
+use crate::denoiser::{DenoiserError, FrameOutput, OutputFormat};
+use crate::engine::{DevicePlane, SampleFormat};
 use crate::nlmeans::{
     BLOCK_X,
     BLOCK_Y,
@@ -41,6 +43,13 @@ enum AccumClear {
     NewestRegion,
     /// None, for edge passes whose regions already hold live contributions.
     Nothing,
+}
+
+/// A finished accumulator region and the ring slot of the frame after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CompletedRegion {
+    pub slot: u32,
+    pub next: Option<u32>,
 }
 
 /// How the current stream began.
@@ -398,6 +407,23 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// on the GPU before the readback, so only the wire bytes cross the
     /// bus.
     pub fn denoise_submit(&mut self) -> Result<Option<Pending<R>>, DenoiserError> {
+        let Some(region) = self.submit_passes()? else {
+            return Ok(None);
+        };
+
+        let output_slot = self.next_output_slot;
+        let handle = self.read_region(region);
+        let wire_dst = self.wire_outputs.as_ref().map(|outputs| &outputs[output_slot]);
+        let pending = self.start_readback(handle, wire_dst, self.output_format);
+
+        Ok(Some(pending))
+    }
+
+    /// Runs the grouping passes a submit owes.
+    ///
+    /// Returns the region the passes completed, or `None` while the ring is still filling or the
+    /// first regions are not yet complete.
+    pub(crate) fn submit_passes(&mut self) -> Result<Option<CompletedRegion>, DenoiserError> {
         if !self.front.window_ready() {
             return Ok(None);
         }
@@ -428,14 +454,32 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         }
 
         let total_frames = 1 + 2 * radius;
-        let completed_slot = (view.centre_slot + total_frames - radius) % total_frames;
-        let (handle, slot) = self.normalise_region(completed_slot);
-        let next_slot = self.front.ring_slot(1);
-        self.measure_grain(completed_slot, Some(next_slot), slot);
-        let wire_dst = self.wire_outputs.as_ref().map(|outputs| &outputs[slot]);
-        let pending = self.start_readback(handle, wire_dst, self.output_format);
+        let slot = (view.centre_slot + total_frames - radius) % total_frames;
+        let next = Some(self.front.ring_slot(1));
 
-        Ok(Some(pending))
+        Ok(Some(CompletedRegion { slot, next }))
+    }
+
+    /// Normalises a finished region into the next output slot and returns that slot's buffer.
+    pub(crate) fn read_region(&mut self, region: CompletedRegion) -> Handle {
+        let (handle, output_slot) = self.normalise_region(region.slot);
+        self.measure_grain(region.slot, region.next, output_slot);
+
+        handle
+    }
+
+    /// Forwards a frame already on the device to the front end's ring.
+    pub(crate) fn push_planes(
+        &mut self,
+        planes: &[DevicePlane<'_>],
+        format: SampleFormat,
+    ) -> Result<(), anyhow::Error> {
+        self.front.push_planes(planes, format)
+    }
+
+    /// A 4-byte handle to bind for planes a kernel never reads.
+    pub(crate) fn placeholder(&self) -> &Handle {
+        self.front.placeholder()
     }
 
     /// Marks the current stream as picking up mid-clip, so it runs no head passes.
@@ -481,10 +525,30 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// [`OutputFormat`] this denoiser was built with, quantised by the
     /// same pack kernel as every streaming frame.
     pub fn flush(&mut self, mut sink: impl FnMut(&FrameOutput)) -> Result<(), DenoiserError> {
+        let regions = self.finish_passes()?;
+
+        // Every output slot is free here. A caller reaches a flush only
+        // once its streaming readbacks have landed, and each readback
+        // below blocks before the next region reuses a slot.
+        for region in regions {
+            let output_slot = self.next_output_slot;
+            let handle = self.read_region(region);
+            let wire_dst = self.wire_outputs.as_ref().map(|outputs| &outputs[output_slot]);
+            let pending = self.start_readback(handle, wire_dst, self.output_format);
+            let frame = pending.wait()?;
+            sink(&frame);
+        }
+
+        self.reset_stream();
+
+        Ok(())
+    }
+
+    /// Runs the passes a stream's end owes and returns the regions to read out, in emit order.
+    pub(crate) fn finish_passes(&mut self) -> Result<Vec<CompletedRegion>, DenoiserError> {
         let emit = self.flush_target() as u32;
         if emit == 0 {
-            self.reset_stream();
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         let radius = self.temporal_radius;
@@ -517,24 +581,15 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             clear = AccumClear::Nothing;
         }
 
-        // Every output slot is free here. A caller reaches a flush only
-        // once its streaming readbacks have landed, and each readback
-        // below blocks before the next region reuses a slot.
         let first_region = last_real + 1 - emit;
+        let mut regions = Vec::with_capacity(emit as usize);
         for logical in first_region..=last_real {
-            let region_slot = self.front.ring_slot(logical);
-            let (handle, slot) = self.normalise_region(region_slot);
-            let next_slot = (logical < last_real).then(|| self.front.ring_slot(logical + 1));
-            self.measure_grain(region_slot, next_slot, slot);
-            let wire_dst = self.wire_outputs.as_ref().map(|outputs| &outputs[slot]);
-            let pending = self.start_readback(handle, wire_dst, self.output_format);
-            let frame = pending.wait()?;
-            sink(&frame);
+            let slot = self.front.ring_slot(logical);
+            let next = (logical < last_real).then(|| self.front.ring_slot(logical + 1));
+            regions.push(CompletedRegion { slot, next });
         }
 
-        self.reset_stream();
-
-        Ok(())
+        Ok(regions)
     }
 
     /// Drops the current stream and returns to the state a fresh

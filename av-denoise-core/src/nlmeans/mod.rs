@@ -42,7 +42,7 @@ mod pending;
 // `cpu_smoke_tests` module in `src/denoiser.rs` covers that backend
 // instead.
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-mod tests;
+pub(crate) mod tests;
 
 pub(crate) use denoiser::RingView;
 pub use denoiser::{GpuOutput, NlmDenoiser};

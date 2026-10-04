@@ -7,15 +7,13 @@ use crate::accelerate::Accelerator;
 use crate::device::Device;
 use crate::engine::{EdgePadding, WindowSpan};
 use crate::nl4d::grain::GrainChunk;
-use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
+use crate::nl4d::{self, Nl4dDenoiser, Nl4dOptions};
 #[cfg(test)]
 use crate::nlmeans::MotionEstimation;
 use crate::nlmeans::{
     ChannelMode,
     DenoisingMode,
     Depth,
-    HqParams,
-    MotionSearch,
     NlmDenoiser,
     NlmParams,
     NlmeansAlgorithm,
@@ -26,7 +24,6 @@ use crate::nlmeans::{
     resolve_params,
     validate_dimensions,
 };
-use crate::options::Preset;
 use crate::sniff::sniff_best_accelerator;
 
 /// How a [`Denoiser`] should be set up.
@@ -144,247 +141,6 @@ impl Default for Algorithm {
     }
 }
 
-/// Settings for [`Algorithm::Nl4d`].
-///
-/// nl4d runs the HQ front end only for its machinery, the frame ring,
-/// the motion field, and the noise estimate. Nothing weights or averages
-/// patches the NLM way, so the NLM knobs are absent here and the fields
-/// below are the whole surface.
-///
-/// The temporal radius comes from [`DenoiserOptions::mode`], which has to
-/// be `Temporal { .. }`. Motion tracking is always on, because the
-/// grouping kernel reads the motion field and confidence scores it
-/// produces.
-///
-/// `lambda_ht` has a per-plane default. `None` resolves through
-/// [`nl4d_default_lambda_ht`] once the plane being denoised is known.
-/// `lambda_ht_scale` then multiplies whichever value that resolves to.
-///
-/// Every other default comes from [`Nl4dParams::default`].
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub struct Nl4dOptions {
-    /// How motion between frames is tracked.
-    pub motion: MotionSearch,
-    /// A fixed noise standard deviation in `[0, 1]` units, replacing the
-    /// automatic per-frame estimate.
-    ///
-    /// `None`, the default, measures the noise in each pushed frame and
-    /// smooths it over time.
-    pub sigma: Option<f32>,
-    /// A multiplier applied to the measured noise level before anything
-    /// reads it. Defaults to 1.0.
-    ///
-    /// This does nothing when `sigma` pins the noise level, because the
-    /// estimator never runs in that case.
-    pub sigma_scale: f32,
-    /// A multiplier on the per-block mismatch threshold, which sets how
-    /// much extra SAD a block tolerates before its confidence starts to
-    /// fall. Defaults to 1.0.
-    ///
-    /// Higher values tolerate larger mismatches.
-    pub thsad_scale: f32,
-    /// Half-width of the refine window searched around each neighbour
-    /// frame's motion-predicted position, in `1..=4`. Defaults to 2.
-    pub refine: u32,
-    /// Half-width of the spatial candidate window searched in the centre
-    /// frame, in `1..=16`. Defaults to 9.
-    pub spatial_radius: u32,
-    /// Hard-threshold multiplier on the propagated coefficient sigma.
-    /// Higher removes more noise and more fine detail.
-    ///
-    /// `None` resolves through [`nl4d_default_lambda_ht`], which returns
-    /// a different value for luma than for chroma.
-    pub lambda_ht: Option<f32>,
-    /// A multiplier applied to the resolved `lambda_ht`. Defaults to
-    /// 1.0.
-    ///
-    /// It scales an explicit `lambda_ht` and the calibrated per-plane
-    /// default alike, so one value moves both planes together. Has to
-    /// be finite and in `[0.1, 10.0]`.
-    pub lambda_ht_scale: f32,
-    /// The confidence floor below which a whole neighbour block is
-    /// skipped rather than scored, in `[0, 1)`. Defaults to 0.05. A
-    /// block below the floor is never scored, and a volume left short
-    /// of frames by the skip makes its group filter from the centre
-    /// frame alone.
-    pub c_min: f32,
-    /// The `beta` of the Kaiser window each filtered patch is tapered
-    /// with as it is aggregated. Defaults to 2.0. `0.0` is uniform
-    /// aggregation. See [`crate::nl4d::Nl4dParams::kaiser_beta`].
-    pub kaiser_beta: f32,
-    /// Estimates noise fresh from each frame's own window instead of
-    /// smoothing it across the whole stream's history. Defaults to
-    /// `false`, matching every calibrated preset.
-    ///
-    /// `av-denoise-vs` turns this on unconditionally, because a
-    /// VapourSynth filter has to return the same pixels for a frame no
-    /// matter what order frames were requested in, and history-dependent
-    /// estimation breaks that guarantee under random access. See
-    /// [`HqParams::windowed_noise_estimation`].
-    pub windowed_noise_estimation: bool,
-    /// See [`crate::nl4d::Nl4dParams::field_lambda`].
-    pub field_lambda: f32,
-    /// See [crate::nl4d::Nl4dParams::noise_map].
-    pub noise_map: bool,
-    /// See [crate::nl4d::Nl4dParams::flat_boost].
-    pub flat_boost: f32,
-    /// See [crate::nl4d::Nl4dParams::chroma_flat_boost].
-    pub chroma_flat_boost: f32,
-    /// See [crate::nl4d::Nl4dParams::shadow_soften].
-    pub shadow_soften: f32,
-    /// See [crate::nl4d::Nl4dParams::flat_texture_cut].
-    pub flat_texture_cut: f32,
-    /// See [crate::nl4d::Nl4dParams::pooled_threshold].
-    pub pooled_threshold: bool,
-    /// See [crate::nl4d::Nl4dParams::grain_export].
-    ///
-    /// Measured chunks stay on the GPU until drained, so callers drain after each flush.
-    pub grain_export: bool,
-}
-
-impl Default for Nl4dOptions {
-    fn default() -> Self {
-        let defaults = Nl4dParams::default();
-        let hq = HqParams::default();
-        Self {
-            motion: MotionSearch::default(),
-            sigma: hq.sigma_override,
-            sigma_scale: hq.sigma_scale,
-            thsad_scale: hq.thsad_scale,
-            refine: defaults.refine,
-            spatial_radius: defaults.spatial_radius,
-            // Resolved per plane by `nl4d_default_lambda_ht` at
-            // construction time, once the plane being denoised is
-            // known.
-            lambda_ht: None,
-            lambda_ht_scale: 1.0,
-            c_min: defaults.c_min,
-            kaiser_beta: defaults.kaiser_beta,
-            windowed_noise_estimation: false,
-            field_lambda: defaults.field_lambda,
-            noise_map: defaults.noise_map,
-            flat_boost: defaults.flat_boost,
-            chroma_flat_boost: defaults.chroma_flat_boost,
-            shadow_soften: defaults.shadow_soften,
-            flat_texture_cut: defaults.flat_texture_cut,
-            pooled_threshold: defaults.pooled_threshold,
-            grain_export: defaults.grain_export,
-        }
-    }
-}
-
-impl Nl4dOptions {
-    /// The front end's HQ parameters for this configuration.
-    ///
-    /// `temporal_confidence` is always on, because the grouping kernel
-    /// reads the confidence scores it produces. The two strength-related
-    /// switches keep their defaults, since nl4d never runs a weighting
-    /// pass for them to affect.
-    fn to_hq_params(self) -> HqParams {
-        HqParams {
-            sigma_override: self.sigma,
-            sigma_scale: self.sigma_scale,
-            thsad_scale: self.thsad_scale,
-            temporal_confidence: true,
-            windowed_noise_estimation: self.windowed_noise_estimation,
-            ..HqParams::default()
-        }
-    }
-}
-
-/// The default `lambda_ht` for nl4d's hard-threshold stage, per plane.
-///
-/// `lambda_ht` is how many standard deviations of estimated noise a
-/// transform coefficient has to clear to survive. Raising it removes more
-/// noise and more fine detail with it, so the value is a trade rather
-/// than an optimum.
-///
-/// Luma and chroma values are picked by eye from a ladder of renders against real
-/// film grain, accepting more lost detail in exchange for less remaining
-/// noise on heavy grain. The reason why we're going a bit heavier on high noise is because
-/// the encoders end up reducing that detail _more_ than the denoiser does if
-/// that extra entropy remains in and overall produces a worse final image.
-///
-/// `ChannelMode::Yuv` reads the luma value, on the same "a fused pass is
-/// dominated by luma" assumption [hq_default_strength](crate::nlmeans::hq_default_strength)
-/// makes for its own Yuv case.
-///
-/// Luma and the fused Yuv mode use 4.158, and chroma uses 3.234.
-pub fn nl4d_default_lambda_ht(channels: ChannelMode) -> f32 {
-    match channels {
-        ChannelMode::Luma | ChannelMode::Yuv => 4.158,
-        ChannelMode::Chroma => 3.234,
-    }
-}
-
-/// The pooled threshold at each plane's default lambda, calibrated on real grain.
-const NL4D_POOLED_THRESHOLD: f32 = 2.42;
-
-/// The ratio of nl4d's pooled threshold to its lambda for one plane.
-///
-/// At the default lambda this gives the calibrated pooled threshold, and it scales with any
-/// other lambda.
-pub fn nl4d_pool_ratio(channels: ChannelMode) -> f32 {
-    NL4D_POOLED_THRESHOLD / nl4d_default_lambda_ht(channels)
-}
-
-/// Resolves `Nl4dOptions.lambda_ht` for one plane, falling back to
-/// [`nl4d_default_lambda_ht`] when the caller left it unset, then
-/// applies `lambda_ht_scale`.
-///
-/// The scale multiplies an explicit value and the calibrated default
-/// alike, so it moves both planes together whether or not one of them
-/// is pinned.
-///
-/// The range check lives here rather than in [`Nl4dParams`],
-/// which only ever sees the product. A scale of 0 would surface there as
-/// a complaint about `lambda_ht`, naming a knob the caller never set.
-fn resolve_lambda_ht(opts: &Nl4dOptions, channels: ChannelMode) -> Result<f32, String> {
-    if !(opts.lambda_ht_scale.is_finite() && (0.1..=10.0).contains(&opts.lambda_ht_scale)) {
-        return Err(format!(
-            "lambda_ht_scale must be finite and in [0.1, 10.0], got {}",
-            opts.lambda_ht_scale
-        ));
-    }
-
-    let lambda_ht = opts.lambda_ht.unwrap_or_else(|| nl4d_default_lambda_ht(channels));
-
-    Ok(lambda_ht * opts.lambda_ht_scale)
-}
-
-/// How far the temporal window reaches at each preset, for `nl4d`.
-///
-/// Unlike `nlmeans`, `veryfast` keeps a 1-frame window rather than
-/// dropping to 0, because nl4d has nothing to do without neighbouring
-/// frames to group against.
-pub fn nl4d_temporal_radius_for(preset: Preset) -> u32 {
-    match preset {
-        Preset::Veryfast | Preset::Fast => 1,
-        Preset::Base => 2,
-        Preset::Slow => 4,
-        Preset::Veryslow => 8,
-    }
-}
-
-/// How wide the centre frame's candidate search is at each preset, for
-/// `nl4d`.
-///
-/// `veryfast` shares its temporal radius with `fast`, so this is what
-/// separates them. The window covers `(2 * radius + 1)^2` positions, so
-/// 6 searches a little over half the candidates 9 does.
-///
-/// Every preset from `fast` up uses the library default. Widening it
-/// further at the slow end costs quadratically and has not been measured
-/// to be worth it.
-pub fn nl4d_spatial_radius_for(preset: Preset) -> u32 {
-    match preset {
-        Preset::Veryfast => 6,
-        Preset::Fast | Preset::Base | Preset::Slow | Preset::Veryslow => {
-            Nl4dOptions::default().spatial_radius
-        },
-    }
-}
-
 impl DenoiserOptions {
     /// Turns this option set into the low-level [`NlmParams`] a backend
     /// denoiser is built from.
@@ -425,12 +181,12 @@ impl DenoiserOptions {
             // nl4d never runs a weighting pass, so `strength`,
             // `search_radius`, `patch_radius`, and `self_weight` stay at
             // their library defaults and no prefilter is built.
-            Algorithm::Nl4d(opts) => NlmParams {
-                channels: self.channel_mode,
-                motion_compensation: opts.motion.into(),
-                temporal_radius,
-                hq: Some(opts.to_hq_params()),
-                ..NlmParams::default()
+            Algorithm::Nl4d(opts) => {
+                let opts = Nl4dOptions {
+                    temporal_radius,
+                    ..opts
+                };
+                nl4d::nlm_params(&opts, self.channel_mode)
             },
         }
     }
@@ -551,10 +307,8 @@ impl<R: Runtime> Engine<R> {
 /// `Algorithm::Nl4d` carries its own grouping tuning, which is not part
 /// of `NlmParams`, so it is read from `algorithm` directly rather than
 /// from `params`. This is also where an unset `lambda_ht` picks up its
-/// calibrated per-plane default (`resolve_lambda_ht`), the same way
-/// `to_nlm_params` resolves HQ's calibrated `strength`, since this is
-/// the first point construction has both `opts` and `params.channels`
-/// together.
+/// calibrated per-plane default, the same way `to_nlm_params` resolves
+/// HQ's calibrated `strength`.
 fn build_engine<R: Runtime>(
     client: &ComputeClient<R>,
     algorithm: &Algorithm,
@@ -574,25 +328,12 @@ fn build_engine<R: Runtime>(
                 )));
             }
 
-            let lambda_ht = resolve_lambda_ht(opts, params.channels)
-                .map_err(|e| DenoiserError::Other(anyhow::anyhow!(e)))?;
-            let nl4d_params = Nl4dParams {
+            let opts = Nl4dOptions {
                 temporal_radius: params.temporal_radius,
-                nlm: params,
-                refine: opts.refine,
-                spatial_radius: opts.spatial_radius,
-                lambda_ht,
-                c_min: opts.c_min,
-                kaiser_beta: opts.kaiser_beta,
-                field_lambda: opts.field_lambda,
-                noise_map: opts.noise_map,
-                flat_boost: opts.flat_boost,
-                chroma_flat_boost: opts.chroma_flat_boost,
-                shadow_soften: opts.shadow_soften,
-                flat_texture_cut: opts.flat_texture_cut,
-                pooled_threshold: opts.pooled_threshold,
-                grain_export: opts.grain_export,
+                ..*opts
             };
+            let nl4d_params = nl4d::resolve_params(&opts, params.channels)
+                .map_err(|e| DenoiserError::Other(anyhow::anyhow!(e)))?;
             let denoiser =
                 Nl4dDenoiser::with_output_format(client, nl4d_params, width, height, output_format)
                     .map_err(|e| DenoiserError::Other(anyhow::anyhow!(e)))?;
@@ -1318,7 +1059,14 @@ fn build_backend(
 #[cfg(test)]
 mod options_tests {
     use super::*;
-    use crate::nlmeans::{MotionCompensationMode, NlmTuning, PrefilterMode, hq_default_strength};
+    use crate::nlmeans::{
+        HqParams,
+        MotionCompensationMode,
+        MotionSearch,
+        NlmTuning,
+        PrefilterMode,
+        hq_default_strength,
+    };
 
     /// `Algorithm::NlmeansHq` with `hq` overridden and everything else
     /// left at its default.
@@ -1335,135 +1083,6 @@ mod options_tests {
             tuning,
             ..NlmeansOptions::default()
         })
-    }
-
-    #[test]
-    fn nl4d_default_lambda_ht_differs_between_luma_and_chroma() {
-        let luma = nl4d_default_lambda_ht(ChannelMode::Luma);
-        let chroma = nl4d_default_lambda_ht(ChannelMode::Chroma);
-
-        assert!((luma - 4.158).abs() < f32::EPSILON);
-        assert!((chroma - 3.234).abs() < f32::EPSILON);
-        assert!(
-            (chroma - luma).abs() > f32::EPSILON,
-            "the two planes should not resolve to the same default"
-        );
-    }
-
-    #[test]
-    fn nl4d_default_lambda_ht_yuv_reads_the_luma_value() {
-        let yuv = nl4d_default_lambda_ht(ChannelMode::Yuv);
-        let luma = nl4d_default_lambda_ht(ChannelMode::Luma);
-
-        assert!((yuv - luma).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn nl4d_pool_ratio_gives_the_calibrated_threshold_at_each_default_lambda() {
-        for channels in [ChannelMode::Luma, ChannelMode::Yuv, ChannelMode::Chroma] {
-            let threshold = nl4d_pool_ratio(channels) * nl4d_default_lambda_ht(channels);
-            assert!(
-                (threshold - 2.42).abs() < 1.0e-6,
-                "{channels:?} gives {threshold}"
-            );
-        }
-
-        assert_eq!(
-            nl4d_pool_ratio(ChannelMode::Yuv),
-            nl4d_pool_ratio(ChannelMode::Luma)
-        );
-    }
-
-    #[test]
-    fn nl4d_options_default_to_pooling_on() {
-        assert!(Nl4dOptions::default().pooled_threshold);
-    }
-
-    #[test]
-    fn resolve_lambda_ht_unset_uses_the_per_plane_default() {
-        let opts = Nl4dOptions::default();
-
-        let luma = resolve_lambda_ht(&opts, ChannelMode::Luma).expect("the default scale is in range");
-        let chroma = resolve_lambda_ht(&opts, ChannelMode::Chroma).expect("the default scale is in range");
-
-        assert!((luma - 4.158).abs() < f32::EPSILON, "got {luma}");
-        assert!((chroma - 3.234).abs() < f32::EPSILON, "got {chroma}");
-    }
-
-    #[test]
-    fn resolve_lambda_ht_explicit_value_overrides_every_plane() {
-        let opts = Nl4dOptions {
-            lambda_ht: Some(4.4),
-            ..Nl4dOptions::default()
-        };
-
-        for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
-            let got = resolve_lambda_ht(&opts, channels).expect("the default scale is in range");
-            assert!(
-                (got - 4.4).abs() < f32::EPSILON,
-                "channels {channels:?} got {got}"
-            );
-        }
-    }
-
-    #[test]
-    fn resolve_lambda_ht_default_scale_leaves_the_value_alone() {
-        let opts = Nl4dOptions::default();
-
-        for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
-            let got = resolve_lambda_ht(&opts, channels).expect("the default scale is in range");
-            let want = nl4d_default_lambda_ht(channels);
-            assert!(
-                (got - want).abs() < f32::EPSILON,
-                "channels {channels:?} got {got}"
-            );
-        }
-    }
-
-    #[test]
-    fn resolve_lambda_ht_scale_multiplies_the_per_plane_default() {
-        let opts = Nl4dOptions {
-            lambda_ht_scale: 1.1,
-            ..Nl4dOptions::default()
-        };
-
-        for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
-            let got = resolve_lambda_ht(&opts, channels).expect("1.1 is in range");
-            let want = nl4d_default_lambda_ht(channels) * 1.1;
-            assert!(
-                (got - want).abs() < 1e-5,
-                "channels {channels:?} got {got}, want {want}"
-            );
-        }
-    }
-
-    /// The scale is not limited to the defaults. Pinning one plane and
-    /// scaling both is the combination this exists for.
-    #[test]
-    fn resolve_lambda_ht_scale_multiplies_an_explicit_value() {
-        let opts = Nl4dOptions {
-            lambda_ht: Some(5.0),
-            lambda_ht_scale: 0.9,
-            ..Nl4dOptions::default()
-        };
-
-        let got = resolve_lambda_ht(&opts, ChannelMode::Luma).expect("0.9 is in range");
-        assert!((got - 4.5).abs() < 1e-5, "got {got}");
-    }
-
-    #[test]
-    fn resolve_lambda_ht_rejects_an_out_of_range_scale() {
-        for bad in [0.0, -1.0, 0.05, 10.5, f32::NAN, f32::INFINITY] {
-            let opts = Nl4dOptions {
-                lambda_ht_scale: bad,
-                ..Nl4dOptions::default()
-            };
-            let err = resolve_lambda_ht(&opts, ChannelMode::Luma).unwrap_err();
-            assert!(
-                err.contains("lambda_ht_scale"),
-                "lambda_ht_scale={bad} should be rejected, got {err}"
-            );
-        }
     }
 
     #[test]
@@ -1656,24 +1275,6 @@ mod options_tests {
         let params = opts.to_nlm_params();
 
         assert!((params.strength - 1.2).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn nl4d_options_default_matches_nl4d_params_default() {
-        let opts = Nl4dOptions::default();
-        let params = crate::nl4d::Nl4dParams::default();
-
-        assert_eq!(opts.refine, params.refine);
-        assert_eq!(opts.spatial_radius, params.spatial_radius);
-        assert!((opts.c_min - params.c_min).abs() < f32::EPSILON);
-        // The two `lambda_ht` fields hold different things, so they are
-        // not compared. `opts.lambda_ht` stays `None` and is deferred to
-        // `nl4d_default_lambda_ht` once the plane is known (see
-        // `resolve_lambda_ht_unset_uses_the_per_plane_default` above),
-        // while `params.lambda_ht` is a concrete default mirroring the
-        // Luma/Yuv value.
-        assert_eq!(opts.lambda_ht, None);
-        assert!((params.lambda_ht - nl4d_default_lambda_ht(ChannelMode::Yuv)).abs() < f32::EPSILON);
     }
 
     /// nl4d takes its own noise and confidence knobs rather than a whole

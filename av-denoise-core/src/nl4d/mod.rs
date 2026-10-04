@@ -11,9 +11,11 @@
 //! time separates it from the texture they share.
 
 mod denoiser;
+mod engine;
 pub mod grain;
 pub mod harness;
 pub mod kernels;
+mod options;
 mod params;
 mod regularise;
 mod snapshot;
@@ -25,5 +27,13 @@ mod snapshot;
 pub(crate) mod tests;
 
 pub use self::denoiser::Nl4dDenoiser;
+pub use self::engine::Nl4d;
+pub use self::options::{
+    Nl4dOptions,
+    nl4d_default_lambda_ht,
+    nl4d_spatial_radius_for,
+    nl4d_temporal_radius_for,
+};
+pub(crate) use self::options::{nl4d_pool_ratio, nlm_params, resolve_params};
 pub use self::params::{MAX_KAISER_BETA, Nl4dParams};
 pub use self::snapshot::MotionSnapshot;

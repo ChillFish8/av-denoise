@@ -3,6 +3,7 @@ use cubecl::wgpu::WgpuRuntime;
 
 use crate::nl4d::Nl4dParams;
 use crate::nlmeans::motion::neighbour_idx_for_k;
+use crate::nlmeans::tests::helpers::noisy_field_over;
 use crate::nlmeans::{
     ChannelMode,
     HqParams,
@@ -309,4 +310,32 @@ pub(super) fn noisy_ring(w: u32, h: u32, radius: u32, confidence_value: f32) -> 
         width: w,
         height: h,
     }
+}
+
+/// `count` interleaved frames of a drifting texture with independent noise per frame and channel.
+pub(crate) fn noisy_frames(width: u32, height: u32, channels: u32, count: usize) -> Vec<Vec<f32>> {
+    let base = textured_base(width + count as u32, height);
+    let mut frames = Vec::with_capacity(count);
+
+    for index in 0..count {
+        let mut frame = vec![0.0f32; (width * height * channels) as usize];
+
+        for channel in 0..channels {
+            let mut clean = Vec::with_capacity((width * height) as usize);
+            for row in 0..height {
+                let start = (row * (width + count as u32) + index as u32) as usize;
+                clean.extend_from_slice(&base[start..start + width as usize]);
+            }
+
+            let seed = (index as u32) * 3 + channel;
+            let noisy = noisy_field_over(&clean, width, height, 0.03, seed);
+            for pixel in 0..(width * height) as usize {
+                frame[pixel * channels as usize + channel as usize] = noisy[pixel];
+            }
+        }
+
+        frames.push(frame);
+    }
+
+    frames
 }

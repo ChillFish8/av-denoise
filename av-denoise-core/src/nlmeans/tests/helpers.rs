@@ -1,13 +1,15 @@
 use cubecl::prelude::*;
+use cubecl::server::Handle;
 use cubecl::wgpu::WgpuRuntime;
 
+use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
 pub(super) use crate::nlmeans::align::StorageAlign;
 #[cfg(feature = "vulkan")]
 use crate::{ChannelMode, Denoiser, DenoiserOptions, DenoisingMode, accelerate::Accelerator, device::Device};
 
-pub(super) type R = WgpuRuntime;
+pub(crate) type R = WgpuRuntime;
 
-pub(super) fn make_client() -> ComputeClient<R> {
+pub(crate) fn make_client() -> ComputeClient<R> {
     let device = <R as Runtime>::Device::default();
     R::client(&device)
 }
@@ -90,7 +92,7 @@ pub(super) fn make_noisy_gaussian_frame(w: u32, h: u32, ch: u32, base: f32, sigm
 /// the requested standard deviation, decorrelated across `seed` values
 /// so two calls with different `seed`s over the *same* `clean` field
 /// produce two independently noisy copies of it.
-pub(super) fn noisy_field_over(clean: &[f32], w: u32, h: u32, sigma: f32, seed: u32) -> Vec<f32> {
+pub(crate) fn noisy_field_over(clean: &[f32], w: u32, h: u32, sigma: f32, seed: u32) -> Vec<f32> {
     let unit_std = (1.0f32 / 3.0f32).sqrt();
     let mut frame = vec![0.0f32; (w * h) as usize];
     for idx in 0..(w * h) {
@@ -293,4 +295,62 @@ pub(super) fn pad_channels(dense: &[f32], pixels: usize, ch: u32, stored_ch: u32
         out[p * stored_ch..p * stored_ch + ch].copy_from_slice(&dense[p * ch..p * ch + ch]);
     }
     out
+}
+
+/// Splits an interleaved host frame into one uploaded plane per channel.
+pub(crate) fn upload_planes(client: &ComputeClient<R>, frame: &[f32], channels: usize) -> Vec<Handle> {
+    (0..channels)
+        .map(|channel| {
+            let plane: Vec<f32> = frame.iter().skip(channel).step_by(channels).copied().collect();
+            let bytes = f32::as_bytes(&plane);
+            client.create_from_slice(bytes)
+        })
+        .collect()
+}
+
+pub(crate) fn read_interleaved(client: &ComputeClient<R>, planes: &[Handle]) -> Vec<f32> {
+    let channels: Vec<Vec<f32>> = planes
+        .iter()
+        .map(|handle| {
+            let bytes = client.read_one(handle.clone()).expect("read plane");
+            f32::from_bytes(&bytes).to_vec()
+        })
+        .collect();
+
+    let pixels = channels[0].len();
+    let mut interleaved = Vec::with_capacity(pixels * channels.len());
+    for pixel in 0..pixels {
+        for channel in &channels {
+            interleaved.push(channel[pixel]);
+        }
+    }
+
+    interleaved
+}
+
+/// The f32 samples the real ingest kernel produces for one plane of `u8` codes.
+pub(crate) fn normalise_with_ingest(
+    client: &ComputeClient<R>,
+    codes: &[u8],
+    width: u32,
+    height: u32,
+) -> Vec<f32> {
+    let pixels = width * height;
+    let input = client.create_from_slice(codes);
+    let planes = [DevicePlane::new(&input, width, height)];
+    let placeholder = client.create_from_slice(&[0u8; 4]);
+    let scratch = client.empty(pixels as usize * 4);
+    let target = IngestTarget {
+        ring: &scratch,
+        ring_len: pixels as usize,
+        offset: 0,
+        pixels,
+        channels: 1,
+        stored_ch: 1,
+    };
+
+    ingest(client, &planes, SampleFormat::U8, &placeholder, target);
+
+    let bytes = client.read_one(scratch).expect("read ingest");
+    f32::from_bytes(&bytes).to_vec()
 }
