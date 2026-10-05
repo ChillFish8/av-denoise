@@ -33,6 +33,11 @@ impl StorageAlign {
         bytes.next_multiple_of(self.0)
     }
 
+    /// [Self::pad_bytes], or `None` when the padded size overflows `u64`.
+    pub(crate) fn checked_pad_bytes(self, bytes: u64) -> Option<u64> {
+        bytes.checked_next_multiple_of(self.0)
+    }
+
     /// A count of `T` rounded up so the elements cover whole alignment boundaries.
     ///
     /// A `T` larger than the alignment is already aligned, so its count comes back unchanged.

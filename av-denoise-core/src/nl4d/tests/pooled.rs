@@ -1,6 +1,7 @@
-use super::helpers::{R, make_client, noisy_copy_of, static_clip_params};
+use super::helpers::{R, make_client, static_clip_params};
 use crate::bench_api::HostIo;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
+use crate::nlmeans::tests::helpers::noisy_field_over;
 
 const WIDTH: u32 = 96;
 const HEIGHT: u32 = 64;
@@ -26,7 +27,7 @@ fn faint_line_clip() -> Vec<Vec<f32>> {
     }
 
     (0..FRAMES)
-        .map(|seed| noisy_copy_of(&clean, WIDTH, HEIGHT, GRAIN, seed))
+        .map(|seed| noisy_field_over(&clean, WIDTH, HEIGHT, GRAIN, seed))
         .collect()
 }
 

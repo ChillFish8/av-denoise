@@ -1,8 +1,18 @@
-use av_denoise_core::{ChannelMode, DenoisingMode, EdgePadding, Nl4dOptions, NlmTuning, NlmeansOptions};
+use av_denoise_core::{
+    ChannelMode,
+    DenoisingMode,
+    DevicePlane,
+    EdgePadding,
+    Engine,
+    Nl4dOptions,
+    NlmTuning,
+    NlmeansOptions,
+    WindowSpan,
+};
 
 use crate::backend::Device;
 use crate::backend::accelerate::Accelerator;
-use crate::host::{Algorithm, DenoiserError, DenoiserOptions, HostDenoiser};
+use crate::host::{Algorithm, DenoiserError, DenoiserOptions, HostDenoiser, OUTPUT_SETS};
 
 fn luma_options(mode: DenoisingMode) -> DenoiserOptions {
     DenoiserOptions::builder()
@@ -143,7 +153,153 @@ fn a_plane_of_the_wrong_length_is_rejected() {
     let plane = vec![128u8; 16 * 15];
     let result = denoiser.push(&[&plane]);
 
+    let is_plane_mismatch = matches!(
+        result,
+        Err(DenoiserError::Engine(av_denoise_core::Error::PlaneMismatch(_)))
+    );
+    assert!(is_plane_mismatch, "got {result:?}");
+}
+
+/// An engine that returns scripted outcomes and writes nothing.
+///
+/// `push_outcome` receives how many pushes came before it.
+struct ScriptedEngine {
+    push_outcome: fn(usize) -> Result<usize, av_denoise_core::Error>,
+    emit_outcome: fn() -> Result<(), av_denoise_core::Error>,
+    finish_outcome: fn() -> Result<usize, av_denoise_core::Error>,
+    pushes: usize,
+}
+
+impl ScriptedEngine {
+    fn pushing(push_outcome: fn(usize) -> Result<usize, av_denoise_core::Error>) -> Self {
+        Self {
+            push_outcome,
+            emit_outcome: || Ok(()),
+            finish_outcome: || Ok(0),
+            pushes: 0,
+        }
+    }
+}
+
+impl Engine for ScriptedEngine {
+    fn push(&mut self, _planes: &[DevicePlane<'_>]) -> Result<usize, av_denoise_core::Error> {
+        let earlier_pushes = self.pushes;
+        self.pushes += 1;
+
+        (self.push_outcome)(earlier_pushes)
+    }
+
+    fn push_context(&mut self, _planes: &[DevicePlane<'_>]) -> Result<(), av_denoise_core::Error> {
+        Ok(())
+    }
+
+    fn emit_into(&mut self, _planes: &[DevicePlane<'_>]) -> Result<(), av_denoise_core::Error> {
+        (self.emit_outcome)()
+    }
+
+    fn finish(&mut self) -> Result<usize, av_denoise_core::Error> {
+        (self.finish_outcome)()
+    }
+
+    fn reset(&mut self) {}
+
+    fn window_span(&self) -> WindowSpan {
+        WindowSpan {
+            behind: 0,
+            ahead: 0,
+            edges: EdgePadding::Repeat,
+        }
+    }
+
+    fn max_held_frames(&self) -> usize {
+        0
+    }
+}
+
+#[test]
+fn a_push_readying_more_frames_than_output_sets_fails_instead_of_overwriting() {
+    let mut denoiser = luma_denoiser(DenoisingMode::Spacial);
+    let engine = ScriptedEngine::pushing(|_| Ok(OUTPUT_SETS + 1));
+    denoiser.engine = Box::new(engine);
+
+    let plane = frame(16, 16);
+    let result = denoiser.push(&[&plane]);
+
     assert!(matches!(result, Err(DenoiserError::Other(_))), "got {result:?}");
+    assert!(
+        denoiser.pending.is_empty(),
+        "no output set should have been emitted"
+    );
+
+    let pushed = denoiser.push(&[&plane]);
+    assert!(matches!(pushed, Err(DenoiserError::Poisoned)));
+}
+
+#[test]
+fn a_push_filling_every_output_set_with_one_in_flight_fails_instead_of_overwriting() {
+    let mut denoiser = luma_denoiser(DenoisingMode::Spacial);
+    let engine = ScriptedEngine::pushing(|earlier_pushes| match earlier_pushes {
+        0 => Ok(1),
+        _ => Ok(OUTPUT_SETS),
+    });
+    denoiser.engine = Box::new(engine);
+
+    let plane = frame(16, 16);
+    denoiser.push(&[&plane]).expect("first push should land");
+    assert_eq!(denoiser.pending.len(), 1);
+
+    let result = denoiser.push(&[&plane]);
+
+    assert!(matches!(result, Err(DenoiserError::Other(_))), "got {result:?}");
+    assert_eq!(
+        denoiser.pending.len(),
+        1,
+        "no output set should have been emitted"
+    );
+}
+
+#[test]
+fn a_failed_emit_during_push_poisons_the_denoiser() {
+    let mut denoiser = luma_denoiser(DenoisingMode::Spacial);
+    let engine = ScriptedEngine {
+        emit_outcome: || Err(av_denoise_core::Error::NothingToEmit),
+        ..ScriptedEngine::pushing(|_| Ok(1))
+    };
+    denoiser.engine = Box::new(engine);
+
+    let plane = frame(16, 16);
+    let result = denoiser.push(&[&plane]);
+
+    let is_nothing_to_emit = matches!(
+        result,
+        Err(DenoiserError::Engine(av_denoise_core::Error::NothingToEmit))
+    );
+    assert!(is_nothing_to_emit, "got {result:?}");
+
+    let pushed = denoiser.push(&[&plane]);
+    assert!(matches!(pushed, Err(DenoiserError::Poisoned)));
+}
+
+#[test]
+fn a_failed_finish_during_flush_poisons_the_denoiser() {
+    let mut denoiser = luma_denoiser(DenoisingMode::Spacial);
+    let engine = ScriptedEngine {
+        finish_outcome: || Err(av_denoise_core::Error::OutputsPending),
+        ..ScriptedEngine::pushing(|_| Ok(0))
+    };
+    denoiser.engine = Box::new(engine);
+
+    let flushed = denoiser.flush(|_| {});
+
+    let is_outputs_pending = matches!(
+        flushed,
+        Err(DenoiserError::Engine(av_denoise_core::Error::OutputsPending))
+    );
+    assert!(is_outputs_pending, "got {flushed:?}");
+
+    let plane = frame(16, 16);
+    let pushed = denoiser.push(&[&plane]);
+    assert!(matches!(pushed, Err(DenoiserError::Poisoned)));
 }
 
 #[test]
@@ -330,7 +486,24 @@ fn poisoned_denoiser_refuses_every_entry_point() {
 }
 
 #[test]
-fn a_failed_push_poisons_the_denoiser() {
+fn a_gpu_failure_during_push_poisons_the_denoiser() {
+    let mut denoiser = luma_denoiser(DenoisingMode::Spacial);
+    let engine = ScriptedEngine::pushing(|_| {
+        let failure = anyhow::anyhow!("synthetic dispatch failure");
+        Err(av_denoise_core::Error::Gpu(failure))
+    });
+    denoiser.engine = Box::new(engine);
+
+    let plane = frame(16, 16);
+    let result = denoiser.push(&[&plane]);
+    assert!(result.is_err());
+
+    let pushed = denoiser.push(&[&plane]);
+    assert!(matches!(pushed, Err(DenoiserError::Poisoned)));
+}
+
+#[test]
+fn a_rejected_plane_does_not_poison_the_denoiser() {
     let mut denoiser = luma_denoiser(DenoisingMode::Spacial);
 
     let short_plane = vec![128u8; 4];
@@ -338,8 +511,28 @@ fn a_failed_push_poisons_the_denoiser() {
     assert!(result.is_err());
 
     let plane = frame(16, 16);
-    let pushed = denoiser.push(&[&plane]);
-    assert!(matches!(pushed, Err(DenoiserError::Poisoned)));
+    denoiser
+        .push(&[&plane])
+        .expect("a push after a rejected plane should land");
+}
+
+#[test]
+fn priming_after_a_push_is_rejected_without_poisoning() {
+    let mut denoiser = luma_denoiser(DenoisingMode::Temporal { radius: 1 });
+    let plane = frame(16, 16);
+
+    denoiser.push(&[&plane]).expect("first push should land");
+
+    let primed = denoiser.push_priming(&[&plane]);
+    let is_context_after_push = matches!(
+        primed,
+        Err(DenoiserError::Engine(av_denoise_core::Error::ContextAfterPush))
+    );
+    assert!(is_context_after_push, "got {primed:?}");
+
+    denoiser
+        .push(&[&plane])
+        .expect("a push after a rejected priming frame should land");
 }
 
 #[test]

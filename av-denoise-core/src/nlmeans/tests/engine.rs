@@ -15,6 +15,7 @@ use crate::error::Error;
 use crate::nlmeans::{
     ChannelMode,
     DenoisingMode,
+    MotionCompensationMode,
     NlmDenoiser,
     Nlmeans,
     NlmeansAlgorithm,
@@ -88,6 +89,13 @@ fn push_frame(
         .collect();
 
     engine.push(&planes).expect("push")
+}
+
+fn try_push_context(engine: &mut Nlmeans<R>, client: &ComputeClient<R>, frame: &[f32]) -> Result<(), Error> {
+    let handles = upload_planes(client, frame, 1);
+    let planes = [DevicePlane::new(&handles[0], WIDTH, HEIGHT)];
+
+    engine.push_context(&planes)
 }
 
 fn push_and_emit(
@@ -243,6 +251,65 @@ fn push_context_then_one_push_matches_the_streaming_centre() {
     let actual = emit(&mut engine, &client, 1);
     let expected = run_oracle(radius, ChannelMode::Luma, &frames);
     assert_eq!(actual, expected[radius as usize]);
+}
+
+#[test]
+fn push_context_after_a_push_is_refused_and_changes_no_state() {
+    let frames = frames(6, 1);
+    let client = make_client();
+    let mut engine = build_engine(&client, 2, ChannelMode::Luma);
+    let mut outputs = Vec::new();
+
+    for (index, frame) in frames.iter().enumerate() {
+        push_and_emit(&mut engine, &client, frame, 1, &mut outputs);
+
+        if index == 2 {
+            let refused = try_push_context(&mut engine, &client, &frames[5]);
+            assert!(matches!(refused, Err(Error::ContextAfterPush)));
+        }
+    }
+
+    finish_and_emit(&mut engine, &client, 1, &mut outputs);
+
+    let expected = run_oracle(2, ChannelMode::Luma, &frames);
+    assert_eq!(outputs, expected);
+}
+
+#[test]
+fn push_context_is_allowed_again_after_reset() {
+    let frames = frames(2, 1);
+    let client = make_client();
+    let mut engine = build_engine(&client, 2, ChannelMode::Luma);
+
+    push_frame(&mut engine, &client, &frames[0], 1);
+    engine.reset();
+
+    let context = try_push_context(&mut engine, &client, &frames[1]);
+    assert!(context.is_ok());
+}
+
+#[test]
+fn push_context_is_allowed_again_after_the_tail_is_emitted() {
+    let frames = frames(4, 1);
+    let client = make_client();
+    let mut engine = build_engine(&client, 2, ChannelMode::Luma);
+
+    drive(&mut engine, &client, &frames, 1);
+
+    let context = try_push_context(&mut engine, &client, &frames[0]);
+    assert!(context.is_ok());
+}
+
+#[test]
+fn push_context_is_allowed_again_after_a_finish_with_no_tail() {
+    let frames = frames(2, 1);
+    let client = make_client();
+    let mut engine = build_engine(&client, 0, ChannelMode::Luma);
+
+    drive(&mut engine, &client, &frames, 1);
+
+    let context = try_push_context(&mut engine, &client, &frames[0]);
+    assert!(context.is_ok());
 }
 
 #[test]
@@ -475,6 +542,79 @@ fn u8_input_matches_f32_input_from_the_ingest_kernel() {
     let f32_frames = drive_u8(&mut f32_engine, &client, &f32_inputs);
     assert_eq!(u8_frames.len(), 6);
     assert_eq!(u8_frames, f32_frames);
+}
+
+#[test]
+fn a_plane_past_u32_pixels_is_invalid_geometry() {
+    let client = make_client();
+    let oversized = Geometry {
+        width: 65_536,
+        height: 65_536,
+        ..geometry(ChannelMode::Luma)
+    };
+
+    let algorithm = hq(0);
+    let built = Nlmeans::new(&client, algorithm, oversized);
+    assert!(matches!(built, Err(Error::InvalidGeometry(_))));
+}
+
+/// Each 16384x16384 YUV frame stores 2^30 elements, so a five-frame ring passes `u32::MAX`.
+#[test]
+fn a_ring_past_u32_elements_is_invalid_geometry() {
+    let client = make_client();
+    let oversized = Geometry {
+        width: 16_384,
+        height: 16_384,
+        ..geometry(ChannelMode::Yuv)
+    };
+
+    let algorithm = hq(2);
+    let built = Nlmeans::new(&client, algorithm, oversized);
+    assert!(matches!(built, Err(Error::InvalidGeometry(_))));
+}
+
+/// A 32768x24576 luma frame ring of five frames fits in `u32`, but its two-level pyramid ring holds
+/// 1.25 times as many elements and does not.
+#[test]
+fn a_motion_pyramid_past_u32_elements_is_invalid_geometry() {
+    let client = make_client();
+    let oversized = Geometry {
+        width: 32_768,
+        height: 24_576,
+        ..geometry(ChannelMode::Luma)
+    };
+    let nlm_options = NlmeansOptions {
+        mode: DenoisingMode::Temporal { radius: 2 },
+        motion_compensation: MotionCompensationMode::mvtools_default(),
+        ..NlmeansOptions::default()
+    };
+    let algorithm = NlmeansAlgorithm::Hq(NlmeansHqOptions {
+        nlm: nlm_options,
+        ..NlmeansHqOptions::default()
+    });
+
+    let built = Nlmeans::new(&client, algorithm, oversized);
+    let Err(Error::InvalidGeometry(message)) = built else {
+        panic!("expected InvalidGeometry");
+    };
+    assert!(message.contains("pyramid"), "{message}");
+}
+
+#[test]
+fn hd_and_4k_geometries_construct() {
+    let client = make_client();
+
+    for (width, height) in [(1920, 1080), (3840, 2160)] {
+        let sized = Geometry {
+            width,
+            height,
+            ..geometry(ChannelMode::Luma)
+        };
+
+        let algorithm = hq(2);
+        let built = Nlmeans::new(&client, algorithm, sized);
+        assert!(built.is_ok(), "{width}x{height} failed to construct");
+    }
 }
 
 #[test]

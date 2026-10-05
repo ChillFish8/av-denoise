@@ -348,8 +348,9 @@ pub fn plane_options_from(
                 ..NlmTuning::default()
             };
 
+            let motion_search = MotionSearch::default();
             let motion_compensation = match raw.motion_compensation {
-                Some(true) => MotionCompensationMode::from(MotionSearch::default()),
+                Some(true) => MotionCompensationMode::from(motion_search),
                 Some(false) | None => MotionCompensationMode::None,
             };
 
@@ -406,7 +407,7 @@ pub fn plane_options_from(
                     None => nl4d_spatial_radius_for(preset),
                 },
                 refine: match raw.refine {
-                    Some(passes) => nonnegative(passes, "refine")?,
+                    Some(radius) => nonnegative(radius, "refine")?,
                     None => Nl4dOptions::default().refine,
                 },
                 noise_map: match raw.noise_map {

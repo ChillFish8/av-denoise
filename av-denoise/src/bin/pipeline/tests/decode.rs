@@ -1,11 +1,10 @@
 use std::collections::BTreeSet;
-use std::io::{Cursor, Read};
 use std::num::{NonZeroU8, NonZeroUsize};
 
 use v_frame::chroma::ChromaSubsampling;
 use v_frame::frame::{Frame, FrameBuilder};
 
-use super::y4m_clip;
+use super::{y4m_clip, y4m_reader};
 use crate::pipeline::convert::SourcePixel;
 use crate::pipeline::decode::{DecodeThread, FrameMsg, pump_frames};
 use crate::pipeline::source::open_y4m;
@@ -26,12 +25,6 @@ fn frames(count: usize) -> impl Iterator<Item = Result<Frame<u8>, anyhow::Error>
         let frame = tiny_frame();
         Ok(frame)
     })
-}
-
-fn y4m_reader(bytes: Vec<u8>) -> Box<dyn Read> {
-    let cursor = Cursor::new(bytes);
-
-    Box::new(cursor)
 }
 
 #[test]

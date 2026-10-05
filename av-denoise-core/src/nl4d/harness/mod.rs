@@ -4,5 +4,5 @@
 mod score;
 mod synth;
 
-pub use self::score::{KindScore, Score, score};
+pub use self::score::{KindScore, Score, covering_blocks, score};
 pub use self::synth::{Clip, MotionClass, Still, synthesise};

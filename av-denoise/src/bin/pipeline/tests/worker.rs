@@ -4,31 +4,14 @@
 use std::collections::VecDeque;
 
 #[cfg(feature = "vulkan")]
-use av_denoise::accelerate::Accelerator;
-#[cfg(feature = "vulkan")]
-use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Device, PlanarDenoiser, PlaneOptions};
+use av_denoise::PlanarDenoiser;
 
 #[cfg(feature = "vulkan")]
-use super::{tiny_layout, tiny_planes};
+use super::{temporal_opts, tiny_layout, tiny_planes};
 #[cfg(feature = "vulkan")]
 use crate::pipeline::coordinator::OutputMsg;
 #[cfg(feature = "vulkan")]
 use crate::pipeline::worker::flush_worker;
-
-#[cfg(feature = "vulkan")]
-fn temporal_opts() -> PlaneOptions {
-    PlaneOptions {
-        accelerators: vec![Accelerator::Vulkan],
-        device: Device::Default,
-        intent: ChannelIntent::LumaChroma,
-        mode: DenoisingMode::Temporal { radius: 1 },
-        algorithm: Algorithm::default(),
-        luma_strength: None,
-        chroma_strength: None,
-        luma_lambda_ht: None,
-        chroma_lambda_ht: None,
-    }
-}
 
 #[cfg(feature = "vulkan")]
 #[test]

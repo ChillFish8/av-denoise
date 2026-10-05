@@ -5,9 +5,9 @@ use crate::collab::MAX_K;
 use crate::collab::kernels::transforms::*;
 
 #[cube(launch_unchecked)]
-fn safe_reciprocal_probe(denom: &Array<f32>, floor: &Array<f32>, out: &mut Array<f32>, n: u32) {
+fn safe_reciprocal_probe(denom: &Array<f32>, floor: &Array<f32>, out: &mut Array<f32>, count: u32) {
     let tid = ABSOLUTE_POS_X;
-    if tid < n {
+    if tid < count {
         out[tid as usize] = safe_reciprocal(denom[tid as usize], floor[tid as usize]);
     }
 }

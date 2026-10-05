@@ -18,6 +18,7 @@ use crate::collab::kernels::fused::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGT
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use crate::engine::{DevicePlane, SampleFormat};
+use crate::nlmeans::denoiser::{BufferSize, front_buffer_sizes};
 use crate::nlmeans::{
     BLOCK_X,
     BLOCK_Y,
@@ -127,6 +128,34 @@ pub struct Nl4dDenoiser<R: Runtime> {
     map_rows: u32,
     /// Present only when grain export is on.
     grain: Option<GrainExport>,
+}
+
+/// The element count of every geometry-sized buffer [Nl4dDenoiser::new] allocates beyond its frame rings.
+///
+/// The front end is sized at the grouping radius, as `new` sets it. `accum` holds as many elements
+/// as the frame ring, `wsum`, `outputs` and `group_weight` hold fewer, and `reg_mv` and `reg_conf`
+/// match the front end's motion field and confidence. The grain's saved vectors span one more frame
+/// than the motion field, so they are counted here.
+pub(crate) fn buffer_sizes<R: Runtime>(
+    client: &ComputeClient<R>,
+    params: &Nl4dParams,
+    width: u32,
+    height: u32,
+) -> Vec<BufferSize> {
+    let mut nlm_params = params.nlm.clone();
+    nlm_params.temporal_radius = params.temporal_radius;
+
+    let front = front_buffer_sizes(client, &nlm_params, width, height);
+    let mut buffers = front.buffers;
+
+    let exports_grain = params.grain_export && nlm_params.channels != ChannelMode::Chroma;
+    if let (true, Some(blocks)) = (exports_grain, front.motion_blocks) {
+        let ring_frames = 1 + 2 * u64::from(params.temporal_radius);
+        let saved_mv = blocks.checked_mul(2 * ring_frames);
+        buffers.push(("grain saved vectors", saved_mv));
+    }
+
+    buffers
 }
 
 impl<R: Runtime> Nl4dDenoiser<R> {

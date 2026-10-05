@@ -2,27 +2,10 @@
 
 use std::io::{Cursor, Read};
 
-use av_denoise::accelerate::Accelerator;
-use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Device, PlaneOptions};
-
-use super::{SCENE_CLIP_SIZE, SharedBuffer, multi_scene_clip};
+use super::{SCENE_CLIP_SIZE, SharedBuffer, multi_scene_clip, temporal_opts};
 use crate::pipeline::run_with;
 use crate::pipeline::source::open_y4m;
 use crate::pipeline::stage::frame_permits;
-
-fn temporal_opts() -> PlaneOptions {
-    PlaneOptions {
-        accelerators: vec![Accelerator::Vulkan],
-        device: Device::Default,
-        intent: ChannelIntent::LumaChroma,
-        mode: DenoisingMode::Temporal { radius: 1 },
-        algorithm: Algorithm::default(),
-        luma_strength: None,
-        chroma_strength: None,
-        luma_lambda_ht: None,
-        chroma_lambda_ht: None,
-    }
-}
 
 fn run_over(bytes: Vec<u8>, workers: usize, budget: u64) -> Result<Vec<u8>, anyhow::Error> {
     let output = SharedBuffer::default();

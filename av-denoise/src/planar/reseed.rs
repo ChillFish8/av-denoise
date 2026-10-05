@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use super::{PlanarDenoiser, Planes};
+use super::{DenoiserError, PlanarDenoiser, Planes};
 use crate::EdgePadding;
 
 /// An explicit window of source frames for [PlanarDenoiser::reseed_window].
@@ -63,6 +63,8 @@ impl PlanarDenoiser {
             let target_output = outputs.pop();
             return target_output.ok_or_else(|| anyhow::anyhow!("reseed produced no frame, this is a bug"));
         }
+
+        self.check_window(window)?;
 
         self.luma_passthrough.clear();
         self.chroma_passthrough.clear();
@@ -138,6 +140,8 @@ impl PlanarDenoiser {
             anyhow::bail!("reseed window does not match the span {span:?} for its edge flags");
         }
 
+        self.check_window(frames)?;
+
         self.luma_passthrough.clear();
         self.chroma_passthrough.clear();
         self.reset_streams();
@@ -183,6 +187,15 @@ impl PlanarDenoiser {
 
         let target_onwards = outputs.split_off(first);
         Ok(target_onwards)
+    }
+
+    /// Checks every frame of a window, so a bad plane is rejected before the running stream is reset.
+    fn check_window(&self, frames: &[Planes]) -> Result<(), DenoiserError> {
+        for planes in frames {
+            self.check_planes(planes)?;
+        }
+
+        Ok(())
     }
 
     /// Abandons the running stream on every enabled half.

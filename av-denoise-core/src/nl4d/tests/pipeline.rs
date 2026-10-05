@@ -8,7 +8,6 @@ use super::helpers::{
     SIGMA,
     SPATIAL_RADIUS,
     make_client,
-    noisy_copy_of,
     psnr,
     static_clip_params,
     textured_base,
@@ -27,6 +26,7 @@ use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, MAX_TEMPORAL_RADIUS, PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
+use crate::nlmeans::tests::helpers::noisy_field_over;
 use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NOISE_CURVE_BINS, NlmDenoiser, NlmParams};
 
 #[test]
@@ -38,7 +38,7 @@ fn denoises_a_static_noisy_clip() {
     let frame_count = 9usize;
 
     let noisy_frames: Vec<Vec<f32>> = (0..frame_count as u32)
-        .map(|seed| noisy_copy_of(&base, width, height, SIGMA, seed))
+        .map(|seed| noisy_field_over(&base, width, height, SIGMA, seed))
         .collect();
 
     let params = static_clip_params(radius);
@@ -87,7 +87,7 @@ fn denoises_at_the_widest_spatial_and_temporal_radius() {
     let frame_count = 3usize;
 
     let noisy_frames: Vec<Vec<f32>> = (0..frame_count as u32)
-        .map(|seed| noisy_copy_of(&base, width, height, SIGMA, seed))
+        .map(|seed| noisy_field_over(&base, width, height, SIGMA, seed))
         .collect();
 
     let clip_params = static_clip_params(radius);
@@ -154,7 +154,7 @@ fn survives_a_ring_size_that_would_overflow_a_single_zero_dispatch() {
     let frame_count = (2 * total_frames + 3) as usize;
 
     let noisy_frames: Vec<Vec<f32>> = (0..frame_count as u32)
-        .map(|seed| noisy_copy_of(&base, width, height, SIGMA, seed))
+        .map(|seed| noisy_field_over(&base, width, height, SIGMA, seed))
         .collect();
 
     // A narrow search keeps the test's time on the ring size under test.
@@ -245,7 +245,7 @@ fn output_carries_its_own_frames_marker_no_other_frame_has() {
             } else {
                 &base
             };
-            noisy_copy_of(content, width, height, SIGMA, seed)
+            noisy_field_over(content, width, height, SIGMA, seed)
         })
         .collect();
 
@@ -298,7 +298,7 @@ fn flush_emits_exactly_the_pushed_frame_count() {
 
     let mut emitted = 0usize;
     for seed in 0..frame_count {
-        let frame = noisy_copy_of(&base, width, height, SIGMA, seed);
+        let frame = noisy_field_over(&base, width, height, SIGMA, seed);
         denoiser.push_frame(&frame);
         if denoiser.denoise().expect("denoise failed").is_some() {
             emitted += 1;
@@ -482,7 +482,7 @@ fn temporal_grouping_beats_spatial_only_on_a_static_clip() {
     let base = textured_base(width, height);
 
     let noisy_frames: Vec<Vec<f32>> = (0..(3 * radius + 1))
-        .map(|seed| noisy_copy_of(&base, width, height, SIGMA, seed))
+        .map(|seed| noisy_field_over(&base, width, height, SIGMA, seed))
         .collect();
     let centre_index = radius as usize;
 
@@ -548,7 +548,7 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
 
     let frame_count = 3 * radius + 1;
     let frames: Vec<Vec<f32>> = (0..frame_count)
-        .map(|seed| noisy_copy_of(&base, width, height, SIGMA, seed))
+        .map(|seed| noisy_field_over(&base, width, height, SIGMA, seed))
         .collect();
     let judged_frame = radius as usize;
 
@@ -919,7 +919,7 @@ fn shipped_defaults_denoise_a_static_clip_and_regularise_its_field_to_zero() {
     }
 
     let frames: Vec<Vec<f32>> = (0..frame_count as u32)
-        .map(|seed| noisy_copy_of(&base, width, height, SIGMA, seed))
+        .map(|seed| noisy_field_over(&base, width, height, SIGMA, seed))
         .collect();
     let noisy_params = shipped_default_params();
     let mut noisy_denoiser = Nl4dDenoiser::<R>::new(&client, noisy_params, width, height)

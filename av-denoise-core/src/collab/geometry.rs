@@ -15,11 +15,11 @@ pub fn fused_cubes_x(width: u32) -> u32 {
     refs_along(width).div_ceil(8)
 }
 
-/// Top-left pixel of reference index `i` along one axis.
+/// Top-left pixel of reference `index` along one axis.
 ///
 /// The last reference clamps so its patch stays inside the frame.
-pub fn ref_pos(i: u32, dim: u32) -> u32 {
-    (i * STEP).min(dim - PATCH_SIZE)
+pub fn ref_pos(index: u32, dim: u32) -> u32 {
+    (index * STEP).min(dim - PATCH_SIZE)
 }
 
 pub fn ref_count(width: u32, height: u32) -> usize {

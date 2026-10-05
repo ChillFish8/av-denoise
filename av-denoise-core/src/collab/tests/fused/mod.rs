@@ -8,7 +8,7 @@ mod walks;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::helpers::{R, make_client, make_unique_frame, noisy_field_over};
+use super::helpers::{R, make_client, make_unique_frame, noisy_flat_field};
 use crate::collab::geometry::{fused_cubes_x, ref_count, ref_pos, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{WEIGHT_GAIN, cross_frame_accum_scale, kaiser_window, weight_scale};
 use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
@@ -273,9 +273,8 @@ const PROBE_TOLERANCE: f64 = 1.0e-3;
 
 /// Checks a run against values recorded from a second, known-good implementation.
 ///
-/// The literals come from the two-kernel `collab_group_temporal` + `collab_filter_ht` pair, which
-/// agreed with the fused kernel to `5e-9` on the whole-run statistics and `5e-7` on the worst probe
-/// when recorded.
+/// The literals come from a two-kernel group-then-filter implementation, which agreed with the fused
+/// kernel to `5e-9` on the whole-run statistics and `5e-7` on the worst probe when recorded.
 /// Fixed literals keep this meaningful because a cubecl compiler bug can make a failing shader do
 /// nothing at all, and a kernel compared against itself would then match zeros to zeros.
 pub(super) fn assert_matches_recorded(label: &str, got: &Aggregated, want: &Digest) {
@@ -600,7 +599,7 @@ pub(super) fn three_frame_ring_with_a_planted_match(width: u32, height: u32) -> 
 pub(super) fn five_frame_ring_with_jittered_copies(width: u32, height: u32) -> Setup {
     let radius = 2u32;
     let frame = unique_frame(width, height);
-    let jitter = noisy_field_over(width, height * 4, 0.5, 0.002);
+    let jitter = noisy_flat_field(width, height * 4, 0.5, 0.002);
     let pixels = (width * height) as usize;
 
     let mut ring = Vec::with_capacity(pixels * 5);
@@ -685,7 +684,7 @@ pub(super) fn output_variance(got: &Aggregated) -> f64 {
 
 /// A flat field carrying nothing but noise, at the settings a real caller would filter it with.
 pub(super) fn flat_noise_setup(width: u32, height: u32, sigma: f32) -> Setup {
-    let field = noisy_field_over(width, height, 0.5, sigma);
+    let field = noisy_flat_field(width, height, 0.5, sigma);
     let mut setup = Setup::spatial_only(field, width, height);
     setup.spatial_radius = 9;
     setup.sigma = sigma;

@@ -9,26 +9,6 @@ mod planar;
 pub mod stack;
 pub mod warmup;
 
-/// Planar frame types and helpers.
-pub mod frame {
-    pub use crate::planar::{
-        ChannelIntent,
-        FrameLayout,
-        PlanarDenoiser,
-        PlaneOptions,
-        Planes,
-        ReseedWindow,
-        Subsampling,
-        f32_to_plane,
-        fill_plane,
-        interleave_uv_to_f32,
-        interleave_yuv_to_f32,
-        plane_to_f32,
-        push_needs_retry,
-        unpack_uv_from_f32,
-    };
-}
-
 pub use av_denoise_core::{
     ChannelMode,
     DEFAULT_PILOT_STRENGTH_SCALE,
@@ -36,7 +16,7 @@ pub use av_denoise_core::{
     DevicePlane,
     EdgePadding,
     Engine,
-    Error,
+    Error as EngineError,
     Geometry,
     GrainChunk,
     HqParams,
@@ -66,8 +46,6 @@ pub use av_denoise_core::{
     nlmeans_variant_for,
     parse_prefilter,
 };
-#[doc(hidden)]
-pub use av_denoise_core::{nl4d, nlmeans};
 
 pub use self::backend::{Device, accelerate, device, enumerate, sniff};
 pub use self::cache::{
@@ -96,6 +74,7 @@ pub use self::planar::{
     Planes,
     ReseedWindow,
     Subsampling,
+    fill_plane,
     push_needs_retry,
 };
 pub use self::stack::{CODEGEN_STACK_BYTES, codegen_stack_is_sufficient, raise_codegen_stack_limit};

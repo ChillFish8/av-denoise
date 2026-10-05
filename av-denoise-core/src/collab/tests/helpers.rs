@@ -12,7 +12,7 @@ pub(super) fn make_client() -> ComputeClient<R> {
 ///
 /// Each sample sums four hash-derived uniforms between -0.5 and 0.5 (Irwin-Hall) and rescales to
 /// the requested standard deviation, so the same arguments always reproduce the same frame.
-pub(super) fn noisy_field_over(width: u32, height: u32, base: f32, sigma: f32) -> Vec<f32> {
+pub(super) fn noisy_flat_field(width: u32, height: u32, base: f32, sigma: f32) -> Vec<f32> {
     let unit_std = (1.0f32 / 3.0f32).sqrt();
     let mut frame = vec![0.0f32; (width * height) as usize];
     for idx in 0..(width * height) {

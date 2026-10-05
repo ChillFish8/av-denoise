@@ -3,12 +3,13 @@ use std::collections::VecDeque;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::denoiser::{CompletedRegion, Nl4dDenoiser};
+use super::denoiser::{CompletedRegion, Nl4dDenoiser, buffer_sizes};
 use super::grain::GrainChunk;
 use super::options::{Nl4dOptions, resolve_params};
 use crate::collab::PATCH_SIZE;
 use crate::engine::{DevicePlane, EdgePadding, EgressSource, Engine, Geometry, WindowSpan, egress};
 use crate::error::Error;
+use crate::nlmeans::denoiser::check_u32_indexable;
 
 /// Four-dimensional collaborative denoising over GPU planes.
 pub struct Nl4d<R: Runtime> {
@@ -22,6 +23,8 @@ pub struct Nl4d<R: Runtime> {
     finishing: bool,
     /// Pushes since the last stream start, used to mark a context-led stream as a continuation.
     pushes: usize,
+    /// Whether the current stream has had a real push, after which context frames are refused.
+    pushed: bool,
     poisoned: bool,
 }
 
@@ -39,6 +42,23 @@ impl<R: Runtime> Nl4d<R> {
         geometry.validate()?;
 
         let params = resolve_params(&options, geometry.channels)?;
+
+        // Buffer sizing builds the motion block grid, which needs validated motion options.
+        let validated = params.validate();
+        validated.map_err(Error::InvalidOptions)?;
+        let front_validated = params.nlm.validate();
+        front_validated.map_err(|error| {
+            let message = error.to_string();
+            Error::InvalidOptions(message)
+        })?;
+
+        let ring_slots = 1 + 2 * u64::from(params.temporal_radius);
+        geometry.check_ring_fits(ring_slots)?;
+
+        let sizes = buffer_sizes(client, &params, geometry.width, geometry.height);
+        let indexable = check_u32_indexable(&sizes);
+        indexable.map_err(Error::InvalidGeometry)?;
+
         let inner = Nl4dDenoiser::new(client, params, geometry.width, geometry.height);
         let inner = inner.map_err(Error::InvalidOptions)?;
 
@@ -50,6 +70,7 @@ impl<R: Runtime> Nl4d<R> {
             pending: VecDeque::new(),
             finishing: false,
             pushes: 0,
+            pushed: false,
             poisoned: false,
         })
     }
@@ -70,6 +91,14 @@ impl<R: Runtime> Nl4d<R> {
         Ok(())
     }
 
+    fn check_no_push_yet(&self) -> Result<(), Error> {
+        if self.pushed {
+            return Err(Error::ContextAfterPush);
+        }
+
+        Ok(())
+    }
+
     /// Poisons the engine if `result` is an error.
     fn guard<T>(&mut self, result: Result<T, anyhow::Error>) -> Result<T, Error> {
         if result.is_err() {
@@ -83,13 +112,16 @@ impl<R: Runtime> Nl4d<R> {
         self.inner.reset_stream();
         self.finishing = false;
         self.pushes = 0;
+        self.pushed = false;
     }
 
     fn write_out(&self, frame: &Handle, planes: &[DevicePlane<'_>]) {
         let channels = self.geometry.channels;
+        // The constructor bounds the ring to `u32` elements, so one plane always fits.
+        let pixels = self.geometry.pixels() as u32;
         let source = EgressSource {
             frame,
-            pixels: self.geometry.pixels(),
+            pixels,
             channels: channels.count(),
             stored_ch: channels.storage_count(),
         };
@@ -115,6 +147,8 @@ impl<R: Runtime> Engine for Nl4d<R> {
         let pushed = self.inner.push_planes(planes, self.geometry.input);
         self.guard(pushed)?;
 
+        self.pushed = true;
+
         let submitted = self.inner.submit_passes();
         let region = self.guard(submitted)?;
         if let Some(region) = region {
@@ -130,6 +164,7 @@ impl<R: Runtime> Engine for Nl4d<R> {
         self.check_usable()?;
         self.check_nothing_pending()?;
         self.geometry.check_planes(planes, self.geometry.input)?;
+        self.check_no_push_yet()?;
 
         if self.pushes == 0 {
             self.inner.mark_continuation();

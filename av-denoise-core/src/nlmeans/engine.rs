@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::denoiser::{GpuOutput, NlmDenoiser};
+use super::denoiser::{GpuOutput, NlmDenoiser, check_u32_indexable, front_buffer_sizes};
 use super::options::{NlmeansAlgorithm, resolve_params};
 use super::params::validate_dimensions;
 use crate::engine::{DevicePlane, EdgePadding, EgressSource, Engine, Geometry, WindowSpan, egress};
@@ -15,6 +15,8 @@ pub struct Nlmeans<R: Runtime> {
     ready: Option<Handle>,
     /// Tail frames still to produce after `finish`.
     tail_remaining: usize,
+    /// Whether the current stream has had a real push, after which context frames are refused.
+    pushed: bool,
     poisoned: bool,
 }
 
@@ -40,6 +42,13 @@ impl<R: Runtime> Nlmeans<R> {
             Error::InvalidOptions(message)
         })?;
 
+        let ring_slots = u64::from(params.total_frames());
+        geometry.check_ring_fits(ring_slots)?;
+
+        let sizes = front_buffer_sizes(client, &params, geometry.width, geometry.height);
+        let indexable = check_u32_indexable(&sizes.buffers);
+        indexable.map_err(Error::InvalidGeometry)?;
+
         let front = NlmDenoiser::new(client, params, geometry.width, geometry.height);
 
         Ok(Self {
@@ -47,6 +56,7 @@ impl<R: Runtime> Nlmeans<R> {
             geometry,
             ready: None,
             tail_remaining: 0,
+            pushed: false,
             poisoned: false,
         })
     }
@@ -65,6 +75,19 @@ impl<R: Runtime> Nlmeans<R> {
         }
 
         Ok(())
+    }
+
+    fn check_no_push_yet(&self) -> Result<(), Error> {
+        if self.pushed {
+            return Err(Error::ContextAfterPush);
+        }
+
+        Ok(())
+    }
+
+    fn restart_stream(&mut self) {
+        self.front.reset_stream_state();
+        self.pushed = false;
     }
 
     /// Poisons the engine if `result` is an error.
@@ -88,9 +111,11 @@ impl<R: Runtime> Nlmeans<R> {
 
     fn write_out(&self, frame: &Handle, planes: &[DevicePlane<'_>]) {
         let channels = self.geometry.channels;
+        // The constructor bounds the ring to `u32` elements, so one plane always fits.
+        let pixels = self.geometry.pixels() as u32;
         let source = EgressSource {
             frame,
-            pixels: self.geometry.pixels(),
+            pixels,
             channels: channels.count(),
             stored_ch: channels.storage_count(),
         };
@@ -117,6 +142,8 @@ impl<R: Runtime> Engine for Nlmeans<R> {
         let pushed = self.front.push_planes(planes, self.geometry.input);
         self.guard(pushed)?;
 
+        self.pushed = true;
+
         let submitted = self.front.denoise_submit_gpu();
         let output = self.guard(submitted)?;
         self.ready = output.map(|output| output.handle);
@@ -129,6 +156,7 @@ impl<R: Runtime> Engine for Nlmeans<R> {
         self.check_usable()?;
         self.check_nothing_pending()?;
         self.geometry.check_planes(planes, self.geometry.input)?;
+        self.check_no_push_yet()?;
 
         let pushed = self.front.push_planes(planes, self.geometry.input);
         self.guard(pushed)
@@ -153,7 +181,7 @@ impl<R: Runtime> Engine for Nlmeans<R> {
 
         self.tail_remaining -= 1;
         if self.tail_remaining == 0 {
-            self.front.reset_stream_state();
+            self.restart_stream();
         }
 
         Ok(())
@@ -165,7 +193,7 @@ impl<R: Runtime> Engine for Nlmeans<R> {
 
         self.tail_remaining = self.front.flush_target();
         if self.tail_remaining == 0 {
-            self.front.reset_stream_state();
+            self.restart_stream();
         }
 
         Ok(self.tail_remaining)
@@ -175,7 +203,7 @@ impl<R: Runtime> Engine for Nlmeans<R> {
         self.ready = None;
         self.tail_remaining = 0;
         self.poisoned = false;
-        self.front.reset_stream_state();
+        self.restart_stream();
     }
 
     fn window_span(&self) -> WindowSpan {

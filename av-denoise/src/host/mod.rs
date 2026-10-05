@@ -14,7 +14,7 @@ use cubecl::server::Handle;
 pub use self::depth::{Depth, UnsupportedDepthError};
 use self::io::PlaneIo;
 pub use self::options::{Algorithm, DenoiserOptions};
-pub use self::pending::{Pending, TryWait};
+pub(crate) use self::pending::{Pending, TryWait};
 use crate::backend::accelerate::Accelerator;
 use crate::backend::{Device, build_engine};
 
@@ -35,7 +35,7 @@ pub enum DenoiserError {
     /// Call [HostDenoiser::recv] or [HostDenoiser::try_recv], then retry the same push.
     #[error("denoiser queue is full, collect the pending frame before pushing more")]
     QueueFull,
-    /// An earlier call failed, so later output would not line up with its input.
+    /// An earlier failure means later output would not line up with its input.
     ///
     /// Call [HostDenoiser::reset_stream] to start a fresh stream, or drop the denoiser.
     #[error("denoiser failed earlier, reset the stream before using it again")]
@@ -49,6 +49,22 @@ pub enum DenoiserError {
     /// Anything else, such as a failed readback.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+impl DenoiserError {
+    /// Whether this error leaves the stream unusable until [HostDenoiser::reset_stream].
+    ///
+    /// Rejected planes are caught before any state changes and never reach this check. A full queue
+    /// and a context frame sent after a push change no state either. Any other failure may leave the
+    /// host partly advanced, so it poisons.
+    fn poisons_stream(&self) -> bool {
+        !matches!(
+            self,
+            DenoiserError::QueueFull
+                | DenoiserError::Poisoned
+                | DenoiserError::Engine(av_denoise_core::Error::ContextAfterPush)
+        )
+    }
 }
 
 /// A stateful denoiser that cleans a stream of frames held as wire bytes.
@@ -102,7 +118,7 @@ pub struct HostDenoiser {
     outputs: Vec<Vec<Handle>>,
     next_output: usize,
     pending: VecDeque<Pending>,
-    /// Set once any call other than a `QueueFull` push has failed.
+    /// Set once a call fails with an error that [DenoiserError::poisons_stream].
     poisoned: bool,
 }
 
@@ -183,7 +199,8 @@ impl HostDenoiser {
     /// Uploads one frame and starts denoising any frame it completes.
     ///
     /// Returns [DenoiserError::QueueFull] once [MAX_PENDING] frames wait to be collected, which does
-    /// not poison the denoiser. Any other failure poisons it until [Self::reset_stream].
+    /// not poison the denoiser. A rejected plane leaves it usable too. Any other failure poisons it
+    /// until [Self::reset_stream].
     pub fn push(&mut self, planes: &[&[u8]]) -> Result<(), DenoiserError> {
         if self.poisoned {
             return Err(DenoiserError::Poisoned);
@@ -193,18 +210,25 @@ impl HostDenoiser {
             return Err(DenoiserError::QueueFull);
         }
 
+        self.check_planes(planes)?;
+
         let result = self.push_inner(planes);
         self.poison_on_error(result)
     }
 
     fn push_inner(&mut self, planes: &[&[u8]]) -> Result<(), DenoiserError> {
-        let handles = self.upload(planes)?;
+        let handles = self.upload(planes);
         let device_planes = device_planes(&handles, self.width, self.height);
         let ready = self.engine.push(&device_planes)?;
-        debug_assert!(
-            ready <= 1,
-            "a streaming push readies at most one frame, got {ready}"
-        );
+
+        // Emitting past the free output sets would overwrite a set whose readback has not landed.
+        let in_flight = self.pending.len();
+        if in_flight + ready > OUTPUT_SETS {
+            let error = anyhow::anyhow!(
+                "push readied {ready} frames with {in_flight} in flight, past the {OUTPUT_SETS} output sets"
+            );
+            return Err(DenoiserError::Other(error));
+        }
 
         for _ in 0..ready {
             let slot = self.next_output;
@@ -225,12 +249,14 @@ impl HostDenoiser {
             return Err(DenoiserError::Poisoned);
         }
 
+        self.check_planes(planes)?;
+
         let result = self.push_priming_inner(planes);
         self.poison_on_error(result)
     }
 
     fn push_priming_inner(&mut self, planes: &[&[u8]]) -> Result<(), DenoiserError> {
-        let handles = self.upload(planes)?;
+        let handles = self.upload(planes);
         let device_planes = device_planes(&handles, self.width, self.height);
         self.engine.push_context(&device_planes)?;
 
@@ -349,15 +375,17 @@ impl HostDenoiser {
     }
 
     fn poison_on_error<T>(&mut self, result: Result<T, DenoiserError>) -> Result<T, DenoiserError> {
-        if result.is_err() {
+        if let Err(error) = &result
+            && error.poisons_stream()
+        {
             self.poisoned = true;
         }
 
         result
     }
 
-    /// Uploads each plane, padded to whole words.
-    fn upload(&self, planes: &[&[u8]]) -> Result<Vec<Handle>, DenoiserError> {
+    /// Rejects a frame with the wrong number of planes or a plane of the wrong length.
+    fn check_planes(&self, planes: &[&[u8]]) -> Result<(), DenoiserError> {
         if planes.len() != self.plane_count {
             let message = format!("expected {} planes, got {}", self.plane_count, planes.len());
             let error = av_denoise_core::Error::PlaneMismatch(message);
@@ -366,15 +394,21 @@ impl HostDenoiser {
 
         for (index, plane) in planes.iter().enumerate() {
             if plane.len() != self.plane_length {
-                let error = anyhow::anyhow!(
+                let message = format!(
                     "plane {index} holds {} bytes, expected {}",
                     plane.len(),
                     self.plane_length
                 );
-                return Err(DenoiserError::Other(error));
+                let error = av_denoise_core::Error::PlaneMismatch(message);
+                return Err(DenoiserError::Engine(error));
             }
         }
 
+        Ok(())
+    }
+
+    /// Uploads each plane, padded to whole words.
+    fn upload(&self, planes: &[&[u8]]) -> Vec<Handle> {
         let mut handles = Vec::with_capacity(planes.len());
 
         for plane in planes {
@@ -388,7 +422,7 @@ impl HostDenoiser {
             handles.push(handle);
         }
 
-        Ok(handles)
+        handles
     }
 
     /// Writes the oldest ready frame into output set `slot` and starts reading it back.

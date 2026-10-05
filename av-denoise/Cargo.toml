@@ -96,9 +96,5 @@ name = "denoise"
 harness = false
 
 [[bench]]
-name = "convert"
-harness = false
-
-[[bench]]
 name = "reseed"
 harness = false

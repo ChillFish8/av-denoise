@@ -5,21 +5,21 @@ use crate::collab::kernels::group::{clamp_top_left, pack_pos_t};
 use crate::collab::kernels::plane_ops::{plane_ssd_reduce8, shift_insert8, shift_insert8_gated};
 use crate::nlmeans::kernels::helpers::read_line;
 
-/// The lowest block index whose span contains the patch at `p` on one axis.
+/// The lowest block index whose span contains the patch at `patch_start` on one axis.
 ///
-/// Block `b` spans `b * step..b * step + blksize`, so it contains `p..p + PATCH_SIZE` when
-/// `b * step + blksize >= p + PATCH_SIZE`. The caller clamps the result to the highest covering
-/// block, `p / step`. It mirrors `covering_blocks` in `nl4d/harness/score.rs`.
+/// Block `b` spans `b * step..b * step + blksize`, so it contains `patch_start..patch_start + PATCH_SIZE`
+/// when `b * step + blksize >= patch_start + PATCH_SIZE`. The caller clamps the result to the highest
+/// covering block, `patch_start / step`. It mirrors `covering_blocks` in `nl4d/harness/score.rs`.
 #[cube]
-pub(crate) fn covering_lo(p: u32, #[comptime] blksize: u32, #[comptime] step: u32) -> u32 {
-    let overhang = u32::max(p + PATCH_SIZE, blksize) - blksize;
+pub(crate) fn covering_lo(patch_start: u32, #[comptime] blksize: u32, #[comptime] step: u32) -> u32 {
+    let overhang = u32::max(patch_start + PATCH_SIZE, blksize) - blksize;
     overhang.div_ceil(step)
 }
 
 /// Host mirror of `covering_lo`.
 #[cfg(test)]
-fn covering_lo_host(p: u32, blksize: u32, step: u32) -> u32 {
-    let overhang = u32::max(p + PATCH_SIZE, blksize) - blksize;
+fn covering_lo_host(patch_start: u32, blksize: u32, step: u32) -> u32 {
+    let overhang = u32::max(patch_start + PATCH_SIZE, blksize) - blksize;
     overhang.div_ceil(step)
 }
 
@@ -423,19 +423,8 @@ pub(crate) fn trajectory_search<N: Size>(
 
 #[cfg(test)]
 mod tests {
-    use super::{PATCH_SIZE, covering_lo_host};
-
-    /// A copy of the harness's `covering_blocks`, which its private `score` module keeps out of reach.
-    fn covering_blocks_host(patch_start: u32, blksize: u32, step: u32, blocks: u32) -> (u32, u32) {
-        let last_block = (patch_start / step).min(blocks - 1);
-        let first_block = if patch_start + PATCH_SIZE <= blksize {
-            0
-        } else {
-            (patch_start + PATCH_SIZE - blksize).div_ceil(step)
-        };
-
-        (first_block.min(last_block), last_block)
-    }
+    use super::covering_lo_host;
+    use crate::nl4d::harness::covering_blocks;
 
     #[test]
     fn covering_lo_matches_the_harness_across_a_range_of_geometries() {
@@ -443,7 +432,7 @@ mod tests {
             let step = blksize - overlap;
             let blocks = 8u32;
             for patch_start in (0..blocks * step).step_by(3) {
-                let (expected_first, last) = covering_blocks_host(patch_start, blksize, step, blocks);
+                let (expected_first, last) = covering_blocks(patch_start, blksize, step, blocks);
                 let got_first = covering_lo_host(patch_start, blksize, step).min(last);
                 assert_eq!(
                     got_first, expected_first,

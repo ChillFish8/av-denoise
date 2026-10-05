@@ -1,6 +1,6 @@
 use cubecl::prelude::*;
 
-use super::helpers::{R, make_client, noisy_field_over};
+use super::helpers::{R, make_client, noisy_flat_field};
 use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{
     ACCUM_SCALE,
@@ -377,7 +377,7 @@ fn run_scatter_stage_windowed(
 #[test]
 fn scattering_every_member_at_zero_sigma_reproduces_the_input() {
     let (width, height) = (48u32, 40u32);
-    let frame = noisy_field_over(width, height, 0.5, 0.05);
+    let frame = noisy_flat_field(width, height, 0.5, 0.05);
 
     let (output, _) = run_scatter_stage(&frame, width, height, 0.0);
 
@@ -399,7 +399,7 @@ fn scattering_every_member_at_zero_sigma_reproduces_the_input() {
 #[test]
 fn every_member_reaches_the_weight_sum_not_only_the_reference_patch() {
     let (width, height) = (64u32, 64u32);
-    let frame = noisy_field_over(width, height, 0.5, 0.02);
+    let frame = noisy_flat_field(width, height, 0.5, 0.02);
 
     let (_, wsum) = run_scatter_stage(&frame, width, height, 0.02);
 
@@ -457,7 +457,7 @@ fn the_aggregation_window_leaves_flat_content_flat() {
 #[test]
 fn the_aggregation_window_reweights_the_blend() {
     let (width, height) = (64u32, 64u32);
-    let frame = noisy_field_over(width, height, 0.5, 0.05);
+    let frame = noisy_flat_field(width, height, 0.5, 0.05);
 
     let (uniform, _) = run_scatter_stage_windowed(&frame, width, height, 0.02, 0.0);
     let (windowed, _) = run_scatter_stage_windowed(&frame, width, height, 0.02, 2.0);

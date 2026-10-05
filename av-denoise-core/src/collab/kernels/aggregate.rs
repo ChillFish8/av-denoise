@@ -1,6 +1,6 @@
 use cubecl::prelude::*;
 
-use crate::collab::kernels::transforms::RECIPROCAL_FLOOR;
+use super::transforms::RECIPROCAL_FLOOR;
 use crate::collab::{MAX_K, PATCH_AREA, PATCH_SIZE, STEP};
 
 /// The fixed-point scale a single-frame accumulator counts in.

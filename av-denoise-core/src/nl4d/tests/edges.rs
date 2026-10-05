@@ -1,6 +1,7 @@
-use super::helpers::{R, SIGMA, make_client, noisy_copy_of, static_clip_params, textured_base};
+use super::helpers::{R, SIGMA, make_client, static_clip_params, textured_base};
 use crate::bench_api::HostIo;
 use crate::nl4d::Nl4dDenoiser;
+use crate::nlmeans::tests::helpers::noisy_field_over;
 
 const SIZE: u32 = 64;
 
@@ -15,7 +16,7 @@ fn run_stream(radius: u32, count: u32) -> (Vec<Vec<f32>>, Option<u32>) {
     let mut first_output_at = None;
 
     for seed in 0..count {
-        let frame = noisy_copy_of(&base, SIZE, SIZE, SIGMA, seed);
+        let frame = noisy_field_over(&base, SIZE, SIZE, SIGMA, seed);
         denoiser.push_frame(&frame);
 
         let Some(values) = denoiser.denoise().expect("denoise failed") else {
@@ -60,7 +61,7 @@ fn first_output_push(denoiser: &mut Nl4dDenoiser<R>, count: u32, first_seed: u32
     let mut first_output_at = None;
 
     for push in 0..count {
-        let frame = noisy_copy_of(&base, SIZE, SIZE, SIGMA, first_seed + push);
+        let frame = noisy_field_over(&base, SIZE, SIZE, SIGMA, first_seed + push);
         denoiser.push_frame(&frame);
 
         if denoiser.denoise().expect("denoise failed").is_some() {
@@ -161,7 +162,7 @@ fn a_full_ring_primed_without_any_submit_flushes_without_black_output() {
     denoiser.mark_continuation();
 
     for seed in 0..(2 * radius + 1) {
-        let frame = noisy_copy_of(&base, SIZE, SIZE, SIGMA, seed);
+        let frame = noisy_field_over(&base, SIZE, SIZE, SIGMA, seed);
         denoiser.push_frame(&frame);
     }
 

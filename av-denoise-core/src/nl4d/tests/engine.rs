@@ -78,6 +78,13 @@ fn push_context_frame(engine: &mut Nl4d<R>, client: &ComputeClient<R>, frame: &[
     engine.push_context(&planes).expect("push_context");
 }
 
+fn try_push_context(engine: &mut Nl4d<R>, client: &ComputeClient<R>, frame: &[f32]) -> Result<(), Error> {
+    let handles = upload_planes(client, frame, 1);
+    let planes = [DevicePlane::new(&handles[0], WIDTH, HEIGHT)];
+
+    engine.push_context(&planes)
+}
+
 fn push_and_emit(
     engine: &mut Nl4d<R>,
     client: &ComputeClient<R>,
@@ -334,6 +341,54 @@ fn a_context_led_second_stream_matches_a_fresh_engine() {
     assert_eq!(second, fresh.frames);
 }
 
+#[test]
+fn push_context_after_a_push_is_refused_and_changes_no_state() {
+    let frames = noisy_frames(WIDTH, HEIGHT, 1, 10);
+    let client = make_client();
+    let mut engine = build_engine(&client, 2, ChannelMode::Luma);
+    let mut outputs = Vec::new();
+
+    for (index, frame) in frames.iter().enumerate() {
+        push_and_emit(&mut engine, &client, frame, 1, &mut outputs);
+
+        if index == 5 {
+            let refused = try_push_context(&mut engine, &client, &frames[9]);
+            assert!(matches!(refused, Err(Error::ContextAfterPush)));
+        }
+    }
+
+    finish_and_emit(&mut engine, &client, 1, &mut outputs);
+
+    let expected_options = options(2, false);
+    let expected = run_oracle(expected_options, ChannelMode::Luma, &frames, 0);
+    assert_eq!(outputs, expected.frames);
+}
+
+#[test]
+fn push_context_is_allowed_again_after_reset() {
+    let frames = noisy_frames(WIDTH, HEIGHT, 1, 2);
+    let client = make_client();
+    let mut engine = build_engine(&client, 1, ChannelMode::Luma);
+
+    push_frame(&mut engine, &client, &frames[0], 1);
+    engine.reset();
+
+    let context = try_push_context(&mut engine, &client, &frames[1]);
+    assert!(context.is_ok());
+}
+
+#[test]
+fn push_context_is_allowed_again_after_the_tail_is_emitted() {
+    let frames = noisy_frames(WIDTH, HEIGHT, 1, 6);
+    let client = make_client();
+    let mut engine = build_engine(&client, 1, ChannelMode::Luma);
+
+    drive(&mut engine, &client, &frames, 1);
+
+    let context = try_push_context(&mut engine, &client, &frames[0]);
+    assert!(context.is_ok());
+}
+
 /// Pushes frames until one is ready, leaving it unemitted, and returns the ready count and frames pushed.
 fn engine_with_a_ready_frame(client: &ComputeClient<R>, frames: &[Vec<f32>]) -> (Nl4d<R>, usize, usize) {
     let mut engine = build_engine(client, 1, ChannelMode::Luma);
@@ -584,4 +639,69 @@ fn frames_smaller_than_a_patch_are_invalid_geometry() {
     let engine_options = options(1, false);
     let built = Nl4d::new(&client, engine_options, geometry);
     assert!(matches!(built, Err(Error::InvalidGeometry(_))));
+}
+
+#[test]
+fn a_plane_past_u32_pixels_is_invalid_geometry() {
+    let client = make_client();
+    let oversized = Geometry {
+        width: 65_536,
+        height: 65_536,
+        ..geometry(ChannelMode::Luma)
+    };
+
+    let engine_options = options(1, false);
+    let built = Nl4d::new(&client, engine_options, oversized);
+    assert!(matches!(built, Err(Error::InvalidGeometry(_))));
+}
+
+/// Each 16384x16384 YUV frame stores 2^30 elements, so a five-frame ring passes `u32::MAX`.
+#[test]
+fn a_ring_past_u32_elements_is_invalid_geometry() {
+    let client = make_client();
+    let oversized = Geometry {
+        width: 16_384,
+        height: 16_384,
+        ..geometry(ChannelMode::Yuv)
+    };
+
+    let engine_options = options(2, false);
+    let built = Nl4d::new(&client, engine_options, oversized);
+    assert!(matches!(built, Err(Error::InvalidGeometry(_))));
+}
+
+/// A 32768x24576 luma frame ring of five frames fits in `u32`, but its motion pyramid ring holds at
+/// least 1.25 times as many elements and does not.
+#[test]
+fn a_motion_pyramid_past_u32_elements_is_invalid_geometry() {
+    let client = make_client();
+    let oversized = Geometry {
+        width: 32_768,
+        height: 24_576,
+        ..geometry(ChannelMode::Luma)
+    };
+
+    let engine_options = options(2, false);
+    let built = Nl4d::new(&client, engine_options, oversized);
+    let Err(Error::InvalidGeometry(message)) = built else {
+        panic!("expected InvalidGeometry");
+    };
+    assert!(message.contains("pyramid"), "{message}");
+}
+
+#[test]
+fn hd_and_4k_geometries_construct() {
+    let client = make_client();
+
+    for (width, height) in [(1920, 1080), (3840, 2160)] {
+        let sized = Geometry {
+            width,
+            height,
+            ..geometry(ChannelMode::Luma)
+        };
+
+        let engine_options = options(2, false);
+        let built = Nl4d::new(&client, engine_options, sized);
+        assert!(built.is_ok(), "{width}x{height} failed to construct");
+    }
 }

@@ -1,8 +1,9 @@
-use super::helpers::{R, make_client, unit_noise};
+use super::helpers::{R, make_client};
 use crate::bench_api::HostIo;
 use crate::collab::kernels::fused::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA};
 use crate::nl4d::denoiser::strength_map_upload;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
+use crate::nlmeans::tests::helpers::seeded_unit_gaussian;
 use crate::nlmeans::{
     ChannelMode,
     HqParams,
@@ -99,7 +100,7 @@ fn half_textured_clip(channels: u32) -> Vec<Vec<f32>> {
                     let pixel = y * WIDTH + x;
                     let sample = pixel * channels + channel;
                     let seed = frame_index * channels + channel;
-                    let noise = unit_noise(pixel, seed);
+                    let noise = seeded_unit_gaussian(pixel, seed);
                     frame[sample as usize] = (clean + noise * noise_std).clamp(0.0, 1.0);
                 }
             }

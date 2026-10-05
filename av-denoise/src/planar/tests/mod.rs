@@ -1,3 +1,14 @@
+mod chroma_dims;
+mod cli_options;
+mod layout;
+// Gated on `vulkan` because `luma_chroma_options` names the `Vulkan` accelerator variant.
+#[cfg(feature = "vulkan")]
+mod lockstep;
+// Gated on `vulkan` because `chroma_only_options` names the `Vulkan` accelerator variant.
+#[cfg(feature = "vulkan")]
+mod passthrough_retry;
+mod push_retry;
+
 use super::*;
 
 // The tests name the `Vulkan` accelerator, which only exists with the `vulkan` feature.
@@ -251,6 +262,70 @@ mod reseed {
             error.contains("5"),
             "error should name the expected length, got {error}"
         );
+    }
+
+    /// Reseeds to `good_target`, tries a reseed whose window has one short U plane, then pushes the
+    /// next frame and returns its output.
+    ///
+    /// The bad reseed must be rejected, so the output matches a denoiser that never saw it.
+    fn next_frame_after_a_rejected_reseed(
+        options: &PlaneOptions,
+        frames: &[Planes],
+        good_target: usize,
+        bad_target: usize,
+    ) -> (Planes, Planes) {
+        let frame_layout = layout();
+        let mut control = PlanarDenoiser::create(options, frame_layout).unwrap();
+        let mut tested = PlanarDenoiser::create(options, frame_layout).unwrap();
+        let span = control.window_span();
+
+        let good_window = window_of_span(frames, good_target, span);
+        let mut bad_window = window_of_span(frames, bad_target, span);
+        let middle = bad_window.len() / 2;
+        bad_window[middle].u.pop();
+
+        control.reseed(&good_window).unwrap();
+        tested.reseed(&good_window).unwrap();
+
+        let rejected = tested.reseed(&bad_window);
+        assert!(
+            rejected.is_err(),
+            "a window with a short U plane should be rejected"
+        );
+
+        let next_frame = &frames[good_target + 1 + span.ahead];
+        control.push(next_frame).unwrap();
+        tested.push(next_frame).unwrap();
+
+        let expected = control.recv().unwrap().expect("control frame");
+        let got = tested.recv().unwrap().expect("tested frame");
+        (expected, got)
+    }
+
+    #[test]
+    fn a_rejected_reseed_leaves_the_running_stream_untouched() {
+        let frame_layout = layout();
+        let options = test_plane_options(2);
+        let frames = ramp_clip(&frame_layout, 12);
+
+        let (expected, got) = next_frame_after_a_rejected_reseed(&options, &frames, 6, 3);
+
+        assert_eq!(got.y, expected.y);
+        assert_eq!(got.u, expected.u);
+        assert_eq!(got.v, expected.v);
+    }
+
+    #[test]
+    fn a_rejected_nl4d_reseed_window_leaves_the_running_stream_untouched() {
+        let frame_layout = layout();
+        let options = nl4d_plane_options(2);
+        let frames = ramp_clip(&frame_layout, 16);
+
+        let (expected, got) = next_frame_after_a_rejected_reseed(&options, &frames, 6, 9);
+
+        assert_eq!(got.y, expected.y);
+        assert_eq!(got.u, expected.u);
+        assert_eq!(got.v, expected.v);
     }
 
     /// `ChannelIntent::Luma` sends chroma through the passthrough queue, and a reseed queues one

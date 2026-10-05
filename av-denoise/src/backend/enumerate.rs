@@ -122,10 +122,15 @@ mod tests {
 
     #[test]
     fn device_kinds_map_from_type_ids() {
-        let discrete = to_device(DeviceId::new(0, 1));
-        let integrated = to_device(DeviceId::new(1, 0));
-        let virtual_gpu = to_device(DeviceId::new(2, 2));
-        let cpu = to_device(DeviceId::new(3, 0));
+        let discrete_id = DeviceId::new(0, 1);
+        let integrated_id = DeviceId::new(1, 0);
+        let virtual_id = DeviceId::new(2, 2);
+        let cpu_id = DeviceId::new(3, 0);
+
+        let discrete = to_device(discrete_id);
+        let integrated = to_device(integrated_id);
+        let virtual_gpu = to_device(virtual_id);
+        let cpu = to_device(cpu_id);
 
         assert_eq!(discrete, Some(Device::Discrete { index: 1 }));
         assert_eq!(integrated, Some(Device::Integrated { index: 0 }));
@@ -135,7 +140,8 @@ mod tests {
 
     #[test]
     fn unknown_type_ids_are_skipped() {
-        let unknown = to_device(DeviceId::new(4, 0));
+        let unknown_id = DeviceId::new(4, 0);
+        let unknown = to_device(unknown_id);
 
         assert_eq!(unknown, None);
     }

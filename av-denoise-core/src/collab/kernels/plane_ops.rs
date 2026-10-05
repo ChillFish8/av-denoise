@@ -30,17 +30,17 @@ pub(crate) fn plane_ssd_reduce8(partial: f32) -> f32 {
 /// leaving it to scheduling.
 ///
 /// `plane_shuffle_up` at the group's first lane reads the previous group, so the `sub == 0` term
-/// discards it. The slots ascend, so the previous lane beat `d` exactly when `d < prev_d`, which
-/// saves shuffling a flag.
+/// discards it. The slots ascend, so the previous lane beat `distance` exactly when
+/// `distance < prev_d`, which saves shuffling a flag.
 #[cube]
-pub(crate) fn shift_insert8(best_d: &mut f32, best_pos: &mut u32, d: f32, packed: u32, sub: u32) {
+pub(crate) fn shift_insert8(best_d: &mut f32, best_pos: &mut u32, distance: f32, packed: u32, sub: u32) {
     let prev_d = plane_shuffle_up(*best_d, 1u32);
     let prev_pos = plane_shuffle_up(*best_pos, 1u32);
 
-    if d < *best_d {
-        let lands_here = sub == 0u32 || d >= prev_d;
+    if distance < *best_d {
+        let lands_here = sub == 0u32 || distance >= prev_d;
         if lands_here {
-            *best_d = d;
+            *best_d = distance;
             *best_pos = packed;
         } else {
             *best_d = prev_d;
@@ -52,7 +52,7 @@ pub(crate) fn shift_insert8(best_d: &mut f32, best_pos: &mut u32, d: f32, packed
 /// `shift_insert8` with the shuffles skipped when the candidate cannot place.
 ///
 /// The group's eighth-best distance sits in its last lane, and a candidate that does not beat it
-/// changes nothing. Every lane holds the same `d` and reads the same broadcast, so the branch is
+/// changes nothing. Every lane holds the same `distance` and reads the same broadcast, so the branch is
 /// uniform across the group and no lane skips a shuffle another lane takes. The broadcast fuses
 /// into the compare, while each skipped shuffle is an LDS crossbar operation. It keeps the same
 /// eight slots as `shift_insert8`.
@@ -60,14 +60,14 @@ pub(crate) fn shift_insert8(best_d: &mut f32, best_pos: &mut u32, d: f32, packed
 pub(crate) fn shift_insert8_gated(
     best_d: &mut f32,
     best_pos: &mut u32,
-    d: f32,
+    distance: f32,
     packed: u32,
     sub: u32,
     base: u32,
 ) {
     let worst = plane_shuffle(*best_d, base + 7u32);
-    if d < worst {
-        shift_insert8(best_d, best_pos, d, packed, sub);
+    if distance < worst {
+        shift_insert8(best_d, best_pos, distance, packed, sub);
     }
 }
 

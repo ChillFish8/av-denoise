@@ -1,5 +1,6 @@
 use crate::engine::{Geometry, SampleFormat};
 use crate::error::Error;
+use crate::nlmeans::ChannelMode;
 
 #[test]
 fn u16_depth_outside_9_to_16_is_rejected() {
@@ -33,6 +34,44 @@ fn plane_bytes_round_up_to_whole_words() {
     assert_eq!(SampleFormat::F32.plane_bytes(3), 12);
 }
 
+fn sized_geometry(width: u32, height: u32, channels: ChannelMode) -> Geometry {
+    Geometry {
+        width,
+        height,
+        channels,
+        input: SampleFormat::F32,
+        output: SampleFormat::F32,
+    }
+}
+
+#[test]
+fn pixels_do_not_overflow_at_the_largest_dimensions() {
+    let geometry = sized_geometry(u32::MAX, u32::MAX, ChannelMode::Luma);
+    let expected = u64::from(u32::MAX) * u64::from(u32::MAX);
+    assert_eq!(geometry.pixels(), expected);
+}
+
+#[test]
+fn a_ring_of_exactly_u32_max_elements_fits() {
+    let geometry = sized_geometry(65_535, 65_537, ChannelMode::Luma);
+    let result = geometry.check_ring_fits(1);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn a_ring_one_frame_past_u32_max_elements_is_invalid_geometry() {
+    let geometry = sized_geometry(65_535, 65_537, ChannelMode::Luma);
+    let result = geometry.check_ring_fits(2);
+    assert!(matches!(result, Err(Error::InvalidGeometry(_))));
+}
+
+#[test]
+fn a_ring_whose_size_overflows_u64_is_invalid_geometry() {
+    let geometry = sized_geometry(u32::MAX, u32::MAX, ChannelMode::Yuv);
+    let result = geometry.check_ring_fits(u64::MAX);
+    assert!(matches!(result, Err(Error::InvalidGeometry(_))));
+}
+
 #[cfg(any(feature = "vulkan", feature = "metal"))]
 mod with_handles {
     use cubecl::prelude::*;
@@ -40,7 +79,6 @@ mod with_handles {
 
     use super::*;
     use crate::engine::DevicePlane;
-    use crate::nlmeans::ChannelMode;
 
     fn client() -> ComputeClient<WgpuRuntime> {
         let device = <WgpuRuntime as Runtime>::Device::default();

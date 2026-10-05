@@ -1,12 +1,14 @@
 mod machinery;
 mod noise;
 mod ring;
+mod sizes;
 mod stages;
 
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 pub(crate) use self::machinery::RingView;
+pub(crate) use self::sizes::{BufferSize, check_u32_indexable, front_buffer_sizes};
 use super::align::StorageAlign;
 use super::motion::{self, MotionCtx, MotionEstimation};
 use super::noise::{

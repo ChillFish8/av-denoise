@@ -45,9 +45,12 @@ pub trait Engine: Send {
     /// Ingests one frame and returns how many frames are ready to emit.
     fn push(&mut self, planes: &[DevicePlane<'_>]) -> Result<usize, Error>;
 
-    /// Ingests one frame as context only, producing no output.
+    /// Ingests one frame as context only, producing no output from this call.
     ///
-    /// A stream that starts with this picks up mid-clip instead of at a scene start.
+    /// A stream that starts with this picks up mid-clip instead of at a scene start. Context frames
+    /// still fill the window, so a later push or [Engine::finish] may emit them, and `finish` alone
+    /// reports at most [Engine::max_held_frames] of them. It returns [Error::ContextAfterPush] once the
+    /// stream has had a real push.
     fn push_context(&mut self, planes: &[DevicePlane<'_>]) -> Result<(), Error>;
 
     /// Writes the oldest ready frame into `planes`.

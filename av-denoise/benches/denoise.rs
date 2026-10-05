@@ -25,7 +25,7 @@ const BILATERAL_SIGMA_S: f32 = 3.0;
 const BILATERAL_SIGMA_R: f32 = 0.02;
 
 #[derive(clap::Parser, Debug)]
-#[command(about = "End-to-end Denoiser benchmark", long_about = None)]
+#[command(about = "End-to-end HostDenoiser benchmark", long_about = None)]
 struct Cli {
     /// GPU device to bind to, one of `default`, `discrete[:N]`, `integrated[:N]`, `virtual[:N]` or `cpu`.
     #[arg(long, default_value = "default")]
@@ -174,7 +174,7 @@ fn main() {
 
     let cli = Cli::parse();
 
-    println!("Denoiser E2E Benchmarks - {WIDTH}×{HEIGHT}");
+    println!("HostDenoiser E2E Benchmarks - {WIDTH}×{HEIGHT}");
     println!("  warmup={WARMUP}, timed={ITERS}");
     println!("  device:        {:?}", cli.device);
     println!("  accelerators:  {:?}", cli.accelerators);

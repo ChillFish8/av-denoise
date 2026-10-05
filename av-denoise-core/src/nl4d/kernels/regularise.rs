@@ -29,11 +29,11 @@ fn abs_i32(value: i32) -> i32 {
     result
 }
 
-/// Sorts the first `n` entries of `vals` in place and returns the lower median.
+/// Sorts the first `count` entries of `vals` in place and returns the lower median.
 #[cube]
-fn median_of(vals: &mut Array<i32>, n: u32) -> i32 {
+fn median_of(vals: &mut Array<i32>, count: u32) -> i32 {
     let mut i: u32 = 1;
-    while i < n {
+    while i < count {
         let key = vals[i as usize];
         let mut j = i;
         while j > 0u32 && vals[(j - 1u32) as usize] > key {
@@ -45,7 +45,7 @@ fn median_of(vals: &mut Array<i32>, n: u32) -> i32 {
         i += 1u32;
     }
 
-    vals[((n - 1u32) / 2u32) as usize]
+    vals[((count - 1u32) / 2u32) as usize]
 }
 
 /// Re-scores each block's motion vector against its 3x3 neighbourhood median.

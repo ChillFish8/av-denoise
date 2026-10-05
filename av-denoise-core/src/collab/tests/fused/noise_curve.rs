@@ -1,5 +1,5 @@
 use super::{Aggregated, Setup, cross_frame_setup, run_fused};
-use crate::collab::tests::helpers::noisy_field_over;
+use crate::collab::tests::helpers::noisy_flat_field;
 use crate::nlmeans::NOISE_CURVE_BINS;
 
 /// The side of the square frame the stepped-curve test filters.
@@ -110,7 +110,7 @@ fn a_flat_curve_equals_scaling_lambda() {
 fn a_stepped_curve_thresholds_each_brightness_by_its_own_noise() {
     let side = STEP_FRAME_SIDE;
     let half = side / 2;
-    let noise = noisy_field_over(side, side, 0.0, 0.02);
+    let noise = noisy_flat_field(side, side, 0.0, 0.02);
     let mut frame = Vec::with_capacity(noise.len());
     for (idx, sample) in noise.iter().enumerate() {
         let x = idx as u32 % side;
@@ -145,7 +145,7 @@ fn a_stepped_curve_thresholds_each_brightness_by_its_own_noise() {
 #[test]
 fn the_curve_is_sampled_at_bin_centres() {
     let side = STEP_FRAME_SIDE;
-    let frame = noisy_field_over(side, side, 0.25, 0.02);
+    let frame = noisy_flat_field(side, side, 0.25, 0.02);
 
     let mut curve = [0.33f32; NOISE_CURVE_BINS];
     curve[3] = 2.0;

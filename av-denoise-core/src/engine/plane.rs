@@ -52,6 +52,10 @@ impl SampleFormat {
 }
 
 /// One plane of samples on the GPU, tightly packed with a stride equal to its width.
+///
+/// The handle must hold whole 4-byte words, which is `SampleFormat::plane_bytes(width * height)` bytes,
+/// and [Engine::emit_into](crate::engine::Engine::emit_into) writes zeros into the padding past the last
+/// sample.
 #[derive(Debug, Clone, Copy)]
 pub struct DevicePlane<'a> {
     handle: &'a Handle,
@@ -101,8 +105,33 @@ impl Geometry {
         Ok(())
     }
 
-    pub(crate) fn pixels(&self) -> u32 {
-        self.width * self.height
+    /// The samples in one plane, in `u64` so no `u32` dimensions overflow it.
+    pub(crate) fn pixels(&self) -> u64 {
+        let width = u64::from(self.width);
+        let height = u64::from(self.height);
+
+        width * height
+    }
+
+    /// Rejects a geometry whose ring of `slots` frames stores more than `u32::MAX` elements.
+    ///
+    /// The kernels index the frame ring and its accumulators with `u32`, so a larger ring would wrap.
+    pub(crate) fn check_ring_fits(&self, slots: u64) -> Result<(), Error> {
+        let stored_ch = u64::from(self.channels.storage_count());
+        let elements = self
+            .pixels()
+            .checked_mul(stored_ch)
+            .and_then(|frame_len| frame_len.checked_mul(slots));
+        let fits = elements.is_some_and(|elements| elements <= u64::from(u32::MAX));
+        if !fits {
+            let message = format!(
+                "a {slots} frame ring of {}x{} planes stores more than u32::MAX elements",
+                self.width, self.height
+            );
+            return Err(Error::InvalidGeometry(message));
+        }
+
+        Ok(())
     }
 
     /// Checks plane count, dimensions, and that every handle covers its whole words.
@@ -113,7 +142,7 @@ impl Geometry {
             return Err(Error::PlaneMismatch(message));
         }
 
-        let pixels = self.pixels() as u64;
+        let pixels = self.pixels();
         let needed = format.plane_bytes(pixels);
 
         for (index, plane) in planes.iter().enumerate() {

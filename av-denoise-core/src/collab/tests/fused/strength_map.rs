@@ -5,7 +5,7 @@ use super::{Aggregated, Setup, cross_frame_setup, run_fused, run_fused_walk};
 use crate::collab::geometry::{ref_pos, refs_along, strength_map_dims};
 use crate::collab::kernels::fused::strength_map::strength_map_scale;
 use crate::collab::kernels::fused::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA};
-use crate::collab::tests::helpers::{R, make_client, noisy_field_over};
+use crate::collab::tests::helpers::{R, make_client, noisy_flat_field};
 use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS};
 
 const FRAME_SIDE: u32 = 64;
@@ -166,7 +166,7 @@ fn the_luma_map_is_clamped_with_the_curve() {
 #[test]
 fn a_two_region_map_thresholds_each_region_by_its_own_multiplier() {
     let side = FRAME_SIDE;
-    let frame = noisy_field_over(side, side, 0.5, 0.02);
+    let frame = noisy_flat_field(side, side, 0.5, 0.02);
     let (cols, rows) = strength_map_dims(side, side);
     let mut map = Vec::with_capacity((cols * rows) as usize);
     for _ in 0..rows {
@@ -220,7 +220,7 @@ fn both_walks_agree_with_a_map_active() {
 /// A single-frame 3-channel ring, each channel carrying its own noise.
 fn three_channel_setup() -> Setup {
     let pixels = (FRAME_SIDE * FRAME_SIDE) as usize;
-    let noise = noisy_field_over(FRAME_SIDE, FRAME_SIDE * 3, 0.5, 0.02);
+    let noise = noisy_flat_field(FRAME_SIDE, FRAME_SIDE * 3, 0.5, 0.02);
     let stored_channels = ChannelMode::Yuv.storage_count() as usize;
 
     let mut ring = vec![0.0f32; pixels * stored_channels];

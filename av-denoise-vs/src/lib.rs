@@ -11,8 +11,8 @@ use vapoursynth::plugins::{Filter, FilterArgument, Metadata};
 use vapoursynth::prelude::{API, Node};
 use vapoursynth::{export_vapoursynth_plugin, make_filter_function};
 
-use crate::filter::Denoise;
-use crate::params::{AlgorithmKind, RawParams};
+use self::filter::Denoise;
+use self::params::{AlgorithmKind, RawParams};
 
 /// Installs the tracing subscriber that writes the plugin's logs to stderr.
 ///

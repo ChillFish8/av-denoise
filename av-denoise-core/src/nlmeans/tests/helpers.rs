@@ -100,7 +100,7 @@ pub(super) fn make_noisy_gaussian_frame(
 /// A unit-variance pseudo-Gaussian sample at `idx`, decorrelated across `seed` values.
 ///
 /// It sums four hash-derived uniforms between -0.5 and 0.5 (Irwin-Hall), whose variance is 1/3.
-fn seeded_unit_gaussian(idx: u32, seed: u32) -> f32 {
+pub(crate) fn seeded_unit_gaussian(idx: u32, seed: u32) -> f32 {
     let unit_std = (1.0f32 / 3.0f32).sqrt();
 
     let mut sum = 0.0f32;

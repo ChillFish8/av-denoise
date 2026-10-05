@@ -21,7 +21,8 @@ fn multi() -> &'static MultiProgress {
 /// Each write is wrapped in `MultiProgress::suspend`, so log lines land above an intact bar
 /// instead of overwriting it.
 pub fn tracing_writer() -> IndicatifWriter<Stderr> {
-    IndicatifWriter::new(multi().clone())
+    let progress = multi().clone();
+    IndicatifWriter::new(progress)
 }
 
 /// Whether the denoising progress bar should be drawn.

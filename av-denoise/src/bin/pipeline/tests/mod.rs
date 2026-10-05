@@ -9,11 +9,15 @@ mod source;
 mod stage;
 mod worker;
 
+use std::io::{Cursor, Read};
 #[cfg(feature = "vulkan")]
 use std::sync::{Arc, Mutex};
 
-use av_denoise::frame::fill_plane;
-use av_denoise::{Depth, FrameLayout, Planes, Subsampling};
+#[cfg(feature = "vulkan")]
+use av_denoise::accelerate::Accelerator;
+#[cfg(feature = "vulkan")]
+use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Device, PlaneOptions};
+use av_denoise::{Depth, FrameLayout, Planes, Subsampling, fill_plane};
 
 /// A writer the test can read back after the coordinator thread drops it.
 #[cfg(feature = "vulkan")]
@@ -29,6 +33,27 @@ impl std::io::Write for SharedBuffer {
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+pub(super) fn y4m_reader(bytes: Vec<u8>) -> Box<dyn Read> {
+    let cursor = Cursor::new(bytes);
+
+    Box::new(cursor)
+}
+
+#[cfg(feature = "vulkan")]
+pub(super) fn temporal_opts() -> PlaneOptions {
+    PlaneOptions {
+        accelerators: vec![Accelerator::Vulkan],
+        device: Device::Default,
+        intent: ChannelIntent::LumaChroma,
+        mode: DenoisingMode::Temporal { radius: 1 },
+        algorithm: Algorithm::default(),
+        luma_strength: None,
+        chroma_strength: None,
+        luma_lambda_ht: None,
+        chroma_lambda_ht: None,
     }
 }
 

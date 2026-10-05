@@ -7,7 +7,7 @@ use super::{
     run_fused,
     unique_frame,
 };
-use crate::collab::tests::helpers::noisy_field_over;
+use crate::collab::tests::helpers::noisy_flat_field;
 
 /// Content without ties, so nothing about the result depends on how the insert breaks one.
 #[test]
@@ -140,7 +140,7 @@ fn fused_reproduces_recorded_output_on_a_short_search_space() {
 #[test]
 fn fused_reproduces_recorded_output_on_noise() {
     let (width, height) = (64u32, 64u32);
-    let frame = noisy_field_over(width, height, 0.5, 0.05);
+    let frame = noisy_flat_field(width, height, 0.5, 0.05);
     let setup = Setup::spatial_only(frame, width, height);
     let got = run_fused(&setup);
     let want = Digest {
@@ -172,7 +172,7 @@ fn fused_reproduces_recorded_output_on_noise() {
 #[test]
 fn fused_reproduces_recorded_output_under_correlation_shaping() {
     let (width, height) = (64u32, 64u32);
-    let frame = noisy_field_over(width, height, 0.5, 0.05);
+    let frame = noisy_flat_field(width, height, 0.5, 0.05);
     let mut setup = Setup::spatial_only(frame, width, height);
     setup.rho = 0.86;
     let got = run_fused(&setup);

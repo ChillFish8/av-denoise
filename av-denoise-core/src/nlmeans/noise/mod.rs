@@ -51,7 +51,9 @@ pub(super) use self::temporal::{
     read_temporal_stats_slot,
     run_temporal_noise_stats,
     temporal_noise_reading,
+    temporal_stats_blocks,
     temporal_stats_buf_bytes,
+    temporal_stats_record_len,
     zero_temporal_stats_slot,
 };
 #[cfg(test)]
@@ -60,6 +62,4 @@ pub(super) use self::temporal::{
     TEMPORAL_QUARTER_SIZE,
     accepted_static_blocks,
     aggregate_temporal_noise_stats,
-    temporal_stats_blocks,
-    temporal_stats_record_len,
 };

@@ -1,7 +1,6 @@
-use std::io::{Cursor, Read};
-
 use av_denoise::{Depth, Subsampling};
 
+use super::y4m_reader;
 use crate::pipeline::convert::SourcePixel;
 use crate::pipeline::source::{color_range_extension, open_y4m, pixel_aspect_from_sar};
 
@@ -36,16 +35,10 @@ fn y4m_bytes(colorspace: y4m::Colorspace, extension: Option<&str>, frames: usize
     bytes
 }
 
-fn reader(bytes: Vec<u8>) -> Box<dyn Read> {
-    let cursor = Cursor::new(bytes);
-
-    Box::new(cursor)
-}
-
 #[test]
 fn a_pipe_keeps_its_vendor_extensions_and_pixel_aspect() {
     let bytes = y4m_bytes(y4m::Colorspace::C420, Some("COLORRANGE=LIMITED"), 1);
-    let source = reader(bytes);
+    let source = y4m_reader(bytes);
     let opened = open_y4m(source).expect("a 4:2:0 pipe opens");
 
     let extensions: Vec<&[u8]> = opened
@@ -63,7 +56,7 @@ fn a_pipe_keeps_its_vendor_extensions_and_pixel_aspect() {
 #[test]
 fn a_ten_bit_pipe_reports_its_layout() {
     let bytes = y4m_bytes(y4m::Colorspace::C422p10, None, 1);
-    let source = reader(bytes);
+    let source = y4m_reader(bytes);
     let opened = open_y4m(source).expect("a 10-bit 4:2:2 pipe opens");
 
     assert_eq!(opened.info.layout.width, 4);
@@ -74,7 +67,7 @@ fn a_ten_bit_pipe_reports_its_layout() {
 #[test]
 fn ten_bit_stream_round_trips_header_and_plane_sizes() {
     let bytes = y4m_bytes(y4m::Colorspace::C420p10, None, 2);
-    let source = reader(bytes);
+    let source = y4m_reader(bytes);
     let mut opened = open_y4m(source).expect("a 10-bit 4:2:0 pipe opens");
     let layout = opened.info.layout;
 
@@ -95,7 +88,7 @@ fn ten_bit_stream_round_trips_header_and_plane_sizes() {
 #[test]
 fn a_pipe_has_no_phantom_frames_or_frame_estimate() {
     let bytes = y4m_bytes(y4m::Colorspace::C420, None, 3);
-    let source = reader(bytes);
+    let source = y4m_reader(bytes);
     let opened = open_y4m(source).expect("a 4:2:0 pipe opens");
 
     assert!(opened.phantom.is_empty());
@@ -111,7 +104,7 @@ fn a_mono_pipe_is_rejected_without_panicking() {
         .write_header(&mut bytes)
         .expect("header should write");
 
-    let source = reader(bytes);
+    let source = y4m_reader(bytes);
     let result = open_y4m(source);
     let err = match result {
         Ok(_) => panic!("a mono pipe must be rejected"),

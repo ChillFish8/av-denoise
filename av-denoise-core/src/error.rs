@@ -11,6 +11,8 @@ pub enum Error {
     OutputsPending,
     #[error("no frame is ready to emit")]
     NothingToEmit,
+    #[error("context frames must come before the first push of a stream")]
+    ContextAfterPush,
     #[error("an earlier call failed, reset the engine before using it again")]
     NeedsReset,
     #[error(transparent)]

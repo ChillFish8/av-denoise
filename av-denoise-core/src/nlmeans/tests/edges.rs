@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 
 use super::helpers::*;
 use crate::bench_api::HostIo;
-use crate::nl4d::tests::helpers::{noisy_copy_of, textured_base};
+use crate::nl4d::tests::helpers::textured_base;
 use crate::nlmeans::*;
 
 const RADIUS: u32 = 2;
@@ -43,7 +43,7 @@ fn shifted_denoiser(client: &ComputeClient<R>, windowed: bool) -> NlmDenoiser<R>
 fn push_grain(denoiser: &mut NlmDenoiser<R>, count: u32) {
     let base = textured_base(SIZE, SIZE);
     for seed in 0..count {
-        let frame = noisy_copy_of(&base, SIZE, SIZE, GRAIN, seed);
+        let frame = noisy_field_over(&base, SIZE, SIZE, GRAIN, seed);
         denoiser.push_frame(&frame);
     }
 }
@@ -87,7 +87,7 @@ fn centre_zero_falls_back_when_every_reading_ahead_is_rejected() {
     let client = make_client();
     let mut denoiser = shifted_denoiser(&client, true);
     let base = textured_base(SIZE, SIZE);
-    let frozen = noisy_copy_of(&base, SIZE, SIZE, GRAIN, 0);
+    let frozen = noisy_field_over(&base, SIZE, SIZE, GRAIN, 0);
     for _ in 0..(2 * RADIUS + 1) {
         denoiser.push_frame(&frozen);
     }
@@ -111,7 +111,7 @@ fn a_second_stream_never_reads_the_first_streams_f0_stats() {
     denoiser.reset_stream_state();
 
     let base = textured_base(SIZE, SIZE);
-    let frozen = noisy_copy_of(&base, SIZE, SIZE, GRAIN, 0);
+    let frozen = noisy_field_over(&base, SIZE, SIZE, GRAIN, 0);
     for _ in 0..total_frames {
         denoiser.push_frame(&frozen);
     }

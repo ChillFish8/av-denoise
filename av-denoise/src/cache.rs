@@ -122,7 +122,8 @@ pub(crate) fn resolve_cache_location(
         }
     }
 
-    CacheLocation::Dir(default())
+    let dir = default();
+    CacheLocation::Dir(dir)
 }
 
 /// Points CubeCL's compilation and autotune caches at this build's subdirectory of `dir`.

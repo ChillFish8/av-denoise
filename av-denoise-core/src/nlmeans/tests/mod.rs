@@ -16,6 +16,7 @@ mod params;
 mod prefilter;
 mod residual_correlation;
 mod separable;
+mod sizes;
 mod spatial;
 mod spatial_offset;
 mod split_sigma;

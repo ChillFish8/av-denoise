@@ -39,8 +39,8 @@ fn run(config: &ParityConfig, entries: &mut Entries) {
             outputs.extend(received);
         }
 
-        while let Some(planes) = denoiser.recv().expect("recv") {
-            outputs.push(planes);
+        while let Some(denoised) = denoiser.recv().expect("recv") {
+            outputs.push(denoised);
         }
     }
 
