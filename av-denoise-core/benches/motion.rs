@@ -1,17 +1,3 @@
-use std::hint::black_box;
-use std::time::{Duration, Instant};
-
-use av_denoise_core::nlmeans::{
-    ChannelMode,
-    MotionCompensationMode,
-    MotionEstimation,
-    NlmDenoiser,
-    NlmParams,
-    Pending,
-    PrefilterMode,
-};
-use cubecl::prelude::*;
-
 #[expect(
     dead_code,
     reason = "the shared kernel module is included by several bench binaries, each of which uses \
@@ -20,23 +6,28 @@ use cubecl::prelude::*;
 #[path = "kernels/mod.rs"]
 mod kernels;
 
+use std::hint::black_box;
+use std::time::{Duration, Instant};
+
+use av_denoise_core::bench_api::{Device, HostIo, NlmDenoiser, NlmParams, start_read, wait_read};
+use av_denoise_core::{ChannelMode, MotionCompensationMode, MotionEstimation, PrefilterMode};
+use clap::Parser;
+use cubecl::prelude::*;
 use kernels::mc_block_match_coarse::BlockMatchCoarseBench;
 use kernels::mc_block_match_fine::BlockMatchFineBench;
 use kernels::mc_confidence::McConfidenceBench;
 use kernels::mc_downscale::DownscaleBench;
 use kernels::mc_warp::WarpBench;
 use kernels::mv_regularise::MvRegulariseBench;
-use kernels::{CHANNELS, print_header, run};
+use kernels::{CHANNELS, make_synthetic_frame, print_header, run};
 
-const W: u32 = 1920;
-const H: u32 = 1080;
+const WIDTH: u32 = 1920;
+const HEIGHT: u32 = 1080;
 
 const WARMUP_PIPELINE: usize = 2;
 const ITERS_PIPELINE: usize = 200;
 
-fn make_synthetic_frame(w: u32, h: u32, ch: u32) -> Vec<f32> {
-    kernels::make_synthetic_frame(w, h, ch)
-}
+const TEMPORAL_RADIUS: u32 = 1;
 
 struct BenchResult {
     name: String,
@@ -64,20 +55,22 @@ fn run_pipeline_bench<R: Runtime>(
     client: &ComputeClient<R>,
     warmup: usize,
     iterations: usize,
-    mut f: impl FnMut(),
+    mut step: impl FnMut(),
 ) -> BenchResult {
     for _ in 0..warmup {
-        f();
-        futures::executor::block_on(client.sync()).unwrap();
+        step();
+        let sync = client.sync();
+        futures::executor::block_on(sync).unwrap();
     }
 
     let mut times = Vec::with_capacity(iterations);
-
     for _ in 0..iterations {
         let start = Instant::now();
-        f();
-        futures::executor::block_on(client.sync()).unwrap();
-        times.push(start.elapsed());
+        step();
+        let sync = client.sync();
+        futures::executor::block_on(sync).unwrap();
+        let elapsed = start.elapsed();
+        times.push(elapsed);
     }
 
     let total: Duration = times.iter().sum();
@@ -97,9 +90,11 @@ fn run_pipeline_bench<R: Runtime>(
     }
 }
 
-const TEMPORAL_RADIUS: u32 = 1;
-
-fn temporal_params(radius: u32, channels: ChannelMode, mc: MotionCompensationMode) -> NlmParams {
+fn temporal_params(
+    radius: u32,
+    channels: ChannelMode,
+    motion_compensation: MotionCompensationMode,
+) -> NlmParams {
     NlmParams {
         temporal_radius: radius,
         search_radius: 2,
@@ -108,7 +103,7 @@ fn temporal_params(radius: u32, channels: ChannelMode, mc: MotionCompensationMod
         self_weight: 1.0,
         channels,
         prefilter: PrefilterMode::None,
-        motion_compensation: mc,
+        motion_compensation,
         hq: None,
     }
 }
@@ -123,9 +118,7 @@ fn mc_default() -> MotionCompensationMode {
     }
 }
 
-/// Same block geometry as `mc_default`, but with `Chained` estimation
-/// at the library's default refinement radius. Used by the direct vs
-/// chained throughput comparison below.
+/// [mc_default]'s block geometry with `Chained` estimation at the library's default refinement radius.
 fn mc_chained_default() -> MotionCompensationMode {
     MotionCompensationMode::Mvtools {
         blksize: 16,
@@ -136,80 +129,87 @@ fn mc_chained_default() -> MotionCompensationMode {
     }
 }
 
-/// Eager temporal pipeline (push → denoise → wait inline). Submits
-/// one frame and blocks on its readback before the next push, so the
-/// per-frame number is the full critical-path cost.
+/// The eager temporal pipeline cost.
+///
+/// Each frame is pushed, denoised and waited on inline before the next push, so the per-frame
+/// number is the full critical-path cost.
 fn bench_eager<R: Runtime>(
     client: &ComputeClient<R>,
     backend: &str,
     radius: u32,
     channels: ChannelMode,
-    ch_name: &str,
-    mc: MotionCompensationMode,
+    channel_name: &str,
+    motion_compensation: MotionCompensationMode,
     tag: &str,
 ) -> BenchResult {
-    let ch = channels.count();
-    let params = temporal_params(radius, channels, mc);
-    let frame = make_synthetic_frame(W, H, ch);
+    let channel_count = channels.count();
+    let params = temporal_params(radius, channels, motion_compensation);
+    let frame = make_synthetic_frame(WIDTH, HEIGHT, channel_count);
     let total_frames = 1 + 2 * params.temporal_radius as usize;
-    let name = format!("denoise_temporal{tag}_1080p_{ch_name}");
+    let name = format!("denoise_temporal{tag}_1080p_{channel_name}");
 
-    let mut denoiser = NlmDenoiser::<R>::new(client, params, W, H);
+    let mut denoiser = NlmDenoiser::<R>::new(client, params, WIDTH, HEIGHT);
     for _ in 0..total_frames - 1 {
         denoiser.push_frame(&frame);
     }
-    futures::executor::block_on(client.sync()).unwrap();
+
+    let sync = client.sync();
+    futures::executor::block_on(sync).unwrap();
 
     run_pipeline_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
         denoiser.push_frame(&frame);
-        let result = denoiser
-            .denoise()
-            .unwrap()
-            .unwrap()
-            .as_f32()
-            .expect("f32 denoiser");
+        let result = denoiser.denoise().unwrap().unwrap();
         black_box(&result);
     })
 }
 
-/// Pipelined variant: kernels for frame N+1 are submitted before the
-/// readback for frame N completes, so GPU and host overlap. Mirrors
-/// the equivalent helper in `benches/nlmeans.rs`.
+/// The pipelined temporal pipeline cost.
+///
+/// Frame N+1's kernels are submitted before frame N's readback completes, so GPU and host work
+/// overlap.
 fn bench_pipelined<R: Runtime>(
     client: &ComputeClient<R>,
     backend: &str,
     radius: u32,
     channels: ChannelMode,
-    ch_name: &str,
-    mc: MotionCompensationMode,
+    channel_name: &str,
+    motion_compensation: MotionCompensationMode,
     tag: &str,
 ) -> BenchResult {
-    let ch = channels.count();
-    let params = temporal_params(radius, channels, mc);
-    let frame = make_synthetic_frame(W, H, ch);
+    let channel_count = channels.count();
+    let params = temporal_params(radius, channels, motion_compensation);
+    let frame = make_synthetic_frame(WIDTH, HEIGHT, channel_count);
     let total_frames = 1 + 2 * params.temporal_radius as usize;
-    let name = format!("denoise_temporal_pipelined{tag}_1080p_{ch_name}");
+    let name = format!("denoise_temporal_pipelined{tag}_1080p_{channel_name}");
 
-    let mut denoiser = NlmDenoiser::<R>::new(client, params, W, H);
+    let mut denoiser = NlmDenoiser::<R>::new(client, params, WIDTH, HEIGHT);
     for _ in 0..total_frames - 1 {
         denoiser.push_frame(&frame);
     }
-    futures::executor::block_on(client.sync()).unwrap();
+
+    let sync = client.sync();
+    futures::executor::block_on(sync).unwrap();
 
     denoiser.push_frame(&frame);
-    let mut in_flight: Option<Pending<R>> = Some(denoiser.denoise_submit().unwrap().unwrap());
+    let first = denoiser.denoise_submit_gpu().unwrap().unwrap();
+    let first_read = start_read(client, first.handle);
+    let mut in_flight = Some(first_read);
 
     let result = run_pipeline_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
         denoiser.push_frame(&frame);
-        let next = denoiser.denoise_submit().unwrap().unwrap();
-        let output = in_flight.take().unwrap().wait().unwrap();
+        let next = denoiser.denoise_submit_gpu().unwrap().unwrap();
+        let next_read = start_read(client, next.handle);
+
+        let previous = in_flight.take().unwrap();
+        let output = wait_read(previous);
         black_box(&output);
-        in_flight = Some(next);
+        in_flight = Some(next_read);
     });
 
-    if let Some(pending) = in_flight.take() {
-        let _ = pending.wait().unwrap();
+    if let Some(read) = in_flight.take() {
+        let _ = wait_read(read);
     }
+
     result
 }
 
@@ -233,57 +233,73 @@ fn run_kernels<R: Runtime>(backend: &str, client: &ComputeClient<R>) {
     run(MvRegulariseBench {
         client: client.clone(),
     });
-    for &(ch, ch_name) in CHANNELS {
+
+    for &(channels, channel_name) in CHANNELS {
         run(WarpBench {
             client: client.clone(),
-            ch,
-            ch_name,
+            channels,
+            channel_name,
         });
     }
 }
 
-/// For each channel mode, print the four temporal-pipeline rows
-/// (with vs without MC, eager vs pipelined) adjacent so the cost
-/// delta is visible at a glance.
+/// Prints each channel mode's four temporal-pipeline rows side by side.
+///
+/// The rows cover with and without motion compensation, eager and pipelined, so the cost delta is
+/// visible at a glance.
 fn run_pipelines<R: Runtime>(backend: &str, client: &ComputeClient<R>) {
     println!();
     println!("--- {backend}: temporal pipeline (with vs without MC) ---");
 
-    let variants: &[(MotionCompensationMode, &str)] =
-        &[(MotionCompensationMode::None, "_no_mc"), (mc_default(), "_mc")];
-    let channels = [
+    let motion_compensation = mc_default();
+    let variants: &[(MotionCompensationMode, &str)] = &[
+        (MotionCompensationMode::None, "_no_mc"),
+        (motion_compensation, "_mc"),
+    ];
+    let channel_modes = [
         ("luma", ChannelMode::Luma),
         ("chroma", ChannelMode::Chroma),
         ("yuv", ChannelMode::Yuv),
     ];
 
-    for &(ch_name, mode) in &channels {
-        for &(mc, tag) in variants {
-            bench_eager::<R>(client, backend, TEMPORAL_RADIUS, mode, ch_name, mc, tag).print();
-            bench_pipelined::<R>(client, backend, TEMPORAL_RADIUS, mode, ch_name, mc, tag).print();
+    for &(channel_name, mode) in &channel_modes {
+        for &(variant, tag) in variants {
+            let eager = bench_eager::<R>(client, backend, TEMPORAL_RADIUS, mode, channel_name, variant, tag);
+            eager.print();
+
+            let pipelined =
+                bench_pipelined::<R>(client, backend, TEMPORAL_RADIUS, mode, channel_name, variant, tag);
+            pipelined.print();
         }
     }
+
     println!();
 }
 
-/// Direct vs chained MC estimation throughput at higher temporal
-/// radii (r2, r4), luma only. The cost delta this comparison tracks
-/// lives entirely in the MC dispatch path, not per-channel NLM
-/// weighting, so extra channels would only add bench time without
-/// adding signal. Prints eager and pipelined rows for each radius
-/// and estimation strategy side by side, mirroring `run_pipelines`'s
-/// "adjacent so the delta is visible at a glance" layout.
+/// Direct and chained motion estimation throughput at radii 2 and 4, luma only.
+///
+/// The cost delta lives entirely in the motion compensation path rather than per-channel weighting,
+/// so extra channels would add bench time without adding signal. Eager and pipelined rows for each
+/// radius and strategy print side by side.
 fn run_mc_estimation_comparison<R: Runtime>(backend: &str, client: &ComputeClient<R>) {
     println!();
     println!("--- {backend}: MC estimation comparison (direct vs chained, r2/r4) ---");
 
     for &radius in &[2u32, 4u32] {
-        for (mc, label) in [(mc_default(), "direct"), (mc_chained_default(), "chained")] {
+        let direct = mc_default();
+        let chained = mc_chained_default();
+        for (variant, label) in [(direct, "direct"), (chained, "chained")] {
             let tag = format!("_mc_r{radius}_{label}");
-            bench_eager::<R>(client, backend, radius, ChannelMode::Luma, "luma", mc, &tag).print();
-            bench_pipelined::<R>(client, backend, radius, ChannelMode::Luma, "luma", mc, &tag).print();
+
+            let eager = bench_eager::<R>(client, backend, radius, ChannelMode::Luma, "luma", variant, &tag);
+            eager.print();
+
+            let pipelined =
+                bench_pipelined::<R>(client, backend, radius, ChannelMode::Luma, "luma", variant, &tag);
+            pipelined.print();
         }
     }
+
     println!();
 }
 
@@ -297,18 +313,16 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
 #[derive(clap::Parser, Debug)]
 #[command(about = "Motion-compensation benches: per-kernel + end-to-end pipeline", long_about = None)]
 struct Cli {
-    /// GPU device to bind to. Format: `default`, `discrete[:N]`,
-    /// `integrated[:N]`, `virtual[:N]`, or `cpu`.
+    /// GPU device to bind to, one of `default`, `discrete[:N]`, `integrated[:N]`, `virtual[:N]` or `cpu`.
     #[arg(long, default_value = "default")]
-    device: av_denoise_core::Device,
+    device: Device,
 
-    /// Swallowed: cargo passes this when invoking the bench binary.
+    /// Swallowed, since cargo passes this when invoking the bench binary.
     #[arg(long, hide = true)]
     bench: bool,
 }
 
 fn main() {
-    use clap::Parser;
     let cli = Cli::parse();
 
     println!("Motion-Compensation Benchmarks - 1920x1080");

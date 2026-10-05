@@ -1,4 +1,5 @@
 use super::helpers::*;
+use crate::bench_api::HostIo;
 use crate::nlmeans::noise::{
     NoiseCurve,
     QUARTER_FLATNESS,
@@ -83,10 +84,9 @@ pub(super) fn write_quarter(
     record[base + QUARTER_TENSOR_XY as usize] = quarter.tensor_xy;
 }
 
-/// Records for a single row of full 16x16 blocks, luma only (`stored_ch` 1).
+/// Records for a single row of full 16x16 luma-only blocks.
 ///
-/// Every four quarters form one block, in top-left, top-right,
-/// bottom-left, bottom-right order.
+/// Every four quarters form one block, in top-left, top-right, bottom-left, bottom-right order.
 pub(super) fn synthetic_records(quarters: &[SyntheticQuarter]) -> Vec<f32> {
     assert_eq!(quarters.len() % 4, 0, "quarters must fill whole blocks");
 
@@ -126,8 +126,9 @@ fn curve_for(quarters: &[SyntheticQuarter]) -> Option<NoiseCurve> {
     build_noise_curve(&records, stored_ch, &accepted, sample.sigma[0])
 }
 
-/// Gives each block the residual means `+m`, `+m`, `-m`, `-m`, so every
-/// block's mean stays 0 while its 16x16 sigma reads above its quarters'.
+/// Gives each block the residual means `+m`, `+m`, `-m`, `-m`.
+///
+/// Every block's mean stays 0 while its 16x16 sigma reads above its quarters'.
 fn with_cancelling_means(quarters: &mut [SyntheticQuarter], mean: f32) {
     for (index, quarter) in quarters.iter_mut().enumerate() {
         quarter.mean_residual = if index % 4 < 2 { mean } else { -mean };
@@ -147,14 +148,14 @@ fn reading_sample_equals_the_scalar_aggregation() {
 
     let mut records = synthetic_records(&good_quarters);
 
-    // Two blocks with a large mean residual, so the static gate rejects
-    // them before either function ever reads their sigma.
+    // Two blocks with a large mean residual, so the static gate rejects them before either function
+    // reads their sigma.
     let record_len = temporal_stats_record_len(stored_ch) as usize;
-    let n = 256.0f32;
-    let mean0_bad = 10.0 / 255.0;
+    let block_pixels = 256.0f32;
+    let bad_mean = 10.0 / 255.0;
     for _ in 0..2 {
         let mut bad = vec![0.0f32; record_len];
-        bad[0] = n * mean0_bad;
+        bad[0] = block_pixels * bad_mean;
         records.extend(bad);
     }
 
@@ -170,25 +171,27 @@ fn reading_sample_equals_the_scalar_aggregation() {
 #[test]
 fn curve_uses_the_median_per_bin_and_normalises() {
     let mut quarters = quarters_at(0.15, 0.02, 160);
-    quarters.extend(quarters_at(0.35, 0.01, 160));
-    quarters.extend(quarters_at(0.6, 0.005, 160));
+    let middle_band = quarters_at(0.35, 0.01, 160);
+    let bright_band = quarters_at(0.6, 0.005, 160);
+    quarters.extend(middle_band);
+    quarters.extend(bright_band);
 
     let curve = curve_for(&quarters).expect("three populated bins");
 
-    let tol = 1e-6;
-    assert!((curve.ratios[2] - 2.0).abs() < tol, "{:?}", curve.ratios);
-    assert!((curve.ratios[5] - 1.0).abs() < tol, "{:?}", curve.ratios);
-    assert!((curve.ratios[9] - 0.5).abs() < tol, "{:?}", curve.ratios);
+    let tolerance = 1e-6;
+    assert!((curve.ratios[2] - 2.0).abs() < tolerance, "{:?}", curve.ratios);
+    assert!((curve.ratios[5] - 1.0).abs() < tolerance, "{:?}", curve.ratios);
+    assert!((curve.ratios[9] - 0.5).abs() < tolerance, "{:?}", curve.ratios);
 
     // The flat low and high ends, held at the nearest populated bin.
-    assert!((curve.ratios[0] - 2.0).abs() < tol);
-    assert!((curve.ratios[1] - 2.0).abs() < tol);
-    assert!((curve.ratios[15] - 0.5).abs() < tol);
+    assert!((curve.ratios[0] - 2.0).abs() < tolerance);
+    assert!((curve.ratios[1] - 2.0).abs() < tolerance);
+    assert!((curve.ratios[15] - 0.5).abs() < tolerance);
 
     // Linear interpolation between the populated bins.
     let expected = 2.0 + (1.0 - 2.0) / 3.0;
     assert!(
-        (curve.ratios[3] - expected).abs() < tol,
+        (curve.ratios[3] - expected).abs() < tolerance,
         "{} vs {expected}",
         curve.ratios[3]
     );
@@ -196,64 +199,72 @@ fn curve_uses_the_median_per_bin_and_normalises() {
 
 #[test]
 fn each_quarter_is_binned_by_its_own_mean_luma() {
-    // Every block mixes one quarter from each bin, so binning by the
-    // block's mean luma would put them all in one bin.
+    // Every block mixes one quarter from each bin, so binning by the block's mean luma would put them
+    // all in one bin.
     let mut quarters = Vec::new();
     for _ in 0..40 {
-        quarters.push(quarter_at(0.15, 0.02));
-        quarters.push(quarter_at(0.35, 0.01));
-        quarters.push(quarter_at(0.6, 0.005));
-        quarters.push(quarter_at(0.9, 0.01));
+        let dark = quarter_at(0.15, 0.02);
+        let middle = quarter_at(0.35, 0.01);
+        let bright = quarter_at(0.6, 0.005);
+        let brightest = quarter_at(0.9, 0.01);
+        quarters.push(dark);
+        quarters.push(middle);
+        quarters.push(bright);
+        quarters.push(brightest);
     }
 
     let curve = curve_for(&quarters).expect("four populated bins");
 
-    let tol = 1e-6;
-    assert!((curve.ratios[2] - 2.0).abs() < tol, "{:?}", curve.ratios);
-    assert!((curve.ratios[5] - 1.0).abs() < tol, "{:?}", curve.ratios);
-    assert!((curve.ratios[9] - 0.5).abs() < tol, "{:?}", curve.ratios);
-    assert!((curve.ratios[14] - 1.0).abs() < tol, "{:?}", curve.ratios);
+    let tolerance = 1e-6;
+    assert!((curve.ratios[2] - 2.0).abs() < tolerance, "{:?}", curve.ratios);
+    assert!((curve.ratios[5] - 1.0).abs() < tolerance, "{:?}", curve.ratios);
+    assert!((curve.ratios[9] - 0.5).abs() < tolerance, "{:?}", curve.ratios);
+    assert!((curve.ratios[14] - 1.0).abs() < tolerance, "{:?}", curve.ratios);
 }
 
 #[test]
 fn a_bin_with_fewer_than_32_quarters_is_empty() {
-    let base = |third_bin: usize| {
+    let build = |third_bin: usize| {
         let mut quarters = quarters_at(0.15, 0.02, 40);
-        quarters.extend(quarters_at(0.35, 0.02, 40));
-        quarters.extend(quarters_at(0.6, 0.02, third_bin));
+        let middle_band = quarters_at(0.35, 0.02, 40);
+        let bright_band = quarters_at(0.6, 0.02, third_bin);
+        quarters.extend(middle_band);
+        quarters.extend(bright_band);
+
         // Pads the frame to whole blocks with a bin that never fills.
         let padding = 4 - third_bin % 4;
-        quarters.extend(quarters_at(0.95, 0.02, padding));
+        let padding_band = quarters_at(0.95, 0.02, padding);
+        quarters.extend(padding_band);
         quarters
     };
 
-    let short = base(31);
-    assert!(
-        curve_for(&short).is_none(),
-        "only 2 of the 3 bins reach 32 quarters"
-    );
+    let short = build(31);
+    let short_curve = curve_for(&short);
+    assert!(short_curve.is_none(), "only 2 of the 3 bins reach 32 quarters");
 
-    let enough = base(32);
-    assert!(curve_for(&enough).is_some(), "32 quarters fill the third bin");
+    let enough = build(32);
+    let enough_curve = curve_for(&enough);
+    assert!(enough_curve.is_some(), "32 quarters fill the third bin");
 }
 
 #[test]
 fn fewer_than_three_bins_gives_none() {
     let mut quarters = quarters_at(0.15, 0.02, 40);
-    quarters.extend(quarters_at(0.35, 0.02, 40));
+    let middle_band = quarters_at(0.35, 0.02, 40);
+    quarters.extend(middle_band);
 
-    assert!(
-        curve_for(&quarters).is_none(),
-        "only 2 bins populated, below the minimum of 3"
-    );
+    let curve = curve_for(&quarters);
+    assert!(curve.is_none(), "only 2 bins populated, below the minimum of 3");
 }
 
-/// Two full bins plus a third bin that reaches 32 quarters only if all
-/// five `odd_one` quarters count. Each odd quarter shares its block with
-/// three plain ones, so its parent block is still accepted.
+/// Two full bins plus a third that reaches 32 quarters only if all five `odd_one` quarters count.
+///
+/// Each odd quarter shares its block with three plain ones, so its parent block is still accepted.
 fn frame_with_odd_quarters(odd_one: SyntheticQuarter) -> Vec<SyntheticQuarter> {
     let mut quarters = quarters_at(0.15, 0.02, 40);
-    quarters.extend(quarters_at(0.35, 0.02, 40));
+    let middle_band = quarters_at(0.35, 0.02, 40);
+    quarters.extend(middle_band);
+
     for index in 0..36 {
         let replaced = index % 4 == 3 && index < 20;
         let quarter = if replaced { odd_one } else { quarter_at(0.6, 0.02) };
@@ -263,19 +274,17 @@ fn frame_with_odd_quarters(odd_one: SyntheticQuarter) -> Vec<SyntheticQuarter> {
     quarters
 }
 
-/// Asserts the frame from [frame_with_odd_quarters] forms a curve with
-/// plain quarters, and none with `gated` ones, which shows the gate kept
-/// them out.
+/// Asserts [frame_with_odd_quarters] forms a curve with plain quarters and none with `gated` ones.
 fn assert_gate_keeps_the_bin_empty(gated: SyntheticQuarter) {
-    let plain = frame_with_odd_quarters(quarter_at(0.6, 0.02));
-    assert!(
-        curve_for(&plain).is_some(),
-        "the ungated frame should form a curve"
-    );
+    let plain_quarter = quarter_at(0.6, 0.02);
+    let plain = frame_with_odd_quarters(plain_quarter);
+    let plain_curve = curve_for(&plain);
+    assert!(plain_curve.is_some(), "the ungated frame should form a curve");
 
     let with_gated = frame_with_odd_quarters(gated);
+    let gated_curve = curve_for(&with_gated);
     assert!(
-        curve_for(&with_gated).is_none(),
+        gated_curve.is_none(),
         "the gated quarters must not let the third bin reach the 32-quarter minimum"
     );
 }
@@ -319,8 +328,9 @@ fn the_quarter_static_gate_passes_a_mean_between_the_block_and_quarter_gates() {
     };
     let quarters = frame_with_odd_quarters(slow);
 
+    let curve = curve_for(&quarters);
     assert!(
-        curve_for(&quarters).is_some(),
+        curve.is_some(),
         "a 2.5 code mean is static for a 64-pixel quarter"
     );
 }
@@ -344,31 +354,37 @@ fn the_rho_sigma_gate_rejects_a_noiseless_quarter() {
 fn quarters_of_a_rejected_block_never_count() {
     let build = |third_sigma: f32| {
         let mut quarters = quarters_at(0.15, 0.01, 40);
-        quarters.extend(quarters_at(0.35, 0.01, 40));
-        quarters.extend(quarters_at(0.6, third_sigma, 40));
+        let middle_band = quarters_at(0.35, 0.01, 40);
+        let bright_band = quarters_at(0.6, third_sigma, 40);
+        quarters.extend(middle_band);
+        quarters.extend(bright_band);
         quarters
     };
 
     // Below 5 times the blocks' lower quartile, so these blocks stay.
     let kept = build(0.04);
-    assert!(curve_for(&kept).is_some());
+    let kept_curve = curve_for(&kept);
+    assert!(kept_curve.is_some());
 
-    // Above it, so the outlier check rejects the whole block, even
-    // though each quarter alone would pass the quarter gates.
+    // Above it, so the outlier check rejects the whole block even though each quarter alone would
+    // pass the quarter gates.
     let rejected = build(0.2);
-    assert!(curve_for(&rejected).is_none());
+    let rejected_curve = curve_for(&rejected);
+    assert!(rejected_curve.is_none());
 }
 
 #[test]
 fn the_curve_normalises_by_the_quarter_median() {
     let sigma = 0.01;
     let mut quarters = quarters_at(0.15, sigma, 40);
-    quarters.extend(quarters_at(0.35, sigma, 40));
-    quarters.extend(quarters_at(0.6, sigma, 40));
+    let middle_band = quarters_at(0.35, sigma, 40);
+    let bright_band = quarters_at(0.6, sigma, 40);
+    quarters.extend(middle_band);
+    quarters.extend(bright_band);
     with_cancelling_means(&mut quarters, 0.005);
 
-    // The 16x16 median reads above the quarters' own sigma, so
-    // normalising by it would put every ratio below 1.
+    // The 16x16 median reads above the quarters' own sigma, so normalising by it would put every
+    // ratio below 1.
     let stored_ch = 1;
     let channels = 1;
     let (width, height) = frame_dims(quarters.len());
@@ -384,11 +400,13 @@ fn the_curve_normalises_by_the_quarter_median() {
 
 #[test]
 fn the_flat_gate_uses_the_block_median() {
-    // The quarters read sigma 0.01, which would set the flat limit at
-    // 5.0e-5. Their blocks read about 0.0106, which sets it at 5.625e-5.
+    // The quarters read sigma 0.01, which would set the flat limit at 5.0e-5. Their blocks read about
+    // 0.0106, which sets it at 5.625e-5.
     let build = |flatness: f32| {
         let mut quarters = quarters_at(0.15, 0.01, 40);
-        quarters.extend(quarters_at(0.35, 0.01, 40));
+        let middle_band = quarters_at(0.35, 0.01, 40);
+        quarters.extend(middle_band);
+
         for _ in 0..40 {
             let quarter = SyntheticQuarter {
                 flatness,
@@ -402,19 +420,21 @@ fn the_flat_gate_uses_the_block_median() {
     };
 
     let between = build(5.3e-5);
+    let between_curve = curve_for(&between);
     assert!(
-        curve_for(&between).is_some(),
+        between_curve.is_some(),
         "above the quarter limit but below the block limit"
     );
 
     let textured = build(5.8e-5);
-    assert!(curve_for(&textured).is_none(), "above the block limit");
+    let textured_curve = curve_for(&textured);
+    assert!(textured_curve.is_none(), "above the block limit");
 }
 
 #[test]
 fn a_ragged_parent_reads_its_partial_quarters_with_their_own_pixel_count() {
-    // Each row holds a full block and a 12 pixel wide ragged one. The
-    // ragged block's right quarters are 4x8, so they hold 32 pixels.
+    // Each row holds a full block and a 12 pixel wide ragged one. The ragged block's right quarters
+    // are 4x8, so they hold 32 pixels.
     let rows = 32u32;
     let width = 28;
     let height = 16 * rows;
@@ -423,8 +443,8 @@ fn a_ragged_parent_reads_its_partial_quarters_with_their_own_pixel_count() {
     let record_len = temporal_stats_record_len(stored_ch) as usize;
     let mut records = vec![0.0f32; 2 * rows as usize * record_len];
 
-    // The full blocks fill three bins at sigma 0.01. Every other quarter
-    // reads 0.02, and textured or ragged ones never reach a bin.
+    // The full blocks fill three bins at sigma 0.01. Every other quarter reads 0.02, and textured or
+    // ragged ones never reach a bin.
     let textured = SyntheticQuarter {
         flatness: 1.0,
         ..quarter_at(0.5, 0.02)
@@ -469,9 +489,8 @@ fn a_ragged_parent_reads_its_partial_quarters_with_their_own_pixel_count() {
     let curve =
         build_noise_curve(&records, stored_ch, &accepted, sample.sigma[0]).expect("three populated bins");
 
-    // 96 quarters read 0.01 and 160 read 0.02, so the quarter median is
-    // 0.02 only when the 64 partial quarters read their sigma over 32
-    // pixels. Over 64 they would read 0.0141, and skipped the median
+    // 96 quarters read 0.01 and 160 read 0.02, so the quarter median is 0.02 only when the 64 partial
+    // quarters read their sigma over 32 pixels. Over 64 they would read 0.0141, and skipped the median
     // would fall to 0.015.
     for ratio in curve.ratios {
         assert!((ratio - 0.5).abs() < 1e-5, "{:?}", curve.ratios);
@@ -481,13 +500,16 @@ fn a_ragged_parent_reads_its_partial_quarters_with_their_own_pixel_count() {
 #[test]
 fn letterbox_bars_do_not_reach_the_curve() {
     let mut base = quarters_at(0.15, 0.02, 160);
-    base.extend(quarters_at(0.35, 0.01, 160));
-    base.extend(quarters_at(0.6, 0.005, 160));
+    let middle_band = quarters_at(0.35, 0.01, 160);
+    let bright_band = quarters_at(0.6, 0.005, 160);
+    base.extend(middle_band);
+    base.extend(bright_band);
 
     let base_curve = curve_for(&base).expect("three populated bins");
 
     let mut with_bars = base.clone();
-    with_bars.extend(quarters_at(0.0, 0.0, 800));
+    let bars = quarters_at(0.0, 0.0, 800);
+    with_bars.extend(bars);
 
     let bar_curve = curve_for(&with_bars).expect("three populated bins");
 
@@ -496,19 +518,21 @@ fn letterbox_bars_do_not_reach_the_curve() {
 
 #[test]
 fn no_passing_quarter_gives_none() {
-    // Every block's mean cancels to 0, so each block is accepted, but
-    // every quarter alone fails the static gate.
+    // Every block's mean cancels to 0, so each block is accepted, but every quarter alone fails the
+    // static gate.
     let mut quarters = quarters_at(0.15, 0.01, 40);
-    quarters.extend(quarters_at(0.35, 0.01, 40));
-    quarters.extend(quarters_at(0.6, 0.01, 40));
+    let middle_band = quarters_at(0.35, 0.01, 40);
+    let bright_band = quarters_at(0.6, 0.01, 40);
+    quarters.extend(middle_band);
+    quarters.extend(bright_band);
     with_cancelling_means(&mut quarters, 3.0 / 255.0);
 
-    assert!(curve_for(&quarters).is_none());
+    let curve = curve_for(&quarters);
+    assert!(curve.is_none());
 }
 
-/// A brightness ramp with static noise in each band, so a curve forms
-/// with at least three populated bins.
-pub(super) fn ramp_frame(width: u32, height: u32, seed: u32) -> Vec<f32> {
+/// Three brightness bands with static noise, so a curve forms with at least three populated bins.
+pub(super) fn banded_noisy_frame(width: u32, height: u32, seed: u32) -> Vec<f32> {
     let band_height = height / 3;
     let mut clean = vec![0.0f32; (width * height) as usize];
     for y in 0..height {
@@ -521,6 +545,7 @@ pub(super) fn ramp_frame(width: u32, height: u32, seed: u32) -> Vec<f32> {
             clean[(y * width + x) as usize] = luma;
         }
     }
+
     noisy_field_over(&clean, width, height, 0.02, seed)
 }
 
@@ -555,7 +580,7 @@ fn reset_stream_state_clears_the_curve() {
 
     let mut curve_seen = false;
     for i in 0..12u32 {
-        let frame = ramp_frame(width, height, 100 + i);
+        let frame = banded_noisy_frame(width, height, 100 + i);
         denoiser.push_frame(&frame);
         let _ = denoiser.denoise().unwrap();
         if denoiser.current_noise_curve().is_some() {
@@ -563,6 +588,7 @@ fn reset_stream_state_clears_the_curve() {
             break;
         }
     }
+
     assert!(curve_seen, "expected a curve to form over the brightness ramp");
 
     denoiser.reset_stream_state();

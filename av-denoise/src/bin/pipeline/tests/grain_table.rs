@@ -54,15 +54,19 @@ fn nl4d_opts(grain_export: bool) -> PlaneOptions {
 
 fn run(bytes: Vec<u8>, workers: usize, table: Option<PathBuf>) -> Result<Vec<u8>, anyhow::Error> {
     let output = SharedBuffer::default();
-    let options = nl4d_opts(table.is_some());
+    let writer = output.clone();
+    let grain_export = table.is_some();
+    let options = nl4d_opts(grain_export);
     let opener = move || {
-        let reader: Box<dyn Read> = Box::new(Cursor::new(bytes));
+        let cursor = Cursor::new(bytes);
+        let reader: Box<dyn Read> = Box::new(cursor);
         open_y4m(reader)
     };
 
-    run_with(&options, opener, workers, 1 << 30, false, output.clone(), table)?;
+    run_with(&options, opener, workers, 1 << 30, false, writer, table)?;
 
     let written = output.0.lock().expect("buffer lock").clone();
+
     Ok(written)
 }
 
@@ -70,22 +74,27 @@ fn run(bytes: Vec<u8>, workers: usize, table: Option<PathBuf>) -> Result<Vec<u8>
 fn a_run_with_the_flag_writes_a_table() {
     let dir = TestDir::new("writes");
     let path = dir.path().join("grain.tbl");
+    let clip = grainy_clip(40);
 
-    run(grainy_clip(40), 2, Some(path.clone())).expect("the run succeeds");
+    run(clip, 2, Some(path.clone())).expect("the run succeeds");
 
     let text = std::fs::read_to_string(&path).expect("the table exists");
+    let temporary = dir.path().join("grain.tbl.tmp");
+
     assert!(text.starts_with("filmgrn1\n"));
     assert!(text.contains("\nE "), "no entry was fitted, got {text}");
-    assert!(!dir.path().join("grain.tbl.tmp").exists());
+    assert!(!temporary.exists());
 }
 
 #[test]
 fn the_flag_does_not_change_the_output() {
     let dir = TestDir::new("output");
     let path = dir.path().join("grain.tbl");
+    let plain_clip = grainy_clip(40);
+    let export_clip = grainy_clip(40);
 
-    let without = run(grainy_clip(40), 1, None).expect("plain run");
-    let with = run(grainy_clip(40), 1, Some(path)).expect("export run");
+    let without = run(plain_clip, 1, None).expect("plain run");
+    let with = run(export_clip, 1, Some(path)).expect("export run");
 
     assert_eq!(without, with);
 }
@@ -95,13 +104,16 @@ fn worker_count_does_not_change_the_table() {
     let dir = TestDir::new("workers");
     let single = dir.path().join("single.tbl");
     let multi = dir.path().join("multi.tbl");
+    let single_clip = grainy_clip(60);
+    let multi_clip = grainy_clip(60);
 
-    run(grainy_clip(60), 1, Some(single.clone())).expect("single worker");
-    run(grainy_clip(60), 3, Some(multi.clone())).expect("three workers");
+    run(single_clip, 1, Some(single.clone())).expect("single worker");
+    run(multi_clip, 3, Some(multi.clone())).expect("three workers");
 
     let single_text = std::fs::read_to_string(single).expect("single table");
     let multi_text = std::fs::read_to_string(multi).expect("multi table");
     let entries = single_text.matches("\nE ").count();
+
     assert!(entries >= 2, "expected an entry per scene, got {single_text}");
     assert_eq!(single_text, multi_text);
 }
@@ -110,19 +122,22 @@ fn worker_count_does_not_change_the_table() {
 fn failed_run_leaves_no_table() {
     let dir = TestDir::new("failed");
     let path = dir.path().join("grain.tbl");
+    let clip = multi_scene_clip(0);
 
-    let result = run(multi_scene_clip(0), 1, Some(path.clone()));
+    let result = run(clip, 1, Some(path.clone()));
+    let temporary = dir.path().join("grain.tbl.tmp");
 
     assert!(result.is_err());
     assert!(!path.exists());
-    assert!(!dir.path().join("grain.tbl.tmp").exists());
+    assert!(!temporary.exists());
 }
 
 #[test]
 fn an_unwritable_path_fails_before_decoding() {
     let path = PathBuf::from("/nonexistent-directory/grain.tbl");
+    let clip = multi_scene_clip(10);
 
-    let err = run(multi_scene_clip(10), 1, Some(path)).expect_err("cannot write there");
+    let err = run(clip, 1, Some(path)).expect_err("cannot write there");
 
     assert!(err.to_string().contains("grain table"), "got {err}");
 }

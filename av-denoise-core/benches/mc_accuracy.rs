@@ -1,22 +1,23 @@
-//! Scores nl4d's motion field against synthetic clips with known
-//! motion. Prints one table per arm.
+//! Scores nl4d's motion field against synthetic clips with known motion
 //!
-//! Run with `cargo bench -p av-denoise-core --bench mc_accuracy --
-//! --device discrete:1 --still brick=/path/to/brick.pgm --still
-//! asterisk=/path/to/asterisk.pgm`. With no `--still` it runs on a
-//! synthetic texture and says so.
+//! Prints one table per arm. With no `--still` it runs on a synthetic texture and says so.
+//!
+//! ```text
+//! cargo bench -p av-denoise-core --bench mc_accuracy -- \
+//!     --device discrete:1 --still brick=/path/to/brick.pgm --still asterisk=/path/to/asterisk.pgm
+//! ```
 
 use std::path::PathBuf;
 
-use av_denoise_core::nl4d::harness::{Clip, KindScore, MotionClass, Score, Still, score, synthesise};
-use av_denoise_core::nl4d::{Nl4dDenoiser, Nl4dParams};
-use av_denoise_core::nlmeans::{ChannelMode, MotionCompensationMode, NlmParams};
+use av_denoise_core::bench_api::harness::{Clip, KindScore, MotionClass, Score, Still, score, synthesise};
+use av_denoise_core::bench_api::{Device, HostIo, Nl4dDenoiser, Nl4dParams, NlmParams};
+use av_denoise_core::{ChannelMode, MotionCompensationMode};
+use clap::Parser;
 use cubecl::prelude::*;
 
 /// Grain levels on the 8-bit scale.
 const GRAIN: [f32; 3] = [2.0, 6.0, 12.0];
 
-/// A named still.
 struct NamedStill {
     name: String,
     still: Still,
@@ -28,23 +29,25 @@ struct Arm {
     params: fn() -> Nl4dParams,
 }
 
-/// `Nl4dParams::default` carries `ChannelMode::Yuv`, which expects
-/// three interleaved planes per pushed frame. The harness only ever
-/// synthesises a single luma plane, so every arm here switches to
-/// `ChannelMode::Luma` instead.
+/// The default parameters switched to `ChannelMode::Luma`.
+///
+/// `Nl4dParams::default` carries `ChannelMode::Yuv`, which expects three interleaved planes per
+/// pushed frame, and the harness only synthesises a single luma plane.
 fn baseline_params() -> Nl4dParams {
+    let nlm = NlmParams {
+        channels: ChannelMode::Luma,
+        ..Nl4dParams::default().nlm
+    };
+
     Nl4dParams {
-        nlm: NlmParams {
-            channels: ChannelMode::Luma,
-            ..Nl4dParams::default().nlm
-        },
+        nlm,
         ..Nl4dParams::default()
     }
 }
 
-/// `baseline_params` with `field_lambda` overridden, for context against
-/// the shipped default. Building from `Nl4dParams::default()` directly
-/// would panic with the three-channel default the harness cannot feed.
+/// [baseline_params] with `field_lambda` at 0.5, for context against the shipped default.
+///
+/// It builds on the luma baseline because the three-channel default would panic in the harness.
 fn with_lambda_0_5() -> Nl4dParams {
     Nl4dParams {
         field_lambda: 0.5,
@@ -52,14 +55,16 @@ fn with_lambda_0_5() -> Nl4dParams {
     }
 }
 
-/// `baseline_params` with the motion pyramid deepened to three levels,
-/// to test whether the extra level earns its added kernel launch.
+/// [baseline_params] with the motion pyramid deepened to three levels.
+///
+/// It tests whether the extra level earns its added kernel launch.
 fn with_pyramid_3() -> Nl4dParams {
-    let mut p = baseline_params();
-    if let MotionCompensationMode::Mvtools { pyramid_levels, .. } = &mut p.nlm.motion_compensation {
+    let mut params = baseline_params();
+    if let MotionCompensationMode::Mvtools { pyramid_levels, .. } = &mut params.nlm.motion_compensation {
         *pyramid_levels = 3;
     }
-    p
+
+    params
 }
 
 fn arms() -> Vec<Arm> {
@@ -83,54 +88,68 @@ fn parse_still(spec: &str) -> Result<NamedStill, String> {
     let (name, path) = spec
         .split_once('=')
         .ok_or_else(|| format!("--still expects name=path, got {spec}"))?;
-    let bytes = std::fs::read(PathBuf::from(path)).map_err(|e| format!("{path}: {e}"))?;
+    let path_buf = PathBuf::from(path);
+    let bytes = std::fs::read(path_buf).map_err(|err| format!("{path}: {err}"))?;
+    let still = Still::from_pgm(&bytes)?;
+
     Ok(NamedStill {
         name: name.to_string(),
-        still: Still::from_pgm(&bytes)?,
+        still,
     })
 }
 
 fn run_clip<R: Runtime>(client: &ComputeClient<R>, params: Nl4dParams, clip: &Clip) -> Score {
     let refine = params.refine;
-    let mut d = Nl4dDenoiser::<R>::new(client, params, clip.width, clip.height).expect("construction failed");
+    let mut denoiser =
+        Nl4dDenoiser::<R>::new(client, params, clip.width, clip.height).expect("construction failed");
     for frame in &clip.frames {
-        d.push_frame(frame);
-        let _ = d.denoise_submit().expect("denoise_submit failed");
+        denoiser.push_frame(frame);
+        let _ = denoiser.denoise().expect("denoise failed");
     }
-    let snap = d.motion_snapshot().expect("a pass ran once the window filled");
-    score(clip, &snap, refine)
+
+    let snapshot = denoiser
+        .motion_snapshot()
+        .expect("a pass ran once the window filled");
+
+    score(clip, &snapshot, refine)
 }
 
-fn print_kind(label: &str, k: &KindScore) {
-    if k.patches == 0 {
+fn print_kind(label: &str, kind: &KindScore) {
+    if kind.patches == 0 {
         return;
     }
+
+    let corner_rate = 100.0 * kind.in_window_rate_corner();
+    let covering_rate = 100.0 * kind.in_window_rate_covering();
+    let epe_mean = kind.epe_mean();
+    let epe_p95 = kind.epe_p95();
+    let confidence = kind.confidence_median();
+
     println!(
         "    {label:<9} {:>6}  corner {:>5.1}%  covering {:>5.1}%  epe {:>5.2} / p95 {:>5.2}  conf {:>4.2}",
-        k.patches,
-        100.0 * k.in_window_rate_corner(),
-        100.0 * k.in_window_rate_covering(),
-        k.epe_mean(),
-        k.epe_p95(),
-        k.confidence_median(),
+        kind.patches, corner_rate, covering_rate, epe_mean, epe_p95, confidence,
     );
 }
 
 fn run_all<R: Runtime>(device: &R::Device, stills: &[NamedStill]) {
     let client = R::client(device);
+
     for arm in arms() {
         println!();
         println!("=== arm: {} ===", arm.name);
+
         for still in stills {
             for class in MotionClass::ALL {
                 for grain in GRAIN {
                     let params = (arm.params)();
                     let clip = synthesise(&still.still, class, params.temporal_radius, grain / 255.0, 7);
-                    let s = run_clip::<R>(&client, params, &clip);
-                    println!("  {:<10} {:<9} grain {grain:>4.0}", still.name, class.label());
-                    print_kind("plain", &s.plain);
-                    print_kind("boundary", &s.boundary);
-                    print_kind("occluded", &s.occluded);
+                    let clip_score = run_clip::<R>(&client, params, &clip);
+                    let class_label = class.label();
+
+                    println!("  {:<10} {:<9} grain {grain:>4.0}", still.name, class_label);
+                    print_kind("plain", &clip_score.plain);
+                    print_kind("boundary", &clip_score.boundary);
+                    print_kind("occluded", &clip_score.occluded);
                 }
             }
         }
@@ -140,34 +159,35 @@ fn run_all<R: Runtime>(device: &R::Device, stills: &[NamedStill]) {
 #[derive(clap::Parser, Debug)]
 #[command(about = "Motion-field accuracy against synthetic known-motion clips", long_about = None)]
 struct Cli {
-    /// GPU device to bind to. Format: `default`, `discrete[:N]`,
-    /// `integrated[:N]`, `virtual[:N]`, or `cpu`.
+    /// GPU device to bind to, one of `default`, `discrete[:N]`, `integrated[:N]`, `virtual[:N]` or `cpu`.
     #[arg(long, default_value = "default")]
-    device: av_denoise_core::Device,
+    device: Device,
 
     /// A still to build clips from, as `name=path.pgm`. Repeatable.
     #[arg(long = "still")]
     stills: Vec<String>,
 
-    /// Swallowed. Cargo passes this when invoking the bench binary.
+    /// Swallowed, since cargo passes this when invoking the bench binary.
     #[arg(long, hide = true)]
     bench: bool,
 }
 
 fn main() {
-    use clap::Parser;
     let cli = Cli::parse();
 
     let stills: Vec<NamedStill> = if cli.stills.is_empty() {
         println!("no --still given, running on a synthetic 256x256 texture");
-        vec![NamedStill {
+        let still = Still::synthetic(256, 256);
+        let synthetic = NamedStill {
             name: "synthetic".to_string(),
-            still: Still::synthetic(256, 256),
-        }]
+            still,
+        };
+
+        vec![synthetic]
     } else {
         cli.stills
             .iter()
-            .map(|s| parse_still(s).unwrap_or_else(|e| panic!("{e}")))
+            .map(|spec| parse_still(spec).unwrap_or_else(|err| panic!("{err}")))
             .collect()
     };
 

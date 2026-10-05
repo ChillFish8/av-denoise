@@ -11,13 +11,12 @@ use vapoursynth::plugins::{Filter, FilterArgument, Metadata};
 use vapoursynth::prelude::{API, Node};
 use vapoursynth::{export_vapoursynth_plugin, make_filter_function};
 
-use crate::filter::Denoise;
-use crate::params::{AlgorithmKind, RawParams};
+use self::filter::Denoise;
+use self::params::{AlgorithmKind, RawParams};
 
 /// Installs the tracing subscriber that writes the plugin's logs to stderr.
 ///
-/// `RUST_LOG` picks what is printed, and without it the plugin logs at `warn` so
-/// an ordinary render stays quiet.
+/// `RUST_LOG` picks what is printed. Without it the plugin logs at `warn` so an ordinary render stays quiet.
 fn init_logging() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
 
@@ -29,28 +28,20 @@ fn init_logging() {
 
 /// Keeps this plugin's library mapped for the rest of the process.
 ///
-/// VapourSynth unloads every plugin library when it frees a core, and
-/// vspipe frees its core right before exiting. The GPU runtime this
-/// plugin builds spawns a device thread per accelerator, plus a
-/// polling thread per stream on the wgpu backends, and those threads
-/// run for the rest of the process. The device thread never blocks. It
-/// spins, yields, then sleeps briefly, over and over. On Windows its
-/// first wake after `FreeLibrary` returns into unmapped code and the
-/// process dies with an access violation, after every frame was
-/// already written. The polling thread parks or waits in the driver,
-/// and dies the same way once anything wakes it.
+/// VapourSynth unloads every plugin library when it frees a core, and vspipe frees its core right
+/// before exiting. The GPU runtime runs a device thread per accelerator, plus a polling thread per
+/// stream on the wgpu backends, until the process exits. The device thread never blocks. It spins,
+/// yields and sleeps in a loop, so on Windows its first wake after `FreeLibrary` returns into unmapped
+/// code and the process dies with an access violation after every frame was written. The polling
+/// thread parks or waits in the driver, and dies the same way once anything wakes it.
 ///
-/// Pinning the module makes the unload a no-op, so the threads stay
-/// valid until process exit terminates them. On Linux the loader
-/// already refuses to unload a library that registered thread-local
-/// destructors, which is what happens as soon as this plugin's threads
-/// start, so nothing needs doing there. macOS is not covered and has
-/// not been tested.
+/// Pinning the module makes the unload a no-op. Linux needs nothing, since its loader refuses to
+/// unload a library that registered thread-local destructors, which these threads do as soon as they
+/// start. macOS is not covered and has not been tested.
 ///
-/// This runs once, on the first filter creation. That is before any
-/// device thread exists, since only a filter builds a denoiser. The
-/// plugin's init function runs earlier, but the export macro owns its
-/// body and this plugin has no code of its own in it.
+/// This runs once, on the first filter creation, which is before any device thread exists since only
+/// a filter builds a denoiser. The plugin's init function runs earlier, but the export macro owns its
+/// body.
 fn pin_plugin_library() {
     static PIN: std::sync::Once = std::sync::Once::new();
     PIN.call_once(|| {
@@ -75,34 +66,33 @@ fn pin_plugin_library_windows() {
     let mut module: *mut c_void = std::ptr::null_mut();
     // SAFETY: `address` is a code address inside this library, which is
     // what `FROM_ADDRESS` asks for, and `module` is a valid out pointer.
-    let ok = unsafe {
+    let pinned = unsafe {
         GetModuleHandleExW(
             GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
             address,
             &mut module,
         )
     };
-    if ok == 0 {
+    if pinned == 0 {
         tracing::warn!("could not pin the plugin library, the process may crash at exit");
     }
 }
 
-/// Reads one optional UTF-8 script argument, naming `field` in the error
-/// when the bytes are not valid UTF-8.
+/// Reads an optional UTF-8 script argument, naming `field` in the error when it is not valid UTF-8.
 fn opt_string(bytes: Option<&[u8]>, field: &str) -> Result<Option<String>, Error> {
-    bytes
-        .map(|b| String::from_utf8(b.to_vec()).map_err(|_| anyhow::anyhow!("{field} must be valid UTF-8")))
-        .transpose()
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
+
+    let owned = bytes.to_vec();
+    let text = String::from_utf8(owned).map_err(|_| anyhow::anyhow!("{field} must be valid UTF-8"))?;
+    Ok(Some(text))
 }
 
-/// Reads the optional `accelerators` script argument, a comma-separated
-/// list of accelerator names, into the `Vec<String>` [`RawParams`]
-/// wants.
+/// Reads the optional `accelerators` script argument, a comma-separated list of accelerator names.
 ///
-/// VapourSynth script arguments have no native string array type that
-/// fits cleanly into `make_filter_function!`'s generated argument
-/// string, so this reuses the plain `data` type and splits it, matching
-/// how `channel_mode` and `device` already take a single string.
+/// VapourSynth has no string array argument type that fits `make_filter_function!`'s generated
+/// argument string, so this takes the plain `data` type and splits it.
 fn opt_accelerators(bytes: Option<&[u8]>) -> Result<Option<Vec<String>>, Error> {
     let Some(joined) = opt_string(bytes, "accelerators")? else {
         return Ok(None);
@@ -111,7 +101,7 @@ fn opt_accelerators(bytes: Option<&[u8]>) -> Result<Option<Vec<String>>, Error> 
     let names: Vec<String> = joined
         .split(',')
         .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .filter(|name| !name.is_empty())
         .map(str::to_string)
         .collect();
 
@@ -122,13 +112,14 @@ fn opt_accelerators(bytes: Option<&[u8]>) -> Result<Option<Vec<String>>, Error> 
     Ok(Some(names))
 }
 
-/// Reads an optional on/off script argument.
 fn opt_bool(value: Option<i64>) -> Option<bool> {
-    value.map(|v| v != 0)
+    value.map(|flag| flag != 0)
 }
 
-/// Builds a [`RawParams`] from a filter function's raw script arguments.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "takes one parameter per optional argument across both VapourSynth filters"
+)]
 fn raw_params(
     strength: Option<f64>,
     variant: Option<&[u8]>,
@@ -192,7 +183,10 @@ fn raw_params(
 make_filter_function! {
     NlmeansFunction, "NLMeans"
 
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each parameter is a VapourSynth filter argument, so they cannot be grouped"
+    )]
     fn create_nlmeans<'core>(
         api: API,
         core: CoreRef<'core>,
@@ -243,19 +237,23 @@ make_filter_function! {
             None,
         )?;
         let filter = Denoise::create(api, core, clip, AlgorithmKind::Nlmeans, &raw)?;
-        Ok(Some(Box::new(filter)))
+        let boxed: Box<dyn Filter<'core> + 'core> = Box::new(filter);
+        Ok(Some(boxed))
     }
 }
 
 make_filter_function! {
     Nl4dFunction, "NL4D"
 
-    /// Estimates its automatic noise level fresh from each frame's own
-    /// temporal window, rather than smoothing it across the whole
-    /// stream, so a frame denoises to the same pixels no matter what
-    /// order VapourSynth requests frames in. Passing `sigma` pins the
-    /// noise level and skips that estimator entirely.
-    #[expect(clippy::too_many_arguments)]
+    /// Creates an `avd.NL4D` filter.
+    ///
+    /// The automatic noise level is estimated from each frame's own temporal window, so a frame
+    /// denoises to the same pixels in any order VapourSynth requests frames. Passing `sigma` pins the
+    /// noise level and skips the estimator.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each parameter is a VapourSynth filter argument, so they cannot be grouped"
+    )]
     fn create_nl4d<'core>(
         api: API,
         core: CoreRef<'core>,
@@ -312,7 +310,8 @@ make_filter_function! {
             pooled_threshold,
         )?;
         let filter = Denoise::create(api, core, clip, AlgorithmKind::Nl4d, &raw)?;
-        Ok(Some(Box::new(filter)))
+        let boxed: Box<dyn Filter<'core> + 'core> = Box::new(filter);
+        Ok(Some(boxed))
     }
 }
 

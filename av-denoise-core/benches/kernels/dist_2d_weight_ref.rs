@@ -1,29 +1,29 @@
-use av_denoise_core::nlmeans::kernels::nlm_dist_2d_weight_ref;
+use av_denoise_core::bench_api::kernels::nlm_dist_2d_weight_ref;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 
 use super::{
     BLOCK_X,
     BLOCK_Y,
-    H,
+    HEIGHT,
     InputOutput,
     PATCH_RADIUS,
     Q_X,
     Q_Y,
-    W,
+    WIDTH,
     block_sync,
     cube_count_2d,
     cube_dim_2d,
     h2_inv_norm,
     make_padded_frame,
-    shapes_with_ch,
+    shapes_with_channels,
     stored_channels,
 };
 
 pub struct DistWeightRefBench<R: Runtime> {
     pub client: ComputeClient<R>,
-    pub ch: u32,
-    pub ch_name: &'static str,
+    pub channels: u32,
+    pub channel_name: &'static str,
 }
 
 impl<R: Runtime> Benchmark for DistWeightRefBench<R> {
@@ -31,10 +31,12 @@ impl<R: Runtime> Benchmark for DistWeightRefBench<R> {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let pixels = (W * H) as usize;
-        let frame = make_padded_frame(W, H, self.ch);
-        let input = self.client.create_from_slice(f32::as_bytes(&frame));
+        let pixels = (WIDTH * HEIGHT) as usize;
+        let frame = make_padded_frame(WIDTH, HEIGHT, self.channels);
+        let frame_bytes = f32::as_bytes(&frame);
+        let input = self.client.create_from_slice(frame_bytes);
         let output = self.client.empty(pixels * size_of::<f32>());
+
         InputOutput {
             input,
             output,
@@ -43,40 +45,47 @@ impl<R: Runtime> Benchmark for DistWeightRefBench<R> {
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let pixels = (W * H) as usize;
-        let stored = stored_channels(self.ch) as usize;
+        let pixels = (WIDTH * HEIGHT) as usize;
+        let stored_ch = stored_channels(self.channels) as usize;
+        let cube_count = cube_count_2d();
+        let cube_dim = cube_dim_2d();
+        let inv_norm = h2_inv_norm();
+
         unsafe {
             nlm_dist_2d_weight_ref::launch_unchecked::<R>(
                 &self.client,
-                cube_count_2d(),
-                cube_dim_2d(),
-                stored,
+                cube_count,
+                cube_dim,
+                stored_ch,
                 ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
                 ArrayArg::from_raw_parts(args.output.clone(), pixels),
                 0u32,
                 0u32,
                 Q_X,
                 Q_Y,
-                h2_inv_norm(),
+                inv_norm,
                 0.0f32,
-                W,
-                H,
-                self.ch,
+                WIDTH,
+                HEIGHT,
+                self.channels,
                 PATCH_RADIUS,
                 BLOCK_X,
                 BLOCK_Y,
             );
         }
+
         Ok(())
     }
 
     fn name(&self) -> String {
-        format!("dist_2d_weight_ref_1080p_{}", self.ch_name)
+        format!("dist_2d_weight_ref_1080p_{}", self.channel_name)
     }
+
     fn sync(&self) {
         block_sync(&self.client);
     }
+
     fn shapes(&self) -> Vec<Vec<usize>> {
-        shapes_with_ch(self.ch)
+        shapes_with_channels(self.channels)
     }
 }

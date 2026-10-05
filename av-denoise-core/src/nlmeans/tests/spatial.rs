@@ -1,4 +1,5 @@
 use super::helpers::*;
+use crate::bench_api::HostIo;
 use crate::nlmeans::*;
 
 #[test]
@@ -16,23 +17,17 @@ fn uniform_image_passthrough() {
         hq: None,
     };
 
-    let w = 16;
-    let h = 16;
-    let frame = make_uniform_frame(w, h, 1, 0.5);
+    let width = 16;
+    let height = 16;
+    let frame = make_uniform_frame(width, height, 1, 0.5);
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
-    let result = denoiser
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let result = denoiser.denoise().unwrap().unwrap();
 
-    for (i, &v) in result.iter().enumerate() {
-        assert!((v - 0.5).abs() < 1e-5, "pixel {i}: expected 0.5, got {v}");
+    for (i, &value) in result.iter().enumerate() {
+        assert!((value - 0.5).abs() < 1e-5, "pixel {i}: expected 0.5, got {value}");
     }
 }
 
@@ -51,24 +46,18 @@ fn uniform_yuv_passthrough() {
         hq: None,
     };
 
-    let w = 16;
-    let h = 16;
-    let frame = make_uniform_frame(w, h, 3, 0.5);
+    let width = 16;
+    let height = 16;
+    let frame = make_uniform_frame(width, height, 3, 0.5);
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
-    let result = denoiser
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
-    assert_eq!(result.len(), (w * h * 3) as usize);
+    let result = denoiser.denoise().unwrap().unwrap();
+    assert_eq!(result.len(), (width * height * 3) as usize);
 
-    for (i, &v) in result.iter().enumerate() {
-        assert!((v - 0.5).abs() < 1e-5, "pixel {i}: expected 0.5, got {v}");
+    for (i, &value) in result.iter().enumerate() {
+        assert!((value - 0.5).abs() < 1e-5, "pixel {i}: expected 0.5, got {value}");
     }
 }
 
@@ -87,24 +76,21 @@ fn uniform_chroma_passthrough() {
         hq: None,
     };
 
-    let w = 16;
-    let h = 16;
-    let frame = make_uniform_frame(w, h, 2, 0.5);
+    let width = 16;
+    let height = 16;
+    let frame = make_uniform_frame(width, height, 2, 0.5);
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
-    let result = denoiser
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
-    assert_eq!(result.len(), (w * h * 2) as usize);
+    let result = denoiser.denoise().unwrap().unwrap();
+    assert_eq!(result.len(), (width * height * 2) as usize);
 
-    for (i, &v) in result.iter().enumerate() {
-        assert!((v - 0.5).abs() < 1e-5, "pixel {i}: expected ~0.5, got {v}");
+    for (i, &value) in result.iter().enumerate() {
+        assert!(
+            (value - 0.5).abs() < 1e-5,
+            "pixel {i}: expected ~0.5, got {value}"
+        );
     }
 }
 
@@ -123,24 +109,18 @@ fn noisy_region_suppressed() {
         hq: None,
     };
 
-    let w = 32;
-    let h = 32;
-    let mut frame = vec![0.5f32; (w * h) as usize];
-    frame[(16 * w + 16) as usize] = 0.8;
+    let width = 32;
+    let height = 32;
+    let mut frame = vec![0.5f32; (width * height) as usize];
+    frame[(16 * width + 16) as usize] = 0.8;
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
-    let result = denoiser
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let result = denoiser.denoise().unwrap().unwrap();
 
-    let noisy_idx = (16 * w + 16) as usize;
-    let denoised = result[noisy_idx];
+    let noisy_index = (16 * width + 16) as usize;
+    let denoised = result[noisy_index];
 
     assert!(
         denoised < 0.8,
@@ -163,29 +143,23 @@ fn high_strength_smooths_heavily() {
         hq: None,
     };
 
-    let w = 16;
-    let h = 16;
+    let width = 16;
+    let height = 16;
 
-    let mut frame = vec![0.0f32; (w * h) as usize];
-    for y in 0..h {
-        let val = if y % 2 == 0 { 0.3 } else { 0.7 };
-        for x in 0..w {
-            frame[(y * w + x) as usize] = val;
+    let mut frame = vec![0.0f32; (width * height) as usize];
+    for y in 0..height {
+        let row_value = if y % 2 == 0 { 0.3 } else { 0.7 };
+        for x in 0..width {
+            frame[(y * width + x) as usize] = row_value;
         }
     }
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
-    let result = denoiser
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let result = denoiser.denoise().unwrap().unwrap();
 
-    let center = result[(8 * w + 8) as usize];
+    let center = result[(8 * width + 8) as usize];
     assert!(
         (center - 0.5).abs() < 0.15,
         "high strength should smooth toward ~0.5, got {center}"
@@ -207,24 +181,18 @@ fn low_strength_preserves_original() {
         hq: None,
     };
 
-    let w = 16;
-    let h = 16;
+    let width = 16;
+    let height = 16;
 
-    let mut frame = vec![0.5f32; (w * h) as usize];
-    frame[(8 * w + 8) as usize] = 0.8;
+    let mut frame = vec![0.5f32; (width * height) as usize];
+    frame[(8 * width + 8) as usize] = 0.8;
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
-    let result = denoiser
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let result = denoiser.denoise().unwrap().unwrap();
 
-    let pixel = result[(8 * w + 8) as usize];
+    let pixel = result[(8 * width + 8) as usize];
     assert!(
         (pixel - 0.8).abs() < 0.05,
         "low strength should preserve original ~0.8, got {pixel}"
@@ -246,24 +214,21 @@ fn self_weight_zero_uniform() {
         hq: None,
     };
 
-    let w = 16;
-    let h = 16;
+    let width = 16;
+    let height = 16;
 
-    let frame = make_uniform_frame(w, h, 1, 0.5);
+    let frame = make_uniform_frame(width, height, 1, 0.5);
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
-    let result = denoiser
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let result = denoiser.denoise().unwrap().unwrap();
 
-    for (i, &v) in result.iter().enumerate() {
-        assert!((v - 0.5).abs() < 1e-5, "pixel {i}: expected ~0.5, got {v}");
+    for (i, &value) in result.iter().enumerate() {
+        assert!(
+            (value - 0.5).abs() < 1e-5,
+            "pixel {i}: expected ~0.5, got {value}"
+        );
     }
 }
 
@@ -275,11 +240,11 @@ fn spatial_only_no_delay() {
         ..NlmParams::default()
     };
 
-    let w = 8;
-    let h = 8;
-    let frame = make_uniform_frame(w, h, 3, 0.5);
+    let width = 8;
+    let height = 8;
+    let frame = make_uniform_frame(width, height, 3, 0.5);
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
     let result = denoiser.denoise().unwrap();
@@ -301,33 +266,27 @@ fn symmetry_preserved() {
         hq: None,
     };
 
-    let w = 16;
-    let h = 16;
+    let width = 16;
+    let height = 16;
 
-    let mut frame = vec![0.5f32; (w * h) as usize];
-    for y in 0..h {
-        for x in 0..(w / 2) {
-            let val = 0.3 + 0.4 * (x as f32 / w as f32);
-            frame[(y * w + x) as usize] = val;
-            frame[(y * w + (w - 1 - x)) as usize] = val;
+    let mut frame = vec![0.5f32; (width * height) as usize];
+    for y in 0..height {
+        for x in 0..(width / 2) {
+            let value = 0.3 + 0.4 * (x as f32 / width as f32);
+            frame[(y * width + x) as usize] = value;
+            frame[(y * width + (width - 1 - x)) as usize] = value;
         }
     }
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
-    let result = denoiser
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let result = denoiser.denoise().unwrap().unwrap();
 
-    for y in 0..h {
-        for x in 0..(w / 2) {
-            let left = result[(y * w + x) as usize];
-            let right = result[(y * w + (w - 1 - x)) as usize];
+    for y in 0..height {
+        for x in 0..(width / 2) {
+            let left = result[(y * width + x) as usize];
+            let right = result[(y * width + (width - 1 - x)) as usize];
             assert!(
                 (left - right).abs() < 1e-5,
                 "symmetry broken at ({x},{y}): \
@@ -352,20 +311,14 @@ fn clamp_to_edge_no_darkening() {
         hq: None,
     };
 
-    let w = 8;
-    let h = 8;
-    let frame = make_uniform_frame(w, h, 1, 0.7);
+    let width = 8;
+    let height = 8;
+    let frame = make_uniform_frame(width, height, 1, 0.7);
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
-    let result = denoiser
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let result = denoiser.denoise().unwrap().unwrap();
 
     let corner = result[0];
     assert!(

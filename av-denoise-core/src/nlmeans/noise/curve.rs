@@ -1,4 +1,5 @@
-use super::{
+use super::stats::{median, sort_ascending};
+use super::temporal::{
     AcceptedBlock,
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
@@ -12,25 +13,30 @@ use super::{
     TEMPORAL_QUARTER_FIELDS,
     TEMPORAL_QUARTER_SIZE,
     TEMPORAL_QUARTERS,
-    median,
-    sort_ascending,
     temporal_stats_record_len,
 };
 
 /// How many luma bins the noise curve spans.
 pub const NOISE_CURVE_BINS: usize = 16;
+
 /// The fewest quarters a bin needs before its median is trusted.
 const MIN_QUARTERS_PER_BIN: usize = 32;
+
 /// The fewest populated bins a frame needs before it gets a curve.
 const MIN_POPULATED_BINS: usize = 3;
+
 /// A quarter with a pixel at or below this luma may be clipped, so its noise reads low.
 pub(super) const CLIP_LOW: f32 = 4.0 / 255.0;
+
 /// A quarter with a pixel at or above this luma may be clipped, so its noise reads low.
 pub(super) const CLIP_HIGH: f32 = 251.0 / 255.0;
+
 /// How much texture a quarter may carry, as a fraction of the frame's noise variance.
 const FLAT_FACTOR: f32 = 0.5;
+
 /// The flat gate never tightens below one code of squared gradient.
 const FLAT_FLOOR: f32 = (1.0 / 255.0) * (1.0 / 255.0);
+
 /// How large a quarter's mean residual can be and still count as static.
 ///
 /// A quarter averages 64 pixels rather than a block's 256, so the noise in its mean is twice as
@@ -158,9 +164,9 @@ fn static_quarters(records: &[f32], stored_ch: u32, accepted: &[AcceptedBlock]) 
         for quarter_index in 0..TEMPORAL_QUARTERS {
             let offset_x = (quarter_index % 2) * TEMPORAL_QUARTER_SIZE;
             let offset_y = (quarter_index / 2) * TEMPORAL_QUARTER_SIZE;
-            let quarter_w = block.width.saturating_sub(offset_x).min(TEMPORAL_QUARTER_SIZE);
-            let quarter_h = block.height.saturating_sub(offset_y).min(TEMPORAL_QUARTER_SIZE);
-            let pixels = (quarter_w * quarter_h) as f32;
+            let quarter_width = block.width.saturating_sub(offset_x).min(TEMPORAL_QUARTER_SIZE);
+            let quarter_height = block.height.saturating_sub(offset_y).min(TEMPORAL_QUARTER_SIZE);
+            let pixels = (quarter_width * quarter_height) as f32;
             if pixels == 0.0 {
                 continue;
             }

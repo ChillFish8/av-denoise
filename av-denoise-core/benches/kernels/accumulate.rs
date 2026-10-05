@@ -1,18 +1,18 @@
-use av_denoise_core::nlmeans::kernels::nlm_accumulate;
+use av_denoise_core::bench_api::kernels::nlm_accumulate;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::{
-    H,
+    HEIGHT,
     Q_X,
     Q_Y,
-    W,
+    WIDTH,
     block_sync,
     cube_count_2d,
     cube_dim_2d,
     make_padded_frame,
-    shapes_with_ch,
+    shapes_with_channels,
     stored_channels,
 };
 
@@ -28,8 +28,8 @@ pub struct AccumulateInput {
 
 pub struct AccumulateBench<R: Runtime> {
     pub client: ComputeClient<R>,
-    pub ch: u32,
-    pub ch_name: &'static str,
+    pub channels: u32,
+    pub channel_name: &'static str,
 }
 
 impl<R: Runtime> Benchmark for AccumulateBench<R> {
@@ -37,15 +37,19 @@ impl<R: Runtime> Benchmark for AccumulateBench<R> {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let pixels = (W * H) as usize;
-        let stored = stored_channels(self.ch) as usize;
-        let frame = make_padded_frame(W, H, self.ch);
-        let input = self.client.create_from_slice(f32::as_bytes(&frame));
+        let pixels = (WIDTH * HEIGHT) as usize;
+        let stored_ch = stored_channels(self.channels) as usize;
+        let frame = make_padded_frame(WIDTH, HEIGHT, self.channels);
+        let frame_bytes = f32::as_bytes(&frame);
+        let input = self.client.create_from_slice(frame_bytes);
+
         let weights_data = vec![0.5f32; pixels];
-        let weights = self.client.create_from_slice(f32::as_bytes(&weights_data));
-        let accum = self.client.empty(pixels * stored * size_of::<f32>());
+        let weights_bytes = f32::as_bytes(&weights_data);
+        let weights = self.client.create_from_slice(weights_bytes);
+        let accum = self.client.empty(pixels * stored_ch * size_of::<f32>());
         let weight_sum = self.client.empty(pixels * size_of::<f32>());
         let max_weight = self.client.empty(pixels * size_of::<f32>());
+
         AccumulateInput {
             input,
             accum,
@@ -57,16 +61,19 @@ impl<R: Runtime> Benchmark for AccumulateBench<R> {
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let pixels = (W * H) as usize;
-        let stored = stored_channels(self.ch) as usize;
+        let pixels = (WIDTH * HEIGHT) as usize;
+        let stored_ch = stored_channels(self.channels) as usize;
+        let cube_count = cube_count_2d();
+        let cube_dim = cube_dim_2d();
+
         unsafe {
             nlm_accumulate::launch_unchecked::<R>(
                 &self.client,
-                cube_count_2d(),
-                cube_dim_2d(),
-                stored,
+                cube_count,
+                cube_dim,
+                stored_ch,
                 ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
-                ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored),
+                ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored_ch),
                 ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels),
                 ArrayArg::from_raw_parts(args.weights.clone(), pixels),
                 ArrayArg::from_raw_parts(args.weights.clone(), pixels),
@@ -75,20 +82,23 @@ impl<R: Runtime> Benchmark for AccumulateBench<R> {
                 0u32,
                 Q_X,
                 Q_Y,
-                W,
-                H,
+                WIDTH,
+                HEIGHT,
             );
         }
+
         Ok(())
     }
 
     fn name(&self) -> String {
-        format!("accumulate_1080p_{}", self.ch_name)
+        format!("accumulate_1080p_{}", self.channel_name)
     }
+
     fn sync(&self) {
         block_sync(&self.client);
     }
+
     fn shapes(&self) -> Vec<Vec<usize>> {
-        shapes_with_ch(self.ch)
+        shapes_with_channels(self.channels)
     }
 }

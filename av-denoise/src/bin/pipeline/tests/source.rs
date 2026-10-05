@@ -1,19 +1,20 @@
-use std::io::{Cursor, Read};
-
 use av_denoise::{Depth, Subsampling};
 
+use super::y4m_reader;
 use crate::pipeline::convert::SourcePixel;
 use crate::pipeline::source::{color_range_extension, open_y4m, pixel_aspect_from_sar};
 
 fn y4m_bytes(colorspace: y4m::Colorspace, extension: Option<&str>, frames: usize) -> Vec<u8> {
     let mut bytes = Vec::new();
-    let mut builder = y4m::encode(4, 4, y4m::Ratio::new(25, 1))
+    let frame_rate = y4m::Ratio::new(25, 1);
+    let pixel_aspect = y4m::Ratio::new(4, 3);
+    let mut builder = y4m::encode(4, 4, frame_rate)
         .with_colorspace(colorspace)
-        .with_pixel_aspect(y4m::Ratio::new(4, 3));
+        .with_pixel_aspect(pixel_aspect);
 
     if let Some(extension) = extension {
-        let vendor = y4m::VendorExtensionString::new(extension.as_bytes().to_vec())
-            .expect("the extension has no spaces");
+        let value = extension.as_bytes().to_vec();
+        let vendor = y4m::VendorExtensionString::new(value).expect("the extension has no spaces");
         builder = builder.append_vendor_extension(vendor);
     }
 
@@ -34,14 +35,10 @@ fn y4m_bytes(colorspace: y4m::Colorspace, extension: Option<&str>, frames: usize
     bytes
 }
 
-fn reader(bytes: Vec<u8>) -> Box<dyn Read> {
-    Box::new(Cursor::new(bytes))
-}
-
 #[test]
 fn a_pipe_keeps_its_vendor_extensions_and_pixel_aspect() {
     let bytes = y4m_bytes(y4m::Colorspace::C420, Some("COLORRANGE=LIMITED"), 1);
-    let source = reader(bytes);
+    let source = y4m_reader(bytes);
     let opened = open_y4m(source).expect("a 4:2:0 pipe opens");
 
     let extensions: Vec<&[u8]> = opened
@@ -59,7 +56,7 @@ fn a_pipe_keeps_its_vendor_extensions_and_pixel_aspect() {
 #[test]
 fn a_ten_bit_pipe_reports_its_layout() {
     let bytes = y4m_bytes(y4m::Colorspace::C422p10, None, 1);
-    let source = reader(bytes);
+    let source = y4m_reader(bytes);
     let opened = open_y4m(source).expect("a 10-bit 4:2:2 pipe opens");
 
     assert_eq!(opened.info.layout.width, 4);
@@ -70,7 +67,7 @@ fn a_ten_bit_pipe_reports_its_layout() {
 #[test]
 fn ten_bit_stream_round_trips_header_and_plane_sizes() {
     let bytes = y4m_bytes(y4m::Colorspace::C420p10, None, 2);
-    let source = reader(bytes);
+    let source = y4m_reader(bytes);
     let mut opened = open_y4m(source).expect("a 10-bit 4:2:0 pipe opens");
     let layout = opened.info.layout;
 
@@ -91,7 +88,7 @@ fn ten_bit_stream_round_trips_header_and_plane_sizes() {
 #[test]
 fn a_pipe_has_no_phantom_frames_or_frame_estimate() {
     let bytes = y4m_bytes(y4m::Colorspace::C420, None, 3);
-    let source = reader(bytes);
+    let source = y4m_reader(bytes);
     let opened = open_y4m(source).expect("a 4:2:0 pipe opens");
 
     assert!(opened.phantom.is_empty());
@@ -101,13 +98,15 @@ fn a_pipe_has_no_phantom_frames_or_frame_estimate() {
 #[test]
 fn a_mono_pipe_is_rejected_without_panicking() {
     let mut bytes = Vec::new();
-    y4m::encode(4, 4, y4m::Ratio::new(25, 1))
+    let frame_rate = y4m::Ratio::new(25, 1);
+    y4m::encode(4, 4, frame_rate)
         .with_colorspace(y4m::Colorspace::Cmono)
         .write_header(&mut bytes)
         .expect("header should write");
 
-    let source = reader(bytes);
-    let err = match open_y4m(source) {
+    let source = y4m_reader(bytes);
+    let result = open_y4m(source);
+    let err = match result {
         Ok(_) => panic!("a mono pipe must be rejected"),
         Err(err) => err,
     };
@@ -132,10 +131,9 @@ fn a_full_range_maps_to_the_full_tag() {
 #[test]
 fn an_unspecified_or_unknown_range_adds_no_tag() {
     for range in [0, 3, -1] {
-        assert!(
-            color_range_extension(range).is_none(),
-            "range {range} must add no tag"
-        );
+        let extension = color_range_extension(range);
+
+        assert!(extension.is_none(), "range {range} must add no tag");
     }
 }
 

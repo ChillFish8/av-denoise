@@ -12,7 +12,8 @@ use crate::pipeline::stage::SceneJob;
 #[test]
 fn dispatch_fails_on_a_forwarded_decode_error() {
     let bytes = y4m_clip(3);
-    let reader: Box<dyn Read> = Box::new(Cursor::new(bytes));
+    let cursor = Cursor::new(bytes);
+    let reader: Box<dyn Read> = Box::new(cursor);
     let mut opened = open_y4m(reader).expect("the clip opens");
     let (frames_tx, frames_rx) = crossbeam_channel::unbounded::<FrameMsg>();
 
@@ -26,9 +27,8 @@ fn dispatch_fails_on_a_forwarded_decode_error() {
         frames_tx.send(Ok(decoded)).expect("the receiver is alive");
     }
 
-    frames_tx
-        .send(Err(anyhow::anyhow!("corrupt packet")))
-        .expect("the receiver is alive");
+    let decode_error = anyhow::anyhow!("corrupt packet");
+    frames_tx.send(Err(decode_error)).expect("the receiver is alive");
     drop(frames_tx);
 
     let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);

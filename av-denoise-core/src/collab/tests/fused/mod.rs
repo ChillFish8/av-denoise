@@ -8,7 +8,7 @@ mod walks;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::helpers::{R, make_client, make_unique_frame, noisy_field_over};
+use super::helpers::{R, make_client, make_unique_frame, noisy_flat_field};
 use crate::collab::geometry::{fused_cubes_x, ref_count, ref_pos, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{WEIGHT_GAIN, cross_frame_accum_scale, kaiser_window, weight_scale};
 use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
@@ -16,61 +16,48 @@ use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS};
 
-/// The spatial search radius most runs below use.
+/// The spatial search radius most runs use.
 ///
-/// Large enough that a reference patch away from the frame edge scores
-/// a 9x9 window, which is well past the eight members a group keeps,
-/// and small enough that the whole sweep stays quick. It is a [`Setup`]
-/// field rather than a constant so one test can narrow it far enough to
-/// shrink a group below `k_max`.
+/// A reference patch away from the frame edge scores a 9x9 window, well past the eight members a
+/// group keeps, and the whole sweep stays quick.
 const SPATIAL_RADIUS: u32 = 4;
 
-/// The group size most runs below use. The fused kernel carries one
-/// member per lane of an 8-lane group, so this is the size it is built
+/// The group size most runs use.
+///
+/// The fused kernel carries one member per lane of an 8-lane group, so this is the size it is built
 /// for.
 const K_MAX: u32 = 8;
 
-/// Motion-block side length. The kernel searches every block whose
-/// `blksize` span contains a patch.
+/// Motion-block side length.
 const BLKSIZE: u32 = 16;
 
-/// Motion-block stride. It stays at `PATCH_SIZE` so a block boundary
-/// lines up with a patch boundary.
+/// Motion-block stride, equal to `PATCH_SIZE` so a block boundary lines up with a patch boundary.
 const BLK_STEP: u32 = 8;
 
-/// The noise level the filter is told to shrink against.
+/// The noise level the filter shrinks against.
 ///
-/// Small enough against content in `[0, 1]` that the threshold keeps a
-/// spread of coefficients rather than everything or nothing, so both
-/// sides of the keep decision are exercised.
+/// Against content between 0 and 1 the threshold keeps a spread of coefficients rather than
+/// everything or nothing, so both sides of the keep decision are exercised.
 const SIGMA: f32 = 0.02;
 
-/// A fixed hard-threshold multiplier, pinned independently of
-/// `Nl4dParams::default().lambda_ht`.
+/// A hard-threshold multiplier pinned independently of the shipped `lambda_ht` default.
 ///
-/// Several tests in this file recorded their expected output at this
-/// value, so it stays fixed even when the shipped default moves.
+/// Several tests recorded their expected output at this value.
 const LAMBDA_HT: f32 = 5.3;
 
-/// [`make_unique_frame`] rescaled into `[0, 1]`.
+/// [make_unique_frame] rescaled to between 0 and 1.
 ///
-/// That helper ramps to ten times the frame width, which suits a
-/// matching test and breaks a filtering one. Everything downstream of
-/// the match is defined over `[0, 1]`, the scatter clamps at
-/// [`crate::collab::kernels::aggregate::ACCUM_CLAMP`], and a patch of
-/// values in the hundreds both saturates that clamp and puts every
-/// coefficient so far above the noise threshold that the threshold stops
-/// being tested at all. Dividing by a constant leaves every 8x8 window
-/// exactly as distinct as it was, so the tie-free property these runs
-/// rely on is untouched.
-pub(super) fn unique_frame(w: u32, h: u32) -> Vec<f32> {
-    let raw = make_unique_frame(w, h);
+/// The raw ramp reaches ten times the frame width. Values in the hundreds saturate
+/// [ACCUM_CLAMP](crate::collab::kernels::aggregate::ACCUM_CLAMP) and put every coefficient far above
+/// the noise threshold, so the threshold would stop being tested. Dividing by a constant keeps every
+/// 8x8 window exactly as distinct as before.
+pub(super) fn unique_frame(width: u32, height: u32) -> Vec<f32> {
+    let raw = make_unique_frame(width, height);
     let peak = raw.iter().copied().fold(0.0f32, f32::max);
-    raw.into_iter().map(|v| v / peak).collect()
+    raw.into_iter().map(|value| value / peak).collect()
 }
 
-/// Everything one launch of [`collab_fused`] takes, so a test reads as
-/// the scenario it sets up rather than as an argument list.
+/// Everything one launch of [collab_fused] takes.
 pub(super) struct Setup {
     pub(super) ring: Vec<f32>,
     pub(super) mv_field: Vec<i32>,
@@ -90,18 +77,15 @@ pub(super) struct Setup {
     pub(super) k_max: u32,
     pub(super) sigma: f32,
     pub(super) lambda_ht: f32,
-    /// Residual correlation the noise profile is built for. `0.0` gives
-    /// the all-ones profile most runs use.
+    /// Residual correlation the noise profile is built for. `0.0` gives the all-ones profile.
     pub(super) rho: f32,
-    /// A profile buffer supplied outright, bypassing
-    /// [`dct_noise_profile`]. The weight scale still follows whatever
-    /// profile is in force.
+    /// A profile supplied outright, bypassing [dct_noise_profile].
+    ///
+    /// The weight scale still follows whichever profile is in force.
     pub(super) profile_override: Option<[f32; 8]>,
-    /// The aggregation window's `beta`. `0.0`, what every run here uses
-    /// unless it says otherwise, is uniform aggregation.
+    /// The aggregation window's beta. `0.0` is uniform aggregation.
     pub(super) kaiser_beta: f32,
-    /// The frame's noise curve. `None` launches with `curve_valid = 0`
-    /// and a zeroed buffer.
+    /// The frame's noise curve. `None` launches with `curve_valid = 0` and a zeroed buffer.
     pub(super) noise_curve: Option<[f32; NOISE_CURVE_BINS]>,
     /// A strength map and the mode it applies in. `None` launches a unit map with the map off.
     pub(super) strength_map: Option<(Vec<f32>, u32)>,
@@ -113,12 +97,13 @@ pub(super) struct Setup {
 }
 
 impl Setup {
-    /// A single-frame ring with no neighbours, which leaves every
-    /// candidate in the spatial window around the reference patch and
-    /// the motion, confidence, and neighbour-slot buffers as dummies
-    /// nothing reads.
+    /// A single-frame ring with no neighbours.
+    ///
+    /// Every candidate comes from the spatial window, and the motion, confidence and neighbour-slot
+    /// buffers are dummies nothing reads.
     pub(super) fn spatial_only(frame: Vec<f32>, width: u32, height: u32) -> Self {
         assert_eq!(frame.len(), (width * height) as usize);
+
         Setup {
             ring: frame,
             mv_field: vec![0i32, 0i32],
@@ -148,8 +133,7 @@ impl Setup {
         }
     }
 
-    /// Ring slots in this setup's frame ring, which is also how many
-    /// regions the accumulators carry.
+    /// Slots in the frame ring, which is also how many regions the accumulators carry.
     pub(super) fn frames(&self) -> u32 {
         let frame_len = self.width * self.height * self.stored_channels();
         self.ring.len() as u32 / frame_len
@@ -184,86 +168,78 @@ pub(super) struct Aggregated {
 }
 
 impl Aggregated {
-    /// One finished pixel, the weighted mean of every filtered patch
-    /// that covered it.
+    /// One finished pixel, the weighted mean of every filtered patch that covered it.
     ///
-    /// This is what [`crate::collab::kernels::aggregate::collab_normalise`]
-    /// computes and what the caller actually sees, so a tolerance stated
-    /// against it is a tolerance in pixel values. Comparing the raw
-    /// accumulator instead would fail on a group-weight difference that
-    /// the division cancels out.
-    ///
-    /// A pixel no member covered has a zero weight sum and reads zero.
+    /// This is what the caller sees, so a tolerance against it is in pixel values. Comparing the raw
+    /// accumulator instead would fail on a group-weight difference the division cancels. A pixel no
+    /// member covered reads zero.
     pub(super) fn pixel(&self, idx: usize) -> f64 {
-        let w = self.wsum[idx];
-        if w == 0 {
+        let weight_sum = self.wsum[idx];
+        if weight_sum == 0 {
             0.0
         } else {
-            // `wsum` counts at `WEIGHT_GAIN` times `accum`'s scale, the
-            // one factor that does not cancel between the two, exactly as
-            // `collab_normalise` multiplies it back out.
-            self.accum[idx] as f64 * WEIGHT_GAIN as f64 / w as f64
+            // `wsum` counts at `WEIGHT_GAIN` times `accum`'s scale, the one factor that does not
+            // cancel, so it is multiplied back out as `collab_normalise` does.
+            self.accum[idx] as f64 * WEIGHT_GAIN as f64 / weight_sum as f64
         }
     }
 
-    /// The total weight one ring slot's region received. A slot no
-    /// member scattered into reads exactly zero.
+    /// The total weight one ring slot's region received.
     pub(super) fn frame_weight_sum(&self, slot: usize) -> i64 {
         self.wsum[slot * self.pixels..(slot + 1) * self.pixels]
             .iter()
-            .map(|&v| v as i64)
+            .map(|&weight| weight as i64)
             .sum()
     }
 
-    /// A compact summary of the whole run, small enough to record as
-    /// literals and specific enough that a kernel writing nothing cannot
-    /// reproduce it.
+    /// A summary of the whole run, small enough to record as literals and specific enough that a
+    /// kernel writing nothing cannot reproduce it.
     fn digest(&self) -> Digest {
-        // Luma stores one channel per pixel across this file, so the two
-        // accumulators hold one entry each per pixel and share an index.
+        // Luma stores one channel per pixel, so the two accumulators share an index.
         assert_eq!(self.accum.len(), self.wsum.len());
-        let n = self.accum.len();
+        let len = self.accum.len();
         let mut sum = 0.0f64;
         let mut sum_sq = 0.0f64;
         let mut covered = 0usize;
-        for idx in 0..n {
-            let v = self.pixel(idx);
-            sum += v;
-            sum_sq += v * v;
+        for idx in 0..len {
+            let pixel = self.pixel(idx);
+            sum += pixel;
+            sum_sq += pixel * pixel;
             if self.wsum[idx] != 0 {
                 covered += 1;
             }
         }
-        let weight_mean =
-            self.group_weight.iter().map(|&w| w as f64).sum::<f64>() / self.group_weight.len() as f64;
+
+        let weight_total = self.group_weight.iter().map(|&weight| weight as f64).sum::<f64>();
+        let weight_mean = weight_total / self.group_weight.len() as f64;
 
         let mut probes = [0.0f64; PROBE_COUNT];
         for (i, probe) in probes.iter_mut().enumerate() {
-            *probe = self.pixel(probe_index(i, n));
+            let index = probe_index(i, len);
+            *probe = self.pixel(index);
         }
 
         Digest {
             covered,
-            pixel_mean: sum / n as f64,
-            pixel_rms: (sum_sq / n as f64).sqrt(),
+            pixel_mean: sum / len as f64,
+            pixel_rms: (sum_sq / len as f64).sqrt(),
             weight_mean,
             probes,
         }
     }
 }
 
-/// How many individual pixels a [`Digest`] pins alongside its whole-run
-/// statistics.
+/// How many individual pixels a [Digest] pins alongside its whole-run statistics.
 const PROBE_COUNT: usize = 8;
 
-/// The pixel a probe reads. The odd stride spreads the eight probes over
-/// the buffer so no two land in one patch or one row.
-pub(super) fn probe_index(i: usize, len: usize) -> usize {
-    (i * 7919 + 1013) % len
+/// The pixel a probe reads.
+///
+/// The odd stride spreads the eight probes over the buffer so no two land in one patch or one row.
+pub(super) fn probe_index(probe: usize, len: usize) -> usize {
+    (probe * 7919 + 1013) % len
 }
 
-/// One run's output, boiled down to numbers a test can carry as
-/// literals.
+/// One run's output, boiled down to numbers a test can carry as literals.
 pub(super) struct Digest {
     /// Pixels whose weight sum is non-zero.
     pub(super) covered: usize,
@@ -273,67 +249,46 @@ pub(super) struct Digest {
     pub(super) pixel_rms: f64,
     /// Mean of the per-reference group weight.
     pub(super) weight_mean: f64,
-    /// Individual pixels at [`probe_index`] positions.
+    /// Individual pixels at [probe_index] positions.
     pub(super) probes: [f64; PROBE_COUNT],
 }
 
 /// How far a recorded whole-run statistic may move, relative.
 ///
-/// Each of these sums thousands of values, so a single coefficient
-/// falling the other side of the hard threshold moves one by around
-/// `1e-8`.
-///
-/// The literals below were recorded from an implementation that
-/// truncated toward zero on the way into the accumulators, which biased
-/// every contribution down by up to a fixed-point unit.
-/// [`crate::collab::kernels::aggregate::to_fixed`] rounds instead, so the
-/// values it produces sit about `1e-5` relative above the recorded ones.
-/// That is the quantisation step itself moving, not the filter, and no
-/// implementation can match across it more tightly than this. Re-recording
-/// from the fused kernel would be worse than loosening, because these
-/// literals are a second implementation's answer and matching the kernel
-/// against itself would prove nothing.
-///
-/// `2e-5` is still vanishingly small next to the difference a kernel that
-/// stopped writing would produce.
+/// Each statistic sums thousands of values, so one coefficient crossing the hard threshold moves it
+/// by around `1e-8`. The recorded literals carry a truncate-toward-zero bias of up to one fixed-point
+/// unit per contribution, while [to_fixed](crate::collab::kernels::aggregate::to_fixed) rounds, so
+/// live values sit about `1e-5` relative above them. That is the quantisation step moving, not the
+/// filter, and no implementation can match across it more tightly. Re-recording from the fused
+/// kernel would prove nothing, since the literals are a second implementation's answer. `2e-5` is
+/// still vanishingly small next to what a kernel that stopped writing would produce.
 const DIGEST_RELATIVE_TOLERANCE: f64 = 2.0e-5;
 
 /// How far a recorded probe pixel may move, absolute.
 ///
-/// The hard threshold is a discontinuity, and a coefficient whose
-/// magnitude sits within float rounding of `lambda_ht * sigma` can fall
-/// either way. One such coefficient moves its group's reconstruction by
-/// its own magnitude, and a probe reads one pixel rather than an
-/// average, so this is the same `1e-3` (a quarter of an 8-bit code
-/// level) the differential these literals were recorded from allowed.
+/// A coefficient within float rounding of `lambda_ht * sigma` can fall either side of the hard
+/// threshold and moves its group's reconstruction by its own magnitude. A probe reads one pixel
+/// rather than an average, so it allows `1e-3`, a quarter of an 8-bit code level.
 const PROBE_TOLERANCE: f64 = 1.0e-3;
 
-/// Checks a run against values recorded from a known-good
-/// implementation.
+/// Checks a run against values recorded from a second, known-good implementation.
 ///
-/// Every expected value below was produced by
-/// `collab_group_temporal` + `collab_filter_ht`, the two-kernel pair the
-/// fused kernel replaces, on 2026-08-21, immediately before that pair
-/// was deleted. The two agreed to `5e-9` on the whole-run statistics and
-/// `5e-7` on the worst probe at the time of recording.
-///
-/// Fixed literals rather than a second kernel is what keeps this
-/// meaningful. A cubecl 0.10 compiler bug makes a failing shader
-/// compile silently do nothing at all, leaving the buffers untouched,
-/// and a test that compared the fused kernel against itself would have
-/// compared zeros to zeros. Zeros do not match these.
+/// The literals come from a two-kernel group-then-filter implementation, which agreed with the fused
+/// kernel to `5e-9` on the whole-run statistics and `5e-7` on the worst probe when recorded.
+/// Fixed literals keep this meaningful because a cubecl compiler bug can make a failing shader do
+/// nothing at all, and a kernel compared against itself would then match zeros to zeros.
 pub(super) fn assert_matches_recorded(label: &str, got: &Aggregated, want: &Digest) {
-    let d = got.digest();
+    let digest = got.digest();
     assert_eq!(
-        d.covered, want.covered,
+        digest.covered, want.covered,
         "{label}: {} pixels carry weight, recorded {}",
-        d.covered, want.covered
+        digest.covered, want.covered
     );
 
     for (name, have, expect) in [
-        ("pixel_mean", d.pixel_mean, want.pixel_mean),
-        ("pixel_rms", d.pixel_rms, want.pixel_rms),
-        ("weight_mean", d.weight_mean, want.weight_mean),
+        ("pixel_mean", digest.pixel_mean, want.pixel_mean),
+        ("pixel_rms", digest.pixel_rms, want.pixel_rms),
+        ("weight_mean", digest.weight_mean, want.weight_mean),
     ] {
         let rel = (have - expect).abs() / expect.abs().max(1.0e-30);
         assert!(
@@ -342,7 +297,7 @@ pub(super) fn assert_matches_recorded(label: &str, got: &Aggregated, want: &Dige
         );
     }
 
-    for (i, (&have, &expect)) in d.probes.iter().zip(want.probes.iter()).enumerate() {
+    for (i, (&have, &expect)) in digest.probes.iter().zip(want.probes.iter()).enumerate() {
         assert!(
             (have - expect).abs() < PROBE_TOLERANCE,
             "{label}: probe {i} is {have}, recorded {expect}"
@@ -370,35 +325,58 @@ pub(super) struct Buffers {
     refs_y: u32,
 }
 
-pub(super) fn buffers(s: &Setup) -> Buffers {
+pub(super) fn buffers(setup: &Setup) -> Buffers {
     let client = make_client();
-    let refs_x = refs_along(s.width);
-    let refs_y = refs_along(s.height);
-    let refs = ref_count(s.width, s.height);
-    let frames = s.frames() as usize;
-    let stored_ch = s.stored_channels() as usize;
-    let accum_len = s.pixels() * stored_ch * frames;
-    let wsum_len = s.pixels() * frames;
+    let refs_x = refs_along(setup.width);
+    let refs_y = refs_along(setup.height);
+    let refs = ref_count(setup.width, setup.height);
+    let frames = setup.frames() as usize;
+    let stored_channels = setup.stored_channels() as usize;
+    let accum_len = setup.pixels() * stored_channels * frames;
+    let wsum_len = setup.pixels() * frames;
 
-    // Padding lanes past the live channels carry a zero sigma, as the
-    // denoiser uploads them.
-    let mut sigma = vec![0.0f32; stored_ch];
-    let live_channels = s.channel_mode.count() as usize;
-    sigma[..live_channels].fill(s.sigma);
+    // Padding lanes past the live channels carry a zero sigma, as the denoiser uploads them.
+    let mut sigma = vec![0.0f32; stored_channels];
+    let live_channels = setup.channel_mode.count() as usize;
+    sigma[..live_channels].fill(setup.sigma);
+
+    let profile = setup.profile();
+    let kaiser = kaiser_window(setup.kaiser_beta);
+    // Zeroed here rather than by `collab_zero_accum`, since the scatter is the only writer in these runs.
+    let zeroed_accum = vec![0i32; accum_len];
+    let zeroed_wsum = vec![0i32; wsum_len];
+
+    let ring_bytes = f32::as_bytes(&setup.ring);
+    let mv_bytes = i32::as_bytes(&setup.mv_field);
+    let conf_bytes = f32::as_bytes(&setup.confidence);
+    let slots_bytes = u32::as_bytes(&setup.neighbour_slots);
+    let sigma_bytes = f32::as_bytes(&sigma);
+    let profile_bytes = f32::as_bytes(&profile);
+    let kaiser_bytes = f32::as_bytes(&kaiser);
+    let accum_bytes = i32::as_bytes(&zeroed_accum);
+    let wsum_bytes = i32::as_bytes(&zeroed_wsum);
+    let ring = client.create_from_slice(ring_bytes);
+    let mv_field = client.create_from_slice(mv_bytes);
+    let confidence = client.create_from_slice(conf_bytes);
+    let neighbour_slots = client.create_from_slice(slots_bytes);
+    let sigma = client.create_from_slice(sigma_bytes);
+    let dct_profile = client.create_from_slice(profile_bytes);
+    let kaiser = client.create_from_slice(kaiser_bytes);
+    let accum = client.create_from_slice(accum_bytes);
+    let wsum = client.create_from_slice(wsum_bytes);
+    let group_weight = client.empty(refs * size_of::<f32>());
 
     Buffers {
-        ring: client.create_from_slice(f32::as_bytes(&s.ring)),
-        mv_field: client.create_from_slice(i32::as_bytes(&s.mv_field)),
-        confidence: client.create_from_slice(f32::as_bytes(&s.confidence)),
-        neighbour_slots: client.create_from_slice(u32::as_bytes(&s.neighbour_slots)),
-        sigma: client.create_from_slice(f32::as_bytes(&sigma)),
-        dct_profile: client.create_from_slice(f32::as_bytes(&s.profile())),
-        kaiser: client.create_from_slice(f32::as_bytes(&kaiser_window(s.kaiser_beta))),
-        // Zeroed here rather than by `collab_zero_accum`, since the
-        // scatter is the only thing writing them in these runs.
-        accum: client.create_from_slice(i32::as_bytes(&vec![0i32; accum_len])),
-        wsum: client.create_from_slice(i32::as_bytes(&vec![0i32; wsum_len])),
-        group_weight: client.empty(refs * size_of::<f32>()),
+        ring,
+        mv_field,
+        confidence,
+        neighbour_slots,
+        sigma,
+        dct_profile,
+        kaiser,
+        accum,
+        wsum,
+        group_weight,
         accum_len,
         wsum_len,
         refs,
@@ -408,43 +386,47 @@ pub(super) fn buffers(s: &Setup) -> Buffers {
     }
 }
 
-pub(super) fn read_back(b: Buffers, s: &Setup) -> Aggregated {
-    let accum = b.client.read_one(b.accum).expect("accum readback failed");
-    let wsum = b.client.read_one(b.wsum).expect("wsum readback failed");
-    let group_weight = b
+pub(super) fn read_back(handles: Buffers, setup: &Setup) -> Aggregated {
+    let accum_bytes = handles
         .client
-        .read_one(b.group_weight)
+        .read_one(handles.accum)
+        .expect("accum readback failed");
+    let wsum_bytes = handles
+        .client
+        .read_one(handles.wsum)
+        .expect("wsum readback failed");
+    let weight_bytes = handles
+        .client
+        .read_one(handles.group_weight)
         .expect("group_weight readback failed");
 
     Aggregated {
-        accum: i32::from_bytes(&accum)[..b.accum_len].to_vec(),
-        wsum: i32::from_bytes(&wsum)[..b.wsum_len].to_vec(),
-        group_weight: f32::from_bytes(&group_weight)[..b.refs].to_vec(),
-        pixels: s.pixels(),
+        accum: i32::from_bytes(&accum_bytes)[..handles.accum_len].to_vec(),
+        wsum: i32::from_bytes(&wsum_bytes)[..handles.wsum_len].to_vec(),
+        group_weight: f32::from_bytes(&weight_bytes)[..handles.refs].to_vec(),
+        pixels: setup.pixels(),
     }
 }
 
-/// Launches [`collab_fused`] on its eight-references-per-cube grid and
-/// reads back what it aggregated.
+/// Launches [collab_fused] on its eight-references-per-cube grid and reads back what it aggregated.
 ///
-/// The search walk is whichever one this runtime needs, so a plain run
-/// covers whatever the shipping code would actually launch here.
-pub(super) fn run_fused(s: &Setup) -> Aggregated {
-    run_fused_walk(s, None)
+/// The search walk is whichever one this runtime needs, matching what the shipping code launches.
+pub(super) fn run_fused(setup: &Setup) -> Aggregated {
+    run_fused_walk(setup, None)
 }
 
-/// [`run_fused`] with the search walk pinned rather than taken from the
-/// runtime, so one test can run both and compare them.
-pub(super) fn run_fused_walk(s: &Setup, warp_uniform: Option<bool>) -> Aggregated {
-    let b = buffers(s);
-    let profile = s.profile();
-    let curve = s.noise_curve.unwrap_or([0.0f32; NOISE_CURVE_BINS]);
-    let curve_buf = b.client.create_from_slice(f32::as_bytes(&curve));
-    let curve_valid = u32::from(s.noise_curve.is_some());
+/// [run_fused] with the search walk pinned rather than taken from the runtime.
+pub(super) fn run_fused_walk(setup: &Setup, warp_uniform: Option<bool>) -> Aggregated {
+    let handles = buffers(setup);
+    let profile = setup.profile();
+    let curve = setup.noise_curve.unwrap_or([0.0f32; NOISE_CURVE_BINS]);
+    let curve_bytes = f32::as_bytes(&curve);
+    let curve_buf = handles.client.create_from_slice(curve_bytes);
+    let curve_valid = u32::from(setup.noise_curve.is_some());
 
-    let (map_cols, map_rows) = strength_map_dims(s.width, s.height);
+    let (map_cols, map_rows) = strength_map_dims(setup.width, setup.height);
     let map_len = (map_cols * map_rows) as usize;
-    let (map_values, map_mode) = match &s.strength_map {
+    let (map_values, map_mode) = match &setup.strength_map {
         Some((values, mode)) => (values.clone(), *mode),
         None => (vec![1.0f32; map_len], STRENGTH_MAP_OFF),
     };
@@ -453,71 +435,77 @@ pub(super) fn run_fused_walk(s: &Setup, warp_uniform: Option<bool>) -> Aggregate
         map_len,
         "a strength map must cover the frame's quarter grid"
     );
-    let map_buf = b.client.create_from_slice(f32::as_bytes(&map_values));
-    let stored_ch = s.stored_channels();
+    let map_bytes = f32::as_bytes(&map_values);
+    let map_buf = handles.client.create_from_slice(map_bytes);
+    let stored_channels = setup.stored_channels();
+
+    let cubes_x = fused_cubes_x(setup.width);
+    let grid = CubeCount::new_2d(cubes_x, handles.refs_y);
+    let dim = CubeDim::new_1d(64);
+    let scale = weight_scale(setup.sigma, &profile);
+    let accum_scale = setup.accum_scale();
+    let warp_uniform = warp_uniform.unwrap_or_else(|| needs_warp_uniform_search(&handles.client));
+    let grid_frame_count = grid_frames(setup.radius);
+    let pooled_ratio = setup.pooled.unwrap_or(0.0);
 
     unsafe {
         collab_fused::launch_unchecked::<R>(
-            &b.client,
-            CubeCount::new_2d(fused_cubes_x(s.width), b.refs_y),
-            CubeDim::new_1d(64),
-            stored_ch as usize,
-            ArrayArg::from_raw_parts(b.ring.clone(), s.ring.len()),
-            ArrayArg::from_raw_parts(b.mv_field.clone(), s.mv_field.len()),
-            ArrayArg::from_raw_parts(b.confidence.clone(), s.confidence.len()),
-            ArrayArg::from_raw_parts(b.neighbour_slots.clone(), s.neighbour_slots.len()),
-            ArrayArg::from_raw_parts(b.sigma.clone(), stored_ch as usize),
+            &handles.client,
+            grid,
+            dim,
+            stored_channels as usize,
+            ArrayArg::from_raw_parts(handles.ring.clone(), setup.ring.len()),
+            ArrayArg::from_raw_parts(handles.mv_field.clone(), setup.mv_field.len()),
+            ArrayArg::from_raw_parts(handles.confidence.clone(), setup.confidence.len()),
+            ArrayArg::from_raw_parts(handles.neighbour_slots.clone(), setup.neighbour_slots.len()),
+            ArrayArg::from_raw_parts(handles.sigma.clone(), stored_channels as usize),
             ArrayArg::from_raw_parts(curve_buf, NOISE_CURVE_BINS),
             ArrayArg::from_raw_parts(map_buf, map_len),
-            ArrayArg::from_raw_parts(b.dct_profile.clone(), 8),
-            ArrayArg::from_raw_parts(b.kaiser.clone(), PATCH_SIZE as usize),
-            ArrayArg::from_raw_parts(b.accum.clone(), b.accum_len),
-            ArrayArg::from_raw_parts(b.wsum.clone(), b.wsum_len),
-            ArrayArg::from_raw_parts(b.group_weight.clone(), b.refs),
-            s.centre_slot,
-            s.c_min,
-            s.lambda_ht,
+            ArrayArg::from_raw_parts(handles.dct_profile.clone(), 8),
+            ArrayArg::from_raw_parts(handles.kaiser.clone(), PATCH_SIZE as usize),
+            ArrayArg::from_raw_parts(handles.accum.clone(), handles.accum_len),
+            ArrayArg::from_raw_parts(handles.wsum.clone(), handles.wsum_len),
+            ArrayArg::from_raw_parts(handles.group_weight.clone(), handles.refs),
+            setup.centre_slot,
+            setup.c_min,
+            setup.lambda_ht,
             curve_valid,
             map_mode,
-            weight_scale(s.sigma, &profile),
-            s.accum_scale(),
-            warp_uniform.unwrap_or_else(|| needs_warp_uniform_search(&b.client)),
-            s.radius,
-            grid_frames(s.radius),
-            s.refine,
-            s.mv_stride,
-            s.conf_stride,
+            scale,
+            accum_scale,
+            warp_uniform,
+            setup.radius,
+            grid_frame_count,
+            setup.refine,
+            setup.mv_stride,
+            setup.conf_stride,
             BLK_STEP,
             BLKSIZE,
-            s.blocks_x,
-            s.blocks_y,
-            s.width,
-            s.height,
-            s.channel_mode.count(),
-            s.k_max,
-            stored_ch,
-            s.spatial_radius,
-            b.refs_x,
+            setup.blocks_x,
+            setup.blocks_y,
+            setup.width,
+            setup.height,
+            setup.channel_mode.count(),
+            setup.k_max,
+            stored_channels,
+            setup.spatial_radius,
+            handles.refs_x,
             map_cols,
             map_rows,
-            s.pooled.unwrap_or(0.0),
-            s.pooled.is_some(),
+            pooled_ratio,
+            setup.pooled.is_some(),
         );
     }
 
-    read_back(b, s)
+    read_back(handles, setup)
 }
 
-/// A ring of `2 * radius + 1` frames of unique content, with a motion
-/// field and a confidence field that both vary by block.
+/// A ring of `2 * radius + 1` frames of unique content, with motion and confidence fields that
+/// vary by block.
 ///
-/// The ring is laid out frame-major, exactly as `read_line` indexes it,
-/// so one call to `make_unique_frame` over a `2 * radius + 1` times
-/// taller image fills the whole ring with content no two 8x8 windows
-/// share, across frames as well as within one.
-///
-/// The confidences run from below `c_min` to 1.0, so some blocks have
-/// their whole window skipped and the rest are searched.
+/// The ring is frame-major, so one [unique_frame] over a `2 * radius + 1` times taller image gives
+/// content no two 8x8 windows share, across frames as well as within one. The confidences run from
+/// below `c_min` to 1.0, so some blocks skip their whole window and the rest are searched.
 pub(super) fn cross_frame_setup(width: u32, height: u32, radius: u32) -> Setup {
     let frames = 2 * radius + 1;
     let blocks_x = width.div_ceil(BLK_STEP);
@@ -529,17 +517,17 @@ pub(super) fn cross_frame_setup(width: u32, height: u32, radius: u32) -> Setup {
     let mut confidence = vec![0.0f32; (2 * radius * conf_stride) as usize];
     for t in 0..(2 * radius) {
         for block in 0..conf_stride {
-            let mv = (t * mv_stride + block * 2) as usize;
-            // A spread of shifts in both signs, including some that push
-            // the refine window off the frame so the clip matters.
-            mv_field[mv] = (block % 11) as i32 - 5 + t as i32;
-            mv_field[mv + 1] = 4 - (block % 9) as i32 - t as i32;
+            let mv_index = (t * mv_stride + block * 2) as usize;
+            // A spread of shifts in both signs, some pushing the refine window off the frame so the
+            // clip matters.
+            mv_field[mv_index] = (block % 11) as i32 - 5 + t as i32;
+            mv_field[mv_index + 1] = 4 - (block % 9) as i32 - t as i32;
             confidence[(t * conf_stride + block) as usize] = ((block * 7 + t * 3) % 11) as f32 / 10.0;
         }
     }
 
-    // The centre sits in the middle of the ring, and the neighbours are
-    // the slots either side of it, nearest first.
+    // The centre sits in the middle of the ring, and the neighbours are the slots either side of it,
+    // nearest first.
     let centre_slot = radius;
     let mut neighbour_slots = Vec::new();
     for t in 0..radius {
@@ -547,8 +535,11 @@ pub(super) fn cross_frame_setup(width: u32, height: u32, radius: u32) -> Setup {
         neighbour_slots.push(radius + 1 + t);
     }
 
+    let ring = unique_frame(width, height * frames);
+    let placeholder = vec![0.0f32; (width * height) as usize];
+
     Setup {
-        ring: unique_frame(width, height * frames),
+        ring,
         mv_field,
         confidence,
         neighbour_slots,
@@ -560,19 +551,17 @@ pub(super) fn cross_frame_setup(width: u32, height: u32, radius: u32) -> Setup {
         conf_stride,
         blocks_x,
         blocks_y,
-        ..Setup::spatial_only(vec![0.0f32; (width * height) as usize], width, height)
+        ..Setup::spatial_only(placeholder, width, height)
     }
 }
 
-/// A three-frame ring whose neighbours hold an exact copy of the centre
-/// frame, at the position the zero motion field predicts.
+/// A three-frame ring whose neighbours hold an exact copy of the centre frame, at the position the
+/// zero motion field predicts.
 ///
-/// An exact copy scores distance zero, which every other candidate on
-/// this content loses to. At radius 1 the group is four volumes of two
-/// frames, and each volume's second frame is neighbour 0, which wins
-/// every tie. `refine = 0` narrows each neighbour's rectangle to that
-/// one predicted position, so there is nothing else in a neighbour for
-/// a volume to pick instead.
+/// An exact copy scores distance zero, which every other candidate loses to. At radius 1 the group
+/// is four volumes of two frames, and each volume's second frame is neighbour 0, which wins every
+/// tie. `refine = 0` narrows each neighbour to that one predicted position, so a volume has nothing
+/// else to pick.
 pub(super) fn three_frame_ring_with_a_planted_match(width: u32, height: u32) -> Setup {
     let frame = unique_frame(width, height);
     let mut ring = Vec::with_capacity(frame.len() * 3);
@@ -584,6 +573,7 @@ pub(super) fn three_frame_ring_with_a_planted_match(width: u32, height: u32) -> 
     let blocks_y = height.div_ceil(BLK_STEP);
     let conf_stride = blocks_x * blocks_y;
     let mv_stride = conf_stride * 2;
+    let placeholder = vec![0.0f32; (width * height) as usize];
 
     Setup {
         ring,
@@ -597,7 +587,7 @@ pub(super) fn three_frame_ring_with_a_planted_match(width: u32, height: u32) -> 
         conf_stride,
         blocks_x,
         blocks_y,
-        ..Setup::spatial_only(vec![0.0f32; (width * height) as usize], width, height)
+        ..Setup::spatial_only(placeholder, width, height)
     }
 }
 
@@ -609,7 +599,7 @@ pub(super) fn three_frame_ring_with_a_planted_match(width: u32, height: u32) -> 
 pub(super) fn five_frame_ring_with_jittered_copies(width: u32, height: u32) -> Setup {
     let radius = 2u32;
     let frame = unique_frame(width, height);
-    let jitter = noisy_field_over(width, height * 4, 0.5, 0.002);
+    let jitter = noisy_flat_field(width, height * 4, 0.5, 0.002);
     let pixels = (width * height) as usize;
 
     let mut ring = Vec::with_capacity(pixels * 5);
@@ -632,6 +622,7 @@ pub(super) fn five_frame_ring_with_jittered_copies(width: u32, height: u32) -> S
     let blocks_y = height.div_ceil(BLK_STEP);
     let conf_stride = blocks_x * blocks_y;
     let mv_stride = conf_stride * 2;
+    let placeholder = vec![0.0f32; pixels];
 
     Setup {
         ring,
@@ -645,58 +636,59 @@ pub(super) fn five_frame_ring_with_jittered_copies(width: u32, height: u32) -> S
         conf_stride,
         blocks_x,
         blocks_y,
-        ..Setup::spatial_only(vec![0.0f32; pixels], width, height)
+        ..Setup::spatial_only(placeholder, width, height)
     }
 }
 
-/// How many reference patches cover each pixel of a `width` by `height`
-/// frame, on the same grid [`ref_pos`] lays out.
+/// How many reference patches cover each pixel, on the same grid [ref_pos] lays out.
 pub(super) fn reference_cover_counts(width: u32, height: u32) -> Vec<i64> {
     let mut counts = vec![0i64; (width * height) as usize];
-    for ry in 0..refs_along(height) {
-        for rx in 0..refs_along(width) {
-            let px = ref_pos(rx, width);
-            let py = ref_pos(ry, height);
+    for ref_y in 0..refs_along(height) {
+        for ref_x in 0..refs_along(width) {
+            let left = ref_pos(ref_x, width);
+            let top = ref_pos(ref_y, height);
             for row in 0..PATCH_SIZE {
                 for col in 0..PATCH_SIZE {
-                    counts[((py + row) * width + px + col) as usize] += 1;
+                    counts[((top + row) * width + left + col) as usize] += 1;
                 }
             }
         }
     }
+
     counts
 }
 
-pub(super) fn patch_pool_variance(frame: &[f32], w: u32, h: u32) -> f64 {
+pub(super) fn patch_pool_variance(frame: &[f32], width: u32, height: u32) -> f64 {
     let mut pool: Vec<f64> = Vec::new();
-    for ry in 0..refs_along(h) {
-        for rx in 0..refs_along(w) {
-            let px = ref_pos(rx, w);
-            let py = ref_pos(ry, h);
+    for ref_y in 0..refs_along(height) {
+        for ref_x in 0..refs_along(width) {
+            let left = ref_pos(ref_x, width);
+            let top = ref_pos(ref_y, height);
             for row in 0..PATCH_SIZE {
                 for col in 0..PATCH_SIZE {
-                    pool.push(frame[((py + row) * w + px + col) as usize] as f64);
+                    pool.push(frame[((top + row) * width + left + col) as usize] as f64);
                 }
             }
         }
     }
+
     let mean = pool.iter().sum::<f64>() / pool.len() as f64;
-    pool.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / pool.len() as f64
+    pool.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / pool.len() as f64
 }
 
-/// The variance of a run's finished pixels.
 pub(super) fn output_variance(got: &Aggregated) -> f64 {
     let values: Vec<f64> = (0..got.accum.len()).map(|i| got.pixel(i)).collect();
     let mean = values.iter().sum::<f64>() / values.len() as f64;
-    values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64
+    values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / values.len() as f64
 }
 
-/// A flat field carrying nothing but noise, at the settings a real
-/// caller would filter it with.
-pub(super) fn flat_noise_setup(w: u32, h: u32, sigma: f32) -> Setup {
-    let mut s = Setup::spatial_only(noisy_field_over(w, h, 0.5, sigma), w, h);
-    s.spatial_radius = 9;
-    s.sigma = sigma;
-    s.lambda_ht = 2.7;
-    s
+/// A flat field carrying nothing but noise, at the settings a real caller would filter it with.
+pub(super) fn flat_noise_setup(width: u32, height: u32, sigma: f32) -> Setup {
+    let field = noisy_flat_field(width, height, 0.5, sigma);
+    let mut setup = Setup::spatial_only(field, width, height);
+    setup.spatial_radius = 9;
+    setup.sigma = sigma;
+    setup.lambda_ht = 2.7;
+
+    setup
 }

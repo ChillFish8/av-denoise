@@ -171,8 +171,8 @@ without use.
 
 If the cache directory cannot be created, `av-denoise` logs a warning and carries on without a cache.
 
-Library users can call `av_denoise::install_compilation_cache()` before `Denoiser::create` to get the same
-behaviour in their own binary. It has to run before the first `Denoiser` exists, because building a CubeCL client
+Library users can call `av_denoise::install_compilation_cache()` before `HostDenoiser::create` to get the same
+behaviour in their own binary. It has to run before the first denoiser exists, because building a CubeCL client
 locks the global config. An embedder that wants to choose the cache directory itself can call
 `av_denoise::default_cache_dir()` to get the same default this crate uses, and
 `av_denoise::install_compilation_cache_at()` to install it, or any other directory, directly.

@@ -1,26 +1,24 @@
 use av_denoise::{FrameLayout, PlanarDenoiser, PlaneOptions, WarmUp, kernel_key};
 
-/// The only place either CLI mode builds a [`PlanarDenoiser`].
+/// Builds a [PlanarDenoiser] after taking a place in the cross-process warm-up queue.
 ///
-/// Takes a place in the cross-process warm-up queue first, so concurrent
-/// `av-denoise` processes do not each compile into a cold cache. The
-/// returned place, if any, is the caller's to finish once this
-/// denoiser has produced its first output frame — see [`WarmUp`] for
-/// why it cannot be finished any earlier than that.
+/// The queue stops concurrent `av-denoise` processes each compiling into a cold cache. The caller
+/// finishes the returned place once the denoiser has produced its first output frame, and [WarmUp]
+/// explains why it cannot be finished any earlier.
 pub fn create_denoiser(
     opts: &PlaneOptions,
     layout: FrameLayout,
 ) -> Result<(PlanarDenoiser, Option<WarmUp>), anyhow::Error> {
-    let warm_up = WarmUp::begin(kernel_key(opts, layout));
+    let key = kernel_key(opts, layout);
+    let warm_up = WarmUp::begin(key);
     let denoiser = PlanarDenoiser::create(opts, layout)?;
 
     Ok((denoiser, warm_up))
 }
 
-/// Gives up a cold-cache queue place after a frame has proven the
-/// kernels it names are compiled and cached. Does nothing once already
-/// finished, or if no place was taken. Mirrors
-/// `av-denoise-vs`'s `State::finish_warm_up`.
+/// Gives up a cold-cache queue place once a frame has proven its kernels are compiled and cached.
+///
+/// Does nothing when no place is held.
 pub fn finish_warm_up(warm_up: &mut Option<WarmUp>) {
     if let Some(warm_up) = warm_up.take() {
         warm_up.finish();
@@ -46,8 +44,9 @@ mod tests {
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
         };
-        // Zero width collapses the 4:2:0 chroma plane to nothing, which
-        // `PlanarDenoiser::create` rejects before touching the GPU.
+
+        // Zero width collapses the 4:2:0 chroma plane to nothing, which `PlanarDenoiser::create`
+        // rejects before touching the GPU.
         let layout = FrameLayout {
             width: 0,
             height: 0,

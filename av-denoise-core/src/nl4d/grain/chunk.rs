@@ -1,14 +1,13 @@
 use super::consts::{HIST_LEN, LAG_COUNT, STRENGTH_GROUPS};
 
-/// The grain statistics of up to [CHUNK_FRAMES](crate::nl4d::grain::consts::CHUNK_FRAMES)
-/// consecutive completed frames of one scene.
+/// The grain statistics of up to `CHUNK_FRAMES` consecutive completed frames of one scene.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GrainChunk {
     /// How many completed frames the chunk covers.
     pub frames: u32,
-    /// Accepted source blocks, 16 luma bins by 64 std buckets.
+    /// Accepted source block counts, 16 luma bins by 64 std buckets.
     pub source_hist: Vec<u32>,
-    /// Accepted kept-grain blocks, in the same layout.
+    /// Accepted kept-grain block counts, in the same layout.
     pub kept_hist: Vec<u32>,
     /// The 46 source autocovariance sums of each strength group, in normalised units squared.
     pub autocov: Vec<f64>,

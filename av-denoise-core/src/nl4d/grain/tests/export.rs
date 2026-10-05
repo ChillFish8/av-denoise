@@ -4,6 +4,7 @@ use cubecl::prelude::*;
 use cubecl::wgpu::WgpuRuntime;
 
 use super::synthetic::gaussian_field;
+use crate::bench_api::HostIo;
 use crate::nl4d::grain::chunk::GrainChunk;
 use crate::nl4d::grain::consts::{CHUNK_FRAMES, HIST_LEN, LUMA_BINS, STD_BUCKETS, STRENGTH_GROUPS};
 use crate::nl4d::grain::fit::{bucket_edges, hist_median};
@@ -40,24 +41,28 @@ fn make_client() -> ComputeClient<R> {
 }
 
 fn params(grain_export: bool) -> Nl4dParams {
+    let motion_compensation = MotionCompensationMode::Mvtools {
+        blksize: 16,
+        overlap: 8,
+        search_radius: 4,
+        pyramid_levels: 2,
+        estimation: MotionEstimation::Auto,
+    };
+    let hq = HqParams::with_sigma(6.0 / 255.0);
+    let nlm = NlmParams {
+        temporal_radius: 2,
+        search_radius: 2,
+        patch_radius: 2,
+        strength: 1.2,
+        self_weight: 1.0,
+        channels: ChannelMode::Luma,
+        prefilter: PrefilterMode::None,
+        motion_compensation,
+        hq: Some(hq),
+    };
+
     Nl4dParams {
-        nlm: NlmParams {
-            temporal_radius: 2,
-            search_radius: 2,
-            patch_radius: 2,
-            strength: 1.2,
-            self_weight: 1.0,
-            channels: ChannelMode::Luma,
-            prefilter: PrefilterMode::None,
-            motion_compensation: MotionCompensationMode::Mvtools {
-                blksize: 16,
-                overlap: 8,
-                search_radius: 4,
-                pyramid_levels: 2,
-                estimation: MotionEstimation::Auto,
-            },
-            hq: Some(HqParams::with_sigma(6.0 / 255.0)),
-        },
+        nlm,
         temporal_radius: 2,
         grain_export,
         ..Nl4dParams::default()
@@ -106,14 +111,17 @@ fn panning_frames(sigma: f32, count: u32) -> Vec<Vec<f32>> {
 fn denoise_stream(denoiser: &mut Nl4dDenoiser<R>, frames: &[Vec<f32>], outputs: &mut Vec<Vec<f32>>) {
     for frame in frames {
         denoiser.push_frame(frame);
-        if let Some(pending) = denoiser.denoise_submit().expect("submit") {
-            let output = pending.wait().expect("readback");
-            outputs.push(output.into_f32().expect("f32 output"));
+
+        if let Some(output) = denoiser.denoise().expect("denoise") {
+            outputs.push(output);
         }
     }
 
     denoiser
-        .flush(|frame| outputs.push(frame.as_f32().expect("f32 output").to_vec()))
+        .flush(|frame| {
+            let output = frame.to_vec();
+            outputs.push(output);
+        })
         .expect("flush");
 }
 
@@ -135,6 +143,7 @@ fn run_sized(
     denoise_stream(&mut denoiser, frames, &mut outputs);
 
     let chunks = denoiser.drain_grain_chunks().expect("drain");
+
     (outputs, chunks, has_export)
 }
 
@@ -171,6 +180,7 @@ fn lag_3_ratio(chunk: &GrainChunk) -> f64 {
     }
 
     assert!(zero_lag > 0.0);
+
     lag_3 / zero_lag
 }
 
@@ -181,7 +191,8 @@ fn frames_counted(chunks: &[GrainChunk]) -> u32 {
 #[test]
 fn export_off_allocates_nothing_and_drains_nothing() {
     let frames = grain_frames(SIGMA, 9);
-    let (_, chunks, has_export) = run(params(false), &frames);
+    let export_off = params(false);
+    let (_, chunks, has_export) = run(export_off, &frames);
 
     assert!(!has_export);
     assert!(chunks.is_empty());
@@ -190,8 +201,10 @@ fn export_off_allocates_nothing_and_drains_nothing() {
 #[test]
 fn export_does_not_change_the_output() {
     let frames = grain_frames(SIGMA, 9);
-    let (off, _, _) = run(params(false), &frames);
-    let (on, _, _) = run(params(true), &frames);
+    let export_off = params(false);
+    let export_on = params(true);
+    let (off, _, _) = run(export_off, &frames);
+    let (on, _, _) = run(export_on, &frames);
 
     assert_eq!(off, on);
 }
@@ -199,21 +212,22 @@ fn export_does_not_change_the_output() {
 #[test]
 fn export_measures_the_source_grain() {
     let frames = grain_frames(SIGMA, 9);
-    let (_, chunks, has_export) = run(params(true), &frames);
+    let export_on = params(true);
+    let (_, chunks, has_export) = run(export_on, &frames);
     let merged = merged(&chunks);
     let median = median_of(&merged.source_hist);
+    let counted = frames_counted(&chunks);
+    let any_pixels = chunks
+        .iter()
+        .any(|chunk| chunk.pixels.iter().any(|&pixels| pixels > 0.0));
 
     assert!(has_export);
-    assert_eq!(frames_counted(&chunks), 9);
+    assert_eq!(counted, 9);
     assert!(
         (median / SIGMA as f64 - 1.0).abs() < 0.1,
         "median {median} vs sigma {SIGMA}"
     );
-    assert!(
-        chunks
-            .iter()
-            .any(|chunk| chunk.pixels.iter().any(|&pixels| pixels > 0.0))
-    );
+    assert!(any_pixels);
 }
 
 #[test]
@@ -225,7 +239,8 @@ fn flicker_keeps_the_strength_and_a_short_texture() {
         }
     }
 
-    let (_, chunks, _) = run(params(true), &frames);
+    let export_on = params(true);
+    let (_, chunks, _) = run(export_on, &frames);
     let merged = merged(&chunks);
     let median = median_of(&merged.source_hist);
     let ratio = lag_3_ratio(&merged);
@@ -240,7 +255,8 @@ fn flicker_keeps_the_strength_and_a_short_texture() {
 #[test]
 fn panning_content_measures_the_source_grain() {
     let frames = panning_frames(SIGMA, 9);
-    let (outputs, chunks, _) = run_sized(params(true), &frames, PAN_WIDTH, PAN_HEIGHT);
+    let export_on = params(true);
+    let (outputs, chunks, _) = run_sized(export_on, &frames, PAN_WIDTH, PAN_HEIGHT);
     let merged = merged(&chunks);
     let accepted: u32 = merged.source_hist.iter().sum();
     let median = median_of(&merged.source_hist);
@@ -256,7 +272,8 @@ fn panning_content_measures_the_source_grain() {
 #[test]
 fn kept_grain_is_weaker_than_source_grain() {
     let frames = grain_frames(SIGMA, 9);
-    let (_, chunks, _) = run(params(true), &frames);
+    let export_on = params(true);
+    let (_, chunks, _) = run(export_on, &frames);
     let merged = merged(&chunks);
     let kept_total: u32 = merged.kept_hist.iter().sum();
     let source_total: u32 = merged.source_hist.iter().sum();
@@ -276,16 +293,18 @@ fn kept_grain_is_weaker_than_source_grain() {
 #[test]
 fn short_scene_measures_only_real_pairs() {
     let client = make_client();
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params(true), WIDTH, HEIGHT).expect("construction");
+    let export_on = params(true);
+    let mut denoiser = Nl4dDenoiser::<R>::new(&client, export_on, WIDTH, HEIGHT).expect("construction");
     let frames = grain_frames(SIGMA, 3);
     let mut outputs = Vec::new();
 
     denoise_stream(&mut denoiser, &frames, &mut outputs);
 
     let chunks = denoiser.drain_grain_chunks().expect("drain");
+    let counted = frames_counted(&chunks);
 
     assert_eq!(outputs.len(), 3);
-    assert_eq!(frames_counted(&chunks), 3);
+    assert_eq!(counted, 3);
     assert_eq!(denoiser.grain_measured_with_entry(), 2);
 }
 
@@ -293,17 +312,19 @@ fn short_scene_measures_only_real_pairs() {
 fn fused_yuv_measures_the_luma_grain() {
     let mut yuv = params(true);
     yuv.nlm.channels = ChannelMode::Yuv;
-    let frames: Vec<Vec<f32>> = grain_frames(SIGMA, 9)
+    let luma_frames = grain_frames(SIGMA, 9);
+    let frames: Vec<Vec<f32>> = luma_frames
         .into_iter()
         .map(|frame| frame.iter().flat_map(|&luma| [luma, 0.5, 0.5]).collect())
         .collect();
     let (outputs, chunks, has_export) = run(yuv, &frames);
     let merged = merged(&chunks);
     let median = median_of(&merged.source_hist);
+    let counted = frames_counted(&chunks);
 
     assert!(has_export);
     assert_eq!(outputs.len(), 9);
-    assert_eq!(frames_counted(&chunks), 9);
+    assert_eq!(counted, 9);
     assert!(
         (median / SIGMA as f64 - 1.0).abs() < 0.1,
         "median {median} vs sigma {SIGMA}"
@@ -314,7 +335,8 @@ fn fused_yuv_measures_the_luma_grain() {
 fn chroma_denoisers_never_export() {
     let mut chroma = params(true);
     chroma.nlm.channels = ChannelMode::Chroma;
-    let frames: Vec<Vec<f32>> = grain_frames(SIGMA, 9)
+    let plane_frames = grain_frames(SIGMA, 9);
+    let frames: Vec<Vec<f32>> = plane_frames
         .into_iter()
         .map(|frame| frame.iter().flat_map(|&sample| [sample, sample]).collect())
         .collect();
@@ -327,7 +349,8 @@ fn chroma_denoisers_never_export() {
 #[test]
 fn chunks_close_when_full_and_at_each_stream_end() {
     let client = make_client();
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params(true), WIDTH, HEIGHT).expect("construction");
+    let export_on = params(true);
+    let mut denoiser = Nl4dDenoiser::<R>::new(&client, export_on, WIDTH, HEIGHT).expect("construction");
     let long_stream = grain_frames(SIGMA, 30);
     let short_stream = grain_frames(SIGMA, 5);
     let mut outputs = Vec::new();

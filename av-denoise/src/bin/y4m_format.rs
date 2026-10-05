@@ -1,9 +1,8 @@
 use av_denoise::{Depth, Subsampling};
 
-/// Maps our [`Subsampling`] and [`Depth`] onto the [`y4m::Colorspace`]
-/// used to read the input and write the output header.
-pub fn subsampling_to_y4m(s: Subsampling, depth: Depth) -> y4m::Colorspace {
-    match (s, depth) {
+/// Maps a [Subsampling] and [Depth] onto the matching [y4m::Colorspace].
+pub fn subsampling_to_y4m(subsampling: Subsampling, depth: Depth) -> y4m::Colorspace {
+    match (subsampling, depth) {
         (Subsampling::Yuv420, Depth::Eight) => y4m::Colorspace::C420,
         (Subsampling::Yuv420, Depth::Ten) => y4m::Colorspace::C420p10,
         (Subsampling::Yuv420, Depth::Twelve) => y4m::Colorspace::C420p12,
@@ -16,13 +15,11 @@ pub fn subsampling_to_y4m(s: Subsampling, depth: Depth) -> y4m::Colorspace {
     }
 }
 
-/// Maps a [`y4m::Colorspace`] back onto our [`Subsampling`] and
-/// [`Depth`].
+/// Maps a [y4m::Colorspace] back onto a [Subsampling] and [Depth].
 ///
-/// Grayscale and any other unsupported colorspace are rejected with an
-/// error naming what is required instead.
-pub fn subsampling_from_y4m(c: y4m::Colorspace) -> Result<(Subsampling, Depth), anyhow::Error> {
-    let sub = match c {
+/// Grayscale and other unsupported colorspaces are rejected with an error naming what is required.
+pub fn subsampling_from_y4m(colorspace: y4m::Colorspace) -> Result<(Subsampling, Depth), anyhow::Error> {
+    let subsampling = match colorspace {
         y4m::Colorspace::C420
         | y4m::Colorspace::C420jpeg
         | y4m::Colorspace::C420paldv
@@ -34,28 +31,25 @@ pub fn subsampling_from_y4m(c: y4m::Colorspace) -> Result<(Subsampling, Depth), 
         other => anyhow::bail!("unsupported y4m colorspace {other:?}, need 4:2:0, 4:2:2, or 4:4:4"),
     };
 
-    let depth = Depth::from_bits(c.get_bit_depth())?;
+    let bit_depth = colorspace.get_bit_depth();
+    let depth = Depth::from_bits(bit_depth)?;
 
-    Ok((sub, depth))
+    Ok((subsampling, depth))
 }
 
-/// Pulls the `X`-prefixed vendor extension params out of a decoded y4m
-/// header's raw params bytes, `XCOLORRANGE=LIMITED` being the common one.
+/// Pulls the `X`-prefixed vendor extension params, such as `XCOLORRANGE=LIMITED`, out of a y4m header.
 ///
-/// The leading `X` is stripped so the result can go straight to
-/// [`y4m::EncoderBuilder::append_vendor_extension`], which adds the `X`
-/// back when it writes the output header.
-///
-/// This is how whatever colorspace and range tags the source declared
-/// reach the output instead of being dropped.
-///
-/// A token that [`y4m::VendorExtensionString`] rejects, which means one
-/// containing a space, is skipped rather than failing the run.
+/// The leading `X` is stripped because [y4m::EncoderBuilder::append_vendor_extension] adds it back.
+/// A token that [y4m::VendorExtensionString] rejects, one containing a space, is skipped rather
+/// than failing the run.
 pub fn y4m_vendor_extensions(raw_params: &[u8]) -> Vec<y4m::VendorExtensionString> {
     raw_params
-        .split(|&b| b == b' ')
-        .filter(|tok| tok.first() == Some(&b'X'))
-        .filter_map(|tok| y4m::VendorExtensionString::new(tok[1..].to_vec()).ok())
+        .split(|&byte| byte == b' ')
+        .filter(|token| token.first() == Some(&b'X'))
+        .filter_map(|token| {
+            let value = token[1..].to_vec();
+            y4m::VendorExtensionString::new(value).ok()
+        })
         .collect()
 }
 
@@ -77,47 +71,52 @@ mod colorspace_tests {
             (Subsampling::Yuv444, Depth::Twelve),
         ];
 
-        for (sub, depth) in combos {
-            let cs = subsampling_to_y4m(sub, depth);
-            let (rsub, rdepth) = subsampling_from_y4m(cs).expect("should map back");
+        for (subsampling, depth) in combos {
+            let colorspace = subsampling_to_y4m(subsampling, depth);
+            let (mapped_subsampling, mapped_depth) =
+                subsampling_from_y4m(colorspace).expect("should map back");
 
-            assert_eq!(rsub, sub, "subsampling lost for {cs:?}");
-            assert_eq!(rdepth, depth, "depth lost for {cs:?}");
+            assert_eq!(
+                mapped_subsampling, subsampling,
+                "subsampling lost for {colorspace:?}"
+            );
+            assert_eq!(mapped_depth, depth, "depth lost for {colorspace:?}");
         }
     }
 
     #[test]
     fn ten_bit_420_maps_to_c420p10() {
-        // `y4m::Colorspace` derives only `Debug, Clone, Copy`, not
-        // `PartialEq`, so `assert_eq!` won't compile here.
-        assert!(matches!(
-            subsampling_to_y4m(Subsampling::Yuv420, Depth::Ten),
-            y4m::Colorspace::C420p10
-        ));
+        let colorspace = subsampling_to_y4m(Subsampling::Yuv420, Depth::Ten);
+
+        // `y4m::Colorspace` does not derive `PartialEq`, so `assert_eq!` won't compile here.
+        assert!(matches!(colorspace, y4m::Colorspace::C420p10));
     }
 
     #[test]
     fn eight_bit_420_variants_all_map_to_yuv420_eight() {
-        for cs in [
+        for colorspace in [
             y4m::Colorspace::C420,
             y4m::Colorspace::C420jpeg,
             y4m::Colorspace::C420paldv,
             y4m::Colorspace::C420mpeg2,
         ] {
-            let (sub, depth) = subsampling_from_y4m(cs).expect("should map");
-            assert_eq!(sub, Subsampling::Yuv420);
+            let (subsampling, depth) = subsampling_from_y4m(colorspace).expect("should map");
+
+            assert_eq!(subsampling, Subsampling::Yuv420);
             assert_eq!(depth, Depth::Eight);
         }
     }
 
     #[test]
     fn grayscale_colorspaces_are_rejected_with_a_clear_message() {
-        for cs in [y4m::Colorspace::Cmono, y4m::Colorspace::Cmono12] {
-            let err = subsampling_from_y4m(cs).expect_err("grayscale should be rejected");
-            let msg = err.to_string();
+        for colorspace in [y4m::Colorspace::Cmono, y4m::Colorspace::Cmono12] {
+            let err = subsampling_from_y4m(colorspace).expect_err("grayscale should be rejected");
+            let message = err.to_string();
+            let colorspace_name = format!("{colorspace:?}");
+
             assert!(
-                msg.contains(&format!("{cs:?}")),
-                "error should name the offending colorspace, got {msg}"
+                message.contains(&colorspace_name),
+                "error should name the offending colorspace, got {message}"
             );
         }
     }

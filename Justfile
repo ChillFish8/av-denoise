@@ -66,6 +66,10 @@ build-static features=static_features:
 bench *ARGS:
     cargo bench -p av-denoise-core {{ARGS}}
 
+# Benchmarks the host layer, end to end through `HostDenoiser` and `PlanarDenoiser`.
+bench-host *ARGS:
+    cargo bench -p av-denoise --features vulkan {{ARGS}}
+
 build-vs *ARGS:
     cargo build -p av-denoise-vs --release {{ARGS}}
 
@@ -84,6 +88,7 @@ test-rust:
     cargo nextest run --release -p av-denoise --features vulkan,binary
     cargo nextest run --release -p av-denoise-vs --features vulkan
     cargo test --doc -p av-denoise-core --features vulkan
+    cargo test --doc -p av-denoise --features vulkan
     cargo check --workspace
 
 # Every Python test, including the ones that render on the GPU.

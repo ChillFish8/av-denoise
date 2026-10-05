@@ -105,6 +105,7 @@ fn run_decode_thread<F>(
         phantom,
         info,
     } = opened;
+
     let result = match info.layout.depth {
         Depth::Eight => pump_decoder::<u8>(decoder, &phantom, &start),
         Depth::Ten | Depth::Twelve => pump_decoder::<u16>(decoder, &phantom, &start),
@@ -130,7 +131,10 @@ fn read_frame<T: SourcePixel>(decoder: &mut Decoder) -> Option<Result<Frame<T>, 
     match decoder.read_video_frame::<T>() {
         Ok(frame) => Some(Ok(frame)),
         Err(DecoderError::EndOfFile) => None,
-        Err(err) => Some(Err(err.into())),
+        Err(err) => {
+            let error = anyhow::Error::from(err);
+            Some(Err(error))
+        },
     }
 }
 
@@ -141,7 +145,7 @@ pub fn pump_frames<T, I>(
     frames: I,
     phantom: &BTreeSet<usize>,
     permits: &crossbeam_channel::Receiver<()>,
-    out: &crossbeam_channel::Sender<FrameMsg>,
+    decoded_tx: &crossbeam_channel::Sender<FrameMsg>,
 ) -> Result<(), anyhow::Error>
 where
     T: SourcePixel,
@@ -162,7 +166,7 @@ where
         let shared = Arc::new(frame);
         let decoded = T::into_decoded(shared);
 
-        if out.send(Ok(decoded)).is_err() {
+        if decoded_tx.send(Ok(decoded)).is_err() {
             return Ok(());
         }
     }

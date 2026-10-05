@@ -1,5 +1,5 @@
 use super::{Aggregated, Setup, cross_frame_setup, run_fused};
-use crate::collab::tests::helpers::noisy_field_over;
+use crate::collab::tests::helpers::noisy_flat_field;
 use crate::nlmeans::NOISE_CURVE_BINS;
 
 /// The side of the square frame the stepped-curve test filters.
@@ -15,6 +15,7 @@ const CURVE_LAMBDA: f32 = 1.0;
 pub(super) fn stepped_curve() -> [f32; NOISE_CURVE_BINS] {
     let mut curve = [2.0f32; NOISE_CURVE_BINS];
     curve[NOISE_CURVE_BINS / 2..].fill(0.5);
+
     curve
 }
 
@@ -32,9 +33,9 @@ pub(super) fn assert_identical(label: &str, got: &Aggregated, want: &Aggregated)
 }
 
 fn run_with_curve(curve: Option<[f32; NOISE_CURVE_BINS]>) -> Aggregated {
-    let mut s = cross_frame_setup(64, 64, 2);
-    s.noise_curve = curve;
-    run_fused(&s)
+    let mut setup = cross_frame_setup(64, 64, 2);
+    setup.noise_curve = curve;
+    run_fused(&setup)
 }
 
 /// Asserts every pixel in columns `x_start..x_end` of a single-frame run matches exactly.
@@ -109,7 +110,7 @@ fn a_flat_curve_equals_scaling_lambda() {
 fn a_stepped_curve_thresholds_each_brightness_by_its_own_noise() {
     let side = STEP_FRAME_SIDE;
     let half = side / 2;
-    let noise = noisy_field_over(side, side, 0.0, 0.02);
+    let noise = noisy_flat_field(side, side, 0.0, 0.02);
     let mut frame = Vec::with_capacity(noise.len());
     for (idx, sample) in noise.iter().enumerate() {
         let x = idx as u32 % side;
@@ -119,7 +120,8 @@ fn a_stepped_curve_thresholds_each_brightness_by_its_own_noise() {
 
     let mut curved_setup = Setup::spatial_only(frame.clone(), side, side);
     curved_setup.lambda_ht = CURVE_LAMBDA;
-    curved_setup.noise_curve = Some(stepped_curve());
+    let curve = stepped_curve();
+    curved_setup.noise_curve = Some(curve);
     let curved = run_fused(&curved_setup);
 
     let plain = run_spatial_with_lambda(&frame, side, CURVE_LAMBDA);
@@ -143,7 +145,7 @@ fn a_stepped_curve_thresholds_each_brightness_by_its_own_noise() {
 #[test]
 fn the_curve_is_sampled_at_bin_centres() {
     let side = STEP_FRAME_SIDE;
-    let frame = noisy_field_over(side, side, 0.25, 0.02);
+    let frame = noisy_flat_field(side, side, 0.25, 0.02);
 
     let mut curve = [0.33f32; NOISE_CURVE_BINS];
     curve[3] = 2.0;

@@ -1,24 +1,23 @@
-use av_denoise_core::nlmeans::kernels::motion::nlm_mc_block_match_fine;
-use av_denoise_core::nlmeans::motion::{DEFAULT_BLKSIZE, DEFAULT_OVERLAP};
+use av_denoise_core::bench_api::kernels::motion::nlm_mc_block_match_fine;
+use av_denoise_core::bench_api::motion::{DEFAULT_BLKSIZE, DEFAULT_OVERLAP};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::{H, W, block_sync, make_synthetic_frame, shapes_with_ch};
+use super::{HEIGHT, WIDTH, block_sync, make_synthetic_frame, shapes_with_channels};
 
 const CONF_STEP: u32 = DEFAULT_BLKSIZE - DEFAULT_OVERLAP;
 const SEARCH_RADIUS: u32 = 0;
 
-// Mirrors `motion::confidence::THSAD_PIXEL` / `thsad`, duplicated here
-// since those host helpers are crate-internal and unreachable from the
-// bench binary.
+/// The library's per-pixel SAD threshold.
+///
+/// The library's own constant and `thsad` helper are crate-private, so a bench target spells it out.
 const THSAD_PIXEL: f32 = 0.02;
 
-/// The no-MC confidence pass. A single-candidate SAD (`search_radius =
-/// 0`, no seed) at the library's default block geometry, the cost
-/// profile of confidence weighting when motion compensation itself is
-/// off. Cheaper than [`super::mc_block_match_fine::BlockMatchFineBench`],
-/// which sweeps a real `(2·4 + 1)²` search window.
+/// The confidence pass without motion compensation.
+///
+/// It scores a single candidate with no seed and `search_radius = 0` at the library's default
+/// block geometry, which is the cost of confidence weighting when motion compensation is off.
 pub struct McConfidenceBench<R: Runtime> {
     pub client: ComputeClient<R>,
 }
@@ -36,13 +35,15 @@ impl<R: Runtime> Benchmark for McConfidenceBench<R> {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let centre_frame = make_synthetic_frame(W, H, 1);
-        let neighbour_frame = make_synthetic_frame(W, H, 1);
-        let centre = self.client.create_from_slice(f32::as_bytes(&centre_frame));
-        let neighbour = self.client.create_from_slice(f32::as_bytes(&neighbour_frame));
+        let centre_frame = make_synthetic_frame(WIDTH, HEIGHT, 1);
+        let neighbour_frame = make_synthetic_frame(WIDTH, HEIGHT, 1);
+        let centre_bytes = f32::as_bytes(&centre_frame);
+        let centre = self.client.create_from_slice(centre_bytes);
+        let neighbour_bytes = f32::as_bytes(&neighbour_frame);
+        let neighbour = self.client.create_from_slice(neighbour_bytes);
 
-        let blocks_x = W.div_ceil(CONF_STEP);
-        let blocks_y = H.div_ceil(CONF_STEP);
+        let blocks_x = WIDTH.div_ceil(CONF_STEP);
+        let blocks_y = HEIGHT.div_ceil(CONF_STEP);
         let mv_scratch = self
             .client
             .empty((blocks_x * blocks_y * 2) as usize * size_of::<i32>());
@@ -59,9 +60,9 @@ impl<R: Runtime> Benchmark for McConfidenceBench<R> {
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let level_len = (W * H) as usize;
-        let blocks_x = W.div_ceil(CONF_STEP);
-        let blocks_y = H.div_ceil(CONF_STEP);
+        let level_len = (WIDTH * HEIGHT) as usize;
+        let blocks_x = WIDTH.div_ceil(CONF_STEP);
+        let blocks_y = HEIGHT.div_ceil(CONF_STEP);
         let mv_len = (blocks_x * blocks_y * 2) as usize;
         let conf_len = (blocks_x * blocks_y) as usize;
         let thsad = (DEFAULT_BLKSIZE * DEFAULT_BLKSIZE) as f32 * THSAD_PIXEL;
@@ -78,18 +79,19 @@ impl<R: Runtime> Benchmark for McConfidenceBench<R> {
                 ArrayArg::from_raw_parts(args.neighbour.clone(), level_len),
                 ArrayArg::from_raw_parts(args.mv_scratch.clone(), mv_len),
                 ArrayArg::from_raw_parts(args.confidence.clone(), conf_len),
-                true, // this bench measures the confidence write itself
+                true, // The confidence write is what this bench measures.
                 0.0,
                 thsad,
-                W,
-                H,
+                WIDTH,
+                HEIGHT,
                 DEFAULT_BLKSIZE,
                 CONF_STEP,
                 SEARCH_RADIUS,
-                0u32, // use_seed = 0 (no coarse pass in the no-MC path)
+                0u32, // `use_seed = 0`, since there is no coarse pass without motion compensation.
                 blocks_x,
             );
         }
+
         Ok(())
     }
 
@@ -102,6 +104,6 @@ impl<R: Runtime> Benchmark for McConfidenceBench<R> {
     }
 
     fn shapes(&self) -> Vec<Vec<usize>> {
-        shapes_with_ch(1)
+        shapes_with_channels(1)
     }
 }

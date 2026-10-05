@@ -4,28 +4,19 @@ use super::PrefilterCtx;
 use crate::nlmeans::kernels::nlm_bilateral;
 use crate::nlmeans::{BLOCK_X, BLOCK_Y};
 
-/// The kernel radius derived from `sigma_s`.
+/// The kernel radius for `sigma_s`.
 ///
-/// Stopping at two sigma covers over 95% of the Gaussian's mass, and it
-/// keeps shared memory and register use bounded.
+/// Two sigma covers over 95% of the Gaussian's mass while keeping shared memory and register use
+/// bounded.
 pub fn bilateral_radius(sigma_s: f32) -> u32 {
     ((2.0 * sigma_s).ceil() as u32).max(1)
 }
 
-/// The normalisation factor `1 / (2 * sigma^2)` for the bilateral
-/// Gaussian.
+/// The bilateral Gaussian's normalisation factor `1 / (2 * sigma^2)`.
 ///
-/// The spatial and range terms share this because they use the same
-/// Gaussian shape.
-///
-/// It is computed on the host and passed to the kernel as a plain `f32`,
-/// so this is the only place the value is derived from a sigma. The
-/// kernel only ever multiplies by it.
-///
-/// Squaring a very small but positive sigma can underflow to 0.0 in
-/// `f32`, which makes this factor infinite even though the sigma itself
-/// was finite and positive. Code validating user input should check this
-/// value rather than only the sign and finiteness of the sigma.
+/// The spatial and range terms share it, and the kernel only multiplies by it. A tiny positive
+/// sigma can square to 0.0 in `f32` and make it infinite, so validation checks this value rather
+/// than the sigma alone.
 pub(crate) fn inv_two_sigma_sq(sigma: f32) -> f32 {
     1.0 / (2.0 * sigma * sigma)
 }
@@ -43,10 +34,13 @@ pub(super) fn run_bilateral<R: Runtime>(
     let inv_two_sigma_s_sq = inv_two_sigma_sq(sigma_s);
     let inv_two_sigma_r_sq = inv_two_sigma_sq(sigma_r);
 
+    let cubes_x = ctx.width.div_ceil(BLOCK_X);
+    let cubes_y = ctx.height.div_ceil(BLOCK_Y);
+
     unsafe {
         nlm_bilateral::launch_unchecked::<R>(
             client,
-            CubeCount::new_2d(ctx.width.div_ceil(BLOCK_X), ctx.height.div_ceil(BLOCK_Y)),
+            CubeCount::new_2d(cubes_x, cubes_y),
             CubeDim::new_2d(BLOCK_X, BLOCK_Y),
             stored_ch,
             ArrayArg::from_raw_parts(ctx.input_buf.clone(), total),

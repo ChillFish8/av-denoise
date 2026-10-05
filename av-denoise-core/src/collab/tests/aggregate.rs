@@ -1,6 +1,6 @@
 use cubecl::prelude::*;
 
-use super::helpers::{R, make_client, noisy_field_over};
+use super::helpers::{R, make_client, noisy_flat_field};
 use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{
     ACCUM_SCALE,
@@ -15,22 +15,29 @@ use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use crate::nlmeans::{BLOCK_X, BLOCK_Y, NOISE_CURVE_BINS};
 
-/// Runs [`collab_normalise`] over hand-built accumulators.
+/// Runs [collab_normalise] over hand-built accumulators.
 fn run_normalise(accum_host: &[i32], wsum_host: &[i32], width: u32, height: u32) -> Vec<f32> {
     let pixels = (width * height) as usize;
     assert_eq!(accum_host.len(), pixels);
     assert_eq!(wsum_host.len(), pixels);
 
     let client = make_client();
-    let accum = client.create_from_slice(i32::as_bytes(accum_host));
-    let wsum = client.create_from_slice(i32::as_bytes(wsum_host));
+    let accum_bytes = i32::as_bytes(accum_host);
+    let wsum_bytes = i32::as_bytes(wsum_host);
+    let accum = client.create_from_slice(accum_bytes);
+    let wsum = client.create_from_slice(wsum_bytes);
     let output = client.empty(pixels * size_of::<f32>());
+
+    let blocks_x = width.div_ceil(BLOCK_X);
+    let blocks_y = height.div_ceil(BLOCK_Y);
+    let grid = CubeCount::new_2d(blocks_x, blocks_y);
+    let dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
 
     unsafe {
         collab_normalise::launch_unchecked::<R>(
             &client,
-            CubeCount::new_2d(width.div_ceil(BLOCK_X), height.div_ceil(BLOCK_Y)),
-            CubeDim::new_2d(BLOCK_X, BLOCK_Y),
+            grid,
+            dim,
             1usize,
             ArrayArg::from_raw_parts(accum, pixels),
             ArrayArg::from_raw_parts(wsum, pixels),
@@ -43,29 +50,28 @@ fn run_normalise(accum_host: &[i32], wsum_host: &[i32], width: u32, height: u32)
         );
     }
 
-    let bytes = client.read_one(output).expect("normalise readback failed");
-    f32::from_bytes(&bytes)[..pixels].to_vec()
+    let output_bytes = client.read_one(output).expect("normalise readback failed");
+
+    f32::from_bytes(&output_bytes)[..pixels].to_vec()
 }
 
 #[test]
 fn normalise_divides_one_accumulator_by_the_other() {
-    let (w, h) = (21u32, 16u32);
-    let pixels = (w * h) as usize;
+    let (width, height) = (21u32, 16u32);
+    let pixels = (width * height) as usize;
 
-    // Varied, non-constant fills, so a transposed index or a dropped
-    // pixel changes the answer rather than vanishing into a fixed point.
+    // Varied fills, so a transposed index or a dropped pixel changes the answer rather than vanishing
+    // into a fixed point.
     let accum: Vec<i32> = (0..pixels).map(|i| (i as i32 % 97) * 1000 - 4000).collect();
     let wsum: Vec<i32> = (0..pixels).map(|i| (i as i32 % 13) + 1).collect();
 
-    let got = run_normalise(&accum, &wsum, w, h);
+    let got = run_normalise(&accum, &wsum, width, height);
 
     for i in 0..pixels {
-        // `wsum` counts at `WEIGHT_GAIN` times `accum`'s scale, the one
-        // factor that does not cancel between the two.
+        // `wsum` counts at `WEIGHT_GAIN` times `accum`'s scale, the one factor that does not cancel.
         let want = accum[i] as f32 * WEIGHT_GAIN / wsum[i] as f32;
-        // Relative, because the ratios here run into the thousands and
-        // a single-precision divide is only good to about 1e-7 of the
-        // value either way.
+        // Relative, because the ratios run into the thousands and a single-precision divide is only
+        // good to about 1e-7 of the value.
         assert!(
             (got[i] - want).abs() <= want.abs() * 1e-6,
             "idx={i}: want {want} got {}",
@@ -74,13 +80,10 @@ fn normalise_divides_one_accumulator_by_the_other() {
     }
 }
 
-/// The fixed-point scale cancels, so a pixel whose accumulator and
-/// weight sum were both built at the same scale reads back as the plain
-/// ratio with no scale factor left in it.
 #[test]
 fn normalise_cancels_the_fixed_point_scale() {
-    let (w, h) = (16u32, 16u32);
-    let pixels = (w * h) as usize;
+    let (width, height) = (16u32, 16u32);
+    let pixels = (width * height) as usize;
 
     let value = 0.375f32;
     let weight = 0.25f32;
@@ -89,38 +92,45 @@ fn normalise_cancels_the_fixed_point_scale() {
     let accum = vec![((value * weight * ACCUM_SCALE) as i32) * covering; pixels];
     let wsum = vec![((weight * ACCUM_SCALE * WEIGHT_GAIN) as i32) * covering; pixels];
 
-    let got = run_normalise(&accum, &wsum, w, h);
-    for (i, &v) in got.iter().enumerate() {
-        assert!((v - value).abs() < 1e-4, "idx={i}: want {value} got {v}");
+    let got = run_normalise(&accum, &wsum, width, height);
+
+    for (i, &pixel) in got.iter().enumerate() {
+        assert!((pixel - value).abs() < 1e-4, "idx={i}: want {value} got {pixel}");
     }
 }
 
 #[test]
 fn a_zero_weight_sum_returns_the_accumulator_rather_than_a_nan() {
-    let (w, h) = (16u32, 16u32);
-    let pixels = (w * h) as usize;
+    let (width, height) = (16u32, 16u32);
+    let pixels = (width * height) as usize;
 
     let accum = vec![1234i32; pixels];
     let wsum = vec![0i32; pixels];
 
-    let got = run_normalise(&accum, &wsum, w, h);
-    for (i, &v) in got.iter().enumerate() {
-        assert!(v.is_finite(), "idx={i}: expected a finite value, got {v}");
-        assert_eq!(v, 1234.0, "idx={i}");
+    let got = run_normalise(&accum, &wsum, width, height);
+
+    for (i, &pixel) in got.iter().enumerate() {
+        assert!(pixel.is_finite(), "idx={i}: expected a finite value, got {pixel}");
+        assert_eq!(pixel, 1234.0, "idx={i}");
     }
 }
 
 #[test]
 fn zero_accum_clears_both_buffers() {
-    let (w, h) = (16u32, 16u32);
-    let pixels = (w * h) as usize;
+    let (width, height) = (16u32, 16u32);
+    let pixels = (width * height) as usize;
 
     let client = make_client();
-    let accum = client.create_from_slice(i32::as_bytes(&vec![42i32; pixels]));
-    let wsum = client.create_from_slice(i32::as_bytes(&vec![7i32; pixels]));
+    let filled_accum = vec![42i32; pixels];
+    let filled_wsum = vec![7i32; pixels];
+    let filled_accum_bytes = i32::as_bytes(&filled_accum);
+    let filled_wsum_bytes = i32::as_bytes(&filled_wsum);
+    let accum = client.create_from_slice(filled_accum_bytes);
+    let wsum = client.create_from_slice(filled_wsum_bytes);
 
     let dim = 256u32;
     let grid = (pixels as u32).div_ceil(dim);
+
     unsafe {
         collab_zero_accum::launch_unchecked::<R>(
             &client,
@@ -135,23 +145,23 @@ fn zero_accum_clears_both_buffers() {
         );
     }
 
-    let a = client.read_one(accum).expect("accum readback failed");
-    let s = client.read_one(wsum).expect("wsum readback failed");
-    assert!(i32::from_bytes(&a)[..pixels].iter().all(|&v| v == 0));
-    assert!(i32::from_bytes(&s)[..pixels].iter().all(|&v| v == 0));
+    let accum_bytes = client.read_one(accum).expect("accum readback failed");
+    let wsum_bytes = client.read_one(wsum).expect("wsum readback failed");
+    let accum_cleared = i32::from_bytes(&accum_bytes)[..pixels]
+        .iter()
+        .all(|&value| value == 0);
+    let wsum_cleared = i32::from_bytes(&wsum_bytes)[..pixels]
+        .iter()
+        .all(|&value| value == 0);
+    assert!(accum_cleared);
+    assert!(wsum_cleared);
 }
 
-/// A buffer sized past the GPU's 65,535-workgroups-per-dimension
-/// dispatch limit at the 256-thread block size the caller launches
-/// this kernel with, and not a multiple of that block size either, so
-/// the tail both needs the grid clamp and lands mid-block.
+/// The buffer needs 65,626 workgroups of 256 threads, past the 65,535 dispatch limit, and is not a
+/// multiple of 256, so the tail both needs the grid clamp and lands mid-block.
 ///
-/// A one-thread-per-slot launch clamped to that limit stops short of
-/// `pixels`, leaving the tail un-zeroed, which is exactly the silent
-/// under-zeroing the task's clamp-without-striding trap describes.
-/// `collab_zero_accum` is grid-strided so a clamped launch still walks
-/// every slot in a second pass, this buffer needs a real 65,626-thread
-/// unclamped grid, only 65,535 of which the dispatch actually starts.
+/// A clamped one-thread-per-slot launch would stop short and leave the tail un-zeroed.
+/// `collab_zero_accum` is grid-strided, so the clamped launch still walks every slot.
 #[test]
 fn zero_accum_clears_every_slot_of_a_buffer_past_the_grid_clamp() {
     const MAX_GRID_1D: u32 = 65_535;
@@ -168,10 +178,15 @@ fn zero_accum_clears_every_slot_of_a_buffer_past_the_grid_clamp() {
     );
 
     let client = make_client();
-    let accum = client.create_from_slice(i32::as_bytes(&vec![42i32; pixels]));
-    let wsum = client.create_from_slice(i32::as_bytes(&vec![7i32; pixels]));
+    let filled_accum = vec![42i32; pixels];
+    let filled_wsum = vec![7i32; pixels];
+    let filled_accum_bytes = i32::as_bytes(&filled_accum);
+    let filled_wsum_bytes = i32::as_bytes(&filled_wsum);
+    let accum = client.create_from_slice(filled_accum_bytes);
+    let wsum = client.create_from_slice(filled_wsum_bytes);
 
     let grid = (pixels as u32).div_ceil(dim).min(MAX_GRID_1D);
+
     unsafe {
         collab_zero_accum::launch_unchecked::<R>(
             &client,
@@ -186,28 +201,31 @@ fn zero_accum_clears_every_slot_of_a_buffer_past_the_grid_clamp() {
         );
     }
 
-    let a = client.read_one(accum).expect("accum readback failed");
-    let s = client.read_one(wsum).expect("wsum readback failed");
-    let a = i32::from_bytes(&a);
-    let s = i32::from_bytes(&s);
+    let accum_bytes = client.read_one(accum).expect("accum readback failed");
+    let wsum_bytes = client.read_one(wsum).expect("wsum readback failed");
+    let accum_values = i32::from_bytes(&accum_bytes);
+    let wsum_values = i32::from_bytes(&wsum_bytes);
+
     for i in 0..pixels {
-        assert_eq!(a[i], 0, "accum[{i}] left un-zeroed past the clamp point");
-        assert_eq!(s[i], 0, "wsum[{i}] left un-zeroed past the clamp point");
+        assert_eq!(
+            accum_values[i], 0,
+            "accum[{i}] left un-zeroed past the clamp point"
+        );
+        assert_eq!(wsum_values[i], 0, "wsum[{i}] left un-zeroed past the clamp point");
     }
 }
 
-/// Groups, filters, and aggregates a frame end to end, returning the
-/// finished plane and the weight sum behind it.
+/// Groups, filters and aggregates a frame end to end, returning the finished plane and its weight sum.
 ///
-/// The search runs at `radius = 0`, a one-frame ring with no
-/// neighbours, so this covers the single-frame scatter path the
-/// aggregation kernels are being checked on here.
+/// The search runs at radius 0, a one-frame ring with no neighbours, so only the single-frame scatter
+/// path runs.
 fn run_scatter_stage(frame: &[f32], width: u32, height: u32, sigma: f32) -> (Vec<f32>, Vec<i32>) {
     run_scatter_stage_windowed(frame, width, height, sigma, 0.0)
 }
 
-/// [`run_scatter_stage`] with the aggregation window's `beta` chosen by
-/// the caller. `0.0` is the uniform blend every other run here uses.
+/// [run_scatter_stage] with the aggregation window's beta chosen by the caller.
+///
+/// A beta of `0.0` is a uniform blend.
 fn run_scatter_stage_windowed(
     frame: &[f32],
     width: u32,
@@ -221,27 +239,53 @@ fn run_scatter_stage_windowed(
     let k_max = 8u32;
     let pixels = (width * height) as usize;
 
-    let input = client.create_from_slice(f32::as_bytes(frame));
-    let mv_dummy = client.create_from_slice(i32::as_bytes(&[0i32, 0i32]));
-    let conf_dummy = client.create_from_slice(f32::as_bytes(&[1.0f32]));
-    let slots_dummy = client.create_from_slice(u32::as_bytes(&[0u32]));
+    let frame_bytes = f32::as_bytes(frame);
+    let mv_dummy_bytes = i32::as_bytes(&[0i32, 0i32]);
+    let conf_dummy_bytes = f32::as_bytes(&[1.0f32]);
+    let slots_dummy_bytes = u32::as_bytes(&[0u32]);
+    let input = client.create_from_slice(frame_bytes);
+    let mv_dummy = client.create_from_slice(mv_dummy_bytes);
+    let conf_dummy = client.create_from_slice(conf_dummy_bytes);
+    let slots_dummy = client.create_from_slice(slots_dummy_bytes);
     let accum = client.empty(pixels * size_of::<i32>());
     let wsum = client.empty(pixels * size_of::<i32>());
     let group_weight = client.empty(refs * size_of::<f32>());
-    let sigma_buf = client.create_from_slice(f32::as_bytes(&[sigma]));
+
+    let sigma_values = [sigma];
+    let sigma_bytes = f32::as_bytes(&sigma_values);
+    let sigma_buf = client.create_from_slice(sigma_bytes);
     let profile = dct_noise_profile(0.0);
-    let profile_buf = client.create_from_slice(f32::as_bytes(&profile));
-    let kaiser_buf = client.create_from_slice(f32::as_bytes(&kaiser_window(kaiser_beta)));
-    let zero_curve = client.create_from_slice(f32::as_bytes(&[0.0f32; NOISE_CURVE_BINS]));
+    let profile_bytes = f32::as_bytes(&profile);
+    let profile_buf = client.create_from_slice(profile_bytes);
+    let kaiser = kaiser_window(kaiser_beta);
+    let kaiser_bytes = f32::as_bytes(&kaiser);
+    let kaiser_buf = client.create_from_slice(kaiser_bytes);
+    let zeroed_curve = [0.0f32; NOISE_CURVE_BINS];
+    let curve_bytes = f32::as_bytes(&zeroed_curve);
+    let zero_curve = client.create_from_slice(curve_bytes);
+
     let (map_cols, map_rows) = strength_map_dims(width, height);
     let map_len = (map_cols * map_rows) as usize;
     let unit_map = vec![1.0f32; map_len];
-    let unit_map_buf = client.create_from_slice(f32::as_bytes(&unit_map));
+    let unit_map_bytes = f32::as_bytes(&unit_map);
+    let unit_map_buf = client.create_from_slice(unit_map_bytes);
     let output = client.empty(pixels * size_of::<f32>());
 
     let zero_dim = 256u32;
+    let zero_grid = (pixels as u32).div_ceil(zero_dim);
+    let cubes_x = fused_cubes_x(width);
+    let fused_grid = CubeCount::new_2d(cubes_x, refs_y);
+    let fused_dim = CubeDim::new_1d(64);
+    let scale = weight_scale(sigma, &profile);
+    let warp_uniform = needs_warp_uniform_search(&client);
+    let grid_frame_count = grid_frames(0);
+    let refs_x = refs_along(width);
+    let blocks_x = width.div_ceil(BLOCK_X);
+    let blocks_y = height.div_ceil(BLOCK_Y);
+    let normalise_grid = CubeCount::new_2d(blocks_x, blocks_y);
+    let normalise_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
+
     unsafe {
-        let zero_grid = (pixels as u32).div_ceil(zero_dim);
         collab_zero_accum::launch_unchecked::<R>(
             &client,
             CubeCount::new_1d(zero_grid),
@@ -255,8 +299,8 @@ fn run_scatter_stage_windowed(
         );
         collab_fused::launch_unchecked::<R>(
             &client,
-            CubeCount::new_2d(fused_cubes_x(width), refs_y),
-            CubeDim::new_1d(64),
+            fused_grid,
+            fused_dim,
             1usize,
             ArrayArg::from_raw_parts(input.clone(), pixels),
             ArrayArg::from_raw_parts(mv_dummy, 2),
@@ -275,11 +319,11 @@ fn run_scatter_stage_windowed(
             2.7f32,
             0u32,
             STRENGTH_MAP_OFF,
-            weight_scale(sigma, &profile),
+            scale,
             ACCUM_SCALE,
-            needs_warp_uniform_search(&client),
+            warp_uniform,
             0u32,
-            grid_frames(0),
+            grid_frame_count,
             0u32,
             2u32,
             1u32,
@@ -293,7 +337,7 @@ fn run_scatter_stage_windowed(
             k_max,
             1u32,
             9u32,
-            refs_along(width),
+            refs_x,
             map_cols,
             map_rows,
             0.0f32,
@@ -301,8 +345,8 @@ fn run_scatter_stage_windowed(
         );
         collab_normalise::launch_unchecked::<R>(
             &client,
-            CubeCount::new_2d(width.div_ceil(BLOCK_X), height.div_ceil(BLOCK_Y)),
-            CubeDim::new_2d(BLOCK_X, BLOCK_Y),
+            normalise_grid,
+            normalise_dim,
             1usize,
             ArrayArg::from_raw_parts(accum, pixels),
             ArrayArg::from_raw_parts(wsum.clone(), pixels),
@@ -315,36 +359,27 @@ fn run_scatter_stage_windowed(
         );
     }
 
-    let out = client.read_one(output).expect("output readback failed");
-    let ws = client.read_one(wsum).expect("wsum readback failed");
-    (
-        f32::from_bytes(&out)[..pixels].to_vec(),
-        i32::from_bytes(&ws)[..pixels].to_vec(),
-    )
+    let output_bytes = client.read_one(output).expect("output readback failed");
+    let wsum_bytes = client.read_one(wsum).expect("wsum readback failed");
+    let plane = f32::from_bytes(&output_bytes)[..pixels].to_vec();
+    let weight_sum = i32::from_bytes(&wsum_bytes)[..pixels].to_vec();
+
+    (plane, weight_sum)
 }
 
-/// The sharpest check the scatter has, and it does not depend on the
-/// filter doing anything in particular.
+/// At `sigma = 0` the hard threshold keeps every coefficient, so each member's filtered patch is an
+/// exact copy of the input at that member's own position.
 ///
-/// At `sigma = 0` the hard threshold keeps every coefficient, so each
-/// member's filtered patch comes back as an exact copy of the input at
-/// that member's own position. A member patch sitting at `q` contributes
-/// its pixel `q + offset` to output pixel `q + offset`, so every single
-/// contribution any pixel receives is that pixel's own input value,
-/// whatever group it travelled through. The weighted mean of a set of
-/// identical values is that value, so the whole scatter and normalise
-/// path has to reproduce the input exactly.
-///
-/// Any addressing mistake breaks this. A member written to the reference
-/// patch's position instead of its own, a transposed `x`/`y`, or an
-/// off-by-one in the pixel index all pull in a neighbouring pixel's
-/// value and move the result.
+/// Every contribution a pixel receives is then its own input value, and the weighted mean of
+/// identical values is that value, so the scatter and normalise path must reproduce the input. A
+/// member written to the reference's position, a transposed `x`/`y` or an off-by-one pixel index
+/// all pull in a neighbouring pixel's value and move the result.
 #[test]
 fn scattering_every_member_at_zero_sigma_reproduces_the_input() {
-    let (w, h) = (48u32, 40u32);
-    let frame = noisy_field_over(w, h, 0.5, 0.05);
+    let (width, height) = (48u32, 40u32);
+    let frame = noisy_flat_field(width, height, 0.5, 0.05);
 
-    let (output, _) = run_scatter_stage(&frame, w, h, 0.0);
+    let (output, _) = run_scatter_stage(&frame, width, height, 0.0);
 
     for (idx, (&want, &have)) in frame.iter().zip(output.iter()).enumerate() {
         assert!(
@@ -354,34 +389,28 @@ fn scattering_every_member_at_zero_sigma_reproduces_the_input() {
     }
 }
 
-/// Proves the aggregation really covers every member and not just the
-/// reference patch of each group.
+/// Reference patches sit on a stride-`STEP` grid and are `PATCH_SIZE` wide, so they cover any pixel
+/// at most nine times. Members come from a radius-9 window around their reference, so writing every
+/// member back gives an interior pixel far more contributions than that.
 ///
-/// Reference patches alone sit on a grid of stride `STEP` and are
-/// `PATCH_SIZE` wide, so they can cover any one pixel at most nine
-/// times. Members are drawn from a window of radius 9 around their
-/// reference, so once every member is written back an interior pixel
-/// picks up far more contributions than that ceiling allows.
-///
-/// The weight sum is read rather than a contribution count, because
-/// that is what aggregation actually divides by. Every group here
-/// carries the same weight, since a flat noise field gives every group
-/// the same retained variance, so the sum is proportional to the number
-/// of covering patches.
+/// The weight sum is read because aggregation divides by it. A flat noise field gives every group the
+/// same retained variance and so the same weight, which makes the sum proportional to the number of
+/// covering patches.
 #[test]
 fn every_member_reaches_the_weight_sum_not_only_the_reference_patch() {
-    let (w, h) = (64u32, 64u32);
-    let frame = noisy_field_over(w, h, 0.5, 0.02);
+    let (width, height) = (64u32, 64u32);
+    let frame = noisy_flat_field(width, height, 0.5, 0.02);
 
-    let (_, wsum) = run_scatter_stage(&frame, w, h, 0.02);
+    let (_, wsum) = run_scatter_stage(&frame, width, height, 0.02);
 
     // Away from the edges, where the search window is not truncated.
     let mut interior: Vec<i32> = Vec::new();
-    for y in 16..h - 16 {
-        for x in 16..w - 16 {
-            interior.push(wsum[(y * w + x) as usize]);
+    for y in 16..height - 16 {
+        for x in 16..width - 16 {
+            interior.push(wsum[(y * width + x) as usize]);
         }
     }
+
     assert!(!interior.is_empty());
 
     let smallest = *interior.iter().min().expect("interior is non-empty");
@@ -390,32 +419,32 @@ fn every_member_reaches_the_weight_sum_not_only_the_reference_patch() {
         "every interior pixel must receive at least one contribution"
     );
 
-    // One group's weight, taken as the largest single contribution any
-    // pixel could have received, bounds the count from above. Nine of
-    // them is the reference-only ceiling.
-    let per_patch = interior.iter().map(|&v| v as f64).fold(f64::INFINITY, f64::min);
+    // The smallest interior sum is at least one group's weight, so the spread is a lower bound on the
+    // largest contribution count. Nine is the reference-only ceiling.
+    let per_patch = interior
+        .iter()
+        .map(|&weight| weight as f64)
+        .fold(f64::INFINITY, f64::min);
     let biggest = *interior.iter().max().expect("interior is non-empty") as f64;
+    let spread = biggest / per_patch;
     assert!(
-        biggest / per_patch > 9.0,
+        spread > 9.0,
         "expected some interior pixel to collect more than the nine covering reference \
-         patches a member-0-only writeback could manage, got a spread of {}",
-        biggest / per_patch,
+         patches a member-0-only writeback could manage, got a spread of {spread}",
     );
 }
 
-/// A window applied to the value but not to the weight would pull every
-/// pixel toward zero, hardest at the patch edges where the taper is
-/// deepest. Flat content is where that shows up exactly, because the
-/// weighted mean of one value is that value however the weights fall.
+/// A window applied to the value but not the weight would pull pixels toward zero, hardest at the
+/// patch edges. Flat content shows that exactly, since the weighted mean of one value is that value.
 #[test]
 fn the_aggregation_window_leaves_flat_content_flat() {
-    let (w, h) = (64u32, 64u32);
+    let (width, height) = (64u32, 64u32);
     let level = 0.5f32;
-    let frame = vec![level; (w * h) as usize];
+    let frame = vec![level; (width * height) as usize];
 
-    let (out, wsum) = run_scatter_stage_windowed(&frame, w, h, 0.02, 2.0);
+    let (plane, wsum) = run_scatter_stage_windowed(&frame, width, height, 0.02, 2.0);
 
-    for (idx, (&got, &weight)) in out.iter().zip(wsum.iter()).enumerate() {
+    for (idx, (&got, &weight)) in plane.iter().zip(wsum.iter()).enumerate() {
         assert!(weight > 0, "pixel {idx} collected no weight at all");
         assert!(
             (got - level).abs() < 1e-3,
@@ -424,21 +453,19 @@ fn the_aggregation_window_leaves_flat_content_flat() {
     }
 }
 
-/// The window enters only at the scatter, so the groups, the threshold
-/// and every filtered value are identical across the two runs and the
-/// difference between them is the taper alone.
+/// The window enters only at the scatter, so the two runs differ by the taper alone.
 #[test]
 fn the_aggregation_window_reweights_the_blend() {
-    let (w, h) = (64u32, 64u32);
-    let frame = noisy_field_over(w, h, 0.5, 0.05);
+    let (width, height) = (64u32, 64u32);
+    let frame = noisy_flat_field(width, height, 0.5, 0.05);
 
-    let (uniform, _) = run_scatter_stage_windowed(&frame, w, h, 0.02, 0.0);
-    let (windowed, _) = run_scatter_stage_windowed(&frame, w, h, 0.02, 2.0);
+    let (uniform, _) = run_scatter_stage_windowed(&frame, width, height, 0.02, 0.0);
+    let (windowed, _) = run_scatter_stage_windowed(&frame, width, height, 0.02, 2.0);
 
     let moved = uniform
         .iter()
         .zip(windowed.iter())
-        .filter(|(a, b)| (*a - *b).abs() > 1e-4)
+        .filter(|(uniform_value, windowed_value)| (*uniform_value - *windowed_value).abs() > 1e-4)
         .count();
     assert!(
         moved > uniform.len() / 100,

@@ -1,5 +1,7 @@
-use super::helpers::{R, make_client, noisy_copy_of, static_clip_params};
+use super::helpers::{R, make_client, static_clip_params};
+use crate::bench_api::HostIo;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
+use crate::nlmeans::tests::helpers::noisy_field_over;
 
 const WIDTH: u32 = 96;
 const HEIGHT: u32 = 64;
@@ -25,7 +27,7 @@ fn faint_line_clip() -> Vec<Vec<f32>> {
     }
 
     (0..FRAMES)
-        .map(|seed| noisy_copy_of(&clean, WIDTH, HEIGHT, GRAIN, seed))
+        .map(|seed| noisy_field_over(&clean, WIDTH, HEIGHT, GRAIN, seed))
         .collect()
 }
 
@@ -36,20 +38,19 @@ fn denoise(params: Nl4dParams, frames: &[Vec<f32>]) -> Vec<Vec<f32>> {
     let mut outputs = Vec::new();
     for frame in frames {
         denoiser.push_frame(frame);
-        let pending = denoiser.denoise_submit().expect("denoise_submit failed");
-        if let Some(pending) = pending {
-            let output = pending.wait().expect("readback failed");
-            let output_frame = output.into_f32().expect("f32 output");
+        let output = denoiser.denoise().expect("denoise failed");
+        if let Some(output_frame) = output {
             outputs.push(output_frame);
         }
     }
 
     denoiser
         .flush(|frame| {
-            let output_frame = frame.as_f32().expect("f32 denoiser").to_vec();
+            let output_frame = frame.to_vec();
             outputs.push(output_frame);
         })
         .expect("flush failed");
+
     outputs
 }
 
@@ -73,14 +74,17 @@ fn line_contrast(outputs: &[Vec<f32>]) -> f64 {
             }
         }
     }
+
     on_sum / on_count - off_sum / off_count
 }
 
 fn params(pooled_threshold: bool, lambda_ht: f32) -> Nl4dParams {
+    let clip_params = static_clip_params(2);
+
     Nl4dParams {
         pooled_threshold,
         lambda_ht,
-        ..static_clip_params(2)
+        ..clip_params
     }
 }
 
@@ -88,8 +92,10 @@ fn params(pooled_threshold: bool, lambda_ht: f32) -> Nl4dParams {
 fn pooling_keeps_more_of_a_faint_line() {
     let frames = faint_line_clip();
 
-    let pooled = denoise(params(true, 3.78), &frames);
-    let plain = denoise(params(false, 3.78), &frames);
+    let pooled_params = params(true, 3.78);
+    let plain_params = params(false, 3.78);
+    let pooled = denoise(pooled_params, &frames);
+    let plain = denoise(plain_params, &frames);
 
     let pooled_contrast = line_contrast(&pooled);
     let plain_contrast = line_contrast(&plain);
@@ -103,8 +109,10 @@ fn pooling_keeps_more_of_a_faint_line() {
 fn lambda_still_changes_the_output_with_pooling_on() {
     let frames = faint_line_clip();
 
-    let gentle = denoise(params(true, 3.0), &frames);
-    let strong = denoise(params(true, 4.5), &frames);
+    let gentle_params = params(true, 3.0);
+    let strong_params = params(true, 4.5);
+    let gentle = denoise(gentle_params, &frames);
+    let strong = denoise(strong_params, &frames);
 
     assert_ne!(gentle, strong);
 }

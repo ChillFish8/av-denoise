@@ -14,28 +14,23 @@ use crate::collab::geometry::refs_along;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::tests::helpers::{deterministic_texture, plant_patch};
 
-/// At `sigma = 0` every threshold is zero, so nothing is discarded and
-/// the transform chain must hand every member's own pixels back
-/// unchanged.
+/// At `sigma = 0` nothing is discarded, so every contribution a pixel receives is its own input
+/// value and the weighted mean must reproduce it.
 ///
-/// Every contribution any pixel receives is then that pixel's own input
-/// value, whatever group carried it, and the weighted mean of a set of
-/// identical values is that value. `k_max = 1` exercises the `k_use = 1`
-/// case, where the stack transform is a no-op and only the 2D DCT round
-/// trip runs. `k_max = 8` forces a full stack over content where every
-/// position differs from every other, so all three Haar levels carry
-/// non-trivial detail coefficients.
+/// `k_max = 1` covers `k_use = 1`, where the stack transform is a no-op and only the 2D DCT round
+/// trip runs. `k_max = 8` forces a full stack over content where every position differs, so all
+/// three Haar levels carry non-trivial detail.
 #[test]
 fn zero_sigma_hands_every_member_back_unchanged() {
-    let (w, h) = (32u32, 32u32);
-    let frame = unique_frame(w, h);
+    let (width, height) = (32u32, 32u32);
+    let frame = unique_frame(width, height);
 
     for k_max in [1u32, 8] {
-        let mut s = Setup::spatial_only(frame.clone(), w, h);
-        s.k_max = k_max;
-        s.sigma = 0.0;
-        s.spatial_radius = 4;
-        let got = run_fused(&s);
+        let mut setup = Setup::spatial_only(frame.clone(), width, height);
+        setup.k_max = k_max;
+        setup.sigma = 0.0;
+        setup.spatial_radius = 4;
+        let got = run_fused(&setup);
 
         for (idx, &want) in frame.iter().enumerate() {
             assert!(
@@ -51,26 +46,25 @@ fn zero_sigma_hands_every_member_back_unchanged() {
     }
 }
 
-/// A covered pixel never ends with an empty weight sum, even when every neighbour holds content
-/// unrelated to the centre.
-///
-/// A group that reached the accumulators as nothing would leave such a pixel, which normalisation
-/// can only render as black.
+/// Every neighbour holds content unrelated to the centre. A group that reached the accumulators as
+/// nothing would leave a covered pixel with an empty weight sum, which normalisation renders black.
 #[test]
 fn a_badly_matched_group_still_reaches_the_accumulators() {
-    let (w, h) = (32u32, 32u32);
-    let counts = reference_cover_counts(w, h);
+    let (width, height) = (32u32, 32u32);
+    let counts = reference_cover_counts(width, height);
 
-    let mut s = cross_frame_setup(w, h, 2);
-    s.spatial_radius = 9;
-    s.c_min = 0.0;
+    let mut setup = cross_frame_setup(width, height, 2);
+    setup.spatial_radius = 9;
+    setup.c_min = 0.0;
 
-    let got = run_fused(&s);
-    let base = s.centre_slot as usize * s.pixels();
+    let got = run_fused(&setup);
+    let base = setup.centre_slot as usize * setup.pixels();
+
     for (idx, &count) in counts.iter().enumerate() {
         if count == 0 {
             continue;
         }
+
         assert!(
             got.wsum[base + idx] > 0,
             "{count} references cover pixel {idx} and its weight sum is still {}",
@@ -79,26 +73,26 @@ fn a_badly_matched_group_still_reaches_the_accumulators() {
     }
 }
 
-/// The same invariant with the aggregation window on.
-///
 /// A patch corner is weighted by the square of the window's end tap, `0.193` at `beta = 2`, so the
 /// smallest weight the fixed point has to resolve drops about fivefold against the uniform case.
 #[test]
 fn a_windowed_badly_matched_group_still_reaches_the_accumulators() {
-    let (w, h) = (32u32, 32u32);
-    let counts = reference_cover_counts(w, h);
+    let (width, height) = (32u32, 32u32);
+    let counts = reference_cover_counts(width, height);
 
-    let mut s = cross_frame_setup(w, h, 2);
-    s.spatial_radius = 9;
-    s.c_min = 0.0;
-    s.kaiser_beta = 2.0;
+    let mut setup = cross_frame_setup(width, height, 2);
+    setup.spatial_radius = 9;
+    setup.c_min = 0.0;
+    setup.kaiser_beta = 2.0;
 
-    let got = run_fused(&s);
-    let base = s.centre_slot as usize * s.pixels();
+    let got = run_fused(&setup);
+    let base = setup.centre_slot as usize * setup.pixels();
+
     for (idx, &count) in counts.iter().enumerate() {
         if count == 0 {
             continue;
         }
+
         assert!(
             got.wsum[base + idx] > 0,
             "{count} references cover pixel {idx} and its weight sum is still {} with the \
@@ -108,27 +102,25 @@ fn a_windowed_badly_matched_group_still_reaches_the_accumulators() {
     }
 }
 
-/// The reference patch is always the group's first member.
+/// At `k_max = 1` a group scatters only slot 0, and `sigma = 0` gives every group the same weight,
+/// so a pixel's weight counts the patches that covered it.
 ///
-/// At `k_max = 1` a group holds exactly one member, so the only patch it
-/// scatters is whichever position slot 0 ended up holding. `sigma = 0`
-/// makes every group's weight the same constant, so the weight one pixel
-/// accumulates counts the patches that covered it. That count must be
-/// exactly the number of reference patches covering it, which only holds
-/// if every group scattered its own reference position and nothing else.
-/// A group that let a search result reach slot 0 would write somewhere
-/// off the reference grid and leave the counts uneven.
+/// That count matches the reference cover count only if every group scattered its own reference
+/// position. A search result reaching slot 0 would write off the reference grid and leave the
+/// counts uneven.
 #[test]
 fn the_reference_patch_is_always_the_first_member() {
-    let (w, h) = (32u32, 32u32);
-    let mut s = Setup::spatial_only(unique_frame(w, h), w, h);
-    s.k_max = 1;
-    s.sigma = 0.0;
-    let got = run_fused(&s);
+    let (width, height) = (32u32, 32u32);
+    let frame = unique_frame(width, height);
+    let mut setup = Setup::spatial_only(frame, width, height);
+    setup.k_max = 1;
+    setup.sigma = 0.0;
+    let got = run_fused(&setup);
 
-    let counts = reference_cover_counts(w, h);
+    let counts = reference_cover_counts(width, height);
     let unit = got.wsum[0] as i64 / counts[0];
     assert!(unit > 0, "the per-patch weight increment must be positive");
+
     for (idx, &count) in counts.iter().enumerate() {
         assert_eq!(
             got.wsum[idx] as i64,
@@ -140,48 +132,40 @@ fn the_reference_patch_is_always_the_first_member() {
     }
 }
 
-/// The group size is the search space size rounded down to a power of
-/// two, capped at `k_max`.
+/// The group size is the search space size rounded down to a power of two, capped at `k_max`.
 ///
-/// At `spatial_radius = 1` the clipped rectangle holds 4 positions at a
-/// corner reference, 6 at an edge one, and 9 in the interior. Rounding
-/// therefore takes the edge references from 6 down to 4, and leaves the
-/// interior ones at 8. Running the same frame at `k_max = 4` caps every
-/// group at 4, so the two runs must agree exactly wherever rounding
-/// already reached 4 and differ wherever it reached 8.
-///
-/// Clipping the rectangle once is what makes those counts right. Were
-/// each offset clamped in turn instead, a corner would count nine
-/// positions rather than four, several of them the same physical patch,
-/// and the corner references would stop agreeing across the two runs.
+/// At `spatial_radius = 1` the clipped rectangle holds 4 positions at a corner reference, 6 at an
+/// edge one and 9 in the interior, which round to 4, 4 and 8. A `k_max = 4` run must therefore
+/// match wherever rounding already reached 4 and differ wherever it reached 8. Clamping each offset
+/// instead of clipping the rectangle would count nine positions at a corner, several of them the
+/// same patch, and the corners would stop agreeing.
 #[test]
 fn group_size_rounds_down_to_a_power_of_two() {
-    let (w, h) = (64u32, 64u32);
-    let frame = unique_frame(w, h);
+    let (width, height) = (64u32, 64u32);
+    let frame = unique_frame(width, height);
 
-    let mut wide = Setup::spatial_only(frame.clone(), w, h);
+    let mut wide = Setup::spatial_only(frame.clone(), width, height);
     wide.spatial_radius = 1;
-    let mut narrow = Setup::spatial_only(frame, w, h);
+    let mut narrow = Setup::spatial_only(frame, width, height);
     narrow.spatial_radius = 1;
     narrow.k_max = 4;
 
     let wide = run_fused(&wide);
     let narrow = run_fused(&narrow);
 
-    let refs_x = refs_along(w);
-    let refs_y = refs_along(h);
+    let refs_x = refs_along(width);
+    let refs_y = refs_along(height);
     let mut interior_differed = 0usize;
-    for ry in 0..refs_y {
-        for rx in 0..refs_x {
-            let idx = (ry * refs_x + rx) as usize;
-            // A clipped axis contributes 2 positions instead of 3, so a
-            // reference is capped below 8 unless both of its axes are
-            // interior.
-            let clipped = rx == 0 || ry == 0 || rx == refs_x - 1 || ry == refs_y - 1;
+    for ref_y in 0..refs_y {
+        for ref_x in 0..refs_x {
+            let idx = (ref_y * refs_x + ref_x) as usize;
+            // A clipped axis contributes 2 positions instead of 3, so a reference is capped below 8
+            // unless both of its axes are interior.
+            let clipped = ref_x == 0 || ref_y == 0 || ref_x == refs_x - 1 || ref_y == refs_y - 1;
             if clipped {
                 assert_eq!(
                     wide.group_weight[idx], narrow.group_weight[idx],
-                    "reference ({rx}, {ry}) sees fewer than 8 positions, so both runs must \
+                    "reference ({ref_x}, {ref_y}) sees fewer than 8 positions, so both runs must \
                      round it to a group of 4"
                 );
             } else if wide.group_weight[idx] != narrow.group_weight[idx] {
@@ -189,6 +173,7 @@ fn group_size_rounds_down_to_a_power_of_two() {
             }
         }
     }
+
     let interior = ((refs_x - 2) * (refs_y - 2)) as usize;
     assert!(
         interior_differed * 2 > interior,
@@ -197,49 +182,39 @@ fn group_size_rounds_down_to_a_power_of_two() {
     );
 }
 
-/// A group that finds a genuine twin agrees with itself, and a group
-/// that does not carries far more detail into the threshold.
+/// One texture is planted at `(4, 4)` and `(16, 12)` over a flat background, and `k_max = 2` keeps
+/// the self-match plus one member.
 ///
-/// One texture is planted twice over a flat background, at `(4, 4)` and
-/// at `(16, 12)`. With `k_max = 2` the group at `(4, 4)` keeps the
-/// self-match and exactly one other member, so the twin either is that
-/// member or the matcher missed it. When it is, the two members are
-/// pixel for pixel identical, the Haar difference across the pair is
-/// exactly zero everywhere, and the threshold keeps nothing from that
-/// level. When it is not, the second member is flat background against a
-/// textured reference, the difference level carries the texture too, and
-/// roughly twice as many coefficients survive, halving the weight.
-///
-/// `lambda_ht` sits at 1.0 so the threshold keeps nearly every
-/// coefficient it is offered, which is what makes the retained count
-/// track the number of levels carrying content rather than the size of
-/// the coefficients in them.
-///
-/// The control run plants the same texture once, leaving nothing in the
-/// window for the group to match.
+/// When that member is the twin, the Haar difference across the pair is zero and the threshold
+/// keeps nothing from that level. When it is flat background, the difference level carries the
+/// texture too, roughly twice as many coefficients survive and the weight halves. `lambda_ht = 1.0`
+/// keeps nearly every coefficient offered, so the retained count tracks how many levels carry
+/// content. The control plants the texture once, leaving nothing to match.
 #[test]
 fn a_planted_twin_is_found() {
-    let (w, h) = (32u32, 32u32);
+    let (width, height) = (32u32, 32u32);
     let texture = deterministic_texture(7);
 
-    let mut twinned = vec![0.2f32; (w * h) as usize];
-    plant_patch(&mut twinned, w, 4, 4, &texture);
-    plant_patch(&mut twinned, w, 16, 12, &texture);
+    let mut twinned = vec![0.2f32; (width * height) as usize];
+    plant_patch(&mut twinned, width, 4, 4, &texture);
+    plant_patch(&mut twinned, width, 16, 12, &texture);
 
-    let mut alone = vec![0.2f32; (w * h) as usize];
-    plant_patch(&mut alone, w, 4, 4, &texture);
+    let mut alone = vec![0.2f32; (width * height) as usize];
+    plant_patch(&mut alone, width, 4, 4, &texture);
 
     let run = |frame: Vec<f32>| {
-        let mut s = Setup::spatial_only(frame, w, h);
-        s.spatial_radius = 12;
-        s.k_max = 2;
-        s.lambda_ht = 1.0;
-        run_fused(&s)
+        let mut setup = Setup::spatial_only(frame, width, height);
+        setup.spatial_radius = 12;
+        setup.k_max = 2;
+        setup.lambda_ht = 1.0;
+        run_fused(&setup)
     };
 
-    let ref_idx = (4 / STEP + (4 / STEP) * refs_along(w)) as usize;
-    let with_twin = run(twinned).group_weight[ref_idx];
-    let without_twin = run(alone).group_weight[ref_idx];
+    let ref_idx = (4 / STEP + (4 / STEP) * refs_along(width)) as usize;
+    let twinned_run = run(twinned);
+    let alone_run = run(alone);
+    let with_twin = twinned_run.group_weight[ref_idx];
+    let without_twin = alone_run.group_weight[ref_idx];
 
     assert!(
         with_twin > without_twin * 1.5,
@@ -248,52 +223,44 @@ fn a_planted_twin_is_found() {
     );
 }
 
-/// A neighbour whose motion-block confidence sits below `c_min` is
-/// skipped outright, so no member ever comes from it and its region of
-/// the accumulator ring stays untouched.
-///
-/// The confidence field is uniform per neighbour here, so the skip is
-/// the same decision for every group in the frame. Both neighbours hold
-/// an exact copy, so neighbour 0 wins every tie. Gating it is what moves
-/// every volume's match onto neighbour 1, and a slot that received even
-/// one member would show a non-zero weight sum.
+/// Confidence is uniform per neighbour, so the skip is the same decision for every group. Both
+/// neighbours hold an exact copy and neighbour 0 wins ties, so gating it moves every match onto
+/// neighbour 1, and a slot that received even one member would show a non-zero weight sum.
 #[test]
 fn a_gated_neighbour_receives_no_scatter() {
-    let (w, h) = (64u32, 64u32);
-    let mut s = three_frame_ring_with_a_planted_match(w, h);
-    // Neighbour 0 is ring slot 0 and neighbour 1 is ring slot 2, so this
-    // gates the first of the two.
-    let blocks = s.conf_stride as usize;
-    s.confidence[..blocks].fill(0.0);
-    s.confidence[blocks..].fill(1.0);
-    s.c_min = 0.5;
+    let (width, height) = (64u32, 64u32);
+    let mut setup = three_frame_ring_with_a_planted_match(width, height);
+    // Neighbour 0 is ring slot 0 and neighbour 1 is ring slot 2, so this gates the first of the two.
+    let blocks = setup.conf_stride as usize;
+    setup.confidence[..blocks].fill(0.0);
+    setup.confidence[blocks..].fill(1.0);
+    setup.c_min = 0.5;
 
-    let got = run_fused(&s);
+    let got = run_fused(&setup);
+    let gated_sum = got.frame_weight_sum(0);
+    let centre_sum = got.frame_weight_sum(1);
+    let ungated_sum = got.frame_weight_sum(2);
 
     assert_eq!(
-        got.frame_weight_sum(0),
-        0,
+        gated_sum, 0,
         "the gated neighbour's slot must receive no scatter at all"
     );
-    assert!(got.frame_weight_sum(1) > 0, "the centre slot received nothing");
-    assert!(
-        got.frame_weight_sum(2) > 0,
-        "the ungated neighbour's slot received nothing"
-    );
+    assert!(centre_sum > 0, "the centre slot received nothing");
+    assert!(ungated_sum > 0, "the ungated neighbour's slot received nothing");
 }
 
 #[test]
 fn noise_is_suppressed_on_a_flat_field() {
-    let (w, h) = (48u32, 48u32);
+    let (width, height) = (48u32, 48u32);
     let sigma = 0.04f32;
-    let s = flat_noise_setup(w, h, sigma);
-    let input_var = patch_pool_variance(&s.ring, w, h);
-    let got = run_fused(&s);
+    let setup = flat_noise_setup(width, height, sigma);
+    let input_var = patch_pool_variance(&setup.ring, width, height);
+    let got = run_fused(&setup);
 
-    // A run that wrote nothing would read a variance of zero and clear
-    // the bound below without filtering anything, so the output has to
-    // be shown to carry the field's own brightness first.
-    let output_mean: f64 = (0..got.accum.len()).map(|i| got.pixel(i)).sum::<f64>() / got.accum.len() as f64;
+    // A run that wrote nothing would read a variance of zero and clear the bound below without
+    // filtering, so the output must first be shown to keep the field's brightness.
+    let output_sum: f64 = (0..got.accum.len()).map(|i| got.pixel(i)).sum();
+    let output_mean = output_sum / got.accum.len() as f64;
     assert!(
         (output_mean - 0.5).abs() < 0.01,
         "expected the filtered field to keep its 0.5 mean, got {output_mean}"
@@ -310,45 +277,30 @@ fn noise_is_suppressed_on_a_flat_field() {
 
 #[test]
 fn group_weight_matches_uniform_theory() {
-    let (w, h) = (48u32, 48u32);
+    let (width, height) = (48u32, 48u32);
     let sigma = 0.04f32;
-    let s = flat_noise_setup(w, h, sigma);
-    let weights = run_fused(&s).group_weight;
+    let setup = flat_noise_setup(width, height, sigma);
+    let weights = run_fused(&setup).group_weight;
 
-    // With every member's variance equal to `sigma^2`, the ladder is a
-    // fixed point, as
-    // `transforms::tests::uniform_variance_is_unchanged_by_the_ladder`
-    // shows. Every coefficient the threshold could keep therefore also
-    // carries variance `sigma^2`, whatever level or spatial position it
-    // came from.
+    // With every member's variance at `sigma^2` the ladder is a fixed point, so every coefficient
+    // the threshold could keep carries variance `sigma^2`. `group_weight` is then exactly
+    // `1 / (sigma^2 * n_ret)`, which backs out the mean retained count.
     //
-    // `group_weight` is then exactly `1 / (sigma^2 * n_ret)`, so this
-    // backs out the mean retained count the run produced and checks two
-    // things about it.
-    //
-    // It must include at least the forced group DC. And a hard threshold
-    // at 2.7 standard deviations lets only about 0.7% of pure-noise
-    // coefficients through by chance, so out of the up to
-    // `k_max * PATCH_AREA - 1` coefficients besides the DC that a full
-    // 8-member group offers, the mean false-positive count should be
-    // small next to that ceiling rather than close to it.
+    // That count must include the forced group DC. A hard threshold at 2.7 standard deviations lets
+    // about 0.7% of pure-noise coefficients through, so out of the `k_max * PATCH_AREA - 1`
+    // non-DC coefficients a full group offers, false positives stay far below that ceiling.
     let sigma2 = sigma * sigma;
-    let mean_weight: f64 = weights.iter().map(|&w| w as f64).sum::<f64>() / weights.len() as f64;
+    let weight_total: f64 = weights.iter().map(|&weight| weight as f64).sum();
+    let mean_weight = weight_total / weights.len() as f64;
     let mean_n_ret = 1.0 / (mean_weight * sigma2 as f64);
 
     let false_positive_rate = 0.007; // ~P(|Z| >= 2.7) for a standard normal, two-tailed
     let ceiling = (8 * 64 - 1) as f64;
     let expected_n_ret = 1.0 + ceiling * false_positive_rate;
 
-    // A run against the real kernel at this setup measures a mean
-    // retained count around 6 (close to `expected_n_ret`, ~4.5, and
-    // nowhere near a naive DC-only assumption of 1, which a 20% band
-    // around would reject this correct result outright). The lower
-    // bound below is what actually distinguishes a working threshold
-    // from two ways it could be broken: forced-DC-only (would measure
-    // exactly 1) and "threshold does nothing, keeps everything" (would
-    // measure close to `ceiling + 1`, an order of magnitude past the
-    // upper bound below).
+    // The kernel measures a mean retained count around 6 here, near `expected_n_ret` (about 4.5).
+    // The lower bound rejects a forced-DC-only threshold (exactly 1), and the upper bound rejects
+    // one that keeps everything (close to `ceiling + 1`).
     assert!(
         mean_n_ret > 2.0,
         "expected the mean retained count ({mean_n_ret}) to clearly exceed the forced-DC-\
@@ -363,35 +315,30 @@ fn group_weight_matches_uniform_theory() {
     );
 }
 
-/// `rho = 0` must leave the output bit for bit identical to what it
-/// would be with no noise-shaping profile in the computation at all.
-///
-/// This is checked two ways from the same noisy group, once through the
-/// real `dct_noise_profile(0.0)` production path, and once through a
-/// profile buffer built entirely by hand, `[1.0; 8]`, which is
-/// mathematically the exact identity multiplier and so stands in for "no
-/// profile logic at all" without needing a second copy of the kernel to
-/// prove it against.
+/// The production `dct_noise_profile(0.0)` path is compared against a hand-built `[1.0; 8]`
+/// buffer, the exact identity multiplier, which stands in for no profile logic at all.
 #[test]
 fn dct_profile_rho_zero_matches_a_hand_built_all_ones_profile() {
-    let (w, h) = (48u32, 48u32);
+    let (width, height) = (48u32, 48u32);
     let sigma = 0.04f32;
 
+    let white_profile = dct_noise_profile(0.0);
     assert_eq!(
-        dct_noise_profile(0.0),
-        [1.0f32; 8],
+        white_profile, [1.0f32; 8],
         "dct_noise_profile(0.0) must be exactly [1.0; 8], the property this comparison relies on"
     );
 
-    let produced = flat_noise_setup(w, h, sigma);
-    let mut hand_built = flat_noise_setup(w, h, sigma);
+    let produced = flat_noise_setup(width, height, sigma);
+    let mut hand_built = flat_noise_setup(width, height, sigma);
     hand_built.profile_override = Some([1.0f32; 8]);
 
     let produced = run_fused(&produced);
     let hand_built = run_fused(&hand_built);
 
+    let wrote_accum = produced.accum.iter().any(|&value| value != 0);
+    let wrote_weight = produced.group_weight.iter().any(|&weight| weight != 0.0);
     assert!(
-        produced.accum.iter().any(|&v| v != 0) || produced.group_weight.iter().any(|&w| w != 0.0),
+        wrote_accum || wrote_weight,
         "the kernel must actually have written output for this comparison to mean anything"
     );
     assert_eq!(
@@ -405,30 +352,25 @@ fn dct_profile_rho_zero_matches_a_hand_built_all_ones_profile() {
     );
 }
 
-/// Higher `rho` must retain more residual noise on a flat, noise-only
-/// field than `rho = 0` does, at the same `lambda_ht`.
+/// A positive `rho` moves variance from the high frequencies into the low ones, so a fixed
+/// `lambda_ht` reaches a smaller threshold on most non-DC coefficients and more pure noise survives.
 ///
-/// A positive `rho` moves variance out of the high frequencies and into
-/// the low ones (`dct_noise_profile`'s own monotonic-decrease property),
-/// so a fixed `lambda_ht` reaches a smaller threshold on most non-DC
-/// coefficients than the white-noise assumption would, and more of the
-/// pure noise sitting in those coefficients survives. This is the
-/// documented, deliberate trade the shipped table's caveat describes. On
-/// content where the true correlation is lower than the table assumes,
-/// shaping under-shrinks rather than over-shrinks, trading a little
-/// leftover noise for preserved detail. A flat, noise-only field
-/// isolates that trade with nothing else going on.
+/// This is the deliberate trade of correlation shaping. Where the true correlation is lower than
+/// assumed it under-shrinks, leaving a little noise to preserve detail. A flat, noise-only field
+/// isolates that trade.
 #[test]
 fn higher_rho_retains_more_noise_on_a_flat_field() {
-    let (w, h) = (48u32, 48u32);
+    let (width, height) = (48u32, 48u32);
     let sigma = 0.04f32;
 
-    let white = flat_noise_setup(w, h, sigma);
-    let mut shaped = flat_noise_setup(w, h, sigma);
+    let white = flat_noise_setup(width, height, sigma);
+    let mut shaped = flat_noise_setup(width, height, sigma);
     shaped.rho = 0.86;
 
-    let var_white = output_variance(&run_fused(&white));
-    let var_shaped = output_variance(&run_fused(&shaped));
+    let white_run = run_fused(&white);
+    let shaped_run = run_fused(&shaped);
+    let var_white = output_variance(&white_run);
+    let var_shaped = output_variance(&shaped_run);
 
     assert!(
         var_shaped > var_white * 1.05,
@@ -437,24 +379,21 @@ fn higher_rho_retains_more_noise_on_a_flat_field() {
     );
 }
 
-/// At radius 1 each volume keeps one neighbour frame, and the first-listed neighbour wins a tie.
-///
 /// Both neighbours hold an exact copy of the centre, so every volume's two candidates tie at zero
-/// and slot 0, neighbour 0, takes every match. A radius-1 group falling back to a single frame
-/// would leave slot 0 empty as well.
+/// and neighbour 0 takes every match. A radius-1 group falling back to a single frame would leave
+/// slot 0 empty as well.
 #[test]
 fn radius_one_keeps_one_neighbour_per_volume() {
-    let s = three_frame_ring_with_a_planted_match(64, 64);
-    let got = run_fused(&s);
+    let setup = three_frame_ring_with_a_planted_match(64, 64);
+    let got = run_fused(&setup);
+    let first_sum = got.frame_weight_sum(0);
+    let centre_sum = got.frame_weight_sum(1);
+    let second_sum = got.frame_weight_sum(2);
 
-    assert!(
-        got.frame_weight_sum(0) > 0,
-        "neighbour 0 must hold every volume's frame"
-    );
-    assert!(got.frame_weight_sum(1) > 0, "the centre slot received nothing");
+    assert!(first_sum > 0, "neighbour 0 must hold every volume's frame");
+    assert!(centre_sum > 0, "the centre slot received nothing");
     assert_eq!(
-        got.frame_weight_sum(2),
-        0,
+        second_sum, 0,
         "a 2x4 volume keeps one neighbour, so the tied second neighbour must receive nothing"
     );
 }

@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use av_denoise::{FrameLayout, Planes, Subsampling};
+use v_frame::chroma::ChromaSubsampling;
 use v_frame::frame::Frame;
 use v_frame::pixel::Pixel;
+use v_frame::plane::Plane;
 
 /// A decoded frame at whichever sample width the source uses.
 pub enum DecodedFrame {
@@ -54,97 +56,100 @@ impl SourcePixel for u16 {
     }
 }
 
-/// Checks each plane's byte length against the layout, failing with an error naming which plane
-/// is wrong, the length found and the length expected.
+/// Checks each plane's byte length against the layout.
+///
+/// The error names the wrong plane, the length found and the length expected.
 pub fn check_plane_lens(planes: &Planes, layout: FrameLayout) -> Result<(), anyhow::Error> {
-    for (name, got, expected) in [
+    for (plane_name, actual, expected) in [
         ("y", planes.y.len(), layout.luma_bytes()),
         ("u", planes.u.len(), layout.chroma_bytes()),
         ("v", planes.v.len(), layout.chroma_bytes()),
     ] {
-        if got != expected {
-            anyhow::bail!("{name} plane is {got} bytes, expected {expected} from the frame layout");
+        if actual != expected {
+            anyhow::bail!("{plane_name} plane is {actual} bytes, expected {expected} from the frame layout");
         }
     }
 
     Ok(())
 }
 
-pub fn planes_from_v_frame_u8(
-    frame: &v_frame::frame::Frame<u8>,
-    layout: FrameLayout,
-) -> Result<Planes, anyhow::Error> {
-    let y = collect_plane_u8(&frame.y_plane);
-    let u = frame
+pub fn planes_from_v_frame_u8(frame: &Frame<u8>, layout: FrameLayout) -> Result<Planes, anyhow::Error> {
+    let y_plane = collect_plane_u8(&frame.y_plane);
+    let u_plane = frame
         .u_plane
         .as_ref()
         .map(collect_plane_u8)
         .unwrap_or_else(|| layout.neutral_chroma_plane());
-    let v = frame
+    let v_plane = frame
         .v_plane
         .as_ref()
         .map(collect_plane_u8)
         .unwrap_or_else(|| layout.neutral_chroma_plane());
 
-    let planes = Planes { y, u, v };
+    let planes = Planes {
+        y: y_plane,
+        u: u_plane,
+        v: v_plane,
+    };
     check_plane_lens(&planes, layout)?;
 
     Ok(planes)
 }
 
-pub fn planes_from_v_frame_u16(
-    frame: &v_frame::frame::Frame<u16>,
-    layout: FrameLayout,
-) -> Result<Planes, anyhow::Error> {
-    let y = collect_plane_u16(&frame.y_plane);
-    let u = frame
+pub fn planes_from_v_frame_u16(frame: &Frame<u16>, layout: FrameLayout) -> Result<Planes, anyhow::Error> {
+    let y_plane = collect_plane_u16(&frame.y_plane);
+    let u_plane = frame
         .u_plane
         .as_ref()
         .map(collect_plane_u16)
         .unwrap_or_else(|| layout.neutral_chroma_plane());
-    let v = frame
+    let v_plane = frame
         .v_plane
         .as_ref()
         .map(collect_plane_u16)
         .unwrap_or_else(|| layout.neutral_chroma_plane());
 
-    let planes = Planes { y, u, v };
+    let planes = Planes {
+        y: y_plane,
+        u: u_plane,
+        v: v_plane,
+    };
     check_plane_lens(&planes, layout)?;
 
     Ok(planes)
 }
 
-pub fn collect_plane_u8(plane: &v_frame::plane::Plane<u8>) -> Vec<u8> {
+pub fn collect_plane_u8(plane: &Plane<u8>) -> Vec<u8> {
     let width = plane.width().get();
     let height = plane.height().get();
-    let mut out = Vec::with_capacity(width * height);
+    let mut bytes = Vec::with_capacity(width * height);
 
     for row in plane.rows() {
-        out.extend_from_slice(row);
+        bytes.extend_from_slice(row);
     }
 
-    out
+    bytes
 }
 
-pub fn collect_plane_u16(plane: &v_frame::plane::Plane<u16>) -> Vec<u8> {
+/// Serialises a plane to little-endian bytes, two per sample.
+pub fn collect_plane_u16(plane: &Plane<u16>) -> Vec<u8> {
     let width = plane.width().get();
     let height = plane.height().get();
-    let mut out = Vec::with_capacity(width * height * 2);
+    let mut bytes = Vec::with_capacity(width * height * 2);
 
     for row in plane.rows() {
         for &sample in row {
-            out.extend_from_slice(&sample.to_le_bytes());
+            let sample_bytes = sample.to_le_bytes();
+            bytes.extend_from_slice(&sample_bytes);
         }
     }
 
-    out
+    bytes
 }
 
 pub fn subsampling_from_av_decoders(
-    chroma_subsampling: v_frame::chroma::ChromaSubsampling,
+    chroma_subsampling: ChromaSubsampling,
 ) -> Result<Subsampling, anyhow::Error> {
-    use v_frame::chroma::ChromaSubsampling;
-
     match chroma_subsampling {
         ChromaSubsampling::Yuv420 => Ok(Subsampling::Yuv420),
         ChromaSubsampling::Yuv422 => Ok(Subsampling::Yuv422),

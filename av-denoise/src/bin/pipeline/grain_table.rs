@@ -17,9 +17,9 @@ pub struct TablePath {
 impl TablePath {
     /// Creates the temporary file beside `path`.
     pub fn create(path: &Path) -> Result<Self, anyhow::Error> {
-        let mut temporary = path.as_os_str().to_owned();
-        temporary.push(".tmp");
-        let temporary = PathBuf::from(temporary);
+        let mut temporary_name = path.as_os_str().to_owned();
+        temporary_name.push(".tmp");
+        let temporary = PathBuf::from(temporary_name);
 
         File::create(&temporary)
             .with_context(|| format!("unable to create the grain table at {}", path.display()))?;
@@ -48,6 +48,7 @@ impl TablePath {
             .with_context(|| format!("unable to move the grain table to {}", self.path.display()))?;
 
         self.written = true;
+
         Ok(())
     }
 }

@@ -94,6 +94,7 @@ fn run_kernel(
             }
         }
     }
+
     (result, retained)
 }
 
@@ -152,6 +153,7 @@ fn reference(
             }
         }
     }
+
     (result, retained)
 }
 
@@ -174,6 +176,7 @@ fn seeded_group(seed: u32) -> Group {
             }
         }
     }
+
     group
 }
 
@@ -193,6 +196,7 @@ const UNIT: [f32; SIDE] = [1.0; SIDE];
 fn the_kernel_matches_the_host_reference() {
     let profile = [1.3, 1.1, 1.0, 0.95, 0.9, 0.9, 0.9, 0.95];
     let variances = [1.0, 1.0, 1.0, 1.0, 1.2, 1.2, 1.2, 1.2];
+
     for (seed, k_use) in [(1u32, 8u32), (2, 8), (3, 4), (4, 2)] {
         let group = seeded_group(seed);
         let (got, got_retained) = run_kernel(&group, &variances, &profile, k_use, 1.6, 2.7);
@@ -327,24 +331,25 @@ fn both_walks_agree_with_pooling_on() {
 
 #[test]
 fn a_ragged_frame_with_pooling_on_completes_and_both_walks_agree() {
-    let mut setup = Setup::spatial_only(unique_frame(70, 54), 70, 54);
+    let frame = unique_frame(70, 54);
+    let mut setup = Setup::spatial_only(frame, 70, 54);
     setup.pooled = Some(RATIO);
 
     let divergent = run_fused_walk(&setup, Some(false));
     let uniform = run_fused_walk(&setup, Some(true));
+    let frame_sum = divergent.frame_weight_sum(0);
 
     assert_eq!(divergent.accum, uniform.accum);
-    assert!(
-        divergent.frame_weight_sum(0) > 0,
-        "the frame should receive weight"
-    );
+    assert!(frame_sum > 0, "the frame should receive weight");
+
     let covered = (0..setup.pixels()).all(|idx| divergent.wsum[idx] > 0);
     assert!(covered, "every pixel of a ragged frame should be covered");
 }
 
 #[test]
 fn a_small_fallback_group_with_pooling_on_stays_finite() {
-    let mut setup = Setup::spatial_only(unique_frame(64, 48), 64, 48);
+    let frame = unique_frame(64, 48);
+    let mut setup = Setup::spatial_only(frame, 64, 48);
     setup.k_max = 4;
     setup.pooled = Some(RATIO);
 
@@ -360,13 +365,15 @@ fn a_small_fallback_group_with_pooling_on_stays_finite() {
 
 #[test]
 fn a_noiseless_flat_frame_passes_through_with_pooling_on() {
-    let mut setup = Setup::spatial_only(vec![0.4f32; 64 * 48], 64, 48);
+    let frame = vec![0.4f32; 64 * 48];
+    let mut setup = Setup::spatial_only(frame, 64, 48);
     setup.sigma = 1.0e-6;
     setup.pooled = Some(RATIO);
 
     let pooled = run_fused(&setup);
 
     assert!(pooled.group_weight.iter().all(|weight| weight.is_finite()));
+
     for idx in 0..setup.pixels() {
         let value = pooled.pixel(idx);
         assert!((value - 0.4).abs() < 1.0e-3, "pixel {idx} is {value}");

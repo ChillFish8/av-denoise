@@ -1,18 +1,18 @@
-use av_denoise_core::nlmeans::kernels::nlm_distance;
+use av_denoise_core::bench_api::kernels::nlm_distance;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::{
-    H,
+    HEIGHT,
     Q_X,
     Q_Y,
-    W,
+    WIDTH,
     block_sync,
     cube_count_2d,
     cube_dim_2d,
     make_padded_frame,
-    shapes_with_ch,
+    shapes_with_channels,
     stored_channels,
 };
 
@@ -25,8 +25,8 @@ pub struct DistanceInput {
 
 pub struct DistanceBench<R: Runtime> {
     pub client: ComputeClient<R>,
-    pub ch: u32,
-    pub ch_name: &'static str,
+    pub channels: u32,
+    pub channel_name: &'static str,
 }
 
 impl<R: Runtime> Benchmark for DistanceBench<R> {
@@ -34,10 +34,12 @@ impl<R: Runtime> Benchmark for DistanceBench<R> {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let pixels = (W * H) as usize;
-        let frame = make_padded_frame(W, H, self.ch);
-        let input = self.client.create_from_slice(f32::as_bytes(&frame));
+        let pixels = (WIDTH * HEIGHT) as usize;
+        let frame = make_padded_frame(WIDTH, HEIGHT, self.channels);
+        let frame_bytes = f32::as_bytes(&frame);
+        let input = self.client.create_from_slice(frame_bytes);
         let dist = self.client.empty(pixels * size_of::<f32>());
+
         DistanceInput {
             input,
             dist,
@@ -46,35 +48,41 @@ impl<R: Runtime> Benchmark for DistanceBench<R> {
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let pixels = (W * H) as usize;
-        let stored = stored_channels(self.ch) as usize;
+        let pixels = (WIDTH * HEIGHT) as usize;
+        let stored_ch = stored_channels(self.channels) as usize;
+        let cube_count = cube_count_2d();
+        let cube_dim = cube_dim_2d();
+
         unsafe {
             nlm_distance::launch_unchecked::<R>(
                 &self.client,
-                cube_count_2d(),
-                cube_dim_2d(),
-                stored,
+                cube_count,
+                cube_dim,
+                stored_ch,
                 ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
                 ArrayArg::from_raw_parts(args.dist.clone(), pixels),
                 0u32,
                 0u32,
                 Q_X,
                 Q_Y,
-                W,
-                H,
-                self.ch,
+                WIDTH,
+                HEIGHT,
+                self.channels,
             );
         }
+
         Ok(())
     }
 
     fn name(&self) -> String {
-        format!("distance_1080p_{}", self.ch_name)
+        format!("distance_1080p_{}", self.channel_name)
     }
+
     fn sync(&self) {
         block_sync(&self.client);
     }
+
     fn shapes(&self) -> Vec<Vec<usize>> {
-        shapes_with_ch(self.ch)
+        shapes_with_channels(self.channels)
     }
 }

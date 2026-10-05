@@ -12,13 +12,9 @@ use av_denoise::{
 
 use super::{Args, CommonArgs, MotionArgs, Preset, RunOptions, resolve_channel_intent};
 
-/// Flags for `nl4d`, which groups 8x8 patches across the temporal window
-/// itself, rather than filtering with `nlmeans` first and grouping
-/// within one frame afterward.
+/// Flags for the `nl4d` subcommand.
 ///
-/// nl4d measures the noise level and tracks motion the way `nlmeans hq`
-/// does, but never weights or averages patches the NLM way, so none of
-/// the NLM knobs appear here.
+/// nl4d never weights or averages patches the NLM way, so none of the NLM flags appear here.
 #[derive(Debug, Clone, clap::Args)]
 pub struct Nl4dArgs {
     #[command(flatten)]
@@ -109,7 +105,7 @@ pub struct Nl4dArgs {
     /// noise. `3` is subtle grain, `6` is clearly visible grain, `12`
     /// and up is heavy noise.
     ///
-    /// Always expressed on an 8-bit 0-255 scale, no matter the
+    /// Always expressed on an 8-bit scale from 0 to 255, no matter the
     /// source's actual bit depth.
     #[arg(long)]
     pub sigma: Option<f32>,
@@ -168,8 +164,6 @@ pub struct Nl4dArgs {
 
     /// Turns off the pooled threshold, which judges each frequency together with its neighbours
     /// so faint texture survives.
-    ///
-    /// With this flag and `--flat-boost 1.5`, the output matches earlier releases.
     #[arg(long)]
     pub no_pooled_threshold: bool,
 
@@ -206,10 +200,9 @@ pub struct Nl4dArgs {
     /// Estimates noise from a local window instead of a temporal EMA
     /// over stream history.
     ///
-    /// Experimental measurement switch for comparing the two estimators
-    /// on real footage. Not a committed public interface. Off by
-    /// default, which keeps the temporal EMA every calibrated preset
-    /// assumes.
+    /// An experimental switch for comparing the two estimators on real
+    /// footage. It is not a stable interface. Off by default, which
+    /// keeps the temporal EMA every calibrated preset assumes.
     #[arg(long, hide = true)]
     pub windowed_noise_estimation: bool,
 
@@ -228,13 +221,11 @@ pub struct Nl4dArgs {
 }
 
 impl Nl4dArgs {
-    /// How far the temporal window reaches, from the explicit flag or
-    /// the active `--preset`.
+    /// How far the temporal window reaches, from the explicit flag or the active `--preset`.
     ///
-    /// nl4d groups patches across neighbouring frames, so a window of 0
-    /// leaves it nothing to do. No preset resolves that way, so only an
-    /// explicit `--temporal-radius 0` reaches the guard, and it is
-    /// rejected here rather than left to fail deep inside construction.
+    /// nl4d groups patches across neighbouring frames, so a radius of 0 leaves it nothing to do.
+    /// Only an explicit `--temporal-radius 0` can ask for one, and it is rejected here rather
+    /// than left to fail deep inside construction.
     fn temporal_radius(&self, preset: Preset) -> Result<u32, anyhow::Error> {
         let radius = self
             .temporal_radius
@@ -250,8 +241,7 @@ impl Nl4dArgs {
         Ok(radius)
     }
 
-    /// Turns the parsed flags plus the shared globals into the options
-    /// the ingest pipeline takes.
+    /// Builds the run options from these flags and the global flags.
     pub fn build_options(&self, globals: &Args) -> Result<RunOptions, anyhow::Error> {
         let defaults = Nl4dOptions::default();
         let intent = resolve_channel_intent(&globals.channel_mode)?;
@@ -268,71 +258,70 @@ impl Nl4dArgs {
             );
         }
 
-        // Check the raw 8-bit value here so an out-of-range `--sigma`
-        // reports the number the user typed. The library re-validates
-        // the same bound after the /255 normalisation, but its message
-        // speaks in [0, 1] units.
+        // Checked in 8-bit units so the error reports the number the user typed. The library's
+        // own check runs after the /255 normalisation, in 0..=1 units.
         if let Some(sigma) = self.sigma
             && (!sigma.is_finite() || sigma <= 0.0 || sigma > 255.0)
         {
             anyhow::bail!("--sigma must be a finite value in (0, 255] 8-bit units (got {sigma})");
         }
 
-        if self.sigma.is_some() && self.sigma_scale.is_some_and(|v| v != 1.0) {
+        if self.sigma.is_some() && self.sigma_scale.is_some_and(|scale| scale != 1.0) {
             tracing::warn!("--sigma-scale has no effect when --sigma pins the noise level");
         }
 
         self.warn_on_dead_per_plane_flags(intent);
 
+        let temporal_radius = self.temporal_radius(globals.preset)?;
+
+        let spatial_radius = self
+            .spatial_radius
+            .unwrap_or_else(|| nl4d_spatial_radius_for(globals.preset));
+        let nl4d_options = Nl4dOptions {
+            motion: self.motion.to_motion_search(),
+            temporal_radius,
+            sigma: self.sigma.map(|sigma| sigma / 255.0),
+            sigma_scale: self.sigma_scale.unwrap_or(defaults.sigma_scale),
+            thsad_scale: self.thsad_scale.unwrap_or(defaults.thsad_scale),
+            refine: self.refine.unwrap_or(defaults.refine),
+            spatial_radius,
+            // Left unset here because the default depends on the plane being denoised, which
+            // is not known yet. The per-plane overrides and defaults apply once it is.
+            lambda_ht: self.lambda_ht,
+            lambda_ht_scale: self.lambda_ht_scale.unwrap_or(defaults.lambda_ht_scale),
+            c_min: self.c_min.unwrap_or(defaults.c_min),
+            kaiser_beta: self.kaiser_beta.unwrap_or(defaults.kaiser_beta),
+            field_lambda: self.field_lambda.unwrap_or(defaults.field_lambda),
+            // Off unless the hidden flag asks, because every calibrated preset assumes the
+            // temporal EMA. Window-local estimation gives random-access determinism.
+            windowed_noise_estimation: self.windowed_noise_estimation,
+            noise_map: defaults.noise_map && !self.no_noise_map,
+            flat_boost: self.flat_boost.unwrap_or(defaults.flat_boost),
+            chroma_flat_boost: self.chroma_flat_boost.unwrap_or(defaults.chroma_flat_boost),
+            shadow_soften: self.shadow_soften.unwrap_or(defaults.shadow_soften),
+            flat_texture_cut: self.flat_texture_cut.unwrap_or(defaults.flat_texture_cut),
+            pooled_threshold: defaults.pooled_threshold && !self.no_pooled_threshold,
+            grain_export: exports_grain,
+        };
+        let mode = DenoisingMode::Temporal {
+            radius: temporal_radius,
+        };
+
+        let planes = PlaneOptions {
+            accelerators: globals.accelerators.clone(),
+            device: globals.device.clone(),
+            intent,
+            mode,
+            algorithm: Algorithm::Nl4d(nl4d_options),
+            // nl4d has no NLM weighting pass for a strength to apply to.
+            luma_strength: None,
+            chroma_strength: None,
+            luma_lambda_ht: self.luma_lambda_ht,
+            chroma_lambda_ht: self.chroma_lambda_ht,
+        };
+
         Ok(RunOptions {
-            planes: PlaneOptions {
-                accelerators: globals.accelerators.clone(),
-                device: globals.device.clone(),
-                intent,
-                mode: DenoisingMode::Temporal {
-                    radius: self.temporal_radius(globals.preset)?,
-                },
-                algorithm: Algorithm::Nl4d(Nl4dOptions {
-                    motion: self.motion.to_motion_search(),
-                    sigma: self.sigma.map(|s| s / 255.0),
-                    sigma_scale: self.sigma_scale.unwrap_or(defaults.sigma_scale),
-                    thsad_scale: self.thsad_scale.unwrap_or(defaults.thsad_scale),
-                    refine: self.refine.unwrap_or(defaults.refine),
-                    spatial_radius: self
-                        .spatial_radius
-                        .unwrap_or_else(|| nl4d_spatial_radius_for(globals.preset)),
-                    // Left unresolved when unset, rather than picked from
-                    // `defaults` here, because the default depends on which
-                    // plane is being denoised and that is not known yet.
-                    // `PlaneOptions::algorithm_for` (av-denoise-core/src/frame/mod.rs)
-                    // applies `--luma-`/`--chroma-lambda-ht` on top of this
-                    // once the plane is known, and construction fills in the
-                    // per-plane default for whatever is still unset.
-                    lambda_ht: self.lambda_ht,
-                    lambda_ht_scale: self.lambda_ht_scale.unwrap_or(defaults.lambda_ht_scale),
-                    c_min: self.c_min.unwrap_or(defaults.c_min),
-                    kaiser_beta: self.kaiser_beta.unwrap_or(defaults.kaiser_beta),
-                    field_lambda: self.field_lambda.unwrap_or(defaults.field_lambda),
-                    // The CLI keeps the temporal EMA every calibrated
-                    // preset assumes by default. Only `av-denoise-vs`
-                    // needs window-local estimation, for random-access
-                    // determinism. `--windowed-noise-estimation` exists
-                    // to measure the difference on real footage.
-                    windowed_noise_estimation: self.windowed_noise_estimation,
-                    noise_map: defaults.noise_map && !self.no_noise_map,
-                    flat_boost: self.flat_boost.unwrap_or(defaults.flat_boost),
-                    chroma_flat_boost: self.chroma_flat_boost.unwrap_or(defaults.chroma_flat_boost),
-                    shadow_soften: self.shadow_soften.unwrap_or(defaults.shadow_soften),
-                    flat_texture_cut: self.flat_texture_cut.unwrap_or(defaults.flat_texture_cut),
-                    pooled_threshold: defaults.pooled_threshold && !self.no_pooled_threshold,
-                    grain_export: exports_grain,
-                }),
-                // nl4d has no NLM weighting pass for a strength to apply to.
-                luma_strength: None,
-                chroma_strength: None,
-                luma_lambda_ht: self.luma_lambda_ht,
-                chroma_lambda_ht: self.chroma_lambda_ht,
-            },
+            planes,
             progress: globals.progress,
             grain_table: self.unstable_export_av1_fgs.clone(),
         })
@@ -362,11 +351,10 @@ impl Nl4dArgs {
 mod tests {
     use clap::Parser;
 
-    use super::super::Command;
     use super::*;
+    use crate::cli::Command;
 
-    /// Parses a full argv into the `nl4d` subcommand's args plus the
-    /// globals they resolve against.
+    /// Parses a `nl4d` argv reading stdin, with `extra` after the subcommand.
     fn parse(extra: &[&str]) -> (Args, Nl4dArgs) {
         let mut argv = vec!["av-denoise", "nl4d", "-i", "-"];
         argv.extend_from_slice(extra);
@@ -380,8 +368,7 @@ mod tests {
         (args, nl4d)
     }
 
-    /// Parses an argv that clap itself is expected to reject, which is
-    /// what an `nlmeans`-only flag should now be.
+    /// Parses a `nl4d` argv that clap is expected to reject.
     fn parse_err(extra: &[&str]) -> clap::Error {
         let mut argv = vec!["av-denoise", "nl4d", "-i", "-"];
         argv.extend_from_slice(extra);
@@ -389,8 +376,6 @@ mod tests {
         Args::try_parse_from(argv).expect_err("expected clap to reject this argv")
     }
 
-    /// Unwraps a `RunOptions`'s `Algorithm::Nl4d`, panicking with the
-    /// whole value on any other variant.
     fn expect_nl4d(opts: &RunOptions) -> Nl4dOptions {
         match opts.planes.algorithm {
             Algorithm::Nl4d(nl4d) => nl4d,
@@ -401,6 +386,7 @@ mod tests {
     #[test]
     fn nl4d_subcommand_parses_with_no_extra_flags() {
         let (_, nl4d) = parse(&[]);
+
         assert_eq!(nl4d.temporal_radius, None);
         assert_eq!(nl4d.refine, None);
         assert_eq!(nl4d.spatial_radius, None);
@@ -453,80 +439,94 @@ mod tests {
     fn lambda_ht_scale_flows_into_the_nl4d_algorithm() {
         let (args, nl4d) = parse(&["--lambda-ht-scale", "1.1"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let nl4d_options = expect_nl4d(&opts);
 
-        assert!((expect_nl4d(&opts).lambda_ht_scale - 1.1).abs() < f32::EPSILON);
+        assert!((nl4d_options.lambda_ht_scale - 1.1).abs() < f32::EPSILON);
     }
 
     #[test]
     fn unset_lambda_ht_scale_resolves_to_the_library_default() {
         let (args, nl4d) = parse(&[]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let nl4d_options = expect_nl4d(&opts);
         let defaults = Nl4dOptions::default();
 
-        assert!((expect_nl4d(&opts).lambda_ht_scale - defaults.lambda_ht_scale).abs() < f32::EPSILON);
+        assert!((nl4d_options.lambda_ht_scale - defaults.lambda_ht_scale).abs() < f32::EPSILON);
     }
 
     #[test]
     fn field_lambda_flows_into_the_nl4d_algorithm() {
         let (args, nl4d) = parse(&["--field-lambda", "0.7"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let nl4d_options = expect_nl4d(&opts);
 
         assert!((nl4d.field_lambda.unwrap() - 0.7).abs() < f32::EPSILON);
-        assert!((expect_nl4d(&opts).field_lambda - 0.7).abs() < f32::EPSILON);
+        assert!((nl4d_options.field_lambda - 0.7).abs() < f32::EPSILON);
     }
 
     #[test]
     fn unset_field_lambda_resolves_to_the_library_default() {
         let (args, nl4d) = parse(&[]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let nl4d_options = expect_nl4d(&opts);
         let defaults = Nl4dOptions::default();
 
         assert_eq!(nl4d.field_lambda, None);
-        assert!((expect_nl4d(&opts).field_lambda - defaults.field_lambda).abs() < f32::EPSILON);
+        assert!((nl4d_options.field_lambda - defaults.field_lambda).abs() < f32::EPSILON);
     }
 
     #[test]
     fn noise_map_defaults_to_on() {
         let (args, nl4d) = parse(&[]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
-        assert!(expect_nl4d(&opts).noise_map);
+        let nl4d_options = expect_nl4d(&opts);
+
+        assert!(nl4d_options.noise_map);
     }
 
     #[test]
     fn no_noise_map_turns_it_off() {
         let (args, nl4d) = parse(&["--no-noise-map"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
-        assert!(!expect_nl4d(&opts).noise_map);
+        let nl4d_options = expect_nl4d(&opts);
+
+        assert!(!nl4d_options.noise_map);
     }
 
     #[test]
     fn there_is_no_positive_noise_map_flag() {
-        let err = parse_err(&["--noise-map"]);
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        let error = parse_err(&["--noise-map"]);
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
     fn pooled_threshold_defaults_to_on() {
         let (args, nl4d) = parse(&[]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
-        assert!(expect_nl4d(&opts).pooled_threshold);
+        let nl4d_options = expect_nl4d(&opts);
+
+        assert!(nl4d_options.pooled_threshold);
     }
 
     #[test]
     fn no_pooled_threshold_turns_it_off() {
         let (args, nl4d) = parse(&["--no-pooled-threshold"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
-        assert!(!expect_nl4d(&opts).pooled_threshold);
+        let nl4d_options = expect_nl4d(&opts);
+
+        assert!(!nl4d_options.pooled_threshold);
     }
 
     #[test]
     fn there_is_no_positive_pooled_threshold_flag() {
-        let err = parse_err(&["--pooled-threshold"]);
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        let error = parse_err(&["--pooled-threshold"]);
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     /// nl4d never runs an NLM weighting pass, so the flags that only
-    /// configure one are gone rather than silently ignored.
+    /// configure one are rejected rather than silently ignored.
     #[test]
     fn nlmeans_only_flags_are_rejected() {
         let valued = [
@@ -550,20 +550,22 @@ mod tests {
         ];
 
         for flag in valued {
-            let err = parse_err(&[flag, "1"]);
+            let error = parse_err(&[flag, "1"]);
+
             assert_eq!(
-                err.kind(),
+                error.kind(),
                 clap::error::ErrorKind::UnknownArgument,
-                "{flag} should not exist under nl4d, got {err}"
+                "{flag} should not exist under nl4d, got {error}"
             );
         }
 
         for flag in switches {
-            let err = parse_err(&[flag]);
+            let error = parse_err(&[flag]);
+
             assert_eq!(
-                err.kind(),
+                error.kind(),
                 clap::error::ErrorKind::UnknownArgument,
-                "{flag} should not exist under nl4d, got {err}"
+                "{flag} should not exist under nl4d, got {error}"
             );
         }
     }
@@ -576,17 +578,16 @@ mod tests {
             "--luma-mismatch-scale=1.0",
             "--chroma-mismatch-scale=1.0",
         ] {
-            let err = parse_err(&[flag]);
+            let error = parse_err(&[flag]);
+
             assert_eq!(
-                err.kind(),
+                error.kind(),
                 clap::error::ErrorKind::UnknownArgument,
-                "{flag} must no longer parse, got {err}"
+                "{flag} must no longer parse, got {error}"
             );
         }
     }
 
-    /// The motion-search knobs stay, because nl4d reads the motion field
-    /// they shape.
     #[test]
     fn motion_flags_flow_into_the_motion_search() {
         let (args, nl4d) = parse(&[
@@ -608,15 +609,14 @@ mod tests {
         assert_eq!(motion.pyramid_levels, 1);
     }
 
-    /// Only an explicit flag can ask for a window nl4d cannot use. No
-    /// preset resolves to 0.
     #[test]
     fn an_explicit_temporal_radius_of_zero_is_rejected() {
         let (args, nl4d) = parse(&["--temporal-radius", "0"]);
-        let err = nl4d
+        let error = nl4d
             .build_options(&args)
             .expect_err("radius 0 must be rejected under nl4d");
-        assert!(err.to_string().contains("--temporal-radius"), "got {err}");
+
+        assert!(error.to_string().contains("--temporal-radius"), "got {error}");
     }
 
     #[test]
@@ -633,7 +633,8 @@ mod tests {
             let (args, nl4d) = parse(&["--preset", preset]);
             let opts = nl4d
                 .build_options(&args)
-                .unwrap_or_else(|e| panic!("preset {preset} should resolve: {e}"));
+                .unwrap_or_else(|error| panic!("preset {preset} should resolve: {error}"));
+            let nl4d_options = expect_nl4d(&opts);
 
             assert_eq!(
                 opts.planes.mode,
@@ -641,8 +642,7 @@ mod tests {
                 "preset {preset} resolved to the wrong temporal radius"
             );
             assert_eq!(
-                expect_nl4d(&opts).spatial_radius,
-                spatial_radius,
+                nl4d_options.spatial_radius, spatial_radius,
                 "preset {preset} resolved to the wrong spatial radius"
             );
         }
@@ -653,20 +653,23 @@ mod tests {
     #[test]
     fn veryfast_searches_fewer_candidates_than_fast() {
         let (fast_args, fast) = parse(&["--preset", "fast"]);
-        let (vf_args, vf) = parse(&["--preset", "veryfast"]);
+        let (veryfast_args, veryfast) = parse(&["--preset", "veryfast"]);
 
-        let fast = expect_nl4d(&fast.build_options(&fast_args).expect("fast should resolve"));
-        let vf = expect_nl4d(&vf.build_options(&vf_args).expect("veryfast should resolve"));
+        let fast_opts = fast.build_options(&fast_args).expect("fast should resolve");
+        let veryfast_opts = veryfast
+            .build_options(&veryfast_args)
+            .expect("veryfast should resolve");
+        let fast_nl4d = expect_nl4d(&fast_opts);
+        let veryfast_nl4d = expect_nl4d(&veryfast_opts);
 
         assert!(
-            vf.spatial_radius < fast.spatial_radius,
+            veryfast_nl4d.spatial_radius < fast_nl4d.spatial_radius,
             "veryfast ({}) should search a narrower window than fast ({})",
-            vf.spatial_radius,
-            fast.spatial_radius
+            veryfast_nl4d.spatial_radius,
+            fast_nl4d.spatial_radius
         );
     }
 
-    /// An explicit flag outranks the preset on both dials.
     #[test]
     fn explicit_radii_outrank_the_preset() {
         let (args, nl4d) = parse(&[
@@ -678,9 +681,10 @@ mod tests {
             "12",
         ]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let nl4d_options = expect_nl4d(&opts);
 
         assert_eq!(opts.planes.mode, DenoisingMode::Temporal { radius: 4 });
-        assert_eq!(expect_nl4d(&opts).spatial_radius, 12);
+        assert_eq!(nl4d_options.spatial_radius, 12);
     }
 
     #[test]
@@ -689,7 +693,7 @@ mod tests {
         let opts = nl4d
             .build_options(&args)
             .expect("default preset should resolve for nl4d");
-        let nl4d_opts = expect_nl4d(&opts);
+        let nl4d_options = expect_nl4d(&opts);
         let defaults = Nl4dOptions::default();
 
         assert_eq!(
@@ -697,40 +701,38 @@ mod tests {
             DenoisingMode::Temporal { radius: 2 },
             "base preset resolves to temporal radius 2"
         );
-        assert_eq!(nl4d_opts.motion, defaults.motion);
-        assert_eq!(nl4d_opts.refine, defaults.refine);
-        assert_eq!(nl4d_opts.spatial_radius, defaults.spatial_radius);
-        assert_eq!(nl4d_opts.sigma, defaults.sigma);
-        assert!((nl4d_opts.sigma_scale - defaults.sigma_scale).abs() < f32::EPSILON);
-        assert!((nl4d_opts.thsad_scale - defaults.thsad_scale).abs() < f32::EPSILON);
+        assert_eq!(nl4d_options.motion, defaults.motion);
+        assert_eq!(nl4d_options.refine, defaults.refine);
+        assert_eq!(nl4d_options.spatial_radius, defaults.spatial_radius);
+        assert_eq!(nl4d_options.sigma, defaults.sigma);
+        assert!((nl4d_options.sigma_scale - defaults.sigma_scale).abs() < f32::EPSILON);
+        assert!((nl4d_options.thsad_scale - defaults.thsad_scale).abs() < f32::EPSILON);
         assert_eq!(
-            nl4d_opts.lambda_ht, defaults.lambda_ht,
+            nl4d_options.lambda_ht, defaults.lambda_ht,
             "unset --lambda-ht should stay None here, resolved later per plane"
         );
-        assert!((nl4d_opts.c_min - defaults.c_min).abs() < f32::EPSILON);
+        assert!((nl4d_options.c_min - defaults.c_min).abs() < f32::EPSILON);
     }
 
     #[test]
     fn explicit_grouping_flags_override_the_library_defaults() {
         let (args, nl4d) = parse(&["--refine", "4", "--spatial-radius", "6", "--c-min", "0.2"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
-        let nl4d_opts = expect_nl4d(&opts);
+        let nl4d_options = expect_nl4d(&opts);
 
-        assert_eq!(nl4d_opts.refine, 4);
-        assert_eq!(nl4d_opts.spatial_radius, 6);
-        assert!((nl4d_opts.c_min - 0.2).abs() < f32::EPSILON);
+        assert_eq!(nl4d_options.refine, 4);
+        assert_eq!(nl4d_options.spatial_radius, 6);
+        assert!((nl4d_options.c_min - 0.2).abs() < f32::EPSILON);
     }
 
-    /// `--sigma` is typed in 8-bit units and the library takes it
-    /// normalised, so `build_options` is where the /255 happens.
     #[test]
     fn sigma_is_normalised_out_of_eight_bit_units() {
         let (args, nl4d) = parse(&["--sigma", "6"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let nl4d_options = expect_nl4d(&opts);
 
-        let sigma = expect_nl4d(&opts)
-            .sigma
-            .expect("--sigma should reach the options");
+        let sigma = nl4d_options.sigma.expect("--sigma should reach the options");
+
         assert!(
             (sigma - 6.0 / 255.0).abs() < f32::EPSILON,
             "expected 6/255, got {sigma}"
@@ -740,33 +742,31 @@ mod tests {
     #[test]
     fn out_of_range_sigma_is_rejected() {
         let (args, nl4d) = parse(&["--sigma", "300"]);
-        let err = nl4d.build_options(&args).expect_err("300 is out of range");
+        let error = nl4d.build_options(&args).expect_err("300 is out of range");
 
-        assert!(err.to_string().contains("--sigma"), "got {err}");
+        assert!(error.to_string().contains("--sigma"), "got {error}");
     }
 
     #[test]
     fn sigma_scale_and_thsad_scale_flow_into_the_nl4d_algorithm() {
         let (args, nl4d) = parse(&["--sigma-scale", "1.2", "--thsad-scale", "0.7"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
-        let nl4d_opts = expect_nl4d(&opts);
+        let nl4d_options = expect_nl4d(&opts);
 
-        assert!((nl4d_opts.sigma_scale - 1.2).abs() < f32::EPSILON);
-        assert!((nl4d_opts.thsad_scale - 0.7).abs() < f32::EPSILON);
+        assert!((nl4d_options.sigma_scale - 1.2).abs() < f32::EPSILON);
+        assert!((nl4d_options.thsad_scale - 0.7).abs() < f32::EPSILON);
     }
 
     #[test]
     fn per_plane_lambda_ht_flags_parse_to_the_typed_values() {
         let (_, nl4d) = parse(&["--luma-lambda-ht", "2.0", "--chroma-lambda-ht", "3.5"]);
+
         assert!((nl4d.luma_lambda_ht.unwrap() - 2.0).abs() < f32::EPSILON);
         assert!((nl4d.chroma_lambda_ht.unwrap() - 3.5).abs() < f32::EPSILON);
     }
 
-    /// `build_options` carries the two per-plane `lambda_ht` overrides
-    /// straight through onto `PlaneOptions`, unresolved.
-    /// `PlaneOptions::algorithm_for` (`av-denoise-core/src/frame/mod.rs`)
-    /// is what actually resolves them per plane, so this test only checks
-    /// the flow into `PlaneOptions`.
+    /// The per-plane overrides reach `PlaneOptions` unresolved, because
+    /// they are resolved per plane later, so this only checks that flow.
     #[test]
     fn luma_lambda_ht_alone_flows_into_cli_options_luma_field_only() {
         let (args, nl4d) = parse(&["--luma-lambda-ht", "2.0"]);
@@ -816,61 +816,67 @@ mod tests {
             "0.3",
         ]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
-        let algorithm = expect_nl4d(&opts);
+        let nl4d_options = expect_nl4d(&opts);
 
-        assert_eq!(algorithm.flat_boost, 2.0);
-        assert_eq!(algorithm.chroma_flat_boost, 1.2);
-        assert_eq!(algorithm.shadow_soften, 0.8);
-        assert_eq!(algorithm.flat_texture_cut, 0.3);
+        assert_eq!(nl4d_options.flat_boost, 2.0);
+        assert_eq!(nl4d_options.chroma_flat_boost, 1.2);
+        assert_eq!(nl4d_options.shadow_soften, 0.8);
+        assert_eq!(nl4d_options.flat_texture_cut, 0.3);
     }
 
     #[test]
     fn unset_strength_map_flags_resolve_to_the_library_defaults() {
         let (args, nl4d) = parse(&[]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
-        let algorithm = expect_nl4d(&opts);
+        let nl4d_options = expect_nl4d(&opts);
         let defaults = Nl4dOptions::default();
 
-        assert_eq!(algorithm.flat_boost, defaults.flat_boost);
-        assert_eq!(algorithm.chroma_flat_boost, defaults.chroma_flat_boost);
-        assert_eq!(algorithm.shadow_soften, defaults.shadow_soften);
-        assert_eq!(algorithm.flat_texture_cut, defaults.flat_texture_cut);
+        assert_eq!(nl4d_options.flat_boost, defaults.flat_boost);
+        assert_eq!(nl4d_options.chroma_flat_boost, defaults.chroma_flat_boost);
+        assert_eq!(nl4d_options.shadow_soften, defaults.shadow_soften);
+        assert_eq!(nl4d_options.flat_texture_cut, defaults.flat_texture_cut);
     }
 
     #[test]
     fn export_flag_sets_the_table_and_turns_export_on() {
         let (args, nl4d) = parse(&["--unstable-export-av1-fgs", "out.tbl"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let nl4d_options = expect_nl4d(&opts);
         let expected = std::path::Path::new("out.tbl");
 
         assert_eq!(opts.grain_table.as_deref(), Some(expected));
-        assert!(expect_nl4d(&opts).grain_export);
+        assert!(nl4d_options.grain_export);
     }
 
     #[test]
     fn export_works_with_a_fixed_sigma() {
         let (args, nl4d) = parse(&["--sigma", "4", "--unstable-export-av1-fgs", "x"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let nl4d_options = expect_nl4d(&opts);
 
-        assert!(expect_nl4d(&opts).grain_export);
+        assert!(nl4d_options.grain_export);
     }
 
     #[test]
     fn export_is_off_without_the_flag() {
         let (args, nl4d) = parse(&[]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let nl4d_options = expect_nl4d(&opts);
 
         assert_eq!(opts.grain_table, None);
-        assert!(!expect_nl4d(&opts).grain_export);
+        assert!(!nl4d_options.grain_export);
     }
 
     #[test]
     fn export_rejects_chroma_only() {
         let (args, nl4d) = parse(&["--channel-mode", "chroma", "--unstable-export-av1-fgs", "out.tbl"]);
-        let err = nl4d
+        let error = nl4d
             .build_options(&args)
             .expect_err("chroma only cannot export luma grain");
 
-        assert!(err.to_string().contains("--unstable-export-av1-fgs"), "got {err}");
+        assert!(
+            error.to_string().contains("--unstable-export-av1-fgs"),
+            "got {error}"
+        );
     }
 }

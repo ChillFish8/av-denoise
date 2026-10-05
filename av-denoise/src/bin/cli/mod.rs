@@ -19,15 +19,11 @@ pub use self::motion::MotionArgs;
 pub use self::nl4d::Nl4dArgs;
 pub use self::nlmeans::NlmeansArgs;
 
-/// The options `main` runs a denoising pass with.
-///
-/// `planes` is the library-side option set that drives `PlanarDenoiser`.
-/// `progress` is a CLI concern the library layer has no use for, so it
-/// stays here rather than on `PlaneOptions`.
+/// The options a denoising run takes.
 #[derive(Debug, Clone)]
 pub struct RunOptions {
     pub planes: PlaneOptions,
-    /// Draws the denoising progress bar.
+    /// Whether to draw the denoising progress bar.
     pub progress: bool,
     /// Where to write the AV1 film grain table, when one was asked for.
     pub grain_table: Option<PathBuf>,
@@ -45,6 +41,7 @@ pub enum CliChannelMode {
     Yuv,
 }
 
+/// Turns the `--channel-mode` list into the planes to denoise.
 pub fn resolve_channel_intent(modes: &[CliChannelMode]) -> Result<ChannelIntent, anyhow::Error> {
     if modes.is_empty() {
         anyhow::bail!("--channel-mode must contain at least one value");
@@ -57,21 +54,26 @@ pub fn resolve_channel_intent(modes: &[CliChannelMode]) -> Result<ChannelIntent,
 
     let has_luma = modes.contains(&CliChannelMode::Luma);
     let has_chroma = modes.contains(&CliChannelMode::Chroma);
-    let luma_count = modes.iter().filter(|m| **m == CliChannelMode::Luma).count();
-    let chroma_count = modes.iter().filter(|m| **m == CliChannelMode::Chroma).count();
-    let yuv_count = modes.iter().filter(|m| **m == CliChannelMode::Yuv).count();
+    let luma_count = modes.iter().filter(|mode| **mode == CliChannelMode::Luma).count();
+    let chroma_count = modes
+        .iter()
+        .filter(|mode| **mode == CliChannelMode::Chroma)
+        .count();
+    let yuv_count = modes.iter().filter(|mode| **mode == CliChannelMode::Yuv).count();
 
     if luma_count > 1 || chroma_count > 1 || yuv_count > 1 {
         anyhow::bail!("--channel-mode entries must be unique");
     }
 
-    Ok(match (has_yuv, has_luma, has_chroma) {
+    let intent = match (has_yuv, has_luma, has_chroma) {
         (true, _, _) => ChannelIntent::YuvFused,
         (false, true, true) => ChannelIntent::LumaChroma,
         (false, true, false) => ChannelIntent::Luma,
         (false, false, true) => ChannelIntent::Chroma,
         (false, false, false) => unreachable!("empty list rejected above"),
-    })
+    };
+
+    Ok(intent)
 }
 
 #[derive(Debug, Parser)]
@@ -80,10 +82,9 @@ pub struct Args {
     /// Speed vs quality dial.
     ///
     /// `veryfast` is the fastest and lowest-quality end of the dial.
-    /// For `nlmeans` it runs the `fast` variant with no temporal window
-    /// and matches this tool's original default behavior. For `nl4d` it
-    /// keeps a 1-frame temporal window, which that algorithm needs, and
-    /// narrows the spatial search instead.
+    /// For `nlmeans` it runs the `fast` variant with no temporal window.
+    /// For `nl4d` it keeps a 1-frame temporal window, which that
+    /// algorithm needs, and narrows the spatial search instead.
     ///
     /// Going up the list widens the temporal window, from a 1-frame
     /// radius at `fast` to an 8-frame radius at `veryslow`. `fast` and
@@ -174,16 +175,15 @@ pub enum Command {
     /// temporal window.
     Nlmeans(NlmeansArgs),
 
-    /// Denoise by grouping matching patches across several noisy frames
-    /// directly, rather than filtering with non-local means first.
+    /// Denoise by grouping matching patches across several noisy frames.
     ///
-    /// `nl4d` measures the noise level, tracks motion, and scores how
-    /// well each neighbour frame matches, the same way `nlmeans hq`
-    /// does. No NLM weighting pass ever runs. Instead, patches are
-    /// grouped straight out of the noisy frames, searching both the
-    /// centre frame spatially and each neighbour frame around where a
-    /// patch is predicted to have moved, then each group's coefficients
-    /// are shrunk jointly.
+    /// Patches are grouped straight out of the noisy frames, and no
+    /// non-local means pass runs. `nl4d` measures the noise level,
+    /// tracks motion, and scores how well each neighbour frame matches,
+    /// the same way `nlmeans hq` does. Each group searches the centre
+    /// frame spatially and each neighbour frame around where a patch is
+    /// predicted to have moved, then the group's coefficients are shrunk
+    /// jointly.
     ///
     /// Motion tracking is always on, and every preset keeps a temporal
     /// window, which this algorithm needs.

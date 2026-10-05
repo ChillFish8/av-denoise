@@ -40,6 +40,7 @@ pub(super) fn gaussian_field(width: usize, height: usize, seed: u64) -> Vec<f64>
     }
 
     field.truncate(width * height);
+
     field
 }
 
@@ -70,6 +71,7 @@ pub(super) fn ar_field(coeffs: &[f64; AR_COEFFS], width: usize, height: usize, s
         let start = y * full_width + warm;
         field.extend_from_slice(&grain[start..start + width]);
     }
+
     field
 }
 
@@ -90,6 +92,7 @@ pub(super) fn autocov_of(field: &[f64], width: usize, height: usize) -> Vec<f64>
             sums[LAG_COUNT] += 1.0;
         }
     }
+
     sums
 }
 
@@ -99,16 +102,17 @@ pub(super) fn cell_mean_removed_record(field: &[f64], width: usize, height: usiz
     let cell = CELL as usize;
     let mut sums = vec![0.0f64; LAG_COUNT + 1];
 
-    for y0 in (0..height - 2 * cell).step_by(cell) {
-        for x0 in (cell..width - 2 * cell).step_by(cell) {
+    for cell_top in (0..height - 2 * cell).step_by(cell) {
+        for cell_left in (cell..width - 2 * cell).step_by(cell) {
             let mut total = 0.0;
-            for y in y0..y0 + cell {
-                total += field[y * width + x0..y * width + x0 + cell].iter().sum::<f64>();
+            for y in cell_top..cell_top + cell {
+                let row = &field[y * width + cell_left..y * width + cell_left + cell];
+                total += row.iter().sum::<f64>();
             }
 
             let mean = total / (cell * cell) as f64;
-            for y in y0..y0 + cell {
-                for x in x0..x0 + cell {
+            for y in cell_top..cell_top + cell {
+                for x in cell_left..cell_left + cell {
                     let centre = field[y * width + x] - mean;
                     for (lane, &(dy, dx)) in LAGS.iter().enumerate() {
                         let neighbour_y = (y as i32 + dy) as usize;
@@ -136,6 +140,7 @@ pub(super) fn grain_record() -> Vec<f64> {
     weights[left] = 0.4;
 
     let field = ar_field(&weights, 300, 300, 5);
+
     autocov_of(&field, 300, 300)
 }
 
@@ -178,5 +183,6 @@ pub(super) fn chunk_at(std_codes: f32, blocks_per_bin: u32, kept_codes: Option<f
 
     let record = grain_record();
     add_group_record(&mut chunk, bucket / BUCKETS_PER_GROUP, &record);
+
     chunk
 }

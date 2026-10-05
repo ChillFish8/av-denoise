@@ -1,7 +1,9 @@
-use super::helpers::{R, make_client, unit_noise};
+use super::helpers::{R, make_client};
+use crate::bench_api::HostIo;
 use crate::collab::kernels::fused::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA};
 use crate::nl4d::denoiser::strength_map_upload;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
+use crate::nlmeans::tests::helpers::seeded_unit_gaussian;
 use crate::nlmeans::{
     ChannelMode,
     HqParams,
@@ -23,16 +25,16 @@ const FRAMES: u32 = 12;
 const SEAM_MARGIN: u32 = 48;
 
 fn two_quarters() -> QuarterClasses {
-    let classes = vec![
-        Some(QuarterClass {
-            flat: true,
-            luma: 0.1,
-        }),
-        Some(QuarterClass {
-            flat: false,
-            luma: 0.1,
-        }),
-    ];
+    let flat = QuarterClass {
+        flat: true,
+        luma: 0.1,
+    };
+    let textured = QuarterClass {
+        flat: false,
+        luma: 0.1,
+    };
+    let classes = vec![Some(flat), Some(textured)];
+
     QuarterClasses::from_classes(2, 1, classes)
 }
 
@@ -60,8 +62,11 @@ fn the_chroma_map_uploads_without_a_curve() {
 fn nothing_uploads_without_classes_or_a_map() {
     let classes = two_quarters();
 
-    assert_eq!(strength_map_upload(None, 1, Some(LUMA_MAP), None), None);
-    assert_eq!(strength_map_upload(Some(&classes), 1, None, None), None);
+    let without_classes = strength_map_upload(None, 1, Some(LUMA_MAP), None);
+    let without_map = strength_map_upload(Some(&classes), 1, None, None);
+
+    assert_eq!(without_classes, None);
+    assert_eq!(without_map, None);
 }
 
 fn ramp_luma(y: u32) -> f32 {
@@ -95,13 +100,15 @@ fn half_textured_clip(channels: u32) -> Vec<Vec<f32>> {
                     let pixel = y * WIDTH + x;
                     let sample = pixel * channels + channel;
                     let seed = frame_index * channels + channel;
-                    let noise = unit_noise(pixel, seed);
+                    let noise = seeded_unit_gaussian(pixel, seed);
                     frame[sample as usize] = (clean + noise * noise_std).clamp(0.0, 1.0);
                 }
             }
         }
+
         frames.push(frame);
     }
+
     frames
 }
 
@@ -112,13 +119,16 @@ fn clip_params(
     shadow_soften: f32,
 ) -> Nl4dParams {
     let defaults = Nl4dParams::default();
+    let hq = HqParams::default();
+    let nlm = NlmParams {
+        channels,
+        prefilter: PrefilterMode::None,
+        hq: Some(hq),
+        ..defaults.nlm
+    };
+
     Nl4dParams {
-        nlm: NlmParams {
-            channels,
-            prefilter: PrefilterMode::None,
-            hq: Some(HqParams::default()),
-            ..defaults.nlm
-        },
+        nlm,
         flat_boost,
         chroma_flat_boost,
         shadow_soften,
@@ -154,19 +164,17 @@ fn denoise_clip(params: Nl4dParams, frames: &[Vec<f32>]) -> ClipRun {
     let mut classes_seen = false;
     for frame in frames {
         denoiser.push_frame(frame);
-        let pending = denoiser.denoise_submit().expect("denoise_submit failed");
+        let output = denoiser.denoise().expect("denoise failed");
         classes_seen |= denoiser.front_for_test().current_quarter_classes().is_some();
 
-        if let Some(pending) = pending {
-            let output = pending.wait().expect("readback failed");
-            let output_frame = output.into_f32().expect("f32 output");
+        if let Some(output_frame) = output {
             outputs.push(output_frame);
         }
     }
 
     denoiser
         .flush(|frame| {
-            let output_frame = frame.as_f32().expect("f32 denoiser").to_vec();
+            let output_frame = frame.to_vec();
             outputs.push(output_frame);
         })
         .expect("flush failed");
@@ -231,8 +239,10 @@ fn dark_rows() -> std::ops::Range<u32> {
 fn the_defaults_differ_from_a_map_of_ones() {
     let frames = half_textured_clip(1);
 
-    let defaults = denoise_clip(default_params(ChannelMode::Luma), &frames);
-    let ones = denoise_clip(unit_params(ChannelMode::Luma), &frames);
+    let default_map_params = default_params(ChannelMode::Luma);
+    let unit_map_params = unit_params(ChannelMode::Luma);
+    let defaults = denoise_clip(default_map_params, &frames);
+    let ones = denoise_clip(unit_map_params, &frames);
 
     assert!(defaults.classes_seen, "the clip should form quarter classes");
     assert_ne!(defaults.outputs, ones.outputs);
@@ -242,12 +252,15 @@ fn the_defaults_differ_from_a_map_of_ones() {
 fn shadow_soften_removes_less_from_textured_darks() {
     let frames = half_textured_clip(1);
 
-    let softened = denoise_clip(clip_params(ChannelMode::Luma, 1.0, 1.0, 0.65), &frames);
-    let ones = denoise_clip(unit_params(ChannelMode::Luma), &frames);
+    let softened_params = clip_params(ChannelMode::Luma, 1.0, 1.0, 0.65);
+    let unit_map_params = unit_params(ChannelMode::Luma);
+    let softened = denoise_clip(softened_params, &frames);
+    let ones = denoise_clip(unit_map_params, &frames);
 
     let left = 0..WIDTH / 2 - SEAM_MARGIN;
-    let softened_std = removed_std(&frames, &softened.outputs, 1, left.clone(), dark_rows());
-    let ones_std = removed_std(&frames, &ones.outputs, 1, left, dark_rows());
+    let dark = dark_rows();
+    let softened_std = removed_std(&frames, &softened.outputs, 1, left.clone(), dark.clone());
+    let ones_std = removed_std(&frames, &ones.outputs, 1, left, dark);
     assert!(softened_std < ones_std, "{softened_std} vs {ones_std}");
 }
 
@@ -255,8 +268,10 @@ fn shadow_soften_removes_less_from_textured_darks() {
 fn flat_boost_removes_more_from_flat_grain() {
     let frames = half_textured_clip(1);
 
-    let boosted = denoise_clip(clip_params(ChannelMode::Luma, 1.5, 1.0, 1.0), &frames);
-    let ones = denoise_clip(unit_params(ChannelMode::Luma), &frames);
+    let boosted_params = clip_params(ChannelMode::Luma, 1.5, 1.0, 1.0);
+    let unit_map_params = unit_params(ChannelMode::Luma);
+    let boosted = denoise_clip(boosted_params, &frames);
+    let ones = denoise_clip(unit_map_params, &frames);
 
     let right = WIDTH / 2 + SEAM_MARGIN..WIDTH;
     let boosted_std = removed_std(&frames, &boosted.outputs, 1, right.clone(), 0..HEIGHT);
@@ -282,10 +297,13 @@ fn the_noise_map_off_ignores_the_strength_map() {
 #[test]
 fn a_pinned_sigma_never_applies_a_map() {
     let frames = half_textured_clip(1);
+    let defaults_hq = HqParams::with_sigma(0.02);
     let mut defaults = default_params(ChannelMode::Luma);
-    defaults.nlm.hq = Some(HqParams::with_sigma(0.02));
+    defaults.nlm.hq = Some(defaults_hq);
+
+    let ones_hq = HqParams::with_sigma(0.02);
     let mut ones = unit_params(ChannelMode::Luma);
-    ones.nlm.hq = Some(HqParams::with_sigma(0.02));
+    ones.nlm.hq = Some(ones_hq);
 
     let with_defaults = denoise_clip(defaults, &frames);
     let with_ones = denoise_clip(ones, &frames);
@@ -298,8 +316,10 @@ fn a_pinned_sigma_never_applies_a_map() {
 fn a_chroma_denoiser_applies_its_flat_boost() {
     let frames = half_textured_clip(2);
 
-    let boosted = denoise_clip(default_params(ChannelMode::Chroma), &frames);
-    let ones = denoise_clip(unit_params(ChannelMode::Chroma), &frames);
+    let boosted_params = default_params(ChannelMode::Chroma);
+    let unit_map_params = unit_params(ChannelMode::Chroma);
+    let boosted = denoise_clip(boosted_params, &frames);
+    let ones = denoise_clip(unit_map_params, &frames);
 
     assert!(
         boosted.classes_seen,
@@ -331,8 +351,10 @@ fn a_chroma_denoiser_with_the_noise_map_off_builds_nothing() {
 fn a_chroma_denoiser_boosts_its_second_channel() {
     let frames = half_textured_clip(2);
 
-    let boosted = denoise_clip(default_params(ChannelMode::Chroma), &frames);
-    let unboosted = denoise_clip(clip_params(ChannelMode::Chroma, 1.5, 1.0, 0.65), &frames);
+    let boosted_params = default_params(ChannelMode::Chroma);
+    let unboosted_params = clip_params(ChannelMode::Chroma, 1.5, 1.0, 0.65);
+    let boosted = denoise_clip(boosted_params, &frames);
+    let unboosted = denoise_clip(unboosted_params, &frames);
 
     let boosted_samples = channel_samples(&boosted.outputs, 2, 1);
     let unboosted_samples = channel_samples(&unboosted.outputs, 2, 1);
@@ -346,21 +368,24 @@ fn a_chroma_denoiser_boosts_its_second_channel() {
 
 #[test]
 fn the_luma_denoiser_passes_the_texture_cut_to_its_front() {
-    let denoiser = build_nl4d(ChannelMode::Luma, Nl4dParams::default());
+    let params = Nl4dParams::default();
+    let denoiser = build_nl4d(ChannelMode::Luma, params);
 
     assert_eq!(denoiser.front_for_test().flat_texture_cut(), Some(0.21));
 }
 
 #[test]
 fn the_fused_yuv_denoiser_passes_the_texture_cut_to_its_front() {
-    let denoiser = build_nl4d(ChannelMode::Yuv, Nl4dParams::default());
+    let params = Nl4dParams::default();
+    let denoiser = build_nl4d(ChannelMode::Yuv, params);
 
     assert_eq!(denoiser.front_for_test().flat_texture_cut(), Some(0.21));
 }
 
 #[test]
 fn the_chroma_denoiser_never_gets_a_texture_cut() {
-    let denoiser = build_nl4d(ChannelMode::Chroma, Nl4dParams::default());
+    let params = Nl4dParams::default();
+    let denoiser = build_nl4d(ChannelMode::Chroma, params);
 
     assert_eq!(denoiser.front_for_test().flat_texture_cut(), None);
 }

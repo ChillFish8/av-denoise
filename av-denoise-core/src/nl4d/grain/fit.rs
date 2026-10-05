@@ -24,6 +24,7 @@ pub(crate) fn bucket_edges() -> [f32; STD_BUCKETS + 1] {
         let fraction = index as f64 / STD_BUCKETS as f64;
         *edge = (STD_MIN as f64 * ratio.powf(fraction)) as f32;
     }
+
     edges
 }
 
@@ -36,6 +37,7 @@ pub(crate) fn bucket_of(std: f32, edges: &[f32]) -> usize {
             bucket = index;
         }
     }
+
     bucket
 }
 
@@ -205,6 +207,8 @@ fn solve(mut matrix: Vec<[f64; AR_COEFFS + 1]>) -> Option<[f64; AR_COEFFS]> {
 }
 
 /// Rounds the weights to AV1 integers with the finest shift that keeps each in a signed byte.
+///
+/// AV1 allows an AR shift between 6 and 9. Weights that overflow at a shift of 6 are clamped.
 pub(crate) fn quantise_ar(coeffs: &[f64; AR_COEFFS]) -> ([i32; AR_COEFFS], u32) {
     for shift in [9u32, 8, 7, 6] {
         let scale = (1u32 << shift) as f64;
@@ -222,13 +226,16 @@ pub(crate) fn quantise_ar(coeffs: &[f64; AR_COEFFS]) -> ([i32; AR_COEFFS], u32) 
 /// Turns per-bin target sigmas into AV1 scaling points and the scaling shift.
 ///
 /// `points` holds `(luma, sigma)` with luma in 8-bit codes and sigma in normalised units.
-/// `sigma_template` is the template std in 8-bit units.
+/// `sigma_template` is the template std in 8-bit units. AV1 allows a scaling shift between 8 and
+/// 11 and a byte per scaling value, so the finest shift that fits the largest value wins and
+/// values past 255 are capped.
 pub(crate) fn scaling_points(points: &[(u8, f64)], sigma_template: f64) -> (Vec<(u8, u8)>, u32) {
     let raw: Vec<f64> = points
         .iter()
         .map(|&(_, sigma)| sigma * 255.0 / sigma_template)
         .collect();
     let largest = raw.iter().copied().fold(0.0f64, f64::max);
+
     let mut shift = 8u32;
     for candidate in [11u32, 10, 9, 8] {
         if largest * (1u32 << candidate) as f64 <= 255.0 {
@@ -243,5 +250,6 @@ pub(crate) fn scaling_points(points: &[(u8, f64)], sigma_template: f64) -> (Vec<
         .zip(raw.iter())
         .map(|(&(luma, _), &value)| (luma, (value * factor).round().min(255.0) as u8))
         .collect();
+
     (scaled, shift)
 }

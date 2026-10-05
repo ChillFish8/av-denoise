@@ -1,13 +1,8 @@
-//! Synthetic clips with known motion, and the scores that compare a
-//! motion field against them.
-//!
-//! This exists for the `mc_accuracy` bench. It is not a stable
-//! interface.
-
+// Shared with the mc_accuracy bench, not a stable interface.
 #![doc(hidden)]
 
 mod score;
 mod synth;
 
-pub use score::{KindScore, Score, score};
-pub use synth::{Clip, MotionClass, Still, synthesise};
+pub use self::score::{KindScore, Score, covering_blocks, score};
+pub use self::synth::{Clip, MotionClass, Still, synthesise};

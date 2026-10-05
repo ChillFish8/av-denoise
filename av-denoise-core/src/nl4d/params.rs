@@ -1,89 +1,64 @@
+use crate::collab::MAX_TEMPORAL_RADIUS;
 use crate::nlmeans::{ChannelMode, HqParams, MotionCompensationMode, MotionEstimation, NlmParams};
 
-/// The largest [`Nl4dParams::kaiser_beta`] worth accepting.
+/// The largest [Nl4dParams::kaiser_beta] worth accepting.
 ///
-/// A Kaiser window's taps fall off faster the larger `beta` is. By 8 the
-/// end tap is under a fiftieth of the centre, so a patch's edge pixels
-/// contribute almost nothing and the step-4 grid is left covering each
-/// pixel with a handful of centres rather than a blend. Past that the
-/// window stops being a taper and starts being a mask, and the smallest
-/// weights fall under what the fixed-point accumulators resolve.
+/// By 8 the end tap is under a fiftieth of the centre, so a patch's edge pixels contribute almost
+/// nothing and the step-4 grid covers each pixel with a handful of centres rather than a blend.
+/// Past that the window acts as a mask, and the smallest weights fall under what the fixed-point
+/// accumulators resolve.
 pub const MAX_KAISER_BETA: f32 = 8.0;
 
 /// The most motion blocks that may cover a reference patch on one axis.
 ///
-/// A block grid at a step below `blksize` puts several blocks over one
-/// patch, and
-/// [`crate::collab::kernels::fused::collab_fused`] searches all of them.
-/// It unrolls its per-neighbour duplicate-rectangle arrays over the
-/// square of this bound, so the bound is what caps the shader's register
-/// footprint. At 4 the arrays hold 16 rectangles and the shipped
-/// geometry, `blksize = 16` at `overlap = 8`, uses 2.
-///
-/// The step is `blksize - overlap`, so 4 admits an overlap of up to
-/// three quarters of the block size.
+/// The fused kernel searches every covering block and unrolls its duplicate-rectangle arrays over
+/// the square of this bound, so the bound caps the shader's register footprint. The default
+/// geometry, `blksize = 16` at `overlap = 8`, uses 2. The step is `blksize - overlap`, so 4 admits
+/// an overlap of up to three quarters of the block size.
 pub const MAX_COVERING_BLOCKS: u32 = 4;
 
-/// Tuning for [`super::Nl4dDenoiser`].
+/// Tuning for the nl4d denoiser.
 ///
-/// `nlm` supplies the front end that builds the frame ring, the motion
-/// field, and the confidence scores the temporal grouping reads. Its own
-/// `temporal_radius` is overwritten at construction time from this
-/// struct's own `temporal_radius`, so it does not need to be set by the
-/// caller.
+/// `nlm` configures the front end that builds the frame ring, motion field and confidence scores.
+/// Its `temporal_radius` is overwritten from this struct's own at construction.
 #[derive(Debug, Clone)]
 pub struct Nl4dParams {
-    /// Machinery configuration for the front end. `hq` must be `Some`
-    /// with `temporal_confidence` on, and `motion_compensation` must be
-    /// active, because [`crate::nlmeans::NlmDenoiser::submit_machinery`]
-    /// only builds a ring view when both are on, and this denoiser is
-    /// built entirely on top of that call.
+    /// Configuration for the front end.
+    ///
+    /// `hq` must be `Some` with `temporal_confidence` on, and motion compensation must be active,
+    /// because the front end only builds a ring view when both are on.
     pub nlm: NlmParams,
-    /// How many frames on each side of the centre frame the temporal
-    /// search reaches into. In `1..=8`.
+    /// How many frames on each side of the centre frame the temporal search reaches, in `1..=8`.
     pub temporal_radius: u32,
-    /// Half-width of the refine window searched around each neighbour
-    /// frame's motion-predicted position. In `1..=4`.
+    /// Half-width of the refine window around each neighbour frame's motion-predicted position, in
+    /// `1..=4`.
     pub refine: u32,
-    /// Half-width of the spatial candidate window searched in the
-    /// centre frame. In `1..=16`.
+    /// Half-width of the spatial candidate window in the centre frame, in `1..=16`.
     pub spatial_radius: u32,
     /// Hard-threshold multiplier on the propagated coefficient sigma.
-    /// Higher shrinks more coefficients, so it removes more noise and
-    /// more fine detail.
     ///
-    /// Defaults to 4.158. Note that in reality luma and chroma want separately
-    /// tuned values. See [nl4d_default_lambda_ht](crate::nl4d_default_lambda_ht).
+    /// Higher removes more noise and more fine detail. Defaults to 4.158, though luma and chroma
+    /// want separately tuned values. See [nl4d_default_lambda_ht](crate::nl4d_default_lambda_ht).
     pub lambda_ht: f32,
-    /// The confidence floor below which a whole neighbour block is
-    /// skipped rather than scored, in `[0, 1)`. A block below the floor
-    /// is never scored, and a volume left short of frames by the skip
-    /// makes its group filter from the centre frame alone.
+    /// The confidence floor below which a whole neighbour block is skipped, in `0.0..1.0`.
+    ///
+    /// A volume left short of frames by the skip makes its group filter from the centre frame
+    /// alone.
     pub c_min: f32,
-    /// The `beta` of the Kaiser window each filtered patch is tapered
-    /// with as it is aggregated, in `0..=8`.
+    /// The `beta` of the Kaiser window each filtered patch is tapered with as it is aggregated, in
+    /// `0.0..=8.0`.
     ///
-    /// A pixel is covered by many patches, each of which made its own
-    /// threshold decision. Tapering a patch toward its edges blends
-    /// those decisions rather than letting each reach its boundary at
-    /// full strength. Larger tapers harder. BM3D uses 2.0.
-    ///
-    /// Defaults to 2.0, BM3D's own value. `0.0` is exactly uniform
-    /// aggregation, which is what this did before the window existed.
-    /// See [`crate::collab::kernels::aggregate::kaiser_window`].
+    /// A pixel is covered by many patches, each with its own threshold decision. Tapering each
+    /// patch toward its edges blends those decisions instead of letting each reach its boundary at
+    /// full strength. Defaults to 2.0, BM3D's own value, and `0.0` is uniform aggregation.
     pub kaiser_beta: f32,
-    /// The penalty on a block's vector deviating from its
-    /// neighbourhood's median, in the field regularisation pass.
+    /// The penalty on a block's vector deviating from its neighbourhood median, in the field
+    /// regularisation pass.
     ///
-    /// The pass re-scores each block's vector against the median of its
-    /// neighbours, the four adjacent blocks' vectors and zero, adding
-    /// this times the distance from the median, in pixels, scaled so
-    /// `1.0` weighs one pixel of deviation like a 5/255 per-pixel
-    /// mismatch. Defaults to `1.0`, calibrated with a `field_lambda`
-    /// sweep on the `mc_accuracy` bench. The pass gains most of its
-    /// accuracy by a moderate penalty and further increases add little,
-    /// so `1.0` sits inside that plateau rather than at its edge. `0.0`
-    /// skips the pass.
+    /// The median is taken over the four adjacent blocks' vectors and zero. The penalty is this
+    /// times the distance from the median in pixels, scaled so `1.0` weighs one pixel of deviation
+    /// like a 5/255 per-pixel mismatch. Defaults to `1.0`, calibrated on the `mc_accuracy` bench to
+    /// sit inside the plateau where larger values add little accuracy. `0.0` skips the pass.
     pub field_lambda: f32,
     /// Scales the luma threshold by how noisy each brightness level is in the current frame.
     ///
@@ -160,9 +135,7 @@ impl Default for Nl4dParams {
 }
 
 impl Nl4dParams {
-    /// Rejects a configuration that would fail to launch, or that would
-    /// hit [`crate::nlmeans::NlmDenoiser::submit_machinery`]'s own
-    /// preconditions only once a real submit ran.
+    /// Rejects a configuration that would fail to launch or fail the front end's checks on submit.
     pub fn validate(&self) -> Result<(), String> {
         let Some(hq) = self.nlm.hq else {
             return Err(
@@ -188,11 +161,8 @@ impl Nl4dParams {
             );
         }
 
-        // Only checked once the geometry itself is sound. An overlap at
-        // or past blksize gives a step of 0, which `nlm.validate()`
-        // rejects on its own terms below with the real fault named. Left
-        // unguarded, that same case saturates the step to 1 here and
-        // reports a nonsensical covering-block count instead.
+        // An overlap at or past `blksize` is left to `nlm.validate()`, which names the real fault
+        // instead of a covering-block count computed from a saturated step.
         if let MotionCompensationMode::Mvtools { blksize, overlap, .. } = self.nlm.motion_compensation
             && overlap < blksize
         {
@@ -208,11 +178,10 @@ impl Nl4dParams {
             }
         }
 
-        if !(1..=crate::collab::MAX_TEMPORAL_RADIUS).contains(&self.temporal_radius) {
+        if !(1..=MAX_TEMPORAL_RADIUS).contains(&self.temporal_radius) {
             return Err(format!(
                 "temporal_radius={} must be in 1..={}",
-                self.temporal_radius,
-                crate::collab::MAX_TEMPORAL_RADIUS,
+                self.temporal_radius, MAX_TEMPORAL_RADIUS,
             ));
         }
 
@@ -285,12 +254,14 @@ mod tests {
 
     #[test]
     fn validate_accepts_default() {
-        assert!(Nl4dParams::default().validate().is_ok());
+        let params = Nl4dParams::default();
+        assert!(params.validate().is_ok());
     }
 
     #[test]
     fn the_noise_map_is_on_by_default() {
-        assert!(Nl4dParams::default().noise_map);
+        let params = Nl4dParams::default();
+        assert!(params.noise_map);
     }
 
     #[test]
@@ -326,15 +297,15 @@ mod tests {
                 flat_boost: bad,
                 ..Nl4dParams::default()
             };
-            let err = flat.validate().expect_err("flat_boost out of range");
-            assert!(err.contains("flat_boost"), "got {err}");
+            let error = flat.validate().expect_err("flat_boost out of range");
+            assert!(error.contains("flat_boost"), "got {error}");
 
             let chroma = Nl4dParams {
                 chroma_flat_boost: bad,
                 ..Nl4dParams::default()
             };
-            let err = chroma.validate().expect_err("chroma_flat_boost out of range");
-            assert!(err.contains("chroma_flat_boost"), "got {err}");
+            let error = chroma.validate().expect_err("chroma_flat_boost out of range");
+            assert!(error.contains("chroma_flat_boost"), "got {error}");
         }
 
         for bad in [0.05f32, 1.01, f32::NAN] {
@@ -342,8 +313,8 @@ mod tests {
                 shadow_soften: bad,
                 ..Nl4dParams::default()
             };
-            let err = params.validate().expect_err("shadow_soften out of range");
-            assert!(err.contains("shadow_soften"), "got {err}");
+            let error = params.validate().expect_err("shadow_soften out of range");
+            assert!(error.contains("shadow_soften"), "got {error}");
         }
     }
 
@@ -365,32 +336,27 @@ mod tests {
                 flat_texture_cut: bad,
                 ..Nl4dParams::default()
             };
-            let err = params.validate().expect_err("flat_texture_cut out of range");
-            assert!(err.contains("flat_texture_cut"), "got {err}");
+            let error = params.validate().expect_err("flat_texture_cut out of range");
+            assert!(error.contains("flat_texture_cut"), "got {error}");
         }
     }
 
-    /// A block geometry with `blksize / step` at or under
-    /// [`MAX_COVERING_BLOCKS`] is what the grouping kernel unrolls its
-    /// search over.
-    ///
-    /// The shipped geometry gives a step of 8 and so 2 covering blocks.
-    /// An overlap of three quarters of the block size gives a step of 4
-    /// and exactly 4, the boundary.
     #[test]
     fn validate_accepts_block_geometries_up_to_the_covering_bound() {
         for (blksize, overlap, covers) in [(16u32, 8u32, 2u32), (16, 12, 4), (32, 24, 4), (8, 4, 2)] {
+            let motion_compensation = MotionCompensationMode::Mvtools {
+                blksize,
+                overlap,
+                search_radius: 4,
+                pyramid_levels: 2,
+                estimation: MotionEstimation::Auto,
+            };
+            let nlm = NlmParams {
+                motion_compensation,
+                ..Nl4dParams::default().nlm
+            };
             let params = Nl4dParams {
-                nlm: NlmParams {
-                    motion_compensation: MotionCompensationMode::Mvtools {
-                        blksize,
-                        overlap,
-                        search_radius: 4,
-                        pyramid_levels: 2,
-                        estimation: MotionEstimation::Auto,
-                    },
-                    ..Nl4dParams::default().nlm
-                },
+                nlm,
                 ..Nl4dParams::default()
             };
             assert!(
@@ -400,54 +366,51 @@ mod tests {
         }
     }
 
-    /// Past the bound the kernel would unroll a far larger duplicate
-    /// check and hold far more rectangles in registers, so the
-    /// configuration is refused rather than compiled.
     #[test]
     fn validate_rejects_a_block_geometry_past_the_covering_bound() {
         for (blksize, overlap) in [(16u32, 13u32), (16, 14), (32, 31), (32, 25)] {
+            let motion_compensation = MotionCompensationMode::Mvtools {
+                blksize,
+                overlap,
+                search_radius: 4,
+                pyramid_levels: 2,
+                estimation: MotionEstimation::Auto,
+            };
+            let nlm = NlmParams {
+                motion_compensation,
+                ..Nl4dParams::default().nlm
+            };
             let params = Nl4dParams {
-                nlm: NlmParams {
-                    motion_compensation: MotionCompensationMode::Mvtools {
-                        blksize,
-                        overlap,
-                        search_radius: 4,
-                        pyramid_levels: 2,
-                        estimation: MotionEstimation::Auto,
-                    },
-                    ..Nl4dParams::default().nlm
-                },
+                nlm,
                 ..Nl4dParams::default()
             };
-            let err = params
+            let error = params
                 .validate()
                 .expect_err("a step this small should be rejected");
+            let blksize_label = format!("blksize={blksize}");
+            let overlap_label = format!("overlap={overlap}");
             assert!(
-                err.contains(&format!("blksize={blksize}")) && err.contains(&format!("overlap={overlap}")),
-                "error should name the offending blksize and overlap, got {err}"
+                error.contains(&blksize_label) && error.contains(&overlap_label),
+                "error should name the offending blksize and overlap, got {error}"
             );
         }
     }
 
-    /// An overlap equal to blksize gives a step of 0, which is really a
-    /// `nlm.validate()` fault, not a covering-block one. `Nl4dParams`'s
-    /// own check has to stay quiet about it, mirroring how construction
-    /// runs both validations in sequence, so the caller sees the overlap
-    /// constraint named rather than a nonsensical covering-block count
-    /// computed from a saturated step.
     #[test]
     fn overlap_equal_to_blksize_reports_the_overlap_constraint_not_covering_blocks() {
+        let motion_compensation = MotionCompensationMode::Mvtools {
+            blksize: 16,
+            overlap: 16,
+            search_radius: 4,
+            pyramid_levels: 2,
+            estimation: MotionEstimation::Auto,
+        };
+        let nlm = NlmParams {
+            motion_compensation,
+            ..Nl4dParams::default().nlm
+        };
         let params = Nl4dParams {
-            nlm: NlmParams {
-                motion_compensation: MotionCompensationMode::Mvtools {
-                    blksize: 16,
-                    overlap: 16,
-                    search_radius: 4,
-                    pyramid_levels: 2,
-                    estimation: MotionEstimation::Auto,
-                },
-                ..Nl4dParams::default().nlm
-            },
+            nlm,
             ..Nl4dParams::default()
         };
         assert!(
@@ -455,71 +418,71 @@ mod tests {
             "the covering-block check must not fire on a geometry nlm.validate() rejects on its \
              own terms"
         );
-        let err = params
+
+        let error = params
             .nlm
             .validate()
             .expect_err("overlap == blksize must be rejected")
             .to_string();
         assert!(
-            err.contains("overlap") && err.contains("blksize"),
-            "error should name the overlap constraint, got {err}"
+            error.contains("overlap") && error.contains("blksize"),
+            "error should name the overlap constraint, got {error}"
         );
         assert!(
-            !err.contains("cover a patch"),
-            "error should not be the covering-block message, got {err}"
+            !error.contains("cover a patch"),
+            "error should not be the covering-block message, got {error}"
         );
     }
 
     #[test]
     fn validate_rejects_missing_hq() {
+        let nlm = NlmParams {
+            hq: None,
+            ..Nl4dParams::default().nlm
+        };
         let params = Nl4dParams {
-            nlm: NlmParams {
-                hq: None,
-                ..Nl4dParams::default().nlm
-            },
+            nlm,
             ..Nl4dParams::default()
         };
-        let err = params.validate().expect_err("expected rejection");
-        assert!(err.contains("nlm.hq"), "error should name nlm.hq, got {err}");
+        let error = params.validate().expect_err("expected rejection");
+        assert!(error.contains("nlm.hq"), "error should name nlm.hq, got {error}");
     }
 
     #[test]
     fn validate_rejects_inactive_motion_compensation() {
+        let nlm = NlmParams {
+            motion_compensation: MotionCompensationMode::None,
+            ..Nl4dParams::default().nlm
+        };
         let params = Nl4dParams {
-            nlm: NlmParams {
-                motion_compensation: MotionCompensationMode::None,
-                ..Nl4dParams::default().nlm
-            },
+            nlm,
             ..Nl4dParams::default()
         };
-        let err = params.validate().expect_err("expected rejection");
+        let error = params.validate().expect_err("expected rejection");
         assert!(
-            err.contains("motion_compensation"),
-            "error should name nlm.motion_compensation, got {err}"
+            error.contains("motion_compensation"),
+            "error should name nlm.motion_compensation, got {error}"
         );
     }
 
-    /// The latent precondition `submit_machinery` enforces at submit
-    /// time. Both motion compensation and the confidence buffer have to
-    /// be active, or that call returns an error. `validate` has to catch
-    /// a configuration that would hit that error before construction ever
-    /// gets that far.
     #[test]
     fn validate_rejects_missing_temporal_confidence() {
+        let hq = HqParams {
+            temporal_confidence: false,
+            ..HqParams::default()
+        };
+        let nlm = NlmParams {
+            hq: Some(hq),
+            ..Nl4dParams::default().nlm
+        };
         let params = Nl4dParams {
-            nlm: NlmParams {
-                hq: Some(HqParams {
-                    temporal_confidence: false,
-                    ..HqParams::default()
-                }),
-                ..Nl4dParams::default().nlm
-            },
+            nlm,
             ..Nl4dParams::default()
         };
-        let err = params.validate().expect_err("expected rejection");
+        let error = params.validate().expect_err("expected rejection");
         assert!(
-            err.contains("temporal_confidence"),
-            "error should name nlm.hq.temporal_confidence, got {err}"
+            error.contains("temporal_confidence"),
+            "error should name nlm.hq.temporal_confidence, got {error}"
         );
     }
 
@@ -605,12 +568,12 @@ mod tests {
                 field_lambda: lambda,
                 ..Nl4dParams::default()
             };
-            let err = params
+            let error = params
                 .validate()
                 .expect_err("field_lambda={lambda} should be rejected");
             assert!(
-                err.contains("field_lambda"),
-                "error should name field_lambda, got {err}"
+                error.contains("field_lambda"),
+                "error should name field_lambda, got {error}"
             );
         }
     }

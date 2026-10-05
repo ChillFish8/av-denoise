@@ -33,271 +33,94 @@ const NOISE_CURVE_SCALE_MIN: f32 = 0.33;
 /// The largest factor the noise curve may scale the luma threshold by.
 const NOISE_CURVE_SCALE_MAX: f32 = 3.0;
 
-// The widest neighbour index this kernel ever packs is `2 * radius`,
-// one past the last neighbour, and `radius` is capped at
-// `MAX_TEMPORAL_RADIUS`. `pack_pos_t` gives `t` bits 26-31, so a value
-// of 64 or more would silently overflow into nothing and corrupt the
-// word. This ties the packer's field width to the radius ceiling that
-// feeds it, so the bound is checked at compile time rather than
-// assumed at the call site.
+// The widest neighbour index packed is `2 * radius`, and `pack_pos_t`'s 6-bit `t` field silently
+// corrupts the word at 64 or more.
 const _: () = assert!(
     2 * MAX_TEMPORAL_RADIUS < 64,
     "pack_pos_t's 6-bit t field must hold every neighbour index collab_fused packs"
 );
 
-// A lane holds one 8-value column of each of `MAX_K` members, so the
-// whole group fits `PATCH_AREA` slots only while the group size and the
-// patch side are the same number. The stack transform's predicate
-// ladder below also names the three levels 8, 4 and 2 outright.
+// A lane holds one 8-value column of each of `MAX_K` members, so the group fits `PATCH_AREA`
+// slots only while the group size and the patch side match. The stack transform's predicate
+// ladder also names the levels 8, 4 and 2 outright.
 const _: () = assert!(
     MAX_K == PATCH_SIZE && MAX_K == 8,
     "collab_fused's per-lane group array and its three-level stack transform are written for \
      MAX_K == PATCH_SIZE == 8"
 );
 
-// A candidate that never placed carries the distance `3.0e38`, written
-// as a literal at each use below. A real distance is a sum of at most
-// `PATCH_AREA` squared differences between values in `[0, 1]`, scaled
-// by at most 3, so it never exceeds 192. `3.0e38` sits far above that
-// and just below `f32::MAX`, so it always compares greater than a live
-// candidate. The self-match takes `-1.0e38` at the other end, which
-// sorts it below every real distance and pins it into slot 0. Both are
-// literals rather than consts or `f32::INFINITY` because cubecl treats
-// all of those as compile-time-only, and the shift-insert needs genuine
-// mutable runtime variables.
-
-/// Groups each reference patch with the patches most similar to it,
-/// filters the whole group jointly with a hard threshold in the
-/// transform domain, and scatters every filtered member back into its
-/// own frame.
+/// Groups each reference patch with its most similar patches, hard-thresholds the group in the
+/// transform domain and scatters every member back into its own frame.
 ///
-/// # Work decomposition
+/// A cube of 64 threads owns eight reference patches. Each 8-lane group owns one, and lane `sub`
+/// owns column `sub` of every patch the group touches, so candidate reads and scatter writes are
+/// coalesced and `plane_ssd_reduce8` completes each distance. Candidates are read straight from
+/// global memory, because neighbouring references search overlapping windows the cache already
+/// serves.
 ///
-/// One cube of 64 threads owns eight reference patches. Each 8-lane
-/// group owns one of them, and lane `sub` of a group owns column `sub`
-/// of every patch that group touches. That one mapping serves both
-/// halves of the kernel. A candidate's 64 pixel differences are spread
-/// eight ways during matching, and [`plane_ssd_reduce8`] folds the eight
-/// column sums into the whole patch distance. A member's 64 filtered
-/// pixels are spread the same eight ways during filtering, so both the
-/// candidate reads and the scatter writes are coalesced.
+/// Every lane must reach every barrier, since a barrier reached by only part of a workgroup is
+/// undefined. The basis fill barrier is unconditional, and the `transpose8` barriers sit in fully
+/// unrolled loops with no runtime condition around them. A group past the end of a row, which
+/// every 1080p row has, works on a clamped copy of the last real reference and is gated only
+/// where it writes.
 ///
-/// The reference patch's own column stays in registers for the whole
-/// matching phase. Candidate pixels are read straight from global
-/// memory. Neighbouring reference patches search heavily overlapping
-/// windows at a step of 4, so the cache already serves those reads well
-/// and a shared-memory tile would only cost occupancy.
+/// The centre frame contributes the `spatial_radius` rectangle around the reference, clipped to
+/// the frame, and the best eight positions are kept. The self-match scores a sentinel below every
+/// real distance, which pins it into slot 0. The first `MAX_K / grid_frames` positions become
+/// volume anchors. In each neighbour frame an anchor searches one `refine` rectangle per covering
+/// motion block, around where that block's vector moves it, and keeps its best match. Each
+/// rectangle is clipped once so every candidate is a distinct position, and a position reached
+/// twice or already in the group is scored once. A block whose confidence is below `c_min` is
+/// skipped, uniformly across the group.
 ///
-/// A row of references rarely divides into eights, so the last cube of
-/// a row runs groups whose reference patch is past the end. A 1080p
-/// frame has 479 references across, so this is a shipped path rather
-/// than an edge case. Those groups stay live through the whole kernel,
-/// working on a clamped copy of the last real reference, and are gated
-/// only where they would write.
+/// A member is a `pack_pos_t` word, and member `s * grid_frames + t` is frame `t` of volume `s`.
+/// The grid is used when the spatial search held at least `MAX_K` positions, `k_max` is `MAX_K`
+/// and every volume filled. Otherwise the group falls back to the single-frame group, its
+/// positions rounded down to a power of two and capped at `k_max`. A block skipped by `c_min` can
+/// leave a volume short of frames, which makes the group fall back, so `c_min` can change the
+/// output.
 ///
-/// # Barriers
+/// For each channel, every member runs through a 2D DCT as a column pass, a transpose and a row
+/// pass. A grid group then runs a Haar along time and across volumes, and a fallback group a Haar
+/// across its stack. The transforms unroll fully, which keeps the whole group in registers. A
+/// coefficient survives when its magnitude reaches `lambda_ht` standard deviations of its
+/// propagated noise, with every member carrying `sigma[c]^2`. The group DC of the spatial DC
+/// always survives, because a group's mean brightness is signal. Both transforms then invert.
 ///
-/// [`transpose8`] carries the only barrier inside the group-processing
-/// loops. Every lane of the cube reaches it the same number of times,
-/// because the transposes sit in fully unrolled loops with no run-time
-/// condition around them. Nothing returns early, a dead group runs the
-/// whole kernel, and the group size only ever gates which iterations do
-/// arithmetic, never how many barriers a lane reaches. A workgroup
-/// barrier reached by only part of the workgroup is undefined, so that
-/// property is what the write gating and the clamped reference index
-/// exist to preserve.
+/// Channel 0's threshold is scaled by the noise curve at the reference's mean luma, interpolated
+/// between bin centres and clamped to 0.33..=3, while the group weight keeps the plain sigma. The
+/// strength map multiplier is the mean of the four 8x8 quarters the reference overlaps.
+/// [STRENGTH_MAP_LUMA] scales channel 0's curve ratio before the clamp. [STRENGTH_MAP_ALL] scales
+/// the chroma thresholds, and channel 0's too when there is no curve. [STRENGTH_MAP_OFF] leaves
+/// every threshold alone. With `pooled` set, `pooled_threshold` keeps a coefficient on the mean
+/// energy of itself and its four frequency neighbours, against `channel_lambda * pool_ratio`.
 ///
-/// The basis fill carries one more barrier, before either transform
-/// runs. It is unconditional and sits before `live` is computed, so
-/// every lane reaches it whatever the reference index later clamps to.
+/// `group_weight` gets `1 / sum(v_j)` over the kept coefficients, the inverse-variance weight, so
+/// a group that keeps more coefficients is trusted more. It comes from channel 0 only, because
+/// luma dominates and one weight per group keeps aggregation simple. `weight_scale` maps it into
+/// the fixed-point band before the scatter.
 ///
-/// # Search space
+/// `ring` holds frames in ring-slot order. `centre_slot` is the slot the pass is centred on.
+/// `neighbour_slots` maps a packed neighbour index to its slot. `accum` and `wsum` hold one region
+/// per slot, so a neighbour-frame member scatters into its own frame's region. `accum_scale` is
+/// the fixed-point scale of that scatter. `sigma` holds one value per stored channel.
+/// `noise_curve` holds `NOISE_CURVE_BINS` ratios and is read only when `curve_valid` is not 0.
+/// `strength_map` holds `map_cols * map_rows` row-major multipliers laid out by
+/// [strength_map_dims](crate::collab::geometry::strength_map_dims). `kaiser` holds
+/// [kaiser_window](crate::collab::kernels::aggregate::kaiser_window)'s taps. `dct_profile` holds
+/// [dct_noise_profile](crate::collab::kernels::transforms::dct_noise_profile)'s values, and
+/// coefficient `(u, v)`'s variance scales by `dct_profile[u] * dct_profile[v]`. `grid_frames` is
+/// the frames per volume from [grid_frames](crate::collab::grid_frames), and 1 compiles the grid
+/// out.
 ///
-/// The centre frame contributes the `spatial_radius` rectangle around
-/// the reference patch, clipped to the frame.
-///
-/// Each volume anchor then searches every neighbour frame. It contributes
-/// one `refine` rectangle per motion block whose span contains the
-/// anchor, each around the position that block's vector predicts the
-/// anchor moved to, clipped the same way. A block grid at a step below
-/// `blksize` gives several such blocks, so an anchor is searched wherever
-/// any block covering it points. A position reached by more than one of
-/// them is scored once, by the first rectangle that reaches it.
-///
-/// Clipping each rectangle once keeps every candidate within it a
-/// distinct position. Clamping each offset in turn would land several
-/// offsets on the same edge position and let one physical patch count as
-/// two.
-///
-/// # Distance
-///
-/// A candidate's distance is the channel-scaled sum of squared pixel
-/// differences over the whole patch.
-///
-/// # Confidence gate
-///
-/// Every candidate stays in the running whatever its distance, so a
-/// group fills wherever the search space is large enough. A covering
-/// block whose confidence sits below `c_min` never runs the pixel
-/// comparison, while the frame's other covering blocks still search.
-/// The confidence comes from a motion block every lane of the group
-/// shares, so the skip is uniform across the group. A volume left short
-/// of frames by this gate makes the whole group fall back to the
-/// single-frame group centred on the reference frame, so `c_min` can
-/// change the output.
-///
-/// # Selection
-///
-/// The spatial search keeps the eight best centre-frame positions, one
-/// per lane, ascending, through
-/// [shift_insert8_gated](crate::collab::kernels::plane_ops::shift_insert8_gated).
-/// A tie never displaces an incumbent, and the self-match scores a
-/// sentinel below every real distance, which pins it into slot 0.
-///
-/// The first `MAX_K / grid_frames` of those become volume anchors. Each
-/// anchor keeps its best match in every neighbour frame, and the volume
-/// keeps the `grid_frames - 1` best of those in ascending order. A
-/// position an earlier volume already holds is skipped, so no patch
-/// enters the group twice.
-///
-/// # Members
-///
-/// A member is a packed position. The neighbour it came from sits in the
-/// bits above the coordinates, so the frame it was matched in is
-/// recovered from the packed word when matching ends. Member
-/// `s * grid_frames + t` is frame `t` of volume `s`, with the anchor at
-/// `t = 0`.
-///
-/// # Group size
-///
-/// A group uses the grid when the spatial search held at least `MAX_K`
-/// positions, `k_max` is `MAX_K`, and every volume filled all of its
-/// frames. Otherwise it falls back to the single-frame group, the
-/// spatial search's positions rounded down to a power of two and capped
-/// at `k_max`. The decision is uniform across the group.
-///
-/// # What the filter does
-///
-/// For each active channel, every member's patch runs through a 2D DCT,
-/// so each patch is described by 64 frequency coefficients instead of 64
-/// pixel values. A grid group then runs a Haar along time within each
-/// volume and a Haar across the volumes, at each spatial position. A
-/// fallback group runs a Haar across its stack instead. Content the group
-/// agrees on collects into the low levels. A coefficient survives a hard
-/// threshold when its magnitude reaches `lambda_ht` standard deviations
-/// of its own propagated noise, where every member carries the plain
-/// `sigma[c]^2`. Both transforms then invert.
-///
-/// The spatial pass runs as a column DCT in registers, a transpose, and
-/// a row DCT in registers, because a lane owns a column and the row pass
-/// needs a row. The inverse runs the same three steps backwards, which
-/// leaves the lane holding a column again in time for the scatter.
-///
-/// Channel 0's threshold is scaled by the frame's noise curve at the
-/// reference patch's mean luma, clamped to 0.33..=3. The group weight
-/// keeps the plain sigma. With no curve the threshold is unchanged.
-///
-/// A strength map scales thresholds further, one multiplier per 8x8 quarter. Each reference
-/// patch takes the mean of the four quarters it overlaps. With `map_mode` at
-/// [STRENGTH_MAP_LUMA] it scales channel 0's curve ratio before the clamp. With
-/// [STRENGTH_MAP_ALL] it scales every channel's threshold when there is no curve. With a curve,
-/// channel 0 keeps its curve threshold. [STRENGTH_MAP_OFF] leaves every threshold as it is.
-///
-/// With `pooled` set, a coefficient is kept on the mean energy of itself and its four frequency
-/// neighbours instead of its own, against `channel_lambda * pool_ratio`. See
-/// [pooled_threshold](crate::collab::kernels::fused::pooled::pooled_threshold).
-///
-/// The one coefficient that is both the group average and the patch's
-/// spatial DC always survives the threshold, whatever its magnitude. A
-/// group's mean brightness is signal, not something a noise threshold
-/// should be able to zero out.
-///
-/// # Group weight
-///
-/// `group_weight` is `1 / sum(v_j)` over the coefficients the threshold
-/// kept, computed from channel 0 only (luma dominates, and one weight
-/// per group keeps aggregation simple downstream). When every member has
-/// the same noise variance and the group keeps `n` coefficients this is
-/// `1 / (sigma^2 * n)`, the usual inverse-variance weight, so a group
-/// whose content agreed enough to keep more of its coefficients is
-/// trusted more. Each lane sums the variance it retained over its own
-/// eight positions and [`plane_ssd_reduce8`] folds the group's eight
-/// partials together, which is why no shared array is needed for it.
-///
-/// # Buffers
-///
-/// `ring` is the frame ring, laid out one frame after another in
-/// physical ring-slot order. `centre_slot` is the slot the pass is
-/// centred on and `neighbour_slots` maps a packed neighbour index onto
-/// its physical slot.
-///
-/// `accum` and `wsum` hold one region per ring slot, the layout
-/// [`scatter_patch`] addresses, so a member matched in a neighbour frame
-/// scatters into that frame's own region rather than the centre's.
-/// `accum_scale` is the fixed-point scale that scatter converts into.
-///
-/// `group_weight` holds one weight per reference, and `sigma` one value
-/// per stored channel.
-///
-/// `noise_curve` holds `NOISE_CURVE_BINS` luma threshold ratios, each
-/// sampled at the centre of an equal-width slice of the luma range. The
-/// kernel interpolates between neighbouring centres. The curve only takes
-/// effect when `curve_valid` is not 0.
-///
-/// `strength_map` holds `map_cols * map_rows` multipliers, row-major, laid out by
-/// [strength_map_dims](crate::collab::geometry::strength_map_dims).
-///
-/// `kaiser` holds [`crate::collab::kernels::aggregate::kaiser_window`]'s 8 taps, which
-/// taper each scattered patch toward its edges. Eight ones leave the aggregation uniform.
-///
-/// `dct_profile` holds
-/// [`crate::collab::kernels::transforms::dct_noise_profile`]'s 8 values.
-/// Every member's coefficient variance at DCT position `(u, v)` scales
-/// by `dct_profile[u] * dct_profile[v]` before the threshold reads it.
-/// At `rho = 0` every entry is `1.0` and the multiply is a no-op.
-///
-/// `grid_frames` is the frames per volume, from
-/// [grid_frames](crate::collab::grid_frames). At 1 the grid compiles out
-/// and every group is a single-frame one.
-///
-/// `pool_ratio` scales each channel's lambda into the pooled threshold. It is only read with
-/// `pooled` set.
-///
-/// # Warp-uniform search
-///
-/// `warp_uniform` decides how the spatial and trajectory searches are
-/// walked.
-///
-/// Both searches are group-scoped work: each 8-lane group owns one
-/// reference patch, and every distance is completed by a shuffle across
-/// just those eight lanes. Nothing in the algorithm needs the other
-/// groups sharing a warp to keep step.
-///
-/// The CUDA backend nevertheless lowers each of those shuffles to a
-/// `__shfl_*_sync` naming the whole 32-lane warp. On Volta and later
-/// such a shuffle waits for every lane it names, so a group still
-/// searching blocks on groups that have already left the loop, and those
-/// never come back. The clipped rectangles and the `c_min` skip both
-/// give neighbouring groups different trip counts, so the warp
-/// deadlocks and the launch never retires a frame.
-///
-/// Setting `warp_uniform` walks fixed, comptime-sized rectangles
-/// instead, in both searches, and masks every position the other walk
-/// skips, whether clipped, gated, already scored or already claimed.
-/// Every group in a warp then takes the same number of turns through the
-/// same shuffles. A masked turn carries the same `3.0e38` an unfilled slot
-/// holds, so it can never displace one.
-///
-/// The candidates that do score, and the order they are offered in, are
-/// exactly the ones the unset path visits, so both settings produce the
-/// same group. Leave it unset on the wgpu backends, whose subgroup
-/// operations reconverge on their own and which would only pay for the
-/// dead turns. [`crate::collab::needs_warp_uniform_search`] is what
-/// picks it per runtime.
-///
-/// # Compilation cost
-///
-/// The transforms unroll fully, which keeps the whole group in registers.
+/// `warp_uniform` walks both searches over fixed comptime rectangles and masks the positions the
+/// clipped walk skips, so both settings score the same candidates in the same order. The clipped
+/// rectangles and the `c_min` skip give neighbouring groups different trip counts. The CUDA
+/// backend lowers each group-scoped shuffle to a `__shfl_*_sync` over the whole warp, so on Volta
+/// and later those different trip counts deadlock the warp. A masked turn carries the
+/// `3.0e38` an unfilled slot holds, so it never displaces a match. The wgpu backends reconverge on
+/// their own, and [needs_warp_uniform_search](crate::collab::needs_warp_uniform_search) picks the
+/// setting per runtime.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
@@ -351,61 +174,55 @@ pub fn collab_fused<N: Size>(
     pool_ratio: f32,
     #[comptime] pooled: bool,
 ) {
-    let tid = UNIT_POS_X;
-    let grp = tid / 8u32;
-    let sub = tid % 8u32;
+    let thread_id = UNIT_POS_X;
+    let group = thread_id / 8u32;
+    let sub = thread_id % 8u32;
     let base = group_base();
 
     let max_x = comptime!(width - PATCH_SIZE);
     let max_y = comptime!(height - PATCH_SIZE);
 
-    // The spatial basis, filled once and read by every lane for the rest
-    // of the kernel. It is 256 B against the transpose buffer's 2,080 B,
-    // and every lane reads all 64 of its entries, so keeping it shared
-    // costs nothing a per-lane copy would save. Shared memory is not
-    // what bounds this kernel's occupancy in any case, registers are.
+    // The basis is 256 B against the transpose buffer's 2,080 B, and registers rather than shared
+    // memory bound this kernel's occupancy, so it stays shared.
     let mut basis = SharedMemory::<f32>::new(PATCH_AREA as usize);
-    let mut tbuf = SharedMemory::<f32>::new(comptime!(8 * 65) as usize);
-    fill_dct8_basis(&mut basis, tid);
+    let mut transpose_buf = SharedMemory::<f32>::new(comptime!(8 * 65) as usize);
+    fill_dct8_basis(&mut basis, thread_id);
     sync_cube();
 
-    // A dead group keeps working on the last real reference of the row
-    // so every read stays inside the frame and every lane reaches every
-    // barrier. `live` is what stops it writing.
-    let ref_x_index = CUBE_POS_X * 8u32 + grp;
+    // A dead group works on the last real reference of the row, so every read stays inside the
+    // frame and every lane reaches every barrier. `live` stops it writing.
+    let ref_x_index = CUBE_POS_X * 8u32 + group;
     let live = ref_x_index < refs_x;
     let ref_x_clamped = ref_x_index.min(refs_x - 1u32);
 
-    let rx = (ref_x_clamped * STEP).min(max_x);
-    let ry = (CUBE_POS_Y * STEP).min(max_y);
+    let ref_x = (ref_x_clamped * STEP).min(max_x);
+    let ref_y = (CUBE_POS_Y * STEP).min(max_y);
 
-    // Column `sub` of the reference patch, all channels, in registers
-    // for the whole search.
+    // Column `sub` of the reference patch, all channels, held in registers for the whole search.
     let mut current = Array::<f32>::new(comptime!(PATCH_SIZE * channels) as usize);
     #[unroll]
     for r in 0..PATCH_SIZE {
-        let px = read_line(ring, rx + sub, ry + r, centre_slot, width, height);
+        let pixel = read_line(ring, ref_x + sub, ref_y + r, centre_slot, width, height);
         #[unroll]
         for c in 0..channels {
-            current[(r * channels + c) as usize] = px[c as usize];
+            current[(r * channels + c) as usize] = pixel[c as usize];
         }
     }
 
+    // An unplaced candidate carries `3.0e38`, far above the largest real distance of 192 and below
+    // `f32::MAX`, and the self-match carries `-1.0e38`. They are literals because cubecl treats
+    // consts and `f32::INFINITY` as comptime-only, and the shift-insert needs runtime variables.
     let mut best_d = 3.0e38f32;
     let mut best_pos = 0u32;
 
-    // One scalar for the whole kernel, from the channel count. It
-    // multiplies the completed 64-pixel distance, not each squared
-    // difference.
+    // The channel scale multiplies the completed 64-pixel distance, not each squared difference.
     let scale = channel_scale(channels);
 
-    // The number of positions the spatial rectangle holds, which fixes the fallback group size
-    // below.
     let n_live = spatial_search(
         ring,
         &current,
-        rx,
-        ry,
+        ref_x,
+        ref_y,
         centre_slot,
         sub,
         base,
@@ -459,10 +276,10 @@ pub fn collab_fused<N: Size>(
             let mut anchor = Array::<f32>::new(comptime!(PATCH_SIZE * channels) as usize);
             #[unroll]
             for r in 0..PATCH_SIZE {
-                let px = read_line(ring, anchor_x + sub, anchor_y + r, centre_slot, width, height);
+                let pixel = read_line(ring, anchor_x + sub, anchor_y + r, centre_slot, width, height);
                 #[unroll]
                 for c in 0..channels {
-                    anchor[(r * channels + c) as usize] = px[c as usize];
+                    anchor[(r * channels + c) as usize] = pixel[c as usize];
                 }
             }
 
@@ -496,8 +313,7 @@ pub fn collab_fused<N: Size>(
             );
         }
 
-        // A grid needs a full spatial search for its anchors and every volume's last frame
-        // filled. The list is ascending, so a filled last slot means the whole volume is.
+        // The list is ascending, so a filled last slot means the whole volume is filled.
         use_grid = k_use == MAX_K;
         #[unroll]
         for volume in 0..volumes {
@@ -512,34 +328,29 @@ pub fn collab_fused<N: Size>(
         k_use = select(use_grid, MAX_K, k_use);
     }
 
-    // The frame each member sits in, from its packed word, once before the channel loop.
-    //
-    // The frame is picked with [`select`] rather than a branch. A frame index that reaches
-    // [`read_line`] through a branch trips a bug in cubecl 0.10's global value numbering, which
-    // panics while compiling the shader and leaves the launch to do nothing at all.
+    // The frame is picked with `select` rather than a branch, because a frame index that reaches
+    // `read_line` through a branch panics cubecl 0.10's GVN pass and the launch silently does
+    // nothing.
     let mut member_slot = Array::<u32>::new(MAX_K as usize);
     #[unroll]
     for m in 0..MAX_K {
         let packed = member_pos[m as usize];
-        let mt = unpack_t(packed);
-        // Clamped so the read below stays in range for a centre-frame member, whose value
-        // `select` then discards. The clamp lands on index 0, so it needs `neighbour_slots` to
-        // hold at least one entry. That is what every caller actually supplies, including
-        // `radius = 0` launches such as `Setup::spatial_only` and the standalone launch
-        // documented at `nl4d::tests::pipeline`, which still pass a one-element
-        // `neighbour_slots` even though there is no real neighbour to read.
-        let neighbour = u32::max(mt, 1u32) - 1u32;
-        member_slot[m as usize] = select(mt > 0u32, neighbour_slots[neighbour as usize], centre_slot);
+        let neighbour_field = unpack_t(packed);
+        // Clamped so the read stays in range for a centre-frame member, whose value `select`
+        // discards. This needs `neighbour_slots` to hold at least one entry, even at `radius = 0`.
+        let neighbour = u32::max(neighbour_field, 1u32) - 1u32;
+        member_slot[m as usize] = select(
+            neighbour_field > 0u32,
+            neighbour_slots[neighbour as usize],
+            centre_slot,
+        );
     }
 
-    // The correlation profile is separable and the same for every
-    // member, so the lane's own half of it is read once. Lane `sub`
-    // ends up owning vertical frequency `sub` at every horizontal
-    // frequency, see the transform order below.
+    // Lane `sub` ends up owning vertical frequency `sub`, so its half of the separable profile is
+    // read once.
     let prof_sub = dct_profile[sub as usize];
 
-    // The reference patch's mean luma picks its place on the frame's noise curve. Every lane
-    // reaches the reduction, so the group stays converged.
+    // Every lane reaches the luma reduction, so the group stays converged.
     let mut column_luma = 0.0f32;
     #[unroll]
     for r in 0..PATCH_SIZE {
@@ -555,59 +366,51 @@ pub fn collab_fused<N: Size>(
     let lower_ratio = noise_curve[lower_bin as usize];
     let upper_ratio = noise_curve[(lower_bin + 1u32) as usize];
     let ratio = lower_ratio + (upper_ratio - lower_ratio) * fraction;
-    let map_scale = strength_map_scale(strength_map, rx, ry, map_cols, map_rows);
+    let map_scale = strength_map_scale(strength_map, ref_x, ref_y, map_cols, map_rows);
     let mapped_ratio = select(map_mode == STRENGTH_MAP_LUMA, ratio * map_scale, ratio);
     let curve_scale = f32::clamp(mapped_ratio, NOISE_CURVE_SCALE_MIN, NOISE_CURVE_SCALE_MAX);
     let other_lambda = select(map_mode == STRENGTH_MAP_ALL, lambda_ht * map_scale, lambda_ht);
     let luma_lambda = select(curve_valid != 0u32, lambda_ht * curve_scale, other_lambda);
 
-    // The group's normalised weight, computed from channel 0 and reused
-    // by every later channel's scatter.
-    let mut gw = 0.0f32;
+    // Computed from channel 0 and reused by every later channel's scatter.
+    let mut scaled_weight = 0.0f32;
 
     #[unroll]
     for c in 0..channels {
         let sigma_c = sigma[c as usize];
         let base_sig2 = sigma_c * sigma_c;
 
-        // Column `sub` of every member, read out of the member's own
-        // frame. Lane `sub` holds `stack[m * 8 + r]` for member `m`, row
-        // `r`.
+        // Lane `sub` holds `stack[m * 8 + r]` for member `m`, row `r`, read from the member's own
+        // frame.
         let mut stack = Array::<f32>::new(PATCH_AREA as usize);
-        let mut v = Array::<f32>::new(MAX_K as usize);
+        let mut member_variance = Array::<f32>::new(MAX_K as usize);
         #[unroll]
         for m in 0..MAX_K {
             let packed = member_pos[m as usize];
-            let mx = packed & 0x1FFFu32;
-            let my = (packed >> 13u32) & 0x1FFFu32;
+            let member_x = packed & 0x1FFFu32;
+            let member_y = (packed >> 13u32) & 0x1FFFu32;
             let src_slot = member_slot[m as usize];
-            v[m as usize] = base_sig2;
+            member_variance[m as usize] = base_sig2;
             #[unroll]
             for r in 0..PATCH_SIZE {
-                let px = read_line(ring, mx + sub, my + r, src_slot, width, height);
-                stack[(m * PATCH_SIZE + r) as usize] = px[c as usize];
+                let pixel = read_line(ring, member_x + sub, member_y + r, src_slot, width, height);
+                stack[(m * PATCH_SIZE + r) as usize] = pixel[c as usize];
             }
         }
 
-        // The noise variance behind each member, propagated to a
-        // per-stack-level variance. The spatial profile is a constant
-        // factor across the stack axis and the ladder only averages, so
-        // it multiplies in at the threshold instead of here.
+        // The spatial profile is constant along the stack axis and the ladder only averages, so
+        // the profile multiplies in at the threshold instead.
         if comptime!(grid_frames > 1) {
             if use_grid {
-                grid_variance(&mut v, grid_frames);
+                grid_variance(&mut member_variance, grid_frames);
             } else {
-                stack_variance_ladder(&mut v, k_use);
+                stack_variance_ladder(&mut member_variance, k_use);
             }
         } else {
-            stack_variance_ladder(&mut v, k_use);
+            stack_variance_ladder(&mut member_variance, k_use);
         }
 
-        // 2D DCT forward, independently for each member's patch. The
-        // column pass runs over the rows the lane already holds, the
-        // transpose hands the lane a row, and the row pass runs over
-        // that. Lane `sub` comes out holding coefficient `(u = i, v =
-        // sub)` at slot `i`.
+        // Lane `sub` comes out holding coefficient `(u = i, v = sub)` at slot `i`.
         #[unroll]
         for m in 0..MAX_K {
             let mut line = Array::<f32>::new(PATCH_SIZE as usize);
@@ -616,7 +419,7 @@ pub fn collab_fused<N: Size>(
                 line[i as usize] = stack[(m * PATCH_SIZE + i) as usize];
             }
             dct8_reg_fwd(&basis, &mut line);
-            transpose8(&mut tbuf, &mut line, sub, grp);
+            transpose8(&mut transpose_buf, &mut line, sub, group);
             dct8_reg_fwd(&basis, &mut line);
             #[unroll]
             for i in 0..PATCH_SIZE {
@@ -624,9 +427,7 @@ pub fn collab_fused<N: Size>(
             }
         }
 
-        // Haar transform along the stack axis, at each of the lane's
-        // eight spatial positions. A lane owns every member at every
-        // position it holds, so nothing crosses lanes here.
+        // A lane owns every member at each of its positions, so nothing crosses lanes here.
         if comptime!(grid_frames > 1) {
             if use_grid {
                 grid_fwd(&mut stack, grid_frames);
@@ -637,9 +438,6 @@ pub fn collab_fused<N: Size>(
             stack_haar_fwd(&mut stack, k_use);
         }
 
-        // Hard threshold, and the group-DC exception described above.
-        // The lane's retained variance is summed here and folded across
-        // the group below.
         let channel_lambda = if comptime!(c == 0u32) {
             luma_lambda
         } else {
@@ -650,7 +448,7 @@ pub fn collab_fused<N: Size>(
             let threshold = channel_lambda * pool_ratio;
             retained_v = pooled_threshold(
                 &mut stack,
-                &v,
+                &member_variance,
                 dct_profile,
                 prof_sub,
                 sub,
@@ -665,16 +463,16 @@ pub fn collab_fused<N: Size>(
                 #[unroll]
                 for j in 0..MAX_K {
                     if j < k_use {
-                        let vj = v[j as usize] * factor;
+                        let coeff_variance = member_variance[j as usize] * factor;
                         let slot = (j * PATCH_SIZE + i) as usize;
-                        let mut keep = f32::abs(stack[slot]) >= channel_lambda * f32::sqrt(vj);
+                        let mut keep = f32::abs(stack[slot]) >= channel_lambda * f32::sqrt(coeff_variance);
                         if comptime!(j == 0u32 && i == 0u32) {
                             if sub == 0u32 {
                                 keep = true;
                             }
                         }
                         if keep {
-                            retained_v += vj;
+                            retained_v += coeff_variance;
                         } else {
                             stack[slot] = 0.0f32;
                         }
@@ -683,32 +481,18 @@ pub fn collab_fused<N: Size>(
             }
         }
 
-        // The group weight has to be known before the scatter below, and
-        // only the first channel computes it, so the reduction runs here
-        // rather than after the inverse transforms.
+        // The scatter needs the weight, so the reduction runs before the inverse transforms.
         if comptime!(c == 0u32) {
             let sum = plane_ssd_reduce8(retained_v);
-            // `sum` adds non-negative variances, so it is never
-            // negative. `safe_reciprocal` checks for a non-finite sum
-            // explicitly rather than leaning on `f32::max` to discard
-            // one, so the weight is finite here whatever a given GPU
-            // does with NaN.
-            let w = safe_reciprocal(sum, RECIPROCAL_FLOOR);
+            let weight = safe_reciprocal(sum, RECIPROCAL_FLOOR);
             if live && sub == 0u32 {
-                group_weight[ref_idx as usize] = w;
+                group_weight[ref_idx as usize] = weight;
             }
-            // The accumulators count in fixed point, so the weight is
-            // scaled into the band `weight_scale` was built to put it
-            // in. Aggregation normalises by the weight sum, so scaling
-            // every weight by the same constant leaves the result
-            // exactly as it would have been.
-            gw = w * weight_scale;
+            scaled_weight = weight * weight_scale;
         }
 
-        // Haar inverse, back from stack coefficients to per-member DCT
-        // coefficients, then the spatial inverse in the opposite order
-        // to the forward pass. The lane holds a column again by the end
-        // of it, which is what makes the scatter below coalesced.
+        // The inverse runs in the opposite order, which leaves the lane holding a column again so
+        // the scatter is coalesced.
         if comptime!(grid_frames > 1) {
             if use_grid {
                 grid_inv(&mut stack, grid_frames);
@@ -727,7 +511,7 @@ pub fn collab_fused<N: Size>(
                 line[i as usize] = stack[(m * PATCH_SIZE + i) as usize];
             }
             dct8_reg_inv(&basis, &mut line);
-            transpose8(&mut tbuf, &mut line, sub, grp);
+            transpose8(&mut transpose_buf, &mut line, sub, group);
             dct8_reg_inv(&basis, &mut line);
             #[unroll]
             for i in 0..PATCH_SIZE {
@@ -735,17 +519,14 @@ pub fn collab_fused<N: Size>(
             }
         }
 
-        // Every member of the group is written back, not just the
-        // reference patch, and each lands in its own frame's region of
-        // the accumulators. A neighbour-frame member therefore feeds the
-        // caller's cross-frame ring rather than being discarded once it
-        // has served the group's shared statistics.
+        // Every member is written back into its own frame's region, so neighbour-frame members
+        // feed the cross-frame ring.
         #[unroll]
         for m in 0..MAX_K {
             if live && m < k_use {
                 let packed = member_pos[m as usize];
-                let mx = packed & 0x1FFFu32;
-                let my = (packed >> 13u32) & 0x1FFFu32;
+                let member_x = packed & 0x1FFFu32;
+                let member_y = (packed >> 13u32) & 0x1FFFu32;
                 let dst_slot = member_slot[m as usize];
                 #[unroll]
                 for r in 0..PATCH_SIZE {
@@ -754,9 +535,9 @@ pub fn collab_fused<N: Size>(
                         wsum,
                         kaiser,
                         stack[(m * PATCH_SIZE + r) as usize],
-                        gw,
-                        mx,
-                        my,
+                        scaled_weight,
+                        member_x,
+                        member_y,
                         r * PATCH_SIZE + sub,
                         comptime!(c == 0u32),
                         c,
@@ -800,7 +581,7 @@ fn stack_haar_fwd(stack: &mut Array<f32>, k_use: u32) {
     }
 }
 
-/// The inverse of [stack_haar_fwd].
+/// The inverse of `stack_haar_fwd`.
 #[cube]
 fn stack_haar_inv(stack: &mut Array<f32>, k_use: u32) {
     if k_use >= 2u32 {

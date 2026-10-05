@@ -39,6 +39,7 @@ fn scene_eight_weights() -> [f64; AR_COEFFS] {
     set_weight(&mut weights, (-2, 0), -0.148);
     set_weight(&mut weights, (-1, -1), -0.164);
     set_weight(&mut weights, (-1, 1), 0.117);
+
     weights
 }
 
@@ -57,10 +58,13 @@ fn bucket_edges_are_log_spaced_between_the_limits() {
 #[test]
 fn bucket_of_clamps_to_the_last_bucket() {
     let edges = bucket_edges();
+    let lowest = bucket_of(STD_MIN, &edges);
+    let far_above = bucket_of(STD_MAX * 4.0, &edges);
+    let just_past_edge = bucket_of(edges[10] * 1.0001, &edges);
 
-    assert_eq!(bucket_of(STD_MIN, &edges), 0);
-    assert_eq!(bucket_of(STD_MAX * 4.0, &edges), STD_BUCKETS - 1);
-    assert_eq!(bucket_of(edges[10] * 1.0001, &edges), 10);
+    assert_eq!(lowest, 0);
+    assert_eq!(far_above, STD_BUCKETS - 1);
+    assert_eq!(just_past_edge, 10);
 }
 
 #[test]
@@ -88,8 +92,9 @@ fn histogram_median_is_within_one_bucket_of_the_exact_median() {
 fn histogram_median_of_an_empty_histogram_is_none() {
     let edges = bucket_edges();
     let counts = vec![0u32; STD_BUCKETS];
+    let median = hist_median(&counts, &edges);
 
-    assert_eq!(hist_median(&counts, &edges), None);
+    assert_eq!(median, None);
 }
 
 #[test]
@@ -107,8 +112,9 @@ fn yule_walker_recovers_known_weights() {
 #[test]
 fn yule_walker_rejects_an_empty_record() {
     let autocov = vec![0.0f64; LAG_COUNT + 1];
+    let solved = yule_walker(&autocov);
 
-    assert!(yule_walker(&autocov).is_none());
+    assert!(solved.is_none());
 }
 
 #[test]
@@ -141,7 +147,8 @@ fn calibration_recovers_a_known_sigma() {
                 block.extend_from_slice(&field[start..start + 8]);
             }
 
-            block_stds.push(sample_std(&block));
+            let block_std = sample_std(&block);
+            block_stds.push(block_std);
         }
     }
 
@@ -201,12 +208,18 @@ fn correlation_of(record: &[f64]) -> Vec<f64> {
 #[test]
 fn measured_lanes_follow_the_lag_order() {
     for (lane, &(dy, dx)) in LAGS.iter().enumerate() {
-        assert_eq!(measured_lane(dy, dx), Some(lane));
-        assert_eq!(measured_lane(-dy, -dx), Some(lane));
+        let forward = measured_lane(dy, dx);
+        let mirrored = measured_lane(-dy, -dx);
+
+        assert_eq!(forward, Some(lane));
+        assert_eq!(mirrored, Some(lane));
     }
 
-    assert_eq!(measured_lane(4, 0), None);
-    assert_eq!(measured_lane(0, 7), None);
+    let too_far_down = measured_lane(4, 0);
+    let too_far_right = measured_lane(0, 7);
+
+    assert_eq!(too_far_down, None);
+    assert_eq!(too_far_right, None);
 }
 
 #[test]

@@ -1,9 +1,9 @@
-use av_denoise_core::nl4d::kernels::{grain_measure, grain_reduce_partials, grain_save_vectors};
+use av_denoise_core::bench_api::nl4d_kernels::{grain_measure, grain_reduce_partials, grain_save_vectors};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::{H, W, block_sync, make_synthetic_frame};
+use super::{HEIGHT, WIDTH, block_sync, make_synthetic_frame};
 
 const STEP: u32 = 8;
 const NEIGHBOURS: u32 = 4;
@@ -44,8 +44,8 @@ impl GrainSize {
 
 pub const GRAIN_SIZES: &[GrainSize] = &[
     GrainSize {
-        width: W,
-        height: H,
+        width: WIDTH,
+        height: HEIGHT,
         label: "1080p",
     },
     GrainSize {
@@ -77,8 +77,10 @@ impl<R: Runtime> Benchmark for GrainSaveVectorsBench<R> {
         let blocks = self.size.blocks() as usize;
         let mv_host = vec![1i32; NEIGHBOURS as usize * blocks * 2];
         let conf_host = vec![0.9f32; NEIGHBOURS as usize * blocks];
-        let mv = self.client.create_from_slice(i32::as_bytes(&mv_host));
-        let conf = self.client.create_from_slice(f32::as_bytes(&conf_host));
+        let mv_bytes = i32::as_bytes(&mv_host);
+        let mv = self.client.create_from_slice(mv_bytes);
+        let conf_bytes = f32::as_bytes(&conf_host);
+        let conf = self.client.create_from_slice(conf_bytes);
         let saved_mv = self.client.empty(RING as usize * blocks * 2 * size_of::<i32>());
         let saved_conf = self.client.empty(RING as usize * blocks * size_of::<f32>());
 
@@ -157,8 +159,8 @@ impl<R: Runtime> Benchmark for GrainMeasureBench<R> {
         ring.push(frame[0]);
 
         // Flat outputs with a small per-pixel ripple, so the kept grain is not zero either.
-        let out_prev = vec![0.5f32; pixels];
-        let out_t: Vec<f32> = (0..pixels)
+        let out_prev_host = vec![0.5f32; pixels];
+        let out_t_host: Vec<f32> = (0..pixels)
             .map(|index| 0.5 + 0.001 * ((index % 7) as f32 - 3.0))
             .collect();
         let saved_mv_host = vec![0i32; 2 * blocks * 2];
@@ -166,15 +168,31 @@ impl<R: Runtime> Benchmark for GrainMeasureBench<R> {
         let edges_host: Vec<f32> = (0..EDGE_COUNT).map(|index| index as f32 * 0.002).collect();
         let hist_host = vec![0i32; HIST_TOTAL];
 
+        let ring_bytes = f32::as_bytes(&ring);
+        let input = self.client.create_from_slice(ring_bytes);
+        let out_t_bytes = f32::as_bytes(&out_t_host);
+        let out_t = self.client.create_from_slice(out_t_bytes);
+        let out_prev_bytes = f32::as_bytes(&out_prev_host);
+        let out_prev = self.client.create_from_slice(out_prev_bytes);
+        let saved_mv_bytes = i32::as_bytes(&saved_mv_host);
+        let saved_mv = self.client.create_from_slice(saved_mv_bytes);
+        let saved_conf_bytes = f32::as_bytes(&saved_conf_host);
+        let saved_conf = self.client.create_from_slice(saved_conf_bytes);
+        let edges_bytes = f32::as_bytes(&edges_host);
+        let edges = self.client.create_from_slice(edges_bytes);
+        let hist_bytes = i32::as_bytes(&hist_host);
+        let hist = self.client.create_from_slice(hist_bytes);
+        let partials = self.client.empty(cells * PARTIAL_LANES * size_of::<f32>());
+
         GrainMeasureInput {
-            input: self.client.create_from_slice(f32::as_bytes(&ring)),
-            out_t: self.client.create_from_slice(f32::as_bytes(&out_t)),
-            out_prev: self.client.create_from_slice(f32::as_bytes(&out_prev)),
-            saved_mv: self.client.create_from_slice(i32::as_bytes(&saved_mv_host)),
-            saved_conf: self.client.create_from_slice(f32::as_bytes(&saved_conf_host)),
-            edges: self.client.create_from_slice(f32::as_bytes(&edges_host)),
-            hist: self.client.create_from_slice(i32::as_bytes(&hist_host)),
-            partials: self.client.empty(cells * PARTIAL_LANES * size_of::<f32>()),
+            input,
+            out_t,
+            out_prev,
+            saved_mv,
+            saved_conf,
+            edges,
+            hist,
+            partials,
         }
     }
 
@@ -184,6 +202,8 @@ impl<R: Runtime> Benchmark for GrainMeasureBench<R> {
         let pixels = self.size.pixels();
         let blocks = self.size.blocks() as usize;
         let cells = self.size.cells();
+        let blocks_x = width.div_ceil(STEP);
+        let blocks_y = height.div_ceil(STEP);
 
         unsafe {
             grain_measure::launch_unchecked::<R>(
@@ -208,8 +228,8 @@ impl<R: Runtime> Benchmark for GrainMeasureBench<R> {
                 width,
                 height,
                 1u32,
-                width.div_ceil(STEP),
-                height.div_ceil(STEP),
+                blocks_x,
+                blocks_y,
                 STEP,
             );
         }
@@ -253,10 +273,12 @@ impl<R: Runtime> Benchmark for GrainReducePartialsBench<R> {
 
         let chunk_host = vec![0.0f32; STRENGTH_GROUPS * RECORD_LANES];
 
-        GrainReducePartialsInput {
-            partials: self.client.create_from_slice(f32::as_bytes(&partials_host)),
-            chunk: self.client.create_from_slice(f32::as_bytes(&chunk_host)),
-        }
+        let partials_bytes = f32::as_bytes(&partials_host);
+        let partials = self.client.create_from_slice(partials_bytes);
+        let chunk_bytes = f32::as_bytes(&chunk_host);
+        let chunk = self.client.create_from_slice(chunk_bytes);
+
+        GrainReducePartialsInput { partials, chunk }
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {

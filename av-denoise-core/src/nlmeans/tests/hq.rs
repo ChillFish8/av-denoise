@@ -1,8 +1,7 @@
 use super::helpers::*;
+use crate::bench_api::HostIo;
 use crate::nlmeans::*;
 
-/// Shared baseline for the fast path. Each test overrides just the
-/// field it's exercising via struct-update syntax.
 fn base_params() -> NlmParams {
     NlmParams {
         temporal_radius: 0,
@@ -17,25 +16,58 @@ fn base_params() -> NlmParams {
     }
 }
 
-/// With both HQ features off, `effective_strength` and `noise_offset`
-/// degenerate to exactly what the fast path already computes, so the
-/// two denoisers must agree bit-for-bit.
+/// Pushes five frames with a moving noisy square, then flushes.
+///
+/// Asserts every output is finite and in range, and that each pushed frame produces one output.
+fn run_temporal_smoke(params: NlmParams, width: u32, height: u32) {
+    let client = make_client();
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+
+    let frames: Vec<Vec<f32>> = (0..5)
+        .map(|i| make_frame_with_noisy_region(width, height, 1, 0.5, 6 + i, 8, 2, 0.8))
+        .collect();
+
+    let mut emitted = 0usize;
+    let check = |frame: &[f32]| {
+        for (i, &value) in frame.iter().enumerate() {
+            assert!(value.is_finite(), "pixel {i}: non-finite output {value}");
+            assert!(
+                (0.0..=1.0).contains(&value),
+                "pixel {i}: out-of-range output {value}"
+            );
+        }
+    };
+
+    for frame in &frames {
+        denoiser.push_frame(frame);
+        if let Some(result) = denoiser.denoise().unwrap() {
+            check(&result);
+            emitted += 1;
+        }
+    }
+
+    denoiser
+        .flush(|frame| {
+            check(frame);
+            emitted += 1;
+        })
+        .unwrap();
+
+    assert_eq!(emitted, frames.len(), "expected one output per pushed frame");
+}
+
+/// With both features off, `effective_strength` and `noise_offset` reduce to the fast path's values.
 #[test]
 fn hq_disabled_features_match_fast_mode() {
     let client = make_client();
-    let w = 16;
-    let h = 16;
-    let frame = make_frame_with_noisy_region(w, h, 1, 0.5, 8, 8, 3, 0.9);
+    let width = 16;
+    let height = 16;
+    let frame = make_frame_with_noisy_region(width, height, 1, 0.5, 8, 8, 3, 0.9);
 
-    let mut fast = NlmDenoiser::<R>::new(&client, base_params(), w, h);
+    let fast_params = base_params();
+    let mut fast = NlmDenoiser::<R>::new(&client, fast_params, width, height);
     fast.push_frame(&frame);
-    let fast_out = fast
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let fast_out = fast.denoise().unwrap().unwrap();
 
     let hq_params = NlmParams {
         hq: Some(HqParams {
@@ -49,15 +81,9 @@ fn hq_disabled_features_match_fast_mode() {
         }),
         ..base_params()
     };
-    let mut hq = NlmDenoiser::<R>::new(&client, hq_params, w, h);
+    let mut hq = NlmDenoiser::<R>::new(&client, hq_params, width, height);
     hq.push_frame(&frame);
-    let hq_out = hq
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let hq_out = hq.denoise().unwrap().unwrap();
 
     assert_eq!(
         fast_out, hq_out,
@@ -65,37 +91,22 @@ fn hq_disabled_features_match_fast_mode() {
     );
 }
 
-/// Turning on the noise floor shifts every patch distance by a
-/// nonzero offset. Neighbours whose distance falls below that offset
-/// get clamped to full weight instead of the fast path's decayed
-/// weight. That changes their contribution to the weighted average
-/// relative to neighbours that stay above the offset, so the two
-/// outputs must differ somewhere while staying finite and in range.
+/// The sigma sits far above realistic noise because the solid block gives only a few discrete
+/// patch distances.
 ///
-/// `sigma` here is set well above the CLI's "heavy noise" guidance.
-/// The synthetic frame is a solid block edge rather than real
-/// per-pixel noise, so patch distances only take a few discrete
-/// values, either zero or a multiple of one mismatched tap's
-/// contribution, instead of the small continuum real sensor noise
-/// would produce. A small, realistic sigma would sit below every
-/// nonzero distance and never clamp anything. The larger sigma exists
-/// purely to land the offset between two of those discrete steps.
+/// A realistic sigma would sit below every nonzero distance and clamp nothing. This one lands the
+/// offset between two of those steps.
 #[test]
 fn hq_noise_floor_changes_output() {
     let client = make_client();
-    let w = 16;
-    let h = 16;
-    let frame = make_frame_with_noisy_region(w, h, 1, 0.5, 8, 8, 3, 0.9);
+    let width = 16;
+    let height = 16;
+    let frame = make_frame_with_noisy_region(width, height, 1, 0.5, 8, 8, 3, 0.9);
 
-    let mut fast = NlmDenoiser::<R>::new(&client, base_params(), w, h);
+    let fast_params = base_params();
+    let mut fast = NlmDenoiser::<R>::new(&client, fast_params, width, height);
     fast.push_frame(&frame);
-    let fast_out = fast
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let fast_out = fast.denoise().unwrap().unwrap();
 
     let hq_params = NlmParams {
         hq: Some(HqParams {
@@ -109,21 +120,18 @@ fn hq_noise_floor_changes_output() {
         }),
         ..base_params()
     };
-    let mut hq = NlmDenoiser::<R>::new(&client, hq_params, w, h);
+    let mut hq = NlmDenoiser::<R>::new(&client, hq_params, width, height);
     hq.push_frame(&frame);
-    let hq_out = hq
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let hq_out = hq.denoise().unwrap().unwrap();
 
     let mut max_diff = 0.0f32;
-    for (i, (&f, &q)) in fast_out.iter().zip(hq_out.iter()).enumerate() {
-        assert!(q.is_finite(), "pixel {i}: non-finite HQ output {q}");
-        assert!((0.0..=1.0).contains(&q), "pixel {i}: out-of-range HQ output {q}");
-        max_diff = max_diff.max((f - q).abs());
+    for (i, (&fast_value, &hq_value)) in fast_out.iter().zip(hq_out.iter()).enumerate() {
+        assert!(hq_value.is_finite(), "pixel {i}: non-finite HQ output {hq_value}");
+        assert!(
+            (0.0..=1.0).contains(&hq_value),
+            "pixel {i}: out-of-range HQ output {hq_value}"
+        );
+        max_diff = max_diff.max((fast_value - hq_value).abs());
     }
 
     assert!(
@@ -132,95 +140,46 @@ fn hq_noise_floor_changes_output() {
     );
 }
 
-/// Mirrors `spatial::uniform_image_passthrough`.
-///
-/// Every patch distance is zero on a flat frame, so both HQ features do
-/// nothing and the output has to come back unchanged.
 #[test]
 fn hq_uniform_input_passthrough() {
     let client = make_client();
-    let w = 16;
-    let h = 16;
-    let frame = make_uniform_frame(w, h, 1, 0.5);
+    let width = 16;
+    let height = 16;
+    let frame = make_uniform_frame(width, height, 1, 0.5);
 
     let params = NlmParams {
         hq: Some(HqParams::with_sigma(8.0 / 255.0)),
         ..base_params()
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
     denoiser.push_frame(&frame);
-    let result = denoiser
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let result = denoiser.denoise().unwrap().unwrap();
 
-    for (i, &v) in result.iter().enumerate() {
-        assert!((v - 0.5).abs() < 1e-5, "pixel {i}: expected 0.5, got {v}");
+    for (i, &value) in result.iter().enumerate() {
+        assert!((value - 0.5).abs() < 1e-5, "pixel {i}: expected 0.5, got {value}");
     }
 }
 
 #[test]
 fn hq_temporal_smoke() {
-    let client = make_client();
-    let w = 16;
-    let h = 16;
-
     let params = NlmParams {
         temporal_radius: 1,
         hq: Some(HqParams::with_sigma(6.0 / 255.0)),
         ..base_params()
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
-
-    let frames: Vec<Vec<f32>> = (0..5)
-        .map(|i| make_frame_with_noisy_region(w, h, 1, 0.5, 6 + i, 8, 2, 0.8))
-        .collect();
-
-    let mut emitted = 0usize;
-    let check = |frame: &[f32]| {
-        for (i, &v) in frame.iter().enumerate() {
-            assert!(v.is_finite(), "pixel {i}: non-finite output {v}");
-            assert!((0.0..=1.0).contains(&v), "pixel {i}: out-of-range output {v}");
-        }
-    };
-
-    for frame in &frames {
-        denoiser.push_frame(frame);
-        if let Some(result) = denoiser.denoise().unwrap() {
-            check(result.as_f32().expect("f32 denoiser"));
-            emitted += 1;
-        }
-    }
-
-    denoiser
-        .flush(|frame| {
-            check(frame.as_f32().expect("f32 denoiser"));
-            emitted += 1;
-        })
-        .unwrap();
-
-    assert_eq!(emitted, frames.len(), "expected one output per pushed frame");
+    run_temporal_smoke(params, 16, 16);
 }
 
-/// `sigma_override: None` measures the noise level from the pushed
-/// frame instead of requiring a caller-supplied value, and the
-/// measured sigma must still drive real denoising.
-///
-/// Uses per-pixel Gaussian noise rather than a solid noisy block. The
-/// Immerkær estimator responds to genuine high-frequency variation. A
-/// single flat block only disturbs its boundary ring, so it reads back
-/// close to the noise floor and barely denoises anything.
+/// Uses per-pixel Gaussian noise because the Immerkær estimator reads a solid block close to the
+/// noise floor, since only its boundary ring varies.
 #[test]
 fn hq_auto_sigma_denoises() {
     let client = make_client();
-    let w = 32;
-    let h = 32;
-    let frame = make_noisy_gaussian_frame(w, h, 1, 0.5, &[8.0 / 255.0]);
+    let width = 32;
+    let height = 32;
+    let frame = make_noisy_gaussian_frame(width, height, 1, 0.5, &[8.0 / 255.0]);
 
     let params = NlmParams {
         hq: Some(HqParams {
@@ -235,15 +194,9 @@ fn hq_auto_sigma_denoises() {
         ..base_params()
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
     denoiser.push_frame(&frame);
-    let result = denoiser
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let result = denoiser.denoise().unwrap().unwrap();
 
     let mut max_diff = 0.0f32;
     for (i, (&input, &output)) in frame.iter().zip(result.iter()).enumerate() {
@@ -261,14 +214,8 @@ fn hq_auto_sigma_denoises() {
     );
 }
 
-/// Mirrors `hq_temporal_smoke` but with the noise level measured
-/// automatically instead of supplied up front.
 #[test]
 fn hq_auto_sigma_temporal_smoke() {
-    let client = make_client();
-    let w = 16;
-    let h = 16;
-
     let params = NlmParams {
         temporal_radius: 1,
         hq: Some(HqParams {
@@ -283,50 +230,21 @@ fn hq_auto_sigma_temporal_smoke() {
         ..base_params()
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
-
-    let frames: Vec<Vec<f32>> = (0..5)
-        .map(|i| make_frame_with_noisy_region(w, h, 1, 0.5, 6 + i, 8, 2, 0.8))
-        .collect();
-
-    let mut emitted = 0usize;
-    let check = |frame: &[f32]| {
-        for (i, &v) in frame.iter().enumerate() {
-            assert!(v.is_finite(), "pixel {i}: non-finite output {v}");
-            assert!((0.0..=1.0).contains(&v), "pixel {i}: out-of-range output {v}");
-        }
-    };
-
-    for frame in &frames {
-        denoiser.push_frame(frame);
-        if let Some(result) = denoiser.denoise().unwrap() {
-            check(result.as_f32().expect("f32 denoiser"));
-            emitted += 1;
-        }
-    }
-
-    denoiser
-        .flush(|frame| {
-            check(frame.as_f32().expect("f32 denoiser"));
-            emitted += 1;
-        })
-        .unwrap();
-
-    assert_eq!(emitted, frames.len(), "expected one output per pushed frame");
+    run_temporal_smoke(params, 16, 16);
 }
 
 #[test]
 fn hq_override_skips_estimation() {
     let client = make_client();
-    let w = 16;
-    let h = 16;
+    let width = 16;
+    let height = 16;
 
     let params = NlmParams {
         hq: Some(HqParams::with_sigma(8.0 / 255.0)),
         ..base_params()
     };
 
-    let denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+    let denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
 
     assert!(
         denoiser.noise_partials.is_none(),
@@ -338,20 +256,13 @@ fn hq_override_skips_estimation() {
     );
 }
 
-/// `reset_stream_state` (called by `flush`) must clear the noise
-/// estimator's EMA so a new stream doesn't inherit the previous
-/// stream's noise level. Verified by observable behaviour. Pushing a
-/// low-noise frame right after a reset must derive exactly the same
-/// `h2_inv_norm` / `noise_offset` as a brand-new denoiser that only
-/// ever saw that frame, instead of a value blended with the earlier
-/// high-noise estimate.
 #[test]
 fn hq_reset_clears_noise_state() {
     let client = make_client();
-    let w = 16;
-    let h = 16;
-    let noisy = make_frame_with_noisy_region(w, h, 1, 0.5, 8, 8, 3, 0.9);
-    let low = make_uniform_frame(w, h, 1, 0.5);
+    let width = 16;
+    let height = 16;
+    let noisy = make_frame_with_noisy_region(width, height, 1, 0.5, 8, 8, 3, 0.9);
+    let low = make_uniform_frame(width, height, 1, 0.5);
 
     let params = NlmParams {
         hq: Some(HqParams {
@@ -366,7 +277,7 @@ fn hq_reset_clears_noise_state() {
         ..base_params()
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params.clone(), w, h);
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params.clone(), width, height);
     denoiser.push_frame(&noisy);
     denoiser.denoise().unwrap();
 
@@ -374,7 +285,7 @@ fn hq_reset_clears_noise_state() {
     denoiser.push_frame(&low);
     denoiser.denoise().unwrap();
 
-    let mut fresh = NlmDenoiser::<R>::new(&client, params, w, h);
+    let mut fresh = NlmDenoiser::<R>::new(&client, params, width, height);
     fresh.push_frame(&low);
     fresh.denoise().unwrap();
 
@@ -388,16 +299,8 @@ fn hq_reset_clears_noise_state() {
     );
 }
 
-/// HQ auto-σ combined with the nlm-spatial pilot over a short temporal
-/// sequence. Mirrors `hq_auto_sigma_temporal_smoke` but with the pilot
-/// enabled. Every produced frame must stay finite and in range, and the
-/// pipeline must still emit exactly one output per pushed frame.
 #[test]
 fn hq_pilot_temporal_end_to_end() {
-    let client = make_client();
-    let w = 16;
-    let h = 16;
-
     let params = NlmParams {
         temporal_radius: 1,
         prefilter: PrefilterMode::NlmSpatial { strength_scale: 1.0 },
@@ -413,52 +316,17 @@ fn hq_pilot_temporal_end_to_end() {
         ..base_params()
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
-
-    let frames: Vec<Vec<f32>> = (0..5)
-        .map(|i| make_frame_with_noisy_region(w, h, 1, 0.5, 6 + i, 8, 2, 0.8))
-        .collect();
-
-    let mut emitted = 0usize;
-    let check = |frame: &[f32]| {
-        for (i, &v) in frame.iter().enumerate() {
-            assert!(v.is_finite(), "pixel {i}: non-finite output {v}");
-            assert!((0.0..=1.0).contains(&v), "pixel {i}: out-of-range output {v}");
-        }
-    };
-
-    for frame in &frames {
-        denoiser.push_frame(frame);
-        if let Some(result) = denoiser.denoise().unwrap() {
-            check(result.as_f32().expect("f32 denoiser"));
-            emitted += 1;
-        }
-    }
-
-    denoiser
-        .flush(|frame| {
-            check(frame.as_f32().expect("f32 denoiser"));
-            emitted += 1;
-        })
-        .unwrap();
-
-    assert_eq!(emitted, frames.len(), "expected one output per pushed frame");
+    run_temporal_smoke(params, 16, 16);
 }
 
-/// The nlm-spatial pilot changes what the main pass reads as its
-/// distance signal, so HQ with the pilot enabled must diverge from
-/// plain HQ (`prefilter: None`) on the same input.
-///
-/// Uses per-pixel Gaussian noise rather than a solid noisy block (as
-/// `hq_noise_floor_changes_output` explains, a flat block only
-/// disturbs its boundary ring, leaving patch distances elsewhere
-/// identical whether or not the pilot ran).
+/// Uses per-pixel Gaussian noise because a solid block only changes patch distances around its
+/// boundary ring, whether or not the pilot ran.
 #[test]
 fn hq_pilot_differs_from_unguided() {
     let client = make_client();
-    let w = 32;
-    let h = 32;
-    let frame = make_noisy_gaussian_frame(w, h, 1, 0.5, &[10.0 / 255.0]);
+    let width = 32;
+    let height = 32;
+    let frame = make_noisy_gaussian_frame(width, height, 1, 0.5, &[10.0 / 255.0]);
 
     let hq_params = |prefilter: PrefilterMode| NlmParams {
         prefilter,
@@ -474,39 +342,28 @@ fn hq_pilot_differs_from_unguided() {
         ..base_params()
     };
 
-    let mut unguided = NlmDenoiser::<R>::new(&client, hq_params(PrefilterMode::None), w, h);
+    let unguided_params = hq_params(PrefilterMode::None);
+    let mut unguided = NlmDenoiser::<R>::new(&client, unguided_params, width, height);
     unguided.push_frame(&frame);
-    let unguided_out = unguided
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let unguided_out = unguided.denoise().unwrap().unwrap();
 
-    let mut piloted = NlmDenoiser::<R>::new(
-        &client,
-        hq_params(PrefilterMode::NlmSpatial { strength_scale: 1.0 }),
-        w,
-        h,
-    );
+    let piloted_params = hq_params(PrefilterMode::NlmSpatial { strength_scale: 1.0 });
+    let mut piloted = NlmDenoiser::<R>::new(&client, piloted_params, width, height);
     piloted.push_frame(&frame);
-    let piloted_out = piloted
-        .denoise()
-        .unwrap()
-        .unwrap()
-        .as_f32()
-        .expect("f32 denoiser")
-        .to_vec();
+    let piloted_out = piloted.denoise().unwrap().unwrap();
 
     let mut max_diff = 0.0f32;
-    for (i, (&a, &b)) in unguided_out.iter().zip(piloted_out.iter()).enumerate() {
-        assert!(b.is_finite(), "pixel {i}: non-finite piloted output {b}");
+    let pairs = unguided_out.iter().zip(piloted_out.iter()).enumerate();
+    for (i, (&unguided_value, &piloted_value)) in pairs {
         assert!(
-            (0.0..=1.0).contains(&b),
-            "pixel {i}: out-of-range piloted output {b}"
+            piloted_value.is_finite(),
+            "pixel {i}: non-finite piloted output {piloted_value}"
         );
-        max_diff = max_diff.max((a - b).abs());
+        assert!(
+            (0.0..=1.0).contains(&piloted_value),
+            "pixel {i}: out-of-range piloted output {piloted_value}"
+        );
+        max_diff = max_diff.max((unguided_value - piloted_value).abs());
     }
 
     assert!(
@@ -515,12 +372,11 @@ fn hq_pilot_differs_from_unguided() {
     );
 }
 
-/// HQ temporal params tuned so a uniformly mismatched neighbour sits
-/// well past `thsad` (confidence collapses to ~0) while the plain NLM
-/// patch weight for that same neighbour stays significant on its own.
-/// `strength`/`patch_radius` are chosen so the two thresholds don't
-/// coincide, otherwise confidence toggling wouldn't be separable from
-/// the intrinsic Welsch suppression.
+/// HQ temporal params where a uniformly mismatched neighbour sits well past `thsad` while its plain
+/// NLM weight stays significant.
+///
+/// `strength` and `patch_radius` keep the two thresholds apart, so confidence is separable from the
+/// Welsch suppression.
 fn temporal_conf_params(temporal_confidence: bool) -> NlmParams {
     NlmParams {
         temporal_radius: 1,
@@ -543,81 +399,56 @@ fn temporal_conf_params(temporal_confidence: bool) -> NlmParams {
     }
 }
 
-/// Confidence weighting has to suppress a mismatched neighbour while
-/// leaving a matching one alone.
+/// The previous neighbour is flat at 0.55, a 0.05 mismatch well past the default threshold.
 ///
-/// The centre frame and the following neighbour are flat at 0.5. The
-/// preceding neighbour is flat at 0.55, mismatched everywhere by 0.05,
-/// which is well past the default threshold at the library's block
-/// size.
-///
-/// Without confidence, plain NLM weighting still gives that neighbour a
-/// noticeable weight, because patch distances stay small at this
-/// strength, and the output drifts away from 0.5.
-///
-/// With confidence, its block-level mismatch collapses that weight to
-/// almost nothing and the output stays at 0.5.
-///
-/// This is the same style of comparison
-/// `temporal_asymmetric_frames_correct_weights` uses for the fast path,
-/// measured here against confidence being off rather than against a
-/// hand-computed target.
+/// Without confidence, plain NLM still gives it a noticeable weight at this strength and the output
+/// drifts from 0.5.
 #[test]
 fn hq_temporal_confidence_suppresses_mismatched_neighbour() {
     let client = make_client();
-    let w = 16;
-    let h = 16;
+    let width = 16;
+    let height = 16;
 
-    let prev = make_uniform_frame(w, h, 1, 0.55);
-    let center = make_uniform_frame(w, h, 1, 0.5);
-    let next = make_uniform_frame(w, h, 1, 0.5);
+    let previous = make_uniform_frame(width, height, 1, 0.55);
+    let centre = make_uniform_frame(width, height, 1, 0.5);
+    let next = make_uniform_frame(width, height, 1, 0.5);
 
     let run = |temporal_confidence: bool| {
-        let mut d = NlmDenoiser::<R>::new(&client, temporal_conf_params(temporal_confidence), w, h);
-        d.push_frame(&prev);
-        d.push_frame(&center);
-        d.push_frame(&next);
-        d.denoise()
-            .unwrap()
-            .unwrap()
-            .as_f32()
-            .expect("f32 denoiser")
-            .to_vec()
+        let params = temporal_conf_params(temporal_confidence);
+        let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+        denoiser.push_frame(&previous);
+        denoiser.push_frame(&centre);
+        denoiser.push_frame(&next);
+        denoiser.denoise().unwrap().unwrap()
     };
 
     let off = run(false);
     let on = run(true);
 
-    let off_dev = (off[(8 * w + 8) as usize] - 0.5).abs();
-    let on_dev = (on[(8 * w + 8) as usize] - 0.5).abs();
+    let off_deviation = (off[(8 * width + 8) as usize] - 0.5).abs();
+    let on_deviation = (on[(8 * width + 8) as usize] - 0.5).abs();
 
     assert!(
-        off_dev > 5e-3,
+        off_deviation > 5e-3,
         "without confidence weighting the mismatched neighbour should pull the \
-         output measurably away from 0.5, got deviation {off_dev}"
+         output measurably away from 0.5, got deviation {off_deviation}"
     );
     assert!(
-        on_dev < off_dev * 0.5,
+        on_deviation < off_deviation * 0.5,
         "confidence weighting should suppress the mismatched neighbour's \
-         contribution: off deviation {off_dev}, on deviation {on_dev}"
+         contribution: off deviation {off_deviation}, on deviation {on_deviation}"
     );
 }
 
-/// HQ with `temporal_confidence` set to `false` must ignore the
-/// confidence machinery entirely, not just apply a weak version of it.
-/// `thsad_scale` only ever feeds the confidence threshold (see
-/// `HqParams::thsad_scale`), so if the disabled kernel path genuinely
-/// never reads the confidence buffer, sweeping it must leave the
-/// output bitwise unchanged. This is the observable form of "compiles
-/// to the same code as before confidence consumption existed" for a
-/// config the plan requires to match prior HQ output exactly.
+/// `thsad_scale` only feeds the confidence threshold, so with confidence off a sweep must leave the
+/// output bitwise unchanged.
 #[test]
 fn hq_temporal_confidence_disabled_ignores_thsad_scale() {
     let client = make_client();
-    let w = 16;
-    let h = 16;
+    let width = 16;
+    let height = 16;
     let frames: Vec<Vec<f32>> = (0..3)
-        .map(|i| make_frame_with_noisy_region(w, h, 1, 0.5, 6 + i, 8, 2, 0.8))
+        .map(|i| make_frame_with_noisy_region(width, height, 1, 0.5, 6 + i, 8, 2, 0.8))
         .collect();
 
     let run = |thsad_scale: f32| {
@@ -640,16 +471,13 @@ fn hq_temporal_confidence_disabled_ignores_thsad_scale() {
                 windowed_noise_estimation: false,
             }),
         };
-        let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
+
+        let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
         for frame in &frames {
-            d.push_frame(frame);
+            denoiser.push_frame(frame);
         }
-        d.denoise()
-            .unwrap()
-            .unwrap()
-            .as_f32()
-            .expect("f32 denoiser")
-            .to_vec()
+
+        denoiser.denoise().unwrap().unwrap()
     };
 
     let base = run(1.0);
@@ -661,17 +489,8 @@ fn hq_temporal_confidence_disabled_ignores_thsad_scale() {
     );
 }
 
-/// End-to-end smoke test covering HQ temporal denoising with motion
-/// compensation and (default-on) confidence weighting together, over a
-/// short synthetic sequence. Every produced frame must stay finite and
-/// in range, mirroring `hq_auto_sigma_temporal_smoke` with MC layered
-/// on top.
 #[test]
 fn hq_temporal_mc_confidence_smoke() {
-    let client = make_client();
-    let w = 32;
-    let h = 32;
-
     let params = NlmParams {
         temporal_radius: 1,
         motion_compensation: MotionCompensationMode::Mvtools {
@@ -685,51 +504,19 @@ fn hq_temporal_mc_confidence_smoke() {
         ..base_params()
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
-
-    let frames: Vec<Vec<f32>> = (0..5)
-        .map(|i| make_frame_with_noisy_region(w, h, 1, 0.5, 6 + i, 8, 2, 0.8))
-        .collect();
-
-    let mut emitted = 0usize;
-    let check = |frame: &[f32]| {
-        for (i, &v) in frame.iter().enumerate() {
-            assert!(v.is_finite(), "pixel {i}: non-finite output {v}");
-            assert!((0.0..=1.0).contains(&v), "pixel {i}: out-of-range output {v}");
-        }
-    };
-
-    for frame in &frames {
-        denoiser.push_frame(frame);
-        if let Some(result) = denoiser.denoise().unwrap() {
-            check(result.as_f32().expect("f32 denoiser"));
-            emitted += 1;
-        }
-    }
-
-    denoiser
-        .flush(|frame| {
-            check(frame.as_f32().expect("f32 denoiser"));
-            emitted += 1;
-        })
-        .unwrap();
-
-    assert_eq!(emitted, frames.len(), "expected one output per pushed frame");
+    run_temporal_smoke(params, 32, 32);
 }
 
-/// `sigma_scale` multiplies each channel's raw sigma before it folds
-/// into the running EMA, so doubling it must exactly double the folded
-/// estimator state (the EMA's first sample sets its state directly,
-/// with no nonlinearity to round off) and quadruple `noise_offset`
-/// (quadratic in sigma). Checking both consumers from a single fold
-/// proves the multiply sits before the blend feeds either of them,
-/// rather than one of them picking it up incidentally.
+/// The EMA's first sample sets its state directly, so doubling `sigma_scale` exactly doubles the
+/// folded estimate and quadruples `noise_offset`.
+///
+/// Checking both consumers from one fold shows the multiply sits before the blend feeds either.
 #[test]
 fn hq_sigma_scale_multiplies_the_folded_estimate() {
     let client = make_client();
-    let w = 32;
-    let h = 32;
-    let frame = make_noisy_gaussian_frame(w, h, 1, 0.5, &[8.0 / 255.0]);
+    let width = 32;
+    let height = 32;
+    let frame = make_noisy_gaussian_frame(width, height, 1, 0.5, &[8.0 / 255.0]);
 
     let run = |sigma_scale: f32| {
         let params = NlmParams {
@@ -744,14 +531,16 @@ fn hq_sigma_scale_multiplies_the_folded_estimate() {
             }),
             ..base_params()
         };
-        let mut d = NlmDenoiser::<R>::new(&client, params, w, h);
-        d.push_frame(&frame);
-        d.denoise().unwrap();
-        let folded = d
+
+        let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+        denoiser.push_frame(&frame);
+        denoiser.denoise().unwrap();
+
+        let folded = denoiser
             .noise_estimator
             .current()
             .expect("estimator should hold a value after one push")[0];
-        (folded, d.noise_offset)
+        (folded, denoiser.noise_offset)
     };
 
     let (folded_1x, offset_1x) = run(1.0);

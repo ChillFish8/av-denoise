@@ -1,24 +1,25 @@
+use std::num::{NonZeroU8, NonZeroUsize};
+use std::sync::Arc;
+
 use av_denoise::{Depth, FrameLayout, Subsampling};
+use v_frame::chroma::ChromaSubsampling;
+use v_frame::frame::{Frame, FrameBuilder};
 
-use crate::pipeline::convert::{collect_plane_u16, planes_from_v_frame_u8, planes_from_v_frame_u16};
+use crate::pipeline::convert::{
+    SourcePixel,
+    collect_plane_u16,
+    planes_from_v_frame_u8,
+    planes_from_v_frame_u16,
+};
 
-/// A 10-bit v_frame plane serialises to little-endian wire bytes at
-/// twice the sample count.
 #[test]
 fn collect_plane_u16_writes_little_endian_bytes() {
-    use std::num::{NonZeroU8, NonZeroUsize};
-
-    use v_frame::chroma::ChromaSubsampling;
-    use v_frame::frame::{Frame, FrameBuilder};
-
-    let mut frame: Frame<u16> = FrameBuilder::new(
-        NonZeroUsize::new(2).expect("width is non-zero"),
-        NonZeroUsize::new(2).expect("height is non-zero"),
-        ChromaSubsampling::Yuv420,
-        NonZeroU8::new(10).expect("depth is non-zero"),
-    )
-    .build()
-    .expect("a 2x2 10-bit frame builds");
+    let width = NonZeroUsize::new(2).expect("width is non-zero");
+    let height = NonZeroUsize::new(2).expect("height is non-zero");
+    let bit_depth = NonZeroU8::new(10).expect("depth is non-zero");
+    let mut frame: Frame<u16> = FrameBuilder::new(width, height, ChromaSubsampling::Yuv420, bit_depth)
+        .build()
+        .expect("a 2x2 10-bit frame builds");
 
     frame
         .y_plane
@@ -37,25 +38,18 @@ fn collect_plane_u16_writes_little_endian_bytes() {
 
 #[test]
 fn planes_from_v_frame_u8_matching_layout_succeeds() {
-    use std::num::{NonZeroU8, NonZeroUsize};
-
-    use v_frame::chroma::ChromaSubsampling;
-    use v_frame::frame::FrameBuilder;
-
     let layout = FrameLayout {
         width: 2,
         height: 2,
         subsampling: Subsampling::Yuv420,
         depth: Depth::Eight,
     };
-    let frame: v_frame::frame::Frame<u8> = FrameBuilder::new(
-        NonZeroUsize::new(2).expect("width is non-zero"),
-        NonZeroUsize::new(2).expect("height is non-zero"),
-        ChromaSubsampling::Yuv420,
-        NonZeroU8::new(8).expect("depth is non-zero"),
-    )
-    .build()
-    .expect("a 2x2 8-bit frame builds");
+    let width = NonZeroUsize::new(2).expect("width is non-zero");
+    let height = NonZeroUsize::new(2).expect("height is non-zero");
+    let bit_depth = NonZeroU8::new(8).expect("depth is non-zero");
+    let frame: Frame<u8> = FrameBuilder::new(width, height, ChromaSubsampling::Yuv420, bit_depth)
+        .build()
+        .expect("a 2x2 8-bit frame builds");
 
     let planes = planes_from_v_frame_u8(&frame, layout).expect("matching layout should not error");
 
@@ -66,25 +60,18 @@ fn planes_from_v_frame_u8_matching_layout_succeeds() {
 
 #[test]
 fn planes_from_v_frame_u16_matching_layout_succeeds() {
-    use std::num::{NonZeroU8, NonZeroUsize};
-
-    use v_frame::chroma::ChromaSubsampling;
-    use v_frame::frame::FrameBuilder;
-
     let layout = FrameLayout {
         width: 2,
         height: 2,
         subsampling: Subsampling::Yuv420,
         depth: Depth::Ten,
     };
-    let frame: v_frame::frame::Frame<u16> = FrameBuilder::new(
-        NonZeroUsize::new(2).expect("width is non-zero"),
-        NonZeroUsize::new(2).expect("height is non-zero"),
-        ChromaSubsampling::Yuv420,
-        NonZeroU8::new(10).expect("depth is non-zero"),
-    )
-    .build()
-    .expect("a 2x2 10-bit frame builds");
+    let width = NonZeroUsize::new(2).expect("width is non-zero");
+    let height = NonZeroUsize::new(2).expect("height is non-zero");
+    let bit_depth = NonZeroU8::new(10).expect("depth is non-zero");
+    let frame: Frame<u16> = FrameBuilder::new(width, height, ChromaSubsampling::Yuv420, bit_depth)
+        .build()
+        .expect("a 2x2 10-bit frame builds");
 
     let planes = planes_from_v_frame_u16(&frame, layout).expect("matching layout should not error");
 
@@ -95,19 +82,12 @@ fn planes_from_v_frame_u16_matching_layout_succeeds() {
 
 #[test]
 fn planes_from_v_frame_u8_mismatched_layout_errors() {
-    use std::num::{NonZeroU8, NonZeroUsize};
-
-    use v_frame::chroma::ChromaSubsampling;
-    use v_frame::frame::FrameBuilder;
-
-    let frame: v_frame::frame::Frame<u8> = FrameBuilder::new(
-        NonZeroUsize::new(2).expect("width is non-zero"),
-        NonZeroUsize::new(2).expect("height is non-zero"),
-        ChromaSubsampling::Yuv420,
-        NonZeroU8::new(8).expect("depth is non-zero"),
-    )
-    .build()
-    .expect("a 2x2 8-bit frame builds");
+    let width = NonZeroUsize::new(2).expect("width is non-zero");
+    let height = NonZeroUsize::new(2).expect("height is non-zero");
+    let bit_depth = NonZeroU8::new(8).expect("depth is non-zero");
+    let frame: Frame<u8> = FrameBuilder::new(width, height, ChromaSubsampling::Yuv420, bit_depth)
+        .build()
+        .expect("a 2x2 8-bit frame builds");
 
     let layout = FrameLayout {
         width: 4,
@@ -117,38 +97,30 @@ fn planes_from_v_frame_u8_mismatched_layout_errors() {
     };
 
     let err = planes_from_v_frame_u8(&frame, layout).expect_err("a smaller frame should not pass");
-    let msg = err.to_string();
+    let message = err.to_string();
 
-    assert!(msg.contains('y'), "error should name the plane: {msg}");
+    assert!(message.contains('y'), "error should name the plane: {message}");
     assert!(
-        msg.contains('4'),
-        "error should name the 2x2 plane's length (4): {msg}"
+        message.contains('4'),
+        "error should name the 2x2 plane's length (4): {message}"
     );
     assert!(
-        msg.contains("16"),
-        "error should name the layout's expected length (16): {msg}"
+        message.contains("16"),
+        "error should name the layout's expected length (16): {message}"
     );
 }
 
 #[test]
 fn a_decoded_frame_only_unwraps_to_its_own_depth() {
-    use std::num::{NonZeroU8, NonZeroUsize};
-    use std::sync::Arc;
+    let width = NonZeroUsize::new(2).expect("width is non-zero");
+    let height = NonZeroUsize::new(2).expect("height is non-zero");
+    let bit_depth = NonZeroU8::new(8).expect("depth is non-zero");
+    let frame: Frame<u8> = FrameBuilder::new(width, height, ChromaSubsampling::Yuv420, bit_depth)
+        .build()
+        .expect("a 2x2 8-bit frame builds");
+    let shared = Arc::new(frame);
+    let decoded = u8::into_decoded(shared);
+    let unwrapped = u16::from_decoded(decoded);
 
-    use v_frame::chroma::ChromaSubsampling;
-    use v_frame::frame::FrameBuilder;
-
-    use crate::pipeline::convert::SourcePixel;
-
-    let frame: v_frame::frame::Frame<u8> = FrameBuilder::new(
-        NonZeroUsize::new(2).expect("width is non-zero"),
-        NonZeroUsize::new(2).expect("height is non-zero"),
-        ChromaSubsampling::Yuv420,
-        NonZeroU8::new(8).expect("depth is non-zero"),
-    )
-    .build()
-    .expect("a 2x2 8-bit frame builds");
-    let decoded = u8::into_decoded(Arc::new(frame));
-
-    assert!(u16::from_decoded(decoded).is_none());
+    assert!(unwrapped.is_none());
 }

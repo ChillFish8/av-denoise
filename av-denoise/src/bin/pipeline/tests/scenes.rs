@@ -13,7 +13,8 @@ const HEIGHT: usize = 128;
 /// Builds an 8-bit 4:2:0 y4m clip where each entry of `scene_lengths` is one scene.
 fn clip(scene_lengths: &[usize]) -> Vec<u8> {
     let mut bytes = Vec::new();
-    let mut encoder = y4m::encode(WIDTH, HEIGHT, y4m::Ratio::new(24, 1))
+    let frame_rate = y4m::Ratio::new(24, 1);
+    let mut encoder = y4m::encode(WIDTH, HEIGHT, frame_rate)
         .with_colorspace(y4m::Colorspace::C420)
         .write_header(&mut bytes)
         .expect("header should write");
@@ -38,7 +39,9 @@ fn clip(scene_lengths: &[usize]) -> Vec<u8> {
 }
 
 fn decoder_over(bytes: &[u8]) -> Decoder {
-    let reader: Box<dyn Read> = Box::new(Cursor::new(bytes.to_vec()));
+    let owned = bytes.to_vec();
+    let cursor = Cursor::new(owned);
+    let reader: Box<dyn Read> = Box::new(cursor);
     let y4m_decoder = y4m::decode(reader).expect("y4m header should parse");
 
     Decoder::from_decoder_impl(DecoderImpl::Y4m(y4m_decoder)).expect("decoder should open")
@@ -62,12 +65,14 @@ fn split(bytes: &[u8]) -> Vec<Decided<u8>> {
     let mut decided = Vec::new();
 
     while let Ok(frame) = decoder.read_video_frame::<u8>() {
-        let released = splitter.push(Arc::new(frame));
+        let shared = Arc::new(frame);
+        let released = splitter.push(shared);
         decided.extend(released);
     }
 
     let tail = splitter.finish();
     decided.extend(tail);
+
     decided
 }
 
@@ -85,9 +90,10 @@ fn the_pipeline_clip_cuts_at_every_pattern_switch() {
     let bytes = multi_scene_clip(40);
     let decided = split(&bytes);
     let expected_starts: Vec<usize> = (0..40).step_by(SCENE_LENGTH).collect();
+    let starts = scene_starts(&decided);
 
     assert_eq!(decided.len(), 40);
-    assert_eq!(scene_starts(&decided), expected_starts);
+    assert_eq!(starts, expected_starts);
 }
 
 #[test]
@@ -101,9 +107,10 @@ fn cuts_match_the_whole_clip_pass_over_several_scenes() {
     );
 
     let decided = split(&bytes);
+    let starts = scene_starts(&decided);
 
     assert_eq!(decided.len(), expected_count);
-    assert_eq!(scene_starts(&decided), expected_starts);
+    assert_eq!(starts, expected_starts);
 }
 
 #[test]
@@ -111,9 +118,10 @@ fn cuts_match_the_whole_clip_pass_at_the_look_ahead_length() {
     let bytes = clip(&[LOOKAHEAD_DISTANCE + 1]);
     let (expected_starts, expected_count) = reference(&bytes);
     let decided = split(&bytes);
+    let starts = scene_starts(&decided);
 
     assert_eq!(decided.len(), expected_count);
-    assert_eq!(scene_starts(&decided), expected_starts);
+    assert_eq!(starts, expected_starts);
 }
 
 #[test]
@@ -121,9 +129,10 @@ fn cuts_match_the_whole_clip_pass_on_two_frames() {
     let bytes = clip(&[1, 1]);
     let (expected_starts, expected_count) = reference(&bytes);
     let decided = split(&bytes);
+    let starts = scene_starts(&decided);
 
     assert_eq!(decided.len(), expected_count);
-    assert_eq!(scene_starts(&decided), expected_starts);
+    assert_eq!(starts, expected_starts);
 }
 
 #[test]
@@ -145,10 +154,11 @@ fn every_frame_is_released_once_in_order() {
     let mut released = Vec::new();
 
     while let Ok(frame) = decoder.read_video_frame::<u8>() {
-        let frame = Arc::new(frame);
-        pushed.push(Arc::clone(&frame));
+        let shared = Arc::new(frame);
+        let pushed_frame = Arc::clone(&shared);
+        pushed.push(pushed_frame);
 
-        let decided = splitter.push(frame);
+        let decided = splitter.push(shared);
         released.extend(decided);
     }
 
@@ -158,7 +168,9 @@ fn every_frame_is_released_once_in_order() {
     assert_eq!(released.len(), pushed.len());
 
     for (original, decided) in pushed.iter().zip(&released) {
-        assert!(Arc::ptr_eq(original, &decided.frame));
+        let same_frame = Arc::ptr_eq(original, &decided.frame);
+
+        assert!(same_frame);
     }
 }
 
@@ -179,7 +191,8 @@ fn nothing_is_released_before_the_look_ahead_fills() {
 
     for pushed in 0..LOOKAHEAD_DISTANCE {
         let frame = decoder.read_video_frame::<u8>().expect("the clip has 20 frames");
-        let released = splitter.push(Arc::new(frame));
+        let shared = Arc::new(frame);
+        let released = splitter.push(shared);
 
         assert!(
             released.is_empty(),
@@ -188,7 +201,8 @@ fn nothing_is_released_before_the_look_ahead_fills() {
     }
 
     let frame = decoder.read_video_frame::<u8>().expect("the clip has 20 frames");
-    let released = splitter.push(Arc::new(frame));
+    let shared = Arc::new(frame);
+    let released = splitter.push(shared);
 
     assert_eq!(
         released.len(),

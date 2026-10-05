@@ -1,18 +1,18 @@
-use av_denoise_core::nlmeans::kernels::nlm_distance_pair;
+use av_denoise_core::bench_api::kernels::nlm_distance_pair;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::{
-    H,
+    HEIGHT,
     Q_X,
     Q_Y,
-    W,
+    WIDTH,
     block_sync,
     cube_count_2d,
     cube_dim_2d,
     make_padded_frame,
-    shapes_with_ch,
+    shapes_with_channels,
     stored_channels,
 };
 
@@ -26,8 +26,8 @@ pub struct DistancePairInput {
 
 pub struct DistancePairBench<R: Runtime> {
     pub client: ComputeClient<R>,
-    pub ch: u32,
-    pub ch_name: &'static str,
+    pub channels: u32,
+    pub channel_name: &'static str,
 }
 
 impl<R: Runtime> Benchmark for DistancePairBench<R> {
@@ -35,11 +35,13 @@ impl<R: Runtime> Benchmark for DistancePairBench<R> {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let pixels = (W * H) as usize;
-        let frame = make_padded_frame(W, H, self.ch);
-        let input = self.client.create_from_slice(f32::as_bytes(&frame));
+        let pixels = (WIDTH * HEIGHT) as usize;
+        let frame = make_padded_frame(WIDTH, HEIGHT, self.channels);
+        let frame_bytes = f32::as_bytes(&frame);
+        let input = self.client.create_from_slice(frame_bytes);
         let dist_fwd = self.client.empty(pixels * size_of::<f32>());
         let dist_bwd = self.client.empty(pixels * size_of::<f32>());
+
         DistancePairInput {
             input,
             dist_fwd,
@@ -49,14 +51,17 @@ impl<R: Runtime> Benchmark for DistancePairBench<R> {
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let pixels = (W * H) as usize;
-        let stored = stored_channels(self.ch) as usize;
+        let pixels = (WIDTH * HEIGHT) as usize;
+        let stored_ch = stored_channels(self.channels) as usize;
+        let cube_count = cube_count_2d();
+        let cube_dim = cube_dim_2d();
+
         unsafe {
             nlm_distance_pair::launch_unchecked::<R>(
                 &self.client,
-                cube_count_2d(),
-                cube_dim_2d(),
-                stored,
+                cube_count,
+                cube_dim,
+                stored_ch,
                 ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
                 ArrayArg::from_raw_parts(args.dist_fwd.clone(), pixels),
                 ArrayArg::from_raw_parts(args.dist_bwd.clone(), pixels),
@@ -65,21 +70,24 @@ impl<R: Runtime> Benchmark for DistancePairBench<R> {
                 0u32,
                 Q_X,
                 Q_Y,
-                W,
-                H,
-                self.ch,
+                WIDTH,
+                HEIGHT,
+                self.channels,
             );
         }
+
         Ok(())
     }
 
     fn name(&self) -> String {
-        format!("distance_pair_1080p_{}", self.ch_name)
+        format!("distance_pair_1080p_{}", self.channel_name)
     }
+
     fn sync(&self) {
         block_sync(&self.client);
     }
+
     fn shapes(&self) -> Vec<Vec<usize>> {
-        shapes_with_ch(self.ch)
+        shapes_with_channels(self.channels)
     }
 }
