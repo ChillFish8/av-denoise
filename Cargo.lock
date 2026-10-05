@@ -181,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "av-denoise"
-version = "0.5.0-alpha3"
+version = "0.5.0-alpha4"
 dependencies = [
  "anyhow",
  "av-decoders",
@@ -211,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "av-denoise-core"
-version = "0.5.0-alpha3"
+version = "0.5.0-alpha4"
 dependencies = [
  "anyhow",
  "bon",
@@ -226,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "av-denoise-vs"
-version = "0.5.0-alpha3"
+version = "0.5.0-alpha4"
 dependencies = [
  "anyhow",
  "av-denoise",
