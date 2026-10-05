@@ -1,3 +1,7 @@
+//! Checks denoised output against hashes recorded on this machine
+//!
+//! Setting `AVD_PARITY_RECORD=1` records the fixture instead of checking it.
+
 mod clips;
 mod configs;
 mod fixture;

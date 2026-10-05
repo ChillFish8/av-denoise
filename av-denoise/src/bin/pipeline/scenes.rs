@@ -79,6 +79,7 @@ impl<T: Pixel> SceneSplitter<T> {
         }
 
         self.queue.clear();
+
         released
     }
 

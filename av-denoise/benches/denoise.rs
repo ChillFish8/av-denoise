@@ -13,9 +13,10 @@ use av_denoise::{
     NlmeansOptions,
     PrefilterMode,
 };
+use clap::Parser;
 
-const W: u32 = 1920;
-const H: u32 = 1080;
+const WIDTH: u32 = 1920;
+const HEIGHT: u32 = 1080;
 
 const WARMUP: usize = 5;
 const ITERS: usize = 100;
@@ -26,31 +27,29 @@ const BILATERAL_SIGMA_R: f32 = 0.02;
 #[derive(clap::Parser, Debug)]
 #[command(about = "End-to-end Denoiser benchmark", long_about = None)]
 struct Cli {
-    /// GPU device to bind to. Format: `default`, `discrete[:N]`,
-    /// `integrated[:N]`, `virtual[:N]`, or `cpu`.
+    /// GPU device to bind to, one of `default`, `discrete[:N]`, `integrated[:N]`, `virtual[:N]` or `cpu`.
     #[arg(long, default_value = "default")]
     device: Device,
 
-    /// Accelerator priority list (comma-delimited). Defaults to all
-    /// compiled-in accelerators.
+    /// Accelerator priority list, comma-delimited. Defaults to all compiled-in accelerators.
     #[arg(long, value_delimiter = ',', default_values_t = av_denoise::accelerate::get_default_accelerators())]
     accelerators: Vec<Accelerator>,
 
-    /// Swallowed: cargo passes this when invoking the bench binary.
+    /// Swallowed, since cargo passes this when invoking the bench binary.
     #[arg(long, hide = true)]
     bench: bool,
 }
 
 /// One 8-bit plane per channel, a smooth pattern plus hashed noise.
-fn make_synthetic_planes(w: u32, h: u32, ch: u32) -> Vec<Vec<u8>> {
-    let mut planes = vec![Vec::with_capacity((w * h) as usize); ch as usize];
+fn make_synthetic_planes(width: u32, height: u32, channels: u32) -> Vec<Vec<u8>> {
+    let mut planes = vec![Vec::with_capacity((width * height) as usize); channels as usize];
 
-    for y in 0..h {
-        for x in 0..w {
+    for y in 0..height {
+        for x in 0..width {
             let base = 0.5 + 0.2 * (x as f32 * 0.05).sin() * (y as f32 * 0.03).cos();
 
-            for (c, plane) in planes.iter_mut().enumerate() {
-                let seed = (y * w + x) * ch + c as u32;
+            for (channel, plane) in planes.iter_mut().enumerate() {
+                let seed = (y * width + x) * channels + channel as u32;
                 let hash = seed
                     .wrapping_mul(2654435761)
                     .wrapping_add(seed.wrapping_mul(340573321));
@@ -94,11 +93,12 @@ fn options(channel_mode: ChannelMode, mode: DenoisingMode, algorithm: Algorithm)
 
 /// The fast NLM path with a prefilter and a motion-compensation mode.
 fn nlm(prefilter: PrefilterMode, motion_compensation: MotionCompensationMode) -> Algorithm {
-    Algorithm::Nlmeans(NlmeansOptions {
+    let nlmeans_options = NlmeansOptions {
         prefilter,
         motion_compensation,
         ..NlmeansOptions::default()
-    })
+    };
+    Algorithm::Nlmeans(nlmeans_options)
 }
 
 fn bench_push_recv(
@@ -109,20 +109,17 @@ fn bench_push_recv(
     mode: DenoisingMode,
     algorithm: Algorithm,
 ) -> Result<BenchResult, anyhow::Error> {
-    let ch = channel_mode.count();
-    let planes = make_synthetic_planes(W, H, ch);
+    let channels = channel_mode.count();
+    let planes = make_synthetic_planes(WIDTH, HEIGHT, channels);
     let frame: Vec<&[u8]> = planes.iter().map(Vec::as_slice).collect();
 
     let denoiser_options = options(channel_mode, mode, algorithm);
-    let mut denoiser = HostDenoiser::create(accelerators, device, W, H, denoiser_options)?;
+    let mut denoiser = HostDenoiser::create(accelerators, device, WIDTH, HEIGHT, denoiser_options)?;
     let accelerator = denoiser.selected_accelerator();
 
-    // Fill the temporal window so subsequent push/recv steady-state
-    // lines up. NLMeans mirrors the first pushed frame into the leading
-    // `R` ring slots, so it emits early and pushing `window - 1` frames
-    // can trip `QueueFull` at radius ≥ 2. nl4d fills its ring with real
-    // frames instead. Use a defensive push that drains a pending if the
-    // queue is full, then drain everything before steady-state.
+    // Fill the temporal window so the steady-state push/recv lines up. NLMeans mirrors the first
+    // frame into the leading ring slots and emits early, so pushing `window - 1` frames can hit
+    // `QueueFull` at radius 2 or more. A full queue drains one frame before the push is retried.
     let temporal_radius = match mode {
         DenoisingMode::Spacial => 0,
         DenoisingMode::Temporal { radius } => radius,
@@ -134,6 +131,7 @@ fn bench_push_recv(
             denoiser.push(&frame)?;
         }
     }
+
     while denoiser.recv()?.is_some() {}
 
     for _ in 0..WARMUP {
@@ -145,14 +143,12 @@ fn bench_push_recv(
     for _ in 0..ITERS {
         let start = Instant::now();
         denoiser.push(&frame)?;
-        let _out = denoiser.recv()?;
+        let _received = denoiser.recv()?;
         times.push(start.elapsed());
     }
 
-    // Drain the temporal tail so every pushed frame is accounted for
-    // before the denoiser drops. An unpolled `Pending` has started no
-    // readback and is free to drop, so this is bookkeeping rather than
-    // a safety requirement.
+    // Drain the temporal tail so every pushed frame is accounted for. An unpolled `Pending` is free
+    // to drop, so this is bookkeeping rather than a safety requirement.
     denoiser.flush(|_| {})?;
 
     let total: Duration = times.iter().sum();
@@ -176,10 +172,9 @@ fn main() {
     // SAFETY: single-threaded at entry, no race possible.
     unsafe { av_denoise::raise_codegen_stack_limit() };
 
-    use clap::Parser;
     let cli = Cli::parse();
 
-    println!("Denoiser E2E Benchmarks - {W}×{H}");
+    println!("Denoiser E2E Benchmarks - {WIDTH}×{HEIGHT}");
     println!("  warmup={WARMUP}, timed={ITERS}");
     println!("  device:        {:?}", cli.device);
     println!("  accelerators:  {:?}", cli.accelerators);
@@ -189,102 +184,104 @@ fn main() {
         sigma_s: BILATERAL_SIGMA_S,
         sigma_r: BILATERAL_SIGMA_R,
     };
-    let mc = MotionCompensationMode::mvtools_default();
+    let motion_compensation = MotionCompensationMode::mvtools_default();
 
-    // Side-by-side ordering: each temporal config is followed by its
-    // motion-compensation variant so the cost delta from `--motion-compensation`
-    // is visible on adjacent rows.
+    let plain = nlm(PrefilterMode::None, MotionCompensationMode::None);
+    let plain_mc = nlm(PrefilterMode::None, motion_compensation);
+    let bilateral_only = nlm(bilateral, MotionCompensationMode::None);
+    let bilateral_mc = nlm(bilateral, motion_compensation);
+
+    // Each temporal config is followed by its motion-compensation variant, so the cost of
+    // `--motion-compensation` shows on adjacent rows.
     let configs: &[(&str, ChannelMode, DenoisingMode, Algorithm)] = &[
-        (
-            "spatial_luma",
-            ChannelMode::Luma,
-            DenoisingMode::Spacial,
-            nlm(PrefilterMode::None, MotionCompensationMode::None),
-        ),
+        ("spatial_luma", ChannelMode::Luma, DenoisingMode::Spacial, plain),
         (
             "spatial_chroma",
             ChannelMode::Chroma,
             DenoisingMode::Spacial,
-            nlm(PrefilterMode::None, MotionCompensationMode::None),
+            plain,
         ),
-        (
-            "spatial_yuv",
-            ChannelMode::Yuv,
-            DenoisingMode::Spacial,
-            nlm(PrefilterMode::None, MotionCompensationMode::None),
-        ),
+        ("spatial_yuv", ChannelMode::Yuv, DenoisingMode::Spacial, plain),
         (
             "temporal_r1_yuv",
             ChannelMode::Yuv,
             DenoisingMode::Temporal { radius: 1 },
-            nlm(PrefilterMode::None, MotionCompensationMode::None),
+            plain,
         ),
         (
             "temporal_r1_yuv+mc",
             ChannelMode::Yuv,
             DenoisingMode::Temporal { radius: 1 },
-            nlm(PrefilterMode::None, mc),
+            plain_mc,
         ),
         (
             "temporal_r2_yuv",
             ChannelMode::Yuv,
             DenoisingMode::Temporal { radius: 2 },
-            nlm(PrefilterMode::None, MotionCompensationMode::None),
+            plain,
         ),
         (
             "temporal_r2_yuv+mc",
             ChannelMode::Yuv,
             DenoisingMode::Temporal { radius: 2 },
-            nlm(PrefilterMode::None, mc),
+            plain_mc,
         ),
         (
             "spatial_luma+bilateral",
             ChannelMode::Luma,
             DenoisingMode::Spacial,
-            nlm(bilateral, MotionCompensationMode::None),
+            bilateral_only,
         ),
         (
             "spatial_chroma+bilateral",
             ChannelMode::Chroma,
             DenoisingMode::Spacial,
-            nlm(bilateral, MotionCompensationMode::None),
+            bilateral_only,
         ),
         (
             "spatial_yuv+bilateral",
             ChannelMode::Yuv,
             DenoisingMode::Spacial,
-            nlm(bilateral, MotionCompensationMode::None),
+            bilateral_only,
         ),
         (
             "temporal_r1_yuv+bilateral",
             ChannelMode::Yuv,
             DenoisingMode::Temporal { radius: 1 },
-            nlm(bilateral, MotionCompensationMode::None),
+            bilateral_only,
         ),
         (
             "temporal_r1_yuv+bilateral+mc",
             ChannelMode::Yuv,
             DenoisingMode::Temporal { radius: 1 },
-            nlm(bilateral, mc),
+            bilateral_mc,
         ),
         (
             "temporal_r2_yuv+bilateral",
             ChannelMode::Yuv,
             DenoisingMode::Temporal { radius: 2 },
-            nlm(bilateral, MotionCompensationMode::None),
+            bilateral_only,
         ),
         (
             "temporal_r2_yuv+bilateral+mc",
             ChannelMode::Yuv,
             DenoisingMode::Temporal { radius: 2 },
-            nlm(bilateral, mc),
+            bilateral_mc,
         ),
     ];
 
-    for (name, ch, mode, algorithm) in configs {
-        match bench_push_recv(name, &cli.accelerators, &cli.device, *ch, *mode, *algorithm) {
+    for (name, channel_mode, mode, algorithm) in configs {
+        let outcome = bench_push_recv(
+            name,
+            &cli.accelerators,
+            &cli.device,
+            *channel_mode,
+            *mode,
+            *algorithm,
+        );
+        match outcome {
             Ok(result) => result.print(),
-            Err(err) => eprintln!("[{name}] failed: {err:?}"),
+            Err(error) => eprintln!("[{name}] failed: {error:?}"),
         }
     }
 }

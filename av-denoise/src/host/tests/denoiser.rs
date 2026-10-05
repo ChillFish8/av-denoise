@@ -4,7 +4,7 @@ use crate::backend::Device;
 use crate::backend::accelerate::Accelerator;
 use crate::host::{Algorithm, DenoiserError, DenoiserOptions, HostDenoiser};
 
-fn opts(mode: DenoisingMode) -> DenoiserOptions {
+fn luma_options(mode: DenoisingMode) -> DenoiserOptions {
     DenoiserOptions::builder()
         .channel_mode(ChannelMode::Luma)
         .mode(mode)
@@ -16,7 +16,7 @@ fn create(width: u32, height: u32, options: DenoiserOptions) -> Result<HostDenoi
 }
 
 fn luma_denoiser(mode: DenoisingMode) -> HostDenoiser {
-    let options = opts(mode);
+    let options = luma_options(mode);
     create(16, 16, options).expect("denoiser construction failed")
 }
 
@@ -28,22 +28,21 @@ fn frame_filled(value: u8) -> Vec<u8> {
     vec![value; 16 * 16]
 }
 
-/// The single plane of a luma frame.
 fn luma_plane(mut planes: Vec<Vec<u8>>) -> Vec<u8> {
     assert_eq!(planes.len(), 1, "a luma frame has one plane");
     planes.remove(0)
 }
 
-/// Flushes `denoiser`, collecting each frame's luma plane into `out`.
-fn flush_luma(denoiser: &mut HostDenoiser, out: &mut Vec<Vec<u8>>) -> Result<(), DenoiserError> {
+/// Flushes `denoiser`, collecting each frame's luma plane into `outputs`.
+fn flush_luma(denoiser: &mut HostDenoiser, outputs: &mut Vec<Vec<u8>>) -> Result<(), DenoiserError> {
     denoiser.flush(|planes| {
         let plane = luma_plane(planes);
-        out.push(plane);
+        outputs.push(plane);
     })
 }
 
 /// Pushes `count` frames of `value`, receiving whenever the queue is full.
-fn push_n_with_drain(denoiser: &mut HostDenoiser, count: usize, value: u8, out: &mut Vec<Vec<u8>>) {
+fn push_n_with_drain(denoiser: &mut HostDenoiser, count: usize, value: u8, outputs: &mut Vec<Vec<u8>>) {
     let plane = frame_filled(value);
 
     for _ in 0..count {
@@ -54,7 +53,7 @@ fn push_n_with_drain(denoiser: &mut HostDenoiser, count: usize, value: u8, out: 
                     let received = denoiser.recv().expect("recv ok");
                     let planes = received.expect("queue full but recv yielded none");
                     let plane = luma_plane(planes);
-                    out.push(plane);
+                    outputs.push(plane);
                 },
                 Err(error) => panic!("unexpected push error: {error:?}"),
             }
@@ -72,13 +71,14 @@ fn spatial_denoise_roundtrip() {
 
     let received = denoiser.recv().expect("recv failed");
     let planes = received.expect("no frame");
-    let out = luma_plane(planes);
-    assert_eq!(out.len(), 16 * 16);
+    let output_plane = luma_plane(planes);
+
+    assert_eq!(output_plane.len(), 16 * 16);
 }
 
 #[test]
 fn a_plane_that_is_not_a_whole_number_of_words_round_trips() {
-    let options = opts(DenoisingMode::Spacial);
+    let options = luma_options(DenoisingMode::Spacial);
     let mut denoiser = create(13, 9, options).expect("denoiser construction failed");
 
     let plane = frame(13, 9);
@@ -86,8 +86,9 @@ fn a_plane_that_is_not_a_whole_number_of_words_round_trips() {
 
     let received = denoiser.recv().expect("recv failed");
     let planes = received.expect("no frame");
-    let out = luma_plane(planes);
-    assert_eq!(out.len(), 13 * 9);
+    let output_plane = luma_plane(planes);
+
+    assert_eq!(output_plane.len(), 13 * 9);
 }
 
 #[test]
@@ -147,10 +148,11 @@ fn a_plane_of_the_wrong_length_is_rejected() {
 
 #[test]
 fn nl4d_algorithm_round_trips_through_the_host() {
+    let algorithm = Algorithm::Nl4d(Nl4dOptions::default());
     let options = DenoiserOptions::builder()
         .channel_mode(ChannelMode::Luma)
         .mode(DenoisingMode::Temporal { radius: 2 })
-        .algorithm(Algorithm::Nl4d(Nl4dOptions::default()))
+        .algorithm(algorithm)
         .build();
     let mut denoiser = create(16, 16, options).expect("nl4d denoiser construction failed");
     assert_eq!(denoiser.selected_accelerator(), Accelerator::Vulkan);
@@ -161,19 +163,25 @@ fn nl4d_algorithm_round_trips_through_the_host() {
     let received = denoiser.recv().expect("recv failed");
     assert!(received.is_none());
 
-    let mut out = Vec::new();
-    flush_luma(&mut denoiser, &mut out).expect("flush failed");
-    assert_eq!(out.len(), 1, "expected exactly one output for one pushed frame");
-    assert_eq!(out[0].len(), 16 * 16);
+    let mut outputs = Vec::new();
+    flush_luma(&mut denoiser, &mut outputs).expect("flush failed");
+
+    assert_eq!(
+        outputs.len(),
+        1,
+        "expected exactly one output for one pushed frame"
+    );
+    assert_eq!(outputs[0].len(), 16 * 16);
 }
 
 /// nl4d groups patches across neighbouring frames, so a spatial mode leaves it nothing to do.
 #[test]
 fn nl4d_rejects_a_spatial_denoising_mode() {
+    let algorithm = Algorithm::Nl4d(Nl4dOptions::default());
     let options = DenoiserOptions::builder()
         .channel_mode(ChannelMode::Luma)
         .mode(DenoisingMode::Spacial)
-        .algorithm(Algorithm::Nl4d(Nl4dOptions::default()))
+        .algorithm(algorithm)
         .build();
     let result = create(16, 16, options);
 
@@ -189,14 +197,16 @@ fn nl4d_rejects_a_spatial_denoising_mode() {
 
 #[test]
 fn window_span_is_symmetric_for_nlmeans() {
+    let algorithm = Algorithm::Nlmeans(NlmeansOptions::default());
     let options = DenoiserOptions::builder()
         .channel_mode(ChannelMode::Luma)
         .mode(DenoisingMode::Temporal { radius: 3 })
-        .algorithm(Algorithm::Nlmeans(NlmeansOptions::default()))
+        .algorithm(algorithm)
         .build();
     let denoiser = create(16, 16, options).expect("denoiser construction failed");
 
     let span = denoiser.window_span();
+
     assert_eq!(span.behind, 3, "behind should equal the temporal radius");
     assert_eq!(span.ahead, 3, "ahead should equal the temporal radius");
     assert_eq!(span.edges, EdgePadding::Repeat);
@@ -204,14 +214,16 @@ fn window_span_is_symmetric_for_nlmeans() {
 
 #[test]
 fn window_span_is_doubled_on_both_sides_for_nl4d() {
+    let algorithm = Algorithm::Nl4d(Nl4dOptions::default());
     let options = DenoiserOptions::builder()
         .channel_mode(ChannelMode::Luma)
         .mode(DenoisingMode::Temporal { radius: 3 })
-        .algorithm(Algorithm::Nl4d(Nl4dOptions::default()))
+        .algorithm(algorithm)
         .build();
     let denoiser = create(16, 16, options).expect("nl4d denoiser construction failed");
 
     let span = denoiser.window_span();
+
     assert_eq!(span.behind, 6, "behind should equal 2 * the temporal radius");
     assert_eq!(span.ahead, 6, "ahead should equal 2 * the temporal radius");
     assert_eq!(span.edges, EdgePadding::Shifted);
@@ -223,10 +235,11 @@ fn invalid_params_surface_as_error() {
         strength: Some(0.0),
         ..NlmTuning::default()
     };
-    let algorithm = Algorithm::Nlmeans(NlmeansOptions {
+    let nlmeans_options = NlmeansOptions {
         tuning,
         ..NlmeansOptions::default()
-    });
+    };
+    let algorithm = Algorithm::Nlmeans(nlmeans_options);
     let options = DenoiserOptions::builder().algorithm(algorithm).build();
     let result = create(16, 16, options);
 
@@ -239,7 +252,7 @@ fn invalid_params_surface_as_error() {
 
 #[test]
 fn tiny_frame_dimensions_surface_as_error() {
-    let options = opts(DenoisingMode::Spacial);
+    let options = luma_options(DenoisingMode::Spacial);
     let result = create(2, 2, options);
 
     match result {
@@ -264,8 +277,9 @@ fn push_after_pending_returns_queue_full() {
 
     let received = denoiser.recv().unwrap();
     let planes = received.unwrap();
-    let out = luma_plane(planes);
-    assert_eq!(out.len(), 16 * 16);
+    let output_plane = luma_plane(planes);
+
+    assert_eq!(output_plane.len(), 16 * 16);
 
     denoiser.push(&[&plane]).expect("push after drain failed");
 }
@@ -383,7 +397,7 @@ fn flush_leaves_denoiser_reusable_temporal() {
     flush_luma(&mut denoiser, &mut batch_a).expect("first flush failed");
     assert_eq!(batch_a.len(), 5, "expected 5 frames from first batch");
 
-    // With r=1 the window needs more than one push before anything is ready.
+    // With radius 1 the window needs more than one push before anything is ready.
     let received = denoiser.recv().unwrap();
     assert!(received.is_none());
 
@@ -414,28 +428,28 @@ fn flush_emits_exactly_n_outputs_for_small_n() {
     for count in 1..=5usize {
         let mut denoiser = luma_denoiser(DenoisingMode::Temporal { radius: 2 });
 
-        let mut out = Vec::new();
-        push_n_with_drain(&mut denoiser, count, 128, &mut out);
-        flush_luma(&mut denoiser, &mut out).expect("flush failed");
+        let mut outputs = Vec::new();
+        push_n_with_drain(&mut denoiser, count, 128, &mut outputs);
+        flush_luma(&mut denoiser, &mut outputs).expect("flush failed");
 
         assert_eq!(
-            out.len(),
+            outputs.len(),
             count,
             "expected {count} outputs for {count} pushes, got {}",
-            out.len()
+            outputs.len()
         );
     }
 }
 
 #[test]
 fn dropping_a_polled_pending_frame_does_not_poison_the_device() {
-    let new = || {
-        let options = opts(DenoisingMode::Spacial);
+    let create_denoiser = || {
+        let options = luma_options(DenoisingMode::Spacial);
         create(64, 64, options).unwrap()
     };
     let plane = frame(64, 64);
 
-    let mut denoiser = new();
+    let mut denoiser = create_denoiser();
     denoiser.push(&[&plane]).unwrap();
 
     // Whether the readback lands on this poll depends on the GPU, and both outcomes must survive the drop.
@@ -443,7 +457,7 @@ fn dropping_a_polled_pending_frame_does_not_poison_the_device() {
     drop(denoiser);
 
     // The staging pool is per device, so a fresh denoiser on the same device is handed the same buffers.
-    let mut denoiser = new();
+    let mut denoiser = create_denoiser();
     for _ in 0..4 {
         denoiser.push(&[&plane]).unwrap();
 
@@ -462,8 +476,8 @@ fn try_recv_observes_a_landed_readback_within_a_bounded_poll() {
     const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
     let radius = 2u32;
-    let new = || {
-        let options = opts(DenoisingMode::Temporal { radius });
+    let create_denoiser = || {
+        let options = luma_options(DenoisingMode::Temporal { radius });
         create(64, 64, options).unwrap()
     };
 
@@ -476,26 +490,28 @@ fn try_recv_observes_a_landed_readback_within_a_bounded_poll() {
         })
         .collect();
 
-    let mut polled = new();
+    let mut polled = create_denoiser();
     for plane in &window {
         polled.push(&[plane]).unwrap();
     }
 
     let start = std::time::Instant::now();
-    let mut got = None;
+    let mut landed = None;
     let mut polls = 0;
     while start.elapsed() < DEADLINE {
         polls += 1;
 
         if let Some(planes) = polled.try_recv().unwrap() {
-            got = Some(planes);
+            landed = Some(planes);
             break;
         }
     }
 
-    let got = got.unwrap_or_else(|| panic!("readback never landed within {DEADLINE:?} ({polls} polls)"));
+    let Some(landed) = landed else {
+        panic!("readback never landed within {DEADLINE:?} ({polls} polls)");
+    };
 
-    let mut blocking = new();
+    let mut blocking = create_denoiser();
     for plane in &window {
         blocking.push(&[plane]).unwrap();
     }
@@ -503,12 +519,13 @@ fn try_recv_observes_a_landed_readback_within_a_bounded_poll() {
     let received = blocking.recv().unwrap();
     let expected = received.expect("blocking denoiser should have a frame ready");
 
-    assert_eq!(got, expected);
+    assert_eq!(landed, expected);
 }
 
 #[test]
 fn try_recv_returns_none_when_nothing_is_in_flight() {
     let mut denoiser = luma_denoiser(DenoisingMode::Temporal { radius: 2 });
     let polled = denoiser.try_recv().unwrap();
+
     assert_eq!(polled, None);
 }

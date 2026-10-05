@@ -11,14 +11,14 @@ pub const IN_TRANSIT_FRAMES: usize = LOOKAHEAD_DISTANCE + 2 + PREFETCH_FRAMES + 
 
 /// Frames in flight this run allows.
 pub fn frame_permits(budget_bytes: u64, frame_bytes: usize, workers: usize, radius: u32) -> usize {
-    // A worker emits nothing until `push` first returns QueueFull, which
-    // takes `radius + MAX_PENDING + 1` pushes, and the frames upstream of
-    // the workers hold permits too. Fewer permits than that and the
-    // dispatcher waits on a permit nothing can release.
+    // A worker emits nothing until `push` first returns QueueFull, which takes
+    // `radius + MAX_PENDING + 1` pushes, and the frames upstream of the workers hold permits too.
+    // Fewer permits than that and the dispatcher waits on a permit nothing can release.
     let per_worker = radius as usize + av_denoise::MAX_PENDING + 2;
     let floor = workers * per_worker + IN_TRANSIT_FRAMES;
+    let afforded = frames_afforded(budget_bytes, frame_bytes);
 
-    frames_afforded(budget_bytes, frame_bytes).max(floor)
+    afforded.max(floor)
 }
 
 /// Frames the budget pays for at this frame size.
@@ -30,8 +30,8 @@ pub fn frames_afforded(budget_bytes: u64, frame_bytes: usize) -> usize {
 
 /// Renders a byte count in the decimal units `--frame-budget` accepts.
 ///
-/// The space `ByteSize` puts before the unit goes, so the result is one
-/// shell argument a caller can paste straight back into the flag.
+/// The space `ByteSize` puts before the unit is removed, so the result is one shell argument that
+/// pastes straight back into the flag.
 pub fn size_string(bytes: u64) -> String {
     bytesize::ByteSize::b(bytes)
         .display()
@@ -42,22 +42,23 @@ pub fn size_string(bytes: u64) -> String {
 
 /// Rounds a byte count up to the precision [size_string] prints at.
 ///
-/// The rendering keeps one decimal place, so a raw minimum can round
-/// down to a size that still fails the budget check.
+/// The rendering keeps one decimal place, so a raw minimum can round down to a size that still
+/// fails the budget check.
 pub fn suggested_budget(bytes: u64) -> String {
     let unit = [bytesize::GB, bytesize::MB, bytesize::KB]
         .into_iter()
         .find(|&unit| bytes >= unit)
         .unwrap_or(1);
     let step = (unit / 10).max(1);
+    let rounded = bytes.div_ceil(step) * step;
 
-    size_string(bytes.div_ceil(step) * step)
+    size_string(rounded)
 }
 
 /// Frames in flight this run allows, refusing a budget below the floor.
 ///
-/// A budget the floor has to raise serialises the pipeline, so it fails
-/// here rather than running on with too few frames in flight.
+/// A budget the floor has to raise serialises the pipeline, so it fails here rather than running
+/// on with too few frames in flight.
 pub fn checked_frame_permits(
     budget_bytes: u64,
     frame_bytes: usize,
@@ -68,13 +69,14 @@ pub fn checked_frame_permits(
     let permits = frame_permits(budget_bytes, frame_bytes, workers, radius);
 
     if permits > afforded {
-        let suggestion = suggested_budget(permits as u64 * frame_bytes as u64);
+        let required_bytes = permits as u64 * frame_bytes as u64;
+        let suggestion = suggested_budget(required_bytes);
+        let budget = size_string(budget_bytes);
 
         anyhow::bail!(
             "--frame-budget {budget} affords {afforded} frames at {frame_bytes} bytes per frame, \
              but {workers} workers at temporal radius {radius} need at least {permits}. Pass at \
              least --frame-budget {suggestion}.",
-            budget = size_string(budget_bytes),
         );
     }
 
@@ -83,9 +85,8 @@ pub fn checked_frame_permits(
 
 /// Builds a counting semaphore holding `count` permits.
 ///
-/// Returns the giving end and the taking end. The coordinator holds the
-/// giving end, so if it dies the dispatcher's next take fails instead of
-/// blocking forever.
+/// Returns the giving end and the taking end. The coordinator holds the giving end, so if it dies
+/// the dispatcher's next take fails instead of blocking forever.
 pub fn frame_permit_channel(
     count: usize,
 ) -> (crossbeam_channel::Sender<()>, crossbeam_channel::Receiver<()>) {
@@ -180,8 +181,7 @@ pub struct StagedFrame {
 
 /// One scene, offered to whichever worker is free.
 ///
-/// `frames` closes when the scene has no more frames, which is how a
-/// worker knows to flush.
+/// `frames` closes when the scene has no more frames, which is how a worker knows to flush.
 pub struct SceneJob {
     pub scene_idx: u32,
     pub frames: crossbeam_channel::Receiver<StagedFrame>,

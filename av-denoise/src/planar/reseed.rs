@@ -86,8 +86,8 @@ impl PlanarDenoiser {
         let mut result = None;
         for planes in tail {
             self.push(planes)?;
-            if let Some(out) = self.recv()? {
-                result = Some(out);
+            if let Some(denoised) = self.recv()? {
+                result = Some(denoised);
             }
         }
 
@@ -158,8 +158,8 @@ impl PlanarDenoiser {
         let mut outputs = Vec::new();
         for planes in real_frames {
             self.push(planes)?;
-            if let Some(out) = self.recv()? {
-                outputs.push(out);
+            if let Some(denoised) = self.recv()? {
+                outputs.push(denoised);
             }
         }
 
@@ -167,7 +167,8 @@ impl PlanarDenoiser {
             let target_output = outputs.pop();
             let target_output = target_output
                 .ok_or_else(|| anyhow::anyhow!("a full window produced no frame, this is a bug"))?;
-            return Ok(vec![target_output]);
+            let target_only = vec![target_output];
+            return Ok(target_only);
         }
 
         let tail_count = frames.len().min(2 * radius);
@@ -204,8 +205,8 @@ impl PlanarDenoiser {
             }
 
             if self.chroma.is_none() {
-                self.chroma_passthrough
-                    .push_back((planes.u.clone(), planes.v.clone()));
+                let chroma_pair = (planes.u.clone(), planes.v.clone());
+                self.chroma_passthrough.push_back(chroma_pair);
             }
         }
     }

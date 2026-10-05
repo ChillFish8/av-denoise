@@ -1,3 +1,5 @@
+//! Listing the devices each backend can see
+
 use cubecl::device::DeviceId;
 use cubecl::prelude::*;
 
@@ -12,9 +14,8 @@ pub struct BackendDevices {
     pub accelerator: Accelerator,
     /// Whether the backend started at all.
     ///
-    /// A build can enable a backend the machine has no driver for, and
-    /// that backend reports no devices because it never ran, not
-    /// because the machine has no hardware.
+    /// A backend the machine has no driver for reports no devices because it never ran, not because
+    /// the machine has no hardware.
     pub available: bool,
     /// The devices the backend can see, in the order it lists them.
     ///
@@ -24,36 +25,34 @@ pub struct BackendDevices {
 
 /// Asks each backend in `enable` which devices it can see.
 ///
-/// Backends are reported in the order given, including the ones that
-/// could not start, so a caller can tell "no such hardware" apart from
-/// "no such driver".
+/// Backends are reported in the order given, including the ones that could not start, so a caller
+/// can tell "no such hardware" apart from "no such driver".
 pub fn enumerate_devices(enable: &[Accelerator]) -> Vec<BackendDevices> {
     enable
         .iter()
         .map(|accelerator| match accelerator {
             #[cfg(feature = "cuda")]
             Accelerator::Cuda => match Device::Default.to_cuda() {
-                Ok(dev) => query_runtime::<cubecl::cuda::CudaRuntime>(*accelerator, &dev),
+                Ok(cuda_device) => query_runtime::<cubecl::cuda::CudaRuntime>(*accelerator, &cuda_device),
                 Err(_) => unavailable(*accelerator),
             },
             #[cfg(feature = "rocm")]
             Accelerator::Rocm => match Device::Default.to_amd() {
-                Ok(dev) => query_runtime::<cubecl::hip::HipRuntime>(*accelerator, &dev),
+                Ok(amd_device) => query_runtime::<cubecl::hip::HipRuntime>(*accelerator, &amd_device),
                 Err(_) => unavailable(*accelerator),
             },
             #[cfg(feature = "vulkan")]
             Accelerator::Vulkan => match Device::Default.to_wgpu() {
-                Ok(dev) => query_runtime::<cubecl::wgpu::WgpuRuntime>(*accelerator, &dev),
+                Ok(wgpu_device) => query_runtime::<cubecl::wgpu::WgpuRuntime>(*accelerator, &wgpu_device),
                 Err(_) => unavailable(*accelerator),
             },
             #[cfg(feature = "metal")]
             Accelerator::Metal => match Device::Default.to_wgpu() {
-                Ok(dev) => query_runtime::<cubecl::wgpu::WgpuRuntime>(*accelerator, &dev),
+                Ok(wgpu_device) => query_runtime::<cubecl::wgpu::WgpuRuntime>(*accelerator, &wgpu_device),
                 Err(_) => unavailable(*accelerator),
             },
-            // Keeps the match exhaustive on docs.rs, where `cfg(docsrs)`
-            // widens the `Accelerator` enum to include variants whose
-            // backend feature is not enabled. Never reached at runtime.
+            // Keeps the match exhaustive on docs.rs, where `cfg(docsrs)` widens the `Accelerator` enum to
+            // include variants whose backend feature is not enabled. Never reached at runtime.
             #[cfg(docsrs)]
             #[expect(
                 unreachable_patterns,
@@ -74,24 +73,20 @@ fn unavailable(accelerator: Accelerator) -> BackendDevices {
 
 /// Opens a client on `device` and lists what that backend can see.
 ///
-/// A backend that cannot open a client at all, because its driver
-/// libraries are missing, is reported as unavailable rather than
-/// allowed to take the process down. See [`probe`](crate::backend::probe).
+/// A backend that cannot open a client at all, because its driver libraries are missing, is reported
+/// as unavailable rather than allowed to take the process down.
 fn query_runtime<R: Runtime>(accelerator: Accelerator, device: &R::Device) -> BackendDevices {
     let Some(client) = open_client::<R>(accelerator, device) else {
         return unavailable(accelerator);
     };
 
-    // Type ids 0 to 3 are the device kinds `Device` can name. Anything
-    // else the runtime reports is hardware this tool cannot select.
-    //
-    // Not every backend filters by the type id it is given. ROCm and
-    // CUDA report their whole device list for each one, so the same
-    // device comes back on every pass and is kept only once.
+    // Type ids 0 to 3 are the device kinds `Device` can name, and anything else is hardware this tool
+    // cannot select. ROCm and CUDA report their whole device list for every type id, so a device that
+    // comes back on several passes is kept only once.
     let mut devices: Vec<Device> = Vec::new();
     for type_id in 0..=3 {
-        for id in client.enumerate_devices(type_id) {
-            if let Some(device) = to_device(id)
+        for device_id in client.enumerate_devices(type_id) {
+            if let Some(device) = to_device(device_id)
                 && !devices.contains(&device)
             {
                 devices.push(device);
@@ -108,8 +103,8 @@ fn query_runtime<R: Runtime>(accelerator: Accelerator, device: &R::Device) -> Ba
 
 /// Maps a cubecl device id onto the selector that names it.
 ///
-/// The type ids come from cubecl's own ordering of device kinds.
-/// Backends that report a kind this tool cannot select return `None`.
+/// The type ids come from cubecl's own ordering of device kinds. A kind this tool cannot select
+/// returns `None`.
 fn to_device(id: DeviceId) -> Option<Device> {
     let index = id.index_id as usize;
     match id.type_id {
@@ -127,26 +122,29 @@ mod tests {
 
     #[test]
     fn device_kinds_map_from_type_ids() {
-        assert_eq!(
-            to_device(DeviceId::new(0, 1)),
-            Some(Device::Discrete { index: 1 }),
-        );
-        assert_eq!(
-            to_device(DeviceId::new(1, 0)),
-            Some(Device::Integrated { index: 0 }),
-        );
-        assert_eq!(to_device(DeviceId::new(2, 2)), Some(Device::Virtual { index: 2 }),);
-        assert_eq!(to_device(DeviceId::new(3, 0)), Some(Device::Cpu));
+        let discrete = to_device(DeviceId::new(0, 1));
+        let integrated = to_device(DeviceId::new(1, 0));
+        let virtual_gpu = to_device(DeviceId::new(2, 2));
+        let cpu = to_device(DeviceId::new(3, 0));
+
+        assert_eq!(discrete, Some(Device::Discrete { index: 1 }));
+        assert_eq!(integrated, Some(Device::Integrated { index: 0 }));
+        assert_eq!(virtual_gpu, Some(Device::Virtual { index: 2 }));
+        assert_eq!(cpu, Some(Device::Cpu));
     }
 
     #[test]
     fn unknown_type_ids_are_skipped() {
-        assert_eq!(to_device(DeviceId::new(4, 0)), None);
+        let unknown = to_device(DeviceId::new(4, 0));
+
+        assert_eq!(unknown, None);
     }
 
     #[test]
     fn no_backends_lists_nothing() {
-        assert!(enumerate_devices(&[]).is_empty());
+        let reported = enumerate_devices(&[]);
+
+        assert!(reported.is_empty());
     }
 
     #[cfg(feature = "vulkan")]

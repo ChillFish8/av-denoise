@@ -10,6 +10,7 @@ use super::source::SourceInfo;
 use crate::progress::{self, denoise_progress_bar};
 use crate::y4m_format::subsampling_to_y4m;
 
+/// A denoised frame tagged with its position in the output.
 pub struct OutputMsg {
     pub global_idx: u64,
     pub planes: Planes,
@@ -17,18 +18,19 @@ pub struct OutputMsg {
 
 pub fn spawn_coordinator<W: std::io::Write + Send + 'static>(
     info: SourceInfo,
-    rx: crossbeam_channel::Receiver<OutputMsg>,
+    outputs: crossbeam_channel::Receiver<OutputMsg>,
     staged: crossbeam_channel::Receiver<u64>,
     visible: bool,
     permits: crossbeam_channel::Sender<()>,
     output: W,
 ) -> thread::JoinHandle<Result<(), anyhow::Error>> {
-    thread::spawn(move || run_coordinator(info, rx, staged, visible, permits, output))
+    thread::spawn(move || run_coordinator(info, outputs, staged, visible, permits, output))
 }
 
+/// Writes the y4m header, then every frame the workers send, in order.
 pub fn run_coordinator<W: std::io::Write>(
     info: SourceInfo,
-    rx: crossbeam_channel::Receiver<OutputMsg>,
+    outputs: crossbeam_channel::Receiver<OutputMsg>,
     staged: crossbeam_channel::Receiver<u64>,
     visible: bool,
     permits: crossbeam_channel::Sender<()>,
@@ -45,69 +47,65 @@ pub fn run_coordinator<W: std::io::Write>(
         builder = builder.with_pixel_aspect(pixel_aspect);
     }
 
-    // Forwards the source's `X` params, `XCOLORRANGE=` being the common one.
     for extension in info.vendor_extensions {
         builder = builder.append_vendor_extension(extension);
     }
 
     let mut encoder = builder.write_header(output)?;
 
-    // Counts frames written to the output, which lags the frames read by
-    // the depth of the worker pipelines. Emitted frames are the honest
-    // measure of progress, because the count stalls whenever whatever
-    // consumes our stdout stops reading.
-    let pb = denoise_progress_bar(info.estimated_frames, visible);
+    // Counts frames written rather than read, which lags by the depth of the worker pipelines.
+    // Written frames are the honest measure because the count stalls whenever the consumer of
+    // stdout stops reading.
+    let progress_bar = denoise_progress_bar(info.estimated_frames, visible);
 
-    // The first frame only lands once a worker has compiled its
-    // kernels, which takes seconds. A steady tick draws the bar right
-    // away and keeps its elapsed time moving until then.
-    pb.enable_steady_tick(Duration::from_millis(250));
+    // The first frame only lands once a worker has compiled its kernels, which takes seconds. A
+    // steady tick draws the bar right away and keeps its elapsed time moving until then.
+    progress_bar.enable_steady_tick(Duration::from_millis(250));
 
-    let result = emit_frames(&mut encoder, &rx, &staged, &pb, &permits);
+    let result = emit_frames(&mut encoder, &outputs, &staged, &progress_bar, &permits);
 
-    progress::finish(&pb);
+    progress::finish(&progress_bar);
 
     result
 }
 
-/// Reorders worker output by frame index and writes it out, updating `pb` as frames land.
+/// Reorders worker output by frame index and writes it out, updating `progress_bar` as frames land.
 ///
 /// Runs until every worker has hung up, then checks the frames written against the count the
 /// dispatcher staged. No count means the dispatcher failed and reports its own error.
 pub fn emit_frames<W: std::io::Write>(
     encoder: &mut y4m::Encoder<W>,
-    rx: &crossbeam_channel::Receiver<OutputMsg>,
+    outputs: &crossbeam_channel::Receiver<OutputMsg>,
     staged: &crossbeam_channel::Receiver<u64>,
-    pb: &ProgressBar,
+    progress_bar: &ProgressBar,
     permits: &crossbeam_channel::Sender<()>,
 ) -> Result<(), anyhow::Error> {
     let mut pending: BTreeMap<u64, Planes> = BTreeMap::new();
     let mut next_emit: u64 = 0;
 
-    while let Ok(msg) = rx.recv() {
-        pending.insert(msg.global_idx, msg.planes);
+    while let Ok(message) = outputs.recv() {
+        pending.insert(message.global_idx, message.planes);
 
         while let Some(planes) = pending.remove(&next_emit) {
             let frame = Y4mFrame::new([&planes.y, &planes.u, &planes.v], None);
             encoder.write_frame(&frame)?;
             next_emit += 1;
 
-            // Returning the permit is what lets the decoder run further
-            // ahead. The send never blocks, because permits held plus
-            // permits waiting is always the channel's capacity. The
-            // result is discarded because it fails once the dispatcher
-            // has already errored out and dropped its receiver.
+            // Returning the permit lets the decoder run further ahead. The send never blocks
+            // because permits held plus permits waiting always equal the channel's capacity.
+            // Its result is discarded because it fails once the dispatcher has errored out and
+            // dropped its receiver.
             let _ = permits.send(());
         }
 
-        pb.set_position(next_emit);
+        progress_bar.set_position(next_emit);
     }
 
     let Ok(total) = staged.recv() else {
         return Ok(());
     };
 
-    pb.set_length(total);
+    progress_bar.set_length(total);
 
     if next_emit != total {
         anyhow::bail!(

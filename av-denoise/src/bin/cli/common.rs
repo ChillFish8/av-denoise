@@ -1,7 +1,6 @@
 use super::InputSource;
 
-/// The flags every denoising family takes, whatever it does with the
-/// frames once it has them.
+/// Flags shared by every denoising subcommand.
 #[derive(Debug, Clone, clap::Args)]
 pub struct CommonArgs {
     /// Where to read frames from.
@@ -21,7 +20,7 @@ pub struct CommonArgs {
     ///
     /// The source's bit depth is detected automatically. 8, 10, and
     /// 12-bit sources are supported and the output keeps the source's
-    /// depth. Other depths are rejected with a clear error message.
+    /// depth. Other depths are rejected with an error.
     #[arg(short, long)]
     pub input: InputSource,
 
@@ -30,8 +29,7 @@ pub struct CommonArgs {
     /// Each worker uses its own GPU memory for the frame ring
     /// buffer, so higher values trade GPU memory for throughput.
     ///
-    /// `1` is valid and useful for debugging. Defaults to 2 when
-    /// unset.
+    /// `1` is valid and useful for debugging. Defaults to 2 when unset.
     #[arg(short = 'W', long)]
     pub workers: Option<usize>,
 

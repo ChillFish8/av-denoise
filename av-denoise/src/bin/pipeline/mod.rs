@@ -37,6 +37,8 @@ pub fn run(
     let visible = denoise_bar_visible(opts.progress, is_terminal);
     let owned_input = input.clone();
     let opener = move || source::open_source(&owned_input);
+    let output = stdout();
+    let grain_table = opts.grain_table.clone();
 
     run_with(
         &opts.planes,
@@ -44,8 +46,8 @@ pub fn run(
         workers,
         frame_budget_bytes,
         visible,
-        stdout(),
-        opts.grain_table.clone(),
+        output,
+        grain_table,
     )
 }
 
@@ -101,8 +103,9 @@ where
     );
 
     let (staged_tx, staged_rx) = crossbeam_channel::bounded::<u64>(1);
-    let (job_tx, worker_handles, out_rx) = spawn_workers(planes, layout, workers);
-    let coordinator = spawn_coordinator(info.clone(), out_rx, staged_rx, visible, give, output);
+    let (job_tx, worker_handles, output_rx) = spawn_workers(planes, layout, workers);
+    let coordinator_info = info.clone();
+    let coordinator = spawn_coordinator(coordinator_info, output_rx, staged_rx, visible, give, output);
     let frames = decode_thread.start(take);
 
     let dispatched = match layout.depth {

@@ -12,74 +12,83 @@ use crate::pipeline::source::open_y4m;
 use crate::pipeline::stage::frame_permit_channel;
 
 fn tiny_frame() -> Frame<u8> {
-    FrameBuilder::new(
-        NonZeroUsize::new(2).expect("width is non-zero"),
-        NonZeroUsize::new(2).expect("height is non-zero"),
-        ChromaSubsampling::Yuv420,
-        NonZeroU8::new(8).expect("depth is non-zero"),
-    )
-    .build()
-    .expect("a 2x2 8-bit frame builds")
+    let width = NonZeroUsize::new(2).expect("width is non-zero");
+    let height = NonZeroUsize::new(2).expect("height is non-zero");
+    let bit_depth = NonZeroU8::new(8).expect("depth is non-zero");
+
+    FrameBuilder::new(width, height, ChromaSubsampling::Yuv420, bit_depth)
+        .build()
+        .expect("a 2x2 8-bit frame builds")
 }
 
 fn frames(count: usize) -> impl Iterator<Item = Result<Frame<u8>, anyhow::Error>> {
-    (0..count).map(|_| Ok(tiny_frame()))
+    (0..count).map(|_| {
+        let frame = tiny_frame();
+        Ok(frame)
+    })
+}
+
+fn y4m_reader(bytes: Vec<u8>) -> Box<dyn Read> {
+    let cursor = Cursor::new(bytes);
+
+    Box::new(cursor)
 }
 
 #[test]
 fn phantom_frames_are_skipped_and_take_no_permit() {
     let (_give, take) = frame_permit_channel(8);
-    let (out_tx, out_rx) = crossbeam_channel::unbounded::<FrameMsg>();
+    let (decoded_tx, decoded_rx) = crossbeam_channel::unbounded::<FrameMsg>();
     let phantom = BTreeSet::from([1, 3]);
 
     let decoded = frames(6);
 
-    pump_frames(decoded, &phantom, &take, &out_tx).expect("pumping should succeed");
-    drop(out_tx);
+    pump_frames(decoded, &phantom, &take, &decoded_tx).expect("pumping should succeed");
+    drop(decoded_tx);
 
-    assert_eq!(out_rx.iter().count(), 4);
+    assert_eq!(decoded_rx.iter().count(), 4);
     assert_eq!(take.len(), 4, "only the four sent frames hold a permit");
 }
 
 #[test]
 fn a_read_error_stops_pumping_after_earlier_frames() {
     let (_give, take) = frame_permit_channel(8);
-    let (out_tx, out_rx) = crossbeam_channel::unbounded::<FrameMsg>();
-    let corrupt = Err(anyhow::anyhow!("corrupt packet"));
+    let (decoded_tx, decoded_rx) = crossbeam_channel::unbounded::<FrameMsg>();
+    let decode_error = anyhow::anyhow!("corrupt packet");
+    let corrupt = Err(decode_error);
     let corrupt_frame = std::iter::once(corrupt);
     let leading = frames(2);
     let failing = leading.chain(corrupt_frame);
 
     let phantom = BTreeSet::new();
 
-    let result = pump_frames(failing, &phantom, &take, &out_tx);
+    let result = pump_frames(failing, &phantom, &take, &decoded_tx);
 
     assert!(result.is_err());
-    assert_eq!(out_rx.len(), 2, "frames before the error are still sent");
+    assert_eq!(decoded_rx.len(), 2, "frames before the error are still sent");
 }
 
 #[test]
 fn pumping_stops_quietly_when_the_splitter_hangs_up() {
     let (_give, take) = frame_permit_channel(8);
-    let (out_tx, out_rx) = crossbeam_channel::bounded::<FrameMsg>(1);
-    drop(out_rx);
+    let (decoded_tx, decoded_rx) = crossbeam_channel::bounded::<FrameMsg>(1);
+    drop(decoded_rx);
 
     let decoded = frames(4);
     let phantom = BTreeSet::new();
 
-    pump_frames(decoded, &phantom, &take, &out_tx).expect("a closed channel is not an error");
+    pump_frames(decoded, &phantom, &take, &decoded_tx).expect("a closed channel is not an error");
 }
 
 #[test]
 fn pumping_fails_when_the_coordinator_drops_every_permit() {
     let (give, take) = frame_permit_channel(1);
     drop(give);
-    let (out_tx, _out_rx) = crossbeam_channel::unbounded::<FrameMsg>();
 
+    let (decoded_tx, _decoded_rx) = crossbeam_channel::unbounded::<FrameMsg>();
     let decoded = frames(4);
     let phantom = BTreeSet::new();
 
-    let result = pump_frames(decoded, &phantom, &take, &out_tx);
+    let result = pump_frames(decoded, &phantom, &take, &decoded_tx);
 
     assert!(result.is_err(), "a second frame cannot get a permit");
 }
@@ -88,7 +97,7 @@ fn pumping_fails_when_the_coordinator_drops_every_permit() {
 fn the_thread_reports_the_source_then_streams_every_frame() {
     let bytes = y4m_clip(3);
     let (thread, info) = DecodeThread::spawn(move || {
-        let reader: Box<dyn Read> = Box::new(Cursor::new(bytes));
+        let reader = y4m_reader(bytes);
         open_y4m(reader)
     })
     .expect("the clip opens");
@@ -105,13 +114,18 @@ fn the_thread_reports_the_source_then_streams_every_frame() {
 
     for message in received {
         let decoded = message.expect("every frame decodes");
-        assert!(u8::from_decoded(decoded).is_some());
+        let unwrapped = u8::from_decoded(decoded);
+
+        assert!(unwrapped.is_some());
     }
 }
 
 #[test]
 fn an_open_failure_is_returned_from_spawn() {
-    let result = DecodeThread::spawn(|| Err(anyhow::anyhow!("no such file")));
+    let result = DecodeThread::spawn(|| {
+        let open_error = anyhow::anyhow!("no such file");
+        Err(open_error)
+    });
 
     let err = match result {
         Ok(_) => panic!("the open failed, so spawn must fail"),
@@ -125,7 +139,7 @@ fn an_open_failure_is_returned_from_spawn() {
 fn dropping_an_unstarted_thread_lets_it_exit() {
     let bytes = y4m_clip(1);
     let (thread, _info) = DecodeThread::spawn(move || {
-        let reader: Box<dyn Read> = Box::new(Cursor::new(bytes));
+        let reader = y4m_reader(bytes);
         open_y4m(reader)
     })
     .expect("the clip opens");

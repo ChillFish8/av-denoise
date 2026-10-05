@@ -18,11 +18,13 @@ pub enum InputSource {
 impl InputSource {
     /// Opens the stream this source names.
     ///
-    /// Only the piped variants are readable here. A path is opened
-    /// with ffms2 instead.
+    /// Only the piped variants are readable as a stream. A path is an error.
     pub fn open_reader(&self) -> Result<Box<dyn Read>, anyhow::Error> {
         match self {
-            InputSource::Stdin => Ok(Box::new(std::io::stdin().lock())),
+            InputSource::Stdin => {
+                let stdin = std::io::stdin().lock();
+                Ok(Box::new(stdin))
+            },
             InputSource::Fd(fd) => open_fd(*fd),
             InputSource::File(path) => anyhow::bail!(
                 "`{}` is a file path and is opened with ffms2, not read as a stream",
@@ -40,38 +42,39 @@ impl FromStr for InputSource {
     /// - `-` and `pipe:0` are standard input
     /// - `pipe:N` for `N` of 3 or above is an inherited descriptor
     /// - anything else is a path on disk
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "-" {
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        if raw == "-" {
             return Ok(InputSource::Stdin);
         }
 
-        if let Some(rest) = s.strip_prefix("pipe:") {
+        if let Some(rest) = raw.strip_prefix("pipe:") {
             let fd: u32 = rest
                 .parse()
-                .map_err(|_| format!("pipe: expects a file descriptor number (got `{s}`)"))?;
+                .map_err(|_| format!("pipe: expects a file descriptor number (got `{raw}`)"))?;
 
             return match fd {
                 0 => Ok(InputSource::Stdin),
                 1 => Err("pipe:1 is this process's stdout, which carries the denoised y4m".to_string()),
                 2 => Err("pipe:2 is this process's stderr, which carries log output".to_string()),
-                n => Ok(InputSource::Fd(n)),
+                inherited => Ok(InputSource::Fd(inherited)),
             };
         }
 
-        if s.is_empty() {
+        if raw.is_empty() {
             return Err("expected a file path, `-`, or `pipe:N`".to_string());
         }
 
-        Ok(InputSource::File(PathBuf::from(s)))
+        let path = PathBuf::from(raw);
+        Ok(InputSource::File(path))
     }
 }
 
 impl fmt::Display for InputSource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            InputSource::Stdin => f.write_str("stdin"),
-            InputSource::Fd(fd) => write!(f, "pipe:{fd}"),
-            InputSource::File(path) => write!(f, "{}", path.display()),
+            InputSource::Stdin => formatter.write_str("stdin"),
+            InputSource::Fd(fd) => write!(formatter, "pipe:{fd}"),
+            InputSource::File(path) => write!(formatter, "{}", path.display()),
         }
     }
 }
@@ -81,7 +84,7 @@ impl fmt::Display for InputSource {
 fn open_fd(fd: u32) -> Result<Box<dyn Read>, anyhow::Error> {
     let path = format!("/dev/fd/{fd}");
     let file = std::fs::File::open(&path)
-        .map_err(|e| anyhow::anyhow!("--input pipe:{fd} could not open {path}: {e}"))?;
+        .map_err(|error| anyhow::anyhow!("--input pipe:{fd} could not open {path}: {error}"))?;
 
     Ok(Box::new(file))
 }
@@ -99,70 +102,86 @@ mod tests {
 
     use super::*;
 
-    fn parse(s: &str) -> Result<InputSource, String> {
-        s.parse()
+    fn parse(raw: &str) -> Result<InputSource, String> {
+        raw.parse()
     }
 
     #[test]
     fn dash_is_stdin() {
-        assert_eq!(parse("-").unwrap(), InputSource::Stdin);
+        let source = parse("-").unwrap();
+
+        assert_eq!(source, InputSource::Stdin);
     }
 
     #[test]
     fn pipe_zero_is_stdin() {
-        assert_eq!(parse("pipe:0").unwrap(), InputSource::Stdin);
+        let source = parse("pipe:0").unwrap();
+
+        assert_eq!(source, InputSource::Stdin);
     }
 
     #[test]
     fn pipe_three_is_an_inherited_descriptor() {
-        assert_eq!(parse("pipe:3").unwrap(), InputSource::Fd(3));
+        let source = parse("pipe:3").unwrap();
+
+        assert_eq!(source, InputSource::Fd(3));
     }
 
     #[test]
     fn our_own_output_descriptors_are_rejected() {
-        assert!(parse("pipe:1").unwrap_err().contains("stdout"));
-        assert!(parse("pipe:2").unwrap_err().contains("stderr"));
+        let stdout_error = parse("pipe:1").unwrap_err();
+        let stderr_error = parse("pipe:2").unwrap_err();
+
+        assert!(stdout_error.contains("stdout"));
+        assert!(stderr_error.contains("stderr"));
     }
 
     #[test]
     fn non_numeric_descriptor_is_rejected() {
-        assert!(parse("pipe:x").unwrap_err().contains("file descriptor"));
+        let error = parse("pipe:x").unwrap_err();
+
+        assert!(error.contains("file descriptor"));
     }
 
     #[test]
     fn anything_else_is_a_path() {
-        assert_eq!(
-            parse("noisy.mkv").unwrap(),
-            InputSource::File(PathBuf::from("noisy.mkv"))
-        );
-        assert_eq!(parse("./-").unwrap(), InputSource::File(PathBuf::from("./-")));
-        assert_eq!(
-            parse("./pipe:3").unwrap(),
-            InputSource::File(PathBuf::from("./pipe:3"))
-        );
+        let plain = parse("noisy.mkv").unwrap();
+        let dash = parse("./-").unwrap();
+        let pipe_lookalike = parse("./pipe:3").unwrap();
+
+        let plain_path = PathBuf::from("noisy.mkv");
+        let dash_path = PathBuf::from("./-");
+        let pipe_lookalike_path = PathBuf::from("./pipe:3");
+
+        assert_eq!(plain, InputSource::File(plain_path));
+        assert_eq!(dash, InputSource::File(dash_path));
+        assert_eq!(pipe_lookalike, InputSource::File(pipe_lookalike_path));
     }
 
     #[test]
     fn empty_is_rejected() {
-        assert!(parse("").is_err());
+        let result = parse("");
+
+        assert!(result.is_err());
     }
 
     #[test]
     fn display_round_trips_the_typed_spelling() {
+        let path = PathBuf::from("noisy.mkv");
+        let file = InputSource::File(path);
+
         assert_eq!(InputSource::Stdin.to_string(), "stdin");
         assert_eq!(InputSource::Fd(3).to_string(), "pipe:3");
-        assert_eq!(
-            InputSource::File(PathBuf::from("noisy.mkv")).to_string(),
-            "noisy.mkv"
-        );
+        assert_eq!(file.to_string(), "noisy.mkv");
     }
 
     /// `/dev/fd/N` reopens whatever the descriptor points at, so a temp
-    /// file stands in for the inherited pipe a harness would hand us.
+    /// file stands in for an inherited pipe.
     #[cfg(unix)]
     #[test]
     fn open_reader_reads_an_inherited_descriptor() {
-        let path = std::env::temp_dir().join(format!("av-denoise-fd-{}.bin", std::process::id()));
+        let file_name = format!("av-denoise-fd-{}.bin", std::process::id());
+        let path = std::env::temp_dir().join(file_name);
 
         let mut file = std::fs::File::create(&path).expect("temp file should create");
         file.write_all(b"YUV4MPEG2 frames").expect("payload should write");
@@ -176,24 +195,29 @@ mod tests {
             .open_reader()
             .expect("inherited descriptor should open");
 
-        let mut got = String::new();
-        reader.read_to_string(&mut got).expect("payload should read back");
+        let mut read_back = String::new();
+        reader
+            .read_to_string(&mut read_back)
+            .expect("payload should read back");
 
         drop(reader);
         drop(file);
         let _ = std::fs::remove_file(&path);
 
-        assert_eq!(got, "YUV4MPEG2 frames");
+        assert_eq!(read_back, "YUV4MPEG2 frames");
     }
 
     #[test]
     fn open_reader_rejects_a_path() {
+        let path = PathBuf::from("noisy.mkv");
+        let source = InputSource::File(path);
+
         // `Box<dyn Read>` isn't `Debug`, so `expect_err` can't be used here.
-        let err = match InputSource::File(PathBuf::from("noisy.mkv")).open_reader() {
+        let error = match source.open_reader() {
             Ok(_) => panic!("paths are opened with ffms2, not read as a stream"),
-            Err(e) => e,
+            Err(error) => error,
         };
 
-        assert!(err.to_string().contains("noisy.mkv"));
+        assert!(error.to_string().contains("noisy.mkv"));
     }
 }

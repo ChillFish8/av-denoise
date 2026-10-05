@@ -1,10 +1,6 @@
-//! Tests for [`super::PlanarDenoiser::reseed`].
-
 use super::*;
 
-// Feature-gated because `test_plane_options` names the `Vulkan`
-// accelerator variant, which only exists when the `vulkan` feature is
-// enabled.
+// The tests name the `Vulkan` accelerator, which only exists with the `vulkan` feature.
 #[cfg(feature = "vulkan")]
 mod reseed {
     use super::*;
@@ -20,14 +16,13 @@ mod reseed {
         }
     }
 
-    /// A `PlaneOptions` running temporal nlmeans at radius `r`, denoising
-    /// both planes independently.
-    fn test_plane_options(r: u32) -> PlaneOptions {
+    /// Temporal nlmeans at `radius`, denoising both planes independently.
+    fn test_plane_options(radius: u32) -> PlaneOptions {
         PlaneOptions {
             accelerators: vec![Accelerator::Vulkan],
             device: Device::Default,
             intent: ChannelIntent::LumaChroma,
-            mode: DenoisingMode::Temporal { radius: r },
+            mode: DenoisingMode::Temporal { radius },
             algorithm: Algorithm::default(),
             luma_strength: None,
             chroma_strength: None,
@@ -36,29 +31,26 @@ mod reseed {
         }
     }
 
-    /// A `PlaneOptions` identical to [`test_plane_options`] except only
-    /// `intent` differs, for exercising a passthrough side.
-    fn test_plane_options_with_intent(r: u32, intent: ChannelIntent) -> PlaneOptions {
+    fn test_plane_options_with_intent(radius: u32, intent: ChannelIntent) -> PlaneOptions {
         PlaneOptions {
             intent,
-            ..test_plane_options(r)
+            ..test_plane_options(radius)
         }
     }
 
-    /// A small xorshift generator, deterministic across runs so the test
-    /// data does not vary between executions.
-    fn pseudo_random(mut x: u64) -> u64 {
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        x
+    /// A small xorshift generator, so the test data is the same on every run.
+    fn pseudo_random(mut state: u64) -> u64 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
     }
 
-    /// One plane's bytes for frame `frame_idx`: a spatial ramp across the
-    /// plane, a per-frame offset, and a deterministic dither, all summed
-    /// and clamped so a temporal filter has real signal and real noise to
-    /// work with.
-    fn ramp_plane(pixels: usize, width: u32, frame_idx: usize, plane_seed: u64) -> Vec<u8> {
+    /// One plane's bytes for frame `frame_index`.
+    ///
+    /// A spatial ramp, a per-frame offset and a deterministic dither are summed and clamped, so a
+    /// temporal filter has real signal and real noise to work with.
+    fn ramp_plane(pixels: usize, width: u32, frame_index: usize, plane_seed: u64) -> Vec<u8> {
         let width = width.max(1) as usize;
 
         (0..pixels)
@@ -66,8 +58,8 @@ mod reseed {
                 let x = (i % width) as u32;
                 let y = (i / width) as u32;
                 let spatial = x.wrapping_add(y) % 120;
-                let frame_offset = (frame_idx as u32 * 7) % 60;
-                let seed = (i as u64) ^ (frame_idx as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ plane_seed;
+                let frame_offset = (frame_index as u32 * 7) % 60;
+                let seed = (i as u64) ^ (frame_index as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ plane_seed;
                 let dither = (pseudo_random(seed) % 16) as u32;
                 let value = 20 + spatial + frame_offset + dither;
                 value.min(235) as u8
@@ -75,265 +67,304 @@ mod reseed {
             .collect()
     }
 
-    /// Builds `count` `Planes` whose bytes vary per frame and per pixel,
-    /// so a temporal filter sees a non-degenerate signal.
+    /// `count` frames whose bytes vary per frame and per pixel, so a temporal filter sees a
+    /// non-degenerate signal.
     fn ramp_clip(layout: &FrameLayout, count: usize) -> Vec<Planes> {
-        let (chroma_w, _) = layout.chroma_dims();
+        let (chroma_width, _) = layout.chroma_dims();
 
         (0..count)
-            .map(|frame_idx| Planes {
-                y: ramp_plane(layout.luma_pixels(), layout.width, frame_idx, 1),
-                u: ramp_plane(layout.chroma_pixels(), chroma_w, frame_idx, 2),
-                v: ramp_plane(layout.chroma_pixels(), chroma_w, frame_idx, 3),
+            .map(|frame_index| {
+                let y_plane = ramp_plane(layout.luma_pixels(), layout.width, frame_index, 1);
+                let u_plane = ramp_plane(layout.chroma_pixels(), chroma_width, frame_index, 2);
+                let v_plane = ramp_plane(layout.chroma_pixels(), chroma_width, frame_index, 3);
+
+                Planes {
+                    y: y_plane,
+                    u: u_plane,
+                    v: v_plane,
+                }
             })
             .collect()
     }
 
-    /// Renders `count` frames through the streaming path.
-    fn stream_all(opts: &PlaneOptions, frames: &[Planes]) -> Vec<Planes> {
-        stream_all_with_layout(opts, layout(), frames)
+    /// Renders every frame through the streaming path.
+    fn stream_all(options: &PlaneOptions, frames: &[Planes]) -> Vec<Planes> {
+        let frame_layout = layout();
+        stream_all_with_layout(options, frame_layout, frames)
     }
 
-    /// [`stream_all`] over a caller-chosen layout, for option sets that
-    /// need a source layout other than [`layout`], such as
-    /// `ChannelIntent::YuvFused`'s 4:4:4 requirement.
     fn stream_all_with_layout(
-        opts: &PlaneOptions,
+        options: &PlaneOptions,
         frame_layout: FrameLayout,
         frames: &[Planes],
     ) -> Vec<Planes> {
-        let mut d = PlanarDenoiser::create(opts, frame_layout).unwrap();
-        let mut out = Vec::new();
-        for f in frames {
-            d.push(f).unwrap();
-            if let Some(p) = d.recv().unwrap() {
-                out.push(p);
+        let mut denoiser = PlanarDenoiser::create(options, frame_layout).unwrap();
+        let mut outputs = Vec::new();
+        for frame in frames {
+            denoiser.push(frame).unwrap();
+            if let Some(planes) = denoiser.recv().unwrap() {
+                outputs.push(planes);
             }
         }
-        d.flush(|p| out.push(p)).unwrap();
-        out
+
+        denoiser.flush(|planes| outputs.push(planes)).unwrap();
+        outputs
     }
 
-    fn window_of(frames: &[Planes], k: usize, r: usize) -> Vec<Planes> {
-        (0..(2 * r + 1))
+    fn window_of(frames: &[Planes], target: usize, radius: usize) -> Vec<Planes> {
+        (0..(2 * radius + 1))
             .map(|i| {
-                let idx = (k + i).saturating_sub(r).min(frames.len() - 1);
-                frames[idx].clone()
+                let index = (target + i).saturating_sub(radius).min(frames.len() - 1);
+                frames[index].clone()
             })
             .collect()
     }
 
     #[test]
     fn reseed_matches_the_streaming_output_mid_clip() {
-        let opts = test_plane_options(2);
-        let frames = ramp_clip(&layout(), 12);
-        let streamed = stream_all(&opts, &frames);
+        let frame_layout = layout();
+        let options = test_plane_options(2);
+        let frames = ramp_clip(&frame_layout, 12);
+        let streamed = stream_all(&options, &frames);
 
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-        let k = 6;
-        let got = d.reseed(&window_of(&frames, k, 2)).unwrap();
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        let target_frame = 6;
+        let window = window_of(&frames, target_frame, 2);
+        let got = denoiser.reseed(&window).unwrap();
 
-        assert_eq!(got.y, streamed[k].y);
-        assert_eq!(got.u, streamed[k].u);
-        assert_eq!(got.v, streamed[k].v);
+        assert_eq!(got.y, streamed[target_frame].y);
+        assert_eq!(got.u, streamed[target_frame].u);
+        assert_eq!(got.v, streamed[target_frame].v);
     }
 
     #[test]
     fn reseed_matches_the_streaming_output_at_both_clip_edges() {
-        let opts = test_plane_options(2);
-        let frames = ramp_clip(&layout(), 12);
-        let streamed = stream_all(&opts, &frames);
+        let frame_layout = layout();
+        let options = test_plane_options(2);
+        let frames = ramp_clip(&frame_layout, 12);
+        let streamed = stream_all(&options, &frames);
         let last = frames.len() - 1;
 
-        for k in [0usize, last] {
-            let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-            let got = d.reseed(&window_of(&frames, k, 2)).unwrap();
-            assert_eq!(got.y, streamed[k].y, "luma mismatch at k = {k}");
-            assert_eq!(got.u, streamed[k].u, "u mismatch at k = {k}");
-            assert_eq!(got.v, streamed[k].v, "v mismatch at k = {k}");
+        for target_frame in [0usize, last] {
+            let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+            let window = window_of(&frames, target_frame, 2);
+            let got = denoiser.reseed(&window).unwrap();
+
+            assert_eq!(
+                got.y, streamed[target_frame].y,
+                "luma mismatch at k = {target_frame}"
+            );
+            assert_eq!(
+                got.u, streamed[target_frame].u,
+                "u mismatch at k = {target_frame}"
+            );
+            assert_eq!(
+                got.v, streamed[target_frame].v,
+                "v mismatch at k = {target_frame}"
+            );
         }
     }
 
     #[test]
     fn reseed_recovers_a_half_poisoned_by_an_earlier_failure() {
-        let opts = test_plane_options(2);
-        let frames = ramp_clip(&layout(), 12);
+        let frame_layout = layout();
+        let options = test_plane_options(2);
+        let frames = ramp_clip(&frame_layout, 12);
 
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-        d.luma.as_mut().unwrap().poison_for_test();
-        d.chroma.as_mut().unwrap().poison_for_test();
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        denoiser.luma.as_mut().unwrap().poison_for_test();
+        denoiser.chroma.as_mut().unwrap().poison_for_test();
 
-        let got = d.reseed(&window_of(&frames, 6, 2)).unwrap();
+        let window = window_of(&frames, 6, 2);
+        let got = denoiser.reseed(&window).unwrap();
+
         assert!(!got.y.is_empty());
         assert!(!got.u.is_empty());
         assert!(!got.v.is_empty());
     }
 
-    /// Whether plain nlmeans's `reseed` stays order-independent under
-    /// repeated out-of-order reseeds on one long-lived denoiser, the
-    /// same stress the VapourSynth plugin's shuffled-access-order
-    /// harness test puts `avd.NLMeans` through.
+    /// Plain nlmeans carries no noise state between frames, so repeated out-of-order reseeds on one
+    /// denoiser must match streaming.
     ///
-    /// `Algorithm::Nlmeans`'s own doc comment says it runs with "no
-    /// noise measurement", and `NlmeansOptions` has no `hq` field for a
-    /// `PlaneOptions` built from it to carry, so `NlmParams::hq` stays
-    /// `None` and `fold_noise_estimate` never runs for it. There is no
-    /// stream-carried noise state for repeated `reseed` calls to
-    /// disagree about, so this is expected to hold without a
-    /// `windowed_noise_estimation` equivalent for nlmeans. This proves
-    /// that rather than assumes it, at a wider temporal radius and a
-    /// longer, more heavily shuffled clip than any other reseed test
-    /// here uses, so a history-dependent regression would have room to
-    /// show itself if one existed.
+    /// The radius is wider and the clip longer and more shuffled than in any other reseed test here,
+    /// so a history-dependent regression has room to show.
     #[test]
     fn nlmeans_repeated_out_of_order_reseeds_match_streaming() {
-        let opts = test_plane_options(4);
-        let frames = ramp_clip(&layout(), 24);
-        let streamed = stream_all(&opts, &frames);
+        let frame_layout = layout();
+        let options = test_plane_options(4);
+        let frames = ramp_clip(&frame_layout, 24);
+        let streamed = stream_all(&options, &frames);
 
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-        // Skews late, mirroring the plugin harness's shuffled order
-        // that first exposed the nl4d defect.
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+
+        // Skews late, like the VapourSynth plugin harness's shuffled order.
         let order = [
             18, 4, 23, 9, 12, 2, 20, 6, 15, 1, 22, 7, 17, 3, 11, 19, 0, 21, 8, 16, 5, 14, 10, 13,
         ];
 
-        for &k in &order {
-            let got = d.reseed(&window_of(&frames, k, 4)).unwrap();
-            assert_eq!(got.y, streamed[k].y, "luma mismatch at k = {k}");
-            assert_eq!(got.u, streamed[k].u, "u mismatch at k = {k}");
-            assert_eq!(got.v, streamed[k].v, "v mismatch at k = {k}");
+        for &target_frame in &order {
+            let window = window_of(&frames, target_frame, 4);
+            let got = denoiser.reseed(&window).unwrap();
+
+            assert_eq!(
+                got.y, streamed[target_frame].y,
+                "luma mismatch at k = {target_frame}"
+            );
+            assert_eq!(
+                got.u, streamed[target_frame].u,
+                "u mismatch at k = {target_frame}"
+            );
+            assert_eq!(
+                got.v, streamed[target_frame].v,
+                "v mismatch at k = {target_frame}"
+            );
         }
     }
 
     #[test]
     fn a_reseed_leaves_the_stream_positioned_for_the_next_frame() {
-        let opts = test_plane_options(2);
-        let frames = ramp_clip(&layout(), 12);
-        let streamed = stream_all(&opts, &frames);
-        let (k, r) = (6usize, 2usize);
+        let frame_layout = layout();
+        let options = test_plane_options(2);
+        let frames = ramp_clip(&frame_layout, 12);
+        let streamed = stream_all(&options, &frames);
+        let (target_frame, radius) = (6usize, 2usize);
 
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-        d.reseed(&window_of(&frames, k, r)).unwrap();
-        d.push(&frames[k + 1 + r]).unwrap();
-        let got = d.recv().unwrap().expect("frame k + 1");
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        let window = window_of(&frames, target_frame, radius);
+        denoiser.reseed(&window).unwrap();
+        denoiser.push(&frames[target_frame + 1 + radius]).unwrap();
+        let got = denoiser.recv().unwrap().expect("frame k + 1");
 
-        assert_eq!(got.y, streamed[k + 1].y);
+        assert_eq!(got.y, streamed[target_frame + 1].y);
     }
 
     #[test]
     fn reseed_rejects_a_window_of_the_wrong_length() {
-        let opts = test_plane_options(2);
-        let frames = ramp_clip(&layout(), 12);
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let frame_layout = layout();
+        let options = test_plane_options(2);
+        let frames = ramp_clip(&frame_layout, 12);
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
 
-        let err = d.reseed(&frames[..3]).unwrap_err().to_string();
+        let error = denoiser.reseed(&frames[..3]).unwrap_err().to_string();
+
         assert!(
-            err.contains("5"),
-            "error should name the expected length, got {err}"
+            error.contains("5"),
+            "error should name the expected length, got {error}"
         );
     }
 
-    /// `ChannelIntent::Luma` leaves chroma disabled, so its planes travel
-    /// through the passthrough queue instead of a `HostDenoiser`. A reseed's
-    /// priming pushes queue one passthrough entry per window frame, and
-    /// this checks the entry `recv` pairs with the denoised centre is the
-    /// centre frame's own chroma, not a neighbour's.
+    /// `ChannelIntent::Luma` sends chroma through the passthrough queue, and a reseed queues one
+    /// entry per window frame.
+    ///
+    /// The entry paired with the denoised centre must be the centre frame's own chroma, not a
+    /// neighbour's.
     #[test]
     fn reseed_pairs_the_passthrough_plane_with_the_centre_frame() {
-        let opts = test_plane_options_with_intent(2, ChannelIntent::Luma);
-        let frames = ramp_clip(&layout(), 12);
-        let (k, r) = (6usize, 2usize);
+        let frame_layout = layout();
+        let options = test_plane_options_with_intent(2, ChannelIntent::Luma);
+        let frames = ramp_clip(&frame_layout, 12);
+        let (target_frame, radius) = (6usize, 2usize);
 
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-        let got = d.reseed(&window_of(&frames, k, r)).unwrap();
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        let window = window_of(&frames, target_frame, radius);
+        let got = denoiser.reseed(&window).unwrap();
 
-        assert_eq!(got.u, frames[k].u, "u should pass through from the centre frame");
-        assert_eq!(got.v, frames[k].v, "v should pass through from the centre frame");
+        assert_eq!(
+            got.u, frames[target_frame].u,
+            "u should pass through from the centre frame"
+        );
+        assert_eq!(
+            got.v, frames[target_frame].v,
+            "v should pass through from the centre frame"
+        );
     }
 
-    /// The mirror of [`reseed_pairs_the_passthrough_plane_with_the_centre_frame`]
-    /// for `ChannelIntent::Chroma`, where luma is the disabled side.
     #[test]
     fn reseed_pairs_the_passthrough_luma_plane_with_the_centre_frame() {
-        let opts = test_plane_options_with_intent(2, ChannelIntent::Chroma);
-        let frames = ramp_clip(&layout(), 12);
-        let (k, r) = (6usize, 2usize);
+        let frame_layout = layout();
+        let options = test_plane_options_with_intent(2, ChannelIntent::Chroma);
+        let frames = ramp_clip(&frame_layout, 12);
+        let (target_frame, radius) = (6usize, 2usize);
 
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-        let got = d.reseed(&window_of(&frames, k, r)).unwrap();
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        let window = window_of(&frames, target_frame, radius);
+        let got = denoiser.reseed(&window).unwrap();
 
-        assert_eq!(got.y, frames[k].y, "y should pass through from the centre frame");
+        assert_eq!(
+            got.y, frames[target_frame].y,
+            "y should pass through from the centre frame"
+        );
     }
 
-    /// A single `reseed` call only checks the very first passthrough
-    /// entry `recv` pops. A leftover-count defect after the drop (an
-    /// extra or missing entry that still happens to leave the right one
-    /// at the front) would pass every single-shot test here and only
-    /// misalign the plane paired with the frame right after the centre,
-    /// once streaming resumes.
+    /// A single reseed only checks the first passthrough entry `recv` pops.
+    ///
+    /// An extra or missing entry that still leaves the right one at the front only misaligns the
+    /// plane paired with the next frame, once streaming resumes.
     #[test]
     fn reseed_then_streaming_keeps_the_passthrough_plane_aligned_on_the_next_frame() {
-        let opts = test_plane_options_with_intent(2, ChannelIntent::Luma);
-        let frames = ramp_clip(&layout(), 12);
-        let (k, r) = (6usize, 2usize);
+        let frame_layout = layout();
+        let options = test_plane_options_with_intent(2, ChannelIntent::Luma);
+        let frames = ramp_clip(&frame_layout, 12);
+        let (target_frame, radius) = (6usize, 2usize);
 
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-        d.reseed(&window_of(&frames, k, r)).unwrap();
-        d.push(&frames[k + 1 + r]).unwrap();
-        let got = d.recv().unwrap().expect("frame k + 1");
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        let window = window_of(&frames, target_frame, radius);
+        denoiser.reseed(&window).unwrap();
+        denoiser.push(&frames[target_frame + 1 + radius]).unwrap();
+        let got = denoiser.recv().unwrap().expect("frame k + 1");
 
-        assert_eq!(got.u, frames[k + 1].u, "u should pass through from frame k + 1");
-        assert_eq!(got.v, frames[k + 1].v, "v should pass through from frame k + 1");
+        assert_eq!(
+            got.u,
+            frames[target_frame + 1].u,
+            "u should pass through from frame k + 1"
+        );
+        assert_eq!(
+            got.v,
+            frames[target_frame + 1].v,
+            "v should pass through from frame k + 1"
+        );
     }
 
-    /// A `PlaneOptions` identical to [`test_plane_options`] except the
-    /// algorithm is `Nl4d`, which needs the wider window `reseed` has
-    /// to build for it instead of nlmeans's `2r+1` one.
+    /// Temporal nl4d at `radius` with a pinned `sigma`.
     ///
-    /// Pins `sigma` rather than leaving it on nl4d's automatic
-    /// per-frame estimate. That estimate is an exponential moving
-    /// average smoothed over every frame folded into it since the
-    /// stream last reset, so it carries genuine history from before
-    /// the window on a real, never-reset stream, history a windowed
-    /// `reseed` cannot supply and was never meant to reproduce. Pinning
-    /// it keeps these tests checking what `reseed`'s window shape and
-    /// pass sequence are actually responsible for, not that unrelated
-    /// warm-up behaviour.
-    fn nl4d_plane_options(r: u32) -> PlaneOptions {
+    /// The automatic estimate is a moving average over every frame since the stream last reset,
+    /// history a windowed `reseed` cannot supply. Pinning it keeps these tests on what the window
+    /// shape and pass sequence decide.
+    fn nl4d_plane_options(radius: u32) -> PlaneOptions {
+        let nl4d_options = Nl4dOptions {
+            sigma: Some(0.03),
+            ..Nl4dOptions::default()
+        };
+
         PlaneOptions {
-            algorithm: Algorithm::Nl4d(Nl4dOptions {
-                sigma: Some(0.03),
-                ..Nl4dOptions::default()
-            }),
-            ..test_plane_options(r)
+            algorithm: Algorithm::Nl4d(nl4d_options),
+            ..test_plane_options(radius)
         }
     }
 
-    /// The window a [`PlanarDenoiser::window_span`] of `span` needs for
-    /// target frame `k`, clamped at both clip ends exactly as
-    /// [`window_of`] clamps nlmeans's `2r+1` window.
-    ///
-    /// Reads the span from the accessor rather than hand-deriving it,
-    /// so this stays correct however the algorithm's own span is
-    /// shaped.
-    fn window_of_span(frames: &[Planes], k: usize, span: WindowSpan) -> Vec<Planes> {
+    /// The window `span` needs for frame `target`, clamped at both clip ends like `window_of`.
+    fn window_of_span(frames: &[Planes], target: usize, span: WindowSpan) -> Vec<Planes> {
         (0..span.frame_count())
             .map(|i| {
-                let idx = (k + i).saturating_sub(span.behind).min(frames.len() - 1);
-                frames[idx].clone()
+                let index = (target + i).saturating_sub(span.behind).min(frames.len() - 1);
+                frames[index].clone()
             })
             .collect()
     }
 
-    /// The shifted window around target frame `k`. It stops at the clip's
-    /// ends rather than repeating them, and returns the target's index in it.
-    fn shifted_window_of(frames: &[Planes], k: usize, span: WindowSpan) -> (Vec<Planes>, ReseedWindowFlags) {
-        let first = k.saturating_sub(span.behind);
-        let last = (k + span.ahead).min(frames.len() - 1);
+    /// The shifted window around frame `target`.
+    ///
+    /// It stops at the clip's ends rather than repeating them, and returns the target's index in it.
+    fn shifted_window_of(
+        frames: &[Planes],
+        target: usize,
+        span: WindowSpan,
+    ) -> (Vec<Planes>, ReseedWindowFlags) {
+        let first = target.saturating_sub(span.behind);
+        let last = (target + span.ahead).min(frames.len() - 1);
         let window = frames[first..=last].to_vec();
         let flags = ReseedWindowFlags {
-            target: k - first,
+            target: target - first,
             at_clip_start: first == 0,
             at_clip_end: last == frames.len() - 1,
         };
@@ -346,9 +377,9 @@ mod reseed {
         at_clip_end: bool,
     }
 
-    fn reseed_shifted(denoiser: &mut PlanarDenoiser, frames: &[Planes], k: usize) -> Vec<Planes> {
+    fn reseed_shifted(denoiser: &mut PlanarDenoiser, frames: &[Planes], target: usize) -> Vec<Planes> {
         let span = denoiser.window_span();
-        let (window, flags) = shifted_window_of(frames, k, span);
+        let (window, flags) = shifted_window_of(frames, target, span);
         let request = ReseedWindow {
             frames: &window,
             target: flags.target,
@@ -358,82 +389,80 @@ mod reseed {
         denoiser.reseed_window(request).unwrap()
     }
 
-    /// How many outputs a shifted reseed at `k` returns. That's the target
-    /// alone mid-clip, or the target through the clip's end.
-    fn got_len_for(denoiser: &PlanarDenoiser, clip_len: usize, k: usize) -> usize {
+    /// How many outputs a shifted reseed at `target` returns.
+    ///
+    /// That is the target alone mid-clip, or the target through the clip's end.
+    fn shifted_output_count(denoiser: &PlanarDenoiser, clip_len: usize, target: usize) -> usize {
         let span = denoiser.window_span();
-        if k + span.ahead >= clip_len - 1 {
-            clip_len - k
+        if target + span.ahead >= clip_len - 1 {
+            clip_len - target
         } else {
             1
         }
     }
 
-    /// This is the test that would have caught the original defect:
-    /// `reseed` for a mid-clip frame under `Algorithm::Nl4d` must match
-    /// the streaming path's own output for that frame bit-for-bit, the
-    /// same property [`reseed_matches_the_streaming_output_mid_clip`]
-    /// checks for nlmeans.
     #[test]
     fn nl4d_reseed_matches_the_streaming_output_mid_clip() {
-        let opts = nl4d_plane_options(2);
-        let frames = ramp_clip(&layout(), 16);
-        let streamed = stream_all(&opts, &frames);
+        let frame_layout = layout();
+        let options = nl4d_plane_options(2);
+        let frames = ramp_clip(&frame_layout, 16);
+        let streamed = stream_all(&options, &frames);
 
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-        let k = 8;
-        let span = d.window_span();
-        let got = d.reseed(&window_of_span(&frames, k, span)).unwrap();
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        let target_frame = 8;
+        let span = denoiser.window_span();
+        let window = window_of_span(&frames, target_frame, span);
+        let got = denoiser.reseed(&window).unwrap();
 
-        assert_eq!(got.y, streamed[k].y);
-        assert_eq!(got.u, streamed[k].u);
-        assert_eq!(got.v, streamed[k].v);
+        assert_eq!(got.y, streamed[target_frame].y);
+        assert_eq!(got.u, streamed[target_frame].u);
+        assert_eq!(got.v, streamed[target_frame].v);
     }
 
-    /// The largest absolute per-sample difference between two same-sized
-    /// byte planes.
-    fn max_abs_diff(a: &[u8], b: &[u8]) -> i32 {
-        a.iter()
-            .zip(b.iter())
-            .map(|(&x, &y)| (x as i32 - y as i32).abs())
+    fn max_abs_diff(left: &[u8], right: &[u8]) -> i32 {
+        left.iter()
+            .zip(right.iter())
+            .map(|(&left_sample, &right_sample)| (left_sample as i32 - right_sample as i32).abs())
             .max()
             .unwrap_or(0)
     }
 
     #[test]
     fn nl4d_reseed_window_matches_streaming_at_every_frame() {
+        let frame_layout = layout();
         let option_sets = [
             nl4d_plane_options(2),
             nl4d_windowed_plane_options(2),
             nl4d_plane_options_with_intent(2, ChannelIntent::Luma),
             nl4d_plane_options_with_intent(2, ChannelIntent::Chroma),
         ];
-        for opts in option_sets {
+
+        for options in option_sets {
             for clip_len in [3usize, 7, 12] {
-                let frames = ramp_clip(&layout(), clip_len);
-                let streamed = stream_all(&opts, &frames);
+                let frames = ramp_clip(&frame_layout, clip_len);
+                let streamed = stream_all(&options, &frames);
                 assert_eq!(streamed.len(), clip_len);
 
-                for k in 0..clip_len {
-                    let mut denoiser = PlanarDenoiser::create(&opts, layout()).unwrap();
-                    let got = reseed_shifted(&mut denoiser, &frames, k);
+                for target_frame in 0..clip_len {
+                    let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+                    let got = reseed_shifted(&mut denoiser, &frames, target_frame);
 
-                    let expected_len = got_len_for(&denoiser, clip_len, k);
-                    assert_eq!(got.len(), expected_len, "len={clip_len} k={k}");
+                    let expected_len = shifted_output_count(&denoiser, clip_len, target_frame);
+                    assert_eq!(got.len(), expected_len, "len={clip_len} k={target_frame}");
 
                     for (offset, planes) in got.iter().enumerate() {
-                        let index = k + offset;
+                        let index = target_frame + offset;
                         assert_eq!(
                             planes.y, streamed[index].y,
-                            "len={clip_len} k={k} frame {index} luma"
+                            "len={clip_len} k={target_frame} frame {index} luma"
                         );
                         assert_eq!(
                             planes.u, streamed[index].u,
-                            "len={clip_len} k={k} frame {index} u"
+                            "len={clip_len} k={target_frame} frame {index} u"
                         );
                         assert_eq!(
                             planes.v, streamed[index].v,
-                            "len={clip_len} k={k} frame {index} v"
+                            "len={clip_len} k={target_frame} frame {index} v"
                         );
                     }
                 }
@@ -441,42 +470,40 @@ mod reseed {
         }
     }
 
-    /// [`ChannelIntent::YuvFused`] needs a 4:4:4 source, so this runs
-    /// the same match-streaming check as
-    /// [`nl4d_reseed_window_matches_streaming_at_every_frame`] over its
-    /// own 4:4:4 layout rather than sharing the 4:2:0 one.
+    /// `ChannelIntent::YuvFused` needs a 4:4:4 source, so it runs over its own layout.
     #[test]
     fn nl4d_reseed_window_matches_streaming_at_every_frame_in_yuv_fused_mode() {
         let fused_layout = FrameLayout {
             subsampling: Subsampling::Yuv444,
             ..layout()
         };
-        let opts = nl4d_plane_options_with_intent(2, ChannelIntent::YuvFused);
+        let options = nl4d_plane_options_with_intent(2, ChannelIntent::YuvFused);
+
         for clip_len in [3usize, 7, 12] {
             let frames = ramp_clip(&fused_layout, clip_len);
-            let streamed = stream_all_with_layout(&opts, fused_layout, &frames);
+            let streamed = stream_all_with_layout(&options, fused_layout, &frames);
             assert_eq!(streamed.len(), clip_len);
 
-            for k in 0..clip_len {
-                let mut denoiser = PlanarDenoiser::create(&opts, fused_layout).unwrap();
-                let got = reseed_shifted(&mut denoiser, &frames, k);
+            for target_frame in 0..clip_len {
+                let mut denoiser = PlanarDenoiser::create(&options, fused_layout).unwrap();
+                let got = reseed_shifted(&mut denoiser, &frames, target_frame);
 
-                let expected_len = got_len_for(&denoiser, clip_len, k);
-                assert_eq!(got.len(), expected_len, "len={clip_len} k={k}");
+                let expected_len = shifted_output_count(&denoiser, clip_len, target_frame);
+                assert_eq!(got.len(), expected_len, "len={clip_len} k={target_frame}");
 
                 for (offset, planes) in got.iter().enumerate() {
-                    let index = k + offset;
+                    let index = target_frame + offset;
                     assert_eq!(
                         planes.y, streamed[index].y,
-                        "len={clip_len} k={k} frame {index} luma"
+                        "len={clip_len} k={target_frame} frame {index} luma"
                     );
                     assert_eq!(
                         planes.u, streamed[index].u,
-                        "len={clip_len} k={k} frame {index} u"
+                        "len={clip_len} k={target_frame} frame {index} u"
                     );
                     assert_eq!(
                         planes.v, streamed[index].v,
-                        "len={clip_len} k={k} frame {index} v"
+                        "len={clip_len} k={target_frame} frame {index} v"
                     );
                 }
             }
@@ -485,10 +512,11 @@ mod reseed {
 
     #[test]
     fn nl4d_reseed_window_pairs_passthrough_at_the_last_frame() {
-        let opts = nl4d_plane_options_with_intent(2, ChannelIntent::Luma);
-        let frames = ramp_clip(&layout(), 16);
+        let frame_layout = layout();
+        let options = nl4d_plane_options_with_intent(2, ChannelIntent::Luma);
+        let frames = ramp_clip(&frame_layout, 16);
         let last = frames.len() - 1;
-        let mut denoiser = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
 
         let got = reseed_shifted(&mut denoiser, &frames, last);
 
@@ -499,9 +527,10 @@ mod reseed {
 
     #[test]
     fn nl4d_reseed_window_pairs_passthrough_at_the_first_frame() {
-        let opts = nl4d_plane_options_with_intent(2, ChannelIntent::Luma);
-        let frames = ramp_clip(&layout(), 16);
-        let mut denoiser = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let frame_layout = layout();
+        let options = nl4d_plane_options_with_intent(2, ChannelIntent::Luma);
+        let frames = ramp_clip(&frame_layout, 16);
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
 
         let got = reseed_shifted(&mut denoiser, &frames, 0);
 
@@ -512,10 +541,11 @@ mod reseed {
 
     #[test]
     fn nl4d_reseed_window_then_streaming_continues_from_the_clip_start() {
-        let opts = nl4d_windowed_plane_options(2);
-        let frames = ramp_clip(&layout(), 16);
-        let streamed = stream_all(&opts, &frames);
-        let mut denoiser = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let frame_layout = layout();
+        let options = nl4d_windowed_plane_options(2);
+        let frames = ramp_clip(&frame_layout, 16);
+        let streamed = stream_all(&options, &frames);
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
         let span = denoiser.window_span();
 
         reseed_shifted(&mut denoiser, &frames, 1);
@@ -525,486 +555,490 @@ mod reseed {
         assert_eq!(next.y, streamed[2].y);
     }
 
-    /// After an nl4d `reseed`, ordinary sequential `push`/`recv` must
-    /// carry on producing the same frames the streaming path would
-    /// have, the nl4d mirror of
-    /// [`a_reseed_leaves_the_stream_positioned_for_the_next_frame`].
     #[test]
     fn nl4d_reseed_then_streaming_continues_correctly() {
-        let opts = nl4d_plane_options(2);
-        let frames = ramp_clip(&layout(), 16);
-        let streamed = stream_all(&opts, &frames);
-        let k = 8usize;
+        let frame_layout = layout();
+        let options = nl4d_plane_options(2);
+        let frames = ramp_clip(&frame_layout, 16);
+        let streamed = stream_all(&options, &frames);
+        let target_frame = 8usize;
 
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-        let span = d.window_span();
-        d.reseed(&window_of_span(&frames, k, span)).unwrap();
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        let span = denoiser.window_span();
+        let window = window_of_span(&frames, target_frame, span);
+        denoiser.reseed(&window).unwrap();
 
-        // The next frame in source order after the reseed window's own
-        // last frame is `k + 1 + span.ahead`, the same relationship
-        // [`Denoise::render`]'s fast path in the VapourSynth plugin
-        // relies on for ordinary sequential continuation.
-        d.push(&frames[k + 1 + span.ahead]).unwrap();
-        let got = d.recv().unwrap().expect("frame k + 1");
+        // The next frame in source order after the reseed window's last frame is
+        // `target_frame + 1 + span.ahead`.
+        denoiser.push(&frames[target_frame + 1 + span.ahead]).unwrap();
+        let got = denoiser.recv().unwrap().expect("frame k + 1");
 
-        assert_eq!(got.y, streamed[k + 1].y);
-        assert_eq!(got.u, streamed[k + 1].u);
-        assert_eq!(got.v, streamed[k + 1].v);
+        assert_eq!(got.y, streamed[target_frame + 1].y);
+        assert_eq!(got.u, streamed[target_frame + 1].u);
+        assert_eq!(got.v, streamed[target_frame + 1].v);
     }
 
-    /// `reseed` rejects a window of the wrong length for nl4d too, and
-    /// the error names the wider length nl4d needs (`4r+1` at this
-    /// radius), not nlmeans's `2r+1`.
+    /// The error names nl4d's wider `4r+1` window length, not nlmeans's `2r+1`.
     #[test]
     fn nl4d_reseed_rejects_a_window_of_the_wrong_length() {
-        let opts = nl4d_plane_options(2);
-        let frames = ramp_clip(&layout(), 16);
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-        let expected = d.window_span().frame_count();
+        let frame_layout = layout();
+        let options = nl4d_plane_options(2);
+        let frames = ramp_clip(&frame_layout, 16);
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        let expected = denoiser.window_span().frame_count();
+        let expected_text = expected.to_string();
 
-        let err = d.reseed(&frames[..3]).unwrap_err().to_string();
+        let error = denoiser.reseed(&frames[..3]).unwrap_err().to_string();
+
         assert!(
-            err.contains(&expected.to_string()),
-            "error should name the expected length ({expected}), got {err}"
+            error.contains(&expected_text),
+            "error should name the expected length ({expected}), got {error}"
         );
     }
 
-    /// A `PlaneOptions` identical to [`nl4d_plane_options`] except only
-    /// `intent` differs, for exercising a passthrough side under nl4d's
-    /// wider window and multi-push pass sequence.
-    fn nl4d_plane_options_with_intent(r: u32, intent: ChannelIntent) -> PlaneOptions {
+    fn nl4d_plane_options_with_intent(radius: u32, intent: ChannelIntent) -> PlaneOptions {
         PlaneOptions {
             intent,
-            ..nl4d_plane_options(r)
+            ..nl4d_plane_options(radius)
         }
     }
 
-    /// The nl4d mirror of
-    /// [`reseed_pairs_the_passthrough_plane_with_the_centre_frame`].
+    /// nl4d drains after every emission during a reseed, not only the last, and each drain pops one
+    /// passthrough entry.
     ///
-    /// nl4d's real-push loop drains after every emission, not only the
-    /// last, and each drain pops one passthrough entry. This checks
-    /// that walk still lands on the target's own entry rather than one
-    /// of the earlier, discarded regions' entries.
+    /// The walk must still land on the target's own entry rather than an earlier, discarded one.
     #[test]
     fn nl4d_reseed_pairs_the_passthrough_plane_with_the_centre_frame() {
-        let opts = nl4d_plane_options_with_intent(2, ChannelIntent::Luma);
-        let frames = ramp_clip(&layout(), 16);
-        let k = 8;
+        let frame_layout = layout();
+        let options = nl4d_plane_options_with_intent(2, ChannelIntent::Luma);
+        let frames = ramp_clip(&frame_layout, 16);
+        let target_frame = 8;
 
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-        let span = d.window_span();
-        let got = d.reseed(&window_of_span(&frames, k, span)).unwrap();
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        let span = denoiser.window_span();
+        let window = window_of_span(&frames, target_frame, span);
+        let got = denoiser.reseed(&window).unwrap();
 
-        assert_eq!(got.u, frames[k].u, "u should pass through from the centre frame");
-        assert_eq!(got.v, frames[k].v, "v should pass through from the centre frame");
+        assert_eq!(
+            got.u, frames[target_frame].u,
+            "u should pass through from the centre frame"
+        );
+        assert_eq!(
+            got.v, frames[target_frame].v,
+            "v should pass through from the centre frame"
+        );
     }
 
-    /// The nl4d mirror of
-    /// [`reseed_pairs_the_passthrough_luma_plane_with_the_centre_frame`].
     #[test]
     fn nl4d_reseed_pairs_the_passthrough_luma_plane_with_the_centre_frame() {
-        let opts = nl4d_plane_options_with_intent(2, ChannelIntent::Chroma);
-        let frames = ramp_clip(&layout(), 16);
-        let k = 8;
+        let frame_layout = layout();
+        let options = nl4d_plane_options_with_intent(2, ChannelIntent::Chroma);
+        let frames = ramp_clip(&frame_layout, 16);
+        let target_frame = 8;
 
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-        let span = d.window_span();
-        let got = d.reseed(&window_of_span(&frames, k, span)).unwrap();
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        let span = denoiser.window_span();
+        let window = window_of_span(&frames, target_frame, span);
+        let got = denoiser.reseed(&window).unwrap();
 
-        assert_eq!(got.y, frames[k].y, "y should pass through from the centre frame");
+        assert_eq!(
+            got.y, frames[target_frame].y,
+            "y should pass through from the centre frame"
+        );
     }
 
-    /// The nl4d mirror of
-    /// [`reseed_then_streaming_keeps_the_passthrough_plane_aligned_on_the_next_frame`].
+    /// A single-shot pairing test only checks the first entry `recv` pops after the drop.
     ///
-    /// A single-shot pairing test only checks the very first entry
-    /// `recv` pops after the drop. A leftover-count defect that still
-    /// happens to leave the right entry at the front would pass every
-    /// single-shot nl4d test above and only misalign the plane paired
-    /// with the frame right after the target, once streaming resumes.
+    /// An extra or missing entry that still leaves the right one at the front only misaligns the
+    /// plane paired with the frame after the target, once streaming resumes.
     #[test]
     fn nl4d_reseed_then_streaming_keeps_the_passthrough_plane_aligned_on_the_next_frame() {
-        let opts = nl4d_plane_options_with_intent(2, ChannelIntent::Luma);
-        let frames = ramp_clip(&layout(), 16);
-        let k = 8;
+        let frame_layout = layout();
+        let options = nl4d_plane_options_with_intent(2, ChannelIntent::Luma);
+        let frames = ramp_clip(&frame_layout, 16);
+        let target_frame = 8;
 
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-        let span = d.window_span();
-        d.reseed(&window_of_span(&frames, k, span)).unwrap();
-        d.push(&frames[k + 1 + span.ahead]).unwrap();
-        let got = d.recv().unwrap().expect("frame k + 1");
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        let span = denoiser.window_span();
+        let window = window_of_span(&frames, target_frame, span);
+        denoiser.reseed(&window).unwrap();
+        denoiser.push(&frames[target_frame + 1 + span.ahead]).unwrap();
+        let got = denoiser.recv().unwrap().expect("frame k + 1");
 
-        assert_eq!(got.u, frames[k + 1].u, "u should pass through from frame k + 1");
-        assert_eq!(got.v, frames[k + 1].v, "v should pass through from frame k + 1");
+        assert_eq!(
+            got.u,
+            frames[target_frame + 1].u,
+            "u should pass through from frame k + 1"
+        );
+        assert_eq!(
+            got.v,
+            frames[target_frame + 1].v,
+            "v should pass through from frame k + 1"
+        );
     }
 
-    /// A `PlaneOptions` identical to [`nl4d_plane_options`] except noise
-    /// estimation is window-local (`windowed_noise_estimation: true`)
-    /// and `sigma` is left on automatic estimation, the configuration
-    /// `av-denoise-vs` runs.
+    /// Temporal nl4d at `radius` with window-local noise estimation and an automatic `sigma`, as
+    /// `av-denoise-vs` runs it.
     ///
-    /// Unlike [`nl4d_plane_options`], `sigma` is deliberately left
-    /// unpinned here: window-local estimation exists precisely so the
-    /// automatic estimate agrees between `reseed` and streaming, and a
-    /// pinned sigma would never have exercised that.
-    fn nl4d_windowed_plane_options(r: u32) -> PlaneOptions {
+    /// `sigma` stays unpinned because window-local estimation exists so the automatic estimate
+    /// agrees between `reseed` and streaming.
+    fn nl4d_windowed_plane_options(radius: u32) -> PlaneOptions {
+        let nl4d_options = Nl4dOptions {
+            windowed_noise_estimation: true,
+            ..Nl4dOptions::default()
+        };
+
         PlaneOptions {
-            algorithm: Algorithm::Nl4d(Nl4dOptions {
-                windowed_noise_estimation: true,
-                ..Nl4dOptions::default()
-            }),
-            ..test_plane_options(r)
+            algorithm: Algorithm::Nl4d(nl4d_options),
+            ..test_plane_options(radius)
         }
     }
 
-    /// The property that would have caught the original random-access
-    /// bug directly: with window-local estimation on and `sigma`
-    /// automatic, a `reseed` for a mid-clip frame matches the streaming
-    /// path's own output for that frame bit-for-bit. The mirror of
-    /// [`nl4d_reseed_matches_the_streaming_output_mid_clip`], but with
-    /// the noise estimator actually exercised instead of sidestepped.
+    /// Like `nl4d_reseed_matches_the_streaming_output_mid_clip`, with the noise estimator running
+    /// instead of pinned.
     #[test]
     fn nl4d_windowed_reseed_matches_the_streaming_output_mid_clip() {
-        let opts = nl4d_windowed_plane_options(2);
-        let frames = ramp_clip(&layout(), 16);
-        let streamed = stream_all(&opts, &frames);
+        let frame_layout = layout();
+        let options = nl4d_windowed_plane_options(2);
+        let frames = ramp_clip(&frame_layout, 16);
+        let streamed = stream_all(&options, &frames);
 
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-        let k = 8;
-        let span = d.window_span();
-        let got = d.reseed(&window_of_span(&frames, k, span)).unwrap();
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        let target_frame = 8;
+        let span = denoiser.window_span();
+        let window = window_of_span(&frames, target_frame, span);
+        let got = denoiser.reseed(&window).unwrap();
 
-        assert_eq!(got.y, streamed[k].y);
-        assert_eq!(got.u, streamed[k].u);
-        assert_eq!(got.v, streamed[k].v);
+        assert_eq!(got.y, streamed[target_frame].y);
+        assert_eq!(got.u, streamed[target_frame].u);
+        assert_eq!(got.v, streamed[target_frame].v);
     }
 
-    /// With window-local estimation on and `sigma` automatic, the fast
-    /// path and the reseed path must compute the same sigma for the
-    /// same window, so their outputs agree: a `reseed` at `k` followed
-    /// by an ordinary `push`/`recv` for `k + 1` must match a `reseed`
-    /// targeted directly at `k + 1` on a fresh denoiser.
+    /// With window-local estimation, a `reseed` at a frame then a `push`/`recv` for the next frame must
+    /// match a `reseed` at the next frame on a fresh denoiser.
     ///
-    /// This is the property window-local estimation exists for. Without
-    /// it, the fast path keeps folding history the reseed path never
-    /// sees, so the two disagree even though both look at the same
-    /// window of real content.
+    /// Without it the fast path folds history the reseed path never sees, so the two disagree on the
+    /// same window of content.
     #[test]
     fn nl4d_windowed_fast_path_agrees_with_reseed_at_the_next_frame() {
-        let opts = nl4d_windowed_plane_options(2);
-        let frames = ramp_clip(&layout(), 16);
-        let k = 8usize;
+        let frame_layout = layout();
+        let options = nl4d_windowed_plane_options(2);
+        let frames = ramp_clip(&frame_layout, 16);
+        let target_frame = 8usize;
 
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-        let span = d.window_span();
-        d.reseed(&window_of_span(&frames, k, span)).unwrap();
-        d.push(&frames[k + 1 + span.ahead]).unwrap();
-        let via_fast_path = d.recv().unwrap().expect("frame k + 1");
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        let span = denoiser.window_span();
+        let window = window_of_span(&frames, target_frame, span);
+        denoiser.reseed(&window).unwrap();
+        denoiser.push(&frames[target_frame + 1 + span.ahead]).unwrap();
+        let via_fast_path = denoiser.recv().unwrap().expect("frame k + 1");
 
-        let mut fresh = PlanarDenoiser::create(&opts, layout()).unwrap();
-        let via_reseed = fresh.reseed(&window_of_span(&frames, k + 1, span)).unwrap();
+        let mut fresh = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        let next_window = window_of_span(&frames, target_frame + 1, span);
+        let via_reseed = fresh.reseed(&next_window).unwrap();
 
         assert_eq!(via_fast_path.y, via_reseed.y);
         assert_eq!(via_fast_path.u, via_reseed.u);
         assert_eq!(via_fast_path.v, via_reseed.v);
     }
 
-    /// A `PlaneOptions` identical to [`test_plane_options`] except the
-    /// algorithm is `NlmeansHq` with window-local estimation on and
-    /// `sigma` left on automatic estimation, the nlmeans mirror of
-    /// [`nl4d_windowed_plane_options`].
-    fn nlmeans_hq_windowed_plane_options(r: u32) -> PlaneOptions {
+    /// Temporal nlmeans HQ at `radius` with window-local noise estimation and an automatic `sigma`.
+    fn nlmeans_hq_windowed_plane_options(radius: u32) -> PlaneOptions {
+        let hq = HqParams {
+            windowed_noise_estimation: true,
+            ..HqParams::default()
+        };
+        let hq_options = NlmeansHqOptions {
+            nlm: NlmeansOptions::default(),
+            hq,
+        };
+
         PlaneOptions {
-            algorithm: Algorithm::NlmeansHq(NlmeansHqOptions {
-                nlm: NlmeansOptions::default(),
-                hq: HqParams {
-                    windowed_noise_estimation: true,
-                    ..HqParams::default()
-                },
-            }),
-            ..test_plane_options(r)
+            algorithm: Algorithm::NlmeansHq(hq_options),
+            ..test_plane_options(radius)
         }
     }
 
-    /// The nlmeans-hq mirror of
-    /// [`nl4d_windowed_reseed_matches_the_streaming_output_mid_clip`].
-    ///
-    /// With window-local estimation on and `sigma` automatic, a `reseed`
-    /// for a mid-clip frame must match the streaming path's own output
-    /// for that frame bit-for-bit. No core test exercised HQ with
-    /// automatic sigma under reseed before this, which is how a
-    /// VapourSynth plugin filter that returns different pixels for the
-    /// same frame depending on request order shipped unnoticed.
+    /// Pins a VapourSynth plugin bug where HQ with an automatic `sigma` returned different pixels for
+    /// the same frame depending on request order.
     #[test]
     fn nlmeans_hq_windowed_reseed_matches_the_streaming_output_mid_clip() {
-        let opts = nlmeans_hq_windowed_plane_options(2);
-        let frames = ramp_clip(&layout(), 16);
-        let streamed = stream_all(&opts, &frames);
+        let frame_layout = layout();
+        let options = nlmeans_hq_windowed_plane_options(2);
+        let frames = ramp_clip(&frame_layout, 16);
+        let streamed = stream_all(&options, &frames);
 
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-        let k = 8;
-        let span = d.window_span();
-        let got = d.reseed(&window_of_span(&frames, k, span)).unwrap();
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        let target_frame = 8;
+        let span = denoiser.window_span();
+        let window = window_of_span(&frames, target_frame, span);
+        let got = denoiser.reseed(&window).unwrap();
 
-        assert_eq!(got.y, streamed[k].y);
-        assert_eq!(got.u, streamed[k].u);
-        assert_eq!(got.v, streamed[k].v);
+        assert_eq!(got.y, streamed[target_frame].y);
+        assert_eq!(got.u, streamed[target_frame].u);
+        assert_eq!(got.v, streamed[target_frame].v);
     }
 
-    /// The clip-edge mirror of
-    /// [`nlmeans_hq_windowed_reseed_matches_the_streaming_output_mid_clip`].
     #[test]
     fn nlmeans_hq_windowed_reseed_matches_the_streaming_output_at_both_clip_edges() {
-        let opts = nlmeans_hq_windowed_plane_options(2);
-        let frames = ramp_clip(&layout(), 16);
-        let streamed = stream_all(&opts, &frames);
+        let frame_layout = layout();
+        let options = nlmeans_hq_windowed_plane_options(2);
+        let frames = ramp_clip(&frame_layout, 16);
+        let streamed = stream_all(&options, &frames);
         let last = frames.len() - 1;
 
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-        let span = d.window_span();
-        let got = d.reseed(&window_of_span(&frames, last, span)).unwrap();
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        let span = denoiser.window_span();
+        let last_window = window_of_span(&frames, last, span);
+        let got = denoiser.reseed(&last_window).unwrap();
+
         assert_eq!(got.y, streamed[last].y, "luma mismatch at the ahead edge");
         assert_eq!(got.u, streamed[last].u, "u mismatch at the ahead edge");
         assert_eq!(got.v, streamed[last].v, "v mismatch at the ahead edge");
 
         const BEHIND_EDGE_TOLERANCE: i32 = 8;
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-        let got = d.reseed(&window_of_span(&frames, 0, span)).unwrap();
+
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        let first_window = window_of_span(&frames, 0, span);
+        let got = denoiser.reseed(&first_window).unwrap();
         let luma_diff = max_abs_diff(&got.y, &streamed[0].y);
+
         assert!(
             luma_diff <= BEHIND_EDGE_TOLERANCE,
             "luma at the behind edge (k=0) drifted too far from streaming: max abs diff {luma_diff}"
         );
     }
 
-    /// The nlmeans-hq mirror of
-    /// [`nl4d_windowed_repeated_out_of_order_access_matches_streaming`]:
-    /// one long-lived `PlanarDenoiser` driven through the VapourSynth
-    /// plugin harness's exact shuffled access order with its hybrid
-    /// fast-path/`reseed` policy, every produced frame compared against
-    /// a true continuous stream.
+    /// Drives one denoiser through the VapourSynth plugin harness's shuffled order with its hybrid
+    /// fast-path and `reseed` policy, comparing every frame with a true stream.
     ///
-    /// A single reseed, or a reseed followed by one push, both pass
-    /// under window-local estimation without exercising this, the same
-    /// way they did for nl4d: it takes a longer, repeatedly-reseeded run
-    /// to expose a carrier that survives `reset_stream_state` outside
-    /// the windowed gate.
+    /// A single reseed, or a reseed then one push, passes under window-local estimation without
+    /// exercising this. It takes a longer, repeatedly reseeded run to expose state that window-local
+    /// estimation fails to clear.
     #[test]
     fn nlmeans_hq_windowed_repeated_out_of_order_access_matches_streaming() {
-        let opts = nlmeans_hq_windowed_plane_options(2);
-        let frames = ramp_clip(&layout(), 14);
-        let streamed = stream_all(&opts, &frames);
+        let frame_layout = layout();
+        let options = nlmeans_hq_windowed_plane_options(2);
+        let frames = ramp_clip(&frame_layout, 14);
+        let streamed = stream_all(&options, &frames);
         let last = frames.len() - 1;
 
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-        let span = d.window_span();
-        let mut last_n: Option<usize> = None;
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        let span = denoiser.window_span();
+        let mut previous_index: Option<usize> = None;
 
         // The VapourSynth plugin harness's exact shuffled order.
         let order = [9usize, 0, 13, 4, 5, 6, 1, 12, 2, 11, 3, 10, 7, 8];
         const NEAR_START_TOLERANCE: i32 = 8;
 
-        for &n in &order {
-            let fast = if last_n == Some(n.wrapping_sub(1)) && n > 0 {
-                let ahead = (n + span.ahead).min(last);
-                d.push(&frames[ahead]).unwrap();
-                d.recv().unwrap()
+        for &frame_index in &order {
+            let fast_output = if previous_index == Some(frame_index.wrapping_sub(1)) && frame_index > 0 {
+                let ahead = (frame_index + span.ahead).min(last);
+                denoiser.push(&frames[ahead]).unwrap();
+                denoiser.recv().unwrap()
             } else {
                 None
             };
-            let got = match fast {
-                Some(out) => out,
-                None => d.reseed(&window_of_span(&frames, n, span)).unwrap(),
+            let got = match fast_output {
+                Some(planes) => planes,
+                None => {
+                    let window = window_of_span(&frames, frame_index, span);
+                    denoiser.reseed(&window).unwrap()
+                },
             };
-            last_n = Some(n);
+            previous_index = Some(frame_index);
 
-            if n < span.behind {
-                let diff = max_abs_diff(&got.y, &streamed[n].y)
-                    .max(max_abs_diff(&got.u, &streamed[n].u))
-                    .max(max_abs_diff(&got.v, &streamed[n].v));
+            if frame_index < span.behind {
+                let luma_diff = max_abs_diff(&got.y, &streamed[frame_index].y);
+                let u_diff = max_abs_diff(&got.u, &streamed[frame_index].u);
+                let v_diff = max_abs_diff(&got.v, &streamed[frame_index].v);
+                let max_diff = luma_diff.max(u_diff).max(v_diff);
+
                 assert!(
-                    diff <= NEAR_START_TOLERANCE,
-                    "near-start frame n = {n} drifted too far from streaming: max abs diff {diff}"
+                    max_diff <= NEAR_START_TOLERANCE,
+                    "near-start frame n = {frame_index} drifted too far from streaming: max abs diff {max_diff}"
                 );
             } else {
-                assert_eq!(got.y, streamed[n].y, "luma mismatch at n = {n}");
-                assert_eq!(got.u, streamed[n].u, "u mismatch at n = {n}");
-                assert_eq!(got.v, streamed[n].v, "v mismatch at n = {n}");
+                assert_eq!(
+                    got.y, streamed[frame_index].y,
+                    "luma mismatch at n = {frame_index}"
+                );
+                assert_eq!(got.u, streamed[frame_index].u, "u mismatch at n = {frame_index}");
+                assert_eq!(got.v, streamed[frame_index].v, "v mismatch at n = {frame_index}");
             }
         }
     }
 
-    /// The nlmeans-hq mirror of
-    /// [`nl4d_windowed_fast_path_agrees_with_reseed_at_the_next_frame`]:
-    /// a `reseed` at `k` followed by an ordinary `push`/`recv` for
-    /// `k + 1` must match a `reseed` targeted directly at `k + 1` on a
-    /// fresh denoiser.
     #[test]
     fn nlmeans_hq_windowed_fast_path_agrees_with_reseed_at_the_next_frame() {
-        let opts = nlmeans_hq_windowed_plane_options(2);
-        let frames = ramp_clip(&layout(), 16);
-        let k = 8usize;
+        let frame_layout = layout();
+        let options = nlmeans_hq_windowed_plane_options(2);
+        let frames = ramp_clip(&frame_layout, 16);
+        let target_frame = 8usize;
 
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-        let span = d.window_span();
-        d.reseed(&window_of_span(&frames, k, span)).unwrap();
-        d.push(&frames[k + 1 + span.ahead]).unwrap();
-        let via_fast_path = d.recv().unwrap().expect("frame k + 1");
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        let span = denoiser.window_span();
+        let window = window_of_span(&frames, target_frame, span);
+        denoiser.reseed(&window).unwrap();
+        denoiser.push(&frames[target_frame + 1 + span.ahead]).unwrap();
+        let via_fast_path = denoiser.recv().unwrap().expect("frame k + 1");
 
-        let mut fresh = PlanarDenoiser::create(&opts, layout()).unwrap();
-        let via_reseed = fresh.reseed(&window_of_span(&frames, k + 1, span)).unwrap();
+        let mut fresh = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        let next_window = window_of_span(&frames, target_frame + 1, span);
+        let via_reseed = fresh.reseed(&next_window).unwrap();
 
         assert_eq!(via_fast_path.y, via_reseed.y);
         assert_eq!(via_fast_path.u, via_reseed.u);
         assert_eq!(via_fast_path.v, via_reseed.v);
     }
 
-    /// Reproduces the VapourSynth plugin harness's own `render` hybrid
-    /// policy exactly: frame 0 goes through `reseed`, and every
-    /// subsequent frame goes through the fast `push`/`recv` path,
-    /// falling back to `reseed` only when `recv` yields nothing.
+    /// Renders `order` with the VapourSynth plugin harness's hybrid `render` policy.
+    ///
+    /// A frame that directly follows the previous request takes the fast `push`/`recv` path, and any
+    /// other frame, or one where `recv` yields nothing, goes through `reseed`.
     fn render_sequence(
-        d: &mut PlanarDenoiser,
+        denoiser: &mut PlanarDenoiser,
         frames: &[Planes],
         span: WindowSpan,
         order: &[usize],
     ) -> Vec<Planes> {
         let last = frames.len() - 1;
-        let mut last_n: Option<usize> = None;
-        let mut out = Vec::new();
-        for &n in order {
-            let fast = if last_n == Some(n.wrapping_sub(1)) && n > 0 {
-                let ahead = (n + span.ahead).min(last);
-                d.push(&frames[ahead]).unwrap();
-                d.recv().unwrap()
+        let mut previous_index: Option<usize> = None;
+        let mut outputs = Vec::new();
+        for &frame_index in order {
+            let fast_output = if previous_index == Some(frame_index.wrapping_sub(1)) && frame_index > 0 {
+                let ahead = (frame_index + span.ahead).min(last);
+                denoiser.push(&frames[ahead]).unwrap();
+                denoiser.recv().unwrap()
             } else {
                 None
             };
-            let got = match fast {
-                Some(out) => out,
-                None => d.reseed(&window_of_span(frames, n, span)).unwrap(),
+            let got = match fast_output {
+                Some(planes) => planes,
+                None => {
+                    let window = window_of_span(frames, frame_index, span);
+                    denoiser.reseed(&window).unwrap()
+                },
             };
-            last_n = Some(n);
-            out.push(got);
+            previous_index = Some(frame_index);
+            outputs.push(got);
         }
-        out
+
+        outputs
     }
 
-    /// Mirrors `a_sequential_run_after_a_seek_stays_correct_nlmeans`
-    /// exactly: a `reseed` at frame 11 of a 14-frame clip, then two
-    /// fast-path frames, compared against the same `render` hybrid
-    /// policy run straight through from frame 0. This is the reference
-    /// the VapourSynth harness actually uses, unlike
-    /// [`stream_all`], which is a true continuous stream with no
-    /// `reseed` in it at all.
+    /// Mirrors the plugin's `a_sequential_run_after_a_seek_stays_correct_nlmeans`.
+    ///
+    /// After a reseed at frame 11 of a 14-frame clip, the two fast-path frames that follow are
+    /// compared with the same policy run from frame 0. That is the reference the VapourSynth harness
+    /// uses, rather than the true continuous stream `stream_all` produces.
     #[test]
     fn nlmeans_hq_windowed_sequential_run_after_a_seek_stays_correct() {
-        let opts = nlmeans_hq_windowed_plane_options(2);
-        let frames = ramp_clip(&layout(), 14);
+        let frame_layout = layout();
+        let options = nlmeans_hq_windowed_plane_options(2);
+        let frames = ramp_clip(&frame_layout, 14);
 
-        let mut linear = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let mut linear = PlanarDenoiser::create(&options, frame_layout).unwrap();
         let span = linear.window_span();
-        let linear_out = render_sequence(&mut linear, &frames, span, &(0..frames.len()).collect::<Vec<_>>());
+        let linear_order: Vec<usize> = (0..frames.len()).collect();
+        let linear_out = render_sequence(&mut linear, &frames, span, &linear_order);
 
-        let mut seeked = PlanarDenoiser::create(&opts, layout()).unwrap();
+        let mut seeked = PlanarDenoiser::create(&options, frame_layout).unwrap();
         let seeked_out = render_sequence(&mut seeked, &frames, span, &[11, 12, 13]);
 
-        for (i, n) in [12usize, 13].into_iter().enumerate() {
+        for (i, frame_index) in [12usize, 13].into_iter().enumerate() {
             let got = &seeked_out[i + 1];
-            let want = &linear_out[n];
-            assert_eq!(got.y, want.y, "luma mismatch at n = {n}");
-            assert_eq!(got.u, want.u, "u mismatch at n = {n}");
-            assert_eq!(got.v, want.v, "v mismatch at n = {n}");
+            let expected = &linear_out[frame_index];
+
+            assert_eq!(got.y, expected.y, "luma mismatch at n = {frame_index}");
+            assert_eq!(got.u, expected.u, "u mismatch at n = {frame_index}");
+            assert_eq!(got.v, expected.v, "v mismatch at n = {frame_index}");
         }
     }
 
-    /// Diagnostic: same as
-    /// [`nlmeans_hq_windowed_sequential_run_after_a_seek_stays_correct`]
-    /// but at the VapourSynth harness's own clip size, 160x120.
+    /// The same check at the VapourSynth harness's clip size, 160x120.
     #[test]
     fn nlmeans_hq_windowed_sequential_run_after_a_seek_stays_correct_at_harness_size() {
-        let layout = FrameLayout {
+        let harness_layout = FrameLayout {
             width: 160,
             height: 120,
             subsampling: Subsampling::Yuv420,
             depth: Depth::Eight,
         };
-        let opts = nlmeans_hq_windowed_plane_options(2);
-        let frames = ramp_clip(&layout, 14);
+        let options = nlmeans_hq_windowed_plane_options(2);
+        let frames = ramp_clip(&harness_layout, 14);
 
-        let mut linear = PlanarDenoiser::create(&opts, layout).unwrap();
+        let mut linear = PlanarDenoiser::create(&options, harness_layout).unwrap();
         let span = linear.window_span();
-        let linear_out = render_sequence(&mut linear, &frames, span, &(0..frames.len()).collect::<Vec<_>>());
+        let linear_order: Vec<usize> = (0..frames.len()).collect();
+        let linear_out = render_sequence(&mut linear, &frames, span, &linear_order);
 
-        let mut seeked = PlanarDenoiser::create(&opts, layout).unwrap();
+        let mut seeked = PlanarDenoiser::create(&options, harness_layout).unwrap();
         let seeked_out = render_sequence(&mut seeked, &frames, span, &[11, 12, 13]);
 
-        for (i, n) in [12usize, 13].into_iter().enumerate() {
+        for (i, frame_index) in [12usize, 13].into_iter().enumerate() {
             let got = &seeked_out[i + 1];
-            let want = &linear_out[n];
-            assert_eq!(got.y, want.y, "luma mismatch at n = {n}");
-            assert_eq!(got.u, want.u, "u mismatch at n = {n}");
-            assert_eq!(got.v, want.v, "v mismatch at n = {n}");
+            let expected = &linear_out[frame_index];
+
+            assert_eq!(got.y, expected.y, "luma mismatch at n = {frame_index}");
+            assert_eq!(got.u, expected.u, "u mismatch at n = {frame_index}");
+            assert_eq!(got.v, expected.v, "v mismatch at n = {frame_index}");
         }
     }
 
-    /// The property that actually reproduces the VapourSynth plugin
-    /// harness's `random_access_matches_sequential_access_nl4d`
-    /// end-to-end, at the core level: one long-lived `PlanarDenoiser`
-    /// driven through a shuffled access order with the plugin's own
-    /// hybrid fast-path/`reseed` policy, every produced frame compared
-    /// against a true continuous stream.
+    /// Drives one denoiser through a shuffled order with the VapourSynth plugin's hybrid fast-path and
+    /// `reseed` policy, comparing every frame with a true stream.
     ///
-    /// A single reseed, or a reseed followed by one push, both pass
-    /// under window-local estimation without exercising this: it took
-    /// a longer, repeatedly-reseeded run to show that
-    /// `noise_estimator_temporal_only`'s "keep the last trustworthy
-    /// reading between folds" behaviour survives `reset_stream_state`
-    /// unwindowed even when every other chain is windowed, so a
-    /// `reseed`'s short real-push run can land on "no trustworthy
-    /// reading yet" while a true stream at the same frame is still
-    /// coasting on one from many frames back.
-    ///
-    /// Targets whose window covers either end of the clip reseed through
-    /// [PlanarDenoiser::reseed_window] with a shifted window.
+    /// It reproduces the plugin's `random_access_matches_sequential_access_nl4d` at the core level.
+    /// It pins a defect where, under window-local estimation, the temporal-only noise estimator kept
+    /// its last trustworthy reading on folds without one, unlike every other chain. A reseed starts
+    /// from `reset_stream_state`, so its short run could find no reading while a true stream still
+    /// coasted on one from many frames back. Targets whose window covers either clip end reseed
+    /// through `reseed_window` with a shifted window.
     #[test]
     fn nl4d_windowed_repeated_out_of_order_access_matches_streaming() {
-        let opts = nl4d_windowed_plane_options(2);
-        let frames = ramp_clip(&layout(), 14);
-        let streamed = stream_all(&opts, &frames);
+        let frame_layout = layout();
+        let options = nl4d_windowed_plane_options(2);
+        let frames = ramp_clip(&frame_layout, 14);
+        let streamed = stream_all(&options, &frames);
         let last = frames.len() - 1;
 
-        let mut d = PlanarDenoiser::create(&opts, layout()).unwrap();
-        let span = d.window_span();
-        let mut last_n: Option<usize> = None;
+        let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
+        let span = denoiser.window_span();
+        let mut previous_index: Option<usize> = None;
 
         // The VapourSynth plugin harness's exact shuffled order.
         let order = [9usize, 0, 13, 4, 5, 6, 1, 12, 2, 11, 3, 10, 7, 8];
 
-        for &n in &order {
-            let fast = if last_n == Some(n.wrapping_sub(1)) && n > 0 {
-                let ahead = (n + span.ahead).min(last);
-                d.push(&frames[ahead]).unwrap();
-                d.recv().unwrap()
+        for &frame_index in &order {
+            let fast_output = if previous_index == Some(frame_index.wrapping_sub(1)) && frame_index > 0 {
+                let ahead = (frame_index + span.ahead).min(last);
+                denoiser.push(&frames[ahead]).unwrap();
+                denoiser.recv().unwrap()
             } else {
                 None
             };
 
-            let at_edge = n <= span.behind || n + span.ahead >= last;
-            let got = match fast {
-                Some(out) => out,
+            let at_edge = frame_index <= span.behind || frame_index + span.ahead >= last;
+            let got = match fast_output {
+                Some(planes) => planes,
                 None if at_edge => {
-                    let outputs = reseed_shifted(&mut d, &frames, n);
+                    let outputs = reseed_shifted(&mut denoiser, &frames, frame_index);
                     outputs[0].clone()
                 },
-                None => d.reseed(&window_of_span(&frames, n, span)).unwrap(),
+                None => {
+                    let window = window_of_span(&frames, frame_index, span);
+                    denoiser.reseed(&window).unwrap()
+                },
             };
-            last_n = Some(n);
+            previous_index = Some(frame_index);
 
-            assert_eq!(got.y, streamed[n].y, "luma mismatch at n = {n}");
-            assert_eq!(got.u, streamed[n].u, "u mismatch at n = {n}");
-            assert_eq!(got.v, streamed[n].v, "v mismatch at n = {n}");
+            assert_eq!(
+                got.y, streamed[frame_index].y,
+                "luma mismatch at n = {frame_index}"
+            );
+            assert_eq!(got.u, streamed[frame_index].u, "u mismatch at n = {frame_index}");
+            assert_eq!(got.v, streamed[frame_index].v, "v mismatch at n = {frame_index}");
         }
     }
 }

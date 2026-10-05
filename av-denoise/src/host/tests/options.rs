@@ -32,7 +32,9 @@ fn expect_nl4d(spec: EngineSpec) -> Nl4dOptions {
 #[test]
 fn the_default_algorithm_is_the_fast_nlmeans_path() {
     let options = DenoiserOptions::builder().build();
-    assert_eq!(options.algorithm, Algorithm::Nlmeans(NlmeansOptions::default()));
+    let expected = Algorithm::Nlmeans(NlmeansOptions::default());
+
+    assert_eq!(options.algorithm, expected);
 }
 
 #[test]
@@ -55,10 +57,11 @@ fn the_geometry_carries_the_size_planes_and_depth() {
 
 #[test]
 fn the_denoising_mode_wins_over_the_fast_options_mode() {
-    let algorithm = Algorithm::Nlmeans(NlmeansOptions {
+    let fast_options = NlmeansOptions {
         mode: DenoisingMode::Temporal { radius: 5 },
         ..NlmeansOptions::default()
-    });
+    };
+    let algorithm = Algorithm::Nlmeans(fast_options);
     let options = DenoiserOptions::builder()
         .mode(DenoisingMode::Spacial)
         .algorithm(algorithm)
@@ -91,10 +94,11 @@ fn the_denoising_mode_wins_over_the_hq_options_mode() {
 #[test]
 fn the_denoising_mode_sets_the_nl4d_temporal_radius() {
     for radius in [1u32, 4, 8] {
-        let algorithm = Algorithm::Nl4d(Nl4dOptions {
+        let nl4d_options = Nl4dOptions {
             temporal_radius: 2,
             ..Nl4dOptions::default()
-        });
+        };
+        let algorithm = Algorithm::Nl4d(nl4d_options);
         let options = DenoiserOptions::builder()
             .mode(DenoisingMode::Temporal { radius })
             .algorithm(algorithm)
@@ -102,6 +106,7 @@ fn the_denoising_mode_sets_the_nl4d_temporal_radius() {
 
         let spec = spec_for(&options);
         let nl4d = expect_nl4d(spec);
+
         assert_eq!(nl4d.temporal_radius, radius);
     }
 }
@@ -120,6 +125,7 @@ fn other_algorithm_options_pass_through_untouched() {
 
     let spec = spec_for(&options);
     let resolved = expect_nl4d(spec);
+
     assert_eq!(resolved.sigma, Some(0.02));
     assert_eq!(resolved.refine, 3);
 }

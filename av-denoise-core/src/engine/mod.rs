@@ -5,11 +5,10 @@ mod plane;
 #[cfg(test)]
 mod tests;
 
-use crate::error::Error;
-use crate::nl4d::grain::GrainChunk;
-
 pub(crate) use self::io::{EgressSource, IngestTarget, egress, ingest};
 pub use self::plane::{DevicePlane, Geometry, SampleFormat};
+use crate::error::Error;
+use crate::nl4d::grain::GrainChunk;
 
 /// How many frames before and after a target frame are needed to denoise it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

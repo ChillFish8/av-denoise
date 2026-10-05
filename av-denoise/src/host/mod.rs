@@ -406,8 +406,9 @@ impl HostDenoiser {
 
         let future = self.io.read(handles);
         let plane_lengths = vec![self.plane_length; self.plane_count];
+        let pending = Pending::new(future, plane_lengths);
 
-        Ok(Pending::new(future, plane_lengths))
+        Ok(pending)
     }
 }
 

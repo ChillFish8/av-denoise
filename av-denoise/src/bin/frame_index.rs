@@ -8,21 +8,18 @@ use ffms2_sys::{FFMS_GetFrameInfo, FFMS_GetNumFrames, FFMS_GetTrackFromVideo};
 pub struct IndexEntry {
     /// Presentation timestamp, in the video track's time base.
     pub pts: i64,
-    /// Whether ffms2 marked this entry as a keyframe.
     pub keyframe: bool,
 }
 
 /// Reads the video index behind `decoder`.
 ///
-/// Returns `None` when `decoder` is not backed by ffms2, or when ffms2 declines to describe the
-/// track, when this happens caller then keeps every frame.
+/// Returns `None` when `decoder` is not backed by ffms2 or when ffms2 cannot describe the track.
 pub fn read_index(decoder: &mut Decoder) -> Option<Vec<IndexEntry>> {
     let total = decoder.get_video_details().total_frames?;
     let source = decoder.get_ffms2_impl()?.video_source;
 
-    // SAFETY: a live `Ffms2Decoder` holds a non-null video source, and
-    // the track belongs to that source rather than to us, so it stays
-    // valid for as long as the decoder does.
+    // SAFETY: a live `Ffms2Decoder` holds a non-null video source, and the track belongs to that
+    // source, so it stays valid for as long as the decoder does.
     let track = unsafe { FFMS_GetTrackFromVideo(source) };
 
     if track.is_null() {
@@ -36,24 +33,21 @@ pub fn read_index(decoder: &mut Decoder) -> Option<Vec<IndexEntry>> {
         return None;
     }
 
-    // `FFMS_GetFrameInfo` indexes the track's entries without checking the
-    // bound, so the track's own count is what the read has to stay under.
-    // The video properties describe the same track but are reported
-    // separately, and a disagreement must not turn into a read past the end.
+    // `FFMS_GetFrameInfo` does not check its bound, so the read stays under the track's own count
+    // in case the separately reported video properties disagree with it.
     let total = total.min(track_frames as usize);
     let mut index = Vec::with_capacity(total);
 
     for i in 0..total {
-        // SAFETY: `track` is non-null, and `i` stays below the entry
-        // count the track itself reports.
-        let info = unsafe { FFMS_GetFrameInfo(track, i as i32) };
+        // SAFETY: `track` is non-null, and `i` stays below the entry count the track reports.
+        let info_ptr = unsafe { FFMS_GetFrameInfo(track, i as i32) };
 
-        if info.is_null() {
+        if info_ptr.is_null() {
             return None;
         }
 
         // SAFETY: checked non-null just above.
-        let info = unsafe { &*info };
+        let info = unsafe { &*info_ptr };
 
         index.push(IndexEntry {
             pts: info.PTS,
@@ -72,23 +66,22 @@ pub fn phantom_indices(index: &[IndexEntry]) -> BTreeSet<usize> {
         return phantom;
     }
 
-    // Nothing before the first keyframe can be decoded, so ffms2
-    // answers those positions with a repeat of the keyframe.
-    let lead = index.iter().position(|e| e.keyframe).unwrap_or(0);
+    // Nothing before the first keyframe can be decoded, so ffms2 answers those positions with a
+    // repeat of the keyframe.
+    let first_keyframe = index.iter().position(|entry| entry.keyframe).unwrap_or(0);
 
-    // One leading picture is the ordinary case. More than that means the
-    // index marks no keyframe for a stretch of the file, so say how much
-    // is going rather than shortening the output quietly.
-    if lead > 1 {
+    // One leading picture is the ordinary case. More means the index marks no keyframe for a
+    // stretch of the file, so the drop is reported rather than shortening the output quietly.
+    if first_keyframe > 1 {
         tracing::warn!(
-            dropped = lead,
-            "the index marks no keyframe until entry {lead}, dropping every entry before it",
+            dropped = first_keyframe,
+            "the index marks no keyframe until entry {first_keyframe}, dropping every entry before it",
         );
     }
 
-    phantom.extend(0..lead);
+    phantom.extend(0..first_keyframe);
 
-    let gaps: Vec<i64> = (lead + 1..index.len())
+    let gaps: Vec<i64> = (first_keyframe + 1..index.len())
         .map(|i| index[i].pts.saturating_sub(index[i - 1].pts))
         .collect();
 
@@ -96,24 +89,23 @@ pub fn phantom_indices(index: &[IndexEntry]) -> BTreeSet<usize> {
         return phantom;
     }
 
-    // The median gap is the clip's real frame spacing. A handful of
-    // phantom entries cannot move it, however far apart they sit.
-    let mut sorted = gaps.clone();
-    sorted.sort_unstable();
-    let median = sorted[sorted.len() / 2];
+    // The median gap is the clip's real frame spacing. A handful of phantom entries cannot move
+    // it, however far apart they sit.
+    let mut sorted_gaps = gaps.clone();
+    sorted_gaps.sort_unstable();
+    let median = sorted_gaps[sorted_gaps.len() / 2];
 
-    // Variable frame rate pacing puts real frames closer together than the
-    // median, which is the same signature a phantom leaves. Telling the two
-    // apart by timing only works on a clip that is otherwise regular, so a
-    // clip that is not keeps every entry.
-    let regular = gaps
+    // Variable frame rate pacing puts real frames closer together than the median, which is the
+    // same signature a phantom leaves. Timing only tells them apart on an otherwise regular clip,
+    // so an irregular clip keeps every entry.
+    let regular_gaps = gaps
         .iter()
         .filter(|&&gap| gap.saturating_sub(median).saturating_abs().saturating_mul(4) <= median)
         .count();
 
-    if regular * 10 < gaps.len() * 9 {
+    if regular_gaps * 10 < gaps.len() * 9 {
         tracing::debug!(
-            regular,
+            regular = regular_gaps,
             gaps = gaps.len(),
             "frame spacing is too irregular to tell phantom entries from variable frame rate pacing",
         );
@@ -121,14 +113,12 @@ pub fn phantom_indices(index: &[IndexEntry]) -> BTreeSet<usize> {
         return phantom;
     }
 
-    // A phantom shares a timeline slot with the frame that follows it, landing just ahead of
-    // that frame's timestamp. The entry to drop is therefore the earlier of the pair.
-    // Doubling the gap rather than halving the median keeps the comparison exact,
-    // which matters when a clip's time base is close enough to its frame rate that the median
-    // gap is a single unit.
+    // A phantom lands just ahead of the frame that follows it, so the earlier entry of a
+    // too-close pair is dropped. Doubling the gap rather than halving the median keeps the
+    // comparison exact when the median gap is a single time base unit.
     for (offset, &gap) in gaps.iter().enumerate() {
         if gap.saturating_mul(2) < median {
-            phantom.insert(lead + offset);
+            phantom.insert(first_keyframe + offset);
         }
     }
 
@@ -139,7 +129,7 @@ pub fn phantom_indices(index: &[IndexEntry]) -> BTreeSet<usize> {
 mod tests {
     use super::*;
 
-    /// Builds an index at a steady 42-unit spacing, with the first entry marked as the keyframe.
+    /// Builds an index at a steady 42-unit spacing with the first entry as the keyframe.
     fn regular(count: usize) -> Vec<IndexEntry> {
         (0..count)
             .map(|i| IndexEntry {
@@ -151,12 +141,17 @@ mod tests {
 
     #[test]
     fn a_regular_index_has_no_phantoms() {
-        assert!(phantom_indices(&regular(20)).is_empty());
+        let index = regular(20);
+        let phantom = phantom_indices(&index);
+
+        assert!(phantom.is_empty());
     }
 
     #[test]
     fn an_empty_index_has_no_phantoms() {
-        assert!(phantom_indices(&[]).is_empty());
+        let phantom = phantom_indices(&[]);
+
+        assert!(phantom.is_empty());
     }
 
     #[test]
@@ -165,12 +160,15 @@ mod tests {
             pts: 0,
             keyframe: false,
         }];
-        index.extend((1..20).map(|i| IndexEntry {
+        let following = (1..20).map(|i| IndexEntry {
             pts: 41 + (i as i64 - 1) * 42,
             keyframe: i == 1,
-        }));
+        });
+        index.extend(following);
 
-        assert_eq!(phantom_indices(&index), BTreeSet::from([0]));
+        let phantom = phantom_indices(&index);
+
+        assert_eq!(phantom, BTreeSet::from([0]));
     }
 
     #[test]
@@ -197,18 +195,21 @@ mod tests {
                 keyframe: false,
             },
         ];
-        index.extend((5..60).map(|i| IndexEntry {
+        let following = (5..60).map(|i| IndexEntry {
             pts: 125 + (i as i64 - 5) * 42,
             keyframe: false,
-        }));
+        });
+        index.extend(following);
 
-        assert_eq!(phantom_indices(&index), BTreeSet::from([1, 3]));
+        let phantom = phantom_indices(&index);
+
+        assert_eq!(phantom, BTreeSet::from([1, 3]));
     }
 
     #[test]
     fn a_time_base_as_tight_as_the_frame_rate_still_finds_a_phantom() {
-        // Every real frame is one unit apart, so a phantom shows up as a
-        // repeated timestamp rather than as a fraction of a wider gap.
+        // Every real frame is one unit apart, so a phantom shows up as a repeated timestamp rather
+        // than as a fraction of a wider gap.
         let mut index: Vec<IndexEntry> = (0..40)
             .map(|i| IndexEntry {
                 pts: i as i64,
@@ -218,13 +219,15 @@ mod tests {
 
         index[4].pts = index[3].pts;
 
-        assert_eq!(phantom_indices(&index), BTreeSet::from([3]));
+        let phantom = phantom_indices(&index);
+
+        assert_eq!(phantom, BTreeSet::from([3]));
     }
 
     #[test]
     fn variable_frame_rate_pacing_keeps_every_entry() {
-        // A third of these frames arrive at a third of the median spacing.
-        // They are real, and the timing rule cannot tell them from phantoms.
+        // A third of these frames arrive at a third of the median spacing. They are real, and the
+        // timing rule cannot tell them from phantoms.
         let mut pts = 0;
         let index: Vec<IndexEntry> = (0..30)
             .map(|i| {
@@ -238,11 +241,16 @@ mod tests {
             })
             .collect();
 
-        assert!(phantom_indices(&index).is_empty());
+        let phantom = phantom_indices(&index);
+
+        assert!(phantom.is_empty());
     }
 
     #[test]
     fn repeated_pictures_at_regular_spacing_are_kept() {
-        assert!(phantom_indices(&regular(2159)).is_empty());
+        let index = regular(2159);
+        let phantom = phantom_indices(&index);
+
+        assert!(phantom.is_empty());
     }
 }

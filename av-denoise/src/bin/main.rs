@@ -1,5 +1,4 @@
-use clap::Parser;
-use tracing_subscriber::EnvFilter;
+//! The `av-denoise` command line tool.
 
 mod cli;
 mod frame_index;
@@ -8,7 +7,10 @@ mod progress;
 mod warm_start;
 mod y4m_format;
 
-use cli::{Args, Command, InputSource, RunOptions, run_list_devices};
+use clap::Parser;
+use tracing_subscriber::EnvFilter;
+
+use self::cli::{Args, Command, InputSource, RunOptions, run_list_devices};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -16,12 +18,10 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// Scene workers used when `--workers` is not given.
 const DEFAULT_WORKERS: usize = 2;
 
-/// Frame budget in bytes used when `--frame-budget` is not given. (1GB)
+/// Frame budget in bytes used when `--frame-budget` is not given, 1 GiB.
 const DEFAULT_FRAME_BUDGET_BYTES: u64 = 1 << 30;
 
-/// Routes an input to the scene-parallel pipeline.
-///
-/// A path opens with ffms2. A pipe reads a y4m stream.
+/// Runs the scene-parallel pipeline on an input, with defaults for unset worker and budget flags.
 fn run_input(
     opts: &RunOptions,
     input: &InputSource,
@@ -43,38 +43,43 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     if std::env::var("RUST_LOG").is_err() {
-        // `list-devices` prints a table and nothing else, and the
-        // backends chatter at info level while they start up, so it
-        // starts quieter than a denoising run.
-        let default = match args.command {
+        // `list-devices` prints only a table, and the backends log at info level while they
+        // start, so it runs quieter than a denoising run.
+        let default_filter = match args.command {
             Command::ListDevices => "warn",
             _ => "info",
         };
-        unsafe { std::env::set_var("RUST_LOG", default) };
+
+        // SAFETY: still single-threaded, no other thread can race the env mutation.
+        unsafe { std::env::set_var("RUST_LOG", default_filter) };
     }
 
+    let env_filter = EnvFilter::from_default_env();
+    let log_writer = progress::tracing_writer();
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .with_writer(progress::tracing_writer())
+        .with_env_filter(env_filter)
+        .with_writer(log_writer)
         .init();
 
-    // Listing devices compiles no kernels, so it runs before the cache
-    // is installed and skips it entirely.
+    // Listing devices compiles no kernels, so it skips the kernel cache.
     if matches!(args.command, Command::ListDevices) {
-        print!("{}", run_list_devices(&args.accelerators));
+        let table = run_list_devices(&args.accelerators);
+        print!("{table}");
         return Ok(());
     }
 
-    // Point CubeCL at a kernel cache. This has to run before
-    // HostDenoiser::create, because the first CubeCL client locks the global
-    // config the moment it is built.
+    // The first CubeCL client locks the global config, so the cache must be installed before
+    // any denoiser is created.
     match av_denoise::install_compilation_cache() {
         Ok(Some(path)) => tracing::info!(?path, "caching compiled kernels"),
         Ok(None) => tracing::info!(
             "kernel caching is off, every run recompiles. Unset {} to turn it back on.",
             av_denoise::COMPILATION_CACHE_ENV,
         ),
-        Err(err) => return Err(anyhow::Error::new(err).context("unable to install the kernel cache")),
+        Err(error) => {
+            let error = anyhow::Error::new(error).context("unable to install the kernel cache");
+            return Err(error);
+        },
     }
 
     let (opts, input, workers, frame_budget) = match &args.command {

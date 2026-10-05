@@ -1,40 +1,29 @@
-//! Which physical device to run on.
-//!
-//! A [`Device`] picks the hardware inside a backend, while
-//! [`Accelerator`](crate::accelerate::Accelerator) picks the backend
-//! itself. The two are chosen separately because most backends expose
-//! more than one device.
-//!
-//! [`Device`] implements `FromStr`, so it can be taken straight from a
-//! command-line flag or a config file.
-//!
-//! ```
-//! use av_denoise::Device;
-//!
-//! // Let the backend decide.
-//! assert_eq!("default".parse::<Device>().unwrap(), Device::Default);
-//!
-//! // Or name the second discrete GPU in the machine.
-//! assert_eq!(
-//!     "discrete:1".parse::<Device>().unwrap(),
-//!     Device::Discrete { index: 1 },
-//! );
-//! ```
+//! Which physical device to run on
 
 use std::fmt;
 use std::str::FromStr;
 
-/// Where to run the compute.
+/// Which physical device inside a backend runs the compute.
 ///
-/// Each variant maps onto the concrete `Device` type of whichever cubecl
-/// runtime was selected.
+/// The backend itself is picked separately with [Accelerator](crate::accelerate::Accelerator),
+/// because most backends expose more than one device. Each variant maps onto the concrete `Device`
+/// type of whichever cubecl runtime was selected.
 ///
-/// Not every variant makes sense on every backend. `Integrated` and
-/// `Virtual` are wgpu-only, and `Cpu` does nothing on the `cpu` runtime
-/// while selecting `WgpuDevice::Cpu` on wgpu.
+/// `Integrated`, `Virtual` and `Cpu` are wgpu-only. Asking for a variant a runtime cannot honour
+/// returns an error from the matching `to_*` conversion.
 ///
-/// Asking for a variant a runtime cannot honour returns an error from
-/// the matching `to_*` conversion.
+/// ```
+/// use av_denoise::Device;
+///
+/// // Let the backend decide.
+/// assert_eq!("default".parse::<Device>().unwrap(), Device::Default);
+///
+/// // Or name the second discrete GPU in the machine.
+/// assert_eq!(
+///     "discrete:1".parse::<Device>().unwrap(),
+///     Device::Discrete { index: 1 },
+/// );
+/// ```
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub enum Device {
     /// Backend-chosen default device.
@@ -42,56 +31,58 @@ pub enum Device {
     Default,
     /// Discrete GPU at ordinal `index`.
     ///
-    /// Maps to `CudaDevice { index }`, `AmdDevice { index }`, or
-    /// `WgpuDevice::DiscreteGpu(index)`.
+    /// Maps to `CudaDevice { index }`, `AmdDevice { index }`, or `WgpuDevice::DiscreteGpu(index)`.
     Discrete { index: usize },
     /// Integrated GPU at ordinal `index`. wgpu-only.
     Integrated { index: usize },
     /// Virtual GPU at ordinal `index`. wgpu-only.
     Virtual { index: usize },
-    /// The software device. Valid on the `cpu` runtime, and on wgpu
-    /// where it picks the lavapipe or software adapter.
+    /// The software device, which picks the lavapipe or software adapter on wgpu.
     Cpu,
 }
 
 impl FromStr for Device {
     type Err = String;
 
-    /// Accepts the same spellings as the bench CLI.
+    /// Parses a device selector.
     ///
     /// - `default`, which takes no index
     /// - `discrete[:N]`, `integrated[:N]`, and `virtual[:N]`, where `N` defaults to 0
     /// - `cpu`, which takes no index
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (kind, suffix) = match s.split_once(':') {
-            Some((kind, idx)) => (kind, Some(idx)),
-            None => (s, None),
+    fn from_str(selector: &str) -> Result<Self, Self::Err> {
+        let (kind, suffix) = match selector.split_once(':') {
+            Some((kind, index_text)) => (kind, Some(index_text)),
+            None => (selector, None),
         };
 
         if matches!(kind, "default" | "cpu") && suffix.is_some() {
             return Err(format!(
-                "device kind '{kind}' takes no index, got '{s}'. Only discrete, integrated, and virtual take an index"
+                "device kind '{kind}' takes no index, got '{selector}'. Only discrete, integrated, and virtual take an index"
             ));
         }
 
-        let parse_index = |idx: &str| -> Result<usize, String> {
-            idx.parse()
-                .map_err(|_| format!("invalid device index '{idx}' in '{s}'"))
+        let parse_index = |index_text: &str| -> Result<usize, String> {
+            index_text
+                .parse()
+                .map_err(|_| format!("invalid device index '{index_text}' in '{selector}'"))
         };
-        let idx = suffix.unwrap_or("0");
+        let index_text = suffix.unwrap_or("0");
 
         match kind {
             "default" => Ok(Device::Default),
             "cpu" => Ok(Device::Cpu),
-            "discrete" => Ok(Device::Discrete {
-                index: parse_index(idx)?,
-            }),
-            "integrated" => Ok(Device::Integrated {
-                index: parse_index(idx)?,
-            }),
-            "virtual" => Ok(Device::Virtual {
-                index: parse_index(idx)?,
-            }),
+            "discrete" => {
+                let index = parse_index(index_text)?;
+                Ok(Device::Discrete { index })
+            },
+            "integrated" => {
+                let index = parse_index(index_text)?;
+                Ok(Device::Integrated { index })
+            },
+            "virtual" => {
+                let index = parse_index(index_text)?;
+                Ok(Device::Virtual { index })
+            },
             other => Err(format!(
                 "unknown device kind '{other}', expected default, discrete[:N], integrated[:N], virtual[:N], or cpu"
             )),
@@ -100,15 +91,14 @@ impl FromStr for Device {
 }
 
 impl fmt::Display for Device {
-    /// Writes the selector spelling [`FromStr`] accepts, so a device
-    /// prints as `discrete:1` rather than as its enum variant.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    /// Writes the selector spelling [FromStr] accepts, such as `discrete:1`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Device::Default => f.write_str("default"),
-            Device::Discrete { index } => write!(f, "discrete:{index}"),
-            Device::Integrated { index } => write!(f, "integrated:{index}"),
-            Device::Virtual { index } => write!(f, "virtual:{index}"),
-            Device::Cpu => f.write_str("cpu"),
+            Device::Default => formatter.write_str("default"),
+            Device::Discrete { index } => write!(formatter, "discrete:{index}"),
+            Device::Integrated { index } => write!(formatter, "integrated:{index}"),
+            Device::Virtual { index } => write!(formatter, "virtual:{index}"),
+            Device::Cpu => formatter.write_str("cpu"),
         }
     }
 }
@@ -143,6 +133,7 @@ impl Device {
 impl Device {
     pub fn to_wgpu(&self) -> Result<cubecl::wgpu::WgpuDevice, anyhow::Error> {
         use cubecl::wgpu::WgpuDevice;
+
         Ok(match self {
             Device::Default => WgpuDevice::DefaultDevice,
             Device::Discrete { index } => WgpuDevice::DiscreteGpu(*index),
@@ -206,10 +197,11 @@ mod tests {
 
     #[test]
     fn rejected_index_error_names_the_kind() {
-        let err = "default:1".parse::<Device>().unwrap_err();
-        assert!(err.contains("default"), "{err}");
-        let err = "cpu:2".parse::<Device>().unwrap_err();
-        assert!(err.contains("cpu"), "{err}");
+        let default_error = "default:1".parse::<Device>().unwrap_err();
+        assert!(default_error.contains("default"), "{default_error}");
+
+        let cpu_error = "cpu:2".parse::<Device>().unwrap_err();
+        assert!(cpu_error.contains("cpu"), "{cpu_error}");
     }
 
     #[test]

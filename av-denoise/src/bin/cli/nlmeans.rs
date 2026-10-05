@@ -46,7 +46,7 @@ pub struct NlmeansArgs {
     /// blur first, then compares patches against that cleaner image.
     ///
     /// `sigma_s` is the spatial blur radius in pixels, greater than 0
-    /// and at most 11.0 (anything beyond this is insane.)
+    /// and at most 11.0.
     ///
     /// `sigma_r` is the colour-similarity threshold, greater than 0.
     /// Values above `0` and up to `1` are typical for normalised
@@ -87,11 +87,11 @@ pub struct NlmeansArgs {
     #[arg(long)]
     pub search_radius: Option<u32>,
 
-    /// Size of each patch being compared. The patch is
-    /// `(2*patch_radius + 1)` pixels square.
+    /// Radius of each patch being compared.
     ///
-    /// Larger patches preserve fine structure better but cost more
-    /// GPU memory. Library default is 4.
+    /// The patch is `(2*patch_radius + 1)` pixels square. Larger patches
+    /// preserve fine structure better but cost more GPU memory. Library
+    /// default is 4.
     #[arg(long)]
     pub patch_radius: Option<u32>,
 
@@ -151,7 +151,7 @@ pub struct NlmeansArgs {
     /// noise. `3` is subtle grain, `6` is clearly visible grain, `12`
     /// and up is heavy noise.
     ///
-    /// Always expressed on an 8-bit 0-255 scale, no matter the
+    /// Always expressed on an 8-bit scale from 0 to 255, no matter the
     /// source's actual bit depth.
     #[arg(long)]
     pub hq_sigma: Option<f32>,
@@ -227,11 +227,10 @@ pub struct NlmeansArgs {
     /// Estimates noise from a local window instead of a temporal EMA
     /// over stream history.
     ///
-    /// Experimental measurement switch for comparing the two estimators
-    /// on real footage. Not a committed public interface. Off by
-    /// default, which keeps the temporal EMA every calibrated preset
-    /// assumes. Only applies to `--variant hq`, since `fast` never
-    /// measures noise.
+    /// An experimental switch for comparing the two estimators on real
+    /// footage. It is not a stable interface. Off by default, which
+    /// keeps the temporal EMA every calibrated preset assumes. Only
+    /// applies to `--variant hq`, since `fast` never measures noise.
     #[arg(long, hide = true)]
     pub windowed_noise_estimation: bool,
 
@@ -262,17 +261,16 @@ impl NlmeansArgs {
         }
     }
 
-    /// Builds the library's [`av_denoise::Algorithm`] from the resolved
-    /// preset and the flags the chosen variant reads.
+    /// Builds the library's [Algorithm](av_denoise::Algorithm) from the resolved preset and
+    /// the flags the chosen variant reads.
     ///
-    /// Flags that are set but do nothing for this configuration are
-    /// reported as warnings.
+    /// Flags that are set but do nothing for this configuration are reported as warnings.
     pub fn resolve_algorithm(
         &self,
         resolved: ResolvedPreset,
         nlm: NlmeansOptions,
     ) -> Result<av_denoise::Algorithm, anyhow::Error> {
-        let sigma_scale_is_set = self.hq_sigma_scale.is_some_and(|v| v != 1.0);
+        let sigma_scale_is_set = self.hq_sigma_scale.is_some_and(|scale| scale != 1.0);
 
         match resolved.variant {
             Variant::Fast => {
@@ -292,13 +290,12 @@ impl NlmeansArgs {
                 {
                     tracing::warn!("--hq-* options are ignored unless --variant hq is selected");
                 }
+
                 Ok(av_denoise::Algorithm::Nlmeans(nlm))
             },
             Variant::Hq => {
-                // Check the raw 8-bit value here so an out-of-range
-                // `--hq-sigma` reports the number the user typed. The
-                // library re-validates the same bound after the /255
-                // normalisation, but its message speaks in [0, 1] units.
+                // Checked in 8-bit units so the error reports the number the user typed. The
+                // library's own check runs after the /255 normalisation, in 0..=1 units.
                 if let Some(sigma) = self.hq_sigma
                     && (!sigma.is_finite() || sigma <= 0.0 || sigma > 255.0)
                 {
@@ -309,30 +306,25 @@ impl NlmeansArgs {
                     tracing::warn!("--hq-sigma-scale has no effect when --hq-sigma pins the noise level");
                 }
 
-                Ok(av_denoise::Algorithm::NlmeansHq(NlmeansHqOptions {
-                    nlm,
-                    hq: av_denoise::HqParams {
-                        auto_strength: !self.hq_no_auto_strength,
-                        noise_floor: !self.hq_no_noise_floor,
-                        sigma_override: self.hq_sigma.map(|s| s / 255.0),
-                        temporal_confidence: !self.hq_no_temporal_confidence,
-                        thsad_scale: self.hq_thsad_scale.unwrap_or(1.0),
-                        sigma_scale: self.hq_sigma_scale.unwrap_or(1.0),
-                        // The CLI keeps the temporal EMA every
-                        // calibrated preset assumes by default. Only
-                        // `av-denoise-vs` needs window-local estimation,
-                        // for random-access determinism.
-                        // `--windowed-noise-estimation` exists to
-                        // measure the difference on real footage.
-                        windowed_noise_estimation: self.windowed_noise_estimation,
-                    },
-                }))
+                let hq = av_denoise::HqParams {
+                    auto_strength: !self.hq_no_auto_strength,
+                    noise_floor: !self.hq_no_noise_floor,
+                    sigma_override: self.hq_sigma.map(|sigma| sigma / 255.0),
+                    temporal_confidence: !self.hq_no_temporal_confidence,
+                    thsad_scale: self.hq_thsad_scale.unwrap_or(1.0),
+                    sigma_scale: self.hq_sigma_scale.unwrap_or(1.0),
+                    // Off unless the hidden flag asks, because every calibrated preset assumes
+                    // the temporal EMA. Window-local estimation gives random-access determinism.
+                    windowed_noise_estimation: self.windowed_noise_estimation,
+                };
+                let options = NlmeansHqOptions { nlm, hq };
+
+                Ok(av_denoise::Algorithm::NlmeansHq(options))
             },
         }
     }
 
-    /// Turns the parsed flags plus the shared globals into the options
-    /// the ingest pipeline takes.
+    /// Builds the run options from these flags and the global flags.
     pub fn build_options(&self, globals: &Args) -> Result<RunOptions, anyhow::Error> {
         let resolved = self.resolve_preset(globals.preset);
 
@@ -359,42 +351,47 @@ impl NlmeansArgs {
                      the spatial path doesn't use temporal neighbours"
                 );
             }
+
             self.motion.to_motion_search().into()
         } else {
             if self.motion.any_set() {
                 tracing::warn!("--mc-* options are ignored unless --motion-compensation is set");
             }
+
             MotionCompensationMode::None
         };
 
-        // search_radius always has a resolved value (explicit flag or the
-        // active preset), so it's always carried into the tuning override.
+        // The search radius always resolves, from the flag or the preset, so it always
+        // overrides the library tuning.
+        let tuning = NlmTuning {
+            search_radius: Some(resolved.search_radius),
+            patch_radius: self.patch_radius,
+            strength: self.strength,
+            self_weight: self.self_weight,
+        };
         let nlm = NlmeansOptions {
             prefilter,
             motion_compensation,
-            tuning: NlmTuning {
-                search_radius: Some(resolved.search_radius),
-                patch_radius: self.patch_radius,
-                strength: self.strength,
-                self_weight: self.self_weight,
-            },
+            tuning,
             mode,
         };
 
+        let algorithm = self.resolve_algorithm(resolved, nlm)?;
+        let planes = PlaneOptions {
+            accelerators: globals.accelerators.clone(),
+            device: globals.device.clone(),
+            intent,
+            mode,
+            algorithm,
+            luma_strength: self.luma_strength,
+            chroma_strength: self.chroma_strength,
+            // `nlmeans` has no grouping stage for a threshold to apply to.
+            luma_lambda_ht: None,
+            chroma_lambda_ht: None,
+        };
+
         Ok(RunOptions {
-            planes: PlaneOptions {
-                accelerators: globals.accelerators.clone(),
-                device: globals.device.clone(),
-                intent,
-                mode,
-                algorithm: self.resolve_algorithm(resolved, nlm)?,
-                luma_strength: self.luma_strength,
-                chroma_strength: self.chroma_strength,
-                // `nlmeans` has no grouping stage, so these stay unset
-                // here. `Nl4dArgs::build_options` fills them in afterwards.
-                luma_lambda_ht: None,
-                chroma_lambda_ht: None,
-            },
+            planes,
             progress: globals.progress,
             grain_table: None,
         })
@@ -406,14 +403,12 @@ mod tests {
     use av_denoise::DEFAULT_PILOT_STRENGTH_SCALE;
     use clap::Parser;
 
-    use super::super::{Args, CliChannelMode, Command, InputSource, Preset};
     use super::*;
+    use crate::cli::{Args, CliChannelMode, Command, InputSource, Preset};
 
-    /// Parses a full argv into the `nlmeans` subcommand's args plus the
-    /// globals they resolve against.
+    /// Parses a `nlmeans` argv reading stdin, with `extra` after the subcommand.
     ///
-    /// `extra` follows the subcommand because the family-owned flags
-    /// only exist there. The globals parse in that position too.
+    /// `extra` follows the subcommand because the subcommand's own flags only exist there.
     fn parse(extra: &[&str]) -> (Args, NlmeansArgs) {
         let mut argv = vec!["av-denoise", "nlmeans", "-i", "-"];
         argv.extend_from_slice(extra);
@@ -427,8 +422,7 @@ mod tests {
         (args, nlm)
     }
 
-    /// Parses an argv whose `-i`/`-W` values are supplied by the caller,
-    /// unlike [`parse`] which pins the input to stdin.
+    /// Parses a `nlmeans` argv whose `-i`/`-W` values come from `extra`.
     fn parse_input(extra: &[&str]) -> NlmeansArgs {
         let mut argv = vec!["av-denoise", "nlmeans"];
         argv.extend_from_slice(extra);
@@ -448,6 +442,7 @@ mod tests {
     #[test]
     fn default_preset_is_base() {
         let resolved = resolve(&[]);
+
         assert_eq!(resolved.variant, Variant::Hq);
         assert_eq!(resolved.temporal_radius, 2);
         assert_eq!(resolved.search_radius, 2);
@@ -456,6 +451,7 @@ mod tests {
     #[test]
     fn veryfast_matches_former_defaults() {
         let resolved = resolve(&["--preset", "veryfast"]);
+
         assert_eq!(resolved.variant, Variant::Fast);
         assert_eq!(resolved.temporal_radius, 0);
         assert_eq!(resolved.search_radius, 2);
@@ -464,6 +460,7 @@ mod tests {
     #[test]
     fn fast_grid_row() {
         let resolved = resolve(&["--preset", "fast"]);
+
         assert_eq!(resolved.variant, Variant::Hq);
         assert_eq!(resolved.temporal_radius, 1);
         assert_eq!(resolved.search_radius, 2);
@@ -472,6 +469,7 @@ mod tests {
     #[test]
     fn base_grid_row() {
         let resolved = resolve(&["--preset", "base"]);
+
         assert_eq!(resolved.variant, Variant::Hq);
         assert_eq!(resolved.temporal_radius, 2);
         assert_eq!(resolved.search_radius, 2);
@@ -480,6 +478,7 @@ mod tests {
     #[test]
     fn slow_grid_row() {
         let resolved = resolve(&["--preset", "slow"]);
+
         assert_eq!(resolved.variant, Variant::Hq);
         assert_eq!(resolved.temporal_radius, 4);
         assert_eq!(resolved.search_radius, 4);
@@ -488,6 +487,7 @@ mod tests {
     #[test]
     fn veryslow_grid_row() {
         let resolved = resolve(&["--preset", "veryslow"]);
+
         assert_eq!(resolved.variant, Variant::Hq);
         assert_eq!(resolved.temporal_radius, 8);
         assert_eq!(resolved.search_radius, 4);
@@ -496,6 +496,7 @@ mod tests {
     #[test]
     fn explicit_variant_overrides_the_preset() {
         let resolved = resolve(&["--preset", "base", "--variant", "fast"]);
+
         assert_eq!(resolved.variant, Variant::Fast);
         assert_eq!(resolved.temporal_radius, 2);
         assert_eq!(resolved.search_radius, 2);
@@ -504,6 +505,7 @@ mod tests {
     #[test]
     fn explicit_temporal_radius_overrides_the_preset() {
         let resolved = resolve(&["--preset", "base", "--temporal-radius", "6"]);
+
         assert_eq!(resolved.variant, Variant::Hq);
         assert_eq!(resolved.temporal_radius, 6);
         assert_eq!(resolved.search_radius, 2);
@@ -512,6 +514,7 @@ mod tests {
     #[test]
     fn explicit_search_radius_overrides_the_preset() {
         let resolved = resolve(&["--preset", "veryslow", "--search-radius", "1"]);
+
         assert_eq!(resolved.variant, Variant::Hq);
         assert_eq!(resolved.temporal_radius, 8);
         assert_eq!(resolved.search_radius, 1);
@@ -520,32 +523,19 @@ mod tests {
     #[test]
     fn globals_parse_before_the_subcommand() {
         let args = Args::parse_from(["av-denoise", "--preset", "slow", "nlmeans", "-i", "-"]);
+
         assert!(matches!(args.preset, Preset::Slow));
     }
 
-    /// The five tests below check that every global flag is accepted
-    /// before the `nlmeans` token. That is the shape the `Justfile`
-    /// uses, passing `-A vulkan,cpu` ahead of the subcommand.
-    ///
-    /// Despite the name they do not guard `global = true`. Clap accepts
-    /// `Args`'s own fields in the leading position either way, because
-    /// `global` only starts to matter once the subcommand token has
-    /// been read. Dropping `global = true` from `accelerators`,
-    /// `device`, `channel_mode`, and `progress` in turn left all five
-    /// tests passing.
-    ///
-    /// What `global = true` really controls is the trailing position,
-    /// after `nlmeans`. The `*_parses_after_the_subcommand` tests
-    /// further down cover that.
-    ///
-    /// The repeated `vulkan` is deliberate. What this pins is that the
-    /// comma delimiter splits the value into a list, and `Vulkan` is
-    /// the only accelerator variant a default build is guaranteed to
-    /// have, so naming it twice tests the split without depending on a
-    /// second backend feature being enabled.
-    ///
-    /// Feature-gated because it names the `Vulkan` accelerator variant,
-    /// which only exists when its feature is enabled.
+    // The five tests below check that every global flag is accepted before the `nlmeans`
+    // token, the shape the `Justfile` uses for `-A vulkan,cpu`. They pass with or without
+    // `global = true`, because clap accepts `Args`'s own fields in the leading position either
+    // way. `global = true` controls the trailing position, which the
+    // `*_parses_after_the_subcommand` tests cover.
+
+    /// The repeated `vulkan` tests the comma split without needing a second backend feature,
+    /// since `Vulkan` is the only variant a default build is guaranteed to have. Gated because
+    /// that variant only exists with the `vulkan` feature.
     #[cfg(feature = "vulkan")]
     #[test]
     fn accelerators_are_accepted_before_the_subcommand() {
@@ -557,6 +547,7 @@ mod tests {
             "-i",
             "-",
         ]);
+
         assert_eq!(
             args.accelerators,
             vec![
@@ -572,6 +563,7 @@ mod tests {
     #[test]
     fn short_accelerators_flag_is_accepted_before_the_subcommand() {
         let args = Args::parse_from(["av-denoise", "-A", "vulkan", "nlmeans", "-i", "-"]);
+
         assert_eq!(
             args.accelerators,
             vec![av_denoise::accelerate::Accelerator::Vulkan]
@@ -581,44 +573,45 @@ mod tests {
     #[test]
     fn device_is_accepted_before_the_subcommand() {
         let args = Args::parse_from(["av-denoise", "--device", "cpu", "nlmeans", "-i", "-"]);
+
         assert!(matches!(args.device, av_denoise::Device::Cpu));
     }
 
     #[test]
     fn channel_mode_is_accepted_before_the_subcommand() {
         let args = Args::parse_from(["av-denoise", "--channel-mode", "chroma", "nlmeans", "-i", "-"]);
+
         assert_eq!(args.channel_mode, vec![CliChannelMode::Chroma]);
     }
 
     #[test]
     fn progress_flag_is_accepted_before_the_subcommand() {
         let args = Args::parse_from(["av-denoise", "--progress", "nlmeans", "-i", "-"]);
+
         assert!(args.progress);
     }
 
-    /// The other half of the rule. `--strength` is owned by the
-    /// `nlmeans` subcommand rather than being global, so it must be
-    /// rejected before `nlmeans` even though the globals above are
-    /// accepted there.
+    /// `--strength` belongs to the `nlmeans` subcommand rather than
+    /// being global, so it must be rejected before `nlmeans` even
+    /// though the globals above are accepted there.
     #[test]
     fn a_subcommand_owned_flag_is_rejected_before_the_subcommand() {
-        let err = Args::try_parse_from(["av-denoise", "--strength", "1.2", "nlmeans", "-i", "-"])
+        let error = Args::try_parse_from(["av-denoise", "--strength", "1.2", "nlmeans", "-i", "-"])
             .expect_err("--strength is subcommand-owned, not global");
-        assert!(err.to_string().contains("strength"), "got {err}");
+
+        assert!(error.to_string().contains("strength"), "got {error}");
     }
 
-    /// This is the test that really depends on `--accelerators` being
-    /// `global = true`. Without it, a flag placed after `nlmeans` is
-    /// rejected as unknown to the subcommand's own parser. The
-    /// `denoise-file` recipe in the `Justfile` passes user flags in
-    /// exactly this position.
-    ///
-    /// Feature-gated because it names the `Vulkan` accelerator variant,
-    /// which only exists when its feature is enabled.
+    /// Depends on `--accelerators` being `global = true`. Without it, a
+    /// flag after `nlmeans` is rejected as unknown to the subcommand,
+    /// and the `denoise-file` recipe in the `Justfile` passes user flags
+    /// in exactly this position. Gated because it names the `Vulkan`
+    /// accelerator variant, which only exists with its feature.
     #[cfg(feature = "vulkan")]
     #[test]
     fn accelerators_parses_after_the_subcommand() {
         let (args, _) = parse(&["--accelerators", "vulkan"]);
+
         assert_eq!(
             args.accelerators,
             vec![av_denoise::accelerate::Accelerator::Vulkan]
@@ -626,25 +619,27 @@ mod tests {
     }
 
     /// Same `global = true` dependency as
-    /// [`accelerators_parses_after_the_subcommand`], for `--device`.
+    /// [accelerators_parses_after_the_subcommand], for `--device`.
     #[test]
     fn device_parses_after_the_subcommand() {
         let (args, _) = parse(&["--device", "cpu"]);
+
         assert!(matches!(args.device, av_denoise::Device::Cpu));
     }
 
     /// Same `global = true` dependency as
-    /// [`accelerators_parses_after_the_subcommand`], for
-    /// `--channel-mode`.
+    /// [accelerators_parses_after_the_subcommand], for `--channel-mode`.
     #[test]
     fn channel_mode_parses_after_the_subcommand() {
         let (args, _) = parse(&["--channel-mode", "chroma"]);
+
         assert_eq!(args.channel_mode, vec![CliChannelMode::Chroma]);
     }
 
     #[test]
     fn channel_mode_defaults_to_luma_and_chroma() {
         let (args, _) = parse(&[]);
+
         assert_eq!(
             args.channel_mode,
             vec![CliChannelMode::Luma, CliChannelMode::Chroma]
@@ -655,6 +650,7 @@ mod tests {
     fn default_channel_mode_resolves_to_the_luma_chroma_intent() {
         let (args, _) = parse(&[]);
         let intent = resolve_channel_intent(&args.channel_mode).expect("default should resolve");
+
         assert!(
             matches!(intent, av_denoise::ChannelIntent::LumaChroma),
             "expected LumaChroma, got {intent:?}",
@@ -664,12 +660,14 @@ mod tests {
     #[test]
     fn variant_flag_is_case_insensitive() {
         let (_, nlm) = parse(&["--variant", "HQ"]);
+
         assert_eq!(nlm.variant, Some(Variant::Hq));
     }
 
     #[test]
     fn hq_sigma_scale_parses_to_the_typed_value() {
         let (_, nlm) = parse(&["--hq-sigma-scale", "2.0"]);
+
         assert_eq!(nlm.hq_sigma_scale, Some(2.0));
     }
 
@@ -677,8 +675,9 @@ mod tests {
     fn unset_hq_sigma_scale_resolves_to_the_library_default_of_one() {
         let (args, nlm) = parse(&["--variant", "hq"]);
         let resolved = nlm.resolve_preset(args.preset);
+        let nlm_options = NlmeansOptions::default();
         let algorithm = nlm
-            .resolve_algorithm(resolved, NlmeansOptions::default())
+            .resolve_algorithm(resolved, nlm_options)
             .expect("resolution should succeed");
 
         match algorithm {
@@ -691,8 +690,9 @@ mod tests {
     fn hq_flags_on_the_fast_variant_still_resolve_to_nlmeans() {
         let (args, nlm) = parse(&["--variant", "fast", "--hq-sigma-scale", "2.0"]);
         let resolved = nlm.resolve_preset(args.preset);
+        let nlm_options = NlmeansOptions::default();
         let algorithm = nlm
-            .resolve_algorithm(resolved, NlmeansOptions::default())
+            .resolve_algorithm(resolved, nlm_options)
             .expect("resolution should succeed");
 
         assert!(matches!(algorithm, av_denoise::Algorithm::Nlmeans(_)));
@@ -702,14 +702,18 @@ mod tests {
     fn hq_sigma_and_sigma_scale_both_resolve() {
         let (args, nlm) = parse(&["--variant", "hq", "--hq-sigma", "6", "--hq-sigma-scale", "2.0"]);
         let resolved = nlm.resolve_preset(args.preset);
+        let nlm_options = NlmeansOptions::default();
         let algorithm = nlm
-            .resolve_algorithm(resolved, NlmeansOptions::default())
+            .resolve_algorithm(resolved, nlm_options)
             .expect("resolution should succeed");
 
         match algorithm {
             av_denoise::Algorithm::NlmeansHq(opts) => {
                 assert!(
-                    matches!(opts.hq.sigma_override, Some(s) if (s - 6.0 / 255.0).abs() < f32::EPSILON),
+                    matches!(
+                        opts.hq.sigma_override,
+                        Some(sigma) if (sigma - 6.0 / 255.0).abs() < f32::EPSILON
+                    ),
                     "expected sigma_override Some(6/255), got {:?}",
                     opts.hq.sigma_override,
                 );
@@ -723,34 +727,41 @@ mod tests {
     fn out_of_range_hq_sigma_is_rejected() {
         let (args, nlm) = parse(&["--variant", "hq", "--hq-sigma", "300"]);
         let resolved = nlm.resolve_preset(args.preset);
-        let err = nlm
-            .resolve_algorithm(resolved, NlmeansOptions::default())
+        let nlm_options = NlmeansOptions::default();
+        let error = nlm
+            .resolve_algorithm(resolved, nlm_options)
             .expect_err("300 is out of range");
 
-        assert!(err.to_string().contains("--hq-sigma"), "got {err}");
+        assert!(error.to_string().contains("--hq-sigma"), "got {error}");
     }
 
     #[test]
     fn progress_defaults_to_false() {
         let (args, _) = parse(&[]);
+
         assert!(!args.progress);
     }
 
     #[test]
     fn progress_flag_sets_it_true() {
         let (args, _) = parse(&["--progress"]);
+
         assert!(args.progress);
     }
 
     #[test]
     fn none_and_empty_prefilters() {
-        assert!(matches!(parse_prefilter("none").unwrap(), PrefilterMode::None));
-        assert!(matches!(parse_prefilter("").unwrap(), PrefilterMode::None));
+        let none = parse_prefilter("none").unwrap();
+        let empty = parse_prefilter("").unwrap();
+
+        assert!(matches!(none, PrefilterMode::None));
+        assert!(matches!(empty, PrefilterMode::None));
     }
 
     #[test]
     fn bilateral_with_values() {
         let mode = parse_prefilter("bilateral:3.0,0.02").unwrap();
+
         assert!(matches!(
             mode,
             PrefilterMode::Bilateral {
@@ -763,6 +774,7 @@ mod tests {
     #[test]
     fn bare_nlm_uses_default_strength_scale() {
         let mode = parse_prefilter("nlm").unwrap();
+
         assert!(matches!(
             mode,
             PrefilterMode::NlmSpatial { strength_scale }
@@ -773,6 +785,7 @@ mod tests {
     #[test]
     fn nlm_with_explicit_strength_scale() {
         let mode = parse_prefilter("nlm:0.8").unwrap();
+
         assert!(matches!(
             mode,
             PrefilterMode::NlmSpatial { strength_scale } if (strength_scale - 0.8).abs() < f32::EPSILON
@@ -781,85 +794,99 @@ mod tests {
 
     #[test]
     fn malformed_nlm_scale_is_rejected() {
-        let err = parse_prefilter("nlm:x").expect_err("expected parse failure");
-        assert!(err.to_string().contains("nlm"));
+        let error = parse_prefilter("nlm:x").expect_err("expected parse failure");
+
+        assert!(error.to_string().contains("nlm"));
     }
 
     #[test]
     fn unknown_prefilter_is_rejected() {
-        assert!(parse_prefilter("garbage").is_err());
+        let result = parse_prefilter("garbage");
+
+        assert!(result.is_err());
     }
 
     #[test]
     fn the_old_subcommands_are_rejected() {
-        assert!(Args::try_parse_from(["av-denoise", "stdin"]).is_err());
-        assert!(Args::try_parse_from(["av-denoise", "file", "-i", "noisy.mkv"]).is_err());
+        let stdin_result = Args::try_parse_from(["av-denoise", "stdin"]);
+        let file_result = Args::try_parse_from(["av-denoise", "file", "-i", "noisy.mkv"]);
+
+        assert!(stdin_result.is_err());
+        assert!(file_result.is_err());
     }
 
     #[test]
     fn a_path_parses_as_a_file_source() {
         let nlm = parse_input(&["--input", "noisy.mkv"]);
-        assert_eq!(
-            nlm.common.input,
-            InputSource::File(std::path::PathBuf::from("noisy.mkv"))
-        );
+        let path = std::path::PathBuf::from("noisy.mkv");
+
+        assert_eq!(nlm.common.input, InputSource::File(path));
     }
 
     #[test]
     fn a_dash_parses_as_stdin() {
         let nlm = parse_input(&["-i", "-"]);
+
         assert_eq!(nlm.common.input, InputSource::Stdin);
     }
 
     #[test]
     fn a_pipe_parses_as_a_descriptor() {
         let nlm = parse_input(&["-i", "pipe:3"]);
+
         assert_eq!(nlm.common.input, InputSource::Fd(3));
     }
 
     #[test]
     fn an_unreadable_descriptor_fails_to_parse() {
-        let err = Args::try_parse_from(["av-denoise", "nlmeans", "-i", "pipe:1"])
+        let error = Args::try_parse_from(["av-denoise", "nlmeans", "-i", "pipe:1"])
             .expect_err("pipe:1 is our own stdout");
-        assert!(err.to_string().contains("stdout"), "got {err}");
+
+        assert!(error.to_string().contains("stdout"), "got {error}");
     }
 
     #[test]
     fn workers_is_unset_by_default() {
         let nlm = parse_input(&["-i", "noisy.mkv"]);
+
         assert_eq!(nlm.common.workers, None);
     }
 
     #[test]
     fn workers_carries_the_typed_value() {
         let nlm = parse_input(&["-i", "noisy.mkv", "--workers", "4"]);
+
         assert_eq!(nlm.common.workers, Some(4));
     }
 
     #[test]
     fn frame_budget_is_unset_by_default() {
         let nlm = parse_input(&["-i", "noisy.mkv"]);
+
         assert_eq!(nlm.common.frame_budget, None);
     }
 
     #[test]
     fn frame_budget_reads_decimal_and_binary_units_apart() {
         let decimal = parse_input(&["-i", "noisy.mkv", "--frame-budget", "8GB"]);
+
         assert_eq!(decimal.common.frame_budget, Some(8_000_000_000));
 
         let binary = parse_input(&["-i", "noisy.mkv", "--frame-budget", "8GiB"]);
+
         assert_eq!(binary.common.frame_budget, Some(8_589_934_592));
     }
 
     #[test]
     fn frame_budget_reads_a_bare_number_as_bytes() {
         let nlm = parse_input(&["-i", "noisy.mkv", "--frame-budget", "512"]);
+
         assert_eq!(nlm.common.frame_budget, Some(512));
     }
 
     #[test]
     fn a_malformed_frame_budget_is_rejected() {
-        let err = Args::try_parse_from([
+        let error = Args::try_parse_from([
             "av-denoise",
             "nlmeans",
             "-i",
@@ -870,14 +897,14 @@ mod tests {
         .expect_err("banana is not a size");
 
         assert!(
-            err.to_string().contains("banana"),
-            "error should name the value: {err}"
+            error.to_string().contains("banana"),
+            "error should name the value: {error}"
         );
     }
 
     #[test]
     fn nlmeans_has_no_export_flag() {
-        let err = Args::try_parse_from([
+        let error = Args::try_parse_from([
             "av-denoise",
             "nlmeans",
             "-i",
@@ -887,7 +914,7 @@ mod tests {
         ])
         .expect_err("only nl4d exports grain");
 
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]

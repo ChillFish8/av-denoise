@@ -17,9 +17,10 @@ use av_denoise::{
     Subsampling,
     push_needs_retry,
 };
+use clap::Parser;
 
-const W: u32 = 1920;
-const H: u32 = 1080;
+const WIDTH: u32 = 1920;
+const HEIGHT: u32 = 1080;
 const RADIUS: u32 = 2;
 
 const WARMUP: usize = 5;
@@ -28,25 +29,23 @@ const ITERS: usize = 100;
 #[derive(clap::Parser, Debug)]
 #[command(about = "Cost of a reseed relative to a sequential frame", long_about = None)]
 struct Cli {
-    /// GPU device to bind to. Format: `default`, `discrete[:N]`,
-    /// `integrated[:N]`, `virtual[:N]`, or `cpu`.
+    /// GPU device to bind to, one of `default`, `discrete[:N]`, `integrated[:N]`, `virtual[:N]` or `cpu`.
     #[arg(long, default_value = "default")]
     device: Device,
 
-    /// Accelerator priority list (comma-delimited). Defaults to all
-    /// compiled-in accelerators.
+    /// Accelerator priority list, comma-delimited. Defaults to all compiled-in accelerators.
     #[arg(long, value_delimiter = ',', default_values_t = av_denoise::accelerate::get_default_accelerators())]
     accelerators: Vec<Accelerator>,
 
-    /// Swallowed: cargo passes this when invoking the bench binary.
+    /// Swallowed, since cargo passes this when invoking the bench binary.
     #[arg(long, hide = true)]
     bench: bool,
 }
 
 fn layout() -> FrameLayout {
     FrameLayout {
-        width: W,
-        height: H,
+        width: WIDTH,
+        height: HEIGHT,
         subsampling: Subsampling::Yuv420,
         depth: Depth::Eight,
     }
@@ -66,19 +65,19 @@ fn plane_options(accelerators: &[Accelerator], device: &Device) -> PlaneOptions 
     }
 }
 
-/// A small xorshift generator, deterministic across runs so the synthetic
-/// clip does not vary between executions.
-fn pseudo_random(mut x: u64) -> u64 {
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    x
+/// A small xorshift generator, so the synthetic clip is the same on every run.
+fn pseudo_random(mut state: u64) -> u64 {
+    state ^= state << 13;
+    state ^= state >> 7;
+    state ^= state << 17;
+    state
 }
 
-/// One plane's wire bytes for frame `frame_idx`: a spatial ramp across the
-/// plane plus a per-frame offset and a deterministic dither, so a temporal
-/// filter sees real signal and real noise to work with.
-fn ramp_plane(pixels: usize, width: u32, frame_idx: usize, plane_seed: u64) -> Vec<u8> {
+/// One plane's wire bytes for frame `frame_index`.
+///
+/// A spatial ramp plus a per-frame offset and a deterministic dither give a temporal filter real
+/// signal and real noise to work with.
+fn ramp_plane(pixels: usize, width: u32, frame_index: usize, plane_seed: u64) -> Vec<u8> {
     let width = width.max(1) as usize;
 
     (0..pixels)
@@ -86,8 +85,8 @@ fn ramp_plane(pixels: usize, width: u32, frame_idx: usize, plane_seed: u64) -> V
             let x = (i % width) as u32;
             let y = (i / width) as u32;
             let spatial = x.wrapping_add(y) % 120;
-            let frame_offset = (frame_idx as u32 * 7) % 60;
-            let seed = (i as u64) ^ (frame_idx as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ plane_seed;
+            let frame_offset = (frame_index as u32 * 7) % 60;
+            let seed = (i as u64) ^ (frame_index as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ plane_seed;
             let dither = (pseudo_random(seed) % 16) as u32;
             let value = 20 + spatial + frame_offset + dither;
             value.min(235) as u8
@@ -95,31 +94,35 @@ fn ramp_plane(pixels: usize, width: u32, frame_idx: usize, plane_seed: u64) -> V
         .collect()
 }
 
-fn make_planes(layout: &FrameLayout, frame_idx: usize) -> Planes {
-    let (chroma_w, _) = layout.chroma_dims();
+fn make_planes(layout: &FrameLayout, frame_index: usize) -> Planes {
+    let (chroma_width, _) = layout.chroma_dims();
+    let y_plane = ramp_plane(layout.luma_pixels(), layout.width, frame_index, 1);
+    let u_plane = ramp_plane(layout.chroma_pixels(), chroma_width, frame_index, 2);
+    let v_plane = ramp_plane(layout.chroma_pixels(), chroma_width, frame_index, 3);
+
     Planes {
-        y: ramp_plane(layout.luma_pixels(), layout.width, frame_idx, 1),
-        u: ramp_plane(layout.chroma_pixels(), chroma_w, frame_idx, 2),
-        v: ramp_plane(layout.chroma_pixels(), chroma_w, frame_idx, 3),
+        y: y_plane,
+        u: u_plane,
+        v: v_plane,
     }
 }
 
-/// `count` frames, each with distinct content, for building sliding
-/// windows out of without re-generating a window's frames per call.
+/// `count` frames with distinct content, so sliding windows are cut from it without regenerating
+/// frames per call.
 fn make_clip(layout: &FrameLayout, count: usize) -> Vec<Planes> {
     (0..count).map(|i| make_planes(layout, i)).collect()
 }
 
-/// The accelerator a real denoiser would pick for `accelerators` and
-/// `device`, read from a throwaway probe since `PlanarDenoiser` may own
-/// up to three inner denoisers and exposes no single accelerator getter.
+/// The accelerator a real denoiser would pick, read from a throwaway probe.
+///
+/// `PlanarDenoiser` may own up to three inner denoisers and exposes no single accelerator getter.
 fn selected_accelerator(accelerators: &[Accelerator], device: &Device) -> Result<Accelerator, anyhow::Error> {
-    let opts = DenoiserOptions::builder()
+    let probe_options = DenoiserOptions::builder()
         .channel_mode(ChannelMode::Luma)
         .mode(DenoisingMode::Spacial)
         .algorithm(Algorithm::default())
         .build();
-    let probe = HostDenoiser::create(accelerators, device, 4, 4, opts)?;
+    let probe = HostDenoiser::create(accelerators, device, 4, 4, probe_options)?;
     Ok(probe.selected_accelerator())
 }
 
@@ -164,59 +167,60 @@ fn summarise(name: &str, accelerator: Accelerator, times: &[Duration]) -> BenchR
     }
 }
 
-/// Times `push` plus `recv` per output frame once the window is primed and
-/// the stream is in steady state.
+/// Times `push` plus `recv` per output frame once the window is primed and the stream is steady.
 fn bench_sequential(accelerators: &[Accelerator], device: &Device) -> Result<BenchResult, anyhow::Error> {
     let layout = layout();
-    let opts = plane_options(accelerators, device);
-    let mut denoiser = PlanarDenoiser::create(&opts, layout)?;
+    let options = plane_options(accelerators, device);
+    let mut denoiser = PlanarDenoiser::create(&options, layout)?;
     let accelerator = selected_accelerator(accelerators, device)?;
 
     let radius = denoiser.temporal_radius();
     let window = 2 * radius + 1;
     let clip = make_clip(&layout, window as usize + WARMUP + ITERS);
 
-    // Prime the window outside the timed region so steady-state push/recv
-    // lines up: one recv for every push from here on.
+    // Priming happens outside the timed region, so from here on every push has one recv.
     for frame in &clip[..window.saturating_sub(1) as usize] {
-        if push_needs_retry(denoiser.push(frame))? {
+        let pushed = denoiser.push(frame);
+        if push_needs_retry(pushed)? {
             let _ = denoiser.recv()?;
             denoiser.push(frame)?;
         }
     }
+
     while denoiser.recv()?.is_some() {}
 
-    let mut idx = window.saturating_sub(1) as usize;
+    let mut next_frame = window.saturating_sub(1) as usize;
 
     for _ in 0..WARMUP {
-        denoiser.push(&clip[idx])?;
+        denoiser.push(&clip[next_frame])?;
         let _ = denoiser.recv()?;
-        idx += 1;
+        next_frame += 1;
     }
 
     let mut times = Vec::with_capacity(ITERS);
     for _ in 0..ITERS {
         let start = Instant::now();
-        denoiser.push(&clip[idx])?;
-        let _out = denoiser.recv()?;
+        denoiser.push(&clip[next_frame])?;
+        let _received = denoiser.recv()?;
         times.push(start.elapsed());
-        idx += 1;
+        next_frame += 1;
     }
 
-    // Drain the trailing temporal frames before the denoiser drops, so no
-    // pending readback dies in flight with its GPU buffer still mapped.
+    // Drain the trailing temporal frames so every pushed frame is accounted for. An unpolled
+    // `Pending` is free to drop, so this is bookkeeping rather than a safety requirement.
     denoiser.flush(|_| {})?;
 
-    Ok(summarise("sequential", accelerator, &times))
+    let result = summarise("sequential", accelerator, &times);
+    Ok(result)
 }
 
-/// Times one `reseed` call over a fresh window per iteration. The
-/// denoiser is built once, before timing starts, and every window is
-/// built ahead of time too, so only `reseed` itself is on the clock.
+/// Times one `reseed` call over a fresh window per iteration.
+///
+/// The denoiser and every window are built before timing starts, so only `reseed` is on the clock.
 fn bench_reseed(accelerators: &[Accelerator], device: &Device) -> Result<BenchResult, anyhow::Error> {
     let layout = layout();
-    let opts = plane_options(accelerators, device);
-    let mut denoiser = PlanarDenoiser::create(&opts, layout)?;
+    let options = plane_options(accelerators, device);
+    let mut denoiser = PlanarDenoiser::create(&options, layout)?;
     let accelerator = selected_accelerator(accelerators, device)?;
 
     let radius = denoiser.temporal_radius() as usize;
@@ -233,41 +237,43 @@ fn bench_reseed(accelerators: &[Accelerator], device: &Device) -> Result<BenchRe
     let mut times = Vec::with_capacity(ITERS);
     for window in &windows[WARMUP..] {
         let start = Instant::now();
-        let _out = denoiser.reseed(window)?;
+        let _reseeded = denoiser.reseed(window)?;
         times.push(start.elapsed());
     }
 
     denoiser.flush(|_| {})?;
 
-    Ok(summarise("reseed", accelerator, &times))
+    let result = summarise("reseed", accelerator, &times);
+    Ok(result)
 }
 
 fn main() {
     // SAFETY: single-threaded at entry, no race possible.
     unsafe { av_denoise::raise_codegen_stack_limit() };
 
-    use clap::Parser;
     let cli = Cli::parse();
 
-    println!("Reseed cost benchmark - {W}×{H}, temporal radius {RADIUS}");
+    println!("Reseed cost benchmark - {WIDTH}×{HEIGHT}, temporal radius {RADIUS}");
     println!("  warmup={WARMUP}, timed={ITERS}");
     println!("  device:        {:?}", cli.device);
     println!("  accelerators:  {:?}", cli.accelerators);
     println!();
 
-    let sequential = match bench_sequential(&cli.accelerators, &cli.device) {
+    let sequential_outcome = bench_sequential(&cli.accelerators, &cli.device);
+    let sequential = match sequential_outcome {
         Ok(result) => result,
-        Err(err) => {
-            eprintln!("[sequential] failed: {err:?}");
+        Err(error) => {
+            eprintln!("[sequential] failed: {error:?}");
             return;
         },
     };
     sequential.print();
 
-    let reseed = match bench_reseed(&cli.accelerators, &cli.device) {
+    let reseed_outcome = bench_reseed(&cli.accelerators, &cli.device);
+    let reseed = match reseed_outcome {
         Ok(result) => result,
-        Err(err) => {
-            eprintln!("[reseed] failed: {err:?}");
+        Err(error) => {
+            eprintln!("[reseed] failed: {error:?}");
             return;
         },
     };

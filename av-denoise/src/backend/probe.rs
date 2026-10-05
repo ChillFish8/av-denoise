@@ -1,17 +1,4 @@
-//! Opening a backend's client without taking the process down with it.
-//!
-//! A build can enable a backend whose driver libraries are not
-//! installed. Some backends do not report that as an error. The CUDA
-//! runtime loads `libcuda` dynamically on its own worker thread and
-//! panics there when the load fails, and the panic reaches the caller
-//! as a second panic when cubecl unwraps the dead worker's channel.
-//!
-//! [`open_client`] runs that work under [`catch_unwind`], so a missing
-//! driver reads as "this backend is not available here" rather than as
-//! a crash. That is what makes a single binary with `cuda`, `rocm`, and
-//! `vulkan` all enabled usable on a machine that has only one of them.
-
-use std::panic::{self, AssertUnwindSafe};
+use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::sync::Mutex;
 
 use cubecl::client::ComputeClient;
@@ -19,21 +6,22 @@ use cubecl::prelude::*;
 
 use super::accelerate::Accelerator;
 
-/// Backends already reported as unavailable, and the lock guarding the
-/// panic hook.
+/// Backends already reported as unavailable, and the lock guarding the panic hook.
 ///
-/// The hook is process-wide, so two probes running at once would race to
-/// restore each other's. Holding this for the length of a probe keeps
-/// them in single file, and the list inside it keeps a backend from
-/// warning again every time it is probed.
+/// The hook is process-wide, so two probes running at once would race to restore each other's.
+/// Holding this for the length of a probe keeps them in single file, and the list inside it stops a
+/// backend from warning again every time it is probed.
 static PROBED: Mutex<Vec<Accelerator>> = Mutex::new(Vec::new());
 
-/// Opens a client for `accelerator` on `device`, or reports that the
-/// backend cannot run here.
+/// Opens a client for `accelerator` on `device`, or reports that the backend cannot run here.
 ///
-/// The client is synchronised before it is handed back. cubecl kernels
-/// are fully asynchronous, so a successful `sync()` is what proves the
-/// backend works, and no test kernel is needed.
+/// The client is synchronised before it is handed back. cubecl kernels are fully asynchronous, so a
+/// successful `sync()` proves the backend works and no test kernel is needed.
+///
+/// Some backends report missing driver libraries by panicking. The CUDA runtime loads `libcuda` on
+/// its own worker thread and panics there, which reaches the caller as a second panic when cubecl
+/// unwraps the dead worker's channel. Catching that lets one binary with several backends enabled
+/// run on a machine that has only one of them.
 pub(crate) fn open_client<R: Runtime>(
     accelerator: Accelerator,
     device: &R::Device,
@@ -42,7 +30,8 @@ pub(crate) fn open_client<R: Runtime>(
 
     let opened = quiet_panics(|| {
         let client = R::client(device);
-        cubecl::future::block_on(client.sync()).map(|()| client)
+        let synced = client.sync();
+        cubecl::future::block_on(synced).map(|()| client)
     });
 
     match opened {
@@ -52,9 +41,8 @@ pub(crate) fn open_client<R: Runtime>(
             None
         },
         Err(_) => {
-            // Only the first probe of a backend says anything. A denoise
-            // run probes once per denoiser it builds, and a missing
-            // driver is worth one line, not one per scene.
+            // A denoise run probes once per denoiser it builds, and a missing driver is worth one
+            // line rather than one per scene.
             if !probed.contains(&accelerator) {
                 probed.push(accelerator);
                 tracing::warn!(
@@ -66,21 +54,20 @@ pub(crate) fn open_client<R: Runtime>(
     }
 }
 
-/// Runs `f`, turning a panic into an `Err` and routing the panic message
-/// to the debug log rather than to stderr.
+/// Runs `work`, turning a panic into an `Err` and routing the panic message to the debug log.
 ///
-/// A failing backend prints its own panic from its worker thread before
-/// the caller ever sees one, so the hook is quietened for as long as `f`
-/// runs and put back afterwards.
-///
-/// The hook is process-wide. Callers hold [`PROBED`] across this so two
-/// probes cannot race to restore each other's.
-fn quiet_panics<T>(f: impl FnOnce() -> T) -> std::thread::Result<T> {
+/// A failing backend prints its own panic from its worker thread before the caller sees one, so the
+/// hook is quietened while `work` runs and put back afterwards. Callers hold [PROBED] across this so
+/// two probes cannot race to restore each other's hook.
+fn quiet_panics<T>(work: impl FnOnce() -> T) -> std::thread::Result<T> {
     let previous = panic::take_hook();
-    panic::set_hook(Box::new(|info| tracing::debug!("{info}")));
-    let out = panic::catch_unwind(AssertUnwindSafe(f));
+    let quiet_hook = Box::new(|info: &PanicHookInfo<'_>| tracing::debug!("{info}"));
+    panic::set_hook(quiet_hook);
+
+    let unwind_safe_work = AssertUnwindSafe(work);
+    let result = panic::catch_unwind(unwind_safe_work);
     panic::set_hook(previous);
-    out
+    result
 }
 
 #[cfg(test)]
@@ -94,22 +81,25 @@ mod tests {
     fn a_panic_inside_becomes_an_error() {
         let _probed = PROBED.lock().unwrap_or_else(|err| err.into_inner());
 
-        assert!(quiet_panics(|| panic!("the backend fell over")).is_err());
-        assert_eq!(quiet_panics(|| 7).unwrap(), 7);
+        let panicked = quiet_panics(|| panic!("the backend fell over"));
+        let returned = quiet_panics(|| 7);
+
+        assert!(panicked.is_err());
+        assert_eq!(returned.unwrap(), 7);
     }
 
-    /// The hook has to come back however the probe ended, or every later
-    /// panic in the process reports at debug level.
+    /// The hook has to come back however the probe ended, or every later panic reports at debug level.
     ///
-    /// Holding [`PROBED`], the way [`open_client`] does, keeps a probe on
-    /// another thread from swapping the hook mid-test.
+    /// Holding [PROBED], as [open_client] does, keeps a probe on another thread from swapping the hook
+    /// mid-test.
     #[test]
     fn the_panic_hook_is_restored() {
         let _probed = PROBED.lock().unwrap_or_else(|err| err.into_inner());
 
         let marker = Arc::new(AtomicBool::new(false));
         let flag = marker.clone();
-        panic::set_hook(Box::new(move |_| flag.store(true, Ordering::SeqCst)));
+        let marking_hook = Box::new(move |_: &PanicHookInfo<'_>| flag.store(true, Ordering::SeqCst));
+        panic::set_hook(marking_hook);
 
         let _ = quiet_panics(|| panic!("swallowed by the quiet hook"));
         assert!(

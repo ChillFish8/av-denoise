@@ -1,26 +1,26 @@
 use av_denoise::{Depth, FrameLayout, Planes};
 
 /// A moving sine texture plus hashed noise, so motion search and the noise estimator both have work.
-pub fn clip(layout: FrameLayout, frames: usize) -> Vec<Planes> {
+pub fn clip(layout: FrameLayout, frame_count: usize) -> Vec<Planes> {
     let (chroma_width, chroma_height) = layout.chroma_dims();
-    let mut clip = Vec::with_capacity(frames);
+    let mut frames = Vec::with_capacity(frame_count);
 
-    for index in 0..frames {
+    for index in 0..frame_count {
         let y_plane = plane(layout.width, layout.height, layout.depth, index, 0);
         let u_plane = plane(chroma_width, chroma_height, layout.depth, index, 1);
         let v_plane = plane(chroma_width, chroma_height, layout.depth, index, 2);
-        clip.push(Planes {
+        frames.push(Planes {
             y: y_plane,
             u: u_plane,
             v: v_plane,
         });
     }
 
-    clip
+    frames
 }
 
 fn plane(width: u32, height: u32, depth: Depth, frame: usize, channel: u32) -> Vec<u8> {
-    let max = depth.max_value();
+    let max_code = depth.max_value();
     let shift = frame as f32 * 1.5;
     let mut samples = Vec::with_capacity((width * height) as usize);
 
@@ -31,7 +31,7 @@ fn plane(width: u32, height: u32, depth: Depth, frame: usize, channel: u32) -> V
             let texture = 0.5 + 0.2 * phase_x.sin() * phase_y.cos();
             let noise = hashed_noise(column, row, frame as u32, channel) * 0.03;
             let value = (texture + noise).clamp(0.0, 1.0);
-            let code = (value * max).round() as u16;
+            let code = (value * max_code).round() as u16;
             samples.push(code);
         }
     }

@@ -75,8 +75,9 @@ fn rho_attenuation_changes_spatial_weighting_on_correlated_content() {
 /// The windowed kernel reads each candidate's offset from the table, while the separable path
 /// computes it on the host.
 ///
-/// Only interior pixels are compared, clear of every clamped read. The two paths already differ on clamped borders, so rho 0 is checked too. That separates the
-/// border difference from anything the offset table could introduce.
+/// Only interior pixels are compared, clear of every clamped read. The two paths already differ on
+/// clamped borders, so rho 0 is checked too. That separates the border difference from anything
+/// the offset table could introduce.
 #[test]
 fn windowed_and_separable_agree_under_rho_attenuation() {
     let client = make_client();

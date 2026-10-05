@@ -1,13 +1,3 @@
-//! Turns a VapourSynth clip's format and a filter's script arguments
-//! into the option types `av-denoise` denoises with.
-//!
-//! Everything here is a pure function over plain values, with no
-//! VapourSynth core and no GPU, so the whole accept/reject matrix is
-//! unit-testable. [`Format`](vapoursynth::format::Format) itself cannot
-//! be built outside a running core, so [`layout_from_format`] takes a
-//! [`RawFormat`] of the plain fields it needs instead. The caller in
-//! `filter.rs` does the short extraction from a real `Format`.
-
 use av_denoise::accelerate::{Accelerator, get_default_accelerators};
 use av_denoise::{
     Algorithm,
@@ -37,14 +27,10 @@ use av_denoise::{
 };
 use vapoursynth::format::{ColorFamily, SampleType};
 
-/// The handful of format fields [`layout_from_format`] actually reads.
+/// The format fields [layout_from_format] reads.
 ///
-/// The real caller is `vapoursynth::format::Format`, which wraps a
-/// pointer only a running VapourSynth core can hand out, so it cannot be
-/// built in a unit test. A caller with a real `Format` builds one of
-/// these from `format.sample_type()`, `format.bits_per_sample()`,
-/// `format.sub_sampling_w()`, `format.sub_sampling_h()`, and
-/// `format.color_family()`.
+/// `vapoursynth::format::Format` wraps a pointer only a running VapourSynth core can hand out, so it
+/// cannot be built in a unit test.
 #[derive(Debug, Clone, Copy)]
 pub struct RawFormat {
     pub sample_type: SampleType,
@@ -54,21 +40,12 @@ pub struct RawFormat {
     pub color_family: ColorFamily,
 }
 
-/// Validates a clip's format and turns it into a [`FrameLayout`].
+/// Validates a clip's format and turns it into a [FrameLayout].
 ///
-/// Accepts integer YUV420, YUV422, and YUV444 sources at 8, 10, or
-/// 12-bit. Rejects RGB, since the denoiser's channel distance weights
-/// are calibrated for YUV. Rejects float sample types and any other
-/// chroma subsampling.
-///
-/// Rejects GRAY too. Core's [`Subsampling`] has no "no chroma" variant,
-/// so a GRAY source would have to be represented as YUV444, which makes
-/// [`av_denoise::FrameLayout::chroma_dims`] report
-/// full-resolution chroma planes that do not exist. The filter would
-/// then have to fabricate and push full-size neutral chroma every
-/// frame, four times the real data volume of true 4:2:0 chroma, purely
-/// to work around a gap in the geometry type. GRAY is out of scope
-/// until core can represent a source with no chroma planes at all.
+/// Accepts integer YUV420, YUV422 and YUV444 sources at 8, 10 or 12 bits. RGB is rejected because
+/// the denoiser's channel distance weights are calibrated for YUV. GRAY is rejected because
+/// [Subsampling] has no "no chroma" variant, and representing it as YUV444 would push full-size
+/// neutral chroma every frame, four times the data volume of true 4:2:0 chroma.
 pub fn layout_from_format(format: RawFormat, width: u32, height: u32) -> Result<FrameLayout, anyhow::Error> {
     match format.color_family {
         ColorFamily::YUV => {},
@@ -96,9 +73,9 @@ pub fn layout_from_format(format: RawFormat, width: u32, height: u32) -> Result<
         (0, 0) => Subsampling::Yuv444,
         (1, 0) => Subsampling::Yuv422,
         (1, 1) => Subsampling::Yuv420,
-        (w, h) => {
+        (subsampling_w, subsampling_h) => {
             anyhow::bail!(
-                "unsupported chroma subsampling (subsampling_w={w}, subsampling_h={h}), av-denoise-vs accepts YUV420, YUV422, and YUV444"
+                "unsupported chroma subsampling (subsampling_w={subsampling_w}, subsampling_h={subsampling_h}), av-denoise-vs accepts YUV420, YUV422, and YUV444"
             );
         },
     };
@@ -112,19 +89,12 @@ pub fn layout_from_format(format: RawFormat, width: u32, height: u32) -> Result<
 }
 
 /// Which denoising algorithm a filter function runs.
-///
-/// `avd.Nlmeans` builds [`AlgorithmKind::Nlmeans`], `avd.Nl4d` builds
-/// [`AlgorithmKind::Nl4d`]. This has no `Hq` variant since the
-/// VapourSynth plugin does not expose the HQ variant separately, it
-/// takes a plain algorithm choice per filter function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlgorithmKind {
     Nlmeans,
     Nl4d,
 }
 
-/// The name a [`NlmeansVariant`] parses back from, used in error
-/// messages.
 fn variant_name(variant: NlmeansVariant) -> &'static str {
     match variant {
         NlmeansVariant::Fast => "fast",
@@ -132,32 +102,24 @@ fn variant_name(variant: NlmeansVariant) -> &'static str {
     }
 }
 
-/// Resolves an explicit `variant` string into an [`NlmeansVariant`].
-///
-/// Uses [`av_denoise`]'s own parser, the same one the CLI's
-/// `--variant` flag resolves through, so a name accepted on the CLI is
-/// accepted here too.
+/// Parses a `variant` name with the parser the CLI's `--variant` flag uses, so both accept the same
+/// names.
 fn parse_variant(raw: &str) -> Result<NlmeansVariant, anyhow::Error> {
     raw.parse::<NlmeansVariant>()
         .map_err(|_| anyhow::anyhow!("unknown variant '{raw}', expected one of fast, hq"))
 }
 
-/// Resolves an explicit `preset` string into a [`Preset`].
-///
-/// Uses [`av_denoise`]'s own parser, the same one the CLI's
-/// `--preset` flag resolves through, so a name accepted on the CLI is
-/// accepted here too.
+/// Parses a `preset` name with the parser the CLI's `--preset` flag uses, so both accept the same
+/// names.
 fn parse_preset(raw: &str) -> Result<Preset, anyhow::Error> {
     raw.parse::<Preset>().map_err(|_| {
         anyhow::anyhow!("unknown preset '{raw}', expected one of veryfast, fast, base, slow, veryslow")
     })
 }
 
-/// The raw script arguments a filter function receives, before they are
-/// validated and folded into a [`PlaneOptions`].
+/// The script arguments a filter function receives, before they are validated.
 ///
-/// Every field is optional. An unset field falls back to the library's
-/// own default for whichever algorithm is being built.
+/// An unset field falls back to the library's own default for the algorithm being built.
 #[derive(Debug, Clone, Default)]
 pub struct RawParams {
     pub strength: Option<f64>,
@@ -189,14 +151,11 @@ pub struct RawParams {
     pub pooled_threshold: Option<bool>,
 }
 
-/// Turns a nonnegative script integer into a `u32`, naming `field` in
-/// the error when it is negative.
 fn nonnegative(value: i64, field: &str) -> Result<u32, anyhow::Error> {
     u32::try_from(value).map_err(|_| anyhow::anyhow!("{field} must not be negative, got {value}"))
 }
 
-/// Resolves an explicit `channel_mode` string into a [`ChannelIntent`],
-/// rejecting anything the source can't support.
+/// Parses a `channel_mode` name, rejecting a mode the source cannot support.
 fn parse_channel_mode(raw: &str, layout: FrameLayout) -> Result<ChannelIntent, anyhow::Error> {
     let intent = match raw.to_ascii_lowercase().as_str() {
         "luma" => ChannelIntent::Luma,
@@ -214,42 +173,15 @@ fn parse_channel_mode(raw: &str, layout: FrameLayout) -> Result<ChannelIntent, a
 
 /// Rejects a parameter set on an algorithm that never reads it.
 ///
-/// `strength`, its per-plane overrides, `patch_radius`, `search_radius`,
-/// and `variant` only feed the NLM weighting pass, which `NlmTuning`
-/// belongs to. Core's own `DenoiserOptions::to_nlm_params` builds the
-/// `Nl4d` arm from `NlmParams::default()` for exactly this group of
-/// fields, so none of them reach an `Nl4d` run at all, no matter what a
-/// caller sets. `lambda_ht` and its per-plane overrides only feed
-/// nl4d's temporal grouping stage. Setting one on the algorithm that
-/// ignores it would silently do nothing, which a script parameter
-/// dictionary has no way to warn about on its own, so this rejects it
-/// instead.
+/// A script parameter dictionary has no way to warn that a parameter silently does nothing, so this
+/// is an error instead. The strength, patch and search radius, variant, prefilter and motion
+/// parameters only feed the NLM weighting pass, which nl4d never runs. The `lambda_ht` family and the
+/// nl4d dials only feed nl4d. `sigma` and `sigma_scale` are rejected only on nlmeans
+/// `variant="fast"`, which has no noise estimator to pin or nudge.
 ///
-/// `sigma` and `sigma_scale` both pin or nudge the noise level an HQ
-/// front end would otherwise measure. nl4d always runs that front end,
-/// so both are always valid there. Plain `nlmeans` (`variant="fast"`)
-/// has no noise estimator at all, so both are rejected only in that one
-/// case, checked separately below since it depends on `variant` rather
-/// than `algorithm_kind` alone.
-///
-/// `sigma_scale` alongside `sigma` is not rejected here, even though it
-/// does nothing in that combination: the noise estimator that
-/// `sigma_scale` would nudge never runs once `sigma` pins the level.
-/// This mirrors the CLI, which only warns about that combination rather
-/// than erroring (see `--hq-sigma-scale` and `--sigma-scale`), because
-/// `sigma_scale` is a parameter every configuration understands, it
-/// just has nothing left to scale.
-///
-/// `temporal_radius` is not here because it genuinely affects every
-/// algorithm: it sets `PlaneOptions::mode`, which every algorithm
-/// reads. `preset` is not here for the same reason: both algorithms
-/// resolve dials from it.
-///
-/// This runs before the `RUST_MIN_STACK` stack-safety check in
-/// [`plane_options_from`], so `search_radius` on an `Nl4d` call fails
-/// here first rather than tripping that check, which nl4d can never
-/// actually need since it never applies a caller's `search_radius` in
-/// the first place.
+/// `sigma_scale` alongside `sigma` is accepted even though the estimator it nudges never runs, to
+/// match the CLI, which only warns about that combination. `temporal_radius` and `preset` are
+/// accepted everywhere because every algorithm reads them.
 fn reject_mismatched_params(
     raw: &RawParams,
     algorithm_kind: AlgorithmKind,
@@ -296,17 +228,20 @@ fn reject_mismatched_params(
                     anyhow::bail!("{name} has no effect on nlmeans, which only nl4d reads");
                 }
             }
+
             if variant == NlmeansVariant::Fast {
+                let variant_label = variant_name(variant);
                 if raw.sigma.is_some() {
                     anyhow::bail!(
                         "sigma has no effect on nlmeans variant=\"{}\", which has no noise measurement to pin. Set variant=\"hq\" to use sigma",
-                        variant_name(variant)
+                        variant_label
                     );
                 }
+
                 if raw.sigma_scale.is_some() {
                     anyhow::bail!(
                         "sigma_scale has no effect on nlmeans variant=\"{}\", which has no noise measurement to nudge. Set variant=\"hq\" to use sigma_scale",
-                        variant_name(variant)
+                        variant_label
                     );
                 }
             }
@@ -316,39 +251,29 @@ fn reject_mismatched_params(
     Ok(())
 }
 
-/// Validates `raw` against `layout` and builds the [`PlaneOptions`] a
-/// [`PlanarDenoiser`](av_denoise::PlanarDenoiser) is created from.
+/// Validates `raw` against `layout` and builds the denoiser's [PlaneOptions].
 ///
-/// Rejects any parameter `algorithm_kind` does not read first, such as
-/// `strength` on nl4d or `lambda_ht` on nlmeans, rather than accepting
-/// and silently ignoring it. See [`reject_mismatched_params`].
-///
-/// Then rejects `search_radius` above 4 when `RUST_MIN_STACK` is unset or
-/// too small, since cubecl's kernel codegen overflows the default 2 MiB
-/// stack and aborts the process at that radius. `filter.rs` raises the
-/// stack before this runs in the real plugin, so this only ever fires
-/// when that step was skipped, and only for nlmeans, since nl4d never
-/// reaches this check with a `search_radius` set at all.
+/// Parameters the algorithm never reads are rejected first, so `search_radius` on nl4d fails as a
+/// mismatch rather than tripping the stack check. A `search_radius` above 4 is then rejected when
+/// `RUST_MIN_STACK` is unset or too small, since cubecl's kernel codegen overflows the default 2 MiB
+/// stack and aborts the process at that radius.
 pub fn plane_options_from(
     raw: &RawParams,
     algorithm_kind: AlgorithmKind,
     layout: FrameLayout,
 ) -> Result<PlaneOptions, anyhow::Error> {
-    // Resolved once and read by both algorithms below, exactly like the
-    // CLI's own `--preset`. An explicit `variant`, `temporal_radius`, or
-    // `search_radius` overrides whatever the preset would have picked,
-    // matching `NlmeansArgs::resolve_preset`'s precedence.
+    // An explicit `variant`, `temporal_radius` or `search_radius` overrides what the preset picks,
+    // matching the CLI's precedence.
     let preset = match &raw.preset {
         None => Preset::default(),
-        Some(p) => parse_preset(p)?,
+        Some(name) => parse_preset(name)?,
     };
 
-    // Only `Nlmeans` reads `variant` at all, so `Nl4d` never parses it,
-    // it is rejected as a mismatched parameter below instead if set.
+    // Only nlmeans reads `variant`, so nl4d never parses it and a set value fails as a mismatch below.
     let variant = match algorithm_kind {
         AlgorithmKind::Nlmeans => match raw.variant.as_deref() {
             None => nlmeans_variant_for(preset),
-            Some(v) => parse_variant(v)?,
+            Some(name) => parse_variant(name)?,
         },
         AlgorithmKind::Nl4d => NlmeansVariant::Hq,
     };
@@ -371,28 +296,25 @@ pub fn plane_options_from(
 
     let device = match &raw.device {
         None => Device::default(),
-        Some(s) => s
+        Some(name) => name
             .parse()
-            .map_err(|e| anyhow::anyhow!("invalid device '{s}': {e}"))?,
+            .map_err(|error| anyhow::anyhow!("invalid device '{name}': {error}"))?,
     };
 
     let accelerators = match &raw.accelerators {
         None => get_default_accelerators(),
         Some(names) => names
             .iter()
-            .map(|s| {
-                s.parse::<Accelerator>()
-                    .map_err(|e| anyhow::anyhow!("invalid accelerator '{s}': {e}"))
+            .map(|name| {
+                name.parse::<Accelerator>()
+                    .map_err(|error| anyhow::anyhow!("invalid accelerator '{name}': {error}"))
             })
             .collect::<Result<Vec<_>, _>>()?,
     };
 
-    // Both algorithms resolve their preset-driven temporal radius the
-    // same way the CLI does: an explicit `temporal_radius` overrides
-    // whatever the preset picks. nl4d groups patches across a temporal
-    // window and has no spatial-only mode, but no preset ever resolves
-    // it to 0, so the `radius == 0` arm below only actually triggers
-    // for `nlmeans`, whose `veryfast` preset does.
+    // An explicit `temporal_radius` overrides the preset's, the same way the CLI resolves it. nl4d has
+    // no spatial-only mode, and no nl4d preset resolves to 0, so only the nlmeans `veryfast` preset
+    // picks the spatial mode by default.
     let preset_temporal_radius = match algorithm_kind {
         AlgorithmKind::Nlmeans => nlmeans_temporal_radius_for(preset),
         AlgorithmKind::Nl4d => nl4d_temporal_radius_for(preset),
@@ -411,16 +333,18 @@ pub fn plane_options_from(
 
     let algorithm = match algorithm_kind {
         AlgorithmKind::Nlmeans => {
+            let search_radius = match raw.search_radius {
+                None => nlmeans_search_radius_for(preset),
+                Some(radius) => nonnegative(radius, "search_radius")?,
+            };
+
             let tuning = NlmTuning {
-                search_radius: Some(match raw.search_radius {
-                    None => nlmeans_search_radius_for(preset),
-                    Some(r) => nonnegative(r, "search_radius")?,
-                }),
+                search_radius: Some(search_radius),
                 patch_radius: raw
                     .patch_radius
-                    .map(|r| nonnegative(r, "patch_radius"))
+                    .map(|radius| nonnegative(radius, "patch_radius"))
                     .transpose()?,
-                strength: raw.strength.map(|v| v as f32),
+                strength: raw.strength.map(|value| value as f32),
                 ..NlmTuning::default()
             };
 
@@ -431,95 +355,89 @@ pub fn plane_options_from(
 
             let prefilter = match &raw.prefilter {
                 None => PrefilterMode::None,
-                Some(s) => parse_prefilter(s)?,
+                Some(spec) => parse_prefilter(spec)?,
+            };
+
+            let nlm = NlmeansOptions {
+                prefilter,
+                motion_compensation,
+                tuning,
+                mode,
             };
 
             match variant {
-                NlmeansVariant::Fast => Algorithm::Nlmeans(NlmeansOptions {
-                    prefilter,
-                    motion_compensation,
-                    tuning,
-                    mode,
-                }),
-                NlmeansVariant::Hq => Algorithm::NlmeansHq(NlmeansHqOptions {
-                    nlm: NlmeansOptions {
-                        prefilter,
-                        motion_compensation,
-                        tuning,
-                        mode,
-                    },
-                    hq: HqParams {
-                        sigma_override: raw.sigma.map(|v| v as f32),
+                NlmeansVariant::Fast => Algorithm::Nlmeans(nlm),
+                NlmeansVariant::Hq => {
+                    let hq = HqParams {
+                        sigma_override: raw.sigma.map(|value| value as f32),
                         sigma_scale: raw
                             .sigma_scale
-                            .map(|v| v as f32)
+                            .map(|value| value as f32)
                             .unwrap_or_else(|| HqParams::default().sigma_scale),
-                        // A VapourSynth filter has to return the same
-                        // pixels for a frame no matter what order
-                        // frames were requested in, and history-
-                        // dependent estimation breaks that guarantee
-                        // under random access. See `Nl4dOptions`'s own
-                        // `windowed_noise_estimation` field for the
-                        // same reasoning applied to nl4d.
+                        // A VapourSynth filter has to return the same pixels for a frame in any
+                        // request order, which history-dependent estimation breaks under random access.
                         windowed_noise_estimation: true,
                         ..HqParams::default()
-                    },
-                }),
+                    };
+
+                    let options = NlmeansHqOptions { nlm, hq };
+                    Algorithm::NlmeansHq(options)
+                },
             }
         },
-        AlgorithmKind::Nl4d => Algorithm::Nl4d(Nl4dOptions {
-            // A VapourSynth filter has to return the same pixels for a
-            // frame no matter what order frames were requested in.
-            // window-local estimation computes sigma from only the
-            // frames in the current window, so the fast path and a
-            // `reseed` after random access agree by construction. There
-            // is no reason to expose the stream-history-dependent
-            // temporal EMA here at all.
-            windowed_noise_estimation: true,
-            sigma: raw.sigma.map(|v| v as f32),
-            sigma_scale: raw
-                .sigma_scale
-                .map(|v| v as f32)
-                .unwrap_or_else(|| Nl4dOptions::default().sigma_scale),
-            lambda_ht: raw.lambda_ht.map(|v| v as f32),
-            lambda_ht_scale: raw
-                .lambda_ht_scale
-                .map(|v| v as f32)
-                .unwrap_or_else(|| Nl4dOptions::default().lambda_ht_scale),
-            spatial_radius: match raw.spatial_radius {
-                Some(r) => nonnegative(r, "spatial_radius")?,
-                None => nl4d_spatial_radius_for(preset),
-            },
-            refine: match raw.refine {
-                Some(r) => nonnegative(r, "refine")?,
-                None => Nl4dOptions::default().refine,
-            },
-            noise_map: match raw.noise_map {
-                Some(enabled) => enabled,
-                None => Nl4dOptions::default().noise_map,
-            },
-            flat_boost: raw
-                .flat_boost
-                .map(|v| v as f32)
-                .unwrap_or_else(|| Nl4dOptions::default().flat_boost),
-            chroma_flat_boost: raw
-                .chroma_flat_boost
-                .map(|v| v as f32)
-                .unwrap_or_else(|| Nl4dOptions::default().chroma_flat_boost),
-            shadow_soften: raw
-                .shadow_soften
-                .map(|v| v as f32)
-                .unwrap_or_else(|| Nl4dOptions::default().shadow_soften),
-            flat_texture_cut: raw
-                .flat_texture_cut
-                .map(|v| v as f32)
-                .unwrap_or_else(|| Nl4dOptions::default().flat_texture_cut),
-            pooled_threshold: match raw.pooled_threshold {
-                Some(enabled) => enabled,
-                None => Nl4dOptions::default().pooled_threshold,
-            },
-            ..Nl4dOptions::default()
-        }),
+        AlgorithmKind::Nl4d => {
+            let options = Nl4dOptions {
+                // A VapourSynth filter has to return the same pixels for a frame in any request
+                // order. Window-local estimation reads sigma from only the current window, so the
+                // fast path and a reseed after random access agree by construction.
+                windowed_noise_estimation: true,
+                sigma: raw.sigma.map(|value| value as f32),
+                sigma_scale: raw
+                    .sigma_scale
+                    .map(|value| value as f32)
+                    .unwrap_or_else(|| Nl4dOptions::default().sigma_scale),
+                lambda_ht: raw.lambda_ht.map(|value| value as f32),
+                lambda_ht_scale: raw
+                    .lambda_ht_scale
+                    .map(|value| value as f32)
+                    .unwrap_or_else(|| Nl4dOptions::default().lambda_ht_scale),
+                spatial_radius: match raw.spatial_radius {
+                    Some(radius) => nonnegative(radius, "spatial_radius")?,
+                    None => nl4d_spatial_radius_for(preset),
+                },
+                refine: match raw.refine {
+                    Some(passes) => nonnegative(passes, "refine")?,
+                    None => Nl4dOptions::default().refine,
+                },
+                noise_map: match raw.noise_map {
+                    Some(enabled) => enabled,
+                    None => Nl4dOptions::default().noise_map,
+                },
+                flat_boost: raw
+                    .flat_boost
+                    .map(|value| value as f32)
+                    .unwrap_or_else(|| Nl4dOptions::default().flat_boost),
+                chroma_flat_boost: raw
+                    .chroma_flat_boost
+                    .map(|value| value as f32)
+                    .unwrap_or_else(|| Nl4dOptions::default().chroma_flat_boost),
+                shadow_soften: raw
+                    .shadow_soften
+                    .map(|value| value as f32)
+                    .unwrap_or_else(|| Nl4dOptions::default().shadow_soften),
+                flat_texture_cut: raw
+                    .flat_texture_cut
+                    .map(|value| value as f32)
+                    .unwrap_or_else(|| Nl4dOptions::default().flat_texture_cut),
+                pooled_threshold: match raw.pooled_threshold {
+                    Some(enabled) => enabled,
+                    None => Nl4dOptions::default().pooled_threshold,
+                },
+                ..Nl4dOptions::default()
+            };
+
+            Algorithm::Nl4d(options)
+        },
     };
 
     Ok(PlaneOptions {
@@ -528,9 +446,9 @@ pub fn plane_options_from(
         intent,
         mode,
         algorithm,
-        luma_strength: raw.luma_strength.map(|v| v as f32),
-        chroma_strength: raw.chroma_strength.map(|v| v as f32),
-        luma_lambda_ht: raw.luma_lambda_ht.map(|v| v as f32),
-        chroma_lambda_ht: raw.chroma_lambda_ht.map(|v| v as f32),
+        luma_strength: raw.luma_strength.map(|value| value as f32),
+        chroma_strength: raw.chroma_strength.map(|value| value as f32),
+        luma_lambda_ht: raw.luma_lambda_ht.map(|value| value as f32),
+        chroma_lambda_ht: raw.chroma_lambda_ht.map(|value| value as f32),
     })
 }

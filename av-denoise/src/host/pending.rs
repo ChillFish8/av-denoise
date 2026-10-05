@@ -7,7 +7,7 @@ use super::io::ReadFuture;
 /// A denoised frame whose readback has not finished.
 ///
 /// The readback starts on the first poll. Dropping a `Pending` that was polled but has not landed
-/// blocks until it lands, see the `Drop` impl.
+/// blocks until it lands.
 pub struct Pending {
     future: ReadFuture,
     /// Set while `future` has been polled but has not produced its result.
@@ -35,7 +35,8 @@ impl Pending {
 
     /// Blocks until the readback finishes and returns one buffer per plane.
     pub fn wait(mut self) -> Result<Vec<Vec<u8>>, anyhow::Error> {
-        let result = cubecl::future::block_on(self.future.as_mut());
+        let future = self.future.as_mut();
+        let result = cubecl::future::block_on(future);
         self.polled = false;
 
         let buffers = result?;
@@ -80,7 +81,8 @@ impl Drop for Pending {
             return;
         }
 
-        let _ = cubecl::future::block_on(self.future.as_mut());
+        let future = self.future.as_mut();
+        let _ = cubecl::future::block_on(future);
     }
 }
 

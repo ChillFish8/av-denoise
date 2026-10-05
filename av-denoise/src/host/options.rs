@@ -58,7 +58,8 @@ pub enum Algorithm {
 
 impl Default for Algorithm {
     fn default() -> Self {
-        Self::Nlmeans(NlmeansOptions::default())
+        let options = NlmeansOptions::default();
+        Self::Nlmeans(options)
     }
 }
 

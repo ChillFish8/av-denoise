@@ -192,7 +192,10 @@ fn plant_patch(frame: &mut [f32], width: u32, x: u32, y: u32, patch: &[f32; 64])
 /// The motion field predicts exactly that shift at the block covering `ref_pos`, so a correct
 /// search recovers the patch through the prediction, not through luck. `confidence_for(k)` is
 /// written into every block of neighbour `k`'s confidence plane.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the test helper takes the full set of parameters its cases vary"
+)]
 pub(super) fn planted_ring(
     width: u32,
     height: u32,

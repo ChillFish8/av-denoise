@@ -2,8 +2,8 @@ use av_denoise_core::SampleFormat;
 
 /// Bit depth of a source's samples.
 ///
-/// Normalisation divides by [`Depth::max_value`], so a value in
-/// normalised units means the same thing at every depth.
+/// Normalisation divides by [Depth::max_value], so a value in normalised units means the same thing
+/// at every depth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Depth {
     Eight,
@@ -17,7 +17,7 @@ pub enum Depth {
 pub struct UnsupportedDepthError(pub usize);
 
 impl Depth {
-    /// Maps a declared bit depth onto a [`Depth`].
+    /// Maps a declared bit depth onto a [Depth].
     pub fn from_bits(bits: usize) -> Result<Self, UnsupportedDepthError> {
         match bits {
             8 => Ok(Depth::Eight),
@@ -46,8 +46,7 @@ impl Depth {
         }
     }
 
-    /// The largest sample value this depth can hold, which is also the
-    /// normalisation divisor.
+    /// The largest sample value this depth can hold, which is also the normalisation divisor.
     pub fn max_value(self) -> f32 {
         ((1u32 << self.bits()) - 1) as f32
     }
@@ -73,9 +72,13 @@ mod tests {
 
     #[test]
     fn from_bits_accepts_supported_depths() {
-        assert_eq!(Depth::from_bits(8).unwrap(), Depth::Eight);
-        assert_eq!(Depth::from_bits(10).unwrap(), Depth::Ten);
-        assert_eq!(Depth::from_bits(12).unwrap(), Depth::Twelve);
+        let eight_bit = Depth::from_bits(8).unwrap();
+        let ten_bit = Depth::from_bits(10).unwrap();
+        let twelve_bit = Depth::from_bits(12).unwrap();
+
+        assert_eq!(eight_bit, Depth::Eight);
+        assert_eq!(ten_bit, Depth::Ten);
+        assert_eq!(twelve_bit, Depth::Twelve);
     }
 
     #[test]

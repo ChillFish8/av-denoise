@@ -64,6 +64,7 @@ pub fn open_file(path: &Path) -> Result<OpenedSource, anyhow::Error> {
 
     let colour = read_file_colour(&mut decoder);
     let vendor_extensions: Vec<y4m::VendorExtensionString> = colour.range.into_iter().collect();
+
     log_forwarded_colour(colour.pixel_aspect, &vendor_extensions);
 
     let info = SourceInfo {
@@ -87,9 +88,10 @@ fn log_forwarded_colour(pixel_aspect: Option<y4m::Ratio>, vendor_extensions: &[y
     }
 
     let aspect = pixel_aspect.map(|ratio| (ratio.num, ratio.den));
-    let range = vendor_extensions
-        .first()
-        .map(|extension| String::from_utf8_lossy(extension.value()).into_owned());
+    let range = vendor_extensions.first().map(|extension| {
+        let value = extension.value();
+        String::from_utf8_lossy(value).into_owned()
+    });
 
     tracing::info!(
         pixel_aspect = ?aspect,
@@ -115,7 +117,9 @@ pub fn color_range_extension(range: i32) -> Option<y4m::VendorExtensionString> {
         _ => return None,
     };
 
-    y4m::VendorExtensionString::new(tag.to_vec()).ok()
+    let value = tag.to_vec();
+
+    y4m::VendorExtensionString::new(value).ok()
 }
 
 /// Turns an ffms2 sample aspect ratio into a y4m pixel aspect.
@@ -146,14 +150,14 @@ pub fn read_file_colour(decoder: &mut Decoder) -> FileColour {
 
     // SAFETY: a live `Ffms2Decoder` holds a non-null video source, and the properties it
     // returns belong to that source, so they stay valid while the decoder does.
-    let properties = unsafe { FFMS_GetVideoProperties(ffms2.video_source) };
+    let properties_ptr = unsafe { FFMS_GetVideoProperties(ffms2.video_source) };
 
-    if properties.is_null() {
+    if properties_ptr.is_null() {
         return empty;
     }
 
     // SAFETY: checked non-null just above.
-    let properties = unsafe { &*properties };
+    let properties = unsafe { &*properties_ptr };
     let range = color_range_extension(properties.ColorRange);
     let pixel_aspect = pixel_aspect_from_sar(properties.SARNum, properties.SARDen);
 

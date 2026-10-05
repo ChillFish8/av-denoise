@@ -1,53 +1,29 @@
-//! The hardware backends kernels can run on.
-//!
-//! An [`Accelerator`] names a backend rather than a specific piece of
-//! hardware. Which physical GPU it lands on is chosen separately, with
-//! [`crate::Device`].
-//!
-//! Only the backends whose crate feature is enabled exist at compile
-//! time, so a build without the `cuda` feature has no `Accelerator::Cuda`
-//! variant at all.
-//!
-//! [`HostDenoiser::create`](crate::HostDenoiser::create) takes a list of these
-//! and uses the first one that starts successfully, which lets a program
-//! prefer a fast backend and quietly fall back to a slower one.
-//!
-//! ```no_run
-//! use av_denoise::accelerate::get_default_accelerators;
-//!
-//! // Every backend this build supports, in the order to try them.
-//! let preferred = get_default_accelerators();
-//! # let _ = preferred;
-//! ```
-//!
-//! A list can also be written out by hand, such as
-//! `vec![Accelerator::Cuda, Accelerator::Vulkan]` to prefer the vendor
-//! backend and fall back to the portable one.
-//!
-//! Every accelerator here runs kernels on a GPU. There is no software
-//! backend, because the collaborative filter aggregates through atomic
-//! floating-point adds and cubecl's CPU runtime does not implement
-//! atomics. [`crate::Device::Cpu`] still selects a software *device*
-//! where the platform offers one, such as lavapipe under Vulkan.
+//! The hardware backends kernels can run on
 
 use strum_macros::{Display, EnumIter, EnumString, IntoStaticStr};
 
+/// A hardware backend that kernels can run on.
+///
+/// It names a backend rather than a specific GPU, which is chosen separately with
+/// [Device](crate::Device). Only the backends whose crate feature is enabled exist.
+///
+/// Every accelerator runs kernels on a GPU. There is no software backend, because the collaborative
+/// filter aggregates through atomic floating-point adds and cubecl's CPU runtime does not implement
+/// atomics. [Device::Cpu](crate::Device::Cpu) still selects a software device where the platform
+/// offers one, such as lavapipe under Vulkan.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, IntoStaticStr, EnumString, EnumIter, Display)]
 #[strum(serialize_all = "snake_case")]
-/// A hardware backend that kernels can run on.
 pub enum Accelerator {
     #[cfg(any(feature = "cuda", docsrs))]
     #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
-    /// Runs kernels through the Nvidia CUDA backend.
-    ///
-    /// Nvidia GPUs only.
+    /// Runs kernels through the Nvidia CUDA backend, on Nvidia GPUs only.
     Cuda,
     #[cfg(any(feature = "vulkan", docsrs))]
     #[cfg_attr(docsrs, doc(cfg(feature = "vulkan")))]
     /// Runs kernels through the wgpu Vulkan backend.
     ///
-    /// This is the lightest and most portable option, because it works
-    /// on any platform and GPU that supports basic compute shaders.
+    /// This is the lightest and most portable option, because it works on any platform and GPU that
+    /// supports basic compute shaders.
     Vulkan,
     #[cfg(any(feature = "metal", docsrs))]
     #[cfg_attr(docsrs, doc(cfg(feature = "metal")))]
@@ -57,25 +33,28 @@ pub enum Accelerator {
     Metal,
     #[cfg(any(feature = "rocm", docsrs))]
     #[cfg_attr(docsrs, doc(cfg(feature = "rocm")))]
-    /// Runs kernels through the AMD ROCm backend.
+    /// Runs kernels through the AMD ROCm backend, on AMD GPUs only.
     ///
-    /// WARNING: ROCm is *not* the recommended backend for AMD GPUs, it is slower and often
-    /// plagued with issues from drivers, vulkan will almost certainly be faster and
-    /// less buggy.
-    ///
-    /// AMD GPUs only.
+    /// ROCm is not the recommended backend for AMD GPUs. It is slower and often hit by driver issues,
+    /// so Vulkan is almost always faster and less buggy.
     Rocm,
 }
 
-/// Returns every accelerator this build enables, in the order to try
-/// them.
+/// Returns every accelerator this build enables, in the order to try them.
+///
+/// ```no_run
+/// use av_denoise::accelerate::get_default_accelerators;
+///
+/// let preferred = get_default_accelerators();
+/// # let _ = preferred;
+/// ```
 pub fn get_default_accelerators() -> Vec<Accelerator> {
     use strum::IntoEnumIterator;
 
-    let mut accelerator = Vec::new();
+    let mut accelerators = Vec::new();
     for enabled in Accelerator::iter() {
-        accelerator.push(enabled);
+        accelerators.push(enabled);
     }
 
-    accelerator
+    accelerators
 }

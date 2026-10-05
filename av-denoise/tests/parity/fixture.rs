@@ -26,7 +26,8 @@ pub fn hash(bytes: &[u8]) -> u64 {
 }
 
 pub fn path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/parity.txt")
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    PathBuf::from(manifest_dir).join("tests/fixtures/parity.txt")
 }
 
 /// Names and drivers of every Vulkan adapter, sorted and joined with `; `.
@@ -55,17 +56,23 @@ pub fn check_adapters(recorded: &str) {
     );
 }
 
-/// Lines of `<config> <label> <hash as 16 hex digits>` after the adapters header.
+/// Reads the fixture.
+///
+/// Every line after the adapters header is `<config> <label> <hash as 16 hex digits>`.
 pub fn read() -> Fixture {
     let fixture_path = path();
     let text = std::fs::read_to_string(fixture_path)
         .expect("parity fixture missing, record it with AVD_PARITY_RECORD=1");
+
     let mut lines = text.lines();
-    let header = lines.next().expect("adapters header");
+    let header = lines
+        .next()
+        .expect("parity fixture has no adapters header, re-record it with AVD_PARITY_RECORD=1");
     let adapters = header
         .strip_prefix(ADAPTERS_PREFIX)
-        .expect("adapters header prefix")
+        .expect("parity fixture has no adapters header, re-record it with AVD_PARITY_RECORD=1")
         .to_string();
+
     let mut entries = Entries::new();
 
     for line in lines {

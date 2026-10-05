@@ -52,136 +52,152 @@ pub fn all() -> Vec<ParityConfig> {
     let fast = Algorithm::Nlmeans(NlmeansOptions::default());
     let hq = Algorithm::NlmeansHq(NlmeansHqOptions::default());
     let nl4d = Algorithm::Nl4d(Nl4dOptions::default());
-    let nl4d_grain = Algorithm::Nl4d(Nl4dOptions {
+    let grain_options = Nl4dOptions {
         grain_export: true,
         ..Nl4dOptions::default()
-    });
-    let nl4d_windowed = Algorithm::Nl4d(Nl4dOptions {
+    };
+    let nl4d_grain = Algorithm::Nl4d(grain_options);
+    let windowed_options = Nl4dOptions {
         windowed_noise_estimation: true,
         ..Nl4dOptions::default()
-    });
+    };
+    let nl4d_windowed = Algorithm::Nl4d(windowed_options);
     let yuv420_8 = layout(Subsampling::Yuv420, Depth::Eight);
     let yuv420_10 = layout(Subsampling::Yuv420, Depth::Ten);
     let yuv444_8 = layout(Subsampling::Yuv444, Depth::Eight);
 
+    let nlm_fast_spatial_8 = config(
+        "nlm_fast_spatial_8",
+        ChannelIntent::LumaChroma,
+        DenoisingMode::Spacial,
+        fast,
+        yuv420_8,
+        6,
+        false,
+    );
+    let nlm_fast_temporal_8 = config(
+        "nlm_fast_temporal_8",
+        ChannelIntent::LumaChroma,
+        temporal,
+        fast,
+        yuv420_8,
+        10,
+        false,
+    );
+    let nlm_hq_temporal_10 = config(
+        "nlm_hq_temporal_10",
+        ChannelIntent::LumaChroma,
+        temporal,
+        hq,
+        yuv420_10,
+        10,
+        false,
+    );
+    let nlm_hq_short_8 = config(
+        "nlm_hq_short_8",
+        ChannelIntent::Luma,
+        temporal,
+        hq,
+        yuv420_8,
+        2,
+        false,
+    );
+    let nlm_hq_yuv_8 = config(
+        "nlm_hq_yuv_8",
+        ChannelIntent::YuvFused,
+        temporal,
+        hq,
+        yuv444_8,
+        10,
+        false,
+    );
+    let nl4d_luma_8 = config(
+        "nl4d_luma_8",
+        ChannelIntent::Luma,
+        temporal,
+        nl4d,
+        yuv420_8,
+        12,
+        false,
+    );
+    let nl4d_chroma_10 = config(
+        "nl4d_chroma_10",
+        ChannelIntent::Chroma,
+        temporal,
+        nl4d,
+        yuv420_10,
+        12,
+        false,
+    );
+    let nl4d_lumachroma_10 = config(
+        "nl4d_lumachroma_10",
+        ChannelIntent::LumaChroma,
+        temporal,
+        nl4d,
+        yuv420_10,
+        12,
+        false,
+    );
+    let nl4d_yuv_8 = config(
+        "nl4d_yuv_8",
+        ChannelIntent::YuvFused,
+        temporal,
+        nl4d,
+        yuv444_8,
+        12,
+        false,
+    );
+    let nl4d_short_8 = config(
+        "nl4d_short_8",
+        ChannelIntent::Luma,
+        temporal,
+        nl4d,
+        yuv420_8,
+        3,
+        false,
+    );
+    let nl4d_grain_8 = config(
+        "nl4d_grain_8",
+        ChannelIntent::Luma,
+        temporal,
+        nl4d_grain,
+        yuv420_8,
+        12,
+        false,
+    );
+    let nl4d_reseed_8 = config(
+        "nl4d_reseed_8",
+        ChannelIntent::LumaChroma,
+        temporal,
+        nl4d_windowed,
+        yuv420_8,
+        12,
+        true,
+    );
+    let nlm_hq_reseed_8 = config(
+        "nlm_hq_reseed_8",
+        ChannelIntent::LumaChroma,
+        temporal,
+        hq,
+        yuv420_8,
+        12,
+        true,
+    );
+
     vec![
-        config(
-            "nlm_fast_spatial_8",
-            ChannelIntent::LumaChroma,
-            DenoisingMode::Spacial,
-            fast,
-            yuv420_8,
-            6,
-            false,
-        ),
-        config(
-            "nlm_fast_temporal_8",
-            ChannelIntent::LumaChroma,
-            temporal,
-            fast,
-            yuv420_8,
-            10,
-            false,
-        ),
-        config(
-            "nlm_hq_temporal_10",
-            ChannelIntent::LumaChroma,
-            temporal,
-            hq,
-            yuv420_10,
-            10,
-            false,
-        ),
-        config(
-            "nlm_hq_short_8",
-            ChannelIntent::Luma,
-            temporal,
-            hq,
-            yuv420_8,
-            2,
-            false,
-        ),
-        config(
-            "nlm_hq_yuv_8",
-            ChannelIntent::YuvFused,
-            temporal,
-            hq,
-            yuv444_8,
-            10,
-            false,
-        ),
-        config(
-            "nl4d_luma_8",
-            ChannelIntent::Luma,
-            temporal,
-            nl4d,
-            yuv420_8,
-            12,
-            false,
-        ),
-        config(
-            "nl4d_chroma_10",
-            ChannelIntent::Chroma,
-            temporal,
-            nl4d,
-            yuv420_10,
-            12,
-            false,
-        ),
-        config(
-            "nl4d_lumachroma_10",
-            ChannelIntent::LumaChroma,
-            temporal,
-            nl4d,
-            yuv420_10,
-            12,
-            false,
-        ),
-        config(
-            "nl4d_yuv_8",
-            ChannelIntent::YuvFused,
-            temporal,
-            nl4d,
-            yuv444_8,
-            12,
-            false,
-        ),
-        config(
-            "nl4d_short_8",
-            ChannelIntent::Luma,
-            temporal,
-            nl4d,
-            yuv420_8,
-            3,
-            false,
-        ),
-        config(
-            "nl4d_grain_8",
-            ChannelIntent::Luma,
-            temporal,
-            nl4d_grain,
-            yuv420_8,
-            12,
-            false,
-        ),
-        config(
-            "nl4d_reseed_8",
-            ChannelIntent::LumaChroma,
-            temporal,
-            nl4d_windowed,
-            yuv420_8,
-            12,
-            true,
-        ),
-        config(
-            "nlm_hq_reseed_8",
-            ChannelIntent::LumaChroma,
-            temporal,
-            hq,
-            yuv420_8,
-            12,
-            true,
-        ),
+        nlm_fast_spatial_8,
+        nlm_fast_temporal_8,
+        nlm_hq_temporal_10,
+        nlm_hq_short_8,
+        nlm_hq_yuv_8,
+        nl4d_luma_8,
+        nl4d_chroma_10,
+        nl4d_lumachroma_10,
+        nl4d_yuv_8,
+        nl4d_short_8,
+        nl4d_grain_8,
+        nl4d_reseed_8,
+        nlm_hq_reseed_8,
     ]
 }
 
@@ -194,9 +210,11 @@ fn config(
     frames: usize,
     reseed: bool,
 ) -> ParityConfig {
+    let plane_options = options(intent, mode, algorithm);
+
     ParityConfig {
         name,
-        options: options(intent, mode, algorithm),
+        options: plane_options,
         layout,
         frames,
         reseed,
