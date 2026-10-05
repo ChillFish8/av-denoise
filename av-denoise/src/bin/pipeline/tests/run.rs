@@ -24,6 +24,18 @@ fn run_over(bytes: Vec<u8>, workers: usize, budget: u64) -> Result<Vec<u8>, anyh
     Ok(written)
 }
 
+struct ClosedPipe;
+
+impl std::io::Write for ClosedPipe {
+    fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn frame_count(y4m_bytes: &[u8]) -> usize {
     let mut decoder = y4m::Decoder::new(y4m_bytes).expect("the output is y4m");
     let mut count = 0;
@@ -74,4 +86,19 @@ fn a_run_at_the_permit_floor_finishes() {
     let frames = frame_count(&output);
 
     assert_eq!(frames, 40);
+}
+
+#[test]
+fn a_failed_write_is_reported_over_the_worker_disconnect() {
+    let clip = multi_scene_clip(30);
+    let options = temporal_opts();
+    let opener = move || {
+        let cursor = Cursor::new(clip);
+        let reader: Box<dyn Read> = Box::new(cursor);
+        open_y4m(reader)
+    };
+
+    let err = run_with(&options, opener, 2, 1 << 30, false, ClosedPipe, None).expect_err("the write fails");
+
+    assert!(err.to_string().contains("broken pipe"), "got {err}");
 }
