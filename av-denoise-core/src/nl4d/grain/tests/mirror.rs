@@ -103,9 +103,9 @@ fn hist_slot(mean: f32, std: f32, edges: &[f32]) -> usize {
 /// Adds the cell's lag products to `record`, each pixel against its neighbour at every lag.
 ///
 /// `mean` is the cell's mean grain, taken off every pixel and neighbour first.
-fn add_lag_sums(frame: &MirrorFrame, x0: u32, y0: u32, mean: f32, record: &mut [f64]) {
-    for y in y0..y0 + CELL {
-        for x in x0..x0 + CELL {
+fn add_lag_sums(frame: &MirrorFrame, cell_left: u32, cell_top: u32, mean: f32, record: &mut [f64]) {
+    for y in cell_top..cell_top + CELL {
+        for x in cell_left..cell_left + CELL {
             let centre = (source_grain(frame, x, y) - mean) as f64;
 
             for (lane, &(dy, dx)) in LAGS.iter().enumerate() {
@@ -129,20 +129,21 @@ pub(super) fn mirror_measure(frame: &MirrorFrame, edges: &[f32]) -> MirrorRecord
 
     for cell_y in 0..cells_y {
         for cell_x in 0..cells_x {
-            let x0 = cell_x * CELL;
-            let y0 = cell_y * CELL;
+            let cell_left = cell_x * CELL;
+            let cell_top = cell_y * CELL;
             let block = block_of(frame, cell_x, cell_y);
             let pixels = (CELL * CELL) as usize;
             let mut grain = Vec::with_capacity(pixels);
             let mut clean = Vec::with_capacity(pixels);
             let mut noisy = Vec::with_capacity(2 * pixels);
             let mut kept = Vec::with_capacity(pixels);
-            let mut prev = Vec::with_capacity(pixels);
+            let mut previous_values = Vec::with_capacity(pixels);
 
-            for y in y0..y0 + CELL {
-                for x in x0..x0 + CELL {
+            for y in cell_top..cell_top + CELL {
+                for x in cell_left..cell_left + CELL {
                     let index = (y * frame.width + x) as usize;
-                    grain.push(source_grain(frame, x, y));
+                    let pixel_grain = source_grain(frame, x, y);
+                    grain.push(pixel_grain);
                     clean.push(frame.out_t[index]);
                     noisy.push(frame.source_t[index]);
 
@@ -153,7 +154,7 @@ pub(super) fn mirror_measure(frame: &MirrorFrame, edges: &[f32]) -> MirrorRecord
                     let warped = frame.out_t[kept_index];
                     let previous = frame.out_prev[index];
                     kept.push((warped - previous) * std::f32::consts::FRAC_1_SQRT_2);
-                    prev.push(previous);
+                    previous_values.push(previous);
                 }
             }
 
@@ -177,22 +178,22 @@ pub(super) fn mirror_measure(frame: &MirrorFrame, edges: &[f32]) -> MirrorRecord
 
                 let group = bucket_of(grain_stats.std, edges) / BUCKETS_PER_GROUP;
                 let record = &mut autocov[group * AUTOCOV_LEN..(group + 1) * AUTOCOV_LEN];
-                add_lag_sums(frame, x0, y0, grain_stats.mean, record);
+                add_lag_sums(frame, cell_left, cell_top, grain_stats.mean, record);
             }
 
             let kept_stats = stats_of(&kept);
-            let prev_stats = stats_of(&prev);
-            let (prev_low, prev_high) = range_of(&prev);
+            let previous_stats = stats_of(&previous_values);
+            let (previous_low, previous_high) = range_of(&previous_values);
             let kept_ok = frame.has_kept
                 && frame.kept_conf[block] >= CONF_MIN
-                && prev_high - prev_low < FLAT_RANGE
-                && prev_stats.mean > LUMA_LOW
-                && prev_stats.mean < LUMA_HIGH
-                && prev_low >= CLIP_LOW
-                && prev_high <= CLIP_HIGH
+                && previous_high - previous_low < FLAT_RANGE
+                && previous_stats.mean > LUMA_LOW
+                && previous_stats.mean < LUMA_HIGH
+                && previous_low >= CLIP_LOW
+                && previous_high <= CLIP_HIGH
                 && kept_stats.std > STD_MIN;
             if kept_ok {
-                let slot = hist_slot(prev_stats.mean, kept_stats.std, edges);
+                let slot = hist_slot(previous_stats.mean, kept_stats.std, edges);
                 hist[HIST_LEN + slot] += 1;
             }
         }

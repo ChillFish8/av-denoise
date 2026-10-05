@@ -204,21 +204,27 @@ mod tests {
     #[test]
     fn pyramid_pixels_single_level_matches_image() {
         let align = align();
-        assert_eq!(pyramid_pixels_per_frame(64, 32, 1, align), 64 * 32);
+        let pixels = pyramid_pixels_per_frame(64, 32, 1, align);
+        assert_eq!(pixels, 64 * 32);
     }
 
     #[test]
     fn pyramid_pixels_two_levels_sums_levels() {
         // Level 0 is 64x32, so 2048 pixels, and level 1 is 32x16, so 512.
         let align = align();
-        assert_eq!(pyramid_pixels_per_frame(64, 32, 2, align), 2048 + 512);
+        let pixels = pyramid_pixels_per_frame(64, 32, 2, align);
+        assert_eq!(pixels, 2048 + 512);
     }
 
     #[test]
     fn level_dims_halve() {
-        assert_eq!(level_dims(64, 32, 0), (64, 32));
-        assert_eq!(level_dims(64, 32, 1), (32, 16));
-        assert_eq!(level_dims(64, 32, 2), (16, 8));
+        let full = level_dims(64, 32, 0);
+        let half = level_dims(64, 32, 1);
+        let quarter = level_dims(64, 32, 2);
+
+        assert_eq!(full, (64, 32));
+        assert_eq!(half, (32, 16));
+        assert_eq!(quarter, (16, 8));
     }
 
     #[test]

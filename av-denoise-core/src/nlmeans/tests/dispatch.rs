@@ -15,7 +15,8 @@ fn matches_the_sequential_fill_order() {
                 continue;
             }
 
-            assert_eq!(neighbour_idx_for_k(radius, k), expected, "radius={radius} k={k}");
+            let idx = neighbour_idx_for_k(radius, k);
+            assert_eq!(idx, expected, "radius={radius} k={k}");
             expected += 1;
         }
     }
@@ -37,10 +38,14 @@ fn forward_and_backward_indices_are_distinct_and_in_range() {
 
 #[test]
 fn radius_two_explicit_indices() {
-    assert_eq!(neighbour_idx_for_k(2, -2), 0);
-    assert_eq!(neighbour_idx_for_k(2, -1), 1);
-    assert_eq!(neighbour_idx_for_k(2, 1), 2);
-    assert_eq!(neighbour_idx_for_k(2, 2), 3);
+    let back_two = neighbour_idx_for_k(2, -2);
+    let back_one = neighbour_idx_for_k(2, -1);
+    let forward_one = neighbour_idx_for_k(2, 1);
+    let forward_two = neighbour_idx_for_k(2, 2);
+    assert_eq!(back_two, 0);
+    assert_eq!(back_one, 1);
+    assert_eq!(forward_one, 2);
+    assert_eq!(forward_two, 3);
 }
 
 /// A literal, so a recalibration fails here instead of passing against itself.
@@ -57,29 +62,25 @@ fn bilateral_residual_fraction_is_calibrated_to_zero() {
 #[test]
 fn mc_sad_noise_floor_sigma_scales_nlm_spatial_by_the_calibrated_fraction() {
     let raw = 0.02f32;
-    assert_eq!(
-        mc_sad_noise_floor_sigma(PrefilterMode::NlmSpatial { strength_scale: 1.0 }, raw),
-        raw * NLM_SPATIAL_RESIDUAL_FRACTION
-    );
+    let prefilter = PrefilterMode::NlmSpatial { strength_scale: 1.0 };
+    let floor = mc_sad_noise_floor_sigma(prefilter, raw);
+    assert_eq!(floor, raw * NLM_SPATIAL_RESIDUAL_FRACTION);
 }
 
 #[test]
 fn mc_sad_noise_floor_sigma_scales_bilateral_by_the_calibrated_fraction() {
     let raw = 0.02f32;
-    assert_eq!(
-        mc_sad_noise_floor_sigma(
-            PrefilterMode::Bilateral {
-                sigma_s: 3.0,
-                sigma_r: 0.02
-            },
-            raw
-        ),
-        raw * BILATERAL_RESIDUAL_FRACTION
-    );
+    let prefilter = PrefilterMode::Bilateral {
+        sigma_s: 3.0,
+        sigma_r: 0.02,
+    };
+    let floor = mc_sad_noise_floor_sigma(prefilter, raw);
+    assert_eq!(floor, raw * BILATERAL_RESIDUAL_FRACTION);
 }
 
 #[test]
 fn mc_sad_noise_floor_sigma_keeps_raw_sigma_for_none() {
     let raw = 0.02f32;
-    assert_eq!(mc_sad_noise_floor_sigma(PrefilterMode::None, raw), raw);
+    let floor = mc_sad_noise_floor_sigma(PrefilterMode::None, raw);
+    assert_eq!(floor, raw);
 }

@@ -1,11 +1,3 @@
-//! `submit_machinery` runs the NLM denoiser's ring, motion, and
-//! confidence machinery without launching any NLM denoising kernel, so
-//! a separate collaborative stage can read the same ring, motion
-//! fields, and confidence scores the NLM path builds.
-//!
-//! These tests pin that the returned [`RingView`] geometry and content
-//! line up with what a real, non-trivial motion sequence produces.
-
 use cubecl::prelude::*;
 
 use super::helpers::*;
@@ -16,29 +8,27 @@ use crate::nlmeans::*;
 const RADIUS: u32 = 2;
 const SIZE: u32 = 128;
 
-/// A single `size x size` noisy world pattern, read at a shifting
-/// horizontal offset and clamped at the edges, so a sequence built from
-/// increasing `shift` values translates the same content one pixel to
-/// the right per frame.
+// The motion module's default block size and overlap, giving the `step = blksize - overlap = 8`
+// geometry the assertions assume.
+const DEFAULT_BLKSIZE_FOR_TEST: u32 = 16;
+const DEFAULT_OVERLAP_FOR_TEST: u32 = 8;
+
+/// A noisy world read at a horizontal offset of `shift` and clamped at the edges.
 ///
-/// A flat gradient (varying only along x) was tried first and rejected.
-/// Its SAD is identical at every vertical candidate offset, the same
-/// degeneracy `block_match.rs`'s tie-break comments describe for a
-/// uniform block, and the fine pass's tie-break resolves that to
-/// whatever the coarse pass seeded rather than to zero, letting a wrong
-/// vertical offset slip through the "within 1 px" assertion below
-/// undetected (confirmed empirically while writing this test). Dense 2D
-/// noise gives every candidate a distinct score, so the block match has
-/// a genuine, unambiguous minimum at the planted shift.
+/// Increasing `shift` by one moves the content one pixel right. Dense 2D noise gives every candidate
+/// offset a distinct SAD, so the block match has one clear minimum at the planted shift. Content that
+/// varies only along x ties every vertical offset, and the tie-break can then let a wrong vertical
+/// offset pass the 1 px checks.
 fn translating_frame(size: u32, shift: i32) -> Vec<f32> {
     let world = noisy_copy(size, 0.5, 0.2, 777);
     let mut frame = vec![0.0f32; (size * size) as usize];
     for y in 0..size {
         for x in 0..size {
-            let sx = (x as i32 - shift).clamp(0, size as i32 - 1) as u32;
-            frame[(y * size + x) as usize] = world[(y * size + sx) as usize];
+            let source_x = (x as i32 - shift).clamp(0, size as i32 - 1) as u32;
+            frame[(y * size + x) as usize] = world[(y * size + source_x) as usize];
         }
     }
+
     frame
 }
 
@@ -62,40 +52,32 @@ fn machinery_params() -> NlmParams {
     }
 }
 
-// Mirrors `motion::DEFAULT_BLKSIZE`/`DEFAULT_OVERLAP`, spelled out locally
-// so this file does not need to reach into the `motion` module just for
-// two constants already fixed by the geometry the assertions below
-// assume (`step = blksize - overlap = 8`).
-const DEFAULT_BLKSIZE_FOR_TEST: u32 = 16;
-const DEFAULT_OVERLAP_FOR_TEST: u32 = 8;
-
-/// Pushes `2 * RADIUS + 1` frames of a one-pixel-per-frame translating
-/// world, exactly filling the temporal window, and returns the built
-/// denoiser.
+/// Pushes `2 * RADIUS + 1` frames of a world translating one pixel per frame, exactly filling the
+/// window.
 fn push_translating_sequence(client: &ComputeClient<R>) -> NlmDenoiser<R> {
-    let mut d = NlmDenoiser::<R>::new(client, machinery_params(), SIZE, SIZE);
+    let params = machinery_params();
+    let mut denoiser = NlmDenoiser::<R>::new(client, params, SIZE, SIZE);
     let total_frames = 2 * RADIUS + 1;
-    for n in 0..total_frames {
-        let frame = translating_frame(SIZE, n as i32);
-        d.push_frame(&frame);
+    for frame_index in 0..total_frames {
+        let frame = translating_frame(SIZE, frame_index as i32);
+        denoiser.push_frame(&frame);
     }
-    d
+
+    denoiser
 }
 
 #[test]
 fn submit_machinery_reports_ring_view_with_correct_motion_and_confidence() {
     let client = make_client();
-    let mut d = push_translating_sequence(&client);
+    let mut denoiser = push_translating_sequence(&client);
 
-    let view = d
+    let view = denoiser
         .submit_machinery(RADIUS)
         .expect("submit_machinery dispatch failed")
         .expect("window is exactly full, submit_machinery should report Some");
 
-    // The centre slot differs from every neighbour slot. With exactly
-    // `2 * RADIUS + 1` pushes into a same-sized ring, every frame landed
-    // in its own distinct physical slot, so this also confirms the ring
-    // never doubled a slot up.
+    // With exactly `2 * RADIUS + 1` pushes into a ring of that size, every frame lands in its own slot,
+    // so this also confirms the ring never doubled a slot up.
     for &slot in &view.neighbour_slots {
         assert_ne!(
             slot, view.centre_slot,
@@ -109,38 +91,38 @@ fn submit_machinery_reports_ring_view_with_correct_motion_and_confidence() {
         "one neighbour slot per non-zero k in -RADIUS..=RADIUS"
     );
 
-    let mc = d.motion_ctx();
-    let bx = (64 / mc.step).min(mc.blocks_x - 1);
-    let by = (64 / mc.step).min(mc.blocks_y - 1);
+    let motion = denoiser.motion_ctx();
+    let block_x = (64 / motion.step).min(motion.blocks_x - 1);
+    let block_y = (64 / motion.step).min(motion.blocks_y - 1);
 
-    let nidx = neighbour_idx_for_k(RADIUS, 1);
-    let mv_idx = (nidx * view.mv_stride + (by * mc.blocks_x + bx) * 2) as usize;
-    let mv_bytes = d
+    let neighbour_idx = neighbour_idx_for_k(RADIUS, 1);
+    let mv_idx = (neighbour_idx * view.mv_stride + (block_y * motion.blocks_x + block_x) * 2) as usize;
+    let mv_field = view.mv_field.clone();
+    let mv_bytes = denoiser
         .compute_client()
-        .read_one(view.mv_field.clone())
+        .read_one(mv_field)
         .expect("mv_field readback failed");
-    let mv = i32::from_bytes(&mv_bytes);
+    let motion_vectors = i32::from_bytes(&mv_bytes);
 
-    // The sequence translates by exactly one pixel per frame, so the
-    // immediate forward neighbour (k = 1) moved by exactly (1, 0)
-    // relative to the centre.
+    // The world shifts one pixel per frame, so the forward neighbour at k = 1 moved by exactly (1, 0).
     assert!(
-        (mv[mv_idx] - 1).abs() <= 1,
+        (motion_vectors[mv_idx] - 1).abs() <= 1,
         "expected mv.x within 1px of the planted shift of 1, got {}",
-        mv[mv_idx]
+        motion_vectors[mv_idx]
     );
     assert!(
-        mv[mv_idx + 1].abs() <= 1,
+        motion_vectors[mv_idx + 1].abs() <= 1,
         "expected mv.y within 1px of the planted shift of 0, got {}",
-        mv[mv_idx + 1]
+        motion_vectors[mv_idx + 1]
     );
 
-    let conf_idx = (nidx * view.conf_stride + (by * mc.blocks_x + bx)) as usize;
-    let conf_bytes = d
+    let confidence_idx = (neighbour_idx * view.conf_stride + (block_y * motion.blocks_x + block_x)) as usize;
+    let confidence_field = view.confidence.clone();
+    let confidence_bytes = denoiser
         .compute_client()
-        .read_one(view.confidence.clone())
+        .read_one(confidence_field)
         .expect("confidence readback failed");
-    let confidence = f32::from_bytes(&conf_bytes)[conf_idx];
+    let confidence = f32::from_bytes(&confidence_bytes)[confidence_idx];
 
     assert!(
         confidence.is_finite() && (0.0..=1.0).contains(&confidence),
@@ -155,107 +137,107 @@ fn submit_machinery_reports_ring_view_with_correct_motion_and_confidence() {
 #[test]
 fn submit_machinery_at_centre_zero_lists_every_later_slot() {
     let client = make_client();
-    let mut d = push_translating_sequence(&client);
+    let mut denoiser = push_translating_sequence(&client);
     let total_frames = 2 * RADIUS + 1;
 
-    let view = d
+    let view = denoiser
         .submit_machinery(0)
         .expect("submit_machinery dispatch failed")
         .expect("window is exactly full");
 
-    let expected: Vec<u32> = (1..total_frames).map(|logical| d.ring_slot(logical)).collect();
-    assert_eq!(view.centre_slot, d.ring_slot(0));
+    let expected: Vec<u32> = (1..total_frames)
+        .map(|logical| denoiser.ring_slot(logical))
+        .collect();
+    let centre_slot = denoiser.ring_slot(0);
+    assert_eq!(view.centre_slot, centre_slot);
     assert_eq!(view.neighbour_slots, expected);
 }
 
 #[test]
 fn submit_machinery_at_the_last_slot_lists_every_earlier_slot() {
     let client = make_client();
-    let mut d = push_translating_sequence(&client);
+    let mut denoiser = push_translating_sequence(&client);
     let last = 2 * RADIUS;
 
-    let view = d
+    let view = denoiser
         .submit_machinery(last)
         .expect("submit_machinery dispatch failed")
         .expect("window is exactly full");
 
-    let expected: Vec<u32> = (0..last).map(|logical| d.ring_slot(logical)).collect();
-    assert_eq!(view.centre_slot, d.ring_slot(last));
+    let expected: Vec<u32> = (0..last).map(|logical| denoiser.ring_slot(logical)).collect();
+    let centre_slot = denoiser.ring_slot(last);
+    assert_eq!(view.centre_slot, centre_slot);
     assert_eq!(view.neighbour_slots, expected);
 }
 
-/// From centre 0 the translating world moves one pixel right per frame,
-/// so the neighbour at logical `2 * RADIUS` sits `2 * RADIUS` frames
-/// ahead. That neighbour is the last one submitted, landing at field
-/// index `2 * RADIUS - 1`.
+/// From centre 0 the neighbour at logical `2 * RADIUS` sits `2 * RADIUS` pixels to the right.
+///
+/// It is the last neighbour submitted, so it lands at field index `2 * RADIUS - 1`.
 #[test]
 fn submit_machinery_at_centre_zero_finds_motion_at_the_far_offset() {
     let client = make_client();
-    let mut d = push_translating_sequence(&client);
+    let mut denoiser = push_translating_sequence(&client);
     let far = 2 * RADIUS;
 
-    let view = d
+    let view = denoiser
         .submit_machinery(0)
         .expect("submit_machinery dispatch failed")
         .expect("window is exactly full");
 
-    let mc = d.motion_ctx();
-    let bx = (64 / mc.step).min(mc.blocks_x - 1);
-    let by = (64 / mc.step).min(mc.blocks_y - 1);
+    let motion = denoiser.motion_ctx();
+    let block_x = (64 / motion.step).min(motion.blocks_x - 1);
+    let block_y = (64 / motion.step).min(motion.blocks_y - 1);
 
     let neighbour_idx = far - 1;
-    let mv_idx = (neighbour_idx * view.mv_stride + (by * mc.blocks_x + bx) * 2) as usize;
-    let mv_bytes = d
+    let mv_idx = (neighbour_idx * view.mv_stride + (block_y * motion.blocks_x + block_x) * 2) as usize;
+    let mv_field = view.mv_field.clone();
+    let mv_bytes = denoiser
         .compute_client()
-        .read_one(view.mv_field.clone())
+        .read_one(mv_field)
         .expect("mv_field readback failed");
-    let mv = i32::from_bytes(&mv_bytes);
+    let motion_vectors = i32::from_bytes(&mv_bytes);
 
     assert!(
-        (mv[mv_idx] - far as i32).abs() <= 1,
+        (motion_vectors[mv_idx] - far as i32).abs() <= 1,
         "expected mv.x within 1px of the planted shift of {far}, got {}",
-        mv[mv_idx]
+        motion_vectors[mv_idx]
     );
 }
 
-/// The ring view carries the pyramid the estimator analysed and the
-/// window size, and the front end reports the SAD noise floor it scored
-/// confidence with.
 #[test]
 fn ring_view_exposes_the_analysed_pyramid_and_the_noise_floor() {
     let client = make_client();
-    let mut d = push_translating_sequence(&client);
-    let view = d
+    let mut denoiser = push_translating_sequence(&client);
+    let view = denoiser
         .submit_machinery(RADIUS)
         .expect("submit_machinery dispatch failed")
         .expect("window is exactly full, submit_machinery should report Some");
 
     let frames = machinery_params().total_frames();
     assert_eq!(view.frame_count, frames);
-    // The pyramid holds every level of every slot, so it is at least
-    // one full-resolution luma plane per slot.
-    let bytes = client
-        .read_one(view.pyramid.clone())
-        .expect("pyramid readback failed");
+
+    // The pyramid holds every level of every slot, so it is at least one full-resolution luma plane
+    // per slot.
+    let pyramid = view.pyramid.clone();
+    let bytes = client.read_one(pyramid).expect("pyramid readback failed");
     let plane = bytes.len() / (frames as usize * size_of::<f32>());
     assert!(plane > 0, "the pyramid must hold at least one plane per slot");
-    assert!(d.sad_noise_floor_value() >= 0.0);
+    assert!(denoiser.sad_noise_floor_value() >= 0.0);
 }
 
-/// A window that has not filled yet reports `None`, the same convention
-/// `denoise_submit_gpu` uses.
 #[test]
 fn submit_machinery_none_while_window_is_filling() {
     let client = make_client();
-    let mut d = NlmDenoiser::<R>::new(&client, machinery_params(), SIZE, SIZE);
+    let params = machinery_params();
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, SIZE, SIZE);
 
     // Fewer than `2 * RADIUS + 1` pushes, so the window never fills.
-    for n in 0..RADIUS {
-        let frame = translating_frame(SIZE, n as i32);
-        d.push_frame(&frame);
+    for frame_index in 0..RADIUS {
+        let frame = translating_frame(SIZE, frame_index as i32);
+        denoiser.push_frame(&frame);
     }
 
-    let result = d
+    let result = denoiser
         .submit_machinery(RADIUS)
         .expect("submit_machinery dispatch failed");
     assert!(
@@ -264,36 +246,32 @@ fn submit_machinery_none_while_window_is_filling() {
     );
 }
 
-/// Priming a whole window with pushes alone, then submitting only after
-/// the last real push, must produce the same frame the streaming path
-/// emits for the window's centre. Filling the window this way is what a
-/// caller with random-order access to a fixed window, such as a
-/// VapourSynth plugin, needs to reseed on every frame request instead of
-/// pushing one frame at a time in order.
 #[cfg(feature = "vulkan")]
 #[test]
 fn priming_pushes_then_one_submit_matches_the_streaming_centre() {
-    let r = 2u32;
-    let window: Vec<Vec<f32>> = (0..(2 * r + 1) as usize).map(|i| ramp_frame(64, 64, i)).collect();
+    let radius = 2u32;
+    let window: Vec<Vec<f32>> = (0..(2 * radius + 1) as usize)
+        .map(|i| ramp_frame(64, 64, i))
+        .collect();
 
-    let mut windowed = test_denoiser(r, 64, 64);
-    for frame in &window[..(2 * r) as usize] {
+    let mut windowed = test_denoiser(radius, 64, 64);
+    for frame in &window[..(2 * radius) as usize] {
         windowed.push_frame(frame);
     }
 
-    windowed.push_frame(&window[(2 * r) as usize]);
+    windowed.push_frame(&window[(2 * radius) as usize]);
     let got = windowed.denoise().unwrap().expect("one frame");
 
-    let mut streamed = test_denoiser(r, 64, 64);
+    let mut streamed = test_denoiser(radius, 64, 64);
     let mut emitted = Vec::new();
     for frame in &window {
         streamed.push_frame(frame);
 
-        if let Some(out) = streamed.denoise().unwrap() {
-            emitted.push(out);
+        if let Some(output) = streamed.denoise().unwrap() {
+            emitted.push(output);
         }
     }
 
-    assert_eq!(emitted.len(), (r + 1) as usize);
-    assert_eq!(got, emitted[r as usize]);
+    assert_eq!(emitted.len(), (radius + 1) as usize);
+    assert_eq!(got, emitted[radius as usize]);
 }

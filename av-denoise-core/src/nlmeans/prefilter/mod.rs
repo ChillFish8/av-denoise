@@ -148,16 +148,24 @@ mod tests {
 
     #[test]
     fn bilateral_radius_truncates_at_two_sigma() {
-        assert_eq!(bilateral_radius(0.1), 1);
-        assert_eq!(bilateral_radius(1.0), 2);
-        assert_eq!(bilateral_radius(3.0), 6);
-        assert_eq!(bilateral_radius(3.5), 7);
+        let tiny = bilateral_radius(0.1);
+        let unit = bilateral_radius(1.0);
+        let wide = bilateral_radius(3.0);
+        let fractional = bilateral_radius(3.5);
+
+        assert_eq!(tiny, 1);
+        assert_eq!(unit, 2);
+        assert_eq!(wide, 6);
+        assert_eq!(fractional, 7);
     }
 
     #[test]
     fn none_and_empty_prefilters_parse() {
-        assert!(matches!(parse_prefilter("none").unwrap(), PrefilterMode::None));
-        assert!(matches!(parse_prefilter("").unwrap(), PrefilterMode::None));
+        let none = parse_prefilter("none").unwrap();
+        let empty = parse_prefilter("").unwrap();
+
+        assert!(matches!(none, PrefilterMode::None));
+        assert!(matches!(empty, PrefilterMode::None));
     }
 
     #[test]
@@ -193,12 +201,13 @@ mod tests {
 
     #[test]
     fn malformed_nlm_scale_is_rejected() {
-        let err = parse_prefilter("nlm:x").expect_err("expected parse failure");
-        assert!(err.to_string().contains("nlm"));
+        let error = parse_prefilter("nlm:x").expect_err("expected parse failure");
+        assert!(error.to_string().contains("nlm"));
     }
 
     #[test]
     fn unknown_prefilter_is_rejected() {
-        assert!(parse_prefilter("garbage").is_err());
+        let result = parse_prefilter("garbage");
+        assert!(result.is_err());
     }
 }

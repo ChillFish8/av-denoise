@@ -44,14 +44,17 @@ mod tests {
     #[test]
     fn refs_cover_1080p_exactly() {
         // (1920 - 8) / 4 + 1 = 479, (1080 - 8) / 4 + 1 = 269.
-        assert_eq!(refs_along(1920), 479);
-        assert_eq!(refs_along(1080), 269);
+        let refs_x = refs_along(1920);
+        let refs_y = refs_along(1080);
+        assert_eq!(refs_x, 479);
+        assert_eq!(refs_y, 269);
     }
 
     #[test]
     fn fused_cubes_cover_every_reference() {
         // 1920 gives 479 references, so the last of the 60 cubes runs seven live groups.
-        assert_eq!(fused_cubes_x(1920), 60);
+        let full_hd_cubes = fused_cubes_x(1920);
+        assert_eq!(full_hd_cubes, 60);
 
         for dim in [8u32, 9, 21, 64, 100, 104, 128, 1280, 1920, 3840] {
             let cubes = fused_cubes_x(dim);
@@ -66,10 +69,12 @@ mod tests {
         // Not a multiple of STEP past PATCH_SIZE.
         let width = 21;
         let ref_total = refs_along(width);
-        assert_eq!(ref_pos(ref_total - 1, width), width - 8);
+        let last_pos = ref_pos(ref_total - 1, width);
+        assert_eq!(last_pos, width - 8);
 
         for i in 0..ref_total {
-            assert!(ref_pos(i, width) + 8 <= width);
+            let pos = ref_pos(i, width);
+            assert!(pos + 8 <= width);
         }
     }
 
@@ -93,17 +98,22 @@ mod tests {
 
     #[test]
     fn ref_count_is_the_product_of_the_per_axis_counts() {
-        assert_eq!(
-            ref_count(1920, 1080),
-            refs_along(1920) as usize * refs_along(1080) as usize
-        );
+        let count = ref_count(1920, 1080);
+        let refs_x = refs_along(1920);
+        let refs_y = refs_along(1080);
+        assert_eq!(count, refs_x as usize * refs_y as usize);
     }
 
     #[test]
     fn strength_map_dims_round_up_to_whole_blocks() {
-        assert_eq!(strength_map_dims(1920, 1080), (240, 136));
-        assert_eq!(strength_map_dims(960, 540), (120, 68));
-        assert_eq!(strength_map_dims(70, 54), (10, 8));
-        assert_eq!(strength_map_dims(16, 16), (2, 2));
+        let full_hd = strength_map_dims(1920, 1080);
+        let quarter_hd = strength_map_dims(960, 540);
+        let ragged = strength_map_dims(70, 54);
+        let two_blocks = strength_map_dims(16, 16);
+
+        assert_eq!(full_hd, (240, 136));
+        assert_eq!(quarter_hd, (120, 68));
+        assert_eq!(ragged, (10, 8));
+        assert_eq!(two_blocks, (2, 2));
     }
 }

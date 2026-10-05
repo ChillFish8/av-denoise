@@ -1,10 +1,8 @@
-//! Per-frame cost of the three collab kernels at the geometry the
-//! pipeline actually runs them at.
+//! Per-frame cost of the three collab kernels at the geometry the pipeline runs them at
 //!
-//! A separate denoiser runs for luma and for chroma, and at 4:2:0 the
-//! chroma planes are half-size on each axis. A bench that runs chroma at
-//! full resolution would report four times the real work. Both planes are
-//! measured here and summed, so the total is one frame's kernel cost.
+//! Luma and chroma run in separate denoisers, and at 4:2:0 the chroma planes are half-size on each
+//! axis. A bench that ran chroma at full resolution would report four times the real work, so both
+//! planes are measured and summed into one frame's kernel cost.
 
 use av_denoise_core::bench_api::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
 use av_denoise_core::bench_api::collab::kernels::aggregate::{
@@ -18,32 +16,33 @@ use av_denoise_core::bench_api::collab::kernels::fused::{STRENGTH_MAP_OFF, colla
 use av_denoise_core::bench_api::collab::kernels::transforms::dct_noise_profile;
 use av_denoise_core::bench_api::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use av_denoise_core::bench_api::{BLOCK_X, BLOCK_Y, Device, NOISE_CURVE_BINS};
+use clap::Parser;
 use cubecl::benchmark::{Benchmark, BenchmarkComputations, TimingMethod};
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 #[derive(Clone, Copy)]
-struct Geom {
-    w: u32,
-    h: u32,
-    ch: u32,
-    stored: u32,
+struct PlaneGeometry {
+    width: u32,
+    height: u32,
+    channels: u32,
+    stored_channels: u32,
     label: &'static str,
 }
 
-const PLANES: &[Geom] = &[
-    Geom {
-        w: 1920,
-        h: 1080,
-        ch: 1,
-        stored: 1,
+const PLANES: &[PlaneGeometry] = &[
+    PlaneGeometry {
+        width: 1920,
+        height: 1080,
+        channels: 1,
+        stored_channels: 1,
         label: "luma   1920x1080 c1",
     },
-    Geom {
-        w: 960,
-        h: 540,
-        ch: 2,
-        stored: 2,
+    PlaneGeometry {
+        width: 960,
+        height: 540,
+        channels: 2,
+        stored_channels: 2,
         label: "chroma  960x540  c2",
     },
 ];
@@ -61,37 +60,38 @@ const SIGMA: f32 = 0.02;
 /// `Nl4dParams::default().lambda_ht`.
 const LAMBDA_HT: f32 = 4.158;
 
-fn frame_data(g: Geom) -> Vec<f32> {
-    let mut data = Vec::with_capacity((g.w * g.h * g.stored) as usize);
-    for y in 0..g.h {
-        for x in 0..g.w {
+fn frame_data(geometry: PlaneGeometry) -> Vec<f32> {
+    let mut data = Vec::with_capacity((geometry.width * geometry.height * geometry.stored_channels) as usize);
+    for y in 0..geometry.height {
+        for x in 0..geometry.width {
             let base = 0.5 + 0.2 * (x as f32 * 0.05).sin() * (y as f32 * 0.03).cos();
-            for c in 0..g.stored {
-                let seed = (y * g.w + x) * g.stored + c;
+            for channel in 0..geometry.stored_channels {
+                let seed = (y * geometry.width + x) * geometry.stored_channels + channel;
                 let hash = seed
                     .wrapping_mul(2654435761)
                     .wrapping_add(seed.wrapping_mul(340573321));
                 let noise = (hash as f32 / u32::MAX as f32 - 0.5) * 0.1;
-                data.push(
-                    if c < g.ch {
-                        (base + noise).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    },
-                );
+                let sample = if channel < geometry.channels {
+                    (base + noise).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                data.push(sample);
             }
         }
     }
+
     data
 }
 
 fn block_sync<R: Runtime>(client: &ComputeClient<R>) {
-    cubecl::future::block_on(client.sync()).unwrap();
+    let sync = client.sync();
+    cubecl::future::block_on(sync).unwrap();
 }
 
 struct Rig<R: Runtime> {
     client: ComputeClient<R>,
-    g: Geom,
+    geometry: PlaneGeometry,
     ring: Handle,
     ring_len: usize,
     mv_field: Handle,
@@ -103,17 +103,17 @@ struct Rig<R: Runtime> {
     group_weight: Handle,
     sigma: Handle,
     dct_profile: Handle,
-    /// An all-zero noise curve, passed with `curve_valid = 0` where the
-    /// kernel never applies it.
+    /// An all-zero noise curve, passed with `curve_valid = 0` where the kernel never applies it.
     zero_curve: Handle,
     /// A strength map of ones, passed with the map off.
     unit_map: Handle,
     map_len: usize,
     /// The uniform aggregation window, which the `fused` row runs with.
     kaiser_off: Handle,
-    /// A `beta = 2` window, which the `fused_kaiser` row runs with. The
-    /// taper is two more loads and two more multiplies per scattered
-    /// pixel, and this is the row that says what they cost.
+    /// A `beta = 2` window, which the `fused_kaiser` row runs with.
+    ///
+    /// The kernel loads and applies the window taps for every scattered pixel in both rows, so this
+    /// row checks that the taper's values add no cost over the uniform window.
     kaiser_on: Handle,
     mv_len: usize,
     conf_len: usize,
@@ -124,54 +124,87 @@ struct Rig<R: Runtime> {
 }
 
 impl<R: Runtime> Rig<R> {
-    fn new(client: ComputeClient<R>, g: Geom) -> Self {
+    fn new(client: ComputeClient<R>, geometry: PlaneGeometry) -> Self {
         let mut ring_data = Vec::new();
         for _ in 0..N_FRAMES {
-            ring_data.extend(frame_data(g));
+            let frame = frame_data(geometry);
+            ring_data.extend(frame);
         }
-        let ring = client.create_from_slice(f32::as_bytes(&ring_data));
 
-        let blocks_x = g.w.div_ceil(BLK_STEP);
-        let blocks_y = g.h.div_ceil(BLK_STEP);
-        // `MotionCtx` pads each neighbour's slice of the motion and
-        // confidence buffers up to the runtime's binding alignment, and
-        // passes the padded element count as the kernel's stride. The
-        // rig pads the same way so the strides the kernels compile
-        // against here are the ones the pipeline compiles against.
+        let ring_bytes = f32::as_bytes(&ring_data);
+        let ring = client.create_from_slice(ring_bytes);
+
+        let blocks_x = geometry.width.div_ceil(BLK_STEP);
+        let blocks_y = geometry.height.div_ceil(BLK_STEP);
+
+        // `MotionCtx` pads each neighbour's slice of the motion and confidence buffers up to the
+        // runtime's binding alignment and passes the padded count as the kernel's stride. The rig
+        // pads the same way so the kernels compile against the strides the pipeline uses.
         let align = client.properties().memory.alignment;
         let blocks = (blocks_x * blocks_y) as u64;
         let pad = |bytes: u64| bytes.next_multiple_of(align);
-        let mv_stride = (pad(blocks * 2 * size_of::<i32>() as u64) / size_of::<i32>() as u64) as u32;
-        let conf_stride = (pad(blocks * size_of::<f32>() as u64) / size_of::<f32>() as u64) as u32;
+        let mv_stride_bytes = pad(blocks * 2 * size_of::<i32>() as u64);
+        let mv_stride = (mv_stride_bytes / size_of::<i32>() as u64) as u32;
+        let conf_stride_bytes = pad(blocks * size_of::<f32>() as u64);
+        let conf_stride = (conf_stride_bytes / size_of::<f32>() as u64) as u32;
         let mv_len = (2 * RADIUS * mv_stride) as usize;
         let conf_len = (2 * RADIUS * conf_stride) as usize;
 
-        let refs = ref_count(g.w, g.h);
-        let pixels = (g.w * g.h) as usize;
-        let frame_len = pixels * g.stored as usize;
+        let refs = ref_count(geometry.width, geometry.height);
+        let pixels = (geometry.width * geometry.height) as usize;
+        let frame_len = pixels * geometry.stored_channels as usize;
 
-        let mut sigma_host = vec![0.0f32; g.stored as usize];
-        sigma_host[..g.ch as usize].fill(SIGMA);
+        let mut sigma_host = vec![0.0f32; geometry.stored_channels as usize];
+        sigma_host[..geometry.channels as usize].fill(SIGMA);
 
-        let (map_cols, map_rows) = strength_map_dims(g.w, g.h);
+        let (map_cols, map_rows) = strength_map_dims(geometry.width, geometry.height);
         let map_len = (map_cols * map_rows) as usize;
-        let unit_map = vec![1.0f32; map_len];
+        let unit_map_host = vec![1.0f32; map_len];
+
+        let mv_host = vec![0i32; mv_len];
+        let mv_bytes = i32::as_bytes(&mv_host);
+        let mv_field = client.create_from_slice(mv_bytes);
+        let conf_host = vec![1.0f32; conf_len];
+        let conf_bytes = f32::as_bytes(&conf_host);
+        let confidence = client.create_from_slice(conf_bytes);
+        let slots_bytes = u32::as_bytes(&NEIGHBOUR_SLOTS);
+        let neighbour_slots = client.create_from_slice(slots_bytes);
+        let accum = client.empty(frame_len * N_FRAMES as usize * size_of::<i32>());
+        let wsum = client.empty(pixels * N_FRAMES as usize * size_of::<i32>());
+        let output = client.empty(frame_len * size_of::<f32>());
+        let group_weight = client.empty(refs * size_of::<f32>());
+        let sigma_bytes = f32::as_bytes(&sigma_host);
+        let sigma = client.create_from_slice(sigma_bytes);
+        let profile_host = dct_noise_profile(0.0);
+        let profile_bytes = f32::as_bytes(&profile_host);
+        let dct_profile = client.create_from_slice(profile_bytes);
+        let zero_curve_host = [0.0f32; NOISE_CURVE_BINS];
+        let zero_curve_bytes = f32::as_bytes(&zero_curve_host);
+        let zero_curve = client.create_from_slice(zero_curve_bytes);
+        let unit_map_bytes = f32::as_bytes(&unit_map_host);
+        let unit_map = client.create_from_slice(unit_map_bytes);
+        let kaiser_off_host = kaiser_window(0.0);
+        let kaiser_off_bytes = f32::as_bytes(&kaiser_off_host);
+        let kaiser_off = client.create_from_slice(kaiser_off_bytes);
+        let kaiser_on_host = kaiser_window(2.0);
+        let kaiser_on_bytes = f32::as_bytes(&kaiser_on_host);
+        let kaiser_on = client.create_from_slice(kaiser_on_bytes);
 
         Self {
-            mv_field: client.create_from_slice(i32::as_bytes(&vec![0i32; mv_len])),
-            confidence: client.create_from_slice(f32::as_bytes(&vec![1.0f32; conf_len])),
-            neighbour_slots: client.create_from_slice(u32::as_bytes(&NEIGHBOUR_SLOTS)),
-            accum: client.empty(frame_len * N_FRAMES as usize * size_of::<i32>()),
-            wsum: client.empty(pixels * N_FRAMES as usize * size_of::<i32>()),
-            output: client.empty(frame_len * size_of::<f32>()),
-            group_weight: client.empty(refs * size_of::<f32>()),
-            sigma: client.create_from_slice(f32::as_bytes(&sigma_host)),
-            dct_profile: client.create_from_slice(f32::as_bytes(&dct_noise_profile(0.0))),
-            zero_curve: client.create_from_slice(f32::as_bytes(&[0.0f32; NOISE_CURVE_BINS])),
-            unit_map: client.create_from_slice(f32::as_bytes(&unit_map)),
+            mv_field,
+            confidence,
+            neighbour_slots,
+            accum,
+            wsum,
+            output,
+            group_weight,
+            sigma,
+            dct_profile,
+            zero_curve,
+            unit_map,
             map_len,
-            kaiser_off: client.create_from_slice(f32::as_bytes(&kaiser_window(0.0))),
-            kaiser_on: client.create_from_slice(f32::as_bytes(&kaiser_window(2.0))),
+            kaiser_off,
+            kaiser_on,
             ring_len: ring_data.len(),
             ring,
             mv_len,
@@ -180,43 +213,51 @@ impl<R: Runtime> Rig<R> {
             blocks_y,
             mv_stride,
             conf_stride,
-            g,
+            geometry,
             client,
         }
     }
 
-    /// The fused kernel, launched exactly as `Nl4dDenoiser` launches
-    /// it. Eight references share one 64-lane cube, so the grid is an
-    /// eighth as wide along x as the reference grid and the cube is 1D.
-    /// One row covers matching, filtering, and scatter together.
+    /// The fused kernel, launched exactly as `Nl4dDenoiser` launches it.
+    ///
+    /// Eight references share one 64-lane cube, so the grid is an eighth as wide along x as the
+    /// reference grid and the cube is 1D. One row covers matching, filtering and scatter together.
     fn fused(&self) {
         self.fused_with(&self.kaiser_off);
     }
 
-    /// [`Self::fused`] with the aggregation window on.
+    /// [Self::fused] with the aggregation window on.
     fn fused_kaiser(&self) {
         self.fused_with(&self.kaiser_on);
     }
 
     fn fused_with(&self, kaiser: &Handle) {
-        let g = self.g;
-        let refs = ref_count(g.w, g.h);
-        let refs_x = refs_along(g.w);
-        let pixels = (g.w * g.h) as usize;
-        let frame_len = pixels * g.stored as usize;
-        let (map_cols, map_rows) = strength_map_dims(g.w, g.h);
+        let geometry = self.geometry;
+        let refs = ref_count(geometry.width, geometry.height);
+        let refs_x = refs_along(geometry.width);
+        let pixels = (geometry.width * geometry.height) as usize;
+        let frame_len = pixels * geometry.stored_channels as usize;
+        let (map_cols, map_rows) = strength_map_dims(geometry.width, geometry.height);
+
+        let cubes_x = fused_cubes_x(geometry.width);
+        let refs_y = refs_along(geometry.height);
+        let dct_profile = dct_noise_profile(0.0);
+        let group_weight_scale = weight_scale(SIGMA, &dct_profile);
+        let accum_scale = cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS);
+        let uniform_search = needs_warp_uniform_search(&self.client);
+        let frames_per_volume = grid_frames(RADIUS);
 
         unsafe {
             collab_fused::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::new_2d(fused_cubes_x(g.w), refs_along(g.h)),
+                CubeCount::new_2d(cubes_x, refs_y),
                 CubeDim::new_1d(64),
-                g.stored as usize,
+                geometry.stored_channels as usize,
                 ArrayArg::from_raw_parts(self.ring.clone(), self.ring_len),
                 ArrayArg::from_raw_parts(self.mv_field.clone(), self.mv_len),
                 ArrayArg::from_raw_parts(self.confidence.clone(), self.conf_len),
                 ArrayArg::from_raw_parts(self.neighbour_slots.clone(), NEIGHBOUR_SLOTS.len()),
-                ArrayArg::from_raw_parts(self.sigma.clone(), g.stored as usize),
+                ArrayArg::from_raw_parts(self.sigma.clone(), geometry.stored_channels as usize),
                 ArrayArg::from_raw_parts(self.zero_curve.clone(), NOISE_CURVE_BINS),
                 ArrayArg::from_raw_parts(self.unit_map.clone(), self.map_len),
                 ArrayArg::from_raw_parts(self.dct_profile.clone(), 8),
@@ -229,11 +270,11 @@ impl<R: Runtime> Rig<R> {
                 LAMBDA_HT,
                 0u32,
                 STRENGTH_MAP_OFF,
-                weight_scale(SIGMA, &dct_noise_profile(0.0)),
-                cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS),
-                needs_warp_uniform_search(&self.client),
+                group_weight_scale,
+                accum_scale,
+                uniform_search,
                 RADIUS,
-                grid_frames(RADIUS),
+                frames_per_volume,
                 REFINE,
                 self.mv_stride,
                 self.conf_stride,
@@ -241,11 +282,11 @@ impl<R: Runtime> Rig<R> {
                 BLKSIZE,
                 self.blocks_x,
                 self.blocks_y,
-                g.w,
-                g.h,
-                g.ch,
+                geometry.width,
+                geometry.height,
+                geometry.channels,
                 K_MAX,
-                g.stored,
+                geometry.stored_channels,
                 SPATIAL_RADIUS,
                 refs_x,
                 map_cols,
@@ -257,33 +298,37 @@ impl<R: Runtime> Rig<R> {
     }
 
     fn normalise(&self) {
-        let g = self.g;
-        let pixels = (g.w * g.h) as usize;
-        let frame_len = pixels * g.stored as usize;
+        let geometry = self.geometry;
+        let pixels = (geometry.width * geometry.height) as usize;
+        let frame_len = pixels * geometry.stored_channels as usize;
+        let cubes_x = geometry.width.div_ceil(BLOCK_X);
+        let cubes_y = geometry.height.div_ceil(BLOCK_Y);
+
         unsafe {
             collab_normalise::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::new_2d(g.w.div_ceil(BLOCK_X), g.h.div_ceil(BLOCK_Y)),
+                CubeCount::new_2d(cubes_x, cubes_y),
                 CubeDim::new_2d(BLOCK_X, BLOCK_Y),
-                g.stored as usize,
+                geometry.stored_channels as usize,
                 ArrayArg::from_raw_parts(self.accum.clone(), frame_len * N_FRAMES as usize),
                 ArrayArg::from_raw_parts(self.wsum.clone(), pixels * N_FRAMES as usize),
                 ArrayArg::from_raw_parts(self.output.clone(), frame_len),
                 0u32,
-                g.w,
-                g.h,
-                g.ch,
-                g.stored,
+                geometry.width,
+                geometry.height,
+                geometry.channels,
+                geometry.stored_channels,
             );
         }
     }
 
     fn zero(&self) {
-        let g = self.g;
-        let pixels = (g.w * g.h) as usize;
-        let frame_len = pixels * g.stored as usize;
+        let geometry = self.geometry;
+        let pixels = (geometry.width * geometry.height) as usize;
+        let frame_len = pixels * geometry.stored_channels as usize;
         let dim = 256u32;
         let grid = (frame_len as u32).div_ceil(dim).min(65_535);
+
         unsafe {
             collab_zero_accum::launch_unchecked::<R>(
                 &self.client,
@@ -293,7 +338,7 @@ impl<R: Runtime> Rig<R> {
                 ArrayArg::from_raw_parts(self.wsum.clone(), pixels * N_FRAMES as usize),
                 0u32,
                 pixels as u32,
-                g.stored,
+                geometry.stored_channels,
                 grid * dim,
             );
         }
@@ -324,11 +369,12 @@ impl<R: Runtime> Benchmark for Arm<'_, R> {
             "normalise" => self.rig.normalise(),
             _ => self.rig.zero(),
         }
+
         Ok(())
     }
 
     fn name(&self) -> String {
-        format!("{:<15} {}", self.kernel, self.rig.g.label)
+        format!("{:<15} {}", self.kernel, self.rig.geometry.label)
     }
 
     fn sync(&self) {
@@ -336,10 +382,11 @@ impl<R: Runtime> Benchmark for Arm<'_, R> {
     }
 
     fn shapes(&self) -> Vec<Vec<usize>> {
+        let geometry = self.rig.geometry;
         vec![vec![
-            self.rig.g.w as usize,
-            self.rig.g.h as usize,
-            self.rig.g.ch as usize,
+            geometry.width as usize,
+            geometry.height as usize,
+            geometry.channels as usize,
         ]]
     }
 }
@@ -353,23 +400,19 @@ struct Cli {
 }
 
 fn main() {
-    use clap::Parser;
     let cli = Cli::parse();
 
     #[cfg(feature = "vulkan")]
     {
         let device = cli.device.to_wgpu().expect("wgpu device conversion failed");
         let client = cubecl::wgpu::WgpuRuntime::client(&device);
+        let alignment = client.properties().memory.alignment;
         println!("\ncollab kernels at real per-frame geometry, TimingMethod::Device");
         println!("  device: {device:?}");
-        println!(
-            "  buffer alignment: {} bytes\n",
-            client.properties().memory.alignment
-        );
+        println!("  buffer alignment: {} bytes\n", alignment);
 
-        // (name, prime). A primed arm runs `fused` once before it is
-        // timed, so `normalise` reads real accumulator contents rather
-        // than an empty buffer.
+        // (name, prime). A primed arm runs `fused` once before it is timed, so `normalise` reads
+        // real accumulator contents rather than an empty buffer.
         let kernels = [
             ("zero_accum", false),
             ("fused", false),
@@ -378,35 +421,37 @@ fn main() {
         ];
         let mut totals = vec![0.0f64; kernels.len()];
 
-        for g in PLANES {
-            let rig = Rig::<cubecl::wgpu::WgpuRuntime>::new(client.clone(), *g);
-            for (i, (k, prime)) in kernels.iter().enumerate() {
+        for plane in PLANES {
+            let rig = Rig::<cubecl::wgpu::WgpuRuntime>::new(client.clone(), *plane);
+            for (index, (kernel, prime)) in kernels.iter().enumerate() {
                 let arm = Arm {
                     rig: &rig,
-                    kernel: k,
+                    kernel,
                     prime: *prime,
                 };
                 let name = arm.name();
                 match arm.run(TimingMethod::Device) {
-                    Ok(d) => {
-                        let c = BenchmarkComputations::new(&d);
-                        let ms = c.median.as_secs_f64() * 1000.0;
-                        totals[i] += ms;
-                        println!("  {name:<40} {ms:>8.3} ms");
+                    Ok(durations) => {
+                        let computations = BenchmarkComputations::new(&durations);
+                        let median_ms = computations.median.as_secs_f64() * 1000.0;
+                        totals[index] += median_ms;
+                        println!("  {name:<40} {median_ms:>8.3} ms");
                     },
-                    Err(e) => println!("  {name:<40}  error: {e}"),
+                    Err(err) => println!("  {name:<40}  error: {err}"),
                 }
             }
+
             println!();
         }
 
         println!("  --- per frame, both planes summed ---");
-        let mut grand = 0.0;
-        for (i, (k, _)) in kernels.iter().enumerate() {
-            grand += totals[i];
-            println!("  {:<40} {:>8.3} ms", *k, totals[i]);
+        let mut grand_total = 0.0;
+        for (index, (kernel, _)) in kernels.iter().enumerate() {
+            grand_total += totals[index];
+            println!("  {:<40} {:>8.3} ms", *kernel, totals[index]);
         }
-        println!("  {:<40} {:>8.3} ms", "COLLAB TOTAL", grand);
+
+        println!("  {:<40} {:>8.3} ms", "COLLAB TOTAL", grand_total);
         println!();
     }
 

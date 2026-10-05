@@ -540,71 +540,76 @@ mod tests {
 
     #[test]
     fn chained_default_is_valid() {
+        let estimation = MotionEstimation::chained_default();
         let mode = MotionCompensationMode::Mvtools {
             blksize: 16,
             overlap: 8,
             search_radius: 4,
             pyramid_levels: 2,
-            estimation: MotionEstimation::chained_default(),
+            estimation,
         };
         mode.validate().unwrap();
-        assert_eq!(
-            mode,
-            MotionCompensationMode::Mvtools {
-                blksize: 16,
-                overlap: 8,
-                search_radius: 4,
-                pyramid_levels: 2,
-                estimation: MotionEstimation::Chained {
-                    refine_radius: DEFAULT_REFINE_RADIUS
-                },
-            }
-        );
+
+        let expected_estimation = MotionEstimation::Chained {
+            refine_radius: DEFAULT_REFINE_RADIUS,
+        };
+        let expected = MotionCompensationMode::Mvtools {
+            blksize: 16,
+            overlap: 8,
+            search_radius: 4,
+            pyramid_levels: 2,
+            estimation: expected_estimation,
+        };
+        assert_eq!(mode, expected);
     }
 
     #[test]
     fn validate_rejects_zero_refine_radius() {
+        let estimation = MotionEstimation::Chained { refine_radius: 0 };
         let mode = MotionCompensationMode::Mvtools {
             blksize: 16,
             overlap: 8,
             search_radius: 4,
             pyramid_levels: 2,
-            estimation: MotionEstimation::Chained { refine_radius: 0 },
+            estimation,
         };
         assert!(mode.validate().is_err());
     }
 
     #[test]
     fn validate_rejects_refine_radius_above_max() {
+        let estimation = MotionEstimation::Chained {
+            refine_radius: MAX_SEARCH_RADIUS + 1,
+        };
         let mode = MotionCompensationMode::Mvtools {
             blksize: 16,
             overlap: 8,
             search_radius: 4,
             pyramid_levels: 2,
-            estimation: MotionEstimation::Chained {
-                refine_radius: MAX_SEARCH_RADIUS + 1,
-            },
+            estimation,
         };
         assert!(mode.validate().is_err());
     }
 
     #[test]
     fn validate_accepts_refine_radius_at_max() {
+        let estimation = MotionEstimation::Chained {
+            refine_radius: MAX_SEARCH_RADIUS,
+        };
         let mode = MotionCompensationMode::Mvtools {
             blksize: 16,
             overlap: 8,
             search_radius: 4,
             pyramid_levels: 2,
-            estimation: MotionEstimation::Chained {
-                refine_radius: MAX_SEARCH_RADIUS,
-            },
+            estimation,
         };
         mode.validate().unwrap();
     }
 
     #[test]
     fn motion_estimation_default_is_auto() {
-        assert_eq!(MotionEstimation::default(), MotionEstimation::Auto);
+        let estimation = MotionEstimation::default();
+        assert_eq!(estimation, MotionEstimation::Auto);
     }
 
     #[test]
@@ -615,14 +620,12 @@ mod tests {
 
     #[test]
     fn resolve_auto_at_and_above_threshold_gives_chained_default() {
-        assert_eq!(
-            MotionEstimation::Auto.resolve(CHAINED_RADIUS_THRESHOLD),
-            MotionEstimation::chained_default()
-        );
-        assert_eq!(
-            MotionEstimation::Auto.resolve(8),
-            MotionEstimation::chained_default()
-        );
+        let chained = MotionEstimation::chained_default();
+        let at_threshold = MotionEstimation::Auto.resolve(CHAINED_RADIUS_THRESHOLD);
+        let above_threshold = MotionEstimation::Auto.resolve(8);
+
+        assert_eq!(at_threshold, chained);
+        assert_eq!(above_threshold, chained);
     }
 
     #[test]
@@ -673,8 +676,11 @@ mod tests {
 
     #[test]
     fn pair_ring_slot_count_is_double_radius() {
-        assert_eq!(pair_ring_slot_count(3), 6);
-        assert_eq!(pair_ring_slot_count(1), 2);
+        let radius_three = pair_ring_slot_count(3);
+        let radius_one = pair_ring_slot_count(1);
+
+        assert_eq!(radius_three, 6);
+        assert_eq!(radius_one, 2);
     }
 
     #[test]

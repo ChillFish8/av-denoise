@@ -273,27 +273,35 @@ mod tests {
     #[test]
     fn mv_field_offset_zero_for_first_neighbour() {
         let ctx = motion_ctx(16, 8);
-        assert_eq!(mv_field_byte_offset(&ctx, 0), 0);
+        let offset = mv_field_byte_offset(&ctx, 0);
+
+        assert_eq!(offset, 0);
     }
 
     #[test]
     fn mv_field_offset_advances_by_blocks() {
         let ctx = motion_ctx(16, 8);
         let stride = (ctx.blocks_x as u64) * (ctx.blocks_y as u64) * 2 * 4;
-        assert_eq!(mv_field_byte_offset(&ctx, 3), 3 * stride);
+        let offset = mv_field_byte_offset(&ctx, 3);
+
+        assert_eq!(offset, 3 * stride);
     }
 
     #[test]
     fn confidence_offset_zero_for_first_neighbour() {
         let ctx = motion_ctx(16, 8);
-        assert_eq!(confidence_byte_offset(&ctx, 0), 0);
+        let offset = confidence_byte_offset(&ctx, 0);
+
+        assert_eq!(offset, 0);
     }
 
     #[test]
     fn confidence_offset_advances_by_blocks() {
         let ctx = motion_ctx(16, 8);
         let stride = (ctx.blocks_x as u64) * (ctx.blocks_y as u64) * 4;
-        assert_eq!(confidence_byte_offset(&ctx, 3), 3 * stride);
+        let offset = confidence_byte_offset(&ctx, 3);
+
+        assert_eq!(offset, 3 * stride);
     }
 
     #[test]
@@ -301,7 +309,10 @@ mod tests {
         // Both strides are 4 bytes per component, so confidence is exactly half the motion field
         // while the unpadded stride is 32-byte aligned, which this fixture's 64 blocks are.
         let ctx = motion_ctx(16, 8);
-        assert_eq!(mv_field_byte_offset(&ctx, 1), 2 * confidence_byte_offset(&ctx, 1));
+        let mv_offset = mv_field_byte_offset(&ctx, 1);
+        let confidence_offset = confidence_byte_offset(&ctx, 1);
+
+        assert_eq!(mv_offset, 2 * confidence_offset);
     }
 
     #[test]
@@ -314,9 +325,14 @@ mod tests {
             1,
             "fixture should have exactly one block"
         );
-        assert_eq!(confidence_byte_offset(&ctx, 0), 0);
-        assert_eq!(confidence_byte_offset(&ctx, 1), 32);
-        assert_eq!(confidence_byte_offset(&ctx, 2), 64);
+
+        let first = confidence_byte_offset(&ctx, 0);
+        let second = confidence_byte_offset(&ctx, 1);
+        let third = confidence_byte_offset(&ctx, 2);
+
+        assert_eq!(first, 0);
+        assert_eq!(second, 32);
+        assert_eq!(third, 64);
     }
 
     #[test]
@@ -329,9 +345,14 @@ mod tests {
             1,
             "fixture should have exactly one block"
         );
-        assert_eq!(mv_field_byte_offset(&ctx, 0), 0);
-        assert_eq!(mv_field_byte_offset(&ctx, 1), 32);
-        assert_eq!(mv_field_byte_offset(&ctx, 2), 64);
+
+        let first = mv_field_byte_offset(&ctx, 0);
+        let second = mv_field_byte_offset(&ctx, 1);
+        let third = mv_field_byte_offset(&ctx, 2);
+
+        assert_eq!(first, 0);
+        assert_eq!(second, 32);
+        assert_eq!(third, 64);
     }
 
     #[test]
@@ -351,7 +372,11 @@ mod tests {
             8,
             "test premise: the unpadded stride is not 32-aligned"
         );
-        assert_eq!(mv_field_byte_offset(&ctx, 0), 0);
-        assert_eq!(mv_field_byte_offset(&ctx, 1), 145_824);
+
+        let first = mv_field_byte_offset(&ctx, 0);
+        let second = mv_field_byte_offset(&ctx, 1);
+
+        assert_eq!(first, 0);
+        assert_eq!(second, 145_824);
     }
 }

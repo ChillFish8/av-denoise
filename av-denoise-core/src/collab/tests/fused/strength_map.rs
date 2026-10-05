@@ -25,15 +25,18 @@ fn map_scale_kernel(
     out[index as usize] = strength_map_scale(map, rx, ry, map_cols, map_rows);
 }
 
-/// Every reference position of a `width` by `height` frame, as `(rx, ry)` pairs.
+/// Every reference position of a `width` by `height` frame, as `(left, top)` pairs.
 fn reference_positions(width: u32, height: u32) -> Vec<u32> {
     let mut positions = Vec::new();
     for ref_y in 0..refs_along(height) {
         for ref_x in 0..refs_along(width) {
-            positions.push(ref_pos(ref_x, width));
-            positions.push(ref_pos(ref_y, height));
+            let left = ref_pos(ref_x, width);
+            let top = ref_pos(ref_y, height);
+            positions.push(left);
+            positions.push(top);
         }
     }
+
     positions
 }
 
@@ -48,8 +51,10 @@ fn the_map_scale_is_the_mean_of_the_overlapped_quarters_on_a_ragged_frame() {
     let count = positions.len() / 2;
 
     let client = make_client();
-    let map_buf = client.create_from_slice(f32::as_bytes(&map));
-    let positions_buf = client.create_from_slice(u32::as_bytes(&positions));
+    let map_bytes = f32::as_bytes(&map);
+    let positions_bytes = u32::as_bytes(&positions);
+    let map_buf = client.create_from_slice(map_bytes);
+    let positions_buf = client.create_from_slice(positions_bytes);
     let out_buf = client.empty(count * size_of::<f32>());
 
     unsafe {
@@ -69,19 +74,20 @@ fn the_map_scale_is_the_mean_of_the_overlapped_quarters_on_a_ragged_frame() {
     let got = f32::from_bytes(&out_bytes)[..count].to_vec();
 
     let cols = map_cols as usize;
+
     for (index, &scale) in got.iter().enumerate() {
-        let rx = positions[2 * index] as usize;
-        let ry = positions[2 * index + 1] as usize;
-        let col_lo = rx / 8;
-        let col_hi = rx.div_ceil(8).min(cols - 1);
-        let row_lo = ry / 8;
-        let row_hi = ry.div_ceil(8).min(map_rows as usize - 1);
-        let sum = map[row_lo * cols + col_lo]
-            + map[row_lo * cols + col_hi]
-            + map[row_hi * cols + col_lo]
-            + map[row_hi * cols + col_hi];
+        let left = positions[2 * index] as usize;
+        let top = positions[2 * index + 1] as usize;
+        let first_col = left / 8;
+        let last_col = left.div_ceil(8).min(cols - 1);
+        let first_row = top / 8;
+        let last_row = top.div_ceil(8).min(map_rows as usize - 1);
+        let sum = map[first_row * cols + first_col]
+            + map[first_row * cols + last_col]
+            + map[last_row * cols + first_col]
+            + map[last_row * cols + last_col];
         let want = sum / 4.0;
-        assert_eq!(scale, want, "reference at ({rx}, {ry})");
+        assert_eq!(scale, want, "reference at ({left}, {top})");
     }
 }
 
@@ -188,8 +194,11 @@ fn a_two_region_map_thresholds_each_region_by_its_own_multiplier() {
     // from 40 on only by references reading 0.5, given the spatial radius of 4.
     assert_columns_identical("left region", &mapped, &left_scaled, side, 0, 24);
     assert_columns_identical("right region", &mapped, &right_scaled, side, 40, side);
-    assert!(columns_differ(&left_scaled, &plain, side, 0, 24));
-    assert!(columns_differ(&right_scaled, &plain, side, 40, side));
+
+    let left_changed = columns_differ(&left_scaled, &plain, side, 0, 24);
+    let right_changed = columns_differ(&right_scaled, &plain, side, 40, side);
+    assert!(left_changed);
+    assert!(right_changed);
 }
 
 #[test]
@@ -212,12 +221,12 @@ fn both_walks_agree_with_a_map_active() {
 fn three_channel_setup() -> Setup {
     let pixels = (FRAME_SIDE * FRAME_SIDE) as usize;
     let noise = noisy_field_over(FRAME_SIDE, FRAME_SIDE * 3, 0.5, 0.02);
-    let stored_ch = ChannelMode::Yuv.storage_count() as usize;
+    let stored_channels = ChannelMode::Yuv.storage_count() as usize;
 
-    let mut ring = vec![0.0f32; pixels * stored_ch];
+    let mut ring = vec![0.0f32; pixels * stored_channels];
     for pixel in 0..pixels {
         for channel in 0..3 {
-            ring[pixel * stored_ch + channel] = noise[channel * pixels + pixel];
+            ring[pixel * stored_channels + channel] = noise[channel * pixels + pixel];
         }
     }
 
@@ -226,14 +235,15 @@ fn three_channel_setup() -> Setup {
     setup.ring = ring;
     setup.channel_mode = ChannelMode::Yuv;
     setup.lambda_ht = LAMBDA;
+
     setup
 }
 
 /// Whether any accumulator of `channel` differs between two single-frame runs.
 fn channel_differs(first: &Aggregated, second: &Aggregated, channel: usize) -> bool {
-    let stored_ch = ChannelMode::Yuv.storage_count() as usize;
-    let first_values = first.accum.iter().skip(channel).step_by(stored_ch);
-    let second_values = second.accum.iter().skip(channel).step_by(stored_ch);
+    let stored_channels = ChannelMode::Yuv.storage_count() as usize;
+    let first_values = first.accum.iter().skip(channel).step_by(stored_channels);
+    let second_values = second.accum.iter().skip(channel).step_by(stored_channels);
     first_values
         .zip(second_values)
         .any(|(first_value, second_value)| first_value != second_value)
@@ -258,6 +268,8 @@ fn a_luma_map_scales_only_channel_zero() {
     all_mapped.strength_map = Some((all_map, STRENGTH_MAP_ALL));
     let all_channels = run_fused(&all_mapped);
 
-    assert!(channel_differs(&all_channels, &got, 1));
-    assert!(channel_differs(&all_channels, &got, 2));
+    let first_chroma_differs = channel_differs(&all_channels, &got, 1);
+    let second_chroma_differs = channel_differs(&all_channels, &got, 2);
+    assert!(first_chroma_differs);
+    assert!(second_chroma_differs);
 }

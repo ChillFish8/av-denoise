@@ -5,7 +5,8 @@ use crate::error::Error;
 fn u16_depth_outside_9_to_16_is_rejected() {
     for depth in [0, 8, 17] {
         let format = SampleFormat::U16 { depth };
-        assert!(matches!(format.validate(), Err(Error::InvalidGeometry(_))));
+        let result = format.validate();
+        assert!(matches!(result, Err(Error::InvalidGeometry(_))));
     }
 }
 
@@ -92,6 +93,7 @@ mod with_handles {
         let handle = client.empty(12);
         let plane = DevicePlane::new(&handle, 3, 3);
         let geometry = geometry(ChannelMode::Luma);
-        assert!(geometry.check_planes(&[plane], SampleFormat::U8).is_ok());
+        let result = geometry.check_planes(&[plane], SampleFormat::U8);
+        assert!(result.is_ok());
     }
 }

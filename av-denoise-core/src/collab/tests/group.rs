@@ -11,10 +11,9 @@ use crate::collab::kernels::group::{
     unpack_t_host,
 };
 
-/// Runs [`pack_pos`], [`pack_pos_t`], and [`clamp_top_left`] on the GPU,
-/// one input per thread, so the host mirrors below are checked against
-/// the kernels that actually consume them rather than against
-/// themselves.
+/// Runs [pack_pos], [pack_pos_t] and [clamp_top_left] on the GPU, one input per thread.
+///
+/// This checks the host mirrors against the kernels that consume them rather than against themselves.
 #[cube(launch_unchecked)]
 fn group_helpers_kernel(
     xs: &Array<u32>,
@@ -42,68 +41,68 @@ fn run_helpers(
     coords: &[i32],
     max_pos: &[u32],
 ) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
-    let n = xs.len();
-    assert_eq!(ys.len(), n);
-    assert_eq!(ts.len(), n);
-    assert_eq!(coords.len(), n);
-    assert_eq!(max_pos.len(), n);
+    let count = xs.len();
+    assert_eq!(ys.len(), count);
+    assert_eq!(ts.len(), count);
+    assert_eq!(coords.len(), count);
+    assert_eq!(max_pos.len(), count);
 
     let client = make_client();
-    let xs_buf = client.create_from_slice(u32::as_bytes(xs));
-    let ys_buf = client.create_from_slice(u32::as_bytes(ys));
-    let ts_buf = client.create_from_slice(u32::as_bytes(ts));
-    let coords_buf = client.create_from_slice(i32::as_bytes(coords));
-    let max_buf = client.create_from_slice(u32::as_bytes(max_pos));
-    // These size the kernel's three output buffers, which hold one u32
-    // per input coordinate. `size_of_val(xs)` reaches the same number
-    // but ties an output's size to an input's slice, which reads as if
-    // the buffers held `xs` itself.
+    let xs_bytes = u32::as_bytes(xs);
+    let ys_bytes = u32::as_bytes(ys);
+    let ts_bytes = u32::as_bytes(ts);
+    let coords_bytes = i32::as_bytes(coords);
+    let max_bytes = u32::as_bytes(max_pos);
+    let xs_buf = client.create_from_slice(xs_bytes);
+    let ys_buf = client.create_from_slice(ys_bytes);
+    let ts_buf = client.create_from_slice(ts_bytes);
+    let coords_buf = client.create_from_slice(coords_bytes);
+    let max_buf = client.create_from_slice(max_bytes);
     #[expect(
         clippy::manual_slice_size_calculation,
-        reason = "n is the element count these outputs hold, not xs's byte length"
+        reason = "count is the element count these outputs hold, not xs's byte length"
     )]
-    let packed_buf = client.empty(n * size_of::<u32>());
+    let packed_buf = client.empty(count * size_of::<u32>());
     #[expect(
         clippy::manual_slice_size_calculation,
-        reason = "n is the element count these outputs hold, not xs's byte length"
+        reason = "count is the element count these outputs hold, not xs's byte length"
     )]
-    let packed_t_buf = client.empty(n * size_of::<u32>());
+    let packed_t_buf = client.empty(count * size_of::<u32>());
     #[expect(
         clippy::manual_slice_size_calculation,
-        reason = "n is the element count these outputs hold, not xs's byte length"
+        reason = "count is the element count these outputs hold, not xs's byte length"
     )]
-    let clamped_buf = client.empty(n * size_of::<u32>());
+    let clamped_buf = client.empty(count * size_of::<u32>());
 
     unsafe {
         group_helpers_kernel::launch_unchecked::<R>(
             &client,
             CubeCount::new_1d(1),
             CubeDim::new_1d(64),
-            ArrayArg::from_raw_parts(xs_buf, n),
-            ArrayArg::from_raw_parts(ys_buf, n),
-            ArrayArg::from_raw_parts(ts_buf, n),
-            ArrayArg::from_raw_parts(coords_buf, n),
-            ArrayArg::from_raw_parts(max_buf, n),
-            ArrayArg::from_raw_parts(packed_buf.clone(), n),
-            ArrayArg::from_raw_parts(packed_t_buf.clone(), n),
-            ArrayArg::from_raw_parts(clamped_buf.clone(), n),
-            n as u32,
+            ArrayArg::from_raw_parts(xs_buf, count),
+            ArrayArg::from_raw_parts(ys_buf, count),
+            ArrayArg::from_raw_parts(ts_buf, count),
+            ArrayArg::from_raw_parts(coords_buf, count),
+            ArrayArg::from_raw_parts(max_buf, count),
+            ArrayArg::from_raw_parts(packed_buf.clone(), count),
+            ArrayArg::from_raw_parts(packed_t_buf.clone(), count),
+            ArrayArg::from_raw_parts(clamped_buf.clone(), count),
+            count as u32,
         );
     }
 
-    let packed = client.read_one(packed_buf).expect("packed readback failed");
-    let packed_t = client.read_one(packed_t_buf).expect("packed_t readback failed");
-    let clamped = client.read_one(clamped_buf).expect("clamped readback failed");
+    let packed_bytes = client.read_one(packed_buf).expect("packed readback failed");
+    let packed_t_bytes = client.read_one(packed_t_buf).expect("packed_t readback failed");
+    let clamped_bytes = client.read_one(clamped_buf).expect("clamped readback failed");
+    let packed = u32::from_bytes(&packed_bytes)[..count].to_vec();
+    let packed_t = u32::from_bytes(&packed_t_bytes)[..count].to_vec();
+    let clamped = u32::from_bytes(&clamped_bytes)[..count].to_vec();
 
-    (
-        u32::from_bytes(&packed)[..n].to_vec(),
-        u32::from_bytes(&packed_t)[..n].to_vec(),
-        u32::from_bytes(&clamped)[..n].to_vec(),
-    )
+    (packed, packed_t, clamped)
 }
 
-/// Positions spanning both halves of the packed word, including the
-/// largest value each 13-bit field holds.
+/// Positions spanning both halves of the packed word, including the largest value each 13-bit field
+/// holds.
 const POSITIONS: &[(u32, u32)] = &[
     (0, 0),
     (1, 0),
@@ -117,18 +116,21 @@ const POSITIONS: &[(u32, u32)] = &[
 #[test]
 fn packing_a_position_round_trips_through_the_host_mirror() {
     for &(x, y) in POSITIONS {
-        let (px, py) = unpack_pos_host(pack_pos_host(x, y));
-        assert_eq!((px, py), (x, y), "({x}, {y}) did not survive the round trip");
+        let packed = pack_pos_host(x, y);
+        let unpacked = unpack_pos_host(packed);
+        assert_eq!(unpacked, (x, y), "({x}, {y}) did not survive the round trip");
 
-        // A neighbour index in the field above y must not leak into the
-        // coordinate unpack_pos_host reads.
-        let (px, py) = unpack_pos_host(pack_pos_t_host(x, y, 4));
-        assert_eq!((px, py), (x, y), "t=4 leaked into the coordinates for ({x}, {y})");
+        // A neighbour index in the field above y must not leak into the coordinates.
+        let packed_with_t = pack_pos_t_host(x, y, 4);
+        let unpacked_with_t = unpack_pos_host(packed_with_t);
+        assert_eq!(
+            unpacked_with_t,
+            (x, y),
+            "t=4 leaked into the coordinates for ({x}, {y})"
+        );
     }
 }
 
-/// The neighbour index rides in the bits above y without disturbing
-/// either coordinate, so the existing unpack still reads them.
 #[test]
 fn pack_pos_t_round_trips_and_leaves_the_coordinates_readable() {
     for &(x, y, t) in &[
@@ -136,22 +138,24 @@ fn pack_pos_t_round_trips_and_leaves_the_coordinates_readable() {
         (1919, 1079, 0),
         (1912, 1072, 4),
         (7, 3, 1),
-        // All three fields at their maximum simultaneously, proving none
-        // bleeds into another at saturation.
+        // All three fields at their maximum at once, so none can bleed into another at saturation.
         (8191, 8191, 63),
     ] {
         let packed = pack_pos_t_host(x, y, t);
-        assert_eq!(unpack_pos_host(packed), (x, y), "coords for ({x},{y},{t})");
-        assert_eq!(unpack_t_host(packed), t, "t for ({x},{y},{t})");
+        let coords = unpack_pos_host(packed);
+        let unpacked_t = unpack_t_host(packed);
+        assert_eq!(coords, (x, y), "coords for ({x},{y},{t})");
+        assert_eq!(unpacked_t, t, "t for ({x},{y},{t})");
     }
 }
 
-/// A centre-frame position packs a zero, which is what lets the filter
-/// stage tell it apart from a motion-predicted member without a second
-/// array.
+/// A centre-frame position packs a zero, which lets the filter stage tell it apart from a
+/// motion-predicted member without a second array.
 #[test]
 fn pack_pos_t_agrees_with_pack_pos_at_t_zero() {
-    assert_eq!(pack_pos_t_host(120, 400, 0), pack_pos_host(120, 400));
+    let packed_t = pack_pos_t_host(120, 400, 0);
+    let packed = pack_pos_host(120, 400);
+    assert_eq!(packed_t, packed);
 }
 
 #[test]
@@ -165,8 +169,9 @@ fn a_position_packs_x_low_and_y_high() {
 fn distinct_positions_pack_to_distinct_words() {
     let mut seen = std::collections::HashSet::new();
     for &(x, y) in POSITIONS {
+        let packed = pack_pos_host(x, y);
         assert!(
-            seen.insert(pack_pos_host(x, y)),
+            seen.insert(packed),
             "({x}, {y}) collided with an earlier position"
         );
     }
@@ -176,26 +181,24 @@ fn distinct_positions_pack_to_distinct_words() {
 fn the_gpu_helpers_match_their_host_mirrors() {
     let xs: Vec<u32> = POSITIONS.iter().map(|&(x, _)| x).collect();
     let ys: Vec<u32> = POSITIONS.iter().map(|&(_, y)| y).collect();
-    // One t per position, covering the centre-frame value and a spread
-    // of neighbour indices.
+    // One t per position, covering the centre-frame value and a spread of neighbour indices.
     let ts: Vec<u32> = vec![0, 1, 4, 0, 2, 0, 3];
-    // One coordinate per position, covering below the range, inside it,
-    // and past its top, against a max of 24 (a 32-wide frame's last
-    // legal 8x8 patch position).
+    // One coordinate per position, covering below the range, inside it and past its top, against a
+    // max of 24 (a 32-wide frame's last legal 8x8 patch position).
     let coords: Vec<i32> = vec![-9, -1, 0, 1, 24, 25, 4096];
     let max_pos: Vec<u32> = vec![24; coords.len()];
 
     let (packed, packed_t, clamped) = run_helpers(&xs, &ys, &ts, &coords, &max_pos);
 
     for (i, &(x, y)) in POSITIONS.iter().enumerate() {
+        let expected = pack_pos_host(x, y);
+        let expected_t = pack_pos_t_host(x, y, ts[i]);
         assert_eq!(
-            packed[i],
-            pack_pos_host(x, y),
+            packed[i], expected,
             "pack_pos disagreed with pack_pos_host at ({x}, {y})"
         );
         assert_eq!(
-            packed_t[i],
-            pack_pos_t_host(x, y, ts[i]),
+            packed_t[i], expected_t,
             "pack_pos_t disagreed with pack_pos_t_host at ({x}, {y}, {})",
             ts[i]
         );

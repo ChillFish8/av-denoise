@@ -279,10 +279,15 @@ mod tests {
     #[test]
     fn neighbour_idx_for_k_matches_dispatch_convention() {
         // Negative offsets take indices 0 up to radius minus 1, then the positive ones follow.
-        assert_eq!(neighbour_idx_for_k(2, -2), 0);
-        assert_eq!(neighbour_idx_for_k(2, -1), 1);
-        assert_eq!(neighbour_idx_for_k(2, 1), 2);
-        assert_eq!(neighbour_idx_for_k(2, 2), 3);
+        let furthest_back = neighbour_idx_for_k(2, -2);
+        let nearest_back = neighbour_idx_for_k(2, -1);
+        let nearest_forward = neighbour_idx_for_k(2, 1);
+        let furthest_forward = neighbour_idx_for_k(2, 2);
+
+        assert_eq!(furthest_back, 0);
+        assert_eq!(nearest_back, 1);
+        assert_eq!(nearest_forward, 2);
+        assert_eq!(furthest_forward, 3);
     }
 
     #[test]
@@ -295,10 +300,16 @@ mod tests {
             1,
             "fixture should have exactly one block"
         );
-        assert_eq!(pair_byte_offset(&ctx, 0, 0), 0);
-        assert_eq!(pair_byte_offset(&ctx, 0, 1), 32);
-        assert_eq!(pair_byte_offset(&ctx, 1, 0), 64);
-        assert_eq!(pair_byte_offset(&ctx, 1, 1), 96);
+
+        let slot_0_forward = pair_byte_offset(&ctx, 0, 0);
+        let slot_0_backward = pair_byte_offset(&ctx, 0, 1);
+        let slot_1_forward = pair_byte_offset(&ctx, 1, 0);
+        let slot_1_backward = pair_byte_offset(&ctx, 1, 1);
+
+        assert_eq!(slot_0_forward, 0);
+        assert_eq!(slot_0_backward, 32);
+        assert_eq!(slot_1_forward, 64);
+        assert_eq!(slot_1_backward, 96);
     }
 
     #[test]
@@ -311,9 +322,15 @@ mod tests {
             2,
             "fixture should have exactly two blocks"
         );
-        assert_eq!(pair_byte_offset(&ctx, 0, 0), 0);
-        assert_eq!(pair_byte_offset(&ctx, 0, 1), 32);
-        assert_eq!(pair_byte_offset(&ctx, 1, 0), 64);
-        assert_eq!(pair_byte_offset(&ctx, 1, 1), 96);
+
+        let slot_0_forward = pair_byte_offset(&ctx, 0, 0);
+        let slot_0_backward = pair_byte_offset(&ctx, 0, 1);
+        let slot_1_forward = pair_byte_offset(&ctx, 1, 0);
+        let slot_1_backward = pair_byte_offset(&ctx, 1, 1);
+
+        assert_eq!(slot_0_forward, 0);
+        assert_eq!(slot_0_backward, 32);
+        assert_eq!(slot_1_forward, 64);
+        assert_eq!(slot_1_backward, 96);
     }
 }

@@ -55,19 +55,25 @@ fn save_vectors_copies_one_neighbour_into_its_entry() {
     let saved_mv_zeros = vec![0i32; saved_mv_len];
     let saved_conf_zeros = vec![0.0f32; saved_conf_len];
 
-    let mv = client.create_from_slice(i32::as_bytes(&mv_host));
-    let conf = client.create_from_slice(f32::as_bytes(&conf_host));
-    let saved_mv = client.create_from_slice(i32::as_bytes(&saved_mv_zeros));
-    let saved_conf = client.create_from_slice(f32::as_bytes(&saved_conf_zeros));
+    let mv_bytes = i32::as_bytes(&mv_host);
+    let conf_bytes = f32::as_bytes(&conf_host);
+    let saved_mv_zero_bytes = i32::as_bytes(&saved_mv_zeros);
+    let saved_conf_zero_bytes = f32::as_bytes(&saved_conf_zeros);
+    let mv = client.create_from_slice(mv_bytes);
+    let conf = client.create_from_slice(conf_bytes);
+    let saved_mv = client.create_from_slice(saved_mv_zero_bytes);
+    let saved_conf = client.create_from_slice(saved_conf_zero_bytes);
 
     let neighbour = 2u32;
     let entry = 1u32;
+    let grid = CubeCount::new_1d(1);
+    let dim = CubeDim::new_1d(THREADS);
 
     unsafe {
         grain_save_vectors::launch_unchecked::<R>(
             &client,
-            CubeCount::new_1d(1),
-            CubeDim::new_1d(THREADS),
+            grid,
+            dim,
             ArrayArg::from_raw_parts(mv, mv_host.len()),
             ArrayArg::from_raw_parts(conf, conf_host.len()),
             ArrayArg::from_raw_parts(saved_mv.clone(), saved_mv_len),
@@ -234,6 +240,7 @@ fn with_kept_grain(mut scene: Scene, kept_shift: (i32, i32)) -> Scene {
     scene.out_t = add_noise(&moved_prev, KEPT_SIGMA, 4, shape);
     scene.out_prev = out_prev;
     scene.kept_mv.fill(kept_shift);
+
     scene
 }
 
@@ -281,20 +288,32 @@ fn run_measure(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Ve
     let edges = bucket_edges();
     let hist_zeros = vec![0i32; 2 * HIST_LEN];
 
-    let input = client.create_from_slice(f32::as_bytes(&ring));
-    let out_t = client.create_from_slice(f32::as_bytes(&scene.out_t));
-    let out_prev = client.create_from_slice(f32::as_bytes(&scene.out_prev));
-    let saved_mv = client.create_from_slice(i32::as_bytes(&saved_mv));
-    let saved_conf = client.create_from_slice(f32::as_bytes(&saved_conf));
-    let edges_buf = client.create_from_slice(f32::as_bytes(&edges));
-    let hist = client.create_from_slice(i32::as_bytes(&hist_zeros));
+    let ring_bytes = f32::as_bytes(&ring);
+    let out_t_bytes = f32::as_bytes(&scene.out_t);
+    let out_prev_bytes = f32::as_bytes(&scene.out_prev);
+    let saved_mv_bytes = i32::as_bytes(&saved_mv);
+    let saved_conf_bytes = f32::as_bytes(&saved_conf);
+    let edges_bytes = f32::as_bytes(&edges);
+    let hist_zero_bytes = i32::as_bytes(&hist_zeros);
+    let input = client.create_from_slice(ring_bytes);
+    let out_t = client.create_from_slice(out_t_bytes);
+    let out_prev = client.create_from_slice(out_prev_bytes);
+    let saved_mv = client.create_from_slice(saved_mv_bytes);
+    let saved_conf = client.create_from_slice(saved_conf_bytes);
+    let edges_buf = client.create_from_slice(edges_bytes);
+    let hist = client.create_from_slice(hist_zero_bytes);
     let partials = client.empty(cells * PARTIAL_LEN * size_of::<f32>());
+
+    let grid = CubeCount::new_2d(shape.width / 8, shape.height / 8);
+    let dim = CubeDim::new_2d(8, 8);
+    let blocks_x = shape.blocks_x();
+    let blocks_y = shape.blocks_y();
 
     unsafe {
         grain_measure::launch_unchecked::<R>(
             &client,
-            CubeCount::new_2d(shape.width / 8, shape.height / 8),
-            CubeDim::new_2d(8, 8),
+            grid,
+            dim,
             1usize,
             ArrayArg::from_raw_parts(input, 2 * pixels),
             ArrayArg::from_raw_parts(out_t, pixels),
@@ -313,8 +332,8 @@ fn run_measure(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Ve
             shape.width,
             shape.height,
             1u32,
-            shape.blocks_x(),
-            shape.blocks_y(),
+            blocks_x,
+            blocks_y,
             shape.step,
         );
     }
@@ -380,9 +399,12 @@ fn assert_matches_mirror(scene: &Scene) -> Vec<u32> {
     let (gpu_hist, gpu_autocov) = run_measure(scene, true, true);
     let (host_hist, host_autocov) = mirror_of(scene, true, true);
 
+    let pixels = pixels_of(&gpu_autocov);
+
     assert_eq!(gpu_hist, host_hist);
     assert_autocov_close(&gpu_autocov, &host_autocov);
-    assert!(pixels_of(&gpu_autocov) > 0.0);
+    assert!(pixels > 0.0);
+
     gpu_hist
 }
 
@@ -403,6 +425,7 @@ fn lag_3_ratio(autocov: &[f64]) -> f64 {
     }
 
     assert!(zero_lag > 0.0);
+
     lag_3 / zero_lag
 }
 
@@ -429,41 +452,48 @@ fn fill_cell_row(scene: &mut Scene, cell_y: u32, value: f32) {
 fn measure_matches_the_mirror_on_flat_grain() {
     let scene = flat_scene((0, 0), &[]);
     let hist = assert_matches_mirror(&scene);
+    let source = source_total(&hist);
 
-    assert!(source_total(&hist) > 0);
+    assert!(source > 0);
 }
 
 #[test]
 fn measure_matches_the_mirror_on_kept_grain() {
     let scene = kept_scene(PLAIN);
     let hist = assert_matches_mirror(&scene);
+    let source = source_total(&hist);
+    let kept = kept_total(&hist);
 
-    assert!(source_total(&hist) > 0);
-    assert!(kept_total(&hist) > 0);
+    assert!(source > 0);
+    assert!(kept > 0);
 }
 
 #[test]
 fn measure_matches_the_mirror_on_a_ragged_frame() {
     let scene = kept_scene(RAGGED);
     let hist = assert_matches_mirror(&scene);
+    let source = source_total(&hist);
+    let kept = kept_total(&hist);
 
-    assert!(source_total(&hist) > 0);
-    assert!(kept_total(&hist) > 0);
+    assert!(source > 0);
+    assert!(kept > 0);
 }
 
 #[test]
 fn flicker_leaves_the_record_unchanged() {
     let steady = flat_scene((0, 0), &[]);
-    let flickered = with_flicker(flat_scene((0, 0), &[]));
+    let unflickered = flat_scene((0, 0), &[]);
+    let flickered = with_flicker(unflickered);
     let (steady_hist, steady_autocov) = run_measure(&steady, true, false);
     let (flicker_hist, flicker_autocov) = run_measure(&flickered, true, false);
     let (host_hist, host_autocov) = mirror_of(&flickered, true, false);
     let steady_ratio = lag_3_ratio(&steady_autocov);
     let flicker_ratio = lag_3_ratio(&flicker_autocov);
+    let steady_source = source_total(&steady_hist);
 
     assert_eq!(flicker_hist, host_hist);
     assert_autocov_close(&flicker_autocov, &host_autocov);
-    assert!(source_total(&steady_hist) > 0);
+    assert!(steady_source > 0);
     assert_eq!(flicker_hist, steady_hist);
     assert!(
         (flicker_ratio - steady_ratio).abs() < 0.02,
@@ -476,9 +506,11 @@ fn flicker_leaves_the_record_unchanged() {
 fn kept_grain_is_not_counted_without_a_kept_pair() {
     let scene = kept_scene(PLAIN);
     let (hist, _) = run_measure(&scene, true, false);
+    let source = source_total(&hist);
+    let kept = kept_total(&hist);
 
-    assert!(source_total(&hist) > 0);
-    assert_eq!(kept_total(&hist), 0);
+    assert!(source > 0);
+    assert_eq!(kept, 0);
 }
 
 #[test]
@@ -488,9 +520,13 @@ fn a_low_kept_confidence_cell_is_rejected() {
     let block = PLAIN.block_at(3, 3);
     scene.kept_conf[block] = 0.5;
     let (after, _) = run_measure(&scene, true, true);
+    let kept_before = kept_total(&before);
+    let kept_after = kept_total(&after);
+    let source_before = source_total(&before);
+    let source_after = source_total(&after);
 
-    assert_eq!(kept_total(&after) + 1, kept_total(&before));
-    assert_eq!(source_total(&after), source_total(&before));
+    assert_eq!(kept_after + 1, kept_before);
+    assert_eq!(source_after, source_before);
 }
 
 #[test]
@@ -523,8 +559,10 @@ fn a_textured_cell_is_rejected() {
     let textured = flat_scene((0, 0), &[(3, 3)]);
     let (plain_hist, _) = run_measure(&plain, true, false);
     let (textured_hist, _) = run_measure(&textured, true, false);
+    let plain_source = source_total(&plain_hist);
+    let textured_source = source_total(&textured_hist);
 
-    assert_eq!(source_total(&textured_hist) + 1, source_total(&plain_hist));
+    assert_eq!(textured_source + 1, plain_source);
 }
 
 #[test]
@@ -542,8 +580,10 @@ fn a_cell_without_grain_is_rejected() {
 
     let (plain_hist, _) = run_measure(&plain, true, false);
     let (empty_hist, _) = run_measure(&empty, true, false);
+    let plain_source = source_total(&plain_hist);
+    let empty_source = source_total(&empty_hist);
 
-    assert_eq!(source_total(&empty_hist) + 1, source_total(&plain_hist));
+    assert_eq!(empty_source + 1, plain_source);
 }
 
 #[test]
@@ -553,8 +593,10 @@ fn a_low_confidence_cell_is_rejected() {
     let block = PLAIN.block_at(3, 3);
     scene.source_conf[block] = 0.5;
     let (after, _) = run_measure(&scene, true, false);
+    let source_before = source_total(&before);
+    let source_after = source_total(&after);
 
-    assert_eq!(source_total(&after) + 1, source_total(&before));
+    assert_eq!(source_after + 1, source_before);
 }
 
 #[test]
@@ -577,12 +619,11 @@ fn clipped_blocks_are_rejected() {
     let (gpu_hist, _) = run_measure(&clipped, true, false);
     let (host_hist, _) = mirror_of(&clipped, true, false);
     let interior_per_row = PLAIN.cells_x() - 2;
+    let plain_source = source_total(&plain_hist);
+    let clipped_source = source_total(&gpu_hist);
 
     assert_eq!(gpu_hist, host_hist);
-    assert_eq!(
-        source_total(&gpu_hist) + 2 * interior_per_row,
-        source_total(&plain_hist)
-    );
+    assert_eq!(clipped_source + 2 * interior_per_row, plain_source);
 }
 
 #[test]
@@ -602,9 +643,11 @@ fn ten_bit_and_eight_bit_give_the_same_record() {
 
     let (eight_hist, eight_autocov) = run_measure(&eight, true, false);
     let (ten_hist, ten_autocov) = run_measure(&ten, true, false);
+    let eight_source = source_total(&eight_hist);
+    let ten_source = source_total(&ten_hist);
 
-    assert!(source_total(&eight_hist) > 0);
-    assert_eq!(source_total(&eight_hist), source_total(&ten_hist));
+    assert!(eight_source > 0);
+    assert_eq!(eight_source, ten_source);
     assert_within_one_bucket(&eight_hist[..HIST_LEN], &ten_hist[..HIST_LEN]);
     assert_groups_close(&eight_autocov, &ten_autocov, 0.05);
 }
@@ -709,14 +752,19 @@ fn reduce_adds_every_cell_into_its_group() {
     }
 
     let start: Vec<f32> = (0..GROUPED_AUTOCOV_LEN).map(|lane| lane as f32).collect();
-    let partials = client.create_from_slice(f32::as_bytes(&partials_host));
-    let chunk = client.create_from_slice(f32::as_bytes(&start));
+    let partials_bytes = f32::as_bytes(&partials_host);
+    let start_bytes = f32::as_bytes(&start);
+    let partials = client.create_from_slice(partials_bytes);
+    let chunk = client.create_from_slice(start_bytes);
+
+    let grid = CubeCount::new_1d(AUTOCOV_LEN as u32);
+    let dim = CubeDim::new_1d(REDUCE_THREADS);
 
     unsafe {
         grain_reduce_partials::launch_unchecked::<R>(
             &client,
-            CubeCount::new_1d(AUTOCOV_LEN as u32),
-            CubeDim::new_1d(REDUCE_THREADS),
+            grid,
+            dim,
             ArrayArg::from_raw_parts(partials, partials_host.len()),
             ArrayArg::from_raw_parts(chunk.clone(), GROUPED_AUTOCOV_LEN),
             cells as u32,

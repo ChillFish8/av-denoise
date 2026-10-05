@@ -466,14 +466,14 @@ mod tests {
     fn a_header_claiming_more_data_than_is_present_is_rejected() {
         let mut pgm = b"P5\n100 100\n255\n".to_vec();
         pgm.extend_from_slice(&[0, 128, 255, 64]);
-        let err = Still::from_pgm(&pgm).expect_err("truncated data must be rejected");
-        assert!(err.contains("truncated"), "got {err}");
+        let error = Still::from_pgm(&pgm).expect_err("truncated data must be rejected");
+        assert!(error.contains("truncated"), "got {error}");
     }
 
     #[test]
     fn a_header_with_dimensions_that_overflow_u32_is_rejected_not_wrapped() {
         let pgm = b"P5\n70000 70000\n255\n".to_vec();
-        let err = Still::from_pgm(&pgm).expect_err("an overflowing header must be rejected");
-        assert!(err.contains("truncated"), "got {err}");
+        let error = Still::from_pgm(&pgm).expect_err("an overflowing header must be rejected");
+        assert!(error.contains("truncated"), "got {error}");
     }
 }

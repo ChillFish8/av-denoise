@@ -3,23 +3,22 @@ use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::{H, W, block_sync, make_synthetic_frame, shapes_with_ch};
+use super::{HEIGHT, WIDTH, block_sync, make_synthetic_frame, shapes_with_channels};
 
 const FINE_BLKSIZE: u32 = 16;
 const FINE_STEP: u32 = 8;
 const SEARCH_RADIUS: u32 = 4;
 
-// Mirrors `motion::confidence::THSAD_PIXEL` / `thsad`, duplicated here
-// since those host helpers are crate-internal and unreachable from the
-// bench binary.
+/// The library's per-pixel SAD threshold.
+///
+/// The library's own constant and `thsad` helper are crate-private, so a bench target spells it out.
 const THSAD_PIXEL: f32 = 0.02;
 
-/// Fine refinement pass at full resolution. Reads no seed (the bench
-/// uses `use_seed = 0` so the kernel cost is bounded purely by the
-/// `(2·r + 1)²` search window per block; fair across runs even if
-/// the coarse bench tuning changes). `sad_noise_floor` is `0.0` (no
-/// noise estimate available at this level) and `thsad` uses the
-/// library's default `thsad_scale` of `1.0`.
+/// The fine refinement pass at full resolution.
+///
+/// It reads no seed, so the cost is bounded by the `(2·r + 1)²` search window per block and stays
+/// fair even if the coarse bench's tuning changes. `sad_noise_floor` is 0.0 because no noise
+/// estimate is available at this level, and `thsad` uses the library's default `thsad_scale` of 1.0.
 pub struct BlockMatchFineBench<R: Runtime> {
     pub client: ComputeClient<R>,
 }
@@ -37,13 +36,15 @@ impl<R: Runtime> Benchmark for BlockMatchFineBench<R> {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let centre_frame = make_synthetic_frame(W, H, 1);
-        let neighbour_frame = make_synthetic_frame(W, H, 1);
-        let centre = self.client.create_from_slice(f32::as_bytes(&centre_frame));
-        let neighbour = self.client.create_from_slice(f32::as_bytes(&neighbour_frame));
+        let centre_frame = make_synthetic_frame(WIDTH, HEIGHT, 1);
+        let neighbour_frame = make_synthetic_frame(WIDTH, HEIGHT, 1);
+        let centre_bytes = f32::as_bytes(&centre_frame);
+        let centre = self.client.create_from_slice(centre_bytes);
+        let neighbour_bytes = f32::as_bytes(&neighbour_frame);
+        let neighbour = self.client.create_from_slice(neighbour_bytes);
 
-        let blocks_x = W.div_ceil(FINE_STEP);
-        let blocks_y = H.div_ceil(FINE_STEP);
+        let blocks_x = WIDTH.div_ceil(FINE_STEP);
+        let blocks_y = HEIGHT.div_ceil(FINE_STEP);
         let mv_field = self
             .client
             .empty((blocks_x * blocks_y * 2) as usize * size_of::<i32>());
@@ -60,9 +61,9 @@ impl<R: Runtime> Benchmark for BlockMatchFineBench<R> {
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let level_len = (W * H) as usize;
-        let blocks_x = W.div_ceil(FINE_STEP);
-        let blocks_y = H.div_ceil(FINE_STEP);
+        let level_len = (WIDTH * HEIGHT) as usize;
+        let blocks_x = WIDTH.div_ceil(FINE_STEP);
+        let blocks_y = HEIGHT.div_ceil(FINE_STEP);
         let mv_len = (blocks_x * blocks_y * 2) as usize;
         let conf_len = (blocks_x * blocks_y) as usize;
         let thsad = (FINE_BLKSIZE * FINE_BLKSIZE) as f32 * THSAD_PIXEL;
@@ -79,18 +80,19 @@ impl<R: Runtime> Benchmark for BlockMatchFineBench<R> {
                 ArrayArg::from_raw_parts(args.neighbour.clone(), level_len),
                 ArrayArg::from_raw_parts(args.mv_field.clone(), mv_len),
                 ArrayArg::from_raw_parts(args.confidence.clone(), conf_len),
-                true, // benchmark the full production-realistic cost, confidence included
+                true, // Includes the confidence write, the full production cost.
                 0.0,
                 thsad,
-                W,
-                H,
+                WIDTH,
+                HEIGHT,
                 FINE_BLKSIZE,
                 FINE_STEP,
                 SEARCH_RADIUS,
-                0u32, // use_seed = 0; bench worst-case without coarse seed
+                0u32, // `use_seed = 0`, the worst case without a coarse seed.
                 blocks_x,
             );
         }
+
         Ok(())
     }
 
@@ -103,6 +105,6 @@ impl<R: Runtime> Benchmark for BlockMatchFineBench<R> {
     }
 
     fn shapes(&self) -> Vec<Vec<usize>> {
-        shapes_with_ch(1)
+        shapes_with_channels(1)
     }
 }

@@ -3,10 +3,11 @@ use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::{H, W, block_sync, make_synthetic_frame, shapes_with_ch};
+use super::{HEIGHT, WIDTH, block_sync, make_synthetic_frame, shapes_with_channels};
 
-/// 2x2 box downsample over a full-res luma frame into a `/2` slot.
-/// Used to build the coarse pyramid level for motion estimation.
+/// A 2x2 box downsample of a full-resolution luma frame into a half-resolution slot.
+///
+/// It builds the coarse pyramid level for motion estimation.
 pub struct DownscaleBench<R: Runtime> {
     pub client: ComputeClient<R>,
 }
@@ -22,20 +23,26 @@ impl<R: Runtime> Benchmark for DownscaleBench<R> {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let src_frame = make_synthetic_frame(W, H, 1);
-        let src = self.client.create_from_slice(f32::as_bytes(&src_frame));
-        let dst_w = W / 2;
-        let dst_h = H / 2;
-        let dst = self.client.empty((dst_w * dst_h) as usize * size_of::<f32>());
+        let src_frame = make_synthetic_frame(WIDTH, HEIGHT, 1);
+        let src_bytes = f32::as_bytes(&src_frame);
+        let src = self.client.create_from_slice(src_bytes);
+        let dst_width = WIDTH / 2;
+        let dst_height = HEIGHT / 2;
+        let dst = self
+            .client
+            .empty((dst_width * dst_height) as usize * size_of::<f32>());
+
         DownscaleInput { src, dst }
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let dst_w = W / 2;
-        let dst_h = H / 2;
+        let dst_width = WIDTH / 2;
+        let dst_height = HEIGHT / 2;
         let block_x = 16u32;
         let block_y = 16u32;
-        let grid = CubeCount::new_2d(dst_w.div_ceil(block_x), dst_h.div_ceil(block_y));
+        let cubes_x = dst_width.div_ceil(block_x);
+        let cubes_y = dst_height.div_ceil(block_y);
+        let grid = CubeCount::new_2d(cubes_x, cubes_y);
         let dim = CubeDim::new_2d(block_x, block_y);
 
         unsafe {
@@ -43,16 +50,17 @@ impl<R: Runtime> Benchmark for DownscaleBench<R> {
                 &self.client,
                 grid,
                 dim,
-                ArrayArg::from_raw_parts(args.src.clone(), (W * H) as usize),
-                ArrayArg::from_raw_parts(args.dst.clone(), (dst_w * dst_h) as usize),
+                ArrayArg::from_raw_parts(args.src.clone(), (WIDTH * HEIGHT) as usize),
+                ArrayArg::from_raw_parts(args.dst.clone(), (dst_width * dst_height) as usize),
                 0u32,
                 0u32,
-                W,
-                H,
-                dst_w,
-                dst_h,
+                WIDTH,
+                HEIGHT,
+                dst_width,
+                dst_height,
             );
         }
+
         Ok(())
     }
 
@@ -65,6 +73,6 @@ impl<R: Runtime> Benchmark for DownscaleBench<R> {
     }
 
     fn shapes(&self) -> Vec<Vec<usize>> {
-        shapes_with_ch(1)
+        shapes_with_channels(1)
     }
 }

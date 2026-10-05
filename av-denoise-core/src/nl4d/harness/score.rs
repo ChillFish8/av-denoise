@@ -226,7 +226,7 @@ mod tests {
     }
 
     /// One vector for every block of every neighbour.
-    fn uniform_snapshot(vx: i32, vy: i32) -> MotionSnapshot {
+    fn uniform_snapshot(vector_x: i32, vector_y: i32) -> MotionSnapshot {
         let (blocks_x, blocks_y) = (4u32, 4u32);
         let blocks = (blocks_x * blocks_y) as usize;
 
@@ -236,7 +236,10 @@ mod tests {
             step: 8,
             blksize: 16,
             offsets: vec![-1, 1],
-            vectors: vec![vec![[-vx, -vy]; blocks], vec![[vx, vy]; blocks]],
+            vectors: vec![
+                vec![[-vector_x, -vector_y]; blocks],
+                vec![[vector_x, vector_y]; blocks],
+            ],
             confidence: vec![vec![0.9; blocks]; 2],
         }
     }
@@ -266,19 +269,26 @@ mod tests {
     fn covering_blocks_for_the_default_geometry() {
         // At blksize 16 and step 8, the patch at 0 is covered by block 0 only, the patch at 8 by
         // blocks 0 and 1, and the patch at 16 by blocks 1 and 2.
-        assert_eq!(covering_blocks(0, 16, 8, 8), (0, 0));
-        assert_eq!(covering_blocks(8, 16, 8, 8), (0, 1));
-        assert_eq!(covering_blocks(16, 16, 8, 8), (1, 2));
+        let at_zero = covering_blocks(0, 16, 8, 8);
+        let at_eight = covering_blocks(8, 16, 8, 8);
+        let at_sixteen = covering_blocks(16, 16, 8, 8);
         // step == blksize gives exactly one block.
-        assert_eq!(covering_blocks(24, 8, 8, 8), (3, 3));
+        let step_equals_blksize = covering_blocks(24, 8, 8, 8);
         // The upper end clamps to the grid.
-        assert_eq!(covering_blocks(56, 16, 8, 7), (6, 6));
+        let clamped = covering_blocks(56, 16, 8, 7);
+
+        assert_eq!(at_zero, (0, 0));
+        assert_eq!(at_eight, (0, 1));
+        assert_eq!(at_sixteen, (1, 2));
+        assert_eq!(step_equals_blksize, (3, 3));
+        assert_eq!(clamped, (6, 6));
     }
 
     #[test]
     fn a_straddling_patch_at_step_equal_blksize_falls_back_to_the_corner_block() {
         // The patch spans 10..18, which neither block 0..16 nor block 16..32 fully contains.
-        assert_eq!(covering_blocks(10, 16, 16, 8), (0, 0));
+        let covering = covering_blocks(10, 16, 16, 8);
+        assert_eq!(covering, (0, 0));
     }
 
     #[test]
@@ -314,17 +324,19 @@ mod tests {
         // Every other block is wrong, so patches whose corner block is wrong still count in the
         // covering reading through another block.
         let mut snapshot = uniform_snapshot(3, 1);
-        for by in 0..4u32 {
-            for bx in 0..4u32 {
-                if (bx + by) % 2 == 0 {
-                    snapshot.vectors[1][(by * 4 + bx) as usize] = [30, 30];
+        for block_y in 0..4u32 {
+            for block_x in 0..4u32 {
+                if (block_x + block_y) % 2 == 0 {
+                    snapshot.vectors[1][(block_y * 4 + block_x) as usize] = [30, 30];
                 }
             }
         }
 
         let clip = uniform_clip();
         let scores = score(&clip, &snapshot, 2);
-        assert!(scores.plain.in_window_rate_covering() > scores.plain.in_window_rate_corner());
+        let covering_rate = scores.plain.in_window_rate_covering();
+        let corner_rate = scores.plain.in_window_rate_corner();
+        assert!(covering_rate > corner_rate);
     }
 
     #[test]

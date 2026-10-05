@@ -8,12 +8,10 @@ use crate::nlmeans::noise::temporal::{
     temporal_stats_slot_len,
 };
 
-/// The two ratios bracketing the outlier check's calibrated boundary.
-///
-/// They are literals so the tests check the calibration rather than the constant against itself.
-/// A static frame with a real noise spread up to fourfold survives and trimming starts at
-/// fivefold, so a factor of 5.0 leaves room above real spread and catches texture. Changing
-/// `SIGMA_OUTLIER_FACTOR` means updating both.
+// The two ratios bracketing the outlier check's calibrated boundary. They are literals so the tests
+// check the calibration rather than the constant against itself. A static frame with a real noise
+// spread up to fourfold survives and trimming starts at fivefold, so a factor of 5.0 leaves room
+// above real spread and catches texture. Changing `SIGMA_OUTLIER_FACTOR` means updating both.
 const OUTLIER_FACTOR_SURVIVES_RATIO: f32 = 4.99;
 const OUTLIER_FACTOR_REJECTS_RATIO: f32 = 5.01;
 
@@ -24,6 +22,7 @@ fn scalar_record(sum_d: f32, sum_d2: f32, sum_lag: f32) -> Vec<f32> {
     record[0] = sum_d;
     record[1] = sum_d2;
     record[2] = sum_lag;
+
     record
 }
 
@@ -35,6 +34,7 @@ fn zero_mean_block_record(sigma_255: f32, rho: f32) -> Vec<f32> {
     let variance = 2.0 * sigma * sigma;
     let sum_d2 = pixel_count * variance;
     let sum_lag = n_pairs * rho * variance;
+
     scalar_record(0.0, sum_d2, sum_lag)
 }
 
@@ -49,28 +49,37 @@ fn outlier_factor_boundary_records(
 ) -> Vec<f32> {
     let mut records = Vec::new();
     for _ in 0..8 {
-        records.extend_from_slice(&zero_mean_block_record(background_sigma_255, background_rho));
+        let record = zero_mean_block_record(background_sigma_255, background_rho);
+        records.extend_from_slice(&record);
     }
 
     let ninth_sigma_255 = background_sigma_255 * ninth_ratio;
-    records.extend_from_slice(&zero_mean_block_record(ninth_sigma_255, 0.0));
+    let ninth_record = zero_mean_block_record(ninth_sigma_255, 0.0);
+    records.extend_from_slice(&ninth_record);
+
     records
 }
 
 #[test]
 fn temporal_stats_blocks_and_slot_len() {
-    assert_eq!(temporal_stats_blocks(32, 16), (2, 1));
-    assert_eq!(temporal_stats_blocks(33, 17), (3, 2)); // ragged on both axes
-    assert_eq!(temporal_stats_record_len(1), 39);
-    assert_eq!(temporal_stats_record_len(4), 45);
-    assert_eq!(temporal_stats_slot_len(32, 16, 1), 78); // 2 blocks x record_len 39
+    let exact_blocks = temporal_stats_blocks(32, 16);
+    let ragged_blocks = temporal_stats_blocks(33, 17);
+    let single_record_len = temporal_stats_record_len(1);
+    let padded_record_len = temporal_stats_record_len(4);
+    let slot_len = temporal_stats_slot_len(32, 16, 1);
+
+    assert_eq!(exact_blocks, (2, 1));
+    assert_eq!(ragged_blocks, (3, 2)); // ragged on both axes
+    assert_eq!(single_record_len, 39);
+    assert_eq!(padded_record_len, 45);
+    assert_eq!(slot_len, 78); // 2 blocks x record_len 39
 }
 
 #[test]
 fn aggregate_only_static_block_contributes_to_sigma_and_rho() {
     let width = 32;
     let height = 16;
-    let stored_ch = 1;
+    let stored_channels = 1;
     let channels = 1;
     let pixel_count = 256.0f32;
     let n_pairs = 240.0f32;
@@ -88,7 +97,7 @@ fn aggregate_only_static_block_contributes_to_sigma_and_rho() {
     let moving_block = scalar_record(sum_d_bad, 0.0, 0.0);
     let records = [static_block, moving_block].concat();
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
         .expect("one of two blocks passes the static gate, above the 5% floor");
 
     assert!((sample.static_fraction - 0.5).abs() < 1e-6);
@@ -110,7 +119,7 @@ fn aggregate_only_static_block_contributes_to_sigma_and_rho() {
 fn aggregate_excludes_perfectly_static_blocks_from_the_population() {
     let width = 16 * 8;
     let height = 16;
-    let stored_ch = 1;
+    let stored_channels = 1;
     let channels = 1;
     let pixel_count = 256.0f32;
     let n_pairs = 240.0f32;
@@ -128,7 +137,7 @@ fn aggregate_excludes_perfectly_static_blocks_from_the_population() {
         records.extend(record);
     }
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
         .expect("five blocks clear the gate");
 
     assert!(
@@ -153,7 +162,7 @@ fn aggregate_excludes_perfectly_static_blocks_from_the_population() {
 fn aggregate_median_over_multiple_static_blocks() {
     let width = 16 * 5;
     let height = 16;
-    let stored_ch = 1;
+    let stored_channels = 1;
     let channels = 1;
     let pixel_count = 256.0f32;
     let n_pairs = 240.0f32;
@@ -172,7 +181,7 @@ fn aggregate_median_over_multiple_static_blocks() {
         records.extend(record);
     }
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
         .expect("all five blocks are static");
 
     assert!((sample.static_fraction - 0.8).abs() < 1e-6);
@@ -198,11 +207,11 @@ fn aggregate_median_over_multiple_static_blocks() {
 fn aggregate_below_static_floor_returns_none() {
     let width = 16 * 5;
     let height = 16 * 5;
-    let stored_ch = 1;
+    let stored_channels = 1;
     let channels = 1;
     let pixel_count = 256.0f32;
 
-    let record_len = temporal_stats_record_len(stored_ch) as usize;
+    let record_len = temporal_stats_record_len(stored_channels) as usize;
     let mut records = vec![0.0f32; 25 * record_len];
     let mean0_bad = 10.0 / 255.0;
     for block in 1..25 {
@@ -214,8 +223,9 @@ fn aggregate_below_static_floor_returns_none() {
     records[1] = pixel_count * variance;
     records[2] = 240.0 * 0.5 * variance;
 
+    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height);
     assert!(
-        aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height).is_none(),
+        sample.is_none(),
         "1 of 25 static blocks (4%) should fall back below the 5% floor"
     );
 }
@@ -225,14 +235,15 @@ fn aggregate_below_static_floor_returns_none() {
 fn aggregate_zeroed_slot_returns_none() {
     let width = 32;
     let height = 32;
-    let stored_ch = 1;
+    let stored_channels = 1;
     let channels = 1;
     let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
-    let record_len = temporal_stats_record_len(stored_ch) as usize;
+    let record_len = temporal_stats_record_len(stored_channels) as usize;
     let records = vec![0.0f32; (blocks_x * blocks_y) as usize * record_len];
 
+    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height);
     assert!(
-        aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height).is_none(),
+        sample.is_none(),
         "a zero-filled duplicate slot's stats must fall back to Immerkær, not report sigma=0"
     );
 }
@@ -243,7 +254,7 @@ fn aggregate_zeroed_slot_returns_none() {
 fn aggregate_multi_channel_layout_reads_correct_offsets() {
     let width = 16;
     let height = 16;
-    let stored_ch = 4;
+    let stored_channels = 4;
     let channels = 3;
     let pixel_count = 256.0f32;
     let n_pairs = 240.0f32;
@@ -251,21 +262,21 @@ fn aggregate_multi_channel_layout_reads_correct_offsets() {
     let sigmas_255 = [2.0f32, 4.0, 6.0];
     let rho_target = 0.6f32;
 
-    let record_len = temporal_stats_record_len(stored_ch) as usize;
+    let record_len = temporal_stats_record_len(stored_channels) as usize;
     let mut record = vec![0.0f32; record_len];
-    let mut var0 = 0.0f32;
+    let mut luma_variance = 0.0f32;
     for (channel, sigma_255) in sigmas_255.iter().enumerate() {
         let sigma = sigma_255 / 255.0;
         let variance = 2.0 * sigma * sigma;
-        record[stored_ch as usize + channel] = pixel_count * variance;
+        record[stored_channels as usize + channel] = pixel_count * variance;
         if channel == 0 {
-            var0 = variance;
+            luma_variance = variance;
         }
     }
 
-    record[2 * stored_ch as usize] = n_pairs * rho_target * var0;
+    record[2 * stored_channels as usize] = n_pairs * rho_target * luma_variance;
 
-    let sample = aggregate_temporal_noise_stats(&record, channels, stored_ch, width, height)
+    let sample = aggregate_temporal_noise_stats(&record, channels, stored_channels, width, height)
         .expect("the single block is static with measurable channel-0 noise");
 
     for (channel, sigma_255) in sigmas_255.iter().enumerate() {
@@ -286,7 +297,7 @@ fn aggregate_multi_channel_layout_reads_correct_offsets() {
 fn aggregate_rejects_majority_zero_mean_texture_outliers() {
     let width = 64;
     let height = 64;
-    let stored_ch = 1;
+    let stored_channels = 1;
     let channels = 1;
 
     let background_sigma_255 = 2.0f32;
@@ -295,14 +306,16 @@ fn aggregate_rejects_majority_zero_mean_texture_outliers() {
 
     let mut records = Vec::new();
     for _ in 0..6 {
-        records.extend_from_slice(&zero_mean_block_record(background_sigma_255, background_rho));
+        let record = zero_mean_block_record(background_sigma_255, background_rho);
+        records.extend_from_slice(&record);
     }
 
     for _ in 0..10 {
-        records.extend_from_slice(&zero_mean_block_record(texture_sigma_255, 0.0));
+        let record = zero_mean_block_record(texture_sigma_255, 0.0);
+        records.extend_from_slice(&record);
     }
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
         .expect("the static minority clears STATIC_FRACTION_MIN on its own");
 
     let expected_sigma = background_sigma_255 / 255.0;
@@ -328,7 +341,7 @@ fn aggregate_rejects_majority_zero_mean_texture_outliers() {
 fn aggregate_keeps_genuinely_static_blocks_despite_spatial_sigma_spread() {
     let width = 64;
     let height = 64;
-    let stored_ch = 1;
+    let stored_channels = 1;
     let channels = 1;
 
     let low_sigma_255 = 2.0f32;
@@ -337,14 +350,16 @@ fn aggregate_keeps_genuinely_static_blocks_despite_spatial_sigma_spread() {
 
     let mut records = Vec::new();
     for _ in 0..8 {
-        records.extend_from_slice(&zero_mean_block_record(low_sigma_255, rho));
+        let record = zero_mean_block_record(low_sigma_255, rho);
+        records.extend_from_slice(&record);
     }
 
     for _ in 0..8 {
-        records.extend_from_slice(&zero_mean_block_record(high_sigma_255, rho));
+        let record = zero_mean_block_record(high_sigma_255, rho);
+        records.extend_from_slice(&record);
     }
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
         .expect("every block is static");
 
     assert!(
@@ -358,7 +373,7 @@ fn aggregate_keeps_genuinely_static_blocks_despite_spatial_sigma_spread() {
 fn aggregate_outlier_factor_survives_just_under_threshold() {
     let width = 48;
     let height = 48;
-    let stored_ch = 1;
+    let stored_channels = 1;
     let channels = 1;
     let background_sigma_255 = 2.0f32;
     let background_rho = 0.1f32;
@@ -369,7 +384,7 @@ fn aggregate_outlier_factor_survives_just_under_threshold() {
         OUTLIER_FACTOR_SURVIVES_RATIO,
     );
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
         .expect("all 9 blocks clear the static-fraction floor");
 
     assert!(
@@ -384,7 +399,7 @@ fn aggregate_outlier_factor_survives_just_under_threshold() {
 fn aggregate_outlier_factor_rejects_just_over_threshold() {
     let width = 48;
     let height = 48;
-    let stored_ch = 1;
+    let stored_channels = 1;
     let channels = 1;
     let background_sigma_255 = 2.0f32;
     let background_rho = 0.1f32;
@@ -392,7 +407,7 @@ fn aggregate_outlier_factor_rejects_just_over_threshold() {
     let records =
         outlier_factor_boundary_records(background_sigma_255, background_rho, OUTLIER_FACTOR_REJECTS_RATIO);
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
         .expect("the 8 background blocks alone still clear the static-fraction floor");
 
     assert!(
@@ -411,7 +426,7 @@ fn aggregate_outlier_factor_rejects_just_over_threshold() {
 fn aggregate_returns_correct_sigma_with_letterbox_zero_population() {
     let width = 160;
     let height = 160;
-    let stored_ch = 1;
+    let stored_channels = 1;
     let channels = 1;
 
     let background_rho = 0.2f32;
@@ -419,15 +434,17 @@ fn aggregate_returns_correct_sigma_with_letterbox_zero_population() {
 
     let mut records = Vec::new();
     for _ in 0..26 {
-        records.extend_from_slice(&zero_mean_block_record(0.0, 0.0));
+        let record = zero_mean_block_record(0.0, 0.0);
+        records.extend_from_slice(&record);
     }
 
     for i in 0..74 {
         let sigma_255 = sigma_levels_255[i % sigma_levels_255.len()];
-        records.extend_from_slice(&zero_mean_block_record(sigma_255, background_rho));
+        let record = zero_mean_block_record(sigma_255, background_rho);
+        records.extend_from_slice(&record);
     }
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
         .expect("74 of 100 blocks carry real static noise, far above the 5% floor");
 
     let expected_sigma = 4.0 / 255.0;
@@ -449,22 +466,25 @@ fn aggregate_returns_correct_sigma_with_letterbox_zero_population() {
 fn aggregate_returns_none_when_the_only_above_gate_population_is_texture() {
     let width = 160;
     let height = 160;
-    let stored_ch = 1;
+    let stored_channels = 1;
     let channels = 1;
 
     let texture_sigma_255 = 20.0f32;
 
     let mut records = Vec::new();
     for _ in 0..26 {
-        records.extend_from_slice(&zero_mean_block_record(0.0, 0.0));
+        let record = zero_mean_block_record(0.0, 0.0);
+        records.extend_from_slice(&record);
     }
 
     for _ in 0..74 {
-        records.extend_from_slice(&zero_mean_block_record(texture_sigma_255, 0.0));
+        let record = zero_mean_block_record(texture_sigma_255, 0.0);
+        records.extend_from_slice(&record);
     }
 
+    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height);
     assert!(
-        aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height).is_none(),
+        sample.is_none(),
         "a homogeneous above-gate population with no genuine low anchor must fall back to \
          None rather than report the texture level as sigma"
     );
@@ -474,7 +494,7 @@ fn aggregate_returns_none_when_the_only_above_gate_population_is_texture() {
 fn aggregate_rejects_texture_outliers_with_zero_population_present() {
     let width = 64;
     let height = 80; // 4 x 5 TEMPORAL_NOISE_BLOCK grid, 20 blocks.
-    let stored_ch = 1;
+    let stored_channels = 1;
     let channels = 1;
 
     let background_sigma_255 = 2.0f32;
@@ -483,18 +503,21 @@ fn aggregate_rejects_texture_outliers_with_zero_population_present() {
 
     let mut records = Vec::new();
     for _ in 0..6 {
-        records.extend_from_slice(&zero_mean_block_record(background_sigma_255, background_rho));
+        let record = zero_mean_block_record(background_sigma_255, background_rho);
+        records.extend_from_slice(&record);
     }
 
     for _ in 0..10 {
-        records.extend_from_slice(&zero_mean_block_record(texture_sigma_255, 0.0));
+        let record = zero_mean_block_record(texture_sigma_255, 0.0);
+        records.extend_from_slice(&record);
     }
 
     for _ in 0..4 {
-        records.extend_from_slice(&zero_mean_block_record(0.0, 0.0));
+        let record = zero_mean_block_record(0.0, 0.0);
+        records.extend_from_slice(&record);
     }
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
         .expect("the static minority clears STATIC_FRACTION_MIN on its own");
 
     let expected_sigma = background_sigma_255 / 255.0;
@@ -521,7 +544,7 @@ fn aggregate_rejects_texture_outliers_with_zero_population_present() {
 fn aggregate_keeps_static_spread_with_zero_population_present() {
     let width = 64;
     let height = 80; // 4 x 5 TEMPORAL_NOISE_BLOCK grid, 20 blocks.
-    let stored_ch = 1;
+    let stored_channels = 1;
     let channels = 1;
 
     let low_sigma_255 = 2.0f32;
@@ -530,18 +553,21 @@ fn aggregate_keeps_static_spread_with_zero_population_present() {
 
     let mut records = Vec::new();
     for _ in 0..8 {
-        records.extend_from_slice(&zero_mean_block_record(low_sigma_255, rho));
+        let record = zero_mean_block_record(low_sigma_255, rho);
+        records.extend_from_slice(&record);
     }
 
     for _ in 0..8 {
-        records.extend_from_slice(&zero_mean_block_record(high_sigma_255, rho));
+        let record = zero_mean_block_record(high_sigma_255, rho);
+        records.extend_from_slice(&record);
     }
 
     for _ in 0..4 {
-        records.extend_from_slice(&zero_mean_block_record(0.0, 0.0));
+        let record = zero_mean_block_record(0.0, 0.0);
+        records.extend_from_slice(&record);
     }
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
         .expect("every non-zero block is static");
 
     assert!(
@@ -558,7 +584,7 @@ fn aggregate_keeps_static_spread_with_zero_population_present() {
 fn aggregate_rho_estimate_stays_within_unit_range() {
     let width = TEMPORAL_NOISE_BLOCK;
     let height = TEMPORAL_NOISE_BLOCK;
-    let stored_ch = 1;
+    let stored_channels = 1;
     let channels = 1;
 
     let scale = 0.007f32;
@@ -584,7 +610,7 @@ fn aggregate_rho_estimate_stays_within_unit_range() {
     );
 
     let records = scalar_record(sum_d, sum_d2, sum_lag);
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
         .expect("the single block clears both gates");
 
     assert!(

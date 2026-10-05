@@ -63,7 +63,9 @@ fn nl4d_pool_ratio_gives_the_calibrated_threshold_at_each_default_lambda() {
 
 #[test]
 fn nl4d_options_default_to_pooling_on() {
-    assert!(Nl4dOptions::default().pooled_threshold);
+    let options = Nl4dOptions::default();
+
+    assert!(options.pooled_threshold);
 }
 
 #[test]
@@ -78,21 +80,23 @@ fn nl4d_options_default_temporal_radius_is_the_base_preset_radius() {
 fn nl4d_spatial_radius_for_veryfast_is_narrower_than_the_default() {
     let veryfast = nl4d_spatial_radius_for(Preset::Veryfast);
     let base = nl4d_spatial_radius_for(Preset::Base);
+    let options = Nl4dOptions::default();
 
     assert_eq!(veryfast, 6);
-    assert_eq!(base, Nl4dOptions::default().spatial_radius);
+    assert_eq!(base, options.spatial_radius);
 }
 
 #[test]
 fn nl4d_options_default_matches_nl4d_params_default() {
     let options = Nl4dOptions::default();
     let params = Nl4dParams::default();
+    let yuv_lambda_ht = nl4d_default_lambda_ht(ChannelMode::Yuv);
 
     assert_eq!(options.refine, params.refine);
     assert_eq!(options.spatial_radius, params.spatial_radius);
     assert!((options.c_min - params.c_min).abs() < f32::EPSILON);
     assert_eq!(options.lambda_ht, None);
-    assert!((params.lambda_ht - nl4d_default_lambda_ht(ChannelMode::Yuv)).abs() < f32::EPSILON);
+    assert!((params.lambda_ht - yuv_lambda_ht).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -208,7 +212,8 @@ fn nl4d_builds_the_front_ends_hq_params_from_its_own_fields() {
 
 #[test]
 fn nl4d_never_builds_a_prefilter() {
-    let params = resolve_params(&Nl4dOptions::default(), ChannelMode::Yuv).expect("resolve");
+    let options = Nl4dOptions::default();
+    let params = resolve_params(&options, ChannelMode::Yuv).expect("resolve");
 
     assert!(matches!(params.nlm.prefilter, PrefilterMode::None));
 }
@@ -230,14 +235,15 @@ fn nl4d_leaves_the_nlm_weighting_knobs_at_their_defaults() {
 
 #[test]
 fn nl4d_motion_search_becomes_an_active_mvtools_mode() {
+    let motion = MotionSearch {
+        blksize: 32,
+        overlap: 16,
+        search_radius: 6,
+        pyramid_levels: 1,
+        estimation: MotionEstimation::Direct,
+    };
     let options = Nl4dOptions {
-        motion: MotionSearch {
-            blksize: 32,
-            overlap: 16,
-            search_radius: 6,
-            pyramid_levels: 1,
-            estimation: MotionEstimation::Direct,
-        },
+        motion,
         ..Nl4dOptions::default()
     };
     let params = resolve_params(&options, ChannelMode::Yuv).expect("resolve");
@@ -256,7 +262,8 @@ fn nl4d_motion_search_becomes_an_active_mvtools_mode() {
 
 #[test]
 fn nl4d_motion_search_defaults_match_the_front_ends_own_defaults() {
-    let params = resolve_params(&Nl4dOptions::default(), ChannelMode::Yuv).expect("resolve");
+    let options = Nl4dOptions::default();
+    let params = resolve_params(&options, ChannelMode::Yuv).expect("resolve");
     let defaults = Nl4dParams::default();
 
     assert_eq!(params.nlm.motion_compensation, defaults.nlm.motion_compensation);

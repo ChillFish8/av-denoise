@@ -425,7 +425,7 @@ pub(crate) fn trajectory_search<N: Size>(
 mod tests {
     use super::{PATCH_SIZE, covering_lo_host};
 
-    /// A copy of `covering_blocks` from `nl4d/harness/score.rs`, whose `score` module is private.
+    /// A copy of the harness's `covering_blocks`, which its private `score` module keeps out of reach.
     fn covering_blocks_host(patch_start: u32, blksize: u32, step: u32, blocks: u32) -> (u32, u32) {
         let last_block = (patch_start / step).min(blocks - 1);
         let first_block = if patch_start + PATCH_SIZE <= blksize {
@@ -433,6 +433,7 @@ mod tests {
         } else {
             (patch_start + PATCH_SIZE - blksize).div_ceil(step)
         };
+
         (first_block.min(last_block), last_block)
     }
 
@@ -441,12 +442,12 @@ mod tests {
         for (blksize, overlap) in [(16u32, 8u32), (16, 12), (32, 24), (8, 4), (16, 0)] {
             let step = blksize - overlap;
             let blocks = 8u32;
-            for p in (0..blocks * step).step_by(3) {
-                let (expect_lo, hi) = covering_blocks_host(p, blksize, step, blocks);
-                let got_lo = covering_lo_host(p, blksize, step).min(hi);
+            for patch_start in (0..blocks * step).step_by(3) {
+                let (expected_first, last) = covering_blocks_host(patch_start, blksize, step, blocks);
+                let got_first = covering_lo_host(patch_start, blksize, step).min(last);
                 assert_eq!(
-                    got_lo, expect_lo,
-                    "blksize={blksize} step={step} p={p}: covering_lo disagrees with the \
+                    got_first, expected_first,
+                    "blksize={blksize} step={step} p={patch_start}: covering_lo disagrees with the \
                      harness's covering_blocks"
                 );
             }

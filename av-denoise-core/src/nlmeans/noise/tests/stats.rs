@@ -3,7 +3,8 @@ use crate::nlmeans::noise::stats::lower_quartile;
 #[test]
 fn lower_quartile_odd_count_exact_index() {
     // With 5 values the quartile lands exactly on index 1.
-    assert_eq!(lower_quartile(&[1.0, 2.0, 3.0, 4.0, 5.0]), 2.0);
+    let got = lower_quartile(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+    assert_eq!(got, 2.0);
 }
 
 #[test]
@@ -22,5 +23,6 @@ fn lower_quartile_interpolates_at_a_fractional_index() {
 
 #[test]
 fn lower_quartile_single_element_returns_it() {
-    assert_eq!(lower_quartile(&[42.0]), 42.0);
+    let got = lower_quartile(&[42.0]);
+    assert_eq!(got, 42.0);
 }

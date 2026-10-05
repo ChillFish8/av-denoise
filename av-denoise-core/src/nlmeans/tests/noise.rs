@@ -3,22 +3,25 @@ use cubecl::prelude::*;
 use super::helpers::*;
 use crate::nlmeans::noise::{NoiseCtx, partials_len, run_noise_estimate, sigma_from_abs_sum};
 
-/// Uploads `dense` (packed `pixels * ch`) as the padded GPU storage
-/// layout and runs both noise-estimate stages for a single frame in a
-/// one-slot ring. Returns the four raw per-lane absolute-sum totals.
-fn estimate_abs_sums(w: u32, h: u32, ch: u32, stored_ch: u32, dense: &[f32]) -> [f32; 4] {
+/// Runs both noise-estimate stages over one frame in a one-slot ring.
+///
+/// `dense` is packed as `pixels * channels` and is padded to `stored_ch` on upload. Returns the four
+/// raw per-lane absolute-sum totals.
+fn estimate_abs_sums(width: u32, height: u32, channels: u32, stored_ch: u32, dense: &[f32]) -> [f32; 4] {
     let client = make_client();
-    let pixels = (w * h) as usize;
-    let padded = pad_channels(dense, pixels, ch, stored_ch);
+    let pixels = (width * height) as usize;
+    let padded = pad_channels(dense, pixels, channels, stored_ch);
 
-    let input_buf = client.create_from_slice(f32::as_bytes(&padded));
-    let partials_buf = client.empty(partials_len(w, h) * size_of::<f32>());
+    let input_bytes = f32::as_bytes(&padded);
+    let partials_bytes = partials_len(width, height) * size_of::<f32>();
+    let input_buf = client.create_from_slice(input_bytes);
+    let partials_buf = client.empty(partials_bytes);
     let results_buf = client.empty(4 * size_of::<f32>());
 
     let ctx = NoiseCtx {
-        width: w,
-        height: h,
-        channels: ch,
+        width,
+        height,
+        channels,
         stored_ch,
         frame_count: 1,
         frame: 0,
@@ -35,15 +38,20 @@ fn estimate_abs_sums(w: u32, h: u32, ch: u32, stored_ch: u32, dense: &[f32]) -> 
     [data[0], data[1], data[2], data[3]]
 }
 
+/// The luma sigma measured over `frame`.
+fn estimate_luma_sigma(width: u32, height: u32, frame: &[f32]) -> f32 {
+    let sums = estimate_abs_sums(width, height, 1, 1, frame);
+    sigma_from_abs_sum(sums[0], width, height)
+}
+
 #[test]
 fn noise_estimate_recovers_known_sigma() {
-    let w = 256;
-    let h = 256;
+    let width = 256;
+    let height = 256;
     let true_sigma = 8.0 / 255.0;
 
-    let frame = make_noisy_gaussian_frame(w, h, 1, 0.5, &[true_sigma]);
-    let sums = estimate_abs_sums(w, h, 1, 1, &frame);
-    let estimated = sigma_from_abs_sum(sums[0], w, h);
+    let frame = make_noisy_gaussian_frame(width, height, 1, 0.5, &[true_sigma]);
+    let estimated = estimate_luma_sigma(width, height, &frame);
 
     let rel_err = (estimated - true_sigma).abs() / true_sigma;
     assert!(
@@ -52,16 +60,13 @@ fn noise_estimate_recovers_known_sigma() {
     );
 }
 
-/// A perfectly uniform frame has zero mask response everywhere, so the
-/// estimate must land below the noise floor.
 #[test]
 fn noise_estimate_zero_on_uniform() {
-    let w = 128;
-    let h = 128;
+    let width = 128;
+    let height = 128;
 
-    let frame = make_uniform_frame(w, h, 1, 0.5);
-    let sums = estimate_abs_sums(w, h, 1, 1, &frame);
-    let estimated = sigma_from_abs_sum(sums[0], w, h);
+    let frame = make_uniform_frame(width, height, 1, 0.5);
+    let estimated = estimate_luma_sigma(width, height, &frame);
 
     assert!(
         estimated < 0.2 / 255.0,
@@ -69,22 +74,21 @@ fn noise_estimate_zero_on_uniform() {
     );
 }
 
-/// YUV storage. Distinct per-channel sigmas must be recovered
-/// independently and the unused 4th (padding) lane must return exactly
-/// zero (stage 1 zeroes it explicitly for every thread).
+/// The unused 4th lane must read exactly zero because stage 1 zeroes it for every thread.
 #[test]
 fn noise_estimate_per_channel() {
-    let w = 256;
-    let h = 256;
+    let width = 256;
+    let height = 256;
     let true_sigma_y = 8.0 / 255.0;
     let true_sigma_uv = 2.0 / 255.0;
 
-    let frame = make_noisy_gaussian_frame(w, h, 3, 0.5, &[true_sigma_y, true_sigma_uv, true_sigma_uv]);
-    let sums = estimate_abs_sums(w, h, 3, 4, &frame);
+    let sigmas = [true_sigma_y, true_sigma_uv, true_sigma_uv];
+    let frame = make_noisy_gaussian_frame(width, height, 3, 0.5, &sigmas);
+    let sums = estimate_abs_sums(width, height, 3, 4, &frame);
 
-    let estimated_y = sigma_from_abs_sum(sums[0], w, h);
-    let estimated_u = sigma_from_abs_sum(sums[1], w, h);
-    let estimated_v = sigma_from_abs_sum(sums[2], w, h);
+    let estimated_y = sigma_from_abs_sum(sums[0], width, height);
+    let estimated_u = sigma_from_abs_sum(sums[1], width, height);
+    let estimated_v = sigma_from_abs_sum(sums[2], width, height);
 
     let rel_err_y = (estimated_y - true_sigma_y).abs() / true_sigma_y;
     let rel_err_u = (estimated_u - true_sigma_uv).abs() / true_sigma_uv;
@@ -105,29 +109,23 @@ fn noise_estimate_per_channel() {
     assert_eq!(sums[3], 0.0, "padding lane must be exactly zero, got {}", sums[3]);
 }
 
-/// Smooth linear gradient plus noise. The mask is orthogonal to affine
-/// content so this mainly documents that gradient content doesn't blow
-/// up the estimate, bounding the known content bias rather than hiding
-/// it.
+/// The mask is orthogonal to affine content, so this bounds the known content bias on a gradient.
 #[test]
 fn noise_estimate_gradient_bias_bounded() {
-    let w = 256;
-    let h = 256;
+    let width = 256;
+    let height = 256;
     let true_sigma = 6.0 / 255.0;
 
-    // Noise is generated around a mid-gray base (safely away from the
-    // clamp bounds for this sigma) and re-centred to zero-mean before
-    // being layered onto the gradient, so the final clamp never clips
-    // and doesn't disturb the gradient's linearity.
-    let gradient = make_gradient_frame(w, h, 0.2, 0.8);
-    let noise_frame = make_noisy_gaussian_frame(w, h, 1, 0.5, &[true_sigma]);
+    // Noise is built around mid-grey, clear of the clamp bounds, then re-centred to zero mean before
+    // it is layered onto the gradient. The final clamp then never clips the gradient.
+    let gradient = make_gradient_frame(width, height, 0.2, 0.8);
+    let noise_frame = make_noisy_gaussian_frame(width, height, 1, 0.5, &[true_sigma]);
     let frame: Vec<f32> = gradient
         .iter()
         .zip(noise_frame.iter())
-        .map(|(&g, &n)| (g + (n - 0.5)).clamp(0.0, 1.0))
+        .map(|(&gradient_value, &noise_value)| (gradient_value + (noise_value - 0.5)).clamp(0.0, 1.0))
         .collect();
-    let sums = estimate_abs_sums(w, h, 1, 1, &frame);
-    let estimated = sigma_from_abs_sum(sums[0], w, h);
+    let estimated = estimate_luma_sigma(width, height, &frame);
 
     let rel_err = (estimated - true_sigma).abs() / true_sigma;
     assert!(
@@ -136,8 +134,7 @@ fn noise_estimate_gradient_bias_bounded() {
     );
 }
 
-/// Quantises a normalised frame to `bits` and back, the round trip a
-/// real source of that depth goes through.
+/// Quantises a normalised frame to `bits` and back, as a real source of that depth would be.
 fn requantise(frame: &[f32], bits: u32) -> Vec<f32> {
     let max = ((1u32 << bits) - 1) as f32;
 
@@ -147,23 +144,21 @@ fn requantise(frame: &[f32], bits: u32) -> Vec<f32> {
         .collect()
 }
 
-/// The same content at 8-bit and at 10-bit must yield the same measured
-/// sigma. Normalising by `(1 << bits) - 1` holds the normalised scale
-/// fixed across depths, which is what lets every calibrated constant in
-/// the library stay depth-independent.
+/// Normalising by `(1 << bits) - 1` holds the scale fixed across depths, so calibrated constants
+/// stay depth-independent.
 #[test]
 fn sigma_estimate_agrees_across_bit_depths() {
-    let w = 256;
-    let h = 256;
+    let width = 256;
+    let height = 256;
     let true_sigma = 8.0 / 255.0;
 
-    let frame = make_noisy_gaussian_frame(w, h, 1, 0.5, &[true_sigma]);
+    let frame = make_noisy_gaussian_frame(width, height, 1, 0.5, &[true_sigma]);
 
     let eight = requantise(&frame, 8);
     let ten = requantise(&frame, 10);
 
-    let sigma_eight = sigma_from_abs_sum(estimate_abs_sums(w, h, 1, 1, &eight)[0], w, h);
-    let sigma_ten = sigma_from_abs_sum(estimate_abs_sums(w, h, 1, 1, &ten)[0], w, h);
+    let sigma_eight = estimate_luma_sigma(width, height, &eight);
+    let sigma_ten = estimate_luma_sigma(width, height, &ten);
 
     let rel_diff = (sigma_eight - sigma_ten).abs() / sigma_eight;
     assert!(
@@ -171,31 +166,28 @@ fn sigma_estimate_agrees_across_bit_depths() {
         "8-bit sigma {sigma_eight} vs 10-bit sigma {sigma_ten} (rel diff {rel_diff:.4})"
     );
 
-    // Both must still recover the true sigma, not merely agree with
-    // each other on a wrong answer.
-    for (label, s) in [("8-bit", sigma_eight), ("10-bit", sigma_ten)] {
-        let err = (s - true_sigma).abs() / true_sigma;
-        assert!(err <= 0.20, "{label} sigma {s} vs true {true_sigma}");
+    // Both must still recover the true sigma, not just agree on a wrong answer.
+    for (label, sigma) in [("8-bit", sigma_eight), ("10-bit", sigma_ten)] {
+        let err = (sigma - true_sigma).abs() / true_sigma;
+        assert!(err <= 0.20, "{label} sigma {sigma} vs true {true_sigma}");
     }
 }
 
-/// Grain too fine for 8-bit to represent survives 10-bit quantisation.
+/// The sigma is half an 8-bit step, which 10-bit resolves across two of its own steps.
 ///
-/// The chosen sigma is half of one 8-bit step (1/255), so 8-bit cannot
-/// carry it, while 10-bit resolves it across two of its own steps
-/// (1/1023). It also sits 5x above `SIGMA_FLOOR` (0.1/255), so a pass
-/// shows the floor is not clipping a legitimate fine measurement.
+/// It sits 5x above `SIGMA_FLOOR` (0.1/255), so a pass also shows the floor does not clip a real
+/// fine measurement.
 #[test]
 fn fine_grain_survives_ten_bit_quantisation() {
-    let w = 256;
-    let h = 256;
+    let width = 256;
+    let height = 256;
     let true_sigma = 0.5 / 255.0;
 
-    let frame = make_noisy_gaussian_frame(w, h, 1, 0.5, &[true_sigma]);
+    let frame = make_noisy_gaussian_frame(width, height, 1, 0.5, &[true_sigma]);
     let ten = requantise(&frame, 10);
     let eight = requantise(&frame, 8);
 
-    let estimated = sigma_from_abs_sum(estimate_abs_sums(w, h, 1, 1, &ten)[0], w, h);
+    let estimated = estimate_luma_sigma(width, height, &ten);
     let err = (estimated - true_sigma).abs() / true_sigma;
 
     assert!(
@@ -203,11 +195,9 @@ fn fine_grain_survives_ten_bit_quantisation() {
         "10-bit estimate {estimated} vs true {true_sigma} (rel err {err:.3})"
     );
 
-    // The same grain through 8-bit picks up quantisation noise worth
-    // more than half its own amplitude, so the estimate inflates. That
-    // gap is the point of the depth, and it must be visible here or the
-    // test above is measuring nothing 8-bit could not already do.
-    let estimated_eight = sigma_from_abs_sum(estimate_abs_sums(w, h, 1, 1, &eight)[0], w, h);
+    // Through 8-bit the grain picks up quantisation noise worth more than half its amplitude, so the
+    // estimate inflates. Without that gap the 10-bit check above proves nothing.
+    let estimated_eight = estimate_luma_sigma(width, height, &eight);
 
     assert!(
         estimated_eight > estimated,

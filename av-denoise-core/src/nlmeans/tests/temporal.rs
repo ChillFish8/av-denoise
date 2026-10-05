@@ -1,3 +1,5 @@
+use cubecl::prelude::ComputeClient;
+
 use super::helpers::*;
 use crate::bench_api::HostIo;
 use crate::nlmeans::*;
@@ -12,15 +14,13 @@ fn temporal_requires_full_window() {
         ..NlmParams::default()
     };
 
-    let w = 8;
-    let h = 8;
-    let frame = make_uniform_frame(w, h, 1, 0.5);
+    let width = 8;
+    let height = 8;
+    let frame = make_uniform_frame(width, height, 1, 0.5);
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
 
-    // Leading-edge mirror fills R past slots from the very first push, so the
-    // window only needs R+1 real pushes (= 2 for radius 1) before the first
-    // submit produces output.
+    // The leading-edge mirror fills the R past slots, so the window needs only R+1 real pushes.
     denoiser.push_frame(&frame);
     assert!(
         denoiser.denoise().unwrap().is_none(),
@@ -50,22 +50,22 @@ fn temporal_denoise_uniform() {
         hq: None,
     };
 
-    let w = 8;
-    let h = 8;
+    let width = 8;
+    let height = 8;
 
-    let frame = make_uniform_frame(w, h, 1, 0.5);
+    let frame = make_uniform_frame(width, height, 1, 0.5);
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
     denoiser.push_frame(&frame);
     denoiser.push_frame(&frame);
     denoiser.push_frame(&frame);
 
     let result = denoiser.denoise().unwrap().unwrap();
 
-    for (i, &v) in result.iter().enumerate() {
+    for (i, &value) in result.iter().enumerate() {
         assert!(
-            (v - 0.5).abs() < 1e-4,
-            "temporal uniform: pixel {i} expected ~0.5, got {v}"
+            (value - 0.5).abs() < 1e-4,
+            "temporal uniform: pixel {i} expected ~0.5, got {value}"
         );
     }
 }
@@ -85,23 +85,23 @@ fn temporal_with_noisy_center_frame() {
         hq: None,
     };
 
-    let w = 16;
-    let h = 16;
+    let width = 16;
+    let height = 16;
 
-    let clean = make_uniform_frame(w, h, 1, 0.5);
-    let noisy = make_frame_with_noisy_region(w, h, 1, 0.5, 8, 8, 1, 0.8);
+    let clean = make_uniform_frame(width, height, 1, 0.5);
+    let noisy = make_frame_with_noisy_region(width, height, 1, 0.5, 8, 8, 1, 0.8);
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
     denoiser.push_frame(&clean);
     denoiser.push_frame(&noisy);
     denoiser.push_frame(&clean);
 
     let result = denoiser.denoise().unwrap().unwrap();
 
-    let center_val = result[(8 * w + 8) as usize];
+    let center_value = result[(8 * width + 8) as usize];
     assert!(
-        center_val < 0.8,
-        "temporal denoising should suppress noise, got {center_val}"
+        center_value < 0.8,
+        "temporal denoising should suppress noise, got {center_value}"
     );
 }
 
@@ -120,31 +120,31 @@ fn temporal_asymmetric_frames_correct_weights() {
         hq: None,
     };
 
-    let w = 16;
-    let h = 16;
+    let width = 16;
+    let height = 16;
 
-    let mut frame0 = vec![0.5f32; (w * h) as usize];
+    let mut frame0 = vec![0.5f32; (width * height) as usize];
     for y in 6..10 {
         for x in 6..10 {
-            frame0[(y * w + x) as usize] = 0.9;
+            frame0[(y * width + x) as usize] = 0.9;
         }
     }
 
-    let frame1 = vec![0.5f32; (w * h) as usize];
-    let frame2 = vec![0.5f32; (w * h) as usize];
+    let frame1 = vec![0.5f32; (width * height) as usize];
+    let frame2 = vec![0.5f32; (width * height) as usize];
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
     denoiser.push_frame(&frame0);
     denoiser.push_frame(&frame1);
     denoiser.push_frame(&frame2);
 
     let result = denoiser.denoise().unwrap().unwrap();
 
-    let center_val = result[(8 * w + 8) as usize];
+    let center_value = result[(8 * width + 8) as usize];
     assert!(
-        (center_val - 0.5).abs() < 0.1,
+        (center_value - 0.5).abs() < 0.1,
         "temporal asymmetric: center should stay near 0.5 \
-         (past frame de-weighted), got {center_val}"
+         (past frame de-weighted), got {center_value}"
     );
 }
 
@@ -158,19 +158,23 @@ fn flush_produces_remaining_frames() {
         ..NlmParams::default()
     };
 
-    let w = 8;
-    let h = 8;
+    let width = 8;
+    let height = 8;
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
 
     for _ in 0..4 {
-        let frame = make_uniform_frame(w, h, 1, 0.5);
+        let frame = make_uniform_frame(width, height, 1, 0.5);
         denoiser.push_frame(&frame);
         let _ = denoiser.denoise().unwrap();
     }
 
     let mut remaining: Vec<Vec<f32>> = Vec::new();
-    denoiser.flush(|frame| remaining.push(frame.to_vec())).unwrap();
+    let collect = |frame: &[f32]| {
+        let samples = frame.to_vec();
+        remaining.push(samples);
+    };
+    denoiser.flush(collect).unwrap();
     assert_eq!(
         remaining.len(),
         1,
@@ -178,19 +182,16 @@ fn flush_produces_remaining_frames() {
     );
 
     for frame in &remaining {
-        assert_eq!(frame.len(), (w * h) as usize);
+        assert_eq!(frame.len(), (width * height) as usize);
     }
 }
 
-/// `N` pushes at temporal radius `R` must produce exactly `N` total emissions
-/// (during pushes + flush). Regression guard against the old bug where the
-/// leading `R` logical frames were silently dropped (every scene lost its
-/// first frame under `--temporal-radius >= 1`).
+/// Pins the bug where the leading `R` frames of every scene were dropped.
 #[test]
 fn temporal_push_flush_frame_count_matches() {
     let client = make_client();
-    let w = 8;
-    let h = 8;
+    let width = 8;
+    let height = 8;
 
     for radius in 1..=2 {
         let params = NlmParams {
@@ -199,15 +200,14 @@ fn temporal_push_flush_frame_count_matches() {
             prefilter: PrefilterMode::None,
             ..NlmParams::default()
         };
-        let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+        let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
 
         const PUSHES: usize = 10;
         let mut during_pushes = 0usize;
         for i in 0..PUSHES {
-            // Distinct frames so the kernel can't accidentally satisfy a
-            // count check by mis-pairing duplicate buffers.
+            // Distinct frames stop mis-paired duplicate buffers from satisfying the count.
             let value = 0.1 + (i as f32) * 0.05;
-            let frame = make_uniform_frame(w, h, 1, value);
+            let frame = make_uniform_frame(width, height, 1, value);
             denoiser.push_frame(&frame);
             if denoiser.denoise().unwrap().is_some() {
                 during_pushes += 1;
@@ -225,104 +225,84 @@ fn temporal_push_flush_frame_count_matches() {
     }
 }
 
-/// Deterministic per-frame noisy copy of `base`, decorrelated across
-/// `seed`. Same Irwin-Hall hash as `noisy_copy`, generalised to a
-/// non-uniform base image instead of a flat value.
-fn noisy_copy_of(base: &[f32], seed: u32, sigma: f32) -> Vec<f32> {
-    let unit_std = (1.0f32 / 3.0f32).sqrt();
-    base.iter()
-        .enumerate()
-        .map(|(idx, &b)| {
-            let idx = idx as u32;
-            let mut sum = 0.0f32;
-            for k in 0..4u32 {
-                let mut hash = (idx * 4 + k)
-                    .wrapping_mul(2654435761)
-                    .wrapping_add(seed.wrapping_mul(0x9E37_79B9).wrapping_add(k));
-                hash ^= hash >> 15;
-                hash = hash.wrapping_mul(0x85EB_CA6B);
-                hash ^= hash >> 13;
-                sum += (hash as f32 / u32::MAX as f32) - 0.5;
-            }
-            (b + (sum / unit_std) * sigma).clamp(0.0, 1.0)
-        })
-        .collect()
-}
-
 fn psnr(reference: &[f32], test: &[f32]) -> f64 {
     let mse: f64 = reference
         .iter()
         .zip(test.iter())
-        .map(|(&r, &t)| {
-            let d = (r as f64) - (t as f64);
-            d * d
+        .map(|(&reference_value, &test_value)| {
+            let difference = (reference_value as f64) - (test_value as f64);
+            difference * difference
         })
         .sum::<f64>()
         / reference.len() as f64;
+
     if mse <= 1e-20 {
         return 999.0;
     }
+
     10.0 * (1.0f64 / mse).log10()
 }
 
-/// Structured content for the search-radius regression tests below.
-/// Combines a gradient (a smooth region for NLM to average) with a
-/// block of a different value (an edge NLM should preserve rather
-/// than blur across).
-fn structured_base(w: u32, h: u32) -> Vec<f32> {
-    let mut base = make_gradient_frame(w, h, 0.2, 0.8);
-    let bx0 = w / 3;
-    let by0 = h / 3;
-    for y in by0..by0 * 2 {
-        for x in bx0..bx0 * 2 {
-            base[(y * w + x) as usize] = 0.15;
+/// A gradient (a smooth region to average) with a block of another value (an edge to preserve).
+fn structured_base(width: u32, height: u32) -> Vec<f32> {
+    let mut base = make_gradient_frame(width, height, 0.2, 0.8);
+    let block_left = width / 3;
+    let block_top = height / 3;
+    for y in block_top..block_top * 2 {
+        for x in block_left..block_left * 2 {
+            base[(y * width + x) as usize] = 0.15;
         }
     }
+
     base
 }
 
-/// Runs `params` through the windowed (default) dispatch and again
-/// through the separable dispatch (forced via the public
-/// `use_separable` flag, an independently-implemented path that
-/// doesn't share the windowed pair kernel's code), denoising `frames`
-/// of noisy copies of `base` both times. Returns `(windowed_psnr,
-/// separable_psnr)` against `base`.
+/// Denoises `frames` through the windowed and separable dispatches, returning each PSNR against `base`.
+///
+/// The separable path shares no code with the windowed pair kernel, so it acts as an independent
+/// reference.
 fn windowed_vs_separable_psnr(
-    client: &cubecl::prelude::ComputeClient<R>,
+    client: &ComputeClient<R>,
     params: &NlmParams,
-    w: u32,
-    h: u32,
+    width: u32,
+    height: u32,
     base: &[f32],
     frames: &[Vec<f32>],
 ) -> (f64, f64) {
-    let mut windowed = NlmDenoiser::<R>::new(client, params.clone(), w, h);
+    let windowed_params = params.clone();
+    let mut windowed = NlmDenoiser::<R>::new(client, windowed_params, width, height);
     for frame in frames {
         windowed.push_frame(frame);
     }
+
     let windowed_result = windowed.denoise().unwrap().unwrap();
 
-    let mut separable = NlmDenoiser::<R>::new(client, params.clone(), w, h);
+    let separable_params = params.clone();
+    let mut separable = NlmDenoiser::<R>::new(client, separable_params, width, height);
     separable.use_separable = true;
     for frame in frames {
         separable.push_frame(frame);
     }
+
     let separable_result = separable.denoise().unwrap().unwrap();
 
-    (psnr(base, &windowed_result), psnr(base, &separable_result))
+    let windowed_psnr = psnr(base, &windowed_result);
+    let separable_psnr = psnr(base, &separable_result);
+
+    (windowed_psnr, separable_psnr)
 }
 
-/// The backward temporal weight in `nlm_fused_pair_accumulate_window[_ref]`
-/// must be measured against the same centre patch as the value it
-/// multiplies. A weight measured against a shifted patch instead grows
-/// wrong with the search offset, so this checks the windowed dispatch
-/// against the independent separable dispatch at a search radius large
-/// enough to expose a shift.
+/// The windowed kernel's backward temporal weight must use the same centre patch as the value it
+/// multiplies.
+///
+/// A weight measured against a shifted patch grows wrong with the search offset, which these search
+/// radii are large enough to expose.
 #[test]
 fn temporal_windowed_matches_separable_at_search_5_and_6() {
     let client = make_client();
-    let w = 128;
-    let h = 128;
-    let base = structured_base(w, h);
+    let width = 128;
+    let height = 128;
+    let base = structured_base(width, height);
 
     for search_radius in [5u32, 6] {
         let params = NlmParams {
@@ -338,10 +318,12 @@ fn temporal_windowed_matches_separable_at_search_5_and_6() {
         };
 
         let sigma = 16.0 / 255.0;
-        let frames: Vec<Vec<f32>> = (0..9).map(|i| noisy_copy_of(&base, i, sigma)).collect();
+        let frames: Vec<Vec<f32>> = (0..9)
+            .map(|seed| noisy_field_over(&base, width, height, sigma, seed))
+            .collect();
 
         let (windowed_psnr, separable_psnr) =
-            windowed_vs_separable_psnr(&client, &params, w, h, &base, &frames);
+            windowed_vs_separable_psnr(&client, &params, width, height, &base, &frames);
 
         assert!(
             (windowed_psnr - separable_psnr).abs() < 1.5,
@@ -351,17 +333,13 @@ fn temporal_windowed_matches_separable_at_search_5_and_6() {
     }
 }
 
-/// Same check as [`temporal_windowed_matches_separable_at_search_5_and_6`]
-/// for `nlm_fused_pair_accumulate_window_ref`, the variant that reads
-/// patch distances from a prefiltered reference clip instead of the raw
-/// input. A prefilter is active so both the windowed and separable
-/// dispatches route through their `_ref` kernels.
+/// A prefilter is active so both dispatches read patch distances from the prefiltered reference.
 #[test]
 fn temporal_windowed_ref_matches_separable_ref_at_search_5_and_6() {
     let client = make_client();
-    let w = 128;
-    let h = 128;
-    let base = structured_base(w, h);
+    let width = 128;
+    let height = 128;
+    let base = structured_base(width, height);
 
     for search_radius in [5u32, 6] {
         let params = NlmParams {
@@ -380,10 +358,12 @@ fn temporal_windowed_ref_matches_separable_ref_at_search_5_and_6() {
         };
 
         let sigma = 16.0 / 255.0;
-        let frames: Vec<Vec<f32>> = (0..9).map(|i| noisy_copy_of(&base, i, sigma)).collect();
+        let frames: Vec<Vec<f32>> = (0..9)
+            .map(|seed| noisy_field_over(&base, width, height, sigma, seed))
+            .collect();
 
         let (windowed_psnr, separable_psnr) =
-            windowed_vs_separable_psnr(&client, &params, w, h, &base, &frames);
+            windowed_vs_separable_psnr(&client, &params, width, height, &base, &frames);
 
         assert!(
             (windowed_psnr - separable_psnr).abs() < 1.5,
@@ -393,21 +373,15 @@ fn temporal_windowed_ref_matches_separable_ref_at_search_5_and_6() {
     }
 }
 
-/// Same check as [`temporal_windowed_matches_separable_at_search_5_and_6`]
-/// at the maximum supported search radius. Ignored by default. The
-/// windowed kernel's fully unrolled window loop at this size overflows a
-/// debug build's codegen stack even at the stack size
-/// `.cargo/config.toml` sets (the spatial windowed kernel hits the same
-/// limit). Release builds compile it fine. Run with
-/// `cargo test --release -- --ignored
-/// temporal_windowed_matches_separable_at_the_search_ceiling`.
+/// A debug build overflows its codegen stack on the fully unrolled window loop at this radius, even
+/// at the stack size `.cargo/config.toml` sets.
 #[test]
 #[ignore = "debug build codegen overflows the stack at search_radius=8, run with --release"]
 fn temporal_windowed_matches_separable_at_the_search_ceiling() {
     let client = make_client();
-    let w = 128;
-    let h = 128;
-    let base = structured_base(w, h);
+    let width = 128;
+    let height = 128;
+    let base = structured_base(width, height);
 
     let params = NlmParams {
         temporal_radius: 4,
@@ -422,9 +396,12 @@ fn temporal_windowed_matches_separable_at_the_search_ceiling() {
     };
 
     let sigma = 16.0 / 255.0;
-    let frames: Vec<Vec<f32>> = (0..9).map(|i| noisy_copy_of(&base, i, sigma)).collect();
+    let frames: Vec<Vec<f32>> = (0..9)
+        .map(|seed| noisy_field_over(&base, width, height, sigma, seed))
+        .collect();
 
-    let (windowed_psnr, separable_psnr) = windowed_vs_separable_psnr(&client, &params, w, h, &base, &frames);
+    let (windowed_psnr, separable_psnr) =
+        windowed_vs_separable_psnr(&client, &params, width, height, &base, &frames);
 
     assert!(
         (windowed_psnr - separable_psnr).abs() < 1.5,
@@ -433,18 +410,15 @@ fn temporal_windowed_matches_separable_at_the_search_ceiling() {
     );
 }
 
-/// Uniform-content sanity check at the same search radii as
-/// [`temporal_windowed_matches_separable_at_search_5_and_6`]. Uniform
-/// input makes every patch distance zero regardless of which pixel a
-/// kernel reads, so this cannot catch a mis-centred weight, but it does
-/// catch a kernel reading or writing outside its intended memory region,
-/// which would pull in unrelated data and break uniformity even here.
+/// Uniform input zeroes every patch distance, so this cannot catch a mis-centred weight.
+///
+/// It does catch a kernel reading or writing outside its region, which breaks the uniformity.
 #[test]
 fn temporal_uniform_passthrough_search_5_and_6() {
     let client = make_client();
-    let w = 64;
-    let h = 64;
-    let frame = make_uniform_frame(w, h, 1, 0.5);
+    let width = 64;
+    let height = 64;
+    let frame = make_uniform_frame(width, height, 1, 0.5);
 
     for search_radius in [5u32, 6] {
         let params = NlmParams {
@@ -459,16 +433,17 @@ fn temporal_uniform_passthrough_search_5_and_6() {
             hq: None,
         };
 
-        let mut denoiser = NlmDenoiser::<R>::new(&client, params, w, h);
+        let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
         for _ in 0..5 {
             denoiser.push_frame(&frame);
         }
+
         let result = denoiser.denoise().unwrap().unwrap();
 
-        for (i, &v) in result.iter().enumerate() {
+        for (i, &value) in result.iter().enumerate() {
             assert!(
-                (v - 0.5).abs() < 1e-3,
-                "search_radius={search_radius}: pixel {i} expected ~0.5, got {v}"
+                (value - 0.5).abs() < 1e-3,
+                "search_radius={search_radius}: pixel {i} expected ~0.5, got {value}"
             );
         }
     }

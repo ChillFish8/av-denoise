@@ -42,8 +42,8 @@ pub struct EgressBench<R: Runtime> {
     pub client: ComputeClient<R>,
     pub width: u32,
     pub height: u32,
-    pub ch: u32,
-    pub ch_name: &'static str,
+    pub channels: u32,
+    pub channel_name: &'static str,
     pub format: EgressFormat,
 }
 
@@ -53,11 +53,13 @@ impl<R: Runtime> EgressBench<R> {
     }
 
     fn words(&self) -> u32 {
-        self.pixels().div_ceil(self.format.samples_per_word())
+        let samples_per_word = self.format.samples_per_word();
+        self.pixels().div_ceil(samples_per_word)
     }
 
     fn frame_len(&self) -> usize {
-        self.pixels() as usize * stored_channels(self.ch) as usize
+        let stored_ch = stored_channels(self.channels);
+        self.pixels() as usize * stored_ch as usize
     }
 }
 
@@ -66,11 +68,15 @@ impl<R: Runtime> Benchmark for EgressBench<R> {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let frame_data = make_padded_frame(self.width, self.height, self.ch);
-        let frame = self.client.create_from_slice(f32::as_bytes(&frame_data));
+        let frame_data = make_padded_frame(self.width, self.height, self.channels);
+        let frame_bytes = f32::as_bytes(&frame_data);
+        let frame = self.client.create_from_slice(frame_bytes);
         let plane_bytes = self.words() as usize * size_of::<u32>();
-        let planes = (0..self.ch).map(|_| self.client.empty(plane_bytes)).collect();
+        let planes = (0..self.channels)
+            .map(|_| self.client.empty(plane_bytes))
+            .collect();
         let placeholder = self.client.empty(size_of::<u32>());
+
         EgressInput {
             frame,
             planes,
@@ -80,7 +86,7 @@ impl<R: Runtime> Benchmark for EgressBench<R> {
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let pixels = self.pixels();
-        let stored_ch = stored_channels(self.ch);
+        let stored_ch = stored_channels(self.channels);
         let frame_len = self.frame_len();
         let samples_per_word = self.format.samples_per_word();
         let max = self.format.max();
@@ -96,7 +102,7 @@ impl<R: Runtime> Benchmark for EgressBench<R> {
         let groups = threads.div_ceil(BLOCK_1D).clamp(1, 65535);
         let total_threads = groups * BLOCK_1D;
 
-        // Planes past `ch` bind a distinct placeholder the kernel never writes.
+        // Planes past `channels` bind a distinct placeholder the kernel never writes.
         let plane_0 = args.planes[0].clone();
         let plane_1 = args.planes.get(1).unwrap_or(&args.placeholder).clone();
         let plane_2 = args.planes.get(2).unwrap_or(&args.placeholder).clone();
@@ -112,7 +118,7 @@ impl<R: Runtime> Benchmark for EgressBench<R> {
                     ArrayArg::from_raw_parts(plane_1, plane_len),
                     ArrayArg::from_raw_parts(plane_2, plane_len),
                     pixels,
-                    self.ch,
+                    self.channels,
                     stored_ch,
                     total_threads,
                 ),
@@ -126,7 +132,7 @@ impl<R: Runtime> Benchmark for EgressBench<R> {
                     ArrayArg::from_raw_parts(plane_2, plane_len),
                     max,
                     pixels,
-                    self.ch,
+                    self.channels,
                     stored_ch,
                     samples_per_word,
                     words,
@@ -141,7 +147,7 @@ impl<R: Runtime> Benchmark for EgressBench<R> {
     fn name(&self) -> String {
         format!(
             "egress_{}x{}_{:?}_{}",
-            self.width, self.height, self.format, self.ch_name
+            self.width, self.height, self.format, self.channel_name
         )
     }
 
@@ -150,6 +156,10 @@ impl<R: Runtime> Benchmark for EgressBench<R> {
     }
 
     fn shapes(&self) -> Vec<Vec<usize>> {
-        vec![vec![self.width as usize, self.height as usize, self.ch as usize]]
+        vec![vec![
+            self.width as usize,
+            self.height as usize,
+            self.channels as usize,
+        ]]
     }
 }

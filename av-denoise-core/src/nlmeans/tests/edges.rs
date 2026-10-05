@@ -33,7 +33,8 @@ fn edge_params(windowed: bool) -> NlmParams {
 }
 
 fn shifted_denoiser(client: &ComputeClient<R>, windowed: bool) -> NlmDenoiser<R> {
-    let mut denoiser = NlmDenoiser::<R>::new(client, edge_params(windowed), SIZE, SIZE);
+    let params = edge_params(windowed);
+    let mut denoiser = NlmDenoiser::<R>::new(client, params, SIZE, SIZE);
     denoiser.set_shifted_edges(true);
     denoiser.set_luma_noise_fields(true);
     denoiser
@@ -104,8 +105,8 @@ fn a_second_stream_never_reads_the_first_streams_f0_stats() {
     let client = make_client();
     let total_frames = 2 * RADIUS + 1;
     let mut denoiser = shifted_denoiser(&client, true);
-    // One more than the ring, so the first stream writes a real record
-    // into the slot the second stream's f0 lands in.
+    // One more than the ring, so the first stream writes a real record into the slot the second
+    // stream's f0 lands in.
     push_grain(&mut denoiser, total_frames + 1);
     denoiser.reset_stream_state();
 
@@ -137,7 +138,8 @@ fn fill_ring_with_last_frame_makes_a_short_stream_ready() {
 #[test]
 fn nlm_mode_keeps_the_leading_copies() {
     let client = make_client();
-    let mut denoiser = NlmDenoiser::<R>::new(&client, edge_params(false), SIZE, SIZE);
+    let params = edge_params(false);
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, SIZE, SIZE);
 
     push_grain(&mut denoiser, 1);
 

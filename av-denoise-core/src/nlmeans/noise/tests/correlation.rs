@@ -9,27 +9,40 @@ use crate::nlmeans::noise::correlation::{
 #[test]
 fn interpolate_table_linear_between_points() {
     let table = [(0.0f32, 1.0f32), (0.5, 1.2), (1.0, 1.5)];
-    assert!((interpolate_table(&table, 0.25) - 1.1).abs() < 1e-6);
-    assert!((interpolate_table(&table, 0.75) - 1.35).abs() < 1e-6);
-    assert_eq!(interpolate_table(&table, 0.0), 1.0);
-    assert_eq!(interpolate_table(&table, 1.0), 1.5);
+    let quarter = interpolate_table(&table, 0.25);
+    let three_quarters = interpolate_table(&table, 0.75);
+    let start = interpolate_table(&table, 0.0);
+    let end = interpolate_table(&table, 1.0);
+
+    assert!((quarter - 1.1).abs() < 1e-6);
+    assert!((three_quarters - 1.35).abs() < 1e-6);
+    assert_eq!(start, 1.0);
+    assert_eq!(end, 1.5);
 }
 
 #[test]
 fn interpolate_table_clamps_outside_range() {
     let table = [(0.0f32, 1.0f32), (1.0, 2.0)];
-    assert_eq!(interpolate_table(&table, -5.0), 1.0);
-    assert_eq!(interpolate_table(&table, 5.0), 2.0);
+    let below = interpolate_table(&table, -5.0);
+    let above = interpolate_table(&table, 5.0);
+
+    assert_eq!(below, 1.0);
+    assert_eq!(above, 2.0);
 }
 
 #[test]
 fn correlation_factor_matches_measured_table() {
-    assert_eq!(correlation_factor(0.0), 1.0);
-    assert!((correlation_factor(0.65) - 1.45).abs() < 1e-6);
+    let uncorrelated = correlation_factor(0.0);
+    let measured = correlation_factor(0.65);
+    let past_last_point = correlation_factor(0.9);
+    let white = correlation_factor(-0.2);
+
+    assert_eq!(uncorrelated, 1.0);
+    assert!((measured - 1.45).abs() < 1e-6);
     // Clamped flat past the last measured point.
-    assert!((correlation_factor(0.9) - 1.45).abs() < 1e-6);
+    assert!((past_last_point - 1.45).abs() < 1e-6);
     // White noise stays uncorrected.
-    assert_eq!(correlation_factor(-0.2), 1.0);
+    assert_eq!(white, 1.0);
 
     // Monotone non-decreasing across the measured range.
     let mut last = 0.0;
@@ -50,11 +63,8 @@ fn spatial_offset_factor_rho_zero_is_white_identity() {
                     continue;
                 }
 
-                assert_eq!(
-                    spatial_offset_factor(dx, dy, rho),
-                    1.0,
-                    "dx={dx} dy={dy} rho={rho}"
-                );
+                let factor = spatial_offset_factor(dx, dy, rho);
+                assert_eq!(factor, 1.0, "dx={dx} dy={dy} rho={rho}");
             }
         }
     }
@@ -63,7 +73,8 @@ fn spatial_offset_factor_rho_zero_is_white_identity() {
 #[test]
 fn spatial_offset_factor_self_is_always_zero() {
     for rho in [-0.2f32, 0.0, 0.3, 0.65, 1.0] {
-        assert_eq!(spatial_offset_factor(0, 0, rho), 0.0, "rho={rho}");
+        let factor = spatial_offset_factor(0, 0, rho);
+        assert_eq!(factor, 0.0, "rho={rho}");
     }
 }
 
@@ -84,16 +95,20 @@ fn spatial_offset_factor_monotone_nondecreasing_in_distance() {
 #[test]
 fn spatial_offset_factor_rho_0_65_shape() {
     let rho = 0.65f32;
+    let one_pixel = spatial_offset_factor(1, 0, rho);
+    let two_pixels = spatial_offset_factor(2, 0, rho);
+    let diagonal = spatial_offset_factor(1, 1, rho);
+
     // One pixel away.
-    assert!((spatial_offset_factor(1, 0, rho) - (1.0 - rho)).abs() < 1e-6);
+    assert!((one_pixel - (1.0 - rho)).abs() < 1e-6);
     // Two pixels away along an axis.
-    assert!((spatial_offset_factor(2, 0, rho) - (1.0 - rho * rho)).abs() < 1e-6);
+    assert!((two_pixels - (1.0 - rho * rho)).abs() < 1e-6);
 
     // A diagonal candidate sits sqrt(2) away.
     let distance = 2.0f32.sqrt();
     let log_rho = rho.ln();
     let expected = 1.0 - (distance * log_rho).exp();
-    assert!((spatial_offset_factor(1, 1, rho) - expected).abs() < 1e-6);
+    assert!((diagonal - expected).abs() < 1e-6);
 
     // Every factor stays within 0..=1.
     for dy in -4..=4 {
@@ -109,7 +124,8 @@ fn build_spatial_offset_lut_rho_zero_matches_flat_noise_offset() {
     let search_radius = 3;
     let noise_offset = 1.5f32;
     let lut = build_spatial_offset_lut(search_radius, 0.0, noise_offset);
-    assert_eq!(lut.len(), spatial_offset_lut_len(search_radius));
+    let expected_len = spatial_offset_lut_len(search_radius);
+    assert_eq!(lut.len(), expected_len);
 
     let side = (2 * search_radius + 1) as usize;
     let radius = search_radius as i32;

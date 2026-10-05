@@ -14,10 +14,11 @@ use av_denoise_core::bench_api::{
     wait_read,
 };
 use av_denoise_core::{ChannelMode, PrefilterMode};
+use clap::Parser;
 use cubecl::prelude::*;
 
-const W: u32 = 1920;
-const H: u32 = 1080;
+const WIDTH: u32 = 1920;
+const HEIGHT: u32 = 1080;
 
 const WARMUP_KERNEL: usize = 5;
 const ITERS_KERNEL: usize = 100;
@@ -25,23 +26,38 @@ const ITERS_KERNEL: usize = 100;
 const WARMUP_PIPELINE: usize = 2;
 const ITERS_PIPELINE: usize = 500;
 
-fn stored_channels(ch: u32) -> u32 {
-    match ch {
+const BILATERAL_SIGMA_S: f32 = 3.0;
+const BILATERAL_SIGMA_R: f32 = 0.02;
+
+const DENOISE_VARIANTS: &[(PrefilterMode, &str)] = &[
+    (PrefilterMode::None, ""),
+    (
+        PrefilterMode::Bilateral {
+            sigma_s: BILATERAL_SIGMA_S,
+            sigma_r: BILATERAL_SIGMA_R,
+        },
+        "_rclip_bilateral",
+    ),
+    (PrefilterMode::NlmSpatial { strength_scale: 1.0 }, "_nlm_pilot"),
+];
+
+fn stored_channels(channels: u32) -> u32 {
+    match channels {
         1 => 1,
         2 => 2,
-        _ => 4, // YUV: 3 logical, 4 stored (vec3 -> vec4 padding)
+        _ => 4, // YUV has 3 logical channels stored as 4, padding vec3 to vec4.
     }
 }
 
-fn make_synthetic_frame(w: u32, h: u32, ch: u32) -> Vec<f32> {
-    let mut data = Vec::with_capacity((w * h * ch) as usize);
+fn make_synthetic_frame(width: u32, height: u32, channels: u32) -> Vec<f32> {
+    let mut data = Vec::with_capacity((width * height * channels) as usize);
 
-    for y in 0..h {
-        for x in 0..w {
+    for y in 0..height {
+        for x in 0..width {
             let base = 0.5 + 0.2 * (x as f32 * 0.05).sin() * (y as f32 * 0.03).cos();
 
-            for c in 0..ch {
-                let seed = (y * w + x) * ch + c;
+            for channel in 0..channels {
+                let seed = (y * width + x) * channels + channel;
                 let hash = seed
                     .wrapping_mul(2654435761)
                     .wrapping_add(seed.wrapping_mul(340573321));
@@ -54,19 +70,21 @@ fn make_synthetic_frame(w: u32, h: u32, ch: u32) -> Vec<f32> {
     data
 }
 
-/// Pad to next-pow2 lane count (matches NlmDenoiser internal storage).
-fn make_padded_frame(w: u32, h: u32, ch: u32) -> Vec<f32> {
-    let stored = stored_channels(ch);
-    if stored == ch {
-        return make_synthetic_frame(w, h, ch);
+/// A synthetic frame padded to the power-of-two lane count `NlmDenoiser` stores.
+fn make_padded_frame(width: u32, height: u32, channels: u32) -> Vec<f32> {
+    let stored_ch = stored_channels(channels);
+    if stored_ch == channels {
+        return make_synthetic_frame(width, height, channels);
     }
-    let src = make_synthetic_frame(w, h, ch);
-    let mut data = vec![0.0f32; (w * h * stored) as usize];
-    for i in 0..(w * h) as usize {
-        for c in 0..ch as usize {
-            data[i * stored as usize + c] = src[i * ch as usize + c];
+
+    let synthetic = make_synthetic_frame(width, height, channels);
+    let mut data = vec![0.0f32; (width * height * stored_ch) as usize];
+    for i in 0..(width * height) as usize {
+        for channel in 0..channels as usize {
+            data[i * stored_ch as usize + channel] = synthetic[i * channels as usize + channel];
         }
     }
+
     data
 }
 
@@ -96,20 +114,22 @@ fn run_bench<R: Runtime>(
     client: &ComputeClient<R>,
     warmup: usize,
     iterations: usize,
-    mut f: impl FnMut(),
+    mut step: impl FnMut(),
 ) -> BenchResult {
     for _ in 0..warmup {
-        f();
-        futures::executor::block_on(client.sync()).unwrap();
+        step();
+        let sync = client.sync();
+        futures::executor::block_on(sync).unwrap();
     }
 
     let mut times = Vec::with_capacity(iterations);
-
     for _ in 0..iterations {
         let start = Instant::now();
-        f();
-        futures::executor::block_on(client.sync()).unwrap();
-        times.push(start.elapsed());
+        step();
+        let sync = client.sync();
+        futures::executor::block_on(sync).unwrap();
+        let elapsed = start.elapsed();
+        times.push(elapsed);
     }
 
     let total: Duration = times.iter().sum();
@@ -130,39 +150,41 @@ fn run_bench<R: Runtime>(
     }
 }
 
-fn div_ceil(a: u32, b: u32) -> u32 {
-    a.div_ceil(b)
+fn div_ceil(value: u32, divisor: u32) -> u32 {
+    value.div_ceil(divisor)
 }
 
 fn bench_dist_2d_weight<R: Runtime>(
     client: &ComputeClient<R>,
     backend: &str,
-    ch: u32,
-    ch_name: &str,
+    channels: u32,
+    channel_name: &str,
 ) -> BenchResult {
-    let pixels = (W * H) as usize;
-    let stored_ch = stored_channels(ch);
-    let frame = make_padded_frame(W, H, ch);
-    let input = client.create_from_slice(f32::as_bytes(&frame));
+    let pixels = (WIDTH * HEIGHT) as usize;
+    let stored_ch = stored_channels(channels);
+    let frame = make_padded_frame(WIDTH, HEIGHT, channels);
+    let frame_bytes = f32::as_bytes(&frame);
+    let input = client.create_from_slice(frame_bytes);
     let output = client.empty(pixels * size_of::<f32>());
 
+    let channel_mode = match channels {
+        1 => ChannelMode::Luma,
+        2 => ChannelMode::Chroma,
+        _ => ChannelMode::Yuv,
+    };
     let params = NlmParams {
         patch_radius: 4,
-        channels: match ch {
-            1 => ChannelMode::Luma,
-            2 => ChannelMode::Chroma,
-            _ => ChannelMode::Yuv,
-        },
+        channels: channel_mode,
         ..NlmParams::default()
     };
     let h2_inv_norm = params.h2_inv_norm();
 
-    let grid_x = div_ceil(W, BLOCK_X);
-    let grid_y = div_ceil(H, BLOCK_Y);
+    let grid_x = div_ceil(WIDTH, BLOCK_X);
+    let grid_y = div_ceil(HEIGHT, BLOCK_Y);
     let cube_count = CubeCount::new_2d(grid_x, grid_y);
     let cube_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
 
-    let name = format!("dist_2d_weight_1080p_{ch_name}");
+    let name = format!("dist_2d_weight_1080p_{channel_name}");
 
     run_bench(&name, backend, client, WARMUP_KERNEL, ITERS_KERNEL, || unsafe {
         nlm_dist_2d_weight::launch_unchecked::<R>(
@@ -178,9 +200,9 @@ fn bench_dist_2d_weight<R: Runtime>(
             0i32,
             h2_inv_norm,
             0.0f32,
-            W,
-            H,
-            ch,
+            WIDTH,
+            HEIGHT,
+            channels,
             params.patch_radius,
             BLOCK_X,
             BLOCK_Y,
@@ -191,27 +213,29 @@ fn bench_dist_2d_weight<R: Runtime>(
 fn bench_accumulate<R: Runtime>(
     client: &ComputeClient<R>,
     backend: &str,
-    ch: u32,
-    ch_name: &str,
+    channels: u32,
+    channel_name: &str,
 ) -> BenchResult {
-    let pixels = (W * H) as usize;
-    let stored_ch = stored_channels(ch);
-    let frame = make_padded_frame(W, H, ch);
-    let input = client.create_from_slice(f32::as_bytes(&frame));
+    let pixels = (WIDTH * HEIGHT) as usize;
+    let stored_ch = stored_channels(channels);
+    let frame = make_padded_frame(WIDTH, HEIGHT, channels);
+    let frame_bytes = f32::as_bytes(&frame);
+    let input = client.create_from_slice(frame_bytes);
 
     let weights_data = vec![0.5f32; pixels];
-    let weights = client.create_from_slice(f32::as_bytes(&weights_data));
+    let weights_bytes = f32::as_bytes(&weights_data);
+    let weights = client.create_from_slice(weights_bytes);
 
     let accum = client.empty(pixels * stored_ch as usize * size_of::<f32>());
     let weight_sum = client.empty(pixels * size_of::<f32>());
     let max_weight = client.empty(pixels * size_of::<f32>());
 
-    let grid_x = div_ceil(W, BLOCK_X);
-    let grid_y = div_ceil(H, BLOCK_Y);
+    let grid_x = div_ceil(WIDTH, BLOCK_X);
+    let grid_y = div_ceil(HEIGHT, BLOCK_Y);
     let cube_count = CubeCount::new_2d(grid_x, grid_y);
     let cube_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
 
-    let name = format!("accumulate_1080p_{ch_name}");
+    let name = format!("accumulate_1080p_{channel_name}");
 
     run_bench(&name, backend, client, WARMUP_KERNEL, ITERS_KERNEL, || unsafe {
         nlm_accumulate::launch_unchecked::<R>(
@@ -229,35 +253,44 @@ fn bench_accumulate<R: Runtime>(
             0u32,
             1i32,
             0i32,
-            W,
-            H,
+            WIDTH,
+            HEIGHT,
         );
     })
 }
 
-fn bench_finish<R: Runtime>(client: &ComputeClient<R>, backend: &str, ch: u32, ch_name: &str) -> BenchResult {
-    let pixels = (W * H) as usize;
-    let stored_ch = stored_channels(ch);
-    let frame = make_padded_frame(W, H, ch);
-    let input = client.create_from_slice(f32::as_bytes(&frame));
+fn bench_finish<R: Runtime>(
+    client: &ComputeClient<R>,
+    backend: &str,
+    channels: u32,
+    channel_name: &str,
+) -> BenchResult {
+    let pixels = (WIDTH * HEIGHT) as usize;
+    let stored_ch = stored_channels(channels);
+    let frame = make_padded_frame(WIDTH, HEIGHT, channels);
+    let frame_bytes = f32::as_bytes(&frame);
+    let input = client.create_from_slice(frame_bytes);
 
     let accum_data = vec![0.25f32; pixels * stored_ch as usize];
-    let accum = client.create_from_slice(f32::as_bytes(&accum_data));
+    let accum_bytes = f32::as_bytes(&accum_data);
+    let accum = client.create_from_slice(accum_bytes);
 
-    let ws_data = vec![1.0f32; pixels];
-    let weight_sum = client.create_from_slice(f32::as_bytes(&ws_data));
+    let weight_sum_data = vec![1.0f32; pixels];
+    let weight_sum_bytes = f32::as_bytes(&weight_sum_data);
+    let weight_sum = client.create_from_slice(weight_sum_bytes);
 
-    let mw_data = vec![0.8f32; pixels];
-    let max_weight = client.create_from_slice(f32::as_bytes(&mw_data));
+    let max_weight_data = vec![0.8f32; pixels];
+    let max_weight_bytes = f32::as_bytes(&max_weight_data);
+    let max_weight = client.create_from_slice(max_weight_bytes);
 
     let output = client.empty(pixels * stored_ch as usize * size_of::<f32>());
 
-    let grid_x = div_ceil(W, BLOCK_X);
-    let grid_y = div_ceil(H, BLOCK_Y);
+    let grid_x = div_ceil(WIDTH, BLOCK_X);
+    let grid_y = div_ceil(HEIGHT, BLOCK_Y);
     let cube_count = CubeCount::new_2d(grid_x, grid_y);
     let cube_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
 
-    let name = format!("finish_1080p_{ch_name}");
+    let name = format!("finish_1080p_{channel_name}");
 
     run_bench(&name, backend, client, WARMUP_KERNEL, ITERS_KERNEL, || unsafe {
         nlm_finish::launch_unchecked::<R>(
@@ -273,9 +306,9 @@ fn bench_finish<R: Runtime>(client: &ComputeClient<R>, backend: &str, ch: u32, c
             0u32,
             0u32,
             1.0f32,
-            W,
-            H,
-            ch,
+            WIDTH,
+            HEIGHT,
+            channels,
         );
     })
 }
@@ -283,23 +316,24 @@ fn bench_finish<R: Runtime>(client: &ComputeClient<R>, backend: &str, ch: u32, c
 fn bench_bilateral<R: Runtime>(
     client: &ComputeClient<R>,
     backend: &str,
-    ch: u32,
-    ch_name: &str,
+    channels: u32,
+    channel_name: &str,
 ) -> BenchResult {
-    let pixels = (W * H) as usize;
-    let stored_ch = stored_channels(ch);
-    let frame = make_padded_frame(W, H, ch);
-    let input = client.create_from_slice(f32::as_bytes(&frame));
+    let pixels = (WIDTH * HEIGHT) as usize;
+    let stored_ch = stored_channels(channels);
+    let frame = make_padded_frame(WIDTH, HEIGHT, channels);
+    let frame_bytes = f32::as_bytes(&frame);
+    let input = client.create_from_slice(frame_bytes);
     let output = client.empty(pixels * stored_ch as usize * size_of::<f32>());
 
     let radius = bilateral_radius(BILATERAL_SIGMA_S);
 
-    let grid_x = div_ceil(W, BLOCK_X);
-    let grid_y = div_ceil(H, BLOCK_Y);
+    let grid_x = div_ceil(WIDTH, BLOCK_X);
+    let grid_y = div_ceil(HEIGHT, BLOCK_Y);
     let cube_count = CubeCount::new_2d(grid_x, grid_y);
     let cube_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
 
-    let name = format!("bilateral_1080p_{ch_name}");
+    let name = format!("bilateral_1080p_{channel_name}");
 
     run_bench(&name, backend, client, WARMUP_KERNEL, ITERS_KERNEL, || unsafe {
         nlm_bilateral::launch_unchecked::<R>(
@@ -312,9 +346,9 @@ fn bench_bilateral<R: Runtime>(
             0u32,
             1.0 / (2.0 * BILATERAL_SIGMA_S * BILATERAL_SIGMA_S),
             1.0 / (2.0 * BILATERAL_SIGMA_R * BILATERAL_SIGMA_R),
-            W,
-            H,
-            ch,
+            WIDTH,
+            HEIGHT,
+            channels,
             radius,
             BLOCK_X,
             BLOCK_Y,
@@ -335,25 +369,27 @@ fn denoise_params(channels: ChannelMode, temporal_radius: u32, prefilter: Prefil
     }
 }
 
-/// Steady-state streaming bench: every iteration pushes a fresh frame
-/// (the real per-frame cost: upload plus optional prefilter) and then
-/// calls the synchronous `denoise()` which waits for the readback. This
-/// is the cost a caller pays if they push and wait in lockstep.
+/// The steady-state spatial streaming cost.
+///
+/// Every iteration pushes a fresh frame, the real per-frame upload and optional prefilter cost, then
+/// calls the synchronous `denoise()` which waits for the readback. This is the cost a caller pays
+/// when pushing and waiting in lockstep.
 fn bench_denoise_spatial<R: Runtime>(
     client: &ComputeClient<R>,
     backend: &str,
     channels: ChannelMode,
-    ch_name: &str,
+    channel_name: &str,
     prefilter: PrefilterMode,
     tag: &str,
 ) -> BenchResult {
-    let ch = channels.count();
+    let channel_count = channels.count();
     let params = denoise_params(channels, 0, prefilter);
-    let frame = make_synthetic_frame(W, H, ch);
-    let name = format!("denoise_spatial{tag}_1080p_{ch_name}");
+    let frame = make_synthetic_frame(WIDTH, HEIGHT, channel_count);
+    let name = format!("denoise_spatial{tag}_1080p_{channel_name}");
 
-    let mut denoiser = NlmDenoiser::<R>::new(client, params, W, H);
-    futures::executor::block_on(client.sync()).unwrap();
+    let mut denoiser = NlmDenoiser::<R>::new(client, params, WIDTH, HEIGHT);
+    let sync = client.sync();
+    futures::executor::block_on(sync).unwrap();
 
     run_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
         denoiser.push_frame(&frame);
@@ -362,28 +398,31 @@ fn bench_denoise_spatial<R: Runtime>(
     })
 }
 
-/// Steady-state temporal streaming bench. The window is pre-filled
-/// outside the timer (a one-off cost in real usage), then every measured
-/// iteration pushes one fresh frame and waits for that frame's denoise.
+/// The steady-state temporal streaming cost.
+///
+/// The window is pre-filled outside the timer because that is a one-off cost in real use. Every
+/// measured iteration then pushes one fresh frame and waits for that frame's denoise.
 fn bench_denoise_temporal<R: Runtime>(
     client: &ComputeClient<R>,
     backend: &str,
     channels: ChannelMode,
-    ch_name: &str,
+    channel_name: &str,
     prefilter: PrefilterMode,
     tag: &str,
 ) -> BenchResult {
-    let ch = channels.count();
+    let channel_count = channels.count();
     let params = denoise_params(channels, 1, prefilter);
-    let frame = make_synthetic_frame(W, H, ch);
+    let frame = make_synthetic_frame(WIDTH, HEIGHT, channel_count);
     let total_frames = 1 + 2 * params.temporal_radius as usize;
-    let name = format!("denoise_temporal{tag}_1080p_{ch_name}");
+    let name = format!("denoise_temporal{tag}_1080p_{channel_name}");
 
-    let mut denoiser = NlmDenoiser::<R>::new(client, params, W, H);
+    let mut denoiser = NlmDenoiser::<R>::new(client, params, WIDTH, HEIGHT);
     for _ in 0..total_frames - 1 {
         denoiser.push_frame(&frame);
     }
-    futures::executor::block_on(client.sync()).unwrap();
+
+    let sync = client.sync();
+    futures::executor::block_on(sync).unwrap();
 
     run_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
         denoiser.push_frame(&frame);
@@ -392,35 +431,39 @@ fn bench_denoise_temporal<R: Runtime>(
     })
 }
 
-/// Pipelined variant: each iteration pushes a fresh frame, submits its
-/// denoise kernels (no wait), then blocks on the *previous* frame's
-/// readback. With double-buffered output handles, frame N+1's kernels
-/// run on the GPU while frame N's host readback is still in flight.
+/// The pipelined temporal streaming cost.
+///
+/// Each iteration pushes a fresh frame, submits its denoise kernels without waiting, then blocks on
+/// the previous frame's readback. With double-buffered output handles, frame N+1's kernels run on
+/// the GPU while frame N's host readback is still in flight.
 fn bench_denoise_temporal_pipelined<R: Runtime>(
     client: &ComputeClient<R>,
     backend: &str,
     channels: ChannelMode,
-    ch_name: &str,
+    channel_name: &str,
     prefilter: PrefilterMode,
     tag: &str,
 ) -> BenchResult {
-    let ch = channels.count();
+    let channel_count = channels.count();
     let params = denoise_params(channels, 1, prefilter);
-    let frame = make_synthetic_frame(W, H, ch);
+    let frame = make_synthetic_frame(WIDTH, HEIGHT, channel_count);
     let total_frames = 1 + 2 * params.temporal_radius as usize;
-    let name = format!("denoise_temporal_pipelined{tag}_1080p_{ch_name}");
+    let name = format!("denoise_temporal_pipelined{tag}_1080p_{channel_name}");
 
-    let mut denoiser = NlmDenoiser::<R>::new(client, params, W, H);
+    let mut denoiser = NlmDenoiser::<R>::new(client, params, WIDTH, HEIGHT);
     for _ in 0..total_frames - 1 {
         denoiser.push_frame(&frame);
     }
-    futures::executor::block_on(client.sync()).unwrap();
 
-    // Prime the pipeline with one outstanding readback so every measured
-    // iteration has previous work to wait on.
+    let sync = client.sync();
+    futures::executor::block_on(sync).unwrap();
+
+    // Prime the pipeline with one outstanding readback so every measured iteration has previous
+    // work to wait on.
     denoiser.push_frame(&frame);
     let first = denoiser.denoise_submit_gpu().unwrap().unwrap();
-    let mut in_flight = Some(start_read(client, first.handle));
+    let first_read = start_read(client, first.handle);
+    let mut in_flight = Some(first_read);
 
     let result = run_bench(&name, backend, client, WARMUP_PIPELINE, ITERS_PIPELINE, || {
         denoiser.push_frame(&frame);
@@ -436,23 +479,9 @@ fn bench_denoise_temporal_pipelined<R: Runtime>(
     if let Some(read) = in_flight.take() {
         let _ = wait_read(read);
     }
+
     result
 }
-
-const BILATERAL_SIGMA_S: f32 = 3.0;
-const BILATERAL_SIGMA_R: f32 = 0.02;
-
-const DENOISE_VARIANTS: &[(PrefilterMode, &str)] = &[
-    (PrefilterMode::None, ""),
-    (
-        PrefilterMode::Bilateral {
-            sigma_s: BILATERAL_SIGMA_S,
-            sigma_r: BILATERAL_SIGMA_R,
-        },
-        "_rclip_bilateral",
-    ),
-    (PrefilterMode::NlmSpatial { strength_scale: 1.0 }, "_nlm_pilot"),
-];
 
 fn run_all_benches<R: Runtime>(backend: &str, device: &R::Device) {
     let client = R::client(device);
@@ -460,67 +489,81 @@ fn run_all_benches<R: Runtime>(backend: &str, device: &R::Device) {
     println!("--- {backend} ---");
     println!();
 
-    let channels = [
+    let channel_modes = [
         (1u32, "luma", ChannelMode::Luma),
         (2, "chroma", ChannelMode::Chroma),
         (3, "yuv", ChannelMode::Yuv),
     ];
 
-    for &(ch, ch_name, _) in &channels {
-        bench_dist_2d_weight::<R>(&client, backend, ch, ch_name).print();
+    for &(channels, channel_name, _) in &channel_modes {
+        let result = bench_dist_2d_weight::<R>(&client, backend, channels, channel_name);
+        result.print();
     }
+
     println!();
 
-    for &(ch, ch_name, _) in &channels {
-        bench_accumulate::<R>(&client, backend, ch, ch_name).print();
+    for &(channels, channel_name, _) in &channel_modes {
+        let result = bench_accumulate::<R>(&client, backend, channels, channel_name);
+        result.print();
     }
+
     println!();
 
-    for &(ch, ch_name, _) in &channels {
-        bench_finish::<R>(&client, backend, ch, ch_name).print();
+    for &(channels, channel_name, _) in &channel_modes {
+        let result = bench_finish::<R>(&client, backend, channels, channel_name);
+        result.print();
     }
+
     println!();
 
-    for &(ch, ch_name, _) in &channels {
-        bench_bilateral::<R>(&client, backend, ch, ch_name).print();
+    for &(channels, channel_name, _) in &channel_modes {
+        let result = bench_bilateral::<R>(&client, backend, channels, channel_name);
+        result.print();
     }
+
     println!();
 
-    // Group each channel mode's baseline and rclip variants together so
-    // before/after comparisons land on adjacent rows.
-    for &(_, ch_name, mode) in &channels {
+    // Group each channel mode's baseline and rclip variants together so before/after comparisons
+    // land on adjacent rows.
+    for &(_, channel_name, mode) in &channel_modes {
         for &(prefilter, tag) in DENOISE_VARIANTS {
-            bench_denoise_spatial::<R>(&client, backend, mode, ch_name, prefilter, tag).print();
+            let result = bench_denoise_spatial::<R>(&client, backend, mode, channel_name, prefilter, tag);
+            result.print();
         }
     }
+
     println!();
 
-    for &(_, ch_name, mode) in &channels {
+    for &(_, channel_name, mode) in &channel_modes {
         for &(prefilter, tag) in DENOISE_VARIANTS {
-            bench_denoise_temporal::<R>(&client, backend, mode, ch_name, prefilter, tag).print();
-            bench_denoise_temporal_pipelined::<R>(&client, backend, mode, ch_name, prefilter, tag).print();
+            let eager = bench_denoise_temporal::<R>(&client, backend, mode, channel_name, prefilter, tag);
+            eager.print();
+
+            let pipelined =
+                bench_denoise_temporal_pipelined::<R>(&client, backend, mode, channel_name, prefilter, tag);
+            pipelined.print();
         }
     }
+
     println!();
 }
 
-/// Bench-harness CLI. `cargo bench --bench nlmeans -- --device discrete:1`
-/// selects the second discrete GPU.
+/// Bench-harness CLI.
+///
+/// `cargo bench --bench nlmeans -- --device discrete:1` selects the second discrete GPU.
 #[derive(clap::Parser, Debug)]
 #[command(about = "NLMeans benchmarks", long_about = None)]
 struct Cli {
-    /// GPU device to bind to. Format: `default`, `discrete[:N]`,
-    /// `integrated[:N]`, `virtual[:N]`, or `cpu`.
+    /// GPU device to bind to, one of `default`, `discrete[:N]`, `integrated[:N]`, `virtual[:N]` or `cpu`.
     #[arg(long, default_value = "default")]
     device: Device,
 
-    /// Swallowed: cargo passes this when invoking the bench binary.
+    /// Swallowed, since cargo passes this when invoking the bench binary.
     #[arg(long, hide = true)]
     bench: bool,
 }
 
 fn main() {
-    use clap::Parser;
     let cli = Cli::parse();
 
     println!("NLMeans Benchmarks - 1920x1080");

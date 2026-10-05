@@ -11,27 +11,28 @@ use cubecl::server::Handle;
 use super::{
     BLOCK_X,
     BLOCK_Y,
-    H,
+    HEIGHT,
     PATCH_RADIUS,
     SEARCH_RADIUS,
-    W,
+    WIDTH,
     block_sync,
     cube_count_2d,
     cube_dim_2d,
     h2_inv_norm,
     make_padded_frame,
-    shapes_with_ch,
+    shapes_with_channels,
     stored_channels,
 };
 
-/// Zero-filled spatial-offset LUT for `SEARCH_RADIUS`. Zero everywhere
-/// reproduces the old flat `noise_offset = 0.0` the single-window
-/// benches measured before the LUT replaced that scalar, so the
-/// timing stays comparable.
+/// A zero-filled spatial-offset LUT for `SEARCH_RADIUS`.
+///
+/// Zero everywhere applies no noise offset, matching the `0.0` `noise_offset` the pair-window rows pass.
 fn zero_spatial_offset_lut<R: Runtime>(client: &ComputeClient<R>) -> (Handle, usize) {
     let side = (2 * SEARCH_RADIUS + 1) as usize;
     let lut = vec![0.0f32; side * side];
-    let handle = client.create_from_slice(f32::as_bytes(&lut));
+    let lut_bytes = f32::as_bytes(&lut);
+    let handle = client.create_from_slice(lut_bytes);
+
     (handle, lut.len())
 }
 
@@ -60,16 +61,18 @@ pub struct WindowRefInput {
     frame_len: usize,
 }
 
-fn prepare_window<R: Runtime>(client: &ComputeClient<R>, ch: u32) -> WindowInput {
-    let pixels = (W * H) as usize;
-    let stored = stored_channels(ch) as usize;
-    let frame = make_padded_frame(W, H, ch);
-    let input = client.create_from_slice(f32::as_bytes(&frame));
-    let accum = client.empty(pixels * stored * size_of::<f32>());
+fn prepare_window<R: Runtime>(client: &ComputeClient<R>, channels: u32) -> WindowInput {
+    let pixels = (WIDTH * HEIGHT) as usize;
+    let stored_ch = stored_channels(channels) as usize;
+    let frame = make_padded_frame(WIDTH, HEIGHT, channels);
+    let frame_bytes = f32::as_bytes(&frame);
+    let input = client.create_from_slice(frame_bytes);
+    let accum = client.empty(pixels * stored_ch * size_of::<f32>());
     let weight_sum = client.empty(pixels * size_of::<f32>());
     let max_weight = client.empty(pixels * size_of::<f32>());
     let confidence_dummy = client.empty(size_of::<f32>());
     let (spatial_offset_lut, spatial_offset_lut_len) = zero_spatial_offset_lut(client);
+
     WindowInput {
         input,
         accum,
@@ -82,17 +85,19 @@ fn prepare_window<R: Runtime>(client: &ComputeClient<R>, ch: u32) -> WindowInput
     }
 }
 
-fn prepare_window_ref<R: Runtime>(client: &ComputeClient<R>, ch: u32) -> WindowRefInput {
-    let pixels = (W * H) as usize;
-    let stored = stored_channels(ch) as usize;
-    let frame = make_padded_frame(W, H, ch);
-    let input = client.create_from_slice(f32::as_bytes(&frame));
-    let reference = client.create_from_slice(f32::as_bytes(&frame));
-    let accum = client.empty(pixels * stored * size_of::<f32>());
+fn prepare_window_ref<R: Runtime>(client: &ComputeClient<R>, channels: u32) -> WindowRefInput {
+    let pixels = (WIDTH * HEIGHT) as usize;
+    let stored_ch = stored_channels(channels) as usize;
+    let frame = make_padded_frame(WIDTH, HEIGHT, channels);
+    let frame_bytes = f32::as_bytes(&frame);
+    let input = client.create_from_slice(frame_bytes);
+    let reference = client.create_from_slice(frame_bytes);
+    let accum = client.empty(pixels * stored_ch * size_of::<f32>());
     let weight_sum = client.empty(pixels * size_of::<f32>());
     let max_weight = client.empty(pixels * size_of::<f32>());
     let confidence_dummy = client.empty(size_of::<f32>());
     let (spatial_offset_lut, spatial_offset_lut_len) = zero_spatial_offset_lut(client);
+
     WindowRefInput {
         input,
         reference,
@@ -108,8 +113,8 @@ fn prepare_window_ref<R: Runtime>(client: &ComputeClient<R>, ch: u32) -> WindowR
 
 pub struct FusedPairWindowBench<R: Runtime> {
     pub client: ComputeClient<R>,
-    pub ch: u32,
-    pub ch_name: &'static str,
+    pub channels: u32,
+    pub channel_name: &'static str,
 }
 
 impl<R: Runtime> Benchmark for FusedPairWindowBench<R> {
@@ -117,20 +122,24 @@ impl<R: Runtime> Benchmark for FusedPairWindowBench<R> {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        prepare_window(&self.client, self.ch)
+        prepare_window(&self.client, self.channels)
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let pixels = (W * H) as usize;
-        let stored = stored_channels(self.ch) as usize;
+        let pixels = (WIDTH * HEIGHT) as usize;
+        let stored_ch = stored_channels(self.channels) as usize;
+        let cube_count = cube_count_2d();
+        let cube_dim = cube_dim_2d();
+        let inv_norm = h2_inv_norm();
+
         unsafe {
             nlm_fused_pair_accumulate_window::launch_unchecked::<R>(
                 &self.client,
-                cube_count_2d(),
-                cube_dim_2d(),
-                stored,
+                cube_count,
+                cube_dim,
+                stored_ch,
                 ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
-                ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored),
+                ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored_ch),
                 ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels),
                 ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
                 ArrayArg::from_raw_parts(args.confidence_dummy.clone(), 1),
@@ -139,11 +148,11 @@ impl<R: Runtime> Benchmark for FusedPairWindowBench<R> {
                 0u32,
                 0u32,
                 0u32,
-                h2_inv_norm(),
+                inv_norm,
                 0.0f32,
-                W,
-                H,
-                self.ch,
+                WIDTH,
+                HEIGHT,
+                self.channels,
                 PATCH_RADIUS,
                 SEARCH_RADIUS,
                 BLOCK_X,
@@ -153,24 +162,27 @@ impl<R: Runtime> Benchmark for FusedPairWindowBench<R> {
                 1u32,
             );
         }
+
         Ok(())
     }
 
     fn name(&self) -> String {
-        format!("fused_pair_accumulate_window_1080p_{}", self.ch_name)
+        format!("fused_pair_accumulate_window_1080p_{}", self.channel_name)
     }
+
     fn sync(&self) {
         block_sync(&self.client);
     }
+
     fn shapes(&self) -> Vec<Vec<usize>> {
-        shapes_with_ch(self.ch)
+        shapes_with_channels(self.channels)
     }
 }
 
 pub struct FusedSingleWindowBench<R: Runtime> {
     pub client: ComputeClient<R>,
-    pub ch: u32,
-    pub ch_name: &'static str,
+    pub channels: u32,
+    pub channel_name: &'static str,
 }
 
 impl<R: Runtime> Benchmark for FusedSingleWindowBench<R> {
@@ -178,52 +190,59 @@ impl<R: Runtime> Benchmark for FusedSingleWindowBench<R> {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        prepare_window(&self.client, self.ch)
+        prepare_window(&self.client, self.channels)
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let pixels = (W * H) as usize;
-        let stored = stored_channels(self.ch) as usize;
+        let pixels = (WIDTH * HEIGHT) as usize;
+        let stored_ch = stored_channels(self.channels) as usize;
+        let cube_count = cube_count_2d();
+        let cube_dim = cube_dim_2d();
+        let inv_norm = h2_inv_norm();
+
         unsafe {
             nlm_fused_single_window::launch_unchecked::<R>(
                 &self.client,
-                cube_count_2d(),
-                cube_dim_2d(),
-                stored,
+                cube_count,
+                cube_dim,
+                stored_ch,
                 ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
-                ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored),
+                ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored_ch),
                 ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels),
                 ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
                 0u32,
-                h2_inv_norm(),
+                inv_norm,
                 ArrayArg::from_raw_parts(args.spatial_offset_lut.clone(), args.spatial_offset_lut_len),
-                W,
-                H,
-                self.ch,
+                WIDTH,
+                HEIGHT,
+                self.channels,
                 PATCH_RADIUS,
                 SEARCH_RADIUS,
                 BLOCK_X,
                 BLOCK_Y,
             );
         }
+
         Ok(())
     }
 
     fn name(&self) -> String {
-        format!("fused_single_window_1080p_{}", self.ch_name)
+        format!("fused_single_window_1080p_{}", self.channel_name)
     }
+
     fn sync(&self) {
         block_sync(&self.client);
     }
+
     fn shapes(&self) -> Vec<Vec<usize>> {
-        shapes_with_ch(self.ch)
+        shapes_with_channels(self.channels)
     }
 }
 
 pub struct FusedPairWindowRefBench<R: Runtime> {
     pub client: ComputeClient<R>,
-    pub ch: u32,
-    pub ch_name: &'static str,
+    pub channels: u32,
+    pub channel_name: &'static str,
 }
 
 impl<R: Runtime> Benchmark for FusedPairWindowRefBench<R> {
@@ -231,21 +250,25 @@ impl<R: Runtime> Benchmark for FusedPairWindowRefBench<R> {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        prepare_window_ref(&self.client, self.ch)
+        prepare_window_ref(&self.client, self.channels)
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let pixels = (W * H) as usize;
-        let stored = stored_channels(self.ch) as usize;
+        let pixels = (WIDTH * HEIGHT) as usize;
+        let stored_ch = stored_channels(self.channels) as usize;
+        let cube_count = cube_count_2d();
+        let cube_dim = cube_dim_2d();
+        let inv_norm = h2_inv_norm();
+
         unsafe {
             nlm_fused_pair_accumulate_window_ref::launch_unchecked::<R>(
                 &self.client,
-                cube_count_2d(),
-                cube_dim_2d(),
-                stored,
+                cube_count,
+                cube_dim,
+                stored_ch,
                 ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
                 ArrayArg::from_raw_parts(args.reference.clone(), args.frame_len),
-                ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored),
+                ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored_ch),
                 ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels),
                 ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
                 ArrayArg::from_raw_parts(args.confidence_dummy.clone(), 1),
@@ -254,11 +277,11 @@ impl<R: Runtime> Benchmark for FusedPairWindowRefBench<R> {
                 0u32,
                 0u32,
                 0u32,
-                h2_inv_norm(),
+                inv_norm,
                 0.0f32,
-                W,
-                H,
-                self.ch,
+                WIDTH,
+                HEIGHT,
+                self.channels,
                 PATCH_RADIUS,
                 SEARCH_RADIUS,
                 BLOCK_X,
@@ -268,24 +291,27 @@ impl<R: Runtime> Benchmark for FusedPairWindowRefBench<R> {
                 1u32,
             );
         }
+
         Ok(())
     }
 
     fn name(&self) -> String {
-        format!("fused_pair_accumulate_window_ref_1080p_{}", self.ch_name)
+        format!("fused_pair_accumulate_window_ref_1080p_{}", self.channel_name)
     }
+
     fn sync(&self) {
         block_sync(&self.client);
     }
+
     fn shapes(&self) -> Vec<Vec<usize>> {
-        shapes_with_ch(self.ch)
+        shapes_with_channels(self.channels)
     }
 }
 
 pub struct FusedSingleWindowRefBench<R: Runtime> {
     pub client: ComputeClient<R>,
-    pub ch: u32,
-    pub ch_name: &'static str,
+    pub channels: u32,
+    pub channel_name: &'static str,
 }
 
 impl<R: Runtime> Benchmark for FusedSingleWindowRefBench<R> {
@@ -293,45 +319,52 @@ impl<R: Runtime> Benchmark for FusedSingleWindowRefBench<R> {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        prepare_window_ref(&self.client, self.ch)
+        prepare_window_ref(&self.client, self.channels)
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let pixels = (W * H) as usize;
-        let stored = stored_channels(self.ch) as usize;
+        let pixels = (WIDTH * HEIGHT) as usize;
+        let stored_ch = stored_channels(self.channels) as usize;
+        let cube_count = cube_count_2d();
+        let cube_dim = cube_dim_2d();
+        let inv_norm = h2_inv_norm();
+
         unsafe {
             nlm_fused_single_window_ref::launch_unchecked::<R>(
                 &self.client,
-                cube_count_2d(),
-                cube_dim_2d(),
-                stored,
+                cube_count,
+                cube_dim,
+                stored_ch,
                 ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
                 ArrayArg::from_raw_parts(args.reference.clone(), args.frame_len),
-                ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored),
+                ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored_ch),
                 ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels),
                 ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
                 0u32,
-                h2_inv_norm(),
+                inv_norm,
                 ArrayArg::from_raw_parts(args.spatial_offset_lut.clone(), args.spatial_offset_lut_len),
-                W,
-                H,
-                self.ch,
+                WIDTH,
+                HEIGHT,
+                self.channels,
                 PATCH_RADIUS,
                 SEARCH_RADIUS,
                 BLOCK_X,
                 BLOCK_Y,
             );
         }
+
         Ok(())
     }
 
     fn name(&self) -> String {
-        format!("fused_single_window_ref_1080p_{}", self.ch_name)
+        format!("fused_single_window_ref_1080p_{}", self.channel_name)
     }
+
     fn sync(&self) {
         block_sync(&self.client);
     }
+
     fn shapes(&self) -> Vec<Vec<usize>> {
-        shapes_with_ch(self.ch)
+        shapes_with_channels(self.channels)
     }
 }

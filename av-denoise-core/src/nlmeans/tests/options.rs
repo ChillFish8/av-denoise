@@ -19,13 +19,12 @@ fn fast(options: NlmeansOptions) -> NlmeansAlgorithm {
 }
 
 fn hq_with(hq: HqParams, mode: DenoisingMode) -> NlmeansAlgorithm {
-    NlmeansAlgorithm::Hq(NlmeansHqOptions {
-        nlm: NlmeansOptions {
-            mode,
-            ..NlmeansOptions::default()
-        },
-        hq,
-    })
+    let nlm_options = NlmeansOptions {
+        mode,
+        ..NlmeansOptions::default()
+    };
+
+    NlmeansAlgorithm::Hq(NlmeansHqOptions { nlm: nlm_options, hq })
 }
 
 #[test]
@@ -70,7 +69,8 @@ fn prefilter_passthrough() {
 
 #[test]
 fn hq_unset_prefilter_defaults_to_none() {
-    let algorithm = hq_with(HqParams::default(), DenoisingMode::Spacial);
+    let hq = HqParams::default();
+    let algorithm = hq_with(hq, DenoisingMode::Spacial);
     let params = resolve_params(&algorithm, ChannelMode::Yuv);
 
     assert!(matches!(params.prefilter, PrefilterMode::None));
@@ -78,7 +78,8 @@ fn hq_unset_prefilter_defaults_to_none() {
 
 #[test]
 fn fast_unset_prefilter_defaults_to_none() {
-    let algorithm = fast(NlmeansOptions::default());
+    let options = NlmeansOptions::default();
+    let algorithm = fast(options);
     let params = resolve_params(&algorithm, ChannelMode::Yuv);
 
     assert!(matches!(params.prefilter, PrefilterMode::None));
@@ -86,7 +87,8 @@ fn fast_unset_prefilter_defaults_to_none() {
 
 #[test]
 fn hq_unset_strength_defaults_to_hq_default_strength() {
-    let algorithm = hq_with(HqParams::default(), DenoisingMode::Spacial);
+    let hq = HqParams::default();
+    let algorithm = hq_with(hq, DenoisingMode::Spacial);
     let params = resolve_params(&algorithm, ChannelMode::Yuv);
 
     let expected = hq_default_strength(ChannelMode::Yuv, 0);
@@ -109,7 +111,8 @@ fn hq_no_auto_strength_falls_back_to_the_legacy_absolute_default() {
 #[test]
 fn hq_luma_r4_uses_measured_table_value() {
     let mode = DenoisingMode::Temporal { radius: 4 };
-    let algorithm = hq_with(HqParams::default(), mode);
+    let hq = HqParams::default();
+    let algorithm = hq_with(hq, mode);
     let params = resolve_params(&algorithm, ChannelMode::Luma);
 
     assert!((params.strength - 0.35).abs() < f32::EPSILON);
@@ -118,7 +121,8 @@ fn hq_luma_r4_uses_measured_table_value() {
 #[test]
 fn hq_chroma_r4_uses_measured_table_value() {
     let mode = DenoisingMode::Temporal { radius: 4 };
-    let algorithm = hq_with(HqParams::default(), mode);
+    let hq = HqParams::default();
+    let algorithm = hq_with(hq, mode);
     let params = resolve_params(&algorithm, ChannelMode::Chroma);
 
     assert!((params.strength - 0.70).abs() < f32::EPSILON);
@@ -127,7 +131,8 @@ fn hq_chroma_r4_uses_measured_table_value() {
 #[test]
 fn hq_yuv_r8_uses_measured_table_value() {
     let mode = DenoisingMode::Temporal { radius: 8 };
-    let algorithm = hq_with(HqParams::default(), mode);
+    let hq = HqParams::default();
+    let algorithm = hq_with(hq, mode);
     let params = resolve_params(&algorithm, ChannelMode::Yuv);
 
     assert!((params.strength - 0.30).abs() < f32::EPSILON);
@@ -136,7 +141,8 @@ fn hq_yuv_r8_uses_measured_table_value() {
 #[test]
 fn hq_spacial_mode_uses_radius_zero_table_values() {
     for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
-        let algorithm = hq_with(HqParams::default(), DenoisingMode::Spacial);
+        let hq = HqParams::default();
+        let algorithm = hq_with(hq, DenoisingMode::Spacial);
         let params = resolve_params(&algorithm, channels);
 
         let expected = hq_default_strength(channels, 0);
@@ -147,17 +153,16 @@ fn hq_spacial_mode_uses_radius_zero_table_values() {
 #[test]
 fn hq_explicit_strength_wins_over_the_table_for_every_plane() {
     for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
-        let algorithm = NlmeansAlgorithm::Hq(NlmeansHqOptions {
-            nlm: NlmeansOptions {
-                mode: DenoisingMode::Temporal { radius: 4 },
-                tuning: NlmTuning {
-                    strength: Some(0.99),
-                    ..NlmTuning::default()
-                },
-                ..NlmeansOptions::default()
+        let nlm_options = NlmeansOptions {
+            mode: DenoisingMode::Temporal { radius: 4 },
+            tuning: NlmTuning {
+                strength: Some(0.99),
+                ..NlmTuning::default()
             },
-            hq: HqParams::default(),
-        });
+            ..NlmeansOptions::default()
+        };
+        let hq = HqParams::default();
+        let algorithm = NlmeansAlgorithm::Hq(NlmeansHqOptions { nlm: nlm_options, hq });
         let params = resolve_params(&algorithm, channels);
 
         assert!((params.strength - 0.99).abs() < f32::EPSILON);
@@ -166,7 +171,8 @@ fn hq_explicit_strength_wins_over_the_table_for_every_plane() {
 
 #[test]
 fn fast_unset_strength_defaults_to_legacy_default() {
-    let algorithm = fast(NlmeansOptions::default());
+    let options = NlmeansOptions::default();
+    let algorithm = fast(options);
     let params = resolve_params(&algorithm, ChannelMode::Yuv);
 
     assert!((params.strength - 1.2).abs() < f32::EPSILON);
@@ -202,7 +208,8 @@ fn motion_compensation_passthrough() {
 
 #[test]
 fn motion_compensation_defaults_to_none() {
-    let algorithm = fast(NlmeansOptions::default());
+    let options = NlmeansOptions::default();
+    let algorithm = fast(options);
     let params = resolve_params(&algorithm, ChannelMode::Yuv);
 
     assert!(matches!(params.motion_compensation, MotionCompensationMode::None));

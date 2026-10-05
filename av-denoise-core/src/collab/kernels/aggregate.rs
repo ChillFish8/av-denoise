@@ -290,24 +290,35 @@ mod tests {
 
     #[test]
     fn to_fixed_rounds_rather_than_truncating() {
-        assert_eq!(to_fixed(0.6, 1.0), 1);
-        assert_eq!(to_fixed(0.4, 1.0), 0);
-        assert_eq!(to_fixed(-0.6, 1.0), -1);
+        let rounded_up = to_fixed(0.6, 1.0);
+        let rounded_down = to_fixed(0.4, 1.0);
+        let negative = to_fixed(-0.6, 1.0);
+
+        assert_eq!(rounded_up, 1);
+        assert_eq!(rounded_down, 0);
+        assert_eq!(negative, -1);
     }
 
     #[test]
     fn to_fixed_weight_resolves_finer_than_to_fixed() {
         let scale = 65_536.0f32;
         let weight = 0.3 / scale;
-        assert_eq!(to_fixed(weight, scale), 0);
-        assert_eq!(to_fixed_weight(weight, scale), 2);
+        let as_value = to_fixed(weight, scale);
+        let as_weight = to_fixed_weight(weight, scale);
+
+        assert_eq!(as_value, 0);
+        assert_eq!(as_weight, 2);
     }
 
     #[test]
     fn to_fixed_weight_clamps_at_one() {
         let scale = 1_024.0f32;
-        assert_eq!(to_fixed_weight(4.0, scale), to_fixed_weight(WEIGHT_CLAMP, scale),);
-        assert_eq!(to_fixed_weight(-1.0, scale), 0);
+        let above = to_fixed_weight(4.0, scale);
+        let at_clamp = to_fixed_weight(WEIGHT_CLAMP, scale);
+        let negative = to_fixed_weight(-1.0, scale);
+
+        assert_eq!(above, at_clamp);
+        assert_eq!(negative, 0);
     }
 
     // The ranges `Nl4dParams::validate` enforces, as plain numbers so the test keeps covering the
@@ -358,7 +369,8 @@ mod tests {
 
     #[test]
     fn kaiser_window_at_beta_zero_is_exactly_one_everywhere() {
-        assert_eq!(kaiser_window(0.0), [1.0f32; PATCH_SIZE as usize]);
+        let window = kaiser_window(0.0);
+        assert_eq!(window, [1.0f32; PATCH_SIZE as usize]);
     }
 
     /// An even tap count puts the centre between taps 3 and 4, so the rise is checked up to that
@@ -374,6 +386,7 @@ mod tests {
                     window[i],
                     window[7 - i],
                 );
+
                 if i < 3 {
                     assert!(
                         window[i + 1] > window[i],
@@ -403,8 +416,9 @@ mod tests {
             assert!((window[7] - expected).abs() < 1e-6);
         }
 
-        // `kaiser_window`'s doc uses `w[0]^2 = 0.193` at `beta = 2`.
-        assert!((kaiser_window(2.0)[0] - 0.4388).abs() < 1e-3);
+        // Pins the end tap behind the `w[0]^2 = 0.193` at `beta = 2` quoted in `kaiser_window`'s doc.
+        let beta_two_window = kaiser_window(2.0);
+        assert!((beta_two_window[0] - 0.4388).abs() < 1e-3);
     }
 
     #[test]

@@ -33,10 +33,12 @@ fn encode(codes: &[u16], format: SampleFormat) -> Vec<u8> {
     };
     let padded = bytes.len().div_ceil(4) * 4;
     bytes.resize(padded, 0);
+
     bytes
 }
 
-/// The GPU divide is not correctly rounded, so a sample can differ from the host by a few units in the last place.
+/// The GPU divide is not correctly rounded, so a sample can differ from the host by a few units in
+/// the last place.
 fn assert_close(actual: &[f32], expected: &[f32]) {
     assert_eq!(actual.len(), expected.len());
 
@@ -54,7 +56,7 @@ fn run_ingest(
     width: u32,
     height: u32,
     channels: u32,
-    stored_ch: u32,
+    stored_channels: u32,
     format: SampleFormat,
 ) -> (Vec<f32>, Vec<f32>) {
     let client = client();
@@ -77,9 +79,10 @@ fn run_ingest(
         .collect();
 
     // Two slots, writing into the second, so the offset is exercised.
-    let frame_len = pixels * stored_ch as usize;
+    let frame_len = pixels * stored_channels as usize;
     let ring_values = vec![-1.0f32; frame_len * 2];
-    let ring = client.create_from_slice(f32::as_bytes(&ring_values));
+    let ring_bytes = f32::as_bytes(&ring_values);
+    let ring = client.create_from_slice(ring_bytes);
     let placeholder = client.empty(4);
     let target = IngestTarget {
         ring: &ring,
@@ -87,8 +90,9 @@ fn run_ingest(
         offset: frame_len as u32,
         pixels: pixels as u32,
         channels,
-        stored_ch,
+        stored_ch: stored_channels,
     };
+
     ingest(&client, &planes, format, &placeholder, target);
 
     let bytes = client.read_one(ring).expect("read ring");
@@ -98,7 +102,7 @@ fn run_ingest(
     for pixel in 0..pixels {
         for channel in 0..channels as usize {
             let code = channel_codes[channel][pixel];
-            expected[pixel * stored_ch as usize + channel] = code as f32 / max;
+            expected[pixel * stored_channels as usize + channel] = code as f32 / max;
         }
     }
 
@@ -166,19 +170,24 @@ fn run_f32_ingest(width: u32, height: u32) {
                 .map(|pixel| (pixel + channel * 100) as f32 * 0.001)
                 .collect();
             values[..3].copy_from_slice(&[0.0, 1.0, 1.0 - f32::EPSILON]);
+
             values
         })
         .collect();
     let handles: Vec<_> = channel_values
         .iter()
-        .map(|values| client.create_from_slice(f32::as_bytes(values)))
+        .map(|values| {
+            let bytes = f32::as_bytes(values);
+            client.create_from_slice(bytes)
+        })
         .collect();
     let planes: Vec<_> = handles
         .iter()
         .map(|handle| DevicePlane::new(handle, width, height))
         .collect();
     let ring_values = vec![-1.0f32; pixels * 4];
-    let ring = client.create_from_slice(f32::as_bytes(&ring_values));
+    let ring_bytes = f32::as_bytes(&ring_values);
+    let ring = client.create_from_slice(ring_bytes);
     let placeholder = client.empty(4);
     let target = IngestTarget {
         ring: &ring,
@@ -206,7 +215,7 @@ fn run_f32_ingest(width: u32, height: u32) {
 /// An interleaved frame whose first pixels hit below zero, zero, one, above one and the top two codes.
 ///
 /// The padding lane holds a value no plane should ever receive.
-fn egress_frame(pixels: usize, channels: u32, stored_ch: u32, format: SampleFormat) -> Vec<f32> {
+fn egress_frame(pixels: usize, channels: u32, stored_channels: u32, format: SampleFormat) -> Vec<f32> {
     let max = format.max_value();
     let extremes = [
         -0.5,
@@ -218,10 +227,10 @@ fn egress_frame(pixels: usize, channels: u32, stored_ch: u32, format: SampleForm
         (max - 0.6) / max,
     ];
 
-    let mut frame = vec![0.0f32; pixels * stored_ch as usize];
+    let mut frame = vec![0.0f32; pixels * stored_channels as usize];
     for pixel in 0..pixels {
-        for lane in 0..stored_ch as usize {
-            let index = pixel * stored_ch as usize + lane;
+        for lane in 0..stored_channels as usize {
+            let index = pixel * stored_channels as usize + lane;
             let value = if lane >= channels as usize {
                 7.0
             } else if pixel < extremes.len() {
@@ -244,21 +253,22 @@ fn bytes_per_sample(format: SampleFormat) -> usize {
 }
 
 /// The host quantisation, a clamp then a round half up.
-fn quantise_planes(frame: &[f32], channels: u32, stored_ch: u32, format: SampleFormat) -> Vec<Vec<u8>> {
-    let pixels = frame.len() / stored_ch as usize;
+fn quantise_planes(frame: &[f32], channels: u32, stored_channels: u32, format: SampleFormat) -> Vec<Vec<u8>> {
+    let pixels = frame.len() / stored_channels as usize;
     let max = format.max_value();
 
     (0..channels as usize)
         .map(|channel| {
             let mut plane = Vec::new();
             for pixel in 0..pixels {
-                let value = frame[pixel * stored_ch as usize + channel].clamp(0.0, 1.0);
+                let value = frame[pixel * stored_channels as usize + channel].clamp(0.0, 1.0);
                 let code = (value * max + 0.5) as u32;
                 match format {
                     SampleFormat::U8 => plane.push(code as u8),
                     _ => plane.extend_from_slice(&(code as u16).to_le_bytes()),
                 }
             }
+
             plane
         })
         .collect()
@@ -270,15 +280,19 @@ fn run_egress(
     width: u32,
     height: u32,
     channels: u32,
-    stored_ch: u32,
+    stored_channels: u32,
     format: SampleFormat,
 ) -> Vec<Vec<u8>> {
     let client = client();
     let pixels = (width * height) as usize;
-    let frame_handle = client.create_from_slice(f32::as_bytes(frame));
+    let frame_bytes = f32::as_bytes(frame);
+    let frame_handle = client.create_from_slice(frame_bytes);
     let plane_bytes = format.plane_bytes(pixels as u64) as usize;
     let outputs: Vec<_> = (0..channels)
-        .map(|_| client.create_from_slice(&vec![0xAAu8; plane_bytes]))
+        .map(|_| {
+            let sentinel = vec![0xAAu8; plane_bytes];
+            client.create_from_slice(&sentinel)
+        })
         .collect();
     let planes: Vec<_> = outputs
         .iter()
@@ -289,7 +303,7 @@ fn run_egress(
         frame: &frame_handle,
         pixels: pixels as u32,
         channels,
-        stored_ch,
+        stored_ch: stored_channels,
     };
 
     egress(&client, source, &planes, format, &placeholder);
@@ -308,13 +322,13 @@ fn assert_egress_matches_oracle(
     width: u32,
     height: u32,
     channels: u32,
-    stored_ch: u32,
+    stored_channels: u32,
     format: SampleFormat,
 ) {
     let pixels = (width * height) as usize;
-    let frame = egress_frame(pixels, channels, stored_ch, format);
-    let actual = run_egress(&frame, width, height, channels, stored_ch, format);
-    let expected = quantise_planes(&frame, channels, stored_ch, format);
+    let frame = egress_frame(pixels, channels, stored_channels, format);
+    let actual = run_egress(&frame, width, height, channels, stored_channels, format);
+    let expected = quantise_planes(&frame, channels, stored_channels, format);
     assert_eq!(actual, expected);
 }
 
@@ -373,11 +387,12 @@ fn egress_f32_across_many_cubes_copies_samples() {
     assert_f32_egress_copies(300, 9, 3, 4);
 }
 
-fn assert_f32_egress_copies(width: u32, height: u32, channels: u32, stored_ch: u32) {
+fn assert_f32_egress_copies(width: u32, height: u32, channels: u32, stored_channels: u32) {
     let client = client();
     let pixels = (width * height) as usize;
-    let frame = egress_frame(pixels, channels, stored_ch, SampleFormat::F32);
-    let frame_handle = client.create_from_slice(f32::as_bytes(&frame));
+    let frame = egress_frame(pixels, channels, stored_channels, SampleFormat::F32);
+    let frame_bytes = f32::as_bytes(&frame);
+    let frame_handle = client.create_from_slice(frame_bytes);
     let outputs: Vec<_> = (0..channels).map(|_| client.empty(pixels * 4)).collect();
     let planes: Vec<_> = outputs
         .iter()
@@ -388,7 +403,7 @@ fn assert_f32_egress_copies(width: u32, height: u32, channels: u32, stored_ch: u
         frame: &frame_handle,
         pixels: pixels as u32,
         channels,
-        stored_ch,
+        stored_ch: stored_channels,
     };
 
     egress(&client, source, &planes, SampleFormat::F32, &placeholder);
@@ -397,7 +412,7 @@ fn assert_f32_egress_copies(width: u32, height: u32, channels: u32, stored_ch: u
         let bytes = client.read_one(handle).expect("read plane");
         let values = f32::from_bytes(&bytes);
         for pixel in 0..pixels {
-            assert_eq!(values[pixel], frame[pixel * stored_ch as usize + channel]);
+            assert_eq!(values[pixel], frame[pixel * stored_channels as usize + channel]);
         }
     }
 }

@@ -1,9 +1,3 @@
-use av_denoise_core::bench_api::NlmParams;
-pub use av_denoise_core::bench_api::{BLOCK_X, BLOCK_Y};
-use cubecl::benchmark::{Benchmark, BenchmarkComputations, TimingMethod};
-use cubecl::prelude::*;
-use cubecl::server::Handle;
-
 pub mod accumulate;
 pub mod bilateral;
 pub mod collab_aggregate;
@@ -36,8 +30,14 @@ pub mod vertical_weight;
 pub mod vweight_pair_accumulate;
 pub mod zero;
 
-pub const W: u32 = 1920;
-pub const H: u32 = 1080;
+use av_denoise_core::bench_api::NlmParams;
+pub use av_denoise_core::bench_api::{BLOCK_X, BLOCK_Y};
+use cubecl::benchmark::{Benchmark, BenchmarkComputations, TimingMethod};
+use cubecl::prelude::*;
+use cubecl::server::Handle;
+
+pub const WIDTH: u32 = 1920;
+pub const HEIGHT: u32 = 1080;
 pub const PATCH_RADIUS: u32 = 4;
 pub const SEARCH_RADIUS: u32 = 2;
 pub const Q_X: i32 = 1;
@@ -47,24 +47,24 @@ pub const BILATERAL_SIGMA_R: f32 = 0.02;
 pub const BLOCK_1D: u32 = 256;
 pub const COPY_GRID_1D: u32 = 1024;
 
-/// (logical channels, label).
+/// The logical channel count and row label of each channel mode.
 pub const CHANNELS: &[(u32, &str)] = &[(1, "luma"), (2, "chroma"), (3, "yuv")];
 
-pub fn stored_channels(ch: u32) -> u32 {
-    match ch {
+pub fn stored_channels(channels: u32) -> u32 {
+    match channels {
         1 => 1,
         2 => 2,
         _ => 4,
     }
 }
 
-pub fn make_synthetic_frame(w: u32, h: u32, ch: u32) -> Vec<f32> {
-    let mut data = Vec::with_capacity((w * h * ch) as usize);
-    for y in 0..h {
-        for x in 0..w {
+pub fn make_synthetic_frame(width: u32, height: u32, channels: u32) -> Vec<f32> {
+    let mut data = Vec::with_capacity((width * height * channels) as usize);
+    for y in 0..height {
+        for x in 0..width {
             let base = 0.5 + 0.2 * (x as f32 * 0.05).sin() * (y as f32 * 0.03).cos();
-            for c in 0..ch {
-                let seed = (y * w + x) * ch + c;
+            for channel in 0..channels {
+                let seed = (y * width + x) * channels + channel;
                 let hash = seed
                     .wrapping_mul(2654435761)
                     .wrapping_add(seed.wrapping_mul(340573321));
@@ -73,38 +73,46 @@ pub fn make_synthetic_frame(w: u32, h: u32, ch: u32) -> Vec<f32> {
             }
         }
     }
+
     data
 }
 
-/// Pad to next-pow2 lane count (matches `NlmDenoiser` internal storage).
-pub fn make_padded_frame(w: u32, h: u32, ch: u32) -> Vec<f32> {
-    let stored = stored_channels(ch);
-    if stored == ch {
-        return make_synthetic_frame(w, h, ch);
+/// A synthetic frame padded to the power-of-two lane count `NlmDenoiser` stores.
+pub fn make_padded_frame(width: u32, height: u32, channels: u32) -> Vec<f32> {
+    let stored_ch = stored_channels(channels);
+    if stored_ch == channels {
+        return make_synthetic_frame(width, height, channels);
     }
-    let src = make_synthetic_frame(w, h, ch);
-    let mut data = vec![0.0f32; (w * h * stored) as usize];
-    for i in 0..(w * h) as usize {
-        for c in 0..ch as usize {
-            data[i * stored as usize + c] = src[i * ch as usize + c];
+
+    let synthetic = make_synthetic_frame(width, height, channels);
+    let mut data = vec![0.0f32; (width * height * stored_ch) as usize];
+    for i in 0..(width * height) as usize {
+        for channel in 0..channels as usize {
+            data[i * stored_ch as usize + channel] = synthetic[i * channels as usize + channel];
         }
     }
+
     data
 }
 
-/// Welsch coefficient for the bench-default parameter set. Channel mode
-/// is irrelevant here; `NlmParams::h2_inv_norm` only reads `patch_radius`
-/// and `strength`.
+/// The Welsch coefficient for the bench parameters.
+///
+/// The channel mode stays at its default because the coefficient only depends on
+/// `patch_radius` and `strength`.
 pub fn h2_inv_norm() -> f32 {
-    NlmParams {
+    let params = NlmParams {
         patch_radius: PATCH_RADIUS,
         ..NlmParams::default()
-    }
-    .h2_inv_norm()
+    };
+
+    params.h2_inv_norm()
 }
 
 pub fn cube_count_2d() -> CubeCount {
-    CubeCount::new_2d(W.div_ceil(BLOCK_X), H.div_ceil(BLOCK_Y))
+    let cubes_x = WIDTH.div_ceil(BLOCK_X);
+    let cubes_y = HEIGHT.div_ceil(BLOCK_Y);
+
+    CubeCount::new_2d(cubes_x, cubes_y)
 }
 
 pub fn cube_dim_2d() -> CubeDim {
@@ -112,16 +120,15 @@ pub fn cube_dim_2d() -> CubeDim {
 }
 
 pub fn block_sync<R: Runtime>(client: &ComputeClient<R>) {
-    cubecl::future::block_on(client.sync()).unwrap();
+    let sync = client.sync();
+    cubecl::future::block_on(sync).unwrap();
 }
 
-pub fn shapes_with_ch(ch: u32) -> Vec<Vec<usize>> {
-    vec![vec![W as usize, H as usize, ch as usize]]
+pub fn shapes_with_channels(channels: u32) -> Vec<Vec<usize>> {
+    vec![vec![WIDTH as usize, HEIGHT as usize, channels as usize]]
 }
 
-/// Shared input shape for kernels that take one framebuffer and write
-/// one output of the same logical size (`dist_2d_weight`, its `_ref`
-/// twin, and `bilateral`).
+/// Buffers for a kernel that reads one frame and writes one output.
 #[derive(Clone)]
 pub struct InputOutput {
     pub input: Handle,
@@ -136,24 +143,31 @@ pub fn print_header() {
         "  {:<NAME_WIDTH$}  {:>5}  {:>10}  {:>10}  {:>10}  {:>10}  {:>10}",
         "kernel", "samp", "mean", "median", "min", "max", "fps",
     );
-    println!("  {}", "-".repeat(NAME_WIDTH + 6 + 12 * 5));
+
+    let rule = "-".repeat(NAME_WIDTH + 6 + 12 * 5);
+    println!("  {}", rule);
 }
 
 pub fn run<B: Benchmark>(bench: B) {
     let name = bench.name();
     match bench.run(TimingMethod::Device) {
         Ok(durations) => {
-            let c = BenchmarkComputations::new(&durations);
-            let mean_s = c.mean.as_secs_f64();
+            let computations = BenchmarkComputations::new(&durations);
+            let mean_s = computations.mean.as_secs_f64();
             let fps = if mean_s > 0.0 { 1.0 / mean_s } else { 0.0 };
+            let mean = fmt_us(computations.mean);
+            let median = fmt_us(computations.median);
+            let min = fmt_us(computations.min);
+            let max = fmt_us(computations.max);
+
             println!(
                 "  {:<NAME_WIDTH$}  {:>5}  {:>10}  {:>10}  {:>10}  {:>10}  {:>10.2}",
                 name,
                 durations.durations.len(),
-                fmt_us(c.mean),
-                fmt_us(c.median),
-                fmt_us(c.min),
-                fmt_us(c.max),
+                mean,
+                median,
+                min,
+                max,
                 fps,
             );
         },
@@ -161,11 +175,11 @@ pub fn run<B: Benchmark>(bench: B) {
     }
 }
 
-fn fmt_us(d: core::time::Duration) -> String {
-    let us = d.as_secs_f64() * 1_000_000.0;
-    if us >= 1000.0 {
-        format!("{:.3} ms", us / 1000.0)
+fn fmt_us(duration: core::time::Duration) -> String {
+    let micros = duration.as_secs_f64() * 1_000_000.0;
+    if micros >= 1000.0 {
+        format!("{:.3} ms", micros / 1000.0)
     } else {
-        format!("{us:.2} µs")
+        format!("{micros:.2} µs")
     }
 }

@@ -15,6 +15,7 @@ const CURVE_LAMBDA: f32 = 1.0;
 pub(super) fn stepped_curve() -> [f32; NOISE_CURVE_BINS] {
     let mut curve = [2.0f32; NOISE_CURVE_BINS];
     curve[NOISE_CURVE_BINS / 2..].fill(0.5);
+
     curve
 }
 
@@ -32,9 +33,9 @@ pub(super) fn assert_identical(label: &str, got: &Aggregated, want: &Aggregated)
 }
 
 fn run_with_curve(curve: Option<[f32; NOISE_CURVE_BINS]>) -> Aggregated {
-    let mut s = cross_frame_setup(64, 64, 2);
-    s.noise_curve = curve;
-    run_fused(&s)
+    let mut setup = cross_frame_setup(64, 64, 2);
+    setup.noise_curve = curve;
+    run_fused(&setup)
 }
 
 /// Asserts every pixel in columns `x_start..x_end` of a single-frame run matches exactly.
@@ -119,7 +120,8 @@ fn a_stepped_curve_thresholds_each_brightness_by_its_own_noise() {
 
     let mut curved_setup = Setup::spatial_only(frame.clone(), side, side);
     curved_setup.lambda_ht = CURVE_LAMBDA;
-    curved_setup.noise_curve = Some(stepped_curve());
+    let curve = stepped_curve();
+    curved_setup.noise_curve = Some(curve);
     let curved = run_fused(&curved_setup);
 
     let plain = run_spatial_with_lambda(&frame, side, CURVE_LAMBDA);

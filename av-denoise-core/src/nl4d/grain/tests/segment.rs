@@ -17,6 +17,7 @@ const EDGE_BUCKET: usize = 37;
 fn sparse_chunk() -> GrainChunk {
     let mut chunk = GrainChunk::empty();
     chunk.frames = CHUNK_FRAMES;
+
     chunk
 }
 
@@ -35,6 +36,7 @@ fn narrow_chunk(std_codes: f32) -> GrainChunk {
 
     let record = grain_record();
     add_group_record(&mut chunk, bucket / BUCKETS_PER_GROUP, &record);
+
     chunk
 }
 
@@ -85,16 +87,16 @@ fn edge_chunk() -> (GrainChunk, usize) {
     let edge_bucket = bucket_of(band_high as f32, &edges);
 
     assert_eq!(edge_bucket % BUCKETS_PER_GROUP, 0);
+
     (chunk, edge_bucket / BUCKETS_PER_GROUP)
 }
 
 #[test]
 fn steady_scene_is_one_segment() {
-    let chunks = vec![
-        chunk_at(2.0, 300, None),
-        chunk_at(2.05, 300, None),
-        chunk_at(1.98, 300, None),
-    ];
+    let first = chunk_at(2.0, 300, None);
+    let second = chunk_at(2.05, 300, None);
+    let third = chunk_at(1.98, 300, None);
+    let chunks = vec![first, second, third];
     let scene = scene_of(100, chunks);
 
     let segments = segment_scene(&scene);
@@ -106,11 +108,10 @@ fn steady_scene_is_one_segment() {
 
 #[test]
 fn drift_splits_on_a_chunk_boundary() {
-    let chunks = vec![
-        chunk_at(2.0, 300, None),
-        chunk_at(2.0, 300, None),
-        chunk_at(2.8, 300, None),
-    ];
+    let first = chunk_at(2.0, 300, None);
+    let second = chunk_at(2.0, 300, None);
+    let drifted = chunk_at(2.8, 300, None);
+    let chunks = vec![first, second, drifted];
     let scene = scene_of(0, chunks);
 
     let segments = segment_scene(&scene);
@@ -121,7 +122,9 @@ fn drift_splits_on_a_chunk_boundary() {
 
 #[test]
 fn a_thin_chunk_joins_the_open_segment() {
-    let chunks = vec![chunk_at(2.0, 300, None), chunk_at(4.0, 10, None)];
+    let full = chunk_at(2.0, 300, None);
+    let thin = chunk_at(4.0, 10, None);
+    let chunks = vec![full, thin];
     let scene = scene_of(0, chunks);
 
     let segments = segment_scene(&scene);
@@ -131,7 +134,9 @@ fn a_thin_chunk_joins_the_open_segment() {
 
 #[test]
 fn a_fitted_entry_has_points_and_weights() {
-    let scenes = vec![scene_of(0, vec![chunk_at(2.0, 300, None)])];
+    let chunk = chunk_at(2.0, 300, None);
+    let scene = scene_of(0, vec![chunk]);
+    let scenes = vec![scene];
 
     let entries = fit_scenes(&scenes);
 
@@ -142,7 +147,9 @@ fn a_fitted_entry_has_points_and_weights() {
 
 #[test]
 fn kept_equal_to_source_gives_zero_strength() {
-    let scenes = vec![scene_of(0, vec![chunk_at(2.0, 300, Some(2.0))])];
+    let chunk = chunk_at(2.0, 300, Some(2.0));
+    let scene = scene_of(0, vec![chunk]);
+    let scenes = vec![scene];
 
     let entries = fit_scenes(&scenes);
 
@@ -151,7 +158,9 @@ fn kept_equal_to_source_gives_zero_strength() {
 
 #[test]
 fn kept_above_source_clamps_to_zero() {
-    let scenes = vec![scene_of(0, vec![chunk_at(2.0, 300, Some(3.0))])];
+    let chunk = chunk_at(2.0, 300, Some(3.0));
+    let scene = scene_of(0, vec![chunk]);
+    let scenes = vec![scene];
 
     let entries = fit_scenes(&scenes);
 
@@ -160,11 +169,14 @@ fn kept_above_source_clamps_to_zero() {
 
 #[test]
 fn a_thin_chunk_never_gets_its_own_entry() {
-    let second_chunks = vec![chunk_at(3.0, 300, None), sparse_chunk(), chunk_at(3.0, 300, None)];
-    let scenes = vec![
-        scene_of(0, vec![chunk_at(1.0, 300, None)]),
-        scene_of(24, second_chunks),
-    ];
+    let first_chunk = chunk_at(1.0, 300, None);
+    let before_thin = chunk_at(3.0, 300, None);
+    let thin = sparse_chunk();
+    let after_thin = chunk_at(3.0, 300, None);
+    let second_chunks = vec![before_thin, thin, after_thin];
+    let first_scene = scene_of(0, vec![first_chunk]);
+    let second_scene = scene_of(24, second_chunks);
+    let scenes = vec![first_scene, second_scene];
 
     let entries = fit_scenes(&scenes);
 
@@ -177,10 +189,10 @@ fn a_thin_chunk_never_gets_its_own_entry() {
 fn missing_texture_borrows_from_the_nearest_segment() {
     let mut no_texture = chunk_at(2.0, 300, None);
     no_texture.pixels.fill(0.0);
-    let scenes = vec![
-        scene_of(0, vec![chunk_at(2.0, 300, None)]),
-        scene_of(24, vec![no_texture]),
-    ];
+    let textured = chunk_at(2.0, 300, None);
+    let first_scene = scene_of(0, vec![textured]);
+    let second_scene = scene_of(24, vec![no_texture]);
+    let scenes = vec![first_scene, second_scene];
 
     let entries = fit_scenes(&scenes);
 
@@ -190,10 +202,11 @@ fn missing_texture_borrows_from_the_nearest_segment() {
 
 #[test]
 fn sparse_scene_borrows_from_a_neighbouring_scene() {
-    let scenes = vec![
-        scene_of(0, vec![chunk_at(2.0, 300, None)]),
-        scene_of(24, vec![sparse_chunk()]),
-    ];
+    let dense = chunk_at(2.0, 300, None);
+    let sparse = sparse_chunk();
+    let first_scene = scene_of(0, vec![dense]);
+    let second_scene = scene_of(24, vec![sparse]);
+    let scenes = vec![first_scene, second_scene];
 
     let entries = fit_scenes(&scenes);
 
@@ -203,7 +216,9 @@ fn sparse_scene_borrows_from_a_neighbouring_scene() {
 
 #[test]
 fn sparse_segment_with_no_donor_gets_no_entry() {
-    let scenes = vec![scene_of(0, vec![sparse_chunk()])];
+    let sparse = sparse_chunk();
+    let scene = scene_of(0, vec![sparse]);
+    let scenes = vec![scene];
 
     let entries = fit_scenes(&scenes);
 
@@ -225,11 +240,15 @@ fn an_outlier_group_leaves_the_texture_unchanged() {
     let mut mixed = grain_only.clone();
     add_group_record(&mut mixed, grain_group, &coarse);
 
-    let clean_entries = fit_scenes(&[scene_of(0, vec![grain_only])]);
-    let outlier_entries = fit_scenes(&[scene_of(0, vec![with_outlier])]);
-    let mixed_entries = fit_scenes(&[scene_of(0, vec![mixed])]);
+    let clean_scene = scene_of(0, vec![grain_only]);
+    let outlier_scene = scene_of(0, vec![with_outlier]);
+    let mixed_scene = scene_of(0, vec![mixed]);
+    let clean_entries = fit_scenes(&[clean_scene]);
+    let outlier_entries = fit_scenes(&[outlier_scene]);
+    let mixed_entries = fit_scenes(&[mixed_scene]);
+    let grain = grain_record();
 
-    assert!(coarse[0] > 10.0 * grain_record()[0]);
+    assert!(coarse[0] > 10.0 * grain[0]);
     assert!(clean_entries[0].ar_coeffs.iter().any(|&coeff| coeff != 0));
     assert_eq!(outlier_entries[0].ar_coeffs, clean_entries[0].ar_coeffs);
     assert_ne!(mixed_entries[0].ar_coeffs, clean_entries[0].ar_coeffs);
@@ -241,7 +260,8 @@ fn a_group_overlapping_the_band_edge_gives_the_texture() {
     let record = grain_record();
     add_group_record(&mut chunk, edge_group, &record);
 
-    let entries = fit_scenes(&[scene_of(0, vec![chunk])]);
+    let scene = scene_of(0, vec![chunk]);
+    let entries = fit_scenes(&[scene]);
 
     assert_eq!(entries.len(), 1);
     assert!(entries[0].ar_coeffs.iter().any(|&coeff| coeff != 0));
@@ -253,18 +273,22 @@ fn a_group_past_the_band_gives_no_texture() {
     let record = grain_record();
     add_group_record(&mut chunk, edge_group + 1, &record);
 
-    let entries = fit_scenes(&[scene_of(0, vec![chunk])]);
+    let scene = scene_of(0, vec![chunk]);
+    let entries = fit_scenes(&[scene]);
 
     assert!(entries.is_empty());
 }
 
 #[test]
 fn a_sparse_segment_borrows_from_its_own_scene_first() {
-    let own_scene = vec![chunk_at(2.0, 300, None), narrow_chunk(3.0), narrow_chunk(4.0)];
-    let scenes = vec![
-        scene_of(0, own_scene),
-        scene_of(3 * CHUNK_FRAMES as u64, vec![chunk_at(1.0, 300, None)]),
-    ];
+    let dense = chunk_at(2.0, 300, None);
+    let first_narrow = narrow_chunk(3.0);
+    let second_narrow = narrow_chunk(4.0);
+    let next_scene_chunk = chunk_at(1.0, 300, None);
+    let own_scene = vec![dense, first_narrow, second_narrow];
+    let first_scene = scene_of(0, own_scene);
+    let second_scene = scene_of(3 * CHUNK_FRAMES as u64, vec![next_scene_chunk]);
+    let scenes = vec![first_scene, second_scene];
 
     let entries = fit_scenes(&scenes);
 
@@ -283,7 +307,8 @@ fn a_chunk_in_every_luma_bin_thins_to_the_point_limit() {
         chunk.source_hist[bin * STD_BUCKETS + bucket] = 300;
     }
 
-    let entries = fit_scenes(&[scene_of(0, vec![chunk])]);
+    let scene = scene_of(0, vec![chunk]);
+    let entries = fit_scenes(&[scene]);
     let points = &entries[0].points;
     let first_luma = points.first().expect("points").0;
     let last_luma = points.last().expect("points").0;

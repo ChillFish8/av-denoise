@@ -13,39 +13,48 @@ use crate::nlmeans::{
     PrefilterMode,
 };
 
+pub(super) type R = WgpuRuntime;
+
 pub(super) const SIGMA: f32 = 6.0 / 255.0;
 pub(super) const SPATIAL_RADIUS: u32 = 9;
 pub(super) const REFINE: u32 = 2;
 pub(super) const C_MIN: f32 = 0.05;
 pub(super) const LAMBDA_HT: f32 = 2.7;
 
+/// The motion block step, equal to [PATCH_SIZE](crate::collab::PATCH_SIZE) so a block boundary
+/// always lines up with a patch boundary.
+pub(super) const BLK_STEP: u32 = 8;
+
 /// Parameters for a still clip with sigma pinned to [SIGMA].
 pub(super) fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
+    let motion_compensation = MotionCompensationMode::Mvtools {
+        blksize: 16,
+        overlap: 8,
+        search_radius: 4,
+        pyramid_levels: 2,
+        estimation: MotionEstimation::Auto,
+    };
+    let hq = HqParams::with_sigma(SIGMA);
+    let nlm = NlmParams {
+        temporal_radius,
+        search_radius: 2,
+        patch_radius: 2,
+        strength: 1.2,
+        self_weight: 1.0,
+        channels: ChannelMode::Luma,
+        prefilter: PrefilterMode::None,
+        motion_compensation,
+        hq: Some(hq),
+    };
+
     Nl4dParams {
-        nlm: NlmParams {
-            temporal_radius,
-            search_radius: 2,
-            patch_radius: 2,
-            strength: 1.2,
-            self_weight: 1.0,
-            channels: ChannelMode::Luma,
-            prefilter: PrefilterMode::None,
-            motion_compensation: MotionCompensationMode::Mvtools {
-                blksize: 16,
-                overlap: 8,
-                search_radius: 4,
-                pyramid_levels: 2,
-                estimation: MotionEstimation::Auto,
-            },
-            hq: Some(HqParams::with_sigma(SIGMA)),
-        },
+        nlm,
         temporal_radius,
         refine: REFINE,
         spatial_radius: SPATIAL_RADIUS,
         lambda_ht: LAMBDA_HT,
         c_min: C_MIN,
-        // The shipped default, so these run the aggregation a real
-        // caller gets.
+        // The shipped default, so these run the aggregation a real caller gets.
         kaiser_beta: 2.0,
         field_lambda: 0.0,
         // No effect here, since sigma is pinned.
@@ -56,43 +65,45 @@ pub(super) fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
         // Off, so the pipeline tests keep the flat map their expectations were recorded against.
         flat_texture_cut: 1.0,
         // Off, so the pipeline tests keep the per-coefficient kernel their expectations were
-        // recorded against. `nl4d::tests::pooled` covers the pooled path.
+        // recorded against.
         pooled_threshold: false,
         grain_export: false,
     }
 }
 
-/// A non-flat luma field, built from two out-of-phase sine waves rather
-/// than noise, so it carries real spatial structure a denoiser can
-/// either preserve or destroy.
-pub(crate) fn textured_base(w: u32, h: u32) -> Vec<f32> {
-    let mut frame = vec![0.0f32; (w * h) as usize];
-    for y in 0..h {
-        for x in 0..w {
-            let fx = x as f32 / w as f32;
-            let fy = y as f32 / h as f32;
-            let v = 0.5
-                + 0.15 * (fx * 6.0 * std::f32::consts::PI).sin() * (fy * 4.0 * std::f32::consts::PI).cos();
-            frame[(y * w + x) as usize] = v.clamp(0.05, 0.95);
+/// A non-flat luma field built from two out-of-phase sine waves.
+///
+/// It carries real spatial structure rather than noise, which a denoiser can either preserve or
+/// destroy.
+pub(crate) fn textured_base(width: u32, height: u32) -> Vec<f32> {
+    let mut frame = vec![0.0f32; (width * height) as usize];
+    for y in 0..height {
+        for x in 0..width {
+            let x_fraction = x as f32 / width as f32;
+            let y_fraction = y as f32 / height as f32;
+            let value = 0.5
+                + 0.15
+                    * (x_fraction * 6.0 * std::f32::consts::PI).sin()
+                    * (y_fraction * 4.0 * std::f32::consts::PI).cos();
+            frame[(y * width + x) as usize] = value.clamp(0.05, 0.95);
         }
     }
+
     frame
 }
 
-/// Adds independent pseudo-Gaussian noise to `base`, decorrelated across
-/// `seed` so different seeds over the same base give independently
-/// noisy copies of the same clean content.
-pub(crate) fn noisy_copy_of(base: &[f32], w: u32, h: u32, sigma: f32, seed: u32) -> Vec<f32> {
+/// Adds pseudo-Gaussian noise to `base`, independent for each `seed`.
+pub(crate) fn noisy_copy_of(base: &[f32], width: u32, height: u32, sigma: f32, seed: u32) -> Vec<f32> {
     let mut frame = vec![0.0f32; base.len()];
-    for idx in 0..(w * h) {
+    for idx in 0..(width * height) {
         let noise = unit_noise(idx, seed);
         frame[idx as usize] = (base[idx as usize] + noise * sigma).clamp(0.0, 1.0);
     }
+
     frame
 }
 
-/// A pseudo-Gaussian sample with unit standard deviation for pixel `idx`
-/// under `seed`.
+/// A pseudo-Gaussian sample with unit standard deviation for pixel `idx` under `seed`.
 pub(super) fn unit_noise(idx: u32, seed: u32) -> f32 {
     let unit_std = (1.0f32 / 3.0f32).sqrt();
     let mut sum = 0.0f32;
@@ -105,42 +116,35 @@ pub(super) fn unit_noise(idx: u32, seed: u32) -> f32 {
         hash ^= hash >> 13;
         sum += (hash as f32 / u32::MAX as f32) - 0.5;
     }
+
     sum / unit_std
 }
 
 /// PSNR between two equal-length planes, in dB.
-pub(super) fn psnr(a: &[f32], b: &[f32]) -> f64 {
-    let mse: f64 = a
+pub(super) fn psnr(output: &[f32], reference: &[f32]) -> f64 {
+    let mse: f64 = output
         .iter()
-        .zip(b.iter())
-        .map(|(&x, &y)| (x as f64 - y as f64).powi(2))
+        .zip(reference.iter())
+        .map(|(&out, &expected)| (out as f64 - expected as f64).powi(2))
         .sum::<f64>()
-        / a.len() as f64;
+        / output.len() as f64;
     if mse <= 0.0 {
         return f64::INFINITY;
     }
+
     10.0 * (1.0f64 / mse).log10()
 }
-
-pub(super) type R = WgpuRuntime;
 
 pub(super) fn make_client() -> ComputeClient<R> {
     let device = <R as Runtime>::Device::default();
     R::client(&device)
 }
 
-/// The block step and grid this tree's fixtures use, matching
-/// [`crate::collab::PATCH_SIZE`] so a block boundary always lines up
-/// with a patch boundary.
-pub(super) const BLK_STEP: u32 = 8;
-
-/// A ring of `2 * radius + 1` frames, one physical slot per logical
-/// temporal offset from `-radius` to `radius`, with the centre frame at
-/// physical slot `radius`.
+/// A ring of `2 * radius + 1` frames with the centre frame at physical slot `radius`.
 ///
 /// Every field is already shaped the way
-/// [`crate::collab::kernels::fused::collab_fused`] expects to read it,
-/// so a test only has to upload each `Vec` and launch.
+/// [collab_fused](crate::collab::kernels::fused::collab_fused) reads it, so a test only uploads
+/// each `Vec` and launches.
 pub(super) struct RingFixture {
     pub ring: Vec<f32>,
     pub mv_field: Vec<i32>,
@@ -156,74 +160,68 @@ pub(super) struct RingFixture {
     pub height: u32,
 }
 
-/// A deterministic 8x8 texture with values well clear of the flat
-/// background these fixtures plant it over.
+/// A deterministic 8x8 texture with values well clear of the flat background it is planted over.
 pub(super) fn deterministic_texture(seed: u32) -> [f32; 64] {
-    let mut out = [0.0f32; 64];
-    for (idx, v) in out.iter_mut().enumerate() {
+    let mut texture = [0.0f32; 64];
+    for (idx, value) in texture.iter_mut().enumerate() {
         let mut hash = (idx as u32)
             .wrapping_mul(2654435761)
             .wrapping_add(seed.wrapping_mul(0x9E37_79B9));
         hash ^= hash >> 15;
         hash = hash.wrapping_mul(0x85EBCA6B);
         hash ^= hash >> 13;
-        *v = 0.6 + (hash as f32 / u32::MAX as f32) * 0.3;
+        *value = 0.6 + (hash as f32 / u32::MAX as f32) * 0.3;
     }
-    out
+
+    texture
 }
 
-/// Writes an 8x8 patch into `frame` with its top-left corner at `(px,
-/// py)`.
-fn plant_patch(frame: &mut [f32], w: u32, px: u32, py: u32, patch: &[f32; 64]) {
+/// Writes an 8x8 patch into `frame` with its top-left corner at `(x, y)`.
+fn plant_patch(frame: &mut [f32], width: u32, x: u32, y: u32, patch: &[f32; 64]) {
     for row in 0..8u32 {
         for col in 0..8u32 {
-            let idx = (py + row) * w + (px + col);
+            let idx = (y + row) * width + (x + col);
             frame[idx as usize] = patch[(row * 8 + col) as usize];
         }
     }
 }
 
-/// Builds a ring whose centre frame carries a distinctive 8x8 patch at
-/// `ref_pos`, and whose neighbour frame for logical offset `k` carries
-/// the same patch shifted by `shift_per_k * k` pixels on the x axis.
+/// Builds a ring whose centre frame carries `patch` at `ref_pos`, and whose neighbour at logical
+/// offset `k` carries it shifted by `shift_per_k * k` pixels along x.
 ///
-/// The motion field is seeded to predict exactly that shift, at the
-/// block covering `ref_pos`, so a correct search recovers the planted
-/// patch through the motion prediction, not through luck.
-///
-/// `conf` gives the per-neighbour confidence written into every block of
-/// that neighbour's plane, keyed by the same logical offset `k` the
-/// shift is keyed by.
+/// The motion field predicts exactly that shift at the block covering `ref_pos`, so a correct
+/// search recovers the patch through the prediction, not through luck. `confidence_for(k)` is
+/// written into every block of neighbour `k`'s confidence plane.
 #[expect(clippy::too_many_arguments)]
 pub(super) fn planted_ring(
-    w: u32,
-    h: u32,
+    width: u32,
+    height: u32,
     radius: u32,
     ref_pos: (u32, u32),
     shift_per_k: i32,
     patch: &[f32; 64],
     background: f32,
-    conf: impl Fn(i32) -> f32,
+    confidence_for: impl Fn(i32) -> f32,
 ) -> RingFixture {
-    let n_frames = 2 * radius + 1;
+    let frame_count = 2 * radius + 1;
     let centre_slot = radius;
-    let blocks_x = w.div_ceil(BLK_STEP);
-    let blocks_y = h.div_ceil(BLK_STEP);
+    let blocks_x = width.div_ceil(BLK_STEP);
+    let blocks_y = height.div_ceil(BLK_STEP);
     let mv_stride = blocks_x * blocks_y * 2;
     let conf_stride = blocks_x * blocks_y;
 
-    let (rx, ry) = ref_pos;
-    let bx = rx / BLK_STEP;
-    let by = ry / BLK_STEP;
-    let block = by * blocks_x + bx;
+    let (ref_x, ref_y) = ref_pos;
+    let block_x = ref_x / BLK_STEP;
+    let block_y = ref_y / BLK_STEP;
+    let block = block_y * blocks_x + block_x;
 
-    let mut ring = vec![0.0f32; (n_frames * w * h) as usize];
-    for slot in 0..n_frames {
+    let mut ring = vec![0.0f32; (frame_count * width * height) as usize];
+    for slot in 0..frame_count {
         let k = slot as i32 - radius as i32;
-        let frame = &mut ring[(slot * w * h) as usize..((slot + 1) * w * h) as usize];
+        let frame = &mut ring[(slot * width * height) as usize..((slot + 1) * width * height) as usize];
         frame.fill(background);
-        let px = (rx as i32 + shift_per_k * k) as u32;
-        plant_patch(frame, w, px, ry, patch);
+        let patch_x = (ref_x as i32 + shift_per_k * k) as u32;
+        plant_patch(frame, width, patch_x, ref_y, patch);
     }
 
     let mut mv_field = vec![0i32; (2 * radius * mv_stride) as usize];
@@ -233,16 +231,18 @@ pub(super) fn planted_ring(
         if k == 0 {
             continue;
         }
-        let t = neighbour_idx_for_k(radius, k);
-        let slot = (k + radius as i32) as u32;
-        neighbour_slots[t as usize] = slot;
 
-        let mv_base = (t * mv_stride + block * 2) as usize;
+        let neighbour = neighbour_idx_for_k(radius, k);
+        let slot = (k + radius as i32) as u32;
+        neighbour_slots[neighbour as usize] = slot;
+
+        let mv_base = (neighbour * mv_stride + block * 2) as usize;
         mv_field[mv_base] = shift_per_k * k;
         mv_field[mv_base + 1] = 0;
 
-        let c_base = t * conf_stride;
-        confidence[c_base as usize..(c_base + conf_stride) as usize].fill(conf(k));
+        let conf_base = neighbour * conf_stride;
+        let neighbour_confidence = confidence_for(k);
+        confidence[conf_base as usize..(conf_base + conf_stride) as usize].fill(neighbour_confidence);
     }
 
     RingFixture {
@@ -256,33 +256,30 @@ pub(super) fn planted_ring(
         blocks_y,
         mv_stride,
         conf_stride,
-        width: w,
-        height: h,
+        width,
+        height,
     }
 }
 
-/// A ring of independent pseudo-random frames, with a zeroed motion
-/// field and uniform confidence.
+/// A ring of independent pseudo-random frames, with a zeroed motion field and uniform confidence.
 ///
-/// No 8x8 window into this ring resembles any other, on any frame, so
-/// every candidate a search finds is a poor match. It exists for the
-/// no-admission-gate test, where the point is that the group still
-/// fills to `k_max` despite that.
-pub(super) fn noisy_ring(w: u32, h: u32, radius: u32, confidence_value: f32) -> RingFixture {
-    let n_frames = 2 * radius + 1;
+/// No 8x8 window into this ring resembles any other, on any frame, so every candidate a search
+/// finds is a poor match.
+pub(super) fn noisy_ring(width: u32, height: u32, radius: u32, confidence_value: f32) -> RingFixture {
+    let frame_count = 2 * radius + 1;
     let centre_slot = radius;
-    let blocks_x = w.div_ceil(BLK_STEP);
-    let blocks_y = h.div_ceil(BLK_STEP);
+    let blocks_x = width.div_ceil(BLK_STEP);
+    let blocks_y = height.div_ceil(BLK_STEP);
     let mv_stride = blocks_x * blocks_y * 2;
     let conf_stride = blocks_x * blocks_y;
 
-    let mut ring = vec![0.0f32; (n_frames * w * h) as usize];
-    for (idx, v) in ring.iter_mut().enumerate() {
+    let mut ring = vec![0.0f32; (frame_count * width * height) as usize];
+    for (idx, value) in ring.iter_mut().enumerate() {
         let mut hash = (idx as u32).wrapping_mul(2654435761).wrapping_add(0x9E3779B9);
         hash ^= hash >> 15;
         hash = hash.wrapping_mul(0x85EBCA6B);
         hash ^= hash >> 13;
-        *v = hash as f32 / u32::MAX as f32;
+        *value = hash as f32 / u32::MAX as f32;
     }
 
     let mv_field = vec![0i32; (2 * radius * mv_stride) as usize];
@@ -292,8 +289,9 @@ pub(super) fn noisy_ring(w: u32, h: u32, radius: u32, confidence_value: f32) -> 
         if k == 0 {
             continue;
         }
-        let t = neighbour_idx_for_k(radius, k);
-        neighbour_slots[t as usize] = (k + radius as i32) as u32;
+
+        let neighbour = neighbour_idx_for_k(radius, k);
+        neighbour_slots[neighbour as usize] = (k + radius as i32) as u32;
     }
 
     RingFixture {
@@ -307,8 +305,8 @@ pub(super) fn noisy_ring(w: u32, h: u32, radius: u32, confidence_value: f32) -> 
         blocks_y,
         mv_stride,
         conf_stride,
-        width: w,
-        height: h,
+        width,
+        height,
     }
 }
 

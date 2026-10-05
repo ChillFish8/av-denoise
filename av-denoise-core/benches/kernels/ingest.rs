@@ -41,8 +41,8 @@ pub struct IngestBench<R: Runtime> {
     pub client: ComputeClient<R>,
     pub width: u32,
     pub height: u32,
-    pub ch: u32,
-    pub ch_name: &'static str,
+    pub channels: u32,
+    pub channel_name: &'static str,
     pub format: IngestFormat,
 }
 
@@ -52,11 +52,13 @@ impl<R: Runtime> IngestBench<R> {
     }
 
     fn words(&self) -> u32 {
-        self.pixels().div_ceil(self.format.samples_per_word())
+        let samples_per_word = self.format.samples_per_word();
+        self.pixels().div_ceil(samples_per_word)
     }
 
     fn ring_len(&self) -> usize {
-        self.pixels() as usize * stored_channels(self.ch) as usize
+        let stored_ch = stored_channels(self.channels);
+        self.pixels() as usize * stored_ch as usize
     }
 }
 
@@ -67,16 +69,18 @@ impl<R: Runtime> Benchmark for IngestBench<R> {
     fn prepare(&self) -> Self::Input {
         let plane_bytes = self.words() as usize * size_of::<u32>();
         let plane_data = vec![0x5Au8; plane_bytes];
-        let planes = (0..self.ch)
+        let planes = (0..self.channels)
             .map(|_| self.client.create_from_slice(&plane_data))
             .collect();
-        let ring = self.client.empty(self.ring_len() * size_of::<f32>());
+        let ring_len = self.ring_len();
+        let ring = self.client.empty(ring_len * size_of::<f32>());
+
         IngestInput { planes, ring }
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let pixels = self.pixels();
-        let stored_ch = stored_channels(self.ch);
+        let stored_ch = stored_channels(self.channels);
         let groups = pixels.div_ceil(BLOCK_1D).min(65535);
         let total_threads = groups * BLOCK_1D;
         let words = self.words() as usize;
@@ -84,7 +88,7 @@ impl<R: Runtime> Benchmark for IngestBench<R> {
         let samples_per_word = self.format.samples_per_word();
         let max = self.format.max();
 
-        // Planes past `ch` are placeholders the kernel never reads.
+        // Planes past `channels` are placeholders the kernel never reads.
         let plane_0 = args.planes[0].clone();
         let plane_1 = args.planes.get(1).unwrap_or(&args.planes[0]).clone();
         let plane_2 = args.planes.get(2).unwrap_or(&args.planes[0]).clone();
@@ -101,7 +105,7 @@ impl<R: Runtime> Benchmark for IngestBench<R> {
                     ArrayArg::from_raw_parts(args.ring.clone(), ring_len),
                     0u32,
                     pixels,
-                    self.ch,
+                    self.channels,
                     stored_ch,
                     total_threads,
                 ),
@@ -116,7 +120,7 @@ impl<R: Runtime> Benchmark for IngestBench<R> {
                     max,
                     0u32,
                     pixels,
-                    self.ch,
+                    self.channels,
                     stored_ch,
                     samples_per_word,
                     total_threads,
@@ -130,7 +134,7 @@ impl<R: Runtime> Benchmark for IngestBench<R> {
     fn name(&self) -> String {
         format!(
             "ingest_{}x{}_{:?}_{}",
-            self.width, self.height, self.format, self.ch_name
+            self.width, self.height, self.format, self.channel_name
         )
     }
 
@@ -139,6 +143,10 @@ impl<R: Runtime> Benchmark for IngestBench<R> {
     }
 
     fn shapes(&self) -> Vec<Vec<usize>> {
-        vec![vec![self.width as usize, self.height as usize, self.ch as usize]]
+        vec![vec![
+            self.width as usize,
+            self.height as usize,
+            self.channels as usize,
+        ]]
     }
 }

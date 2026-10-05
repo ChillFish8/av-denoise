@@ -8,21 +8,21 @@ use super::{
     BILATERAL_SIGMA_S,
     BLOCK_X,
     BLOCK_Y,
-    H,
+    HEIGHT,
     InputOutput,
-    W,
+    WIDTH,
     block_sync,
     cube_count_2d,
     cube_dim_2d,
     make_padded_frame,
-    shapes_with_ch,
+    shapes_with_channels,
     stored_channels,
 };
 
 pub struct BilateralBench<R: Runtime> {
     pub client: ComputeClient<R>,
-    pub ch: u32,
-    pub ch_name: &'static str,
+    pub channels: u32,
+    pub channel_name: &'static str,
 }
 
 impl<R: Runtime> Benchmark for BilateralBench<R> {
@@ -30,11 +30,13 @@ impl<R: Runtime> Benchmark for BilateralBench<R> {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let pixels = (W * H) as usize;
-        let stored = stored_channels(self.ch) as usize;
-        let frame = make_padded_frame(W, H, self.ch);
-        let input = self.client.create_from_slice(f32::as_bytes(&frame));
-        let output = self.client.empty(pixels * stored * size_of::<f32>());
+        let pixels = (WIDTH * HEIGHT) as usize;
+        let stored_ch = stored_channels(self.channels) as usize;
+        let frame = make_padded_frame(WIDTH, HEIGHT, self.channels);
+        let frame_bytes = f32::as_bytes(&frame);
+        let input = self.client.create_from_slice(frame_bytes);
+        let output = self.client.empty(pixels * stored_ch * size_of::<f32>());
+
         InputOutput {
             input,
             output,
@@ -43,38 +45,44 @@ impl<R: Runtime> Benchmark for BilateralBench<R> {
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let pixels = (W * H) as usize;
-        let stored = stored_channels(self.ch) as usize;
+        let pixels = (WIDTH * HEIGHT) as usize;
+        let stored_ch = stored_channels(self.channels) as usize;
         let radius = bilateral_radius(BILATERAL_SIGMA_S);
+        let cube_count = cube_count_2d();
+        let cube_dim = cube_dim_2d();
+
         unsafe {
             nlm_bilateral::launch_unchecked::<R>(
                 &self.client,
-                cube_count_2d(),
-                cube_dim_2d(),
-                stored,
+                cube_count,
+                cube_dim,
+                stored_ch,
                 ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
-                ArrayArg::from_raw_parts(args.output.clone(), pixels * stored),
+                ArrayArg::from_raw_parts(args.output.clone(), pixels * stored_ch),
                 0u32,
                 1.0 / (2.0 * BILATERAL_SIGMA_S * BILATERAL_SIGMA_S),
                 1.0 / (2.0 * BILATERAL_SIGMA_R * BILATERAL_SIGMA_R),
-                W,
-                H,
-                self.ch,
+                WIDTH,
+                HEIGHT,
+                self.channels,
                 radius,
                 BLOCK_X,
                 BLOCK_Y,
             );
         }
+
         Ok(())
     }
 
     fn name(&self) -> String {
-        format!("bilateral_1080p_{}", self.ch_name)
+        format!("bilateral_1080p_{}", self.channel_name)
     }
+
     fn sync(&self) {
         block_sync(&self.client);
     }
+
     fn shapes(&self) -> Vec<Vec<usize>> {
-        shapes_with_ch(self.ch)
+        shapes_with_channels(self.channels)
     }
 }

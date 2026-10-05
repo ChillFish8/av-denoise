@@ -41,13 +41,13 @@ fn hq(radius: u32) -> NlmeansAlgorithm {
         0 => DenoisingMode::Spacial,
         radius => DenoisingMode::Temporal { radius },
     };
-    let nlm = NlmeansOptions {
+    let nlm_options = NlmeansOptions {
         mode,
         ..NlmeansOptions::default()
     };
 
     NlmeansAlgorithm::Hq(NlmeansHqOptions {
-        nlm,
+        nlm: nlm_options,
         ..NlmeansHqOptions::default()
     })
 }
@@ -61,9 +61,9 @@ fn frames(count: usize, channels: u32) -> Vec<Vec<f32>> {
         .collect()
 }
 
-fn emit(engine: &mut Nlmeans<R>, client: &ComputeClient<R>, channels: usize) -> Vec<f32> {
+fn emit(engine: &mut Nlmeans<R>, client: &ComputeClient<R>, channel_count: usize) -> Vec<f32> {
     let pixels = (WIDTH * HEIGHT) as usize;
-    let outputs: Vec<Handle> = (0..channels).map(|_| client.empty(pixels * 4)).collect();
+    let outputs: Vec<Handle> = (0..channel_count).map(|_| client.empty(pixels * 4)).collect();
     let planes: Vec<_> = outputs
         .iter()
         .map(|handle| DevicePlane::new(handle, WIDTH, HEIGHT))
@@ -75,8 +75,13 @@ fn emit(engine: &mut Nlmeans<R>, client: &ComputeClient<R>, channels: usize) -> 
 }
 
 /// Pushes one frame and returns how many frames the engine reports ready.
-fn push_frame(engine: &mut Nlmeans<R>, client: &ComputeClient<R>, frame: &[f32], count: usize) -> usize {
-    let handles = upload_planes(client, frame, count);
+fn push_frame(
+    engine: &mut Nlmeans<R>,
+    client: &ComputeClient<R>,
+    frame: &[f32],
+    channel_count: usize,
+) -> usize {
+    let handles = upload_planes(client, frame, channel_count);
     let planes: Vec<_> = handles
         .iter()
         .map(|handle| DevicePlane::new(handle, WIDTH, HEIGHT))
@@ -85,31 +90,29 @@ fn push_frame(engine: &mut Nlmeans<R>, client: &ComputeClient<R>, frame: &[f32],
     engine.push(&planes).expect("push")
 }
 
-/// Pushes one frame and emits whatever becomes ready into `outputs`.
 fn push_and_emit(
     engine: &mut Nlmeans<R>,
     client: &ComputeClient<R>,
     frame: &[f32],
-    count: usize,
+    channel_count: usize,
     outputs: &mut Vec<Vec<f32>>,
 ) {
-    let ready = push_frame(engine, client, frame, count);
+    let ready = push_frame(engine, client, frame, channel_count);
     for _ in 0..ready {
-        let output = emit(engine, client, count);
+        let output = emit(engine, client, channel_count);
         outputs.push(output);
     }
 }
 
-/// Finishes the stream and emits every tail frame into `outputs`.
 fn finish_and_emit(
     engine: &mut Nlmeans<R>,
     client: &ComputeClient<R>,
-    count: usize,
+    channel_count: usize,
     outputs: &mut Vec<Vec<f32>>,
 ) {
     let tail = engine.finish().expect("finish");
     for _ in 0..tail {
-        let output = emit(engine, client, count);
+        let output = emit(engine, client, channel_count);
         outputs.push(output);
     }
 }
@@ -119,15 +122,15 @@ fn drive(
     engine: &mut Nlmeans<R>,
     client: &ComputeClient<R>,
     frames: &[Vec<f32>],
-    count: usize,
+    channel_count: usize,
 ) -> Vec<Vec<f32>> {
     let mut outputs = Vec::new();
 
     for frame in frames {
-        push_and_emit(engine, client, frame, count, &mut outputs);
+        push_and_emit(engine, client, frame, channel_count, &mut outputs);
     }
 
-    finish_and_emit(engine, client, count, &mut outputs);
+    finish_and_emit(engine, client, channel_count, &mut outputs);
 
     outputs
 }
@@ -141,10 +144,10 @@ fn build_engine(client: &ComputeClient<R>, radius: u32, channels: ChannelMode) -
 
 fn run_engine(radius: u32, channels: ChannelMode, frames: &[Vec<f32>]) -> Vec<Vec<f32>> {
     let client = make_client();
-    let count = channels.count() as usize;
+    let channel_count = channels.count() as usize;
     let mut engine = build_engine(&client, radius, channels);
 
-    drive(&mut engine, &client, frames, count)
+    drive(&mut engine, &client, frames, channel_count)
 }
 
 fn run_oracle(radius: u32, channels: ChannelMode, frames: &[Vec<f32>]) -> Vec<Vec<f32>> {
@@ -274,7 +277,6 @@ fn finish_while_a_frame_is_ready_returns_outputs_pending() {
     assert!(matches!(finished, Err(Error::OutputsPending)));
 }
 
-/// Pushes a stream and finishes it, leaving the whole tail owed.
 fn engine_owing_a_tail(client: &ComputeClient<R>) -> (Nlmeans<R>, usize) {
     let frames = frames(4, 1);
     let mut engine = build_engine(client, 1, ChannelMode::Luma);
@@ -386,6 +388,7 @@ fn reset_mid_stream_with_a_ready_frame_matches_a_fresh_engine() {
     for frame in &frames[..3] {
         ready = push_frame(&mut engine, &client, frame, 1);
     }
+
     assert_eq!(ready, 1);
 
     engine.reset();
@@ -415,11 +418,11 @@ fn drive_u8(engine: &mut Nlmeans<R>, client: &ComputeClient<R>, inputs: &[Handle
 fn emit_u8(
     engine: &mut Nlmeans<R>,
     client: &ComputeClient<R>,
-    count: usize,
+    frame_count: usize,
     pixels: usize,
     outputs: &mut Vec<Vec<u8>>,
 ) {
-    for _ in 0..count {
+    for _ in 0..frame_count {
         let output = client.empty(pixels);
         let planes = [DevicePlane::new(&output, WIDTH, HEIGHT)];
         engine.emit_into(&planes).expect("emit");
@@ -433,9 +436,9 @@ fn emit_u8(
 fn u8_input_matches_f32_input_from_the_ingest_kernel() {
     let client = make_client();
     let codes: Vec<Vec<u8>> = (0..6)
-        .map(|frame| {
+        .map(|frame_index| {
             (0..WIDTH * HEIGHT)
-                .map(|index| ((index + frame * 7) % 251) as u8)
+                .map(|index| ((index + frame_index * 7) % 251) as u8)
                 .collect()
         })
         .collect();
@@ -463,15 +466,15 @@ fn u8_input_matches_f32_input_from_the_ingest_kernel() {
         input: SampleFormat::F32,
         ..u8_geometry
     };
-    let algorithm_a = hq(2);
-    let algorithm_b = hq(2);
-    let mut engine_a = Nlmeans::new(&client, algorithm_a, u8_geometry).expect("build u8");
-    let mut engine_b = Nlmeans::new(&client, algorithm_b, f32_geometry).expect("build f32");
+    let u8_algorithm = hq(2);
+    let f32_algorithm = hq(2);
+    let mut u8_engine = Nlmeans::new(&client, u8_algorithm, u8_geometry).expect("build u8");
+    let mut f32_engine = Nlmeans::new(&client, f32_algorithm, f32_geometry).expect("build f32");
 
-    let frames_a = drive_u8(&mut engine_a, &client, &u8_inputs);
-    let frames_b = drive_u8(&mut engine_b, &client, &f32_inputs);
-    assert_eq!(frames_a.len(), 6);
-    assert_eq!(frames_a, frames_b);
+    let u8_frames = drive_u8(&mut u8_engine, &client, &u8_inputs);
+    let f32_frames = drive_u8(&mut f32_engine, &client, &f32_inputs);
+    assert_eq!(u8_frames.len(), 6);
+    assert_eq!(u8_frames, f32_frames);
 }
 
 #[test]

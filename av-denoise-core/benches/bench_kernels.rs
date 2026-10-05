@@ -1,6 +1,7 @@
 mod kernels;
 
 use av_denoise_core::bench_api::Device;
+use clap::Parser;
 use cubecl::prelude::*;
 use kernels::accumulate::AccumulateBench;
 use kernels::bilateral::BilateralBench;
@@ -46,122 +47,133 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
     println!("--- {backend} ---");
     print_header();
 
-    for &(ch, ch_name) in CHANNELS {
+    for &(channels, channel_name) in CHANNELS {
         run(CopyBench {
             client: client.clone(),
-            ch,
-            ch_name,
+            channels,
+            channel_name,
         });
     }
+
     let ingest_cases = [
         (1920, 1080, 1, "luma", IngestFormat::U8),
         (960, 540, 2, "chroma", IngestFormat::U16Ten),
         (1920, 1080, 3, "yuv", IngestFormat::U16Ten),
         (1920, 1080, 1, "luma", IngestFormat::F32),
     ];
-    for (width, height, ch, ch_name, format) in ingest_cases {
+    for (width, height, channels, channel_name, format) in ingest_cases {
         run(IngestBench {
             client: client.clone(),
             width,
             height,
-            ch,
-            ch_name,
+            channels,
+            channel_name,
             format,
         });
     }
+
     let egress_cases = [
         (1920, 1080, 1, "luma", EgressFormat::U8),
         (960, 540, 2, "chroma", EgressFormat::U16Ten),
         (1920, 1080, 3, "yuv", EgressFormat::U16Ten),
         (1920, 1080, 1, "luma", EgressFormat::F32),
     ];
-    for (width, height, ch, ch_name, format) in egress_cases {
+    for (width, height, channels, channel_name, format) in egress_cases {
         run(EgressBench {
             client: client.clone(),
             width,
             height,
-            ch,
-            ch_name,
+            channels,
+            channel_name,
             format,
         });
     }
-    for &(ch, ch_name) in CHANNELS {
+
+    for &(channels, channel_name) in CHANNELS {
         run(ZeroBench {
             client: client.clone(),
-            ch,
-            ch_name,
+            channels,
+            channel_name,
         });
     }
 
-    for &(ch, ch_name) in CHANNELS {
+    for &(channels, channel_name) in CHANNELS {
         run(DistWeightBench {
             client: client.clone(),
-            ch,
-            ch_name,
-        });
-    }
-    for &(ch, ch_name) in CHANNELS {
-        run(DistWeightRefBench {
-            client: client.clone(),
-            ch,
-            ch_name,
-        });
-    }
-    for &(ch, ch_name) in CHANNELS {
-        run(FusedSingleWindowBench {
-            client: client.clone(),
-            ch,
-            ch_name,
-        });
-    }
-    for &(ch, ch_name) in CHANNELS {
-        run(FusedPairWindowBench {
-            client: client.clone(),
-            ch,
-            ch_name,
-        });
-    }
-    for &(ch, ch_name) in CHANNELS {
-        run(FusedSingleWindowRefBench {
-            client: client.clone(),
-            ch,
-            ch_name,
-        });
-    }
-    for &(ch, ch_name) in CHANNELS {
-        run(FusedPairWindowRefBench {
-            client: client.clone(),
-            ch,
-            ch_name,
+            channels,
+            channel_name,
         });
     }
 
-    for &(ch, ch_name) in CHANNELS {
+    for &(channels, channel_name) in CHANNELS {
+        run(DistWeightRefBench {
+            client: client.clone(),
+            channels,
+            channel_name,
+        });
+    }
+
+    for &(channels, channel_name) in CHANNELS {
+        run(FusedSingleWindowBench {
+            client: client.clone(),
+            channels,
+            channel_name,
+        });
+    }
+
+    for &(channels, channel_name) in CHANNELS {
+        run(FusedPairWindowBench {
+            client: client.clone(),
+            channels,
+            channel_name,
+        });
+    }
+
+    for &(channels, channel_name) in CHANNELS {
+        run(FusedSingleWindowRefBench {
+            client: client.clone(),
+            channels,
+            channel_name,
+        });
+    }
+
+    for &(channels, channel_name) in CHANNELS {
+        run(FusedPairWindowRefBench {
+            client: client.clone(),
+            channels,
+            channel_name,
+        });
+    }
+
+    for &(channels, channel_name) in CHANNELS {
         run(DistanceBench {
             client: client.clone(),
-            ch,
-            ch_name,
+            channels,
+            channel_name,
         });
     }
-    for &(ch, ch_name) in CHANNELS {
+
+    for &(channels, channel_name) in CHANNELS {
         run(DistanceRefBench {
             client: client.clone(),
-            ch,
-            ch_name,
+            channels,
+            channel_name,
         });
     }
-    for &(ch, ch_name) in CHANNELS {
+
+    for &(channels, channel_name) in CHANNELS {
         run(DistancePairBench {
             client: client.clone(),
-            ch,
-            ch_name,
+            channels,
+            channel_name,
         });
     }
-    for &(ch, ch_name) in CHANNELS {
+
+    for &(channels, channel_name) in CHANNELS {
         run(DistancePairRefBench {
             client: client.clone(),
-            ch,
-            ch_name,
+            channels,
+            channel_name,
         });
     }
 
@@ -174,45 +186,44 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
     run(VWeightBench {
         client: client.clone(),
     });
-    for &(ch, ch_name) in CHANNELS {
+
+    for &(channels, channel_name) in CHANNELS {
         run(VWeightPairAccBench {
             client: client.clone(),
-            ch,
-            ch_name,
+            channels,
+            channel_name,
         });
     }
 
-    for &(ch, ch_name) in CHANNELS {
+    for &(channels, channel_name) in CHANNELS {
         run(AccumulateBench {
             client: client.clone(),
-            ch,
-            ch_name,
+            channels,
+            channel_name,
         });
     }
-    for &(ch, ch_name) in CHANNELS {
+
+    for &(channels, channel_name) in CHANNELS {
         run(FinishBench {
             client: client.clone(),
-            ch,
-            ch_name,
+            channels,
+            channel_name,
         });
     }
 
-    for &(ch, ch_name) in CHANNELS {
+    for &(channels, channel_name) in CHANNELS {
         run(BilateralBench {
             client: client.clone(),
-            ch,
-            ch_name,
+            channels,
+            channel_name,
         });
     }
 
-    // Immerkær noise estimate (stage 1 + stage 2 back-to-back).
     run(NoisePartialBench {
         client: client.clone(),
     });
 
-    // Temporal-residual noise-stats kernel, the default `luma_fields`
-    // off variant every caller but nl4d's luma pass uses, and the on
-    // variant that pass will enable.
+    // `luma_fields` off as nlmeans runs it, and on as nl4d runs it with the noise map.
     run(TemporalNoiseStatsBench {
         client: client.clone(),
         luma_fields: false,
@@ -222,9 +233,8 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         luma_fields: true,
     });
 
-    // Motion-compensation kernels. Pyramid build and analyse are
-    // luma-only (ME doesn't look at chroma); warp runs per channel
-    // mode because its memory traffic scales with `stored_ch`.
+    // Pyramid build and block matching are luma-only since motion estimation ignores chroma. Warp
+    // runs per channel mode because its memory traffic scales with `stored_ch`.
     run(DownscaleBench {
         client: client.clone(),
     });
@@ -243,6 +253,7 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
     run(MvRegulariseBench {
         client: client.clone(),
     });
+
     for &size in GRAIN_SIZES {
         run(GrainSaveVectorsBench {
             client: client.clone(),
@@ -257,21 +268,23 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
             size,
         });
     }
-    for &(ch, ch_name) in CHANNELS {
+
+    for &(channels, channel_name) in CHANNELS {
         run(CollabFusedBench {
             client: client.clone(),
-            ch,
-            ch_name,
+            channels,
+            channel_name,
             split_mv: false,
             noise_curve: false,
             strength_map: false,
             pooled: false,
         });
     }
+
     run(CollabFusedBench {
         client: client.clone(),
-        ch: 1,
-        ch_name: "luma",
+        channels: 1,
+        channel_name: "luma",
         split_mv: false,
         noise_curve: true,
         strength_map: false,
@@ -279,8 +292,8 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
     });
     run(CollabFusedBench {
         client: client.clone(),
-        ch: 1,
-        ch_name: "luma",
+        channels: 1,
+        channel_name: "luma",
         split_mv: false,
         noise_curve: true,
         strength_map: true,
@@ -288,43 +301,47 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
     });
     run(CollabFusedBench {
         client: client.clone(),
-        ch: 1,
-        ch_name: "luma",
+        channels: 1,
+        channel_name: "luma",
         split_mv: false,
         noise_curve: true,
         strength_map: true,
         pooled: true,
     });
-    for &(ch, ch_name) in CHANNELS {
+
+    for &(channels, channel_name) in CHANNELS {
         run(CollabFusedBench {
             client: client.clone(),
-            ch,
-            ch_name,
+            channels,
+            channel_name,
             split_mv: true,
             noise_curve: false,
             strength_map: false,
             pooled: false,
         });
     }
-    for &(ch, ch_name) in CHANNELS {
+
+    for &(channels, channel_name) in CHANNELS {
         run(CollabNormaliseBench {
             client: client.clone(),
-            ch,
-            ch_name,
+            channels,
+            channel_name,
         });
     }
-    for &(ch, ch_name) in CHANNELS {
+
+    for &(channels, channel_name) in CHANNELS {
         run(CollabZeroAccumBench {
             client: client.clone(),
-            ch,
-            ch_name,
+            channels,
+            channel_name,
         });
     }
-    for &(ch, ch_name) in CHANNELS {
+
+    for &(channels, channel_name) in CHANNELS {
         run(WarpBench {
             client: client.clone(),
-            ch,
-            ch_name,
+            channels,
+            channel_name,
         });
     }
 
@@ -334,18 +351,16 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
 #[derive(clap::Parser, Debug)]
 #[command(about = "NLMeans per-kernel benchmarks", long_about = None)]
 struct Cli {
-    /// GPU device to bind to. Format: `default`, `discrete[:N]`,
-    /// `integrated[:N]`, `virtual[:N]`, or `cpu`.
+    /// GPU device to bind to, one of `default`, `discrete[:N]`, `integrated[:N]`, `virtual[:N]` or `cpu`.
     #[arg(long, default_value = "default")]
     device: Device,
 
-    /// Swallowed: cargo passes this when invoking the bench binary.
+    /// Swallowed, since cargo passes this when invoking the bench binary.
     #[arg(long, hide = true)]
     bench: bool,
 }
 
 fn main() {
-    use clap::Parser;
     let cli = Cli::parse();
 
     println!("NLMeans Per-Kernel Benchmarks - 1920x1080 (TimingMethod::Device)");

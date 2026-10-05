@@ -25,43 +25,49 @@ use crate::collab::kernels::aggregate::{
 };
 use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{MAX_K, PATCH_SIZE, grid_frames, needs_warp_uniform_search};
+use crate::collab::{MAX_K, MAX_TEMPORAL_RADIUS, PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
-use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS, NlmDenoiser, NlmParams};
+use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NOISE_CURVE_BINS, NlmDenoiser, NlmParams};
 
-/// A static clip, camera and content both still, with independent
-/// per-frame noise. Every emitted frame must come out well above the
-/// noisy input's own PSNR against the clean base.
 #[test]
 fn denoises_a_static_noisy_clip() {
     let client = make_client();
-    let (w, h) = (64u32, 64u32);
+    let (width, height) = (64u32, 64u32);
     let radius = 2u32;
-    let base = textured_base(w, h);
-    let n = 9usize;
+    let base = textured_base(width, height);
+    let frame_count = 9usize;
 
-    let noisy_frames: Vec<Vec<f32>> = (0..n as u32)
-        .map(|seed| noisy_copy_of(&base, w, h, SIGMA, seed))
+    let noisy_frames: Vec<Vec<f32>> = (0..frame_count as u32)
+        .map(|seed| noisy_copy_of(&base, width, height, SIGMA, seed))
         .collect();
 
     let params = static_clip_params(radius);
-    let mut d = Nl4dDenoiser::<R>::new(&client, params, w, h).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, width, height).expect("construction failed");
 
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     for frame in &noisy_frames {
-        d.push_frame(frame);
-        if let Some(frame) = d.denoise().expect("denoise failed") {
+        denoiser.push_frame(frame);
+        if let Some(frame) = denoiser.denoise().expect("denoise failed") {
             outputs.push(frame);
         }
     }
-    d.flush(|frame| outputs.push(frame.to_vec()))
+
+    denoiser
+        .flush(|frame| {
+            let values = frame.to_vec();
+            outputs.push(values);
+        })
         .expect("flush failed");
 
-    assert_eq!(outputs.len(), n, "expected one emitted frame per pushed frame");
+    assert_eq!(
+        outputs.len(),
+        frame_count,
+        "expected one emitted frame per pushed frame"
+    );
 
-    for (i, out) in outputs.iter().enumerate() {
+    for (i, output) in outputs.iter().enumerate() {
         let noisy_psnr = psnr(&noisy_frames[i], &base);
-        let out_psnr = psnr(out, &base);
+        let out_psnr = psnr(output, &base);
         assert!(
             out_psnr > noisy_psnr + 6.0,
             "frame {i}: expected at least a 6 dB PSNR improvement over the noisy input, got \
@@ -70,58 +76,59 @@ fn denoises_a_static_noisy_clip() {
     }
 }
 
-/// `spatial_radius = 16` with `temporal_radius = MAX_TEMPORAL_RADIUS` (8)
-/// is the widest configuration the parameter ranges allow, and so the one
-/// whose cross-frame accumulator comes closest to overflowing `i32`.
-///
-/// `cross_frame_accum_scale` sizes the fixed-point scale for it, so this
-/// combination should denoise as cleanly as any other rather than
-/// producing the non-finite or wildly out-of-range values an overflow
-/// leaves behind.
+/// The widest radii the parameter ranges allow come closest to overflowing the `i32` cross-frame
+/// accumulator, so they must still denoise cleanly.
 #[test]
 fn denoises_at_the_widest_spatial_and_temporal_radius() {
     let client = make_client();
-    let (w, h) = (64u32, 64u32);
-    let radius = crate::collab::MAX_TEMPORAL_RADIUS;
-    let base = textured_base(w, h);
-    let n = 3usize;
+    let (width, height) = (64u32, 64u32);
+    let radius = MAX_TEMPORAL_RADIUS;
+    let base = textured_base(width, height);
+    let frame_count = 3usize;
 
-    let noisy_frames: Vec<Vec<f32>> = (0..n as u32)
-        .map(|seed| noisy_copy_of(&base, w, h, SIGMA, seed))
+    let noisy_frames: Vec<Vec<f32>> = (0..frame_count as u32)
+        .map(|seed| noisy_copy_of(&base, width, height, SIGMA, seed))
         .collect();
 
+    let clip_params = static_clip_params(radius);
     let params = Nl4dParams {
         spatial_radius: 16,
-        ..static_clip_params(radius)
+        ..clip_params
     };
-    let mut d = Nl4dDenoiser::<R>::new(&client, params, w, h).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, width, height).expect("construction failed");
 
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     for frame in &noisy_frames {
-        d.push_frame(frame);
-        if let Some(frame) = d.denoise().expect("denoise failed") {
+        denoiser.push_frame(frame);
+        if let Some(frame) = denoiser.denoise().expect("denoise failed") {
             outputs.push(frame);
         }
     }
-    d.flush(|frame| outputs.push(frame.to_vec()))
+
+    denoiser
+        .flush(|frame| {
+            let values = frame.to_vec();
+            outputs.push(values);
+        })
         .expect("flush failed");
 
-    assert_eq!(outputs.len(), n, "expected one emitted frame per pushed frame");
+    assert_eq!(
+        outputs.len(),
+        frame_count,
+        "expected one emitted frame per pushed frame"
+    );
 
-    for (i, out) in outputs.iter().enumerate() {
-        // An `i32` overflow wraps the fixed-point accumulator into a huge
-        // or negative value, which `collab_normalise` then divides
-        // through into non-finite or wildly out-of-range output. Checking
-        // finiteness first gives a clearer failure than letting a bad
-        // value fall through into the PSNR comparison below.
+    for (i, output) in outputs.iter().enumerate() {
+        // An overflow wraps the accumulator into non-finite output, so checking finiteness first
+        // gives a clearer failure than the PSNR comparison.
         assert!(
-            out.iter().all(|v| v.is_finite()),
+            output.iter().all(|value| value.is_finite()),
             "frame {i}: output contains non-finite values, a symptom of the accumulator \
              overflow this test guards against"
         );
 
         let noisy_psnr = psnr(&noisy_frames[i], &base);
-        let out_psnr = psnr(out, &base);
+        let out_psnr = psnr(output, &base);
         assert!(
             out_psnr > noisy_psnr,
             "frame {i}: expected a PSNR improvement over the noisy input at spatial_radius=16, \
@@ -130,76 +137,65 @@ fn denoises_at_the_widest_spatial_and_temporal_radius() {
     }
 }
 
-/// Guards `run_pass`'s whole-ring accumulator zero against the GPU's
-/// per-dimension dispatch limit.
+/// Guards the whole-ring accumulator zero against the 65,535 workgroup limit on a single 1D
+/// dispatch.
 ///
-/// A single 1D dispatch has to stay at or under 65,535 workgroups on
-/// every backend this project targets. Zeroing the whole cross-frame ring
-/// in one dispatch would need `accum_ring_len` slots
-/// (`width * height * stored_ch * (1 + 2 * temporal_radius)`) at 256
-/// threads per workgroup, which a large enough resolution and
-/// `temporal_radius` pushes over that limit.
-///
-/// A GPU that rejects an oversized dispatch leaves the ring holding
-/// `client.empty`'s undefined memory instead of zero. Every later pass
-/// then scatters real contributions on top of that, and
-/// `collab_normalise` divides it through into wildly wrong output.
-///
-/// `1024 * 1024` at `temporal_radius = MAX_TEMPORAL_RADIUS` (a
-/// `1 + 2 * 8 = 17`-frame ring) needs `1024 * 1024 * 17 = 17,825,792`
-/// accumulator elements, `69,632` workgroups at 256 threads each,
-/// comfortably over the limit. This is also the exact failure mode a
-/// real run hit at `temporal_radius = 4` on a 1080p input, `72,900`
-/// workgroups for the luma plane alone.
-///
-/// The frame count pushes the ring past a second full cycle
-/// (`2 * total_frames + 3`), so this also stands as a regression guard
-/// for slot reuse across more than one lap of the ring, not only the
-/// pass-0 dispatch itself.
+/// A rejected dispatch leaves the ring holding `client.empty` memory instead of zero, which
+/// normalises into wildly wrong output. `1024 * 1024` at a 17-frame ring needs 69,632 workgroups
+/// at 256 threads each. 1080p luma at `temporal_radius = 4` needs 72,900 workgroups. The frame
+/// count runs the ring past a second full lap, so this also guards slot reuse.
 #[test]
 fn survives_a_ring_size_that_would_overflow_a_single_zero_dispatch() {
     let client = make_client();
-    let (w, h) = (1024u32, 1024u32);
-    let radius = crate::collab::MAX_TEMPORAL_RADIUS;
-    let base = textured_base(w, h);
+    let (width, height) = (1024u32, 1024u32);
+    let radius = MAX_TEMPORAL_RADIUS;
+    let base = textured_base(width, height);
     let total_frames = 1 + 2 * radius;
-    let n = (2 * total_frames + 3) as usize;
+    let frame_count = (2 * total_frames + 3) as usize;
 
-    let noisy_frames: Vec<Vec<f32>> = (0..n as u32)
-        .map(|seed| noisy_copy_of(&base, w, h, SIGMA, seed))
+    let noisy_frames: Vec<Vec<f32>> = (0..frame_count as u32)
+        .map(|seed| noisy_copy_of(&base, width, height, SIGMA, seed))
         .collect();
 
+    // A narrow search keeps the test's time on the ring size under test.
+    let clip_params = static_clip_params(radius);
     let params = Nl4dParams {
-        // Cheaper than the module defaults so the test spends its time
-        // on the ring size under test, not on a wide spatial search
-        // this bug has nothing to do with.
         spatial_radius: 2,
         refine: 1,
-        ..static_clip_params(radius)
+        ..clip_params
     };
-    let mut d = Nl4dDenoiser::<R>::new(&client, params, w, h).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, width, height).expect("construction failed");
 
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     for frame in &noisy_frames {
-        d.push_frame(frame);
-        if let Some(frame) = d.denoise().expect("denoise failed") {
+        denoiser.push_frame(frame);
+        if let Some(frame) = denoiser.denoise().expect("denoise failed") {
             outputs.push(frame);
         }
     }
-    d.flush(|frame| outputs.push(frame.to_vec()))
+
+    denoiser
+        .flush(|frame| {
+            let values = frame.to_vec();
+            outputs.push(values);
+        })
         .expect("flush failed");
 
-    assert_eq!(outputs.len(), n, "expected one emitted frame per pushed frame");
+    assert_eq!(
+        outputs.len(),
+        frame_count,
+        "expected one emitted frame per pushed frame"
+    );
 
-    for (i, out) in outputs.iter().enumerate() {
+    for (i, output) in outputs.iter().enumerate() {
         assert!(
-            out.iter().all(|v| v.is_finite()),
+            output.iter().all(|value| value.is_finite()),
             "frame {i}: output contains non-finite values, a symptom of the pass-0 dispatch \
              this test guards against leaving the accumulator ring unzeroed"
         );
 
         let noisy_psnr = psnr(&noisy_frames[i], &base);
-        let out_psnr = psnr(out, &base);
+        let out_psnr = psnr(output, &base);
         assert!(
             out_psnr > noisy_psnr,
             "frame {i}: expected a PSNR improvement over the noisy input, got noisy={noisy_psnr:.4} dB \
@@ -209,91 +205,62 @@ fn survives_a_ring_size_that_would_overflow_a_single_zero_dispatch() {
     }
 }
 
-/// Guards the `centre_slot` contract `run_pass` depends on. The
-/// slot the pass is centred on is what the reference patch is read from
-/// and what an untouched member scatters back into, and nothing in the
-/// type system pins it to the frame the caller means, so this test
-/// plants content only one real frame carries and checks it survives in
-/// that frame's own emitted output.
+/// Each pass must centre on the ring slot of the frame the caller means.
 ///
-/// `denoises_a_static_noisy_clip` is a weak canary for this specific
-/// mismatch: every ring slot there holds the same base content, so
-/// feeding the filter a valid but wrong slot would barely move its PSNR
-/// (a neighbour frame denoises to essentially the same clean content).
-/// Here one frame alone carries a strong, low-frequency marker block no
-/// other frame has. If the pass ever centred on a different physical
-/// ring slot, none of the marker's own patches would be a reference at
-/// all, and the marker would be attenuated or absent from its frame's
-/// own completed output.
-///
-/// Emission lags `temporal_radius` passes behind the pass a frame is
-/// the centre of (see [`Nl4dDenoiser::submit_passes`]), so this
-/// pushes `3 * radius + 1` frames, interleaving a `denoise` after
-/// every push the way a real caller does, and collects every emitted
-/// output in order. Emitted output `k` is always real frame `k`'s own
-/// completed region (see that same doc comment for why), so the marker,
-/// planted on real frame `radius`, is checked against emitted output
-/// `radius`.
-///
-/// The marker is a big flat block, not fine detail, so ordinary
-/// shrinkage cannot legitimately remove it, and the assertion checks a
-/// wide margin rather than an exact value, so ordinary filtering noise
-/// does not trip it.
+/// Only one frame carries a large flat marker block. A pass centred on a different slot would
+/// have none of the marker's patches as references, so the marker would fade from its frame's
+/// output. A flat block cannot be removed by ordinary shrinkage, and the check uses a wide margin
+/// so filtering noise does not trip it.
 #[test]
 fn output_carries_its_own_frames_marker_no_other_frame_has() {
     let client = make_client();
-    let (w, h) = (64u32, 64u32);
+    let (width, height) = (64u32, 64u32);
     let radius = 2u32;
-    let base = textured_base(w, h);
+    let base = textured_base(width, height);
 
-    // `textured_base` never exceeds 0.65 (0.5 centre +/- 0.15 amplitude),
-    // so a marker at 0.92 is unambiguous against it even before adding
-    // noise or considering denoising error.
+    // `textured_base` never exceeds 0.65, so a marker at 0.92 is unambiguous against it.
     const MARKER: f32 = 0.92;
     const MARKER_X0: u32 = 24;
     const MARKER_Y0: u32 = 24;
     const MARKER_SIZE: u32 = 24;
-    // Read only the block's interior, away from its own edges, so patch
-    // boundary blending against the surrounding non-marker texture can't
-    // explain a low reading.
+    // Read only the block's interior, so blending at its edges cannot explain a low reading.
     const INTERIOR_MARGIN: u32 = 8;
 
     let mut marker_clean = base.clone();
     for y in MARKER_Y0..MARKER_Y0 + MARKER_SIZE {
         for x in MARKER_X0..MARKER_X0 + MARKER_SIZE {
-            marker_clean[(y * w + x) as usize] = MARKER;
+            marker_clean[(y * width + x) as usize] = MARKER;
         }
     }
 
-    // The pass centred on real frame `radius` only finishes contributing
-    // to real frame `radius`'s own output `radius` passes later, and the
-    // pass centred on frame `f` runs once `f + radius + 1` real frames
-    // have been pushed, so `3 * radius + 1` real pushes are exactly
-    // enough to reach that emission without needing `flush` too.
+    // The pass centred on frame `f` runs once `f + radius + 1` frames are pushed, and frame
+    // `radius` emits `radius` passes after its own, so `3 * radius + 1` pushes reach it without
+    // `flush`.
     let marker_frame = radius;
-    let n_frames = 3 * radius + 1;
-    let frames: Vec<Vec<f32>> = (0..n_frames)
+    let frame_count = 3 * radius + 1;
+    let frames: Vec<Vec<f32>> = (0..frame_count)
         .map(|seed| {
             let content = if seed == marker_frame {
                 &marker_clean
             } else {
                 &base
             };
-            noisy_copy_of(content, w, h, SIGMA, seed)
+            noisy_copy_of(content, width, height, SIGMA, seed)
         })
         .collect();
 
     let params = static_clip_params(radius);
-    let mut d = Nl4dDenoiser::<R>::new(&client, params, w, h).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, width, height).expect("construction failed");
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     for frame in &frames {
-        d.push_frame(frame);
-        if let Some(frame) = d.denoise().expect("denoise failed") {
+        denoiser.push_frame(frame);
+        if let Some(frame) = denoiser.denoise().expect("denoise failed") {
             outputs.push(frame);
         }
     }
 
-    let out = outputs
+    // Outputs emit in frame order, so output `k` is real frame `k`'s own completed region.
+    let output = outputs
         .get(marker_frame as usize)
         .expect("enough frames were pushed for frame `radius`'s own output to have emitted");
 
@@ -301,10 +268,11 @@ fn output_carries_its_own_frames_marker_no_other_frame_has() {
     let mut count = 0usize;
     for y in (MARKER_Y0 + INTERIOR_MARGIN)..(MARKER_Y0 + MARKER_SIZE - INTERIOR_MARGIN) {
         for x in (MARKER_X0 + INTERIOR_MARGIN)..(MARKER_X0 + MARKER_SIZE - INTERIOR_MARGIN) {
-            sum += out[(y * w + x) as usize] as f64;
+            sum += output[(y * width + x) as usize] as f64;
             count += 1;
         }
     }
+
     let mean = sum / count as f64;
     eprintln!("output_carries_its_own_frames_marker_no_other_frame_has: marker interior mean = {mean:.4}");
 
@@ -317,39 +285,39 @@ fn output_carries_its_own_frames_marker_no_other_frame_has() {
     );
 }
 
-/// `flush` must emit exactly as many frames as were pushed, whatever mix
-/// of `denoise` and `flush` produced them.
 #[test]
 fn flush_emits_exactly_the_pushed_frame_count() {
     let client = make_client();
-    let (w, h) = (64u32, 64u32);
+    let (width, height) = (64u32, 64u32);
     let radius = 2u32;
-    let base = textured_base(w, h);
-    let n = 7u32;
+    let base = textured_base(width, height);
+    let frame_count = 7u32;
 
     let params = static_clip_params(radius);
-    let mut d = Nl4dDenoiser::<R>::new(&client, params, w, h).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, width, height).expect("construction failed");
 
     let mut emitted = 0usize;
-    for seed in 0..n {
-        let frame = noisy_copy_of(&base, w, h, SIGMA, seed);
-        d.push_frame(&frame);
-        if d.denoise().expect("denoise failed").is_some() {
+    for seed in 0..frame_count {
+        let frame = noisy_copy_of(&base, width, height, SIGMA, seed);
+        denoiser.push_frame(&frame);
+        if denoiser.denoise().expect("denoise failed").is_some() {
             emitted += 1;
         }
     }
-    d.flush(|_| emitted += 1).expect("flush failed");
 
-    assert_eq!(emitted, n as usize, "expected exactly {n} emitted frames");
+    denoiser.flush(|_| emitted += 1).expect("flush failed");
+
+    assert_eq!(
+        emitted, frame_count as usize,
+        "expected exactly {frame_count} emitted frames"
+    );
 }
 
-/// Launches the same collaborative and aggregation kernels
-/// [`Nl4dDenoiser::run_pass`] runs, standalone, for a
-/// single-frame ring at `radius = 0`. This is the "spatial-only" arm of
-/// the hypothesis test below: identical grouping (no admission gate),
-/// identical filter (hard threshold, same `lambda_ht`), identical noise
-/// floor and `c_min`, with the only difference being that no temporal
-/// candidates exist to search.
+/// Runs the denoiser's collaborative and aggregation kernels standalone on a single-frame ring at
+/// `radius = 0`.
+///
+/// Grouping, filter, noise floor and `c_min` match the denoiser, so the only difference is that
+/// no temporal candidates exist to search.
 #[expect(
     clippy::too_many_arguments,
     reason = "the test helper takes the full set of parameters its cases vary"
@@ -357,8 +325,8 @@ fn flush_emits_exactly_the_pushed_frame_count() {
 fn run_spatial_only(
     client: &ComputeClient<R>,
     noisy_centre: &[f32],
-    w: u32,
-    h: u32,
+    width: u32,
+    height: u32,
     spatial_radius: u32,
     refine: u32,
     c_min: f32,
@@ -369,47 +337,62 @@ fn run_spatial_only(
     let k_max = MAX_K;
     let stored_ch = 1u32;
     let channels_count = 1u32;
-    let refs_x = refs_along(w);
-    let refs_y = refs_along(h);
-    let refs = ref_count(w, h);
-    let pixels = (w * h) as usize;
+    let refs_x = refs_along(width);
+    let refs_y = refs_along(height);
+    let refs = ref_count(width, height);
+    let pixels = (width * height) as usize;
     let frame_len = pixels;
 
-    let ring_buf = client.create_from_slice(f32::as_bytes(noisy_centre));
+    let centre_bytes = f32::as_bytes(noisy_centre);
+    let ring_buf = client.create_from_slice(centre_bytes);
     let mv_dummy = client.empty(size_of::<i32>());
     let conf_dummy = client.empty(size_of::<f32>());
     let neighbour_slots_dummy = client.empty(size_of::<u32>());
     let group_weight = client.empty(refs * size_of::<f32>());
-    let sigma_buf = client.create_from_slice(f32::as_bytes(&[sigma]));
+
+    let sigma_values = [sigma];
     let dct_profile = dct_noise_profile(0.0);
-    let dct_profile_buf = client.create_from_slice(f32::as_bytes(&dct_profile));
-    let kaiser_buf = client.create_from_slice(f32::as_bytes(&kaiser_window(0.0)));
-    let zero_curve = client.create_from_slice(f32::as_bytes(&[0.0f32; NOISE_CURVE_BINS]));
-    let (map_cols, map_rows) = strength_map_dims(w, h);
+    let kaiser = kaiser_window(0.0);
+    let zeroed_curve = [0.0f32; NOISE_CURVE_BINS];
+    let sigma_bytes = f32::as_bytes(&sigma_values);
+    let sigma_buf = client.create_from_slice(sigma_bytes);
+    let dct_profile_bytes = f32::as_bytes(&dct_profile);
+    let dct_profile_buf = client.create_from_slice(dct_profile_bytes);
+    let kaiser_bytes = f32::as_bytes(&kaiser);
+    let kaiser_buf = client.create_from_slice(kaiser_bytes);
+    let curve_bytes = f32::as_bytes(&zeroed_curve);
+    let zero_curve = client.create_from_slice(curve_bytes);
+
+    let (map_cols, map_rows) = strength_map_dims(width, height);
     let map_len = (map_cols * map_rows) as usize;
     let unit_map = vec![1.0f32; map_len];
-    let unit_map_buf = client.create_from_slice(f32::as_bytes(&unit_map));
+    let unit_map_bytes = f32::as_bytes(&unit_map);
+    let unit_map_buf = client.create_from_slice(unit_map_bytes);
     let accum = client.empty(frame_len * size_of::<i32>());
     let wsum = client.empty(pixels * size_of::<i32>());
     let output = client.empty(frame_len * size_of::<f32>());
 
-    let agg_grid = CubeCount::new_2d(
-        w.div_ceil(crate::nlmeans::BLOCK_X),
-        h.div_ceil(crate::nlmeans::BLOCK_Y),
-    );
-    let agg_dim = CubeDim::new_2d(crate::nlmeans::BLOCK_X, crate::nlmeans::BLOCK_Y);
+    let agg_cubes_x = width.div_ceil(BLOCK_X);
+    let agg_cubes_y = height.div_ceil(BLOCK_Y);
+    let agg_grid = CubeCount::new_2d(agg_cubes_x, agg_cubes_y);
+    let agg_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
     let zero_dim = 256u32;
     let zero_workgroups = (frame_len as u32).div_ceil(zero_dim);
     let zero_grid = CubeCount::new_1d(zero_workgroups);
+    let zero_cube_dim = CubeDim::new_1d(zero_dim);
 
-    let wnorm = weight_scale(sigma, &dct_profile);
+    let fused_x = fused_cubes_x(width);
+    let fused_grid = CubeCount::new_2d(fused_x, refs_y);
+    let fused_dim = CubeDim::new_1d(64);
+    let weight_norm = weight_scale(sigma, &dct_profile);
+    let grid_frame_count = grid_frames(0);
     let centre_slot = 0u32;
 
     unsafe {
         collab_zero_accum::launch_unchecked::<R>(
             client,
             zero_grid,
-            CubeDim::new_1d(zero_dim),
+            zero_cube_dim,
             ArrayArg::from_raw_parts(accum.clone(), frame_len),
             ArrayArg::from_raw_parts(wsum.clone(), pixels),
             0u32,
@@ -420,8 +403,8 @@ fn run_spatial_only(
 
         collab_fused::launch_unchecked::<R>(
             client,
-            CubeCount::new_2d(fused_cubes_x(w), refs_y),
-            CubeDim::new_1d(64),
+            fused_grid,
+            fused_dim,
             stored_ch as usize,
             ArrayArg::from_raw_parts(ring_buf, noisy_centre.len()),
             ArrayArg::from_raw_parts(mv_dummy, 1),
@@ -440,11 +423,11 @@ fn run_spatial_only(
             lambda_ht,
             0u32,
             STRENGTH_MAP_OFF,
-            wnorm,
+            weight_norm,
             ACCUM_SCALE,
             warp_uniform,
             0u32,
-            grid_frames(0),
+            grid_frame_count,
             refine,
             1u32,
             1u32,
@@ -452,8 +435,8 @@ fn run_spatial_only(
             8u32,
             1u32,
             1u32,
-            w,
-            h,
+            width,
+            height,
             channels_count,
             k_max,
             stored_ch,
@@ -474,8 +457,8 @@ fn run_spatial_only(
             ArrayArg::from_raw_parts(wsum, pixels),
             ArrayArg::from_raw_parts(output.clone(), frame_len),
             0u32,
-            w,
-            h,
+            width,
+            height,
             channels_count,
             stored_ch,
         );
@@ -485,59 +468,51 @@ fn run_spatial_only(
     f32::from_bytes(&bytes).to_vec()
 }
 
-/// The hypothesis under test, as a unit assertion: on a static clip
-/// where temporal candidates are near-duplicates, grouping across the
-/// temporal window should cancel more grain than a spatial-only search
-/// on the same frame ever could.
+/// On a static clip, grouping across the temporal window cancels more grain than a spatial-only
+/// search on the same frame.
 ///
-/// Both arms run the exact same kernel, at the same `spatial_radius`,
-/// `c_min`, `lambda_ht`, and fixed `sigma`, over the identical noisy
-/// centre frame. The only difference is whether the search has a
-/// temporal window to look in.
-///
-/// `denoise` is called after every push, exactly the way a real
-/// caller drives this denoiser, and every emitted output is collected in
-/// order. Emitted output `k` is real frame `k`'s own completed region
-/// (see [`Nl4dDenoiser::submit_passes`]'s scheduling), which is only
-/// ready `radius` passes after the pass centred on frame `k` itself, so
-/// `3 * radius + 1` frames are pushed.
+/// Both arms run the same kernel with the same `spatial_radius`, `c_min`, `lambda_ht` and fixed
+/// `sigma` over the same noisy centre frame. Frame `radius` emits `radius` passes after its own,
+/// so `3 * radius + 1` frames are pushed.
 #[test]
 fn temporal_grouping_beats_spatial_only_on_a_static_clip() {
     let client = make_client();
-    let (w, h) = (64u32, 64u32);
+    let (width, height) = (64u32, 64u32);
     let radius = 2u32;
-    let base = textured_base(w, h);
+    let base = textured_base(width, height);
 
     let noisy_frames: Vec<Vec<f32>> = (0..(3 * radius + 1))
-        .map(|seed| noisy_copy_of(&base, w, h, SIGMA, seed))
+        .map(|seed| noisy_copy_of(&base, width, height, SIGMA, seed))
         .collect();
     let centre_index = radius as usize;
 
     let params = static_clip_params(radius);
-    let mut d = Nl4dDenoiser::<R>::new(&client, params, w, h).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, width, height).expect("construction failed");
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     for frame in &noisy_frames {
-        d.push_frame(frame);
-        if let Some(frame) = d.denoise().expect("denoise failed") {
+        denoiser.push_frame(frame);
+        if let Some(frame) = denoiser.denoise().expect("denoise failed") {
             outputs.push(frame);
         }
     }
+
     let temporal_out = outputs
         .get(centre_index)
         .expect("enough frames were pushed for frame `radius`'s own output to have emitted")
         .clone();
 
+    let warp_uniform = needs_warp_uniform_search(&client);
     let spatial_out = run_spatial_only(
         &client,
         &noisy_frames[centre_index],
-        w,
-        h,
+        width,
+        height,
         SPATIAL_RADIUS,
         REFINE,
         C_MIN,
         LAMBDA_HT,
         SIGMA,
-        needs_warp_uniform_search(&client),
+        warp_uniform,
     );
 
     let temporal_psnr = psnr(&temporal_out, &base);
@@ -556,65 +531,50 @@ fn temporal_grouping_beats_spatial_only_on_a_static_clip() {
     );
 }
 
-/// Isolates cross-frame aggregation's own contribution, apart from
-/// temporal grouping's.
+/// Isolates cross-frame aggregation's own contribution from temporal grouping's.
 ///
-/// Both arms here group across the identical radius-2 temporal window,
-/// with the identical `lambda_ht`, and run the identical kernel. They
-/// differ only in which filtered members reach the aggregate for real
-/// frame `radius`'s own output.
-///
-/// The cross-frame arm is `Nl4dDenoiser` itself, which keeps every member
-/// that ever matched into that frame, whatever pass found it.
-///
-/// The centre-only arm runs the one pass centred on that frame and reads
-/// back only the centre slot's own region of the accumulator ring. The
-/// kernel scatters each member into the region of the frame it was
-/// matched in, so that region holds exactly the members whose own frame
-/// is the centre, which is what a single-pass centre-only design would
-/// have produced. It is built by driving the same front end
-/// (`NlmDenoiser::submit_machinery`) directly, so the ring, the motion
-/// field, and the noise estimate are all the ones the real denoiser
-/// used.
+/// Both arms group across the same radius-2 window with the same `lambda_ht` and kernel. The
+/// cross-frame arm is the denoiser itself, which keeps every member that matched into the judged
+/// frame from any pass. The centre-only arm runs the one pass centred on that frame through the
+/// same `NlmDenoiser` front end and reads back only the centre slot's region of the ring. Each
+/// member scatters into the region of the frame it was matched in, so that region holds exactly
+/// the members whose own frame is the centre.
 #[test]
 fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
     let client = make_client();
-    let (w, h) = (64u32, 64u32);
+    let (width, height) = (64u32, 64u32);
     let radius = 2u32;
-    let base = textured_base(w, h);
+    let base = textured_base(width, height);
 
-    let n_frames = 3 * radius + 1;
-    let frames: Vec<Vec<f32>> = (0..n_frames)
-        .map(|seed| noisy_copy_of(&base, w, h, SIGMA, seed))
+    let frame_count = 3 * radius + 1;
+    let frames: Vec<Vec<f32>> = (0..frame_count)
+        .map(|seed| noisy_copy_of(&base, width, height, SIGMA, seed))
         .collect();
     let judged_frame = radius as usize;
 
-    // Cross-frame arm: the real denoiser, unmodified, driven the same
-    // way every other test above drives it.
     let params = static_clip_params(radius);
-    let mut d = Nl4dDenoiser::<R>::new(&client, params, w, h).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, width, height).expect("construction failed");
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     for frame in &frames {
-        d.push_frame(frame);
-        if let Some(frame) = d.denoise().expect("denoise failed") {
+        denoiser.push_frame(frame);
+        if let Some(frame) = denoiser.denoise().expect("denoise failed") {
             outputs.push(frame);
         }
     }
+
     let cross_frame_out = outputs
         .get(judged_frame)
         .expect("enough frames were pushed for frame `radius`'s own output to have emitted")
         .clone();
 
-    // Centre-only arm: the same front end, driven directly rather than
-    // through `Nl4dDenoiser`, so the pass centred on real frame `radius`
-    // can be aggregated on its own once it runs.
-    let mut nlm_params = static_clip_params(radius).nlm;
+    let clip_params = static_clip_params(radius);
+    let mut nlm_params = clip_params.nlm;
     nlm_params.temporal_radius = radius;
-    let mut front = NlmDenoiser::<R>::new(&client, nlm_params, w, h);
+    let mut front = NlmDenoiser::<R>::new(&client, nlm_params, width, height);
 
-    let pixels = (w * h) as usize;
-    let refs_x = refs_along(w);
-    let refs = ref_count(w, h);
+    let pixels = (width * height) as usize;
+    let refs_x = refs_along(width);
+    let refs = ref_count(width, height);
     let k_max = MAX_K;
     let total_frames = 1 + 2 * radius;
 
@@ -622,9 +582,11 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
     let mut pass_index = 0u32;
     for frame in &frames {
         front.push_frame(frame);
+
         let Some(view) = front.submit_machinery(radius).expect("submit_machinery failed") else {
             continue;
         };
+
         if pass_index != radius {
             pass_index += 1;
             continue;
@@ -635,37 +597,61 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
         let neighbours = 2 * radius;
         let mv_len = (neighbours * view.mv_stride) as usize;
         let conf_len = (neighbours * view.conf_stride) as usize;
-        let neighbour_slots_buf = client.create_from_slice(u32::as_bytes(&view.neighbour_slots));
+        let slots_bytes = u32::as_bytes(&view.neighbour_slots);
+        let neighbour_slots_buf = client.create_from_slice(slots_bytes);
 
         let sigmas = front.current_sigmas_temporal_only();
-        let sigma_buf = client.create_from_slice(f32::as_bytes(&[sigmas[0]]));
+        let sigma = [sigmas[0]];
         let profile = dct_noise_profile(0.0);
-        let profile_buf = client.create_from_slice(f32::as_bytes(&profile));
-        let kaiser_buf = client.create_from_slice(f32::as_bytes(&kaiser_window(0.0)));
-        let zero_curve = client.create_from_slice(f32::as_bytes(&[0.0f32; NOISE_CURVE_BINS]));
-        let (map_cols, map_rows) = strength_map_dims(w, h);
+        let kaiser = kaiser_window(0.0);
+        let zeroed_curve = [0.0f32; NOISE_CURVE_BINS];
+        let sigma_bytes = f32::as_bytes(&sigma);
+        let sigma_buf = client.create_from_slice(sigma_bytes);
+        let profile_bytes = f32::as_bytes(&profile);
+        let profile_buf = client.create_from_slice(profile_bytes);
+        let kaiser_bytes = f32::as_bytes(&kaiser);
+        let kaiser_buf = client.create_from_slice(kaiser_bytes);
+        let curve_bytes = f32::as_bytes(&zeroed_curve);
+        let zero_curve = client.create_from_slice(curve_bytes);
+
+        let (map_cols, map_rows) = strength_map_dims(width, height);
         let map_len = (map_cols * map_rows) as usize;
         let unit_map = vec![1.0f32; map_len];
-        let unit_map_buf = client.create_from_slice(f32::as_bytes(&unit_map));
-        let wnorm = weight_scale(sigmas[0], &profile);
+        let unit_map_bytes = f32::as_bytes(&unit_map);
+        let unit_map_buf = client.create_from_slice(unit_map_bytes);
+        let weight_norm = weight_scale(sigmas[0], &profile);
         let accum_scale = cross_frame_accum_scale(SPATIAL_RADIUS, radius);
 
         let group_weight = client.empty(refs * size_of::<f32>());
-        // The whole ring, because a member matched in a neighbour frame
-        // scatters into that frame's own region. Only the centre slot's
-        // region is read back below, which is exactly what makes this
-        // the centre-only arm.
-        let accum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels * total_frames as usize]));
-        let wsum = client.create_from_slice(i32::as_bytes(&vec![0i32; pixels * total_frames as usize]));
+        // The whole ring, because a member matched in a neighbour frame scatters into that
+        // frame's region. Reading back only the centre slot is what makes this the centre-only
+        // arm.
+        let zeroed_accum = vec![0i32; pixels * total_frames as usize];
+        let zeroed_wsum = vec![0i32; pixels * total_frames as usize];
+        let accum_bytes = i32::as_bytes(&zeroed_accum);
+        let accum = client.create_from_slice(accum_bytes);
+        let wsum_bytes = i32::as_bytes(&zeroed_wsum);
+        let wsum = client.create_from_slice(wsum_bytes);
         let output = client.empty(pixels * size_of::<f32>());
 
-        let mc = front.motion_ctx();
+        let motion = front.motion_ctx();
+
+        let fused_x = fused_cubes_x(width);
+        let refs_y = refs_along(height);
+        let fused_grid = CubeCount::new_2d(fused_x, refs_y);
+        let fused_dim = CubeDim::new_1d(64);
+        let warp_uniform = needs_warp_uniform_search(&client);
+        let grid_frame_count = grid_frames(radius);
+        let agg_cubes_x = width.div_ceil(BLOCK_X);
+        let agg_cubes_y = height.div_ceil(BLOCK_Y);
+        let agg_grid = CubeCount::new_2d(agg_cubes_x, agg_cubes_y);
+        let agg_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
 
         unsafe {
             collab_fused::launch_unchecked::<R>(
                 &client,
-                CubeCount::new_2d(fused_cubes_x(w), refs_along(h)),
-                CubeDim::new_1d(64),
+                fused_grid,
+                fused_dim,
                 1usize,
                 ArrayArg::from_raw_parts(view.input.clone(), ring_len),
                 ArrayArg::from_raw_parts(view.mv_field.clone(), mv_len.max(1)),
@@ -684,20 +670,20 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 LAMBDA_HT,
                 0u32,
                 STRENGTH_MAP_OFF,
-                wnorm,
+                weight_norm,
                 accum_scale,
-                needs_warp_uniform_search(&client),
+                warp_uniform,
                 radius,
-                grid_frames(radius),
+                grid_frame_count,
                 REFINE,
                 view.mv_stride,
                 view.conf_stride,
-                mc.step,
-                mc.blksize,
-                mc.blocks_x,
-                mc.blocks_y,
-                w,
-                h,
+                motion.step,
+                motion.blksize,
+                motion.blocks_x,
+                motion.blocks_y,
+                width,
+                height,
                 1u32,
                 k_max,
                 1u32,
@@ -711,29 +697,28 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
 
             collab_normalise::launch_unchecked::<R>(
                 &client,
-                CubeCount::new_2d(
-                    w.div_ceil(crate::nlmeans::BLOCK_X),
-                    h.div_ceil(crate::nlmeans::BLOCK_Y),
-                ),
-                CubeDim::new_2d(crate::nlmeans::BLOCK_X, crate::nlmeans::BLOCK_Y),
+                agg_grid,
+                agg_dim,
                 1usize,
                 ArrayArg::from_raw_parts(accum, pixels * total_frames as usize),
                 ArrayArg::from_raw_parts(wsum, pixels * total_frames as usize),
                 ArrayArg::from_raw_parts(output.clone(), pixels),
                 centre_slot * pixels as u32,
-                w,
-                h,
+                width,
+                height,
                 1u32,
                 1u32,
             );
         }
 
-        let out = f32::from_bytes(&client.read_one(output).expect("readback failed"))[..pixels].to_vec();
+        let output_bytes = client.read_one(output).expect("readback failed");
+        let centre_only = f32::from_bytes(&output_bytes)[..pixels].to_vec();
         assert!(
-            out.iter().all(|v| v.is_finite()),
+            centre_only.iter().all(|value| value.is_finite()),
             "the centre-only arm left a pixel with no contribution at all"
         );
-        centre_only_out = Some(out);
+
+        centre_only_out = Some(centre_only);
         break;
     }
 
@@ -755,189 +740,177 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
     );
 }
 
-/// The snapshot reports the field the fused kernel was given. A clip
-/// whose every frame is the previous one shifted right by 2 pixels must
-/// report `[2 * k, 0]` toward the neighbour at offset `k`, at an
-/// interior block, once the first pass has run.
+/// A clip where every frame is the previous one shifted right by 2 pixels must report
+/// `[2 * k, 0]` toward the neighbour at offset `k` once the first pass has run.
 #[test]
 fn motion_snapshot_reports_the_field_the_pass_used() {
     let client = make_client();
-    let (w, h) = (96u32, 96u32);
+    let (width, height) = (96u32, 96u32);
     let radius = 2u32;
-    let base = textured_base(w, h);
+    let base = textured_base(width, height);
     let frames: Vec<Vec<f32>> = (0..5i32)
         .map(|k| {
-            let mut f = vec![0.0f32; (w * h) as usize];
-            for y in 0..h {
-                for x in 0..w {
-                    let sx = (x as i32 - 2 * (k - 2)).clamp(0, w as i32 - 1) as u32;
-                    f[(y * w + x) as usize] = base[(y * w + sx) as usize];
+            let mut shifted = vec![0.0f32; (width * height) as usize];
+            for y in 0..height {
+                for x in 0..width {
+                    let source_x = (x as i32 - 2 * (k - 2)).clamp(0, width as i32 - 1) as u32;
+                    shifted[(y * width + x) as usize] = base[(y * width + source_x) as usize];
                 }
             }
-            f
+
+            shifted
         })
         .collect();
 
-    let mut d =
-        Nl4dDenoiser::<R>::new(&client, static_clip_params(radius), w, h).expect("construction failed");
-    assert!(d.motion_snapshot().is_none(), "no pass has run yet");
+    let params = static_clip_params(radius);
+    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, width, height).expect("construction failed");
+    assert!(denoiser.motion_snapshot().is_none(), "no pass has run yet");
+
     for frame in &frames {
-        d.push_frame(frame);
-        let _ = d.denoise().expect("denoise failed");
+        denoiser.push_frame(frame);
+        let _ = denoiser.denoise().expect("denoise failed");
     }
 
-    let snap = d.motion_snapshot().expect("a pass has run");
-    assert_eq!(snap.offsets, vec![-2, -1, 1, 2]);
-    assert_eq!(snap.step, 8);
-    assert_eq!(snap.blksize, 16);
+    let snapshot = denoiser.motion_snapshot().expect("a pass has run");
+    assert_eq!(snapshot.offsets, vec![-2, -1, 1, 2]);
+    assert_eq!(snapshot.step, 8);
+    assert_eq!(snapshot.blksize, 16);
+
     // Block (3, 3) covers pixels 24..40, well inside the frame.
-    let block = (3 * snap.blocks_x + 3) as usize;
-    for (t, &k) in snap.offsets.iter().enumerate() {
+    let block = (3 * snapshot.blocks_x + 3) as usize;
+    for (neighbour, &k) in snapshot.offsets.iter().enumerate() {
         assert_eq!(
-            snap.vectors[t][block],
+            snapshot.vectors[neighbour][block],
             [2 * k, 0],
             "neighbour k={k} should be tracked as a 2*k pixel shift"
         );
         assert!(
-            snap.confidence[t][block] > 0.5,
+            snapshot.confidence[neighbour][block] > 0.5,
             "a clean shift must score confidently"
         );
     }
 }
 
-/// A panning clip with one flat block. The estimator ties on the flat
-/// block and leaves it at the seed, so its vector differs from its
-/// neighbours'. With `field_lambda` on, the pass pulls it to the
-/// neighbourhood's vector, and the snapshot shows the regularised
-/// field. With it off the field is the estimator's.
+/// A panning clip with one flat block, which the estimator ties on and leaves at the seed.
+///
+/// With `field_lambda` on, the snapshot shows the flat block pulled to its neighbours' vector.
+/// With it off, the snapshot shows the estimator's field.
 #[test]
 fn field_regularisation_reaches_the_snapshot() {
     let client = make_client();
-    let (w, h) = (128u32, 96u32);
+    let (width, height) = (128u32, 96u32);
     let radius = 1u32;
-    let mut base = textured_base(w, h);
-    // Flatten a 24x24 region centred on block (7, 5)'s own footprint,
-    // 52..76 x 36..60. Large enough to tie both the fine-level search and
-    // the coarse pyramid level for that one block, but small enough that
-    // its overlapping neighbours still see enough texture past the
-    // region's edge to estimate correctly, so only the centre block ties.
+    let mut base = textured_base(width, height);
+
+    // Flatten 52..76 x 36..60 around block (7, 5). It is large enough to tie both the fine search
+    // and the coarse pyramid level for that block, but small enough that its overlapping
+    // neighbours still see texture, so only the centre block ties.
     for y in 36..60u32 {
         for x in 52..76u32 {
-            base[(y * w + x) as usize] = 0.5;
+            base[(y * width + x) as usize] = 0.5;
         }
     }
+
     let frames: Vec<Vec<f32>> = (0..3i32)
         .map(|k| {
-            let mut f = vec![0.0f32; (w * h) as usize];
-            for y in 0..h {
-                for x in 0..w {
-                    let sx = (x as i32 - 3 * (k - 1)).clamp(0, w as i32 - 1) as u32;
-                    f[(y * w + x) as usize] = base[(y * w + sx) as usize];
+            let mut shifted = vec![0.0f32; (width * height) as usize];
+            for y in 0..height {
+                for x in 0..width {
+                    let source_x = (x as i32 - 3 * (k - 1)).clamp(0, width as i32 - 1) as u32;
+                    shifted[(y * width + x) as usize] = base[(y * width + source_x) as usize];
                 }
             }
-            f
+
+            shifted
         })
         .collect();
 
     let run = |lambda: f32| {
+        let clip_params = static_clip_params(radius);
         let params = Nl4dParams {
             field_lambda: lambda,
-            ..static_clip_params(radius)
+            ..clip_params
         };
-        let mut d = Nl4dDenoiser::<R>::new(&client, params, w, h).expect("construction failed");
+        let mut denoiser =
+            Nl4dDenoiser::<R>::new(&client, params, width, height).expect("construction failed");
         for frame in &frames {
-            d.push_frame(frame);
-            let _ = d.denoise().expect("denoise failed");
+            denoiser.push_frame(frame);
+            let _ = denoiser.denoise().expect("denoise failed");
         }
-        d.motion_snapshot().expect("a pass ran")
+
+        denoiser.motion_snapshot().expect("a pass ran")
     };
 
     let off = run(0.0);
     let on = run(1.0);
-    // The block at (7, 5) spans pixels 56..72 x 40..56, inside the flat
-    // region on every frame.
+
+    // The block at (7, 5) spans pixels 56..72 x 40..56, inside the flat region on every frame.
     let flat_block = (5 * off.blocks_x + 7) as usize;
-    let t_plus = 1usize;
+    let forward_neighbour = 1usize;
     assert_ne!(
-        off.vectors[t_plus][flat_block],
+        off.vectors[forward_neighbour][flat_block],
         [3, 0],
         "the flat block must not be tracked without help, or this test proves nothing"
     );
-    assert_eq!(on.vectors[t_plus][flat_block], [3, 0]);
+    assert_eq!(on.vectors[forward_neighbour][flat_block], [3, 0]);
+
     // A textured block is unchanged by the pass.
     let textured_block = (2 * off.blocks_x + 2) as usize;
-    assert_eq!(off.vectors[t_plus][textured_block], [3, 0]);
-    assert_eq!(on.vectors[t_plus][textured_block], [3, 0]);
+    assert_eq!(off.vectors[forward_neighbour][textured_block], [3, 0]);
+    assert_eq!(on.vectors[forward_neighbour][textured_block], [3, 0]);
 }
 
-/// `Nl4dParams::default()`, changing only `channels`, which has to
-/// switch to `Luma` because this file's helpers only ever synthesise a
-/// single plane. Every other test in this file pins `field_lambda:
-/// 0.0` so its recorded values stay stable, but the shipped default is
-/// `1.0`, meaning a real caller always runs the field-regularisation
-/// pass this configuration exercises.
+/// The shipped default parameters, with `channels` switched to `Luma` because these fixtures only
+/// synthesise a single plane.
+///
+/// The other tests here pin `field_lambda` to 0.0 so their recorded values stay stable, while the
+/// shipped default of 1.0 runs the field-regularisation pass.
 fn shipped_default_params() -> Nl4dParams {
-    let params = Nl4dParams {
-        nlm: NlmParams {
-            channels: ChannelMode::Luma,
-            ..Nl4dParams::default().nlm
-        },
-        ..Nl4dParams::default()
+    let defaults = Nl4dParams::default();
+    let nlm = NlmParams {
+        channels: ChannelMode::Luma,
+        ..defaults.nlm
     };
+    let params = Nl4dParams { nlm, ..defaults };
     assert_eq!(
         params.field_lambda, 1.0,
         "this helper exists to exercise the shipped default, not an override"
     );
+
     params
 }
 
-/// Runs the pipeline at the true shipped defaults, in two phases.
+/// Runs the shipped defaults over a clean static clip, then a noisy one.
 ///
-/// The first phase pushes a static, clean (noiseless) clip and checks
-/// the field-regularisation pass leaves an interior block's vector at
-/// exactly zero. A static clip's true motion is zero everywhere, so a
-/// correctly regularised field has nothing to pull a well-textured
-/// interior block's vector away from zero toward: every neighbouring
-/// block's vector is also zero, so their median is zero, which is
-/// already where the block sits. A field-regularisation dispatch that
-/// reads the wrong pyramid slot, indexes the wrong neighbour, or
-/// strides into a different block's data instead of its own would
-/// instead pull in whatever mismatched vector sits there, and a real
-/// motion vector would show up in a scene where nothing ever moved.
-/// This phase carries no noise, because the estimator's own
-/// noise-driven wobble would otherwise mask exactly the kind of small,
-/// wrong-source displacement it exists to catch.
-///
-/// The second phase pushes a static, noisy clip through a fresh
-/// denoiser at the same defaults and checks every emitted frame comes
-/// out well above the noisy input's own PSNR, the same property
-/// [`denoises_a_static_noisy_clip`] checks at `field_lambda: 0.0`. A
-/// field-regularisation dispatch bug severe enough to corrupt the
-/// motion field would feed the temporal grouping kernel the wrong
-/// candidates and show up here as a smaller improvement, or none at
-/// all.
+/// A static clip's true motion is zero everywhere, so the regularised field must read exactly zero
+/// at an interior block. A dispatch that read the wrong pyramid slot, neighbour or stride would
+/// pull in a mismatched vector. The clean clip has no noise, because the estimator's noise-driven
+/// wobble would mask that small displacement. The noisy clip must then gain at least 6 dB, since a
+/// corrupt field would feed grouping the wrong candidates.
 #[test]
 fn shipped_defaults_denoise_a_static_clip_and_regularise_its_field_to_zero() {
     let client = make_client();
-    let (w, h) = (96u32, 96u32);
-    let base = textured_base(w, h);
-    let radius = shipped_default_params().temporal_radius;
-    let n = (3 * radius + 1) as usize;
+    let (width, height) = (96u32, 96u32);
+    let base = textured_base(width, height);
+    let shipped_params = shipped_default_params();
+    let radius = shipped_params.temporal_radius;
+    let frame_count = (3 * radius + 1) as usize;
 
-    // Phase 1: a clean, static clip, checking the regularised field.
-    let mut clean_d = Nl4dDenoiser::<R>::new(&client, shipped_default_params(), w, h)
+    let clean_params = shipped_default_params();
+    let mut clean_denoiser = Nl4dDenoiser::<R>::new(&client, clean_params, width, height)
         .expect("construction failed for the clean phase");
-    for _ in 0..n {
-        clean_d.push_frame(&base);
-        let _ = clean_d.denoise().expect("denoise failed");
+    for _ in 0..frame_count {
+        clean_denoiser.push_frame(&base);
+        let _ = clean_denoiser.denoise().expect("denoise failed");
     }
-    let snap = clean_d.motion_snapshot().expect("a pass ran");
-    // Block (2, 2) spans pixels 16..32 on both axes, well inside the
-    // frame and away from any edge-clamping effects.
-    let interior_block = (2 * snap.blocks_x + 2) as usize;
-    for (t, &k) in snap.offsets.iter().enumerate() {
+
+    let snapshot = clean_denoiser.motion_snapshot().expect("a pass ran");
+
+    // Block (2, 2) spans pixels 16..32 on both axes, away from any edge clamping.
+    let interior_block = (2 * snapshot.blocks_x + 2) as usize;
+    for (neighbour, &k) in snapshot.offsets.iter().enumerate() {
         assert_eq!(
-            snap.vectors[t][interior_block],
+            snapshot.vectors[neighbour][interior_block],
             [0, 0],
             "neighbour k={k}: a static, noiseless clip's regularised field must read exactly \
              zero at an interior block; a nonzero vector here is what a wrong pyramid slot, \
@@ -945,27 +918,36 @@ fn shipped_defaults_denoise_a_static_clip_and_regularise_its_field_to_zero() {
         );
     }
 
-    // Phase 2: a noisy version of the same clip, checking the output.
-    let frames: Vec<Vec<f32>> = (0..n as u32)
-        .map(|seed| noisy_copy_of(&base, w, h, SIGMA, seed))
+    let frames: Vec<Vec<f32>> = (0..frame_count as u32)
+        .map(|seed| noisy_copy_of(&base, width, height, SIGMA, seed))
         .collect();
-    let mut noisy_d = Nl4dDenoiser::<R>::new(&client, shipped_default_params(), w, h)
+    let noisy_params = shipped_default_params();
+    let mut noisy_denoiser = Nl4dDenoiser::<R>::new(&client, noisy_params, width, height)
         .expect("construction failed for the noisy phase");
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     for frame in &frames {
-        noisy_d.push_frame(frame);
-        if let Some(frame) = noisy_d.denoise().expect("denoise failed") {
+        noisy_denoiser.push_frame(frame);
+        if let Some(frame) = noisy_denoiser.denoise().expect("denoise failed") {
             outputs.push(frame);
         }
     }
-    noisy_d
-        .flush(|frame| outputs.push(frame.to_vec()))
+
+    noisy_denoiser
+        .flush(|frame| {
+            let values = frame.to_vec();
+            outputs.push(values);
+        })
         .expect("flush failed");
 
-    assert_eq!(outputs.len(), n, "expected one emitted frame per pushed frame");
-    for (i, out) in outputs.iter().enumerate() {
+    assert_eq!(
+        outputs.len(),
+        frame_count,
+        "expected one emitted frame per pushed frame"
+    );
+
+    for (i, output) in outputs.iter().enumerate() {
         let noisy_psnr = psnr(&frames[i], &base);
-        let out_psnr = psnr(out, &base);
+        let out_psnr = psnr(output, &base);
         assert!(
             out_psnr > noisy_psnr + 6.0,
             "frame {i}: expected at least a 6 dB PSNR improvement over the noisy input at the \

@@ -107,7 +107,8 @@ mod tests {
 
     #[test]
     fn sad_noise_floor_zero_for_zero_sigma() {
-        assert_eq!(sad_noise_floor(16, 0.0), 0.0);
+        let floor = sad_noise_floor(16, 0.0);
+        assert_eq!(floor, 0.0);
     }
 
     #[test]
@@ -119,6 +120,7 @@ mod tests {
 
     #[test]
     fn thsad_default_scale_is_positive() {
-        assert!(thsad(16, 1.0) > 0.0);
+        let threshold = thsad(16, 1.0);
+        assert!(threshold > 0.0);
     }
 }

@@ -12,8 +12,7 @@ const FRAMES: u32 = 12;
 const RAMP_TOP: f32 = 0.15;
 const RAMP_BOTTOM: f32 = 0.85;
 
-/// A clip's denoised frames, and whether the front end built a noise
-/// curve during any pass.
+/// A clip's denoised frames, and whether the front end built a noise curve during any pass.
 struct ClipRun {
     outputs: Vec<Vec<f32>>,
     curve_seen: bool,
@@ -29,8 +28,8 @@ fn noise_std_at(luma: f32) -> f32 {
     0.004 + 0.02 * luma
 }
 
-/// A static vertical brightness ramp with fresh noise per frame, in
-/// `channels` interleaved planes that all carry the same ramp.
+/// A static vertical brightness ramp with fresh noise per frame, in `channels` interleaved planes
+/// that all carry the same ramp.
 fn ramp_clip(channels: u32) -> Vec<Vec<f32>> {
     let mut frames = Vec::new();
     for frame_index in 0..FRAMES {
@@ -49,8 +48,10 @@ fn ramp_clip(channels: u32) -> Vec<Vec<f32>> {
                 }
             }
         }
+
         frames.push(frame);
     }
+
     frames
 }
 
@@ -60,13 +61,15 @@ fn ramp_params(channels: ChannelMode, noise_map: bool, sigma_scale: f32) -> Nl4d
         sigma_scale,
         ..HqParams::default()
     };
+    let nlm = NlmParams {
+        channels,
+        prefilter: PrefilterMode::None,
+        hq: Some(hq),
+        ..defaults.nlm
+    };
+
     Nl4dParams {
-        nlm: NlmParams {
-            channels,
-            prefilter: PrefilterMode::None,
-            hq: Some(hq),
-            ..defaults.nlm
-        },
+        nlm,
         noise_map,
         ..defaults
     }

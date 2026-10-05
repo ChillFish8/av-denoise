@@ -254,12 +254,14 @@ mod tests {
 
     #[test]
     fn validate_accepts_default() {
-        assert!(Nl4dParams::default().validate().is_ok());
+        let params = Nl4dParams::default();
+        assert!(params.validate().is_ok());
     }
 
     #[test]
     fn the_noise_map_is_on_by_default() {
-        assert!(Nl4dParams::default().noise_map);
+        let params = Nl4dParams::default();
+        assert!(params.noise_map);
     }
 
     #[test]
@@ -295,15 +297,15 @@ mod tests {
                 flat_boost: bad,
                 ..Nl4dParams::default()
             };
-            let err = flat.validate().expect_err("flat_boost out of range");
-            assert!(err.contains("flat_boost"), "got {err}");
+            let error = flat.validate().expect_err("flat_boost out of range");
+            assert!(error.contains("flat_boost"), "got {error}");
 
             let chroma = Nl4dParams {
                 chroma_flat_boost: bad,
                 ..Nl4dParams::default()
             };
-            let err = chroma.validate().expect_err("chroma_flat_boost out of range");
-            assert!(err.contains("chroma_flat_boost"), "got {err}");
+            let error = chroma.validate().expect_err("chroma_flat_boost out of range");
+            assert!(error.contains("chroma_flat_boost"), "got {error}");
         }
 
         for bad in [0.05f32, 1.01, f32::NAN] {
@@ -311,8 +313,8 @@ mod tests {
                 shadow_soften: bad,
                 ..Nl4dParams::default()
             };
-            let err = params.validate().expect_err("shadow_soften out of range");
-            assert!(err.contains("shadow_soften"), "got {err}");
+            let error = params.validate().expect_err("shadow_soften out of range");
+            assert!(error.contains("shadow_soften"), "got {error}");
         }
     }
 
@@ -334,25 +336,27 @@ mod tests {
                 flat_texture_cut: bad,
                 ..Nl4dParams::default()
             };
-            let err = params.validate().expect_err("flat_texture_cut out of range");
-            assert!(err.contains("flat_texture_cut"), "got {err}");
+            let error = params.validate().expect_err("flat_texture_cut out of range");
+            assert!(error.contains("flat_texture_cut"), "got {error}");
         }
     }
 
     #[test]
     fn validate_accepts_block_geometries_up_to_the_covering_bound() {
         for (blksize, overlap, covers) in [(16u32, 8u32, 2u32), (16, 12, 4), (32, 24, 4), (8, 4, 2)] {
+            let motion_compensation = MotionCompensationMode::Mvtools {
+                blksize,
+                overlap,
+                search_radius: 4,
+                pyramid_levels: 2,
+                estimation: MotionEstimation::Auto,
+            };
+            let nlm = NlmParams {
+                motion_compensation,
+                ..Nl4dParams::default().nlm
+            };
             let params = Nl4dParams {
-                nlm: NlmParams {
-                    motion_compensation: MotionCompensationMode::Mvtools {
-                        blksize,
-                        overlap,
-                        search_radius: 4,
-                        pyramid_levels: 2,
-                        estimation: MotionEstimation::Auto,
-                    },
-                    ..Nl4dParams::default().nlm
-                },
+                nlm,
                 ..Nl4dParams::default()
             };
             assert!(
@@ -365,42 +369,48 @@ mod tests {
     #[test]
     fn validate_rejects_a_block_geometry_past_the_covering_bound() {
         for (blksize, overlap) in [(16u32, 13u32), (16, 14), (32, 31), (32, 25)] {
+            let motion_compensation = MotionCompensationMode::Mvtools {
+                blksize,
+                overlap,
+                search_radius: 4,
+                pyramid_levels: 2,
+                estimation: MotionEstimation::Auto,
+            };
+            let nlm = NlmParams {
+                motion_compensation,
+                ..Nl4dParams::default().nlm
+            };
             let params = Nl4dParams {
-                nlm: NlmParams {
-                    motion_compensation: MotionCompensationMode::Mvtools {
-                        blksize,
-                        overlap,
-                        search_radius: 4,
-                        pyramid_levels: 2,
-                        estimation: MotionEstimation::Auto,
-                    },
-                    ..Nl4dParams::default().nlm
-                },
+                nlm,
                 ..Nl4dParams::default()
             };
-            let err = params
+            let error = params
                 .validate()
                 .expect_err("a step this small should be rejected");
+            let blksize_label = format!("blksize={blksize}");
+            let overlap_label = format!("overlap={overlap}");
             assert!(
-                err.contains(&format!("blksize={blksize}")) && err.contains(&format!("overlap={overlap}")),
-                "error should name the offending blksize and overlap, got {err}"
+                error.contains(&blksize_label) && error.contains(&overlap_label),
+                "error should name the offending blksize and overlap, got {error}"
             );
         }
     }
 
     #[test]
     fn overlap_equal_to_blksize_reports_the_overlap_constraint_not_covering_blocks() {
+        let motion_compensation = MotionCompensationMode::Mvtools {
+            blksize: 16,
+            overlap: 16,
+            search_radius: 4,
+            pyramid_levels: 2,
+            estimation: MotionEstimation::Auto,
+        };
+        let nlm = NlmParams {
+            motion_compensation,
+            ..Nl4dParams::default().nlm
+        };
         let params = Nl4dParams {
-            nlm: NlmParams {
-                motion_compensation: MotionCompensationMode::Mvtools {
-                    blksize: 16,
-                    overlap: 16,
-                    search_radius: 4,
-                    pyramid_levels: 2,
-                    estimation: MotionEstimation::Auto,
-                },
-                ..Nl4dParams::default().nlm
-            },
+            nlm,
             ..Nl4dParams::default()
         };
         assert!(
@@ -409,66 +419,70 @@ mod tests {
              own terms"
         );
 
-        let err = params
+        let error = params
             .nlm
             .validate()
             .expect_err("overlap == blksize must be rejected")
             .to_string();
         assert!(
-            err.contains("overlap") && err.contains("blksize"),
-            "error should name the overlap constraint, got {err}"
+            error.contains("overlap") && error.contains("blksize"),
+            "error should name the overlap constraint, got {error}"
         );
         assert!(
-            !err.contains("cover a patch"),
-            "error should not be the covering-block message, got {err}"
+            !error.contains("cover a patch"),
+            "error should not be the covering-block message, got {error}"
         );
     }
 
     #[test]
     fn validate_rejects_missing_hq() {
+        let nlm = NlmParams {
+            hq: None,
+            ..Nl4dParams::default().nlm
+        };
         let params = Nl4dParams {
-            nlm: NlmParams {
-                hq: None,
-                ..Nl4dParams::default().nlm
-            },
+            nlm,
             ..Nl4dParams::default()
         };
-        let err = params.validate().expect_err("expected rejection");
-        assert!(err.contains("nlm.hq"), "error should name nlm.hq, got {err}");
+        let error = params.validate().expect_err("expected rejection");
+        assert!(error.contains("nlm.hq"), "error should name nlm.hq, got {error}");
     }
 
     #[test]
     fn validate_rejects_inactive_motion_compensation() {
+        let nlm = NlmParams {
+            motion_compensation: MotionCompensationMode::None,
+            ..Nl4dParams::default().nlm
+        };
         let params = Nl4dParams {
-            nlm: NlmParams {
-                motion_compensation: MotionCompensationMode::None,
-                ..Nl4dParams::default().nlm
-            },
+            nlm,
             ..Nl4dParams::default()
         };
-        let err = params.validate().expect_err("expected rejection");
+        let error = params.validate().expect_err("expected rejection");
         assert!(
-            err.contains("motion_compensation"),
-            "error should name nlm.motion_compensation, got {err}"
+            error.contains("motion_compensation"),
+            "error should name nlm.motion_compensation, got {error}"
         );
     }
 
     #[test]
     fn validate_rejects_missing_temporal_confidence() {
+        let hq = HqParams {
+            temporal_confidence: false,
+            ..HqParams::default()
+        };
+        let nlm = NlmParams {
+            hq: Some(hq),
+            ..Nl4dParams::default().nlm
+        };
         let params = Nl4dParams {
-            nlm: NlmParams {
-                hq: Some(HqParams {
-                    temporal_confidence: false,
-                    ..HqParams::default()
-                }),
-                ..Nl4dParams::default().nlm
-            },
+            nlm,
             ..Nl4dParams::default()
         };
-        let err = params.validate().expect_err("expected rejection");
+        let error = params.validate().expect_err("expected rejection");
         assert!(
-            err.contains("temporal_confidence"),
-            "error should name nlm.hq.temporal_confidence, got {err}"
+            error.contains("temporal_confidence"),
+            "error should name nlm.hq.temporal_confidence, got {error}"
         );
     }
 
@@ -554,12 +568,12 @@ mod tests {
                 field_lambda: lambda,
                 ..Nl4dParams::default()
             };
-            let err = params
+            let error = params
                 .validate()
                 .expect_err("field_lambda={lambda} should be rejected");
             assert!(
-                err.contains("field_lambda"),
-                "error should name field_lambda, got {err}"
+                error.contains("field_lambda"),
+                "error should name field_lambda, got {error}"
             );
         }
     }

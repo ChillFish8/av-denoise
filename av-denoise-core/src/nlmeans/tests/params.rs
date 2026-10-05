@@ -23,11 +23,8 @@ fn noise_offset_scales_with_sigma_and_patch_size() {
     };
 
     let expected = 6.0 * sigma * sigma * 81.0;
-    assert!(
-        (params.noise_offset() - expected).abs() < 1e-6,
-        "expected {expected}, got {}",
-        params.noise_offset()
-    );
+    let got = params.noise_offset();
+    assert!((got - expected).abs() < 1e-6, "expected {expected}, got {got}");
 }
 
 #[test]
@@ -67,11 +64,8 @@ fn h2_inv_norm_with_auto_strength_matches_hand_computed() {
     let effective_strength = 1.0 * sigma * 255.0;
     let expected = NLM_NORM / (NLM_LEGACY * effective_strength * effective_strength * patch_area as f32);
 
-    assert!(
-        (params.h2_inv_norm() - expected).abs() < 1e-6,
-        "expected {expected}, got {}",
-        params.h2_inv_norm()
-    );
+    let got = params.h2_inv_norm();
+    assert!((got - expected).abs() < 1e-6, "expected {expected}, got {got}");
 }
 
 #[test]
@@ -148,7 +142,8 @@ fn validate_accepts_default_thsad_scale() {
 
 #[test]
 fn hq_params_default_sigma_scale_is_one() {
-    assert_eq!(HqParams::default().sigma_scale, 1.0);
+    let defaults = HqParams::default();
+    assert_eq!(defaults.sigma_scale, 1.0);
 }
 
 #[test]
@@ -315,14 +310,14 @@ fn validate_rejects_non_positive_bilateral_sigma_r() {
     };
     assert!(nan.validate().is_err());
 
-    let inf = NlmParams {
+    let infinite = NlmParams {
         prefilter: PrefilterMode::Bilateral {
             sigma_s: 3.0,
             sigma_r: f32::INFINITY,
         },
         ..NlmParams::default()
     };
-    assert!(inf.validate().is_err());
+    assert!(infinite.validate().is_err());
 }
 
 #[test]
@@ -355,14 +350,14 @@ fn validate_rejects_non_positive_bilateral_sigma_s() {
     };
     assert!(nan.validate().is_err());
 
-    let inf = NlmParams {
+    let infinite = NlmParams {
         prefilter: PrefilterMode::Bilateral {
             sigma_s: f32::INFINITY,
             sigma_r: 0.02,
         },
         ..NlmParams::default()
     };
-    assert!(inf.validate().is_err());
+    assert!(infinite.validate().is_err());
 }
 
 #[test]
@@ -549,15 +544,20 @@ fn hq_default_strength_yuv_reads_the_luma_table() {
 
 #[test]
 fn validate_dimensions_rejects_frames_below_the_minimum() {
-    assert!(validate_dimensions(2, 64).is_err());
-    assert!(validate_dimensions(64, 2).is_err());
-    assert!(validate_dimensions(0, 0).is_err());
+    let small_width = validate_dimensions(2, 64);
+    let small_height = validate_dimensions(64, 2);
+    let empty = validate_dimensions(0, 0);
+    assert!(small_width.is_err());
+    assert!(small_height.is_err());
+    assert!(empty.is_err());
 }
 
 #[test]
 fn validate_dimensions_accepts_the_minimum() {
-    assert!(validate_dimensions(MIN_FRAME_DIM, MIN_FRAME_DIM).is_ok());
-    assert!(validate_dimensions(1920, 1080).is_ok());
+    let minimum = validate_dimensions(MIN_FRAME_DIM, MIN_FRAME_DIM);
+    let full_hd = validate_dimensions(1920, 1080);
+    assert!(minimum.is_ok());
+    assert!(full_hd.is_ok());
 }
 
 #[test]

@@ -13,6 +13,7 @@ fn sums(samples: &[i32]) -> (i64, i64) {
         .iter()
         .map(|&sample| (sample as i64) * (sample as i64))
         .sum();
+
     (sum, sum_sq)
 }
 
@@ -41,8 +42,8 @@ fn lag_and_offset_tables_have_the_expected_order() {
 
 #[test]
 fn lfsr_matches_the_specification() {
-    let mut rng = Av1Random::new(1000);
-    let draws: Vec<u32> = (0..8).map(|_| rng.next(11)).collect();
+    let mut random = Av1Random::new(1000);
+    let draws: Vec<u32> = (0..8).map(|_| random.next(11)).collect();
 
     assert_eq!(draws, [1039, 519, 259, 129, 1088, 1568, 1808, 904]);
 }
@@ -52,13 +53,16 @@ fn template_matches_the_reference_port() {
     let template = luma_template(&SCENE_EIGHT, 7, 1000);
     let (sum, sum_sq) = sums(&template);
     let row = |y: usize, x: usize| template[y * 82 + x..y * 82 + x + 8].to_vec();
+    let top_row = row(3, 0);
+    let middle_row = row(40, 30);
+    let bottom_row = row(72, 70);
 
     assert_eq!(template.len(), 73 * 82);
     assert_eq!(sum, -2598);
     assert_eq!(sum_sq, 11_079_620);
-    assert_eq!(row(3, 0), [-29, 27, -56, -20, 7, 58, 21, 47]);
-    assert_eq!(row(40, 30), [-15, -67, -39, -9, 16, 45, 48, -1]);
-    assert_eq!(row(72, 70), [10, 4, 44, 60, -48, -10, 7, 37]);
+    assert_eq!(top_row, [-29, 27, -56, -20, 7, 58, 21, 47]);
+    assert_eq!(middle_row, [-15, -67, -39, -9, 16, 45, 48, -1]);
+    assert_eq!(bottom_row, [10, 4, 44, 60, -48, -10, 7, 37]);
 }
 
 #[test]
@@ -87,6 +91,9 @@ fn template_stats_match_the_reference_port() {
 
 #[test]
 fn template_seeds_stay_sixteen_bit() {
-    assert_eq!(template_seed(0), 1000);
-    assert_eq!(template_seed(23), ((1000u32 + 7919 * 23) & 0xFFFF) as u16);
+    let first_seed = template_seed(0);
+    let later_seed = template_seed(23);
+
+    assert_eq!(first_seed, 1000);
+    assert_eq!(later_seed, ((1000u32 + 7919 * 23) & 0xFFFF) as u16);
 }

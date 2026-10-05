@@ -44,9 +44,9 @@ fn build_engine(client: &ComputeClient<R>, radius: u32, channels: ChannelMode) -
     Nl4d::new(client, options, geometry).expect("build")
 }
 
-fn emit(engine: &mut Nl4d<R>, client: &ComputeClient<R>, channels: usize) -> Vec<f32> {
+fn emit(engine: &mut Nl4d<R>, client: &ComputeClient<R>, channel_count: usize) -> Vec<f32> {
     let pixels = (WIDTH * HEIGHT) as usize;
-    let outputs: Vec<Handle> = (0..channels).map(|_| client.empty(pixels * 4)).collect();
+    let outputs: Vec<Handle> = (0..channel_count).map(|_| client.empty(pixels * 4)).collect();
     let planes: Vec<_> = outputs
         .iter()
         .map(|handle| DevicePlane::new(handle, WIDTH, HEIGHT))
@@ -58,8 +58,8 @@ fn emit(engine: &mut Nl4d<R>, client: &ComputeClient<R>, channels: usize) -> Vec
 }
 
 /// Pushes one frame and returns how many frames the engine reports ready.
-fn push_frame(engine: &mut Nl4d<R>, client: &ComputeClient<R>, frame: &[f32], channels: usize) -> usize {
-    let handles = upload_planes(client, frame, channels);
+fn push_frame(engine: &mut Nl4d<R>, client: &ComputeClient<R>, frame: &[f32], channel_count: usize) -> usize {
+    let handles = upload_planes(client, frame, channel_count);
     let planes: Vec<_> = handles
         .iter()
         .map(|handle| DevicePlane::new(handle, WIDTH, HEIGHT))
@@ -68,8 +68,8 @@ fn push_frame(engine: &mut Nl4d<R>, client: &ComputeClient<R>, frame: &[f32], ch
     engine.push(&planes).expect("push")
 }
 
-fn push_context_frame(engine: &mut Nl4d<R>, client: &ComputeClient<R>, frame: &[f32], channels: usize) {
-    let handles = upload_planes(client, frame, channels);
+fn push_context_frame(engine: &mut Nl4d<R>, client: &ComputeClient<R>, frame: &[f32], channel_count: usize) {
+    let handles = upload_planes(client, frame, channel_count);
     let planes: Vec<_> = handles
         .iter()
         .map(|handle| DevicePlane::new(handle, WIDTH, HEIGHT))
@@ -78,31 +78,29 @@ fn push_context_frame(engine: &mut Nl4d<R>, client: &ComputeClient<R>, frame: &[
     engine.push_context(&planes).expect("push_context");
 }
 
-/// Pushes one frame and emits whatever becomes ready into `outputs`.
 fn push_and_emit(
     engine: &mut Nl4d<R>,
     client: &ComputeClient<R>,
     frame: &[f32],
-    channels: usize,
+    channel_count: usize,
     outputs: &mut Vec<Vec<f32>>,
 ) {
-    let ready = push_frame(engine, client, frame, channels);
+    let ready = push_frame(engine, client, frame, channel_count);
     for _ in 0..ready {
-        let output = emit(engine, client, channels);
+        let output = emit(engine, client, channel_count);
         outputs.push(output);
     }
 }
 
-/// Finishes the stream and emits every tail frame into `outputs`.
 fn finish_and_emit(
     engine: &mut Nl4d<R>,
     client: &ComputeClient<R>,
-    channels: usize,
+    channel_count: usize,
     outputs: &mut Vec<Vec<f32>>,
 ) {
     let tail = engine.finish().expect("finish");
     for _ in 0..tail {
-        let output = emit(engine, client, channels);
+        let output = emit(engine, client, channel_count);
         outputs.push(output);
     }
 }
@@ -112,15 +110,15 @@ fn drive(
     engine: &mut Nl4d<R>,
     client: &ComputeClient<R>,
     frames: &[Vec<f32>],
-    channels: usize,
+    channel_count: usize,
 ) -> Vec<Vec<f32>> {
     let mut outputs = Vec::new();
 
     for frame in frames {
-        push_and_emit(engine, client, frame, channels, &mut outputs);
+        push_and_emit(engine, client, frame, channel_count, &mut outputs);
     }
 
-    finish_and_emit(engine, client, channels, &mut outputs);
+    finish_and_emit(engine, client, channel_count, &mut outputs);
 
     outputs
 }
@@ -142,15 +140,15 @@ fn drive_u8(engine: &mut Nl4d<R>, client: &ComputeClient<R>, inputs: &[Handle]) 
     outputs
 }
 
-/// Emits `count` frames as `u8` planes into `outputs`.
+/// Emits `frame_count` frames as `u8` planes into `outputs`.
 fn emit_u8(
     engine: &mut Nl4d<R>,
     client: &ComputeClient<R>,
-    count: usize,
+    frame_count: usize,
     pixels: usize,
     outputs: &mut Vec<Vec<u8>>,
 ) {
-    for _ in 0..count {
+    for _ in 0..frame_count {
         let output = client.empty(pixels);
         let planes = [DevicePlane::new(&output, WIDTH, HEIGHT)];
         engine.emit_into(&planes).expect("emit");
@@ -168,21 +166,21 @@ struct Run {
 /// Runs the engine, pushing the first `context` frames with `push_context`.
 fn run_engine(options: Nl4dOptions, channels: ChannelMode, frames: &[Vec<f32>], context: usize) -> Run {
     let client = make_client();
-    let count = channels.count() as usize;
+    let channel_count = channels.count() as usize;
     let geometry = geometry(channels);
     let mut engine = Nl4d::new(&client, options, geometry).expect("build");
     let mut outputs = Vec::new();
 
     for (index, frame) in frames.iter().enumerate() {
         if index < context {
-            push_context_frame(&mut engine, &client, frame, count);
+            push_context_frame(&mut engine, &client, frame, channel_count);
             continue;
         }
 
-        push_and_emit(&mut engine, &client, frame, count, &mut outputs);
+        push_and_emit(&mut engine, &client, frame, channel_count, &mut outputs);
     }
 
-    finish_and_emit(&mut engine, &client, count, &mut outputs);
+    finish_and_emit(&mut engine, &client, channel_count, &mut outputs);
 
     // Drained through the trait object, the way the host layer reaches it.
     let dyn_engine: &mut dyn Engine = &mut engine;
@@ -194,7 +192,8 @@ fn run_engine(options: Nl4dOptions, channels: ChannelMode, frames: &[Vec<f32>], 
     }
 }
 
-/// Runs the pre-engine denoiser, marking a continuation and skipping submits for the first `context` frames.
+/// Runs the `Nl4dDenoiser` oracle, marking a continuation and skipping submits for the first
+/// `context` frames.
 fn run_oracle(options: Nl4dOptions, channels: ChannelMode, frames: &[Vec<f32>], context: usize) -> Run {
     let client = make_client();
     let params = resolve_params(&options, channels).expect("resolve");
@@ -377,7 +376,6 @@ fn finish_while_a_frame_is_ready_returns_outputs_pending() {
     assert!(matches!(finished, Err(Error::OutputsPending)));
 }
 
-/// Pushes a stream and finishes it, leaving the whole tail owed.
 fn engine_owing_a_tail(client: &ComputeClient<R>) -> (Nl4d<R>, usize) {
     let frames = noisy_frames(WIDTH, HEIGHT, 1, 6);
     let mut engine = build_engine(client, 1, ChannelMode::Luma);
@@ -450,6 +448,7 @@ fn misuse_errors_do_not_poison() {
             break;
         }
     }
+
     assert_eq!(ready, 1);
 }
 
@@ -550,15 +549,15 @@ fn u8_input_matches_f32_input_from_the_ingest_kernel() {
         input: SampleFormat::F32,
         ..u8_geometry
     };
-    let options_a = options(1, false);
-    let options_b = options(1, false);
-    let mut engine_a = Nl4d::new(&client, options_a, u8_geometry).expect("build u8");
-    let mut engine_b = Nl4d::new(&client, options_b, f32_geometry).expect("build f32");
+    let u8_options = options(1, false);
+    let f32_options = options(1, false);
+    let mut u8_engine = Nl4d::new(&client, u8_options, u8_geometry).expect("build u8");
+    let mut f32_engine = Nl4d::new(&client, f32_options, f32_geometry).expect("build f32");
 
-    let frames_a = drive_u8(&mut engine_a, &client, &u8_inputs);
-    let frames_b = drive_u8(&mut engine_b, &client, &f32_inputs);
-    assert_eq!(frames_a.len(), 4);
-    assert_eq!(frames_a, frames_b);
+    let u8_frames = drive_u8(&mut u8_engine, &client, &u8_inputs);
+    let f32_frames = drive_u8(&mut f32_engine, &client, &f32_inputs);
+    assert_eq!(u8_frames.len(), 4);
+    assert_eq!(u8_frames, f32_frames);
 }
 
 #[test]
