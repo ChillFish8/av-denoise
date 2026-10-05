@@ -86,16 +86,28 @@ fn a_scene_job_channel_closes_when_its_scene_ends() {
 #[test]
 fn staging_fails_rather_than_hanging_when_the_pool_dies() {
     let (job_tx, job_rx) = crossbeam_channel::bounded::<SceneJob>(0);
+    let (die_tx, die_rx) = crossbeam_channel::bounded::<()>(0);
     let pool = thread::spawn(move || {
         let claimed = job_rx.recv();
+        let _ = die_rx.recv();
         drop(claimed);
     });
 
-    let scene_starts = flags(&[10]);
+    let layout = tiny_layout();
+    let planes = tiny_planes(layout);
+    let mut stager = Stager::new(&job_tx);
 
-    let err = stage_all(&scene_starts, &job_tx).expect_err("staging must not hang");
+    let first_planes = planes.clone();
+    stager
+        .stage(first_planes, true)
+        .expect("the pool claims the first scene");
 
+    // The scene's channel is unbounded, so a send only fails once the claimed job is dropped.
+    // The pool holds the job until told to die, so the drop lands between the two frames.
+    drop(die_tx);
     pool.join().expect("pool panicked");
+
+    let err = stager.stage(planes, false).expect_err("staging must not hang");
 
     assert!(
         err.to_string().contains("disconnect"),
