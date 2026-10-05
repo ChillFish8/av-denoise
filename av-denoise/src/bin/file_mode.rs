@@ -301,24 +301,66 @@ fn encode_scenes(
         give,
     );
 
-    dispatch_frames(input, scenes, &job_tx, &take)?;
+    let dispatched = dispatch_frames(input, scenes, &job_tx, &take);
 
     // Closing the queue is what tells the workers there are no more scenes.
     drop(job_tx);
 
-    for h in worker_handles {
-        h.join()
-            .map_err(|e| anyhow::anyhow!("worker panicked: {e:?}"))??;
-    }
-
-    coordinator
+    let workers_joined = join_workers(worker_handles);
+    let coordinator_joined = coordinator
         .join()
-        .map_err(|e| anyhow::anyhow!("coordinator panicked: {e:?}"))??;
+        .map_err(|panic| anyhow::anyhow!("coordinator panicked: {panic:?}"))
+        .and_then(|result| result);
 
-    Ok(())
+    first_root_cause(coordinator_joined, workers_joined, dispatched)
+}
+
+/// Picks which error a finished run reports.
+///
+/// A failed write comes first, then worker errors, then dispatch errors. Lost frames come
+/// last because a failed worker or dispatcher is what loses them.
+fn first_root_cause(
+    coordinator: Result<(), anyhow::Error>,
+    workers: Result<(), anyhow::Error>,
+    dispatched: Result<(), anyhow::Error>,
+) -> Result<(), anyhow::Error> {
+    let lost_frames = match coordinator {
+        Ok(()) => None,
+        Err(err) if err.is::<FramesLost>() => Some(err),
+        Err(err) => return Err(err),
+    };
+
+    workers?;
+    dispatched?;
+
+    lost_frames.map_or(Ok(()), Err)
 }
 
 type WorkerJoin = thread::JoinHandle<Result<(), anyhow::Error>>;
+
+/// Joins every worker, logging each error or panic and returning the first.
+fn join_workers(handles: Vec<WorkerJoin>) -> Result<(), anyhow::Error> {
+    let mut first_error = None;
+
+    for (worker_id, handle) in handles.into_iter().enumerate() {
+        let result = handle
+            .join()
+            .map_err(|panic| anyhow::anyhow!("worker panicked: {panic:?}"))
+            .and_then(|result| result);
+
+        let Err(err) = result else {
+            continue;
+        };
+
+        tracing::error!(worker_id, error = %err, "worker failed");
+
+        if first_error.is_none() {
+            first_error = Some(err);
+        }
+    }
+
+    first_error.map_or(Ok(()), Err)
+}
 
 /// Spawns `workers` worker threads over one shared scene queue.
 ///
@@ -703,14 +745,35 @@ fn emit_frames<W: std::io::Write>(
     }
 
     if next_emit != total {
-        anyhow::bail!(
-            "wrote {next_emit} frames but expected {total}. Every worker disconnected \
-             before the stream finished, so a frame index was likely lost"
-        );
+        let lost = FramesLost {
+            written: next_emit,
+            expected: total,
+        };
+        return Err(lost.into());
     }
 
     Ok(())
 }
+
+/// Every worker hung up before the coordinator wrote all the frames it expected.
+#[derive(Debug)]
+struct FramesLost {
+    written: u64,
+    expected: u64,
+}
+
+impl std::fmt::Display for FramesLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "wrote {} frames but expected {}. Every worker disconnected before the stream \
+             finished, so a frame index was likely lost",
+            self.written, self.expected,
+        )
+    }
+}
+
+impl std::error::Error for FramesLost {}
 
 /// Checks each plane's byte length against the layout, failing with an error naming which plane
 /// is wrong, the length found and the length expected.
@@ -1138,6 +1201,53 @@ mod tests {
             msg.contains('1') && msg.contains('3'),
             "error should name frames written (1) vs expected (3): {msg}"
         );
+        assert!(err.is::<FramesLost>());
+    }
+
+    fn lost_frames() -> Result<(), anyhow::Error> {
+        let lost = FramesLost {
+            written: 1,
+            expected: 3,
+        };
+
+        Err(lost.into())
+    }
+
+    #[test]
+    fn a_failed_write_is_reported_over_the_worker_disconnect() {
+        let coordinator = Err(anyhow::anyhow!("broken pipe"));
+        let workers = Err(anyhow::anyhow!("coordinator disconnected"));
+        let dispatched = Err(anyhow::anyhow!("the coordinator stopped"));
+
+        let err = first_root_cause(coordinator, workers, dispatched).expect_err("the run failed");
+
+        assert_eq!(err.to_string(), "broken pipe");
+    }
+
+    #[test]
+    fn a_worker_error_is_reported_over_lost_frames_and_dispatch() {
+        let workers = Err(anyhow::anyhow!("device lost"));
+        let dispatched = Err(anyhow::anyhow!("the worker holding scene 0 disconnected"));
+
+        let err = first_root_cause(lost_frames(), workers, dispatched).expect_err("the run failed");
+
+        assert_eq!(err.to_string(), "device lost");
+    }
+
+    #[test]
+    fn a_dispatch_error_is_reported_over_lost_frames() {
+        let dispatched = Err(anyhow::anyhow!("decode failed"));
+
+        let err = first_root_cause(lost_frames(), Ok(()), dispatched).expect_err("the run failed");
+
+        assert_eq!(err.to_string(), "decode failed");
+    }
+
+    #[test]
+    fn lost_frames_are_reported_when_nothing_else_failed() {
+        let err = first_root_cause(lost_frames(), Ok(()), Ok(())).expect_err("the run failed");
+
+        assert!(err.is::<FramesLost>());
     }
 
     /// Gated because it names the `Vulkan` accelerator variant, which only
