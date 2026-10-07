@@ -59,6 +59,8 @@ const NEIGHBOUR_SLOTS: [u32; 4] = [0, 1, 3, 4];
 const SIGMA: f32 = 0.02;
 /// `Nl4dParams::default().lambda_ht`.
 const LAMBDA_HT: f32 = 4.158;
+/// The pooled threshold over `LAMBDA_HT`, as `nl4d_pool_ratio` gives it at the default lambda.
+const POOL_RATIO: f32 = 2.42 / LAMBDA_HT;
 
 fn frame_data(geometry: PlaneGeometry) -> Vec<f32> {
     let mut data = Vec::with_capacity((geometry.width * geometry.height * geometry.stored_channels) as usize);
@@ -110,10 +112,11 @@ struct Rig<R: Runtime> {
     map_len: usize,
     /// The uniform aggregation window, which the `fused` row runs with.
     kaiser_off: Handle,
-    /// A `beta = 2` window, which the `fused_kaiser` row runs with.
+    /// A `beta = 2` window, which the `fused_kaiser` and `fused_prod` rows run with.
     ///
-    /// The kernel loads and applies the window taps for every scattered pixel in both rows, so this
-    /// row checks that the taper's values add no cost over the uniform window.
+    /// The kernel loads and applies the window taps for every scattered pixel in the `fused` and
+    /// `fused_kaiser` rows, so this row checks that the taper's values add no cost over the uniform
+    /// window.
     kaiser_on: Handle,
     mv_len: usize,
     conf_len: usize,
@@ -223,15 +226,20 @@ impl<R: Runtime> Rig<R> {
     /// Eight references share one 64-lane cube, so the grid is an eighth as wide along x as the
     /// reference grid and the cube is 1D. One row covers matching, filtering and scatter together.
     fn fused(&self) {
-        self.fused_with(&self.kaiser_off);
+        self.fused_with(&self.kaiser_off, false);
     }
 
     /// [Self::fused] with the aggregation window on.
     fn fused_kaiser(&self) {
-        self.fused_with(&self.kaiser_on);
+        self.fused_with(&self.kaiser_on, false);
     }
 
-    fn fused_with(&self, kaiser: &Handle) {
+    /// The program production launches, with the aggregation window and the pooled threshold on.
+    fn fused_prod(&self) {
+        self.fused_with(&self.kaiser_on, true);
+    }
+
+    fn fused_with(&self, kaiser: &Handle, pooled: bool) {
         let geometry = self.geometry;
         let refs = ref_count(geometry.width, geometry.height);
         let refs_x = refs_along(geometry.width);
@@ -291,8 +299,8 @@ impl<R: Runtime> Rig<R> {
                 refs_x,
                 map_cols,
                 map_rows,
-                0.0f32,
-                false,
+                POOL_RATIO,
+                pooled,
             );
         }
     }
@@ -366,6 +374,7 @@ impl<R: Runtime> Benchmark for Arm<'_, R> {
         match self.kernel {
             "fused" => self.rig.fused(),
             "fused_kaiser" => self.rig.fused_kaiser(),
+            "fused_prod" => self.rig.fused_prod(),
             "normalise" => self.rig.normalise(),
             _ => self.rig.zero(),
         }
@@ -417,6 +426,7 @@ fn main() {
             ("zero_accum", false),
             ("fused", false),
             ("fused_kaiser", false),
+            ("fused_prod", false),
             ("normalise", true),
         ];
         let mut totals = vec![0.0f64; kernels.len()];
