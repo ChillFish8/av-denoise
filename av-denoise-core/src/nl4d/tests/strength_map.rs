@@ -2,7 +2,7 @@ use super::helpers::{R, make_client};
 use crate::bench_api::HostIo;
 use crate::collab::kernels::fused::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA};
 use crate::nl4d::denoiser::strength_map_upload;
-use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
+use crate::nl4d::{Nl4dDenoiser, Nl4dParams, PsyParams};
 use crate::nlmeans::tests::helpers::seeded_unit_gaussian;
 use crate::nlmeans::{
     ChannelMode,
@@ -129,9 +129,13 @@ fn clip_params(
 
     Nl4dParams {
         nlm,
-        flat_boost,
-        chroma_flat_boost,
-        shadow_soften,
+        psy: Some(PsyParams {
+            flat_boost,
+            chroma_flat_boost,
+            shadow_soften,
+            line_ring: 0,
+            ..PsyParams::default()
+        }),
         ..defaults
     }
 }
@@ -143,6 +147,7 @@ fn build_nl4d(channels: ChannelMode, mut params: Nl4dParams) -> Nl4dDenoiser<R> 
 }
 
 fn unit_params(channels: ChannelMode) -> Nl4dParams {
+    // The texture cut stays at its default so the recorded comparisons keep their configuration.
     clip_params(channels, 1.0, 1.0, 1.0)
 }
 
@@ -366,37 +371,70 @@ fn a_chroma_denoiser_boosts_its_second_channel() {
     assert!(boosted_std > unboosted_std, "{boosted_std} vs {unboosted_std}");
 }
 
-#[test]
-fn the_luma_denoiser_passes_the_texture_cut_to_its_front() {
-    let params = Nl4dParams::default();
-    let denoiser = build_nl4d(ChannelMode::Luma, params);
-
-    assert_eq!(denoiser.front_for_test().flat_texture_cut(), Some(0.21));
+fn psy_params() -> Nl4dParams {
+    Nl4dParams {
+        psy: Some(PsyParams::default()),
+        ..Nl4dParams::default()
+    }
 }
 
 #[test]
-fn the_fused_yuv_denoiser_passes_the_texture_cut_to_its_front() {
-    let params = Nl4dParams::default();
-    let denoiser = build_nl4d(ChannelMode::Yuv, params);
-
-    assert_eq!(denoiser.front_for_test().flat_texture_cut(), Some(0.21));
-}
-
-#[test]
-fn the_chroma_denoiser_never_gets_a_texture_cut() {
-    let params = Nl4dParams::default();
-    let denoiser = build_nl4d(ChannelMode::Chroma, params);
+fn default_params_hand_the_front_no_psy() {
+    let denoiser = build_nl4d(ChannelMode::Luma, Nl4dParams::default());
 
     assert_eq!(denoiser.front_for_test().flat_texture_cut(), None);
+    assert_eq!(denoiser.front_for_test().line_ring(), None);
 }
 
 #[test]
-fn a_texture_cut_of_one_is_not_passed_on() {
+fn the_luma_denoiser_passes_the_psy_cut_and_ring_to_its_front() {
+    let denoiser = build_nl4d(ChannelMode::Luma, psy_params());
+
+    assert_eq!(denoiser.front_for_test().flat_texture_cut(), Some(0.21));
+    assert_eq!(denoiser.front_for_test().line_ring(), Some(2));
+}
+
+#[test]
+fn the_fused_yuv_denoiser_passes_the_psy_cut_and_ring_to_its_front() {
+    let denoiser = build_nl4d(ChannelMode::Yuv, psy_params());
+
+    assert_eq!(denoiser.front_for_test().flat_texture_cut(), Some(0.21));
+    assert_eq!(denoiser.front_for_test().line_ring(), Some(2));
+}
+
+#[test]
+fn the_chroma_denoiser_never_gets_a_cut_or_ring() {
+    let denoiser = build_nl4d(ChannelMode::Chroma, psy_params());
+
+    assert_eq!(denoiser.front_for_test().flat_texture_cut(), None);
+    assert_eq!(denoiser.front_for_test().line_ring(), None);
+}
+
+#[test]
+fn psy_without_the_noise_map_hands_the_front_nothing() {
     let params = Nl4dParams {
+        noise_map: false,
+        ..psy_params()
+    };
+    let denoiser = build_nl4d(ChannelMode::Luma, params);
+
+    assert_eq!(denoiser.front_for_test().flat_texture_cut(), None);
+    assert_eq!(denoiser.front_for_test().line_ring(), None);
+}
+
+#[test]
+fn psy_knobs_at_their_off_values_are_not_passed_on() {
+    let psy = PsyParams {
         flat_texture_cut: 1.0,
+        line_ring: 0,
+        ..PsyParams::default()
+    };
+    let params = Nl4dParams {
+        psy: Some(psy),
         ..Nl4dParams::default()
     };
     let denoiser = build_nl4d(ChannelMode::Luma, params);
 
     assert_eq!(denoiser.front_for_test().flat_texture_cut(), None);
+    assert_eq!(denoiser.front_for_test().line_ring(), None);
 }

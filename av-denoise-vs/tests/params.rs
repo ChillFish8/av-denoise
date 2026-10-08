@@ -985,90 +985,155 @@ fn the_four_nl4d_dials_are_rejected_for_nlmeans() {
     }
 }
 
+fn nl4d_psy(raw: &RawParams) -> Option<av_denoise::PsyParams> {
+    let layout = yuv420_layout();
+    let algorithm = plane_options_from(raw, AlgorithmKind::Nl4d, layout)
+        .unwrap()
+        .algorithm;
+
+    match algorithm {
+        av_denoise::Algorithm::Nl4d(nl4d) => nl4d.psy,
+        other => panic!("expected Nl4d, got {other:?}"),
+    }
+}
+
 #[test]
-fn strength_map_params_reach_nl4d_options() {
+fn psy_is_off_by_default() {
+    let raw = RawParams::default();
+
+    assert_eq!(nl4d_psy(&raw), None);
+}
+
+#[test]
+fn enable_psy_turns_on_the_library_defaults() {
     let raw = RawParams {
-        flat_boost: Some(2.0),
-        chroma_flat_boost: Some(1.2),
-        shadow_soften: Some(0.8),
-        flat_texture_cut: Some(0.3),
+        enable_psy: Some(true),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let algorithm = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
-        .unwrap()
-        .algorithm;
 
-    match algorithm {
-        av_denoise::Algorithm::Nl4d(nl4d) => {
-            assert_eq!(nl4d.flat_boost, 2.0);
-            assert_eq!(nl4d.chroma_flat_boost, 1.2);
-            assert_eq!(nl4d.shadow_soften, 0.8);
-            assert_eq!(nl4d.flat_texture_cut, 0.3);
-        },
-        other => panic!("expected Nl4d, got {other:?}"),
+    assert_eq!(nl4d_psy(&raw), Some(av_denoise::PsyParams::default()));
+}
+
+#[test]
+fn psy_params_reach_nl4d_options() {
+    let raw = RawParams {
+        enable_psy: Some(true),
+        psy_flat_boost: Some(2.0),
+        psy_chroma_flat_boost: Some(1.2),
+        psy_shadow_soften: Some(0.8),
+        psy_flat_texture_cut: Some(0.3),
+        psy_line_ring: Some(8),
+        ..RawParams::default()
+    };
+    let psy = nl4d_psy(&raw).expect("psy on");
+
+    assert_eq!(psy.flat_boost, 2.0);
+    assert_eq!(psy.chroma_flat_boost, 1.2);
+    assert_eq!(psy.shadow_soften, 0.8);
+    assert_eq!(psy.flat_texture_cut, 0.3);
+    assert_eq!(psy.line_ring, 8);
+}
+
+fn single_psy_params() -> [(&'static str, RawParams); 5] {
+    [
+        (
+            "psy_flat_boost",
+            RawParams {
+                psy_flat_boost: Some(1.5),
+                ..RawParams::default()
+            },
+        ),
+        (
+            "psy_chroma_flat_boost",
+            RawParams {
+                psy_chroma_flat_boost: Some(1.5),
+                ..RawParams::default()
+            },
+        ),
+        (
+            "psy_shadow_soften",
+            RawParams {
+                psy_shadow_soften: Some(0.65),
+                ..RawParams::default()
+            },
+        ),
+        (
+            "psy_flat_texture_cut",
+            RawParams {
+                psy_flat_texture_cut: Some(0.21),
+                ..RawParams::default()
+            },
+        ),
+        (
+            "psy_line_ring",
+            RawParams {
+                psy_line_ring: Some(16),
+                ..RawParams::default()
+            },
+        ),
+    ]
+}
+
+#[test]
+fn a_psy_param_without_enable_psy_is_rejected() {
+    let layout = yuv420_layout();
+    for (name, raw) in single_psy_params() {
+        let err = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains(name), "error should name {name}, got {err}");
+        assert!(
+            err.contains("enable_psy"),
+            "error should say to set enable_psy, got {err}"
+        );
     }
 }
 
 #[test]
-fn strength_map_params_default_to_the_library_values() {
-    let raw = RawParams::default();
+fn a_psy_param_with_enable_psy_off_is_rejected() {
     let layout = yuv420_layout();
-    let defaults = av_denoise::Nl4dOptions::default();
-    let algorithm = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
-        .unwrap()
-        .algorithm;
+    let raw = RawParams {
+        enable_psy: Some(false),
+        psy_line_ring: Some(16),
+        ..RawParams::default()
+    };
 
-    match algorithm {
-        av_denoise::Algorithm::Nl4d(nl4d) => {
-            assert_eq!(nl4d.flat_boost, defaults.flat_boost);
-            assert_eq!(nl4d.chroma_flat_boost, defaults.chroma_flat_boost);
-            assert_eq!(nl4d.shadow_soften, defaults.shadow_soften);
-            assert_eq!(nl4d.flat_texture_cut, defaults.flat_texture_cut);
-        },
-        other => panic!("expected Nl4d, got {other:?}"),
-    }
+    assert!(plane_options_from(&raw, AlgorithmKind::Nl4d, layout).is_err());
 }
 
 #[test]
-fn strength_map_params_are_rejected_for_nlmeans() {
+fn a_negative_psy_line_ring_is_rejected() {
     let layout = yuv420_layout();
-    let cases = [
-        (
-            "flat_boost",
-            RawParams {
-                flat_boost: Some(1.5),
-                ..RawParams::default()
-            },
-        ),
-        (
-            "chroma_flat_boost",
-            RawParams {
-                chroma_flat_boost: Some(1.5),
-                ..RawParams::default()
-            },
-        ),
-        (
-            "shadow_soften",
-            RawParams {
-                shadow_soften: Some(0.65),
-                ..RawParams::default()
-            },
-        ),
-        (
-            "flat_texture_cut",
-            RawParams {
-                flat_texture_cut: Some(0.21),
-                ..RawParams::default()
-            },
-        ),
-    ];
+    let raw = RawParams {
+        enable_psy: Some(true),
+        psy_line_ring: Some(-1),
+        ..RawParams::default()
+    };
+    let err = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("psy_line_ring"), "got {err}");
+}
+
+#[test]
+fn psy_params_are_rejected_for_nlmeans() {
+    let layout = yuv420_layout();
+    let mut cases = single_psy_params().to_vec();
+    cases.push((
+        "enable_psy",
+        RawParams {
+            enable_psy: Some(true),
+            ..RawParams::default()
+        },
+    ));
     for (name, raw) in cases {
         let err = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout)
             .unwrap_err()
             .to_string();
 
-        assert!(err.contains(name), "{name}: got {err}");
+        assert!(err.contains(name), "error should name {name}, got {err}");
     }
 }
 

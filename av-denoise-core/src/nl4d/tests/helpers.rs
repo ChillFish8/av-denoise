@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 use cubecl::wgpu::WgpuRuntime;
 
-use crate::nl4d::Nl4dParams;
+use crate::nl4d::{Nl4dParams, PsyParams};
 use crate::nlmeans::motion::neighbour_idx_for_k;
 use crate::nlmeans::tests::helpers::noisy_field_over;
 use crate::nlmeans::{
@@ -59,11 +59,15 @@ pub(super) fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
         field_lambda: 0.0,
         // No effect here, since sigma is pinned.
         noise_map: true,
-        flat_boost: 1.5,
-        chroma_flat_boost: 1.5,
-        shadow_soften: 0.65,
-        // Off, so the pipeline tests keep the flat map their expectations were recorded against.
-        flat_texture_cut: 1.0,
+        // A boost of 1.5 with the cut and ring off, the flat map the pipeline tests' expectations
+        // were recorded against.
+        psy: Some(PsyParams {
+            flat_boost: 1.5,
+            chroma_flat_boost: 1.5,
+            shadow_soften: 0.65,
+            flat_texture_cut: 1.0,
+            line_ring: 0,
+        }),
         // Off, so the pipeline tests keep the per-coefficient kernel their expectations were
         // recorded against.
         pooled_threshold: false,

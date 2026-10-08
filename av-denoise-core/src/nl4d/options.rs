@@ -1,4 +1,5 @@
 use super::Nl4dParams;
+use super::psy::PsyParams;
 use crate::error::Error;
 use crate::nlmeans::{ChannelMode, HqParams, MotionSearch, NlmParams};
 use crate::options::Preset;
@@ -59,14 +60,8 @@ pub struct Nl4dOptions {
     pub field_lambda: f32,
     /// See [Nl4dParams::noise_map](crate::nl4d::Nl4dParams::noise_map).
     pub noise_map: bool,
-    /// See [Nl4dParams::flat_boost](crate::nl4d::Nl4dParams::flat_boost).
-    pub flat_boost: f32,
-    /// See [Nl4dParams::chroma_flat_boost](crate::nl4d::Nl4dParams::chroma_flat_boost).
-    pub chroma_flat_boost: f32,
-    /// See [Nl4dParams::shadow_soften](crate::nl4d::Nl4dParams::shadow_soften).
-    pub shadow_soften: f32,
-    /// See [Nl4dParams::flat_texture_cut](crate::nl4d::Nl4dParams::flat_texture_cut).
-    pub flat_texture_cut: f32,
+    /// See [Nl4dParams::psy](crate::nl4d::Nl4dParams::psy).
+    pub psy: Option<PsyParams>,
     /// See [Nl4dParams::pooled_threshold](crate::nl4d::Nl4dParams::pooled_threshold).
     pub pooled_threshold: bool,
     /// Whether the denoiser measures the source's film grain for an AV1 grain table.
@@ -97,10 +92,7 @@ impl Default for Nl4dOptions {
             windowed_noise_estimation: false,
             field_lambda: defaults.field_lambda,
             noise_map: defaults.noise_map,
-            flat_boost: defaults.flat_boost,
-            chroma_flat_boost: defaults.chroma_flat_boost,
-            shadow_soften: defaults.shadow_soften,
-            flat_texture_cut: defaults.flat_texture_cut,
+            psy: defaults.psy,
             pooled_threshold: defaults.pooled_threshold,
             grain_export: defaults.grain_export,
             temporal_radius: nl4d_temporal_radius_for(Preset::Base),
@@ -228,10 +220,7 @@ pub(crate) fn resolve_params(options: &Nl4dOptions, channels: ChannelMode) -> Re
         kaiser_beta: options.kaiser_beta,
         field_lambda: options.field_lambda,
         noise_map: options.noise_map,
-        flat_boost: options.flat_boost,
-        chroma_flat_boost: options.chroma_flat_boost,
-        shadow_soften: options.shadow_soften,
-        flat_texture_cut: options.flat_texture_cut,
+        psy: options.psy,
         pooled_threshold: options.pooled_threshold,
         grain_export: options.grain_export,
     })

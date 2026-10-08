@@ -15,6 +15,7 @@ use super::noise::{
     NoiseCurve,
     NoiseEstimator,
     QuarterClasses,
+    QuarterSettings,
     build_spatial_offset_lut,
     noise_partials_slot_stride_bytes,
     temporal_stats_buf_bytes,
@@ -165,8 +166,10 @@ pub struct NlmDenoiser<R: Runtime> {
     /// Leaving them off roughly halves the kernel's cost at 1080p.
     pub(super) luma_noise_fields: bool,
 
-    /// The cut the luma flat map vetoes textured quarters at, or `None` for no veto.
-    pub(super) flat_texture_cut: Option<f32>,
+    /// What the luma flat map does after classing quarters.
+    ///
+    /// It holds the texture cut and the line ring.
+    pub(super) quarter_settings: QuarterSettings,
 
     /// Whether the stream's edges run off-centre passes instead of copied padding.
     ///
@@ -400,7 +403,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             confidence_dummy,
             sigma_y,
             luma_noise_fields: false,
-            flat_texture_cut: None,
+            quarter_settings: QuarterSettings::default(),
             shifted_edges: false,
         }
     }

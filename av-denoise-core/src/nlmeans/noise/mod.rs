@@ -1,6 +1,7 @@
 mod correlation;
 mod curve;
 mod estimator;
+mod line_ring;
 mod spatial;
 mod stats;
 mod strength_map;
@@ -31,7 +32,7 @@ pub(super) use self::spatial::{
 pub(super) use self::strength_map::classify_quarters;
 #[cfg(test)]
 pub(crate) use self::strength_map::{QuarterClass, QuarterTensor};
-pub(crate) use self::strength_map::{QuarterClasses, StrengthMapParams};
+pub(crate) use self::strength_map::{QuarterClasses, QuarterSettings, StrengthMapParams};
 pub(super) use self::temporal::{
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
@@ -44,6 +45,7 @@ pub(super) use self::temporal::{
     QUARTER_TENSOR_YY,
     TEMPORAL_QUARTER_BASE,
     TEMPORAL_QUARTER_FIELDS,
+    TEMPORAL_QUARTER_SIZE,
     TEMPORAL_QUARTERS,
     TemporalNoiseReading,
     TemporalNoiseSample,
@@ -59,7 +61,6 @@ pub(super) use self::temporal::{
 #[cfg(test)]
 pub(super) use self::temporal::{
     TEMPORAL_NOISE_BLOCK,
-    TEMPORAL_QUARTER_SIZE,
     accepted_static_blocks,
     aggregate_temporal_noise_stats,
 };

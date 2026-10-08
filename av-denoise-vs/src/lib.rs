@@ -143,10 +143,12 @@ fn raw_params(
     spatial_radius: Option<i64>,
     refine: Option<i64>,
     noise_map: Option<i64>,
-    flat_boost: Option<f64>,
-    chroma_flat_boost: Option<f64>,
-    shadow_soften: Option<f64>,
-    flat_texture_cut: Option<f64>,
+    enable_psy: Option<i64>,
+    psy_flat_boost: Option<f64>,
+    psy_chroma_flat_boost: Option<f64>,
+    psy_shadow_soften: Option<f64>,
+    psy_flat_texture_cut: Option<f64>,
+    psy_line_ring: Option<i64>,
     pooled_threshold: Option<i64>,
 ) -> Result<RawParams, Error> {
     Ok(RawParams {
@@ -172,10 +174,12 @@ fn raw_params(
         spatial_radius,
         refine,
         noise_map: opt_bool(noise_map),
-        flat_boost,
-        chroma_flat_boost,
-        shadow_soften,
-        flat_texture_cut,
+        enable_psy: opt_bool(enable_psy),
+        psy_flat_boost,
+        psy_chroma_flat_boost,
+        psy_shadow_soften,
+        psy_flat_texture_cut,
+        psy_line_ring,
         pooled_threshold: opt_bool(pooled_threshold),
     })
 }
@@ -235,6 +239,8 @@ make_filter_function! {
             None,
             None,
             None,
+            None,
+            None,
         )?;
         let filter = Denoise::create(api, core, clip, AlgorithmKind::Nlmeans, &raw)?;
         let boxed: Box<dyn Filter<'core> + 'core> = Box::new(filter);
@@ -274,10 +280,12 @@ make_filter_function! {
         spatial_radius: Option<i64>,
         refine: Option<i64>,
         noise_map: Option<i64>,
-        flat_boost: Option<f64>,
-        chroma_flat_boost: Option<f64>,
-        shadow_soften: Option<f64>,
-        flat_texture_cut: Option<f64>,
+        enable_psy: Option<i64>,
+        psy_flat_boost: Option<f64>,
+        psy_chroma_flat_boost: Option<f64>,
+        psy_shadow_soften: Option<f64>,
+        psy_flat_texture_cut: Option<f64>,
+        psy_line_ring: Option<i64>,
         pooled_threshold: Option<i64>,
     ) -> Result<Option<Box<dyn Filter<'core> + 'core>>, Error> {
         let raw = raw_params(
@@ -303,10 +311,12 @@ make_filter_function! {
             spatial_radius,
             refine,
             noise_map,
-            flat_boost,
-            chroma_flat_boost,
-            shadow_soften,
-            flat_texture_cut,
+            enable_psy,
+            psy_flat_boost,
+            psy_chroma_flat_boost,
+            psy_shadow_soften,
+            psy_flat_texture_cut,
+            psy_line_ring,
             pooled_threshold,
         )?;
         let filter = Denoise::create(api, core, clip, AlgorithmKind::Nl4d, &raw)?;

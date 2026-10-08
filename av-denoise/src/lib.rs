@@ -34,6 +34,7 @@ pub use av_denoise_core::{
     NlmeansVariant,
     PrefilterMode,
     Preset,
+    PsyParams,
     SampleFormat,
     SceneGrain,
     WindowSpan,

@@ -1,7 +1,7 @@
 use super::helpers::{R, make_client};
 use crate::bench_api::HostIo;
 use crate::nl4d::denoiser::noise_curve_upload;
-use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
+use crate::nl4d::{Nl4dDenoiser, Nl4dParams, PsyParams};
 use crate::nlmeans::tests::helpers::seeded_unit_gaussian;
 use crate::nlmeans::{ChannelMode, HqParams, NOISE_CURVE_BINS, NlmParams, PrefilterMode};
 
@@ -72,6 +72,10 @@ fn ramp_params(channels: ChannelMode, noise_map: bool, sigma_scale: f32) -> Nl4d
     Nl4dParams {
         nlm,
         noise_map,
+        psy: Some(PsyParams {
+            line_ring: 0,
+            ..PsyParams::default()
+        }),
         ..defaults
     }
 }
@@ -168,15 +172,13 @@ fn sigma_scale_still_scales_strength_with_the_noise_map_on() {
         // A lower threshold keeps both arms off the point where all the noise is removed.
         let mut full_params = ramp_params(ChannelMode::Luma, noise_map, 1.0);
         full_params.lambda_ht = 2.0;
-        full_params.flat_boost = 1.0;
-        full_params.shadow_soften = 1.0;
+        full_params.psy = None;
         let full = denoise_clip(full_params, &frames);
         assert_eq!(full.curve_seen, noise_map);
 
         let mut scaled_params = ramp_params(ChannelMode::Luma, noise_map, 0.8);
         scaled_params.lambda_ht = 2.0;
-        scaled_params.flat_boost = 1.0;
-        scaled_params.shadow_soften = 1.0;
+        scaled_params.psy = None;
         let scaled = denoise_clip(scaled_params, &frames);
 
         let full_std = residual_std(&frames, &full.outputs);
@@ -204,11 +206,11 @@ fn a_chroma_denoiser_without_a_flat_boost_never_builds_a_curve() {
     let frames = ramp_clip(2);
 
     let mut map_on_params = ramp_params(ChannelMode::Chroma, true, 1.0);
-    map_on_params.chroma_flat_boost = 1.0;
+    map_on_params.psy = None;
     let map_on = denoise_clip(map_on_params, &frames);
 
     let mut map_off_params = ramp_params(ChannelMode::Chroma, false, 1.0);
-    map_off_params.chroma_flat_boost = 1.0;
+    map_off_params.psy = None;
     let map_off = denoise_clip(map_off_params, &frames);
 
     assert!(!map_on.curve_seen, "a chroma denoiser should never build a curve");

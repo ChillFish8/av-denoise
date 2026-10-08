@@ -3,7 +3,7 @@ use cubecl::server::Handle;
 
 use super::curve::{NoiseCurve, build_noise_curve};
 use super::stats::{lower_quartile, median, sort_ascending};
-use super::strength_map::{QuarterClasses, classify_quarters};
+use super::strength_map::{QuarterClasses, QuarterSettings, classify_quarters};
 use crate::nlmeans::align::StorageAlign;
 use crate::nlmeans::kernels::{nlm_temporal_noise_stats, nlm_temporal_stats_zero};
 use crate::nlmeans::{BLOCK_1D, MAX_GRID_1D};
@@ -426,7 +426,16 @@ pub(in crate::nlmeans) fn aggregate_temporal_noise_stats(
     width: u32,
     height: u32,
 ) -> Option<TemporalNoiseSample> {
-    temporal_noise_reading(records, channels, stored_ch, width, height, false, None).sample
+    temporal_noise_reading(
+        records,
+        channels,
+        stored_ch,
+        width,
+        height,
+        false,
+        QuarterSettings::default(),
+    )
+    .sample
 }
 
 /// One centre slot's temporal-noise reading.
@@ -446,8 +455,8 @@ pub(in crate::nlmeans) struct TemporalNoiseReading {
 /// as in a zero-filled duplicate slot.
 ///
 /// The curve needs `with_curve` and a sample, since a frame too unreliable for a scalar sample is
-/// too unreliable for a curve. `texture_cut` is the cut [classify_quarters] vetoes textured flat
-/// quarters at, or `None` for no veto.
+/// too unreliable for a curve. `settings` control what [classify_quarters] does after classing the
+/// quarters.
 pub(in crate::nlmeans) fn temporal_noise_reading(
     records: &[f32],
     channels: u32,
@@ -455,7 +464,7 @@ pub(in crate::nlmeans) fn temporal_noise_reading(
     width: u32,
     height: u32,
     with_curve: bool,
-    texture_cut: Option<f32>,
+    settings: QuarterSettings,
 ) -> TemporalNoiseReading {
     let none = TemporalNoiseReading {
         sample: None,
@@ -519,7 +528,7 @@ pub(in crate::nlmeans) fn temporal_noise_reading(
 
     let classes = curve
         .as_ref()
-        .map(|curve| classify_quarters(records, stored_ch, width, height, curve, texture_cut));
+        .map(|curve| classify_quarters(records, stored_ch, width, height, curve, settings));
 
     TemporalNoiseReading {
         sample: Some(sample),
