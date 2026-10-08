@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 
 use super::helpers::*;
 use crate::bench_api::HostIo;
-use crate::nlmeans::kernels::motion::nlm_mc_block_match_fine;
+use crate::nlmeans::kernels::motion::{BLOCK_MATCH_THREADS, nlm_mc_block_match_fine};
 use crate::nlmeans::motion::{
     MotionCompensationMode,
     MotionCtx,
@@ -52,7 +52,7 @@ fn run_fine_confidence(
     let confidence = client.empty(size_of::<f32>());
 
     let grid = CubeCount::new_2d(1, 1);
-    let dim = CubeDim::new_2d(8, 8);
+    let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
     unsafe {
         nlm_mc_block_match_fine::launch_unchecked::<R>(

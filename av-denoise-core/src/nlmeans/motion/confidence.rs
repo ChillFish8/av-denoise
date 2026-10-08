@@ -4,7 +4,7 @@ use cubecl::server::Handle;
 use super::MotionCtx;
 use super::analyse::confidence_byte_offset;
 use super::pyramid::{level_dims, pyramid_slot_byte_offset};
-use crate::nlmeans::kernels::motion::nlm_mc_block_match_fine;
+use crate::nlmeans::kernels::motion::{BLOCK_MATCH_THREADS, nlm_mc_block_match_fine};
 
 /// The average per-pixel error at which a block stops counting as a match.
 ///
@@ -66,7 +66,7 @@ pub(crate) fn run_confidence_for_neighbour<R: Runtime>(
     let mv_slot_len = (ctx.blocks_x as usize) * (ctx.blocks_y as usize) * 2;
 
     let grid = CubeCount::new_2d(ctx.blocks_x, ctx.blocks_y);
-    let dim = CubeDim::new_2d(8, 8);
+    let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
     unsafe {
         nlm_mc_block_match_fine::launch_unchecked::<R>(

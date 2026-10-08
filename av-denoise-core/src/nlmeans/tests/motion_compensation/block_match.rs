@@ -1,7 +1,11 @@
 use cubecl::prelude::*;
 
 use super::frame_shifted_by;
-use crate::nlmeans::kernels::motion::{nlm_mc_block_match_coarse, nlm_mc_block_match_fine};
+use crate::nlmeans::kernels::motion::{
+    BLOCK_MATCH_THREADS,
+    nlm_mc_block_match_coarse,
+    nlm_mc_block_match_fine,
+};
 use crate::nlmeans::motion::{DEFAULT_BLKSIZE, DEFAULT_SEARCH_RADIUS};
 use crate::nlmeans::tests::helpers::*;
 
@@ -29,7 +33,7 @@ fn run_fine_block_match_single_block(
     let confidence = client.empty(size_of::<f32>());
 
     let grid = CubeCount::new_2d(1, 1);
-    let dim = CubeDim::new_2d(8, 8);
+    let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
     unsafe {
         nlm_mc_block_match_fine::launch_unchecked::<R>(
@@ -121,7 +125,7 @@ fn block_match_fine_argmin_finds_clean_shift() {
     let confidence = client.empty(size_of::<f32>());
 
     let grid = CubeCount::new_2d(blocks_x, blocks_y);
-    let dim = CubeDim::new_2d(8, 8);
+    let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
     unsafe {
         nlm_mc_block_match_fine::launch_unchecked::<R>(
@@ -185,7 +189,7 @@ fn run_coarse_block_match_single_block(
     let mv_field = client.empty(2 * size_of::<i32>());
 
     let grid = CubeCount::new_2d(1, 1);
-    let dim = CubeDim::new_2d(8, 8);
+    let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
     unsafe {
         nlm_mc_block_match_coarse::launch_unchecked::<R>(

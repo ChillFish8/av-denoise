@@ -1,6 +1,8 @@
 mod block_match;
+mod blocked_equivalence;
 mod chain;
 mod end_to_end;
+mod reference;
 mod seeding;
 
 /// Clamps `value - delta` into `0..limit`, matching the kernel's clamp-to-edge reads.

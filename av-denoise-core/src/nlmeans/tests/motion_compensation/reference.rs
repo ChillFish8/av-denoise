@@ -1,35 +1,9 @@
 use cubecl::prelude::*;
 use cubecl::terminate;
 
-/// The threads in one block-match workgroup, one 32-thread wave.
-pub const BLOCK_MATCH_THREADS: u32 = 32;
-
-/// How many horizontally adjacent candidate offsets one thread scores together.
-const OFFSETS_PER_THREAD: u32 = 3;
-
-/// The row stride of the staged search window.
-///
-/// It is wide enough for the last group of offsets in a row to read a full register row.
-fn window_stride(blksize: u32, search_radius: u32) -> u32 {
-    let window_side = 2 * search_radius + 1;
-    let groups_per_row = window_side.div_ceil(OFFSETS_PER_THREAD);
-    let last_read = groups_per_row * OFFSETS_PER_THREAD + blksize - 1;
-    let reach = blksize + 2 * search_radius;
-    reach.max(last_read)
-}
-
-/// Finds each block's motion on one pyramid level and seeds the fine grid with it.
-///
-/// One GPU block handles one image block and picks the lowest SAD among the
-/// `(2 * search_radius + 1)^2` candidates. `blksize` is capped at
-/// [MAX_BLKSIZE](crate::nlmeans::motion::MAX_BLKSIZE) so the shared centre tile stays within 1024
-/// values. The neighbour pixels the search reaches are staged into shared memory once, clamped to
-/// the level.
-///
-/// The winner is scaled by `level_scale`, 2 raised to the coarse level, and written to every fine
-/// block inside this block's region. `step` and `fine_step` are the coarse and fine block spacings.
+/// The per-candidate block match the production kernel must reproduce.
 #[cube(launch_unchecked)]
-pub fn nlm_mc_block_match_coarse(
+pub(super) fn reference_block_match_coarse(
     centre: &Array<f32>,
     neighbour: &Array<f32>,
     mv_field: &mut Array<i32>,
@@ -59,10 +33,6 @@ pub fn nlm_mc_block_match_coarse(
     let block_pixels = comptime!(blksize * blksize);
     let mut sad_scratch = SharedMemory::<f32>::new(candidates as usize);
     let mut centre_smem = SharedMemory::<f32>::new(block_pixels as usize);
-    let window_stride_len = comptime!(window_stride(blksize, search_radius));
-    let window_rows = comptime!(blksize + 2 * search_radius);
-    let window_area = comptime!(window_stride_len * window_rows);
-    let mut window = SharedMemory::<f32>::new(window_area as usize);
 
     let mut pixel_y = local_y;
     while pixel_y < blksize {
@@ -78,32 +48,33 @@ pub fn nlm_mc_block_match_coarse(
         pixel_y += CUBE_DIM_Y;
     }
 
-    let window_x0 = block_origin_x - search_radius as i32;
-    let window_y0 = block_origin_y - search_radius as i32;
-    stage_window(
-        neighbour,
-        &mut window,
-        window_x0,
-        window_y0,
-        thread_id,
-        threads,
-        level_width,
-        level_height,
-        blksize,
-        search_radius,
-    );
-
     sync_cube();
 
-    blocked_window_sads(
-        &centre_smem,
-        &window,
-        &mut sad_scratch,
-        thread_id,
-        threads,
-        blksize,
-        search_radius,
-    );
+    let mut candidate_idx = thread_id;
+    while candidate_idx < candidates {
+        let dy = candidate_idx / window_side;
+        let dx = candidate_idx % window_side;
+        let mvx = dx as i32 - search_radius as i32;
+        let mvy = dy as i32 - search_radius as i32;
+
+        let mut sad = 0.0f32;
+        for iy in 0..blksize {
+            for ix in 0..blksize {
+                let centre_x = block_origin_x + ix as i32;
+                let centre_y = block_origin_y + iy as i32;
+                let centre_val = centre_smem[(iy * blksize + ix) as usize];
+                let neighbour_x = clamp_i32(centre_x + mvx, level_width as i32);
+                let neighbour_y = clamp_i32(centre_y + mvy, level_height as i32);
+                let neighbour_val = neighbour[(neighbour_y * level_width as i32 + neighbour_x) as usize];
+                let diff = centre_val - neighbour_val;
+                let abs_diff = if diff < 0.0f32 { -diff } else { diff };
+                sad += abs_diff;
+            }
+        }
+
+        sad_scratch[candidate_idx as usize] = sad;
+        candidate_idx += threads;
+    }
 
     sync_cube();
 
@@ -179,20 +150,9 @@ pub fn nlm_mc_block_match_coarse(
     }
 }
 
-/// Refines each block's motion at full resolution and optionally scores its confidence.
-///
-/// When `use_seed` is 1, the search window centres on the vector already in `mv_field`, and the
-/// refined vector replaces it. A `search_radius` of 0 with no seed scores only the unshifted block.
-///
-/// When `write_confidence` is set, each block also writes a confidence between 0 and 1 so a poor
-/// match can suppress its frame. `sad_noise_floor` is the SAD two noisy copies of the same content
-/// show, and `thsad` is how far past it the confidence reaches zero. `thsad` must be positive, or
-/// a perfect match divides zero by zero. When it is unset `confidence` is never touched and can be
-/// a placeholder.
-///
-/// The neighbour pixels the search reaches are staged into shared memory once, clamped to the frame.
+/// The per-candidate block match the production kernel must reproduce.
 #[cube(launch_unchecked)]
-pub fn nlm_mc_block_match_fine(
+pub(super) fn reference_block_match_fine(
     centre: &Array<f32>,
     neighbour: &Array<f32>,
     mv_field: &mut Array<i32>,
@@ -247,10 +207,6 @@ pub fn nlm_mc_block_match_fine(
     let block_pixels = comptime!(blksize * blksize);
     let mut sad_scratch = SharedMemory::<f32>::new(candidates as usize);
     let mut centre_smem = SharedMemory::<f32>::new(block_pixels as usize);
-    let window_stride_len = comptime!(window_stride(blksize, search_radius));
-    let window_rows = comptime!(blksize + 2 * search_radius);
-    let window_area = comptime!(window_stride_len * window_rows);
-    let mut window = SharedMemory::<f32>::new(window_area as usize);
 
     let mut pixel_y = local_y;
     while pixel_y < blksize {
@@ -266,32 +222,33 @@ pub fn nlm_mc_block_match_fine(
         pixel_y += CUBE_DIM_Y;
     }
 
-    let window_x0 = block_origin_x + seed_dx - search_radius as i32;
-    let window_y0 = block_origin_y + seed_dy - search_radius as i32;
-    stage_window(
-        neighbour,
-        &mut window,
-        window_x0,
-        window_y0,
-        thread_id,
-        threads,
-        width,
-        height,
-        blksize,
-        search_radius,
-    );
-
     sync_cube();
 
-    blocked_window_sads(
-        &centre_smem,
-        &window,
-        &mut sad_scratch,
-        thread_id,
-        threads,
-        blksize,
-        search_radius,
-    );
+    let mut candidate_idx = thread_id;
+    while candidate_idx < candidates {
+        let dy = candidate_idx / window_side;
+        let dx = candidate_idx % window_side;
+        let mvx = seed_dx + (dx as i32 - search_radius as i32);
+        let mvy = seed_dy + (dy as i32 - search_radius as i32);
+
+        let mut sad = 0.0f32;
+        for iy in 0..blksize {
+            for ix in 0..blksize {
+                let centre_x = block_origin_x + ix as i32;
+                let centre_y = block_origin_y + iy as i32;
+                let centre_val = centre_smem[(iy * blksize + ix) as usize];
+                let neighbour_x = clamp_i32(centre_x + mvx, width as i32);
+                let neighbour_y = clamp_i32(centre_y + mvy, height as i32);
+                let neighbour_val = neighbour[(neighbour_y * width as i32 + neighbour_x) as usize];
+                let diff = centre_val - neighbour_val;
+                let abs_diff = if diff < 0.0f32 { -diff } else { diff };
+                sad += abs_diff;
+            }
+        }
+
+        sad_scratch[candidate_idx as usize] = sad;
+        candidate_idx += threads;
+    }
 
     sync_cube();
 
@@ -340,106 +297,6 @@ pub fn nlm_mc_block_match_fine(
         }
 
         confidence[(block_row * blocks_x + block_col) as usize] = confidence_val;
-    }
-}
-
-/// Stages every neighbour pixel the search reaches into `window`, clamped to the frame.
-///
-/// Window row `window_y` and column `window_x` hold the pixel at
-/// `(window_x0 + window_x, window_y0 + window_y)`, with rows `window_stride` values apart.
-#[cube]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "every argument is a buffer, position or comptime shape the staging reads"
-)]
-fn stage_window(
-    neighbour: &Array<f32>,
-    window: &mut SharedMemory<f32>,
-    window_x0: i32,
-    window_y0: i32,
-    thread_id: u32,
-    threads: u32,
-    #[comptime] width: u32,
-    #[comptime] height: u32,
-    #[comptime] blksize: u32,
-    #[comptime] search_radius: u32,
-) {
-    let stride = comptime!(window_stride(blksize, search_radius));
-    let rows = comptime!(blksize + 2 * search_radius);
-    let area = comptime!(stride * rows);
-
-    let mut index = thread_id;
-    while index < area {
-        let window_y = index / stride;
-        let window_x = index % stride;
-        let source_x = clamp_i32(window_x0 + window_x as i32, width as i32);
-        let source_y = clamp_i32(window_y0 + window_y as i32, height as i32);
-        window[index as usize] = neighbour[(source_y * width as i32 + source_x) as usize];
-        index += threads;
-    }
-}
-
-/// Writes the SAD of every candidate offset into `sad_scratch`, indexed `dy * window_side + dx`.
-///
-/// Each work item covers one candidate row and `OFFSETS_PER_THREAD` adjacent offsets along it. It
-/// loads each window row into registers once and scores all of its offsets from them. Every SAD
-/// sums its pixels in row-major order, one block row at a time, so the result does not depend on
-/// how candidates are grouped.
-#[cube]
-fn blocked_window_sads(
-    centre_smem: &SharedMemory<f32>,
-    window: &SharedMemory<f32>,
-    sad_scratch: &mut SharedMemory<f32>,
-    thread_id: u32,
-    threads: u32,
-    #[comptime] blksize: u32,
-    #[comptime] search_radius: u32,
-) {
-    let window_side = comptime!(2 * search_radius + 1);
-    let groups_per_row = comptime!(window_side.div_ceil(OFFSETS_PER_THREAD));
-    let work_items = comptime!(window_side * groups_per_row);
-    let row_span = comptime!(blksize + OFFSETS_PER_THREAD - 1);
-    let stride = comptime!(window_stride(blksize, search_radius));
-
-    let mut item = thread_id;
-    while item < work_items {
-        let dy = item / groups_per_row;
-        let first_dx = (item % groups_per_row) * OFFSETS_PER_THREAD;
-
-        let mut sads = Array::<f32>::new(OFFSETS_PER_THREAD as usize);
-        #[unroll]
-        for k in 0..OFFSETS_PER_THREAD {
-            sads[k as usize] = 0.0f32;
-        }
-
-        for iy in 0..blksize {
-            let row_start = (iy + dy) * stride + first_dx;
-            let mut row = Array::<f32>::new(row_span as usize);
-            #[unroll]
-            for i in 0..row_span {
-                row[i as usize] = window[(row_start + i) as usize];
-            }
-
-            #[unroll]
-            for ix in 0..blksize {
-                let centre_val = centre_smem[(iy * blksize + ix) as usize];
-                #[unroll]
-                for k in 0..OFFSETS_PER_THREAD {
-                    let diff = centre_val - row[comptime!(ix + k) as usize];
-                    sads[k as usize] += f32::abs(diff);
-                }
-            }
-        }
-
-        #[unroll]
-        for k in 0..OFFSETS_PER_THREAD {
-            let dx = first_dx + k;
-            if dx < window_side {
-                sad_scratch[(dy * window_side + dx) as usize] = sads[k as usize];
-            }
-        }
-
-        item += threads;
     }
 }
 

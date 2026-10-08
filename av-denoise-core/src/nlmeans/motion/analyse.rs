@@ -5,7 +5,11 @@ use super::MotionCtx;
 use super::pyramid::{level_dims, pyramid_slot_byte_offset};
 #[cfg(test)]
 use crate::nlmeans::align::StorageAlign;
-use crate::nlmeans::kernels::motion::{nlm_mc_block_match_coarse, nlm_mc_block_match_fine};
+use crate::nlmeans::kernels::motion::{
+    BLOCK_MATCH_THREADS,
+    nlm_mc_block_match_coarse,
+    nlm_mc_block_match_fine,
+};
 
 /// Where a neighbour's motion-field slice starts.
 ///
@@ -93,9 +97,8 @@ pub(crate) fn run_analyse<R: Runtime>(
         let coarse_blocks_x = coarse_width.div_ceil(coarse_step).max(1);
         let coarse_blocks_y = coarse_height.div_ceil(coarse_step).max(1);
         let grid = CubeCount::new_2d(coarse_blocks_x, coarse_blocks_y);
-        // One cube per image block, sized for the 8x8 blocks a coarse level typically has, with
-        // its threads sharing the scoring work.
-        let dim = CubeDim::new_2d(8, 8);
+        // One cube per image block, with its threads sharing the scoring work.
+        let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
         unsafe {
             nlm_mc_block_match_coarse::launch_unchecked::<R>(
@@ -129,7 +132,7 @@ pub(crate) fn run_analyse<R: Runtime>(
     let fine_neighbour = pyramid.clone().offset_start(fine_neighbour_offset);
     let level_len = (fine_width * fine_height) as usize;
     let grid = CubeCount::new_2d(motion_ctx.blocks_x, motion_ctx.blocks_y);
-    let dim = CubeDim::new_2d(8, 8);
+    let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
     let seeded = if motion_ctx.pyramid_levels > 1 { 1u32 } else { 0u32 };
 
     unsafe {
@@ -206,7 +209,7 @@ pub(crate) fn run_seeded_refine<R: Runtime>(
     let fine_neighbour = pyramid.clone().offset_start(fine_neighbour_offset);
     let level_len = (fine_width * fine_height) as usize;
     let grid = CubeCount::new_2d(motion_ctx.blocks_x, motion_ctx.blocks_y);
-    let dim = CubeDim::new_2d(8, 8);
+    let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
     unsafe {
         nlm_mc_block_match_fine::launch_unchecked::<R>(
