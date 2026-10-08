@@ -94,9 +94,10 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.quarter_settings.texture_cut = cut;
     }
 
-    /// Sets how far around strong lines, in pixels, the luma flat map keeps the base threshold.
+    /// Sets the line ring's radius in pixels.
     ///
-    /// The radius rounds up to whole 8x8 quarters. `None` or `0` turns the ring off.
+    /// Within the ring around strong lines, the luma flat map skips shadow soften and the flat texture
+    /// cut. The radius rounds up to whole 8x8 quarters. `None` or `0` turns the ring off.
     pub(crate) fn set_line_ring(&mut self, radius_px: Option<u32>) {
         let active_radius = radius_px.filter(|&radius| radius > 0);
         let quarters = active_radius.map(|radius| radius.div_ceil(TEMPORAL_QUARTER_SIZE) as usize);
