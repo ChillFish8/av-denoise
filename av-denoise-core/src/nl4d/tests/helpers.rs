@@ -64,6 +64,7 @@ pub(super) fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
         shadow_soften: 0.65,
         // Off, so the pipeline tests keep the flat map their expectations were recorded against.
         flat_texture_cut: 1.0,
+        line_ring: 0,
         // Off, so the pipeline tests keep the per-coefficient kernel their expectations were
         // recorded against.
         pooled_threshold: false,

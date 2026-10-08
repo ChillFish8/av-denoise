@@ -7,6 +7,7 @@ use crate::nlmeans::noise::{
     NoiseCtx,
     NoiseCurve,
     QuarterClasses,
+    TEMPORAL_QUARTER_SIZE,
     TemporalNoiseReading,
     TemporalNoiseSample,
     TemporalStatsCtx,
@@ -90,7 +91,16 @@ impl<R: Runtime> NlmDenoiser<R> {
     }
 
     pub(crate) fn set_flat_texture_cut(&mut self, cut: Option<f32>) {
-        self.flat_texture_cut = cut;
+        self.quarter_settings.texture_cut = cut;
+    }
+
+    /// Sets how far around strong lines, in pixels, the luma flat map keeps the base threshold.
+    ///
+    /// The radius rounds up to whole 8x8 quarters. `None` or `0` turns the ring off.
+    pub(crate) fn set_line_ring(&mut self, radius_px: Option<u32>) {
+        let active_radius = radius_px.filter(|&radius| radius > 0);
+        let quarters = active_radius.map(|radius| radius.div_ceil(TEMPORAL_QUARTER_SIZE) as usize);
+        self.quarter_settings.line_ring = quarters;
     }
 
     pub(crate) fn current_noise_curve(&self) -> Option<NoiseCurve> {
@@ -103,7 +113,12 @@ impl<R: Runtime> NlmDenoiser<R> {
 
     #[cfg(test)]
     pub(crate) fn flat_texture_cut(&self) -> Option<f32> {
-        self.flat_texture_cut
+        self.quarter_settings.texture_cut
+    }
+
+    #[cfg(test)]
+    pub(crate) fn line_ring(&self) -> Option<usize> {
+        self.quarter_settings.line_ring
     }
 
     /// Zeroes a duplicated slot's temporal stats record.
@@ -377,7 +392,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             self.width,
             self.height,
             self.luma_noise_fields,
-            self.flat_texture_cut,
+            self.quarter_settings,
         );
         Ok(reading)
     }

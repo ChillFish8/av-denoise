@@ -197,6 +197,14 @@ pub struct Nl4dArgs {
     #[arg(long)]
     pub flat_texture_cut: Option<f32>,
 
+    /// Keeps the base threshold within this many pixels of a strong line.
+    ///
+    /// Between `0` and `64`. Library default is 16. Inside the ring, `--shadow-soften` and
+    /// `--flat-texture-cut` stop applying, so the areas beside dark ink lines lose their band of
+    /// grain. `0` turns it off. Luma only. Has no effect with `--no-noise-map`.
+    #[arg(long)]
+    pub line_ring: Option<u32>,
+
     /// Estimates noise from a local window instead of a temporal EMA
     /// over stream history.
     ///
@@ -300,6 +308,7 @@ impl Nl4dArgs {
             chroma_flat_boost: self.chroma_flat_boost.unwrap_or(defaults.chroma_flat_boost),
             shadow_soften: self.shadow_soften.unwrap_or(defaults.shadow_soften),
             flat_texture_cut: self.flat_texture_cut.unwrap_or(defaults.flat_texture_cut),
+            line_ring: self.line_ring.unwrap_or(defaults.line_ring),
             pooled_threshold: defaults.pooled_threshold && !self.no_pooled_threshold,
             grain_export: exports_grain,
         };
@@ -814,6 +823,8 @@ mod tests {
             "0.8",
             "--flat-texture-cut",
             "0.3",
+            "--line-ring",
+            "8",
         ]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
         let nl4d_options = expect_nl4d(&opts);
@@ -822,6 +833,7 @@ mod tests {
         assert_eq!(nl4d_options.chroma_flat_boost, 1.2);
         assert_eq!(nl4d_options.shadow_soften, 0.8);
         assert_eq!(nl4d_options.flat_texture_cut, 0.3);
+        assert_eq!(nl4d_options.line_ring, 8);
     }
 
     #[test]
@@ -835,6 +847,7 @@ mod tests {
         assert_eq!(nl4d_options.chroma_flat_boost, defaults.chroma_flat_boost);
         assert_eq!(nl4d_options.shadow_soften, defaults.shadow_soften);
         assert_eq!(nl4d_options.flat_texture_cut, defaults.flat_texture_cut);
+        assert_eq!(nl4d_options.line_ring, defaults.line_ring);
     }
 
     #[test]

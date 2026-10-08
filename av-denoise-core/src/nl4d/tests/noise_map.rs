@@ -72,6 +72,7 @@ fn ramp_params(channels: ChannelMode, noise_map: bool, sigma_scale: f32) -> Nl4d
     Nl4dParams {
         nlm,
         noise_map,
+        line_ring: 0,
         ..defaults
     }
 }

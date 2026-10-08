@@ -132,6 +132,7 @@ fn clip_params(
         flat_boost,
         chroma_flat_boost,
         shadow_soften,
+        line_ring: 0,
         ..defaults
     }
 }
@@ -399,4 +400,31 @@ fn a_texture_cut_of_one_is_not_passed_on() {
     let denoiser = build_nl4d(ChannelMode::Luma, params);
 
     assert_eq!(denoiser.front_for_test().flat_texture_cut(), None);
+}
+
+#[test]
+fn the_luma_denoiser_passes_the_line_ring_to_its_front() {
+    let params = Nl4dParams::default();
+    let denoiser = build_nl4d(ChannelMode::Luma, params);
+
+    assert_eq!(denoiser.front_for_test().line_ring(), Some(2));
+}
+
+#[test]
+fn the_chroma_denoiser_never_gets_a_line_ring() {
+    let params = Nl4dParams::default();
+    let denoiser = build_nl4d(ChannelMode::Chroma, params);
+
+    assert_eq!(denoiser.front_for_test().line_ring(), None);
+}
+
+#[test]
+fn a_line_ring_of_zero_is_not_passed_on() {
+    let params = Nl4dParams {
+        line_ring: 0,
+        ..Nl4dParams::default()
+    };
+    let denoiser = build_nl4d(ChannelMode::Luma, params);
+
+    assert_eq!(denoiser.front_for_test().line_ring(), None);
 }

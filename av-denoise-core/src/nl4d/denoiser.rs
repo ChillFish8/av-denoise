@@ -216,6 +216,10 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let texture_cut_applies = apply_noise_map && params.flat_texture_cut < 1.0;
         let texture_cut = texture_cut_applies.then_some(params.flat_texture_cut);
         front.set_flat_texture_cut(texture_cut);
+
+        let line_ring = apply_noise_map.then_some(params.line_ring);
+        front.set_line_ring(line_ring);
+
         front.set_shifted_edges(true);
 
         let f16_search = supports_f16_search(client);

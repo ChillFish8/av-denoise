@@ -67,6 +67,8 @@ pub struct Nl4dOptions {
     pub shadow_soften: f32,
     /// See [Nl4dParams::flat_texture_cut](crate::nl4d::Nl4dParams::flat_texture_cut).
     pub flat_texture_cut: f32,
+    /// See [Nl4dParams::line_ring](crate::nl4d::Nl4dParams::line_ring).
+    pub line_ring: u32,
     /// See [Nl4dParams::pooled_threshold](crate::nl4d::Nl4dParams::pooled_threshold).
     pub pooled_threshold: bool,
     /// Whether the denoiser measures the source's film grain for an AV1 grain table.
@@ -101,6 +103,7 @@ impl Default for Nl4dOptions {
             chroma_flat_boost: defaults.chroma_flat_boost,
             shadow_soften: defaults.shadow_soften,
             flat_texture_cut: defaults.flat_texture_cut,
+            line_ring: defaults.line_ring,
             pooled_threshold: defaults.pooled_threshold,
             grain_export: defaults.grain_export,
             temporal_radius: nl4d_temporal_radius_for(Preset::Base),
@@ -232,6 +235,7 @@ pub(crate) fn resolve_params(options: &Nl4dOptions, channels: ChannelMode) -> Re
         chroma_flat_boost: options.chroma_flat_boost,
         shadow_soften: options.shadow_soften,
         flat_texture_cut: options.flat_texture_cut,
+        line_ring: options.line_ring,
         pooled_threshold: options.pooled_threshold,
         grain_export: options.grain_export,
     })

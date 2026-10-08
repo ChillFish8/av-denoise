@@ -88,6 +88,13 @@ pub struct Nl4dParams {
     /// with `noise_map` on, and only on luma. `1.0` turns it off. Between 0.0 and 1.0, defaults
     /// to 0.21.
     pub flat_texture_cut: f32,
+    /// How far around a strong line, in pixels, shadow soften and the flat texture cut stop
+    /// applying.
+    ///
+    /// The areas beside dark ink lines read as dark texture, so they would otherwise be filtered
+    /// more gently and keep a band of grain. Only takes effect with `noise_map` on, and only on
+    /// luma. `0` turns it off. Between 0 and 64, defaults to 16.
+    pub line_ring: u32,
     /// Judges each transform coefficient together with its frequency neighbours instead of alone.
     ///
     /// Faint texture spreads over several neighbouring frequencies, so it survives where each
@@ -128,6 +135,7 @@ impl Default for Nl4dParams {
             chroma_flat_boost: 1.5,
             shadow_soften: 0.65,
             flat_texture_cut: 0.21,
+            line_ring: 16,
             pooled_threshold: true,
             grain_export: false,
         }
@@ -244,6 +252,10 @@ impl Nl4dParams {
             ));
         }
 
+        if self.line_ring > 64 {
+            return Err(format!("line_ring must be in 0..=64, got {}", self.line_ring));
+        }
+
         Ok(())
     }
 }
@@ -339,6 +351,33 @@ mod tests {
             let error = params.validate().expect_err("flat_texture_cut out of range");
             assert!(error.contains("flat_texture_cut"), "got {error}");
         }
+    }
+
+    #[test]
+    fn the_line_ring_defaults_to_sixteen_pixels() {
+        let params = Nl4dParams::default();
+        assert_eq!(params.line_ring, 16);
+    }
+
+    #[test]
+    fn validate_accepts_the_line_ring_bounds() {
+        for line_ring in [0u32, 64] {
+            let params = Nl4dParams {
+                line_ring,
+                ..Nl4dParams::default()
+            };
+            assert!(params.validate().is_ok(), "{line_ring}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_a_line_ring_past_64() {
+        let params = Nl4dParams {
+            line_ring: 65,
+            ..Nl4dParams::default()
+        };
+        let error = params.validate().expect_err("line_ring out of range");
+        assert!(error.contains("line_ring"), "got {error}");
     }
 
     #[test]

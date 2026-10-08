@@ -1,4 +1,5 @@
 use super::curve::{CLIP_HIGH, CLIP_LOW, NoiseCurve, QUARTER_STATIC_GATE};
+use super::line_ring::{LineInput, dilate, line_quarters};
 use super::temporal::{
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
@@ -67,13 +68,40 @@ pub(crate) struct QuarterClasses {
     cols: usize,
     rows: usize,
     classes: Vec<Option<QuarterClass>>,
+    /// Whether each quarter lies within the line ring, row-major. Empty when the ring is off.
+    ring: Vec<bool>,
+}
+
+/// What [classify_quarters] does after classing each quarter.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct QuarterSettings {
+    /// The cut [QuarterClasses::veto_textured] runs at, or `None` for no veto.
+    pub(crate) texture_cut: Option<f32>,
+    /// How many quarters the line ring reaches past each line quarter, or `None` for no ring.
+    pub(crate) line_ring: Option<usize>,
 }
 
 impl QuarterClasses {
     #[cfg(test)]
     pub(crate) fn from_classes(cols: usize, rows: usize, classes: Vec<Option<QuarterClass>>) -> Self {
         assert_eq!(classes.len(), cols * rows);
-        Self { cols, rows, classes }
+        Self {
+            cols,
+            rows,
+            classes,
+            ring: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_ring(mut self, ring: Vec<bool>) -> Self {
+        assert_eq!(ring.len(), self.classes.len());
+        self.ring = ring;
+        self
+    }
+
+    fn in_ring(&self, index: usize) -> bool {
+        self.ring.get(index).copied().unwrap_or(false)
     }
 
     pub(crate) fn cols(&self) -> usize {
@@ -86,13 +114,16 @@ impl QuarterClasses {
 
     /// One luma threshold multiplier per quarter, row-major.
     ///
-    /// Flat quarters get `flat_boost`. Other quarters get `shadow_soften` at or below luma 128 of
-    /// 255, fading linearly back to 1.0 at 160. A quarter with no class gets 1.0.
+    /// Flat quarters get `flat_boost`. Other quarters inside the line ring get 1.0, and the rest get
+    /// `shadow_soften` at or below luma 128 of 255, fading linearly back to 1.0 at 160. A quarter
+    /// with no class gets 1.0.
     pub(crate) fn luma_multipliers(&self, params: StrengthMapParams) -> Vec<f32> {
         self.classes
             .iter()
-            .map(|class| match class {
+            .enumerate()
+            .map(|(index, class)| match class {
                 Some(class) if class.flat => params.flat_boost,
+                Some(_) if self.in_ring(index) => 1.0,
                 Some(class) => shadow_multiplier(class.luma, params.shadow_soften),
                 None => 1.0,
             })
@@ -157,7 +188,7 @@ impl QuarterClasses {
     /// Grain has no preferred direction, so its pooled coherence stays low, while faint lines and
     /// edges keep theirs. `tensors` holds one tensor per quarter, row-major. The neighbourhood is
     /// clamped at the frame edges and pools only quarters that have a class. A vetoed quarter keeps
-    /// its luma.
+    /// its luma. Quarters inside the line ring are never vetoed.
     pub(crate) fn veto_textured(&mut self, tensors: &[QuarterTensor], cut: f32) -> VetoCounts {
         assert_eq!(tensors.len(), self.classes.len());
 
@@ -176,6 +207,10 @@ impl QuarterClasses {
                 }
 
                 counts.flat += 1;
+
+                if self.in_ring(index) {
+                    continue;
+                }
 
                 let pooled = self.pooled_tensor(tensors, col, row);
                 if pooled.coherence() >= cut {
@@ -226,15 +261,16 @@ fn shadow_multiplier(luma: f32, shadow_soften: f32) -> f32 {
 /// `curve` predicts at its luma, is unclipped, and its texture is under [QUARTER_FLAT_FACTOR] of its
 /// own noise variance. Every quarter is classed, not only those of the blocks the curve accepted.
 ///
-/// With `texture_cut` below 1.0, flat quarters then go through [QuarterClasses::veto_textured] at
-/// that cut.
+/// With a texture cut below 1.0 in `settings`, flat quarters then go through
+/// [QuarterClasses::veto_textured] at that cut. With a line ring, quarters within that many quarters
+/// of a strong line skip the shadow soften and the veto.
 pub(in crate::nlmeans) fn classify_quarters(
     records: &[f32],
     stored_ch: u32,
     width: u32,
     height: u32,
     curve: &NoiseCurve,
-    texture_cut: Option<f32>,
+    settings: QuarterSettings,
 ) -> QuarterClasses {
     let record_len = temporal_stats_record_len(stored_ch) as usize;
     let quarters_base = (2 * stored_ch + TEMPORAL_QUARTER_BASE) as usize;
@@ -244,6 +280,7 @@ pub(in crate::nlmeans) fn classify_quarters(
     let rows = map_rows as usize;
     let mut classes = vec![None; cols * rows];
     let mut tensors = vec![QuarterTensor::default(); cols * rows];
+    let mut line_inputs = vec![None; cols * rows];
 
     for block_y in 0..blocks_y {
         for block_x in 0..blocks_x {
@@ -269,19 +306,42 @@ pub(in crate::nlmeans) fn classify_quarters(
                 let col = (2 * block_x + quarter_index % 2) as usize;
                 let row = (2 * block_y + quarter_index / 2) as usize;
                 let index = row * cols + col;
-                classes[index] = Some(class);
-                tensors[index] = QuarterTensor {
+                let tensor = QuarterTensor {
                     xx: fields[QUARTER_TENSOR_XX as usize],
                     yy: fields[QUARTER_TENSOR_YY as usize],
                     xy: fields[QUARTER_TENSOR_XY as usize],
                 };
+                classes[index] = Some(class);
+                tensors[index] = tensor;
+
+                let full_quarter =
+                    quarter_width == TEMPORAL_QUARTER_SIZE && quarter_height == TEMPORAL_QUARTER_SIZE;
+                if full_quarter {
+                    let luma_range = fields[QUARTER_LUMA_MAX as usize] - fields[QUARTER_LUMA_MIN as usize];
+                    let input = LineInput {
+                        luma: class.luma,
+                        luma_range,
+                        tensor_trace: tensor.xx + tensor.yy,
+                    };
+                    line_inputs[index] = Some(input);
+                }
             }
         }
     }
 
-    let mut quarter_classes = QuarterClasses { cols, rows, classes };
+    let mut quarter_classes = QuarterClasses {
+        cols,
+        rows,
+        classes,
+        ring: Vec::new(),
+    };
 
-    let active_cut = texture_cut.filter(|&cut| cut < 1.0);
+    if let Some(radius) = settings.line_ring {
+        let lines = line_quarters(&line_inputs, curve);
+        quarter_classes.ring = dilate(&lines, cols, rows, radius);
+    }
+
+    let active_cut = settings.texture_cut.filter(|&cut| cut < 1.0);
     if let Some(cut) = active_cut {
         quarter_classes.veto_textured(&tensors, cut);
     }

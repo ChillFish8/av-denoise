@@ -11,6 +11,7 @@ use crate::nlmeans::noise::{
     QUARTER_TENSOR_XX,
     QUARTER_TENSOR_XY,
     QUARTER_TENSOR_YY,
+    QuarterSettings,
     TEMPORAL_QUARTER_BASE,
     TEMPORAL_QUARTER_FIELDS,
     accepted_static_blocks,
@@ -162,7 +163,15 @@ fn reading_sample_equals_the_scalar_aggregation() {
     let (width, height) = frame_dims(good_quarters.len() + 8);
 
     let sample_scalar = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height);
-    let reading = temporal_noise_reading(&records, channels, stored_ch, width, height, true, None);
+    let reading = temporal_noise_reading(
+        &records,
+        channels,
+        stored_ch,
+        width,
+        height,
+        true,
+        QuarterSettings::default(),
+    );
 
     assert!(sample_scalar.is_some());
     assert_eq!(reading.sample, sample_scalar);

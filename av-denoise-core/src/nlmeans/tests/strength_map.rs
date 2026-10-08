@@ -15,6 +15,7 @@ use crate::nlmeans::noise::{
     NoiseCurve,
     QuarterClass,
     QuarterClasses,
+    QuarterSettings,
     QuarterTensor,
     StrengthMapParams,
     classify_quarters,
@@ -50,7 +51,11 @@ fn classify_block(quarter: SyntheticQuarter, cut: Option<f32>) -> QuarterClasses
     let (width, height) = frame_dims(quarters.len());
     let records = synthetic_records(&quarters);
     let curve = flat_curve();
-    classify_quarters(&records, 1, width, height, &curve, cut)
+    let settings = QuarterSettings {
+        texture_cut: cut,
+        line_ring: None,
+    };
+    classify_quarters(&records, 1, width, height, &curve, settings)
 }
 
 fn all_flat(classes: &QuarterClasses) -> bool {
@@ -259,7 +264,7 @@ fn classes_match_the_kernel_map_dims_on_ragged_frames() {
         let records = vec![0.0f32; (blocks_x * blocks_y) as usize * record_len];
         let curve = flat_curve();
 
-        let classes = classify_quarters(&records, 1, width, height, &curve, None);
+        let classes = classify_quarters(&records, 1, width, height, &curve, QuarterSettings::default());
 
         let (cols, rows) = strength_map_dims(width, height);
         assert_eq!((classes.cols(), classes.rows()), (cols as usize, rows as usize));
@@ -296,7 +301,7 @@ fn a_quarter_past_the_frame_edge_gets_one() {
         shadow_soften: 0.65,
     };
 
-    let classes = classify_quarters(&records, 1, width, height, &curve, None);
+    let classes = classify_quarters(&records, 1, width, height, &curve, QuarterSettings::default());
     let multipliers = classes.luma_multipliers(params);
 
     let cols = classes.cols();
@@ -315,8 +320,9 @@ fn a_reading_carries_classes_exactly_when_it_carries_a_curve() {
     let (width, height) = frame_dims(quarters.len());
     let records = synthetic_records(&quarters);
 
-    let with_curve = temporal_noise_reading(&records, 1, 1, width, height, true, None);
-    let without_curve = temporal_noise_reading(&records, 1, 1, width, height, false, None);
+    let with_curve = temporal_noise_reading(&records, 1, 1, width, height, true, QuarterSettings::default());
+    let without_curve =
+        temporal_noise_reading(&records, 1, 1, width, height, false, QuarterSettings::default());
 
     assert!(with_curve.curve.is_some());
     assert!(with_curve.classes.is_some());
@@ -485,4 +491,162 @@ fn a_cut_of_one_leaves_an_oriented_flat_block_flat() {
 
     let flat = all_flat(&classes);
     assert!(flat);
+}
+
+fn dark_textured() -> Option<QuarterClass> {
+    let class = QuarterClass {
+        flat: false,
+        luma: 0.1,
+    };
+    Some(class)
+}
+
+fn dark_flat() -> Option<QuarterClass> {
+    let class = QuarterClass {
+        flat: true,
+        luma: 0.1,
+    };
+    Some(class)
+}
+
+#[test]
+fn a_ring_quarter_skips_the_shadow_soften() {
+    let classes = vec![dark_textured(), dark_textured()];
+    let ring = vec![true, false];
+    let quarters = QuarterClasses::from_classes(2, 1, classes).with_ring(ring);
+    let params = StrengthMapParams {
+        flat_boost: 1.5,
+        shadow_soften: 0.65,
+    };
+
+    let multipliers = quarters.luma_multipliers(params);
+
+    assert_eq!(multipliers, vec![1.0, 0.65]);
+}
+
+#[test]
+fn a_flat_ring_quarter_keeps_the_boost() {
+    let classes = vec![dark_flat()];
+    let ring = vec![true];
+    let quarters = QuarterClasses::from_classes(1, 1, classes).with_ring(ring);
+    let params = StrengthMapParams {
+        flat_boost: 1.5,
+        shadow_soften: 0.65,
+    };
+
+    let multipliers = quarters.luma_multipliers(params);
+
+    assert_eq!(multipliers, vec![1.5]);
+}
+
+#[test]
+fn the_veto_skips_ring_quarters() {
+    let tensors = vec![ORIENTED; 9];
+    let ring = vec![true; 9];
+    let mut ringed = flat_grid(3, 3).with_ring(ring);
+    let mut plain = flat_grid(3, 3);
+
+    let ringed_counts = ringed.veto_textured(&tensors, 0.21);
+    let plain_counts = plain.veto_textured(&tensors, 0.21);
+
+    assert_eq!(ringed_counts.flat, 9);
+    assert_eq!(ringed_counts.vetoed, 0);
+    assert_eq!(plain_counts.vetoed, 9);
+}
+
+/// A row of three blocks whose first quarter holds a strong line.
+///
+/// The other quarters are textured and sit in the soften range.
+fn line_row(line_ring: Option<usize>) -> QuarterClasses {
+    let textured = with_flatness(2.0);
+    let line = SyntheticQuarter {
+        luma_min: 0.0,
+        luma_max: 0.5,
+        tensor_xx: 0.49,
+        tensor_yy: 0.0,
+        ..textured
+    };
+    let mut quarters = vec![textured; 12];
+    quarters[0] = line;
+
+    let (width, height) = frame_dims(quarters.len());
+    let records = synthetic_records(&quarters);
+    let curve = flat_curve();
+    let settings = QuarterSettings {
+        texture_cut: None,
+        line_ring,
+    };
+    classify_quarters(&records, 1, width, height, &curve, settings)
+}
+
+#[test]
+fn classify_quarters_rings_a_strong_line() {
+    let classes = line_row(Some(1));
+    let params = StrengthMapParams {
+        flat_boost: 1.5,
+        shadow_soften: 0.65,
+    };
+
+    let multipliers = classes.luma_multipliers(params);
+
+    // Quarter columns 0 and 1 of both rows sit within one quarter of the line at column 0, row 0.
+    for row in 0..classes.rows() {
+        for col in 0..classes.cols() {
+            let expected = if col <= 1 { 1.0 } else { 0.65 };
+            let multiplier = multipliers[row * classes.cols() + col];
+            assert_eq!(multiplier, expected, "row {row} col {col}");
+        }
+    }
+}
+
+#[test]
+fn classify_quarters_without_a_ring_softens_every_dark_textured_quarter() {
+    let classes = line_row(None);
+    let params = StrengthMapParams {
+        flat_boost: 1.5,
+        shadow_soften: 0.65,
+    };
+
+    let multipliers = classes.luma_multipliers(params);
+
+    assert!(multipliers.iter().all(|&multiplier| multiplier == 0.65));
+}
+
+#[test]
+fn the_front_end_rounds_the_line_ring_up_to_whole_quarters() {
+    let client = make_client();
+    let params = NlmParams {
+        temporal_radius: 2,
+        search_radius: 2,
+        patch_radius: 2,
+        strength: 1.2,
+        self_weight: 1.0,
+        channels: ChannelMode::Luma,
+        prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
+        hq: Some(HqParams {
+            auto_strength: true,
+            noise_floor: true,
+            sigma_override: None,
+            temporal_confidence: false,
+            thsad_scale: 1.0,
+            sigma_scale: 1.0,
+            windowed_noise_estimation: false,
+        }),
+    };
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, 64, 64);
+    let cases = [
+        (None, None),
+        (Some(0), None),
+        (Some(1), Some(1)),
+        (Some(8), Some(1)),
+        (Some(9), Some(2)),
+        (Some(16), Some(2)),
+        (Some(64), Some(8)),
+    ];
+
+    for (radius_px, expected) in cases {
+        denoiser.set_line_ring(radius_px);
+        assert_eq!(denoiser.line_ring(), expected, "{radius_px:?}");
+    }
 }
