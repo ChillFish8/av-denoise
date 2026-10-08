@@ -181,7 +181,8 @@ pub(crate) fn spatial_search<N: Size>(
 ///
 /// A position already held in `member_pos[..first]` is skipped, so no patch enters the group
 /// twice. A block below `c_min` is skipped too, and a position reached by two covering blocks
-/// is scored once.
+/// is scored once. The clipped walk skips any rectangle that lies wholly inside one it already
+/// searched.
 ///
 /// With `warp_uniform` the rectangles are walked at their full comptime span and skipped
 /// positions are masked rather than branched around, so every group in a warp takes the same
@@ -343,53 +344,67 @@ pub(crate) fn trajectory_search<N: Size>(
                         let t_top = clamp_top_left(predicted_y - refine as i32, max_y);
                         let t_bot = clamp_top_left(predicted_y + refine as i32, max_y);
 
-                        let mut candidate_y = t_top;
-                        while candidate_y <= t_bot {
-                            let mut candidate_x = t_left;
-                            while candidate_x <= t_right {
-                                let packed = pack_pos_t(candidate_x, candidate_y, packed_t);
-
-                                let mut skipped = false;
-                                #[unroll]
-                                for s in 0..max_rects {
-                                    if candidate_x >= seen_left[s as usize]
-                                        && candidate_x <= seen_right[s as usize]
-                                        && candidate_y >= seen_top[s as usize]
-                                        && candidate_y <= seen_bot[s as usize]
-                                    {
-                                        skipped = true;
-                                    }
-                                }
-
-                                #[unroll]
-                                for k in 0..first {
-                                    if member_pos[k as usize] == packed {
-                                        skipped = true;
-                                    }
-                                }
-
-                                if !skipped {
-                                    let dist = candidate_distance(
-                                        ring,
-                                        anchor,
-                                        candidate_x,
-                                        candidate_y,
-                                        slot,
-                                        sub,
-                                        scale,
-                                        width,
-                                        height,
-                                        channels,
-                                    );
-                                    if dist < frame_d {
-                                        frame_d = dist;
-                                        frame_pos = packed;
-                                    }
-                                }
-
-                                candidate_x += 1u32;
+                        // An empty `seen_*` slot spans 1..=0, which no rectangle fits inside.
+                        let mut contained = false;
+                        #[unroll]
+                        for s in 0..max_rects {
+                            let inside_x =
+                                t_left >= seen_left[s as usize] && t_right <= seen_right[s as usize];
+                            let inside_y = t_top >= seen_top[s as usize] && t_bot <= seen_bot[s as usize];
+                            if inside_x && inside_y {
+                                contained = true;
                             }
-                            candidate_y += 1u32;
+                        }
+
+                        if !contained {
+                            let mut candidate_y = t_top;
+                            while candidate_y <= t_bot {
+                                let mut candidate_x = t_left;
+                                while candidate_x <= t_right {
+                                    let packed = pack_pos_t(candidate_x, candidate_y, packed_t);
+
+                                    let mut skipped = false;
+                                    #[unroll]
+                                    for s in 0..max_rects {
+                                        if candidate_x >= seen_left[s as usize]
+                                            && candidate_x <= seen_right[s as usize]
+                                            && candidate_y >= seen_top[s as usize]
+                                            && candidate_y <= seen_bot[s as usize]
+                                        {
+                                            skipped = true;
+                                        }
+                                    }
+
+                                    #[unroll]
+                                    for k in 0..first {
+                                        if member_pos[k as usize] == packed {
+                                            skipped = true;
+                                        }
+                                    }
+
+                                    if !skipped {
+                                        let dist = candidate_distance(
+                                            ring,
+                                            anchor,
+                                            candidate_x,
+                                            candidate_y,
+                                            slot,
+                                            sub,
+                                            scale,
+                                            width,
+                                            height,
+                                            channels,
+                                        );
+                                        if dist < frame_d {
+                                            frame_d = dist;
+                                            frame_pos = packed;
+                                        }
+                                    }
+
+                                    candidate_x += 1u32;
+                                }
+                                candidate_y += 1u32;
+                            }
                         }
 
                         let rect = (iy * covers + ix) as usize;
