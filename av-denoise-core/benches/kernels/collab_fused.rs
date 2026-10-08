@@ -235,12 +235,13 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
         let dim = CubeDim::new_1d(64);
 
         unsafe {
-            collab_fused::launch_unchecked::<R>(
+            collab_fused::launch_unchecked::<f32, R>(
                 &self.client,
                 grid,
                 dim,
                 stored_ch as usize,
                 ArrayArg::from_raw_parts(args.ring.clone(), args.ring_len),
+                ArrayArg::from_raw_parts(args.ring.clone(), stored_ch as usize),
                 ArrayArg::from_raw_parts(args.mv_field.clone(), (2 * RADIUS * neighbour_mv_stride) as usize),
                 ArrayArg::from_raw_parts(
                     args.confidence.clone(),
@@ -263,6 +264,7 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
                 group_weight_scale,
                 accum_scale,
                 uniform_search,
+                false,
                 RADIUS,
                 frames_per_volume,
                 REFINE,

@@ -28,6 +28,7 @@ tracing = "0.1"
 strum_macros = "0.28"
 strum = "0.28"
 bon = "3"
+half = "2.7.1"
 
 cubecl = { version = "0.10", features = ["std"] }
 

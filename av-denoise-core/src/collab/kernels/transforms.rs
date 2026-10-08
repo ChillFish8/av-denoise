@@ -1,6 +1,6 @@
 use cubecl::prelude::*;
 
-use crate::collab::{MAX_K, PATCH_AREA, PATCH_SIZE};
+use crate::collab::{MAX_K, PATCH_SIZE};
 
 // A lane holds one 8-value column of each of `MAX_K` members, so the Haar helpers stride a group
 // by `PATCH_SIZE` and a `PATCH_AREA` array only holds the whole group while the two match.
@@ -32,52 +32,59 @@ pub(crate) fn safe_reciprocal(denom: f32, floor: f32) -> f32 {
     reciprocal
 }
 
-/// Fills an 8x8 orthonormal DCT-II basis into shared memory, one entry per thread.
+/// Entry `(row, col)` of the orthonormal 8-point DCT-II basis.
 ///
-/// Entry `j * 8 + i` holds `c_j * cos(PI * (2i + 1) * j / 16)`, with `c_0 = 1/sqrt(8)` and
-/// `c_j = 0.5` otherwise. The basis is orthonormal, so its transpose is its inverse. Only the first
-/// 64 threads write, and the caller must `sync_cube()` before reading `basis`.
-#[cube]
-pub(crate) fn fill_dct8_basis(basis: &mut SharedMemory<f32>, thread_id: u32) {
-    if thread_id < PATCH_AREA {
-        let i = thread_id % PATCH_SIZE;
-        let j = thread_id / PATCH_SIZE;
-        let mut row_scale = 0.5f32;
-        if j == 0 {
-            row_scale = 1.0f32 / f32::sqrt(8.0f32);
-        }
-        let angle = std::f32::consts::PI * (2.0f32 * i as f32 + 1.0f32) * j as f32 / 16.0f32;
-        basis[thread_id as usize] = row_scale * f32::cos(angle);
-    }
+/// It is `c_row * cos(PI * (2 * col + 1) * row / 16)`, with `c_0 = 1 / sqrt(8)` and `c_row = 0.5`
+/// otherwise. The basis is orthonormal, so its transpose is its inverse.
+pub(crate) fn dct8_basis(row: u32, col: u32) -> f64 {
+    let row_scale = if row == 0 { 1.0 / 8.0f64.sqrt() } else { 0.5 };
+    let angle = std::f64::consts::PI * (2.0 * col as f64 + 1.0) * row as f64 / 16.0;
+    row_scale * angle.cos()
 }
 
 /// Runs a forward 8-point DCT over a line one lane holds in registers.
 ///
-/// `line` holds 8 values on entry and 8 coefficients on return. The basis stays in shared memory
-/// because a per-lane copy would cost 64 registers. The lane owns every value it touches, so no
-/// barrier is needed.
+/// `line` holds 8 values on entry and 8 coefficients on return. Even basis rows are symmetric and
+/// odd rows antisymmetric, so the even coefficients come from the sums of mirrored values and the
+/// odd ones from their differences. The basis entries are compile-time constants, so the
+/// transform reads no shared or global memory.
 #[cube]
-pub(crate) fn dct8_reg_fwd(basis: &SharedMemory<f32>, line: &mut Array<f32>) {
-    let mut snapshot = Array::<f32>::new(8usize);
+pub(crate) fn dct8_reg_fwd(line: &mut Array<f32>) {
+    let mut pair_sums = Array::<f32>::new(4usize);
+    let mut pair_diffs = Array::<f32>::new(4usize);
     #[unroll]
-    for i in 0..PATCH_SIZE {
-        snapshot[i as usize] = line[i as usize];
+    for k in 0..4u32 {
+        let low = line[k as usize];
+        let high = line[comptime!(7 - k) as usize];
+        pair_sums[k as usize] = low + high;
+        pair_diffs[k as usize] = low - high;
     }
 
     #[unroll]
-    for j in 0..PATCH_SIZE {
-        let mut sum = 0.0f32;
+    for m in 0..4u32 {
+        let even_row = comptime!(2 * m);
+        let odd_row = comptime!(2 * m + 1);
+        let mut even_sum = 0.0f32;
+        let mut odd_sum = 0.0f32;
         #[unroll]
-        for i in 0..PATCH_SIZE {
-            sum += basis[(j * PATCH_SIZE + i) as usize] * snapshot[i as usize];
+        for k in 0..4u32 {
+            let even_tap = comptime!(dct8_basis(even_row, k) as f32);
+            let odd_tap = comptime!(dct8_basis(odd_row, k) as f32);
+            even_sum += pair_sums[k as usize] * even_tap;
+            odd_sum += pair_diffs[k as usize] * odd_tap;
         }
-        line[j as usize] = sum;
+
+        line[even_row as usize] = even_sum;
+        line[odd_row as usize] = odd_sum;
     }
 }
 
-/// The inverse of `dct8_reg_fwd`, using the transpose of the same basis.
+/// The inverse of `dct8_reg_fwd`.
+///
+/// Each mirrored pair of outputs shares one even sum and one odd sum, and takes their sum and
+/// difference.
 #[cube]
-pub(crate) fn dct8_reg_inv(basis: &SharedMemory<f32>, line: &mut Array<f32>) {
+pub(crate) fn dct8_reg_inv(line: &mut Array<f32>) {
     let mut snapshot = Array::<f32>::new(8usize);
     #[unroll]
     for j in 0..PATCH_SIZE {
@@ -85,13 +92,21 @@ pub(crate) fn dct8_reg_inv(basis: &SharedMemory<f32>, line: &mut Array<f32>) {
     }
 
     #[unroll]
-    for i in 0..PATCH_SIZE {
-        let mut sum = 0.0f32;
+    for k in 0..4u32 {
+        let mut even_sum = 0.0f32;
+        let mut odd_sum = 0.0f32;
         #[unroll]
-        for j in 0..PATCH_SIZE {
-            sum += basis[(j * PATCH_SIZE + i) as usize] * snapshot[j as usize];
+        for m in 0..4u32 {
+            let even_row = comptime!(2 * m);
+            let odd_row = comptime!(2 * m + 1);
+            let even_tap = comptime!(dct8_basis(even_row, k) as f32);
+            let odd_tap = comptime!(dct8_basis(odd_row, k) as f32);
+            even_sum += snapshot[even_row as usize] * even_tap;
+            odd_sum += snapshot[odd_row as usize] * odd_tap;
         }
-        line[i as usize] = sum;
+
+        line[k as usize] = even_sum + odd_sum;
+        line[comptime!(7 - k) as usize] = even_sum - odd_sum;
     }
 }
 
@@ -173,11 +188,11 @@ pub(crate) fn variance_reg_level(v: &mut Array<f32>, #[comptime] len: u32) {
 
 /// The per-DCT-frequency variance multiplier for a residual whose covariance falls off as `rho^d`.
 ///
-/// `g(u) = sum_i sum_j B_u(i) * B_u(j) * rho^|i-j|`, where `B_u` is row `u` of the basis
-/// `fill_dct8_basis` builds, and a coefficient at `(u, v)` scales by `g(u) * g(v)`. The basis is
-/// orthonormal, so `sum_u g(u) = 8` and the total variance is unchanged. `rho <= 0` returns exactly
-/// `[1.0; 8]`, because the float sum lands a few bits off and an unshaped caller needs a bit-exact
-/// result.
+/// `g(u) = sum_i sum_j B_u(i) * B_u(j) * rho^|i-j|`, where `B_u` is row `u` of
+/// [dct8_basis](crate::collab::kernels::transforms::dct8_basis), and a coefficient at `(u, v)`
+/// scales by `g(u) * g(v)`. The basis is orthonormal, so `sum_u g(u) = 8` and the total variance
+/// is unchanged. `rho <= 0` returns exactly `[1.0; 8]`, because the float sum lands a few bits off
+/// and an unshaped caller needs a bit-exact result.
 pub fn dct_noise_profile(rho: f32) -> [f32; 8] {
     if rho <= 0.0 {
         return [1.0; 8];
@@ -185,11 +200,9 @@ pub fn dct_noise_profile(rho: f32) -> [f32; 8] {
 
     let rho = rho as f64;
     let mut basis = [[0.0f64; 8]; 8];
-    for (u, row) in basis.iter_mut().enumerate() {
-        let row_scale = if u == 0 { 1.0 / 8.0f64.sqrt() } else { 0.5 };
-        for (i, entry) in row.iter_mut().enumerate() {
-            let angle = std::f64::consts::PI * (2.0 * i as f64 + 1.0) * u as f64 / 16.0;
-            *entry = row_scale * angle.cos();
+    for (row, entries) in basis.iter_mut().enumerate() {
+        for (col, entry) in entries.iter_mut().enumerate() {
+            *entry = dct8_basis(row as u32, col as u32);
         }
     }
 

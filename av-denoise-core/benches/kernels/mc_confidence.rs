@@ -1,4 +1,4 @@
-use av_denoise_core::bench_api::kernels::motion::nlm_mc_block_match_fine;
+use av_denoise_core::bench_api::kernels::motion::{BLOCK_MATCH_THREADS, nlm_mc_block_match_fine};
 use av_denoise_core::bench_api::motion::{DEFAULT_BLKSIZE, DEFAULT_OVERLAP};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
@@ -68,7 +68,7 @@ impl<R: Runtime> Benchmark for McConfidenceBench<R> {
         let thsad = (DEFAULT_BLKSIZE * DEFAULT_BLKSIZE) as f32 * THSAD_PIXEL;
 
         let grid = CubeCount::new_2d(blocks_x, blocks_y);
-        let dim = CubeDim::new_2d(8, 8);
+        let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
         unsafe {
             nlm_mc_block_match_fine::launch_unchecked::<R>(

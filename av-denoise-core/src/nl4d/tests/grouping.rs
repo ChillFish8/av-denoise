@@ -145,13 +145,16 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
         .unwrap_or_else(|| needs_warp_uniform_search(&client));
     let grid_frame_count = grid_frames(fixture.radius);
 
+    let stored_ch = 1usize;
+
     unsafe {
-        collab_fused::launch_unchecked::<R>(
+        collab_fused::launch_unchecked::<f32, R>(
             &client,
             grid,
             dim,
-            1usize,
-            ArrayArg::from_raw_parts(ring_buf, fixture.ring.len()),
+            stored_ch,
+            ArrayArg::from_raw_parts(ring_buf.clone(), fixture.ring.len()),
+            ArrayArg::from_raw_parts(ring_buf, stored_ch),
             ArrayArg::from_raw_parts(mv_buf, fixture.mv_field.len()),
             ArrayArg::from_raw_parts(conf_buf, fixture.confidence.len()),
             ArrayArg::from_raw_parts(slots_buf, fixture.neighbour_slots.len()),
@@ -171,6 +174,7 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
             scale,
             accum_scale,
             warp_uniform,
+            false,
             fixture.radius,
             grid_frame_count,
             knobs.refine,

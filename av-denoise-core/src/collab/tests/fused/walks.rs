@@ -1,5 +1,5 @@
 use super::noise_curve::stepped_curve;
-use super::{Setup, cross_frame_setup, run_fused_walk, unique_frame};
+use super::{Setup, chroma_cross_frame_setup, cross_frame_setup, run_fused_walk, unique_frame};
 
 /// Asserts the two search walks aggregated the same thing, byte for byte.
 ///
@@ -75,4 +75,81 @@ fn warp_uniform_search_matches_the_clipped_search_with_a_noise_curve() {
     setup.noise_curve = Some(curve);
 
     assert_walks_agree("noise curve", &setup);
+}
+
+/// [cross_frame_setup] with every motion block of a neighbour carrying one vector, so the refine
+/// rectangles covering an anchor coincide.
+fn shared_vector_setup(radius: u32) -> Setup {
+    let mut setup = cross_frame_setup(64, 64, radius);
+
+    for t in 0..(2 * radius) {
+        for block in 0..setup.conf_stride {
+            let mv_index = (t * setup.mv_stride + block * 2) as usize;
+            setup.mv_field[mv_index] = t as i32 - 1;
+            setup.mv_field[mv_index + 1] = 1 - t as i32;
+        }
+    }
+
+    setup
+}
+
+/// [cross_frame_setup] with vectors that push most refine windows past the right and bottom edges by
+/// slightly different amounts, so clamping makes rectangles equal or nested.
+fn edge_clamped_setup(radius: u32) -> Setup {
+    let mut setup = cross_frame_setup(64, 64, radius);
+
+    for t in 0..(2 * radius) {
+        for block in 0..setup.conf_stride {
+            let mv_index = (t * setup.mv_stride + block * 2) as usize;
+            let overshoot_x = (block % 3) as i32;
+            let overshoot_y = (block % 2) as i32;
+            setup.mv_field[mv_index] = 40 + overshoot_x;
+            setup.mv_field[mv_index + 1] = 40 + overshoot_y;
+        }
+    }
+
+    setup
+}
+
+#[test]
+fn warp_uniform_search_matches_the_clipped_search_when_covering_blocks_share_a_vector() {
+    let setup = shared_vector_setup(2);
+
+    assert_walks_agree("shared vector", &setup);
+}
+
+#[test]
+fn warp_uniform_search_matches_the_clipped_search_when_every_shared_block_is_confident() {
+    let mut setup = shared_vector_setup(2);
+    setup.confidence.fill(1.0);
+
+    assert_walks_agree("shared vector, all confident", &setup);
+}
+
+#[test]
+fn warp_uniform_search_matches_the_clipped_search_when_the_edge_clamps_rectangles_together() {
+    let mut setup = edge_clamped_setup(2);
+    setup.confidence.fill(1.0);
+
+    assert_walks_agree("edge clamped", &setup);
+}
+
+#[test]
+fn warp_uniform_search_matches_the_clipped_search_with_the_f16_search() {
+    let mut cross_frame = cross_frame_setup(64, 64, 2);
+    cross_frame.f16_search = true;
+    assert_walks_agree("f16 cross frame", &cross_frame);
+
+    let mut shared = shared_vector_setup(2);
+    shared.f16_search = true;
+    shared.confidence.fill(1.0);
+    assert_walks_agree("f16 shared vector", &shared);
+}
+
+#[test]
+fn warp_uniform_search_matches_the_clipped_search_with_the_f16_search_on_wide_storage() {
+    let mut setup = chroma_cross_frame_setup(64, 64, 2);
+    setup.f16_search = true;
+
+    assert_walks_agree("f16 chroma cross frame", &setup);
 }

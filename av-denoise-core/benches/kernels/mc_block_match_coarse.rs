@@ -1,4 +1,4 @@
-use av_denoise_core::bench_api::kernels::motion::nlm_mc_block_match_coarse;
+use av_denoise_core::bench_api::kernels::motion::{BLOCK_MATCH_THREADS, nlm_mc_block_match_coarse};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -67,7 +67,7 @@ impl<R: Runtime> Benchmark for BlockMatchCoarseBench<R> {
         let level_len = (coarse_width * coarse_height) as usize;
         let mv_len = (fine_blocks_x * fine_blocks_y * 2) as usize;
         let grid = CubeCount::new_2d(coarse_blocks_x, coarse_blocks_y);
-        let dim = CubeDim::new_2d(8, 8);
+        let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
         unsafe {
             nlm_mc_block_match_coarse::launch_unchecked::<R>(

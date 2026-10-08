@@ -13,6 +13,7 @@ use crate::collab::STEP;
 use crate::collab::geometry::refs_along;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::tests::helpers::{deterministic_texture, plant_patch};
+use crate::nlmeans::ChannelMode;
 
 /// At `sigma = 0` nothing is discarded, so every contribution a pixel receives is its own input
 /// value and the weighted mean must reproduce it.
@@ -396,4 +397,114 @@ fn radius_one_keeps_one_neighbour_per_volume() {
         second_sum, 0,
         "a 2x4 volume keeps one neighbour, so the tied second neighbour must receive nothing"
     );
+}
+
+/// A hashed multiple of 1/8 between 0 and 1 for each `index`.
+fn hashed_eighth(index: u64) -> f32 {
+    let mut hash = index.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    hash = (hash ^ (hash >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    hash = (hash ^ (hash >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    hash ^= hash >> 31;
+
+    (hash % 9) as f32 / 8.0
+}
+
+/// Refills the ring with a hashed eighth per pixel and live channel, and zero in padding lanes.
+///
+/// Every difference, square and sum the f16 search makes on such content is exact, so it scores
+/// each candidate exactly as the f32 search does.
+fn fill_with_hashed_eighths(setup: &mut Setup) {
+    let stored_channels = setup.stored_channels() as usize;
+    let live_channels = setup.channel_mode.count() as usize;
+    for (index, value) in setup.ring.iter_mut().enumerate() {
+        let channel = index % stored_channels;
+        *value = if channel < live_channels {
+            hashed_eighth(index as u64)
+        } else {
+            0.0
+        };
+    }
+}
+
+/// [cross_frame_setup] in `channel_mode`, its ring filled by [fill_with_hashed_eighths].
+fn exact_cross_frame_setup(channel_mode: ChannelMode) -> Setup {
+    let mut setup = cross_frame_setup(64, 64, 2);
+    let stored_channels = channel_mode.storage_count() as usize;
+    let frames = setup.frames() as usize;
+    setup.ring = vec![0.0f32; setup.pixels() * frames * stored_channels];
+    setup.channel_mode = channel_mode;
+    fill_with_hashed_eighths(&mut setup);
+
+    setup
+}
+
+/// Asserts the f16 search aggregates exactly what the f32 search does on `setup`.
+fn assert_f16_search_agrees(label: &str, mut setup: Setup) {
+    let f32_search = run_fused(&setup);
+
+    setup.f16_search = true;
+    let f16_search = run_fused(&setup);
+
+    assert_eq!(
+        f16_search.group_weight, f32_search.group_weight,
+        "{label}: the two searches retired different groups"
+    );
+    assert_eq!(
+        f16_search.wsum, f32_search.wsum,
+        "{label}: the two searches scattered different weights"
+    );
+    assert_eq!(
+        f16_search.accum, f32_search.accum,
+        "{label}: the two searches scattered different values"
+    );
+    assert!(
+        f32_search.group_weight.iter().any(|weight| *weight > 0.0),
+        "{label}: nothing aggregated, so agreeing proves nothing"
+    );
+}
+
+#[test]
+fn the_f16_search_matches_the_f32_search_on_f16_exact_content() {
+    for channel_mode in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
+        let setup = exact_cross_frame_setup(channel_mode);
+        assert_f16_search_agrees(&format!("{channel_mode:?} cross frame"), setup);
+    }
+}
+
+/// `refine = 2` gives each neighbour frame candidates around the twin for it to beat.
+#[test]
+fn the_f16_search_still_picks_a_planted_exact_twin() {
+    let mut setup = three_frame_ring_with_a_planted_match(64, 64);
+    setup.refine = 2;
+    let frame_len = setup.pixels() as u64;
+    let frame: Vec<f32> = (0..frame_len).map(hashed_eighth).collect();
+    setup.ring = frame.repeat(3);
+
+    assert_f16_search_agrees("planted twin", setup);
+}
+
+fn accum_mean(accum: &[i32]) -> f64 {
+    let total: f64 = accum.iter().map(|&value| f64::from(value)).sum();
+    total / accum.len() as f64
+}
+
+#[test]
+fn the_f16_search_stays_close_to_the_f32_search_on_unrounded_content() {
+    let mut setup = cross_frame_setup(64, 64, 2);
+    let f32_search = run_fused(&setup);
+
+    setup.f16_search = true;
+    let f16_search = run_fused(&setup);
+
+    let f32_weight: i64 = f32_search.wsum.iter().map(|&weight| i64::from(weight)).sum();
+    let f16_weight: i64 = f16_search.wsum.iter().map(|&weight| i64::from(weight)).sum();
+    let weight_gap = (f16_weight - f32_weight).abs() as f64 / f32_weight as f64;
+
+    let f32_mean = accum_mean(&f32_search.accum);
+    let f16_mean = accum_mean(&f16_search.accum);
+    let accum_gap = (f16_mean - f32_mean).abs() / f32_mean.abs();
+
+    eprintln!("f16 vs f32: wsum total gap {weight_gap:.3e}, accum mean gap {accum_gap:.3e}");
+    assert!(weight_gap < 0.01, "the wsum totals differ by {weight_gap}");
+    assert!(accum_gap < 1.0e-3, "the accum means differ by {accum_gap}");
 }

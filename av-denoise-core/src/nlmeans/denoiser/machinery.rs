@@ -13,6 +13,8 @@ use crate::nlmeans::params::ChannelMode;
 pub(crate) struct RingView {
     /// The whole input ring, indexable by physical frame slot.
     pub input: Handle,
+    /// The f16 search ring, when the denoiser has one.
+    pub search_input: Option<Handle>,
     /// Chained motion fields, one per neighbour.
     pub mv_field: Handle,
     /// Per-block confidence, one plane per neighbour.
@@ -87,6 +89,7 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         let view = RingView {
             input: self.input_buf.clone(),
+            search_input: self.search_buf.clone(),
             mv_field,
             confidence,
             centre_slot,
@@ -138,6 +141,11 @@ impl<R: Runtime> NlmDenoiser<R> {
 
     pub(crate) fn input_ring(&self) -> &Handle {
         &self.input_buf
+    }
+
+    #[cfg(test)]
+    pub(crate) fn search_ring(&self) -> Option<&Handle> {
+        self.search_buf.as_ref()
     }
 
     pub(crate) fn frame_shape(&self) -> (u32, u32, ChannelMode) {

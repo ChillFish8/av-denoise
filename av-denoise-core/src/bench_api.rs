@@ -16,6 +16,8 @@ pub mod kernels {
     pub use crate::nlmeans::kernels::*;
 }
 
+pub const MAX_GRID_1D: u32 = crate::nlmeans::MAX_GRID_1D;
+
 pub mod motion {
     pub use crate::nlmeans::motion::*;
 }

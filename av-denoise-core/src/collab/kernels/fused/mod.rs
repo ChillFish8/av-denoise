@@ -17,7 +17,6 @@ use super::transforms::{
     RECIPROCAL_FLOOR,
     dct8_reg_fwd,
     dct8_reg_inv,
-    fill_dct8_basis,
     haar_reg_fwd_level,
     haar_reg_inv_level,
     safe_reciprocal,
@@ -59,10 +58,9 @@ const _: () = assert!(
 /// serves.
 ///
 /// Every lane must reach every barrier, since a barrier reached by only part of a workgroup is
-/// undefined. The basis fill barrier is unconditional, and the `transpose8` barriers sit in fully
-/// unrolled loops with no runtime condition around them. A group past the end of a row, which
-/// every 1080p row has, works on a clamped copy of the last real reference and is gated only
-/// where it writes.
+/// undefined. The `transpose8` barriers sit in fully unrolled loops with no runtime condition around
+/// them. A group past the end of a row, which every 1080p row has, works on a clamped copy of the
+/// last real reference and is gated only where it writes.
 ///
 /// The centre frame contributes the `spatial_radius` rectangle around the reference, clipped to
 /// the frame, and the best eight positions are kept. The self-match scores a sentinel below every
@@ -121,6 +119,11 @@ const _: () = assert!(
 /// `3.0e38` an unfilled slot holds, so it never displaces a match. The wgpu backends reconverge on
 /// their own, and [needs_warp_uniform_search](crate::collab::needs_warp_uniform_search) picks the
 /// setting per runtime.
+///
+/// `search_ring` is an f16 copy of `ring`, with `S` as `half::f16`, that the candidate distances
+/// read when `f16_search` is set. The reference columns and the member stack always come from
+/// `ring`. With `f16_search` unset `search_ring` is never read and can be the f32 `ring`, which
+/// keeps every f16 type out of the kernel.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
@@ -132,8 +135,9 @@ const _: () = assert!(
               inner test in 63 of the 64 unrolled positions rather than emitting it and ANDing \
               a constant false into it"
 )]
-pub fn collab_fused<N: Size>(
+pub fn collab_fused<S: Float, N: Size>(
     ring: &Array<Vector<f32, N>>,
+    search_ring: &Array<Vector<S, N>>,
     mv_field: &Array<i32>,
     confidence: &Array<f32>,
     neighbour_slots: &Array<u32>,
@@ -153,6 +157,7 @@ pub fn collab_fused<N: Size>(
     weight_scale: f32,
     accum_scale: f32,
     #[comptime] warp_uniform: bool,
+    #[comptime] f16_search: bool,
     #[comptime] radius: u32,
     #[comptime] grid_frames: u32,
     #[comptime] refine: u32,
@@ -182,12 +187,7 @@ pub fn collab_fused<N: Size>(
     let max_x = comptime!(width - PATCH_SIZE);
     let max_y = comptime!(height - PATCH_SIZE);
 
-    // The basis is 256 B against the transpose buffer's 2,080 B, and registers rather than shared
-    // memory bound this kernel's occupancy, so it stays shared.
-    let mut basis = SharedMemory::<f32>::new(PATCH_AREA as usize);
     let mut transpose_buf = SharedMemory::<f32>::new(comptime!(8 * 65) as usize);
-    fill_dct8_basis(&mut basis, thread_id);
-    sync_cube();
 
     // A dead group works on the last real reference of the row, so every read stays inside the
     // frame and every lane reaches every barrier. `live` stops it writing.
@@ -220,6 +220,7 @@ pub fn collab_fused<N: Size>(
 
     let n_live = spatial_search(
         ring,
+        search_ring,
         &current,
         ref_x,
         ref_y,
@@ -230,10 +231,12 @@ pub fn collab_fused<N: Size>(
         &mut best_d,
         &mut best_pos,
         warp_uniform,
+        f16_search,
         spatial_radius,
         width,
         height,
         channels,
+        stored_ch,
     );
 
     let ref_idx = CUBE_POS_Y * refs_x + ref_x_clamped;
@@ -285,6 +288,7 @@ pub fn collab_fused<N: Size>(
 
             trajectory_search(
                 ring,
+                search_ring,
                 mv_field,
                 confidence,
                 neighbour_slots,
@@ -299,6 +303,7 @@ pub fn collab_fused<N: Size>(
                 comptime!(first + 1),
                 tail,
                 warp_uniform,
+                f16_search,
                 radius,
                 refine,
                 mv_stride,
@@ -310,6 +315,7 @@ pub fn collab_fused<N: Size>(
                 width,
                 height,
                 channels,
+                stored_ch,
             );
         }
 
@@ -418,9 +424,9 @@ pub fn collab_fused<N: Size>(
             for i in 0..PATCH_SIZE {
                 line[i as usize] = stack[(m * PATCH_SIZE + i) as usize];
             }
-            dct8_reg_fwd(&basis, &mut line);
+            dct8_reg_fwd(&mut line);
             transpose8(&mut transpose_buf, &mut line, sub, group);
-            dct8_reg_fwd(&basis, &mut line);
+            dct8_reg_fwd(&mut line);
             #[unroll]
             for i in 0..PATCH_SIZE {
                 stack[(m * PATCH_SIZE + i) as usize] = line[i as usize];
@@ -510,9 +516,9 @@ pub fn collab_fused<N: Size>(
             for i in 0..PATCH_SIZE {
                 line[i as usize] = stack[(m * PATCH_SIZE + i) as usize];
             }
-            dct8_reg_inv(&basis, &mut line);
+            dct8_reg_inv(&mut line);
             transpose8(&mut transpose_buf, &mut line, sub, group);
-            dct8_reg_inv(&basis, &mut line);
+            dct8_reg_inv(&mut line);
             #[unroll]
             for i in 0..PATCH_SIZE {
                 stack[(m * PATCH_SIZE + i) as usize] = line[i as usize];

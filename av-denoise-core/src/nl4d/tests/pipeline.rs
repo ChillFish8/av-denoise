@@ -401,12 +401,13 @@ fn run_spatial_only(
             zero_workgroups * zero_dim,
         );
 
-        collab_fused::launch_unchecked::<R>(
+        collab_fused::launch_unchecked::<f32, R>(
             client,
             fused_grid,
             fused_dim,
             stored_ch as usize,
-            ArrayArg::from_raw_parts(ring_buf, noisy_centre.len()),
+            ArrayArg::from_raw_parts(ring_buf.clone(), noisy_centre.len()),
+            ArrayArg::from_raw_parts(ring_buf, stored_ch as usize),
             ArrayArg::from_raw_parts(mv_dummy, 1),
             ArrayArg::from_raw_parts(conf_dummy, 1),
             ArrayArg::from_raw_parts(neighbour_slots_dummy, 1),
@@ -426,6 +427,7 @@ fn run_spatial_only(
             weight_norm,
             ACCUM_SCALE,
             warp_uniform,
+            false,
             0u32,
             grid_frame_count,
             refine,
@@ -646,14 +648,16 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
         let agg_cubes_y = height.div_ceil(BLOCK_Y);
         let agg_grid = CubeCount::new_2d(agg_cubes_x, agg_cubes_y);
         let agg_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
+        let stored_ch = 1usize;
 
         unsafe {
-            collab_fused::launch_unchecked::<R>(
+            collab_fused::launch_unchecked::<f32, R>(
                 &client,
                 fused_grid,
                 fused_dim,
-                1usize,
+                stored_ch,
                 ArrayArg::from_raw_parts(view.input.clone(), ring_len),
+                ArrayArg::from_raw_parts(view.input.clone(), stored_ch),
                 ArrayArg::from_raw_parts(view.mv_field.clone(), mv_len.max(1)),
                 ArrayArg::from_raw_parts(view.confidence.clone(), conf_len.max(1)),
                 ArrayArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
@@ -673,6 +677,7 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 weight_norm,
                 accum_scale,
                 warp_uniform,
+                false,
                 radius,
                 grid_frame_count,
                 REFINE,
