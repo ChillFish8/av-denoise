@@ -1001,10 +1001,11 @@ fn strength_map_params_reach_nl4d_options() {
 
     match algorithm {
         av_denoise::Algorithm::Nl4d(nl4d) => {
-            assert_eq!(nl4d.flat_boost, 2.0);
-            assert_eq!(nl4d.chroma_flat_boost, 1.2);
-            assert_eq!(nl4d.shadow_soften, 0.8);
-            assert_eq!(nl4d.flat_texture_cut, 0.3);
+            let psy = nl4d.psy.expect("psy on");
+            assert_eq!(psy.flat_boost, 2.0);
+            assert_eq!(psy.chroma_flat_boost, 1.2);
+            assert_eq!(psy.shadow_soften, 0.8);
+            assert_eq!(psy.flat_texture_cut, 0.3);
         },
         other => panic!("expected Nl4d, got {other:?}"),
     }
@@ -1014,17 +1015,14 @@ fn strength_map_params_reach_nl4d_options() {
 fn strength_map_params_default_to_the_library_values() {
     let raw = RawParams::default();
     let layout = yuv420_layout();
-    let defaults = av_denoise::Nl4dOptions::default();
     let algorithm = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
         .unwrap()
         .algorithm;
 
     match algorithm {
         av_denoise::Algorithm::Nl4d(nl4d) => {
-            assert_eq!(nl4d.flat_boost, defaults.flat_boost);
-            assert_eq!(nl4d.chroma_flat_boost, defaults.chroma_flat_boost);
-            assert_eq!(nl4d.shadow_soften, defaults.shadow_soften);
-            assert_eq!(nl4d.flat_texture_cut, defaults.flat_texture_cut);
+            let psy = nl4d.psy.expect("psy on");
+            assert_eq!(psy, av_denoise::PsyParams::default());
         },
         other => panic!("expected Nl4d, got {other:?}"),
     }

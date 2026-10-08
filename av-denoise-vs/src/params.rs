@@ -17,6 +17,7 @@ use av_denoise::{
     PlaneOptions,
     PrefilterMode,
     Preset,
+    PsyParams,
     Subsampling,
     nl4d_spatial_radius_for,
     nl4d_temporal_radius_for,
@@ -251,6 +252,31 @@ fn reject_mismatched_params(
     Ok(())
 }
 
+/// The psy options the per-knob parameters ask for, always with psy on.
+fn legacy_psy(raw: &RawParams) -> PsyParams {
+    let defaults = PsyParams::default();
+
+    PsyParams {
+        flat_boost: raw
+            .flat_boost
+            .map(|value| value as f32)
+            .unwrap_or(defaults.flat_boost),
+        chroma_flat_boost: raw
+            .chroma_flat_boost
+            .map(|value| value as f32)
+            .unwrap_or(defaults.chroma_flat_boost),
+        shadow_soften: raw
+            .shadow_soften
+            .map(|value| value as f32)
+            .unwrap_or(defaults.shadow_soften),
+        flat_texture_cut: raw
+            .flat_texture_cut
+            .map(|value| value as f32)
+            .unwrap_or(defaults.flat_texture_cut),
+        line_ring: defaults.line_ring,
+    }
+}
+
 /// Validates `raw` against `layout` and builds the denoiser's [PlaneOptions].
 ///
 /// Parameters the algorithm never reads are rejected first, so `search_radius` on nl4d fails as a
@@ -414,22 +440,7 @@ pub fn plane_options_from(
                     Some(enabled) => enabled,
                     None => Nl4dOptions::default().noise_map,
                 },
-                flat_boost: raw
-                    .flat_boost
-                    .map(|value| value as f32)
-                    .unwrap_or_else(|| Nl4dOptions::default().flat_boost),
-                chroma_flat_boost: raw
-                    .chroma_flat_boost
-                    .map(|value| value as f32)
-                    .unwrap_or_else(|| Nl4dOptions::default().chroma_flat_boost),
-                shadow_soften: raw
-                    .shadow_soften
-                    .map(|value| value as f32)
-                    .unwrap_or_else(|| Nl4dOptions::default().shadow_soften),
-                flat_texture_cut: raw
-                    .flat_texture_cut
-                    .map(|value| value as f32)
-                    .unwrap_or_else(|| Nl4dOptions::default().flat_texture_cut),
+                psy: Some(legacy_psy(raw)),
                 pooled_threshold: match raw.pooled_threshold {
                     Some(enabled) => enabled,
                     None => Nl4dOptions::default().pooled_threshold,

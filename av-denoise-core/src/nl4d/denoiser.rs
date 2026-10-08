@@ -204,20 +204,25 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
         let channels = params.nlm.channels;
         let apply_noise_map = params.noise_map && channels != ChannelMode::Chroma;
-        let luma_map_params = StrengthMapParams {
-            flat_boost: params.flat_boost,
-            shadow_soften: params.shadow_soften,
-        };
-        let luma_map = (apply_noise_map && !luma_map_params.is_identity()).then_some(luma_map_params);
-        let chroma_map_applies =
-            params.noise_map && channels == ChannelMode::Chroma && params.chroma_flat_boost != 1.0;
-        let chroma_map_boost = chroma_map_applies.then_some(params.chroma_flat_boost);
+        let psy = params.psy.filter(|_| params.noise_map);
+        let luma_psy = psy.filter(|_| channels != ChannelMode::Chroma);
+        let chroma_psy = psy.filter(|_| channels == ChannelMode::Chroma);
+
+        let luma_map = luma_psy
+            .map(|psy| StrengthMapParams {
+                flat_boost: psy.flat_boost,
+                shadow_soften: psy.shadow_soften,
+            })
+            .filter(|map| !map.is_identity());
+        let chroma_map_boost = chroma_psy
+            .map(|psy| psy.chroma_flat_boost)
+            .filter(|&boost| boost != 1.0);
         front.set_luma_noise_fields(apply_noise_map || chroma_map_boost.is_some());
-        let texture_cut_applies = apply_noise_map && params.flat_texture_cut < 1.0;
-        let texture_cut = texture_cut_applies.then_some(params.flat_texture_cut);
+
+        let texture_cut = luma_psy.map(|psy| psy.flat_texture_cut).filter(|&cut| cut < 1.0);
         front.set_flat_texture_cut(texture_cut);
 
-        let line_ring = apply_noise_map.then_some(params.line_ring);
+        let line_ring = luma_psy.map(|psy| psy.line_ring);
         front.set_line_ring(line_ring);
 
         front.set_shifted_edges(true);

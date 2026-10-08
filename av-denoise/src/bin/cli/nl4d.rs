@@ -6,6 +6,7 @@ use av_denoise::{
     DenoisingMode,
     Nl4dOptions,
     PlaneOptions,
+    PsyParams,
     nl4d_spatial_radius_for,
     nl4d_temporal_radius_for,
 };
@@ -249,6 +250,19 @@ impl Nl4dArgs {
         Ok(radius)
     }
 
+    /// The psy options the per-knob flags ask for, always with psy on.
+    fn psy_from_legacy_flags(&self) -> PsyParams {
+        let defaults = PsyParams::default();
+
+        PsyParams {
+            flat_boost: self.flat_boost.unwrap_or(defaults.flat_boost),
+            chroma_flat_boost: self.chroma_flat_boost.unwrap_or(defaults.chroma_flat_boost),
+            shadow_soften: self.shadow_soften.unwrap_or(defaults.shadow_soften),
+            flat_texture_cut: self.flat_texture_cut.unwrap_or(defaults.flat_texture_cut),
+            line_ring: self.line_ring.unwrap_or(defaults.line_ring),
+        }
+    }
+
     /// Builds the run options from these flags and the global flags.
     pub fn build_options(&self, globals: &Args) -> Result<RunOptions, anyhow::Error> {
         let defaults = Nl4dOptions::default();
@@ -304,11 +318,7 @@ impl Nl4dArgs {
             // temporal EMA. Window-local estimation gives random-access determinism.
             windowed_noise_estimation: self.windowed_noise_estimation,
             noise_map: defaults.noise_map && !self.no_noise_map,
-            flat_boost: self.flat_boost.unwrap_or(defaults.flat_boost),
-            chroma_flat_boost: self.chroma_flat_boost.unwrap_or(defaults.chroma_flat_boost),
-            shadow_soften: self.shadow_soften.unwrap_or(defaults.shadow_soften),
-            flat_texture_cut: self.flat_texture_cut.unwrap_or(defaults.flat_texture_cut),
-            line_ring: self.line_ring.unwrap_or(defaults.line_ring),
+            psy: Some(self.psy_from_legacy_flags()),
             pooled_threshold: defaults.pooled_threshold && !self.no_pooled_threshold,
             grain_export: exports_grain,
         };
@@ -829,11 +839,12 @@ mod tests {
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
         let nl4d_options = expect_nl4d(&opts);
 
-        assert_eq!(nl4d_options.flat_boost, 2.0);
-        assert_eq!(nl4d_options.chroma_flat_boost, 1.2);
-        assert_eq!(nl4d_options.shadow_soften, 0.8);
-        assert_eq!(nl4d_options.flat_texture_cut, 0.3);
-        assert_eq!(nl4d_options.line_ring, 8);
+        let psy = nl4d_options.psy.expect("psy on");
+        assert_eq!(psy.flat_boost, 2.0);
+        assert_eq!(psy.chroma_flat_boost, 1.2);
+        assert_eq!(psy.shadow_soften, 0.8);
+        assert_eq!(psy.flat_texture_cut, 0.3);
+        assert_eq!(psy.line_ring, 8);
     }
 
     #[test]
@@ -841,13 +852,9 @@ mod tests {
         let (args, nl4d) = parse(&[]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
         let nl4d_options = expect_nl4d(&opts);
-        let defaults = Nl4dOptions::default();
+        let psy = nl4d_options.psy.expect("psy on");
 
-        assert_eq!(nl4d_options.flat_boost, defaults.flat_boost);
-        assert_eq!(nl4d_options.chroma_flat_boost, defaults.chroma_flat_boost);
-        assert_eq!(nl4d_options.shadow_soften, defaults.shadow_soften);
-        assert_eq!(nl4d_options.flat_texture_cut, defaults.flat_texture_cut);
-        assert_eq!(nl4d_options.line_ring, defaults.line_ring);
+        assert_eq!(psy, PsyParams::default());
     }
 
     #[test]
