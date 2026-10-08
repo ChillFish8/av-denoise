@@ -1,7 +1,7 @@
 /// Perceptual tuning that filters each area by what it looks like.
 ///
 /// Flat, grainy areas are filtered harder, textured dark areas more gently, and the areas around
-/// strong lines keep the base threshold. Every knob needs the noise map on.
+/// strong lines skip shadow soften and the flat texture cut. Every knob needs the noise map on.
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct PsyParams {
     /// How much harder flat, grainy 8x8 areas are filtered, as a multiplier on the luma threshold.
@@ -51,8 +51,8 @@ impl PsyParams {
     /// Rejects a knob outside its range.
     pub fn validate(&self) -> Result<(), String> {
         for (name, value) in [
-            ("flat_boost", self.flat_boost),
-            ("chroma_flat_boost", self.chroma_flat_boost),
+            ("psy_flat_boost", self.flat_boost),
+            ("psy_chroma_flat_boost", self.chroma_flat_boost),
         ] {
             if !(value.is_finite() && (1.0..=3.0).contains(&value)) {
                 return Err(format!("{name} must be finite and in 1.0..=3.0, got {value}"));
@@ -61,20 +61,20 @@ impl PsyParams {
 
         if !(self.shadow_soften.is_finite() && (0.1..=1.0).contains(&self.shadow_soften)) {
             return Err(format!(
-                "shadow_soften must be finite and in 0.1..=1.0, got {}",
+                "psy_shadow_soften must be finite and in 0.1..=1.0, got {}",
                 self.shadow_soften
             ));
         }
 
         if !(self.flat_texture_cut.is_finite() && (0.0..=1.0).contains(&self.flat_texture_cut)) {
             return Err(format!(
-                "flat_texture_cut must be finite and in 0.0..=1.0, got {}",
+                "psy_flat_texture_cut must be finite and in 0.0..=1.0, got {}",
                 self.flat_texture_cut
             ));
         }
 
         if self.line_ring > 64 {
-            return Err(format!("line_ring must be in 0..=64, got {}", self.line_ring));
+            return Err(format!("psy_line_ring must be in 0..=64, got {}", self.line_ring));
         }
 
         Ok(())
@@ -124,14 +124,14 @@ mod tests {
                 ..PsyParams::default()
             };
             let error = flat.validate().expect_err("flat_boost out of range");
-            assert!(error.contains("flat_boost"), "got {error}");
+            assert!(error.contains("psy_flat_boost"), "got {error}");
 
             let chroma = PsyParams {
                 chroma_flat_boost: bad,
                 ..PsyParams::default()
             };
             let error = chroma.validate().expect_err("chroma_flat_boost out of range");
-            assert!(error.contains("chroma_flat_boost"), "got {error}");
+            assert!(error.contains("psy_chroma_flat_boost"), "got {error}");
         }
     }
 
@@ -143,7 +143,7 @@ mod tests {
                 ..PsyParams::default()
             };
             let error = psy.validate().expect_err("shadow_soften out of range");
-            assert!(error.contains("shadow_soften"), "got {error}");
+            assert!(error.contains("psy_shadow_soften"), "got {error}");
         }
     }
 
@@ -155,7 +155,7 @@ mod tests {
                 ..PsyParams::default()
             };
             let error = psy.validate().expect_err("flat_texture_cut out of range");
-            assert!(error.contains("flat_texture_cut"), "got {error}");
+            assert!(error.contains("psy_flat_texture_cut"), "got {error}");
         }
     }
 
@@ -166,6 +166,6 @@ mod tests {
             ..PsyParams::default()
         };
         let error = psy.validate().expect_err("line_ring out of range");
-        assert!(error.contains("line_ring"), "got {error}");
+        assert!(error.contains("psy_line_ring"), "got {error}");
     }
 }

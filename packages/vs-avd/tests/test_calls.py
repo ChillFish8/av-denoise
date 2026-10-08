@@ -44,12 +44,6 @@ def test_no_defaults_are_injected(fake, monkeypatch):
     assert set(kwargs) == {"variant"}, f"unexpected arguments forwarded: {kwargs}"
 
 
-def test_flat_texture_cut_is_a_typed_nl4d_parameter():
-    import inspect
-
-    assert "flat_texture_cut" in inspect.signature(Nl4d).parameters
-
-
 def test_nl4d_forwards_no_arguments_when_none_are_set(fake, monkeypatch):
     monkeypatch.setattr("vsavd._nl4d_filter", lambda: fake)
     Nl4d("clip")
@@ -85,15 +79,48 @@ def test_kwargs_pass_through_verbatim(fake, monkeypatch):
     assert kwargs == {"sigma": 0.5, "temporal_radius": 3}
 
 
-def test_nl4d_forwards_the_strength_map_settings(fake, monkeypatch):
+def test_psy_settings_are_typed_nl4d_parameters():
+    import inspect
+
+    parameters = inspect.signature(Nl4d).parameters
+    for name in (
+        "enable_psy",
+        "psy_flat_boost",
+        "psy_chroma_flat_boost",
+        "psy_shadow_soften",
+        "psy_flat_texture_cut",
+        "psy_line_ring",
+    ):
+        assert name in parameters, name
+
+
+def test_the_pre_psy_strength_map_settings_are_not_typed_parameters():
+    import inspect
+
+    parameters = inspect.signature(Nl4d).parameters
+    for name in ("flat_boost", "chroma_flat_boost", "shadow_soften", "flat_texture_cut"):
+        assert name not in parameters, name
+
+
+def test_nl4d_forwards_the_psy_settings(fake, monkeypatch):
     monkeypatch.setattr("vsavd._nl4d_filter", lambda: fake)
-    Nl4d("clip", flat_boost=2.0, chroma_flat_boost=1.2, shadow_soften=0.8, flat_texture_cut=0.3)
+    Nl4d(
+        "clip",
+        enable_psy=True,
+        psy_flat_boost=2.0,
+        psy_chroma_flat_boost=1.2,
+        psy_shadow_soften=0.8,
+        psy_flat_texture_cut=0.3,
+        psy_line_ring=8,
+    )
     _, kwargs = fake.calls[0]
     assert kwargs == {
-        "flat_boost": 2.0,
-        "chroma_flat_boost": 1.2,
-        "shadow_soften": 0.8,
-        "flat_texture_cut": 0.3,
+        "enable_psy": True,
+        "psy_flat_boost": 2.0,
+        "psy_chroma_flat_boost": 1.2,
+        "psy_shadow_soften": 0.8,
+        "psy_flat_texture_cut": 0.3,
+        "psy_line_ring": 8,
     }
 
 

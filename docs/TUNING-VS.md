@@ -104,24 +104,31 @@ clean = avd.Nl4d(clip, noise_map=False)
 **`pooled_threshold=False` turns off the pooled threshold.** It is on by default. Each frequency
 is judged together with its neighbours rather than alone, so faint lines and fine texture
 survive where each frequency on its own would fall under the threshold. Turn it off, and set
-`flat_boost=1.5`, to get the output of earlier releases.
+`pooled_threshold=False, enable_psy=True, psy_flat_boost=1.5, psy_flat_texture_cut=1, psy_line_ring=0`,
+to get the output of earlier releases.
 
-**`flat_boost`, `chroma_flat_boost`, `shadow_soften` and `flat_texture_cut` adjust the noise map
-by area.** Flat, grainy areas such as skies are filtered harder, 1.75 times by default on luma and
-1.5 times on chroma. The chroma boost applies when chroma is denoised in its own pass, not under
-`channel_mode="yuv"`. Textured dark areas are filtered more gently, at 0.65 times by default,
-fading out between luma 128 and 160. `1` turns each one off, and `noise_map=False` turns all
-four off.
+**`enable_psy=True` turns on the psy options.** They are off by default. Flat, grainy areas such
+as skies are filtered harder, 1.75 times by default on luma and 1.5 times on chroma. The chroma
+boost applies when chroma is denoised in its own pass, not under `channel_mode="yuv"`. Textured
+dark areas are filtered more gently, at 0.65 times by default, fading out between luma 128 and 160.
+The areas within 16 pixels of a strong line skip shadow soften and the flat texture cut, so the
+grain beside dark ink lines is filtered like the rest of the frame. `noise_map=False` turns all of it off.
 
 ```python
-clean = avd.Nl4d(clip, shadow_soften=0.8)
+clean = avd.Nl4d(clip, enable_psy=True)
 ```
 
-**`flat_texture_cut` keeps faint texture out of the flat areas.** Grain points every which way,
-while faint lines and edges share one direction. An area whose surroundings line up at or above
-the cut, 0.21 by default, is filtered as texture rather than boosted as flat. Lower it to keep
-more faint texture in dark scenes, raise it to filter more areas as flat. It applies to luma
-only, and `1` turns it off.
+**`psy_flat_boost`, `psy_chroma_flat_boost`, `psy_shadow_soften`, `psy_flat_texture_cut` and
+`psy_line_ring` tune the psy options.** Each needs `enable_psy=True`, and `1` (or `0` for the line
+ring) turns that one off. `psy_flat_texture_cut` keeps faint texture out of the flat areas. Grain
+points every which way, while faint lines and edges share one direction, so an area whose
+surroundings line up at or above the cut, 0.21 by default, is filtered as texture rather than
+boosted as flat. Lower it to keep more faint texture in dark scenes. `psy_line_ring` sets how many
+pixels around a strong line skip shadow soften and the flat texture cut, between 0 and 64.
+
+```python
+clean = avd.Nl4d(clip, enable_psy=True, psy_shadow_soften=0.8)
+```
 
 ### What not to touch in NL4D
 

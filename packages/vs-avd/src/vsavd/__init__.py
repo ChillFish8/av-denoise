@@ -179,10 +179,12 @@ def Nl4d(
     spatial_radius: int | None = None,
     refine: int | None = None,
     noise_map: bool | None = None,
-    flat_boost: float | None = None,
-    chroma_flat_boost: float | None = None,
-    shadow_soften: float | None = None,
-    flat_texture_cut: float | None = None,
+    enable_psy: bool | None = None,
+    psy_flat_boost: float | None = None,
+    psy_chroma_flat_boost: float | None = None,
+    psy_shadow_soften: float | None = None,
+    psy_flat_texture_cut: float | None = None,
+    psy_line_ring: int | None = None,
     pooled_threshold: bool | None = None,
     accelerators: list[Accelerators] | None = None,
     **kwargs: Any,
@@ -213,16 +215,23 @@ def Nl4d(
             Raise it when motion tracking lands close but not exact.
         noise_map: Whether to scale the luma threshold by how noisy each brightness level is.
             On by default, `False` turns it off.
-        flat_boost: How much harder flat, grainy areas are filtered, as a multiplier on the luma
-            threshold. Between 1.0 and 3.0, 1.75 by default. `1.0` turns it off. Needs `noise_map`.
-        chroma_flat_boost: The same for the colour planes. Between 1.0 and 3.0, 1.5 by default.
-            `1.0` turns it off. Needs `noise_map`.
-        shadow_soften: How much more gently textured dark areas are filtered, as a multiplier on
+        enable_psy: Turns on the psy options, which filter each area by what it looks like. Flat,
+            grainy areas are filtered harder, textured dark areas more gently, and the areas around
+            strong lines skip shadow soften and the flat texture cut. Off by default. Needs
+            `noise_map`. The `psy_*` settings tune it and need it set.
+        psy_flat_boost: How much harder flat, grainy areas are filtered, as a multiplier on the luma
+            threshold. Between 1.0 and 3.0, 1.75 by default. `1.0` turns it off. Needs `enable_psy`.
+        psy_chroma_flat_boost: The same for the colour planes. Between 1.0 and 3.0, 1.5 by default.
+            `1.0` turns it off. Needs `enable_psy`.
+        psy_shadow_soften: How much more gently textured dark areas are filtered, as a multiplier on
             the luma threshold. Between 0.1 and 1.0, 0.65 by default. `1.0` turns it off. Needs
-            `noise_map`.
-        flat_texture_cut: How strongly an area's surroundings may line up, like faint lines or
-            edges, before it stops counting as flat. Between 0.0 and 1.0, 0.21 by default.
-            Lower keeps more faint texture. `1.0` turns it off. Luma only. Needs `noise_map`.
+            `enable_psy`.
+        psy_flat_texture_cut: How strongly an area's surroundings may line up, like faint lines or
+            edges, before it stops counting as flat. Between 0.0 and 1.0, 0.21 by default. Lower
+            keeps more faint texture. `1.0` turns it off. Luma only. Needs `enable_psy`.
+        psy_line_ring: How many pixels around a strong line skip shadow soften and the flat texture
+            cut, so the grain beside dark ink lines is filtered like the rest of the frame. Between 0
+            and 64, 16 by default. `0` turns it off. Luma only. Needs `enable_psy`.
         pooled_threshold: Whether to judge each frequency together with its neighbours, which
             keeps faint texture. On by default, `False` turns it off.
         accelerators: The accelerators to try and use in the order to attempt.
@@ -253,10 +262,12 @@ def Nl4d(
         spatial_radius=spatial_radius,
         refine=refine,
         noise_map=noise_map,
-        flat_boost=flat_boost,
-        chroma_flat_boost=chroma_flat_boost,
-        shadow_soften=shadow_soften,
-        flat_texture_cut=flat_texture_cut,
+        enable_psy=enable_psy,
+        psy_flat_boost=psy_flat_boost,
+        psy_chroma_flat_boost=psy_chroma_flat_boost,
+        psy_shadow_soften=psy_shadow_soften,
+        psy_flat_texture_cut=psy_flat_texture_cut,
+        psy_line_ring=psy_line_ring,
         pooled_threshold=pooled_threshold,
         accelerators=accelerators_string,
         **kwargs,

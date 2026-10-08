@@ -71,20 +71,23 @@ more lightly.
 **`--no-pooled-threshold` turns off the pooled threshold.** It is on by default. Each frequency
 is judged together with its neighbours rather than alone, so faint lines and fine texture
 survive where each frequency on its own would fall under the threshold. Turn it off, and set
-`--flat-boost 1.5`, to get the output of earlier releases.
+`--enable-psy --psy-flat-boost 1.5 --psy-flat-texture-cut 1 --psy-line-ring 0`, to get the output
+of earlier releases.
 
-**`--flat-boost`, `--chroma-flat-boost`, `--shadow-soften` and `--flat-texture-cut` adjust the
-noise map by area.** Flat, grainy areas such as skies are filtered harder, 1.75 times by default on
-luma and 1.5 times on chroma. The chroma boost applies when chroma is denoised in its own pass, not
-under `--channel-mode yuv`. Textured dark areas are filtered more gently, at 0.65 times by default,
-fading out between luma 128 and 160. `1` turns each one off, and `--no-noise-map` turns all
-four off.
+**`--enable-psy` turns on the psy options.** They are off by default. Flat, grainy areas such as
+skies are filtered harder, 1.75 times by default on luma and 1.5 times on chroma. The chroma boost
+applies when chroma is denoised in its own pass, not under `--channel-mode yuv`. Textured dark
+areas are filtered more gently, at 0.65 times by default, fading out between luma 128 and 160. The
+areas within 16 pixels of a strong line skip shadow soften and the flat texture cut, so the grain
+beside dark ink lines is filtered like the rest of the frame. `--no-noise-map` turns all of it off.
 
-**`--flat-texture-cut` keeps faint texture out of the flat areas.** Grain points every which way,
-while faint lines and edges share one direction. An area whose surroundings line up at or above
-the cut, 0.21 by default, is filtered as texture rather than boosted as flat. Lower it to keep
-more faint texture in dark scenes, raise it to filter more areas as flat. It applies to luma
-only, and `1` turns it off.
+**`--psy-flat-boost`, `--psy-chroma-flat-boost`, `--psy-shadow-soften`, `--psy-flat-texture-cut`
+and `--psy-line-ring` tune the psy options.** Each needs `--enable-psy`, and `1` (or `0` for the
+line ring) turns that one off. `--psy-flat-texture-cut` keeps faint texture out of the flat areas.
+Grain points every which way, while faint lines and edges share one direction, so an area whose
+surroundings line up at or above the cut, 0.21 by default, is filtered as texture rather than
+boosted as flat. Lower it to keep more faint texture in dark scenes. `--psy-line-ring` sets how
+many pixels around a strong line skip shadow soften and the flat texture cut, between 0 and 64.
 
 **`--unstable-export-av1-fgs <PATH>` keeps the look of film grain.** It writes an AV1 film grain
 table to PATH. The flag is unstable, so its name and output may change between releases. The table describes the source's luma grain, minus whatever the output

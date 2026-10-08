@@ -241,7 +241,7 @@ mod tests {
             ..Nl4dParams::default()
         };
         let error = params.validate().expect_err("line_ring out of range");
-        assert!(error.contains("line_ring"), "got {error}");
+        assert!(error.contains("psy_line_ring"), "got {error}");
     }
 
     #[test]

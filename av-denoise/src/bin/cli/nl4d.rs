@@ -168,43 +168,49 @@ pub struct Nl4dArgs {
     #[arg(long)]
     pub no_pooled_threshold: bool,
 
+    /// Turns on the psy options, which filter each area by what it looks like.
+    ///
+    /// Flat, grainy areas such as skies are filtered harder, textured dark areas more gently, and
+    /// the areas around strong lines skip shadow soften and the flat texture cut. Off by default.
+    /// Has no effect with `--no-noise-map`. The `--psy-*` flags tune it and need this flag.
+    #[arg(long)]
+    pub enable_psy: bool,
+
     /// Filters flat, grainy areas harder, as a multiplier on the luma threshold.
     ///
-    /// Between `1` and `3`. Library default is 1.75. `1` turns it off. Has no effect with
-    /// `--no-noise-map`.
+    /// Between `1` and `3`. Library default is 1.75. `1` turns it off. Needs `--enable-psy`.
     #[arg(long)]
-    pub flat_boost: Option<f32>,
+    pub psy_flat_boost: Option<f32>,
 
     /// Filters flat, grainy areas of the colour planes harder, as a multiplier on the chroma
     /// threshold.
     ///
-    /// Between `1` and `3`. Library default is 1.5. `1` turns it off. Has no effect with
-    /// `--no-noise-map`.
+    /// Between `1` and `3`. Library default is 1.5. `1` turns it off. Applies when chroma is
+    /// denoised in its own pass. Needs `--enable-psy`.
     #[arg(long)]
-    pub chroma_flat_boost: Option<f32>,
+    pub psy_chroma_flat_boost: Option<f32>,
 
     /// Filters textured dark areas more gently, as a multiplier on the luma threshold.
     ///
     /// Between `0.1` and `1`. Library default is 0.65. It applies in full at or below luma 128 of
-    /// 255 and fades out by 160. `1` turns it off. Has no effect with `--no-noise-map`.
+    /// 255 and fades out by 160. `1` turns it off. Needs `--enable-psy`.
     #[arg(long)]
-    pub shadow_soften: Option<f32>,
+    pub psy_shadow_soften: Option<f32>,
 
     /// Stops flat areas whose surroundings line up like faint lines or edges from counting as flat.
     ///
     /// Between `0` and `1`. Library default is 0.21. Lower keeps more faint texture, higher
-    /// filters more areas as flat. `1` turns it off. Luma only. Has no effect with
-    /// `--no-noise-map`.
+    /// filters more areas as flat. `1` turns it off. Luma only. Needs `--enable-psy`.
     #[arg(long)]
-    pub flat_texture_cut: Option<f32>,
+    pub psy_flat_texture_cut: Option<f32>,
 
-    /// Keeps the base threshold within this many pixels of a strong line.
+    /// Skips shadow soften and the flat texture cut within this many pixels of a strong line.
     ///
-    /// Between `0` and `64`. Library default is 16. Inside the ring, `--shadow-soften` and
-    /// `--flat-texture-cut` stop applying, so the areas beside dark ink lines lose their band of
-    /// grain. `0` turns it off. Luma only. Has no effect with `--no-noise-map`.
+    /// Between `0` and `64`. Library default is 16. Inside the ring, `--psy-shadow-soften` and
+    /// `--psy-flat-texture-cut` stop applying, so the areas beside dark ink lines lose their band
+    /// of grain. `0` turns it off. Luma only. Needs `--enable-psy`.
     #[arg(long)]
-    pub line_ring: Option<u32>,
+    pub psy_line_ring: Option<u32>,
 
     /// Estimates noise from a local window instead of a temporal EMA
     /// over stream history.
@@ -250,17 +256,38 @@ impl Nl4dArgs {
         Ok(radius)
     }
 
-    /// The psy options the per-knob flags ask for, always with psy on.
-    fn psy_from_legacy_flags(&self) -> PsyParams {
-        let defaults = PsyParams::default();
+    /// The psy options these flags ask for, or `None` without `--enable-psy`.
+    ///
+    /// A `--psy-*` flag without `--enable-psy` is an error, so a setting is never silently
+    /// ignored.
+    fn psy_options(&self) -> Result<Option<PsyParams>, anyhow::Error> {
+        let tuning_flags = [
+            ("--psy-flat-boost", self.psy_flat_boost.is_some()),
+            ("--psy-chroma-flat-boost", self.psy_chroma_flat_boost.is_some()),
+            ("--psy-shadow-soften", self.psy_shadow_soften.is_some()),
+            ("--psy-flat-texture-cut", self.psy_flat_texture_cut.is_some()),
+            ("--psy-line-ring", self.psy_line_ring.is_some()),
+        ];
 
-        PsyParams {
-            flat_boost: self.flat_boost.unwrap_or(defaults.flat_boost),
-            chroma_flat_boost: self.chroma_flat_boost.unwrap_or(defaults.chroma_flat_boost),
-            shadow_soften: self.shadow_soften.unwrap_or(defaults.shadow_soften),
-            flat_texture_cut: self.flat_texture_cut.unwrap_or(defaults.flat_texture_cut),
-            line_ring: self.line_ring.unwrap_or(defaults.line_ring),
+        if !self.enable_psy {
+            let set_flag = tuning_flags.iter().find(|(_, is_set)| *is_set);
+            if let Some((name, _)) = set_flag {
+                anyhow::bail!("{name} needs --enable-psy, add it to turn the psy options on");
+            }
+
+            return Ok(None);
         }
+
+        let defaults = PsyParams::default();
+        let psy = PsyParams {
+            flat_boost: self.psy_flat_boost.unwrap_or(defaults.flat_boost),
+            chroma_flat_boost: self.psy_chroma_flat_boost.unwrap_or(defaults.chroma_flat_boost),
+            shadow_soften: self.psy_shadow_soften.unwrap_or(defaults.shadow_soften),
+            flat_texture_cut: self.psy_flat_texture_cut.unwrap_or(defaults.flat_texture_cut),
+            line_ring: self.psy_line_ring.unwrap_or(defaults.line_ring),
+        };
+
+        Ok(Some(psy))
     }
 
     /// Builds the run options from these flags and the global flags.
@@ -295,6 +322,7 @@ impl Nl4dArgs {
         self.warn_on_dead_per_plane_flags(intent);
 
         let temporal_radius = self.temporal_radius(globals.preset)?;
+        let psy = self.psy_options()?;
 
         let spatial_radius = self
             .spatial_radius
@@ -318,7 +346,7 @@ impl Nl4dArgs {
             // temporal EMA. Window-local estimation gives random-access determinism.
             windowed_noise_estimation: self.windowed_noise_estimation,
             noise_map: defaults.noise_map && !self.no_noise_map,
-            psy: Some(self.psy_from_legacy_flags()),
+            psy,
             pooled_threshold: defaults.pooled_threshold && !self.no_pooled_threshold,
             grain_export: exports_grain,
         };
@@ -823,23 +851,39 @@ mod tests {
     }
 
     #[test]
-    fn the_strength_map_flags_flow_into_the_nl4d_algorithm() {
+    fn psy_is_off_without_enable_psy() {
+        let (args, nl4d) = parse(&[]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+
+        assert_eq!(expect_nl4d(&opts).psy, None);
+    }
+
+    #[test]
+    fn enable_psy_turns_on_the_library_defaults() {
+        let (args, nl4d) = parse(&["--enable-psy"]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+
+        assert_eq!(expect_nl4d(&opts).psy, Some(PsyParams::default()));
+    }
+
+    #[test]
+    fn the_psy_flags_flow_into_the_nl4d_algorithm() {
         let (args, nl4d) = parse(&[
-            "--flat-boost",
+            "--enable-psy",
+            "--psy-flat-boost",
             "2.0",
-            "--chroma-flat-boost",
+            "--psy-chroma-flat-boost",
             "1.2",
-            "--shadow-soften",
+            "--psy-shadow-soften",
             "0.8",
-            "--flat-texture-cut",
+            "--psy-flat-texture-cut",
             "0.3",
-            "--line-ring",
+            "--psy-line-ring",
             "8",
         ]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
-        let nl4d_options = expect_nl4d(&opts);
+        let psy = expect_nl4d(&opts).psy.expect("psy on");
 
-        let psy = nl4d_options.psy.expect("psy on");
         assert_eq!(psy.flat_boost, 2.0);
         assert_eq!(psy.chroma_flat_boost, 1.2);
         assert_eq!(psy.shadow_soften, 0.8);
@@ -848,13 +892,67 @@ mod tests {
     }
 
     #[test]
-    fn unset_strength_map_flags_resolve_to_the_library_defaults() {
-        let (args, nl4d) = parse(&[]);
+    fn a_psy_flag_without_enable_psy_is_rejected() {
+        let cases = [
+            ["--psy-flat-boost", "2.0"],
+            ["--psy-chroma-flat-boost", "1.2"],
+            ["--psy-shadow-soften", "0.8"],
+            ["--psy-flat-texture-cut", "0.3"],
+            ["--psy-line-ring", "8"],
+        ];
+        for flags in cases {
+            let (args, nl4d) = parse(&flags);
+            let error = nl4d
+                .build_options(&args)
+                .expect_err("a psy flag alone should be rejected")
+                .to_string();
+
+            assert!(
+                error.contains(flags[0]),
+                "error should name {}, got {error}",
+                flags[0]
+            );
+            assert!(
+                error.contains("--enable-psy"),
+                "error should say to add --enable-psy, got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_psy_flag_at_its_default_still_needs_enable_psy() {
+        let (args, nl4d) = parse(&["--psy-line-ring", "16"]);
+
+        assert!(nl4d.build_options(&args).is_err());
+    }
+
+    #[test]
+    fn enable_psy_with_no_noise_map_builds() {
+        let (args, nl4d) = parse(&["--enable-psy", "--no-noise-map"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
         let nl4d_options = expect_nl4d(&opts);
-        let psy = nl4d_options.psy.expect("psy on");
 
-        assert_eq!(psy, PsyParams::default());
+        assert!(!nl4d_options.noise_map);
+        assert_eq!(nl4d_options.psy, Some(PsyParams::default()));
+    }
+
+    #[test]
+    fn the_pre_psy_strength_map_flags_are_rejected() {
+        for flag in [
+            "--flat-boost=2.0",
+            "--chroma-flat-boost=1.2",
+            "--shadow-soften=0.8",
+            "--flat-texture-cut=0.3",
+            "--line-ring=8",
+        ] {
+            let error = parse_err(&[flag]);
+
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{flag} must no longer parse, got {error}"
+            );
+        }
     }
 
     #[test]

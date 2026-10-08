@@ -145,10 +145,12 @@ pub struct RawParams {
     pub spatial_radius: Option<i64>,
     pub refine: Option<i64>,
     pub noise_map: Option<bool>,
-    pub flat_boost: Option<f64>,
-    pub chroma_flat_boost: Option<f64>,
-    pub shadow_soften: Option<f64>,
-    pub flat_texture_cut: Option<f64>,
+    pub enable_psy: Option<bool>,
+    pub psy_flat_boost: Option<f64>,
+    pub psy_chroma_flat_boost: Option<f64>,
+    pub psy_shadow_soften: Option<f64>,
+    pub psy_flat_texture_cut: Option<f64>,
+    pub psy_line_ring: Option<i64>,
     pub pooled_threshold: Option<bool>,
 }
 
@@ -206,10 +208,12 @@ fn reject_mismatched_params(
         ("spatial_radius", raw.spatial_radius.is_some()),
         ("refine", raw.refine.is_some()),
         ("noise_map", raw.noise_map.is_some()),
-        ("flat_boost", raw.flat_boost.is_some()),
-        ("chroma_flat_boost", raw.chroma_flat_boost.is_some()),
-        ("shadow_soften", raw.shadow_soften.is_some()),
-        ("flat_texture_cut", raw.flat_texture_cut.is_some()),
+        ("enable_psy", raw.enable_psy.is_some()),
+        ("psy_flat_boost", raw.psy_flat_boost.is_some()),
+        ("psy_chroma_flat_boost", raw.psy_chroma_flat_boost.is_some()),
+        ("psy_shadow_soften", raw.psy_shadow_soften.is_some()),
+        ("psy_flat_texture_cut", raw.psy_flat_texture_cut.is_some()),
+        ("psy_line_ring", raw.psy_line_ring.is_some()),
         ("pooled_threshold", raw.pooled_threshold.is_some()),
     ];
 
@@ -252,29 +256,54 @@ fn reject_mismatched_params(
     Ok(())
 }
 
-/// The psy options the per-knob parameters ask for, always with psy on.
-fn legacy_psy(raw: &RawParams) -> PsyParams {
-    let defaults = PsyParams::default();
+/// The psy options these parameters ask for, or `None` unless `enable_psy` is set.
+///
+/// A `psy_*` parameter without `enable_psy` is an error, so a setting is never silently ignored.
+fn psy_options(raw: &RawParams) -> Result<Option<PsyParams>, anyhow::Error> {
+    let tuning_params = [
+        ("psy_flat_boost", raw.psy_flat_boost.is_some()),
+        ("psy_chroma_flat_boost", raw.psy_chroma_flat_boost.is_some()),
+        ("psy_shadow_soften", raw.psy_shadow_soften.is_some()),
+        ("psy_flat_texture_cut", raw.psy_flat_texture_cut.is_some()),
+        ("psy_line_ring", raw.psy_line_ring.is_some()),
+    ];
+    let enabled = raw.enable_psy.unwrap_or(false);
 
-    PsyParams {
+    if !enabled {
+        let set_param = tuning_params.iter().find(|(_, is_set)| *is_set);
+        if let Some((name, _)) = set_param {
+            anyhow::bail!("{name} needs enable_psy=True, add enable_psy=True to turn the psy options on");
+        }
+
+        return Ok(None);
+    }
+
+    let defaults = PsyParams::default();
+    let line_ring = match raw.psy_line_ring {
+        Some(radius) => nonnegative(radius, "psy_line_ring")?,
+        None => defaults.line_ring,
+    };
+    let psy = PsyParams {
         flat_boost: raw
-            .flat_boost
+            .psy_flat_boost
             .map(|value| value as f32)
             .unwrap_or(defaults.flat_boost),
         chroma_flat_boost: raw
-            .chroma_flat_boost
+            .psy_chroma_flat_boost
             .map(|value| value as f32)
             .unwrap_or(defaults.chroma_flat_boost),
         shadow_soften: raw
-            .shadow_soften
+            .psy_shadow_soften
             .map(|value| value as f32)
             .unwrap_or(defaults.shadow_soften),
         flat_texture_cut: raw
-            .flat_texture_cut
+            .psy_flat_texture_cut
             .map(|value| value as f32)
             .unwrap_or(defaults.flat_texture_cut),
-        line_ring: defaults.line_ring,
-    }
+        line_ring,
+    };
+
+    Ok(Some(psy))
 }
 
 /// Validates `raw` against `layout` and builds the denoiser's [PlaneOptions].
@@ -413,6 +442,7 @@ pub fn plane_options_from(
             }
         },
         AlgorithmKind::Nl4d => {
+            let psy = psy_options(raw)?;
             let options = Nl4dOptions {
                 // A VapourSynth filter has to return the same pixels for a frame in any request
                 // order. Window-local estimation reads sigma from only the current window, so the
@@ -440,7 +470,7 @@ pub fn plane_options_from(
                     Some(enabled) => enabled,
                     None => Nl4dOptions::default().noise_map,
                 },
-                psy: Some(legacy_psy(raw)),
+                psy,
                 pooled_threshold: match raw.pooled_threshold {
                     Some(enabled) => enabled,
                     None => Nl4dOptions::default().pooled_threshold,

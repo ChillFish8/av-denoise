@@ -455,7 +455,8 @@ pub(in crate::nlmeans) struct TemporalNoiseReading {
 /// as in a zero-filled duplicate slot.
 ///
 /// The curve needs `with_curve` and a sample, since a frame too unreliable for a scalar sample is
-/// too unreliable for a curve. `settings` control what [classify_quarters] does after classing the quarters.
+/// too unreliable for a curve. `settings` control what [classify_quarters] does after classing the
+/// quarters.
 pub(in crate::nlmeans) fn temporal_noise_reading(
     records: &[f32],
     channels: u32,
