@@ -11,6 +11,8 @@ mod machinery;
 mod motion_compensation;
 mod noise;
 mod noise_curve;
+mod noise_equivalence;
+mod noise_reference;
 mod options;
 mod params;
 mod prefilter;

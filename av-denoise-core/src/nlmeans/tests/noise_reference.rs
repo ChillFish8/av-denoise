@@ -1,6 +1,6 @@
 use cubecl::prelude::*;
 
-use super::helpers::read_line;
+use crate::nlmeans::kernels::helpers::read_line;
 use crate::nlmeans::noise::{
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
@@ -16,14 +16,9 @@ use crate::nlmeans::noise::{
     TEMPORAL_QUARTERS,
 };
 
-/// The per-block stage of the Immerkær noise estimate.
-///
-/// Each interior pixel applies a 3x3 mask that cancels smooth content and leaves mostly noise. The
-/// block sums the absolute responses per channel into `partials[block_index * 4 + lane]`. Border
-/// pixels, threads past the image and unused lanes contribute zero. Thread `l` sums lane `l` over
-/// every thread in order.
+/// The single-thread reduction the production kernel must reproduce.
 #[cube(launch_unchecked)]
-pub fn nlm_noise_partial<N: Size>(
+pub(super) fn reference_noise_partial<N: Size>(
     input: &Array<Vector<f32, N>>,
     partials: &mut Array<f32>,
     frame: u32,
@@ -34,11 +29,6 @@ pub fn nlm_noise_partial<N: Size>(
     #[comptime] block_y: u32,
 ) {
     let threads = comptime!(block_x * block_y);
-
-    comptime! {
-        assert!(threads >= 4, "nlm_noise_partial needs a thread per lane");
-    }
-
     let mut scratch = SharedMemory::<f32>::new(comptime!(block_x * block_y * 4) as usize);
 
     let x = ABSOLUTE_POS_X;
@@ -76,34 +66,30 @@ pub fn nlm_noise_partial<N: Size>(
 
     sync_cube();
 
-    if thread_id < 4u32 {
+    if thread_id == 0 {
         let cube_index = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
-        let channel = thread_id;
-        let mut sum = 0.0f32;
-        for t in 0..threads {
-            sum += scratch[(t * 4 + channel) as usize];
-        }
 
-        partials[(cube_index * 4 + channel) as usize] = sum;
+        #[unroll]
+        for channel in 0..4u32 {
+            let mut sum = 0.0f32;
+            for t in 0..threads {
+                sum += scratch[(t * 4 + channel) as usize];
+            }
+
+            partials[(cube_index * 4 + channel) as usize] = sum;
+        }
     }
 }
 
-/// The final stage of the Immerkær noise estimate.
-///
-/// A single block of `block` threads sums every partial into the per-channel totals at
-/// `results[slot * 4..]`. Thread `l` sums lane `l` over every thread in order.
+/// The single-thread reduction the production kernel must reproduce.
 #[cube(launch_unchecked)]
-pub fn nlm_noise_reduce(
+pub(super) fn reference_noise_reduce(
     partials: &Array<f32>,
     results: &mut Array<f32>,
     slot: u32,
     num_partials: u32,
     #[comptime] block: u32,
 ) {
-    comptime! {
-        assert!(block >= 4, "nlm_noise_reduce needs a thread per lane");
-    }
-
     let mut scratch = SharedMemory::<f32>::new(comptime!(block * 4) as usize);
     let thread_id = UNIT_POS_X;
 
@@ -127,47 +113,22 @@ pub fn nlm_noise_reduce(
 
     sync_cube();
 
-    if thread_id < 4u32 {
-        let channel = thread_id;
-        let mut total = 0.0f32;
-        for t in 0..block {
-            total += scratch[(t * 4 + channel) as usize];
-        }
+    if thread_id == 0 {
+        #[unroll]
+        for channel in 0..4u32 {
+            let mut total = 0.0f32;
+            for t in 0..block {
+                total += scratch[(t * 4 + channel) as usize];
+            }
 
-        results[(slot * 4 + channel) as usize] = total;
+            results[(slot * 4 + channel) as usize] = total;
+        }
     }
 }
 
-/// Writes one temporal residual record per `block x block` region of the frame.
-///
-/// The residual is the new slot minus the previous slot. Each record holds the per-channel `sum_d`
-/// and `sum_d2`, then `sum_lag`, the lag-1 product of neighbouring channel-0 residuals, which
-/// reveals grain correlated across nearby pixels. Pixels outside the frame contribute nothing, and
-/// a lag pair never crosses a block boundary.
-///
-/// Each record also carries nine channel-0 fields per 8x8 quarter, in top-left, top-right,
-/// bottom-left, bottom-right order.
-///
-/// - `sum_d` and `sum_d2` of the residual.
-/// - `luma_sum`, `luma_min` and `luma_max` of the new frame.
-/// - `flatness`, the mean squared neighbour difference of a 4x4 grid of 2x2 cells over the mean of
-///   both frames. A quarter smaller than 8x8 writes `3.0e38`, so a flat gate always rejects it.
-/// - `tensor_xx`, `tensor_yy` and `tensor_xy`, the structure tensor sums of the temporal mean's
-///   2x2 gradients, from the 2x2 windows inside both the quarter and the frame, 49 on a full
-///   quarter.
-///
-/// With `luma_fields` off, every quarter lane is written as 0 and the quarter work is skipped.
-/// `block` must be 16, because the quarter reductions assume 8x8 quarters and 64-slot segments.
-///
-/// # Layout
-///
-/// Records sit at `stats[block_index * (2 * stored_ch + 37)..]` as every `sum_d`, every `sum_d2`,
-/// then `sum_lag`. Quarter `q` follows at `2 * stored_ch + 1 + 9 * q`, with its fields at the
-/// `QUARTER_*` offsets in `nlmeans::noise`. The stride never depends on `luma_fields`. `stats` must
-/// be bound to the new slot's own region of the ring. Thread `l` sums record lane `l` over every
-/// thread in order.
+/// The single-thread reduction the production kernel must reproduce.
 #[cube(launch_unchecked)]
-pub fn nlm_temporal_noise_stats<N: Size>(
+pub(super) fn reference_temporal_noise_stats<N: Size>(
     input: &Array<Vector<f32, N>>,
     stats: &mut Array<f32>,
     slot_new: u32,
@@ -185,10 +146,6 @@ pub fn nlm_temporal_noise_stats<N: Size>(
     let record_len = comptime!(2 * stored_ch + TEMPORAL_QUARTER_BASE + quarter_lanes);
     let scratch_len = comptime!(2 * stored_ch + 1);
     let threads = comptime!(block * block);
-
-    comptime! {
-        assert!(threads >= scratch_len, "nlm_temporal_noise_stats needs a thread per lane");
-    }
 
     let mut scratch = SharedMemory::<f32>::new(comptime!(threads * scratch_len) as usize);
     let mut d0_tile = SharedMemory::<f32>::new(threads as usize);
@@ -275,26 +232,28 @@ pub fn nlm_temporal_noise_stats<N: Size>(
 
     sync_cube();
 
-    let block_index = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
-    let out_base = block_index * record_len;
-
-    if thread_id < scratch_len {
-        let lane = thread_id;
-        let mut total = 0.0f32;
-        for t in 0..threads {
-            total += scratch[(t * scratch_len + lane) as usize];
-        }
-
-        stats[(out_base + lane) as usize] = total;
-    }
-
-    // The quarter lanes are written explicitly so a reader never sees an earlier frame's data.
-    if comptime!(!luma_fields) && thread_id == 0 {
-        let quarters_start = out_base + 2 * stored_ch + TEMPORAL_QUARTER_BASE;
+    if thread_id == 0 {
+        let block_index = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
+        let out_base = block_index * record_len;
 
         #[unroll]
-        for lane in 0..quarter_lanes {
-            stats[(quarters_start + lane) as usize] = 0.0f32;
+        for lane in 0..scratch_len {
+            let mut total = 0.0f32;
+            for t in 0..threads {
+                total += scratch[(t * scratch_len + lane) as usize];
+            }
+
+            stats[(out_base + lane) as usize] = total;
+        }
+
+        // The quarter lanes are written explicitly so a reader never sees an earlier frame's data.
+        if comptime!(!luma_fields) {
+            let quarters_start = out_base + 2 * stored_ch + TEMPORAL_QUARTER_BASE;
+
+            #[unroll]
+            for lane in 0..quarter_lanes {
+                stats[(quarters_start + lane) as usize] = 0.0f32;
+            }
         }
     }
 
@@ -442,34 +401,18 @@ pub fn nlm_temporal_noise_stats<N: Size>(
                 flatness = pair_tile[(quarter * 16u32) as usize] / 24.0f32;
             }
 
+            let block_index = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
             let quarter_offset = TEMPORAL_QUARTER_BASE + quarter * TEMPORAL_QUARTER_FIELDS;
-            let quarter_base = out_base + 2 * stored_ch + quarter_offset;
-            stats[(quarter_base + QUARTER_SUM_D) as usize] = residual_tile[slot as usize];
-            stats[(quarter_base + QUARTER_SUM_D2) as usize] = residual_sq_tile[slot as usize];
-            stats[(quarter_base + QUARTER_LUMA_SUM) as usize] = sum_tile[slot as usize];
-            stats[(quarter_base + QUARTER_FLATNESS) as usize] = flatness;
-            stats[(quarter_base + QUARTER_LUMA_MIN) as usize] = min_tile[slot as usize];
-            stats[(quarter_base + QUARTER_LUMA_MAX) as usize] = max_tile[slot as usize];
-            stats[(quarter_base + QUARTER_TENSOR_XX) as usize] = scratch[slot as usize];
-            stats[(quarter_base + QUARTER_TENSOR_YY) as usize] = scratch[(threads + slot) as usize];
-            stats[(quarter_base + QUARTER_TENSOR_XY) as usize] = scratch[(2u32 * threads + slot) as usize];
+            let out_base = block_index * record_len + 2 * stored_ch + quarter_offset;
+            stats[(out_base + QUARTER_SUM_D) as usize] = residual_tile[slot as usize];
+            stats[(out_base + QUARTER_SUM_D2) as usize] = residual_sq_tile[slot as usize];
+            stats[(out_base + QUARTER_LUMA_SUM) as usize] = sum_tile[slot as usize];
+            stats[(out_base + QUARTER_FLATNESS) as usize] = flatness;
+            stats[(out_base + QUARTER_LUMA_MIN) as usize] = min_tile[slot as usize];
+            stats[(out_base + QUARTER_LUMA_MAX) as usize] = max_tile[slot as usize];
+            stats[(out_base + QUARTER_TENSOR_XX) as usize] = scratch[slot as usize];
+            stats[(out_base + QUARTER_TENSOR_YY) as usize] = scratch[(threads + slot) as usize];
+            stats[(out_base + QUARTER_TENSOR_XY) as usize] = scratch[(2u32 * threads + slot) as usize];
         }
-    }
-}
-
-/// Fills a slice of the temporal-stats ring with zeroes.
-///
-/// A duplicated ring slot would only ever measure an all-zero record, so writing the zeroes is
-/// cheaper and gives the same result.
-#[cube(launch_unchecked)]
-pub fn nlm_temporal_stats_zero(
-    dst: &mut Array<f32>,
-    #[comptime] length: u32,
-    #[comptime] total_threads: u32,
-) {
-    let mut idx = ABSOLUTE_POS_X;
-    while idx < length {
-        dst[idx as usize] = 0.0f32;
-        idx += total_threads;
     }
 }
