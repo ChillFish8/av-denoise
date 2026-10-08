@@ -17,7 +17,7 @@ pub use self::fused::{
     nlm_fused_single_window,
     nlm_fused_single_window_ref,
 };
-pub use self::memory::{gpu_copy, gpu_zero_buffers};
+pub use self::memory::{gpu_cast_f16, gpu_copy, gpu_zero_buffers};
 pub use self::noise::{
     nlm_noise_partial,
     nlm_noise_reduce,

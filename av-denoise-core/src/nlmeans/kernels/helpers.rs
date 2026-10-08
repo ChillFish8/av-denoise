@@ -33,14 +33,14 @@ pub(crate) fn read_clamped_line<N: Size>(
 ///
 /// `x` must be within `0..width` and `y` within `0..height`.
 #[cube]
-pub(crate) fn read_line<N: Size>(
-    buf: &Array<Vector<f32, N>>,
+pub(crate) fn read_line<F: Float, N: Size>(
+    buf: &Array<Vector<F, N>>,
     x: u32,
     y: u32,
     frame: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
-) -> Vector<f32, N> {
+) -> Vector<F, N> {
     let idx = (frame * height + y) * width + x;
     buf[idx as usize]
 }

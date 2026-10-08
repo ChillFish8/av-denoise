@@ -14,7 +14,12 @@ use av_denoise_core::bench_api::collab::kernels::aggregate::{
 };
 use av_denoise_core::bench_api::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
 use av_denoise_core::bench_api::collab::kernels::transforms::dct_noise_profile;
-use av_denoise_core::bench_api::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
+use av_denoise_core::bench_api::collab::{
+    PATCH_SIZE,
+    grid_frames,
+    needs_warp_uniform_search,
+    supports_f16_search,
+};
 use av_denoise_core::bench_api::{BLOCK_X, BLOCK_Y, Device, NOISE_CURVE_BINS};
 use clap::Parser;
 use cubecl::benchmark::{Benchmark, BenchmarkComputations, TimingMethod};
@@ -96,6 +101,8 @@ struct Rig<R: Runtime> {
     geometry: PlaneGeometry,
     ring: Handle,
     ring_len: usize,
+    /// An f16 copy of `ring`, which the `fused_prod_f16` row searches.
+    search_ring: Handle,
     mv_field: Handle,
     confidence: Handle,
     neighbour_slots: Handle,
@@ -136,6 +143,12 @@ impl<R: Runtime> Rig<R> {
 
         let ring_bytes = f32::as_bytes(&ring_data);
         let ring = client.create_from_slice(ring_bytes);
+        let search_values: Vec<half::f16> = ring_data
+            .iter()
+            .map(|value| half::f16::from_f32(*value))
+            .collect();
+        let search_bytes = half::f16::as_bytes(&search_values);
+        let search_ring = client.create_from_slice(search_bytes);
 
         let blocks_x = geometry.width.div_ceil(BLK_STEP);
         let blocks_y = geometry.height.div_ceil(BLK_STEP);
@@ -210,6 +223,7 @@ impl<R: Runtime> Rig<R> {
             kaiser_on,
             ring_len: ring_data.len(),
             ring,
+            search_ring,
             mv_len,
             conf_len,
             blocks_x,
@@ -239,7 +253,25 @@ impl<R: Runtime> Rig<R> {
         self.fused_with(&self.kaiser_on, true);
     }
 
+    /// [Self::fused_prod] with candidate distances read from the f16 search ring.
+    fn fused_prod_f16(&self) {
+        self.fused_launch::<half::f16>(&self.kaiser_on, true, &self.search_ring, self.ring_len, true);
+    }
+
+    /// The f32 search, with the f32 ring bound as its placeholder search ring.
     fn fused_with(&self, kaiser: &Handle, pooled: bool) {
+        let placeholder_len = self.geometry.stored_channels as usize;
+        self.fused_launch::<f32>(kaiser, pooled, &self.ring, placeholder_len, false);
+    }
+
+    fn fused_launch<S: Float>(
+        &self,
+        kaiser: &Handle,
+        pooled: bool,
+        search_ring: &Handle,
+        search_len: usize,
+        f16_search: bool,
+    ) {
         let geometry = self.geometry;
         let refs = ref_count(geometry.width, geometry.height);
         let refs_x = refs_along(geometry.width);
@@ -256,12 +288,13 @@ impl<R: Runtime> Rig<R> {
         let frames_per_volume = grid_frames(RADIUS);
 
         unsafe {
-            collab_fused::launch_unchecked::<R>(
+            collab_fused::launch_unchecked::<S, R>(
                 &self.client,
                 CubeCount::new_2d(cubes_x, refs_y),
                 CubeDim::new_1d(64),
                 geometry.stored_channels as usize,
                 ArrayArg::from_raw_parts(self.ring.clone(), self.ring_len),
+                ArrayArg::from_raw_parts(search_ring.clone(), search_len),
                 ArrayArg::from_raw_parts(self.mv_field.clone(), self.mv_len),
                 ArrayArg::from_raw_parts(self.confidence.clone(), self.conf_len),
                 ArrayArg::from_raw_parts(self.neighbour_slots.clone(), NEIGHBOUR_SLOTS.len()),
@@ -281,6 +314,7 @@ impl<R: Runtime> Rig<R> {
                 group_weight_scale,
                 accum_scale,
                 uniform_search,
+                f16_search,
                 RADIUS,
                 frames_per_volume,
                 REFINE,
@@ -375,6 +409,7 @@ impl<R: Runtime> Benchmark for Arm<'_, R> {
             "fused" => self.rig.fused(),
             "fused_kaiser" => self.rig.fused_kaiser(),
             "fused_prod" => self.rig.fused_prod(),
+            "fused_prod_f16" => self.rig.fused_prod_f16(),
             "normalise" => self.rig.normalise(),
             _ => self.rig.zero(),
         }
@@ -427,13 +462,20 @@ fn main() {
             ("fused", false),
             ("fused_kaiser", false),
             ("fused_prod", false),
+            ("fused_prod_f16", false),
             ("normalise", true),
         ];
         let mut totals = vec![0.0f64; kernels.len()];
+        let f16_supported = supports_f16_search(&client);
 
         for plane in PLANES {
             let rig = Rig::<cubecl::wgpu::WgpuRuntime>::new(client.clone(), *plane);
             for (index, (kernel, prime)) in kernels.iter().enumerate() {
+                if *kernel == "fused_prod_f16" && !f16_supported {
+                    println!("  {kernel:<15} skipped, the device has no f16 search");
+                    continue;
+                }
+
                 let arm = Arm {
                     rig: &rig,
                     kernel,

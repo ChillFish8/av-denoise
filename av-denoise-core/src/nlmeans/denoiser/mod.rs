@@ -52,6 +52,8 @@ pub struct NlmDenoiser<R: Runtime> {
 
     /// The frame ring, one slot per frame in the window.
     pub(super) input_buf: Handle,
+    /// An f16 copy of `input_buf`, slot for slot, allocated by `enable_search_ring`.
+    pub(super) search_buf: Option<Handle>,
     /// The prefiltered ring the `_ref` distance kernels read, shaped like `input_buf`.
     pub(super) reference_buf: Option<Handle>,
     /// A 4-byte handle bound for planes a kernel never reads.
@@ -355,6 +357,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             frames_loaded: 0,
             real_pushes: 0,
             input_buf,
+            search_buf: None,
             reference_buf,
             placeholder,
             accum,
@@ -427,6 +430,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         };
 
         ingest(&self.client, planes, format, &self.placeholder, target);
+        self.mirror_search_slot(slot);
         self.run_post_upload_stages(slot)
     }
 

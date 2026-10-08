@@ -15,6 +15,7 @@ mod options;
 mod params;
 mod prefilter;
 mod residual_correlation;
+mod search_ring;
 mod separable;
 mod sizes;
 mod spatial;

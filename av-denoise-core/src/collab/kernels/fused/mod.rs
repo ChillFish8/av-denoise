@@ -119,6 +119,11 @@ const _: () = assert!(
 /// `3.0e38` an unfilled slot holds, so it never displaces a match. The wgpu backends reconverge on
 /// their own, and [needs_warp_uniform_search](crate::collab::needs_warp_uniform_search) picks the
 /// setting per runtime.
+///
+/// `search_ring` is an f16 copy of `ring`, with `S` as `half::f16`, that the candidate distances
+/// read when `f16_search` is set. The reference columns and the member stack always come from
+/// `ring`. With `f16_search` unset `search_ring` is never read and can be the f32 `ring`, which
+/// keeps every f16 type out of the kernel.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
@@ -130,8 +135,9 @@ const _: () = assert!(
               inner test in 63 of the 64 unrolled positions rather than emitting it and ANDing \
               a constant false into it"
 )]
-pub fn collab_fused<N: Size>(
+pub fn collab_fused<S: Float, N: Size>(
     ring: &Array<Vector<f32, N>>,
+    search_ring: &Array<Vector<S, N>>,
     mv_field: &Array<i32>,
     confidence: &Array<f32>,
     neighbour_slots: &Array<u32>,
@@ -151,6 +157,7 @@ pub fn collab_fused<N: Size>(
     weight_scale: f32,
     accum_scale: f32,
     #[comptime] warp_uniform: bool,
+    #[comptime] f16_search: bool,
     #[comptime] radius: u32,
     #[comptime] grid_frames: u32,
     #[comptime] refine: u32,
@@ -213,6 +220,7 @@ pub fn collab_fused<N: Size>(
 
     let n_live = spatial_search(
         ring,
+        search_ring,
         &current,
         ref_x,
         ref_y,
@@ -223,10 +231,12 @@ pub fn collab_fused<N: Size>(
         &mut best_d,
         &mut best_pos,
         warp_uniform,
+        f16_search,
         spatial_radius,
         width,
         height,
         channels,
+        stored_ch,
     );
 
     let ref_idx = CUBE_POS_Y * refs_x + ref_x_clamped;
@@ -278,6 +288,7 @@ pub fn collab_fused<N: Size>(
 
             trajectory_search(
                 ring,
+                search_ring,
                 mv_field,
                 confidence,
                 neighbour_slots,
@@ -292,6 +303,7 @@ pub fn collab_fused<N: Size>(
                 comptime!(first + 1),
                 tail,
                 warp_uniform,
+                f16_search,
                 radius,
                 refine,
                 mv_stride,
@@ -303,6 +315,7 @@ pub fn collab_fused<N: Size>(
                 width,
                 height,
                 channels,
+                stored_ch,
             );
         }
 

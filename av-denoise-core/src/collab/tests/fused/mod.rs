@@ -94,6 +94,8 @@ pub(super) struct Setup {
     /// The channels the ring interleaves per pixel, laid out at
     /// [ChannelMode::storage_count](crate::nlmeans::ChannelMode::storage_count) floats each.
     pub(super) channel_mode: ChannelMode,
+    /// Scores candidates from an f16 copy of the ring.
+    pub(super) f16_search: bool,
 }
 
 impl Setup {
@@ -130,6 +132,7 @@ impl Setup {
             strength_map: None,
             pooled: None,
             channel_mode: ChannelMode::Luma,
+            f16_search: false,
         }
     }
 
@@ -309,6 +312,7 @@ pub(super) fn assert_matches_recorded(label: &str, got: &Aggregated, want: &Dige
 pub(super) struct Buffers {
     client: ComputeClient<R>,
     ring: Handle,
+    search_ring: Handle,
     mv_field: Handle,
     confidence: Handle,
     neighbour_slots: Handle,
@@ -366,8 +370,17 @@ pub(super) fn buffers(setup: &Setup) -> Buffers {
     let wsum = client.create_from_slice(wsum_bytes);
     let group_weight = client.empty(refs * size_of::<f32>());
 
+    let search_values: Vec<half::f16> = setup
+        .ring
+        .iter()
+        .map(|value| half::f16::from_f32(*value))
+        .collect();
+    let search_bytes = half::f16::as_bytes(&search_values);
+    let search_ring = client.create_from_slice(search_bytes);
+
     Buffers {
         ring,
+        search_ring,
         mv_field,
         confidence,
         neighbour_slots,
@@ -418,6 +431,20 @@ pub(super) fn run_fused(setup: &Setup) -> Aggregated {
 /// [run_fused] with the search walk pinned rather than taken from the runtime.
 pub(super) fn run_fused_walk(setup: &Setup, warp_uniform: Option<bool>) -> Aggregated {
     let handles = buffers(setup);
+    let warp_uniform = warp_uniform.unwrap_or_else(|| needs_warp_uniform_search(&handles.client));
+
+    // The f32 search launches with the f32 ring as its placeholder, as the shipping code does.
+    if setup.f16_search {
+        launch_fused::<half::f16>(setup, &handles, handles.search_ring.clone(), warp_uniform);
+    } else {
+        launch_fused::<f32>(setup, &handles, handles.ring.clone(), warp_uniform);
+    }
+
+    read_back(handles, setup)
+}
+
+/// Launches [collab_fused] with its search ring read as `S`.
+fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle, warp_uniform: bool) {
     let profile = setup.profile();
     let curve = setup.noise_curve.unwrap_or([0.0f32; NOISE_CURVE_BINS]);
     let curve_bytes = f32::as_bytes(&curve);
@@ -444,17 +471,17 @@ pub(super) fn run_fused_walk(setup: &Setup, warp_uniform: Option<bool>) -> Aggre
     let dim = CubeDim::new_1d(64);
     let scale = weight_scale(setup.sigma, &profile);
     let accum_scale = setup.accum_scale();
-    let warp_uniform = warp_uniform.unwrap_or_else(|| needs_warp_uniform_search(&handles.client));
     let grid_frame_count = grid_frames(setup.radius);
     let pooled_ratio = setup.pooled.unwrap_or(0.0);
 
     unsafe {
-        collab_fused::launch_unchecked::<R>(
+        collab_fused::launch_unchecked::<S, R>(
             &handles.client,
             grid,
             dim,
             stored_channels as usize,
             ArrayArg::from_raw_parts(handles.ring.clone(), setup.ring.len()),
+            ArrayArg::from_raw_parts(search_ring, setup.ring.len()),
             ArrayArg::from_raw_parts(handles.mv_field.clone(), setup.mv_field.len()),
             ArrayArg::from_raw_parts(handles.confidence.clone(), setup.confidence.len()),
             ArrayArg::from_raw_parts(handles.neighbour_slots.clone(), setup.neighbour_slots.len()),
@@ -474,6 +501,7 @@ pub(super) fn run_fused_walk(setup: &Setup, warp_uniform: Option<bool>) -> Aggre
             scale,
             accum_scale,
             warp_uniform,
+            setup.f16_search,
             setup.radius,
             grid_frame_count,
             setup.refine,
@@ -496,8 +524,6 @@ pub(super) fn run_fused_walk(setup: &Setup, warp_uniform: Option<bool>) -> Aggre
             setup.pooled.is_some(),
         );
     }
-
-    read_back(handles, setup)
 }
 
 /// A ring of `2 * radius + 1` frames of unique content, with motion and confidence fields that
@@ -553,6 +579,19 @@ pub(super) fn cross_frame_setup(width: u32, height: u32, radius: u32) -> Setup {
         blocks_y,
         ..Setup::spatial_only(placeholder, width, height)
     }
+}
+
+/// [cross_frame_setup] with a two-channel chroma ring.
+///
+/// Each pixel takes two neighbouring values of a [unique_frame] twice as wide, so no two 8x8
+/// windows share content in either channel.
+pub(super) fn chroma_cross_frame_setup(width: u32, height: u32, radius: u32) -> Setup {
+    let frames = 2 * radius + 1;
+    let mut setup = cross_frame_setup(width, height, radius);
+    setup.ring = unique_frame(width * 2, height * frames);
+    setup.channel_mode = ChannelMode::Chroma;
+
+    setup
 }
 
 /// A three-frame ring whose neighbours hold an exact copy of the centre frame, at the position the

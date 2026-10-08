@@ -8,4 +8,5 @@ mod options;
 mod pipeline;
 mod pooled;
 mod regularise;
+mod search_ring;
 mod strength_map;

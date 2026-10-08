@@ -16,7 +16,7 @@ use crate::collab::kernels::aggregate::{
 };
 use crate::collab::kernels::fused::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{MAX_K, PATCH_SIZE, grid_frames, needs_warp_uniform_search};
+use crate::collab::{MAX_K, PATCH_SIZE, grid_frames, needs_warp_uniform_search, supports_f16_search};
 use crate::engine::{DevicePlane, SampleFormat};
 use crate::nlmeans::denoiser::{BufferSize, front_buffer_sizes};
 use crate::nlmeans::{
@@ -83,6 +83,8 @@ pub struct Nl4dDenoiser<R: Runtime> {
     k_max: u32,
     /// Whether `collab_fused` runs its warp-uniform search.
     warp_uniform: bool,
+    /// Whether candidate distances read the f16 search ring.
+    f16_search: bool,
     /// The fixed-point scale the cross-frame accumulator ring counts in.
     accum_scale: f32,
 
@@ -128,6 +130,22 @@ pub struct Nl4dDenoiser<R: Runtime> {
     map_rows: u32,
     /// Present only when grain export is on.
     grain: Option<GrainExport>,
+}
+
+/// The per-pass buffers and values `collab_fused` reads beside the denoiser's own state.
+struct FusedPass {
+    mv_field: Handle,
+    confidence: Handle,
+    neighbour_slots: Handle,
+    noise_curve: Handle,
+    strength_map: Handle,
+    curve_valid: u32,
+    map_mode: u32,
+    weight_norm: f32,
+    stored_ch: u32,
+    accum_ring_len: usize,
+    wsum_ring_len: usize,
+    neighbours: u32,
 }
 
 /// The element count of every geometry-sized buffer [Nl4dDenoiser::new] allocates beyond its frame rings.
@@ -199,6 +217,11 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let texture_cut = texture_cut_applies.then_some(params.flat_texture_cut);
         front.set_flat_texture_cut(texture_cut);
         front.set_shifted_edges(true);
+
+        let f16_search = supports_f16_search(client);
+        if f16_search {
+            front.enable_search_ring();
+        }
 
         let stored_ch = channels.storage_count();
         let k_max = MAX_K;
@@ -281,6 +304,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             c_min: params.c_min,
             k_max,
             warp_uniform,
+            f16_search,
             accum_scale,
             group_weight,
             sigma_buf,
@@ -515,6 +539,17 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         &self.front
     }
 
+    #[cfg(test)]
+    pub(crate) fn uses_f16_search(&self) -> bool {
+        self.f16_search
+    }
+
+    /// Makes candidate distances read the f32 ring, called before the first push.
+    #[cfg(test)]
+    pub(crate) fn force_f32_search_for_test(&mut self) {
+        self.f16_search = false;
+    }
+
     /// How many tail frames [Self::finish_passes] must emit.
     ///
     /// A stream that filled its ring holds `2 * temporal_radius` unread regions. A shorter stream
@@ -535,10 +570,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// newest region is the slot `temporal_radius` ahead of the centre, which the newest frame has
     /// just taken over.
     fn run_pass(&mut self, view: &RingView, clear: AccumClear) -> Result<(), anyhow::Error> {
-        // The kernel's centre slot must be the ring view's centre, or a member is grouped against
-        // one frame and scattered into another.
         let centre_slot = view.centre_slot;
-
         let client = self.front.compute_client().clone();
 
         let stored_ch = self.channels.storage_count();
@@ -546,13 +578,9 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let pixels = (self.width * self.height) as usize;
         let frame_len = pixels * stored_ch as usize;
         let total_frames = 1 + 2 * self.temporal_radius;
-        let ring_len = frame_len * total_frames as usize;
         let accum_ring_len = frame_len * total_frames as usize;
         let wsum_ring_len = pixels * total_frames as usize;
-
         let neighbours = 2 * self.temporal_radius;
-        let mv_len = (neighbours * view.mv_stride) as usize;
-        let conf_len = (neighbours * view.conf_stride) as usize;
 
         let neighbour_slot_bytes = u32::as_bytes(&view.neighbour_slots);
         let neighbour_slots_buf = client.create_from_slice(neighbour_slot_bytes);
@@ -589,15 +617,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             },
             None => (self.unit_map.clone(), STRENGTH_MAP_OFF),
         };
-        let map_len = (self.map_cols * self.map_rows) as usize;
 
-        let refs_x = refs_along(self.width);
-        let refs_y = refs_along(self.height);
-        let refs = ref_count(self.width, self.height);
-
-        let collab_cubes_x = fused_cubes_x(self.width);
-        let collab_grid = CubeCount::new_2d(collab_cubes_x, refs_y);
-        let collab_dim = CubeDim::new_1d(64);
         let zero_dim = 256u32;
         // Clamped to the 65,535 workgroup limit, which a 4:4:4 4K frame or an 8K luma plane alone
         // exceeds. `collab_zero_accum` strides, so a clamped launch still reaches every slot.
@@ -606,10 +626,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let zero_total_threads_one_frame = zero_workgroups_one_frame * zero_dim;
 
         let motion_ctx = self.front.motion_ctx();
-        let blk_step = motion_ctx.step;
-        let blksize = motion_ctx.blksize;
-        let blocks_x = motion_ctx.blocks_x;
-        let blocks_y = motion_ctx.blocks_y;
 
         let cleared_slots = match clear {
             AccumClear::WholeRing => 0..total_frames,
@@ -652,8 +668,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             neighbours,
         });
 
-        let frames_per_volume = grid_frames(self.temporal_radius);
-
         unsafe {
             // One dispatch over the whole ring exceeds the 65,535 workgroup limit at
             // `temporal_radius = 4` for a 1080p luma plane. A rejected dispatch leaves undefined
@@ -671,21 +685,85 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                     zero_total_threads_one_frame,
                 );
             }
+        }
 
-            let pool_ratio = nl4d_pool_ratio(self.channels);
+        let pass = FusedPass {
+            mv_field,
+            confidence,
+            neighbour_slots: neighbour_slots_buf,
+            noise_curve: noise_curve_buf,
+            strength_map: strength_map_buf,
+            curve_valid,
+            map_mode,
+            weight_norm,
+            stored_ch,
+            accum_ring_len,
+            wsum_ring_len,
+            neighbours,
+        };
 
-            collab_fused::launch_unchecked::<R>(
-                &client,
+        // The f32 search binds the f32 ring as its placeholder, so its kernel declares no f16 type.
+        if self.f16_search {
+            let search_handle = view
+                .search_input
+                .clone()
+                .expect("the f16 search enables the search ring");
+            self.launch_collab_fused::<half::f16>(&client, view, search_handle, accum_ring_len, pass);
+        } else {
+            let placeholder = view.input.clone();
+            self.launch_collab_fused::<f32>(&client, view, placeholder, stored_ch as usize, pass);
+        }
+
+        Ok(())
+    }
+
+    /// Launches `collab_fused` for one pass, with its search ring read as `S`.
+    fn launch_collab_fused<S: Float>(
+        &self,
+        client: &ComputeClient<R>,
+        view: &RingView,
+        search_ring: Handle,
+        search_len: usize,
+        pass: FusedPass,
+    ) {
+        let stored_ch = pass.stored_ch;
+        let accum_ring_len = pass.accum_ring_len;
+        let wsum_ring_len = pass.wsum_ring_len;
+        let neighbours = pass.neighbours;
+        let channels_count = self.channels.count();
+        let mv_len = (neighbours * view.mv_stride) as usize;
+        let conf_len = (neighbours * view.conf_stride) as usize;
+        let neighbour_slots_len = view.neighbour_slots.len();
+        let map_len = (self.map_cols * self.map_rows) as usize;
+
+        let refs_x = refs_along(self.width);
+        let refs_y = refs_along(self.height);
+        let refs = ref_count(self.width, self.height);
+        let collab_cubes_x = fused_cubes_x(self.width);
+        let collab_grid = CubeCount::new_2d(collab_cubes_x, refs_y);
+        let collab_dim = CubeDim::new_1d(64);
+
+        let motion_ctx = self.front.motion_ctx();
+        let frames_per_volume = grid_frames(self.temporal_radius);
+        let pool_ratio = nl4d_pool_ratio(self.channels);
+        // The kernel's centre slot must be the ring view's centre, or a member is grouped against
+        // one frame and scattered into another.
+        let centre_slot = view.centre_slot;
+
+        unsafe {
+            collab_fused::launch_unchecked::<S, R>(
+                client,
                 collab_grid,
                 collab_dim,
                 stored_ch as usize,
-                ArrayArg::from_raw_parts(view.input.clone(), ring_len),
-                ArrayArg::from_raw_parts(mv_field.clone(), mv_len.max(1)),
-                ArrayArg::from_raw_parts(confidence.clone(), conf_len.max(1)),
-                ArrayArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
+                ArrayArg::from_raw_parts(view.input.clone(), accum_ring_len),
+                ArrayArg::from_raw_parts(search_ring, search_len),
+                ArrayArg::from_raw_parts(pass.mv_field, mv_len.max(1)),
+                ArrayArg::from_raw_parts(pass.confidence, conf_len.max(1)),
+                ArrayArg::from_raw_parts(pass.neighbour_slots, neighbour_slots_len.max(1)),
                 ArrayArg::from_raw_parts(self.sigma_buf.clone(), stored_ch as usize),
-                ArrayArg::from_raw_parts(noise_curve_buf, NOISE_CURVE_BINS),
-                ArrayArg::from_raw_parts(strength_map_buf, map_len),
+                ArrayArg::from_raw_parts(pass.noise_curve, NOISE_CURVE_BINS),
+                ArrayArg::from_raw_parts(pass.strength_map, map_len),
                 ArrayArg::from_raw_parts(self.dct_profile_buf.clone(), 8),
                 ArrayArg::from_raw_parts(self.kaiser_buf.clone(), PATCH_SIZE as usize),
                 ArrayArg::from_raw_parts(self.accum.clone(), accum_ring_len),
@@ -694,20 +772,21 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 centre_slot,
                 self.c_min,
                 self.lambda_ht,
-                curve_valid,
-                map_mode,
-                weight_norm,
+                pass.curve_valid,
+                pass.map_mode,
+                pass.weight_norm,
                 self.accum_scale,
                 self.warp_uniform,
+                self.f16_search,
                 self.temporal_radius,
                 frames_per_volume,
                 self.refine,
                 view.mv_stride,
                 view.conf_stride,
-                blk_step,
-                blksize,
-                blocks_x,
-                blocks_y,
+                motion_ctx.step,
+                motion_ctx.blksize,
+                motion_ctx.blocks_x,
+                motion_ctx.blocks_y,
                 self.width,
                 self.height,
                 channels_count,
@@ -721,8 +800,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 self.pooled_threshold,
             );
         }
-
-        Ok(())
     }
 
     /// Saves the last pass's vectors from the centre to the next frame for grain export.

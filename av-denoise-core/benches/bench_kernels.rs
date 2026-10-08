@@ -5,6 +5,7 @@ use clap::Parser;
 use cubecl::prelude::*;
 use kernels::accumulate::AccumulateBench;
 use kernels::bilateral::BilateralBench;
+use kernels::cast_f16::CastF16Bench;
 use kernels::collab_aggregate::{CollabNormaliseBench, CollabZeroAccumBench};
 use kernels::collab_fused::CollabFusedBench;
 use kernels::copy::CopyBench;
@@ -50,6 +51,17 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
     for &(channels, channel_name) in CHANNELS {
         run(CopyBench {
             client: client.clone(),
+            channels,
+            channel_name,
+        });
+    }
+
+    let cast_cases = [(1920, 1080, 1, "luma"), (960, 540, 2, "chroma")];
+    for (width, height, channels, channel_name) in cast_cases {
+        run(CastF16Bench {
+            client: client.clone(),
+            width,
+            height,
             channels,
             channel_name,
         });

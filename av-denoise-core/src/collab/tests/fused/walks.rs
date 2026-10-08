@@ -1,5 +1,5 @@
 use super::noise_curve::stepped_curve;
-use super::{Setup, cross_frame_setup, run_fused_walk, unique_frame};
+use super::{Setup, chroma_cross_frame_setup, cross_frame_setup, run_fused_walk, unique_frame};
 
 /// Asserts the two search walks aggregated the same thing, byte for byte.
 ///
@@ -132,4 +132,24 @@ fn warp_uniform_search_matches_the_clipped_search_when_the_edge_clamps_rectangle
     setup.confidence.fill(1.0);
 
     assert_walks_agree("edge clamped", &setup);
+}
+
+#[test]
+fn warp_uniform_search_matches_the_clipped_search_with_the_f16_search() {
+    let mut cross_frame = cross_frame_setup(64, 64, 2);
+    cross_frame.f16_search = true;
+    assert_walks_agree("f16 cross frame", &cross_frame);
+
+    let mut shared = shared_vector_setup(2);
+    shared.f16_search = true;
+    shared.confidence.fill(1.0);
+    assert_walks_agree("f16 shared vector", &shared);
+}
+
+#[test]
+fn warp_uniform_search_matches_the_clipped_search_with_the_f16_search_on_wide_storage() {
+    let mut setup = chroma_cross_frame_setup(64, 64, 2);
+    setup.f16_search = true;
+
+    assert_walks_agree("f16 chroma cross frame", &setup);
 }

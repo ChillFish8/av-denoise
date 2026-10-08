@@ -3,7 +3,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::NlmDenoiser;
-use crate::nlmeans::kernels::gpu_copy;
+use crate::nlmeans::kernels::{gpu_cast_f16, gpu_copy};
 use crate::nlmeans::prefilter::PrefilterMode;
 use crate::nlmeans::{BLOCK_1D, MAX_GRID_1D};
 
@@ -53,6 +53,52 @@ impl<R: Runtime> NlmDenoiser<R> {
         };
     }
 
+    /// Allocates the f16 search ring, a slot-for-slot f16 copy of the input ring.
+    ///
+    /// Every later write to an input slot is mirrored into it, so it must be called before the
+    /// first push.
+    pub(crate) fn enable_search_ring(&mut self) {
+        debug_assert_eq!(
+            self.frames_loaded, 0,
+            "the search ring must be enabled before the first push"
+        );
+
+        let total_frames = self.params.total_frames() as usize;
+        let stored_ch = self.params.channels.storage_count() as usize;
+        let frame_len = (self.width * self.height) as usize * stored_ch;
+        let bytes = frame_len * total_frames * size_of::<half::f16>();
+        let search_buf = self.client.empty(bytes);
+        self.search_buf = Some(search_buf);
+    }
+
+    /// Copies input slot `slot` into the search ring as f16, when the search ring exists.
+    pub(in crate::nlmeans) fn mirror_search_slot(&self, slot: usize) {
+        let Some(search_buf) = self.search_buf.as_ref() else {
+            return;
+        };
+
+        let total_frames = self.params.total_frames() as usize;
+        let stored_ch = self.params.channels.storage_count();
+        let frame_len = self.width * self.height * stored_ch;
+        let ring_len = frame_len as usize * total_frames;
+        let grid = frame_len.div_ceil(BLOCK_1D).min(MAX_GRID_1D);
+        let total_threads = grid * BLOCK_1D;
+        let offset = slot as u32 * frame_len;
+
+        unsafe {
+            gpu_cast_f16::launch_unchecked::<R>(
+                &self.client,
+                CubeCount::new_1d(grid),
+                CubeDim::new_1d(BLOCK_1D),
+                ArrayArg::from_raw_parts(self.input_buf.clone(), ring_len),
+                ArrayArg::from_raw_parts(search_buf.clone(), ring_len),
+                offset,
+                frame_len,
+                total_threads,
+            );
+        }
+    }
+
     /// Copies the first pushed frame into the leading ring slots so the window starts balanced.
     ///
     /// It does nothing with shifted edges on, since those windows stop at the clip start instead.
@@ -84,6 +130,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         // Slots never overlap, so copying within the same buffer is safe.
         let input_buf = self.input_buf.clone();
         self.copy_frame_into_slot(&input_buf, next_slot, &input_buf, last_slot, total_frames);
+        self.mirror_search_slot(next_slot);
 
         // `NlmSpatial` rebuilds this slot's reference with the pilot below.
         if !matches!(self.params.prefilter, PrefilterMode::NlmSpatial { .. })
