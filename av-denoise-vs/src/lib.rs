@@ -3,6 +3,7 @@
 mod filter;
 pub mod frames;
 pub mod params;
+pub mod stream;
 
 use anyhow::Error;
 use tracing_subscriber::EnvFilter;
