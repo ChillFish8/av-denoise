@@ -9,7 +9,7 @@ experience and eventually growing beyond NLMeans.
 av-denoise features **NLMeans**, **NLMeans-HQ** and **NL4D** algorithms offering significant advantages over existing
 denoising tools.
 
-![CLI benchmark results RX9700](assets/cli-bench-results-1080p-amd-rx9700.png)
+![CLI benchmark results RX9700](assets/cli-bench-results-1080p-amd-rx9700-v0-5.png)
 
 ## Features
 
@@ -32,7 +32,7 @@ denoising tools.
 - _**Fast!**_ - around **2x** FFmpeg's `nlmeans_opencl` at matched settings and **~1.3x** faster than V-BM3DHIP.
 - **VapourSynth Plugin** - [Available on PyPi](https://pypi.org/project/vsavd/) for integrating within your existing
   pipelines.
-  - Please be aware that due to VS API limitations the NLMeans-HQ and NL4D algorithms are very heavily limited and
+  - Please be aware that due to VS API limitations the NLMeans-HQ and NL4D algorithms are limited and
     performance is suboptimal from what it could be. For best performance we recommend using the CLI and then feeding
     the output into VS separately.
 
@@ -117,19 +117,19 @@ under Vulkan.
 
 ### CLI - 1080p 8-bit
 
-![CLI benchmark results RX9700](assets/cli-bench-results-1080p-amd-rx9700.png)
+![CLI benchmark results RX9700](assets/cli-bench-results-1080p-amd-rx9700-v0-5.png)
 
 ### CLI - 4K 10-bit
 
-![CLI benchmark results RX9700](assets/cli-bench-results-4k-amd-rx9700.png)
+![CLI benchmark results RX9700](assets/cli-bench-results-4k-amd-rx9700-v0-5.png)
 
 ### VS Plugin  - 1080p 8-bit
 
-![VS benchmark results RX9700](assets/vs-plugin-bench-results-1080p-amd-rx9700.png)
+![VS benchmark results RX9700](assets/vs-plugin-bench-results-1080p-amd-rx9700-v0-5.png)
 
 ### VS Plugin  - 4K 10-bit
 
-![VS benchmark results RX9700](assets/vs-plugin-bench-results-4k-amd-rx9700.png)
+![VS benchmark results RX9700](assets/vs-plugin-bench-results-4k-amd-rx9700-v0-5.png)
 
 ### Notes about the JIT
 
