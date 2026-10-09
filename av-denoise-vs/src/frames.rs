@@ -1,7 +1,5 @@
 use std::ops::RangeInclusive;
 
-use av_denoise::Planes;
-
 /// Copies a plane with a row stride of `stride` bytes into a tightly packed buffer.
 ///
 /// `width_bytes` is `width * bytes_per_sample`, not a pixel count, so this works the same at any bit
@@ -48,24 +46,4 @@ pub fn shifted_window_range(
     let first = output_index.saturating_sub(behind);
     let last = (output_index + ahead).min(last_frame);
     first..=last
-}
-
-/// Denoised frames from a clip's final flush, held for the requests that follow.
-///
-/// Each frame is handed out at most once, and a request for any other index misses.
-pub struct TailCache {
-    first: usize,
-    frames: Vec<Option<Planes>>,
-}
-
-impl TailCache {
-    pub fn new(first: usize, frames: Vec<Planes>) -> Self {
-        let frames = frames.into_iter().map(Some).collect();
-        Self { first, frames }
-    }
-
-    pub fn take(&mut self, output_index: usize) -> Option<Planes> {
-        let index = output_index.checked_sub(self.first)?;
-        self.frames.get_mut(index)?.take()
-    }
 }

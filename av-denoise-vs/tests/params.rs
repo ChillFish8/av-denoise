@@ -357,23 +357,6 @@ fn nlmeans_explicit_zero_temporal_radius_stays_spacial() {
 }
 
 #[test]
-fn the_hq_arm_sets_windowed_noise_estimation() {
-    let raw = RawParams {
-        variant: Some("hq".to_string()),
-        ..RawParams::default()
-    };
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
-
-    match opts.algorithm {
-        av_denoise::Algorithm::NlmeansHq(hq) => {
-            assert!(hq.hq.windowed_noise_estimation);
-        },
-        other => panic!("expected NlmeansHq algorithm, got {other:?}"),
-    }
-}
-
-#[test]
 fn a_large_search_radius_is_rejected_when_the_stack_is_not_raised() {
     // SAFETY: single-threaded test, no denoiser thread exists yet.
     unsafe { std::env::remove_var("RUST_MIN_STACK") };

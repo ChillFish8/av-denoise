@@ -507,7 +507,7 @@ mod reseed {
         let frame_layout = layout();
         let option_sets = [
             nl4d_plane_options(2),
-            nl4d_windowed_plane_options(2),
+            nl4d_pinned_plane_options(2),
             nl4d_plane_options_with_intent(2, ChannelIntent::Luma),
             nl4d_plane_options_with_intent(2, ChannelIntent::Chroma),
         ];
@@ -617,7 +617,7 @@ mod reseed {
     #[test]
     fn nl4d_reseed_window_then_streaming_continues_from_the_clip_start() {
         let frame_layout = layout();
-        let options = nl4d_windowed_plane_options(2);
+        let options = nl4d_pinned_plane_options(2);
         let frames = ramp_clip(&frame_layout, 16);
         let streamed = stream_all(&options, &frames);
         let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
@@ -752,14 +752,12 @@ mod reseed {
         );
     }
 
-    /// Temporal nl4d at `radius` with window-local noise estimation and an automatic `sigma`, as
-    /// `av-denoise-vs` runs it.
+    /// Temporal nl4d at `radius` with `sigma` pinned to 3 in 8-bit units.
     ///
-    /// `sigma` stays unpinned because window-local estimation exists so the automatic estimate
-    /// agrees between `reseed` and streaming.
-    fn nl4d_windowed_plane_options(radius: u32) -> PlaneOptions {
+    /// Pinning leaves no history for `reseed` to miss, so it must agree with streaming.
+    fn nl4d_pinned_plane_options(radius: u32) -> PlaneOptions {
         let nl4d_options = Nl4dOptions {
-            windowed_noise_estimation: true,
+            sigma: Some(3.0 / 255.0),
             ..Nl4dOptions::default()
         };
 
@@ -769,12 +767,11 @@ mod reseed {
         }
     }
 
-    /// Like `nl4d_reseed_matches_the_streaming_output_mid_clip`, with the noise estimator running
-    /// instead of pinned.
+    /// Like `nl4d_reseed_matches_the_streaming_output_mid_clip`, with a smaller pinned `sigma`.
     #[test]
-    fn nl4d_windowed_reseed_matches_the_streaming_output_mid_clip() {
+    fn nl4d_pinned_reseed_matches_the_streaming_output_mid_clip() {
         let frame_layout = layout();
-        let options = nl4d_windowed_plane_options(2);
+        let options = nl4d_pinned_plane_options(2);
         let frames = ramp_clip(&frame_layout, 16);
         let streamed = stream_all(&options, &frames);
 
@@ -789,15 +786,12 @@ mod reseed {
         assert_eq!(got.v, streamed[target_frame].v);
     }
 
-    /// With window-local estimation, a `reseed` at a frame then a `push`/`recv` for the next frame must
-    /// match a `reseed` at the next frame on a fresh denoiser.
-    ///
-    /// Without it the fast path folds history the reseed path never sees, so the two disagree on the
-    /// same window of content.
+    /// A `reseed` at a frame then a `push`/`recv` for the next frame must match a `reseed` at the
+    /// next frame on a fresh denoiser.
     #[test]
-    fn nl4d_windowed_fast_path_agrees_with_reseed_at_the_next_frame() {
+    fn nl4d_pinned_fast_path_agrees_with_reseed_at_the_next_frame() {
         let frame_layout = layout();
-        let options = nl4d_windowed_plane_options(2);
+        let options = nl4d_pinned_plane_options(2);
         let frames = ramp_clip(&frame_layout, 16);
         let target_frame = 8usize;
 
@@ -817,10 +811,10 @@ mod reseed {
         assert_eq!(via_fast_path.v, via_reseed.v);
     }
 
-    /// Temporal nlmeans HQ at `radius` with window-local noise estimation and an automatic `sigma`.
-    fn nlmeans_hq_windowed_plane_options(radius: u32) -> PlaneOptions {
+    /// Temporal nlmeans HQ at `radius` with `sigma` pinned to 3 in 8-bit units.
+    fn nlmeans_hq_pinned_plane_options(radius: u32) -> PlaneOptions {
         let hq = HqParams {
-            windowed_noise_estimation: true,
+            sigma_override: Some(3.0 / 255.0),
             ..HqParams::default()
         };
         let hq_options = NlmeansHqOptions {
@@ -834,12 +828,11 @@ mod reseed {
         }
     }
 
-    /// Pins a VapourSynth plugin bug where HQ with an automatic `sigma` returned different pixels for
-    /// the same frame depending on request order.
+    /// HQ must return the same pixels for a frame whether it is reseeded or streamed.
     #[test]
-    fn nlmeans_hq_windowed_reseed_matches_the_streaming_output_mid_clip() {
+    fn nlmeans_hq_pinned_reseed_matches_the_streaming_output_mid_clip() {
         let frame_layout = layout();
-        let options = nlmeans_hq_windowed_plane_options(2);
+        let options = nlmeans_hq_pinned_plane_options(2);
         let frames = ramp_clip(&frame_layout, 16);
         let streamed = stream_all(&options, &frames);
 
@@ -855,9 +848,9 @@ mod reseed {
     }
 
     #[test]
-    fn nlmeans_hq_windowed_reseed_matches_the_streaming_output_at_both_clip_edges() {
+    fn nlmeans_hq_pinned_reseed_matches_the_streaming_output_at_both_clip_edges() {
         let frame_layout = layout();
-        let options = nlmeans_hq_windowed_plane_options(2);
+        let options = nlmeans_hq_pinned_plane_options(2);
         let frames = ramp_clip(&frame_layout, 16);
         let streamed = stream_all(&options, &frames);
         let last = frames.len() - 1;
@@ -884,16 +877,15 @@ mod reseed {
         );
     }
 
-    /// Drives one denoiser through the VapourSynth plugin harness's shuffled order with its hybrid
-    /// fast-path and `reseed` policy, comparing every frame with a true stream.
+    /// Drives one denoiser through a shuffled order with a mix of `push` and `reseed`, comparing every
+    /// frame with a true stream.
     ///
-    /// A single reseed, or a reseed then one push, passes under window-local estimation without
-    /// exercising this. It takes a longer, repeatedly reseeded run to expose state that window-local
-    /// estimation fails to clear.
+    /// A single reseed, or a reseed then one push, passes without exercising this. It takes a longer,
+    /// repeatedly reseeded run to expose state that a reseed fails to clear.
     #[test]
-    fn nlmeans_hq_windowed_repeated_out_of_order_access_matches_streaming() {
+    fn nlmeans_hq_pinned_repeated_out_of_order_access_matches_streaming() {
         let frame_layout = layout();
-        let options = nlmeans_hq_windowed_plane_options(2);
+        let options = nlmeans_hq_pinned_plane_options(2);
         let frames = ramp_clip(&frame_layout, 14);
         let streamed = stream_all(&options, &frames);
         let last = frames.len() - 1;
@@ -945,9 +937,9 @@ mod reseed {
     }
 
     #[test]
-    fn nlmeans_hq_windowed_fast_path_agrees_with_reseed_at_the_next_frame() {
+    fn nlmeans_hq_pinned_fast_path_agrees_with_reseed_at_the_next_frame() {
         let frame_layout = layout();
-        let options = nlmeans_hq_windowed_plane_options(2);
+        let options = nlmeans_hq_pinned_plane_options(2);
         let frames = ramp_clip(&frame_layout, 16);
         let target_frame = 8usize;
 
@@ -967,7 +959,7 @@ mod reseed {
         assert_eq!(via_fast_path.v, via_reseed.v);
     }
 
-    /// Renders `order` with the VapourSynth plugin harness's hybrid `render` policy.
+    /// Renders `order` with a mix of `push` and `reseed`.
     ///
     /// A frame that directly follows the previous request takes the fast `push`/`recv` path, and any
     /// other frame, or one where `recv` yields nothing, goes through `reseed`.
@@ -1002,15 +994,12 @@ mod reseed {
         outputs
     }
 
-    /// Mirrors the plugin's `a_sequential_run_after_a_seek_stays_correct_nlmeans`.
-    ///
-    /// After a reseed at frame 11 of a 14-frame clip, the two fast-path frames that follow are
-    /// compared with the same policy run from frame 0. That is the reference the VapourSynth harness
-    /// uses, rather than the true continuous stream `stream_all` produces.
+    /// After a reseed at frame 11 of a 14-frame clip, the two pushed frames that follow are compared
+    /// with the same policy run from frame 0.
     #[test]
-    fn nlmeans_hq_windowed_sequential_run_after_a_seek_stays_correct() {
+    fn nlmeans_hq_pinned_sequential_run_after_a_seek_stays_correct() {
         let frame_layout = layout();
-        let options = nlmeans_hq_windowed_plane_options(2);
+        let options = nlmeans_hq_pinned_plane_options(2);
         let frames = ramp_clip(&frame_layout, 14);
 
         let mut linear = PlanarDenoiser::create(&options, frame_layout).unwrap();
@@ -1031,16 +1020,16 @@ mod reseed {
         }
     }
 
-    /// The same check at the VapourSynth harness's clip size, 160x120.
+    /// The same check at 160x120.
     #[test]
-    fn nlmeans_hq_windowed_sequential_run_after_a_seek_stays_correct_at_harness_size() {
+    fn nlmeans_hq_pinned_sequential_run_after_a_seek_stays_correct_at_harness_size() {
         let harness_layout = FrameLayout {
             width: 160,
             height: 120,
             subsampling: Subsampling::Yuv420,
             depth: Depth::Eight,
         };
-        let options = nlmeans_hq_windowed_plane_options(2);
+        let options = nlmeans_hq_pinned_plane_options(2);
         let frames = ramp_clip(&harness_layout, 14);
 
         let mut linear = PlanarDenoiser::create(&options, harness_layout).unwrap();
@@ -1061,19 +1050,15 @@ mod reseed {
         }
     }
 
-    /// Drives one denoiser through a shuffled order with the VapourSynth plugin's hybrid fast-path and
-    /// `reseed` policy, comparing every frame with a true stream.
+    /// Drives one denoiser through a shuffled order with a mix of `push` and `reseed`, comparing every
+    /// frame with a true stream.
     ///
-    /// It reproduces the plugin's `random_access_matches_sequential_access_nl4d` at the core level.
-    /// It pins a defect where, under window-local estimation, the temporal-only noise estimator kept
-    /// its last trustworthy reading on folds without one, unlike every other chain. A reseed starts
-    /// from `reset_stream_state`, so its short run could find no reading while a true stream still
-    /// coasted on one from many frames back. Targets whose window covers either clip end reseed
-    /// through `reseed_window` with a shifted window.
+    /// Targets whose window covers either clip end reseed through `reseed_window` with a shifted
+    /// window.
     #[test]
-    fn nl4d_windowed_repeated_out_of_order_access_matches_streaming() {
+    fn nl4d_pinned_repeated_out_of_order_access_matches_streaming() {
         let frame_layout = layout();
-        let options = nl4d_windowed_plane_options(2);
+        let options = nl4d_pinned_plane_options(2);
         let frames = ramp_clip(&frame_layout, 14);
         let streamed = stream_all(&options, &frames);
         let last = frames.len() - 1;

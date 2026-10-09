@@ -430,9 +430,6 @@ pub fn plane_options_from(
                             .sigma_scale
                             .map(|value| value as f32)
                             .unwrap_or_else(|| HqParams::default().sigma_scale),
-                        // A VapourSynth filter has to return the same pixels for a frame in any
-                        // request order, which history-dependent estimation breaks under random access.
-                        windowed_noise_estimation: true,
                         ..HqParams::default()
                     };
 
@@ -444,10 +441,6 @@ pub fn plane_options_from(
         AlgorithmKind::Nl4d => {
             let psy = psy_options(raw)?;
             let options = Nl4dOptions {
-                // A VapourSynth filter has to return the same pixels for a frame in any request
-                // order. Window-local estimation reads sigma from only the current window, so the
-                // fast path and a reseed after random access agree by construction.
-                windowed_noise_estimation: true,
                 sigma: raw.sigma.map(|value| value as f32),
                 sigma_scale: raw
                     .sigma_scale

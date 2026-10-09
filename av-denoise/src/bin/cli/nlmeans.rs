@@ -224,16 +224,6 @@ pub struct NlmeansArgs {
     #[arg(long)]
     pub motion_compensation: bool,
 
-    /// Estimates noise from a local window instead of a temporal EMA
-    /// over stream history.
-    ///
-    /// An experimental switch for comparing the two estimators on real
-    /// footage. It is not a stable interface. Off by default, which
-    /// keeps the temporal EMA every calibrated preset assumes. Only
-    /// applies to `--variant hq`, since `fast` never measures noise.
-    #[arg(long, hide = true)]
-    pub windowed_noise_estimation: bool,
-
     #[command(flatten)]
     pub motion: MotionArgs,
 }
@@ -274,13 +264,6 @@ impl NlmeansArgs {
 
         match resolved.variant {
             Variant::Fast => {
-                if self.windowed_noise_estimation {
-                    anyhow::bail!(
-                        "--windowed-noise-estimation has no effect on --variant fast, which \
-                         never measures noise; select --variant hq instead"
-                    );
-                }
-
                 if self.hq_sigma.is_some()
                     || self.hq_no_auto_strength
                     || self.hq_no_noise_floor
@@ -313,9 +296,6 @@ impl NlmeansArgs {
                     temporal_confidence: !self.hq_no_temporal_confidence,
                     thsad_scale: self.hq_thsad_scale.unwrap_or(1.0),
                     sigma_scale: self.hq_sigma_scale.unwrap_or(1.0),
-                    // Off unless the hidden flag asks, because every calibrated preset assumes
-                    // the temporal EMA. Window-local estimation gives random-access determinism.
-                    windowed_noise_estimation: self.windowed_noise_estimation,
                 };
                 let options = NlmeansHqOptions { nlm, hq };
 

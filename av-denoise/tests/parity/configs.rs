@@ -57,11 +57,6 @@ pub fn all() -> Vec<ParityConfig> {
         ..Nl4dOptions::default()
     };
     let nl4d_grain = Algorithm::Nl4d(grain_options);
-    let windowed_options = Nl4dOptions {
-        windowed_noise_estimation: true,
-        ..Nl4dOptions::default()
-    };
-    let nl4d_windowed = Algorithm::Nl4d(windowed_options);
     let yuv420_8 = layout(Subsampling::Yuv420, Depth::Eight);
     let yuv420_10 = layout(Subsampling::Yuv420, Depth::Ten);
     let yuv444_8 = layout(Subsampling::Yuv444, Depth::Eight);
@@ -165,15 +160,6 @@ pub fn all() -> Vec<ParityConfig> {
         12,
         false,
     );
-    let nl4d_reseed_8 = config(
-        "nl4d_reseed_8",
-        ChannelIntent::LumaChroma,
-        temporal,
-        nl4d_windowed,
-        yuv420_8,
-        12,
-        true,
-    );
     let nlm_hq_reseed_8 = config(
         "nlm_hq_reseed_8",
         ChannelIntent::LumaChroma,
@@ -196,7 +182,6 @@ pub fn all() -> Vec<ParityConfig> {
         nl4d_yuv_8,
         nl4d_short_8,
         nl4d_grain_8,
-        nl4d_reseed_8,
         nlm_hq_reseed_8,
     ]
 }

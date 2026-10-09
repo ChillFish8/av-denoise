@@ -17,16 +17,15 @@ pub(in crate::nlmeans) struct NoiseEstimator {
 impl NoiseEstimator {
     /// Folds per-channel sigmas into the running estimate and returns the smoothed result.
     ///
-    /// The first call, and every call with `windowed` set, takes the sample outright so a window's
-    /// reading never blends with frames outside it. Every element is floored at [SIGMA_FLOOR].
-    pub(in crate::nlmeans) fn update(&mut self, sigmas: &[f32], windowed: bool) -> &[f32] {
+    /// The first call takes the sample outright. Every element is floored at [SIGMA_FLOOR].
+    pub(in crate::nlmeans) fn update(&mut self, sigmas: &[f32]) -> &[f32] {
         match &mut self.ema {
-            Some(ema) if !windowed => {
+            Some(ema) => {
                 for (smoothed, &sample) in ema.iter_mut().zip(sigmas.iter()) {
                     *smoothed = (EMA_ALPHA * sample + (1.0 - EMA_ALPHA) * *smoothed).max(SIGMA_FLOOR);
                 }
             },
-            _ => {
+            None => {
                 let floored: Vec<f32> = sigmas.iter().map(|&sigma| sigma.max(SIGMA_FLOOR)).collect();
                 self.ema = Some(floored);
             },

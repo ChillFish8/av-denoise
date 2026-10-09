@@ -1,5 +1,4 @@
-use av_denoise::Planes;
-use av_denoise_vs::frames::{TailCache, pack_plane, shifted_window_range, unpack_plane_into, window_indices};
+use av_denoise_vs::frames::{pack_plane, shifted_window_range, unpack_plane_into, window_indices};
 
 /// A strided buffer whose padding bytes are all 0xAA, so a bug that reads padding is visible rather
 /// than silently plausible.
@@ -125,29 +124,4 @@ fn shifted_windows_are_full_mid_clip() {
 #[test]
 fn a_short_clip_shifted_window_is_the_whole_clip() {
     assert_eq!(shifted_window_range(1, 4, 4, 2), 0..=2);
-}
-
-fn planes_marked(mark: u8) -> Planes {
-    Planes {
-        y: vec![mark],
-        u: vec![mark],
-        v: vec![mark],
-    }
-}
-
-#[test]
-fn the_tail_cache_serves_frames_in_order_once() {
-    let marked_7 = planes_marked(7);
-    let marked_8 = planes_marked(8);
-    let marked_9 = planes_marked(9);
-    let frames = vec![marked_7, marked_8, marked_9];
-    let mut cache = TailCache::new(7, frames);
-
-    let frame_8 = cache.take(8).map(|planes| planes.y);
-    assert_eq!(frame_8, Some(vec![8]));
-    assert!(cache.take(8).is_none());
-    assert!(cache.take(6).is_none());
-
-    let frame_9 = cache.take(9).map(|planes| planes.y);
-    assert_eq!(frame_9, Some(vec![9]));
 }

@@ -27,8 +27,8 @@ pub struct Nl4dArgs {
     /// Larger values find more matches for a patch but use more memory
     /// and add latency. Between `1` and `8`.
     ///
-    /// When `--input` names a file this is reset at every scene change,
-    /// so raising it never causes blending across cuts.
+    /// This is reset at every scene change, so raising it never causes
+    /// blending across cuts.
     ///
     /// Defaults to whatever `--preset` selects.
     #[arg(long)]
@@ -212,15 +212,6 @@ pub struct Nl4dArgs {
     #[arg(long)]
     pub psy_line_ring: Option<u32>,
 
-    /// Estimates noise from a local window instead of a temporal EMA
-    /// over stream history.
-    ///
-    /// An experimental switch for comparing the two estimators on real
-    /// footage. It is not a stable interface. Off by default, which
-    /// keeps the temporal EMA every calibrated preset assumes.
-    #[arg(long, hide = true)]
-    pub windowed_noise_estimation: bool,
-
     /// Writes an AV1 film grain table for the grain this run removes. Unstable.
     ///
     /// The flag and its output may change between releases. The table describes the source's
@@ -342,9 +333,6 @@ impl Nl4dArgs {
             c_min: self.c_min.unwrap_or(defaults.c_min),
             kaiser_beta: self.kaiser_beta.unwrap_or(defaults.kaiser_beta),
             field_lambda: self.field_lambda.unwrap_or(defaults.field_lambda),
-            // Off unless the hidden flag asks, because every calibrated preset assumes the
-            // temporal EMA. Window-local estimation gives random-access determinism.
-            windowed_noise_estimation: self.windowed_noise_estimation,
             noise_map: defaults.noise_map && !self.no_noise_map,
             psy,
             pooled_threshold: defaults.pooled_threshold && !self.no_pooled_threshold,

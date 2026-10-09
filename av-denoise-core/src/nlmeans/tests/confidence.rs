@@ -412,7 +412,6 @@ fn confidence_buf_filled_without_motion_compensation() {
             temporal_confidence: true,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
-            windowed_noise_estimation: false,
         }),
     };
 
@@ -480,7 +479,6 @@ fn confidence_buf_filled_with_motion_compensation() {
             temporal_confidence: true,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
-            windowed_noise_estimation: false,
         }),
     };
 

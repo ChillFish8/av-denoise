@@ -28,11 +28,13 @@ variant and everything above it selects NLMeans-HQ. In Python you pick the algor
 `NlmHQ(clip, preset="veryfast")` is a spatial-only NLMeans-HQ run, and `Nlm(clip, preset="slow")` is
 the fast variant with a 9-frame window, neither of which the CLI can express through `--preset`.
 
-**There is no scene detection.** The plugin estimates the noise level fresh for each frame from that
-frame's own temporal window rather than smoothing it over a scene, so a frame denoises to the same
-pixels no matter what order VapourSynth asks for frames in. Tuning still works the same way, but if
-you have wildly different-looking scenes in one clip, trimming and denoising them separately gives
-each one its own dials.
+**There is no scene detection.** Like the CLI, the plugin smooths the noise estimate over the
+stream's history. Unlike the CLI, it does not reset the estimate at a
+scene cut. A render from the start is consistent. Frames after a seek, or after a burst of requests
+wider than twice VapourSynth's thread count, can differ slightly for a while. In tests the drift
+lasted 20 or more frames after a seek. Tuning still works the same way, but if you have wildly
+different-looking scenes in one clip, trimming and denoising them separately gives each one its own
+dials.
 
 Every numeric parameter is optional. An unset one falls back to what `preset` resolves for it, and
 anything you set explicitly wins over the preset.
@@ -216,9 +218,9 @@ fixes the cause rather than the symptom.
   take `chroma_strength` above the default without touching luma.
 - **Fast motion looks smeary.** Set `motion_compensation=True` first. If a scene still trails,
   drop one preset (a shallower window has less material to mis-blend).
-- **Mixed content in one clip.** With no scene detection the estimate is per frame, so a clip that
-  swings between very clean and very grainy material is better served by trimming it and giving
-  each part its own call.
+- **Mixed content in one clip.** With no scene detection the estimate carries across cuts and
+  adapts slowly, so a clip that swings between very clean and very grainy material is better
+  served by trimming it and giving each part its own call.
 
 ### What not to touch in NLMeans-HQ
 
