@@ -15,35 +15,51 @@ you should try them from the highest priority, to the lowest priority.
 
 ## NL4D
 
-A cousin of both NLMeans-HQ and V-BM3D, NL4D inherits the noise measurement and motion tracking from the first
-and the collaborative filtering from the second.
+A cousin of both NLMeans-HQ and V-BM3D (or more precisely, V-BM4D), NL4D inherits the noise measurement and motion
+tracking from the first and the collaborative filtering from the second.
 
 <details>
 <summary><b>How it works</b></summary>
 
 Like every algorithm here, it starts by searching for patches of pixels that look like the patch it is currently
-working on, pulling candidates from both elsewhere in the current frame and from future and past frames.
-This is done while following the motion so that a moving object is compared against itself rather than against
-whatever happens to be at the same coordinates a few frames later selecting the eight "best" candidates
-forming a _group_.
+working on, beginning in the current frame. The closest couple of matches, the patch itself included, become
+_anchors_.
+
+Each anchor is then followed through the past and future frames in the window. This is done while following the
+motion so that a moving object is compared against itself rather than against whatever happens to be at the same
+coordinates a few frames later. Out of every frame it was followed into, the three closest matches are kept,
+giving a short _track_ of the same patch through time. Two of these tracks, four patches each, form a _group_.
 
 This group is where it diverges from NLMeans. NLMeans averages the group together, 
 weighted by how similar each member of the group is. Crude, but fast, and effective enough that it is still used often.
 However, it comes at a cost of removing both the noise and low-contrast detail alike because it has no way of
 knowing what is truly noise, or just fine detail. 
 
-NL4D instead transforms the whole group into frequency coefficients, sorted so that content every member agrees 
-on goes into one bucket and content that only one or two members carry lands in another. Noise is what 
-the members do not agree on. Real detail, even faint and very fine detail, is what they do agree on.
-The group is built as short tracks of the same patch followed through time, so grain, which changes every frame,
-separates from detail, which does not.
+NL4D instead transforms the whole group into frequency coefficients along four axes, which is where the name
+comes from. The first two are the patch itself, its horizontal and vertical detail. The third runs along each track
+through time, sorting what holds still from what changes from one frame to the next. The fourth runs across the two
+tracks, sorting what two similar parts of the picture have in common from what only one of them carries.
+
+Noise is what the members do not agree on. Grain changes every frame, so it lands on the "changes" side of the time
+axis, while real detail, even faint and very fine detail, holds still and lands on the "agrees" side.
 Each coefficient is then kept or discarded depending on whether it stands far enough above the noise level _measured in 
-that frame_, and what survives is transformed back into pixels.
+that frame_, adjusted for how bright that part of the picture is, since grain is rarely equally strong in the
+shadows and the highlights. The overall brightness of the group is always kept, and what survives is transformed
+back into pixels.
+
+Every patch in the group, including the ones borrowed from past and future frames, is written back to where it
+came from. Each pixel ends up covered by many overlapping groups which are blended together, each one tapered
+towards its edges so the patch grid never shows up as blocking.
+
+When a track cannot be filled, because of a scene change, something moving into view, or motion it cannot trust,
+the group falls back to eight patches from the current frame alone, laid out the same way BM3D lays out its groups.
 
 The practical effect is two-fold. Against NLMeans, NL4D can remove noise that averaging can only smooth over, because
 it makes a decision about each piece of the signal separately rather than one blended compromise about
-the pixel as a whole. Against BM3D (and V-BM3D), which makes those same per-coefficient decisions, the gain is 
-that each decision sees the same patch tracked through time, where grain changes and detail holds still.
+the pixel as a whole. Against V-BM3D, which makes those same per-coefficient decisions, the gain is in how the
+group is laid out. V-BM3D piles every match from every frame into a single stack, so the same patch a frame later
+and a merely similar patch elsewhere count as the same kind of match. NL4D keeps time and similarity on separate
+axes, so it can tell grain, which changes through time, from detail, which holds still.
 
 </details>
 

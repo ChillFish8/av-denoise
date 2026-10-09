@@ -30,14 +30,6 @@ instead, since NL4D has nothing to group without neighbours.
 
 ### The NL4D dials
 
-| Symptom                               | First thing to try                | Second              |
-|---------------------------------------|-----------------------------------|---------------------|
-| Grain or noise still visible          | `--lambda-ht-scale` up a little   | one preset higher   |
-| Fine texture getting scrubbed         | `--lambda-ht-scale` down a little | `--sigma-scale 0.9` |
-| Result looks under-cleaned everywhere | `--sigma-scale 1.1`               | one preset higher   |
-| Smearing or ghosting on motion        | one preset lower                  | `--refine` up       |
-| Too slow                              | `--spatial-radius` down           | one preset lower    |
-
 **`--lambda-ht-scale` is the main dial.** The threshold it scales is how many standard deviations
 of estimated noise a transform coefficient has to clear to survive, so raising the scale removes
 more noise and takes more fine detail with it. Move in steps of **0.05 to 0.1** and judge by eye,
@@ -48,12 +40,6 @@ from different defaults and the scale keeps that separation.
 **`--lambda-ht` sets those thresholds outright.** The defaults are 4.158 for luma and 3.234 for chroma.
 `--luma-lambda-ht` and `--chroma-lambda-ht` pin one plane without touching the other, and `--lambda-ht-scale` still
 applies on top of whatever is pinned.
-
-**`--sigma-scale` is the other one**, and it does something different. The lambda dials decide how
-aggressive to be at a given noise level. `--sigma-scale` corrects the noise level itself. That
-estimate also feeds the motion confidence scoring, so when the whole result reads uniformly
-under- or over-cleaned, correcting the level fixes the cause rather than the symptom. When you
-are happy with the level and just want to adjust how much noise is removed vs detail, use `--lambda-ht-scale`.
 
 **`--spatial-radius` is the speed dial.** The centre-frame search covers `(2 * radius + 1)^2`
 positions, so it dominates the work. Dropping it from 9 to 6 roughly halves the candidates, which
@@ -111,6 +97,12 @@ sources, or an encode of the original file when av-denoise dropped frames that c
   the output.
 - **`--thsad-scale`, `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels`** tune
   the motion machinery's internals, changing any of these will likely invalidate all other defaults.
+- **`--sigma-scale`**, and it does something different. The lambda dials decide how
+  aggressive to be at a given noise level. `--sigma-scale` corrects the noise level itself. That
+  estimate also feeds the motion confidence scoring, so when the whole result reads uniformly
+  under- or over-cleaned, correcting the level fixes the cause rather than the symptom.
+  Be aware that the sigma estimator is generally very accurate, and you want to reduce the `--lambda-ht-scale`
+  rather than adjust the `--sigma-scale` due to the extent the sigma estimation impacts the algorithm.
 
 ## NLMeans
 

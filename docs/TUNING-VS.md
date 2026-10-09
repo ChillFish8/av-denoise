@@ -57,14 +57,6 @@ instead, since NL4D has nothing to group without neighbours.
 
 ### The NL4D dials
 
-| Symptom                               | First thing to try              | Second            |
-|---------------------------------------|---------------------------------|-------------------|
-| Grain or noise still visible          | `lambda_ht_scale` up a little   | one preset higher |
-| Fine texture getting scrubbed         | `lambda_ht_scale` down a little | `sigma_scale=0.9` |
-| Result looks under-cleaned everywhere | `sigma_scale=1.1`               | one preset higher |
-| Smearing or ghosting on motion        | one preset lower                | `refine` up       |
-| Too slow                              | `spatial_radius` down           | one preset lower  |
-
 **`lambda_ht_scale` is the main dial.** The threshold it scales is how many standard deviations
 of estimated noise a transform coefficient has to clear to survive, so raising the scale removes
 more noise and takes more fine detail with it. Move in steps of **0.05 to 0.1** and judge by eye,
@@ -83,13 +75,6 @@ plane without touching the other, and `lambda_ht_scale` still applies on top of 
 ```python
 clean = avd.Nl4d(clip, luma_lambda_ht=5.0, lambda_ht_scale=1.05)
 ```
-
-**`sigma_scale` is the other one**, and it does something different. The lambda dials decide how
-aggressive to be at a given noise level. `sigma_scale` corrects the noise level itself. That
-estimate also feeds the motion confidence scoring, so when the whole result reads uniformly
-under- or over-cleaned, correcting the level fixes the cause rather than the symptom. When you
-are happy with the level and just want to adjust how much noise is removed vs detail, use
-`lambda_ht_scale`.
 
 **`spatial_radius` is the speed dial.** The centre-frame search covers `(2 * radius + 1)^2`
 positions, so it dominates the work. Dropping it from 9 to 6 roughly halves the candidates, which
@@ -139,6 +124,12 @@ clean = avd.Nl4d(clip, enable_psy=True, psy_shadow_soften=0.8)
   actually want.
 - **`temporal_radius`** is what `preset` mostly exists to resolve. Setting it by hand is fine, but
   it is the same lever the preset ladder pulls, so reach for the ladder first.
+- **`sigma_scale`**, and it does something different. The lambda dials decide how
+  aggressive to be at a given noise level. `sigma_scale` corrects the noise level itself. That
+  estimate also feeds the motion confidence scoring, so when the whole result reads uniformly
+  under- or over-cleaned, correcting the level fixes the cause rather than the symptom. When you
+  are happy with the level and just want to adjust how much noise is removed vs detail, use
+  `lambda_ht_scale`.
 
 `strength`, `luma_strength`, `chroma_strength`, `search_radius`, `patch_radius`, `prefilter` and
 `motion_compensation` all belong to the NLMeans weighting pass, which NL4D does not have. Passing
