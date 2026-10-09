@@ -1,0 +1,15 @@
+[project]
+name = "scripts-vs-r81"
+version = "0.1.0"
+description = "The VapourSynth R81 arms of the end-to-end benchmark"
+requires-python = ">=3.13"
+
+# A project of its own rather than a group of `scripts`, because R81 refuses
+# to load API 3 plugins, which takes bm3dhip and bm3dcuda with it. The two
+# VapourSynth versions cannot share one environment, and a conflicting group
+# would swap them inside the same venv between arms, mid-measurement.
+dependencies = [
+    "vapoursynth>=81",
+    "vapoursynth-bestsource",
+    "vapoursynth-bm3dvk2",
+]

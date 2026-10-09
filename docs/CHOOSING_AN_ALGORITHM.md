@@ -53,10 +53,11 @@ that each decision sees the same patch tracked through time, where grain changes
 - Handles motion, occlusion, and scene changes without smearing.
 - Automatic per-frame noise measurement, so it needs no tuning to a source.
 - Faster than the V-BM3D & BM4D algorithms.
+- Can produce AV1 Film Grain Sythesis (FGS) tables to re-apply the grain removed in an encode.
 
 #### Cons
 
-- The slowest of the algorithms provided, although it is worth noting it ties when Nlmeans-HQ enables motion compensation.
+- The slowest of the algorithms provided, though not by much.
 - Requires a temporal window and as such cannot be used on single images.
 - Slightly GPU memory than the others.
 

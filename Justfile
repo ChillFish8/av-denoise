@@ -118,5 +118,8 @@ _build-benchmark-bin:
 # install, and `uv run` does not rebuild the cdylib after a Rust change, so they
 # would otherwise measure a stale build against a freshly built CLI. Cargo is
 # incremental, so this costs about a second when nothing has moved.
+#
+# setuptools-rust builds editable installs in debug, so the profile is forced to
+# release here, matching the CLI arms.
 _rebuild-benchmark-vs-plugin:
-    uv sync --directory scripts --group vs --reinstall-package vsavd
+    SETUPTOOLS_RUST_CARGO_PROFILE=release uv sync --directory scripts --group vs --reinstall-package vsavd

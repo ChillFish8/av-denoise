@@ -28,16 +28,18 @@ count against it.
 
 A variant may also carry an `env` table, whose entries are added to the
 environment its command runs in. The checked-in config pins no GPU. Each
-stack reads its card from a variable, and all three count in PCI order, so
+stack reads its card from a variable, and all four count in PCI order, so
 one index selects one card across the lot:
 
 ```
-AVD_DEVICE=discrete:1 BENCH_OCL_DEVICE=1 BENCH_HIP_DEVICE=1 just benchmark-e2e
+AVD_DEVICE=discrete:1 BENCH_OCL_DEVICE=1 BENCH_HIP_DEVICE=1 BENCH_VK_DEVICE=1 just benchmark-e2e
 ```
 
 `AVD_DEVICE` goes to av-denoise through Vulkan, `BENCH_OCL_DEVICE` is the
-device half of ffmpeg's `ocl:0.N`, and `BENCH_HIP_DEVICE` is V-BM3D's HIP
-index. A single variant can override any of them through `env`.
+device half of ffmpeg's `ocl:0.N`, `BENCH_HIP_DEVICE` is V-BM3D's HIP
+index, and `BENCH_VK_DEVICE` is bm3dvk2's index into VapourSynth's
+`core.vulkan_devices`. A single variant can override any of them through
+`env`.
 
 `AVD_DEVICE` reaches the CLI arms as an environment variable, which is
 what the binary reads. The plugin does not read it, so the plugin arms
@@ -58,7 +60,12 @@ up by hand.
   picking one of its profiles. It picks its own backend by rendering a
   probe frame through each GPU BM3D plugin in turn, so it runs on HIP on an
   AMD box and CUDA on an NVIDIA one. `--arg backend=` forces one.
+- `vs/bm3dvk2_denoise.vpy` runs the same V-BM3D settings through
+  [bm3dvk2](https://github.com/HolyWu/VapourSynth-bm3dvk2) on Vulkan. It
+  needs VapourSynth R81, which no longer loads the API 3 plugins bm3dhip
+  and bm3dcuda are built as, so it runs from the `vs-r81` project with its
+  own environment rather than the `vs` group.
 
 See `configs/benchmark_e2e.toml` for the config the recipe runs by
-default. It measures ten variants against a 1080p clip and nine against a
-4K one.
+default. It measures thirteen variants against a 1080p clip and twelve
+against a 4K one.
