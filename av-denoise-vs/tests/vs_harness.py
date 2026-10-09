@@ -9,6 +9,7 @@ is why these live outside `cargo nextest`.
 """
 
 import argparse
+import collections
 import os
 import pathlib
 import subprocess
@@ -210,6 +211,100 @@ def a_sequential_run_after_a_seek_stays_correct_nl4d():
     seeked.get_frame(11)
     for n in [12, 13]:
         _assert_frame_matches(seeked, n, linear, "nl4d")
+
+
+PARALLEL_THREADS = 8
+
+
+def _render_linear(node):
+    return {
+        (n, plane): frame_to_array(node.get_frame(n), plane)
+        for n in range(node.num_frames)
+        for plane in range(3)
+    }
+
+
+def _render_in_parallel_bursts(node, first_frame=0):
+    """
+    Renders frames from `first_frame` on through `get_frame_async`, one burst at a time.
+
+    Each burst is submitted highest frame first, so the filter is likely to see its requests out of order.
+    """
+    rendered = {}
+    for first in range(first_frame, node.num_frames, PARALLEL_THREADS):
+        indices = range(first, min(first + PARALLEL_THREADS, node.num_frames))
+        futures = {n: node.get_frame_async(n) for n in reversed(indices)}
+        for n, future in futures.items():
+            _store_frame(rendered, n, future.result())
+    return rendered
+
+
+def _render_with_sliding_window(node):
+    """
+    Renders every frame keeping `PARALLEL_THREADS` requests in flight, like vspipe does.
+
+    Frames are requested in ascending order and the window is topped up as the oldest one completes.
+    """
+    rendered = {}
+    pending = collections.deque()
+    next_frame = 0
+    while next_frame < node.num_frames or pending:
+        while next_frame < node.num_frames and len(pending) < PARALLEL_THREADS:
+            pending.append((next_frame, node.get_frame_async(next_frame)))
+            next_frame += 1
+
+        n, future = pending.popleft()
+        _store_frame(rendered, n, future.result())
+    return rendered
+
+
+def _store_frame(rendered, n, frame):
+    for plane in range(frame.format.num_planes):
+        rendered[(n, plane)] = frame_to_array(frame, plane)
+
+
+def _assert_parallel_render_matches(make_filter, label, render):
+    """
+    A multi-threaded render must match a sequential one frame for frame.
+
+    The parallel filter is built after the thread count changes, so it is created under that count.
+    """
+    src = synthetic_clip(length=40)
+    linear = _render_linear(make_filter(src))
+
+    previous_threads = core.num_threads
+    core.num_threads = PARALLEL_THREADS
+    try:
+        rendered = render(make_filter(src))
+    finally:
+        core.num_threads = previous_threads
+
+    for (n, plane), got in rendered.items():
+        want = linear[(n, plane)]
+        assert np.array_equal(got, want), f"{label}: frame {n} plane {plane} differs"
+
+
+@test
+def parallel_bursts_match_sequential_access_nl4d():
+    _assert_parallel_render_matches(core.avd.NL4D, "nl4d", _render_in_parallel_bursts)
+
+
+@test
+def parallel_bursts_match_sequential_access_nlmeans():
+    _assert_parallel_render_matches(core.avd.NLMeans, "nlmeans", _render_in_parallel_bursts)
+
+
+@test
+def parallel_bursts_after_a_seek_match_sequential_access_nl4d():
+    def render_after_seek(node):
+        return _render_in_parallel_bursts(node, first_frame=17)
+
+    _assert_parallel_render_matches(core.avd.NL4D, "nl4d seek", render_after_seek)
+
+
+@test
+def sliding_window_requests_match_sequential_access_nl4d():
+    _assert_parallel_render_matches(core.avd.NL4D, "nl4d window", _render_with_sliding_window)
 
 
 FORMATS = [
