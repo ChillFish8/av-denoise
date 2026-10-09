@@ -106,7 +106,7 @@ Just trust the estimator, I promise it will do a better job.
 
 ### What sigma σ impacts
 
-For context here is a brief summary of all the ways sigma impacts the two algorithms:
+For context here is a brief summary of just _some_ of the ways sigma impacts the two algorithms:
 
 - Strength is a multiplier on the observed noise level, the strength value has no meaning unless it is paired with
   an accurate sigma value.

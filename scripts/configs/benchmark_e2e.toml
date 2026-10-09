@@ -19,24 +19,27 @@
 # through `cargo run`, so compilation is never part of a measurement. The
 # `just benchmark-e2e` recipe builds that binary first.
 #
-# No variant pins a GPU. Each of the three stacks takes its card from an
+# No variant pins a GPU. Each of the four stacks takes its card from an
 # environment variable, and every one of them counts the cards in PCI order,
-# so the same index means the same card in all three:
+# so the same index means the same card in all four:
 #
 #   AVD_DEVICE=discrete:1     av-denoise, both the CLI and the plugin arms
 #   BENCH_OCL_DEVICE=1        ffmpeg, the device half of `ocl:0.N`
 #   BENCH_HIP_DEVICE=1        V-BM3D, through HIP
+#   BENCH_VK_DEVICE=1         bm3dvk2, VapourSynth's Vulkan device index
 #
 # The CLI reads `AVD_DEVICE` itself. The plugin does not, so the plugin arms
 # read it in the shell and pass it through as `--arg device=`.
 #
 # Running the whole thing on the second card is therefore:
 #
-#   AVD_DEVICE=discrete:1 BENCH_OCL_DEVICE=1 BENCH_HIP_DEVICE=1 just benchmark-e2e
+#   AVD_DEVICE=discrete:1 BENCH_OCL_DEVICE=1 BENCH_HIP_DEVICE=1 BENCH_VK_DEVICE=1 just benchmark-e2e
 #
-# All three default to the first card. `av-denoise list-devices`, `clinfo -l`
-# and `rocm-smi --showbus` list what a machine offers. A single variant can
-# override any of them through its own `env` table.
+# All four default to the first card. `av-denoise list-devices`, `clinfo -l`,
+# `rocm-smi --showbus` and VapourSynth's `core.vulkan_devices` list what a
+# machine offers. VapourSynth's Vulkan list also carries integrated GPUs,
+# after the discrete ones on a typical machine. A single variant can override
+# any of them through its own `env` table.
 #
 # The variants:
 #
@@ -51,11 +54,17 @@
 #   avd_vs_nlm_base            each front end costs is readable
 #   vbm3d_normal/fast/lc       V-BM3D through VapourSynth on its three
 #                              cheapest profiles
+#   vbm3dvk2_normal/fast/lc    the same V-BM3D settings through bm3dvk2 on
+#                              Vulkan instead of HIP or CUDA
 #
 # `avd_vs_nlmhq_base` is the plugin's counterpart to `avd_nlmeans_base`, since
 # the CLI's `base` preset resolves `nlmeans` to the `hq` variant.
 # `avd_vs_nlm_base` runs the `fast` variant that no CLI arm here covers at
 # `base`.
+#
+# The bm3dvk2 arms run from `scripts/vs-r81`, a uv project of their own.
+# bm3dvk2 needs VapourSynth R81, which no longer loads the API 3 plugins
+# that bm3dhip and bm3dcuda are, so the two cannot share an environment.
 #
 # The plugin arms are driven by vspipe on its own defaults, with no `--requests`
 # flag, so what they measure is what a VapourSynth user gets. Frames reaching
@@ -71,7 +80,7 @@ warmup = true
 
 [[groups]]
 name = "1080p"
-input = "data/benchmark-samples/1080p-8bit.mkv"
+input = "data/benchmark-samples/bench-sample-1080p.mkv"
 
   [[groups.variants]]
   name = "ffmpeg_nlmeans_default"
@@ -147,13 +156,34 @@ input = "data/benchmark-samples/1080p-8bit.mkv"
     --arg src={{input}} --arg device=${BENCH_HIP_DEVICE:-0} --arg profile=lc vs/vbm3d_denoise.vpy - -c y4m > /dev/null
   """
 
+  [[groups.variants]]
+  name = "vbm3dvk2_normal"
+  command = """
+  uv run --directory scripts/vs-r81 vspipe \
+    --arg src={{input}} --arg device=${BENCH_VK_DEVICE:-0} --arg profile=normal ../vs/bm3dvk2_denoise.vpy - -c y4m > /dev/null
+  """
+
+  [[groups.variants]]
+  name = "vbm3dvk2_fast"
+  command = """
+  uv run --directory scripts/vs-r81 vspipe \
+    --arg src={{input}} --arg device=${BENCH_VK_DEVICE:-0} --arg profile=fast ../vs/bm3dvk2_denoise.vpy - -c y4m > /dev/null
+  """
+
+  [[groups.variants]]
+  name = "vbm3dvk2_lc"
+  command = """
+  uv run --directory scripts/vs-r81 vspipe \
+    --arg src={{input}} --arg device=${BENCH_VK_DEVICE:-0} --arg profile=lc ../vs/bm3dvk2_denoise.vpy - -c y4m > /dev/null
+  """
+
 # The 4K clip is 10-bit, and ffmpeg's OpenCL NLMeans rejects every 10-bit
 # pixel format the hwupload path offers. Measuring it here would mean
 # converting to 8-bit for that arm alone, which is less work per pixel than
 # the other arms do, so the ffmpeg comparison lives in the 1080p group only.
 [[groups]]
 name = "4k"
-input = "data/benchmark-samples/4k-10bit.mkv"
+input = "data/benchmark-samples/bench-sample-4k-10-bit.mkv"
 
   [[groups.variants]]
   name = "avd_nlmeans_ffmpeg_match"
@@ -218,4 +248,25 @@ input = "data/benchmark-samples/4k-10bit.mkv"
   command = """
   uv run --directory scripts --group vs vspipe \
     --arg src={{input}} --arg device=${BENCH_HIP_DEVICE:-0} --arg profile=lc vs/vbm3d_denoise.vpy - -c y4m > /dev/null
+  """
+
+  [[groups.variants]]
+  name = "vbm3dvk2_normal"
+  command = """
+  uv run --directory scripts/vs-r81 vspipe \
+    --arg src={{input}} --arg device=${BENCH_VK_DEVICE:-0} --arg profile=normal ../vs/bm3dvk2_denoise.vpy - -c y4m > /dev/null
+  """
+
+  [[groups.variants]]
+  name = "vbm3dvk2_fast"
+  command = """
+  uv run --directory scripts/vs-r81 vspipe \
+    --arg src={{input}} --arg device=${BENCH_VK_DEVICE:-0} --arg profile=fast ../vs/bm3dvk2_denoise.vpy - -c y4m > /dev/null
+  """
+
+  [[groups.variants]]
+  name = "vbm3dvk2_lc"
+  command = """
+  uv run --directory scripts/vs-r81 vspipe \
+    --arg src={{input}} --arg device=${BENCH_VK_DEVICE:-0} --arg profile=lc ../vs/bm3dvk2_denoise.vpy - -c y4m > /dev/null
   """
