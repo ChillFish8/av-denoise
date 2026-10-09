@@ -106,6 +106,26 @@ def synthetic_clip_content_is_independent_of_request_order():
             assert np.array_equal(a, b), f"frame {n} plane {plane} differs by request order"
 
 
+def _max_abs_diff(a, b):
+    return int(np.abs(a.astype(np.int32) - b.astype(np.int32)).max())
+
+
+# Pinned once, on an 8-bit av-denoise --sigma scale, and reused for both
+# front ends below so the same number never has to be retyped in two
+# unit systems. `--sigma` on the CLI is documented in 8-bit pixel
+# units. `avd.NL4D`'s `sigma=` takes the normalised units between 0 and 1
+# that `Nl4dOptions.sigma` itself uses, so the plugin side divides by 255.
+PARITY_SIGMA_8BIT = 6.0
+PARITY_SIGMA_NORMALIZED = PARITY_SIGMA_8BIT / 255.0
+
+
+# Bounds how far a frame rendered after a seek may sit from a sequential render. The
+# noise level is an EMA over stream history, and a seek changes the history it has seen.
+EMA_DRIFT_TOLERANCE = 16
+
+PINNED_SIGMA = {"sigma": PARITY_SIGMA_NORMALIZED}
+
+
 def _assert_frame_matches(node, n, linear, label):
     frame = node.get_frame(n)
     for plane in range(frame.format.num_planes):
@@ -114,106 +134,15 @@ def _assert_frame_matches(node, n, linear, label):
         assert np.array_equal(got, want), f"{label}: frame {n} plane {plane} differs"
 
 
-@test
-def random_access_matches_sequential_access_nlmeans():
-    """The seek fallback must produce the same frames as a linear render.
-
-    Two separate filter instances so the shuffled run cannot benefit
-    from the sequential run's pipeline state, which would make this
-    test compare VapourSynth's frame cache instead of the plugin.
-    """
-    src = synthetic_clip(length=14)
-
-    in_order = core.avd.NLMeans(src)
-    start = time.perf_counter()
-    linear = {
-        (n, plane): frame_to_array(in_order.get_frame(n), plane)
-        for n in range(src.num_frames)
-        for plane in range(3)
-    }
-    linear_seconds = time.perf_counter() - start
-
-    shuffled = core.avd.NLMeans(src)
-    order = [9, 0, 13, 4, 5, 6, 1, 12, 2, 11, 3, 10, 7, 8]
-    start = time.perf_counter()
-    for n in order:
-        _assert_frame_matches(shuffled, n, linear, "nlmeans")
-    shuffled_seconds = time.perf_counter() - start
-    print(
-        f"    nlmeans: linear {linear_seconds:.3f}s, shuffled {shuffled_seconds:.3f}s, "
-        f"ratio {shuffled_seconds / linear_seconds:.2f}x",
-        file=sys.stderr,
-    )
-
-
-@test
-def random_access_matches_sequential_access_nl4d():
-    """Same guarantee as the NLMeans version, for the wider NL4D window.
-
-    NL4D needs 2r frames of context on each side instead of NLMeans'
-    r, so its reseed path is exercised harder by the same shuffle.
-    """
-    src = synthetic_clip(length=14)
-
-    in_order = core.avd.NL4D(src)
-    start = time.perf_counter()
-    linear = {
-        (n, plane): frame_to_array(in_order.get_frame(n), plane)
-        for n in range(src.num_frames)
-        for plane in range(3)
-    }
-    linear_seconds = time.perf_counter() - start
-
-    shuffled = core.avd.NL4D(src)
-    order = [9, 0, 13, 4, 5, 6, 1, 12, 2, 11, 3, 10, 7, 8]
-    start = time.perf_counter()
-    for n in order:
-        _assert_frame_matches(shuffled, n, linear, "nl4d")
-    shuffled_seconds = time.perf_counter() - start
-    print(
-        f"    nl4d: linear {linear_seconds:.3f}s, shuffled {shuffled_seconds:.3f}s, "
-        f"ratio {shuffled_seconds / linear_seconds:.2f}x",
-        file=sys.stderr,
-    )
-
-
-@test
-def a_sequential_run_after_a_seek_stays_correct_nlmeans():
-    """Exercises the fast path resuming right after a reseed."""
-    src = synthetic_clip(length=14)
-
-    linear_node = core.avd.NLMeans(src)
-    linear = {
-        (n, plane): frame_to_array(linear_node.get_frame(n), plane)
-        for n in range(src.num_frames)
-        for plane in range(3)
-    }
-
-    seeked = core.avd.NLMeans(src)
-    seeked.get_frame(11)
-    for n in [12, 13]:
-        _assert_frame_matches(seeked, n, linear, "nlmeans")
-
-
-@test
-def a_sequential_run_after_a_seek_stays_correct_nl4d():
-    """Exercises the fast path resuming right after a reseed, on NL4D."""
-    src = synthetic_clip(length=14)
-
-    linear_node = core.avd.NL4D(src)
-    linear = {
-        (n, plane): frame_to_array(linear_node.get_frame(n), plane)
-        for n in range(src.num_frames)
-        for plane in range(3)
-    }
-
-    seeked = core.avd.NL4D(src)
-    seeked.get_frame(11)
-    for n in [12, 13]:
-        _assert_frame_matches(seeked, n, linear, "nl4d")
-
-
-PARALLEL_THREADS = 8
+def _assert_frame_close(node, n, linear, label):
+    frame = node.get_frame(n)
+    for plane in range(frame.format.num_planes):
+        got = frame_to_array(frame, plane)
+        want = linear[(n, plane)]
+        diff = _max_abs_diff(got, want)
+        assert diff <= EMA_DRIFT_TOLERANCE, (
+            f"{label}: frame {n} plane {plane} drifts by {diff}, over {EMA_DRIFT_TOLERANCE}"
+        )
 
 
 def _render_linear(node):
@@ -222,6 +151,95 @@ def _render_linear(node):
         for n in range(node.num_frames)
         for plane in range(3)
     }
+
+
+SHUFFLED_ORDER = [9, 0, 13, 4, 5, 6, 1, 12, 2, 11, 3, 10, 7, 8]
+
+
+def _check_random_access(make_filter, label, assert_frame):
+    """
+    Two separate filter instances so the shuffled run cannot benefit
+    from the sequential run's pipeline state, which would make this
+    test compare VapourSynth's frame cache instead of the plugin.
+    """
+    src = synthetic_clip(length=14)
+
+    start = time.perf_counter()
+    linear = _render_linear(make_filter(src))
+    linear_seconds = time.perf_counter() - start
+
+    shuffled = make_filter(src)
+    start = time.perf_counter()
+    for n in SHUFFLED_ORDER:
+        assert_frame(shuffled, n, linear, label)
+    shuffled_seconds = time.perf_counter() - start
+    print(
+        f"    {label}: linear {linear_seconds:.3f}s, shuffled {shuffled_seconds:.3f}s, "
+        f"ratio {shuffled_seconds / linear_seconds:.2f}x",
+        file=sys.stderr,
+    )
+
+
+def _check_sequential_run_after_seek(make_filter, label, assert_frame):
+    """Exercises the fast path resuming right after a reseed."""
+    src = synthetic_clip(length=14)
+    linear = _render_linear(make_filter(src))
+
+    seeked = make_filter(src)
+    seeked.get_frame(11)
+    for n in [12, 13]:
+        assert_frame(seeked, n, linear, label)
+
+
+def _nlmeans_pinned(src):
+    return core.avd.NLMeans(src, **PINNED_SIGMA)
+
+
+def _nl4d_pinned(src):
+    return core.avd.NL4D(src, **PINNED_SIGMA)
+
+
+@test
+def random_access_stays_close_to_sequential_access_nlmeans():
+    _check_random_access(core.avd.NLMeans, "nlmeans", _assert_frame_close)
+
+
+@test
+def random_access_stays_close_to_sequential_access_nl4d():
+    _check_random_access(core.avd.NL4D, "nl4d", _assert_frame_close)
+
+
+@test
+def random_access_matches_sequential_access_with_pinned_sigma_nlmeans():
+    _check_random_access(_nlmeans_pinned, "nlmeans pinned", _assert_frame_matches)
+
+
+@test
+def random_access_matches_sequential_access_with_pinned_sigma_nl4d():
+    _check_random_access(_nl4d_pinned, "nl4d pinned", _assert_frame_matches)
+
+
+@test
+def a_sequential_run_after_a_seek_stays_close_nlmeans():
+    _check_sequential_run_after_seek(core.avd.NLMeans, "nlmeans", _assert_frame_close)
+
+
+@test
+def a_sequential_run_after_a_seek_stays_close_nl4d():
+    _check_sequential_run_after_seek(core.avd.NL4D, "nl4d", _assert_frame_close)
+
+
+@test
+def a_sequential_run_after_a_seek_matches_with_pinned_sigma_nlmeans():
+    _check_sequential_run_after_seek(_nlmeans_pinned, "nlmeans pinned", _assert_frame_matches)
+
+
+@test
+def a_sequential_run_after_a_seek_matches_with_pinned_sigma_nl4d():
+    _check_sequential_run_after_seek(_nl4d_pinned, "nl4d pinned", _assert_frame_matches)
+
+
+PARALLEL_THREADS = 8
 
 
 def _render_in_parallel_bursts(node, first_frame=0):
@@ -263,9 +281,9 @@ def _store_frame(rendered, n, frame):
         rendered[(n, plane)] = frame_to_array(frame, plane)
 
 
-def _assert_parallel_render_matches(make_filter, label, render):
+def _assert_parallel_render_matches(make_filter, label, render, max_drift=0):
     """
-    A multi-threaded render must match a sequential one frame for frame.
+    A multi-threaded render must match a sequential one frame for frame, within `max_drift`.
 
     The parallel filter is built after the thread count changes, so it is created under that count.
     """
@@ -279,9 +297,11 @@ def _assert_parallel_render_matches(make_filter, label, render):
     finally:
         core.num_threads = previous_threads
 
+    assert rendered, f"{label}: nothing was rendered"
     for (n, plane), got in rendered.items():
         want = linear[(n, plane)]
-        assert np.array_equal(got, want), f"{label}: frame {n} plane {plane} differs"
+        diff = _max_abs_diff(got, want)
+        assert diff <= max_drift, f"{label}: frame {n} plane {plane} differs by {diff}"
 
 
 @test
@@ -294,12 +314,39 @@ def parallel_bursts_match_sequential_access_nlmeans():
     _assert_parallel_render_matches(core.avd.NLMeans, "nlmeans", _render_in_parallel_bursts)
 
 
-@test
-def parallel_bursts_after_a_seek_match_sequential_access_nl4d():
-    def render_after_seek(node):
-        return _render_in_parallel_bursts(node, first_frame=17)
+def _render_bursts_after_seek(node):
+    return _render_in_parallel_bursts(node, first_frame=17)
 
-    _assert_parallel_render_matches(core.avd.NL4D, "nl4d seek", render_after_seek)
+
+@test
+def parallel_bursts_after_a_seek_stay_close_to_sequential_access_nl4d():
+    _assert_parallel_render_matches(
+        core.avd.NL4D, "nl4d seek", _render_bursts_after_seek, max_drift=EMA_DRIFT_TOLERANCE
+    )
+
+
+@test
+def parallel_bursts_after_a_seek_match_sequential_access_with_pinned_sigma_nl4d():
+    _assert_parallel_render_matches(_nl4d_pinned, "nl4d seek pinned", _render_bursts_after_seek)
+
+
+def _render_from_an_early_frame_first(node):
+    """
+    Renders frame 7 on its own before any other request, then the rest in order.
+
+    Pins the race where a burst's highest frame reaches the filter before the frames below it.
+    """
+    rendered = {}
+    _store_frame(rendered, 7, node.get_frame(7))
+    for n in range(node.num_frames):
+        if n != 7:
+            _store_frame(rendered, n, node.get_frame(n))
+    return rendered
+
+
+@test
+def an_early_first_request_matches_sequential_access_nl4d():
+    _assert_parallel_render_matches(core.avd.NL4D, "nl4d early first", _render_from_an_early_frame_first)
 
 
 @test
@@ -379,15 +426,6 @@ def a_large_search_radius_is_guarded():
         pass  # A clean rejection is the acceptable outcome.
 
 
-# Pinned once, on an 8-bit av-denoise --sigma scale, and reused for both
-# front ends below so the same number never has to be retyped in two
-# unit systems. `--sigma` on the CLI is documented in 8-bit pixel
-# units; `avd.NL4D`'s `sigma=` takes the normalised [0, 1] units
-# `Nl4dOptions.sigma` itself uses, so the plugin side divides by 255.
-PARITY_SIGMA_8BIT = 6.0
-PARITY_SIGMA_NORMALIZED = PARITY_SIGMA_8BIT / 255.0
-
-
 def _parity_source_filter():
     if hasattr(core, "bs"):
         return core.bs.VideoSource
@@ -396,37 +434,39 @@ def _parity_source_filter():
     raise AssertionError("neither core.bs (BestSource) nor core.lsmas (LSMASHSource) is installed")
 
 
-# Both front ends resolve an unset temporal_radius to this same value
-# (the CLI's `base` preset and `DEFAULT_NL4D_TEMPORAL_RADIUS` in
-# av-denoise-vs/src/params.rs), and the test relies on that agreement
-# rather than pinning it explicitly, so a future default drift between
-# the two shows up here too.
-PARITY_TEMPORAL_RADIUS = 2
-
-# nl4d's WindowSpan is `{behind: 2 * radius, ahead: 2 * radius}`
-# (av-denoise/src/planar/mod.rs, `PlanarDenoiser::window_span`), so a
-# window reaches `2 * radius` frames behind its centre. Those are the
-# only output frames close enough to the clip's start for the two front
-# ends' leading-edge padding to differ: `reseed` (what the plugin's
-# window rebuild always uses) fills the whole `behind` span by
-# repeating the clip's first frame, while the CLI's streaming path
-# primes only `radius` duplicates of it before real frames start
-# arriving. nl4d's cross-frame accumulator folds a different amount of
-# duplicated history in each case, so outputs in this region land close
-# but not bit-exact. This is accepted, documented behaviour, not a bug
-# — see `av-denoise-vs/README.md`.
-PARITY_LEADING_EDGE_FRAMES = 2 * PARITY_TEMPORAL_RADIUS
-
-# The bound the leading edge frames are allowed to drift within, the
-# same value and reasoning as `BEHIND_EDGE_TOLERANCE` in
-# av-denoise/src/planar/tests/mod.rs: full-range luma codes span 255,
-# and the extra duplicated history moves the result by at most a
-# handful of 8-bit codes.
-PARITY_LEADING_EDGE_TOLERANCE = 8
+PARITY_CLIP = pathlib.Path("data/parity-clip.y4m")
 
 
-def _max_abs_diff(a, b):
-    return int(np.abs(a.astype(np.int32) - b.astype(np.int32)).max())
+def _render_cli_to(out_file, cli_args):
+    """Runs the CLI over the parity clip, writing its y4m output to `out_file`."""
+    if not PARITY_CLIP.exists():
+        raise AssertionError(
+            f"{PARITY_CLIP} is missing. Create it with: "
+            "ffmpeg -i data/bench-sample.mkv -frames:v 12 -pix_fmt yuv420p -y data/parity-clip.y4m"
+        )
+
+    env = dict(os.environ, AV_DENOISE_COMPILATION_CACHE="off")
+    command = [
+        "cargo", "run", "--release",
+        "-p", "av-denoise", "--features", "binary", "--",
+        "nl4d", "--input", "-",
+        *cli_args,
+    ]  # fmt: skip
+    with open(PARITY_CLIP, "rb") as src_stream:
+        subprocess.run(command, stdin=src_stream, stdout=out_file, env=env, check=True)
+    out_file.flush()
+
+
+def _parity_frame_diffs(cli, plugin):
+    """Yields `(frame, plane, cli_plane, plugin_plane)` for every plane of every frame."""
+    assert cli.num_frames == plugin.num_frames, (
+        f"frame count differs: cli={cli.num_frames} plugin={plugin.num_frames}"
+    )
+    for n in range(cli.num_frames):
+        cli_frame = cli.get_frame(n)
+        plugin_frame = plugin.get_frame(n)
+        for plane in range(cli_frame.format.num_planes):
+            yield n, plane, frame_to_array(cli_frame, plane), frame_to_array(plugin_frame, plane)
 
 
 @test
@@ -435,74 +475,39 @@ def the_plugin_matches_the_cli_on_the_same_clip():
 
     Renders a short clip through the CLI's y4m output and through the
     plugin, with the same sigma pinned on both sides, then compares
-    every plane of every frame. Sigma has to be pinned because the
-    CLI's automatic estimate is a temporal EMA over stream history, and
-    the plugin's is a fresh window-local measurement, so the two
-    legitimately disagree whenever sigma is left automatic. With sigma
-    pinned, neither estimator runs, and both front ends should resolve
-    to the exact same `PlaneOptions`.
-
-    Frames at `PARITY_LEADING_EDGE_FRAMES` or beyond are asserted
-    bit-exact: this is the drift check the CLI/plugin crate split
-    exists to provide, and it must not be weakened. The clip's first
-    `PARITY_LEADING_EDGE_FRAMES` frames are asserted within
-    `PARITY_LEADING_EDGE_TOLERANCE` instead of skipped, so a genuine
-    regression there still fails this test, but the accepted
-    leading-edge padding difference does not.
+    every plane of every frame byte for byte. With sigma pinned, neither
+    estimator runs, and both front ends resolve to the exact same
+    `PlaneOptions`.
     """
-    src_path = pathlib.Path("data/parity-clip.y4m")
-    if not src_path.exists():
-        raise AssertionError(
-            f"{src_path} is missing. Create it with: "
-            "ffmpeg -i data/bench-sample.mkv -frames:v 12 -pix_fmt yuv420p -y data/parity-clip.y4m"
-        )
-
     source_filter = _parity_source_filter()
-    env = dict(os.environ, AV_DENOISE_COMPILATION_CACHE="off")
 
-    with tempfile.NamedTemporaryFile(suffix=".y4m") as out, open(src_path, "rb") as src_stream:
-        # The gutter lines the CLI's arguments up with the plugin call they mirror,
-        # so the two sides of the parity check can be read against each other. Ruff
-        # would put every argument on its own line and lose that.
-        # fmt: off
-        subprocess.run(  # CLI                                    ||  Plugin, same clip and sigma below
-            [                                                     # |
-                "cargo", "run", "--release",                      # |
-                "-p", "av-denoise", "--features", "binary", "--",  # |
-                "nl4d",                                            # |
-                "--input", "-",                                    # |  core.avd.NL4D(
-                "--sigma", str(PARITY_SIGMA_8BIT),                 # |      src,
-            ],                                                     # |      sigma=PARITY_SIGMA_NORMALIZED,
-            stdin=src_stream,                                      # |  )
-            stdout=out,
-            env=env,
-            check=True,
-        )
-        # fmt: on
-        out.flush()
+    with tempfile.NamedTemporaryFile(suffix=".y4m") as out:
+        _render_cli_to(out, ["--sigma", str(PARITY_SIGMA_8BIT)])
 
         cli = source_filter(out.name)
-        src = source_filter(str(src_path))
+        src = source_filter(str(PARITY_CLIP))
         plugin = core.avd.NL4D(src, sigma=PARITY_SIGMA_NORMALIZED)
 
-        assert cli.num_frames == plugin.num_frames, (
-            f"frame count differs: cli={cli.num_frames} plugin={plugin.num_frames}"
-        )
-        for n in range(cli.num_frames):
-            cli_frame = cli.get_frame(n)
-            plugin_frame = plugin.get_frame(n)
-            for plane in range(cli_frame.format.num_planes):
-                a = frame_to_array(cli_frame, plane)
-                b = frame_to_array(plugin_frame, plane)
-                if n < PARITY_LEADING_EDGE_FRAMES:
-                    diff = _max_abs_diff(a, b)
-                    assert diff <= PARITY_LEADING_EDGE_TOLERANCE, (
-                        f"frame {n} plane {plane} is a leading-edge frame "
-                        f"(< {PARITY_LEADING_EDGE_FRAMES}) and should stay within "
-                        f"{PARITY_LEADING_EDGE_TOLERANCE}, got max abs diff {diff}"
-                    )
-                else:
-                    assert np.array_equal(a, b), f"frame {n} plane {plane} differs"
+        for n, plane, cli_plane, plugin_plane in _parity_frame_diffs(cli, plugin):
+            diff = _max_abs_diff(cli_plane, plugin_plane)
+            assert diff == 0, f"frame {n} plane {plane} differs by {diff}"
+
+
+@test
+def the_plugin_matches_the_cli_with_automatic_sigma():
+    """Both front ends smooth the noise level over the stream, so they must agree."""
+    source_filter = _parity_source_filter()
+
+    with tempfile.NamedTemporaryFile(suffix=".y4m") as out:
+        _render_cli_to(out, [])
+
+        cli = source_filter(out.name)
+        src = source_filter(str(PARITY_CLIP))
+        plugin = core.avd.NL4D(src)
+
+        for n, plane, a, b in _parity_frame_diffs(cli, plugin):
+            diff = _max_abs_diff(a, b)
+            assert diff == 0, f"frame {n} plane {plane} differs by {diff}"
 
 
 def main():

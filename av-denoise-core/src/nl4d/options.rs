@@ -50,12 +50,6 @@ pub struct Nl4dOptions {
     /// Defaults to 2.0, and `0.0` is uniform aggregation. See
     /// [Nl4dParams::kaiser_beta](crate::nl4d::Nl4dParams::kaiser_beta).
     pub kaiser_beta: f32,
-    /// Estimates noise from each frame's own window instead of the whole stream's history.
-    ///
-    /// A VapourSynth filter must return the same pixels for a frame in any request order, and
-    /// history-dependent estimation breaks that under random access. Defaults to `false`, matching
-    /// every calibrated preset.
-    pub windowed_noise_estimation: bool,
     /// See [Nl4dParams::field_lambda](crate::nl4d::Nl4dParams::field_lambda).
     pub field_lambda: f32,
     /// See [Nl4dParams::noise_map](crate::nl4d::Nl4dParams::noise_map).
@@ -89,7 +83,6 @@ impl Default for Nl4dOptions {
             lambda_ht_scale: 1.0,
             c_min: defaults.c_min,
             kaiser_beta: defaults.kaiser_beta,
-            windowed_noise_estimation: false,
             field_lambda: defaults.field_lambda,
             noise_map: defaults.noise_map,
             psy: defaults.psy,
@@ -180,7 +173,6 @@ fn hq_params(options: &Nl4dOptions) -> HqParams {
         sigma_scale: options.sigma_scale,
         thsad_scale: options.thsad_scale,
         temporal_confidence: true,
-        windowed_noise_estimation: options.windowed_noise_estimation,
         ..HqParams::default()
     }
 }

@@ -150,12 +150,6 @@ pub struct HqParams {
     ///
     /// It has no effect with `sigma_override` set, because the estimator never runs.
     pub sigma_scale: f32,
-    /// Estimates noise from the current window alone rather than an EMA over every earlier frame.
-    ///
-    /// `false`, the default, keeps the EMA every calibrated preset assumes. `true` makes a reseed
-    /// at frame `n` and a continuous stream reaching frame `n` compute the same sigma. It has no
-    /// effect with `sigma_override` set.
-    pub windowed_noise_estimation: bool,
 }
 
 impl Default for HqParams {
@@ -167,7 +161,6 @@ impl Default for HqParams {
             temporal_confidence: true,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
-            windowed_noise_estimation: false,
         }
     }
 }

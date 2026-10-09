@@ -331,7 +331,6 @@ fn chained_hq_params(radius: u32, refine_radius: u32) -> NlmParams {
             temporal_confidence: true,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
-            windowed_noise_estimation: false,
         }),
     }
 }

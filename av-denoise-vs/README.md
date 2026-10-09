@@ -13,13 +13,13 @@ _All_ algorithms are temporal aware and have inbuilt motion compensation kernels
 
 ### _Here be dragons!_ 🐉
 
-VapourSynth's API significantly restricts how av-denoise can operate and as a result, can produce a worse
-denoising experience compared to the CLI or direct Rust library usage. Primarily because noise estimation
-cannot be incrementally refined over all frames and instead has to be performed only over the temporal
-window.
+VapourSynth's API restricts how av-denoise can operate and as a result, can produce a worse
+denoising experience compared to the CLI or direct Rust library usage.
 
-Performance is a _best effort_ situation, if you have anything which causes frames to arrive to the filter out of order
-your performance can drop by 70-80%.
+The plugin smooths the noise estimate over the stream's history, like the CLI. A render from the start
+is consistent. Frames after a seek, or after a burst of requests wider than twice the thread count, can
+differ slightly for a while. In tests the drift lasted 20 or more frames after a seek. Unlike the CLI,
+the plugin does not reset the estimate at scene cuts.
 
 
 ## Table of contents

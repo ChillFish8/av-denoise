@@ -580,7 +580,6 @@ fn reset_stream_state_clears_the_curve() {
             temporal_confidence: false,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
-            windowed_noise_estimation: false,
         }),
     };
 

@@ -351,7 +351,6 @@ fn the_front_end_keeps_classes_beside_the_curve_and_resets_both() {
             temporal_confidence: false,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
-            windowed_noise_estimation: false,
         }),
     };
 
@@ -631,7 +630,6 @@ fn the_front_end_rounds_the_line_ring_up_to_whole_quarters() {
             temporal_confidence: false,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
-            windowed_noise_estimation: false,
         }),
     };
     let mut denoiser = NlmDenoiser::<R>::new(&client, params, 64, 64);

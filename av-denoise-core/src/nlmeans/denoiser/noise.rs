@@ -183,11 +183,6 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// The unboosted chain skips the correlation boost for consumers that square sigma into a
     /// threshold. The temporal-only chain also skips the spatial maximum, because a spatial mask
     /// reads repeating texture as noise.
-    ///
-    /// Under windowed estimation every chain takes this fold's sample outright, and a fold with no
-    /// temporal sample clears the temporal-only chain and `rho_smoothed`. Keeping an older
-    /// window's reading would make the result, `spatial_offset_lut` included, depend on how many
-    /// pushes came before rather than only on the current window.
     fn fold_noise_estimate(
         &mut self,
         data: &[f32],
@@ -207,8 +202,6 @@ impl<R: Runtime> NlmDenoiser<R> {
         let mut raw_low_unboosted = immerkaer_low;
         let mut raw_temporal_only: Option<[f32; 3]> = None;
 
-        let windowed = self.params.hq.is_some_and(|hq| hq.windowed_noise_estimation);
-
         if let Some(sample) = temporal {
             let factor = correlation_factor(sample.rho);
             for c in 0..channels {
@@ -219,18 +212,11 @@ impl<R: Runtime> NlmDenoiser<R> {
 
             raw_temporal_only = Some(sample.sigma);
 
-            let rho = if windowed {
-                sample.rho
-            } else {
-                match self.rho_smoothed {
-                    None => sample.rho,
-                    Some(previous) => EMA_ALPHA * sample.rho + (1.0 - EMA_ALPHA) * previous,
-                }
+            let rho = match self.rho_smoothed {
+                None => sample.rho,
+                Some(previous) => EMA_ALPHA * sample.rho + (1.0 - EMA_ALPHA) * previous,
             };
             self.rho_smoothed = Some(rho);
-        } else if windowed {
-            // Window-local estimation drops an earlier window's correlation rather than keeping it.
-            self.rho_smoothed = None;
         }
 
         // The user's scale applies after combining and before smoothing, so everything derived
@@ -248,25 +234,20 @@ impl<R: Runtime> NlmDenoiser<R> {
             }
         }
 
-        let updated = self.noise_estimator.update(&raw[..channels], windowed);
+        let updated = self.noise_estimator.update(&raw[..channels]);
         let mut smoothed = [0.0f32; 3];
         smoothed[..channels].copy_from_slice(updated);
 
-        let updated_low = self.noise_estimator_low.update(&raw_low[..channels], windowed);
+        let updated_low = self.noise_estimator_low.update(&raw_low[..channels]);
         let mut smoothed_low = [0.0f32; 3];
         smoothed_low[..channels].copy_from_slice(updated_low);
 
         self.noise_estimator_low_unboosted
-            .update(&raw_low_unboosted[..channels], windowed);
+            .update(&raw_low_unboosted[..channels]);
 
-        match raw_temporal_only {
-            Some(raw_temporal) => {
-                self.noise_estimator_temporal_only
-                    .update(&raw_temporal[..channels], windowed);
-            },
-            // Window-local estimation clears rather than coasting on an older window's reading.
-            None if windowed => self.noise_estimator_temporal_only.reset(),
-            None => {},
+        if let Some(raw_temporal) = raw_temporal_only {
+            self.noise_estimator_temporal_only
+                .update(&raw_temporal[..channels]);
         }
 
         let effective_sigma = sigma_eff(&smoothed[..channels], self.params.channels);
@@ -308,19 +289,10 @@ impl<R: Runtime> NlmDenoiser<R> {
         let reading = self.borrow_reading_ahead(center_t)?;
         let immerkaer_low = self.read_noise_partials_low(center_slot as u32)?;
 
-        // The curve only changes alongside a trustworthy sample. Windowed estimation clears it on
-        // a fold with none.
-        let windowed = self.params.hq.is_some_and(|hq| hq.windowed_noise_estimation);
-        match (&reading.sample, reading.curve, reading.classes) {
-            (Some(_), curve, classes) => {
-                self.noise_curve = curve;
-                self.quarter_classes = classes;
-            },
-            (None, _, _) if windowed => {
-                self.noise_curve = None;
-                self.quarter_classes = None;
-            },
-            (None, _, _) => {},
+        // The curve only changes alongside a trustworthy sample.
+        if reading.sample.is_some() {
+            self.noise_curve = reading.curve;
+            self.quarter_classes = reading.classes;
         }
 
         self.fold_noise_estimate(data, center_slot, reading.sample, immerkaer_low);

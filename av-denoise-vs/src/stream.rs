@@ -124,7 +124,8 @@ impl StreamPlanner {
     ///
     /// A live stream at or before `n` is caught up when its next push is still inside `n`'s request
     /// range. Otherwise the stream is rebuilt at the lowest outstanding request whose own window fits
-    /// inside that range, which is never later than `n`.
+    /// inside that range, which is never later than `n`. When the clip's first frame fits too, the
+    /// rebuild starts there, so a render from the start has the same noise history as a sequential one.
     pub fn plan(&self, n: usize, buffered: bool, outstanding: &Outstanding) -> Plan {
         if buffered {
             return Plan::Serve;
@@ -145,7 +146,7 @@ impl StreamPlanner {
 
         let floor = n.saturating_sub(self.geometry.lookback);
         let lowest = outstanding.lowest_in(floor..=n);
-        let start = lowest.unwrap_or(n);
+        let start = if floor == 0 { 0 } else { lowest.unwrap_or(n) };
         let first_step = start + 1;
 
         let steps = if self.geometry.reseed_ends_stream(start) {

@@ -77,7 +77,6 @@ fn hq_disabled_features_match_fast_mode() {
             temporal_confidence: true,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
-            windowed_noise_estimation: false,
         }),
         ..base_params()
     };
@@ -116,7 +115,6 @@ fn hq_noise_floor_changes_output() {
             temporal_confidence: true,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
-            windowed_noise_estimation: false,
         }),
         ..base_params()
     };
@@ -189,7 +187,6 @@ fn hq_auto_sigma_denoises() {
             temporal_confidence: true,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
-            windowed_noise_estimation: false,
         }),
         ..base_params()
     };
@@ -225,7 +222,6 @@ fn hq_auto_sigma_temporal_smoke() {
             temporal_confidence: true,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
-            windowed_noise_estimation: false,
         }),
         ..base_params()
     };
@@ -272,7 +268,6 @@ fn hq_reset_clears_noise_state() {
             temporal_confidence: true,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
-            windowed_noise_estimation: false,
         }),
         ..base_params()
     };
@@ -311,7 +306,6 @@ fn hq_pilot_temporal_end_to_end() {
             temporal_confidence: true,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
-            windowed_noise_estimation: false,
         }),
         ..base_params()
     };
@@ -337,7 +331,6 @@ fn hq_pilot_differs_from_unguided() {
             temporal_confidence: true,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
-            windowed_noise_estimation: false,
         }),
         ..base_params()
     };
@@ -394,7 +387,6 @@ fn temporal_conf_params(temporal_confidence: bool) -> NlmParams {
             temporal_confidence,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
-            windowed_noise_estimation: false,
         }),
     }
 }
@@ -468,7 +460,6 @@ fn hq_temporal_confidence_disabled_ignores_thsad_scale() {
                 temporal_confidence: false,
                 thsad_scale,
                 sigma_scale: 1.0,
-                windowed_noise_estimation: false,
             }),
         };
 
@@ -527,7 +518,6 @@ fn hq_sigma_scale_multiplies_the_folded_estimate() {
                 temporal_confidence: true,
                 thsad_scale: 1.0,
                 sigma_scale,
-                windowed_noise_estimation: false,
             }),
             ..base_params()
         };

@@ -37,7 +37,6 @@ fn noise_offset_zero_without_noise_floor() {
             temporal_confidence: true,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
-            windowed_noise_estimation: false,
         }),
         ..NlmParams::default()
     };
@@ -221,7 +220,6 @@ fn noise_offset_with_handles_distinct_per_channel_sigmas() {
             temporal_confidence: true,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
-            windowed_noise_estimation: false,
         }),
         ..NlmParams::default()
     };

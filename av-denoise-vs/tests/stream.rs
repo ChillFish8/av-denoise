@@ -182,17 +182,17 @@ fn repeat_steps_clamp_their_source_to_the_last_frame() {
 }
 
 #[test]
-fn the_first_request_reseeds_at_the_lowest_outstanding_frame() {
+fn a_request_near_the_clip_start_reseeds_at_frame_zero() {
     let mut harness = Harness::new(shifted());
-    harness.register(0..8);
+    harness.register([7]);
 
-    let plan = harness.request(5);
+    let plan = harness.request(7);
 
     assert_eq!(
         plan,
         Plan::Reseed {
             start: 0,
-            steps: 1..8
+            steps: 1..10
         }
     );
 }
@@ -268,16 +268,16 @@ fn a_single_scrub_reseeds_at_the_requested_frame() {
 #[test]
 fn a_request_behind_the_stream_reseeds() {
     let mut harness = Harness::new(shifted());
-    render_in_order(&mut harness, 0..=30);
+    render_in_order(&mut harness, 0..=50);
 
-    harness.register([10]);
-    let plan = harness.request(10);
+    harness.register([30]);
+    let plan = harness.request(30);
 
     assert_eq!(
         plan,
         Plan::Reseed {
-            start: 10,
-            steps: 11..13
+            start: 30,
+            steps: 31..33
         }
     );
 }
@@ -357,17 +357,17 @@ fn a_clip_inside_one_window_reseeds_with_no_steps() {
 #[test]
 fn a_killed_stream_reseeds_on_the_next_request() {
     let mut harness = Harness::new(shifted());
-    render_in_order(&mut harness, 0..=5);
+    render_in_order(&mut harness, 0..=20);
 
     harness.planner.kill();
-    harness.register([6]);
-    let plan = harness.request(6);
+    harness.register([21]);
+    let plan = harness.request(21);
 
     assert_eq!(
         plan,
         Plan::Reseed {
-            start: 6,
-            steps: 7..9
+            start: 21,
+            steps: 22..24
         }
     );
 }

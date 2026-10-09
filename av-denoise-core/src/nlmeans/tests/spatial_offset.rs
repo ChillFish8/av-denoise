@@ -22,7 +22,6 @@ fn attenuation_params(sigma: f32) -> NlmParams {
             temporal_confidence: false,
             thsad_scale: 1.0,
             sigma_scale: 1.0,
-            windowed_noise_estimation: false,
         }),
     }
 }

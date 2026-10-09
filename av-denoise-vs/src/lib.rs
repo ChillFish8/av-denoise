@@ -254,9 +254,10 @@ make_filter_function! {
 
     /// Creates an `avd.NL4D` filter.
     ///
-    /// The automatic noise level is estimated from each frame's own temporal window, so a frame
-    /// denoises to the same pixels in any order VapourSynth requests frames. Passing `sigma` pins the
-    /// noise level and skips the estimator.
+    /// The automatic noise level is smoothed over the stream's history. Frames match a sequential
+    /// render while VapourSynth's requests stay within twice its thread count. Frames after a seek
+    /// or a wider burst of requests can differ slightly. Passing `sigma` pins the noise level and
+    /// skips the estimator.
     #[expect(
         clippy::too_many_arguments,
         reason = "each parameter is a VapourSynth filter argument, so they cannot be grouped"
