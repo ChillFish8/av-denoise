@@ -1,24 +1,35 @@
-use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Mutex;
 
-use anyhow::{Error, Result, anyhow};
-use av_denoise::{EdgePadding, FrameLayout, PlanarDenoiser, Planes, ReseedWindow, WarmUp, WindowSpan};
+use anyhow::{Error, Result, anyhow, bail};
+use av_denoise::{
+    EdgePadding,
+    FrameLayout,
+    MAX_PENDING,
+    PlanarDenoiser,
+    Planes,
+    ReseedWindow,
+    WarmUp,
+    push_needs_retry,
+};
 use vapoursynth::core::CoreRef;
 use vapoursynth::plugins::{Filter, FrameContext};
 use vapoursynth::prelude::{API, FrameRef, FrameRefMut, Node, Property};
 use vapoursynth::video_info::{Resolution, VideoInfo};
 
-use crate::frames::{TailCache, pack_plane, shifted_window_range, unpack_plane_into, window_indices};
+use crate::frames::{pack_plane, shifted_window_range, unpack_plane_into, window_indices};
 use crate::params::{AlgorithmKind, RawFormat, RawParams, layout_from_format, plane_options_from};
+use crate::stream::{OutputBuffer, Outstanding, Plan, Step, StreamGeometry, StreamPlanner, lookback_for};
 use crate::{init_logging, pin_plugin_library};
 
-/// The running pipeline and the output frame it last produced.
+/// The running pipeline, the planner tracking it, and the outputs no request has taken yet.
 ///
-/// VapourSynth may call `get_frame` from several threads, so the pipeline sits behind a mutex and
-/// requests queue on it. One pipeline is enough because the GPU is the bottleneck.
+/// VapourSynth may call `get_frame` from several threads, so this sits behind a mutex. One pipeline is
+/// enough because the GPU is the bottleneck.
 struct State {
     denoiser: PlanarDenoiser,
-    last_served: Option<usize>,
+    planner: StreamPlanner,
+    buffer: OutputBuffer<Planes>,
     /// The cold-cache queue place this filter holds until its first frame is rendered.
     ///
     /// CubeCL compiles a kernel on its first dispatch rather than when the denoiser is built, so the
@@ -26,8 +37,6 @@ struct State {
     /// keeps the place until it exits, making other workers wait out the queue's limit before compiling
     /// for themselves, which is rare enough to accept.
     warm_up: Option<WarmUp>,
-    /// Outputs from the clip's final flush that no request has taken yet.
-    tail: Option<TailCache>,
 }
 
 impl State {
@@ -40,18 +49,16 @@ impl State {
     }
 }
 
-/// A denoising filter backed by one [PlanarDenoiser] pipeline.
+/// A denoising filter backed by one [PlanarDenoiser] stream shared by every request.
 ///
 /// `avd.NLMeans` and `avd.NL4D` both build one, differing only in the algorithm the denoiser runs.
 pub struct Denoise<'core> {
     source: Node<'core>,
     layout: FrameLayout,
-    /// How many source frames a window needs behind and ahead of its output frame.
-    ///
-    /// nlmeans and nl4d report different spans, so this comes from [PlanarDenoiser::window_span]
-    /// rather than being assumed symmetric.
-    span: WindowSpan,
-    source_len: usize,
+    geometry: StreamGeometry,
+    /// Requests `get_frame_initial` has registered, kept apart from [State] so registering one never
+    /// waits on GPU work.
+    outstanding: Mutex<Outstanding>,
     state: Mutex<State>,
 }
 
@@ -62,7 +69,7 @@ impl<'core> Denoise<'core> {
     /// variable-resolution source, which [FrameLayout] has no way to represent.
     pub(crate) fn create(
         _api: API,
-        _core: CoreRef<'core>,
+        core: CoreRef<'core>,
         source: Node<'core>,
         algorithm_kind: AlgorithmKind,
         raw: &RawParams,
@@ -83,7 +90,7 @@ impl<'core> Denoise<'core> {
         let (width, height) = match info.resolution {
             Property::Constant(resolution) => (resolution.width as u32, resolution.height as u32),
             Property::Variable => {
-                anyhow::bail!("clips with variable resolution are not supported");
+                bail!("clips with variable resolution are not supported");
             },
         };
 
@@ -109,153 +116,253 @@ impl<'core> Denoise<'core> {
         let denoiser = PlanarDenoiser::create(&plane_options, layout)?;
         let span = denoiser.window_span();
 
+        let core_info = core.info();
+        let lookback = lookback_for(core_info.num_threads);
+        let last_frame = info.num_frames.saturating_sub(1);
+        let geometry = StreamGeometry {
+            span,
+            lookback,
+            lead: MAX_PENDING,
+            last_frame,
+        };
+
+        let planner = StreamPlanner::new(geometry);
         let state = State {
             denoiser,
-            last_served: None,
+            planner,
+            buffer: OutputBuffer::new(),
             warm_up,
-            tail: None,
         };
 
         Ok(Self {
             source,
             layout,
-            span,
-            source_len: info.num_frames,
+            geometry,
+            outstanding: Mutex::new(Outstanding::default()),
             state: Mutex::new(state),
         })
     }
 
-    /// The ordered source indices `reseed` or `reseed_window` needs for an output frame.
+    /// Renders output frame `n` from the shared stream.
     ///
-    /// `EdgePadding::Repeat` repeats the boundary frame so `reseed` sees the exact window length it
-    /// expects. `EdgePadding::Shifted` stops at either end of the clip instead, with no repeats, for
-    /// `reseed_window`.
-    fn window(&self, output_index: usize) -> Vec<usize> {
-        let last_frame = self.source_len - 1;
-        match self.span.edges {
-            EdgePadding::Repeat => {
-                window_indices(output_index, self.span.behind, self.span.ahead, last_frame)
-            },
-            EdgePadding::Shifted => {
-                let range = shifted_window_range(output_index, self.span.behind, self.span.ahead, last_frame);
-                range.collect()
-            },
-        }
-    }
-
-    /// The source indices an output frame needs, deduplicated so each one is requested and fetched
-    /// from VapourSynth only once.
-    ///
-    /// Only `EdgePadding::Repeat` windows can repeat an index, at either end of the clip.
-    /// [Self::window] is already non-decreasing, so the sort is a no-op kept for clarity.
-    fn unique_window(&self, output_index: usize) -> Vec<usize> {
-        let mut indices = self.window(output_index);
-        indices.sort_unstable();
-        indices.dedup();
-        indices
-    }
-
-    /// Renders one output frame, applying the hybrid fast/rebuild policy.
-    ///
-    /// A sequential request, straight after the last frame produced, pushes one frame through the
-    /// running stream. Under shifted edges, the request that reaches the clip's end flushes the stream
-    /// once instead, and the frames after it are served from the tail cache. Anything else, including
-    /// frame 0, rebuilds the stream from an explicit window, which costs more but is correct from any
-    /// starting point.
-    fn render(
-        &self,
-        output_index: usize,
-        fetch: impl Fn(usize) -> Result<Planes, Error>,
-    ) -> Result<Planes, Error> {
+    /// The stream is caught up, rebuilt, or skipped when `n` is already buffered, as the planner decides.
+    /// Any error leaves the stream dead, so the next request rebuilds it.
+    fn render(&self, n: usize, fetch: impl Fn(usize) -> Result<Planes, Error>) -> Result<Planes, Error> {
         let mut state = self.state.lock().expect("denoiser mutex poisoned");
-        let last_frame = self.source_len - 1;
-        let shifted = self.span.edges == EdgePadding::Shifted;
 
-        // The anchor is cleared before anything touches the pipeline. Every path below either sets it
-        // again or leaves through `?`, so an error can never leave it claiming a position the stream
-        // has moved past.
-        let sequential = state.last_served == Some(output_index.wrapping_sub(1)) && output_index > 0;
-        state.last_served = None;
-
-        let cached = state.tail.as_mut().and_then(|tail| tail.take(output_index));
-        if let Some(denoised) = cached {
-            state.last_served = Some(output_index);
-            return Ok(denoised);
+        let result = self.render_locked(&mut state, n, &fetch);
+        if result.is_err() {
+            state.planner.kill();
         }
 
-        state.tail = None;
+        result
+    }
 
-        let window_end = output_index + self.span.ahead;
-
-        // This request is the first whose window would run past the clip's last frame. The previous
-        // request pushed that last frame into a live stream, and no tail cache covers this index, so
-        // flushing the stream yields this frame and every later one.
-        if sequential && shifted && window_end == last_frame + 1 {
-            let mut outputs = Vec::new();
-            state.denoiser.flush(|planes| outputs.push(planes))?;
-
-            let mut outputs = outputs.into_iter();
-            let denoised = outputs
-                .next()
-                .ok_or_else(|| anyhow!("the clip's final flush produced no frame"))?;
-            let rest: Vec<Planes> = outputs.collect();
-            let tail = TailCache::new(output_index + 1, rest);
-            state.tail = Some(tail);
-            state.last_served = Some(output_index);
-            state.finish_warm_up();
-            return Ok(denoised);
-        }
-
-        if sequential && (!shifted || window_end <= last_frame) {
-            let next_index = window_end.min(last_frame);
-            let frame = fetch(next_index)?;
-            state.denoiser.push(&frame)?;
-            if let Some(denoised) = state.denoiser.recv()? {
-                state.last_served = Some(output_index);
-                state.finish_warm_up();
-                return Ok(denoised);
-            }
-
-            // The stream did not yield, so fall through and rebuild.
-        }
-
-        let indices = self.window(output_index);
-        let window: Vec<Planes> = indices
-            .iter()
-            .map(|&index| fetch(index))
-            .collect::<Result<_, _>>()?;
-
-        let denoised = if shifted {
-            let first_index = indices[0];
-            let last_index = *indices
-                .last()
-                .ok_or_else(|| anyhow!("window produced no frame indices"))?;
-            let request = ReseedWindow {
-                frames: &window,
-                target: output_index - first_index,
-                at_clip_start: first_index == 0,
-                at_clip_end: last_index == last_frame,
-            };
-
-            let mut outputs = state.denoiser.reseed_window(request)?.into_iter();
-            let denoised = outputs
-                .next()
-                .ok_or_else(|| anyhow!("reseed produced no frame"))?;
-            let rest: Vec<Planes> = outputs.collect();
-            if !rest.is_empty() {
-                let tail = TailCache::new(output_index + 1, rest);
-                state.tail = Some(tail);
-            }
-
-            denoised
-        } else {
-            state.denoiser.reseed(&window)?
+    fn render_locked(
+        &self,
+        state: &mut State,
+        n: usize,
+        fetch: &impl Fn(usize) -> Result<Planes, Error>,
+    ) -> Result<Planes, Error> {
+        let buffered = state.buffer.contains(n);
+        let plan = {
+            let outstanding = self.outstanding.lock().expect("outstanding mutex poisoned");
+            state.planner.plan(n, buffered, &outstanding)
         };
 
-        state.last_served = Some(output_index);
+        match plan {
+            Plan::Serve => {},
+            Plan::Advance { steps } => {
+                self.run_steps(state, steps, fetch)?;
+            },
+            Plan::Reseed { start, steps } => {
+                self.reseed_at(state, start, fetch)?;
+                self.run_steps(state, steps, fetch)?;
+            },
+        }
+
+        receive_all(state)?;
+
+        let denoised = state
+            .buffer
+            .take(n)
+            .ok_or_else(|| anyhow!("output frame {n} was never produced"))?;
+
+        let capacity = self.geometry.buffer_capacity();
+        state.buffer.evict_to(capacity);
         state.finish_warm_up();
+
         Ok(denoised)
     }
+
+    /// Rebuilds the stream so it has produced output `start`, buffering it and any clip-end tail.
+    fn reseed_at(
+        &self,
+        state: &mut State,
+        start: usize,
+        fetch: &impl Fn(usize) -> Result<Planes, Error>,
+    ) -> Result<(), Error> {
+        let span = self.geometry.span;
+        let last_frame = self.geometry.last_frame;
+
+        if span.edges == EdgePadding::Repeat {
+            let indices = window_indices(start, span.behind, span.ahead, last_frame);
+            let window = fetch_all(&indices, fetch)?;
+            let denoised = state.denoiser.reseed(&window)?;
+            state.buffer.insert(start, denoised);
+            state.planner.reseeded(start);
+            return Ok(());
+        }
+
+        let range = shifted_window_range(start, span.behind, span.ahead, last_frame);
+        let first_index = *range.start();
+        let last_index = *range.end();
+        let indices: Vec<usize> = range.collect();
+        let window = fetch_all(&indices, fetch)?;
+
+        let request = ReseedWindow {
+            frames: &window,
+            target: start - first_index,
+            at_clip_start: first_index == 0,
+            at_clip_end: last_index == last_frame,
+        };
+
+        let outputs = state.denoiser.reseed_window(request)?;
+        for (offset, denoised) in outputs.into_iter().enumerate() {
+            state.buffer.insert(start + offset, denoised);
+        }
+
+        state.planner.reseeded(start);
+        Ok(())
+    }
+
+    /// Runs each step in order, buffering every output the stream hands back along the way.
+    fn run_steps(
+        &self,
+        state: &mut State,
+        steps: Range<usize>,
+        fetch: &impl Fn(usize) -> Result<Planes, Error>,
+    ) -> Result<(), Error> {
+        for step in steps {
+            match self.geometry.step(step) {
+                Step::Push(source) => {
+                    let planes = fetch(source)?;
+                    push_with_drain(state, &planes)?;
+                },
+                Step::Flush => {
+                    flush_into_buffer(state)?;
+                },
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Renders output frame `n` and wraps it in a frame carrying the source frame's properties.
+    ///
+    /// Source frames are packed only when the stream actually pushes them.
+    fn serve(&self, core: CoreRef<'core>, context: FrameContext, n: usize) -> Result<FrameRef<'core>, Error> {
+        let depth_bytes = self.layout.depth.bytes_per_sample();
+        let fetch = |index: usize| -> Result<Planes, Error> {
+            let frame = self
+                .source
+                .get_frame_filter(context, index)
+                .ok_or_else(|| anyhow!("couldn't get source frame {index}"))?;
+            let packed = pack_frame(&frame, depth_bytes);
+            Ok(packed)
+        };
+
+        let planes = self.render(n, fetch)?;
+
+        let props_source = self
+            .source
+            .get_frame_filter(context, n)
+            .ok_or_else(|| anyhow!("couldn't get source frame {n}"))?;
+        let format = props_source.format();
+        let resolution = Resolution {
+            width: self.layout.width as usize,
+            height: self.layout.height as usize,
+        };
+
+        // SAFETY: the frame's plane data starts uninitialized, but
+        // `unpack_into_frame` below writes every byte of every plane
+        // before the frame is returned to VapourSynth.
+        let mut output_frame =
+            unsafe { FrameRefMut::new_uninitialized(core, Some(&props_source), format, resolution) };
+        unpack_into_frame(&mut output_frame, &planes, depth_bytes);
+
+        Ok(output_frame.into())
+    }
+}
+
+fn fetch_all(
+    indices: &[usize],
+    fetch: &impl Fn(usize) -> Result<Planes, Error>,
+) -> Result<Vec<Planes>, Error> {
+    indices.iter().map(|&index| fetch(index)).collect()
+}
+
+/// Pushes one frame, first receiving one output into the buffer when the queue is full.
+fn push_with_drain(state: &mut State, planes: &Planes) -> Result<(), Error> {
+    let first_attempt = state.denoiser.push(planes);
+    if push_needs_retry(first_attempt)? {
+        receive_one(state)?;
+        state.denoiser.push(planes)?;
+    }
+
+    state.planner.pushed();
+    Ok(())
+}
+
+/// Receives the oldest in-flight output into the buffer.
+fn receive_one(state: &mut State) -> Result<(), Error> {
+    let index = state
+        .planner
+        .received()
+        .ok_or_else(|| anyhow!("no output is in flight to receive"))?;
+
+    receive_output(state, index)
+}
+
+/// Receives every in-flight output into the buffer.
+///
+/// A readback left in flight could be collected by a request on another thread, whose GPU stream has no
+/// ordering against the one that started it. Receiving everything keeps each readback inside the call
+/// that began it.
+fn receive_all(state: &mut State) -> Result<(), Error> {
+    while let Some(index) = state.planner.received() {
+        receive_output(state, index)?;
+    }
+
+    Ok(())
+}
+
+fn receive_output(state: &mut State, index: usize) -> Result<(), Error> {
+    let received = state.denoiser.recv()?;
+    let denoised = received.ok_or_else(|| anyhow!("the stream yielded nothing for output {index}"))?;
+    state.buffer.insert(index, denoised);
+    Ok(())
+}
+
+/// Flushes the stream's in-flight and tail outputs into the buffer. The stream ends.
+fn flush_into_buffer(state: &mut State) -> Result<(), Error> {
+    let mut outputs = Vec::new();
+    state.denoiser.flush(|planes| outputs.push(planes))?;
+
+    let indices = state.planner.flushed();
+    if outputs.len() != indices.len() {
+        bail!(
+            "the clip's final flush produced {} frames, expected {}",
+            outputs.len(),
+            indices.len()
+        );
+    }
+
+    for (index, denoised) in indices.zip(outputs) {
+        state.buffer.insert(index, denoised);
+    }
+
+    Ok(())
 }
 
 /// Packs one source frame's three planes into a [Planes], dropping each plane's row padding.
@@ -307,7 +414,13 @@ impl<'core> Filter<'core> for Denoise<'core> {
         context: FrameContext,
         output_index: usize,
     ) -> Result<Option<FrameRef<'core>>, Error> {
-        for index in self.unique_window(output_index) {
+        {
+            let mut outstanding = self.outstanding.lock().expect("outstanding mutex poisoned");
+            outstanding.register(output_index);
+        }
+
+        let range = self.geometry.request_range(output_index);
+        for index in range {
             self.source.request_frame_filter(context, index);
         }
 
@@ -321,42 +434,13 @@ impl<'core> Filter<'core> for Denoise<'core> {
         context: FrameContext,
         output_index: usize,
     ) -> Result<FrameRef<'core>, Error> {
-        let mut frames: HashMap<usize, FrameRef<'core>> = HashMap::new();
-        for index in self.unique_window(output_index) {
-            let frame = self
-                .source
-                .get_frame_filter(context, index)
-                .ok_or_else(|| anyhow!("couldn't get source frame {index}"))?;
-            frames.insert(index, frame);
+        let result = self.serve(core, context, output_index);
+
+        {
+            let mut outstanding = self.outstanding.lock().expect("outstanding mutex poisoned");
+            outstanding.finish(output_index);
         }
 
-        let depth_bytes = self.layout.depth.bytes_per_sample();
-        let fetch = |index: usize| -> Result<Planes, Error> {
-            let frame = frames
-                .get(&index)
-                .expect("get_frame_initial requested the same window as get_frame");
-            let packed = pack_frame(frame, depth_bytes);
-            Ok(packed)
-        };
-
-        let planes = self.render(output_index, fetch)?;
-
-        let props_source = frames
-            .get(&output_index)
-            .expect("the window always includes output_index");
-        let format = props_source.format();
-        let resolution = Resolution {
-            width: self.layout.width as usize,
-            height: self.layout.height as usize,
-        };
-
-        // SAFETY: the frame's plane data starts uninitialized, but
-        // `unpack_into_frame` below writes every byte of every plane
-        // before the frame is returned to VapourSynth.
-        let mut output_frame =
-            unsafe { FrameRefMut::new_uninitialized(core, Some(props_source), format, resolution) };
-        unpack_into_frame(&mut output_frame, &planes, depth_bytes);
-
-        Ok(output_frame.into())
+        result
     }
 }

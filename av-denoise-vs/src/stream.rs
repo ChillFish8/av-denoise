@@ -29,7 +29,7 @@ pub enum Step {
 pub enum Plan {
     /// The output is already buffered.
     Serve,
-    /// Run these steps on the live stream, then receive up to the output.
+    /// Run these steps on the live stream, then receive its outputs.
     Advance { steps: Range<usize> },
     /// Rebuild the stream so it has produced output `start`, then run these steps.
     Reseed { start: usize, steps: Range<usize> },
