@@ -131,8 +131,11 @@ pub(crate) fn run_analyse<R: Runtime>(
         pyramid_slot_byte_offset(width, height, frame_count, 0, neighbour_slot, motion_ctx.align);
     let fine_neighbour = pyramid.clone().offset_start(fine_neighbour_offset);
     let level_len = (fine_width * fine_height) as usize;
-    let grid = CubeCount::new_2d(motion_ctx.blocks_x, motion_ctx.blocks_y);
-    let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
+    let bm_blocks: u32 = std::env::var("AVD_PROBE_BM_BLOCKS")
+        .map(|v| v.parse().unwrap())
+        .unwrap_or(1);
+    let dim = CubeDim::new_3d(BLOCK_MATCH_THREADS, 1, bm_blocks);
+    let grid = CubeCount::new_2d(motion_ctx.blocks_x.div_ceil(bm_blocks), motion_ctx.blocks_y);
     let seeded = if motion_ctx.pyramid_levels > 1 { 1u32 } else { 0u32 };
 
     unsafe {
@@ -154,6 +157,7 @@ pub(crate) fn run_analyse<R: Runtime>(
             motion_ctx.search_radius,
             seeded,
             motion_ctx.blocks_x,
+            bm_blocks,
         );
     }
 
@@ -208,8 +212,11 @@ pub(crate) fn run_seeded_refine<R: Runtime>(
         pyramid_slot_byte_offset(width, height, frame_count, 0, neighbour_slot, motion_ctx.align);
     let fine_neighbour = pyramid.clone().offset_start(fine_neighbour_offset);
     let level_len = (fine_width * fine_height) as usize;
-    let grid = CubeCount::new_2d(motion_ctx.blocks_x, motion_ctx.blocks_y);
-    let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
+    let bm_blocks: u32 = std::env::var("AVD_PROBE_BM_BLOCKS")
+        .map(|v| v.parse().unwrap())
+        .unwrap_or(1);
+    let dim = CubeDim::new_3d(BLOCK_MATCH_THREADS, 1, bm_blocks);
+    let grid = CubeCount::new_2d(motion_ctx.blocks_x.div_ceil(bm_blocks), motion_ctx.blocks_y);
 
     unsafe {
         nlm_mc_block_match_fine::launch_unchecked::<R>(
@@ -230,6 +237,7 @@ pub(crate) fn run_seeded_refine<R: Runtime>(
             refine_radius,
             1u32,
             motion_ctx.blocks_x,
+            bm_blocks,
         );
     }
 

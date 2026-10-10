@@ -152,6 +152,11 @@ impl<R: Runtime> CollabLaunch<R> {
         let cubes_x = fused_cubes_x_for(params.width, groups);
         let grid = CubeCount::new_2d(cubes_x, params.refs_y);
         let dim = CubeDim::new_1d(groups * 8);
+        let tiled = std::env::var("AVD_PROBE_TILED").is_ok();
+        let batched = std::env::var("AVD_PROBE_BATCHED").is_ok();
+        let probe_skip: u32 = std::env::var("AVD_PROBE_SKIP")
+            .map(|v| v.parse().unwrap())
+            .unwrap_or(0);
 
         unsafe {
             collab_fused::launch_unchecked::<S, R>(
@@ -202,6 +207,9 @@ impl<R: Runtime> CollabLaunch<R> {
                 params.pool_ratio,
                 params.pooled,
                 groups,
+                tiled,
+                batched,
+                probe_skip,
             );
         }
     }

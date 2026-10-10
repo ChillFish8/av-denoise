@@ -541,6 +541,9 @@ fn launch_fused<S: Float>(
             pooled_ratio,
             setup.pooled.is_some(),
             groups,
+            false,
+            false,
+            0,
         );
     }
 }

@@ -89,6 +89,7 @@ impl<R: Runtime> Benchmark for McConfidenceBench<R> {
                 SEARCH_RADIUS,
                 0u32, // `use_seed = 0`, since there is no coarse pass without motion compensation.
                 blocks_x,
+                1,
             );
         }
 

@@ -1,17 +1,21 @@
+pub(crate) mod batched;
 pub(crate) mod grid;
 pub(crate) mod pooled;
 pub(crate) mod search;
 pub(crate) mod strength_map;
+pub(crate) mod tile;
 
 use cubecl::prelude::*;
 
+use self::batched::spatial_search_batched;
 use self::grid::{grid_fwd, grid_inv, grid_variance};
 use self::pooled::pooled_threshold;
 use self::search::{spatial_search, trajectory_search};
 use self::strength_map::strength_map_scale;
 pub use self::strength_map::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
+use self::tile::{load_search_tile, tile_height, tile_width};
 use super::aggregate::scatter_patch;
-use super::group::unpack_t;
+use super::group::{clamp_top_left, unpack_t};
 use super::plane_ops::{group_base, plane_ssd_reduce8, transpose8};
 use super::transforms::{
     RECIPROCAL_FLOOR,
@@ -179,6 +183,9 @@ pub fn collab_fused<S: Float, N: Size>(
     pool_ratio: f32,
     #[comptime] pooled: bool,
     #[comptime] groups: u32,
+    #[comptime] tiled: bool,
+    #[comptime] batched: bool,
+    #[comptime] probe_skip: u32,
 ) {
     let thread_id = UNIT_POS_X;
     let group = thread_id / 8u32;
@@ -219,26 +226,86 @@ pub fn collab_fused<S: Float, N: Size>(
     // The channel scale multiplies the completed 64-pixel distance, not each squared difference.
     let scale = channel_scale(channels);
 
-    let n_live = spatial_search(
-        ring,
-        search_ring,
-        &current,
-        ref_x,
-        ref_y,
-        centre_slot,
-        sub,
-        base,
-        scale,
-        &mut best_d,
-        &mut best_pos,
-        warp_uniform,
-        f16_search,
-        spatial_radius,
-        width,
-        height,
-        channels,
-        stored_ch,
-    );
+    // The groups' references sit `STEP` apart along one row, so their search windows overlap
+    // and one tile from the first group's window covers them all.
+    let tile_w = comptime!(tile_width(groups, spatial_radius));
+    let tile_h = comptime!(tile_height(spatial_radius));
+    let tile_len = comptime!(if tiled { tile_w * tile_h * stored_ch } else { 1 });
+    let mut search_tile = SharedMemory::<S>::new(tile_len as usize);
+    let first_ref_index = (CUBE_POS_X * groups).min(refs_x - 1u32);
+    let first_ref_x = (first_ref_index * STEP).min(max_x);
+    let tile_x = clamp_top_left(first_ref_x as i32 - spatial_radius as i32, max_x);
+    let tile_y = clamp_top_left(ref_y as i32 - spatial_radius as i32, max_y);
+    if comptime!(tiled) {
+        load_search_tile(
+            search_ring,
+            &mut search_tile,
+            tile_x,
+            tile_y,
+            centre_slot,
+            tile_w,
+            tile_h,
+            comptime!(groups * 8),
+            width,
+            height,
+            stored_ch,
+        );
+    }
+
+    let mut n_live = 0u32;
+    if comptime!(batched) {
+        n_live = spatial_search_batched(
+            ring,
+            search_ring,
+            &search_tile,
+            &current,
+            ref_x,
+            ref_y,
+            centre_slot,
+            sub,
+            base,
+            scale,
+            &mut best_d,
+            &mut best_pos,
+            tile_x,
+            tile_y,
+            warp_uniform,
+            f16_search,
+            tiled,
+            tile_w,
+            spatial_radius,
+            width,
+            height,
+            channels,
+            stored_ch,
+        );
+    } else {
+        n_live = spatial_search(
+            ring,
+            search_ring,
+            &search_tile,
+            &current,
+            ref_x,
+            ref_y,
+            centre_slot,
+            sub,
+            base,
+            scale,
+            &mut best_d,
+            &mut best_pos,
+            tile_x,
+            tile_y,
+            warp_uniform,
+            f16_search,
+            tiled,
+            tile_w,
+            spatial_radius,
+            width,
+            height,
+            channels,
+            stored_ch,
+        );
+    }
 
     let ref_idx = CUBE_POS_Y * refs_x + ref_x_clamped;
 
@@ -426,7 +493,9 @@ pub fn collab_fused<S: Float, N: Size>(
                 line[i as usize] = stack[(m * PATCH_SIZE + i) as usize];
             }
             dct8_reg_fwd(&mut line);
-            transpose8(&mut transpose_buf, &mut line, sub, group);
+            if comptime!(probe_skip & 2 == 0) {
+                transpose8(&mut transpose_buf, &mut line, sub, group);
+            }
             dct8_reg_fwd(&mut line);
             #[unroll]
             for i in 0..PATCH_SIZE {
@@ -518,7 +587,9 @@ pub fn collab_fused<S: Float, N: Size>(
                 line[i as usize] = stack[(m * PATCH_SIZE + i) as usize];
             }
             dct8_reg_inv(&mut line);
-            transpose8(&mut transpose_buf, &mut line, sub, group);
+            if comptime!(probe_skip & 2 == 0) {
+                transpose8(&mut transpose_buf, &mut line, sub, group);
+            }
             dct8_reg_inv(&mut line);
             #[unroll]
             for i in 0..PATCH_SIZE {
@@ -528,9 +599,20 @@ pub fn collab_fused<S: Float, N: Size>(
 
         // Every member is written back into its own frame's region, so neighbour-frame members
         // feed the cross-frame ring.
+        if comptime!(probe_skip & 1 != 0) {
+            let mut keep_alive = 0.0f32;
+            #[unroll]
+            for m in 0..PATCH_AREA {
+                keep_alive += stack[m as usize];
+            }
+            if keep_alive == 12345.0f32 {
+                group_weight[ref_idx as usize] = keep_alive;
+            }
+        }
+
         #[unroll]
         for m in 0..MAX_K {
-            if live && m < k_use {
+            if comptime!(probe_skip & 1 == 0) && live && m < k_use {
                 let packed = member_pos[m as usize];
                 let member_x = packed & 0x1FFFu32;
                 let member_y = (packed >> 13u32) & 0x1FFFu32;

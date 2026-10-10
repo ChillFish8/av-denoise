@@ -1,6 +1,7 @@
 use cubecl::prelude::*;
 
 use crate::collab::PATCH_SIZE;
+use crate::collab::kernels::fused::tile::tile_partial;
 use crate::collab::kernels::group::{clamp_top_left, pack_pos_t};
 use crate::collab::kernels::plane_ops::{plane_ssd_reduce8, shift_insert8, shift_insert8_gated};
 use crate::nlmeans::kernels::helpers::read_line;
@@ -158,6 +159,45 @@ pub(crate) fn candidate_distance<S: Float, N: Size>(
     #[comptime] channels: u32,
     #[comptime] stored_ch: u32,
 ) -> f32 {
+    let partial = candidate_partial(
+        ring,
+        search_ring,
+        current,
+        reference,
+        x,
+        y,
+        slot,
+        sub,
+        f16_search,
+        width,
+        height,
+        channels,
+        stored_ch,
+    );
+    plane_ssd_reduce8(partial) * scale
+}
+
+/// One lane's share of the distance to the candidate with top-left `(x, y)` in frame `slot`.
+#[cube]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a buffer, position or comptime shape the read needs"
+)]
+pub(crate) fn candidate_partial<S: Float, N: Size>(
+    ring: &Array<Vector<f32, N>>,
+    search_ring: &Array<Vector<S, N>>,
+    current: &Array<f32>,
+    reference: &Array<Vector<S, Const<2>>>,
+    x: u32,
+    y: u32,
+    slot: u32,
+    sub: u32,
+    #[comptime] f16_search: bool,
+    #[comptime] width: u32,
+    #[comptime] height: u32,
+    #[comptime] channels: u32,
+    #[comptime] stored_ch: u32,
+) -> f32 {
     let mut partial = 0.0f32;
     if comptime!(f16_search) {
         partial = packed_partial(search_ring, reference, x, y, slot, sub, width, height, stored_ch);
@@ -172,7 +212,66 @@ pub(crate) fn candidate_distance<S: Float, N: Size>(
             }
         }
     }
-    plane_ssd_reduce8(partial) * scale
+    partial
+}
+
+/// The distance to the centre-frame candidate at `(x, y)`, read from the cube's search tile when
+/// `tiled` is set and from `search_ring` otherwise.
+#[cube]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a buffer, position or comptime shape the read needs"
+)]
+fn centre_distance<S: Float, N: Size>(
+    ring: &Array<Vector<f32, N>>,
+    search_ring: &Array<Vector<S, N>>,
+    tile: &SharedMemory<S>,
+    current: &Array<f32>,
+    reference: &Array<Vector<S, Const<2>>>,
+    x: u32,
+    y: u32,
+    slot: u32,
+    sub: u32,
+    scale: f32,
+    tile_x: u32,
+    tile_y: u32,
+    #[comptime] f16_search: bool,
+    #[comptime] tiled: bool,
+    #[comptime] tile_w: u32,
+    #[comptime] width: u32,
+    #[comptime] height: u32,
+    #[comptime] channels: u32,
+    #[comptime] stored_ch: u32,
+) -> f32 {
+    let mut distance = 0.0f32;
+
+    if comptime!(tiled) {
+        let column = x - tile_x + sub;
+        let row = y - tile_y;
+        let partial = tile_partial(
+            tile, current, reference, column, row, f16_search, tile_w, channels, stored_ch,
+        );
+        distance = plane_ssd_reduce8(partial) * scale;
+    } else {
+        distance = candidate_distance(
+            ring,
+            search_ring,
+            current,
+            reference,
+            x,
+            y,
+            slot,
+            sub,
+            scale,
+            f16_search,
+            width,
+            height,
+            channels,
+            stored_ch,
+        );
+    }
+
+    distance
 }
 
 /// Scores the centre frame's `spatial_radius` rectangle against the reference patch and keeps the
@@ -188,6 +287,7 @@ pub(crate) fn candidate_distance<S: Float, N: Size>(
 pub(crate) fn spatial_search<S: Float, N: Size>(
     ring: &Array<Vector<f32, N>>,
     search_ring: &Array<Vector<S, N>>,
+    tile: &SharedMemory<S>,
     current: &Array<f32>,
     rx: u32,
     ry: u32,
@@ -197,8 +297,12 @@ pub(crate) fn spatial_search<S: Float, N: Size>(
     scale: f32,
     best_d: &mut f32,
     best_pos: &mut u32,
+    tile_x: u32,
+    tile_y: u32,
     #[comptime] warp_uniform: bool,
     #[comptime] f16_search: bool,
+    #[comptime] tiled: bool,
+    #[comptime] tile_w: u32,
     #[comptime] spatial_radius: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -230,9 +334,10 @@ pub(crate) fn spatial_search<S: Float, N: Size>(
                 let candidate_x = u32::min(wanted_x, s_right);
                 let candidate_y = u32::min(wanted_y, s_bot);
 
-                let scored = candidate_distance(
+                let scored = centre_distance(
                     ring,
                     search_ring,
+                    tile,
                     current,
                     &reference,
                     candidate_x,
@@ -240,7 +345,11 @@ pub(crate) fn spatial_search<S: Float, N: Size>(
                     centre_slot,
                     sub,
                     scale,
+                    tile_x,
+                    tile_y,
                     f16_search,
+                    tiled,
+                    tile_w,
                     width,
                     height,
                     channels,
@@ -256,13 +365,19 @@ pub(crate) fn spatial_search<S: Float, N: Size>(
                 if live_pos && candidate_x == rx && candidate_y == ry {
                     dist = -1.0e38f32;
                 }
-                shift_insert8(
-                    best_d,
-                    best_pos,
-                    dist,
-                    pack_pos_t(candidate_x, candidate_y, 0u32),
-                    sub,
-                );
+
+                // A candidate that does not beat its group's eighth best changes nothing, and the
+                // warp-wide vote keeps the skip uniform across every group in the warp.
+                let worst = plane_shuffle(*best_d, base + 7u32);
+                if plane_any(dist < worst) {
+                    shift_insert8(
+                        best_d,
+                        best_pos,
+                        dist,
+                        pack_pos_t(candidate_x, candidate_y, 0u32),
+                        sub,
+                    );
+                }
             }
         }
     } else {
@@ -270,9 +385,10 @@ pub(crate) fn spatial_search<S: Float, N: Size>(
         while candidate_y <= s_bot {
             let mut candidate_x = s_left;
             while candidate_x <= s_right {
-                let mut dist = candidate_distance(
+                let mut dist = centre_distance(
                     ring,
                     search_ring,
+                    tile,
                     current,
                     &reference,
                     candidate_x,
@@ -280,7 +396,11 @@ pub(crate) fn spatial_search<S: Float, N: Size>(
                     centre_slot,
                     sub,
                     scale,
+                    tile_x,
+                    tile_y,
                     f16_search,
+                    tiled,
+                    tile_w,
                     width,
                     height,
                     channels,
@@ -445,23 +565,29 @@ pub(crate) fn trajectory_search<S: Float, N: Size>(
                             }
 
                             let live_pos = block_scored && in_rect && !skipped;
-                            let scored = candidate_distance(
-                                ring,
-                                search_ring,
-                                anchor,
-                                &reference,
-                                candidate_x,
-                                candidate_y,
-                                slot,
-                                sub,
-                                scale,
-                                f16_search,
-                                width,
-                                height,
-                                channels,
-                                stored_ch,
-                            );
-                            let dist = select(live_pos, scored, 3.0e38f32);
+
+                            // The vote is the same in every lane of the warp, so skipping a
+                            // position no group wants never splits the warp around a shuffle.
+                            let mut dist = 3.0e38f32;
+                            if plane_any(live_pos) {
+                                let scored = candidate_distance(
+                                    ring,
+                                    search_ring,
+                                    anchor,
+                                    &reference,
+                                    candidate_x,
+                                    candidate_y,
+                                    slot,
+                                    sub,
+                                    scale,
+                                    f16_search,
+                                    width,
+                                    height,
+                                    channels,
+                                    stored_ch,
+                                );
+                                dist = select(live_pos, scored, 3.0e38f32);
+                            }
                             let better = dist < frame_d;
                             frame_d = select(better, dist, frame_d);
                             frame_pos = select(better, packed, frame_pos);

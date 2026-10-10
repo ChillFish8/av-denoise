@@ -250,6 +250,7 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
     #[comptime] step: u32,
     #[comptime] blocks_x: u32,
     #[comptime] blocks_y: u32,
+    #[comptime] separable: bool,
 ) {
     let tile_width = comptime!(block_x + 2 * patch_radius);
     let tile_elems = comptime!((block_x + 2 * patch_radius) * (block_y + 2 * patch_radius));
@@ -260,6 +261,15 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
     let mut smem_center = SharedMemory::<Vector<f32, N>>::new(expanded_elems as usize);
     let mut smem_fwd = SharedMemory::<f32>::new(tile_elems as usize);
     let mut smem_bwd = SharedMemory::<f32>::new(tile_elems as usize);
+    let hsum_elems = comptime!(
+        if separable {
+            (block_y + 2 * patch_radius) * block_x
+        } else {
+            1
+        }
+    );
+    let mut hsum_fwd = SharedMemory::<f32>::new(hsum_elems as usize);
+    let mut hsum_bwd = SharedMemory::<f32>::new(hsum_elems as usize);
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -336,6 +346,29 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
 
             sync_cube();
 
+            if comptime!(separable) {
+                let mut row_idx = thread_id;
+                while row_idx < hsum_elems {
+                    let row = row_idx / block_x;
+                    let col = row_idx % block_x;
+                    let mut row_fwd = 0.0f32;
+                    let mut row_bwd = 0.0f32;
+
+                    #[unroll]
+                    for offset_x in 0..comptime!(2 * patch_radius + 1) {
+                        let smem_idx = (row * tile_width + col + offset_x) as usize;
+                        row_fwd += smem_fwd[smem_idx];
+                        row_bwd += smem_bwd[smem_idx];
+                    }
+
+                    hsum_fwd[row_idx as usize] = row_fwd;
+                    hsum_bwd[row_idx as usize] = row_bwd;
+                    row_idx += threads;
+                }
+
+                sync_cube();
+            }
+
             if in_image {
                 let center_tile_x = local_x + patch_radius;
                 let center_tile_y = local_y + patch_radius;
@@ -343,14 +376,23 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
                 let mut sum_fwd = 0.0f32;
                 let mut sum_bwd = 0.0f32;
 
-                for offset_y in 0..patch_size {
-                    for offset_x in 0..patch_size {
-                        let smem_idx = ((center_tile_y - patch_radius + offset_y) * tile_width
-                            + center_tile_x
-                            - patch_radius
-                            + offset_x) as usize;
-                        sum_fwd += smem_fwd[smem_idx];
-                        sum_bwd += smem_bwd[smem_idx];
+                if comptime!(separable) {
+                    #[unroll]
+                    for offset_y in 0..comptime!(2 * patch_radius + 1) {
+                        let hsum_idx = ((local_y + offset_y) * block_x + local_x) as usize;
+                        sum_fwd += hsum_fwd[hsum_idx];
+                        sum_bwd += hsum_bwd[hsum_idx];
+                    }
+                } else {
+                    for offset_y in 0..patch_size {
+                        for offset_x in 0..patch_size {
+                            let smem_idx = ((center_tile_y - patch_radius + offset_y) * tile_width
+                                + center_tile_x
+                                - patch_radius
+                                + offset_x) as usize;
+                            sum_fwd += smem_fwd[smem_idx];
+                            sum_bwd += smem_bwd[smem_idx];
+                        }
                     }
                 }
 
@@ -429,6 +471,7 @@ pub fn nlm_fused_single_window<N: Size>(
     #[comptime] search_radius: u32,
     #[comptime] block_x: u32,
     #[comptime] block_y: u32,
+    #[comptime] separable: bool,
 ) {
     let tile_width = comptime!(block_x + 2 * patch_radius);
     let tile_elems = comptime!((block_x + 2 * patch_radius) * (block_y + 2 * patch_radius));
@@ -438,6 +481,14 @@ pub fn nlm_fused_single_window<N: Size>(
     );
     let mut smem_center = SharedMemory::<Vector<f32, N>>::new(expanded_elems as usize);
     let mut smem_dist = SharedMemory::<f32>::new(tile_elems as usize);
+    let hsum_elems = comptime!(
+        if separable {
+            (block_y + 2 * patch_radius) * block_x
+        } else {
+            1
+        }
+    );
+    let mut hsum_dist = SharedMemory::<f32>::new(hsum_elems as usize);
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -502,19 +553,45 @@ pub fn nlm_fused_single_window<N: Size>(
 
                 sync_cube();
 
+                if comptime!(separable) {
+                    let mut row_idx = thread_id;
+                    while row_idx < hsum_elems {
+                        let row = row_idx / block_x;
+                        let col = row_idx % block_x;
+                        let mut row_sum = 0.0f32;
+
+                        #[unroll]
+                        for offset_x in 0..comptime!(2 * patch_radius + 1) {
+                            row_sum += smem_dist[(row * tile_width + col + offset_x) as usize];
+                        }
+
+                        hsum_dist[row_idx as usize] = row_sum;
+                        row_idx += threads;
+                    }
+
+                    sync_cube();
+                }
+
                 if in_image {
                     let center_tile_x = local_x + patch_radius;
                     let center_tile_y = local_y + patch_radius;
                     let patch_size = 2 * patch_radius + 1;
                     let mut patch_sum = 0.0f32;
 
-                    for offset_y in 0..patch_size {
-                        for offset_x in 0..patch_size {
-                            let smem_idx = ((center_tile_y - patch_radius + offset_y) * tile_width
-                                + center_tile_x
-                                - patch_radius
-                                + offset_x) as usize;
-                            patch_sum += smem_dist[smem_idx];
+                    if comptime!(separable) {
+                        #[unroll]
+                        for offset_y in 0..comptime!(2 * patch_radius + 1) {
+                            patch_sum += hsum_dist[((local_y + offset_y) * block_x + local_x) as usize];
+                        }
+                    } else {
+                        for offset_y in 0..patch_size {
+                            for offset_x in 0..patch_size {
+                                let smem_idx = ((center_tile_y - patch_radius + offset_y) * tile_width
+                                    + center_tile_x
+                                    - patch_radius
+                                    + offset_x) as usize;
+                                patch_sum += smem_dist[smem_idx];
+                            }
                         }
                     }
 

@@ -131,6 +131,7 @@ fn run_fine(
                 search_radius,
                 use_seed,
                 blocks_x,
+                1,
             ),
         }
     }

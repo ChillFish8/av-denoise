@@ -80,6 +80,7 @@ const SPLIT_MV_SPACING: i32 = 8;
 
 #[derive(Clone)]
 pub struct CollabFusedInput {
+    search_ring: Handle,
     pub ring: Handle,
     pub mv_field: Handle,
     pub confidence: Handle,
@@ -117,6 +118,12 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
 
         let ring_bytes = f32::as_bytes(&ring_data);
         let ring = self.client.create_from_slice(ring_bytes);
+        let search_ring = if std::env::var("BENCH_F16").is_ok() {
+            let halves: Vec<half::f16> = ring_data.iter().map(|v| half::f16::from_f32(*v)).collect();
+            self.client.create_from_slice(half::f16::as_bytes(&halves))
+        } else {
+            ring.clone()
+        };
 
         let blocks_x = WIDTH.div_ceil(BLK_STEP);
         let blocks_y = HEIGHT.div_ceil(BLK_STEP);
@@ -188,6 +195,7 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
 
         CollabFusedInput {
             ring,
+            search_ring,
             mv_field,
             confidence,
             neighbour_slots,
@@ -229,7 +237,12 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
         let dct_profile = dct_noise_profile(0.0);
         let group_weight_scale = weight_scale(SIGMA, &dct_profile);
         let accum_scale = cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS);
-        let uniform_search = needs_warp_uniform_search(&self.client);
+        let uniform_search = match std::env::var("BENCH_WARP").as_deref() {
+            Ok("1") => true,
+            Ok("0") => false,
+            _ => needs_warp_uniform_search(&self.client),
+        };
+        let f16_search = std::env::var("BENCH_F16").is_ok();
         let frames_per_volume = grid_frames(RADIUS);
 
         let params = CollabParams {
@@ -242,10 +255,12 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
             weight_scale: group_weight_scale,
             accum_scale,
             warp_uniform: uniform_search,
-            f16_search: false,
+            f16_search,
             radius: RADIUS,
             grid_frames: frames_per_volume,
-            refine: REFINE,
+            refine: std::env::var("BENCH_REFINE")
+                .map(|v| v.parse().unwrap())
+                .unwrap_or(REFINE),
             mv_stride: neighbour_mv_stride,
             conf_stride: neighbour_conf_stride,
             blk_step: BLK_STEP,
@@ -256,7 +271,9 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
             height: HEIGHT,
             channels: self.channels,
             k_max: K_MAX,
-            spatial_radius: SPATIAL_RADIUS,
+            spatial_radius: std::env::var("BENCH_SR")
+                .map(|v| v.parse().unwrap())
+                .unwrap_or(SPATIAL_RADIUS),
             refs_x,
             refs_y,
             map_cols,
@@ -268,8 +285,12 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
             client: self.client.clone(),
             ring: args.ring.clone(),
             ring_len: args.ring_len,
-            search_ring: args.ring,
-            search_len: stored_ch as usize,
+            search_ring: args.search_ring,
+            search_len: if f16_search {
+                args.ring_len
+            } else {
+                stored_ch as usize
+            },
             mv_field: args.mv_field,
             mv_len: (2 * RADIUS * neighbour_mv_stride) as usize,
             confidence: args.confidence,

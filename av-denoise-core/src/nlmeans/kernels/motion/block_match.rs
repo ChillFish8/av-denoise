@@ -83,6 +83,7 @@ pub fn nlm_mc_block_match_coarse(
     stage_window(
         neighbour,
         &mut window,
+        0u32,
         window_x0,
         window_y0,
         thread_id,
@@ -97,8 +98,11 @@ pub fn nlm_mc_block_match_coarse(
 
     blocked_window_sads(
         &centre_smem,
+        0u32,
         &window,
+        0u32,
         &mut sad_scratch,
+        0u32,
         thread_id,
         threads,
         blksize,
@@ -107,25 +111,15 @@ pub fn nlm_mc_block_match_coarse(
 
     sync_cube();
 
+    let best_index = parallel_argmin(&sad_scratch, 0u32, thread_id, candidates);
+    let best_sad = sad_scratch[best_index as usize];
+
     if thread_id != 0 {
         terminate!();
     }
 
-    // A huge start rather than a negative initialiser, which cubecl's macro does not lift cleanly.
-    let mut best_sad = 1.0e30f32;
-    let mut best_dx = 0i32;
-    let mut best_dy = 0i32;
-
-    for dy in 0..window_side {
-        for dx in 0..window_side {
-            let candidate_sad = sad_scratch[(dy * window_side + dx) as usize];
-            if candidate_sad < best_sad {
-                best_sad = candidate_sad;
-                best_dx = dx as i32 - search_radius as i32;
-                best_dy = dy as i32 - search_radius as i32;
-            }
-        }
-    }
+    let mut best_dx = (best_index % window_side) as i32 - search_radius as i32;
+    let mut best_dy = (best_index / window_side) as i32 - search_radius as i32;
 
     // A tie resolves to zero motion, so a flat block never seeds the fine pass from a shifted
     // position that no comparison preferred.
@@ -207,8 +201,14 @@ pub fn nlm_mc_block_match_fine(
     #[comptime] search_radius: u32,
     use_seed: u32,
     #[comptime] blocks_x: u32,
+    #[comptime] blocks_per_cube: u32,
 ) {
-    let block_col = CUBE_POS_X;
+    // Each image block keeps its own 32-thread wave, stacked along z, so one cube can hold
+    // several without changing how a block's threads cooperate.
+    let sub_block = UNIT_POS_Z;
+    let wanted_col = CUBE_POS_X * blocks_per_cube + sub_block;
+    let block_live = wanted_col < blocks_x;
+    let block_col = wanted_col.min(blocks_x - 1u32);
     let block_row = CUBE_POS_Y;
 
     let mv_slot = ((block_row * blocks_x + block_col) * 2) as usize;
@@ -245,12 +245,15 @@ pub fn nlm_mc_block_match_fine(
     let window_side = comptime!(2 * search_radius + 1);
     let candidates = comptime!(window_side * window_side);
     let block_pixels = comptime!(blksize * blksize);
-    let mut sad_scratch = SharedMemory::<f32>::new(candidates as usize);
-    let mut centre_smem = SharedMemory::<f32>::new(block_pixels as usize);
+    let mut sad_scratch = SharedMemory::<f32>::new(comptime!(candidates * blocks_per_cube) as usize);
+    let mut centre_smem = SharedMemory::<f32>::new(comptime!(block_pixels * blocks_per_cube) as usize);
+    let sad_base = sub_block * candidates;
+    let centre_base = sub_block * block_pixels;
     let window_stride_len = comptime!(window_stride(blksize, search_radius));
     let window_rows = comptime!(blksize + 2 * search_radius);
     let window_area = comptime!(window_stride_len * window_rows);
-    let mut window = SharedMemory::<f32>::new(window_area as usize);
+    let mut window = SharedMemory::<f32>::new(comptime!(window_area * blocks_per_cube) as usize);
+    let window_base = sub_block * window_area;
 
     let mut pixel_y = local_y;
     while pixel_y < blksize {
@@ -258,7 +261,7 @@ pub fn nlm_mc_block_match_fine(
         while pixel_x < blksize {
             let clamped_x = clamp_i32(block_origin_x + pixel_x as i32, width as i32);
             let clamped_y = clamp_i32(block_origin_y + pixel_y as i32, height as i32);
-            centre_smem[(pixel_y * blksize + pixel_x) as usize] =
+            centre_smem[(centre_base + pixel_y * blksize + pixel_x) as usize] =
                 centre[(clamped_y * width as i32 + clamped_x) as usize];
             pixel_x += CUBE_DIM_X;
         }
@@ -271,6 +274,7 @@ pub fn nlm_mc_block_match_fine(
     stage_window(
         neighbour,
         &mut window,
+        window_base,
         window_x0,
         window_y0,
         thread_id,
@@ -285,8 +289,11 @@ pub fn nlm_mc_block_match_fine(
 
     blocked_window_sads(
         &centre_smem,
+        centre_base,
         &window,
+        window_base,
         &mut sad_scratch,
+        sad_base,
         thread_id,
         threads,
         blksize,
@@ -295,28 +302,19 @@ pub fn nlm_mc_block_match_fine(
 
     sync_cube();
 
-    if thread_id != 0 {
+    let best_index = parallel_argmin(&sad_scratch, sad_base, thread_id, candidates);
+
+    if thread_id != 0 || !block_live {
         terminate!();
     }
 
-    let mut best_sad = 1.0e30f32;
-    let mut best_dx = seed_dx;
-    let mut best_dy = seed_dy;
-
-    for dy in 0..window_side {
-        for dx in 0..window_side {
-            let candidate_sad = sad_scratch[(dy * window_side + dx) as usize];
-            if candidate_sad < best_sad {
-                best_sad = candidate_sad;
-                best_dx = seed_dx + (dx as i32 - search_radius as i32);
-                best_dy = seed_dy + (dy as i32 - search_radius as i32);
-            }
-        }
-    }
+    let mut best_sad = sad_scratch[(sad_base + best_index) as usize];
+    let mut best_dx = seed_dx + ((best_index % window_side) as i32 - search_radius as i32);
+    let mut best_dy = seed_dy + ((best_index / window_side) as i32 - search_radius as i32);
 
     // A tie resolves to the seed. On a flat block every candidate ties at zero, and any other
     // winner would warp in unpreferred pixels with a perfect confidence.
-    let seed_sad = sad_scratch[(search_radius * window_side + search_radius) as usize];
+    let seed_sad = sad_scratch[(sad_base + search_radius * window_side + search_radius) as usize];
     if seed_sad <= best_sad {
         best_sad = seed_sad;
         best_dx = seed_dx;
@@ -343,6 +341,45 @@ pub fn nlm_mc_block_match_fine(
     }
 }
 
+/// The index of the lowest SAD in `sad_scratch`, the first in row-major order on a tie.
+///
+/// Every lane of the 32-thread cube takes part and every lane gets the same answer. Each lane
+/// scans every 32nd candidate, then a shuffle reduction keeps the lower SAD, or the lower index
+/// on a tie, so it picks what a serial scan with a strict `<` picks.
+#[cube]
+fn parallel_argmin(
+    sad_scratch: &SharedMemory<f32>,
+    sad_base: u32,
+    thread_id: u32,
+    #[comptime] candidates: u32,
+) -> u32 {
+    let mut best_sad = 1.0e30f32;
+    // A lane with no candidate keeps the `1.0e30` start, which every real SAD beats.
+    let mut best_index = thread_id;
+
+    let mut index = thread_id;
+    while index < candidates {
+        let candidate_sad = sad_scratch[(sad_base + index) as usize];
+        if candidate_sad < best_sad {
+            best_sad = candidate_sad;
+            best_index = index;
+        }
+        index += BLOCK_MATCH_THREADS;
+    }
+
+    #[unroll]
+    for level in 0..5u32 {
+        let offset = comptime!(16u32 >> level);
+        let other_sad = plane_shuffle_xor(best_sad, offset);
+        let other_index = plane_shuffle_xor(best_index, offset);
+        let takes_other = other_sad < best_sad || (other_sad == best_sad && other_index < best_index);
+        best_sad = select(takes_other, other_sad, best_sad);
+        best_index = select(takes_other, other_index, best_index);
+    }
+
+    best_index
+}
+
 /// Stages every neighbour pixel the search reaches into `window`, clamped to the frame.
 ///
 /// Window row `window_y` and column `window_x` hold the pixel at
@@ -355,6 +392,7 @@ pub fn nlm_mc_block_match_fine(
 fn stage_window(
     neighbour: &Array<f32>,
     window: &mut SharedMemory<f32>,
+    window_base: u32,
     window_x0: i32,
     window_y0: i32,
     thread_id: u32,
@@ -374,7 +412,7 @@ fn stage_window(
         let window_x = index % stride;
         let source_x = clamp_i32(window_x0 + window_x as i32, width as i32);
         let source_y = clamp_i32(window_y0 + window_y as i32, height as i32);
-        window[index as usize] = neighbour[(source_y * width as i32 + source_x) as usize];
+        window[(window_base + index) as usize] = neighbour[(source_y * width as i32 + source_x) as usize];
         index += threads;
     }
 }
@@ -388,8 +426,11 @@ fn stage_window(
 #[cube]
 fn blocked_window_sads(
     centre_smem: &SharedMemory<f32>,
+    centre_base: u32,
     window: &SharedMemory<f32>,
+    window_base: u32,
     sad_scratch: &mut SharedMemory<f32>,
+    sad_base: u32,
     thread_id: u32,
     threads: u32,
     #[comptime] blksize: u32,
@@ -417,12 +458,12 @@ fn blocked_window_sads(
             let mut row = Array::<f32>::new(row_span as usize);
             #[unroll]
             for i in 0..row_span {
-                row[i as usize] = window[(row_start + i) as usize];
+                row[i as usize] = window[(window_base + row_start + i) as usize];
             }
 
             #[unroll]
             for ix in 0..blksize {
-                let centre_val = centre_smem[(iy * blksize + ix) as usize];
+                let centre_val = centre_smem[(centre_base + iy * blksize + ix) as usize];
                 #[unroll]
                 for k in 0..OFFSETS_PER_THREAD {
                     let diff = centre_val - row[comptime!(ix + k) as usize];
@@ -435,7 +476,7 @@ fn blocked_window_sads(
         for k in 0..OFFSETS_PER_THREAD {
             let dx = first_dx + k;
             if dx < window_side {
-                sad_scratch[(dy * window_side + dx) as usize] = sads[k as usize];
+                sad_scratch[(sad_base + dy * window_side + dx) as usize] = sads[k as usize];
             }
         }
 

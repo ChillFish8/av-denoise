@@ -347,6 +347,9 @@ fn run_scatter_stage_windowed(
             0.0f32,
             false,
             COLLAB_GROUPS,
+            false,
+            false,
+            0,
         );
         collab_normalise::launch_unchecked::<R>(
             &client,

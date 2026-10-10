@@ -151,6 +151,7 @@ impl<R: Runtime> WindowLaunch<R> {
         let grid = CubeCount::new_2d(cubes_x, cubes_y);
         let dim = CubeDim::new_2d(block_x, block_y);
         let vector_size = shape.stored_ch as usize;
+        let separable = std::env::var("AVD_PROBE_SEPARABLE").is_ok();
 
         match &self.pass {
             WindowPass::Single {
@@ -177,6 +178,7 @@ impl<R: Runtime> WindowLaunch<R> {
                     shape.search_radius,
                     block_x,
                     block_y,
+                    separable,
                 );
             },
             WindowPass::Pair {
@@ -213,6 +215,7 @@ impl<R: Runtime> WindowLaunch<R> {
                     confidence.step,
                     confidence.blocks_x,
                     confidence.blocks_y,
+                    separable,
                 );
             },
         }

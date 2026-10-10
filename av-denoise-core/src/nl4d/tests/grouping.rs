@@ -196,6 +196,9 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
             0.0f32,
             false,
             COLLAB_GROUPS,
+            false,
+            false,
+            0,
         );
     }
 

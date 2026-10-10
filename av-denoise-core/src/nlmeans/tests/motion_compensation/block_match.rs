@@ -54,6 +54,7 @@ fn run_fine_block_match_single_block(
             search_radius,
             0u32,
             1,
+            1,
         );
     }
 
@@ -146,6 +147,7 @@ fn block_match_fine_argmin_finds_clean_shift() {
             search_radius,
             0u32,
             blocks_x,
+            1,
         );
     }
 

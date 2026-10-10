@@ -65,8 +65,11 @@ pub(crate) fn run_confidence_for_neighbour<R: Runtime>(
     let conf_slot_len = (ctx.blocks_x as usize) * (ctx.blocks_y as usize);
     let mv_slot_len = (ctx.blocks_x as usize) * (ctx.blocks_y as usize) * 2;
 
-    let grid = CubeCount::new_2d(ctx.blocks_x, ctx.blocks_y);
-    let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
+    let bm_blocks: u32 = std::env::var("AVD_PROBE_BM_BLOCKS")
+        .map(|v| v.parse().unwrap())
+        .unwrap_or(1);
+    let dim = CubeDim::new_3d(BLOCK_MATCH_THREADS, 1, bm_blocks);
+    let grid = CubeCount::new_2d(ctx.blocks_x.div_ceil(bm_blocks), ctx.blocks_y);
 
     unsafe {
         nlm_mc_block_match_fine::launch_unchecked::<R>(
@@ -87,6 +90,7 @@ pub(crate) fn run_confidence_for_neighbour<R: Runtime>(
             ctx.search_radius,
             0u32,
             ctx.blocks_x,
+            bm_blocks,
         );
     }
 

@@ -458,6 +458,9 @@ fn run_spatial_only(
             0.0f32,
             false,
             COLLAB_GROUPS,
+            false,
+            false,
+            0,
         );
 
         collab_normalise::launch_unchecked::<R>(
@@ -844,6 +847,9 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 0.0f32,
                 false,
                 COLLAB_GROUPS,
+                false,
+                false,
+                0,
             );
 
             collab_normalise::launch_unchecked::<R>(
