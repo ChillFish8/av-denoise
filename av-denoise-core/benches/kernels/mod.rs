@@ -151,6 +151,12 @@ pub fn print_header() {
 
 pub fn run<B: Benchmark>(bench: B) {
     let name = bench.name();
+    if let Ok(filter) = std::env::var("BENCH_FILTER")
+        && !filter.split('|').any(|pattern| name.contains(pattern))
+    {
+        return;
+    }
+
     match bench.run(TimingMethod::Device) {
         Ok(durations) => {
             let computations = BenchmarkComputations::new(&durations);

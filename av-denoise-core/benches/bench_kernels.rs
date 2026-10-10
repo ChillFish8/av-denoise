@@ -385,10 +385,17 @@ fn main() {
         run_all::<cubecl::wgpu::WgpuRuntime>("vulkan", &device);
     }
 
-    #[cfg(not(feature = "vulkan"))]
+    #[cfg(feature = "cuda")]
+    {
+        let device = cubecl::cuda::CudaDevice::new(0);
+        println!("  device:   {device:?}");
+        run_all::<cubecl::cuda::CudaRuntime>("cuda", &device);
+    }
+
+    #[cfg(not(any(feature = "vulkan", feature = "cuda")))]
     {
         let _ = cli;
-        eprintln!("No GPU backend enabled. Run with --features vulkan");
+        eprintln!("No GPU backend enabled. Run with --features vulkan or --features cuda");
         std::process::exit(1);
     }
 }
