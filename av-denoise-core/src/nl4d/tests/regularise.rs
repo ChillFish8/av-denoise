@@ -1,13 +1,18 @@
 use cubecl::prelude::*;
 
 use super::helpers::{R, make_client};
-use crate::nl4d::kernels::nl4d_mv_regularise;
+use crate::nl4d::kernels::{nl4d_mv_regularise, nl4d_mv_regularise_coop};
 use crate::nlmeans::motion::THSAD_PIXEL;
 
 const BLKSIZE: u32 = 16;
 const STEP: u32 = 8;
 
-/// One launch over a `blocks_x x blocks_y` grid, returning the output field and confidence.
+#[derive(Clone, Copy, Debug)]
+enum Variant {
+    Serial(u32, u32),
+    Cooperative(u32, u32),
+}
+
 fn run(
     width: u32,
     height: u32,
@@ -15,6 +20,33 @@ fn run(
     neighbour: &[f32],
     mv_in: &[i32],
     lambda: f32,
+) -> (Vec<i32>, Vec<f32>) {
+    run_variant(
+        width,
+        height,
+        centre,
+        neighbour,
+        mv_in,
+        lambda,
+        BLKSIZE,
+        Variant::Serial(8, 8),
+    )
+}
+
+/// One launch over a `blocks_x x blocks_y` grid, returning the output field and confidence.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the helper binds the kernel's inputs and shape"
+)]
+fn run_variant(
+    width: u32,
+    height: u32,
+    centre: &[f32],
+    neighbour: &[f32],
+    mv_in: &[i32],
+    lambda: f32,
+    blksize: u32,
+    variant: Variant,
 ) -> (Vec<i32>, Vec<f32>) {
     let client = make_client();
     let blocks_x = width.div_ceil(STEP);
@@ -30,31 +62,59 @@ fn run(
     let mv_in_buf = client.create_from_slice(mv_in_bytes);
     let mv_out = client.empty(2 * blocks * size_of::<i32>());
     let conf_out = client.empty(blocks * size_of::<f32>());
-    let thsad = (BLKSIZE * BLKSIZE) as f32 * THSAD_PIXEL;
+    let lambda_pixel = lambda * (blksize * blksize) as f32 * THSAD_PIXEL;
+    let thsad = (blksize * blksize) as f32 * THSAD_PIXEL;
 
     let grid = CubeCount::new_2d(blocks_x, blocks_y);
-    let dim = CubeDim::new_2d(8, 8);
+    let (dim_x, dim_y) = match variant {
+        Variant::Serial(dim_x, dim_y) | Variant::Cooperative(dim_x, dim_y) => (dim_x, dim_y),
+    };
+    let dim = CubeDim::new_2d(dim_x, dim_y);
 
-    unsafe {
-        nl4d_mv_regularise::launch_unchecked::<R>(
-            &client,
-            grid,
-            dim,
-            ArrayArg::from_raw_parts(centre_buf, centre.len()),
-            ArrayArg::from_raw_parts(neighbour_buf, neighbour.len()),
-            ArrayArg::from_raw_parts(mv_in_buf, 2 * blocks),
-            ArrayArg::from_raw_parts(mv_out.clone(), 2 * blocks),
-            ArrayArg::from_raw_parts(conf_out.clone(), blocks),
-            lambda * (BLKSIZE * BLKSIZE) as f32 * THSAD_PIXEL,
-            0.0,
-            thsad,
-            width,
-            height,
-            BLKSIZE,
-            STEP,
-            blocks_x,
-            blocks_y,
-        );
+    match variant {
+        Variant::Serial(..) => unsafe {
+            nl4d_mv_regularise::launch_unchecked::<R>(
+                &client,
+                grid,
+                dim,
+                ArrayArg::from_raw_parts(centre_buf, centre.len()),
+                ArrayArg::from_raw_parts(neighbour_buf, neighbour.len()),
+                ArrayArg::from_raw_parts(mv_in_buf, 2 * blocks),
+                ArrayArg::from_raw_parts(mv_out.clone(), 2 * blocks),
+                ArrayArg::from_raw_parts(conf_out.clone(), blocks),
+                lambda_pixel,
+                0.0,
+                thsad,
+                width,
+                height,
+                blksize,
+                STEP,
+                blocks_x,
+                blocks_y,
+            );
+        },
+        Variant::Cooperative(..) => unsafe {
+            nl4d_mv_regularise_coop::launch_unchecked::<R>(
+                &client,
+                grid,
+                dim,
+                ArrayArg::from_raw_parts(centre_buf, centre.len()),
+                ArrayArg::from_raw_parts(neighbour_buf, neighbour.len()),
+                ArrayArg::from_raw_parts(mv_in_buf, 2 * blocks),
+                ArrayArg::from_raw_parts(mv_out.clone(), 2 * blocks),
+                ArrayArg::from_raw_parts(conf_out.clone(), blocks),
+                lambda_pixel,
+                0.0,
+                thsad,
+                width,
+                height,
+                blksize,
+                STEP,
+                blocks_x,
+                blocks_y,
+                dim_x * dim_y,
+            );
+        },
     }
 
     let mv_bytes = client.read_one(mv_out).expect("mv readback");
@@ -268,4 +328,60 @@ fn confidence_follows_the_winning_vector() {
         "right wins its neighbour's exact match (candidate 2), so confidence must be high, got {}",
         confidence[right]
     );
+}
+
+/// A field with a spread of vectors, so every candidate slot holds something different.
+fn varied_field(blocks: usize) -> Vec<i32> {
+    (0..2 * blocks).map(|index| (index * 7 % 11) as i32 - 5).collect()
+}
+
+fn assert_variant_matches_serial(blksize: u32, variant: Variant) {
+    let width = 200;
+    let height = 120;
+    let blocks = (width.div_ceil(STEP) * height.div_ceil(STEP)) as usize;
+    let centre = textured(width, height, 1);
+    let neighbour = textured(width, height, 2);
+    let field = varied_field(blocks);
+
+    let baseline = Variant::Serial(8, 8);
+    let (want_field, want_conf) =
+        run_variant(width, height, &centre, &neighbour, &field, 0.5, blksize, baseline);
+    let (got_field, got_conf) =
+        run_variant(width, height, &centre, &neighbour, &field, 0.5, blksize, variant);
+
+    assert_eq!(
+        got_field, want_field,
+        "{variant:?} at blksize {blksize} picked different vectors"
+    );
+    for (block, (got, want)) in got_conf.iter().zip(&want_conf).enumerate() {
+        let diff = (got - want).abs();
+        assert!(
+            diff <= 1e-4,
+            "{variant:?} block {block} confidence {got} vs {want}"
+        );
+    }
+}
+
+#[test]
+fn serial_8x4_matches_8x8() {
+    assert_variant_matches_serial(16, Variant::Serial(8, 4));
+    assert_variant_matches_serial(8, Variant::Serial(8, 4));
+}
+
+#[test]
+fn serial_4x4_matches_8x8() {
+    assert_variant_matches_serial(16, Variant::Serial(4, 4));
+    assert_variant_matches_serial(8, Variant::Serial(4, 4));
+}
+
+#[test]
+fn cooperative_8x4_matches_serial() {
+    assert_variant_matches_serial(16, Variant::Cooperative(8, 4));
+    assert_variant_matches_serial(8, Variant::Cooperative(8, 4));
+}
+
+#[test]
+fn cooperative_8x8_matches_serial() {
+    assert_variant_matches_serial(16, Variant::Cooperative(8, 8));
+    assert_variant_matches_serial(8, Variant::Cooperative(8, 8));
 }

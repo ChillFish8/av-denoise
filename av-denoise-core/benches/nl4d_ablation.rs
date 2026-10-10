@@ -15,6 +15,7 @@ use av_denoise_core::bench_api::collab::kernels::aggregate::{
 use av_denoise_core::bench_api::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
 use av_denoise_core::bench_api::collab::kernels::transforms::dct_noise_profile;
 use av_denoise_core::bench_api::collab::{
+    COLLAB_GROUPS,
     PATCH_SIZE,
     grid_frames,
     needs_warp_uniform_search,
@@ -335,6 +336,7 @@ impl<R: Runtime> Rig<R> {
                 map_rows,
                 POOL_RATIO,
                 pooled,
+                COLLAB_GROUPS,
             );
         }
     }

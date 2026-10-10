@@ -6,7 +6,7 @@ use super::nl4d_pool_ratio;
 use super::params::Nl4dParams;
 use super::regularise::run_regularise;
 use super::snapshot::{LastFields, MotionSnapshot, read_snapshot};
-use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
+use crate::collab::geometry::{ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{
     collab_normalise,
     collab_zero_accum,
@@ -14,7 +14,7 @@ use crate::collab::kernels::aggregate::{
     kaiser_window,
     weight_scale,
 };
-use crate::collab::kernels::fused::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF, collab_fused};
+use crate::collab::kernels::fused::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, PATCH_SIZE, grid_frames, needs_warp_uniform_search, supports_f16_search};
 use crate::engine::{DevicePlane, SampleFormat};
@@ -30,6 +30,8 @@ use crate::nlmeans::{
     RingView,
     StrengthMapParams,
 };
+use crate::tune;
+use crate::tune::collab::{CollabLaunch, CollabParams};
 
 /// Which accumulator regions a pass zeroes before scattering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -717,17 +719,17 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 .search_input
                 .clone()
                 .expect("the f16 search enables the search ring");
-            self.launch_collab_fused::<half::f16>(&client, view, search_handle, accum_ring_len, pass);
+            self.launch_collab_fused(&client, view, search_handle, accum_ring_len, pass);
         } else {
             let placeholder = view.input.clone();
-            self.launch_collab_fused::<f32>(&client, view, placeholder, stored_ch as usize, pass);
+            self.launch_collab_fused(&client, view, placeholder, stored_ch as usize, pass);
         }
 
         Ok(())
     }
 
-    /// Launches `collab_fused` for one pass, with its search ring read as `S`.
-    fn launch_collab_fused<S: Float>(
+    /// Launches `collab_fused` for one pass through the tuner.
+    fn launch_collab_fused(
         &self,
         client: &ComputeClient<R>,
         view: &RingView,
@@ -736,21 +738,16 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         pass: FusedPass,
     ) {
         let stored_ch = pass.stored_ch;
-        let accum_ring_len = pass.accum_ring_len;
-        let wsum_ring_len = pass.wsum_ring_len;
         let neighbours = pass.neighbours;
-        let channels_count = self.channels.count();
         let mv_len = (neighbours * view.mv_stride) as usize;
         let conf_len = (neighbours * view.conf_stride) as usize;
         let neighbour_slots_len = view.neighbour_slots.len();
         let map_len = (self.map_cols * self.map_rows) as usize;
+        let channels_count = self.channels.count();
 
         let refs_x = refs_along(self.width);
         let refs_y = refs_along(self.height);
         let refs = ref_count(self.width, self.height);
-        let collab_cubes_x = fused_cubes_x(self.width);
-        let collab_grid = CubeCount::new_2d(collab_cubes_x, refs_y);
-        let collab_dim = CubeDim::new_1d(64);
 
         let motion_ctx = self.front.motion_ctx();
         let frames_per_volume = grid_frames(self.temporal_radius);
@@ -759,56 +756,66 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         // one frame and scattered into another.
         let centre_slot = view.centre_slot;
 
-        unsafe {
-            collab_fused::launch_unchecked::<S, R>(
-                client,
-                collab_grid,
-                collab_dim,
-                stored_ch as usize,
-                ArrayArg::from_raw_parts(view.input.clone(), accum_ring_len),
-                ArrayArg::from_raw_parts(search_ring, search_len),
-                ArrayArg::from_raw_parts(pass.mv_field, mv_len.max(1)),
-                ArrayArg::from_raw_parts(pass.confidence, conf_len.max(1)),
-                ArrayArg::from_raw_parts(pass.neighbour_slots, neighbour_slots_len.max(1)),
-                ArrayArg::from_raw_parts(self.sigma_buf.clone(), stored_ch as usize),
-                ArrayArg::from_raw_parts(pass.noise_curve, NOISE_CURVE_BINS),
-                ArrayArg::from_raw_parts(pass.strength_map, map_len),
-                ArrayArg::from_raw_parts(self.dct_profile_buf.clone(), 8),
-                ArrayArg::from_raw_parts(self.kaiser_buf.clone(), PATCH_SIZE as usize),
-                ArrayArg::from_raw_parts(self.accum.clone(), accum_ring_len),
-                ArrayArg::from_raw_parts(self.wsum.clone(), wsum_ring_len),
-                ArrayArg::from_raw_parts(self.group_weight.clone(), refs),
-                centre_slot,
-                self.c_min,
-                self.lambda_ht,
-                pass.curve_valid,
-                pass.map_mode,
-                pass.weight_norm,
-                self.accum_scale,
-                self.warp_uniform,
-                self.f16_search,
-                self.temporal_radius,
-                frames_per_volume,
-                self.refine,
-                view.mv_stride,
-                view.conf_stride,
-                motion_ctx.step,
-                motion_ctx.blksize,
-                motion_ctx.blocks_x,
-                motion_ctx.blocks_y,
-                self.width,
-                self.height,
-                channels_count,
-                self.k_max,
-                stored_ch,
-                self.spatial_radius,
-                refs_x,
-                self.map_cols,
-                self.map_rows,
-                pool_ratio,
-                self.pooled_threshold,
-            );
-        }
+        let params = CollabParams {
+            stored_ch,
+            centre_slot,
+            c_min: self.c_min,
+            lambda_ht: self.lambda_ht,
+            curve_valid: pass.curve_valid,
+            map_mode: pass.map_mode,
+            weight_scale: pass.weight_norm,
+            accum_scale: self.accum_scale,
+            warp_uniform: self.warp_uniform,
+            f16_search: self.f16_search,
+            radius: self.temporal_radius,
+            grid_frames: frames_per_volume,
+            refine: self.refine,
+            mv_stride: view.mv_stride,
+            conf_stride: view.conf_stride,
+            blk_step: motion_ctx.step,
+            blksize: motion_ctx.blksize,
+            blocks_x: motion_ctx.blocks_x,
+            blocks_y: motion_ctx.blocks_y,
+            width: self.width,
+            height: self.height,
+            channels: channels_count,
+            k_max: self.k_max,
+            spatial_radius: self.spatial_radius,
+            refs_x,
+            refs_y,
+            map_cols: self.map_cols,
+            map_rows: self.map_rows,
+            pool_ratio,
+            pooled: self.pooled_threshold,
+        };
+
+        let collab = CollabLaunch {
+            client: client.clone(),
+            ring: view.input.clone(),
+            ring_len: pass.accum_ring_len,
+            search_ring,
+            search_len,
+            mv_field: pass.mv_field,
+            mv_len: mv_len.max(1),
+            confidence: pass.confidence,
+            conf_len: conf_len.max(1),
+            neighbour_slots: pass.neighbour_slots,
+            neighbour_slots_len: neighbour_slots_len.max(1),
+            sigma: self.sigma_buf.clone(),
+            noise_curve: pass.noise_curve,
+            strength_map: pass.strength_map,
+            map_len,
+            dct_profile: self.dct_profile_buf.clone(),
+            kaiser: self.kaiser_buf.clone(),
+            accum: self.accum.clone(),
+            accum_len: pass.accum_ring_len,
+            wsum: self.wsum.clone(),
+            wsum_len: pass.wsum_ring_len,
+            group_weight: self.group_weight.clone(),
+            refs,
+            params,
+        };
+        tune::collab::launch(collab);
     }
 
     /// Saves the last pass's vectors from the centre to the next frame for grain export.

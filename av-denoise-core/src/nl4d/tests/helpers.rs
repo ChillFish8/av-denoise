@@ -13,7 +13,7 @@ use crate::nlmeans::{
     PrefilterMode,
 };
 
-pub(super) type R = WgpuRuntime;
+pub(crate) type R = WgpuRuntime;
 
 pub(super) const SIGMA: f32 = 6.0 / 255.0;
 pub(super) const SPATIAL_RADIUS: u32 = 9;
@@ -111,7 +111,7 @@ pub(super) fn psnr(output: &[f32], reference: &[f32]) -> f64 {
     10.0 * (1.0f64 / mse).log10()
 }
 
-pub(super) fn make_client() -> ComputeClient<R> {
+pub(crate) fn make_client() -> ComputeClient<R> {
     let device = <R as Runtime>::Device::default();
     R::client(&device)
 }

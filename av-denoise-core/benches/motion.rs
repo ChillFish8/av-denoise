@@ -232,6 +232,7 @@ fn run_kernels<R: Runtime>(backend: &str, client: &ComputeClient<R>) {
     });
     run(MvRegulariseBench {
         client: client.clone(),
+        candidate: 0,
     });
 
     for &(channels, channel_name) in CHANNELS {

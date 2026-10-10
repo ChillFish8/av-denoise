@@ -24,10 +24,19 @@ use crate::collab::kernels::aggregate::{
 };
 use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{MAX_K, MAX_TEMPORAL_RADIUS, PATCH_SIZE, grid_frames, needs_warp_uniform_search};
+use crate::collab::{
+    COLLAB_GROUPS,
+    MAX_K,
+    MAX_TEMPORAL_RADIUS,
+    PATCH_SIZE,
+    grid_frames,
+    needs_warp_uniform_search,
+};
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::tests::helpers::noisy_field_over;
 use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NOISE_CURVE_BINS, NlmDenoiser, NlmParams};
+use crate::tune::collab::{CollabLaunch, CollabParams};
+use crate::tune::zeroed;
 
 #[test]
 fn denoises_a_static_noisy_clip() {
@@ -448,6 +457,7 @@ fn run_spatial_only(
             map_rows,
             0.0f32,
             false,
+            COLLAB_GROUPS,
         );
 
         collab_normalise::launch_unchecked::<R>(
@@ -468,6 +478,141 @@ fn run_spatial_only(
 
     let bytes = client.read_one(output).expect("readback failed");
     f32::from_bytes(&bytes).to_vec()
+}
+
+/// Every buffer a collab launch writes, read back from the device.
+#[derive(Debug, PartialEq)]
+pub(crate) struct CollabOutputs {
+    pub accum: Vec<i32>,
+    pub wsum: Vec<i32>,
+    pub group_weight: Vec<f32>,
+}
+
+/// The spatial-only `collab_fused` pass of [run_spatial_only] as a tuner launch over a noisy
+/// 64x64 frame, with a zero-filled accumulator and a closure that reads it back.
+pub(crate) fn single_pass_launch(
+    client: &ComputeClient<R>,
+) -> (CollabLaunch<R>, impl Fn(&CollabLaunch<R>) -> CollabOutputs) {
+    let (width, height) = (64u32, 64u32);
+    let stored_ch = 1u32;
+    let refs = ref_count(width, height);
+    let pixels = (width * height) as usize;
+    let frame_len = pixels;
+
+    let base = textured_base(width, height);
+    let noisy_centre = noisy_field_over(&base, width, height, SIGMA, 0);
+    let centre_bytes = f32::as_bytes(&noisy_centre);
+    let ring_buf = client.create_from_slice(centre_bytes);
+    let mv_dummy = client.empty(size_of::<i32>());
+    let conf_dummy = client.empty(size_of::<f32>());
+    let neighbour_slots_dummy = client.empty(size_of::<u32>());
+    let group_weight = zeroed(client, refs * size_of::<f32>());
+
+    let sigma_values = [SIGMA];
+    let dct_profile = dct_noise_profile(0.0);
+    let kaiser = kaiser_window(0.0);
+    let zeroed_curve = [0.0f32; NOISE_CURVE_BINS];
+    let sigma_bytes = f32::as_bytes(&sigma_values);
+    let sigma_buf = client.create_from_slice(sigma_bytes);
+    let dct_profile_bytes = f32::as_bytes(&dct_profile);
+    let dct_profile_buf = client.create_from_slice(dct_profile_bytes);
+    let kaiser_bytes = f32::as_bytes(&kaiser);
+    let kaiser_buf = client.create_from_slice(kaiser_bytes);
+    let curve_bytes = f32::as_bytes(&zeroed_curve);
+    let zero_curve = client.create_from_slice(curve_bytes);
+
+    let (map_cols, map_rows) = strength_map_dims(width, height);
+    let map_len = (map_cols * map_rows) as usize;
+    let unit_map = vec![1.0f32; map_len];
+    let unit_map_bytes = f32::as_bytes(&unit_map);
+    let unit_map_buf = client.create_from_slice(unit_map_bytes);
+    let zero_accum = vec![0i32; frame_len];
+    let zero_accum_bytes = i32::as_bytes(&zero_accum);
+    let accum = client.create_from_slice(zero_accum_bytes);
+    let wsum = zeroed(client, pixels * size_of::<i32>());
+
+    let params = CollabParams {
+        stored_ch,
+        centre_slot: 0,
+        c_min: C_MIN,
+        lambda_ht: LAMBDA_HT,
+        curve_valid: 0,
+        map_mode: STRENGTH_MAP_OFF,
+        weight_scale: weight_scale(SIGMA, &dct_profile),
+        accum_scale: ACCUM_SCALE,
+        warp_uniform: needs_warp_uniform_search(client),
+        f16_search: false,
+        radius: 0,
+        grid_frames: grid_frames(0),
+        refine: REFINE,
+        mv_stride: 1,
+        conf_stride: 1,
+        blk_step: 8,
+        blksize: 8,
+        blocks_x: 1,
+        blocks_y: 1,
+        width,
+        height,
+        channels: 1,
+        k_max: MAX_K,
+        spatial_radius: SPATIAL_RADIUS,
+        refs_x: refs_along(width),
+        refs_y: refs_along(height),
+        map_cols,
+        map_rows,
+        pool_ratio: 0.0,
+        pooled: false,
+    };
+
+    let collab = CollabLaunch {
+        client: client.clone(),
+        ring: ring_buf.clone(),
+        ring_len: noisy_centre.len(),
+        search_ring: ring_buf,
+        search_len: stored_ch as usize,
+        mv_field: mv_dummy,
+        mv_len: 1,
+        confidence: conf_dummy,
+        conf_len: 1,
+        neighbour_slots: neighbour_slots_dummy,
+        neighbour_slots_len: 1,
+        sigma: sigma_buf,
+        noise_curve: zero_curve,
+        strength_map: unit_map_buf,
+        map_len,
+        dct_profile: dct_profile_buf,
+        kaiser: kaiser_buf,
+        accum,
+        accum_len: frame_len,
+        wsum,
+        wsum_len: pixels,
+        group_weight,
+        refs,
+        params,
+    };
+
+    let read_outputs = |launch: &CollabLaunch<R>| {
+        let accum_bytes = launch
+            .client
+            .read_one(launch.accum.clone())
+            .expect("accum readback");
+        let wsum_bytes = launch
+            .client
+            .read_one(launch.wsum.clone())
+            .expect("wsum readback");
+        let weight_bytes = launch
+            .client
+            .read_one(launch.group_weight.clone())
+            .expect("group_weight readback");
+
+        CollabOutputs {
+            accum: i32::from_bytes(&accum_bytes).to_vec(),
+            wsum: i32::from_bytes(&wsum_bytes).to_vec(),
+            group_weight: f32::from_bytes(&weight_bytes).to_vec(),
+        }
+    };
+
+    (collab, read_outputs)
 }
 
 /// On a static clip, grouping across the temporal window cancels more grain than a spatial-only
@@ -698,6 +843,7 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 map_rows,
                 0.0f32,
                 false,
+                COLLAB_GROUPS,
             );
 
             collab_normalise::launch_unchecked::<R>(

@@ -4,4 +4,4 @@ mod grain;
 mod regularise;
 
 pub use self::grain::{grain_measure, grain_reduce_partials, grain_save_vectors};
-pub use self::regularise::nl4d_mv_regularise;
+pub use self::regularise::{nl4d_mv_regularise, nl4d_mv_regularise_coop};

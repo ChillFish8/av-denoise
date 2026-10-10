@@ -18,6 +18,8 @@ pub const STEP: u32 = 4;
 ///
 /// A power of two, sized so a stack of 8x8 f32 patches stays small in shared memory.
 pub const MAX_K: u32 = 8;
+/// Reference patches one `collab_fused` cube owns by default, one 8-lane group each.
+pub const COLLAB_GROUPS: u32 = 8;
 /// Hard ceiling on a cross-frame denoiser's temporal radius.
 ///
 /// The widest cross-frame accumulator holds `2 * MAX_TEMPORAL_RADIUS + 1` frames, which bounds how

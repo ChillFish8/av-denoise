@@ -1,6 +1,7 @@
 mod motion;
 
 use cubecl::prelude::*;
+use cubecl::server::Handle;
 
 pub(super) use self::motion::mc_sad_noise_floor_sigma;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
@@ -14,9 +15,7 @@ use super::kernels::{
     nlm_distance_pair_ref,
     nlm_distance_ref,
     nlm_finish,
-    nlm_fused_pair_accumulate_window,
     nlm_fused_pair_accumulate_window_ref,
-    nlm_fused_single_window,
     nlm_fused_single_window_ref,
     nlm_horizontal_sum,
     nlm_horizontal_sum_pair,
@@ -26,6 +25,8 @@ use super::kernels::{
 use super::motion::{confidence_byte_offset, neighbour_idx_for_k};
 use super::noise::{build_spatial_offset_lut, spatial_offset_factor, spatial_offset_lut_len};
 use super::{BLOCK_1D, BLOCK_X, BLOCK_X_THIN, BLOCK_Y, BLOCK_Y_THIN, MAX_GRID_1D};
+use crate::tune;
+use crate::tune::nlm_window::{WindowConfidence, WindowLaunch, WindowPass, WindowShape};
 
 /// The sizes and launch shapes one frame's dispatches share.
 pub(super) struct LaunchCtx {
@@ -37,20 +38,6 @@ pub(super) struct LaunchCtx {
     /// The cube count for `nlm_accumulate`. See [BLOCK_X_THIN].
     pub(super) thin_cube_count: CubeCount,
     pub(super) thin_cube_dim: CubeDim,
-}
-
-/// The confidence arguments for one temporal pair dispatch.
-///
-/// The block geometry must map an output pixel onto its block exactly as `nlm_mc_warp` does. With
-/// confidence off this holds the placeholder buffer, a false flag and geometry the kernel never
-/// reads.
-struct ConfidenceArgs<R: Runtime> {
-    use_confidence: bool,
-    conf_fwd: ArrayArg<R>,
-    conf_bwd: ArrayArg<R>,
-    step: u32,
-    blocks_x: u32,
-    blocks_y: u32,
 }
 
 impl<R: Runtime> NlmDenoiser<R> {
@@ -68,11 +55,27 @@ impl<R: Runtime> NlmDenoiser<R> {
 
     /// The input ring the temporal kernels read, which is the compensated one under motion
     /// compensation.
-    fn input_arg_for_temporal(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
+    fn temporal_input_handle(&self) -> Handle {
         match self.compensated_input_buf.as_ref() {
-            Some(buf) => unsafe { ArrayArg::from_raw_parts(buf.clone(), ctx.total_frame_data) },
-            None => self.input_arg(ctx),
+            Some(buf) => buf.clone(),
+            None => self.input_buf.clone(),
         }
+    }
+
+    fn window_shape(&self) -> WindowShape {
+        WindowShape {
+            width: self.width,
+            height: self.height,
+            channels: self.params.channels.count(),
+            stored_ch: self.params.channels.storage_count(),
+            patch_radius: self.params.patch_radius,
+            search_radius: self.params.search_radius,
+        }
+    }
+
+    fn input_arg_for_temporal(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
+        let input = self.temporal_input_handle();
+        unsafe { ArrayArg::from_raw_parts(input, ctx.total_frame_data) }
     }
 
     /// The reference ring the temporal `_ref` kernels read, which is the compensated one under
@@ -140,11 +143,12 @@ impl<R: Runtime> NlmDenoiser<R> {
 
     /// Builds the confidence arguments for the temporal pair at the nonzero offset `q_k`.
     ///
+    /// The block geometry must map an output pixel onto its block exactly as `nlm_mc_warp` does.
     /// The forward frame reads the neighbour at `+q_k` and the backward frame the one at `-q_k`,
     /// so each takes its confidence from that neighbour's slice. Weighting runs only when
     /// `confidence_buf` exists and block geometry is available. Otherwise the flag is off and the
     /// kernel never reads the placeholder.
-    fn confidence_pair_args(&self, q_k: i32) -> ConfidenceArgs<R> {
+    fn confidence_pair_args(&self, q_k: i32) -> WindowConfidence {
         let confidence_geometry = self.confidence_ctx.as_ref();
         let geometry = self.mc_ctx.as_ref().or(confidence_geometry);
         if let (Some(confidence_buf), Some(geometry)) = (self.confidence_buf.as_ref(), geometry) {
@@ -157,19 +161,21 @@ impl<R: Runtime> NlmDenoiser<R> {
             let forward_handle = confidence_buf.clone().offset_start(forward_offset);
             let backward_handle = confidence_buf.clone().offset_start(backward_offset);
 
-            ConfidenceArgs {
+            WindowConfidence {
                 use_confidence: true,
-                conf_fwd: unsafe { ArrayArg::from_raw_parts(forward_handle, conf_len) },
-                conf_bwd: unsafe { ArrayArg::from_raw_parts(backward_handle, conf_len) },
+                conf_fwd: forward_handle,
+                conf_bwd: backward_handle,
+                conf_len,
                 step: geometry.step,
                 blocks_x: geometry.blocks_x,
                 blocks_y: geometry.blocks_y,
             }
         } else {
-            ConfidenceArgs {
+            WindowConfidence {
                 use_confidence: false,
-                conf_fwd: unsafe { ArrayArg::from_raw_parts(self.confidence_dummy.clone(), 1) },
-                conf_bwd: unsafe { ArrayArg::from_raw_parts(self.confidence_dummy.clone(), 1) },
+                conf_fwd: self.confidence_dummy.clone(),
+                conf_bwd: self.confidence_dummy.clone(),
+                conf_len: 1,
                 step: 1,
                 blocks_x: 1,
                 blocks_y: 1,
@@ -194,6 +200,11 @@ impl<R: Runtime> NlmDenoiser<R> {
         let confidence = self.confidence_pair_args(q_k);
 
         if self.use_reference {
+            let conf_fwd =
+                unsafe { ArrayArg::from_raw_parts(confidence.conf_fwd.clone(), confidence.conf_len) };
+            let conf_bwd =
+                unsafe { ArrayArg::from_raw_parts(confidence.conf_bwd.clone(), confidence.conf_len) };
+
             unsafe {
                 nlm_fused_pair_accumulate_window_ref::launch_unchecked::<R>(
                     &self.client,
@@ -205,8 +216,8 @@ impl<R: Runtime> NlmDenoiser<R> {
                     self.accum_arg(ctx),
                     self.weight_sum_arg(ctx),
                     self.max_weight_arg(ctx),
-                    confidence.conf_fwd,
-                    confidence.conf_bwd,
+                    conf_fwd,
+                    conf_bwd,
                     confidence.use_confidence,
                     frame_t,
                     frame_fwd,
@@ -226,36 +237,26 @@ impl<R: Runtime> NlmDenoiser<R> {
                 );
             }
         } else {
-            unsafe {
-                nlm_fused_pair_accumulate_window::launch_unchecked::<R>(
-                    &self.client,
-                    ctx.cube_count.clone(),
-                    ctx.cube_dim,
-                    self.params.channels.storage_count() as usize,
-                    self.input_arg_for_temporal(ctx),
-                    self.accum_arg(ctx),
-                    self.weight_sum_arg(ctx),
-                    self.max_weight_arg(ctx),
-                    confidence.conf_fwd,
-                    confidence.conf_bwd,
-                    confidence.use_confidence,
+            let window = WindowLaunch {
+                client: self.client.clone(),
+                input: self.temporal_input_handle(),
+                input_len: ctx.total_frame_data,
+                accum: self.accum.clone(),
+                frame_size: ctx.frame_size,
+                weight_sum: self.weight_sum.clone(),
+                max_weight: self.max_weight.clone(),
+                pixels: ctx.pixels,
+                h2_inv_norm: self.h2_inv_norm,
+                pass: WindowPass::Pair {
                     frame_t,
                     frame_fwd,
                     frame_bwd,
-                    self.h2_inv_norm,
-                    self.noise_offset,
-                    self.width,
-                    self.height,
-                    channels,
-                    self.params.patch_radius,
-                    self.params.search_radius,
-                    BLOCK_X,
-                    BLOCK_Y,
-                    confidence.step,
-                    confidence.blocks_x,
-                    confidence.blocks_y,
-                );
-            }
+                    noise_offset: self.noise_offset,
+                    confidence,
+                },
+                shape: self.window_shape(),
+            };
+            tune::nlm_window::launch(window);
         }
 
         Ok(())
@@ -294,28 +295,25 @@ impl<R: Runtime> NlmDenoiser<R> {
                 );
             }
         } else {
-            unsafe {
-                nlm_fused_single_window::launch_unchecked::<R>(
-                    &self.client,
-                    ctx.cube_count.clone(),
-                    ctx.cube_dim,
-                    self.params.channels.storage_count() as usize,
-                    self.input_arg(ctx),
-                    self.accum_arg(ctx),
-                    self.weight_sum_arg(ctx),
-                    self.max_weight_arg(ctx),
+            let lut_len = spatial_offset_lut_len(self.params.search_radius);
+            let window = WindowLaunch {
+                client: self.client.clone(),
+                input: self.input_buf.clone(),
+                input_len: ctx.total_frame_data,
+                accum: self.accum.clone(),
+                frame_size: ctx.frame_size,
+                weight_sum: self.weight_sum.clone(),
+                max_weight: self.max_weight.clone(),
+                pixels: ctx.pixels,
+                h2_inv_norm: self.h2_inv_norm,
+                pass: WindowPass::Single {
                     frame_t,
-                    self.h2_inv_norm,
-                    self.spatial_offset_lut_arg(),
-                    self.width,
-                    self.height,
-                    channels,
-                    self.params.patch_radius,
-                    self.params.search_radius,
-                    BLOCK_X,
-                    BLOCK_Y,
-                );
-            }
+                    offset_lut: self.spatial_offset_lut.clone(),
+                    offset_lut_len: lut_len,
+                },
+                shape: self.window_shape(),
+            };
+            tune::nlm_window::launch(window);
         }
 
         Ok(())
@@ -398,6 +396,9 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
 
         let confidence = self.confidence_pair_args(q_k);
+        let conf_fwd = unsafe { ArrayArg::from_raw_parts(confidence.conf_fwd.clone(), confidence.conf_len) };
+        let conf_bwd = unsafe { ArrayArg::from_raw_parts(confidence.conf_bwd.clone(), confidence.conf_len) };
+
         unsafe {
             nlm_vweight_pair_accumulate::launch_unchecked::<R>(
                 &self.client,
@@ -410,8 +411,8 @@ impl<R: Runtime> NlmDenoiser<R> {
                 self.accum_arg(ctx),
                 self.weight_sum_arg(ctx),
                 self.max_weight_arg(ctx),
-                confidence.conf_fwd,
-                confidence.conf_bwd,
+                conf_fwd,
+                conf_bwd,
                 confidence.use_confidence,
                 frame_fwd,
                 frame_bwd,
@@ -637,7 +638,6 @@ impl<R: Runtime> NlmDenoiser<R> {
         let ctx = self.launch_ctx();
         self.zero_accumulators(&ctx)?;
 
-        let channels = self.params.channels.count();
         let pilot_h2 = self.h2_inv_norm / (strength_scale * strength_scale);
 
         // A flat table with no correlation adjustment, because the pilot compares noisy input
@@ -646,32 +646,27 @@ impl<R: Runtime> NlmDenoiser<R> {
         let pilot_lut = build_spatial_offset_lut(self.params.search_radius, 0.0, self.input_noise_offset);
         let pilot_lut_bytes = f32::as_bytes(&pilot_lut);
         let pilot_lut_handle = self.client.create_from_slice(pilot_lut_bytes);
-        let pilot_lut_arg = unsafe { ArrayArg::<R>::from_raw_parts(pilot_lut_handle, pilot_lut.len()) };
 
         // Always the noisy input. For `NlmSpatial` the reference ring is this pass's output, even
         // though `use_reference` is set so the main pass picks the `_ref` kernels.
-        unsafe {
-            nlm_fused_single_window::launch_unchecked::<R>(
-                &self.client,
-                ctx.cube_count.clone(),
-                ctx.cube_dim,
-                self.params.channels.storage_count() as usize,
-                self.input_arg(&ctx),
-                self.accum_arg(&ctx),
-                self.weight_sum_arg(&ctx),
-                self.max_weight_arg(&ctx),
-                slot,
-                pilot_h2,
-                pilot_lut_arg,
-                self.width,
-                self.height,
-                channels,
-                self.params.patch_radius,
-                self.params.search_radius,
-                BLOCK_X,
-                BLOCK_Y,
-            );
-        }
+        let window = WindowLaunch {
+            client: self.client.clone(),
+            input: self.input_buf.clone(),
+            input_len: ctx.total_frame_data,
+            accum: self.accum.clone(),
+            frame_size: ctx.frame_size,
+            weight_sum: self.weight_sum.clone(),
+            max_weight: self.max_weight.clone(),
+            pixels: ctx.pixels,
+            h2_inv_norm: pilot_h2,
+            pass: WindowPass::Single {
+                frame_t: slot,
+                offset_lut: pilot_lut_handle,
+                offset_lut_len: pilot_lut.len(),
+            },
+            shape: self.window_shape(),
+        };
+        tune::nlm_window::launch(window);
 
         let reference_ring = self.reference_ring_arg(&ctx);
         self.run_finish_to(&ctx, slot, slot, reference_ring)

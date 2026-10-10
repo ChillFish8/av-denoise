@@ -1,4 +1,4 @@
-use super::{PATCH_SIZE, STEP};
+use super::{COLLAB_GROUPS, PATCH_SIZE, STEP};
 
 /// Number of reference patches along one axis.
 ///
@@ -7,12 +7,18 @@ pub fn refs_along(dim: u32) -> u32 {
     (dim - PATCH_SIZE).div_ceil(STEP) + 1
 }
 
-/// Cubes along x for the `collab_fused` kernel.
-///
-/// Each cube runs eight 8-lane groups with one reference patch each. The count rounds up, so the
-/// last cube of a row runs dead groups past the end.
+/// Cubes along x for the `collab_fused` kernel at [COLLAB_GROUPS](crate::collab::COLLAB_GROUPS)
+/// references per cube.
 pub fn fused_cubes_x(width: u32) -> u32 {
-    refs_along(width).div_ceil(8)
+    fused_cubes_x_for(width, COLLAB_GROUPS)
+}
+
+/// Cubes along x for the `collab_fused` kernel at `groups` references per cube.
+///
+/// Each cube runs `groups` 8-lane groups with one reference patch each. The count rounds up, so the
+/// last cube of a row runs dead groups past the end.
+pub fn fused_cubes_x_for(width: u32, groups: u32) -> u32 {
+    refs_along(width).div_ceil(groups)
 }
 
 /// Top-left pixel of reference `index` along one axis.

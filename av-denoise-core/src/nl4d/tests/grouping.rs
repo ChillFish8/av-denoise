@@ -13,7 +13,7 @@ use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map
 use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
 use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{PATCH_SIZE, STEP, grid_frames, needs_warp_uniform_search};
+use crate::collab::{COLLAB_GROUPS, PATCH_SIZE, STEP, grid_frames, needs_warp_uniform_search};
 use crate::nlmeans::NOISE_CURVE_BINS;
 use crate::nlmeans::motion::neighbour_idx_for_k;
 
@@ -195,6 +195,7 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
             map_rows,
             0.0f32,
             false,
+            COLLAB_GROUPS,
         );
     }
 

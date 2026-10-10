@@ -51,7 +51,7 @@ pub(in crate::nlmeans) fn spatial_offset_factor(dx: i32, dy: i32, rho: f32) -> f
     1.0 - (distance * log_rho).exp()
 }
 
-pub(in crate::nlmeans) fn spatial_offset_lut_len(search_radius: u32) -> usize {
+pub(crate) fn spatial_offset_lut_len(search_radius: u32) -> usize {
     let side = (2 * search_radius + 1) as usize;
     side * side
 }
@@ -60,11 +60,7 @@ pub(in crate::nlmeans) fn spatial_offset_lut_len(search_radius: u32) -> usize {
 ///
 /// Each entry is the flat noise offset scaled by [spatial_offset_factor] at that candidate. It is
 /// cheap enough to rebuild on every submit, at most 289 entries at the largest search radius.
-pub(in crate::nlmeans) fn build_spatial_offset_lut(
-    search_radius: u32,
-    rho: f32,
-    noise_offset: f32,
-) -> Vec<f32> {
+pub(crate) fn build_spatial_offset_lut(search_radius: u32, rho: f32, noise_offset: f32) -> Vec<f32> {
     let radius = search_radius as i32;
     let side = (2 * search_radius + 1) as usize;
     let mut lut = vec![0.0f32; side * side];

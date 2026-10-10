@@ -5,7 +5,7 @@ mod engine;
 mod grouping;
 mod noise_map;
 mod options;
-mod pipeline;
+pub(crate) mod pipeline;
 mod pooled;
 mod regularise;
 mod search_ring;

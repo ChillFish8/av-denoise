@@ -10,6 +10,7 @@ mod error;
 pub mod nl4d;
 pub mod nlmeans;
 mod options;
+pub(crate) mod tune;
 
 pub use self::engine::{DevicePlane, EdgePadding, Engine, Geometry, SampleFormat, WindowSpan};
 pub use self::error::Error;

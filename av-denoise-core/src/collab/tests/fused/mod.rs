@@ -1,4 +1,5 @@
 mod behaviour;
+mod groups;
 mod noise_curve;
 mod pooled;
 mod recorded;
@@ -9,11 +10,11 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::helpers::{R, make_client, make_unique_frame, noisy_flat_field};
-use crate::collab::geometry::{fused_cubes_x, ref_count, ref_pos, refs_along, strength_map_dims};
+use crate::collab::geometry::{fused_cubes_x_for, ref_count, ref_pos, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{WEIGHT_GAIN, cross_frame_accum_scale, kaiser_window, weight_scale};
 use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
+use crate::collab::{COLLAB_GROUPS, PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS};
 
 /// The spatial search radius most runs use.
@@ -421,7 +422,7 @@ pub(super) fn read_back(handles: Buffers, setup: &Setup) -> Aggregated {
     }
 }
 
-/// Launches [collab_fused] on its eight-references-per-cube grid and reads back what it aggregated.
+/// Launches [collab_fused] with [COLLAB_GROUPS] references per cube and reads back what it aggregated.
 ///
 /// The search walk is whichever one this runtime needs, matching what the shipping code launches.
 pub(super) fn run_fused(setup: &Setup) -> Aggregated {
@@ -430,21 +431,38 @@ pub(super) fn run_fused(setup: &Setup) -> Aggregated {
 
 /// [run_fused] with the search walk pinned rather than taken from the runtime.
 pub(super) fn run_fused_walk(setup: &Setup, warp_uniform: Option<bool>) -> Aggregated {
+    run_fused_with(setup, warp_uniform, COLLAB_GROUPS)
+}
+
+/// [run_fused] with `groups` reference patches per cube.
+pub(super) fn run_fused_groups(setup: &Setup, groups: u32) -> Aggregated {
+    run_fused_with(setup, None, groups)
+}
+
+fn run_fused_with(setup: &Setup, warp_uniform: Option<bool>, groups: u32) -> Aggregated {
     let handles = buffers(setup);
     let warp_uniform = warp_uniform.unwrap_or_else(|| needs_warp_uniform_search(&handles.client));
 
     // The f32 search launches with the f32 ring as its placeholder, as the shipping code does.
     if setup.f16_search {
-        launch_fused::<half::f16>(setup, &handles, handles.search_ring.clone(), warp_uniform);
+        let search_ring = handles.search_ring.clone();
+        launch_fused::<half::f16>(setup, &handles, search_ring, warp_uniform, groups);
     } else {
-        launch_fused::<f32>(setup, &handles, handles.ring.clone(), warp_uniform);
+        let search_ring = handles.ring.clone();
+        launch_fused::<f32>(setup, &handles, search_ring, warp_uniform, groups);
     }
 
     read_back(handles, setup)
 }
 
 /// Launches [collab_fused] with its search ring read as `S`.
-fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle, warp_uniform: bool) {
+fn launch_fused<S: Float>(
+    setup: &Setup,
+    handles: &Buffers,
+    search_ring: Handle,
+    warp_uniform: bool,
+    groups: u32,
+) {
     let profile = setup.profile();
     let curve = setup.noise_curve.unwrap_or([0.0f32; NOISE_CURVE_BINS]);
     let curve_bytes = f32::as_bytes(&curve);
@@ -466,9 +484,9 @@ fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle,
     let map_buf = handles.client.create_from_slice(map_bytes);
     let stored_channels = setup.stored_channels();
 
-    let cubes_x = fused_cubes_x(setup.width);
+    let cubes_x = fused_cubes_x_for(setup.width, groups);
     let grid = CubeCount::new_2d(cubes_x, handles.refs_y);
-    let dim = CubeDim::new_1d(64);
+    let dim = CubeDim::new_1d(groups * 8);
     let scale = weight_scale(setup.sigma, &profile);
     let accum_scale = setup.accum_scale();
     let grid_frame_count = grid_frames(setup.radius);
@@ -522,6 +540,7 @@ fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle,
             map_rows,
             pooled_ratio,
             setup.pooled.is_some(),
+            groups,
         );
     }
 }

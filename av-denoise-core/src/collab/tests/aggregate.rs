@@ -12,7 +12,7 @@ use crate::collab::kernels::aggregate::{
 };
 use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
+use crate::collab::{COLLAB_GROUPS, PATCH_SIZE, grid_frames, needs_warp_uniform_search};
 use crate::nlmeans::{BLOCK_X, BLOCK_Y, NOISE_CURVE_BINS};
 
 /// Runs [collab_normalise] over hand-built accumulators.
@@ -346,6 +346,7 @@ fn run_scatter_stage_windowed(
             map_rows,
             0.0f32,
             false,
+            COLLAB_GROUPS,
         );
         collab_normalise::launch_unchecked::<R>(
             &client,

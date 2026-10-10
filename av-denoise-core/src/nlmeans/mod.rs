@@ -17,7 +17,7 @@ mod align;
 mod dispatch;
 mod edges;
 mod engine;
-mod noise;
+pub(crate) mod noise;
 mod options;
 
 // The tests run against a real GPU runtime, so they need a wgpu-backed feature.

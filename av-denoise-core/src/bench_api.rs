@@ -30,6 +30,24 @@ pub mod prefilter {
     pub use crate::nlmeans::prefilter::*;
 }
 
+pub mod tune {
+    pub use crate::tune::collab::{COLLAB_CANDIDATES, CollabLaunch, CollabParams};
+    pub use crate::tune::nlm_window::{
+        WINDOW_CANDIDATES,
+        WindowConfidence,
+        WindowLaunch,
+        WindowPass,
+        WindowShape,
+    };
+    pub use crate::tune::regularise::{REGULARISE_CANDIDATES, RegulariseLaunch, RegulariseShape};
+
+    pub mod labels {
+        pub use crate::tune::collab::candidate_label as collab;
+        pub use crate::tune::nlm_window::candidate_label as nlm_window;
+        pub use crate::tune::regularise::candidate_label as regularise;
+    }
+}
+
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;

@@ -9,12 +9,8 @@ mod temporal;
 #[cfg(test)]
 mod tests;
 
-pub(super) use self::correlation::{
-    build_spatial_offset_lut,
-    correlation_factor,
-    spatial_offset_factor,
-    spatial_offset_lut_len,
-};
+pub(crate) use self::correlation::{build_spatial_offset_lut, spatial_offset_lut_len};
+pub(super) use self::correlation::{correlation_factor, spatial_offset_factor};
 pub use self::curve::NOISE_CURVE_BINS;
 pub(crate) use self::curve::NoiseCurve;
 #[cfg(test)]

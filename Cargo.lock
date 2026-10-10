@@ -219,6 +219,7 @@ dependencies = [
  "cubecl",
  "futures",
  "half",
+ "serde",
  "strum",
  "strum_macros",
  "thiserror",

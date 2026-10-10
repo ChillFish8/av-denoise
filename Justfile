@@ -70,6 +70,16 @@ bench *ARGS:
 bench-host *ARGS:
     cargo bench -p av-denoise --features vulkan {{ARGS}}
 
+# Times every autotune candidate of the tuned kernels on the default Vulkan device.
+bench-autotune *ARGS:
+    BENCH_FILTER="_c0_|_c1_|_c2_|_c3_|_c4_" cargo bench -p av-denoise-core --features vulkan --bench bench_kernels -- --device discrete {{ARGS}}
+
+# Times every autotune candidate of the tuned kernels on CUDA.
+#
+# cudarc 0.19.7 rejects CUDA toolkit 13.3, so this pins its bindings to 13.2.
+bench-autotune-cuda *ARGS:
+    CUDARC_CUDA_VERSION=13020 BENCH_FILTER="_c0_|_c1_|_c2_|_c3_|_c4_" cargo bench -p av-denoise-core --no-default-features --features cuda --bench bench_kernels {{ARGS}}
+
 build-vs *ARGS:
     cargo build -p av-denoise-vs --release {{ARGS}}
 

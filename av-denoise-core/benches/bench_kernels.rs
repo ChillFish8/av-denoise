@@ -1,6 +1,7 @@
 mod kernels;
 
 use av_denoise_core::bench_api::Device;
+use av_denoise_core::bench_api::tune::{COLLAB_CANDIDATES, REGULARISE_CANDIDATES, WINDOW_CANDIDATES};
 use clap::Parser;
 use cubecl::prelude::*;
 use kernels::accumulate::AccumulateBench;
@@ -126,19 +127,25 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
     }
 
     for &(channels, channel_name) in CHANNELS {
-        run(FusedSingleWindowBench {
-            client: client.clone(),
-            channels,
-            channel_name,
-        });
+        for candidate in 0..WINDOW_CANDIDATES.len() {
+            run(FusedSingleWindowBench {
+                client: client.clone(),
+                channels,
+                channel_name,
+                candidate,
+            });
+        }
     }
 
     for &(channels, channel_name) in CHANNELS {
-        run(FusedPairWindowBench {
-            client: client.clone(),
-            channels,
-            channel_name,
-        });
+        for candidate in 0..WINDOW_CANDIDATES.len() {
+            run(FusedPairWindowBench {
+                client: client.clone(),
+                channels,
+                channel_name,
+                candidate,
+            });
+        }
     }
 
     for &(channels, channel_name) in CHANNELS {
@@ -262,9 +269,13 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
     run(ChainComposeBench {
         client: client.clone(),
     });
-    run(MvRegulariseBench {
-        client: client.clone(),
-    });
+
+    for candidate in 0..REGULARISE_CANDIDATES.len() {
+        run(MvRegulariseBench {
+            client: client.clone(),
+            candidate,
+        });
+    }
 
     for &size in GRAIN_SIZES {
         run(GrainSaveVectorsBench {
@@ -282,55 +293,49 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
     }
 
     for &(channels, channel_name) in CHANNELS {
-        run(CollabFusedBench {
-            client: client.clone(),
-            channels,
-            channel_name,
-            split_mv: false,
-            noise_curve: false,
-            strength_map: false,
-            pooled: false,
-        });
+        for candidate in 0..COLLAB_CANDIDATES.len() {
+            run(CollabFusedBench {
+                client: client.clone(),
+                channels,
+                channel_name,
+                split_mv: false,
+                noise_curve: false,
+                strength_map: false,
+                pooled: false,
+                candidate,
+            });
+        }
     }
 
-    run(CollabFusedBench {
-        client: client.clone(),
-        channels: 1,
-        channel_name: "luma",
-        split_mv: false,
-        noise_curve: true,
-        strength_map: false,
-        pooled: false,
-    });
-    run(CollabFusedBench {
-        client: client.clone(),
-        channels: 1,
-        channel_name: "luma",
-        split_mv: false,
-        noise_curve: true,
-        strength_map: true,
-        pooled: false,
-    });
-    run(CollabFusedBench {
-        client: client.clone(),
-        channels: 1,
-        channel_name: "luma",
-        split_mv: false,
-        noise_curve: true,
-        strength_map: true,
-        pooled: true,
-    });
+    let luma_arms = [(true, false, false), (true, true, false), (true, true, true)];
+    for (noise_curve, strength_map, pooled) in luma_arms {
+        for candidate in 0..COLLAB_CANDIDATES.len() {
+            run(CollabFusedBench {
+                client: client.clone(),
+                channels: 1,
+                channel_name: "luma",
+                split_mv: false,
+                noise_curve,
+                strength_map,
+                pooled,
+                candidate,
+            });
+        }
+    }
 
     for &(channels, channel_name) in CHANNELS {
-        run(CollabFusedBench {
-            client: client.clone(),
-            channels,
-            channel_name,
-            split_mv: true,
-            noise_curve: false,
-            strength_map: false,
-            pooled: false,
-        });
+        for candidate in 0..COLLAB_CANDIDATES.len() {
+            run(CollabFusedBench {
+                client: client.clone(),
+                channels,
+                channel_name,
+                split_mv: true,
+                noise_curve: false,
+                strength_map: false,
+                pooled: false,
+                candidate,
+            });
+        }
     }
 
     for &(channels, channel_name) in CHANNELS {

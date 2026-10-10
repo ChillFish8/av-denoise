@@ -1,4 +1,4 @@
-use av_denoise_core::bench_api::nl4d_kernels::nl4d_mv_regularise;
+use av_denoise_core::bench_api::tune::{RegulariseLaunch, RegulariseShape, labels};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -13,6 +13,7 @@ const FIELD_LAMBDA: f32 = 1.0;
 /// The nl4d field regularisation pass over one neighbour at 1080p.
 pub struct MvRegulariseBench<R: Runtime> {
     pub client: ComputeClient<R>,
+    pub candidate: usize,
 }
 
 #[derive(Clone)]
@@ -58,38 +59,38 @@ impl<R: Runtime> Benchmark for MvRegulariseBench<R> {
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let blocks_x = WIDTH.div_ceil(STEP);
         let blocks_y = HEIGHT.div_ceil(STEP);
-        let blocks = (blocks_x * blocks_y) as usize;
         let block_area = (BLKSIZE * BLKSIZE) as f32;
         let lambda = FIELD_LAMBDA * block_area * THSAD_PIXEL;
         let thsad = block_area * THSAD_PIXEL;
 
-        unsafe {
-            nl4d_mv_regularise::launch_unchecked::<R>(
-                &self.client,
-                CubeCount::new_2d(blocks_x, blocks_y),
-                CubeDim::new_2d(8, 8),
-                ArrayArg::from_raw_parts(args.centre.clone(), (WIDTH * HEIGHT) as usize),
-                ArrayArg::from_raw_parts(args.neighbour.clone(), (WIDTH * HEIGHT) as usize),
-                ArrayArg::from_raw_parts(args.mv_in.clone(), 2 * blocks),
-                ArrayArg::from_raw_parts(args.mv_out.clone(), 2 * blocks),
-                ArrayArg::from_raw_parts(args.confidence.clone(), blocks),
-                lambda,
-                0.0,
-                thsad,
-                WIDTH,
-                HEIGHT,
-                BLKSIZE,
-                STEP,
-                blocks_x,
-                blocks_y,
-            );
-        }
+        let shape = RegulariseShape {
+            level_width: WIDTH,
+            level_height: HEIGHT,
+            blksize: BLKSIZE,
+            step: STEP,
+            blocks_x,
+            blocks_y,
+        };
+        let launch = RegulariseLaunch {
+            client: self.client.clone(),
+            centre: args.centre,
+            neighbour: args.neighbour,
+            level_len: (WIDTH * HEIGHT) as usize,
+            mv_in: args.mv_in,
+            mv_out: args.mv_out,
+            conf_out: args.confidence,
+            lambda_pixel: lambda,
+            sad_noise_floor: 0.0,
+            thsad,
+            shape,
+        };
 
-        Ok(())
+        launch.launch_candidate(self.candidate)
     }
 
     fn name(&self) -> String {
-        "nl4d_mv_regularise_1080p_luma".to_string()
+        let label = labels::regularise(self.candidate);
+        format!("nl4d_mv_regularise_1080p_luma_{label}")
     }
 
     fn sync(&self) {

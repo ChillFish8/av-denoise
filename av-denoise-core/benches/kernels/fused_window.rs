@@ -1,9 +1,8 @@
 use av_denoise_core::bench_api::kernels::{
-    nlm_fused_pair_accumulate_window,
     nlm_fused_pair_accumulate_window_ref,
-    nlm_fused_single_window,
     nlm_fused_single_window_ref,
 };
+use av_denoise_core::bench_api::tune::{WindowConfidence, WindowLaunch, WindowPass, WindowShape, labels};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -111,10 +110,45 @@ fn prepare_window_ref<R: Runtime>(client: &ComputeClient<R>, channels: u32) -> W
     }
 }
 
+/// A fused window launch over `args` running `pass` at the bench's 1080p shape.
+fn window_launch<R: Runtime>(
+    client: &ComputeClient<R>,
+    channels: u32,
+    args: WindowInput,
+    pass: WindowPass,
+) -> WindowLaunch<R> {
+    let pixels = (WIDTH * HEIGHT) as usize;
+    let stored_ch = stored_channels(channels);
+    let inv_norm = h2_inv_norm();
+    let shape = WindowShape {
+        width: WIDTH,
+        height: HEIGHT,
+        channels,
+        stored_ch,
+        patch_radius: PATCH_RADIUS,
+        search_radius: SEARCH_RADIUS,
+    };
+
+    WindowLaunch {
+        client: client.clone(),
+        input: args.input,
+        input_len: args.frame_len,
+        accum: args.accum,
+        frame_size: pixels * stored_ch as usize,
+        weight_sum: args.weight_sum,
+        max_weight: args.max_weight,
+        pixels,
+        h2_inv_norm: inv_norm,
+        pass,
+        shape,
+    }
+}
+
 pub struct FusedPairWindowBench<R: Runtime> {
     pub client: ComputeClient<R>,
     pub channels: u32,
     pub channel_name: &'static str,
+    pub candidate: usize,
 }
 
 impl<R: Runtime> Benchmark for FusedPairWindowBench<R> {
@@ -126,48 +160,30 @@ impl<R: Runtime> Benchmark for FusedPairWindowBench<R> {
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let pixels = (WIDTH * HEIGHT) as usize;
-        let stored_ch = stored_channels(self.channels) as usize;
-        let cube_count = cube_count_2d();
-        let cube_dim = cube_dim_2d();
-        let inv_norm = h2_inv_norm();
+        let confidence = WindowConfidence {
+            use_confidence: false,
+            conf_fwd: args.confidence_dummy.clone(),
+            conf_bwd: args.confidence_dummy.clone(),
+            conf_len: 1,
+            step: 1,
+            blocks_x: 1,
+            blocks_y: 1,
+        };
+        let pass = WindowPass::Pair {
+            frame_t: 0,
+            frame_fwd: 0,
+            frame_bwd: 0,
+            noise_offset: 0.0,
+            confidence,
+        };
+        let launch = window_launch(&self.client, self.channels, args, pass);
 
-        unsafe {
-            nlm_fused_pair_accumulate_window::launch_unchecked::<R>(
-                &self.client,
-                cube_count,
-                cube_dim,
-                stored_ch,
-                ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
-                ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored_ch),
-                ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels),
-                ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
-                ArrayArg::from_raw_parts(args.confidence_dummy.clone(), 1),
-                ArrayArg::from_raw_parts(args.confidence_dummy.clone(), 1),
-                false,
-                0u32,
-                0u32,
-                0u32,
-                inv_norm,
-                0.0f32,
-                WIDTH,
-                HEIGHT,
-                self.channels,
-                PATCH_RADIUS,
-                SEARCH_RADIUS,
-                BLOCK_X,
-                BLOCK_Y,
-                1u32,
-                1u32,
-                1u32,
-            );
-        }
-
-        Ok(())
+        launch.launch_candidate(self.candidate)
     }
 
     fn name(&self) -> String {
-        format!("fused_pair_accumulate_window_1080p_{}", self.channel_name)
+        let label = labels::nlm_window(self.candidate);
+        format!("fused_pair_accumulate_window_1080p_{}_{label}", self.channel_name)
     }
 
     fn sync(&self) {
@@ -183,6 +199,7 @@ pub struct FusedSingleWindowBench<R: Runtime> {
     pub client: ComputeClient<R>,
     pub channels: u32,
     pub channel_name: &'static str,
+    pub candidate: usize,
 }
 
 impl<R: Runtime> Benchmark for FusedSingleWindowBench<R> {
@@ -194,40 +211,19 @@ impl<R: Runtime> Benchmark for FusedSingleWindowBench<R> {
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let pixels = (WIDTH * HEIGHT) as usize;
-        let stored_ch = stored_channels(self.channels) as usize;
-        let cube_count = cube_count_2d();
-        let cube_dim = cube_dim_2d();
-        let inv_norm = h2_inv_norm();
+        let pass = WindowPass::Single {
+            frame_t: 0,
+            offset_lut: args.spatial_offset_lut.clone(),
+            offset_lut_len: args.spatial_offset_lut_len,
+        };
+        let launch = window_launch(&self.client, self.channels, args, pass);
 
-        unsafe {
-            nlm_fused_single_window::launch_unchecked::<R>(
-                &self.client,
-                cube_count,
-                cube_dim,
-                stored_ch,
-                ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
-                ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored_ch),
-                ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels),
-                ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
-                0u32,
-                inv_norm,
-                ArrayArg::from_raw_parts(args.spatial_offset_lut.clone(), args.spatial_offset_lut_len),
-                WIDTH,
-                HEIGHT,
-                self.channels,
-                PATCH_RADIUS,
-                SEARCH_RADIUS,
-                BLOCK_X,
-                BLOCK_Y,
-            );
-        }
-
-        Ok(())
+        launch.launch_candidate(self.candidate)
     }
 
     fn name(&self) -> String {
-        format!("fused_single_window_1080p_{}", self.channel_name)
+        let label = labels::nlm_window(self.candidate);
+        format!("fused_single_window_1080p_{}_{label}", self.channel_name)
     }
 
     fn sync(&self) {

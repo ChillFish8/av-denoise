@@ -51,11 +51,11 @@ const _: () = assert!(
 /// Groups each reference patch with its most similar patches, hard-thresholds the group in the
 /// transform domain and scatters every member back into its own frame.
 ///
-/// A cube of 64 threads owns eight reference patches. Each 8-lane group owns one, and lane `sub`
-/// owns column `sub` of every patch the group touches, so candidate reads and scatter writes are
-/// coalesced and `plane_ssd_reduce8` completes each distance. Candidates are read straight from
-/// global memory, because neighbouring references search overlapping windows the cache already
-/// serves.
+/// A cube of `groups * 8` threads owns `groups` reference patches. Each 8-lane group owns one, and
+/// lane `sub` owns column `sub` of every patch the group touches, so candidate reads and scatter
+/// writes are coalesced and `plane_ssd_reduce8` completes each distance. Candidates are read
+/// straight from global memory, because neighbouring references search overlapping windows the
+/// cache already serves.
 ///
 /// Every lane must reach every barrier, since a barrier reached by only part of a workgroup is
 /// undefined. The `transpose8` barriers sit in fully unrolled loops with no runtime condition around
@@ -178,6 +178,7 @@ pub fn collab_fused<S: Float, N: Size>(
     #[comptime] map_rows: u32,
     pool_ratio: f32,
     #[comptime] pooled: bool,
+    #[comptime] groups: u32,
 ) {
     let thread_id = UNIT_POS_X;
     let group = thread_id / 8u32;
@@ -187,11 +188,11 @@ pub fn collab_fused<S: Float, N: Size>(
     let max_x = comptime!(width - PATCH_SIZE);
     let max_y = comptime!(height - PATCH_SIZE);
 
-    let mut transpose_buf = SharedMemory::<f32>::new(comptime!(8 * 65) as usize);
+    let mut transpose_buf = SharedMemory::<f32>::new(comptime!(groups * 65) as usize);
 
     // A dead group works on the last real reference of the row, so every read stays inside the
     // frame and every lane reaches every barrier. `live` stops it writing.
-    let ref_x_index = CUBE_POS_X * 8u32 + group;
+    let ref_x_index = CUBE_POS_X * groups + group;
     let live = ref_x_index < refs_x;
     let ref_x_clamped = ref_x_index.min(refs_x - 1u32);
 
