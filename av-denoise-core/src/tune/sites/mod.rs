@@ -8,7 +8,17 @@ use cubecl::server::Handle;
 
 pub use self::accumulate::{AccumulateCandidate, AccumulateSite};
 pub use self::collab::{CollabCandidate, CollabInputs, CollabOutputs, CollabShape, CollabSite, CollabValues};
-pub use self::regularise::{RegulariseCandidate, RegulariseLayout, RegulariseOutputs, RegulariseSite};
+#[cfg(test)]
+pub(crate) use self::regularise::compare_fields;
+pub use self::regularise::{
+    COOP_MAX_ABS,
+    COOP_MAX_FLIPPED_SHARE,
+    COOP_MIN_PSNR,
+    RegulariseCandidate,
+    RegulariseLayout,
+    RegulariseOutputs,
+    RegulariseSite,
+};
 pub use self::window::{ConfidenceBinding, WindowCandidate, WindowPass, WindowSite};
 use crate::tune::fidelity::{CompareResult, Fidelity, diff_plane};
 use crate::tune::gpu::{read_f32, zero_accumulators};

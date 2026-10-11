@@ -1,12 +1,35 @@
+use cubecl::prelude::*;
+
 use super::engine::{nl4d_outputs, noisy_frames};
 use super::equivalence::assert_candidates_match_baseline;
 use super::fixtures::{RegulariseContent, RegulariseSpec, regularise_site};
-use super::runtime::test_client;
+use super::runtime::{TestRuntime, test_client};
 use crate::Nl4dOptions;
+use crate::nl4d::kernels::tests::reference::nl4d_mv_regularise_reference;
 use crate::nlmeans::ChannelMode;
-use crate::tune::gpu::read_i32;
-use crate::tune::sites::{NL4D_MV_REGULARISE, RegulariseCandidate};
-use crate::tune::{DeviceLimits, FidelityClass, KernelPlan, SiteCandidate, VariantSite, fit_candidates};
+use crate::tune::gpu::{bind, read_f32, read_i32};
+use crate::tune::sites::{
+    COOP_MAX_ABS,
+    COOP_MAX_FLIPPED_SHARE,
+    NL4D_MV_REGULARISE,
+    RegulariseCandidate,
+    RegulariseLayout,
+    RegulariseOutputs,
+    RegulariseSite,
+    compare_fields,
+};
+use crate::tune::{
+    CandidateRecord,
+    DeviceLimits,
+    Fidelity,
+    FidelityClass,
+    KernelPlan,
+    SiteCandidate,
+    VariantSite,
+    choose,
+    diff_plane,
+    fit_candidates,
+};
 
 fn textured_spec() -> RegulariseSpec {
     RegulariseSpec {
@@ -126,4 +149,332 @@ fn the_narrow_serial_shapes_are_candidates() {
 
     assert_eq!(eight_by_four, Some(RegulariseCandidate::Serial8x4));
     assert_eq!(four_by_four, Some(RegulariseCandidate::Serial4x4));
+}
+
+/// Runs the verbatim copy of the serial kernel on `site`'s inputs and returns its field and confidence.
+fn reference_outputs(site: &RegulariseSite<TestRuntime>) -> (Vec<i32>, Vec<f32>) {
+    let client = &site.client;
+    let outputs = site.scratch_outputs();
+    let blocks = outputs.blocks;
+    let cube_count = CubeCount::new_2d(site.blocks_x, site.blocks_y);
+    let cube_dim = CubeDim::new_2d(8, 8);
+    let centre = bind::<TestRuntime>(&site.centre, site.level_len);
+    let neighbour = bind::<TestRuntime>(&site.neighbour, site.level_len);
+    let mv_in = bind::<TestRuntime>(&site.mv_in, 2 * blocks);
+    let vectors = bind::<TestRuntime>(&outputs.vectors, 2 * blocks);
+    let confidence = bind::<TestRuntime>(&outputs.confidence, blocks);
+
+    unsafe {
+        nl4d_mv_regularise_reference::launch_unchecked::<TestRuntime>(
+            client,
+            cube_count,
+            cube_dim,
+            centre,
+            neighbour,
+            mv_in,
+            vectors,
+            confidence,
+            site.lambda_pixel,
+            site.sad_noise_floor,
+            site.thsad,
+            site.width,
+            site.height,
+            site.blksize,
+            site.step,
+            site.blocks_x,
+            site.blocks_y,
+        );
+    }
+
+    let field = read_i32(client, &outputs.vectors, 2 * blocks).expect("vectors read back");
+    let scores = read_f32(client, &outputs.confidence, blocks).expect("confidence reads back");
+    (field, scores)
+}
+
+#[test]
+fn the_serial_kernel_matches_its_verbatim_reference() {
+    let client = test_client();
+    let mut textured_confidence_written = false;
+
+    for spec in regularise_specs() {
+        let site = regularise_site(&client, &spec);
+        let outputs = site.scratch_outputs();
+        site.launch(RegulariseCandidate::Serial8x8, &outputs);
+
+        let blocks = outputs.blocks;
+        let field = read_i32(&client, &outputs.vectors, 2 * blocks).expect("vectors read back");
+        let scores = read_f32(&client, &outputs.confidence, blocks).expect("confidence reads back");
+        let (reference_field, reference_scores) = reference_outputs(&site);
+        let score_bits: Vec<u32> = scores.iter().map(|value| value.to_bits()).collect();
+        let reference_bits: Vec<u32> = reference_scores.iter().map(|value| value.to_bits()).collect();
+
+        assert_eq!(field, reference_field, "{spec:?}: vectors");
+        assert_eq!(score_bits, reference_bits, "{spec:?}: confidence");
+
+        if spec.content == RegulariseContent::Textured {
+            let wrote_vectors = reference_field.iter().any(|&component| component != 0);
+            assert!(wrote_vectors, "{spec:?}: the reference wrote an all-zero field");
+
+            let wrote_scores = reference_scores.iter().any(|&score| score != 0.0);
+            textured_confidence_written |= wrote_scores;
+        }
+    }
+
+    assert!(
+        textured_confidence_written,
+        "the reference wrote no confidence on textured content"
+    );
+}
+
+#[test]
+fn cooperative_thread_counts_are_powers_of_two_of_at_least_eight() {
+    for &candidate in RegulariseCandidate::ALL {
+        if let RegulariseLayout::Cooperative { threads } = candidate.layout() {
+            assert!(threads.is_power_of_two(), "{}", candidate.name());
+            assert!(threads >= 8, "{}", candidate.name());
+        }
+    }
+}
+
+#[test]
+fn cooperative_shared_bytes_add_one_partial_per_candidate_per_thread() {
+    let client = test_client();
+    let site = regularise_site(&client, &textured_spec());
+    let serial_bytes = 16 * 16 * 4 + 30 * 4;
+
+    assert_eq!(
+        site.shared_bytes(RegulariseCandidate::Coop32),
+        serial_bytes + 7 * 32 * 4
+    );
+    assert_eq!(
+        site.shared_bytes(RegulariseCandidate::Coop64),
+        serial_bytes + 7 * 64 * 4
+    );
+}
+
+#[test]
+fn cooperative_candidates_are_rounding_and_prescreened() {
+    let coop = RegulariseCandidate::Coop32.fidelity();
+
+    assert_eq!(coop.class(), FidelityClass::Rounding);
+    assert!(matches!(coop, Fidelity::Rounding { .. }));
+    const { assert!(<RegulariseSite<TestRuntime> as VariantSite<TestRuntime>>::PRESCREEN) };
+}
+
+#[test]
+fn deterministic_choice_never_picks_a_cooperative_candidate() {
+    let records: Vec<CandidateRecord> = RegulariseCandidate::ALL
+        .iter()
+        .map(|&candidate| {
+            let is_cooperative = matches!(candidate.layout(), RegulariseLayout::Cooperative { .. });
+            let median_ns = if is_cooperative { 1_000 } else { 10_000 };
+
+            CandidateRecord {
+                name: candidate.name().to_string(),
+                fidelity: candidate.fidelity().class(),
+                baseline: candidate.is_baseline(),
+                median_ns,
+                samples: 15,
+            }
+        })
+        .collect();
+
+    let chosen = choose(&records, true).expect("a candidate is chosen");
+
+    assert_eq!(chosen.fidelity, FidelityClass::Exact, "{}", chosen.name);
+}
+
+#[test]
+fn the_cooperative_kernels_match_the_verbatim_reference() {
+    let client = test_client();
+    let mut textured_confidence_written = false;
+
+    for spec in regularise_specs() {
+        let site = regularise_site(&client, &spec);
+        let (reference_field, reference_scores) = reference_outputs(&site);
+        let reference_wrote_scores = reference_scores.iter().any(|&score| score != 0.0);
+        let blocks = site.outputs.blocks;
+        let allowed = (blocks as f64 * COOP_MAX_FLIPPED_SHARE).floor() as usize;
+
+        for candidate in [RegulariseCandidate::Coop32, RegulariseCandidate::Coop64] {
+            let label = format!("{spec:?} {}", candidate.name());
+            let outputs = site.scratch_outputs();
+            site.launch(candidate, &outputs);
+
+            let field = read_i32(&client, &outputs.vectors, 2 * blocks).expect("vectors read back");
+            let scores = read_f32(&client, &outputs.confidence, blocks).expect("confidence reads back");
+            let agreement = compare_fields(&reference_field, &field, &reference_scores, &scores);
+            let flipped = agreement.flipped;
+            let difference = agreement.confidence.max_abs;
+            assert!(difference <= COOP_MAX_ABS, "{label}: confidence {difference:e}");
+
+            assert!(flipped <= allowed, "{label}: {flipped} flipped vectors");
+
+            if spec.content == RegulariseContent::Textured {
+                let wrote_vectors = field.iter().any(|&component| component != 0);
+                assert!(wrote_vectors, "{label}: wrote an all-zero field");
+
+                let wrote_scores = scores.iter().any(|&score| score != 0.0);
+                assert_eq!(
+                    wrote_scores, reference_wrote_scores,
+                    "{label}: confidence written"
+                );
+                textured_confidence_written |= wrote_scores;
+            }
+        }
+    }
+
+    assert!(
+        textured_confidence_written,
+        "the cooperative kernels wrote no confidence on textured content"
+    );
+}
+
+#[test]
+fn tie_heavy_content_picks_the_same_vectors_as_the_serial_kernel() {
+    let client = test_client();
+
+    for spec in regularise_specs() {
+        if spec.content == RegulariseContent::Textured {
+            continue;
+        }
+
+        let site = regularise_site(&client, &spec);
+        let serial = site.scratch_outputs();
+        site.launch(RegulariseCandidate::Serial8x8, &serial);
+        let serial_field = read_i32(&client, &serial.vectors, 2 * serial.blocks).expect("vectors read back");
+
+        for candidate in [RegulariseCandidate::Coop32, RegulariseCandidate::Coop64] {
+            let coop = site.scratch_outputs();
+            site.launch(candidate, &coop);
+            let coop_field = read_i32(&client, &coop.vectors, 2 * coop.blocks).expect("vectors read back");
+            assert_eq!(coop_field, serial_field, "{spec:?} {}", candidate.name());
+        }
+    }
+}
+
+#[test]
+fn cooperative_confidence_stays_well_inside_its_declared_bound() {
+    let client = test_client();
+    let mut worst = 0.0f32;
+    let mut flipped = 0usize;
+
+    for spec in regularise_specs() {
+        let site = regularise_site(&client, &spec);
+        let serial = site.scratch_outputs();
+        site.launch(RegulariseCandidate::Serial8x8, &serial);
+        let serial_field = read_i32(&client, &serial.vectors, 2 * serial.blocks).expect("vectors read back");
+        let serial_scores =
+            read_f32(&client, &serial.confidence, serial.blocks).expect("confidence reads back");
+
+        for candidate in [RegulariseCandidate::Coop32, RegulariseCandidate::Coop64] {
+            let coop = site.scratch_outputs();
+            site.launch(candidate, &coop);
+            let coop_field = read_i32(&client, &coop.vectors, 2 * coop.blocks).expect("vectors read back");
+            let coop_scores =
+                read_f32(&client, &coop.confidence, coop.blocks).expect("confidence reads back");
+
+            let agreement = compare_fields(&serial_field, &coop_field, &serial_scores, &coop_scores);
+            worst = worst.max(agreement.confidence.max_abs);
+            flipped += agreement.flipped;
+        }
+    }
+
+    eprintln!("worst cooperative confidence difference {worst:e}, {flipped} flipped vectors");
+    assert!(
+        worst <= COOP_MAX_ABS / 10.0,
+        "difference {worst:e} is too close to the bound"
+    );
+}
+
+#[test]
+fn cooperative_candidates_pass_the_output_check_against_the_serial_kernel() {
+    let client = test_client();
+
+    for spec in regularise_specs() {
+        let site = regularise_site(&client, &spec);
+        let label = format!("{spec:?}");
+        assert_candidates_match_baseline(&site, &label);
+    }
+}
+
+#[test]
+fn forcing_the_cooperative_kernel_keeps_nl4d_output_within_rounding() {
+    let options = Nl4dOptions {
+        temporal_radius: 1,
+        ..Nl4dOptions::default()
+    };
+    let channels = ChannelMode::Luma;
+    let (width, height) = (72u32, 48u32);
+    let frames = noisy_frames(width, height, 1, 7);
+    let baseline_plan = KernelPlan::baseline();
+    let baseline = nl4d_outputs(options, channels, width, height, &frames, baseline_plan);
+
+    for candidate in [RegulariseCandidate::Coop32, RegulariseCandidate::Coop64] {
+        let plan = KernelPlan::baseline().with_site(NL4D_MV_REGULARISE, candidate.name());
+        let forced = nl4d_outputs(options, channels, width, height, &frames, plan);
+        assert_eq!(forced.len(), baseline.len());
+
+        for (forced_frame, baseline_frame) in forced.iter().zip(&baseline) {
+            let diff = diff_plane(baseline_frame, forced_frame);
+            assert!(diff.psnr >= 60.0, "{}: psnr {:.2}", candidate.name(), diff.psnr);
+        }
+    }
+}
+
+fn upload_field(
+    site: &RegulariseSite<TestRuntime>,
+    vectors: &[i32],
+    confidence: &[f32],
+) -> RegulariseOutputs {
+    let vector_bytes = i32::as_bytes(vectors);
+    let confidence_bytes = f32::as_bytes(confidence);
+    let vectors = site.client.create_from_slice(vector_bytes);
+    let confidence = site.client.create_from_slice(confidence_bytes);
+
+    RegulariseOutputs {
+        vectors,
+        confidence,
+        blocks: site.outputs.blocks,
+    }
+}
+
+#[test]
+fn rounding_compare_allows_flipped_vectors_up_to_the_share() {
+    let client = test_client();
+    let spec = RegulariseSpec {
+        width: 256,
+        height: 256,
+        content: RegulariseContent::Flat,
+        field_lambda: 1.0,
+    };
+    let site = regularise_site(&client, &spec);
+    let blocks = site.outputs.blocks;
+    let allowed = (blocks as f64 * COOP_MAX_FLIPPED_SHARE).floor() as usize;
+    assert!(allowed > 0, "{blocks} blocks allow no flipped vector");
+
+    let fidelity = RegulariseCandidate::Coop32.fidelity();
+    let expected_vectors = vec![1i32; 2 * blocks];
+    let confidence = vec![0.5f32; blocks];
+    let baseline = upload_field(&site, &expected_vectors, &confidence);
+
+    let mut under_vectors = expected_vectors.clone();
+    for block in 0..allowed {
+        under_vectors[2 * block] = -1;
+    }
+
+    let under = upload_field(&site, &under_vectors, &confidence);
+    let under_verdict = site
+        .compare(&baseline, &under, fidelity)
+        .expect("the outputs read back");
+    assert!(under_verdict.passed(), "{under_verdict:?}");
+
+    let mut over_vectors = under_vectors.clone();
+    over_vectors[2 * allowed + 1] = -1;
+
+    let over = upload_field(&site, &over_vectors, &confidence);
+    let over_verdict = site
+        .compare(&baseline, &over, fidelity)
+        .expect("the outputs read back");
+    assert!(!over_verdict.passed(), "{over_verdict:?}");
 }

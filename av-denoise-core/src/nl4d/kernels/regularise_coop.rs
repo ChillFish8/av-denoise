@@ -1,0 +1,156 @@
+use cubecl::prelude::*;
+
+use super::regularise::{
+    REGULARISE_CANDIDATES,
+    candidate_cost,
+    gather_candidates,
+    load_centre_tile,
+    write_winner,
+};
+
+/// Clamps a coordinate into `0..limit` without a branch.
+#[cube]
+fn clamp_index(value: i32, limit: i32) -> i32 {
+    let floored = i32::max(value, 0i32);
+    i32::min(floored, limit - 1i32)
+}
+
+/// Re-scores each block's motion vector with every thread of the cube sharing every candidate's SAD.
+///
+/// It picks the same winner as [nl4d_mv_regularise](crate::nl4d::kernels::nl4d_mv_regularise) up
+/// to rounding. Launch one cube of `threads` threads along x per block, where `threads` is a power
+/// of two of at least 8. Each thread sums the absolute differences of every `threads`-th pixel of
+/// the block for all seven candidates, so neighbouring threads read neighbouring pixels. The
+/// partial sums meet in shared memory through a tree with one barrier per level. Thread 0 then
+/// costs the candidates and writes the winner and its confidence.
+///
+/// Candidates whose differences match pixel for pixel tie exactly, because every candidate goes
+/// through the same tree.
+#[cube(launch_unchecked)]
+pub fn nl4d_mv_regularise_coop(
+    centre: &Array<f32>,
+    neighbour: &Array<f32>,
+    mv_in: &Array<i32>,
+    mv_out: &mut Array<i32>,
+    confidence_out: &mut Array<f32>,
+    lambda_pixel: f32,
+    sad_noise_floor: f32,
+    thsad: f32,
+    #[comptime] width: u32,
+    #[comptime] height: u32,
+    #[comptime] blksize: u32,
+    #[comptime] step: u32,
+    #[comptime] blocks_x: u32,
+    #[comptime] blocks_y: u32,
+    #[comptime] threads: u32,
+) {
+    let block_col = CUBE_POS_X;
+    let block_row = CUBE_POS_Y;
+    let block = block_row * blocks_x + block_col;
+    let thread_id = UNIT_POS_X;
+
+    let block_pixels = comptime!(blksize * blksize);
+    let mut centre_smem = SharedMemory::<f32>::new(block_pixels as usize);
+    let mut candidates = SharedMemory::<i32>::new(comptime!(2 * REGULARISE_CANDIDATES) as usize);
+    let mut median = SharedMemory::<i32>::new(2usize);
+    let mut sad_scratch = SharedMemory::<f32>::new(REGULARISE_CANDIDATES as usize);
+    let mut cost = SharedMemory::<f32>::new(REGULARISE_CANDIDATES as usize);
+    let mut partials = SharedMemory::<f32>::new(comptime!(REGULARISE_CANDIDATES * threads) as usize);
+
+    let block_origin_x = block_col as i32 * step as i32;
+    let block_origin_y = block_row as i32 * step as i32;
+
+    load_centre_tile(
+        centre,
+        &mut centre_smem,
+        block_origin_x,
+        block_origin_y,
+        width,
+        height,
+        blksize,
+    );
+
+    if thread_id == 0u32 {
+        gather_candidates(
+            mv_in,
+            &mut candidates,
+            &mut median,
+            block_col,
+            block_row,
+            blocks_x,
+            blocks_y,
+        );
+    }
+
+    sync_cube();
+
+    let mut partial = Array::<f32>::new(REGULARISE_CANDIDATES as usize);
+    for candidate in 0..REGULARISE_CANDIDATES {
+        partial[candidate as usize] = 0.0f32;
+    }
+
+    let mut pixel = thread_id;
+    while pixel < block_pixels {
+        let pixel_x = pixel % blksize;
+        let pixel_y = pixel / blksize;
+        let centre_x = block_origin_x + pixel_x as i32;
+        let centre_y = block_origin_y + pixel_y as i32;
+        let centre_val = centre_smem[pixel as usize];
+
+        for candidate in 0..REGULARISE_CANDIDATES {
+            let mvx = candidates[(candidate * 2u32) as usize];
+            let mvy = candidates[(candidate * 2u32 + 1u32) as usize];
+            let neighbour_x = clamp_index(centre_x + mvx, width as i32);
+            let neighbour_y = clamp_index(centre_y + mvy, height as i32);
+            let neighbour_val = neighbour[(neighbour_y * width as i32 + neighbour_x) as usize];
+            let diff = centre_val - neighbour_val;
+            partial[candidate as usize] += f32::abs(diff);
+        }
+
+        pixel += threads;
+    }
+
+    for candidate in 0..REGULARISE_CANDIDATES {
+        partials[(candidate * threads + thread_id) as usize] = partial[candidate as usize];
+    }
+
+    sync_cube();
+
+    // Every thread walks the same strides, so every thread reaches every barrier.
+    let half_threads = comptime!(threads / 2u32);
+    let mut stride = half_threads.runtime();
+    while stride > 0u32 {
+        if thread_id < stride {
+            for candidate in 0..REGULARISE_CANDIDATES {
+                let own = (candidate * threads + thread_id) as usize;
+                let other = (candidate * threads + thread_id + stride) as usize;
+                let other_sum = partials[other];
+                partials[own] += other_sum;
+            }
+        }
+
+        sync_cube();
+        stride /= 2u32;
+    }
+
+    if thread_id == 0u32 {
+        for candidate in 0..REGULARISE_CANDIDATES {
+            let sad = partials[(candidate * threads) as usize];
+            let mvx = candidates[(candidate * 2u32) as usize];
+            let mvy = candidates[(candidate * 2u32 + 1u32) as usize];
+            sad_scratch[candidate as usize] = sad;
+            cost[candidate as usize] = candidate_cost(sad, mvx, mvy, &median, lambda_pixel);
+        }
+
+        write_winner(
+            &candidates,
+            &sad_scratch,
+            &cost,
+            mv_out,
+            confidence_out,
+            block,
+            sad_noise_floor,
+            thsad,
+        );
+    }
+}

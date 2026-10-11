@@ -2,8 +2,8 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::NL4D_MV_REGULARISE;
-use crate::nl4d::kernels::{REGULARISE_CANDIDATES, nl4d_mv_regularise};
-use crate::tune::fidelity::{CompareResult, Fidelity, diff_integers, diff_plane};
+use crate::nl4d::kernels::{REGULARISE_CANDIDATES, nl4d_mv_regularise, nl4d_mv_regularise_coop};
+use crate::tune::fidelity::{CompareResult, Fidelity, PlaneDiff, diff_integers, diff_plane};
 use crate::tune::gpu::{bind, read_f32, read_i32, zero_words};
 use crate::tune::key::SiteKey;
 use crate::tune::site::{LaunchShape, SiteCandidate, VariantSite};
@@ -14,11 +14,68 @@ use crate::tune::site::{LaunchShape, SiteCandidate, VariantSite};
 /// its SAD and one for its cost.
 const SCRATCH_WORDS: u32 = 2 * REGULARISE_CANDIDATES + 2 + 2 * REGULARISE_CANDIDATES;
 
+/// The largest confidence difference the cooperative kernels may show against the serial one.
+pub const COOP_MAX_ABS: f32 = 1.0e-4;
+
+/// The lowest confidence PSNR the cooperative kernels may show against the serial one.
+pub const COOP_MIN_PSNR: f64 = 80.0;
+
+/// The share of blocks whose winning vector may differ from the serial kernel's.
+///
+/// A near tie between two different candidates can resolve either way once the SADs are summed in
+/// another order.
+pub const COOP_MAX_FLIPPED_SHARE: f64 = 0.001;
+
+const COOP_FIDELITY: Fidelity = Fidelity::Rounding {
+    min_psnr: COOP_MIN_PSNR,
+    max_abs: COOP_MAX_ABS,
+};
+
+/// How closely two regularised fields agree.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FieldAgreement {
+    /// Blocks whose winning vector differs.
+    pub(crate) flipped: usize,
+    /// The confidence difference over the blocks whose vectors match.
+    pub(crate) confidence: PlaneDiff,
+}
+
+/// Counts the blocks whose vectors differ and diffs the confidence of the blocks whose vectors match.
+pub(crate) fn compare_fields(
+    expected_vectors: &[i32],
+    actual_vectors: &[i32],
+    expected_confidence: &[f32],
+    actual_confidence: &[f32],
+) -> FieldAgreement {
+    let blocks = expected_confidence.len();
+    let mut flipped = 0usize;
+    let mut kept_expected = Vec::with_capacity(blocks);
+    let mut kept_actual = Vec::with_capacity(blocks);
+
+    for block in 0..blocks {
+        let expected_pair = &expected_vectors[2 * block..2 * block + 2];
+        let actual_pair = &actual_vectors[2 * block..2 * block + 2];
+
+        if expected_pair == actual_pair {
+            kept_expected.push(expected_confidence[block]);
+            kept_actual.push(actual_confidence[block]);
+        } else {
+            flipped += 1;
+        }
+    }
+
+    let confidence = diff_plane(&kept_expected, &kept_actual);
+
+    FieldAgreement { flipped, confidence }
+}
+
 /// How one candidate spreads a block's work over its cube.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegulariseLayout {
     /// The serial kernel on an `x` by `y` cube, one thread per scored vector.
     Serial { x: u32, y: u32 },
+    /// The cooperative kernel on a `threads` by 1 cube.
+    Cooperative { threads: u32 },
 }
 
 /// A way to run the regularise pass.
@@ -27,6 +84,8 @@ pub enum RegulariseCandidate {
     Serial8x8,
     Serial8x4,
     Serial4x4,
+    Coop32,
+    Coop64,
 }
 
 impl RegulariseCandidate {
@@ -35,6 +94,8 @@ impl RegulariseCandidate {
             RegulariseCandidate::Serial8x8 => RegulariseLayout::Serial { x: 8, y: 8 },
             RegulariseCandidate::Serial8x4 => RegulariseLayout::Serial { x: 8, y: 4 },
             RegulariseCandidate::Serial4x4 => RegulariseLayout::Serial { x: 4, y: 4 },
+            RegulariseCandidate::Coop32 => RegulariseLayout::Cooperative { threads: 32 },
+            RegulariseCandidate::Coop64 => RegulariseLayout::Cooperative { threads: 64 },
         }
     }
 }
@@ -45,6 +106,8 @@ impl SiteCandidate for RegulariseCandidate {
         RegulariseCandidate::Serial8x8,
         RegulariseCandidate::Serial8x4,
         RegulariseCandidate::Serial4x4,
+        RegulariseCandidate::Coop32,
+        RegulariseCandidate::Coop64,
     ];
 
     fn name(self) -> &'static str {
@@ -52,11 +115,16 @@ impl SiteCandidate for RegulariseCandidate {
             RegulariseCandidate::Serial8x8 => "serial8x8",
             RegulariseCandidate::Serial8x4 => "serial8x4",
             RegulariseCandidate::Serial4x4 => "serial4x4",
+            RegulariseCandidate::Coop32 => "coop32",
+            RegulariseCandidate::Coop64 => "coop64",
         }
     }
 
     fn fidelity(self) -> Fidelity {
-        Fidelity::Exact
+        match self.layout() {
+            RegulariseLayout::Serial { .. } => Fidelity::Exact,
+            RegulariseLayout::Cooperative { .. } => COOP_FIDELITY,
+        }
     }
 }
 
@@ -126,11 +194,47 @@ impl<R: Runtime> RegulariseSite<R> {
             );
         }
     }
+
+    fn launch_cooperative(&self, threads: u32, outputs: &RegulariseOutputs) {
+        let blocks = outputs.blocks;
+        let cube_count = CubeCount::new_2d(self.blocks_x, self.blocks_y);
+        let cube_dim = CubeDim::new_1d(threads);
+        let centre = bind::<R>(&self.centre, self.level_len);
+        let neighbour = bind::<R>(&self.neighbour, self.level_len);
+        let mv_in = bind::<R>(&self.mv_in, 2 * blocks);
+        let vectors = bind::<R>(&outputs.vectors, 2 * blocks);
+        let confidence = bind::<R>(&outputs.confidence, blocks);
+
+        unsafe {
+            nl4d_mv_regularise_coop::launch_unchecked::<R>(
+                &self.client,
+                cube_count,
+                cube_dim,
+                centre,
+                neighbour,
+                mv_in,
+                vectors,
+                confidence,
+                self.lambda_pixel,
+                self.sad_noise_floor,
+                self.thsad,
+                self.width,
+                self.height,
+                self.blksize,
+                self.step,
+                self.blocks_x,
+                self.blocks_y,
+                threads,
+            );
+        }
+    }
 }
 
 impl<R: Runtime> VariantSite<R> for RegulariseSite<R> {
     type Candidate = RegulariseCandidate;
     type Outputs = RegulariseOutputs;
+
+    const PRESCREEN: bool = true;
 
     fn client(&self) -> &ComputeClient<R> {
         &self.client
@@ -146,18 +250,25 @@ impl<R: Runtime> VariantSite<R> for RegulariseSite<R> {
     fn shape(&self, candidate: RegulariseCandidate) -> LaunchShape {
         match candidate.layout() {
             RegulariseLayout::Serial { x, y } => LaunchShape { x, y },
+            RegulariseLayout::Cooperative { threads } => LaunchShape { x: threads, y: 1 },
         }
     }
 
-    fn shared_bytes(&self, _candidate: RegulariseCandidate) -> usize {
+    fn shared_bytes(&self, candidate: RegulariseCandidate) -> usize {
         let centre_floats = self.blksize * self.blksize;
-        let words = centre_floats + SCRATCH_WORDS;
+        let partial_floats = match candidate.layout() {
+            RegulariseLayout::Serial { .. } => 0,
+            RegulariseLayout::Cooperative { threads } => REGULARISE_CANDIDATES * threads,
+        };
+        let words = centre_floats + SCRATCH_WORDS + partial_floats;
+
         words as usize * size_of::<f32>()
     }
 
     fn launch(&self, candidate: RegulariseCandidate, outputs: &RegulariseOutputs) {
         match candidate.layout() {
             RegulariseLayout::Serial { x, y } => self.launch_serial(x, y, outputs),
+            RegulariseLayout::Cooperative { threads } => self.launch_cooperative(threads, outputs),
         }
     }
 
@@ -196,9 +307,28 @@ impl<R: Runtime> VariantSite<R> for RegulariseSite<R> {
         let expected_confidence = read_f32(&self.client, &baseline.confidence, blocks)?;
         let actual_confidence = read_f32(&self.client, &candidate.confidence, blocks)?;
 
-        let vector_diff = diff_integers(&expected_vectors, &actual_vectors);
-        let confidence_diff = diff_plane(&expected_confidence, &actual_confidence);
-        let verdict = fidelity.judge(&[vector_diff, confidence_diff]);
+        if fidelity == Fidelity::Exact {
+            let vector_diff = diff_integers(&expected_vectors, &actual_vectors);
+            let confidence_diff = diff_plane(&expected_confidence, &actual_confidence);
+            let verdict = fidelity.judge(&[vector_diff, confidence_diff]);
+            return Ok(verdict);
+        }
+
+        let agreement = compare_fields(
+            &expected_vectors,
+            &actual_vectors,
+            &expected_confidence,
+            &actual_confidence,
+        );
+        let flipped = agreement.flipped;
+
+        let allowed = (blocks as f64 * COOP_MAX_FLIPPED_SHARE).floor() as usize;
+        if flipped > allowed {
+            let reason = format!("{flipped} of {blocks} vectors differ where at most {allowed} may");
+            return Ok(CompareResult::Fail(reason));
+        }
+
+        let verdict = fidelity.judge(&[agreement.confidence]);
 
         Ok(verdict)
     }
