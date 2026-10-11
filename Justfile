@@ -82,8 +82,18 @@ build-wheel *ARGS:
 # Runs every Rust and Python test. Needs an accelerator, both sides render.
 test: test-rust test-py
 
-# Every Rust test across the three crates.
-test-rust:
+# Every Rust test across the three crates. Another backend, for example `just test-rust rocm`, runs
+# the core crate's backend-generic tests on it instead. ROCm runs at most 8 test processes, because
+# each HIP process takes copy queues from a small fixed pool.
+test-rust backend="vulkan":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ "{{backend}}" != vulkan ]; then
+        threads=()
+        if [ "{{backend}}" = rocm ]; then threads=(--test-threads 8); fi
+        cargo nextest run --release -p av-denoise-core --no-default-features --features {{backend}} "${threads[@]}"
+        exit 0
+    fi
     cargo nextest run --release -p av-denoise-core --features vulkan
     cargo nextest run --release -p av-denoise --features vulkan,binary
     cargo nextest run --release -p av-denoise-vs --features vulkan

@@ -1,0 +1,217 @@
+use crate::tune::{
+    CandidateRecord,
+    FidelityClass,
+    PipelineProfile,
+    ProfileRanking,
+    ProfileRecord,
+    SiteKey,
+    SiteRanking,
+    TuneResult,
+    choose,
+    choose_profile,
+};
+
+fn record(name: &str, fidelity: FidelityClass, baseline: bool, median_ns: u64) -> CandidateRecord {
+    CandidateRecord {
+        name: name.to_string(),
+        fidelity,
+        baseline,
+        median_ns,
+        samples: 20,
+    }
+}
+
+fn baseline_record(median_ns: u64) -> CandidateRecord {
+    record("baseline", FidelityClass::Exact, true, median_ns)
+}
+
+#[test]
+fn the_lowest_median_wins_when_it_is_clear_of_the_rest() {
+    let records = [
+        baseline_record(1000),
+        record("fast", FidelityClass::Exact, false, 900),
+    ];
+    let chosen = choose(&records, false).expect("a candidate");
+
+    assert_eq!(chosen.name, "fast");
+}
+
+#[test]
+fn a_candidate_within_two_percent_of_the_baseline_loses_to_it() {
+    let records = [
+        baseline_record(1000),
+        record("barely_faster", FidelityClass::Exact, false, 985),
+    ];
+    let chosen = choose(&records, false).expect("a candidate");
+
+    assert!(chosen.baseline);
+}
+
+#[test]
+fn a_rounding_winner_within_two_percent_of_an_exact_one_loses_to_it() {
+    let records = [
+        baseline_record(1000),
+        record("exact_fast", FidelityClass::Exact, false, 800),
+        record("rounding_fast", FidelityClass::Rounding, false, 790),
+    ];
+    let chosen = choose(&records, false).expect("a candidate");
+
+    assert_eq!(chosen.name, "exact_fast");
+}
+
+#[test]
+fn a_rounding_winner_clear_of_every_exact_one_wins() {
+    let records = [
+        baseline_record(1000),
+        record("exact_fast", FidelityClass::Exact, false, 900),
+        record("rounding_fast", FidelityClass::Rounding, false, 700),
+    ];
+    let chosen = choose(&records, false).expect("a candidate");
+
+    assert_eq!(chosen.name, "rounding_fast");
+}
+
+/// The margin is measured from the fastest median only, so faithfulness never chains past it.
+#[test]
+fn hysteresis_does_not_chain_past_the_fastest_median() {
+    let records = [
+        baseline_record(1030),
+        record("exact_fast", FidelityClass::Exact, false, 1015),
+        record("rounding_fast", FidelityClass::Rounding, false, 1000),
+    ];
+    let chosen = choose(&records, false).expect("a candidate");
+
+    assert_eq!(chosen.name, "exact_fast");
+}
+
+#[test]
+fn deterministic_only_considers_exact_candidates() {
+    let records = [
+        baseline_record(1000),
+        record("rounding_fast", FidelityClass::Rounding, false, 500),
+        record("exact_fast", FidelityClass::Exact, false, 900),
+    ];
+    let chosen = choose(&records, true).expect("a candidate");
+
+    assert_eq!(chosen.name, "exact_fast");
+}
+
+#[test]
+fn no_records_choose_nothing() {
+    assert!(choose(&[], false).is_none());
+}
+
+fn key(site: &'static str) -> SiteKey {
+    SiteKey::builder(site, 64, 64).build()
+}
+
+#[test]
+fn the_plan_holds_each_sites_choice() {
+    let mut result = TuneResult::default();
+    let window_ranking = SiteRanking {
+        candidates: vec![
+            record("32x16", FidelityClass::Exact, false, 800),
+            record("32x8", FidelityClass::Exact, true, 1000),
+        ],
+    };
+    result.sites.insert(key("nlm_window"), window_ranking);
+
+    let plan = result.kernel_plan(false);
+
+    assert_eq!(plan.get(&key("nlm_window")), Some("32x16"));
+}
+
+#[test]
+fn unknown_names_drop_their_key() {
+    let mut result = TuneResult::default();
+    let known = SiteRanking {
+        candidates: vec![record("32x8", FidelityClass::Exact, true, 1000)],
+    };
+    let unknown = SiteRanking {
+        candidates: vec![
+            record("32x8", FidelityClass::Exact, true, 1000),
+            record("64x64", FidelityClass::Exact, false, 900),
+        ],
+    };
+    result.sites.insert(key("nlm_window"), known);
+    result.sites.insert(key("nlm_accumulate"), unknown);
+
+    let dropped = result.retain_known_with(|site, name| site == "nlm_window" || name != "64x64");
+
+    assert_eq!(dropped, 1);
+    assert!(result.sites.contains_key(&key("nlm_window")));
+    assert!(!result.sites.contains_key(&key("nlm_accumulate")));
+}
+
+#[test]
+fn a_newer_result_replaces_keys_it_holds_and_keeps_the_rest() {
+    let mut stored = TuneResult::default();
+    let old_ranking = SiteRanking {
+        candidates: vec![baseline_record(1000)],
+    };
+    stored.sites.insert(key("nlm_window"), old_ranking.clone());
+    stored.sites.insert(key("collab_fused"), old_ranking);
+
+    let mut newer = TuneResult::default();
+    let new_ranking = SiteRanking {
+        candidates: vec![baseline_record(500)],
+    };
+    newer.sites.insert(key("nlm_window"), new_ranking.clone());
+
+    stored.merge(newer);
+
+    assert_eq!(stored.sites[&key("nlm_window")], new_ranking);
+    assert!(stored.sites.contains_key(&key("collab_fused")));
+}
+
+fn profile_ranking(baseline_ns: u64, f32_ns: u64) -> ProfileRanking {
+    ProfileRanking {
+        complete: true,
+        profiles: vec![
+            ProfileRecord {
+                profile: PipelineProfile::Baseline,
+                median_frame_ns: baseline_ns,
+                blocks: 3,
+            },
+            ProfileRecord {
+                profile: PipelineProfile::F32Search,
+                median_frame_ns: f32_ns,
+                blocks: 3,
+            },
+        ],
+    }
+}
+
+#[test]
+fn a_profile_must_beat_the_baseline_by_three_percent() {
+    let barely = profile_ranking(1000, 975);
+    let clearly = profile_ranking(1000, 960);
+
+    assert_eq!(choose_profile(&barely, false), PipelineProfile::Baseline);
+    assert_eq!(choose_profile(&clearly, false), PipelineProfile::F32Search);
+}
+
+#[test]
+fn deterministic_always_picks_the_baseline_profile() {
+    let clearly = profile_ranking(1000, 500);
+
+    assert_eq!(choose_profile(&clearly, true), PipelineProfile::Baseline);
+}
+
+#[test]
+fn a_configuration_is_complete_only_when_every_profile_key_is() {
+    let mut result = TuneResult::default();
+    let complete = profile_ranking(1000, 1000);
+    let mut partial = profile_ranking(1000, 1000);
+    partial.complete = false;
+    result.profiles.insert("luma".to_string(), complete);
+    result.profiles.insert("chroma".to_string(), partial);
+
+    let luma_only = ["luma".to_string()];
+    let both = ["luma".to_string(), "chroma".to_string()];
+    let missing = ["luma".to_string(), "yuv".to_string()];
+
+    assert!(result.is_complete(&luma_only));
+    assert!(!result.is_complete(&both));
+    assert!(!result.is_complete(&missing));
+}
