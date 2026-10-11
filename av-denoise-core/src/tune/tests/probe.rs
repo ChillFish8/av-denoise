@@ -58,6 +58,8 @@ pub(crate) struct ProbeSite {
     pub(crate) baseline_shared: usize,
     pub(crate) baseline_plane: u32,
     pub(crate) launched: Arc<Mutex<Vec<ProbeCandidate>>>,
+    /// Whether allocating scratch outputs panics, which makes any tuning of this site fail.
+    pub(crate) fail_scratch: bool,
 }
 
 impl ProbeSite {
@@ -68,6 +70,7 @@ impl ProbeSite {
             baseline_shared: 1024,
             baseline_plane: 1,
             launched: Arc::new(Mutex::new(Vec::new())),
+            fail_scratch: false,
         }
     }
 
@@ -118,7 +121,11 @@ impl VariantSite<TestRuntime> for ProbeSite {
 
     fn real_outputs(&self) {}
 
-    fn scratch_outputs(&self) {}
+    fn scratch_outputs(&self) {
+        if self.fail_scratch {
+            panic!("scratch allocation failed");
+        }
+    }
 
     fn clear_outputs(&self, _outputs: &()) {}
 

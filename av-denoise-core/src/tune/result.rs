@@ -1,9 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::consts::{HYSTERESIS, PROFILE_MARGIN};
 use super::fidelity::FidelityClass;
 use super::key::SiteKey;
 use super::plan::{KernelPlan, PipelineProfile};
+use super::sites::candidate_known;
 
 /// Every ranking a tuning pass produced, per site key and per profile key.
 ///
@@ -14,6 +15,8 @@ pub struct TuneResult {
     pub sites: BTreeMap<SiteKey, SiteRanking>,
     /// Keyed by the host's profile key, which names an algorithm, plane geometry and parameters.
     pub profiles: BTreeMap<String, ProfileRanking>,
+    /// Site keys whose tuning failed. They hold no ranking and run their baseline.
+    pub failed: BTreeSet<SiteKey>,
 }
 
 /// The candidates that passed their output check at one site key.
@@ -116,9 +119,25 @@ pub fn choose_profile(ranking: &ProfileRanking, deterministic: bool) -> Pipeline
 
 impl TuneResult {
     /// Takes every key `newer` holds, keeping the rest of this result.
+    ///
+    /// A key `newer` ranks is no longer failed, and a key `newer` failed loses its old ranking.
     pub fn merge(&mut self, newer: TuneResult) {
+        for key in newer.sites.keys() {
+            self.failed.remove(key);
+        }
+
+        for key in &newer.failed {
+            self.sites.remove(key);
+        }
+
         self.sites.extend(newer.sites);
+        self.failed.extend(newer.failed);
         self.profiles.extend(newer.profiles);
+    }
+
+    /// Whether `key` was ranked or its tuning failed, so it needs no more tuning.
+    pub fn is_settled(&self, key: &SiteKey) -> bool {
+        self.sites.contains_key(key) || self.failed.contains(key)
     }
 
     /// Drops every site key whose site or any candidate name `known` rejects.
@@ -134,6 +153,11 @@ impl TuneResult {
         });
 
         before - self.sites.len()
+    }
+
+    /// Drops every site key whose site or candidate this build does not know, so it is tuned again.
+    pub fn retain_known(&mut self) -> usize {
+        self.retain_known_with(candidate_known)
     }
 
     /// The plan this result implies, one choice per site key.

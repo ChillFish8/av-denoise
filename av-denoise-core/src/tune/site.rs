@@ -58,6 +58,9 @@ pub trait VariantSite<R: Runtime>: Clone + Send {
     /// Whether every candidate takes a few short samples before full timing.
     const PRESCREEN: bool = false;
 
+    /// How many stages the candidates are timed in. One stage times every candidate together.
+    const STAGES: usize = 1;
+
     fn client(&self) -> &ComputeClient<R>;
 
     fn key(&self) -> SiteKey;
@@ -70,6 +73,15 @@ pub trait VariantSite<R: Runtime>: Clone + Send {
     /// The narrowest plane the candidate's kernel works on.
     fn min_plane_size(&self, _candidate: Self::Candidate) -> u32 {
         1
+    }
+
+    /// Whether stage `stage` times `candidate` around `seed`.
+    ///
+    /// Stage 0 starts from the baseline. Each later stage starts from each of the fastest candidates
+    /// timed so far and should vary only its own dimensions. The default puts every candidate in
+    /// every stage, which with one stage times them all together.
+    fn in_stage(&self, _stage: usize, _seed: Self::Candidate, _candidate: Self::Candidate) -> bool {
+        true
     }
 
     fn launch(&self, candidate: Self::Candidate, outputs: &Self::Outputs);

@@ -74,7 +74,7 @@ fn regularise_keys_name_the_block_geometry() {
     assert_eq!(key.as_str(), "nl4d_mv_regularise|w128|h64|blksize=16|step=8");
 }
 
-fn regularise_specs() -> Vec<RegulariseSpec> {
+pub(super) fn regularise_specs() -> Vec<RegulariseSpec> {
     let mut specs = Vec::new();
 
     for content in [

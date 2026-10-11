@@ -5,10 +5,14 @@ use crate::tune::{
     DecideLimits,
     MIN_CANDIDATE_TIME,
     MIN_SAMPLES,
+    PRESCREEN_SAMPLES,
     SampleTiming,
     Sampler,
     Samples,
+    SiteTiming,
+    Staging,
     prescreen,
+    sample_in_stages,
     sample_until_settled,
 };
 
@@ -245,4 +249,160 @@ fn a_quantile_rank_past_one_gives_the_slowest_sample() {
     }
 
     assert_eq!(samples.quantile(2.0), Duration::from_micros(3));
+}
+
+/// A 3 by 4 grid of candidates, `index = row * 4 + column`, timed at these microseconds.
+///
+/// Candidate 0 is the baseline. Stage 0 varies the column in the seed's row and stage 1 varies the
+/// row in the seed's column, the way a site varies its search dimensions and then its group count.
+const GRID_MICROS: [u64; 12] = [1_000, 900, 800, 850, 1_200, 700, 760, 820, 1_300, 980, 990, 640];
+
+const GRID_COLUMNS: usize = 4;
+
+fn grid_sampler() -> ScriptedSampler {
+    let scripts: Vec<(usize, &[u64])> = GRID_MICROS
+        .iter()
+        .enumerate()
+        .map(|(index, micros)| (index, std::slice::from_ref(micros)))
+        .collect();
+
+    ScriptedSampler::new(&scripts)
+}
+
+fn grid_members(stage: usize, seed: usize) -> Vec<usize> {
+    let seed_row = seed / GRID_COLUMNS;
+    let seed_column = seed % GRID_COLUMNS;
+
+    (0..GRID_MICROS.len())
+        .filter(|&index| {
+            let same_row = index / GRID_COLUMNS == seed_row;
+            let same_column = index % GRID_COLUMNS == seed_column;
+            if stage == 0 { same_row } else { same_column }
+        })
+        .collect()
+}
+
+fn grid_staging(stages: usize, prescreen: bool) -> Staging<'static> {
+    Staging {
+        stages,
+        keep: 3,
+        prescreen,
+        members: &grid_members,
+    }
+}
+
+fn timed_indices(timing: &SiteTiming) -> Vec<usize> {
+    let mut indices: Vec<usize> = timing.timed.iter().map(|stats| stats.index).collect();
+    indices.sort_unstable();
+    indices
+}
+
+#[test]
+fn one_stage_around_the_baseline_times_only_its_members() {
+    let mut sampler = grid_sampler();
+    let limits = DecideLimits::default();
+    let staging = grid_staging(1, false);
+
+    let timing = sample_in_stages(&mut sampler, &staging, 0, &limits, |indices| indices.to_vec())
+        .expect("sampling succeeds");
+
+    assert_eq!(timed_indices(&timing), vec![0, 1, 2, 3]);
+    assert_eq!(sampler.served(4), 0);
+}
+
+/// Columns 2, 3 and 1 are the fastest of the first row, so the second stage times rows 1 and 2 of
+/// those columns and never column 0.
+#[test]
+fn a_later_stage_varies_its_dimension_around_the_fastest_so_far() {
+    let mut sampler = grid_sampler();
+    let limits = DecideLimits::default();
+    let staging = grid_staging(2, false);
+
+    let timing = sample_in_stages(&mut sampler, &staging, 0, &limits, |indices| indices.to_vec())
+        .expect("sampling succeeds");
+
+    assert_eq!(timed_indices(&timing), vec![0, 1, 2, 3, 5, 6, 7, 9, 10, 11]);
+    assert_eq!(sampler.served(4), 0);
+    assert_eq!(sampler.served(8), 0);
+}
+
+#[test]
+fn a_later_stage_never_retimes_a_candidate() {
+    let mut first_only = grid_sampler();
+    let mut both = grid_sampler();
+    let limits = DecideLimits::default();
+    let keep_all = |indices: &[usize]| indices.to_vec();
+
+    sample_in_stages(&mut first_only, &grid_staging(1, false), 0, &limits, keep_all)
+        .expect("sampling succeeds");
+    sample_in_stages(&mut both, &grid_staging(2, false), 0, &limits, keep_all).expect("sampling succeeds");
+
+    for index in 0..GRID_COLUMNS {
+        assert_eq!(both.served(index), first_only.served(index), "candidate {index}");
+    }
+}
+
+/// Candidate 1 is 41% slower than the fastest of the whole grid but within 25% of its own stage's
+/// fastest, so it survives. Candidates 7, 9 and 10 are more than 25% slower than candidate 11, the
+/// fastest of their stage, and are dropped after their pre-screen samples.
+#[test]
+fn the_prescreen_runs_within_each_stage() {
+    let mut sampler = grid_sampler();
+    let limits = DecideLimits::default();
+    let staging = grid_staging(2, true);
+
+    let timing = sample_in_stages(&mut sampler, &staging, 0, &limits, |indices| indices.to_vec())
+        .expect("sampling succeeds");
+    let timed = timed_indices(&timing);
+
+    assert!(timed.contains(&1));
+
+    for dropped in [7, 9, 10] {
+        assert!(!timed.contains(&dropped), "candidate {dropped} was timed");
+        assert_eq!(sampler.served(dropped), PRESCREEN_SAMPLES, "candidate {dropped}");
+    }
+}
+
+#[test]
+fn a_candidate_whose_output_check_fails_is_never_timed() {
+    let mut sampler = grid_sampler();
+    let limits = DecideLimits::default();
+    let staging = grid_staging(2, false);
+    let drop_six = |indices: &[usize]| indices.iter().copied().filter(|&index| index != 6).collect();
+
+    let timing = sample_in_stages(&mut sampler, &staging, 0, &limits, drop_six).expect("sampling succeeds");
+
+    assert!(!timed_indices(&timing).contains(&6));
+    assert_eq!(sampler.served(6), 0);
+}
+
+#[test]
+fn a_later_stage_where_every_member_fails_the_prescreen_keeps_the_earlier_ranking() {
+    let mut sampler = grid_sampler();
+    sampler.failing = vec![5, 6, 7, 9, 10, 11];
+    let limits = DecideLimits::default();
+    let staging = grid_staging(2, true);
+
+    let timing = sample_in_stages(&mut sampler, &staging, 0, &limits, |indices| indices.to_vec())
+        .expect("the earlier stage still ranks");
+
+    assert_eq!(timed_indices(&timing), vec![0, 1, 2, 3]);
+}
+
+#[test]
+fn the_baseline_is_timed_even_when_the_first_stage_leaves_it_out() {
+    let mut sampler = grid_sampler();
+    let limits = DecideLimits::default();
+    let without_baseline = |_stage: usize, _seed: usize| vec![1, 2, 3];
+    let staging = Staging {
+        stages: 1,
+        keep: 3,
+        prescreen: false,
+        members: &without_baseline,
+    };
+
+    let timing = sample_in_stages(&mut sampler, &staging, 0, &limits, |indices| indices.to_vec())
+        .expect("sampling succeeds");
+
+    assert_eq!(timed_indices(&timing), vec![0, 1, 2, 3]);
 }

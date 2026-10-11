@@ -22,6 +22,7 @@ pub use self::regularise::{
 pub use self::window::{ConfidenceBinding, WindowCandidate, WindowPass, WindowSite};
 use crate::tune::fidelity::{CompareResult, Fidelity, diff_plane};
 use crate::tune::gpu::{read_f32, zero_accumulators};
+use crate::tune::site::SiteCandidate;
 
 /// The fused windowed NLM kernels, one launch per temporal offset.
 pub const NLM_WINDOW: &str = "nlm_window";
@@ -31,6 +32,17 @@ pub const NLM_ACCUMULATE: &str = "nlm_accumulate";
 pub const COLLAB_FUSED: &str = "collab_fused";
 /// The nl4d motion field regularisation pass.
 pub const NL4D_MV_REGULARISE: &str = "nl4d_mv_regularise";
+
+/// Whether `name` is a candidate of the site `site` in this build.
+pub fn candidate_known(site: &str, name: &str) -> bool {
+    match site {
+        NLM_WINDOW => WindowCandidate::from_name(name).is_some(),
+        NLM_ACCUMULATE => AccumulateCandidate::from_name(name).is_some(),
+        COLLAB_FUSED => CollabCandidate::from_name(name).is_some(),
+        NL4D_MV_REGULARISE => RegulariseCandidate::from_name(name).is_some(),
+        _ => false,
+    }
+}
 
 /// The NLM accumulators a windowed or accumulate launch adds into.
 #[derive(Debug, Clone)]

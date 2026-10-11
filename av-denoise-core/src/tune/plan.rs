@@ -23,6 +23,11 @@ impl KernelPlan {
         self.choices.insert(key, owned);
     }
 
+    /// Drops the entry of `key` itself, leaving any site-wide entry in place.
+    pub fn remove(&mut self, key: &SiteKey) {
+        self.choices.remove(key);
+    }
+
     /// Runs `name` at every key of `site` that has no entry of its own.
     pub fn with_site(mut self, site: &str, name: &str) -> Self {
         let site_owned = site.to_string();

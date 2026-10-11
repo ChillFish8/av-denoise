@@ -1,0 +1,243 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
+
+use super::key::SiteKey;
+use super::plan::KernelPlan;
+use super::result::{SiteRanking, TuneResult, choose};
+
+/// What the selector does at each launch while a ledger is attached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TunePhase {
+    /// Runs the planned candidate.
+    #[default]
+    Idle,
+    /// Runs the planned candidate and times it.
+    Census,
+    /// Tunes the target key in place when its site is reached.
+    Tune,
+}
+
+/// One site key's cost over a census.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CensusEntry {
+    /// Total time of every launch at this key during the census.
+    pub total: Duration,
+    pub launches: u32,
+    /// Candidates tuning this key times, from those that fit the device and pass the deterministic filter.
+    pub candidates: usize,
+}
+
+#[derive(Debug, Clone)]
+struct Target {
+    key: SiteKey,
+    deadline: Instant,
+    /// Whether one caller is tuning the target, so every other caller runs untuned.
+    claimed: bool,
+    settled: bool,
+}
+
+#[derive(Debug, Default)]
+struct LedgerState {
+    phase: TunePhase,
+    plan: KernelPlan,
+    result: TuneResult,
+    census: BTreeMap<SiteKey, CensusEntry>,
+    seen: BTreeMap<SiteKey, usize>,
+    target: Option<Target>,
+}
+
+/// Tuning state shared by every engine one tuning pass drives.
+///
+/// Engines built with a ledger consult it at every launch site. Its phase and target say what each
+/// launch does, and it collects the census and rankings those launches produce. Every method holds
+/// the lock only briefly and never across GPU work.
+#[derive(Debug, Default)]
+pub struct TuneLedger {
+    deterministic: bool,
+    state: Mutex<LedgerState>,
+}
+
+/// The ledger's choice for one key.
+pub(crate) enum LedgerChoice {
+    /// The key's tuning failed, so it runs the baseline.
+    Baseline,
+    Named(String),
+    /// The ledger has no choice for the key.
+    Unplanned,
+}
+
+/// What the selector does at one launch.
+pub(crate) enum Observed {
+    Idle,
+    Census,
+    Tune { deadline: Instant },
+}
+
+impl TuneLedger {
+    /// A ledger in the idle phase.
+    ///
+    /// With `deterministic` set, only exact candidates are tuned or run.
+    pub fn new(deterministic: bool) -> Arc<Self> {
+        let ledger = Self {
+            deterministic,
+            state: Mutex::default(),
+        };
+
+        Arc::new(ledger)
+    }
+
+    pub fn deterministic(&self) -> bool {
+        self.deterministic
+    }
+
+    fn lock(&self) -> MutexGuard<'_, LedgerState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Adds every choice in `plan` the ledger has none for yet.
+    pub fn seed(&self, plan: &KernelPlan) {
+        let mut state = self.lock();
+        state.plan.fill_from(plan);
+    }
+
+    pub fn phase(&self) -> TunePhase {
+        self.lock().phase
+    }
+
+    pub fn set_phase(&self, phase: TunePhase) {
+        self.lock().phase = phase;
+    }
+
+    /// Names the key to tune when its site is next reached, finishing by `deadline`.
+    pub fn set_target(&self, key: SiteKey, deadline: Instant) {
+        let target = Target {
+            key,
+            deadline,
+            claimed: false,
+            settled: false,
+        };
+
+        self.lock().target = Some(target);
+    }
+
+    pub fn clear_target(&self) {
+        self.lock().target = None;
+    }
+
+    /// Whether the target has been tuned or has failed, or no target is set.
+    pub fn target_settled(&self) -> bool {
+        let state = self.lock();
+        state.target.as_ref().is_none_or(|target| target.settled)
+    }
+
+    /// Returns the census and clears it.
+    pub fn take_census(&self) -> BTreeMap<SiteKey, CensusEntry> {
+        let mut state = self.lock();
+        std::mem::take(&mut state.census)
+    }
+
+    /// Every key reached since the ledger was built, with how many candidates tuning it times.
+    pub fn seen(&self) -> BTreeMap<SiteKey, usize> {
+        self.lock().seen.clone()
+    }
+
+    /// Keys whose tuning failed.
+    pub fn failed(&self) -> BTreeSet<SiteKey> {
+        self.lock().result.failed.clone()
+    }
+
+    /// The rankings recorded so far.
+    pub fn result(&self) -> TuneResult {
+        self.lock().result.clone()
+    }
+
+    /// The current choice for every key, seeded and newly tuned.
+    pub fn plan(&self) -> KernelPlan {
+        self.lock().plan.clone()
+    }
+
+    /// Records that `key` was reached and says what its launch should do.
+    ///
+    /// Only the first caller to reach an unsettled target tunes it. The target stays claimed until
+    /// it settles, so every other caller at that key runs untuned.
+    pub(crate) fn observe(&self, key: &SiteKey, candidates: usize) -> Observed {
+        let mut state = self.lock();
+        state.seen.insert(key.clone(), candidates);
+
+        match state.phase {
+            TunePhase::Idle => Observed::Idle,
+            TunePhase::Census => Observed::Census,
+            TunePhase::Tune => claim_target(&mut state, key),
+        }
+    }
+
+    pub(crate) fn choice(&self, key: &SiteKey) -> LedgerChoice {
+        let state = self.lock();
+
+        if state.result.failed.contains(key) {
+            return LedgerChoice::Baseline;
+        }
+
+        match state.plan.get(key) {
+            Some(name) => LedgerChoice::Named(name.to_owned()),
+            None => LedgerChoice::Unplanned,
+        }
+    }
+
+    pub(crate) fn add_census(&self, key: &SiteKey, candidates: usize, elapsed: Duration) {
+        let mut state = self.lock();
+        let entry = state.census.entry(key.clone()).or_default();
+        entry.total += elapsed;
+        entry.launches += 1;
+        entry.candidates = candidates;
+    }
+
+    /// Stores `ranking` for `key` and makes its choice the one that runs.
+    pub(crate) fn record_ranking(&self, key: SiteKey, ranking: SiteRanking) {
+        let mut state = self.lock();
+        let chosen = choose(&ranking.candidates, self.deterministic);
+        if let Some(record) = chosen {
+            state.plan.insert(key.clone(), &record.name);
+        }
+
+        state.result.failed.remove(&key);
+        state.result.sites.insert(key.clone(), ranking);
+        settle(&mut state, &key);
+    }
+
+    pub(crate) fn record_failure(&self, key: SiteKey) {
+        let mut state = self.lock();
+        state.plan.remove(&key);
+        state.result.sites.remove(&key);
+        state.result.failed.insert(key.clone());
+        settle(&mut state, &key);
+    }
+}
+
+/// Hands the target to the caller at `key` when it is unsettled and nobody holds it yet.
+fn claim_target(state: &mut LedgerState, key: &SiteKey) -> Observed {
+    let Some(target) = state.target.as_mut() else {
+        return Observed::Idle;
+    };
+
+    let claimable = !target.settled && !target.claimed && &target.key == key;
+    if !claimable {
+        return Observed::Idle;
+    }
+
+    target.claimed = true;
+
+    Observed::Tune {
+        deadline: target.deadline,
+    }
+}
+
+fn settle(state: &mut LedgerState, key: &SiteKey) {
+    if let Some(target) = state.target.as_mut()
+        && &target.key == key
+    {
+        target.claimed = false;
+        target.settled = true;
+    }
+}

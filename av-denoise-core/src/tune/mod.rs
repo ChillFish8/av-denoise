@@ -9,6 +9,7 @@
 //! - [TuneResult] holds every timed ranking, so a plan can be rebuilt under different rules
 //! - [VariantSite] is one tunable launch point, and [KernelSelector] launches the planned candidate at each
 //! - [DeviceProfile] says which device a result belongs to and what launches fit on it
+//! - [TuneLedger] is the shared state a tuning pass uses to drive engines in place
 
 mod budget;
 mod consts;
@@ -17,9 +18,11 @@ mod device;
 mod fidelity;
 pub(crate) mod gpu;
 mod key;
+mod ledger;
 mod plan;
 mod result;
 mod selector;
+mod session;
 mod site;
 pub(crate) mod sites;
 
@@ -46,8 +49,10 @@ pub use self::decide::{
     Sampler,
     Samples,
     SiteTiming,
+    Staging,
     median,
     prescreen,
+    sample_in_stages,
     sample_until_settled,
 };
 pub use self::device::{DeviceIdentity, DeviceLimits, DeviceProfile};
@@ -61,6 +66,7 @@ pub use self::fidelity::{
     diff_plane,
 };
 pub use self::key::{SiteKey, SiteKeyBuilder, bucket_dim};
+pub use self::ledger::{CensusEntry, TuneLedger, TunePhase};
 pub use self::plan::{KernelPlan, PipelineProfile};
 pub use self::result::{
     CandidateRecord,
@@ -73,4 +79,5 @@ pub use self::result::{
     choose_profile,
 };
 pub use self::selector::{EngineKernels, KernelSelector};
+pub(crate) use self::session::{calibrate, rewarm};
 pub use self::site::{FitError, LaunchShape, SiteCandidate, VariantSite, fit_candidates};

@@ -315,3 +315,42 @@ impl Device {
         Ok(device)
     }
 }
+
+/// The tuner's own timing path, for checking its rankings against other methods.
+pub mod tune_timing {
+    use cubecl::prelude::*;
+
+    use crate::tune::gpu::{self, GpuSampler};
+    use crate::tune::{self, Sampler, VariantSite};
+
+    /// The tuner's sampler over `candidates`, `launches` launches per sample.
+    pub fn gpu_sampler<'a, R: Runtime, S: VariantSite<R>>(
+        site: &'a S,
+        candidates: &'a [S::Candidate],
+        outputs: &'a S::Outputs,
+        launches: u32,
+    ) -> impl Sampler + 'a {
+        GpuSampler::new(site, candidates, outputs, launches)
+    }
+
+    /// Waits for every launch queued on `client`.
+    pub fn sync<R: Runtime>(client: &ComputeClient<R>) -> Result<(), anyhow::Error> {
+        gpu::sync(client)
+    }
+
+    /// Runs the baseline for the tuner's re-warm time.
+    pub fn rewarm<R: Runtime, S: VariantSite<R>>(
+        site: &S,
+        outputs: &S::Outputs,
+    ) -> Result<(), anyhow::Error> {
+        tune::rewarm(site, outputs)
+    }
+
+    /// The launches per sample the tuner would pick for `site`.
+    pub fn calibrate<R: Runtime, S: VariantSite<R>>(
+        site: &S,
+        outputs: &S::Outputs,
+    ) -> Result<u32, anyhow::Error> {
+        tune::calibrate(site, outputs)
+    }
+}
