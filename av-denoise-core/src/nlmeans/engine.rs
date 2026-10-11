@@ -6,6 +6,7 @@ use super::options::{NlmeansAlgorithm, resolve_params};
 use super::params::validate_dimensions;
 use crate::engine::{DevicePlane, EdgePadding, EgressSource, Engine, Geometry, WindowSpan, egress};
 use crate::error::Error;
+use crate::tune::{EngineKernels, KernelSelector};
 
 /// Non-local means over GPU planes.
 pub struct Nlmeans<R: Runtime> {
@@ -26,6 +27,17 @@ impl<R: Runtime> Nlmeans<R> {
         client: &ComputeClient<R>,
         algorithm: NlmeansAlgorithm,
         geometry: Geometry,
+    ) -> Result<Self, Error> {
+        let kernels = EngineKernels::default();
+        Self::with_kernels(client, algorithm, geometry, kernels)
+    }
+
+    /// [Nlmeans::new] with each launch site's candidate picked from `kernels`.
+    pub fn with_kernels(
+        client: &ComputeClient<R>,
+        algorithm: NlmeansAlgorithm,
+        geometry: Geometry,
+        kernels: EngineKernels,
     ) -> Result<Self, Error> {
         geometry.validate()?;
 
@@ -49,7 +61,8 @@ impl<R: Runtime> Nlmeans<R> {
         let indexable = check_u32_indexable(&sizes.buffers);
         indexable.map_err(Error::InvalidGeometry)?;
 
-        let front = NlmDenoiser::new(client, params, geometry.width, geometry.height);
+        let selector = KernelSelector::new(client, kernels);
+        let front = NlmDenoiser::with_kernels(client, params, geometry.width, geometry.height, selector);
 
         Ok(Self {
             front,

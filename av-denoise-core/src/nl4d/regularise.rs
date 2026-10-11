@@ -1,7 +1,6 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::kernels::nl4d_mv_regularise;
 use crate::nlmeans::RingView;
 use crate::nlmeans::motion::{
     MotionCtx,
@@ -11,8 +10,10 @@ use crate::nlmeans::motion::{
     mv_field_byte_offset,
     pyramid_slot_byte_offset,
 };
+use crate::tune::KernelSelector;
+use crate::tune::sites::{RegulariseOutputs, RegulariseSite};
 
-/// Runs the field regularisation pass over every neighbour of `view`.
+/// Runs the field regularisation pass over every neighbour of `view`, through `kernels`.
 ///
 /// Each block's vector is re-scored against the median of its neighbourhood. The results land in
 /// `mv_out` and `conf_out`, which share the front end's per-neighbour layout.
@@ -21,7 +22,7 @@ use crate::nlmeans::motion::{
     reason = "the dispatch threads through every buffer and shape the kernel binds"
 )]
 pub(super) fn run_regularise<R: Runtime>(
-    client: &ComputeClient<R>,
+    kernels: &KernelSelector<R>,
     motion_ctx: &MotionCtx,
     view: &RingView,
     width: u32,
@@ -58,27 +59,30 @@ pub(super) fn run_regularise<R: Runtime>(
         let mv_dst = mv_out.clone().offset_start(mv_offset);
         let conf_dst = conf_out.clone().offset_start(conf_offset);
 
-        unsafe {
-            nl4d_mv_regularise::launch_unchecked::<R>(
-                client,
-                CubeCount::new_2d(motion_ctx.blocks_x, motion_ctx.blocks_y),
-                CubeDim::new_2d(8, 8),
-                ArrayArg::from_raw_parts(centre.clone(), level_len),
-                ArrayArg::from_raw_parts(neighbour, level_len),
-                ArrayArg::from_raw_parts(mv_in, 2 * blocks),
-                ArrayArg::from_raw_parts(mv_dst, 2 * blocks),
-                ArrayArg::from_raw_parts(conf_dst, blocks),
-                lambda_pixel,
-                sad_noise_floor,
-                thsad,
-                level_width,
-                level_height,
-                motion_ctx.blksize,
-                motion_ctx.step,
-                motion_ctx.blocks_x,
-                motion_ctx.blocks_y,
-            );
-        }
+        let outputs = RegulariseOutputs {
+            vectors: mv_dst,
+            confidence: conf_dst,
+            blocks,
+        };
+        let site = RegulariseSite {
+            client: kernels.client().clone(),
+            centre: centre.clone(),
+            neighbour,
+            level_len,
+            mv_in,
+            outputs,
+            lambda_pixel,
+            sad_noise_floor,
+            thsad,
+            width: level_width,
+            height: level_height,
+            blksize: motion_ctx.blksize,
+            step: motion_ctx.step,
+            blocks_x: motion_ctx.blocks_x,
+            blocks_y: motion_ctx.blocks_y,
+        };
+
+        kernels.run(&site)?;
     }
 
     Ok(())

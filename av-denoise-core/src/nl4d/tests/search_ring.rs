@@ -4,6 +4,7 @@ use crate::collab::supports_f16_search;
 use crate::nl4d::Nl4dDenoiser;
 use crate::nlmeans::ChannelMode;
 use crate::nlmeans::tests::helpers::noisy_field_over;
+use crate::tune::{EngineKernels, KernelSelector, PipelineProfile};
 
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 64;
@@ -145,4 +146,27 @@ fn rms_difference(left: &[f32], right: &[f32]) -> f64 {
         .sum();
     let mean = total / left.len() as f64;
     mean.sqrt()
+}
+
+#[test]
+fn the_f32_search_profile_never_enables_the_f16_ring() {
+    let client = make_client();
+    if !supports_f16_search(&client) {
+        eprintln!("skipping: this device has no f16 search");
+        return;
+    }
+
+    let params = static_clip_params(RADIUS);
+    let kernels = EngineKernels {
+        profile: PipelineProfile::F32Search,
+        ..EngineKernels::default()
+    };
+    let selector = KernelSelector::new(&client, kernels);
+
+    let denoiser = Nl4dDenoiser::<R>::with_kernels(&client, params, WIDTH, HEIGHT, selector)
+        .expect("construction failed");
+    let has_search_ring = denoiser.front_for_test().search_ring().is_some();
+
+    assert!(!denoiser.uses_f16_search());
+    assert!(!has_search_ring);
 }

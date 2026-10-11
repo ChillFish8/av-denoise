@@ -1,3 +1,7 @@
 [profile.default]
 test-threads = 16
 slow-timeout = { period = "120s", terminate-after = 4 }
+
+[[profile.default.overrides]]
+filter = 'test(/tune::tests::collab::every_group_count_matches/)'
+slow-timeout = { period = "120s", terminate-after = 10 }

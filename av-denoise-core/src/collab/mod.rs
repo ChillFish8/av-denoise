@@ -5,9 +5,9 @@ pub mod kernels;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 mod tests;
 
-use cubecl::ir::features::TypeUsage;
-use cubecl::ir::{ElemType, FloatKind, StorageType};
 use cubecl::prelude::*;
+
+use crate::tune::DeviceLimits;
 
 /// Side length of a collaborative patch in pixels.
 pub const PATCH_SIZE: u32 = 8;
@@ -37,11 +37,8 @@ pub fn needs_warp_uniform_search<R: Runtime>(client: &ComputeClient<R>) -> bool 
 
 /// Whether `client` can store f16 in buffers and compute with it, which the f16 search needs.
 pub fn supports_f16_search<R: Runtime>(client: &ComputeClient<R>) -> bool {
-    let f16_type = StorageType::Scalar(ElemType::Float(FloatKind::F16));
-    let usage = client.properties().type_usage(f16_type);
-    let stores = usage.contains(TypeUsage::Buffer);
-    let computes = usage.contains(TypeUsage::Arithmetic);
-    stores && computes
+    let limits = DeviceLimits::from_client(client);
+    limits.supports_f16_search()
 }
 
 /// Frames per volume in a cross-frame group at `temporal_radius`.

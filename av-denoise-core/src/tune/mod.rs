@@ -7,6 +7,7 @@
 //! - [KernelPlan] maps site keys to the candidate to run
 //! - [PipelineProfile] names a set of pipeline switches compared on whole frames
 //! - [TuneResult] holds every timed ranking, so a plan can be rebuilt under different rules
+//! - [VariantSite] is one tunable launch point, and [KernelSelector] launches the planned candidate at each
 //! - [DeviceProfile] says which device a result belongs to and what launches fit on it
 
 mod budget;
@@ -14,9 +15,13 @@ mod consts;
 mod decide;
 mod device;
 mod fidelity;
+pub(crate) mod gpu;
 mod key;
 mod plan;
 mod result;
+mod selector;
+mod site;
+pub(crate) mod sites;
 
 #[cfg(test)]
 mod tests;
@@ -67,3 +72,5 @@ pub use self::result::{
     choose,
     choose_profile,
 };
+pub use self::selector::{EngineKernels, KernelSelector};
+pub use self::site::{FitError, LaunchShape, SiteCandidate, VariantSite, fit_candidates};

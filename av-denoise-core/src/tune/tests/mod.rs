@@ -1,8 +1,17 @@
+mod accumulate;
 mod budget;
+mod collab;
 mod decide;
 mod device;
+mod engine;
+pub(crate) mod equivalence;
 mod fidelity;
+pub(crate) mod fixtures;
 mod key;
 mod plan;
+pub(crate) mod probe;
+mod regularise;
 mod result;
 pub(crate) mod runtime;
+mod selector;
+mod window;

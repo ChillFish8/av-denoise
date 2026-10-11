@@ -23,6 +23,7 @@ use super::noise::{
 use super::params::{NlmParams, SEPARABLE_THRESHOLD, validate_dimensions};
 use super::prefilter::PrefilterMode;
 use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
+use crate::tune::KernelSelector;
 
 /// A denoised frame still resident on the GPU.
 ///
@@ -88,6 +89,8 @@ pub struct NlmDenoiser<R: Runtime> {
     pub(super) input_noise_offset: f32,
     pub use_separable: bool,
     pub(super) use_reference: bool,
+    /// Picks the candidate each tunable launch runs.
+    pub(super) kernels: KernelSelector<R>,
 
     /// The smoothed grain correlation between neighbouring pixels.
     ///
@@ -179,13 +182,29 @@ pub struct NlmDenoiser<R: Runtime> {
 }
 
 impl<R: Runtime> NlmDenoiser<R> {
-    /// Builds a new denoiser.
+    /// Builds a new denoiser that runs every launch site's baseline.
     ///
     /// # Panics
     ///
     /// Panics if the parameters or the frame dimensions are invalid. [Nlmeans](crate::Nlmeans)
     /// checks both and returns a `Result` instead.
     pub fn new(client: &ComputeClient<R>, params: NlmParams, width: u32, height: u32) -> Self {
+        let kernels = KernelSelector::baseline(client);
+        Self::with_kernels(client, params, width, height, kernels)
+    }
+
+    /// Builds a new denoiser that picks each launch site's candidate through `kernels`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the parameters or the frame dimensions are invalid.
+    pub fn with_kernels(
+        client: &ComputeClient<R>,
+        params: NlmParams,
+        width: u32,
+        height: u32,
+        kernels: KernelSelector<R>,
+    ) -> Self {
         params
             .validate()
             .expect("invalid NlmParams, call params.validate() first to get this as a Result");
@@ -378,6 +397,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             input_noise_offset,
             use_separable,
             use_reference,
+            kernels,
             rho_smoothed,
             spatial_offset_lut,
             noise_partials,
@@ -410,6 +430,11 @@ impl<R: Runtime> NlmDenoiser<R> {
 
     pub(crate) fn placeholder(&self) -> &Handle {
         &self.placeholder
+    }
+
+    #[expect(dead_code, reason = "no caller reads the selector back yet")]
+    pub(crate) fn kernels(&self) -> &KernelSelector<R> {
+        &self.kernels
     }
 
     /// Ingests `planes` into the next ring slot and runs every per-frame stage on it.

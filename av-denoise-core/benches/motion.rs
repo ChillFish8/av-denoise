@@ -9,7 +9,9 @@ mod kernels;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
+use av_denoise_core::bench_api::tune_sites::RegulariseCandidate;
 use av_denoise_core::bench_api::{Device, HostIo, NlmDenoiser, NlmParams, start_read, wait_read};
+use av_denoise_core::tune::SiteCandidate;
 use av_denoise_core::{ChannelMode, MotionCompensationMode, MotionEstimation, PrefilterMode};
 use clap::Parser;
 use cubecl::prelude::*;
@@ -230,9 +232,12 @@ fn run_kernels<R: Runtime>(backend: &str, client: &ComputeClient<R>) {
     run(McConfidenceBench {
         client: client.clone(),
     });
-    run(MvRegulariseBench {
-        client: client.clone(),
-    });
+    for &candidate in RegulariseCandidate::ALL {
+        run(MvRegulariseBench {
+            client: client.clone(),
+            candidate,
+        });
+    }
 
     for &(channels, channel_name) in CHANNELS {
         run(WarpBench {

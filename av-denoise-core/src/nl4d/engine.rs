@@ -10,6 +10,7 @@ use crate::collab::PATCH_SIZE;
 use crate::engine::{DevicePlane, EdgePadding, EgressSource, Engine, Geometry, WindowSpan, egress};
 use crate::error::Error;
 use crate::nlmeans::denoiser::check_u32_indexable;
+use crate::tune::{EngineKernels, KernelSelector};
 
 /// Four-dimensional collaborative denoising over GPU planes.
 pub struct Nl4d<R: Runtime> {
@@ -31,6 +32,17 @@ pub struct Nl4d<R: Runtime> {
 impl<R: Runtime> Nl4d<R> {
     /// Builds the engine, returning [Error::InvalidGeometry] or [Error::InvalidOptions] for unusable input.
     pub fn new(client: &ComputeClient<R>, options: Nl4dOptions, geometry: Geometry) -> Result<Self, Error> {
+        let kernels = EngineKernels::default();
+        Self::with_kernels(client, options, geometry, kernels)
+    }
+
+    /// [Nl4d::new] with each launch site's candidate picked from `kernels`.
+    pub fn with_kernels(
+        client: &ComputeClient<R>,
+        options: Nl4dOptions,
+        geometry: Geometry,
+        kernels: EngineKernels,
+    ) -> Result<Self, Error> {
         if geometry.width < PATCH_SIZE || geometry.height < PATCH_SIZE {
             let message = format!(
                 "frame dimensions {}x{} must be at least {PATCH_SIZE}x{PATCH_SIZE}",
@@ -59,7 +71,8 @@ impl<R: Runtime> Nl4d<R> {
         let indexable = check_u32_indexable(&sizes);
         indexable.map_err(Error::InvalidGeometry)?;
 
-        let inner = Nl4dDenoiser::new(client, params, geometry.width, geometry.height);
+        let selector = KernelSelector::new(client, kernels);
+        let inner = Nl4dDenoiser::with_kernels(client, params, geometry.width, geometry.height, selector);
         let inner = inner.map_err(Error::InvalidOptions)?;
 
         Ok(Self {

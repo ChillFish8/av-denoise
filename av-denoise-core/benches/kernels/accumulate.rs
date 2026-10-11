@@ -1,44 +1,29 @@
-use av_denoise_core::bench_api::kernels::nlm_accumulate;
+use av_denoise_core::bench_api::tune_sites::{
+    AccumOutputs,
+    AccumulateCandidate,
+    AccumulateSite,
+    allocate_accum,
+};
+use av_denoise_core::tune::{SiteCandidate, VariantSite};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
-use cubecl::server::Handle;
 
-use super::{
-    HEIGHT,
-    Q_X,
-    Q_Y,
-    WIDTH,
-    block_sync,
-    cube_count_2d,
-    cube_dim_2d,
-    make_padded_frame,
-    shapes_with_channels,
-    stored_channels,
-};
-
-#[derive(Clone)]
-pub struct AccumulateInput {
-    input: Handle,
-    accum: Handle,
-    weight_sum: Handle,
-    max_weight: Handle,
-    weights: Handle,
-    frame_len: usize,
-}
+use super::{HEIGHT, Q_X, Q_Y, WIDTH, block_sync, make_padded_frame, shapes_with_channels, stored_channels};
 
 pub struct AccumulateBench<R: Runtime> {
     pub client: ComputeClient<R>,
     pub channels: u32,
     pub channel_name: &'static str,
+    pub candidate: AccumulateCandidate,
 }
 
 impl<R: Runtime> Benchmark for AccumulateBench<R> {
-    type Input = AccumulateInput;
+    type Input = (AccumulateSite<R>, AccumOutputs);
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
         let pixels = (WIDTH * HEIGHT) as usize;
-        let stored_ch = stored_channels(self.channels) as usize;
+        let stored_ch = stored_channels(self.channels);
         let frame = make_padded_frame(WIDTH, HEIGHT, self.channels);
         let frame_bytes = f32::as_bytes(&frame);
         let input = self.client.create_from_slice(frame_bytes);
@@ -46,52 +31,39 @@ impl<R: Runtime> Benchmark for AccumulateBench<R> {
         let weights_data = vec![0.5f32; pixels];
         let weights_bytes = f32::as_bytes(&weights_data);
         let weights = self.client.create_from_slice(weights_bytes);
-        let accum = self.client.empty(pixels * stored_ch * size_of::<f32>());
-        let weight_sum = self.client.empty(pixels * size_of::<f32>());
-        let max_weight = self.client.empty(pixels * size_of::<f32>());
+        let outputs = allocate_accum(&self.client, pixels * stored_ch as usize, pixels);
 
-        AccumulateInput {
+        let site = AccumulateSite {
+            client: self.client.clone(),
             input,
-            accum,
-            weight_sum,
-            max_weight,
+            ring_len: frame.len(),
             weights,
-            frame_len: frame.len(),
-        }
+            outputs: outputs.clone(),
+            frame: 0,
+            q_x: Q_X,
+            q_y: Q_Y,
+            width: WIDTH,
+            height: HEIGHT,
+            stored_ch,
+        };
+
+        (site, outputs)
     }
 
-    fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let pixels = (WIDTH * HEIGHT) as usize;
-        let stored_ch = stored_channels(self.channels) as usize;
-        let cube_count = cube_count_2d();
-        let cube_dim = cube_dim_2d();
-
-        unsafe {
-            nlm_accumulate::launch_unchecked::<R>(
-                &self.client,
-                cube_count,
-                cube_dim,
-                stored_ch,
-                ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
-                ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored_ch),
-                ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels),
-                ArrayArg::from_raw_parts(args.weights.clone(), pixels),
-                ArrayArg::from_raw_parts(args.weights.clone(), pixels),
-                ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
-                0u32,
-                0u32,
-                Q_X,
-                Q_Y,
-                WIDTH,
-                HEIGHT,
-            );
-        }
+    fn execute(&self, input: Self::Input) -> Result<(), String> {
+        let (site, outputs) = input;
+        site.launch(self.candidate, &outputs);
 
         Ok(())
     }
 
     fn name(&self) -> String {
-        format!("accumulate_1080p_{}", self.channel_name)
+        format!(
+            "{}/{}/1080p_{}",
+            AccumulateCandidate::SITE,
+            self.candidate.name(),
+            self.channel_name,
+        )
     }
 
     fn sync(&self) {

@@ -30,6 +30,10 @@ pub mod prefilter {
     pub use crate::nlmeans::prefilter::*;
 }
 
+pub mod tune_sites {
+    pub use crate::tune::sites::*;
+}
+
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;

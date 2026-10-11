@@ -9,7 +9,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::helpers::{R, make_client, make_unique_frame, noisy_flat_field};
-use crate::collab::geometry::{fused_cubes_x, ref_count, ref_pos, refs_along, strength_map_dims};
+use crate::collab::geometry::{BASELINE_GROUPS, fused_cubes_x, ref_count, ref_pos, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{WEIGHT_GAIN, cross_frame_accum_scale, kaiser_window, weight_scale};
 use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
@@ -466,9 +466,9 @@ fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle,
     let map_buf = handles.client.create_from_slice(map_bytes);
     let stored_channels = setup.stored_channels();
 
-    let cubes_x = fused_cubes_x(setup.width);
+    let cubes_x = fused_cubes_x(setup.width, BASELINE_GROUPS);
     let grid = CubeCount::new_2d(cubes_x, handles.refs_y);
-    let dim = CubeDim::new_1d(64);
+    let dim = CubeDim::new_1d(8 * BASELINE_GROUPS);
     let scale = weight_scale(setup.sigma, &profile);
     let accum_scale = setup.accum_scale();
     let grid_frame_count = grid_frames(setup.radius);
@@ -522,6 +522,7 @@ fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle,
             map_rows,
             pooled_ratio,
             setup.pooled.is_some(),
+            BASELINE_GROUPS,
         );
     }
 }

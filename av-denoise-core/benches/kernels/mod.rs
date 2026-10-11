@@ -31,11 +31,16 @@ pub mod vertical_weight;
 pub mod vweight_pair_accumulate;
 pub mod zero;
 
+use std::sync::OnceLock;
+
 use av_denoise_core::bench_api::NlmParams;
 pub use av_denoise_core::bench_api::{BLOCK_X, BLOCK_Y};
 use cubecl::benchmark::{Benchmark, BenchmarkComputations, TimingMethod};
 use cubecl::prelude::*;
 use cubecl::server::Handle;
+
+/// Only benches whose name contains this text run, when it is set.
+pub static FILTER: OnceLock<String> = OnceLock::new();
 
 pub const WIDTH: u32 = 1920;
 pub const HEIGHT: u32 = 1080;
@@ -151,6 +156,13 @@ pub fn print_header() {
 
 pub fn run<B: Benchmark>(bench: B) {
     let name = bench.name();
+
+    if let Some(filter) = FILTER.get()
+        && !name.contains(filter.as_str())
+    {
+        return;
+    }
+
     match bench.run(TimingMethod::Device) {
         Ok(durations) => {
             let computations = BenchmarkComputations::new(&durations);

@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 
 use super::helpers::{R, make_client, noisy_flat_field};
-use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
+use crate::collab::geometry::{BASELINE_GROUPS, fused_cubes_x, ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{
     ACCUM_SCALE,
     WEIGHT_GAIN,
@@ -273,9 +273,9 @@ fn run_scatter_stage_windowed(
 
     let zero_dim = 256u32;
     let zero_grid = (pixels as u32).div_ceil(zero_dim);
-    let cubes_x = fused_cubes_x(width);
+    let cubes_x = fused_cubes_x(width, BASELINE_GROUPS);
     let fused_grid = CubeCount::new_2d(cubes_x, refs_y);
-    let fused_dim = CubeDim::new_1d(64);
+    let fused_dim = CubeDim::new_1d(8 * BASELINE_GROUPS);
     let scale = weight_scale(sigma, &profile);
     let warp_uniform = needs_warp_uniform_search(&client);
     let grid_frame_count = grid_frames(0);
@@ -346,6 +346,7 @@ fn run_scatter_stage_windowed(
             map_rows,
             0.0f32,
             false,
+            BASELINE_GROUPS,
         );
         collab_normalise::launch_unchecked::<R>(
             &client,

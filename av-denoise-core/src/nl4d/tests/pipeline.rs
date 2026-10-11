@@ -13,7 +13,7 @@ use super::helpers::{
     textured_base,
 };
 use crate::bench_api::HostIo;
-use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
+use crate::collab::geometry::{BASELINE_GROUPS, fused_cubes_x, ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{
     ACCUM_SCALE,
     collab_normalise,
@@ -381,9 +381,9 @@ fn run_spatial_only(
     let zero_grid = CubeCount::new_1d(zero_workgroups);
     let zero_cube_dim = CubeDim::new_1d(zero_dim);
 
-    let fused_x = fused_cubes_x(width);
+    let fused_x = fused_cubes_x(width, BASELINE_GROUPS);
     let fused_grid = CubeCount::new_2d(fused_x, refs_y);
-    let fused_dim = CubeDim::new_1d(64);
+    let fused_dim = CubeDim::new_1d(8 * BASELINE_GROUPS);
     let weight_norm = weight_scale(sigma, &dct_profile);
     let grid_frame_count = grid_frames(0);
     let centre_slot = 0u32;
@@ -448,6 +448,7 @@ fn run_spatial_only(
             map_rows,
             0.0f32,
             false,
+            BASELINE_GROUPS,
         );
 
         collab_normalise::launch_unchecked::<R>(
@@ -638,10 +639,10 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
 
         let motion = front.motion_ctx();
 
-        let fused_x = fused_cubes_x(width);
+        let fused_x = fused_cubes_x(width, BASELINE_GROUPS);
         let refs_y = refs_along(height);
         let fused_grid = CubeCount::new_2d(fused_x, refs_y);
-        let fused_dim = CubeDim::new_1d(64);
+        let fused_dim = CubeDim::new_1d(8 * BASELINE_GROUPS);
         let warp_uniform = needs_warp_uniform_search(&client);
         let grid_frame_count = grid_frames(radius);
         let agg_cubes_x = width.div_ceil(BLOCK_X);
@@ -698,6 +699,7 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 map_rows,
                 0.0f32,
                 false,
+                BASELINE_GROUPS,
             );
 
             collab_normalise::launch_unchecked::<R>(

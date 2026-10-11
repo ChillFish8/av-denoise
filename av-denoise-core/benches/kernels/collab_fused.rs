@@ -1,13 +1,24 @@
+use std::marker::PhantomData;
+
 use av_denoise_core::bench_api::NOISE_CURVE_BINS;
-use av_denoise_core::bench_api::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
+use av_denoise_core::bench_api::collab::geometry::{ref_count, refs_along, strength_map_dims};
 use av_denoise_core::bench_api::collab::kernels::aggregate::{
     cross_frame_accum_scale,
     kaiser_window,
     weight_scale,
 };
-use av_denoise_core::bench_api::collab::kernels::fused::{STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF, collab_fused};
+use av_denoise_core::bench_api::collab::kernels::fused::{STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
 use av_denoise_core::bench_api::collab::kernels::transforms::dct_noise_profile;
-use av_denoise_core::bench_api::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
+use av_denoise_core::bench_api::collab::{grid_frames, needs_warp_uniform_search};
+use av_denoise_core::bench_api::tune_sites::{
+    CollabCandidate,
+    CollabInputs,
+    CollabOutputs,
+    CollabShape,
+    CollabSite,
+    CollabValues,
+};
+use av_denoise_core::tune::{SiteCandidate, VariantSite};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -57,6 +68,7 @@ pub struct CollabFusedBench<R: Runtime> {
     pub strength_map: bool,
     /// Launches with the pooled threshold on.
     pub pooled: bool,
+    pub candidate: CollabCandidate,
 }
 
 /// The luma pool ratio at the default lambda. The kernel's cost does not depend on its value.
@@ -230,63 +242,77 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
         let uniform_search = needs_warp_uniform_search(&self.client);
         let frames_per_volume = grid_frames(RADIUS);
 
-        let cubes_x = fused_cubes_x(WIDTH);
-        let grid = CubeCount::new_2d(cubes_x, refs_y);
-        let dim = CubeDim::new_1d(64);
+        let inputs = CollabInputs {
+            ring: args.ring.clone(),
+            ring_len: args.ring_len,
+            search_ring: args.ring.clone(),
+            search_len: stored_ch as usize,
+            mv_field: args.mv_field.clone(),
+            mv_len: (2 * RADIUS * neighbour_mv_stride) as usize,
+            confidence: args.confidence.clone(),
+            conf_len: (2 * RADIUS * neighbour_conf_stride) as usize,
+            neighbour_slots: args.neighbour_slots.clone(),
+            neighbour_slots_len: NEIGHBOUR_SLOTS.len(),
+            sigma: args.sigma.clone(),
+            noise_curve: args.noise_curve.clone(),
+            strength_map: args.strength_map.clone(),
+            map_len: args.map_len,
+            dct_profile: args.dct_profile.clone(),
+            kaiser: args.kaiser.clone(),
+        };
+        let values = CollabValues {
+            centre_slot: CENTRE_SLOT,
+            c_min: 0.0,
+            lambda_ht: LAMBDA_HT,
+            curve_valid,
+            map_mode,
+            weight_scale: group_weight_scale,
+            accum_scale,
+            pool_ratio: POOL_RATIO,
+        };
+        let shape = CollabShape {
+            warp_uniform: uniform_search,
+            f16_search: false,
+            radius: RADIUS,
+            grid_frames: frames_per_volume,
+            refine: REFINE,
+            mv_stride: neighbour_mv_stride,
+            conf_stride: neighbour_conf_stride,
+            blk_step: BLK_STEP,
+            blksize: BLKSIZE,
+            blocks_x,
+            blocks_y,
+            width: WIDTH,
+            height: HEIGHT,
+            channels: self.channels,
+            k_max: K_MAX,
+            stored_ch,
+            spatial_radius: SPATIAL_RADIUS,
+            refs_x,
+            refs_y,
+            map_cols,
+            map_rows,
+            pooled: self.pooled,
+        };
+        let outputs = CollabOutputs {
+            accum: args.accum.clone(),
+            wsum: args.wsum.clone(),
+            group_weight: args.group_weight.clone(),
+            accum_len: frame_len * N_FRAMES as usize,
+            wsum_len: pixels * N_FRAMES as usize,
+            refs,
+        };
+        let site = CollabSite::<R, f32> {
+            client: self.client.clone(),
+            inputs,
+            values,
+            shape,
+            outputs,
+            search: PhantomData,
+        };
 
-        unsafe {
-            collab_fused::launch_unchecked::<f32, R>(
-                &self.client,
-                grid,
-                dim,
-                stored_ch as usize,
-                ArrayArg::from_raw_parts(args.ring.clone(), args.ring_len),
-                ArrayArg::from_raw_parts(args.ring.clone(), stored_ch as usize),
-                ArrayArg::from_raw_parts(args.mv_field.clone(), (2 * RADIUS * neighbour_mv_stride) as usize),
-                ArrayArg::from_raw_parts(
-                    args.confidence.clone(),
-                    (2 * RADIUS * neighbour_conf_stride) as usize,
-                ),
-                ArrayArg::from_raw_parts(args.neighbour_slots.clone(), NEIGHBOUR_SLOTS.len()),
-                ArrayArg::from_raw_parts(args.sigma.clone(), stored_ch as usize),
-                ArrayArg::from_raw_parts(args.noise_curve.clone(), NOISE_CURVE_BINS),
-                ArrayArg::from_raw_parts(args.strength_map.clone(), args.map_len),
-                ArrayArg::from_raw_parts(args.dct_profile.clone(), 8),
-                ArrayArg::from_raw_parts(args.kaiser.clone(), PATCH_SIZE as usize),
-                ArrayArg::from_raw_parts(args.accum.clone(), frame_len * N_FRAMES as usize),
-                ArrayArg::from_raw_parts(args.wsum.clone(), pixels * N_FRAMES as usize),
-                ArrayArg::from_raw_parts(args.group_weight.clone(), refs),
-                CENTRE_SLOT,
-                0.0f32,
-                LAMBDA_HT,
-                curve_valid,
-                map_mode,
-                group_weight_scale,
-                accum_scale,
-                uniform_search,
-                false,
-                RADIUS,
-                frames_per_volume,
-                REFINE,
-                neighbour_mv_stride,
-                neighbour_conf_stride,
-                BLK_STEP,
-                BLKSIZE,
-                blocks_x,
-                blocks_y,
-                WIDTH,
-                HEIGHT,
-                self.channels,
-                K_MAX,
-                stored_ch,
-                SPATIAL_RADIUS,
-                refs_x,
-                map_cols,
-                map_rows,
-                POOL_RATIO,
-                self.pooled,
-            );
-        }
+        let real_outputs = site.real_outputs();
+        site.launch(self.candidate, &real_outputs);
 
         Ok(())
     }
@@ -296,9 +322,12 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
         let curve = if self.noise_curve { "_noise_curve" } else { "" };
         let map = if self.strength_map { "_strength_map" } else { "" };
         let pool = if self.pooled { "_pooled" } else { "" };
+
         format!(
-            "collab_fused_1080p_{}{field}{curve}{map}{pool}",
-            self.channel_name
+            "{}/{}/1080p_{}{field}{curve}{map}{pool}",
+            CollabCandidate::SITE,
+            self.candidate.name(),
+            self.channel_name,
         )
     }
 

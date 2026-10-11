@@ -4,7 +4,13 @@
 //! axis. A bench that ran chroma at full resolution would report four times the real work, so both
 //! planes are measured and summed into one frame's kernel cost.
 
-use av_denoise_core::bench_api::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
+use av_denoise_core::bench_api::collab::geometry::{
+    BASELINE_GROUPS,
+    fused_cubes_x,
+    ref_count,
+    refs_along,
+    strength_map_dims,
+};
 use av_denoise_core::bench_api::collab::kernels::aggregate::{
     collab_normalise,
     collab_zero_accum,
@@ -279,7 +285,7 @@ impl<R: Runtime> Rig<R> {
         let frame_len = pixels * geometry.stored_channels as usize;
         let (map_cols, map_rows) = strength_map_dims(geometry.width, geometry.height);
 
-        let cubes_x = fused_cubes_x(geometry.width);
+        let cubes_x = fused_cubes_x(geometry.width, BASELINE_GROUPS);
         let refs_y = refs_along(geometry.height);
         let dct_profile = dct_noise_profile(0.0);
         let group_weight_scale = weight_scale(SIGMA, &dct_profile);
@@ -291,7 +297,7 @@ impl<R: Runtime> Rig<R> {
             collab_fused::launch_unchecked::<S, R>(
                 &self.client,
                 CubeCount::new_2d(cubes_x, refs_y),
-                CubeDim::new_1d(64),
+                CubeDim::new_1d(8 * BASELINE_GROUPS),
                 geometry.stored_channels as usize,
                 ArrayArg::from_raw_parts(self.ring.clone(), self.ring_len),
                 ArrayArg::from_raw_parts(search_ring.clone(), search_len),
@@ -335,6 +341,7 @@ impl<R: Runtime> Rig<R> {
                 map_rows,
                 POOL_RATIO,
                 pooled,
+                BASELINE_GROUPS,
             );
         }
     }

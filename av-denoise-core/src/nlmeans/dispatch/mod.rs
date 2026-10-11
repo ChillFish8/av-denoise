@@ -1,6 +1,7 @@
 mod motion;
 
 use cubecl::prelude::*;
+use cubecl::server::Handle;
 
 pub(super) use self::motion::mc_sad_noise_floor_sigma;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
@@ -8,16 +9,11 @@ pub(super) use self::motion::{BILATERAL_RESIDUAL_FRACTION, NLM_SPATIAL_RESIDUAL_
 use super::denoiser::NlmDenoiser;
 use super::kernels::{
     gpu_zero_buffers,
-    nlm_accumulate,
     nlm_distance,
     nlm_distance_pair,
     nlm_distance_pair_ref,
     nlm_distance_ref,
     nlm_finish,
-    nlm_fused_pair_accumulate_window,
-    nlm_fused_pair_accumulate_window_ref,
-    nlm_fused_single_window,
-    nlm_fused_single_window_ref,
     nlm_horizontal_sum,
     nlm_horizontal_sum_pair,
     nlm_vertical_weight,
@@ -25,63 +21,48 @@ use super::kernels::{
 };
 use super::motion::{confidence_byte_offset, neighbour_idx_for_k};
 use super::noise::{build_spatial_offset_lut, spatial_offset_factor, spatial_offset_lut_len};
-use super::{BLOCK_1D, BLOCK_X, BLOCK_X_THIN, BLOCK_Y, BLOCK_Y_THIN, MAX_GRID_1D};
+use super::{BLOCK_1D, BLOCK_X, BLOCK_Y, MAX_GRID_1D};
+use crate::tune::gpu::bind;
+use crate::tune::sites::{AccumOutputs, AccumulateSite, ConfidenceBinding, WindowPass, WindowSite};
 
-/// The sizes and launch shapes one frame's dispatches share.
+/// The sizes and tile launch shape one frame's dispatches share.
+///
+/// `cube_count` and `cube_dim` are the tile shape of the separable and finish kernels. The
+/// windowed and accumulate launches take their shape from the planned candidate.
 pub(super) struct LaunchCtx {
     pub(super) total_frame_data: usize,
     pub(super) frame_size: usize,
     pub(super) pixels: usize,
     pub(super) cube_count: CubeCount,
     pub(super) cube_dim: CubeDim,
-    /// The cube count for `nlm_accumulate`. See [BLOCK_X_THIN].
-    pub(super) thin_cube_count: CubeCount,
-    pub(super) thin_cube_dim: CubeDim,
-}
-
-/// The confidence arguments for one temporal pair dispatch.
-///
-/// The block geometry must map an output pixel onto its block exactly as `nlm_mc_warp` does. With
-/// confidence off this holds the placeholder buffer, a false flag and geometry the kernel never
-/// reads.
-struct ConfidenceArgs<R: Runtime> {
-    use_confidence: bool,
-    conf_fwd: ArrayArg<R>,
-    conf_bwd: ArrayArg<R>,
-    step: u32,
-    blocks_x: u32,
-    blocks_y: u32,
 }
 
 impl<R: Runtime> NlmDenoiser<R> {
     fn input_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
-        unsafe { ArrayArg::from_raw_parts(self.input_buf.clone(), ctx.total_frame_data) }
+        bind::<R>(&self.input_buf, ctx.total_frame_data)
     }
 
     fn reference_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
-        let buf = self
-            .reference_buf
-            .as_ref()
-            .expect("reference buffer must exist when use_reference is set");
-        unsafe { ArrayArg::from_raw_parts(buf.clone(), ctx.total_frame_data) }
+        let reference = self
+            .plain_reference()
+            .expect("reference ring must exist when this kernel runs");
+        bind::<R>(&reference, ctx.total_frame_data)
     }
 
     /// The input ring the temporal kernels read, which is the compensated one under motion
     /// compensation.
     fn input_arg_for_temporal(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
-        match self.compensated_input_buf.as_ref() {
-            Some(buf) => unsafe { ArrayArg::from_raw_parts(buf.clone(), ctx.total_frame_data) },
-            None => self.input_arg(ctx),
-        }
+        let input = self.temporal_input();
+        bind::<R>(&input, ctx.total_frame_data)
     }
 
     /// The reference ring the temporal `_ref` kernels read, which is the compensated one under
     /// motion compensation.
     fn reference_arg_for_temporal(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
-        match self.compensated_reference_buf.as_ref() {
-            Some(buf) => unsafe { ArrayArg::from_raw_parts(buf.clone(), ctx.total_frame_data) },
-            None => self.reference_arg(ctx),
-        }
+        let reference = self
+            .temporal_reference()
+            .expect("reference ring must exist when this kernel runs");
+        bind::<R>(&reference, ctx.total_frame_data)
     }
 
     fn accum_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
@@ -132,48 +113,117 @@ impl<R: Runtime> NlmDenoiser<R> {
         unsafe { ArrayArg::from_raw_parts(self.tmp_hsum_bwd.clone(), ctx.pixels) }
     }
 
-    /// The spatial offset table, sized for this denoiser's search radius.
-    fn spatial_offset_lut_arg(&self) -> ArrayArg<R> {
-        let len = spatial_offset_lut_len(self.params.search_radius);
-        unsafe { ArrayArg::from_raw_parts(self.spatial_offset_lut.clone(), len) }
+    fn accum_outputs(&self, ctx: &LaunchCtx) -> AccumOutputs {
+        AccumOutputs {
+            accum: self.accum.clone(),
+            weight_sum: self.weight_sum.clone(),
+            max_weight: self.max_weight.clone(),
+            accum_len: ctx.frame_size,
+            pixels: ctx.pixels,
+        }
     }
 
-    /// Builds the confidence arguments for the temporal pair at the nonzero offset `q_k`.
+    /// The input ring the temporal kernels read, which is the compensated one under motion
+    /// compensation.
+    fn temporal_input(&self) -> Handle {
+        let compensated = self.compensated_input_buf.as_ref();
+        compensated.unwrap_or(&self.input_buf).clone()
+    }
+
+    /// The reference ring the frame-against-itself kernels read, when the pipeline has one.
+    fn plain_reference(&self) -> Option<Handle> {
+        if !self.use_reference {
+            return None;
+        }
+
+        let reference = self
+            .reference_buf
+            .as_ref()
+            .expect("reference buffer must exist when use_reference is set");
+        Some(reference.clone())
+    }
+
+    /// The reference ring the temporal kernels read, which is the compensated one under motion
+    /// compensation.
+    fn temporal_reference(&self) -> Option<Handle> {
+        if !self.use_reference {
+            return None;
+        }
+
+        let compensated = self.compensated_reference_buf.as_ref();
+        let reference = compensated.or(self.reference_buf.as_ref());
+        let reference = reference.expect("reference buffer must exist when use_reference is set");
+        Some(reference.clone())
+    }
+
+    /// Binds the confidence slices for the temporal pair at the nonzero offset `q_k`.
     ///
     /// The forward frame reads the neighbour at `+q_k` and the backward frame the one at `-q_k`,
     /// so each takes its confidence from that neighbour's slice. Weighting runs only when
-    /// `confidence_buf` exists and block geometry is available. Otherwise the flag is off and the
-    /// kernel never reads the placeholder.
-    fn confidence_pair_args(&self, q_k: i32) -> ConfidenceArgs<R> {
+    /// `confidence_buf` exists and block geometry is available. Otherwise the binding is disabled and
+    /// both slices are the placeholder the kernel never reads.
+    fn confidence_binding(&self, q_k: i32) -> ConfidenceBinding {
         let confidence_geometry = self.confidence_ctx.as_ref();
         let geometry = self.mc_ctx.as_ref().or(confidence_geometry);
+
         if let (Some(confidence_buf), Some(geometry)) = (self.confidence_buf.as_ref(), geometry) {
             let radius = self.params.temporal_radius;
             let forward_idx = neighbour_idx_for_k(radius, q_k);
             let backward_idx = neighbour_idx_for_k(radius, -q_k);
-            let conf_len = (geometry.blocks_x * geometry.blocks_y) as usize;
             let forward_offset = confidence_byte_offset(geometry, forward_idx);
             let backward_offset = confidence_byte_offset(geometry, backward_idx);
-            let forward_handle = confidence_buf.clone().offset_start(forward_offset);
-            let backward_handle = confidence_buf.clone().offset_start(backward_offset);
+            let forward = confidence_buf.clone().offset_start(forward_offset);
+            let backward = confidence_buf.clone().offset_start(backward_offset);
 
-            ConfidenceArgs {
-                use_confidence: true,
-                conf_fwd: unsafe { ArrayArg::from_raw_parts(forward_handle, conf_len) },
-                conf_bwd: unsafe { ArrayArg::from_raw_parts(backward_handle, conf_len) },
+            return ConfidenceBinding {
+                enabled: true,
+                forward,
+                backward,
+                len: (geometry.blocks_x * geometry.blocks_y) as usize,
                 step: geometry.step,
                 blocks_x: geometry.blocks_x,
                 blocks_y: geometry.blocks_y,
-            }
-        } else {
-            ConfidenceArgs {
-                use_confidence: false,
-                conf_fwd: unsafe { ArrayArg::from_raw_parts(self.confidence_dummy.clone(), 1) },
-                conf_bwd: unsafe { ArrayArg::from_raw_parts(self.confidence_dummy.clone(), 1) },
-                step: 1,
-                blocks_x: 1,
-                blocks_y: 1,
-            }
+            };
+        }
+
+        ConfidenceBinding {
+            enabled: false,
+            forward: self.confidence_dummy.clone(),
+            backward: self.confidence_dummy.clone(),
+            len: 1,
+            step: 1,
+            blocks_x: 1,
+            blocks_y: 1,
+        }
+    }
+
+    /// A windowed launch over `input` that adds into the frame accumulators.
+    fn window_site(
+        &self,
+        ctx: &LaunchCtx,
+        pass: WindowPass,
+        input: Handle,
+        reference: Option<Handle>,
+        frame_t: u32,
+        h2_inv_norm: f32,
+    ) -> WindowSite<R> {
+        let outputs = self.accum_outputs(ctx);
+
+        WindowSite {
+            client: self.client.clone(),
+            pass,
+            input,
+            reference,
+            ring_len: ctx.total_frame_data,
+            outputs,
+            frame_t,
+            h2_inv_norm,
+            width: self.width,
+            height: self.height,
+            channels: self.params.channels.count(),
+            stored_ch: self.params.channels.storage_count(),
+            patch_radius: self.params.patch_radius,
+            search_radius: self.params.search_radius,
         }
     }
 
@@ -187,78 +237,21 @@ impl<R: Runtime> NlmDenoiser<R> {
         center_t: u32,
         q_k: i32,
     ) -> Result<(), anyhow::Error> {
-        let channels = self.params.channels.count();
         let frame_t = self.phys_frame(center_t as i32);
         let frame_fwd = self.phys_frame(center_t as i32 + q_k);
         let frame_bwd = self.phys_frame(center_t as i32 - q_k);
-        let confidence = self.confidence_pair_args(q_k);
+        let confidence = self.confidence_binding(q_k);
+        let pass = WindowPass::Pair {
+            frame_fwd,
+            frame_bwd,
+            noise_offset: self.noise_offset,
+            confidence,
+        };
+        let input = self.temporal_input();
+        let reference = self.temporal_reference();
+        let site = self.window_site(ctx, pass, input, reference, frame_t, self.h2_inv_norm);
 
-        if self.use_reference {
-            unsafe {
-                nlm_fused_pair_accumulate_window_ref::launch_unchecked::<R>(
-                    &self.client,
-                    ctx.cube_count.clone(),
-                    ctx.cube_dim,
-                    self.params.channels.storage_count() as usize,
-                    self.input_arg_for_temporal(ctx),
-                    self.reference_arg_for_temporal(ctx),
-                    self.accum_arg(ctx),
-                    self.weight_sum_arg(ctx),
-                    self.max_weight_arg(ctx),
-                    confidence.conf_fwd,
-                    confidence.conf_bwd,
-                    confidence.use_confidence,
-                    frame_t,
-                    frame_fwd,
-                    frame_bwd,
-                    self.h2_inv_norm,
-                    self.noise_offset,
-                    self.width,
-                    self.height,
-                    channels,
-                    self.params.patch_radius,
-                    self.params.search_radius,
-                    BLOCK_X,
-                    BLOCK_Y,
-                    confidence.step,
-                    confidence.blocks_x,
-                    confidence.blocks_y,
-                );
-            }
-        } else {
-            unsafe {
-                nlm_fused_pair_accumulate_window::launch_unchecked::<R>(
-                    &self.client,
-                    ctx.cube_count.clone(),
-                    ctx.cube_dim,
-                    self.params.channels.storage_count() as usize,
-                    self.input_arg_for_temporal(ctx),
-                    self.accum_arg(ctx),
-                    self.weight_sum_arg(ctx),
-                    self.max_weight_arg(ctx),
-                    confidence.conf_fwd,
-                    confidence.conf_bwd,
-                    confidence.use_confidence,
-                    frame_t,
-                    frame_fwd,
-                    frame_bwd,
-                    self.h2_inv_norm,
-                    self.noise_offset,
-                    self.width,
-                    self.height,
-                    channels,
-                    self.params.patch_radius,
-                    self.params.search_radius,
-                    BLOCK_X,
-                    BLOCK_Y,
-                    confidence.step,
-                    confidence.blocks_x,
-                    confidence.blocks_y,
-                );
-            }
-        }
-
-        Ok(())
+        self.kernels.run(&site)
     }
 
     /// The windowed fused step for the frame against itself.
@@ -266,59 +259,17 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// Patch distance is symmetric, so the full window walked in one direction gives the same total
     /// as a half window walked both ways.
     fn dispatch_fused_single_window_iter(&self, ctx: &LaunchCtx, center_t: u32) -> Result<(), anyhow::Error> {
-        let channels = self.params.channels.count();
         let frame_t = self.phys_frame(center_t as i32);
+        let offsets_len = spatial_offset_lut_len(self.params.search_radius);
+        let pass = WindowPass::Single {
+            offsets: self.spatial_offset_lut.clone(),
+            offsets_len,
+        };
+        let input = self.input_buf.clone();
+        let reference = self.plain_reference();
+        let site = self.window_site(ctx, pass, input, reference, frame_t, self.h2_inv_norm);
 
-        if self.use_reference {
-            unsafe {
-                nlm_fused_single_window_ref::launch_unchecked::<R>(
-                    &self.client,
-                    ctx.cube_count.clone(),
-                    ctx.cube_dim,
-                    self.params.channels.storage_count() as usize,
-                    self.input_arg(ctx),
-                    self.reference_arg(ctx),
-                    self.accum_arg(ctx),
-                    self.weight_sum_arg(ctx),
-                    self.max_weight_arg(ctx),
-                    frame_t,
-                    self.h2_inv_norm,
-                    self.spatial_offset_lut_arg(),
-                    self.width,
-                    self.height,
-                    channels,
-                    self.params.patch_radius,
-                    self.params.search_radius,
-                    BLOCK_X,
-                    BLOCK_Y,
-                );
-            }
-        } else {
-            unsafe {
-                nlm_fused_single_window::launch_unchecked::<R>(
-                    &self.client,
-                    ctx.cube_count.clone(),
-                    ctx.cube_dim,
-                    self.params.channels.storage_count() as usize,
-                    self.input_arg(ctx),
-                    self.accum_arg(ctx),
-                    self.weight_sum_arg(ctx),
-                    self.max_weight_arg(ctx),
-                    frame_t,
-                    self.h2_inv_norm,
-                    self.spatial_offset_lut_arg(),
-                    self.width,
-                    self.height,
-                    channels,
-                    self.params.patch_radius,
-                    self.params.search_radius,
-                    BLOCK_X,
-                    BLOCK_Y,
-                );
-            }
-        }
-
-        Ok(())
+        self.kernels.run(&site)
     }
 
     /// The separable step for a temporal neighbour.
@@ -397,7 +348,10 @@ impl<R: Runtime> NlmDenoiser<R> {
             );
         }
 
-        let confidence = self.confidence_pair_args(q_k);
+        let confidence = self.confidence_binding(q_k);
+        let conf_fwd = bind::<R>(&confidence.forward, confidence.len);
+        let conf_bwd = bind::<R>(&confidence.backward, confidence.len);
+
         unsafe {
             nlm_vweight_pair_accumulate::launch_unchecked::<R>(
                 &self.client,
@@ -410,9 +364,9 @@ impl<R: Runtime> NlmDenoiser<R> {
                 self.accum_arg(ctx),
                 self.weight_sum_arg(ctx),
                 self.max_weight_arg(ctx),
-                confidence.conf_fwd,
-                confidence.conf_bwd,
-                confidence.use_confidence,
+                conf_fwd,
+                conf_bwd,
+                confidence.enabled,
                 frame_fwd,
                 frame_bwd,
                 q_x,
@@ -521,28 +475,22 @@ impl<R: Runtime> NlmDenoiser<R> {
             );
         }
 
-        unsafe {
-            nlm_accumulate::launch_unchecked::<R>(
-                &self.client,
-                ctx.thin_cube_count.clone(),
-                ctx.thin_cube_dim,
-                self.params.channels.storage_count() as usize,
-                self.input_arg(ctx),
-                self.accum_arg(ctx),
-                self.weight_sum_arg(ctx),
-                self.weight_buf_arg(ctx),
-                self.weight_buf_arg(ctx),
-                self.max_weight_arg(ctx),
-                frame_t,
-                frame_t,
-                q_x,
-                q_y,
-                self.width,
-                self.height,
-            );
-        }
+        let outputs = self.accum_outputs(ctx);
+        let site = AccumulateSite {
+            client: self.client.clone(),
+            input: self.input_buf.clone(),
+            ring_len: ctx.total_frame_data,
+            weights: self.weight_buf.clone(),
+            outputs,
+            frame: frame_t,
+            q_x,
+            q_y,
+            width: self.width,
+            height: self.height,
+            stored_ch: self.params.channels.storage_count(),
+        };
 
-        Ok(())
+        self.kernels.run(&site)
     }
 
     fn zero_accumulators(&self, ctx: &LaunchCtx) -> Result<(), anyhow::Error> {
@@ -604,7 +552,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.run_finish_to(ctx, center_frame, 0, output)
     }
 
-    /// The launch shapes every per-frame dispatch shares, for the main pass and the NLM pilot.
+    /// The sizes and tile shape every per-frame dispatch shares, for the main pass and the NLM pilot.
     fn launch_ctx(&self) -> LaunchCtx {
         let width = self.width;
         let height = self.height;
@@ -612,11 +560,8 @@ impl<R: Runtime> NlmDenoiser<R> {
         let total_frames = self.params.total_frames();
         let pixels = (width * height) as usize;
         let frame_size = pixels * stored_ch as usize;
-
         let cubes_x = width.div_ceil(BLOCK_X);
         let cubes_y = height.div_ceil(BLOCK_Y);
-        let thin_cubes_x = width.div_ceil(BLOCK_X_THIN);
-        let thin_cubes_y = height.div_ceil(BLOCK_Y_THIN);
 
         LaunchCtx {
             total_frame_data: frame_size * total_frames as usize,
@@ -624,8 +569,6 @@ impl<R: Runtime> NlmDenoiser<R> {
             pixels,
             cube_count: CubeCount::new_2d(cubes_x, cubes_y),
             cube_dim: CubeDim::new_2d(BLOCK_X, BLOCK_Y),
-            thin_cube_count: CubeCount::new_2d(thin_cubes_x, thin_cubes_y),
-            thin_cube_dim: CubeDim::new_2d(BLOCK_X_THIN, BLOCK_Y_THIN),
         }
     }
 
@@ -637,7 +580,6 @@ impl<R: Runtime> NlmDenoiser<R> {
         let ctx = self.launch_ctx();
         self.zero_accumulators(&ctx)?;
 
-        let channels = self.params.channels.count();
         let pilot_h2 = self.h2_inv_norm / (strength_scale * strength_scale);
 
         // A flat table with no correlation adjustment, because the pilot compares noisy input
@@ -646,32 +588,16 @@ impl<R: Runtime> NlmDenoiser<R> {
         let pilot_lut = build_spatial_offset_lut(self.params.search_radius, 0.0, self.input_noise_offset);
         let pilot_lut_bytes = f32::as_bytes(&pilot_lut);
         let pilot_lut_handle = self.client.create_from_slice(pilot_lut_bytes);
-        let pilot_lut_arg = unsafe { ArrayArg::<R>::from_raw_parts(pilot_lut_handle, pilot_lut.len()) };
+        let pass = WindowPass::Single {
+            offsets: pilot_lut_handle,
+            offsets_len: pilot_lut.len(),
+        };
+        let input = self.input_buf.clone();
 
         // Always the noisy input. For `NlmSpatial` the reference ring is this pass's output, even
         // though `use_reference` is set so the main pass picks the `_ref` kernels.
-        unsafe {
-            nlm_fused_single_window::launch_unchecked::<R>(
-                &self.client,
-                ctx.cube_count.clone(),
-                ctx.cube_dim,
-                self.params.channels.storage_count() as usize,
-                self.input_arg(&ctx),
-                self.accum_arg(&ctx),
-                self.weight_sum_arg(&ctx),
-                self.max_weight_arg(&ctx),
-                slot,
-                pilot_h2,
-                pilot_lut_arg,
-                self.width,
-                self.height,
-                channels,
-                self.params.patch_radius,
-                self.params.search_radius,
-                BLOCK_X,
-                BLOCK_Y,
-            );
-        }
+        let site = self.window_site(&ctx, pass, input, None, slot, pilot_h2);
+        self.kernels.run(&site)?;
 
         let reference_ring = self.reference_ring_arg(&ctx);
         self.run_finish_to(&ctx, slot, slot, reference_ring)

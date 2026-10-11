@@ -9,7 +9,7 @@ use super::helpers::{
     noisy_ring,
     planted_ring,
 };
-use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
+use crate::collab::geometry::{BASELINE_GROUPS, fused_cubes_x, ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
 use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
@@ -134,10 +134,10 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
     let wsum = client.create_from_slice(wsum_bytes);
     let group_weight = client.empty(refs * size_of::<f32>());
 
-    let cubes_x = fused_cubes_x(width);
+    let cubes_x = fused_cubes_x(width, BASELINE_GROUPS);
     let refs_y = refs_along(height);
     let grid = CubeCount::new_2d(cubes_x, refs_y);
-    let dim = CubeDim::new_1d(64);
+    let dim = CubeDim::new_1d(8 * BASELINE_GROUPS);
     let scale = weight_scale(knobs.sigma, &profile);
     let accum_scale = cross_frame_accum_scale(knobs.spatial_radius, fixture.radius);
     let warp_uniform = knobs
@@ -195,6 +195,7 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
             map_rows,
             0.0f32,
             false,
+            BASELINE_GROUPS,
         );
     }
 

@@ -1,6 +1,13 @@
 mod kernels;
 
 use av_denoise_core::bench_api::Device;
+use av_denoise_core::bench_api::tune_sites::{
+    AccumulateCandidate,
+    CollabCandidate,
+    RegulariseCandidate,
+    WindowCandidate,
+};
+use av_denoise_core::tune::SiteCandidate;
 use clap::Parser;
 use cubecl::prelude::*;
 use kernels::accumulate::AccumulateBench;
@@ -17,12 +24,7 @@ use kernels::distance_pair_ref::DistancePairRefBench;
 use kernels::distance_ref::DistanceRefBench;
 use kernels::egress::{EgressBench, EgressFormat};
 use kernels::finish::FinishBench;
-use kernels::fused_window::{
-    FusedPairWindowBench,
-    FusedPairWindowRefBench,
-    FusedSingleWindowBench,
-    FusedSingleWindowRefBench,
-};
+use kernels::fused_window::{WindowBench, WindowKernel};
 use kernels::grain::{GRAIN_SIZES, GrainMeasureBench, GrainReducePartialsBench, GrainSaveVectorsBench};
 use kernels::horizontal_sum::HSumBench;
 use kernels::horizontal_sum_pair::HSumPairBench;
@@ -125,36 +127,18 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         });
     }
 
-    for &(channels, channel_name) in CHANNELS {
-        run(FusedSingleWindowBench {
-            client: client.clone(),
-            channels,
-            channel_name,
-        });
-    }
-
-    for &(channels, channel_name) in CHANNELS {
-        run(FusedPairWindowBench {
-            client: client.clone(),
-            channels,
-            channel_name,
-        });
-    }
-
-    for &(channels, channel_name) in CHANNELS {
-        run(FusedSingleWindowRefBench {
-            client: client.clone(),
-            channels,
-            channel_name,
-        });
-    }
-
-    for &(channels, channel_name) in CHANNELS {
-        run(FusedPairWindowRefBench {
-            client: client.clone(),
-            channels,
-            channel_name,
-        });
+    for kernel in WindowKernel::ALL {
+        for &candidate in WindowCandidate::ALL {
+            for &(channels, channel_name) in CHANNELS {
+                run(WindowBench {
+                    client: client.clone(),
+                    channels,
+                    channel_name,
+                    kernel,
+                    candidate,
+                });
+            }
+        }
     }
 
     for &(channels, channel_name) in CHANNELS {
@@ -207,12 +191,15 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         });
     }
 
-    for &(channels, channel_name) in CHANNELS {
-        run(AccumulateBench {
-            client: client.clone(),
-            channels,
-            channel_name,
-        });
+    for &candidate in AccumulateCandidate::ALL {
+        for &(channels, channel_name) in CHANNELS {
+            run(AccumulateBench {
+                client: client.clone(),
+                channels,
+                channel_name,
+                candidate,
+            });
+        }
     }
 
     for &(channels, channel_name) in CHANNELS {
@@ -262,9 +249,12 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
     run(ChainComposeBench {
         client: client.clone(),
     });
-    run(MvRegulariseBench {
-        client: client.clone(),
-    });
+    for &candidate in RegulariseCandidate::ALL {
+        run(MvRegulariseBench {
+            client: client.clone(),
+            candidate,
+        });
+    }
 
     for &size in GRAIN_SIZES {
         run(GrainSaveVectorsBench {
@@ -281,16 +271,19 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         });
     }
 
-    for &(channels, channel_name) in CHANNELS {
-        run(CollabFusedBench {
-            client: client.clone(),
-            channels,
-            channel_name,
-            split_mv: false,
-            noise_curve: false,
-            strength_map: false,
-            pooled: false,
-        });
+    for &candidate in CollabCandidate::ALL {
+        for &(channels, channel_name) in CHANNELS {
+            run(CollabFusedBench {
+                client: client.clone(),
+                channels,
+                channel_name,
+                split_mv: false,
+                noise_curve: false,
+                strength_map: false,
+                pooled: false,
+                candidate,
+            });
+        }
     }
 
     run(CollabFusedBench {
@@ -301,6 +294,7 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         noise_curve: true,
         strength_map: false,
         pooled: false,
+        candidate: CollabCandidate::baseline(),
     });
     run(CollabFusedBench {
         client: client.clone(),
@@ -310,6 +304,7 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         noise_curve: true,
         strength_map: true,
         pooled: false,
+        candidate: CollabCandidate::baseline(),
     });
     run(CollabFusedBench {
         client: client.clone(),
@@ -319,6 +314,7 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         noise_curve: true,
         strength_map: true,
         pooled: true,
+        candidate: CollabCandidate::baseline(),
     });
 
     for &(channels, channel_name) in CHANNELS {
@@ -330,6 +326,7 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
             noise_curve: false,
             strength_map: false,
             pooled: false,
+            candidate: CollabCandidate::baseline(),
         });
     }
 
@@ -370,6 +367,10 @@ struct Cli {
     /// Swallowed, since cargo passes this when invoking the bench binary.
     #[arg(long, hide = true)]
     bench: bool,
+
+    /// Runs only the benches whose name contains this text, for example `nlm_window/32x16`.
+    #[arg(long)]
+    filter: Option<String>,
 }
 
 fn main() {
@@ -377,6 +378,10 @@ fn main() {
 
     println!("NLMeans Per-Kernel Benchmarks - 1920x1080 (TimingMethod::Device)");
     println!("  override sample count with BENCH_NUM_SAMPLES=N (default 15)");
+
+    if let Some(filter) = cli.filter.clone() {
+        let _ = kernels::FILTER.set(filter);
+    }
 
     #[cfg(feature = "vulkan")]
     {

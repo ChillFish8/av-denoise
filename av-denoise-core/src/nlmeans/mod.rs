@@ -54,13 +54,6 @@ pub(crate) const BLOCK_X: u32 = 32;
 /// Cube Y dimension for tile-heavy fused/separable kernels.
 pub(crate) const BLOCK_Y: u32 = 8;
 
-/// Cube shape for the per-pixel `nlm_accumulate` kernel, which has no shared-memory tile.
-///
-/// On RDNA-class GPUs it benchmarks 10 to 25% faster than the tile-heavy default, because the
-/// kernel waits on memory and the extra threads hide the load latency.
-pub(crate) const BLOCK_X_THIN: u32 = 32;
-pub(crate) const BLOCK_Y_THIN: u32 = 16;
-
 /// Largest 1D grid a dispatch may ask for, set by the WebGPU and Vulkan limits.
 pub(crate) const MAX_GRID_1D: u32 = 65535;
 

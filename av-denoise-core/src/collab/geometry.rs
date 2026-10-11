@@ -7,12 +7,15 @@ pub fn refs_along(dim: u32) -> u32 {
     (dim - PATCH_SIZE).div_ceil(STEP) + 1
 }
 
-/// Cubes along x for the `collab_fused` kernel.
+/// Reference patches one `collab_fused` cube handles at the baseline launch shape.
+pub const BASELINE_GROUPS: u32 = 8;
+
+/// Cubes along x for the `collab_fused` kernel with `groups` reference patches per cube.
 ///
-/// Each cube runs eight 8-lane groups with one reference patch each. The count rounds up, so the
-/// last cube of a row runs dead groups past the end.
-pub fn fused_cubes_x(width: u32) -> u32 {
-    refs_along(width).div_ceil(8)
+/// Each reference patch takes one 8-lane group. The count rounds up, so the last cube of a row runs
+/// dead groups past the end.
+pub fn fused_cubes_x(width: u32, groups: u32) -> u32 {
+    refs_along(width).div_ceil(groups)
 }
 
 /// Top-left pixel of reference `index` along one axis.
@@ -53,14 +56,22 @@ mod tests {
     #[test]
     fn fused_cubes_cover_every_reference() {
         // 1920 gives 479 references, so the last of the 60 cubes runs seven live groups.
-        let full_hd_cubes = fused_cubes_x(1920);
+        let full_hd_cubes = fused_cubes_x(1920, BASELINE_GROUPS);
         assert_eq!(full_hd_cubes, 60);
 
-        for dim in [8u32, 9, 21, 64, 100, 104, 128, 1280, 1920, 3840] {
-            let cubes = fused_cubes_x(dim);
-            let refs = refs_along(dim);
-            assert!(cubes * 8 >= refs, "dim={dim} leaves references uncovered");
-            assert!((cubes - 1) * 8 < refs, "dim={dim} launches a wholly dead cube");
+        for groups in [4u32, 8, 16] {
+            for dim in [8u32, 9, 21, 64, 100, 104, 128, 1280, 1920, 3840] {
+                let cubes = fused_cubes_x(dim, groups);
+                let refs = refs_along(dim);
+                assert!(
+                    cubes * groups >= refs,
+                    "dim={dim} groups={groups} leaves references uncovered"
+                );
+                assert!(
+                    (cubes - 1) * groups < refs,
+                    "dim={dim} groups={groups} launches a dead cube"
+                );
+            }
         }
     }
 
