@@ -27,7 +27,7 @@ mod site;
 pub(crate) mod sites;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub use self::budget::{
     Budget,

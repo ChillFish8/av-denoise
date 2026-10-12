@@ -1,11 +1,22 @@
 use cubecl::prelude::*;
 use cubecl::terminate;
 
-/// The threads in one block-match workgroup, one 32-thread wave.
+/// The threads in one block-match workgroup.
 pub const BLOCK_MATCH_THREADS: u32 = 32;
 
 /// How many horizontally adjacent candidate offsets one thread scores together.
 const OFFSETS_PER_THREAD: u32 = 3;
+
+/// Planes one block-match cube may span, which fits a cube of up to 256 threads at a plane width of 8.
+const ARGMIN_MAX_PLANES: u32 = 32;
+
+/// The index [parallel_argmin] returns when no SAD is below its `1.0e30` start.
+const NO_CANDIDATE: u32 = u32::MAX;
+
+const _: () = assert!(
+    BLOCK_MATCH_THREADS <= ARGMIN_MAX_PLANES * 8,
+    "the argmin's per-plane buffers must cover a block-match cube at a plane width of 8"
+);
 
 /// The row stride of the staged search window.
 ///
@@ -20,11 +31,13 @@ fn window_stride(blksize: u32, search_radius: u32) -> u32 {
 
 /// Finds each block's motion on one pyramid level and seeds the fine grid with it.
 ///
-/// One GPU block handles one image block and picks the lowest SAD among the
-/// `(2 * search_radius + 1)^2` candidates. `blksize` is capped at
-/// [MAX_BLKSIZE](crate::nlmeans::motion::MAX_BLKSIZE) so the shared centre tile stays within 1024
-/// values. The neighbour pixels the search reaches are staged into shared memory once, clamped to
-/// the level.
+/// One GPU block handles one image block. Every thread scores a share of the
+/// `(2 * search_radius + 1)^2` candidates, and the lowest SAD is picked, the first in row-major
+/// order on a tie.
+///
+/// `blksize` is capped at [MAX_BLKSIZE](crate::nlmeans::motion::MAX_BLKSIZE) so the shared centre
+/// tile stays within 1024 values. The neighbour pixels the search reaches are staged into shared
+/// memory once, clamped to the level.
 ///
 /// The winner is scaled by `level_scale`, 2 raised to the coarse level, and written to every fine
 /// block inside this block's region. `step` and `fine_step` are the coarse and fine block spacings.
@@ -63,6 +76,8 @@ pub fn nlm_mc_block_match_coarse(
     let window_rows = comptime!(blksize + 2 * search_radius);
     let window_area = comptime!(window_stride_len * window_rows);
     let mut window = SharedMemory::<f32>::new(window_area as usize);
+    let mut plane_sads = SharedMemory::<f32>::new(ARGMIN_MAX_PLANES as usize);
+    let mut plane_indices = SharedMemory::<u32>::new(ARGMIN_MAX_PLANES as usize);
 
     let mut pixel_y = local_y;
     while pixel_y < blksize {
@@ -107,6 +122,17 @@ pub fn nlm_mc_block_match_coarse(
 
     sync_cube();
 
+    let fills_planes = threads.is_multiple_of(PLANE_DIM);
+    let best_index = parallel_argmin(
+        &sad_scratch,
+        &mut plane_sads,
+        &mut plane_indices,
+        thread_id,
+        threads,
+        fills_planes,
+        candidates,
+    );
+
     if thread_id != 0 {
         terminate!();
     }
@@ -116,13 +142,25 @@ pub fn nlm_mc_block_match_coarse(
     let mut best_dx = 0i32;
     let mut best_dy = 0i32;
 
-    for dy in 0..window_side {
-        for dx in 0..window_side {
-            let candidate_sad = sad_scratch[(dy * window_side + dx) as usize];
-            if candidate_sad < best_sad {
-                best_sad = candidate_sad;
-                best_dx = dx as i32 - search_radius as i32;
-                best_dy = dy as i32 - search_radius as i32;
+    if fills_planes {
+        let last_candidate = comptime!(candidates - 1);
+        let found = best_index < candidates;
+        let safe_index = u32::min(best_index, last_candidate);
+        let found_sad = sad_scratch[safe_index as usize];
+        let offset_x = (safe_index % window_side) as i32 - search_radius as i32;
+        let offset_y = (safe_index / window_side) as i32 - search_radius as i32;
+        best_sad = select(found, found_sad, 1.0e30f32);
+        best_dx = select(found, offset_x, 0i32);
+        best_dy = select(found, offset_y, 0i32);
+    } else {
+        for dy in 0..window_side {
+            for dx in 0..window_side {
+                let candidate_sad = sad_scratch[(dy * window_side + dx) as usize];
+                if candidate_sad < best_sad {
+                    best_sad = candidate_sad;
+                    best_dx = dx as i32 - search_radius as i32;
+                    best_dy = dy as i32 - search_radius as i32;
+                }
             }
         }
     }
@@ -183,6 +221,10 @@ pub fn nlm_mc_block_match_coarse(
 ///
 /// When `use_seed` is 1, the search window centres on the vector already in `mv_field`, and the
 /// refined vector replaces it. A `search_radius` of 0 with no seed scores only the unshifted block.
+///
+/// One GPU block handles one image block. Every thread scores a share of the
+/// `(2 * search_radius + 1)^2` candidates, and the lowest SAD is picked, the first in row-major
+/// order on a tie.
 ///
 /// When `write_confidence` is set, each block also writes a confidence between 0 and 1 so a poor
 /// match can suppress its frame. `sad_noise_floor` is the SAD two noisy copies of the same content
@@ -251,6 +293,8 @@ pub fn nlm_mc_block_match_fine(
     let window_rows = comptime!(blksize + 2 * search_radius);
     let window_area = comptime!(window_stride_len * window_rows);
     let mut window = SharedMemory::<f32>::new(window_area as usize);
+    let mut plane_sads = SharedMemory::<f32>::new(ARGMIN_MAX_PLANES as usize);
+    let mut plane_indices = SharedMemory::<u32>::new(ARGMIN_MAX_PLANES as usize);
 
     let mut pixel_y = local_y;
     while pixel_y < blksize {
@@ -295,6 +339,17 @@ pub fn nlm_mc_block_match_fine(
 
     sync_cube();
 
+    let fills_planes = threads.is_multiple_of(PLANE_DIM);
+    let best_index = parallel_argmin(
+        &sad_scratch,
+        &mut plane_sads,
+        &mut plane_indices,
+        thread_id,
+        threads,
+        fills_planes,
+        candidates,
+    );
+
     if thread_id != 0 {
         terminate!();
     }
@@ -303,13 +358,25 @@ pub fn nlm_mc_block_match_fine(
     let mut best_dx = seed_dx;
     let mut best_dy = seed_dy;
 
-    for dy in 0..window_side {
-        for dx in 0..window_side {
-            let candidate_sad = sad_scratch[(dy * window_side + dx) as usize];
-            if candidate_sad < best_sad {
-                best_sad = candidate_sad;
-                best_dx = seed_dx + (dx as i32 - search_radius as i32);
-                best_dy = seed_dy + (dy as i32 - search_radius as i32);
+    if fills_planes {
+        let last_candidate = comptime!(candidates - 1);
+        let found = best_index < candidates;
+        let safe_index = u32::min(best_index, last_candidate);
+        let found_sad = sad_scratch[safe_index as usize];
+        let offset_x = (safe_index % window_side) as i32 - search_radius as i32;
+        let offset_y = (safe_index / window_side) as i32 - search_radius as i32;
+        best_sad = select(found, found_sad, 1.0e30f32);
+        best_dx = select(found, seed_dx + offset_x, seed_dx);
+        best_dy = select(found, seed_dy + offset_y, seed_dy);
+    } else {
+        for dy in 0..window_side {
+            for dx in 0..window_side {
+                let candidate_sad = sad_scratch[(dy * window_side + dx) as usize];
+                if candidate_sad < best_sad {
+                    best_sad = candidate_sad;
+                    best_dx = seed_dx + (dx as i32 - search_radius as i32);
+                    best_dy = seed_dy + (dy as i32 - search_radius as i32);
+                }
             }
         }
     }
@@ -441,6 +508,78 @@ fn blocked_window_sads(
 
         item += threads;
     }
+}
+
+/// The index of the lowest SAD in `sad_scratch`, the lowest index on a tie.
+///
+/// It returns what a row-major scan with a strict `<` returns. Each lane scans every `threads`-th
+/// candidate, each plane keeps its lowest SAD and then the lowest index holding it, and every lane
+/// combines the planes' winners in plane order.
+///
+/// Plane reductions are only defined on whole planes, so when `fills_planes` is false it skips the
+/// search and returns [NO_CANDIDATE]. Every thread of the cube must call it with the same
+/// `fills_planes`.
+#[cube]
+fn parallel_argmin(
+    sad_scratch: &SharedMemory<f32>,
+    plane_sads: &mut SharedMemory<f32>,
+    plane_indices: &mut SharedMemory<u32>,
+    thread_id: u32,
+    threads: u32,
+    fills_planes: bool,
+    #[comptime] candidates: u32,
+) -> u32 {
+    if fills_planes {
+        let mut lane_sad = 1.0e30f32;
+        let mut lane_index = NO_CANDIDATE.runtime();
+        let mut index = thread_id;
+
+        while index < candidates {
+            let sad = sad_scratch[index as usize];
+            if sad < lane_sad {
+                lane_sad = sad;
+                lane_index = index;
+            }
+
+            index += threads;
+        }
+
+        let plane_sad = plane_min(lane_sad);
+        let tied_index = select(lane_sad == plane_sad, lane_index, NO_CANDIDATE);
+        let plane_index = plane_min(tied_index);
+
+        let plane = thread_id / PLANE_DIM;
+        if UNIT_POS_PLANE == 0u32 {
+            plane_sads[plane as usize] = plane_sad;
+            plane_indices[plane as usize] = plane_index;
+        }
+    }
+
+    sync_cube();
+
+    let mut best_index = NO_CANDIDATE.runtime();
+
+    if fills_planes {
+        let planes = threads / PLANE_DIM;
+        let mut best_sad = plane_sads[0];
+        best_index = plane_indices[0];
+        let mut other = 1u32;
+
+        while other < planes {
+            let sad = plane_sads[other as usize];
+            let candidate_index = plane_indices[other as usize];
+            let lower = sad < best_sad;
+            let lower_tie = sad == best_sad && candidate_index < best_index;
+            if lower || lower_tie {
+                best_sad = sad;
+                best_index = candidate_index;
+            }
+
+            other += 1u32;
+        }
+    }
+
+    best_index
 }
 
 #[cube]

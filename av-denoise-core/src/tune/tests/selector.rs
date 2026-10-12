@@ -177,3 +177,74 @@ fn a_baseline_that_does_not_fit_fails_the_run() {
     assert!(result.is_err());
     assert!(site.launches().is_empty());
 }
+
+#[test]
+fn the_site_baseline_leads_the_fitted_list() {
+    let client = test_client();
+    let mut site = ProbeSite::new(&client);
+    site.site_baseline = Some(ProbeCandidate::Wide);
+    let limits = small_device_limits();
+
+    let fitted = fit_candidates(&site, &limits).expect("the baseline fits");
+
+    assert_eq!(
+        fitted,
+        vec![
+            ProbeCandidate::Wide,
+            ProbeCandidate::Small,
+            ProbeCandidate::Medium
+        ]
+    );
+}
+
+#[test]
+fn an_illegal_candidate_is_never_offered() {
+    let client = test_client();
+    let mut site = ProbeSite::new(&client);
+    site.illegal = vec![ProbeCandidate::Medium];
+    let limits = small_device_limits();
+
+    let fitted = fit_candidates(&site, &limits).expect("the baseline fits");
+
+    assert_eq!(fitted, vec![ProbeCandidate::Small, ProbeCandidate::Wide]);
+}
+
+#[test]
+fn an_illegal_baseline_is_a_fit_error() {
+    let client = test_client();
+    let mut site = ProbeSite::new(&client);
+    site.illegal = vec![ProbeCandidate::Small];
+    let limits = small_device_limits();
+
+    let result = fit_candidates(&site, &limits);
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn a_missing_plan_entry_runs_the_site_baseline() {
+    let selector = selector_with(KernelPlan::baseline());
+    let client = test_client();
+    let mut site = ProbeSite::new(&client);
+    site.site_baseline = Some(ProbeCandidate::Wide);
+
+    selector.run(&site).expect("the run succeeds");
+
+    assert_eq!(site.launches(), vec![ProbeCandidate::Wide]);
+}
+
+/// A stored plan can come from a runtime that allows a candidate this one forbids.
+#[test]
+fn a_planned_illegal_candidate_runs_the_site_baseline() {
+    let client = test_client();
+    let mut site = ProbeSite::new(&client);
+    site.site_baseline = Some(ProbeCandidate::Wide);
+    site.illegal = vec![ProbeCandidate::Small];
+    let mut plan = KernelPlan::baseline();
+    plan.insert(site.key(), "small");
+    let selector = selector_with(plan);
+
+    selector.run(&site).expect("the run succeeds");
+
+    assert_eq!(site.launches(), vec![ProbeCandidate::Wide]);
+}

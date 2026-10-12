@@ -19,8 +19,16 @@ enum Kernel {
 }
 
 /// The workgroup shapes the production kernels are checked at.
-fn production_dims() -> [CubeDim; 2] {
-    [CubeDim::new_2d(8, 8), CubeDim::new_1d(BLOCK_MATCH_THREADS)]
+///
+/// 16 threads leave a plane partly empty, and 128 threads span several planes at wave32 and two at
+/// RADV's wave64.
+fn production_dims() -> [CubeDim; 4] {
+    [
+        CubeDim::new_2d(8, 8),
+        CubeDim::new_1d(BLOCK_MATCH_THREADS),
+        CubeDim::new_1d(16),
+        CubeDim::new_1d(128),
+    ]
 }
 
 fn next_random(state: &mut u64) -> u32 {

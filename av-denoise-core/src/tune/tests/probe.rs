@@ -57,6 +57,10 @@ pub(crate) struct ProbeSite {
     pub(crate) width: u32,
     pub(crate) baseline_shared: usize,
     pub(crate) baseline_plane: u32,
+    /// The baseline this site reports instead of the first listed candidate.
+    pub(crate) site_baseline: Option<ProbeCandidate>,
+    /// Candidates this site never allows.
+    pub(crate) illegal: Vec<ProbeCandidate>,
     pub(crate) launched: Arc<Mutex<Vec<ProbeCandidate>>>,
     /// Whether allocating scratch outputs panics, which makes any tuning of this site fail.
     pub(crate) fail_scratch: bool,
@@ -69,6 +73,8 @@ impl ProbeSite {
             width: 64,
             baseline_shared: 1024,
             baseline_plane: 1,
+            site_baseline: None,
+            illegal: Vec::new(),
             launched: Arc::new(Mutex::new(Vec::new())),
             fail_scratch: false,
         }
@@ -113,6 +119,14 @@ impl VariantSite<TestRuntime> for ProbeSite {
             ProbeCandidate::Medium => 16,
             _ => 1,
         }
+    }
+
+    fn legal(&self, candidate: ProbeCandidate, _limits: &DeviceLimits) -> bool {
+        !self.illegal.contains(&candidate)
+    }
+
+    fn baseline(&self) -> ProbeCandidate {
+        self.site_baseline.unwrap_or_else(ProbeCandidate::baseline)
     }
 
     fn launch(&self, candidate: ProbeCandidate, _outputs: &()) {

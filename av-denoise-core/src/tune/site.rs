@@ -17,7 +17,7 @@ pub trait SiteCandidate: Copy + Eq + Debug + Send + Sync + 'static {
 
     fn fidelity(self) -> Fidelity;
 
-    /// The candidate that matches the original kernel and launch shape exactly.
+    /// The first listed candidate, which is a site's baseline unless the site names another.
     fn baseline() -> Self {
         Self::ALL[0]
     }
@@ -27,10 +27,6 @@ pub trait SiteCandidate: Copy + Eq + Debug + Send + Sync + 'static {
             .iter()
             .copied()
             .find(|candidate| candidate.name() == name)
-    }
-
-    fn is_baseline(self) -> bool {
-        self == Self::baseline()
     }
 }
 
@@ -103,11 +99,18 @@ pub trait VariantSite<R: Runtime>: Clone + Send {
         fidelity: Fidelity,
     ) -> Result<CompareResult, anyhow::Error>;
 
+    /// The candidate that matches the original kernel and launch shape on this site's runtime.
     fn baseline(&self) -> Self::Candidate {
         Self::Candidate::baseline()
     }
 
-    /// Whether the candidate's shared memory, thread count, cube shape and plane width fit `limits`.
+    /// Whether the candidate's code is correct on this site's runtime.
+    fn legal(&self, _candidate: Self::Candidate, _limits: &DeviceLimits) -> bool {
+        true
+    }
+
+    /// Whether the candidate is legal and its shared memory, thread count, cube shape and plane width
+    /// fit `limits`.
     ///
     /// The baseline skips the plane width check, so it launches wherever the original kernel did.
     fn fits(&self, candidate: Self::Candidate, limits: &DeviceLimits) -> bool {
@@ -115,13 +118,15 @@ pub trait VariantSite<R: Runtime>: Clone + Send {
         let shared_bytes = self.shared_bytes(candidate);
         let min_plane = self.min_plane_size(candidate);
         let (max_x, max_y, _) = limits.max_cube_dim;
+        let is_baseline = candidate == self.baseline();
 
+        let legal = self.legal(candidate, limits);
         let shared_fits = shared_bytes <= limits.max_shared_bytes;
         let units_fit = shape.units() <= limits.max_units_per_cube;
         let dims_fit = shape.x <= max_x && shape.y <= max_y;
-        let plane_fits = candidate.is_baseline() || limits.plane_size_min >= min_plane;
+        let plane_fits = is_baseline || limits.plane_size_min >= min_plane;
 
-        shared_fits && units_fit && dims_fit && plane_fits
+        legal && shared_fits && units_fit && dims_fit && plane_fits
     }
 }
 
@@ -137,10 +142,9 @@ pub struct FitError {
     pub units: u32,
 }
 
-/// Every candidate of `site` that fits `limits`, baseline first.
+/// Every candidate of `site` that is legal and fits `limits`, the site's baseline first.
 ///
-/// A baseline whose shared memory, thread count or cube shape does not fit is an error, as a launch
-/// that cannot run is.
+/// A baseline that is illegal or does not fit is an error, as a launch that cannot run is.
 pub fn fit_candidates<R: Runtime, S: VariantSite<R>>(
     site: &S,
     limits: &DeviceLimits,
@@ -158,11 +162,12 @@ pub fn fit_candidates<R: Runtime, S: VariantSite<R>>(
         });
     }
 
-    let fitted = S::Candidate::ALL
+    let others = S::Candidate::ALL
         .iter()
         .copied()
-        .filter(|&candidate| site.fits(candidate, limits))
-        .collect();
+        .filter(|&candidate| candidate != baseline && site.fits(candidate, limits));
+    let mut fitted = vec![baseline];
+    fitted.extend(others);
 
     Ok(fitted)
 }

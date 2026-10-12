@@ -70,7 +70,8 @@ impl<R: Runtime> KernelSelector<R> {
 
     /// Launches the chosen candidate of `site` on its real outputs.
     ///
-    /// A key with no choice, an unknown name or a candidate that does not fit runs the baseline.
+    /// A key with no choice, an unknown name or a candidate that is illegal or does not fit runs the
+    /// site's baseline.
     /// With a ledger attached, a census phase times the launch and a tune phase tunes the target key
     /// in place before its real launch.
     pub fn run<S: VariantSite<R>>(&self, site: &S) -> Result<(), anyhow::Error> {
@@ -78,7 +79,7 @@ impl<R: Runtime> KernelSelector<R> {
         let outputs = site.real_outputs();
 
         if self.ledger.is_none() && self.plan.is_empty() {
-            let baseline = S::Candidate::baseline();
+            let baseline = site.baseline();
             site.launch(baseline, &outputs);
             return Ok(());
         }
@@ -87,7 +88,7 @@ impl<R: Runtime> KernelSelector<R> {
 
         let Some(ledger) = self.ledger.as_ref() else {
             let named = self.plan.get(&key);
-            let candidate = planned::<R, S>(&fitted, named);
+            let candidate = planned(site, &fitted, named);
             site.launch(candidate, &outputs);
             return Ok(());
         };
@@ -98,16 +99,16 @@ impl<R: Runtime> KernelSelector<R> {
 
         match observed {
             Observed::Idle => {
-                let candidate = self.ledger_planned::<S>(&key, &allowed, ledger);
+                let candidate = self.ledger_planned(site, &key, &allowed, ledger);
                 site.launch(candidate, &outputs);
             },
             Observed::Census => {
-                let candidate = self.ledger_planned::<S>(&key, &allowed, ledger);
+                let candidate = self.ledger_planned(site, &key, &allowed, ledger);
                 self.census_launch(site, &outputs, &key, candidate, timed, ledger);
             },
             Observed::Tune { deadline } => {
                 self.tune_key(site, &key, &allowed, deadline, ledger);
-                let candidate = self.ledger_planned::<S>(&key, &allowed, ledger);
+                let candidate = self.ledger_planned(site, &key, &allowed, ledger);
                 site.launch(candidate, &outputs);
             },
         }
@@ -173,9 +174,10 @@ impl<R: Runtime> KernelSelector<R> {
 
     /// The candidate the ledger names for `key`, falling back to the selector's own plan.
     ///
-    /// A key whose tuning failed runs the baseline.
+    /// A key whose tuning failed runs the site's baseline.
     fn ledger_planned<S: VariantSite<R>>(
         &self,
+        site: &S,
         key: &SiteKey,
         allowed: &[S::Candidate],
         ledger: &TuneLedger,
@@ -187,7 +189,7 @@ impl<R: Runtime> KernelSelector<R> {
             LedgerChoice::Unplanned => self.plan.get(key),
         };
 
-        planned::<R, S>(allowed, named)
+        planned(site, allowed, named)
     }
 }
 
@@ -225,13 +227,18 @@ impl Drop for TargetGuard<'_> {
     }
 }
 
-/// The candidate `named` names, or the baseline when the name is missing, unknown or not in `allowed`.
-fn planned<R: Runtime, S: VariantSite<R>>(allowed: &[S::Candidate], named: Option<&str>) -> S::Candidate {
+/// The candidate `named` names, or the site's baseline when the name is missing, unknown or not in
+/// `allowed`.
+fn planned<R: Runtime, S: VariantSite<R>>(
+    site: &S,
+    allowed: &[S::Candidate],
+    named: Option<&str>,
+) -> S::Candidate {
     let parsed = named.and_then(S::Candidate::from_name);
 
     match parsed {
         Some(candidate) if allowed.contains(&candidate) => candidate,
-        _ => S::Candidate::baseline(),
+        _ => site.baseline(),
     }
 }
 

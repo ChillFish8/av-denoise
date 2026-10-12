@@ -272,7 +272,7 @@ fn deterministic_choice_never_picks_a_cooperative_candidate() {
             CandidateRecord {
                 name: candidate.name().to_string(),
                 fidelity: candidate.fidelity().class(),
-                baseline: candidate.is_baseline(),
+                baseline: candidate == RegulariseCandidate::baseline(),
                 median_ns,
                 samples: 15,
             }

@@ -18,7 +18,7 @@ pub(crate) fn assert_candidates_match_baseline<S: VariantSite<TestRuntime>>(
     site.launch(baseline, &baseline_outputs);
 
     for candidate in fitted {
-        if candidate.is_baseline() {
+        if candidate == baseline {
             continue;
         }
 
