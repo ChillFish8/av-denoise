@@ -27,7 +27,7 @@ pub fn finish_warm_up(warm_up: &mut Option<WarmUp>) {
 
 #[cfg(test)]
 mod tests {
-    use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Depth, Device, Subsampling};
+    use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Depth, Device, Subsampling, TuningMode};
 
     use super::*;
 
@@ -43,6 +43,8 @@ mod tests {
             chroma_strength: None,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
+            tuning: TuningMode::Off,
+            deterministic: false,
         };
 
         // Zero width collapses the 4:2:0 chroma plane to nothing, which `PlanarDenoiser::create`

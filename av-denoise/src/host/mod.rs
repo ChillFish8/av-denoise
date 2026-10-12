@@ -8,6 +8,7 @@ mod tests;
 
 use std::collections::VecDeque;
 
+use av_denoise_core::tune::DeviceProfile;
 use av_denoise_core::{DevicePlane, Engine, GrainChunk, WindowSpan};
 use cubecl::server::Handle;
 
@@ -17,6 +18,7 @@ pub use self::options::{Algorithm, DenoiserOptions};
 pub(crate) use self::pending::{Pending, TryWait};
 use crate::backend::accelerate::Accelerator;
 use crate::backend::{Device, build_engine};
+use crate::tune::{KernelRequest, KernelSetup, profile_key};
 
 /// How many readbacks a [HostDenoiser] keeps in flight at once.
 pub const MAX_PENDING: usize = 2;
@@ -106,6 +108,9 @@ pub struct HostDenoiser {
     engine: Box<dyn Engine>,
     io: Box<dyn PlaneIo>,
     accelerator: Accelerator,
+    device: DeviceProfile,
+    /// The key this denoiser's profile ranking is stored under.
+    profile_key: String,
     width: u32,
     height: u32,
     temporal_radius: u32,
@@ -139,6 +144,19 @@ impl HostDenoiser {
         height: u32,
         options: DenoiserOptions,
     ) -> Result<Self, DenoiserError> {
+        let setup = KernelSetup::default();
+        Self::create_with(accelerators, device, width, height, options, &setup)
+    }
+
+    /// [Self::create] with the engine's tuning wired as `setup` says.
+    pub(crate) fn create_with(
+        accelerators: &[Accelerator],
+        device: &Device,
+        width: u32,
+        height: u32,
+        options: DenoiserOptions,
+        setup: &KernelSetup,
+    ) -> Result<Self, DenoiserError> {
         let temporal_radius = options.temporal_radius();
         let is_nl4d = matches!(options.algorithm, Algorithm::Nl4d(_));
 
@@ -150,7 +168,14 @@ impl HostDenoiser {
         }
 
         let spec = options.algorithm.engine_spec(&options, width, height);
-        let built = build_engine(accelerators, device, spec)?;
+        let plane_key = profile_key(&options, width, height);
+        let request = KernelRequest {
+            tuning: options.tuning,
+            deterministic: options.deterministic,
+            profile_key: &plane_key,
+            setup,
+        };
+        let built = build_engine(accelerators, device, spec, &request)?;
 
         let format = options.depth.sample_format();
         let pixels = width as usize * height as usize;
@@ -162,6 +187,8 @@ impl HostDenoiser {
             engine: built.engine,
             io: built.io,
             accelerator: built.accelerator,
+            device: built.device,
+            profile_key: plane_key,
             width,
             height,
             temporal_radius,
@@ -177,6 +204,14 @@ impl HostDenoiser {
 
     pub fn selected_accelerator(&self) -> Accelerator {
         self.accelerator
+    }
+
+    pub(crate) fn device_profile(&self) -> &DeviceProfile {
+        &self.device
+    }
+
+    pub(crate) fn profile_key(&self) -> &str {
+        &self.profile_key
     }
 
     pub fn width(&self) -> u32 {

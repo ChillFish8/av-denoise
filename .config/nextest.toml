@@ -5,3 +5,7 @@ slow-timeout = { period = "120s", terminate-after = 4 }
 [[profile.default.overrides]]
 filter = 'test(/tune::tests::collab::every_group_count_matches/)'
 slow-timeout = { period = "120s", terminate-after = 10 }
+
+[[profile.default.overrides]]
+filter = 'test(/tune::tests::driver::(an_nl4d_pass_records_a_ranking_for_every_plane|a_tuned_grain_export_denoiser_drains_only_the_real_streams_grain)/)'
+slow-timeout = { period = "120s", terminate-after = 10 }

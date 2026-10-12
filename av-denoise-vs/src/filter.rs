@@ -2,6 +2,7 @@ use std::ops::Range;
 use std::sync::Mutex;
 
 use anyhow::{Error, Result, anyhow, bail};
+use av_denoise::tune::{BudgetRequest, TuneOutcome, TuneRequest, is_tuned};
 use av_denoise::{
     EdgePadding,
     FrameLayout,
@@ -37,6 +38,8 @@ struct State {
     /// keeps the place until it exits, making other workers wait out the queue's limit before compiling
     /// for themselves, which is rare enough to accept.
     warm_up: Option<WarmUp>,
+    /// Set when this configuration has no stored tuning result, so the first request tunes.
+    tuning_pending: bool,
 }
 
 impl State {
@@ -104,7 +107,8 @@ impl<'core> Denoise<'core> {
         };
 
         let layout = layout_from_format(raw_format, width, height)?;
-        let plane_options = plane_options_from(raw, algorithm_kind, layout)?;
+        let mut plane_options = plane_options_from(raw, algorithm_kind, layout)?;
+        plane_options.tuning = plane_options.tuning.with_env_override();
 
         // Av1an runs one of these per chunk, so without a cache every chunk pays the ten seconds it
         // takes to compile the kernels. The queue keeps the first wave of chunks from all paying it at
@@ -115,6 +119,14 @@ impl<'core> Denoise<'core> {
 
         let denoiser = PlanarDenoiser::create(&plane_options, layout)?;
         let span = denoiser.window_span();
+
+        let tuning_pending = !is_tuned(&plane_options, layout);
+        if tuning_pending {
+            tracing::warn!(
+                "no tuning results are stored for this device, so the first frame is slow while av-denoise \
+                 tunes. Run `av-denoise tune` with the same options beforehand to avoid it"
+            );
+        }
 
         let core_info = core.info();
         let lookback = lookback_for(core_info.num_threads);
@@ -132,6 +144,7 @@ impl<'core> Denoise<'core> {
             planner,
             buffer: OutputBuffer::new(),
             warm_up,
+            tuning_pending,
         };
 
         Ok(Self {
@@ -164,6 +177,10 @@ impl<'core> Denoise<'core> {
         n: usize,
         fetch: &impl Fn(usize) -> Result<Planes, Error>,
     ) -> Result<Planes, Error> {
+        if state.tuning_pending {
+            self.tune_on(state, n, fetch);
+        }
+
         let buffered = state.buffer.contains(n);
         let plan = {
             let outstanding = self.outstanding.lock().expect("outstanding mutex poisoned");
@@ -193,6 +210,42 @@ impl<'core> Denoise<'core> {
         state.finish_warm_up();
 
         Ok(denoised)
+    }
+
+    /// Tunes the denoiser on the frames VapourSynth holds for request `n`, once.
+    ///
+    /// The frames the request already asked for are the tuning frames, looped as needed. Tuning
+    /// never fails the request. The stream is rebuilt afterwards.
+    fn tune_on(&self, state: &mut State, n: usize, fetch: &impl Fn(usize) -> Result<Planes, Error>) {
+        state.tuning_pending = false;
+
+        let range = self.geometry.request_range(n);
+        let indices: Vec<usize> = range.collect();
+        let fetched = fetch_all(&indices, fetch);
+        let window = match fetched {
+            Ok(window) => window,
+            Err(error) => {
+                tracing::warn!(%error, "cannot fetch frames to tune on, using the untuned kernels");
+                return;
+            },
+        };
+
+        let clip_frames = self.geometry.last_frame as u64 + 1;
+        let request = TuneRequest {
+            budget: BudgetRequest::Automatic {
+                frames: Some(clip_frames),
+            },
+            force: false,
+        };
+        let report = state.denoiser.tune(&window, &request);
+
+        match report.outcome {
+            TuneOutcome::Tuned => tracing::warn!(keys = report.tuned_keys, "av-denoise finished tuning"),
+            TuneOutcome::AlreadyTuned => {},
+            TuneOutcome::Skipped(reason) => tracing::info!(%reason, "av-denoise did not tune"),
+        }
+
+        state.planner.kill();
     }
 
     /// Rebuilds the stream so it has produced output `start`, buffering it and any clip-end tail.

@@ -159,6 +159,63 @@ impl Drop for WarmUp {
     }
 }
 
+/// The lock file that keeps tuning to one process at a time.
+const TUNE_LOCK_NAME: &str = "tune.lock";
+
+/// How long a process waits for another to finish tuning before running with stored results.
+///
+/// Explicit tuning can take ten minutes, so the wait is longer than the compile wait.
+const TUNE_WAIT_LIMIT: Duration = Duration::from_secs(15 * 60);
+
+/// The one place on this machine to tune kernels at a time.
+///
+/// Tuning times kernels, so two processes tuning at once would measure each other. The lock is
+/// released when this is dropped.
+#[derive(Debug)]
+pub struct TuneLock {
+    lock: File,
+}
+
+/// What asking for the tune lock gave.
+#[derive(Debug)]
+pub enum TuneLockOutcome {
+    Held(TuneLock),
+    /// Caching is off or the lock file cannot be opened, so the caller tunes without a lock.
+    Unlocked,
+    /// Another process held the lock for the whole wait, so the caller should use stored results.
+    TimedOut,
+}
+
+impl TuneLock {
+    /// Waits for the tune lock next to the kernel cache.
+    pub fn acquire() -> TuneLockOutcome {
+        let Some(dir) = compilation_cache_dir() else {
+            return TuneLockOutcome::Unlocked;
+        };
+
+        Self::acquire_in(dir, TUNE_WAIT_LIMIT)
+    }
+
+    fn acquire_in(dir: &Path, wait_limit: Duration) -> TuneLockOutcome {
+        let path = dir.join(TUNE_LOCK_NAME);
+        let Some(lock) = open_lock_file(&path) else {
+            return TuneLockOutcome::Unlocked;
+        };
+
+        if wait_for_lock(&lock, wait_limit) {
+            TuneLockOutcome::Held(TuneLock { lock })
+        } else {
+            TuneLockOutcome::TimedOut
+        }
+    }
+}
+
+impl Drop for TuneLock {
+    fn drop(&mut self) {
+        let _ = self.lock.unlock();
+    }
+}
+
 /// Opens the lock file, creating it when this is the first process to ask for these kernels.
 ///
 /// A directory that cannot be written is logged and then ignored, because denoising works without
@@ -174,7 +231,7 @@ fn open_lock_file(path: &Path) -> Option<File> {
     match opened {
         Ok(file) => Some(file),
         Err(err) => {
-            tracing::debug!(?path, %err, "cannot open the kernel warm-up lock, compiling unqueued");
+            tracing::debug!(?path, %err, "cannot open the lock file, carrying on without it");
             None
         },
     }
@@ -193,14 +250,14 @@ fn wait_for_lock(lock: &File, wait_limit: Duration) -> bool {
             Ok(()) => return true,
             Err(TryLockError::WouldBlock) => {},
             Err(TryLockError::Error(err)) => {
-                tracing::debug!(%err, "cannot take the kernel warm-up lock, compiling unqueued");
+                tracing::debug!(%err, "cannot take the lock file, carrying on without it");
                 return false;
             },
         }
 
         if start.elapsed() >= wait_limit {
             tracing::warn!(
-                "waited {:?} for another process to compile kernels, compiling for ourselves",
+                "waited {:?} for another process to release the lock file, carrying on without it",
                 wait_limit,
             );
             return false;
@@ -239,6 +296,30 @@ mod tests {
             place.is_none(),
             "a caller gives up rather than compiling alongside the process ahead",
         );
+    }
+
+    #[test]
+    fn a_tune_lock_held_elsewhere_keeps_this_process_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(TUNE_LOCK_NAME);
+        let elsewhere = open_lock_file(&path).unwrap();
+        elsewhere.lock().unwrap();
+
+        let outcome = TuneLock::acquire_in(dir.path(), BRIEFLY);
+
+        assert!(matches!(outcome, TuneLockOutcome::TimedOut), "{outcome:?}");
+    }
+
+    #[test]
+    fn a_free_tune_lock_is_taken_and_released() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let first = TuneLock::acquire_in(dir.path(), BRIEFLY);
+        assert!(matches!(first, TuneLockOutcome::Held(_)));
+        drop(first);
+
+        let second = TuneLock::acquire_in(dir.path(), BRIEFLY);
+        assert!(matches!(second, TuneLockOutcome::Held(_)));
     }
 
     #[test]
@@ -306,6 +387,8 @@ mod tests {
             chroma_strength: None,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
+            tuning: crate::TuningMode::Off,
+            deterministic: false,
         }
     }
 

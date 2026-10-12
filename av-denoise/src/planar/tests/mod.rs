@@ -7,6 +7,9 @@ mod lockstep;
 // Gated on `vulkan` because `chroma_only_options` names the `Vulkan` accelerator variant.
 #[cfg(feature = "vulkan")]
 mod passthrough_retry;
+// Gated on `vulkan` because the planar denoiser it builds names the `Vulkan` accelerator variant.
+#[cfg(feature = "vulkan")]
+mod profile_keys;
 mod push_retry;
 
 use super::*;
@@ -39,6 +42,8 @@ mod reseed {
             chroma_strength: None,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
+            tuning: TuningMode::Off,
+            deterministic: false,
         }
     }
 

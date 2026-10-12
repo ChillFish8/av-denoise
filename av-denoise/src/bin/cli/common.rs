@@ -1,3 +1,5 @@
+use av_denoise::TuningMode;
+
 use super::InputSource;
 
 /// Flags shared by every denoising subcommand.
@@ -50,6 +52,79 @@ pub struct CommonArgs {
     /// Defaults to 1GiB when unset.
     #[arg(long, value_name = "SIZE", value_parser = parse_frame_budget)]
     pub frame_budget: Option<u64>,
+
+    /// Whether to tune the kernels for this device before denoising.
+    ///
+    /// `auto` times several kernel variants on the first frames when this configuration has no
+    /// stored results, saves the fastest correct ones next to the kernel cache, then denoises.
+    /// Later runs on the same device load them and skip tuning. `cached` uses stored results only.
+    /// `off` always runs the untuned kernels.
+    ///
+    /// The `AV_DENOISE_TUNE` environment variable overrides this flag.
+    #[arg(long, value_name = "MODE", default_value = "auto", value_parser = parse_tuning_mode)]
+    pub tune: TuningMode,
+
+    /// Runs only kernels whose output is bit identical to the untuned kernels.
+    #[arg(long)]
+    pub deterministic: bool,
+
+    /// How many seconds tuning may take, instead of a share of the clip's estimated encode time.
+    ///
+    /// Takes a finite number between 0 and 86400.
+    #[arg(long, value_name = "SECONDS", allow_negative_numbers = true, value_parser = parse_tune_budget)]
+    pub tune_budget: Option<f64>,
+}
+
+/// The longest tuning budget accepted, one day in seconds.
+const MAX_TUNE_BUDGET_SECONDS: f64 = 86_400.0;
+
+fn parse_tuning_mode(raw: &str) -> Result<TuningMode, String> {
+    raw.parse()
+}
+
+/// Reads a tuning budget in seconds, rejecting one that is negative, non-finite or over a day.
+fn parse_tune_budget(raw: &str) -> Result<f64, String> {
+    let seconds = raw.trim().parse::<f64>().map_err(|_| invalid_tune_budget(raw))?;
+
+    if !is_valid_tune_budget(seconds) {
+        return Err(invalid_tune_budget(raw));
+    }
+
+    Ok(seconds)
+}
+
+fn invalid_tune_budget(shown: &str) -> String {
+    format!("invalid tuning budget '{shown}', give between 0 and {MAX_TUNE_BUDGET_SECONDS} seconds")
+}
+
+fn is_valid_tune_budget(seconds: f64) -> bool {
+    seconds.is_finite() && (0.0..=MAX_TUNE_BUDGET_SECONDS).contains(&seconds)
+}
+
+fn check_tune_budget(seconds: f64) -> Result<(), anyhow::Error> {
+    if !is_valid_tune_budget(seconds) {
+        let shown = seconds.to_string();
+        let message = invalid_tune_budget(&shown);
+        anyhow::bail!(message);
+    }
+
+    Ok(())
+}
+
+impl CommonArgs {
+    /// The tuning mode, with `AV_DENOISE_TUNE` applied.
+    pub fn tuning_mode(&self) -> TuningMode {
+        self.tune.with_env_override()
+    }
+
+    /// The tuning budget, rejecting one that is negative, non-finite or over a day.
+    pub fn checked_tune_budget(&self) -> Result<Option<f64>, anyhow::Error> {
+        if let Some(seconds) = self.tune_budget {
+            check_tune_budget(seconds)?;
+        }
+
+        Ok(self.tune_budget)
+    }
 }
 
 /// Reads a size string such as `8GB` into a byte count.

@@ -66,8 +66,6 @@ impl PlanarDenoiser {
 
         self.check_window(window)?;
 
-        self.luma_passthrough.clear();
-        self.chroma_passthrough.clear();
         self.reset_streams();
 
         // Prime the first `2 * radius` frames, filling the underlying
@@ -142,8 +140,6 @@ impl PlanarDenoiser {
 
         self.check_window(frames)?;
 
-        self.luma_passthrough.clear();
-        self.chroma_passthrough.clear();
         self.reset_streams();
 
         let real_frames = if window.at_clip_start {
@@ -198,12 +194,15 @@ impl PlanarDenoiser {
         Ok(())
     }
 
-    /// Abandons the running stream on every enabled half.
-    fn reset_streams(&mut self) {
+    /// Abandons the running stream on every enabled half and empties the passthrough queues.
+    pub(crate) fn reset_streams(&mut self) {
         let halves = [self.yuv.as_mut(), self.luma.as_mut(), self.chroma.as_mut()];
         for denoiser in halves.into_iter().flatten() {
             denoiser.reset_stream();
         }
+
+        self.luma_passthrough.clear();
+        self.chroma_passthrough.clear();
     }
 
     /// Resets the passthrough queues to the source planes of the frames

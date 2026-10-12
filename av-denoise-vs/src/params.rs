@@ -19,6 +19,7 @@ use av_denoise::{
     Preset,
     PsyParams,
     Subsampling,
+    TuningMode,
     nl4d_spatial_radius_for,
     nl4d_temporal_radius_for,
     nlmeans_search_radius_for,
@@ -152,6 +153,8 @@ pub struct RawParams {
     pub psy_flat_texture_cut: Option<f64>,
     pub psy_line_ring: Option<i64>,
     pub pooled_threshold: Option<bool>,
+    pub tune: Option<String>,
+    pub deterministic: Option<bool>,
 }
 
 fn nonnegative(value: i64, field: &str) -> Result<u32, anyhow::Error> {
@@ -475,6 +478,14 @@ pub fn plane_options_from(
         },
     };
 
+    let tuning = match raw.tune.as_deref() {
+        None => TuningMode::Auto,
+        Some(text) => text
+            .parse::<TuningMode>()
+            .map_err(|error| anyhow::anyhow!("invalid tune: {error}"))?,
+    };
+    let deterministic = raw.deterministic.unwrap_or(false);
+
     Ok(PlaneOptions {
         accelerators,
         device,
@@ -485,5 +496,7 @@ pub fn plane_options_from(
         chroma_strength: raw.chroma_strength.map(|value| value as f32),
         luma_lambda_ht: raw.luma_lambda_ht.map(|value| value as f32),
         chroma_lambda_ht: raw.chroma_lambda_ht.map(|value| value as f32),
+        tuning,
+        deterministic,
     })
 }

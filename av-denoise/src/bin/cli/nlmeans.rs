@@ -368,12 +368,15 @@ impl NlmeansArgs {
             // `nlmeans` has no grouping stage for a threshold to apply to.
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
+            tuning: self.common.tuning_mode(),
+            deterministic: self.common.deterministic,
         };
 
         Ok(RunOptions {
             planes,
             progress: globals.progress,
             grain_table: None,
+            tune_budget: self.common.checked_tune_budget()?,
         })
     }
 }

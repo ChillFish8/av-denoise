@@ -10,7 +10,7 @@ mod y4m_format;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use self::cli::{Args, Command, InputSource, RunOptions, run_list_devices};
+use self::cli::{Args, Command, InputSource, RunOptions, run_list_devices, run_tune};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -82,6 +82,10 @@ fn main() -> anyhow::Result<()> {
         },
     }
 
+    if let Command::Tune(tune) = &args.command {
+        return run_tune(tune, &args);
+    }
+
     let (opts, input, workers, frame_budget) = match &args.command {
         Command::Nlmeans(nlm) => (
             nlm.build_options(&args)?,
@@ -97,6 +101,8 @@ fn main() -> anyhow::Result<()> {
         ),
         // Handled above, before any denoising options are built.
         Command::ListDevices => unreachable!(),
+        // Handled above, before any denoising options are built.
+        Command::Tune(_) => unreachable!(),
     };
 
     run_input(&opts, input, workers, frame_budget)

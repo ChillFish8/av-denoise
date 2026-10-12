@@ -5,6 +5,7 @@ mod grain_table;
 mod scenes;
 mod source;
 mod stage;
+mod tune;
 mod worker;
 
 #[cfg(test)]
@@ -22,9 +23,22 @@ use self::grain_table::TablePath;
 use self::scenes::{Decided, SceneSplitter};
 use self::source::{OpenedSource, SourceInfo};
 use self::stage::{SceneJob, Stager, checked_frame_permits, frame_permit_channel};
+pub use self::tune::{budget_request, tune_input};
 use self::worker::{WorkerJoin, spawn_workers};
 use crate::cli::{InputSource, RunOptions};
 use crate::progress::denoise_bar_visible;
+
+/// How a pipeline run uses the machine and what it writes beside the video.
+pub struct RunSettings {
+    pub workers: usize,
+    pub frame_budget_bytes: u64,
+    /// Whether to draw the denoising progress bar.
+    pub visible: bool,
+    /// Where to write the AV1 film grain table, when one was asked for.
+    pub grain_table: Option<PathBuf>,
+    /// Seconds tuning may take, when the user set a budget.
+    pub tune_budget: Option<f64>,
+}
 
 /// Denoises `input` scene by scene, writing y4m on stdout.
 pub fn run(
@@ -39,35 +53,40 @@ pub fn run(
     let opener = move || source::open_source(&owned_input);
     let output = stdout();
     let grain_table = opts.grain_table.clone();
-
-    run_with(
-        &opts.planes,
-        opener,
+    let settings = RunSettings {
         workers,
         frame_budget_bytes,
         visible,
-        output,
         grain_table,
-    )
+        tune_budget: opts.tune_budget,
+    };
+
+    run_with(&opts.planes, opener, settings, output)
 }
 
 /// Denoises the source `opener` returns scene by scene, writing y4m into `output`.
 ///
-/// Blocks until every thread in the pipeline has finished. The grain table is written to
-/// `grain_table` only when every stage succeeds.
+/// Blocks until every thread in the pipeline has finished. The grain table is written only when
+/// every stage succeeds. When the options ask for `auto` tuning and nothing is stored for this
+/// configuration, the first frames are tuned on before the workers start, then denoised as usual.
 pub fn run_with<W, F>(
     planes: &PlaneOptions,
     opener: F,
-    workers: usize,
-    frame_budget_bytes: u64,
-    visible: bool,
+    settings: RunSettings,
     output: W,
-    grain_table: Option<PathBuf>,
 ) -> Result<(), anyhow::Error>
 where
     W: std::io::Write + Send + 'static,
     F: FnOnce() -> Result<OpenedSource, anyhow::Error> + Send + 'static,
 {
+    let RunSettings {
+        workers,
+        frame_budget_bytes,
+        visible,
+        grain_table,
+        tune_budget,
+    } = settings;
+
     if workers == 0 {
         anyhow::bail!("--workers must be at least 1");
     }
@@ -102,15 +121,18 @@ where
         "frame buffer budget",
     );
 
+    let frames = decode_thread.start(take);
+    let prefix = tune::tune_before_workers(planes, &info, &frames, permits, tune_budget);
+
     let (staged_tx, staged_rx) = crossbeam_channel::bounded::<u64>(1);
     let (job_tx, worker_handles, output_rx) = spawn_workers(planes, layout, workers);
     let coordinator_info = info.clone();
     let coordinator = spawn_coordinator(coordinator_info, output_rx, staged_rx, visible, give, output);
-    let frames = decode_thread.start(take);
 
+    let feed = prefix.into_iter().chain(frames.iter());
     let dispatched = match layout.depth {
-        Depth::Eight => dispatch::<u8>(&frames, &info, &job_tx),
-        Depth::Ten | Depth::Twelve => dispatch::<u16>(&frames, &info, &job_tx),
+        Depth::Eight => dispatch::<u8>(feed, &info, &job_tx),
+        Depth::Ten | Depth::Twelve => dispatch::<u16>(feed, &info, &job_tx),
     };
 
     // Closing the queue tells the workers there are no more scenes, and dropping the frame
@@ -159,14 +181,14 @@ where
 ///
 /// Returns how many frames were staged.
 pub fn dispatch<T: SourcePixel>(
-    frames: &crossbeam_channel::Receiver<FrameMsg>,
+    frames: impl Iterator<Item = FrameMsg>,
     info: &SourceInfo,
     jobs: &crossbeam_channel::Sender<SceneJob>,
 ) -> Result<u64, anyhow::Error> {
     let mut splitter = SceneSplitter::<T>::new(&info.details);
     let mut stager = Stager::new(jobs);
 
-    for message in frames.iter() {
+    for message in frames {
         let decoded = message?;
         let frame = T::from_decoded(decoded)
             .ok_or_else(|| anyhow::anyhow!("the decoder changed sample width mid-stream"))?;

@@ -17,6 +17,8 @@ fn luma_chroma_options() -> PlaneOptions {
         chroma_strength: None,
         luma_lambda_ht: None,
         chroma_lambda_ht: None,
+        tuning: TuningMode::Off,
+        deterministic: false,
     }
 }
 

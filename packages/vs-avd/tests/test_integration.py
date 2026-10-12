@@ -110,3 +110,44 @@ def test_an_unknown_channel_mode_is_rejected():
     src = synthetic_clip()
     with pytest.raises(Exception):
         Nl4d(src, channel_mode="ludicrous").get_frame(0)
+
+
+_TUNE_SCRIPT = """
+import vapoursynth as vs
+from vsavd import Nl4d
+
+core = vs.core
+clip = core.std.BlankClip(width=256, height=144, length=10000000, format=vs.YUV420P8, color=[90, 120, 130])
+out = Nl4d(clip, tune="auto")
+for n in (0, 5, 15):
+    frame = out.get_frame(n)
+    assert frame.width == 256 and frame.height == 144
+print("rendered")
+"""
+
+
+@pytest.mark.gpu
+def test_auto_tuning_runs_in_the_first_frame_request(tmp_path):
+    """Runs in a subprocess with its own kernel cache, because tuning is off for this process.
+
+    The clip claims ten million frames so the tuning budget clears its floor. Only three are rendered.
+    """
+    import os
+    import subprocess
+    import sys
+
+    env = {key: value for key, value in os.environ.items() if key != "AV_DENOISE_TUNE"}
+    env["AV_DENOISE_COMPILATION_CACHE"] = str(tmp_path)
+
+    result = subprocess.run(
+        [sys.executable, "-c", _TUNE_SCRIPT],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "rendered" in result.stdout
+    stored = list(tmp_path.glob("**/tune/*.json"))
+    assert stored, f"no tuning result was stored under {tmp_path}: {result.stderr}"

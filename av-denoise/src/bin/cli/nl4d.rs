@@ -353,12 +353,15 @@ impl Nl4dArgs {
             chroma_strength: None,
             luma_lambda_ht: self.luma_lambda_ht,
             chroma_lambda_ht: self.chroma_lambda_ht,
+            tuning: self.common.tuning_mode(),
+            deterministic: self.common.deterministic,
         };
 
         Ok(RunOptions {
             planes,
             progress: globals.progress,
             grain_table: self.unstable_export_av1_fgs.clone(),
+            tune_budget: self.common.checked_tune_budget()?,
         })
     }
 

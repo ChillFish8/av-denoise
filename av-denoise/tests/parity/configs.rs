@@ -11,6 +11,7 @@ use av_denoise::{
     NlmeansOptions,
     PlaneOptions,
     Subsampling,
+    TuningMode,
 };
 
 pub struct ParityConfig {
@@ -44,6 +45,8 @@ fn options(intent: ChannelIntent, mode: DenoisingMode, algorithm: Algorithm) -> 
         chroma_strength: None,
         luma_lambda_ht: None,
         chroma_lambda_ht: None,
+        tuning: TuningMode::Off,
+        deterministic: false,
     }
 }
 

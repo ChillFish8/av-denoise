@@ -4,7 +4,9 @@ mod reseed;
 mod tests;
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
+use av_denoise_core::tune::TuneLedger;
 use av_denoise_core::{
     ChannelMode,
     DenoisingMode,
@@ -20,6 +22,7 @@ pub use self::reseed::ReseedWindow;
 use crate::backend::Device;
 use crate::backend::accelerate::Accelerator;
 use crate::host::{Algorithm, DenoiserError, DenoiserOptions, Depth, HostDenoiser};
+use crate::tune::{KernelSetup, TuneReport, TuneRequest, TuningMode, profile_key, tune_planar};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Subsampling {
@@ -178,6 +181,12 @@ pub struct PlaneOptions {
     /// It wins over `algorithm`'s value, which itself falls back to a calibrated per-plane default
     /// when neither is set.
     pub chroma_lambda_ht: Option<f32>,
+    /// Whether the planes run tuned kernels.
+    ///
+    /// With [TuningMode::Auto], [PlanarDenoiser::tune] can also tune them in place.
+    pub tuning: TuningMode,
+    /// Picks only bit-identical candidates and the baseline profile.
+    pub deterministic: bool,
 }
 
 impl PlaneOptions {
@@ -226,7 +235,7 @@ impl PlaneOptions {
     /// The options for one plane's denoiser at the source's wire `depth`.
     ///
     /// Every denoiser quantises to `depth` on the GPU.
-    fn denoiser_options(&self, channels: ChannelMode, depth: Depth) -> DenoiserOptions {
+    pub(crate) fn denoiser_options(&self, channels: ChannelMode, depth: Depth) -> DenoiserOptions {
         let algorithm = self.algorithm_for(channels);
 
         DenoiserOptions::builder()
@@ -234,6 +243,8 @@ impl PlaneOptions {
             .mode(self.mode)
             .algorithm(algorithm)
             .depth(depth)
+            .tuning(self.tuning)
+            .deterministic(self.deterministic)
             .build()
     }
 }
@@ -251,6 +262,28 @@ fn with_plane_strength(nlm: NlmeansOptions, strength: Option<f32>) -> NlmeansOpt
             NlmeansOptions { tuning, ..nlm }
         },
     }
+}
+
+/// The profile key of every plane `options` denoises at `layout`.
+pub(crate) fn plane_profile_keys(options: &PlaneOptions, layout: FrameLayout) -> Vec<String> {
+    let (chroma_width, chroma_height) = layout.chroma_dims();
+    let planes = match options.intent {
+        ChannelIntent::Luma => vec![(ChannelMode::Luma, layout.width, layout.height)],
+        ChannelIntent::Chroma => vec![(ChannelMode::Chroma, chroma_width, chroma_height)],
+        ChannelIntent::LumaChroma => vec![
+            (ChannelMode::Luma, layout.width, layout.height),
+            (ChannelMode::Chroma, chroma_width, chroma_height),
+        ],
+        ChannelIntent::YuvFused => vec![(ChannelMode::Yuv, layout.width, layout.height)],
+    };
+
+    planes
+        .into_iter()
+        .map(|(channels, width, height)| {
+            let plane_options = options.denoiser_options(channels, layout.depth);
+            profile_key(&plane_options, width, height)
+        })
+        .collect()
 }
 
 /// Reads the result of a [PlanarDenoiser::push] for the push, drain and retry loop.
@@ -306,10 +339,29 @@ pub struct PlanarDenoiser {
     luma_passthrough: VecDeque<Vec<u8>>,
     chroma_passthrough: VecDeque<(Vec<u8>, Vec<u8>)>,
     temporal_radius: u32,
+    options: PlaneOptions,
+    /// The shared tuning ledger from the setup this denoiser was created with, if it had one.
+    ledger: Option<Arc<TuneLedger>>,
 }
 
 impl PlanarDenoiser {
     pub fn create(options: &PlaneOptions, layout: FrameLayout) -> Result<Self, anyhow::Error> {
+        let auto = options.tuning == TuningMode::Auto;
+        let ledger = auto.then(|| TuneLedger::new(options.deterministic));
+        let setup = KernelSetup {
+            ledger,
+            profile_override: None,
+        };
+
+        Self::create_with(options, layout, setup)
+    }
+
+    /// [Self::create] with every engine's tuning wired as `setup` says.
+    pub(crate) fn create_with(
+        options: &PlaneOptions,
+        layout: FrameLayout,
+        setup: KernelSetup,
+    ) -> Result<Self, anyhow::Error> {
         let (chroma_width, chroma_height) = layout.chroma_dims();
 
         if chroma_width == 0 || chroma_height == 0 {
@@ -333,12 +385,13 @@ impl PlanarDenoiser {
         let luma = denoise_luma
             .then(|| {
                 let luma_options = options.denoiser_options(ChannelMode::Luma, layout.depth);
-                HostDenoiser::create(
+                HostDenoiser::create_with(
                     &options.accelerators,
                     &options.device,
                     layout.width,
                     layout.height,
                     luma_options,
+                    &setup,
                 )
             })
             .transpose()?;
@@ -346,12 +399,13 @@ impl PlanarDenoiser {
         let chroma = denoise_chroma
             .then(|| {
                 let chroma_options = options.denoiser_options(ChannelMode::Chroma, layout.depth);
-                HostDenoiser::create(
+                HostDenoiser::create_with(
                     &options.accelerators,
                     &options.device,
                     chroma_width,
                     chroma_height,
                     chroma_options,
+                    &setup,
                 )
             })
             .transpose()?;
@@ -359,12 +413,13 @@ impl PlanarDenoiser {
         let yuv = denoise_yuv
             .then(|| {
                 let yuv_options = options.denoiser_options(ChannelMode::Yuv, layout.depth);
-                HostDenoiser::create(
+                HostDenoiser::create_with(
                     &options.accelerators,
                     &options.device,
                     layout.width,
                     layout.height,
                     yuv_options,
+                    &setup,
                 )
             })
             .transpose()?;
@@ -382,7 +437,35 @@ impl PlanarDenoiser {
             luma_passthrough: VecDeque::new(),
             chroma_passthrough: VecDeque::new(),
             temporal_radius,
+            options: options.clone(),
+            ledger: setup.ledger,
         })
+    }
+
+    pub(crate) fn ledger(&self) -> Option<&Arc<TuneLedger>> {
+        self.ledger.as_ref()
+    }
+
+    pub(crate) fn options(&self) -> &PlaneOptions {
+        &self.options
+    }
+
+    pub(crate) fn layout(&self) -> FrameLayout {
+        self.layout
+    }
+
+    /// The host denoisers this denoiser runs, in luma, chroma, yuv order.
+    pub(crate) fn hosts(&self) -> Vec<&HostDenoiser> {
+        let halves = [self.luma.as_ref(), self.chroma.as_ref(), self.yuv.as_ref()];
+        halves.into_iter().flatten().collect()
+    }
+
+    /// Tunes this denoiser's launch sites in place on `frames`, and saves the result.
+    ///
+    /// Only a denoiser built with [TuningMode::Auto] tunes. The frames are looped as often as tuning
+    /// needs, no output from them is returned, and the stream is reset afterwards.
+    pub fn tune(&mut self, frames: &[Planes], request: &TuneRequest) -> TuneReport {
+        tune_planar(self, frames, request)
     }
 
     /// The temporal radius the underlying denoisers run at.

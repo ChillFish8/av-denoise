@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from . import _plugin
-from ._types import Accelerators, ChannelMode, Preset
+from ._types import Accelerators, ChannelMode, Preset, Tune
 
 if TYPE_CHECKING:
     # vapoursynth ships a vapoursynth.pyi stub but no py.typed marker, so mypy
@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     # covers both that and the case where the package is absent entirely.
     import vapoursynth as vs
 
-__all__ = ["Nlm", "NlmHQ", "Nl4d", "Preset", "ChannelMode"]
+__all__ = ["Nlm", "NlmHQ", "Nl4d", "Preset", "ChannelMode", "Tune"]
 
 
 def _nlmeans_filter() -> "vs.Function":
@@ -48,6 +48,8 @@ def Nlm(
     chroma_strength: float | None = None,
     motion_compensation: bool | None = None,
     accelerators: list[Accelerators] | None = None,
+    tune: Tune | None = None,
+    deterministic: bool | None = None,
     **kwargs: Any,
 ) -> "vs.VideoNode":
     """
@@ -68,6 +70,10 @@ def Nlm(
         chroma_strength: Strength override for the chroma planes. Mirrors FFmpeg's scaling.
         motion_compensation: Whether to motion-compensate neighbour frames before matching.
         accelerators: The accelerators to try and use in the order to attempt.
+        tune: Whether to tune kernels for this device. `"auto"` tunes inside the first frame request
+            when nothing is stored, `"cached"` uses stored results only and `"off"` runs the untuned
+            kernels. `AV_DENOISE_TUNE` overrides it.
+        deterministic: Runs only kernels whose output is bit identical to the untuned ones.
         **kwargs: Further parameters reachable by name. Not recommended
 
     Returns:
@@ -94,6 +100,8 @@ def Nlm(
         chroma_strength=chroma_strength,
         motion_compensation=motion_compensation,
         accelerators=accelerators_string,
+        tune=tune,
+        deterministic=deterministic,
         **kwargs,
     )
 
@@ -110,6 +118,8 @@ def NlmHQ(
     chroma_strength: float | None = None,
     motion_compensation: bool | None = None,
     accelerators: list[Accelerators] | None = None,
+    tune: Tune | None = None,
+    deterministic: bool | None = None,
     **kwargs: Any,
 ) -> "vs.VideoNode":
     """
@@ -135,6 +145,10 @@ def NlmHQ(
         chroma_strength: Strength override for the chroma planes.
         motion_compensation: Whether to motion-compensate neighbour frames before matching.
         accelerators: The accelerators to try and use in the order to attempt.
+        tune: Whether to tune kernels for this device. `"auto"` tunes inside the first frame request
+            when nothing is stored, `"cached"` uses stored results only and `"off"` runs the untuned
+            kernels. `AV_DENOISE_TUNE` overrides it.
+        deterministic: Runs only kernels whose output is bit identical to the untuned ones.
         **kwargs: Further parameters reachable by name, documented in the
             `av-denoise` CLI documentation under their flag names.
 
@@ -163,6 +177,8 @@ def NlmHQ(
         chroma_strength=chroma_strength,
         motion_compensation=motion_compensation,
         accelerators=accelerators_string,
+        tune=tune,
+        deterministic=deterministic,
         **kwargs,
     )
 
@@ -187,6 +203,8 @@ def Nl4d(
     psy_line_ring: int | None = None,
     pooled_threshold: bool | None = None,
     accelerators: list[Accelerators] | None = None,
+    tune: Tune | None = None,
+    deterministic: bool | None = None,
     **kwargs: Any,
 ) -> "vs.VideoNode":
     """
@@ -235,6 +253,10 @@ def Nl4d(
         pooled_threshold: Whether to judge each frequency together with its neighbours, which
             keeps faint texture. On by default, `False` turns it off.
         accelerators: The accelerators to try and use in the order to attempt.
+        tune: Whether to tune kernels for this device. `"auto"` tunes inside the first frame request
+            when nothing is stored, `"cached"` uses stored results only and `"off"` runs the untuned
+            kernels. `AV_DENOISE_TUNE` overrides it.
+        deterministic: Runs only kernels whose output is bit identical to the untuned ones.
         **kwargs: Further parameters reachable by name, documented in the
             `av-denoise` CLI documentation under their flag names.
 
@@ -270,5 +292,7 @@ def Nl4d(
         psy_line_ring=psy_line_ring,
         pooled_threshold=pooled_threshold,
         accelerators=accelerators_string,
+        tune=tune,
+        deterministic=deterministic,
         **kwargs,
     )

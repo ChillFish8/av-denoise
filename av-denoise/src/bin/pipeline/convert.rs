@@ -7,6 +7,7 @@ use v_frame::pixel::Pixel;
 use v_frame::plane::Plane;
 
 /// A decoded frame at whichever sample width the source uses.
+#[derive(Clone)]
 pub enum DecodedFrame {
     Eight(Arc<Frame<u8>>),
     Wide(Arc<Frame<u16>>),
@@ -71,6 +72,14 @@ pub fn check_plane_lens(planes: &Planes, layout: FrameLayout) -> Result<(), anyh
     }
 
     Ok(())
+}
+
+/// Copies a decoded frame into planar wire bytes.
+pub fn decoded_planes(decoded: &DecodedFrame, layout: FrameLayout) -> Result<Planes, anyhow::Error> {
+    match decoded {
+        DecodedFrame::Eight(frame) => planes_from_v_frame_u8(frame, layout),
+        DecodedFrame::Wide(frame) => planes_from_v_frame_u16(frame, layout),
+    }
 }
 
 pub fn planes_from_v_frame_u8(frame: &Frame<u8>, layout: FrameLayout) -> Result<Planes, anyhow::Error> {

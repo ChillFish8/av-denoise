@@ -2,10 +2,10 @@
 
 use std::io::{Cursor, Read};
 
-use super::{SCENE_CLIP_SIZE, SharedBuffer, multi_scene_clip, temporal_opts};
-use crate::pipeline::run_with;
+use super::{SCENE_CLIP_SIZE, SharedBuffer, frame_count, multi_scene_clip, temporal_opts};
 use crate::pipeline::source::open_y4m;
 use crate::pipeline::stage::frame_permits;
+use crate::pipeline::{RunSettings, run_with};
 
 fn run_over(bytes: Vec<u8>, workers: usize, budget: u64) -> Result<Vec<u8>, anyhow::Error> {
     let output = SharedBuffer::default();
@@ -16,8 +16,15 @@ fn run_over(bytes: Vec<u8>, workers: usize, budget: u64) -> Result<Vec<u8>, anyh
         let reader: Box<dyn Read> = Box::new(cursor);
         open_y4m(reader)
     };
+    let settings = RunSettings {
+        workers,
+        frame_budget_bytes: budget,
+        visible: false,
+        grain_table: None,
+        tune_budget: None,
+    };
 
-    run_with(&options, opener, workers, budget, false, writer, None)?;
+    run_with(&options, opener, settings, writer)?;
 
     let written = output.0.lock().expect("buffer lock").clone();
 
@@ -34,17 +41,6 @@ impl std::io::Write for ClosedPipe {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
-}
-
-fn frame_count(y4m_bytes: &[u8]) -> usize {
-    let mut decoder = y4m::Decoder::new(y4m_bytes).expect("the output is y4m");
-    let mut count = 0;
-
-    while decoder.read_frame().is_ok() {
-        count += 1;
-    }
-
-    count
 }
 
 #[test]
@@ -97,8 +93,15 @@ fn a_failed_write_is_reported_over_the_worker_disconnect() {
         let reader: Box<dyn Read> = Box::new(cursor);
         open_y4m(reader)
     };
+    let settings = RunSettings {
+        workers: 2,
+        frame_budget_bytes: 1 << 30,
+        visible: false,
+        grain_table: None,
+        tune_budget: None,
+    };
 
-    let err = run_with(&options, opener, 2, 1 << 30, false, ClosedPipe, None).expect_err("the write fails");
+    let err = run_with(&options, opener, settings, ClosedPipe).expect_err("the write fails");
 
     assert!(err.to_string().contains("broken pipe"), "got {err}");
 }

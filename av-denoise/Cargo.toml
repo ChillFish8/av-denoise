@@ -35,10 +35,17 @@ anyhow.workspace = true
 bon.workspace = true
 cubecl.workspace = true
 etcetera = "0.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror.workspace = true
 tracing.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
+
+# Adapter and driver names for the tuning store's device identity.
+wgpu = { version = "29", optional = true }
+cudarc = { version = "0.19", optional = true, default-features = false, features = ["std", "driver"] }
+cubecl-hip-sys = { version = "7.1.5280200", optional = true }
 
 # Frame ingestion via ffms2
 av-scenechange = { version = "0.23", optional = true, features = ["ffms2"] }
@@ -69,10 +76,10 @@ wgpu = "29"
 pkg-config = { version = "0.3.34", optional = true }
 
 [features]
-vulkan = ["av-denoise-core/vulkan", "cubecl/vulkan"]
-metal = ["av-denoise-core/metal", "cubecl/metal"]
-cuda = ["av-denoise-core/cuda", "cubecl/cuda"]
-rocm = ["av-denoise-core/rocm", "cubecl/hip"]
+vulkan = ["av-denoise-core/vulkan", "cubecl/vulkan", "dep:wgpu"]
+metal = ["av-denoise-core/metal", "cubecl/metal", "dep:wgpu"]
+cuda = ["av-denoise-core/cuda", "cubecl/cuda", "dep:cudarc"]
+rocm = ["av-denoise-core/rocm", "cubecl/hip", "dep:cubecl-hip-sys"]
 binary = [
     "bytesize",
     "clap",
