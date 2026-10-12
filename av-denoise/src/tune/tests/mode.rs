@@ -81,3 +81,10 @@ fn profile_keys_bucket_the_plane_size_and_ignore_tuning_switches() {
     assert_eq!(full_hd, switched);
     assert!(full_hd.ends_with("|w2048|h2048"), "{full_hd}");
 }
+
+#[test]
+fn auto_runs_as_cached_after_tuning() {
+    assert_eq!(TuningMode::Auto.after_tuning(), TuningMode::Cached);
+    assert_eq!(TuningMode::Cached.after_tuning(), TuningMode::Cached);
+    assert_eq!(TuningMode::Off.after_tuning(), TuningMode::Off);
+}

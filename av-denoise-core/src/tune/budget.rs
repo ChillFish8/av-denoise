@@ -154,6 +154,11 @@ impl WarmUpTracker {
         WarmUpState::Warming
     }
 
+    /// The median of the frames in the current window, zero before the first frame.
+    pub fn recent_median(&self) -> Duration {
+        median(&self.recent)
+    }
+
     fn is_steady(&self) -> bool {
         let fastest = self.recent.iter().min().copied().unwrap_or_default();
         let slowest = self.recent.iter().max().copied().unwrap_or_default();

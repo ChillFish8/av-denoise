@@ -59,6 +59,17 @@ impl TuningMode {
         let env = std::env::var(TUNE_ENV).ok();
         resolve_mode(self, env.as_deref())
     }
+
+    /// The mode a denoiser runs with once tuning is done.
+    ///
+    /// [TuningMode::Auto] becomes [TuningMode::Cached], so the denoiser builds from stored results
+    /// and carries no tuning ledger.
+    pub fn after_tuning(self) -> Self {
+        match self {
+            TuningMode::Auto => TuningMode::Cached,
+            other => other,
+        }
+    }
 }
 
 /// `flag`, unless `env` names a valid mode. An invalid `env` is logged and ignored.

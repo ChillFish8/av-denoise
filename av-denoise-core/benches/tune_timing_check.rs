@@ -231,9 +231,11 @@ fn rank_with_wall_clock<R: Runtime, S: VariantSite<R>>(
 
             sync(client).expect("sync failed");
             let started = Instant::now();
+
             for _ in 0..launches {
                 site.launch(candidate, outputs);
             }
+
             sync(client).expect("sync failed");
 
             let elapsed = started.elapsed();
@@ -261,9 +263,11 @@ fn calibrate_batch_launches<R: Runtime, S: VariantSite<R>>(
     for _ in 0..PROBE_RUNS {
         sync(client).expect("sync failed");
         let started = Instant::now();
+
         for _ in 0..PROBE_LAUNCHES {
             site.launch(candidate, outputs);
         }
+
         sync(client).expect("sync failed");
 
         probes.push(started.elapsed());

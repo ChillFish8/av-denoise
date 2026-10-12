@@ -34,6 +34,16 @@ pub fn run_budget(tune_budget: Option<f64>, info: &SourceInfo) -> BudgetRequest 
     budget_request(tune_budget, automatic)
 }
 
+/// The options workers build with, which never tune because tuning runs before they start.
+pub fn worker_options(planes: &PlaneOptions) -> PlaneOptions {
+    let tuning = planes.tuning.after_tuning();
+
+    PlaneOptions {
+        tuning,
+        ..planes.clone()
+    }
+}
+
 /// Takes up to `wanted` frames off `frames`, stopping early at the end of the input or at an error.
 ///
 /// An error is kept in place, so it reaches the dispatcher in order like any other frame.

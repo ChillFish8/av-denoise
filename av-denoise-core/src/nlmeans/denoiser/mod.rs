@@ -432,11 +432,6 @@ impl<R: Runtime> NlmDenoiser<R> {
         &self.placeholder
     }
 
-    #[expect(dead_code, reason = "no caller reads the selector back yet")]
-    pub(crate) fn kernels(&self) -> &KernelSelector<R> {
-        &self.kernels
-    }
-
     /// Ingests `planes` into the next ring slot and runs every per-frame stage on it.
     pub(crate) fn push_planes(
         &mut self,

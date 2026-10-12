@@ -204,7 +204,8 @@ pub(crate) fn tune_planar(
     let identity = hosts[0].device_profile().identity.clone();
     let profile_keys: Vec<String> = hosts.iter().map(|host| host.profile_key().to_string()).collect();
     let stored = reload(&identity);
-    let stored_plan = stored.kernel_plan(ledger.deterministic());
+    let deterministic = ledger.deterministic();
+    let stored_plan = stored.kernel_plan(deterministic);
     ledger.seed(&stored_plan);
 
     if matches!(lock, TuneLockOutcome::TimedOut) {
@@ -252,9 +253,9 @@ fn discard_grain_chunks(planar: &mut PlanarDenoiser) {
 
 fn run_pass(planar: &mut PlanarDenoiser, inputs: &PassInputs<'_>) -> Result<PassSummary, anyhow::Error> {
     let mut cycle = FrameCycle::new(inputs.frames);
-    let warmed = warm_up(planar, &mut cycle, inputs.request.budget)?;
+    let warmed = warm_up(planar, &mut cycle, inputs)?;
     let Some(reading) = warmed else {
-        anyhow::bail!("the clip is too short to earn back tuning");
+        anyhow::bail!("the clip is too short or the budget too small to earn back tuning");
     };
 
     let frame_time = reading.frame_time;
@@ -336,12 +337,14 @@ fn prime(planar: &mut PlanarDenoiser, cycle: &mut FrameCycle<'_>) -> Result<Dura
 /// Runs frames until per-frame time holds steady, and returns its median with the priming time.
 ///
 /// Returns `None` once a reading shows the clip is too short to earn back tuning. Frame time only
-/// falls as clocks rise, so a clip that is too short at the current time stays too short.
+/// falls as clocks rise, so a clip that is too short at the current time stays too short. Also
+/// returns `None` once the budget no longer covers the time spent plus one site.
 fn warm_up(
     planar: &mut PlanarDenoiser,
     cycle: &mut FrameCycle<'_>,
-    budget: BudgetRequest,
+    inputs: &PassInputs<'_>,
 ) -> Result<Option<WarmUpReading>, anyhow::Error> {
+    let budget = inputs.request.budget;
     let priming = prime(planar, cycle)?;
 
     let started = Instant::now();
@@ -374,7 +377,28 @@ fn warm_up(
         if reading_ready && !affordable {
             return Ok(None);
         }
+
+        let recent_median = tracker.recent_median();
+        let spent = inputs.started.elapsed();
+        if warm_up_overruns(budget, recent_median, spent) {
+            tracing::info!("the tuning budget runs out during the warm-up");
+            return Ok(None);
+        }
     }
+}
+
+/// Whether the warm-up has spent so much of the budget that one site no longer fits after it.
+///
+/// An automatic budget is worked out from `frame_time`. A request that earns no budget at all is
+/// not an overrun here.
+pub(super) fn warm_up_overruns(request: BudgetRequest, frame_time: Duration, spent: Duration) -> bool {
+    let budget = tuning_budget(request, frame_time);
+    let Some(budget) = budget else {
+        return false;
+    };
+
+    let one_site = site_min_cost(TYPICAL_CANDIDATES);
+    !can_afford(&budget, spent, one_site)
 }
 
 /// Times every launch of one frame and returns each key's cost.

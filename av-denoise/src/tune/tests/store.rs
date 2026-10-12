@@ -188,11 +188,51 @@ fn unknown_candidate_names_drop_their_key() {
 
     let loaded = store.load(&device);
 
+    let profile_keys = ["luma".to_string()];
+
     assert!(
         loaded.sites.is_empty(),
         "the key naming an unknown candidate is tuned again"
     );
     assert_eq!(loaded.profiles.len(), 1);
+    assert!(!loaded.is_complete(&profile_keys), "the next run tunes again");
+}
+
+#[test]
+fn unknown_fidelity_names_drop_their_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TuneStore::at(dir.path());
+    let device = identity();
+    let result = sample_result();
+    let path = store.save(&device, &result).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let renamed = text.replace("\"fidelity\": \"exact\"", "\"fidelity\": \"mystery\"");
+    std::fs::write(&path, renamed).unwrap();
+
+    let loaded = store.load(&device);
+
+    let profile_keys = ["luma".to_string()];
+
+    assert!(
+        loaded.sites.is_empty(),
+        "the key naming an unknown fidelity is tuned again"
+    );
+    assert_eq!(loaded.profiles.len(), 1);
+    assert!(!loaded.is_complete(&profile_keys), "the next run tunes again");
+}
+
+#[test]
+fn a_store_with_only_known_keys_stays_complete() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TuneStore::at(dir.path());
+    let device = identity();
+    let result = sample_result();
+    store.save(&device, &result).unwrap();
+
+    let loaded = store.load(&device);
+
+    let profile_keys = ["luma".to_string()];
+    assert!(loaded.is_complete(&profile_keys));
 }
 
 #[test]

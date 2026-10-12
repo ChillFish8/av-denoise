@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 
 use av_denoise_core::DenoisingMode;
 use av_denoise_core::tune::BudgetRequest;
@@ -156,6 +157,44 @@ fn a_clip_too_short_to_earn_back_tuning_is_skipped() {
     assert!(matches!(report.outcome, TuneOutcome::Skipped(_)), "{report:?}");
     assert!(!report.saved);
     assert!(!is_tuned(&plane_options, frame_layout));
+}
+
+/// The first pass compiles the kernels, so the second pass is mostly warm-up.
+#[test]
+fn a_tiny_budget_ends_the_warm_up_early() {
+    let cache = tempfile::tempdir().unwrap();
+    install_cache(cache.path());
+    let algorithm = Algorithm::default();
+    let plane_options = options(algorithm, TuningMode::Auto);
+    let frame_layout = layout();
+    let clip = frames(12);
+    let budget_seconds = 0.5;
+    let request = TuneRequest {
+        budget: BudgetRequest::Seconds(budget_seconds),
+        force: false,
+    };
+
+    tune_planes(&plane_options, frame_layout, &clip, &request);
+    let report = tune_planes(&plane_options, frame_layout, &clip, &request);
+
+    let budget = Duration::from_secs_f64(budget_seconds);
+    let frame_allowance = Duration::from_secs(1);
+
+    assert!(matches!(report.outcome, TuneOutcome::Skipped(_)), "{report:?}");
+    assert!(!report.saved);
+    assert!(report.elapsed <= budget + frame_allowance, "{report:?}");
+}
+
+#[test]
+fn a_denoiser_built_after_tuning_carries_no_ledger() {
+    let algorithm = Algorithm::default();
+    let tuning = TuningMode::Auto.after_tuning();
+    let plane_options = options(algorithm, tuning);
+    let frame_layout = layout();
+
+    let planar = PlanarDenoiser::create(&plane_options, frame_layout).expect("the denoiser builds");
+
+    assert!(planar.ledger().is_none());
 }
 
 #[test]

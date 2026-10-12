@@ -10,7 +10,8 @@ pub(crate) fn assert_candidates_match_baseline<S: VariantSite<TestRuntime>>(
     site: &S,
     label: &str,
 ) -> S::Outputs {
-    let limits = DeviceLimits::from_client(site.client());
+    let client = site.client();
+    let limits = DeviceLimits::from_client(client);
     let fitted = fit_candidates(site, &limits).expect("the baseline fits the test device");
     let baseline = site.baseline();
     let baseline_outputs = site.scratch_outputs();

@@ -107,6 +107,7 @@ fn key(site: &'static str) -> SiteKey {
 
 #[test]
 fn the_plan_holds_each_sites_choice() {
+    let window_key = key("nlm_window");
     let mut result = TuneResult::default();
     let window_ranking = SiteRanking {
         candidates: vec![
@@ -114,15 +115,17 @@ fn the_plan_holds_each_sites_choice() {
             record("32x8", FidelityClass::Exact, true, 1000),
         ],
     };
-    result.sites.insert(key("nlm_window"), window_ranking);
+    result.sites.insert(window_key.clone(), window_ranking);
 
     let plan = result.kernel_plan(false);
 
-    assert_eq!(plan.get(&key("nlm_window")), Some("32x16"));
+    assert_eq!(plan.get(&window_key), Some("32x16"));
 }
 
 #[test]
 fn unknown_names_drop_their_key() {
+    let window_key = key("nlm_window");
+    let accumulate_key = key("nlm_accumulate");
     let mut result = TuneResult::default();
     let known = SiteRanking {
         candidates: vec![record("32x8", FidelityClass::Exact, true, 1000)],
@@ -133,71 +136,78 @@ fn unknown_names_drop_their_key() {
             record("64x64", FidelityClass::Exact, false, 900),
         ],
     };
-    result.sites.insert(key("nlm_window"), known);
-    result.sites.insert(key("nlm_accumulate"), unknown);
+    result.sites.insert(window_key.clone(), known);
+    result.sites.insert(accumulate_key.clone(), unknown);
 
     let dropped = result.retain_known_with(|site, name| site == "nlm_window" || name != "64x64");
 
     assert_eq!(dropped, 1);
-    assert!(result.sites.contains_key(&key("nlm_window")));
-    assert!(!result.sites.contains_key(&key("nlm_accumulate")));
+    assert!(result.sites.contains_key(&window_key));
+    assert!(!result.sites.contains_key(&accumulate_key));
 }
 
 #[test]
 fn a_newer_result_replaces_keys_it_holds_and_keeps_the_rest() {
+    let window_key = key("nlm_window");
+    let collab_key = key("collab_fused");
     let mut stored = TuneResult::default();
     let old_ranking = SiteRanking {
         candidates: vec![baseline_record(1000)],
     };
-    stored.sites.insert(key("nlm_window"), old_ranking.clone());
-    stored.sites.insert(key("collab_fused"), old_ranking);
+    stored.sites.insert(window_key.clone(), old_ranking.clone());
+    stored.sites.insert(collab_key.clone(), old_ranking);
 
     let mut newer = TuneResult::default();
     let new_ranking = SiteRanking {
         candidates: vec![baseline_record(500)],
     };
-    newer.sites.insert(key("nlm_window"), new_ranking.clone());
+    newer.sites.insert(window_key.clone(), new_ranking.clone());
 
     stored.merge(newer);
 
-    assert_eq!(stored.sites[&key("nlm_window")], new_ranking);
-    assert!(stored.sites.contains_key(&key("collab_fused")));
+    assert_eq!(stored.sites[&window_key], new_ranking);
+    assert!(stored.sites.contains_key(&collab_key));
 }
 
 #[test]
 fn a_failed_key_is_settled_without_a_ranking() {
+    let window_key = key("nlm_window");
+    let collab_key = key("collab_fused");
     let mut result = TuneResult::default();
-    result.failed.insert(key("nlm_window"));
+    result.failed.insert(window_key.clone());
 
     let plan = result.kernel_plan(false);
 
-    assert!(result.is_settled(&key("nlm_window")));
-    assert!(!result.is_settled(&key("collab_fused")));
+    assert!(result.is_settled(&window_key));
+    assert!(!result.is_settled(&collab_key));
     assert!(result.sites.is_empty());
-    assert_eq!(plan.get(&key("nlm_window")), None);
+    assert_eq!(plan.get(&window_key), None);
 }
 
 #[test]
 fn merging_keeps_the_newer_outcome_of_each_key() {
+    let window_key = key("nlm_window");
+    let accumulate_key = key("nlm_accumulate");
+    let collab_key = key("collab_fused");
     let ranking = SiteRanking {
         candidates: vec![baseline_record(1000)],
     };
     let mut stored = TuneResult::default();
-    stored.sites.insert(key("nlm_window"), ranking.clone());
-    stored.failed.insert(key("collab_fused"));
-    stored.failed.insert(key("nlm_accumulate"));
+    stored.sites.insert(window_key.clone(), ranking.clone());
+    stored.failed.insert(collab_key.clone());
+    stored.failed.insert(accumulate_key.clone());
 
     let mut newer = TuneResult::default();
-    newer.failed.insert(key("nlm_window"));
-    newer.sites.insert(key("collab_fused"), ranking);
+    newer.failed.insert(window_key.clone());
+    newer.sites.insert(collab_key.clone(), ranking);
 
     stored.merge(newer);
 
-    assert!(!stored.sites.contains_key(&key("nlm_window")));
-    assert!(stored.failed.contains(&key("nlm_window")));
-    assert!(stored.sites.contains_key(&key("collab_fused")));
-    assert!(!stored.failed.contains(&key("collab_fused")));
-    assert!(stored.failed.contains(&key("nlm_accumulate")));
+    assert!(!stored.sites.contains_key(&window_key));
+    assert!(stored.failed.contains(&window_key));
+    assert!(stored.sites.contains_key(&collab_key));
+    assert!(!stored.failed.contains(&collab_key));
+    assert!(stored.failed.contains(&accumulate_key));
 }
 
 fn profile_ranking(baseline_ns: u64, f32_ns: u64) -> ProfileRanking {

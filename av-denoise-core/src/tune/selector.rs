@@ -75,8 +75,15 @@ impl<R: Runtime> KernelSelector<R> {
     /// in place before its real launch.
     pub fn run<S: VariantSite<R>>(&self, site: &S) -> Result<(), anyhow::Error> {
         let fitted = fit_candidates(site, &self.limits)?;
-        let key = site.key();
         let outputs = site.real_outputs();
+
+        if self.ledger.is_none() && self.plan.is_empty() {
+            let baseline = S::Candidate::baseline();
+            site.launch(baseline, &outputs);
+            return Ok(());
+        }
+
+        let key = site.key();
 
         let Some(ledger) = self.ledger.as_ref() else {
             let named = self.plan.get(&key);
@@ -152,7 +159,7 @@ impl<R: Runtime> KernelSelector<R> {
 
         match outcome {
             Ok(Ok(ranking)) => {
-                tracing::info!(%key, candidates = ranking.candidates.len(), "tuned a launch site");
+                tracing::info!(%key, ranked = ranking.candidates.len(), "tuned a launch site");
                 guard.record_ranking(ranking);
             },
             Ok(Err(error)) => {

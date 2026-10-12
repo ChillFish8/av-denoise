@@ -120,8 +120,9 @@ impl TuneStore {
     /// Loads the result stored for `identity`.
     ///
     /// A missing file loads empty. An unreadable or corrupt file, or one of another format version
-    /// or device, is logged and loads empty. Keys naming a candidate this build does not have, and
-    /// profile keys naming a profile it does not have, are dropped so they are tuned again.
+    /// or device, is logged and loads empty. Keys naming a candidate, fidelity or profile this build
+    /// does not have are dropped, and every profile ranking is then marked incomplete so the next
+    /// run tunes them again.
     pub fn load(&self, identity: &DeviceIdentity) -> TuneResult {
         let path = self.path_for(identity);
         let read = std::fs::read_to_string(&path);
@@ -136,20 +137,22 @@ impl TuneStore {
         };
 
         let decoded = decode(&text, identity);
-        let mut result = match decoded {
-            Ok(result) => result,
+        let (mut result, undecoded) = match decoded {
+            Ok(decoded) => decoded,
             Err(error) => {
                 tracing::warn!(?path, %error, "ignoring an unusable tuning store, tuning again");
                 return TuneResult::default();
             },
         };
 
-        let dropped = result.retain_known();
+        let unknown = result.retain_known();
+        let dropped = undecoded + unknown;
         if dropped > 0 {
             tracing::info!(
                 dropped,
                 "the tuning store names candidates this build lacks, tuning them again"
             );
+            mark_incomplete(&mut result);
         }
 
         result
@@ -288,7 +291,15 @@ fn decode_profile(stored: StoredProfile) -> Option<ProfileRecord> {
     })
 }
 
-fn decode(text: &str, identity: &DeviceIdentity) -> Result<TuneResult, anyhow::Error> {
+/// Marks every profile ranking in `result` incomplete, so the next run tunes again.
+fn mark_incomplete(result: &mut TuneResult) {
+    for ranking in result.profiles.values_mut() {
+        ranking.complete = false;
+    }
+}
+
+/// The result stored in `text`, with how many keys it dropped because this build cannot read them.
+fn decode(text: &str, identity: &DeviceIdentity) -> Result<(TuneResult, usize), anyhow::Error> {
     let stored: StoredFile = serde_json::from_str(text)?;
 
     if stored.format_version != FORMAT_VERSION {
@@ -304,23 +315,29 @@ fn decode(text: &str, identity: &DeviceIdentity) -> Result<TuneResult, anyhow::E
     }
 
     let mut result = TuneResult::default();
+    let mut dropped = 0;
 
     for (key_text, candidates) in stored.sites {
         let Some(key) = SiteKey::from_stored(&key_text) else {
+            dropped += 1;
             continue;
         };
 
         let records: Option<Vec<CandidateRecord>> = candidates.into_iter().map(decode_candidate).collect();
-        if let Some(records) = records {
-            let ranking = SiteRanking { candidates: records };
-            result.sites.insert(key, ranking);
-        }
+        let Some(records) = records else {
+            dropped += 1;
+            continue;
+        };
+
+        let ranking = SiteRanking { candidates: records };
+        result.sites.insert(key, ranking);
     }
 
     for (profile_key, stored_profiles) in stored.profiles {
         let records: Option<Vec<ProfileRecord>> =
             stored_profiles.ranking.into_iter().map(decode_profile).collect();
         let Some(profiles) = records else {
+            dropped += 1;
             continue;
         };
 
@@ -331,13 +348,16 @@ fn decode(text: &str, identity: &DeviceIdentity) -> Result<TuneResult, anyhow::E
         result.profiles.insert(profile_key, ranking);
     }
 
-    let failed_keys = stored
-        .failed
-        .iter()
-        .filter_map(|key_text| SiteKey::from_stored(key_text));
-    result.failed.extend(failed_keys);
+    for key_text in &stored.failed {
+        let Some(key) = SiteKey::from_stored(key_text) else {
+            dropped += 1;
+            continue;
+        };
 
-    Ok(result)
+        result.failed.insert(key);
+    }
+
+    Ok((result, dropped))
 }
 
 /// Keeps `result` for `identity` for the rest of this process.

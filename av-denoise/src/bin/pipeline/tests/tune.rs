@@ -14,7 +14,7 @@ use crate::cli::InputSource;
 use crate::pipeline::convert::SourcePixel;
 use crate::pipeline::decode::FrameMsg;
 use crate::pipeline::source::open_y4m;
-use crate::pipeline::tune::{run_budget, tune_before_workers};
+use crate::pipeline::tune::{run_budget, tune_before_workers, worker_options};
 use crate::pipeline::{RunSettings, budget_request, run_with, tune_input};
 
 fn run_clip(bytes: Vec<u8>, tuning: TuningMode, tune_budget: Option<f64>) -> Vec<u8> {
@@ -103,6 +103,15 @@ fn a_set_budget_overrides_the_automatic_one() {
     let request = run_budget(Some(12.5), &opened.info);
 
     assert_eq!(request, BudgetRequest::Seconds(12.5));
+}
+
+#[test]
+fn workers_never_tune() {
+    let options = tuned_options();
+
+    let workers = worker_options(&options);
+
+    assert_eq!(workers.tuning, TuningMode::Cached);
 }
 
 #[test]

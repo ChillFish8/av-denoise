@@ -260,4 +260,9 @@ impl<R: Runtime, S: VariantSite<R>> Sampler for GpuSampler<'_, R, S> {
     fn elapsed(&self) -> Duration {
         self.started.elapsed()
     }
+
+    fn candidate_name(&self, index: usize) -> String {
+        let candidate = self.candidates[index];
+        candidate.name().to_string()
+    }
 }

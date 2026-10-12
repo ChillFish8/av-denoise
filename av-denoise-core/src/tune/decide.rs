@@ -35,6 +35,11 @@ pub trait Sampler {
     ///
     /// It increases with every sample.
     fn elapsed(&self) -> Duration;
+
+    /// The name of the candidate at `index`, for logs.
+    fn candidate_name(&self, index: usize) -> String {
+        index.to_string()
+    }
 }
 
 /// The samples one candidate has collected.
@@ -190,11 +195,18 @@ pub fn prescreen<S: Sampler>(
     };
 
     let threshold = fastest.as_secs_f64() * (1.0 + limits.prescreen_margin);
-    let survivors = medians
-        .into_iter()
-        .filter(|&(index, sample_median)| index == keep || sample_median.as_secs_f64() <= threshold)
-        .map(|(index, _)| index)
-        .collect();
+    let mut survivors = Vec::with_capacity(medians.len());
+
+    for (index, sample_median) in medians {
+        let survives = index == keep || sample_median.as_secs_f64() <= threshold;
+        if survives {
+            survivors.push(index);
+            continue;
+        }
+
+        let name = sampler.candidate_name(index);
+        tracing::debug!(candidate = %name, median = ?sample_median, "the pre-screen dropped a candidate");
+    }
 
     Ok(survivors)
 }

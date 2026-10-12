@@ -125,7 +125,8 @@ where
     let prefix = tune::tune_before_workers(planes, &info, &frames, permits, tune_budget);
 
     let (staged_tx, staged_rx) = crossbeam_channel::bounded::<u64>(1);
-    let (job_tx, worker_handles, output_rx) = spawn_workers(planes, layout, workers);
+    let worker_planes = tune::worker_options(planes);
+    let (job_tx, worker_handles, output_rx) = spawn_workers(&worker_planes, layout, workers);
     let coordinator_info = info.clone();
     let coordinator = spawn_coordinator(coordinator_info, output_rx, staged_rx, visible, give, output);
 

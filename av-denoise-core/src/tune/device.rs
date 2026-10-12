@@ -21,7 +21,7 @@ pub struct DeviceIdentity {
 impl DeviceIdentity {
     /// A stable hash of every identity field, as 32 lowercase hex characters.
     ///
-    /// It names the store file, so its input text never changes.
+    /// Stable across runs and builds.
     pub fn identity_hash(&self) -> String {
         let rendered = format!(
             "{}|{}|{:08x}|{:08x}|{}|{}",

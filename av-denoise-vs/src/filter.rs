@@ -8,6 +8,7 @@ use av_denoise::{
     FrameLayout,
     MAX_PENDING,
     PlanarDenoiser,
+    PlaneOptions,
     Planes,
     ReseedWindow,
     WarmUp,
@@ -58,6 +59,8 @@ impl State {
 pub struct Denoise<'core> {
     source: Node<'core>,
     layout: FrameLayout,
+    /// The options the denoiser is rebuilt with once tuning is done, which carry no tuning ledger.
+    settled_options: PlaneOptions,
     geometry: StreamGeometry,
     /// Requests `get_frame_initial` has registered, kept apart from [State] so registering one never
     /// waits on GPU work.
@@ -117,8 +120,11 @@ impl<'core> Denoise<'core> {
         let cache_key = av_denoise::kernel_key(&plane_options, layout);
         let warm_up = WarmUp::begin(cache_key);
 
-        let denoiser = PlanarDenoiser::create(&plane_options, layout)?;
-        let span = denoiser.window_span();
+        let settled_tuning = plane_options.tuning.after_tuning();
+        let settled_options = PlaneOptions {
+            tuning: settled_tuning,
+            ..plane_options.clone()
+        };
 
         let tuning_pending = !is_tuned(&plane_options, layout);
         if tuning_pending {
@@ -127,6 +133,14 @@ impl<'core> Denoise<'core> {
                  tunes. Run `av-denoise tune` with the same options beforehand to avoid it"
             );
         }
+
+        let build_options = if tuning_pending {
+            &plane_options
+        } else {
+            &settled_options
+        };
+        let denoiser = PlanarDenoiser::create(build_options, layout)?;
+        let span = denoiser.window_span();
 
         let core_info = core.info();
         let lookback = lookback_for(core_info.num_threads);
@@ -150,6 +164,7 @@ impl<'core> Denoise<'core> {
         Ok(Self {
             source,
             layout,
+            settled_options,
             geometry,
             outstanding: Mutex::new(Outstanding::default()),
             state: Mutex::new(state),
@@ -179,6 +194,7 @@ impl<'core> Denoise<'core> {
     ) -> Result<Planes, Error> {
         if state.tuning_pending {
             self.tune_on(state, n, fetch);
+            self.settle(state);
         }
 
         let buffered = state.buffer.contains(n);
@@ -215,7 +231,7 @@ impl<'core> Denoise<'core> {
     /// Tunes the denoiser on the frames VapourSynth holds for request `n`, once.
     ///
     /// The frames the request already asked for are the tuning frames, looped as needed. Tuning
-    /// never fails the request. The stream is rebuilt afterwards.
+    /// never fails the request.
     fn tune_on(&self, state: &mut State, n: usize, fetch: &impl Fn(usize) -> Result<Planes, Error>) {
         state.tuning_pending = false;
 
@@ -243,6 +259,17 @@ impl<'core> Denoise<'core> {
             TuneOutcome::Tuned => tracing::warn!(keys = report.tuned_keys, "av-denoise finished tuning"),
             TuneOutcome::AlreadyTuned => {},
             TuneOutcome::Skipped(reason) => tracing::info!(%reason, "av-denoise did not tune"),
+        }
+    }
+
+    /// Rebuilds the denoiser without its tuning ledger, and the stream with it.
+    fn settle(&self, state: &mut State) {
+        let rebuilt = PlanarDenoiser::create(&self.settled_options, self.layout);
+        match rebuilt {
+            Ok(denoiser) => state.denoiser = denoiser,
+            Err(error) => {
+                tracing::warn!(%error, "cannot rebuild the denoiser after tuning, keeping the tuned one")
+            },
         }
 
         state.planner.kill();

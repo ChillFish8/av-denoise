@@ -230,6 +230,10 @@ fn cuda_details(index: usize) -> Result<DeviceIdentity, anyhow::Error> {
     use cudarc::driver::{result, sys};
 
     let ordinal = i32::try_from(index)?;
+
+    // The identity can be read before any client initialises the driver. `cuInit` is idempotent.
+    result::init()?;
+
     let device = result::device::get(ordinal)?;
     let name = result::device::get_name(device)?;
     let attribute = sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID;
@@ -238,8 +242,7 @@ fn cuda_details(index: usize) -> Result<DeviceIdentity, anyhow::Error> {
     let pci_device = unsafe { result::device::get_attribute(device, attribute) }?;
 
     let mut version = 0i32;
-    // SAFETY: the client already running on this device initialised the driver, and `version` is a
-    // valid out pointer.
+    // SAFETY: the driver was initialised above, and `version` is a valid out pointer.
     let status = unsafe { sys::cuDriverGetVersion(&mut version) };
     if status != sys::CUresult::CUDA_SUCCESS {
         anyhow::bail!("cuDriverGetVersion returned {status:?}");

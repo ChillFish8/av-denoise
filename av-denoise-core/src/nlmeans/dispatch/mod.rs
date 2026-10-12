@@ -27,8 +27,7 @@ use crate::tune::sites::{AccumOutputs, AccumulateSite, ConfidenceBinding, Window
 
 /// The sizes and tile launch shape one frame's dispatches share.
 ///
-/// `cube_count` and `cube_dim` are the tile shape of the separable and finish kernels. The
-/// windowed and accumulate launches take their shape from the planned candidate.
+/// `cube_count` and `cube_dim` are the tile shape of the separable and finish kernels.
 pub(super) struct LaunchCtx {
     pub(super) total_frame_data: usize,
     pub(super) frame_size: usize,
