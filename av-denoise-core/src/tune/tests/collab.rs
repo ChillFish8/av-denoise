@@ -98,7 +98,8 @@ fn a_uniform_only_runtime_is_offered_half_the_variants() {
 #[test]
 fn the_staged_collab_site_times_the_first_stage_and_three_regroupings() {
     let client = test_client();
-    let site = collab_site(&client, &luma_spec());
+    let spec = luma_spec();
+    let site = collab_site(&client, &spec);
     let limits = DeviceLimits::from_client(&client);
     let uniform_only = needs_warp_uniform_search(&client);
 
@@ -114,8 +115,9 @@ fn the_staged_collab_site_times_the_first_stage_and_three_regroupings() {
 #[test]
 fn the_baseline_walk_follows_the_runtime() {
     let uniform = CollabVariant::baseline_for(true);
+    let mixed = CollabVariant::baseline_for(false);
 
-    assert_eq!(CollabVariant::baseline_for(false), CollabVariant::BASELINE);
+    assert_eq!(mixed, CollabVariant::BASELINE);
     assert_eq!(uniform.walk, Walk::Uniform);
     assert_eq!(uniform.groups, CollabVariant::BASELINE.groups);
     assert_eq!(uniform.name(), "groups8_uniform");
@@ -124,17 +126,21 @@ fn the_baseline_walk_follows_the_runtime() {
 #[test]
 fn a_uniform_only_runtime_runs_only_uniform_walks() {
     for &variant in CollabVariant::ALL {
+        let name = variant.name();
         let uniform = variant.walk == Walk::Uniform;
+        let runs_anywhere = variant.runs_where(false);
+        let runs_uniform_only = variant.runs_where(true);
 
-        assert!(variant.runs_where(false), "{}", variant.name());
-        assert_eq!(variant.runs_where(true), uniform, "{}", variant.name());
+        assert!(runs_anywhere, "{name}");
+        assert_eq!(runs_uniform_only, uniform, "{name}");
     }
 }
 
 #[test]
 fn this_runtime_is_offered_its_baseline_first_and_only_legal_walks() {
     let client = test_client();
-    let site = collab_site(&client, &luma_spec());
+    let spec = luma_spec();
+    let site = collab_site(&client, &spec);
     let limits = DeviceLimits::from_client(&client);
     let uniform_only = needs_warp_uniform_search(&client);
 
@@ -150,7 +156,8 @@ fn this_runtime_is_offered_its_baseline_first_and_only_legal_walks() {
     assert_eq!(fitted.len(), legal.len());
 
     for variant in &fitted {
-        assert!(legal.contains(variant), "{} is not legal here", variant.name());
+        let name = variant.name();
+        assert!(legal.contains(variant), "{name} is not legal here");
     }
 }
 
@@ -159,7 +166,8 @@ fn this_runtime_is_offered_its_baseline_first_and_only_legal_walks() {
 #[test]
 fn collab_shared_bytes_count_the_transpose_regions_and_the_tile() {
     let client = test_client();
-    let site = collab_site(&client, &luma_spec());
+    let spec = luma_spec();
+    let site = collab_site(&client, &spec);
     let groups16 = CollabVariant {
         groups: 16,
         ..CollabVariant::BASELINE
@@ -169,11 +177,16 @@ fn collab_shared_bytes_count_the_transpose_regions_and_the_tile() {
         ..CollabVariant::BASELINE
     };
 
+    let baseline_bytes = site.shared_bytes(CollabVariant::BASELINE);
+    let groups16_bytes = site.shared_bytes(groups16);
+    let tiled_bytes = site.shared_bytes(tiled);
+    let baseline_units = site.shape(CollabVariant::BASELINE).units();
+
     // A luma tile at radius 9 is 54 by 26 pixels of one f32 lane.
-    assert_eq!(site.shared_bytes(CollabVariant::BASELINE), 8 * 65 * 4 + 4);
-    assert_eq!(site.shared_bytes(groups16), 16 * 65 * 4 + 4);
-    assert_eq!(site.shared_bytes(tiled), 8 * 65 * 4 + 54 * 26 * 4);
-    assert_eq!(site.shape(CollabVariant::BASELINE).units(), 64);
+    assert_eq!(baseline_bytes, 8 * 65 * 4 + 4);
+    assert_eq!(groups16_bytes, 16 * 65 * 4 + 4);
+    assert_eq!(tiled_bytes, 8 * 65 * 4 + 54 * 26 * 4);
+    assert_eq!(baseline_units, 64);
 }
 
 #[test]
@@ -236,10 +249,12 @@ fn the_tile_holds_every_stored_lane_in_the_search_precision() {
     };
 
     let f32_site = collab_site(&client, &spec);
-    assert_eq!(f32_site.shared_bytes(tiled16), 39_936);
+    let f32_bytes = f32_site.shared_bytes(tiled16);
+    assert_eq!(f32_bytes, 39_936);
 
     let f16_site = collab_site_f16(&client, &spec);
-    assert_eq!(f16_site.shared_bytes(tiled16), 22_048);
+    let f16_bytes = f16_site.shared_bytes(tiled16);
+    assert_eq!(f16_bytes, 22_048);
 
     // The HIP runtime crashes at process exit while an upload is still queued.
     sync(&client).expect("the uploads finish");
@@ -248,7 +263,8 @@ fn the_tile_holds_every_stored_lane_in_the_search_precision() {
 #[test]
 fn collab_keys_name_every_compiled_value() {
     let client = test_client();
-    let site = collab_site(&client, &luma_spec());
+    let spec = luma_spec();
+    let site = collab_site(&client, &spec);
 
     let key = site.key();
 
@@ -262,20 +278,24 @@ fn collab_keys_name_every_compiled_value() {
 #[test]
 fn collab_baseline_fits_planes_narrower_than_eight_lanes() {
     let client = test_client();
-    let site = collab_site(&client, &luma_spec());
+    let spec = luma_spec();
+    let site = collab_site(&client, &spec);
     let mut limits = small_device_limits();
     limits.plane_size_min = 4;
 
     let fitted = fit_candidates(&site, &limits).expect("the baseline skips the plane check");
+    let baseline_plane = site.min_plane_size(CollabVariant::BASELINE);
+    let baseline = site.baseline();
 
-    assert_eq!(site.min_plane_size(CollabVariant::BASELINE), 8);
-    assert_eq!(fitted, vec![site.baseline()]);
+    assert_eq!(baseline_plane, 8);
+    assert_eq!(fitted, vec![baseline]);
 }
 
 #[test]
 fn sixteen_groups_still_fit_a_32kb_device() {
     let client = test_client();
-    let site = collab_site(&client, &luma_spec());
+    let spec = luma_spec();
+    let site = collab_site(&client, &spec);
     let limits = small_device_limits();
     let groups16 = CollabVariant {
         groups: 16,
@@ -300,7 +320,9 @@ fn a_32kb_device_drops_only_the_tiles_that_do_not_fit() {
     for &variant in CollabVariant::ALL {
         let too_big = variant.groups == 16 && variant.centre == Centre::Tiled;
         let expected = !too_big && variant.runs_where(uniform_only);
-        assert_eq!(fitted.contains(&variant), expected, "{}", variant.name());
+        let offered = fitted.contains(&variant);
+        let name = variant.name();
+        assert_eq!(offered, expected, "{name}");
     }
 }
 
@@ -323,8 +345,9 @@ fn radius_16_drops_the_widest_tile_on_a_64kb_device() {
     let tiled16 = CollabVariant { groups: 16, ..tiled8 };
 
     let fitted = fit_candidates(&site, &limits).expect("the baseline fits");
+    let tiled16_bytes = site.shared_bytes(tiled16);
 
-    assert_eq!(site.shared_bytes(tiled16), 68_160);
+    assert_eq!(tiled16_bytes, 68_160);
     assert!(fitted.contains(&tiled8));
     assert!(!fitted.contains(&tiled16));
 }
@@ -333,7 +356,8 @@ fn radius_16_drops_the_widest_tile_on_a_64kb_device() {
 #[test]
 fn collab_stages_vary_the_search_first_and_the_group_count_second() {
     let client = test_client();
-    let site = collab_site(&client, &luma_spec());
+    let spec = luma_spec();
+    let site = collab_site(&client, &spec);
     let seed = CollabVariant::from_name("groups8_uniform").expect("a listed variant");
 
     let first_stage: Vec<&str> = CollabVariant::ALL
@@ -527,9 +551,10 @@ fn assert_forced_variants_leave_nl4d_output_unchanged(channels: ChannelMode, var
     let baseline = nl4d_outputs(options, channels, width, height, &frames, baseline_plan);
 
     for &variant in variants {
-        let plan = KernelPlan::baseline().with_site(COLLAB_FUSED, variant.name());
+        let name = variant.name();
+        let plan = KernelPlan::baseline().with_site(COLLAB_FUSED, name);
         let forced = nl4d_outputs(options, channels, width, height, &frames, plan);
-        assert_eq!(forced, baseline, "{channels:?} {}", variant.name());
+        assert_eq!(forced, baseline, "{channels:?} {name}");
     }
 }
 

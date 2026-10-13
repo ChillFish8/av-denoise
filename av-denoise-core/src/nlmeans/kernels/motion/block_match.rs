@@ -32,8 +32,8 @@ fn window_stride(blksize: u32, search_radius: u32) -> u32 {
 /// Finds each block's motion on one pyramid level and seeds the fine grid with it.
 ///
 /// One GPU block handles one image block. Every thread scores a share of the
-/// `(2 * search_radius + 1)^2` candidates, and the lowest SAD is picked, the first in row-major
-/// order on a tie.
+/// `(2 * search_radius + 1)^2` candidates, and the lowest SAD is picked. A tie picks the first in
+/// row-major order, and the zero offset wins a tie with that pick.
 ///
 /// `blksize` is capped at [MAX_BLKSIZE](crate::nlmeans::motion::MAX_BLKSIZE) so the shared centre
 /// tile stays within 1024 values. The neighbour pixels the search reaches are staged into shared
@@ -223,8 +223,8 @@ pub fn nlm_mc_block_match_coarse(
 /// refined vector replaces it. A `search_radius` of 0 with no seed scores only the unshifted block.
 ///
 /// One GPU block handles one image block. Every thread scores a share of the
-/// `(2 * search_radius + 1)^2` candidates, and the lowest SAD is picked, the first in row-major
-/// order on a tie.
+/// `(2 * search_radius + 1)^2` candidates, and the lowest SAD is picked. A tie picks the first in
+/// row-major order, and the seed wins a tie with that pick.
 ///
 /// When `write_confidence` is set, each block also writes a confidence between 0 and 1 so a poor
 /// match can suppress its frame. `sad_noise_floor` is the SAD two noisy copies of the same content

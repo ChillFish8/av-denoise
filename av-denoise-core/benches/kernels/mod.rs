@@ -142,7 +142,7 @@ pub struct InputOutput {
     pub frame_len: usize,
 }
 
-const NAME_WIDTH: usize = 44;
+const NAME_WIDTH: usize = 56;
 
 pub fn print_header() {
     println!(

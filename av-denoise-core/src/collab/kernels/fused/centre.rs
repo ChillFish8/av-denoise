@@ -222,14 +222,8 @@ pub(crate) fn uniform_centre_walk<S: Float, N: Size>(
                     channels,
                     stored_ch,
                 );
-                let mut dist = select(live_pos, scored, 3.0e38f32);
-
-                // A masked turn pinned onto the reference would otherwise plant a second
-                // self-match. The sentinel sits below every real distance, so the self-match holds
-                // slot 0 even on flat content where every candidate ties.
-                if live_pos && candidate_x == rx && candidate_y == ry {
-                    dist = -1.0e38f32;
-                }
+                let masked = select(live_pos, scored, 3.0e38f32);
+                let dist = pin_self_match(masked, live_pos, candidate_x, candidate_y, rx, ry);
 
                 let worst = plane_shuffle(*best_d, base + 7u32);
 
@@ -280,7 +274,7 @@ pub(crate) fn clipped_centre_walk<S: Float, N: Size>(
     while candidate_y <= rect.bottom {
         let mut candidate_x = rect.left;
         while candidate_x <= rect.right {
-            let mut dist = centre_distance(
+            let scored = centre_distance(
                 ring,
                 search_ring,
                 tile,
@@ -301,12 +295,7 @@ pub(crate) fn clipped_centre_walk<S: Float, N: Size>(
                 channels,
                 stored_ch,
             );
-
-            // The sentinel sits below every real distance, so the self-match holds slot 0 even on
-            // flat content where every candidate ties.
-            if candidate_x == rx && candidate_y == ry {
-                dist = -1.0e38f32;
-            }
+            let dist = pin_self_match(scored, true, candidate_x, candidate_y, rx, ry);
 
             let packed = pack_pos_t(candidate_x, candidate_y, 0u32);
             shift_insert8_gated(best_d, best_pos, dist, packed, sub, base);
@@ -314,6 +303,29 @@ pub(crate) fn clipped_centre_walk<S: Float, N: Size>(
         }
         candidate_y += 1u32;
     }
+}
+
+/// Swaps `dist` for a sentinel below every real distance when `live` and the candidate is the
+/// reference itself.
+///
+/// The self-match then holds slot 0 even on flat content where every candidate ties. A masked
+/// turn is not live, so one pinned onto the reference never plants a second self-match.
+#[cube]
+pub(crate) fn pin_self_match(
+    dist: f32,
+    live: bool,
+    candidate_x: u32,
+    candidate_y: u32,
+    rx: u32,
+    ry: u32,
+) -> f32 {
+    let mut pinned = dist;
+
+    if live && candidate_x == rx && candidate_y == ry {
+        pinned = -1.0e38f32;
+    }
+
+    pinned
 }
 
 /// One lane's share of the distance to the centre candidate at `(x, y)`, read from the tile or the

@@ -30,10 +30,10 @@ const BATCHED_OPTIONS: [bool; 2] = [false, true];
 const VARIANT_COUNT: usize =
     GROUP_OPTIONS.len() * WALK_OPTIONS.len() * CENTRE_OPTIONS.len() * BATCHED_OPTIONS.len();
 
-/// Every listed variant, baseline first, with the batched flag varying fastest.
+/// Every listed variant, the default baseline first, with the batched flag varying fastest.
 const VARIANTS: [CollabVariant; VARIANT_COUNT] = listed_variants();
 
-// The tuner and the store read the first listed variant as the site's baseline.
+// Keeps the default baseline first.
 const _: () = assert!(
     VARIANTS[0].groups == CollabVariant::BASELINE.groups
         && VARIANTS[0].walk as u8 == CollabVariant::BASELINE.walk as u8

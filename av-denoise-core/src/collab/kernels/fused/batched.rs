@@ -1,6 +1,6 @@
 use cubecl::prelude::*;
 
-use super::centre::{SearchRect, centre_partial};
+use super::centre::{SearchRect, centre_partial, pin_self_match};
 use super::variant::{CollabVariant, Walk};
 use crate::collab::kernels::group::pack_pos_t;
 use crate::collab::kernels::plane_ops::{group_any, scatter_sums8, shift_insert8};
@@ -193,12 +193,8 @@ fn score_batch<S: Float, N: Size>(
     let candidate_x = u32::min(own_x, rect.right);
     let candidate_y = u32::min(own_y, rect.bottom);
     let scored = total * scale;
-    let mut dist = select(own_live, scored, 3.0e38f32);
-
-    // The sentinel sits below every real distance, so the self-match holds slot 0.
-    if own_live && candidate_x == rx && candidate_y == ry {
-        dist = -1.0e38f32;
-    }
+    let masked = select(own_live, scored, 3.0e38f32);
+    let dist = pin_self_match(masked, own_live, candidate_x, candidate_y, rx, ry);
 
     let packed = pack_pos_t(candidate_x, candidate_y, 0u32);
     let worst = plane_shuffle(*best_d, base + 7u32);

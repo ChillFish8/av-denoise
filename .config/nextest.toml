@@ -1,26 +1,20 @@
 [profile.default]
-test-threads = 16
+# Light tests run on every CPU thread. Heavy tests queue in their groups below.
+test-threads = "num-cpus"
 slow-timeout = { period = "120s", terminate-after = 4 }
 
-# Each full tuning pass JIT-compiles every candidate inside a 600 s budget, so at most two run at once.
 [test-groups]
-tuning-passes = { max-threads = 2 }
+# Each full tuning pass JIT-compiles every candidate inside a 600 s budget.
+tuning-passes = { max-threads = 8 }
+# Tests that compile many kernel variants, which saturate the CPU on an empty kernel cache.
+heavy-compile = { max-threads = 12 }
 
 [[profile.default.overrides]]
-filter = 'test(/tune::tests::collab::(.*_match(es)?_the_baseline(_in_the_[a-z]+_variant_(quarter|eighth))?$|forcing_the_[a-z]+_variant_(quarter|eighth)_leaves_(luma|chroma|yuv)_nl4d_output_unchanged$)|collab::tests::fused::(walks::every_variant_matches_the_baseline_|recorded::fused_reproduces_recorded_output_)/)'
-slow-timeout = { period = "120s", terminate-after = 10 }
-
-# The window equivalence and forcing tests run every candidate through whole engines.
-[[profile.default.overrides]]
-filter = 'test(/tune::tests::window::(every_window_candidate_matches_the_baseline_within_its_fidelity|forcing_.*)$/)'
-slow-timeout = { period = "120s", terminate-after = 10 }
-
-[[profile.default.overrides]]
-filter = 'test(/tune::tests::driver::(an_nl4d_pass_records_a_ranking_for_every_plane|a_tuned_grain_export_denoiser_drains_only_the_real_streams_grain)/)'
+filter = 'test(/^tune::tests::driver::(an_nl4d_pass_records_a_ranking_for_every_plane|a_tuned_grain_export_denoiser_drains_only_the_real_streams_grain)$/) | binary_id(av-denoise::tuning)'
 slow-timeout = { period = "120s", terminate-after = 10 }
 test-group = 'tuning-passes'
 
 [[profile.default.overrides]]
-filter = 'binary_id(av-denoise::tuning)'
+filter = 'test(/^(tune::tests::(collab|window)|collab::tests::fused|nlmeans::tests::temporal|nl4d::tests::(engine|search_ring|strength_map|noise_map)|nl4d::grain::tests::export)::/)'
 slow-timeout = { period = "120s", terminate-after = 10 }
-test-group = 'tuning-passes'
+test-group = 'heavy-compile'

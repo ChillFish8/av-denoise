@@ -60,6 +60,9 @@ pub struct CommonArgs {
     /// Later runs on the same device load them and skip tuning. `cached` uses stored results only.
     /// `off` always runs the untuned kernels.
     ///
+    /// Some tuned kernels add in a different order, so output can differ from `off` by rounding, and
+    /// `--deterministic` keeps it bit identical.
+    ///
     /// The `AV_DENOISE_TUNE` environment variable overrides this flag.
     #[arg(long, value_name = "MODE", default_value = "auto", value_parser = parse_tuning_mode)]
     pub tune: TuningMode,

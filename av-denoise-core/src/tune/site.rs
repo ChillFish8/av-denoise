@@ -3,14 +3,14 @@ use std::fmt::Debug;
 use cubecl::prelude::*;
 
 use super::device::DeviceLimits;
-use super::fidelity::{CompareResult, Fidelity};
+use super::fidelity::{CompareResult, Fidelity, FidelityClass};
 use super::key::SiteKey;
 
 /// One way to run a site, with the stable name the store and the benches use.
 pub trait SiteCandidate: Copy + Eq + Debug + Send + Sync + 'static {
     /// The id of the site this candidate belongs to.
     const SITE: &'static str;
-    /// Every candidate, baseline first.
+    /// Every candidate, the default baseline first.
     const ALL: &'static [Self];
 
     fn name(self) -> &'static str;
@@ -150,6 +150,13 @@ pub fn fit_candidates<R: Runtime, S: VariantSite<R>>(
     limits: &DeviceLimits,
 ) -> Result<Vec<S::Candidate>, FitError> {
     let baseline = site.baseline();
+    let baseline_class = baseline.fidelity().class();
+    debug_assert_eq!(
+        baseline_class,
+        FidelityClass::Exact,
+        "the {} baseline must be exact",
+        S::Candidate::SITE
+    );
 
     if !site.fits(baseline, limits) {
         let shape = site.shape(baseline);

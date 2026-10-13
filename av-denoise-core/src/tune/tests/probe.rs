@@ -56,6 +56,7 @@ pub(crate) struct ProbeSite {
     pub(crate) client: ComputeClient<TestRuntime>,
     pub(crate) width: u32,
     pub(crate) baseline_shared: usize,
+    /// The narrowest plane the site's baseline works on.
     pub(crate) baseline_plane: u32,
     /// The baseline this site reports instead of the first listed candidate.
     pub(crate) site_baseline: Option<ProbeCandidate>,
@@ -114,8 +115,12 @@ impl VariantSite<TestRuntime> for ProbeSite {
     }
 
     fn min_plane_size(&self, candidate: ProbeCandidate) -> u32 {
+        let baseline = VariantSite::baseline(self);
+        if candidate == baseline {
+            return self.baseline_plane;
+        }
+
         match candidate {
-            ProbeCandidate::Small => self.baseline_plane,
             ProbeCandidate::Medium => 16,
             _ => 1,
         }

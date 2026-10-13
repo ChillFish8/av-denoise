@@ -16,6 +16,7 @@ use crate::nlmeans::{
 pub(crate) type R = WgpuRuntime;
 
 pub(crate) fn make_client() -> ComputeClient<R> {
+    crate::tests::compilation_cache::install_test_compilation_cache();
     let device = <R as Runtime>::Device::default();
     R::client(&device)
 }

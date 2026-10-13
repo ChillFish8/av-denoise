@@ -112,6 +112,7 @@ pub(super) fn psnr(output: &[f32], reference: &[f32]) -> f64 {
 }
 
 pub(super) fn make_client() -> ComputeClient<R> {
+    crate::tests::compilation_cache::install_test_compilation_cache();
     let device = <R as Runtime>::Device::default();
     R::client(&device)
 }

@@ -163,6 +163,27 @@ fn the_target_key_is_settled_as_failed_and_runs_its_baseline() {
 }
 
 #[test]
+fn a_failed_target_key_runs_the_site_baseline() {
+    let client = test_client();
+    let mut site = ProbeSite::new(&client);
+    site.fail_scratch = true;
+    site.site_baseline = Some(ProbeCandidate::Wide);
+    let ledger = TuneLedger::new(false);
+    ledger.set_phase(TunePhase::Tune);
+    let key = site.key();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    ledger.set_target(key.clone(), deadline);
+    let selector = selector_for(&ledger);
+
+    selector.run(&site).expect("the run succeeds");
+    let launches = site.launches();
+
+    assert_eq!(launches, vec![ProbeCandidate::Wide]);
+    assert!(ledger.target_settled());
+    assert!(ledger.failed().contains(&key));
+}
+
+#[test]
 fn a_failed_key_drops_its_seeded_choice_and_runs_the_baseline() {
     let client = test_client();
     let mut site = ProbeSite::new(&client);

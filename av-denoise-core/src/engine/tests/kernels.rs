@@ -6,6 +6,7 @@ use crate::engine::{DevicePlane, EgressSource, IngestTarget, SampleFormat, egres
 type R = WgpuRuntime;
 
 fn client() -> ComputeClient<R> {
+    crate::tests::compilation_cache::install_test_compilation_cache();
     let device = <R as Runtime>::Device::default();
     R::client(&device)
 }

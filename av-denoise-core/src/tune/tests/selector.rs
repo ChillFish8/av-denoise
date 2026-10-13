@@ -98,7 +98,8 @@ fn a_baseline_that_does_not_fit_is_an_error() {
 
 #[test]
 fn a_missing_plan_entry_runs_the_baseline() {
-    let selector = selector_with(KernelPlan::baseline());
+    let plan = KernelPlan::baseline();
+    let selector = selector_with(plan);
     let client = test_client();
     let site = ProbeSite::new(&client);
 
@@ -112,7 +113,8 @@ fn a_planned_candidate_runs() {
     let client = test_client();
     let site = ProbeSite::new(&client);
     let mut plan = KernelPlan::baseline();
-    plan.insert(site.key(), "medium");
+    let key = site.key();
+    plan.insert(key, "medium");
     let selector = selector_with(plan);
 
     selector.run(&site).expect("the run succeeds");
@@ -127,7 +129,8 @@ fn a_planned_candidate_that_no_longer_fits_runs_the_baseline() {
     let client = test_client();
     let site = ProbeSite::new(&client);
     let mut plan = KernelPlan::baseline();
-    plan.insert(site.key(), "huge");
+    let key = site.key();
+    plan.insert(key, "huge");
     let selector = selector_with(plan);
 
     selector.run(&site).expect("the run succeeds");
@@ -140,7 +143,8 @@ fn an_unknown_planned_name_runs_the_baseline() {
     let client = test_client();
     let site = ProbeSite::new(&client);
     let mut plan = KernelPlan::baseline();
-    plan.insert(site.key(), "retired");
+    let key = site.key();
+    plan.insert(key, "retired");
     let selector = selector_with(plan);
 
     selector.run(&site).expect("the run succeeds");
@@ -167,7 +171,8 @@ fn a_site_wide_plan_entry_runs_at_every_key() {
 
 #[test]
 fn a_baseline_that_does_not_fit_fails_the_run() {
-    let selector = selector_with(KernelPlan::baseline());
+    let plan = KernelPlan::baseline();
+    let selector = selector_with(plan);
     let client = test_client();
     let mut site = ProbeSite::new(&client);
     site.baseline_shared = 40 * 1024;
@@ -198,6 +203,21 @@ fn the_site_baseline_leads_the_fitted_list() {
 }
 
 #[test]
+fn a_site_baseline_needing_wide_planes_still_fits_narrow_planes() {
+    let client = test_client();
+    let mut site = ProbeSite::new(&client);
+    site.site_baseline = Some(ProbeCandidate::Wide);
+    site.baseline_plane = 64;
+    let mut limits = small_device_limits();
+    limits.plane_size_min = 4;
+    limits.plane_size_max = 4;
+
+    let fitted = fit_candidates(&site, &limits).expect("the site baseline skips the plane check");
+
+    assert_eq!(fitted, vec![ProbeCandidate::Wide, ProbeCandidate::Small]);
+}
+
+#[test]
 fn an_illegal_candidate_is_never_offered() {
     let client = test_client();
     let mut site = ProbeSite::new(&client);
@@ -223,7 +243,8 @@ fn an_illegal_baseline_is_a_fit_error() {
 
 #[test]
 fn a_missing_plan_entry_runs_the_site_baseline() {
-    let selector = selector_with(KernelPlan::baseline());
+    let plan = KernelPlan::baseline();
+    let selector = selector_with(plan);
     let client = test_client();
     let mut site = ProbeSite::new(&client);
     site.site_baseline = Some(ProbeCandidate::Wide);
@@ -241,7 +262,8 @@ fn a_planned_illegal_candidate_runs_the_site_baseline() {
     site.site_baseline = Some(ProbeCandidate::Wide);
     site.illegal = vec![ProbeCandidate::Small];
     let mut plan = KernelPlan::baseline();
-    plan.insert(site.key(), "small");
+    let key = site.key();
+    plan.insert(key, "small");
     let selector = selector_with(plan);
 
     selector.run(&site).expect("the run succeeds");

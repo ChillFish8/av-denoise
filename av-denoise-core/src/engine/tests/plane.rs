@@ -81,6 +81,7 @@ mod with_handles {
     use crate::engine::DevicePlane;
 
     fn client() -> ComputeClient<WgpuRuntime> {
+        crate::tests::compilation_cache::install_test_compilation_cache();
         let device = <WgpuRuntime as Runtime>::Device::default();
         WgpuRuntime::client(&device)
     }

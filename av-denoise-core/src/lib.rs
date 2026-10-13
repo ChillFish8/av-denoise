@@ -11,6 +11,8 @@ pub mod nl4d;
 pub mod nlmeans;
 mod options;
 pub mod tune;
+#[cfg(test)]
+mod tests;
 
 pub use self::engine::{DevicePlane, EdgePadding, Engine, Geometry, SampleFormat, WindowSpan};
 pub use self::error::Error;

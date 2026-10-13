@@ -153,6 +153,10 @@ pub struct RawParams {
     pub psy_flat_texture_cut: Option<f64>,
     pub psy_line_ring: Option<i64>,
     pub pooled_threshold: Option<bool>,
+    /// The kernel tuning mode, `auto`, `cached` or `off`.
+    ///
+    /// Some tuned kernels add in a different order, so output can differ from `off` by rounding, and
+    /// `deterministic` keeps it bit identical.
     pub tune: Option<String>,
     pub deterministic: Option<bool>,
 }

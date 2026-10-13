@@ -29,6 +29,7 @@ wgpu_only! {
 }
 
 pub(crate) fn test_client() -> ComputeClient<TestRuntime> {
+    crate::tests::compilation_cache::install_test_compilation_cache();
     let device = <TestRuntime as Runtime>::Device::default();
     TestRuntime::client(&device)
 }

@@ -38,6 +38,7 @@ const FLICKER: f32 = 2.0 / 255.0;
 const LAG_RIGHT_3: usize = 3;
 
 fn make_client() -> ComputeClient<R> {
+    crate::tests::compilation_cache::install_test_compilation_cache();
     let device = <R as Runtime>::Device::default();
     R::client(&device)
 }
