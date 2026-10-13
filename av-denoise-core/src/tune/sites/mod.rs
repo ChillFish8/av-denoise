@@ -19,7 +19,16 @@ pub use self::regularise::{
     RegulariseOutputs,
     RegulariseSite,
 };
-pub use self::window::{ConfidenceBinding, WindowCandidate, WindowPass, WindowSite};
+#[cfg(test)]
+pub(crate) use self::window::estimate_planes;
+pub use self::window::{
+    ConfidenceBinding,
+    SEPARABLE_MAX_ABS,
+    SEPARABLE_MIN_PSNR,
+    WindowCandidate,
+    WindowPass,
+    WindowSite,
+};
 pub use crate::collab::kernels::fused::{Centre, CollabVariant, Walk, tile_height, tile_width};
 use crate::tune::fidelity::{CompareResult, Fidelity, diff_plane};
 use crate::tune::gpu::{read_f32, zero_accumulators};

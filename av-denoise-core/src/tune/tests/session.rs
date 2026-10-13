@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,7 +18,7 @@ use super::runtime::{TestRuntime, test_client, wgpu_only};
 use crate::nlmeans::ChannelMode;
 use crate::tune::gpu::read_f32;
 use crate::tune::session::timed_count;
-use crate::tune::sites::{AccumOutputs, AccumulateCandidate, AccumulateSite};
+use crate::tune::sites::{AccumOutputs, AccumulateCandidate, AccumulateSite, WindowCandidate};
 use crate::tune::{
     CompareResult,
     DeviceLimits,
@@ -66,7 +67,7 @@ fn tune_once<S: VariantSite<TestRuntime>>(site: &S, deterministic: bool) -> Arc<
 }
 
 #[test]
-fn tuning_a_key_ranks_every_candidate_and_runs_the_choice() {
+fn tuning_a_key_ranks_the_screened_candidates_and_runs_the_choice() {
     let client = test_client();
     let spec = WindowSpec::pair(96, 64, ChannelMode::Luma);
     let site = window_site(&client, &spec);
@@ -83,9 +84,18 @@ fn tuning_a_key_ranks_every_candidate_and_runs_the_choice() {
     let plan = ledger.plan();
 
     assert!(ledger.target_settled());
-    assert_eq!(ranking.candidates.len(), 3, "{names:?}");
+    let chosen = plan.get(&key).expect("the key has a choice");
+    let unique: HashSet<&str> = names.iter().copied().collect();
+
+    assert!(names.contains(&"32x8"), "{names:?}");
+    assert!(names.contains(&chosen), "{chosen} is not in {names:?}");
+    assert_eq!(unique.len(), names.len(), "{names:?}");
+    for name in &names {
+        let parsed = WindowCandidate::from_name(name);
+        assert!(parsed.is_some(), "{name} is not a window candidate");
+    }
+
     assert!(ranking.candidates.iter().all(|record| record.samples >= 15));
-    assert!(plan.get(&key).is_some());
 }
 
 /// Candidates are timed into scratch outputs, so the real accumulators see one launch only.

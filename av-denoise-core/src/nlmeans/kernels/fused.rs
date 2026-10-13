@@ -217,6 +217,119 @@ pub fn nlm_dist_2d_weight_ref<N: Size>(
     output[(global_y * width + global_x) as usize] = welsch_weight(patch_sum, h2_inv_norm, noise_offset);
 }
 
+/// Elements of one row-sum buffer, `block_y + 2 * patch_radius` rows of `block_x` sums.
+///
+/// Without separable sums the buffer is a one-element placeholder, so both forms of a window kernel
+/// share one body.
+pub(crate) fn hsum_elements(separable: bool, block_x: u32, block_y: u32, patch_radius: u32) -> u32 {
+    if !separable {
+        return 1;
+    }
+
+    (block_y + 2 * patch_radius) * block_x
+}
+
+/// Sums one pixel's `(2 * patch_radius + 1)^2` patch of distances straight from `tile`, row by row.
+#[cube]
+fn direct_patch_sum(
+    tile: &SharedMemory<f32>,
+    local_x: u32,
+    local_y: u32,
+    #[comptime] tile_width: u32,
+    #[comptime] patch_radius: u32,
+) -> f32 {
+    let center_tile_x = local_x + patch_radius;
+    let center_tile_y = local_y + patch_radius;
+    let patch_size = 2 * patch_radius + 1;
+    let mut patch_sum = 0.0f32;
+
+    for offset_y in 0..patch_size {
+        for offset_x in 0..patch_size {
+            let smem_idx = ((center_tile_y - patch_radius + offset_y) * tile_width + center_tile_x
+                - patch_radius
+                + offset_x) as usize;
+            patch_sum += tile[smem_idx];
+        }
+    }
+
+    patch_sum
+}
+
+/// Writes each tile row's sums of `2 * patch_radius + 1` neighbouring distances into `hsum`.
+///
+/// `hsum` holds `block_y + 2 * patch_radius` rows of `block_x` sums, one per pixel column of the
+/// cube. Every thread of the cube must call it, and the cube syncs before any thread reads `hsum`.
+#[cube]
+fn row_sums(
+    tile: &SharedMemory<f32>,
+    hsum: &mut SharedMemory<f32>,
+    thread_id: u32,
+    threads: u32,
+    #[comptime] block_x: u32,
+    #[comptime] block_y: u32,
+    #[comptime] patch_radius: u32,
+) {
+    let tile_width = comptime!(block_x + 2 * patch_radius);
+    let count = comptime!((block_y + 2 * patch_radius) * block_x);
+    let taps = comptime!(2 * patch_radius + 1);
+    let mut index = thread_id;
+
+    while index < count {
+        let row = index / block_x;
+        let column = index % block_x;
+        let start = row * tile_width + column;
+        let mut sum = 0.0f32;
+
+        #[unroll]
+        for tap in 0..taps {
+            sum += tile[(start + tap) as usize];
+        }
+
+        hsum[index as usize] = sum;
+        index += threads;
+    }
+}
+
+/// Sums `2 * patch_radius + 1` row sums down the pixel's column, which completes its patch sum.
+#[cube]
+fn column_sum(
+    hsum: &SharedMemory<f32>,
+    local_x: u32,
+    local_y: u32,
+    #[comptime] block_x: u32,
+    #[comptime] patch_radius: u32,
+) -> f32 {
+    let taps = comptime!(2 * patch_radius + 1);
+    let mut sum = 0.0f32;
+
+    #[unroll]
+    for tap in 0..taps {
+        sum += hsum[((local_y + tap) * block_x + local_x) as usize];
+    }
+
+    sum
+}
+
+/// One pixel's patch sum, from the row sums in `hsum` when `separable` is set, otherwise from `tile`.
+#[cube]
+fn patch_sum(
+    tile: &SharedMemory<f32>,
+    hsum: &SharedMemory<f32>,
+    local_x: u32,
+    local_y: u32,
+    #[comptime] tile_width: u32,
+    #[comptime] patch_radius: u32,
+    #[comptime] separable: bool,
+) -> f32 {
+    let block_x = comptime!(tile_width - 2 * patch_radius);
+
+    if comptime!(separable) {
+        column_sum(hsum, local_x, local_y, block_x, patch_radius)
+    } else {
+        direct_patch_sum(tile, local_x, local_y, tile_width, patch_radius)
+    }
+}
+
 /// Accumulates one pair of temporal neighbours over the whole search window in a single launch.
 ///
 /// The running sums stay in registers and are added to `accum`, `weight_sum` and `max_weight`
@@ -226,6 +339,11 @@ pub fn nlm_dist_2d_weight_ref<N: Size>(
 /// When `use_confidence` is set, each weight is scaled by its block's confidence from `conf_fwd`
 /// and `conf_bwd`. `step`, `blocks_x` and `blocks_y` describe the motion block grid, which pixels
 /// map onto the same way as in `nlm_mc_warp`. When it is unset the confidence buffers are never read.
+///
+/// With `separable` set, each distance tile is first summed along its rows into a row-sum buffer,
+/// and each pixel then sums `2 * patch_radius + 1` of those down its column. That reads shared
+/// memory about a third as often per pixel, at the cost of one barrier per offset, and changes the
+/// order of the additions.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_pair_accumulate_window<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -247,6 +365,7 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
     #[comptime] search_radius: u32,
     #[comptime] block_x: u32,
     #[comptime] block_y: u32,
+    #[comptime] separable: bool,
     #[comptime] step: u32,
     #[comptime] blocks_x: u32,
     #[comptime] blocks_y: u32,
@@ -260,6 +379,9 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
     let mut smem_center = SharedMemory::<Vector<f32, N>>::new(expanded_elems as usize);
     let mut smem_fwd = SharedMemory::<f32>::new(tile_elems as usize);
     let mut smem_bwd = SharedMemory::<f32>::new(tile_elems as usize);
+    let hsum_len = comptime!(hsum_elements(separable, block_x, block_y, patch_radius));
+    let mut hsum_fwd = SharedMemory::<f32>::new(hsum_len as usize);
+    let mut hsum_bwd = SharedMemory::<f32>::new(hsum_len as usize);
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -336,23 +458,47 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
 
             sync_cube();
 
-            if in_image {
-                let center_tile_x = local_x + patch_radius;
-                let center_tile_y = local_y + patch_radius;
-                let patch_size = 2 * patch_radius + 1;
-                let mut sum_fwd = 0.0f32;
-                let mut sum_bwd = 0.0f32;
+            if comptime!(separable) {
+                row_sums(
+                    &smem_fwd,
+                    &mut hsum_fwd,
+                    thread_id,
+                    threads,
+                    block_x,
+                    block_y,
+                    patch_radius,
+                );
+                row_sums(
+                    &smem_bwd,
+                    &mut hsum_bwd,
+                    thread_id,
+                    threads,
+                    block_x,
+                    block_y,
+                    patch_radius,
+                );
+                sync_cube();
+            }
 
-                for offset_y in 0..patch_size {
-                    for offset_x in 0..patch_size {
-                        let smem_idx = ((center_tile_y - patch_radius + offset_y) * tile_width
-                            + center_tile_x
-                            - patch_radius
-                            + offset_x) as usize;
-                        sum_fwd += smem_fwd[smem_idx];
-                        sum_bwd += smem_bwd[smem_idx];
-                    }
-                }
+            if in_image {
+                let sum_fwd = patch_sum(
+                    &smem_fwd,
+                    &hsum_fwd,
+                    local_x,
+                    local_y,
+                    tile_width,
+                    patch_radius,
+                    separable,
+                );
+                let sum_bwd = patch_sum(
+                    &smem_bwd,
+                    &hsum_bwd,
+                    local_x,
+                    local_y,
+                    tile_width,
+                    patch_radius,
+                    separable,
+                );
 
                 let mut weight_fwd = welsch_weight(sum_fwd, h2_inv_norm, noise_offset);
                 let mut weight_bwd = welsch_weight(sum_bwd, h2_inv_norm, noise_offset);
@@ -413,6 +559,11 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
 ///
 /// `spatial_offset_lut` holds one noise-floor offset per candidate, row-major over the window.
 /// Nearby candidates share more of the grain's spatial correlation, so their offsets are smaller.
+///
+/// With `separable` set, each distance tile is first summed along its rows into a row-sum buffer,
+/// and each pixel then sums `2 * patch_radius + 1` of those down its column. That reads shared
+/// memory about a third as often per pixel, at the cost of one barrier per offset, and changes the
+/// order of the additions.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_single_window<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -429,6 +580,7 @@ pub fn nlm_fused_single_window<N: Size>(
     #[comptime] search_radius: u32,
     #[comptime] block_x: u32,
     #[comptime] block_y: u32,
+    #[comptime] separable: bool,
 ) {
     let tile_width = comptime!(block_x + 2 * patch_radius);
     let tile_elems = comptime!((block_x + 2 * patch_radius) * (block_y + 2 * patch_radius));
@@ -438,6 +590,8 @@ pub fn nlm_fused_single_window<N: Size>(
     );
     let mut smem_center = SharedMemory::<Vector<f32, N>>::new(expanded_elems as usize);
     let mut smem_dist = SharedMemory::<f32>::new(tile_elems as usize);
+    let hsum_len = comptime!(hsum_elements(separable, block_x, block_y, patch_radius));
+    let mut hsum = SharedMemory::<f32>::new(hsum_len as usize);
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -502,25 +656,33 @@ pub fn nlm_fused_single_window<N: Size>(
 
                 sync_cube();
 
-                if in_image {
-                    let center_tile_x = local_x + patch_radius;
-                    let center_tile_y = local_y + patch_radius;
-                    let patch_size = 2 * patch_radius + 1;
-                    let mut patch_sum = 0.0f32;
+                if comptime!(separable) {
+                    row_sums(
+                        &smem_dist,
+                        &mut hsum,
+                        thread_id,
+                        threads,
+                        block_x,
+                        block_y,
+                        patch_radius,
+                    );
+                    sync_cube();
+                }
 
-                    for offset_y in 0..patch_size {
-                        for offset_x in 0..patch_size {
-                            let smem_idx = ((center_tile_y - patch_radius + offset_y) * tile_width
-                                + center_tile_x
-                                - patch_radius
-                                + offset_x) as usize;
-                            patch_sum += smem_dist[smem_idx];
-                        }
-                    }
+                if in_image {
+                    let patch_distance = patch_sum(
+                        &smem_dist,
+                        &hsum,
+                        local_x,
+                        local_y,
+                        tile_width,
+                        patch_radius,
+                        separable,
+                    );
 
                     let lut_idx = (q_yi * window_side + q_xi) as usize;
                     let offset = spatial_offset_lut[lut_idx];
-                    let weight = welsch_weight(patch_sum, h2_inv_norm, offset);
+                    let weight = welsch_weight(patch_distance, h2_inv_norm, offset);
 
                     let neighbor_pixel = read_clamped_line(
                         input,
@@ -554,6 +716,7 @@ pub fn nlm_fused_single_window<N: Size>(
 /// The reference-image version of `nlm_fused_pair_accumulate_window`.
 ///
 /// Distances are read from `reference` while the accumulated pixels still come from `input`.
+/// `separable` works as there.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -576,6 +739,7 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
     #[comptime] search_radius: u32,
     #[comptime] block_x: u32,
     #[comptime] block_y: u32,
+    #[comptime] separable: bool,
     #[comptime] step: u32,
     #[comptime] blocks_x: u32,
     #[comptime] blocks_y: u32,
@@ -589,6 +753,9 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
     let mut smem_center = SharedMemory::<Vector<f32, N>>::new(expanded_elems as usize);
     let mut smem_fwd = SharedMemory::<f32>::new(tile_elems as usize);
     let mut smem_bwd = SharedMemory::<f32>::new(tile_elems as usize);
+    let hsum_len = comptime!(hsum_elements(separable, block_x, block_y, patch_radius));
+    let mut hsum_fwd = SharedMemory::<f32>::new(hsum_len as usize);
+    let mut hsum_bwd = SharedMemory::<f32>::new(hsum_len as usize);
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -663,23 +830,47 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
 
             sync_cube();
 
-            if in_image {
-                let center_tile_x = local_x + patch_radius;
-                let center_tile_y = local_y + patch_radius;
-                let patch_size = 2 * patch_radius + 1;
-                let mut sum_fwd = 0.0f32;
-                let mut sum_bwd = 0.0f32;
+            if comptime!(separable) {
+                row_sums(
+                    &smem_fwd,
+                    &mut hsum_fwd,
+                    thread_id,
+                    threads,
+                    block_x,
+                    block_y,
+                    patch_radius,
+                );
+                row_sums(
+                    &smem_bwd,
+                    &mut hsum_bwd,
+                    thread_id,
+                    threads,
+                    block_x,
+                    block_y,
+                    patch_radius,
+                );
+                sync_cube();
+            }
 
-                for offset_y in 0..patch_size {
-                    for offset_x in 0..patch_size {
-                        let smem_idx = ((center_tile_y - patch_radius + offset_y) * tile_width
-                            + center_tile_x
-                            - patch_radius
-                            + offset_x) as usize;
-                        sum_fwd += smem_fwd[smem_idx];
-                        sum_bwd += smem_bwd[smem_idx];
-                    }
-                }
+            if in_image {
+                let sum_fwd = patch_sum(
+                    &smem_fwd,
+                    &hsum_fwd,
+                    local_x,
+                    local_y,
+                    tile_width,
+                    patch_radius,
+                    separable,
+                );
+                let sum_bwd = patch_sum(
+                    &smem_bwd,
+                    &hsum_bwd,
+                    local_x,
+                    local_y,
+                    tile_width,
+                    patch_radius,
+                    separable,
+                );
 
                 let mut weight_fwd = welsch_weight(sum_fwd, h2_inv_norm, noise_offset);
                 let mut weight_bwd = welsch_weight(sum_bwd, h2_inv_norm, noise_offset);
@@ -732,6 +923,7 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
 /// The reference-image version of `nlm_fused_single_window`.
 ///
 /// Distances are read from `reference` while the accumulated pixels still come from `input`.
+/// `separable` works as there.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_single_window_ref<N: Size>(
     input: &Array<Vector<f32, N>>,
@@ -749,6 +941,7 @@ pub fn nlm_fused_single_window_ref<N: Size>(
     #[comptime] search_radius: u32,
     #[comptime] block_x: u32,
     #[comptime] block_y: u32,
+    #[comptime] separable: bool,
 ) {
     let tile_width = comptime!(block_x + 2 * patch_radius);
     let tile_elems = comptime!((block_x + 2 * patch_radius) * (block_y + 2 * patch_radius));
@@ -758,6 +951,8 @@ pub fn nlm_fused_single_window_ref<N: Size>(
     );
     let mut smem_center = SharedMemory::<Vector<f32, N>>::new(expanded_elems as usize);
     let mut smem_dist = SharedMemory::<f32>::new(tile_elems as usize);
+    let hsum_len = comptime!(hsum_elements(separable, block_x, block_y, patch_radius));
+    let mut hsum = SharedMemory::<f32>::new(hsum_len as usize);
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -822,25 +1017,33 @@ pub fn nlm_fused_single_window_ref<N: Size>(
 
                 sync_cube();
 
-                if in_image {
-                    let center_tile_x = local_x + patch_radius;
-                    let center_tile_y = local_y + patch_radius;
-                    let patch_size = 2 * patch_radius + 1;
-                    let mut patch_sum = 0.0f32;
+                if comptime!(separable) {
+                    row_sums(
+                        &smem_dist,
+                        &mut hsum,
+                        thread_id,
+                        threads,
+                        block_x,
+                        block_y,
+                        patch_radius,
+                    );
+                    sync_cube();
+                }
 
-                    for offset_y in 0..patch_size {
-                        for offset_x in 0..patch_size {
-                            let smem_idx = ((center_tile_y - patch_radius + offset_y) * tile_width
-                                + center_tile_x
-                                - patch_radius
-                                + offset_x) as usize;
-                            patch_sum += smem_dist[smem_idx];
-                        }
-                    }
+                if in_image {
+                    let patch_distance = patch_sum(
+                        &smem_dist,
+                        &hsum,
+                        local_x,
+                        local_y,
+                        tile_width,
+                        patch_radius,
+                        separable,
+                    );
 
                     let lut_idx = (q_yi * window_side + q_xi) as usize;
                     let offset = spatial_offset_lut[lut_idx];
-                    let weight = welsch_weight(patch_sum, h2_inv_norm, offset);
+                    let weight = welsch_weight(patch_distance, h2_inv_norm, offset);
 
                     let neighbor_pixel = read_clamped_line(
                         input,

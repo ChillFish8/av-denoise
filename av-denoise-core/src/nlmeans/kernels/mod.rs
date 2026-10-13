@@ -9,6 +9,7 @@ mod separable;
 
 pub use self::accumulate::{nlm_accumulate, nlm_finish};
 pub use self::bilateral::nlm_bilateral;
+pub(crate) use self::fused::hsum_elements;
 pub use self::fused::{
     nlm_dist_2d_weight,
     nlm_dist_2d_weight_ref,

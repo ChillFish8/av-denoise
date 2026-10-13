@@ -3,35 +3,55 @@ use cubecl::server::Handle;
 
 use super::{AccumOutputs, NLM_WINDOW, allocate_accum, clear_accum, compare_accum};
 use crate::nlmeans::kernels::{
+    hsum_elements,
     nlm_fused_pair_accumulate_window,
     nlm_fused_pair_accumulate_window_ref,
     nlm_fused_single_window,
     nlm_fused_single_window_ref,
 };
-use crate::tune::fidelity::{CompareResult, Fidelity};
-use crate::tune::gpu::bind;
+use crate::tune::fidelity::{CompareResult, Fidelity, PlaneDiff, diff_plane};
+use crate::tune::gpu::{bind, read_f32};
 use crate::tune::key::SiteKey;
 use crate::tune::site::{LaunchShape, SiteCandidate, VariantSite};
 
-/// A cube shape for the windowed NLM kernels.
+/// The lowest PSNR a separable candidate may show against the baseline on any plane.
+pub const SEPARABLE_MIN_PSNR: f64 = 80.0;
+
+/// The largest absolute difference a separable candidate may show against the baseline.
+pub const SEPARABLE_MAX_ABS: f32 = 1.0e-3;
+
+/// A cube shape for the windowed NLM kernels, with direct or separable patch sums.
 ///
-/// Each pixel walks the same search window in the same order whatever the cube shape, so every
-/// shape is bit identical.
+/// Each pixel walks the same search window in the same order whatever the cube shape, so the direct
+/// shapes are bit identical. Separable sums add the same distances in another order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowCandidate {
     Block32x8,
     Block32x16,
     Block16x16,
+    Separable32x8,
+    Separable32x16,
+    Separable16x16,
 }
 
 impl WindowCandidate {
     /// The cube's width and height in threads.
     pub fn block(self) -> (u32, u32) {
         match self {
-            WindowCandidate::Block32x8 => (32, 8),
-            WindowCandidate::Block32x16 => (32, 16),
-            WindowCandidate::Block16x16 => (16, 16),
+            WindowCandidate::Block32x8 | WindowCandidate::Separable32x8 => (32, 8),
+            WindowCandidate::Block32x16 | WindowCandidate::Separable32x16 => (32, 16),
+            WindowCandidate::Block16x16 | WindowCandidate::Separable16x16 => (16, 16),
         }
+    }
+
+    /// Whether each patch sums as rows, then as a column of row sums.
+    pub fn separable(self) -> bool {
+        matches!(
+            self,
+            WindowCandidate::Separable32x8
+                | WindowCandidate::Separable32x16
+                | WindowCandidate::Separable16x16
+        )
     }
 }
 
@@ -41,6 +61,9 @@ impl SiteCandidate for WindowCandidate {
         WindowCandidate::Block32x8,
         WindowCandidate::Block32x16,
         WindowCandidate::Block16x16,
+        WindowCandidate::Separable32x8,
+        WindowCandidate::Separable32x16,
+        WindowCandidate::Separable16x16,
     ];
 
     fn name(self) -> &'static str {
@@ -48,10 +71,20 @@ impl SiteCandidate for WindowCandidate {
             WindowCandidate::Block32x8 => "32x8",
             WindowCandidate::Block32x16 => "32x16",
             WindowCandidate::Block16x16 => "16x16",
+            WindowCandidate::Separable32x8 => "32x8_separable",
+            WindowCandidate::Separable32x16 => "32x16_separable",
+            WindowCandidate::Separable16x16 => "16x16_separable",
         }
     }
 
     fn fidelity(self) -> Fidelity {
+        if self.separable() {
+            return Fidelity::Rounding {
+                min_psnr: SEPARABLE_MIN_PSNR,
+                max_abs: SEPARABLE_MAX_ABS,
+            };
+        }
+
         Fidelity::Exact
     }
 }
@@ -112,6 +145,7 @@ struct WindowGrid {
     cube_dim: CubeDim,
     block_x: u32,
     block_y: u32,
+    separable: bool,
 }
 
 impl<R: Runtime> WindowSite<R> {
@@ -125,6 +159,7 @@ impl<R: Runtime> WindowSite<R> {
             cube_dim: CubeDim::new_2d(block_x, block_y),
             block_x,
             block_y,
+            separable: candidate.separable(),
         }
     }
 
@@ -161,6 +196,7 @@ impl<R: Runtime> WindowSite<R> {
                         self.search_radius,
                         grid.block_x,
                         grid.block_y,
+                        grid.separable,
                     );
                 }
             },
@@ -184,6 +220,7 @@ impl<R: Runtime> WindowSite<R> {
                     self.search_radius,
                     grid.block_x,
                     grid.block_y,
+                    grid.separable,
                 );
             },
         }
@@ -236,6 +273,7 @@ impl<R: Runtime> WindowSite<R> {
                         self.search_radius,
                         grid.block_x,
                         grid.block_y,
+                        grid.separable,
                         confidence.step,
                         confidence.blocks_x,
                         confidence.blocks_y,
@@ -267,6 +305,7 @@ impl<R: Runtime> WindowSite<R> {
                     self.search_radius,
                     grid.block_x,
                     grid.block_y,
+                    grid.separable,
                     confidence.step,
                     confidence.blocks_x,
                     confidence.blocks_y,
@@ -279,6 +318,8 @@ impl<R: Runtime> WindowSite<R> {
 impl<R: Runtime> VariantSite<R> for WindowSite<R> {
     type Candidate = WindowCandidate;
     type Outputs = AccumOutputs;
+
+    const PRESCREEN: bool = true;
 
     fn client(&self) -> &ComputeClient<R> {
         &self.client
@@ -310,17 +351,19 @@ impl<R: Runtime> VariantSite<R> for WindowSite<R> {
 
     fn shared_bytes(&self, candidate: WindowCandidate) -> usize {
         let (block_x, block_y) = candidate.block();
+        let separable = candidate.separable();
         let halo = 2 * self.patch_radius;
         let reach = halo + 2 * self.search_radius;
         let expanded = ((block_x + reach) * (block_y + reach)) as usize;
         let tile = ((block_x + halo) * (block_y + halo)) as usize;
+        let hsum = hsum_elements(separable, block_x, block_y, self.patch_radius) as usize;
         let vector_bytes = self.stored_ch as usize * size_of::<f32>();
         let distance_tiles = match self.pass {
             WindowPass::Single { .. } => 1,
             WindowPass::Pair { .. } => 2,
         };
 
-        expanded * vector_bytes + distance_tiles * tile * size_of::<f32>()
+        expanded * vector_bytes + distance_tiles * (tile + hsum) * size_of::<f32>()
     }
 
     fn launch(&self, candidate: WindowCandidate, outputs: &AccumOutputs) {
@@ -360,6 +403,75 @@ impl<R: Runtime> VariantSite<R> for WindowSite<R> {
         candidate: &AccumOutputs,
         fidelity: Fidelity,
     ) -> Result<CompareResult, anyhow::Error> {
-        compare_accum(&self.client, baseline, candidate, fidelity)
+        match fidelity {
+            Fidelity::Exact => compare_accum(&self.client, baseline, candidate, fidelity),
+            _ => compare_estimates(&self.client, baseline, candidate, self.stored_ch, fidelity),
+        }
     }
+}
+
+/// Compares the estimates two sets of accumulators normalise to, plane by plane under `fidelity`.
+///
+/// Raw sums grow with the number of weights a pixel gathers, so a bound on the output's 0..1 range
+/// is checked on each sum divided by its pixel's weight sum instead.
+fn compare_estimates<R: Runtime>(
+    client: &ComputeClient<R>,
+    baseline: &AccumOutputs,
+    candidate: &AccumOutputs,
+    stored_ch: u32,
+    fidelity: Fidelity,
+) -> Result<CompareResult, anyhow::Error> {
+    let expected = normalised_planes(client, baseline, stored_ch)?;
+    let actual = normalised_planes(client, candidate, stored_ch)?;
+    let diffs: Vec<PlaneDiff> = expected
+        .iter()
+        .zip(&actual)
+        .map(|(expected_plane, actual_plane)| diff_plane(expected_plane, actual_plane))
+        .collect();
+    let verdict = fidelity.judge(&diffs);
+
+    Ok(verdict)
+}
+
+/// Reads `outputs` back and splits them into normalised estimate planes.
+fn normalised_planes<R: Runtime>(
+    client: &ComputeClient<R>,
+    outputs: &AccumOutputs,
+    stored_ch: u32,
+) -> Result<Vec<Vec<f32>>, anyhow::Error> {
+    let accum = read_f32(client, &outputs.accum, outputs.accum_len)?;
+    let weight_sum = read_f32(client, &outputs.weight_sum, outputs.pixels)?;
+    let max_weight = read_f32(client, &outputs.max_weight, outputs.pixels)?;
+    let planes = estimate_planes(&accum, &weight_sum, &max_weight, stored_ch);
+
+    Ok(planes)
+}
+
+/// Divides each pixel's `stored_ch` sums and largest weight by its weight sum, one plane each.
+///
+/// A pixel with a zero weight sum reads as zero in every plane.
+pub(crate) fn estimate_planes(
+    accum: &[f32],
+    weight_sum: &[f32],
+    max_weight: &[f32],
+    stored_ch: u32,
+) -> Vec<Vec<f32>> {
+    let lanes = stored_ch as usize;
+    let pixels = weight_sum.len();
+    let mut planes: Vec<Vec<f32>> = (0..=lanes).map(|_| Vec::with_capacity(pixels)).collect();
+
+    for (pixel, &weight) in weight_sum.iter().enumerate() {
+        let normalise = |value: f32| if weight == 0.0 { 0.0 } else { value / weight };
+
+        for lane in 0..lanes {
+            let sum = accum[pixel * lanes + lane];
+            let estimate = normalise(sum);
+            planes[lane].push(estimate);
+        }
+
+        let largest = normalise(max_weight[pixel]);
+        planes[lanes].push(largest);
+    }
+
+    planes
 }

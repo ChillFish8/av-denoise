@@ -10,6 +10,11 @@ tuning-passes = { max-threads = 2 }
 filter = 'test(/tune::tests::collab::(.*_match(es)?_the_baseline(_in_the_[a-z]+_variant_(quarter|eighth))?$|forcing_the_[a-z]+_variant_(quarter|eighth)_leaves_(luma|chroma|yuv)_nl4d_output_unchanged$)|collab::tests::fused::(walks::every_variant_matches_the_baseline_|recorded::fused_reproduces_recorded_output_)/)'
 slow-timeout = { period = "120s", terminate-after = 10 }
 
+# The window equivalence and forcing tests run every candidate through whole engines.
+[[profile.default.overrides]]
+filter = 'test(/tune::tests::window::(every_window_candidate_matches_the_baseline_within_its_fidelity|forcing_.*)$/)'
+slow-timeout = { period = "120s", terminate-after = 10 }
+
 [[profile.default.overrides]]
 filter = 'test(/tune::tests::driver::(an_nl4d_pass_records_a_ranking_for_every_plane|a_tuned_grain_export_denoiser_drains_only_the_real_streams_grain)/)'
 slow-timeout = { period = "120s", terminate-after = 10 }
