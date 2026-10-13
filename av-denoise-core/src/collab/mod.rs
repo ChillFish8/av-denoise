@@ -24,13 +24,13 @@ pub const MAX_K: u32 = 8;
 /// many passes can write into one pixel before it is read back.
 pub const MAX_TEMPORAL_RADIUS: u32 = 8;
 
-/// Whether `R` needs the fused kernel's warp-uniform search.
+/// Whether `R` only runs the fused kernel's uniform walk.
 ///
 /// The fused kernel's searches are group-scoped. Eight lanes share one reference patch and finish
 /// each distance with a shuffle across just those eight. CUDA lowers each shuffle to a
 /// `__shfl_*_sync` over the whole 32-lane warp, which on Volta and later waits for every lane it
-/// names. A group that leaves the search early never releases the ones still in it, so the warp
-/// deadlocks. The wgpu backends reconverge on their own and run the cheaper clipped search.
+/// names. A group that leaves the clipped walk early never releases the ones still in it, so the
+/// warp deadlocks. The wgpu and HIP backends reconverge on their own and run either walk.
 pub fn needs_warp_uniform_search<R: Runtime>(client: &ComputeClient<R>) -> bool {
     R::name(client) == "cuda"
 }

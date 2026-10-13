@@ -13,7 +13,7 @@ use super::helpers::{
     textured_base,
 };
 use crate::bench_api::HostIo;
-use crate::collab::geometry::{BASELINE_GROUPS, fused_cubes_x, ref_count, refs_along, strength_map_dims};
+use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{
     ACCUM_SCALE,
     collab_normalise,
@@ -22,9 +22,9 @@ use crate::collab::kernels::aggregate::{
     kaiser_window,
     weight_scale,
 };
-use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
+use crate::collab::kernels::fused::{CollabVariant, STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{MAX_K, MAX_TEMPORAL_RADIUS, PATCH_SIZE, grid_frames, needs_warp_uniform_search};
+use crate::collab::{MAX_K, MAX_TEMPORAL_RADIUS, PATCH_SIZE, grid_frames};
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::tests::helpers::noisy_field_over;
 use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NOISE_CURVE_BINS, NlmDenoiser, NlmParams};
@@ -332,7 +332,7 @@ fn run_spatial_only(
     c_min: f32,
     lambda_ht: f32,
     sigma: f32,
-    warp_uniform: bool,
+    variant: CollabVariant,
 ) -> Vec<f32> {
     let k_max = MAX_K;
     let stored_ch = 1u32;
@@ -381,9 +381,9 @@ fn run_spatial_only(
     let zero_grid = CubeCount::new_1d(zero_workgroups);
     let zero_cube_dim = CubeDim::new_1d(zero_dim);
 
-    let fused_x = fused_cubes_x(width, BASELINE_GROUPS);
+    let fused_x = fused_cubes_x(width, variant.groups);
     let fused_grid = CubeCount::new_2d(fused_x, refs_y);
-    let fused_dim = CubeDim::new_1d(8 * BASELINE_GROUPS);
+    let fused_dim = CubeDim::new_1d(variant.lanes());
     let weight_norm = weight_scale(sigma, &dct_profile);
     let grid_frame_count = grid_frames(0);
     let centre_slot = 0u32;
@@ -426,7 +426,6 @@ fn run_spatial_only(
             STRENGTH_MAP_OFF,
             weight_norm,
             ACCUM_SCALE,
-            warp_uniform,
             false,
             0u32,
             grid_frame_count,
@@ -448,7 +447,7 @@ fn run_spatial_only(
             map_rows,
             0.0f32,
             false,
-            BASELINE_GROUPS,
+            variant,
         );
 
         collab_normalise::launch_unchecked::<R>(
@@ -504,7 +503,7 @@ fn temporal_grouping_beats_spatial_only_on_a_static_clip() {
         .expect("enough frames were pushed for frame `radius`'s own output to have emitted")
         .clone();
 
-    let warp_uniform = needs_warp_uniform_search(&client);
+    let variant = CollabVariant::for_client(&client);
     let spatial_out = run_spatial_only(
         &client,
         &noisy_frames[centre_index],
@@ -515,7 +514,7 @@ fn temporal_grouping_beats_spatial_only_on_a_static_clip() {
         C_MIN,
         LAMBDA_HT,
         SIGMA,
-        warp_uniform,
+        variant,
     );
 
     let temporal_psnr = psnr(&temporal_out, &base);
@@ -639,11 +638,11 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
 
         let motion = front.motion_ctx();
 
-        let fused_x = fused_cubes_x(width, BASELINE_GROUPS);
+        let variant = CollabVariant::for_client(&client);
+        let fused_x = fused_cubes_x(width, variant.groups);
         let refs_y = refs_along(height);
         let fused_grid = CubeCount::new_2d(fused_x, refs_y);
-        let fused_dim = CubeDim::new_1d(8 * BASELINE_GROUPS);
-        let warp_uniform = needs_warp_uniform_search(&client);
+        let fused_dim = CubeDim::new_1d(variant.lanes());
         let grid_frame_count = grid_frames(radius);
         let agg_cubes_x = width.div_ceil(BLOCK_X);
         let agg_cubes_y = height.div_ceil(BLOCK_Y);
@@ -677,7 +676,6 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 STRENGTH_MAP_OFF,
                 weight_norm,
                 accum_scale,
-                warp_uniform,
                 false,
                 radius,
                 grid_frame_count,
@@ -699,7 +697,7 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 map_rows,
                 0.0f32,
                 false,
-                BASELINE_GROUPS,
+                variant,
             );
 
             collab_normalise::launch_unchecked::<R>(

@@ -1,59 +1,100 @@
 use std::marker::PhantomData;
+use std::sync::LazyLock;
 
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::COLLAB_FUSED;
-use crate::collab::PATCH_SIZE;
-use crate::collab::geometry::fused_cubes_x;
-use crate::collab::kernels::fused::collab_fused;
+use crate::collab::geometry::{BASELINE_GROUPS, fused_cubes_x};
+use crate::collab::kernels::fused::{Centre, CollabVariant, GROUP_LANES, Walk, collab_fused};
+use crate::collab::{PATCH_SIZE, needs_warp_uniform_search};
 use crate::nlmeans::NOISE_CURVE_BINS;
+use crate::tune::DeviceLimits;
 use crate::tune::fidelity::{CompareResult, Fidelity, diff_integers, diff_plane};
 use crate::tune::gpu::{bind, read_f32, read_i32, zero_words};
 use crate::tune::key::SiteKey;
 use crate::tune::site::{LaunchShape, SiteCandidate, VariantSite};
 
-/// Floats in each group's transpose region, one past 64 so lanes never collide on a bank.
-const TRANSPOSE_REGION_FLOATS: u32 = 65;
+/// Group counts per cube, the baseline's first.
+const GROUP_OPTIONS: [u32; 3] = [BASELINE_GROUPS, 4, 16];
 
-/// Lanes in one group, one per patch column.
-const GROUP_LANES: u32 = 8;
+/// Walks, the clipped baseline first.
+const WALK_OPTIONS: [Walk; 2] = [Walk::Clipped, Walk::Uniform];
 
-/// How many reference patches one `collab_fused` cube handles.
-///
-/// The scatter adds fixed-point integers, so the output is the same for every group count.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CollabCandidate {
-    Groups8,
-    Groups4,
-    Groups16,
-}
+/// Centre sources, the global baseline first.
+const CENTRE_OPTIONS: [Centre; 2] = [Centre::Global, Centre::Tiled];
 
-impl CollabCandidate {
-    /// Reference patches, and so 8-lane groups, per cube.
-    pub fn groups(self) -> u32 {
-        match self {
-            CollabCandidate::Groups8 => 8,
-            CollabCandidate::Groups4 => 4,
-            CollabCandidate::Groups16 => 16,
-        }
+/// Batched centre sums off, the baseline, then on.
+const BATCHED_OPTIONS: [bool; 2] = [false, true];
+
+const VARIANT_COUNT: usize =
+    GROUP_OPTIONS.len() * WALK_OPTIONS.len() * CENTRE_OPTIONS.len() * BATCHED_OPTIONS.len();
+
+/// Every listed variant, baseline first, with the batched flag varying fastest.
+const VARIANTS: [CollabVariant; VARIANT_COUNT] = listed_variants();
+
+// The tuner and the store read the first listed variant as the site's baseline.
+const _: () = assert!(
+    VARIANTS[0].groups == CollabVariant::BASELINE.groups
+        && VARIANTS[0].walk as u8 == CollabVariant::BASELINE.walk as u8
+        && VARIANTS[0].centre as u8 == CollabVariant::BASELINE.centre as u8
+        && VARIANTS[0].batched == CollabVariant::BASELINE.batched,
+    "the first listed collab variant must be CollabVariant::BASELINE"
+);
+
+/// Every listed variant's stored name, in [VARIANTS] order.
+static NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    VARIANTS
+        .iter()
+        .map(|&variant| {
+            let name = variant_name(variant);
+            let leaked: &'static str = name.leak();
+            leaked
+        })
+        .collect()
+});
+
+const fn listed_variants() -> [CollabVariant; VARIANT_COUNT] {
+    let mut variants = [CollabVariant::BASELINE; VARIANT_COUNT];
+    let batched_options = BATCHED_OPTIONS.len();
+    let centres = CENTRE_OPTIONS.len();
+    let walks = WALK_OPTIONS.len();
+    let mut index = 0;
+
+    while index < VARIANT_COUNT {
+        let batched = BATCHED_OPTIONS[index % batched_options];
+        let centre = CENTRE_OPTIONS[(index / batched_options) % centres];
+        let walk = WALK_OPTIONS[(index / (batched_options * centres)) % walks];
+        let groups = GROUP_OPTIONS[index / (batched_options * centres * walks)];
+        variants[index] = CollabVariant {
+            groups,
+            walk,
+            centre,
+            batched,
+        };
+        index += 1;
     }
+
+    variants
 }
 
-impl SiteCandidate for CollabCandidate {
+/// `groups<g>_<walk>` with `_tiled` and `_batched` where they apply, for example
+/// `groups8_uniform_tiled_batched`.
+fn variant_name(variant: CollabVariant) -> String {
+    let walk = variant.walk.name();
+    let centre = variant.centre.name_suffix();
+    let batched = if variant.batched { "_batched" } else { "" };
+    format!("groups{}_{walk}{centre}{batched}", variant.groups)
+}
+
+impl SiteCandidate for CollabVariant {
     const SITE: &'static str = COLLAB_FUSED;
-    const ALL: &'static [Self] = &[
-        CollabCandidate::Groups8,
-        CollabCandidate::Groups4,
-        CollabCandidate::Groups16,
-    ];
+    const ALL: &'static [Self] = &VARIANTS;
 
     fn name(self) -> &'static str {
-        match self {
-            CollabCandidate::Groups8 => "groups8",
-            CollabCandidate::Groups4 => "groups4",
-            CollabCandidate::Groups16 => "groups16",
-        }
+        let position = VARIANTS.iter().position(|&variant| variant == self);
+        let index = position.expect("every collab candidate is a listed variant");
+        NAMES[index]
     }
 
     fn fidelity(self) -> Fidelity {
@@ -103,7 +144,6 @@ pub struct CollabValues {
 /// The compile-time geometry and switches `collab_fused` is built for.
 #[derive(Debug, Clone, Copy)]
 pub struct CollabShape {
-    pub warp_uniform: bool,
     pub f16_search: bool,
     pub radius: u32,
     pub grid_frames: u32,
@@ -151,8 +191,11 @@ pub struct CollabSite<R: Runtime, S: Float> {
 }
 
 impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
-    type Candidate = CollabCandidate;
+    type Candidate = CollabVariant;
     type Outputs = CollabOutputs;
+
+    const PRESCREEN: bool = true;
+    const STAGES: usize = 2;
 
     fn client(&self) -> &ComputeClient<R> {
         &self.client
@@ -172,33 +215,48 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
             .param("kmax", shape.k_max)
             .param("spatial", shape.spatial_radius)
             .param("pooled", u8::from(shape.pooled))
-            .param("warp", u8::from(shape.warp_uniform))
             .param("f16", u8::from(shape.f16_search))
             .build()
     }
 
-    fn shape(&self, candidate: CollabCandidate) -> LaunchShape {
-        let lanes = GROUP_LANES * candidate.groups();
+    fn shape(&self, candidate: CollabVariant) -> LaunchShape {
+        let lanes = candidate.lanes();
         LaunchShape { x: lanes, y: 1 }
     }
 
-    fn shared_bytes(&self, candidate: CollabCandidate) -> usize {
-        let floats = candidate.groups() * TRANSPOSE_REGION_FLOATS;
-        floats as usize * size_of::<f32>()
+    fn shared_bytes(&self, candidate: CollabVariant) -> usize {
+        let search_bytes = size_of::<S>();
+        candidate.shared_bytes(self.shape.spatial_radius, self.shape.stored_ch, search_bytes)
     }
 
-    fn min_plane_size(&self, _candidate: CollabCandidate) -> u32 {
+    fn min_plane_size(&self, _candidate: CollabVariant) -> u32 {
         GROUP_LANES
     }
 
-    fn launch(&self, candidate: CollabCandidate, outputs: &CollabOutputs) {
-        let groups = candidate.groups();
+    /// The first stage varies every search dimension at the seed's group count, and the second
+    /// varies only the group count.
+    fn in_stage(&self, stage: usize, seed: CollabVariant, candidate: CollabVariant) -> bool {
+        if stage == 0 {
+            return candidate.groups == seed.groups;
+        }
+
+        let regrouped = CollabVariant {
+            groups: seed.groups,
+            ..candidate
+        };
+
+        regrouped == seed
+    }
+
+    fn launch(&self, candidate: CollabVariant, outputs: &CollabOutputs) {
+        let groups = candidate.groups;
+        let lanes = candidate.lanes();
         let inputs = &self.inputs;
         let values = &self.values;
         let shape = &self.shape;
         let cubes_x = fused_cubes_x(shape.width, groups);
         let cube_count = CubeCount::new_2d(cubes_x, shape.refs_y);
-        let cube_dim = CubeDim::new_1d(GROUP_LANES * groups);
+        let cube_dim = CubeDim::new_1d(lanes);
 
         let ring = bind::<R>(&inputs.ring, inputs.ring_len);
         let search_ring = bind::<R>(&inputs.search_ring, inputs.search_len);
@@ -240,7 +298,6 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
                 values.map_mode,
                 values.weight_scale,
                 values.accum_scale,
-                shape.warp_uniform,
                 shape.f16_search,
                 shape.radius,
                 shape.grid_frames,
@@ -262,7 +319,7 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
                 shape.map_rows,
                 values.pool_ratio,
                 shape.pooled,
-                groups,
+                candidate,
             );
         }
     }
@@ -311,5 +368,14 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
         let verdict = fidelity.judge(&[accum_diff, wsum_diff, weight_diff]);
 
         Ok(verdict)
+    }
+
+    fn baseline(&self) -> CollabVariant {
+        CollabVariant::for_client(&self.client)
+    }
+
+    fn legal(&self, candidate: CollabVariant, _limits: &DeviceLimits) -> bool {
+        let uniform_only = needs_warp_uniform_search(&self.client);
+        candidate.runs_where(uniform_only)
     }
 }

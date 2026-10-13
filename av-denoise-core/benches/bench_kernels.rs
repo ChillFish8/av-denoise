@@ -3,7 +3,7 @@ mod kernels;
 use av_denoise_core::bench_api::Device;
 use av_denoise_core::bench_api::tune_sites::{
     AccumulateCandidate,
-    CollabCandidate,
+    CollabVariant,
     RegulariseCandidate,
     WindowCandidate,
 };
@@ -14,7 +14,7 @@ use kernels::accumulate::AccumulateBench;
 use kernels::bilateral::BilateralBench;
 use kernels::cast_f16::CastF16Bench;
 use kernels::collab_aggregate::{CollabNormaliseBench, CollabZeroAccumBench};
-use kernels::collab_fused::CollabFusedBench;
+use kernels::collab_fused::{CollabFusedBench, fitted_variants};
 use kernels::copy::CopyBench;
 use kernels::dist_2d_weight::DistWeightBench;
 use kernels::dist_2d_weight_ref::DistWeightRefBench;
@@ -271,8 +271,11 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         });
     }
 
-    for &candidate in CollabCandidate::ALL {
-        for &(channels, channel_name) in CHANNELS {
+    // A clipped walk deadlocks on CUDA, so only the variants the device fits are launched.
+    for &(channels, channel_name) in CHANNELS {
+        let variants = fitted_variants(&client, channels, channel_name);
+
+        for candidate in variants {
             run(CollabFusedBench {
                 client: client.clone(),
                 channels,
@@ -286,6 +289,8 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         }
     }
 
+    let collab_baseline = CollabVariant::for_client(&client);
+
     run(CollabFusedBench {
         client: client.clone(),
         channels: 1,
@@ -294,7 +299,7 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         noise_curve: true,
         strength_map: false,
         pooled: false,
-        candidate: CollabCandidate::baseline(),
+        candidate: collab_baseline,
     });
     run(CollabFusedBench {
         client: client.clone(),
@@ -304,7 +309,7 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         noise_curve: true,
         strength_map: true,
         pooled: false,
-        candidate: CollabCandidate::baseline(),
+        candidate: collab_baseline,
     });
     run(CollabFusedBench {
         client: client.clone(),
@@ -314,7 +319,7 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         noise_curve: true,
         strength_map: true,
         pooled: true,
-        candidate: CollabCandidate::baseline(),
+        candidate: collab_baseline,
     });
 
     for &(channels, channel_name) in CHANNELS {
@@ -326,7 +331,7 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
             noise_curve: false,
             strength_map: false,
             pooled: false,
-            candidate: CollabCandidate::baseline(),
+            candidate: collab_baseline,
         });
     }
 

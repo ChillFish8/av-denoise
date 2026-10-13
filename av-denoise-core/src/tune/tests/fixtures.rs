@@ -8,9 +8,11 @@ use crate::collab::geometry::{ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
 use crate::collab::kernels::fused::STRENGTH_MAP_OFF;
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{MAX_K, grid_frames, needs_warp_uniform_search};
+use crate::collab::{MAX_K, grid_frames};
+use crate::nl4d::nl4d_pool_ratio;
 use crate::nlmeans::motion::THSAD_PIXEL;
 use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS};
+use crate::tune::SiteCandidate;
 use crate::tune::gpu::zero_words;
 use crate::tune::sites::{
     AccumulateSite,
@@ -19,6 +21,7 @@ use crate::tune::sites::{
     CollabShape,
     CollabSite,
     CollabValues,
+    CollabVariant,
     ConfidenceBinding,
     RegulariseOutputs,
     RegulariseSite,
@@ -198,13 +201,47 @@ pub(crate) fn accumulate_site(
 pub(crate) const BLK_STEP: u32 = 8;
 pub(crate) const BLKSIZE: u32 = 16;
 
-/// The geometry of one `collab_fused` launch over a cross-frame ring.
+/// The geometry and switches of one `collab_fused` launch over a cross-frame ring.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CollabSpec {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) channels: ChannelMode,
     pub(crate) radius: u32,
+    pub(crate) spatial_radius: u32,
+    pub(crate) pooled: bool,
+    /// Every pixel the same, so every candidate distance ties.
+    pub(crate) flat: bool,
+    pub(crate) f16_search: bool,
+}
+
+impl CollabSpec {
+    /// Hashed content at spatial radius 9, with the pooled threshold and the f16 search off.
+    pub(crate) fn new(width: u32, height: u32, channels: ChannelMode, radius: u32) -> Self {
+        Self {
+            width,
+            height,
+            channels,
+            radius,
+            spatial_radius: 9,
+            pooled: false,
+            flat: false,
+            f16_search: false,
+        }
+    }
+}
+
+/// The ring a collab fixture searches.
+fn collab_ring(spec: &CollabSpec) -> Vec<f32> {
+    let stored_ch = spec.channels.storage_count();
+    let frames = 2 * spec.radius + 1;
+
+    if spec.flat {
+        let len = spec.width * spec.height * stored_ch * frames;
+        return vec![0.5f32; len as usize];
+    }
+
+    hashed_ring(spec.width, spec.height, stored_ch, frames, 5)
 }
 
 /// A cross-frame ring of hashed content with motion and confidence fields that vary by block.
@@ -219,7 +256,7 @@ pub(crate) fn collab_site(
     let stored_ch = spec.channels.storage_count();
     let frames = 2 * spec.radius + 1;
     let pixels = (spec.width * spec.height) as usize;
-    let ring_values = hashed_ring(spec.width, spec.height, stored_ch, frames, 5);
+    let ring_values = collab_ring(spec);
     let ring = upload(client, &ring_values);
 
     let blocks_x = spec.width.div_ceil(BLK_STEP);
@@ -271,7 +308,7 @@ pub(crate) fn collab_site(
     let kaiser_taps = kaiser_window(0.0);
     let kaiser = upload(client, &kaiser_taps);
 
-    let spatial_radius = 9;
+    let spatial_radius = spec.spatial_radius;
     let refs = ref_count(spec.width, spec.height);
     let accum_len = pixels * stored_ch as usize * frames as usize;
     let wsum_len = pixels * frames as usize;
@@ -302,6 +339,11 @@ pub(crate) fn collab_site(
     };
     let weight_norm = weight_scale(sigma_value, &profile);
     let accum_scale = cross_frame_accum_scale(spatial_radius, spec.radius);
+    let pool_ratio = if spec.pooled {
+        nl4d_pool_ratio(spec.channels)
+    } else {
+        0.0
+    };
     let values = CollabValues {
         centre_slot,
         c_min: 0.05,
@@ -310,14 +352,12 @@ pub(crate) fn collab_site(
         map_mode: STRENGTH_MAP_OFF,
         weight_scale: weight_norm,
         accum_scale,
-        pool_ratio: 0.0,
+        pool_ratio,
     };
-    let warp_uniform = needs_warp_uniform_search(client);
     let frames_per_volume = grid_frames(spec.radius);
     let refs_x = refs_along(spec.width);
     let refs_y = refs_along(spec.height);
     let shape = CollabShape {
-        warp_uniform,
         f16_search: false,
         radius: spec.radius,
         grid_frames: frames_per_volume,
@@ -338,7 +378,7 @@ pub(crate) fn collab_site(
         refs_y,
         map_cols,
         map_rows,
-        pooled: false,
+        pooled: spec.pooled,
     };
     let outputs = CollabOutputs {
         accum,
@@ -355,6 +395,40 @@ pub(crate) fn collab_site(
         values,
         shape,
         outputs,
+        search: PhantomData,
+    }
+}
+
+/// [collab_site] scoring its candidates from an f16 copy of the ring.
+pub(crate) fn collab_site_f16(
+    client: &ComputeClient<TestRuntime>,
+    spec: &CollabSpec,
+) -> CollabSite<TestRuntime, half::f16> {
+    let site = collab_site(client, spec);
+    let ring_values = collab_ring(spec);
+    let search_values: Vec<half::f16> = ring_values
+        .iter()
+        .map(|&value| half::f16::from_f32(value))
+        .collect();
+    let search_bytes = half::f16::as_bytes(&search_values);
+    let search_ring = client.create_from_slice(search_bytes);
+
+    let inputs = CollabInputs {
+        search_ring,
+        search_len: search_values.len(),
+        ..site.inputs
+    };
+    let shape = CollabShape {
+        f16_search: true,
+        ..site.shape
+    };
+
+    CollabSite {
+        client: site.client,
+        inputs,
+        values: site.values,
+        shape,
+        outputs: site.outputs,
         search: PhantomData,
     }
 }
@@ -459,4 +533,20 @@ pub(crate) fn regularise_site(
         blocks_x,
         blocks_y,
     }
+}
+
+/// Chunk `chunk` of the listed collab variants cut into `chunk_count` equal chunks, counting from 0.
+pub(crate) fn variant_chunk(chunk: usize, chunk_count: usize) -> &'static [CollabVariant] {
+    let listed = CollabVariant::ALL.len();
+    assert_eq!(
+        listed % chunk_count,
+        0,
+        "{listed} variants do not split into {chunk_count} equal chunks"
+    );
+
+    let chunk_len = listed / chunk_count;
+    let start = chunk * chunk_len;
+    let end = start + chunk_len;
+
+    &CollabVariant::ALL[start..end]
 }

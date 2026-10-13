@@ -10,6 +10,15 @@ pub(crate) fn assert_candidates_match_baseline<S: VariantSite<TestRuntime>>(
     site: &S,
     label: &str,
 ) -> S::Outputs {
+    assert_listed_candidates_match_baseline(site, label, S::Candidate::ALL)
+}
+
+/// [assert_candidates_match_baseline] over only the fitted candidates in `listed`.
+pub(crate) fn assert_listed_candidates_match_baseline<S: VariantSite<TestRuntime>>(
+    site: &S,
+    label: &str,
+    listed: &[S::Candidate],
+) -> S::Outputs {
     let client = site.client();
     let limits = DeviceLimits::from_client(client);
     let fitted = fit_candidates(site, &limits).expect("the baseline fits the test device");
@@ -18,7 +27,7 @@ pub(crate) fn assert_candidates_match_baseline<S: VariantSite<TestRuntime>>(
     site.launch(baseline, &baseline_outputs);
 
     for candidate in fitted {
-        if candidate == baseline {
+        if candidate == baseline || !listed.contains(&candidate) {
             continue;
         }
 

@@ -4,13 +4,7 @@
 //! axis. A bench that ran chroma at full resolution would report four times the real work, so both
 //! planes are measured and summed into one frame's kernel cost.
 
-use av_denoise_core::bench_api::collab::geometry::{
-    BASELINE_GROUPS,
-    fused_cubes_x,
-    ref_count,
-    refs_along,
-    strength_map_dims,
-};
+use av_denoise_core::bench_api::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
 use av_denoise_core::bench_api::collab::kernels::aggregate::{
     collab_normalise,
     collab_zero_accum,
@@ -18,14 +12,9 @@ use av_denoise_core::bench_api::collab::kernels::aggregate::{
     kaiser_window,
     weight_scale,
 };
-use av_denoise_core::bench_api::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
+use av_denoise_core::bench_api::collab::kernels::fused::{CollabVariant, STRENGTH_MAP_OFF, collab_fused};
 use av_denoise_core::bench_api::collab::kernels::transforms::dct_noise_profile;
-use av_denoise_core::bench_api::collab::{
-    PATCH_SIZE,
-    grid_frames,
-    needs_warp_uniform_search,
-    supports_f16_search,
-};
+use av_denoise_core::bench_api::collab::{PATCH_SIZE, grid_frames, supports_f16_search};
 use av_denoise_core::bench_api::{BLOCK_X, BLOCK_Y, Device, NOISE_CURVE_BINS};
 use clap::Parser;
 use cubecl::benchmark::{Benchmark, BenchmarkComputations, TimingMethod};
@@ -285,19 +274,20 @@ impl<R: Runtime> Rig<R> {
         let frame_len = pixels * geometry.stored_channels as usize;
         let (map_cols, map_rows) = strength_map_dims(geometry.width, geometry.height);
 
-        let cubes_x = fused_cubes_x(geometry.width, BASELINE_GROUPS);
+        let variant = CollabVariant::for_client(&self.client);
+        let cubes_x = fused_cubes_x(geometry.width, variant.groups);
+        let cube_dim = CubeDim::new_1d(variant.lanes());
         let refs_y = refs_along(geometry.height);
         let dct_profile = dct_noise_profile(0.0);
         let group_weight_scale = weight_scale(SIGMA, &dct_profile);
         let accum_scale = cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS);
-        let uniform_search = needs_warp_uniform_search(&self.client);
         let frames_per_volume = grid_frames(RADIUS);
 
         unsafe {
             collab_fused::launch_unchecked::<S, R>(
                 &self.client,
                 CubeCount::new_2d(cubes_x, refs_y),
-                CubeDim::new_1d(8 * BASELINE_GROUPS),
+                cube_dim,
                 geometry.stored_channels as usize,
                 ArrayArg::from_raw_parts(self.ring.clone(), self.ring_len),
                 ArrayArg::from_raw_parts(search_ring.clone(), search_len),
@@ -319,7 +309,6 @@ impl<R: Runtime> Rig<R> {
                 STRENGTH_MAP_OFF,
                 group_weight_scale,
                 accum_scale,
-                uniform_search,
                 f16_search,
                 RADIUS,
                 frames_per_volume,
@@ -341,7 +330,7 @@ impl<R: Runtime> Rig<R> {
                 map_rows,
                 POOL_RATIO,
                 pooled,
-                BASELINE_GROUPS,
+                variant,
             );
         }
     }

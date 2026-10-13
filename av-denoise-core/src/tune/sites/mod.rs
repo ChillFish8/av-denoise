@@ -7,7 +7,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 pub use self::accumulate::{AccumulateCandidate, AccumulateSite};
-pub use self::collab::{CollabCandidate, CollabInputs, CollabOutputs, CollabShape, CollabSite, CollabValues};
+pub use self::collab::{CollabInputs, CollabOutputs, CollabShape, CollabSite, CollabValues};
 #[cfg(test)]
 pub(crate) use self::regularise::compare_fields;
 pub use self::regularise::{
@@ -20,6 +20,7 @@ pub use self::regularise::{
     RegulariseSite,
 };
 pub use self::window::{ConfidenceBinding, WindowCandidate, WindowPass, WindowSite};
+pub use crate::collab::kernels::fused::{Centre, CollabVariant, Walk, tile_height, tile_width};
 use crate::tune::fidelity::{CompareResult, Fidelity, diff_plane};
 use crate::tune::gpu::{read_f32, zero_accumulators};
 use crate::tune::site::SiteCandidate;
@@ -38,7 +39,7 @@ pub fn candidate_known(site: &str, name: &str) -> bool {
     match site {
         NLM_WINDOW => WindowCandidate::from_name(name).is_some(),
         NLM_ACCUMULATE => AccumulateCandidate::from_name(name).is_some(),
-        COLLAB_FUSED => CollabCandidate::from_name(name).is_some(),
+        COLLAB_FUSED => CollabVariant::from_name(name).is_some(),
         NL4D_MV_REGULARISE => RegulariseCandidate::from_name(name).is_some(),
         _ => false,
     }

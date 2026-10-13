@@ -1,59 +1,264 @@
+use std::collections::HashSet;
+
+use cubecl::prelude::*;
+
 use super::engine::{nl4d_outputs, noisy_frames};
-use super::equivalence::assert_candidates_match_baseline;
-use super::fixtures::{CollabSpec, collab_site};
+use super::equivalence::assert_listed_candidates_match_baseline;
+use super::fixtures::{CollabSpec, collab_site, collab_site_f16, variant_chunk};
 use super::probe::small_device_limits;
-use super::runtime::test_client;
+use super::runtime::{TestRuntime, test_client};
 use crate::Nl4dOptions;
+use crate::collab::geometry::refs_along;
+use crate::collab::{PATCH_SIZE, STEP, needs_warp_uniform_search, supports_f16_search};
 use crate::nlmeans::ChannelMode;
-use crate::tune::gpu::read_f32;
-use crate::tune::sites::{COLLAB_FUSED, CollabCandidate};
+use crate::tune::gpu::{read_f32, sync};
+use crate::tune::session::timed_count;
+use crate::tune::sites::{COLLAB_FUSED, Centre, CollabOutputs, CollabVariant, Walk, tile_height, tile_width};
 use crate::tune::{DeviceLimits, KernelPlan, SiteCandidate, VariantSite, fit_candidates};
 
+/// Writes one test per named chunk, each passing `subject` and that chunk of the listed variants
+/// to `check`.
+macro_rules! variant_chunk_tests {
+    (
+        $check:ident($subject:expr), $chunk_count:literal chunks,
+        [$($name:ident => $chunk:literal),+ $(,)?]
+    ) => {
+        $(
+            #[test]
+            fn $name() {
+                let subject = $subject;
+                let variants = variant_chunk($chunk, $chunk_count);
+                $check(subject, variants);
+            }
+        )+
+    };
+}
+
 fn luma_spec() -> CollabSpec {
-    CollabSpec {
-        width: 64,
-        height: 48,
-        channels: ChannelMode::Luma,
-        radius: 2,
-    }
+    CollabSpec::new(64, 48, ChannelMode::Luma, 2)
 }
 
 #[test]
-fn collab_candidate_names_round_trip() {
-    for &candidate in CollabCandidate::ALL {
-        let name = candidate.name();
-        let parsed = CollabCandidate::from_name(name);
-        assert_eq!(parsed, Some(candidate), "{name}");
+fn collab_variant_names_round_trip_and_are_unique() {
+    let mut seen = HashSet::new();
+
+    for &variant in CollabVariant::ALL {
+        let name = variant.name();
+        let parsed = CollabVariant::from_name(name);
+        assert_eq!(parsed, Some(variant), "{name}");
+        assert!(seen.insert(name), "{name} names two variants");
     }
 
-    assert_eq!(CollabCandidate::baseline(), CollabCandidate::Groups8);
+    assert_eq!(CollabVariant::baseline(), CollabVariant::BASELINE);
+    assert_eq!(CollabVariant::BASELINE.name(), "groups8_clipped");
 }
 
-/// Each 8-lane group owns a 65-float transpose region, and that is all the kernel allocates.
 #[test]
-fn collab_shared_bytes_count_one_transpose_region_per_group() {
+fn the_listed_variants_cross_every_dimension() {
+    assert_eq!(CollabVariant::ALL.len(), 24);
+
+    for groups in [8u32, 4, 16] {
+        for walk in [Walk::Clipped, Walk::Uniform] {
+            for centre in [Centre::Global, Centre::Tiled] {
+                for batched in [false, true] {
+                    let variant = CollabVariant {
+                        groups,
+                        walk,
+                        centre,
+                        batched,
+                    };
+                    assert!(CollabVariant::ALL.contains(&variant), "{variant:?} is not listed");
+                }
+            }
+        }
+    }
+
+    let everything = CollabVariant {
+        groups: 16,
+        walk: Walk::Uniform,
+        centre: Centre::Tiled,
+        batched: true,
+    };
+    assert_eq!(everything.name(), "groups16_uniform_tiled_batched");
+}
+
+/// Before fit checks the uniform walk holds half the listed variants.
+#[test]
+fn a_uniform_only_runtime_is_offered_half_the_variants() {
+    let uniform_only_count = CollabVariant::ALL
+        .iter()
+        .filter(|variant| variant.runs_where(true))
+        .count();
+
+    assert_eq!(uniform_only_count, 12);
+}
+
+/// The staged site times every fitted variant at 8 groups, then 2 more group counts for each of the
+/// 3 fastest. That is 8 and then 6, 14 in all, or 4 and then 6 where only the uniform walk runs.
+#[test]
+fn the_staged_collab_site_times_the_first_stage_and_three_regroupings() {
     let client = test_client();
     let site = collab_site(&client, &luma_spec());
+    let limits = DeviceLimits::from_client(&client);
+    let uniform_only = needs_warp_uniform_search(&client);
 
-    assert_eq!(site.shared_bytes(CollabCandidate::Groups8), 8 * 65 * 4);
-    assert_eq!(site.shape(CollabCandidate::Groups8).units(), 64);
+    let fitted = fit_candidates(&site, &limits).expect("the baseline fits");
+    let at_eight_groups = fitted.iter().filter(|variant| variant.groups == 8).count();
+    let timed = timed_count(&site, &fitted);
+    let expected_first = if uniform_only { 4 } else { 8 };
+
+    assert_eq!(at_eight_groups, expected_first);
+    assert_eq!(timed, at_eight_groups + 3 * 2);
+}
+
+#[test]
+fn the_baseline_walk_follows_the_runtime() {
+    let uniform = CollabVariant::baseline_for(true);
+
+    assert_eq!(CollabVariant::baseline_for(false), CollabVariant::BASELINE);
+    assert_eq!(uniform.walk, Walk::Uniform);
+    assert_eq!(uniform.groups, CollabVariant::BASELINE.groups);
+    assert_eq!(uniform.name(), "groups8_uniform");
+}
+
+#[test]
+fn a_uniform_only_runtime_runs_only_uniform_walks() {
+    for &variant in CollabVariant::ALL {
+        let uniform = variant.walk == Walk::Uniform;
+
+        assert!(variant.runs_where(false), "{}", variant.name());
+        assert_eq!(variant.runs_where(true), uniform, "{}", variant.name());
+    }
+}
+
+#[test]
+fn this_runtime_is_offered_its_baseline_first_and_only_legal_walks() {
+    let client = test_client();
+    let site = collab_site(&client, &luma_spec());
+    let limits = DeviceLimits::from_client(&client);
+    let uniform_only = needs_warp_uniform_search(&client);
+
+    let fitted = fit_candidates(&site, &limits).expect("the baseline fits");
+    let expected_baseline = CollabVariant::baseline_for(uniform_only);
+    let legal: Vec<CollabVariant> = CollabVariant::ALL
+        .iter()
+        .copied()
+        .filter(|variant| variant.runs_where(uniform_only))
+        .collect();
+
+    assert_eq!(fitted[0], expected_baseline);
+    assert_eq!(fitted.len(), legal.len());
+
+    for variant in &fitted {
+        assert!(legal.contains(variant), "{} is not legal here", variant.name());
+    }
+}
+
+/// Each 8-lane group owns a 65-float transpose region, and the global centre keeps a one-element
+/// placeholder tile.
+#[test]
+fn collab_shared_bytes_count_the_transpose_regions_and_the_tile() {
+    let client = test_client();
+    let site = collab_site(&client, &luma_spec());
+    let groups16 = CollabVariant {
+        groups: 16,
+        ..CollabVariant::BASELINE
+    };
+    let tiled = CollabVariant {
+        centre: Centre::Tiled,
+        ..CollabVariant::BASELINE
+    };
+
+    // A luma tile at radius 9 is 54 by 26 pixels of one f32 lane.
+    assert_eq!(site.shared_bytes(CollabVariant::BASELINE), 8 * 65 * 4 + 4);
+    assert_eq!(site.shared_bytes(groups16), 16 * 65 * 4 + 4);
+    assert_eq!(site.shared_bytes(tiled), 8 * 65 * 4 + 54 * 26 * 4);
+    assert_eq!(site.shape(CollabVariant::BASELINE).units(), 64);
+}
+
+#[test]
+fn the_tile_spans_every_reference_window_of_the_cube() {
+    assert_eq!(tile_width(8, 9), 54);
+    assert_eq!(tile_width(16, 9), 86);
+    assert_eq!(tile_height(9), 26);
+
+    for width in [40u32, 64, 70, 104, 129, 1920] {
+        let refs = refs_along(width);
+        let max_x = width - PATCH_SIZE;
+
+        for groups in [4u32, 8, 16] {
+            for spatial_radius in [1u32, 9, 16] {
+                let span = tile_width(groups, spatial_radius);
+                let cubes = refs.div_ceil(groups);
+
+                for cube in 0..cubes {
+                    let first_ref = (cube * groups * STEP).min(max_x);
+                    let origin = clamp_window_edge(first_ref, -(spatial_radius as i32), max_x);
+
+                    for group in 0..groups {
+                        let ref_index = (cube * groups + group).min(refs - 1);
+                        let ref_x = (ref_index * STEP).min(max_x);
+                        let left = clamp_window_edge(ref_x, -(spatial_radius as i32), max_x);
+                        let right = clamp_window_edge(ref_x, spatial_radius as i32, max_x);
+                        let last_column = right + PATCH_SIZE - 1;
+                        let label =
+                            format!("width {width} groups {groups} radius {spatial_radius} cube {cube}");
+
+                        assert!(left >= origin, "{label}: the window starts left of the tile");
+                        assert!(
+                            last_column < origin + span,
+                            "{label}: the window ends right of the tile"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `position + offset` clamped to the top-left positions a patch can take, as the kernel clamps a
+/// search window's edge.
+fn clamp_window_edge(position: u32, offset: i32, max_pos: u32) -> u32 {
+    let shifted = position as i32 + offset;
+    shifted.clamp(0, max_pos as i32) as u32
+}
+
+/// The tile holds every stored lane, so a radius 9 yuv tile at 16 groups is 86 by 26 pixels of
+/// four lanes. That is 35,776 bytes in f32 and half that in f16, plus 4,160 bytes of transpose.
+#[test]
+fn the_tile_holds_every_stored_lane_in_the_search_precision() {
+    let client = test_client();
+    let spec = CollabSpec::new(64, 48, ChannelMode::Yuv, 1);
+    let tiled16 = CollabVariant {
+        groups: 16,
+        centre: Centre::Tiled,
+        ..CollabVariant::BASELINE
+    };
+
+    let f32_site = collab_site(&client, &spec);
+    assert_eq!(f32_site.shared_bytes(tiled16), 39_936);
+
+    let f16_site = collab_site_f16(&client, &spec);
+    assert_eq!(f16_site.shared_bytes(tiled16), 22_048);
+
+    // The HIP runtime crashes at process exit while an upload is still queued.
+    sync(&client).expect("the uploads finish");
 }
 
 #[test]
 fn collab_keys_name_every_compiled_value() {
     let client = test_client();
     let site = collab_site(&client, &luma_spec());
-    let warp = u8::from(site.shape.warp_uniform);
 
     let key = site.key();
-    let expected = format!(
-        "collab_fused|w64|h64|ch=1|stored=1|radius=2|grid=4|refine=2|blksize=16|step=8|kmax=8|spatial=9|\
-         pooled=0|warp={warp}|f16=0"
-    );
 
-    assert_eq!(key.as_str(), expected);
+    assert_eq!(
+        key.as_str(),
+        "collab_fused|w64|h64|ch=1|stored=1|radius=2|grid=4|refine=2|blksize=16|step=8|kmax=8|spatial=9|pooled=0|f16=0"
+    );
 }
 
+/// The baseline launches on any plane width, so only the other variants drop.
 #[test]
 fn collab_baseline_fits_planes_narrower_than_eight_lanes() {
     let client = test_client();
@@ -63,59 +268,8 @@ fn collab_baseline_fits_planes_narrower_than_eight_lanes() {
 
     let fitted = fit_candidates(&site, &limits).expect("the baseline skips the plane check");
 
-    assert_eq!(site.min_plane_size(CollabCandidate::Groups8), 8);
-    assert_eq!(fitted, vec![CollabCandidate::Groups8]);
-}
-
-/// Walks the sizes, radii and warp switches with one channel mode.
-fn assert_every_group_count_matches_for(channels: ChannelMode, sizes: &[(u32, u32)]) {
-    let client = test_client();
-    let limits = DeviceLimits::from_client(&client);
-
-    for &(width, height) in sizes {
-        for radius in [0u32, 2] {
-            let spec = CollabSpec {
-                width,
-                height,
-                channels,
-                radius,
-            };
-            let site = collab_site(&client, &spec);
-
-            for warp_uniform in [false, true] {
-                let mut walked = site.clone();
-                walked.shape.warp_uniform = warp_uniform;
-                let label = format!("{spec:?} warp_uniform={warp_uniform}");
-
-                let fitted = fit_candidates(&walked, &limits).expect("the baseline fits");
-                assert!(fitted.contains(&CollabCandidate::Groups4), "{label}");
-                assert!(fitted.contains(&CollabCandidate::Groups16), "{label}");
-
-                let baseline = assert_candidates_match_baseline(&walked, &label);
-                let weights =
-                    read_f32(&client, &baseline.group_weight, baseline.refs).expect("weights read back");
-                let has_signal = weights.iter().any(|&weight| weight > 0.0);
-                assert!(has_signal, "{label}: the baseline retired no group");
-            }
-        }
-    }
-}
-
-#[test]
-fn every_group_count_matches_the_baseline_bit_for_bit_on_luma() {
-    assert_every_group_count_matches_for(ChannelMode::Luma, &[(70, 45), (129, 33)]);
-}
-
-// Every walk compiles its own kernels, so this mode walks fewer sizes.
-#[test]
-fn every_group_count_matches_the_baseline_bit_for_bit_on_chroma() {
-    assert_every_group_count_matches_for(ChannelMode::Chroma, &[(70, 45)]);
-}
-
-// Every walk compiles its own kernels, so this mode walks fewer sizes.
-#[test]
-fn every_group_count_matches_the_baseline_bit_for_bit_on_yuv() {
-    assert_every_group_count_matches_for(ChannelMode::Yuv, &[(70, 45)]);
+    assert_eq!(site.min_plane_size(CollabVariant::BASELINE), 8);
+    assert_eq!(fitted, vec![site.baseline()]);
 }
 
 #[test]
@@ -123,31 +277,292 @@ fn sixteen_groups_still_fit_a_32kb_device() {
     let client = test_client();
     let site = collab_site(&client, &luma_spec());
     let limits = small_device_limits();
+    let groups16 = CollabVariant {
+        groups: 16,
+        ..site.baseline()
+    };
 
     let fitted = fit_candidates(&site, &limits).expect("the baseline fits");
 
-    assert_eq!(site.shared_bytes(CollabCandidate::Groups16), 16 * 65 * 4);
-    assert!(fitted.contains(&CollabCandidate::Groups16));
+    assert!(fitted.contains(&groups16));
 }
 
 #[test]
-fn forcing_any_group_count_leaves_nl4d_output_unchanged() {
+fn a_32kb_device_drops_only_the_tiles_that_do_not_fit() {
+    let client = test_client();
+    let spec = CollabSpec::new(64, 48, ChannelMode::Yuv, 1);
+    let site = collab_site(&client, &spec);
+    let limits = small_device_limits();
+    let uniform_only = needs_warp_uniform_search(&client);
+
+    let fitted = fit_candidates(&site, &limits).expect("the baseline fits");
+
+    for &variant in CollabVariant::ALL {
+        let too_big = variant.groups == 16 && variant.centre == Centre::Tiled;
+        let expected = !too_big && variant.runs_where(uniform_only);
+        assert_eq!(fitted.contains(&variant), expected, "{}", variant.name());
+    }
+}
+
+/// At spatial radius 16 a yuv f32 tile at 16 groups needs 68,160 bytes, past a 64 KB device, while
+/// the 8-group tile needs 45,600.
+#[test]
+fn radius_16_drops_the_widest_tile_on_a_64kb_device() {
+    let client = test_client();
+    let mut spec = CollabSpec::new(64, 48, ChannelMode::Yuv, 1);
+    spec.spatial_radius = 16;
+    let site = collab_site(&client, &spec);
+    let limits = DeviceLimits {
+        max_shared_bytes: 64 * 1024,
+        ..small_device_limits()
+    };
+    let tiled8 = CollabVariant {
+        centre: Centre::Tiled,
+        ..site.baseline()
+    };
+    let tiled16 = CollabVariant { groups: 16, ..tiled8 };
+
+    let fitted = fit_candidates(&site, &limits).expect("the baseline fits");
+
+    assert_eq!(site.shared_bytes(tiled16), 68_160);
+    assert!(fitted.contains(&tiled8));
+    assert!(!fitted.contains(&tiled16));
+}
+
+/// Stage 0 holds only 8-group variants, and stage 1 around a seed changes only its group count.
+#[test]
+fn collab_stages_vary_the_search_first_and_the_group_count_second() {
+    let client = test_client();
+    let site = collab_site(&client, &luma_spec());
+    let seed = CollabVariant::from_name("groups8_uniform").expect("a listed variant");
+
+    let first_stage: Vec<&str> = CollabVariant::ALL
+        .iter()
+        .copied()
+        .filter(|&variant| site.in_stage(0, CollabVariant::BASELINE, variant))
+        .map(|variant| variant.name())
+        .collect();
+    let mut regrouped: Vec<&str> = CollabVariant::ALL
+        .iter()
+        .copied()
+        .filter(|&variant| site.in_stage(1, seed, variant))
+        .map(|variant| variant.name())
+        .collect();
+    regrouped.sort_unstable();
+
+    assert!(
+        first_stage.iter().all(|name| name.starts_with("groups8_")),
+        "{first_stage:?}"
+    );
+    assert_eq!(first_stage.len(), CollabVariant::ALL.len() / 3);
+    assert_eq!(
+        regrouped,
+        vec!["groups16_uniform", "groups4_uniform", "groups8_uniform"]
+    );
+}
+
+fn assert_groups_retired(client: &ComputeClient<TestRuntime>, outputs: &CollabOutputs, label: &str) {
+    let weights = read_f32(client, &outputs.group_weight, outputs.refs).expect("weights read back");
+    let retired = weights.iter().any(|&weight| weight > 0.0);
+
+    assert!(retired, "{label}: the baseline retired no group");
+}
+
+/// Checks each of `variants` that is legal and fits this device against the baseline, bit for bit.
+///
+/// A device without f16 support has no f16 case to check.
+fn assert_variants_match_baseline(spec: CollabSpec, variants: &[CollabVariant]) {
+    let client = test_client();
+    let label = format!("{spec:?}");
+
+    if spec.f16_search {
+        let supported = supports_f16_search(&client);
+        if !supported {
+            return;
+        }
+
+        let site = collab_site_f16(&client, &spec);
+        let baseline = assert_listed_candidates_match_baseline(&site, &label, variants);
+        assert_groups_retired(&client, &baseline, &label);
+        return;
+    }
+
+    let site = collab_site(&client, &spec);
+    let baseline = assert_listed_candidates_match_baseline(&site, &label, variants);
+    assert_groups_retired(&client, &baseline, &label);
+}
+
+#[test]
+fn luma_at_an_odd_width_across_frames_matches_the_baseline() {
+    let spec = CollabSpec::new(70, 45, ChannelMode::Luma, 2);
+    assert_variants_match_baseline(spec, CollabVariant::ALL);
+}
+
+fn pooled_chroma_spec() -> CollabSpec {
+    let mut spec = CollabSpec::new(64, 48, ChannelMode::Chroma, 1);
+    spec.pooled = true;
+
+    spec
+}
+
+variant_chunk_tests! {
+    assert_variants_match_baseline(pooled_chroma_spec()), 4 chunks,
+    [
+        pooled_chroma_matches_the_baseline_in_the_first_variant_quarter => 0,
+        pooled_chroma_matches_the_baseline_in_the_second_variant_quarter => 1,
+        pooled_chroma_matches_the_baseline_in_the_third_variant_quarter => 2,
+        pooled_chroma_matches_the_baseline_in_the_fourth_variant_quarter => 3,
+    ]
+}
+
+/// 133 by 33 clamps the last reference onto the right and bottom frame edges, and its 33
+/// references per row leave dead groups in the last cube of each row at every group count.
+fn frame_edge_yuv_spec() -> CollabSpec {
+    CollabSpec::new(133, 33, ChannelMode::Yuv, 2)
+}
+
+variant_chunk_tests! {
+    assert_variants_match_baseline(frame_edge_yuv_spec()), 8 chunks,
+    [
+        yuv_at_the_frame_edges_matches_the_baseline_in_the_first_variant_eighth => 0,
+        yuv_at_the_frame_edges_matches_the_baseline_in_the_second_variant_eighth => 1,
+        yuv_at_the_frame_edges_matches_the_baseline_in_the_third_variant_eighth => 2,
+        yuv_at_the_frame_edges_matches_the_baseline_in_the_fourth_variant_eighth => 3,
+        yuv_at_the_frame_edges_matches_the_baseline_in_the_fifth_variant_eighth => 4,
+        yuv_at_the_frame_edges_matches_the_baseline_in_the_sixth_variant_eighth => 5,
+        yuv_at_the_frame_edges_matches_the_baseline_in_the_seventh_variant_eighth => 6,
+        yuv_at_the_frame_edges_matches_the_baseline_in_the_eighth_variant_eighth => 7,
+    ]
+}
+
+/// 104 pixels gives 25 references per row, so the last cube of a row has dead groups at every
+/// group count.
+#[test]
+fn dead_groups_at_the_end_of_a_row_match_the_baseline() {
+    let spec = CollabSpec::new(104, 40, ChannelMode::Luma, 0);
+    assert_variants_match_baseline(spec, CollabVariant::ALL);
+}
+
+fn smaller_than_the_search_window_spec() -> CollabSpec {
+    CollabSpec::new(40, 24, ChannelMode::Yuv, 1)
+}
+
+variant_chunk_tests! {
+    assert_variants_match_baseline(smaller_than_the_search_window_spec()), 8 chunks,
+    [
+        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_first_variant_eighth => 0,
+        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_second_variant_eighth => 1,
+        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_third_variant_eighth => 2,
+        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_fourth_variant_eighth => 3,
+        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_fifth_variant_eighth => 4,
+        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_sixth_variant_eighth => 5,
+        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_seventh_variant_eighth => 6,
+        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_eighth_variant_eighth => 7,
+    ]
+}
+
+#[test]
+fn flat_content_matches_the_baseline() {
+    let mut spec = CollabSpec::new(64, 48, ChannelMode::Luma, 1);
+    spec.flat = true;
+    assert_variants_match_baseline(spec, CollabVariant::ALL);
+}
+
+#[test]
+fn the_f16_search_on_pooled_luma_matches_the_baseline() {
+    let mut spec = CollabSpec::new(70, 45, ChannelMode::Luma, 2);
+    spec.f16_search = true;
+    spec.pooled = true;
+    assert_variants_match_baseline(spec, CollabVariant::ALL);
+}
+
+fn f16_yuv_spec() -> CollabSpec {
+    let mut spec = CollabSpec::new(64, 48, ChannelMode::Yuv, 1);
+    spec.f16_search = true;
+
+    spec
+}
+
+variant_chunk_tests! {
+    assert_variants_match_baseline(f16_yuv_spec()), 8 chunks,
+    [
+        the_f16_search_on_yuv_matches_the_baseline_in_the_first_variant_eighth => 0,
+        the_f16_search_on_yuv_matches_the_baseline_in_the_second_variant_eighth => 1,
+        the_f16_search_on_yuv_matches_the_baseline_in_the_third_variant_eighth => 2,
+        the_f16_search_on_yuv_matches_the_baseline_in_the_fourth_variant_eighth => 3,
+        the_f16_search_on_yuv_matches_the_baseline_in_the_fifth_variant_eighth => 4,
+        the_f16_search_on_yuv_matches_the_baseline_in_the_sixth_variant_eighth => 5,
+        the_f16_search_on_yuv_matches_the_baseline_in_the_seventh_variant_eighth => 6,
+        the_f16_search_on_yuv_matches_the_baseline_in_the_eighth_variant_eighth => 7,
+    ]
+}
+
+fn f16_frame_edge_chroma_spec() -> CollabSpec {
+    let mut spec = CollabSpec::new(133, 33, ChannelMode::Chroma, 2);
+    spec.f16_search = true;
+
+    spec
+}
+
+variant_chunk_tests! {
+    assert_variants_match_baseline(f16_frame_edge_chroma_spec()), 4 chunks,
+    [
+        the_f16_search_on_chroma_at_the_frame_edges_matches_the_baseline_in_the_first_variant_quarter => 0,
+        the_f16_search_on_chroma_at_the_frame_edges_matches_the_baseline_in_the_second_variant_quarter => 1,
+        the_f16_search_on_chroma_at_the_frame_edges_matches_the_baseline_in_the_third_variant_quarter => 2,
+        the_f16_search_on_chroma_at_the_frame_edges_matches_the_baseline_in_the_fourth_variant_quarter => 3,
+    ]
+}
+
+/// Runs nl4d over `channels` with each of `variants` forced and checks it against the baseline.
+fn assert_forced_variants_leave_nl4d_output_unchanged(channels: ChannelMode, variants: &[CollabVariant]) {
     let options = Nl4dOptions {
         temporal_radius: 1,
         ..Nl4dOptions::default()
     };
+    let planes = channels.count() as usize;
+    let (width, height) = (72u32, 48u32);
+    let frames = noisy_frames(width, height, planes, 7);
+    let baseline_plan = KernelPlan::baseline();
+    let baseline = nl4d_outputs(options, channels, width, height, &frames, baseline_plan);
 
-    for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
-        let planes = channels.count() as usize;
-        let (width, height) = (72u32, 48u32);
-        let frames = noisy_frames(width, height, planes, 7);
-        let baseline_plan = KernelPlan::baseline();
-        let baseline = nl4d_outputs(options, channels, width, height, &frames, baseline_plan);
-
-        for &candidate in CollabCandidate::ALL {
-            let plan = KernelPlan::baseline().with_site(COLLAB_FUSED, candidate.name());
-            let forced = nl4d_outputs(options, channels, width, height, &frames, plan);
-            assert_eq!(forced, baseline, "{channels:?} {}", candidate.name());
-        }
+    for &variant in variants {
+        let plan = KernelPlan::baseline().with_site(COLLAB_FUSED, variant.name());
+        let forced = nl4d_outputs(options, channels, width, height, &frames, plan);
+        assert_eq!(forced, baseline, "{channels:?} {}", variant.name());
     }
+}
+
+variant_chunk_tests! {
+    assert_forced_variants_leave_nl4d_output_unchanged(ChannelMode::Luma), 4 chunks,
+    [
+        forcing_the_first_variant_quarter_leaves_luma_nl4d_output_unchanged => 0,
+        forcing_the_second_variant_quarter_leaves_luma_nl4d_output_unchanged => 1,
+        forcing_the_third_variant_quarter_leaves_luma_nl4d_output_unchanged => 2,
+        forcing_the_fourth_variant_quarter_leaves_luma_nl4d_output_unchanged => 3,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_forced_variants_leave_nl4d_output_unchanged(ChannelMode::Chroma), 4 chunks,
+    [
+        forcing_the_first_variant_quarter_leaves_chroma_nl4d_output_unchanged => 0,
+        forcing_the_second_variant_quarter_leaves_chroma_nl4d_output_unchanged => 1,
+        forcing_the_third_variant_quarter_leaves_chroma_nl4d_output_unchanged => 2,
+        forcing_the_fourth_variant_quarter_leaves_chroma_nl4d_output_unchanged => 3,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_forced_variants_leave_nl4d_output_unchanged(ChannelMode::Yuv), 8 chunks,
+    [
+        forcing_the_first_variant_eighth_leaves_yuv_nl4d_output_unchanged => 0,
+        forcing_the_second_variant_eighth_leaves_yuv_nl4d_output_unchanged => 1,
+        forcing_the_third_variant_eighth_leaves_yuv_nl4d_output_unchanged => 2,
+        forcing_the_fourth_variant_eighth_leaves_yuv_nl4d_output_unchanged => 3,
+        forcing_the_fifth_variant_eighth_leaves_yuv_nl4d_output_unchanged => 4,
+        forcing_the_sixth_variant_eighth_leaves_yuv_nl4d_output_unchanged => 5,
+        forcing_the_seventh_variant_eighth_leaves_yuv_nl4d_output_unchanged => 6,
+        forcing_the_eighth_variant_eighth_leaves_yuv_nl4d_output_unchanged => 7,
+    ]
 }

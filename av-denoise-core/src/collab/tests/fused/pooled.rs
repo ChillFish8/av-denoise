@@ -1,7 +1,8 @@
 use cubecl::prelude::*;
 
-use super::{Setup, cross_frame_setup, run_fused, run_fused_walk, unique_frame};
+use super::{Setup, cross_frame_setup, run_fused, run_fused_variant, unique_frame};
 use crate::collab::kernels::fused::pooled::pooled_threshold;
+use crate::collab::kernels::fused::{CollabVariant, Walk};
 use crate::collab::tests::helpers::{R, make_client};
 use crate::collab::{PATCH_AREA, PATCH_SIZE};
 
@@ -321,8 +322,12 @@ fn both_walks_agree_with_pooling_on() {
     let mut setup = cross_frame_setup(64, 48, 2);
     setup.pooled = Some(RATIO);
 
-    let divergent = run_fused_walk(&setup, Some(false));
-    let uniform = run_fused_walk(&setup, Some(true));
+    let uniform_variant = CollabVariant {
+        walk: Walk::Uniform,
+        ..CollabVariant::BASELINE
+    };
+    let divergent = run_fused_variant(&setup, CollabVariant::BASELINE);
+    let uniform = run_fused_variant(&setup, uniform_variant);
 
     assert_eq!(divergent.accum, uniform.accum);
     assert_eq!(divergent.wsum, uniform.wsum);
@@ -335,8 +340,12 @@ fn a_ragged_frame_with_pooling_on_completes_and_both_walks_agree() {
     let mut setup = Setup::spatial_only(frame, 70, 54);
     setup.pooled = Some(RATIO);
 
-    let divergent = run_fused_walk(&setup, Some(false));
-    let uniform = run_fused_walk(&setup, Some(true));
+    let uniform_variant = CollabVariant {
+        walk: Walk::Uniform,
+        ..CollabVariant::BASELINE
+    };
+    let divergent = run_fused_variant(&setup, CollabVariant::BASELINE);
+    let uniform = run_fused_variant(&setup, uniform_variant);
     let frame_sum = divergent.frame_weight_sum(0);
 
     assert_eq!(divergent.accum, uniform.accum);

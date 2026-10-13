@@ -1,6 +1,7 @@
 use super::{
     Digest,
     Setup,
+    assert_every_variant_matches_recorded,
     assert_matches_recorded,
     cross_frame_setup,
     five_frame_ring_with_jittered_copies,
@@ -15,7 +16,6 @@ fn fused_reproduces_recorded_output_on_unique_content() {
     let (width, height) = (128u32, 96u32);
     let frame = unique_frame(width, height);
     let setup = Setup::spatial_only(frame, width, height);
-    let got = run_fused(&setup);
     let want = Digest {
         covered: 12288,
         pixel_mean: 0.500102660422,
@@ -33,7 +33,7 @@ fn fused_reproduces_recorded_output_on_unique_content() {
         ],
     };
 
-    assert_matches_recorded("unique content", &got, &want);
+    assert_every_variant_matches_recorded("unique content", &setup, &want);
 }
 
 /// The unique frame ramps along x, so a one-column shift costs far more than a one-row shift and
@@ -51,7 +51,6 @@ fn fused_reproduces_recorded_output_on_a_transposed_ramp() {
     }
 
     let setup = Setup::spatial_only(frame, width, height);
-    let got = run_fused(&setup);
     let want = Digest {
         covered: 12288,
         pixel_mean: 0.500026936557,
@@ -69,11 +68,11 @@ fn fused_reproduces_recorded_output_on_a_transposed_ramp() {
         ],
     };
 
-    assert_matches_recorded("transposed ramp", &got, &want);
+    assert_every_variant_matches_recorded("transposed ramp", &setup, &want);
 }
 
-/// 104 pixels wide gives 25 reference patches at `STEP = 4`, so the fourth cube of each row runs one
-/// live group and seven dead ones.
+/// 104 pixels wide gives 25 reference patches at `STEP = 4`, so the last cube of each row runs dead
+/// groups at every group count.
 ///
 /// The dead groups must reach every barrier and write nothing. One that scattered would double the
 /// last reference's contribution and move a pixel.
@@ -82,7 +81,6 @@ fn fused_reproduces_recorded_output_when_refs_are_not_a_multiple_of_eight() {
     let (width, height) = (104u32, 96u32);
     let frame = unique_frame(width, height);
     let setup = Setup::spatial_only(frame, width, height);
-    let got = run_fused(&setup);
     let want = Digest {
         covered: 9984,
         pixel_mean: 0.500121022858,
@@ -100,7 +98,7 @@ fn fused_reproduces_recorded_output_when_refs_are_not_a_multiple_of_eight() {
         ],
     };
 
-    assert_matches_recorded("ragged reference row", &got, &want);
+    assert_every_variant_matches_recorded("ragged reference row", &setup, &want);
 }
 
 /// At `spatial_radius = 1` a corner reference sees 2x2 candidates and an edge one 2x3, both keeping
@@ -114,7 +112,6 @@ fn fused_reproduces_recorded_output_on_a_short_search_space() {
     let frame = unique_frame(width, height);
     let mut setup = Setup::spatial_only(frame, width, height);
     setup.spatial_radius = 1;
-    let got = run_fused(&setup);
     let want = Digest {
         covered: 4096,
         pixel_mean: 0.500333883408,
@@ -132,7 +129,7 @@ fn fused_reproduces_recorded_output_on_a_short_search_space() {
         ],
     };
 
-    assert_matches_recorded("short search space", &got, &want);
+    assert_every_variant_matches_recorded("short search space", &setup, &want);
 }
 
 /// Noise over a flat field has no ramp to separate candidates, so the self-match sentinel and the
@@ -142,7 +139,6 @@ fn fused_reproduces_recorded_output_on_noise() {
     let (width, height) = (64u32, 64u32);
     let frame = noisy_flat_field(width, height, 0.5, 0.05);
     let setup = Setup::spatial_only(frame, width, height);
-    let got = run_fused(&setup);
     let want = Digest {
         covered: 4096,
         pixel_mean: 0.500598531425,
@@ -160,7 +156,7 @@ fn fused_reproduces_recorded_output_on_noise() {
         ],
     };
 
-    assert_matches_recorded("noise", &got, &want);
+    assert_every_variant_matches_recorded("noise", &setup, &want);
 }
 
 /// The kernel applies the correlation profile at the threshold, while the recording applied it to
@@ -175,7 +171,6 @@ fn fused_reproduces_recorded_output_under_correlation_shaping() {
     let frame = noisy_flat_field(width, height, 0.5, 0.05);
     let mut setup = Setup::spatial_only(frame, width, height);
     setup.rho = 0.86;
-    let got = run_fused(&setup);
     let want = Digest {
         covered: 4096,
         pixel_mean: 0.500501375321,
@@ -193,7 +188,7 @@ fn fused_reproduces_recorded_output_under_correlation_shaping() {
         ],
     };
 
-    assert_matches_recorded("correlation shaping", &got, &want);
+    assert_every_variant_matches_recorded("correlation shaping", &setup, &want);
 }
 
 /// Covers the `c_min` skip, the volume grid with its single-frame fallback, and the scatter into
@@ -206,7 +201,6 @@ fn fused_reproduces_recorded_output_under_correlation_shaping() {
 #[test]
 fn fused_reproduces_recorded_output_across_frames() {
     let setup = cross_frame_setup(64, 64, 2);
-    let got = run_fused(&setup);
     let want = Digest {
         covered: 16453,
         pixel_mean: 0.441598762473,
@@ -224,7 +218,7 @@ fn fused_reproduces_recorded_output_across_frames() {
         ],
     };
 
-    assert_matches_recorded("cross frame", &got, &want);
+    assert_every_variant_matches_recorded("cross frame", &setup, &want);
 }
 
 /// Each neighbour holds the centre plus its own jitter, so every volume keeps a different three of

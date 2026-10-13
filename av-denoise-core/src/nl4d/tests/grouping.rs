@@ -9,11 +9,11 @@ use super::helpers::{
     noisy_ring,
     planted_ring,
 };
-use crate::collab::geometry::{BASELINE_GROUPS, fused_cubes_x, ref_count, refs_along, strength_map_dims};
+use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
-use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
+use crate::collab::kernels::fused::{CollabVariant, STRENGTH_MAP_OFF, Walk, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{PATCH_SIZE, STEP, grid_frames, needs_warp_uniform_search};
+use crate::collab::{PATCH_SIZE, STEP, grid_frames};
 use crate::nlmeans::NOISE_CURVE_BINS;
 use crate::nlmeans::motion::neighbour_idx_for_k;
 
@@ -42,8 +42,8 @@ struct Knobs {
     spatial_radius: u32,
     /// The motion block side length. At [BLK_STEP] exactly one block covers a patch.
     blksize: u32,
-    /// Pins the search walk. `None` follows [needs_warp_uniform_search].
-    warp_uniform: Option<bool>,
+    /// Pins the kernel variant. `None` runs this runtime's baseline.
+    variant: Option<CollabVariant>,
 }
 
 impl Default for Knobs {
@@ -56,7 +56,7 @@ impl Default for Knobs {
             refine: REFINE,
             spatial_radius: SPATIAL_RADIUS,
             blksize: BLKSIZE,
-            warp_uniform: None,
+            variant: None,
         }
     }
 }
@@ -87,7 +87,7 @@ impl FusedRun {
     }
 }
 
-/// Launches [collab_fused] over a fixture on the denoiser's eight-references-per-cube grid.
+/// Launches [collab_fused] over a fixture as the variant `knobs` pins.
 ///
 /// Luma always stores one channel per line, so the kernel's `Size` selector is fixed at 1.
 fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
@@ -134,15 +134,15 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
     let wsum = client.create_from_slice(wsum_bytes);
     let group_weight = client.empty(refs * size_of::<f32>());
 
-    let cubes_x = fused_cubes_x(width, BASELINE_GROUPS);
+    let runtime_baseline = CollabVariant::for_client(&client);
+    let variant = knobs.variant.unwrap_or(runtime_baseline);
+
+    let cubes_x = fused_cubes_x(width, variant.groups);
     let refs_y = refs_along(height);
     let grid = CubeCount::new_2d(cubes_x, refs_y);
-    let dim = CubeDim::new_1d(8 * BASELINE_GROUPS);
+    let dim = CubeDim::new_1d(variant.lanes());
     let scale = weight_scale(knobs.sigma, &profile);
     let accum_scale = cross_frame_accum_scale(knobs.spatial_radius, fixture.radius);
-    let warp_uniform = knobs
-        .warp_uniform
-        .unwrap_or_else(|| needs_warp_uniform_search(&client));
     let grid_frame_count = grid_frames(fixture.radius);
 
     let stored_ch = 1usize;
@@ -173,7 +173,6 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
             STRENGTH_MAP_OFF,
             scale,
             accum_scale,
-            warp_uniform,
             false,
             fixture.radius,
             grid_frame_count,
@@ -195,7 +194,7 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
             map_rows,
             0.0f32,
             false,
-            BASELINE_GROUPS,
+            variant,
         );
     }
 
@@ -693,11 +692,14 @@ fn a_position_claimed_by_an_earlier_volume_agrees_across_search_walks() {
     let bait = twin_ring(&patch, |k| [3 * k, 16], |k| [3 * k, 16]);
 
     let clipped_knobs = Knobs {
-        warp_uniform: Some(false),
+        variant: Some(CollabVariant::BASELINE),
         ..twin_knobs()
     };
     let uniform_knobs = Knobs {
-        warp_uniform: Some(true),
+        variant: Some(CollabVariant {
+            walk: Walk::Uniform,
+            ..CollabVariant::BASELINE
+        }),
         ..twin_knobs()
     };
 

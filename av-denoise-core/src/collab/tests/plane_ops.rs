@@ -3,8 +3,10 @@ use cubecl::prelude::*;
 use super::helpers::{R, make_client};
 use crate::collab::MAX_K;
 use crate::collab::kernels::plane_ops::{
+    group_any,
     group_base,
     plane_ssd_reduce8,
+    scatter_sums8,
     shift_insert8,
     shift_insert8_gated,
     transpose8,
@@ -359,5 +361,108 @@ fn transpose8_swaps_rows_and_columns_within_each_group() {
                 assert_eq!(got, want, "group {grp} lane {sub} slot {r}");
             }
         }
+    }
+}
+
+#[cube(launch_unchecked)]
+fn scatter_sums_kernel(input: &Array<f32>, scattered: &mut Array<f32>, reduced: &mut Array<f32>) {
+    let lane = ABSOLUTE_POS_X;
+    let sub = UNIT_POS_PLANE % 8u32;
+    let mut partials = Array::<f32>::new(8usize);
+
+    #[unroll]
+    for k in 0..8u32 {
+        partials[k as usize] = input[(lane * 8u32 + k) as usize];
+    }
+
+    scattered[lane as usize] = scatter_sums8(&partials, sub);
+
+    let mut own_total = 0.0f32;
+
+    #[unroll]
+    for k in 0..8u32 {
+        let total = plane_ssd_reduce8(partials[k as usize]);
+        own_total = select(sub == k, total, own_total);
+    }
+
+    reduced[lane as usize] = own_total;
+}
+
+#[test]
+fn scatter_sums8_matches_the_group_reduction_bit_for_bit() {
+    let lanes = 16usize;
+    let input: Vec<f32> = (0..lanes * 8)
+        .map(|index| {
+            let magnitude = 10f32.powi((index % 7) as i32 - 3);
+            let fraction = ((index * 2_654_435_761) % 1000) as f32 / 1000.0;
+            magnitude * (0.5 + fraction)
+        })
+        .collect();
+    let client = make_client();
+    let input_bytes = f32::as_bytes(&input);
+    let input_buf = client.create_from_slice(input_bytes);
+    let scattered_buf = client.empty(lanes * size_of::<f32>());
+    let reduced_buf = client.empty(lanes * size_of::<f32>());
+
+    unsafe {
+        scatter_sums_kernel::launch_unchecked::<R>(
+            &client,
+            CubeCount::new_1d(1),
+            CubeDim::new_1d(lanes as u32),
+            ArrayArg::from_raw_parts(input_buf, input.len()),
+            ArrayArg::from_raw_parts(scattered_buf.clone(), lanes),
+            ArrayArg::from_raw_parts(reduced_buf.clone(), lanes),
+        );
+    }
+
+    let scattered_bytes = client.read_one(scattered_buf).expect("scattered readback failed");
+    let reduced_bytes = client.read_one(reduced_buf).expect("reduced readback failed");
+    let scattered = f32::from_bytes(&scattered_bytes);
+    let reduced = f32::from_bytes(&reduced_bytes);
+
+    let totals = scattered.iter().zip(reduced.iter()).take(lanes);
+    for (lane, (scattered_total, reduced_total)) in totals.enumerate() {
+        assert_eq!(scattered_total.to_bits(), reduced_total.to_bits(), "lane {lane}");
+    }
+}
+
+#[cube(launch_unchecked)]
+fn group_any_kernel(flags: &Array<u32>, out: &mut Array<u32>) {
+    let lane = ABSOLUTE_POS_X;
+    let flag = flags[lane as usize] != 0u32;
+    let voted = group_any(flag);
+    out[lane as usize] = select(voted, 1u32, 0u32);
+}
+
+#[test]
+fn group_any_votes_within_its_own_group() {
+    // Group 0 has one raised flag in its last lane, groups 1 and 3 have none, group 2 has every
+    // flag raised.
+    let lanes = 32usize;
+    let mut flags = vec![0u32; lanes];
+    flags[7] = 1;
+    flags[16..24].fill(1);
+    let client = make_client();
+    let flag_bytes = u32::as_bytes(&flags);
+    let flag_buf = client.create_from_slice(flag_bytes);
+    let out_buf = client.empty(lanes * size_of::<u32>());
+
+    unsafe {
+        group_any_kernel::launch_unchecked::<R>(
+            &client,
+            CubeCount::new_1d(1),
+            CubeDim::new_1d(lanes as u32),
+            ArrayArg::from_raw_parts(flag_buf, lanes),
+            ArrayArg::from_raw_parts(out_buf.clone(), lanes),
+        );
+    }
+
+    let out_bytes = client.read_one(out_buf).expect("vote readback failed");
+    let votes = u32::from_bytes(&out_bytes);
+
+    for (lane, &vote) in votes.iter().take(lanes).enumerate() {
+        let raised_group = lane < 8 || (16..24).contains(&lane);
+        let expected = u32::from(raised_group);
+        assert_eq!(vote, expected, "lane {lane}");
     }
 }

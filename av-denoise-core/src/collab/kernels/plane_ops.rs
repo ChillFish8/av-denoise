@@ -92,3 +92,56 @@ pub(crate) fn transpose8(buf: &mut SharedMemory<f32>, v: &mut Array<f32>, sub: u
     }
     sync_cube();
 }
+
+/// Sums each of 8 per-lane partials across the group and leaves candidate `sub`'s total in lane
+/// `sub`.
+///
+/// Each stage keeps the half of the candidates whose index bit matches the lane's, and swaps the
+/// other half with its partner at XOR 1, 2 and then 4. That is 7 shuffles for 8 totals. The partners
+/// pair up as in [plane_ssd_reduce8], so every total has the same bits.
+#[cube]
+pub(crate) fn scatter_sums8(partials: &Array<f32>, sub: u32) -> f32 {
+    let odd_lane = (sub & 1u32) == 1u32;
+    let mut pairs = Array::<f32>::new(4usize);
+
+    #[unroll]
+    for k in 0..4u32 {
+        let even = partials[(2u32 * k) as usize];
+        let odd = partials[(2u32 * k + 1u32) as usize];
+        let kept = select(odd_lane, odd, even);
+        let sent = select(odd_lane, even, odd);
+        let received = plane_shuffle_xor(sent, 1u32);
+        pairs[k as usize] = kept + received;
+    }
+
+    let upper_pair = ((sub >> 1u32) & 1u32) == 1u32;
+    let mut quads = Array::<f32>::new(2usize);
+
+    #[unroll]
+    for k in 0..2u32 {
+        let low = pairs[(2u32 * k) as usize];
+        let high = pairs[(2u32 * k + 1u32) as usize];
+        let kept = select(upper_pair, high, low);
+        let sent = select(upper_pair, low, high);
+        let received = plane_shuffle_xor(sent, 2u32);
+        quads[k as usize] = kept + received;
+    }
+
+    let upper_quad = ((sub >> 2u32) & 1u32) == 1u32;
+    let kept = select(upper_quad, quads[1usize], quads[0usize]);
+    let sent = select(upper_quad, quads[0usize], quads[1usize]);
+    let received = plane_shuffle_xor(sent, 4u32);
+
+    kept + received
+}
+
+/// Whether any lane of the calling lane's 8-lane group raised `flag`, returned to every lane.
+#[cube]
+pub(crate) fn group_any(flag: bool) -> bool {
+    let mut votes = select(flag, 1u32, 0u32);
+    votes |= plane_shuffle_xor(votes, 1u32);
+    votes |= plane_shuffle_xor(votes, 2u32);
+    votes |= plane_shuffle_xor(votes, 4u32);
+
+    votes != 0u32
+}

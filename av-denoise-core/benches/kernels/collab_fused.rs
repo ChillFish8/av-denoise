@@ -2,6 +2,7 @@ use std::marker::PhantomData;
 
 use av_denoise_core::bench_api::NOISE_CURVE_BINS;
 use av_denoise_core::bench_api::collab::geometry::{ref_count, refs_along, strength_map_dims};
+use av_denoise_core::bench_api::collab::grid_frames;
 use av_denoise_core::bench_api::collab::kernels::aggregate::{
     cross_frame_accum_scale,
     kaiser_window,
@@ -9,16 +10,15 @@ use av_denoise_core::bench_api::collab::kernels::aggregate::{
 };
 use av_denoise_core::bench_api::collab::kernels::fused::{STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
 use av_denoise_core::bench_api::collab::kernels::transforms::dct_noise_profile;
-use av_denoise_core::bench_api::collab::{grid_frames, needs_warp_uniform_search};
 use av_denoise_core::bench_api::tune_sites::{
-    CollabCandidate,
     CollabInputs,
     CollabOutputs,
     CollabShape,
     CollabSite,
     CollabValues,
+    CollabVariant,
 };
-use av_denoise_core::tune::{SiteCandidate, VariantSite};
+use av_denoise_core::tune::{DeviceLimits, SiteCandidate, VariantSite, fit_candidates};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -68,7 +68,31 @@ pub struct CollabFusedBench<R: Runtime> {
     pub strength_map: bool,
     /// Launches with the pooled threshold on.
     pub pooled: bool,
-    pub candidate: CollabCandidate,
+    pub candidate: CollabVariant,
+}
+
+/// The variants this device runs for a bench of `channels`, baseline first.
+pub fn fitted_variants<R: Runtime>(
+    client: &ComputeClient<R>,
+    channels: u32,
+    channel_name: &'static str,
+) -> Vec<CollabVariant> {
+    let bench = CollabFusedBench {
+        client: client.clone(),
+        channels,
+        channel_name,
+        split_mv: false,
+        noise_curve: false,
+        strength_map: false,
+        pooled: false,
+        candidate: CollabVariant::BASELINE,
+    };
+    let input = bench.prepare();
+    let site = bench.site(&input);
+    let limits = DeviceLimits::from_client(client);
+    let fitted = fit_candidates(&site, &limits);
+
+    fitted.expect("the baseline fits the bench device")
 }
 
 /// The luma pool ratio at the default lambda. The kernel's cost does not depend on its value.
@@ -137,7 +161,6 @@ impl<R: Runtime> CollabFusedBench<R> {
         let dct_profile = dct_noise_profile(0.0);
         let group_weight_scale = weight_scale(SIGMA, &dct_profile);
         let accum_scale = cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS);
-        let uniform_search = needs_warp_uniform_search(&self.client);
         let frames_per_volume = grid_frames(RADIUS);
 
         let inputs = CollabInputs {
@@ -169,7 +192,6 @@ impl<R: Runtime> CollabFusedBench<R> {
             pool_ratio: POOL_RATIO,
         };
         let shape = CollabShape {
-            warp_uniform: uniform_search,
             f16_search: false,
             radius: RADIUS,
             grid_frames: frames_per_volume,
@@ -332,7 +354,7 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
 
         format!(
             "{}/{}/1080p_{}{field}{curve}{map}{pool}",
-            CollabCandidate::SITE,
+            CollabVariant::SITE,
             self.candidate.name(),
             self.channel_name,
         )

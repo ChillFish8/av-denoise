@@ -1,9 +1,9 @@
 use cubecl::prelude::*;
 
+use super::distance::{candidate_distance, pack_reference};
+use super::variant::Walk;
 use crate::collab::PATCH_SIZE;
 use crate::collab::kernels::group::{clamp_top_left, pack_pos_t};
-use crate::collab::kernels::plane_ops::{plane_ssd_reduce8, shift_insert8, shift_insert8_gated};
-use crate::nlmeans::kernels::helpers::read_line;
 
 /// The lowest block index whose span contains the patch at `patch_start` on one axis.
 ///
@@ -23,289 +23,6 @@ fn covering_lo_host(patch_start: u32, blksize: u32, step: u32) -> u32 {
     overhang.div_ceil(step)
 }
 
-/// Packs the reference column into `S` pairs for [packed_partial].
-///
-/// A single stored channel pairs row `r` with row `r + 4`. Wider storage pairs neighbouring
-/// channels within each row, and lanes past `channels` stay zero. Without `f16_search` it returns
-/// one unfilled pair.
-#[cube]
-pub(crate) fn pack_reference<S: Float>(
-    current: &Array<f32>,
-    #[comptime] f16_search: bool,
-    #[comptime] channels: u32,
-    #[comptime] stored_ch: u32,
-) -> Array<Vector<S, Const<2>>> {
-    let pair_count = comptime!(
-        if !f16_search {
-            1
-        } else if stored_ch == 1 {
-            PATCH_SIZE / 2
-        } else {
-            PATCH_SIZE * stored_ch / 2
-        }
-    );
-    let mut packed = Array::<Vector<S, Const<2>>>::new(pair_count as usize);
-
-    if comptime!(f16_search && stored_ch == 1) {
-        #[unroll]
-        for r in 0..comptime!(PATCH_SIZE / 2) {
-            let mut pair = Vector::<f32, Const<2>>::new(0.0f32);
-            pair[0] = current[r as usize];
-            pair[1] = current[comptime!(r + PATCH_SIZE / 2) as usize];
-            packed[r as usize] = Vector::<S, Const<2>>::cast_from(pair);
-        }
-    } else if comptime!(f16_search) {
-        let pairs_per_row = comptime!(stored_ch / 2);
-        #[unroll]
-        for r in 0..PATCH_SIZE {
-            #[unroll]
-            for p in 0..pairs_per_row {
-                let first = comptime!(2 * p);
-                let second = comptime!(2 * p + 1);
-                let mut pair = Vector::<f32, Const<2>>::new(0.0f32);
-                if comptime!(first < channels) {
-                    pair[0] = current[comptime!(r * channels + first) as usize];
-                }
-                if comptime!(second < channels) {
-                    pair[1] = current[comptime!(r * channels + second) as usize];
-                }
-                packed[comptime!(r * pairs_per_row + p) as usize] = Vector::<S, Const<2>>::cast_from(pair);
-            }
-        }
-    }
-
-    packed
-}
-
-/// One lane's squared difference against the candidate column in the search ring.
-///
-/// Both sides pair up as [pack_reference] lays them out, so each packed instruction covers two
-/// values in the ring's precision `S`. The two lanes of the sum widen to f32 before they add.
-#[cube]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "every argument is a buffer, position or comptime shape the read needs"
-)]
-fn packed_partial<S: Float, N: Size>(
-    search_ring: &Array<Vector<S, N>>,
-    reference: &Array<Vector<S, Const<2>>>,
-    x: u32,
-    y: u32,
-    slot: u32,
-    sub: u32,
-    #[comptime] width: u32,
-    #[comptime] height: u32,
-    #[comptime] stored_ch: u32,
-) -> f32 {
-    let mut sum = Vector::<S, Const<2>>::new(S::new(0.0f32));
-
-    if comptime!(stored_ch == 1) {
-        #[unroll]
-        for r in 0..comptime!(PATCH_SIZE / 2) {
-            let top = read_line(search_ring, x + sub, y + r, slot, width, height);
-            let bottom_row = y + r + comptime!(PATCH_SIZE / 2);
-            let bottom = read_line(search_ring, x + sub, bottom_row, slot, width, height);
-            let mut pixel = Vector::<S, Const<2>>::empty();
-            pixel[0] = top[0];
-            pixel[1] = bottom[0];
-            let diff = reference[r as usize] - pixel;
-            sum += diff * diff;
-        }
-    } else {
-        let pairs_per_row = comptime!(stored_ch / 2);
-        #[unroll]
-        for r in 0..PATCH_SIZE {
-            let line = read_line(search_ring, x + sub, y + r, slot, width, height);
-            #[unroll]
-            for p in 0..pairs_per_row {
-                let mut pixel = Vector::<S, Const<2>>::empty();
-                pixel[0] = line[comptime!(2 * p) as usize];
-                pixel[1] = line[comptime!(2 * p + 1) as usize];
-                let diff = reference[comptime!(r * pairs_per_row + p) as usize] - pixel;
-                sum += diff * diff;
-            }
-        }
-    }
-
-    let low = f32::cast_from(sum[0]);
-    let high = f32::cast_from(sum[1]);
-    low + high
-}
-
-/// The distance from the reference patch to the candidate with top-left `(x, y)` in frame `slot`.
-///
-/// Each lane sums its own column and `plane_ssd_reduce8` completes the distance with shuffles, so
-/// every lane of the group must call this, even when the result is discarded. With `f16_search`
-/// the candidate column comes from `search_ring` and is scored by [packed_partial].
-#[cube]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "every argument is a buffer, position or comptime shape the read needs"
-)]
-pub(crate) fn candidate_distance<S: Float, N: Size>(
-    ring: &Array<Vector<f32, N>>,
-    search_ring: &Array<Vector<S, N>>,
-    current: &Array<f32>,
-    reference: &Array<Vector<S, Const<2>>>,
-    x: u32,
-    y: u32,
-    slot: u32,
-    sub: u32,
-    scale: f32,
-    #[comptime] f16_search: bool,
-    #[comptime] width: u32,
-    #[comptime] height: u32,
-    #[comptime] channels: u32,
-    #[comptime] stored_ch: u32,
-) -> f32 {
-    let mut partial = 0.0f32;
-    if comptime!(f16_search) {
-        partial = packed_partial(search_ring, reference, x, y, slot, sub, width, height, stored_ch);
-    } else {
-        #[unroll]
-        for r in 0..PATCH_SIZE {
-            let pixel = read_line(ring, x + sub, y + r, slot, width, height);
-            #[unroll]
-            for c in 0..channels {
-                let diff = current[(r * channels + c) as usize] - pixel[c as usize];
-                partial += diff * diff;
-            }
-        }
-    }
-    plane_ssd_reduce8(partial) * scale
-}
-
-/// Scores the centre frame's `spatial_radius` rectangle against the reference patch and keeps the
-/// best eight positions, one per lane, in ascending order.
-///
-/// The reference position scores below every real distance, so it always holds slot 0. Returns
-/// the number of positions the clipped rectangle holds.
-#[cube]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "every argument is a buffer or comptime shape the kernel binds"
-)]
-pub(crate) fn spatial_search<S: Float, N: Size>(
-    ring: &Array<Vector<f32, N>>,
-    search_ring: &Array<Vector<S, N>>,
-    current: &Array<f32>,
-    rx: u32,
-    ry: u32,
-    centre_slot: u32,
-    sub: u32,
-    base: u32,
-    scale: f32,
-    best_d: &mut f32,
-    best_pos: &mut u32,
-    #[comptime] warp_uniform: bool,
-    #[comptime] f16_search: bool,
-    #[comptime] spatial_radius: u32,
-    #[comptime] width: u32,
-    #[comptime] height: u32,
-    #[comptime] channels: u32,
-    #[comptime] stored_ch: u32,
-) -> u32 {
-    let max_x = comptime!(width - PATCH_SIZE);
-    let max_y = comptime!(height - PATCH_SIZE);
-    let reference = pack_reference::<S>(current, f16_search, channels, stored_ch);
-
-    let s_left = clamp_top_left(rx as i32 - spatial_radius as i32, max_x);
-    let s_right = clamp_top_left(rx as i32 + spatial_radius as i32, max_x);
-    let s_top = clamp_top_left(ry as i32 - spatial_radius as i32, max_y);
-    let s_bot = clamp_top_left(ry as i32 + spatial_radius as i32, max_y);
-
-    // The self-match takes a sentinel below every real distance, so it holds slot 0 even on flat
-    // content where every candidate ties.
-    if warp_uniform {
-        // The unclipped span covers every position the clipped walk visits, in the same order, and
-        // its comptime size gives every group in the warp the same number of turns.
-        let span = comptime!(2 * spatial_radius + 1);
-        for dy in 0..span {
-            for dx in 0..span {
-                let wanted_y = s_top + dy;
-                let wanted_x = s_left + dx;
-                let live_pos = wanted_x <= s_right && wanted_y <= s_bot;
-
-                // A masked turn still reads, so it is pinned to the last live position.
-                let candidate_x = u32::min(wanted_x, s_right);
-                let candidate_y = u32::min(wanted_y, s_bot);
-
-                let scored = candidate_distance(
-                    ring,
-                    search_ring,
-                    current,
-                    &reference,
-                    candidate_x,
-                    candidate_y,
-                    centre_slot,
-                    sub,
-                    scale,
-                    f16_search,
-                    width,
-                    height,
-                    channels,
-                    stored_ch,
-                );
-
-                // The gated insert branches on a group-local distance before it shuffles, which is
-                // the divergence this path avoids.
-                let mut dist = select(live_pos, scored, 3.0e38f32);
-
-                // A masked turn pinned onto the reference would otherwise plant a second
-                // self-match.
-                if live_pos && candidate_x == rx && candidate_y == ry {
-                    dist = -1.0e38f32;
-                }
-                shift_insert8(
-                    best_d,
-                    best_pos,
-                    dist,
-                    pack_pos_t(candidate_x, candidate_y, 0u32),
-                    sub,
-                );
-            }
-        }
-    } else {
-        let mut candidate_y = s_top;
-        while candidate_y <= s_bot {
-            let mut candidate_x = s_left;
-            while candidate_x <= s_right {
-                let mut dist = candidate_distance(
-                    ring,
-                    search_ring,
-                    current,
-                    &reference,
-                    candidate_x,
-                    candidate_y,
-                    centre_slot,
-                    sub,
-                    scale,
-                    f16_search,
-                    width,
-                    height,
-                    channels,
-                    stored_ch,
-                );
-                if candidate_x == rx && candidate_y == ry {
-                    dist = -1.0e38f32;
-                }
-                shift_insert8_gated(
-                    best_d,
-                    best_pos,
-                    dist,
-                    pack_pos_t(candidate_x, candidate_y, 0u32),
-                    sub,
-                    base,
-                );
-                candidate_x += 1u32;
-            }
-            candidate_y += 1u32;
-        }
-    }
-
-    (s_right - s_left + 1u32) * (s_bot - s_top + 1u32)
-}
-
 /// Builds one volume's frames, the anchor patch's best match in each neighbour frame.
 ///
 /// A neighbour's match is the lowest-distance position inside the refine rectangles of the motion
@@ -318,9 +35,13 @@ pub(crate) fn spatial_search<S: Float, N: Size>(
 /// is scored once. The clipped walk skips any rectangle that lies wholly inside one it already
 /// searched.
 ///
-/// With `warp_uniform` the rectangles are walked at their full comptime span and skipped
-/// positions are masked rather than branched around, so every group in a warp takes the same
-/// turns. Both walks score the same positions in the same order and keep the same matches.
+/// With [Walk::Uniform](crate::collab::kernels::fused::Walk::Uniform) the rectangles are walked
+/// at their full comptime span and skipped positions are masked rather than branched around, so
+/// every group in a plane takes the same turns. Both walks score the same positions in the same
+/// order and keep the same matches.
+///
+/// A plane-wide vote skips a position no group in the plane needs, so a turn that is masked in
+/// every group costs one vote.
 #[cube]
 #[expect(
     clippy::too_many_arguments,
@@ -342,7 +63,7 @@ pub(crate) fn trajectory_search<S: Float, N: Size>(
     member_pos: &mut Array<u32>,
     #[comptime] first: u32,
     #[comptime] tail: u32,
-    #[comptime] warp_uniform: bool,
+    #[comptime] walk: Walk,
     #[comptime] f16_search: bool,
     #[comptime] radius: u32,
     #[comptime] refine: u32,
@@ -399,7 +120,7 @@ pub(crate) fn trajectory_search<S: Float, N: Size>(
                 let wanted_by = by_lo + iy;
                 let block_live = wanted_bx <= bx_hi && wanted_by <= by_hi;
 
-                if warp_uniform {
+                if comptime!(walk == Walk::Uniform) {
                     let clamped_bx = u32::min(wanted_bx, bx_hi);
                     let clamped_by = u32::min(wanted_by, by_hi);
                     let block = clamped_by * blocks_x + clamped_bx;
@@ -445,26 +166,29 @@ pub(crate) fn trajectory_search<S: Float, N: Size>(
                             }
 
                             let live_pos = block_scored && in_rect && !skipped;
-                            let scored = candidate_distance(
-                                ring,
-                                search_ring,
-                                anchor,
-                                &reference,
-                                candidate_x,
-                                candidate_y,
-                                slot,
-                                sub,
-                                scale,
-                                f16_search,
-                                width,
-                                height,
-                                channels,
-                                stored_ch,
-                            );
-                            let dist = select(live_pos, scored, 3.0e38f32);
-                            let better = dist < frame_d;
-                            frame_d = select(better, dist, frame_d);
-                            frame_pos = select(better, packed, frame_pos);
+
+                            if plane_any(live_pos) {
+                                let scored = candidate_distance(
+                                    ring,
+                                    search_ring,
+                                    anchor,
+                                    &reference,
+                                    candidate_x,
+                                    candidate_y,
+                                    slot,
+                                    sub,
+                                    scale,
+                                    f16_search,
+                                    width,
+                                    height,
+                                    channels,
+                                    stored_ch,
+                                );
+                                let dist = select(live_pos, scored, 3.0e38f32);
+                                let better = dist < frame_d;
+                                frame_d = select(better, dist, frame_d);
+                                frame_pos = select(better, packed, frame_pos);
+                            }
                         }
                     }
 

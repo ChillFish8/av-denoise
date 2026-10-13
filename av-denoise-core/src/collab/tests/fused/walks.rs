@@ -1,80 +1,98 @@
 use super::noise_curve::stepped_curve;
-use super::{Setup, chroma_cross_frame_setup, cross_frame_setup, run_fused_walk, unique_frame};
+use super::{Setup, chroma_cross_frame_setup, cross_frame_setup, run_fused_variant, unique_frame};
+use crate::collab::kernels::fused::CollabVariant;
+use crate::tune::SiteCandidate;
+use crate::tune::tests::fixtures::variant_chunk;
 
-/// Asserts the two search walks aggregated the same thing, byte for byte.
+/// Asserts every listed variant aggregated exactly what the baseline did, byte for byte.
 ///
-/// The warp-uniform walk offers the same candidates in the same order with the same arithmetic. Its
-/// extra turns carry the `3.0e38` an unfilled slot already holds, which cannot displace a slot. A
-/// difference therefore means the masking let a dead position in or dropped a live one, not that
+/// Every variant offers the same candidates in the same order with the same arithmetic. A masked
+/// turn carries the `3.0e38` an unfilled slot already holds, which cannot displace a slot. A
+/// difference therefore means a variant let a dead position in or dropped a live one, not that
 /// floating point drifted.
-fn assert_walks_agree(label: &str, setup: &Setup) {
-    let clipped = run_fused_walk(setup, Some(false));
-    let uniform = run_fused_walk(setup, Some(true));
+fn assert_variants_agree(label: &str, setup: &Setup) {
+    assert_listed_variants_agree(label, setup, CollabVariant::ALL);
+}
 
-    assert_eq!(
-        clipped.group_weight, uniform.group_weight,
-        "{label}: the two search walks retired different groups",
-    );
-    assert_eq!(
-        clipped.accum, uniform.accum,
-        "{label}: the two search walks scattered different values",
-    );
-    assert_eq!(
-        clipped.wsum, uniform.wsum,
-        "{label}: the two search walks scattered different weights",
-    );
+/// [assert_variants_agree] over only `variants`.
+fn assert_listed_variants_agree(label: &str, setup: &Setup, variants: &[CollabVariant]) {
+    let baseline = run_fused_variant(setup, CollabVariant::BASELINE);
+    let aggregated = baseline.group_weight.iter().any(|weight| *weight > 0.0);
+
     assert!(
-        uniform.group_weight.iter().any(|weight| *weight > 0.0),
-        "{label}: neither walk aggregated anything, so agreeing proves nothing",
+        aggregated,
+        "{label}: the baseline aggregated nothing, so agreeing proves nothing"
     );
+
+    for &variant in variants {
+        if variant == CollabVariant::BASELINE {
+            continue;
+        }
+
+        let got = run_fused_variant(setup, variant);
+        let name = variant.name();
+
+        assert_eq!(
+            got.group_weight, baseline.group_weight,
+            "{label} {name}: retired different groups"
+        );
+        assert_eq!(
+            got.accum, baseline.accum,
+            "{label} {name}: scattered different values"
+        );
+        assert_eq!(
+            got.wsum, baseline.wsum,
+            "{label} {name}: scattered different weights"
+        );
+    }
 }
 
 /// References along the left and top edges have a clipped rectangle narrower than the unclipped
 /// span, which is where the uniform walk takes extra turns. Those turns must score nothing.
 #[test]
-fn warp_uniform_search_matches_the_clipped_search_on_the_spatial_pass() {
+fn every_variant_matches_the_baseline_on_the_spatial_pass() {
     let (width, height) = (48u32, 48u32);
     let frame = unique_frame(width, height);
     let setup = Setup::spatial_only(frame, width, height);
 
-    assert_walks_agree("spatial", &setup);
+    assert_variants_agree("spatial", &setup);
 }
 
 /// [cross_frame_setup] pushes some refine windows off the frame and its confidences straddle `c_min`,
 /// the two things that give groups sharing a warp different trip counts under the clipped walk.
 #[test]
-fn warp_uniform_search_matches_the_clipped_search_across_frames() {
+fn every_variant_matches_the_baseline_across_frames() {
     let setup = cross_frame_setup(64, 64, 2);
 
-    assert_walks_agree("cross frame", &setup);
+    assert_variants_agree("cross frame", &setup);
 }
 
 /// The uniform walk reads a gated motion block the clipped walk never touches, so the `seen_*` slot
 /// it leaves must stay empty or it would hide positions a later covering block still owes the search.
 #[test]
-fn warp_uniform_search_matches_the_clipped_search_when_every_neighbour_is_gated() {
+fn every_variant_matches_the_baseline_when_every_neighbour_is_gated() {
     let mut setup = cross_frame_setup(64, 64, 2);
     // Above every planted confidence, so every `seen_*` slot is one the uniform walk wrote.
     setup.c_min = 2.0;
 
-    assert_walks_agree("all gated", &setup);
+    assert_variants_agree("all gated", &setup);
 }
 
 /// At radius 1 the grid is four volumes of two frames.
 #[test]
-fn warp_uniform_search_matches_the_clipped_search_at_radius_one() {
+fn every_variant_matches_the_baseline_at_radius_one() {
     let setup = cross_frame_setup(64, 64, 1);
 
-    assert_walks_agree("radius one", &setup);
+    assert_variants_agree("radius one", &setup);
 }
 
 #[test]
-fn warp_uniform_search_matches_the_clipped_search_with_a_noise_curve() {
+fn every_variant_matches_the_baseline_with_a_noise_curve() {
     let mut setup = cross_frame_setup(64, 64, 2);
     let curve = stepped_curve();
     setup.noise_curve = Some(curve);
 
-    assert_walks_agree("noise curve", &setup);
+    assert_variants_agree("noise curve", &setup);
 }
 
 /// [cross_frame_setup] with every motion block of a neighbour carrying one vector, so the refine
@@ -112,44 +130,59 @@ fn edge_clamped_setup(radius: u32) -> Setup {
 }
 
 #[test]
-fn warp_uniform_search_matches_the_clipped_search_when_covering_blocks_share_a_vector() {
+fn every_variant_matches_the_baseline_when_covering_blocks_share_a_vector() {
     let setup = shared_vector_setup(2);
 
-    assert_walks_agree("shared vector", &setup);
+    assert_variants_agree("shared vector", &setup);
 }
 
 #[test]
-fn warp_uniform_search_matches_the_clipped_search_when_every_shared_block_is_confident() {
+fn every_variant_matches_the_baseline_when_every_shared_block_is_confident() {
     let mut setup = shared_vector_setup(2);
     setup.confidence.fill(1.0);
 
-    assert_walks_agree("shared vector, all confident", &setup);
+    assert_variants_agree("shared vector, all confident", &setup);
 }
 
 #[test]
-fn warp_uniform_search_matches_the_clipped_search_when_the_edge_clamps_rectangles_together() {
+fn every_variant_matches_the_baseline_when_the_edge_clamps_rectangles_together() {
     let mut setup = edge_clamped_setup(2);
     setup.confidence.fill(1.0);
 
-    assert_walks_agree("edge clamped", &setup);
+    assert_variants_agree("edge clamped", &setup);
 }
 
 #[test]
-fn warp_uniform_search_matches_the_clipped_search_with_the_f16_search() {
+fn every_variant_matches_the_baseline_with_the_f16_search() {
     let mut cross_frame = cross_frame_setup(64, 64, 2);
     cross_frame.f16_search = true;
-    assert_walks_agree("f16 cross frame", &cross_frame);
+    assert_variants_agree("f16 cross frame", &cross_frame);
 
     let mut shared = shared_vector_setup(2);
     shared.f16_search = true;
     shared.confidence.fill(1.0);
-    assert_walks_agree("f16 shared vector", &shared);
+    assert_variants_agree("f16 shared vector", &shared);
 }
 
-#[test]
-fn warp_uniform_search_matches_the_clipped_search_with_the_f16_search_on_wide_storage() {
+fn f16_wide_storage_setup() -> Setup {
     let mut setup = chroma_cross_frame_setup(64, 64, 2);
     setup.f16_search = true;
 
-    assert_walks_agree("f16 chroma cross frame", &setup);
+    setup
+}
+
+#[test]
+fn every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_first_half() {
+    let setup = f16_wide_storage_setup();
+    let variants = variant_chunk(0, 2);
+
+    assert_listed_variants_agree("f16 chroma cross frame", &setup, variants);
+}
+
+#[test]
+fn every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_second_half() {
+    let setup = f16_wide_storage_setup();
+    let variants = variant_chunk(1, 2);
+
+    assert_listed_variants_agree("f16 chroma cross frame", &setup, variants);
 }

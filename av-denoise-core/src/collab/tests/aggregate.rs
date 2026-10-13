@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 
 use super::helpers::{R, make_client, noisy_flat_field};
-use crate::collab::geometry::{BASELINE_GROUPS, fused_cubes_x, ref_count, refs_along, strength_map_dims};
+use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{
     ACCUM_SCALE,
     WEIGHT_GAIN,
@@ -10,9 +10,9 @@ use crate::collab::kernels::aggregate::{
     kaiser_window,
     weight_scale,
 };
-use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
+use crate::collab::kernels::fused::{CollabVariant, STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
+use crate::collab::{PATCH_SIZE, grid_frames};
 use crate::nlmeans::{BLOCK_X, BLOCK_Y, NOISE_CURVE_BINS};
 
 /// Runs [collab_normalise] over hand-built accumulators.
@@ -273,11 +273,11 @@ fn run_scatter_stage_windowed(
 
     let zero_dim = 256u32;
     let zero_grid = (pixels as u32).div_ceil(zero_dim);
-    let cubes_x = fused_cubes_x(width, BASELINE_GROUPS);
+    let variant = CollabVariant::for_client(&client);
+    let cubes_x = fused_cubes_x(width, variant.groups);
     let fused_grid = CubeCount::new_2d(cubes_x, refs_y);
-    let fused_dim = CubeDim::new_1d(8 * BASELINE_GROUPS);
+    let fused_dim = CubeDim::new_1d(variant.lanes());
     let scale = weight_scale(sigma, &profile);
-    let warp_uniform = needs_warp_uniform_search(&client);
     let grid_frame_count = grid_frames(0);
     let refs_x = refs_along(width);
     let blocks_x = width.div_ceil(BLOCK_X);
@@ -324,7 +324,6 @@ fn run_scatter_stage_windowed(
             STRENGTH_MAP_OFF,
             scale,
             ACCUM_SCALE,
-            warp_uniform,
             false,
             0u32,
             grid_frame_count,
@@ -346,7 +345,7 @@ fn run_scatter_stage_windowed(
             map_rows,
             0.0f32,
             false,
-            BASELINE_GROUPS,
+            variant,
         );
         collab_normalise::launch_unchecked::<R>(
             &client,

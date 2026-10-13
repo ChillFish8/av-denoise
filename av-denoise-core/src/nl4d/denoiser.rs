@@ -18,7 +18,7 @@ use crate::collab::kernels::aggregate::{
 };
 use crate::collab::kernels::fused::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{MAX_K, PATCH_SIZE, grid_frames, needs_warp_uniform_search, supports_f16_search};
+use crate::collab::{MAX_K, PATCH_SIZE, grid_frames, supports_f16_search};
 use crate::engine::{DevicePlane, SampleFormat};
 use crate::nlmeans::denoiser::{BufferSize, front_buffer_sizes};
 use crate::nlmeans::{
@@ -85,8 +85,6 @@ pub struct Nl4dDenoiser<R: Runtime> {
     lambda_ht: f32,
     c_min: f32,
     k_max: u32,
-    /// Whether `collab_fused` runs its warp-uniform search.
-    warp_uniform: bool,
     /// Whether candidate distances read the f16 search ring.
     f16_search: bool,
     /// Picks the candidate each tunable launch runs.
@@ -319,7 +317,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             None
         };
 
-        let warp_uniform = needs_warp_uniform_search(client);
         let accum_scale = cross_frame_accum_scale(params.spatial_radius, params.temporal_radius);
 
         Ok(Self {
@@ -334,7 +331,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             lambda_ht: params.lambda_ht,
             c_min: params.c_min,
             k_max,
-            warp_uniform,
             f16_search,
             kernels,
             accum_scale,
@@ -802,7 +798,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             pool_ratio,
         };
         let shape = CollabShape {
-            warp_uniform: self.warp_uniform,
             f16_search: self.f16_search,
             radius: self.temporal_radius,
             grid_frames: frames_per_volume,

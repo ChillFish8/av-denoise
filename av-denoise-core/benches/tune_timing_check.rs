@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use av_denoise_core::bench_api::Device;
 use av_denoise_core::bench_api::tune_sites::{
-    CollabCandidate,
     CollabSite,
+    CollabVariant,
     RegulariseCandidate,
     WindowCandidate,
 };
@@ -138,7 +138,7 @@ fn collab_site<R: Runtime>(client: &ComputeClient<R>) -> CollabSite<R, f32> {
         noise_curve: false,
         strength_map: false,
         pooled: false,
-        candidate: CollabCandidate::baseline(),
+        candidate: CollabVariant::BASELINE,
     };
     let args = bench.prepare();
 

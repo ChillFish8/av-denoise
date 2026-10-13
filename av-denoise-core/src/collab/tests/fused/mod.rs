@@ -9,12 +9,13 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::helpers::{R, make_client, make_unique_frame, noisy_flat_field};
-use crate::collab::geometry::{BASELINE_GROUPS, fused_cubes_x, ref_count, ref_pos, refs_along, strength_map_dims};
+use crate::collab::geometry::{fused_cubes_x, ref_count, ref_pos, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{WEIGHT_GAIN, cross_frame_accum_scale, kaiser_window, weight_scale};
-use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
+use crate::collab::kernels::fused::{CollabVariant, STRENGTH_MAP_OFF, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
+use crate::collab::{PATCH_SIZE, grid_frames};
 use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS};
+use crate::tune::SiteCandidate;
 
 /// The spatial search radius most runs use.
 ///
@@ -421,30 +422,39 @@ pub(super) fn read_back(handles: Buffers, setup: &Setup) -> Aggregated {
     }
 }
 
-/// Launches [collab_fused] on its eight-references-per-cube grid and reads back what it aggregated.
-///
-/// The search walk is whichever one this runtime needs, matching what the shipping code launches.
+/// Launches [collab_fused] as this runtime's baseline variant and reads back what it aggregated.
 pub(super) fn run_fused(setup: &Setup) -> Aggregated {
-    run_fused_walk(setup, None)
+    let client = make_client();
+    let variant = CollabVariant::for_client(&client);
+
+    run_fused_variant(setup, variant)
 }
 
-/// [run_fused] with the search walk pinned rather than taken from the runtime.
-pub(super) fn run_fused_walk(setup: &Setup, warp_uniform: Option<bool>) -> Aggregated {
+/// [run_fused] as `variant`.
+pub(super) fn run_fused_variant(setup: &Setup, variant: CollabVariant) -> Aggregated {
     let handles = buffers(setup);
-    let warp_uniform = warp_uniform.unwrap_or_else(|| needs_warp_uniform_search(&handles.client));
 
     // The f32 search launches with the f32 ring as its placeholder, as the shipping code does.
     if setup.f16_search {
-        launch_fused::<half::f16>(setup, &handles, handles.search_ring.clone(), warp_uniform);
+        launch_fused::<half::f16>(setup, &handles, handles.search_ring.clone(), variant);
     } else {
-        launch_fused::<f32>(setup, &handles, handles.ring.clone(), warp_uniform);
+        launch_fused::<f32>(setup, &handles, handles.ring.clone(), variant);
     }
 
     read_back(handles, setup)
 }
 
+/// Checks every listed variant against a recorded digest.
+pub(super) fn assert_every_variant_matches_recorded(label: &str, setup: &Setup, want: &Digest) {
+    for &variant in CollabVariant::ALL {
+        let got = run_fused_variant(setup, variant);
+        let variant_label = format!("{label} {}", variant.name());
+        assert_matches_recorded(&variant_label, &got, want);
+    }
+}
+
 /// Launches [collab_fused] with its search ring read as `S`.
-fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle, warp_uniform: bool) {
+fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle, variant: CollabVariant) {
     let profile = setup.profile();
     let curve = setup.noise_curve.unwrap_or([0.0f32; NOISE_CURVE_BINS]);
     let curve_bytes = f32::as_bytes(&curve);
@@ -466,9 +476,9 @@ fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle,
     let map_buf = handles.client.create_from_slice(map_bytes);
     let stored_channels = setup.stored_channels();
 
-    let cubes_x = fused_cubes_x(setup.width, BASELINE_GROUPS);
+    let cubes_x = fused_cubes_x(setup.width, variant.groups);
     let grid = CubeCount::new_2d(cubes_x, handles.refs_y);
-    let dim = CubeDim::new_1d(8 * BASELINE_GROUPS);
+    let dim = CubeDim::new_1d(variant.lanes());
     let scale = weight_scale(setup.sigma, &profile);
     let accum_scale = setup.accum_scale();
     let grid_frame_count = grid_frames(setup.radius);
@@ -500,7 +510,6 @@ fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle,
             map_mode,
             scale,
             accum_scale,
-            warp_uniform,
             setup.f16_search,
             setup.radius,
             grid_frame_count,
@@ -522,7 +531,7 @@ fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle,
             map_rows,
             pooled_ratio,
             setup.pooled.is_some(),
-            BASELINE_GROUPS,
+            variant,
         );
     }
 }

@@ -9,7 +9,7 @@ use crate::nlmeans::ChannelMode;
 use crate::tune::ledger::Observed;
 use crate::tune::sites::{
     AccumulateCandidate,
-    CollabCandidate,
+    CollabVariant,
     RegulariseCandidate,
     WindowCandidate,
     candidate_known,
@@ -51,7 +51,7 @@ fn assert_all_known<C: SiteCandidate>() {
 fn every_shipped_candidate_name_is_known() {
     assert_all_known::<WindowCandidate>();
     assert_all_known::<AccumulateCandidate>();
-    assert_all_known::<CollabCandidate>();
+    assert_all_known::<CollabVariant>();
     assert_all_known::<RegulariseCandidate>();
 }
 

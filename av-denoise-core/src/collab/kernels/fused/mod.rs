@@ -1,17 +1,33 @@
+pub(crate) mod batched;
+pub(crate) mod centre;
+pub(crate) mod distance;
 pub(crate) mod grid;
 pub(crate) mod pooled;
-pub(crate) mod search;
 pub(crate) mod strength_map;
+pub(crate) mod tile;
+pub(crate) mod trajectory;
+pub(crate) mod variant;
 
 use cubecl::prelude::*;
 
+use self::centre::centre_search;
 use self::grid::{grid_fwd, grid_inv, grid_variance};
 use self::pooled::pooled_threshold;
-use self::search::{spatial_search, trajectory_search};
 use self::strength_map::strength_map_scale;
 pub use self::strength_map::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
+use self::tile::load_centre_tile;
+use self::trajectory::trajectory_search;
+pub use self::variant::{
+    Centre,
+    CollabVariant,
+    GROUP_LANES,
+    TRANSPOSE_REGION_FLOATS,
+    Walk,
+    tile_height,
+    tile_width,
+};
 use super::aggregate::scatter_patch;
-use super::group::unpack_t;
+use super::group::{clamp_top_left, unpack_t};
 use super::plane_ops::{group_base, plane_ssd_reduce8, transpose8};
 use super::transforms::{
     RECIPROCAL_FLOOR,
@@ -51,11 +67,11 @@ const _: () = assert!(
 /// Groups each reference patch with its most similar patches, hard-thresholds the group in the
 /// transform domain and scatters every member back into its own frame.
 ///
-/// A cube of `8 * groups` threads owns `groups` reference patches. Each 8-lane group owns one, and
-/// lane `sub` owns column `sub` of every patch the group touches, so candidate reads and scatter
-/// writes are coalesced and `plane_ssd_reduce8` completes each distance. Candidates are read straight
-/// from global memory, because neighbouring references search overlapping windows the cache already
-/// serves. The fixed-point scatter adds integers, so the output does not depend on `groups`.
+/// A cube of `8 * variant.groups` threads owns `variant.groups` reference patches. Each 8-lane
+/// group owns one, and lane `sub` owns column `sub` of every patch the group touches, so candidate
+/// reads and scatter writes are coalesced and `plane_ssd_reduce8` completes each distance.
+/// Candidates are read from global memory or, when tiled, from shared memory. The fixed-point
+/// scatter adds integers, so the output does not depend on `variant.groups`.
 ///
 /// Every lane must reach every barrier, since a barrier reached by only part of a workgroup is
 /// undefined. The `transpose8` barriers sit in fully unrolled loops with no runtime condition around
@@ -111,14 +127,17 @@ const _: () = assert!(
 /// the frames per volume from [grid_frames](crate::collab::grid_frames), and 1 compiles the grid
 /// out.
 ///
-/// `warp_uniform` walks both searches over fixed comptime rectangles and masks the positions the
-/// clipped walk skips, so both settings score the same candidates in the same order. The clipped
-/// rectangles and the `c_min` skip give neighbouring groups different trip counts. The CUDA
-/// backend lowers each group-scoped shuffle to a `__shfl_*_sync` over the whole warp, so on Volta
-/// and later those different trip counts deadlock the warp. A masked turn carries the
-/// `3.0e38` an unfilled slot holds, so it never displaces a match. The wgpu backends reconverge on
-/// their own, and [needs_warp_uniform_search](crate::collab::needs_warp_uniform_search) picks the
-/// setting per runtime.
+/// `variant` picks how the searches run, and every variant gives the same output.
+/// [Walk::Uniform](crate::collab::kernels::fused::Walk::Uniform) walks both searches over fixed
+/// comptime rectangles and masks the positions the clipped walk skips, so every group in a plane
+/// takes the same turns. The CUDA backend lowers each group-scoped shuffle to a `__shfl_*_sync` over
+/// the whole warp, so on Volta and later the clipped walk's different trip counts deadlock the warp.
+/// [needs_warp_uniform_search](crate::collab::needs_warp_uniform_search) names the runtimes that
+/// only run the uniform walk.
+/// [Centre::Tiled](crate::collab::kernels::fused::Centre::Tiled) loads the union of the cube's
+/// centre search windows into shared memory once and reads every centre candidate from it, in the
+/// same order as the ring.
+/// `batched` scores 8 centre candidates per round of shuffles and inserts them in walk order.
 ///
 /// `search_ring` is an f16 copy of `ring`, with `S` as `half::f16`, that the candidate distances
 /// read when `f16_search` is set. The reference columns and the member stack always come from
@@ -156,7 +175,6 @@ pub fn collab_fused<S: Float, N: Size>(
     map_mode: u32,
     weight_scale: f32,
     accum_scale: f32,
-    #[comptime] warp_uniform: bool,
     #[comptime] f16_search: bool,
     #[comptime] radius: u32,
     #[comptime] grid_frames: u32,
@@ -178,17 +196,25 @@ pub fn collab_fused<S: Float, N: Size>(
     #[comptime] map_rows: u32,
     pool_ratio: f32,
     #[comptime] pooled: bool,
-    #[comptime] groups: u32,
+    #[comptime] variant: CollabVariant,
 ) {
     let thread_id = UNIT_POS_X;
     let group = thread_id / 8u32;
     let sub = thread_id % 8u32;
     let base = group_base();
+    let groups = comptime!(variant.groups);
+    let walk = comptime!(variant.walk);
 
     let max_x = comptime!(width - PATCH_SIZE);
     let max_y = comptime!(height - PATCH_SIZE);
 
-    let mut transpose_buf = SharedMemory::<f32>::new(comptime!(groups * 65) as usize);
+    let transpose_floats = comptime!(groups * TRANSPOSE_REGION_FLOATS);
+    let mut transpose_buf = SharedMemory::<f32>::new(transpose_floats as usize);
+
+    let centre = comptime!(variant.centre);
+    let lanes = comptime!(variant.lanes());
+    let tile_len = comptime!(variant.tile_elements(spatial_radius, stored_ch));
+    let mut tile = SharedMemory::<S>::new(tile_len as usize);
 
     // A dead group works on the last real reference of the row, so every read stays inside the
     // frame and every lane reaches every barrier. `live` stops it writing.
@@ -198,6 +224,33 @@ pub fn collab_fused<S: Float, N: Size>(
 
     let ref_x = (ref_x_clamped * STEP).min(max_x);
     let ref_y = (CUBE_POS_Y * STEP).min(max_y);
+
+    // The tile's corner is the first reference's search window corner, so every window of the
+    // cube lies inside it.
+    let first_ref_x = (CUBE_POS_X * groups * STEP).min(max_x);
+    let tile_x0 = clamp_top_left(first_ref_x as i32 - spatial_radius as i32, max_x);
+    let tile_y0 = clamp_top_left(ref_y as i32 - spatial_radius as i32, max_y);
+
+    if comptime!(centre == Centre::Tiled) {
+        let tile_w = comptime!(tile_width(groups, spatial_radius));
+        let tile_h = comptime!(tile_height(spatial_radius));
+        load_centre_tile(
+            ring,
+            search_ring,
+            &mut tile,
+            tile_x0,
+            tile_y0,
+            centre_slot,
+            f16_search,
+            tile_w,
+            tile_h,
+            lanes,
+            width,
+            height,
+            stored_ch,
+        );
+        sync_cube();
+    }
 
     // Column `sub` of the reference patch, all channels, held in registers for the whole search.
     let mut current = Array::<f32>::new(comptime!(PATCH_SIZE * channels) as usize);
@@ -219,19 +272,22 @@ pub fn collab_fused<S: Float, N: Size>(
     // The channel scale multiplies the completed 64-pixel distance, not each squared difference.
     let scale = channel_scale(channels);
 
-    let n_live = spatial_search(
+    let n_live = centre_search(
         ring,
         search_ring,
+        &tile,
         &current,
         ref_x,
         ref_y,
+        tile_x0,
+        tile_y0,
         centre_slot,
         sub,
         base,
         scale,
         &mut best_d,
         &mut best_pos,
-        warp_uniform,
+        variant,
         f16_search,
         spatial_radius,
         width,
@@ -303,7 +359,7 @@ pub fn collab_fused<S: Float, N: Size>(
                 &mut grid_pos,
                 comptime!(first + 1),
                 tail,
-                warp_uniform,
+                walk,
                 f16_search,
                 radius,
                 refine,

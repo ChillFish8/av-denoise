@@ -2,14 +2,20 @@
 test-threads = 16
 slow-timeout = { period = "120s", terminate-after = 4 }
 
+# Each full tuning pass JIT-compiles every candidate inside a 600 s budget, so at most two run at once.
+[test-groups]
+tuning-passes = { max-threads = 2 }
+
 [[profile.default.overrides]]
-filter = 'test(/tune::tests::collab::every_group_count_matches/)'
+filter = 'test(/tune::tests::collab::(.*_match(es)?_the_baseline(_in_the_[a-z]+_variant_(quarter|eighth))?$|forcing_the_[a-z]+_variant_(quarter|eighth)_leaves_(luma|chroma|yuv)_nl4d_output_unchanged$)|collab::tests::fused::(walks::every_variant_matches_the_baseline_|recorded::fused_reproduces_recorded_output_)/)'
 slow-timeout = { period = "120s", terminate-after = 10 }
 
 [[profile.default.overrides]]
 filter = 'test(/tune::tests::driver::(an_nl4d_pass_records_a_ranking_for_every_plane|a_tuned_grain_export_denoiser_drains_only_the_real_streams_grain)/)'
 slow-timeout = { period = "120s", terminate-after = 10 }
+test-group = 'tuning-passes'
 
 [[profile.default.overrides]]
 filter = 'binary_id(av-denoise::tuning)'
 slow-timeout = { period = "120s", terminate-after = 10 }
+test-group = 'tuning-passes'

@@ -1,10 +1,10 @@
 use cubecl::prelude::*;
 
 use super::noise_curve::{assert_columns_identical, assert_identical, columns_differ};
-use super::{Aggregated, Setup, cross_frame_setup, run_fused, run_fused_walk};
+use super::{Aggregated, Setup, cross_frame_setup, run_fused, run_fused_variant};
 use crate::collab::geometry::{ref_pos, refs_along, strength_map_dims};
 use crate::collab::kernels::fused::strength_map::strength_map_scale;
-use crate::collab::kernels::fused::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA};
+use crate::collab::kernels::fused::{CollabVariant, STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, Walk};
 use crate::collab::tests::helpers::{R, make_client, noisy_flat_field};
 use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS};
 
@@ -211,8 +211,12 @@ fn both_walks_agree_with_a_map_active() {
         .collect();
     setup.strength_map = Some((map, STRENGTH_MAP_LUMA));
 
-    let uniform = run_fused_walk(&setup, Some(true));
-    let branching = run_fused_walk(&setup, Some(false));
+    let uniform_variant = CollabVariant {
+        walk: Walk::Uniform,
+        ..CollabVariant::BASELINE
+    };
+    let uniform = run_fused_variant(&setup, uniform_variant);
+    let branching = run_fused_variant(&setup, CollabVariant::BASELINE);
 
     assert_identical("walks with a map", &uniform, &branching);
 }
