@@ -22,6 +22,7 @@ use super::noise::{
 };
 use super::params::{NlmParams, SEPARABLE_THRESHOLD, validate_dimensions};
 use super::prefilter::PrefilterMode;
+use crate::engine::timing::{DeviceTimer, StallClock};
 use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
 use crate::tune::KernelSelector;
 
@@ -173,6 +174,11 @@ pub struct NlmDenoiser<R: Runtime> {
     ///
     /// It holds the texture cut and the line ring.
     pub(super) quarter_settings: QuarterSettings,
+
+    /// The host time spent blocked on noise readbacks.
+    pub(super) stalls: StallClock,
+    /// Samples the device time of this denoiser's frames.
+    pub(crate) device_timer: DeviceTimer,
 
     /// Whether the stream's edges run off-centre passes instead of copied padding.
     ///
@@ -369,6 +375,10 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         let sigma_y = params.hq.and_then(|hq| hq.sigma_override).unwrap_or(0.0);
 
+        let mut device_timer = DeviceTimer::default();
+        let ledger = kernels.ledger().cloned();
+        device_timer.set_ledger(ledger);
+
         Self {
             client: client.clone(),
             params,
@@ -424,6 +434,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             sigma_y,
             luma_noise_fields: false,
             quarter_settings: QuarterSettings::default(),
+            stalls: StallClock::default(),
+            device_timer,
             shifted_edges: false,
         }
     }
@@ -451,6 +463,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             channels: self.params.channels.count(),
             stored_ch,
         };
+
+        self.device_timer.begin_frame();
 
         ingest(&self.client, planes, format, &self.placeholder, target);
         self.mirror_search_slot(slot);
@@ -505,6 +519,8 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// pushing. Later steps always return `Some`, so callers stop after [Self::flush_target]
     /// outputs. It needs at least one pushed frame and a temporal radius above 0.
     pub(crate) fn flush_step_gpu(&mut self) -> Result<Option<GpuOutput>, anyhow::Error> {
+        self.device_timer.stop_sampling();
+
         let total_frames = self.params.total_frames() as usize;
 
         self.duplicate_last_frame()?;

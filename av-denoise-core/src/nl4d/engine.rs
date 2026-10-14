@@ -7,7 +7,16 @@ use super::denoiser::{CompletedRegion, Nl4dDenoiser, buffer_sizes};
 use super::grain::GrainChunk;
 use super::options::{Nl4dOptions, resolve_params};
 use crate::collab::PATCH_SIZE;
-use crate::engine::{DevicePlane, EdgePadding, EgressSource, Engine, Geometry, WindowSpan, egress};
+use crate::engine::{
+    DevicePlane,
+    EdgePadding,
+    EgressSource,
+    Engine,
+    EngineTiming,
+    Geometry,
+    WindowSpan,
+    egress,
+};
 use crate::error::Error;
 use crate::nlmeans::denoiser::check_u32_indexable;
 use crate::tune::{EngineKernels, KernelSelector};
@@ -253,5 +262,13 @@ impl<R: Runtime> Engine for Nl4d<R> {
 
         let drained = self.inner.drain_grain_chunks();
         self.guard(drained)
+    }
+
+    fn timing(&mut self) -> EngineTiming {
+        self.inner.timing()
+    }
+
+    fn sample_device_time(&mut self, every: u32) {
+        self.inner.sample_device_time(every);
     }
 }

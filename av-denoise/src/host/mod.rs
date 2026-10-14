@@ -2,11 +2,13 @@ mod depth;
 pub(crate) mod io;
 mod options;
 mod pending;
+mod timing;
 
 #[cfg(test)]
 mod tests;
 
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use av_denoise_core::tune::DeviceProfile;
 use av_denoise_core::{DevicePlane, Engine, GrainChunk, WindowSpan};
@@ -16,6 +18,7 @@ pub use self::depth::{Depth, UnsupportedDepthError};
 use self::io::PlaneIo;
 pub use self::options::{Algorithm, DenoiserOptions};
 pub(crate) use self::pending::{Pending, TryWait};
+pub use self::timing::PlaneTiming;
 use crate::backend::accelerate::Accelerator;
 use crate::backend::{Device, build_engine};
 use crate::tune::{KernelRequest, KernelSetup, profile_key};
@@ -125,6 +128,14 @@ pub struct HostDenoiser {
     pending: VecDeque<Pending>,
     /// Set once a call fails with an error that [DenoiserError::poisons_stream].
     poisoned: bool,
+    /// Host time spent inside this denoiser's public calls.
+    call_time: Duration,
+    /// Host time spent blocked until a denoised frame's readback landed.
+    output_wait: Duration,
+    /// Host time spent in the caller's flush sink, which [Self::timing] takes off the call clock.
+    sink_time: Duration,
+    /// Frames handed back to the caller.
+    frames_emitted: u64,
 }
 
 impl HostDenoiser {
@@ -199,6 +210,10 @@ impl HostDenoiser {
             next_output: 0,
             pending: VecDeque::with_capacity(MAX_PENDING),
             poisoned: false,
+            call_time: Duration::ZERO,
+            output_wait: Duration::ZERO,
+            sink_time: Duration::ZERO,
+            frames_emitted: 0,
         })
     }
 
@@ -247,7 +262,7 @@ impl HostDenoiser {
 
         self.check_planes(planes)?;
 
-        let result = self.push_inner(planes);
+        let result = self.clocked(|denoiser| denoiser.push_inner(planes));
         self.poison_on_error(result)
     }
 
@@ -286,7 +301,7 @@ impl HostDenoiser {
 
         self.check_planes(planes)?;
 
-        let result = self.push_priming_inner(planes);
+        let result = self.clocked(|denoiser| denoiser.push_priming_inner(planes));
         self.poison_on_error(result)
     }
 
@@ -306,7 +321,7 @@ impl HostDenoiser {
             return Err(DenoiserError::Poisoned);
         }
 
-        let result = self.recv_inner();
+        let result = self.clocked(Self::recv_inner);
         self.poison_on_error(result)
     }
 
@@ -315,7 +330,7 @@ impl HostDenoiser {
             return Ok(None);
         };
 
-        let planes = pending.wait()?;
+        let planes = self.wait_for_output(pending)?;
         Ok(Some(planes))
     }
 
@@ -331,7 +346,7 @@ impl HostDenoiser {
             return Err(DenoiserError::Poisoned);
         }
 
-        let result = self.try_recv_inner();
+        let result = self.clocked(Self::try_recv_inner);
         self.poison_on_error(result)
     }
 
@@ -340,8 +355,13 @@ impl HostDenoiser {
             return Ok(None);
         };
 
-        match pending.try_wait()? {
-            TryWait::Ready(planes) => Ok(Some(planes)),
+        let polled = self.output_clocked(|| pending.try_wait())?;
+
+        match polled {
+            TryWait::Ready(planes) => {
+                self.frames_emitted += 1;
+                Ok(Some(planes))
+            },
             TryWait::NotReady(pending) => {
                 self.pending.push_front(pending);
                 Ok(None)
@@ -357,21 +377,21 @@ impl HostDenoiser {
             return Err(DenoiserError::Poisoned);
         }
 
-        let result = self.flush_inner(sink);
+        let result = self.clocked(|denoiser| denoiser.flush_inner(sink));
         self.poison_on_error(result)
     }
 
     fn flush_inner(&mut self, mut sink: impl FnMut(Vec<Vec<u8>>)) -> Result<(), DenoiserError> {
         while let Some(planes) = self.recv_inner()? {
-            sink(planes);
+            self.hand_to_sink(&mut sink, planes);
         }
 
         let tail = self.engine.finish()?;
 
         for _ in 0..tail {
             let pending = self.emit_into_slot(0)?;
-            let planes = pending.wait()?;
-            sink(planes);
+            let planes = self.wait_for_output(pending)?;
+            self.hand_to_sink(&mut sink, planes);
         }
 
         self.next_output = 0;
@@ -388,6 +408,21 @@ impl HostDenoiser {
         self.engine.reset();
         self.next_output = 0;
         self.poisoned = false;
+    }
+
+    /// Samples the device time of one frame in every `every`, or of none at 0.
+    pub fn sample_device_time(&mut self, every: u32) {
+        self.engine.sample_device_time(every);
+    }
+
+    /// Where this plane's host time went so far.
+    ///
+    /// It waits for any device-time spans still in flight.
+    pub fn timing(&mut self) -> PlaneTiming {
+        let engine = self.engine.timing();
+        let calls = self.call_time.saturating_sub(self.sink_time);
+
+        PlaneTiming::new(calls, self.output_wait, self.frames_emitted, engine)
     }
 
     /// Reads back the grain chunks measured since the last call, in frame order.
@@ -407,6 +442,39 @@ impl HostDenoiser {
     #[cfg(test)]
     pub(crate) fn poison_for_test(&mut self) {
         self.poisoned = true;
+    }
+
+    /// Runs `call`, adding its host time to the call clock.
+    fn clocked<T>(&mut self, call: impl FnOnce(&mut Self) -> T) -> T {
+        let started = Instant::now();
+        let result = call(self);
+        self.call_time += started.elapsed();
+
+        result
+    }
+
+    /// Blocks until `pending` lands, adding the wait to the output clock and counting the frame.
+    fn wait_for_output(&mut self, pending: Pending) -> Result<Vec<Vec<u8>>, DenoiserError> {
+        let planes = self.output_clocked(|| pending.wait())?;
+        self.frames_emitted += 1;
+
+        Ok(planes)
+    }
+
+    /// Hands one frame to `sink`, adding the time it takes to the sink clock.
+    fn hand_to_sink(&mut self, sink: &mut impl FnMut(Vec<Vec<u8>>), planes: Vec<Vec<u8>>) {
+        let started = Instant::now();
+        sink(planes);
+        self.sink_time += started.elapsed();
+    }
+
+    /// Runs `wait`, adding its host time to the output-wait clock.
+    fn output_clocked<T>(&mut self, wait: impl FnOnce() -> T) -> T {
+        let started = Instant::now();
+        let result = wait();
+        self.output_wait += started.elapsed();
+
+        result
     }
 
     fn poison_on_error<T>(&mut self, result: Result<T, DenoiserError>) -> Result<T, DenoiserError> {

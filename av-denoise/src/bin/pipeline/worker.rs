@@ -1,23 +1,33 @@
 use std::collections::VecDeque;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use av_denoise::{FrameLayout, PlanarDenoiser, PlaneOptions, Planes, SceneGrain, WarmUp, push_needs_retry};
 
 use super::coordinator::OutputMsg;
+use super::report::{DEVICE_SAMPLE_EVERY, WorkerTiming};
 use super::stage::SceneJob;
 use crate::warm_start::{create_denoiser, finish_warm_up};
 
-pub type WorkerJoin = thread::JoinHandle<Result<Vec<SceneGrain>, anyhow::Error>>;
+/// What one worker returns once the scene queue closes.
+pub struct WorkerOutput {
+    pub scenes: Vec<SceneGrain>,
+    pub timing: WorkerTiming,
+}
+
+pub type WorkerJoin = thread::JoinHandle<Result<WorkerOutput, anyhow::Error>>;
 
 /// Spawns `workers` worker threads over one shared scene queue.
 ///
 /// The queue is a rendezvous, so a scene is only offered when a worker is free and at most
 /// `workers` scenes are ever in flight. Returns the queue's sender, the join handles and the
-/// shared output channel the workers emit denoised frames on.
+/// shared output channel the workers emit denoised frames on. With `device_timing` set, each
+/// worker samples its denoiser's device time.
 pub fn spawn_workers(
     opts: &PlaneOptions,
     layout: FrameLayout,
     workers: usize,
+    device_timing: bool,
 ) -> (
     crossbeam_channel::Sender<SceneJob>,
     Vec<WorkerJoin>,
@@ -32,7 +42,8 @@ pub fn spawn_workers(
         let output_tx = output_tx.clone();
         let job_rx = job_rx.clone();
 
-        let handle = thread::spawn(move || run_worker(worker_id, opts, layout, job_rx, output_tx));
+        let handle =
+            thread::spawn(move || run_worker(worker_id, opts, layout, job_rx, output_tx, device_timing));
         worker_handles.push(handle);
     }
 
@@ -42,24 +53,44 @@ pub fn spawn_workers(
     (job_tx, worker_handles, output_rx)
 }
 
-/// Denoises every scene this worker claims and returns the grain it measured.
+/// Denoises every scene this worker claims and returns the grain it measured and where its time
+/// went.
 pub fn run_worker(
     worker_id: usize,
     opts: PlaneOptions,
     layout: FrameLayout,
     jobs: crossbeam_channel::Receiver<SceneJob>,
     output_tx: crossbeam_channel::Sender<OutputMsg>,
-) -> Result<Vec<SceneGrain>, anyhow::Error> {
+    device_timing: bool,
+) -> Result<WorkerOutput, anyhow::Error> {
+    let started = Instant::now();
+    let mut setup = Duration::ZERO;
+    let mut idle = Duration::ZERO;
+
     let mut scenes = Vec::new();
     let mut denoiser_slot: Option<PlanarDenoiser> = None;
 
     // Held until the denoiser's first output frame proves its kernels are compiled and cached.
     let mut warm_up: Option<WarmUp> = None;
 
-    while let Ok(job) = jobs.recv() {
+    loop {
+        let waiting = Instant::now();
+        let next = jobs.recv();
+        idle += waiting.elapsed();
+
+        let Ok(job) = next else {
+            break;
+        };
+
         // Built on the first claimed scene, so a worker that never claims one never compiles.
         if denoiser_slot.is_none() {
-            let (denoiser, place) = create_denoiser(&opts, layout)?;
+            let building = Instant::now();
+            let (mut denoiser, place) = create_denoiser(&opts, layout)?;
+            if device_timing {
+                denoiser.sample_device_time(DEVICE_SAMPLE_EVERY);
+            }
+
+            setup += building.elapsed();
             denoiser_slot = Some(denoiser);
             warm_up = place;
         }
@@ -101,7 +132,20 @@ pub fn run_worker(
         }
     }
 
-    Ok(scenes)
+    let planes = denoiser_slot
+        .as_mut()
+        .map(PlanarDenoiser::timing)
+        .unwrap_or_default();
+    let accelerator = denoiser_slot.as_ref().map(PlanarDenoiser::selected_accelerator);
+    let timing = WorkerTiming {
+        wall: started.elapsed(),
+        setup,
+        idle,
+        planes,
+        accelerator,
+    };
+
+    Ok(WorkerOutput { scenes, timing })
 }
 
 /// Pushes one frame, emitting the oldest pending output and retrying when the queue is full.

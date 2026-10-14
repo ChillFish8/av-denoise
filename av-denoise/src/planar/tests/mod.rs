@@ -11,6 +11,9 @@ mod passthrough_retry;
 #[cfg(feature = "vulkan")]
 mod profile_keys;
 mod push_retry;
+// Gated on `vulkan` because the planar denoiser it builds names the `Vulkan` accelerator variant.
+#[cfg(feature = "vulkan")]
+mod timing;
 
 use super::*;
 

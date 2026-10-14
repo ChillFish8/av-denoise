@@ -1,12 +1,14 @@
 mod io;
 pub(crate) mod kernels;
 mod plane;
+pub(crate) mod timing;
 
 #[cfg(test)]
 mod tests;
 
 pub(crate) use self::io::{EgressSource, IngestTarget, egress, ingest};
 pub use self::plane::{DevicePlane, Geometry, SampleFormat};
+pub use self::timing::EngineTiming;
 use crate::error::Error;
 use crate::nl4d::grain::GrainChunk;
 
@@ -71,4 +73,14 @@ pub trait Engine: Send {
     fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, Error> {
         Ok(Vec::new())
     }
+
+    /// Host and device time spent so far.
+    ///
+    /// Device time is only gathered after [Engine::sample_device_time] turns it on.
+    fn timing(&mut self) -> EngineTiming {
+        EngineTiming::default()
+    }
+
+    /// Samples the device time of one frame in every `every`, or of none at 0.
+    fn sample_device_time(&mut self, _every: u32) {}
 }

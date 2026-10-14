@@ -1,4 +1,5 @@
 use std::marker::PhantomData;
+use std::ops::Range;
 
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -19,7 +20,8 @@ use crate::collab::kernels::aggregate::{
 use crate::collab::kernels::fused::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, PATCH_SIZE, grid_frames, supports_f16_search};
-use crate::engine::{DevicePlane, SampleFormat};
+use crate::engine::timing::{DeviceTimed, DeviceTimer, timed};
+use crate::engine::{DevicePlane, EngineTiming, SampleFormat};
 use crate::nlmeans::denoiser::{BufferSize, front_buffer_sizes};
 use crate::nlmeans::{
     BLOCK_X,
@@ -178,6 +180,12 @@ pub(crate) fn buffer_sizes<R: Runtime>(
     }
 
     buffers
+}
+
+impl<R: Runtime> DeviceTimed for Nl4dDenoiser<R> {
+    fn device_timer(&mut self) -> &mut DeviceTimer {
+        &mut self.front.device_timer
+    }
 }
 
 impl<R: Runtime> Nl4dDenoiser<R> {
@@ -407,7 +415,10 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
     /// Normalises a finished region into the next output slot and returns that slot's buffer.
     pub(crate) fn read_region(&mut self, region: CompletedRegion) -> Handle {
-        let (handle, output_slot) = self.normalise_region(region.slot);
+        let client = self.front.compute_client().clone();
+        let (handle, output_slot) = timed(&client, self, move |denoiser| {
+            denoiser.normalise_region(region.slot)
+        });
         self.measure_grain(region.slot, region.next, output_slot);
 
         handle
@@ -434,6 +445,15 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         (self.width, self.height, self.channels)
     }
 
+    /// Host and device time this denoiser has spent.
+    pub(crate) fn timing(&mut self) -> EngineTiming {
+        self.front.timing()
+    }
+
+    pub(crate) fn sample_device_time(&mut self, every: u32) {
+        self.front.sample_device_time(every);
+    }
+
     /// Marks the current stream as picking up mid-clip, so it runs no head passes.
     ///
     /// Only has an effect before the stream's first pass.
@@ -458,6 +478,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// ring with copies of its last frame, runs every real frame as a centre and reads out every
     /// real frame.
     pub(crate) fn finish_passes(&mut self) -> Result<Vec<CompletedRegion>, anyhow::Error> {
+        self.front.device_timer.stop_sampling();
+
         let emit = self.flush_target() as u32;
         if emit == 0 {
             return Ok(Vec::new());
@@ -646,15 +668,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             None => (self.unit_map.clone(), STRENGTH_MAP_OFF),
         };
 
-        let zero_dim = 256u32;
-        // Clamped to the 65,535 workgroup limit, which a 4:4:4 4K frame or an 8K luma plane alone
-        // exceeds. `collab_zero_accum` strides, so a clamped launch still reaches every slot.
-        let zero_workgroups_one_frame = (frame_len as u32).div_ceil(zero_dim).min(MAX_GRID_1D);
-        let zero_grid_one_frame = CubeCount::new_1d(zero_workgroups_one_frame);
-        let zero_total_threads_one_frame = zero_workgroups_one_frame * zero_dim;
-
-        let motion_ctx = self.front.motion_ctx();
-
         let cleared_slots = match clear {
             AccumClear::WholeRing => 0..total_frames,
             AccumClear::NewestRegion => {
@@ -666,27 +679,10 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
         self.passes_run += 1;
 
-        let (mv_field, confidence) = match (self.reg_mv.as_ref(), self.reg_conf.as_ref()) {
-            (Some(reg_mv), Some(reg_conf)) => {
-                let sad_noise_floor = self.front.sad_noise_floor_value();
-                let thsad = self.front.thsad_value();
-                run_regularise::<R>(
-                    &self.kernels,
-                    motion_ctx,
-                    view,
-                    self.width,
-                    self.height,
-                    self.field_lambda,
-                    sad_noise_floor,
-                    thsad,
-                    reg_mv,
-                    reg_conf,
-                )?;
-
-                (reg_mv.clone(), reg_conf.clone())
-            },
-            _ => (view.mv_field.clone(), view.confidence.clone()),
-        };
+        // The regularise launches and the scatter run in separate device spans, so each span fits
+        // one compute pass.
+        let regularised = timed(&client, self, |denoiser| denoiser.regularise_fields(view));
+        let (mv_field, confidence) = regularised?;
 
         self.last_fields = Some(LastFields {
             mv_field: mv_field.clone(),
@@ -695,25 +691,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             conf_stride: view.conf_stride,
             neighbours,
         });
-
-        unsafe {
-            // One dispatch over the whole ring exceeds the 65,535 workgroup limit at
-            // `temporal_radius = 4` for a 1080p luma plane. A rejected dispatch leaves undefined
-            // memory that a fresh stream would aggregate as real, so each region gets its own.
-            for slot in cleared_slots {
-                collab_zero_accum::launch_unchecked::<R>(
-                    &client,
-                    zero_grid_one_frame.clone(),
-                    CubeDim::new_1d(zero_dim),
-                    ArrayArg::from_raw_parts(self.accum.clone(), accum_ring_len),
-                    ArrayArg::from_raw_parts(self.wsum.clone(), wsum_ring_len),
-                    slot * pixels as u32,
-                    pixels as u32,
-                    stored_ch,
-                    zero_total_threads_one_frame,
-                );
-            }
-        }
 
         let pass = FusedPass {
             mv_field,
@@ -730,6 +707,78 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             neighbours,
         };
 
+        timed(&client, self, move |denoiser| {
+            denoiser.scatter_pass(view, cleared_slots, pass)
+        })
+    }
+
+    /// Regularises the view's motion fields when the field regulariser is on.
+    ///
+    /// Returns the motion field and confidence the pass groups with.
+    fn regularise_fields(&self, view: &RingView) -> Result<(Handle, Handle), anyhow::Error> {
+        let (Some(reg_mv), Some(reg_conf)) = (self.reg_mv.as_ref(), self.reg_conf.as_ref()) else {
+            let fields = (view.mv_field.clone(), view.confidence.clone());
+            return Ok(fields);
+        };
+
+        let motion_ctx = self.front.motion_ctx();
+        let sad_noise_floor = self.front.sad_noise_floor_value();
+        let thsad = self.front.thsad_value();
+        run_regularise::<R>(
+            &self.kernels,
+            motion_ctx,
+            view,
+            self.width,
+            self.height,
+            self.field_lambda,
+            sad_noise_floor,
+            thsad,
+            reg_mv,
+            reg_conf,
+        )?;
+
+        let fields = (reg_mv.clone(), reg_conf.clone());
+        Ok(fields)
+    }
+
+    /// Zeroes the accumulator regions in `cleared_slots`, then groups, filters and scatters one pass.
+    fn scatter_pass(
+        &self,
+        view: &RingView,
+        cleared_slots: Range<u32>,
+        pass: FusedPass,
+    ) -> Result<(), anyhow::Error> {
+        let client = self.front.compute_client().clone();
+        let pixels = (self.width * self.height) as usize;
+        let frame_len = pixels * pass.stored_ch as usize;
+        let accum_ring_len = pass.accum_ring_len;
+
+        let zero_dim = 256u32;
+        // Clamped to the 65,535 workgroup limit, which a 4:4:4 4K frame or an 8K luma plane alone
+        // exceeds. `collab_zero_accum` strides, so a clamped launch still reaches every slot.
+        let zero_workgroups_one_frame = (frame_len as u32).div_ceil(zero_dim).min(MAX_GRID_1D);
+        let zero_grid_one_frame = CubeCount::new_1d(zero_workgroups_one_frame);
+        let zero_total_threads_one_frame = zero_workgroups_one_frame * zero_dim;
+
+        unsafe {
+            // One dispatch over the whole ring exceeds the 65,535 workgroup limit at
+            // `temporal_radius = 4` for a 1080p luma plane. A rejected dispatch leaves undefined
+            // memory that a fresh stream would aggregate as real, so each region gets its own.
+            for slot in cleared_slots {
+                collab_zero_accum::launch_unchecked::<R>(
+                    &client,
+                    zero_grid_one_frame.clone(),
+                    CubeDim::new_1d(zero_dim),
+                    ArrayArg::from_raw_parts(self.accum.clone(), accum_ring_len),
+                    ArrayArg::from_raw_parts(self.wsum.clone(), pass.wsum_ring_len),
+                    slot * pixels as u32,
+                    pixels as u32,
+                    pass.stored_ch,
+                    zero_total_threads_one_frame,
+                );
+            }
+        }
+
         // The f32 search binds the f32 ring as its placeholder, so its kernel declares no f16 type.
         if self.f16_search {
             let search_handle = view
@@ -739,7 +788,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             self.launch_collab_fused::<half::f16>(&client, view, search_handle, accum_ring_len, pass)?;
         } else {
             let placeholder = view.input.clone();
-            self.launch_collab_fused::<f32>(&client, view, placeholder, stored_ch as usize, pass)?;
+            let search_len = pass.stored_ch as usize;
+            self.launch_collab_fused::<f32>(&client, view, placeholder, search_len, pass)?;
         }
 
         Ok(())

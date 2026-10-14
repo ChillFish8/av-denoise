@@ -31,6 +31,8 @@ pub struct RunOptions {
     pub grain_table: Option<PathBuf>,
     /// Seconds tuning may take, when the user set a budget.
     pub tune_budget: Option<f64>,
+    /// Whether to print the timing report at the end of the run.
+    pub timing_report: bool,
 }
 
 /// Which planes to clean up.

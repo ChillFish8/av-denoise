@@ -123,7 +123,7 @@ const WGPU_DEFAULT_MAX_TASKS: u32 = 32;
 /// The wgpu runtime timestamps only the first compute pass of a profile, and it ends a pass after
 /// `CUBECL_WGPU_MAX_TASKS` dispatches, 32 by default. A profile therefore holds the lower of 32 and
 /// that variable, read once.
-fn profile_chunk_limit() -> u32 {
+pub(crate) fn profile_chunk_limit() -> u32 {
     static CHUNK: OnceLock<u32> = OnceLock::new();
 
     *CHUNK.get_or_init(|| {

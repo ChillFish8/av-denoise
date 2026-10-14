@@ -26,5 +26,6 @@ mod split_sigma;
 mod strength_map;
 mod temporal;
 mod temporal_noise;
+mod timing;
 mod util;
 mod validation;

@@ -14,7 +14,7 @@ pub mod tune;
 #[cfg(test)]
 mod tests;
 
-pub use self::engine::{DevicePlane, EdgePadding, Engine, Geometry, SampleFormat, WindowSpan};
+pub use self::engine::{DevicePlane, EdgePadding, Engine, EngineTiming, Geometry, SampleFormat, WindowSpan};
 pub use self::error::Error;
 pub use self::nl4d::grain::{GrainChunk, SceneGrain, build_table};
 pub use self::nl4d::{

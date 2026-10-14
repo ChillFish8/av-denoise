@@ -68,6 +68,10 @@ impl<R: Runtime> KernelSelector<R> {
         self.profile
     }
 
+    pub(crate) fn ledger(&self) -> Option<&Arc<TuneLedger>> {
+        self.ledger.as_ref()
+    }
+
     /// Launches the chosen candidate of `site` on its real outputs.
     ///
     /// A key with no choice, an unknown name or a candidate that is illegal or does not fit runs the

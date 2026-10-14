@@ -70,6 +70,7 @@ fn run(bytes: Vec<u8>, workers: usize, table: Option<PathBuf>) -> Result<Vec<u8>
         visible: false,
         grain_table: table,
         tune_budget: None,
+        timing_report: false,
     };
 
     run_with(&options, opener, settings, writer)?;

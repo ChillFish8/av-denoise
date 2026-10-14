@@ -362,6 +362,7 @@ impl Nl4dArgs {
             progress: globals.progress,
             grain_table: self.unstable_export_av1_fgs.clone(),
             tune_budget: self.common.checked_tune_budget()?,
+            timing_report: self.common.timing_report,
         })
     }
 

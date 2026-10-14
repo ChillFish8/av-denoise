@@ -2,6 +2,8 @@ use anyhow::Context;
 use cubecl::prelude::*;
 
 use super::NlmDenoiser;
+use crate::engine::EngineTiming;
+use crate::engine::timing::{DeviceTimed, DeviceTimer};
 use crate::nlmeans::noise::{
     EMA_ALPHA,
     NoiseCtx,
@@ -26,7 +28,31 @@ use crate::nlmeans::noise::{
 use crate::nlmeans::params::sigma_eff;
 use crate::nlmeans::prefilter::PrefilterMode;
 
+impl<R: Runtime> DeviceTimed for NlmDenoiser<R> {
+    fn device_timer(&mut self) -> &mut DeviceTimer {
+        &mut self.device_timer
+    }
+}
+
 impl<R: Runtime> NlmDenoiser<R> {
+    /// Host and device time this denoiser has spent.
+    pub(crate) fn timing(&mut self) -> EngineTiming {
+        let (device_time, device_samples) = self.device_timer.settle();
+
+        EngineTiming {
+            readback_wait: self.stalls.wait(),
+            readback_waits: self.stalls.waits(),
+            device_time,
+            device_samples,
+        }
+    }
+
+    pub(crate) fn sample_device_time(&mut self, every: u32) {
+        let timing_method = self.client.properties().timing_method;
+        self.device_timer.set_timing_method(timing_method);
+        self.device_timer.set_every(every);
+    }
+
     /// Queues the Immerkær noise estimate for `slot` when automatic estimation is active.
     pub(super) fn run_noise_estimate_for_slot(&self, slot: u32) -> Result<(), anyhow::Error> {
         let (Some(partials_buf), Some(results_buf)) =
@@ -158,9 +184,10 @@ impl<R: Runtime> NlmDenoiser<R> {
             return Ok(());
         };
 
+        let results = results_buf.clone();
         let bytes = self
-            .client
-            .read_one(results_buf.clone())
+            .stalls
+            .time(|| self.client.read_one(results))
             .context("noise-estimate seed readback failed")?;
         let data = f32::from_bytes(&bytes);
 
@@ -279,8 +306,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             .clone();
 
         let bytes = self
-            .client
-            .read_one(results_buf)
+            .stalls
+            .time(|| self.client.read_one(results_buf))
             .map_err(|error| anyhow::anyhow!("noise-estimate results readback failed: {error}"))?;
         let data = f32::from_bytes(&bytes);
 
@@ -317,8 +344,8 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         let sliced = partials_buf.clone().offset_start(start).offset_end(end_trim);
         let bytes = self
-            .client
-            .read_one(sliced)
+            .stalls
+            .time(|| self.client.read_one(sliced))
             .map_err(|error| anyhow::anyhow!("noise partials readback failed: {error}"))?;
         let data = f32::from_bytes(&bytes);
 
@@ -347,16 +374,18 @@ impl<R: Runtime> NlmDenoiser<R> {
         let channels = self.params.channels.count();
         let frame_count = self.params.total_frames();
 
-        let records = read_temporal_stats_slot::<R>(
-            &self.client,
-            stats_buf,
-            self.width,
-            self.height,
-            stored_ch,
-            frame_count,
-            slot,
-            self.align,
-        )?;
+        let records = self.stalls.time(|| {
+            read_temporal_stats_slot::<R>(
+                &self.client,
+                stats_buf,
+                self.width,
+                self.height,
+                stored_ch,
+                frame_count,
+                slot,
+                self.align,
+            )
+        })?;
 
         let reading = temporal_noise_reading(
             &records,

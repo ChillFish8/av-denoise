@@ -6,16 +6,22 @@ use av_denoise::{
     Depth,
     Device,
     FrameLayout,
+    MotionCompensationMode,
+    MotionSearch,
     Nl4dOptions,
     NlmeansHqOptions,
     NlmeansOptions,
     PlaneOptions,
+    PsyParams,
     Subsampling,
     TuningMode,
 };
 
+use super::clips::ClipKind;
+
 pub struct ParityConfig {
     pub name: &'static str,
+    pub clip: ClipKind,
     pub options: PlaneOptions,
     pub layout: FrameLayout,
     pub frames: usize,
@@ -63,6 +69,27 @@ pub fn all() -> Vec<ParityConfig> {
     let yuv420_8 = layout(Subsampling::Yuv420, Depth::Eight);
     let yuv420_10 = layout(Subsampling::Yuv420, Depth::Ten);
     let yuv444_8 = layout(Subsampling::Yuv444, Depth::Eight);
+    let yuv420_8_large = FrameLayout {
+        width: 2 * WIDTH,
+        height: 2 * HEIGHT,
+        ..yuv420_8
+    };
+    let wide = DenoisingMode::Temporal { radius: 3 };
+    let motion_search = MotionSearch::default();
+    let compensated = NlmeansOptions {
+        motion_compensation: MotionCompensationMode::from(motion_search),
+        ..NlmeansOptions::default()
+    };
+    let hq_compensated_options = NlmeansHqOptions {
+        nlm: compensated,
+        ..NlmeansHqOptions::default()
+    };
+    let hq_compensated = Algorithm::NlmeansHq(hq_compensated_options);
+    let psy_options = Nl4dOptions {
+        psy: Some(PsyParams::default()),
+        ..Nl4dOptions::default()
+    };
+    let nl4d_psy = Algorithm::Nl4d(psy_options);
 
     let nlm_fast_spatial_8 = config(
         "nlm_fast_spatial_8",
@@ -172,6 +199,55 @@ pub fn all() -> Vec<ParityConfig> {
         12,
         true,
     );
+    let nlm_hq_mc_8 = config(
+        "nlm_hq_mc_8",
+        ChannelIntent::LumaChroma,
+        temporal,
+        hq_compensated,
+        yuv420_8,
+        12,
+        false,
+    );
+    let nlm_hq_chained_8 = config(
+        "nlm_hq_chained_8",
+        ChannelIntent::Luma,
+        wide,
+        hq_compensated,
+        yuv420_8,
+        12,
+        false,
+    );
+    let nl4d_chained_8 = config(
+        "nl4d_chained_8",
+        ChannelIntent::Luma,
+        wide,
+        nl4d,
+        yuv420_8,
+        14,
+        false,
+    );
+    let nl4d_psy_base = config(
+        "nl4d_psy_8",
+        ChannelIntent::LumaChroma,
+        temporal,
+        nl4d_psy,
+        yuv420_8_large,
+        12,
+        false,
+    );
+    let nl4d_psy_8 = ParityConfig {
+        clip: ClipKind::Still,
+        ..nl4d_psy_base
+    };
+    let nl4d_reseed_8 = config(
+        "nl4d_reseed_8",
+        ChannelIntent::LumaChroma,
+        temporal,
+        nl4d,
+        yuv420_8,
+        12,
+        true,
+    );
 
     vec![
         nlm_fast_spatial_8,
@@ -186,6 +262,11 @@ pub fn all() -> Vec<ParityConfig> {
         nl4d_short_8,
         nl4d_grain_8,
         nlm_hq_reseed_8,
+        nlm_hq_mc_8,
+        nlm_hq_chained_8,
+        nl4d_chained_8,
+        nl4d_psy_8,
+        nl4d_reseed_8,
     ]
 }
 
@@ -202,6 +283,7 @@ fn config(
 
     ParityConfig {
         name,
+        clip: ClipKind::Moving,
         options: plane_options,
         layout,
         frames,

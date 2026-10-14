@@ -22,6 +22,7 @@ fn run_over(bytes: Vec<u8>, workers: usize, budget: u64) -> Result<Vec<u8>, anyh
         visible: false,
         grain_table: None,
         tune_budget: None,
+        timing_report: false,
     };
 
     run_with(&options, opener, settings, writer)?;
@@ -99,6 +100,7 @@ fn a_failed_write_is_reported_over_the_worker_disconnect() {
         visible: false,
         grain_table: None,
         tune_budget: None,
+        timing_report: false,
     };
 
     let err = run_with(&options, opener, settings, ClosedPipe).expect_err("the write fails");

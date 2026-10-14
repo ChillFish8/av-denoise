@@ -40,6 +40,25 @@ pub enum Accelerator {
     Rocm,
 }
 
+impl Accelerator {
+    /// Whether every thread working on one device submits into a single shared queue.
+    ///
+    /// The wgpu backends give each thread its own command encoder and submit all of them to the
+    /// device's one queue. CUDA and ROCm give threads separate streams.
+    pub fn shares_device_queue(self) -> bool {
+        match self {
+            #[cfg(any(feature = "cuda", docsrs))]
+            Accelerator::Cuda => false,
+            #[cfg(any(feature = "vulkan", docsrs))]
+            Accelerator::Vulkan => true,
+            #[cfg(any(feature = "metal", docsrs))]
+            Accelerator::Metal => true,
+            #[cfg(any(feature = "rocm", docsrs))]
+            Accelerator::Rocm => false,
+        }
+    }
+}
+
 /// Returns every accelerator this build enables, in the order to try them.
 ///
 /// ```no_run

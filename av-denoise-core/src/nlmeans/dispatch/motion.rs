@@ -1,6 +1,7 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
+use crate::engine::timing::{timed, units_per_span};
 use crate::nlmeans::denoiser::NlmDenoiser;
 use crate::nlmeans::kernels::gpu_copy;
 use crate::nlmeans::motion::{
@@ -28,6 +29,12 @@ pub(in crate::nlmeans) const NLM_SPATIAL_RESIDUAL_FRACTION: f32 = 0.0;
 /// and 0.57 dB at the heaviest. It stays separate from [NLM_SPATIAL_RESIDUAL_FRACTION] because the
 /// two zeros come from different reasons.
 pub(in crate::nlmeans) const BILATERAL_RESIDUAL_FRACTION: f32 = 0.0;
+
+/// The most dispatches one neighbour's motion estimate queues.
+const DISPATCHES_PER_ESTIMATE: u32 = 2;
+
+/// The most dispatches one neighbour's motion estimate and warps queue.
+const DISPATCHES_PER_COMPENSATED_NEIGHBOUR: u32 = 4;
 
 /// The sigma to pass [motion::sad_noise_floor] for the motion-compensation block match.
 ///
@@ -124,16 +131,54 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// Runs the motion estimate for every neighbour in the window without shifting any buffer.
     ///
     /// It returns each neighbour's physical slot in logical ring order, skipping the centre, or an
-    /// empty list when motion compensation is off or there are no neighbours.
-    pub(in crate::nlmeans) fn run_motion_machinery(&self, center_t: u32) -> Result<Vec<u32>, anyhow::Error> {
-        let Some(motion_ctx) = self.mc_ctx.as_ref() else {
-            return Ok(Vec::new());
-        };
-
-        let temporal_radius = self.params.temporal_radius;
-        if temporal_radius == 0 {
+    /// empty list when motion compensation is off or there are no neighbours. The neighbours run
+    /// in chunks that each fit one device span.
+    pub(in crate::nlmeans) fn run_motion_machinery(
+        &mut self,
+        center_t: u32,
+    ) -> Result<Vec<u32>, anyhow::Error> {
+        if self.mc_ctx.is_none() || self.params.temporal_radius == 0 {
             return Ok(Vec::new());
         }
+
+        let client = self.client.clone();
+        let offsets = self.neighbour_offsets(center_t);
+        let per_span = units_per_span(DISPATCHES_PER_ESTIMATE);
+
+        let mut slots = Vec::with_capacity(offsets.len());
+        for (chunk_index, chunk) in offsets.chunks(per_span).enumerate() {
+            let first_idx = (chunk_index * per_span) as u32;
+            let chunk_slots = timed(&client, self, move |front| {
+                front.estimate_neighbours(center_t, chunk, first_idx)
+            })?;
+            slots.extend(chunk_slots);
+        }
+
+        Ok(slots)
+    }
+
+    /// The temporal offset of every neighbour of logical position `center_t`, oldest first.
+    fn neighbour_offsets(&self, center_t: u32) -> Vec<i32> {
+        let frame_count = self.params.total_frames();
+
+        (0..frame_count)
+            .filter(|&logical| logical != center_t)
+            .map(|logical| logical as i32 - center_t as i32)
+            .collect()
+    }
+
+    /// Estimates the motion of the neighbours at `offsets`, whose motion-field indices start at
+    /// `first_idx`, and returns their physical slots.
+    fn estimate_neighbours(
+        &self,
+        center_t: u32,
+        offsets: &[i32],
+        first_idx: u32,
+    ) -> Result<Vec<u32>, anyhow::Error> {
+        let motion_ctx = self
+            .mc_ctx
+            .as_ref()
+            .expect("motion estimates run only with motion compensation active");
 
         let frame_count = self.params.total_frames();
         let centre_slot = self.phys_frame(center_t as i32);
@@ -158,14 +203,9 @@ impl<R: Runtime> NlmDenoiser<R> {
         // Match against the reference pyramid when one exists, because it is cleaner.
         let analyse_pyramid = self.pyramid_reference.as_ref().unwrap_or(pyramid_input);
 
-        let mut neighbour_idx: u32 = 0;
-        let mut slots = Vec::with_capacity((frame_count - 1) as usize);
-        for logical in 0..frame_count {
-            if logical == center_t {
-                continue;
-            }
-
-            let k = logical as i32 - center_t as i32;
+        let indexed = (first_idx..).zip(offsets.iter());
+        let mut slots = Vec::with_capacity(offsets.len());
+        for (neighbour_idx, &k) in indexed {
             let neighbour_slot = self.run_motion_estimate(
                 motion_ctx,
                 analyse_pyramid,
@@ -181,8 +221,6 @@ impl<R: Runtime> NlmDenoiser<R> {
                 thsad,
             )?;
             slots.push(neighbour_slot);
-
-            neighbour_idx += 1;
         }
 
         Ok(slots)
@@ -191,16 +229,80 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// Estimates each neighbour's motion and shifts it into the compensated rings.
     ///
     /// The centre slot is copied through unchanged so the temporal kernels read every slot the same
-    /// way. It does nothing when motion compensation is off or there are no neighbours.
-    pub(super) fn run_motion_compensation(&self, center_t: u32) -> Result<(), anyhow::Error> {
-        let Some(motion_ctx) = self.mc_ctx.as_ref() else {
-            return Ok(());
-        };
-
-        let temporal_radius = self.params.temporal_radius;
-        if temporal_radius == 0 {
+    /// way. It does nothing when motion compensation is off or there are no neighbours. The
+    /// neighbours run in chunks that each fit one device span.
+    pub(super) fn run_motion_compensation(&mut self, center_t: u32) -> Result<(), anyhow::Error> {
+        if self.mc_ctx.is_none() || self.params.temporal_radius == 0 {
             return Ok(());
         }
+
+        let client = self.client.clone();
+
+        timed(&client, self, move |front| front.copy_centre_through(center_t));
+
+        // Neighbours run from the furthest behind to the furthest ahead, skipping the centre, so
+        // their motion-field indices stay contiguous.
+        let offsets = self.neighbour_offsets(center_t);
+        let per_span = units_per_span(DISPATCHES_PER_COMPENSATED_NEIGHBOUR);
+        for (chunk_index, chunk) in offsets.chunks(per_span).enumerate() {
+            let first_idx = (chunk_index * per_span) as u32;
+            timed(&client, self, move |front| {
+                front.compensate_neighbours(center_t, chunk, first_idx)
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Copies the centre slot unchanged into the compensated input and reference rings.
+    fn copy_centre_through(&self, center_t: u32) {
+        let compensated_input = self
+            .compensated_input_buf
+            .as_ref()
+            .expect("compensated_input allocated when mc_ctx is Some");
+
+        let centre_slot = self.phys_frame(center_t as i32);
+        let stored_ch = self.params.channels.storage_count();
+
+        copy_frame_into_slot_handle::<R>(
+            &self.client,
+            &self.input_buf,
+            compensated_input,
+            centre_slot as usize,
+            self.params.total_frames(),
+            self.width,
+            self.height,
+            stored_ch,
+        );
+        if let (Some(ref_src), Some(ref_dst)) = (
+            self.reference_buf.as_ref(),
+            self.compensated_reference_buf.as_ref(),
+        ) {
+            copy_frame_into_slot_handle::<R>(
+                &self.client,
+                ref_src,
+                ref_dst,
+                centre_slot as usize,
+                self.params.total_frames(),
+                self.width,
+                self.height,
+                stored_ch,
+            );
+        }
+    }
+
+    /// Estimates and warps the neighbours at `offsets`, whose motion-field indices start at
+    /// `first_idx`.
+    fn compensate_neighbours(
+        &self,
+        center_t: u32,
+        offsets: &[i32],
+        first_idx: u32,
+    ) -> Result<(), anyhow::Error> {
+        let motion_ctx = self
+            .mc_ctx
+            .as_ref()
+            .expect("motion compensation runs only with motion compensation active");
 
         let frame_count = self.params.total_frames();
         let centre_slot = self.phys_frame(center_t as i32);
@@ -229,44 +331,11 @@ impl<R: Runtime> NlmDenoiser<R> {
         let sad_noise_floor = motion::sad_noise_floor(motion_ctx.blksize, mc_sigma_y);
         let thsad = motion::thsad(motion_ctx.blksize, thsad_scale);
 
-        copy_frame_into_slot_handle::<R>(
-            &self.client,
-            &self.input_buf,
-            compensated_input,
-            centre_slot as usize,
-            self.params.total_frames(),
-            self.width,
-            self.height,
-            stored_ch,
-        );
-        if let (Some(ref_src), Some(ref_dst)) = (
-            self.reference_buf.as_ref(),
-            self.compensated_reference_buf.as_ref(),
-        ) {
-            copy_frame_into_slot_handle::<R>(
-                &self.client,
-                ref_src,
-                ref_dst,
-                centre_slot as usize,
-                self.params.total_frames(),
-                self.width,
-                self.height,
-                stored_ch,
-            );
-        }
-
         // Match against the reference pyramid when one exists, because it is cleaner.
         let analyse_pyramid = self.pyramid_reference.as_ref().unwrap_or(pyramid_input);
 
-        // Neighbours run from the furthest behind to the furthest ahead, skipping the centre, so
-        // their motion-field indices stay contiguous.
-        let radius = temporal_radius as i32;
-        let mut neighbour_idx: u32 = 0;
-        for k in -radius..=radius {
-            if k == 0 {
-                continue;
-            }
-
+        let indexed = (first_idx..).zip(offsets.iter());
+        for (neighbour_idx, &k) in indexed {
             let neighbour_slot = self.run_motion_estimate(
                 motion_ctx,
                 analyse_pyramid,
@@ -314,8 +383,6 @@ impl<R: Runtime> NlmDenoiser<R> {
                     mv_field,
                 )?;
             }
-
-            neighbour_idx += 1;
         }
 
         Ok(())

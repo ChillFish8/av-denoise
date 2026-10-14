@@ -4,7 +4,16 @@ use cubecl::server::Handle;
 use super::denoiser::{GpuOutput, NlmDenoiser, check_u32_indexable, front_buffer_sizes};
 use super::options::{NlmeansAlgorithm, resolve_params};
 use super::params::validate_dimensions;
-use crate::engine::{DevicePlane, EdgePadding, EgressSource, Engine, Geometry, WindowSpan, egress};
+use crate::engine::{
+    DevicePlane,
+    EdgePadding,
+    EgressSource,
+    Engine,
+    EngineTiming,
+    Geometry,
+    WindowSpan,
+    egress,
+};
 use crate::error::Error;
 use crate::tune::{EngineKernels, KernelSelector};
 
@@ -231,5 +240,13 @@ impl<R: Runtime> Engine for Nlmeans<R> {
 
     fn max_held_frames(&self) -> usize {
         self.front.params.temporal_radius as usize
+    }
+
+    fn timing(&mut self) -> EngineTiming {
+        self.front.timing()
+    }
+
+    fn sample_device_time(&mut self, every: u32) {
+        self.front.sample_device_time(every);
     }
 }

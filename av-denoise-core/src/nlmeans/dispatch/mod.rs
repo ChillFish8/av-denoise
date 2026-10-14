@@ -22,8 +22,12 @@ use super::kernels::{
 use super::motion::{confidence_byte_offset, neighbour_idx_for_k};
 use super::noise::{build_spatial_offset_lut, spatial_offset_factor, spatial_offset_lut_len};
 use super::{BLOCK_1D, BLOCK_X, BLOCK_Y, MAX_GRID_1D};
+use crate::engine::timing::{timed, units_per_span};
 use crate::tune::gpu::bind;
 use crate::tune::sites::{AccumOutputs, AccumulateSite, ConfidenceBinding, WindowPass, WindowSite};
+
+/// The most dispatches one separable search offset queues.
+const SEPARABLE_DISPATCHES_PER_OFFSET: u32 = 4;
 
 /// The sizes and tile launch shape one frame's dispatches share.
 ///
@@ -576,17 +580,18 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// It shares the frame accumulators with the main pass. That is safe because the GPU queue runs
     /// in order and the main pass zeroes them before use.
     pub(super) fn run_nlm_spatial_pilot(&self, slot: u32, strength_scale: f32) -> Result<(), anyhow::Error> {
+        // A flat table with no correlation adjustment, because the pilot compares noisy input
+        // patches and keeps the full white-noise floor. It is rebuilt each call since
+        // `input_noise_offset` can change between pushes. It uploads before the first dispatch,
+        // because an upload ends a device span's timed pass.
+        let pilot_lut = build_spatial_offset_lut(self.params.search_radius, 0.0, self.input_noise_offset);
+        let pilot_lut_bytes = f32::as_bytes(&pilot_lut);
+        let pilot_lut_handle = self.client.create_from_slice(pilot_lut_bytes);
+
         let ctx = self.launch_ctx();
         self.zero_accumulators(&ctx)?;
 
         let pilot_h2 = self.h2_inv_norm / (strength_scale * strength_scale);
-
-        // A flat table with no correlation adjustment, because the pilot compares noisy input
-        // patches and keeps the full white-noise floor. It is rebuilt each call since
-        // `input_noise_offset` can change between pushes.
-        let pilot_lut = build_spatial_offset_lut(self.params.search_radius, 0.0, self.input_noise_offset);
-        let pilot_lut_bytes = f32::as_bytes(&pilot_lut);
-        let pilot_lut_handle = self.client.create_from_slice(pilot_lut_bytes);
         let pass = WindowPass::Single {
             offsets: pilot_lut_handle,
             offsets_len: pilot_lut.len(),
@@ -602,56 +607,109 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.run_finish_to(&ctx, slot, slot, reference_ring)
     }
 
+    /// Queues every denoise kernel for the current window, in device spans when sampled.
     pub(super) fn run_denoise_kernels(&mut self, output_slot: usize) -> Result<(), anyhow::Error> {
-        let temporal_radius = self.params.temporal_radius;
-        let search_radius = self.params.search_radius as i32;
-
-        let ctx = self.launch_ctx();
-
-        let center_t = temporal_radius;
+        let center_t = self.params.temporal_radius;
+        let client = self.client.clone();
 
         // Both run before any NLM dispatch so the temporal kernels read aligned neighbours.
         // `confidence_ctx` only exists with motion compensation off, so at most one does work.
         self.run_motion_compensation(center_t)?;
-        self.run_confidence_pass(center_t)?;
+
+        timed(&client, self, move |front| front.run_confidence_pass(center_t))?;
+
+        if self.use_separable {
+            return self.run_separable_kernels(output_slot);
+        }
+
+        timed(&client, self, move |front| {
+            front.run_windowed_kernels(output_slot)
+        })
+    }
+
+    /// Queues the windowed path, which makes one launch per temporal offset.
+    fn run_windowed_kernels(&self, output_slot: usize) -> Result<(), anyhow::Error> {
+        let temporal_radius = self.params.temporal_radius;
+        let center_t = temporal_radius;
+        let ctx = self.launch_ctx();
 
         self.zero_accumulators(&ctx)?;
+
+        let k_start = -(temporal_radius as i32);
+        for q_k in k_start..0 {
+            self.dispatch_fused_window_iter(&ctx, center_t, q_k)?;
+        }
+
+        self.dispatch_fused_single_window_iter(&ctx, center_t)?;
+        self.run_finish(&ctx, center_t, output_slot)
+    }
+
+    /// Queues the separable path, which launches per search offset.
+    ///
+    /// The offsets run in chunks that each fit one device span.
+    fn run_separable_kernels(&mut self, output_slot: usize) -> Result<(), anyhow::Error> {
+        let center_t = self.params.temporal_radius;
+        let client = self.client.clone();
+
+        timed(&client, self, |front| {
+            let ctx = front.launch_ctx();
+            front.zero_accumulators(&ctx)
+        })?;
+
+        let offsets = self.separable_offsets();
+        let per_span = units_per_span(SEPARABLE_DISPATCHES_PER_OFFSET);
+        for chunk in offsets.chunks(per_span) {
+            timed(&client, self, move |front| {
+                front.dispatch_separable_offsets(center_t, chunk)
+            })?;
+        }
+
+        timed(&client, self, move |front| {
+            let ctx = front.launch_ctx();
+            front.run_finish(&ctx, center_t, output_slot)
+        })
+    }
+
+    /// Every `(q_k, q_y, q_x)` search offset the separable path visits, in launch order.
+    ///
+    /// `linear < 0` keeps half of the frame-against-itself window, because its weights are
+    /// symmetric.
+    fn separable_offsets(&self) -> Vec<(i32, i32, i32)> {
+        let temporal_radius = self.params.temporal_radius;
+        let search_radius = self.params.search_radius as i32;
         let window_side = 2 * search_radius + 1;
         let window_area = window_side * window_side;
-
-        // The windowed path makes one launch per temporal offset. The separable path launches per
-        // search offset, and `linear < 0` keeps half of the frame-against-itself window because
-        // its weights are symmetric.
         let k_start = -(temporal_radius as i32);
-        let use_windowed = !self.use_separable;
+
+        let mut offsets = Vec::new();
         for q_k in k_start..=0 {
-            if use_windowed {
-                if q_k != 0 {
-                    self.dispatch_fused_window_iter(&ctx, center_t, q_k)?;
-                } else {
-                    self.dispatch_fused_single_window_iter(&ctx, center_t)?;
-                }
-
-                continue;
-            }
-
             for q_y in -search_radius..=search_radius {
                 for q_x in -search_radius..=search_radius {
                     let linear = q_k * window_area + q_y * window_side + q_x;
-                    if linear >= 0 {
-                        continue;
-                    }
-
-                    if q_k == 0 {
-                        self.dispatch_separable_iter_k0(&ctx, center_t, q_x, q_y)?;
-                    } else {
-                        self.dispatch_separable_iter(&ctx, center_t, q_x, q_y, q_k)?;
+                    if linear < 0 {
+                        offsets.push((q_k, q_y, q_x));
                     }
                 }
             }
         }
 
-        self.run_finish(&ctx, center_t, output_slot)?;
+        offsets
+    }
+
+    fn dispatch_separable_offsets(
+        &self,
+        center_t: u32,
+        offsets: &[(i32, i32, i32)],
+    ) -> Result<(), anyhow::Error> {
+        let ctx = self.launch_ctx();
+
+        for &(q_k, q_y, q_x) in offsets {
+            if q_k == 0 {
+                self.dispatch_separable_iter_k0(&ctx, center_t, q_x, q_y)?;
+            } else {
+                self.dispatch_separable_iter(&ctx, center_t, q_x, q_y, q_k)?;
+            }
+        }
 
         Ok(())
     }

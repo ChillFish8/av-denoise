@@ -21,7 +21,7 @@ use av_denoise_core::{
 pub use self::reseed::ReseedWindow;
 use crate::backend::Device;
 use crate::backend::accelerate::Accelerator;
-use crate::host::{Algorithm, DenoiserError, DenoiserOptions, Depth, HostDenoiser};
+use crate::host::{Algorithm, DenoiserError, DenoiserOptions, Depth, HostDenoiser, PlaneTiming};
 use crate::tune::{KernelSetup, TuneReport, TuneRequest, TuningMode, profile_key, tune_planar};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,7 +110,7 @@ pub fn fill_plane(samples: usize, value: u16, depth: Depth) -> Vec<u8> {
 ///
 /// Plane lengths come from [FrameLayout], so `y.len()` is `layout.luma_bytes()` and both `u.len()`
 /// and `v.len()` are `layout.chroma_bytes()`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Planes {
     pub y: Vec<u8>,
     pub u: Vec<u8>,
@@ -318,6 +318,27 @@ fn into_uv(planes: Vec<Vec<u8>>) -> (Vec<u8>, Vec<u8>) {
 fn into_luma(planes: Vec<Vec<u8>>) -> Vec<u8> {
     let [y_plane] = into_array(planes);
     y_plane
+}
+
+/// Where each denoised plane's host time went.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PlanarTiming {
+    pub luma: Option<PlaneTiming>,
+    pub chroma: Option<PlaneTiming>,
+    /// Set when all three planes are denoised together.
+    pub yuv: Option<PlaneTiming>,
+}
+
+impl PlanarTiming {
+    /// Each denoised plane's name and timing, in luma, chroma, yuv order.
+    pub fn planes(&self) -> Vec<(&'static str, PlaneTiming)> {
+        let named = [("luma", self.luma), ("chroma", self.chroma), ("yuv", self.yuv)];
+
+        named
+            .into_iter()
+            .filter_map(|(name, timing)| timing.map(|timing| (name, timing)))
+            .collect()
+    }
 }
 
 /// The push a [PlanarDenoiser] runs against each enabled half, either [HostDenoiser::push] or
@@ -688,6 +709,36 @@ impl PlanarDenoiser {
         }
 
         Ok(())
+    }
+
+    /// Samples the device time of one frame in every `every` on each denoised plane.
+    pub fn sample_device_time(&mut self, every: u32) {
+        let denoisers = [&mut self.luma, &mut self.chroma, &mut self.yuv];
+
+        for denoiser in denoisers.into_iter().flatten() {
+            denoiser.sample_device_time(every);
+        }
+    }
+
+    /// Where each denoised plane's host time went so far.
+    pub fn timing(&mut self) -> PlanarTiming {
+        let luma = self.luma.as_mut().map(HostDenoiser::timing);
+        let chroma = self.chroma.as_mut().map(HostDenoiser::timing);
+        let yuv = self.yuv.as_mut().map(HostDenoiser::timing);
+
+        PlanarTiming { luma, chroma, yuv }
+    }
+
+    /// The backend the denoised planes run on.
+    pub fn selected_accelerator(&self) -> Accelerator {
+        let denoiser = self
+            .yuv
+            .as_ref()
+            .or(self.luma.as_ref())
+            .or(self.chroma.as_ref())
+            .expect("a planar denoiser denoises at least one plane");
+
+        denoiser.selected_accelerator()
     }
 
     /// The number of frames behind and ahead of a target frame a [Self::reseed] window must supply.

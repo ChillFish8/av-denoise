@@ -76,6 +76,15 @@ pub struct CommonArgs {
     /// Takes a finite number between 0 and 86400.
     #[arg(long, value_name = "SECONDS", allow_negative_numbers = true, value_parser = parse_tune_budget)]
     pub tune_budget: Option<f64>,
+
+    /// Prints where the time went at the end of the run.
+    ///
+    /// Shows, per plane and per frame, the host time blocked on GPU
+    /// readbacks and the host time spent building and queuing work. It
+    /// also shows how busy the GPU was where the device has timestamps,
+    /// and the frames per second. The report goes to stderr.
+    #[arg(long)]
+    pub timing_report: bool,
 }
 
 /// The longest tuning budget accepted, one day in seconds.

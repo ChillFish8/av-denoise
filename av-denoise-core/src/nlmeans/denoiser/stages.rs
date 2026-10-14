@@ -2,16 +2,37 @@ use anyhow::Context;
 use cubecl::prelude::*;
 
 use super::NlmDenoiser;
+use crate::engine::timing::timed;
 use crate::nlmeans::motion::{self, MotionEstimation, build_pyramid_for_slot, run_pyramid_build};
 use crate::nlmeans::prefilter::{PrefilterCtx, PrefilterMode, run_prefilter};
 
 impl<R: Runtime> NlmDenoiser<R> {
     /// Runs every per-frame stage on a freshly pushed `slot`, through to the ring advance.
+    ///
+    /// The GPU stages run in device spans when the frame is sampled. The first frame's noise seed
+    /// waits on the host, so it runs between two spans.
     pub(super) fn run_post_upload_stages(&mut self, slot: usize) -> Result<(), anyhow::Error> {
-        self.run_noise_estimate_for_slot(slot as u32)?;
-        self.run_temporal_stats_for_slot(slot as u32)?;
-        self.seed_noise_estimate_if_first_frame(slot as u32)?;
+        let client = self.client.clone();
+        let frame_slot = slot as u32;
 
+        timed(&client, self, move |front| front.run_noise_stages(frame_slot))?;
+
+        self.seed_noise_estimate_if_first_frame(frame_slot)?;
+
+        timed(&client, self, move |front| front.run_reference_stages(slot))?;
+
+        self.advance_ring();
+        self.prime_leading_edge_if_first()
+    }
+
+    /// Queues the noise estimate and the temporal noise statistics for `slot`.
+    fn run_noise_stages(&self, slot: u32) -> Result<(), anyhow::Error> {
+        self.run_noise_estimate_for_slot(slot)?;
+        self.run_temporal_stats_for_slot(slot)
+    }
+
+    /// Queues the prefilter, the motion pyramids and the pair analyse for `slot`.
+    fn run_reference_stages(&self, slot: usize) -> Result<(), anyhow::Error> {
         if let PrefilterMode::NlmSpatial { strength_scale } = self.params.prefilter {
             self.run_nlm_spatial_pilot(slot as u32, strength_scale)
                 .context("nlm spatial pilot dispatch failed")?;
@@ -21,10 +42,7 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         self.build_pyramids_for_slot(slot as u32)?;
         self.build_confidence_pyramid_for_slot(slot as u32)?;
-        self.run_pair_analyse_for_slot(slot as u32)?;
-
-        self.advance_ring();
-        self.prime_leading_edge_if_first()
+        self.run_pair_analyse_for_slot(slot as u32)
     }
 
     fn run_prefilter_for_slot(&self, slot: usize) -> Result<(), anyhow::Error> {

@@ -66,12 +66,14 @@ pub use self::host::{
     Depth,
     HostDenoiser,
     MAX_PENDING,
+    PlaneTiming,
     UnsupportedDepthError,
 };
 pub use self::planar::{
     ChannelIntent,
     FrameLayout,
     PlanarDenoiser,
+    PlanarTiming,
     PlaneOptions,
     Planes,
     ReseedWindow,
