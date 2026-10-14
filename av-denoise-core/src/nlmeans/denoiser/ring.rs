@@ -166,7 +166,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// Refreshes every per-slot buffer of the duplicated `slot`.
     ///
     /// A later pass then never reads an older frame's state there.
-    fn refresh_duplicated_slot(&self, slot: usize) -> Result<(), anyhow::Error> {
+    fn refresh_duplicated_slot(&mut self, slot: usize) -> Result<(), anyhow::Error> {
         if let PrefilterMode::NlmSpatial { strength_scale } = self.params.prefilter {
             self.run_nlm_spatial_pilot(slot as u32, strength_scale)
                 .context("nlm spatial pilot dispatch failed")?;

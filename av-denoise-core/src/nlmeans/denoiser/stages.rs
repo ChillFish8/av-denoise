@@ -33,7 +33,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     }
 
     /// Queues the prefilter, the motion pyramids and the pair analyse for `slot`.
-    fn run_reference_stages(&self, slot: usize) -> Result<(), anyhow::Error> {
+    fn run_reference_stages(&mut self, slot: usize) -> Result<(), anyhow::Error> {
         if let PrefilterMode::NlmSpatial { strength_scale } = self.params.prefilter {
             self.run_nlm_spatial_pilot(slot as u32, strength_scale)
                 .context("nlm spatial pilot dispatch failed")?;

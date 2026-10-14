@@ -265,7 +265,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let frame_t = self.phys_frame(center_t as i32);
         let offsets_len = spatial_offset_lut_len(self.params.search_radius);
         let pass = WindowPass::Single {
-            offsets: self.spatial_offset_lut.clone(),
+            offsets: self.spatial_offset_lut.handle().clone(),
             offsets_len,
         };
         let input = self.input_buf.clone();
@@ -579,14 +579,18 @@ impl<R: Runtime> NlmDenoiser<R> {
     ///
     /// It shares the frame accumulators with the main pass. That is safe because the GPU queue runs
     /// in order and the main pass zeroes them before use.
-    pub(super) fn run_nlm_spatial_pilot(&self, slot: u32, strength_scale: f32) -> Result<(), anyhow::Error> {
+    pub(super) fn run_nlm_spatial_pilot(
+        &mut self,
+        slot: u32,
+        strength_scale: f32,
+    ) -> Result<(), anyhow::Error> {
         // A flat table with no correlation adjustment, because the pilot compares noisy input
-        // patches and keeps the full white-noise floor. It is rebuilt each call since
-        // `input_noise_offset` can change between pushes. It uploads before the first dispatch,
-        // because an upload ends a device span's timed pass.
+        // patches. Any upload happens before the first dispatch, because an upload ends a device
+        // span's timed pass.
         let pilot_lut = build_spatial_offset_lut(self.params.search_radius, 0.0, self.input_noise_offset);
         let pilot_lut_bytes = f32::as_bytes(&pilot_lut);
-        let pilot_lut_handle = self.client.create_from_slice(pilot_lut_bytes);
+        self.pilot_offset_lut.update(&self.client, pilot_lut_bytes);
+        let pilot_lut_handle = self.pilot_offset_lut.handle().clone();
 
         let ctx = self.launch_ctx();
         self.zero_accumulators(&ctx)?;

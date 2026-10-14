@@ -3,6 +3,8 @@ use cubecl::server::Handle;
 
 use super::NlmDenoiser;
 use crate::nlmeans::dispatch::mc_sad_noise_floor_sigma;
+#[cfg(test)]
+use crate::nlmeans::mirror::MirroredBuffer;
 use crate::nlmeans::motion::{self, MotionCtx};
 use crate::nlmeans::params::ChannelMode;
 
@@ -23,6 +25,8 @@ pub(crate) struct RingView {
     pub centre_slot: u32,
     /// Physical ring slot of each neighbour in logical order, skipping the centre.
     pub neighbour_slots: Vec<u32>,
+    /// The neighbour slots as a device table, one u32 per neighbour.
+    pub neighbour_slots_buf: Handle,
     /// `i32` element stride between neighbours in `mv_field`.
     pub mv_stride: u32,
     /// `f32` element stride between neighbours in `confidence`.
@@ -87,6 +91,9 @@ impl<R: Runtime> NlmDenoiser<R> {
         let mv_stride = (motion_ctx.mv_field_bytes_per_neighbour() / size_of::<i32>() as u64) as u32;
         let conf_stride = (motion_ctx.confidence_bytes_per_neighbour() / size_of::<f32>() as u64) as u32;
 
+        self.update_neighbour_slots(&neighbour_slots);
+        let neighbour_slots_buf = self.neighbour_slots_handle();
+
         let view = RingView {
             input: self.input_buf.clone(),
             search_input: self.search_buf.clone(),
@@ -94,12 +101,42 @@ impl<R: Runtime> NlmDenoiser<R> {
             confidence,
             centre_slot,
             neighbour_slots,
+            neighbour_slots_buf,
             mv_stride,
             conf_stride,
             pyramid,
             frame_count: self.params.total_frames(),
         };
         Ok(Some(view))
+    }
+
+    /// Points the neighbour-slot table at `slots`, uploading only when they changed.
+    pub(in crate::nlmeans) fn update_neighbour_slots(&mut self, slots: &[u32]) {
+        let Some(table) = self.neighbour_slots.as_mut() else {
+            return;
+        };
+
+        let bytes = u32::as_bytes(slots);
+        table.update(&self.client, bytes);
+    }
+
+    /// The neighbour-slot table's handle.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless the temporal radius is above 0.
+    pub(crate) fn neighbour_slots_handle(&self) -> Handle {
+        let table = self
+            .neighbour_slots
+            .as_ref()
+            .expect("a temporal window has a neighbour-slot table");
+
+        table.handle().clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn neighbour_slots_for_test(&self) -> Option<&MirroredBuffer> {
+        self.neighbour_slots.as_ref()
     }
 
     /// The motion-compensation geometry.

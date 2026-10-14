@@ -205,10 +205,11 @@ pub fn scatter_patch(
 
 /// Zeroes `pixels` pixels of both accumulators, starting `frame_offset` pixels in.
 ///
-/// `client.empty` memory is not zeroed, so the accumulators must be cleared before a pass, and a
-/// reused ring region must be cleared again before a later pass writes into it. The
-/// `accum` region is `pixels * stored_ch` slots and `wsum`'s is `pixels`, so the weight write is
-/// masked past its end. The loop is strided so the grid stays under the 65,535 workgroup limit,
+/// `client.empty` memory is not zeroed, so a stream's first pass clears the whole ring with this.
+/// [collab_normalise] leaves every region it reads zeroed.
+///
+/// The `accum` region is `pixels * stored_ch` slots and `wsum`'s is `pixels`, so the weight write
+/// is masked past its end. The loop is strided so the grid stays under the 65,535 workgroup limit,
 /// which a 4K or 8K frame exceeds at 256 threads per block.
 #[cube(launch_unchecked)]
 pub fn collab_zero_accum(
@@ -229,7 +230,8 @@ pub fn collab_zero_accum(
     }
 }
 
-/// Writes `accum / wsum` for one frame's region of the accumulators into `output`.
+/// Writes `accum / wsum` for one frame's region of the accumulators into `output`, then zeroes the
+/// region.
 ///
 /// Each pixel becomes the weighted mean of every filtered patch covering it. The fixed-point scale
 /// cancels, so only [WEIGHT_GAIN] is multiplied back. `frame_offset` (in pixels) picks the region,
@@ -244,8 +246,8 @@ pub fn collab_zero_accum(
     reason = "every argument is a buffer or comptime shape the kernel binds"
 )]
 pub fn collab_normalise<N: Size>(
-    accum: &Array<i32>,
-    wsum: &Array<i32>,
+    accum: &mut Array<i32>,
+    wsum: &mut Array<i32>,
     output: &mut Array<Vector<f32, N>>,
     frame_offset: u32,
     #[comptime] width: u32,
@@ -274,6 +276,14 @@ pub fn collab_normalise<N: Size>(
         pixel_out[channel as usize] = value;
     }
     output[local_pixel as usize] = pixel_out;
+
+    // A later frame reuses this region and expects it empty, padding lanes included.
+    #[unroll]
+    for channel in 0..stored_ch {
+        accum[(pixel * stored_ch + channel) as usize] = 0i32;
+    }
+
+    wsum[pixel as usize] = 0i32;
 }
 
 // Recheck ACCUM_SCALE's headroom if the patch area or group size moves, since both raise the

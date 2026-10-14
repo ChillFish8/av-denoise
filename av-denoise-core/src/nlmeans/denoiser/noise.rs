@@ -8,6 +8,8 @@ use super::NlmDenoiser;
 use super::readings::{ReadingShape, SlotNoiseReading};
 use crate::engine::EngineTiming;
 use crate::engine::timing::{DeviceTimed, DeviceTimer};
+#[cfg(test)]
+use crate::nlmeans::mirror::MirroredBuffer;
 use crate::nlmeans::noise::{
     EMA_ALPHA,
     NoiseCtx,
@@ -429,15 +431,28 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.noise_readings.fallbacks()
     }
 
-    /// Rebuilds `spatial_offset_lut` from `noise_offset` and `rho_smoothed`.
+    /// Points `spatial_offset_lut` at the table `noise_offset` and `rho_smoothed` imply.
+    ///
+    /// The table uploads only when it changed.
     pub(super) fn rebuild_spatial_offset_lut(&mut self) {
-        let offsets = build_spatial_offset_lut(
-            self.params.search_radius,
-            self.rho_smoothed.unwrap_or(0.0),
-            self.noise_offset,
-        );
+        let rho = self.rho_smoothed.unwrap_or(0.0);
+        let offsets = build_spatial_offset_lut(self.params.search_radius, rho, self.noise_offset);
         let offset_bytes = f32::as_bytes(&offsets);
-        self.spatial_offset_lut = self.client.create_from_slice(offset_bytes);
+
+        self.spatial_offset_lut.update(&self.client, offset_bytes);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spatial_offset_lut_for_test(&self) -> (&MirroredBuffer, Vec<f32>) {
+        let rho = self.rho_smoothed.unwrap_or(0.0);
+        let expected = build_spatial_offset_lut(self.params.search_radius, rho, self.noise_offset);
+
+        (&self.spatial_offset_lut, expected)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pilot_offset_lut_for_test(&self) -> &MirroredBuffer {
+        &self.pilot_offset_lut
     }
 
     /// The median chain's smoothed per-channel sigma.

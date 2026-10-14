@@ -9,6 +9,7 @@
 
 pub(crate) mod denoiser;
 pub(crate) mod kernels;
+pub(crate) mod mirror;
 pub(crate) mod motion;
 pub(crate) mod params;
 pub(crate) mod prefilter;

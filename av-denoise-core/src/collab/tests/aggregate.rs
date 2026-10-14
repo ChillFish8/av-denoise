@@ -347,13 +347,20 @@ fn run_scatter_stage_windowed(
             false,
             variant,
         );
+    }
+
+    // Normalise zeroes the region it reads, so the weight sum is read before it runs.
+    let wsum_bytes = client.read_one(wsum.clone()).expect("wsum readback failed");
+    let weight_sum = i32::from_bytes(&wsum_bytes)[..pixels].to_vec();
+
+    unsafe {
         collab_normalise::launch_unchecked::<R>(
             &client,
             normalise_grid,
             normalise_dim,
             1usize,
             ArrayArg::from_raw_parts(accum, pixels),
-            ArrayArg::from_raw_parts(wsum.clone(), pixels),
+            ArrayArg::from_raw_parts(wsum, pixels),
             ArrayArg::from_raw_parts(output.clone(), pixels),
             0u32,
             width,
@@ -364,9 +371,7 @@ fn run_scatter_stage_windowed(
     }
 
     let output_bytes = client.read_one(output).expect("output readback failed");
-    let wsum_bytes = client.read_one(wsum).expect("wsum readback failed");
     let plane = f32::from_bytes(&output_bytes)[..pixels].to_vec();
-    let weight_sum = i32::from_bytes(&wsum_bytes)[..pixels].to_vec();
 
     (plane, weight_sum)
 }

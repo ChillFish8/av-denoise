@@ -1,17 +1,8 @@
-use super::helpers::{R, make_client};
+use super::helpers::{R, RAMP_HEIGHT, RAMP_WIDTH, make_client, ramp_clip, ramp_params};
 use crate::bench_api::HostIo;
 use crate::nl4d::denoiser::noise_curve_upload;
-use crate::nl4d::{Nl4dDenoiser, Nl4dParams, PsyParams};
-use crate::nlmeans::tests::helpers::seeded_unit_gaussian;
-use crate::nlmeans::{ChannelMode, HqParams, NOISE_CURVE_BINS, NlmParams, PrefilterMode};
-
-// Large enough that each luma bin the ramp crosses gathers the blocks a curve needs. At 320x240
-// no curve forms.
-const WIDTH: u32 = 640;
-const HEIGHT: u32 = 360;
-const FRAMES: u32 = 12;
-const RAMP_TOP: f32 = 0.15;
-const RAMP_BOTTOM: f32 = 0.85;
+use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
+use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS};
 
 /// A clip's denoised frames, and whether the front end built a noise curve during any pass.
 struct ClipRun {
@@ -19,70 +10,10 @@ struct ClipRun {
     curve_seen: bool,
 }
 
-fn ramp_luma(y: u32) -> f32 {
-    let fraction = y as f32 / (HEIGHT - 1) as f32;
-    RAMP_TOP + (RAMP_BOTTOM - RAMP_TOP) * fraction
-}
-
-/// The noise std at `luma`, which grows with brightness.
-fn noise_std_at(luma: f32) -> f32 {
-    0.004 + 0.02 * luma
-}
-
-/// A static vertical brightness ramp with fresh noise per frame, in `channels` interleaved planes
-/// that all carry the same ramp.
-fn ramp_clip(channels: u32) -> Vec<Vec<f32>> {
-    let mut frames = Vec::new();
-    for frame_index in 0..FRAMES {
-        let mut frame = vec![0.0f32; (WIDTH * HEIGHT * channels) as usize];
-        for y in 0..HEIGHT {
-            let luma = ramp_luma(y);
-            let noise_std = noise_std_at(luma);
-
-            for x in 0..WIDTH {
-                for channel in 0..channels {
-                    let pixel = y * WIDTH + x;
-                    let sample = pixel * channels + channel;
-                    let seed = frame_index * channels + channel;
-                    let noise = seeded_unit_gaussian(pixel, seed);
-                    frame[sample as usize] = (luma + noise * noise_std).clamp(0.0, 1.0);
-                }
-            }
-        }
-
-        frames.push(frame);
-    }
-
-    frames
-}
-
-fn ramp_params(channels: ChannelMode, noise_map: bool, sigma_scale: f32) -> Nl4dParams {
-    let defaults = Nl4dParams::default();
-    let hq = HqParams {
-        sigma_scale,
-        ..HqParams::default()
-    };
-    let nlm = NlmParams {
-        channels,
-        prefilter: PrefilterMode::None,
-        hq: Some(hq),
-        ..defaults.nlm
-    };
-
-    Nl4dParams {
-        nlm,
-        noise_map,
-        psy: Some(PsyParams {
-            line_ring: 0,
-            ..PsyParams::default()
-        }),
-        ..defaults
-    }
-}
-
 fn denoise_clip(params: Nl4dParams, frames: &[Vec<f32>]) -> ClipRun {
     let client = make_client();
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, WIDTH, HEIGHT).expect("construction failed");
+    let mut denoiser =
+        Nl4dDenoiser::<R>::new(&client, params, RAMP_WIDTH, RAMP_HEIGHT).expect("construction failed");
 
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     let mut curve_seen = false;

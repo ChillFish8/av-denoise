@@ -23,6 +23,7 @@ use crate::collab::{MAX_K, PATCH_SIZE, grid_frames, supports_f16_search};
 use crate::engine::timing::{DeviceTimed, DeviceTimer, timed};
 use crate::engine::{DevicePlane, EngineTiming, SampleFormat};
 use crate::nlmeans::denoiser::{BufferSize, front_buffer_sizes};
+use crate::nlmeans::mirror::MirroredBuffer;
 use crate::nlmeans::{
     BLOCK_X,
     BLOCK_Y,
@@ -42,7 +43,7 @@ use crate::tune::{KernelSelector, PipelineProfile};
 enum AccumClear {
     /// Every region, on a stream's first pass.
     WholeRing,
-    /// Only the region about to be reused by the newest frame.
+    /// Only the region about to be reused by the newest frame, unless normalise already zeroed it.
     NewestRegion,
     /// None, for edge passes whose regions already hold live contributions.
     Nothing,
@@ -95,7 +96,7 @@ pub struct Nl4dDenoiser<R: Runtime> {
     accum_scale: f32,
 
     group_weight: Handle,
-    sigma_buf: Handle,
+    sigma_buf: MirroredBuffer,
     dct_profile_buf: Handle,
     /// The aggregation window's 8 taps, all ones when `kaiser_beta` is 0.
     kaiser_buf: Handle,
@@ -107,6 +108,11 @@ pub struct Nl4dDenoiser<R: Runtime> {
     /// as the frame sits in the ring.
     accum: Handle,
     wsum: Handle,
+    /// Regions [collab_normalise](crate::collab::kernels::aggregate::collab_normalise) has zeroed
+    /// since the last pass scattered into the ring.
+    zeroed_regions: Vec<bool>,
+    #[cfg(test)]
+    region_clears: u64,
     /// Two output buffers, alternated so one frame's kernels can overlap the previous frame's
     /// readback.
     outputs: [Handle; 2],
@@ -130,6 +136,10 @@ pub struct Nl4dDenoiser<R: Runtime> {
     luma_map: Option<StrengthMapParams>,
     /// The chroma flat boost, set when the noise map is on and the boost is not 1.0.
     chroma_map_boost: Option<f32>,
+    /// The luma noise curve the last pass applied, zeros when none applies.
+    noise_curve_buf: MirroredBuffer,
+    /// The strength map the last pass applied with a map mode other than off.
+    strength_map_buf: MirroredBuffer,
     /// A strength map of all 1.0, bound by every pass with no map to apply.
     unit_map: Handle,
     map_cols: u32,
@@ -269,7 +279,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let group_weight = client.empty(refs * size_of::<f32>());
         let sigma_host = vec![0.0f32; stored_ch as usize];
         let sigma_bytes = f32::as_bytes(&sigma_host);
-        let sigma_buf = client.create_from_slice(sigma_bytes);
+        let sigma_buf = MirroredBuffer::new(client, sigma_bytes);
 
         // The correlation profile is purely spatial and has no `rho` knob, so it is built once from
         // the white-noise default.
@@ -284,6 +294,11 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let unit_map_host = vec![1.0f32; (map_cols * map_rows) as usize];
         let unit_map_bytes = f32::as_bytes(&unit_map_host);
         let unit_map = client.create_from_slice(unit_map_bytes);
+        let strength_map_buf = MirroredBuffer::new(client, unit_map_bytes);
+
+        let zero_curve = [0.0f32; NOISE_CURVE_BINS];
+        let zero_curve_bytes = f32::as_bytes(&zero_curve);
+        let noise_curve_buf = MirroredBuffer::new(client, zero_curve_bytes);
 
         // `client.empty` memory is not zeroed, so a stream's first pass zeroes the whole ring.
         let ring_frames = 1 + 2 * params.temporal_radius;
@@ -349,6 +364,9 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             kaiser_buf,
             accum,
             wsum,
+            zeroed_regions: vec![false; ring_frames as usize],
+            #[cfg(test)]
+            region_clears: 0,
             outputs,
             next_output_slot: 0,
             passes_run: 0,
@@ -360,6 +378,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             apply_noise_map,
             luma_map,
             chroma_map_boost,
+            noise_curve_buf,
+            strength_map_buf,
             unit_map,
             map_cols,
             map_rows,
@@ -539,6 +559,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         self.passes_run = 0;
         self.stream_start = StreamStart::SceneStart;
         self.last_fields = None;
+        self.zeroed_regions.fill(false);
 
         if let Some(grain) = self.grain.as_mut() {
             grain.reset_stream();
@@ -595,6 +616,26 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     }
 
     #[cfg(test)]
+    pub(crate) fn sigma_buffer_for_test(&self) -> &MirroredBuffer {
+        &self.sigma_buf
+    }
+
+    #[cfg(test)]
+    pub(crate) fn noise_curve_buffer_for_test(&self) -> &MirroredBuffer {
+        &self.noise_curve_buf
+    }
+
+    #[cfg(test)]
+    pub(crate) fn strength_map_buffer_for_test(&self) -> &MirroredBuffer {
+        &self.strength_map_buf
+    }
+
+    #[cfg(test)]
+    pub(crate) fn region_clears_for_test(&self) -> u64 {
+        self.region_clears
+    }
+
+    #[cfg(test)]
     pub(crate) fn uses_f16_search(&self) -> bool {
         self.f16_search
     }
@@ -637,20 +678,20 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let wsum_ring_len = pixels * total_frames as usize;
         let neighbours = 2 * self.temporal_radius;
 
-        let neighbour_slot_bytes = u32::as_bytes(&view.neighbour_slots);
-        let neighbour_slots_buf = client.create_from_slice(neighbour_slot_bytes);
+        let neighbour_slots_buf = view.neighbour_slots_buf.clone();
 
         let sigmas = self.front.current_sigmas_temporal_only();
         let mut sigma_host = vec![0.0f32; stored_ch as usize];
         sigma_host[..channels_count as usize].copy_from_slice(&sigmas[..channels_count as usize]);
         let sigma_bytes = f32::as_bytes(&sigma_host);
-        self.sigma_buf = client.create_from_slice(sigma_bytes);
+        self.sigma_buf.update(&client, sigma_bytes);
         let weight_norm = weight_scale(sigma_host[0], &self.dct_profile);
 
         let curve_ratios = self.front.current_noise_curve().map(|curve| curve.ratios);
         let (ratios, curve_valid) = noise_curve_upload(curve_ratios, self.apply_noise_map);
         let ratio_bytes = f32::as_bytes(&ratios);
-        let noise_curve_buf = client.create_from_slice(ratio_bytes);
+        self.noise_curve_buf.update(&client, ratio_bytes);
+        let noise_curve_buf = self.noise_curve_buf.handle().clone();
 
         let classes = self.front.current_quarter_classes();
         if let Some(classes) = classes {
@@ -666,9 +707,10 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let (strength_map_buf, map_mode) = match map_upload {
             Some((multipliers, mode)) => {
                 let multiplier_bytes = f32::as_bytes(&multipliers);
-                let strength_map_buf = client.create_from_slice(multiplier_bytes);
+                self.strength_map_buf.update(&client, multiplier_bytes);
+                let strength_map = self.strength_map_buf.handle().clone();
 
-                (strength_map_buf, mode)
+                (strength_map, mode)
             },
             None => (self.unit_map.clone(), STRENGTH_MAP_OFF),
         };
@@ -677,17 +719,31 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             AccumClear::WholeRing => 0..total_frames,
             AccumClear::NewestRegion => {
                 let newest_slot = (centre_slot + self.temporal_radius) % total_frames;
-                newest_slot..newest_slot + 1
+
+                // A region normalise zeroed since the last scatter is already empty.
+                let already_zeroed = self.zeroed_regions[newest_slot as usize];
+                if already_zeroed {
+                    newest_slot..newest_slot
+                } else {
+                    newest_slot..newest_slot + 1
+                }
             },
             AccumClear::Nothing => 0..0,
         };
+
+        // The pass scatters into every region, so none stays zeroed past it.
+        self.zeroed_regions.fill(false);
+
+        #[cfg(test)]
+        {
+            self.region_clears += cleared_slots.len() as u64;
+        }
 
         self.passes_run += 1;
 
         // The regularise launches and the scatter run in separate device spans, so each span fits
         // one compute pass.
-        let regularised = timed(&client, self, |denoiser| denoiser.regularise_fields(view));
-        let (mv_field, confidence) = regularised?;
+        let (mv_field, confidence) = timed(&client, self, |denoiser| denoiser.regularise_fields(view))?;
 
         self.last_fields = Some(LastFields {
             mv_field: mv_field.clone(),
@@ -832,7 +888,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             conf_len: conf_len.max(1),
             neighbour_slots: pass.neighbour_slots,
             neighbour_slots_len: neighbour_slots_len.max(1),
-            sigma: self.sigma_buf.clone(),
+            sigma: self.sigma_buf.handle().clone(),
             noise_curve: pass.noise_curve,
             strength_map: pass.strength_map,
             map_len,
@@ -928,8 +984,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
     /// Normalises the accumulator region at `region_slot` into the next output buffer.
     ///
-    /// Returns the output buffer and its index. The region is left as it was, and a later pass
-    /// clears it before reuse.
+    /// Returns the output buffer and its index. The region is left zeroed for the frame that
+    /// reuses it.
     fn normalise_region(&mut self, region_slot: u32) -> (Handle, usize) {
         let client = self.front.compute_client().clone();
         let stored_ch = self.channels.storage_count();
@@ -962,6 +1018,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 stored_ch,
             );
         }
+
+        self.zeroed_regions[region_slot as usize] = true;
 
         (self.outputs[slot].clone(), slot)
     }

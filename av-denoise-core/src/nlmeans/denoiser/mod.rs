@@ -14,6 +14,7 @@ pub(crate) use self::machinery::RingView;
 use self::readings::NoiseReadings;
 pub(crate) use self::sizes::{BufferSize, check_u32_indexable, front_buffer_sizes};
 use super::align::StorageAlign;
+use super::mirror::MirroredBuffer;
 use super::motion::{self, MotionCtx, MotionEstimation};
 use super::noise::{
     NoiseCurve,
@@ -108,7 +109,13 @@ pub struct NlmDenoiser<R: Runtime> {
     /// `None` reads as white noise.
     pub(super) rho_smoothed: Option<f32>,
     /// One noise-floor offset per search candidate, row-major, for the self-comparison kernels.
-    pub(super) spatial_offset_lut: Handle,
+    pub(super) spatial_offset_lut: MirroredBuffer,
+    /// The pilot's flat offset table, which follows `input_noise_offset`.
+    pub(super) pilot_offset_lut: MirroredBuffer,
+    /// The physical ring slot of each neighbour of the last pass, in motion-field order.
+    ///
+    /// Present when the temporal radius is above 0.
+    pub(super) neighbour_slots: Option<MirroredBuffer>,
 
     /// Per-ring-slot scratch for the first stage of the noise estimate.
     ///
@@ -265,7 +272,19 @@ impl<R: Runtime> NlmDenoiser<R> {
         let rho_smoothed: Option<f32> = None;
         let initial_offsets = build_spatial_offset_lut(params.search_radius, 0.0, noise_offset);
         let initial_offset_bytes = f32::as_bytes(&initial_offsets);
-        let spatial_offset_lut = client.create_from_slice(initial_offset_bytes);
+        let spatial_offset_lut = MirroredBuffer::new(client, initial_offset_bytes);
+        let pilot_offsets = build_spatial_offset_lut(params.search_radius, 0.0, input_noise_offset);
+        let pilot_offset_bytes = f32::as_bytes(&pilot_offsets);
+        let pilot_offset_lut = MirroredBuffer::new(client, pilot_offset_bytes);
+
+        let neighbour_slots = if params.temporal_radius > 0 {
+            let initial_slots = vec![0u32; 2 * params.temporal_radius as usize];
+            let initial_slot_bytes = u32::as_bytes(&initial_slots);
+            let table = MirroredBuffer::new(client, initial_slot_bytes);
+            Some(table)
+        } else {
+            None
+        };
 
         let auto_noise = params.hq.is_some_and(|hq| hq.sigma_override.is_none());
         let (noise_partials, noise_results) = if auto_noise {
@@ -420,6 +439,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             kernels,
             rho_smoothed,
             spatial_offset_lut,
+            pilot_offset_lut,
+            neighbour_slots,
             noise_partials,
             noise_results,
             temporal_stats_buf,

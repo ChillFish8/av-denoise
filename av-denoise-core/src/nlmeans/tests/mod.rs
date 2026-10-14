@@ -8,6 +8,7 @@ mod engine;
 mod gpu_submit;
 mod hq;
 mod machinery;
+mod mirror;
 mod motion_compensation;
 mod noise;
 mod noise_curve;

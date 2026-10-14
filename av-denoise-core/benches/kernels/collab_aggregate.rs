@@ -1,5 +1,5 @@
 use av_denoise_core::bench_api::collab::kernels::aggregate::{collab_normalise, collab_zero_accum};
-use cubecl::benchmark::Benchmark;
+use cubecl::benchmark::{Benchmark, Instant, ProfileDuration};
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
@@ -10,9 +10,28 @@ use super::{BLOCK_X, BLOCK_Y, HEIGHT, WIDTH, block_sync, stored_channels};
 /// The library's own constant is crate-private, so a bench target spells it out.
 const MAX_GRID_1D: u32 = 65_535;
 
+/// Copies `length` values of `source` over `target`.
+///
+/// The loop is strided, so a grid clamped to [MAX_GRID_1D] still reaches every slot.
+#[cube(launch_unchecked)]
+fn refill(
+    source: &Array<i32>,
+    target: &mut Array<i32>,
+    #[comptime] length: u32,
+    #[comptime] total_threads: u32,
+) {
+    let mut idx = ABSOLUTE_POS_X;
+    while idx < length {
+        target[idx as usize] = source[idx as usize];
+        idx += total_threads;
+    }
+}
+
 /// Divides the fixed-point accumulators back out to a finished 1080p frame plane.
 ///
 /// Cost scales with `stored_ch`, since one accumulator slot per channel is read for every pixel.
+/// The kernel zeroes what it reads, so the accumulators are refilled before every sample, outside
+/// the timed span, and each sample times the divide.
 pub struct CollabNormaliseBench<R: Runtime> {
     pub client: ComputeClient<R>,
     pub channels: u32,
@@ -26,8 +45,36 @@ pub struct CollabNormaliseInput {
     pub output: Handle,
 }
 
+/// The buffers one normalise sample reads, plus the untouched copies it is refilled from.
+#[derive(Clone)]
+pub struct CollabNormaliseSample {
+    pub buffers: CollabNormaliseInput,
+    pub accum_source: Handle,
+    pub wsum_source: Handle,
+}
+
+impl<R: Runtime> CollabNormaliseBench<R> {
+    /// Copies `length` values of `source` over `target` on the device.
+    fn refill_from(&self, source: &Handle, target: &Handle, length: usize) {
+        let dim = 256u32;
+        let grid = (length as u32).div_ceil(dim).min(MAX_GRID_1D);
+
+        unsafe {
+            refill::launch_unchecked::<R>(
+                &self.client,
+                CubeCount::new_1d(grid),
+                CubeDim::new_1d(dim),
+                ArrayArg::from_raw_parts(source.clone(), length),
+                ArrayArg::from_raw_parts(target.clone(), length),
+                length as u32,
+                grid * dim,
+            );
+        }
+    }
+}
+
 impl<R: Runtime> Benchmark for CollabNormaliseBench<R> {
-    type Input = CollabNormaliseInput;
+    type Input = CollabNormaliseSample;
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
@@ -45,16 +92,40 @@ impl<R: Runtime> Benchmark for CollabNormaliseBench<R> {
 
         let accum_bytes = i32::as_bytes(&accum_data);
         let accum = self.client.create_from_slice(accum_bytes);
+        let accum_source = self.client.create_from_slice(accum_bytes);
         let wsum_bytes = i32::as_bytes(&wsum_data);
         let wsum = self.client.create_from_slice(wsum_bytes);
+        let wsum_source = self.client.create_from_slice(wsum_bytes);
         let output = self.client.empty(pixels * stored_ch * size_of::<f32>());
 
-        CollabNormaliseInput { accum, wsum, output }
+        let buffers = CollabNormaliseInput { accum, wsum, output };
+
+        CollabNormaliseSample {
+            buffers,
+            accum_source,
+            wsum_source,
+        }
+    }
+
+    /// Refills the accumulators, then times one launch with the refill outside the span.
+    fn profile_full(&self, args: Self::Input) -> Result<ProfileDuration, String> {
+        let stored_ch = stored_channels(self.channels) as usize;
+        let pixels = (WIDTH * HEIGHT) as usize;
+        self.refill_from(&args.accum_source, &args.buffers.accum, pixels * stored_ch);
+        self.refill_from(&args.wsum_source, &args.buffers.wsum, pixels);
+
+        self.sync();
+        let start_time = Instant::now();
+        self.execute(args)?;
+        self.sync();
+
+        Ok(ProfileDuration::new_system_time(start_time, Instant::now()))
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let stored_ch = stored_channels(self.channels) as usize;
         let pixels = (WIDTH * HEIGHT) as usize;
+        let buffers = args.buffers;
         let cubes_x = WIDTH.div_ceil(BLOCK_X);
         let cubes_y = HEIGHT.div_ceil(BLOCK_Y);
 
@@ -64,9 +135,9 @@ impl<R: Runtime> Benchmark for CollabNormaliseBench<R> {
                 CubeCount::new_2d(cubes_x, cubes_y),
                 CubeDim::new_2d(BLOCK_X, BLOCK_Y),
                 stored_ch,
-                ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored_ch),
-                ArrayArg::from_raw_parts(args.wsum.clone(), pixels),
-                ArrayArg::from_raw_parts(args.output.clone(), pixels * stored_ch),
+                ArrayArg::from_raw_parts(buffers.accum, pixels * stored_ch),
+                ArrayArg::from_raw_parts(buffers.wsum, pixels),
+                ArrayArg::from_raw_parts(buffers.output, pixels * stored_ch),
                 // One frame's region, since this bench measures a single frame's normalisation.
                 0u32,
                 WIDTH,
@@ -92,7 +163,7 @@ impl<R: Runtime> Benchmark for CollabNormaliseBench<R> {
     }
 }
 
-/// Clears both accumulators, which runs once before every filter pass.
+/// Clears both accumulators for one region, which a stream's first pass runs over the whole ring.
 pub struct CollabZeroAccumBench<R: Runtime> {
     pub client: ComputeClient<R>,
     pub channels: u32,
