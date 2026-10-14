@@ -402,6 +402,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         self.run_pass(&view, clear)?;
         self.save_grain_vectors(view.centre_slot, radius, 2 * radius);
 
+        self.front.process_landed_readings()?;
+
         if self.passes_run <= radius {
             return Ok(None);
         }
@@ -478,6 +480,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// ring with copies of its last frame, runs every real frame as a centre and reads out every
     /// real frame.
     pub(crate) fn finish_passes(&mut self) -> Result<Vec<CompletedRegion>, anyhow::Error> {
+        self.front.begin_call();
         self.front.device_timer.stop_sampling();
 
         let emit = self.flush_target() as u32;
@@ -511,6 +514,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             self.save_grain_vectors(view.centre_slot, centre, last_real);
             clear = AccumClear::Nothing;
         }
+
+        self.front.process_landed_readings()?;
 
         let first_region = last_real + 1 - emit;
         let mut regions = Vec::with_capacity(emit as usize);

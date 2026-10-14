@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use cubecl::prelude::*;
 
 use super::NlmDenoiser;
-use super::noise::TemporalNoiseReading;
+use super::denoiser::readings::SlotNoiseReading;
 
 impl<R: Runtime> NlmDenoiser<R> {
     /// Whether every ring slot holds a frame, so a pass can run at any centre.
@@ -31,28 +33,30 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
-    /// The temporal reading a pass centred on `center_t` folds.
+    /// The reading whose temporal side a pass centred on `center_t` folds.
     ///
     /// It is the centre's own reading, unless shifted edges are on and the centre has no usable
-    /// sample. Then it is the first usable reading at a later ring position, or the centre's empty
-    /// one when there is none.
-    pub(super) fn borrow_reading_ahead(&self, center_t: u32) -> Result<TemporalNoiseReading, anyhow::Error> {
-        let centre_slot = self.ring_slot(center_t);
-        let own = self.read_temporal_noise(centre_slot)?;
-        if own.sample.is_some() || !self.shifted_edges {
-            return Ok(own);
+    /// sample. Then it is the first reading with a usable sample at a later ring position, or the
+    /// centre's own when there is none.
+    pub(super) fn borrow_reading_ahead(
+        &mut self,
+        center_t: u32,
+        centre: &Arc<SlotNoiseReading>,
+    ) -> Result<Arc<SlotNoiseReading>, anyhow::Error> {
+        let has_sample = centre.temporal.sample.is_some();
+        if has_sample || !self.shifted_edges {
+            return Ok(Arc::clone(centre));
         }
 
         let total_frames = self.params.total_frames();
         for logical in center_t + 1..total_frames {
-            let slot = self.ring_slot(logical);
-            let candidate = self.read_temporal_noise(slot)?;
-            if candidate.sample.is_some() {
+            let candidate = self.noise_reading_at(logical)?;
+            if candidate.temporal.sample.is_some() {
                 return Ok(candidate);
             }
         }
 
-        Ok(own)
+        Ok(Arc::clone(centre))
     }
 
     #[cfg(test)]

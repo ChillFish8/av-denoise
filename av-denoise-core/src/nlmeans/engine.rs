@@ -123,6 +123,8 @@ impl<R: Runtime> Nlmeans<R> {
 
     /// Steps the flush until it yields the next tail frame.
     fn next_tail_frame(&mut self) -> Result<GpuOutput, anyhow::Error> {
+        self.front.begin_call();
+
         loop {
             let step = self.front.flush_step_gpu()?;
             if let Some(output) = step {

@@ -195,9 +195,29 @@ pub(in crate::nlmeans) fn zero_temporal_stats_slot<R: Runtime>(
     }
 }
 
+/// One ring slot's temporal-stats region.
+pub(in crate::nlmeans) fn temporal_stats_slot_view(
+    stats_buf: &Handle,
+    width: u32,
+    height: u32,
+    stored_ch: u32,
+    frame_count: u32,
+    slot: u32,
+    align: StorageAlign,
+) -> Handle {
+    let slot_len_bytes = temporal_stats_slot_len(width, height, stored_ch) as u64 * size_of::<f32>() as u64;
+    let stride = temporal_stats_slot_stride_bytes(width, height, stored_ch, align);
+    let total_bytes = frame_count as u64 * stride;
+    let start = slot as u64 * stride;
+    let end_trim = total_bytes - start - slot_len_bytes;
+
+    stats_buf.clone().offset_start(start).offset_end(end_trim)
+}
+
 /// Reads one ring slot's temporal-stats region back.
 ///
 /// The ring handle is sliced to the slot, so the transfer skips the rest of the ring.
+#[cfg(test)]
 #[expect(
     clippy::too_many_arguments,
     reason = "the readback needs the ring handle plus every shape value that locates one slot in it"
@@ -212,13 +232,7 @@ pub(in crate::nlmeans) fn read_temporal_stats_slot<R: Runtime>(
     slot: u32,
     align: StorageAlign,
 ) -> Result<Vec<f32>, anyhow::Error> {
-    let slot_len_bytes = temporal_stats_slot_len(width, height, stored_ch) as u64 * size_of::<f32>() as u64;
-    let stride = temporal_stats_slot_stride_bytes(width, height, stored_ch, align);
-    let total_bytes = frame_count as u64 * stride;
-    let start = (slot as u64) * stride;
-    let end_trim = total_bytes - start - slot_len_bytes;
-
-    let sliced = stats_buf.clone().offset_start(start).offset_end(end_trim);
+    let sliced = temporal_stats_slot_view(stats_buf, width, height, stored_ch, frame_count, slot, align);
     let bytes = client
         .read_one(sliced)
         .map_err(|error| anyhow::anyhow!("temporal noise stats readback failed: {error}"))?;
@@ -439,12 +453,24 @@ pub(in crate::nlmeans) fn aggregate_temporal_noise_stats(
 }
 
 /// One centre slot's temporal-noise reading.
+#[derive(Debug, Clone)]
 pub(in crate::nlmeans) struct TemporalNoiseReading {
     pub(in crate::nlmeans) sample: Option<TemporalNoiseSample>,
     /// The per-frame luma noise curve, present only when requested and a sample exists.
     pub(in crate::nlmeans) curve: Option<NoiseCurve>,
     /// The frame's quarter classes, present exactly when `curve` is.
     pub(in crate::nlmeans) classes: Option<QuarterClasses>,
+}
+
+impl TemporalNoiseReading {
+    /// A reading with no sample, curve or classes.
+    pub(in crate::nlmeans) fn empty() -> Self {
+        Self {
+            sample: None,
+            curve: None,
+            classes: None,
+        }
+    }
 }
 
 /// Builds one centre slot's [TemporalNoiseReading] from a single [accepted_static_blocks] call.
@@ -466,11 +492,7 @@ pub(in crate::nlmeans) fn temporal_noise_reading(
     with_curve: bool,
     settings: QuarterSettings,
 ) -> TemporalNoiseReading {
-    let none = TemporalNoiseReading {
-        sample: None,
-        curve: None,
-        classes: None,
-    };
+    let none = TemporalNoiseReading::empty();
 
     let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
     let total_blocks = (blocks_x * blocks_y) as usize;

@@ -37,14 +37,30 @@ fn run_frames(denoiser: &mut NlmDenoiser<R>, count: usize) {
 }
 
 #[test]
-fn auto_noise_counts_its_readback_waits() {
+fn the_first_frame_seed_waits_once() {
+    let mut denoiser = hq_denoiser(None);
+    run_frames(&mut denoiser, 1);
+
+    let timing = denoiser.timing();
+
+    assert_eq!(timing.readback_waits, 1);
+    assert!(timing.readback_wait > Duration::ZERO);
+}
+
+#[test]
+fn auto_noise_waits_at_most_once_per_fold() {
     let mut denoiser = hq_denoiser(None);
     run_frames(&mut denoiser, 6);
 
     let timing = denoiser.timing();
 
-    // The first-frame seed reads twice, and each of the five submits reads three times.
-    assert_eq!(timing.readback_waits, 17);
+    // The seed always waits. Each of the five submits folds one reading, since unshifted edges
+    // never borrow, and waits only if that reading has not landed. So six is the most.
+    assert!(
+        (1..=6).contains(&timing.readback_waits),
+        "{} waits",
+        timing.readback_waits
+    );
     assert!(timing.readback_wait > Duration::ZERO);
 }
 

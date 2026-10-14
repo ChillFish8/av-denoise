@@ -1,13 +1,17 @@
 mod machinery;
 mod noise;
+pub(in crate::nlmeans) mod readings;
 mod ring;
 mod sizes;
 mod stages;
+#[cfg(test)]
+mod tests;
 
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 pub(crate) use self::machinery::RingView;
+use self::readings::NoiseReadings;
 pub(crate) use self::sizes::{BufferSize, check_u32_indexable, front_buffer_sizes};
 use super::align::StorageAlign;
 use super::motion::{self, MotionCtx, MotionEstimation};
@@ -16,13 +20,14 @@ use super::noise::{
     NoiseEstimator,
     QuarterClasses,
     QuarterSettings,
+    RESULTS_PER_SLOT,
     build_spatial_offset_lut,
     noise_partials_slot_stride_bytes,
     temporal_stats_buf_bytes,
 };
 use super::params::{NlmParams, SEPARABLE_THRESHOLD, validate_dimensions};
 use super::prefilter::PrefilterMode;
-use crate::engine::timing::{DeviceTimer, StallClock};
+use crate::engine::timing::DeviceTimer;
 use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
 use crate::tune::KernelSelector;
 
@@ -52,6 +57,10 @@ pub struct NlmDenoiser<R: Runtime> {
     pub(super) frames_loaded: usize,
     /// Real pushes in the current stream, not counting the duplicates added at either end.
     pub(super) real_pushes: usize,
+    /// The value of `ring_head` when the current engine call began.
+    ///
+    /// Readings from this push on were started by the current call and are not polled during it.
+    pub(super) call_start_push: usize,
 
     /// The frame ring, one slot per frame in the window.
     pub(super) input_buf: Handle,
@@ -175,8 +184,8 @@ pub struct NlmDenoiser<R: Runtime> {
     /// It holds the texture cut and the line ring.
     pub(super) quarter_settings: QuarterSettings,
 
-    /// The host time spent blocked on noise readbacks.
-    pub(super) stalls: StallClock,
+    /// Each ring slot's noise reading, started when the slot is written.
+    pub(super) noise_readings: NoiseReadings,
     /// Samples the device time of this denoiser's frames.
     pub(crate) device_timer: DeviceTimer,
 
@@ -262,7 +271,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let (noise_partials, noise_results) = if auto_noise {
             let partials_ring_bytes =
                 noise_partials_slot_stride_bytes(width, height, align) * total_frames as u64;
-            let n_results = (total_frames * 4) as usize;
+            let n_results = total_frames as usize * RESULTS_PER_SLOT;
             let partials = client.empty(partials_ring_bytes as usize);
             let results = client.empty(n_results * size_of::<f32>());
             (Some(partials), Some(results))
@@ -388,6 +397,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             ring_head: 0,
             frames_loaded: 0,
             real_pushes: 0,
+            call_start_push: 0,
             input_buf,
             search_buf: None,
             reference_buf,
@@ -434,7 +444,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             sigma_y,
             luma_noise_fields: false,
             quarter_settings: QuarterSettings::default(),
-            stalls: StallClock::default(),
+            noise_readings: NoiseReadings::new(total_frames as usize),
             device_timer,
             shifted_edges: false,
         }
@@ -450,6 +460,8 @@ impl<R: Runtime> NlmDenoiser<R> {
         planes: &[DevicePlane<'_>],
         format: SampleFormat,
     ) -> Result<(), anyhow::Error> {
+        self.begin_call();
+
         let total_frames = self.params.total_frames() as usize;
         let slot = self.ring_head % total_frames;
         let pixels = self.width * self.height;
@@ -468,7 +480,9 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         ingest(&self.client, planes, format, &self.placeholder, target);
         self.mirror_search_slot(slot);
-        self.run_post_upload_stages(slot)
+        self.run_post_upload_stages(slot)?;
+
+        self.process_landed_readings()
     }
 
     /// Queues the denoise kernels for the current window without reading the result back.
@@ -490,6 +504,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.next_output_slot = (slot + 1) % self.outputs.len();
 
         self.run_denoise_kernels(slot)?;
+        self.process_landed_readings()?;
 
         let output = GpuOutput {
             handle: self.outputs[slot].clone(),
@@ -539,6 +554,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.frames_loaded = 0;
         self.next_output_slot = 0;
         self.real_pushes = 0;
+        self.call_start_push = 0;
         self.noise_estimator.reset();
         self.noise_estimator_low.reset();
         self.noise_estimator_low_unboosted.reset();
@@ -546,5 +562,6 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.noise_curve = None;
         self.quarter_classes = None;
         self.rho_smoothed = None;
+        self.noise_readings.clear();
     }
 }

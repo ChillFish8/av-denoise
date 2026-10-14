@@ -20,10 +20,14 @@ pub(crate) use self::curve::NoiseCurve;
 #[cfg(test)]
 pub(super) use self::curve::build_noise_curve;
 pub(super) use self::estimator::{EMA_ALPHA, NoiseEstimator};
+#[cfg(test)]
+pub(super) use self::spatial::partials_len;
 pub(super) use self::spatial::{
     NoiseCtx,
+    RESULTS_PER_SLOT,
     noise_partials_slot_stride_bytes,
-    partials_len,
+    noise_partials_slot_view,
+    noise_results_slot_view,
     run_noise_estimate,
     sigma_block_p25_from_partials,
     sigma_from_abs_sum,
@@ -50,12 +54,12 @@ pub(super) use self::temporal::{
     TemporalNoiseReading,
     TemporalNoiseSample,
     TemporalStatsCtx,
-    read_temporal_stats_slot,
     run_temporal_noise_stats,
     temporal_noise_reading,
     temporal_stats_blocks,
     temporal_stats_buf_bytes,
     temporal_stats_record_len,
+    temporal_stats_slot_view,
     zero_temporal_stats_slot,
 };
 #[cfg(test)]
@@ -63,4 +67,5 @@ pub(super) use self::temporal::{
     TEMPORAL_NOISE_BLOCK,
     accepted_static_blocks,
     aggregate_temporal_noise_stats,
+    read_temporal_stats_slot,
 };

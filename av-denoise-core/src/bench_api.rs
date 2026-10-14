@@ -109,6 +109,8 @@ impl<R: Runtime> HostIo for NlmDenoiser<R> {
         let target = self.flush_target();
 
         for _ in 0..target {
+            self.begin_call();
+
             let output = loop {
                 let step = self.flush_step_gpu()?;
                 if let Some(output) = step {

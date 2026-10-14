@@ -16,6 +16,7 @@ mod noise_reference;
 mod options;
 mod params;
 mod prefilter;
+mod readings;
 mod residual_correlation;
 mod search_ring;
 mod separable;

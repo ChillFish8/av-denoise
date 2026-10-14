@@ -9,14 +9,15 @@ use crate::nlmeans::prefilter::{PrefilterCtx, PrefilterMode, run_prefilter};
 impl<R: Runtime> NlmDenoiser<R> {
     /// Runs every per-frame stage on a freshly pushed `slot`, through to the ring advance.
     ///
-    /// The GPU stages run in device spans when the frame is sampled. The first frame's noise seed
-    /// waits on the host, so it runs between two spans.
+    /// The GPU stages run in device spans when the frame is sampled. The noise readback starts and
+    /// the first frame's noise seed waits between two spans, since a readback ends a span early.
     pub(super) fn run_post_upload_stages(&mut self, slot: usize) -> Result<(), anyhow::Error> {
         let client = self.client.clone();
         let frame_slot = slot as u32;
 
         timed(&client, self, move |front| front.run_noise_stages(frame_slot))?;
 
+        self.start_noise_reading(frame_slot, self.ring_head);
         self.seed_noise_estimate_if_first_frame(frame_slot)?;
 
         timed(&client, self, move |front| front.run_reference_stages(slot))?;

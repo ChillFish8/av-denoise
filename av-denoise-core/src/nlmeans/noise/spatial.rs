@@ -38,6 +38,41 @@ pub(in crate::nlmeans) fn noise_partials_slot_stride_bytes(
     align.pad_bytes(partials_bytes)
 }
 
+/// The Immerkær totals each ring slot keeps in the results buffer, one per stored channel lane.
+pub(in crate::nlmeans) const RESULTS_PER_SLOT: usize = 4;
+
+/// The four Immerkær totals `slot` holds in the results buffer.
+pub(in crate::nlmeans) fn noise_results_slot_view(
+    results_buf: &Handle,
+    frame_count: u32,
+    slot: u32,
+) -> Handle {
+    let row_bytes = (RESULTS_PER_SLOT * size_of::<f32>()) as u64;
+    let total_bytes = frame_count as u64 * row_bytes;
+    let start = slot as u64 * row_bytes;
+    let end_trim = total_bytes - start - row_bytes;
+
+    results_buf.clone().offset_start(start).offset_end(end_trim)
+}
+
+/// One slot's first-stage partials within the partials ring.
+pub(in crate::nlmeans) fn noise_partials_slot_view(
+    partials_buf: &Handle,
+    width: u32,
+    height: u32,
+    frame_count: u32,
+    slot: u32,
+    align: StorageAlign,
+) -> Handle {
+    let slot_len_bytes = partials_len(width, height) as u64 * size_of::<f32>() as u64;
+    let stride = noise_partials_slot_stride_bytes(width, height, align);
+    let total_bytes = frame_count as u64 * stride;
+    let start = slot as u64 * stride;
+    let end_trim = total_bytes - start - slot_len_bytes;
+
+    partials_buf.clone().offset_start(start).offset_end(end_trim)
+}
+
 /// Runs both stages of the Immerkær noise estimate for one frame.
 ///
 /// The mask is cheap and needs only one frame, but it reads correlated grain low because the grain
@@ -49,7 +84,7 @@ pub(in crate::nlmeans) fn run_noise_estimate<R: Runtime>(
 ) -> Result<(), anyhow::Error> {
     let total_input = (ctx.frame_count * ctx.height * ctx.width * ctx.stored_ch) as usize;
     let partials_count = partials_len(ctx.width, ctx.height);
-    let total_results = (ctx.frame_count * 4) as usize;
+    let total_results = ctx.frame_count as usize * RESULTS_PER_SLOT;
     let stored_ch = ctx.stored_ch as usize;
     let cubes_x = ctx.width.div_ceil(BLOCK_X);
     let cubes_y = ctx.height.div_ceil(BLOCK_Y);

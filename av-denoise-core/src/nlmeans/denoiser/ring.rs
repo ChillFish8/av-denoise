@@ -125,7 +125,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// Copies the last pushed frame into the next ring slot and refreshes that slot's state.
     ///
     /// The copy and the refresh run in separate device spans, because the pilot's upload would
-    /// end the copy's span early.
+    /// end the copy's span early. The slot's noise readback starts after both.
     pub(in crate::nlmeans) fn duplicate_last_frame(&mut self) -> Result<(), anyhow::Error> {
         let total_frames = self.params.total_frames() as usize;
         let last_slot = (self.ring_head - 1) % total_frames;
@@ -140,6 +140,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             front.refresh_duplicated_slot(next_slot)
         })?;
 
+        self.start_noise_reading(next_slot as u32, self.ring_head);
         self.ring_head += 1;
 
         Ok(())

@@ -1,7 +1,11 @@
+use std::sync::Arc;
+
 use anyhow::Context;
 use cubecl::prelude::*;
+use cubecl::server::Handle;
 
 use super::NlmDenoiser;
+use super::readings::{ReadingShape, SlotNoiseReading};
 use crate::engine::EngineTiming;
 use crate::engine::timing::{DeviceTimed, DeviceTimer};
 use crate::nlmeans::noise::{
@@ -9,20 +13,19 @@ use crate::nlmeans::noise::{
     NoiseCtx,
     NoiseCurve,
     QuarterClasses,
+    RESULTS_PER_SLOT,
     TEMPORAL_QUARTER_SIZE,
-    TemporalNoiseReading,
     TemporalNoiseSample,
     TemporalStatsCtx,
     build_spatial_offset_lut,
     correlation_factor,
     noise_partials_slot_stride_bytes,
-    partials_len,
-    read_temporal_stats_slot,
+    noise_partials_slot_view,
+    noise_results_slot_view,
     run_noise_estimate,
     run_temporal_noise_stats,
-    sigma_block_p25_from_partials,
     sigma_from_abs_sum,
-    temporal_noise_reading,
+    temporal_stats_slot_view,
     zero_temporal_stats_slot,
 };
 use crate::nlmeans::params::sigma_eff;
@@ -38,10 +41,11 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// Host and device time this denoiser has spent.
     pub(crate) fn timing(&mut self) -> EngineTiming {
         let (device_time, device_samples) = self.device_timer.settle();
+        let stalls = self.noise_readings.stalls();
 
         EngineTiming {
-            readback_wait: self.stalls.wait(),
-            readback_waits: self.stalls.waits(),
+            readback_wait: stalls.wait(),
+            readback_waits: stalls.waits(),
             device_time,
             device_samples,
         }
@@ -167,35 +171,141 @@ impl<R: Runtime> NlmDenoiser<R> {
         );
     }
 
+    /// The handles one slot's noise reading reads, in [SlotNoiseReading::from_bytes] order.
+    ///
+    /// `None` when automatic noise estimation is off.
+    pub(in crate::nlmeans) fn noise_reading_handles(&self, slot: u32) -> Option<Vec<Handle>> {
+        let (Some(partials_buf), Some(results_buf)) =
+            (self.noise_partials.as_ref(), self.noise_results.as_ref())
+        else {
+            return None;
+        };
+
+        let frame_count = self.params.total_frames();
+        let row = noise_results_slot_view(results_buf, frame_count, slot);
+        let partials = noise_partials_slot_view(
+            partials_buf,
+            self.width,
+            self.height,
+            frame_count,
+            slot,
+            self.align,
+        );
+        let mut handles = vec![row, partials];
+
+        if let Some(stats_buf) = self.temporal_stats_buf.as_ref() {
+            let stored_ch = self.params.channels.storage_count();
+            let stats = temporal_stats_slot_view(
+                stats_buf,
+                self.width,
+                self.height,
+                stored_ch,
+                frame_count,
+                slot,
+                self.align,
+            );
+            handles.push(stats);
+        }
+
+        Some(handles)
+    }
+
+    pub(in crate::nlmeans) fn reading_shape(&self) -> ReadingShape {
+        ReadingShape {
+            width: self.width,
+            height: self.height,
+            channels: self.params.channels.count(),
+            stored_ch: self.params.channels.storage_count(),
+            with_curve: self.luma_noise_fields,
+            settings: self.quarter_settings,
+        }
+    }
+
+    /// Starts reading back the noise that push `push_index` measured into `slot`.
+    ///
+    /// It runs right after the slot's noise kernels are queued, so the copy lands while later work
+    /// runs.
+    pub(super) fn start_noise_reading(&mut self, slot: u32, push_index: usize) {
+        let Some(handles) = self.noise_reading_handles(slot) else {
+            return;
+        };
+
+        let shape = self.reading_shape();
+        self.noise_readings
+            .start(&self.client, slot, push_index, handles, shape);
+    }
+
+    /// The push that filled logical ring position `logical`, counting duplicates.
+    fn push_index_at(&self, logical: u32) -> usize {
+        let total_frames = self.params.total_frames() as usize;
+        debug_assert!(
+            self.ring_head >= total_frames,
+            "the ring is full whenever a reading is folded"
+        );
+
+        self.ring_head - total_frames + logical as usize
+    }
+
+    /// The reading push `push_index` left in `slot`, waiting for it if it has not landed.
+    fn slot_reading(&mut self, slot: u32, push_index: usize) -> Result<Arc<SlotNoiseReading>, anyhow::Error> {
+        let stored = self.noise_readings.get(slot, push_index)?;
+        if let Some(reading) = stored {
+            return Ok(reading);
+        }
+
+        // Every write to a slot starts its reading, so this only covers a slot nothing has read yet.
+        self.noise_readings.count_fallback();
+        self.start_noise_reading(slot, push_index);
+
+        let started = self.noise_readings.get(slot, push_index)?;
+        let reading = started.ok_or_else(|| anyhow::anyhow!("no noise reading for slot {slot}"))?;
+
+        Ok(reading)
+    }
+
+    /// The noise reading of logical ring position `logical`.
+    pub(in crate::nlmeans) fn noise_reading_at(
+        &mut self,
+        logical: u32,
+    ) -> Result<Arc<SlotNoiseReading>, anyhow::Error> {
+        let slot = self.ring_slot(logical);
+        let push_index = self.push_index_at(logical);
+
+        self.slot_reading(slot, push_index)
+    }
+
+    /// Marks the start of an engine call, so the readings it starts are not polled during it.
+    pub(crate) fn begin_call(&mut self) {
+        self.call_start_push = self.ring_head;
+    }
+
+    /// Turns landed readings that earlier engine calls started into values.
+    ///
+    /// Readings the current call started are left alone, since on CUDA and ROCm a poll waits for
+    /// the copy.
+    pub(crate) fn process_landed_readings(&mut self) -> Result<(), anyhow::Error> {
+        self.noise_readings.process_landed(self.call_start_push)
+    }
+
     /// Folds the first frame's noise estimate straight away so push-time work has a real sigma.
     ///
-    /// Push-time stages such as the NLM pilot run before the first submit folds an estimate.
-    /// One blocking read here keeps them off the construction-time fallback strength.
+    /// Push-time stages such as the NLM pilot run before the first submit folds an estimate. This
+    /// waits for the push's own reading, which was queued just before.
     ///
-    /// It must run after this push queues its estimate and before `advance_ring` moves
+    /// It must run after this push starts its reading and before `advance_ring` moves
     /// `frames_loaded`, which the first-frame check reads. The first submit folds the same frame
     /// again, which is harmless because it reproduces these values to within rounding.
     pub(super) fn seed_noise_estimate_if_first_frame(&mut self, slot: u32) -> Result<(), anyhow::Error> {
-        if self.frames_loaded != 0 {
+        if self.frames_loaded != 0 || self.noise_results.is_none() {
             return Ok(());
         }
 
-        let Some(results_buf) = self.noise_results.as_ref() else {
-            return Ok(());
-        };
-
-        let results = results_buf.clone();
-        let bytes = self
-            .stalls
-            .time(|| self.client.read_one(results))
+        let reading = self
+            .slot_reading(slot, self.ring_head)
             .context("noise-estimate seed readback failed")?;
-        let data = f32::from_bytes(&bytes);
 
         // The first frame has no temporal record, so Immerkær alone seeds it.
-        let immerkaer_low = self
-            .read_noise_partials_low(slot)
-            .context("noise-partials seed readback failed")?;
-        self.fold_noise_estimate(data, slot as usize, None, immerkaer_low);
+        self.fold_noise_estimate(reading.immerkaer_sums, None, reading.immerkaer_low);
 
         Ok(())
     }
@@ -212,17 +322,15 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// reads repeating texture as noise.
     fn fold_noise_estimate(
         &mut self,
-        data: &[f32],
-        slot: usize,
+        immerkaer_sums: [f32; RESULTS_PER_SLOT],
         temporal: Option<TemporalNoiseSample>,
         immerkaer_low: [f32; 3],
     ) {
         let channels = self.params.channels.count() as usize;
-        let base = slot * 4;
 
         let mut raw = [0.0f32; 3];
         for (c, sigma) in raw.iter_mut().enumerate().take(channels) {
-            *sigma = sigma_from_abs_sum(data[base + c], self.width, self.height);
+            *sigma = sigma_from_abs_sum(immerkaer_sums[c], self.width, self.height);
         }
 
         let mut raw_low = immerkaer_low;
@@ -289,114 +397,36 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.sigma_y = smoothed[0];
     }
 
-    /// Refreshes the derived filter values from the window centre's noise estimate.
+    /// Refreshes the derived filter values from the window centre's noise reading.
     ///
-    /// The estimate was queued when the slot was first written, so the blocking read lands on
-    /// finished work.
+    /// The reading was queued when the slot was written, so it has almost always landed.
     pub(super) fn update_noise_estimate(&mut self, center_t: u32) -> Result<(), anyhow::Error> {
         debug_assert!(
             center_t < self.params.total_frames(),
             "center_t must be a logical ring position"
         );
 
-        let results_buf = self
-            .noise_results
-            .as_ref()
-            .expect("noise_results allocated when auto noise is active")
-            .clone();
-
-        let bytes = self
-            .stalls
-            .time(|| self.client.read_one(results_buf))
-            .map_err(|error| anyhow::anyhow!("noise-estimate results readback failed: {error}"))?;
-        let data = f32::from_bytes(&bytes);
-
-        let center_slot = self.phys_frame(center_t as i32) as usize;
-
-        let reading = self.borrow_reading_ahead(center_t)?;
-        let immerkaer_low = self.read_noise_partials_low(center_slot as u32)?;
+        let centre = self.noise_reading_at(center_t)?;
+        let lender = self.borrow_reading_ahead(center_t, &centre)?;
 
         // The curve only changes alongside a trustworthy sample.
-        if reading.sample.is_some() {
-            self.noise_curve = reading.curve;
-            self.quarter_classes = reading.classes;
+        if lender.temporal.sample.is_some() {
+            self.noise_curve = lender.temporal.curve;
+            self.quarter_classes = lender.temporal.classes.clone();
         }
 
-        self.fold_noise_estimate(data, center_slot, reading.sample, immerkaer_low);
+        self.fold_noise_estimate(
+            centre.immerkaer_sums,
+            lender.temporal.sample,
+            centre.immerkaer_low,
+        );
 
         Ok(())
     }
 
-    /// Reads one slot's noise partials back and reduces them to the low chain's estimate.
-    ///
-    /// The ring handle is sliced to the slot, so the transfer skips the rest of the ring.
-    fn read_noise_partials_low(&self, slot: u32) -> Result<[f32; 3], anyhow::Error> {
-        let partials_buf = self
-            .noise_partials
-            .as_ref()
-            .expect("noise_partials allocated when auto noise is active");
-
-        let slot_len_bytes = partials_len(self.width, self.height) as u64 * size_of::<f32>() as u64;
-        let stride = noise_partials_slot_stride_bytes(self.width, self.height, self.align);
-        let total_bytes = self.params.total_frames() as u64 * stride;
-        let start = (slot as u64) * stride;
-        let end_trim = total_bytes - start - slot_len_bytes;
-
-        let sliced = partials_buf.clone().offset_start(start).offset_end(end_trim);
-        let bytes = self
-            .stalls
-            .time(|| self.client.read_one(sliced))
-            .map_err(|error| anyhow::anyhow!("noise partials readback failed: {error}"))?;
-        let data = f32::from_bytes(&bytes);
-
-        let sigmas =
-            sigma_block_p25_from_partials(data, self.params.channels.count(), self.width, self.height);
-        Ok(sigmas)
-    }
-
-    /// Reads a slot's temporal residual statistics back and combines them into one reading.
-    ///
-    /// Every part is `None` when the temporal estimator is inactive or too little of the frame
-    /// held still. The curve also needs `luma_noise_fields` on.
-    pub(in crate::nlmeans) fn read_temporal_noise(
-        &self,
-        slot: u32,
-    ) -> Result<TemporalNoiseReading, anyhow::Error> {
-        let Some(stats_buf) = self.temporal_stats_buf.as_ref() else {
-            return Ok(TemporalNoiseReading {
-                sample: None,
-                curve: None,
-                classes: None,
-            });
-        };
-
-        let stored_ch = self.params.channels.storage_count();
-        let channels = self.params.channels.count();
-        let frame_count = self.params.total_frames();
-
-        let records = self.stalls.time(|| {
-            read_temporal_stats_slot::<R>(
-                &self.client,
-                stats_buf,
-                self.width,
-                self.height,
-                stored_ch,
-                frame_count,
-                slot,
-                self.align,
-            )
-        })?;
-
-        let reading = temporal_noise_reading(
-            &records,
-            channels,
-            stored_ch,
-            self.width,
-            self.height,
-            self.luma_noise_fields,
-            self.quarter_settings,
-        );
-        Ok(reading)
+    #[cfg(test)]
+    pub(crate) fn noise_reading_fallbacks(&self) -> u64 {
+        self.noise_readings.fallbacks()
     }
 
     /// Rebuilds `spatial_offset_lut` from `noise_offset` and `rho_smoothed`.
