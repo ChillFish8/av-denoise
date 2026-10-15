@@ -134,6 +134,18 @@ pub fn shapes_with_channels(channels: u32) -> Vec<Vec<usize>> {
     vec![vec![WIDTH as usize, HEIGHT as usize, channels as usize]]
 }
 
+/// The neighbour counts each block-match bench launches with.
+pub const BENCH_NEIGHBOURS: &[u32] = &[1, 4];
+
+/// A block-match row name, with a `_4n` style suffix when the launch covers more than one neighbour.
+pub fn neighbour_bench_name(base: &str, neighbours: u32) -> String {
+    if neighbours == 1 {
+        return base.to_string();
+    }
+
+    format!("{base}_{neighbours}n")
+}
+
 /// Buffers for a kernel that reads one frame and writes one output.
 #[derive(Clone)]
 pub struct InputOutput {

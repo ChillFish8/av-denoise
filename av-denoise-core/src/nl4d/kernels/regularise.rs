@@ -49,10 +49,17 @@ fn median_of(vals: &mut Array<i32>, count: u32) -> i32 {
 }
 
 /// Loads the block's centre tile, clamped at the frame edge, with every thread of the cube.
+///
+/// The centre frame starts `centre_base` values into `pyramid`.
 #[cube]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a buffer, position or comptime shape the tile load reads"
+)]
 pub(crate) fn load_centre_tile(
-    centre: &Array<f32>,
+    pyramid: &Array<f32>,
     centre_smem: &mut SharedMemory<f32>,
+    centre_base: u32,
     block_origin_x: i32,
     block_origin_y: i32,
     #[comptime] width: u32,
@@ -67,8 +74,9 @@ pub(crate) fn load_centre_tile(
         while pixel_x < blksize {
             let centre_x = clamp_coord(block_origin_x + pixel_x as i32, width as i32);
             let centre_y = clamp_coord(block_origin_y + pixel_y as i32, height as i32);
+            let pixel_index = (centre_y * width as i32 + centre_x) as u32;
             centre_smem[(pixel_y * blksize + pixel_x) as usize] =
-                centre[(centre_y * width as i32 + centre_x) as usize];
+                pyramid[(centre_base + pixel_index) as usize];
             pixel_x += CUBE_DIM_X;
         }
 
@@ -79,10 +87,16 @@ pub(crate) fn load_centre_tile(
 /// Writes the block's seven candidate vectors and its neighbourhood median.
 ///
 /// The candidates are its own vector, the median, its left, right, upper and lower neighbours'
-/// vectors and zero. Off-grid neighbours repeat the block's own vector. Run by one thread.
+/// vectors and zero. Off-grid neighbours repeat the block's own vector. The field starts
+/// `mv_base` values into `mv_in`. Run by one thread.
 #[cube]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a buffer, position or comptime shape the gather reads"
+)]
 pub(crate) fn gather_candidates(
     mv_in: &Array<i32>,
+    mv_base: u32,
     candidates: &mut SharedMemory<i32>,
     median: &mut SharedMemory<i32>,
     block_col: u32,
@@ -106,7 +120,8 @@ pub(crate) fn gather_candidates(
                     && neighbour_x < blocks_x as i32
                     && neighbour_y < blocks_y as i32
                 {
-                    let mv_index = ((neighbour_y as u32 * blocks_x + neighbour_x as u32) * 2u32) as usize;
+                    let mv_index =
+                        (mv_base + (neighbour_y as u32 * blocks_x + neighbour_x as u32) * 2u32) as usize;
                     neighbour_xs[neighbour_count as usize] = mv_in[mv_index];
                     neighbour_ys[neighbour_count as usize] = mv_in[mv_index + 1];
                     neighbour_count += 1u32;
@@ -119,8 +134,8 @@ pub(crate) fn gather_candidates(
         dy += 1u32;
     }
 
-    let own_x = mv_in[(block * 2u32) as usize];
-    let own_y = mv_in[(block * 2u32 + 1u32) as usize];
+    let own_x = mv_in[(mv_base + block * 2u32) as usize];
+    let own_y = mv_in[(mv_base + block * 2u32 + 1u32) as usize];
 
     // A block with no neighbours is its own median.
     let mut median_x = own_x;
@@ -162,7 +177,7 @@ pub(crate) fn gather_candidates(
             && neighbour_x < blocks_x as i32
             && neighbour_y < blocks_y as i32
         {
-            let mv_index = ((neighbour_y as u32 * blocks_x + neighbour_x as u32) * 2u32) as usize;
+            let mv_index = (mv_base + (neighbour_y as u32 * blocks_x + neighbour_x as u32) * 2u32) as usize;
             vector_x = mv_in[mv_index];
             vector_y = mv_in[mv_index + 1];
         }
@@ -193,14 +208,21 @@ pub(crate) fn candidate_cost(
 /// Writes the lowest-cost candidate and the confidence its SAD earns.
 ///
 /// A tie keeps the earlier candidate. The confidence is 1 up to `sad_noise_floor` and falls to 0 at
-/// `thsad` past it. Run by one thread.
+/// `thsad` past it. The block's vector lands `mv_base` values into `mv_out` and its confidence
+/// `conf_base` values into `confidence_out`. Run by one thread.
 #[cube]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the winner write needs every scratch array, output and base the kernel holds"
+)]
 pub(crate) fn write_winner(
     candidates: &SharedMemory<i32>,
     sad_scratch: &SharedMemory<f32>,
     cost: &SharedMemory<f32>,
     mv_out: &mut Array<i32>,
     confidence_out: &mut Array<f32>,
+    mv_base: u32,
+    conf_base: u32,
     block: u32,
     sad_noise_floor: f32,
     thsad: f32,
@@ -217,8 +239,8 @@ pub(crate) fn write_winner(
         candidate += 1u32;
     }
 
-    mv_out[(block * 2u32) as usize] = candidates[(best * 2u32) as usize];
-    mv_out[(block * 2u32 + 1u32) as usize] = candidates[(best * 2u32 + 1u32) as usize];
+    mv_out[(mv_base + block * 2u32) as usize] = candidates[(best * 2u32) as usize];
+    mv_out[(mv_base + block * 2u32 + 1u32) as usize] = candidates[(best * 2u32 + 1u32) as usize];
 
     let mut excess = sad_scratch[best as usize] - sad_noise_floor;
     if excess < 0.0f32 {
@@ -232,16 +254,20 @@ pub(crate) fn write_winner(
         confidence = 0.0f32;
     }
 
-    confidence_out[block as usize] = confidence;
+    confidence_out[(conf_base + block) as usize] = confidence;
 }
 
 /// Re-scores each block's motion vector against its 3x3 neighbourhood median.
 ///
-/// Launch one cube per block with at least `REGULARISE_CANDIDATES` threads. `centre` and
-/// `neighbour` are full-resolution luma planes. Each candidate costs its SAD over the block plus
-/// `lambda_pixel` times its distance in pixels from the component-wise median of the neighbours.
-/// The lowest cost wins, and a tie keeps the earlier candidate, so the block's own vector wins
-/// every tie.
+/// Launch one cube per block per neighbour with at least `REGULARISE_CANDIDATES` threads. Each
+/// candidate costs its SAD over the block plus `lambda_pixel` times its distance in pixels from the
+/// component-wise median of the neighbouring blocks. The lowest cost wins, and a tie keeps the
+/// earlier candidate, so the block's own vector wins every tie.
+///
+/// Every frame is a full-resolution luma slot of `pyramid`, `slot_pixels` values apart. The
+/// neighbour runs on z. Neighbour `n` re-scores the field `n * mv_stride` values into `mv_in`
+/// against slot `neighbour_slots[n]`, and writes `n * mv_stride` values into `mv_out` and
+/// `n * conf_stride` values into `confidence_out`.
 ///
 /// The winner goes to `mv_out` and a confidence from its SAD to `confidence_out`. The confidence
 /// is 1 up to `sad_noise_floor` and falls to 0 at `thsad` past it.
@@ -253,25 +279,36 @@ pub(crate) fn write_winner(
     reason = "every argument is a buffer or comptime shape the kernel binds"
 )]
 pub fn nl4d_mv_regularise(
-    centre: &Array<f32>,
-    neighbour: &Array<f32>,
+    pyramid: &Array<f32>,
+    neighbour_slots: &Array<u32>,
     mv_in: &Array<i32>,
     mv_out: &mut Array<i32>,
     confidence_out: &mut Array<f32>,
+    centre_slot: u32,
     lambda_pixel: f32,
     sad_noise_floor: f32,
     thsad: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
+    #[comptime] slot_pixels: u32,
     #[comptime] blksize: u32,
     #[comptime] step: u32,
     #[comptime] blocks_x: u32,
     #[comptime] blocks_y: u32,
+    #[comptime] mv_stride: u32,
+    #[comptime] conf_stride: u32,
 ) {
     let block_col = CUBE_POS_X;
     let block_row = CUBE_POS_Y;
+    let neighbour_index = CUBE_POS_Z;
     let block = block_row * blocks_x + block_col;
     let thread_id = UNIT_POS_Y * CUBE_DIM_X + UNIT_POS_X;
+
+    let neighbour_slot = neighbour_slots[neighbour_index as usize];
+    let centre_base = centre_slot * slot_pixels;
+    let neighbour_base = neighbour_slot * slot_pixels;
+    let mv_base = neighbour_index * mv_stride;
+    let conf_base = neighbour_index * conf_stride;
 
     let block_pixels = comptime!(blksize * blksize);
     let mut centre_smem = SharedMemory::<f32>::new(block_pixels as usize);
@@ -284,8 +321,9 @@ pub fn nl4d_mv_regularise(
     let block_origin_y = block_row as i32 * step as i32;
 
     load_centre_tile(
-        centre,
+        pyramid,
         &mut centre_smem,
+        centre_base,
         block_origin_x,
         block_origin_y,
         width,
@@ -296,6 +334,7 @@ pub fn nl4d_mv_regularise(
     if thread_id == 0u32 {
         gather_candidates(
             mv_in,
+            mv_base,
             &mut candidates,
             &mut median,
             block_col,
@@ -318,7 +357,8 @@ pub fn nl4d_mv_regularise(
                 let centre_val = centre_smem[(iy * blksize + ix) as usize];
                 let neighbour_x = clamp_coord(centre_x + mvx, width as i32);
                 let neighbour_y = clamp_coord(centre_y + mvy, height as i32);
-                let diff = centre_val - neighbour[(neighbour_y * width as i32 + neighbour_x) as usize];
+                let pixel_index = (neighbour_y * width as i32 + neighbour_x) as u32;
+                let diff = centre_val - pyramid[(neighbour_base + pixel_index) as usize];
                 let abs_diff = if diff < 0.0f32 { -diff } else { diff };
                 sad += abs_diff;
             }
@@ -337,6 +377,8 @@ pub fn nl4d_mv_regularise(
             &cost,
             mv_out,
             confidence_out,
+            mv_base,
+            conf_base,
             block,
             sad_noise_floor,
             thsad,

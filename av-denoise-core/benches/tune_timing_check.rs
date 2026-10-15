@@ -122,6 +122,7 @@ fn regularise_site<R: Runtime>(
     let bench = MvRegulariseBench {
         client: client.clone(),
         candidate: RegulariseCandidate::baseline(),
+        neighbours: 4,
     };
     let (site, _) = bench.prepare();
 

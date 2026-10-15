@@ -43,6 +43,25 @@ pub fn pyramid_slot_byte_offset(
     (offset_pixels * size_of::<f32>()) as u64
 }
 
+/// One frame slot's length at `level`, in values, padded as [pyramid_slot_byte_offset] steps.
+pub(crate) fn pyramid_slot_pixels(width: u32, height: u32, level: u32, align: StorageAlign) -> u32 {
+    let pixels = level_slot_pixels(width, height, level, align);
+    pixels as u32
+}
+
+/// Where `level` starts in the flat pyramid buffer, in values.
+pub(crate) fn pyramid_level_offset(
+    width: u32,
+    height: u32,
+    frame_count: u32,
+    level: u32,
+    align: StorageAlign,
+) -> u32 {
+    let offset_bytes = pyramid_slot_byte_offset(width, height, frame_count, level, 0, align);
+    let offset_values = offset_bytes / size_of::<f32>() as u64;
+    offset_values as u32
+}
+
 /// The pixel dimensions at `level`, where level 0 is full resolution.
 pub fn level_dims(width: u32, height: u32, level: u32) -> (u32, u32) {
     let mut level_width = width;

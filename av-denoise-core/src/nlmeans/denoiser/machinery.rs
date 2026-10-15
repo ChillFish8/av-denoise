@@ -64,7 +64,12 @@ impl<R: Runtime> NlmDenoiser<R> {
             self.update_noise_estimate(center_t)?;
         }
 
-        let neighbour_slots = self.run_motion_machinery(center_t)?;
+        // The table upload comes before the first motion dispatch, because an upload ends a device
+        // span's timed pass.
+        let neighbour_slots = self.window_neighbour_slots(center_t);
+        self.update_neighbour_slots(&neighbour_slots);
+
+        self.run_motion_machinery(center_t)?;
 
         let motion_ctx = self
             .mc_ctx
@@ -88,10 +93,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             .clone();
 
         let centre_slot = self.phys_frame(center_t as i32);
-        let mv_stride = (motion_ctx.mv_field_bytes_per_neighbour() / size_of::<i32>() as u64) as u32;
-        let conf_stride = (motion_ctx.confidence_bytes_per_neighbour() / size_of::<f32>() as u64) as u32;
-
-        self.update_neighbour_slots(&neighbour_slots);
+        let mv_stride = motion_ctx.mv_stride();
+        let conf_stride = motion_ctx.conf_stride();
         let neighbour_slots_buf = self.neighbour_slots_handle();
 
         let view = RingView {

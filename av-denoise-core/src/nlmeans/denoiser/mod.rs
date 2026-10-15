@@ -116,6 +116,11 @@ pub struct NlmDenoiser<R: Runtime> {
     ///
     /// Present when the temporal radius is above 0.
     pub(super) neighbour_slots: Option<MirroredBuffer>,
+    /// One single-slot table per ring slot, so a pair analyse can name any one frame as its
+    /// neighbour.
+    ///
+    /// Empty unless `Chained` motion estimation is active.
+    pub(super) ring_slot_tables: Vec<Handle>,
 
     /// Per-ring-slot scratch for the first stage of the noise estimate.
     ///
@@ -389,13 +394,27 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         let confidence_dummy = client.empty(size_of::<f32>());
 
+        let ring_slot_tables = if pair_ring_buf.is_some() {
+            (0..total_frames)
+                .map(|slot| {
+                    let table = [slot];
+                    let table_bytes = u32::as_bytes(&table);
+                    client.create_from_slice(table_bytes)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         let (confidence_pyramid, confidence_mv_scratch) = if let Some(geometry) = confidence_ctx.as_ref() {
             let pyramid_pixels =
                 motion::pyramid_pixels_per_frame(width, height, geometry.pyramid_levels, geometry.align);
             let pyramid_bytes = pyramid_pixels * total_frames as usize * size_of::<f32>();
-            let mv_scratch_len = geometry.mv_slots_per_neighbour() * 2 * size_of::<i32>();
+            // Every neighbour gets its own slice, so no two write the same discarded vectors.
+            let neighbours = (2 * params.temporal_radius) as u64;
+            let mv_scratch_bytes = neighbours * geometry.mv_field_bytes_per_neighbour();
             let pyramid = client.empty(pyramid_bytes);
-            let mv_scratch = client.empty(mv_scratch_len);
+            let mv_scratch = client.empty(mv_scratch_bytes as usize);
             (Some(pyramid), Some(mv_scratch))
         } else {
             (None, None)
@@ -441,6 +460,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             spatial_offset_lut,
             pilot_offset_lut,
             neighbour_slots,
+            ring_slot_tables,
             noise_partials,
             noise_results,
             temporal_stats_buf,

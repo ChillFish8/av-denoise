@@ -190,6 +190,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             newer_slot,
             pair_slot,
             pyramid,
+            &self.ring_slot_tables,
             pair_ring,
             &self.confidence_dummy,
         )

@@ -1,10 +1,7 @@
 use cubecl::prelude::*;
-use cubecl::server::Handle;
 
 use super::MotionCtx;
-use super::analyse::confidence_byte_offset;
-use super::pyramid::{level_dims, pyramid_slot_byte_offset};
-use crate::nlmeans::kernels::motion::{BLOCK_MATCH_THREADS, nlm_mc_block_match_fine};
+use super::analyse::{MatchTargets, launch_fine};
 
 /// The average per-pixel error at which a block stops counting as a match.
 ///
@@ -30,65 +27,35 @@ pub(crate) fn thsad(blksize: u32, thsad_scale: f32) -> f32 {
     thsad_scale * block_area * THSAD_PIXEL
 }
 
-/// Scores how well one neighbour matches the centre frame without a motion search.
+/// Scores how well each neighbour matches the centre frame without a motion search.
 ///
-/// Each block is scored where it stands at pyramid level 0, into this neighbour's `confidence`
-/// slot. The motion vector the kernel also writes goes to `mv_scratch` and is discarded.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the dispatch threads through every buffer and shape the kernel binds"
-)]
-pub(crate) fn run_confidence_for_neighbour<R: Runtime>(
+/// Each block is scored where it stands at pyramid level 0, into its neighbour's `confidence`
+/// slice. The motion vectors the kernel also writes go to `mv_field` and are discarded.
+pub(crate) fn run_confidence<R: Runtime>(
     client: &ComputeClient<R>,
     ctx: &MotionCtx,
     width: u32,
     height: u32,
-    frame_count: u32,
-    centre_slot: u32,
-    neighbour_slot: u32,
-    neighbour_idx: u32,
-    luma_pyramid: &Handle,
-    mv_scratch: &Handle,
-    confidence: &Handle,
+    targets: &MatchTargets<'_>,
     sad_noise_floor: f32,
     thsad: f32,
 ) -> Result<(), anyhow::Error> {
-    let (fine_width, fine_height) = level_dims(width, height, 0);
-    let centre_offset = pyramid_slot_byte_offset(width, height, frame_count, 0, centre_slot, ctx.align);
-    let centre = luma_pyramid.clone().offset_start(centre_offset);
-    let neighbour_offset = pyramid_slot_byte_offset(width, height, frame_count, 0, neighbour_slot, ctx.align);
-    let neighbour = luma_pyramid.clone().offset_start(neighbour_offset);
-    let level_len = (fine_width * fine_height) as usize;
+    debug_assert!(
+        targets.write_confidence,
+        "the confidence pass always writes confidence"
+    );
 
-    let conf_offset = confidence_byte_offset(ctx, neighbour_idx);
-    let conf_slot = confidence.clone().offset_start(conf_offset);
-    let conf_slot_len = (ctx.blocks_x as usize) * (ctx.blocks_y as usize);
-    let mv_slot_len = (ctx.blocks_x as usize) * (ctx.blocks_y as usize) * 2;
-
-    let grid = CubeCount::new_2d(ctx.blocks_x, ctx.blocks_y);
-    let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
-
-    unsafe {
-        nlm_mc_block_match_fine::launch_unchecked::<R>(
-            client,
-            grid,
-            dim,
-            ArrayArg::from_raw_parts(centre, level_len),
-            ArrayArg::from_raw_parts(neighbour, level_len),
-            ArrayArg::from_raw_parts(mv_scratch.clone(), mv_slot_len),
-            ArrayArg::from_raw_parts(conf_slot, conf_slot_len),
-            true,
-            sad_noise_floor,
-            thsad,
-            fine_width,
-            fine_height,
-            ctx.blksize,
-            ctx.step,
-            ctx.search_radius,
-            0u32,
-            ctx.blocks_x,
-        );
-    }
+    launch_fine::<R>(
+        client,
+        ctx,
+        width,
+        height,
+        targets,
+        ctx.search_radius,
+        0u32,
+        sad_noise_floor,
+        thsad,
+    );
 
     Ok(())
 }

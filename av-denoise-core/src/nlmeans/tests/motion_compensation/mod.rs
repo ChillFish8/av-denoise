@@ -2,6 +2,7 @@ mod block_match;
 mod blocked_equivalence;
 mod chain;
 mod end_to_end;
+mod merged;
 mod reference;
 mod seeding;
 

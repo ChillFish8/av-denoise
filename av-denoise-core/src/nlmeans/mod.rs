@@ -25,6 +25,8 @@ mod options;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) mod tests;
 
+#[cfg(test)]
+pub(crate) use self::align::StorageAlign;
 pub(crate) use self::denoiser::{NlmDenoiser, RingView};
 pub use self::engine::Nlmeans;
 pub use self::motion::{MotionCompensationMode, MotionEstimation, MotionSearch};

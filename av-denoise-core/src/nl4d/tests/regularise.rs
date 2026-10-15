@@ -8,6 +8,8 @@ const BLKSIZE: u32 = 16;
 const STEP: u32 = 8;
 
 /// One launch over a `blocks_x x blocks_y` grid, returning the output field and confidence.
+///
+/// The centre sits in slot 0 of a two-slot frame buffer and the neighbour in slot 1.
 fn run(
     width: u32,
     height: u32,
@@ -21,39 +23,58 @@ fn run(
     let blocks_y = height.div_ceil(STEP);
     let blocks = (blocks_x * blocks_y) as usize;
     assert_eq!(mv_in.len(), 2 * blocks);
+    assert_eq!(neighbour.len(), centre.len());
 
-    let centre_bytes = f32::as_bytes(centre);
-    let neighbour_bytes = f32::as_bytes(neighbour);
+    let mut frames = centre.to_vec();
+    frames.extend_from_slice(neighbour);
+
+    let frame_bytes = f32::as_bytes(&frames);
+    let neighbour_table = [1u32];
+    let table_bytes = u32::as_bytes(&neighbour_table);
     let mv_in_bytes = i32::as_bytes(mv_in);
-    let centre_buf = client.create_from_slice(centre_bytes);
-    let neighbour_buf = client.create_from_slice(neighbour_bytes);
+    let frame_buf = client.create_from_slice(frame_bytes);
+    let table_buf = client.create_from_slice(table_bytes);
     let mv_in_buf = client.create_from_slice(mv_in_bytes);
     let mv_out = client.empty(2 * blocks * size_of::<i32>());
     let conf_out = client.empty(blocks * size_of::<f32>());
     let thsad = (BLKSIZE * BLKSIZE) as f32 * THSAD_PIXEL;
+    let lambda_pixel = lambda * (BLKSIZE * BLKSIZE) as f32 * THSAD_PIXEL;
+    let slot_pixels = centre.len() as u32;
+    let mv_stride = 2 * blocks as u32;
+    let conf_stride = blocks as u32;
 
-    let grid = CubeCount::new_2d(blocks_x, blocks_y);
+    let grid = CubeCount::new_3d(blocks_x, blocks_y, 1);
     let dim = CubeDim::new_2d(8, 8);
 
     unsafe {
+        let frame_arg = ArrayArg::from_raw_parts(frame_buf, frames.len());
+        let table_arg = ArrayArg::from_raw_parts(table_buf, neighbour_table.len());
+        let mv_in_arg = ArrayArg::from_raw_parts(mv_in_buf, 2 * blocks);
+        let mv_out_arg = ArrayArg::from_raw_parts(mv_out.clone(), 2 * blocks);
+        let conf_out_arg = ArrayArg::from_raw_parts(conf_out.clone(), blocks);
+
         nl4d_mv_regularise::launch_unchecked::<R>(
             &client,
             grid,
             dim,
-            ArrayArg::from_raw_parts(centre_buf, centre.len()),
-            ArrayArg::from_raw_parts(neighbour_buf, neighbour.len()),
-            ArrayArg::from_raw_parts(mv_in_buf, 2 * blocks),
-            ArrayArg::from_raw_parts(mv_out.clone(), 2 * blocks),
-            ArrayArg::from_raw_parts(conf_out.clone(), blocks),
-            lambda * (BLKSIZE * BLKSIZE) as f32 * THSAD_PIXEL,
+            frame_arg,
+            table_arg,
+            mv_in_arg,
+            mv_out_arg,
+            conf_out_arg,
+            0u32,
+            lambda_pixel,
             0.0,
             thsad,
             width,
             height,
+            slot_pixels,
             BLKSIZE,
             STEP,
             blocks_x,
             blocks_y,
+            mv_stride,
+            conf_stride,
         );
     }
 

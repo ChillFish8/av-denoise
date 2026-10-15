@@ -83,11 +83,7 @@ fn run_fine(
     let mv_len = (blocks_x * blocks_y * 2) as usize;
     let conf_len = (blocks_x * blocks_y) as usize;
 
-    let centre_bytes = f32::as_bytes(centre);
-    let neighbour_bytes = f32::as_bytes(neighbour);
     let seed_bytes = i32::as_bytes(seeds);
-    let centre_buf = client.create_from_slice(centre_bytes);
-    let neighbour_buf = client.create_from_slice(neighbour_bytes);
     let mv_field = client.create_from_slice(seed_bytes);
     let unwritten = vec![f32::NAN; conf_len];
     let unwritten_bytes = f32::as_bytes(&unwritten);
@@ -96,50 +92,69 @@ fn run_fine(
     let grid = CubeCount::new_2d(blocks_x, blocks_y);
 
     unsafe {
-        let centre_arg = ArrayArg::from_raw_parts(centre_buf, level_len);
-        let neighbour_arg = ArrayArg::from_raw_parts(neighbour_buf, level_len);
         let mv_arg = ArrayArg::from_raw_parts(mv_field.clone(), mv_len);
         let conf_arg = ArrayArg::from_raw_parts(confidence.clone(), conf_len);
 
         match kernel {
-            Kernel::Reference => reference_block_match_fine::launch_unchecked::<R>(
-                &client,
-                grid,
-                dim,
-                centre_arg,
-                neighbour_arg,
-                mv_arg,
-                conf_arg,
-                true,
-                NOISE_FLOOR,
-                THSAD,
-                width,
-                height,
-                blksize,
-                FINE_STEP,
-                search_radius,
-                use_seed,
-                blocks_x,
-            ),
-            Kernel::Production => nlm_mc_block_match_fine::launch_unchecked::<R>(
-                &client,
-                grid,
-                dim,
-                centre_arg,
-                neighbour_arg,
-                mv_arg,
-                conf_arg,
-                true,
-                NOISE_FLOOR,
-                THSAD,
-                width,
-                height,
-                blksize,
-                FINE_STEP,
-                search_radius,
-                use_seed,
-                blocks_x,
-            ),
+            Kernel::Reference => {
+                let centre_bytes = f32::as_bytes(centre);
+                let neighbour_bytes = f32::as_bytes(neighbour);
+                let centre_buf = client.create_from_slice(centre_bytes);
+                let neighbour_buf = client.create_from_slice(neighbour_bytes);
+
+                let centre_arg = ArrayArg::from_raw_parts(centre_buf, level_len);
+                let neighbour_arg = ArrayArg::from_raw_parts(neighbour_buf, level_len);
+
+                reference_block_match_fine::launch_unchecked::<R>(
+                    &client,
+                    grid,
+                    dim,
+                    centre_arg,
+                    neighbour_arg,
+                    mv_arg,
+                    conf_arg,
+                    true,
+                    NOISE_FLOOR,
+                    THSAD,
+                    width,
+                    height,
+                    blksize,
+                    FINE_STEP,
+                    search_radius,
+                    use_seed,
+                    blocks_x,
+                )
+            },
+            Kernel::Production => {
+                let (pyramid, neighbour_slots) = pair_pyramid(&client, centre, neighbour);
+
+                let pyramid_arg = ArrayArg::from_raw_parts(pyramid, 2 * level_len);
+                let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, 1);
+
+                nlm_mc_block_match_fine::launch_unchecked::<R>(
+                    &client,
+                    grid,
+                    dim,
+                    pyramid_arg,
+                    neighbour_slots_arg,
+                    mv_arg,
+                    conf_arg,
+                    0u32,
+                    true,
+                    NOISE_FLOOR,
+                    THSAD,
+                    width,
+                    height,
+                    level_len as u32,
+                    blksize,
+                    FINE_STEP,
+                    search_radius,
+                    use_seed,
+                    blocks_x,
+                    mv_len as u32,
+                    conf_len as u32,
+                )
+            },
         }
     }
 
@@ -239,56 +254,71 @@ fn run_coarse(
     let level_len = (level_width * level_height) as usize;
     let mv_len = (fine_blocks_x * fine_blocks_y * 2) as usize;
 
-    let centre_bytes = f32::as_bytes(centre);
-    let neighbour_bytes = f32::as_bytes(neighbour);
     let sentinels = vec![i32::MIN; mv_len];
     let sentinel_bytes = i32::as_bytes(&sentinels);
-    let centre_buf = client.create_from_slice(centre_bytes);
-    let neighbour_buf = client.create_from_slice(neighbour_bytes);
     let mv_field = client.create_from_slice(sentinel_bytes);
 
     let grid = CubeCount::new_2d(coarse_blocks_x, coarse_blocks_y);
 
     unsafe {
-        let centre_arg = ArrayArg::from_raw_parts(centre_buf, level_len);
-        let neighbour_arg = ArrayArg::from_raw_parts(neighbour_buf, level_len);
         let mv_arg = ArrayArg::from_raw_parts(mv_field.clone(), mv_len);
 
         match kernel {
-            Kernel::Reference => reference_block_match_coarse::launch_unchecked::<R>(
-                &client,
-                grid,
-                dim,
-                centre_arg,
-                neighbour_arg,
-                mv_arg,
-                level_width,
-                level_height,
-                blksize,
-                step,
-                search_radius,
-                level_scale,
-                fine_blocks_x,
-                fine_blocks_y,
-                FINE_STEP,
-            ),
-            Kernel::Production => nlm_mc_block_match_coarse::launch_unchecked::<R>(
-                &client,
-                grid,
-                dim,
-                centre_arg,
-                neighbour_arg,
-                mv_arg,
-                level_width,
-                level_height,
-                blksize,
-                step,
-                search_radius,
-                level_scale,
-                fine_blocks_x,
-                fine_blocks_y,
-                FINE_STEP,
-            ),
+            Kernel::Reference => {
+                let centre_bytes = f32::as_bytes(centre);
+                let neighbour_bytes = f32::as_bytes(neighbour);
+                let centre_buf = client.create_from_slice(centre_bytes);
+                let neighbour_buf = client.create_from_slice(neighbour_bytes);
+
+                let centre_arg = ArrayArg::from_raw_parts(centre_buf, level_len);
+                let neighbour_arg = ArrayArg::from_raw_parts(neighbour_buf, level_len);
+
+                reference_block_match_coarse::launch_unchecked::<R>(
+                    &client,
+                    grid,
+                    dim,
+                    centre_arg,
+                    neighbour_arg,
+                    mv_arg,
+                    level_width,
+                    level_height,
+                    blksize,
+                    step,
+                    search_radius,
+                    level_scale,
+                    fine_blocks_x,
+                    fine_blocks_y,
+                    FINE_STEP,
+                )
+            },
+            Kernel::Production => {
+                let (pyramid, neighbour_slots) = pair_pyramid(&client, centre, neighbour);
+
+                let pyramid_arg = ArrayArg::from_raw_parts(pyramid, 2 * level_len);
+                let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, 1);
+
+                nlm_mc_block_match_coarse::launch_unchecked::<R>(
+                    &client,
+                    grid,
+                    dim,
+                    pyramid_arg,
+                    neighbour_slots_arg,
+                    mv_arg,
+                    0u32,
+                    level_width,
+                    level_height,
+                    0,
+                    level_len as u32,
+                    blksize,
+                    step,
+                    search_radius,
+                    level_scale,
+                    fine_blocks_x,
+                    fine_blocks_y,
+                    FINE_STEP,
+                    mv_len as u32,
+                )
+            },
         }
     }
 

@@ -11,7 +11,7 @@ use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, grid_frames};
 use crate::nl4d::nl4d_pool_ratio;
 use crate::nlmeans::motion::THSAD_PIXEL;
-use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS};
+use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS, StorageAlign};
 use crate::tune::SiteCandidate;
 use crate::tune::gpu::zero_words;
 use crate::tune::sites::{
@@ -436,11 +436,12 @@ pub(crate) fn collab_site_f16(
 /// The content a regularise fixture scores its candidates against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RegulariseContent {
-    /// Distinct values everywhere, with the neighbour shifted by `(2, 1)` and lightly perturbed.
+    /// Distinct values everywhere. Neighbour `n` is the centre shifted by `(2 - n, 1 + n % 2)` and
+    /// lightly perturbed.
     Textured,
     /// Every pixel the same, so every candidate scores a SAD of zero.
     Flat,
-    /// A 4x4 tile repeated across both frames, so candidates a whole tile apart score equal SADs.
+    /// A 4x4 tile repeated across every frame, so candidates a whole tile apart score equal SADs.
     Periodic,
 }
 
@@ -450,67 +451,123 @@ pub(crate) struct RegulariseSpec {
     pub(crate) height: u32,
     pub(crate) content: RegulariseContent,
     pub(crate) field_lambda: f32,
+    pub(crate) neighbours: u32,
 }
 
-fn regularise_planes(spec: &RegulariseSpec) -> (Vec<f32>, Vec<f32>) {
+/// The centre frame and one frame per neighbour.
+///
+/// Textured neighbours are each shifted by their own amount. Flat and periodic neighbours repeat
+/// the centre, so their candidates keep tying pixel for pixel.
+fn regularise_frames(spec: &RegulariseSpec) -> Vec<Vec<f32>> {
     let pixels = (spec.width * spec.height) as usize;
+    let tile: Vec<f32> = (0..16).map(|index| hashed_unit(index, 11)).collect();
+    let centre: Vec<f32> = match spec.content {
+        RegulariseContent::Flat => vec![0.5f32; pixels],
+        RegulariseContent::Periodic => (0..pixels as u32)
+            .map(|index| {
+                let x = index % spec.width;
+                let y = index / spec.width;
+                tile[((y % 4) * 4 + x % 4) as usize]
+            })
+            .collect(),
+        RegulariseContent::Textured => (0..pixels as u32).map(|index| hashed_unit(index, 12)).collect(),
+    };
 
-    match spec.content {
-        RegulariseContent::Flat => (vec![0.5f32; pixels], vec![0.5f32; pixels]),
-        RegulariseContent::Periodic => {
-            let tile: Vec<f32> = (0..16).map(|index| hashed_unit(index, 11)).collect();
-            let plane: Vec<f32> = (0..pixels as u32)
-                .map(|index| {
-                    let x = index % spec.width;
-                    let y = index / spec.width;
-                    tile[((y % 4) * 4 + x % 4) as usize]
-                })
-                .collect();
-            (plane.clone(), plane)
-        },
-        RegulariseContent::Textured => {
-            let centre: Vec<f32> = (0..pixels as u32).map(|index| hashed_unit(index, 12)).collect();
-            let neighbour: Vec<f32> = (0..pixels as u32)
-                .map(|index| {
-                    let x = (index % spec.width) as i32;
-                    let y = (index / spec.width) as i32;
-                    let source_x = (x - 2).clamp(0, spec.width as i32 - 1) as u32;
-                    let source_y = (y - 1).clamp(0, spec.height as i32 - 1) as u32;
-                    let source = centre[(source_y * spec.width + source_x) as usize];
-                    let perturbation = (hashed_unit(index, 13) - 0.5) * 0.02;
-                    source + perturbation
-                })
-                .collect();
-            (centre, neighbour)
-        },
+    let mut frames = vec![centre.clone()];
+
+    if spec.content != RegulariseContent::Textured {
+        for _ in 0..spec.neighbours {
+            frames.push(centre.clone());
+        }
+
+        return frames;
     }
+
+    for neighbour in 0..spec.neighbours {
+        let shift_x = 2 - neighbour as i32;
+        let shift_y = 1 + (neighbour as i32 % 2);
+        let moved: Vec<f32> = (0..pixels as u32)
+            .map(|index| {
+                let x = (index % spec.width) as i32;
+                let y = (index / spec.width) as i32;
+                let source_x = (x - shift_x).clamp(0, spec.width as i32 - 1) as u32;
+                let source_y = (y - shift_y).clamp(0, spec.height as i32 - 1) as u32;
+                let source = centre[(source_y * spec.width + source_x) as usize];
+                let perturbation = (hashed_unit(index + neighbour * 7919, 13) - 0.5) * 0.02;
+                source + perturbation
+            })
+            .collect();
+        frames.push(moved);
+    }
+
+    frames
 }
 
+/// The pyramid slot a regularise fixture stores neighbour `neighbour` in.
+///
+/// The neighbours fill slots `0..neighbours` in reverse, so the table is never the identity once
+/// there are two or more. The centre takes the last slot.
+pub(crate) fn regularise_neighbour_slot(neighbours: u32, neighbour: u32) -> u32 {
+    neighbours - 1 - neighbour
+}
+
+/// A regularise site over `spec.neighbours` neighbours laid out with the production padding.
 pub(crate) fn regularise_site(
     client: &ComputeClient<TestRuntime>,
     spec: &RegulariseSpec,
 ) -> RegulariseSite<TestRuntime> {
-    let (centre_values, neighbour_values) = regularise_planes(spec);
-    let centre = upload(client, &centre_values);
-    let neighbour = upload(client, &neighbour_values);
+    let align = StorageAlign::from_client(client);
+    let pixels = (spec.width * spec.height) as usize;
+    let slot_pixels = align.pad_elems::<f32>(pixels);
+    let frames = regularise_frames(spec);
+
+    let neighbour_table: Vec<u32> = (0..spec.neighbours)
+        .map(|neighbour| regularise_neighbour_slot(spec.neighbours, neighbour))
+        .collect();
+
+    let mut pyramid_values = vec![0.0f32; frames.len() * slot_pixels];
+    let neighbour_frames = frames.iter().skip(1);
+    for (&slot, frame) in neighbour_table.iter().zip(neighbour_frames) {
+        let start = slot as usize * slot_pixels;
+        pyramid_values[start..start + pixels].copy_from_slice(frame);
+    }
+
+    let centre_start = spec.neighbours as usize * slot_pixels;
+    pyramid_values[centre_start..centre_start + pixels].copy_from_slice(&frames[0]);
+
+    let pyramid = upload(client, &pyramid_values);
+    let table_bytes = u32::as_bytes(&neighbour_table);
+    let neighbour_slots = client.create_from_slice(table_bytes);
 
     let blocks_x = spec.width.div_ceil(BLK_STEP);
     let blocks_y = spec.height.div_ceil(BLK_STEP);
     let blocks = (blocks_x * blocks_y) as usize;
-    let field_values: Vec<i32> = (0..2 * blocks as u32)
-        .map(|index| (index % 7) as i32 - 3 + ((index / 14) % 3) as i32)
-        .collect();
+    let mv_stride = align.pad_elems::<i32>(2 * blocks);
+    let conf_stride = align.pad_elems::<f32>(blocks);
+    let neighbours = spec.neighbours as usize;
+
+    let mut field_values = vec![0i32; neighbours * mv_stride];
+    for neighbour in 0..neighbours {
+        for index in 0..2 * blocks {
+            let value = (index % 7) as i32 - 3 + ((index / 14) % 3) as i32 + neighbour as i32;
+            field_values[neighbour * mv_stride + index] = value;
+        }
+    }
+
     let field_bytes = i32::as_bytes(&field_values);
     let mv_in = client.create_from_slice(field_bytes);
 
-    let vectors = client.empty(2 * blocks * size_of::<i32>());
-    let confidence = client.empty(blocks * size_of::<f32>());
-    zero_words(client, &vectors, 2 * blocks);
-    zero_words(client, &confidence, blocks);
+    let vectors = client.empty(neighbours * mv_stride * size_of::<i32>());
+    let confidence = client.empty(neighbours * conf_stride * size_of::<f32>());
+    zero_words(client, &vectors, neighbours * mv_stride);
+    zero_words(client, &confidence, neighbours * conf_stride);
     let outputs = RegulariseOutputs {
         vectors,
         confidence,
         blocks,
+        neighbours: spec.neighbours,
+        mv_stride: mv_stride as u32,
+        conf_stride: conf_stride as u32,
     };
 
     let block_area = (BLKSIZE * BLKSIZE) as f32;
@@ -518,9 +575,11 @@ pub(crate) fn regularise_site(
 
     RegulariseSite {
         client: client.clone(),
-        centre,
-        neighbour,
-        level_len: centre_values.len(),
+        pyramid,
+        pyramid_len: pyramid_values.len(),
+        centre_slot: spec.neighbours,
+        neighbour_slots,
+        slot_pixels: slot_pixels as u32,
         mv_in,
         outputs,
         lambda_pixel: spec.field_lambda * thsad,

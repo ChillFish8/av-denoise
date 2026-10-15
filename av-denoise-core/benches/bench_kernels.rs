@@ -41,7 +41,7 @@ use kernels::temporal_noise_stats::TemporalNoiseStatsBench;
 use kernels::vertical_weight::VWeightBench;
 use kernels::vweight_pair_accumulate::VWeightPairAccBench;
 use kernels::zero::ZeroBench;
-use kernels::{CHANNELS, print_header, run};
+use kernels::{BENCH_NEIGHBOURS, CHANNELS, print_header, run};
 
 fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
     let client = R::client(device);
@@ -237,23 +237,36 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
     run(DownscaleBench {
         client: client.clone(),
     });
-    run(BlockMatchCoarseBench {
-        client: client.clone(),
-    });
-    run(BlockMatchFineBench {
-        client: client.clone(),
-    });
-    run(McConfidenceBench {
-        client: client.clone(),
-    });
+
+    // Each block-match launch covers every neighbour, so they run at one neighbour and at four.
+    for &neighbours in BENCH_NEIGHBOURS {
+        run(BlockMatchCoarseBench {
+            client: client.clone(),
+            neighbours,
+        });
+        run(BlockMatchFineBench {
+            client: client.clone(),
+            neighbours,
+        });
+        run(McConfidenceBench {
+            client: client.clone(),
+            neighbours,
+        });
+    }
+
     run(ChainComposeBench {
         client: client.clone(),
     });
-    for &candidate in RegulariseCandidate::ALL {
-        run(MvRegulariseBench {
-            client: client.clone(),
-            candidate,
-        });
+
+    // Each regularise launch covers every neighbour, so every candidate runs at one neighbour and at four.
+    for &neighbours in BENCH_NEIGHBOURS {
+        for &candidate in RegulariseCandidate::ALL {
+            run(MvRegulariseBench {
+                client: client.clone(),
+                candidate,
+                neighbours,
+            });
+        }
     }
 
     for &size in GRAIN_SIZES {

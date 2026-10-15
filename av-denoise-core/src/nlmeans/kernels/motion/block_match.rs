@@ -39,15 +39,23 @@ fn window_stride(blksize: u32, search_radius: u32) -> u32 {
 /// tile stays within 1024 values. The neighbour pixels the search reaches are staged into shared
 /// memory once, clamped to the level.
 ///
+/// This level of every frame is a slot of `pyramid`, the first `level_offset` values in and
+/// `slot_pixels` values apart. The launch runs one cube per block per neighbour, with the neighbour
+/// on z. Neighbour `n` matches slot `neighbour_slots[n]` against `centre_slot` and writes its field
+/// `n * mv_stride` values in.
+///
 /// The winner is scaled by `level_scale`, 2 raised to the coarse level, and written to every fine
 /// block inside this block's region. `step` and `fine_step` are the coarse and fine block spacings.
 #[cube(launch_unchecked)]
 pub fn nlm_mc_block_match_coarse(
-    centre: &Array<f32>,
-    neighbour: &Array<f32>,
+    pyramid: &Array<f32>,
+    neighbour_slots: &Array<u32>,
     mv_field: &mut Array<i32>,
+    centre_slot: u32,
     #[comptime] level_width: u32,
     #[comptime] level_height: u32,
+    #[comptime] level_offset: u32,
+    #[comptime] slot_pixels: u32,
     #[comptime] blksize: u32,
     #[comptime] step: u32,
     #[comptime] search_radius: u32,
@@ -55,9 +63,16 @@ pub fn nlm_mc_block_match_coarse(
     #[comptime] fine_blocks_x: u32,
     #[comptime] fine_blocks_y: u32,
     #[comptime] fine_step: u32,
+    #[comptime] mv_stride: u32,
 ) {
     let block_col = CUBE_POS_X;
     let block_row = CUBE_POS_Y;
+    let neighbour_index = CUBE_POS_Z;
+
+    let neighbour_slot = neighbour_slots[neighbour_index as usize];
+    let centre_base = level_offset + centre_slot * slot_pixels;
+    let neighbour_base = level_offset + neighbour_slot * slot_pixels;
+    let mv_base = neighbour_index * mv_stride;
 
     let block_origin_x = block_col as i32 * step as i32;
     let block_origin_y = block_row as i32 * step as i32;
@@ -85,8 +100,9 @@ pub fn nlm_mc_block_match_coarse(
         while pixel_x < blksize {
             let clamped_x = clamp_i32(block_origin_x + pixel_x as i32, level_width as i32);
             let clamped_y = clamp_i32(block_origin_y + pixel_y as i32, level_height as i32);
+            let pixel_index = (clamped_y * level_width as i32 + clamped_x) as u32;
             centre_smem[(pixel_y * blksize + pixel_x) as usize] =
-                centre[(clamped_y * level_width as i32 + clamped_x) as usize];
+                pyramid[(centre_base + pixel_index) as usize];
             pixel_x += CUBE_DIM_X;
         }
 
@@ -96,8 +112,9 @@ pub fn nlm_mc_block_match_coarse(
     let window_x0 = block_origin_x - search_radius as i32;
     let window_y0 = block_origin_y - search_radius as i32;
     stage_window(
-        neighbour,
+        pyramid,
         &mut window,
+        neighbour_base,
         window_x0,
         window_y0,
         thread_id,
@@ -207,7 +224,7 @@ pub fn nlm_mc_block_match_coarse(
     while fine_row < fine_row_end {
         let mut fine_col = fine_col_start;
         while fine_col < fine_col_end {
-            let idx = ((fine_row * fine_blocks_x + fine_col) * 2) as usize;
+            let idx = (mv_base + (fine_row * fine_blocks_x + fine_col) * 2) as usize;
             mv_field[idx] = mvx_fine;
             mv_field[idx + 1] = mvy_fine;
             fine_col += 1;
@@ -226,6 +243,11 @@ pub fn nlm_mc_block_match_coarse(
 /// `(2 * search_radius + 1)^2` candidates, and the lowest SAD is picked. A tie picks the first in
 /// row-major order, and the seed wins a tie with that pick.
 ///
+/// Every frame is a slot of `pyramid`, `slot_pixels` values apart. The launch runs one cube per
+/// block per neighbour, with the neighbour on z. Neighbour `n` matches slot `neighbour_slots[n]`
+/// against `centre_slot`, and writes its field `n * mv_stride` values in and its confidence
+/// `n * conf_stride` values in.
+///
 /// When `write_confidence` is set, each block also writes a confidence between 0 and 1 so a poor
 /// match can suppress its frame. `sad_noise_floor` is the SAD two noisy copies of the same content
 /// show, and `thsad` is how far past it the confidence reaches zero. `thsad` must be positive, or
@@ -235,25 +257,36 @@ pub fn nlm_mc_block_match_coarse(
 /// The neighbour pixels the search reaches are staged into shared memory once, clamped to the frame.
 #[cube(launch_unchecked)]
 pub fn nlm_mc_block_match_fine(
-    centre: &Array<f32>,
-    neighbour: &Array<f32>,
+    pyramid: &Array<f32>,
+    neighbour_slots: &Array<u32>,
     mv_field: &mut Array<i32>,
     confidence: &mut Array<f32>,
+    centre_slot: u32,
     #[comptime] write_confidence: bool,
     sad_noise_floor: f32,
     thsad: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
+    #[comptime] slot_pixels: u32,
     #[comptime] blksize: u32,
     #[comptime] step: u32,
     #[comptime] search_radius: u32,
     use_seed: u32,
     #[comptime] blocks_x: u32,
+    #[comptime] mv_stride: u32,
+    #[comptime] conf_stride: u32,
 ) {
     let block_col = CUBE_POS_X;
     let block_row = CUBE_POS_Y;
+    let neighbour_index = CUBE_POS_Z;
 
-    let mv_slot = ((block_row * blocks_x + block_col) * 2) as usize;
+    let neighbour_slot = neighbour_slots[neighbour_index as usize];
+    let centre_base = centre_slot * slot_pixels;
+    let neighbour_base = neighbour_slot * slot_pixels;
+    let mv_base = neighbour_index * mv_stride;
+    let conf_base = neighbour_index * conf_stride;
+
+    let mv_slot = (mv_base + (block_row * blocks_x + block_col) * 2) as usize;
 
     #[expect(
         clippy::useless_conversion,
@@ -302,8 +335,9 @@ pub fn nlm_mc_block_match_fine(
         while pixel_x < blksize {
             let clamped_x = clamp_i32(block_origin_x + pixel_x as i32, width as i32);
             let clamped_y = clamp_i32(block_origin_y + pixel_y as i32, height as i32);
+            let pixel_index = (clamped_y * width as i32 + clamped_x) as u32;
             centre_smem[(pixel_y * blksize + pixel_x) as usize] =
-                centre[(clamped_y * width as i32 + clamped_x) as usize];
+                pyramid[(centre_base + pixel_index) as usize];
             pixel_x += CUBE_DIM_X;
         }
 
@@ -313,8 +347,9 @@ pub fn nlm_mc_block_match_fine(
     let window_x0 = block_origin_x + seed_dx - search_radius as i32;
     let window_y0 = block_origin_y + seed_dy - search_radius as i32;
     stage_window(
-        neighbour,
+        pyramid,
         &mut window,
+        neighbour_base,
         window_x0,
         window_y0,
         thread_id,
@@ -406,22 +441,24 @@ pub fn nlm_mc_block_match_fine(
             confidence_val = 0.0f32;
         }
 
-        confidence[(block_row * blocks_x + block_col) as usize] = confidence_val;
+        confidence[(conf_base + block_row * blocks_x + block_col) as usize] = confidence_val;
     }
 }
 
 /// Stages every neighbour pixel the search reaches into `window`, clamped to the frame.
 ///
-/// Window row `window_y` and column `window_x` hold the pixel at
-/// `(window_x0 + window_x, window_y0 + window_y)`, with rows `window_stride` values apart.
+/// The frame starts `neighbour_base` values into `pyramid`. Window row `window_y` and column
+/// `window_x` hold the pixel at `(window_x0 + window_x, window_y0 + window_y)`, with rows
+/// `window_stride` values apart.
 #[cube]
 #[expect(
     clippy::too_many_arguments,
     reason = "every argument is a buffer, position or comptime shape the staging reads"
 )]
 fn stage_window(
-    neighbour: &Array<f32>,
+    pyramid: &Array<f32>,
     window: &mut SharedMemory<f32>,
+    neighbour_base: u32,
     window_x0: i32,
     window_y0: i32,
     thread_id: u32,
@@ -441,7 +478,8 @@ fn stage_window(
         let window_x = index % stride;
         let source_x = clamp_i32(window_x0 + window_x as i32, width as i32);
         let source_y = clamp_i32(window_y0 + window_y as i32, height as i32);
-        window[index as usize] = neighbour[(source_y * width as i32 + source_x) as usize];
+        let pixel_index = (source_y * width as i32 + source_x) as u32;
+        window[index as usize] = pyramid[(neighbour_base + pixel_index) as usize];
         index += threads;
     }
 }

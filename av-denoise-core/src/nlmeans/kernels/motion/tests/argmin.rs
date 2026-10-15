@@ -1,4 +1,5 @@
 use cubecl::prelude::*;
+use cubecl::server::Handle;
 
 use crate::nlmeans::kernels::motion::{nlm_mc_block_match_coarse, nlm_mc_block_match_fine};
 use crate::tune::gpu::{read_i32, zero_words};
@@ -16,6 +17,9 @@ const STEP: u32 = 8;
 
 /// Search radii with fewer and more candidates than the widest cube has threads.
 const SEARCH_RADII: [u32; 2] = [4, 7];
+
+/// Neighbours each argmin launch covers on z, all matching the same neighbour frame.
+const NEIGHBOURS: u32 = 2;
 
 /// The content both frames of a case hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,27 +178,46 @@ fn expected_vector(sads: &[f32], seed: (i32, i32), search_radius: u32) -> (i32, 
     best
 }
 
-fn run_fine(content: Content, search_radius: u32, threads: u32) -> Vec<i32> {
+/// Lays out `centre` and then [NEIGHBOURS] copies of `neighbour` as frame slots of one buffer, with
+/// a table naming the copies.
+fn slot_frames(client: &ComputeClient<TestRuntime>, centre: &[f32], neighbour: &[f32]) -> (Handle, Handle) {
+    let mut frames = centre.to_vec();
+    for _ in 0..NEIGHBOURS {
+        frames.extend_from_slice(neighbour);
+    }
+
+    let pyramid = upload(client, &frames);
+    let table: Vec<u32> = (1..=NEIGHBOURS).collect();
+    let table_bytes = u32::as_bytes(&table);
+    let neighbour_slots = client.create_from_slice(table_bytes);
+
+    (pyramid, neighbour_slots)
+}
+
+/// Runs the fine kernel over [NEIGHBOURS] neighbours and returns each neighbour's field.
+fn run_fine(content: Content, search_radius: u32, threads: u32) -> Vec<Vec<i32>> {
     let client = test_client();
     let (centre, neighbour) = frames(content);
+    let (pyramid, neighbour_slots) = slot_frames(&client, &centre, &neighbour);
     let seeds = seeds();
-    let centre_buf = upload(&client, &centre);
-    let neighbour_buf = upload(&client, &neighbour);
-    let seed_bytes = i32::as_bytes(&seeds);
+    let mv_stride = seeds.len();
+    let field_values = seeds.repeat(NEIGHBOURS as usize);
+    let seed_bytes = i32::as_bytes(&field_values);
     let mv_field = client.create_from_slice(seed_bytes);
     let confidence = client.empty(size_of::<f32>());
     zero_words(&client, &confidence, 1);
 
     let pixels = (WIDTH * HEIGHT) as usize;
+    let pyramid_len = pixels * (NEIGHBOURS as usize + 1);
     let columns = blocks_x();
     let rows = blocks_y();
-    let cube_count = CubeCount::new_2d(columns, rows);
+    let cube_count = CubeCount::new_3d(columns, rows, NEIGHBOURS);
     let cube_dim = CubeDim::new_1d(threads);
 
     // SAFETY: every argument covers the element count it was allocated for.
-    let centre_arg = unsafe { ArrayArg::from_raw_parts(centre_buf, pixels) };
-    let neighbour_arg = unsafe { ArrayArg::from_raw_parts(neighbour_buf, pixels) };
-    let field_arg = unsafe { ArrayArg::from_raw_parts(mv_field.clone(), seeds.len()) };
+    let pyramid_arg = unsafe { ArrayArg::from_raw_parts(pyramid, pyramid_len) };
+    let slots_arg = unsafe { ArrayArg::from_raw_parts(neighbour_slots, NEIGHBOURS as usize) };
+    let field_arg = unsafe { ArrayArg::from_raw_parts(mv_field.clone(), field_values.len()) };
     let confidence_arg = unsafe { ArrayArg::from_raw_parts(confidence, 1) };
 
     unsafe {
@@ -202,24 +225,29 @@ fn run_fine(content: Content, search_radius: u32, threads: u32) -> Vec<i32> {
             &client,
             cube_count,
             cube_dim,
-            centre_arg,
-            neighbour_arg,
+            pyramid_arg,
+            slots_arg,
             field_arg,
             confidence_arg,
+            0u32,
             false,
             0.0,
             1.0,
             WIDTH,
             HEIGHT,
+            pixels as u32,
             BLKSIZE,
             STEP,
             search_radius,
             1u32,
             columns,
+            mv_stride as u32,
+            1u32,
         );
     }
 
-    read_i32(&client, &mv_field, seeds.len()).expect("the field reads back")
+    let field = read_i32(&client, &mv_field, field_values.len()).expect("the field reads back");
+    field.chunks(mv_stride).map(<[i32]>::to_vec).collect()
 }
 
 fn expected_fine(content: Content, search_radius: u32) -> Vec<i32> {
@@ -248,25 +276,28 @@ fn expected_fine(content: Content, search_radius: u32) -> Vec<i32> {
     field
 }
 
-/// Runs the coarse kernel with the fine grid equal to its own, so each block writes only itself.
-fn run_coarse(content: Content, search_radius: u32, threads: u32) -> Vec<i32> {
+/// Runs the coarse kernel over [NEIGHBOURS] neighbours and returns each neighbour's field.
+///
+/// The fine grid equals the coarse one, so each block writes only itself.
+fn run_coarse(content: Content, search_radius: u32, threads: u32) -> Vec<Vec<i32>> {
     let client = test_client();
     let (centre, neighbour) = frames(content);
-    let centre_buf = upload(&client, &centre);
-    let neighbour_buf = upload(&client, &neighbour);
+    let (pyramid, neighbour_slots) = slot_frames(&client, &centre, &neighbour);
     let columns = blocks_x();
     let rows = blocks_y();
-    let field_len = (2 * columns * rows) as usize;
+    let mv_stride = (2 * columns * rows) as usize;
+    let field_len = mv_stride * NEIGHBOURS as usize;
     let mv_field = client.empty(field_len * size_of::<i32>());
     zero_words(&client, &mv_field, field_len);
 
     let pixels = (WIDTH * HEIGHT) as usize;
-    let cube_count = CubeCount::new_2d(columns, rows);
+    let pyramid_len = pixels * (NEIGHBOURS as usize + 1);
+    let cube_count = CubeCount::new_3d(columns, rows, NEIGHBOURS);
     let cube_dim = CubeDim::new_1d(threads);
 
     // SAFETY: every argument covers the element count it was allocated for.
-    let centre_arg = unsafe { ArrayArg::from_raw_parts(centre_buf, pixels) };
-    let neighbour_arg = unsafe { ArrayArg::from_raw_parts(neighbour_buf, pixels) };
+    let pyramid_arg = unsafe { ArrayArg::from_raw_parts(pyramid, pyramid_len) };
+    let slots_arg = unsafe { ArrayArg::from_raw_parts(neighbour_slots, NEIGHBOURS as usize) };
     let field_arg = unsafe { ArrayArg::from_raw_parts(mv_field.clone(), field_len) };
 
     unsafe {
@@ -274,11 +305,14 @@ fn run_coarse(content: Content, search_radius: u32, threads: u32) -> Vec<i32> {
             &client,
             cube_count,
             cube_dim,
-            centre_arg,
-            neighbour_arg,
+            pyramid_arg,
+            slots_arg,
             field_arg,
+            0u32,
             WIDTH,
             HEIGHT,
+            0,
+            pixels as u32,
             BLKSIZE,
             STEP,
             search_radius,
@@ -286,10 +320,12 @@ fn run_coarse(content: Content, search_radius: u32, threads: u32) -> Vec<i32> {
             columns,
             rows,
             STEP,
+            mv_stride as u32,
         );
     }
 
-    read_i32(&client, &mv_field, field_len).expect("the field reads back")
+    let field = read_i32(&client, &mv_field, field_len).expect("the field reads back");
+    field.chunks(mv_stride).map(<[i32]>::to_vec).collect()
 }
 
 fn expected_coarse(content: Content, search_radius: u32) -> Vec<i32> {
@@ -315,11 +351,13 @@ fn assert_fine_matches_the_serial_scan(content: Content) {
         let expected = expected_fine(content, search_radius);
 
         for threads in CUBE_THREADS {
-            let got = run_fine(content, search_radius, threads);
-            assert_eq!(
-                got, expected,
-                "{content:?} radius {search_radius} on {threads} threads"
-            );
+            let fields = run_fine(content, search_radius, threads);
+
+            for (neighbour, got) in fields.iter().enumerate() {
+                let label =
+                    format!("{content:?} radius {search_radius} on {threads} threads, neighbour {neighbour}");
+                assert_eq!(got, &expected, "{label}");
+            }
         }
     }
 }
@@ -329,11 +367,13 @@ fn assert_coarse_matches_the_serial_scan(content: Content) {
         let expected = expected_coarse(content, search_radius);
 
         for threads in CUBE_THREADS {
-            let got = run_coarse(content, search_radius, threads);
-            assert_eq!(
-                got, expected,
-                "{content:?} radius {search_radius} on {threads} threads"
-            );
+            let fields = run_coarse(content, search_radius, threads);
+
+            for (neighbour, got) in fields.iter().enumerate() {
+                let label =
+                    format!("{content:?} radius {search_radius} on {threads} threads, neighbour {neighbour}");
+                assert_eq!(got, &expected, "{label}");
+            }
         }
     }
 }

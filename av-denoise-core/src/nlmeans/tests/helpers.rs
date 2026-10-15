@@ -27,6 +27,22 @@ pub(super) fn test_align() -> StorageAlign {
     StorageAlign::from_client(&client)
 }
 
+/// Uploads `centre` and `neighbour` as frame slots 0 and 1 of one buffer, with a table naming slot 1.
+///
+/// The block-match kernels read every frame from one buffer, so this is how a test matches two planes.
+pub(crate) fn pair_pyramid(client: &ComputeClient<R>, centre: &[f32], neighbour: &[f32]) -> (Handle, Handle) {
+    let mut frames = centre.to_vec();
+    frames.extend_from_slice(neighbour);
+    let frame_bytes = f32::as_bytes(&frames);
+    let pyramid = client.create_from_slice(frame_bytes);
+
+    let table = [1u32];
+    let table_bytes = u32::as_bytes(&table);
+    let neighbour_slots = client.create_from_slice(table_bytes);
+
+    (pyramid, neighbour_slots)
+}
+
 pub(super) fn make_uniform_frame(width: u32, height: u32, channels: u32, value: f32) -> Vec<f32> {
     vec![value; (width * height * channels) as usize]
 }

@@ -616,6 +616,13 @@ impl<R: Runtime> NlmDenoiser<R> {
         let center_t = self.params.temporal_radius;
         let client = self.client.clone();
 
+        // Only the motion and confidence launches read the table, and the upload comes before
+        // their first dispatch because an upload ends a device span's timed pass.
+        if self.mc_ctx.is_some() || self.confidence_ctx.is_some() {
+            let neighbour_slots = self.window_neighbour_slots(center_t);
+            self.update_neighbour_slots(&neighbour_slots);
+        }
+
         // Both run before any NLM dispatch so the temporal kernels read aligned neighbours.
         // `confidence_ctx` only exists with motion compensation off, so at most one does work.
         self.run_motion_compensation(center_t)?;

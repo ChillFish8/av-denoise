@@ -21,7 +21,7 @@ use kernels::mc_confidence::McConfidenceBench;
 use kernels::mc_downscale::DownscaleBench;
 use kernels::mc_warp::WarpBench;
 use kernels::mv_regularise::MvRegulariseBench;
-use kernels::{CHANNELS, make_synthetic_frame, print_header, run};
+use kernels::{BENCH_NEIGHBOURS, CHANNELS, make_synthetic_frame, print_header, run};
 
 const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
@@ -223,20 +223,30 @@ fn run_kernels<R: Runtime>(backend: &str, client: &ComputeClient<R>) {
     run(DownscaleBench {
         client: client.clone(),
     });
-    run(BlockMatchCoarseBench {
-        client: client.clone(),
-    });
-    run(BlockMatchFineBench {
-        client: client.clone(),
-    });
-    run(McConfidenceBench {
-        client: client.clone(),
-    });
-    for &candidate in RegulariseCandidate::ALL {
-        run(MvRegulariseBench {
+
+    for &neighbours in BENCH_NEIGHBOURS {
+        run(BlockMatchCoarseBench {
             client: client.clone(),
-            candidate,
+            neighbours,
         });
+        run(BlockMatchFineBench {
+            client: client.clone(),
+            neighbours,
+        });
+        run(McConfidenceBench {
+            client: client.clone(),
+            neighbours,
+        });
+    }
+
+    for &neighbours in BENCH_NEIGHBOURS {
+        for &candidate in RegulariseCandidate::ALL {
+            run(MvRegulariseBench {
+                client: client.clone(),
+                candidate,
+                neighbours,
+            });
+        }
     }
 
     for &(channels, channel_name) in CHANNELS {

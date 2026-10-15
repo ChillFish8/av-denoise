@@ -25,10 +25,7 @@ fn run_fine_block_match_single_block(
     assert_eq!(centre.len(), level_len);
     assert_eq!(neighbour.len(), level_len);
 
-    let centre_bytes = f32::as_bytes(centre);
-    let neighbour_bytes = f32::as_bytes(neighbour);
-    let centre_buf = client.create_from_slice(centre_bytes);
-    let neighbour_buf = client.create_from_slice(neighbour_bytes);
+    let (pyramid, neighbour_slots) = pair_pyramid(&client, centre, neighbour);
     let mv_field = client.empty(2 * size_of::<i32>());
     let confidence = client.empty(size_of::<f32>());
 
@@ -36,23 +33,32 @@ fn run_fine_block_match_single_block(
     let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
     unsafe {
+        let pyramid_arg = ArrayArg::from_raw_parts(pyramid, 2 * level_len);
+        let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, 1);
+        let mv_field_arg = ArrayArg::from_raw_parts(mv_field.clone(), 2);
+        let confidence_arg = ArrayArg::from_raw_parts(confidence.clone(), 1);
+
         nlm_mc_block_match_fine::launch_unchecked::<R>(
             &client,
             grid,
             dim,
-            ArrayArg::from_raw_parts(centre_buf, level_len),
-            ArrayArg::from_raw_parts(neighbour_buf, level_len),
-            ArrayArg::from_raw_parts(mv_field.clone(), 2),
-            ArrayArg::from_raw_parts(confidence.clone(), 1),
+            pyramid_arg,
+            neighbour_slots_arg,
+            mv_field_arg,
+            confidence_arg,
+            0u32,
             true,
             sad_noise_floor,
             thsad,
             blksize,
             blksize,
+            level_len as u32,
             blksize,
             blksize,
             search_radius,
             0u32,
+            1,
+            2,
             1,
         );
     }
@@ -115,10 +121,7 @@ fn block_match_fine_argmin_finds_clean_shift() {
 
     let client = make_client();
     let level_len = (width * height) as usize;
-    let centre_bytes = f32::as_bytes(&centre);
-    let neighbour_bytes = f32::as_bytes(&neighbour);
-    let centre_buf = client.create_from_slice(centre_bytes);
-    let neighbour_buf = client.create_from_slice(neighbour_bytes);
+    let (pyramid, neighbour_slots) = pair_pyramid(&client, &centre, &neighbour);
     let mv_len = (blocks_x * blocks_y * 2) as usize;
     let mv_field = client.empty(mv_len * size_of::<i32>());
     // Confidence is off below, so this placeholder is never indexed.
@@ -128,24 +131,33 @@ fn block_match_fine_argmin_finds_clean_shift() {
     let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
     unsafe {
+        let pyramid_arg = ArrayArg::from_raw_parts(pyramid, 2 * level_len);
+        let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, 1);
+        let mv_field_arg = ArrayArg::from_raw_parts(mv_field.clone(), mv_len);
+        let confidence_arg = ArrayArg::from_raw_parts(confidence, 1);
+
         nlm_mc_block_match_fine::launch_unchecked::<R>(
             &client,
             grid,
             dim,
-            ArrayArg::from_raw_parts(centre_buf, level_len),
-            ArrayArg::from_raw_parts(neighbour_buf, level_len),
-            ArrayArg::from_raw_parts(mv_field.clone(), mv_len),
-            ArrayArg::from_raw_parts(confidence, 1),
+            pyramid_arg,
+            neighbour_slots_arg,
+            mv_field_arg,
+            confidence_arg,
+            0u32,
             false,
             0.0,
             1.0,
             width,
             height,
+            level_len as u32,
             blksize,
             step,
             search_radius,
             0u32,
             blocks_x,
+            mv_len as u32,
+            1,
         );
     }
 
@@ -182,25 +194,29 @@ fn run_coarse_block_match_single_block(
     assert_eq!(centre.len(), level_len);
     assert_eq!(neighbour.len(), level_len);
 
-    let centre_bytes = f32::as_bytes(centre);
-    let neighbour_bytes = f32::as_bytes(neighbour);
-    let centre_buf = client.create_from_slice(centre_bytes);
-    let neighbour_buf = client.create_from_slice(neighbour_bytes);
+    let (pyramid, neighbour_slots) = pair_pyramid(&client, centre, neighbour);
     let mv_field = client.empty(2 * size_of::<i32>());
 
     let grid = CubeCount::new_2d(1, 1);
     let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
     unsafe {
+        let pyramid_arg = ArrayArg::from_raw_parts(pyramid, 2 * level_len);
+        let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, 1);
+        let mv_field_arg = ArrayArg::from_raw_parts(mv_field.clone(), 2);
+
         nlm_mc_block_match_coarse::launch_unchecked::<R>(
             &client,
             grid,
             dim,
-            ArrayArg::from_raw_parts(centre_buf, level_len),
-            ArrayArg::from_raw_parts(neighbour_buf, level_len),
-            ArrayArg::from_raw_parts(mv_field.clone(), 2),
+            pyramid_arg,
+            neighbour_slots_arg,
+            mv_field_arg,
+            0u32,
             blksize,
             blksize,
+            0,
+            level_len as u32,
             blksize,
             blksize,
             search_radius,
@@ -208,6 +224,7 @@ fn run_coarse_block_match_single_block(
             1,
             1,
             blksize,
+            2,
         );
     }
 

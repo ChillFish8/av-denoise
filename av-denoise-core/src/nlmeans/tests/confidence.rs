@@ -4,11 +4,12 @@ use super::helpers::*;
 use crate::bench_api::HostIo;
 use crate::nlmeans::kernels::motion::{BLOCK_MATCH_THREADS, nlm_mc_block_match_fine};
 use crate::nlmeans::motion::{
+    MatchTargets,
     MotionCompensationMode,
     MotionCtx,
     pyramid_pixels_per_frame,
     run_analyse,
-    run_confidence_for_neighbour,
+    run_confidence,
     sad_noise_floor,
     thsad,
 };
@@ -44,10 +45,7 @@ fn run_fine_confidence(
     assert_eq!(centre.len(), level_len);
     assert_eq!(neighbour.len(), level_len);
 
-    let centre_bytes = f32::as_bytes(centre);
-    let neighbour_bytes = f32::as_bytes(neighbour);
-    let centre_buf = client.create_from_slice(centre_bytes);
-    let neighbour_buf = client.create_from_slice(neighbour_bytes);
+    let (pyramid, neighbour_slots) = pair_pyramid(&client, centre, neighbour);
     let mv_field = client.empty(2 * size_of::<i32>());
     let confidence = client.empty(size_of::<f32>());
 
@@ -55,23 +53,32 @@ fn run_fine_confidence(
     let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
     unsafe {
+        let pyramid_arg = ArrayArg::from_raw_parts(pyramid, 2 * level_len);
+        let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, 1);
+        let mv_field_arg = ArrayArg::from_raw_parts(mv_field, 2);
+        let confidence_arg = ArrayArg::from_raw_parts(confidence.clone(), 1);
+
         nlm_mc_block_match_fine::launch_unchecked::<R>(
             &client,
             grid,
             dim,
-            ArrayArg::from_raw_parts(centre_buf, level_len),
-            ArrayArg::from_raw_parts(neighbour_buf, level_len),
-            ArrayArg::from_raw_parts(mv_field, 2),
-            ArrayArg::from_raw_parts(confidence.clone(), 1),
+            pyramid_arg,
+            neighbour_slots_arg,
+            mv_field_arg,
+            confidence_arg,
+            0u32,
             true,
             sad_noise_floor,
             thsad,
             blksize,
             blksize,
+            level_len as u32,
             blksize,
             blksize,
             0u32,
             0u32,
+            1,
+            2,
             1,
         );
     }
@@ -288,32 +295,33 @@ fn run_analyse_fills_confidence_buffer() {
     let pyramid_bytes = f32::as_bytes(&pyramid_data);
     let pyramid = client.create_from_slice(pyramid_bytes);
 
-    let mv_field_bytes = mc.mv_slots_per_neighbour() * 2 * size_of::<i32>();
+    let blocks = mc.mv_slots_per_neighbour();
+    let mv_field_bytes = blocks * 2 * size_of::<i32>();
     let mv_field = client.empty(mv_field_bytes);
-    let sentinel = vec![-1.0f32; mc.mv_slots_per_neighbour()];
+    let sentinel = vec![-1.0f32; blocks];
     let sentinel_bytes = f32::as_bytes(&sentinel);
     let confidence = client.create_from_slice(sentinel_bytes);
+    let slot_table = [1u32];
+    let slot_table_bytes = u32::as_bytes(&slot_table);
+    let neighbour_slots = client.create_from_slice(slot_table_bytes);
 
     let floor = sad_noise_floor(mc.blksize, 4.0 / 255.0);
     let threshold = thsad(mc.blksize, 1.0);
 
-    run_analyse::<R>(
-        &client,
-        &mc,
-        width,
-        height,
+    let targets = MatchTargets {
+        pyramid: &pyramid,
         frame_count,
-        0,
-        1,
-        0,
-        &pyramid,
-        &mv_field,
-        &confidence,
-        true,
-        floor,
-        threshold,
-    )
-    .expect("run_analyse dispatch failed");
+        centre_slot: 0,
+        neighbour_slots: &neighbour_slots,
+        neighbours: 1,
+        mv_field: &mv_field,
+        mv_len: 2 * blocks,
+        confidence: &confidence,
+        conf_len: blocks,
+        write_confidence: true,
+    };
+    run_analyse::<R>(&client, &mc, width, height, &targets, floor, threshold)
+        .expect("run_analyse dispatch failed");
 
     let bytes = client.read_one(confidence).expect("confidence readback failed");
     let data = f32::from_bytes(&bytes);
@@ -332,7 +340,7 @@ fn run_analyse_fills_confidence_buffer() {
 }
 
 #[test]
-fn run_confidence_for_neighbour_fills_confidence_buffer() {
+fn run_confidence_fills_confidence_buffer() {
     let client = make_client();
     let width = 16;
     let height = 16;
@@ -347,31 +355,33 @@ fn run_confidence_for_neighbour_fills_confidence_buffer() {
     let pyramid_bytes = f32::as_bytes(&pyramid_data);
     let pyramid = client.create_from_slice(pyramid_bytes);
 
-    let mv_scratch_bytes = ctx.mv_slots_per_neighbour() * 2 * size_of::<i32>();
+    let blocks = ctx.mv_slots_per_neighbour();
+    let mv_scratch_bytes = blocks * 2 * size_of::<i32>();
     let mv_scratch = client.empty(mv_scratch_bytes);
-    let sentinel = vec![-1.0f32; ctx.mv_slots_per_neighbour()];
+    let sentinel = vec![-1.0f32; blocks];
     let sentinel_bytes = f32::as_bytes(&sentinel);
     let confidence = client.create_from_slice(sentinel_bytes);
+    let slot_table = [1u32];
+    let slot_table_bytes = u32::as_bytes(&slot_table);
+    let neighbour_slots = client.create_from_slice(slot_table_bytes);
 
     let floor = sad_noise_floor(ctx.blksize, 4.0 / 255.0);
     let threshold = thsad(ctx.blksize, 1.0);
 
-    run_confidence_for_neighbour::<R>(
-        &client,
-        &ctx,
-        width,
-        height,
+    let targets = MatchTargets {
+        pyramid: &pyramid,
         frame_count,
-        0,
-        1,
-        0,
-        &pyramid,
-        &mv_scratch,
-        &confidence,
-        floor,
-        threshold,
-    )
-    .expect("run_confidence_for_neighbour dispatch failed");
+        centre_slot: 0,
+        neighbour_slots: &neighbour_slots,
+        neighbours: 1,
+        mv_field: &mv_scratch,
+        mv_len: 2 * blocks,
+        confidence: &confidence,
+        conf_len: blocks,
+        write_confidence: true,
+    };
+    run_confidence::<R>(&client, &ctx, width, height, &targets, floor, threshold)
+        .expect("run_confidence dispatch failed");
 
     let bytes = client.read_one(confidence).expect("confidence readback failed");
     let data = f32::from_bytes(&bytes);

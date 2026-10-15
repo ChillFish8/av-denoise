@@ -7,21 +7,18 @@ mod pyramid;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-pub(crate) use self::analyse::{
-    confidence_byte_offset,
-    mv_field_byte_offset,
-    run_analyse,
-    run_seeded_refine,
-};
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+pub(crate) use self::analyse::mv_field_byte_offset;
+pub(crate) use self::analyse::{MatchTargets, confidence_byte_offset, run_analyse, run_seeded_refine};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::chain::pair_byte_offset;
 pub(crate) use self::chain::{neighbour_idx_for_k, run_pair_analyse, zero_pair_slot};
 pub(crate) use self::compensate::run_compensate;
-pub(crate) use self::confidence::{THSAD_PIXEL, run_confidence_for_neighbour, sad_noise_floor, thsad};
+pub(crate) use self::confidence::{THSAD_PIXEL, run_confidence, sad_noise_floor, thsad};
 pub(crate) use self::pyramid::{
     level_dims,
     pyramid_pixels_per_frame,
-    pyramid_slot_byte_offset,
+    pyramid_slot_pixels,
     run_pyramid_build,
 };
 use super::align::StorageAlign;
@@ -335,6 +332,7 @@ impl MotionCtx {
         })
     }
 
+    #[cfg(test)]
     pub fn mv_slots_per_neighbour(&self) -> usize {
         (self.blocks_x * self.blocks_y) as usize
     }
@@ -355,6 +353,18 @@ impl MotionCtx {
         let blocks = (self.blocks_x as u64) * (self.blocks_y as u64);
         let unpadded = blocks * size_of::<f32>() as u64;
         self.align.pad_bytes(unpadded)
+    }
+
+    /// `i32` values between neighbours in a motion field.
+    pub(crate) fn mv_stride(&self) -> u32 {
+        let values = self.mv_field_bytes_per_neighbour() / size_of::<i32>() as u64;
+        values as u32
+    }
+
+    /// `f32` values between neighbours in a confidence buffer.
+    pub(crate) fn conf_stride(&self) -> u32 {
+        let values = self.confidence_bytes_per_neighbour() / size_of::<f32>() as u64;
+        values as u32
     }
 
     /// The unpadded `i32` count of one pair-ring direction, two per block.

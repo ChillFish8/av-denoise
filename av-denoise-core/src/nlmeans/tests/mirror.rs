@@ -136,3 +136,42 @@ fn an_estimated_sigma_keeps_the_pilot_offset_table_current() {
     assert!(pilot.uploads() > 1);
     assert_eq!(read_floats(&denoiser.client, pilot), expected);
 }
+
+#[test]
+fn fast_temporal_nlm_never_reuploads_the_neighbour_table() {
+    let params = NlmParams {
+        temporal_radius: 1,
+        search_radius: 2,
+        patch_radius: 2,
+        channels: ChannelMode::Luma,
+        motion_compensation: MotionCompensationMode::None,
+        hq: None,
+        ..NlmParams::default()
+    };
+    let client = make_client();
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, SIZE, SIZE);
+    run_frames(&mut denoiser, 6);
+
+    let table = denoiser
+        .neighbour_slots_for_test()
+        .expect("a temporal window has a neighbour-slot table");
+    assert_eq!(table.uploads(), 1);
+}
+
+#[test]
+fn the_confidence_pass_keeps_the_neighbour_table_on_the_window() {
+    let mut denoiser = hq_denoiser(PrefilterMode::None, Some(0.02));
+    run_frames(&mut denoiser, 6);
+
+    let center_t = denoiser.params.temporal_radius;
+    let expected = denoiser.window_neighbour_slots(center_t);
+    let table = denoiser
+        .neighbour_slots_for_test()
+        .expect("a temporal window has a neighbour-slot table");
+    let handle = table.handle().clone();
+    let bytes = denoiser.client.read_one(handle).expect("the table reads back");
+    let slots = u32::from_bytes(&bytes).to_vec();
+
+    assert!(table.uploads() > 1);
+    assert_eq!(slots, expected);
+}

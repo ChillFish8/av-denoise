@@ -4,7 +4,7 @@ use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::{HEIGHT, WIDTH, block_sync, make_synthetic_frame, shapes_with_channels};
+use super::{HEIGHT, WIDTH, block_sync, make_synthetic_frame, neighbour_bench_name, shapes_with_channels};
 
 const CONF_STEP: u32 = DEFAULT_BLKSIZE - DEFAULT_OVERLAP;
 const SEARCH_RADIUS: u32 = 0;
@@ -20,12 +20,16 @@ const THSAD_PIXEL: f32 = 0.02;
 /// block geometry, which is the cost of confidence weighting when motion compensation is off.
 pub struct McConfidenceBench<R: Runtime> {
     pub client: ComputeClient<R>,
+    /// Neighbours scored in one launch, each against the centre frame.
+    pub neighbours: u32,
 }
 
 #[derive(Clone)]
 pub struct ConfidenceInput {
-    pub centre: Handle,
-    pub neighbour: Handle,
+    /// The centre frame in slot 0 and each neighbour in the slots after it.
+    pub pyramid: Handle,
+    /// One entry per neighbour, naming slots 1 onwards.
+    pub neighbour_slots: Handle,
     pub mv_scratch: Handle,
     pub confidence: Handle,
 }
@@ -35,25 +39,29 @@ impl<R: Runtime> Benchmark for McConfidenceBench<R> {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let centre_frame = make_synthetic_frame(WIDTH, HEIGHT, 1);
-        let neighbour_frame = make_synthetic_frame(WIDTH, HEIGHT, 1);
-        let centre_bytes = f32::as_bytes(&centre_frame);
-        let centre = self.client.create_from_slice(centre_bytes);
-        let neighbour_bytes = f32::as_bytes(&neighbour_frame);
-        let neighbour = self.client.create_from_slice(neighbour_bytes);
+        let mut frames = make_synthetic_frame(WIDTH, HEIGHT, 1);
+
+        for _ in 0..self.neighbours {
+            let neighbour_frame = make_synthetic_frame(WIDTH, HEIGHT, 1);
+            frames.extend_from_slice(&neighbour_frame);
+        }
+
+        let frame_bytes = f32::as_bytes(&frames);
+        let pyramid = self.client.create_from_slice(frame_bytes);
+        let table: Vec<u32> = (1..=self.neighbours).collect();
+        let table_bytes = u32::as_bytes(&table);
+        let neighbour_slots = self.client.create_from_slice(table_bytes);
 
         let blocks_x = WIDTH.div_ceil(CONF_STEP);
         let blocks_y = HEIGHT.div_ceil(CONF_STEP);
-        let mv_scratch = self
-            .client
-            .empty((blocks_x * blocks_y * 2) as usize * size_of::<i32>());
-        let confidence = self
-            .client
-            .empty((blocks_x * blocks_y) as usize * size_of::<f32>());
+        let blocks = (blocks_x * blocks_y) as usize;
+        let neighbours = self.neighbours as usize;
+        let mv_scratch = self.client.empty(neighbours * blocks * 2 * size_of::<i32>());
+        let confidence = self.client.empty(neighbours * blocks * size_of::<f32>());
 
         ConfidenceInput {
-            centre,
-            neighbour,
+            pyramid,
+            neighbour_slots,
             mv_scratch,
             confidence,
         }
@@ -61,34 +69,47 @@ impl<R: Runtime> Benchmark for McConfidenceBench<R> {
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let level_len = (WIDTH * HEIGHT) as usize;
+        let neighbours = self.neighbours as usize;
+        let pyramid_len = (neighbours + 1) * level_len;
         let blocks_x = WIDTH.div_ceil(CONF_STEP);
         let blocks_y = HEIGHT.div_ceil(CONF_STEP);
-        let mv_len = (blocks_x * blocks_y * 2) as usize;
-        let conf_len = (blocks_x * blocks_y) as usize;
+        let conf_stride = blocks_x * blocks_y;
+        let mv_stride = 2 * conf_stride;
+        let mv_len = neighbours * mv_stride as usize;
+        let conf_len = neighbours * conf_stride as usize;
         let thsad = (DEFAULT_BLKSIZE * DEFAULT_BLKSIZE) as f32 * THSAD_PIXEL;
 
-        let grid = CubeCount::new_2d(blocks_x, blocks_y);
+        let grid = CubeCount::new_3d(blocks_x, blocks_y, self.neighbours);
         let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
         unsafe {
+            let pyramid_arg = ArrayArg::from_raw_parts(args.pyramid, pyramid_len);
+            let neighbour_slots_arg = ArrayArg::from_raw_parts(args.neighbour_slots, neighbours);
+            let mv_scratch_arg = ArrayArg::from_raw_parts(args.mv_scratch, mv_len);
+            let confidence_arg = ArrayArg::from_raw_parts(args.confidence, conf_len);
+
             nlm_mc_block_match_fine::launch_unchecked::<R>(
                 &self.client,
                 grid,
                 dim,
-                ArrayArg::from_raw_parts(args.centre.clone(), level_len),
-                ArrayArg::from_raw_parts(args.neighbour.clone(), level_len),
-                ArrayArg::from_raw_parts(args.mv_scratch.clone(), mv_len),
-                ArrayArg::from_raw_parts(args.confidence.clone(), conf_len),
+                pyramid_arg,
+                neighbour_slots_arg,
+                mv_scratch_arg,
+                confidence_arg,
+                0u32,
                 true, // The confidence write is what this bench measures.
                 0.0,
                 thsad,
                 WIDTH,
                 HEIGHT,
+                level_len as u32,
                 DEFAULT_BLKSIZE,
                 CONF_STEP,
                 SEARCH_RADIUS,
                 0u32, // `use_seed = 0`, since there is no coarse pass without motion compensation.
                 blocks_x,
+                mv_stride,
+                conf_stride,
             );
         }
 
@@ -96,7 +117,7 @@ impl<R: Runtime> Benchmark for McConfidenceBench<R> {
     }
 
     fn name(&self) -> String {
-        "mc_confidence_1080p_luma".to_string()
+        neighbour_bench_name("mc_confidence_1080p_luma", self.neighbours)
     }
 
     fn sync(&self) {

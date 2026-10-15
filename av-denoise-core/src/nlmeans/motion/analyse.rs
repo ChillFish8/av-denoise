@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::MotionCtx;
-use super::pyramid::{level_dims, pyramid_slot_byte_offset};
+use super::pyramid::{level_dims, pyramid_level_offset, pyramid_pixels_per_frame, pyramid_slot_pixels};
 #[cfg(test)]
 use crate::nlmeans::align::StorageAlign;
 use crate::nlmeans::kernels::motion::{
@@ -27,89 +27,84 @@ pub(crate) fn confidence_byte_offset(motion_ctx: &MotionCtx, neighbour_idx: u32)
     (neighbour_idx as u64) * motion_ctx.confidence_bytes_per_neighbour()
 }
 
-/// Estimates how one neighbour frame moved relative to the centre frame.
+/// The frames and fields one block-match launch covers.
+///
+/// Every frame is a slot of `pyramid`. Neighbour `n` matches slot `neighbour_slots[n]` against
+/// `centre_slot`. It writes its vectors `n` motion-field strides into `mv_field` and its
+/// confidence `n` confidence strides into `confidence`, as [MotionCtx] lays them out.
+pub(crate) struct MatchTargets<'a> {
+    pub pyramid: &'a Handle,
+    /// Frame slots the pyramid holds.
+    pub frame_count: u32,
+    pub centre_slot: u32,
+    /// One `u32` ring slot per neighbour.
+    pub neighbour_slots: &'a Handle,
+    pub neighbours: u32,
+    pub mv_field: &'a Handle,
+    /// `i32` values `mv_field` holds.
+    pub mv_len: usize,
+    pub confidence: &'a Handle,
+    /// `f32` values `confidence` holds, 1 for a placeholder.
+    pub conf_len: usize,
+    pub write_confidence: bool,
+}
+
+/// Estimates how each neighbour frame moved relative to the centre frame.
 ///
 /// A coarse pass on the smallest pyramid level seeds a fine pass at full resolution, which writes
-/// this neighbour's `mv_field` slot. With `write_confidence` set, a per-block score also lands in
-/// its `confidence` slot. Otherwise `confidence` is never indexed, so a placeholder buffer works
+/// each neighbour's `mv_field` slice. With `write_confidence` set, a per-block score also lands in
+/// its `confidence` slice. Otherwise `confidence` is never indexed, so a placeholder buffer works
 /// and `sad_noise_floor` and `thsad` may stay at 0.0.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the dispatch threads through every buffer and shape the kernel binds"
-)]
 pub(crate) fn run_analyse<R: Runtime>(
     client: &ComputeClient<R>,
     motion_ctx: &MotionCtx,
     width: u32,
     height: u32,
-    frame_count: u32,
-    centre_slot: u32,
-    neighbour_slot: u32,
-    neighbour_idx: u32,
-    pyramid: &Handle,
-    mv_field: &Handle,
-    confidence: &Handle,
-    write_confidence: bool,
+    targets: &MatchTargets<'_>,
     sad_noise_floor: f32,
     thsad: f32,
 ) -> Result<(), anyhow::Error> {
-    let mv_offset = mv_field_byte_offset(motion_ctx, neighbour_idx);
-    let mv_slot = mv_field.clone().offset_start(mv_offset);
-    let mv_slot_len = (motion_ctx.blocks_x as usize) * (motion_ctx.blocks_y as usize) * 2;
-
-    // A placeholder `confidence` has no per-neighbour layout to offset into.
-    let (conf_slot, conf_slot_len) = if write_confidence {
-        let conf_offset = confidence_byte_offset(motion_ctx, neighbour_idx);
-        (
-            confidence.clone().offset_start(conf_offset),
-            (motion_ctx.blocks_x as usize) * (motion_ctx.blocks_y as usize),
-        )
-    } else {
-        (confidence.clone(), 1)
-    };
+    let pyramid_pixels = pyramid_pixels_per_frame(width, height, motion_ctx.pyramid_levels, motion_ctx.align);
+    let pyramid_len = pyramid_pixels * targets.frame_count as usize;
+    let slots_len = targets.neighbours as usize;
+    let mv_stride = motion_ctx.mv_stride();
 
     if motion_ctx.pyramid_levels > 1 {
         let coarse_level = motion_ctx.pyramid_levels - 1;
         let (coarse_width, coarse_height) = level_dims(width, height, coarse_level);
-        let coarse_centre_offset = pyramid_slot_byte_offset(
-            width,
-            height,
-            frame_count,
-            coarse_level,
-            centre_slot,
-            motion_ctx.align,
-        );
-        let coarse_centre = pyramid.clone().offset_start(coarse_centre_offset);
-        let coarse_neighbour_offset = pyramid_slot_byte_offset(
-            width,
-            height,
-            frame_count,
-            coarse_level,
-            neighbour_slot,
-            motion_ctx.align,
-        );
-        let coarse_neighbour = pyramid.clone().offset_start(coarse_neighbour_offset);
-        let level_len = (coarse_width * coarse_height) as usize;
+        let level_offset =
+            pyramid_level_offset(width, height, targets.frame_count, coarse_level, motion_ctx.align);
+        let slot_pixels = pyramid_slot_pixels(width, height, coarse_level, motion_ctx.align);
         let coarse_scale = 1u32 << coarse_level;
         // A coarse block covers the same content as a fine block scaled down by `coarse_scale`.
         let coarse_blksize = (motion_ctx.blksize / coarse_scale).max(2);
         let coarse_step = (motion_ctx.step / coarse_scale).max(1);
         let coarse_blocks_x = coarse_width.div_ceil(coarse_step).max(1);
         let coarse_blocks_y = coarse_height.div_ceil(coarse_step).max(1);
-        let grid = CubeCount::new_2d(coarse_blocks_x, coarse_blocks_y);
+        let grid = CubeCount::new_3d(coarse_blocks_x, coarse_blocks_y, targets.neighbours);
         // One cube per image block, with its threads sharing the scoring work.
         let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
+        let pyramid = targets.pyramid.clone();
+        let neighbour_slots = targets.neighbour_slots.clone();
+        let mv_field = targets.mv_field.clone();
 
         unsafe {
+            let pyramid_arg = ArrayArg::from_raw_parts(pyramid, pyramid_len);
+            let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, slots_len);
+            let mv_field_arg = ArrayArg::from_raw_parts(mv_field, targets.mv_len);
+
             nlm_mc_block_match_coarse::launch_unchecked::<R>(
                 client,
                 grid,
                 dim,
-                ArrayArg::from_raw_parts(coarse_centre, level_len),
-                ArrayArg::from_raw_parts(coarse_neighbour, level_len),
-                ArrayArg::from_raw_parts(mv_slot.clone(), mv_slot_len),
+                pyramid_arg,
+                neighbour_slots_arg,
+                mv_field_arg,
+                targets.centre_slot,
                 coarse_width,
                 coarse_height,
+                level_offset,
+                slot_pixels,
                 coarse_blksize,
                 coarse_step,
                 motion_ctx.search_radius,
@@ -117,50 +112,30 @@ pub(crate) fn run_analyse<R: Runtime>(
                 motion_ctx.blocks_x,
                 motion_ctx.blocks_y,
                 motion_ctx.step,
+                mv_stride,
             );
         }
     } else {
         // A single level has no coarse seed, and the fine pass then treats the seed as zero.
     }
 
-    let (fine_width, fine_height) = level_dims(width, height, 0);
-    let fine_centre_offset =
-        pyramid_slot_byte_offset(width, height, frame_count, 0, centre_slot, motion_ctx.align);
-    let fine_centre = pyramid.clone().offset_start(fine_centre_offset);
-    let fine_neighbour_offset =
-        pyramid_slot_byte_offset(width, height, frame_count, 0, neighbour_slot, motion_ctx.align);
-    let fine_neighbour = pyramid.clone().offset_start(fine_neighbour_offset);
-    let level_len = (fine_width * fine_height) as usize;
-    let grid = CubeCount::new_2d(motion_ctx.blocks_x, motion_ctx.blocks_y);
-    let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
     let seeded = if motion_ctx.pyramid_levels > 1 { 1u32 } else { 0u32 };
-
-    unsafe {
-        nlm_mc_block_match_fine::launch_unchecked::<R>(
-            client,
-            grid,
-            dim,
-            ArrayArg::from_raw_parts(fine_centre, level_len),
-            ArrayArg::from_raw_parts(fine_neighbour, level_len),
-            ArrayArg::from_raw_parts(mv_slot, mv_slot_len),
-            ArrayArg::from_raw_parts(conf_slot, conf_slot_len),
-            write_confidence,
-            sad_noise_floor,
-            thsad,
-            fine_width,
-            fine_height,
-            motion_ctx.blksize,
-            motion_ctx.step,
-            motion_ctx.search_radius,
-            seeded,
-            motion_ctx.blocks_x,
-        );
-    }
+    launch_fine::<R>(
+        client,
+        motion_ctx,
+        width,
+        height,
+        targets,
+        motion_ctx.search_radius,
+        seeded,
+        sad_noise_floor,
+        thsad,
+    );
 
     Ok(())
 }
 
-/// Refines the chained seed already sitting in this neighbour's `mv_field` slot.
+/// Refines the chained seed already sitting in each neighbour's `mv_field` slice.
 ///
 /// It searches `refine_radius` around the seed and writes the corrected vector back. There is no
 /// coarse pass, because the joined seed already carries the large movement. Confidence is written
@@ -174,66 +149,86 @@ pub(crate) fn run_seeded_refine<R: Runtime>(
     motion_ctx: &MotionCtx,
     width: u32,
     height: u32,
-    frame_count: u32,
-    centre_slot: u32,
-    neighbour_slot: u32,
-    neighbour_idx: u32,
+    targets: &MatchTargets<'_>,
     refine_radius: u32,
-    pyramid: &Handle,
-    mv_field: &Handle,
-    confidence: &Handle,
-    write_confidence: bool,
     sad_noise_floor: f32,
     thsad: f32,
 ) -> Result<(), anyhow::Error> {
-    let mv_offset = mv_field_byte_offset(motion_ctx, neighbour_idx);
-    let mv_slot = mv_field.clone().offset_start(mv_offset);
-    let mv_slot_len = (motion_ctx.blocks_x as usize) * (motion_ctx.blocks_y as usize) * 2;
+    launch_fine::<R>(
+        client,
+        motion_ctx,
+        width,
+        height,
+        targets,
+        refine_radius,
+        1u32,
+        sad_noise_floor,
+        thsad,
+    );
 
-    let (conf_slot, conf_slot_len) = if write_confidence {
-        let conf_offset = confidence_byte_offset(motion_ctx, neighbour_idx);
-        (
-            confidence.clone().offset_start(conf_offset),
-            (motion_ctx.blocks_x as usize) * (motion_ctx.blocks_y as usize),
-        )
-    } else {
-        (confidence.clone(), 1)
-    };
+    Ok(())
+}
 
+/// Launches the fine block match at pyramid level 0 over every neighbour in `targets`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the dispatch threads through every buffer and shape the kernel binds"
+)]
+pub(super) fn launch_fine<R: Runtime>(
+    client: &ComputeClient<R>,
+    motion_ctx: &MotionCtx,
+    width: u32,
+    height: u32,
+    targets: &MatchTargets<'_>,
+    search_radius: u32,
+    use_seed: u32,
+    sad_noise_floor: f32,
+    thsad: f32,
+) {
+    let pyramid_pixels = pyramid_pixels_per_frame(width, height, motion_ctx.pyramid_levels, motion_ctx.align);
+    let pyramid_len = pyramid_pixels * targets.frame_count as usize;
+    let slots_len = targets.neighbours as usize;
     let (fine_width, fine_height) = level_dims(width, height, 0);
-    let fine_centre_offset =
-        pyramid_slot_byte_offset(width, height, frame_count, 0, centre_slot, motion_ctx.align);
-    let fine_centre = pyramid.clone().offset_start(fine_centre_offset);
-    let fine_neighbour_offset =
-        pyramid_slot_byte_offset(width, height, frame_count, 0, neighbour_slot, motion_ctx.align);
-    let fine_neighbour = pyramid.clone().offset_start(fine_neighbour_offset);
-    let level_len = (fine_width * fine_height) as usize;
-    let grid = CubeCount::new_2d(motion_ctx.blocks_x, motion_ctx.blocks_y);
+    let slot_pixels = pyramid_slot_pixels(width, height, 0, motion_ctx.align);
+    let mv_stride = motion_ctx.mv_stride();
+    let conf_stride = motion_ctx.conf_stride();
+    let grid = CubeCount::new_3d(motion_ctx.blocks_x, motion_ctx.blocks_y, targets.neighbours);
     let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
+    let pyramid = targets.pyramid.clone();
+    let neighbour_slots = targets.neighbour_slots.clone();
+    let mv_field = targets.mv_field.clone();
+    let confidence = targets.confidence.clone();
 
     unsafe {
+        let pyramid_arg = ArrayArg::from_raw_parts(pyramid, pyramid_len);
+        let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, slots_len);
+        let mv_field_arg = ArrayArg::from_raw_parts(mv_field, targets.mv_len);
+        let confidence_arg = ArrayArg::from_raw_parts(confidence, targets.conf_len);
+
         nlm_mc_block_match_fine::launch_unchecked::<R>(
             client,
             grid,
             dim,
-            ArrayArg::from_raw_parts(fine_centre, level_len),
-            ArrayArg::from_raw_parts(fine_neighbour, level_len),
-            ArrayArg::from_raw_parts(mv_slot, mv_slot_len),
-            ArrayArg::from_raw_parts(conf_slot, conf_slot_len),
-            write_confidence,
+            pyramid_arg,
+            neighbour_slots_arg,
+            mv_field_arg,
+            confidence_arg,
+            targets.centre_slot,
+            targets.write_confidence,
             sad_noise_floor,
             thsad,
             fine_width,
             fine_height,
+            slot_pixels,
             motion_ctx.blksize,
             motion_ctx.step,
-            refine_radius,
-            1u32,
+            search_radius,
+            use_seed,
             motion_ctx.blocks_x,
+            mv_stride,
+            conf_stride,
         );
     }
-
-    Ok(())
 }
 
 #[cfg(test)]

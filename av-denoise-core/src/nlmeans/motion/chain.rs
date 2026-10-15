@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::MotionCtx;
-use super::analyse::{mv_field_byte_offset, run_analyse};
+use super::analyse::{MatchTargets, mv_field_byte_offset, run_analyse};
 use crate::nlmeans::denoiser::NlmDenoiser;
 use crate::nlmeans::kernels::motion::{nlm_mc_chain_compose, nlm_mc_pair_zero};
 use crate::nlmeans::{BLOCK_1D, MAX_GRID_1D};
@@ -21,8 +21,9 @@ pub(crate) fn pair_byte_offset(motion_ctx: &MotionCtx, pair_slot: u32, direction
 
 /// Measures motion between a pushed frame and the one before it, both ways, into the pair ring.
 ///
-/// `older_slot` and `newer_slot` are physical input-ring slots. Nothing reads confidence at the pair
-/// level, so both directions turn it off and target `confidence_dummy`.
+/// `older_slot` and `newer_slot` are physical input-ring slots, and `slot_tables` holds one
+/// single-slot table per ring slot. Nothing reads confidence at the pair level, so both directions
+/// turn it off and target `confidence_dummy`.
 #[expect(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
@@ -37,43 +38,56 @@ pub(crate) fn run_pair_analyse<R: Runtime>(
     newer_slot: u32,
     pair_slot: u32,
     pyramid: &Handle,
+    slot_tables: &[Handle],
     pair_ring: &Handle,
     confidence_dummy: &Handle,
 ) -> Result<(), anyhow::Error> {
+    let direction_len = motion_ctx.pair_direction_len() as usize;
+
     let older_to_newer_offset = pair_byte_offset(motion_ctx, pair_slot, 0);
     let older_to_newer = pair_ring.clone().offset_start(older_to_newer_offset);
+    let older_to_newer_targets = MatchTargets {
+        pyramid,
+        frame_count,
+        centre_slot: older_slot,
+        neighbour_slots: &slot_tables[newer_slot as usize],
+        neighbours: 1,
+        mv_field: &older_to_newer,
+        mv_len: direction_len,
+        confidence: confidence_dummy,
+        conf_len: 1,
+        write_confidence: false,
+    };
     run_analyse::<R>(
         client,
         motion_ctx,
         width,
         height,
-        frame_count,
-        older_slot,
-        newer_slot,
-        0,
-        pyramid,
-        &older_to_newer,
-        confidence_dummy,
-        false,
+        &older_to_newer_targets,
         0.0,
         1.0,
     )?;
 
     let newer_to_older_offset = pair_byte_offset(motion_ctx, pair_slot, 1);
     let newer_to_older = pair_ring.clone().offset_start(newer_to_older_offset);
+    let newer_to_older_targets = MatchTargets {
+        pyramid,
+        frame_count,
+        centre_slot: newer_slot,
+        neighbour_slots: &slot_tables[older_slot as usize],
+        neighbours: 1,
+        mv_field: &newer_to_older,
+        mv_len: direction_len,
+        confidence: confidence_dummy,
+        conf_len: 1,
+        write_confidence: false,
+    };
     run_analyse::<R>(
         client,
         motion_ctx,
         width,
         height,
-        frame_count,
-        newer_slot,
-        older_slot,
-        0,
-        pyramid,
-        &newer_to_older,
-        confidence_dummy,
-        false,
+        &newer_to_older_targets,
         0.0,
         1.0,
     )?;

@@ -140,7 +140,9 @@ pub(crate) fn front_buffer_sizes<R: Runtime>(
         buffers.push(("confidence pyramid ring", pyramid));
 
         let blocks = block_count(geometry);
-        let scratch = times(blocks, 2);
+        let field_len = times(blocks, 2);
+        let field_bytes = padded_slot_bytes(field_len, align);
+        let scratch = slot_ring(field_bytes, neighbours);
         buffers.push(("confidence vector scratch", scratch));
     }
 

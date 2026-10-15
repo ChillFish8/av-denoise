@@ -6,11 +6,12 @@ use crate::nlmeans::denoiser::NlmDenoiser;
 use crate::nlmeans::kernels::gpu_copy;
 use crate::nlmeans::motion::{
     self,
+    MatchTargets,
     MotionCtx,
     MotionEstimation,
     run_analyse,
     run_compensate,
-    run_confidence_for_neighbour,
+    run_confidence,
     run_seeded_refine,
 };
 use crate::nlmeans::prefilter::PrefilterMode;
@@ -30,11 +31,11 @@ pub(in crate::nlmeans) const NLM_SPATIAL_RESIDUAL_FRACTION: f32 = 0.0;
 /// two zeros come from different reasons.
 pub(in crate::nlmeans) const BILATERAL_RESIDUAL_FRACTION: f32 = 0.0;
 
-/// The most dispatches one neighbour's motion estimate queues.
-const DISPATCHES_PER_ESTIMATE: u32 = 2;
+/// The dispatches one neighbour's chained seed queues.
+const DISPATCHES_PER_COMPOSE: u32 = 1;
 
-/// The most dispatches one neighbour's motion estimate and warps queue.
-const DISPATCHES_PER_COMPENSATED_NEIGHBOUR: u32 = 4;
+/// The most dispatches one neighbour's warps queue.
+const DISPATCHES_PER_WARPED_NEIGHBOUR: u32 = 2;
 
 /// The sigma to pass [motion::sad_noise_floor] for the motion-compensation block match.
 ///
@@ -52,109 +53,22 @@ pub(in crate::nlmeans) fn mc_sad_noise_floor_sigma(prefilter: PrefilterMode, sig
 }
 
 impl<R: Runtime> NlmDenoiser<R> {
-    /// Estimates how the neighbour at temporal offset `k` moved and writes it to its `mv_field`
-    /// slot.
-    ///
-    /// `Chained` estimation composes the pair fields and refines the seed, and otherwise a direct
-    /// coarse-to-fine match runs. It shifts no buffer and returns the neighbour's physical slot.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the dispatch threads through every buffer and shape the kernel binds"
-    )]
-    fn run_motion_estimate(
-        &self,
-        motion_ctx: &MotionCtx,
-        analyse_pyramid: &Handle,
-        mv_field: &Handle,
-        confidence_arg: &Handle,
-        write_confidence: bool,
-        frame_count: u32,
-        centre_slot: u32,
-        center_t: u32,
-        k: i32,
-        neighbour_idx: u32,
-        sad_noise_floor: f32,
-        thsad: f32,
-    ) -> Result<u32, anyhow::Error> {
-        let neighbour_slot = self.phys_frame(center_t as i32 + k);
+    /// Each neighbour's physical slot for a pass centred on `center_t`, in logical order skipping
+    /// the centre.
+    pub(in crate::nlmeans) fn window_neighbour_slots(&self, center_t: u32) -> Vec<u32> {
+        let frame_count = self.params.total_frames();
+        let mut slots = Vec::with_capacity((frame_count - 1) as usize);
 
-        if self.is_chained() {
-            self.run_chain_compose(center_t, k, neighbour_idx)?;
-            let refine_radius = match self
-                .params
-                .motion_compensation
-                .resolved_estimation(self.params.temporal_radius)
-            {
-                Some(MotionEstimation::Chained { refine_radius }) => refine_radius,
-                _ => unreachable!("is_chained() guarantees a resolved Chained estimation"),
-            };
+        for logical in 0..frame_count {
+            if logical == center_t {
+                continue;
+            }
 
-            run_seeded_refine::<R>(
-                &self.client,
-                motion_ctx,
-                self.width,
-                self.height,
-                frame_count,
-                centre_slot,
-                neighbour_slot,
-                neighbour_idx,
-                refine_radius,
-                analyse_pyramid,
-                mv_field,
-                confidence_arg,
-                write_confidence,
-                sad_noise_floor,
-                thsad,
-            )?;
-        } else {
-            run_analyse::<R>(
-                &self.client,
-                motion_ctx,
-                self.width,
-                self.height,
-                frame_count,
-                centre_slot,
-                neighbour_slot,
-                neighbour_idx,
-                analyse_pyramid,
-                mv_field,
-                confidence_arg,
-                write_confidence,
-                sad_noise_floor,
-                thsad,
-            )?;
+            let slot = self.ring_slot(logical);
+            slots.push(slot);
         }
 
-        Ok(neighbour_slot)
-    }
-
-    /// Runs the motion estimate for every neighbour in the window without shifting any buffer.
-    ///
-    /// It returns each neighbour's physical slot in logical ring order, skipping the centre, or an
-    /// empty list when motion compensation is off or there are no neighbours. The neighbours run
-    /// in chunks that each fit one device span.
-    pub(in crate::nlmeans) fn run_motion_machinery(
-        &mut self,
-        center_t: u32,
-    ) -> Result<Vec<u32>, anyhow::Error> {
-        if self.mc_ctx.is_none() || self.params.temporal_radius == 0 {
-            return Ok(Vec::new());
-        }
-
-        let client = self.client.clone();
-        let offsets = self.neighbour_offsets(center_t);
-        let per_span = units_per_span(DISPATCHES_PER_ESTIMATE);
-
-        let mut slots = Vec::with_capacity(offsets.len());
-        for (chunk_index, chunk) in offsets.chunks(per_span).enumerate() {
-            let first_idx = (chunk_index * per_span) as u32;
-            let chunk_slots = timed(&client, self, move |front| {
-                front.estimate_neighbours(center_t, chunk, first_idx)
-            })?;
-            slots.extend(chunk_slots);
-        }
-
-        Ok(slots)
+        slots
     }
 
     /// The temporal offset of every neighbour of logical position `center_t`, oldest first.
@@ -167,21 +81,69 @@ impl<R: Runtime> NlmDenoiser<R> {
             .collect()
     }
 
-    /// Estimates the motion of the neighbours at `offsets`, whose motion-field indices start at
-    /// `first_idx`, and returns their physical slots.
-    fn estimate_neighbours(
-        &self,
-        center_t: u32,
-        offsets: &[i32],
-        first_idx: u32,
-    ) -> Result<Vec<u32>, anyhow::Error> {
+    /// Estimates every neighbour's motion without shifting any buffer.
+    ///
+    /// The neighbour-slot table must already name the window's neighbours. It does nothing when
+    /// motion compensation is off or there are no neighbours.
+    pub(in crate::nlmeans) fn run_motion_machinery(&mut self, center_t: u32) -> Result<(), anyhow::Error> {
+        if self.mc_ctx.is_none() || self.params.temporal_radius == 0 {
+            return Ok(());
+        }
+
+        let client = self.client.clone();
+
+        self.compose_chained_seeds(center_t)?;
+
+        timed(&client, self, move |front| front.match_neighbours(center_t))
+    }
+
+    /// Composes every neighbour's seed from the pair ring when `Chained` estimation is active.
+    ///
+    /// The neighbours run in chunks that each fit one device span.
+    fn compose_chained_seeds(&mut self, center_t: u32) -> Result<(), anyhow::Error> {
+        if !self.is_chained() {
+            return Ok(());
+        }
+
+        let client = self.client.clone();
+        let offsets = self.neighbour_offsets(center_t);
+        let per_span = units_per_span(DISPATCHES_PER_COMPOSE);
+
+        for (chunk_index, chunk) in offsets.chunks(per_span).enumerate() {
+            let first_idx = (chunk_index * per_span) as u32;
+            timed(&client, self, move |front| {
+                front.compose_seeds(center_t, chunk, first_idx)
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Composes the seeds of the neighbours at `offsets`, whose motion-field indices start at
+    /// `first_idx`.
+    fn compose_seeds(&self, center_t: u32, offsets: &[i32], first_idx: u32) -> Result<(), anyhow::Error> {
+        let indexed = (first_idx..).zip(offsets.iter());
+        for (neighbour_idx, &k) in indexed {
+            self.run_chain_compose(center_t, k, neighbour_idx)?;
+        }
+
+        Ok(())
+    }
+
+    /// Matches every neighbour against the centre frame and writes each one's `mv_field` slice.
+    ///
+    /// It reads the neighbours from the neighbour-slot table, and writes confidence too when the
+    /// denoiser has a confidence buffer.
+    fn match_neighbours(&self, center_t: u32) -> Result<(), anyhow::Error> {
         let motion_ctx = self
             .mc_ctx
             .as_ref()
             .expect("motion estimates run only with motion compensation active");
 
         let frame_count = self.params.total_frames();
+        let neighbours = frame_count - 1;
         let centre_slot = self.phys_frame(center_t as i32);
+        let neighbour_slots = self.neighbour_slots_handle();
 
         let pyramid_input = self
             .pyramid_input
@@ -191,6 +153,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             .mv_field_buf
             .as_ref()
             .expect("mv_field allocated when mc_ctx is Some");
+        // Without confidence weighting the fine kernel still needs a buffer, so it gets the dummy
+        // and is told not to write it.
         let (confidence_arg, write_confidence): (&Handle, bool) = match self.confidence_buf.as_ref() {
             Some(buf) => (buf, true),
             None => (&self.confidence_dummy, false),
@@ -203,34 +167,75 @@ impl<R: Runtime> NlmDenoiser<R> {
         // Match against the reference pyramid when one exists, because it is cleaner.
         let analyse_pyramid = self.pyramid_reference.as_ref().unwrap_or(pyramid_input);
 
-        let indexed = (first_idx..).zip(offsets.iter());
-        let mut slots = Vec::with_capacity(offsets.len());
-        for (neighbour_idx, &k) in indexed {
-            let neighbour_slot = self.run_motion_estimate(
+        let mv_len = neighbours as usize * motion_ctx.mv_stride() as usize;
+        // A placeholder `confidence` holds a single value.
+        let conf_len = if write_confidence {
+            neighbours as usize * motion_ctx.conf_stride() as usize
+        } else {
+            1
+        };
+
+        let targets = MatchTargets {
+            pyramid: analyse_pyramid,
+            frame_count,
+            centre_slot,
+            neighbour_slots: &neighbour_slots,
+            neighbours,
+            mv_field,
+            mv_len,
+            confidence: confidence_arg,
+            conf_len,
+            write_confidence,
+        };
+
+        self.run_match(motion_ctx, &targets, sad_noise_floor, thsad)
+    }
+
+    /// Runs the block match for every neighbour in `targets` in one launch per level.
+    ///
+    /// `Chained` estimation refines the composed seeds. Otherwise a direct coarse-to-fine match runs.
+    fn run_match(
+        &self,
+        motion_ctx: &MotionCtx,
+        targets: &MatchTargets<'_>,
+        sad_noise_floor: f32,
+        thsad: f32,
+    ) -> Result<(), anyhow::Error> {
+        let estimation = self
+            .params
+            .motion_compensation
+            .resolved_estimation(self.params.temporal_radius);
+
+        if let Some(MotionEstimation::Chained { refine_radius }) = estimation {
+            return run_seeded_refine::<R>(
+                &self.client,
                 motion_ctx,
-                analyse_pyramid,
-                mv_field,
-                confidence_arg,
-                write_confidence,
-                frame_count,
-                centre_slot,
-                center_t,
-                k,
-                neighbour_idx,
+                self.width,
+                self.height,
+                targets,
+                refine_radius,
                 sad_noise_floor,
                 thsad,
-            )?;
-            slots.push(neighbour_slot);
+            );
         }
 
-        Ok(slots)
+        run_analyse::<R>(
+            &self.client,
+            motion_ctx,
+            self.width,
+            self.height,
+            targets,
+            sad_noise_floor,
+            thsad,
+        )
     }
 
     /// Estimates each neighbour's motion and shifts it into the compensated rings.
     ///
     /// The centre slot is copied through unchanged so the temporal kernels read every slot the same
-    /// way. It does nothing when motion compensation is off or there are no neighbours. The
-    /// neighbours run in chunks that each fit one device span.
+    /// way. The neighbour-slot table must already name the window's neighbours. It does nothing when
+    /// motion compensation is off or there are no neighbours. The warps run in chunks that each fit
+    /// one device span.
     pub(super) fn run_motion_compensation(&mut self, center_t: u32) -> Result<(), anyhow::Error> {
         if self.mc_ctx.is_none() || self.params.temporal_radius == 0 {
             return Ok(());
@@ -240,14 +245,17 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         timed(&client, self, move |front| front.copy_centre_through(center_t));
 
+        self.compose_chained_seeds(center_t)?;
+        timed(&client, self, move |front| front.match_neighbours(center_t))?;
+
         // Neighbours run from the furthest behind to the furthest ahead, skipping the centre, so
         // their motion-field indices stay contiguous.
         let offsets = self.neighbour_offsets(center_t);
-        let per_span = units_per_span(DISPATCHES_PER_COMPENSATED_NEIGHBOUR);
+        let per_span = units_per_span(DISPATCHES_PER_WARPED_NEIGHBOUR);
         for (chunk_index, chunk) in offsets.chunks(per_span).enumerate() {
             let first_idx = (chunk_index * per_span) as u32;
             timed(&client, self, move |front| {
-                front.compensate_neighbours(center_t, chunk, first_idx)
+                front.warp_neighbours(center_t, chunk, first_idx)
             })?;
         }
 
@@ -291,27 +299,17 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
     }
 
-    /// Estimates and warps the neighbours at `offsets`, whose motion-field indices start at
-    /// `first_idx`.
-    fn compensate_neighbours(
-        &self,
-        center_t: u32,
-        offsets: &[i32],
-        first_idx: u32,
-    ) -> Result<(), anyhow::Error> {
+    /// Shifts the neighbours at `offsets`, whose motion-field indices start at `first_idx`, into
+    /// the compensated rings.
+    fn warp_neighbours(&self, center_t: u32, offsets: &[i32], first_idx: u32) -> Result<(), anyhow::Error> {
         let motion_ctx = self
             .mc_ctx
             .as_ref()
             .expect("motion compensation runs only with motion compensation active");
 
         let frame_count = self.params.total_frames();
-        let centre_slot = self.phys_frame(center_t as i32);
         let stored_ch = self.params.channels.storage_count();
 
-        let pyramid_input = self
-            .pyramid_input
-            .as_ref()
-            .expect("pyramid_input allocated when mc_ctx is Some");
         let mv_field = self
             .mv_field_buf
             .as_ref()
@@ -320,36 +318,10 @@ impl<R: Runtime> NlmDenoiser<R> {
             .compensated_input_buf
             .as_ref()
             .expect("compensated_input allocated when mc_ctx is Some");
-        // Without confidence weighting the fine kernel still needs a buffer, so it gets the dummy
-        // and is told not to write it.
-        let (confidence_arg, write_confidence): (&Handle, bool) = match self.confidence_buf.as_ref() {
-            Some(buf) => (buf, true),
-            None => (&self.confidence_dummy, false),
-        };
-        let thsad_scale = self.params.hq.map_or(1.0, |hq| hq.thsad_scale);
-        let mc_sigma_y = mc_sad_noise_floor_sigma(self.params.prefilter, self.sigma_y);
-        let sad_noise_floor = motion::sad_noise_floor(motion_ctx.blksize, mc_sigma_y);
-        let thsad = motion::thsad(motion_ctx.blksize, thsad_scale);
-
-        // Match against the reference pyramid when one exists, because it is cleaner.
-        let analyse_pyramid = self.pyramid_reference.as_ref().unwrap_or(pyramid_input);
 
         let indexed = (first_idx..).zip(offsets.iter());
         for (neighbour_idx, &k) in indexed {
-            let neighbour_slot = self.run_motion_estimate(
-                motion_ctx,
-                analyse_pyramid,
-                mv_field,
-                confidence_arg,
-                write_confidence,
-                frame_count,
-                centre_slot,
-                center_t,
-                k,
-                neighbour_idx,
-                sad_noise_floor,
-                thsad,
-            )?;
+            let neighbour_slot = self.phys_frame(center_t as i32 + k);
 
             run_compensate::<R>(
                 &self.client,
@@ -388,20 +360,20 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
-    /// Scores each neighbour against the centre frame with every block matched where it stands.
+    /// Scores every neighbour against the centre frame with each block matched where it stands.
     ///
     /// It runs only when confidence is on and motion compensation is off, the one case where
-    /// `confidence_ctx` exists.
+    /// `confidence_ctx` exists. The neighbour-slot table must already name the window's neighbours.
     pub(super) fn run_confidence_pass(&self, center_t: u32) -> Result<(), anyhow::Error> {
         let Some(ctx) = self.confidence_ctx.as_ref() else {
             return Ok(());
         };
 
-        // `confidence_ctx` only exists for a temporal radius above 0.
-        let temporal_radius = self.params.temporal_radius;
-
         let frame_count = self.params.total_frames();
+        // `confidence_ctx` only exists for a temporal radius above 0.
+        let neighbours = 2 * self.params.temporal_radius;
         let centre_slot = self.phys_frame(center_t as i32);
+        let neighbour_slots = self.neighbour_slots_handle();
 
         let luma_pyramid = self
             .confidence_pyramid
@@ -420,35 +392,31 @@ impl<R: Runtime> NlmDenoiser<R> {
         let sad_noise_floor = motion::sad_noise_floor(ctx.blksize, self.sigma_y);
         let thsad = motion::thsad(ctx.blksize, thsad_scale);
 
-        let radius = temporal_radius as i32;
-        let mut neighbour_idx: u32 = 0;
-        for k in -radius..=radius {
-            if k == 0 {
-                continue;
-            }
+        let mv_len = neighbours as usize * ctx.mv_stride() as usize;
+        let conf_len = neighbours as usize * ctx.conf_stride() as usize;
 
-            let neighbour_slot = self.phys_frame(center_t as i32 + k);
+        let targets = MatchTargets {
+            pyramid: luma_pyramid,
+            frame_count,
+            centre_slot,
+            neighbour_slots: &neighbour_slots,
+            neighbours,
+            mv_field: mv_scratch,
+            mv_len,
+            confidence: confidence_buf,
+            conf_len,
+            write_confidence: true,
+        };
 
-            run_confidence_for_neighbour::<R>(
-                &self.client,
-                ctx,
-                self.width,
-                self.height,
-                frame_count,
-                centre_slot,
-                neighbour_slot,
-                neighbour_idx,
-                luma_pyramid,
-                mv_scratch,
-                confidence_buf,
-                sad_noise_floor,
-                thsad,
-            )?;
-
-            neighbour_idx += 1;
-        }
-
-        Ok(())
+        run_confidence::<R>(
+            &self.client,
+            ctx,
+            self.width,
+            self.height,
+            &targets,
+            sad_noise_floor,
+            thsad,
+        )
     }
 }
 

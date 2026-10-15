@@ -130,6 +130,7 @@ fn deterministic_tuning_never_ranks_a_rounding_candidate() {
         height: 64,
         content: RegulariseContent::Textured,
         field_lambda: 1.0,
+        neighbours: 4,
     };
     let site = regularise_site(&client, &spec);
     let key = site.key();

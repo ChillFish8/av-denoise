@@ -18,36 +18,52 @@ fn clamp_index(value: i32, limit: i32) -> i32 {
 /// Re-scores each block's motion vector with every thread of the cube sharing every candidate's SAD.
 ///
 /// It picks the same winner as [nl4d_mv_regularise](crate::nl4d::kernels::nl4d_mv_regularise) up
-/// to rounding. Launch one cube of `threads` threads along x per block, where `threads` is a power
-/// of two of at least 8. Each thread sums the absolute differences of every `threads`-th pixel of
-/// the block for all seven candidates, so neighbouring threads read neighbouring pixels. The
-/// partial sums meet in shared memory through a tree with one barrier per level. Thread 0 then
-/// costs the candidates and writes the winner and its confidence.
+/// to rounding. Launch one cube of `threads` threads along x per block per neighbour, where
+/// `threads` is a power of two of at least 8. Each thread sums the absolute differences of every
+/// `threads`-th pixel of the block for all seven candidates, so neighbouring threads read
+/// neighbouring pixels. The partial sums meet in shared memory through a tree with one barrier per
+/// level. Thread 0 then costs the candidates and writes the winner and its confidence.
+///
+/// Every frame is a full-resolution luma slot of `pyramid`, `slot_pixels` values apart. The
+/// neighbour runs on z. Neighbour `n` re-scores the field `n * mv_stride` values into `mv_in`
+/// against slot `neighbour_slots[n]`, and writes `n * mv_stride` values into `mv_out` and
+/// `n * conf_stride` values into `confidence_out`.
 ///
 /// Candidates whose differences match pixel for pixel tie exactly, because every candidate goes
 /// through the same tree.
 #[cube(launch_unchecked)]
 pub fn nl4d_mv_regularise_coop(
-    centre: &Array<f32>,
-    neighbour: &Array<f32>,
+    pyramid: &Array<f32>,
+    neighbour_slots: &Array<u32>,
     mv_in: &Array<i32>,
     mv_out: &mut Array<i32>,
     confidence_out: &mut Array<f32>,
+    centre_slot: u32,
     lambda_pixel: f32,
     sad_noise_floor: f32,
     thsad: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
+    #[comptime] slot_pixels: u32,
     #[comptime] blksize: u32,
     #[comptime] step: u32,
     #[comptime] blocks_x: u32,
     #[comptime] blocks_y: u32,
+    #[comptime] mv_stride: u32,
+    #[comptime] conf_stride: u32,
     #[comptime] threads: u32,
 ) {
     let block_col = CUBE_POS_X;
     let block_row = CUBE_POS_Y;
+    let neighbour_index = CUBE_POS_Z;
     let block = block_row * blocks_x + block_col;
     let thread_id = UNIT_POS_X;
+
+    let neighbour_slot = neighbour_slots[neighbour_index as usize];
+    let centre_base = centre_slot * slot_pixels;
+    let neighbour_base = neighbour_slot * slot_pixels;
+    let mv_base = neighbour_index * mv_stride;
+    let conf_base = neighbour_index * conf_stride;
 
     let block_pixels = comptime!(blksize * blksize);
     let mut centre_smem = SharedMemory::<f32>::new(block_pixels as usize);
@@ -61,8 +77,9 @@ pub fn nl4d_mv_regularise_coop(
     let block_origin_y = block_row as i32 * step as i32;
 
     load_centre_tile(
-        centre,
+        pyramid,
         &mut centre_smem,
+        centre_base,
         block_origin_x,
         block_origin_y,
         width,
@@ -73,6 +90,7 @@ pub fn nl4d_mv_regularise_coop(
     if thread_id == 0u32 {
         gather_candidates(
             mv_in,
+            mv_base,
             &mut candidates,
             &mut median,
             block_col,
@@ -102,7 +120,8 @@ pub fn nl4d_mv_regularise_coop(
             let mvy = candidates[(candidate * 2u32 + 1u32) as usize];
             let neighbour_x = clamp_index(centre_x + mvx, width as i32);
             let neighbour_y = clamp_index(centre_y + mvy, height as i32);
-            let neighbour_val = neighbour[(neighbour_y * width as i32 + neighbour_x) as usize];
+            let pixel_index = (neighbour_y * width as i32 + neighbour_x) as u32;
+            let neighbour_val = pyramid[(neighbour_base + pixel_index) as usize];
             let diff = centre_val - neighbour_val;
             partial[candidate as usize] += f32::abs(diff);
         }
@@ -148,6 +167,8 @@ pub fn nl4d_mv_regularise_coop(
             &cost,
             mv_out,
             confidence_out,
+            mv_base,
+            conf_base,
             block,
             sad_noise_floor,
             thsad,
