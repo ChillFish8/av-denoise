@@ -3,7 +3,16 @@ use std::sync::{Arc, Mutex};
 use cubecl::prelude::*;
 
 use super::runtime::TestRuntime;
-use crate::tune::{CompareResult, DeviceLimits, Fidelity, LaunchShape, SiteCandidate, SiteKey, VariantSite};
+use crate::tune::{
+    CompareResult,
+    DeviceLimits,
+    Fidelity,
+    LaunchShape,
+    Legality,
+    SiteCandidate,
+    SiteKey,
+    VariantSite,
+};
 
 /// A device with a 32 KB shared-memory cap and 16-wide planes, the Apple-class limits.
 pub(crate) fn small_device_limits() -> DeviceLimits {
@@ -16,6 +25,7 @@ pub(crate) fn small_device_limits() -> DeviceLimits {
         compute_units: None,
         f16_buffer: false,
         f16_arithmetic: false,
+        int64_atomic_add: false,
     }
 }
 
@@ -126,7 +136,7 @@ impl VariantSite<TestRuntime> for ProbeSite {
         }
     }
 
-    fn legal(&self, candidate: ProbeCandidate, _limits: &DeviceLimits) -> bool {
+    fn legal(&self, candidate: ProbeCandidate, _limits: &DeviceLimits, _legality: &Legality) -> bool {
         !self.illegal.contains(&candidate)
     }
 

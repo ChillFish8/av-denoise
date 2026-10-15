@@ -9,6 +9,7 @@ mod fidelity;
 pub(crate) mod fixtures;
 mod key;
 mod ledger;
+mod legality;
 mod plan;
 pub(crate) mod probe;
 mod regularise;

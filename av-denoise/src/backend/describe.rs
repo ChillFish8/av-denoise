@@ -1,18 +1,17 @@
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, PoisonError};
 
+#[cfg(feature = "rocm")]
+use av_denoise_core::tune::AMD_VENDOR_ID;
 use av_denoise_core::tune::DeviceIdentity;
+#[cfg(feature = "cuda")]
+use av_denoise_core::tune::NVIDIA_VENDOR_ID;
 use cubecl::hash::StableHasher;
 use cubecl::prelude::*;
 
 /// Identities already worked out in this process, keyed by backend and device selector.
 static IDENTITIES: LazyLock<Mutex<HashMap<String, DeviceIdentity>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-
-#[cfg(feature = "cuda")]
-const NVIDIA_VENDOR_ID: u32 = 0x10de;
-#[cfg(feature = "rocm")]
-const AMD_VENDOR_ID: u32 = 0x1002;
 
 /// Returns the identity cached under `memo_key`, working it out with `describe` the first time.
 fn remembered_identity(memo_key: String, describe: impl FnOnce() -> DeviceIdentity) -> DeviceIdentity {
@@ -45,6 +44,7 @@ pub(crate) fn fallback_identity<R: Runtime>(backend: &str, client: &ComputeClien
         device_id: 0,
         driver: String::new(),
         os: std::env::consts::OS.to_string(),
+        compute_capability: None,
     }
 }
 
@@ -83,6 +83,7 @@ mod wgpu_identity {
                         device_id: info.device,
                         driver: driver.trim().to_string(),
                         os: std::env::consts::OS.to_string(),
+                        compute_capability: None,
                     }
                 },
                 None => fallback_identity(&backend_name, client),
@@ -241,6 +242,15 @@ fn cuda_details(index: usize) -> Result<DeviceIdentity, anyhow::Error> {
     // SAFETY: `device` came from `result::device::get` just above.
     let pci_device = unsafe { result::device::get_attribute(device, attribute) }?;
 
+    let capability_major_attribute = sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR;
+    let capability_minor_attribute = sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR;
+
+    // SAFETY: `device` came from `result::device::get` above.
+    let capability_major = unsafe { result::device::get_attribute(device, capability_major_attribute) }?;
+    // SAFETY: as above.
+    let capability_minor = unsafe { result::device::get_attribute(device, capability_minor_attribute) }?;
+    let compute_capability = (capability_major * 10 + capability_minor) as u32;
+
     let mut version = 0i32;
     // SAFETY: the driver was initialised above, and `version` is a valid out pointer.
     let status = unsafe { sys::cuDriverGetVersion(&mut version) };
@@ -258,6 +268,7 @@ fn cuda_details(index: usize) -> Result<DeviceIdentity, anyhow::Error> {
         device_id: pci_device as u32,
         driver: format!("cuda driver {major}.{minor}"),
         os: std::env::consts::OS.to_string(),
+        compute_capability: Some(compute_capability),
     })
 }
 
@@ -312,6 +323,7 @@ fn rocm_details(index: usize) -> Result<DeviceIdentity, anyhow::Error> {
         device_id: properties.pciDeviceID as u32,
         driver: format!("hip driver {version}"),
         os: std::env::consts::OS.to_string(),
+        compute_capability: None,
     })
 }
 

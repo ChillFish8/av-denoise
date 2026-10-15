@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use av_denoise_core::tune::{DeviceProfile, EngineKernels, PipelineProfile, TuneLedger};
+use av_denoise_core::tune::{DeviceProfile, EngineKernels, Legality, PipelineProfile, TuneLedger};
 
 use super::mode::TuningMode;
 use super::resolve;
@@ -23,13 +23,19 @@ pub(crate) struct KernelRequest<'a> {
     pub setup: &'a KernelSetup,
 }
 
-/// The plan, profile and ledger an engine on `device` is built with.
+/// The plan, profile, ledger and legality rules an engine on `device` is built with.
 ///
-/// [TuningMode::Off] runs every baseline. Otherwise the stored result for the device picks each
-/// key's candidate and the plane's profile, and seeds the ledger when one is attached.
+/// [TuningMode::Off] runs every baseline under the device's legality rules. Otherwise the stored
+/// result for the device picks each key's candidate and the plane's profile, and seeds the ledger
+/// when one is attached.
 pub(crate) fn engine_kernels(request: &KernelRequest<'_>, device: &DeviceProfile) -> EngineKernels {
+    let legality = Legality::for_device(device);
+
     if request.tuning == TuningMode::Off {
-        return EngineKernels::default();
+        return EngineKernels {
+            legality,
+            ..EngineKernels::default()
+        };
     }
 
     let stored = resolve(&device.identity);
@@ -46,5 +52,6 @@ pub(crate) fn engine_kernels(request: &KernelRequest<'_>, device: &DeviceProfile
         plan,
         profile,
         ledger,
+        legality,
     }
 }

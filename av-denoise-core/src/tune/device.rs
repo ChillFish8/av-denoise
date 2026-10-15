@@ -1,6 +1,6 @@
 use cubecl::hash::StableHasher;
-use cubecl::ir::features::TypeUsage;
-use cubecl::ir::{ElemType, FloatKind, StorageType};
+use cubecl::ir::features::{AtomicUsage, TypeUsage};
+use cubecl::ir::{ElemType, FloatKind, IntKind, StorageType, Type};
 use cubecl::prelude::*;
 
 /// Which physical device and driver a tuning result was measured on.
@@ -16,10 +16,15 @@ pub struct DeviceIdentity {
     /// The driver name and version, as the backend reports them.
     pub driver: String,
     pub os: String,
+    /// The CUDA compute capability as `major * 10 + minor`, when the backend reports one.
+    ///
+    /// The device id already names the chip, so the capability is left out of the hash.
+    pub compute_capability: Option<u32>,
 }
 
 impl DeviceIdentity {
-    /// A stable hash of every identity field, as 32 lowercase hex characters.
+    /// A stable hash of every identity field except the compute capability, as 32 lowercase hex
+    /// characters.
     ///
     /// Stable across runs and builds.
     pub fn identity_hash(&self) -> String {
@@ -45,6 +50,8 @@ pub struct DeviceLimits {
     pub compute_units: Option<u32>,
     pub f16_buffer: bool,
     pub f16_arithmetic: bool,
+    /// Whether 64-bit integer atomic adds work on storage buffers.
+    pub int64_atomic_add: bool,
 }
 
 impl DeviceLimits {
@@ -56,6 +63,15 @@ impl DeviceLimits {
         let f16_type = StorageType::Scalar(f16_elem);
         let f16_usage = properties.type_usage(f16_type);
 
+        let i64_elem = ElemType::Int(IntKind::I64);
+        let i64_scalar = StorageType::Scalar(i64_elem);
+        let i64_usage = properties.type_usage(i64_scalar);
+        let i64_atomic = StorageType::Atomic(i64_elem);
+        let i64_atomic_type = Type::new(i64_atomic);
+        let i64_atomic_usage = properties.atomic_type_usage(i64_atomic_type);
+        let i64_arithmetic = i64_usage.contains(TypeUsage::Arithmetic);
+        let i64_atomic_add = i64_atomic_usage.contains(AtomicUsage::Add);
+
         Self {
             plane_size_min: hardware.plane_size_min,
             plane_size_max: hardware.plane_size_max,
@@ -65,6 +81,7 @@ impl DeviceLimits {
             compute_units: hardware.num_streaming_multiprocessors,
             f16_buffer: f16_usage.contains(TypeUsage::Buffer),
             f16_arithmetic: f16_usage.contains(TypeUsage::Arithmetic),
+            int64_atomic_add: i64_arithmetic && i64_atomic_add,
         }
     }
 

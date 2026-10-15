@@ -312,6 +312,7 @@ mod tests {
             device_id: 0x7551,
             driver: "test".to_string(),
             os: "linux".to_string(),
+            compute_capability: None,
         };
         let mut result = TuneResult::default();
         let key = SiteKey::builder("nlm_window", 1920, 1080).param("pr", 2).build();
@@ -352,6 +353,7 @@ mod tests {
             device_id: 0,
             driver: "test".to_string(),
             os: "linux".to_string(),
+            compute_capability: None,
         };
 
         let table = format_stored(&identity, &TuneResult::default(), false);

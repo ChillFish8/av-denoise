@@ -18,6 +18,7 @@ fn identity() -> DeviceIdentity {
         device_id: 0x7551,
         driver: "test driver 1.0".to_string(),
         os: "linux".to_string(),
+        compute_capability: None,
     }
 }
 

@@ -8,7 +8,7 @@ use crate::collab::geometry::{ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
 use crate::collab::kernels::fused::STRENGTH_MAP_OFF;
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{MAX_K, grid_frames};
+use crate::collab::{MAX_K, grid_frames, needs_warp_uniform_search};
 use crate::nl4d::nl4d_pool_ratio;
 use crate::nlmeans::motion::THSAD_PIXEL;
 use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS, StorageAlign};
@@ -357,6 +357,7 @@ pub(crate) fn collab_site(
     let frames_per_volume = grid_frames(spec.radius);
     let refs_x = refs_along(spec.width);
     let refs_y = refs_along(spec.height);
+    let uniform_walk_only = needs_warp_uniform_search(client);
     let shape = CollabShape {
         f16_search: false,
         radius: spec.radius,
@@ -379,6 +380,7 @@ pub(crate) fn collab_site(
         map_cols,
         map_rows,
         pooled: spec.pooled,
+        uniform_walk_only,
     };
     let outputs = CollabOutputs {
         accum,

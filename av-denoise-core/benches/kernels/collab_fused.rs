@@ -2,7 +2,6 @@ use std::marker::PhantomData;
 
 use av_denoise_core::bench_api::NOISE_CURVE_BINS;
 use av_denoise_core::bench_api::collab::geometry::{ref_count, refs_along, strength_map_dims};
-use av_denoise_core::bench_api::collab::grid_frames;
 use av_denoise_core::bench_api::collab::kernels::aggregate::{
     cross_frame_accum_scale,
     kaiser_window,
@@ -10,6 +9,7 @@ use av_denoise_core::bench_api::collab::kernels::aggregate::{
 };
 use av_denoise_core::bench_api::collab::kernels::fused::{STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
 use av_denoise_core::bench_api::collab::kernels::transforms::dct_noise_profile;
+use av_denoise_core::bench_api::collab::{grid_frames, needs_warp_uniform_search};
 use av_denoise_core::bench_api::tune_sites::{
     CollabInputs,
     CollabOutputs,
@@ -191,6 +191,7 @@ impl<R: Runtime> CollabFusedBench<R> {
             accum_scale,
             pool_ratio: POOL_RATIO,
         };
+        let uniform_walk_only = needs_warp_uniform_search(&self.client);
         let shape = CollabShape {
             f16_search: false,
             radius: RADIUS,
@@ -213,6 +214,7 @@ impl<R: Runtime> CollabFusedBench<R> {
             map_cols,
             map_rows,
             pooled: self.pooled,
+            uniform_walk_only,
         };
         let outputs = CollabOutputs {
             accum: args.accum.clone(),

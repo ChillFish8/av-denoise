@@ -10,6 +10,7 @@
 //! - [VariantSite] is one tunable launch point, and [KernelSelector] launches the planned candidate at each
 //! - [DeviceProfile] says which device a result belongs to and what launches fit on it
 //! - [TuneLedger] is the shared state a tuning pass uses to drive engines in place
+//! - [Legality] says what a device may run beyond the fit check
 
 mod budget;
 mod consts;
@@ -19,6 +20,7 @@ mod fidelity;
 pub(crate) mod gpu;
 mod key;
 mod ledger;
+pub(crate) mod legality;
 mod plan;
 mod result;
 mod selector;
@@ -67,6 +69,17 @@ pub use self::fidelity::{
 };
 pub use self::key::{SiteKey, SiteKeyBuilder, bucket_dim};
 pub use self::ledger::{CensusEntry, TuneLedger, TunePhase};
+pub use self::legality::{
+    AMD_VENDOR_ID,
+    APPLE_VENDOR_ID,
+    DeviceClass,
+    INTEL_VENDOR_ID,
+    Legality,
+    MIN_PLANE_SIZE,
+    NVIDIA_VENDOR_ID,
+    PlaneSizeError,
+    check_plane_size,
+};
 pub use self::plan::{KernelPlan, PipelineProfile};
 pub use self::result::{
     CandidateRecord,
@@ -80,4 +93,4 @@ pub use self::result::{
 };
 pub use self::selector::{EngineKernels, KernelSelector};
 pub(crate) use self::session::{calibrate, rewarm};
-pub use self::site::{FitError, LaunchShape, SiteCandidate, VariantSite, fit_candidates};
+pub use self::site::{FitError, LaunchShape, SiteCandidate, VariantSite, fit_candidates, legal_candidates};

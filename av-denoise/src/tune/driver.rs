@@ -7,8 +7,10 @@ use av_denoise_core::tune::{
     BudgetRequest,
     CensusEntry,
     DeviceIdentity,
+    DeviceProfile,
     HARD_SITE_CAP,
     KeyValue,
+    Legality,
     PROFILE_BLOCK_FRAMES,
     PROFILE_MIN_BLOCKS,
     PipelineProfile,
@@ -566,7 +568,15 @@ fn drive_until_settled(
 fn supports_f32_profile(planar: &PlanarDenoiser) -> bool {
     let is_nl4d = matches!(planar.options().algorithm, Algorithm::Nl4d(_));
     let hosts = planar.hosts();
-    let runs_f16 = hosts[0].device_profile().limits.supports_f16_search();
+    let device = hosts[0].device_profile();
+
+    f32_profile_applies(is_nl4d, device)
+}
+
+/// Whether `F32Search` differs from the baseline, which needs nl4d and a legal f16 search.
+pub(crate) fn f32_profile_applies(is_nl4d: bool, device: &DeviceProfile) -> bool {
+    let legality = Legality::for_device(device);
+    let runs_f16 = device.limits.supports_f16_search() && legality.f16_search;
 
     is_nl4d && runs_f16
 }

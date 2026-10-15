@@ -9,10 +9,11 @@ use super::fidelity::FidelityClass;
 use super::gpu::profile_launches;
 use super::key::SiteKey;
 use super::ledger::{LedgerChoice, Observed, TuneLedger};
+use super::legality::Legality;
 use super::plan::{KernelPlan, PipelineProfile};
 use super::result::SiteRanking;
 use super::session::{timed_count, tune_site};
-use super::site::{SiteCandidate, VariantSite, fit_candidates};
+use super::site::{SiteCandidate, VariantSite, legal_candidates};
 
 /// What an engine needs to pick a candidate at each of its launch sites.
 #[derive(Debug, Clone, Default)]
@@ -21,6 +22,8 @@ pub struct EngineKernels {
     pub profile: PipelineProfile,
     /// Shared tuning state, attached only while a tuning pass drives the engine.
     pub ledger: Option<Arc<TuneLedger>>,
+    /// What this device may run beyond the fit check.
+    pub legality: Legality,
 }
 
 /// Picks and launches the planned candidate at each site.
@@ -31,6 +34,7 @@ pub struct KernelSelector<R: Runtime> {
     plan: KernelPlan,
     profile: PipelineProfile,
     ledger: Option<Arc<TuneLedger>>,
+    legality: Legality,
 }
 
 impl<R: Runtime> KernelSelector<R> {
@@ -53,6 +57,7 @@ impl<R: Runtime> KernelSelector<R> {
             plan: kernels.plan,
             profile: kernels.profile,
             ledger: kernels.ledger,
+            legality: kernels.legality,
         }
     }
 
@@ -68,18 +73,22 @@ impl<R: Runtime> KernelSelector<R> {
         self.profile
     }
 
+    pub fn legality(&self) -> &Legality {
+        &self.legality
+    }
+
     pub(crate) fn ledger(&self) -> Option<&Arc<TuneLedger>> {
         self.ledger.as_ref()
     }
 
     /// Launches the chosen candidate of `site` on its real outputs.
     ///
-    /// A key with no choice, an unknown name or a candidate that is illegal or does not fit runs the
-    /// site's baseline.
+    /// A key with no choice, an unknown name or a candidate that is illegal under the selector's
+    /// legality or does not fit runs the site's baseline.
     /// With a ledger attached, a census phase times the launch and a tune phase tunes the target key
     /// in place before its real launch.
     pub fn run<S: VariantSite<R>>(&self, site: &S) -> Result<(), anyhow::Error> {
-        let fitted = fit_candidates(site, &self.limits)?;
+        let fitted = legal_candidates(site, &self.limits, &self.legality)?;
         let outputs = site.real_outputs();
 
         if self.ledger.is_none() && self.plan.is_empty() {

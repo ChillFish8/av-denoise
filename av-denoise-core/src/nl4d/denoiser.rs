@@ -19,7 +19,7 @@ use crate::collab::kernels::aggregate::{
 };
 use crate::collab::kernels::fused::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{MAX_K, PATCH_SIZE, grid_frames, supports_f16_search};
+use crate::collab::{MAX_K, PATCH_SIZE, grid_frames, needs_warp_uniform_search, supports_f16_search};
 use crate::engine::timing::{DeviceTimed, DeviceTimer, timed};
 use crate::engine::{DevicePlane, EngineTiming, SampleFormat};
 use crate::nlmeans::denoiser::{BufferSize, front_buffer_sizes};
@@ -36,7 +36,7 @@ use crate::nlmeans::{
     StrengthMapParams,
 };
 use crate::tune::sites::{CollabInputs, CollabOutputs, CollabShape, CollabSite, CollabValues};
-use crate::tune::{KernelSelector, PipelineProfile};
+use crate::tune::{KernelSelector, PipelineProfile, check_plane_size};
 
 /// Which accumulator regions a pass zeroes before scattering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +90,8 @@ pub struct Nl4dDenoiser<R: Runtime> {
     k_max: u32,
     /// Whether candidate distances read the f16 search ring.
     f16_search: bool,
+    /// Whether the fused kernel may run only its uniform walk.
+    uniform_walk_only: bool,
     /// Picks the candidate each tunable launch runs.
     kernels: KernelSelector<R>,
     /// The fixed-point scale the cross-frame accumulator ring counts in.
@@ -212,7 +214,9 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
     /// [Nl4dDenoiser::new] with each launch site's candidate picked through `kernels`.
     ///
-    /// The [F32Search](crate::tune::PipelineProfile::F32Search) profile keeps the f16 search ring off.
+    /// The [F32Search](crate::tune::PipelineProfile::F32Search) profile and a legality that forbids
+    /// the f16 search keep the f16 search ring off. A device with planes narrower than 8 lanes is an
+    /// error.
     pub fn with_kernels(
         client: &ComputeClient<R>,
         mut params: Nl4dParams,
@@ -221,6 +225,9 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         kernels: KernelSelector<R>,
     ) -> Result<Self, String> {
         params.validate()?;
+
+        let limits = kernels.limits();
+        check_plane_size(limits).map_err(|error| error.to_string())?;
 
         if width < PATCH_SIZE || height < PATCH_SIZE {
             return Err(format!(
@@ -265,10 +272,15 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         front.set_shifted_edges(true);
 
         let profile_allows_f16 = kernels.profile() != PipelineProfile::F32Search;
-        let f16_search = supports_f16_search(client) && profile_allows_f16;
+        let legality = *kernels.legality();
+        let device_supports_f16 = supports_f16_search(client);
+        let f16_search = device_supports_f16 && profile_allows_f16 && legality.f16_search;
         if f16_search {
             front.enable_search_ring();
         }
+
+        let cuda_needs_uniform = needs_warp_uniform_search(client);
+        let uniform_walk_only = cuda_needs_uniform || legality.uniform_walk_only;
 
         let stored_ch = channels.storage_count();
         let k_max = MAX_K;
@@ -355,6 +367,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             c_min: params.c_min,
             k_max,
             f16_search,
+            uniform_walk_only,
             kernels,
             accum_scale,
             group_weight,
@@ -936,6 +949,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             map_cols: self.map_cols,
             map_rows: self.map_rows,
             pooled: self.pooled_threshold,
+            uniform_walk_only: self.uniform_walk_only,
         };
         let outputs = CollabOutputs {
             accum: self.accum.clone(),

@@ -5,6 +5,7 @@ use cubecl::prelude::*;
 use super::device::DeviceLimits;
 use super::fidelity::{CompareResult, Fidelity, FidelityClass};
 use super::key::SiteKey;
+use super::legality::Legality;
 
 /// One way to run a site, with the stable name the store and the benches use.
 pub trait SiteCandidate: Copy + Eq + Debug + Send + Sync + 'static {
@@ -104,23 +105,23 @@ pub trait VariantSite<R: Runtime>: Clone + Send {
         Self::Candidate::baseline()
     }
 
-    /// Whether the candidate's code is correct on this site's runtime.
-    fn legal(&self, _candidate: Self::Candidate, _limits: &DeviceLimits) -> bool {
+    /// Whether the candidate's code is correct on this site's runtime and allowed by `legality`.
+    fn legal(&self, _candidate: Self::Candidate, _limits: &DeviceLimits, _legality: &Legality) -> bool {
         true
     }
 
-    /// Whether the candidate is legal and its shared memory, thread count, cube shape and plane width
-    /// fit `limits`.
+    /// Whether the candidate is legal under `legality` and its shared memory, thread count, cube shape
+    /// and plane width fit `limits`.
     ///
     /// The baseline skips the plane width check, so it launches wherever the original kernel did.
-    fn fits(&self, candidate: Self::Candidate, limits: &DeviceLimits) -> bool {
+    fn fits(&self, candidate: Self::Candidate, limits: &DeviceLimits, legality: &Legality) -> bool {
         let shape = self.shape(candidate);
         let shared_bytes = self.shared_bytes(candidate);
         let min_plane = self.min_plane_size(candidate);
         let (max_x, max_y, _) = limits.max_cube_dim;
         let is_baseline = candidate == self.baseline();
 
-        let legal = self.legal(candidate, limits);
+        let legal = self.legal(candidate, limits, legality);
         let shared_fits = shared_bytes <= limits.max_shared_bytes;
         let units_fit = shape.units() <= limits.max_units_per_cube;
         let dims_fit = shape.x <= max_x && shape.y <= max_y;
@@ -142,12 +143,14 @@ pub struct FitError {
     pub units: u32,
 }
 
-/// Every candidate of `site` that is legal and fits `limits`, the site's baseline first.
+/// Every candidate of `site` that is legal under `legality` and fits `limits`, the site's baseline
+/// first.
 ///
 /// A baseline that is illegal or does not fit is an error, as a launch that cannot run is.
-pub fn fit_candidates<R: Runtime, S: VariantSite<R>>(
+pub fn legal_candidates<R: Runtime, S: VariantSite<R>>(
     site: &S,
     limits: &DeviceLimits,
+    legality: &Legality,
 ) -> Result<Vec<S::Candidate>, FitError> {
     let baseline = site.baseline();
     let baseline_class = baseline.fidelity().class();
@@ -158,7 +161,7 @@ pub fn fit_candidates<R: Runtime, S: VariantSite<R>>(
         S::Candidate::SITE
     );
 
-    if !site.fits(baseline, limits) {
+    if !site.fits(baseline, limits, legality) {
         let shape = site.shape(baseline);
         let shared_bytes = site.shared_bytes(baseline);
 
@@ -172,9 +175,18 @@ pub fn fit_candidates<R: Runtime, S: VariantSite<R>>(
     let others = S::Candidate::ALL
         .iter()
         .copied()
-        .filter(|&candidate| candidate != baseline && site.fits(candidate, limits));
+        .filter(|&candidate| candidate != baseline && site.fits(candidate, limits, legality));
     let mut fitted = vec![baseline];
     fitted.extend(others);
 
     Ok(fitted)
+}
+
+/// [legal_candidates] under the rules of a device the legality rules cannot identify.
+pub fn fit_candidates<R: Runtime, S: VariantSite<R>>(
+    site: &S,
+    limits: &DeviceLimits,
+) -> Result<Vec<S::Candidate>, FitError> {
+    let legality = Legality::default();
+    legal_candidates(site, limits, &legality)
 }

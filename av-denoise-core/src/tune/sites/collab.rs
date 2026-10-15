@@ -5,15 +5,15 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::COLLAB_FUSED;
+use crate::collab::PATCH_SIZE;
 use crate::collab::geometry::{BASELINE_GROUPS, fused_cubes_x};
 use crate::collab::kernels::fused::{Centre, CollabVariant, GROUP_LANES, Walk, collab_fused};
-use crate::collab::{PATCH_SIZE, needs_warp_uniform_search};
 use crate::nlmeans::NOISE_CURVE_BINS;
-use crate::tune::DeviceLimits;
 use crate::tune::fidelity::{CompareResult, Fidelity, diff_integers, diff_plane};
 use crate::tune::gpu::{bind, read_f32, read_i32, zero_words};
 use crate::tune::key::SiteKey;
 use crate::tune::site::{LaunchShape, SiteCandidate, VariantSite};
+use crate::tune::{DeviceLimits, Legality};
 
 /// Group counts per cube, the baseline's first.
 const GROUP_OPTIONS: [u32; 3] = [BASELINE_GROUPS, 4, 16];
@@ -165,6 +165,8 @@ pub struct CollabShape {
     pub map_cols: u32,
     pub map_rows: u32,
     pub pooled: bool,
+    /// Only `Walk::Uniform` may run, on CUDA and on devices without independent thread scheduling.
+    pub uniform_walk_only: bool,
 }
 
 /// The fixed-point accumulator rings and group weights `collab_fused` writes.
@@ -371,11 +373,11 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
     }
 
     fn baseline(&self) -> CollabVariant {
-        CollabVariant::for_client(&self.client)
+        CollabVariant::baseline_for(self.shape.uniform_walk_only)
     }
 
-    fn legal(&self, candidate: CollabVariant, _limits: &DeviceLimits) -> bool {
-        let uniform_only = needs_warp_uniform_search(&self.client);
+    fn legal(&self, candidate: CollabVariant, _limits: &DeviceLimits, legality: &Legality) -> bool {
+        let uniform_only = self.shape.uniform_walk_only || legality.uniform_walk_only;
         candidate.runs_where(uniform_only)
     }
 }

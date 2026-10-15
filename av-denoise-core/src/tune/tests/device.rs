@@ -9,6 +9,7 @@ fn r9700_identity() -> DeviceIdentity {
         device_id: 0x7551,
         driver: "radv Mesa 25.2.4".to_string(),
         os: "linux".to_string(),
+        compute_capability: None,
     }
 }
 
@@ -63,4 +64,16 @@ fn the_f16_search_needs_both_buffer_and_arithmetic_support() {
 
     limits.f16_arithmetic = true;
     assert!(limits.supports_f16_search());
+}
+
+#[test]
+fn the_compute_capability_does_not_change_the_hash() {
+    let identity = r9700_identity();
+    let mut with_capability = identity.clone();
+    with_capability.compute_capability = Some(86);
+
+    let base_hash = identity.identity_hash();
+    let capability_hash = with_capability.identity_hash();
+
+    assert_eq!(base_hash, capability_hash);
 }

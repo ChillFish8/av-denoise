@@ -1,7 +1,7 @@
-use super::runtime::TestRuntime;
-use crate::tune::{DeviceLimits, SiteCandidate, VariantSite, fit_candidates};
+use super::runtime::{TestRuntime, test_legality};
+use crate::tune::{DeviceLimits, SiteCandidate, VariantSite, legal_candidates};
 
-/// Launches every candidate of `site` that fits this device into fresh scratch outputs, and checks
+/// Launches every candidate of `site` that this device can run into fresh scratch outputs, and checks
 /// each against the baseline's under the candidate's own fidelity class.
 ///
 /// Returns the baseline's outputs so the caller can check they hold real work, because a kernel that
@@ -21,7 +21,8 @@ pub(crate) fn assert_listed_candidates_match_baseline<S: VariantSite<TestRuntime
 ) -> S::Outputs {
     let client = site.client();
     let limits = DeviceLimits::from_client(client);
-    let fitted = fit_candidates(site, &limits).expect("the baseline fits the test device");
+    let legality = test_legality(client);
+    let fitted = legal_candidates(site, &limits, &legality).expect("the baseline fits the test device");
     let baseline = site.baseline();
     let baseline_outputs = site.scratch_outputs();
     site.launch(baseline, &baseline_outputs);
