@@ -115,10 +115,8 @@ pub fn busy_share(busy: Option<Duration>, wall: Duration, streams: usize) -> Str
 /// How many streams the device time is shared over.
 ///
 /// Workers on a shared queue take turns on one stream. Otherwise each worker has its own.
-fn busy_streams(accelerator: Option<Accelerator>, worker_count: usize) -> usize {
-    let separate = accelerator.is_some_and(|accelerator| !accelerator.shares_device_queue());
-
-    if separate { worker_count } else { 1 }
+pub fn busy_streams(shares_queue: bool, worker_count: usize) -> usize {
+    if shares_queue { 1 } else { worker_count }
 }
 
 fn push_line(report: &mut String, text: &str) {
@@ -134,7 +132,8 @@ pub fn format_report(summary: &RunSummary) -> String {
     let worker_count = summary.workers.len();
     let worker_noun = if worker_count == 1 { "worker" } else { "workers" };
     let accelerator = summary.workers.iter().find_map(|worker| worker.accelerator);
-    let streams = busy_streams(accelerator, worker_count);
+    let shares_queue = accelerator.is_none_or(|accelerator| accelerator.shares_device_queue());
+    let streams = busy_streams(shares_queue, worker_count);
 
     let heading = format!(
         "Timing report, {worker_count} {worker_noun}, {} frames in {seconds:.2} s ({fps:.2} fps)",

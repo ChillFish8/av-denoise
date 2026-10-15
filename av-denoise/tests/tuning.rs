@@ -30,9 +30,6 @@ use av_denoise::{
 const WIDTH: u32 = 96;
 const HEIGHT: u32 = 64;
 
-/// Short tuning passes a configuration may need before its result is complete.
-const MAX_SHORT_PASSES: usize = 4;
-
 fn layout() -> FrameLayout {
     FrameLayout {
         width: WIDTH,
@@ -139,12 +136,29 @@ fn short_tunes_store_results_until_a_later_run_loads_them() {
     let device = selected_device(&plane_options.accelerators, &plane_options.device).expect("a device");
     let store = TuneStore::open_default().expect("caching is on");
     let stored = store.load(&device.identity);
-    assert!(!stored.sites.is_empty());
+    let mut settled = stored.sites.len() + stored.failed.len();
+    assert!(settled > 0);
 
     // A short budget can leave keys that later runs tune before the result is complete.
     let mut later = tune_planes(&plane_options, frame_layout, &clip, &request);
     let mut passes = 2;
-    while later.outcome == TuneOutcome::Tuned && passes < MAX_SHORT_PASSES {
+    while later.outcome == TuneOutcome::Tuned {
+        assert!(later.saved, "pass {passes} saved nothing");
+
+        let stored = store.load(&device.identity);
+        let now_settled = stored.sites.len() + stored.failed.len();
+        let complete = is_tuned(&plane_options, frame_layout);
+        assert!(
+            now_settled > settled || complete,
+            "pass {passes} left {settled} settled keys untouched"
+        );
+        // Every pass that leaves the result incomplete settles at least one more key.
+        assert!(
+            passes <= now_settled + 1,
+            "{passes} passes for {now_settled} keys"
+        );
+
+        settled = now_settled;
         later = tune_planes(&plane_options, frame_layout, &clip, &request);
         passes += 1;
     }

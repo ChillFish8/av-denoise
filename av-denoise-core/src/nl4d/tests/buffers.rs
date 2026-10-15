@@ -44,7 +44,8 @@ fn read_words<T: CubeElement>(mirror: &MirroredBuffer) -> Vec<T> {
 
 #[test]
 fn a_pinned_sigma_uploads_its_buffers_only_when_they_change() {
-    let denoiser = run_stream(static_clip_params(1), 10);
+    let params = static_clip_params(1);
+    let denoiser = run_stream(params, 10);
 
     // Built as zeros, then the pinned sigma once.
     assert_eq!(denoiser.sigma_buffer_for_test().uploads(), 2);
@@ -61,7 +62,8 @@ fn an_estimated_sigma_buffer_holds_what_the_last_pass_read() {
     let front = denoiser.front_for_test();
 
     let sigmas = front.current_sigmas_temporal_only();
-    let sigma_buffer: Vec<f32> = read_words(denoiser.sigma_buffer_for_test());
+    let sigma_mirror = denoiser.sigma_buffer_for_test();
+    let sigma_buffer: Vec<f32> = read_words(sigma_mirror);
     assert_eq!(sigma_buffer[0].to_bits(), sigmas[0].to_bits());
 }
 
@@ -86,7 +88,8 @@ fn the_noise_curve_buffer_holds_what_the_last_pass_read() {
 
 #[test]
 fn the_neighbour_table_follows_the_pass_centre() {
-    let denoiser = run_stream(static_clip_params(1), 10);
+    let params = static_clip_params(1);
+    let denoiser = run_stream(params, 10);
     let front = denoiser.front_for_test();
     let table = front
         .neighbour_slots_for_test()

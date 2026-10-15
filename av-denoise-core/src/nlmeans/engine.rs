@@ -149,7 +149,7 @@ impl<R: Runtime> Nlmeans<R> {
         egress(client, source, planes, self.geometry.output, placeholder);
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn fail_through_guard_for_test(&mut self) -> Result<(), Error> {
         let failure = Err(anyhow::anyhow!("forced failure"));
 

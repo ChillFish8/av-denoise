@@ -113,13 +113,17 @@ pub(crate) fn zero_pair_slot<R: Runtime>(
     for direction in 0..2u32 {
         let offset = pair_byte_offset(motion_ctx, pair_slot, direction);
         let direction_slice = pair_ring.clone().offset_start(offset);
+        let cube_count = CubeCount::new_1d(grid);
+        let cube_dim = CubeDim::new_1d(BLOCK_1D);
 
         unsafe {
+            let direction_arg = ArrayArg::from_raw_parts(direction_slice, length as usize);
+
             nlm_mc_pair_zero::launch_unchecked::<R>(
                 client,
-                CubeCount::new_1d(grid),
-                CubeDim::new_1d(BLOCK_1D),
-                ArrayArg::from_raw_parts(direction_slice, length as usize),
+                cube_count,
+                cube_dim,
+                direction_arg,
                 length,
                 total_threads,
             );
@@ -156,20 +160,26 @@ fn dispatch_chain_compose<R: Runtime>(
     // One single-thread cube per block, since there is no per-candidate work to share.
     let grid = CubeCount::new_2d(motion_ctx.blocks_x, motion_ctx.blocks_y);
     let dim = CubeDim::new_2d(1, 1);
+    let pair_direction_stride = motion_ctx.pair_direction_stride();
+    let pair_slot_stride = motion_ctx.pair_slot_stride();
+    let pair_ring_handle = pair_ring.clone();
 
     unsafe {
+        let pair_ring_arg = ArrayArg::from_raw_parts(pair_ring_handle, pair_ring_len);
+        let mv_slot_arg = ArrayArg::from_raw_parts(mv_slot, mv_slot_len);
+
         nlm_mc_chain_compose::launch_unchecked::<R>(
             client,
             grid,
             dim,
-            ArrayArg::from_raw_parts(pair_ring.clone(), pair_ring_len),
-            ArrayArg::from_raw_parts(mv_slot, mv_slot_len),
+            pair_ring_arg,
+            mv_slot_arg,
             start_pair_slot,
             forward,
             steps,
             pair_ring_slots,
-            motion_ctx.pair_direction_stride(),
-            motion_ctx.pair_slot_stride(),
+            pair_direction_stride,
+            pair_slot_stride,
             motion_ctx.step,
             width,
             height,

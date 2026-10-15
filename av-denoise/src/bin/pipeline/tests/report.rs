@@ -8,7 +8,7 @@ use av_denoise::{PlanarTiming, PlaneTiming};
 
 #[cfg(feature = "vulkan")]
 use super::{SharedBuffer, multi_scene_clip, temporal_opts};
-use crate::pipeline::report::{RunSummary, WorkerTiming, busy_share, format_report};
+use crate::pipeline::report::{RunSummary, WorkerTiming, busy_share, busy_streams, format_report};
 #[cfg(feature = "vulkan")]
 use crate::pipeline::source::open_y4m;
 #[cfg(feature = "vulkan")]
@@ -99,6 +99,20 @@ fn busy_share_is_the_mean_over_every_stream() {
     assert_eq!(two_streams, "75.0%");
 }
 
+#[test]
+fn workers_on_a_shared_queue_count_as_one_stream() {
+    let streams = busy_streams(true, 3);
+
+    assert_eq!(streams, 1);
+}
+
+#[test]
+fn workers_on_separate_streams_count_one_stream_each() {
+    let streams = busy_streams(false, 3);
+
+    assert_eq!(streams, 3);
+}
+
 #[cfg(feature = "vulkan")]
 #[test]
 fn workers_on_a_shared_queue_share_one_busy_figure() {
@@ -180,7 +194,8 @@ fn every_workers_parts_add_up_to_its_wall_time() {
 #[test]
 fn the_timing_report_leaves_the_output_unchanged() {
     let clip = multi_scene_clip(30);
-    let (plain, _) = run_clip(clip.clone(), 2, false);
+    let plain_clip = clip.clone();
+    let (plain, _) = run_clip(plain_clip, 2, false);
     let (reported, _) = run_clip(clip, 2, true);
 
     assert_eq!(reported, plain);

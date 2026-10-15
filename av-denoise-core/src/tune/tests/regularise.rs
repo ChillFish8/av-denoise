@@ -66,13 +66,16 @@ fn serial_shared_bytes_count_the_centre_tile_and_every_scratch_array() {
 }
 
 #[test]
-fn regularise_keys_name_the_block_geometry() {
+fn regularise_keys_name_the_block_geometry_and_neighbours() {
     let client = test_client();
     let site = regularise_site(&client, &textured_spec());
 
     let key = site.key();
 
-    assert_eq!(key.as_str(), "nl4d_mv_regularise|w128|h64|blksize=16|step=8");
+    assert_eq!(
+        key.as_str(),
+        "nl4d_mv_regularise|w128|h64|blksize=16|step=8|neighbours=4"
+    );
 }
 
 pub(super) fn regularise_specs() -> Vec<RegulariseSpec> {
@@ -322,10 +325,11 @@ fn the_cooperative_kernels_match_the_verbatim_reference() {
             let outputs = site.scratch_outputs();
             site.launch(candidate, &outputs);
 
-            let field =
-                read_i32(&client, &outputs.vectors, outputs.vectors_len()).expect("vectors read back");
-            let scores = read_f32(&client, &outputs.confidence, outputs.confidence_len())
-                .expect("confidence reads back");
+            let vectors_len = outputs.vectors_len();
+            let confidence_len = outputs.confidence_len();
+            let field = read_i32(&client, &outputs.vectors, vectors_len).expect("vectors read back");
+            let scores =
+                read_f32(&client, &outputs.confidence, confidence_len).expect("confidence reads back");
             let agreement = compare_fields(&outputs, &reference_field, &field, &reference_scores, &scores);
             let flipped = agreement.flipped;
             let difference = agreement.confidence.max_abs;

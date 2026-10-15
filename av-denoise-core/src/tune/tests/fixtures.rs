@@ -477,7 +477,8 @@ fn regularise_frames(spec: &RegulariseSpec) -> Vec<Vec<f32>> {
 
     if spec.content != RegulariseContent::Textured {
         for _ in 0..spec.neighbours {
-            frames.push(centre.clone());
+            let duplicate = centre.clone();
+            frames.push(duplicate);
         }
 
         return frames;

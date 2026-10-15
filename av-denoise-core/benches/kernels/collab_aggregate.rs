@@ -58,14 +58,21 @@ impl<R: Runtime> CollabNormaliseBench<R> {
     fn refill_from(&self, source: &Handle, target: &Handle, length: usize) {
         let dim = 256u32;
         let grid = (length as u32).div_ceil(dim).min(MAX_GRID_1D);
+        let cube_count = CubeCount::new_1d(grid);
+        let cube_dim = CubeDim::new_1d(dim);
+        let source_handle = source.clone();
+        let target_handle = target.clone();
 
         unsafe {
+            let source_arg = ArrayArg::from_raw_parts(source_handle, length);
+            let target_arg = ArrayArg::from_raw_parts(target_handle, length);
+
             refill::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::new_1d(grid),
-                CubeDim::new_1d(dim),
-                ArrayArg::from_raw_parts(source.clone(), length),
-                ArrayArg::from_raw_parts(target.clone(), length),
+                cube_count,
+                cube_dim,
+                source_arg,
+                target_arg,
                 length as u32,
                 grid * dim,
             );
@@ -128,16 +135,22 @@ impl<R: Runtime> Benchmark for CollabNormaliseBench<R> {
         let buffers = args.buffers;
         let cubes_x = WIDTH.div_ceil(BLOCK_X);
         let cubes_y = HEIGHT.div_ceil(BLOCK_Y);
+        let cube_count = CubeCount::new_2d(cubes_x, cubes_y);
+        let cube_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
 
         unsafe {
+            let accum_arg = ArrayArg::from_raw_parts(buffers.accum, pixels * stored_ch);
+            let wsum_arg = ArrayArg::from_raw_parts(buffers.wsum, pixels);
+            let output_arg = ArrayArg::from_raw_parts(buffers.output, pixels * stored_ch);
+
             collab_normalise::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::new_2d(cubes_x, cubes_y),
-                CubeDim::new_2d(BLOCK_X, BLOCK_Y),
+                cube_count,
+                cube_dim,
                 stored_ch,
-                ArrayArg::from_raw_parts(buffers.accum, pixels * stored_ch),
-                ArrayArg::from_raw_parts(buffers.wsum, pixels),
-                ArrayArg::from_raw_parts(buffers.output, pixels * stored_ch),
+                accum_arg,
+                wsum_arg,
+                output_arg,
                 // One frame's region, since this bench measures a single frame's normalisation.
                 0u32,
                 WIDTH,

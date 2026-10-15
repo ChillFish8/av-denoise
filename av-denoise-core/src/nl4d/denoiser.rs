@@ -111,7 +111,7 @@ pub struct Nl4dDenoiser<R: Runtime> {
     /// Regions [collab_normalise](crate::collab::kernels::aggregate::collab_normalise) has zeroed
     /// since the last pass scattered into the ring.
     zeroed_regions: Vec<bool>,
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     region_clears: u64,
     /// Two output buffers, alternated so one frame's kernels can overlap the previous frame's
     /// readback.
@@ -365,7 +365,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             accum,
             wsum,
             zeroed_regions: vec![false; ring_frames as usize],
-            #[cfg(test)]
+            #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
             region_clears: 0,
             outputs,
             next_output_slot: 0,
@@ -599,49 +599,49 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         Ok(chunks)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn has_grain_export(&self) -> bool {
         self.grain.is_some()
     }
 
     /// How many measured frames had a saved grain entry to their next frame.
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn grain_measured_with_entry(&self) -> u32 {
         self.grain.as_ref().map_or(0, |grain| grain.measured_with_entry())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn front_for_test(&self) -> &NlmDenoiser<R> {
         &self.front
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn sigma_buffer_for_test(&self) -> &MirroredBuffer {
         &self.sigma_buf
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn noise_curve_buffer_for_test(&self) -> &MirroredBuffer {
         &self.noise_curve_buf
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn strength_map_buffer_for_test(&self) -> &MirroredBuffer {
         &self.strength_map_buf
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn region_clears_for_test(&self) -> u64 {
         self.region_clears
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn uses_f16_search(&self) -> bool {
         self.f16_search
     }
 
     /// Makes candidate distances read the f32 ring, called before the first push.
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn force_f32_search_for_test(&mut self) {
         self.f16_search = false;
     }
@@ -734,14 +734,14 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         // The pass scatters into every region, so none stays zeroed past it.
         self.zeroed_regions.fill(false);
 
-        #[cfg(test)]
+        #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
         {
             self.region_clears += cleared_slots.len() as u64;
         }
 
         self.passes_run += 1;
 
-        // The regularise launches and the scatter run in separate device spans, so each span fits
+        // The regularise launch and the scatter run in separate device spans, so each span fits
         // one compute pass.
         let (mv_field, confidence) = timed(&client, self, |denoiser| denoiser.regularise_fields(view))?;
 
@@ -820,18 +820,24 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let zero_workgroups_one_frame = (frame_len as u32).div_ceil(zero_dim).min(MAX_GRID_1D);
         let zero_grid_one_frame = CubeCount::new_1d(zero_workgroups_one_frame);
         let zero_total_threads_one_frame = zero_workgroups_one_frame * zero_dim;
+        let zero_cube_dim = CubeDim::new_1d(zero_dim);
 
         unsafe {
             // One dispatch over the whole ring exceeds the 65,535 workgroup limit at
             // `temporal_radius = 4` for a 1080p luma plane. A rejected dispatch leaves undefined
             // memory that a fresh stream would aggregate as real, so each region gets its own.
             for slot in cleared_slots {
+                let accum = self.accum.clone();
+                let wsum = self.wsum.clone();
+                let accum_arg = ArrayArg::from_raw_parts(accum, accum_ring_len);
+                let wsum_arg = ArrayArg::from_raw_parts(wsum, pass.wsum_ring_len);
+
                 collab_zero_accum::launch_unchecked::<R>(
                     &client,
                     zero_grid_one_frame.clone(),
-                    CubeDim::new_1d(zero_dim),
-                    ArrayArg::from_raw_parts(self.accum.clone(), accum_ring_len),
-                    ArrayArg::from_raw_parts(self.wsum.clone(), pass.wsum_ring_len),
+                    zero_cube_dim,
+                    accum_arg,
+                    wsum_arg,
                     slot * pixels as u32,
                     pixels as u32,
                     pass.stored_ch,
@@ -1001,16 +1007,23 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
         let slot = self.next_output_slot;
         self.next_output_slot = (slot + 1) % self.outputs.len();
+        let accum = self.accum.clone();
+        let wsum = self.wsum.clone();
+        let output = self.outputs[slot].clone();
 
         unsafe {
+            let accum_arg = ArrayArg::from_raw_parts(accum, accum_ring_len);
+            let wsum_arg = ArrayArg::from_raw_parts(wsum, wsum_ring_len);
+            let output_arg = ArrayArg::from_raw_parts(output, frame_len);
+
             collab_normalise::launch_unchecked::<R>(
                 &client,
                 agg_grid,
                 agg_dim,
                 stored_ch as usize,
-                ArrayArg::from_raw_parts(self.accum.clone(), accum_ring_len),
-                ArrayArg::from_raw_parts(self.wsum.clone(), wsum_ring_len),
-                ArrayArg::from_raw_parts(self.outputs[slot].clone(), frame_len),
+                accum_arg,
+                wsum_arg,
+                output_arg,
                 region_slot * pixels as u32,
                 self.width,
                 self.height,

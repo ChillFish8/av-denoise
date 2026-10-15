@@ -42,7 +42,8 @@ fn textured(width: u32, height: u32) -> Vec<f32> {
 }
 
 fn shifted(frame: &[f32], width: u32, height: u32, shift: (i32, i32)) -> Vec<f32> {
-    let mut moved = Vec::with_capacity(frame.len());
+    let pixel_count = frame.len();
+    let mut moved = Vec::with_capacity(pixel_count);
 
     for y in 0..height as i32 {
         for x in 0..width as i32 {
@@ -126,10 +127,15 @@ fn run_fine_merged_against_reference(use_seed: u32, threads: u32) {
     let dim = CubeDim::new_1d(threads);
 
     unsafe {
-        let pyramid_arg = ArrayArg::from_raw_parts(pyramid, frames.len());
+        let frames_len = frames.len();
+        let mv_field_handle = mv_field.clone();
+        let seeds_len = seeds.len();
+        let confidence_handle = confidence.clone();
+        let unwritten_len = unwritten.len();
+        let pyramid_arg = ArrayArg::from_raw_parts(pyramid, frames_len);
         let table_arg = ArrayArg::from_raw_parts(table, neighbours);
-        let mv_field_arg = ArrayArg::from_raw_parts(mv_field.clone(), seeds.len());
-        let confidence_arg = ArrayArg::from_raw_parts(confidence.clone(), unwritten.len());
+        let mv_field_arg = ArrayArg::from_raw_parts(mv_field_handle, seeds_len);
+        let confidence_arg = ArrayArg::from_raw_parts(confidence_handle, unwritten_len);
 
         nlm_mc_block_match_fine::launch_unchecked::<R>(
             &client,
@@ -172,10 +178,12 @@ fn run_fine_merged_against_reference(use_seed: u32, threads: u32) {
         let reference_grid = CubeCount::new_2d(blocks_x, blocks_y);
 
         unsafe {
+            let reference_mv_handle = reference_mv.clone();
+            let reference_conf_handle = reference_conf.clone();
             let centre_arg = ArrayArg::from_raw_parts(centre, level_len);
             let neighbour_arg = ArrayArg::from_raw_parts(neighbour, level_len);
-            let reference_mv_arg = ArrayArg::from_raw_parts(reference_mv.clone(), 2 * blocks);
-            let reference_conf_arg = ArrayArg::from_raw_parts(reference_conf.clone(), blocks);
+            let reference_mv_arg = ArrayArg::from_raw_parts(reference_mv_handle, 2 * blocks);
+            let reference_conf_arg = ArrayArg::from_raw_parts(reference_conf_handle, blocks);
 
             reference_block_match_fine::launch_unchecked::<R>(
                 &client,
@@ -251,9 +259,12 @@ fn run_coarse_merged_against_reference(threads: u32) {
     let dim = CubeDim::new_1d(threads);
 
     unsafe {
-        let pyramid_arg = ArrayArg::from_raw_parts(pyramid, frames.len());
+        let frames_len = frames.len();
+        let mv_field_handle = mv_field.clone();
+        let unwritten_len = unwritten.len();
+        let pyramid_arg = ArrayArg::from_raw_parts(pyramid, frames_len);
         let table_arg = ArrayArg::from_raw_parts(table, neighbours);
-        let mv_field_arg = ArrayArg::from_raw_parts(mv_field.clone(), unwritten.len());
+        let mv_field_arg = ArrayArg::from_raw_parts(mv_field_handle, unwritten_len);
 
         nlm_mc_block_match_coarse::launch_unchecked::<R>(
             &client,
@@ -290,9 +301,10 @@ fn run_coarse_merged_against_reference(threads: u32) {
         let reference_grid = CubeCount::new_2d(coarse_blocks_x, coarse_blocks_y);
 
         unsafe {
+            let reference_mv_handle = reference_mv.clone();
             let centre_arg = ArrayArg::from_raw_parts(centre, level_len);
             let neighbour_arg = ArrayArg::from_raw_parts(neighbour, level_len);
-            let reference_mv_arg = ArrayArg::from_raw_parts(reference_mv.clone(), 2 * fine_blocks);
+            let reference_mv_arg = ArrayArg::from_raw_parts(reference_mv_handle, 2 * fine_blocks);
 
             reference_block_match_coarse::launch_unchecked::<R>(
                 &client,

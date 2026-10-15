@@ -43,14 +43,21 @@ fn ramp(count: usize, scale: f32) -> Vec<f32> {
 fn overwrite(client: &ComputeClient<TestRuntime>, source: &Handle, target: &Handle, length: u32) {
     let grid = length.div_ceil(BLOCK_1D);
     let total_threads = grid * BLOCK_1D;
+    let cube_count = CubeCount::new_1d(grid);
+    let cube_dim = CubeDim::new_1d(BLOCK_1D);
+    let source_handle = source.clone();
+    let target_handle = target.clone();
 
     unsafe {
+        let source_arg = ArrayArg::from_raw_parts(source_handle, length as usize);
+        let target_arg = ArrayArg::from_raw_parts(target_handle, length as usize);
+
         gpu_copy::launch_unchecked::<TestRuntime>(
             client,
-            CubeCount::new_1d(grid),
-            CubeDim::new_1d(BLOCK_1D),
-            ArrayArg::from_raw_parts(source.clone(), length as usize),
-            ArrayArg::from_raw_parts(target.clone(), length as usize),
+            cube_count,
+            cube_dim,
+            source_arg,
+            target_arg,
             0,
             0,
             length,
@@ -186,7 +193,8 @@ fn dropping_a_started_read_leaves_the_device_usable() {
     let buffer = client.create_from_slice(values_bytes);
 
     for _ in 0..8 {
-        let read = InFlightRead::start(&client, vec![buffer.clone()]);
+        let handles = vec![buffer.clone()];
+        let read = InFlightRead::start(&client, handles);
         drop(read);
     }
 
@@ -216,8 +224,9 @@ fn a_reading_taken_before_it_lands_waits_and_returns_its_values() {
     let mut readings = NoiseReadings::new(3);
     let row = [0.5f32, 0.25, 0.125, 0.0];
     let handles = slot_handles(&client, row, 0.5);
+    let shape = luma_shape();
 
-    readings.start(&client, 1, 7, handles, luma_shape());
+    readings.start(&client, 1, 7, handles, shape);
     let reading = readings
         .get(1, 7)
         .expect("the read lands")
@@ -232,8 +241,9 @@ fn a_reading_for_another_push_is_not_handed_out() {
     let client = test_client();
     let mut readings = NoiseReadings::new(3);
     let handles = slot_handles(&client, [0.5; 4], 0.5);
+    let shape = luma_shape();
 
-    readings.start(&client, 1, 3, handles, luma_shape());
+    readings.start(&client, 1, 3, handles, shape);
     let stale = readings.get(1, 6).expect("no read error");
 
     assert!(stale.is_none());
@@ -245,9 +255,10 @@ fn starting_a_slot_again_drops_the_previous_frames_reading() {
     let mut readings = NoiseReadings::new(2);
     let first = slot_handles(&client, [1.0; 4], 0.5);
     let second = slot_handles(&client, [2.0; 4], 0.75);
+    let shape = luma_shape();
 
-    readings.start(&client, 0, 1, first, luma_shape());
-    readings.start(&client, 0, 3, second, luma_shape());
+    readings.start(&client, 0, 1, first, shape);
+    readings.start(&client, 0, 3, second, shape);
 
     let old = readings.get(0, 1).expect("no read error");
     let new = readings
@@ -264,9 +275,10 @@ fn processing_skips_the_newest_push_and_lands_the_rest() {
     let mut readings = NoiseReadings::new(3);
     let older = slot_handles(&client, [1.0; 4], 0.5);
     let newest = slot_handles(&client, [2.0; 4], 0.5);
+    let shape = luma_shape();
 
-    readings.start(&client, 0, 4, older, luma_shape());
-    readings.start(&client, 1, 5, newest, luma_shape());
+    readings.start(&client, 0, 4, older, shape);
+    readings.start(&client, 1, 5, newest, shape);
     sync(&client).expect("the device drains");
 
     readings.process_landed(5).expect("no read error");
@@ -297,16 +309,17 @@ fn a_failed_reading_reports_its_error_on_every_get() {
 fn clearing_with_reads_in_flight_leaves_every_slot_reusable() {
     let client = test_client();
     let mut readings = NoiseReadings::new(3);
+    let shape = luma_shape();
 
     for slot in 0..3u32 {
         let handles = slot_handles(&client, [slot as f32; 4], 0.5);
-        readings.start(&client, slot, slot as usize, handles, luma_shape());
+        readings.start(&client, slot, slot as usize, handles, shape);
     }
 
     readings.clear();
 
     let fresh = slot_handles(&client, [9.0; 4], 0.25);
-    readings.start(&client, 2, 0, fresh, luma_shape());
+    readings.start(&client, 2, 0, fresh, shape);
     let cleared = readings.get(0, 0).expect("no read error");
     let reused = readings
         .get(2, 0)

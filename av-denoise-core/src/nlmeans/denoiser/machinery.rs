@@ -3,7 +3,7 @@ use cubecl::server::Handle;
 
 use super::NlmDenoiser;
 use crate::nlmeans::dispatch::mc_sad_noise_floor_sigma;
-#[cfg(test)]
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 use crate::nlmeans::mirror::MirroredBuffer;
 use crate::nlmeans::motion::{self, MotionCtx};
 use crate::nlmeans::params::ChannelMode;
@@ -137,7 +137,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         table.handle().clone()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn neighbour_slots_for_test(&self) -> Option<&MirroredBuffer> {
         self.neighbour_slots.as_ref()
     }
@@ -183,7 +183,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         &self.input_buf
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn search_ring(&self) -> Option<&Handle> {
         self.search_buf.as_ref()
     }

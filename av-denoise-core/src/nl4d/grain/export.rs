@@ -90,7 +90,7 @@ pub(crate) struct GrainExport {
     chunk_open: bool,
     last_completed: Option<Completed>,
     /// How many measured frames had a saved entry to their next frame.
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     measured_with_entry: u32,
 }
 
@@ -119,7 +119,7 @@ impl GrainExport {
             chunks: Vec::new(),
             chunk_open: false,
             last_completed: None,
-            #[cfg(test)]
+            #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
             measured_with_entry: 0,
         }
     }
@@ -179,7 +179,7 @@ impl GrainExport {
     ) {
         let has_source = next_slot.is_some() && self.saved_valid[frame_slot as usize];
 
-        #[cfg(test)]
+        #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
         if self.saved_valid[frame_slot as usize] {
             self.measured_with_entry += 1;
         }
@@ -270,7 +270,7 @@ impl GrainExport {
         (chunk.hist.clone(), chunk.autocov.clone())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn measured_with_entry(&self) -> u32 {
         self.measured_with_entry
     }

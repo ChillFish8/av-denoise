@@ -14,12 +14,14 @@ fn layout() -> FrameLayout {
 }
 
 fn nl4d_options() -> PlaneOptions {
+    let nl4d = Nl4dOptions::default();
+
     PlaneOptions {
         accelerators: vec![Accelerator::Vulkan],
         device: Device::Default,
         intent: ChannelIntent::LumaChroma,
         mode: DenoisingMode::Temporal { radius: 1 },
-        algorithm: Algorithm::Nl4d(Nl4dOptions::default()),
+        algorithm: Algorithm::Nl4d(nl4d),
         luma_strength: None,
         chroma_strength: None,
         luma_lambda_ht: None,

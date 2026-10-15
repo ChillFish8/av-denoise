@@ -47,11 +47,15 @@ fn run(
     let dim = CubeDim::new_2d(8, 8);
 
     unsafe {
-        let frame_arg = ArrayArg::from_raw_parts(frame_buf, frames.len());
-        let table_arg = ArrayArg::from_raw_parts(table_buf, neighbour_table.len());
+        let frames_len = frames.len();
+        let neighbour_table_len = neighbour_table.len();
+        let mv_out_handle = mv_out.clone();
+        let conf_out_handle = conf_out.clone();
+        let frame_arg = ArrayArg::from_raw_parts(frame_buf, frames_len);
+        let table_arg = ArrayArg::from_raw_parts(table_buf, neighbour_table_len);
         let mv_in_arg = ArrayArg::from_raw_parts(mv_in_buf, 2 * blocks);
-        let mv_out_arg = ArrayArg::from_raw_parts(mv_out.clone(), 2 * blocks);
-        let conf_out_arg = ArrayArg::from_raw_parts(conf_out.clone(), blocks);
+        let mv_out_arg = ArrayArg::from_raw_parts(mv_out_handle, 2 * blocks);
+        let conf_out_arg = ArrayArg::from_raw_parts(conf_out_handle, blocks);
 
         nl4d_mv_regularise::launch_unchecked::<R>(
             &client,

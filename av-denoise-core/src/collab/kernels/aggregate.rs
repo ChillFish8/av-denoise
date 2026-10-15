@@ -206,7 +206,8 @@ pub fn scatter_patch(
 /// Zeroes `pixels` pixels of both accumulators, starting `frame_offset` pixels in.
 ///
 /// `client.empty` memory is not zeroed, so a stream's first pass clears the whole ring with this.
-/// [collab_normalise] leaves every region it reads zeroed.
+/// [collab_normalise] leaves every region it reads zeroed. A later pass clears the newest region
+/// with this whenever normalise has not zeroed it, as in a continuation stream.
 ///
 /// The `accum` region is `pixels * stored_ch` slots and `wsum`'s is `pixels`, so the weight write
 /// is masked past its end. The loop is strided so the grid stays under the 65,535 workgroup limit,

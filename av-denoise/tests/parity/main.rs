@@ -2,6 +2,8 @@
 //!
 //! Setting `AVD_PARITY_RECORD=1` records the fixture instead of checking it.
 
+#![cfg(feature = "vulkan")]
+
 mod clips;
 mod configs;
 mod fixture;

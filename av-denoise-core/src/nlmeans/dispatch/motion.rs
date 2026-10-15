@@ -445,14 +445,21 @@ fn copy_frame_into_slot_handle<R: Runtime>(
 
     let grid = frame_size.div_ceil(BLOCK_1D).min(MAX_GRID_1D);
     let total_threads = grid * BLOCK_1D;
+    let cube_count = CubeCount::new_1d(grid);
+    let cube_dim = CubeDim::new_1d(BLOCK_1D);
+    let src_handle = src.clone();
+    let dst_handle = dst.clone();
 
     unsafe {
+        let src_arg = ArrayArg::from_raw_parts(src_handle, ring_len);
+        let dst_arg = ArrayArg::from_raw_parts(dst_handle, ring_len);
+
         gpu_copy::launch_unchecked::<R>(
             client,
-            CubeCount::new_1d(grid),
-            CubeDim::new_1d(BLOCK_1D),
-            ArrayArg::from_raw_parts(src.clone(), ring_len),
-            ArrayArg::from_raw_parts(dst.clone(), ring_len),
+            cube_count,
+            cube_dim,
+            src_arg,
+            dst_arg,
             offset,
             offset,
             frame_size,

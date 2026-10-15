@@ -82,7 +82,7 @@ pub(crate) struct QuarterSettings {
 }
 
 impl QuarterClasses {
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn from_classes(cols: usize, rows: usize, classes: Vec<Option<QuarterClass>>) -> Self {
         assert_eq!(classes.len(), cols * rows);
         Self {
@@ -93,7 +93,7 @@ impl QuarterClasses {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn with_ring(mut self, ring: Vec<bool>) -> Self {
         assert_eq!(ring.len(), self.classes.len());
         self.ring = ring;

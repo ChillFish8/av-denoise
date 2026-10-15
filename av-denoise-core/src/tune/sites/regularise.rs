@@ -198,9 +198,11 @@ impl<R: Runtime> RegulariseSite<R> {
         let slots_len = outputs.neighbours as usize;
         let pyramid = bind::<R>(&self.pyramid, self.pyramid_len);
         let neighbour_slots = bind::<R>(&self.neighbour_slots, slots_len);
-        let mv_in = bind::<R>(&self.mv_in, outputs.vectors_len());
-        let vectors = bind::<R>(&outputs.vectors, outputs.vectors_len());
-        let confidence = bind::<R>(&outputs.confidence, outputs.confidence_len());
+        let vectors_len = outputs.vectors_len();
+        let confidence_len = outputs.confidence_len();
+        let mv_in = bind::<R>(&self.mv_in, vectors_len);
+        let vectors = bind::<R>(&outputs.vectors, vectors_len);
+        let confidence = bind::<R>(&outputs.confidence, confidence_len);
 
         unsafe {
             nl4d_mv_regularise::launch_unchecked::<R>(
@@ -235,9 +237,11 @@ impl<R: Runtime> RegulariseSite<R> {
         let slots_len = outputs.neighbours as usize;
         let pyramid = bind::<R>(&self.pyramid, self.pyramid_len);
         let neighbour_slots = bind::<R>(&self.neighbour_slots, slots_len);
-        let mv_in = bind::<R>(&self.mv_in, outputs.vectors_len());
-        let vectors = bind::<R>(&outputs.vectors, outputs.vectors_len());
-        let confidence = bind::<R>(&outputs.confidence, outputs.confidence_len());
+        let vectors_len = outputs.vectors_len();
+        let confidence_len = outputs.confidence_len();
+        let mv_in = bind::<R>(&self.mv_in, vectors_len);
+        let vectors = bind::<R>(&outputs.vectors, vectors_len);
+        let confidence = bind::<R>(&outputs.confidence, confidence_len);
 
         unsafe {
             nl4d_mv_regularise_coop::launch_unchecked::<R>(
@@ -282,6 +286,7 @@ impl<R: Runtime> VariantSite<R> for RegulariseSite<R> {
         SiteKey::builder(NL4D_MV_REGULARISE, self.width, self.height)
             .param("blksize", self.blksize)
             .param("step", self.step)
+            .param("neighbours", self.outputs.neighbours)
             .build()
     }
 
@@ -333,8 +338,10 @@ impl<R: Runtime> VariantSite<R> for RegulariseSite<R> {
     }
 
     fn clear_outputs(&self, outputs: &RegulariseOutputs) {
-        zero_words(&self.client, &outputs.vectors, outputs.vectors_len());
-        zero_words(&self.client, &outputs.confidence, outputs.confidence_len());
+        let vectors_len = outputs.vectors_len();
+        let confidence_len = outputs.confidence_len();
+        zero_words(&self.client, &outputs.vectors, vectors_len);
+        zero_words(&self.client, &outputs.confidence, confidence_len);
     }
 
     fn compare(

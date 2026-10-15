@@ -21,7 +21,8 @@ fn one_frame_in_every_n_is_sampled() {
     let mut sampled = Vec::new();
     for _ in 0..9 {
         timer.begin_frame();
-        sampled.push(timer.is_sampling());
+        let is_sampling = timer.is_sampling();
+        sampled.push(is_sampling);
     }
 
     let expected = [true, false, false, false, true, false, false, false, true];
@@ -42,14 +43,18 @@ fn every_span_of_a_sampled_frame_adds_up() {
     let mut timer = DeviceTimer::default();
     timer.set_every(1);
 
+    let first_length = Duration::from_millis(3);
+    let second_length = Duration::from_millis(2);
+    let third_length = Duration::from_millis(4);
+
     timer.begin_frame();
-    let first = device_span(Duration::from_millis(3));
+    let first = device_span(first_length);
     timer.record(first);
-    let second = device_span(Duration::from_millis(2));
+    let second = device_span(second_length);
     timer.record(second);
 
     timer.begin_frame();
-    let third = device_span(Duration::from_millis(4));
+    let third = device_span(third_length);
     timer.record(third);
 
     let (total, frames) = timer.settle();

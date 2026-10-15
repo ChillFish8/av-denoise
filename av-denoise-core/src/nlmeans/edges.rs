@@ -59,7 +59,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(Arc::clone(centre))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn frames_loaded_for_test(&self) -> usize {
         self.frames_loaded
     }

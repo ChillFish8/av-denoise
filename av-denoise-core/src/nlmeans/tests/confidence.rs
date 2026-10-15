@@ -53,10 +53,11 @@ fn run_fine_confidence(
     let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
     unsafe {
+        let confidence_handle = confidence.clone();
         let pyramid_arg = ArrayArg::from_raw_parts(pyramid, 2 * level_len);
         let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, 1);
         let mv_field_arg = ArrayArg::from_raw_parts(mv_field, 2);
-        let confidence_arg = ArrayArg::from_raw_parts(confidence.clone(), 1);
+        let confidence_arg = ArrayArg::from_raw_parts(confidence_handle, 1);
 
         nlm_mc_block_match_fine::launch_unchecked::<R>(
             &client,

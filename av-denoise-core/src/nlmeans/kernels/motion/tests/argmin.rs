@@ -18,28 +18,51 @@ const STEP: u32 = 8;
 /// Search radii with fewer and more candidates than the widest cube has threads.
 const SEARCH_RADII: [u32; 2] = [4, 7];
 
-/// Neighbours each argmin launch covers on z, all matching the same neighbour frame.
-const NEIGHBOURS: u32 = 2;
+/// Neighbours each argmin launch covers on z, each matching its own frame.
+const NEIGHBOURS: usize = 3;
 
-/// The content both frames of a case hold.
+/// The frame slot each neighbour's frame sits in, out of order so a wrong slot lookup shows.
+const NEIGHBOUR_SLOTS: [u32; NEIGHBOURS] = [2, 0, 3];
+
+/// The frame slot the centre frame sits in.
+const CENTRE_SLOT: u32 = 1;
+
+/// Frame slots in the buffer, the centre's included.
+const SLOT_COUNT: usize = NEIGHBOURS + 1;
+
+/// How far each periodic neighbour is shifted. None is a multiple of the 4x4 tile.
+const PERIODIC_SHIFTS: [(i32, i32); NEIGHBOURS] = [(2, 1), (1, 3), (3, 2)];
+
+/// How far each textured neighbour is shifted.
+const TEXTURED_SHIFTS: [(i32, i32); NEIGHBOURS] = [(3, -2), (-2, 3), (1, 1)];
+
+/// The content the frames of a case hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Content {
-    /// Every pixel the same, so every SAD ties at zero.
+    /// Every frame flat at its own level, so every SAD of a block ties.
     Flat,
-    /// A 4x4 tile repeated, with the neighbour shifted by `(2, 1)`, so several offsets share the
-    /// lowest SAD and the zero offset is not among them.
+    /// A 4x4 tile repeated, with each neighbour shifted by its [PERIODIC_SHIFTS] entry, so several
+    /// offsets share the lowest SAD and the zero offset is not among them.
     Periodic,
-    /// Distinct values, with the neighbour shifted by `(3, -2)` and lightly perturbed.
+    /// Distinct values, with each neighbour shifted by its [TEXTURED_SHIFTS] entry and lightly
+    /// perturbed.
     Textured,
 }
 
-fn frames(content: Content) -> (Vec<f32>, Vec<f32>) {
+/// The centre frame and one frame per neighbour.
+fn frames(content: Content) -> (Vec<f32>, Vec<Vec<f32>>) {
     let pixels = WIDTH * HEIGHT;
 
     match content {
         Content::Flat => {
-            let flat = vec![0.25f32; pixels as usize];
-            (flat.clone(), flat)
+            let centre = vec![0.25f32; pixels as usize];
+            let neighbours = (0..NEIGHBOURS)
+                .map(|neighbour| {
+                    let level = 0.3 + 0.05 * neighbour as f32;
+                    vec![level; pixels as usize]
+                })
+                .collect();
+            (centre, neighbours)
         },
         Content::Periodic => {
             let tile: Vec<f32> = (0..16).map(|index| hashed_unit(index, 21)).collect();
@@ -48,36 +71,38 @@ fn frames(content: Content) -> (Vec<f32>, Vec<f32>) {
                 let tile_y = y.rem_euclid(4) as usize;
                 tile[tile_y * 4 + tile_x]
             };
-            let centre: Vec<f32> = (0..pixels)
-                .map(|index| {
-                    let x = (index % WIDTH) as i32;
-                    let y = (index / WIDTH) as i32;
-                    sample(x, y)
-                })
-                .collect();
-            let neighbour: Vec<f32> = (0..pixels)
-                .map(|index| {
-                    let x = (index % WIDTH) as i32;
-                    let y = (index / WIDTH) as i32;
-                    sample(x - 2, y - 1)
-                })
-                .collect();
-            (centre, neighbour)
+            let shifted = |shift: (i32, i32)| -> Vec<f32> {
+                (0..pixels)
+                    .map(|index| {
+                        let x = (index % WIDTH) as i32;
+                        let y = (index / WIDTH) as i32;
+                        sample(x - shift.0, y - shift.1)
+                    })
+                    .collect()
+            };
+            let centre = shifted((0, 0));
+            let neighbours = PERIODIC_SHIFTS.into_iter().map(shifted).collect();
+            (centre, neighbours)
         },
         Content::Textured => {
             let centre: Vec<f32> = (0..pixels).map(|index| hashed_unit(index, 22)).collect();
-            let neighbour: Vec<f32> = (0..pixels)
-                .map(|index| {
-                    let x = (index % WIDTH) as i32;
-                    let y = (index / WIDTH) as i32;
-                    let source_x = (x - 3).clamp(0, WIDTH as i32 - 1) as u32;
-                    let source_y = (y + 2).clamp(0, HEIGHT as i32 - 1) as u32;
-                    let source = centre[(source_y * WIDTH + source_x) as usize];
-                    let perturbation = (hashed_unit(index, 23) - 0.5) * 0.02;
-                    source + perturbation
-                })
-                .collect();
-            (centre, neighbour)
+            let shifted = |(neighbour, shift): (usize, (i32, i32))| -> Vec<f32> {
+                let perturbation_seed = 23 + neighbour as u32;
+
+                (0..pixels)
+                    .map(|index| {
+                        let x = (index % WIDTH) as i32;
+                        let y = (index / WIDTH) as i32;
+                        let source_x = (x - shift.0).clamp(0, WIDTH as i32 - 1) as u32;
+                        let source_y = (y - shift.1).clamp(0, HEIGHT as i32 - 1) as u32;
+                        let source = centre[(source_y * WIDTH + source_x) as usize];
+                        let perturbation = (hashed_unit(index, perturbation_seed) - 0.5) * 0.02;
+                        source + perturbation
+                    })
+                    .collect()
+            };
+            let neighbours = TEXTURED_SHIFTS.into_iter().enumerate().map(shifted).collect();
+            (centre, neighbours)
         },
     }
 }
@@ -178,17 +203,25 @@ fn expected_vector(sads: &[f32], seed: (i32, i32), search_radius: u32) -> (i32, 
     best
 }
 
-/// Lays out `centre` and then [NEIGHBOURS] copies of `neighbour` as frame slots of one buffer, with
-/// a table naming the copies.
-fn slot_frames(client: &ComputeClient<TestRuntime>, centre: &[f32], neighbour: &[f32]) -> (Handle, Handle) {
-    let mut frames = centre.to_vec();
-    for _ in 0..NEIGHBOURS {
-        frames.extend_from_slice(neighbour);
+/// Lays out `centre` at [CENTRE_SLOT] and each neighbour at its [NEIGHBOUR_SLOTS] entry, with that
+/// table uploaded beside the frames.
+fn slot_frames(
+    client: &ComputeClient<TestRuntime>,
+    centre: &[f32],
+    neighbours: &[Vec<f32>],
+) -> (Handle, Handle) {
+    let pixels = centre.len();
+    let mut frames = vec![0.0f32; pixels * SLOT_COUNT];
+    let centre_start = CENTRE_SLOT as usize * pixels;
+    frames[centre_start..centre_start + pixels].copy_from_slice(centre);
+
+    for (neighbour, &slot) in neighbours.iter().zip(NEIGHBOUR_SLOTS.iter()) {
+        let start = slot as usize * pixels;
+        frames[start..start + pixels].copy_from_slice(neighbour);
     }
 
     let pyramid = upload(client, &frames);
-    let table: Vec<u32> = (1..=NEIGHBOURS).collect();
-    let table_bytes = u32::as_bytes(&table);
+    let table_bytes = u32::as_bytes(&NEIGHBOUR_SLOTS);
     let neighbour_slots = client.create_from_slice(table_bytes);
 
     (pyramid, neighbour_slots)
@@ -197,27 +230,29 @@ fn slot_frames(client: &ComputeClient<TestRuntime>, centre: &[f32], neighbour: &
 /// Runs the fine kernel over [NEIGHBOURS] neighbours and returns each neighbour's field.
 fn run_fine(content: Content, search_radius: u32, threads: u32) -> Vec<Vec<i32>> {
     let client = test_client();
-    let (centre, neighbour) = frames(content);
-    let (pyramid, neighbour_slots) = slot_frames(&client, &centre, &neighbour);
+    let (centre, neighbours) = frames(content);
+    let (pyramid, neighbour_slots) = slot_frames(&client, &centre, &neighbours);
     let seeds = seeds();
     let mv_stride = seeds.len();
-    let field_values = seeds.repeat(NEIGHBOURS as usize);
+    let field_values = seeds.repeat(NEIGHBOURS);
+    let field_len = field_values.len();
     let seed_bytes = i32::as_bytes(&field_values);
     let mv_field = client.create_from_slice(seed_bytes);
     let confidence = client.empty(size_of::<f32>());
     zero_words(&client, &confidence, 1);
 
     let pixels = (WIDTH * HEIGHT) as usize;
-    let pyramid_len = pixels * (NEIGHBOURS as usize + 1);
+    let pyramid_len = pixels * SLOT_COUNT;
     let columns = blocks_x();
     let rows = blocks_y();
-    let cube_count = CubeCount::new_3d(columns, rows, NEIGHBOURS);
+    let cube_count = CubeCount::new_3d(columns, rows, NEIGHBOURS as u32);
     let cube_dim = CubeDim::new_1d(threads);
+    let mv_field_handle = mv_field.clone();
 
     // SAFETY: every argument covers the element count it was allocated for.
     let pyramid_arg = unsafe { ArrayArg::from_raw_parts(pyramid, pyramid_len) };
-    let slots_arg = unsafe { ArrayArg::from_raw_parts(neighbour_slots, NEIGHBOURS as usize) };
-    let field_arg = unsafe { ArrayArg::from_raw_parts(mv_field.clone(), field_values.len()) };
+    let slots_arg = unsafe { ArrayArg::from_raw_parts(neighbour_slots, NEIGHBOURS) };
+    let field_arg = unsafe { ArrayArg::from_raw_parts(mv_field_handle, field_len) };
     let confidence_arg = unsafe { ArrayArg::from_raw_parts(confidence, 1) };
 
     unsafe {
@@ -229,7 +264,7 @@ fn run_fine(content: Content, search_radius: u32, threads: u32) -> Vec<Vec<i32>>
             slots_arg,
             field_arg,
             confidence_arg,
-            0u32,
+            CENTRE_SLOT,
             false,
             0.0,
             1.0,
@@ -246,12 +281,21 @@ fn run_fine(content: Content, search_radius: u32, threads: u32) -> Vec<Vec<i32>>
         );
     }
 
-    let field = read_i32(&client, &mv_field, field_values.len()).expect("the field reads back");
+    let field = read_i32(&client, &mv_field, field_len).expect("the field reads back");
     field.chunks(mv_stride).map(<[i32]>::to_vec).collect()
 }
 
-fn expected_fine(content: Content, search_radius: u32) -> Vec<i32> {
-    let (centre, neighbour) = frames(content);
+/// Each neighbour's field from the serial scan against that neighbour's own frame.
+fn expected_fine(content: Content, search_radius: u32) -> Vec<Vec<i32>> {
+    let (centre, neighbours) = frames(content);
+
+    neighbours
+        .iter()
+        .map(|neighbour| expected_fine_field(&centre, neighbour, search_radius))
+        .collect()
+}
+
+fn expected_fine_field(centre: &[f32], neighbour: &[f32], search_radius: u32) -> Vec<i32> {
     let seeds = seeds();
     let columns = blocks_x();
     let rows = blocks_y();
@@ -266,7 +310,7 @@ fn expected_fine(content: Content, search_radius: u32) -> Vec<i32> {
                 origin.0 + seed.0 - search_radius as i32,
                 origin.1 + seed.1 - search_radius as i32,
             );
-            let sads = block_sads(&centre, &neighbour, origin, window_origin, search_radius);
+            let sads = block_sads(centre, neighbour, origin, window_origin, search_radius);
             let (vector_x, vector_y) = expected_vector(&sads, seed, search_radius);
             field.push(vector_x);
             field.push(vector_y);
@@ -281,24 +325,25 @@ fn expected_fine(content: Content, search_radius: u32) -> Vec<i32> {
 /// The fine grid equals the coarse one, so each block writes only itself.
 fn run_coarse(content: Content, search_radius: u32, threads: u32) -> Vec<Vec<i32>> {
     let client = test_client();
-    let (centre, neighbour) = frames(content);
-    let (pyramid, neighbour_slots) = slot_frames(&client, &centre, &neighbour);
+    let (centre, neighbours) = frames(content);
+    let (pyramid, neighbour_slots) = slot_frames(&client, &centre, &neighbours);
     let columns = blocks_x();
     let rows = blocks_y();
     let mv_stride = (2 * columns * rows) as usize;
-    let field_len = mv_stride * NEIGHBOURS as usize;
+    let field_len = mv_stride * NEIGHBOURS;
     let mv_field = client.empty(field_len * size_of::<i32>());
     zero_words(&client, &mv_field, field_len);
 
     let pixels = (WIDTH * HEIGHT) as usize;
-    let pyramid_len = pixels * (NEIGHBOURS as usize + 1);
-    let cube_count = CubeCount::new_3d(columns, rows, NEIGHBOURS);
+    let pyramid_len = pixels * SLOT_COUNT;
+    let cube_count = CubeCount::new_3d(columns, rows, NEIGHBOURS as u32);
     let cube_dim = CubeDim::new_1d(threads);
+    let mv_field_handle = mv_field.clone();
 
     // SAFETY: every argument covers the element count it was allocated for.
     let pyramid_arg = unsafe { ArrayArg::from_raw_parts(pyramid, pyramid_len) };
-    let slots_arg = unsafe { ArrayArg::from_raw_parts(neighbour_slots, NEIGHBOURS as usize) };
-    let field_arg = unsafe { ArrayArg::from_raw_parts(mv_field.clone(), field_len) };
+    let slots_arg = unsafe { ArrayArg::from_raw_parts(neighbour_slots, NEIGHBOURS) };
+    let field_arg = unsafe { ArrayArg::from_raw_parts(mv_field_handle, field_len) };
 
     unsafe {
         nlm_mc_block_match_coarse::launch_unchecked::<TestRuntime>(
@@ -308,7 +353,7 @@ fn run_coarse(content: Content, search_radius: u32, threads: u32) -> Vec<Vec<i32
             pyramid_arg,
             slots_arg,
             field_arg,
-            0u32,
+            CENTRE_SLOT,
             WIDTH,
             HEIGHT,
             0,
@@ -328,15 +373,24 @@ fn run_coarse(content: Content, search_radius: u32, threads: u32) -> Vec<Vec<i32
     field.chunks(mv_stride).map(<[i32]>::to_vec).collect()
 }
 
-fn expected_coarse(content: Content, search_radius: u32) -> Vec<i32> {
-    let (centre, neighbour) = frames(content);
+/// Each neighbour's field from the serial scan against that neighbour's own frame.
+fn expected_coarse(content: Content, search_radius: u32) -> Vec<Vec<i32>> {
+    let (centre, neighbours) = frames(content);
+
+    neighbours
+        .iter()
+        .map(|neighbour| expected_coarse_field(&centre, neighbour, search_radius))
+        .collect()
+}
+
+fn expected_coarse_field(centre: &[f32], neighbour: &[f32], search_radius: u32) -> Vec<i32> {
     let mut field = Vec::new();
 
     for block_row in 0..blocks_y() {
         for block_col in 0..blocks_x() {
             let origin = ((block_col * STEP) as i32, (block_row * STEP) as i32);
             let window_origin = (origin.0 - search_radius as i32, origin.1 - search_radius as i32);
-            let sads = block_sads(&centre, &neighbour, origin, window_origin, search_radius);
+            let sads = block_sads(centre, neighbour, origin, window_origin, search_radius);
             let (vector_x, vector_y) = expected_vector(&sads, (0, 0), search_radius);
             field.push(vector_x);
             field.push(vector_y);
@@ -353,10 +407,13 @@ fn assert_fine_matches_the_serial_scan(content: Content) {
         for threads in CUBE_THREADS {
             let fields = run_fine(content, search_radius, threads);
 
-            for (neighbour, got) in fields.iter().enumerate() {
+            assert_eq!(fields.len(), expected.len());
+
+            let pairs = fields.iter().zip(expected.iter()).enumerate();
+            for (neighbour, (got, want)) in pairs {
                 let label =
                     format!("{content:?} radius {search_radius} on {threads} threads, neighbour {neighbour}");
-                assert_eq!(got, &expected, "{label}");
+                assert_eq!(got, want, "{label}");
             }
         }
     }
@@ -369,10 +426,13 @@ fn assert_coarse_matches_the_serial_scan(content: Content) {
         for threads in CUBE_THREADS {
             let fields = run_coarse(content, search_radius, threads);
 
-            for (neighbour, got) in fields.iter().enumerate() {
+            assert_eq!(fields.len(), expected.len());
+
+            let pairs = fields.iter().zip(expected.iter()).enumerate();
+            for (neighbour, (got, want)) in pairs {
                 let label =
                     format!("{content:?} radius {search_radius} on {threads} threads, neighbour {neighbour}");
-                assert_eq!(got, &expected, "{label}");
+                assert_eq!(got, want, "{label}");
             }
         }
     }
@@ -380,15 +440,38 @@ fn assert_coarse_matches_the_serial_scan(content: Content) {
 
 #[test]
 fn periodic_content_has_blocks_with_several_lowest_sads() {
-    let (centre, neighbour) = frames(Content::Periodic);
+    let (centre, neighbours) = frames(Content::Periodic);
     let origin = (24, 16);
     let window_origin = (20, 12);
 
-    let sads = block_sads(&centre, &neighbour, origin, window_origin, 4);
-    let lowest = sads.iter().copied().fold(f32::INFINITY, f32::min);
-    let tied = sads.iter().filter(|&&sad| sad == lowest).count();
+    for (index, neighbour) in neighbours.iter().enumerate() {
+        let sads = block_sads(&centre, neighbour, origin, window_origin, 4);
+        let lowest = sads.iter().copied().fold(f32::INFINITY, f32::min);
+        let tied = sads.iter().filter(|&&sad| sad == lowest).count();
 
-    assert!(tied > 1, "the periodic case must force ties, found {tied}");
+        assert!(tied > 1, "neighbour {index} must force ties, found {tied}");
+    }
+}
+
+#[test]
+fn every_neighbour_expects_a_different_field() {
+    for content in [Content::Periodic, Content::Textured] {
+        let fine = expected_fine(content, 4);
+        let coarse = expected_coarse(content, 4);
+
+        for first in 0..NEIGHBOURS {
+            for second in first + 1..NEIGHBOURS {
+                assert_ne!(
+                    fine[first], fine[second],
+                    "{content:?} fine neighbours {first} and {second}"
+                );
+                assert_ne!(
+                    coarse[first], coarse[second],
+                    "{content:?} coarse neighbours {first} and {second}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

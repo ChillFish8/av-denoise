@@ -121,7 +121,8 @@ fn stream_outputs(params: NlmParams, sample_every: u32) -> Vec<Vec<f32>> {
 }
 
 fn assert_sampling_leaves_output_unchanged(params: NlmParams) {
-    let untimed = stream_outputs(params.clone(), 0);
+    let untimed_params = params.clone();
+    let untimed = stream_outputs(untimed_params, 0);
     let timed = stream_outputs(params, 1);
 
     assert_eq!(timed, untimed);

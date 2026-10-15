@@ -8,7 +8,7 @@ use super::NlmDenoiser;
 use super::readings::{ReadingShape, SlotNoiseReading};
 use crate::engine::EngineTiming;
 use crate::engine::timing::{DeviceTimed, DeviceTimer};
-#[cfg(test)]
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 use crate::nlmeans::mirror::MirroredBuffer;
 use crate::nlmeans::noise::{
     EMA_ALPHA,
@@ -144,12 +144,12 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.quarter_classes.as_ref()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn flat_texture_cut(&self) -> Option<f32> {
         self.quarter_settings.texture_cut
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn line_ring(&self) -> Option<usize> {
         self.quarter_settings.line_ring
     }
@@ -442,7 +442,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.spatial_offset_lut.update(&self.client, offset_bytes);
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn spatial_offset_lut_for_test(&self) -> (&MirroredBuffer, Vec<f32>) {
         let rho = self.rho_smoothed.unwrap_or(0.0);
         let expected = build_spatial_offset_lut(self.params.search_radius, rho, self.noise_offset);
@@ -450,7 +450,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         (&self.spatial_offset_lut, expected)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn pilot_offset_lut_for_test(&self) -> &MirroredBuffer {
         &self.pilot_offset_lut
     }

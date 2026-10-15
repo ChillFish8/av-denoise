@@ -350,18 +350,24 @@ fn run_scatter_stage_windowed(
     }
 
     // Normalise zeroes the region it reads, so the weight sum is read before it runs.
-    let wsum_bytes = client.read_one(wsum.clone()).expect("wsum readback failed");
+    let wsum_handle = wsum.clone();
+    let wsum_bytes = client.read_one(wsum_handle).expect("wsum readback failed");
     let weight_sum = i32::from_bytes(&wsum_bytes)[..pixels].to_vec();
+    let output_launched = output.clone();
 
     unsafe {
+        let accum_arg = ArrayArg::from_raw_parts(accum, pixels);
+        let wsum_arg = ArrayArg::from_raw_parts(wsum, pixels);
+        let output_arg = ArrayArg::from_raw_parts(output_launched, pixels);
+
         collab_normalise::launch_unchecked::<R>(
             &client,
             normalise_grid,
             normalise_dim,
             1usize,
-            ArrayArg::from_raw_parts(accum, pixels),
-            ArrayArg::from_raw_parts(wsum, pixels),
-            ArrayArg::from_raw_parts(output.clone(), pixels),
+            accum_arg,
+            wsum_arg,
+            output_arg,
             0u32,
             width,
             height,

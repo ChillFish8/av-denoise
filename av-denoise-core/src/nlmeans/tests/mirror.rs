@@ -23,8 +23,9 @@ fn an_unchanged_update_uploads_nothing() {
 
     mirror.update(&client, bytes);
 
+    let actual = read_floats(&client, &mirror);
     assert_eq!(mirror.uploads(), 1);
-    assert_eq!(read_floats(&client, &mirror), values);
+    assert_eq!(actual, values);
 }
 
 #[test]
@@ -38,8 +39,9 @@ fn a_changed_update_reaches_the_buffer() {
 
     mirror.update(&client, second_bytes);
 
+    let actual = read_floats(&client, &mirror);
     assert_eq!(mirror.uploads(), 2);
-    assert_eq!(read_floats(&client, &mirror), second);
+    assert_eq!(actual, second);
 }
 
 #[test]
@@ -106,10 +108,12 @@ fn a_pinned_sigma_uploads_the_spatial_offset_table_once() {
 
 #[test]
 fn a_pinned_sigma_uploads_the_pilot_offset_table_once() {
-    let mut denoiser = hq_denoiser(pilot_prefilter(), Some(0.02));
+    let prefilter = pilot_prefilter();
+    let mut denoiser = hq_denoiser(prefilter, Some(0.02));
     run_frames(&mut denoiser, 6);
 
-    assert_eq!(denoiser.pilot_offset_lut_for_test().uploads(), 1);
+    let pilot = denoiser.pilot_offset_lut_for_test();
+    assert_eq!(pilot.uploads(), 1);
 }
 
 #[test]
@@ -118,13 +122,15 @@ fn an_estimated_sigma_keeps_the_spatial_offset_table_current() {
     run_frames(&mut denoiser, 6);
 
     let (spatial, expected) = denoiser.spatial_offset_lut_for_test();
+    let actual = read_floats(&denoiser.client, spatial);
     assert!(spatial.uploads() > 1);
-    assert_eq!(read_floats(&denoiser.client, spatial), expected);
+    assert_eq!(actual, expected);
 }
 
 #[test]
 fn an_estimated_sigma_keeps_the_pilot_offset_table_current() {
-    let mut denoiser = hq_denoiser(pilot_prefilter(), None);
+    let prefilter = pilot_prefilter();
+    let mut denoiser = hq_denoiser(prefilter, None);
     run_frames(&mut denoiser, 6);
 
     // The pilot runs on push, so one more push uploads the table for the latest estimate.
@@ -133,8 +139,9 @@ fn an_estimated_sigma_keeps_the_pilot_offset_table_current() {
     let search_radius = denoiser.params.search_radius;
     let expected = build_spatial_offset_lut(search_radius, 0.0, denoiser.input_noise_offset);
     let pilot = denoiser.pilot_offset_lut_for_test();
+    let actual = read_floats(&denoiser.client, pilot);
     assert!(pilot.uploads() > 1);
-    assert_eq!(read_floats(&denoiser.client, pilot), expected);
+    assert_eq!(actual, expected);
 }
 
 #[test]

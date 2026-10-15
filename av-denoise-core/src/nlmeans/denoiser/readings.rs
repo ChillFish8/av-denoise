@@ -356,9 +356,10 @@ impl NoiseReadings {
 
     #[cfg(test)]
     pub(in crate::nlmeans) fn fail_slot(&mut self, slot: u32, push_index: usize, message: &str) {
+        let owned_message = message.to_string();
         let entry = SlotEntry {
             push_index,
-            state: EntryState::Failed(message.to_string()),
+            state: EntryState::Failed(owned_message),
         };
 
         self.slots[slot as usize] = Some(entry);

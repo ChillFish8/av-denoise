@@ -33,10 +33,12 @@ fn run_fine_block_match_single_block(
     let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
     unsafe {
+        let mv_field_handle = mv_field.clone();
+        let confidence_handle = confidence.clone();
         let pyramid_arg = ArrayArg::from_raw_parts(pyramid, 2 * level_len);
         let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, 1);
-        let mv_field_arg = ArrayArg::from_raw_parts(mv_field.clone(), 2);
-        let confidence_arg = ArrayArg::from_raw_parts(confidence.clone(), 1);
+        let mv_field_arg = ArrayArg::from_raw_parts(mv_field_handle, 2);
+        let confidence_arg = ArrayArg::from_raw_parts(confidence_handle, 1);
 
         nlm_mc_block_match_fine::launch_unchecked::<R>(
             &client,
@@ -131,9 +133,10 @@ fn block_match_fine_argmin_finds_clean_shift() {
     let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
     unsafe {
+        let mv_field_handle = mv_field.clone();
         let pyramid_arg = ArrayArg::from_raw_parts(pyramid, 2 * level_len);
         let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, 1);
-        let mv_field_arg = ArrayArg::from_raw_parts(mv_field.clone(), mv_len);
+        let mv_field_arg = ArrayArg::from_raw_parts(mv_field_handle, mv_len);
         let confidence_arg = ArrayArg::from_raw_parts(confidence, 1);
 
         nlm_mc_block_match_fine::launch_unchecked::<R>(
@@ -201,9 +204,10 @@ fn run_coarse_block_match_single_block(
     let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
     unsafe {
+        let mv_field_handle = mv_field.clone();
         let pyramid_arg = ArrayArg::from_raw_parts(pyramid, 2 * level_len);
         let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, 1);
-        let mv_field_arg = ArrayArg::from_raw_parts(mv_field.clone(), 2);
+        let mv_field_arg = ArrayArg::from_raw_parts(mv_field_handle, 2);
 
         nlm_mc_block_match_coarse::launch_unchecked::<R>(
             &client,

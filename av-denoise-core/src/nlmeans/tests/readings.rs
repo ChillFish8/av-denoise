@@ -11,7 +11,8 @@ fn a_reading_with_temporal_stats_matches_the_temporal_reading() {
     let bright_band = quarters_at(0.6, 0.005, 160);
     quarters.extend(middle_band);
     quarters.extend(bright_band);
-    let (width, height) = frame_dims(quarters.len());
+    let quarter_count = quarters.len();
+    let (width, height) = frame_dims(quarter_count);
     let records = synthetic_records(&quarters);
 
     let row = [0.1f32, 0.2, 0.3, 0.4];

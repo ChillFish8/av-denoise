@@ -217,7 +217,7 @@ pub(in crate::nlmeans) fn temporal_stats_slot_view(
 /// Reads one ring slot's temporal-stats region back.
 ///
 /// The ring handle is sliced to the slot, so the transfer skips the rest of the ring.
-#[cfg(test)]
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 #[expect(
     clippy::too_many_arguments,
     reason = "the readback needs the ring handle plus every shape value that locates one slot in it"

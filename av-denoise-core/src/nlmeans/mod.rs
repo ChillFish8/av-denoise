@@ -30,7 +30,7 @@ pub(crate) use self::align::StorageAlign;
 pub(crate) use self::denoiser::{NlmDenoiser, RingView};
 pub use self::engine::Nlmeans;
 pub use self::motion::{MotionCompensationMode, MotionEstimation, MotionSearch};
-#[cfg(test)]
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::noise::QuarterClass;
 pub(crate) use self::noise::{NOISE_CURVE_BINS, QuarterClasses, StrengthMapParams};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]

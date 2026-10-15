@@ -27,16 +27,22 @@ fn normalise_leaves_the_region_it_read_zeroed() {
     let blocks_y = height.div_ceil(BLOCK_Y);
     let grid = CubeCount::new_2d(blocks_x, blocks_y);
     let dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
+    let accum_launched = accum.clone();
+    let wsum_launched = wsum.clone();
 
     unsafe {
+        let accum_arg = ArrayArg::from_raw_parts(accum_launched, 2 * region_len);
+        let wsum_arg = ArrayArg::from_raw_parts(wsum_launched, 2 * pixels);
+        let output_arg = ArrayArg::from_raw_parts(output, region_len);
+
         collab_normalise::launch_unchecked::<TestRuntime>(
             &client,
             grid,
             dim,
             stored_ch as usize,
-            ArrayArg::from_raw_parts(accum.clone(), 2 * region_len),
-            ArrayArg::from_raw_parts(wsum.clone(), 2 * pixels),
-            ArrayArg::from_raw_parts(output, region_len),
+            accum_arg,
+            wsum_arg,
+            output_arg,
             pixels as u32,
             width,
             height,

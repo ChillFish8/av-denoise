@@ -9,6 +9,7 @@ use cubecl::server::Handle;
 pub(crate) struct MirroredBuffer {
     handle: Handle,
     contents: Vec<u8>,
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     uploads: u64,
 }
 
@@ -20,6 +21,7 @@ impl MirroredBuffer {
         Self {
             handle,
             contents,
+            #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
             uploads: 1,
         }
     }
@@ -42,7 +44,11 @@ impl MirroredBuffer {
 
         self.handle = client.create_from_slice(bytes);
         self.contents.copy_from_slice(bytes);
-        self.uploads += 1;
+
+        #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+        {
+            self.uploads += 1;
+        }
     }
 
     pub(crate) fn handle(&self) -> &Handle {
@@ -50,7 +56,7 @@ impl MirroredBuffer {
     }
 
     /// How many times the buffer was uploaded, the first upload included.
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn uploads(&self) -> u64 {
         self.uploads
     }

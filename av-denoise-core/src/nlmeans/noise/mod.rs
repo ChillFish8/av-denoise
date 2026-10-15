@@ -17,7 +17,7 @@ pub(super) use self::correlation::{
 };
 pub use self::curve::NOISE_CURVE_BINS;
 pub(crate) use self::curve::NoiseCurve;
-#[cfg(test)]
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(super) use self::curve::build_noise_curve;
 pub(super) use self::estimator::{EMA_ALPHA, NoiseEstimator};
 #[cfg(test)]
@@ -32,9 +32,9 @@ pub(super) use self::spatial::{
     sigma_block_p25_from_partials,
     sigma_from_abs_sum,
 };
-#[cfg(test)]
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(super) use self::strength_map::classify_quarters;
-#[cfg(test)]
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::strength_map::{QuarterClass, QuarterTensor};
 pub(crate) use self::strength_map::{QuarterClasses, QuarterSettings, StrengthMapParams};
 pub(super) use self::temporal::{
@@ -62,7 +62,7 @@ pub(super) use self::temporal::{
     temporal_stats_slot_view,
     zero_temporal_stats_slot,
 };
-#[cfg(test)]
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(super) use self::temporal::{
     TEMPORAL_NOISE_BLOCK,
     accepted_static_blocks,

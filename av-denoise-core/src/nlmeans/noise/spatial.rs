@@ -41,7 +41,8 @@ pub(in crate::nlmeans) fn noise_partials_slot_stride_bytes(
 /// The Immerkær totals each ring slot keeps in the results buffer, one per stored channel lane.
 pub(in crate::nlmeans) const RESULTS_PER_SLOT: usize = 4;
 
-/// The four Immerkær totals `slot` holds in the results buffer.
+/// The [RESULTS_PER_SLOT](crate::nlmeans::noise::spatial::RESULTS_PER_SLOT) Immerkær totals `slot`
+/// holds in the results buffer.
 pub(in crate::nlmeans) fn noise_results_slot_view(
     results_buf: &Handle,
     frame_count: u32,

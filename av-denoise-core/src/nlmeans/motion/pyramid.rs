@@ -146,15 +146,19 @@ fn extract_luma<R: Runtime>(
     let level0_offset = pyramid_slot_byte_offset(width, height, frame_count, 0, slot, align);
     let level0_dst = pyramid.clone().offset_start(level0_offset);
     let level0_len = (frame_count * height * width) as usize;
+    let full_res_handle = full_res.clone();
 
     unsafe {
+        let full_res_arg = ArrayArg::from_raw_parts(full_res_handle, full_len);
+        let level0_arg = ArrayArg::from_raw_parts(level0_dst, level0_len);
+
         nlm_mc_extract_luma::launch_unchecked::<R>(
             client,
             grid,
             dim,
             stored_ch as usize,
-            ArrayArg::from_raw_parts(full_res.clone(), full_len),
-            ArrayArg::from_raw_parts(level0_dst, level0_len),
+            full_res_arg,
+            level0_arg,
             slot,
             0u32,
             width,
@@ -194,18 +198,11 @@ fn downscale_level<R: Runtime>(
     let dst_len = (dst_w * dst_h) as usize;
 
     unsafe {
+        let src_arg = ArrayArg::from_raw_parts(src, src_len);
+        let dst_arg = ArrayArg::from_raw_parts(dst, dst_len);
+
         nlm_mc_downscale::launch_unchecked::<R>(
-            client,
-            grid,
-            dim,
-            ArrayArg::from_raw_parts(src, src_len),
-            ArrayArg::from_raw_parts(dst, dst_len),
-            0u32,
-            0u32,
-            src_w,
-            src_h,
-            dst_w,
-            dst_h,
+            client, grid, dim, src_arg, dst_arg, 0u32, 0u32, src_w, src_h, dst_w, dst_h,
         );
     }
 }
