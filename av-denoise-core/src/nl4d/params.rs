@@ -175,7 +175,7 @@ impl Nl4dParams {
 
         if !(self.c_min.is_finite() && self.c_min >= 0.0 && self.c_min < 1.0) {
             let c_min = self.c_min;
-            let message = format!("c_min must be finite and at least 0 and below 1, got {c_min}");
+            let message = format!("c_min must be finite, at least 0 and below 1, got {c_min}");
             return Err(message);
         }
 
