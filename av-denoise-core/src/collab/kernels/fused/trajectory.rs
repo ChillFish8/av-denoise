@@ -25,6 +25,91 @@ fn covering_lo_host(patch_start: u32, blksize: u32, step: u32) -> u32 {
     overhang.div_ceil(step)
 }
 
+/// An x no candidate column can have, since positions use 13 bits.
+const NO_COLUMN: u32 = 0xFFFF_FFFF;
+
+/// Works out the x span each searched rectangle excludes on row `row_y`.
+///
+/// A rectangle the row crosses excludes its x span, and one it misses gets the empty span `1..=0`.
+#[cube]
+fn row_spans(
+    seen_left: &Array<u32>,
+    seen_right: &Array<u32>,
+    seen_top: &Array<u32>,
+    seen_bot: &Array<u32>,
+    row_y: u32,
+    skip_left: &mut Array<u32>,
+    skip_right: &mut Array<u32>,
+    #[comptime] max_rects: u32,
+) {
+    #[unroll]
+    for s in 0..max_rects {
+        let below_top = row_y >= seen_top[s as usize];
+        let above_bottom = row_y <= seen_bot[s as usize];
+        let row_inside = below_top && above_bottom;
+        skip_left[s as usize] = select(row_inside, seen_left[s as usize], 1u32);
+        skip_right[s as usize] = select(row_inside, seen_right[s as usize], 0u32);
+    }
+}
+
+/// Works out the column each held member takes on row `row_y` of frame `packed_t`.
+///
+/// A member on another row or frame gets [NO_COLUMN].
+#[cube]
+fn row_held_columns(
+    member_pos: &Array<u32>,
+    row_y: u32,
+    packed_t: u32,
+    held_x: &mut Array<u32>,
+    #[comptime] first: u32,
+) {
+    let row_key = pack_pos_t(0u32, row_y, packed_t);
+
+    #[unroll]
+    for k in 0..first {
+        let held = member_pos[k as usize];
+        let held_row = held & 0xFFFF_E000u32;
+        let held_column = held & 0x1FFFu32;
+        let on_row = held_row == row_key;
+        held_x[k as usize] = select(on_row, held_column, NO_COLUMN);
+    }
+}
+
+/// Whether `candidate_x` falls inside one of the spans [row_spans] worked out.
+#[cube]
+fn in_searched_span(
+    candidate_x: u32,
+    skip_left: &Array<u32>,
+    skip_right: &Array<u32>,
+    #[comptime] max_rects: u32,
+) -> bool {
+    let mut inside_any = false;
+
+    #[unroll]
+    for s in 0..max_rects {
+        let right_of_left = candidate_x >= skip_left[s as usize];
+        let left_of_right = candidate_x <= skip_right[s as usize];
+        let inside = right_of_left && left_of_right;
+        inside_any = inside_any || inside;
+    }
+
+    inside_any
+}
+
+/// Whether `candidate_x` is a column [row_held_columns] worked out.
+#[cube]
+fn is_held_column(candidate_x: u32, held_x: &Array<u32>, #[comptime] first: u32) -> bool {
+    let mut held_any = false;
+
+    #[unroll]
+    for k in 0..first {
+        let held = held_x[k as usize] == candidate_x;
+        held_any = held_any || held;
+    }
+
+    held_any
+}
+
 /// Builds one volume's frames, the anchor patch's best match in each neighbour frame.
 ///
 /// A neighbour's match is the lowest-distance position inside the refine rectangles of the motion
@@ -137,14 +222,17 @@ pub(crate) fn trajectory_search<S: Float, N: Size>(
 
                     let span = comptime!(2 * refine + 1);
                     for dy in 0..span {
+                        let wanted_y = t_top + dy;
+                        let candidate_y = u32::min(wanted_y, t_bot);
+
                         for dx in 0..span {
-                            let wanted_y = t_top + dy;
                             let wanted_x = t_left + dx;
                             let in_rect = wanted_x <= t_right && wanted_y <= t_bot;
                             let candidate_x = u32::min(wanted_x, t_right);
-                            let candidate_y = u32::min(wanted_y, t_bot);
                             let packed = pack_pos_t(candidate_x, candidate_y, packed_t);
 
+                            // The per-row skip spans run slower on this walk than testing each
+                            // position against every rectangle and member.
                             let mut skipped = false;
                             #[unroll]
                             for s in 0..max_rects {
@@ -218,32 +306,31 @@ pub(crate) fn trajectory_search<S: Float, N: Size>(
                         }
 
                         if !contained {
+                            let mut skip_left = Array::<u32>::new(max_rects as usize);
+                            let mut skip_right = Array::<u32>::new(max_rects as usize);
+                            let mut held_x = Array::<u32>::new(first as usize);
+
                             let mut candidate_y = t_top;
                             while candidate_y <= t_bot {
+                                row_spans(
+                                    &seen_left,
+                                    &seen_right,
+                                    &seen_top,
+                                    &seen_bot,
+                                    candidate_y,
+                                    &mut skip_left,
+                                    &mut skip_right,
+                                    max_rects,
+                                );
+                                row_held_columns(member_pos, candidate_y, packed_t, &mut held_x, first);
+
                                 let mut candidate_x = t_left;
                                 while candidate_x <= t_right {
-                                    let packed = pack_pos_t(candidate_x, candidate_y, packed_t);
-
-                                    let mut skipped = false;
-                                    #[unroll]
-                                    for s in 0..max_rects {
-                                        if candidate_x >= seen_left[s as usize]
-                                            && candidate_x <= seen_right[s as usize]
-                                            && candidate_y >= seen_top[s as usize]
-                                            && candidate_y <= seen_bot[s as usize]
-                                        {
-                                            skipped = true;
-                                        }
-                                    }
-
-                                    #[unroll]
-                                    for k in 0..first {
-                                        if member_pos[k as usize] == packed {
-                                            skipped = true;
-                                        }
-                                    }
-
-                                    if !skipped {
+                                    let in_span =
+                                        in_searched_span(candidate_x, &skip_left, &skip_right, max_rects);
+                                    let held = is_held_column(candidate_x, &held_x, first);
+                                    if !in_span && !held {
+                                        let packed = pack_pos_t(candidate_x, candidate_y, packed_t);
                                         let dist = candidate_distance(
                                             ring,
                                             search_ring,
@@ -264,6 +351,7 @@ pub(crate) fn trajectory_search<S: Float, N: Size>(
 
                                     candidate_x += 1u32;
                                 }
+
                                 candidate_y += 1u32;
                             }
                         }

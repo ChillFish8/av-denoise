@@ -3,6 +3,7 @@ pub mod bilateral;
 pub mod cast_f16;
 pub mod collab_aggregate;
 pub mod collab_fused;
+pub mod compilation_cache;
 pub mod copy;
 pub mod dist_2d_weight;
 pub mod dist_2d_weight_ref;

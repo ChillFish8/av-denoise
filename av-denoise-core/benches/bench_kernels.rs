@@ -15,6 +15,7 @@ use kernels::bilateral::BilateralBench;
 use kernels::cast_f16::CastF16Bench;
 use kernels::collab_aggregate::{CollabNormaliseBench, CollabZeroAccumBench};
 use kernels::collab_fused::{CollabFusedBench, fitted_variants};
+use kernels::compilation_cache::install_bench_compilation_cache;
 use kernels::copy::CopyBench;
 use kernels::dist_2d_weight::DistWeightBench;
 use kernels::dist_2d_weight_ref::DistWeightRefBench;
@@ -400,6 +401,8 @@ fn main() {
     if let Some(filter) = cli.filter.clone() {
         let _ = kernels::FILTER.set(filter);
     }
+
+    install_bench_compilation_cache();
 
     #[cfg(feature = "vulkan")]
     {
