@@ -123,6 +123,7 @@ fn regularise_site<R: Runtime>(
         client: client.clone(),
         candidate: RegulariseCandidate::baseline(),
         neighbours: 4,
+        static_field: false,
     };
     let (site, _) = bench.prepare();
 

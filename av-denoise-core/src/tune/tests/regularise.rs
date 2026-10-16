@@ -508,3 +508,89 @@ fn rounding_compare_allows_flipped_vectors_up_to_the_share() {
         .expect("the outputs read back");
     assert!(!over_verdict.passed(), "{over_verdict:?}");
 }
+
+/// A regularise site whose motion field holds one vector over each 3x3 patch of blocks.
+fn patched_field_site(
+    client: &ComputeClient<TestRuntime>,
+    spec: &RegulariseSpec,
+) -> RegulariseSite<TestRuntime> {
+    let mut site = regularise_site(client, spec);
+    let mv_stride = site.outputs.mv_stride as usize;
+    let neighbours = site.outputs.neighbours as usize;
+    let mut field = vec![0i32; neighbours * mv_stride];
+
+    for neighbour in 0..neighbours {
+        for block_row in 0..site.blocks_y {
+            for block_col in 0..site.blocks_x {
+                let block = (block_row * site.blocks_x + block_col) as usize;
+                let index = neighbour * mv_stride + 2 * block;
+                field[index] = (block_col / 3 % 3) as i32 - 1 + neighbour as i32;
+                field[index + 1] = (block_row / 3 % 2) as i32;
+            }
+        }
+    }
+
+    let field_bytes = i32::as_bytes(&field);
+    site.mv_in = client.create_from_slice(field_bytes);
+    site
+}
+
+/// At each patch's centre block, every adjacent block and the median repeat the block's own vector.
+#[test]
+fn repeated_candidates_pick_the_reference_kernel_vectors() {
+    let client = test_client();
+    let contents = [
+        RegulariseContent::Flat,
+        RegulariseContent::Periodic,
+        RegulariseContent::Textured,
+    ];
+
+    for content in contents {
+        let spec = RegulariseSpec {
+            width: 72,
+            height: 40,
+            content,
+            field_lambda: 1.0,
+            neighbours: 4,
+        };
+        let site = patched_field_site(&client, &spec);
+        let (expected_vectors, expected_confidence) = reference_outputs(&site);
+        let vector_count = site.outputs.neighbours as usize * site.outputs.blocks;
+        let allowed = (vector_count as f64 * COOP_MAX_FLIPPED_SHARE).floor() as usize;
+
+        for &candidate in RegulariseCandidate::ALL {
+            let label = format!("{content:?} {}", candidate.name());
+            let outputs = site.scratch_outputs();
+            site.launch(candidate, &outputs);
+
+            let vectors_len = outputs.vectors_len();
+            let confidence_len = outputs.confidence_len();
+            let got_vectors = read_i32(&client, &outputs.vectors, vectors_len).expect("vectors read back");
+            let got_confidence =
+                read_f32(&client, &outputs.confidence, confidence_len).expect("confidence reads back");
+
+            if candidate.fidelity().class() == FidelityClass::Exact {
+                assert_eq!(got_vectors, expected_vectors, "{label}: vectors");
+                assert_eq!(got_confidence, expected_confidence, "{label}: confidence");
+                continue;
+            }
+
+            let agreement = compare_fields(
+                &outputs,
+                &expected_vectors,
+                &got_vectors,
+                &expected_confidence,
+                &got_confidence,
+            );
+            let flipped = agreement.flipped;
+            let difference = agreement.confidence.max_abs;
+            assert!(flipped <= allowed, "{label}: {flipped} flipped vectors");
+            assert!(difference <= COOP_MAX_ABS, "{label}: confidence {difference:e}");
+
+            // Flat and periodic SADs tie exactly, so rounding cannot flip a vector.
+            if content != RegulariseContent::Textured {
+                assert_eq!(got_vectors, expected_vectors, "{label}: vectors");
+            }
+        }
+    }
+}

@@ -266,8 +266,19 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
                 client: client.clone(),
                 candidate,
                 neighbours,
+                static_field: false,
             });
         }
+    }
+
+    // A zero motion field, where six of every block's seven candidates repeat.
+    for &candidate in RegulariseCandidate::ALL {
+        run(MvRegulariseBench {
+            client: client.clone(),
+            candidate,
+            neighbours: 4,
+            static_field: true,
+        });
     }
 
     for &size in GRAIN_SIZES {

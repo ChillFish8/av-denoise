@@ -16,6 +16,8 @@ pub struct MvRegulariseBench<R: Runtime> {
     pub candidate: RegulariseCandidate,
     /// Neighbours regularised in one launch, each against the centre frame.
     pub neighbours: u32,
+    /// Whether the motion field is all zero, so six of every block's seven candidates repeat.
+    pub static_field: bool,
 }
 
 impl<R: Runtime> Benchmark for MvRegulariseBench<R> {
@@ -44,9 +46,13 @@ impl<R: Runtime> Benchmark for MvRegulariseBench<R> {
 
         let mv_stride = 2 * blocks;
         let conf_stride = blocks;
-        let field: Vec<i32> = (0..neighbours * mv_stride)
+        let mut field: Vec<i32> = (0..neighbours * mv_stride)
             .map(|index| (index % 7) as i32 - 3)
             .collect();
+        if self.static_field {
+            field.fill(0);
+        }
+
         let field_bytes = i32::as_bytes(&field);
         let mv_in = self.client.create_from_slice(field_bytes);
         let vectors = self.client.empty(neighbours * mv_stride * size_of::<i32>());
@@ -95,8 +101,9 @@ impl<R: Runtime> Benchmark for MvRegulariseBench<R> {
     }
 
     fn name(&self) -> String {
+        let content = if self.static_field { "_static" } else { "" };
         let base = format!(
-            "{}/{}/1080p_luma",
+            "{}/{}/1080p_luma{content}",
             RegulariseCandidate::SITE,
             self.candidate.name()
         );

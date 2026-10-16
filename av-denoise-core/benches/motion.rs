@@ -245,6 +245,7 @@ fn run_kernels<R: Runtime>(backend: &str, client: &ComputeClient<R>) {
                 client: client.clone(),
                 candidate,
                 neighbours,
+                static_field: false,
             });
         }
     }

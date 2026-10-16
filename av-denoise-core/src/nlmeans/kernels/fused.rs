@@ -675,9 +675,9 @@ pub fn nlm_fused_single_window<N: Size>(
                     let center_idx =
                         ((tile_y + search_radius) * expanded_width + (tile_x + search_radius)) as usize;
                     let center = smem_center[center_idx];
-                    let src_x = fwd_tile_x0 + tile_x as i32 + q_x;
-                    let src_y = fwd_tile_y0 + tile_y as i32 + q_y;
-                    let neighbor = read_clamped_line(input, src_x, src_y, frame_t, width, height);
+                    let neighbor_x = fwd_tile_x0 + tile_x as i32 + q_x;
+                    let neighbor_y = fwd_tile_y0 + tile_y as i32 + q_y;
+                    let neighbor = read_clamped_line(input, neighbor_x, neighbor_y, frame_t, width, height);
                     smem_dist[tile_idx as usize] = line_sum_sq(center - neighbor, channels) * scale;
                     halo += threads;
                 }
@@ -1028,9 +1028,10 @@ pub fn nlm_fused_single_window_ref<N: Size>(
                     let center_idx =
                         ((tile_y + search_radius) * expanded_width + (tile_x + search_radius)) as usize;
                     let center = smem_center[center_idx];
-                    let src_x = fwd_tile_x0 + tile_x as i32 + q_x;
-                    let src_y = fwd_tile_y0 + tile_y as i32 + q_y;
-                    let neighbor = read_clamped_line(reference, src_x, src_y, frame_t, width, height);
+                    let neighbor_x = fwd_tile_x0 + tile_x as i32 + q_x;
+                    let neighbor_y = fwd_tile_y0 + tile_y as i32 + q_y;
+                    let neighbor =
+                        read_clamped_line(reference, neighbor_x, neighbor_y, frame_t, width, height);
                     smem_dist[tile_idx as usize] = line_sum_sq(center - neighbor, channels) * scale;
                     tile_idx += threads;
                 }
