@@ -294,9 +294,13 @@ impl FromStr for Device {
             "discrete" => Ok(Device::Discrete(index?)),
             "integrated" => Ok(Device::Integrated(index?)),
             "virtual" => Ok(Device::Virtual(index?)),
-            other => Err(format!(
-                "unknown device kind '{other}', expected default, discrete[:N], integrated[:N], virtual[:N], or cpu"
-            )),
+            other => {
+                let message = format!(
+                    "unknown device kind '{other}', expected default, discrete[:N], integrated[:N], \
+                     virtual[:N], or cpu"
+                );
+                Err(message)
+            },
         }
     }
 }

@@ -1,9 +1,10 @@
 use cubecl::prelude::*;
 
 use super::centre::{SearchRect, centre_partial, pin_self_match};
+use super::shape::{SearchCursor, SearchShape};
 use super::variant::{CollabVariant, Walk};
 use crate::collab::kernels::group::pack_pos_t;
-use crate::collab::kernels::plane_ops::{group_any, scatter_sums8, shift_insert8};
+use crate::collab::kernels::plane_ops::{UNFILLED_DISTANCE, group_any, scatter_sums8, shift_insert8};
 
 /// Candidates one batch scores, one per lane of a group.
 const BATCH: u32 = 8;
@@ -27,26 +28,14 @@ pub(crate) fn batched_centre_walk<S: Float, N: Size>(
     current: &Array<f32>,
     reference: &Array<Vector<S, Const<2>>>,
     rect: &SearchRect,
-    rx: u32,
-    ry: u32,
-    tile_x0: u32,
-    tile_y0: u32,
-    centre_slot: u32,
-    sub: u32,
-    base: u32,
-    scale: f32,
+    cursor: &SearchCursor,
     best_d: &mut f32,
     best_pos: &mut u32,
     #[comptime] variant: CollabVariant,
-    #[comptime] f16_search: bool,
-    #[comptime] spatial_radius: u32,
-    #[comptime] width: u32,
-    #[comptime] height: u32,
-    #[comptime] channels: u32,
-    #[comptime] stored_ch: u32,
+    #[comptime] shape: SearchShape,
 ) {
     let walk = comptime!(variant.walk);
-    let span = comptime!(2 * spatial_radius + 1);
+    let span = comptime!(2 * shape.spatial_radius + 1);
     let rect_width = rect.right - rect.left + 1u32;
     let rect_count = rect_width * (rect.bottom - rect.top + 1u32);
 
@@ -63,13 +52,14 @@ pub(crate) fn batched_centre_walk<S: Float, N: Size>(
     };
 
     let batches = walk_count.div_ceil(BATCH);
+    let mut worst = UNFILLED_DISTANCE.runtime();
     let mut batch = 0u32;
 
     while batch < batches {
         let first = batch * BATCH;
 
         // Lane `sub` owns candidate `sub` of the batch for the vote and the insert.
-        let own_index = first + sub;
+        let own_index = first + cursor.sub;
         let own_x = rect.left + own_index % walk_width;
         let own_y = rect.top + own_index / walk_width;
         let own_live = own_index < walk_count && own_x <= rect.right && own_y <= rect.bottom;
@@ -89,28 +79,17 @@ pub(crate) fn batched_centre_walk<S: Float, N: Size>(
                 current,
                 reference,
                 rect,
-                rx,
-                ry,
-                tile_x0,
-                tile_y0,
-                centre_slot,
-                sub,
-                base,
-                scale,
+                cursor,
                 best_d,
                 best_pos,
+                &mut worst,
                 first,
                 walk_width,
                 own_x,
                 own_y,
                 own_live,
                 variant,
-                f16_search,
-                spatial_radius,
-                width,
-                height,
-                channels,
-                stored_ch,
+                shape,
             );
         }
 
@@ -121,7 +100,7 @@ pub(crate) fn batched_centre_walk<S: Float, N: Size>(
 /// Scores the batch starting at walk index `first` and inserts its totals in walk order.
 ///
 /// A padding candidate past the walk is pinned inside the rectangle, so every read stays in range,
-/// and carries the `3.0e38` an unfilled slot holds.
+/// and carries [UNFILLED_DISTANCE](crate::collab::kernels::plane_ops::UNFILLED_DISTANCE).
 #[cube]
 #[expect(
     clippy::too_many_arguments,
@@ -134,28 +113,17 @@ fn score_batch<S: Float, N: Size>(
     current: &Array<f32>,
     reference: &Array<Vector<S, Const<2>>>,
     rect: &SearchRect,
-    rx: u32,
-    ry: u32,
-    tile_x0: u32,
-    tile_y0: u32,
-    centre_slot: u32,
-    sub: u32,
-    base: u32,
-    scale: f32,
+    cursor: &SearchCursor,
     best_d: &mut f32,
     best_pos: &mut u32,
+    worst: &mut f32,
     first: u32,
     walk_width: u32,
     own_x: u32,
     own_y: u32,
     own_live: bool,
     #[comptime] variant: CollabVariant,
-    #[comptime] f16_search: bool,
-    #[comptime] spatial_radius: u32,
-    #[comptime] width: u32,
-    #[comptime] height: u32,
-    #[comptime] channels: u32,
-    #[comptime] stored_ch: u32,
+    #[comptime] shape: SearchShape,
 ) {
     let walk = comptime!(variant.walk);
     let mut partials = Array::<f32>::new(BATCH as usize);
@@ -175,30 +143,21 @@ fn score_batch<S: Float, N: Size>(
             reference,
             candidate_x,
             candidate_y,
-            tile_x0,
-            tile_y0,
-            centre_slot,
-            sub,
+            cursor,
             variant,
-            f16_search,
-            spatial_radius,
-            width,
-            height,
-            channels,
-            stored_ch,
+            shape,
         );
     }
 
-    let total = scatter_sums8(&partials, sub);
+    let total = scatter_sums8(&partials, cursor.sub);
     let candidate_x = u32::min(own_x, rect.right);
     let candidate_y = u32::min(own_y, rect.bottom);
-    let scored = total * scale;
-    let masked = select(own_live, scored, 3.0e38f32);
-    let dist = pin_self_match(masked, own_live, candidate_x, candidate_y, rx, ry);
+    let scored = total * cursor.scale;
+    let masked = select(own_live, scored, UNFILLED_DISTANCE);
+    let dist = pin_self_match(masked, own_live, candidate_x, candidate_y, cursor.rx, cursor.ry);
 
     let packed = pack_pos_t(candidate_x, candidate_y, 0u32);
-    let worst = plane_shuffle(*best_d, base + 7u32);
-    let beats = dist < worst;
+    let beats = dist < *worst;
     let voted = if comptime!(walk == Walk::Uniform) {
         plane_any(beats)
     } else {
@@ -208,9 +167,11 @@ fn score_batch<S: Float, N: Size>(
     if voted {
         #[unroll]
         for k in 0..BATCH {
-            let candidate_d = plane_shuffle(dist, base + k);
-            let candidate_pos = plane_shuffle(packed, base + k);
-            shift_insert8(best_d, best_pos, candidate_d, candidate_pos, sub);
+            let candidate_d = plane_shuffle(dist, cursor.base + k);
+            let candidate_pos = plane_shuffle(packed, cursor.base + k);
+            shift_insert8(best_d, best_pos, candidate_d, candidate_pos, cursor.sub);
         }
+
+        *worst = plane_shuffle(*best_d, cursor.base + 7u32);
     }
 }

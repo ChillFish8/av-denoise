@@ -213,7 +213,8 @@ pub fn compilation_cache_dir() -> Option<&'static Path> {
 fn set_runtime_config(path: &Path) -> Result<(), CacheError> {
     let cache_dir = path.to_path_buf();
     let mut config = CubeClRuntimeConfig::from_current_dir().override_from_env();
-    config.compilation.cache = Some(CacheConfig::File(cache_dir.clone()));
+    let compilation_dir = cache_dir.clone();
+    config.compilation.cache = Some(CacheConfig::File(compilation_dir));
     config.autotune.cache = CacheConfig::File(cache_dir);
 
     // `RuntimeConfig::set` panics if the singleton is already set up, and CubeCL has no fallible

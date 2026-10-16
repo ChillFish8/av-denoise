@@ -330,7 +330,7 @@ impl NlmParams {
             && (!sigma.is_finite() || sigma <= 0.0 || sigma > 1.0)
         {
             anyhow::bail!(
-                "hq sigma_override must be finite and in (0, 1] in normalised units, got {}",
+                "hq sigma_override must be finite, above 0 and at most 1 in normalised units, got {}",
                 sigma,
             );
         }
@@ -350,7 +350,7 @@ impl NlmParams {
             && !(hq.sigma_scale.is_finite() && (0.1..=10.0).contains(&hq.sigma_scale))
         {
             anyhow::bail!(
-                "hq sigma_scale must be finite and in [0.1, 10.0], got {}",
+                "hq sigma_scale must be finite and in 0.1..=10.0, got {}",
                 hq.sigma_scale,
             );
         }

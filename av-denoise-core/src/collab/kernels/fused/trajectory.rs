@@ -1,9 +1,11 @@
 use cubecl::prelude::*;
 
 use super::distance::{candidate_distance, pack_reference};
+use super::shape::SearchShape;
 use super::variant::Walk;
 use crate::collab::PATCH_SIZE;
 use crate::collab::kernels::group::{clamp_top_left, pack_pos_t};
+use crate::collab::kernels::plane_ops::UNFILLED_DISTANCE;
 
 /// The lowest block index whose span contains the patch at `patch_start` on one axis.
 ///
@@ -28,7 +30,8 @@ fn covering_lo_host(patch_start: u32, blksize: u32, step: u32) -> u32 {
 /// A neighbour's match is the lowest-distance position inside the refine rectangles of the motion
 /// blocks covering the anchor, each around where that block's vector moves the anchor. The
 /// `tail` lowest of those per-frame matches land in `member_d` and `member_pos` at
-/// `first..first + tail`, ascending. A slot no frame filled keeps the `3.0e38` it starts with.
+/// `first..first + tail`, ascending. A slot no frame filled keeps the
+/// [UNFILLED_DISTANCE](crate::collab::kernels::plane_ops::UNFILLED_DISTANCE) it starts with.
 ///
 /// A position already held in `member_pos[..first]` is skipped, so no patch enters the group
 /// twice. A block below `c_min` is skipped too, and a position reached by two covering blocks
@@ -64,7 +67,6 @@ pub(crate) fn trajectory_search<S: Float, N: Size>(
     #[comptime] first: u32,
     #[comptime] tail: u32,
     #[comptime] walk: Walk,
-    #[comptime] f16_search: bool,
     #[comptime] radius: u32,
     #[comptime] refine: u32,
     #[comptime] mv_stride: u32,
@@ -73,17 +75,14 @@ pub(crate) fn trajectory_search<S: Float, N: Size>(
     #[comptime] blksize: u32,
     #[comptime] blocks_x: u32,
     #[comptime] blocks_y: u32,
-    #[comptime] width: u32,
-    #[comptime] height: u32,
-    #[comptime] channels: u32,
-    #[comptime] stored_ch: u32,
+    #[comptime] shape: SearchShape,
 ) {
-    let max_x = comptime!(width - PATCH_SIZE);
-    let max_y = comptime!(height - PATCH_SIZE);
+    let max_x = comptime!(shape.width - PATCH_SIZE);
+    let max_y = comptime!(shape.height - PATCH_SIZE);
     let n_neighbours = comptime!(2 * radius);
     let covers = comptime!(blksize.div_ceil(blk_step));
     let max_rects = comptime!(covers * covers);
-    let reference = pack_reference::<S>(anchor, f16_search, channels, stored_ch);
+    let reference = pack_reference::<S>(anchor, shape);
 
     let bx_hi = (anchor_x / blk_step).min(blocks_x - 1);
     let by_hi = (anchor_y / blk_step).min(blocks_y - 1);
@@ -97,7 +96,7 @@ pub(crate) fn trajectory_search<S: Float, N: Size>(
         let slot = neighbour_slots[t as usize];
         let packed_t = t + 1u32;
 
-        let mut frame_d = 3.0e38f32;
+        let mut frame_d = UNFILLED_DISTANCE.runtime();
         let mut frame_pos = 0u32;
 
         let mut seen_left = Array::<u32>::new(max_rects as usize);
@@ -178,13 +177,9 @@ pub(crate) fn trajectory_search<S: Float, N: Size>(
                                     slot,
                                     sub,
                                     scale,
-                                    f16_search,
-                                    width,
-                                    height,
-                                    channels,
-                                    stored_ch,
+                                    shape,
                                 );
-                                let dist = select(live_pos, scored, 3.0e38f32);
+                                let dist = select(live_pos, scored, UNFILLED_DISTANCE);
                                 let better = dist < frame_d;
                                 frame_d = select(better, dist, frame_d);
                                 frame_pos = select(better, packed, frame_pos);
@@ -259,11 +254,7 @@ pub(crate) fn trajectory_search<S: Float, N: Size>(
                                             slot,
                                             sub,
                                             scale,
-                                            f16_search,
-                                            width,
-                                            height,
-                                            channels,
-                                            stored_ch,
+                                            shape,
                                         );
                                         if dist < frame_d {
                                             frame_d = dist;

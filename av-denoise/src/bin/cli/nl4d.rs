@@ -303,7 +303,9 @@ impl Nl4dArgs {
         if let Some(sigma) = self.sigma
             && (!sigma.is_finite() || sigma <= 0.0 || sigma > 255.0)
         {
-            anyhow::bail!("--sigma must be a finite value in (0, 255] 8-bit units (got {sigma})");
+            anyhow::bail!(
+                "--sigma must be a finite value above 0 and at most 255 in 8-bit units (got {sigma})"
+            );
         }
 
         if self.sigma.is_some() && self.sigma_scale.is_some_and(|scale| scale != 1.0) {

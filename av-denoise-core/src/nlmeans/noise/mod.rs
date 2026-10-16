@@ -54,6 +54,7 @@ pub(super) use self::temporal::{
     TemporalNoiseReading,
     TemporalNoiseSample,
     TemporalStatsCtx,
+    UNMEASURED_FLATNESS,
     run_temporal_noise_stats,
     temporal_noise_reading,
     temporal_stats_blocks,

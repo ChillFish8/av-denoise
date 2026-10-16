@@ -14,6 +14,7 @@ use crate::nlmeans::noise::{
     QuarterSettings,
     TEMPORAL_QUARTER_BASE,
     TEMPORAL_QUARTER_FIELDS,
+    UNMEASURED_FLATNESS,
     accepted_static_blocks,
     aggregate_temporal_noise_stats,
     build_noise_curve,
@@ -323,7 +324,7 @@ fn the_flat_and_clip_gates_reject_their_quarters() {
 #[test]
 fn a_ragged_quarter_is_rejected_by_the_flat_gate() {
     let ragged = SyntheticQuarter {
-        flatness: 3.0e38,
+        flatness: UNMEASURED_FLATNESS,
         ..quarter_at(0.6, 0.02)
     };
     assert_gate_keeps_the_bin_empty(ragged);
@@ -459,7 +460,7 @@ fn a_ragged_parent_reads_its_partial_quarters_with_their_own_pixel_count() {
         ..quarter_at(0.5, 0.02)
     };
     let ragged = SyntheticQuarter {
-        flatness: 3.0e38,
+        flatness: UNMEASURED_FLATNESS,
         ..quarter_at(0.5, 0.02)
     };
     let full_block = [

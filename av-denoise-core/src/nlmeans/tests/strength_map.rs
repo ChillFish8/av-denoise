@@ -18,6 +18,7 @@ use crate::nlmeans::noise::{
     QuarterSettings,
     QuarterTensor,
     StrengthMapParams,
+    UNMEASURED_FLATNESS,
     classify_quarters,
     temporal_noise_reading,
     temporal_stats_record_len,
@@ -150,7 +151,7 @@ fn clipped_quarters_are_not_flat() {
 #[test]
 fn a_ragged_quarter_is_not_flat() {
     let ragged = SyntheticQuarter {
-        flatness: 3.0e38,
+        flatness: UNMEASURED_FLATNESS,
         ..quarter_at(0.3, SIGMA)
     };
     let flat = is_flat(ragged);

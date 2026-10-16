@@ -1,5 +1,7 @@
 use cubecl::prelude::*;
 
+use super::distance::{pair_squared_difference, pair_sum_total};
+use super::shape::SearchShape;
 use crate::collab::PATCH_SIZE;
 use crate::nlmeans::kernels::helpers::read_line;
 
@@ -20,14 +22,15 @@ pub(crate) fn load_centre_tile<S: Float, N: Size>(
     origin_x: u32,
     origin_y: u32,
     centre_slot: u32,
-    #[comptime] f16_search: bool,
     #[comptime] tile_width: u32,
     #[comptime] tile_height: u32,
     #[comptime] lanes: u32,
-    #[comptime] width: u32,
-    #[comptime] height: u32,
-    #[comptime] stored_ch: u32,
+    #[comptime] shape: SearchShape,
 ) {
+    let f16_search = comptime!(shape.f16_search);
+    let width = comptime!(shape.width);
+    let height = comptime!(shape.height);
+    let stored_ch = comptime!(shape.stored_ch);
     let pixels = comptime!(tile_width * tile_height);
     let last_x = comptime!(width - 1);
     let last_y = comptime!(height - 1);
@@ -65,21 +68,18 @@ pub(crate) fn load_centre_tile<S: Float, N: Size>(
 /// [candidate_partial](crate::collab::kernels::fused::distance::candidate_partial), so the two give
 /// bit identical partials.
 #[cube]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "every argument is a buffer, position or comptime shape the read needs"
-)]
 pub(crate) fn tile_partial<S: Float>(
     tile: &SharedMemory<S>,
     current: &Array<f32>,
     reference: &Array<Vector<S, Const<2>>>,
     column: u32,
     row: u32,
-    #[comptime] f16_search: bool,
     #[comptime] tile_width: u32,
-    #[comptime] channels: u32,
-    #[comptime] stored_ch: u32,
+    #[comptime] shape: SearchShape,
 ) -> f32 {
+    let f16_search = comptime!(shape.f16_search);
+    let channels = comptime!(shape.channels);
+    let stored_ch = comptime!(shape.stored_ch);
     let mut partial = 0.0f32;
 
     if comptime!(f16_search && stored_ch == 1) {
@@ -90,16 +90,11 @@ pub(crate) fn tile_partial<S: Float>(
             let top = tile[((row + r) * tile_width + column) as usize];
             let bottom_row = row + r + comptime!(PATCH_SIZE / 2);
             let bottom = tile[(bottom_row * tile_width + column) as usize];
-            let mut pixel = Vector::<S, Const<2>>::empty();
-            pixel[0] = top;
-            pixel[1] = bottom;
-            let diff = reference[r as usize] - pixel;
-            sum += diff * diff;
+            let squared = pair_squared_difference(reference, top, bottom, r);
+            sum += squared;
         }
 
-        let low = f32::cast_from(sum[0]);
-        let high = f32::cast_from(sum[1]);
-        partial = low + high;
+        partial = pair_sum_total(sum);
     } else if comptime!(f16_search) {
         let pairs_per_row = comptime!(stored_ch / 2);
         let mut sum = Vector::<S, Const<2>>::new(S::new(0.0f32));
@@ -109,17 +104,15 @@ pub(crate) fn tile_partial<S: Float>(
             let first_lane = ((row + r) * tile_width + column) * stored_ch;
             #[unroll]
             for p in 0..pairs_per_row {
-                let mut pixel = Vector::<S, Const<2>>::empty();
-                pixel[0] = tile[(first_lane + comptime!(2 * p)) as usize];
-                pixel[1] = tile[(first_lane + comptime!(2 * p + 1)) as usize];
-                let diff = reference[comptime!(r * pairs_per_row + p) as usize] - pixel;
-                sum += diff * diff;
+                let first = tile[(first_lane + comptime!(2 * p)) as usize];
+                let second = tile[(first_lane + comptime!(2 * p + 1)) as usize];
+                let pair = comptime!(r * pairs_per_row + p);
+                let squared = pair_squared_difference(reference, first, second, pair);
+                sum += squared;
             }
         }
 
-        let low = f32::cast_from(sum[0]);
-        let high = f32::cast_from(sum[1]);
-        partial = low + high;
+        partial = pair_sum_total(sum);
     } else {
         #[unroll]
         for r in 0..PATCH_SIZE {

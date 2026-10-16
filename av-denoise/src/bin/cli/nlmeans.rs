@@ -282,7 +282,10 @@ impl NlmeansArgs {
                 if let Some(sigma) = self.hq_sigma
                     && (!sigma.is_finite() || sigma <= 0.0 || sigma > 255.0)
                 {
-                    anyhow::bail!("--hq-sigma must be a finite value in (0, 255] 8-bit units (got {sigma})");
+                    anyhow::bail!(
+                        "--hq-sigma must be a finite value above 0 and at most 255 in 8-bit units \
+                         (got {sigma})"
+                    );
                 }
 
                 if self.hq_sigma.is_some() && sigma_scale_is_set {

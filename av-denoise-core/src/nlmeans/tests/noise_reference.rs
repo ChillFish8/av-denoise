@@ -14,6 +14,7 @@ use crate::nlmeans::noise::{
     TEMPORAL_QUARTER_BASE,
     TEMPORAL_QUARTER_FIELDS,
     TEMPORAL_QUARTERS,
+    UNMEASURED_FLATNESS,
 };
 
 /// The single-thread reduction the production kernel must reproduce.
@@ -396,7 +397,7 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
             let full_width = block_w >= (quarter_x + 1u32) * 8u32;
             let full_height = block_h >= (quarter_y + 1u32) * 8u32;
 
-            let mut flatness = 3.0e38f32;
+            let mut flatness = UNMEASURED_FLATNESS.runtime();
             if full_width && full_height {
                 flatness = pair_tile[(quarter * 16u32) as usize] / 24.0f32;
             }

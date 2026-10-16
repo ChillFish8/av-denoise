@@ -56,9 +56,11 @@ impl FromStr for Device {
         };
 
         if matches!(kind, "default" | "cpu") && suffix.is_some() {
-            return Err(format!(
-                "device kind '{kind}' takes no index, got '{selector}'. Only discrete, integrated, and virtual take an index"
-            ));
+            let message = format!(
+                "device kind '{kind}' takes no index, got '{selector}'. Only discrete, integrated, \
+                 and virtual take an index"
+            );
+            return Err(message);
         }
 
         let parse_index = |index_text: &str| -> Result<usize, String> {
@@ -83,9 +85,13 @@ impl FromStr for Device {
                 let index = parse_index(index_text)?;
                 Ok(Device::Virtual { index })
             },
-            other => Err(format!(
-                "unknown device kind '{other}', expected default, discrete[:N], integrated[:N], virtual[:N], or cpu"
-            )),
+            other => {
+                let message = format!(
+                    "unknown device kind '{other}', expected default, discrete[:N], integrated[:N], \
+                     virtual[:N], or cpu"
+                );
+                Err(message)
+            },
         }
     }
 }
@@ -109,9 +115,12 @@ impl Device {
         match self {
             Device::Default => Ok(cubecl::cuda::CudaDevice { index: 0 }),
             Device::Discrete { index } => Ok(cubecl::cuda::CudaDevice { index: *index }),
-            other => Err(anyhow::anyhow!(
-                "device {other:?} is not supported on the CUDA runtime, use `default` or `discrete[:N]`"
-            )),
+            other => {
+                let error = anyhow::anyhow!(
+                    "device {other:?} is not supported on the CUDA runtime, use `default` or `discrete[:N]`"
+                );
+                Err(error)
+            },
         }
     }
 }
@@ -122,9 +131,12 @@ impl Device {
         match self {
             Device::Default => Ok(cubecl::hip::AmdDevice { index: 0 }),
             Device::Discrete { index } => Ok(cubecl::hip::AmdDevice { index: *index }),
-            other => Err(anyhow::anyhow!(
-                "device {other:?} is not supported on the ROCm runtime, use `default` or `discrete[:N]`"
-            )),
+            other => {
+                let error = anyhow::anyhow!(
+                    "device {other:?} is not supported on the ROCm runtime, use `default` or `discrete[:N]`"
+                );
+                Err(error)
+            },
         }
     }
 }

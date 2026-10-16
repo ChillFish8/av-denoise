@@ -126,7 +126,7 @@ fn submit_machinery_reports_ring_view_with_correct_motion_and_confidence() {
 
     assert!(
         confidence.is_finite() && (0.0..=1.0).contains(&confidence),
-        "confidence must be finite and in [0, 1], got {confidence}"
+        "confidence must be finite and in 0.0..=1.0, got {confidence}"
     );
     assert!(
         confidence > 0.5,

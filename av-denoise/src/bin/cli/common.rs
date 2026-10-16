@@ -99,7 +99,8 @@ fn parse_tune_budget(raw: &str) -> Result<f64, String> {
     let seconds = raw.trim().parse::<f64>().map_err(|_| invalid_tune_budget(raw))?;
 
     if !is_valid_tune_budget(seconds) {
-        return Err(invalid_tune_budget(raw));
+        let error = invalid_tune_budget(raw);
+        return Err(error);
     }
 
     Ok(seconds)
@@ -141,7 +142,12 @@ impl CommonArgs {
 
 /// Reads a size string such as `8GB` into a byte count.
 fn parse_frame_budget(raw: &str) -> Result<u64, String> {
-    raw.parse::<bytesize::ByteSize>().map(|size| size.as_u64()).map_err(|_| {
-        format!("invalid frame budget '{raw}'. Give a size such as 8GB, 4.5GiB, or 512MB, or a plain byte count")
-    })
+    raw.parse::<bytesize::ByteSize>()
+        .map(|size| size.as_u64())
+        .map_err(|_| {
+            format!(
+                "invalid frame budget '{raw}'. Give a size such as 8GB, 4.5GiB, or 512MB, or a plain \
+                 byte count"
+            )
+        })
 }

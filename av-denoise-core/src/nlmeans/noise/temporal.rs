@@ -28,7 +28,7 @@ pub(in crate::nlmeans) const QUARTER_SUM_D2: u32 = 1;
 pub(in crate::nlmeans) const QUARTER_LUMA_SUM: u32 = 2;
 /// The quarter-record offset of the smoothed temporal mean's gradient energy.
 ///
-/// A quarter smaller than 8x8 reads `3.0e38`.
+/// A quarter smaller than 8x8 reads [UNMEASURED_FLATNESS](crate::nlmeans::noise::UNMEASURED_FLATNESS).
 pub(in crate::nlmeans) const QUARTER_FLATNESS: u32 = 3;
 /// The quarter-record offset of the new frame's minimum luma.
 pub(in crate::nlmeans) const QUARTER_LUMA_MIN: u32 = 4;
@@ -40,6 +40,10 @@ pub(in crate::nlmeans) const QUARTER_TENSOR_XX: u32 = 6;
 pub(in crate::nlmeans) const QUARTER_TENSOR_YY: u32 = 7;
 /// The quarter-record offset of the temporal mean's summed horizontal times vertical gradient.
 pub(in crate::nlmeans) const QUARTER_TENSOR_XY: u32 = 8;
+/// The flatness a quarter smaller than 8x8 holds.
+///
+/// It sits far above any measured flatness, so a flat gate always rejects the quarter.
+pub(in crate::nlmeans) const UNMEASURED_FLATNESS: f32 = 3.0e38;
 
 /// The largest mean block residual, in normalised units, that still counts as static.
 ///

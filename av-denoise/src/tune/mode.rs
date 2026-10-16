@@ -34,9 +34,10 @@ impl FromStr for TuningMode {
             "auto" => Ok(TuningMode::Auto),
             "cached" => Ok(TuningMode::Cached),
             "off" => Ok(TuningMode::Off),
-            _ => Err(format!(
-                "unknown tuning mode '{text}', expected auto, cached or off"
-            )),
+            _ => {
+                let message = format!("unknown tuning mode '{text}', expected auto, cached or off");
+                Err(message)
+            },
         }
     }
 }

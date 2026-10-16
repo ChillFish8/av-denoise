@@ -230,11 +230,12 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         check_plane_size(limits).map_err(|error| error.to_string())?;
 
         if width < PATCH_SIZE || height < PATCH_SIZE {
-            return Err(format!(
+            let message = format!(
                 "frame dimensions {width}x{height} must be at least {p}x{p} for the \
                  collaborative filter's patch grid",
                 p = PATCH_SIZE,
-            ));
+            );
+            return Err(message);
         }
 
         // The ring view `submit_machinery` returns walks the front end's own window, so its radius
@@ -347,7 +348,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 step: motion_ctx.step,
                 ring_frames,
             };
-            Some(GrainExport::new(client, geometry))
+            let export = GrainExport::new(client, geometry);
+            Some(export)
         } else {
             None
         };
@@ -443,7 +445,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
         let total_frames = 1 + 2 * radius;
         let slot = (view.centre_slot + total_frames - radius) % total_frames;
-        let next = Some(self.front.ring_slot(1));
+        let next_slot = self.front.ring_slot(1);
+        let next = Some(next_slot);
 
         Ok(Some(CompletedRegion { slot, next }))
     }

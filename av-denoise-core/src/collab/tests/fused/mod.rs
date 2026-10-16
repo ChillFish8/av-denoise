@@ -1,4 +1,5 @@
 mod behaviour;
+mod golden;
 mod noise_curve;
 mod pooled;
 mod recorded;
@@ -600,6 +601,17 @@ pub(super) fn chroma_cross_frame_setup(width: u32, height: u32, radius: u32) -> 
     let mut setup = cross_frame_setup(width, height, radius);
     setup.ring = unique_frame(width * 2, height * frames);
     setup.channel_mode = ChannelMode::Chroma;
+
+    setup
+}
+
+/// [cross_frame_setup] with a three-channel ring stored four floats wide.
+pub(super) fn yuv_cross_frame_setup(width: u32, height: u32, radius: u32) -> Setup {
+    let frames = 2 * radius + 1;
+    let stored = ChannelMode::Yuv.storage_count();
+    let mut setup = cross_frame_setup(width, height, radius);
+    setup.ring = unique_frame(width * stored, height * frames);
+    setup.channel_mode = ChannelMode::Yuv;
 
     setup
 }

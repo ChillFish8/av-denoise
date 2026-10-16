@@ -591,3 +591,20 @@ variant_chunk_tests! {
         forcing_the_eighth_variant_eighth_leaves_yuv_nl4d_output_unchanged => 7,
     ]
 }
+
+/// Launches the chroma collab baseline once, so a compilation log holds its generated source.
+#[test]
+#[ignore = "used to dump the compiled chroma kernel for register counts"]
+fn dump_chroma_collab_kernel() {
+    let client = test_client();
+    let mut spec = CollabSpec::new(64, 48, ChannelMode::Chroma, 2);
+    spec.pooled = true;
+    let site = collab_site(&client, &spec);
+    let outputs = site.scratch_outputs();
+    let baseline = site.baseline();
+
+    site.launch(baseline, &outputs);
+
+    let weights = read_f32(&client, &outputs.group_weight, outputs.refs).expect("weights read back");
+    assert!(weights.iter().any(|&weight| weight > 0.0));
+}

@@ -321,11 +321,15 @@ impl NoiseReadings {
 
         let reading = match &entry.state {
             EntryState::Landed(reading) => reading,
-            EntryState::Failed(message) => return Err(readback_error(message)),
+            EntryState::Failed(message) => {
+                let error = readback_error(message);
+                return Err(error);
+            },
             EntryState::InFlight { .. } => unreachable!("an in-flight reading lands above"),
         };
 
-        Ok(Some(Arc::clone(reading)))
+        let reading = Arc::clone(reading);
+        Ok(Some(reading))
     }
 
     /// Drops every reading. Reads still in flight land first.

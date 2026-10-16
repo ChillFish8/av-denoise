@@ -53,10 +53,11 @@ impl Still {
         let bytes_per_sample: u64 = if maxval > 255 { 2 } else { 1 };
         let available = (bytes.len() - pos.min(bytes.len())) as u64;
         if sample_count_u64 * bytes_per_sample > available {
-            return Err(format!(
+            let message = format!(
                 "pgm data truncated: header claims {width}x{height} at {bytes_per_sample} bytes/sample, \
                  only {available} bytes remain"
-            ));
+            );
+            return Err(message);
         }
 
         let sample_count = sample_count_u64 as usize;

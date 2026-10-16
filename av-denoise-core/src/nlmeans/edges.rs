@@ -45,7 +45,8 @@ impl<R: Runtime> NlmDenoiser<R> {
     ) -> Result<Arc<SlotNoiseReading>, anyhow::Error> {
         let has_sample = centre.temporal.sample.is_some();
         if has_sample || !self.shifted_edges {
-            return Ok(Arc::clone(centre));
+            let reading = Arc::clone(centre);
+            return Ok(reading);
         }
 
         let total_frames = self.params.total_frames();
@@ -56,7 +57,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             }
         }
 
-        Ok(Arc::clone(centre))
+        let reading = Arc::clone(centre);
+        Ok(reading)
     }
 
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]

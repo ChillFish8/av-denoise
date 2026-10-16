@@ -3,12 +3,13 @@ use cubecl::prelude::*;
 use super::helpers::{R, make_client};
 use crate::collab::MAX_K;
 use crate::collab::kernels::plane_ops::{
+    UNFILLED_DISTANCE,
     group_any,
     group_base,
     plane_ssd_reduce8,
     scatter_sums8,
     shift_insert8,
-    shift_insert8_gated,
+    shift_insert8_cached,
     transpose8,
 };
 
@@ -29,14 +30,18 @@ fn run_ssd_reduce(input: &[f32]) -> Vec<f32> {
         reason = "count is the element count this output holds, not the input's byte length"
     )]
     let out_buf = client.empty(count * size_of::<f32>());
+    let out_launched = out_buf.clone();
 
     unsafe {
+        let input_arg = ArrayArg::from_raw_parts(input_buf, count);
+        let out_arg = ArrayArg::from_raw_parts(out_launched, count);
+
         ssd_reduce_kernel::launch_unchecked::<R>(
             &client,
             CubeCount::new_1d(1),
             CubeDim::new_1d(count as u32),
-            ArrayArg::from_raw_parts(input_buf, count),
-            ArrayArg::from_raw_parts(out_buf.clone(), count),
+            input_arg,
+            out_arg,
         );
     }
 
@@ -74,50 +79,56 @@ fn shift_insert_kernel(
 ) {
     let tid = ABSOLUTE_POS_X;
     let sub = UNIT_POS_PLANE % 8;
-    let mut best_d = 3.0e38f32;
+    let mut best_d = UNFILLED_DISTANCE.runtime();
     let mut best_p = 0u32;
     let mut i = 0u32;
+
     while i < n {
-        shift_insert8(
-            &mut best_d,
-            &mut best_p,
-            dists[i as usize],
-            posns[i as usize],
-            sub,
-        );
+        let distance = dists[i as usize];
+        let position = posns[i as usize];
+        shift_insert8(&mut best_d, &mut best_p, distance, position, sub);
         i += 1u32;
     }
+
     out_d[tid as usize] = best_d;
     out_p[tid as usize] = best_p;
 }
 
 #[cube(launch_unchecked)]
-fn shift_insert_gated_kernel(
+fn shift_insert_cached_kernel(
     dists: &Array<f32>,
     posns: &Array<u32>,
     n: u32,
     out_d: &mut Array<f32>,
     out_p: &mut Array<u32>,
+    out_worst: &mut Array<f32>,
 ) {
     let tid = ABSOLUTE_POS_X;
     let sub = UNIT_POS_PLANE % 8;
     let base = group_base();
-    let mut best_d = 3.0e38f32;
+    let mut best_d = UNFILLED_DISTANCE.runtime();
     let mut best_p = 0u32;
+    let mut worst = UNFILLED_DISTANCE.runtime();
     let mut i = 0u32;
+
     while i < n {
-        shift_insert8_gated(
+        let distance = dists[i as usize];
+        let position = posns[i as usize];
+        shift_insert8_cached(
             &mut best_d,
             &mut best_p,
-            dists[i as usize],
-            posns[i as usize],
+            &mut worst,
+            distance,
+            position,
             sub,
             base,
         );
         i += 1u32;
     }
+
     out_d[tid as usize] = best_d;
     out_p[tid as usize] = best_p;
+    out_worst[tid as usize] = worst;
 }
 
 /// Runs [shift_insert8] over `dists`/`posns` on a single 8-lane group, feeding every candidate
@@ -132,17 +143,24 @@ fn run_shift_insert_with(dists: &[f32], posns: &[u32]) -> (Vec<f32>, Vec<u32>) {
     let posns_buf = client.create_from_slice(posns_bytes);
     let out_d_buf = client.empty(MAX_K as usize * size_of::<f32>());
     let out_p_buf = client.empty(MAX_K as usize * size_of::<u32>());
+    let out_d_launched = out_d_buf.clone();
+    let out_p_launched = out_p_buf.clone();
 
     unsafe {
+        let dists_arg = ArrayArg::from_raw_parts(dists_buf, count);
+        let posns_arg = ArrayArg::from_raw_parts(posns_buf, count);
+        let out_d_arg = ArrayArg::from_raw_parts(out_d_launched, 8);
+        let out_p_arg = ArrayArg::from_raw_parts(out_p_launched, 8);
+
         shift_insert_kernel::launch_unchecked::<R>(
             &client,
             CubeCount::new_1d(1),
             CubeDim::new_1d(8),
-            ArrayArg::from_raw_parts(dists_buf, count),
-            ArrayArg::from_raw_parts(posns_buf, count),
+            dists_arg,
+            posns_arg,
             count as u32,
-            ArrayArg::from_raw_parts(out_d_buf.clone(), 8),
-            ArrayArg::from_raw_parts(out_p_buf.clone(), 8),
+            out_d_arg,
+            out_p_arg,
         );
     }
 
@@ -164,9 +182,9 @@ fn run_shift_insert(dists: &[f32]) -> (Vec<f32>, Vec<u32>) {
     run_shift_insert_with(dists, &posns)
 }
 
-/// Runs [shift_insert8_gated] over `dists`/`posns` on a single 8-lane group, feeding every
-/// candidate through in order.
-fn run_shift_insert_gated_with(dists: &[f32], posns: &[u32]) -> (Vec<f32>, Vec<u32>) {
+/// Runs [shift_insert8_cached] over `dists`/`posns` on a single 8-lane group, feeding every
+/// candidate through in order. Returns the slots and each lane's cached worst.
+fn run_shift_insert_cached_with(dists: &[f32], posns: &[u32]) -> ((Vec<f32>, Vec<u32>), Vec<f32>) {
     let count = dists.len();
     assert_eq!(posns.len(), count);
     let client = make_client();
@@ -176,40 +194,56 @@ fn run_shift_insert_gated_with(dists: &[f32], posns: &[u32]) -> (Vec<f32>, Vec<u
     let posns_buf = client.create_from_slice(posns_bytes);
     let out_d_buf = client.empty(MAX_K as usize * size_of::<f32>());
     let out_p_buf = client.empty(MAX_K as usize * size_of::<u32>());
+    let out_worst_buf = client.empty(MAX_K as usize * size_of::<f32>());
+
+    let out_d_launched = out_d_buf.clone();
+    let out_p_launched = out_p_buf.clone();
+    let out_worst_launched = out_worst_buf.clone();
 
     unsafe {
-        shift_insert_gated_kernel::launch_unchecked::<R>(
+        let dists_arg = ArrayArg::from_raw_parts(dists_buf, count);
+        let posns_arg = ArrayArg::from_raw_parts(posns_buf, count);
+        let out_d_arg = ArrayArg::from_raw_parts(out_d_launched, 8);
+        let out_p_arg = ArrayArg::from_raw_parts(out_p_launched, 8);
+        let out_worst_arg = ArrayArg::from_raw_parts(out_worst_launched, 8);
+
+        shift_insert_cached_kernel::launch_unchecked::<R>(
             &client,
             CubeCount::new_1d(1),
             CubeDim::new_1d(8),
-            ArrayArg::from_raw_parts(dists_buf, count),
-            ArrayArg::from_raw_parts(posns_buf, count),
+            dists_arg,
+            posns_arg,
             count as u32,
-            ArrayArg::from_raw_parts(out_d_buf.clone(), 8),
-            ArrayArg::from_raw_parts(out_p_buf.clone(), 8),
+            out_d_arg,
+            out_p_arg,
+            out_worst_arg,
         );
     }
 
     let dist_bytes = client
         .read_one(out_d_buf)
-        .expect("shift_insert_gated dist readback failed");
+        .expect("shift_insert_cached dist readback failed");
     let pos_bytes = client
         .read_one(out_p_buf)
-        .expect("shift_insert_gated pos readback failed");
+        .expect("shift_insert_cached pos readback failed");
+    let worst_bytes = client
+        .read_one(out_worst_buf)
+        .expect("shift_insert_cached worst readback failed");
     let best_dists = f32::from_bytes(&dist_bytes)[..8].to_vec();
     let best_posns = u32::from_bytes(&pos_bytes)[..8].to_vec();
+    let worsts = f32::from_bytes(&worst_bytes)[..8].to_vec();
 
-    (best_dists, best_posns)
+    ((best_dists, best_posns), worsts)
 }
 
-/// One [shift_insert8] test input, named so the gated test can report which case failed.
+/// One [shift_insert8] test input, named so the cached test can report which case failed.
 struct InsertCase {
     name: &'static str,
     dists: Vec<f32>,
     posns: Vec<u32>,
 }
 
-/// The inputs of the four `shift_insert8` tests, shared so the gated test runs the identical inputs.
+/// The inputs of the four `shift_insert8` tests, shared so the cached test runs the identical inputs.
 fn insert_test_cases() -> Vec<InsertCase> {
     vec![
         InsertCase {
@@ -266,7 +300,7 @@ fn shift_insert8_leaves_unfilled_slots_at_the_sentinel() {
     assert_eq!(&got_d[..3], &[1.0, 2.0, 3.0]);
 
     for (slot, &dist) in got_d.iter().enumerate().take(8).skip(3) {
-        assert!(dist > 1.0e38, "slot {slot} should still be the sentinel");
+        assert_eq!(dist, UNFILLED_DISTANCE, "slot {slot} should be unfilled");
     }
 }
 
@@ -279,14 +313,17 @@ fn shift_insert8_handles_a_descending_feed() {
     assert_eq!(&got_d[..8], &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
 }
 
-/// The gate is a compute saving, never an admission decision, so it must keep the same eight slots
-/// as the ungated insert.
+/// The cache is a compute saving, never an admission decision, so it must keep the same eight slots
+/// as the ungated insert, and its worst must be the eighth slot.
 #[test]
-fn shift_insert8_gated_matches_the_ungated_insert() {
+fn shift_insert8_cached_matches_the_ungated_insert() {
     for case in insert_test_cases() {
         let want = run_shift_insert_with(&case.dists, &case.posns);
-        let got = run_shift_insert_gated_with(&case.dists, &case.posns);
+        let (got, worsts) = run_shift_insert_cached_with(&case.dists, &case.posns);
+        let eighth = want.0[7];
+
         assert_eq!(got, want, "case {}", case.name);
+        assert!(worsts.iter().all(|&worst| worst == eighth), "case {}", case.name);
     }
 }
 
@@ -320,14 +357,18 @@ fn run_transpose(input: &[f32]) -> Vec<f32> {
         reason = "count is the element count this output holds, not the input's byte length"
     )]
     let out_buf = client.empty(count * size_of::<f32>());
+    let out_launched = out_buf.clone();
 
     unsafe {
+        let input_arg = ArrayArg::from_raw_parts(input_buf, count);
+        let out_arg = ArrayArg::from_raw_parts(out_launched, count);
+
         transpose_kernel::launch_unchecked::<R>(
             &client,
             CubeCount::new_1d(1),
             CubeDim::new_1d(16),
-            ArrayArg::from_raw_parts(input_buf, count),
-            ArrayArg::from_raw_parts(out_buf.clone(), count),
+            input_arg,
+            out_arg,
         );
     }
 
@@ -403,15 +444,22 @@ fn scatter_sums8_matches_the_group_reduction_bit_for_bit() {
     let input_buf = client.create_from_slice(input_bytes);
     let scattered_buf = client.empty(lanes * size_of::<f32>());
     let reduced_buf = client.empty(lanes * size_of::<f32>());
+    let input_len = input.len();
+    let scattered_launched = scattered_buf.clone();
+    let reduced_launched = reduced_buf.clone();
 
     unsafe {
+        let input_arg = ArrayArg::from_raw_parts(input_buf, input_len);
+        let scattered_arg = ArrayArg::from_raw_parts(scattered_launched, lanes);
+        let reduced_arg = ArrayArg::from_raw_parts(reduced_launched, lanes);
+
         scatter_sums_kernel::launch_unchecked::<R>(
             &client,
             CubeCount::new_1d(1),
             CubeDim::new_1d(lanes as u32),
-            ArrayArg::from_raw_parts(input_buf, input.len()),
-            ArrayArg::from_raw_parts(scattered_buf.clone(), lanes),
-            ArrayArg::from_raw_parts(reduced_buf.clone(), lanes),
+            input_arg,
+            scattered_arg,
+            reduced_arg,
         );
     }
 
@@ -446,14 +494,18 @@ fn group_any_votes_within_its_own_group() {
     let flag_bytes = u32::as_bytes(&flags);
     let flag_buf = client.create_from_slice(flag_bytes);
     let out_buf = client.empty(lanes * size_of::<u32>());
+    let out_launched = out_buf.clone();
 
     unsafe {
+        let flag_arg = ArrayArg::from_raw_parts(flag_buf, lanes);
+        let out_arg = ArrayArg::from_raw_parts(out_launched, lanes);
+
         group_any_kernel::launch_unchecked::<R>(
             &client,
             CubeCount::new_1d(1),
             CubeDim::new_1d(lanes as u32),
-            ArrayArg::from_raw_parts(flag_buf, lanes),
-            ArrayArg::from_raw_parts(out_buf.clone(), lanes),
+            flag_arg,
+            out_arg,
         );
     }
 

@@ -174,7 +174,8 @@ pub fn prescreen<S: Sampler>(
             match sampled {
                 Ok(timing) => samples.push(timing),
                 Err(error) if index == keep => {
-                    return Err(error.context("the baseline failed during the pre-screen"));
+                    let error = error.context("the baseline failed during the pre-screen");
+                    return Err(error);
                 },
                 Err(error) => {
                     tracing::warn!(index, %error, "dropping a candidate that failed the pre-screen");

@@ -14,6 +14,7 @@ use crate::nlmeans::noise::{
     TEMPORAL_QUARTER_BASE,
     TEMPORAL_QUARTER_FIELDS,
     TEMPORAL_QUARTERS,
+    UNMEASURED_FLATNESS,
 };
 
 /// The per-block stage of the Immerkær noise estimate.
@@ -151,7 +152,8 @@ pub fn nlm_noise_reduce(
 /// - `sum_d` and `sum_d2` of the residual.
 /// - `luma_sum`, `luma_min` and `luma_max` of the new frame.
 /// - `flatness`, the mean squared neighbour difference of a 4x4 grid of 2x2 cells over the mean of
-///   both frames. A quarter smaller than 8x8 writes `3.0e38`, so a flat gate always rejects it.
+///   both frames. A quarter smaller than 8x8 writes
+///   [UNMEASURED_FLATNESS](crate::nlmeans::noise::UNMEASURED_FLATNESS).
 /// - `tensor_xx`, `tensor_yy` and `tensor_xy`, the structure tensor sums of the temporal mean's
 ///   2x2 gradients, from the 2x2 windows inside both the quarter and the frame, 49 on a full
 ///   quarter.
@@ -437,7 +439,7 @@ pub fn nlm_temporal_noise_stats<N: Size>(
             let full_width = block_w >= (quarter_x + 1u32) * 8u32;
             let full_height = block_h >= (quarter_y + 1u32) * 8u32;
 
-            let mut flatness = 3.0e38f32;
+            let mut flatness = UNMEASURED_FLATNESS.runtime();
             if full_width && full_height {
                 flatness = pair_tile[(quarter * 16u32) as usize] / 24.0f32;
             }

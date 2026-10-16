@@ -7,9 +7,9 @@ use crate::tune::tests::fixtures::variant_chunk;
 /// Asserts every listed variant aggregated exactly what the baseline did, byte for byte.
 ///
 /// Every variant offers the same candidates in the same order with the same arithmetic. A masked
-/// turn carries the `3.0e38` an unfilled slot already holds, which cannot displace a slot. A
-/// difference therefore means a variant let a dead position in or dropped a live one, not that
-/// floating point drifted.
+/// turn carries [UNFILLED_DISTANCE](crate::collab::kernels::plane_ops::UNFILLED_DISTANCE), which
+/// cannot displace a slot. A difference therefore means a variant let a dead position in or dropped
+/// a live one, not that floating point drifted.
 fn assert_variants_agree(label: &str, setup: &Setup) {
     assert_listed_variants_agree(label, setup, CollabVariant::ALL);
 }

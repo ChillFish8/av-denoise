@@ -126,7 +126,9 @@ impl<R: Runtime> Benchmark for CollabNormaliseBench<R> {
         self.execute(args)?;
         self.sync();
 
-        Ok(ProfileDuration::new_system_time(start_time, Instant::now()))
+        let end_time = Instant::now();
+        let duration = ProfileDuration::new_system_time(start_time, end_time);
+        Ok(duration)
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {

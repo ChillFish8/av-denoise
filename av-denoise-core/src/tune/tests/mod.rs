@@ -18,3 +18,5 @@ pub(crate) mod runtime;
 mod selector;
 mod session;
 mod window;
+#[cfg(all(feature = "vulkan", not(any(feature = "cuda", feature = "rocm"))))]
+mod window_golden;

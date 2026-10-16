@@ -19,6 +19,7 @@ use crate::nlmeans::noise::{
     TEMPORAL_QUARTER_SIZE,
     TEMPORAL_QUARTERS,
     TemporalStatsCtx,
+    UNMEASURED_FLATNESS,
     aggregate_temporal_noise_stats,
     correlation_factor,
     partials_len,
@@ -244,7 +245,7 @@ fn quarter_fields_host(
 
         energy / 24.0
     } else {
-        3.0e38
+        UNMEASURED_FLATNESS
     };
 
     let mean_at = |x: u32, y: u32| {
@@ -464,8 +465,8 @@ fn assert_quarters_match_mirror(width: u32, height: u32, previous: &[f32], new: 
                 let flatness_index = QUARTER_FLATNESS as usize;
                 let expected_flatness = expected[flatness_index];
                 let got_flatness = fields[flatness_index];
-                if expected_flatness == 3.0e38 {
-                    assert_eq!(got_flatness, 3.0e38, "{label}: flatness sentinel");
+                if expected_flatness == UNMEASURED_FLATNESS {
+                    assert_eq!(got_flatness, UNMEASURED_FLATNESS, "{label}: flatness sentinel");
                 } else {
                     let flatness_label = format!("{label} flatness");
                     assert_relative(got_flatness, expected_flatness, 1e-4, &flatness_label);

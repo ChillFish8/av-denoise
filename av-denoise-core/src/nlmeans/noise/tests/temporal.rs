@@ -615,7 +615,7 @@ fn aggregate_rho_estimate_stays_within_unit_range() {
 
     assert!(
         (0.0..=1.0).contains(&sample.rho),
-        "the mismatched-denominator estimate must stay within [0, 1], got {}",
+        "the mismatched-denominator estimate must stay within 0.0..=1.0, got {}",
         sample.rho
     );
 }

@@ -49,25 +49,30 @@ pub(crate) fn shift_insert8(best_d: &mut f32, best_pos: &mut u32, distance: f32,
     }
 }
 
+/// The distance an unfilled match slot holds.
+///
+/// It sits far above the largest real distance of 192 and below `f32::MAX`, so any real candidate
+/// displaces it.
+pub(crate) const UNFILLED_DISTANCE: f32 = 3.0e38;
+
 /// `shift_insert8` with the shuffles skipped when the candidate cannot place.
 ///
-/// The group's eighth-best distance sits in its last lane, and a candidate that does not beat it
-/// changes nothing. Every lane holds the same `distance` and reads the same broadcast, so the branch is
-/// uniform across the group and no lane skips a shuffle another lane takes. The broadcast fuses
-/// into the compare, while each skipped shuffle is an LDS crossbar operation. It keeps the same
-/// eight slots as `shift_insert8`.
+/// `worst` holds the group's eighth-best distance. It changes only when a candidate places, so one
+/// broadcast after each insert keeps it current. Every lane holds the same `distance` and `worst`,
+/// so the branch is uniform across the group. It keeps the same eight slots as `shift_insert8`.
 #[cube]
-pub(crate) fn shift_insert8_gated(
+pub(crate) fn shift_insert8_cached(
     best_d: &mut f32,
     best_pos: &mut u32,
+    worst: &mut f32,
     distance: f32,
     packed: u32,
     sub: u32,
     base: u32,
 ) {
-    let worst = plane_shuffle(*best_d, base + 7u32);
-    if distance < worst {
+    if distance < *worst {
         shift_insert8(best_d, best_pos, distance, packed, sub);
+        *worst = plane_shuffle(*best_d, base + 7u32);
     }
 }
 

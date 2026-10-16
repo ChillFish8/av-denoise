@@ -207,6 +207,6 @@ fn the_gpu_helpers_match_their_host_mirrors() {
     assert_eq!(
         clamped,
         vec![0, 0, 0, 1, 24, 24, 24],
-        "clamp_top_left must pin every coordinate into [0, 24]"
+        "clamp_top_left must pin every coordinate into 0..=24"
     );
 }

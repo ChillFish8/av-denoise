@@ -3,6 +3,7 @@ pub(crate) mod centre;
 pub(crate) mod distance;
 pub(crate) mod grid;
 pub(crate) mod pooled;
+pub(crate) mod shape;
 pub(crate) mod strength_map;
 pub(crate) mod tile;
 pub(crate) mod trajectory;
@@ -13,6 +14,7 @@ use cubecl::prelude::*;
 use self::centre::centre_search;
 use self::grid::{grid_fwd, grid_inv, grid_variance};
 use self::pooled::pooled_threshold;
+use self::shape::{SearchCursor, SearchShape};
 use self::strength_map::strength_map_scale;
 pub use self::strength_map::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
 use self::tile::load_centre_tile;
@@ -28,7 +30,7 @@ pub use self::variant::{
 };
 use super::aggregate::scatter_patch;
 use super::group::{clamp_top_left, unpack_t};
-use super::plane_ops::{group_base, plane_ssd_reduce8, transpose8};
+use super::plane_ops::{UNFILLED_DISTANCE, group_base, plane_ssd_reduce8, transpose8};
 use super::transforms::{
     RECIPROCAL_FLOOR,
     dct8_reg_fwd,
@@ -79,13 +81,13 @@ const _: () = assert!(
 /// last real reference and is gated only where it writes.
 ///
 /// The centre frame contributes the `spatial_radius` rectangle around the reference, clipped to
-/// the frame, and the best eight positions are kept. The self-match scores a sentinel below every
-/// real distance, which pins it into slot 0. The first `MAX_K / grid_frames` positions become
-/// volume anchors. In each neighbour frame an anchor searches one `refine` rectangle per covering
-/// motion block, around where that block's vector moves it, and keeps its best match. Each
-/// rectangle is clipped once so every candidate is a distinct position, and a position reached
-/// twice or already in the group is scored once. A block whose confidence is below `c_min` is
-/// skipped, uniformly across the group.
+/// the frame, and the best eight positions are kept.
+/// [pin_self_match](crate::collab::kernels::fused::centre::pin_self_match) holds the self-match in
+/// slot 0. The first `MAX_K / grid_frames` positions become volume anchors. In each neighbour
+/// frame an anchor searches one `refine` rectangle per covering motion block, around where that
+/// block's vector moves it, and keeps its best match. Each rectangle is clipped once so every
+/// candidate is a distinct position, and a position reached twice or already in the group is
+/// scored once. A block whose confidence is below `c_min` is skipped, uniformly across the group.
 ///
 /// A member is a `pack_pos_t` word, and member `s * grid_frames + t` is frame `t` of volume `s`.
 /// The grid is used when the spatial search held at least `MAX_K` positions, `k_max` is `MAX_K`
@@ -207,6 +209,14 @@ pub fn collab_fused<S: Float, N: Size>(
 
     let max_x = comptime!(width - PATCH_SIZE);
     let max_y = comptime!(height - PATCH_SIZE);
+    let shape = comptime!(SearchShape {
+        f16_search,
+        spatial_radius,
+        width,
+        height,
+        channels,
+        stored_ch,
+    });
 
     let transpose_floats = comptime!(groups * TRANSPOSE_REGION_FLOATS);
     let mut transpose_buf = SharedMemory::<f32>::new(transpose_floats as usize);
@@ -241,13 +251,10 @@ pub fn collab_fused<S: Float, N: Size>(
             tile_x0,
             tile_y0,
             centre_slot,
-            f16_search,
             tile_w,
             tile_h,
             lanes,
-            width,
-            height,
-            stored_ch,
+            shape,
         );
         sync_cube();
     }
@@ -263,37 +270,34 @@ pub fn collab_fused<S: Float, N: Size>(
         }
     }
 
-    // An unplaced candidate carries `3.0e38`, far above the largest real distance of 192 and below
-    // `f32::MAX`, and the self-match carries `-1.0e38`. They are literals because cubecl treats
-    // consts and `f32::INFINITY` as comptime-only, and the shift-insert needs runtime variables.
-    let mut best_d = 3.0e38f32;
+    // An unplaced candidate carries `UNFILLED_DISTANCE` and the self-match carries `-1.0e38`.
+    // cubecl treats consts as comptime, so the slot takes the constant through `runtime()`.
+    let mut best_d = UNFILLED_DISTANCE.runtime();
     let mut best_pos = 0u32;
 
     // The channel scale multiplies the completed 64-pixel distance, not each squared difference.
     let scale = channel_scale(channels);
 
-    let n_live = centre_search(
-        ring,
-        search_ring,
-        &tile,
-        &current,
-        ref_x,
-        ref_y,
+    let cursor = SearchCursor {
+        rx: ref_x,
+        ry: ref_y,
         tile_x0,
         tile_y0,
         centre_slot,
         sub,
         base,
         scale,
+    };
+    let n_live = centre_search(
+        ring,
+        search_ring,
+        &tile,
+        &current,
+        &cursor,
         &mut best_d,
         &mut best_pos,
         variant,
-        f16_search,
-        spatial_radius,
-        width,
-        height,
-        channels,
-        stored_ch,
+        shape,
     );
 
     let ref_idx = CUBE_POS_Y * refs_x + ref_x_clamped;
@@ -330,7 +334,7 @@ pub fn collab_fused<S: Float, N: Size>(
             #[unroll]
             for j in 0..tail {
                 grid_pos[comptime!(first + 1 + j) as usize] = 0u32;
-                grid_d[comptime!(first + 1 + j) as usize] = 3.0e38f32;
+                grid_d[comptime!(first + 1 + j) as usize] = UNFILLED_DISTANCE;
             }
 
             let mut anchor = Array::<f32>::new(comptime!(PATCH_SIZE * channels) as usize);
@@ -360,7 +364,6 @@ pub fn collab_fused<S: Float, N: Size>(
                 comptime!(first + 1),
                 tail,
                 walk,
-                f16_search,
                 radius,
                 refine,
                 mv_stride,
@@ -369,10 +372,7 @@ pub fn collab_fused<S: Float, N: Size>(
                 blksize,
                 blocks_x,
                 blocks_y,
-                width,
-                height,
-                channels,
-                stored_ch,
+                shape,
             );
         }
 
@@ -381,7 +381,7 @@ pub fn collab_fused<S: Float, N: Size>(
         #[unroll]
         for volume in 0..volumes {
             let last = comptime!(volume * grid_frames + tail) as usize;
-            use_grid = use_grid && grid_d[last] < 1.0e38f32;
+            use_grid = use_grid && grid_d[last] < UNFILLED_DISTANCE;
         }
 
         #[unroll]
