@@ -1,6 +1,7 @@
 use cubecl::prelude::*;
 use cubecl::terminate;
 
+use super::fill::{expanded_interior, fill_center_tile, halo_slot_index};
 use super::helpers::{channel_scale, line_sum_sq, read_clamped_line, read_line, welsch_weight};
 
 /// Writes the Welsch weight of the patch distance between each pixel and its neighbour at `q`.
@@ -372,6 +373,8 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
 ) {
     let tile_width = comptime!(block_x + 2 * patch_radius);
     let tile_elems = comptime!((block_x + 2 * patch_radius) * (block_y + 2 * patch_radius));
+    let halo_elems =
+        comptime!((block_x + 2 * patch_radius) * (block_y + 2 * patch_radius) - block_x * block_y);
     let expanded_width = comptime!(block_x + 2 * patch_radius + 2 * search_radius);
     let expanded_elems = comptime!(
         (block_x + 2 * patch_radius + 2 * search_radius) * (block_y + 2 * patch_radius + 2 * search_radius)
@@ -397,18 +400,37 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
     let fwd_tile_y0 = CUBE_POS_Y as i32 * block_y as i32 - patch_radius as i32;
     let expanded_x0 = fwd_tile_x0 - search_radius as i32;
     let expanded_y0 = fwd_tile_y0 - search_radius as i32;
+    let expanded_height = comptime!(block_y + 2 * patch_radius + 2 * search_radius);
+    let interior = expanded_interior(
+        expanded_x0,
+        expanded_y0,
+        expanded_width,
+        expanded_height,
+        width,
+        height,
+    );
 
-    let mut idx = thread_id;
-    while idx < expanded_elems {
-        let expanded_x = idx % expanded_width;
-        let expanded_y = idx / expanded_width;
-        let src_x = expanded_x0 + expanded_x as i32;
-        let src_y = expanded_y0 + expanded_y as i32;
-        smem_center[idx as usize] = read_clamped_line(input, src_x, src_y, frame_t, width, height);
-        idx += threads;
-    }
+    fill_center_tile(
+        input,
+        &mut smem_center,
+        expanded_x0,
+        expanded_y0,
+        interior,
+        frame_t,
+        thread_id,
+        threads,
+        expanded_width,
+        expanded_elems,
+        width,
+        height,
+    );
 
     sync_cube();
+
+    let own_x = local_x + patch_radius;
+    let own_y = local_y + patch_radius;
+    let own_idx = (own_y * tile_width + own_x) as usize;
+    let own_center_idx = ((own_y + search_radius) * expanded_width + (own_x + search_radius)) as usize;
 
     let mut accum_reg = Vector::<f32, N>::empty();
     let mut weight_sum_reg = 0.0f32;
@@ -423,37 +445,36 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
             let q_x = q_xi as i32 - search_radius as i32;
             let q_y = q_yi as i32 - search_radius as i32;
 
-            let mut idx = thread_id;
-            while idx < tile_elems {
+            // Each thread fills its own pixel's element first and keeps both neighbours for the
+            // accumulate. The backward comparison mirrors the forward one against `frame_bwd` at
+            // `-q`, so both centre on the same cached patch.
+            let own_center = smem_center[own_center_idx];
+            let fwd_x = global_x as i32 + q_x;
+            let fwd_y = global_y as i32 + q_y;
+            let bwd_x = global_x as i32 - q_x;
+            let bwd_y = global_y as i32 - q_y;
+            let fwd_pixel = read_clamped_line(input, fwd_x, fwd_y, frame_fwd, width, height);
+            let bwd_pixel = read_clamped_line(input, bwd_x, bwd_y, frame_bwd, width, height);
+            smem_fwd[own_idx] = line_sum_sq(own_center - fwd_pixel, channels) * scale;
+            smem_bwd[own_idx] = line_sum_sq(own_center - bwd_pixel, channels) * scale;
+
+            let mut halo = thread_id;
+            while halo < halo_elems {
+                let idx = halo_slot_index(halo, block_x, block_y, patch_radius);
                 let tile_x = idx % tile_width;
                 let tile_y = idx / tile_width;
-
-                // The backward comparison mirrors the forward one against `frame_bwd` at `-q`, so
-                // both centre on the same cached patch.
                 let center_idx =
                     ((tile_y + search_radius) * expanded_width + (tile_x + search_radius)) as usize;
                 let center = smem_center[center_idx];
-                let fwd_neighbor = read_clamped_line(
-                    input,
-                    fwd_tile_x0 + tile_x as i32 + q_x,
-                    fwd_tile_y0 + tile_y as i32 + q_y,
-                    frame_fwd,
-                    width,
-                    height,
-                );
+                let src_x = fwd_tile_x0 + tile_x as i32;
+                let src_y = fwd_tile_y0 + tile_y as i32;
+                let fwd_neighbor =
+                    read_clamped_line(input, src_x + q_x, src_y + q_y, frame_fwd, width, height);
+                let bwd_neighbor =
+                    read_clamped_line(input, src_x - q_x, src_y - q_y, frame_bwd, width, height);
                 smem_fwd[idx as usize] = line_sum_sq(center - fwd_neighbor, channels) * scale;
-
-                let bwd_neighbor = read_clamped_line(
-                    input,
-                    fwd_tile_x0 + tile_x as i32 - q_x,
-                    fwd_tile_y0 + tile_y as i32 - q_y,
-                    frame_bwd,
-                    width,
-                    height,
-                );
                 smem_bwd[idx as usize] = line_sum_sq(center - bwd_neighbor, channels) * scale;
-
-                idx += threads;
+                halo += threads;
             }
 
             sync_cube();
@@ -511,24 +532,6 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
                     weight_bwd *= conf_bwd[block_idx];
                 }
 
-                let fwd_pixel = read_clamped_line(
-                    input,
-                    global_x as i32 + q_x,
-                    global_y as i32 + q_y,
-                    frame_fwd,
-                    width,
-                    height,
-                );
-
-                let bwd_pixel = read_clamped_line(
-                    input,
-                    global_x as i32 - q_x,
-                    global_y as i32 - q_y,
-                    frame_bwd,
-                    width,
-                    height,
-                );
-
                 let line_w_fwd = Vector::<f32, N>::empty().fill(weight_fwd);
                 let line_w_bwd = Vector::<f32, N>::empty().fill(weight_bwd);
                 accum_reg = accum_reg + fwd_pixel * line_w_fwd + bwd_pixel * line_w_bwd;
@@ -584,6 +587,8 @@ pub fn nlm_fused_single_window<N: Size>(
 ) {
     let tile_width = comptime!(block_x + 2 * patch_radius);
     let tile_elems = comptime!((block_x + 2 * patch_radius) * (block_y + 2 * patch_radius));
+    let halo_elems =
+        comptime!((block_x + 2 * patch_radius) * (block_y + 2 * patch_radius) - block_x * block_y);
     let expanded_width = comptime!(block_x + 2 * patch_radius + 2 * search_radius);
     let expanded_elems = comptime!(
         (block_x + 2 * patch_radius + 2 * search_radius) * (block_y + 2 * patch_radius + 2 * search_radius)
@@ -607,18 +612,37 @@ pub fn nlm_fused_single_window<N: Size>(
     let fwd_tile_y0 = CUBE_POS_Y as i32 * block_y as i32 - patch_radius as i32;
     let expanded_x0 = fwd_tile_x0 - search_radius as i32;
     let expanded_y0 = fwd_tile_y0 - search_radius as i32;
+    let expanded_height = comptime!(block_y + 2 * patch_radius + 2 * search_radius);
+    let interior = expanded_interior(
+        expanded_x0,
+        expanded_y0,
+        expanded_width,
+        expanded_height,
+        width,
+        height,
+    );
 
-    let mut idx = thread_id;
-    while idx < expanded_elems {
-        let expanded_x = idx % expanded_width;
-        let expanded_y = idx / expanded_width;
-        let src_x = expanded_x0 + expanded_x as i32;
-        let src_y = expanded_y0 + expanded_y as i32;
-        smem_center[idx as usize] = read_clamped_line(input, src_x, src_y, frame_t, width, height);
-        idx += threads;
-    }
+    fill_center_tile(
+        input,
+        &mut smem_center,
+        expanded_x0,
+        expanded_y0,
+        interior,
+        frame_t,
+        thread_id,
+        threads,
+        expanded_width,
+        expanded_elems,
+        width,
+        height,
+    );
 
     sync_cube();
+
+    let own_x = local_x + patch_radius;
+    let own_y = local_y + patch_radius;
+    let own_idx = (own_y * tile_width + own_x) as usize;
+    let own_center_idx = ((own_y + search_radius) * expanded_width + (own_x + search_radius)) as usize;
 
     let mut accum_reg = Vector::<f32, N>::empty();
     let mut weight_sum_reg = 0.0f32;
@@ -635,23 +659,27 @@ pub fn nlm_fused_single_window<N: Size>(
             if comptime!(q_x == 0 && q_y == 0) {
                 // An empty comptime branch stands in for `continue`, which cubecl lacks.
             } else {
-                let mut tile_idx = thread_id;
-                while tile_idx < tile_elems {
+                // Each thread fills its own pixel's element first and keeps the neighbour for the
+                // accumulate.
+                let own_center = smem_center[own_center_idx];
+                let pixel_x = global_x as i32 + q_x;
+                let pixel_y = global_y as i32 + q_y;
+                let neighbor_pixel = read_clamped_line(input, pixel_x, pixel_y, frame_t, width, height);
+                smem_dist[own_idx] = line_sum_sq(own_center - neighbor_pixel, channels) * scale;
+
+                let mut halo = thread_id;
+                while halo < halo_elems {
+                    let tile_idx = halo_slot_index(halo, block_x, block_y, patch_radius);
                     let tile_x = tile_idx % tile_width;
                     let tile_y = tile_idx / tile_width;
                     let center_idx =
                         ((tile_y + search_radius) * expanded_width + (tile_x + search_radius)) as usize;
                     let center = smem_center[center_idx];
-                    let neighbor = read_clamped_line(
-                        input,
-                        fwd_tile_x0 + tile_x as i32 + q_x,
-                        fwd_tile_y0 + tile_y as i32 + q_y,
-                        frame_t,
-                        width,
-                        height,
-                    );
+                    let src_x = fwd_tile_x0 + tile_x as i32 + q_x;
+                    let src_y = fwd_tile_y0 + tile_y as i32 + q_y;
+                    let neighbor = read_clamped_line(input, src_x, src_y, frame_t, width, height);
                     smem_dist[tile_idx as usize] = line_sum_sq(center - neighbor, channels) * scale;
-                    tile_idx += threads;
+                    halo += threads;
                 }
 
                 sync_cube();
@@ -684,14 +712,6 @@ pub fn nlm_fused_single_window<N: Size>(
                     let offset = spatial_offset_lut[lut_idx];
                     let weight = welsch_weight(patch_distance, h2_inv_norm, offset);
 
-                    let neighbor_pixel = read_clamped_line(
-                        input,
-                        global_x as i32 + q_x,
-                        global_y as i32 + q_y,
-                        frame_t,
-                        width,
-                        height,
-                    );
                     let line_w = Vector::<f32, N>::empty().fill(weight);
                     accum_reg += neighbor_pixel * line_w;
                     weight_sum_reg += weight;
@@ -771,16 +791,30 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
     let fwd_tile_y0 = CUBE_POS_Y as i32 * block_y as i32 - patch_radius as i32;
     let expanded_x0 = fwd_tile_x0 - search_radius as i32;
     let expanded_y0 = fwd_tile_y0 - search_radius as i32;
+    let expanded_height = comptime!(block_y + 2 * patch_radius + 2 * search_radius);
+    let interior = expanded_interior(
+        expanded_x0,
+        expanded_y0,
+        expanded_width,
+        expanded_height,
+        width,
+        height,
+    );
 
-    let mut idx = thread_id;
-    while idx < expanded_elems {
-        let expanded_x = idx % expanded_width;
-        let expanded_y = idx / expanded_width;
-        let src_x = expanded_x0 + expanded_x as i32;
-        let src_y = expanded_y0 + expanded_y as i32;
-        smem_center[idx as usize] = read_clamped_line(reference, src_x, src_y, frame_t, width, height);
-        idx += threads;
-    }
+    fill_center_tile(
+        reference,
+        &mut smem_center,
+        expanded_x0,
+        expanded_y0,
+        interior,
+        frame_t,
+        thread_id,
+        threads,
+        expanded_width,
+        expanded_elems,
+        width,
+        height,
+    );
 
     sync_cube();
 
@@ -801,30 +835,17 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
             while idx < tile_elems {
                 let tile_x = idx % tile_width;
                 let tile_y = idx / tile_width;
-
                 let center_idx =
                     ((tile_y + search_radius) * expanded_width + (tile_x + search_radius)) as usize;
                 let center = smem_center[center_idx];
-                let fwd_neighbor = read_clamped_line(
-                    reference,
-                    fwd_tile_x0 + tile_x as i32 + q_x,
-                    fwd_tile_y0 + tile_y as i32 + q_y,
-                    frame_fwd,
-                    width,
-                    height,
-                );
+                let src_x = fwd_tile_x0 + tile_x as i32;
+                let src_y = fwd_tile_y0 + tile_y as i32;
+                let fwd_neighbor =
+                    read_clamped_line(reference, src_x + q_x, src_y + q_y, frame_fwd, width, height);
+                let bwd_neighbor =
+                    read_clamped_line(reference, src_x - q_x, src_y - q_y, frame_bwd, width, height);
                 smem_fwd[idx as usize] = line_sum_sq(center - fwd_neighbor, channels) * scale;
-
-                let bwd_neighbor = read_clamped_line(
-                    reference,
-                    fwd_tile_x0 + tile_x as i32 - q_x,
-                    fwd_tile_y0 + tile_y as i32 - q_y,
-                    frame_bwd,
-                    width,
-                    height,
-                );
                 smem_bwd[idx as usize] = line_sum_sq(center - bwd_neighbor, channels) * scale;
-
                 idx += threads;
             }
 
@@ -883,22 +904,12 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
                     weight_bwd *= conf_bwd[block_idx];
                 }
 
-                let fwd_pixel = read_clamped_line(
-                    input,
-                    global_x as i32 + q_x,
-                    global_y as i32 + q_y,
-                    frame_fwd,
-                    width,
-                    height,
-                );
-                let bwd_pixel = read_clamped_line(
-                    input,
-                    global_x as i32 - q_x,
-                    global_y as i32 - q_y,
-                    frame_bwd,
-                    width,
-                    height,
-                );
+                let fwd_x = global_x as i32 + q_x;
+                let fwd_y = global_y as i32 + q_y;
+                let bwd_x = global_x as i32 - q_x;
+                let bwd_y = global_y as i32 - q_y;
+                let fwd_pixel = read_clamped_line(input, fwd_x, fwd_y, frame_fwd, width, height);
+                let bwd_pixel = read_clamped_line(input, bwd_x, bwd_y, frame_bwd, width, height);
                 let line_w_fwd = Vector::<f32, N>::empty().fill(weight_fwd);
                 let line_w_bwd = Vector::<f32, N>::empty().fill(weight_bwd);
                 accum_reg = accum_reg + fwd_pixel * line_w_fwd + bwd_pixel * line_w_bwd;
@@ -968,16 +979,30 @@ pub fn nlm_fused_single_window_ref<N: Size>(
     let fwd_tile_y0 = CUBE_POS_Y as i32 * block_y as i32 - patch_radius as i32;
     let expanded_x0 = fwd_tile_x0 - search_radius as i32;
     let expanded_y0 = fwd_tile_y0 - search_radius as i32;
+    let expanded_height = comptime!(block_y + 2 * patch_radius + 2 * search_radius);
+    let interior = expanded_interior(
+        expanded_x0,
+        expanded_y0,
+        expanded_width,
+        expanded_height,
+        width,
+        height,
+    );
 
-    let mut idx = thread_id;
-    while idx < expanded_elems {
-        let expanded_x = idx % expanded_width;
-        let expanded_y = idx / expanded_width;
-        let src_x = expanded_x0 + expanded_x as i32;
-        let src_y = expanded_y0 + expanded_y as i32;
-        smem_center[idx as usize] = read_clamped_line(reference, src_x, src_y, frame_t, width, height);
-        idx += threads;
-    }
+    fill_center_tile(
+        reference,
+        &mut smem_center,
+        expanded_x0,
+        expanded_y0,
+        interior,
+        frame_t,
+        thread_id,
+        threads,
+        expanded_width,
+        expanded_elems,
+        width,
+        height,
+    );
 
     sync_cube();
 
@@ -1003,14 +1028,9 @@ pub fn nlm_fused_single_window_ref<N: Size>(
                     let center_idx =
                         ((tile_y + search_radius) * expanded_width + (tile_x + search_radius)) as usize;
                     let center = smem_center[center_idx];
-                    let neighbor = read_clamped_line(
-                        reference,
-                        fwd_tile_x0 + tile_x as i32 + q_x,
-                        fwd_tile_y0 + tile_y as i32 + q_y,
-                        frame_t,
-                        width,
-                        height,
-                    );
+                    let src_x = fwd_tile_x0 + tile_x as i32 + q_x;
+                    let src_y = fwd_tile_y0 + tile_y as i32 + q_y;
+                    let neighbor = read_clamped_line(reference, src_x, src_y, frame_t, width, height);
                     smem_dist[tile_idx as usize] = line_sum_sq(center - neighbor, channels) * scale;
                     tile_idx += threads;
                 }
@@ -1045,14 +1065,9 @@ pub fn nlm_fused_single_window_ref<N: Size>(
                     let offset = spatial_offset_lut[lut_idx];
                     let weight = welsch_weight(patch_distance, h2_inv_norm, offset);
 
-                    let neighbor_pixel = read_clamped_line(
-                        input,
-                        global_x as i32 + q_x,
-                        global_y as i32 + q_y,
-                        frame_t,
-                        width,
-                        height,
-                    );
+                    let pixel_x = global_x as i32 + q_x;
+                    let pixel_y = global_y as i32 + q_y;
+                    let neighbor_pixel = read_clamped_line(input, pixel_x, pixel_y, frame_t, width, height);
                     let line_w = Vector::<f32, N>::empty().fill(weight);
                     accum_reg += neighbor_pixel * line_w;
                     weight_sum_reg += weight;

@@ -1,5 +1,6 @@
 mod accumulate;
 mod bilateral;
+pub(crate) mod fill;
 mod fused;
 pub(crate) mod helpers;
 mod memory;
