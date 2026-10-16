@@ -11,6 +11,7 @@ mod key;
 mod ledger;
 mod legality;
 mod plan;
+mod precompile;
 pub(crate) mod probe;
 mod regularise;
 mod result;

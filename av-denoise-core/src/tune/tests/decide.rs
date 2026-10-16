@@ -1,4 +1,6 @@
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::time::Duration;
 
 use crate::tune::{
@@ -6,6 +8,7 @@ use crate::tune::{
     MIN_CANDIDATE_TIME,
     MIN_SAMPLES,
     PRESCREEN_SAMPLES,
+    Precompiled,
     SampleTiming,
     Sampler,
     Samples,
@@ -13,6 +16,7 @@ use crate::tune::{
     Staging,
     prescreen,
     sample_in_stages,
+    sample_in_stages_with,
     sample_until_settled,
 };
 
@@ -405,4 +409,159 @@ fn the_baseline_is_timed_even_when_the_first_stage_leaves_it_out() {
         .expect("sampling succeeds");
 
     assert_eq!(timed_indices(&timing), vec![0, 1, 2, 3]);
+}
+
+/// A scripted sampler whose elapsed time also counts a shared compile clock, less what it leaves out.
+struct CompilingSampler {
+    inner: ScriptedSampler,
+    compile_clock: Rc<Cell<Duration>>,
+    excluded: Duration,
+}
+
+impl CompilingSampler {
+    fn new(inner: ScriptedSampler, compile_clock: &Rc<Cell<Duration>>) -> Self {
+        let compile_clock = compile_clock.clone();
+
+        Self {
+            inner,
+            compile_clock,
+            excluded: Duration::ZERO,
+        }
+    }
+}
+
+impl Sampler for CompilingSampler {
+    fn sample(&mut self, index: usize) -> Result<SampleTiming, anyhow::Error> {
+        self.inner.sample(index)
+    }
+
+    fn elapsed(&self) -> Duration {
+        let sampled = self.inner.elapsed();
+        let compiled = self.compile_clock.get();
+        let total = sampled + compiled;
+
+        total.saturating_sub(self.excluded)
+    }
+
+    fn exclude(&mut self, spent: Duration) {
+        self.excluded += spent;
+    }
+}
+
+/// Two candidates whose samples overlap, so only the site cap ends their timing.
+fn overlapping_pair() -> (CompilingSampler, Rc<Cell<Duration>>) {
+    let alternating: Vec<u64> = (0..4000)
+        .map(|round| if round % 2 == 0 { 900 } else { 1100 })
+        .collect();
+    let inner = ScriptedSampler::new(&[(0, &alternating), (1, &alternating)]);
+    let compile_clock = Rc::new(Cell::new(Duration::ZERO));
+    let sampler = CompilingSampler::new(inner, &compile_clock);
+
+    (sampler, compile_clock)
+}
+
+fn pair_members(_stage: usize, _seed: usize) -> Vec<usize> {
+    vec![0, 1]
+}
+
+fn pair_staging() -> Staging<'static> {
+    Staging {
+        stages: 1,
+        keep: 3,
+        prescreen: false,
+        members: &pair_members,
+    }
+}
+
+#[test]
+fn compile_time_does_not_shorten_the_timing_before_the_site_cap() {
+    let (mut sampler, compile_clock) = overlapping_pair();
+    let limits = DecideLimits::default();
+    let staging = pair_staging();
+    let compile_spent = Duration::from_secs(30);
+    let slow_compile = |indices: &[usize]| -> Result<Precompiled, anyhow::Error> {
+        let advanced = compile_clock.get() + compile_spent;
+        compile_clock.set(advanced);
+
+        let mut precompiled = Precompiled::keeping(indices);
+        precompiled.spent = compile_spent;
+        Ok(precompiled)
+    };
+    let keep_all = |indices: &[usize]| indices.to_vec();
+
+    let timing = sample_in_stages_with(&mut sampler, &staging, 0, &limits, slow_compile, keep_all)
+        .expect("sampling succeeds");
+
+    assert!(timing.capped);
+    assert!(sampler.inner.elapsed() >= limits.site_cap);
+    assert_eq!(sampler.excluded, compile_spent);
+}
+
+/// The same compile, reported as taking no time, eats the site cap before any timing.
+#[test]
+fn unreported_compile_time_ends_the_timing_at_its_minimums() {
+    let (mut sampler, compile_clock) = overlapping_pair();
+    let limits = DecideLimits::default();
+    let staging = pair_staging();
+    let silent_compile = |indices: &[usize]| -> Result<Precompiled, anyhow::Error> {
+        let advanced = compile_clock.get() + Duration::from_secs(30);
+        compile_clock.set(advanced);
+
+        Ok(Precompiled::keeping(indices))
+    };
+    let keep_all = |indices: &[usize]| indices.to_vec();
+
+    sample_in_stages_with(&mut sampler, &staging, 0, &limits, silent_compile, keep_all)
+        .expect("sampling succeeds");
+
+    assert!(sampler.inner.elapsed() < limits.site_cap);
+}
+
+#[test]
+fn a_member_that_does_not_compile_is_never_checked_or_timed() {
+    let mut sampler = grid_sampler();
+    let limits = DecideLimits::default();
+    let staging = grid_staging(2, false);
+    let drop_six = |indices: &[usize]| -> Result<Precompiled, anyhow::Error> {
+        let kept = indices.iter().copied().filter(|&index| index != 6).collect();
+        let dropped = indices
+            .iter()
+            .filter(|&&index| index == 6)
+            .map(|&index| (index, "too much shared memory".to_string()))
+            .collect();
+
+        Ok(Precompiled {
+            kept,
+            dropped,
+            ..Precompiled::default()
+        })
+    };
+    let checked = RefCell::new(Vec::new());
+    let record_checked = |indices: &[usize]| {
+        checked.borrow_mut().extend_from_slice(indices);
+        indices.to_vec()
+    };
+
+    let timing = sample_in_stages_with(&mut sampler, &staging, 0, &limits, drop_six, record_checked)
+        .expect("sampling succeeds");
+
+    assert!(!timed_indices(&timing).contains(&6));
+    assert!(!checked.borrow().contains(&6));
+    assert_eq!(sampler.served(6), 0);
+}
+
+#[test]
+fn a_failing_precompile_fails_the_site() {
+    let mut sampler = grid_sampler();
+    let limits = DecideLimits::default();
+    let staging = grid_staging(2, false);
+    let failing = |_indices: &[usize]| -> Result<Precompiled, anyhow::Error> {
+        anyhow::bail!("the baseline did not compile")
+    };
+    let keep_all = |indices: &[usize]| indices.to_vec();
+
+    let result = sample_in_stages_with(&mut sampler, &staging, 0, &limits, failing, keep_all);
+
+    assert!(result.is_err());
+    assert_eq!(sampler.served(0), 0);
 }

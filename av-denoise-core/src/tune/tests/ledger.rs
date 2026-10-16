@@ -234,3 +234,49 @@ fn deterministic_ledgers_count_only_exact_candidates() {
 
     assert_eq!(ledger.seen().get(&site.key()), Some(&3));
 }
+
+#[test]
+fn compile_time_adds_up_per_key_and_in_total() {
+    let ledger = TuneLedger::new(false);
+    let window_key = SiteKey::builder("window_probe", 64, 64).build();
+    let collab_key = SiteKey::builder("collab_probe", 64, 64).build();
+
+    ledger.add_compile(&window_key, Duration::from_millis(300));
+    ledger.add_compile(&collab_key, Duration::from_millis(500));
+    ledger.add_compile(&window_key, Duration::from_millis(200));
+    let per_key = ledger.compile_times();
+
+    assert_eq!(ledger.compile_time(), Duration::from_secs(1));
+    assert_eq!(per_key.get(&window_key), Some(&Duration::from_millis(500)));
+    assert_eq!(per_key.get(&collab_key), Some(&Duration::from_millis(500)));
+}
+
+#[test]
+fn a_ledger_without_a_compile_ceiling_never_runs_out() {
+    let ledger = TuneLedger::new(false);
+    let key = SiteKey::builder("probe", 64, 64).build();
+
+    ledger.add_compile(&key, Duration::from_secs(3600));
+
+    assert_eq!(ledger.compile_left(), Duration::MAX);
+}
+
+#[test]
+fn the_compile_ceiling_shrinks_with_compile_time_and_restarts_each_pass() {
+    let ledger = TuneLedger::new(false);
+    let key = SiteKey::builder("probe", 64, 64).build();
+    let ceiling = Duration::from_secs(30);
+
+    ledger.begin_compile_pass(ceiling);
+    ledger.add_compile(&key, Duration::from_secs(20));
+    let partly_spent = ledger.compile_left();
+    ledger.add_compile(&key, Duration::from_secs(20));
+    let fully_spent = ledger.compile_left();
+    ledger.begin_compile_pass(ceiling);
+
+    assert_eq!(partly_spent, Duration::from_secs(10));
+    assert_eq!(fully_spent, Duration::ZERO);
+    assert_eq!(ledger.compile_left(), ceiling);
+    assert_eq!(ledger.compile_time(), Duration::ZERO);
+    assert!(ledger.compile_times().is_empty());
+}

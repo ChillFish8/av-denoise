@@ -11,6 +11,7 @@ use super::key::SiteKey;
 use super::ledger::{LedgerChoice, Observed, TuneLedger};
 use super::legality::Legality;
 use super::plan::{KernelPlan, PipelineProfile};
+use super::precompile::CompileAccount;
 use super::result::SiteRanking;
 use super::session::{timed_count, tune_site};
 use super::site::{SiteCandidate, VariantSite, legal_candidates};
@@ -168,7 +169,8 @@ impl<R: Runtime> KernelSelector<R> {
         ledger: &TuneLedger,
     ) {
         let guard = TargetGuard::new(ledger, key);
-        let attempt = AssertUnwindSafe(|| tune_site(site, allowed, deadline));
+        let compile = CompileAccount { ledger, key };
+        let attempt = AssertUnwindSafe(|| tune_site(site, allowed, deadline, compile));
         let outcome = catch_unwind(attempt);
 
         match outcome {

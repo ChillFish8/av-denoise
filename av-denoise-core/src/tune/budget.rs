@@ -80,6 +80,11 @@ pub fn site_min_cost(candidates: usize) -> Duration {
     REWARM + MIN_CANDIDATE_TIME * count
 }
 
+/// The part of `elapsed` that counts against a tuning budget, which leaves out `compile`.
+pub fn timing_spent(elapsed: Duration, compile: Duration) -> Duration {
+    elapsed.saturating_sub(compile)
+}
+
 /// Whether `needed` more time fits in `budget` after `spent`.
 pub fn can_afford(budget: &Budget, spent: Duration, needed: Duration) -> bool {
     let total_needed = spent + needed;

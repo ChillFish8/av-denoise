@@ -10,6 +10,7 @@ use super::consts::{
     PRESCREEN_SAMPLES,
     SITE_CAP,
 };
+use super::precompile::Precompiled;
 
 /// One timing sample, `launches` back-to-back launches that took `total` together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +41,9 @@ pub trait Sampler {
     fn candidate_name(&self, index: usize) -> String {
         index.to_string()
     }
+
+    /// Leaves `spent` out of [Sampler::elapsed] from now on.
+    fn exclude(&mut self, _spent: Duration) {}
 }
 
 /// The samples one candidate has collected.
@@ -324,6 +328,22 @@ pub struct Staging<'a> {
     pub members: &'a dyn Fn(usize, usize) -> Vec<usize>,
 }
 
+/// [sample_in_stages_with] with every member kept and nothing compiled.
+pub fn sample_in_stages<S: Sampler>(
+    sampler: &mut S,
+    staging: &Staging<'_>,
+    baseline: usize,
+    limits: &DecideLimits,
+    check: impl FnMut(&[usize]) -> Vec<usize>,
+) -> Result<SiteTiming, anyhow::Error> {
+    let keep_all = |indices: &[usize]| -> Result<Precompiled, anyhow::Error> {
+        let kept = Precompiled::keeping(indices);
+        Ok(kept)
+    };
+
+    sample_in_stages_with(sampler, staging, baseline, limits, keep_all, check)
+}
+
 /// Times candidates stage by stage and returns every candidate timed.
 ///
 /// The first stage times the members around `baseline`. Each later stage times the members around
@@ -332,12 +352,14 @@ pub struct Staging<'a> {
 /// are sampled until settled. The baseline is always a member of the first stage. A later stage
 /// where no member passes the pre-screen times nothing and the site keeps what it has. The site cap
 /// counts the whole site. The hard cap restarts with each stage, so a later stage always reaches its
-/// minimums.
-pub fn sample_in_stages<S: Sampler>(
+/// minimums. Each stage's members go through `precompile` first, which drops those that do not
+/// compile, and the time it took is left out of the sampler's elapsed time.
+pub fn sample_in_stages_with<S: Sampler>(
     sampler: &mut S,
     staging: &Staging<'_>,
     baseline: usize,
     limits: &DecideLimits,
+    mut precompile: impl FnMut(&[usize]) -> Result<Precompiled, anyhow::Error>,
     mut check: impl FnMut(&[usize]) -> Vec<usize>,
 ) -> Result<SiteTiming, anyhow::Error> {
     let mut timed: Vec<CandidateStats> = Vec::new();
@@ -354,6 +376,14 @@ pub fn sample_in_stages<S: Sampler>(
         }
 
         tried.extend(&members);
+
+        if members.is_empty() {
+            continue;
+        }
+
+        let precompiled = precompile(&members)?;
+        sampler.exclude(precompiled.spent);
+        let members = precompiled.kept;
 
         if members.is_empty() {
             continue;

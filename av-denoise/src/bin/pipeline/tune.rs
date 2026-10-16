@@ -93,6 +93,7 @@ fn log_report(report: &TuneReport) {
         TuneOutcome::Tuned => tracing::info!(
             keys = report.tuned_keys,
             seconds = report.elapsed.as_secs_f64(),
+            compile_seconds = report.compile.as_secs_f64(),
             saved = report.saved,
             "tuned kernels for this device"
         ),

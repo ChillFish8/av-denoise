@@ -214,13 +214,14 @@ pub(crate) fn sync<R: Runtime>(client: &ComputeClient<R>) -> Result<(), anyhow::
 /// Samples candidates of one site with device timestamps, `launches` launches per sample.
 ///
 /// A sample the device timer reports as taking no time is an error, since a calibrated sample
-/// always takes some.
+/// always takes some. Time spent compiling is left out of its elapsed time.
 pub(crate) struct GpuSampler<'a, R: Runtime, S: VariantSite<R>> {
     site: &'a S,
     candidates: &'a [S::Candidate],
     outputs: &'a S::Outputs,
     launches: u32,
     started: Instant,
+    excluded: Duration,
     runtime: PhantomData<R>,
 }
 
@@ -237,6 +238,7 @@ impl<'a, R: Runtime, S: VariantSite<R>> GpuSampler<'a, R, S> {
             outputs,
             launches,
             started: Instant::now(),
+            excluded: Duration::ZERO,
             runtime: PhantomData,
         }
     }
@@ -258,7 +260,12 @@ impl<R: Runtime, S: VariantSite<R>> Sampler for GpuSampler<'_, R, S> {
     }
 
     fn elapsed(&self) -> Duration {
-        self.started.elapsed()
+        let wall = self.started.elapsed();
+        wall.saturating_sub(self.excluded)
+    }
+
+    fn exclude(&mut self, spent: Duration) {
+        self.excluded += spent;
     }
 
     fn candidate_name(&self, index: usize) -> String {

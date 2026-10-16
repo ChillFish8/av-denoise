@@ -12,6 +12,9 @@ pub const WARM_MIN: Duration = Duration::from_secs(2);
 /// The longest warm-up. A pipeline still unstable by then is tuned as it is.
 pub const WARM_MAX: Duration = Duration::from_secs(15);
 
+/// The index of the baseline in a site's allowed candidates.
+pub const BASELINE_INDEX: usize = 0;
+
 /// How long the baseline runs just before a site is tuned, so clocks stay up.
 pub const REWARM: Duration = Duration::from_millis(200);
 

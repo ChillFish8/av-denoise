@@ -22,6 +22,7 @@ mod key;
 mod ledger;
 pub(crate) mod legality;
 mod plan;
+pub(crate) mod precompile;
 mod result;
 mod selector;
 mod session;
@@ -40,6 +41,7 @@ pub use self::budget::{
     can_afford,
     profile_wins,
     site_min_cost,
+    timing_spent,
     tuning_budget,
     tuning_order,
 };
@@ -55,6 +57,7 @@ pub use self::decide::{
     median,
     prescreen,
     sample_in_stages,
+    sample_in_stages_with,
     sample_until_settled,
 };
 pub use self::device::{DeviceIdentity, DeviceLimits, DeviceProfile};
@@ -81,6 +84,7 @@ pub use self::legality::{
     check_plane_size,
 };
 pub use self::plan::{KernelPlan, PipelineProfile};
+pub use self::precompile::Precompiled;
 pub use self::result::{
     CandidateRecord,
     ProfileRanking,

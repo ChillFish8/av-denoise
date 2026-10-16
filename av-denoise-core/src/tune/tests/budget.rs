@@ -15,6 +15,7 @@ use crate::tune::{
     can_afford,
     profile_wins,
     site_min_cost,
+    timing_spent,
     tuning_budget,
     tuning_order,
 };
@@ -196,4 +197,40 @@ fn a_profile_wins_only_past_the_margin() {
 
     assert!(!profile_wins(baseline, close));
     assert!(profile_wins(baseline, clear));
+}
+
+#[test]
+fn compile_time_is_left_out_of_the_spent_budget() {
+    let elapsed = Duration::from_secs(50);
+    let compile = Duration::from_secs(45);
+
+    let spent = timing_spent(elapsed, compile);
+
+    assert_eq!(spent, Duration::from_secs(5));
+}
+
+#[test]
+fn compile_time_past_the_elapsed_time_leaves_nothing_spent() {
+    let elapsed = Duration::from_secs(1);
+    let compile = Duration::from_secs(2);
+
+    let spent = timing_spent(elapsed, compile);
+
+    assert_eq!(spent, Duration::ZERO);
+}
+
+#[test]
+fn a_site_is_affordable_once_compile_time_is_left_out() {
+    let budget = Budget {
+        total: Duration::from_secs(30),
+        full: false,
+    };
+    let elapsed = Duration::from_millis(29_500);
+    let compile = Duration::from_secs(20);
+    let needed = site_min_cost(3);
+
+    let spent = timing_spent(elapsed, compile);
+
+    assert!(!can_afford(&budget, elapsed, needed));
+    assert!(can_afford(&budget, spent, needed));
 }

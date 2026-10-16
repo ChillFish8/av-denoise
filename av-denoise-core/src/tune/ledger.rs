@@ -45,6 +45,16 @@ struct LedgerState {
     census: BTreeMap<SiteKey, CensusEntry>,
     seen: BTreeMap<SiteKey, usize>,
     target: Option<Target>,
+    compile: CompileState,
+}
+
+/// The time a pass spends compiling candidates, and its ceiling.
+#[derive(Debug, Default)]
+struct CompileState {
+    total: Duration,
+    by_key: BTreeMap<SiteKey, Duration>,
+    /// No ceiling means compiling never runs out.
+    ceiling: Option<Duration>,
 }
 
 /// Tuning state shared by every engine one tuning pass drives.
@@ -191,6 +201,46 @@ impl TuneLedger {
         entry.total += elapsed;
         entry.launches += 1;
         entry.candidates = candidates;
+    }
+
+    /// Starts a pass's compile time at zero, with `ceiling` as the most it may spend compiling.
+    pub fn begin_compile_pass(&self, ceiling: Duration) {
+        let compile = CompileState {
+            ceiling: Some(ceiling),
+            ..CompileState::default()
+        };
+
+        self.lock().compile = compile;
+    }
+
+    /// Adds `spent` to the time spent compiling the candidates of `key`.
+    pub(crate) fn add_compile(&self, key: &SiteKey, spent: Duration) {
+        let mut state = self.lock();
+        state.compile.total += spent;
+
+        let owned = key.clone();
+        let entry = state.compile.by_key.entry(owned).or_default();
+        *entry += spent;
+    }
+
+    /// The time spent compiling candidates, which the budget leaves out.
+    pub fn compile_time(&self) -> Duration {
+        self.lock().compile.total
+    }
+
+    /// The time spent compiling each key's candidates.
+    pub fn compile_times(&self) -> BTreeMap<SiteKey, Duration> {
+        self.lock().compile.by_key.clone()
+    }
+
+    /// The compile time the pass has left, unlimited when no pass set a ceiling.
+    pub fn compile_left(&self) -> Duration {
+        let state = self.lock();
+
+        match state.compile.ceiling {
+            Some(ceiling) => ceiling.saturating_sub(state.compile.total),
+            None => Duration::MAX,
+        }
     }
 
     /// Stores `ranking` for `key` and makes its choice the one that runs.

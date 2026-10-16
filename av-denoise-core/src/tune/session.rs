@@ -2,18 +2,19 @@ use std::time::{Duration, Instant};
 
 use cubecl::prelude::*;
 
-use super::consts::{MAX_LAUNCHES_PER_SAMPLE, REWARM, SAMPLE_TARGET, STAGE_KEEP};
+use super::consts::{BASELINE_INDEX, MAX_LAUNCHES_PER_SAMPLE, REWARM, SAMPLE_TARGET, STAGE_KEEP};
 use super::decide::{
     DecideLimits,
     SiteTiming,
     Staging,
     median,
     prescreen,
-    sample_in_stages,
+    sample_in_stages_with,
     sample_until_settled,
 };
 use super::fidelity::CompareResult;
 use super::gpu::{GpuSampler, profile_launches, sync};
+use super::precompile::{CompileAccount, Precompiled, precompile};
 use super::result::{CandidateRecord, SiteRanking};
 use super::site::{SiteCandidate, VariantSite};
 
@@ -31,14 +32,17 @@ const CALIBRATION_SAMPLES: usize = 3;
 /// site that asks for one gets a pre-screen. Every survivor's output is checked against the
 /// baseline's, and the rest are timed round-robin until the stop rule ends the site or `deadline`
 /// caps it. A staged site runs these steps once per stage, as
-/// [sample_in_stages](crate::tune::sample_in_stages) describes.
+/// [sample_in_stages_with](crate::tune::sample_in_stages_with) describes. Before timing, each stage's
+/// candidates are compiled once, and the compile time goes to `compile` instead of counting towards
+/// the caps.
 pub(crate) fn tune_site<R: Runtime, S: VariantSite<R>>(
     site: &S,
     allowed: &[S::Candidate],
     deadline: Instant,
+    compile: CompileAccount<'_>,
 ) -> Result<SiteRanking, anyhow::Error> {
     if allowed.len() == 1 {
-        let ranking = untimed_baseline(allowed[0]);
+        let ranking = untimed_baseline(allowed[BASELINE_INDEX]);
         return Ok(ranking);
     }
 
@@ -52,6 +56,9 @@ pub(crate) fn tune_site<R: Runtime, S: VariantSite<R>>(
     let remaining = deadline.saturating_duration_since(Instant::now());
     limits.site_cap = limits.site_cap.min(remaining);
 
+    let compile_stage =
+        |indices: &[usize]| compile_members(site, allowed, indices, &candidate_outputs, compile);
+
     if S::STAGES > 1 {
         let members = |stage: usize, seed: usize| stage_members(site, allowed, stage, seed);
         let staging = Staging {
@@ -63,26 +70,73 @@ pub(crate) fn tune_site<R: Runtime, S: VariantSite<R>>(
         let check =
             |indices: &[usize]| check_outputs(site, allowed, indices, &baseline_outputs, &candidate_outputs);
         let mut sampler = GpuSampler::new(site, allowed, &candidate_outputs, launches);
-        let timing = sample_in_stages(&mut sampler, &staging, 0, &limits, check)?;
+        let timing = sample_in_stages_with(
+            &mut sampler,
+            &staging,
+            BASELINE_INDEX,
+            &limits,
+            compile_stage,
+            check,
+        )?;
 
         let ranking = ranking_from(allowed, &timing);
         return Ok(ranking);
     }
 
     let indices: Vec<usize> = (0..allowed.len()).collect();
+    let precompiled = compile_stage(&indices)?;
+    let compiled = precompiled.kept;
+
     let screened = if S::PRESCREEN {
         let mut sampler = GpuSampler::new(site, allowed, &candidate_outputs, launches);
-        prescreen(&mut sampler, &indices, 0, &limits)?
+        prescreen(&mut sampler, &compiled, BASELINE_INDEX, &limits)?
     } else {
-        indices
+        compiled
     };
 
     let checked = check_outputs(site, allowed, &screened, &baseline_outputs, &candidate_outputs);
     let mut sampler = GpuSampler::new(site, allowed, &candidate_outputs, launches);
-    let timing = sample_until_settled(&mut sampler, &checked, 0, &limits)?;
+    let timing = sample_until_settled(&mut sampler, &checked, BASELINE_INDEX, &limits)?;
 
     let ranking = ranking_from(allowed, &timing);
     Ok(ranking)
+}
+
+/// Compiles the candidates at `indices` within the pass's compile ceiling and records the time it took.
+///
+/// A compile of [REWARM](crate::tune::REWARM) or longer can let the clocks drop, so the baseline runs
+/// again before timing resumes, and that re-warm counts as timing. A baseline that does not compile
+/// fails the site.
+pub(crate) fn compile_members<R: Runtime, S: VariantSite<R>>(
+    site: &S,
+    allowed: &[S::Candidate],
+    indices: &[usize],
+    outputs: &S::Outputs,
+    compile: CompileAccount<'_>,
+) -> Result<Precompiled, anyhow::Error> {
+    let allowance = compile.left();
+    let precompiled = precompile(site, allowed, indices, outputs, allowance);
+    compile.record(precompiled.spent);
+
+    tracing::debug!(
+        site = S::Candidate::SITE,
+        key = %compile.key,
+        kept = precompiled.kept.len(),
+        dropped = precompiled.dropped.len(),
+        skipped = precompiled.skipped.len(),
+        spent = ?precompiled.spent,
+        "compiled a stage's candidates"
+    );
+
+    if let Some(reason) = precompiled.reason_for(BASELINE_INDEX) {
+        anyhow::bail!("the baseline did not compile: {reason}");
+    }
+
+    if precompiled.spent >= REWARM {
+        rewarm(site, outputs)?;
+    }
+
+    Ok(precompiled)
 }
 
 /// The indices into `allowed` that stage `stage` times around `allowed[seed]`.
@@ -174,15 +228,15 @@ fn check_outputs<R: Runtime, S: VariantSite<R>>(
     baseline_outputs: &S::Outputs,
     candidate_outputs: &S::Outputs,
 ) -> Vec<usize> {
-    let baseline = allowed[0];
+    let baseline = allowed[BASELINE_INDEX];
     site.clear_outputs(baseline_outputs);
     site.launch(baseline, baseline_outputs);
 
     let mut passed = Vec::with_capacity(indices.len());
 
     for &index in indices {
-        if index == 0 {
-            passed.push(0);
+        if index == BASELINE_INDEX {
+            passed.push(BASELINE_INDEX);
             continue;
         }
 

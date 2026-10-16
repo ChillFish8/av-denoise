@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use cubecl::prelude::*;
 
@@ -75,6 +76,10 @@ pub(crate) struct ProbeSite {
     pub(crate) launched: Arc<Mutex<Vec<ProbeCandidate>>>,
     /// Whether allocating scratch outputs panics, which makes any tuning of this site fail.
     pub(crate) fail_scratch: bool,
+    /// Candidates whose launch panics.
+    pub(crate) panicking: Vec<ProbeCandidate>,
+    /// How long each launch blocks the calling thread.
+    pub(crate) launch_delay: Duration,
 }
 
 impl ProbeSite {
@@ -88,6 +93,8 @@ impl ProbeSite {
             illegal: Vec::new(),
             launched: Arc::new(Mutex::new(Vec::new())),
             fail_scratch: false,
+            panicking: Vec::new(),
+            launch_delay: Duration::ZERO,
         }
     }
 
@@ -145,6 +152,12 @@ impl VariantSite<TestRuntime> for ProbeSite {
     }
 
     fn launch(&self, candidate: ProbeCandidate, _outputs: &()) {
+        std::thread::sleep(self.launch_delay);
+
+        if self.panicking.contains(&candidate) {
+            panic!("the {} probe launch panicked", candidate.name());
+        }
+
         self.launched.lock().expect("probe lock").push(candidate);
     }
 

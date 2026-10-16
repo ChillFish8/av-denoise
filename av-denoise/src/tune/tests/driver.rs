@@ -1,11 +1,12 @@
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use av_denoise_core::DenoisingMode;
-use av_denoise_core::tune::BudgetRequest;
+use av_denoise_core::tune::{Budget, BudgetRequest, KeyValue, SiteKey, TuneLedger};
 
 use crate::accelerate::Accelerator;
 use crate::planar::{ChannelIntent, FrameLayout, PlanarDenoiser, PlaneOptions, Planes, Subsampling};
+use crate::tune::driver::{FrameCycle, tune_keys};
 use crate::tune::{TuneOutcome, TuneRequest, TuneStore, TuningMode, is_tuned, selected_device, tune_planes};
 use crate::{Algorithm, Depth, Device, Nl4dOptions, install_compilation_cache_at};
 
@@ -110,6 +111,9 @@ fn a_full_pass_tunes_and_saves_and_a_second_finds_it_done() {
     assert!(first.saved);
     assert_eq!(second.outcome, TuneOutcome::AlreadyTuned, "{second:?}");
     assert_eq!(second.tuned_keys, 0);
+    assert!(first.compile > Duration::ZERO, "{first:?}");
+    assert!(first.compile < first.elapsed, "{first:?}");
+    assert_eq!(second.compile, Duration::ZERO);
     assert!(is_tuned(&plane_options, frame_layout));
 
     let store_dir = cache.path().join(crate::KERNEL_HASH).join("tune");
@@ -195,6 +199,32 @@ fn a_denoiser_built_after_tuning_carries_no_ledger() {
     let planar = PlanarDenoiser::create(&plane_options, frame_layout).expect("the denoiser builds");
 
     assert!(planar.ledger().is_none());
+}
+
+#[test]
+fn a_spent_compile_ceiling_stops_before_the_next_key() {
+    let algorithm = Algorithm::default();
+    let plane_options = options(algorithm, TuningMode::Auto);
+    let frame_layout = layout();
+    let clip = frames(2);
+    let mut planar = PlanarDenoiser::create(&plane_options, frame_layout).expect("the denoiser builds");
+    let mut cycle = FrameCycle::new(&clip);
+    let ledger = TuneLedger::new(false);
+    let budget = Budget {
+        total: Duration::from_secs(600),
+        full: true,
+    };
+    let order = [KeyValue {
+        key: SiteKey::builder("test", 64, 64).build(),
+        per_frame: Duration::from_millis(1),
+        candidates: 2,
+    }];
+
+    ledger.begin_compile_pass(Duration::ZERO);
+    let tuned = tune_keys(&mut planar, &ledger, &mut cycle, &order, &budget, Instant::now());
+
+    assert!(tuned.frame_error.is_none());
+    assert_eq!(cycle.next, 0, "a frame was pushed for the key");
 }
 
 #[test]
@@ -304,5 +334,5 @@ fn an_nl4d_pass_records_a_ranking_for_every_plane() {
 
     assert_eq!(report.outcome, TuneOutcome::Tuned, "{report:?}");
     assert_eq!(report.tuned_keys, stored_site_count(&plane_options), "{report:?}");
-    assert!(is_tuned(&plane_options, frame_layout));
+    assert!(is_tuned(&plane_options, frame_layout), "{report:?}");
 }

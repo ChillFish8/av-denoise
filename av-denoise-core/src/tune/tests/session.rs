@@ -17,7 +17,8 @@ use super::probe::{ProbeCandidate, ProbeSite, small_device_limits};
 use super::runtime::{TestRuntime, test_client, wgpu_only};
 use crate::nlmeans::ChannelMode;
 use crate::tune::gpu::read_f32;
-use crate::tune::session::timed_count;
+use crate::tune::precompile::CompileAccount;
+use crate::tune::session::{compile_members, timed_count};
 use crate::tune::sites::{AccumOutputs, AccumulateCandidate, AccumulateSite, WindowCandidate};
 use crate::tune::{
     CompareResult,
@@ -51,9 +52,21 @@ fn tuning_selector(ledger: &Arc<TuneLedger>, limits: DeviceLimits) -> KernelSele
 }
 
 fn tune_once<S: VariantSite<TestRuntime>>(site: &S, deterministic: bool) -> Arc<TuneLedger> {
+    let ledger = TuneLedger::new(deterministic);
+    tune_on(site, ledger)
+}
+
+/// Tunes `site` once under a pass whose compile ceiling is `ceiling`.
+fn tune_within<S: VariantSite<TestRuntime>>(site: &S, ceiling: Duration) -> Arc<TuneLedger> {
+    let ledger = TuneLedger::new(false);
+    ledger.begin_compile_pass(ceiling);
+
+    tune_on(site, ledger)
+}
+
+fn tune_on<S: VariantSite<TestRuntime>>(site: &S, ledger: Arc<TuneLedger>) -> Arc<TuneLedger> {
     let client = test_client();
     let limits = DeviceLimits::from_client(&client);
-    let ledger = TuneLedger::new(deterministic);
     ledger.set_phase(TunePhase::Tune);
 
     let key = site.key();
@@ -96,6 +109,65 @@ fn tuning_a_key_ranks_the_screened_candidates_and_runs_the_choice() {
     }
 
     assert!(ranking.candidates.iter().all(|record| record.samples >= 15));
+}
+
+#[test]
+fn tuning_a_key_records_its_compile_time_apart_from_timing() {
+    let client = test_client();
+    let spec = WindowSpec::pair(96, 64, ChannelMode::Luma);
+    let site = window_site(&client, &spec);
+    let key = site.key();
+
+    let started = Instant::now();
+    let ledger = tune_once(&site, false);
+    let run_elapsed = started.elapsed();
+    let compile_time = ledger.compile_time();
+    let per_key = ledger.compile_times();
+
+    assert!(compile_time > Duration::ZERO);
+    assert!(compile_time < run_elapsed, "{compile_time:?} of {run_elapsed:?}");
+    assert_eq!(per_key.get(&key), Some(&compile_time));
+}
+
+#[test]
+fn a_spent_compile_ceiling_ranks_only_the_baseline() {
+    let client = test_client();
+    let spec = WindowSpec::pair(96, 64, ChannelMode::Luma);
+    let site = window_site(&client, &spec);
+    let key = site.key();
+    let baseline = site.baseline();
+
+    let ledger = tune_within(&site, Duration::ZERO);
+    let result = ledger.result();
+    let ranking = result.sites.get(&key).expect("the key was ranked");
+    let names: Vec<&str> = ranking
+        .candidates
+        .iter()
+        .map(|record| record.name.as_str())
+        .collect();
+
+    assert_eq!(names, vec![baseline.name()]);
+}
+
+#[test]
+fn a_baseline_that_does_not_compile_fails_the_site() {
+    let client = test_client();
+    let mut site = ProbeSite::new(&client);
+    site.panicking = vec![ProbeCandidate::Small];
+    let ledger = TuneLedger::new(false);
+    let key = site.key();
+    let compile = CompileAccount {
+        ledger: &ledger,
+        key: &key,
+    };
+
+    let result = compile_members(&site, ProbeCandidate::ALL, &[0, 1, 2], &(), compile);
+    let error = result.expect_err("the site fails without its baseline");
+
+    assert!(
+        error.to_string().contains("the baseline did not compile"),
+        "{error:#}"
+    );
 }
 
 /// Candidates are timed into scratch outputs, so the real accumulators see one launch only.

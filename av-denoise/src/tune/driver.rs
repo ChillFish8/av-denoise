@@ -28,6 +28,7 @@ use av_denoise_core::tune::{
     median,
     profile_wins,
     site_min_cost,
+    timing_spent,
     tuning_budget,
     tuning_order,
 };
@@ -82,6 +83,8 @@ pub struct TuneReport {
     pub outcome: TuneOutcome,
     /// Site keys ranked in this pass, by the main pass and the alternative profile pass together.
     pub tuned_keys: usize,
+    /// The time spent compiling candidates, which the budget leaves out.
+    pub compile: Duration,
     /// The whole call's wall time, any wait for the tune lock included.
     pub elapsed: Duration,
     /// Whether the result reached the store on disk.
@@ -93,6 +96,7 @@ impl TuneReport {
         Self {
             outcome,
             tuned_keys: 0,
+            compile: Duration::ZERO,
             elapsed: started.elapsed(),
             saved: false,
         }
@@ -107,13 +111,13 @@ impl TuneReport {
 }
 
 /// Hands out a fixed set of frames in order, starting over at the end.
-struct FrameCycle<'a> {
+pub(super) struct FrameCycle<'a> {
     frames: &'a [Planes],
-    next: usize,
+    pub(super) next: usize,
 }
 
 impl<'a> FrameCycle<'a> {
-    fn new(frames: &'a [Planes]) -> Self {
+    pub(super) fn new(frames: &'a [Planes]) -> Self {
         Self { frames, next: 0 }
     }
 
@@ -166,9 +170,9 @@ struct WarmUpReading {
 }
 
 /// What tuning a list of keys did.
-struct TunedKeys {
+pub(super) struct TunedKeys {
     /// The frame error that ended tuning early, if one did.
-    frame_error: Option<anyhow::Error>,
+    pub(super) frame_error: Option<anyhow::Error>,
 }
 
 /// What the timed part of a pass produced.
@@ -272,6 +276,8 @@ fn run_pass(planar: &mut PlanarDenoiser, inputs: &PassInputs<'_>) -> Result<Pass
     if !can_afford(&budget, spent, one_site) {
         anyhow::bail!("the tuning budget does not cover the warm-up and one site");
     }
+
+    inputs.ledger.begin_compile_pass(budget.total);
 
     let census = take_census(planar, inputs.ledger, &mut cycle)?;
     let census_measured = check_census(&census);
@@ -486,10 +492,10 @@ fn pending_keys(
     tuning_order(values, frame_time, full)
 }
 
-/// Tunes each key in `order` in place while the budget lasts.
+/// Tunes each key in `order` in place while the budget and the compile ceiling last.
 ///
 /// A frame that fails ends tuning, keeping the keys ranked before it.
-fn tune_keys(
+pub(super) fn tune_keys(
     planar: &mut PlanarDenoiser,
     ledger: &TuneLedger,
     cycle: &mut FrameCycle<'_>,
@@ -502,10 +508,15 @@ fn tune_keys(
     ledger.set_phase(TunePhase::Tune);
 
     for value in order {
-        let spent = started.elapsed();
+        let spent = budget_spent(ledger, started);
         let needed = site_min_cost(value.candidates);
         if !can_afford(budget, spent, needed) {
             tracing::info!("the tuning budget is spent, the remaining keys run their baseline");
+            break;
+        }
+
+        if ledger.compile_left().is_zero() {
+            tracing::info!("the compile ceiling is spent, the remaining keys run their baseline");
             break;
         }
 
@@ -534,6 +545,14 @@ fn tune_keys(
     ledger.set_phase(TunePhase::Idle);
 
     TunedKeys { frame_error }
+}
+
+/// The budget spent since `started`, leaving out the time spent compiling candidates.
+fn budget_spent(ledger: &TuneLedger, started: Instant) -> Duration {
+    let elapsed = started.elapsed();
+    let compile = ledger.compile_time();
+
+    timing_spent(elapsed, compile)
 }
 
 /// Pushes frames until the ledger's target settles. Returns whether it did.
@@ -601,7 +620,7 @@ fn compare_profiles(
     let frames_cost = reading.frame_time * (block_frames + warm_frames);
     let one_site = site_min_cost(TYPICAL_CANDIDATES);
     let needed = frames_cost + one_site + reading.priming;
-    let spent = inputs.started.elapsed();
+    let spent = budget_spent(inputs.ledger, inputs.started);
     if !can_afford(budget, spent, needed) {
         tracing::info!("no tuning budget is left to compare pipeline profiles");
         return ProfilePhase::Unfinished;
@@ -759,6 +778,7 @@ fn keep_result(
     let mut merged = stored.clone();
     let ranked = ledger.result();
     let tuned_keys = ranked.sites.len();
+    let compile = ledger.compile_time();
     merged.merge(ranked);
 
     let keys_done = summary.significant.iter().all(|key| merged.is_settled(key));
@@ -795,6 +815,7 @@ fn keep_result(
     TuneReport {
         outcome: TuneOutcome::Tuned,
         tuned_keys,
+        compile,
         elapsed: started.elapsed(),
         saved,
     }
