@@ -150,6 +150,68 @@ fn a_spent_compile_ceiling_ranks_only_the_baseline() {
 }
 
 #[test]
+fn a_key_cut_short_by_the_compile_ceiling_is_ranked_as_partial() {
+    let client = test_client();
+    let spec = WindowSpec::pair(96, 64, ChannelMode::Luma);
+    let site = window_site(&client, &spec);
+    let key = site.key();
+
+    let ledger = tune_within(&site, Duration::ZERO);
+    let result = ledger.result();
+    let ranking = result.sites.get(&key).expect("the key was ranked");
+
+    assert!(ranking.partial);
+    assert!(!result.is_settled(&key));
+    assert!(ledger.plan().get(&key).is_some(), "the partial choice still runs");
+}
+
+#[test]
+fn a_key_tuned_within_the_compile_ceiling_is_not_partial() {
+    let client = test_client();
+    let spec = WindowSpec::pair(96, 64, ChannelMode::Luma);
+    let site = window_site(&client, &spec);
+    let key = site.key();
+
+    let ledger = tune_within(&site, Duration::from_secs(600));
+    let result = ledger.result();
+    let ranking = result.sites.get(&key).expect("the key was ranked");
+
+    assert!(!ranking.partial);
+    assert!(result.is_settled(&key));
+}
+
+#[test]
+fn a_candidate_that_fails_to_compile_does_not_make_the_ranking_partial() {
+    let client = test_client();
+    let spec = AccumulateSpec {
+        width: 96,
+        height: 64,
+        channels: ChannelMode::Luma,
+        q_x: 1,
+        q_y: 1,
+    };
+    let inner = accumulate_site(&client, &spec);
+    let site = FaultySite {
+        inner,
+        broken_panics: true,
+    };
+    let key = site.key();
+
+    let ledger = tune_within(&site, Duration::from_secs(600));
+    let result = ledger.result();
+    let ranking = result.sites.get(&key).expect("the key was ranked");
+    let names: Vec<&str> = ranking
+        .candidates
+        .iter()
+        .map(|record| record.name.as_str())
+        .collect();
+
+    assert_eq!(names, vec!["baseline"]);
+    assert!(!ranking.partial);
+    assert!(result.is_settled(&key));
+}
+
+#[test]
 fn a_baseline_that_does_not_compile_fails_the_site() {
     let client = test_client();
     let mut site = ProbeSite::new(&client);
@@ -256,6 +318,8 @@ impl SiteCandidate for FaultCandidate {
 #[derive(Clone)]
 struct FaultySite {
     inner: AccumulateSite<TestRuntime>,
+    /// Whether the extra candidate's launch panics, the way a candidate that fails to compile does.
+    broken_panics: bool,
 }
 
 impl VariantSite<TestRuntime> for FaultySite {
@@ -281,6 +345,8 @@ impl VariantSite<TestRuntime> for FaultySite {
     fn launch(&self, candidate: FaultCandidate, outputs: &AccumOutputs) {
         if candidate == FaultCandidate::Baseline {
             self.inner.launch(AccumulateCandidate::Thin32x16, outputs);
+        } else if self.broken_panics {
+            panic!("the broken candidate failed to compile");
         }
     }
 
@@ -317,7 +383,10 @@ fn a_candidate_with_wrong_output_is_never_ranked_or_chosen() {
         q_y: 1,
     };
     let inner = accumulate_site(&client, &spec);
-    let site = FaultySite { inner };
+    let site = FaultySite {
+        inner,
+        broken_panics: false,
+    };
     let key = site.key();
 
     let ledger = tune_once(&site, false);

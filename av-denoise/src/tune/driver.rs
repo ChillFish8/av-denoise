@@ -81,8 +81,10 @@ pub enum TuneOutcome {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TuneReport {
     pub outcome: TuneOutcome,
-    /// Site keys ranked in this pass, by the main pass and the alternative profile pass together.
+    /// Site keys fully ranked in this pass, by the main pass and the alternative profile pass together.
     pub tuned_keys: usize,
+    /// Site keys this pass ranked partially, which a later run tunes again.
+    pub partial_keys: usize,
     /// The time spent compiling candidates, which the budget leaves out.
     pub compile: Duration,
     /// The whole call's wall time, any wait for the tune lock included.
@@ -96,6 +98,7 @@ impl TuneReport {
         Self {
             outcome,
             tuned_keys: 0,
+            partial_keys: 0,
             compile: Duration::ZERO,
             elapsed: started.elapsed(),
             saved: false,
@@ -480,7 +483,9 @@ fn known_keys(inputs: &PassInputs<'_>) -> TuneResult {
 }
 
 /// The census keys not yet settled in `known`, most valuable first.
-fn pending_keys(
+///
+/// Keys with a partial ranking come after every unranked key.
+pub(super) fn pending_keys(
     census: BTreeMap<SiteKey, CensusEntry>,
     known: &TuneResult,
     frame_time: Duration,
@@ -489,7 +494,13 @@ fn pending_keys(
     let mut values = key_values(&census);
     values.retain(|value| !known.is_settled(&value.key));
 
-    tuning_order(values, frame_time, full)
+    let (partial, unranked): (Vec<KeyValue>, Vec<KeyValue>) =
+        values.into_iter().partition(|value| known.is_partial(&value.key));
+    let mut order = tuning_order(unranked, frame_time, full);
+    let retries = tuning_order(partial, frame_time, full);
+    order.extend(retries);
+
+    order
 }
 
 /// Tunes each key in `order` in place while the budget and the compile ceiling last.
@@ -507,7 +518,7 @@ pub(super) fn tune_keys(
     let mut frame_error = None;
     ledger.set_phase(TunePhase::Tune);
 
-    for value in order {
+    for (position, value) in order.iter().enumerate() {
         let spent = budget_spent(ledger, started);
         let needed = site_min_cost(value.candidates);
         if !can_afford(budget, spent, needed) {
@@ -516,7 +527,11 @@ pub(super) fn tune_keys(
         }
 
         if ledger.compile_left().is_zero() {
-            tracing::info!("the compile ceiling is spent, the remaining keys run their baseline");
+            let skipped = key_names(&order[position..]);
+            tracing::info!(
+                ?skipped,
+                "the compile ceiling is spent, the remaining keys run their baseline"
+            );
             break;
         }
 
@@ -545,6 +560,10 @@ pub(super) fn tune_keys(
     ledger.set_phase(TunePhase::Idle);
 
     TunedKeys { frame_error }
+}
+
+fn key_names(values: &[KeyValue]) -> Vec<String> {
+    values.iter().map(|value| value.key.to_string()).collect()
 }
 
 /// The budget spent since `started`, leaving out the time spent compiling candidates.
@@ -766,7 +785,7 @@ fn time_block(
 /// Merges this pass's rankings into the stored result, then remembers and saves it.
 ///
 /// Each profile key is complete when every key worth at least 2% of frame time is settled and the
-/// profiles were compared or do not apply.
+/// profiles were compared or do not apply. A key with a partial ranking is not settled.
 fn keep_result(
     identity: &DeviceIdentity,
     profile_keys: &[String],
@@ -777,7 +796,8 @@ fn keep_result(
 ) -> TuneReport {
     let mut merged = stored.clone();
     let ranked = ledger.result();
-    let tuned_keys = ranked.sites.len();
+    let partial_keys = ranked.sites.values().filter(|ranking| ranking.partial).count();
+    let tuned_keys = ranked.sites.len() - partial_keys;
     let compile = ledger.compile_time();
     merged.merge(ranked);
 
@@ -815,6 +835,7 @@ fn keep_result(
     TuneReport {
         outcome: TuneOutcome::Tuned,
         tuned_keys,
+        partial_keys,
         compile,
         elapsed: started.elapsed(),
         saved,

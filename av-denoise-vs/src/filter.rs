@@ -256,7 +256,11 @@ impl<'core> Denoise<'core> {
         let report = state.denoiser.tune(&window, &request);
 
         match report.outcome {
-            TuneOutcome::Tuned => tracing::warn!(keys = report.tuned_keys, "av-denoise finished tuning"),
+            TuneOutcome::Tuned => tracing::warn!(
+                keys = report.tuned_keys,
+                partial_keys = report.partial_keys,
+                "av-denoise finished tuning"
+            ),
             TuneOutcome::AlreadyTuned => {},
             TuneOutcome::Skipped(reason) => tracing::info!(%reason, "av-denoise did not tune"),
         }

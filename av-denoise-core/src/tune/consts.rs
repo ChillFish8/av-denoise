@@ -15,6 +15,11 @@ pub const WARM_MAX: Duration = Duration::from_secs(15);
 /// The index of the baseline in a site's allowed candidates.
 pub const BASELINE_INDEX: usize = 0;
 
+/// The compile time per candidate assumed before a pass has compiled anything.
+///
+/// It is close to what a cold chroma collab variant takes, the slowest candidate to compile.
+pub const FIRST_COMPILE_ESTIMATE: Duration = Duration::from_secs(10);
+
 /// How long the baseline runs just before a site is tuned, so clocks stay up.
 pub const REWARM: Duration = Duration::from_millis(200);
 

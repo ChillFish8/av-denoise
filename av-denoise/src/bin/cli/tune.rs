@@ -67,6 +67,7 @@ pub fn run_tune(tune: &TuneArgs, globals: &Args) -> Result<(), anyhow::Error> {
     match report.outcome {
         TuneOutcome::Tuned => tracing::info!(
             keys = report.tuned_keys,
+            partial_keys = report.partial_keys,
             seconds = report.elapsed.as_secs_f64(),
             compile_seconds = report.compile.as_secs_f64(),
             saved = report.saved,
@@ -107,6 +108,8 @@ fn show_or_clear(tune: &TuneArgs, globals: &Args) -> Result<(), anyhow::Error> {
 }
 
 /// Renders the stored winner of every site key, one row per key.
+///
+/// A key with a partial ranking is marked `(partial)`.
 pub fn format_stored(identity: &DeviceIdentity, result: &TuneResult, deterministic: bool) -> String {
     let mut table = String::new();
     let _ = writeln!(
@@ -127,7 +130,8 @@ pub fn format_stored(identity: &DeviceIdentity, result: &TuneResult, determinist
         };
 
         let millis = record.median_ns as f64 / 1_000_000.0;
-        let _ = writeln!(table, "  {key}  {}  {millis:.2} ms", record.name);
+        let note = if ranking.partial { "  (partial)" } else { "" };
+        let _ = writeln!(table, "  {key}  {}  {millis:.2} ms{note}", record.name);
     }
 
     table
@@ -334,6 +338,7 @@ mod tests {
                     samples: 40,
                 },
             ],
+            partial: false,
         };
         result.sites.insert(key, ranking);
 
@@ -343,6 +348,37 @@ mod tests {
         assert!(table.contains("nlm_window|w2048|h2048|pr=2"), "{table}");
         assert!(table.contains("32x16"), "{table}");
         assert!(table.contains("0.80 ms"), "{table}");
+    }
+
+    #[test]
+    fn a_partial_key_is_marked_in_the_table() {
+        let identity = DeviceIdentity {
+            backend: "vulkan".to_string(),
+            adapter: "Test Adapter".to_string(),
+            vendor_id: 0,
+            device_id: 0,
+            driver: "test".to_string(),
+            os: "linux".to_string(),
+            compute_capability: None,
+        };
+        let record = CandidateRecord {
+            name: "32x8".to_string(),
+            fidelity: FidelityClass::Exact,
+            baseline: true,
+            median_ns: 1_000_000,
+            samples: 40,
+        };
+        let ranking = SiteRanking {
+            candidates: vec![record],
+            partial: true,
+        };
+        let key = SiteKey::builder("nlm_window", 1920, 1080).build();
+        let mut result = TuneResult::default();
+        result.sites.insert(key, ranking);
+
+        let table = format_stored(&identity, &result, false);
+
+        assert!(table.contains("1.00 ms  (partial)"), "{table}");
     }
 
     #[test]

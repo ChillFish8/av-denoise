@@ -42,6 +42,7 @@ fn sample_result() -> TuneResult {
                 samples: 40,
             },
         ],
+        partial: false,
     };
     result.sites.insert(key, ranking);
 
@@ -103,6 +104,42 @@ fn a_file_without_failed_keys_loads_with_none() {
     let loaded = store.load(&device);
 
     assert!(loaded.failed.is_empty());
+    assert_eq!(loaded, result);
+}
+
+#[test]
+fn partial_rankings_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TuneStore::at(dir.path());
+    let device = identity();
+    let mut result = sample_result();
+    for ranking in result.sites.values_mut() {
+        ranking.partial = true;
+    }
+
+    store.save(&device, &result).expect("the save succeeds");
+    let loaded = store.load(&device);
+
+    assert!(loaded.sites.values().all(|ranking| ranking.partial));
+    assert_eq!(loaded, result);
+}
+
+#[test]
+fn a_file_without_partial_keys_loads_every_ranking_as_full() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TuneStore::at(dir.path());
+    let device = identity();
+    let result = sample_result();
+    let path = store.save(&device, &result).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut document: serde_json::Value = serde_json::from_str(&text).unwrap();
+    document.as_object_mut().unwrap().remove("partial");
+    let stripped = serde_json::to_string_pretty(&document).unwrap();
+    std::fs::write(&path, stripped).unwrap();
+
+    let loaded = store.load(&device);
+
+    assert!(loaded.sites.values().all(|ranking| !ranking.partial));
     assert_eq!(loaded, result);
 }
 

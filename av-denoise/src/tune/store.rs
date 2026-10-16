@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -40,6 +40,9 @@ struct StoredFile {
     profiles: BTreeMap<String, StoredProfiles>,
     #[serde(default)]
     failed: Vec<String>,
+    /// Site keys whose ranking is partial.
+    #[serde(default)]
+    partial: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,6 +262,12 @@ fn encode(identity: &DeviceIdentity, result: &TuneResult) -> StoredFile {
         .collect();
 
     let failed = result.failed.iter().map(|key| key.as_str().to_string()).collect();
+    let partial = result
+        .sites
+        .iter()
+        .filter(|(_, ranking)| ranking.partial)
+        .map(|(key, _)| key.as_str().to_string())
+        .collect();
 
     StoredFile {
         format_version: FORMAT_VERSION,
@@ -266,6 +275,7 @@ fn encode(identity: &DeviceIdentity, result: &TuneResult) -> StoredFile {
         sites,
         profiles,
         failed,
+        partial,
     }
 }
 
@@ -316,8 +326,10 @@ fn decode(text: &str, identity: &DeviceIdentity) -> Result<(TuneResult, usize), 
 
     let mut result = TuneResult::default();
     let mut dropped = 0;
+    let partial: BTreeSet<String> = stored.partial.into_iter().collect();
 
     for (key_text, candidates) in stored.sites {
+        let is_partial = partial.contains(&key_text);
         let Some(key) = SiteKey::from_stored(&key_text) else {
             dropped += 1;
             continue;
@@ -329,7 +341,10 @@ fn decode(text: &str, identity: &DeviceIdentity) -> Result<(TuneResult, usize), 
             continue;
         };
 
-        let ranking = SiteRanking { candidates: records };
+        let ranking = SiteRanking {
+            candidates: records,
+            partial: is_partial,
+        };
         result.sites.insert(key, ranking);
     }
 

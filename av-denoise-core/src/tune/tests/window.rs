@@ -459,6 +459,7 @@ fn a_deterministic_plan_never_picks_a_separable_window() {
     };
     let ranking = SiteRanking {
         candidates: vec![separable, baseline],
+        partial: false,
     };
     let mut result = TuneResult::default();
     result.sites.insert(key.clone(), ranking);

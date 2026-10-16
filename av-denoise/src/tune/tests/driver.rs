@@ -77,6 +77,14 @@ fn full_request() -> TuneRequest {
     }
 }
 
+/// A budget, and so a compile ceiling, long enough for a cold nl4d pass to compile every candidate.
+fn cold_nl4d_request() -> TuneRequest {
+    TuneRequest {
+        budget: BudgetRequest::Seconds(1200.0),
+        force: false,
+    }
+}
+
 /// How many launch sites the store holds for the device `plane_options` selects.
 fn stored_site_count(plane_options: &PlaneOptions) -> usize {
     let device = selected_device(&plane_options.accelerators, &plane_options.device).expect("a device");
@@ -328,11 +336,12 @@ fn an_nl4d_pass_records_a_ranking_for_every_plane() {
     let plane_options = options(Algorithm::Nl4d(nl4d), TuningMode::Auto);
     let frame_layout = layout();
     let clip = frames(13);
-    let request = full_request();
+    let request = cold_nl4d_request();
 
     let report = tune_planes(&plane_options, frame_layout, &clip, &request);
 
     assert_eq!(report.outcome, TuneOutcome::Tuned, "{report:?}");
+    assert_eq!(report.partial_keys, 0, "{report:?}");
     assert_eq!(report.tuned_keys, stored_site_count(&plane_options), "{report:?}");
     assert!(is_tuned(&plane_options, frame_layout), "{report:?}");
 }

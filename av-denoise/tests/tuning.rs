@@ -5,6 +5,7 @@ use av_denoise::tune::{
     BudgetRequest,
     TuneOutcome,
     TuneRequest,
+    TuneResult,
     TuneStore,
     is_tuned,
     selected_device,
@@ -29,6 +30,9 @@ use av_denoise::{
 
 const WIDTH: u32 = 96;
 const HEIGHT: u32 = 64;
+/// The most passes short tunes spend retrying partial keys, about 1.5x a cold nl4d compile (357 s) over
+/// the 90 s compile ceiling.
+const MAX_RETRY_PASSES: usize = 6;
 
 fn layout() -> FrameLayout {
     FrameLayout {
@@ -115,6 +119,17 @@ fn planes_equal(left: &[Planes], right: &[Planes]) -> bool {
         })
 }
 
+/// Keys with a ranking or a failure, partial rankings included.
+fn ranked_count(result: &TuneResult) -> usize {
+    result.sites.len() + result.failed.len()
+}
+
+/// Keys that need no more tuning.
+fn settled_count(result: &TuneResult) -> usize {
+    let full = result.sites.values().filter(|ranking| !ranking.partial).count();
+    full + result.failed.len()
+}
+
 #[test]
 fn short_tunes_store_results_until_a_later_run_loads_them() {
     let cache = tempfile::tempdir().expect("a temporary directory");
@@ -136,28 +151,34 @@ fn short_tunes_store_results_until_a_later_run_loads_them() {
     let device = selected_device(&plane_options.accelerators, &plane_options.device).expect("a device");
     let store = TuneStore::open_default().expect("caching is on");
     let stored = store.load(&device.identity);
-    let mut settled = stored.sites.len() + stored.failed.len();
-    assert!(settled > 0);
+    let mut ranked = ranked_count(&stored);
+    let mut settled = settled_count(&stored);
+    assert!(ranked > 0);
 
-    // A short budget can leave keys that later runs tune before the result is complete.
+    // A short budget can leave keys, or partial rankings, that later runs tune before the result is
+    // complete.
     let mut later = tune_planes(&plane_options, frame_layout, &clip, &request);
     let mut passes = 2;
     while later.outcome == TuneOutcome::Tuned {
         assert!(later.saved, "pass {passes} saved nothing");
 
         let stored = store.load(&device.identity);
-        let now_settled = stored.sites.len() + stored.failed.len();
+        let now_ranked = ranked_count(&stored);
+        let now_settled = settled_count(&stored);
         let complete = is_tuned(&plane_options, frame_layout);
+        let grew = now_settled > settled || now_ranked > ranked;
+        let ranked_any = later.tuned_keys + later.partial_keys > 0;
         assert!(
-            now_settled > settled || complete,
-            "pass {passes} left {settled} settled keys untouched"
+            grew || ranked_any || complete,
+            "pass {passes} ranked nothing and left {settled} settled keys untouched: {later:?}"
         );
-        // Every pass that leaves the result incomplete settles at least one more key.
+        // Every key is ranked once, and partial keys share a few retry passes.
         assert!(
-            passes <= now_settled + 1,
-            "{passes} passes for {now_settled} keys"
+            passes <= now_ranked + MAX_RETRY_PASSES + 1,
+            "{passes} passes for {now_ranked} keys"
         );
 
+        ranked = now_ranked;
         settled = now_settled;
         later = tune_planes(&plane_options, frame_layout, &clip, &request);
         passes += 1;
@@ -169,6 +190,7 @@ fn short_tunes_store_results_until_a_later_run_loads_them() {
         "{later:?} after {passes} passes"
     );
     assert!(is_tuned(&plane_options, frame_layout));
+    println!("short tunes finished after {passes} passes for {ranked} keys");
 }
 
 #[test]

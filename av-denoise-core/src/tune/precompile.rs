@@ -20,6 +20,8 @@ pub struct Precompiled {
     pub skipped: Vec<usize>,
     /// The wall time the compiles took, one run of each candidate included.
     pub spent: Duration,
+    /// Whether each candidate was compiled with a sync of its own.
+    pub one_by_one: bool,
 }
 
 impl Precompiled {
@@ -55,50 +57,75 @@ impl CompileAccount<'_> {
         self.ledger.compile_left()
     }
 
+    /// The compile time one more candidate is expected to take.
+    pub(crate) fn estimate(&self) -> Duration {
+        self.ledger.compile_estimate()
+    }
+
     /// Adds one stage's compile time to the key.
-    pub(crate) fn record(&self, spent: Duration) {
-        self.ledger.add_compile(self.key, spent);
+    pub(crate) fn record(&self, precompiled: &Precompiled) {
+        let compiled = precompiled.kept.len() + precompiled.dropped.len();
+        self.ledger.add_compile(self.key, precompiled.spent, compiled);
     }
 }
 
 /// Compiles the candidates at `indices` of `allowed` by launching each once into `outputs`.
 ///
 /// A kernel compiles on its first launch and stays compiled for the client's device, so a candidate
-/// launched here compiles nothing when it is timed. Every launch is queued, then the device is synced
-/// once. When a launch panics or the sync fails, each candidate is launched and synced again on its own,
-/// so the failure names its candidate. A failed candidate is dropped with the reason, and nothing here
-/// panics.
+/// launched here compiles nothing when it is timed. When `allowance` covers `estimate` for every
+/// candidate, every launch is queued and the device is synced once. Otherwise, or when a launch panics
+/// or the sync fails, each candidate is launched and synced on its own, so a failure names its
+/// candidate. A failed candidate is dropped with the reason, and nothing here panics.
 ///
 /// The baseline is at [BASELINE_INDEX](crate::tune::BASELINE_INDEX) and always compiles. Once
 /// `allowance` has passed, every other candidate not yet launched is skipped. Queued launches compile
-/// on the device thread, so in the batch the allowance is mostly checked before the stage starts.
+/// on the device thread, so a batch checks the allowance mostly before it starts, and one candidate at
+/// a time checks it before each.
 pub(crate) fn precompile<R: Runtime, S: VariantSite<R>>(
     site: &S,
     allowed: &[S::Candidate],
     indices: &[usize],
     outputs: &S::Outputs,
     allowance: Duration,
+    estimate: Duration,
 ) -> Precompiled {
     let started = Instant::now();
     let ceiling = Ceiling { started, allowance };
-    let queued = launch_all(site, allowed, indices, outputs, &ceiling);
-    let synced = sync(site.client());
+    let batched = fits_in_one_batch(allowance, estimate, indices.len());
 
-    let mut precompiled = match queued {
-        Ok(batch) if synced.is_ok() => batch,
-        _ => one_by_one(site, allowed, indices, outputs, &ceiling),
+    let mut precompiled = if batched {
+        batch(site, allowed, indices, outputs, &ceiling)
+    } else {
+        one_by_one(site, allowed, indices, outputs, &ceiling)
     };
-
-    if !precompiled.skipped.is_empty() {
-        tracing::info!(
-            site = S::Candidate::SITE,
-            skipped = precompiled.skipped.len(),
-            "the compile ceiling is spent, so the remaining candidates are skipped for this run"
-        );
-    }
 
     precompiled.spent = started.elapsed();
     precompiled
+}
+
+/// Whether `allowance` is longer than `candidates` compiles of `estimate` each.
+pub(crate) fn fits_in_one_batch(allowance: Duration, estimate: Duration, candidates: usize) -> bool {
+    let count = u32::try_from(candidates).unwrap_or(u32::MAX);
+    let needed = estimate.saturating_mul(count);
+
+    allowance > needed
+}
+
+/// Queues every launch and syncs once, falling back to one candidate at a time when that fails.
+fn batch<R: Runtime, S: VariantSite<R>>(
+    site: &S,
+    allowed: &[S::Candidate],
+    indices: &[usize],
+    outputs: &S::Outputs,
+    ceiling: &Ceiling,
+) -> Precompiled {
+    let queued = launch_all(site, allowed, indices, outputs, ceiling);
+    let synced = sync(site.client());
+
+    match queued {
+        Ok(batch) if synced.is_ok() => batch,
+        _ => one_by_one(site, allowed, indices, outputs, ceiling),
+    }
 }
 
 /// When compiling began and how long it may run.
@@ -160,7 +187,10 @@ fn one_by_one<R: Runtime, S: VariantSite<R>>(
     outputs: &S::Outputs,
     ceiling: &Ceiling,
 ) -> Precompiled {
-    let mut precompiled = Precompiled::default();
+    let mut precompiled = Precompiled {
+        one_by_one: true,
+        ..Precompiled::default()
+    };
 
     for &index in indices {
         if ceiling.skips(index) {

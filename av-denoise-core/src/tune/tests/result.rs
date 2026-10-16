@@ -114,6 +114,7 @@ fn the_plan_holds_each_sites_choice() {
             record("32x16", FidelityClass::Exact, false, 800),
             record("32x8", FidelityClass::Exact, true, 1000),
         ],
+        partial: false,
     };
     result.sites.insert(window_key.clone(), window_ranking);
 
@@ -129,12 +130,14 @@ fn unknown_names_drop_their_key() {
     let mut result = TuneResult::default();
     let known = SiteRanking {
         candidates: vec![record("32x8", FidelityClass::Exact, true, 1000)],
+        partial: false,
     };
     let unknown = SiteRanking {
         candidates: vec![
             record("32x8", FidelityClass::Exact, true, 1000),
             record("64x64", FidelityClass::Exact, false, 900),
         ],
+        partial: false,
     };
     result.sites.insert(window_key.clone(), known);
     result.sites.insert(accumulate_key.clone(), unknown);
@@ -153,6 +156,7 @@ fn a_newer_result_replaces_keys_it_holds_and_keeps_the_rest() {
     let mut stored = TuneResult::default();
     let old_ranking = SiteRanking {
         candidates: vec![baseline_record(1000)],
+        partial: false,
     };
     stored.sites.insert(window_key.clone(), old_ranking.clone());
     stored.sites.insert(collab_key.clone(), old_ranking);
@@ -160,6 +164,7 @@ fn a_newer_result_replaces_keys_it_holds_and_keeps_the_rest() {
     let mut newer = TuneResult::default();
     let new_ranking = SiteRanking {
         candidates: vec![baseline_record(500)],
+        partial: false,
     };
     newer.sites.insert(window_key.clone(), new_ranking.clone());
 
@@ -185,12 +190,57 @@ fn a_failed_key_is_settled_without_a_ranking() {
 }
 
 #[test]
+fn a_partial_ranking_is_not_settled_but_its_choice_runs() {
+    let window_key = key("nlm_window");
+    let mut result = TuneResult::default();
+    let ranking = SiteRanking {
+        candidates: vec![
+            record("32x16", FidelityClass::Exact, false, 800),
+            record("32x8", FidelityClass::Exact, true, 1000),
+        ],
+        partial: true,
+    };
+    result.sites.insert(window_key.clone(), ranking);
+
+    let plan = result.kernel_plan(false);
+
+    assert!(!result.is_settled(&window_key));
+    assert!(result.is_partial(&window_key));
+    assert_eq!(plan.get(&window_key), Some("32x16"));
+}
+
+#[test]
+fn a_full_ranking_replaces_a_partial_one() {
+    let window_key = key("nlm_window");
+    let mut stored = TuneResult::default();
+    let partial = SiteRanking {
+        candidates: vec![baseline_record(1000)],
+        partial: true,
+    };
+    stored.sites.insert(window_key.clone(), partial);
+
+    let mut newer = TuneResult::default();
+    let full = SiteRanking {
+        candidates: vec![baseline_record(900)],
+        partial: false,
+    };
+    newer.sites.insert(window_key.clone(), full.clone());
+
+    stored.merge(newer);
+
+    assert_eq!(stored.sites[&window_key], full);
+    assert!(stored.is_settled(&window_key));
+    assert!(!stored.is_partial(&window_key));
+}
+
+#[test]
 fn merging_keeps_the_newer_outcome_of_each_key() {
     let window_key = key("nlm_window");
     let accumulate_key = key("nlm_accumulate");
     let collab_key = key("collab_fused");
     let ranking = SiteRanking {
         candidates: vec![baseline_record(1000)],
+        partial: false,
     };
     let mut stored = TuneResult::default();
     stored.sites.insert(window_key.clone(), ranking.clone());

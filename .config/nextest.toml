@@ -19,3 +19,18 @@ test-group = 'heavy-compile'
 test-threads = 2
 slow-timeout = { period = "120s", terminate-after = 10 }
 default-filter = '(package(av-denoise) & test(/^(tune::tests::driver|pipeline::tests::tune)::/)) | binary_id(av-denoise::tuning)'
+
+# Cold tuning passes for nl4d can be very slow.
+[[profile.tuning.overrides]]
+filter = 'binary_id(av-denoise) & test(=tune::tests::driver::an_nl4d_pass_records_a_ranking_for_every_plane)'
+slow-timeout = { period = "120s", terminate-after = 25 }
+
+# Cold tuning passes for nl4d can be very slow.
+[[profile.tuning.overrides]]
+filter = 'binary_id(av-denoise::tuning) & test(=deterministic_output_equals_baseline_output)'
+slow-timeout = { period = "120s", terminate-after = 15 }
+
+# Cold tuning passes for nl4d can be very slow.
+[[profile.tuning.overrides]]
+filter = 'binary_id(av-denoise::tuning) & test(=short_tunes_store_results_until_a_later_run_loads_them)'
+slow-timeout = { period = "120s", terminate-after = 30 }

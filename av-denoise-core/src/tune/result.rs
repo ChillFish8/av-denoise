@@ -23,6 +23,8 @@ pub struct TuneResult {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SiteRanking {
     pub candidates: Vec<CandidateRecord>,
+    /// Whether the compile ceiling skipped some of the key's candidates, so a later run tunes it again.
+    pub partial: bool,
 }
 
 /// One candidate's timing at one site key.
@@ -135,9 +137,15 @@ impl TuneResult {
         self.profiles.extend(newer.profiles);
     }
 
-    /// Whether `key` was ranked or its tuning failed, so it needs no more tuning.
+    /// Whether `key` was fully ranked or its tuning failed, so it needs no more tuning.
     pub fn is_settled(&self, key: &SiteKey) -> bool {
-        self.sites.contains_key(key) || self.failed.contains(key)
+        let fully_ranked = self.sites.get(key).is_some_and(|ranking| !ranking.partial);
+        fully_ranked || self.failed.contains(key)
+    }
+
+    /// Whether `key` holds a partial ranking, which runs its choice until it is tuned again.
+    pub fn is_partial(&self, key: &SiteKey) -> bool {
+        self.sites.get(key).is_some_and(|ranking| ranking.partial)
     }
 
     /// Drops every site key whose site or any candidate name `known` rejects.

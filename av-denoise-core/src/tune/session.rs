@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 use cubecl::prelude::*;
@@ -34,7 +35,7 @@ const CALIBRATION_SAMPLES: usize = 3;
 /// caps it. A staged site runs these steps once per stage, as
 /// [sample_in_stages_with](crate::tune::sample_in_stages_with) describes. Before timing, each stage's
 /// candidates are compiled once, and the compile time goes to `compile` instead of counting towards
-/// the caps.
+/// the caps. When the compile ceiling skips any candidate, the ranking is partial.
 pub(crate) fn tune_site<R: Runtime, S: VariantSite<R>>(
     site: &S,
     allowed: &[S::Candidate],
@@ -56,8 +57,15 @@ pub(crate) fn tune_site<R: Runtime, S: VariantSite<R>>(
     let remaining = deadline.saturating_duration_since(Instant::now());
     limits.site_cap = limits.site_cap.min(remaining);
 
-    let compile_stage =
-        |indices: &[usize]| compile_members(site, allowed, indices, &candidate_outputs, compile);
+    let skipped_any = Cell::new(false);
+    let compile_stage = |indices: &[usize]| {
+        let precompiled = compile_members(site, allowed, indices, &candidate_outputs, compile)?;
+        if !precompiled.skipped.is_empty() {
+            skipped_any.set(true);
+        }
+
+        Ok(precompiled)
+    };
 
     if S::STAGES > 1 {
         let members = |stage: usize, seed: usize| stage_members(site, allowed, stage, seed);
@@ -79,7 +87,7 @@ pub(crate) fn tune_site<R: Runtime, S: VariantSite<R>>(
             check,
         )?;
 
-        let ranking = ranking_from(allowed, &timing);
+        let ranking = ranking_from(allowed, &timing, skipped_any.get());
         return Ok(ranking);
     }
 
@@ -98,7 +106,7 @@ pub(crate) fn tune_site<R: Runtime, S: VariantSite<R>>(
     let mut sampler = GpuSampler::new(site, allowed, &candidate_outputs, launches);
     let timing = sample_until_settled(&mut sampler, &checked, BASELINE_INDEX, &limits)?;
 
-    let ranking = ranking_from(allowed, &timing);
+    let ranking = ranking_from(allowed, &timing, skipped_any.get());
     Ok(ranking)
 }
 
@@ -115,8 +123,9 @@ pub(crate) fn compile_members<R: Runtime, S: VariantSite<R>>(
     compile: CompileAccount<'_>,
 ) -> Result<Precompiled, anyhow::Error> {
     let allowance = compile.left();
-    let precompiled = precompile(site, allowed, indices, outputs, allowance);
-    compile.record(precompiled.spent);
+    let estimate = compile.estimate();
+    let precompiled = precompile(site, allowed, indices, outputs, allowance, estimate);
+    compile.record(&precompiled);
 
     tracing::debug!(
         site = S::Candidate::SITE,
@@ -124,9 +133,21 @@ pub(crate) fn compile_members<R: Runtime, S: VariantSite<R>>(
         kept = precompiled.kept.len(),
         dropped = precompiled.dropped.len(),
         skipped = precompiled.skipped.len(),
+        one_by_one = precompiled.one_by_one,
         spent = ?precompiled.spent,
         "compiled a stage's candidates"
     );
+
+    if !precompiled.skipped.is_empty() {
+        let skipped = candidate_names(allowed, &precompiled.skipped);
+        tracing::info!(
+            site = S::Candidate::SITE,
+            key = %compile.key,
+            ?skipped,
+            "the compile ceiling is spent, so this key's remaining candidates are skipped and a later run \
+             tunes it again"
+        );
+    }
 
     if let Some(reason) = precompiled.reason_for(BASELINE_INDEX) {
         anyhow::bail!("the baseline did not compile: {reason}");
@@ -137,6 +158,10 @@ pub(crate) fn compile_members<R: Runtime, S: VariantSite<R>>(
     }
 
     Ok(precompiled)
+}
+
+fn candidate_names<C: SiteCandidate>(allowed: &[C], indices: &[usize]) -> Vec<&'static str> {
+    indices.iter().map(|&index| allowed[index].name()).collect()
 }
 
 /// The indices into `allowed` that stage `stage` times around `allowed[seed]`.
@@ -283,11 +308,12 @@ fn untimed_baseline<C: SiteCandidate>(baseline: C) -> SiteRanking {
 
     SiteRanking {
         candidates: vec![record],
+        partial: false,
     }
 }
 
 /// The timed candidates as records, fastest first.
-fn ranking_from<C: SiteCandidate>(allowed: &[C], timing: &SiteTiming) -> SiteRanking {
+fn ranking_from<C: SiteCandidate>(allowed: &[C], timing: &SiteTiming, partial: bool) -> SiteRanking {
     let mut candidates: Vec<CandidateRecord> = timing
         .timed
         .iter()
@@ -306,5 +332,5 @@ fn ranking_from<C: SiteCandidate>(allowed: &[C], timing: &SiteTiming) -> SiteRan
         .collect();
 
     candidates.sort_by_key(|record| record.median_ns);
-    SiteRanking { candidates }
+    SiteRanking { candidates, partial }
 }

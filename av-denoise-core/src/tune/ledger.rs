@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use super::consts::FIRST_COMPILE_ESTIMATE;
 use super::key::SiteKey;
 use super::plan::KernelPlan;
 use super::result::{SiteRanking, TuneResult, choose};
@@ -55,6 +56,8 @@ struct CompileState {
     by_key: BTreeMap<SiteKey, Duration>,
     /// No ceiling means compiling never runs out.
     ceiling: Option<Duration>,
+    /// The highest mean compile time per candidate of any stage this pass.
+    slowest_mean: Option<Duration>,
 }
 
 /// Tuning state shared by every engine one tuning pass drives.
@@ -213,10 +216,21 @@ impl TuneLedger {
         self.lock().compile = compile;
     }
 
-    /// Adds `spent` to the time spent compiling the candidates of `key`.
-    pub(crate) fn add_compile(&self, key: &SiteKey, spent: Duration) {
+    /// Adds `spent`, the time one stage took to compile `compiled` candidates, to the time spent
+    /// compiling the candidates of `key`.
+    pub(crate) fn add_compile(&self, key: &SiteKey, spent: Duration, compiled: usize) {
         let mut state = self.lock();
         state.compile.total += spent;
+
+        if compiled > 0 {
+            let count = u32::try_from(compiled).unwrap_or(u32::MAX);
+            let mean = spent / count;
+            let slowest = state
+                .compile
+                .slowest_mean
+                .map_or(mean, |slowest| slowest.max(mean));
+            state.compile.slowest_mean = Some(slowest);
+        }
 
         let owned = key.clone();
         let entry = state.compile.by_key.entry(owned).or_default();
@@ -231,6 +245,16 @@ impl TuneLedger {
     /// The time spent compiling each key's candidates.
     pub fn compile_times(&self) -> BTreeMap<SiteKey, Duration> {
         self.lock().compile.by_key.clone()
+    }
+
+    /// The compile time one more candidate is expected to take.
+    ///
+    /// It is the highest mean per candidate of any stage this pass, and never less than
+    /// [FIRST_COMPILE_ESTIMATE](crate::tune::FIRST_COMPILE_ESTIMATE).
+    pub fn compile_estimate(&self) -> Duration {
+        let state = self.lock();
+        let observed = state.compile.slowest_mean.unwrap_or(FIRST_COMPILE_ESTIMATE);
+        observed.max(FIRST_COMPILE_ESTIMATE)
     }
 
     /// The compile time the pass has left, unlimited when no pass set a ceiling.

@@ -17,6 +17,7 @@ use crate::tune::sites::{
 use crate::tune::{
     CandidateRecord,
     EngineKernels,
+    FIRST_COMPILE_ESTIMATE,
     FidelityClass,
     KernelPlan,
     KernelSelector,
@@ -74,6 +75,7 @@ fn a_stored_result_drops_keys_with_unknown_names() {
     };
     let ranking = SiteRanking {
         candidates: vec![retired],
+        partial: false,
     };
     result.sites.insert(key, ranking);
 
@@ -241,9 +243,9 @@ fn compile_time_adds_up_per_key_and_in_total() {
     let window_key = SiteKey::builder("window_probe", 64, 64).build();
     let collab_key = SiteKey::builder("collab_probe", 64, 64).build();
 
-    ledger.add_compile(&window_key, Duration::from_millis(300));
-    ledger.add_compile(&collab_key, Duration::from_millis(500));
-    ledger.add_compile(&window_key, Duration::from_millis(200));
+    ledger.add_compile(&window_key, Duration::from_millis(300), 1);
+    ledger.add_compile(&collab_key, Duration::from_millis(500), 1);
+    ledger.add_compile(&window_key, Duration::from_millis(200), 1);
     let per_key = ledger.compile_times();
 
     assert_eq!(ledger.compile_time(), Duration::from_secs(1));
@@ -256,7 +258,7 @@ fn a_ledger_without_a_compile_ceiling_never_runs_out() {
     let ledger = TuneLedger::new(false);
     let key = SiteKey::builder("probe", 64, 64).build();
 
-    ledger.add_compile(&key, Duration::from_secs(3600));
+    ledger.add_compile(&key, Duration::from_secs(3600), 1);
 
     assert_eq!(ledger.compile_left(), Duration::MAX);
 }
@@ -268,9 +270,9 @@ fn the_compile_ceiling_shrinks_with_compile_time_and_restarts_each_pass() {
     let ceiling = Duration::from_secs(30);
 
     ledger.begin_compile_pass(ceiling);
-    ledger.add_compile(&key, Duration::from_secs(20));
+    ledger.add_compile(&key, Duration::from_secs(20), 1);
     let partly_spent = ledger.compile_left();
-    ledger.add_compile(&key, Duration::from_secs(20));
+    ledger.add_compile(&key, Duration::from_secs(20), 1);
     let fully_spent = ledger.compile_left();
     ledger.begin_compile_pass(ceiling);
 
@@ -279,4 +281,43 @@ fn the_compile_ceiling_shrinks_with_compile_time_and_restarts_each_pass() {
     assert_eq!(ledger.compile_left(), ceiling);
     assert_eq!(ledger.compile_time(), Duration::ZERO);
     assert!(ledger.compile_times().is_empty());
+}
+
+#[test]
+fn the_compile_estimate_is_the_slowest_stage_mean_of_the_pass() {
+    let ledger = TuneLedger::new(false);
+    let key = SiteKey::builder("probe", 64, 64).build();
+    let ceiling = Duration::from_secs(120);
+
+    ledger.begin_compile_pass(ceiling);
+    let before_any = ledger.compile_estimate();
+    ledger.add_compile(&key, Duration::from_secs(48), 4);
+    ledger.add_compile(&key, Duration::from_secs(22), 2);
+    let after_two = ledger.compile_estimate();
+    ledger.begin_compile_pass(ceiling);
+
+    assert_eq!(before_any, FIRST_COMPILE_ESTIMATE);
+    assert_eq!(after_two, Duration::from_secs(12));
+    assert_eq!(ledger.compile_estimate(), FIRST_COMPILE_ESTIMATE);
+}
+
+#[test]
+fn cheap_stages_never_lower_the_compile_estimate_below_the_first_estimate() {
+    let ledger = TuneLedger::new(false);
+    let key = SiteKey::builder("probe", 64, 64).build();
+
+    ledger.begin_compile_pass(Duration::from_secs(30));
+    ledger.add_compile(&key, Duration::from_secs(8), 4);
+
+    assert_eq!(ledger.compile_estimate(), FIRST_COMPILE_ESTIMATE);
+}
+
+#[test]
+fn a_stage_that_compiled_nothing_leaves_the_compile_estimate_alone() {
+    let ledger = TuneLedger::new(false);
+    let key = SiteKey::builder("probe", 64, 64).build();
+
+    ledger.add_compile(&key, Duration::from_millis(5), 0);
+
+    assert_eq!(ledger.compile_estimate(), FIRST_COMPILE_ESTIMATE);
 }
