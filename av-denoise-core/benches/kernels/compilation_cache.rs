@@ -1,16 +1,18 @@
 use std::path::PathBuf;
 
-use av_denoise_core::KERNEL_HASH;
 use cubecl::config::cache::CacheConfig;
 use cubecl::config::{CubeClRuntimeConfig, RuntimeConfig};
 
 const CACHE_DIR_NAME: &str = "bench-kernel-cache";
 
+/// A hash of the crate's sources and benches, which names this build's cache directory.
+const BENCH_KERNEL_HASH: &str = env!("AV_DENOISE_BENCH_KERNEL_HASH");
+
 /// Points CubeCL's compilation cache at a directory every run of this build shares.
 ///
 /// A rerun of the same build reuses the kernels an earlier run compiled. CubeCL keys cached kernels
-/// by their signature rather than their body, so the directory is named by
-/// [KERNEL_HASH](av_denoise_core::KERNEL_HASH). It runs before the first client is made.
+/// by their signature rather than their body, so the directory is named by a hash of the crate's
+/// sources and benches. It panics if CubeCL has already read its config.
 pub fn install_bench_compilation_cache() {
     let cache_dir = cache_dir();
     let _ = std::fs::create_dir_all(&cache_dir);
@@ -26,5 +28,5 @@ fn cache_dir() -> PathBuf {
         None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target"),
     };
 
-    target_dir.join(CACHE_DIR_NAME).join(KERNEL_HASH)
+    target_dir.join(CACHE_DIR_NAME).join(BENCH_KERNEL_HASH)
 }

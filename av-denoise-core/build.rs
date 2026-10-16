@@ -6,19 +6,32 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 /// Hashes every source file so the kernel cache is keyed by the exact
 /// kernel sources a build contains.
+///
+/// The bench hash also covers `benches`, which defines kernels of its own.
 fn main() {
-    let source_root = Path::new("src");
+    let kernel_hash = hash_tree(Path::new("src"), FNV_OFFSET_BASIS);
+    println!("cargo:rustc-env=AV_DENOISE_KERNEL_HASH={kernel_hash:016x}");
+    println!("cargo:rerun-if-changed=src");
 
+    let bench_root = Path::new("benches");
+    if bench_root.is_dir() {
+        let bench_hash = hash_tree(bench_root, kernel_hash);
+        println!("cargo:rustc-env=AV_DENOISE_BENCH_KERNEL_HASH={bench_hash:016x}");
+        println!("cargo:rerun-if-changed=benches");
+    }
+}
+
+/// Folds every file below `root` into `hash`, in path order.
+fn hash_tree(root: &Path, mut hash: u64) -> u64 {
     let mut files = Vec::new();
-    collect_files(source_root, &mut files);
+    collect_files(root, &mut files);
 
     let mut relative_paths: Vec<(String, PathBuf)> = files
         .into_iter()
-        .map(|path| (relative_path(source_root, &path), path))
+        .map(|path| (relative_path(root, &path), path))
         .collect();
     relative_paths.sort();
 
-    let mut hash = FNV_OFFSET_BASIS;
     for (relative, path) in relative_paths {
         let contents = fs::read(&path).expect("source file is readable");
         let length = contents.len() as u64;
@@ -29,8 +42,7 @@ fn main() {
         hash = fnv1a(hash, &contents);
     }
 
-    println!("cargo:rustc-env=AV_DENOISE_KERNEL_HASH={hash:016x}");
-    println!("cargo:rerun-if-changed=src");
+    hash
 }
 
 fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) {
