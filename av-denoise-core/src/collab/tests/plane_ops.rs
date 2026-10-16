@@ -10,6 +10,8 @@ use crate::collab::kernels::plane_ops::{
     scatter_sums8,
     shift_insert8,
     shift_insert8_cached,
+    shift_insert8_ordered,
+    shift_insert8_ordered_cached,
     transpose8,
 };
 
@@ -325,6 +327,295 @@ fn shift_insert8_cached_matches_the_ungated_insert() {
         assert_eq!(got, want, "case {}", case.name);
         assert!(worsts.iter().all(|&worst| worst == eighth), "case {}", case.name);
     }
+}
+
+#[cube(launch_unchecked)]
+fn shift_insert_ordered_kernel(
+    dists: &Array<f32>,
+    posns: &Array<u32>,
+    n: u32,
+    out_d: &mut Array<f32>,
+    out_p: &mut Array<u32>,
+) {
+    let tid = ABSOLUTE_POS_X;
+    let sub = UNIT_POS_PLANE % 8;
+    let mut best_d = UNFILLED_DISTANCE.runtime();
+    let mut best_p = 0u32;
+    let mut i = 0u32;
+
+    while i < n {
+        let distance = dists[i as usize];
+        let position = posns[i as usize];
+        shift_insert8_ordered(&mut best_d, &mut best_p, distance, position, sub);
+        i += 1u32;
+    }
+
+    out_d[tid as usize] = best_d;
+    out_p[tid as usize] = best_p;
+}
+
+#[cube(launch_unchecked)]
+fn shift_insert_ordered_cached_kernel(
+    dists: &Array<f32>,
+    posns: &Array<u32>,
+    n: u32,
+    out_d: &mut Array<f32>,
+    out_p: &mut Array<u32>,
+    out_worst_d: &mut Array<f32>,
+    out_worst_p: &mut Array<u32>,
+) {
+    let tid = ABSOLUTE_POS_X;
+    let sub = UNIT_POS_PLANE % 8;
+    let base = group_base();
+    let mut best_d = UNFILLED_DISTANCE.runtime();
+    let mut best_p = 0u32;
+    let mut worst_d = UNFILLED_DISTANCE.runtime();
+    let mut worst_p = 0u32;
+    let mut i = 0u32;
+
+    while i < n {
+        let distance = dists[i as usize];
+        let position = posns[i as usize];
+        shift_insert8_ordered_cached(
+            &mut best_d,
+            &mut best_p,
+            &mut worst_d,
+            &mut worst_p,
+            distance,
+            position,
+            sub,
+            base,
+        );
+        i += 1u32;
+    }
+
+    out_d[tid as usize] = best_d;
+    out_p[tid as usize] = best_p;
+    out_worst_d[tid as usize] = worst_d;
+    out_worst_p[tid as usize] = worst_p;
+}
+
+/// Runs [shift_insert8_ordered] over `dists`/`posns` on a single 8-lane group, feeding every
+/// candidate through in order.
+fn run_shift_insert_ordered_with(dists: &[f32], posns: &[u32]) -> (Vec<f32>, Vec<u32>) {
+    let count = dists.len();
+    assert_eq!(posns.len(), count);
+    let client = make_client();
+    let dists_bytes = f32::as_bytes(dists);
+    let posns_bytes = u32::as_bytes(posns);
+    let dists_buf = client.create_from_slice(dists_bytes);
+    let posns_buf = client.create_from_slice(posns_bytes);
+    let out_d_buf = client.empty(MAX_K as usize * size_of::<f32>());
+    let out_p_buf = client.empty(MAX_K as usize * size_of::<u32>());
+    let out_d_launched = out_d_buf.clone();
+    let out_p_launched = out_p_buf.clone();
+
+    unsafe {
+        let dists_arg = ArrayArg::from_raw_parts(dists_buf, count);
+        let posns_arg = ArrayArg::from_raw_parts(posns_buf, count);
+        let out_d_arg = ArrayArg::from_raw_parts(out_d_launched, 8);
+        let out_p_arg = ArrayArg::from_raw_parts(out_p_launched, 8);
+
+        shift_insert_ordered_kernel::launch_unchecked::<R>(
+            &client,
+            CubeCount::new_1d(1),
+            CubeDim::new_1d(8),
+            dists_arg,
+            posns_arg,
+            count as u32,
+            out_d_arg,
+            out_p_arg,
+        );
+    }
+
+    let dist_bytes = client
+        .read_one(out_d_buf)
+        .expect("shift_insert_ordered dist readback failed");
+    let pos_bytes = client
+        .read_one(out_p_buf)
+        .expect("shift_insert_ordered pos readback failed");
+    let best_dists = f32::from_bytes(&dist_bytes)[..8].to_vec();
+    let best_posns = u32::from_bytes(&pos_bytes)[..8].to_vec();
+
+    (best_dists, best_posns)
+}
+
+/// The slots, then each lane's cached worst distance and position.
+type OrderedCachedOutput = ((Vec<f32>, Vec<u32>), Vec<f32>, Vec<u32>);
+
+/// Runs [shift_insert8_ordered_cached] over `dists`/`posns` on a single 8-lane group, feeding every
+/// candidate through in order.
+fn run_shift_insert_ordered_cached_with(dists: &[f32], posns: &[u32]) -> OrderedCachedOutput {
+    let count = dists.len();
+    assert_eq!(posns.len(), count);
+    let client = make_client();
+    let dists_bytes = f32::as_bytes(dists);
+    let posns_bytes = u32::as_bytes(posns);
+    let dists_buf = client.create_from_slice(dists_bytes);
+    let posns_buf = client.create_from_slice(posns_bytes);
+    let out_d_buf = client.empty(MAX_K as usize * size_of::<f32>());
+    let out_p_buf = client.empty(MAX_K as usize * size_of::<u32>());
+    let out_worst_d_buf = client.empty(MAX_K as usize * size_of::<f32>());
+    let out_worst_p_buf = client.empty(MAX_K as usize * size_of::<u32>());
+
+    let out_d_launched = out_d_buf.clone();
+    let out_p_launched = out_p_buf.clone();
+    let out_worst_d_launched = out_worst_d_buf.clone();
+    let out_worst_p_launched = out_worst_p_buf.clone();
+
+    unsafe {
+        let dists_arg = ArrayArg::from_raw_parts(dists_buf, count);
+        let posns_arg = ArrayArg::from_raw_parts(posns_buf, count);
+        let out_d_arg = ArrayArg::from_raw_parts(out_d_launched, 8);
+        let out_p_arg = ArrayArg::from_raw_parts(out_p_launched, 8);
+        let out_worst_d_arg = ArrayArg::from_raw_parts(out_worst_d_launched, 8);
+        let out_worst_p_arg = ArrayArg::from_raw_parts(out_worst_p_launched, 8);
+
+        shift_insert_ordered_cached_kernel::launch_unchecked::<R>(
+            &client,
+            CubeCount::new_1d(1),
+            CubeDim::new_1d(8),
+            dists_arg,
+            posns_arg,
+            count as u32,
+            out_d_arg,
+            out_p_arg,
+            out_worst_d_arg,
+            out_worst_p_arg,
+        );
+    }
+
+    let dist_bytes = client
+        .read_one(out_d_buf)
+        .expect("shift_insert_ordered_cached dist readback failed");
+    let pos_bytes = client
+        .read_one(out_p_buf)
+        .expect("shift_insert_ordered_cached pos readback failed");
+    let worst_d_bytes = client
+        .read_one(out_worst_d_buf)
+        .expect("shift_insert_ordered_cached worst dist readback failed");
+    let worst_p_bytes = client
+        .read_one(out_worst_p_buf)
+        .expect("shift_insert_ordered_cached worst pos readback failed");
+    let best_dists = f32::from_bytes(&dist_bytes)[..8].to_vec();
+    let best_posns = u32::from_bytes(&pos_bytes)[..8].to_vec();
+    let worst_dists = f32::from_bytes(&worst_d_bytes)[..8].to_vec();
+    let worst_posns = u32::from_bytes(&worst_p_bytes)[..8].to_vec();
+
+    ((best_dists, best_posns), worst_dists, worst_posns)
+}
+
+/// A row-major feed, where every tie arrives with its smaller position first.
+fn row_major_ties() -> (Vec<f32>, Vec<u32>) {
+    let dists = vec![2.0f32, 1.0, 1.0, 3.0, 1.0, 2.0, 1.0, 0.5, 2.0, 1.0, 1.0, 4.0];
+    let posns = (0..12u32).map(|index| index * 3).collect();
+
+    (dists, posns)
+}
+
+#[test]
+fn the_ordered_insert_matches_first_wins_on_a_row_major_feed() {
+    let (dists, posns) = row_major_ties();
+
+    let want = run_shift_insert_with(&dists, &posns);
+    let got = run_shift_insert_ordered_with(&dists, &posns);
+
+    assert_eq!(got, want);
+}
+
+/// The shared insert cases plus [row_major_ties], each fed in row-major order.
+fn ordering_cases() -> Vec<InsertCase> {
+    let (dists, posns) = row_major_ties();
+    let ties = InsertCase {
+        name: "row_major_ties",
+        dists,
+        posns,
+    };
+
+    let mut cases = insert_test_cases();
+    cases.push(ties);
+    cases
+}
+
+/// The reversed, interleaved and rotated visit orders of `count` candidates, as index lists.
+fn visit_orders(count: usize) -> Vec<(&'static str, Vec<usize>)> {
+    let reversed: Vec<usize> = (0..count).rev().collect();
+
+    let evens = (0..count).step_by(2);
+    let odds = (1..count).step_by(2);
+    let interleaved: Vec<usize> = evens.chain(odds).collect();
+
+    let mut rotated: Vec<usize> = (0..count).collect();
+    let shift = count / 3;
+    rotated.rotate_left(shift);
+
+    vec![
+        ("reversed", reversed),
+        ("interleaved", interleaved),
+        ("rotated", rotated),
+    ]
+}
+
+/// Reorders `case`'s candidates into the visit order `order`.
+fn reorder(case: &InsertCase, order: &[usize]) -> (Vec<f32>, Vec<u32>) {
+    let dists = order.iter().map(|&index| case.dists[index]).collect();
+    let posns = order.iter().map(|&index| case.posns[index]).collect();
+
+    (dists, posns)
+}
+
+#[test]
+fn the_ordered_insert_does_not_depend_on_visit_order() {
+    for case in ordering_cases() {
+        let want = run_shift_insert_with(&case.dists, &case.posns);
+
+        for (order_name, order) in visit_orders(case.dists.len()) {
+            let (dists, posns) = reorder(&case, &order);
+            let got = run_shift_insert_ordered_with(&dists, &posns);
+
+            assert_eq!(got, want, "case {} fed {order_name}", case.name);
+        }
+    }
+}
+
+#[test]
+fn the_cached_ordered_insert_does_not_depend_on_visit_order() {
+    for case in ordering_cases() {
+        let want = run_shift_insert_with(&case.dists, &case.posns);
+        let eighth_d = want.0[7];
+        let eighth_p = want.1[7];
+
+        for (order_name, order) in visit_orders(case.dists.len()) {
+            let (dists, posns) = reorder(&case, &order);
+            let (got, worst_d, worst_p) = run_shift_insert_ordered_cached_with(&dists, &posns);
+
+            assert_eq!(got, want, "case {} fed {order_name}", case.name);
+            assert!(
+                worst_d.iter().all(|&distance| distance == eighth_d),
+                "case {} fed {order_name}",
+                case.name
+            );
+            assert!(
+                worst_p.iter().all(|&position| position == eighth_p),
+                "case {} fed {order_name}",
+                case.name
+            );
+        }
+    }
+}
+
+/// A masked turn carries the unfilled distance, so it ties an unfilled slot and must never place.
+#[test]
+fn the_ordered_insert_never_places_a_masked_turn() {
+    let dists = vec![1.0f32, UNFILLED_DISTANCE, 2.0, UNFILLED_DISTANCE];
+    let posns = vec![5u32, 0, 9, 3];
+
+    let (got_d, got_p) = run_shift_insert_ordered_with(&dists, &posns);
+
+    assert_eq!(&got_d[..2], &[1.0, 2.0]);
+    assert_eq!(&got_p[..2], &[5, 9]);
+    assert!(got_d[2..].iter().all(|&distance| distance == UNFILLED_DISTANCE));
+    assert!(got_p[2..].iter().all(|&position| position == 0));
 }
 
 #[cube(launch_unchecked)]

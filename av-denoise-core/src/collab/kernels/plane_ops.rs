@@ -76,6 +76,79 @@ pub(crate) fn shift_insert8_cached(
     }
 }
 
+/// Whether `(distance, packed)` ranks before `(held_d, held_pos)`.
+///
+/// Distances compare first and positions break ties. A centre-frame `pack_pos_t` word grows with
+/// the row-major index, so a tie goes to the earlier row-major position whatever order the
+/// candidates arrive in.
+#[cube]
+pub(crate) fn ranks_before(distance: f32, packed: u32, held_d: f32, held_pos: u32) -> bool {
+    let closer = distance < held_d;
+    let same_distance = distance == held_d;
+    let earlier = packed < held_pos;
+
+    closer || (same_distance && earlier)
+}
+
+/// Inserts one candidate into the group's sorted top-8, ordered by [ranks_before].
+///
+/// It shifts slots like [shift_insert8] but breaks ties by position, so it keeps the same eight
+/// slots for any visit order. The previous lane ranks before this one, so beating it implies
+/// beating this slot too.
+#[cube]
+pub(crate) fn shift_insert8_ordered(
+    best_d: &mut f32,
+    best_pos: &mut u32,
+    distance: f32,
+    packed: u32,
+    sub: u32,
+) {
+    let prev_d = plane_shuffle_up(*best_d, 1u32);
+    let prev_pos = plane_shuffle_up(*best_pos, 1u32);
+    let beats_slot = ranks_before(distance, packed, *best_d, *best_pos);
+
+    if beats_slot {
+        let beats_previous = ranks_before(distance, packed, prev_d, prev_pos);
+        let lands_here = sub == 0u32 || !beats_previous;
+
+        if lands_here {
+            *best_d = distance;
+            *best_pos = packed;
+        } else {
+            *best_d = prev_d;
+            *best_pos = prev_pos;
+        }
+    }
+}
+
+/// [shift_insert8_ordered] with the shuffles skipped when the candidate cannot place.
+///
+/// `worst_d` and `worst_pos` hold the group's eighth slot and are refreshed after each insert that
+/// places. It keeps the same eight slots as [shift_insert8_ordered].
+#[cube]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a per-lane register the search already holds"
+)]
+pub(crate) fn shift_insert8_ordered_cached(
+    best_d: &mut f32,
+    best_pos: &mut u32,
+    worst_d: &mut f32,
+    worst_pos: &mut u32,
+    distance: f32,
+    packed: u32,
+    sub: u32,
+    base: u32,
+) {
+    let places = ranks_before(distance, packed, *worst_d, *worst_pos);
+
+    if places {
+        shift_insert8_ordered(best_d, best_pos, distance, packed, sub);
+        *worst_d = plane_shuffle(*best_d, base + 7u32);
+        *worst_pos = plane_shuffle(*best_pos, base + 7u32);
+    }
+}
+
 /// Transposes an 8x8 block held one column per lane into one row per lane, through `buf`.
 ///
 /// `v` holds the lane's 8 values on entry and its transposed 8 on return. `slot` picks the group's
