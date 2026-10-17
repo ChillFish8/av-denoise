@@ -24,6 +24,7 @@ pub use self::variant::{
     Centre,
     CollabVariant,
     GROUP_LANES,
+    NeighbourWalk,
     TRANSPOSE_REGION_FLOATS,
     Walk,
     tile_height,
@@ -207,6 +208,7 @@ pub fn collab_fused<S: Float, N: Size>(
     let base = group_base();
     let groups = comptime!(variant.groups);
     let walk = comptime!(variant.walk);
+    let neighbour_walk = comptime!(variant.neighbour);
 
     let max_x = comptime!(width - PATCH_SIZE);
     let max_y = comptime!(height - PATCH_SIZE);
@@ -365,6 +367,7 @@ pub fn collab_fused<S: Float, N: Size>(
                 comptime!(first + 1),
                 tail,
                 walk,
+                neighbour_walk,
                 radius,
                 refine,
                 mv_stride,

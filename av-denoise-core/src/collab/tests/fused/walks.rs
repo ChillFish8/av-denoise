@@ -2,7 +2,7 @@ use super::noise_curve::stepped_curve;
 use super::{Setup, chroma_cross_frame_setup, cross_frame_setup, run_fused_variant, unique_frame};
 use crate::collab::kernels::fused::CollabVariant;
 use crate::tune::SiteCandidate;
-use crate::tune::tests::fixtures::{variant_chunk, variant_chunk_tests};
+use crate::tune::tests::fixtures::variant_chunk_tests;
 
 /// One labelled launch the variants are compared on.
 type Case = (&'static str, Setup);
@@ -163,112 +163,120 @@ fn f16_shared_vector_case() -> Case {
 }
 
 variant_chunk_tests! {
-    assert_case_agrees(spatial_case()), 2 chunks,
+    assert_case_agrees(spatial_case()), 4 chunks,
     [
-        every_variant_matches_the_baseline_on_the_spatial_pass_in_the_first_half => 0,
-        every_variant_matches_the_baseline_on_the_spatial_pass_in_the_second_half => 1,
+        every_variant_matches_the_baseline_on_the_spatial_pass_in_the_first_quarter => 0,
+        every_variant_matches_the_baseline_on_the_spatial_pass_in_the_second_quarter => 1,
+        every_variant_matches_the_baseline_on_the_spatial_pass_in_the_third_quarter => 2,
+        every_variant_matches_the_baseline_on_the_spatial_pass_in_the_fourth_quarter => 3,
     ]
 }
 
 variant_chunk_tests! {
-    assert_case_agrees(cross_frame_case()), 2 chunks,
+    assert_case_agrees(cross_frame_case()), 4 chunks,
     [
-        every_variant_matches_the_baseline_across_frames_in_the_first_half => 0,
-        every_variant_matches_the_baseline_across_frames_in_the_second_half => 1,
+        every_variant_matches_the_baseline_across_frames_in_the_first_quarter => 0,
+        every_variant_matches_the_baseline_across_frames_in_the_second_quarter => 1,
+        every_variant_matches_the_baseline_across_frames_in_the_third_quarter => 2,
+        every_variant_matches_the_baseline_across_frames_in_the_fourth_quarter => 3,
     ]
 }
 
 variant_chunk_tests! {
-    assert_case_agrees(all_gated_case()), 2 chunks,
+    assert_case_agrees(all_gated_case()), 4 chunks,
     [
-        every_variant_matches_the_baseline_when_every_neighbour_is_gated_in_the_first_half => 0,
-        every_variant_matches_the_baseline_when_every_neighbour_is_gated_in_the_second_half => 1,
+        every_variant_matches_the_baseline_when_every_neighbour_is_gated_in_the_first_quarter => 0,
+        every_variant_matches_the_baseline_when_every_neighbour_is_gated_in_the_second_quarter => 1,
+        every_variant_matches_the_baseline_when_every_neighbour_is_gated_in_the_third_quarter => 2,
+        every_variant_matches_the_baseline_when_every_neighbour_is_gated_in_the_fourth_quarter => 3,
     ]
 }
 
 variant_chunk_tests! {
-    assert_case_agrees(radius_one_case()), 2 chunks,
+    assert_case_agrees(radius_one_case()), 4 chunks,
     [
-        every_variant_matches_the_baseline_at_radius_one_in_the_first_half => 0,
-        every_variant_matches_the_baseline_at_radius_one_in_the_second_half => 1,
+        every_variant_matches_the_baseline_at_radius_one_in_the_first_quarter => 0,
+        every_variant_matches_the_baseline_at_radius_one_in_the_second_quarter => 1,
+        every_variant_matches_the_baseline_at_radius_one_in_the_third_quarter => 2,
+        every_variant_matches_the_baseline_at_radius_one_in_the_fourth_quarter => 3,
     ]
 }
 
 variant_chunk_tests! {
-    assert_case_agrees(noise_curve_case()), 2 chunks,
+    assert_case_agrees(noise_curve_case()), 4 chunks,
     [
-        every_variant_matches_the_baseline_with_a_noise_curve_in_the_first_half => 0,
-        every_variant_matches_the_baseline_with_a_noise_curve_in_the_second_half => 1,
+        every_variant_matches_the_baseline_with_a_noise_curve_in_the_first_quarter => 0,
+        every_variant_matches_the_baseline_with_a_noise_curve_in_the_second_quarter => 1,
+        every_variant_matches_the_baseline_with_a_noise_curve_in_the_third_quarter => 2,
+        every_variant_matches_the_baseline_with_a_noise_curve_in_the_fourth_quarter => 3,
     ]
 }
 
 variant_chunk_tests! {
-    assert_case_agrees(shared_vector_case()), 2 chunks,
+    assert_case_agrees(shared_vector_case()), 4 chunks,
     [
-        every_variant_matches_the_baseline_when_covering_blocks_share_a_vector_in_the_first_half => 0,
-        every_variant_matches_the_baseline_when_covering_blocks_share_a_vector_in_the_second_half => 1,
+        every_variant_matches_the_baseline_when_covering_blocks_share_a_vector_in_the_first_quarter => 0,
+        every_variant_matches_the_baseline_when_covering_blocks_share_a_vector_in_the_second_quarter => 1,
+        every_variant_matches_the_baseline_when_covering_blocks_share_a_vector_in_the_third_quarter => 2,
+        every_variant_matches_the_baseline_when_covering_blocks_share_a_vector_in_the_fourth_quarter => 3,
     ]
 }
 
 variant_chunk_tests! {
-    assert_case_agrees(shared_confident_case()), 2 chunks,
+    assert_case_agrees(shared_confident_case()), 4 chunks,
     [
-        every_variant_matches_the_baseline_when_every_shared_block_is_confident_in_the_first_half => 0,
-        every_variant_matches_the_baseline_when_every_shared_block_is_confident_in_the_second_half => 1,
+        every_variant_matches_the_baseline_when_every_shared_block_is_confident_in_the_first_quarter => 0,
+        every_variant_matches_the_baseline_when_every_shared_block_is_confident_in_the_second_quarter => 1,
+        every_variant_matches_the_baseline_when_every_shared_block_is_confident_in_the_third_quarter => 2,
+        every_variant_matches_the_baseline_when_every_shared_block_is_confident_in_the_fourth_quarter => 3,
     ]
 }
 
 variant_chunk_tests! {
-    assert_case_agrees(edge_clamped_case()), 2 chunks,
+    assert_case_agrees(edge_clamped_case()), 4 chunks,
     [
-        every_variant_matches_the_baseline_when_the_edge_clamps_rectangles_together_in_the_first_half => 0,
-        every_variant_matches_the_baseline_when_the_edge_clamps_rectangles_together_in_the_second_half => 1,
+        every_variant_matches_the_baseline_when_edges_clamp_rectangles_together_in_the_first_quarter => 0,
+        every_variant_matches_the_baseline_when_edges_clamp_rectangles_together_in_the_second_quarter => 1,
+        every_variant_matches_the_baseline_when_edges_clamp_rectangles_together_in_the_third_quarter => 2,
+        every_variant_matches_the_baseline_when_edges_clamp_rectangles_together_in_the_fourth_quarter => 3,
     ]
 }
 
 variant_chunk_tests! {
-    assert_case_agrees(f16_cross_frame_case()), 2 chunks,
+    assert_case_agrees(f16_cross_frame_case()), 4 chunks,
     [
-        every_variant_matches_the_baseline_with_the_f16_search_across_frames_in_the_first_half => 0,
-        every_variant_matches_the_baseline_with_the_f16_search_across_frames_in_the_second_half => 1,
+        every_variant_matches_the_baseline_with_the_f16_search_across_frames_in_the_first_quarter => 0,
+        every_variant_matches_the_baseline_with_the_f16_search_across_frames_in_the_second_quarter => 1,
+        every_variant_matches_the_baseline_with_the_f16_search_across_frames_in_the_third_quarter => 2,
+        every_variant_matches_the_baseline_with_the_f16_search_across_frames_in_the_fourth_quarter => 3,
     ]
 }
 
 variant_chunk_tests! {
-    assert_case_agrees(f16_shared_vector_case()), 2 chunks,
+    assert_case_agrees(f16_shared_vector_case()), 4 chunks,
     [
-        every_variant_matches_the_baseline_with_the_f16_search_on_a_shared_vector_in_the_first_half => 0,
-        every_variant_matches_the_baseline_with_the_f16_search_on_a_shared_vector_in_the_second_half => 1,
+        every_variant_matches_the_baseline_with_the_f16_search_on_a_shared_vector_in_the_first_quarter => 0,
+        every_variant_matches_the_baseline_with_the_f16_search_on_a_shared_vector_in_the_second_quarter => 1,
+        every_variant_matches_the_baseline_with_the_f16_search_on_a_shared_vector_in_the_third_quarter => 2,
+        every_variant_matches_the_baseline_with_the_f16_search_on_a_shared_vector_in_the_fourth_quarter => 3,
     ]
 }
 
-fn f16_wide_storage_setup() -> Setup {
+fn f16_wide_storage_case() -> Case {
     let mut setup = chroma_cross_frame_setup(64, 64, 2);
     setup.f16_search = true;
 
-    setup
+    ("f16 chroma cross frame", setup)
 }
 
-#[test]
-fn every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_first_third() {
-    let setup = f16_wide_storage_setup();
-    let variants = variant_chunk(0, 3);
-
-    assert_listed_variants_agree("f16 chroma cross frame", &setup, variants);
-}
-
-#[test]
-fn every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_second_third() {
-    let setup = f16_wide_storage_setup();
-    let variants = variant_chunk(1, 3);
-
-    assert_listed_variants_agree("f16 chroma cross frame", &setup, variants);
-}
-
-#[test]
-fn every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_third_third() {
-    let setup = f16_wide_storage_setup();
-    let variants = variant_chunk(2, 3);
-
-    assert_listed_variants_agree("f16 chroma cross frame", &setup, variants);
+variant_chunk_tests! {
+    assert_case_agrees(f16_wide_storage_case()), 6 chunks,
+    [
+        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_first_sixth => 0,
+        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_second_sixth => 1,
+        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_third_sixth => 2,
+        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_fourth_sixth => 3,
+        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_fifth_sixth => 4,
+        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_sixth_sixth => 5,
+    ]
 }

@@ -52,6 +52,25 @@ impl Centre {
     }
 }
 
+/// How the neighbour search walks each refine rectangle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NeighbourWalk {
+    /// Row by row, scoring each candidate from eight fresh loads.
+    Rows,
+    /// Column by column, keeping each lane's eight rows in registers.
+    Sliding,
+}
+
+impl NeighbourWalk {
+    /// The neighbour walk's part of a variant's stored name, empty for the row-major baseline.
+    pub fn name_suffix(self) -> &'static str {
+        match self {
+            NeighbourWalk::Rows => "",
+            NeighbourWalk::Sliding => "_nslide",
+        }
+    }
+}
+
 /// Width in pixels of the centre tile for `groups` references `STEP` apart.
 pub fn tile_width(groups: u32, spatial_radius: u32) -> u32 {
     (groups - 1) * STEP + 2 * spatial_radius + PATCH_SIZE
@@ -74,6 +93,8 @@ pub struct CollabVariant {
     pub centre: Centre,
     /// Whether the centre search scores 8 candidates per round of shuffles.
     pub batched: bool,
+    /// How the neighbour search walks each refine rectangle.
+    pub neighbour: NeighbourWalk,
 }
 
 impl CollabVariant {
@@ -83,6 +104,7 @@ impl CollabVariant {
         walk: Walk::Clipped,
         centre: Centre::Global,
         batched: false,
+        neighbour: NeighbourWalk::Rows,
     };
 
     /// The untuned variant, with the uniform walk where `uniform_only` is set.

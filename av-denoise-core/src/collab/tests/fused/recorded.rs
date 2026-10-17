@@ -225,58 +225,72 @@ fn across_frames_case() -> RecordedCase {
 }
 
 variant_chunk_tests! {
-    assert_case_matches_recorded(on_unique_content_case()), 2 chunks,
+    assert_case_matches_recorded(on_unique_content_case()), 4 chunks,
     [
-        fused_reproduces_recorded_output_on_unique_content_in_the_first_half => 0,
-        fused_reproduces_recorded_output_on_unique_content_in_the_second_half => 1,
+        fused_reproduces_recorded_output_on_unique_content_in_the_first_quarter => 0,
+        fused_reproduces_recorded_output_on_unique_content_in_the_second_quarter => 1,
+        fused_reproduces_recorded_output_on_unique_content_in_the_third_quarter => 2,
+        fused_reproduces_recorded_output_on_unique_content_in_the_fourth_quarter => 3,
     ]
 }
 
 variant_chunk_tests! {
-    assert_case_matches_recorded(on_a_transposed_ramp_case()), 2 chunks,
+    assert_case_matches_recorded(on_a_transposed_ramp_case()), 4 chunks,
     [
-        fused_reproduces_recorded_output_on_a_transposed_ramp_in_the_first_half => 0,
-        fused_reproduces_recorded_output_on_a_transposed_ramp_in_the_second_half => 1,
+        fused_reproduces_recorded_output_on_a_transposed_ramp_in_the_first_quarter => 0,
+        fused_reproduces_recorded_output_on_a_transposed_ramp_in_the_second_quarter => 1,
+        fused_reproduces_recorded_output_on_a_transposed_ramp_in_the_third_quarter => 2,
+        fused_reproduces_recorded_output_on_a_transposed_ramp_in_the_fourth_quarter => 3,
     ]
 }
 
 variant_chunk_tests! {
-    assert_case_matches_recorded(when_refs_are_not_a_multiple_of_eight_case()), 2 chunks,
+    assert_case_matches_recorded(when_refs_are_not_a_multiple_of_eight_case()), 4 chunks,
     [
-        fused_reproduces_recorded_output_when_refs_are_not_a_multiple_of_eight_in_the_first_half => 0,
-        fused_reproduces_recorded_output_when_refs_are_not_a_multiple_of_eight_in_the_second_half => 1,
+        fused_reproduces_recorded_output_when_refs_are_not_a_multiple_of_eight_in_the_first_quarter => 0,
+        fused_reproduces_recorded_output_when_refs_are_not_a_multiple_of_eight_in_the_second_quarter => 1,
+        fused_reproduces_recorded_output_when_refs_are_not_a_multiple_of_eight_in_the_third_quarter => 2,
+        fused_reproduces_recorded_output_when_refs_are_not_a_multiple_of_eight_in_the_fourth_quarter => 3,
     ]
 }
 
 variant_chunk_tests! {
-    assert_case_matches_recorded(on_a_short_search_space_case()), 2 chunks,
+    assert_case_matches_recorded(on_a_short_search_space_case()), 4 chunks,
     [
-        fused_reproduces_recorded_output_on_a_short_search_space_in_the_first_half => 0,
-        fused_reproduces_recorded_output_on_a_short_search_space_in_the_second_half => 1,
+        fused_reproduces_recorded_output_on_a_short_search_space_in_the_first_quarter => 0,
+        fused_reproduces_recorded_output_on_a_short_search_space_in_the_second_quarter => 1,
+        fused_reproduces_recorded_output_on_a_short_search_space_in_the_third_quarter => 2,
+        fused_reproduces_recorded_output_on_a_short_search_space_in_the_fourth_quarter => 3,
     ]
 }
 
 variant_chunk_tests! {
-    assert_case_matches_recorded(on_noise_case()), 2 chunks,
+    assert_case_matches_recorded(on_noise_case()), 4 chunks,
     [
-        fused_reproduces_recorded_output_on_noise_in_the_first_half => 0,
-        fused_reproduces_recorded_output_on_noise_in_the_second_half => 1,
+        fused_reproduces_recorded_output_on_noise_in_the_first_quarter => 0,
+        fused_reproduces_recorded_output_on_noise_in_the_second_quarter => 1,
+        fused_reproduces_recorded_output_on_noise_in_the_third_quarter => 2,
+        fused_reproduces_recorded_output_on_noise_in_the_fourth_quarter => 3,
     ]
 }
 
 variant_chunk_tests! {
-    assert_case_matches_recorded(under_correlation_shaping_case()), 2 chunks,
+    assert_case_matches_recorded(under_correlation_shaping_case()), 4 chunks,
     [
-        fused_reproduces_recorded_output_under_correlation_shaping_in_the_first_half => 0,
-        fused_reproduces_recorded_output_under_correlation_shaping_in_the_second_half => 1,
+        fused_reproduces_recorded_output_under_correlation_shaping_in_the_first_quarter => 0,
+        fused_reproduces_recorded_output_under_correlation_shaping_in_the_second_quarter => 1,
+        fused_reproduces_recorded_output_under_correlation_shaping_in_the_third_quarter => 2,
+        fused_reproduces_recorded_output_under_correlation_shaping_in_the_fourth_quarter => 3,
     ]
 }
 
 variant_chunk_tests! {
-    assert_case_matches_recorded(across_frames_case()), 2 chunks,
+    assert_case_matches_recorded(across_frames_case()), 4 chunks,
     [
-        fused_reproduces_recorded_output_across_frames_in_the_first_half => 0,
-        fused_reproduces_recorded_output_across_frames_in_the_second_half => 1,
+        fused_reproduces_recorded_output_across_frames_in_the_first_quarter => 0,
+        fused_reproduces_recorded_output_across_frames_in_the_second_quarter => 1,
+        fused_reproduces_recorded_output_across_frames_in_the_third_quarter => 2,
+        fused_reproduces_recorded_output_across_frames_in_the_fourth_quarter => 3,
     ]
 }
 

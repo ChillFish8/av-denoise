@@ -29,7 +29,14 @@ pub use self::window::{
     WindowPass,
     WindowSite,
 };
-pub use crate::collab::kernels::fused::{Centre, CollabVariant, Walk, tile_height, tile_width};
+pub use crate::collab::kernels::fused::{
+    Centre,
+    CollabVariant,
+    NeighbourWalk,
+    Walk,
+    tile_height,
+    tile_width,
+};
 use crate::tune::fidelity::{CompareResult, Fidelity, diff_plane};
 use crate::tune::gpu::{read_f32, zero_accumulators};
 use crate::tune::site::SiteCandidate;

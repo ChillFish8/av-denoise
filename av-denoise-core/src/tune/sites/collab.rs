@@ -7,7 +7,7 @@ use cubecl::server::Handle;
 use super::COLLAB_FUSED;
 use crate::collab::PATCH_SIZE;
 use crate::collab::geometry::{BASELINE_GROUPS, fused_cubes_x};
-use crate::collab::kernels::fused::{Centre, CollabVariant, GROUP_LANES, Walk, collab_fused};
+use crate::collab::kernels::fused::{Centre, CollabVariant, GROUP_LANES, NeighbourWalk, Walk, collab_fused};
 use crate::nlmeans::NOISE_CURVE_BINS;
 use crate::tune::fidelity::{CompareResult, Fidelity, diff_integers, diff_plane};
 use crate::tune::gpu::{bind, read_f32, read_i32, zero_words};
@@ -26,6 +26,9 @@ const CENTRE_OPTIONS: [Centre; 3] = [Centre::Global, Centre::Tiled, Centre::Slid
 
 /// Batched centre sums off, the baseline, then on.
 const BATCHED_OPTIONS: [bool; 2] = [false, true];
+
+/// Neighbour walks, the row-major baseline first.
+const NEIGHBOUR_OPTIONS: [NeighbourWalk; 2] = [NeighbourWalk::Rows, NeighbourWalk::Sliding];
 
 /// Whether a combination of dimensions is a variant the kernel builds.
 ///
@@ -56,12 +59,12 @@ const fn count_variants() -> usize {
         centre_index += 1;
     }
 
-    count * GROUP_OPTIONS.len() * WALK_OPTIONS.len()
+    count * GROUP_OPTIONS.len() * WALK_OPTIONS.len() * NEIGHBOUR_OPTIONS.len()
 }
 
 const VARIANT_COUNT: usize = count_variants();
 
-/// Every listed variant the kernel builds, the default baseline first, with the batched flag varying
+/// Every listed variant the kernel builds, the default baseline first, with the neighbour walk varying
 /// fastest.
 const VARIANTS: [CollabVariant; VARIANT_COUNT] = listed_variants();
 
@@ -70,7 +73,8 @@ const _: () = assert!(
     VARIANTS[0].groups == CollabVariant::BASELINE.groups
         && VARIANTS[0].walk as u8 == CollabVariant::BASELINE.walk as u8
         && VARIANTS[0].centre as u8 == CollabVariant::BASELINE.centre as u8
-        && VARIANTS[0].batched == CollabVariant::BASELINE.batched,
+        && VARIANTS[0].batched == CollabVariant::BASELINE.batched
+        && VARIANTS[0].neighbour as u8 == CollabVariant::BASELINE.neighbour as u8,
     "the first listed collab variant must be CollabVariant::BASELINE"
 );
 
@@ -105,13 +109,19 @@ const fn listed_variants() -> [CollabVariant; VARIANT_COUNT] {
                     let batched = BATCHED_OPTIONS[batched_index];
 
                     if builds(centre, batched) {
-                        variants[next] = CollabVariant {
-                            groups: GROUP_OPTIONS[group_index],
-                            walk: WALK_OPTIONS[walk_index],
-                            centre,
-                            batched,
-                        };
-                        next += 1;
+                        let mut neighbour_index = 0;
+
+                        while neighbour_index < NEIGHBOUR_OPTIONS.len() {
+                            variants[next] = CollabVariant {
+                                groups: GROUP_OPTIONS[group_index],
+                                walk: WALK_OPTIONS[walk_index],
+                                centre,
+                                batched,
+                                neighbour: NEIGHBOUR_OPTIONS[neighbour_index],
+                            };
+                            next += 1;
+                            neighbour_index += 1;
+                        }
                     }
 
                     batched_index += 1;
@@ -129,13 +139,14 @@ const fn listed_variants() -> [CollabVariant; VARIANT_COUNT] {
     variants
 }
 
-/// `groups<g>_<walk>` with the centre's suffix and `_batched` where they apply, for example
-/// `groups8_uniform_tiled_batched`.
+/// `groups<g>_<walk>` with the centre's suffix, `_batched` and the neighbour walk's suffix where they
+/// apply, for example `groups8_uniform_tiled_batched_nslide`.
 fn variant_name(variant: CollabVariant) -> String {
     let walk = variant.walk.name();
     let centre = variant.centre.name_suffix();
     let batched = if variant.batched { "_batched" } else { "" };
-    format!("groups{}_{walk}{centre}{batched}", variant.groups)
+    let neighbour = variant.neighbour.name_suffix();
+    format!("groups{}_{walk}{centre}{batched}{neighbour}", variant.groups)
 }
 
 impl SiteCandidate for CollabVariant {
