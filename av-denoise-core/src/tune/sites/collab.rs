@@ -22,15 +22,47 @@ const GROUP_OPTIONS: [u32; 3] = [BASELINE_GROUPS, 4, 16];
 const WALK_OPTIONS: [Walk; 2] = [Walk::Clipped, Walk::Uniform];
 
 /// Centre sources, the global baseline first.
-const CENTRE_OPTIONS: [Centre; 2] = [Centre::Global, Centre::Tiled];
+const CENTRE_OPTIONS: [Centre; 3] = [Centre::Global, Centre::Tiled, Centre::Sliding];
 
 /// Batched centre sums off, the baseline, then on.
 const BATCHED_OPTIONS: [bool; 2] = [false, true];
 
-const VARIANT_COUNT: usize =
-    GROUP_OPTIONS.len() * WALK_OPTIONS.len() * CENTRE_OPTIONS.len() * BATCHED_OPTIONS.len();
+/// Whether a combination of dimensions is a variant the kernel builds.
+///
+/// The batched exchange scores eight candidates of one row at once, so it pairs only with the
+/// row-major centres.
+const fn builds(centre: Centre, batched: bool) -> bool {
+    let sliding = matches!(centre, Centre::Sliding);
+    !(sliding && batched)
+}
 
-/// Every listed variant, the default baseline first, with the batched flag varying fastest.
+const fn count_variants() -> usize {
+    let mut count = 0;
+    let mut centre_index = 0;
+
+    while centre_index < CENTRE_OPTIONS.len() {
+        let mut batched_index = 0;
+
+        while batched_index < BATCHED_OPTIONS.len() {
+            let centre = CENTRE_OPTIONS[centre_index];
+            let batched = BATCHED_OPTIONS[batched_index];
+            if builds(centre, batched) {
+                count += 1;
+            }
+
+            batched_index += 1;
+        }
+
+        centre_index += 1;
+    }
+
+    count * GROUP_OPTIONS.len() * WALK_OPTIONS.len()
+}
+
+const VARIANT_COUNT: usize = count_variants();
+
+/// Every listed variant the kernel builds, the default baseline first, with the batched flag varying
+/// fastest.
 const VARIANTS: [CollabVariant; VARIANT_COUNT] = listed_variants();
 
 // Keeps the default baseline first.
@@ -56,29 +88,48 @@ static NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
 
 const fn listed_variants() -> [CollabVariant; VARIANT_COUNT] {
     let mut variants = [CollabVariant::BASELINE; VARIANT_COUNT];
-    let batched_options = BATCHED_OPTIONS.len();
-    let centres = CENTRE_OPTIONS.len();
-    let walks = WALK_OPTIONS.len();
-    let mut index = 0;
+    let mut next = 0;
+    let mut group_index = 0;
 
-    while index < VARIANT_COUNT {
-        let batched = BATCHED_OPTIONS[index % batched_options];
-        let centre = CENTRE_OPTIONS[(index / batched_options) % centres];
-        let walk = WALK_OPTIONS[(index / (batched_options * centres)) % walks];
-        let groups = GROUP_OPTIONS[index / (batched_options * centres * walks)];
-        variants[index] = CollabVariant {
-            groups,
-            walk,
-            centre,
-            batched,
-        };
-        index += 1;
+    while group_index < GROUP_OPTIONS.len() {
+        let mut walk_index = 0;
+
+        while walk_index < WALK_OPTIONS.len() {
+            let mut centre_index = 0;
+
+            while centre_index < CENTRE_OPTIONS.len() {
+                let mut batched_index = 0;
+
+                while batched_index < BATCHED_OPTIONS.len() {
+                    let centre = CENTRE_OPTIONS[centre_index];
+                    let batched = BATCHED_OPTIONS[batched_index];
+
+                    if builds(centre, batched) {
+                        variants[next] = CollabVariant {
+                            groups: GROUP_OPTIONS[group_index],
+                            walk: WALK_OPTIONS[walk_index],
+                            centre,
+                            batched,
+                        };
+                        next += 1;
+                    }
+
+                    batched_index += 1;
+                }
+
+                centre_index += 1;
+            }
+
+            walk_index += 1;
+        }
+
+        group_index += 1;
     }
 
     variants
 }
 
-/// `groups<g>_<walk>` with `_tiled` and `_batched` where they apply, for example
+/// `groups<g>_<walk>` with the centre's suffix and `_batched` where they apply, for example
 /// `groups8_uniform_tiled_batched`.
 fn variant_name(variant: CollabVariant) -> String {
     let walk = variant.walk.name();

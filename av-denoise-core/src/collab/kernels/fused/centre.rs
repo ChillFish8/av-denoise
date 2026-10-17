@@ -3,6 +3,7 @@ use cubecl::prelude::*;
 use super::batched::batched_centre_walk;
 use super::distance::{candidate_partial, pack_reference};
 use super::shape::{SearchCursor, SearchShape};
+use super::sliding::sliding_centre_walk;
 use super::tile::tile_partial;
 use super::variant::{Centre, CollabVariant, Walk, tile_width};
 use crate::collab::PATCH_SIZE;
@@ -62,8 +63,23 @@ pub(crate) fn centre_search<S: Float, N: Size>(
 
     let walk = comptime!(variant.walk);
     let batched = comptime!(variant.batched);
+    let centre = comptime!(variant.centre);
+    let uniform = comptime!(walk == Walk::Uniform);
 
-    if comptime!(batched) {
+    if comptime!(centre == Centre::Sliding) {
+        sliding_centre_walk(
+            ring,
+            search_ring,
+            current,
+            &reference,
+            &rect,
+            cursor,
+            best_d,
+            best_pos,
+            uniform,
+            shape,
+        );
+    } else if comptime!(batched) {
         batched_centre_walk(
             ring,
             search_ring,
@@ -77,7 +93,7 @@ pub(crate) fn centre_search<S: Float, N: Size>(
             variant,
             shape,
         );
-    } else if comptime!(walk == Walk::Uniform) {
+    } else if comptime!(uniform) {
         uniform_centre_walk(
             ring,
             search_ring,

@@ -1,0 +1,341 @@
+use cubecl::prelude::*;
+
+use super::centre::{SearchRect, pin_self_match};
+use super::distance::{pair_squared_difference, pair_sum_total};
+use super::shape::{SearchCursor, SearchShape};
+use crate::collab::PATCH_SIZE;
+use crate::collab::kernels::group::pack_pos_t;
+use crate::collab::kernels::plane_ops::{
+    UNFILLED_DISTANCE,
+    plane_ssd_reduce8,
+    ranks_before,
+    shift_insert8_ordered,
+    shift_insert8_ordered_cached,
+};
+use crate::nlmeans::kernels::helpers::read_line;
+
+/// One row of a lane's candidate column, in the search ring's precision.
+///
+/// With `f16_search` unset the row comes from the f32 `ring` and `S` is f32, so the cast changes
+/// nothing.
+#[cube]
+pub(crate) fn search_line<S: Float, N: Size>(
+    ring: &Array<Vector<f32, N>>,
+    search_ring: &Array<Vector<S, N>>,
+    x: u32,
+    y: u32,
+    slot: u32,
+    #[comptime] shape: SearchShape,
+) -> Vector<S, N> {
+    let f16_search = comptime!(shape.f16_search);
+    let width = comptime!(shape.width);
+    let height = comptime!(shape.height);
+
+    if comptime!(f16_search) {
+        read_line(search_ring, x, y, slot, width, height)
+    } else {
+        let full = read_line(ring, x, y, slot, width, height);
+        Vector::<S, N>::cast_from(full)
+    }
+}
+
+/// The f16 partial over a window, pairing row `r` with `r + 4` for one stored channel and
+/// neighbouring channels within a row otherwise.
+#[cube]
+fn window_packed_partial<S: Float, N: Size>(
+    window: &Array<Vector<S, N>>,
+    reference: &Array<Vector<S, Const<2>>>,
+    #[comptime] shape: SearchShape,
+) -> f32 {
+    let stored_ch = comptime!(shape.stored_ch);
+    let zero = S::new(0.0f32);
+    let mut sum = Vector::<S, Const<2>>::new(zero);
+
+    if comptime!(stored_ch == 1) {
+        #[unroll]
+        for r in 0..comptime!(PATCH_SIZE / 2) {
+            let top = window[r as usize];
+            let bottom = window[comptime!(r + PATCH_SIZE / 2) as usize];
+            let squared = pair_squared_difference(reference, top[0], bottom[0], r);
+            sum += squared;
+        }
+    } else {
+        let pairs_per_row = comptime!(stored_ch / 2);
+
+        #[unroll]
+        for r in 0..PATCH_SIZE {
+            let line = window[r as usize];
+
+            #[unroll]
+            for p in 0..pairs_per_row {
+                let first = line[comptime!(2 * p) as usize];
+                let second = line[comptime!(2 * p + 1) as usize];
+                let pair = comptime!(r * pairs_per_row + p);
+                let squared = pair_squared_difference(reference, first, second, pair);
+                sum += squared;
+            }
+        }
+    }
+
+    pair_sum_total(sum)
+}
+
+/// The distance from the reference to the candidate whose eight rows `window` holds.
+///
+/// Rows sum in order 0..7, each lane over its own column. Every lane of the group must call it.
+#[cube]
+pub(crate) fn window_distance<S: Float, N: Size>(
+    window: &Array<Vector<S, N>>,
+    current: &Array<f32>,
+    reference: &Array<Vector<S, Const<2>>>,
+    scale: f32,
+    #[comptime] shape: SearchShape,
+) -> f32 {
+    let f16_search = comptime!(shape.f16_search);
+    let channels = comptime!(shape.channels);
+    let mut partial = 0.0f32;
+
+    if comptime!(f16_search) {
+        partial = window_packed_partial(window, reference, shape);
+    } else {
+        #[unroll]
+        for r in 0..PATCH_SIZE {
+            let line = window[r as usize];
+
+            #[unroll]
+            for c in 0..channels {
+                let pixel = f32::cast_from(line[c as usize]);
+                let diff = current[(r * channels + c) as usize] - pixel;
+                partial += diff * diff;
+            }
+        }
+    }
+
+    let distance = plane_ssd_reduce8(partial);
+
+    distance * scale
+}
+
+/// Moves the window down one row, dropping row 0 and appending `next`.
+#[cube]
+pub(crate) fn slide_window<S: Float, N: Size>(window: &mut Array<Vector<S, N>>, next: Vector<S, N>) {
+    #[unroll]
+    for r in 0..comptime!(PATCH_SIZE - 1) {
+        window[r as usize] = window[comptime!(r + 1) as usize];
+    }
+
+    window[comptime!(PATCH_SIZE - 1) as usize] = next;
+}
+
+/// Fills the window with the eight rows of the candidate column starting at row `top`.
+#[cube]
+fn fill_window<S: Float, N: Size>(
+    window: &mut Array<Vector<S, N>>,
+    ring: &Array<Vector<f32, N>>,
+    search_ring: &Array<Vector<S, N>>,
+    column: u32,
+    top: u32,
+    slot: u32,
+    #[comptime] shape: SearchShape,
+) {
+    #[unroll]
+    for r in 0..PATCH_SIZE {
+        window[r as usize] = search_line(ring, search_ring, column, top + r, slot, shape);
+    }
+}
+
+/// The centre walk of [centre_search](crate::collab::kernels::fused::centre::centre_search) taken
+/// column by column.
+///
+/// Each lane keeps its eight rows of the current candidate and loads one row per step down. The
+/// insert ranks by distance and then position, so the kept slots do not depend on the visit order.
+/// With `uniform` the walk runs the full comptime span, masks positions past the clipped rectangle
+/// and votes across the plane before each column, score and insert, so every group in a plane takes
+/// the same turns.
+#[cube]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a buffer, position or comptime shape the walk needs"
+)]
+pub(crate) fn sliding_centre_walk<S: Float, N: Size>(
+    ring: &Array<Vector<f32, N>>,
+    search_ring: &Array<Vector<S, N>>,
+    current: &Array<f32>,
+    reference: &Array<Vector<S, Const<2>>>,
+    rect: &SearchRect,
+    cursor: &SearchCursor,
+    best_d: &mut f32,
+    best_pos: &mut u32,
+    #[comptime] uniform: bool,
+    #[comptime] shape: SearchShape,
+) {
+    if comptime!(uniform) {
+        uniform_sliding_walk(
+            ring,
+            search_ring,
+            current,
+            reference,
+            rect,
+            cursor,
+            best_d,
+            best_pos,
+            shape,
+        );
+    } else {
+        clipped_sliding_walk(
+            ring,
+            search_ring,
+            current,
+            reference,
+            rect,
+            cursor,
+            best_d,
+            best_pos,
+            shape,
+        );
+    }
+}
+
+/// Walks the clipped rectangle column by column, leaving each column at the rectangle's bottom.
+#[cube]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a buffer, position or comptime shape the walk needs"
+)]
+fn clipped_sliding_walk<S: Float, N: Size>(
+    ring: &Array<Vector<f32, N>>,
+    search_ring: &Array<Vector<S, N>>,
+    current: &Array<f32>,
+    reference: &Array<Vector<S, Const<2>>>,
+    rect: &SearchRect,
+    cursor: &SearchCursor,
+    best_d: &mut f32,
+    best_pos: &mut u32,
+    #[comptime] shape: SearchShape,
+) {
+    let last_row = comptime!(shape.height - 1);
+    let mut worst_d = UNFILLED_DISTANCE.runtime();
+    let mut worst_pos = 0u32;
+    let mut window = Array::<Vector<S, N>>::new(PATCH_SIZE as usize);
+    let mut candidate_x = rect.left;
+
+    while candidate_x <= rect.right {
+        let column = candidate_x + cursor.sub;
+        fill_window(
+            &mut window,
+            ring,
+            search_ring,
+            column,
+            rect.top,
+            cursor.centre_slot,
+            shape,
+        );
+
+        let mut candidate_y = rect.top;
+
+        while candidate_y <= rect.bottom {
+            let scored = window_distance(&window, current, reference, cursor.scale, shape);
+            let dist = pin_self_match(scored, true, candidate_x, candidate_y, cursor.rx, cursor.ry);
+
+            let packed = pack_pos_t(candidate_x, candidate_y, 0u32);
+            shift_insert8_ordered_cached(
+                best_d,
+                best_pos,
+                &mut worst_d,
+                &mut worst_pos,
+                dist,
+                packed,
+                cursor.sub,
+                cursor.base,
+            );
+
+            // The last step's row is clamped and never scored.
+            let wanted_row = candidate_y + PATCH_SIZE;
+            let next_row = u32::min(wanted_row, last_row);
+            let next = search_line(ring, search_ring, column, next_row, cursor.centre_slot, shape);
+            slide_window(&mut window, next);
+            candidate_y += 1u32;
+        }
+
+        candidate_x += 1u32;
+    }
+}
+
+/// Walks the full `2 * spatial_radius + 1` span column by column and masks the positions past the
+/// clipped rectangle.
+///
+/// A masked turn reads a clamped column or row and carries
+/// [UNFILLED_DISTANCE](crate::collab::kernels::plane_ops::UNFILLED_DISTANCE), so it never places.
+/// Every vote is the same in every lane, so the plane never splits around a shuffle.
+#[cube]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a buffer, position or comptime shape the walk needs"
+)]
+fn uniform_sliding_walk<S: Float, N: Size>(
+    ring: &Array<Vector<f32, N>>,
+    search_ring: &Array<Vector<S, N>>,
+    current: &Array<f32>,
+    reference: &Array<Vector<S, Const<2>>>,
+    rect: &SearchRect,
+    cursor: &SearchCursor,
+    best_d: &mut f32,
+    best_pos: &mut u32,
+    #[comptime] shape: SearchShape,
+) {
+    let span = comptime!(2 * shape.spatial_radius + 1);
+    let last_row = comptime!(shape.height - 1);
+    let mut worst_d = UNFILLED_DISTANCE.runtime();
+    let mut worst_pos = 0u32;
+    let mut window = Array::<Vector<S, N>>::new(PATCH_SIZE as usize);
+
+    for dx in 0..span {
+        let wanted_x = rect.left + dx;
+        let column_live = wanted_x <= rect.right;
+
+        if plane_any(column_live) {
+            let candidate_x = u32::min(wanted_x, rect.right);
+            let column = candidate_x + cursor.sub;
+            fill_window(
+                &mut window,
+                ring,
+                search_ring,
+                column,
+                rect.top,
+                cursor.centre_slot,
+                shape,
+            );
+
+            #[unroll]
+            for dy in 0..span {
+                let wanted_y = rect.top + dy;
+                let live_pos = column_live && wanted_y <= rect.bottom;
+
+                if plane_any(live_pos) {
+                    let candidate_y = u32::min(wanted_y, rect.bottom);
+                    let scored = window_distance(&window, current, reference, cursor.scale, shape);
+                    let masked = select(live_pos, scored, UNFILLED_DISTANCE);
+                    let dist =
+                        pin_self_match(masked, live_pos, candidate_x, candidate_y, cursor.rx, cursor.ry);
+
+                    let packed = pack_pos_t(candidate_x, candidate_y, 0u32);
+                    let places = ranks_before(dist, packed, worst_d, worst_pos);
+
+                    if plane_any(places) {
+                        shift_insert8_ordered(best_d, best_pos, dist, packed, cursor.sub);
+                        worst_d = plane_shuffle(*best_d, cursor.base + 7u32);
+                        worst_pos = plane_shuffle(*best_pos, cursor.base + 7u32);
+                    }
+                }
+
+                // Past the rectangle's bottom the row is clamped and its distance is masked.
+                if comptime!(dy + 1 < span) {
+                    let wanted_row = wanted_y + PATCH_SIZE;
+                    let next_row = u32::min(wanted_row, last_row);
+                    let next = search_line(ring, search_ring, column, next_row, cursor.centre_slot, shape);
+                    slide_window(&mut window, next);
+                }
+            }
+        }
+    }
+}

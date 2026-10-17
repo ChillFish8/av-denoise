@@ -612,3 +612,23 @@ pub(crate) fn variant_chunk(chunk: usize, chunk_count: usize) -> &'static [Colla
 
     &CollabVariant::ALL[start..end]
 }
+
+/// Writes one test per named chunk, each passing `subject` and that chunk of the listed variants
+/// to `check`.
+macro_rules! variant_chunk_tests {
+    (
+        $check:ident($subject:expr), $chunk_count:literal chunks,
+        [$($name:ident => $chunk:literal),+ $(,)?]
+    ) => {
+        $(
+            #[test]
+            fn $name() {
+                let subject = $subject;
+                let variants = $crate::tune::tests::fixtures::variant_chunk($chunk, $chunk_count);
+                $check(subject, variants);
+            }
+        )+
+    };
+}
+
+pub(crate) use variant_chunk_tests;

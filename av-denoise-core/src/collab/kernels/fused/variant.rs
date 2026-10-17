@@ -37,6 +37,8 @@ pub enum Centre {
     Global,
     /// From a shared tile holding the union of the cube's search windows, loaded once per cube.
     Tiled,
+    /// Walks the centre window column by column, keeping each lane's eight rows in registers.
+    Sliding,
 }
 
 impl Centre {
@@ -45,6 +47,7 @@ impl Centre {
         match self {
             Centre::Global => "",
             Centre::Tiled => "_tiled",
+            Centre::Sliding => "_sliding",
         }
     }
 }
@@ -61,8 +64,7 @@ pub fn tile_height(spatial_radius: u32) -> u32 {
 
 /// One compiled form of `collab_fused`.
 ///
-/// Every variant scores the same candidates in the same order and scatters the same values, and the
-/// centre tile is read in the same order as the ring, so all of them give bit identical output.
+/// Every variant gives bit identical output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CollabVariant {
     /// Reference patches per cube, one 8-lane group each.
@@ -113,10 +115,11 @@ impl CollabVariant {
 
     /// Elements of the centre tile, one per stored lane per pixel.
     ///
-    /// The global centre search keeps a one-element placeholder, so every variant shares one kernel
-    /// body and one set of helper signatures.
+    /// Centres other than [Centre::Tiled](crate::collab::kernels::fused::Centre::Tiled) keep a
+    /// one-element placeholder, so every variant shares one kernel body and one set of helper
+    /// signatures.
     pub fn tile_elements(self, spatial_radius: u32, stored_ch: u32) -> u32 {
-        if self.centre == Centre::Global {
+        if self.centre != Centre::Tiled {
             return 1;
         }
 

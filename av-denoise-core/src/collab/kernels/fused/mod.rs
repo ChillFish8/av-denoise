@@ -4,6 +4,7 @@ pub(crate) mod distance;
 pub(crate) mod grid;
 pub(crate) mod pooled;
 pub(crate) mod shape;
+pub(crate) mod sliding;
 pub(crate) mod strength_map;
 pub(crate) mod tile;
 pub(crate) mod trajectory;

@@ -4,6 +4,7 @@ mod noise_curve;
 mod pooled;
 mod recorded;
 mod strength_map;
+mod variants;
 mod walks;
 
 use cubecl::prelude::*;
@@ -445,9 +446,14 @@ pub(super) fn run_fused_variant(setup: &Setup, variant: CollabVariant) -> Aggreg
     read_back(handles, setup)
 }
 
-/// Checks every listed variant against a recorded digest.
-pub(super) fn assert_every_variant_matches_recorded(label: &str, setup: &Setup, want: &Digest) {
-    for &variant in CollabVariant::ALL {
+/// Checks each of `variants` against a recorded digest.
+pub(super) fn assert_listed_variants_match_recorded(
+    label: &str,
+    setup: &Setup,
+    want: &Digest,
+    variants: &[CollabVariant],
+) {
+    for &variant in variants {
         let got = run_fused_variant(setup, variant);
         let variant_label = format!("{label} {}", variant.name());
         assert_matches_recorded(&variant_label, &got, want);

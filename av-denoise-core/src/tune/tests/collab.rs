@@ -4,7 +4,7 @@ use cubecl::prelude::*;
 
 use super::engine::{nl4d_outputs, noisy_frames};
 use super::equivalence::assert_listed_candidates_match_baseline;
-use super::fixtures::{CollabSpec, collab_site, collab_site_f16, variant_chunk};
+use super::fixtures::{CollabSpec, collab_site, collab_site_f16, variant_chunk_tests};
 use super::probe::small_device_limits;
 use super::runtime::{TestRuntime, test_client};
 use crate::Nl4dOptions;
@@ -15,24 +15,6 @@ use crate::tune::gpu::{read_f32, sync};
 use crate::tune::session::timed_count;
 use crate::tune::sites::{COLLAB_FUSED, Centre, CollabOutputs, CollabVariant, Walk, tile_height, tile_width};
 use crate::tune::{DeviceLimits, KernelPlan, SiteCandidate, VariantSite, fit_candidates};
-
-/// Writes one test per named chunk, each passing `subject` and that chunk of the listed variants
-/// to `check`.
-macro_rules! variant_chunk_tests {
-    (
-        $check:ident($subject:expr), $chunk_count:literal chunks,
-        [$($name:ident => $chunk:literal),+ $(,)?]
-    ) => {
-        $(
-            #[test]
-            fn $name() {
-                let subject = $subject;
-                let variants = variant_chunk($chunk, $chunk_count);
-                $check(subject, variants);
-            }
-        )+
-    };
-}
 
 fn luma_spec() -> CollabSpec {
     CollabSpec::new(64, 48, ChannelMode::Luma, 2)
@@ -50,16 +32,17 @@ fn collab_variant_names_round_trip_and_are_unique() {
     }
 
     assert_eq!(CollabVariant::baseline(), CollabVariant::BASELINE);
+    assert_eq!(CollabVariant::ALL[0], CollabVariant::BASELINE);
     assert_eq!(CollabVariant::BASELINE.name(), "groups8_clipped");
 }
 
 #[test]
 fn the_listed_variants_cross_every_dimension() {
-    assert_eq!(CollabVariant::ALL.len(), 24);
+    assert_eq!(CollabVariant::ALL.len(), 30);
 
     for groups in [8u32, 4, 16] {
         for walk in [Walk::Clipped, Walk::Uniform] {
-            for centre in [Centre::Global, Centre::Tiled] {
+            for centre in [Centre::Global, Centre::Tiled, Centre::Sliding] {
                 for batched in [false, true] {
                     let variant = CollabVariant {
                         groups,
@@ -67,7 +50,9 @@ fn the_listed_variants_cross_every_dimension() {
                         centre,
                         batched,
                     };
-                    assert!(CollabVariant::ALL.contains(&variant), "{variant:?} is not listed");
+                    let listed = CollabVariant::ALL.contains(&variant);
+                    let builds = !(centre == Centre::Sliding && batched);
+                    assert_eq!(listed, builds, "{variant:?}");
                 }
             }
         }
@@ -80,6 +65,12 @@ fn the_listed_variants_cross_every_dimension() {
         batched: true,
     };
     assert_eq!(everything.name(), "groups16_uniform_tiled_batched");
+
+    let sliding = CollabVariant {
+        centre: Centre::Sliding,
+        ..CollabVariant::BASELINE
+    };
+    assert_eq!(sliding.name(), "groups8_clipped_sliding");
 }
 
 /// Before fit checks the uniform walk holds half the listed variants.
@@ -90,11 +81,11 @@ fn a_uniform_only_runtime_is_offered_half_the_variants() {
         .filter(|variant| variant.runs_where(true))
         .count();
 
-    assert_eq!(uniform_only_count, 12);
+    assert_eq!(uniform_only_count, 15);
 }
 
 /// The staged site times every fitted variant at 8 groups, then 2 more group counts for each of the
-/// 3 fastest. That is 8 and then 6, 14 in all, or 4 and then 6 where only the uniform walk runs.
+/// 3 fastest. That is 10 and then 6, 16 in all, or 5 and then 6 where only the uniform walk runs.
 #[test]
 fn the_staged_collab_site_times_the_first_stage_and_three_regroupings() {
     let client = test_client();
@@ -106,7 +97,7 @@ fn the_staged_collab_site_times_the_first_stage_and_three_regroupings() {
     let fitted = fit_candidates(&site, &limits).expect("the baseline fits");
     let at_eight_groups = fitted.iter().filter(|variant| variant.groups == 8).count();
     let timed = timed_count(&site, &fitted);
-    let expected_first = if uniform_only { 4 } else { 8 };
+    let expected_first = if uniform_only { 5 } else { 10 };
 
     assert_eq!(at_eight_groups, expected_first);
     assert_eq!(timed, at_eight_groups + 3 * 2);
@@ -161,8 +152,8 @@ fn this_runtime_is_offered_its_baseline_first_and_only_legal_walks() {
     }
 }
 
-/// Each 8-lane group owns a 65-float transpose region, and the global centre keeps a one-element
-/// placeholder tile.
+/// Each 8-lane group owns a 65-float transpose region, and the global and sliding centres keep a
+/// one-element placeholder tile.
 #[test]
 fn collab_shared_bytes_count_the_transpose_regions_and_the_tile() {
     let client = test_client();
@@ -180,12 +171,18 @@ fn collab_shared_bytes_count_the_transpose_regions_and_the_tile() {
     let baseline_bytes = site.shared_bytes(CollabVariant::BASELINE);
     let groups16_bytes = site.shared_bytes(groups16);
     let tiled_bytes = site.shared_bytes(tiled);
+    let sliding = CollabVariant {
+        centre: Centre::Sliding,
+        ..CollabVariant::BASELINE
+    };
+    let sliding_bytes = site.shared_bytes(sliding);
     let baseline_units = site.shape(CollabVariant::BASELINE).units();
 
     // A luma tile at radius 9 is 54 by 26 pixels of one f32 lane.
     assert_eq!(baseline_bytes, 8 * 65 * 4 + 4);
     assert_eq!(groups16_bytes, 16 * 65 * 4 + 4);
     assert_eq!(tiled_bytes, 8 * 65 * 4 + 54 * 26 * 4);
+    assert_eq!(sliding_bytes, baseline_bytes);
     assert_eq!(baseline_units, 64);
 }
 
@@ -289,6 +286,24 @@ fn collab_baseline_fits_planes_narrower_than_eight_lanes() {
 
     assert_eq!(baseline_plane, 8);
     assert_eq!(fitted, vec![baseline]);
+}
+
+/// The sliding centre needs no tile, so it fits a 32 KB device at every group count.
+#[test]
+fn sliding_centres_fit_a_32kb_device() {
+    let client = test_client();
+    let spec = luma_spec();
+    let site = collab_site(&client, &spec);
+    let limits = small_device_limits();
+
+    let fitted = fit_candidates(&site, &limits).expect("the baseline fits");
+
+    for groups in [4u32, 8, 16] {
+        let offered = fitted
+            .iter()
+            .any(|variant| variant.centre == Centre::Sliding && variant.groups == groups);
+        assert!(offered, "no sliding centre with {groups} groups fits 32 KB");
+    }
 }
 
 #[test]
@@ -416,10 +431,16 @@ fn assert_variants_match_baseline(spec: CollabSpec, variants: &[CollabVariant]) 
     assert_groups_retired(&client, &baseline, &label);
 }
 
-#[test]
-fn luma_at_an_odd_width_across_frames_matches_the_baseline() {
-    let spec = CollabSpec::new(70, 45, ChannelMode::Luma, 2);
-    assert_variants_match_baseline(spec, CollabVariant::ALL);
+fn odd_width_luma_spec() -> CollabSpec {
+    CollabSpec::new(70, 45, ChannelMode::Luma, 2)
+}
+
+variant_chunk_tests! {
+    assert_variants_match_baseline(odd_width_luma_spec()), 2 chunks,
+    [
+        luma_at_an_odd_width_across_frames_matches_the_baseline_in_the_first_variant_half => 0,
+        luma_at_an_odd_width_across_frames_matches_the_baseline_in_the_second_variant_half => 1,
+    ]
 }
 
 fn pooled_chroma_spec() -> CollabSpec {
@@ -430,12 +451,13 @@ fn pooled_chroma_spec() -> CollabSpec {
 }
 
 variant_chunk_tests! {
-    assert_variants_match_baseline(pooled_chroma_spec()), 4 chunks,
+    assert_variants_match_baseline(pooled_chroma_spec()), 5 chunks,
     [
-        pooled_chroma_matches_the_baseline_in_the_first_variant_quarter => 0,
-        pooled_chroma_matches_the_baseline_in_the_second_variant_quarter => 1,
-        pooled_chroma_matches_the_baseline_in_the_third_variant_quarter => 2,
-        pooled_chroma_matches_the_baseline_in_the_fourth_variant_quarter => 3,
+        pooled_chroma_matches_the_baseline_in_the_first_variant_fifth => 0,
+        pooled_chroma_matches_the_baseline_in_the_second_variant_fifth => 1,
+        pooled_chroma_matches_the_baseline_in_the_third_variant_fifth => 2,
+        pooled_chroma_matches_the_baseline_in_the_fourth_variant_fifth => 3,
+        pooled_chroma_matches_the_baseline_in_the_fifth_variant_fifth => 4,
     ]
 }
 
@@ -446,25 +468,33 @@ fn frame_edge_yuv_spec() -> CollabSpec {
 }
 
 variant_chunk_tests! {
-    assert_variants_match_baseline(frame_edge_yuv_spec()), 8 chunks,
+    assert_variants_match_baseline(frame_edge_yuv_spec()), 10 chunks,
     [
-        yuv_at_the_frame_edges_matches_the_baseline_in_the_first_variant_eighth => 0,
-        yuv_at_the_frame_edges_matches_the_baseline_in_the_second_variant_eighth => 1,
-        yuv_at_the_frame_edges_matches_the_baseline_in_the_third_variant_eighth => 2,
-        yuv_at_the_frame_edges_matches_the_baseline_in_the_fourth_variant_eighth => 3,
-        yuv_at_the_frame_edges_matches_the_baseline_in_the_fifth_variant_eighth => 4,
-        yuv_at_the_frame_edges_matches_the_baseline_in_the_sixth_variant_eighth => 5,
-        yuv_at_the_frame_edges_matches_the_baseline_in_the_seventh_variant_eighth => 6,
-        yuv_at_the_frame_edges_matches_the_baseline_in_the_eighth_variant_eighth => 7,
+        yuv_at_the_frame_edges_matches_the_baseline_in_the_first_variant_tenth => 0,
+        yuv_at_the_frame_edges_matches_the_baseline_in_the_second_variant_tenth => 1,
+        yuv_at_the_frame_edges_matches_the_baseline_in_the_third_variant_tenth => 2,
+        yuv_at_the_frame_edges_matches_the_baseline_in_the_fourth_variant_tenth => 3,
+        yuv_at_the_frame_edges_matches_the_baseline_in_the_fifth_variant_tenth => 4,
+        yuv_at_the_frame_edges_matches_the_baseline_in_the_sixth_variant_tenth => 5,
+        yuv_at_the_frame_edges_matches_the_baseline_in_the_seventh_variant_tenth => 6,
+        yuv_at_the_frame_edges_matches_the_baseline_in_the_eighth_variant_tenth => 7,
+        yuv_at_the_frame_edges_matches_the_baseline_in_the_ninth_variant_tenth => 8,
+        yuv_at_the_frame_edges_matches_the_baseline_in_the_tenth_variant_tenth => 9,
     ]
 }
 
 /// 104 pixels gives 25 references per row, so the last cube of a row has dead groups at every
 /// group count.
-#[test]
-fn dead_groups_at_the_end_of_a_row_match_the_baseline() {
-    let spec = CollabSpec::new(104, 40, ChannelMode::Luma, 0);
-    assert_variants_match_baseline(spec, CollabVariant::ALL);
+fn dead_groups_spec() -> CollabSpec {
+    CollabSpec::new(104, 40, ChannelMode::Luma, 0)
+}
+
+variant_chunk_tests! {
+    assert_variants_match_baseline(dead_groups_spec()), 2 chunks,
+    [
+        dead_groups_at_the_end_of_a_row_match_the_baseline_in_the_first_variant_half => 0,
+        dead_groups_at_the_end_of_a_row_match_the_baseline_in_the_second_variant_half => 1,
+    ]
 }
 
 fn smaller_than_the_search_window_spec() -> CollabSpec {
@@ -472,32 +502,59 @@ fn smaller_than_the_search_window_spec() -> CollabSpec {
 }
 
 variant_chunk_tests! {
-    assert_variants_match_baseline(smaller_than_the_search_window_spec()), 8 chunks,
+    assert_variants_match_baseline(smaller_than_the_search_window_spec()), 10 chunks,
     [
-        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_first_variant_eighth => 0,
-        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_second_variant_eighth => 1,
-        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_third_variant_eighth => 2,
-        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_fourth_variant_eighth => 3,
-        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_fifth_variant_eighth => 4,
-        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_sixth_variant_eighth => 5,
-        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_seventh_variant_eighth => 6,
-        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_eighth_variant_eighth => 7,
+        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_first_variant_tenth => 0,
+        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_second_variant_tenth => 1,
+        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_third_variant_tenth => 2,
+        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_fourth_variant_tenth => 3,
+        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_fifth_variant_tenth => 4,
+        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_sixth_variant_tenth => 5,
+        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_seventh_variant_tenth => 6,
+        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_eighth_variant_tenth => 7,
+        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_ninth_variant_tenth => 8,
+        a_frame_smaller_than_the_search_window_matches_the_baseline_in_the_tenth_variant_tenth => 9,
     ]
 }
 
-#[test]
-fn flat_content_matches_the_baseline() {
+fn flat_spec(f16_search: bool) -> CollabSpec {
     let mut spec = CollabSpec::new(64, 48, ChannelMode::Luma, 1);
     spec.flat = true;
-    assert_variants_match_baseline(spec, CollabVariant::ALL);
+    spec.f16_search = f16_search;
+
+    spec
 }
 
-#[test]
-fn the_f16_search_on_pooled_luma_matches_the_baseline() {
+variant_chunk_tests! {
+    assert_variants_match_baseline(flat_spec(false)), 2 chunks,
+    [
+        flat_content_matches_the_baseline_in_the_first_variant_half => 0,
+        flat_content_matches_the_baseline_in_the_second_variant_half => 1,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_variants_match_baseline(flat_spec(true)), 2 chunks,
+    [
+        flat_content_matches_the_baseline_with_the_f16_search_in_the_first_variant_half => 0,
+        flat_content_matches_the_baseline_with_the_f16_search_in_the_second_variant_half => 1,
+    ]
+}
+
+fn f16_pooled_luma_spec() -> CollabSpec {
     let mut spec = CollabSpec::new(70, 45, ChannelMode::Luma, 2);
     spec.f16_search = true;
     spec.pooled = true;
-    assert_variants_match_baseline(spec, CollabVariant::ALL);
+
+    spec
+}
+
+variant_chunk_tests! {
+    assert_variants_match_baseline(f16_pooled_luma_spec()), 2 chunks,
+    [
+        the_f16_search_on_pooled_luma_matches_the_baseline_in_the_first_variant_half => 0,
+        the_f16_search_on_pooled_luma_matches_the_baseline_in_the_second_variant_half => 1,
+    ]
 }
 
 fn f16_yuv_spec() -> CollabSpec {
@@ -508,16 +565,18 @@ fn f16_yuv_spec() -> CollabSpec {
 }
 
 variant_chunk_tests! {
-    assert_variants_match_baseline(f16_yuv_spec()), 8 chunks,
+    assert_variants_match_baseline(f16_yuv_spec()), 10 chunks,
     [
-        the_f16_search_on_yuv_matches_the_baseline_in_the_first_variant_eighth => 0,
-        the_f16_search_on_yuv_matches_the_baseline_in_the_second_variant_eighth => 1,
-        the_f16_search_on_yuv_matches_the_baseline_in_the_third_variant_eighth => 2,
-        the_f16_search_on_yuv_matches_the_baseline_in_the_fourth_variant_eighth => 3,
-        the_f16_search_on_yuv_matches_the_baseline_in_the_fifth_variant_eighth => 4,
-        the_f16_search_on_yuv_matches_the_baseline_in_the_sixth_variant_eighth => 5,
-        the_f16_search_on_yuv_matches_the_baseline_in_the_seventh_variant_eighth => 6,
-        the_f16_search_on_yuv_matches_the_baseline_in_the_eighth_variant_eighth => 7,
+        the_f16_search_on_yuv_matches_the_baseline_in_the_first_variant_tenth => 0,
+        the_f16_search_on_yuv_matches_the_baseline_in_the_second_variant_tenth => 1,
+        the_f16_search_on_yuv_matches_the_baseline_in_the_third_variant_tenth => 2,
+        the_f16_search_on_yuv_matches_the_baseline_in_the_fourth_variant_tenth => 3,
+        the_f16_search_on_yuv_matches_the_baseline_in_the_fifth_variant_tenth => 4,
+        the_f16_search_on_yuv_matches_the_baseline_in_the_sixth_variant_tenth => 5,
+        the_f16_search_on_yuv_matches_the_baseline_in_the_seventh_variant_tenth => 6,
+        the_f16_search_on_yuv_matches_the_baseline_in_the_eighth_variant_tenth => 7,
+        the_f16_search_on_yuv_matches_the_baseline_in_the_ninth_variant_tenth => 8,
+        the_f16_search_on_yuv_matches_the_baseline_in_the_tenth_variant_tenth => 9,
     ]
 }
 
@@ -529,12 +588,138 @@ fn f16_frame_edge_chroma_spec() -> CollabSpec {
 }
 
 variant_chunk_tests! {
-    assert_variants_match_baseline(f16_frame_edge_chroma_spec()), 4 chunks,
+    assert_variants_match_baseline(f16_frame_edge_chroma_spec()), 5 chunks,
     [
-        the_f16_search_on_chroma_at_the_frame_edges_matches_the_baseline_in_the_first_variant_quarter => 0,
-        the_f16_search_on_chroma_at_the_frame_edges_matches_the_baseline_in_the_second_variant_quarter => 1,
-        the_f16_search_on_chroma_at_the_frame_edges_matches_the_baseline_in_the_third_variant_quarter => 2,
-        the_f16_search_on_chroma_at_the_frame_edges_matches_the_baseline_in_the_fourth_variant_quarter => 3,
+        the_f16_search_on_chroma_at_the_frame_edges_matches_the_baseline_in_the_first_variant_fifth => 0,
+        the_f16_search_on_chroma_at_the_frame_edges_matches_the_baseline_in_the_second_variant_fifth => 1,
+        the_f16_search_on_chroma_at_the_frame_edges_matches_the_baseline_in_the_third_variant_fifth => 2,
+        the_f16_search_on_chroma_at_the_frame_edges_matches_the_baseline_in_the_fourth_variant_fifth => 3,
+        the_f16_search_on_chroma_at_the_frame_edges_matches_the_baseline_in_the_fifth_variant_fifth => 4,
+    ]
+}
+
+/// [assert_variants_match_baseline] with the f16 search and the pooled threshold each off and on.
+fn assert_switches_match_baseline(spec: CollabSpec, variants: &[CollabVariant]) {
+    for f16_search in [false, true] {
+        for pooled in [false, true] {
+            let switched = CollabSpec {
+                f16_search,
+                pooled,
+                ..spec
+            };
+            assert_variants_match_baseline(switched, variants);
+        }
+    }
+}
+
+fn site_chroma_spec() -> CollabSpec {
+    CollabSpec::new(64, 48, ChannelMode::Chroma, 2)
+}
+
+/// Yuv takes one switch setting per test, since each yuv variant compiles several times slower.
+fn site_yuv_spec(f16_search: bool, pooled: bool) -> CollabSpec {
+    let spec = CollabSpec::new(72, 40, ChannelMode::Yuv, 1);
+
+    CollabSpec {
+        f16_search,
+        pooled,
+        ..spec
+    }
+}
+
+variant_chunk_tests! {
+    assert_switches_match_baseline(luma_spec()), 10 chunks,
+    [
+        every_luma_switch_matches_the_baseline_through_the_site_in_the_first_variant_tenth => 0,
+        every_luma_switch_matches_the_baseline_through_the_site_in_the_second_variant_tenth => 1,
+        every_luma_switch_matches_the_baseline_through_the_site_in_the_third_variant_tenth => 2,
+        every_luma_switch_matches_the_baseline_through_the_site_in_the_fourth_variant_tenth => 3,
+        every_luma_switch_matches_the_baseline_through_the_site_in_the_fifth_variant_tenth => 4,
+        every_luma_switch_matches_the_baseline_through_the_site_in_the_sixth_variant_tenth => 5,
+        every_luma_switch_matches_the_baseline_through_the_site_in_the_seventh_variant_tenth => 6,
+        every_luma_switch_matches_the_baseline_through_the_site_in_the_eighth_variant_tenth => 7,
+        every_luma_switch_matches_the_baseline_through_the_site_in_the_ninth_variant_tenth => 8,
+        every_luma_switch_matches_the_baseline_through_the_site_in_the_tenth_variant_tenth => 9,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_switches_match_baseline(site_chroma_spec()), 10 chunks,
+    [
+        every_chroma_switch_matches_the_baseline_through_the_site_in_the_first_variant_tenth => 0,
+        every_chroma_switch_matches_the_baseline_through_the_site_in_the_second_variant_tenth => 1,
+        every_chroma_switch_matches_the_baseline_through_the_site_in_the_third_variant_tenth => 2,
+        every_chroma_switch_matches_the_baseline_through_the_site_in_the_fourth_variant_tenth => 3,
+        every_chroma_switch_matches_the_baseline_through_the_site_in_the_fifth_variant_tenth => 4,
+        every_chroma_switch_matches_the_baseline_through_the_site_in_the_sixth_variant_tenth => 5,
+        every_chroma_switch_matches_the_baseline_through_the_site_in_the_seventh_variant_tenth => 6,
+        every_chroma_switch_matches_the_baseline_through_the_site_in_the_eighth_variant_tenth => 7,
+        every_chroma_switch_matches_the_baseline_through_the_site_in_the_ninth_variant_tenth => 8,
+        every_chroma_switch_matches_the_baseline_through_the_site_in_the_tenth_variant_tenth => 9,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_variants_match_baseline(site_yuv_spec(false, false)), 10 chunks,
+    [
+        yuv_matches_the_baseline_through_the_site_in_the_first_variant_tenth => 0,
+        yuv_matches_the_baseline_through_the_site_in_the_second_variant_tenth => 1,
+        yuv_matches_the_baseline_through_the_site_in_the_third_variant_tenth => 2,
+        yuv_matches_the_baseline_through_the_site_in_the_fourth_variant_tenth => 3,
+        yuv_matches_the_baseline_through_the_site_in_the_fifth_variant_tenth => 4,
+        yuv_matches_the_baseline_through_the_site_in_the_sixth_variant_tenth => 5,
+        yuv_matches_the_baseline_through_the_site_in_the_seventh_variant_tenth => 6,
+        yuv_matches_the_baseline_through_the_site_in_the_eighth_variant_tenth => 7,
+        yuv_matches_the_baseline_through_the_site_in_the_ninth_variant_tenth => 8,
+        yuv_matches_the_baseline_through_the_site_in_the_tenth_variant_tenth => 9,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_variants_match_baseline(site_yuv_spec(false, true)), 10 chunks,
+    [
+        pooled_yuv_matches_the_baseline_through_the_site_in_the_first_variant_tenth => 0,
+        pooled_yuv_matches_the_baseline_through_the_site_in_the_second_variant_tenth => 1,
+        pooled_yuv_matches_the_baseline_through_the_site_in_the_third_variant_tenth => 2,
+        pooled_yuv_matches_the_baseline_through_the_site_in_the_fourth_variant_tenth => 3,
+        pooled_yuv_matches_the_baseline_through_the_site_in_the_fifth_variant_tenth => 4,
+        pooled_yuv_matches_the_baseline_through_the_site_in_the_sixth_variant_tenth => 5,
+        pooled_yuv_matches_the_baseline_through_the_site_in_the_seventh_variant_tenth => 6,
+        pooled_yuv_matches_the_baseline_through_the_site_in_the_eighth_variant_tenth => 7,
+        pooled_yuv_matches_the_baseline_through_the_site_in_the_ninth_variant_tenth => 8,
+        pooled_yuv_matches_the_baseline_through_the_site_in_the_tenth_variant_tenth => 9,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_variants_match_baseline(site_yuv_spec(true, false)), 10 chunks,
+    [
+        f16_yuv_matches_the_baseline_through_the_site_in_the_first_variant_tenth => 0,
+        f16_yuv_matches_the_baseline_through_the_site_in_the_second_variant_tenth => 1,
+        f16_yuv_matches_the_baseline_through_the_site_in_the_third_variant_tenth => 2,
+        f16_yuv_matches_the_baseline_through_the_site_in_the_fourth_variant_tenth => 3,
+        f16_yuv_matches_the_baseline_through_the_site_in_the_fifth_variant_tenth => 4,
+        f16_yuv_matches_the_baseline_through_the_site_in_the_sixth_variant_tenth => 5,
+        f16_yuv_matches_the_baseline_through_the_site_in_the_seventh_variant_tenth => 6,
+        f16_yuv_matches_the_baseline_through_the_site_in_the_eighth_variant_tenth => 7,
+        f16_yuv_matches_the_baseline_through_the_site_in_the_ninth_variant_tenth => 8,
+        f16_yuv_matches_the_baseline_through_the_site_in_the_tenth_variant_tenth => 9,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_variants_match_baseline(site_yuv_spec(true, true)), 10 chunks,
+    [
+        pooled_f16_yuv_matches_the_baseline_through_the_site_in_the_first_variant_tenth => 0,
+        pooled_f16_yuv_matches_the_baseline_through_the_site_in_the_second_variant_tenth => 1,
+        pooled_f16_yuv_matches_the_baseline_through_the_site_in_the_third_variant_tenth => 2,
+        pooled_f16_yuv_matches_the_baseline_through_the_site_in_the_fourth_variant_tenth => 3,
+        pooled_f16_yuv_matches_the_baseline_through_the_site_in_the_fifth_variant_tenth => 4,
+        pooled_f16_yuv_matches_the_baseline_through_the_site_in_the_sixth_variant_tenth => 5,
+        pooled_f16_yuv_matches_the_baseline_through_the_site_in_the_seventh_variant_tenth => 6,
+        pooled_f16_yuv_matches_the_baseline_through_the_site_in_the_eighth_variant_tenth => 7,
+        pooled_f16_yuv_matches_the_baseline_through_the_site_in_the_ninth_variant_tenth => 8,
+        pooled_f16_yuv_matches_the_baseline_through_the_site_in_the_tenth_variant_tenth => 9,
     ]
 }
 
@@ -559,36 +744,40 @@ fn assert_forced_variants_leave_nl4d_output_unchanged(channels: ChannelMode, var
 }
 
 variant_chunk_tests! {
-    assert_forced_variants_leave_nl4d_output_unchanged(ChannelMode::Luma), 4 chunks,
+    assert_forced_variants_leave_nl4d_output_unchanged(ChannelMode::Luma), 5 chunks,
     [
-        forcing_the_first_variant_quarter_leaves_luma_nl4d_output_unchanged => 0,
-        forcing_the_second_variant_quarter_leaves_luma_nl4d_output_unchanged => 1,
-        forcing_the_third_variant_quarter_leaves_luma_nl4d_output_unchanged => 2,
-        forcing_the_fourth_variant_quarter_leaves_luma_nl4d_output_unchanged => 3,
+        forcing_the_first_variant_fifth_leaves_luma_nl4d_output_unchanged => 0,
+        forcing_the_second_variant_fifth_leaves_luma_nl4d_output_unchanged => 1,
+        forcing_the_third_variant_fifth_leaves_luma_nl4d_output_unchanged => 2,
+        forcing_the_fourth_variant_fifth_leaves_luma_nl4d_output_unchanged => 3,
+        forcing_the_fifth_variant_fifth_leaves_luma_nl4d_output_unchanged => 4,
     ]
 }
 
 variant_chunk_tests! {
-    assert_forced_variants_leave_nl4d_output_unchanged(ChannelMode::Chroma), 4 chunks,
+    assert_forced_variants_leave_nl4d_output_unchanged(ChannelMode::Chroma), 5 chunks,
     [
-        forcing_the_first_variant_quarter_leaves_chroma_nl4d_output_unchanged => 0,
-        forcing_the_second_variant_quarter_leaves_chroma_nl4d_output_unchanged => 1,
-        forcing_the_third_variant_quarter_leaves_chroma_nl4d_output_unchanged => 2,
-        forcing_the_fourth_variant_quarter_leaves_chroma_nl4d_output_unchanged => 3,
+        forcing_the_first_variant_fifth_leaves_chroma_nl4d_output_unchanged => 0,
+        forcing_the_second_variant_fifth_leaves_chroma_nl4d_output_unchanged => 1,
+        forcing_the_third_variant_fifth_leaves_chroma_nl4d_output_unchanged => 2,
+        forcing_the_fourth_variant_fifth_leaves_chroma_nl4d_output_unchanged => 3,
+        forcing_the_fifth_variant_fifth_leaves_chroma_nl4d_output_unchanged => 4,
     ]
 }
 
 variant_chunk_tests! {
-    assert_forced_variants_leave_nl4d_output_unchanged(ChannelMode::Yuv), 8 chunks,
+    assert_forced_variants_leave_nl4d_output_unchanged(ChannelMode::Yuv), 10 chunks,
     [
-        forcing_the_first_variant_eighth_leaves_yuv_nl4d_output_unchanged => 0,
-        forcing_the_second_variant_eighth_leaves_yuv_nl4d_output_unchanged => 1,
-        forcing_the_third_variant_eighth_leaves_yuv_nl4d_output_unchanged => 2,
-        forcing_the_fourth_variant_eighth_leaves_yuv_nl4d_output_unchanged => 3,
-        forcing_the_fifth_variant_eighth_leaves_yuv_nl4d_output_unchanged => 4,
-        forcing_the_sixth_variant_eighth_leaves_yuv_nl4d_output_unchanged => 5,
-        forcing_the_seventh_variant_eighth_leaves_yuv_nl4d_output_unchanged => 6,
-        forcing_the_eighth_variant_eighth_leaves_yuv_nl4d_output_unchanged => 7,
+        forcing_the_first_variant_tenth_leaves_yuv_nl4d_output_unchanged => 0,
+        forcing_the_second_variant_tenth_leaves_yuv_nl4d_output_unchanged => 1,
+        forcing_the_third_variant_tenth_leaves_yuv_nl4d_output_unchanged => 2,
+        forcing_the_fourth_variant_tenth_leaves_yuv_nl4d_output_unchanged => 3,
+        forcing_the_fifth_variant_tenth_leaves_yuv_nl4d_output_unchanged => 4,
+        forcing_the_sixth_variant_tenth_leaves_yuv_nl4d_output_unchanged => 5,
+        forcing_the_seventh_variant_tenth_leaves_yuv_nl4d_output_unchanged => 6,
+        forcing_the_eighth_variant_tenth_leaves_yuv_nl4d_output_unchanged => 7,
+        forcing_the_ninth_variant_tenth_leaves_yuv_nl4d_output_unchanged => 8,
+        forcing_the_tenth_variant_tenth_leaves_yuv_nl4d_output_unchanged => 9,
     ]
 }
 
