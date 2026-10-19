@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use cubecl::prelude::*;
+
 use super::consts::FIRST_COMPILE_ESTIMATE;
+use super::helpers::{HelperFactory, HelperSource};
 use super::key::SiteKey;
 use super::plan::KernelPlan;
 use super::result::{SiteRanking, TuneResult, choose};
@@ -69,6 +72,7 @@ struct CompileState {
 pub struct TuneLedger {
     deterministic: bool,
     state: Mutex<LedgerState>,
+    helpers: HelperSource,
 }
 
 /// The ledger's choice for one key.
@@ -95,6 +99,7 @@ impl TuneLedger {
         let ledger = Self {
             deterministic,
             state: Mutex::default(),
+            helpers: HelperSource::default(),
         };
 
         Arc::new(ledger)
@@ -102,6 +107,27 @@ impl TuneLedger {
 
     pub fn deterministic(&self) -> bool {
         self.deterministic
+    }
+
+    /// Hands the ledger a way to make clients that compile candidates in parallel.
+    ///
+    /// The factory runs when the first stage compiles. Only the first factory is kept.
+    pub fn set_compile_helpers(&self, factory: HelperFactory) {
+        self.helpers.set_factory(factory);
+    }
+
+    pub fn has_compile_helpers(&self) -> bool {
+        self.helpers.is_set()
+    }
+
+    /// The compile helpers that run on `R`, made on the first call, and empty when there are none.
+    pub(crate) fn compile_helpers<R: Runtime>(&self) -> &[ComputeClient<R>] {
+        self.helpers.clients::<R>()
+    }
+
+    /// Stops using the compile helpers after every one of them failed in a stage.
+    pub(crate) fn fail_compile_helpers(&self) {
+        self.helpers.mark_failed();
     }
 
     fn lock(&self) -> MutexGuard<'_, LedgerState> {

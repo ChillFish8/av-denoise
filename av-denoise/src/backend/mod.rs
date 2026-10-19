@@ -2,6 +2,8 @@ pub mod accelerate;
 mod describe;
 pub mod device;
 pub mod enumerate;
+#[cfg(feature = "vulkan")]
+mod helpers;
 mod probe;
 pub mod sniff;
 
@@ -53,6 +55,10 @@ trait OnClient {
         accelerator: Accelerator,
         identity: DeviceIdentity,
     ) -> Result<Self::Output, DenoiserError>;
+
+    /// Runs before [OnClient::run] when the client is on Vulkan.
+    #[cfg(feature = "vulkan")]
+    fn on_vulkan(&self, _device: &cubecl::wgpu::WgpuDevice) {}
 }
 
 /// Builds an engine for `spec` on the client.
@@ -63,6 +69,13 @@ struct BuildEngine<'a> {
 
 impl OnClient for BuildEngine<'_> {
     type Output = BuiltEngine;
+
+    #[cfg(feature = "vulkan")]
+    fn on_vulkan(&self, device: &cubecl::wgpu::WgpuDevice) {
+        if let Some(ledger) = &self.request.setup.ledger {
+            helpers::install_compile_helpers(ledger, device);
+        }
+    }
 
     fn run<R: Runtime>(
         self,
@@ -143,6 +156,7 @@ fn run_on_best<T: OnClient>(
             let client = <cubecl::wgpu::WgpuRuntime as Runtime>::client(&wgpu_device);
             let backend = *client.info();
             let identity = describe::describe_wgpu(&wgpu_device, backend, &client);
+            task.on_vulkan(&wgpu_device);
             task.run(client, accelerator, identity)
         },
         #[cfg(feature = "metal")]

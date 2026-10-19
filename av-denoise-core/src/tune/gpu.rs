@@ -20,6 +20,15 @@ pub(crate) fn bind<R: Runtime>(handle: &Handle, len: usize) -> ArrayArg<R> {
     unsafe { ArrayArg::from_raw_parts(owned, len) }
 }
 
+/// A new buffer of `len` 32-bit words on `client`, zeroed on the GPU.
+pub(crate) fn zeroed_words<R: Runtime>(client: &ComputeClient<R>, len: usize) -> Handle {
+    let words = len.max(1);
+    let handle = client.empty(words * size_of::<u32>());
+    zero_words(client, &handle, words);
+
+    handle
+}
+
 /// Zeroes the first `len` 32-bit words of `handle` with the zero kernel.
 ///
 /// A zero bit pattern is zero for both `f32` and `i32`, so this clears either kind of buffer.

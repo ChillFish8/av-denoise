@@ -20,6 +20,9 @@ pub const BASELINE_INDEX: usize = 0;
 /// It is close to what a cold chroma collab variant takes, the slowest candidate to compile.
 pub const FIRST_COMPILE_ESTIMATE: Duration = Duration::from_secs(10);
 
+/// The most helper clients that compile a stage's candidates at once.
+pub const PRECOMPILE_THREADS: usize = 8;
+
 /// How long the baseline runs just before a site is tuned, so clocks stay up.
 pub const REWARM: Duration = Duration::from_millis(200);
 

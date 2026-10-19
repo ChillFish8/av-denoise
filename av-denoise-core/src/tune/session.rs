@@ -124,8 +124,19 @@ pub(crate) fn compile_members<R: Runtime, S: VariantSite<R>>(
 ) -> Result<Precompiled, anyhow::Error> {
     let allowance = compile.left();
     let estimate = compile.estimate();
-    let precompiled = precompile(site, allowed, indices, outputs, allowance, estimate);
+    // Sites that cannot copy themselves never ask, so they never make helper devices.
+    let helpers = if S::COPIES { compile.helpers::<R>() } else { &[] };
+    let precompiled = precompile(site, allowed, indices, outputs, allowance, estimate, helpers);
     compile.record(&precompiled);
+
+    if precompiled.helpers_failed {
+        tracing::warn!(
+            site = S::Candidate::SITE,
+            key = %compile.key,
+            "every compile helper failed, so later stages compile on the tuned client"
+        );
+        compile.fail_helpers();
+    }
 
     tracing::debug!(
         site = S::Candidate::SITE,
@@ -134,6 +145,8 @@ pub(crate) fn compile_members<R: Runtime, S: VariantSite<R>>(
         dropped = precompiled.dropped.len(),
         skipped = precompiled.skipped.len(),
         one_by_one = precompiled.one_by_one,
+        helpers = precompiled.helpers,
+        load = ?precompiled.load,
         spent = ?precompiled.spent,
         "compiled a stage's candidates"
     );

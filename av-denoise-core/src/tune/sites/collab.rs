@@ -10,7 +10,7 @@ use crate::collab::geometry::{BASELINE_GROUPS, fused_cubes_x};
 use crate::collab::kernels::fused::{Centre, CollabVariant, GROUP_LANES, NeighbourWalk, Walk, collab_fused};
 use crate::nlmeans::NOISE_CURVE_BINS;
 use crate::tune::fidelity::{CompareResult, Fidelity, diff_integers, diff_plane};
-use crate::tune::gpu::{bind, read_f32, read_i32, zero_words};
+use crate::tune::gpu::{bind, read_f32, read_i32, zero_words, zeroed_words};
 use crate::tune::key::SiteKey;
 use crate::tune::site::{LaunchShape, SiteCandidate, VariantSite};
 use crate::tune::{DeviceLimits, Legality};
@@ -260,6 +260,7 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
 
     const PRESCREEN: bool = true;
     const STAGES: usize = 2;
+    const COPIES: bool = true;
 
     fn client(&self) -> &ComputeClient<R> {
         &self.client
@@ -281,6 +282,12 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
             .param("pooled", u8::from(shape.pooled))
             .param("f16", u8::from(shape.f16_search))
             .build()
+    }
+
+    /// The exact compile-time shape and the search type, which the bucketed key leaves out.
+    fn compile_identity(&self) -> String {
+        let search = std::any::type_name::<S>();
+        format!("{:?}|{search}", self.shape)
     }
 
     fn shape(&self, candidate: CollabVariant) -> LaunchShape {
@@ -313,13 +320,124 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
     }
 
     fn launch(&self, candidate: CollabVariant, outputs: &CollabOutputs) {
-        let groups = candidate.groups;
+        let cubes_x = fused_cubes_x(self.shape.width, candidate.groups);
+        let cube_count = CubeCount::new_2d(cubes_x, self.shape.refs_y);
+
+        self.dispatch(candidate, outputs, cube_count);
+    }
+
+    /// A launch with no cubes.
+    ///
+    /// On wgpu this compiles and caches the kernel without running it, because the wgpu runtime
+    /// skips a dispatch with no cubes after building its pipeline.
+    fn compile_only(&self, candidate: CollabVariant, outputs: &CollabOutputs) {
+        let no_cubes = CubeCount::Static(0, 0, 1);
+        self.dispatch(candidate, outputs, no_cubes);
+    }
+
+    fn real_outputs(&self) -> CollabOutputs {
+        self.outputs.clone()
+    }
+
+    fn scratch_outputs(&self) -> CollabOutputs {
+        let accum = self.client.empty(self.outputs.accum_len * size_of::<i32>());
+        let wsum = self.client.empty(self.outputs.wsum_len * size_of::<i32>());
+        let group_weight = self.client.empty(self.outputs.refs * size_of::<f32>());
+        let scratch = CollabOutputs {
+            accum,
+            wsum,
+            group_weight,
+            ..self.outputs.clone()
+        };
+
+        self.clear_outputs(&scratch);
+        scratch
+    }
+
+    fn clear_outputs(&self, outputs: &CollabOutputs) {
+        zero_words(&self.client, &outputs.accum, outputs.accum_len);
+        zero_words(&self.client, &outputs.wsum, outputs.wsum_len);
+        zero_words(&self.client, &outputs.group_weight, outputs.refs);
+    }
+
+    /// The copy's frame-sized buffers hold one word each, which [VariantSite::compile_only] never
+    /// reads. The small fixed-size tables keep their sizes.
+    fn on_client(&self, client: &ComputeClient<R>) -> Option<Self> {
+        let stored_ch = self.shape.stored_ch as usize;
+
+        let blank_inputs = CollabInputs {
+            ring: zeroed_words(client, 1),
+            ring_len: 1,
+            search_ring: zeroed_words(client, 1),
+            search_len: 1,
+            mv_field: zeroed_words(client, 1),
+            mv_len: 1,
+            confidence: zeroed_words(client, 1),
+            conf_len: 1,
+            neighbour_slots: zeroed_words(client, 1),
+            neighbour_slots_len: 1,
+            sigma: zeroed_words(client, stored_ch),
+            noise_curve: zeroed_words(client, NOISE_CURVE_BINS),
+            strength_map: zeroed_words(client, 1),
+            map_len: 1,
+            dct_profile: zeroed_words(client, 8),
+            kaiser: zeroed_words(client, PATCH_SIZE as usize),
+        };
+        let blank_outputs = CollabOutputs {
+            accum: zeroed_words(client, 1),
+            wsum: zeroed_words(client, 1),
+            group_weight: zeroed_words(client, 1),
+            accum_len: 1,
+            wsum_len: 1,
+            refs: 1,
+        };
+
+        Some(Self {
+            client: client.clone(),
+            inputs: blank_inputs,
+            outputs: blank_outputs,
+            ..self.clone()
+        })
+    }
+
+    fn compare(
+        &self,
+        baseline: &CollabOutputs,
+        candidate: &CollabOutputs,
+        fidelity: Fidelity,
+    ) -> Result<CompareResult, anyhow::Error> {
+        let expected_accum = read_i32(&self.client, &baseline.accum, baseline.accum_len)?;
+        let actual_accum = read_i32(&self.client, &candidate.accum, candidate.accum_len)?;
+        let expected_wsum = read_i32(&self.client, &baseline.wsum, baseline.wsum_len)?;
+        let actual_wsum = read_i32(&self.client, &candidate.wsum, candidate.wsum_len)?;
+        let expected_weight = read_f32(&self.client, &baseline.group_weight, baseline.refs)?;
+        let actual_weight = read_f32(&self.client, &candidate.group_weight, candidate.refs)?;
+
+        let accum_diff = diff_integers(&expected_accum, &actual_accum);
+        let wsum_diff = diff_integers(&expected_wsum, &actual_wsum);
+        let weight_diff = diff_plane(&expected_weight, &actual_weight);
+        let verdict = fidelity.judge(&[accum_diff, wsum_diff, weight_diff]);
+
+        Ok(verdict)
+    }
+
+    fn baseline(&self) -> CollabVariant {
+        CollabVariant::baseline_for(self.shape.uniform_walk_only)
+    }
+
+    fn legal(&self, candidate: CollabVariant, _limits: &DeviceLimits, legality: &Legality) -> bool {
+        let uniform_only = self.shape.uniform_walk_only || legality.uniform_walk_only;
+        candidate.runs_where(uniform_only)
+    }
+}
+
+impl<R: Runtime, S: Float> CollabSite<R, S> {
+    /// Launches `candidate` over `cube_count` cubes.
+    fn dispatch(&self, candidate: CollabVariant, outputs: &CollabOutputs, cube_count: CubeCount) {
         let lanes = candidate.lanes();
         let inputs = &self.inputs;
         let values = &self.values;
         let shape = &self.shape;
-        let cubes_x = fused_cubes_x(shape.width, groups);
-        let cube_count = CubeCount::new_2d(cubes_x, shape.refs_y);
         let cube_dim = CubeDim::new_1d(lanes);
 
         let ring = bind::<R>(&inputs.ring, inputs.ring_len);
@@ -386,60 +504,5 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
                 candidate,
             );
         }
-    }
-
-    fn real_outputs(&self) -> CollabOutputs {
-        self.outputs.clone()
-    }
-
-    fn scratch_outputs(&self) -> CollabOutputs {
-        let accum = self.client.empty(self.outputs.accum_len * size_of::<i32>());
-        let wsum = self.client.empty(self.outputs.wsum_len * size_of::<i32>());
-        let group_weight = self.client.empty(self.outputs.refs * size_of::<f32>());
-        let scratch = CollabOutputs {
-            accum,
-            wsum,
-            group_weight,
-            ..self.outputs.clone()
-        };
-
-        self.clear_outputs(&scratch);
-        scratch
-    }
-
-    fn clear_outputs(&self, outputs: &CollabOutputs) {
-        zero_words(&self.client, &outputs.accum, outputs.accum_len);
-        zero_words(&self.client, &outputs.wsum, outputs.wsum_len);
-        zero_words(&self.client, &outputs.group_weight, outputs.refs);
-    }
-
-    fn compare(
-        &self,
-        baseline: &CollabOutputs,
-        candidate: &CollabOutputs,
-        fidelity: Fidelity,
-    ) -> Result<CompareResult, anyhow::Error> {
-        let expected_accum = read_i32(&self.client, &baseline.accum, baseline.accum_len)?;
-        let actual_accum = read_i32(&self.client, &candidate.accum, candidate.accum_len)?;
-        let expected_wsum = read_i32(&self.client, &baseline.wsum, baseline.wsum_len)?;
-        let actual_wsum = read_i32(&self.client, &candidate.wsum, candidate.wsum_len)?;
-        let expected_weight = read_f32(&self.client, &baseline.group_weight, baseline.refs)?;
-        let actual_weight = read_f32(&self.client, &candidate.group_weight, candidate.refs)?;
-
-        let accum_diff = diff_integers(&expected_accum, &actual_accum);
-        let wsum_diff = diff_integers(&expected_wsum, &actual_wsum);
-        let weight_diff = diff_plane(&expected_weight, &actual_weight);
-        let verdict = fidelity.judge(&[accum_diff, wsum_diff, weight_diff]);
-
-        Ok(verdict)
-    }
-
-    fn baseline(&self) -> CollabVariant {
-        CollabVariant::baseline_for(self.shape.uniform_walk_only)
-    }
-
-    fn legal(&self, candidate: CollabVariant, _limits: &DeviceLimits, legality: &Legality) -> bool {
-        let uniform_only = self.shape.uniform_walk_only || legality.uniform_walk_only;
-        candidate.runs_where(uniform_only)
     }
 }

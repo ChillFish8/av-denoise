@@ -92,6 +92,15 @@ mod wgpu_identity {
     }
 
     fn adapter_info(device: &WgpuDevice, backend: wgpu::Backend) -> Option<wgpu::AdapterInfo> {
+        let (_, adapter) = find_adapter(device, backend)?;
+        Some(adapter.get_info())
+    }
+
+    /// The adapter CubeCL picks for `device` on `backend`, with the instance it was found on.
+    pub(crate) fn find_adapter(
+        device: &WgpuDevice,
+        backend: wgpu::Backend,
+    ) -> Option<(wgpu::Instance, wgpu::Adapter)> {
         let descriptor = wgpu::InstanceDescriptor {
             backends: backend.into(),
             ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -122,7 +131,7 @@ mod wgpu_identity {
             },
         }?;
 
-        Some(adapter.get_info())
+        Some((instance, adapter))
     }
 
     /// The `index`-th adapter of `kind`.
@@ -208,6 +217,8 @@ mod wgpu_identity {
 
 #[cfg(any(feature = "vulkan", feature = "metal"))]
 pub(crate) use self::wgpu_identity::describe_wgpu;
+#[cfg(feature = "vulkan")]
+pub(crate) use self::wgpu_identity::find_adapter;
 
 /// The identity of CUDA device `index`, from the driver.
 #[cfg(feature = "cuda")]

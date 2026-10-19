@@ -58,6 +58,9 @@ pub trait VariantSite<R: Runtime>: Clone + Send {
     /// How many stages the candidates are timed in. One stage times every candidate together.
     const STAGES: usize = 1;
 
+    /// Whether [VariantSite::on_client] makes copies, so compile helpers can be used.
+    const COPIES: bool = false;
+
     fn client(&self) -> &ComputeClient<R>;
 
     fn key(&self) -> SiteKey;
@@ -91,6 +94,29 @@ pub trait VariantSite<R: Runtime>: Clone + Send {
 
     /// Zeroes `outputs` on the GPU.
     fn clear_outputs(&self, outputs: &Self::Outputs);
+
+    /// Everything that sets which kernels the candidates compile to, as text.
+    ///
+    /// The key buckets plane sizes, so a site whose kernels take exact sizes adds them here. The
+    /// default is the key.
+    fn compile_identity(&self) -> String {
+        self.key().to_string()
+    }
+
+    /// A copy of the site on `client` that only ever runs [VariantSite::compile_only].
+    ///
+    /// Its buffers can be as small as a launch with no cubes allows. Sites without one compile their
+    /// candidates on their own client.
+    fn on_client(&self, _client: &ComputeClient<R>) -> Option<Self> {
+        None
+    }
+
+    /// Compiles the candidate's kernel, running as little of it as the site can.
+    ///
+    /// The default is a full [VariantSite::launch].
+    fn compile_only(&self, candidate: Self::Candidate, outputs: &Self::Outputs) {
+        self.launch(candidate, outputs);
+    }
 
     /// Reads both outputs back and checks the candidate's against the baseline's under `fidelity`.
     fn compare(

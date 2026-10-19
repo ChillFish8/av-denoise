@@ -18,6 +18,7 @@ mod decide;
 mod device;
 mod fidelity;
 pub(crate) mod gpu;
+mod helpers;
 mod key;
 mod ledger;
 pub(crate) mod legality;
@@ -70,6 +71,9 @@ pub use self::fidelity::{
     diff_integers,
     diff_plane,
 };
+#[cfg(feature = "vulkan")]
+pub use self::helpers::vulkan_compile_helpers;
+pub use self::helpers::{CompileHelpers, HelperFactory, compilation_cache_enabled};
 pub use self::key::{SiteKey, SiteKeyBuilder, bucket_dim};
 pub use self::ledger::{CensusEntry, TuneLedger, TunePhase};
 pub use self::legality::{

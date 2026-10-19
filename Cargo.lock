@@ -227,6 +227,7 @@ dependencies = [
  "strum_macros",
  "thiserror",
  "tracing",
+ "wgpu",
 ]
 
 [[package]]

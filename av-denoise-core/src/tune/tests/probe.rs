@@ -80,6 +80,14 @@ pub(crate) struct ProbeSite {
     pub(crate) panicking: Vec<ProbeCandidate>,
     /// How long each launch blocks the calling thread.
     pub(crate) launch_delay: Duration,
+    /// Whether this is a copy made by [VariantSite::on_client].
+    pub(crate) copy: bool,
+    /// Whether every compile on a copy panics, as a helper whose device was lost would fail.
+    pub(crate) copy_fails: bool,
+    /// How long each compile on a copy blocks the calling thread.
+    pub(crate) copy_delay: Duration,
+    /// The candidates compiled on copies.
+    pub(crate) copied: Arc<Mutex<Vec<ProbeCandidate>>>,
 }
 
 impl ProbeSite {
@@ -95,17 +103,30 @@ impl ProbeSite {
             fail_scratch: false,
             panicking: Vec::new(),
             launch_delay: Duration::ZERO,
+            copy: false,
+            copy_fails: false,
+            copy_delay: Duration::ZERO,
+            copied: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     pub(crate) fn launches(&self) -> Vec<ProbeCandidate> {
         self.launched.lock().expect("probe lock").clone()
     }
+
+    /// The candidates compiled on copies, sorted.
+    pub(crate) fn copied(&self) -> Vec<ProbeCandidate> {
+        let mut copied = self.copied.lock().expect("probe lock").clone();
+        copied.sort_by_key(|candidate| candidate.name());
+        copied
+    }
 }
 
 impl VariantSite<TestRuntime> for ProbeSite {
     type Candidate = ProbeCandidate;
     type Outputs = ();
+
+    const COPIES: bool = true;
 
     fn client(&self) -> &ComputeClient<TestRuntime> {
         &self.client
@@ -170,6 +191,29 @@ impl VariantSite<TestRuntime> for ProbeSite {
     }
 
     fn clear_outputs(&self, _outputs: &()) {}
+
+    fn on_client(&self, client: &ComputeClient<TestRuntime>) -> Option<Self> {
+        Some(Self {
+            client: client.clone(),
+            copy: true,
+            ..self.clone()
+        })
+    }
+
+    fn compile_only(&self, candidate: ProbeCandidate, outputs: &()) {
+        if !self.copy {
+            self.launch(candidate, outputs);
+            return;
+        }
+
+        std::thread::sleep(self.copy_delay);
+
+        if self.copy_fails || self.panicking.contains(&candidate) {
+            panic!("the {} probe compile panicked", candidate.name());
+        }
+
+        self.copied.lock().expect("probe lock").push(candidate);
+    }
 
     fn compare(
         &self,
