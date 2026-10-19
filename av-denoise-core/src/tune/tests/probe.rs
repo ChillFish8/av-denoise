@@ -88,6 +88,11 @@ pub(crate) struct ProbeSite {
     pub(crate) copy_delay: Duration,
     /// The candidates compiled on copies.
     pub(crate) copied: Arc<Mutex<Vec<ProbeCandidate>>>,
+    /// The candidates compiled so far, kept across runs like the on-disk compilation cache.
+    ///
+    /// With it set, a launch of a candidate it lacks waits `cold_delay` and adds it.
+    pub(crate) cache: Option<Arc<Mutex<Vec<ProbeCandidate>>>>,
+    pub(crate) cold_delay: Duration,
 }
 
 impl ProbeSite {
@@ -107,7 +112,24 @@ impl ProbeSite {
             copy_fails: false,
             copy_delay: Duration::ZERO,
             copied: Arc::new(Mutex::new(Vec::new())),
+            cache: None,
+            cold_delay: Duration::ZERO,
         }
+    }
+
+    /// How long launching `candidate` blocks, which is `cold_delay` the first time a cache sees it.
+    fn delay_for(&self, candidate: ProbeCandidate) -> Duration {
+        let Some(cache) = &self.cache else {
+            return self.launch_delay;
+        };
+
+        let mut cached = cache.lock().expect("probe lock");
+        if cached.contains(&candidate) {
+            return self.launch_delay;
+        }
+
+        cached.push(candidate);
+        self.cold_delay
     }
 
     pub(crate) fn launches(&self) -> Vec<ProbeCandidate> {
@@ -173,7 +195,8 @@ impl VariantSite<TestRuntime> for ProbeSite {
     }
 
     fn launch(&self, candidate: ProbeCandidate, _outputs: &()) {
-        std::thread::sleep(self.launch_delay);
+        let delay = self.delay_for(candidate);
+        std::thread::sleep(delay);
 
         if self.panicking.contains(&candidate) {
             panic!("the {} probe launch panicked", candidate.name());

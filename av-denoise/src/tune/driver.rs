@@ -25,7 +25,9 @@ use av_denoise_core::tune::{
     WarmUpState,
     WarmUpTracker,
     can_afford,
+    key_values,
     median,
+    pending_keys,
     profile_wins,
     site_min_cost,
     timing_spent,
@@ -150,7 +152,11 @@ struct PassInputs<'a> {
 enum ProfilePhase {
     /// Only the baseline profile exists for this configuration on this device.
     NotApplicable,
-    Compared(Vec<ProfileRecord>),
+    /// Compared, with the keys worth at least 2% of the `F32Search` census device time.
+    Compared {
+        records: Vec<ProfileRecord>,
+        significant: Vec<SiteKey>,
+    },
     /// The comparison could not run or finish, so a later run tries again.
     Unfinished,
 }
@@ -158,6 +164,8 @@ enum ProfilePhase {
 /// What timing both profiles on whole frames found.
 struct ProfileComparison {
     records: Vec<ProfileRecord>,
+    /// Keys worth at least 2% of the `F32Search` census device time.
+    significant: Vec<SiteKey>,
     /// Whether the `F32Search` census timed a launch and every key worth at least 2% of its device
     /// time is settled.
     finished: bool,
@@ -216,6 +224,7 @@ pub(crate) fn tune_planar(
     let deterministic = ledger.deterministic();
     let stored_plan = stored.kernel_plan(deterministic);
     ledger.seed(&stored_plan);
+    ledger.seed_compiled(&stored);
 
     if matches!(lock, TuneLockOutcome::TimedOut) {
         return TuneReport::skipped("another process is still tuning", started);
@@ -287,7 +296,7 @@ fn run_pass(planar: &mut PlanarDenoiser, inputs: &PassInputs<'_>) -> Result<Pass
     let census_time = census_frame_time(&census);
     let significant = significant_keys(&census, census_time);
     let known = known_keys(inputs);
-    let order = pending_keys(census, &known, census_time, budget.full);
+    let order = pending_keys(&census, &known, census_time, budget.full);
     let tuned = tune_keys(planar, inputs.ledger, &mut cycle, &order, &budget, inputs.started);
 
     let profiles = match tuned.frame_error {
@@ -427,17 +436,6 @@ fn take_census(
     Ok(census)
 }
 
-fn key_values(census: &BTreeMap<SiteKey, CensusEntry>) -> Vec<KeyValue> {
-    census
-        .iter()
-        .map(|(key, entry)| KeyValue {
-            key: key.clone(),
-            per_frame: entry.total,
-            candidates: entry.candidates,
-        })
-        .collect()
-}
-
 /// Whether the census timed any launch for a nonzero time.
 pub(super) fn census_measured(census: &BTreeMap<SiteKey, CensusEntry>) -> bool {
     census.values().any(|entry| !entry.total.is_zero())
@@ -480,27 +478,6 @@ fn known_keys(inputs: &PassInputs<'_>) -> TuneResult {
     let mut known = inputs.stored.clone();
     known.merge(ranked_so_far);
     known
-}
-
-/// The census keys not yet settled in `known`, most valuable first.
-///
-/// Keys with a partial ranking come after every unranked key.
-pub(super) fn pending_keys(
-    census: BTreeMap<SiteKey, CensusEntry>,
-    known: &TuneResult,
-    frame_time: Duration,
-    full: bool,
-) -> Vec<KeyValue> {
-    let mut values = key_values(&census);
-    values.retain(|value| !known.is_settled(&value.key));
-
-    let (partial, unranked): (Vec<KeyValue>, Vec<KeyValue>) =
-        values.into_iter().partition(|value| known.is_partial(&value.key));
-    let mut order = tuning_order(unranked, frame_time, full);
-    let retries = tuning_order(partial, frame_time, full);
-    order.extend(retries);
-
-    order
 }
 
 /// Tunes each key in `order` in place while the budget and the compile ceiling last.
@@ -675,7 +652,10 @@ fn compare_profiles(
     }
 
     if comparison.finished {
-        ProfilePhase::Compared(comparison.records)
+        ProfilePhase::Compared {
+            records: comparison.records,
+            significant: comparison.significant,
+        }
     } else {
         ProfilePhase::Unfinished
     }
@@ -709,7 +689,7 @@ fn compare_with(
     let census_time = census_frame_time(&census);
     let significant = significant_keys(&census, census_time);
     let known = known_keys(inputs);
-    let order = pending_keys(census, &known, census_time, budget.full);
+    let order = pending_keys(&census, &known, census_time, budget.full);
     let tuned = tune_keys(
         alternative,
         inputs.ledger,
@@ -756,6 +736,7 @@ fn compare_with(
 
     Ok(ProfileComparison {
         records,
+        significant,
         finished,
         alternative_wins,
     })
@@ -785,7 +766,8 @@ fn time_block(
 /// Merges this pass's rankings into the stored result, then remembers and saves it.
 ///
 /// Each profile key is complete when every key worth at least 2% of frame time is settled and the
-/// profiles were compared or do not apply. A key with a partial ranking is not settled.
+/// profiles were compared or do not apply. A key with a partial ranking is not settled. Each profile
+/// key keeps those keys, so it stops being complete if any of them is later left partial.
 fn keep_result(
     identity: &DeviceIdentity,
     profile_keys: &[String],
@@ -796,10 +778,12 @@ fn keep_result(
 ) -> TuneReport {
     let mut merged = stored.clone();
     let ranked = ledger.result();
-    let partial_keys = ranked.sites.values().filter(|ranking| ranking.partial).count();
-    let tuned_keys = ranked.sites.len() - partial_keys;
     let compile = ledger.compile_time();
+    let tuned_keys = ranked.sites.values().filter(|ranking| !ranking.partial).count();
+    let ranked_keys: Vec<SiteKey> = ranked.sites.keys().cloned().collect();
     merged.merge(ranked);
+
+    let partial_keys = ranked_keys.iter().filter(|key| merged.is_partial(key)).count();
 
     let keys_done = summary.significant.iter().all(|key| merged.is_settled(key));
     let profiles_done = summary.profiles != ProfilePhase::Unfinished;
@@ -810,10 +794,17 @@ fn keep_result(
         median_frame_ns: summary.frame_time.as_nanos() as u64,
         blocks: 0,
     }];
+    let mut sites = summary.significant;
     let compared = match summary.profiles {
-        ProfilePhase::Compared(records) => Some(records),
+        ProfilePhase::Compared { records, significant } => {
+            sites.extend(significant);
+            Some(records)
+        },
         _ => None,
     };
+
+    sites.sort();
+    sites.dedup();
 
     for profile_key in profile_keys {
         let previous = stored.profiles.get(profile_key);
@@ -825,6 +816,7 @@ fn keep_result(
         let ranking = ProfileRanking {
             complete,
             profiles: kept_records,
+            sites: sites.clone(),
         };
         merged.profiles.insert(profile_key.clone(), ranking);
     }

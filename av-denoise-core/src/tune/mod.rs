@@ -40,6 +40,8 @@ pub use self::budget::{
     WarmUpState,
     WarmUpTracker,
     can_afford,
+    key_values,
+    pending_keys,
     profile_wins,
     site_min_cost,
     timing_spent,
@@ -91,6 +93,7 @@ pub use self::plan::{KernelPlan, PipelineProfile};
 pub use self::precompile::Precompiled;
 pub use self::result::{
     CandidateRecord,
+    CompileProgress,
     ProfileRanking,
     ProfileRecord,
     SiteRanking,

@@ -6,7 +6,9 @@ use super::probe::{ProbeCandidate, ProbeSite, small_device_limits};
 use super::regularise::regularise_specs;
 use super::runtime::{TestRuntime, test_client};
 use crate::nlmeans::ChannelMode;
+use crate::tests::compilation_cache::install_test_compilation_cache;
 use crate::tune::ledger::Observed;
+use crate::tune::precompile::CompileAccount;
 use crate::tune::sites::{
     AccumulateCandidate,
     CollabVariant,
@@ -16,6 +18,7 @@ use crate::tune::sites::{
 };
 use crate::tune::{
     CandidateRecord,
+    CompileProgress,
     EngineKernels,
     FIRST_COMPILE_ESTIMATE,
     FidelityClass,
@@ -76,6 +79,8 @@ fn a_stored_result_drops_keys_with_unknown_names() {
     let ranking = SiteRanking {
         candidates: vec![retired],
         partial: false,
+        progress: CompileProgress::default(),
+        identity: String::new(),
     };
     result.sites.insert(key, ranking);
 
@@ -243,9 +248,24 @@ fn compile_time_adds_up_per_key_and_in_total() {
     let window_key = SiteKey::builder("window_probe", 64, 64).build();
     let collab_key = SiteKey::builder("collab_probe", 64, 64).build();
 
-    ledger.add_compile(&window_key, Duration::from_millis(300), 1);
-    ledger.add_compile(&collab_key, Duration::from_millis(500), 1);
-    ledger.add_compile(&window_key, Duration::from_millis(200), 1);
+    ledger.add_compile(
+        &window_key,
+        Duration::from_millis(300),
+        Duration::from_millis(300),
+        1,
+    );
+    ledger.add_compile(
+        &collab_key,
+        Duration::from_millis(500),
+        Duration::from_millis(500),
+        1,
+    );
+    ledger.add_compile(
+        &window_key,
+        Duration::from_millis(200),
+        Duration::from_millis(200),
+        1,
+    );
     let per_key = ledger.compile_times();
 
     assert_eq!(ledger.compile_time(), Duration::from_secs(1));
@@ -258,7 +278,7 @@ fn a_ledger_without_a_compile_ceiling_never_runs_out() {
     let ledger = TuneLedger::new(false);
     let key = SiteKey::builder("probe", 64, 64).build();
 
-    ledger.add_compile(&key, Duration::from_secs(3600), 1);
+    ledger.add_compile(&key, Duration::from_secs(3600), Duration::from_secs(3600), 1);
 
     assert_eq!(ledger.compile_left(), Duration::MAX);
 }
@@ -270,9 +290,9 @@ fn the_compile_ceiling_shrinks_with_compile_time_and_restarts_each_pass() {
     let ceiling = Duration::from_secs(30);
 
     ledger.begin_compile_pass(ceiling);
-    ledger.add_compile(&key, Duration::from_secs(20), 1);
+    ledger.add_compile(&key, Duration::from_secs(20), Duration::from_secs(20), 1);
     let partly_spent = ledger.compile_left();
-    ledger.add_compile(&key, Duration::from_secs(20), 1);
+    ledger.add_compile(&key, Duration::from_secs(20), Duration::from_secs(20), 1);
     let fully_spent = ledger.compile_left();
     ledger.begin_compile_pass(ceiling);
 
@@ -291,8 +311,8 @@ fn the_compile_estimate_is_the_slowest_stage_mean_of_the_pass() {
 
     ledger.begin_compile_pass(ceiling);
     let before_any = ledger.compile_estimate();
-    ledger.add_compile(&key, Duration::from_secs(48), 4);
-    ledger.add_compile(&key, Duration::from_secs(22), 2);
+    ledger.add_compile(&key, Duration::from_secs(48), Duration::from_secs(48), 4);
+    ledger.add_compile(&key, Duration::from_secs(22), Duration::from_secs(22), 2);
     let after_two = ledger.compile_estimate();
     ledger.begin_compile_pass(ceiling);
 
@@ -307,7 +327,7 @@ fn cheap_stages_never_lower_the_compile_estimate_below_the_first_estimate() {
     let key = SiteKey::builder("probe", 64, 64).build();
 
     ledger.begin_compile_pass(Duration::from_secs(30));
-    ledger.add_compile(&key, Duration::from_secs(8), 4);
+    ledger.add_compile(&key, Duration::from_secs(8), Duration::from_secs(8), 4);
 
     assert_eq!(ledger.compile_estimate(), FIRST_COMPILE_ESTIMATE);
 }
@@ -317,7 +337,90 @@ fn a_stage_that_compiled_nothing_leaves_the_compile_estimate_alone() {
     let ledger = TuneLedger::new(false);
     let key = SiteKey::builder("probe", 64, 64).build();
 
-    ledger.add_compile(&key, Duration::from_millis(5), 0);
+    ledger.add_compile(&key, Duration::from_millis(5), Duration::from_millis(5), 0);
 
     assert_eq!(ledger.compile_estimate(), FIRST_COMPILE_ESTIMATE);
+}
+
+#[test]
+fn a_stage_knows_which_of_its_candidates_a_stored_ranking_names() {
+    install_test_compilation_cache();
+    let ledger = TuneLedger::new(false);
+    let key = SiteKey::builder(ProbeCandidate::SITE, 64, 64).build();
+    let small = CandidateRecord {
+        name: "small".to_string(),
+        fidelity: FidelityClass::Exact,
+        baseline: true,
+        median_ns: 20,
+        samples: 20,
+    };
+    let wide = CandidateRecord {
+        name: "wide".to_string(),
+        ..small.clone()
+    };
+    let ranking = SiteRanking {
+        candidates: vec![small, wide],
+        partial: true,
+        progress: CompileProgress::default(),
+        identity: "probe 64x64".to_string(),
+    };
+    let mut stored = TuneResult::default();
+    stored.sites.insert(key.clone(), ranking);
+
+    ledger.seed_compiled(&stored);
+    let account = CompileAccount {
+        ledger: &ledger,
+        key: &key,
+    };
+    let limits = account.limits("probe 64x64", ProbeCandidate::ALL, &[0, 1, 2, 3]);
+    let later_stage = account.limits("probe 64x64", ProbeCandidate::ALL, &[1, 2]);
+    let other_size = account.limits("probe 62x64", ProbeCandidate::ALL, &[0, 1, 2, 3]);
+
+    assert_eq!(limits.compiled_before, vec![0, 2]);
+    assert_eq!(later_stage.compiled_before, vec![2]);
+    assert!(other_size.compiled_before.is_empty());
+}
+
+#[test]
+fn a_ranking_stored_without_a_compile_identity_seeds_nothing() {
+    install_test_compilation_cache();
+    let ledger = TuneLedger::new(false);
+    let key = SiteKey::builder(ProbeCandidate::SITE, 64, 64).build();
+    let small = CandidateRecord {
+        name: "small".to_string(),
+        fidelity: FidelityClass::Exact,
+        baseline: true,
+        median_ns: 20,
+        samples: 20,
+    };
+    let ranking = SiteRanking {
+        candidates: vec![small],
+        partial: true,
+        progress: CompileProgress::default(),
+        identity: String::new(),
+    };
+    let mut stored = TuneResult::default();
+    stored.sites.insert(key.clone(), ranking);
+
+    ledger.seed_compiled(&stored);
+    let account = CompileAccount {
+        ledger: &ledger,
+        key: &key,
+    };
+    let limits = account.limits("", ProbeCandidate::ALL, &[0, 1]);
+
+    assert!(limits.compiled_before.is_empty());
+}
+
+#[test]
+fn only_cold_compile_time_sets_the_compile_estimate() {
+    let ledger = TuneLedger::new(false);
+    let key = SiteKey::builder("collab_fused", 64, 64).build();
+    let spent = Duration::from_secs(40);
+    let cold_spent = Duration::from_secs(24);
+
+    ledger.add_compile(&key, spent, cold_spent, 2);
+
+    assert_eq!(ledger.compile_estimate(), Duration::from_secs(12));
+    assert_eq!(ledger.compile_time(), spent);
 }

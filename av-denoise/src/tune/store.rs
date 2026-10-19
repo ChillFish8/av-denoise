@@ -6,6 +6,7 @@ use std::sync::{LazyLock, Mutex, PoisonError};
 
 use av_denoise_core::tune::{
     CandidateRecord,
+    CompileProgress,
     DeviceIdentity,
     FidelityClass,
     PipelineProfile,
@@ -43,6 +44,18 @@ struct StoredFile {
     /// Site keys whose ranking is partial.
     #[serde(default)]
     partial: Vec<String>,
+    /// How far the compile ceiling let each key get.
+    #[serde(default)]
+    progress: BTreeMap<String, StoredProgress>,
+    /// The exact compile identity each key's candidates were compiled for.
+    #[serde(default)]
+    identities: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredProgress {
+    left: usize,
+    total: usize,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +81,9 @@ struct StoredCandidate {
 struct StoredProfiles {
     complete: bool,
     ranking: Vec<StoredProfile>,
+    /// The site keys whose settling the profile key's completeness rests on.
+    #[serde(default)]
+    sites: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -253,9 +269,11 @@ fn encode(identity: &DeviceIdentity, result: &TuneResult) -> StoredFile {
         .profiles
         .iter()
         .map(|(profile_key, ranking)| {
+            let sites: Vec<String> = ranking.sites.iter().map(|key| key.as_str().to_string()).collect();
             let stored = StoredProfiles {
                 complete: ranking.complete,
                 ranking: ranking.profiles.iter().map(encode_profile).collect(),
+                sites,
             };
             (profile_key.clone(), stored)
         })
@@ -268,6 +286,23 @@ fn encode(identity: &DeviceIdentity, result: &TuneResult) -> StoredFile {
         .filter(|(_, ranking)| ranking.partial)
         .map(|(key, _)| key.as_str().to_string())
         .collect();
+    let progress = result
+        .sites
+        .iter()
+        .map(|(key, ranking)| {
+            let stored = StoredProgress {
+                left: ranking.progress.left,
+                total: ranking.progress.total,
+            };
+            (key.as_str().to_string(), stored)
+        })
+        .collect();
+    let identities = result
+        .sites
+        .iter()
+        .filter(|(_, ranking)| !ranking.identity.is_empty())
+        .map(|(key, ranking)| (key.as_str().to_string(), ranking.identity.clone()))
+        .collect();
 
     StoredFile {
         format_version: FORMAT_VERSION,
@@ -276,6 +311,8 @@ fn encode(identity: &DeviceIdentity, result: &TuneResult) -> StoredFile {
         profiles,
         failed,
         partial,
+        progress,
+        identities,
     }
 }
 
@@ -299,6 +336,17 @@ fn decode_profile(stored: StoredProfile) -> Option<ProfileRecord> {
         median_frame_ns: stored.median_frame_ns,
         blocks: stored.blocks,
     })
+}
+
+/// The progress stored for a key, zero when the file predates it.
+fn decode_progress(stored: Option<&StoredProgress>) -> CompileProgress {
+    match stored {
+        Some(stored) => CompileProgress {
+            left: stored.left,
+            total: stored.total,
+        },
+        None => CompileProgress::default(),
+    }
 }
 
 /// Marks every profile ranking in `result` incomplete, so the next run tunes again.
@@ -330,6 +378,8 @@ fn decode(text: &str, identity: &DeviceIdentity) -> Result<(TuneResult, usize), 
 
     for (key_text, candidates) in stored.sites {
         let is_partial = partial.contains(&key_text);
+        let progress = decode_progress(stored.progress.get(&key_text));
+        let identity = stored.identities.get(&key_text).cloned().unwrap_or_default();
         let Some(key) = SiteKey::from_stored(&key_text) else {
             dropped += 1;
             continue;
@@ -344,6 +394,8 @@ fn decode(text: &str, identity: &DeviceIdentity) -> Result<(TuneResult, usize), 
         let ranking = SiteRanking {
             candidates: records,
             partial: is_partial,
+            progress,
+            identity,
         };
         result.sites.insert(key, ranking);
     }
@@ -356,9 +408,21 @@ fn decode(text: &str, identity: &DeviceIdentity) -> Result<(TuneResult, usize), 
             continue;
         };
 
+        let sites: Option<Vec<SiteKey>> = stored_profiles
+            .sites
+            .iter()
+            .map(String::as_str)
+            .map(SiteKey::from_stored)
+            .collect();
+        let Some(sites) = sites else {
+            dropped += 1;
+            continue;
+        };
+
         let ranking = ProfileRanking {
             complete: stored_profiles.complete,
             profiles,
+            sites,
         };
         result.profiles.insert(profile_key, ranking);
     }

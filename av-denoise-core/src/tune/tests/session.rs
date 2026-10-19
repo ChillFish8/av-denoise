@@ -160,9 +160,16 @@ fn a_key_cut_short_by_the_compile_ceiling_is_ranked_as_partial() {
     let result = ledger.result();
     let ranking = result.sites.get(&key).expect("the key was ranked");
 
+    let progress = ranking.progress;
+
     assert!(ranking.partial);
     assert!(!result.is_settled(&key));
     assert!(ledger.plan().get(&key).is_some(), "the partial choice still runs");
+    assert!(progress.left > 0, "{progress:?}");
+    assert!(
+        progress.left < progress.total,
+        "the baseline compiled: {progress:?}"
+    );
 }
 
 #[test]
@@ -178,6 +185,7 @@ fn a_key_tuned_within_the_compile_ceiling_is_not_partial() {
 
     assert!(!ranking.partial);
     assert!(result.is_settled(&key));
+    assert_eq!(ranking.progress.left, 0);
 }
 
 #[test]

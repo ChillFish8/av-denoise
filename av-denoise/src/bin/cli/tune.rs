@@ -9,7 +9,7 @@ use av_denoise::tune::{
     TuneStore,
     selected_device,
 };
-use av_denoise_core::tune::choose;
+use av_denoise_core::tune::{SiteRanking, choose};
 
 use super::{Args, Nl4dArgs, NlmeansArgs};
 use crate::pipeline::{budget_request, tune_input};
@@ -109,7 +109,8 @@ fn show_or_clear(tune: &TuneArgs, globals: &Args) -> Result<(), anyhow::Error> {
 
 /// Renders the stored winner of every site key, one row per key.
 ///
-/// A key with a partial ranking is marked `(partial)`.
+/// A key with a partial ranking is marked `(partial)`, with how many of its candidates the compile
+/// ceiling left when that is known.
 pub fn format_stored(identity: &DeviceIdentity, result: &TuneResult, deterministic: bool) -> String {
     let mut table = String::new();
     let _ = writeln!(
@@ -130,18 +131,31 @@ pub fn format_stored(identity: &DeviceIdentity, result: &TuneResult, determinist
         };
 
         let millis = record.median_ns as f64 / 1_000_000.0;
-        let note = if ranking.partial { "  (partial)" } else { "" };
+        let note = partial_note(ranking);
         let _ = writeln!(table, "  {key}  {}  {millis:.2} ms{note}", record.name);
     }
 
     table
 }
 
+fn partial_note(ranking: &SiteRanking) -> String {
+    if !ranking.partial {
+        return String::new();
+    }
+
+    let progress = ranking.progress;
+    if progress.total == 0 {
+        return "  (partial)".to_string();
+    }
+
+    format!("  (partial, {} of {} left)", progress.left, progress.total)
+}
+
 #[cfg(test)]
 mod tests {
     use av_denoise::TuningMode;
     use av_denoise::tune::{DeviceIdentity, TuneResult};
-    use av_denoise_core::tune::{CandidateRecord, FidelityClass, SiteKey, SiteRanking};
+    use av_denoise_core::tune::{CandidateRecord, CompileProgress, FidelityClass, SiteKey, SiteRanking};
     use clap::Parser;
 
     use super::*;
@@ -339,6 +353,8 @@ mod tests {
                 },
             ],
             partial: false,
+            progress: CompileProgress::default(),
+            identity: String::new(),
         };
         result.sites.insert(key, ranking);
 
@@ -371,6 +387,8 @@ mod tests {
         let ranking = SiteRanking {
             candidates: vec![record],
             partial: true,
+            progress: CompileProgress::default(),
+            identity: String::new(),
         };
         let key = SiteKey::builder("nlm_window", 1920, 1080).build();
         let mut result = TuneResult::default();
@@ -379,6 +397,40 @@ mod tests {
         let table = format_stored(&identity, &result, false);
 
         assert!(table.contains("1.00 ms  (partial)"), "{table}");
+    }
+
+    #[test]
+    fn a_partial_key_shows_how_many_candidates_it_has_left() {
+        let identity = DeviceIdentity {
+            backend: "vulkan".to_string(),
+            adapter: "Test Adapter".to_string(),
+            vendor_id: 0,
+            device_id: 0,
+            driver: "test".to_string(),
+            os: "linux".to_string(),
+            compute_capability: None,
+        };
+        let record = CandidateRecord {
+            name: "32x8".to_string(),
+            fidelity: FidelityClass::Exact,
+            baseline: true,
+            median_ns: 1_000_000,
+            samples: 40,
+        };
+        let progress = CompileProgress { left: 9, total: 26 };
+        let ranking = SiteRanking {
+            candidates: vec![record],
+            partial: true,
+            progress,
+            identity: String::new(),
+        };
+        let key = SiteKey::builder("nlm_window", 1920, 1080).build();
+        let mut result = TuneResult::default();
+        result.sites.insert(key, ranking);
+
+        let table = format_stored(&identity, &result, false);
+
+        assert!(table.contains("1.00 ms  (partial, 9 of 26 left)"), "{table}");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,17 @@ use super::key::SiteKey;
 use super::ledger::TuneLedger;
 use super::site::{SiteCandidate, VariantSite};
 
+/// How long one stage may compile, and which of its candidates an earlier run compiled.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CompileLimits {
+    /// The compile time the pass has left.
+    pub(crate) allowance: Duration,
+    /// The compile time one more cold candidate is expected to take.
+    pub(crate) estimate: Duration,
+    /// Indices an earlier run compiled into the on-disk cache.
+    pub(crate) compiled_before: Vec<usize>,
+}
+
 /// What compiling one stage's candidates did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Precompiled {
@@ -23,17 +34,19 @@ pub struct Precompiled {
     pub skipped: Vec<usize>,
     /// The wall time the compiles took, one run of each candidate included.
     pub spent: Duration,
-    /// Whether each candidate was compiled with a sync of its own.
+    /// Whether each candidate no earlier run compiled was compiled with a sync of its own.
     pub one_by_one: bool,
     /// How many helper clients compiled the stage, zero when the site's own client did.
     pub helpers: usize,
     /// The part of `spent` the site's own client took to load what the helpers compiled.
     pub load: Duration,
-    /// Whether the helpers compiled nothing and failed at least once, as helpers on a lost device do.
-    ///
-    /// A stage whose every candidate truly fails to compile looks the same, which only costs a fresh
-    /// helper set.
+    /// Whether the helpers compiled nothing while the site's own client compiled a candidate they
+    /// failed, which happens when the helpers' device is lost.
     pub helpers_failed: bool,
+    /// How many kept candidates an earlier run had compiled, so they loaded instead.
+    pub reused: usize,
+    /// The time spent loading candidates from the on-disk cache, summed over every client.
+    pub reused_load: Duration,
 }
 
 impl Precompiled {
@@ -64,14 +77,28 @@ pub(crate) struct CompileAccount<'a> {
 }
 
 impl CompileAccount<'_> {
-    /// The compile time the pass has left.
-    pub(crate) fn left(&self) -> Duration {
-        self.ledger.compile_left()
-    }
+    /// The pass's compile allowance and estimate, with the indices in `indices` an earlier run
+    /// compiled for exactly `identity`.
+    pub(crate) fn limits<C: SiteCandidate>(
+        &self,
+        identity: &str,
+        allowed: &[C],
+        indices: &[usize],
+    ) -> CompileLimits {
+        let allowance = self.ledger.compile_left();
+        let estimate = self.ledger.compile_estimate();
+        let names = self.ledger.compiled_before(self.key, identity);
+        let compiled_before = indices
+            .iter()
+            .copied()
+            .filter(|&index| names.contains(allowed[index].name()))
+            .collect();
 
-    /// The compile time one more candidate is expected to take.
-    pub(crate) fn estimate(&self) -> Duration {
-        self.ledger.compile_estimate()
+        CompileLimits {
+            allowance,
+            estimate,
+            compiled_before,
+        }
     }
 
     /// The clients that compile candidates in parallel, empty when there are none.
@@ -79,7 +106,7 @@ impl CompileAccount<'_> {
         self.ledger.compile_helpers::<R>()
     }
 
-    /// Stops using the helpers after every one of them failed in a stage.
+    /// Stops using the helpers after they failed candidates the tuned client then compiled.
     pub(crate) fn fail_helpers(&self) {
         self.ledger.fail_compile_helpers();
     }
@@ -87,7 +114,10 @@ impl CompileAccount<'_> {
     /// Adds one stage's compile time to the key.
     pub(crate) fn record(&self, precompiled: &Precompiled) {
         let compiled = precompiled.kept.len() + precompiled.dropped.len();
-        self.ledger.add_compile(self.key, precompiled.spent, compiled);
+        let cold = compiled.saturating_sub(precompiled.reused);
+        let cold_spent = precompiled.spent.saturating_sub(precompiled.reused_load);
+        self.ledger
+            .add_compile(self.key, precompiled.spent, cold_spent, cold);
     }
 }
 
@@ -96,54 +126,92 @@ impl CompileAccount<'_> {
 /// A kernel compiles on its first launch and stays compiled for the client's device, so a candidate
 /// launched here compiles nothing when it is timed. With `helpers`, a site that can copy itself onto
 /// them, and the on-disk compilation cache on, the helpers compile the candidates in parallel and the
-/// site's client then loads them from the cache one at a time. Otherwise, when `allowance` covers
-/// `estimate` for every candidate, every launch is queued and the device is synced once. Otherwise,
-/// or when a launch panics or the sync fails, each candidate is launched and synced on its own, so a
+/// site's client then loads them from the cache one at a time. Otherwise the candidates an earlier
+/// run compiled load first, one at a time. Then, when the allowance left covers the estimate for
+/// every other candidate, their launches are queued and the device is synced once. Otherwise, or
+/// when a launch panics or the sync fails, each candidate is launched and synced on its own, so a
 /// failure names its candidate. A failed candidate is dropped with the reason, and nothing here
 /// panics.
 ///
-/// The baseline is at [BASELINE_INDEX](crate::tune::BASELINE_INDEX) and always compiles. Once
-/// `allowance` has passed, every other candidate not yet launched is skipped. Queued launches compile
-/// on the device thread, so a batch checks the allowance mostly before it starts. One candidate at a
+/// The baseline is at [BASELINE_INDEX](crate::tune::BASELINE_INDEX) and always compiles. Once the
+/// allowance has passed, every other candidate not yet launched is skipped, unless an earlier run
+/// compiled it. Those still load, since a load from the cache takes about a tenth of a second, until
+/// one of them takes [SLOW_LOAD] or longer and so was not in the cache. Queued launches compile on
+/// the device thread, so a batch checks the allowance mostly before it starts. One candidate at a
 /// time, each helper, and each load after the helpers check it before each candidate.
 pub(crate) fn precompile<R: Runtime, S: VariantSite<R>>(
     site: &S,
     allowed: &[S::Candidate],
     indices: &[usize],
     outputs: &S::Outputs,
-    allowance: Duration,
-    estimate: Duration,
+    limits: &CompileLimits,
     helpers: &[ComputeClient<R>],
 ) -> Precompiled {
     let started = Instant::now();
-    let ceiling = Ceiling { started, allowance };
+    let ceiling = Ceiling {
+        started,
+        allowance: limits.allowance,
+        compiled_before: &limits.compiled_before,
+        missed: AtomicBool::new(false),
+        reused_nanos: AtomicU64::new(0),
+    };
     let replicas = replicas(site, helpers);
 
     let mut precompiled = match replicas {
         Some(replicas) => parallel(site, replicas, allowed, indices, outputs, &ceiling),
-        None => serial(site, allowed, indices, outputs, &ceiling, estimate),
+        None => serial(site, allowed, indices, outputs, &ceiling, limits.estimate),
     };
 
     precompiled.spent = started.elapsed();
+    precompiled.reused = precompiled
+        .kept
+        .iter()
+        .filter(|index| limits.compiled_before.contains(index))
+        .count();
+    precompiled.reused_load = ceiling.reused_load();
     precompiled
 }
 
-/// Compiles on the site's own client, in one batch when the allowance covers every estimate.
+/// Compiles on the site's own client.
+///
+/// The candidates an earlier run compiled load first, each with a sync of its own, so a slow one
+/// shows the cache missed it. The rest compile in one batch when the allowance left covers the
+/// estimate for each of them.
 fn serial<R: Runtime, S: VariantSite<R>>(
     site: &S,
     allowed: &[S::Candidate],
     indices: &[usize],
     outputs: &S::Outputs,
-    ceiling: &Ceiling,
+    ceiling: &Ceiling<'_>,
     estimate: Duration,
 ) -> Precompiled {
-    let batched = fits_in_one_batch(ceiling.allowance, estimate, indices.len());
+    let (reused, cold): (Vec<usize>, Vec<usize>) =
+        indices.iter().copied().partition(|&index| ceiling.reused(index));
+    let mut precompiled = one_by_one(site, allowed, &reused, outputs, ceiling);
 
-    if batched {
-        batch(site, allowed, indices, outputs, ceiling)
+    let left = ceiling.left();
+    let batched = fits_in_one_batch(left, estimate, cold.len());
+    let rest = if batched {
+        batch(site, allowed, &cold, outputs, ceiling)
     } else {
-        one_by_one(site, allowed, indices, outputs, ceiling)
-    }
+        one_by_one(site, allowed, &cold, outputs, ceiling)
+    };
+
+    precompiled.kept.extend(rest.kept);
+    precompiled.dropped.extend(rest.dropped);
+    precompiled.skipped.extend(rest.skipped);
+    precompiled.one_by_one = rest.one_by_one;
+    in_stage_order(&mut precompiled, indices);
+    precompiled
+}
+
+/// Sorts what `precompiled` kept, dropped and skipped into the order of `indices`.
+fn in_stage_order(precompiled: &mut Precompiled, indices: &[usize]) {
+    let position = |index: &usize| indices.iter().position(|member| member == index);
+
+    precompiled.kept.sort_by_key(position);
+    precompiled.skipped.sort_by_key(position);
+    precompiled.dropped.sort_by_key(|(index, _)| position(index));
 }
 
 /// A copy of `site` on each helper, or none when there are no helpers, the site cannot copy itself
@@ -169,7 +237,7 @@ fn replicas<R: Runtime, S: VariantSite<R>>(site: &S, helpers: &[ComputeClient<R>
 const NEW_COMPILE: Duration = Duration::from_millis(500);
 
 /// A load on the site's client at least this long compiled the kernel instead of loading it.
-const SLOW_LOAD: Duration = Duration::from_secs(1);
+pub(crate) const SLOW_LOAD: Duration = Duration::from_secs(1);
 
 /// How many compiles in a row may fail on one helper before it stops, as a lost device would.
 const HELPER_FAILURE_LIMIT: usize = 2;
@@ -223,8 +291,8 @@ struct HelperResults {
     skipped: Vec<usize>,
     /// Whether any helper compile built a kernel the cache did not hold.
     any_new: bool,
-    /// Whether the helpers compiled nothing and failed at least once, as helpers on a lost device do.
-    none_worked: bool,
+    /// Indices the helpers failed or never finished.
+    failed: Vec<usize>,
 }
 
 /// Compiles the candidates on the helpers in parallel, then loads them on the site's own client.
@@ -247,7 +315,7 @@ fn parallel<R: Runtime, S: VariantSite<R>>(
     allowed: &[S::Candidate],
     indices: &[usize],
     outputs: &S::Outputs,
-    ceiling: &Ceiling,
+    ceiling: &Ceiling<'_>,
 ) -> Precompiled {
     let helpers = replicas.len();
     let helper_indices: Vec<usize> = indices
@@ -273,14 +341,24 @@ fn parallel<R: Runtime, S: VariantSite<R>>(
     let load_started = Instant::now();
     let mut loaded = load_one_by_one(site, allowed, &on_site, &results.compiled, outputs, ceiling);
     loaded.load = load_started.elapsed();
+    loaded.helpers = helpers;
+    loaded.helpers_failed = helpers_failed(&results, &loaded);
 
     loaded.skipped.extend(results.skipped);
     loaded
         .skipped
         .sort_by_key(|skipped| indices.iter().position(|index| index == skipped));
-    loaded.helpers = helpers;
-    loaded.helpers_failed = results.none_worked;
     loaded
+}
+
+/// Whether the helpers compiled nothing while the site's client compiled a candidate they failed.
+///
+/// A candidate that fails on the site's client too is a genuine compile failure, which says nothing
+/// about the helpers.
+fn helpers_failed(results: &HelperResults, loaded: &Precompiled) -> bool {
+    let site_compiled_one = results.failed.iter().any(|index| loaded.kept.contains(index));
+
+    results.compiled.is_empty() && site_compiled_one
 }
 
 /// Runs one compile loop per helper and waits for every one of them.
@@ -288,7 +366,7 @@ fn run_helpers<R: Runtime, S: VariantSite<R>>(
     replicas: Vec<S>,
     allowed: &[S::Candidate],
     queue: &HelperQueue<'_>,
-    ceiling: &Ceiling,
+    ceiling: &Ceiling<'_>,
 ) {
     let clients: Vec<ComputeClient<R>> = replicas.iter().map(|replica| replica.client().clone()).collect();
 
@@ -318,13 +396,14 @@ fn compile_on_helper<R: Runtime, S: VariantSite<R>>(
     replica: &S,
     allowed: &[S::Candidate],
     queue: &HelperQueue<'_>,
-    ceiling: &Ceiling,
+    ceiling: &Ceiling<'_>,
 ) {
     let outputs = replica.real_outputs();
     let mut failures_in_a_row = 0;
 
     while let Some((position, index)) = queue.claim() {
-        if ceiling.skips(index) {
+        let reused = ceiling.reused(index);
+        if ceiling.skips(index, reused) {
             queue.record(position, Outcome::Skipped);
             continue;
         }
@@ -332,11 +411,13 @@ fn compile_on_helper<R: Runtime, S: VariantSite<R>>(
         let candidate = allowed[index];
         let started = Instant::now();
         let compiled = compile_only_one(replica, candidate, &outputs);
+        let took = started.elapsed();
+        ceiling.observe(took, reused);
 
         match compiled {
             Ok(()) => {
                 failures_in_a_row = 0;
-                queue.record(position, Outcome::Compiled(started.elapsed()));
+                queue.record(position, Outcome::Compiled(took));
             },
             Err(reason) => {
                 failures_in_a_row += 1;
@@ -367,7 +448,6 @@ fn sort_outcomes<C: SiteCandidate>(
     done.sort_by_key(|(position, _)| *position);
 
     let mut results = HelperResults::default();
-    let mut any_failed = false;
 
     for (position, outcome) in done {
         let index = helper_indices[position];
@@ -385,13 +465,12 @@ fn sort_outcomes<C: SiteCandidate>(
                     %reason,
                     "a helper did not compile a candidate, so the tuned client tries it"
                 );
-                any_failed = true;
+                results.failed.push(index);
             },
             Outcome::Skipped => results.skipped.push(index),
         }
     }
 
-    results.none_worked = results.compiled.is_empty() && any_failed;
     results
 }
 
@@ -413,31 +492,24 @@ fn reload_for<R: Runtime, S: VariantSite<R>>(site: &S, allowed: &[S::Candidate],
 /// A candidate from `from_helpers` is already compiled, so it loads whatever the ceiling, which costs
 /// about a tenth of a second. A slow such load means the cache missed, and a miss repeats, so after
 /// one the helper candidates past the ceiling are skipped too. Every other candidate checks the
-/// ceiling before it loads.
+/// ceiling with [Ceiling::skips] before it loads.
 fn load_one_by_one<R: Runtime, S: VariantSite<R>>(
     site: &S,
     allowed: &[S::Candidate],
     indices: &[usize],
     from_helpers: &[usize],
     outputs: &S::Outputs,
-    ceiling: &Ceiling,
+    ceiling: &Ceiling<'_>,
 ) -> Precompiled {
     let mut loaded = Precompiled {
         one_by_one: true,
         ..Precompiled::default()
     };
-    let mut cache_missed = false;
 
     for &index in indices {
         let from_helper = from_helpers.contains(&index);
-        let past_ceiling = ceiling.skips(index);
-        let skipped = if from_helper {
-            past_ceiling && cache_missed
-        } else {
-            past_ceiling
-        };
-
-        if skipped {
+        let reused = from_helper || ceiling.reused(index);
+        if ceiling.skips(index, reused) {
             loaded.skipped.push(index);
             continue;
         }
@@ -446,6 +518,7 @@ fn load_one_by_one<R: Runtime, S: VariantSite<R>>(
         let started = Instant::now();
         let compiled = compile_one(site, candidate, outputs);
         let took = started.elapsed();
+        ceiling.observe(took, reused);
 
         if from_helper && took >= SLOW_LOAD {
             tracing::warn!(
@@ -454,7 +527,6 @@ fn load_one_by_one<R: Runtime, S: VariantSite<R>>(
                 ?took,
                 "a candidate a helper compiled compiled again on the tuned client, so the cache missed it"
             );
-            cache_missed = true;
         }
 
         match compiled {
@@ -480,7 +552,7 @@ fn batch<R: Runtime, S: VariantSite<R>>(
     allowed: &[S::Candidate],
     indices: &[usize],
     outputs: &S::Outputs,
-    ceiling: &Ceiling,
+    ceiling: &Ceiling<'_>,
 ) -> Precompiled {
     let queued = launch_all(site, allowed, indices, outputs, ceiling);
     let synced = sync(site.client());
@@ -491,17 +563,59 @@ fn batch<R: Runtime, S: VariantSite<R>>(
     }
 }
 
-/// When compiling began and how long it may run.
-struct Ceiling {
+/// When compiling began, how long it may run, and which candidates load from the cache instead.
+struct Ceiling<'a> {
     started: Instant,
     allowance: Duration,
+    compiled_before: &'a [usize],
+    /// Whether a candidate that should have loaded from the cache took [SLOW_LOAD] or longer.
+    missed: AtomicBool,
+    /// The time candidates an earlier run compiled took, in nanoseconds.
+    reused_nanos: AtomicU64,
 }
 
-impl Ceiling {
-    /// Whether the candidate at `index` is skipped, which only happens to a non-baseline candidate
-    /// once the allowance has passed.
-    fn skips(&self, index: usize) -> bool {
-        index != BASELINE_INDEX && self.started.elapsed() >= self.allowance
+impl Ceiling<'_> {
+    /// Whether an earlier run compiled the candidate at `index`.
+    fn reused(&self, index: usize) -> bool {
+        self.compiled_before.contains(&index)
+    }
+
+    /// The allowance not yet spent.
+    fn left(&self) -> Duration {
+        let elapsed = self.started.elapsed();
+        self.allowance.saturating_sub(elapsed)
+    }
+
+    fn reused_load(&self) -> Duration {
+        let nanos = self.reused_nanos.load(Ordering::Relaxed);
+        Duration::from_nanos(nanos)
+    }
+
+    /// Whether the candidate at `index` is skipped.
+    ///
+    /// Only a non-baseline candidate past the allowance is. A `reused` one, which should load from
+    /// the cache, is skipped only once some such load turned out slow.
+    fn skips(&self, index: usize, reused: bool) -> bool {
+        if index == BASELINE_INDEX || self.started.elapsed() < self.allowance {
+            return false;
+        }
+
+        !reused || self.missed.load(Ordering::Relaxed)
+    }
+
+    /// Notes that a candidate took `took`, which for a `reused` one of [SLOW_LOAD] or longer means
+    /// the cache missed it.
+    fn observe(&self, took: Duration, reused: bool) {
+        if !reused {
+            return;
+        }
+
+        let nanos = u64::try_from(took.as_nanos()).unwrap_or(u64::MAX);
+        self.reused_nanos.fetch_add(nanos, Ordering::Relaxed);
+
+        if took >= SLOW_LOAD {
+            self.missed.store(true, Ordering::Relaxed);
+        }
     }
 }
 
@@ -511,12 +625,13 @@ fn launch_all<R: Runtime, S: VariantSite<R>>(
     allowed: &[S::Candidate],
     indices: &[usize],
     outputs: &S::Outputs,
-    ceiling: &Ceiling,
+    ceiling: &Ceiling<'_>,
 ) -> Result<Precompiled, String> {
     let mut queued = Precompiled::default();
 
     for &index in indices {
-        if ceiling.skips(index) {
+        let reused = ceiling.reused(index);
+        if ceiling.skips(index, reused) {
             queued.skipped.push(index);
             continue;
         }
@@ -548,7 +663,7 @@ fn one_by_one<R: Runtime, S: VariantSite<R>>(
     allowed: &[S::Candidate],
     indices: &[usize],
     outputs: &S::Outputs,
-    ceiling: &Ceiling,
+    ceiling: &Ceiling<'_>,
 ) -> Precompiled {
     let mut precompiled = Precompiled {
         one_by_one: true,
@@ -556,13 +671,17 @@ fn one_by_one<R: Runtime, S: VariantSite<R>>(
     };
 
     for &index in indices {
-        if ceiling.skips(index) {
+        let reused = ceiling.reused(index);
+        if ceiling.skips(index, reused) {
             precompiled.skipped.push(index);
             continue;
         }
 
         let candidate = allowed[index];
+        let started = Instant::now();
         let compiled = compile_one(site, candidate, outputs);
+        let took = started.elapsed();
+        ceiling.observe(took, reused);
 
         match compiled {
             Ok(()) => precompiled.kept.push(index),

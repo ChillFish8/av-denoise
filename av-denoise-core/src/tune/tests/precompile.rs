@@ -1,4 +1,5 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cubecl::config::{CubeClRuntimeConfig, RuntimeConfig};
@@ -10,7 +11,7 @@ use super::probe::{ProbeCandidate, ProbeSite};
 use super::runtime::{TestRuntime, test_client, test_legality};
 use crate::nlmeans::ChannelMode;
 use crate::tune::gpu::{bind, profile_launches, sync, zero_words};
-use crate::tune::precompile::{fits_in_one_batch, precompile};
+use crate::tune::precompile::{CompileLimits, SLOW_LOAD, fits_in_one_batch, precompile};
 use crate::tune::sites::{CollabOutputs, CollabSite, CollabVariant};
 use crate::tune::{
     CompareResult,
@@ -26,13 +27,23 @@ use crate::tune::{
 /// A compile allowance no test runs out of.
 const NO_CEILING: Duration = Duration::MAX;
 
+/// Limits for a stage no earlier run compiled any of.
+pub(super) fn compile_limits(allowance: Duration, estimate: Duration) -> CompileLimits {
+    CompileLimits {
+        allowance,
+        estimate,
+        compiled_before: Vec::new(),
+    }
+}
+
 #[test]
 fn precompiling_launches_each_candidate_once_in_order() {
     let client = test_client();
     let site = ProbeSite::new(&client);
     let allowed = ProbeCandidate::ALL;
 
-    let precompiled = precompile(&site, allowed, &[0, 1, 2], &(), NO_CEILING, Duration::ZERO, &[]);
+    let limits = compile_limits(NO_CEILING, Duration::ZERO);
+    let precompiled = precompile(&site, allowed, &[0, 1, 2], &(), &limits, &[]);
     let launches = site.launches();
 
     assert_eq!(precompiled.kept, vec![0, 1, 2]);
@@ -55,7 +66,8 @@ fn a_candidate_whose_launch_panics_is_dropped_with_a_reason() {
     site.panicking = vec![ProbeCandidate::Medium];
     let allowed = ProbeCandidate::ALL;
 
-    let precompiled = precompile(&site, allowed, &[0, 1, 2], &(), NO_CEILING, Duration::ZERO, &[]);
+    let limits = compile_limits(NO_CEILING, Duration::ZERO);
+    let precompiled = precompile(&site, allowed, &[0, 1, 2], &(), &limits, &[]);
     let reason = precompiled
         .reason_for(1)
         .expect("the medium candidate was dropped");
@@ -70,15 +82,8 @@ fn a_spent_compile_ceiling_compiles_only_the_baseline() {
     let site = ProbeSite::new(&client);
     let allowed = ProbeCandidate::ALL;
 
-    let precompiled = precompile(
-        &site,
-        allowed,
-        &[0, 1, 2],
-        &(),
-        Duration::ZERO,
-        Duration::ZERO,
-        &[],
-    );
+    let limits = compile_limits(Duration::ZERO, Duration::ZERO);
+    let precompiled = precompile(&site, allowed, &[0, 1, 2], &(), &limits, &[]);
     let launches = site.launches();
 
     assert_eq!(precompiled.kept, vec![0]);
@@ -93,7 +98,8 @@ fn a_later_stage_past_the_compile_ceiling_compiles_nothing() {
     let site = ProbeSite::new(&client);
     let allowed = ProbeCandidate::ALL;
 
-    let precompiled = precompile(&site, allowed, &[1, 2], &(), Duration::ZERO, Duration::ZERO, &[]);
+    let limits = compile_limits(Duration::ZERO, Duration::ZERO);
+    let precompiled = precompile(&site, allowed, &[1, 2], &(), &limits, &[]);
 
     assert!(precompiled.kept.is_empty());
     assert_eq!(precompiled.skipped, vec![1, 2]);
@@ -109,7 +115,8 @@ fn the_compile_ceiling_skips_the_candidates_left_once_it_runs_out() {
     let allowed = ProbeCandidate::ALL;
     let allowance = Duration::from_millis(300);
 
-    let precompiled = precompile(&site, allowed, &[0, 1, 2], &(), allowance, Duration::ZERO, &[]);
+    let limits = compile_limits(allowance, Duration::ZERO);
+    let precompiled = precompile(&site, allowed, &[0, 1, 2], &(), &limits, &[]);
 
     assert_eq!(precompiled.kept, vec![0, 1]);
     assert_eq!(precompiled.skipped, vec![2]);
@@ -127,7 +134,8 @@ fn the_compile_ceiling_also_cuts_the_one_by_one_retry_short() {
     let allowed = ProbeCandidate::ALL;
     let allowance = Duration::from_millis(500);
 
-    let precompiled = precompile(&site, allowed, &[0, 1, 2], &(), allowance, Duration::ZERO, &[]);
+    let limits = compile_limits(allowance, Duration::ZERO);
+    let precompiled = precompile(&site, allowed, &[0, 1, 2], &(), &limits, &[]);
 
     assert_eq!(precompiled.kept, vec![0]);
     assert_eq!(precompiled.skipped, vec![1, 2]);
@@ -142,7 +150,8 @@ fn a_ceiling_that_covers_every_estimated_compile_compiles_in_one_batch() {
     let allowance = Duration::from_secs(10);
     let estimate = Duration::from_secs(2);
 
-    let precompiled = precompile(&site, allowed, &[0, 1, 2, 3], &(), allowance, estimate, &[]);
+    let limits = compile_limits(allowance, estimate);
+    let precompiled = precompile(&site, allowed, &[0, 1, 2, 3], &(), &limits, &[]);
 
     assert_eq!(precompiled.kept, vec![0, 1, 2, 3]);
     assert!(!precompiled.one_by_one);
@@ -159,7 +168,8 @@ fn a_short_compile_ceiling_compiles_one_candidate_at_a_time_and_stops_within_one
     let allowance = Duration::from_millis(500);
     let slack = Duration::from_millis(100);
 
-    let precompiled = precompile(&site, allowed, &[0, 1, 2, 3], &(), allowance, launch_delay, &[]);
+    let limits = compile_limits(allowance, launch_delay);
+    let precompiled = precompile(&site, allowed, &[0, 1, 2, 3], &(), &limits, &[]);
 
     assert!(precompiled.one_by_one);
     assert_eq!(precompiled.kept, vec![0, 1, 2]);
@@ -169,6 +179,136 @@ fn a_short_compile_ceiling_compiles_one_candidate_at_a_time_and_stops_within_one
         "{:?}",
         precompiled.spent
     );
+}
+
+/// A probe whose candidates compile in `cold_delay` the first time `cache` sees them.
+fn cached_probe(
+    client: &ComputeClient<TestRuntime>,
+    cache: &Arc<Mutex<Vec<ProbeCandidate>>>,
+    cold_delay: Duration,
+) -> ProbeSite {
+    let mut site = ProbeSite::new(client);
+    site.cache = Some(cache.clone());
+    site.cold_delay = cold_delay;
+    site
+}
+
+/// Each cold compile takes 400 ms against a 600 ms ceiling, so a run compiles two new candidates.
+#[test]
+fn a_later_run_keeps_what_an_earlier_run_compiled_and_compiles_more_within_the_same_ceiling() {
+    let client = test_client();
+    let cache = Arc::new(Mutex::new(Vec::new()));
+    let cold_delay = Duration::from_millis(400);
+    let allowance = Duration::from_millis(600);
+    let allowed = ProbeCandidate::ALL;
+    let indices = [0, 1, 2, 3];
+
+    let first_site = cached_probe(&client, &cache, cold_delay);
+    let first_limits = compile_limits(allowance, cold_delay);
+    let first = precompile(&first_site, allowed, &indices, &(), &first_limits, &[]);
+
+    let second_site = cached_probe(&client, &cache, cold_delay);
+    let second_limits = CompileLimits {
+        compiled_before: first.kept.clone(),
+        ..first_limits
+    };
+    let second = precompile(&second_site, allowed, &indices, &(), &second_limits, &[]);
+
+    assert_eq!(first.kept, vec![0, 1]);
+    assert_eq!(first.skipped, vec![2, 3]);
+    assert_eq!(second.kept, vec![0, 1, 2, 3]);
+    assert_eq!(second.reused, 2);
+}
+
+#[test]
+fn candidates_an_earlier_run_compiled_still_load_once_the_ceiling_is_spent() {
+    let client = test_client();
+    let cached = vec![ProbeCandidate::Small, ProbeCandidate::Medium];
+    let cache = Arc::new(Mutex::new(cached));
+    let site = cached_probe(&client, &cache, Duration::from_secs(5));
+    let allowed = ProbeCandidate::ALL;
+    let limits = CompileLimits {
+        allowance: Duration::ZERO,
+        estimate: Duration::from_secs(5),
+        compiled_before: vec![0, 1],
+    };
+
+    let precompiled = precompile(&site, allowed, &[0, 1, 2, 3], &(), &limits, &[]);
+    let launches = site.launches();
+
+    assert_eq!(precompiled.kept, vec![0, 1]);
+    assert_eq!(precompiled.skipped, vec![2, 3]);
+    assert_eq!(launches, vec![ProbeCandidate::Small, ProbeCandidate::Medium]);
+}
+
+/// The medium candidate should load from the cache but compiles from cold, so the wide one, which
+/// should load too, is skipped.
+#[test]
+fn a_slow_load_past_the_ceiling_stops_the_candidates_an_earlier_run_compiled_from_loading() {
+    let client = test_client();
+    let cache = Arc::new(Mutex::new(Vec::new()));
+    let cold_delay = SLOW_LOAD + Duration::from_millis(100);
+    let site = cached_probe(&client, &cache, cold_delay);
+    let allowed = ProbeCandidate::ALL;
+    let limits = CompileLimits {
+        allowance: Duration::ZERO,
+        estimate: cold_delay,
+        compiled_before: vec![1, 2],
+    };
+
+    let precompiled = precompile(&site, allowed, &[0, 1, 2, 3], &(), &limits, &[]);
+
+    assert_eq!(precompiled.kept, vec![0, 1]);
+    assert_eq!(precompiled.skipped, vec![2, 3]);
+}
+
+#[test]
+fn candidates_an_earlier_run_compiled_load_first_and_the_cold_rest_batches() {
+    let client = test_client();
+    let site = ProbeSite::new(&client);
+    let allowed = ProbeCandidate::ALL;
+    let limits = CompileLimits {
+        allowance: Duration::from_secs(30),
+        estimate: Duration::from_secs(10),
+        compiled_before: vec![1, 3],
+    };
+
+    let precompiled = precompile(&site, allowed, &[0, 1, 2, 3], &(), &limits, &[]);
+    let launches = site.launches();
+
+    assert_eq!(precompiled.kept, vec![0, 1, 2, 3]);
+    assert_eq!(precompiled.reused, 2);
+    assert!(!precompiled.one_by_one);
+    assert_eq!(
+        launches,
+        vec![
+            ProbeCandidate::Medium,
+            ProbeCandidate::Huge,
+            ProbeCandidate::Small,
+            ProbeCandidate::Wide
+        ]
+    );
+}
+
+/// Every seeded candidate misses the cache, so the first slow load stops the rest. A batch would
+/// have compiled the whole stage past the ceiling.
+#[test]
+fn seeded_candidates_that_miss_the_cache_never_batch_past_the_ceiling() {
+    let client = test_client();
+    let cache = Arc::new(Mutex::new(Vec::new()));
+    let cold_delay = SLOW_LOAD + Duration::from_millis(100);
+    let site = cached_probe(&client, &cache, cold_delay);
+    let allowed = ProbeCandidate::ALL;
+    let limits = CompileLimits {
+        allowance: Duration::from_millis(100),
+        estimate: Duration::from_secs(10),
+        compiled_before: vec![0, 1, 2, 3],
+    };
+
+    let precompiled = precompile(&site, allowed, &[0, 1, 2, 3], &(), &limits, &[]);
+
+    assert_eq!(precompiled.kept, vec![0]);
+    assert_eq!(precompiled.skipped, vec![1, 2, 3]);
 }
 
 #[test]
@@ -308,15 +448,8 @@ fn a_candidate_that_cannot_compile_is_dropped_with_a_reason() {
     let site = SharedSite::new(&client);
     let outputs = site.scratch_outputs();
 
-    let precompiled = precompile(
-        &site,
-        SharedProbe::ALL,
-        &[0, 1],
-        &outputs,
-        NO_CEILING,
-        Duration::ZERO,
-        &[],
-    );
+    let limits = compile_limits(NO_CEILING, Duration::ZERO);
+    let precompiled = precompile(&site, SharedProbe::ALL, &[0, 1], &outputs, &limits, &[]);
     let reason = precompiled
         .reason_for(1)
         .expect("the oversized candidate was dropped");
@@ -367,15 +500,8 @@ fn a_precompiled_candidate_compiles_nothing_at_its_first_timed_launch() {
 
     assert!(allowed.len() >= 3, "{} candidates", allowed.len());
 
-    let precompiled = precompile(
-        &site,
-        &allowed,
-        &[0, warmed],
-        &outputs,
-        NO_CEILING,
-        Duration::ZERO,
-        &[],
-    );
+    let limits = compile_limits(NO_CEILING, Duration::ZERO);
+    let precompiled = precompile(&site, &allowed, &[0, warmed], &outputs, &limits, &[]);
     let warmed_first = first_timed_launch(&site, allowed[warmed], &outputs);
     let cold_first = first_timed_launch(&site, allowed[cold], &outputs);
 

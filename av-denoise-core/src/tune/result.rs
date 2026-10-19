@@ -25,6 +25,21 @@ pub struct SiteRanking {
     pub candidates: Vec<CandidateRecord>,
     /// Whether the compile ceiling skipped some of the key's candidates, so a later run tunes it again.
     pub partial: bool,
+    /// How far the compile ceiling let tuning get through the key's candidates.
+    pub progress: CompileProgress,
+    /// The exact compile identity of the site the candidates were compiled for.
+    ///
+    /// It is empty for a ranking stored before identities were kept.
+    pub identity: String,
+}
+
+/// How many of a key's candidates the compile ceiling skipped, out of how many tuning tried.
+///
+/// Each candidate counts once. Both are zero for a key stored before these counts were kept.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompileProgress {
+    pub left: usize,
+    pub total: usize,
 }
 
 /// One candidate's timing at one site key.
@@ -55,6 +70,9 @@ pub struct ProfileRanking {
     /// Whether every site this configuration reached has a ranking and the profiles were compared.
     pub complete: bool,
     pub profiles: Vec<ProfileRecord>,
+    /// The site keys worth tuning that this configuration reached, which stay settled while it is
+    /// complete.
+    pub sites: Vec<SiteKey>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -62,6 +80,18 @@ pub struct ProfileRecord {
     pub profile: PipelineProfile,
     pub median_frame_ns: u64,
     pub blocks: u32,
+}
+
+/// Whether `older` stays when merging `newer`.
+///
+/// It stays when `newer` is partial and either `older` is full or `older` timed more candidates.
+fn keeps_over(older: &SiteRanking, newer: &SiteRanking) -> bool {
+    if !newer.partial {
+        return false;
+    }
+
+    let timed_fewer = newer.candidates.len() < older.candidates.len();
+    !older.partial || timed_fewer
 }
 
 /// Picks the candidate to run from a site's records.
@@ -122,7 +152,9 @@ pub fn choose_profile(ranking: &ProfileRanking, deterministic: bool) -> Pipeline
 impl TuneResult {
     /// Takes every key `newer` holds, keeping the rest of this result.
     ///
-    /// A key `newer` ranks is no longer failed, and a key `newer` failed loses its old ranking.
+    /// A key `newer` ranks is no longer failed, and a key `newer` failed loses its old ranking. A
+    /// partial ranking in `newer` never replaces a full one, and replaces an older partial one only
+    /// when it timed at least as many candidates.
     pub fn merge(&mut self, newer: TuneResult) {
         for key in newer.sites.keys() {
             self.failed.remove(key);
@@ -132,7 +164,16 @@ impl TuneResult {
             self.sites.remove(key);
         }
 
-        self.sites.extend(newer.sites);
+        for (key, ranking) in newer.sites {
+            let older = self.sites.get(&key);
+            let keeps_older = older.is_some_and(|older| keeps_over(older, &ranking));
+            if keeps_older {
+                continue;
+            }
+
+            self.sites.insert(key, ranking);
+        }
+
         self.failed.extend(newer.failed);
         self.profiles.extend(newer.profiles);
     }
@@ -191,11 +232,17 @@ impl TuneResult {
     }
 
     /// Whether every profile key in `profile_keys` was tuned to completion.
+    ///
+    /// A profile key whose sites include one that is no longer settled, such as a key another
+    /// configuration left partial, is not complete.
     pub fn is_complete(&self, profile_keys: &[String]) -> bool {
         profile_keys.iter().all(|profile_key| {
-            self.profiles
-                .get(profile_key)
-                .is_some_and(|ranking| ranking.complete)
+            let ranking = self.profiles.get(profile_key);
+            ranking.is_some_and(|ranking| ranking.complete && self.all_settled(&ranking.sites))
         })
+    }
+
+    fn all_settled(&self, keys: &[SiteKey]) -> bool {
+        keys.iter().all(|key| self.is_settled(key))
     }
 }

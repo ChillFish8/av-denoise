@@ -35,6 +35,9 @@ use cubecl::config::{CubeClRuntimeConfig, RuntimeConfig};
 use etcetera::base_strategy::{BaseStrategy, choose_base_strategy};
 
 /// The environment variable that overrides where compiled kernels are cached, or turns caching off.
+///
+/// Tuning results are stored in the same directory. With caching off, every run tunes from scratch
+/// and stores nothing.
 pub const COMPILATION_CACHE_ENV: &str = "AV_DENOISE_COMPILATION_CACHE";
 
 /// Where compiled kernels are cached, once an install has settled it.

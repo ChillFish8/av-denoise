@@ -4,7 +4,7 @@ use std::time::Duration;
 use cubecl::prelude::*;
 
 use super::fixtures::{CollabSpec, collab_site};
-use super::precompile::{SharedProbe, SharedSite, uncached_client};
+use super::precompile::{SharedProbe, SharedSite, compile_limits, uncached_client};
 use super::probe::{ProbeCandidate, ProbeSite};
 use super::runtime::{TestRuntime, test_client};
 use crate::nlmeans::ChannelMode;
@@ -28,15 +28,8 @@ fn helpers_compile_every_candidate_but_the_baseline_and_the_site_client_loads_ea
     let helpers = cloned_helpers(&client);
     let allowed = ProbeCandidate::ALL;
 
-    let precompiled = precompile(
-        &site,
-        allowed,
-        &[0, 1, 2],
-        &(),
-        NO_CEILING,
-        Duration::ZERO,
-        &helpers,
-    );
+    let limits = compile_limits(NO_CEILING, Duration::ZERO);
+    let precompiled = precompile(&site, allowed, &[0, 1, 2], &(), &limits, &helpers);
 
     assert_eq!(precompiled.kept, vec![0, 1, 2]);
     assert!(precompiled.dropped.is_empty());
@@ -63,15 +56,8 @@ fn a_helper_past_the_ceiling_skips_what_it_had_not_started_and_the_rest_still_lo
     let allowed = ProbeCandidate::ALL;
     let allowance = Duration::from_millis(150);
 
-    let precompiled = precompile(
-        &site,
-        allowed,
-        &[0, 1, 2, 3],
-        &(),
-        allowance,
-        Duration::ZERO,
-        &helpers,
-    );
+    let limits = compile_limits(allowance, Duration::ZERO);
+    let precompiled = precompile(&site, allowed, &[0, 1, 2, 3], &(), &limits, &helpers);
 
     assert_eq!(site.copied(), vec![ProbeCandidate::Medium, ProbeCandidate::Wide]);
     assert_eq!(precompiled.kept, vec![0, 1, 2]);
@@ -89,15 +75,8 @@ fn retries_on_the_site_client_stop_at_the_ceiling() {
     let allowed = ProbeCandidate::ALL;
     let allowance = Duration::from_millis(150);
 
-    let precompiled = precompile(
-        &site,
-        allowed,
-        &[0, 1, 2, 3],
-        &(),
-        allowance,
-        Duration::ZERO,
-        &helpers,
-    );
+    let limits = compile_limits(allowance, Duration::ZERO);
+    let precompiled = precompile(&site, allowed, &[0, 1, 2, 3], &(), &limits, &helpers);
 
     assert_eq!(precompiled.kept, vec![0, 1]);
     assert_eq!(precompiled.skipped, vec![2, 3]);
@@ -113,15 +92,8 @@ fn a_slow_load_past_the_ceiling_skips_the_helper_candidates_after_it() {
     let allowed = ProbeCandidate::ALL;
     let allowance = Duration::from_millis(50);
 
-    let precompiled = precompile(
-        &site,
-        allowed,
-        &[0, 1, 2, 3],
-        &(),
-        allowance,
-        Duration::ZERO,
-        &helpers,
-    );
+    let limits = compile_limits(allowance, Duration::ZERO);
+    let precompiled = precompile(&site, allowed, &[0, 1, 2, 3], &(), &limits, &helpers);
 
     assert_eq!(site.copied().len(), 3);
     assert_eq!(precompiled.kept, vec![0, 1]);
@@ -136,15 +108,8 @@ fn a_candidate_that_fails_everywhere_is_dropped_with_the_site_clients_reason() {
     let helpers = cloned_helpers(&client);
     let allowed = ProbeCandidate::ALL;
 
-    let precompiled = precompile(
-        &site,
-        allowed,
-        &[0, 1, 2],
-        &(),
-        NO_CEILING,
-        Duration::ZERO,
-        &helpers,
-    );
+    let limits = compile_limits(NO_CEILING, Duration::ZERO);
+    let precompiled = precompile(&site, allowed, &[0, 1, 2], &(), &limits, &helpers);
     let reason = precompiled
         .reason_for(1)
         .expect("the panicking candidate was dropped");
@@ -161,15 +126,8 @@ fn candidates_failing_helpers_could_not_compile_are_compiled_on_the_site_client(
     let helpers = cloned_helpers(&client);
     let allowed = ProbeCandidate::ALL;
 
-    let precompiled = precompile(
-        &site,
-        allowed,
-        &[0, 1, 2, 3],
-        &(),
-        NO_CEILING,
-        Duration::ZERO,
-        &helpers,
-    );
+    let limits = compile_limits(NO_CEILING, Duration::ZERO);
+    let precompiled = precompile(&site, allowed, &[0, 1, 2, 3], &(), &limits, &helpers);
 
     assert_eq!(precompiled.kept, vec![0, 1, 2, 3]);
     assert!(precompiled.dropped.is_empty());
@@ -177,6 +135,22 @@ fn candidates_failing_helpers_could_not_compile_are_compiled_on_the_site_client(
     assert!(site.copied().is_empty());
     assert_eq!(site.launches().len(), 4);
     assert!(precompiled.helpers_failed);
+}
+
+#[test]
+fn helpers_stay_in_use_when_the_site_client_fails_their_candidates_too() {
+    let client = test_client();
+    let mut site = ProbeSite::new(&client);
+    site.panicking = vec![ProbeCandidate::Medium, ProbeCandidate::Wide, ProbeCandidate::Huge];
+    let helpers = cloned_helpers(&client);
+    let allowed = ProbeCandidate::ALL;
+
+    let limits = compile_limits(NO_CEILING, Duration::ZERO);
+    let precompiled = precompile(&site, allowed, &[0, 1, 2, 3], &(), &limits, &helpers);
+
+    assert_eq!(precompiled.kept, vec![0]);
+    assert_eq!(precompiled.dropped.len(), 3);
+    assert!(!precompiled.helpers_failed);
 }
 
 #[test]
@@ -205,15 +179,8 @@ fn with_the_compilation_cache_off_helpers_are_not_used() {
     let helpers = cloned_helpers(&client);
     let allowed = ProbeCandidate::ALL;
 
-    let precompiled = precompile(
-        &site,
-        allowed,
-        &[0, 1, 2],
-        &(),
-        NO_CEILING,
-        Duration::ZERO,
-        &helpers,
-    );
+    let limits = compile_limits(NO_CEILING, Duration::ZERO);
+    let precompiled = precompile(&site, allowed, &[0, 1, 2], &(), &limits, &helpers);
 
     assert_eq!(precompiled.kept, vec![0, 1, 2]);
     assert_eq!(precompiled.helpers, 0);
@@ -268,15 +235,8 @@ fn a_site_that_cannot_copy_itself_compiles_on_its_own_client_despite_helpers() {
     let outputs = site.scratch_outputs();
     let helpers = cloned_helpers(&client);
 
-    let precompiled = precompile(
-        &site,
-        SharedProbe::ALL,
-        &[0],
-        &outputs,
-        NO_CEILING,
-        Duration::ZERO,
-        &helpers,
-    );
+    let limits = compile_limits(NO_CEILING, Duration::ZERO);
+    let precompiled = precompile(&site, SharedProbe::ALL, &[0], &outputs, &limits, &helpers);
 
     assert_eq!(precompiled.kept, vec![0]);
     assert_eq!(precompiled.helpers, 0);
@@ -337,15 +297,8 @@ super::runtime::wgpu_only! {
         site.launch(allowed[0], &outputs);
         sync(client).expect("the baseline compiles");
 
-        let precompiled = precompile(
-            &site,
-            &allowed,
-            &indices,
-            &outputs,
-            NO_CEILING,
-            Duration::ZERO,
-            helper_clients,
-        );
+        let limits = compile_limits(NO_CEILING, Duration::ZERO);
+        let precompiled = precompile(&site, &allowed, &indices, &outputs, &limits, helper_clients);
 
         assert_eq!(precompiled.kept, indices.to_vec());
         assert_eq!(precompiled.helpers, 2);

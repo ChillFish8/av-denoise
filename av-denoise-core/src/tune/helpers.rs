@@ -35,7 +35,8 @@ impl CompileHelpers {
         }
     }
 
-    /// Whether every helper once gave up on failures in one stage, after which the set goes unused.
+    /// Whether the helpers failed candidates the tuned client then compiled, after which the set
+    /// goes unused.
     pub fn has_failed(&self) -> bool {
         self.failed.load(Ordering::Relaxed)
     }

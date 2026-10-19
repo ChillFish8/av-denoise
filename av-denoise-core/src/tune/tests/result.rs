@@ -1,5 +1,6 @@
 use crate::tune::{
     CandidateRecord,
+    CompileProgress,
     FidelityClass,
     PipelineProfile,
     ProfileRanking,
@@ -115,6 +116,8 @@ fn the_plan_holds_each_sites_choice() {
             record("32x8", FidelityClass::Exact, true, 1000),
         ],
         partial: false,
+        progress: CompileProgress::default(),
+        identity: String::new(),
     };
     result.sites.insert(window_key.clone(), window_ranking);
 
@@ -131,6 +134,8 @@ fn unknown_names_drop_their_key() {
     let known = SiteRanking {
         candidates: vec![record("32x8", FidelityClass::Exact, true, 1000)],
         partial: false,
+        progress: CompileProgress::default(),
+        identity: String::new(),
     };
     let unknown = SiteRanking {
         candidates: vec![
@@ -138,6 +143,8 @@ fn unknown_names_drop_their_key() {
             record("64x64", FidelityClass::Exact, false, 900),
         ],
         partial: false,
+        progress: CompileProgress::default(),
+        identity: String::new(),
     };
     result.sites.insert(window_key.clone(), known);
     result.sites.insert(accumulate_key.clone(), unknown);
@@ -157,6 +164,8 @@ fn a_newer_result_replaces_keys_it_holds_and_keeps_the_rest() {
     let old_ranking = SiteRanking {
         candidates: vec![baseline_record(1000)],
         partial: false,
+        progress: CompileProgress::default(),
+        identity: String::new(),
     };
     stored.sites.insert(window_key.clone(), old_ranking.clone());
     stored.sites.insert(collab_key.clone(), old_ranking);
@@ -165,6 +174,8 @@ fn a_newer_result_replaces_keys_it_holds_and_keeps_the_rest() {
     let new_ranking = SiteRanking {
         candidates: vec![baseline_record(500)],
         partial: false,
+        progress: CompileProgress::default(),
+        identity: String::new(),
     };
     newer.sites.insert(window_key.clone(), new_ranking.clone());
 
@@ -199,6 +210,8 @@ fn a_partial_ranking_is_not_settled_but_its_choice_runs() {
             record("32x8", FidelityClass::Exact, true, 1000),
         ],
         partial: true,
+        progress: CompileProgress::default(),
+        identity: String::new(),
     };
     result.sites.insert(window_key.clone(), ranking);
 
@@ -216,6 +229,8 @@ fn a_full_ranking_replaces_a_partial_one() {
     let partial = SiteRanking {
         candidates: vec![baseline_record(1000)],
         partial: true,
+        progress: CompileProgress::default(),
+        identity: String::new(),
     };
     stored.sites.insert(window_key.clone(), partial);
 
@@ -223,6 +238,8 @@ fn a_full_ranking_replaces_a_partial_one() {
     let full = SiteRanking {
         candidates: vec![baseline_record(900)],
         partial: false,
+        progress: CompileProgress::default(),
+        identity: String::new(),
     };
     newer.sites.insert(window_key.clone(), full.clone());
 
@@ -241,6 +258,8 @@ fn merging_keeps_the_newer_outcome_of_each_key() {
     let ranking = SiteRanking {
         candidates: vec![baseline_record(1000)],
         partial: false,
+        progress: CompileProgress::default(),
+        identity: String::new(),
     };
     let mut stored = TuneResult::default();
     stored.sites.insert(window_key.clone(), ranking.clone());
@@ -275,6 +294,7 @@ fn profile_ranking(baseline_ns: u64, f32_ns: u64) -> ProfileRanking {
                 blocks: 3,
             },
         ],
+        sites: Vec::new(),
     }
 }
 
@@ -310,4 +330,113 @@ fn a_configuration_is_complete_only_when_every_profile_key_is() {
     assert!(result.is_complete(&luma_only));
     assert!(!result.is_complete(&both));
     assert!(!result.is_complete(&missing));
+}
+
+#[test]
+fn a_partial_ranking_never_replaces_a_full_one() {
+    let window_key = key("nlm_window");
+    let mut stored = TuneResult::default();
+    let full = SiteRanking {
+        candidates: vec![baseline_record(1000)],
+        partial: false,
+        progress: CompileProgress::default(),
+        identity: String::new(),
+    };
+    stored.sites.insert(window_key.clone(), full.clone());
+
+    let mut newer = TuneResult::default();
+    let progress = CompileProgress { left: 3, total: 8 };
+    let partial = SiteRanking {
+        candidates: vec![baseline_record(900)],
+        partial: true,
+        progress,
+        identity: String::new(),
+    };
+    newer.sites.insert(window_key.clone(), partial);
+
+    stored.merge(newer);
+
+    assert_eq!(stored.sites[&window_key], full);
+    assert!(stored.is_settled(&window_key));
+}
+
+#[test]
+fn a_partial_ranking_replaces_an_older_partial_one() {
+    let window_key = key("nlm_window");
+    let mut stored = TuneResult::default();
+    let older_progress = CompileProgress { left: 5, total: 8 };
+    let older = SiteRanking {
+        candidates: vec![baseline_record(1000)],
+        partial: true,
+        progress: older_progress,
+        identity: String::new(),
+    };
+    stored.sites.insert(window_key.clone(), older);
+
+    let mut newer = TuneResult::default();
+    let newer_progress = CompileProgress { left: 2, total: 8 };
+    let partial = SiteRanking {
+        candidates: vec![baseline_record(900)],
+        partial: true,
+        progress: newer_progress,
+        identity: String::new(),
+    };
+    newer.sites.insert(window_key.clone(), partial.clone());
+
+    stored.merge(newer);
+
+    assert_eq!(stored.sites[&window_key], partial);
+}
+
+#[test]
+fn a_partial_ranking_that_timed_fewer_candidates_keeps_the_older_partial_one() {
+    let window_key = key("nlm_window");
+    let mut stored = TuneResult::default();
+    let baseline = baseline_record(1000);
+    let faster = record("32x16", FidelityClass::Exact, false, 800);
+    let older = SiteRanking {
+        candidates: vec![baseline, faster],
+        partial: true,
+        progress: CompileProgress::default(),
+        identity: String::new(),
+    };
+    stored.sites.insert(window_key.clone(), older.clone());
+
+    let mut newer = TuneResult::default();
+    let fewer = SiteRanking {
+        candidates: vec![baseline_record(900)],
+        partial: true,
+        progress: CompileProgress::default(),
+        identity: String::new(),
+    };
+    newer.sites.insert(window_key.clone(), fewer);
+
+    stored.merge(newer);
+
+    assert_eq!(stored.sites[&window_key], older);
+}
+
+#[test]
+fn a_complete_profile_stops_being_complete_once_one_of_its_sites_is_partial() {
+    let window_key = key("nlm_window");
+    let mut result = TuneResult::default();
+    let mut profile = profile_ranking(1000, 1000);
+    profile.sites = vec![window_key.clone()];
+    result.profiles.insert("luma".to_string(), profile);
+    let ranking = SiteRanking {
+        candidates: vec![baseline_record(1000)],
+        partial: false,
+        progress: CompileProgress::default(),
+        identity: String::new(),
+    };
+    result.sites.insert(window_key.clone(), ranking);
+    let profile_keys = ["luma".to_string()];
+
+    let complete_while_full = result.is_complete(&profile_keys);
+    let full = result.sites.get_mut(&window_key).expect("the key is ranked");
+    full.partial = true;
+    let complete_once_partial = result.is_complete(&profile_keys);
+
+    assert!(complete_while_full);
+    assert!(!complete_once_partial);
 }

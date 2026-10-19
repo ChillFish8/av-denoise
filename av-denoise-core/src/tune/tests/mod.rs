@@ -1,6 +1,7 @@
 mod accumulate;
 mod budget;
 mod collab;
+mod convergence;
 mod decide;
 mod device;
 mod engine;

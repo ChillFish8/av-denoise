@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use cubecl::prelude::*;
 
 use super::consts::FIRST_COMPILE_ESTIMATE;
-use super::helpers::{HelperFactory, HelperSource};
+use super::helpers::{HelperFactory, HelperSource, compilation_cache_enabled};
 use super::key::SiteKey;
 use super::plan::KernelPlan;
 use super::result::{SiteRanking, TuneResult, choose};
@@ -50,6 +50,15 @@ struct LedgerState {
     seen: BTreeMap<SiteKey, usize>,
     target: Option<Target>,
     compile: CompileState,
+    /// The candidates an earlier run compiled, by key, with the compile identity they were compiled for.
+    compiled_before: BTreeMap<SiteKey, Compiled>,
+}
+
+/// The candidates an earlier run compiled at one key.
+#[derive(Debug, Default)]
+struct Compiled {
+    identity: String,
+    names: BTreeSet<String>,
 }
 
 /// The time a pass spends compiling candidates, and its ceiling.
@@ -59,7 +68,7 @@ struct CompileState {
     by_key: BTreeMap<SiteKey, Duration>,
     /// No ceiling means compiling never runs out.
     ceiling: Option<Duration>,
-    /// The highest mean compile time per candidate of any stage this pass.
+    /// The highest mean time per cold compile of any stage this pass.
     slowest_mean: Option<Duration>,
 }
 
@@ -125,7 +134,7 @@ impl TuneLedger {
         self.helpers.clients::<R>()
     }
 
-    /// Stops using the compile helpers after every one of them failed in a stage.
+    /// Stops using the compile helpers after they failed candidates the tuned client then compiled.
     pub(crate) fn fail_compile_helpers(&self) {
         self.helpers.mark_failed();
     }
@@ -138,6 +147,43 @@ impl TuneLedger {
     pub fn seed(&self, plan: &KernelPlan) {
         let mut state = self.lock();
         state.plan.fill_from(plan);
+    }
+
+    /// Remembers, by key, every candidate `stored` ranks, since an earlier run compiled each one.
+    ///
+    /// A ranking stored without a compile identity is skipped.
+    pub fn seed_compiled(&self, stored: &TuneResult) {
+        let mut state = self.lock();
+
+        for (key, ranking) in &stored.sites {
+            if ranking.identity.is_empty() {
+                continue;
+            }
+
+            let names = ranking.candidates.iter().map(|record| record.name.clone());
+            let compiled = Compiled {
+                identity: ranking.identity.clone(),
+                names: names.collect(),
+            };
+            state.compiled_before.insert(key.clone(), compiled);
+        }
+    }
+
+    /// The names of the candidates at `key` an earlier run compiled for exactly `identity`.
+    ///
+    /// They are empty when the on-disk cache is off, since nothing then outlives a run.
+    pub(crate) fn compiled_before(&self, key: &SiteKey, identity: &str) -> BTreeSet<String> {
+        if !compilation_cache_enabled() {
+            return BTreeSet::new();
+        }
+
+        let state = self.lock();
+        let compiled = state.compiled_before.get(key);
+
+        match compiled {
+            Some(compiled) if compiled.identity == identity => compiled.names.clone(),
+            _ => BTreeSet::new(),
+        }
     }
 
     pub fn phase(&self) -> TunePhase {
@@ -242,15 +288,17 @@ impl TuneLedger {
         self.lock().compile = compile;
     }
 
-    /// Adds `spent`, the time one stage took to compile `compiled` candidates, to the time spent
-    /// compiling the candidates of `key`.
-    pub(crate) fn add_compile(&self, key: &SiteKey, spent: Duration, compiled: usize) {
+    /// Adds `spent`, the time one stage took, to the time spent compiling the candidates of `key`.
+    ///
+    /// `cold` counts the stage's candidates that were compiled rather than loaded from an earlier
+    /// run, and `cold_spent` is the part of `spent` they took. Only those set the compile estimate.
+    pub(crate) fn add_compile(&self, key: &SiteKey, spent: Duration, cold_spent: Duration, cold: usize) {
         let mut state = self.lock();
         state.compile.total += spent;
 
-        if compiled > 0 {
-            let count = u32::try_from(compiled).unwrap_or(u32::MAX);
-            let mean = spent / count;
+        if cold > 0 {
+            let count = u32::try_from(cold).unwrap_or(u32::MAX);
+            let mean = cold_spent / count;
             let slowest = state
                 .compile
                 .slowest_mean
@@ -273,9 +321,9 @@ impl TuneLedger {
         self.lock().compile.by_key.clone()
     }
 
-    /// The compile time one more candidate is expected to take.
+    /// The compile time one more cold candidate is expected to take.
     ///
-    /// It is the highest mean per candidate of any stage this pass, and never less than
+    /// It is the highest mean per cold compile of any stage this pass, and never less than
     /// [FIRST_COMPILE_ESTIMATE](crate::tune::FIRST_COMPILE_ESTIMATE).
     pub fn compile_estimate(&self) -> Duration {
         let state = self.lock();

@@ -14,14 +14,16 @@ use cubecl::wgpu::WgpuDevice;
 
 use super::describe::find_adapter;
 
+/// Compile helper sets by adapter, `None` where a set could not be made.
+type HelperSets = HashMap<String, Option<Arc<CompileHelpers>>>;
+
 /// The compile helpers made so far in this process, one set per adapter.
 ///
 /// CubeCL never frees a client, so every ledger on an adapter shares one set instead of making its
-/// own. A set whose helpers all failed in a stage is replaced by a new one on the next request, and the
-/// replaced set's devices stay alive until the process exits. A set that could not be made is
-/// remembered as `None` and never tried again in this process.
-static SHARED_HELPERS: LazyLock<Mutex<HashMap<String, Option<Arc<CompileHelpers>>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// own. A set marked failed is replaced by a new one on the next request, and the replaced set's
+/// devices stay alive until the process exits. A set that could not be made is remembered as `None`
+/// and never tried again in this process.
+static SHARED_HELPERS: LazyLock<Mutex<HelperSets>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Gives `ledger` a factory for Vulkan clients on `device`'s adapter that compile tuner candidates
 /// in parallel.
@@ -54,18 +56,28 @@ fn shared_helpers(device: &WgpuDevice) -> Option<Arc<CompileHelpers>> {
         "{}|{}|{:#06x}:{:#06x}",
         info.device_pci_bus_id, info.name, info.vendor, info.device
     );
-    let mut shared = SHARED_HELPERS.lock().unwrap_or_else(PoisonError::into_inner);
+    let make = || make_helpers(&instance, &adapter);
+
+    shared_set(&SHARED_HELPERS, adapter_key, make, CompileHelpers::has_failed)
+}
+
+/// The set `shared` holds for `adapter_key`, made with `make` when there is none yet or the one
+/// there `has_failed`.
+fn shared_set<T>(
+    shared: &Mutex<HashMap<String, Option<Arc<T>>>>,
+    adapter_key: String,
+    make: impl FnOnce() -> Option<Arc<T>>,
+    has_failed: impl Fn(&T) -> bool,
+) -> Option<Arc<T>> {
+    let mut shared = shared.lock().unwrap_or_else(PoisonError::into_inner);
     let previous = shared.get(&adapter_key);
-    let failed = matches!(previous, Some(Some(helpers)) if helpers.has_failed());
+    let failed = matches!(previous, Some(Some(helpers)) if has_failed(helpers));
     if failed {
         tracing::debug!("the compile helpers failed before, so a new set replaces them");
         shared.remove(&adapter_key);
     }
 
-    let helpers = shared
-        .entry(adapter_key)
-        .or_insert_with(|| make_helpers(&instance, &adapter));
-
+    let helpers = shared.entry(adapter_key).or_insert_with(make);
     helpers.clone()
 }
 
@@ -101,4 +113,91 @@ fn helpers_turned_off() -> bool {
 #[cfg(not(test))]
 fn helpers_turned_off() -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    const ADAPTER: &str = "adapter";
+
+    /// A stand-in helper set that can be marked failed.
+    #[derive(Default)]
+    struct FakeSet {
+        failed: AtomicBool,
+    }
+
+    type FakeSets = HashMap<String, Option<Arc<FakeSet>>>;
+
+    fn fake_set() -> Option<Arc<FakeSet>> {
+        Some(Arc::default())
+    }
+
+    fn fake_failed(set: &FakeSet) -> bool {
+        set.failed.load(Ordering::Relaxed)
+    }
+
+    #[test]
+    fn a_set_is_made_once_and_shared() {
+        let shared = Mutex::new(FakeSets::new());
+        let made = Cell::new(0);
+        let make = || {
+            made.set(made.get() + 1);
+            fake_set()
+        };
+
+        let first = shared_set(&shared, ADAPTER.to_string(), make, fake_failed);
+        let second = shared_set(&shared, ADAPTER.to_string(), make, fake_failed);
+        let first = first.expect("the first request makes a set");
+        let second = second.expect("the second request finds it");
+
+        assert_eq!(made.get(), 1);
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn a_set_that_could_not_be_made_is_never_tried_again() {
+        let shared = Mutex::new(FakeSets::new());
+        let made = Cell::new(0);
+        let make = || {
+            made.set(made.get() + 1);
+            None
+        };
+
+        let first = shared_set(&shared, ADAPTER.to_string(), make, fake_failed);
+        let second = shared_set(&shared, ADAPTER.to_string(), make, fake_failed);
+
+        assert!(first.is_none());
+        assert!(second.is_none());
+        assert_eq!(made.get(), 1);
+    }
+
+    #[test]
+    fn a_failed_set_is_replaced_by_a_new_one() {
+        let shared = Mutex::new(FakeSets::new());
+        let first = shared_set(&shared, ADAPTER.to_string(), fake_set, fake_failed);
+        let first = first.expect("the first request makes a set");
+        first.failed.store(true, Ordering::Relaxed);
+
+        let second = shared_set(&shared, ADAPTER.to_string(), fake_set, fake_failed);
+        let second = second.expect("the failed set is replaced");
+
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(!fake_failed(&second));
+    }
+
+    #[test]
+    fn each_adapter_gets_a_set_of_its_own() {
+        let shared = Mutex::new(FakeSets::new());
+
+        let first = shared_set(&shared, ADAPTER.to_string(), fake_set, fake_failed);
+        let other = shared_set(&shared, "other".to_string(), fake_set, fake_failed);
+        let first = first.expect("the first adapter has a set");
+        let other = other.expect("the other adapter has a set");
+
+        assert!(!Arc::ptr_eq(&first, &other));
+    }
 }

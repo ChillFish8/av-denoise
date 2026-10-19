@@ -1,4 +1,5 @@
 use std::cmp::Reverse;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use super::consts::{
@@ -17,7 +18,8 @@ use super::consts::{
 };
 use super::decide::median;
 use super::key::SiteKey;
-use super::result::beats_baseline_profile;
+use super::ledger::CensusEntry;
+use super::result::{TuneResult, beats_baseline_profile};
 
 /// How a run asks for its tuning budget.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -110,6 +112,39 @@ pub fn tuning_order(mut values: Vec<KeyValue>, frame_time: Duration, full: bool)
     values.retain(|value| full || value.per_frame.as_secs_f64() >= threshold);
     values.sort_by_key(|value| Reverse(value.per_frame));
     values
+}
+
+/// Each census key with its cost per frame and candidate count.
+pub fn key_values(census: &BTreeMap<SiteKey, CensusEntry>) -> Vec<KeyValue> {
+    census
+        .iter()
+        .map(|(key, entry)| KeyValue {
+            key: key.clone(),
+            per_frame: entry.total,
+            candidates: entry.candidates,
+        })
+        .collect()
+}
+
+/// The census keys not yet settled in `known`, most valuable first.
+///
+/// Keys with a partial ranking come after every unranked key.
+pub fn pending_keys(
+    census: &BTreeMap<SiteKey, CensusEntry>,
+    known: &TuneResult,
+    frame_time: Duration,
+    full: bool,
+) -> Vec<KeyValue> {
+    let mut values = key_values(census);
+    values.retain(|value| !known.is_settled(&value.key));
+
+    let (partial, unranked): (Vec<KeyValue>, Vec<KeyValue>) =
+        values.into_iter().partition(|value| known.is_partial(&value.key));
+    let mut order = tuning_order(unranked, frame_time, full);
+    let retries = tuning_order(partial, frame_time, full);
+    order.extend(retries);
+
+    order
 }
 
 /// Where the warm-up stands.

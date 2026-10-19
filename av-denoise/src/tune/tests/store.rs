@@ -1,5 +1,6 @@
 use av_denoise_core::tune::{
     CandidateRecord,
+    CompileProgress,
     FidelityClass,
     PipelineProfile,
     ProfileRanking,
@@ -43,7 +44,10 @@ fn sample_result() -> TuneResult {
             },
         ],
         partial: false,
+        progress: CompileProgress::default(),
+        identity: "nlm_window|exact 1920x1080".to_string(),
     };
+    let profile_sites = vec![key.clone()];
     result.sites.insert(key, ranking);
 
     let profiles = ProfileRanking {
@@ -53,6 +57,7 @@ fn sample_result() -> TuneResult {
             median_frame_ns: 30_000_000,
             blocks: 3,
         }],
+        sites: profile_sites,
     };
     result.profiles.insert("luma".to_string(), profiles);
     result
@@ -122,6 +127,61 @@ fn partial_rankings_round_trip() {
 
     assert!(loaded.sites.values().all(|ranking| ranking.partial));
     assert_eq!(loaded, result);
+}
+
+#[test]
+fn the_candidates_a_partial_key_has_left_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TuneStore::at(dir.path());
+    let device = identity();
+    let mut result = sample_result();
+    for ranking in result.sites.values_mut() {
+        ranking.partial = true;
+        ranking.progress = CompileProgress { left: 9, total: 26 };
+    }
+
+    store.save(&device, &result).expect("the save succeeds");
+    let loaded = store.load(&device);
+
+    assert_eq!(loaded, result);
+}
+
+#[test]
+fn a_file_without_progress_or_profile_sites_still_loads() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TuneStore::at(dir.path());
+    let device = identity();
+    let mut result = sample_result();
+    for ranking in result.sites.values_mut() {
+        ranking.partial = true;
+        ranking.progress = CompileProgress { left: 9, total: 26 };
+    }
+
+    let path = store.save(&device, &result).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut document: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let file = document.as_object_mut().unwrap();
+    file.remove("progress");
+    file.remove("identities");
+    let profiles = file["profiles"].as_object_mut().unwrap();
+    for profile in profiles.values_mut() {
+        profile.as_object_mut().unwrap().remove("sites");
+    }
+
+    let stripped = serde_json::to_string_pretty(&document).unwrap();
+    std::fs::write(&path, stripped).unwrap();
+
+    let loaded = store.load(&device);
+
+    assert!(loaded.sites.values().all(|ranking| ranking.partial));
+    assert!(
+        loaded
+            .sites
+            .values()
+            .all(|ranking| ranking.progress == CompileProgress::default())
+    );
+    assert!(loaded.sites.values().all(|ranking| ranking.identity.is_empty()));
+    assert!(loaded.profiles.values().all(|profile| profile.sites.is_empty()));
 }
 
 #[test]
