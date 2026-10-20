@@ -22,6 +22,7 @@ use self::tile::load_centre_tile;
 use self::trajectory::trajectory_search;
 pub use self::variant::{
     Centre,
+    ChannelView,
     CollabVariant,
     GROUP_LANES,
     NeighbourWalk,
@@ -118,10 +119,11 @@ const _: () = assert!(
 /// luma dominates and one weight per group keeps aggregation simple. `weight_scale` maps it into
 /// the fixed-point band before the scatter.
 ///
-/// `ring` holds frames in ring-slot order. `centre_slot` is the slot the pass is centred on.
-/// `neighbour_slots` maps a packed neighbour index to its slot. `accum` and `wsum` hold one region
-/// per slot, so a neighbour-frame member scatters into its own frame's region. `accum_scale` is
-/// the fixed-point scale of that scatter. `sigma` holds one value per stored channel.
+/// `ring` holds frames in ring-slot order. `ring_scalar` is the same buffer bound as single floats.
+/// `centre_slot` is the slot the pass is centred on. `neighbour_slots` maps a packed neighbour
+/// index to its slot. `accum` and `wsum` hold one region per slot, so a neighbour-frame member
+/// scatters into its own frame's region. `accum_scale` is the fixed-point scale of that scatter.
+/// `sigma` holds one value per stored channel.
 /// `noise_curve` holds `NOISE_CURVE_BINS` ratios and is read only when `curve_valid` is not 0.
 /// `strength_map` holds `map_cols * map_rows` row-major multipliers laid out by
 /// [strength_map_dims](crate::collab::geometry::strength_map_dims). `kaiser` holds
@@ -142,6 +144,8 @@ const _: () = assert!(
 /// centre search windows into shared memory once and reads every centre candidate from it, in the
 /// same order as the ring.
 /// `batched` scores 8 centre candidates per round of shuffles and inserts them in walk order.
+/// [ChannelView::Scalar](crate::collab::kernels::fused::ChannelView::Scalar) gathers every member
+/// channel after the first from `ring_scalar`, while channel 0 keeps the vector load.
 ///
 /// `search_ring` is an f16 copy of `ring`, with `S` as `half::f16`, that the candidate distances
 /// read when `f16_search` is set. The reference columns and the member stack always come from
@@ -160,6 +164,7 @@ const _: () = assert!(
 )]
 pub fn collab_fused<S: Float, N: Size>(
     ring: &Array<Vector<f32, N>>,
+    ring_scalar: &Array<f32>,
     search_ring: &Array<Vector<S, N>>,
     mv_field: &Array<i32>,
     confidence: &Array<f32>,
@@ -209,6 +214,7 @@ pub fn collab_fused<S: Float, N: Size>(
     let groups = comptime!(variant.groups);
     let walk = comptime!(variant.walk);
     let neighbour_walk = comptime!(variant.neighbour);
+    let channel_view = comptime!(variant.channel_view);
 
     let max_x = comptime!(width - PATCH_SIZE);
     let max_y = comptime!(height - PATCH_SIZE);
@@ -458,10 +464,20 @@ pub fn collab_fused<S: Float, N: Size>(
             let member_y = (packed >> 13u32) & 0x1FFFu32;
             let src_slot = member_slot[m as usize];
             member_variance[m as usize] = base_sig2;
+
+            // Under the scalar view, channels after the first read their own value. Read from
+            // `ring`, they load with channel 0's pixels and stay live through its transforms.
             #[unroll]
             for r in 0..PATCH_SIZE {
-                let pixel = read_line(ring, member_x + sub, member_y + r, src_slot, width, height);
-                stack[(m * PATCH_SIZE + r) as usize] = pixel[c as usize];
+                let stack_index = (m * PATCH_SIZE + r) as usize;
+                if comptime!(c == 0u32 || channel_view == ChannelView::Lines) {
+                    let pixel = read_line(ring, member_x + sub, member_y + r, src_slot, width, height);
+                    stack[stack_index] = pixel[c as usize];
+                } else {
+                    let line_index = (src_slot * height + member_y + r) * width + member_x + sub;
+                    let value_index = line_index * stored_ch + c;
+                    stack[stack_index] = ring_scalar[value_index as usize];
+                }
             }
         }
 

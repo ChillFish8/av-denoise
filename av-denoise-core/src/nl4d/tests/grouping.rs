@@ -148,12 +148,14 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
     let stored_ch = 1usize;
 
     unsafe {
+        let ring_scalar = ArrayArg::from_raw_parts(ring_buf.clone(), fixture.ring.len());
         collab_fused::launch_unchecked::<f32, R>(
             &client,
             grid,
             dim,
             stored_ch,
             ArrayArg::from_raw_parts(ring_buf.clone(), fixture.ring.len()),
+            ring_scalar,
             ArrayArg::from_raw_parts(ring_buf, stored_ch),
             ArrayArg::from_raw_parts(mv_buf, fixture.mv_field.len()),
             ArrayArg::from_raw_parts(conf_buf, fixture.confidence.len()),

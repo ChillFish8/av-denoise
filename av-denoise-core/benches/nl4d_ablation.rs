@@ -284,12 +284,14 @@ impl<R: Runtime> Rig<R> {
         let frames_per_volume = grid_frames(RADIUS);
 
         unsafe {
+            let ring_scalar = ArrayArg::from_raw_parts(self.ring.clone(), self.ring_len);
             collab_fused::launch_unchecked::<S, R>(
                 &self.client,
                 CubeCount::new_2d(cubes_x, refs_y),
                 cube_dim,
                 geometry.stored_channels as usize,
                 ArrayArg::from_raw_parts(self.ring.clone(), self.ring_len),
+                ring_scalar,
                 ArrayArg::from_raw_parts(search_ring.clone(), search_len),
                 ArrayArg::from_raw_parts(self.mv_field.clone(), self.mv_len),
                 ArrayArg::from_raw_parts(self.confidence.clone(), self.conf_len),

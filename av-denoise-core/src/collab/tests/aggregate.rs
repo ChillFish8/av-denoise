@@ -299,12 +299,15 @@ fn run_scatter_stage_windowed(
             1u32,
             zero_grid * zero_dim,
         );
+
+        let ring_scalar = ArrayArg::from_raw_parts(input.clone(), pixels);
         collab_fused::launch_unchecked::<f32, R>(
             &client,
             fused_grid,
             fused_dim,
             stored_ch,
             ArrayArg::from_raw_parts(input.clone(), pixels),
+            ring_scalar,
             ArrayArg::from_raw_parts(input.clone(), stored_ch),
             ArrayArg::from_raw_parts(mv_dummy, 2),
             ArrayArg::from_raw_parts(conf_dummy, 1),

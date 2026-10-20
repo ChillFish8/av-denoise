@@ -446,14 +446,17 @@ pub(super) fn run_fused_variant(setup: &Setup, variant: CollabVariant) -> Aggreg
     read_back(handles, setup)
 }
 
-/// Checks each of `variants` against a recorded digest.
+/// Checks each of `variants` that builds a kernel of its own on `setup` against a recorded digest.
 pub(super) fn assert_listed_variants_match_recorded(
     label: &str,
     setup: &Setup,
     want: &Digest,
     variants: &[CollabVariant],
 ) {
-    for &variant in variants {
+    let channels = setup.channel_mode.count();
+    let distinct = variants.iter().filter(|variant| variant.distinct_for(channels));
+
+    for &variant in distinct {
         let got = run_fused_variant(setup, variant);
         let variant_label = format!("{label} {}", variant.name());
         assert_matches_recorded(&variant_label, &got, want);
@@ -492,12 +495,14 @@ fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle,
     let pooled_ratio = setup.pooled.unwrap_or(0.0);
 
     unsafe {
+        let ring_scalar = ArrayArg::from_raw_parts(handles.ring.clone(), setup.ring.len());
         collab_fused::launch_unchecked::<S, R>(
             &handles.client,
             grid,
             dim,
             stored_channels as usize,
             ArrayArg::from_raw_parts(handles.ring.clone(), setup.ring.len()),
+            ring_scalar,
             ArrayArg::from_raw_parts(search_ring, setup.ring.len()),
             ArrayArg::from_raw_parts(handles.mv_field.clone(), setup.mv_field.len()),
             ArrayArg::from_raw_parts(handles.confidence.clone(), setup.confidence.len()),
