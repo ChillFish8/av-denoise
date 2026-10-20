@@ -7,15 +7,7 @@ use cubecl::server::Handle;
 use super::COLLAB_FUSED;
 use crate::collab::PATCH_SIZE;
 use crate::collab::geometry::{BASELINE_GROUPS, fused_cubes_x};
-use crate::collab::kernels::fused::{
-    Centre,
-    ChannelView,
-    CollabVariant,
-    GROUP_LANES,
-    NeighbourWalk,
-    Walk,
-    collab_fused,
-};
+use crate::collab::kernels::fused::{Centre, CollabVariant, GROUP_LANES, NeighbourWalk, Walk, collab_fused};
 use crate::nlmeans::NOISE_CURVE_BINS;
 use crate::tune::fidelity::{CompareResult, Fidelity, diff_integers, diff_plane};
 use crate::tune::gpu::{bind, read_f32, read_i32, zero_words, zeroed_words};
@@ -37,9 +29,6 @@ const BATCHED_OPTIONS: [bool; 2] = [false, true];
 
 /// Neighbour walks, the row-major baseline first.
 const NEIGHBOUR_OPTIONS: [NeighbourWalk; 2] = [NeighbourWalk::Rows, NeighbourWalk::Sliding];
-
-/// Member channel views, the line baseline first.
-const CHANNEL_VIEW_OPTIONS: [ChannelView; 2] = [ChannelView::Lines, ChannelView::Scalar];
 
 /// Whether a combination of dimensions is a variant the kernel builds.
 ///
@@ -70,13 +59,12 @@ const fn count_variants() -> usize {
         centre_index += 1;
     }
 
-    let searches = count * GROUP_OPTIONS.len() * WALK_OPTIONS.len() * NEIGHBOUR_OPTIONS.len();
-    searches * CHANNEL_VIEW_OPTIONS.len()
+    count * GROUP_OPTIONS.len() * WALK_OPTIONS.len() * NEIGHBOUR_OPTIONS.len()
 }
 
 const VARIANT_COUNT: usize = count_variants();
 
-/// Every listed variant the kernel builds, the default baseline first, with the channel view varying
+/// Every listed variant the kernel builds, the default baseline first, with the neighbour walk varying
 /// fastest.
 const VARIANTS: [CollabVariant; VARIANT_COUNT] = listed_variants();
 
@@ -86,8 +74,7 @@ const _: () = assert!(
         && VARIANTS[0].walk as u8 == CollabVariant::BASELINE.walk as u8
         && VARIANTS[0].centre as u8 == CollabVariant::BASELINE.centre as u8
         && VARIANTS[0].batched == CollabVariant::BASELINE.batched
-        && VARIANTS[0].neighbour as u8 == CollabVariant::BASELINE.neighbour as u8
-        && VARIANTS[0].channel_view as u8 == CollabVariant::BASELINE.channel_view as u8,
+        && VARIANTS[0].neighbour as u8 == CollabVariant::BASELINE.neighbour as u8,
     "the first listed collab variant must be CollabVariant::BASELINE"
 );
 
@@ -125,21 +112,14 @@ const fn listed_variants() -> [CollabVariant; VARIANT_COUNT] {
                         let mut neighbour_index = 0;
 
                         while neighbour_index < NEIGHBOUR_OPTIONS.len() {
-                            let mut view_index = 0;
-
-                            while view_index < CHANNEL_VIEW_OPTIONS.len() {
-                                variants[next] = CollabVariant {
-                                    groups: GROUP_OPTIONS[group_index],
-                                    walk: WALK_OPTIONS[walk_index],
-                                    centre,
-                                    batched,
-                                    neighbour: NEIGHBOUR_OPTIONS[neighbour_index],
-                                    channel_view: CHANNEL_VIEW_OPTIONS[view_index],
-                                };
-                                next += 1;
-                                view_index += 1;
-                            }
-
+                            variants[next] = CollabVariant {
+                                groups: GROUP_OPTIONS[group_index],
+                                walk: WALK_OPTIONS[walk_index],
+                                centre,
+                                batched,
+                                neighbour: NEIGHBOUR_OPTIONS[neighbour_index],
+                            };
+                            next += 1;
                             neighbour_index += 1;
                         }
                     }
@@ -159,18 +139,14 @@ const fn listed_variants() -> [CollabVariant; VARIANT_COUNT] {
     variants
 }
 
-/// `groups<g>_<walk>` with the centre's suffix, `_batched`, the neighbour walk's suffix and the
-/// channel view's suffix where they apply, for example `groups8_uniform_tiled_batched_nslide_scalar`.
+/// `groups<g>_<walk>` with the centre's suffix, `_batched` and the neighbour walk's suffix where they
+/// apply, for example `groups8_uniform_tiled_batched_nslide`.
 fn variant_name(variant: CollabVariant) -> String {
     let walk = variant.walk.name();
     let centre = variant.centre.name_suffix();
     let batched = if variant.batched { "_batched" } else { "" };
     let neighbour = variant.neighbour.name_suffix();
-    let view = variant.channel_view.name_suffix();
-    format!(
-        "groups{}_{walk}{centre}{batched}{neighbour}{view}",
-        variant.groups
-    )
+    format!("groups{}_{walk}{centre}{batched}{neighbour}", variant.groups)
 }
 
 impl SiteCandidate for CollabVariant {
@@ -449,13 +425,9 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
         CollabVariant::baseline_for(self.shape.uniform_walk_only)
     }
 
-    /// A single-channel shape drops the scalar view, which would build the line view's kernel again.
     fn legal(&self, candidate: CollabVariant, _limits: &DeviceLimits, legality: &Legality) -> bool {
         let uniform_only = self.shape.uniform_walk_only || legality.uniform_walk_only;
-        let walk_runs = candidate.runs_where(uniform_only);
-        let distinct = candidate.distinct_for(self.shape.channels);
-
-        walk_runs && distinct
+        candidate.runs_where(uniform_only)
     }
 }
 

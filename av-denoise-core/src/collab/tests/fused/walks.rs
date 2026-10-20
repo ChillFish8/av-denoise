@@ -22,10 +22,8 @@ fn assert_listed_variants_agree(label: &str, setup: &Setup, variants: &[CollabVa
         "{label}: the baseline aggregated nothing, so agreeing proves nothing"
     );
 
-    let channels = setup.channel_mode.count();
-
     for &variant in variants {
-        if variant == CollabVariant::BASELINE || !variant.distinct_for(channels) {
+        if variant == CollabVariant::BASELINE {
             continue;
         }
 
@@ -272,19 +270,13 @@ fn f16_wide_storage_case() -> Case {
 }
 
 variant_chunk_tests! {
-    assert_case_agrees(f16_wide_storage_case()), 12 chunks,
+    assert_case_agrees(f16_wide_storage_case()), 6 chunks,
     [
-        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_first_twelfth => 0,
-        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_second_twelfth => 1,
-        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_third_twelfth => 2,
-        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_fourth_twelfth => 3,
-        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_fifth_twelfth => 4,
-        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_sixth_twelfth => 5,
-        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_seventh_twelfth => 6,
-        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_eighth_twelfth => 7,
-        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_ninth_twelfth => 8,
-        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_tenth_twelfth => 9,
-        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_eleventh_twelfth => 10,
-        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_twelfth_twelfth => 11,
+        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_first_sixth => 0,
+        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_second_sixth => 1,
+        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_third_sixth => 2,
+        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_fourth_sixth => 3,
+        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_fifth_sixth => 4,
+        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_sixth_sixth => 5,
     ]
 }

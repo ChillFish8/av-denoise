@@ -31,7 +31,6 @@ pub use self::window::{
 };
 pub use crate::collab::kernels::fused::{
     Centre,
-    ChannelView,
     CollabVariant,
     NeighbourWalk,
     Walk,

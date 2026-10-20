@@ -71,26 +71,6 @@ impl NeighbourWalk {
     }
 }
 
-/// How the member stack reads the channels after the first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ChannelView {
-    /// Every channel comes from the one vector load of each pixel.
-    Lines,
-    /// Channels after the first read their own value from the ring bound as single floats, so they
-    /// do not stay live through channel 0's transforms.
-    Scalar,
-}
-
-impl ChannelView {
-    /// The channel view's part of a variant's stored name, empty for the line baseline.
-    pub fn name_suffix(self) -> &'static str {
-        match self {
-            ChannelView::Lines => "",
-            ChannelView::Scalar => "_scalar",
-        }
-    }
-}
-
 /// Width in pixels of the centre tile for `groups` references `STEP` apart.
 pub fn tile_width(groups: u32, spatial_radius: u32) -> u32 {
     (groups - 1) * STEP + 2 * spatial_radius + PATCH_SIZE
@@ -115,8 +95,6 @@ pub struct CollabVariant {
     pub batched: bool,
     /// How the neighbour search walks each refine rectangle.
     pub neighbour: NeighbourWalk,
-    /// How the member stack reads the channels after the first.
-    pub channel_view: ChannelView,
 }
 
 impl CollabVariant {
@@ -127,7 +105,6 @@ impl CollabVariant {
         centre: Centre::Global,
         batched: false,
         neighbour: NeighbourWalk::Rows,
-        channel_view: ChannelView::Lines,
     };
 
     /// The untuned variant, with the uniform walk where `uniform_only` is set.
@@ -151,13 +128,6 @@ impl CollabVariant {
     /// Whether this variant can run on a runtime where `uniform_only` is set.
     pub fn runs_where(self, uniform_only: bool) -> bool {
         !uniform_only || self.walk == Walk::Uniform
-    }
-
-    /// Whether this variant builds a kernel of its own on a plane of `channels` channels.
-    ///
-    /// With one channel the scalar view has nothing to read, so it builds the line view's kernel.
-    pub fn distinct_for(self, channels: u32) -> bool {
-        channels > 1 || self.channel_view == ChannelView::Lines
     }
 
     /// Threads in one cube.

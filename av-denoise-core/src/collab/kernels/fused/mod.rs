@@ -22,7 +22,6 @@ use self::tile::load_centre_tile;
 use self::trajectory::trajectory_search;
 pub use self::variant::{
     Centre,
-    ChannelView,
     CollabVariant,
     GROUP_LANES,
     NeighbourWalk,
@@ -144,13 +143,12 @@ const _: () = assert!(
 /// centre search windows into shared memory once and reads every centre candidate from it, in the
 /// same order as the ring.
 /// `batched` scores 8 centre candidates per round of shuffles and inserts them in walk order.
-/// [ChannelView::Scalar](crate::collab::kernels::fused::ChannelView::Scalar) gathers every member
-/// channel after the first from `ring_scalar`, while channel 0 keeps the vector load.
 ///
 /// `search_ring` is an f16 copy of `ring`, with `S` as `half::f16`, that the candidate distances
-/// read when `f16_search` is set. The reference columns and the member stack always come from
-/// `ring`. With `f16_search` unset `search_ring` is never read and can be the f32 `ring`, which
-/// keeps every f16 type out of the kernel.
+/// read when `f16_search` is set. The reference columns always come from `ring`, and the member
+/// stack reads each value as a single float from `ring_scalar`. With `f16_search` unset
+/// `search_ring` is never read and can be the f32 `ring`, which keeps every f16 type out of the
+/// kernel.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
@@ -214,7 +212,6 @@ pub fn collab_fused<S: Float, N: Size>(
     let groups = comptime!(variant.groups);
     let walk = comptime!(variant.walk);
     let neighbour_walk = comptime!(variant.neighbour);
-    let channel_view = comptime!(variant.channel_view);
 
     let max_x = comptime!(width - PATCH_SIZE);
     let max_y = comptime!(height - PATCH_SIZE);
@@ -448,7 +445,8 @@ pub fn collab_fused<S: Float, N: Size>(
     // Computed from channel 0 and reused by every later channel's scatter.
     let mut scaled_weight = 0.0f32;
 
-    #[unroll]
+    // The channel loop runs at runtime, which keeps one copy of the filter in the kernel. Every
+    // loop inside it unrolls, and its comptime trip count keeps every lane on every barrier.
     for c in 0..channels {
         let sigma_c = sigma[c as usize];
         let base_sig2 = sigma_c * sigma_c;
@@ -465,19 +463,12 @@ pub fn collab_fused<S: Float, N: Size>(
             let src_slot = member_slot[m as usize];
             member_variance[m as usize] = base_sig2;
 
-            // Under the scalar view, channels after the first read their own value. Read from
-            // `ring`, they load with channel 0's pixels and stay live through its transforms.
+            // Each value reads as a single float, so the runtime channel indexes it directly.
             #[unroll]
             for r in 0..PATCH_SIZE {
-                let stack_index = (m * PATCH_SIZE + r) as usize;
-                if comptime!(c == 0u32 || channel_view == ChannelView::Lines) {
-                    let pixel = read_line(ring, member_x + sub, member_y + r, src_slot, width, height);
-                    stack[stack_index] = pixel[c as usize];
-                } else {
-                    let line_index = (src_slot * height + member_y + r) * width + member_x + sub;
-                    let value_index = line_index * stored_ch + c;
-                    stack[stack_index] = ring_scalar[value_index as usize];
-                }
+                let line_index = (src_slot * height + member_y + r) * width + member_x + sub;
+                let value_index = line_index * stored_ch + c;
+                stack[(m * PATCH_SIZE + r) as usize] = ring_scalar[value_index as usize];
             }
         }
 
@@ -521,11 +512,7 @@ pub fn collab_fused<S: Float, N: Size>(
             stack_haar_fwd(&mut stack, k_use);
         }
 
-        let channel_lambda = if comptime!(c == 0u32) {
-            luma_lambda
-        } else {
-            other_lambda
-        };
+        let channel_lambda = select(c == 0u32, luma_lambda, other_lambda);
         let mut retained_v = 0.0f32;
         if comptime!(pooled) {
             let threshold = channel_lambda * pool_ratio;
@@ -564,15 +551,16 @@ pub fn collab_fused<S: Float, N: Size>(
             }
         }
 
-        // The scatter needs the weight, so the reduction runs before the inverse transforms.
-        if comptime!(c == 0u32) {
-            let sum = plane_ssd_reduce8(retained_v);
-            let weight = safe_reciprocal(sum, RECIPROCAL_FLOOR);
-            if live && sub == 0u32 {
-                group_weight[ref_idx as usize] = weight;
-            }
-            scaled_weight = weight * weight_scale;
+        // The scatter needs the weight, so the reduction runs before the inverse transforms. It
+        // runs for every channel so every lane reaches its shuffles, and only channel 0 keeps it.
+        let sum = plane_ssd_reduce8(retained_v);
+        let weight = safe_reciprocal(sum, RECIPROCAL_FLOOR);
+        let first_channel = c == 0u32;
+        if live && sub == 0u32 && first_channel {
+            group_weight[ref_idx as usize] = weight;
         }
+
+        scaled_weight = select(first_channel, weight * weight_scale, scaled_weight);
 
         // The inverse runs in the opposite order, which leaves the lane holding a column again so
         // the scatter is coalesced.
@@ -622,7 +610,7 @@ pub fn collab_fused<S: Float, N: Size>(
                         member_x,
                         member_y,
                         r * PATCH_SIZE + sub,
-                        comptime!(c == 0u32),
+                        first_channel,
                         c,
                         width,
                         stored_ch,

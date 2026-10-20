@@ -446,17 +446,14 @@ pub(super) fn run_fused_variant(setup: &Setup, variant: CollabVariant) -> Aggreg
     read_back(handles, setup)
 }
 
-/// Checks each of `variants` that builds a kernel of its own on `setup` against a recorded digest.
+/// Checks each of `variants` against a recorded digest.
 pub(super) fn assert_listed_variants_match_recorded(
     label: &str,
     setup: &Setup,
     want: &Digest,
     variants: &[CollabVariant],
 ) {
-    let channels = setup.channel_mode.count();
-    let distinct = variants.iter().filter(|variant| variant.distinct_for(channels));
-
-    for &variant in distinct {
+    for &variant in variants {
         let got = run_fused_variant(setup, variant);
         let variant_label = format!("{label} {}", variant.name());
         assert_matches_recorded(&variant_label, &got, want);

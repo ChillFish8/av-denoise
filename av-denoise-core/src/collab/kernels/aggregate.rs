@@ -178,7 +178,7 @@ pub fn scatter_patch(
     patch_y: u32,
     tid: u32,
     write_weight: bool,
-    #[comptime] channel: u32,
+    channel: u32,
     #[comptime] width: u32,
     #[comptime] stored_ch: u32,
     frame_slot: u32,

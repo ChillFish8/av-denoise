@@ -2,27 +2,16 @@ mod chunks;
 
 use std::collections::HashSet;
 
-use super::engine::{nl4d_outputs, noisy_frames};
 use super::fixtures::{CollabSpec, collab_site, collab_site_f16};
 use super::probe::small_device_limits;
-use super::runtime::{test_client, test_legality};
-use crate::Nl4dOptions;
+use super::runtime::test_client;
 use crate::collab::geometry::refs_along;
 use crate::collab::{PATCH_SIZE, STEP, needs_warp_uniform_search};
 use crate::nlmeans::ChannelMode;
 use crate::tune::gpu::{read_f32, sync};
 use crate::tune::session::timed_count;
-use crate::tune::sites::{
-    COLLAB_FUSED,
-    Centre,
-    ChannelView,
-    CollabVariant,
-    NeighbourWalk,
-    Walk,
-    tile_height,
-    tile_width,
-};
-use crate::tune::{DeviceLimits, KernelPlan, SiteCandidate, VariantSite, fit_candidates, legal_candidates};
+use crate::tune::sites::{Centre, CollabVariant, NeighbourWalk, Walk, tile_height, tile_width};
+use crate::tune::{DeviceLimits, SiteCandidate, VariantSite, fit_candidates};
 
 pub(super) fn luma_spec() -> CollabSpec {
     CollabSpec::new(64, 48, ChannelMode::Luma, 2)
@@ -46,26 +35,23 @@ fn collab_variant_names_round_trip_and_are_unique() {
 
 #[test]
 fn the_listed_variants_cross_every_dimension() {
-    assert_eq!(CollabVariant::ALL.len(), 120);
+    assert_eq!(CollabVariant::ALL.len(), 60);
 
     for groups in [8u32, 4, 16] {
         for walk in [Walk::Clipped, Walk::Uniform] {
             for centre in [Centre::Global, Centre::Tiled, Centre::Sliding] {
                 for batched in [false, true] {
                     for neighbour in [NeighbourWalk::Rows, NeighbourWalk::Sliding] {
-                        for channel_view in [ChannelView::Lines, ChannelView::Scalar] {
-                            let variant = CollabVariant {
-                                groups,
-                                walk,
-                                centre,
-                                batched,
-                                neighbour,
-                                channel_view,
-                            };
-                            let listed = CollabVariant::ALL.contains(&variant);
-                            let builds = !(centre == Centre::Sliding && batched);
-                            assert_eq!(listed, builds, "{variant:?}");
-                        }
+                        let variant = CollabVariant {
+                            groups,
+                            walk,
+                            centre,
+                            batched,
+                            neighbour,
+                        };
+                        let listed = CollabVariant::ALL.contains(&variant);
+                        let builds = !(centre == Centre::Sliding && batched);
+                        assert_eq!(listed, builds, "{variant:?}");
                     }
                 }
             }
@@ -78,15 +64,8 @@ fn the_listed_variants_cross_every_dimension() {
         centre: Centre::Tiled,
         batched: true,
         neighbour: NeighbourWalk::Sliding,
-        channel_view: ChannelView::Scalar,
     };
-    assert_eq!(everything.name(), "groups16_uniform_tiled_batched_nslide_scalar");
-
-    let scalar = CollabVariant {
-        channel_view: ChannelView::Scalar,
-        ..CollabVariant::BASELINE
-    };
-    assert_eq!(scalar.name(), "groups8_clipped_scalar");
+    assert_eq!(everything.name(), "groups16_uniform_tiled_batched_nslide");
 
     let sliding = CollabVariant {
         centre: Centre::Sliding,
@@ -109,24 +88,13 @@ fn a_uniform_only_runtime_is_offered_half_the_variants() {
         .filter(|variant| variant.runs_where(true))
         .count();
 
-    assert_eq!(uniform_only_count, 60);
+    assert_eq!(uniform_only_count, 30);
 }
 
-#[test]
-fn only_multi_channel_planes_build_the_scalar_view() {
-    for &variant in CollabVariant::ALL {
-        let name = variant.name();
-        let scalar = variant.channel_view == ChannelView::Scalar;
-
-        assert_eq!(variant.distinct_for(1), !scalar, "{name}");
-        assert!(variant.distinct_for(2), "{name}");
-        assert!(variant.distinct_for(3), "{name}");
-    }
-}
-
-/// Asserts the staged site over `spec` times `expected_first` fitted variants at 8 groups, or half
-/// as many where only the uniform walk runs, then 2 more group counts for each of the 3 fastest.
-fn assert_staged_counts(spec: CollabSpec, expected_first: usize) {
+/// Asserts the staged site over `spec` times every fitted variant at 8 groups, then 2 more group
+/// counts for each of the 3 fastest. That is 20 and then 6, 26 in all, or 10 and then 6 where only
+/// the uniform walk runs.
+fn assert_staged_counts(spec: CollabSpec) {
     let client = test_client();
     let site = collab_site(&client, &spec);
     let limits = DeviceLimits::from_client(&client);
@@ -134,44 +102,28 @@ fn assert_staged_counts(spec: CollabSpec, expected_first: usize) {
 
     let fitted = fit_candidates(&site, &limits).expect("the baseline fits");
     let at_eight_groups = fitted.iter().filter(|variant| variant.groups == 8).count();
-    let scalar_at_eight_groups = fitted
-        .iter()
-        .filter(|variant| variant.groups == 8 && variant.channel_view == ChannelView::Scalar)
-        .count();
     let timed = timed_count(&site, &fitted);
-    let expected = if uniform_only {
-        expected_first / 2
-    } else {
-        expected_first
-    };
-    let expected_scalar = if spec.channels == ChannelMode::Luma {
-        0
-    } else {
-        expected / 2
-    };
+    let expected_first = if uniform_only { 10 } else { 20 };
 
-    assert_eq!(at_eight_groups, expected);
-    assert_eq!(scalar_at_eight_groups, expected_scalar);
+    assert_eq!(at_eight_groups, expected_first);
     assert_eq!(timed, at_eight_groups + 3 * 2);
 
     // The HIP runtime crashes at process exit while an upload is still queued.
     sync(&client).expect("the uploads finish");
 }
 
-/// Luma has no scalar view, so it times 20 and then 6, 26 in all.
 #[test]
 fn the_staged_collab_site_times_the_first_stage_and_three_regroupings() {
-    assert_staged_counts(luma_spec(), 20);
+    assert_staged_counts(luma_spec());
 }
 
-/// Chroma and yuv time each search variant with both channel views, 40 and then 6.
 #[test]
-fn the_staged_chroma_and_yuv_sites_time_both_channel_views() {
+fn the_staged_chroma_and_yuv_sites_time_as_many_variants_as_luma() {
     let chroma = CollabSpec::new(64, 48, ChannelMode::Chroma, 2);
     let yuv = CollabSpec::new(64, 48, ChannelMode::Yuv, 1);
 
-    assert_staged_counts(chroma, 40);
-    assert_staged_counts(yuv, 40);
+    assert_staged_counts(chroma);
+    assert_staged_counts(yuv);
 }
 
 #[test]
@@ -211,7 +163,7 @@ fn this_runtime_is_offered_its_baseline_first_and_only_legal_walks() {
     let legal: Vec<CollabVariant> = CollabVariant::ALL
         .iter()
         .copied()
-        .filter(|variant| variant.runs_where(uniform_only) && variant.distinct_for(1))
+        .filter(|variant| variant.runs_where(uniform_only))
         .collect();
 
     assert_eq!(fitted[0], expected_baseline);
@@ -469,36 +421,6 @@ fn collab_stages_vary_the_search_first_and_the_group_count_second() {
         regrouped,
         vec!["groups16_uniform", "groups4_uniform", "groups8_uniform"]
     );
-}
-
-/// Luma has one channel, so the scalar view is never a legal candidate there.
-///
-/// Both views build the same kernel on one channel, so the output check only shows the forced plan still runs.
-#[test]
-fn forcing_the_scalar_view_on_luma_runs_the_baseline() {
-    let client = test_client();
-    let spec = luma_spec();
-    let site = collab_site(&client, &spec);
-    let limits = DeviceLimits::from_client(&client);
-    let legality = test_legality(&client);
-    let scalar = CollabVariant::from_name("groups8_clipped_scalar").expect("a listed variant");
-
-    let legal = legal_candidates(&site, &limits, &legality).expect("the baseline fits");
-    assert!(!legal.contains(&scalar));
-
-    let options = Nl4dOptions {
-        temporal_radius: 1,
-        ..Nl4dOptions::default()
-    };
-    let (width, height) = (72u32, 48u32);
-    let frames = noisy_frames(width, height, 1, 7);
-    let baseline_plan = KernelPlan::baseline();
-    let forced_plan = KernelPlan::baseline().with_site(COLLAB_FUSED, scalar.name());
-
-    let baseline = nl4d_outputs(options, ChannelMode::Luma, width, height, &frames, baseline_plan);
-    let forced = nl4d_outputs(options, ChannelMode::Luma, width, height, &frames, forced_plan);
-
-    assert_eq!(forced, baseline);
 }
 
 /// Launches the chroma collab baseline once, so a compilation log holds its generated source.
