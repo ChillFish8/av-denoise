@@ -40,6 +40,16 @@ tracing.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
 
+# Checks NVRTC loads before the CUDA backend is picked. Must track the cudarc
+# that cubecl-cuda links, so both load the library through one handle.
+cudarc = { version = "0.19", optional = true, default-features = false, features = [
+    "std",
+    "nvrtc",
+    "fallback-dynamic-loading",
+    "cuda-version-from-build-system",
+    "fallback-latest",
+] }
+
 # Frame ingestion via ffms2
 av-scenechange = { version = "0.23", optional = true, features = ["ffms2"] }
 av-decoders = { version = "0.9", optional = true, features = ["ffms2"] }
@@ -71,7 +81,7 @@ pkg-config = { version = "0.3.34", optional = true }
 [features]
 vulkan = ["av-denoise-core/vulkan", "cubecl/vulkan"]
 metal = ["av-denoise-core/metal", "cubecl/metal"]
-cuda = ["av-denoise-core/cuda", "cubecl/cuda"]
+cuda = ["av-denoise-core/cuda", "cubecl/cuda", "dep:cudarc"]
 rocm = ["av-denoise-core/rocm", "cubecl/hip"]
 binary = [
     "bytesize",

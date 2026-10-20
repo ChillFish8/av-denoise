@@ -54,6 +54,9 @@ uv add vsavd
 
 Installing `vsavd` bundles the compiled plugin inside the wheel, so there is nothing else to build or load.
 
+The `cuda` backend also needs the CUDA toolkit, not just the NVIDIA driver. Without it the plugin warns
+that CUDA is skipped and uses Vulkan instead. Pass `accelerators="vulkan"` to skip the CUDA check entirely.
+
 ## [Choosing an algorithm](https://github.com/ChillFish8/av-denoise/blob/HEAD/docs/CHOOSING_AN_ALGORITHM.md)
 
 Please have a read of the linked page for info about what each algorithm does and its tradeoffs.

@@ -143,7 +143,10 @@ must also provide access to the hardware specific headers and compilers.
 This primarily has the following impacts:
 
 - The `rocm` backend requires the AMD HIP compiler and headers, typically vendored via the ROCm dev SDK.
-- The `cuda` backend requires the NVIDIA CUDA headers and nvcc, typically vendored via the CUDA devel toolkit.
+- The `cuda` backend requires the CUDA toolkit as well as the NVIDIA driver. Kernels are compiled with NVRTC,
+  which ships with the toolkit, against the toolkit's headers. It finds the toolkit through `CUDA_PATH`,
+  then the default install location. When it cannot, the CUDA backend is skipped with a warning saying why,
+  and the next accelerator in the list is used.
 - The `vulkan` and `metal` backends should "just work" on non-containerised hosts. If you are building for
   docker, then the vulkan backend requires `vulkan-icd-loader` and then the relevant GPU specific driver,
   i.e. `vulkan-radeon` or `vulkan-intel`.

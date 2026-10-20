@@ -192,6 +192,7 @@ dependencies = [
  "clap",
  "crossbeam-channel",
  "cubecl",
+ "cudarc",
  "etcetera",
  "ffms2-sys",
  "indicatif",

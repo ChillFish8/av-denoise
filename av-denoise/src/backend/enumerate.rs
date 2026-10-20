@@ -4,6 +4,8 @@ use cubecl::device::DeviceId;
 use cubecl::prelude::*;
 
 use super::accelerate::Accelerator;
+#[cfg(feature = "cuda")]
+use super::cuda_toolkit::check_cuda_toolkit;
 use super::device::Device;
 use super::probe::open_client;
 
@@ -33,6 +35,7 @@ pub fn enumerate_devices(enable: &[Accelerator]) -> Vec<BackendDevices> {
         .map(|accelerator| match accelerator {
             #[cfg(feature = "cuda")]
             Accelerator::Cuda => match Device::Default.to_cuda() {
+                Ok(_) if check_cuda_toolkit().is_err() => unavailable(*accelerator),
                 Ok(cuda_device) => query_runtime::<cubecl::cuda::CudaRuntime>(*accelerator, &cuda_device),
                 Err(_) => unavailable(*accelerator),
             },
@@ -76,7 +79,7 @@ fn unavailable(accelerator: Accelerator) -> BackendDevices {
 /// A backend that cannot open a client at all, because its driver libraries are missing, is reported
 /// as unavailable rather than allowed to take the process down.
 fn query_runtime<R: Runtime>(accelerator: Accelerator, device: &R::Device) -> BackendDevices {
-    let Some(client) = open_client::<R>(accelerator, device) else {
+    let Ok(client) = open_client::<R>(accelerator, device) else {
         return unavailable(accelerator);
     };
 

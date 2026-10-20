@@ -16,6 +16,7 @@ use self::io::PlaneIo;
 pub use self::options::{Algorithm, DenoiserOptions};
 pub(crate) use self::pending::{Pending, TryWait};
 use crate::backend::accelerate::Accelerator;
+use crate::backend::sniff::BackendUnavailable;
 use crate::backend::{Device, build_engine};
 
 /// How many readbacks a [HostDenoiser] keeps in flight at once.
@@ -41,14 +42,19 @@ pub enum DenoiserError {
     #[error("denoiser failed earlier, reset the stream before using it again")]
     Poisoned,
     /// None of the accelerators in the priority list could be started.
-    #[error("no accelerator from the priority list is available")]
-    NoAcceleratorAvailable,
+    #[error("no accelerator from the priority list is available{}", list_reasons(reasons))]
+    NoAcceleratorAvailable { reasons: Vec<BackendUnavailable> },
     /// The engine rejected its options, its planes or a call.
     #[error(transparent)]
     Engine(#[from] av_denoise_core::Error),
     /// Anything else, such as a failed readback.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+/// Writes one indented line per skipped accelerator.
+fn list_reasons(reasons: &[BackendUnavailable]) -> String {
+    reasons.iter().map(|reason| format!("\n  {reason}")).collect()
 }
 
 impl DenoiserError {

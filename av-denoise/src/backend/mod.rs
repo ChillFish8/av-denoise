@@ -1,4 +1,6 @@
 pub mod accelerate;
+#[cfg(feature = "cuda")]
+mod cuda_toolkit;
 pub mod device;
 pub mod enumerate;
 mod probe;
@@ -10,7 +12,7 @@ use cubecl::prelude::ComputeClient;
 
 use self::accelerate::Accelerator;
 pub use self::device::Device;
-use self::sniff::sniff_best_accelerator;
+use self::sniff::select_accelerator;
 use crate::host::DenoiserError;
 use crate::host::io::{ClientIo, PlaneIo};
 
@@ -65,8 +67,8 @@ pub(crate) fn build_engine(
     device: &Device,
     spec: EngineSpec,
 ) -> Result<BuiltEngine, DenoiserError> {
-    let accelerator = sniff_best_accelerator(accelerators, device);
-    let accelerator = accelerator.ok_or(DenoiserError::NoAcceleratorAvailable)?;
+    let selected = select_accelerator(accelerators, device);
+    let accelerator = selected.map_err(|reasons| DenoiserError::NoAcceleratorAvailable { reasons })?;
 
     match accelerator {
         #[cfg(feature = "cuda")]
