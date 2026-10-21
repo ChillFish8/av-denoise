@@ -442,7 +442,7 @@ impl HostDenoiser {
         self.poison_on_error(drained)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "vulkan"))]
     pub(crate) fn poison_for_test(&mut self) {
         self.poisoned = true;
     }

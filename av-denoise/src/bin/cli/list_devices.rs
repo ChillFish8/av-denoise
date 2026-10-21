@@ -104,7 +104,7 @@ fn sort_key(device: &Device) -> (u8, usize) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "vulkan"))]
 mod tests {
     use super::*;
 
