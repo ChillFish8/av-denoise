@@ -157,7 +157,6 @@ impl<R: Runtime> Benchmark for WindowBench<R> {
             stored_ch,
             patch_radius: PATCH_RADIUS,
             search_radius: SEARCH_RADIUS,
-            matrix_plane: 0,
         };
 
         (site, outputs)

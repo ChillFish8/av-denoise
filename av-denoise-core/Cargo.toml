@@ -32,7 +32,6 @@ half = "2.7.1"
 
 cubecl = { version = "0.10", features = ["std"] }
 wgpu = { version = "29", optional = true }
-cubecl-hip-sys = { version = "7.1.5280200", optional = true }
 
 [dev-dependencies]
 futures = "0.3"
@@ -42,7 +41,7 @@ clap = { version = "4", features = ["derive"] }
 vulkan = ["cubecl/vulkan", "dep:wgpu"]
 metal = ["cubecl/metal"]
 cuda = ["cubecl/cuda"]
-rocm = ["cubecl/hip", "dep:cubecl-hip-sys"]
+rocm = ["cubecl/hip"]
 default = ["vulkan"]
 
 [[bench]]

@@ -7,7 +7,6 @@ pub mod bench_api;
 mod collab;
 mod engine;
 mod error;
-mod matrix;
 pub mod nl4d;
 pub mod nlmeans;
 mod options;

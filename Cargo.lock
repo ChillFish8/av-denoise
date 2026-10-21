@@ -221,7 +221,6 @@ dependencies = [
  "bon",
  "clap",
  "cubecl",
- "cubecl-hip-sys",
  "futures",
  "half",
  "strum",

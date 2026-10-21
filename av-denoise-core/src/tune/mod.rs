@@ -49,7 +49,7 @@ pub use self::budget::{
     tuning_budget,
     tuning_order,
 };
-pub use self::codes::{IntegerCodes, MATRIX_EXACT_VALUES, MAX_INTEGER_DEPTH};
+pub use self::codes::{IntegerCodes, MAX_INTEGER_DEPTH};
 pub use self::consts::*;
 pub use self::decide::{
     CandidateStats,
@@ -65,7 +65,7 @@ pub use self::decide::{
     sample_in_stages_with,
     sample_until_settled,
 };
-pub use self::device::{DeviceIdentity, DeviceLimits, DeviceProfile, visible_architectures};
+pub use self::device::{DeviceIdentity, DeviceLimits, DeviceProfile};
 pub use self::fidelity::{
     CompareResult,
     ErrorBound,
@@ -85,22 +85,12 @@ pub use self::legality::{
     AMD_VENDOR_ID,
     APPLE_VENDOR_ID,
     DeviceClass,
-    HIP_RUNTIME,
     INTEL_VENDOR_ID,
-    Int8Layout,
-    Int8Matrix,
     Legality,
-    MATRIX_PLANE_WIDTHS,
     MIN_PLANE_SIZE,
     NVIDIA_VENDOR_ID,
     PlaneSizeError,
     check_plane_size,
-    compiles_matrix_products,
-    int8_matrix_plane_width,
-    lists_int8_matrix,
-    matrix_plane_width,
-    offers_f16_matrix,
-    offers_int8_matrix,
 };
 pub use self::plan::{KernelPlan, PipelineProfile};
 pub use self::precompile::Precompiled;

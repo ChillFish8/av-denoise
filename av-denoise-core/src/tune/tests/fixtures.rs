@@ -33,7 +33,7 @@ use crate::tune::sites::{
     WindowSite,
     allocate_accum,
 };
-use crate::tune::{DeviceLimits, IntegerCodes, SiteCandidate, matrix_plane_width};
+use crate::tune::{IntegerCodes, SiteCandidate};
 
 /// Frames in every fixture ring. The centre is slot 1, with a neighbour either side.
 pub(crate) const RING_FRAMES: u32 = 3;
@@ -158,12 +158,6 @@ pub(crate) fn window_site(client: &ComputeClient<TestRuntime>, spec: &WindowSpec
         None => (hashed, None),
     };
     let input = upload(client, &ring);
-    let limits = DeviceLimits::from_client(client);
-    let plane_width = matrix_plane_width(&limits);
-    let matrix_plane = match codes {
-        Some(_) => plane_width.unwrap_or(0),
-        None => 0,
-    };
     let reference = spec.reference.then(|| {
         let reference_ring = hashed_ring(spec.width, spec.height, stored_ch, RING_FRAMES, 2);
         upload(client, &reference_ring)
@@ -202,7 +196,6 @@ pub(crate) fn window_site(client: &ComputeClient<TestRuntime>, spec: &WindowSpec
         stored_ch,
         patch_radius: spec.patch_radius,
         search_radius: spec.search_radius,
-        matrix_plane,
     }
 }
 

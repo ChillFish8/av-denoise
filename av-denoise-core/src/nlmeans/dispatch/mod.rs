@@ -23,6 +23,7 @@ use super::motion::{confidence_byte_offset, neighbour_idx_for_k};
 use super::noise::{build_spatial_offset_lut, spatial_offset_factor, spatial_offset_lut_len};
 use super::{BLOCK_1D, BLOCK_X, BLOCK_Y, MAX_GRID_1D};
 use crate::engine::timing::{timed, units_per_span};
+use crate::tune::IntegerCodes;
 use crate::tune::gpu::bind;
 use crate::tune::sites::{
     AccumOutputs,
@@ -32,7 +33,6 @@ use crate::tune::sites::{
     WindowPass,
     WindowSite,
 };
-use crate::tune::{IntegerCodes, matrix_plane_width};
 
 /// The most dispatches one separable search offset queues.
 const SEPARABLE_DISPATCHES_PER_OFFSET: u32 = 4;
@@ -261,8 +261,6 @@ impl<R: Runtime> NlmDenoiser<R> {
     }
 
     /// A windowed launch over `rings` that adds into the frame accumulators.
-    ///
-    /// With codes the site also carries the device's matrix plane.
     fn window_site(
         &self,
         ctx: &LaunchCtx,
@@ -272,12 +270,6 @@ impl<R: Runtime> NlmDenoiser<R> {
         h2_inv_norm: f32,
     ) -> WindowSite<R> {
         let outputs = self.accum_outputs(ctx);
-        let limits = self.kernels.limits();
-        let plane_width = matrix_plane_width(limits);
-        let matrix_plane = match rings.codes {
-            Some(_) => plane_width.unwrap_or(0),
-            None => 0,
-        };
 
         WindowSite {
             client: self.client.clone(),
@@ -295,7 +287,6 @@ impl<R: Runtime> NlmDenoiser<R> {
             stored_ch: self.params.channels.storage_count(),
             patch_radius: self.params.patch_radius,
             search_radius: self.params.search_radius,
-            matrix_plane,
         }
     }
 

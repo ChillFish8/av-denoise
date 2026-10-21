@@ -1,14 +1,5 @@
-use cubecl::features::{EnumSet, Features, MmaConfig, TypeUsage};
-use cubecl::ir::{
-    DeviceProperties,
-    ElemType,
-    FloatKind,
-    HardwareProperties,
-    IntKind,
-    MemoryDeviceProperties,
-    StorageType,
-    UIntKind,
-};
+use cubecl::features::{EnumSet, Features, TypeUsage};
+use cubecl::ir::{DeviceProperties, ElemType, HardwareProperties, MemoryDeviceProperties, UIntKind};
 use cubecl::profile::TimingMethod;
 
 use crate::engine::SampleFormat;
@@ -32,74 +23,30 @@ use crate::tune::sites::{
     window_candidate_legal,
     window_shared_bytes,
 };
-use crate::tune::{
-    DeviceLimits,
-    HIP_RUNTIME,
-    Int8Layout,
-    Int8Matrix,
-    IntegerCodes,
-    Legality,
-    SiteCandidate,
-    int8_matrix_plane_width,
-    matrix_plane_width,
-};
+use crate::tune::{DeviceLimits, IntegerCodes, Legality, SiteCandidate};
 
 /// What a fake device offers, turned into the runtime properties a real client reports.
 #[derive(Debug, Clone)]
 struct FakeDevice {
-    matrix_config: Option<MmaConfig>,
-    int8_configs: Vec<MmaConfig>,
     plane_size_min: u32,
     plane_size_max: u32,
     shared_bytes: usize,
     u16_usage: EnumSet<TypeUsage>,
-    u8_usage: EnumSet<TypeUsage>,
-    i8_usage: EnumSet<TypeUsage>,
 }
 
 impl FakeDevice {
     /// An RDNA 4 card under RADV.
     fn rdna4() -> Self {
-        let config = f16_matrix_config(FloatKind::F32, 16);
-        let unsigned = int8_matrix_config(UNSIGNED_ELEM, UNSIGNED_ELEM, I32_ELEM, 16, 16, 16);
-        let signed = int8_matrix_config(SIGNED_ELEM, SIGNED_ELEM, I32_ELEM, 16, 16, 16);
-
         Self {
-            matrix_config: Some(config),
-            int8_configs: vec![unsigned, signed],
             plane_size_min: 32,
             plane_size_max: 64,
             shared_bytes: 64 * 1024,
             u16_usage: TypeUsage::all(),
-            u8_usage: TypeUsage::all(),
-            i8_usage: TypeUsage::all(),
-        }
-    }
-
-    /// A Pascal card under Vulkan, which has no matrix units.
-    fn pascal() -> Self {
-        Self {
-            matrix_config: None,
-            int8_configs: Vec::new(),
-            plane_size_min: 32,
-            plane_size_max: 32,
-            shared_bytes: 48 * 1024,
-            u16_usage: TypeUsage::all(),
-            u8_usage: TypeUsage::all(),
-            i8_usage: TypeUsage::all(),
         }
     }
 
     fn properties(&self) -> DeviceProperties {
-        let mut features = Features::default();
-
-        if let Some(config) = self.matrix_config {
-            features.matmul.cmma.insert(config);
-        }
-
-        for &config in &self.int8_configs {
-            features.matmul.cmma.insert(config);
-        }
+        let features = Features::default();
 
         let memory = MemoryDeviceProperties {
             max_page_size: 1 << 30,
@@ -127,314 +74,12 @@ impl FakeDevice {
             properties.register_type_usage(u16_elem, self.u16_usage);
         }
 
-        if !self.u8_usage.is_empty() {
-            properties.register_type_usage(UNSIGNED_ELEM, self.u8_usage);
-        }
-
-        if !self.i8_usage.is_empty() {
-            properties.register_type_usage(SIGNED_ELEM, self.i8_usage);
-        }
-
         properties
     }
 
     fn limits(&self) -> DeviceLimits {
         let properties = self.properties();
         DeviceLimits::from_properties(&properties)
-    }
-
-    /// The limits on `runtime` for devices of `architectures`, after the matrix rule.
-    fn limits_on(&self, runtime: &str, architectures: &[&str]) -> DeviceLimits {
-        let properties = self.properties();
-        let architectures: Vec<String> = architectures.iter().map(|name| name.to_string()).collect();
-
-        DeviceLimits::for_runtime(&properties, runtime, &architectures)
-    }
-}
-
-/// The name CubeCL's wgpu runtime reports over SPIR-V.
-const WGPU_SPIRV_RUNTIME: &str = "wgpu<spirv>";
-
-#[test]
-fn hip_on_rdna4_offers_no_matrix_products() {
-    let rdna4 = FakeDevice::rdna4();
-    let cases: [&[&str]; 3] = [&["gfx1201"], &["gfx1200"], &["gfx1100", "gfx1201"]];
-
-    for architectures in cases {
-        let limits = rdna4.limits_on(HIP_RUNTIME, architectures);
-        let f16_plane = matrix_plane_width(&limits);
-        let int8_plane = int8_matrix_plane_width(&limits);
-
-        assert!(!limits.f16_matrix, "{architectures:?}");
-        assert_eq!(limits.int8_matrix, None, "{architectures:?}");
-        assert!(!limits.int8_signed, "{architectures:?}");
-        assert_eq!(f16_plane, None, "{architectures:?}");
-        assert_eq!(int8_plane, None, "{architectures:?}");
-    }
-}
-
-#[test]
-fn hip_with_an_unknown_architecture_offers_no_matrix_products() {
-    let limits = FakeDevice::rdna4().limits_on(HIP_RUNTIME, &[]);
-
-    assert!(!limits.f16_matrix);
-    assert_eq!(limits.int8_matrix, None);
-}
-
-#[test]
-fn hip_on_rdna3_keeps_the_reported_f16_matrix() {
-    let rdna3 = FakeDevice {
-        int8_configs: Vec::new(),
-        plane_size_max: 32,
-        ..FakeDevice::rdna4()
-    };
-
-    let limits = rdna3.limits_on(HIP_RUNTIME, &["gfx1100"]);
-    let f16_plane = matrix_plane_width(&limits);
-
-    assert!(limits.f16_matrix);
-    assert_eq!(limits.int8_matrix, None);
-    assert_eq!(f16_plane, Some(32));
-}
-
-#[test]
-fn vulkan_on_rdna4_keeps_both_matrix_products() {
-    let limits = FakeDevice::rdna4().limits_on(WGPU_SPIRV_RUNTIME, &["gfx1201"]);
-    let raw_limits = FakeDevice::rdna4().limits();
-    let f16_plane = matrix_plane_width(&limits);
-    let int8_plane = int8_matrix_plane_width(&limits);
-
-    assert!(limits.f16_matrix);
-    assert_eq!(limits.int8_matrix, Some(Int8Matrix::Unsigned));
-    assert_eq!(f16_plane, Some(64));
-    assert_eq!(int8_plane, Some(64));
-    assert_eq!(limits, raw_limits);
-}
-
-/// A square f16-input matrix config of side `size`, accumulating in `accumulator`.
-fn f16_matrix_config(accumulator: FloatKind, size: u32) -> MmaConfig {
-    let half_elem = ElemType::Float(FloatKind::F16);
-    let half_type = StorageType::Scalar(half_elem);
-    let accumulator_elem = ElemType::Float(accumulator);
-    let accumulator_type = StorageType::Scalar(accumulator_elem);
-
-    MmaConfig {
-        a_type: half_type,
-        b_type: half_type,
-        cd_type: accumulator_type,
-        m: size,
-        n: size,
-        k: size,
-    }
-}
-
-const UNSIGNED_ELEM: ElemType = ElemType::UInt(UIntKind::U8);
-const SIGNED_ELEM: ElemType = ElemType::Int(IntKind::I8);
-const I32_ELEM: ElemType = ElemType::Int(IntKind::I32);
-
-/// A matrix config of `a` times `b` accumulating in `cd`, at `m` x `n` x `k`.
-fn int8_matrix_config(a: ElemType, b: ElemType, cd: ElemType, m: u32, n: u32, k: u32) -> MmaConfig {
-    MmaConfig {
-        a_type: StorageType::Scalar(a),
-        b_type: StorageType::Scalar(b),
-        cd_type: StorageType::Scalar(cd),
-        m,
-        n,
-        k,
-    }
-}
-
-/// An RDNA 4 card listing only `configs` as its int8 matrix products.
-fn int8_device(configs: &[MmaConfig]) -> FakeDevice {
-    FakeDevice {
-        int8_configs: configs.to_vec(),
-        ..FakeDevice::rdna4()
-    }
-}
-
-#[test]
-fn int8_gating_takes_only_the_exact_16x16x16_i32_configs() {
-    let half_elem = ElemType::Float(FloatKind::F16);
-    let u32_elem = ElemType::UInt(UIntKind::U32);
-    let f32_elem = ElemType::Float(FloatKind::F32);
-    let unsigned = int8_matrix_config(UNSIGNED_ELEM, UNSIGNED_ELEM, I32_ELEM, 16, 16, 16);
-    let signed = int8_matrix_config(SIGNED_ELEM, SIGNED_ELEM, I32_ELEM, 16, 16, 16);
-
-    let accepted = [
-        (vec![unsigned], Int8Matrix::Unsigned),
-        (vec![signed], Int8Matrix::Signed),
-        (vec![signed, unsigned], Int8Matrix::Unsigned),
-    ];
-    for (configs, expected) in accepted {
-        let device = int8_device(&configs);
-        let limits = device.limits();
-        assert_eq!(limits.int8_matrix, Some(expected), "{configs:?}");
-    }
-
-    let half_result = int8_matrix_config(SIGNED_ELEM, SIGNED_ELEM, half_elem, 16, 16, 16);
-    let longer_k = int8_matrix_config(UNSIGNED_ELEM, UNSIGNED_ELEM, I32_ELEM, 16, 16, 32);
-    let narrow_m = int8_matrix_config(UNSIGNED_ELEM, UNSIGNED_ELEM, I32_ELEM, 8, 32, 16);
-    let unsigned_result = int8_matrix_config(UNSIGNED_ELEM, UNSIGNED_ELEM, u32_elem, 16, 16, 16);
-    let float_result = int8_matrix_config(UNSIGNED_ELEM, UNSIGNED_ELEM, f32_elem, 16, 16, 16);
-    let mixed = int8_matrix_config(UNSIGNED_ELEM, SIGNED_ELEM, I32_ELEM, 16, 16, 16);
-
-    let refused = [
-        vec![half_result],
-        vec![longer_k],
-        vec![narrow_m],
-        vec![unsigned_result, float_result],
-        vec![mixed],
-    ];
-    for configs in refused {
-        let device = int8_device(&configs);
-        let limits = device.limits();
-        assert_eq!(limits.int8_matrix, None, "{configs:?}");
-    }
-
-    let without_int8 = FakeDevice {
-        u8_usage: TypeUsage::Conversion | TypeUsage::Buffer,
-        ..int8_device(&[unsigned])
-    };
-    let without_int8_limits = without_int8.limits();
-    assert_eq!(
-        without_int8_limits.int8_matrix, None,
-        "a listed config needs u8 arithmetic"
-    );
-}
-
-#[test]
-fn int8_gating_falls_back_to_i8_when_only_i8_runs_arithmetic() {
-    let unsigned = int8_matrix_config(UNSIGNED_ELEM, UNSIGNED_ELEM, I32_ELEM, 16, 16, 16);
-    let signed = int8_matrix_config(SIGNED_ELEM, SIGNED_ELEM, I32_ELEM, 16, 16, 16);
-    let signed_only = FakeDevice {
-        u8_usage: TypeUsage::Conversion | TypeUsage::Buffer,
-        ..int8_device(&[unsigned, signed])
-    };
-
-    let limits = signed_only.limits();
-
-    assert_eq!(limits.int8_matrix, Some(Int8Matrix::Signed));
-}
-
-#[test]
-fn the_int8_plane_follows_the_widest_plane_rule() {
-    let unsigned = int8_matrix_config(UNSIGNED_ELEM, UNSIGNED_ELEM, I32_ELEM, 16, 16, 16);
-    let f16_config = f16_matrix_config(FloatKind::F32, 16);
-    let cases = [
-        (32, vec![unsigned], Some(32)),
-        (64, vec![unsigned], Some(64)),
-        (16, vec![unsigned], None),
-        (128, vec![unsigned], None),
-        (64, Vec::new(), None),
-    ];
-
-    for (plane_size_max, configs, expected) in cases {
-        for matrix_config in [Some(f16_config), None] {
-            let device = FakeDevice {
-                matrix_config,
-                plane_size_min: 16,
-                plane_size_max,
-                ..int8_device(&configs)
-            };
-            let limits = device.limits();
-            let width = int8_matrix_plane_width(&limits);
-
-            assert_eq!(width, expected, "{device:?}");
-        }
-    }
-}
-
-#[test]
-fn int8_layouts_split_codes_so_every_part_fits_its_operand() {
-    let eight_bit = IntegerCodes { depth: 8 };
-    let ten_bit = IntegerCodes { depth: 10 };
-    let cases = [
-        (Int8Matrix::Unsigned, eight_bit, 0, 1, 1, 1),
-        (Int8Matrix::Unsigned, ten_bit, 2, 2, 4, 3),
-        (Int8Matrix::Signed, eight_bit, 4, 2, 4, 3),
-        (Int8Matrix::Signed, ten_bit, 5, 2, 4, 3),
-    ];
-
-    for (element, codes, low_bits, parts, products, accumulators) in cases {
-        let layout = Int8Layout::for_codes(element, codes);
-        let label = format!("{element:?} at {} bits", codes.depth);
-
-        assert_eq!(layout.element, element, "{label}");
-        assert_eq!(layout.low_bits, low_bits, "{label}");
-        assert_eq!(layout.parts(), parts, "{label}");
-        assert_eq!(layout.products(), products, "{label}");
-        assert_eq!(layout.accumulators(), accumulators, "{label}");
-
-        let operand_max = match element {
-            Int8Matrix::Unsigned => 255,
-            Int8Matrix::Signed => 127,
-        };
-        let low_mask = (1 << low_bits) - 1;
-
-        for code in 0..=codes.max_code() {
-            let high = code >> low_bits;
-            let low = code & low_mask;
-            let rebuilt = (high << low_bits) + low;
-
-            assert!(high <= operand_max, "{label}: high part of {code}");
-            assert!(low <= operand_max, "{label}: low part of {code}");
-            assert_eq!(rebuilt, code, "{label}");
-        }
-    }
-}
-
-#[test]
-fn limits_read_the_f16_matrix_config_from_the_properties() {
-    assert!(FakeDevice::rdna4().limits().f16_matrix);
-    assert!(!FakeDevice::pascal().limits().f16_matrix);
-}
-
-#[test]
-fn near_miss_matrix_configs_are_not_the_f16_matrix() {
-    let half_accumulator = f16_matrix_config(FloatKind::F16, 16);
-    let longer_k = MmaConfig {
-        k: 32,
-        ..f16_matrix_config(FloatKind::F32, 16)
-    };
-    let narrow_m = MmaConfig {
-        m: 32,
-        n: 8,
-        ..f16_matrix_config(FloatKind::F32, 16)
-    };
-
-    for config in [half_accumulator, longer_k, narrow_m] {
-        let device = FakeDevice {
-            matrix_config: Some(config),
-            ..FakeDevice::rdna4()
-        };
-        let limits = device.limits();
-
-        assert!(!limits.f16_matrix, "{config:?}");
-    }
-}
-
-#[test]
-fn the_matrix_plane_is_the_widest_plane_at_32_or_64() {
-    let config = f16_matrix_config(FloatKind::F32, 16);
-    let cases = [
-        (16, Some(config), None),
-        (32, Some(config), Some(32)),
-        (64, Some(config), Some(64)),
-        (128, Some(config), None),
-        (64, None, None),
-    ];
-
-    for (plane_size_max, matrix_config, expected) in cases {
-        let device = FakeDevice {
-            matrix_config,
-            plane_size_min: 16,
-            plane_size_max,
-            ..FakeDevice::rdna4()
-        };
-        let limits = device.limits();
-        let width = matrix_plane_width(&limits);
-
-        assert_eq!(width, expected, "{device:?}");
     }
 }
 
@@ -471,16 +116,12 @@ fn integer_codes_cover_eight_to_ten_bit_sources() {
 }
 
 #[test]
-fn integer_codes_split_only_past_eight_bits() {
+fn integer_codes_hold_the_top_code_and_two_bytes() {
     let eight_bit = IntegerCodes { depth: 8 };
     let ten_bit = IntegerCodes { depth: 10 };
 
     assert_eq!(eight_bit.max_code(), 255);
     assert_eq!(ten_bit.max_code(), 1023);
-    assert!(!eight_bit.wide());
-    assert!(ten_bit.wide());
-    assert_eq!(eight_bit.split_shift(), 0);
-    assert_eq!(ten_bit.split_shift(), 2);
     assert_eq!(eight_bit.code_bytes(), 2);
     assert_eq!(ten_bit.code_bytes(), 2);
 }
@@ -501,13 +142,6 @@ fn integer_codes_need_their_storage_type() {
         assert!(codes.storable(&with_storage), "depth {depth}");
         assert!(!codes.storable(&without_storage), "depth {depth}");
     }
-}
-
-#[test]
-fn matrix_sums_stay_exact_up_to_258_values() {
-    assert!(IntegerCodes::matrix_exact(243));
-    assert!(IntegerCodes::matrix_exact(258));
-    assert!(!IntegerCodes::matrix_exact(259));
 }
 
 #[test]
@@ -727,36 +361,6 @@ fn the_sliding_centre_counts_its_block_sums() {
     }
 }
 
-#[test]
-fn an_int8_product_runs_only_where_the_device_offers_it() {
-    let unsigned_config = int8_matrix_config(UNSIGNED_ELEM, UNSIGNED_ELEM, I32_ELEM, 16, 16, 16);
-    let unsigned_only = FakeDevice {
-        int8_configs: vec![unsigned_config],
-        ..FakeDevice::rdna4()
-    };
-    let without_int8 = FakeDevice {
-        int8_configs: Vec::new(),
-        ..FakeDevice::rdna4()
-    };
-    let unsigned_limits = unsigned_only.limits();
-    let without_limits = without_int8.limits();
-    let rdna4 = FakeDevice::rdna4().limits();
-
-    let rdna4_unsigned = rdna4.runs_int8_matrix(Int8Matrix::Unsigned);
-    let rdna4_signed = rdna4.runs_int8_matrix(Int8Matrix::Signed);
-    let unsigned_only_unsigned = unsigned_limits.runs_int8_matrix(Int8Matrix::Unsigned);
-    let unsigned_only_signed = unsigned_limits.runs_int8_matrix(Int8Matrix::Signed);
-    let without_unsigned = without_limits.runs_int8_matrix(Int8Matrix::Unsigned);
-    let without_signed = without_limits.runs_int8_matrix(Int8Matrix::Signed);
-
-    assert!(rdna4_unsigned);
-    assert!(rdna4_signed);
-    assert!(unsigned_only_unsigned);
-    assert!(!unsigned_only_signed);
-    assert!(!without_unsigned);
-    assert!(!without_signed);
-}
-
 /// A window shape of `channels` at patch radius 4 and search radius 2, the bench geometry.
 fn window_shape(channels: ChannelMode, pair: bool, codes: Option<IntegerCodes>) -> WindowShape {
     WindowShape {
@@ -767,7 +371,6 @@ fn window_shape(channels: ChannelMode, pair: bool, codes: Option<IntegerCodes>) 
         stored_ch: channels.storage_count(),
         patch_radius: 4,
         search_radius: 2,
-        matrix_plane: 0,
     }
 }
 

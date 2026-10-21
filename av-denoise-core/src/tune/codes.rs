@@ -13,18 +13,6 @@ pub const MAX_INTEGER_DEPTH: u32 = 10;
 /// f32 holds every integer up to 2^24 exactly, so a sum of integer products below it never rounds.
 pub(crate) const F32_EXACT_LIMIT: u32 = 1 << 24;
 
-/// The most code values one exact f16 matrix product may sum.
-///
-/// Every partial sum of products of 8-bit parts then stays below 2^24, where f32 is still exact.
-pub const MATRIX_EXACT_VALUES: u32 = 258;
-
-// Clippy rejects a runtime `assert!` on constants, so the bound is checked at compile time.
-const _: () = assert!(
-    MATRIX_EXACT_VALUES * 255 * 255 < F32_EXACT_LIMIT
-        && (MATRIX_EXACT_VALUES + 1) * 255 * 255 >= F32_EXACT_LIMIT,
-    "MATRIX_EXACT_VALUES must be the largest count of 8-bit products that sums exactly in f32"
-);
-
 /// The largest squared difference of two codes at [MAX_INTEGER_DEPTH].
 const MAX_SQUARED_DIFFERENCE: u32 = ((1 << MAX_INTEGER_DEPTH) - 1) * ((1 << MAX_INTEGER_DEPTH) - 1);
 
@@ -39,9 +27,6 @@ const _: () = assert!(
     SLIDING_BLOCK * SLIDING_BLOCK * MAX_SQUARED_DIFFERENCE < F32_EXACT_LIMIT,
     "one channel of a sliding block must sum exactly in f32 at the deepest codes"
 );
-
-/// The bits each matrix part holds.
-const PART_BITS: u32 = 8;
 
 /// The integer codes a source's samples arrive as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -88,16 +73,6 @@ impl IntegerCodes {
         (1 << self.depth) - 1
     }
 
-    /// Whether codes split into a high and a low 8-bit part for matrix products.
-    pub fn wide(self) -> bool {
-        self.depth > PART_BITS
-    }
-
-    /// The shift that takes a code's high part down to 8 bits, 0 for 8-bit codes.
-    pub fn split_shift(self) -> u32 {
-        self.depth.saturating_sub(PART_BITS)
-    }
-
     /// The bytes one stored code takes, which is 2 at every depth.
     pub fn code_bytes(self) -> usize {
         size_of::<u16>()
@@ -117,10 +92,5 @@ impl IntegerCodes {
         let squared_max = (max_code * max_code) as f32;
 
         scale / squared_max
-    }
-
-    /// Whether a matrix product over `values` code values sums exactly.
-    pub fn matrix_exact(values: u32) -> bool {
-        values <= MATRIX_EXACT_VALUES
     }
 }

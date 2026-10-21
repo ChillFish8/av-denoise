@@ -178,8 +178,6 @@ pub struct WindowSite<R: Runtime> {
     pub stored_ch: u32,
     pub patch_radius: u32,
     pub search_radius: u32,
-    /// The device's matrix plane width with codes, or 0.
-    pub matrix_plane: u32,
 }
 
 /// Everything about a window launch that decides which candidates may run and what they allocate.
@@ -192,7 +190,6 @@ pub struct WindowShape {
     pub stored_ch: u32,
     pub patch_radius: u32,
     pub search_radius: u32,
-    pub matrix_plane: u32,
 }
 
 /// Whether `candidate` may run on a window of `shape`.
@@ -285,7 +282,6 @@ impl<R: Runtime> WindowSite<R> {
             stored_ch: self.stored_ch,
             patch_radius: self.patch_radius,
             search_radius: self.search_radius,
-            matrix_plane: self.matrix_plane,
         }
     }
 
