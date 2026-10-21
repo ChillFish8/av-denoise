@@ -7,6 +7,11 @@ pub mod bench_api;
 mod collab;
 mod engine;
 mod error;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "only the smoke tests call the matrix helpers")
+)]
+mod matrix;
 pub mod nl4d;
 pub mod nlmeans;
 mod options;

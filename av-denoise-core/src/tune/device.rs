@@ -1,9 +1,22 @@
+#[cfg(feature = "rocm")]
+use std::ffi::CStr;
+#[cfg(feature = "rocm")]
+use std::mem::MaybeUninit;
+use std::sync::OnceLock;
+
 use cubecl::hash::StableHasher;
 use cubecl::ir::features::{AtomicUsage, TypeUsage};
 use cubecl::ir::{DeviceProperties, ElemType, FloatKind, IntKind, StorageType, Type, UIntKind};
 use cubecl::prelude::*;
 
-use super::legality::offers_f16_matrix;
+use super::legality::{
+    HIP_RUNTIME,
+    INT8_PREFERENCE,
+    Int8Matrix,
+    compiles_matrix_products,
+    lists_int8_matrix,
+    offers_f16_matrix,
+};
 
 /// Which physical device and driver a tuning result was measured on.
 ///
@@ -58,15 +71,34 @@ pub struct DeviceLimits {
     pub f16_matrix: bool,
     /// Whether u16 storage buffers work.
     pub u16_buffer: bool,
+    /// The 16x16x16 int8 matrix product the device runs, when its operands also work in shaders.
+    pub int8_matrix: Option<Int8Matrix>,
 }
 
 impl DeviceLimits {
     pub fn from_client<R: Runtime>(client: &ComputeClient<R>) -> Self {
         let properties = client.properties();
-        Self::from_properties(properties)
+        let runtime = R::name(client);
+        let architectures = visible_architectures(runtime);
+
+        Self::for_runtime(properties, runtime, &architectures)
     }
 
-    pub fn from_properties(properties: &DeviceProperties) -> Self {
+    /// The limits `properties` give on `runtime`, without matrix products CubeCL cannot compile
+    /// for `architectures`.
+    pub fn for_runtime(properties: &DeviceProperties, runtime: &str, architectures: &[String]) -> Self {
+        let limits = Self::from_properties(properties);
+        let compiles = compiles_matrix_products(runtime, architectures);
+
+        if compiles {
+            limits
+        } else {
+            limits.without_matrix_products()
+        }
+    }
+
+    /// The limits as the runtime reports them, before any matrix rule.
+    pub(crate) fn from_properties(properties: &DeviceProperties) -> Self {
         let hardware = &properties.hardware;
 
         let f16_elem = ElemType::Float(FloatKind::F16);
@@ -86,7 +118,16 @@ impl DeviceLimits {
         let u16_type = StorageType::Scalar(u16_elem);
         let u16_usage = properties.type_usage(u16_type);
 
-        let f16_matrix = offers_f16_matrix(&properties.features.matmul.cmma);
+        let matrix_configs = &properties.features.matmul.cmma;
+        let f16_matrix = offers_f16_matrix(matrix_configs);
+        let int8_matrix = INT8_PREFERENCE.into_iter().find(|&element| {
+            let element_type = element.element();
+            let storage_type = StorageType::Scalar(element_type);
+            let usage = properties.type_usage(storage_type);
+            let listed = lists_int8_matrix(matrix_configs, element);
+
+            listed && usage.contains(TypeUsage::Arithmetic)
+        });
 
         Self {
             plane_size_min: hardware.plane_size_min,
@@ -100,6 +141,15 @@ impl DeviceLimits {
             int64_atomic_add: i64_arithmetic && i64_atomic_add,
             f16_matrix,
             u16_buffer: u16_usage.contains(TypeUsage::Buffer),
+            int8_matrix,
+        }
+    }
+
+    fn without_matrix_products(self) -> Self {
+        Self {
+            f16_matrix: false,
+            int8_matrix: None,
+            ..self
         }
     }
 
@@ -107,6 +157,61 @@ impl DeviceLimits {
     pub fn supports_f16_search(&self) -> bool {
         self.f16_buffer && self.f16_arithmetic
     }
+}
+
+/// The gfx architectures of every HIP device the process sees, or none on other runtimes.
+///
+/// A client does not say which device it runs on, so every visible device counts. An empty list
+/// on HIP means the architectures could not be read.
+pub fn visible_architectures(runtime: &str) -> Vec<String> {
+    if runtime != HIP_RUNTIME {
+        return Vec::new();
+    }
+
+    static ARCHITECTURES: OnceLock<Vec<String>> = OnceLock::new();
+    let architectures = ARCHITECTURES.get_or_init(hip_architectures);
+
+    architectures.clone()
+}
+
+#[cfg(feature = "rocm")]
+fn hip_architectures() -> Vec<String> {
+    let mut count = 0i32;
+
+    // SAFETY: `count` is a valid out pointer.
+    let status = unsafe { cubecl_hip_sys::hipGetDeviceCount(&mut count) };
+    if status != cubecl_hip_sys::HIP_SUCCESS {
+        return Vec::new();
+    }
+
+    let architectures: Option<Vec<String>> = (0..count).map(hip_architecture).collect();
+    architectures.unwrap_or_default()
+}
+
+#[cfg(feature = "rocm")]
+fn hip_architecture(device: i32) -> Option<String> {
+    let mut properties = MaybeUninit::<cubecl_hip_sys::hipDeviceProp_tR0600>::zeroed();
+    let properties_ptr = properties.as_mut_ptr();
+
+    // SAFETY: `properties_ptr` points at zeroed storage of the type HIP fills.
+    let status = unsafe { cubecl_hip_sys::hipGetDevicePropertiesR0600(properties_ptr, device) };
+    if status != cubecl_hip_sys::HIP_SUCCESS {
+        return None;
+    }
+
+    // SAFETY: the struct is plain data and starts zeroed, so every field holds a valid value.
+    let properties = unsafe { properties.assume_init() };
+    let name_ptr = properties.gcnArchName.as_ptr();
+    // SAFETY: HIP writes a NUL-terminated string into the fixed-size array.
+    let architecture = unsafe { CStr::from_ptr(name_ptr) };
+    let text = architecture.to_string_lossy();
+
+    Some(text.into_owned())
+}
+
+#[cfg(not(feature = "rocm"))]
+fn hip_architectures() -> Vec<String> {
+    Vec::new()
 }
 
 /// A device's identity and its limits.

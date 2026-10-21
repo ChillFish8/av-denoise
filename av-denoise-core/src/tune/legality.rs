@@ -1,9 +1,11 @@
 use std::collections::BTreeSet;
 
 use cubecl::features::MmaConfig;
-use cubecl::ir::{ElemType, FloatKind, StorageType};
+use cubecl::ir::{ElemType, FloatKind, IntKind, StorageType, UIntKind};
 
+use super::codes::IntegerCodes;
 use super::device::{DeviceIdentity, DeviceLimits, DeviceProfile};
+use crate::matrix::MATRIX_TILE;
 
 /// The PCI vendor id of NVIDIA.
 pub const NVIDIA_VENDOR_ID: u32 = 0x10DE;
@@ -20,8 +22,20 @@ pub const MIN_PLANE_SIZE: u32 = 8;
 /// The plane widths matrix candidates run at.
 pub const MATRIX_PLANE_WIDTHS: [u32; 2] = [32, 64];
 
-/// The side of the square f16 matrix tile the matrix candidates use.
-const F16_MATRIX_TILE: u32 = 16;
+/// The int8 products in the order they are preferred when a device lists both.
+pub(crate) const INT8_PREFERENCE: [Int8Matrix; 2] = [Int8Matrix::Unsigned, Int8Matrix::Signed];
+
+/// The name CubeCL's HIP runtime reports.
+pub const HIP_RUNTIME: &str = "hip";
+
+/// The gfx architecture prefix of RDNA 4 chips.
+const RDNA4_ARCH_PREFIX: &str = "gfx12";
+
+/// The bits a u8 operand holds.
+const UNSIGNED_OPERAND_BITS: u32 = 8;
+
+/// The bits an i8 operand holds without reaching its sign bit.
+const SIGNED_OPERAND_BITS: u32 = 7;
 
 /// The first CUDA compute capability with independent thread scheduling.
 const VOLTA_COMPUTE_CAPABILITY: u32 = 70;
@@ -225,9 +239,9 @@ pub fn offers_f16_matrix(configs: &BTreeSet<MmaConfig>) -> bool {
         a_type: half_type,
         b_type: half_type,
         cd_type: float_type,
-        m: F16_MATRIX_TILE,
-        n: F16_MATRIX_TILE,
-        k: F16_MATRIX_TILE,
+        m: MATRIX_TILE,
+        n: MATRIX_TILE,
+        k: MATRIX_TILE,
     };
 
     configs.contains(&config)
@@ -246,6 +260,139 @@ pub fn matrix_plane_width(limits: &DeviceLimits) -> Option<u32> {
     } else {
         None
     }
+}
+
+/// The 16x16x16 int8 matrix product a device runs, accumulating in i32.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Int8Matrix {
+    /// u8 times u8.
+    Unsigned,
+    /// i8 times i8.
+    Signed,
+}
+
+impl Int8Matrix {
+    /// The operand element of the product.
+    pub fn element(self) -> ElemType {
+        match self {
+            Int8Matrix::Unsigned => ElemType::UInt(UIntKind::U8),
+            Int8Matrix::Signed => ElemType::Int(IntKind::I8),
+        }
+    }
+
+    /// The bits one operand value holds without overflow.
+    fn value_bits(self) -> u32 {
+        match self {
+            Int8Matrix::Unsigned => UNSIGNED_OPERAND_BITS,
+            Int8Matrix::Signed => SIGNED_OPERAND_BITS,
+        }
+    }
+
+    /// The 16x16x16 config of the product, accumulating in i32.
+    fn config(self) -> MmaConfig {
+        let operand_elem = self.element();
+        let operand_type = StorageType::Scalar(operand_elem);
+        let accumulator_elem = ElemType::Int(IntKind::I32);
+        let accumulator_type = StorageType::Scalar(accumulator_elem);
+
+        MmaConfig {
+            a_type: operand_type,
+            b_type: operand_type,
+            cd_type: accumulator_type,
+            m: MATRIX_TILE,
+            n: MATRIX_TILE,
+            k: MATRIX_TILE,
+        }
+    }
+}
+
+/// How codes of one depth split into parts that fit an int8 operand, as a comptime kernel argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Int8Layout {
+    pub element: Int8Matrix,
+    /// Bits in the low part, or 0 when codes go in whole.
+    pub low_bits: u32,
+}
+
+impl Int8Layout {
+    /// The layout `element` takes for `codes`.
+    ///
+    /// Codes that fit the operand go in whole. Wider codes split, with the low part taking the bits
+    /// the high part cannot hold. Signed operands split codes in half, so both parts hold at most 5
+    /// bits at 10-bit depth.
+    pub fn for_codes(element: Int8Matrix, codes: IntegerCodes) -> Int8Layout {
+        let value_bits = element.value_bits();
+        let low_bits = if codes.depth <= value_bits {
+            0
+        } else {
+            match element {
+                Int8Matrix::Unsigned => codes.depth - value_bits,
+                Int8Matrix::Signed => codes.depth.div_ceil(2),
+            }
+        };
+
+        Int8Layout { element, low_bits }
+    }
+
+    /// The parts each code splits into, 1 or 2.
+    pub fn parts(self) -> u32 {
+        if self.low_bits == 0 { 1 } else { 2 }
+    }
+
+    /// The matrix products one patch pair takes, 1 or 4.
+    pub fn products(self) -> u32 {
+        let parts = self.parts();
+        parts * parts
+    }
+
+    /// The i32 accumulators one patch pair takes, 1 or 3.
+    ///
+    /// Both cross products share one accumulator.
+    pub fn accumulators(self) -> u32 {
+        if self.low_bits == 0 { 1 } else { 3 }
+    }
+}
+
+/// The int8 product `configs` offer, preferring u8 when both are listed.
+pub fn offers_int8_matrix(configs: &BTreeSet<MmaConfig>) -> Option<Int8Matrix> {
+    INT8_PREFERENCE
+        .into_iter()
+        .find(|&element| lists_int8_matrix(configs, element))
+}
+
+/// Whether `configs` hold the exact 16x16x16 config of `element`, accumulating in i32.
+pub fn lists_int8_matrix(configs: &BTreeSet<MmaConfig>, element: Int8Matrix) -> bool {
+    let config = element.config();
+    configs.contains(&config)
+}
+
+/// The plane width int8 matrix candidates run at, under the same rule as [matrix_plane_width].
+pub fn int8_matrix_plane_width(limits: &DeviceLimits) -> Option<u32> {
+    let width = limits.plane_size_max;
+    let supported = MATRIX_PLANE_WIDTHS.contains(&width);
+
+    if limits.int8_matrix.is_some() && supported {
+        Some(width)
+    } else {
+        None
+    }
+}
+
+/// Whether CubeCL compiles matrix products on `runtime` for devices of `architectures`.
+///
+/// CubeCL 0.10's HIP compiler emits RDNA 3 WMMA builtins for gfx12 chips, and LLVM aborts the
+/// process when it cannot select them. HIP devices of unknown architecture are refused too.
+pub fn compiles_matrix_products(runtime: &str, architectures: &[String]) -> bool {
+    if runtime != HIP_RUNTIME {
+        return true;
+    }
+
+    let known = !architectures.is_empty();
+    let rdna4 = architectures
+        .iter()
+        .any(|architecture| architecture.starts_with(RDNA4_ARCH_PREFIX));
+
+    known && !rdna4
 }
 
 /// Every device-id table with its name, for the ordering test.

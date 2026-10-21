@@ -235,6 +235,7 @@ fn pascal_vulkan_profile() -> DeviceProfile {
         int64_atomic_add: true,
         f16_matrix: false,
         u16_buffer: false,
+        int8_matrix: None,
     };
 
     DeviceProfile { identity, limits }
