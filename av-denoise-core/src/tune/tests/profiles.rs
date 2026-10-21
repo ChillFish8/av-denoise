@@ -1,7 +1,7 @@
-use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::engine::{nl4d_outputs_with, noisy_frames, run_engine_on_planes};
+use super::fixtures::{code_format, upload_codes};
 use super::runtime::{TestRuntime, packed_supported, test_client};
 use crate::bench_api::HostIo;
 use crate::collab::needs_warp_uniform_search;
@@ -95,27 +95,6 @@ fn code_cases() -> Vec<CodeCase> {
     }
 
     cases
-}
-
-fn code_format(codes: IntegerCodes) -> SampleFormat {
-    if codes.depth == 8 {
-        return SampleFormat::U8;
-    }
-
-    SampleFormat::U16 {
-        depth: codes.depth as u8,
-    }
-}
-
-/// Uploads `plane` in the wire layout of `codes`, one byte per 8-bit code and two otherwise.
-fn upload_codes(client: &ComputeClient<TestRuntime>, plane: &[u16], codes: IntegerCodes) -> Handle {
-    if codes.depth == 8 {
-        let bytes: Vec<u8> = plane.iter().map(|&code| code as u8).collect();
-        return client.create_from_slice(&bytes);
-    }
-
-    let bytes = u16::as_bytes(plane);
-    client.create_from_slice(bytes)
 }
 
 /// Every frame an nl4d engine under `profile` and `plan` emits for `case`.

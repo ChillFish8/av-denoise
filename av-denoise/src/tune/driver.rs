@@ -39,6 +39,7 @@ use super::mode::TuningMode;
 use super::setup::KernelSetup;
 use super::store::TuneStore;
 use super::{reload, remember, resolve};
+use crate::PrefilterMode;
 use crate::backend::selected_device;
 use crate::host::{Algorithm, Depth};
 use crate::planar::{
@@ -589,21 +590,33 @@ fn drive_until_settled(
 
 /// The profiles worth comparing with the baseline for this denoiser on `device`.
 ///
-/// Every profile here differs from the baseline on this device for a `depth` source. NLMeans has
-/// none.
+/// Every profile here differs from the baseline on this device for a `depth` source. NLMeans is
+/// offered only the integer search, and only without a prefilter.
 pub(crate) fn alternative_profiles_for(
     algorithm: &Algorithm,
     depth: Depth,
     device: &DeviceProfile,
 ) -> Vec<PipelineProfile> {
-    let is_nl4d = matches!(algorithm, Algorithm::Nl4d(_));
-    if !is_nl4d {
-        return Vec::new();
+    let nlmeans_prefilter = match algorithm {
+        Algorithm::Nlmeans(options) => Some(options.prefilter),
+        Algorithm::NlmeansHq(options) => Some(options.nlm.prefilter),
+        Algorithm::Nl4d(_) => None,
+    };
+
+    if let Some(prefilter) = nlmeans_prefilter {
+        let unfiltered = prefilter == PrefilterMode::None;
+        let offered = unfiltered && integer_search_applies(depth, device);
+        if !offered {
+            return Vec::new();
+        }
+
+        return vec![PipelineProfile::IntegerSearch];
     }
 
+    // Every nlmeans variant has returned, so only nl4d reaches here.
     let mut profiles = Vec::new();
 
-    if f32_profile_applies(is_nl4d, device) {
+    if f32_profile_applies(true, device) {
         profiles.push(PipelineProfile::F32Search);
     }
 

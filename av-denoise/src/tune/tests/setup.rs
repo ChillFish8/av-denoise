@@ -1,5 +1,11 @@
-use av_denoise_core::Nl4dOptions;
 use av_denoise_core::tune::{DeviceIdentity, DeviceLimits, DeviceProfile, PipelineProfile};
+use av_denoise_core::{
+    DEFAULT_PILOT_STRENGTH_SCALE,
+    Nl4dOptions,
+    NlmeansHqOptions,
+    NlmeansOptions,
+    PrefilterMode,
+};
 
 use crate::tune::driver::{alternative_profiles_for, f32_profile_applies};
 use crate::tune::{KernelRequest, KernelSetup, TuningMode, engine_kernels};
@@ -46,7 +52,7 @@ fn the_f32_profile_applies_to_nl4d_where_f16_is_legal() {
 }
 
 #[test]
-fn only_nl4d_has_alternative_profiles() {
+fn nlmeans_is_offered_only_the_integer_search() {
     let device = r9700_profile();
     let nlmeans_algorithm = Algorithm::default();
     let nl4d_algorithm = nl4d();
@@ -54,9 +60,41 @@ fn only_nl4d_has_alternative_profiles() {
     let nlmeans = alternative_profiles_for(&nlmeans_algorithm, Depth::Eight, &device);
     let nl4d = alternative_profiles_for(&nl4d_algorithm, Depth::Eight, &device);
 
-    assert!(nlmeans.is_empty());
+    assert_eq!(nlmeans, vec![PipelineProfile::IntegerSearch]);
     assert!(nl4d.contains(&PipelineProfile::SplitSearch));
     assert!(nl4d.contains(&PipelineProfile::F32Search));
+}
+
+#[test]
+fn a_prefiltered_nlmeans_is_not_offered_integer_search() {
+    let device = r9700_profile();
+    let pilot = PrefilterMode::NlmSpatial {
+        strength_scale: DEFAULT_PILOT_STRENGTH_SCALE,
+    };
+    let bilateral = PrefilterMode::Bilateral {
+        sigma_s: 3.0,
+        sigma_r: 0.02,
+    };
+
+    for prefilter in [pilot, bilateral] {
+        let fast = nlmeans_with(prefilter);
+        let hq = nlmeans_hq_with(prefilter);
+
+        let fast_profiles = alternative_profiles_for(&fast, Depth::Eight, &device);
+        let hq_profiles = alternative_profiles_for(&hq, Depth::Eight, &device);
+
+        assert!(fast_profiles.is_empty(), "{prefilter:?}: {fast_profiles:?}");
+        assert!(hq_profiles.is_empty(), "{prefilter:?}: {hq_profiles:?}");
+    }
+
+    let unfiltered_fast = nlmeans_with(PrefilterMode::None);
+    let unfiltered_hq = nlmeans_hq_with(PrefilterMode::None);
+
+    let fast_profiles = alternative_profiles_for(&unfiltered_fast, Depth::Eight, &device);
+    let hq_profiles = alternative_profiles_for(&unfiltered_hq, Depth::Eight, &device);
+
+    assert_eq!(fast_profiles, vec![PipelineProfile::IntegerSearch]);
+    assert_eq!(hq_profiles, vec![PipelineProfile::IntegerSearch]);
 }
 
 #[test]
@@ -107,11 +145,14 @@ fn integer_search_is_offered_only_for_eight_and_ten_bit_sources() {
         "{twelve_bit:?}"
     );
 
-    for depth in [Depth::Eight, Depth::Ten, Depth::Twelve] {
+    for depth in [Depth::Eight, Depth::Ten] {
         let nlmeans = alternative_profiles_for(&nlmeans_algorithm, depth, &device);
 
-        assert!(nlmeans.is_empty(), "{depth:?}: {nlmeans:?}");
+        assert_eq!(nlmeans, vec![PipelineProfile::IntegerSearch], "{depth:?}");
     }
+
+    let twelve_bit_nlmeans = alternative_profiles_for(&nlmeans_algorithm, Depth::Twelve, &device);
+    assert!(twelve_bit_nlmeans.is_empty(), "{twelve_bit_nlmeans:?}");
 }
 
 #[test]
@@ -134,6 +175,28 @@ fn integer_search_needs_the_code_storage_type() {
 fn nl4d() -> Algorithm {
     let options = Nl4dOptions::default();
     Algorithm::Nl4d(options)
+}
+
+fn nlmeans_with(prefilter: PrefilterMode) -> Algorithm {
+    let options = NlmeansOptions {
+        prefilter,
+        ..NlmeansOptions::default()
+    };
+
+    Algorithm::Nlmeans(options)
+}
+
+fn nlmeans_hq_with(prefilter: PrefilterMode) -> Algorithm {
+    let nlm = NlmeansOptions {
+        prefilter,
+        ..NlmeansOptions::default()
+    };
+    let options = NlmeansHqOptions {
+        nlm,
+        ..NlmeansHqOptions::default()
+    };
+
+    Algorithm::NlmeansHq(options)
 }
 
 /// An AMD Radeon AI PRO R9700 under Vulkan.

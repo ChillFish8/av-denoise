@@ -8,11 +8,14 @@ use crate::nlmeans::kernels::{
     nlm_fused_pair_accumulate_window_ref,
     nlm_fused_single_window,
     nlm_fused_single_window_ref,
+    nlm_int_pair_window,
+    nlm_int_single_window,
 };
-use crate::tune::fidelity::{CompareResult, Fidelity, PlaneDiff, diff_plane};
+use crate::tune::fidelity::{CompareResult, ErrorBound, Fidelity, IntegerBound, PlaneDiff, diff_plane};
 use crate::tune::gpu::{bind, read_f32};
 use crate::tune::key::SiteKey;
 use crate::tune::site::{LaunchShape, SiteCandidate, VariantSite};
+use crate::tune::{DeviceLimits, IntegerCodes, Legality};
 
 /// The lowest PSNR a separable candidate may show against the baseline on any plane.
 pub const SEPARABLE_MIN_PSNR: f64 = 80.0;
@@ -23,7 +26,8 @@ pub const SEPARABLE_MAX_ABS: f32 = 1.0e-3;
 /// A cube shape for the windowed NLM kernels, with direct or separable patch sums.
 ///
 /// Each pixel walks the same search window in the same order whatever the cube shape, so the direct
-/// shapes are bit identical. Separable sums add the same distances in another order.
+/// shapes are bit identical. Separable sums add the same distances in another order. `ScalarInt`
+/// sums exact integer SSDs over the code ring, which round differently from the float distances.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowCandidate {
     Block32x8,
@@ -32,16 +36,29 @@ pub enum WindowCandidate {
     Separable32x8,
     Separable32x16,
     Separable16x16,
+    ScalarInt,
 }
 
 impl WindowCandidate {
     /// The cube's width and height in threads.
     pub fn block(self) -> (u32, u32) {
         match self {
-            WindowCandidate::Block32x8 | WindowCandidate::Separable32x8 => (32, 8),
+            WindowCandidate::Block32x8 | WindowCandidate::Separable32x8 | WindowCandidate::ScalarInt => {
+                (32, 8)
+            },
             WindowCandidate::Block32x16 | WindowCandidate::Separable32x16 => (32, 16),
             WindowCandidate::Block16x16 | WindowCandidate::Separable16x16 => (16, 16),
         }
+    }
+
+    /// The width and height in pixels of the block one cube covers.
+    pub fn pixel_block(self) -> (u32, u32) {
+        self.block()
+    }
+
+    /// Whether the candidate reads the integer code ring.
+    pub fn integer(self) -> bool {
+        self == WindowCandidate::ScalarInt
     }
 
     /// Whether each patch sums as rows, then as a column of row sums.
@@ -64,6 +81,7 @@ impl SiteCandidate for WindowCandidate {
         WindowCandidate::Separable32x8,
         WindowCandidate::Separable32x16,
         WindowCandidate::Separable16x16,
+        WindowCandidate::ScalarInt,
     ];
 
     fn name(self) -> &'static str {
@@ -74,10 +92,20 @@ impl SiteCandidate for WindowCandidate {
             WindowCandidate::Separable32x8 => "32x8_separable",
             WindowCandidate::Separable32x16 => "32x16_separable",
             WindowCandidate::Separable16x16 => "16x16_separable",
+            WindowCandidate::ScalarInt => "scalar_int",
         }
     }
 
     fn fidelity(self) -> Fidelity {
+        if self.integer() {
+            let bound = ErrorBound {
+                min_psnr: SEPARABLE_MIN_PSNR,
+                max_abs: SEPARABLE_MAX_ABS,
+            };
+            let reference = IntegerBound::Bound(bound);
+            return Fidelity::ExactInteger { reference };
+        }
+
         if self.separable() {
             return Fidelity::Rounding {
                 min_psnr: SEPARABLE_MIN_PSNR,
@@ -118,6 +146,17 @@ pub struct ConfidenceBinding {
     pub blocks_y: u32,
 }
 
+/// The integer code ring a window's integer candidates read.
+#[derive(Debug, Clone)]
+pub struct WindowCodes {
+    /// A u16 copy of the site's `input`, with the same layout and length.
+    pub ring: Handle,
+    pub codes: IntegerCodes,
+    /// The factor that turns an integer SSD into the float kernels' distance, from
+    /// [IntegerCodes::inv_scale2](crate::tune::IntegerCodes::inv_scale2).
+    pub inv_scale2: f32,
+}
+
 /// One windowed NLM launch over the whole search window.
 #[derive(Clone)]
 pub struct WindowSite<R: Runtime> {
@@ -126,7 +165,9 @@ pub struct WindowSite<R: Runtime> {
     pub input: Handle,
     /// The prefiltered ring the distances read, when the pipeline has one.
     pub reference: Option<Handle>,
-    /// Elements in `input`, and in `reference` when it is set.
+    /// The code copy of `input`, when the pipeline keeps one and has no reference.
+    pub codes: Option<WindowCodes>,
+    /// Elements in `input`, and in `reference` and the code ring when they are set.
     pub ring_len: usize,
     pub outputs: AccumOutputs,
     pub frame_t: u32,
@@ -137,6 +178,88 @@ pub struct WindowSite<R: Runtime> {
     pub stored_ch: u32,
     pub patch_radius: u32,
     pub search_radius: u32,
+    /// The device's matrix plane width with codes, or 0.
+    pub matrix_plane: u32,
+}
+
+/// Everything about a window launch that decides which candidates may run and what they allocate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowShape {
+    pub pair: bool,
+    pub codes: Option<IntegerCodes>,
+    pub has_reference: bool,
+    pub channels: u32,
+    pub stored_ch: u32,
+    pub patch_radius: u32,
+    pub search_radius: u32,
+    pub matrix_plane: u32,
+}
+
+/// Whether `candidate` may run on a window of `shape`.
+///
+/// Without codes the six float shapes run. With codes the baseline runs, and `ScalarInt` runs when
+/// the window has no reference and the device can store the codes.
+pub fn window_candidate_legal(
+    candidate: WindowCandidate,
+    shape: &WindowShape,
+    limits: &DeviceLimits,
+) -> bool {
+    let Some(codes) = shape.codes else {
+        return !candidate.integer();
+    };
+
+    match candidate {
+        WindowCandidate::Block32x8 => true,
+        WindowCandidate::ScalarInt => !shape.has_reference && codes.storable(limits),
+        _ => false,
+    }
+}
+
+/// The bytes of every shared buffer `candidate` allocates on a window of `shape`.
+///
+/// A float shape holds the expanded centre tile of f32 lanes and, per direction, a distance tile
+/// and its row-sum buffer. `ScalarInt` holds the centre tile as codes and, per direction, an i32
+/// distance tile. Each of its tiles counts one spare word, the size of a float shape's row-sum
+/// placeholder, so both counts keep the same margin.
+pub fn window_shared_bytes(candidate: WindowCandidate, shape: &WindowShape) -> usize {
+    let (block_x, block_y) = candidate.block();
+    let halo = 2 * shape.patch_radius;
+    let reach = halo + 2 * shape.search_radius;
+    let expanded = ((block_x + reach) * (block_y + reach)) as usize;
+    let tile = ((block_x + halo) * (block_y + halo)) as usize;
+    let directions = if shape.pair { 2 } else { 1 };
+    let stored_ch = shape.stored_ch as usize;
+
+    if candidate.integer() {
+        let code_bytes = shape.codes.map_or(size_of::<u16>(), IntegerCodes::code_bytes);
+        let centre_bytes = expanded * stored_ch * code_bytes;
+        let tile_bytes = (tile + 1) * size_of::<i32>();
+
+        return centre_bytes + directions * tile_bytes;
+    }
+
+    let separable = candidate.separable();
+    let hsum = hsum_elements(separable, block_x, block_y, shape.patch_radius) as usize;
+    let vector_bytes = stored_ch * size_of::<f32>();
+
+    expanded * vector_bytes + directions * (tile + hsum) * size_of::<f32>()
+}
+
+/// Whether `candidate` is legal on a window of `shape` and its shared memory, threads and cube shape
+/// fit `limits`, as [VariantSite::fits](crate::tune::VariantSite::fits) checks them.
+///
+/// Every candidate works on any plane width, so no plane check applies.
+pub fn window_candidate_fits(candidate: WindowCandidate, shape: &WindowShape, limits: &DeviceLimits) -> bool {
+    let (block_x, block_y) = candidate.block();
+    let shared_bytes = window_shared_bytes(candidate, shape);
+    let (max_x, max_y, _) = limits.max_cube_dim;
+
+    let legal = window_candidate_legal(candidate, shape, limits);
+    let shared_fits = shared_bytes <= limits.max_shared_bytes;
+    let units_fit = block_x * block_y <= limits.max_units_per_cube;
+    let dims_fit = block_x <= max_x && block_y <= max_y;
+
+    legal && shared_fits && units_fit && dims_fit
 }
 
 /// The grid and cube one candidate launches.
@@ -149,17 +272,137 @@ struct WindowGrid {
 }
 
 impl<R: Runtime> WindowSite<R> {
+    /// The shape the pure legality and byte rules read.
+    pub fn window_shape(&self) -> WindowShape {
+        let pair = matches!(self.pass, WindowPass::Pair { .. });
+        let codes = self.codes.as_ref().map(|window_codes| window_codes.codes);
+
+        WindowShape {
+            pair,
+            codes,
+            has_reference: self.reference.is_some(),
+            channels: self.channels,
+            stored_ch: self.stored_ch,
+            patch_radius: self.patch_radius,
+            search_radius: self.search_radius,
+            matrix_plane: self.matrix_plane,
+        }
+    }
+
     fn grid(&self, candidate: WindowCandidate) -> WindowGrid {
         let (block_x, block_y) = candidate.block();
-        let cubes_x = self.width.div_ceil(block_x);
-        let cubes_y = self.height.div_ceil(block_y);
+        let (pixels_x, pixels_y) = candidate.pixel_block();
+        let cubes_x = self.width.div_ceil(pixels_x);
+        let cubes_y = self.height.div_ceil(pixels_y);
 
         WindowGrid {
             cube_count: CubeCount::new_2d(cubes_x, cubes_y),
             cube_dim: CubeDim::new_2d(block_x, block_y),
-            block_x,
-            block_y,
+            block_x: pixels_x,
+            block_y: pixels_y,
             separable: candidate.separable(),
+        }
+    }
+
+    /// The code ring and its scale, which an integer candidate cannot launch without.
+    fn integer_codes(&self) -> &WindowCodes {
+        self.codes
+            .as_ref()
+            .expect("an integer window candidate needs the code ring")
+    }
+
+    fn launch_single_int(
+        &self,
+        grid: WindowGrid,
+        offsets: &Handle,
+        offsets_len: usize,
+        outputs: &AccumOutputs,
+    ) {
+        let window_codes = self.integer_codes();
+        let vector_size = self.stored_ch as usize;
+        let input = bind::<R>(&self.input, self.ring_len);
+        let codes = bind::<R>(&window_codes.ring, self.ring_len);
+        let accum = bind::<R>(&outputs.accum, outputs.accum_len);
+        let weight_sum = bind::<R>(&outputs.weight_sum, outputs.pixels);
+        let max_weight = bind::<R>(&outputs.max_weight, outputs.pixels);
+        let offsets = bind::<R>(offsets, offsets_len);
+
+        unsafe {
+            nlm_int_single_window::launch_unchecked::<u16, R>(
+                &self.client,
+                grid.cube_count,
+                grid.cube_dim,
+                vector_size,
+                input,
+                codes,
+                accum,
+                weight_sum,
+                max_weight,
+                self.frame_t,
+                self.h2_inv_norm,
+                window_codes.inv_scale2,
+                offsets,
+                self.width,
+                self.height,
+                self.channels,
+                self.patch_radius,
+                self.search_radius,
+                grid.block_x,
+                grid.block_y,
+            );
+        }
+    }
+
+    fn launch_pair_int(
+        &self,
+        grid: WindowGrid,
+        frames: (u32, u32),
+        noise_offset: f32,
+        confidence: &ConfidenceBinding,
+        outputs: &AccumOutputs,
+    ) {
+        let (frame_fwd, frame_bwd) = frames;
+        let window_codes = self.integer_codes();
+        let vector_size = self.stored_ch as usize;
+        let input = bind::<R>(&self.input, self.ring_len);
+        let codes = bind::<R>(&window_codes.ring, self.ring_len);
+        let accum = bind::<R>(&outputs.accum, outputs.accum_len);
+        let weight_sum = bind::<R>(&outputs.weight_sum, outputs.pixels);
+        let max_weight = bind::<R>(&outputs.max_weight, outputs.pixels);
+        let conf_fwd = bind::<R>(&confidence.forward, confidence.len);
+        let conf_bwd = bind::<R>(&confidence.backward, confidence.len);
+
+        unsafe {
+            nlm_int_pair_window::launch_unchecked::<u16, R>(
+                &self.client,
+                grid.cube_count,
+                grid.cube_dim,
+                vector_size,
+                input,
+                codes,
+                accum,
+                weight_sum,
+                max_weight,
+                conf_fwd,
+                conf_bwd,
+                confidence.enabled,
+                self.frame_t,
+                frame_fwd,
+                frame_bwd,
+                self.h2_inv_norm,
+                window_codes.inv_scale2,
+                noise_offset,
+                self.width,
+                self.height,
+                self.channels,
+                self.patch_radius,
+                self.search_radius,
+                grid.block_x,
+                grid.block_y,
+                confidence.step,
+                confidence.blocks_x,
+                confidence.blocks_y,
+            );
         }
     }
 
@@ -332,7 +575,7 @@ impl<R: Runtime> VariantSite<R> for WindowSite<R> {
         };
         let has_reference = self.reference.is_some();
 
-        SiteKey::builder(NLM_WINDOW, self.width, self.height)
+        let builder = SiteKey::builder(NLM_WINDOW, self.width, self.height)
             .param("kernel", kernel)
             .param("ref", u8::from(has_reference))
             .param("conf", u8::from(confidence))
@@ -340,8 +583,15 @@ impl<R: Runtime> VariantSite<R> for WindowSite<R> {
             .param("ch", self.channels)
             .param("stored", self.stored_ch)
             .param("pr", self.patch_radius)
-            .param("sr", self.search_radius)
-            .build()
+            .param("sr", self.search_radius);
+
+        // Only a key with codes names their depth, so every float key keeps its stored text.
+        if let Some(window_codes) = &self.codes {
+            let integer_builder = builder.param("int", window_codes.codes.depth);
+            return integer_builder.build();
+        }
+
+        builder.build()
     }
 
     fn shape(&self, candidate: WindowCandidate) -> LaunchShape {
@@ -350,28 +600,21 @@ impl<R: Runtime> VariantSite<R> for WindowSite<R> {
     }
 
     fn shared_bytes(&self, candidate: WindowCandidate) -> usize {
-        let (block_x, block_y) = candidate.block();
-        let separable = candidate.separable();
-        let halo = 2 * self.patch_radius;
-        let reach = halo + 2 * self.search_radius;
-        let expanded = ((block_x + reach) * (block_y + reach)) as usize;
-        let tile = ((block_x + halo) * (block_y + halo)) as usize;
-        let hsum = hsum_elements(separable, block_x, block_y, self.patch_radius) as usize;
-        let vector_bytes = self.stored_ch as usize * size_of::<f32>();
-        let distance_tiles = match self.pass {
-            WindowPass::Single { .. } => 1,
-            WindowPass::Pair { .. } => 2,
-        };
-
-        expanded * vector_bytes + distance_tiles * (tile + hsum) * size_of::<f32>()
+        let shape = self.window_shape();
+        window_shared_bytes(candidate, &shape)
     }
 
     fn launch(&self, candidate: WindowCandidate, outputs: &AccumOutputs) {
         let grid = self.grid(candidate);
+        let integer = candidate.integer();
 
         match &self.pass {
             WindowPass::Single { offsets, offsets_len } => {
-                self.launch_single(grid, offsets, *offsets_len, outputs);
+                if integer {
+                    self.launch_single_int(grid, offsets, *offsets_len, outputs);
+                } else {
+                    self.launch_single(grid, offsets, *offsets_len, outputs);
+                }
             },
             WindowPass::Pair {
                 frame_fwd,
@@ -380,7 +623,12 @@ impl<R: Runtime> VariantSite<R> for WindowSite<R> {
                 confidence,
             } => {
                 let frames = (*frame_fwd, *frame_bwd);
-                self.launch_pair(grid, frames, *noise_offset, confidence, outputs);
+
+                if integer {
+                    self.launch_pair_int(grid, frames, *noise_offset, confidence, outputs);
+                } else {
+                    self.launch_pair(grid, frames, *noise_offset, confidence, outputs);
+                }
             },
         }
     }
@@ -407,6 +655,22 @@ impl<R: Runtime> VariantSite<R> for WindowSite<R> {
             Fidelity::Exact => compare_accum(&self.client, baseline, candidate, fidelity),
             _ => compare_estimates(&self.client, baseline, candidate, self.stored_ch, fidelity),
         }
+    }
+
+    fn integer_reference(&self) -> Option<WindowCandidate> {
+        self.codes.as_ref()?;
+
+        Some(WindowCandidate::ScalarInt)
+    }
+
+    fn legal(&self, candidate: WindowCandidate, limits: &DeviceLimits, _legality: &Legality) -> bool {
+        let shape = self.window_shape();
+        window_candidate_legal(candidate, &shape, limits)
+    }
+
+    fn fits(&self, candidate: WindowCandidate, limits: &DeviceLimits, _legality: &Legality) -> bool {
+        let shape = self.window_shape();
+        window_candidate_fits(candidate, &shape, limits)
     }
 }
 

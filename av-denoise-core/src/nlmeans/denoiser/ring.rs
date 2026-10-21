@@ -212,13 +212,6 @@ impl<R: Runtime> NlmDenoiser<R> {
     }
 
     /// The code copy of the compensated ring, when it exists.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no integer window candidate reads the compensated codes yet"
-        )
-    )]
     pub(crate) fn compensated_code_ring(&self) -> Option<&Handle> {
         self.compensated_code_buf.as_ref()
     }

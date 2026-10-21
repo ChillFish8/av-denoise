@@ -28,8 +28,11 @@ use crate::tune::sites::{
 use crate::tune::{
     CandidateRecord,
     CompileProgress,
+    ErrorBound,
     Fidelity,
     FidelityClass,
+    IntegerBound,
+    IntegerCodes,
     KernelPlan,
     PlaneDiff,
     SiteCandidate,
@@ -49,6 +52,8 @@ fn window_candidate_names_round_trip() {
         assert_eq!(parsed, Some(candidate), "{name}");
     }
 
+    let scalar_int = WindowCandidate::from_name("scalar_int");
+    assert_eq!(scalar_int, Some(WindowCandidate::ScalarInt));
     assert_eq!(WindowCandidate::baseline(), WindowCandidate::Block32x8);
 }
 
@@ -91,6 +96,17 @@ fn window_keys_name_the_kernel_and_every_compiled_value() {
     assert_eq!(
         key.as_str(),
         "nlm_window|w2048|h2048|kernel=pair|ref=1|conf=1|step=8|ch=2|stored=2|pr=2|sr=3"
+    );
+
+    let mut integer_spec = WindowSpec::single(1920, 1080, ChannelMode::Luma);
+    integer_spec.codes = Some(IntegerCodes { depth: 10 });
+    let integer_site = window_site(&client, &integer_spec);
+
+    let integer_key = integer_site.key();
+
+    assert_eq!(
+        integer_key.as_str(),
+        "nlm_window|w2048|h2048|kernel=single|ref=0|conf=0|step=0|ch=1|stored=1|pr=2|sr=3|int=10"
     );
 }
 
@@ -190,7 +206,7 @@ fn assert_forced_shapes_match(algorithm: NlmeansAlgorithm, label: &str) {
         let baseline = nlmeans_outputs(algorithm, channels, width, height, &frames, baseline_plan);
 
         for &candidate in WindowCandidate::ALL {
-            if candidate.separable() {
+            if candidate.fidelity() != Fidelity::Exact {
                 continue;
             }
 
@@ -234,12 +250,19 @@ fn separable_candidates_carry_the_rounding_bound() {
         min_psnr: SEPARABLE_MIN_PSNR,
         max_abs: SEPARABLE_MAX_ABS,
     };
+    let integer_bound = ErrorBound {
+        min_psnr: SEPARABLE_MIN_PSNR,
+        max_abs: SEPARABLE_MAX_ABS,
+    };
+    let integer = Fidelity::ExactInteger {
+        reference: IntegerBound::Bound(integer_bound),
+    };
 
     for &candidate in WindowCandidate::ALL {
-        let expected = if candidate.separable() {
-            bound
-        } else {
-            Fidelity::Exact
+        let expected = match (candidate.separable(), candidate.integer()) {
+            (true, _) => bound,
+            (false, true) => integer,
+            (false, false) => Fidelity::Exact,
         };
         assert_eq!(candidate.fidelity(), expected, "{}", candidate.name());
     }

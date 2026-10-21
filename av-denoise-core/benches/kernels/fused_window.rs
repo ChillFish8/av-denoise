@@ -2,11 +2,12 @@ use av_denoise_core::bench_api::tune_sites::{
     AccumOutputs,
     ConfidenceBinding,
     WindowCandidate,
+    WindowCodes,
     WindowPass,
     WindowSite,
     allocate_accum,
 };
-use av_denoise_core::tune::{SiteCandidate, VariantSite};
+use av_denoise_core::tune::{IntegerCodes, SiteCandidate, VariantSite};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 
@@ -58,12 +59,39 @@ impl WindowKernel {
 }
 
 /// One windowed kernel at one candidate's cube shape over a 1080p frame.
+///
+/// With `codes` the site also reads the frame rounded to codes of that depth.
 pub struct WindowBench<R: Runtime> {
     pub client: ComputeClient<R>,
     pub channels: u32,
     pub channel_name: &'static str,
     pub kernel: WindowKernel,
     pub candidate: WindowCandidate,
+    pub codes: Option<IntegerCodes>,
+}
+
+impl<R: Runtime> WindowBench<R> {
+    /// `frame` rounded to `codes` and uploaded as the u16 code ring.
+    fn code_ring(&self, frame: &[f32], codes: IntegerCodes) -> WindowCodes {
+        let max_value = codes.max_code() as f32;
+        let code_values: Vec<u16> = frame
+            .iter()
+            .map(|&value| {
+                let clamped = value.clamp(0.0, 1.0);
+                let code = (clamped * max_value).round();
+                code as u16
+            })
+            .collect();
+        let code_bytes = u16::as_bytes(&code_values);
+        let ring = self.client.create_from_slice(code_bytes);
+        let inv_scale2 = codes.inv_scale2(self.channels);
+
+        WindowCodes {
+            ring,
+            codes,
+            inv_scale2,
+        }
+    }
 }
 
 impl<R: Runtime> Benchmark for WindowBench<R> {
@@ -81,6 +109,7 @@ impl<R: Runtime> Benchmark for WindowBench<R> {
             .has_reference()
             .then(|| self.client.create_from_slice(frame_bytes));
         let outputs = allocate_accum(&self.client, pixels * stored_ch as usize, pixels);
+        let codes = self.codes.map(|codes| self.code_ring(&frame, codes));
 
         let pass = if self.kernel.is_pair() {
             let placeholder = self.client.empty(size_of::<f32>());
@@ -117,6 +146,7 @@ impl<R: Runtime> Benchmark for WindowBench<R> {
             pass,
             input,
             reference,
+            codes,
             ring_len: frame.len(),
             outputs: outputs.clone(),
             frame_t: 0,
@@ -127,6 +157,7 @@ impl<R: Runtime> Benchmark for WindowBench<R> {
             stored_ch,
             patch_radius: PATCH_RADIUS,
             search_radius: SEARCH_RADIUS,
+            matrix_plane: 0,
         };
 
         (site, outputs)
@@ -139,9 +170,14 @@ impl<R: Runtime> Benchmark for WindowBench<R> {
         Ok(())
     }
 
+    /// `<site>/<candidate>/<kernel>_1080p_<channels>`, with `_10bit` after the channels for 10-bit
+    /// codes.
     fn name(&self) -> String {
+        let ten_bit = self.codes.is_some_and(|codes| codes.depth == 10);
+        let suffix = if ten_bit { "_10bit" } else { "" };
+
         format!(
-            "{}/{}/{}_1080p_{}",
+            "{}/{}/{}_1080p_{}{suffix}",
             WindowCandidate::SITE,
             self.candidate.name(),
             self.kernel.label(),

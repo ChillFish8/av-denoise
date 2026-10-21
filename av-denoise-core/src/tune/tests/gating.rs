@@ -22,9 +22,14 @@ use crate::tune::sites::{
     IntegerVariant,
     SearchVariant,
     Walk,
+    WindowCandidate,
+    WindowShape,
     search_candidate_fits,
     search_candidate_legal,
     search_shared_bytes,
+    window_candidate_fits,
+    window_candidate_legal,
+    window_shared_bytes,
 };
 use crate::tune::{DeviceLimits, IntegerCodes, Legality, SiteCandidate, matrix_plane_width};
 
@@ -408,4 +413,116 @@ fn integer_search_offers_only_uniform_walks_where_the_device_needs_them() {
     let uniform = integer_search(Walk::Uniform);
 
     assert_eq!(legal, vec![uniform_baseline, uniform]);
+}
+
+/// A window shape of `channels` at patch radius 4 and search radius 2, the bench geometry.
+fn window_shape(channels: ChannelMode, pair: bool, codes: Option<IntegerCodes>) -> WindowShape {
+    WindowShape {
+        pair,
+        codes,
+        has_reference: false,
+        channels: channels.count(),
+        stored_ch: channels.storage_count(),
+        patch_radius: 4,
+        search_radius: 2,
+        matrix_plane: 0,
+    }
+}
+
+/// Every window candidate legal on `shape`, on an RDNA 4 card.
+fn legal_windows(shape: &WindowShape) -> Vec<WindowCandidate> {
+    let limits = FakeDevice::rdna4().limits();
+
+    WindowCandidate::ALL
+        .iter()
+        .copied()
+        .filter(|&candidate| window_candidate_legal(candidate, shape, &limits))
+        .collect()
+}
+
+#[test]
+fn integer_windows_need_codes_and_an_unfiltered_reference() {
+    let eight_bit = Some(IntegerCodes { depth: 8 });
+    let float_shapes = vec![
+        WindowCandidate::Block32x8,
+        WindowCandidate::Block32x16,
+        WindowCandidate::Block16x16,
+        WindowCandidate::Separable32x8,
+        WindowCandidate::Separable32x16,
+        WindowCandidate::Separable16x16,
+    ];
+    let integer_shapes = vec![WindowCandidate::Block32x8, WindowCandidate::ScalarInt];
+    let baseline_only = vec![WindowCandidate::Block32x8];
+
+    for pair in [false, true] {
+        let unfiltered = window_shape(ChannelMode::Luma, pair, eight_bit);
+        let filtered = WindowShape {
+            has_reference: true,
+            ..unfiltered
+        };
+        let without_codes = window_shape(ChannelMode::Luma, pair, None);
+
+        let integer_route = legal_windows(&unfiltered);
+        let with_reference = legal_windows(&filtered);
+        let float_route = legal_windows(&without_codes);
+
+        assert_eq!(integer_route, integer_shapes, "pair {pair}");
+        assert_eq!(with_reference, baseline_only, "pair {pair}");
+        assert_eq!(float_route, float_shapes, "pair {pair}");
+    }
+
+    let mut no_storage = FakeDevice::rdna4();
+    no_storage.u16_usage = EnumSet::empty();
+    let no_storage_limits = no_storage.limits();
+    let shape = window_shape(ChannelMode::Luma, false, eight_bit);
+    let stored = window_candidate_legal(WindowCandidate::ScalarInt, &shape, &no_storage_limits);
+    assert!(!stored, "the integer window needs u16 storage");
+}
+
+#[test]
+fn the_scalar_int_window_counts_its_code_tile_and_integer_distance_tiles() {
+    let ten_bit = Some(IntegerCodes { depth: 10 });
+    let single = window_shape(ChannelMode::Luma, false, ten_bit);
+    let pair = window_shape(ChannelMode::Luma, true, ten_bit);
+
+    // Centre tile: (32 + 8 + 4) x (8 + 8 + 4) codes of 2 bytes = 1760 bytes.
+    // One distance tile: (32 + 8) x (8 + 8) i32 and one spare word = 2564 bytes.
+    let single_bytes = window_shared_bytes(WindowCandidate::ScalarInt, &single);
+    let pair_bytes = window_shared_bytes(WindowCandidate::ScalarInt, &pair);
+
+    assert_eq!(single_bytes, 1760 + 2564);
+    assert_eq!(single_bytes, 4324);
+    assert_eq!(pair_bytes, 1760 + 2 * 2564);
+    assert_eq!(pair_bytes, 6888);
+
+    let rdna4 = FakeDevice::rdna4().limits();
+    let fits = window_candidate_fits(WindowCandidate::ScalarInt, &pair, &rdna4);
+    assert!(fits);
+}
+
+#[test]
+fn existing_window_byte_counts_are_unchanged_through_the_pure_function() {
+    let single = WindowShape {
+        patch_radius: 3,
+        search_radius: 7,
+        ..window_shape(ChannelMode::Yuv, false, None)
+    };
+    let pair = WindowShape { pair: true, ..single };
+
+    // The values `window.rs` pins on a 64x48 yuv site at patch radius 3 and search radius 7.
+    let cases = [
+        (WindowCandidate::Block32x8, &pair, 23296 + 2 * 2128 + 2 * 4),
+        (WindowCandidate::Block32x8, &single, 23296 + 2128 + 4),
+        (WindowCandidate::Separable32x8, &pair, 23296 + 2 * 2128 + 2 * 1792),
+        (WindowCandidate::Separable32x8, &single, 23296 + 2128 + 1792),
+        (WindowCandidate::Block32x16, &pair, 36648),
+        (WindowCandidate::Block16x16, &pair, 24616),
+        (WindowCandidate::Separable32x16, &pair, 42272),
+        (WindowCandidate::Separable16x16, &pair, 27424),
+    ];
+
+    for (candidate, shape, expected) in cases {
+        let bytes = window_shared_bytes(candidate, shape);
+        assert_eq!(bytes, expected, "{} pair {}", candidate.name(), shape.pair);
+    }
 }

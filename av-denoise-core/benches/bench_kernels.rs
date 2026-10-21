@@ -142,7 +142,11 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
     }
 
     for kernel in WindowKernel::ALL {
-        for &candidate in WindowCandidate::ALL {
+        let float_windows = WindowCandidate::ALL
+            .iter()
+            .copied()
+            .filter(|candidate| !candidate.integer());
+        for candidate in float_windows {
             for &(channels, channel_name) in CHANNELS {
                 run(WindowBench {
                     client: client.clone(),
@@ -150,6 +154,27 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
                     channel_name,
                     kernel,
                     candidate,
+                    codes: None,
+                });
+            }
+        }
+    }
+
+    // The integer windows read a u16 code ring, and run only without a reference.
+    let window_limits = DeviceLimits::from_client(&client);
+    let window_depths: &[u32] = if window_limits.u16_buffer { &[8, 10] } else { &[] };
+    for &depth in window_depths {
+        let codes = IntegerCodes { depth };
+
+        for kernel in [WindowKernel::Single, WindowKernel::Pair] {
+            for &(channels, channel_name) in CHANNELS {
+                run(WindowBench {
+                    client: client.clone(),
+                    channels,
+                    channel_name,
+                    kernel,
+                    candidate: WindowCandidate::ScalarInt,
+                    codes: Some(codes),
                 });
             }
         }

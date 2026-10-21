@@ -14,6 +14,7 @@ pub(crate) mod fixtures;
 mod gating;
 mod helpers;
 mod integer_search;
+mod integer_window;
 mod key;
 mod ledger;
 mod legality;

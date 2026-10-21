@@ -9,6 +9,7 @@ use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, 
 use crate::collab::kernels::fused::STRENGTH_MAP_OFF;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, grid_frames, needs_warp_uniform_search};
+use crate::engine::SampleFormat;
 use crate::nl4d::nl4d_pool_ratio;
 use crate::nlmeans::motion::THSAD_PIXEL;
 use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS, StorageAlign};
@@ -27,6 +28,7 @@ use crate::tune::sites::{
     RegulariseOutputs,
     RegulariseSite,
     SearchOutputs,
+    WindowCodes,
     WindowPass,
     WindowSite,
     allocate_accum,
@@ -72,6 +74,8 @@ pub(crate) struct WindowSpec {
     pub(crate) pair: bool,
     pub(crate) reference: bool,
     pub(crate) confidence: bool,
+    /// With codes the input ring holds whole codes of that depth, and the site reads their code ring.
+    pub(crate) codes: Option<IntegerCodes>,
 }
 
 impl WindowSpec {
@@ -85,6 +89,7 @@ impl WindowSpec {
             pair: false,
             reference: false,
             confidence: false,
+            codes: None,
         }
     }
 
@@ -118,11 +123,47 @@ fn confidence_binding(client: &ComputeClient<TestRuntime>, spec: &WindowSpec) ->
     }
 }
 
+/// The hashed ring rounded to `codes`, as normalised values and as the code ring of the same layout.
+fn code_exact_ring(
+    client: &ComputeClient<TestRuntime>,
+    ring: &[f32],
+    channels: u32,
+    codes: IntegerCodes,
+) -> (Vec<f32>, WindowCodes) {
+    let code_values = quantised_codes(ring, codes);
+    let max_value = codes.max_code() as f32;
+    let quantised: Vec<f32> = code_values.iter().map(|&code| code as f32 / max_value).collect();
+    let code_bytes = u16::as_bytes(&code_values);
+    let code_ring = client.create_from_slice(code_bytes);
+    let inv_scale2 = codes.inv_scale2(channels);
+    let window_codes = WindowCodes {
+        ring: code_ring,
+        codes,
+        inv_scale2,
+    };
+
+    (quantised, window_codes)
+}
+
 pub(crate) fn window_site(client: &ComputeClient<TestRuntime>, spec: &WindowSpec) -> WindowSite<TestRuntime> {
     let stored_ch = spec.channels.storage_count();
+    let channels = spec.channels.count();
     let pixels = (spec.width * spec.height) as usize;
-    let ring = hashed_ring(spec.width, spec.height, stored_ch, RING_FRAMES, 1);
+    let hashed = hashed_ring(spec.width, spec.height, stored_ch, RING_FRAMES, 1);
+    let (ring, codes) = match spec.codes {
+        Some(codes) => {
+            let (quantised, window_codes) = code_exact_ring(client, &hashed, channels, codes);
+            (quantised, Some(window_codes))
+        },
+        None => (hashed, None),
+    };
     let input = upload(client, &ring);
+    let limits = DeviceLimits::from_client(client);
+    let plane_width = matrix_plane_width(&limits);
+    let matrix_plane = match codes {
+        Some(_) => plane_width.unwrap_or(0),
+        None => 0,
+    };
     let reference = spec.reference.then(|| {
         let reference_ring = hashed_ring(spec.width, spec.height, stored_ch, RING_FRAMES, 2);
         upload(client, &reference_ring)
@@ -150,16 +191,18 @@ pub(crate) fn window_site(client: &ComputeClient<TestRuntime>, spec: &WindowSpec
         pass,
         input,
         reference,
+        codes,
         ring_len: ring.len(),
         outputs,
         frame_t: 1,
         h2_inv_norm: H2_INV_NORM,
         width: spec.width,
         height: spec.height,
-        channels: spec.channels.count(),
+        channels,
         stored_ch,
         patch_radius: spec.patch_radius,
         search_radius: spec.search_radius,
+        matrix_plane,
     }
 }
 
@@ -506,6 +549,32 @@ pub(crate) fn split_sites<S: Float>(
     };
 
     (search, filter)
+}
+
+/// The wire format a source of `codes` arrives in.
+pub(crate) fn code_format(codes: IntegerCodes) -> SampleFormat {
+    if codes.depth == 8 {
+        return SampleFormat::U8;
+    }
+
+    SampleFormat::U16 {
+        depth: codes.depth as u8,
+    }
+}
+
+/// Uploads `plane` in the wire layout of `codes`, one byte per 8-bit code and two otherwise.
+pub(crate) fn upload_codes(
+    client: &ComputeClient<TestRuntime>,
+    plane: &[u16],
+    codes: IntegerCodes,
+) -> Handle {
+    if codes.depth == 8 {
+        let bytes: Vec<u8> = plane.iter().map(|&code| code as u8).collect();
+        return client.create_from_slice(&bytes);
+    }
+
+    let bytes = u16::as_bytes(plane);
+    client.create_from_slice(bytes)
 }
 
 /// Each value of `values` as the code `codes` rounds it to, clamped between 0 and the top code.

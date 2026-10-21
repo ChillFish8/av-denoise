@@ -48,8 +48,13 @@ pub use self::window::{
     SEPARABLE_MAX_ABS,
     SEPARABLE_MIN_PSNR,
     WindowCandidate,
+    WindowCodes,
     WindowPass,
+    WindowShape,
     WindowSite,
+    window_candidate_fits,
+    window_candidate_legal,
+    window_shared_bytes,
 };
 pub use crate::collab::kernels::fused::{
     Centre,
