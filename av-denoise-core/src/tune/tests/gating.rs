@@ -636,6 +636,8 @@ fn integer_search_candidates_are_legal_only_with_codes() {
     let integer_tiled = integer_tiled_search();
     let refs16_matrix = named_search("int_refs16_matrix");
     let refs8x2_matrix = named_search("int_refs8x2_matrix");
+    let sliding7x7 = named_search("int_sliding7x7");
+    let sliding15x7 = named_search("int_sliding15x7");
     let integer_route = legal_searches(&with_codes, &legality);
     let expected_route = vec![
         baseline,
@@ -644,6 +646,8 @@ fn integer_search_candidates_are_legal_only_with_codes() {
         integer_tiled,
         refs16_matrix,
         refs8x2_matrix,
+        sliding7x7,
+        sliding15x7,
     ];
     assert_eq!(integer_route, expected_route);
 
@@ -725,12 +729,12 @@ fn sized_rdna4(shared_kb: usize, plane_size_max: u32) -> DeviceLimits {
     device.limits()
 }
 
-fn matrix_bytes(candidate: SearchVariant, shape: &CollabShape) -> usize {
+fn candidate_bytes(candidate: SearchVariant, shape: &CollabShape) -> usize {
     let search_bytes = size_of::<f32>();
     search_shared_bytes(candidate, shape, search_bytes)
 }
 
-fn matrix_fits(candidate: SearchVariant, shape: &CollabShape, limits: &DeviceLimits) -> bool {
+fn candidate_fits(candidate: SearchVariant, shape: &CollabShape, limits: &DeviceLimits) -> bool {
     let legality = Legality::default();
     let search_bytes = size_of::<f32>();
 
@@ -754,6 +758,27 @@ fn legal_matrix_names(shape: &CollabShape, limits: &DeviceLimits) -> Vec<&'stati
 }
 
 #[test]
+fn the_sliding_centre_counts_its_block_sums() {
+    let cases = [("int_sliding7x7", 512), ("int_sliding15x7", 1024)];
+    let wide = sized_rdna4(16, 64);
+    let narrow = sized_rdna4(16, 32);
+
+    for (name, expected) in cases {
+        let sliding = named_search(name);
+        let at_64 = coded_search_shape(ChannelMode::Yuv, 10, 64);
+        let at_32 = coded_search_shape(ChannelMode::Yuv, 10, 32);
+
+        let bytes = candidate_bytes(sliding, &at_64);
+        let fits_at_64 = candidate_fits(sliding, &at_64, &wide);
+        let fits_at_32 = candidate_fits(sliding, &at_32, &narrow);
+
+        assert_eq!(bytes, expected, "{name}");
+        assert!(fits_at_64, "{name}");
+        assert!(fits_at_32, "{name}");
+    }
+}
+
+#[test]
 fn the_matrix_centre_fits_16_kb_only_for_8_bit_luma_at_plane_64() {
     let refs16 = named_search("int_refs16_matrix");
     let luma_at_64 = coded_search_shape(ChannelMode::Luma, 8, 64);
@@ -763,12 +788,12 @@ fn the_matrix_centre_fits_16_kb_only_for_8_bit_luma_at_plane_64() {
     let wide = sized_rdna4(16, 64);
     let narrow = sized_rdna4(16, 32);
 
-    let bytes_at_64 = matrix_bytes(refs16, &luma_at_64);
-    let bytes_at_32 = matrix_bytes(refs16, &luma_at_32);
-    let fits_at_64 = matrix_fits(refs16, &luma_at_64, &wide);
-    let fits_at_32 = matrix_fits(refs16, &luma_at_32, &narrow);
-    let chroma_fits = matrix_fits(refs16, &chroma_at_64, &wide);
-    let ten_bit_fits = matrix_fits(refs16, &ten_bit_at_64, &wide);
+    let bytes_at_64 = candidate_bytes(refs16, &luma_at_64);
+    let bytes_at_32 = candidate_bytes(refs16, &luma_at_32);
+    let fits_at_64 = candidate_fits(refs16, &luma_at_64, &wide);
+    let fits_at_32 = candidate_fits(refs16, &luma_at_32, &narrow);
+    let chroma_fits = candidate_fits(refs16, &chroma_at_64, &wide);
+    let ten_bit_fits = candidate_fits(refs16, &ten_bit_at_64, &wide);
 
     assert_eq!(bytes_at_64, 13548);
     assert_eq!(bytes_at_32, 16620);
@@ -784,8 +809,8 @@ fn ten_bit_luma_matrix_centre_fits_32_kb_at_plane_32() {
     let shape = coded_search_shape(ChannelMode::Luma, 10, 32);
     let limits = sized_rdna4(32, 32);
 
-    let bytes = matrix_bytes(refs16, &shape);
-    let fits = matrix_fits(refs16, &shape, &limits);
+    let bytes = candidate_bytes(refs16, &shape);
+    let fits = candidate_fits(refs16, &shape, &limits);
 
     assert_eq!(bytes, 31332);
     assert!(fits);
@@ -798,9 +823,9 @@ fn ten_bit_yuv_matrix_centre_does_not_fit_32_kb() {
     let small = sized_rdna4(32, 32);
     let large = sized_rdna4(64, 32);
 
-    let bytes = matrix_bytes(refs16, &shape);
-    let fits_small = matrix_fits(refs16, &shape, &small);
-    let fits_large = matrix_fits(refs16, &shape, &large);
+    let bytes = candidate_bytes(refs16, &shape);
+    let fits_small = candidate_fits(refs16, &shape, &small);
+    let fits_large = candidate_fits(refs16, &shape, &large);
 
     assert_eq!(bytes, 49220);
     assert!(!fits_small);
@@ -811,7 +836,7 @@ fn ten_bit_yuv_matrix_centre_does_not_fit_32_kb() {
 fn the_two_row_matrix_centre_counts_its_smaller_union() {
     let refs8x2 = named_search("int_refs8x2_matrix");
     let shape = coded_search_shape(ChannelMode::Luma, 8, 64);
-    let bytes = matrix_bytes(refs8x2, &shape);
+    let bytes = candidate_bytes(refs8x2, &shape);
 
     assert_eq!(bytes, 10636);
 }
@@ -828,11 +853,11 @@ fn the_int8_matrix_centre_counts_one_byte_per_part() {
     let whole_at_64 = int8_search_shape(ChannelMode::Luma, 8, Int8Matrix::Unsigned, 64);
     let whole_at_32 = int8_search_shape(ChannelMode::Luma, 8, Int8Matrix::Unsigned, 32);
     let f16_at_32 = coded_search_shape(ChannelMode::Luma, 8, 32);
-    let whole_bytes_at_64 = matrix_bytes(refs16_i8, &whole_at_64);
-    let whole_bytes_at_32 = matrix_bytes(refs16_i8, &whole_at_32);
-    let whole_fits_at_64 = matrix_fits(refs16_i8, &whole_at_64, &small_wide);
-    let whole_fits_at_32 = matrix_fits(refs16_i8, &whole_at_32, &small_narrow);
-    let f16_fits_at_32 = matrix_fits(refs16_f16, &f16_at_32, &small_narrow);
+    let whole_bytes_at_64 = candidate_bytes(refs16_i8, &whole_at_64);
+    let whole_bytes_at_32 = candidate_bytes(refs16_i8, &whole_at_32);
+    let whole_fits_at_64 = candidate_fits(refs16_i8, &whole_at_64, &small_wide);
+    let whole_fits_at_32 = candidate_fits(refs16_i8, &whole_at_32, &small_narrow);
+    let f16_fits_at_32 = candidate_fits(refs16_f16, &f16_at_32, &small_narrow);
 
     assert_eq!(whole_bytes_at_64, 10800);
     assert_eq!(whole_bytes_at_32, 13360);
@@ -847,12 +872,12 @@ fn the_int8_matrix_centre_counts_one_byte_per_part() {
         let split_at_64 = int8_search_shape(ChannelMode::Luma, depth, element, 64);
         let split_at_32 = int8_search_shape(ChannelMode::Luma, depth, element, 32);
 
-        let bytes_at_64 = matrix_bytes(refs16_i8, &split_at_64);
-        let bytes_at_32 = matrix_bytes(refs16_i8, &split_at_32);
-        let medium_fits_at_64 = matrix_fits(refs16_i8, &split_at_64, &medium_wide);
-        let medium_fits_at_32 = matrix_fits(refs16_i8, &split_at_32, &medium_narrow);
-        let small_fits_at_64 = matrix_fits(refs16_i8, &split_at_64, &small_wide);
-        let small_fits_at_32 = matrix_fits(refs16_i8, &split_at_32, &small_narrow);
+        let bytes_at_64 = candidate_bytes(refs16_i8, &split_at_64);
+        let bytes_at_32 = candidate_bytes(refs16_i8, &split_at_32);
+        let medium_fits_at_64 = candidate_fits(refs16_i8, &split_at_64, &medium_wide);
+        let medium_fits_at_32 = candidate_fits(refs16_i8, &split_at_32, &medium_narrow);
+        let small_fits_at_64 = candidate_fits(refs16_i8, &split_at_64, &small_wide);
+        let small_fits_at_32 = candidate_fits(refs16_i8, &split_at_32, &small_narrow);
 
         assert_eq!(bytes_at_64, 17644, "{label}");
         assert_eq!(bytes_at_32, 24812, "{label}");
@@ -863,8 +888,8 @@ fn the_int8_matrix_centre_counts_one_byte_per_part() {
     }
 
     let signed_yuv = int8_search_shape(ChannelMode::Yuv, 10, Int8Matrix::Signed, 32);
-    let signed_yuv_bytes = matrix_bytes(refs16_i8, &signed_yuv);
-    let signed_yuv_fits = matrix_fits(refs16_i8, &signed_yuv, &medium_narrow);
+    let signed_yuv_bytes = candidate_bytes(refs16_i8, &signed_yuv);
+    let signed_yuv_fits = candidate_fits(refs16_i8, &signed_yuv, &medium_narrow);
 
     assert_eq!(signed_yuv_bytes, 33756);
     assert!(!signed_yuv_fits);

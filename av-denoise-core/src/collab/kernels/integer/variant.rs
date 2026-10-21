@@ -12,6 +12,8 @@ pub enum IntCentre {
     Matrix,
     /// On the int8 matrix units.
     MatrixI8,
+    /// Offset by offset over a block of references, from shared sums of 4x4 blocks.
+    Sliding,
 }
 
 /// How the integer neighbour search scores its candidates.
@@ -19,13 +21,9 @@ pub enum IntCentre {
 pub enum IntNeighbour {
     /// Each group scores its own candidates from the code ring.
     Scalar,
-    /// On the f16 matrix units.
-    Matrix,
-    /// On the int8 matrix units.
-    MatrixI8,
 }
 
-/// One compiled form of `collab_search_int`.
+/// One compiled form of the integer collab search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct IntegerVariant {
     /// References along a row per cube.
@@ -38,19 +36,39 @@ pub struct IntegerVariant {
 }
 
 impl IntegerVariant {
-    /// Threads in one cube, one 8-lane group per reference.
-    pub fn lanes(self) -> u32 {
-        GROUP_LANES * self.cube_refs_x * self.ref_rows
+    /// Threads in one centre cube.
+    ///
+    /// Most centres run one 8-lane group per reference. A sliding centre runs one lane per
+    /// reference, rounded up to whole 64-lane planes.
+    pub const fn lanes(self) -> u32 {
+        let refs = self.cube_refs_x * self.ref_rows;
+
+        if self.is_sliding() {
+            return refs.next_multiple_of(SLIDING_LANE_STEP);
+        }
+
+        GROUP_LANES * refs
     }
 
-    /// Whether either search runs on the f16 matrix units.
+    /// Whether the centre search runs on the f16 matrix units.
     pub fn is_matrix(self) -> bool {
-        self.centre == IntCentre::Matrix || self.neighbour == IntNeighbour::Matrix
+        self.centre == IntCentre::Matrix
     }
 
-    /// Whether either search runs on the int8 matrix units.
+    /// Whether the centre search runs on the int8 matrix units.
     pub fn is_int8(self) -> bool {
-        self.centre == IntCentre::MatrixI8 || self.neighbour == IntNeighbour::MatrixI8
+        self.centre == IntCentre::MatrixI8
+    }
+
+    /// Whether the centre search is the sliding one.
+    pub const fn is_sliding(self) -> bool {
+        matches!(self.centre, IntCentre::Sliding)
+    }
+
+    /// The 4x4 blocks a sliding centre cube scores per offset, one more than its references along
+    /// each side.
+    pub const fn sliding_blocks(self) -> u32 {
+        (self.cube_refs_x + 1) * (self.ref_rows + 1)
     }
 
     /// Whether the centre search runs on either kind of matrix unit.
@@ -58,11 +76,12 @@ impl IntegerVariant {
         matches!(self.centre, IntCentre::Matrix | IntCentre::MatrixI8)
     }
 
-    /// Whether `collab_search_int` builds this variant.
+    /// Whether a kernel is built for this variant.
     pub fn is_built(self) -> bool {
         let tiled_built = self.centre == IntCentre::Tiled && self.ref_rows == 1;
         let matrix_built = self.has_matrix_centre() && self.walk == Walk::Uniform;
-        let centre_built = self.centre == IntCentre::Scalar || tiled_built || matrix_built;
+        let sliding_built = self.is_sliding() && self.walk == Walk::Clipped;
+        let centre_built = self.centre == IntCentre::Scalar || tiled_built || matrix_built || sliding_built;
         centre_built && self.neighbour == IntNeighbour::Scalar
     }
 
@@ -128,7 +147,10 @@ impl IntegerVariant {
     }
 }
 
-pub const INTEGER_VARIANT_COUNT: usize = 9;
+/// The plane width a sliding centre cube's lanes round up to.
+const SLIDING_LANE_STEP: u32 = 64;
+
+pub const INTEGER_VARIANT_COUNT: usize = 8;
 
 const fn integer_variant(
     cube_refs_x: u32,
@@ -153,11 +175,32 @@ pub const INTEGER_VARIANTS: [IntegerVariant; INTEGER_VARIANT_COUNT] = [
     integer_variant(8, 1, Walk::Clipped, IntCentre::Tiled, IntNeighbour::Scalar),
     integer_variant(16, 1, Walk::Uniform, IntCentre::Matrix, IntNeighbour::Scalar),
     integer_variant(8, 2, Walk::Uniform, IntCentre::Matrix, IntNeighbour::Scalar),
-    integer_variant(16, 1, Walk::Uniform, IntCentre::Matrix, IntNeighbour::Matrix),
-    integer_variant(8, 2, Walk::Uniform, IntCentre::Matrix, IntNeighbour::Matrix),
     integer_variant(16, 1, Walk::Uniform, IntCentre::MatrixI8, IntNeighbour::Scalar),
-    integer_variant(16, 1, Walk::Uniform, IntCentre::MatrixI8, IntNeighbour::MatrixI8),
+    integer_variant(7, 7, Walk::Clipped, IntCentre::Sliding, IntNeighbour::Scalar),
+    integer_variant(15, 7, Walk::Clipped, IntCentre::Sliding, IntNeighbour::Scalar),
 ];
+
+const fn sliding_blocks_fit_their_lanes() -> bool {
+    let mut index = 0;
+
+    while index < INTEGER_VARIANT_COUNT {
+        let variant = INTEGER_VARIANTS[index];
+
+        if variant.is_sliding() && variant.sliding_blocks() > variant.lanes() {
+            return false;
+        }
+
+        index += 1;
+    }
+
+    true
+}
+
+// Each lane of a sliding centre scores one block per offset.
+const _: () = assert!(
+    sliding_blocks_fit_their_lanes(),
+    "every sliding centre needs a lane for each of its blocks"
+);
 
 /// Every integer variant's stored name, in [INTEGER_VARIANTS] order.
 const INTEGER_NAMES: [&str; INTEGER_VARIANT_COUNT] = [
@@ -166,8 +209,7 @@ const INTEGER_NAMES: [&str; INTEGER_VARIANT_COUNT] = [
     "int_groups8_clipped_tiled",
     "int_refs16_matrix",
     "int_refs8x2_matrix",
-    "int_refs16_matrix_nmatrix",
-    "int_refs8x2_matrix_nmatrix",
     "int_refs16_i8",
-    "int_refs16_i8_ni8",
+    "int_sliding7x7",
+    "int_sliding15x7",
 ];

@@ -1,13 +1,17 @@
 pub(crate) mod matrix;
+pub(crate) mod neighbour;
 pub(crate) mod scalar;
+pub(crate) mod sliding;
 pub(crate) mod variant;
 
 use cubecl::prelude::*;
 
 use self::matrix::{MatrixRoute, matrix_centre_search};
+pub use self::neighbour::collab_neighbour_int;
 use self::scalar::{int_centre_search, int_trajectory_search, load_code_column, load_int_centre_tile};
+pub use self::sliding::collab_centre_sliding;
 pub use self::variant::{INTEGER_VARIANT_COUNT, INTEGER_VARIANTS, IntCentre, IntNeighbour, IntegerVariant};
-use super::fused::{GROUP_USES_GRID, MEMBER_WORDS, tile_height, tile_width};
+use super::fused::{GROUP_USES_GRID, MEMBER_WORDS, Walk, tile_height, tile_width};
 use super::group::clamp_top_left;
 use super::plane_ops::{UNFILLED_SSD, group_base};
 use crate::collab::geometry::refs_along;
@@ -254,10 +258,6 @@ pub(crate) fn int_search_group<C: Int, N: Size, E: Numeric, A: Numeric>(
     #[comptime] shape: IntShape,
 ) -> u32 {
     let walk = comptime!(variant.walk);
-    let width = comptime!(shape.width);
-    let height = comptime!(shape.height);
-    let channels = comptime!(shape.channels);
-    let sub = cursor.sub;
 
     // cubecl treats consts as comptime, so the slot takes the constant through `runtime()`.
     let mut best_ssd = UNFILLED_SSD.runtime();
@@ -287,19 +287,85 @@ pub(crate) fn int_search_group<C: Int, N: Size, E: Numeric, A: Numeric>(
         )
     };
 
-    let mut k_use = 1u32;
-    while k_use * 2u32 <= n_live && k_use * 2u32 <= k_max {
-        k_use *= 2u32;
-    }
+    int_group_members(
+        codes,
+        mv_field,
+        confidence,
+        neighbour_slots,
+        best_pos,
+        n_live,
+        cursor.centre_slot,
+        cursor.sub,
+        cursor.base,
+        c_min,
+        member_pos,
+        walk,
+        radius,
+        grid_frames,
+        refine,
+        mv_stride,
+        conf_stride,
+        blk_step,
+        blksize,
+        blocks_x,
+        blocks_y,
+        k_max,
+        shape,
+    )
+}
+
+/// Builds the group of a reference from its centre search, the members its 8-lane group returns.
+///
+/// Lane `sub` passes centre member `sub` as `best_pos`, and `n_live` is the number of positions
+/// the centre search scored. With a volume grid each centre member anchors a volume, and the
+/// group becomes the grid when every volume fills. Every lane of the group ends up holding the
+/// same members in `member_pos`. Returns the group word, the member count in the low 8 bits with
+/// [GROUP_USES_GRID](crate::collab::kernels::fused::GROUP_USES_GRID) set when the group is a
+/// volume grid.
+#[cube]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a buffer or comptime shape the search reads"
+)]
+pub(crate) fn int_group_members<C: Int, N: Size>(
+    codes: &Array<Vector<C, N>>,
+    mv_field: &Array<i32>,
+    confidence: &Array<f32>,
+    neighbour_slots: &Array<u32>,
+    best_pos: u32,
+    n_live: u32,
+    centre_slot: u32,
+    sub: u32,
+    base: u32,
+    c_min: f32,
+    member_pos: &mut Array<u32>,
+    #[comptime] walk: Walk,
+    #[comptime] radius: u32,
+    #[comptime] grid_frames: u32,
+    #[comptime] refine: u32,
+    #[comptime] mv_stride: u32,
+    #[comptime] conf_stride: u32,
+    #[comptime] blk_step: u32,
+    #[comptime] blksize: u32,
+    #[comptime] blocks_x: u32,
+    #[comptime] blocks_y: u32,
+    #[comptime] k_max: u32,
+    #[comptime] shape: IntShape,
+) -> u32 {
+    let width = comptime!(shape.width);
+    let height = comptime!(shape.height);
+    let channels = comptime!(shape.channels);
+
+    let mut k_use = centre_group_size(n_live, k_max);
 
     // The single-frame group, which is also the fallback. Lane `i` holds member `i`.
     #[unroll]
     for m in 0..MAX_K {
-        member_pos[m as usize] = plane_shuffle(best_pos, cursor.base + m);
+        member_pos[m as usize] = plane_shuffle(best_pos, base + m);
     }
 
     let mut use_grid = false;
-    if comptime!(grid_frames > 1 && k_max == MAX_K) {
+    if comptime!(builds_volume_grid(grid_frames, k_max)) {
         let volumes = comptime!(MAX_K / grid_frames);
         let tail = comptime!(grid_frames - 1);
 
@@ -325,7 +391,7 @@ pub(crate) fn int_search_group<C: Int, N: Size, E: Numeric, A: Numeric>(
                 codes,
                 anchor_x,
                 anchor_y,
-                cursor.centre_slot,
+                centre_slot,
                 sub,
                 width,
                 height,
@@ -376,4 +442,39 @@ pub(crate) fn int_search_group<C: Int, N: Size, E: Numeric, A: Numeric>(
 
     let grid_flag = select(use_grid, GROUP_USES_GRID, 0u32);
     k_use | grid_flag
+}
+
+/// Whether a search with `grid_frames` frames per volume and up to `k_max` members builds volume
+/// grids.
+pub(crate) fn builds_volume_grid(grid_frames: u32, k_max: u32) -> bool {
+    grid_frames > 1 && k_max == MAX_K
+}
+
+/// The largest power of two up to `k_max` that the `n_live` scored centre positions fill.
+#[cube]
+pub(crate) fn centre_group_size(n_live: u32, #[comptime] k_max: u32) -> u32 {
+    let mut k_use = 1u32;
+    while k_use * 2u32 <= n_live && k_use * 2u32 <= k_max {
+        k_use *= 2u32;
+    }
+
+    k_use
+}
+
+/// The positions in the centre search's window around `(ref_x, ref_y)`, clipped to the frame.
+#[cube]
+pub(crate) fn centre_window_positions(
+    ref_x: u32,
+    ref_y: u32,
+    #[comptime] spatial_radius: u32,
+    #[comptime] max_x: u32,
+    #[comptime] max_y: u32,
+) -> u32 {
+    let radius = comptime!(spatial_radius as i32);
+    let left = clamp_top_left(ref_x as i32 - radius, max_x);
+    let right = clamp_top_left(ref_x as i32 + radius, max_x);
+    let top = clamp_top_left(ref_y as i32 - radius, max_y);
+    let bottom = clamp_top_left(ref_y as i32 + radius, max_y);
+
+    (right - left + 1u32) * (bottom - top + 1u32)
 }

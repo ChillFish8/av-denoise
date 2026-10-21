@@ -29,5 +29,6 @@ mod result;
 pub(crate) mod runtime;
 mod selector;
 mod session;
+mod sliding_search;
 mod tie_bound;
 mod window;

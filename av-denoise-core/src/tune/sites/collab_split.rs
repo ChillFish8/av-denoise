@@ -31,10 +31,14 @@ use crate::collab::kernels::fused::{
     collab_search,
 };
 use crate::collab::kernels::integer::matrix::MatrixRoute;
+use crate::collab::kernels::integer::neighbour::NEIGHBOUR_GROUPS;
 use crate::collab::kernels::integer::{
     INTEGER_VARIANT_COUNT,
     INTEGER_VARIANTS,
     IntegerVariant,
+    builds_volume_grid,
+    collab_centre_sliding,
+    collab_neighbour_int,
     collab_search_int,
 };
 use crate::nlmeans::NOISE_CURVE_BINS;
@@ -57,6 +61,13 @@ pub const SEARCH_VARIANT_COUNT: usize = FLOAT_SEARCH_COUNT + INTEGER_VARIANT_COU
 
 /// The float search's group count, which every float search variant shares.
 const SEARCH_GROUPS: u32 = 8;
+
+/// The cubes of one search launch, the centre kernel's and the neighbour pass's.
+#[derive(Debug, Clone)]
+struct SearchCubes {
+    centre: CubeCount,
+    neighbour: CubeCount,
+}
 
 const fn search_variants() -> [SearchVariant; SEARCH_VARIANT_COUNT] {
     let mut variants = [SearchVariant::Float(VARIANTS[0]); SEARCH_VARIANT_COUNT];
@@ -272,9 +283,11 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSearchSite<R, S> {
         GROUP_LANES
     }
 
+    /// A sliding variant launches its centre kernel and then, when the search builds volume grids,
+    /// the neighbour pass.
     fn launch(&self, candidate: SearchVariant, outputs: &SearchOutputs) {
         let shape = &self.shape;
-        let cube_count = match candidate {
+        let centre = match candidate {
             SearchVariant::Float(_) => {
                 let cubes_x = fused_cubes_x(shape.width, SEARCH_GROUPS);
                 CubeCount::new_2d(cubes_x, shape.refs_y)
@@ -285,14 +298,22 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSearchSite<R, S> {
                 CubeCount::new_2d(cubes_x, cubes_y)
             },
         };
+        let neighbour_x = fused_cubes_x(shape.width, NEIGHBOUR_GROUPS);
+        let neighbour = CubeCount::new_2d(neighbour_x, shape.refs_y);
+        let cubes = SearchCubes { centre, neighbour };
 
-        self.dispatch(candidate, outputs, cube_count);
+        self.dispatch(candidate, outputs, &cubes);
     }
 
-    /// A launch with no cubes, which on wgpu compiles the kernel without running it.
+    /// A launch with no cubes, which on wgpu compiles every kernel the candidate launches without
+    /// running it.
     fn compile_only(&self, candidate: SearchVariant, outputs: &SearchOutputs) {
-        let no_cubes = CubeCount::Static(0, 0, 1);
-        self.dispatch(candidate, outputs, no_cubes);
+        let cubes = SearchCubes {
+            centre: CubeCount::Static(0, 0, 1),
+            neighbour: CubeCount::Static(0, 0, 1),
+        };
+
+        self.dispatch(candidate, outputs, &cubes);
     }
 
     fn real_outputs(&self) -> SearchOutputs {
@@ -420,11 +441,100 @@ impl<R: Runtime, S: Float> CollabSearchSite<R, S> {
         Ok(verdict)
     }
 
-    /// Launches `candidate` over `cube_count` cubes.
-    fn dispatch(&self, candidate: SearchVariant, outputs: &SearchOutputs, cube_count: CubeCount) {
+    /// Launches `candidate` over `cubes`.
+    fn dispatch(&self, candidate: SearchVariant, outputs: &SearchOutputs, cubes: &SearchCubes) {
         match candidate {
-            SearchVariant::Float(variant) => self.dispatch_float(variant, outputs, cube_count),
-            SearchVariant::Integer(variant) => self.dispatch_integer(variant, outputs, cube_count),
+            SearchVariant::Float(variant) => {
+                let centre = cubes.centre.clone();
+                self.dispatch_float(variant, outputs, centre);
+            },
+            SearchVariant::Integer(variant) if variant.is_sliding() => {
+                self.dispatch_sliding(variant, outputs, cubes);
+            },
+            SearchVariant::Integer(variant) => {
+                let centre = cubes.centre.clone();
+                self.dispatch_integer(variant, outputs, centre);
+            },
+        }
+    }
+
+    /// Launches `collab_centre_sliding` with `variant`, then `collab_neighbour_int` when the search
+    /// builds volume grids, both reading u16 codes.
+    fn dispatch_sliding(&self, variant: IntegerVariant, outputs: &SearchOutputs, cubes: &SearchCubes) {
+        let inputs = &self.inputs;
+        let values = &self.values;
+        let shape = &self.shape;
+        let centre_dim = CubeDim::new_1d(variant.lanes());
+        let words = outputs.words().max(1);
+        let centre_cubes = cubes.centre.clone();
+
+        let centre_codes = bind::<R>(&inputs.codes, inputs.codes_len);
+        let centre_members = bind::<R>(&outputs.members, words);
+
+        unsafe {
+            collab_centre_sliding::launch_unchecked::<u16, R>(
+                &self.client,
+                centre_cubes,
+                centre_dim,
+                shape.stored_ch as usize,
+                centre_codes,
+                centre_members,
+                values.centre_slot,
+                shape.width,
+                shape.height,
+                shape.channels,
+                shape.k_max,
+                shape.spatial_radius,
+                shape.refs_x,
+                variant,
+            );
+        }
+
+        if !builds_volume_grid(shape.grid_frames, shape.k_max) {
+            return;
+        }
+
+        let neighbour_lanes = GROUP_LANES * NEIGHBOUR_GROUPS;
+        let neighbour_dim = CubeDim::new_1d(neighbour_lanes);
+        let neighbour_cubes = cubes.neighbour.clone();
+
+        let codes = bind::<R>(&inputs.codes, inputs.codes_len);
+        let mv_field = bind::<R>(&inputs.mv_field, inputs.mv_len);
+        let confidence = bind::<R>(&inputs.confidence, inputs.conf_len);
+        let neighbour_slots = bind::<R>(&inputs.neighbour_slots, inputs.neighbour_slots_len);
+        let members = bind::<R>(&outputs.members, words);
+
+        unsafe {
+            collab_neighbour_int::launch_unchecked::<u16, R>(
+                &self.client,
+                neighbour_cubes,
+                neighbour_dim,
+                shape.stored_ch as usize,
+                codes,
+                mv_field,
+                confidence,
+                neighbour_slots,
+                members,
+                values.centre_slot,
+                values.c_min,
+                shape.radius,
+                shape.grid_frames,
+                shape.refine,
+                shape.mv_stride,
+                shape.conf_stride,
+                shape.blk_step,
+                shape.blksize,
+                shape.blocks_x,
+                shape.blocks_y,
+                shape.width,
+                shape.height,
+                shape.channels,
+                shape.k_max,
+                shape.stored_ch,
+                shape.spatial_radius,
+                shape.refs_x,
+                variant.walk,
+            );
         }
     }
 
