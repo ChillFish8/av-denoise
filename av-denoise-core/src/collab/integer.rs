@@ -119,6 +119,7 @@ pub(crate) fn patch_ssd(view: &CodeView<'_>, first: u32, second: u32) -> u64 {
 ///
 /// The candidates are the `spatial_radius` rectangle around the reference, clipped to the frame.
 /// Returns at most [MAX_K](crate::collab::MAX_K) words.
+#[cfg(test)]
 pub(crate) fn host_centre_members(
     view: &CodeView<'_>,
     ref_x: u32,

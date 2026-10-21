@@ -13,7 +13,7 @@ use crate::tune::fidelity::{CompareResult, Fidelity, diff_integers, diff_plane};
 use crate::tune::gpu::{bind, read_f32, read_i32, zero_words, zeroed_words};
 use crate::tune::key::{SiteKey, SiteKeyBuilder};
 use crate::tune::site::{LaunchShape, SiteCandidate, VariantSite};
-use crate::tune::{DeviceLimits, Legality};
+use crate::tune::{DeviceLimits, IntegerCodes, Legality};
 
 /// Group counts per cube, the baseline's first.
 const GROUP_OPTIONS: [u32; 3] = [BASELINE_GROUPS, 4, 16];
@@ -188,6 +188,9 @@ pub struct CollabInputs {
     pub dct_profile: Handle,
     /// [PATCH_SIZE](crate::collab::PATCH_SIZE) taps.
     pub kaiser: Handle,
+    /// The integer code ring when the shape has codes, otherwise a placeholder never read.
+    pub codes: Handle,
+    pub codes_len: usize,
 }
 
 /// The runtime values `collab_fused` reads.
@@ -231,6 +234,10 @@ pub struct CollabShape {
     pub uniform_walk_only: bool,
     /// Whether `wsum` holds packed 64-bit words and `accum` the channels after the first.
     pub packed: bool,
+    /// The integer codes of the code ring the integer search reads, when one exists.
+    pub codes: Option<IntegerCodes>,
+    /// The plane width the matrix candidates run at, 0 when none runs.
+    pub matrix_plane: u32,
 }
 
 /// The fixed-point accumulator rings and group weights `collab_fused` writes.
@@ -548,6 +555,8 @@ pub(crate) fn blank_collab_inputs<R: Runtime>(client: &ComputeClient<R>, stored_
         map_len: 1,
         dct_profile: zeroed_words(client, 8),
         kaiser: zeroed_words(client, PATCH_SIZE as usize),
+        codes: zeroed_words(client, 1),
+        codes_len: 1,
     }
 }
 

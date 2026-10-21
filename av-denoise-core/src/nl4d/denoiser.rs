@@ -494,7 +494,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "no integer search candidate reads the codes yet")
+        expect(dead_code, reason = "the pipeline does not read the codes yet")
     )]
     pub(crate) fn integer_codes(&self) -> Option<IntegerCodes> {
         self.integer_codes

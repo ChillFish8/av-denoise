@@ -2,6 +2,7 @@ mod accumulate;
 mod collab;
 mod collab_split;
 mod regularise;
+mod search_bytes;
 mod window;
 
 use cubecl::prelude::*;
@@ -21,6 +22,7 @@ pub use self::collab_split::{
     COLLAB_SEARCH,
     CollabFilterSite,
     CollabSearchSite,
+    FLOAT_SEARCH_COUNT,
     FilterCandidate,
     SEARCH_VARIANT_COUNT,
     SEARCH_VARIANTS,
@@ -38,6 +40,7 @@ pub use self::regularise::{
     RegulariseOutputs,
     RegulariseSite,
 };
+pub use self::search_bytes::{search_candidate_fits, search_candidate_legal, search_shared_bytes};
 #[cfg(test)]
 pub(crate) use self::window::estimate_planes;
 pub use self::window::{
@@ -55,6 +58,13 @@ pub use crate::collab::kernels::fused::{
     Walk,
     tile_height,
     tile_width,
+};
+pub use crate::collab::kernels::integer::{
+    INTEGER_VARIANT_COUNT,
+    INTEGER_VARIANTS,
+    IntCentre,
+    IntNeighbour,
+    IntegerVariant,
 };
 use crate::tune::fidelity::{CompareResult, Fidelity, diff_plane};
 use crate::tune::gpu::{read_f32, zero_accumulators};

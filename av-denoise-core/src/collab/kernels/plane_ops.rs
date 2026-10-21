@@ -149,6 +149,86 @@ pub(crate) fn shift_insert8_ordered_cached(
     }
 }
 
+/// The SSD an unfilled integer match slot holds.
+///
+/// It sits above the largest real SSD, `64 * 3 * 1023^2`, so any real candidate displaces it.
+pub(crate) const UNFILLED_SSD: i32 = i32::MAX;
+
+/// The SSD the integer self-match carries, below every real SSD.
+pub(crate) const SELF_MATCH_SSD: i32 = -1;
+
+/// The i32 twin of [plane_ssd_reduce8].
+#[cube]
+pub(crate) fn plane_ssd_reduce8_int(partial: i32) -> i32 {
+    let mut sum = partial;
+    sum += plane_shuffle_xor(sum, 1u32);
+    sum += plane_shuffle_xor(sum, 2u32);
+    sum += plane_shuffle_xor(sum, 4u32);
+    sum
+}
+
+/// The i32 twin of [ranks_before].
+#[cube]
+pub(crate) fn ranks_before_int(ssd: i32, packed: u32, held_ssd: i32, held_pos: u32) -> bool {
+    let closer = ssd < held_ssd;
+    let same_ssd = ssd == held_ssd;
+    let earlier = packed < held_pos;
+
+    closer || (same_ssd && earlier)
+}
+
+/// The i32 twin of [shift_insert8_ordered].
+#[cube]
+pub(crate) fn shift_insert8_ordered_int(
+    best_ssd: &mut i32,
+    best_pos: &mut u32,
+    ssd: i32,
+    packed: u32,
+    sub: u32,
+) {
+    let prev_ssd = plane_shuffle_up(*best_ssd, 1u32);
+    let prev_pos = plane_shuffle_up(*best_pos, 1u32);
+    let beats_slot = ranks_before_int(ssd, packed, *best_ssd, *best_pos);
+
+    if beats_slot {
+        let beats_previous = ranks_before_int(ssd, packed, prev_ssd, prev_pos);
+        let lands_here = sub == 0u32 || !beats_previous;
+
+        if lands_here {
+            *best_ssd = ssd;
+            *best_pos = packed;
+        } else {
+            *best_ssd = prev_ssd;
+            *best_pos = prev_pos;
+        }
+    }
+}
+
+/// The i32 twin of [shift_insert8_ordered_cached].
+#[cube]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a per-lane register the search already holds"
+)]
+pub(crate) fn shift_insert8_ordered_int_cached(
+    best_ssd: &mut i32,
+    best_pos: &mut u32,
+    worst_ssd: &mut i32,
+    worst_pos: &mut u32,
+    ssd: i32,
+    packed: u32,
+    sub: u32,
+    base: u32,
+) {
+    let places = ranks_before_int(ssd, packed, *worst_ssd, *worst_pos);
+
+    if places {
+        shift_insert8_ordered_int(best_ssd, best_pos, ssd, packed, sub);
+        *worst_ssd = plane_shuffle(*best_ssd, base + 7u32);
+        *worst_pos = plane_shuffle(*best_pos, base + 7u32);
+    }
+}
+
 /// Transposes an 8x8 block held one column per lane into one row per lane, through `buf`.
 ///
 /// `v` holds the lane's 8 values on entry and its transposed 8 on return. `slot` picks the group's

@@ -105,6 +105,15 @@ pub(crate) fn read_f32<R: Runtime>(
     read_values(client, handle, len)
 }
 
+/// Reads the first `len` `u16` values of `handle` back to the host.
+pub(crate) fn read_u16<R: Runtime>(
+    client: &ComputeClient<R>,
+    handle: &Handle,
+    len: usize,
+) -> Result<Vec<u16>, anyhow::Error> {
+    read_values(client, handle, len)
+}
+
 /// Reads the first `len` `i32` values of `handle` back to the host.
 pub(crate) fn read_i32<R: Runtime>(
     client: &ComputeClient<R>,

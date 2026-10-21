@@ -305,6 +305,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             map_len,
             dct_profile: self.dct_profile_buf.clone(),
             kaiser: self.kaiser_buf.clone(),
+            codes: view.input.clone(),
+            codes_len: pass.stored_ch as usize,
         };
 
         // The kernel's centre slot must be the ring view's centre, or a member is grouped against
@@ -343,6 +345,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             pooled: self.pooled_threshold,
             uniform_walk_only: self.uniform_walk_only,
             packed: self.packed,
+            codes: None,
+            matrix_plane: 0,
         };
         let outputs = CollabOutputs {
             accum: self.accum.clone(),

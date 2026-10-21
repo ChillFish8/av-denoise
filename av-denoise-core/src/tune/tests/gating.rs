@@ -13,7 +13,19 @@ use cubecl::profile::TimingMethod;
 use crate::engine::SampleFormat;
 use crate::nlmeans::ChannelMode;
 use crate::nlmeans::params::channel_scale_for;
-use crate::tune::{DeviceLimits, IntegerCodes, matrix_plane_width};
+use crate::tune::sites::{
+    Centre,
+    CollabShape,
+    CollabVariant,
+    FLOAT_SEARCH_COUNT,
+    IntegerVariant,
+    SearchVariant,
+    Walk,
+    search_candidate_fits,
+    search_candidate_legal,
+    search_shared_bytes,
+};
+use crate::tune::{DeviceLimits, IntegerCodes, Legality, SiteCandidate, matrix_plane_width};
 
 /// What a fake device offers, turned into the runtime properties a real client reports.
 #[derive(Debug, Clone, Copy)]
@@ -253,4 +265,114 @@ fn the_inverse_scale_matches_the_kernel_distance_scale() {
 
         assert_eq!(inverse_scale, scale / squared_max, "{codes:?} {mode:?}");
     }
+}
+
+/// A 1080p luma search shape at the library's default geometry.
+fn search_shape(codes: Option<IntegerCodes>, matrix_plane: u32) -> CollabShape {
+    CollabShape {
+        f16_search: false,
+        radius: 1,
+        grid_frames: 2,
+        refine: 2,
+        mv_stride: 2 * 240 * 135,
+        conf_stride: 240 * 135,
+        blk_step: 8,
+        blksize: 16,
+        blocks_x: 240,
+        blocks_y: 135,
+        width: 1920,
+        height: 1080,
+        channels: 1,
+        k_max: 8,
+        stored_ch: 1,
+        spatial_radius: 9,
+        refs_x: 479,
+        refs_y: 269,
+        map_cols: 240,
+        map_rows: 136,
+        pooled: false,
+        uniform_walk_only: false,
+        packed: false,
+        codes,
+        matrix_plane,
+    }
+}
+
+/// Every search variant legal on `shape` under `legality`, on an RDNA 4 card.
+fn legal_searches(shape: &CollabShape, legality: &Legality) -> Vec<SearchVariant> {
+    let limits = FakeDevice::rdna4().limits();
+
+    SearchVariant::ALL
+        .iter()
+        .copied()
+        .filter(|&candidate| search_candidate_legal(candidate, shape, &limits, legality))
+        .collect()
+}
+
+fn integer_search(walk: Walk) -> SearchVariant {
+    let variant = IntegerVariant {
+        walk,
+        ..IntegerVariant::reference_for(false)
+    };
+
+    SearchVariant::Integer(variant)
+}
+
+#[test]
+fn integer_search_candidates_are_legal_only_with_codes() {
+    let legality = Legality::default();
+    let rdna4 = FakeDevice::rdna4().limits();
+    let matrix_plane = matrix_plane_width(&rdna4).expect("RDNA 4 offers the matrix plane");
+    let ten_bit = Some(IntegerCodes { depth: 10 });
+    let without_codes = search_shape(None, 0);
+    let with_codes = search_shape(ten_bit, matrix_plane);
+
+    let float_only = legal_searches(&without_codes, &legality);
+    let expected_floats: Vec<SearchVariant> = SearchVariant::ALL[..FLOAT_SEARCH_COUNT].to_vec();
+    assert_eq!(float_only, expected_floats);
+
+    let baseline = SearchVariant::Float(CollabVariant::BASELINE);
+    let clipped = integer_search(Walk::Clipped);
+    let uniform = integer_search(Walk::Uniform);
+    let integer_route = legal_searches(&with_codes, &legality);
+    assert_eq!(integer_route, vec![baseline, clipped, uniform]);
+
+    let search_bytes = size_of::<f32>();
+    for candidate in [baseline, clipped, uniform] {
+        let fits = search_candidate_fits(candidate, &with_codes, &rdna4, &legality, search_bytes);
+        assert!(fits, "{candidate:?}");
+    }
+
+    // The integer placeholder is one u32. The untiled float baseline's is one f32 tile value.
+    let integer_bytes = search_shared_bytes(clipped, &with_codes, search_bytes);
+    let baseline_bytes = search_shared_bytes(baseline, &with_codes, search_bytes);
+    assert_eq!(integer_bytes, size_of::<u32>());
+    assert_eq!(baseline_bytes, search_bytes);
+
+    let tiled = SearchVariant::Float(CollabVariant {
+        centre: Centre::Tiled,
+        ..CollabVariant::BASELINE
+    });
+    let tiled_fits = search_candidate_fits(tiled, &with_codes, &rdna4, &legality, search_bytes);
+    assert!(
+        !tiled_fits,
+        "a float variant other than the baseline runs only without codes"
+    );
+}
+
+#[test]
+fn integer_search_offers_only_uniform_walks_where_the_device_needs_them() {
+    let uniform_legality = Legality {
+        uniform_walk_only: true,
+        ..Legality::default()
+    };
+    let eight_bit = Some(IntegerCodes { depth: 8 });
+    let shape = search_shape(eight_bit, 64);
+
+    let legal = legal_searches(&shape, &uniform_legality);
+    let uniform_variant = CollabVariant::baseline_for(true);
+    let uniform_baseline = SearchVariant::Float(uniform_variant);
+    let uniform = integer_search(Walk::Uniform);
+
+    assert_eq!(legal, vec![uniform_baseline, uniform]);
 }

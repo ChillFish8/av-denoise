@@ -1,0 +1,76 @@
+use super::collab::CollabShape;
+use super::collab_split::SearchVariant;
+use crate::collab::kernels::fused::{CollabVariant, GROUP_LANES};
+use crate::tune::{DeviceLimits, Legality, matrix_plane_width};
+
+/// Whether `candidate` may run on a search of `shape` under `legality`.
+///
+/// Without codes only the float variants run, as the walk allows. With codes only the float
+/// baseline and the built integer variants run, each on a walk the device allows. A matrix variant
+/// also needs the device's matrix plane to be the shape's.
+pub fn search_candidate_legal(
+    candidate: SearchVariant,
+    shape: &CollabShape,
+    limits: &DeviceLimits,
+    legality: &Legality,
+) -> bool {
+    let uniform_only = shape.uniform_walk_only || legality.uniform_walk_only;
+    let has_codes = shape.codes.is_some();
+
+    match candidate {
+        SearchVariant::Float(variant) => {
+            if has_codes {
+                let baseline = CollabVariant::baseline_for(uniform_only);
+                return variant == baseline;
+            }
+
+            variant.runs_where(uniform_only)
+        },
+        SearchVariant::Integer(variant) => {
+            let walk_runs = variant.runs_where(uniform_only);
+            let plane_width = matrix_plane_width(limits);
+            let matrix_fits = !variant.is_matrix() || plane_width == Some(shape.matrix_plane);
+
+            has_codes && variant.is_built() && walk_runs && matrix_fits
+        },
+    }
+}
+
+/// The bytes of every shared buffer `candidate` allocates, with float tiles of `search_bytes`
+/// bytes per value.
+///
+/// A float variant allocates its centre tile. A scalar integer variant counts a one-element
+/// placeholder.
+pub fn search_shared_bytes(candidate: SearchVariant, shape: &CollabShape, search_bytes: usize) -> usize {
+    match candidate {
+        SearchVariant::Float(variant) => {
+            let tile_elements = variant.tile_elements(shape.spatial_radius, shape.stored_ch);
+            tile_elements as usize * search_bytes
+        },
+        SearchVariant::Integer(_) => size_of::<u32>(),
+    }
+}
+
+/// Legal, and its shared memory, threads, cube shape and plane width fit `limits`, as
+/// `VariantSite::fits` checks them (the baseline skips the plane width check).
+pub fn search_candidate_fits(
+    candidate: SearchVariant,
+    shape: &CollabShape,
+    limits: &DeviceLimits,
+    legality: &Legality,
+    search_bytes: usize,
+) -> bool {
+    let lanes = candidate.lanes();
+    let shared_bytes = search_shared_bytes(candidate, shape, search_bytes);
+    let (max_x, _, _) = limits.max_cube_dim;
+    let baseline_variant = CollabVariant::baseline_for(shape.uniform_walk_only);
+    let is_baseline = candidate == SearchVariant::Float(baseline_variant);
+
+    let legal = search_candidate_legal(candidate, shape, limits, legality);
+    let shared_fits = shared_bytes <= limits.max_shared_bytes;
+    let units_fit = lanes <= limits.max_units_per_cube;
+    let dims_fit = lanes <= max_x;
+    let plane_fits = is_baseline || limits.plane_size_min >= GROUP_LANES;
+
+    legal && shared_fits && units_fit && dims_fit && plane_fits
+}

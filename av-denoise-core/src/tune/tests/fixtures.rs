@@ -12,8 +12,7 @@ use crate::collab::{MAX_K, grid_frames, needs_warp_uniform_search};
 use crate::nl4d::nl4d_pool_ratio;
 use crate::nlmeans::motion::THSAD_PIXEL;
 use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS, StorageAlign};
-use crate::tune::SiteCandidate;
-use crate::tune::gpu::zero_words;
+use crate::tune::gpu::{read_f32, zero_words};
 use crate::tune::sites::{
     AccumulateSite,
     CollabFilterSite,
@@ -32,6 +31,7 @@ use crate::tune::sites::{
     WindowSite,
     allocate_accum,
 };
+use crate::tune::{DeviceLimits, IntegerCodes, SiteCandidate, matrix_plane_width};
 
 /// Frames in every fixture ring. The centre is slot 1, with a neighbour either side.
 pub(crate) const RING_FRAMES: u32 = 3;
@@ -216,6 +216,8 @@ pub(crate) struct CollabSpec {
     /// Every pixel the same, so every candidate distance ties.
     pub(crate) flat: bool,
     pub(crate) f16_search: bool,
+    /// The confidence a motion block needs before its window is searched.
+    pub(crate) c_min: f32,
 }
 
 impl CollabSpec {
@@ -230,6 +232,7 @@ impl CollabSpec {
             pooled: false,
             flat: false,
             f16_search: false,
+            c_min: 0.05,
         }
     }
 }
@@ -256,11 +259,20 @@ pub(crate) fn collab_site(
     client: &ComputeClient<TestRuntime>,
     spec: &CollabSpec,
 ) -> CollabSite<TestRuntime, f32> {
+    let ring_values = collab_ring(spec);
+    collab_site_with_ring(client, spec, &ring_values)
+}
+
+/// [collab_site] over `ring_values`, which hold `2 * spec.radius + 1` frames in slot order.
+pub(crate) fn collab_site_with_ring(
+    client: &ComputeClient<TestRuntime>,
+    spec: &CollabSpec,
+    ring_values: &[f32],
+) -> CollabSite<TestRuntime, f32> {
     let stored_ch = spec.channels.storage_count();
     let frames = 2 * spec.radius + 1;
     let pixels = (spec.width * spec.height) as usize;
-    let ring_values = collab_ring(spec);
-    let ring = upload(client, &ring_values);
+    let ring = upload(client, ring_values);
 
     let blocks_x = spec.width.div_ceil(BLK_STEP);
     let blocks_y = spec.height.div_ceil(BLK_STEP);
@@ -325,7 +337,7 @@ pub(crate) fn collab_site(
     let inputs = CollabInputs {
         ring: ring.clone(),
         ring_len: ring_values.len(),
-        search_ring: ring,
+        search_ring: ring.clone(),
         search_len: stored_ch as usize,
         mv_field,
         mv_len: mv_values.len(),
@@ -339,6 +351,8 @@ pub(crate) fn collab_site(
         map_len,
         dct_profile,
         kaiser,
+        codes: ring,
+        codes_len: stored_ch as usize,
     };
     let weight_norm = weight_scale(sigma_value, &profile);
     let accum_scale = cross_frame_accum_scale(spatial_radius, spec.radius);
@@ -349,7 +363,7 @@ pub(crate) fn collab_site(
     };
     let values = CollabValues {
         centre_slot,
-        c_min: 0.05,
+        c_min: spec.c_min,
         lambda_ht: 2.7,
         curve_valid: 0,
         map_mode: STRENGTH_MAP_OFF,
@@ -385,6 +399,8 @@ pub(crate) fn collab_site(
         pooled: spec.pooled,
         uniform_walk_only,
         packed: false,
+        codes: None,
+        matrix_plane: 0,
     };
     let outputs = CollabOutputs {
         accum,
@@ -490,6 +506,61 @@ pub(crate) fn split_sites<S: Float>(
     };
 
     (search, filter)
+}
+
+/// Each value of `values` as the code `codes` rounds it to, clamped between 0 and the top code.
+pub(crate) fn quantised_codes(values: &[f32], codes: IntegerCodes) -> Vec<u16> {
+    let max_value = codes.max_code() as f32;
+
+    values
+        .iter()
+        .map(|&value| {
+            let clamped = value.clamp(0.0, 1.0);
+            let code = (clamped * max_value).round();
+            code as u16
+        })
+        .collect()
+}
+
+/// The split sites for `fused`, reading its ring rounded to `codes` and the matching code ring.
+///
+/// The ring is read back and rounded on the host, so the float search and the integer search see the
+/// same content. The matrix plane is the device's, or 0 when it has none.
+pub(crate) fn integer_split_sites(
+    fused: &CollabSite<TestRuntime, f32>,
+    codes: IntegerCodes,
+) -> (CollabSearchSite<TestRuntime, f32>, CollabFilterSite<TestRuntime>) {
+    let client = &fused.client;
+    let inputs = &fused.inputs;
+    let ring_values = read_f32(client, &inputs.ring, inputs.ring_len).expect("the fixture ring reads back");
+    let code_values = quantised_codes(&ring_values, codes);
+    let max_value = codes.max_code() as f32;
+    let quantised: Vec<f32> = code_values.iter().map(|&code| code as f32 / max_value).collect();
+    let ring = upload(client, &quantised);
+    let code_bytes = u16::as_bytes(&code_values);
+    let code_ring = client.create_from_slice(code_bytes);
+
+    let limits = DeviceLimits::from_client(client);
+    let plane_width = matrix_plane_width(&limits);
+    let quantised_inputs = CollabInputs {
+        ring: ring.clone(),
+        search_ring: ring,
+        codes: code_ring,
+        codes_len: code_values.len(),
+        ..inputs.clone()
+    };
+    let integer_shape = CollabShape {
+        codes: Some(codes),
+        matrix_plane: plane_width.unwrap_or(0),
+        ..fused.shape
+    };
+    let quantised_site = CollabSite {
+        inputs: quantised_inputs,
+        shape: integer_shape,
+        ..fused.clone()
+    };
+
+    split_sites(&quantised_site)
 }
 
 /// The content a regularise fixture scores its candidates against.

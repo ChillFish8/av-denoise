@@ -7,7 +7,7 @@ use av_denoise_core::bench_api::tune_sites::{
     RegulariseCandidate,
     WindowCandidate,
 };
-use av_denoise_core::tune::{DeviceLimits, SiteCandidate};
+use av_denoise_core::tune::{DeviceLimits, IntegerCodes, SiteCandidate};
 use clap::Parser;
 use cubecl::prelude::*;
 use kernels::accumulate::AccumulateBench;
@@ -16,7 +16,7 @@ use kernels::cast_codes::CastCodesBench;
 use kernels::cast_f16::CastF16Bench;
 use kernels::collab_aggregate::{CollabNormaliseBench, CollabZeroAccumBench};
 use kernels::collab_fused::{CollabFusedBench, fitted_variants};
-use kernels::collab_split::{CollabSplitBench, fitted_split_kernels};
+use kernels::collab_split::{CollabSplitBench, fitted_integer_kernels, fitted_split_kernels};
 use kernels::compilation_cache::install_bench_compilation_cache;
 use kernels::copy::CopyBench;
 use kernels::dist_2d_weight::DistWeightBench;
@@ -347,7 +347,27 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
                 channels,
                 channel_name,
                 kernel,
+                codes: None,
             });
+        }
+    }
+
+    let code_depths: &[u32] = if limits.u16_buffer { &[8, 10] } else { &[] };
+    for &depth in code_depths {
+        let codes = IntegerCodes { depth };
+
+        for &(channels, channel_name) in CHANNELS {
+            let kernels = fitted_integer_kernels(&client, channels, channel_name, codes);
+
+            for kernel in kernels {
+                run(CollabSplitBench {
+                    client: client.clone(),
+                    channels,
+                    channel_name,
+                    kernel,
+                    codes: Some(codes),
+                });
+            }
         }
     }
 
