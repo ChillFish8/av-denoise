@@ -15,6 +15,7 @@ use kernels::bilateral::BilateralBench;
 use kernels::cast_f16::CastF16Bench;
 use kernels::collab_aggregate::{CollabNormaliseBench, CollabZeroAccumBench};
 use kernels::collab_fused::{CollabFusedBench, fitted_variants};
+use kernels::collab_split::{CollabSplitBench, fitted_split_kernels};
 use kernels::compilation_cache::install_bench_compilation_cache;
 use kernels::copy::CopyBench;
 use kernels::dist_2d_weight::DistWeightBench;
@@ -310,6 +311,19 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
                 strength_map: false,
                 pooled: false,
                 candidate,
+            });
+        }
+    }
+
+    for &(channels, channel_name) in CHANNELS {
+        let kernels = fitted_split_kernels(&client, channels, channel_name);
+
+        for kernel in kernels {
+            run(CollabSplitBench {
+                client: client.clone(),
+                channels,
+                channel_name,
+                kernel,
             });
         }
     }

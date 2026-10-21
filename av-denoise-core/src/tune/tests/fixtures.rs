@@ -16,8 +16,10 @@ use crate::tune::SiteCandidate;
 use crate::tune::gpu::zero_words;
 use crate::tune::sites::{
     AccumulateSite,
+    CollabFilterSite,
     CollabInputs,
     CollabOutputs,
+    CollabSearchSite,
     CollabShape,
     CollabSite,
     CollabValues,
@@ -25,6 +27,7 @@ use crate::tune::sites::{
     ConfidenceBinding,
     RegulariseOutputs,
     RegulariseSite,
+    SearchOutputs,
     WindowPass,
     WindowSite,
     allocate_accum,
@@ -433,6 +436,34 @@ pub(crate) fn collab_site_f16(
         outputs: site.outputs,
         search: PhantomData,
     }
+}
+
+/// The search and filter sites for the same pass as `site`, sharing a zeroed member buffer.
+pub(crate) fn split_sites<S: Float>(
+    site: &CollabSite<TestRuntime, S>,
+) -> (CollabSearchSite<TestRuntime, S>, CollabFilterSite<TestRuntime>) {
+    let client = &site.client;
+    let search_outputs = SearchOutputs::zeroed(client, site.outputs.refs);
+    let members = search_outputs.members.clone();
+
+    let search = CollabSearchSite {
+        client: client.clone(),
+        inputs: site.inputs.clone(),
+        values: site.values,
+        shape: site.shape,
+        outputs: search_outputs,
+        search: PhantomData,
+    };
+    let filter = CollabFilterSite {
+        client: client.clone(),
+        inputs: site.inputs.clone(),
+        members,
+        values: site.values,
+        shape: site.shape,
+        outputs: site.outputs.clone(),
+    };
+
+    (search, filter)
 }
 
 /// The content a regularise fixture scores its candidates against.

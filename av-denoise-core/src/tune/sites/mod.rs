@@ -1,5 +1,6 @@
 mod accumulate;
 mod collab;
+mod collab_split;
 mod regularise;
 mod window;
 
@@ -7,7 +8,25 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 pub use self::accumulate::{AccumulateCandidate, AccumulateSite};
-pub use self::collab::{CollabInputs, CollabOutputs, CollabShape, CollabSite, CollabValues};
+pub use self::collab::{
+    CollabInputs,
+    CollabOutputs,
+    CollabShape,
+    CollabSite,
+    CollabValues,
+    compare_collab_outputs,
+};
+pub use self::collab_split::{
+    COLLAB_FILTER,
+    COLLAB_SEARCH,
+    CollabFilterSite,
+    CollabSearchSite,
+    FilterCandidate,
+    SEARCH_VARIANT_COUNT,
+    SEARCH_VARIANTS,
+    SearchOutputs,
+    SearchVariant,
+};
 #[cfg(test)]
 pub(crate) use self::regularise::compare_fields;
 pub use self::regularise::{
@@ -56,6 +75,8 @@ pub fn candidate_known(site: &str, name: &str) -> bool {
         NLM_WINDOW => WindowCandidate::from_name(name).is_some(),
         NLM_ACCUMULATE => AccumulateCandidate::from_name(name).is_some(),
         COLLAB_FUSED => CollabVariant::from_name(name).is_some(),
+        COLLAB_SEARCH => SearchVariant::from_name(name).is_some(),
+        COLLAB_FILTER => FilterCandidate::from_name(name).is_some(),
         NL4D_MV_REGULARISE => RegulariseCandidate::from_name(name).is_some(),
         _ => false,
     }

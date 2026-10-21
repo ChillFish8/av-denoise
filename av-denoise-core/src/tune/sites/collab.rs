@@ -11,7 +11,7 @@ use crate::collab::kernels::fused::{Centre, CollabVariant, GROUP_LANES, Neighbou
 use crate::nlmeans::NOISE_CURVE_BINS;
 use crate::tune::fidelity::{CompareResult, Fidelity, diff_integers, diff_plane};
 use crate::tune::gpu::{bind, read_f32, read_i32, zero_words, zeroed_words};
-use crate::tune::key::SiteKey;
+use crate::tune::key::{SiteKey, SiteKeyBuilder};
 use crate::tune::site::{LaunchShape, SiteCandidate, VariantSite};
 use crate::tune::{DeviceLimits, Legality};
 
@@ -62,11 +62,11 @@ const fn count_variants() -> usize {
     count * GROUP_OPTIONS.len() * WALK_OPTIONS.len() * NEIGHBOUR_OPTIONS.len()
 }
 
-const VARIANT_COUNT: usize = count_variants();
+pub(crate) const VARIANT_COUNT: usize = count_variants();
 
 /// Every listed variant the kernel builds, the default baseline first, with the neighbour walk varying
 /// fastest.
-const VARIANTS: [CollabVariant; VARIANT_COUNT] = listed_variants();
+pub(crate) const VARIANTS: [CollabVariant; VARIANT_COUNT] = listed_variants();
 
 // Keeps the default baseline first.
 const _: () = assert!(
@@ -268,17 +268,9 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
 
     fn key(&self) -> SiteKey {
         let shape = &self.shape;
+        let builder = collab_key_builder(COLLAB_FUSED, shape);
 
-        SiteKey::builder(COLLAB_FUSED, shape.width, shape.height)
-            .param("ch", shape.channels)
-            .param("stored", shape.stored_ch)
-            .param("radius", shape.radius)
-            .param("grid", shape.grid_frames)
-            .param("refine", shape.refine)
-            .param("blksize", shape.blksize)
-            .param("step", shape.blk_step)
-            .param("kmax", shape.k_max)
-            .param("spatial", shape.spatial_radius)
+        builder
             .param("pooled", u8::from(shape.pooled))
             .param("f16", u8::from(shape.f16_search))
             .build()
@@ -340,57 +332,18 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
     }
 
     fn scratch_outputs(&self) -> CollabOutputs {
-        let accum = self.client.empty(self.outputs.accum_len * size_of::<i32>());
-        let wsum = self.client.empty(self.outputs.wsum_len * size_of::<i32>());
-        let group_weight = self.client.empty(self.outputs.refs * size_of::<f32>());
-        let scratch = CollabOutputs {
-            accum,
-            wsum,
-            group_weight,
-            ..self.outputs.clone()
-        };
-
-        self.clear_outputs(&scratch);
-        scratch
+        scratch_collab_outputs(&self.client, &self.outputs)
     }
 
     fn clear_outputs(&self, outputs: &CollabOutputs) {
-        zero_words(&self.client, &outputs.accum, outputs.accum_len);
-        zero_words(&self.client, &outputs.wsum, outputs.wsum_len);
-        zero_words(&self.client, &outputs.group_weight, outputs.refs);
+        clear_collab_outputs(&self.client, outputs);
     }
 
     /// The copy's frame-sized buffers hold one word each, which [VariantSite::compile_only] never
     /// reads. The small fixed-size tables keep their sizes.
     fn on_client(&self, client: &ComputeClient<R>) -> Option<Self> {
-        let stored_ch = self.shape.stored_ch as usize;
-
-        let blank_inputs = CollabInputs {
-            ring: zeroed_words(client, 1),
-            ring_len: 1,
-            search_ring: zeroed_words(client, 1),
-            search_len: 1,
-            mv_field: zeroed_words(client, 1),
-            mv_len: 1,
-            confidence: zeroed_words(client, 1),
-            conf_len: 1,
-            neighbour_slots: zeroed_words(client, 1),
-            neighbour_slots_len: 1,
-            sigma: zeroed_words(client, stored_ch),
-            noise_curve: zeroed_words(client, NOISE_CURVE_BINS),
-            strength_map: zeroed_words(client, 1),
-            map_len: 1,
-            dct_profile: zeroed_words(client, 8),
-            kaiser: zeroed_words(client, PATCH_SIZE as usize),
-        };
-        let blank_outputs = CollabOutputs {
-            accum: zeroed_words(client, 1),
-            wsum: zeroed_words(client, 1),
-            group_weight: zeroed_words(client, 1),
-            accum_len: 1,
-            wsum_len: 1,
-            refs: 1,
-        };
+        let blank_inputs = blank_collab_inputs(client, self.shape.stored_ch);
+        let blank_outputs = blank_collab_outputs(client);
 
         Some(Self {
             client: client.clone(),
@@ -406,19 +359,7 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
         candidate: &CollabOutputs,
         fidelity: Fidelity,
     ) -> Result<CompareResult, anyhow::Error> {
-        let expected_accum = read_i32(&self.client, &baseline.accum, baseline.accum_len)?;
-        let actual_accum = read_i32(&self.client, &candidate.accum, candidate.accum_len)?;
-        let expected_wsum = read_i32(&self.client, &baseline.wsum, baseline.wsum_len)?;
-        let actual_wsum = read_i32(&self.client, &candidate.wsum, candidate.wsum_len)?;
-        let expected_weight = read_f32(&self.client, &baseline.group_weight, baseline.refs)?;
-        let actual_weight = read_f32(&self.client, &candidate.group_weight, candidate.refs)?;
-
-        let accum_diff = diff_integers(&expected_accum, &actual_accum);
-        let wsum_diff = diff_integers(&expected_wsum, &actual_wsum);
-        let weight_diff = diff_plane(&expected_weight, &actual_weight);
-        let verdict = fidelity.judge(&[accum_diff, wsum_diff, weight_diff]);
-
-        Ok(verdict)
+        compare_collab_outputs(&self.client, baseline, candidate, fidelity)
     }
 
     fn baseline(&self) -> CollabVariant {
@@ -507,4 +448,102 @@ impl<R: Runtime, S: Float> CollabSite<R, S> {
             );
         }
     }
+}
+
+/// The key fields every collab site shares, for the site `site`.
+pub(crate) fn collab_key_builder(site: &'static str, shape: &CollabShape) -> SiteKeyBuilder {
+    SiteKey::builder(site, shape.width, shape.height)
+        .param("ch", shape.channels)
+        .param("stored", shape.stored_ch)
+        .param("radius", shape.radius)
+        .param("grid", shape.grid_frames)
+        .param("refine", shape.refine)
+        .param("blksize", shape.blksize)
+        .param("step", shape.blk_step)
+        .param("kmax", shape.k_max)
+        .param("spatial", shape.spatial_radius)
+}
+
+/// Freshly allocated outputs shaped like `outputs`, zeroed on the GPU.
+pub(crate) fn scratch_collab_outputs<R: Runtime>(
+    client: &ComputeClient<R>,
+    outputs: &CollabOutputs,
+) -> CollabOutputs {
+    let accum = client.empty(outputs.accum_len * size_of::<i32>());
+    let wsum = client.empty(outputs.wsum_len * size_of::<i32>());
+    let group_weight = client.empty(outputs.refs * size_of::<f32>());
+    let scratch = CollabOutputs {
+        accum,
+        wsum,
+        group_weight,
+        ..outputs.clone()
+    };
+
+    clear_collab_outputs(client, &scratch);
+    scratch
+}
+
+pub(crate) fn clear_collab_outputs<R: Runtime>(client: &ComputeClient<R>, outputs: &CollabOutputs) {
+    zero_words(client, &outputs.accum, outputs.accum_len);
+    zero_words(client, &outputs.wsum, outputs.wsum_len);
+    zero_words(client, &outputs.group_weight, outputs.refs);
+}
+
+/// Inputs for a copy that only compiles, with one word in each frame-sized buffer.
+///
+/// The small fixed-size tables keep their sizes.
+pub(crate) fn blank_collab_inputs<R: Runtime>(client: &ComputeClient<R>, stored_ch: u32) -> CollabInputs {
+    CollabInputs {
+        ring: zeroed_words(client, 1),
+        ring_len: 1,
+        search_ring: zeroed_words(client, 1),
+        search_len: 1,
+        mv_field: zeroed_words(client, 1),
+        mv_len: 1,
+        confidence: zeroed_words(client, 1),
+        conf_len: 1,
+        neighbour_slots: zeroed_words(client, 1),
+        neighbour_slots_len: 1,
+        sigma: zeroed_words(client, stored_ch as usize),
+        noise_curve: zeroed_words(client, NOISE_CURVE_BINS),
+        strength_map: zeroed_words(client, 1),
+        map_len: 1,
+        dct_profile: zeroed_words(client, 8),
+        kaiser: zeroed_words(client, PATCH_SIZE as usize),
+    }
+}
+
+/// Outputs for a copy that only compiles, one word each.
+pub(crate) fn blank_collab_outputs<R: Runtime>(client: &ComputeClient<R>) -> CollabOutputs {
+    CollabOutputs {
+        accum: zeroed_words(client, 1),
+        wsum: zeroed_words(client, 1),
+        group_weight: zeroed_words(client, 1),
+        accum_len: 1,
+        wsum_len: 1,
+        refs: 1,
+    }
+}
+
+/// Reads both sets of collab outputs back and judges the accumulators and group weights under
+/// `fidelity`.
+pub fn compare_collab_outputs<R: Runtime>(
+    client: &ComputeClient<R>,
+    baseline: &CollabOutputs,
+    candidate: &CollabOutputs,
+    fidelity: Fidelity,
+) -> Result<CompareResult, anyhow::Error> {
+    let expected_accum = read_i32(client, &baseline.accum, baseline.accum_len)?;
+    let actual_accum = read_i32(client, &candidate.accum, candidate.accum_len)?;
+    let expected_wsum = read_i32(client, &baseline.wsum, baseline.wsum_len)?;
+    let actual_wsum = read_i32(client, &candidate.wsum, candidate.wsum_len)?;
+    let expected_weight = read_f32(client, &baseline.group_weight, baseline.refs)?;
+    let actual_weight = read_f32(client, &candidate.group_weight, candidate.refs)?;
+
+    let accum_diff = diff_integers(&expected_accum, &actual_accum);
+    let wsum_diff = diff_integers(&expected_wsum, &actual_wsum);
+    let weight_diff = diff_plane(&expected_weight, &actual_weight);
+    let verdict = fidelity.judge(&[accum_diff, wsum_diff, weight_diff]);
+
+    Ok(verdict)
 }

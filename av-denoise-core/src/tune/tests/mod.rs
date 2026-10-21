@@ -1,6 +1,7 @@
 mod accumulate;
 mod budget;
 mod collab;
+mod collab_split;
 mod convergence;
 mod decide;
 mod device;

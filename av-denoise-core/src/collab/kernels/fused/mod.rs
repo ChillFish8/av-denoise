@@ -5,6 +5,7 @@ pub(crate) mod grid;
 pub(crate) mod pooled;
 pub(crate) mod shape;
 pub(crate) mod sliding;
+mod split;
 pub(crate) mod strength_map;
 pub(crate) mod tile;
 pub(crate) mod trajectory;
@@ -16,6 +17,7 @@ use self::centre::centre_search;
 use self::grid::{grid_fwd, grid_inv, grid_variance};
 use self::pooled::pooled_threshold;
 use self::shape::{SearchCursor, SearchShape};
+pub use self::split::{MEMBER_WORDS, collab_filter, collab_search};
 use self::strength_map::strength_map_scale;
 pub use self::strength_map::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
 use self::tile::load_centre_tile;
@@ -51,6 +53,12 @@ const NOISE_CURVE_SCALE_MIN: f32 = 0.33;
 
 /// The largest factor the noise curve may scale the luma threshold by.
 const NOISE_CURVE_SCALE_MAX: f32 = 3.0;
+
+/// The bits of a group word that hold the member count.
+pub const GROUP_SIZE_MASK: u32 = 0xFF;
+
+/// The group word bit set when the group is a volume grid.
+pub const GROUP_USES_GRID: u32 = 0x100;
 
 // The widest neighbour index packed is `2 * radius`, and `pack_pos_t`'s 6-bit `t` field silently
 // corrupts the word at 64 or more.
@@ -154,12 +162,6 @@ const _: () = assert!(
     clippy::too_many_arguments,
     reason = "every argument is a buffer or comptime shape the kernel binds"
 )]
-#[expect(
-    clippy::collapsible_if,
-    reason = "the outer condition of the group-DC exception is comptime, so nesting elides the \
-              inner test in 63 of the 64 unrolled positions rather than emitting it and ANDing \
-              a constant false into it"
-)]
 pub fn collab_fused<S: Float, N: Size>(
     ring: &Array<Vector<f32, N>>,
     ring_scalar: &Array<f32>,
@@ -210,8 +212,6 @@ pub fn collab_fused<S: Float, N: Size>(
     let sub = thread_id % 8u32;
     let base = group_base();
     let groups = comptime!(variant.groups);
-    let walk = comptime!(variant.walk);
-    let neighbour_walk = comptime!(variant.neighbour);
 
     let max_x = comptime!(width - PATCH_SIZE);
     let max_y = comptime!(height - PATCH_SIZE);
@@ -265,21 +265,7 @@ pub fn collab_fused<S: Float, N: Size>(
         sync_cube();
     }
 
-    // Column `sub` of the reference patch, all channels, held in registers for the whole search.
-    let mut current = Array::<f32>::new(comptime!(PATCH_SIZE * channels) as usize);
-    #[unroll]
-    for r in 0..PATCH_SIZE {
-        let pixel = read_line(ring, ref_x + sub, ref_y + r, centre_slot, width, height);
-        #[unroll]
-        for c in 0..channels {
-            current[(r * channels + c) as usize] = pixel[c as usize];
-        }
-    }
-
-    // An unplaced candidate carries `UNFILLED_DISTANCE` and the self-match carries `-1.0e38`.
-    // cubecl treats consts as comptime, so the slot takes the constant through `runtime()`.
-    let mut best_d = UNFILLED_DISTANCE.runtime();
-    let mut best_pos = 0u32;
+    let current = load_reference_column(ring, ref_x, ref_y, centre_slot, sub, width, height, channels);
 
     // The channel scale multiplies the completed 64-pixel distance, not each squared difference.
     let scale = channel_scale(channels);
@@ -294,19 +280,176 @@ pub fn collab_fused<S: Float, N: Size>(
         base,
         scale,
     };
-    let n_live = centre_search(
+    let mut member_pos = Array::<u32>::new(MAX_K as usize);
+    let group_word = search_group(
         ring,
         search_ring,
         &tile,
+        mv_field,
+        confidence,
+        neighbour_slots,
         &current,
         &cursor,
+        c_min,
+        &mut member_pos,
+        variant,
+        radius,
+        grid_frames,
+        refine,
+        mv_stride,
+        conf_stride,
+        blk_step,
+        blksize,
+        blocks_x,
+        blocks_y,
+        k_max,
+        shape,
+    );
+
+    let ref_idx = CUBE_POS_Y * refs_x + ref_x_clamped;
+    let k_use = group_word & GROUP_SIZE_MASK;
+    let use_grid = (group_word & GROUP_USES_GRID) != 0u32;
+    let column_luma = column_luma_of(&current, channels);
+
+    filter_group(
+        ring_scalar,
+        neighbour_slots,
+        sigma,
+        noise_curve,
+        strength_map,
+        dct_profile,
+        kaiser,
+        accum,
+        wsum,
+        group_weight,
+        &mut transpose_buf,
+        &member_pos,
+        k_use,
+        use_grid,
+        column_luma,
+        ref_x,
+        ref_y,
+        ref_idx,
+        live,
+        centre_slot,
+        sub,
+        group,
+        lambda_ht,
+        curve_valid,
+        map_mode,
+        weight_scale,
+        accum_scale,
+        pool_ratio,
+        grid_frames,
+        width,
+        height,
+        channels,
+        stored_ch,
+        map_cols,
+        map_rows,
+        pooled,
+    );
+}
+
+/// Column `sub` of the patch at `(x, y)` in frame `slot`, every channel, row by row.
+#[cube]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a buffer or comptime shape the load reads"
+)]
+pub(crate) fn load_reference_column<N: Size>(
+    ring: &Array<Vector<f32, N>>,
+    x: u32,
+    y: u32,
+    slot: u32,
+    sub: u32,
+    #[comptime] width: u32,
+    #[comptime] height: u32,
+    #[comptime] channels: u32,
+) -> Array<f32> {
+    let mut column = Array::<f32>::new(comptime!(PATCH_SIZE * channels) as usize);
+
+    #[unroll]
+    for r in 0..PATCH_SIZE {
+        let pixel = read_line(ring, x + sub, y + r, slot, width, height);
+        #[unroll]
+        for c in 0..channels {
+            column[(r * channels + c) as usize] = pixel[c as usize];
+        }
+    }
+
+    column
+}
+
+/// The sum of channel 0 down a column loaded by [load_reference_column].
+#[cube]
+pub(crate) fn column_luma_of(column: &Array<f32>, #[comptime] channels: u32) -> f32 {
+    let mut column_luma = 0.0f32;
+
+    #[unroll]
+    for r in 0..PATCH_SIZE {
+        column_luma += column[(r * channels) as usize];
+    }
+
+    column_luma
+}
+
+/// Finds the group of the reference at the cursor and writes its members to `member_pos`.
+///
+/// Every lane of the group ends up holding the same members. Returns the group word, the member
+/// count in the low 8 bits with [GROUP_USES_GRID] set when the group is a volume grid.
+#[cube]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a buffer or comptime shape the search reads"
+)]
+pub(crate) fn search_group<S: Float, N: Size>(
+    ring: &Array<Vector<f32, N>>,
+    search_ring: &Array<Vector<S, N>>,
+    tile: &SharedMemory<S>,
+    mv_field: &Array<i32>,
+    confidence: &Array<f32>,
+    neighbour_slots: &Array<u32>,
+    current: &Array<f32>,
+    cursor: &SearchCursor,
+    c_min: f32,
+    member_pos: &mut Array<u32>,
+    #[comptime] variant: CollabVariant,
+    #[comptime] radius: u32,
+    #[comptime] grid_frames: u32,
+    #[comptime] refine: u32,
+    #[comptime] mv_stride: u32,
+    #[comptime] conf_stride: u32,
+    #[comptime] blk_step: u32,
+    #[comptime] blksize: u32,
+    #[comptime] blocks_x: u32,
+    #[comptime] blocks_y: u32,
+    #[comptime] k_max: u32,
+    #[comptime] shape: SearchShape,
+) -> u32 {
+    let walk = comptime!(variant.walk);
+    let neighbour_walk = comptime!(variant.neighbour);
+    let width = comptime!(shape.width);
+    let height = comptime!(shape.height);
+    let channels = comptime!(shape.channels);
+    let sub = cursor.sub;
+
+    // An unplaced candidate carries `UNFILLED_DISTANCE` and the self-match carries `-1.0e38`.
+    // cubecl treats consts as comptime, so the slot takes the constant through `runtime()`.
+    let mut best_d = UNFILLED_DISTANCE.runtime();
+    let mut best_pos = 0u32;
+
+    let n_live = centre_search(
+        ring,
+        search_ring,
+        tile,
+        current,
+        cursor,
         &mut best_d,
         &mut best_pos,
         variant,
         shape,
     );
-
-    let ref_idx = CUBE_POS_Y * refs_x + ref_x_clamped;
 
     let mut k_use = 1u32;
     while k_use * 2u32 <= n_live && k_use * 2u32 <= k_max {
@@ -314,10 +457,9 @@ pub fn collab_fused<S: Float, N: Size>(
     }
 
     // The single-frame group, which is also the fallback. Lane `i` holds member `i`.
-    let mut member_pos = Array::<u32>::new(MAX_K as usize);
     #[unroll]
     for m in 0..MAX_K {
-        member_pos[m as usize] = plane_shuffle(best_pos, base + m);
+        member_pos[m as usize] = plane_shuffle(best_pos, cursor.base + m);
     }
 
     let mut use_grid = false;
@@ -346,7 +488,14 @@ pub fn collab_fused<S: Float, N: Size>(
             let mut anchor = Array::<f32>::new(comptime!(PATCH_SIZE * channels) as usize);
             #[unroll]
             for r in 0..PATCH_SIZE {
-                let pixel = read_line(ring, anchor_x + sub, anchor_y + r, centre_slot, width, height);
+                let pixel = read_line(
+                    ring,
+                    anchor_x + sub,
+                    anchor_y + r,
+                    cursor.centre_slot,
+                    width,
+                    height,
+                );
                 #[unroll]
                 for c in 0..channels {
                     anchor[(r * channels + c) as usize] = pixel[c as usize];
@@ -363,7 +512,7 @@ pub fn collab_fused<S: Float, N: Size>(
                 anchor_x,
                 anchor_y,
                 sub,
-                scale,
+                cursor.scale,
                 c_min,
                 &mut grid_d,
                 &mut grid_pos,
@@ -398,6 +547,63 @@ pub fn collab_fused<S: Float, N: Size>(
         k_use = select(use_grid, MAX_K, k_use);
     }
 
+    let grid_flag = select(use_grid, GROUP_USES_GRID, 0u32);
+    k_use | grid_flag
+}
+
+/// Filters the group in `member_pos` and scatters every member back into its own frame.
+///
+/// `column_luma` is lane `sub`'s sum of channel 0 down the reference column, and the group sums
+/// it into the patch luma the noise curve reads. `live` gates every write.
+#[cube]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a buffer or comptime shape the filter binds"
+)]
+#[expect(
+    clippy::collapsible_if,
+    reason = "the outer condition of the group-DC exception is comptime, so nesting elides the \
+              inner test in 63 of the 64 unrolled positions rather than emitting it and ANDing \
+              a constant false into it"
+)]
+pub(crate) fn filter_group(
+    ring_scalar: &Array<f32>,
+    neighbour_slots: &Array<u32>,
+    sigma: &Array<f32>,
+    noise_curve: &Array<f32>,
+    strength_map: &Array<f32>,
+    dct_profile: &Array<f32>,
+    kaiser: &Array<f32>,
+    accum: &mut Array<Atomic<i32>>,
+    wsum: &mut Array<Atomic<i32>>,
+    group_weight: &mut Array<f32>,
+    transpose_buf: &mut SharedMemory<f32>,
+    member_pos: &Array<u32>,
+    k_use: u32,
+    use_grid: bool,
+    column_luma: f32,
+    ref_x: u32,
+    ref_y: u32,
+    ref_idx: u32,
+    live: bool,
+    centre_slot: u32,
+    sub: u32,
+    group: u32,
+    lambda_ht: f32,
+    curve_valid: u32,
+    map_mode: u32,
+    weight_scale: f32,
+    accum_scale: f32,
+    pool_ratio: f32,
+    #[comptime] grid_frames: u32,
+    #[comptime] width: u32,
+    #[comptime] height: u32,
+    #[comptime] channels: u32,
+    #[comptime] stored_ch: u32,
+    #[comptime] map_cols: u32,
+    #[comptime] map_rows: u32,
+    #[comptime] pooled: bool,
+) {
     // The frame is picked with `select` rather than a branch, because a frame index that reaches
     // `read_line` through a branch panics cubecl 0.10's GVN pass and the launch silently does
     // nothing.
@@ -421,12 +627,6 @@ pub fn collab_fused<S: Float, N: Size>(
     let prof_sub = dct_profile[sub as usize];
 
     // Every lane reaches the luma reduction, so the group stays converged.
-    let mut column_luma = 0.0f32;
-    #[unroll]
-    for r in 0..PATCH_SIZE {
-        column_luma += current[(r * channels) as usize];
-    }
-
     let patch_luma = plane_ssd_reduce8(column_luma) / comptime!(PATCH_AREA as f32);
     let bins = comptime!(NOISE_CURVE_BINS as f32);
     let unclamped_pos = patch_luma * bins - 0.5f32;
@@ -493,7 +693,7 @@ pub fn collab_fused<S: Float, N: Size>(
                 line[i as usize] = stack[(m * PATCH_SIZE + i) as usize];
             }
             dct8_reg_fwd(&mut line);
-            transpose8(&mut transpose_buf, &mut line, sub, group);
+            transpose8(transpose_buf, &mut line, sub, group);
             dct8_reg_fwd(&mut line);
             #[unroll]
             for i in 0..PATCH_SIZE {
@@ -582,7 +782,7 @@ pub fn collab_fused<S: Float, N: Size>(
                 line[i as usize] = stack[(m * PATCH_SIZE + i) as usize];
             }
             dct8_reg_inv(&mut line);
-            transpose8(&mut transpose_buf, &mut line, sub, group);
+            transpose8(transpose_buf, &mut line, sub, group);
             dct8_reg_inv(&mut line);
             #[unroll]
             for i in 0..PATCH_SIZE {
