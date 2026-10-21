@@ -7,6 +7,7 @@ use super::snapshot::{LastFields, MotionSnapshot, read_snapshot};
 use crate::collab::geometry::{ref_count, strength_map_dims};
 use crate::collab::kernels::aggregate::{collab_normalise, cross_frame_accum_scale, kaiser_window};
 use crate::collab::kernels::fused::{MEMBER_WORDS, STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA};
+use crate::collab::kernels::packed::collab_normalise_packed;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, PATCH_SIZE, needs_warp_uniform_search, supports_f16_search};
 use crate::engine::timing::{DeviceTimed, DeviceTimer, timed};
@@ -100,6 +101,10 @@ pub struct Nl4dDenoiser<R: Runtime> {
     /// as the frame sits in the ring.
     pub(super) accum: Handle,
     pub(super) wsum: Handle,
+    /// Whether `wsum` holds one `i64` word per pixel with channel 0 and the weight, and `accum` the
+    /// other channels, set only under
+    /// [PackedAtomics](crate::tune::PipelineProfile::PackedAtomics).
+    pub(super) packed: bool,
     /// Regions [collab_normalise](crate::collab::kernels::aggregate::collab_normalise) has zeroed
     /// since the last pass scattered into the ring.
     pub(super) zeroed_regions: Vec<bool>,
@@ -191,7 +196,10 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// The [F32Search](crate::tune::PipelineProfile::F32Search) profile and a legality that forbids
     /// the f16 search keep the f16 search ring off. The
     /// [SplitSearch](crate::tune::PipelineProfile::SplitSearch) profile runs the collab search and
-    /// filter as two launches. A device with planes narrower than 8 lanes is an error.
+    /// filter as two launches. The
+    /// [PackedAtomics](crate::tune::PipelineProfile::PackedAtomics) profile packs channel 0 and the
+    /// weight into one 64-bit accumulator word where the device and legality allow it. A device with
+    /// planes narrower than 8 lanes is an error.
     pub fn with_kernels(
         client: &ComputeClient<R>,
         mut params: Nl4dParams,
@@ -297,10 +305,19 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let zero_curve_bytes = f32::as_bytes(&zero_curve);
         let noise_curve_buf = MirroredBuffer::new(client, zero_curve_bytes);
 
+        let packed_profile = kernels.profile() == PipelineProfile::PackedAtomics;
+        let packed = packed_profile && legality.packed_atomics && limits.int64_atomic_add;
+
         // `client.empty` memory is not zeroed, so a stream's first pass zeroes the whole ring.
         let ring_frames = 1 + 2 * params.temporal_radius;
-        let accum = client.empty(frame_len * ring_frames as usize * size_of::<i32>());
-        let wsum = client.empty(pixels * ring_frames as usize * size_of::<i32>());
+        let (accum_len, wsum_len) = accumulator_lens(pixels, stored_ch, ring_frames, packed);
+        let wsum_element_bytes = if packed {
+            size_of::<i64>()
+        } else {
+            size_of::<i32>()
+        };
+        let accum = client.empty(accum_len * size_of::<i32>());
+        let wsum = client.empty(wsum_len * wsum_element_bytes);
         let outputs = [
             client.empty(frame_len * size_of::<f32>()),
             client.empty(frame_len * size_of::<f32>()),
@@ -364,6 +381,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             kaiser_buf,
             accum,
             wsum,
+            packed,
             zeroed_regions: vec![false; ring_frames as usize],
             #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
             region_clears: 0,
@@ -701,8 +719,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let pixels = (self.width * self.height) as usize;
         let frame_len = pixels * stored_ch as usize;
         let total_frames = 1 + 2 * self.temporal_radius;
-        let accum_ring_len = frame_len * total_frames as usize;
-        let wsum_ring_len = pixels * total_frames as usize;
+        let (accum_ring_len, wsum_ring_len) = accumulator_lens(pixels, stored_ch, total_frames, self.packed);
         let agg_cubes_x = self.width.div_ceil(BLOCK_X);
         let agg_cubes_y = self.height.div_ceil(BLOCK_Y);
         let agg_grid = CubeCount::new_2d(agg_cubes_x, agg_cubes_y);
@@ -714,31 +731,72 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let wsum = self.wsum.clone();
         let output = self.outputs[slot].clone();
 
+        // Both normalise kernels leave the region zeroed.
         unsafe {
             let accum_arg = ArrayArg::from_raw_parts(accum, accum_ring_len);
             let wsum_arg = ArrayArg::from_raw_parts(wsum, wsum_ring_len);
             let output_arg = ArrayArg::from_raw_parts(output, frame_len);
 
-            collab_normalise::launch_unchecked::<R>(
-                &client,
-                agg_grid,
-                agg_dim,
-                stored_ch as usize,
-                accum_arg,
-                wsum_arg,
-                output_arg,
-                region_slot * pixels as u32,
-                self.width,
-                self.height,
-                self.channels.count(),
-                stored_ch,
-            );
+            if self.packed {
+                collab_normalise_packed::launch_unchecked::<R>(
+                    &client,
+                    agg_grid,
+                    agg_dim,
+                    stored_ch as usize,
+                    wsum_arg,
+                    accum_arg,
+                    output_arg,
+                    region_slot * pixels as u32,
+                    self.width,
+                    self.height,
+                    self.channels.count(),
+                    stored_ch,
+                );
+            } else {
+                collab_normalise::launch_unchecked::<R>(
+                    &client,
+                    agg_grid,
+                    agg_dim,
+                    stored_ch as usize,
+                    accum_arg,
+                    wsum_arg,
+                    output_arg,
+                    region_slot * pixels as u32,
+                    self.width,
+                    self.height,
+                    self.channels.count(),
+                    stored_ch,
+                );
+            }
         }
 
         self.zeroed_regions[region_slot as usize] = true;
 
         (self.outputs[slot].clone(), slot)
     }
+}
+
+/// The element counts of `accum` and `wsum` over a ring of `ring_frames` regions.
+///
+/// The packed layout keeps the channels after the first in `accum`, at least one element, and one
+/// `i64` word per pixel in `wsum`.
+pub(super) fn accumulator_lens(
+    pixels: usize,
+    stored_ch: u32,
+    ring_frames: u32,
+    packed: bool,
+) -> (usize, usize) {
+    let frames = ring_frames as usize;
+    let wsum_len = pixels * frames;
+
+    if packed {
+        let rest_channels = (stored_ch - 1) as usize;
+        let rest_len = pixels * rest_channels * frames;
+        return (rest_len.max(1), wsum_len);
+    }
+
+    let accum_len = pixels * stored_ch as usize * frames;
+    (accum_len, wsum_len)
 }
 
 /// The noise curve a pass uploads, and the flag that tells the kernel to apply it.

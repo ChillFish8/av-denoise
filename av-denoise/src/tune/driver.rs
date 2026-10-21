@@ -602,6 +602,12 @@ pub(crate) fn alternative_profiles_for(is_nl4d: bool, device: &DeviceProfile) ->
     }
 
     profiles.push(PipelineProfile::SplitSearch);
+
+    let legality = Legality::for_device(device);
+    if legality.packed_atomics {
+        profiles.push(PipelineProfile::PackedAtomics);
+    }
+
     profiles
 }
 

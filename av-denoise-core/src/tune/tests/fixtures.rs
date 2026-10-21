@@ -384,6 +384,7 @@ pub(crate) fn collab_site(
         map_rows,
         pooled: spec.pooled,
         uniform_walk_only,
+        packed: false,
     };
     let outputs = CollabOutputs {
         accum,
@@ -392,6 +393,7 @@ pub(crate) fn collab_site(
         accum_len,
         wsum_len,
         refs,
+        packed: false,
     };
 
     CollabSite {
@@ -436,6 +438,30 @@ pub(crate) fn collab_site_f16(
         outputs: site.outputs,
         search: PhantomData,
     }
+}
+
+/// `site` with the packed accumulator layout and zeroed outputs of that layout.
+pub(crate) fn packed_twin(site: &CollabSite<TestRuntime, f32>) -> CollabSite<TestRuntime, f32> {
+    let client = &site.client;
+    let pixels = site.outputs.wsum_len;
+    let stored = site.shape.stored_ch as usize;
+    let rest_len = (pixels * (stored - 1)).max(1);
+    let packed = client.empty(pixels * size_of::<i64>());
+    let rest = client.empty(rest_len * size_of::<i32>());
+    zero_words(client, &packed, 2 * pixels);
+    zero_words(client, &rest, rest_len);
+
+    let mut twin = site.clone();
+    twin.shape.packed = true;
+    twin.outputs = CollabOutputs {
+        accum: rest,
+        wsum: packed,
+        accum_len: rest_len,
+        packed: true,
+        ..site.outputs.clone()
+    };
+
+    twin
 }
 
 /// The search and filter sites for the same pass as `site`, sharing a zeroed member buffer.

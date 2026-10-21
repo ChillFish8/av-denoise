@@ -4,7 +4,7 @@ use std::ops::Range;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::denoiser::{AccumClear, Nl4dDenoiser, noise_curve_upload, strength_map_upload};
+use super::denoiser::{AccumClear, Nl4dDenoiser, accumulator_lens, noise_curve_upload, strength_map_upload};
 use super::nl4d_pool_ratio;
 use super::regularise::run_regularise;
 use super::snapshot::LastFields;
@@ -12,6 +12,7 @@ use crate::collab::geometry::{ref_count, refs_along};
 use crate::collab::grid_frames;
 use crate::collab::kernels::aggregate::{collab_zero_accum, weight_scale};
 use crate::collab::kernels::fused::STRENGTH_MAP_OFF;
+use crate::collab::kernels::packed::collab_zero_packed;
 use crate::engine::timing::timed;
 use crate::nlmeans::{MAX_GRID_1D, RingView};
 use crate::tune::sites::{
@@ -36,6 +37,8 @@ struct FusedPass {
     map_mode: u32,
     weight_norm: f32,
     stored_ch: u32,
+    /// Values in the frame ring, which the f16 search ring matches.
+    ring_len: usize,
     accum_ring_len: usize,
     wsum_ring_len: usize,
     neighbours: u32,
@@ -57,8 +60,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let pixels = (self.width * self.height) as usize;
         let frame_len = pixels * stored_ch as usize;
         let total_frames = 1 + 2 * self.temporal_radius;
-        let accum_ring_len = frame_len * total_frames as usize;
-        let wsum_ring_len = pixels * total_frames as usize;
+        let ring_len = frame_len * total_frames as usize;
+        let (accum_ring_len, wsum_ring_len) = accumulator_lens(pixels, stored_ch, total_frames, self.packed);
         let neighbours = 2 * self.temporal_radius;
 
         let neighbour_slots_buf = view.neighbour_slots_buf.clone();
@@ -146,6 +149,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             map_mode,
             weight_norm,
             stored_ch,
+            ring_len,
             accum_ring_len,
             wsum_ring_len,
             neighbours,
@@ -215,17 +219,32 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 let accum_arg = ArrayArg::from_raw_parts(accum, accum_ring_len);
                 let wsum_arg = ArrayArg::from_raw_parts(wsum, pass.wsum_ring_len);
 
-                collab_zero_accum::launch_unchecked::<R>(
-                    &client,
-                    zero_grid_one_frame.clone(),
-                    zero_cube_dim,
-                    accum_arg,
-                    wsum_arg,
-                    slot * pixels as u32,
-                    pixels as u32,
-                    pass.stored_ch,
-                    zero_total_threads_one_frame,
-                );
+                // A packed region spans no more threads than a split one, so the same grid covers it.
+                if self.packed {
+                    collab_zero_packed::launch_unchecked::<R>(
+                        &client,
+                        zero_grid_one_frame.clone(),
+                        zero_cube_dim,
+                        wsum_arg,
+                        accum_arg,
+                        slot * pixels as u32,
+                        pixels as u32,
+                        pass.stored_ch - 1,
+                        zero_total_threads_one_frame,
+                    );
+                } else {
+                    collab_zero_accum::launch_unchecked::<R>(
+                        &client,
+                        zero_grid_one_frame.clone(),
+                        zero_cube_dim,
+                        accum_arg,
+                        wsum_arg,
+                        slot * pixels as u32,
+                        pixels as u32,
+                        pass.stored_ch,
+                        zero_total_threads_one_frame,
+                    );
+                }
             }
         }
 
@@ -235,7 +254,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 .search_input
                 .clone()
                 .expect("the f16 search enables the search ring");
-            self.launch_collab_fused::<half::f16>(&client, view, search_handle, accum_ring_len, pass)?;
+            let search_len = pass.ring_len;
+            self.launch_collab_fused::<half::f16>(&client, view, search_handle, search_len, pass)?;
         } else {
             let placeholder = view.input.clone();
             let search_len = pass.stored_ch as usize;
@@ -270,7 +290,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
         let inputs = CollabInputs {
             ring: view.input.clone(),
-            ring_len: pass.accum_ring_len,
+            ring_len: pass.ring_len,
             search_ring,
             search_len,
             mv_field: pass.mv_field,
@@ -322,6 +342,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             map_rows: self.map_rows,
             pooled: self.pooled_threshold,
             uniform_walk_only: self.uniform_walk_only,
+            packed: self.packed,
         };
         let outputs = CollabOutputs {
             accum: self.accum.clone(),
@@ -330,6 +351,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             accum_len: pass.accum_ring_len,
             wsum_len: pass.wsum_ring_len,
             refs,
+            packed: self.packed,
         };
         // Both split launches queue on one client, so the filter sees the search's writes.
         if let Some(members) = &self.members {

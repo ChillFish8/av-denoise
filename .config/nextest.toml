@@ -11,7 +11,7 @@ default-filter = 'not ((package(av-denoise) & test(/^(tune::tests::driver|pipeli
 heavy-compile = { max-threads = 12 }
 
 [[profile.default.overrides]]
-filter = 'test(/^(tune::tests::(collab|collab_split|window|window_golden)|collab::tests::fused|nlmeans::tests::temporal|nl4d::tests::(engine|search_ring|strength_map|noise_map)|nl4d::grain::tests::export)::/)'
+filter = 'test(/^(tune::tests::(collab|collab_split|window|window_golden|profiles|packed)|collab::tests::fused|nlmeans::tests::temporal|nl4d::tests::(engine|search_ring|strength_map|noise_map)|nl4d::grain::tests::export)::/)'
 slow-timeout = { period = "120s", terminate-after = 10 }
 test-group = 'heavy-compile'
 

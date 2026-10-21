@@ -29,7 +29,7 @@ pub(crate) mod tests;
 pub(crate) use self::denoiser::Nl4dDenoiser;
 pub use self::engine::Nl4d;
 pub(crate) use self::options::nl4d_pool_ratio;
-#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+#[cfg(test)]
 pub(crate) use self::options::resolve_params;
 pub use self::options::{
     Nl4dOptions,

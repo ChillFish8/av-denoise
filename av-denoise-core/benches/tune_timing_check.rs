@@ -140,6 +140,7 @@ fn collab_site<R: Runtime>(client: &ComputeClient<R>) -> CollabSite<R, f32> {
         noise_curve: false,
         strength_map: false,
         pooled: false,
+        packed: false,
         candidate: CollabVariant::BASELINE,
     };
     let args = bench.prepare();

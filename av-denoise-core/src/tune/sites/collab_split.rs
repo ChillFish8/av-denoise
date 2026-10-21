@@ -422,7 +422,7 @@ impl<R: Runtime> VariantSite<R> for CollabFilterSite<R> {
     fn on_client(&self, client: &ComputeClient<R>) -> Option<Self> {
         let inputs = blank_collab_inputs(client, self.shape.stored_ch);
         let members = zeroed_words(client, MEMBER_WORDS as usize);
-        let outputs = blank_collab_outputs(client);
+        let outputs = blank_collab_outputs(client, false);
 
         Some(Self {
             client: client.clone(),
@@ -468,7 +468,7 @@ impl<R: Runtime> CollabFilterSite<R> {
         let group_weight = bind::<R>(&outputs.group_weight, outputs.refs);
 
         unsafe {
-            collab_filter::launch_unchecked::<R>(
+            collab_filter::launch_unchecked::<i32, R>(
                 &self.client,
                 cube_count,
                 cube_dim,
@@ -503,6 +503,7 @@ impl<R: Runtime> CollabFilterSite<R> {
                 shape.k_max,
                 shape.pooled,
                 groups,
+                false,
             );
         }
     }

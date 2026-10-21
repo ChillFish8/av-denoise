@@ -493,7 +493,7 @@ fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle,
 
     unsafe {
         let ring_scalar = ArrayArg::from_raw_parts(handles.ring.clone(), setup.ring.len());
-        collab_fused::launch_unchecked::<S, R>(
+        collab_fused::launch_unchecked::<S, i32, R>(
             &handles.client,
             grid,
             dim,
@@ -541,6 +541,7 @@ fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle,
             pooled_ratio,
             setup.pooled.is_some(),
             variant,
+            false,
         );
     }
 }

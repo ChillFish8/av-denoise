@@ -68,7 +68,25 @@ pub struct CollabFusedBench<R: Runtime> {
     pub strength_map: bool,
     /// Launches with the pooled threshold on.
     pub pooled: bool,
+    /// Scatters into the packed 64-bit accumulator layout.
+    pub packed: bool,
     pub candidate: CollabVariant,
+}
+
+/// The element counts of `accum` and `wsum` over the bench ring, in the packed layout or the split
+/// one.
+fn accumulator_lens(stored_ch: u32, packed: bool) -> (usize, usize) {
+    let pixels = (WIDTH * HEIGHT) as usize;
+    let frames = N_FRAMES as usize;
+    let wsum_len = pixels * frames;
+
+    if packed {
+        let rest_len = pixels * (stored_ch as usize - 1) * frames;
+        return (rest_len.max(1), wsum_len);
+    }
+
+    let accum_len = pixels * stored_ch as usize * frames;
+    (accum_len, wsum_len)
 }
 
 /// The variants this device runs for a bench of `channels`, baseline first.
@@ -85,6 +103,7 @@ pub fn fitted_variants<R: Runtime>(
         noise_curve: false,
         strength_map: false,
         pooled: false,
+        packed: false,
         candidate: CollabVariant::BASELINE,
     };
     let input = bench.prepare();
@@ -138,8 +157,7 @@ impl<R: Runtime> CollabFusedBench<R> {
     /// The tunable site over `args`, with the library's default search geometry.
     pub fn site(&self, args: &CollabFusedInput) -> CollabSite<R, f32> {
         let stored_ch = stored_channels(self.channels);
-        let pixels = (WIDTH * HEIGHT) as usize;
-        let frame_len = pixels * stored_ch as usize;
+        let (accum_len, wsum_len) = accumulator_lens(stored_ch, self.packed);
         let refs = ref_count(WIDTH, HEIGHT);
         let refs_x = refs_along(WIDTH);
         let refs_y = refs_along(HEIGHT);
@@ -215,14 +233,16 @@ impl<R: Runtime> CollabFusedBench<R> {
             map_rows,
             pooled: self.pooled,
             uniform_walk_only,
+            packed: self.packed,
         };
         let outputs = CollabOutputs {
             accum: args.accum.clone(),
             wsum: args.wsum.clone(),
             group_weight: args.group_weight.clone(),
-            accum_len: frame_len * N_FRAMES as usize,
-            wsum_len: pixels * N_FRAMES as usize,
+            accum_len,
+            wsum_len,
             refs,
+            packed: self.packed,
         };
         CollabSite::<R, f32> {
             client: self.client.clone(),
@@ -241,8 +261,6 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
 
     fn prepare(&self) -> Self::Input {
         let stored_ch = stored_channels(self.channels);
-        let pixels = (WIDTH * HEIGHT) as usize;
-        let frame_len = pixels * stored_ch as usize;
 
         let mut ring_data = Vec::new();
         for _ in 0..N_FRAMES {
@@ -295,10 +313,14 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
 
         // One accumulator region per ring slot, the same shape `Nl4dDenoiser` allocates, so the
         // scatter crosses the same address range it does in the pipeline.
-        let accum = self
-            .client
-            .empty(frame_len * N_FRAMES as usize * size_of::<i32>());
-        let wsum = self.client.empty(pixels * N_FRAMES as usize * size_of::<i32>());
+        let (accum_len, wsum_len) = accumulator_lens(stored_ch, self.packed);
+        let wsum_element_bytes = if self.packed {
+            size_of::<i64>()
+        } else {
+            size_of::<i32>()
+        };
+        let accum = self.client.empty(accum_len * size_of::<i32>());
+        let wsum = self.client.empty(wsum_len * wsum_element_bytes);
         let refs = ref_count(WIDTH, HEIGHT);
         let group_weight = self.client.empty(refs * size_of::<f32>());
         let curve_host = if self.noise_curve {
@@ -353,9 +375,10 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
         let curve = if self.noise_curve { "_noise_curve" } else { "" };
         let map = if self.strength_map { "_strength_map" } else { "" };
         let pool = if self.pooled { "_pooled" } else { "" };
+        let packed = if self.packed { "_packed" } else { "" };
 
         format!(
-            "{}/{}/1080p_{}{field}{curve}{map}{pool}",
+            "{}/{}/1080p_{}{field}{curve}{map}{pool}{packed}",
             CollabVariant::SITE,
             self.candidate.name(),
             self.channel_name,

@@ -2,11 +2,29 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use av_denoise_core::DenoisingMode;
-use av_denoise_core::tune::{Budget, BudgetRequest, KeyValue, SiteKey, TuneLedger};
+use av_denoise_core::tune::{
+    Budget,
+    BudgetRequest,
+    KeyValue,
+    PROFILE_MIN_BLOCKS,
+    PipelineProfile,
+    SiteKey,
+    TuneLedger,
+    choose_profile,
+    profile_wins,
+};
 
 use crate::accelerate::Accelerator;
-use crate::planar::{ChannelIntent, FrameLayout, PlanarDenoiser, PlaneOptions, Planes, Subsampling};
-use crate::tune::driver::{FrameCycle, tune_keys};
+use crate::planar::{
+    ChannelIntent,
+    FrameLayout,
+    PlanarDenoiser,
+    PlaneOptions,
+    Planes,
+    Subsampling,
+    plane_profile_keys,
+};
+use crate::tune::driver::{FrameCycle, alternative_profiles_for, tune_keys};
 use crate::tune::{TuneOutcome, TuneRequest, TuneStore, TuningMode, is_tuned, selected_device, tune_planes};
 use crate::{Algorithm, Depth, Device, Nl4dOptions, install_compilation_cache_at};
 
@@ -343,4 +361,47 @@ fn an_nl4d_pass_records_a_ranking_for_every_plane() {
     assert_eq!(report.partial_keys, 0, "{report:?}");
     assert_eq!(report.tuned_keys, stored_site_count(&plane_options), "{report:?}");
     assert!(is_tuned(&plane_options, frame_layout), "{report:?}");
+
+    let device = selected_device(&plane_options.accelerators, &plane_options.device).expect("a device");
+    let store = TuneStore::open_default().expect("the cache is installed");
+    let stored = store.load(&device.identity);
+    let alternatives = alternative_profiles_for(true, &device);
+    let pooled_blocks = PROFILE_MIN_BLOCKS * alternatives.len();
+    let profile_keys = plane_profile_keys(&plane_options, frame_layout);
+
+    for profile_key in &profile_keys {
+        let ranking = stored
+            .profiles
+            .get(profile_key)
+            .expect("every plane stores its profiles");
+        let records = &ranking.profiles;
+        let baseline = &records[0];
+        let compared: Vec<PipelineProfile> = records[1..].iter().map(|record| record.profile).collect();
+
+        assert_eq!(
+            baseline.profile,
+            PipelineProfile::Baseline,
+            "{profile_key}: {records:?}"
+        );
+        assert_eq!(
+            baseline.blocks as usize, pooled_blocks,
+            "{profile_key}: {records:?}"
+        );
+        assert_eq!(compared, alternatives, "{profile_key}: {records:?}");
+
+        let fastest = records[1..]
+            .iter()
+            .min_by_key(|record| record.median_frame_ns)
+            .expect("an alternative was compared");
+        let baseline_median = Duration::from_nanos(baseline.median_frame_ns);
+        let fastest_median = Duration::from_nanos(fastest.median_frame_ns);
+        let kept = if profile_wins(baseline_median, fastest_median) {
+            fastest.profile
+        } else {
+            PipelineProfile::Baseline
+        };
+        let chosen = choose_profile(ranking, false);
+
+        assert_eq!(chosen, kept, "{profile_key}: {records:?}");
+    }
 }

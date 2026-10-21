@@ -81,6 +81,13 @@ pub(crate) fn test_client() -> ComputeClient<TestRuntime> {
     TestRuntime::client(&device)
 }
 
+pub(crate) fn packed_supported() -> bool {
+    let client = test_client();
+    let limits = DeviceLimits::from_client(&client);
+
+    limits.int64_atomic_add
+}
+
 /// Every rule relaxed except what the test backend needs for correct output.
 ///
 /// Equivalence tests run every candidate the device can execute, including those a real device

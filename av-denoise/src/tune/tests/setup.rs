@@ -65,12 +65,26 @@ fn a_device_with_illegal_f16_is_not_offered_the_f32_profile() {
     assert!(profiles.contains(&PipelineProfile::SplitSearch));
 }
 
+#[test]
+fn packed_atomics_are_offered_only_where_legal() {
+    let capable = r9700_profile();
+    let mut incapable = r9700_profile();
+    incapable.limits.int64_atomic_add = false;
+
+    let offered = alternative_profiles_for(true, &capable);
+    let withheld = alternative_profiles_for(true, &incapable);
+
+    assert!(offered.contains(&PipelineProfile::PackedAtomics));
+    assert!(!withheld.contains(&PipelineProfile::PackedAtomics));
+}
+
 /// An AMD Radeon AI PRO R9700 under Vulkan.
 fn r9700_profile() -> DeviceProfile {
     let mut device = pascal_vulkan_profile();
     device.identity.adapter = "AMD Radeon AI PRO R9700".to_string();
     device.identity.vendor_id = 0x1002;
     device.identity.device_id = 0x7551;
+    device.limits.int64_atomic_add = true;
 
     device
 }

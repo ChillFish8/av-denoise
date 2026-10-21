@@ -229,6 +229,8 @@ pub struct CollabShape {
     pub pooled: bool,
     /// Only `Walk::Uniform` may run, on CUDA and on devices without independent thread scheduling.
     pub uniform_walk_only: bool,
+    /// Whether `wsum` holds packed 64-bit words and `accum` the channels after the first.
+    pub packed: bool,
 }
 
 /// The fixed-point accumulator rings and group weights `collab_fused` writes.
@@ -238,9 +240,23 @@ pub struct CollabOutputs {
     pub wsum: Handle,
     pub group_weight: Handle,
     pub accum_len: usize,
+    /// Elements of `wsum`, which are `i64` words when `packed` is set.
     pub wsum_len: usize,
     /// Reference patches, one group weight each.
     pub refs: usize,
+    /// Whether `wsum` holds packed 64-bit words and `accum` the channels after the first.
+    pub packed: bool,
+}
+
+impl CollabOutputs {
+    /// The 32-bit words `wsum` spans.
+    pub(crate) fn wsum_words(&self) -> usize {
+        if self.packed {
+            2 * self.wsum_len
+        } else {
+            self.wsum_len
+        }
+    }
 }
 
 /// One `collab_fused` pass, with its candidate distances read as `S`.
@@ -268,12 +284,17 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
 
     fn key(&self) -> SiteKey {
         let shape = &self.shape;
-        let builder = collab_key_builder(COLLAB_FUSED, shape);
-
-        builder
+        let builder = collab_key_builder(COLLAB_FUSED, shape)
             .param("pooled", u8::from(shape.pooled))
-            .param("f16", u8::from(shape.f16_search))
-            .build()
+            .param("f16", u8::from(shape.f16_search));
+
+        // Only a packed key names the layout, so every split-layout key keeps its stored text.
+        if shape.packed {
+            let packed_builder = builder.param("packed", 1u8);
+            return packed_builder.build();
+        }
+
+        builder.build()
     }
 
     /// The exact compile-time shape and the search type, which the bucketed key leaves out.
@@ -343,7 +364,7 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
     /// reads. The small fixed-size tables keep their sizes.
     fn on_client(&self, client: &ComputeClient<R>) -> Option<Self> {
         let blank_inputs = blank_collab_inputs(client, self.shape.stored_ch);
-        let blank_outputs = blank_collab_outputs(client);
+        let blank_outputs = blank_collab_outputs(client, self.outputs.packed);
 
         Some(Self {
             client: client.clone(),
@@ -373,13 +394,27 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
 }
 
 impl<R: Runtime, S: Float> CollabSite<R, S> {
-    /// Launches `candidate` over `cube_count` cubes.
+    /// Launches `candidate` over `cube_count` cubes, with `wsum` as `i64` words when the shape is packed.
     fn dispatch(&self, candidate: CollabVariant, outputs: &CollabOutputs, cube_count: CubeCount) {
+        if self.shape.packed {
+            self.dispatch_as::<i64>(candidate, outputs, cube_count);
+        } else {
+            self.dispatch_as::<i32>(candidate, outputs, cube_count);
+        }
+    }
+
+    fn dispatch_as<W: Int>(&self, candidate: CollabVariant, outputs: &CollabOutputs, cube_count: CubeCount) {
         let lanes = candidate.lanes();
         let inputs = &self.inputs;
         let values = &self.values;
         let shape = &self.shape;
         let cube_dim = CubeDim::new_1d(lanes);
+
+        // A 32-bit word would truncate the packed unit, `2^32`.
+        debug_assert!(
+            !shape.packed || size_of::<W>() == size_of::<i64>(),
+            "a packed shape needs 64-bit weight words"
+        );
 
         let ring = bind::<R>(&inputs.ring, inputs.ring_len);
         let ring_scalar = bind::<R>(&inputs.ring, inputs.ring_len);
@@ -397,7 +432,7 @@ impl<R: Runtime, S: Float> CollabSite<R, S> {
         let group_weight = bind::<R>(&outputs.group_weight, outputs.refs);
 
         unsafe {
-            collab_fused::launch_unchecked::<S, R>(
+            collab_fused::launch_unchecked::<S, W, R>(
                 &self.client,
                 cube_count,
                 cube_dim,
@@ -445,6 +480,7 @@ impl<R: Runtime, S: Float> CollabSite<R, S> {
                 values.pool_ratio,
                 shape.pooled,
                 candidate,
+                shape.packed,
             );
         }
     }
@@ -470,7 +506,8 @@ pub(crate) fn scratch_collab_outputs<R: Runtime>(
     outputs: &CollabOutputs,
 ) -> CollabOutputs {
     let accum = client.empty(outputs.accum_len * size_of::<i32>());
-    let wsum = client.empty(outputs.wsum_len * size_of::<i32>());
+    let wsum_words = outputs.wsum_words();
+    let wsum = client.empty(wsum_words * size_of::<i32>());
     let group_weight = client.empty(outputs.refs * size_of::<f32>());
     let scratch = CollabOutputs {
         accum,
@@ -484,8 +521,9 @@ pub(crate) fn scratch_collab_outputs<R: Runtime>(
 }
 
 pub(crate) fn clear_collab_outputs<R: Runtime>(client: &ComputeClient<R>, outputs: &CollabOutputs) {
+    let wsum_words = outputs.wsum_words();
     zero_words(client, &outputs.accum, outputs.accum_len);
-    zero_words(client, &outputs.wsum, outputs.wsum_len);
+    zero_words(client, &outputs.wsum, wsum_words);
     zero_words(client, &outputs.group_weight, outputs.refs);
 }
 
@@ -513,20 +551,25 @@ pub(crate) fn blank_collab_inputs<R: Runtime>(client: &ComputeClient<R>, stored_
     }
 }
 
-/// Outputs for a copy that only compiles, one word each.
-pub(crate) fn blank_collab_outputs<R: Runtime>(client: &ComputeClient<R>) -> CollabOutputs {
+/// Outputs for a copy that only compiles, one element each.
+pub(crate) fn blank_collab_outputs<R: Runtime>(client: &ComputeClient<R>, packed: bool) -> CollabOutputs {
+    let wsum_words = if packed { 2 } else { 1 };
+
     CollabOutputs {
         accum: zeroed_words(client, 1),
-        wsum: zeroed_words(client, 1),
+        wsum: zeroed_words(client, wsum_words),
         group_weight: zeroed_words(client, 1),
         accum_len: 1,
         wsum_len: 1,
         refs: 1,
+        packed,
     }
 }
 
 /// Reads both sets of collab outputs back and judges the accumulators and group weights under
 /// `fidelity`.
+///
+/// A packed `wsum` reads as its 32-bit halves, which compares the packed words exactly.
 pub fn compare_collab_outputs<R: Runtime>(
     client: &ComputeClient<R>,
     baseline: &CollabOutputs,
@@ -535,8 +578,10 @@ pub fn compare_collab_outputs<R: Runtime>(
 ) -> Result<CompareResult, anyhow::Error> {
     let expected_accum = read_i32(client, &baseline.accum, baseline.accum_len)?;
     let actual_accum = read_i32(client, &candidate.accum, candidate.accum_len)?;
-    let expected_wsum = read_i32(client, &baseline.wsum, baseline.wsum_len)?;
-    let actual_wsum = read_i32(client, &candidate.wsum, candidate.wsum_len)?;
+    let expected_wsum_words = baseline.wsum_words();
+    let actual_wsum_words = candidate.wsum_words();
+    let expected_wsum = read_i32(client, &baseline.wsum, expected_wsum_words)?;
+    let actual_wsum = read_i32(client, &candidate.wsum, actual_wsum_words)?;
     let expected_weight = read_f32(client, &baseline.group_weight, baseline.refs)?;
     let actual_weight = read_f32(client, &candidate.group_weight, candidate.refs)?;
 

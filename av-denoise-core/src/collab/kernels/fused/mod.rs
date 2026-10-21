@@ -157,12 +157,15 @@ const _: () = assert!(
 /// stack reads each value as a single float from `ring_scalar`. With `f16_search` unset
 /// `search_ring` is never read and can be the f32 `ring`, which keeps every f16 type out of the
 /// kernel.
+///
+/// With `packed`, `wsum` holds one `i64` word per pixel with channel 0 and the weight, and `accum`
+/// holds the other channels, as [scatter_patch] writes them. Otherwise `W` is `i32`.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
     reason = "every argument is a buffer or comptime shape the kernel binds"
 )]
-pub fn collab_fused<S: Float, N: Size>(
+pub fn collab_fused<S: Float, N: Size, W: Int>(
     ring: &Array<Vector<f32, N>>,
     ring_scalar: &Array<f32>,
     search_ring: &Array<Vector<S, N>>,
@@ -175,7 +178,7 @@ pub fn collab_fused<S: Float, N: Size>(
     dct_profile: &Array<f32>,
     kaiser: &Array<f32>,
     accum: &mut Array<Atomic<i32>>,
-    wsum: &mut Array<Atomic<i32>>,
+    wsum: &mut Array<Atomic<W>>,
     group_weight: &mut Array<f32>,
     centre_slot: u32,
     c_min: f32,
@@ -206,6 +209,7 @@ pub fn collab_fused<S: Float, N: Size>(
     pool_ratio: f32,
     #[comptime] pooled: bool,
     #[comptime] variant: CollabVariant,
+    #[comptime] packed: bool,
 ) {
     let thread_id = UNIT_POS_X;
     let group = thread_id / 8u32;
@@ -311,7 +315,7 @@ pub fn collab_fused<S: Float, N: Size>(
     let use_grid = (group_word & GROUP_USES_GRID) != 0u32;
     let column_luma = column_luma_of(&current, channels);
 
-    filter_group(
+    filter_group::<W>(
         ring_scalar,
         neighbour_slots,
         sigma,
@@ -348,6 +352,7 @@ pub fn collab_fused<S: Float, N: Size>(
         map_cols,
         map_rows,
         pooled,
+        packed,
     );
 }
 
@@ -566,7 +571,7 @@ pub(crate) fn search_group<S: Float, N: Size>(
               inner test in 63 of the 64 unrolled positions rather than emitting it and ANDing \
               a constant false into it"
 )]
-pub(crate) fn filter_group(
+pub(crate) fn filter_group<W: Int>(
     ring_scalar: &Array<f32>,
     neighbour_slots: &Array<u32>,
     sigma: &Array<f32>,
@@ -575,7 +580,7 @@ pub(crate) fn filter_group(
     dct_profile: &Array<f32>,
     kaiser: &Array<f32>,
     accum: &mut Array<Atomic<i32>>,
-    wsum: &mut Array<Atomic<i32>>,
+    wsum: &mut Array<Atomic<W>>,
     group_weight: &mut Array<f32>,
     transpose_buf: &mut SharedMemory<f32>,
     member_pos: &Array<u32>,
@@ -603,6 +608,7 @@ pub(crate) fn filter_group(
     #[comptime] map_cols: u32,
     #[comptime] map_rows: u32,
     #[comptime] pooled: bool,
+    #[comptime] packed: bool,
 ) {
     // The frame is picked with `select` rather than a branch, because a frame index that reaches
     // `read_line` through a branch panics cubecl 0.10's GVN pass and the launch silently does
@@ -610,8 +616,8 @@ pub(crate) fn filter_group(
     let mut member_slot = Array::<u32>::new(MAX_K as usize);
     #[unroll]
     for m in 0..MAX_K {
-        let packed = member_pos[m as usize];
-        let neighbour_field = unpack_t(packed);
+        let position = member_pos[m as usize];
+        let neighbour_field = unpack_t(position);
         // Clamped so the read stays in range for a centre-frame member, whose value `select`
         // discards. This needs `neighbour_slots` to hold at least one entry, even at `radius = 0`.
         let neighbour = u32::max(neighbour_field, 1u32) - 1u32;
@@ -657,9 +663,9 @@ pub(crate) fn filter_group(
         let mut member_variance = Array::<f32>::new(MAX_K as usize);
         #[unroll]
         for m in 0..MAX_K {
-            let packed = member_pos[m as usize];
-            let member_x = packed & 0x1FFFu32;
-            let member_y = (packed >> 13u32) & 0x1FFFu32;
+            let position = member_pos[m as usize];
+            let member_x = position & 0x1FFFu32;
+            let member_y = (position >> 13u32) & 0x1FFFu32;
             let src_slot = member_slot[m as usize];
             member_variance[m as usize] = base_sig2;
 
@@ -795,13 +801,13 @@ pub(crate) fn filter_group(
         #[unroll]
         for m in 0..MAX_K {
             if live && m < k_use {
-                let packed = member_pos[m as usize];
-                let member_x = packed & 0x1FFFu32;
-                let member_y = (packed >> 13u32) & 0x1FFFu32;
+                let position = member_pos[m as usize];
+                let member_x = position & 0x1FFFu32;
+                let member_y = (position >> 13u32) & 0x1FFFu32;
                 let dst_slot = member_slot[m as usize];
                 #[unroll]
                 for r in 0..PATCH_SIZE {
-                    scatter_patch(
+                    scatter_patch::<W>(
                         accum,
                         wsum,
                         kaiser,
@@ -817,6 +823,7 @@ pub(crate) fn filter_group(
                         dst_slot,
                         comptime!(width * height),
                         accum_scale,
+                        packed,
                     );
                 }
             }

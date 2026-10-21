@@ -11,9 +11,11 @@ use crate::collab::kernels::aggregate::{
     weight_scale,
 };
 use crate::collab::kernels::fused::{CollabVariant, STRENGTH_MAP_OFF, collab_fused};
+use crate::collab::kernels::packed::collab_zero_packed;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, grid_frames};
 use crate::nlmeans::{BLOCK_X, BLOCK_Y, NOISE_CURVE_BINS};
+use crate::tune::tests::runtime::packed_supported;
 
 /// Runs [collab_normalise] over hand-built accumulators.
 fn run_normalise(accum_host: &[i32], wsum_host: &[i32], width: u32, height: u32) -> Vec<f32> {
@@ -215,6 +217,67 @@ fn zero_accum_clears_every_slot_of_a_buffer_past_the_grid_clamp() {
     }
 }
 
+/// Clears the middle of three slots, so a wrong offset or stride shows in either neighbour.
+#[test]
+fn zero_packed_clears_only_its_slot_in_both_buffers() {
+    if !packed_supported() {
+        eprintln!("skipped, this device has no 64-bit atomic add");
+        return;
+    }
+
+    let pixels = 37usize;
+    let slots = 3usize;
+    let slot = 1usize;
+    let dim = 32u32;
+    let client = make_client();
+
+    for rest_channels in [0usize, 1, 3] {
+        let packed_host = vec![0x1234_5678_9ABCi64; pixels * slots];
+        let rest_host = vec![42i32; (pixels * rest_channels * slots).max(1)];
+        let packed_bytes = i64::as_bytes(&packed_host);
+        let rest_bytes = i32::as_bytes(&rest_host);
+        let packed = client.create_from_slice(packed_bytes);
+        let rest = client.create_from_slice(rest_bytes);
+        let packed_launched = packed.clone();
+        let rest_launched = rest.clone();
+        let packed_len = packed_host.len();
+        let rest_len = rest_host.len();
+        let packed_arg = unsafe { ArrayArg::from_raw_parts(packed_launched, packed_len) };
+        let rest_arg = unsafe { ArrayArg::from_raw_parts(rest_launched, rest_len) };
+
+        unsafe {
+            collab_zero_packed::launch_unchecked::<R>(
+                &client,
+                CubeCount::new_1d(1),
+                CubeDim::new_1d(dim),
+                packed_arg,
+                rest_arg,
+                (slot * pixels) as u32,
+                pixels as u32,
+                rest_channels as u32,
+                dim,
+            );
+        }
+
+        let packed_bytes_after = client.read_one(packed).expect("packed readback failed");
+        let rest_bytes_after = client.read_one(rest).expect("rest readback failed");
+        let packed_after = i64::from_bytes(&packed_bytes_after);
+        let rest_after = i32::from_bytes(&rest_bytes_after);
+
+        for (index, &word) in packed_after[..packed_host.len()].iter().enumerate() {
+            let inside = index / pixels == slot;
+            let want = if inside { 0 } else { packed_host[index] };
+            assert_eq!(word, want, "packed[{index}] with {rest_channels} rest channels");
+        }
+
+        for (index, &value) in rest_after[..rest_host.len()].iter().enumerate() {
+            let inside = rest_channels > 0 && index / (pixels * rest_channels) == slot;
+            let want = if inside { 0 } else { rest_host[index] };
+            assert_eq!(value, want, "rest[{index}] with {rest_channels} rest channels");
+        }
+    }
+}
+
 /// Groups, filters and aggregates a frame end to end, returning the finished plane and its weight sum.
 ///
 /// The search runs at radius 0, a one-frame ring with no neighbours, so only the single-frame scatter
@@ -301,7 +364,7 @@ fn run_scatter_stage_windowed(
         );
 
         let ring_scalar = ArrayArg::from_raw_parts(input.clone(), pixels);
-        collab_fused::launch_unchecked::<f32, R>(
+        collab_fused::launch_unchecked::<f32, i32, R>(
             &client,
             fused_grid,
             fused_dim,
@@ -349,6 +412,7 @@ fn run_scatter_stage_windowed(
             0.0f32,
             false,
             variant,
+            false,
         );
     }
 
