@@ -498,3 +498,129 @@ fn the_tie_bound_maps_each_reference_to_its_clamped_position() {
     assert_eq!(matching, CompareResult::Pass);
     assert_fails_with(wrong, "reference 7 member 7");
 }
+
+/// Centre blocks for the grid-choice groups. Blocks 1 and 2 tie as the second anchor.
+const TIED_ANCHOR_BLOCKS: [u32; 9] = [0, 1, 1, 2, 3, 4, 5, 6, 9];
+
+/// The verdict over a centre frame and three neighbour frames, with two four-frame volumes.
+fn tied_anchor_verdict(baseline: &[u32], candidate: &[u32]) -> CompareResult {
+    let frame = block_frame(&TIED_ANCHOR_BLOCKS);
+    let codes = frame.repeat(4);
+
+    let neighbour_slots = [1, 2, 3];
+    let view = block_view(&codes, TIED_ANCHOR_BLOCKS.len(), &neighbour_slots);
+    tie_bound_verdict(&view, 1, 1, 4, baseline, candidate)
+}
+
+/// A grid group of two four-frame volumes, each frame member at its anchor's block.
+fn four_frame_grid_group(anchor_blocks: [u32; 2]) -> Vec<u32> {
+    let mut members = [0u32; MAX_K as usize];
+    for (volume, anchor_block) in anchor_blocks.into_iter().enumerate() {
+        let first = 4 * volume;
+        members[first] = centre_block(anchor_block);
+
+        for frame in 1..4 {
+            let frame_member = pack_position(anchor_block * BLOCK, 0, frame);
+            members[first + frame as usize] = frame_member;
+        }
+    }
+
+    group_words(members, MAX_K | GROUP_USES_GRID)
+}
+
+#[test]
+fn the_tie_bound_accepts_a_grid_choice_that_follows_a_tied_anchor() {
+    let baseline = four_frame_grid_group([0, 1]);
+    let candidate = single_frame_group([0, 2, 1, 3, 4, 5, 6, 7]);
+
+    let verdict = tied_anchor_verdict(&baseline, &candidate);
+
+    assert_eq!(verdict, CompareResult::Pass);
+}
+
+#[test]
+fn the_tie_bound_accepts_a_grid_built_on_a_tied_anchor() {
+    let baseline = single_frame_group([0, 1, 2, 3, 4, 5, 6, 7]);
+    let candidate = four_frame_grid_group([0, 2]);
+
+    let verdict = tied_anchor_verdict(&baseline, &candidate);
+
+    assert_eq!(verdict, CompareResult::Pass);
+}
+
+#[test]
+fn the_tie_bound_rejects_a_grid_choice_with_the_same_anchors() {
+    let baseline = four_frame_grid_group([0, 1]);
+    let candidate = single_frame_group([0, 1, 2, 3, 4, 5, 6, 7]);
+
+    let verdict = tied_anchor_verdict(&baseline, &candidate);
+
+    assert_fails_with(
+        verdict,
+        "reference 0 group word is 0x8, the baseline's is 0x108 with the same anchors",
+    );
+}
+
+#[test]
+fn the_tie_bound_rejects_a_grid_choice_past_the_baseline_anchors() {
+    let baseline = four_frame_grid_group([0, 1]);
+    let candidate = single_frame_group([0, 3, 1, 2, 4, 5, 6, 7]);
+
+    let verdict = tied_anchor_verdict(&baseline, &candidate);
+
+    assert_fails_with(verdict, "reference 0 member 1");
+}
+
+#[test]
+fn the_tie_bound_rejects_a_grid_choice_on_a_partial_group() {
+    let mut baseline = four_frame_grid_group([0, 1]);
+    baseline[MAX_K as usize] = 4 | GROUP_USES_GRID;
+    let mut candidate = single_frame_group([0, 2, 1, 3, 4, 5, 6, 7]);
+    candidate[MAX_K as usize] = 4;
+
+    let verdict = tied_anchor_verdict(&baseline, &candidate);
+
+    assert_fails_with(verdict, "reference 0 group word is 0x4, the baseline's is 0x104");
+}
+
+#[test]
+fn the_tie_bound_rejects_a_grid_choice_without_the_self_match_first() {
+    let baseline = four_frame_grid_group([0, 1]);
+    let candidate = single_frame_group([2, 0, 1, 3, 4, 5, 6, 7]);
+
+    let verdict = tied_anchor_verdict(&baseline, &candidate);
+
+    assert_fails_with(verdict, "reference 0 member 0");
+}
+
+#[test]
+fn the_tie_bound_rejects_a_grid_choice_with_a_repeated_frame_member() {
+    let baseline = single_frame_group([0, 1, 2, 3, 4, 5, 6, 7]);
+    let mut candidate = four_frame_grid_group([0, 2]);
+    candidate[6] = candidate[5];
+
+    let verdict = tied_anchor_verdict(&baseline, &candidate);
+
+    assert_fails_with(verdict, "candidate reference 0 member 6");
+}
+
+#[test]
+fn the_tie_bound_rejects_a_grid_choice_with_a_frame_member_past_the_slots() {
+    let baseline = single_frame_group([0, 1, 2, 3, 4, 5, 6, 7]);
+    let mut candidate = four_frame_grid_group([0, 2]);
+    candidate[7] = pack_position(2 * BLOCK, 0, 4);
+
+    let verdict = tied_anchor_verdict(&baseline, &candidate);
+
+    assert_fails_with(verdict, "past the neighbour slots");
+}
+
+#[test]
+fn the_tie_bound_rejects_a_grid_choice_whose_later_picks_descend() {
+    let baseline = four_frame_grid_group([0, 1]);
+    let candidate = single_frame_group([0, 2, 1, 3, 4, 6, 5, 7]);
+
+    let verdict = tied_anchor_verdict(&baseline, &candidate);
+
+    assert_fails_with(verdict, "reference 0 member 6");
+}
