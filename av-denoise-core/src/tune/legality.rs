@@ -1,3 +1,8 @@
+use std::collections::BTreeSet;
+
+use cubecl::features::MmaConfig;
+use cubecl::ir::{ElemType, FloatKind, StorageType};
+
 use super::device::{DeviceIdentity, DeviceLimits, DeviceProfile};
 
 /// The PCI vendor id of NVIDIA.
@@ -11,6 +16,12 @@ pub const APPLE_VENDOR_ID: u32 = 0x106B;
 
 /// The narrowest plane the 8-lane groups of the nl4d kernels work on.
 pub const MIN_PLANE_SIZE: u32 = 8;
+
+/// The plane widths matrix candidates run at.
+pub const MATRIX_PLANE_WIDTHS: [u32; 2] = [32, 64];
+
+/// The side of the square f16 matrix tile the matrix candidates use.
+const F16_MATRIX_TILE: u32 = 16;
 
 /// The first CUDA compute capability with independent thread scheduling.
 const VOLTA_COMPUTE_CAPABILITY: u32 = 70;
@@ -202,6 +213,39 @@ pub fn check_plane_size(limits: &DeviceLimits) -> Result<(), PlaneSizeError> {
     Err(PlaneSizeError {
         plane_size: limits.plane_size_min,
     })
+}
+
+/// Whether `configs` holds a 16x16x16 f16 matrix product accumulating in f32.
+pub fn offers_f16_matrix(configs: &BTreeSet<MmaConfig>) -> bool {
+    let half_elem = ElemType::Float(FloatKind::F16);
+    let half_type = StorageType::Scalar(half_elem);
+    let float_elem = ElemType::Float(FloatKind::F32);
+    let float_type = StorageType::Scalar(float_elem);
+    let config = MmaConfig {
+        a_type: half_type,
+        b_type: half_type,
+        cd_type: float_type,
+        m: F16_MATRIX_TILE,
+        n: F16_MATRIX_TILE,
+        k: F16_MATRIX_TILE,
+    };
+
+    configs.contains(&config)
+}
+
+/// The plane width matrix candidates run at, or `None` when the device runs none.
+///
+/// Matrix candidates run at the widest plane the device offers, when that is one of
+/// [MATRIX_PLANE_WIDTHS].
+pub fn matrix_plane_width(limits: &DeviceLimits) -> Option<u32> {
+    let width = limits.plane_size_max;
+    let supported = MATRIX_PLANE_WIDTHS.contains(&width);
+
+    if limits.f16_matrix && supported {
+        Some(width)
+    } else {
+        None
+    }
 }
 
 /// Every device-id table with its name, for the ordering test.

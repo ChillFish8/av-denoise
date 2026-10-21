@@ -9,6 +9,7 @@ mod engine;
 pub(crate) mod equivalence;
 mod fidelity;
 pub(crate) mod fixtures;
+mod gating;
 mod helpers;
 mod key;
 mod ledger;

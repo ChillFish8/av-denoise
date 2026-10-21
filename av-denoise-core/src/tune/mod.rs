@@ -13,6 +13,7 @@
 //! - [Legality] says what a device may run beyond the fit check
 
 mod budget;
+mod codes;
 mod consts;
 mod decide;
 mod device;
@@ -48,6 +49,7 @@ pub use self::budget::{
     tuning_budget,
     tuning_order,
 };
+pub use self::codes::{IntegerCodes, MATRIX_EXACT_VALUES, MAX_INTEGER_DEPTH};
 pub use self::consts::*;
 pub use self::decide::{
     CandidateStats,
@@ -85,10 +87,13 @@ pub use self::legality::{
     DeviceClass,
     INTEL_VENDOR_ID,
     Legality,
+    MATRIX_PLANE_WIDTHS,
     MIN_PLANE_SIZE,
     NVIDIA_VENDOR_ID,
     PlaneSizeError,
     check_plane_size,
+    matrix_plane_width,
+    offers_f16_matrix,
 };
 pub use self::plan::{KernelPlan, PipelineProfile};
 pub use self::precompile::Precompiled;

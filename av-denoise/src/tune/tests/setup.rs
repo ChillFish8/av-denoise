@@ -85,6 +85,8 @@ fn r9700_profile() -> DeviceProfile {
     device.identity.vendor_id = 0x1002;
     device.identity.device_id = 0x7551;
     device.limits.int64_atomic_add = true;
+    device.limits.f16_matrix = true;
+    device.limits.u16_buffer = true;
 
     device
 }
@@ -110,6 +112,8 @@ fn pascal_vulkan_profile() -> DeviceProfile {
         f16_buffer: true,
         f16_arithmetic: true,
         int64_atomic_add: true,
+        f16_matrix: false,
+        u16_buffer: false,
     };
 
     DeviceProfile { identity, limits }
