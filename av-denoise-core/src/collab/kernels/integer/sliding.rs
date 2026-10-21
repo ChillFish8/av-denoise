@@ -1,5 +1,6 @@
 use cubecl::prelude::*;
 
+use super::scalar::{exact_channel_total, zeroed_channel_sums};
 use super::variant::IntegerVariant;
 use super::{centre_group_size, centre_window_positions};
 use crate::collab::geometry::refs_along;
@@ -31,7 +32,8 @@ fn block_origin(first: u32, index: u32, #[comptime] frame_refs: u32, #[comptime]
     select(past_end, corner + SLIDING_BLOCK, corner)
 }
 
-/// Channel `c` of the code at `(x, y)` in frame `slot`, with the position clamped into the frame.
+/// Channel `c` of the code at `(x, y)` in frame `slot` as f32, with the position clamped into the
+/// frame.
 #[cube]
 fn clamped_code<C: Int, N: Size>(
     codes: &Array<Vector<C, N>>,
@@ -41,7 +43,7 @@ fn clamped_code<C: Int, N: Size>(
     #[comptime] c: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
-) -> i32 {
+) -> f32 {
     let last_x = comptime!(width as i32 - 1);
     let last_y = comptime!(height as i32 - 1);
     let inside_x = i32::max(x, 0i32);
@@ -51,7 +53,7 @@ fn clamped_code<C: Int, N: Size>(
     let index = (slot * height + row) * width + column;
     let pixel = codes[index as usize];
 
-    i32::cast_from(pixel[c as usize])
+    f32::cast_from(pixel[c as usize])
 }
 
 /// The block at `(corner_x, corner_y)` of frame `slot`, every summed channel, row by row.
@@ -64,8 +66,8 @@ fn load_block<C: Int, N: Size>(
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
-) -> Array<i32> {
-    let mut block = Array::<i32>::new(comptime!(SLIDING_BLOCK * SLIDING_BLOCK * channels) as usize);
+) -> Array<f32> {
+    let mut block = Array::<f32>::new(comptime!(SLIDING_BLOCK * SLIDING_BLOCK * channels) as usize);
 
     #[unroll]
     for py in 0..SLIDING_BLOCK {
@@ -85,10 +87,13 @@ fn load_block<C: Int, N: Size>(
 }
 
 /// The SSD from `block` to the block at `(x, y)` of frame `slot`.
+///
+/// Each channel sums its 16 squared differences on f32 multiply-adds, which stay exact below
+/// [F32_EXACT_LIMIT](crate::tune::codes::F32_EXACT_LIMIT), and the channels add in i32.
 #[cube]
 fn block_ssd<C: Int, N: Size>(
     codes: &Array<Vector<C, N>>,
-    block: &Array<i32>,
+    block: &Array<f32>,
     x: i32,
     y: i32,
     slot: u32,
@@ -96,7 +101,7 @@ fn block_ssd<C: Int, N: Size>(
     #[comptime] height: u32,
     #[comptime] channels: u32,
 ) -> i32 {
-    let mut sum = 0i32;
+    let mut sums = zeroed_channel_sums(channels);
 
     #[unroll]
     for py in 0..SLIDING_BLOCK {
@@ -109,16 +114,19 @@ fn block_ssd<C: Int, N: Size>(
                 let candidate_y = y + py as i32;
                 let code = clamped_code(codes, candidate_x, candidate_y, slot, c, width, height);
                 let diff = block[at as usize] - code;
-                sum += diff * diff;
+                sums[c as usize] += diff * diff;
             }
         }
     }
 
-    sum
+    exact_channel_total(&sums, channels)
 }
 
 /// The SSD from the patch at `(ref_x, ref_y)` to the patch at `(x, y)` of frame `slot`, read
 /// straight from the code ring.
+///
+/// Each row sums one channel's eight squared differences in f32, and the rows and channels add in
+/// i32.
 #[cube]
 fn direct_ssd<C: Int, N: Size>(
     codes: &Array<Vector<C, N>>,
@@ -134,6 +142,8 @@ fn direct_ssd<C: Int, N: Size>(
     let mut sum = 0i32;
 
     for py in 0..PATCH_SIZE {
+        let mut row_sums = zeroed_channel_sums(channels);
+
         for px in 0..PATCH_SIZE {
             let reference_x = (ref_x + px) as i32;
             let reference_y = (ref_y + py) as i32;
@@ -145,9 +155,11 @@ fn direct_ssd<C: Int, N: Size>(
                 let reference = clamped_code(codes, reference_x, reference_y, slot, c, width, height);
                 let candidate = clamped_code(codes, candidate_x, candidate_y, slot, c, width, height);
                 let diff = reference - candidate;
-                sum += diff * diff;
+                row_sums[c as usize] += diff * diff;
             }
         }
+
+        sum += exact_channel_total(&row_sums, channels);
     }
 
     sum

@@ -23,6 +23,8 @@ use crate::collab::kernels::plane_ops::{
 
 /// Column `sub` of the patch at `(x, y)` in frame `slot` of the code ring, every channel, row by
 /// row.
+///
+/// Codes are held as f32, which is exact for every code up to 2^24.
 #[cube]
 #[expect(
     clippy::too_many_arguments,
@@ -37,8 +39,8 @@ pub(crate) fn load_code_column<C: Int, N: Size>(
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
-) -> Array<i32> {
-    let mut column = Array::<i32>::new(comptime!(PATCH_SIZE * channels) as usize);
+) -> Array<f32> {
+    let mut column = Array::<f32>::new(comptime!(PATCH_SIZE * channels) as usize);
 
     #[unroll]
     for r in 0..PATCH_SIZE {
@@ -46,21 +48,52 @@ pub(crate) fn load_code_column<C: Int, N: Size>(
         let pixel = codes[index as usize];
         #[unroll]
         for c in 0..channels {
-            column[(r * channels + c) as usize] = i32::cast_from(pixel[c as usize]);
+            column[(r * channels + c) as usize] = f32::cast_from(pixel[c as usize]);
         }
     }
 
     column
 }
 
+/// Converts each channel's f32 sum to i32 and adds them in i32.
+///
+/// Each channel's sum is exact in f32 while it stays below
+/// [F32_EXACT_LIMIT](crate::tune::codes::F32_EXACT_LIMIT), but the channels together may not be.
+#[cube]
+pub(crate) fn exact_channel_total(sums: &Array<f32>, #[comptime] channels: u32) -> i32 {
+    let mut total = 0i32;
+
+    #[unroll]
+    for c in 0..channels {
+        total += i32::cast_from(sums[c as usize]);
+    }
+
+    total
+}
+
+/// One f32 sum per channel, each starting at zero.
+#[cube]
+pub(crate) fn zeroed_channel_sums(#[comptime] channels: u32) -> Array<f32> {
+    let mut sums = Array::<f32>::new(channels as usize);
+
+    #[unroll]
+    for c in 0..channels {
+        sums[c as usize] = 0.0f32;
+    }
+
+    sums
+}
+
 /// The exact SSD from the reference column to the candidate with top-left `(x, y)` in frame
 /// `slot`, completed across the group with shuffles.
 ///
-/// Every lane of the group must call it, even when the result is discarded.
+/// Each channel sums its column of squared differences on f32 multiply-adds, which stay exact
+/// below [F32_EXACT_LIMIT](crate::tune::codes::F32_EXACT_LIMIT). The channels and lanes then add
+/// in i32. Every lane of the group must call it, even when the result is discarded.
 #[cube]
 pub(crate) fn int_candidate_ssd<C: Int, N: Size>(
     codes: &Array<Vector<C, N>>,
-    current: &Array<i32>,
+    current: &Array<f32>,
     x: u32,
     y: u32,
     slot: u32,
@@ -70,7 +103,7 @@ pub(crate) fn int_candidate_ssd<C: Int, N: Size>(
     let width = comptime!(shape.width);
     let height = comptime!(shape.height);
     let channels = comptime!(shape.channels);
-    let mut partial = 0i32;
+    let mut sums = zeroed_channel_sums(channels);
 
     #[unroll]
     for r in 0..PATCH_SIZE {
@@ -78,20 +111,20 @@ pub(crate) fn int_candidate_ssd<C: Int, N: Size>(
         let pixel = codes[index as usize];
         #[unroll]
         for c in 0..channels {
-            let code = i32::cast_from(pixel[c as usize]);
+            let code = f32::cast_from(pixel[c as usize]);
             let diff = current[(r * channels + c) as usize] - code;
-            partial += diff * diff;
+            sums[c as usize] += diff * diff;
         }
     }
 
+    let partial = exact_channel_total(&sums, channels);
     plane_ssd_reduce8_int(partial)
 }
 
 /// Loads the cube's centre tile, `tile_width` by `tile_height` pixels from `(origin_x, origin_y)`.
 ///
-/// Pixels are row-major with the summed channels interleaved, each read clamped to the frame.
-/// Every lane of the cube loads a strided share, and the caller syncs the cube before any lane
-/// reads the tile.
+/// Pixels are row-major with the summed channels interleaved as f32 codes, each read clamped to
+/// the frame. Every lane of the cube loads a strided share.
 #[cube]
 #[expect(
     clippy::too_many_arguments,
@@ -99,7 +132,7 @@ pub(crate) fn int_candidate_ssd<C: Int, N: Size>(
 )]
 pub(crate) fn load_int_centre_tile<C: Int, N: Size>(
     codes: &Array<Vector<C, N>>,
-    tile: &mut SharedMemory<i32>,
+    tile: &mut SharedMemory<f32>,
     origin_x: u32,
     origin_y: u32,
     centre_slot: u32,
@@ -127,7 +160,7 @@ pub(crate) fn load_int_centre_tile<C: Int, N: Size>(
 
         #[unroll]
         for c in 0..channels {
-            tile[(first_lane + c) as usize] = i32::cast_from(pixel[c as usize]);
+            tile[(first_lane + c) as usize] = f32::cast_from(pixel[c as usize]);
         }
 
         index += lanes;
@@ -137,17 +170,17 @@ pub(crate) fn load_int_centre_tile<C: Int, N: Size>(
 /// One lane's share of the SSD to the candidate whose column `column` and top row `row` sit in
 /// the tile.
 ///
-/// It reads the same codes in the same order as [int_candidate_ssd] does before its reduction.
+/// It sums the same codes in the same order as [int_candidate_ssd] does before its reduction.
 #[cube]
 pub(crate) fn int_tile_partial(
-    tile: &SharedMemory<i32>,
-    current: &Array<i32>,
+    tile: &SharedMemory<f32>,
+    current: &Array<f32>,
     column: u32,
     row: u32,
     #[comptime] tile_width: u32,
     #[comptime] channels: u32,
 ) -> i32 {
-    let mut partial = 0i32;
+    let mut sums = zeroed_channel_sums(channels);
 
     #[unroll]
     for r in 0..PATCH_SIZE {
@@ -156,11 +189,11 @@ pub(crate) fn int_tile_partial(
         for c in 0..channels {
             let code = tile[(first_lane + c) as usize];
             let diff = current[(r * channels + c) as usize] - code;
-            partial += diff * diff;
+            sums[c as usize] += diff * diff;
         }
     }
 
-    partial
+    exact_channel_total(&sums, channels)
 }
 
 /// The exact SSD to the centre candidate with top-left `(x, y)`, read from the tile when the
@@ -170,8 +203,8 @@ pub(crate) fn int_tile_partial(
 #[cube]
 pub(crate) fn int_centre_ssd<C: Int, N: Size>(
     codes: &Array<Vector<C, N>>,
-    tile: &SharedMemory<i32>,
-    current: &Array<i32>,
+    tile: &SharedMemory<f32>,
+    current: &Array<f32>,
     x: u32,
     y: u32,
     cursor: &IntCursor,
@@ -218,8 +251,8 @@ pub(crate) fn pin_self_match_int(
 )]
 pub(crate) fn int_centre_search<C: Int, N: Size>(
     codes: &Array<Vector<C, N>>,
-    tile: &SharedMemory<i32>,
-    current: &Array<i32>,
+    tile: &SharedMemory<f32>,
+    current: &Array<f32>,
     cursor: &IntCursor,
     best_ssd: &mut i32,
     best_pos: &mut u32,
@@ -268,8 +301,8 @@ pub(crate) fn int_centre_search<C: Int, N: Size>(
 )]
 fn int_uniform_centre_walk<C: Int, N: Size>(
     codes: &Array<Vector<C, N>>,
-    tile: &SharedMemory<i32>,
-    current: &Array<i32>,
+    tile: &SharedMemory<f32>,
+    current: &Array<f32>,
     rect: &SearchRect,
     cursor: &IntCursor,
     best_ssd: &mut i32,
@@ -328,8 +361,8 @@ fn int_uniform_centre_walk<C: Int, N: Size>(
 )]
 fn int_clipped_centre_walk<C: Int, N: Size>(
     codes: &Array<Vector<C, N>>,
-    tile: &SharedMemory<i32>,
-    current: &Array<i32>,
+    tile: &SharedMemory<f32>,
+    current: &Array<f32>,
     rect: &SearchRect,
     cursor: &IntCursor,
     best_ssd: &mut i32,
@@ -387,7 +420,7 @@ pub(crate) fn int_trajectory_search<C: Int, N: Size>(
     mv_field: &Array<i32>,
     confidence: &Array<f32>,
     neighbour_slots: &Array<u32>,
-    anchor: &Array<i32>,
+    anchor: &Array<f32>,
     anchor_x: u32,
     anchor_y: u32,
     sub: u32,
@@ -462,7 +495,7 @@ pub(crate) fn int_trajectory_frame<C: Int, N: Size>(
     mv_field: &Array<i32>,
     confidence: &Array<f32>,
     neighbour_slots: &Array<u32>,
-    anchor: &Array<i32>,
+    anchor: &Array<f32>,
     anchor_x: u32,
     anchor_y: u32,
     sub: u32,

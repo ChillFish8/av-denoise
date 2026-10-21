@@ -134,7 +134,7 @@ pub fn collab_search_int<C: Int, N: Size, E: Numeric, A: Numeric>(
 
     let centre = comptime!(variant.centre);
     let tile_len = comptime!(variant.tile_elements(spatial_radius, channels));
-    let mut tile = SharedMemory::<i32>::new(tile_len as usize);
+    let mut tile = SharedMemory::<f32>::new(tile_len as usize);
 
     // The tile's corner is the first reference's search window corner, so every window of the
     // cube lies inside it.
@@ -234,11 +234,11 @@ pub fn collab_search_int<C: Int, N: Size, E: Numeric, A: Numeric>(
 )]
 pub(crate) fn int_search_group<C: Int, N: Size, E: Numeric, A: Numeric>(
     codes: &Array<Vector<C, N>>,
-    tile: &SharedMemory<i32>,
+    tile: &SharedMemory<f32>,
     mv_field: &Array<i32>,
     confidence: &Array<f32>,
     neighbour_slots: &Array<u32>,
-    current: &Array<i32>,
+    current: &Array<f32>,
     cursor: &IntCursor,
     c_min: f32,
     member_pos: &mut Array<u32>,

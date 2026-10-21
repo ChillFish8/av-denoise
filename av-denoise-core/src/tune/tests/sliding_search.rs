@@ -1,6 +1,13 @@
 use super::corpus::{integer_corpus, is_flat_case};
 use super::fixtures::{CollabSpec, collab_site, collab_site_with_ring, integer_split_sites};
-use super::integer_search::{reference_position, run_search};
+use super::integer_search::{
+    BRIGHTEST_LAYOUTS,
+    TEN_BIT,
+    assert_matches_host_centre,
+    brightest_ten_bit_frame,
+    reference_position,
+    run_search,
+};
 use super::runtime::{TestRuntime, test_client};
 use crate::collab::MAX_K;
 use crate::collab::kernels::fused::{GROUP_USES_GRID, MEMBER_WORDS, Walk};
@@ -151,6 +158,24 @@ fn the_sliding_centre_matches_scalar_int_on_flat_content() {
             let (search, _) = integer_split_sites(&fused, codes);
 
             assert_sliding_matches_scalar(&search, &label);
+        }
+    }
+}
+
+#[test]
+fn the_sliding_centre_holds_the_brightest_10_bit_patch() {
+    let client = test_client();
+
+    for (width, left) in BRIGHTEST_LAYOUTS {
+        let (spec, frame) = brightest_ten_bit_frame(width, left);
+        let fused = collab_site_with_ring(&client, &spec, &frame);
+        let (search, _) = integer_split_sites(&fused, TEN_BIT);
+
+        for sliding in sliding_variants() {
+            let label = format!("brightest 10-bit yuv {width} wide {}", sliding.name());
+            let (_, words) = run_search(&search, sliding);
+
+            assert_matches_host_centre(&search, &spec, &words, &label);
         }
     }
 }

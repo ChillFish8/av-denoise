@@ -49,7 +49,7 @@ pub fn search_candidate_legal(
 /// bytes per value.
 ///
 /// A float variant allocates its centre tile. A scalar or tiled integer variant allocates its tile
-/// of i32 codes, one per summed channel, or a one-code placeholder. A matrix centre allocates the
+/// of f32 codes, one per summed channel, or a one-code placeholder. A matrix centre allocates the
 /// buffers [matrix_centre_bytes] counts. A sliding centre allocates two i32 sums per block, and
 /// its neighbour pass allocates none.
 pub fn search_shared_bytes(candidate: SearchVariant, shape: &CollabShape, search_bytes: usize) -> usize {
@@ -65,7 +65,7 @@ pub fn search_shared_bytes(candidate: SearchVariant, shape: &CollabShape, search
         SearchVariant::Integer(variant) => {
             let matrix_bytes = matrix_centre_bytes(variant, shape);
             let tile_elements = variant.tile_elements(shape.spatial_radius, shape.channels);
-            let tile_bytes = tile_elements as usize * size_of::<i32>();
+            let tile_bytes = tile_elements as usize * size_of::<f32>();
 
             matrix_bytes.unwrap_or(tile_bytes)
         },

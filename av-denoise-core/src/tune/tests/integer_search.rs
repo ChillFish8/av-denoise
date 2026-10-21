@@ -9,7 +9,7 @@ use super::runtime::{TestRuntime, test_client};
 use crate::collab::geometry::{ref_pos, refs_along};
 use crate::collab::integer::{CodeView, host_centre_members, pack_position, patch_ssd};
 use crate::collab::kernels::fused::{GROUP_SIZE_MASK, GROUP_USES_GRID, MEMBER_WORDS, Walk};
-use crate::collab::{MAX_K, PATCH_SIZE};
+use crate::collab::{MAX_K, PATCH_SIZE, STEP};
 use crate::nlmeans::ChannelMode;
 use crate::tune::gpu::{read_f32, read_i32, read_u16};
 use crate::tune::sites::{
@@ -38,7 +38,7 @@ use crate::tune::{
 };
 
 const EIGHT_BIT: IntegerCodes = IntegerCodes { depth: 8 };
-const TEN_BIT: IntegerCodes = IntegerCodes { depth: 10 };
+pub(super) const TEN_BIT: IntegerCodes = IntegerCodes { depth: 10 };
 
 fn integer_variant(walk: Walk) -> SearchVariant {
     let variant = IntegerVariant {
@@ -91,6 +91,42 @@ pub(super) fn reference_position(spec: &CollabSpec, index: usize) -> u32 {
     pack_position(ref_x, ref_y, 0)
 }
 
+/// Checks the centre members in `words` against the host search of every reference, for a
+/// single-frame search of `spec`.
+pub(super) fn assert_matches_host_centre(
+    search: &CollabSearchSite<TestRuntime, f32>,
+    spec: &CollabSpec,
+    words: &[u32],
+    label: &str,
+) {
+    let inputs = &search.inputs;
+    let code_values = read_u16(&search.client, &inputs.codes, inputs.codes_len).expect("the codes read back");
+    let widened: Vec<u32> = code_values.iter().map(|&code| u32::from(code)).collect();
+    let view = CodeView {
+        codes: &widened,
+        width: spec.width,
+        height: spec.height,
+        stored_ch: spec.channels.storage_count(),
+        channels: spec.channels.count(),
+        centre_slot: 0,
+        neighbour_slots: &[],
+    };
+
+    let groups = words.chunks(MEMBER_WORDS as usize).enumerate();
+    for (index, group) in groups {
+        let reference_word = reference_position(spec, index);
+        let ref_x = reference_word & 0x1FFF;
+        let ref_y = reference_word >> 13;
+        let expected = host_centre_members(&view, ref_x, ref_y, spec.spatial_radius);
+
+        assert_eq!(
+            &group[..expected.len()],
+            expected.as_slice(),
+            "{label}: reference {index}"
+        );
+    }
+}
+
 #[test]
 fn scalar_int_matches_the_host_reference_on_small_frames() {
     let client = test_client();
@@ -111,33 +147,75 @@ fn scalar_int_matches_the_host_reference_on_small_frames() {
             let reference = reference_variant(&search);
             let (_, words) = run_search(&search, reference);
 
-            let inputs = &search.inputs;
-            let code_values =
-                read_u16(&client, &inputs.codes, inputs.codes_len).expect("the codes read back");
-            let widened: Vec<u32> = code_values.iter().map(|&code| u32::from(code)).collect();
-            let view = CodeView {
-                codes: &widened,
-                width: spec.width,
-                height: spec.height,
-                stored_ch: channels.storage_count(),
-                channels: channels.count(),
-                centre_slot: 0,
-                neighbour_slots: &[],
-            };
+            assert_matches_host_centre(&search, &spec, &words, &label);
+        }
+    }
+}
 
-            let groups = words.chunks(MEMBER_WORDS as usize).enumerate();
-            for (index, group) in groups {
-                let reference_word = reference_position(&spec, index);
-                let ref_x = reference_word & 0x1FFF;
-                let ref_y = reference_word >> 13;
-                let expected = host_centre_members(&view, ref_x, ref_y, spec.spatial_radius);
+/// The frame widths and bright patch columns of the brightest 10-bit frames.
+///
+/// The 40-pixel frame tiles every reference into sliding blocks. In the 42-pixel frame the patch
+/// sits under a reference whose blocks do not tile, so the sliding centre scores it directly.
+pub(super) const BRIGHTEST_LAYOUTS: [(u32, u32); 2] = [(40, 16), (42, 32)];
 
-                assert_eq!(
-                    &group[..expected.len()],
-                    expected.as_slice(),
-                    "{label}: reference {index}"
-                );
-            }
+/// A yuv frame `width` by 24 of code 0 around an all-1023 patch at `(left, 8)`, where the columns
+/// and rows beside the patch sit at the f32 partial sums' bound.
+///
+/// The diagonal neighbours at `(left - 1, 7)` and `(left + 1, 9)` tie exactly. One code of 1022
+/// in each, at opposite ends of their dark column and row, would round them apart if a column or
+/// row summed its channels in f32, which the position order then exposes.
+pub(super) fn brightest_ten_bit_frame(width: u32, left: u32) -> (CollabSpec, Vec<f32>) {
+    let spec = CollabSpec::new(width, 24, ChannelMode::Yuv, 0);
+    let stored_ch = spec.channels.storage_count();
+    let summed_ch = spec.channels.count();
+    let pixels = spec.width * spec.height;
+    let mut frame = vec![0.0f32; (pixels * stored_ch) as usize];
+
+    for row in 8..16 {
+        for column in left..left + 8 {
+            let first_lane = (row * spec.width + column) * stored_ch;
+            let lanes = first_lane as usize..(first_lane + summed_ch) as usize;
+            frame[lanes].fill(1.0);
+        }
+    }
+
+    let below_top = 1022.0 / 1023.0;
+    for (column, row) in [(left - 1, 7u32), (left + 8, 16)] {
+        let first_lane = (row * spec.width + column) * stored_ch;
+        frame[first_lane as usize] = below_top;
+    }
+
+    (spec, frame)
+}
+
+#[test]
+fn the_f32_partial_sums_hold_the_brightest_10_bit_patch() {
+    let client = test_client();
+
+    for (width, left) in BRIGHTEST_LAYOUTS {
+        let (spec, frame) = brightest_ten_bit_frame(width, left);
+        let fused = collab_site_with_ring(&client, &spec, &frame);
+        let (search, _) = integer_split_sites(&fused, TEN_BIT);
+        let reference = reference_variant(&search);
+        let (_, words) = run_search(&search, reference);
+
+        let label = format!("brightest 10-bit yuv {width} wide");
+        assert_matches_host_centre(&search, &spec, &words, &label);
+
+        // The tied diagonals follow the four single steps, in position order.
+        let ref_y = 8u32;
+        let refs_x = refs_along(spec.width);
+        let reference_index = (ref_y / STEP * refs_x + left / STEP) as usize;
+        let first_word = reference_index * MEMBER_WORDS as usize;
+        let tied = [pack_position(left - 1, 7, 0), pack_position(left + 1, 9, 0)];
+        assert_eq!(&words[first_word + 5..first_word + 7], &tied, "{label}");
+
+        // The other walk and the tile sum the same columns, so they hold the bound too.
+        for variant in [integer_variant(Walk::Uniform), tiled_variant()] {
+            let variant_label = format!("{label} {}", variant.name());
+            let (_, variant_words) = run_search(&search, variant);
+
+            assert_matches_host_centre(&search, &spec, &variant_words, &variant_label);
         }
     }
 }

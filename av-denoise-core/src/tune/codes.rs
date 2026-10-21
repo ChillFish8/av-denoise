@@ -1,10 +1,17 @@
 use super::device::DeviceLimits;
 use super::plan::PipelineProfile;
+use crate::collab::PATCH_SIZE;
+use crate::collab::kernels::integer::sliding::SLIDING_BLOCK;
 use crate::engine::SampleFormat;
 use crate::nlmeans::params::channel_scale_for;
 
 /// The deepest source whose codes the integer route stores.
 pub const MAX_INTEGER_DEPTH: u32 = 10;
+
+/// The bound every exact f32 integer sum stays below.
+///
+/// f32 holds every integer up to 2^24 exactly, so a sum of integer products below it never rounds.
+pub(crate) const F32_EXACT_LIMIT: u32 = 1 << 24;
 
 /// The most code values one exact f16 matrix product may sum.
 ///
@@ -13,8 +20,24 @@ pub const MATRIX_EXACT_VALUES: u32 = 258;
 
 // Clippy rejects a runtime `assert!` on constants, so the bound is checked at compile time.
 const _: () = assert!(
-    MATRIX_EXACT_VALUES * 255 * 255 < 1 << 24 && (MATRIX_EXACT_VALUES + 1) * 255 * 255 >= 1 << 24,
+    MATRIX_EXACT_VALUES * 255 * 255 < F32_EXACT_LIMIT
+        && (MATRIX_EXACT_VALUES + 1) * 255 * 255 >= F32_EXACT_LIMIT,
     "MATRIX_EXACT_VALUES must be the largest count of 8-bit products that sums exactly in f32"
+);
+
+/// The largest squared difference of two codes at [MAX_INTEGER_DEPTH].
+const MAX_SQUARED_DIFFERENCE: u32 = ((1 << MAX_INTEGER_DEPTH) - 1) * ((1 << MAX_INTEGER_DEPTH) - 1);
+
+// A scalar search lane sums one channel of one patch column in f32 before converting to i32.
+const _: () = assert!(
+    PATCH_SIZE * MAX_SQUARED_DIFFERENCE < F32_EXACT_LIMIT,
+    "one channel of an 8-pixel column must sum exactly in f32 at the deepest codes"
+);
+
+// A sliding block sums one channel of its 4x4 pixels in f32 before converting to i32.
+const _: () = assert!(
+    SLIDING_BLOCK * SLIDING_BLOCK * MAX_SQUARED_DIFFERENCE < F32_EXACT_LIMIT,
+    "one channel of a sliding block must sum exactly in f32 at the deepest codes"
 );
 
 /// The bits each matrix part holds.
