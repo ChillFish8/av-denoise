@@ -19,8 +19,8 @@ use av_denoise_core::{
 };
 
 pub use self::reseed::ReseedWindow;
-use crate::backend::Device;
 use crate::backend::accelerate::Accelerator;
+use crate::backend::{Device, DevicePlacement};
 use crate::host::{Algorithm, DenoiserError, DenoiserOptions, Depth, HostDenoiser, PlaneTiming};
 use crate::tune::{KernelSetup, TuneReport, TuneRequest, TuningMode, profile_key, tune_planar};
 
@@ -363,10 +363,37 @@ pub struct PlanarDenoiser {
     options: PlaneOptions,
     /// The shared tuning ledger from the setup this denoiser was created with, if it had one.
     ledger: Option<Arc<TuneLedger>>,
+    /// Where the hosts opened their clients, kept so a rebuild lands on the same device.
+    placement: Arc<DevicePlacement>,
 }
 
 impl PlanarDenoiser {
     pub fn create(options: &PlaneOptions, layout: FrameLayout) -> Result<Self, anyhow::Error> {
+        let placement = DevicePlacement::shared();
+        let placement = Arc::new(placement);
+        Self::create_placed(options, layout, &placement)
+    }
+
+    /// [Self::create] on a wgpu device of its own when the denoiser runs on Vulkan.
+    ///
+    /// The device sits on the adapter `options.device` selects and has its own queue, so this
+    /// denoiser's readbacks never wait behind another denoiser's work. It loads the same tuning
+    /// results as the shared device, and [Self::tune] keeps it on this device. Other runtimes build
+    /// exactly as [Self::create] does.
+    ///
+    /// Each call opens a new device, which stays open until the process exits because CubeCL never
+    /// frees a client.
+    pub fn create_on_own_device(options: &PlaneOptions, layout: FrameLayout) -> Result<Self, anyhow::Error> {
+        let placement = DevicePlacement::own();
+        let placement = Arc::new(placement);
+        Self::create_placed(options, layout, &placement)
+    }
+
+    fn create_placed(
+        options: &PlaneOptions,
+        layout: FrameLayout,
+        placement: &Arc<DevicePlacement>,
+    ) -> Result<Self, anyhow::Error> {
         let auto = options.tuning == TuningMode::Auto;
         let ledger = auto.then(|| TuneLedger::new(options.deterministic));
         let setup = KernelSetup {
@@ -374,13 +401,15 @@ impl PlanarDenoiser {
             profile_override: None,
         };
 
-        Self::create_with(options, layout, setup)
+        Self::create_with(options, layout, placement, setup)
     }
 
-    /// [Self::create] with every engine's tuning wired as `setup` says.
+    /// [Self::create] on the clients `placement` gives, with every engine's tuning wired as `setup`
+    /// says.
     pub(crate) fn create_with(
         options: &PlaneOptions,
         layout: FrameLayout,
+        placement: &Arc<DevicePlacement>,
         setup: KernelSetup,
     ) -> Result<Self, anyhow::Error> {
         let (chroma_width, chroma_height) = layout.chroma_dims();
@@ -409,6 +438,7 @@ impl PlanarDenoiser {
                 HostDenoiser::create_with(
                     &options.accelerators,
                     &options.device,
+                    placement,
                     layout.width,
                     layout.height,
                     luma_options,
@@ -423,6 +453,7 @@ impl PlanarDenoiser {
                 HostDenoiser::create_with(
                     &options.accelerators,
                     &options.device,
+                    placement,
                     chroma_width,
                     chroma_height,
                     chroma_options,
@@ -437,6 +468,7 @@ impl PlanarDenoiser {
                 HostDenoiser::create_with(
                     &options.accelerators,
                     &options.device,
+                    placement,
                     layout.width,
                     layout.height,
                     yuv_options,
@@ -460,7 +492,12 @@ impl PlanarDenoiser {
             temporal_radius,
             options: options.clone(),
             ledger: setup.ledger,
+            placement: placement.clone(),
         })
+    }
+
+    pub(crate) fn placement(&self) -> &Arc<DevicePlacement> {
+        &self.placement
     }
 
     pub(crate) fn ledger(&self) -> Option<&Arc<TuneLedger>> {

@@ -34,6 +34,7 @@ fn run_clip(bytes: Vec<u8>, tuning: TuningMode, tune_budget: Option<f64>) -> Vec
         grain_table: None,
         tune_budget,
         timing_report: false,
+        shared_device: false,
     };
 
     run_with(&options, opener, settings, writer).expect("the run succeeds");

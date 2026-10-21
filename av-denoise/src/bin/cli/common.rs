@@ -88,6 +88,10 @@ pub struct CommonArgs {
     /// and the frames per second. The report goes to stderr.
     #[arg(long)]
     pub timing_report: bool,
+
+    /// Runs every worker on one shared GPU device instead of a Vulkan device each.
+    #[arg(long)]
+    pub shared_device: bool,
 }
 
 /// The longest tuning budget accepted, one day in seconds.

@@ -365,6 +365,7 @@ impl Nl4dArgs {
             grain_table: self.unstable_export_av1_fgs.clone(),
             tune_budget: self.common.checked_tune_budget()?,
             timing_report: self.common.timing_report,
+            shared_device: self.common.shared_device,
         })
     }
 

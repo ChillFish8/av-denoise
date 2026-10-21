@@ -775,8 +775,9 @@ fn compare_profiles(
     }
 }
 
-/// Builds a denoiser like `planar` that runs `profile` and tunes through `ledger`.
-fn build_alternative(
+/// Builds a denoiser like `planar`, on the same device, that runs `profile` and tunes through
+/// `ledger`.
+pub(super) fn build_alternative(
     planar: &PlanarDenoiser,
     ledger: &Arc<TuneLedger>,
     profile: PipelineProfile,
@@ -787,8 +788,9 @@ fn build_alternative(
     };
     let options = planar.options().clone();
     let layout = planar.layout();
+    let placement = planar.placement();
 
-    PlanarDenoiser::create_with(&options, layout, setup)
+    PlanarDenoiser::create_with(&options, layout, placement, setup)
 }
 
 /// Tunes the keys only `alternative` reaches, then times both denoisers in interleaved blocks.

@@ -20,7 +20,7 @@ pub use self::options::{Algorithm, DenoiserOptions};
 pub(crate) use self::pending::{Pending, TryWait};
 pub use self::timing::PlaneTiming;
 use crate::backend::accelerate::Accelerator;
-use crate::backend::{Device, build_engine};
+use crate::backend::{Device, DevicePlacement, build_engine};
 use crate::tune::{KernelRequest, KernelSetup, profile_key};
 
 /// How many readbacks a [HostDenoiser] keeps in flight at once.
@@ -156,13 +156,16 @@ impl HostDenoiser {
         options: DenoiserOptions,
     ) -> Result<Self, DenoiserError> {
         let setup = KernelSetup::default();
-        Self::create_with(accelerators, device, width, height, options, &setup)
+        let placement = DevicePlacement::shared();
+        Self::create_with(accelerators, device, &placement, width, height, options, &setup)
     }
 
-    /// [Self::create] with the engine's tuning wired as `setup` says.
+    /// [Self::create] on the client `placement` gives, with the engine's tuning wired as `setup`
+    /// says.
     pub(crate) fn create_with(
         accelerators: &[Accelerator],
         device: &Device,
+        placement: &DevicePlacement,
         width: u32,
         height: u32,
         options: DenoiserOptions,
@@ -186,7 +189,7 @@ impl HostDenoiser {
             profile_key: &plane_key,
             setup,
         };
-        let built = build_engine(accelerators, device, spec, &request)?;
+        let built = build_engine(accelerators, device, placement, spec, &request)?;
 
         let format = options.depth.sample_format();
         let pixels = width as usize * height as usize;

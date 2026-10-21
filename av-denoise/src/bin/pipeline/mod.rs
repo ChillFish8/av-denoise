@@ -27,7 +27,7 @@ use self::scenes::{Decided, SceneSplitter};
 use self::source::{OpenedSource, SourceInfo};
 use self::stage::{SceneJob, Stager, checked_frame_permits, frame_permit_channel};
 pub use self::tune::{budget_request, tune_input};
-use self::worker::{WorkerJoin, WorkerOutput, spawn_workers};
+use self::worker::{WorkerJoin, WorkerOutput, WorkerSettings, spawn_workers};
 use crate::cli::{InputSource, RunOptions};
 use crate::progress::denoise_bar_visible;
 
@@ -43,6 +43,8 @@ pub struct RunSettings {
     pub tune_budget: Option<f64>,
     /// Whether the workers sample device time for the timing report.
     pub timing_report: bool,
+    /// Whether every worker shares one wgpu device instead of opening its own.
+    pub shared_device: bool,
 }
 
 /// Denoises `input` scene by scene, writing y4m on stdout.
@@ -65,6 +67,7 @@ pub fn run(
         grain_table,
         tune_budget: opts.tune_budget,
         timing_report: opts.timing_report,
+        shared_device: opts.shared_device,
     };
 
     let summary = run_with(&opts.planes, opener, settings, output)?;
@@ -100,6 +103,7 @@ where
         grain_table,
         tune_budget,
         timing_report,
+        shared_device,
     } = settings;
 
     let started = Instant::now();
@@ -143,7 +147,8 @@ where
 
     let (staged_tx, staged_rx) = crossbeam_channel::bounded::<u64>(1);
     let worker_planes = tune::worker_options(planes);
-    let (job_tx, worker_handles, output_rx) = spawn_workers(&worker_planes, layout, workers, timing_report);
+    let worker_settings = WorkerSettings::for_run(workers, timing_report, shared_device);
+    let (job_tx, worker_handles, output_rx) = spawn_workers(&worker_planes, layout, workers, worker_settings);
     let coordinator_info = info.clone();
     let coordinator = spawn_coordinator(coordinator_info, output_rx, staged_rx, visible, give, output);
 

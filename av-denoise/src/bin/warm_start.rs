@@ -4,14 +4,20 @@ use av_denoise::{FrameLayout, PlanarDenoiser, PlaneOptions, WarmUp, kernel_key};
 ///
 /// The queue stops concurrent `av-denoise` processes each compiling into a cold cache. The caller
 /// finishes the returned place once the denoiser has produced its first output frame, and [WarmUp]
-/// explains why it cannot be finished any earlier.
+/// explains why it cannot be finished any earlier. With `own_device` set, the denoiser is built
+/// with [PlanarDenoiser::create_on_own_device].
 pub fn create_denoiser(
     opts: &PlaneOptions,
     layout: FrameLayout,
+    own_device: bool,
 ) -> Result<(PlanarDenoiser, Option<WarmUp>), anyhow::Error> {
     let key = kernel_key(opts, layout);
     let warm_up = WarmUp::begin(key);
-    let denoiser = PlanarDenoiser::create(opts, layout)?;
+    let denoiser = if own_device {
+        PlanarDenoiser::create_on_own_device(opts, layout)?
+    } else {
+        PlanarDenoiser::create(opts, layout)?
+    };
 
     Ok((denoiser, warm_up))
 }
@@ -59,7 +65,7 @@ mod tests {
         let direct = PlanarDenoiser::create(&opts, layout)
             .err()
             .expect("zero-size layout should be rejected");
-        let wrapped = create_denoiser(&opts, layout)
+        let wrapped = create_denoiser(&opts, layout, false)
             .err()
             .expect("wrapper should forward the same rejection");
 

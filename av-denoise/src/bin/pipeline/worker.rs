@@ -17,17 +17,37 @@ pub struct WorkerOutput {
 
 pub type WorkerJoin = thread::JoinHandle<Result<WorkerOutput, anyhow::Error>>;
 
+/// How each worker builds and measures its denoiser.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkerSettings {
+    /// Whether each worker samples its denoiser's device time.
+    pub device_timing: bool,
+    /// Whether each worker builds its denoiser on a wgpu device of its own.
+    pub own_device: bool,
+}
+
+impl WorkerSettings {
+    /// The settings for a run of `workers` workers.
+    ///
+    /// Workers open devices of their own only when there are several and `shared_device` is unset.
+    pub fn for_run(workers: usize, timing_report: bool, shared_device: bool) -> Self {
+        Self {
+            device_timing: timing_report,
+            own_device: workers > 1 && !shared_device,
+        }
+    }
+}
+
 /// Spawns `workers` worker threads over one shared scene queue.
 ///
 /// The queue is a rendezvous, so a scene is only offered when a worker is free and at most
 /// `workers` scenes are ever in flight. Returns the queue's sender, the join handles and the
-/// shared output channel the workers emit denoised frames on. With `device_timing` set, each
-/// worker samples its denoiser's device time.
+/// shared output channel the workers emit denoised frames on.
 pub fn spawn_workers(
     opts: &PlaneOptions,
     layout: FrameLayout,
     workers: usize,
-    device_timing: bool,
+    settings: WorkerSettings,
 ) -> (
     crossbeam_channel::Sender<SceneJob>,
     Vec<WorkerJoin>,
@@ -42,8 +62,7 @@ pub fn spawn_workers(
         let output_tx = output_tx.clone();
         let job_rx = job_rx.clone();
 
-        let handle =
-            thread::spawn(move || run_worker(worker_id, opts, layout, job_rx, output_tx, device_timing));
+        let handle = thread::spawn(move || run_worker(worker_id, opts, layout, job_rx, output_tx, settings));
         worker_handles.push(handle);
     }
 
@@ -61,7 +80,7 @@ pub fn run_worker(
     layout: FrameLayout,
     jobs: crossbeam_channel::Receiver<SceneJob>,
     output_tx: crossbeam_channel::Sender<OutputMsg>,
-    device_timing: bool,
+    settings: WorkerSettings,
 ) -> Result<WorkerOutput, anyhow::Error> {
     let started = Instant::now();
     let mut setup = Duration::ZERO;
@@ -85,8 +104,8 @@ pub fn run_worker(
         // Built on the first claimed scene, so a worker that never claims one never compiles.
         if denoiser_slot.is_none() {
             let building = Instant::now();
-            let (mut denoiser, place) = create_denoiser(&opts, layout)?;
-            if device_timing {
+            let (mut denoiser, place) = create_denoiser(&opts, layout, settings.own_device)?;
+            if settings.device_timing {
                 denoiser.sample_device_time(DEVICE_SAMPLE_EVERY);
             }
 

@@ -4,6 +4,7 @@ pub mod device;
 pub mod enumerate;
 #[cfg(feature = "vulkan")]
 mod helpers;
+mod placement;
 mod probe;
 pub mod sniff;
 
@@ -14,6 +15,7 @@ use cubecl::prelude::ComputeClient;
 
 use self::accelerate::Accelerator;
 pub use self::device::Device;
+pub(crate) use self::placement::DevicePlacement;
 use self::sniff::sniff_best_accelerator;
 use crate::host::DenoiserError;
 use crate::host::io::{ClientIo, PlaneIo};
@@ -127,9 +129,17 @@ impl OnClient for DescribeDevice {
 
 /// Opens a client and identifies its device on the first accelerator in `accelerators` that works,
 /// then runs `task` on it.
+///
+/// The identity always describes `device`, so a client on an own device from `placement` loads the
+/// same stored tuning results as the shared one.
+#[cfg_attr(
+    not(feature = "vulkan"),
+    expect(unused_variables, reason = "only the Vulkan runtime reads the placement")
+)]
 fn run_on_best<T: OnClient>(
     accelerators: &[Accelerator],
     device: &Device,
+    placement: &DevicePlacement,
     task: T,
 ) -> Result<T::Output, DenoiserError> {
     let accelerator = sniff_best_accelerator(accelerators, device);
@@ -153,7 +163,8 @@ fn run_on_best<T: OnClient>(
         #[cfg(feature = "vulkan")]
         Accelerator::Vulkan => {
             let wgpu_device = device.to_wgpu()?;
-            let client = <cubecl::wgpu::WgpuRuntime as Runtime>::client(&wgpu_device);
+            let client_device = placement.vulkan_device(&wgpu_device);
+            let client = <cubecl::wgpu::WgpuRuntime as Runtime>::client(&client_device);
             let backend = *client.info();
             let identity = describe::describe_wgpu(&wgpu_device, backend, &client);
             task.on_vulkan(&wgpu_device);
@@ -182,11 +193,12 @@ fn run_on_best<T: OnClient>(
 pub(crate) fn build_engine(
     accelerators: &[Accelerator],
     device: &Device,
+    placement: &DevicePlacement,
     spec: EngineSpec,
     request: &KernelRequest<'_>,
 ) -> Result<BuiltEngine, DenoiserError> {
     let task = BuildEngine { spec, request };
-    run_on_best(accelerators, device, task)
+    run_on_best(accelerators, device, placement, task)
 }
 
 /// The profile of the device [build_engine] picks for `accelerators` and `device`.
@@ -194,5 +206,6 @@ pub fn selected_device(
     accelerators: &[Accelerator],
     device: &Device,
 ) -> Result<DeviceProfile, DenoiserError> {
-    run_on_best(accelerators, device, DescribeDevice)
+    let placement = DevicePlacement::shared();
+    run_on_best(accelerators, device, &placement, DescribeDevice)
 }

@@ -166,6 +166,7 @@ fn run_clip(bytes: Vec<u8>, workers: usize, timing_report: bool) -> (Vec<u8>, Ru
         grain_table: None,
         tune_budget: None,
         timing_report,
+        shared_device: false,
     };
 
     let summary = run_with(&options, opener, settings, writer).expect("the run succeeds");

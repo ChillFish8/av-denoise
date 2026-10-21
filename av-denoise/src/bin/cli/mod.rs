@@ -33,6 +33,8 @@ pub struct RunOptions {
     pub tune_budget: Option<f64>,
     /// Whether to print the timing report at the end of the run.
     pub timing_report: bool,
+    /// Whether every worker shares one wgpu device.
+    pub shared_device: bool,
 }
 
 /// Which planes to clean up.
