@@ -80,16 +80,23 @@ pub enum PipelineProfile {
     Baseline,
     /// The f16 search ring turned off on a device that supports it.
     F32Search,
+    /// The collab search and filter as two kernels joined by a member buffer.
+    SplitSearch,
 }
 
 impl PipelineProfile {
-    pub const ALL: [PipelineProfile; 2] = [PipelineProfile::Baseline, PipelineProfile::F32Search];
+    pub const ALL: [PipelineProfile; 3] = [
+        PipelineProfile::Baseline,
+        PipelineProfile::F32Search,
+        PipelineProfile::SplitSearch,
+    ];
 
     /// The name the store writes.
     pub fn name(self) -> &'static str {
         match self {
             PipelineProfile::Baseline => "baseline",
             PipelineProfile::F32Search => "f32_search",
+            PipelineProfile::SplitSearch => "split_search",
         }
     }
 

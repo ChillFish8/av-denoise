@@ -131,12 +131,25 @@ pub(crate) fn nl4d_outputs(
     frames: &[Vec<Vec<f32>>],
     plan: KernelPlan,
 ) -> Vec<Vec<f32>> {
-    let client = test_client();
-    let geometry = f32_geometry(width, height, channels);
     let kernels = EngineKernels {
         plan,
         ..EngineKernels::default()
     };
+
+    nl4d_outputs_with(options, channels, width, height, frames, kernels)
+}
+
+/// Denoises `frames` with an nl4d engine built on `kernels`.
+pub(crate) fn nl4d_outputs_with(
+    options: Nl4dOptions,
+    channels: ChannelMode,
+    width: u32,
+    height: u32,
+    frames: &[Vec<Vec<f32>>],
+    kernels: EngineKernels,
+) -> Vec<Vec<f32>> {
+    let client = test_client();
+    let geometry = f32_geometry(width, height, channels);
     let mut engine = Nl4d::with_kernels(&client, options, geometry, kernels).expect("the engine builds");
 
     run_engine(&client, &mut engine, width, height, frames).expect("the frames denoise")

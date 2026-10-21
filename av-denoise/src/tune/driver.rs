@@ -83,7 +83,7 @@ pub enum TuneOutcome {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TuneReport {
     pub outcome: TuneOutcome,
-    /// Site keys fully ranked in this pass, by the main pass and the alternative profile pass together.
+    /// Site keys fully ranked in this pass, by the main pass and the alternative profile passes together.
     pub tuned_keys: usize,
     /// Site keys this pass ranked partially, which a later run tunes again.
     pub partial_keys: usize,
@@ -152,7 +152,7 @@ struct PassInputs<'a> {
 enum ProfilePhase {
     /// Only the baseline profile exists for this configuration on this device.
     NotApplicable,
-    /// Compared, with the keys worth at least 2% of the `F32Search` census device time.
+    /// Compared, with the keys worth at least 2% of each alternative's census device time.
     Compared {
         records: Vec<ProfileRecord>,
         significant: Vec<SiteKey>,
@@ -161,15 +161,22 @@ enum ProfilePhase {
     Unfinished,
 }
 
-/// What timing both profiles on whole frames found.
+/// Block times of one alternative against the baseline, and whether every significant key was ranked.
 struct ProfileComparison {
-    records: Vec<ProfileRecord>,
-    /// Keys worth at least 2% of the `F32Search` census device time.
+    baseline_times: Vec<Duration>,
+    alternative_times: Vec<Duration>,
+    /// Keys worth at least 2% of the alternative's census device time.
     significant: Vec<SiteKey>,
-    /// Whether the `F32Search` census timed a launch and every key worth at least 2% of its device
-    /// time is settled.
+    /// Whether the alternative's census timed a launch and every key worth at least 2% of its
+    /// device time is settled.
     finished: bool,
-    alternative_wins: bool,
+}
+
+/// The fastest alternative profile compared so far.
+struct BestAlternative {
+    profile: PipelineProfile,
+    median: Duration,
+    planar: PlanarDenoiser,
 }
 
 /// What the warm-up measured.
@@ -580,12 +587,30 @@ fn drive_until_settled(
     Ok(false)
 }
 
-fn supports_f32_profile(planar: &PlanarDenoiser) -> bool {
+/// The profiles worth comparing with the baseline for this denoiser on `device`.
+///
+/// Every profile here differs from the baseline on this device. NLMeans has none.
+pub(crate) fn alternative_profiles_for(is_nl4d: bool, device: &DeviceProfile) -> Vec<PipelineProfile> {
+    if !is_nl4d {
+        return Vec::new();
+    }
+
+    let mut profiles = Vec::new();
+
+    if f32_profile_applies(is_nl4d, device) {
+        profiles.push(PipelineProfile::F32Search);
+    }
+
+    profiles.push(PipelineProfile::SplitSearch);
+    profiles
+}
+
+fn alternative_profiles(planar: &PlanarDenoiser) -> Vec<PipelineProfile> {
     let is_nl4d = matches!(planar.options().algorithm, Algorithm::Nl4d(_));
     let hosts = planar.hosts();
     let device = hosts[0].device_profile();
 
-    f32_profile_applies(is_nl4d, device)
+    alternative_profiles_for(is_nl4d, device)
 }
 
 /// Whether `F32Search` differs from the baseline, which needs nl4d and a legal f16 search.
@@ -596,18 +621,20 @@ pub(crate) fn f32_profile_applies(is_nl4d: bool, device: &DeviceProfile) -> bool
     is_nl4d && runs_f16
 }
 
-/// Compares the baseline profile with `F32Search` on whole frames, when that profile applies.
+/// Compares every applicable profile with the baseline on whole frames.
 ///
-/// A winning `F32Search` denoiser replaces `planar`. The cost estimate counts the alternative's
-/// kernel compilation as one more priming. A configuration whose alternative cannot be built has
-/// no profile to compare.
+/// Alternatives run one at a time, and only the fastest one so far stays alive. The winner, if it
+/// beats the baseline by the profile margin, replaces `planar`. Each cost estimate counts the
+/// alternative's kernel compilation as one more priming. A configuration where no alternative can
+/// be built has no profile to compare.
 fn compare_profiles(
     planar: &mut PlanarDenoiser,
     inputs: &PassInputs<'_>,
     budget: &Budget,
     reading: &WarmUpReading,
 ) -> ProfilePhase {
-    if !supports_f32_profile(planar) || inputs.ledger.deterministic() {
+    let alternatives = alternative_profiles(planar);
+    if alternatives.is_empty() || inputs.ledger.deterministic() {
         return ProfilePhase::NotApplicable;
     }
 
@@ -616,49 +643,115 @@ fn compare_profiles(
     let frames_cost = reading.frame_time * (block_frames + warm_frames);
     let one_site = site_min_cost(TYPICAL_CANDIDATES);
     let needed = frames_cost + one_site + reading.priming;
-    let spent = budget_spent(inputs.ledger, inputs.started);
-    if !can_afford(budget, spent, needed) {
-        tracing::info!("no tuning budget is left to compare pipeline profiles");
-        return ProfilePhase::Unfinished;
-    }
 
-    let setup = KernelSetup {
-        ledger: Some(inputs.ledger.clone()),
-        profile_override: Some(PipelineProfile::F32Search),
-    };
-    let options = planar.options().clone();
-    let layout = planar.layout();
-    let created = PlanarDenoiser::create_with(&options, layout, setup);
-    let mut alternative = match created {
-        Ok(alternative) => alternative,
-        Err(error) => {
-            tracing::warn!(%error, "cannot build the f32 search pipeline, only the baseline profile runs");
-            return ProfilePhase::NotApplicable;
-        },
-    };
+    let mut baseline_times = Vec::new();
+    let mut records = Vec::new();
+    let mut significant = Vec::new();
+    let mut finished = true;
+    let mut best: Option<BestAlternative> = None;
 
-    let compared = compare_with(planar, &mut alternative, inputs, budget);
-    let comparison = match compared {
-        Ok(comparison) => comparison,
-        Err(error) => {
-            tracing::warn!(%error, "the profile comparison failed");
-            return ProfilePhase::Unfinished;
-        },
-    };
-
-    if comparison.alternative_wins {
-        tracing::info!("the f32 search profile is faster on this device");
-        std::mem::swap(planar, &mut alternative);
-    }
-
-    if comparison.finished {
-        ProfilePhase::Compared {
-            records: comparison.records,
-            significant: comparison.significant,
+    for profile in alternatives {
+        let spent = budget_spent(inputs.ledger, inputs.started);
+        if !can_afford(budget, spent, needed) {
+            tracing::info!(
+                profile = profile.name(),
+                "no tuning budget is left to compare this profile"
+            );
+            finished = false;
+            break;
         }
+
+        let created = build_alternative(planar, inputs.ledger, profile);
+        let mut alternative = match created {
+            Ok(alternative) => alternative,
+            Err(error) => {
+                tracing::warn!(%error, profile = profile.name(), "cannot build a profile to compare");
+                continue;
+            },
+        };
+
+        let compared = compare_with(planar, &mut alternative, inputs, budget);
+        let comparison = match compared {
+            Ok(comparison) => comparison,
+            Err(error) => {
+                tracing::warn!(%error, profile = profile.name(), "the profile comparison failed");
+                finished = false;
+                continue;
+            },
+        };
+
+        finished = finished && comparison.finished;
+        significant.extend(comparison.significant);
+        baseline_times.extend(comparison.baseline_times);
+
+        let alternative_median = median(&comparison.alternative_times);
+        records.push(ProfileRecord {
+            profile,
+            median_frame_ns: alternative_median.as_nanos() as u64,
+            blocks: PROFILE_MIN_BLOCKS as u32,
+        });
+
+        let beats_best = best.as_ref().is_none_or(|best| alternative_median < best.median);
+        if beats_best {
+            best = Some(BestAlternative {
+                profile,
+                median: alternative_median,
+                planar: alternative,
+            });
+        }
+    }
+
+    if records.is_empty() {
+        return if finished {
+            ProfilePhase::NotApplicable
+        } else {
+            ProfilePhase::Unfinished
+        };
+    }
+
+    let baseline_median = median(&baseline_times);
+    let baseline_blocks = (baseline_times.len() / PROFILE_BLOCK_FRAMES) as u32;
+    let baseline_record = ProfileRecord {
+        profile: PipelineProfile::Baseline,
+        median_frame_ns: baseline_median.as_nanos() as u64,
+        blocks: baseline_blocks,
+    };
+    records.insert(0, baseline_record);
+
+    if let Some(mut best) = best
+        && profile_wins(baseline_median, best.median)
+    {
+        tracing::info!(
+            profile = best.profile.name(),
+            "a pipeline profile is faster on this device"
+        );
+        std::mem::swap(planar, &mut best.planar);
+    }
+
+    significant.sort();
+    significant.dedup();
+
+    if finished {
+        ProfilePhase::Compared { records, significant }
     } else {
         ProfilePhase::Unfinished
     }
+}
+
+/// Builds a denoiser like `planar` that runs `profile` and tunes through `ledger`.
+fn build_alternative(
+    planar: &PlanarDenoiser,
+    ledger: &Arc<TuneLedger>,
+    profile: PipelineProfile,
+) -> Result<PlanarDenoiser, anyhow::Error> {
+    let setup = KernelSetup {
+        ledger: Some(ledger.clone()),
+        profile_override: Some(profile),
+    };
+    let options = planar.options().clone();
+    let layout = planar.layout();
+
+    PlanarDenoiser::create_with(&options, layout, setup)
 }
 
 /// Tunes the keys only `alternative` reaches, then times both denoisers in interleaved blocks.
@@ -711,34 +804,17 @@ fn compare_with(
         time_block(alternative, &mut alternative_cycle, &mut alternative_times)?;
     }
 
-    let baseline_median = median(&baseline_times);
-    let alternative_median = median(&alternative_times);
-    let blocks = PROFILE_MIN_BLOCKS as u32;
-    let records = vec![
-        ProfileRecord {
-            profile: PipelineProfile::Baseline,
-            median_frame_ns: baseline_median.as_nanos() as u64,
-            blocks,
-        },
-        ProfileRecord {
-            profile: PipelineProfile::F32Search,
-            median_frame_ns: alternative_median.as_nanos() as u64,
-            blocks,
-        },
-    ];
-
     let mut settled = inputs.stored.clone();
     let ranked = inputs.ledger.result();
     settled.merge(ranked);
     let keys_settled = significant.iter().all(|key| settled.is_settled(key));
     let finished = census_measured && keys_settled;
-    let alternative_wins = profile_wins(baseline_median, alternative_median);
 
     Ok(ProfileComparison {
-        records,
+        baseline_times,
+        alternative_times,
         significant,
         finished,
-        alternative_wins,
     })
 }
 

@@ -1,6 +1,6 @@
-use av_denoise_core::tune::{DeviceIdentity, DeviceLimits, DeviceProfile};
+use av_denoise_core::tune::{DeviceIdentity, DeviceLimits, DeviceProfile, PipelineProfile};
 
-use crate::tune::driver::f32_profile_applies;
+use crate::tune::driver::{alternative_profiles_for, f32_profile_applies};
 use crate::tune::{KernelRequest, KernelSetup, TuningMode, engine_kernels};
 
 #[test]
@@ -41,6 +41,38 @@ fn the_f32_profile_applies_to_nl4d_where_f16_is_legal() {
 
     assert!(nl4d_applies);
     assert!(!nlmeans_applies);
+}
+
+#[test]
+fn only_nl4d_has_alternative_profiles() {
+    let device = r9700_profile();
+
+    let nlmeans = alternative_profiles_for(false, &device);
+    let nl4d = alternative_profiles_for(true, &device);
+
+    assert!(nlmeans.is_empty());
+    assert!(nl4d.contains(&PipelineProfile::SplitSearch));
+    assert!(nl4d.contains(&PipelineProfile::F32Search));
+}
+
+#[test]
+fn a_device_with_illegal_f16_is_not_offered_the_f32_profile() {
+    let device = pascal_vulkan_profile();
+
+    let profiles = alternative_profiles_for(true, &device);
+
+    assert!(!profiles.contains(&PipelineProfile::F32Search));
+    assert!(profiles.contains(&PipelineProfile::SplitSearch));
+}
+
+/// An AMD Radeon AI PRO R9700 under Vulkan.
+fn r9700_profile() -> DeviceProfile {
+    let mut device = pascal_vulkan_profile();
+    device.identity.adapter = "AMD Radeon AI PRO R9700".to_string();
+    device.identity.vendor_id = 0x1002;
+    device.identity.device_id = 0x7551;
+
+    device
 }
 
 /// A GTX 1070 under Vulkan whose driver reports f16 buffers and arithmetic.

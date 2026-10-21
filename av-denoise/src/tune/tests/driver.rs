@@ -327,7 +327,6 @@ fn a_tuned_grain_export_denoiser_drains_only_the_real_streams_grain() {
     assert_eq!(tuned_frames, fresh_frames);
 }
 
-/// The f32 search profile is compared only where the f16 search runs.
 #[test]
 fn an_nl4d_pass_records_a_ranking_for_every_plane() {
     let cache = tempfile::tempdir().unwrap();

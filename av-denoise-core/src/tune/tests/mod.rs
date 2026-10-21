@@ -16,6 +16,7 @@ mod legality;
 mod plan;
 mod precompile;
 pub(crate) mod probe;
+mod profiles;
 mod regularise;
 mod result;
 pub(crate) mod runtime;

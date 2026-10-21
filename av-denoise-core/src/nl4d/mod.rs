@@ -9,6 +9,7 @@
 //! - [PsyParams], the perceptual tuning that filters each area by what it looks like
 //! - film grain measurement for AV1 grain tables
 
+mod collab_pass;
 pub(crate) mod denoiser;
 mod engine;
 pub mod grain;
