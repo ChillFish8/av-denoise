@@ -1,5 +1,5 @@
 mod behaviour;
-mod golden;
+mod corpus;
 mod noise_curve;
 mod pooled;
 mod recorded;

@@ -1,4 +1,4 @@
-use super::golden::collab_corpus;
+use super::corpus::collab_corpus;
 use super::{Aggregated, run_fused_variant};
 use crate::collab::kernels::fused::{Centre, CollabVariant, NeighbourWalk, Walk};
 
