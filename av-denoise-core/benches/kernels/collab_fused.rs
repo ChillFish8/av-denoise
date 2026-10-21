@@ -237,9 +237,6 @@ impl<R: Runtime> CollabFusedBench<R> {
             uniform_walk_only,
             packed: self.packed,
             codes: None,
-            matrix_plane: 0,
-            int8: None,
-            int8_plane: 0,
         };
         let outputs = CollabOutputs {
             accum: args.accum.clone(),

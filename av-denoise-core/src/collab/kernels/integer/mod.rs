@@ -1,4 +1,3 @@
-pub(crate) mod matrix;
 pub(crate) mod neighbour;
 pub(crate) mod scalar;
 pub(crate) mod sliding;
@@ -6,7 +5,6 @@ pub(crate) mod variant;
 
 use cubecl::prelude::*;
 
-use self::matrix::{MatrixRoute, matrix_centre_search};
 pub use self::neighbour::collab_neighbour_int;
 use self::scalar::{int_centre_search, int_trajectory_search, load_code_column, load_int_centre_tile};
 pub use self::sliding::collab_centre_sliding;
@@ -16,7 +14,6 @@ use super::group::clamp_top_left;
 use super::plane_ops::{UNFILLED_SSD, group_base};
 use crate::collab::geometry::refs_along;
 use crate::collab::{MAX_K, PATCH_SIZE, STEP};
-use crate::tune::Int8Layout;
 
 /// The comptime frame and patch shape the integer searches read.
 ///
@@ -59,16 +56,13 @@ pub(crate) struct IntCursor {
 /// real one and writes nothing.
 ///
 /// `codes` holds one integer code per stored lane, laid out as the f32 ring is. A tiled centre
-/// first copies the union of the cube's search windows into a shared tile and scores from it. A
-/// matrix centre scores that union on the matrix units, with `E` operands and `A` accumulators.
-/// The f16 centre runs at `matrix_plane` and splits codes at `split_shift`, and the int8 centre
-/// runs at `int8_plane` and splits codes as `int8` does. The other centres read none of these.
+/// first copies the union of the cube's search windows into a shared tile and scores from it.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
     reason = "every argument is a buffer or comptime shape the kernel binds"
 )]
-pub fn collab_search_int<C: Int, N: Size, E: Numeric, A: Numeric>(
+pub fn collab_search_int<C: Int, N: Size>(
     codes: &Array<Vector<C, N>>,
     mv_field: &Array<i32>,
     confidence: &Array<f32>,
@@ -76,7 +70,6 @@ pub fn collab_search_int<C: Int, N: Size, E: Numeric, A: Numeric>(
     members: &mut Array<u32>,
     centre_slot: u32,
     c_min: f32,
-    #[comptime] split_shift: u32,
     #[comptime] radius: u32,
     #[comptime] grid_frames: u32,
     #[comptime] refine: u32,
@@ -93,16 +86,8 @@ pub fn collab_search_int<C: Int, N: Size, E: Numeric, A: Numeric>(
     #[comptime] stored_ch: u32,
     #[comptime] spatial_radius: u32,
     #[comptime] frame_refs_x: u32,
-    #[comptime] matrix_plane: u32,
-    #[comptime] int8_plane: u32,
-    #[comptime] int8: Int8Layout,
     #[comptime] variant: IntegerVariant,
 ) {
-    let route = comptime!(match variant.centre {
-        IntCentre::MatrixI8 => MatrixRoute::int8(int8_plane, int8),
-        _ => MatrixRoute::f16(matrix_plane, split_shift),
-    });
-
     let thread_id = UNIT_POS_X;
     let group = thread_id / 8u32;
     let sub = thread_id % 8u32;
@@ -173,7 +158,7 @@ pub fn collab_search_int<C: Int, N: Size, E: Numeric, A: Numeric>(
         base,
     };
     let mut member_pos = Array::<u32>::new(MAX_K as usize);
-    let group_word = int_search_group::<C, N, E, A>(
+    let group_word = int_search_group::<C, N>(
         codes,
         &tile,
         mv_field,
@@ -184,8 +169,6 @@ pub fn collab_search_int<C: Int, N: Size, E: Numeric, A: Numeric>(
         c_min,
         &mut member_pos,
         variant,
-        route,
-        frame_refs_x,
         radius,
         grid_frames,
         refine,
@@ -224,15 +207,12 @@ pub fn collab_search_int<C: Int, N: Size, E: Numeric, A: Numeric>(
 /// Every lane of the group ends up holding the same members. Returns the group word, the member
 /// count in the low 8 bits with [GROUP_USES_GRID](crate::collab::kernels::fused::GROUP_USES_GRID)
 /// set when the group is a volume grid.
-///
-/// A matrix centre runs [matrix_centre_search](crate::collab::kernels::integer::matrix::matrix_centre_search)
-/// on `route`, so every lane of the cube must call it.
 #[cube]
 #[expect(
     clippy::too_many_arguments,
     reason = "every argument is a buffer or comptime shape the search reads"
 )]
-pub(crate) fn int_search_group<C: Int, N: Size, E: Numeric, A: Numeric>(
+pub(crate) fn int_search_group<C: Int, N: Size>(
     codes: &Array<Vector<C, N>>,
     tile: &SharedMemory<f32>,
     mv_field: &Array<i32>,
@@ -243,8 +223,6 @@ pub(crate) fn int_search_group<C: Int, N: Size, E: Numeric, A: Numeric>(
     c_min: f32,
     member_pos: &mut Array<u32>,
     #[comptime] variant: IntegerVariant,
-    #[comptime] route: MatrixRoute,
-    #[comptime] frame_refs_x: u32,
     #[comptime] radius: u32,
     #[comptime] grid_frames: u32,
     #[comptime] refine: u32,
@@ -263,29 +241,16 @@ pub(crate) fn int_search_group<C: Int, N: Size, E: Numeric, A: Numeric>(
     let mut best_ssd = UNFILLED_SSD.runtime();
     let mut best_pos = 0u32;
 
-    let n_live = if comptime!(variant.has_matrix_centre()) {
-        matrix_centre_search::<C, N, E, A>(
-            codes,
-            cursor,
-            &mut best_ssd,
-            &mut best_pos,
-            frame_refs_x,
-            variant,
-            route,
-            shape,
-        )
-    } else {
-        int_centre_search(
-            codes,
-            tile,
-            current,
-            cursor,
-            &mut best_ssd,
-            &mut best_pos,
-            variant,
-            shape,
-        )
-    };
+    let n_live = int_centre_search(
+        codes,
+        tile,
+        current,
+        cursor,
+        &mut best_ssd,
+        &mut best_pos,
+        variant,
+        shape,
+    );
 
     int_group_members(
         codes,

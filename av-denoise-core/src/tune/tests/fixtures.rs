@@ -33,7 +33,7 @@ use crate::tune::sites::{
     WindowSite,
     allocate_accum,
 };
-use crate::tune::{DeviceLimits, IntegerCodes, SiteCandidate, int8_matrix_plane_width, matrix_plane_width};
+use crate::tune::{DeviceLimits, IntegerCodes, SiteCandidate, matrix_plane_width};
 
 /// Frames in every fixture ring. The centre is slot 1, with a neighbour either side.
 pub(crate) const RING_FRAMES: u32 = 3;
@@ -443,9 +443,6 @@ pub(crate) fn collab_site_with_ring(
         uniform_walk_only,
         packed: false,
         codes: None,
-        matrix_plane: 0,
-        int8: None,
-        int8_plane: 0,
     };
     let outputs = CollabOutputs {
         accum,
@@ -596,8 +593,7 @@ pub(crate) fn quantised_codes(values: &[f32], codes: IntegerCodes) -> Vec<u16> {
 /// The split sites for `fused`, reading its ring rounded to `codes` and the matching code ring.
 ///
 /// The ring is read back and rounded on the host, so the float search and the integer search see the
-/// same content. The matrix planes and the int8 product are the device's, or 0 and `None` when it
-/// has none.
+/// same content.
 pub(crate) fn integer_split_sites(
     fused: &CollabSite<TestRuntime, f32>,
     codes: IntegerCodes,
@@ -612,9 +608,6 @@ pub(crate) fn integer_split_sites(
     let code_bytes = u16::as_bytes(&code_values);
     let code_ring = client.create_from_slice(code_bytes);
 
-    let limits = DeviceLimits::from_client(client);
-    let plane_width = matrix_plane_width(&limits);
-    let int8_plane = int8_matrix_plane_width(&limits);
     let quantised_inputs = CollabInputs {
         ring: ring.clone(),
         search_ring: ring,
@@ -624,9 +617,6 @@ pub(crate) fn integer_split_sites(
     };
     let integer_shape = CollabShape {
         codes: Some(codes),
-        matrix_plane: plane_width.unwrap_or(0),
-        int8: limits.int8_matrix,
-        int8_plane: int8_plane.unwrap_or(0),
         ..fused.shape
     };
     let quantised_site = CollabSite {

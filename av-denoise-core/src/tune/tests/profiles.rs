@@ -153,8 +153,7 @@ fn forced_search(variant: IntegerVariant) -> KernelPlan {
 /// Every integer search variant that is legal on this device for a search of `case`'s geometry and
 /// fits it.
 ///
-/// The search is the fixture's at the engine's frame size and default spatial radius, with the
-/// device's matrix planes and int8 product.
+/// The search is the fixture's at the engine's frame size and default spatial radius.
 fn runnable_integer_variants(case: &CodeCase) -> Vec<IntegerVariant> {
     let client = test_client();
     let limits = DeviceLimits::from_client(&client);

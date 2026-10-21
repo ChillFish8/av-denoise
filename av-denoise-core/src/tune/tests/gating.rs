@@ -530,7 +530,7 @@ fn the_inverse_scale_matches_the_kernel_distance_scale() {
 }
 
 /// A 1080p luma search shape at the library's default geometry.
-fn search_shape(codes: Option<IntegerCodes>, matrix_plane: u32) -> CollabShape {
+fn search_shape(codes: Option<IntegerCodes>) -> CollabShape {
     CollabShape {
         f16_search: false,
         radius: 1,
@@ -556,20 +556,15 @@ fn search_shape(codes: Option<IntegerCodes>, matrix_plane: u32) -> CollabShape {
         uniform_walk_only: false,
         packed: false,
         codes,
-        matrix_plane,
-        int8: None,
-        int8_plane: 0,
     }
 }
 
-/// Every search variant legal on `shape` under `legality`, on an RDNA 4 card.
+/// Every search variant legal on `shape` under `legality`.
 fn legal_searches(shape: &CollabShape, legality: &Legality) -> Vec<SearchVariant> {
-    let limits = FakeDevice::rdna4().limits();
-
     SearchVariant::ALL
         .iter()
         .copied()
-        .filter(|&candidate| search_candidate_legal(candidate, shape, &limits, legality))
+        .filter(|&candidate| search_candidate_legal(candidate, shape, legality))
         .collect()
 }
 
@@ -607,7 +602,7 @@ fn the_integer_tile_counts_four_bytes_per_code() {
         (ChannelMode::Yuv, 16848),
     ];
     for (mode, expected) in cases {
-        let mut shape = search_shape(eight_bit, 64);
+        let mut shape = search_shape(eight_bit);
         shape.channels = mode.count();
         shape.stored_ch = mode.storage_count();
 
@@ -621,10 +616,9 @@ fn the_integer_tile_counts_four_bytes_per_code() {
 fn integer_search_candidates_are_legal_only_with_codes() {
     let legality = Legality::default();
     let rdna4 = FakeDevice::rdna4().limits();
-    let matrix_plane = matrix_plane_width(&rdna4).expect("RDNA 4 offers the matrix plane");
     let ten_bit = Some(IntegerCodes { depth: 10 });
-    let without_codes = search_shape(None, 0);
-    let with_codes = search_shape(ten_bit, matrix_plane);
+    let without_codes = search_shape(None);
+    let with_codes = search_shape(ten_bit);
 
     let float_only = legal_searches(&without_codes, &legality);
     let expected_floats: Vec<SearchVariant> = SearchVariant::ALL[..FLOAT_SEARCH_COUNT].to_vec();
@@ -634,21 +628,10 @@ fn integer_search_candidates_are_legal_only_with_codes() {
     let clipped = integer_search(Walk::Clipped);
     let uniform = integer_search(Walk::Uniform);
     let integer_tiled = integer_tiled_search();
-    let refs16_matrix = named_search("int_refs16_matrix");
-    let refs8x2_matrix = named_search("int_refs8x2_matrix");
     let sliding7x7 = named_search("int_sliding7x7");
     let sliding15x7 = named_search("int_sliding15x7");
     let integer_route = legal_searches(&with_codes, &legality);
-    let expected_route = vec![
-        baseline,
-        clipped,
-        uniform,
-        integer_tiled,
-        refs16_matrix,
-        refs8x2_matrix,
-        sliding7x7,
-        sliding15x7,
-    ];
+    let expected_route = vec![baseline, clipped, uniform, integer_tiled, sliding7x7, sliding15x7];
     assert_eq!(integer_route, expected_route);
 
     let search_bytes = size_of::<f32>();
@@ -681,41 +664,24 @@ fn integer_search_offers_only_uniform_walks_where_the_device_needs_them() {
         ..Legality::default()
     };
     let eight_bit = Some(IntegerCodes { depth: 8 });
-    let shape = search_shape(eight_bit, 64);
+    let shape = search_shape(eight_bit);
 
     let legal = legal_searches(&shape, &uniform_legality);
     let uniform_variant = CollabVariant::baseline_for(true);
     let uniform_baseline = SearchVariant::Float(uniform_variant);
     let uniform = integer_search(Walk::Uniform);
-    let refs16_matrix = named_search("int_refs16_matrix");
-    let refs8x2_matrix = named_search("int_refs8x2_matrix");
 
-    assert_eq!(
-        legal,
-        vec![uniform_baseline, uniform, refs16_matrix, refs8x2_matrix]
-    );
+    assert_eq!(legal, vec![uniform_baseline, uniform]);
 }
 
-/// A 1080p search of `mode` at spatial radius 9 with codes of `depth` bits and the f16 matrix
-/// plane `matrix_plane`.
-fn coded_search_shape(mode: ChannelMode, depth: u32, matrix_plane: u32) -> CollabShape {
+/// A 1080p search of `mode` at spatial radius 9 with codes of `depth` bits.
+fn coded_search_shape(mode: ChannelMode, depth: u32) -> CollabShape {
     let codes = Some(IntegerCodes { depth });
-    let mut shape = search_shape(codes, matrix_plane);
+    let mut shape = search_shape(codes);
     shape.channels = mode.count();
     shape.stored_ch = mode.storage_count();
 
     shape
-}
-
-/// [coded_search_shape] on the int8 route of `element` at `int8_plane`.
-fn int8_search_shape(mode: ChannelMode, depth: u32, element: Int8Matrix, int8_plane: u32) -> CollabShape {
-    let shape = coded_search_shape(mode, depth, 64);
-
-    CollabShape {
-        int8: Some(element),
-        int8_plane,
-        ..shape
-    }
 }
 
 /// An RDNA 4 card with `shared_kb` KB of shared memory and planes up to `plane_size_max`.
@@ -741,22 +707,6 @@ fn candidate_fits(candidate: SearchVariant, shape: &CollabShape, limits: &Device
     search_candidate_fits(candidate, shape, limits, &legality, search_bytes)
 }
 
-/// The names of every matrix search variant legal on `shape` under `limits`.
-fn legal_matrix_names(shape: &CollabShape, limits: &DeviceLimits) -> Vec<&'static str> {
-    let legality = Legality::default();
-
-    SearchVariant::ALL
-        .iter()
-        .copied()
-        .filter(|&candidate| match candidate {
-            SearchVariant::Integer(variant) => variant.is_matrix() || variant.is_int8(),
-            SearchVariant::Float(_) => false,
-        })
-        .filter(|&candidate| search_candidate_legal(candidate, shape, limits, &legality))
-        .map(|candidate| candidate.name())
-        .collect()
-}
-
 #[test]
 fn the_sliding_centre_counts_its_block_sums() {
     let cases = [("int_sliding7x7", 512), ("int_sliding15x7", 1024)];
@@ -765,12 +715,11 @@ fn the_sliding_centre_counts_its_block_sums() {
 
     for (name, expected) in cases {
         let sliding = named_search(name);
-        let at_64 = coded_search_shape(ChannelMode::Yuv, 10, 64);
-        let at_32 = coded_search_shape(ChannelMode::Yuv, 10, 32);
+        let shape = coded_search_shape(ChannelMode::Yuv, 10);
 
-        let bytes = candidate_bytes(sliding, &at_64);
-        let fits_at_64 = candidate_fits(sliding, &at_64, &wide);
-        let fits_at_32 = candidate_fits(sliding, &at_32, &narrow);
+        let bytes = candidate_bytes(sliding, &shape);
+        let fits_at_64 = candidate_fits(sliding, &shape, &wide);
+        let fits_at_32 = candidate_fits(sliding, &shape, &narrow);
 
         assert_eq!(bytes, expected, "{name}");
         assert!(fits_at_64, "{name}");
@@ -779,195 +728,33 @@ fn the_sliding_centre_counts_its_block_sums() {
 }
 
 #[test]
-fn the_matrix_centre_fits_16_kb_only_for_8_bit_luma_at_plane_64() {
-    let refs16 = named_search("int_refs16_matrix");
-    let luma_at_64 = coded_search_shape(ChannelMode::Luma, 8, 64);
-    let luma_at_32 = coded_search_shape(ChannelMode::Luma, 8, 32);
-    let chroma_at_64 = coded_search_shape(ChannelMode::Chroma, 8, 64);
-    let ten_bit_at_64 = coded_search_shape(ChannelMode::Luma, 10, 64);
-    let wide = sized_rdna4(16, 64);
-    let narrow = sized_rdna4(16, 32);
-
-    let bytes_at_64 = candidate_bytes(refs16, &luma_at_64);
-    let bytes_at_32 = candidate_bytes(refs16, &luma_at_32);
-    let fits_at_64 = candidate_fits(refs16, &luma_at_64, &wide);
-    let fits_at_32 = candidate_fits(refs16, &luma_at_32, &narrow);
-    let chroma_fits = candidate_fits(refs16, &chroma_at_64, &wide);
-    let ten_bit_fits = candidate_fits(refs16, &ten_bit_at_64, &wide);
-
-    assert_eq!(bytes_at_64, 13548);
-    assert_eq!(bytes_at_32, 16620);
-    assert!(fits_at_64);
-    assert!(!fits_at_32);
-    assert!(!chroma_fits);
-    assert!(!ten_bit_fits);
-}
-
-#[test]
-fn ten_bit_luma_matrix_centre_fits_32_kb_at_plane_32() {
-    let refs16 = named_search("int_refs16_matrix");
-    let shape = coded_search_shape(ChannelMode::Luma, 10, 32);
-    let limits = sized_rdna4(32, 32);
-
-    let bytes = candidate_bytes(refs16, &shape);
-    let fits = candidate_fits(refs16, &shape, &limits);
-
-    assert_eq!(bytes, 31332);
-    assert!(fits);
-}
-
-#[test]
-fn ten_bit_yuv_matrix_centre_does_not_fit_32_kb() {
-    let refs16 = named_search("int_refs16_matrix");
-    let shape = coded_search_shape(ChannelMode::Yuv, 10, 32);
-    let small = sized_rdna4(32, 32);
-    let large = sized_rdna4(64, 32);
-
-    let bytes = candidate_bytes(refs16, &shape);
-    let fits_small = candidate_fits(refs16, &shape, &small);
-    let fits_large = candidate_fits(refs16, &shape, &large);
-
-    assert_eq!(bytes, 49220);
-    assert!(!fits_small);
-    assert!(fits_large);
-}
-
-#[test]
-fn the_two_row_matrix_centre_counts_its_smaller_union() {
-    let refs8x2 = named_search("int_refs8x2_matrix");
-    let shape = coded_search_shape(ChannelMode::Luma, 8, 64);
-    let bytes = candidate_bytes(refs8x2, &shape);
-
-    assert_eq!(bytes, 10636);
-}
-
-#[test]
-fn the_int8_matrix_centre_counts_one_byte_per_part() {
-    let refs16_i8 = named_search("int_refs16_i8");
-    let refs16_f16 = named_search("int_refs16_matrix");
-    let small_wide = sized_rdna4(16, 64);
-    let small_narrow = sized_rdna4(16, 32);
-    let medium_wide = sized_rdna4(32, 64);
-    let medium_narrow = sized_rdna4(32, 32);
-
-    let whole_at_64 = int8_search_shape(ChannelMode::Luma, 8, Int8Matrix::Unsigned, 64);
-    let whole_at_32 = int8_search_shape(ChannelMode::Luma, 8, Int8Matrix::Unsigned, 32);
-    let f16_at_32 = coded_search_shape(ChannelMode::Luma, 8, 32);
-    let whole_bytes_at_64 = candidate_bytes(refs16_i8, &whole_at_64);
-    let whole_bytes_at_32 = candidate_bytes(refs16_i8, &whole_at_32);
-    let whole_fits_at_64 = candidate_fits(refs16_i8, &whole_at_64, &small_wide);
-    let whole_fits_at_32 = candidate_fits(refs16_i8, &whole_at_32, &small_narrow);
-    let f16_fits_at_32 = candidate_fits(refs16_f16, &f16_at_32, &small_narrow);
-
-    assert_eq!(whole_bytes_at_64, 10800);
-    assert_eq!(whole_bytes_at_32, 13360);
-    assert!(whole_fits_at_64);
-    assert!(whole_fits_at_32);
-    assert!(!f16_fits_at_32);
-
-    // Both split layouts take 2 parts and 3 accumulators.
-    let split_cases = [(Int8Matrix::Signed, 8), (Int8Matrix::Unsigned, 10)];
-    for (element, depth) in split_cases {
-        let label = format!("{element:?} {depth}-bit");
-        let split_at_64 = int8_search_shape(ChannelMode::Luma, depth, element, 64);
-        let split_at_32 = int8_search_shape(ChannelMode::Luma, depth, element, 32);
-
-        let bytes_at_64 = candidate_bytes(refs16_i8, &split_at_64);
-        let bytes_at_32 = candidate_bytes(refs16_i8, &split_at_32);
-        let medium_fits_at_64 = candidate_fits(refs16_i8, &split_at_64, &medium_wide);
-        let medium_fits_at_32 = candidate_fits(refs16_i8, &split_at_32, &medium_narrow);
-        let small_fits_at_64 = candidate_fits(refs16_i8, &split_at_64, &small_wide);
-        let small_fits_at_32 = candidate_fits(refs16_i8, &split_at_32, &small_narrow);
-
-        assert_eq!(bytes_at_64, 17644, "{label}");
-        assert_eq!(bytes_at_32, 24812, "{label}");
-        assert!(medium_fits_at_64, "{label}");
-        assert!(medium_fits_at_32, "{label}");
-        assert!(!small_fits_at_64, "{label}");
-        assert!(!small_fits_at_32, "{label}");
-    }
-
-    let signed_yuv = int8_search_shape(ChannelMode::Yuv, 10, Int8Matrix::Signed, 32);
-    let signed_yuv_bytes = candidate_bytes(refs16_i8, &signed_yuv);
-    let signed_yuv_fits = candidate_fits(refs16_i8, &signed_yuv, &medium_narrow);
-
-    assert_eq!(signed_yuv_bytes, 33756);
-    assert!(!signed_yuv_fits);
-}
-
-#[test]
-fn int8_candidates_need_the_int8_config_and_its_plane() {
-    let without_int8 = FakeDevice {
-        int8_configs: Vec::new(),
-        ..FakeDevice::rdna4()
-    };
-    let without_limits = without_int8.limits();
-    let rdna4 = FakeDevice::rdna4().limits();
-    let shape = int8_search_shape(ChannelMode::Luma, 8, Int8Matrix::Unsigned, 64);
-    let narrow_plane = CollabShape {
-        int8_plane: 32,
-        ..shape
-    };
-    let no_product = CollabShape { int8: None, ..shape };
-
-    let none_offered = legal_matrix_names(&shape, &without_limits);
-    let offered = legal_matrix_names(&shape, &rdna4);
-    let wrong_plane = legal_matrix_names(&narrow_plane, &rdna4);
-    let unnamed = legal_matrix_names(&no_product, &rdna4);
-
-    let f16_centres = vec!["int_refs16_matrix", "int_refs8x2_matrix"];
-    let with_int8 = vec!["int_refs16_matrix", "int_refs8x2_matrix", "int_refs16_i8"];
-    assert_eq!(none_offered, f16_centres);
-    assert_eq!(offered, with_int8);
-    assert_eq!(wrong_plane, f16_centres);
-    assert_eq!(unnamed, f16_centres);
-}
-
-#[test]
-fn an_int8_shape_needs_the_device_to_run_its_own_product() {
+fn an_int8_product_runs_only_where_the_device_offers_it() {
     let unsigned_config = int8_matrix_config(UNSIGNED_ELEM, UNSIGNED_ELEM, I32_ELEM, 16, 16, 16);
     let unsigned_only = FakeDevice {
         int8_configs: vec![unsigned_config],
         ..FakeDevice::rdna4()
     };
-    let unsigned_limits = unsigned_only.limits();
-    let rdna4 = FakeDevice::rdna4().limits();
-    let signed_shape = int8_search_shape(ChannelMode::Luma, 8, Int8Matrix::Signed, 64);
-    let unsigned_shape = int8_search_shape(ChannelMode::Luma, 8, Int8Matrix::Unsigned, 64);
-
-    let signed_on_unsigned = legal_matrix_names(&signed_shape, &unsigned_limits);
-    let unsigned_on_unsigned = legal_matrix_names(&unsigned_shape, &unsigned_limits);
-    let signed_on_both = legal_matrix_names(&signed_shape, &rdna4);
-
-    let f16_centres = vec!["int_refs16_matrix", "int_refs8x2_matrix"];
-    let with_int8 = vec!["int_refs16_matrix", "int_refs8x2_matrix", "int_refs16_i8"];
-    assert_eq!(signed_on_unsigned, f16_centres);
-    assert_eq!(unsigned_on_unsigned, with_int8);
-    assert_eq!(signed_on_both, with_int8);
-    assert_eq!(rdna4.int8_matrix, Some(Int8Matrix::Unsigned));
-    assert!(rdna4.int8_signed);
-    assert!(!unsigned_limits.int8_signed);
-}
-
-#[test]
-fn matrix_candidates_need_the_config_and_the_widest_plane() {
-    let without_matrix = FakeDevice {
-        matrix_config: None,
+    let without_int8 = FakeDevice {
         int8_configs: Vec::new(),
         ..FakeDevice::rdna4()
     };
-    let without_limits = without_matrix.limits();
+    let unsigned_limits = unsigned_only.limits();
+    let without_limits = without_int8.limits();
     let rdna4 = FakeDevice::rdna4().limits();
-    let at_64 = coded_search_shape(ChannelMode::Luma, 8, 64);
-    let at_32 = coded_search_shape(ChannelMode::Luma, 8, 32);
 
-    let none_offered = legal_matrix_names(&at_64, &without_limits);
-    let narrower = legal_matrix_names(&at_32, &rdna4);
-    let widest = legal_matrix_names(&at_64, &rdna4);
+    let rdna4_unsigned = rdna4.runs_int8_matrix(Int8Matrix::Unsigned);
+    let rdna4_signed = rdna4.runs_int8_matrix(Int8Matrix::Signed);
+    let unsigned_only_unsigned = unsigned_limits.runs_int8_matrix(Int8Matrix::Unsigned);
+    let unsigned_only_signed = unsigned_limits.runs_int8_matrix(Int8Matrix::Signed);
+    let without_unsigned = without_limits.runs_int8_matrix(Int8Matrix::Unsigned);
+    let without_signed = without_limits.runs_int8_matrix(Int8Matrix::Signed);
 
-    assert!(none_offered.is_empty(), "{none_offered:?}");
-    assert!(narrower.is_empty(), "{narrower:?}");
-    assert_eq!(widest, vec!["int_refs16_matrix", "int_refs8x2_matrix"]);
+    assert!(rdna4_unsigned);
+    assert!(rdna4_signed);
+    assert!(unsigned_only_unsigned);
+    assert!(!unsigned_only_signed);
+    assert!(!without_unsigned);
+    assert!(!without_signed);
 }
 
 /// A window shape of `channels` at patch radius 4 and search radius 2, the bench geometry.
