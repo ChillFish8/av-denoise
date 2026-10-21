@@ -13,7 +13,7 @@ use crate::tune::fidelity::{CompareResult, Fidelity, diff_integers, diff_plane};
 use crate::tune::gpu::{bind, read_f32, read_i32, zero_words, zeroed_words};
 use crate::tune::key::{SiteKey, SiteKeyBuilder};
 use crate::tune::site::{LaunchShape, SiteCandidate, VariantSite};
-use crate::tune::{DeviceLimits, IntegerCodes, Legality};
+use crate::tune::{DeviceLimits, Int8Matrix, IntegerCodes, Legality};
 
 /// Group counts per cube, the baseline's first.
 const GROUP_OPTIONS: [u32; 3] = [BASELINE_GROUPS, 4, 16];
@@ -238,6 +238,10 @@ pub struct CollabShape {
     pub codes: Option<IntegerCodes>,
     /// The plane width the matrix candidates run at, 0 when none runs.
     pub matrix_plane: u32,
+    /// The int8 product the int8 matrix candidates run, when one runs.
+    pub int8: Option<Int8Matrix>,
+    /// The plane width the int8 matrix candidates run at, 0 when none runs.
+    pub int8_plane: u32,
 }
 
 /// The fixed-point accumulator rings and group weights `collab_fused` writes.

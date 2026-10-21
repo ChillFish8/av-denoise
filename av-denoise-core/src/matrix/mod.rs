@@ -92,7 +92,11 @@ pub(crate) fn combine_split_dot_i32(
 /// The whole code when the layout does not split, otherwise its high part `code >> low_bits` or
 /// its low part.
 #[cube]
-pub(crate) fn int8_part<E: Int>(code: u32, #[comptime] layout: Int8Layout, #[comptime] high: bool) -> E {
+pub(crate) fn int8_part<E: CubePrimitive>(
+    code: u32,
+    #[comptime] layout: Int8Layout,
+    #[comptime] high: bool,
+) -> E {
     let low_bits = comptime!(layout.low_bits);
     let low_mask = comptime!((1u32 << low_bits) - 1);
     let mut part = code;

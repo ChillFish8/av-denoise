@@ -19,6 +19,7 @@ use av_denoise_core::tune::{
     SiteCandidate,
     VariantSite,
     fit_candidates,
+    int8_matrix_plane_width,
     matrix_plane_width,
 };
 use cubecl::benchmark::Benchmark;
@@ -173,7 +174,8 @@ impl<R: Runtime> CollabSplitBench<R> {
 
     /// The search and filter sites over `input`, sharing its member buffer.
     ///
-    /// With codes the search shape names them and the device's matrix plane, and reads the code ring.
+    /// With codes the search shape names them, the device's matrix planes and its int8 product, and
+    /// reads the code ring.
     fn sites(&self, input: &CollabSplitInput) -> (CollabSearchSite<R, f32>, CollabFilterSite<R>) {
         let fused_bench = self.fused();
         let fused = fused_bench.site(&input.fused);
@@ -187,6 +189,7 @@ impl<R: Runtime> CollabSplitBench<R> {
             Some(code_ring) => {
                 let limits = DeviceLimits::from_client(&self.client);
                 let matrix_plane = matrix_plane_width(&limits).unwrap_or(0);
+                let int8_plane = int8_matrix_plane_width(&limits).unwrap_or(0);
                 let inputs = CollabInputs {
                     codes: code_ring.clone(),
                     codes_len: input.fused.ring_len,
@@ -195,6 +198,8 @@ impl<R: Runtime> CollabSplitBench<R> {
                 let shape = CollabShape {
                     codes: self.codes,
                     matrix_plane,
+                    int8: limits.int8_matrix,
+                    int8_plane,
                     ..fused.shape
                 };
                 (inputs, shape)

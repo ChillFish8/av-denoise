@@ -1,7 +1,7 @@
 use cubecl::server::Handle;
 
 use super::engine::{nl4d_outputs_with, noisy_frames, run_engine_on_planes};
-use super::fixtures::{code_format, upload_codes};
+use super::fixtures::{CollabSpec, code_format, collab_site, integer_split_sites, upload_codes};
 use super::runtime::{TestRuntime, packed_supported, test_client};
 use crate::bench_api::HostIo;
 use crate::collab::needs_warp_uniform_search;
@@ -10,7 +10,17 @@ use crate::nl4d::denoiser::Nl4dDenoiser;
 use crate::nl4d::resolve_params;
 use crate::nlmeans::ChannelMode;
 use crate::tune::sites::{COLLAB_SEARCH, IntegerVariant, SearchVariant};
-use crate::tune::{EngineKernels, IntegerCodes, KernelPlan, KernelSelector, PipelineProfile, SiteCandidate};
+use crate::tune::{
+    DeviceLimits,
+    EngineKernels,
+    IntegerCodes,
+    KernelPlan,
+    KernelSelector,
+    Legality,
+    PipelineProfile,
+    SiteCandidate,
+    VariantSite,
+};
 use crate::{Nl4d, Nl4dOptions};
 
 const WIDTH: u32 = 96;
@@ -140,18 +150,31 @@ fn forced_search(variant: IntegerVariant) -> KernelPlan {
     KernelPlan::baseline().with_site(COLLAB_SEARCH, name)
 }
 
-/// Every built integer search variant that may run on this device.
-fn runnable_integer_variants() -> Vec<IntegerVariant> {
+/// Every integer search variant that is legal on this device for a search of `case`'s geometry and
+/// fits it.
+///
+/// The search is the fixture's at the engine's frame size and default spatial radius, with the
+/// device's matrix planes and int8 product.
+fn runnable_integer_variants(case: &CodeCase) -> Vec<IntegerVariant> {
     let client = test_client();
-    let uniform_only = needs_warp_uniform_search(&client);
+    let limits = DeviceLimits::from_client(&client);
+    let legality = Legality::default();
+    let options = Nl4dOptions::default();
+    let spec = CollabSpec {
+        spatial_radius: options.spatial_radius,
+        ..CollabSpec::new(WIDTH, HEIGHT, case.channels, 1)
+    };
+    let fused = collab_site(&client, &spec);
+    let (search, _) = integer_split_sites(&fused, case.codes);
 
     SearchVariant::ALL
         .iter()
-        .filter_map(|&candidate| match candidate {
+        .copied()
+        .filter(|&candidate| search.fits(candidate, &limits, &legality))
+        .filter_map(|candidate| match candidate {
             SearchVariant::Integer(variant) => Some(variant),
             SearchVariant::Float(_) => None,
         })
-        .filter(|variant| variant.is_built() && variant.runs_where(uniform_only))
         .collect()
 }
 
@@ -367,18 +390,19 @@ fn the_integer_search_profile_runs_the_f32_baseline_when_nothing_is_tuned() {
 #[test]
 fn every_integer_candidate_gives_the_same_frames() {
     let reference = integer_reference();
-    let variants = runnable_integer_variants();
-    let followers: Vec<IntegerVariant> = variants
-        .into_iter()
-        .filter(|&variant| variant != reference)
-        .collect();
-    assert!(
-        !followers.is_empty(),
-        "some integer variant follows the reference"
-    );
 
     for case in code_cases() {
         let label = &case.label;
+        let variants = runnable_integer_variants(&case);
+        let followers: Vec<IntegerVariant> = variants
+            .into_iter()
+            .filter(|&variant| variant != reference)
+            .collect();
+        assert!(
+            !followers.is_empty(),
+            "{label}: some integer variant follows the reference"
+        );
+
         let reference_plan = forced_search(reference);
         let want = code_outputs(PipelineProfile::IntegerSearch, reference_plan, &case);
         assert!(!want.is_empty(), "{label} emits frames");

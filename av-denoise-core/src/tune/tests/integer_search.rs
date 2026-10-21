@@ -59,14 +59,14 @@ fn tiled_variant() -> SearchVariant {
 }
 
 /// The integer reference this device runs, the uniform walk where only it may run.
-fn reference_variant(search: &CollabSearchSite<TestRuntime, f32>) -> SearchVariant {
+pub(super) fn reference_variant(search: &CollabSearchSite<TestRuntime, f32>) -> SearchVariant {
     search
         .integer_reference()
         .expect("a search with codes has an integer reference")
 }
 
 /// Launches `candidate` into fresh outputs and returns them with their words.
-fn run_search(
+pub(super) fn run_search(
     search: &CollabSearchSite<TestRuntime, f32>,
     candidate: SearchVariant,
 ) -> (SearchOutputs, Vec<u32>) {
@@ -81,7 +81,7 @@ fn run_search(
 }
 
 /// The packed top-left of reference `index` in a frame of `spec`.
-fn reference_position(spec: &CollabSpec, index: usize) -> u32 {
+pub(super) fn reference_position(spec: &CollabSpec, index: usize) -> u32 {
     let refs_x = refs_along(spec.width) as usize;
     let column = (index % refs_x) as u32;
     let row = (index / refs_x) as u32;

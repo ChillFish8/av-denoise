@@ -25,7 +25,7 @@ use crate::tune::sites::{
     CollabValues,
     SearchOutputs,
 };
-use crate::tune::{IntegerCodes, matrix_plane_width};
+use crate::tune::{Int8Matrix, IntegerCodes, int8_matrix_plane_width, matrix_plane_width};
 
 /// The per-pass buffers and values `collab_fused` reads beside the denoiser's own state.
 struct FusedPass {
@@ -52,6 +52,8 @@ struct SearchCodes {
     ring: Handle,
     len: usize,
     matrix_plane: u32,
+    int8: Option<Int8Matrix>,
+    int8_plane: u32,
 }
 
 impl<R: Runtime> Nl4dDenoiser<R> {
@@ -360,6 +362,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             packed: self.packed,
             codes: search_codes.codes,
             matrix_plane: search_codes.matrix_plane,
+            int8: search_codes.int8,
+            int8_plane: search_codes.int8_plane,
         };
         let outputs = CollabOutputs {
             accum: self.accum.clone(),
@@ -411,7 +415,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
     /// The code ring the collab search reads, when the denoiser keeps integer codes.
     ///
-    /// The matrix plane is then the device's matrix plane width, or 0 on a device with none.
+    /// The matrix planes and the int8 product are then the device's, or 0 and `None` on a device
+    /// with none.
     fn search_codes(&self, view: &RingView, ring_len: usize, stored_ch: u32) -> SearchCodes {
         let codes = self.integer_codes();
         let code_ring = view.code_input.clone();
@@ -422,17 +427,22 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 ring: view.input.clone(),
                 len: stored_ch as usize,
                 matrix_plane: 0,
+                int8: None,
+                int8_plane: 0,
             };
         };
 
         let limits = self.kernels.limits();
         let plane_width = matrix_plane_width(limits);
+        let int8_plane = int8_matrix_plane_width(limits);
 
         SearchCodes {
             codes: Some(codes),
             ring,
             len: ring_len,
             matrix_plane: plane_width.unwrap_or(0),
+            int8: limits.int8_matrix,
+            int8_plane: int8_plane.unwrap_or(0),
         }
     }
 }

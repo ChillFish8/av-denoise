@@ -18,6 +18,7 @@ mod integer_window;
 mod key;
 mod ledger;
 mod legality;
+mod matrix_search;
 mod packed;
 mod plan;
 mod precompile;

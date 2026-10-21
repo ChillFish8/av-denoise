@@ -2,6 +2,7 @@ use std::marker::PhantomData;
 
 use cubecl::prelude::*;
 use cubecl::server::Handle;
+use half::f16;
 
 use super::collab::{
     CollabInputs,
@@ -29,6 +30,7 @@ use crate::collab::kernels::fused::{
     collab_filter,
     collab_search,
 };
+use crate::collab::kernels::integer::matrix::MatrixRoute;
 use crate::collab::kernels::integer::{
     INTEGER_VARIANT_COUNT,
     INTEGER_VARIANTS,
@@ -40,7 +42,7 @@ use crate::tune::fidelity::{CompareResult, Fidelity, IntegerBound, diff_integers
 use crate::tune::gpu::{bind, read_i32, read_u16, zero_words, zeroed_words};
 use crate::tune::key::SiteKey;
 use crate::tune::site::{LaunchShape, SiteCandidate, VariantSite};
-use crate::tune::{DeviceLimits, IntegerCodes, Legality};
+use crate::tune::{DeviceLimits, Int8Layout, Int8Matrix, IntegerCodes, Legality};
 
 /// The collab search kernel.
 pub const COLLAB_SEARCH: &str = "collab_search";
@@ -427,7 +429,43 @@ impl<R: Runtime, S: Float> CollabSearchSite<R, S> {
     }
 
     /// Launches `collab_search_int` with `variant` over `cube_count` cubes, reading u16 codes.
+    ///
+    /// An int8 variant runs on the shape's int8 product. Every other variant takes f16 operands, f32
+    /// accumulators and a placeholder int8 layout, so the non-matrix variants compile once.
     fn dispatch_integer(&self, variant: IntegerVariant, outputs: &SearchOutputs, cube_count: CubeCount) {
+        let int8 = self.shape.int8.filter(|_| variant.is_int8());
+        let codes = self.shape.codes;
+
+        match (int8, codes) {
+            (Some(element), Some(codes)) => {
+                let layout = Int8Layout::for_codes(element, codes);
+                let int8_plane = self.shape.int8_plane;
+
+                match element {
+                    Int8Matrix::Unsigned => {
+                        self.launch_integer::<u8, i32>(variant, outputs, cube_count, int8_plane, layout);
+                    },
+                    Int8Matrix::Signed => {
+                        self.launch_integer::<i8, i32>(variant, outputs, cube_count, int8_plane, layout);
+                    },
+                }
+            },
+            _ => {
+                let layout = MatrixRoute::PLACEHOLDER_LAYOUT;
+                self.launch_integer::<f16, f32>(variant, outputs, cube_count, 0, layout);
+            },
+        }
+    }
+
+    /// Launches `collab_search_int` with `E` operands and `A` accumulators.
+    fn launch_integer<E: Numeric, A: Numeric>(
+        &self,
+        variant: IntegerVariant,
+        outputs: &SearchOutputs,
+        cube_count: CubeCount,
+        int8_plane: u32,
+        int8: Int8Layout,
+    ) {
         let lanes = variant.lanes();
         let inputs = &self.inputs;
         let values = &self.values;
@@ -443,7 +481,7 @@ impl<R: Runtime, S: Float> CollabSearchSite<R, S> {
         let members = bind::<R>(&outputs.members, words);
 
         unsafe {
-            collab_search_int::launch_unchecked::<u16, R>(
+            collab_search_int::launch_unchecked::<u16, E, A, R>(
                 &self.client,
                 cube_count,
                 cube_dim,
@@ -473,6 +511,8 @@ impl<R: Runtime, S: Float> CollabSearchSite<R, S> {
                 shape.spatial_radius,
                 shape.refs_x,
                 shape.matrix_plane,
+                int8_plane,
+                int8,
                 variant,
             );
         }
@@ -562,12 +602,14 @@ impl<R: Runtime> VariantSite<R> for CollabFilterSite<R> {
 
     /// The exact compile-time shape, which the bucketed key leaves out.
     ///
-    /// The codes and the matrix plane are left out because the filter never reads them, so every
-    /// profile shares one filter identity.
+    /// The codes, the matrix planes and the int8 product are left out because the filter never reads
+    /// them, so every profile shares one filter identity.
     fn compile_identity(&self) -> String {
         let shape = CollabShape {
             codes: None,
             matrix_plane: 0,
+            int8: None,
+            int8_plane: 0,
             ..self.shape
         };
 

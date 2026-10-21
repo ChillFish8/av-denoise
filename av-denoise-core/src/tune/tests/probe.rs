@@ -30,6 +30,7 @@ pub(crate) fn small_device_limits() -> DeviceLimits {
         f16_matrix: false,
         u16_buffer: false,
         int8_matrix: None,
+        int8_signed: false,
     }
 }
 

@@ -123,7 +123,7 @@ fn every_filter_candidate_matches_the_baseline() {
 
 #[test]
 fn split_site_names_round_trip_and_are_known() {
-    assert_eq!(SearchVariant::ALL.len(), 27);
+    assert_eq!(SearchVariant::ALL.len(), 29);
 
     for &variant in SearchVariant::ALL {
         let name = variant.name();

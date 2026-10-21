@@ -73,6 +73,9 @@ pub struct DeviceLimits {
     pub u16_buffer: bool,
     /// The 16x16x16 int8 matrix product the device runs, when its operands also work in shaders.
     pub int8_matrix: Option<Int8Matrix>,
+    /// Whether the device runs the 16x16x16 i8 matrix product with i8 shader arithmetic, whichever
+    /// product it prefers.
+    pub int8_signed: bool,
 }
 
 impl DeviceLimits {
@@ -120,14 +123,16 @@ impl DeviceLimits {
 
         let matrix_configs = &properties.features.matmul.cmma;
         let f16_matrix = offers_f16_matrix(matrix_configs);
-        let int8_matrix = INT8_PREFERENCE.into_iter().find(|&element| {
+        let runs_product = |element: Int8Matrix| {
             let element_type = element.element();
             let storage_type = StorageType::Scalar(element_type);
             let usage = properties.type_usage(storage_type);
             let listed = lists_int8_matrix(matrix_configs, element);
 
             listed && usage.contains(TypeUsage::Arithmetic)
-        });
+        };
+        let int8_matrix = INT8_PREFERENCE.into_iter().find(|&element| runs_product(element));
+        let int8_signed = runs_product(Int8Matrix::Signed);
 
         Self {
             plane_size_min: hardware.plane_size_min,
@@ -142,6 +147,7 @@ impl DeviceLimits {
             f16_matrix,
             u16_buffer: u16_usage.contains(TypeUsage::Buffer),
             int8_matrix,
+            int8_signed,
         }
     }
 
@@ -149,7 +155,16 @@ impl DeviceLimits {
         Self {
             f16_matrix: false,
             int8_matrix: None,
+            int8_signed: false,
             ..self
+        }
+    }
+
+    /// Whether the device runs the int8 matrix product of `element`.
+    pub fn runs_int8_matrix(&self, element: Int8Matrix) -> bool {
+        match element {
+            Int8Matrix::Unsigned => self.int8_matrix == Some(Int8Matrix::Unsigned),
+            Int8Matrix::Signed => self.int8_signed,
         }
     }
 
