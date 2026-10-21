@@ -4,7 +4,7 @@ use crate::collab::supports_f16_search;
 use crate::nl4d::Nl4dDenoiser;
 use crate::nlmeans::ChannelMode;
 use crate::nlmeans::tests::helpers::noisy_field_over;
-use crate::tune::{DeviceLimits, EngineKernels, KernelSelector, Legality, PipelineProfile};
+use crate::tune::{DeviceLimits, EngineKernels, IntegerCodes, KernelSelector, Legality, PipelineProfile};
 
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 64;
@@ -169,6 +169,34 @@ fn the_f32_search_profile_never_enables_the_f16_ring() {
 
     assert!(!denoiser.uses_f16_search());
     assert!(!has_search_ring);
+}
+
+#[test]
+fn integer_search_turns_the_f16_ring_off_and_allocates_members() {
+    let client = make_client();
+    let params = static_clip_params(RADIUS);
+    let kernels = EngineKernels {
+        profile: PipelineProfile::IntegerSearch,
+        ..EngineKernels::default()
+    };
+    let selector = KernelSelector::new(&client, kernels);
+    let codes = IntegerCodes { depth: 8 };
+
+    let mut denoiser = Nl4dDenoiser::<R>::with_kernels(&client, params, WIDTH, HEIGHT, selector)
+        .expect("construction failed");
+    denoiser.enable_integer_search(codes);
+
+    let has_search_ring = denoiser.front_for_test().search_ring().is_some();
+    let has_code_ring = denoiser.front_for_test().code_ring().is_some();
+
+    assert!(!denoiser.uses_f16_search());
+    assert!(!has_search_ring);
+    assert!(
+        denoiser.members.is_some(),
+        "the integer search runs the split layout"
+    );
+    assert_eq!(denoiser.integer_codes(), Some(codes));
+    assert!(has_code_ring);
 }
 
 #[test]

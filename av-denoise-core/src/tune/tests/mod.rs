@@ -1,5 +1,6 @@
 mod accumulate;
 mod budget;
+mod code_ring;
 mod collab;
 mod collab_split;
 mod convergence;

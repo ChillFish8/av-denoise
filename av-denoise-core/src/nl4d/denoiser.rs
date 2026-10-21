@@ -24,7 +24,7 @@ use crate::nlmeans::{
     RingView,
     StrengthMapParams,
 };
-use crate::tune::{KernelSelector, PipelineProfile, check_plane_size};
+use crate::tune::{IntegerCodes, KernelSelector, PipelineProfile, check_plane_size};
 
 /// Which accumulator regions a pass zeroes before scattering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +78,9 @@ pub struct Nl4dDenoiser<R: Runtime> {
     pub(super) k_max: u32,
     /// Whether candidate distances read the f16 search ring.
     pub(super) f16_search: bool,
+    /// The codes the front end's integer code ring holds, set by
+    /// [Nl4dDenoiser::enable_integer_search].
+    pub(super) integer_codes: Option<IntegerCodes>,
     /// Whether the fused kernel may run only its uniform walk.
     pub(super) uniform_walk_only: bool,
     /// Picks the candidate each tunable launch runs.
@@ -85,7 +88,8 @@ pub struct Nl4dDenoiser<R: Runtime> {
     /// The fixed-point scale the cross-frame accumulator ring counts in.
     pub(super) accum_scale: f32,
     /// The groups the collab search writes and the collab filter reads, allocated only under
-    /// [SplitSearch](crate::tune::PipelineProfile::SplitSearch).
+    /// [SplitSearch](crate::tune::PipelineProfile::SplitSearch) and
+    /// [IntegerSearch](crate::tune::PipelineProfile::IntegerSearch).
     pub(super) members: Option<Handle>,
 
     pub(super) group_weight: Handle,
@@ -193,10 +197,11 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
     /// [Nl4dDenoiser::new] with each launch site's candidate picked through `kernels`.
     ///
-    /// The [F32Search](crate::tune::PipelineProfile::F32Search) profile and a legality that forbids
-    /// the f16 search keep the f16 search ring off. The
-    /// [SplitSearch](crate::tune::PipelineProfile::SplitSearch) profile runs the collab search and
-    /// filter as two launches. The
+    /// The [F32Search](crate::tune::PipelineProfile::F32Search) and
+    /// [IntegerSearch](crate::tune::PipelineProfile::IntegerSearch) profiles and a legality that
+    /// forbids the f16 search keep the f16 search ring off. The
+    /// [SplitSearch](crate::tune::PipelineProfile::SplitSearch) and `IntegerSearch` profiles run the
+    /// collab search and filter as two launches. The
     /// [PackedAtomics](crate::tune::PipelineProfile::PackedAtomics) profile packs channel 0 and the
     /// weight into one 64-bit accumulator word where the device and legality allow it. A device with
     /// planes narrower than 8 lanes is an error.
@@ -255,7 +260,11 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
         front.set_shifted_edges(true);
 
-        let profile_allows_f16 = kernels.profile() != PipelineProfile::F32Search;
+        let profile = kernels.profile();
+        let profile_allows_f16 = !matches!(
+            profile,
+            PipelineProfile::F32Search | PipelineProfile::IntegerSearch
+        );
         let legality = *kernels.legality();
         let device_supports_f16 = supports_f16_search(client);
         let f16_search = device_supports_f16 && profile_allows_f16 && legality.f16_search;
@@ -276,7 +285,10 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
         // The search writes every live reference's words before the filter reads them, so the
         // member buffer needs no clearing.
-        let split_search = kernels.profile() == PipelineProfile::SplitSearch;
+        let split_search = matches!(
+            profile,
+            PipelineProfile::SplitSearch | PipelineProfile::IntegerSearch
+        );
         let members = split_search.then(|| {
             let member_bytes = refs * MEMBER_WORDS as usize * size_of::<u32>();
             client.empty(member_bytes)
@@ -305,7 +317,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let zero_curve_bytes = f32::as_bytes(&zero_curve);
         let noise_curve_buf = MirroredBuffer::new(client, zero_curve_bytes);
 
-        let packed_profile = kernels.profile() == PipelineProfile::PackedAtomics;
+        let packed_profile = profile == PipelineProfile::PackedAtomics;
         let packed = packed_profile && legality.packed_atomics && limits.int64_atomic_add;
 
         // `client.empty` memory is not zeroed, so a stream's first pass zeroes the whole ring.
@@ -370,6 +382,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             c_min: params.c_min,
             k_max,
             f16_search,
+            integer_codes: None,
             uniform_walk_only,
             kernels,
             accum_scale,
@@ -471,6 +484,20 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         format: SampleFormat,
     ) -> Result<(), anyhow::Error> {
         self.front.push_planes(planes, format)
+    }
+
+    /// Keeps an integer code copy of the frame ring for the integer search, before the first push.
+    pub(crate) fn enable_integer_search(&mut self, codes: IntegerCodes) {
+        self.integer_codes = Some(codes);
+        self.front.enable_uncompensated_code_ring(codes);
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no integer search candidate reads the codes yet")
+    )]
+    pub(crate) fn integer_codes(&self) -> Option<IntegerCodes> {
+        self.integer_codes
     }
 
     /// A 4-byte handle to bind for planes a kernel never reads.
@@ -629,7 +656,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         self.grain.as_ref().map_or(0, |grain| grain.measured_with_entry())
     }
 
-    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+    #[cfg(test)]
     pub(crate) fn front_for_test(&self) -> &NlmDenoiser<R> {
         &self.front
     }

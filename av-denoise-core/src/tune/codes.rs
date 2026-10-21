@@ -1,4 +1,5 @@
 use super::device::DeviceLimits;
+use super::plan::PipelineProfile;
 use crate::engine::SampleFormat;
 use crate::nlmeans::params::channel_scale_for;
 
@@ -41,6 +42,23 @@ impl IntegerCodes {
             },
             SampleFormat::F32 => None,
         }
+    }
+
+    /// The codes an engine under `profile` keeps an integer ring of, or `None` for no ring.
+    ///
+    /// Only [IntegerSearch](crate::tune::PipelineProfile::IntegerSearch) keeps one, and only for a
+    /// source with codes the device can store.
+    pub fn for_profile(
+        profile: PipelineProfile,
+        format: SampleFormat,
+        limits: &DeviceLimits,
+    ) -> Option<IntegerCodes> {
+        if profile != PipelineProfile::IntegerSearch {
+            return None;
+        }
+
+        let codes = IntegerCodes::from_format(format)?;
+        codes.storable(limits).then_some(codes)
     }
 
     pub fn max_code(self) -> u32 {

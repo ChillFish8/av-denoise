@@ -84,14 +84,17 @@ pub enum PipelineProfile {
     SplitSearch,
     /// One 64-bit atomic per member pixel for the first channel and the weight.
     PackedAtomics,
+    /// The split collab layout with an integer copy of the frame ring for exact patch distances.
+    IntegerSearch,
 }
 
 impl PipelineProfile {
-    pub const ALL: [PipelineProfile; 4] = [
+    pub const ALL: [PipelineProfile; 5] = [
         PipelineProfile::Baseline,
         PipelineProfile::F32Search,
         PipelineProfile::SplitSearch,
         PipelineProfile::PackedAtomics,
+        PipelineProfile::IntegerSearch,
     ];
 
     /// The name the store writes.
@@ -101,6 +104,7 @@ impl PipelineProfile {
             PipelineProfile::F32Search => "f32_search",
             PipelineProfile::SplitSearch => "split_search",
             PipelineProfile::PackedAtomics => "packed_atomics",
+            PipelineProfile::IntegerSearch => "integer_search",
         }
     }
 

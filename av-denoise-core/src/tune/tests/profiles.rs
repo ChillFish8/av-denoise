@@ -164,4 +164,7 @@ fn profile_names_round_trip_with_the_new_profiles() {
 
     assert!(PipelineProfile::ALL.contains(&PipelineProfile::SplitSearch));
     assert!(PipelineProfile::ALL.contains(&PipelineProfile::PackedAtomics));
+    assert!(PipelineProfile::ALL.contains(&PipelineProfile::IntegerSearch));
+    assert_eq!(PipelineProfile::IntegerSearch.name(), "integer_search");
+    assert_eq!(PipelineProfile::ALL.len(), 5);
 }

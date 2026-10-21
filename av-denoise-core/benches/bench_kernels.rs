@@ -12,6 +12,7 @@ use clap::Parser;
 use cubecl::prelude::*;
 use kernels::accumulate::AccumulateBench;
 use kernels::bilateral::BilateralBench;
+use kernels::cast_codes::CastCodesBench;
 use kernels::cast_f16::CastF16Bench;
 use kernels::collab_aggregate::{CollabNormaliseBench, CollabZeroAccumBench};
 use kernels::collab_fused::{CollabFusedBench, fitted_variants};
@@ -69,6 +70,17 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
             channels,
             channel_name,
         });
+    }
+
+    for depth in [8, 10] {
+        for &(channels, channel_name) in CHANNELS {
+            run(CastCodesBench {
+                client: client.clone(),
+                channels,
+                channel_name,
+                depth,
+            });
+        }
     }
 
     let ingest_cases = [

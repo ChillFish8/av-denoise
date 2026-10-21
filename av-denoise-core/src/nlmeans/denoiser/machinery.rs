@@ -17,6 +17,9 @@ pub(crate) struct RingView {
     pub input: Handle,
     /// The f16 search ring, when the denoiser has one.
     pub search_input: Option<Handle>,
+    /// The u16 integer code ring, when the denoiser has one.
+    #[expect(dead_code, reason = "no integer search candidate reads the code ring yet")]
+    pub code_input: Option<Handle>,
     /// Chained motion fields, one per neighbour.
     pub mv_field: Handle,
     /// Per-block confidence, one plane per neighbour.
@@ -96,10 +99,13 @@ impl<R: Runtime> NlmDenoiser<R> {
         let mv_stride = motion_ctx.mv_stride();
         let conf_stride = motion_ctx.conf_stride();
         let neighbour_slots_buf = self.neighbour_slots_handle();
+        let code_ring = self.code_ring();
+        let code_input = code_ring.map(|(handle, _)| handle.clone());
 
         let view = RingView {
             input: self.input_buf.clone(),
             search_input: self.search_buf.clone(),
+            code_input,
             mv_field,
             confidence,
             centre_slot,
