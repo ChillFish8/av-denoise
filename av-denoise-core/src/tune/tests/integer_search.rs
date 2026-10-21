@@ -1,3 +1,8 @@
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use cubecl::prelude::*;
+
 use super::corpus::{integer_corpus, is_flat_case};
 use super::fixtures::{CollabSpec, collab_site, collab_site_with_ring, integer_split_sites, split_sites};
 use super::runtime::{TestRuntime, test_client};
@@ -15,7 +20,22 @@ use crate::tune::sites::{
     SearchOutputs,
     SearchVariant,
 };
-use crate::tune::{Fidelity, IntegerCodes, SiteCandidate, VariantSite};
+use crate::tune::{
+    CompareResult,
+    DeviceLimits,
+    EngineKernels,
+    Fidelity,
+    IntegerCodes,
+    KernelSelector,
+    LaunchShape,
+    Legality,
+    SiteCandidate,
+    SiteKey,
+    TuneLedger,
+    TunePhase,
+    VariantSite,
+    legal_candidates,
+};
 
 const EIGHT_BIT: IntegerCodes = IntegerCodes { depth: 8 };
 const TEN_BIT: IntegerCodes = IntegerCodes { depth: 10 };
@@ -514,5 +534,223 @@ fn the_integer_reference_follows_the_walk_the_device_allows() {
         assert_eq!(expected.centre, IntCentre::Scalar);
         assert_eq!(expected.neighbour, IntNeighbour::Scalar);
         assert_eq!((expected.cube_refs_x, expected.ref_rows), (8, 1));
+    }
+}
+
+/// One output check a tuning pass ran, with the candidate launched just before it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SearchCheck {
+    candidate: SearchVariant,
+    fidelity: Fidelity,
+    passed: bool,
+}
+
+/// The integer search site with its pre-screen off, logging every output check a tune runs.
+///
+/// Each check clears, launches and then compares, so the candidate launched last is the one checked.
+/// With no pre-screen every compiled candidate is checked, however slow it is under load.
+#[derive(Clone)]
+struct CheckedSearchSite {
+    inner: CollabSearchSite<TestRuntime, f32>,
+    last_launch: Arc<Mutex<Option<SearchVariant>>>,
+    checks: Arc<Mutex<Vec<SearchCheck>>>,
+}
+
+impl CheckedSearchSite {
+    fn new(inner: CollabSearchSite<TestRuntime, f32>) -> Self {
+        Self {
+            inner,
+            last_launch: Arc::default(),
+            checks: Arc::default(),
+        }
+    }
+
+    fn checks(&self) -> Vec<SearchCheck> {
+        let checks = self.checks.lock().expect("the check log is not poisoned");
+        checks.clone()
+    }
+}
+
+impl VariantSite<TestRuntime> for CheckedSearchSite {
+    type Candidate = SearchVariant;
+    type Outputs = SearchOutputs;
+
+    const COPIES: bool = true;
+
+    fn client(&self) -> &ComputeClient<TestRuntime> {
+        self.inner.client()
+    }
+
+    fn key(&self) -> SiteKey {
+        self.inner.key()
+    }
+
+    fn shape(&self, candidate: SearchVariant) -> LaunchShape {
+        self.inner.shape(candidate)
+    }
+
+    fn shared_bytes(&self, candidate: SearchVariant) -> usize {
+        self.inner.shared_bytes(candidate)
+    }
+
+    fn min_plane_size(&self, candidate: SearchVariant) -> u32 {
+        self.inner.min_plane_size(candidate)
+    }
+
+    fn launch(&self, candidate: SearchVariant, outputs: &SearchOutputs) {
+        {
+            let mut last_launch = self.last_launch.lock().expect("the launch log is not poisoned");
+            *last_launch = Some(candidate);
+        }
+
+        self.inner.launch(candidate, outputs);
+    }
+
+    fn real_outputs(&self) -> SearchOutputs {
+        self.inner.real_outputs()
+    }
+
+    fn scratch_outputs(&self) -> SearchOutputs {
+        self.inner.scratch_outputs()
+    }
+
+    fn clear_outputs(&self, outputs: &SearchOutputs) {
+        self.inner.clear_outputs(outputs);
+    }
+
+    fn compile_identity(&self) -> String {
+        self.inner.compile_identity()
+    }
+
+    fn on_client(&self, client: &ComputeClient<TestRuntime>) -> Option<Self> {
+        let inner = self.inner.on_client(client)?;
+
+        Some(Self {
+            inner,
+            ..self.clone()
+        })
+    }
+
+    fn compile_only(&self, candidate: SearchVariant, outputs: &SearchOutputs) {
+        self.inner.compile_only(candidate, outputs);
+    }
+
+    fn compare(
+        &self,
+        baseline: &SearchOutputs,
+        candidate: &SearchOutputs,
+        fidelity: Fidelity,
+    ) -> Result<CompareResult, anyhow::Error> {
+        let verdict = self.inner.compare(baseline, candidate, fidelity)?;
+        let last_launch = *self.last_launch.lock().expect("the launch log is not poisoned");
+        let checked = last_launch.expect("a check follows a launch");
+        let check = SearchCheck {
+            candidate: checked,
+            fidelity,
+            passed: verdict.passed(),
+        };
+
+        {
+            let mut checks = self.checks.lock().expect("the check log is not poisoned");
+            checks.push(check);
+        }
+
+        Ok(verdict)
+    }
+
+    fn baseline(&self) -> SearchVariant {
+        self.inner.baseline()
+    }
+
+    fn integer_reference(&self) -> Option<SearchVariant> {
+        self.inner.integer_reference()
+    }
+
+    fn legal(&self, candidate: SearchVariant, limits: &DeviceLimits, legality: &Legality) -> bool {
+        self.inner.legal(candidate, limits, legality)
+    }
+
+    fn fits(&self, candidate: SearchVariant, limits: &DeviceLimits, legality: &Legality) -> bool {
+        self.inner.fits(candidate, limits, legality)
+    }
+}
+
+/// Tunes the key of `site` once and returns the candidates the selector allowed it.
+fn tune_search(site: &CheckedSearchSite) -> Vec<SearchVariant> {
+    let client = test_client();
+    let limits = DeviceLimits::from_client(&client);
+    let ledger = TuneLedger::new(false);
+    ledger.set_phase(TunePhase::Tune);
+
+    let key = site.key();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    ledger.set_target(key, deadline);
+
+    let kernels = EngineKernels {
+        ledger: Some(ledger),
+        ..EngineKernels::default()
+    };
+    let selector = KernelSelector::with_limits(&client, kernels, limits);
+    let site_limits = selector.limits();
+    let legality = selector.legality();
+    let allowed = legal_candidates(site, site_limits, legality).expect("the baseline fits");
+    selector.run(site).expect("the tuned run succeeds");
+
+    allowed
+}
+
+#[test]
+fn tuning_the_integer_search_checks_the_reference_then_every_follower() {
+    let client = test_client();
+    let spec = CollabSpec::new(96, 64, ChannelMode::Yuv, 1);
+    let fused = collab_site(&client, &spec);
+
+    for codes in [EIGHT_BIT, TEN_BIT] {
+        let depth = codes.depth;
+        let (search, _) = integer_split_sites(&fused, codes);
+        let reference = reference_variant(&search);
+        let site = CheckedSearchSite::new(search);
+
+        let allowed = tune_search(&site);
+        let checks = site.checks();
+        let followers: Vec<SearchVariant> = allowed
+            .iter()
+            .copied()
+            .filter(|&candidate| matches!(candidate, SearchVariant::Integer(_)) && candidate != reference)
+            .collect();
+        assert!(allowed.contains(&reference), "{depth}-bit: {allowed:?}");
+        assert!(!followers.is_empty(), "{depth}-bit: {allowed:?}");
+
+        let reference_check = SearchCheck {
+            candidate: reference,
+            fidelity: reference.fidelity(),
+            passed: true,
+        };
+        let reference_position = checks.iter().position(|check| *check == reference_check);
+        let reference_index = reference_position.expect("the reference passes its tie-bound check");
+
+        for follower in followers {
+            let follower_check = SearchCheck {
+                candidate: follower,
+                fidelity: Fidelity::Exact,
+                passed: true,
+            };
+            let follower_position = checks.iter().position(|check| *check == follower_check);
+            let Some(follower_index) = follower_position else {
+                panic!(
+                    "{depth}-bit {} never passed against the reference: {checks:?}",
+                    follower.name()
+                );
+            };
+
+            assert!(
+                follower_index > reference_index,
+                "{depth}-bit {}: {checks:?}",
+                follower.name()
+            );
+        }
+
+        let failed: Vec<&SearchCheck> = checks.iter().filter(|check| !check.passed).collect();
+        assert!(failed.is_empty(), "{depth}-bit: {failed:?}");
     }
 }

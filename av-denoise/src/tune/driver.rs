@@ -40,7 +40,7 @@ use super::setup::KernelSetup;
 use super::store::TuneStore;
 use super::{reload, remember, resolve};
 use crate::backend::selected_device;
-use crate::host::Algorithm;
+use crate::host::{Algorithm, Depth};
 use crate::planar::{
     FrameLayout,
     PlanarDenoiser,
@@ -589,8 +589,14 @@ fn drive_until_settled(
 
 /// The profiles worth comparing with the baseline for this denoiser on `device`.
 ///
-/// Every profile here differs from the baseline on this device. NLMeans has none.
-pub(crate) fn alternative_profiles_for(is_nl4d: bool, device: &DeviceProfile) -> Vec<PipelineProfile> {
+/// Every profile here differs from the baseline on this device for a `depth` source. NLMeans has
+/// none.
+pub(crate) fn alternative_profiles_for(
+    algorithm: &Algorithm,
+    depth: Depth,
+    device: &DeviceProfile,
+) -> Vec<PipelineProfile> {
+    let is_nl4d = matches!(algorithm, Algorithm::Nl4d(_));
     if !is_nl4d {
         return Vec::new();
     }
@@ -608,15 +614,27 @@ pub(crate) fn alternative_profiles_for(is_nl4d: bool, device: &DeviceProfile) ->
         profiles.push(PipelineProfile::PackedAtomics);
     }
 
+    if integer_search_applies(depth, device) {
+        profiles.push(PipelineProfile::IntegerSearch);
+    }
+
     profiles
 }
 
+/// Whether a `depth` source has codes the device can keep an integer copy of.
+fn integer_search_applies(depth: Depth, device: &DeviceProfile) -> bool {
+    let has_codes = matches!(depth, Depth::Eight | Depth::Ten);
+
+    has_codes && device.limits.u16_buffer
+}
+
 fn alternative_profiles(planar: &PlanarDenoiser) -> Vec<PipelineProfile> {
-    let is_nl4d = matches!(planar.options().algorithm, Algorithm::Nl4d(_));
+    let algorithm = &planar.options().algorithm;
+    let layout = planar.layout();
     let hosts = planar.hosts();
     let device = hosts[0].device_profile();
 
-    alternative_profiles_for(is_nl4d, device)
+    alternative_profiles_for(algorithm, layout.depth, device)
 }
 
 /// Whether `F32Search` differs from the baseline, which needs nl4d and a legal f16 search.

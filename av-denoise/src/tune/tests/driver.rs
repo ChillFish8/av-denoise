@@ -365,7 +365,7 @@ fn an_nl4d_pass_records_a_ranking_for_every_plane() {
     let device = selected_device(&plane_options.accelerators, &plane_options.device).expect("a device");
     let store = TuneStore::open_default().expect("the cache is installed");
     let stored = store.load(&device.identity);
-    let alternatives = alternative_profiles_for(true, &device);
+    let alternatives = alternative_profiles_for(&plane_options.algorithm, frame_layout.depth, &device);
     let pooled_blocks = PROFILE_MIN_BLOCKS * alternatives.len();
     let profile_keys = plane_profile_keys(&plane_options, frame_layout);
 

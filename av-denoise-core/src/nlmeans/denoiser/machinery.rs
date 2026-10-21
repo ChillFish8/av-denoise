@@ -18,7 +18,6 @@ pub(crate) struct RingView {
     /// The f16 search ring, when the denoiser has one.
     pub search_input: Option<Handle>,
     /// The u16 integer code ring, when the denoiser has one.
-    #[expect(dead_code, reason = "the pipeline does not read the code ring yet")]
     pub code_input: Option<Handle>,
     /// Chained motion fields, one per neighbour.
     pub mv_field: Handle,

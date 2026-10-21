@@ -492,10 +492,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         self.front.enable_uncompensated_code_ring(codes);
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the pipeline does not read the codes yet")
-    )]
     pub(crate) fn integer_codes(&self) -> Option<IntegerCodes> {
         self.integer_codes
     }

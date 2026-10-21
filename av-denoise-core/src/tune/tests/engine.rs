@@ -66,11 +66,29 @@ pub(crate) fn run_engine(
     height: u32,
     frames: &[Vec<Vec<f32>>],
 ) -> Result<Vec<Vec<f32>>, anyhow::Error> {
-    let planes = frames.first().map_or(0, Vec::len);
-    let mut outputs = Vec::new();
+    let mut uploaded = Vec::with_capacity(frames.len());
 
     for frame in frames {
         let handles: Vec<Handle> = frame.iter().map(|plane| upload(client, plane)).collect();
+        uploaded.push(handles);
+    }
+
+    run_engine_on_planes(client, engine, width, height, &uploaded)
+}
+
+/// Pushes frames already on the device through `engine` and returns every frame it emits as f32,
+/// planes flattened.
+pub(crate) fn run_engine_on_planes(
+    client: &ComputeClient<TestRuntime>,
+    engine: &mut dyn Engine,
+    width: u32,
+    height: u32,
+    frames: &[Vec<Handle>],
+) -> Result<Vec<Vec<f32>>, anyhow::Error> {
+    let planes = frames.first().map_or(0, Vec::len);
+    let mut outputs = Vec::new();
+
+    for handles in frames {
         let device_planes: Vec<DevicePlane<'_>> = handles
             .iter()
             .map(|handle| DevicePlane::new(handle, width, height))

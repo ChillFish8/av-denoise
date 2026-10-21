@@ -1,7 +1,9 @@
+use av_denoise_core::Nl4dOptions;
 use av_denoise_core::tune::{DeviceIdentity, DeviceLimits, DeviceProfile, PipelineProfile};
 
 use crate::tune::driver::{alternative_profiles_for, f32_profile_applies};
 use crate::tune::{KernelRequest, KernelSetup, TuningMode, engine_kernels};
+use crate::{Algorithm, Depth};
 
 #[test]
 fn tuning_off_still_applies_the_legality_rules() {
@@ -46,9 +48,11 @@ fn the_f32_profile_applies_to_nl4d_where_f16_is_legal() {
 #[test]
 fn only_nl4d_has_alternative_profiles() {
     let device = r9700_profile();
+    let nlmeans_algorithm = Algorithm::default();
+    let nl4d_algorithm = nl4d();
 
-    let nlmeans = alternative_profiles_for(false, &device);
-    let nl4d = alternative_profiles_for(true, &device);
+    let nlmeans = alternative_profiles_for(&nlmeans_algorithm, Depth::Eight, &device);
+    let nl4d = alternative_profiles_for(&nl4d_algorithm, Depth::Eight, &device);
 
     assert!(nlmeans.is_empty());
     assert!(nl4d.contains(&PipelineProfile::SplitSearch));
@@ -58,8 +62,9 @@ fn only_nl4d_has_alternative_profiles() {
 #[test]
 fn a_device_with_illegal_f16_is_not_offered_the_f32_profile() {
     let device = pascal_vulkan_profile();
+    let algorithm = nl4d();
 
-    let profiles = alternative_profiles_for(true, &device);
+    let profiles = alternative_profiles_for(&algorithm, Depth::Eight, &device);
 
     assert!(!profiles.contains(&PipelineProfile::F32Search));
     assert!(profiles.contains(&PipelineProfile::SplitSearch));
@@ -70,12 +75,65 @@ fn packed_atomics_are_offered_only_where_legal() {
     let capable = r9700_profile();
     let mut incapable = r9700_profile();
     incapable.limits.int64_atomic_add = false;
+    let algorithm = nl4d();
 
-    let offered = alternative_profiles_for(true, &capable);
-    let withheld = alternative_profiles_for(true, &incapable);
+    let offered = alternative_profiles_for(&algorithm, Depth::Eight, &capable);
+    let withheld = alternative_profiles_for(&algorithm, Depth::Eight, &incapable);
 
     assert!(offered.contains(&PipelineProfile::PackedAtomics));
     assert!(!withheld.contains(&PipelineProfile::PackedAtomics));
+}
+
+#[test]
+fn integer_search_is_offered_only_for_eight_and_ten_bit_sources() {
+    let device = r9700_profile();
+    let nl4d_algorithm = nl4d();
+    let nlmeans_algorithm = Algorithm::default();
+
+    for depth in [Depth::Eight, Depth::Ten] {
+        let profiles = alternative_profiles_for(&nl4d_algorithm, depth, &device);
+        let last = profiles.last().copied();
+
+        assert_eq!(
+            last,
+            Some(PipelineProfile::IntegerSearch),
+            "{depth:?}: {profiles:?}"
+        );
+    }
+
+    let twelve_bit = alternative_profiles_for(&nl4d_algorithm, Depth::Twelve, &device);
+    assert!(
+        !twelve_bit.contains(&PipelineProfile::IntegerSearch),
+        "{twelve_bit:?}"
+    );
+
+    for depth in [Depth::Eight, Depth::Ten, Depth::Twelve] {
+        let nlmeans = alternative_profiles_for(&nlmeans_algorithm, depth, &device);
+
+        assert!(nlmeans.is_empty(), "{depth:?}: {nlmeans:?}");
+    }
+}
+
+#[test]
+fn integer_search_needs_the_code_storage_type() {
+    let mut device = r9700_profile();
+    device.limits.u16_buffer = false;
+    let algorithm = nl4d();
+
+    for depth in [Depth::Eight, Depth::Ten] {
+        let profiles = alternative_profiles_for(&algorithm, depth, &device);
+
+        assert!(
+            !profiles.contains(&PipelineProfile::IntegerSearch),
+            "{depth:?}: {profiles:?}"
+        );
+        assert!(profiles.contains(&PipelineProfile::SplitSearch), "{depth:?}");
+    }
+}
+
+fn nl4d() -> Algorithm {
+    let options = Nl4dOptions::default();
+    Algorithm::Nl4d(options)
 }
 
 /// An AMD Radeon AI PRO R9700 under Vulkan.
