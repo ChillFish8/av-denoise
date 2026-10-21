@@ -1,4 +1,4 @@
-use crate::collab::kernels::fused::{GROUP_LANES, Walk};
+use crate::collab::kernels::fused::{GROUP_LANES, Walk, tile_height, tile_width};
 
 /// How the integer centre search scores its candidates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -45,7 +45,23 @@ impl IntegerVariant {
 
     /// Whether `collab_search_int` builds this variant.
     pub fn is_built(self) -> bool {
-        self.centre == IntCentre::Scalar && self.neighbour == IntNeighbour::Scalar
+        let tiled_built = self.centre == IntCentre::Tiled && self.ref_rows == 1;
+        let centre_built = self.centre == IntCentre::Scalar || tiled_built;
+        centre_built && self.neighbour == IntNeighbour::Scalar
+    }
+
+    /// Codes in the centre tile, one per summed channel per pixel.
+    ///
+    /// Centres other than [IntCentre::Tiled](crate::collab::kernels::integer::IntCentre::Tiled)
+    /// keep a one-element placeholder, so every variant shares one kernel body.
+    pub fn tile_elements(self, spatial_radius: u32, channels: u32) -> u32 {
+        if self.centre != IntCentre::Tiled {
+            return 1;
+        }
+
+        let width = tile_width(self.cube_refs_x, spatial_radius);
+        let height = tile_height(spatial_radius);
+        width * height * channels
     }
 
     /// The scalar variant at the baseline's cube shape, with the uniform walk where `uniform_only` is

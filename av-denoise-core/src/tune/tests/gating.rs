@@ -18,6 +18,7 @@ use crate::tune::sites::{
     CollabShape,
     CollabVariant,
     FLOAT_SEARCH_COUNT,
+    IntCentre,
     IntegerVariant,
     SearchVariant,
     Walk,
@@ -318,6 +319,37 @@ fn integer_search(walk: Walk) -> SearchVariant {
     SearchVariant::Integer(variant)
 }
 
+fn integer_tiled_search() -> SearchVariant {
+    let variant = IntegerVariant {
+        centre: IntCentre::Tiled,
+        ..IntegerVariant::reference_for(false)
+    };
+
+    SearchVariant::Integer(variant)
+}
+
+#[test]
+fn the_integer_tile_counts_four_bytes_per_code() {
+    let eight_bit = Some(IntegerCodes { depth: 8 });
+    let tiled = integer_tiled_search();
+
+    // A yuv pixel stores 4 lanes, but the tile packs only the 3 the distance sums.
+    let cases = [
+        (ChannelMode::Luma, 5616),
+        (ChannelMode::Chroma, 11232),
+        (ChannelMode::Yuv, 16848),
+    ];
+    for (mode, expected) in cases {
+        let mut shape = search_shape(eight_bit, 64);
+        shape.channels = mode.count();
+        shape.stored_ch = mode.storage_count();
+
+        let float_bytes = size_of::<f32>();
+        let bytes = search_shared_bytes(tiled, &shape, float_bytes);
+        assert_eq!(bytes, expected, "{mode:?}");
+    }
+}
+
 #[test]
 fn integer_search_candidates_are_legal_only_with_codes() {
     let legality = Legality::default();
@@ -334,16 +366,17 @@ fn integer_search_candidates_are_legal_only_with_codes() {
     let baseline = SearchVariant::Float(CollabVariant::BASELINE);
     let clipped = integer_search(Walk::Clipped);
     let uniform = integer_search(Walk::Uniform);
+    let integer_tiled = integer_tiled_search();
     let integer_route = legal_searches(&with_codes, &legality);
-    assert_eq!(integer_route, vec![baseline, clipped, uniform]);
+    assert_eq!(integer_route, vec![baseline, clipped, uniform, integer_tiled]);
 
     let search_bytes = size_of::<f32>();
-    for candidate in [baseline, clipped, uniform] {
+    for candidate in [baseline, clipped, uniform, integer_tiled] {
         let fits = search_candidate_fits(candidate, &with_codes, &rdna4, &legality, search_bytes);
         assert!(fits, "{candidate:?}");
     }
 
-    // The integer placeholder is one u32. The untiled float baseline's is one f32 tile value.
+    // The integer placeholder is one i32 code. The untiled float baseline's is one f32 tile value.
     let integer_bytes = search_shared_bytes(clipped, &with_codes, search_bytes);
     let baseline_bytes = search_shared_bytes(baseline, &with_codes, search_bytes);
     assert_eq!(integer_bytes, size_of::<u32>());

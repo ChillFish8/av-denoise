@@ -39,15 +39,18 @@ pub fn search_candidate_legal(
 /// The bytes of every shared buffer `candidate` allocates, with float tiles of `search_bytes`
 /// bytes per value.
 ///
-/// A float variant allocates its centre tile. A scalar integer variant counts a one-element
-/// placeholder.
+/// A float variant allocates its centre tile. An integer variant allocates its tile of i32 codes,
+/// one per summed channel, or a one-code placeholder.
 pub fn search_shared_bytes(candidate: SearchVariant, shape: &CollabShape, search_bytes: usize) -> usize {
     match candidate {
         SearchVariant::Float(variant) => {
             let tile_elements = variant.tile_elements(shape.spatial_radius, shape.stored_ch);
             tile_elements as usize * search_bytes
         },
-        SearchVariant::Integer(_) => size_of::<u32>(),
+        SearchVariant::Integer(variant) => {
+            let tile_elements = variant.tile_elements(shape.spatial_radius, shape.channels);
+            tile_elements as usize * size_of::<i32>()
+        },
     }
 }
 

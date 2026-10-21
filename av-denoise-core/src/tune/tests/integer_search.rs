@@ -29,6 +29,15 @@ fn integer_variant(walk: Walk) -> SearchVariant {
     SearchVariant::Integer(variant)
 }
 
+fn tiled_variant() -> SearchVariant {
+    let variant = IntegerVariant {
+        centre: IntCentre::Tiled,
+        ..IntegerVariant::reference_for(false)
+    };
+
+    SearchVariant::Integer(variant)
+}
+
 /// The integer reference this device runs, the uniform walk where only it may run.
 fn reference_variant(search: &CollabSearchSite<TestRuntime, f32>) -> SearchVariant {
     search
@@ -167,6 +176,31 @@ fn the_uniform_scalar_walk_matches_the_clipped_one_bitwise() {
                 .compare(&clipped_outputs, &uniform_outputs, Fidelity::Exact)
                 .expect("the outputs read back");
             assert!(verdict.passed(), "{label}: {verdict:?}");
+        }
+    }
+}
+
+#[test]
+fn the_integer_tile_matches_scalar_int_bitwise() {
+    let client = test_client();
+    let scalar = integer_variant(Walk::Clipped);
+    let tiled = tiled_variant();
+
+    for depth in [8u32, 10] {
+        let codes = IntegerCodes { depth };
+
+        for case in integer_corpus(depth) {
+            let label = format!("{} {depth}-bit", case.label);
+            let fused = collab_site_with_ring(&client, &case.spec, &case.ring);
+            let (search, _) = integer_split_sites(&fused, codes);
+            let (scalar_outputs, scalar_words) = run_search(&search, scalar);
+            let (tiled_outputs, tiled_words) = run_search(&search, tiled);
+
+            let verdict = search
+                .compare(&scalar_outputs, &tiled_outputs, Fidelity::Exact)
+                .expect("the outputs read back");
+            assert!(verdict.passed(), "{label}: {verdict:?}");
+            assert_eq!(scalar_words, tiled_words, "{label}: member words");
         }
     }
 }
@@ -340,7 +374,7 @@ fn host_volume_frames(
 }
 
 #[test]
-fn both_scalar_walks_keep_the_host_trajectory_frames() {
+fn the_scalar_walks_and_the_tile_keep_the_host_trajectory_frames() {
     let client = test_client();
 
     for depth in [8u32, 10] {
@@ -364,9 +398,14 @@ fn both_scalar_walks_keep_the_host_trajectory_frames() {
                 neighbour_slots: &host.neighbour_slots,
             };
 
-            for walk in [Walk::Clipped, Walk::Uniform] {
-                let label = format!("{} {depth}-bit {walk:?}", case.label);
-                let variant = integer_variant(walk);
+            let variants = [
+                integer_variant(Walk::Clipped),
+                integer_variant(Walk::Uniform),
+                tiled_variant(),
+            ];
+            for variant in variants {
+                let name = variant.name();
+                let label = format!("{} {depth}-bit {name}", case.label);
                 let (_, words) = run_search(&search, variant);
                 let groups = words.chunks(MEMBER_WORDS as usize).enumerate();
                 let grid_groups = groups.filter(|(_, group)| group[MAX_K as usize] & GROUP_USES_GRID != 0);

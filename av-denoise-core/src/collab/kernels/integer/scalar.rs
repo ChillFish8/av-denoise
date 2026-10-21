@@ -1,8 +1,7 @@
 use cubecl::prelude::*;
 
-use super::{IntCursor, IntShape};
+use super::{IntCentre, IntCursor, IntShape, IntegerVariant};
 use crate::collab::PATCH_SIZE;
-use crate::collab::kernels::fused::Walk;
 use crate::collab::kernels::fused::centre::SearchRect;
 use crate::collab::kernels::fused::trajectory::{
     covering_lo,
@@ -11,6 +10,7 @@ use crate::collab::kernels::fused::trajectory::{
     row_held_columns,
     row_spans,
 };
+use crate::collab::kernels::fused::{Walk, tile_width};
 use crate::collab::kernels::group::{clamp_top_left, pack_pos_t};
 use crate::collab::kernels::plane_ops::{
     SELF_MATCH_SSD,
@@ -87,6 +87,109 @@ pub(crate) fn int_candidate_ssd<C: Int, N: Size>(
     plane_ssd_reduce8_int(partial)
 }
 
+/// Loads the cube's centre tile, `tile_width` by `tile_height` pixels from `(origin_x, origin_y)`.
+///
+/// Pixels are row-major with the summed channels interleaved, each read clamped to the frame.
+/// Every lane of the cube loads a strided share, and the caller syncs the cube before any lane
+/// reads the tile.
+#[cube]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a buffer, position or comptime shape the load needs"
+)]
+pub(crate) fn load_int_centre_tile<C: Int, N: Size>(
+    codes: &Array<Vector<C, N>>,
+    tile: &mut SharedMemory<i32>,
+    origin_x: u32,
+    origin_y: u32,
+    centre_slot: u32,
+    #[comptime] tile_width: u32,
+    #[comptime] tile_height: u32,
+    #[comptime] lanes: u32,
+    #[comptime] shape: IntShape,
+) {
+    let width = comptime!(shape.width);
+    let height = comptime!(shape.height);
+    let channels = comptime!(shape.channels);
+    let pixels = comptime!(tile_width * tile_height);
+    let last_x = comptime!(width - 1);
+    let last_y = comptime!(height - 1);
+    let mut index = UNIT_POS_X;
+
+    while index < pixels {
+        let tile_x = index % tile_width;
+        let tile_y = index / tile_width;
+        let source_x = u32::min(origin_x + tile_x, last_x);
+        let source_y = u32::min(origin_y + tile_y, last_y);
+        let source = (centre_slot * height + source_y) * width + source_x;
+        let pixel = codes[source as usize];
+        let first_lane = index * channels;
+
+        #[unroll]
+        for c in 0..channels {
+            tile[(first_lane + c) as usize] = i32::cast_from(pixel[c as usize]);
+        }
+
+        index += lanes;
+    }
+}
+
+/// One lane's share of the SSD to the candidate whose column `column` and top row `row` sit in
+/// the tile.
+///
+/// It reads the same codes in the same order as [int_candidate_ssd] does before its reduction.
+#[cube]
+pub(crate) fn int_tile_partial(
+    tile: &SharedMemory<i32>,
+    current: &Array<i32>,
+    column: u32,
+    row: u32,
+    #[comptime] tile_width: u32,
+    #[comptime] channels: u32,
+) -> i32 {
+    let mut partial = 0i32;
+
+    #[unroll]
+    for r in 0..PATCH_SIZE {
+        let first_lane = ((row + r) * tile_width + column) * channels;
+        #[unroll]
+        for c in 0..channels {
+            let code = tile[(first_lane + c) as usize];
+            let diff = current[(r * channels + c) as usize] - code;
+            partial += diff * diff;
+        }
+    }
+
+    partial
+}
+
+/// The exact SSD to the centre candidate with top-left `(x, y)`, read from the tile when the
+/// variant has one and from the code ring otherwise.
+///
+/// Every lane of the group must call it, even when the result is discarded.
+#[cube]
+pub(crate) fn int_centre_ssd<C: Int, N: Size>(
+    codes: &Array<Vector<C, N>>,
+    tile: &SharedMemory<i32>,
+    current: &Array<i32>,
+    x: u32,
+    y: u32,
+    cursor: &IntCursor,
+    #[comptime] variant: IntegerVariant,
+    #[comptime] shape: IntShape,
+) -> i32 {
+    if comptime!(variant.centre == IntCentre::Tiled) {
+        let tile_w = comptime!(tile_width(variant.cube_refs_x, shape.spatial_radius));
+        let channels = comptime!(shape.channels);
+        let column = x - cursor.tile_x0 + cursor.sub;
+        let row = y - cursor.tile_y0;
+        let partial = int_tile_partial(tile, current, column, row, tile_w, channels);
+        plane_ssd_reduce8_int(partial)
+    } else {
+        int_candidate_ssd(codes, current, x, y, cursor.centre_slot, cursor.sub, shape)
+    }
+}
+
 /// Swaps `ssd` for [SELF_MATCH_SSD](crate::collab::kernels::plane_ops::SELF_MATCH_SSD) when `live`
 /// and the candidate is the reference itself.
 #[cube]
@@ -109,15 +212,21 @@ pub(crate) fn pin_self_match_int(
 ///
 /// The self-match holds slot 0. Returns the number of positions the clipped rectangle holds.
 #[cube]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a buffer, slot or comptime shape the search reads"
+)]
 pub(crate) fn int_centre_search<C: Int, N: Size>(
     codes: &Array<Vector<C, N>>,
+    tile: &SharedMemory<i32>,
     current: &Array<i32>,
     cursor: &IntCursor,
     best_ssd: &mut i32,
     best_pos: &mut u32,
-    #[comptime] walk: Walk,
+    #[comptime] variant: IntegerVariant,
     #[comptime] shape: IntShape,
 ) -> u32 {
+    let walk = comptime!(variant.walk);
     let spatial_radius = comptime!(shape.spatial_radius);
     let max_x = comptime!(shape.width - PATCH_SIZE);
     let max_y = comptime!(shape.height - PATCH_SIZE);
@@ -134,9 +243,13 @@ pub(crate) fn int_centre_search<C: Int, N: Size>(
     };
 
     if comptime!(walk == Walk::Uniform) {
-        int_uniform_centre_walk(codes, current, &rect, cursor, best_ssd, best_pos, shape);
+        int_uniform_centre_walk(
+            codes, tile, current, &rect, cursor, best_ssd, best_pos, variant, shape,
+        );
     } else {
-        int_clipped_centre_walk(codes, current, &rect, cursor, best_ssd, best_pos, shape);
+        int_clipped_centre_walk(
+            codes, tile, current, &rect, cursor, best_ssd, best_pos, variant, shape,
+        );
     }
 
     (right - left + 1u32) * (bottom - top + 1u32)
@@ -149,13 +262,19 @@ pub(crate) fn int_centre_search<C: Int, N: Size>(
 /// group's eighth slot is beaten. A masked turn carries
 /// [UNFILLED_SSD](crate::collab::kernels::plane_ops::UNFILLED_SSD), so it never places.
 #[cube]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a buffer, slot or comptime shape the walk reads"
+)]
 fn int_uniform_centre_walk<C: Int, N: Size>(
     codes: &Array<Vector<C, N>>,
+    tile: &SharedMemory<i32>,
     current: &Array<i32>,
     rect: &SearchRect,
     cursor: &IntCursor,
     best_ssd: &mut i32,
     best_pos: &mut u32,
+    #[comptime] variant: IntegerVariant,
     #[comptime] shape: IntShape,
 ) {
     let mut worst_ssd = UNFILLED_SSD.runtime();
@@ -172,13 +291,14 @@ fn int_uniform_centre_walk<C: Int, N: Size>(
                 // A masked turn still reads, so it is pinned to the last live position.
                 let candidate_x = u32::min(wanted_x, rect.right);
                 let candidate_y = u32::min(wanted_y, rect.bottom);
-                let scored = int_candidate_ssd(
+                let scored = int_centre_ssd(
                     codes,
+                    tile,
                     current,
                     candidate_x,
                     candidate_y,
-                    cursor.centre_slot,
-                    cursor.sub,
+                    cursor,
+                    variant,
                     shape,
                 );
                 let masked = select(live_pos, scored, UNFILLED_SSD);
@@ -202,13 +322,19 @@ fn int_uniform_centre_walk<C: Int, N: Size>(
 /// Each group leaves the rectangle as soon as it is done, and the cached insert skips its shuffles
 /// for a candidate that cannot place.
 #[cube]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a buffer, slot or comptime shape the walk reads"
+)]
 fn int_clipped_centre_walk<C: Int, N: Size>(
     codes: &Array<Vector<C, N>>,
+    tile: &SharedMemory<i32>,
     current: &Array<i32>,
     rect: &SearchRect,
     cursor: &IntCursor,
     best_ssd: &mut i32,
     best_pos: &mut u32,
+    #[comptime] variant: IntegerVariant,
     #[comptime] shape: IntShape,
 ) {
     let mut worst_ssd = UNFILLED_SSD.runtime();
@@ -218,13 +344,14 @@ fn int_clipped_centre_walk<C: Int, N: Size>(
     while candidate_y <= rect.bottom {
         let mut candidate_x = rect.left;
         while candidate_x <= rect.right {
-            let scored = int_candidate_ssd(
+            let scored = int_centre_ssd(
                 codes,
+                tile,
                 current,
                 candidate_x,
                 candidate_y,
-                cursor.centre_slot,
-                cursor.sub,
+                cursor,
+                variant,
                 shape,
             );
             let ssd = pin_self_match_int(scored, true, candidate_x, candidate_y, cursor.rx, cursor.ry);

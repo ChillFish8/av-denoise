@@ -3,9 +3,10 @@ pub(crate) mod variant;
 
 use cubecl::prelude::*;
 
-use self::scalar::{int_centre_search, int_trajectory_search, load_code_column};
+use self::scalar::{int_centre_search, int_trajectory_search, load_code_column, load_int_centre_tile};
 pub use self::variant::{INTEGER_VARIANT_COUNT, INTEGER_VARIANTS, IntCentre, IntNeighbour, IntegerVariant};
-use super::fused::{GROUP_USES_GRID, MEMBER_WORDS};
+use super::fused::{GROUP_USES_GRID, MEMBER_WORDS, tile_height, tile_width};
+use super::group::clamp_top_left;
 use super::plane_ops::{UNFILLED_SSD, group_base};
 use crate::collab::geometry::refs_along;
 use crate::collab::{MAX_K, PATCH_SIZE, STEP};
@@ -25,12 +26,14 @@ pub(crate) struct IntShape {
 
 /// One lane's position in its group's integer centre search.
 ///
-/// `(rx, ry)` is the reference's top-left. `sub` is the lane's column in its group and `base` the
-/// group's first lane in the plane.
+/// `(rx, ry)` is the reference's top-left and `(tile_x0, tile_y0)` the centre tile's. `sub` is the
+/// lane's column in its group and `base` the group's first lane in the plane.
 #[derive(CubeType, Clone, Copy)]
 pub(crate) struct IntCursor {
     pub(crate) rx: u32,
     pub(crate) ry: u32,
+    pub(crate) tile_x0: u32,
+    pub(crate) tile_y0: u32,
     pub(crate) centre_slot: u32,
     pub(crate) sub: u32,
     pub(crate) base: u32,
@@ -48,8 +51,9 @@ pub(crate) struct IntCursor {
 /// row. A group past the last reference of its row or column searches a clamped copy of the last
 /// real one and writes nothing.
 ///
-/// `codes` holds one integer code per stored lane, laid out as the f32 ring is. The scalar walks
-/// read neither `split_shift` nor `matrix_plane`.
+/// `codes` holds one integer code per stored lane, laid out as the f32 ring is. A tiled centre
+/// first copies the union of the cube's search windows into a shared tile and scores from it. The
+/// scalar and tiled walks read neither `split_shift` nor `matrix_plane`.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
@@ -114,11 +118,42 @@ pub fn collab_search_int<C: Int, N: Size>(
     let ref_x = (ref_x_clamped * STEP).min(max_x);
     let ref_y = (ref_y_clamped * STEP).min(max_y);
 
+    let centre = comptime!(variant.centre);
+    let tile_len = comptime!(variant.tile_elements(spatial_radius, channels));
+    let mut tile = SharedMemory::<i32>::new(tile_len as usize);
+
+    // The tile's corner is the first reference's search window corner, so every window of the
+    // cube lies inside it.
+    let first_ref_x = (CUBE_POS_X * cube_refs_x * STEP).min(max_x);
+    let first_ref_y = (CUBE_POS_Y * ref_rows * STEP).min(max_y);
+    let tile_x0 = clamp_top_left(first_ref_x as i32 - spatial_radius as i32, max_x);
+    let tile_y0 = clamp_top_left(first_ref_y as i32 - spatial_radius as i32, max_y);
+
+    if comptime!(centre == IntCentre::Tiled) {
+        let tile_w = comptime!(tile_width(cube_refs_x, spatial_radius));
+        let tile_h = comptime!(tile_height(spatial_radius));
+        let lanes = comptime!(variant.lanes());
+        load_int_centre_tile(
+            codes,
+            &mut tile,
+            tile_x0,
+            tile_y0,
+            centre_slot,
+            tile_w,
+            tile_h,
+            lanes,
+            shape,
+        );
+        sync_cube();
+    }
+
     let current = load_code_column(codes, ref_x, ref_y, centre_slot, sub, width, height, channels);
 
     let cursor = IntCursor {
         rx: ref_x,
         ry: ref_y,
+        tile_x0,
+        tile_y0,
         centre_slot,
         sub,
         base,
@@ -126,6 +161,7 @@ pub fn collab_search_int<C: Int, N: Size>(
     let mut member_pos = Array::<u32>::new(MAX_K as usize);
     let group_word = int_search_group(
         codes,
+        &tile,
         mv_field,
         confidence,
         neighbour_slots,
@@ -179,6 +215,7 @@ pub fn collab_search_int<C: Int, N: Size>(
 )]
 pub(crate) fn int_search_group<C: Int, N: Size>(
     codes: &Array<Vector<C, N>>,
+    tile: &SharedMemory<i32>,
     mv_field: &Array<i32>,
     confidence: &Array<f32>,
     neighbour_slots: &Array<u32>,
@@ -209,7 +246,16 @@ pub(crate) fn int_search_group<C: Int, N: Size>(
     let mut best_ssd = UNFILLED_SSD.runtime();
     let mut best_pos = 0u32;
 
-    let n_live = int_centre_search(codes, current, cursor, &mut best_ssd, &mut best_pos, walk, shape);
+    let n_live = int_centre_search(
+        codes,
+        tile,
+        current,
+        cursor,
+        &mut best_ssd,
+        &mut best_pos,
+        variant,
+        shape,
+    );
 
     let mut k_use = 1u32;
     while k_use * 2u32 <= n_live && k_use * 2u32 <= k_max {
