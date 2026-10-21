@@ -78,6 +78,27 @@ fn a_saved_result_loads_back_unchanged() {
 }
 
 #[test]
+fn exact_integer_records_round_trip_through_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TuneStore::at(dir.path());
+    let device = identity();
+    let mut result = sample_result();
+    let ranking = result
+        .sites
+        .values_mut()
+        .next()
+        .expect("the sample holds a ranking");
+    ranking.candidates[0].fidelity = FidelityClass::ExactInteger;
+
+    let path = store.save(&device, &result).expect("the save succeeds");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let loaded = store.load(&device);
+
+    assert!(text.contains("\"fidelity\": \"exact_integer\""), "{text}");
+    assert_eq!(loaded, result);
+}
+
+#[test]
 fn failed_keys_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let store = TuneStore::at(dir.path());

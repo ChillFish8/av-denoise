@@ -3,6 +3,10 @@
 pub enum Fidelity {
     /// Bit identical output.
     Exact,
+    /// Integer arithmetic bit identical to the site's integer reference.
+    ///
+    /// The reference itself is held to `reference` against the baseline.
+    ExactInteger { reference: IntegerBound },
     /// The same algorithm with its float operations reordered.
     Rounding { min_psnr: f64, max_abs: f32 },
     /// An algorithmic shortcut, held to the error bound it declares.
@@ -19,10 +23,20 @@ pub struct ErrorBound {
     pub max_abs: f32,
 }
 
+/// How far a site's integer reference may stray from the baseline.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum IntegerBound {
+    /// No member is worse than the baseline's eighth-best, which the site checks itself.
+    EighthBest,
+    /// Held to an error bound, as a rounding candidate is.
+    Bound(ErrorBound),
+}
+
 /// A fidelity class without its bounds, ordered from most to least faithful.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FidelityClass {
     Exact,
+    ExactInteger,
     Rounding,
     Approximate,
 }
@@ -32,6 +46,7 @@ impl FidelityClass {
     pub fn name(self) -> &'static str {
         match self {
             FidelityClass::Exact => "exact",
+            FidelityClass::ExactInteger => "exact_integer",
             FidelityClass::Rounding => "rounding",
             FidelityClass::Approximate => "approximate",
         }
@@ -40,10 +55,16 @@ impl FidelityClass {
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "exact" => Some(FidelityClass::Exact),
+            "exact_integer" => Some(FidelityClass::ExactInteger),
             "rounding" => Some(FidelityClass::Rounding),
             "approximate" => Some(FidelityClass::Approximate),
             _ => None,
         }
+    }
+
+    /// Whether a deterministic run may pick the class, since its output bits are fixed.
+    pub fn deterministic(self) -> bool {
+        matches!(self, FidelityClass::Exact | FidelityClass::ExactInteger)
     }
 }
 
@@ -75,6 +96,7 @@ impl Fidelity {
     pub fn class(&self) -> FidelityClass {
         match self {
             Fidelity::Exact => FidelityClass::Exact,
+            Fidelity::ExactInteger { .. } => FidelityClass::ExactInteger,
             Fidelity::Rounding { .. } => FidelityClass::Rounding,
             Fidelity::Approximate { .. } => FidelityClass::Approximate,
         }
@@ -84,6 +106,7 @@ impl Fidelity {
     pub fn judge(&self, planes: &[PlaneDiff]) -> CompareResult {
         match *self {
             Fidelity::Exact => judge_exact(planes),
+            Fidelity::ExactInteger { reference } => judge_integer_reference(planes, reference),
             Fidelity::Rounding { min_psnr, max_abs } => judge_bound(planes, min_psnr, max_abs),
             Fidelity::Approximate { bound, .. } => judge_bound(planes, bound.min_psnr, bound.max_abs),
         }
@@ -98,6 +121,16 @@ fn judge_exact(planes: &[PlaneDiff]) -> CompareResult {
         Some(index) => {
             let reason = format!("plane {index} is not bit identical");
             CompareResult::Fail(reason)
+        },
+    }
+}
+
+fn judge_integer_reference(planes: &[PlaneDiff], reference: IntegerBound) -> CompareResult {
+    match reference {
+        IntegerBound::Bound(bound) => judge_bound(planes, bound.min_psnr, bound.max_abs),
+        IntegerBound::EighthBest => {
+            let reason = "the eighth-best bound is checked by the site, not from plane differences";
+            CompareResult::Fail(reason.to_string())
         },
     }
 }

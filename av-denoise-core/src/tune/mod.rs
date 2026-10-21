@@ -69,6 +69,7 @@ pub use self::fidelity::{
     ErrorBound,
     Fidelity,
     FidelityClass,
+    IntegerBound,
     PlaneDiff,
     diff_integers,
     diff_plane,

@@ -103,7 +103,7 @@ pub(crate) enum Observed {
 impl TuneLedger {
     /// A ledger in the idle phase.
     ///
-    /// With `deterministic` set, only exact candidates are tuned or run.
+    /// With `deterministic` set, only exact and exact integer candidates are tuned or run.
     pub fn new(deterministic: bool) -> Arc<Self> {
         let ledger = Self {
             deterministic,

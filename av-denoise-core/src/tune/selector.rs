@@ -5,7 +5,6 @@ use std::time::Instant;
 use cubecl::prelude::*;
 
 use super::device::DeviceLimits;
-use super::fidelity::FidelityClass;
 use super::gpu::profile_launches;
 use super::key::SiteKey;
 use super::ledger::{LedgerChoice, Observed, TuneLedger};
@@ -257,7 +256,8 @@ fn planned<R: Runtime, S: VariantSite<R>>(
     }
 }
 
-/// The fitted candidates a run may use, only exact ones when `deterministic` is set.
+/// The fitted candidates a run may use, only exact and exact integer ones when `deterministic` is
+/// set.
 fn allowed_candidates<R: Runtime, S: VariantSite<R>>(
     fitted: &[S::Candidate],
     deterministic: bool,
@@ -265,6 +265,6 @@ fn allowed_candidates<R: Runtime, S: VariantSite<R>>(
     fitted
         .iter()
         .copied()
-        .filter(|candidate| !deterministic || candidate.fidelity().class() == FidelityClass::Exact)
+        .filter(|candidate| !deterministic || candidate.fidelity().class().deterministic())
         .collect()
 }

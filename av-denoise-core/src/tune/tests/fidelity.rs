@@ -1,4 +1,13 @@
-use crate::tune::{CompareResult, ErrorBound, Fidelity, FidelityClass, diff_integers, diff_plane};
+use crate::tune::{
+    CompareResult,
+    ErrorBound,
+    Fidelity,
+    FidelityClass,
+    IntegerBound,
+    PlaneDiff,
+    diff_integers,
+    diff_plane,
+};
 
 #[test]
 fn identical_planes_are_identical_with_infinite_psnr() {
@@ -114,9 +123,56 @@ fn classes_order_from_most_to_least_faithful() {
 }
 
 #[test]
+fn exact_integer_names_round_trip_and_sit_between_exact_and_rounding() {
+    let class = FidelityClass::ExactInteger;
+
+    assert_eq!(class.name(), "exact_integer");
+    assert_eq!(FidelityClass::from_name("exact_integer"), Some(class));
+    assert!(FidelityClass::Exact < class && class < FidelityClass::Rounding);
+    assert!(class.deterministic() && FidelityClass::Exact.deterministic());
+    assert!(!FidelityClass::Rounding.deterministic());
+    assert!(!FidelityClass::Approximate.deterministic());
+}
+
+#[test]
+fn an_integer_window_bound_is_judged_like_rounding() {
+    let bound = ErrorBound {
+        min_psnr: 80.0,
+        max_abs: 1.0e-3,
+    };
+    let fidelity = Fidelity::ExactInteger {
+        reference: IntegerBound::Bound(bound),
+    };
+    let baseline = [0.5f32, 0.25];
+    let within_values = [0.500_000_1f32, 0.25];
+    let past_values = [0.51f32, 0.25];
+    let within = diff_plane(&baseline, &within_values);
+    let past = diff_plane(&baseline, &past_values);
+
+    assert_eq!(fidelity.class(), FidelityClass::ExactInteger);
+    assert!(fidelity.judge(&[within]).passed());
+    assert!(!fidelity.judge(&[past]).passed());
+}
+
+#[test]
+fn the_eighth_best_bound_is_never_judged_from_plane_diffs() {
+    let fidelity = Fidelity::ExactInteger {
+        reference: IntegerBound::EighthBest,
+    };
+    let identical = PlaneDiff {
+        identical: true,
+        max_abs: 0.0,
+        psnr: f64::INFINITY,
+    };
+
+    assert!(!fidelity.judge(&[identical]).passed());
+}
+
+#[test]
 fn class_names_round_trip() {
     let classes = [
         FidelityClass::Exact,
+        FidelityClass::ExactInteger,
         FidelityClass::Rounding,
         FidelityClass::Approximate,
     ];

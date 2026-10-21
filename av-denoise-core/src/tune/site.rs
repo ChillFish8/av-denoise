@@ -131,6 +131,13 @@ pub trait VariantSite<R: Runtime>: Clone + Send {
         Self::Candidate::baseline()
     }
 
+    /// The candidate every other exact integer candidate must match bit for bit.
+    ///
+    /// It is checked against the baseline under its own fidelity.
+    fn integer_reference(&self) -> Option<Self::Candidate> {
+        None
+    }
+
     /// Whether the candidate's code is correct on this site's runtime and allowed by `legality`.
     fn legal(&self, _candidate: Self::Candidate, _limits: &DeviceLimits, _legality: &Legality) -> bool {
         true
