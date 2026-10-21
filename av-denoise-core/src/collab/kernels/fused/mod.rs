@@ -611,7 +611,7 @@ pub(crate) fn filter_group<W: Int>(
     #[comptime] packed: bool,
 ) {
     // The frame is picked with `select` rather than a branch, because a frame index that reaches
-    // `read_line` through a branch panics cubecl 0.10's GVN pass and the launch silently does
+    // a ring read through a branch panics cubecl 0.10's GVN pass and the launch silently does
     // nothing.
     let mut member_slot = Array::<u32>::new(MAX_K as usize);
     #[unroll]

@@ -99,7 +99,6 @@ pub(crate) fn test_legality(client: &ComputeClient<TestRuntime>) -> Legality {
     Legality {
         uniform_walk_only: on_cuda,
         f16_search: true,
-        early_exit: true,
         packed_atomics: limits.int64_atomic_add,
     }
 }

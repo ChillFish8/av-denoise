@@ -153,8 +153,6 @@ pub struct Legality {
     pub uniform_walk_only: bool,
     /// The f16 search ring may run.
     pub f16_search: bool,
-    /// The partial-distance early exit may run.
-    pub early_exit: bool,
     /// Packed 64-bit accumulators may run.
     pub packed_atomics: bool,
 }
@@ -164,7 +162,6 @@ impl Default for Legality {
         Self {
             uniform_walk_only: false,
             f16_search: true,
-            early_exit: false,
             packed_atomics: false,
         }
     }
@@ -181,7 +178,6 @@ impl Legality {
         Self {
             uniform_walk_only: pre_volta,
             f16_search: !slow_f16,
-            early_exit: class == DeviceClass::Amd,
             packed_atomics,
         }
     }

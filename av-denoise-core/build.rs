@@ -9,7 +9,8 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 ///
 /// The bench hash also covers `benches`, which defines kernels of its own.
 fn main() {
-    let kernel_hash = hash_tree(Path::new("src"), FNV_OFFSET_BASIS);
+    let source_root = Path::new("src");
+    let kernel_hash = hash_tree(source_root, FNV_OFFSET_BASIS);
     println!("cargo:rustc-env=AV_DENOISE_KERNEL_HASH={kernel_hash:016x}");
     println!("cargo:rerun-if-changed=src");
 

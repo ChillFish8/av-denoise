@@ -290,7 +290,8 @@ fn collab_keys_name_every_compiled_value() {
 
     assert_eq!(
         key.as_str(),
-        "collab_fused|w64|h64|ch=1|stored=1|radius=2|grid=4|refine=2|blksize=16|step=8|kmax=8|spatial=9|pooled=0|f16=0"
+        "collab_fused|w64|h64|ch=1|stored=1|radius=2|grid=4|refine=2|blksize=16|step=8|kmax=8|\
+         spatial=9|pooled=0|f16=0"
     );
 }
 

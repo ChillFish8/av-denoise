@@ -4,7 +4,6 @@ use super::runtime::test_client;
 use crate::nlmeans::ChannelMode;
 use crate::tune::sites::Walk;
 use crate::tune::{
-    AMD_VENDOR_ID,
     APPLE_VENDOR_ID,
     DeviceClass,
     DeviceIdentity,
@@ -140,26 +139,6 @@ fn intel_and_unknown_vendors_get_their_own_classes() {
 }
 
 #[test]
-fn the_early_exit_is_legal_only_on_amd() {
-    let radv = faked_profile("vulkan", AMD_VENDOR_ID, 0x7551, None);
-    let rocm = faked_profile("rocm", AMD_VENDOR_ID, 0x7551, None);
-    let others = [
-        faked_profile("vulkan", NVIDIA_VENDOR_ID, RTX_3050_TI_LAPTOP, None),
-        faked_profile("vulkan", INTEL_VENDOR_ID, 0xE20B, None),
-        faked_profile("metal", APPLE_VENDOR_ID, 0, None),
-        faked_profile("vulkan", 0x5143, 0, None),
-    ];
-
-    assert!(Legality::for_device(&radv).early_exit);
-    assert!(Legality::for_device(&rocm).early_exit);
-
-    for profile in others {
-        let legality = Legality::for_device(&profile);
-        assert!(!legality.early_exit, "{:#06x}", profile.identity.vendor_id);
-    }
-}
-
-#[test]
 fn packed_atomics_need_64_bit_atomics_and_never_run_on_metal() {
     let capable = faked_profile("vulkan", INTEL_VENDOR_ID, 0xE20B, None);
     let mut incapable = capable.clone();
@@ -177,7 +156,6 @@ fn defaults_are_todays_behaviour() {
 
     assert!(!defaults.uniform_walk_only);
     assert!(defaults.f16_search);
-    assert!(!defaults.early_exit);
     assert!(!defaults.packed_atomics);
 }
 

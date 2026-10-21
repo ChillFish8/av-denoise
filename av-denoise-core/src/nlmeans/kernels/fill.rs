@@ -37,34 +37,6 @@ pub(crate) fn halo_slot_index(
     select(in_top, halo, below_top_index)
 }
 
-/// The host version of [halo_slot_index](crate::nlmeans::kernels::fill::halo_slot_index).
-#[cfg(test)]
-pub(crate) fn halo_slot_index_host(halo: u32, block_x: u32, block_y: u32, patch_radius: u32) -> u32 {
-    let tile_width = block_x + 2 * patch_radius;
-    let top_count = patch_radius * tile_width;
-    let side_width = 2 * patch_radius;
-    let side_count = block_y * side_width;
-
-    if halo < top_count {
-        return halo;
-    }
-
-    let side = halo - top_count;
-    if side < side_count {
-        let side_row = side / side_width + patch_radius;
-        let side_column = side % side_width;
-        let column = if side_column < patch_radius {
-            side_column
-        } else {
-            side_column + block_x
-        };
-        return side_row * tile_width + column;
-    }
-
-    let bottom = side - side_count;
-    (block_y + patch_radius) * tile_width + bottom
-}
-
 /// Whether the expanded centre region, and so every read of the block, lies inside the frame.
 #[cube]
 pub(crate) fn expanded_interior(

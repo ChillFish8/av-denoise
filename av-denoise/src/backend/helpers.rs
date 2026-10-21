@@ -31,7 +31,7 @@ static SHARED_HELPERS: LazyLock<Mutex<HelperSets>> = LazyLock::new(|| Mutex::new
 /// Nothing is installed when the ledger already has a factory or the on-disk compilation cache is
 /// off. The clients are made, or found, only when the first stage that can use them compiles.
 pub(crate) fn install_compile_helpers(ledger: &TuneLedger, device: &WgpuDevice) {
-    if ledger.has_compile_helpers() || !compilation_cache_enabled() || helpers_turned_off() {
+    if ledger.has_compile_helpers() || !compilation_cache_enabled() {
         return;
     }
 
@@ -98,21 +98,6 @@ fn make_helpers(instance: &wgpu::Instance, adapter: &wgpu::Adapter) -> Option<Ar
 
     tracing::debug!(count, "compile helpers ready");
     Some(Arc::new(helpers))
-}
-
-/// Set in a run of the library's unit tests to turn the compile helpers off, so a test can compare
-/// with and without them.
-#[cfg(test)]
-const TEST_NO_HELPERS_ENV: &str = "AV_DENOISE_TEST_NO_COMPILE_HELPERS";
-
-#[cfg(test)]
-fn helpers_turned_off() -> bool {
-    std::env::var_os(TEST_NO_HELPERS_ENV).is_some()
-}
-
-#[cfg(not(test))]
-fn helpers_turned_off() -> bool {
-    false
 }
 
 #[cfg(test)]
