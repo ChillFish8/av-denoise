@@ -282,8 +282,6 @@ impl<R: Runtime> NlmDenoiser<R> {
             self.height,
             stored_ch,
         );
-        self.mirror_compensated_codes(centre_slot as usize);
-
         if let (Some(ref_src), Some(ref_dst)) = (
             self.reference_buf.as_ref(),
             self.compensated_reference_buf.as_ref(),
@@ -338,7 +336,6 @@ impl<R: Runtime> NlmDenoiser<R> {
                 compensated_input,
                 mv_field,
             )?;
-            self.mirror_compensated_codes(neighbour_slot as usize);
 
             if let (Some(ref_src), Some(ref_dst)) = (
                 self.reference_buf.as_ref(),

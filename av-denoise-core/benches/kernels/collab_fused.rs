@@ -198,8 +198,6 @@ impl<R: Runtime> CollabFusedBench<R> {
             map_len: args.map_len,
             dct_profile: args.dct_profile.clone(),
             kaiser: args.kaiser.clone(),
-            codes: args.ring.clone(),
-            codes_len: stored_ch as usize,
         };
         let values = CollabValues {
             centre_slot: CENTRE_SLOT,
@@ -236,7 +234,6 @@ impl<R: Runtime> CollabFusedBench<R> {
             pooled: self.pooled,
             uniform_walk_only,
             packed: self.packed,
-            codes: None,
         };
         let outputs = CollabOutputs {
             accum: args.accum.clone(),

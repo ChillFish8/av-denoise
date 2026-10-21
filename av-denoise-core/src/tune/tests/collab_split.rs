@@ -11,7 +11,6 @@ use crate::tune::sites::{
     COLLAB_FILTER,
     COLLAB_SEARCH,
     CollabSite,
-    FLOAT_SEARCH_COUNT,
     FilterCandidate,
     SearchVariant,
     candidate_known,
@@ -105,7 +104,7 @@ fn the_first_half_of_the_search_variants_write_the_baselines_members() {
 
 #[test]
 fn the_second_half_of_the_search_variants_write_the_baselines_members() {
-    assert_search_variants_match_baseline(&SearchVariant::ALL[10..FLOAT_SEARCH_COUNT]);
+    assert_search_variants_match_baseline(&SearchVariant::ALL[10..]);
 }
 
 #[test]
@@ -123,27 +122,14 @@ fn every_filter_candidate_matches_the_baseline() {
 
 #[test]
 fn split_site_names_round_trip_and_are_known() {
-    assert_eq!(SearchVariant::ALL.len(), 25);
+    assert_eq!(SearchVariant::ALL.len(), 20);
 
     for &variant in SearchVariant::ALL {
         let name = variant.name();
         assert_eq!(SearchVariant::from_name(name), Some(variant));
         assert!(candidate_known(COLLAB_SEARCH, name), "{name}");
-
-        if let SearchVariant::Float(float_variant) = variant {
-            assert_eq!(float_variant.groups, 8);
-        }
+        assert_eq!(variant.0.groups, 8);
     }
-
-    let float_variants = &SearchVariant::ALL[..FLOAT_SEARCH_COUNT];
-    let integer_variants = &SearchVariant::ALL[FLOAT_SEARCH_COUNT..];
-    let floats_lead = float_variants
-        .iter()
-        .all(|variant| matches!(variant, SearchVariant::Float(_)));
-    let integers_follow = integer_variants
-        .iter()
-        .all(|variant| matches!(variant, SearchVariant::Integer(_)));
-    assert!(floats_lead && integers_follow);
 
     for &candidate in FilterCandidate::ALL {
         let name = candidate.name();

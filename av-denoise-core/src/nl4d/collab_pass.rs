@@ -15,7 +15,6 @@ use crate::collab::kernels::fused::STRENGTH_MAP_OFF;
 use crate::collab::kernels::packed::collab_zero_packed;
 use crate::engine::timing::timed;
 use crate::nlmeans::{MAX_GRID_1D, RingView};
-use crate::tune::IntegerCodes;
 use crate::tune::sites::{
     CollabFilterSite,
     CollabInputs,
@@ -38,19 +37,11 @@ struct FusedPass {
     map_mode: u32,
     weight_norm: f32,
     stored_ch: u32,
-    /// Values in the frame ring, which the f16 search ring and the code ring match.
+    /// Values in the frame ring, which the f16 search ring matches.
     ring_len: usize,
     accum_ring_len: usize,
     wsum_ring_len: usize,
     neighbours: u32,
-}
-
-/// The code ring the collab search binds, and the shape fields that go with it.
-struct SearchCodes {
-    codes: Option<IntegerCodes>,
-    /// The code ring, or the f32 ring as a placeholder the search never reads.
-    ring: Handle,
-    len: usize,
 }
 
 impl<R: Runtime> Nl4dDenoiser<R> {
@@ -276,8 +267,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
     /// Launches `collab_fused` for one pass, with its search ring read as `S`.
     ///
-    /// With a member buffer, the pass runs `collab_search` then `collab_filter` in its place. With
-    /// integer codes, the search reads the code ring.
+    /// With a member buffer, the pass runs `collab_search` then `collab_filter` in its place.
     fn launch_collab_fused<S: Float>(
         &self,
         client: &ComputeClient<R>,
@@ -297,8 +287,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let motion_ctx = self.front.motion_ctx();
         let frames_per_volume = grid_frames(self.temporal_radius);
         let pool_ratio = nl4d_pool_ratio(self.channels);
-        let search_codes = self.search_codes(view, pass.ring_len, pass.stored_ch);
-        let f16_search = self.f16_search && search_codes.codes.is_none();
 
         let inputs = CollabInputs {
             ring: view.input.clone(),
@@ -317,8 +305,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             map_len,
             dct_profile: self.dct_profile_buf.clone(),
             kaiser: self.kaiser_buf.clone(),
-            codes: search_codes.ring,
-            codes_len: search_codes.len,
         };
 
         // The kernel's centre slot must be the ring view's centre, or a member is grouped against
@@ -334,7 +320,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             pool_ratio,
         };
         let shape = CollabShape {
-            f16_search,
+            f16_search: self.f16_search,
             radius: self.temporal_radius,
             grid_frames: frames_per_volume,
             refine: self.refine,
@@ -357,7 +343,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             pooled: self.pooled_threshold,
             uniform_walk_only: self.uniform_walk_only,
             packed: self.packed,
-            codes: search_codes.codes,
         };
         let outputs = CollabOutputs {
             accum: self.accum.clone(),
@@ -404,26 +389,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             };
 
             self.kernels.run(&site)
-        }
-    }
-
-    /// The code ring the collab search reads, when the denoiser keeps integer codes.
-    fn search_codes(&self, view: &RingView, ring_len: usize, stored_ch: u32) -> SearchCodes {
-        let codes = self.integer_codes();
-        let code_ring = view.code_input.clone();
-
-        let (Some(codes), Some(ring)) = (codes, code_ring) else {
-            return SearchCodes {
-                codes: None,
-                ring: view.input.clone(),
-                len: stored_ch as usize,
-            };
-        };
-
-        SearchCodes {
-            codes: Some(codes),
-            ring,
-            len: ring_len,
         }
     }
 }

@@ -1,6 +1,5 @@
 pub mod accumulate;
 pub mod bilateral;
-pub mod cast_codes;
 pub mod cast_f16;
 pub mod collab_aggregate;
 pub mod collab_fused;

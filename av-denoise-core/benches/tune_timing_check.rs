@@ -110,7 +110,6 @@ fn window_site<R: Runtime>(client: &ComputeClient<R>) -> impl VariantSite<R, Can
         channel_name: "luma",
         kernel: WindowKernel::Pair,
         candidate: WindowCandidate::baseline(),
-        codes: None,
     };
     let (site, _) = bench.prepare();
 

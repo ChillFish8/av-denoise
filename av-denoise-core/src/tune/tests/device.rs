@@ -54,17 +54,6 @@ fn limits_come_from_the_runtime() {
 }
 
 #[test]
-fn the_test_device_binds_u16_buffers() {
-    let client = test_client();
-    let limits = DeviceLimits::from_client(&client);
-
-    assert!(
-        limits.u16_buffer,
-        "the integer code ring needs u16 storage buffers"
-    );
-}
-
-#[test]
 fn the_f16_search_needs_both_buffer_and_arithmetic_support() {
     let client = test_client();
     let mut limits = DeviceLimits::from_client(&client);

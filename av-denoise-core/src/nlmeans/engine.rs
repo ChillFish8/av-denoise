@@ -4,7 +4,6 @@ use cubecl::server::Handle;
 use super::denoiser::{GpuOutput, NlmDenoiser, check_u32_indexable, front_buffer_sizes};
 use super::options::{NlmeansAlgorithm, resolve_params};
 use super::params::validate_dimensions;
-use super::prefilter::PrefilterMode;
 use crate::engine::{
     DevicePlane,
     EdgePadding,
@@ -16,7 +15,7 @@ use crate::engine::{
     egress,
 };
 use crate::error::Error;
-use crate::tune::{EngineKernels, IntegerCodes, KernelSelector};
+use crate::tune::{EngineKernels, KernelSelector};
 
 /// Non-local means over GPU planes.
 pub struct Nlmeans<R: Runtime> {
@@ -72,16 +71,7 @@ impl<R: Runtime> Nlmeans<R> {
         indexable.map_err(Error::InvalidGeometry)?;
 
         let selector = KernelSelector::new(client, kernels);
-        let profile = selector.profile();
-        let limits = selector.limits();
-        let profile_codes = IntegerCodes::for_profile(profile, geometry.input, limits);
-        let unfiltered = params.prefilter == PrefilterMode::None;
-        let codes = profile_codes.filter(|_| unfiltered);
-        let mut front = NlmDenoiser::with_kernels(client, params, geometry.width, geometry.height, selector);
-
-        if let Some(codes) = codes {
-            front.enable_code_ring(codes);
-        }
+        let front = NlmDenoiser::with_kernels(client, params, geometry.width, geometry.height, selector);
 
         Ok(Self {
             front,
@@ -164,11 +154,6 @@ impl<R: Runtime> Nlmeans<R> {
         let failure = Err(anyhow::anyhow!("forced failure"));
 
         self.guard(failure)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn front_for_test(&self) -> &NlmDenoiser<R> {
-        &self.front
     }
 }
 

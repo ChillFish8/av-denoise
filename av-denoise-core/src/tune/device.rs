@@ -1,6 +1,6 @@
 use cubecl::hash::StableHasher;
 use cubecl::ir::features::{AtomicUsage, TypeUsage};
-use cubecl::ir::{DeviceProperties, ElemType, FloatKind, IntKind, StorageType, Type, UIntKind};
+use cubecl::ir::{ElemType, FloatKind, IntKind, StorageType, Type};
 use cubecl::prelude::*;
 
 /// Which physical device and driver a tuning result was measured on.
@@ -52,18 +52,11 @@ pub struct DeviceLimits {
     pub f16_arithmetic: bool,
     /// Whether 64-bit integer atomic adds work on storage buffers.
     pub int64_atomic_add: bool,
-    /// Whether u16 storage buffers work.
-    pub u16_buffer: bool,
 }
 
 impl DeviceLimits {
     pub fn from_client<R: Runtime>(client: &ComputeClient<R>) -> Self {
         let properties = client.properties();
-
-        Self::from_properties(properties)
-    }
-
-    pub(crate) fn from_properties(properties: &DeviceProperties) -> Self {
         let hardware = &properties.hardware;
 
         let f16_elem = ElemType::Float(FloatKind::F16);
@@ -79,10 +72,6 @@ impl DeviceLimits {
         let i64_arithmetic = i64_usage.contains(TypeUsage::Arithmetic);
         let i64_atomic_add = i64_atomic_usage.contains(AtomicUsage::Add);
 
-        let u16_elem = ElemType::UInt(UIntKind::U16);
-        let u16_type = StorageType::Scalar(u16_elem);
-        let u16_usage = properties.type_usage(u16_type);
-
         Self {
             plane_size_min: hardware.plane_size_min,
             plane_size_max: hardware.plane_size_max,
@@ -93,7 +82,6 @@ impl DeviceLimits {
             f16_buffer: f16_usage.contains(TypeUsage::Buffer),
             f16_arithmetic: f16_usage.contains(TypeUsage::Arithmetic),
             int64_atomic_add: i64_arithmetic && i64_atomic_add,
-            u16_buffer: u16_usage.contains(TypeUsage::Buffer),
         }
     }
 

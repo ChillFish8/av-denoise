@@ -19,7 +19,7 @@ use crate::engine::{
 };
 use crate::error::Error;
 use crate::nlmeans::denoiser::check_u32_indexable;
-use crate::tune::{EngineKernels, IntegerCodes, KernelSelector};
+use crate::tune::{EngineKernels, KernelSelector};
 
 /// Four-dimensional collaborative denoising over GPU planes.
 pub struct Nl4d<R: Runtime> {
@@ -81,15 +81,8 @@ impl<R: Runtime> Nl4d<R> {
         indexable.map_err(Error::InvalidGeometry)?;
 
         let selector = KernelSelector::new(client, kernels);
-        let profile = selector.profile();
-        let limits = selector.limits();
-        let codes = IntegerCodes::for_profile(profile, geometry.input, limits);
         let inner = Nl4dDenoiser::with_kernels(client, params, geometry.width, geometry.height, selector);
-        let mut inner = inner.map_err(Error::InvalidOptions)?;
-
-        if let Some(codes) = codes {
-            inner.enable_integer_search(codes);
-        }
+        let inner = inner.map_err(Error::InvalidOptions)?;
 
         Ok(Self {
             inner,
@@ -164,11 +157,6 @@ impl<R: Runtime> Nl4d<R> {
         let failure = Err(anyhow::anyhow!("forced failure"));
 
         self.guard(failure)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn denoiser_for_test(&self) -> &Nl4dDenoiser<R> {
-        &self.inner
     }
 }
 

@@ -3,7 +3,6 @@ mod bilateral;
 pub(crate) mod fill;
 mod fused;
 pub(crate) mod helpers;
-mod integer;
 mod memory;
 pub mod motion;
 mod noise;
@@ -20,8 +19,7 @@ pub use self::fused::{
     nlm_fused_single_window,
     nlm_fused_single_window_ref,
 };
-pub use self::integer::{nlm_int_pair_window, nlm_int_single_window};
-pub use self::memory::{gpu_cast_codes, gpu_cast_f16, gpu_copy, gpu_zero_buffers};
+pub use self::memory::{gpu_cast_f16, gpu_copy, gpu_zero_buffers};
 pub use self::noise::{
     nlm_noise_partial,
     nlm_noise_reduce,

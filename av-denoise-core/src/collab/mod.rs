@@ -1,5 +1,4 @@
 pub mod geometry;
-pub(crate) mod integer;
 pub mod kernels;
 
 // The tests run against a real GPU runtime, so they need a wgpu-backed feature.

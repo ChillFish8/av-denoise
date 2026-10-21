@@ -39,9 +39,8 @@ use super::mode::TuningMode;
 use super::setup::KernelSetup;
 use super::store::TuneStore;
 use super::{reload, remember, resolve};
-use crate::PrefilterMode;
 use crate::backend::selected_device;
-use crate::host::{Algorithm, Depth};
+use crate::host::Algorithm;
 use crate::planar::{
     FrameLayout,
     PlanarDenoiser,
@@ -590,33 +589,15 @@ fn drive_until_settled(
 
 /// The profiles worth comparing with the baseline for this denoiser on `device`.
 ///
-/// Every profile here differs from the baseline on this device for a `depth` source. NLMeans is
-/// offered only the integer search, and only without a prefilter.
-pub(crate) fn alternative_profiles_for(
-    algorithm: &Algorithm,
-    depth: Depth,
-    device: &DeviceProfile,
-) -> Vec<PipelineProfile> {
-    let nlmeans_prefilter = match algorithm {
-        Algorithm::Nlmeans(options) => Some(options.prefilter),
-        Algorithm::NlmeansHq(options) => Some(options.nlm.prefilter),
-        Algorithm::Nl4d(_) => None,
-    };
-
-    if let Some(prefilter) = nlmeans_prefilter {
-        let unfiltered = prefilter == PrefilterMode::None;
-        let offered = unfiltered && integer_search_applies(depth, device);
-        if !offered {
-            return Vec::new();
-        }
-
-        return vec![PipelineProfile::IntegerSearch];
+/// Every profile here differs from the baseline on this device. NLMeans has none.
+pub(crate) fn alternative_profiles_for(is_nl4d: bool, device: &DeviceProfile) -> Vec<PipelineProfile> {
+    if !is_nl4d {
+        return Vec::new();
     }
 
-    // Every nlmeans variant has returned, so only nl4d reaches here.
     let mut profiles = Vec::new();
 
-    if f32_profile_applies(true, device) {
+    if f32_profile_applies(is_nl4d, device) {
         profiles.push(PipelineProfile::F32Search);
     }
 
@@ -627,27 +608,15 @@ pub(crate) fn alternative_profiles_for(
         profiles.push(PipelineProfile::PackedAtomics);
     }
 
-    if integer_search_applies(depth, device) {
-        profiles.push(PipelineProfile::IntegerSearch);
-    }
-
     profiles
 }
 
-/// Whether a `depth` source has codes the device can keep an integer copy of.
-fn integer_search_applies(depth: Depth, device: &DeviceProfile) -> bool {
-    let has_codes = matches!(depth, Depth::Eight | Depth::Ten);
-
-    has_codes && device.limits.u16_buffer
-}
-
 fn alternative_profiles(planar: &PlanarDenoiser) -> Vec<PipelineProfile> {
-    let algorithm = &planar.options().algorithm;
-    let layout = planar.layout();
+    let is_nl4d = matches!(planar.options().algorithm, Algorithm::Nl4d(_));
     let hosts = planar.hosts();
     let device = hosts[0].device_profile();
 
-    alternative_profiles_for(algorithm, layout.depth, device)
+    alternative_profiles_for(is_nl4d, device)
 }
 
 /// Whether `F32Search` differs from the baseline, which needs nl4d and a legal f16 search.

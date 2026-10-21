@@ -1,4 +1,4 @@
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
@@ -14,7 +14,7 @@ use super::decide::{
     sample_in_stages_with,
     sample_until_settled,
 };
-use super::fidelity::{CompareResult, Fidelity, FidelityClass};
+use super::fidelity::CompareResult;
 use super::gpu::{GpuSampler, profile_launches, sync};
 use super::precompile::{CompileAccount, Precompiled, precompile};
 use super::result::{CandidateRecord, CompileProgress, SiteRanking};
@@ -29,16 +29,15 @@ const CALIBRATION_SAMPLES: usize = 3;
 /// Tunes one site in place and ranks every candidate that passed its output check.
 ///
 /// `allowed` lists the candidates that fit the device, baseline first. A key with only its baseline
-/// is ranked without timing. Candidates run only into scratch output sets, so the pipeline's own
-/// buffers stay untouched. A site with an allowed integer reference gets a third set for it. The
-/// baseline re-warms first and the batch size is calibrated from it. A site that asks for one gets a
-/// pre-screen. Every survivor's output is checked as [check_outputs] describes, and the rest are timed
-/// round-robin until the stop rule ends the site or `deadline` caps it. A staged site runs these steps
-/// once per stage, as [sample_in_stages_with](crate::tune::sample_in_stages_with) describes. Before
-/// timing, each stage's candidates are compiled once, and the compile time goes to `compile` instead
-/// of counting towards the caps. When the compile ceiling skips any candidate, the ranking is
-/// partial, and it counts how many it skipped. A stage whose integer reference was skipped or failed
-/// to compile drops its exact integer candidates before any of them is timed.
+/// is ranked without timing. Candidates run only into two scratch output sets, so the pipeline's own
+/// buffers stay untouched. The baseline re-warms first and the batch size is calibrated from it. A
+/// site that asks for one gets a pre-screen. Every survivor's output is checked against the
+/// baseline's, and the rest are timed round-robin until the stop rule ends the site or `deadline`
+/// caps it. A staged site runs these steps once per stage, as
+/// [sample_in_stages_with](crate::tune::sample_in_stages_with) describes. Before timing, each stage's
+/// candidates are compiled once, and the compile time goes to `compile` instead of counting towards
+/// the caps. When the compile ceiling skips any candidate, the ranking is partial, and it counts how
+/// many it skipped.
 pub(crate) fn tune_site<R: Runtime, S: VariantSite<R>>(
     site: &S,
     allowed: &[S::Candidate],
@@ -54,7 +53,6 @@ pub(crate) fn tune_site<R: Runtime, S: VariantSite<R>>(
 
     let baseline_outputs = site.scratch_outputs();
     let candidate_outputs = site.scratch_outputs();
-    let reference = integer_reference(site, allowed);
 
     rewarm(site, &candidate_outputs)?;
     let launches = calibrate(site, &candidate_outputs)?;
@@ -64,9 +62,8 @@ pub(crate) fn tune_site<R: Runtime, S: VariantSite<R>>(
     limits.site_cap = limits.site_cap.min(remaining);
 
     let tried = RefCell::new(StageCounts::default());
-    let reference_compiled = Cell::new(false);
     let compile_stage = |indices: &[usize]| {
-        let mut precompiled = compile_members(site, allowed, indices, &candidate_outputs, compile)?;
+        let precompiled = compile_members(site, allowed, indices, &candidate_outputs, compile)?;
 
         {
             let mut counts = tried.borrow_mut();
@@ -74,17 +71,7 @@ pub(crate) fn tune_site<R: Runtime, S: VariantSite<R>>(
             counts.skipped.extend(&precompiled.skipped);
         }
 
-        let integers = keep_integers_with_reference(allowed, reference.as_ref(), &mut precompiled);
-        reference_compiled.set(integers.reference_kept);
-        tried.borrow_mut().skipped.extend(&integers.left_untimed);
-
         Ok(precompiled)
-    };
-
-    let checks = CheckOutputs {
-        baseline: &baseline_outputs,
-        candidate: &candidate_outputs,
-        reference: reference.as_ref(),
     };
 
     if S::STAGES > 1 {
@@ -95,10 +82,8 @@ pub(crate) fn tune_site<R: Runtime, S: VariantSite<R>>(
             prescreen: S::PRESCREEN,
             members: &members,
         };
-        let check = |indices: &[usize]| {
-            let reference_kept = reference_compiled.get();
-            check_outputs(site, allowed, indices, &checks, reference_kept)
-        };
+        let check =
+            |indices: &[usize]| check_outputs(site, allowed, indices, &baseline_outputs, &candidate_outputs);
         let mut sampler = GpuSampler::new(site, allowed, &candidate_outputs, launches);
         let timing = sample_in_stages_with(
             &mut sampler,
@@ -125,8 +110,7 @@ pub(crate) fn tune_site<R: Runtime, S: VariantSite<R>>(
         compiled
     };
 
-    let reference_kept = reference_compiled.get();
-    let checked = check_outputs(site, allowed, &screened, &checks, reference_kept);
+    let checked = check_outputs(site, allowed, &screened, &baseline_outputs, &candidate_outputs);
     let mut sampler = GpuSampler::new(site, allowed, &candidate_outputs, launches);
     let timing = sample_until_settled(&mut sampler, &checked, BASELINE_INDEX, &limits)?;
 
@@ -298,233 +282,58 @@ pub(crate) fn calibrate<R: Runtime, S: VariantSite<R>>(
     Ok(clamped)
 }
 
-/// A site's integer reference, as an index into its allowed candidates, with the outputs it runs into.
-struct IntegerReference<O> {
-    index: usize,
-    outputs: O,
-}
-
-/// The scratch output sets [check_outputs] runs candidates into.
-struct CheckOutputs<'a, O> {
-    baseline: &'a O,
-    candidate: &'a O,
-    reference: Option<&'a IntegerReference<O>>,
-}
-
-/// The site's integer reference when it is allowed, with a scratch output set of its own.
-fn integer_reference<R: Runtime, S: VariantSite<R>>(
-    site: &S,
-    allowed: &[S::Candidate],
-) -> Option<IntegerReference<S::Outputs>> {
-    let candidate = site.integer_reference()?;
-    let index = allowed.iter().position(|&allowed| allowed == candidate)?;
-    let outputs = site.scratch_outputs();
-
-    Some(IntegerReference { index, outputs })
-}
-
-fn is_exact_integer<C: SiteCandidate>(candidate: C) -> bool {
-    candidate.fidelity().class() == FidelityClass::ExactInteger
-}
-
-/// What [keep_integers_with_reference] decided for one stage.
-#[derive(Default)]
-struct IntegerStage {
-    /// Whether the integer reference compiled and is among the stage's kept candidates.
-    reference_kept: bool,
-    /// Exact integer candidates removed because the compile ceiling skipped the reference.
-    left_untimed: Vec<usize>,
-}
-
-/// Removes a stage's exact integer candidates from what it kept when its integer reference was skipped
-/// or did not compile.
-///
-/// Only a skipped reference leaves candidates untimed for a later run. A reference that failed to
-/// compile is a drop, which does not make the ranking partial.
-fn keep_integers_with_reference<C: SiteCandidate, O>(
-    allowed: &[C],
-    reference: Option<&IntegerReference<O>>,
-    precompiled: &mut Precompiled,
-) -> IntegerStage {
-    let Some(reference) = reference else {
-        return IntegerStage::default();
-    };
-
-    let skipped = precompiled.skipped.contains(&reference.index);
-    let dropped = precompiled.reason_for(reference.index).is_some();
-    if !skipped && !dropped {
-        let reference_kept = precompiled.kept.contains(&reference.index);
-        return IntegerStage {
-            reference_kept,
-            ..IntegerStage::default()
-        };
-    }
-
-    let removed: Vec<usize> = precompiled
-        .kept
-        .iter()
-        .copied()
-        .filter(|&index| is_exact_integer(allowed[index]))
-        .collect();
-    let names = candidate_names(allowed, &removed);
-    precompiled
-        .kept
-        .retain(|&index| !is_exact_integer(allowed[index]));
-
-    if skipped {
-        tracing::info!(
-            site = C::SITE,
-            removed = ?names,
-            "the compile ceiling skipped the integer reference, so its exact-integer candidates are \
-             skipped this run"
-        );
-    } else {
-        tracing::info!(
-            site = C::SITE,
-            removed = ?names,
-            "the integer reference did not compile, so its exact-integer candidates are dropped this run"
-        );
-    }
-
-    let left_untimed = if skipped { removed } else { Vec::new() };
-    IntegerStage {
-        reference_kept: false,
-        left_untimed,
-    }
-}
-
 /// The indices whose candidate's output passes its fidelity check, keeping the baseline when asked.
 ///
-/// Each candidate runs once into cleared outputs, so the check sees a single launch. Most candidates
-/// are checked against the baseline. When `reference_compiled` is set, the integer reference runs
-/// once after the baseline and is checked against it under its own fidelity. Every other exact
-/// integer candidate must then match the reference bit for bit, and is dropped when the reference
-/// failed or did not run. A failed check or a failed readback drops the candidate with a warning.
+/// Each candidate runs once into cleared outputs, so the check sees a single launch. A failed check
+/// or a failed readback drops the candidate with a warning.
 fn check_outputs<R: Runtime, S: VariantSite<R>>(
     site: &S,
     allowed: &[S::Candidate],
     indices: &[usize],
-    outputs: &CheckOutputs<'_, S::Outputs>,
-    reference_compiled: bool,
+    baseline_outputs: &S::Outputs,
+    candidate_outputs: &S::Outputs,
 ) -> Vec<usize> {
     let baseline = allowed[BASELINE_INDEX];
-    site.clear_outputs(outputs.baseline);
-    site.launch(baseline, outputs.baseline);
-
-    let reference = outputs.reference.filter(|_| reference_compiled);
-    let reference_passed = match reference {
-        Some(reference) => check_reference(site, allowed, reference, outputs),
-        None => false,
-    };
+    site.clear_outputs(baseline_outputs);
+    site.launch(baseline, baseline_outputs);
 
     let mut passed = Vec::with_capacity(indices.len());
 
     for &index in indices {
-        let is_reference = reference.is_some_and(|reference| reference.index == index);
+        if index == BASELINE_INDEX {
+            passed.push(BASELINE_INDEX);
+            continue;
+        }
+
         let candidate = allowed[index];
+        site.clear_outputs(candidate_outputs);
+        site.launch(candidate, candidate_outputs);
 
-        let keep = if index == BASELINE_INDEX {
-            true
-        } else if is_reference {
-            reference_passed
-        } else if is_exact_integer(candidate) {
-            check_integer_follower(site, candidate, reference, reference_passed, outputs)
-        } else {
-            site.clear_outputs(outputs.candidate);
-            site.launch(candidate, outputs.candidate);
+        let fidelity = candidate.fidelity();
+        let verdict = site.compare(baseline_outputs, candidate_outputs, fidelity);
 
-            let fidelity = candidate.fidelity();
-            let verdict = site.compare(outputs.baseline, outputs.candidate, fidelity);
-            passes(candidate, verdict, "the baseline")
-        };
-
-        if keep {
-            passed.push(index);
+        match verdict {
+            Ok(CompareResult::Pass) => passed.push(index),
+            Ok(CompareResult::Fail(reason)) => {
+                tracing::warn!(
+                    site = S::Candidate::SITE,
+                    candidate = candidate.name(),
+                    %reason,
+                    "dropping a candidate whose output differs from the baseline"
+                );
+            },
+            Err(error) => {
+                tracing::warn!(
+                    site = S::Candidate::SITE,
+                    candidate = candidate.name(),
+                    %error,
+                    "dropping a candidate whose output could not be checked"
+                );
+            },
         }
     }
 
     passed
-}
-
-/// Runs the integer reference into its own outputs and checks it against the baseline's.
-fn check_reference<R: Runtime, S: VariantSite<R>>(
-    site: &S,
-    allowed: &[S::Candidate],
-    reference: &IntegerReference<S::Outputs>,
-    outputs: &CheckOutputs<'_, S::Outputs>,
-) -> bool {
-    let candidate = allowed[reference.index];
-    site.clear_outputs(&reference.outputs);
-    site.launch(candidate, &reference.outputs);
-
-    let fidelity = candidate.fidelity();
-    let verdict = site.compare(outputs.baseline, &reference.outputs, fidelity);
-
-    passes(candidate, verdict, "the baseline")
-}
-
-/// Whether an exact integer candidate other than the reference matches the reference bit for bit.
-fn check_integer_follower<R: Runtime, S: VariantSite<R>>(
-    site: &S,
-    candidate: S::Candidate,
-    reference: Option<&IntegerReference<S::Outputs>>,
-    reference_passed: bool,
-    outputs: &CheckOutputs<'_, S::Outputs>,
-) -> bool {
-    let Some(reference) = reference else {
-        tracing::warn!(
-            site = S::Candidate::SITE,
-            candidate = candidate.name(),
-            "dropping an exact integer candidate because no integer reference ran to check it against"
-        );
-        return false;
-    };
-
-    if !reference_passed {
-        tracing::warn!(
-            site = S::Candidate::SITE,
-            candidate = candidate.name(),
-            "dropping an exact integer candidate because its integer reference failed its own check"
-        );
-        return false;
-    }
-
-    site.clear_outputs(outputs.candidate);
-    site.launch(candidate, outputs.candidate);
-
-    let verdict = site.compare(&reference.outputs, outputs.candidate, Fidelity::Exact);
-
-    passes(candidate, verdict, "the integer reference")
-}
-
-/// Whether `verdict` passed, logging why a candidate is dropped when it did not.
-fn passes<C: SiteCandidate>(
-    candidate: C,
-    verdict: Result<CompareResult, anyhow::Error>,
-    against: &'static str,
-) -> bool {
-    match verdict {
-        Ok(CompareResult::Pass) => true,
-        Ok(CompareResult::Fail(reason)) => {
-            tracing::warn!(
-                site = C::SITE,
-                candidate = candidate.name(),
-                against,
-                %reason,
-                "dropping a candidate whose output differs from what it is checked against"
-            );
-            false
-        },
-        Err(error) => {
-            tracing::warn!(
-                site = C::SITE,
-                candidate = candidate.name(),
-                %error,
-                "dropping a candidate whose output could not be checked"
-            );
-            false
-        },
-    }
 }
 
 /// The ranking of a key whose baseline is its only candidate, which needs no timing.

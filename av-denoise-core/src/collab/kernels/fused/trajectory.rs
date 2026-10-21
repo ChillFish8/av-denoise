@@ -34,7 +34,7 @@ pub(crate) const NO_COORDINATE: u32 = 0xFFFF_FFFF;
 ///
 /// A rectangle the row crosses excludes its x span, and one it misses gets the empty span `1..=0`.
 #[cube]
-pub(crate) fn row_spans(
+fn row_spans(
     seen_left: &Array<u32>,
     seen_right: &Array<u32>,
     seen_top: &Array<u32>,
@@ -58,7 +58,7 @@ pub(crate) fn row_spans(
 ///
 /// A member on another row or frame gets [NO_COORDINATE].
 #[cube]
-pub(crate) fn row_held_columns(
+fn row_held_columns(
     member_pos: &Array<u32>,
     row_y: u32,
     packed_t: u32,

@@ -13,7 +13,6 @@
 //! - [Legality] says what a device may run beyond the fit check
 
 mod budget;
-mod codes;
 mod consts;
 mod decide;
 mod device;
@@ -49,7 +48,6 @@ pub use self::budget::{
     tuning_budget,
     tuning_order,
 };
-pub use self::codes::{IntegerCodes, MAX_INTEGER_DEPTH};
 pub use self::consts::*;
 pub use self::decide::{
     CandidateStats,
@@ -71,7 +69,6 @@ pub use self::fidelity::{
     ErrorBound,
     Fidelity,
     FidelityClass,
-    IntegerBound,
     PlaneDiff,
     diff_integers,
     diff_plane,

@@ -53,15 +53,13 @@ pub struct CandidateRecord {
 }
 
 impl CandidateRecord {
-    /// Lower is more faithful. The baseline comes first, then exact, exact integer, rounding and
-    /// approximate.
+    /// Lower is more faithful. The baseline comes first, then exact, rounding and approximate.
     pub fn faithfulness(&self) -> u8 {
         match (self.baseline, self.fidelity) {
             (true, _) => 0,
             (false, FidelityClass::Exact) => 1,
-            (false, FidelityClass::ExactInteger) => 2,
-            (false, FidelityClass::Rounding) => 3,
-            (false, FidelityClass::Approximate) => 4,
+            (false, FidelityClass::Rounding) => 2,
+            (false, FidelityClass::Approximate) => 3,
         }
     }
 }
@@ -101,11 +99,11 @@ fn keeps_over(older: &SiteRanking, newer: &SiteRanking) -> bool {
 /// The lowest median wins, unless a more faithful candidate is within
 /// [HYSTERESIS](crate::tune::HYSTERESIS) of that median. Then the most faithful such candidate
 /// wins, and the faster one between equally faithful candidates. With `deterministic` set only
-/// exact and exact integer candidates are considered.
+/// exact candidates are considered.
 pub fn choose(records: &[CandidateRecord], deterministic: bool) -> Option<&CandidateRecord> {
     let eligible: Vec<&CandidateRecord> = records
         .iter()
-        .filter(|record| !deterministic || record.fidelity.deterministic())
+        .filter(|record| !deterministic || record.fidelity == FidelityClass::Exact)
         .collect();
 
     let fastest = eligible.iter().map(|record| record.median_ns).min()?;

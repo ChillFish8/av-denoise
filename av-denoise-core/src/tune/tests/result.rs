@@ -98,30 +98,6 @@ fn deterministic_only_considers_exact_candidates() {
 }
 
 #[test]
-fn deterministic_choices_keep_exact_integer_candidates() {
-    let records = [
-        baseline_record(10_000_000),
-        record("int", FidelityClass::ExactInteger, false, 5_000_000),
-        record("round", FidelityClass::Rounding, false, 4_000_000),
-    ];
-    let chosen = choose(&records, true).expect("a candidate");
-
-    assert_eq!(chosen.name, "int");
-}
-
-#[test]
-fn hysteresis_prefers_exact_over_exact_integer_within_the_margin() {
-    let records = [
-        baseline_record(2000),
-        record("exact", FidelityClass::Exact, false, 1010),
-        record("int", FidelityClass::ExactInteger, false, 1000),
-    ];
-    let chosen = choose(&records, false).expect("a candidate");
-
-    assert_eq!(chosen.name, "exact");
-}
-
-#[test]
 fn no_records_choose_nothing() {
     assert!(choose(&[], false).is_none());
 }

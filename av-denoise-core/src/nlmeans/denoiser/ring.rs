@@ -4,10 +4,9 @@ use cubecl::server::Handle;
 
 use super::NlmDenoiser;
 use crate::engine::timing::timed;
-use crate::nlmeans::kernels::{gpu_cast_codes, gpu_cast_f16, gpu_copy};
+use crate::nlmeans::kernels::{gpu_cast_f16, gpu_copy};
 use crate::nlmeans::prefilter::PrefilterMode;
 use crate::nlmeans::{BLOCK_1D, MAX_GRID_1D};
-use crate::tune::IntegerCodes;
 
 impl<R: Runtime> NlmDenoiser<R> {
     pub(super) fn advance_ring(&mut self) {
@@ -101,126 +100,6 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
     }
 
-    /// Allocates the integer code ring, a slot-for-slot u16 copy of the input ring.
-    ///
-    /// A motion-compensated denoiser also gets a code copy of its compensated ring. Every later
-    /// write to a mirrored slot is cast into the code rings, so it must be called before the first
-    /// push.
-    pub(crate) fn enable_code_ring(&mut self, codes: IntegerCodes) {
-        // One cast per warped neighbour fits the motion pass's dispatch count only without a
-        // reference warp.
-        debug_assert!(
-            self.reference_buf.is_none(),
-            "the code ring needs an unfiltered pipeline"
-        );
-
-        let compensated = self.compensated_input_buf.is_some();
-        self.allocate_code_rings(codes, compensated);
-    }
-
-    /// Allocates the integer code ring without a compensated copy, before the first push.
-    ///
-    /// It suits a denoiser whose temporal reads never go through the compensated ring.
-    pub(crate) fn enable_uncompensated_code_ring(&mut self, codes: IntegerCodes) {
-        self.allocate_code_rings(codes, false);
-    }
-
-    fn allocate_code_rings(&mut self, codes: IntegerCodes, compensated: bool) {
-        debug_assert_eq!(
-            self.frames_loaded, 0,
-            "the code ring must be enabled before the first push"
-        );
-
-        let total_frames = self.params.total_frames() as usize;
-        let stored_ch = self.params.channels.storage_count() as usize;
-        let frame_len = (self.width * self.height) as usize * stored_ch;
-        let ring_bytes = frame_len * total_frames * codes.code_bytes();
-        // A storage binding is a whole number of 4-byte words.
-        let bytes = ring_bytes.next_multiple_of(size_of::<u32>());
-
-        let code_buf = self.client.empty(bytes);
-        self.code_buf = Some(code_buf);
-        self.codes = Some(codes);
-
-        if compensated {
-            let compensated_code_buf = self.client.empty(bytes);
-            self.compensated_code_buf = Some(compensated_code_buf);
-        }
-    }
-
-    /// Casts input slot `slot` into the code ring, when the code ring exists.
-    pub(in crate::nlmeans) fn mirror_code_slot(&self, slot: usize) {
-        let (Some(code_buf), Some(codes)) = (self.code_buf.as_ref(), self.codes) else {
-            return;
-        };
-
-        self.cast_codes_into(&self.input_buf, code_buf, codes, slot);
-    }
-
-    /// Casts compensated slot `slot` into the compensated code ring, when it exists.
-    pub(in crate::nlmeans) fn mirror_compensated_codes(&self, slot: usize) {
-        let compensated_code_buf = self.compensated_code_buf.as_ref();
-        let compensated_input_buf = self.compensated_input_buf.as_ref();
-        let (Some(code_buf), Some(source), Some(codes)) =
-            (compensated_code_buf, compensated_input_buf, self.codes)
-        else {
-            return;
-        };
-
-        self.cast_codes_into(source, code_buf, codes, slot);
-    }
-
-    /// Casts slot `slot` of the f32 ring `source` into the same slot of the u16 ring `codes_ring`.
-    fn cast_codes_into(&self, source: &Handle, codes_ring: &Handle, codes: IntegerCodes, slot: usize) {
-        let total_frames = self.params.total_frames() as usize;
-        let stored_ch = self.params.channels.storage_count();
-        let frame_len = self.width * self.height * stored_ch;
-        let ring_len = frame_len as usize * total_frames;
-        let grid = frame_len.div_ceil(BLOCK_1D).min(MAX_GRID_1D);
-        let total_threads = grid * BLOCK_1D;
-        let offset = slot as u32 * frame_len;
-        let max_code = codes.max_code() as f32;
-        let cube_count = CubeCount::new_1d(grid);
-        let cube_dim = CubeDim::new_1d(BLOCK_1D);
-        let source_handle = source.clone();
-        let codes_handle = codes_ring.clone();
-
-        unsafe {
-            let source_arg = ArrayArg::from_raw_parts(source_handle, ring_len);
-            let codes_arg = ArrayArg::from_raw_parts(codes_handle, ring_len);
-
-            gpu_cast_codes::launch_unchecked::<u16, R>(
-                &self.client,
-                cube_count,
-                cube_dim,
-                source_arg,
-                codes_arg,
-                max_code,
-                offset,
-                frame_len,
-                total_threads,
-            );
-        }
-    }
-
-    /// The integer code ring and its codes, when the code ring exists.
-    pub(crate) fn code_ring(&self) -> Option<(&Handle, IntegerCodes)> {
-        let code_buf = self.code_buf.as_ref()?;
-        let codes = self.codes?;
-
-        Some((code_buf, codes))
-    }
-
-    /// The code copy of the compensated ring, when it exists.
-    pub(crate) fn compensated_code_ring(&self) -> Option<&Handle> {
-        self.compensated_code_buf.as_ref()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn compensated_input_ring_for_test(&self) -> Option<&Handle> {
-        self.compensated_input_buf.as_ref()
-    }
-
     /// Copies the first pushed frame into the leading ring slots so the window starts balanced.
     ///
     /// It does nothing with shifted edges on, since those windows stop at the clip start instead.
@@ -275,7 +154,6 @@ impl<R: Runtime> NlmDenoiser<R> {
         let input_buf = self.input_buf.clone();
         self.copy_frame_into_slot(&input_buf, next_slot, &input_buf, last_slot, total_frames);
         self.mirror_search_slot(next_slot);
-        self.mirror_code_slot(next_slot);
 
         // `NlmSpatial` rebuilds this slot's reference with the pilot instead.
         if !matches!(self.params.prefilter, PrefilterMode::NlmSpatial { .. })

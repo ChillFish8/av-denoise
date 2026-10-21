@@ -23,16 +23,8 @@ use super::motion::{confidence_byte_offset, neighbour_idx_for_k};
 use super::noise::{build_spatial_offset_lut, spatial_offset_factor, spatial_offset_lut_len};
 use super::{BLOCK_1D, BLOCK_X, BLOCK_Y, MAX_GRID_1D};
 use crate::engine::timing::{timed, units_per_span};
-use crate::tune::IntegerCodes;
 use crate::tune::gpu::bind;
-use crate::tune::sites::{
-    AccumOutputs,
-    AccumulateSite,
-    ConfidenceBinding,
-    WindowCodes,
-    WindowPass,
-    WindowSite,
-};
+use crate::tune::sites::{AccumOutputs, AccumulateSite, ConfidenceBinding, WindowPass, WindowSite};
 
 /// The most dispatches one separable search offset queues.
 const SEPARABLE_DISPATCHES_PER_OFFSET: u32 = 4;
@@ -46,14 +38,6 @@ pub(super) struct LaunchCtx {
     pub(super) pixels: usize,
     pub(super) cube_count: CubeCount,
     pub(super) cube_dim: CubeDim,
-}
-
-/// The rings one windowed launch reads.
-struct WindowRings {
-    input: Handle,
-    reference: Option<Handle>,
-    /// The code copy of `input`.
-    codes: Option<WindowCodes>,
 }
 
 impl<R: Runtime> NlmDenoiser<R> {
@@ -216,56 +200,13 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
     }
 
-    /// The code ring `ring` as a window binding, with the scale for this denoiser's channels.
-    fn window_codes(&self, ring: &Handle, codes: IntegerCodes) -> WindowCodes {
-        let channels = self.params.channels.count();
-        let inv_scale2 = codes.inv_scale2(channels);
-
-        WindowCodes {
-            ring: ring.clone(),
-            codes,
-            inv_scale2,
-        }
-    }
-
-    /// The code ring the frame-against-itself windows read, when there is one and no reference.
-    pub(crate) fn plain_codes(&self) -> Option<WindowCodes> {
-        if self.use_reference {
-            return None;
-        }
-
-        let (ring, codes) = self.code_ring()?;
-        let window_codes = self.window_codes(ring, codes);
-
-        Some(window_codes)
-    }
-
-    /// The code ring the temporal windows read, which is the compensated one under motion
-    /// compensation.
-    ///
-    /// There is none with a reference in use, or when the ring the temporal kernels read has no code
-    /// copy.
-    pub(crate) fn temporal_codes(&self) -> Option<WindowCodes> {
-        if self.use_reference {
-            return None;
-        }
-
-        let (plain_ring, codes) = self.code_ring()?;
-        let ring = match self.compensated_input_buf {
-            Some(_) => self.compensated_code_ring()?,
-            None => plain_ring,
-        };
-        let window_codes = self.window_codes(ring, codes);
-
-        Some(window_codes)
-    }
-
-    /// A windowed launch over `rings` that adds into the frame accumulators.
+    /// A windowed launch over `input` that adds into the frame accumulators.
     fn window_site(
         &self,
         ctx: &LaunchCtx,
         pass: WindowPass,
-        rings: WindowRings,
+        input: Handle,
+        reference: Option<Handle>,
         frame_t: u32,
         h2_inv_norm: f32,
     ) -> WindowSite<R> {
@@ -274,9 +215,8 @@ impl<R: Runtime> NlmDenoiser<R> {
         WindowSite {
             client: self.client.clone(),
             pass,
-            input: rings.input,
-            reference: rings.reference,
-            codes: rings.codes,
+            input,
+            reference,
             ring_len: ctx.total_frame_data,
             outputs,
             frame_t,
@@ -310,12 +250,9 @@ impl<R: Runtime> NlmDenoiser<R> {
             noise_offset: self.noise_offset,
             confidence,
         };
-        let rings = WindowRings {
-            input: self.temporal_input(),
-            reference: self.temporal_reference(),
-            codes: self.temporal_codes(),
-        };
-        let site = self.window_site(ctx, pass, rings, frame_t, self.h2_inv_norm);
+        let input = self.temporal_input();
+        let reference = self.temporal_reference();
+        let site = self.window_site(ctx, pass, input, reference, frame_t, self.h2_inv_norm);
 
         self.kernels.run(&site)
     }
@@ -331,12 +268,9 @@ impl<R: Runtime> NlmDenoiser<R> {
             offsets: self.spatial_offset_lut.handle().clone(),
             offsets_len,
         };
-        let rings = WindowRings {
-            input: self.input_buf.clone(),
-            reference: self.plain_reference(),
-            codes: self.plain_codes(),
-        };
-        let site = self.window_site(ctx, pass, rings, frame_t, self.h2_inv_norm);
+        let input = self.input_buf.clone();
+        let reference = self.plain_reference();
+        let site = self.window_site(ctx, pass, input, reference, frame_t, self.h2_inv_norm);
 
         self.kernels.run(&site)
     }
@@ -666,14 +600,11 @@ impl<R: Runtime> NlmDenoiser<R> {
             offsets: pilot_lut_handle,
             offsets_len: pilot_lut.len(),
         };
+        let input = self.input_buf.clone();
+
         // Always the noisy input. For `NlmSpatial` the reference ring is this pass's output, even
         // though `use_reference` is set so the main pass picks the `_ref` kernels.
-        let rings = WindowRings {
-            input: self.input_buf.clone(),
-            reference: None,
-            codes: None,
-        };
-        let site = self.window_site(&ctx, pass, rings, slot, pilot_h2);
+        let site = self.window_site(&ctx, pass, input, None, slot, pilot_h2);
         self.kernels.run(&site)?;
 
         let reference_ring = self.reference_ring_arg(&ctx);

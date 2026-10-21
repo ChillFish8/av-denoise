@@ -30,7 +30,7 @@ use super::params::{NlmParams, SEPARABLE_THRESHOLD, validate_dimensions};
 use super::prefilter::PrefilterMode;
 use crate::engine::timing::DeviceTimer;
 use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
-use crate::tune::{IntegerCodes, KernelSelector};
+use crate::tune::KernelSelector;
 
 /// A denoised frame still resident on the GPU.
 ///
@@ -67,12 +67,6 @@ pub struct NlmDenoiser<R: Runtime> {
     pub(super) input_buf: Handle,
     /// An f16 copy of `input_buf`, slot for slot, allocated by `enable_search_ring`.
     pub(super) search_buf: Option<Handle>,
-    /// The codes `code_buf` holds, set by `enable_code_ring`.
-    pub(super) codes: Option<IntegerCodes>,
-    /// A u16 integer-code copy of `input_buf`, slot for slot.
-    pub(super) code_buf: Option<Handle>,
-    /// A u16 integer-code copy of `compensated_input_buf`, slot for slot.
-    pub(super) compensated_code_buf: Option<Handle>,
     /// The prefiltered ring the `_ref` distance kernels read, shaped like `input_buf`.
     pub(super) reference_buf: Option<Handle>,
     /// A 4-byte handle bound for planes a kernel never reads.
@@ -444,9 +438,6 @@ impl<R: Runtime> NlmDenoiser<R> {
             call_start_push: 0,
             input_buf,
             search_buf: None,
-            codes: None,
-            code_buf: None,
-            compensated_code_buf: None,
             reference_buf,
             placeholder,
             accum,
@@ -530,7 +521,6 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         ingest(&self.client, planes, format, &self.placeholder, target);
         self.mirror_search_slot(slot);
-        self.mirror_code_slot(slot);
         self.run_post_upload_stages(slot)?;
 
         self.process_landed_readings()

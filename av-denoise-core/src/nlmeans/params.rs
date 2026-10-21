@@ -438,16 +438,10 @@ impl NlmParams {
 
 /// The per-channel distance scale, matching the `channel_scale` the weighting kernels use.
 pub(super) fn channel_scale(channels: ChannelMode) -> f32 {
-    let count = channels.count();
-    channel_scale_for(count)
-}
-
-/// The per-channel distance scale for `channels` active channels.
-pub(crate) fn channel_scale_for(channels: u32) -> f32 {
     match channels {
-        1 => 3.0,
-        2 => 1.5,
-        _ => 1.0,
+        ChannelMode::Luma => 3.0,
+        ChannelMode::Chroma => 1.5,
+        ChannelMode::Yuv => 1.0,
     }
 }
 
