@@ -1,4 +1,12 @@
 pub mod geometry;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "no integer search candidate reads the host reference yet"
+    )
+)]
+pub(crate) mod integer;
 pub mod kernels;
 
 // The tests run against a real GPU runtime, so they need a wgpu-backed feature.
