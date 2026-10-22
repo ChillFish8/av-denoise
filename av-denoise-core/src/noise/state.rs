@@ -1,14 +1,35 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
+#[cfg(test)]
+use super::reading::ReadingRecord;
+use super::reading::{
+    IMMERKAER_SPATIAL_TAGS,
+    IMMERKAER_TAGS,
+    READING_WORDS,
+    SAMPLE_TAGS,
+    immerkaer_queries,
+    sample_queries,
+};
+use super::select::SelectBatch;
+#[cfg(test)]
+use super::select::{SelectQuery, order_key_host};
 use super::spatial::{
     RESULTS_PER_SLOT,
     noise_partials_slot_stride_bytes,
     noise_partials_slot_view,
     noise_results_slot_view,
+    partials_len,
 };
 use super::strength_map::{QuarterSettings, StrengthMapParams};
-use super::temporal::{temporal_stats_buf_bytes, temporal_stats_slot_view};
+#[cfg(test)]
+use super::temporal::temporal_stats_slot_len;
+use super::temporal::{
+    min_static_blocks,
+    temporal_stats_blocks,
+    temporal_stats_buf_bytes,
+    temporal_stats_slot_view,
+};
 use crate::engine::align::StorageAlign;
 
 /// The plane geometry one noise state measures.
@@ -40,6 +61,23 @@ pub(crate) enum StrengthMapKind {
     },
 }
 
+/// The `f32` values block derive keeps per block, starting with the three channel sigmas.
+pub(crate) const BLOCK_FIELDS: u32 = 8;
+/// The block value of channel 0's mean residual.
+pub(crate) const BLOCK_VALUE_MEAN0: u32 = 3;
+/// The block value of channel 0's mean lag-1 product.
+pub(crate) const BLOCK_VALUE_MEAN_LAG: u32 = 4;
+/// The block value of channel 0's residual variance.
+pub(crate) const BLOCK_VALUE_VAR0: u32 = 5;
+/// The block value of the pixel pair count.
+pub(crate) const BLOCK_VALUE_PAIRS: u32 = 6;
+/// The unused last block value.
+pub(crate) const BLOCK_VALUE_SPARE: u32 = 7;
+/// The block flag of a block whose mean residual passes the static gate.
+pub(crate) const BLOCK_CANDIDATE: u32 = 1;
+/// The block flag of a block accepted as static noise.
+pub(crate) const BLOCK_ACCEPTED: u32 = 2;
+
 /// What one slot's reading measures.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct ReadingSettings {
@@ -60,6 +98,24 @@ pub(crate) struct NoiseState<R: Runtime> {
     pub(super) results: Handle,
     /// The temporal residual statistics, one padded region per slot, when they are measured.
     pub(super) stats: Option<Handle>,
+    /// One reading of [READING_WORDS](crate::noise::reading::READING_WORDS) values per slot.
+    pub(super) readings: Handle,
+    /// Each Immerkær cube's sigmas and, with temporal stats, each candidate block's channel-0 sigma.
+    pub(super) immerkaer_batch: SelectBatch,
+    /// The per-block scratch and the sample batch, when temporal stats are measured.
+    pub(super) sample: Option<SampleScratch>,
+    /// The fewest accepted blocks a sample needs to reach the static fraction.
+    pub(super) min_accepted: u32,
+}
+
+/// The buffers one slot's temporal sample is built in.
+pub(super) struct SampleScratch {
+    /// [BLOCK_FIELDS](crate::noise::state::BLOCK_FIELDS) values per block.
+    pub(super) block_values: Handle,
+    /// One flag word per block.
+    pub(super) block_flags: Handle,
+    /// Each accepted block's sigmas, correlation and static quarter sigmas.
+    pub(super) batch: SelectBatch,
 }
 
 impl<R: Runtime> NoiseState<R> {
@@ -86,6 +142,16 @@ impl<R: Runtime> NoiseState<R> {
             None
         };
 
+        let readings_len = (shape.frames * READING_WORDS) as usize;
+        let reading_zeros = vec![0.0f32; readings_len];
+        let reading_bytes = f32::as_bytes(&reading_zeros);
+        let readings = client.create_from_slice(reading_bytes);
+
+        let immerkaer_batch = immerkaer_batch(client, shape);
+        let sample = shape.temporal.then(|| sample_scratch(client, shape));
+        let blocks = block_count(shape);
+        let min_accepted = min_static_blocks(blocks);
+
         Self {
             client: client.clone(),
             shape,
@@ -93,6 +159,10 @@ impl<R: Runtime> NoiseState<R> {
             partials,
             results,
             stats,
+            readings,
+            immerkaer_batch,
+            sample,
+            min_accepted,
         }
     }
 
@@ -161,4 +231,211 @@ impl<R: Runtime> NoiseState<R> {
     pub(crate) fn stats(&self) -> Option<&Handle> {
         self.stats.as_ref()
     }
+}
+
+/// Immerkær cubes in one frame of `shape`.
+pub(super) fn cube_count(shape: NoiseShape) -> u32 {
+    let lanes = partials_len(shape.width, shape.height) as u32;
+    lanes / 4
+}
+
+/// Temporal-stats blocks in one frame of `shape`.
+pub(super) fn block_count(shape: NoiseShape) -> u32 {
+    let (blocks_x, blocks_y) = temporal_stats_blocks(shape.width, shape.height);
+    blocks_x * blocks_y
+}
+
+/// The immerkaer batch, `3 * cubes` lanes plus, with temporal stats, one lane per block.
+fn immerkaer_batch<R: Runtime>(client: &ComputeClient<R>, shape: NoiseShape) -> SelectBatch {
+    let cubes = cube_count(shape);
+    let block_lanes = if shape.temporal { block_count(shape) } else { 0 };
+    let len = 3 * cubes + block_lanes;
+    let tag_count = if shape.temporal {
+        IMMERKAER_TAGS
+    } else {
+        IMMERKAER_SPATIAL_TAGS
+    };
+    let min_counts = vec![0u32; tag_count as usize];
+    let queries = immerkaer_queries(shape.temporal);
+
+    SelectBatch::new(client, len, &min_counts, &queries)
+}
+
+/// The block scratch and the sample batch of eight lanes per block.
+fn sample_scratch<R: Runtime>(client: &ComputeClient<R>, shape: NoiseShape) -> SampleScratch {
+    let blocks = block_count(shape);
+    let values_bytes = (blocks * BLOCK_FIELDS) as usize * size_of::<f32>();
+    let flags_bytes = blocks as usize * size_of::<u32>();
+    let min_counts = vec![0u32; SAMPLE_TAGS as usize];
+    let queries = sample_queries();
+    let batch = SelectBatch::new(client, 8 * blocks, &min_counts, &queries);
+
+    SampleScratch {
+        block_values: client.empty(values_bytes),
+        block_flags: client.empty(flags_bytes),
+        batch,
+    }
+}
+
+/// One slot's stats a test state starts with.
+#[cfg(test)]
+pub(crate) struct SlotStats<'a> {
+    pub partials: &'a [f32],
+    pub results_row: [f32; 4],
+    pub records: &'a [f32],
+}
+
+#[cfg(test)]
+impl<R: Runtime> NoiseState<R> {
+    /// A state whose slot 0 holds `partials`, `results_row` and, with temporal stats, `records`.
+    ///
+    /// Every other slot and the padding between slots read 0.
+    pub(crate) fn from_stats_for_test(
+        client: &ComputeClient<R>,
+        shape: NoiseShape,
+        settings: ReadingSettings,
+        partials: &[f32],
+        results_row: [f32; 4],
+        records: &[f32],
+    ) -> Self {
+        let slot = SlotStats {
+            partials,
+            results_row,
+            records,
+        };
+
+        Self::from_slots_for_test(client, shape, settings, &[slot])
+    }
+
+    /// A state whose first slots hold `slots` in order, with every other slot and the padding at 0.
+    pub(crate) fn from_slots_for_test(
+        client: &ComputeClient<R>,
+        shape: NoiseShape,
+        settings: ReadingSettings,
+        slots: &[SlotStats<'_>],
+    ) -> Self {
+        let mut state = Self::new(client, shape, settings);
+        let frames = shape.frames as usize;
+        let word = size_of::<f32>();
+        let partials_words = partials_len(shape.width, shape.height);
+        let records_words = temporal_stats_slot_len(shape.width, shape.height, shape.stored_ch);
+
+        let partials_stride = noise_partials_slot_stride_bytes(shape.width, shape.height, shape.align);
+        let partials_stride_words = partials_stride as usize / word;
+        let mut partials_ring = vec![0.0f32; partials_stride_words * frames];
+        let mut results_ring = vec![0.0f32; RESULTS_PER_SLOT * frames];
+
+        let stats_bytes = temporal_stats_buf_bytes(
+            shape.width,
+            shape.height,
+            shape.stored_ch,
+            shape.frames,
+            shape.align,
+        );
+        let stats_stride_words = stats_bytes / word / frames;
+        let mut stats_ring = vec![0.0f32; stats_bytes / word];
+
+        for (index, slot) in slots.iter().enumerate() {
+            let slot_partials = slot.partials.len();
+            assert_eq!(slot_partials, partials_words, "one slot's partials");
+
+            let partials_start = index * partials_stride_words;
+            let partials_end = partials_start + partials_words;
+            partials_ring[partials_start..partials_end].copy_from_slice(slot.partials);
+
+            let results_start = index * RESULTS_PER_SLOT;
+            let results_end = results_start + RESULTS_PER_SLOT;
+            results_ring[results_start..results_end].copy_from_slice(&slot.results_row);
+
+            if shape.temporal {
+                let slot_records = slot.records.len();
+                assert_eq!(slot_records, records_words, "one slot's records");
+
+                let records_start = index * stats_stride_words;
+                let records_end = records_start + records_words;
+                stats_ring[records_start..records_end].copy_from_slice(slot.records);
+            }
+        }
+
+        state.partials = upload_ring(client, &partials_ring);
+        state.results = upload_ring(client, &results_ring);
+
+        if shape.temporal {
+            let stats = upload_ring(client, &stats_ring);
+            state.stats = Some(stats);
+        }
+
+        state
+    }
+
+    /// Fills every batch's keys and tags and the block scratch with values no reading may keep.
+    ///
+    /// Every tag joins channel 1 or 2 with a key far above any sigma, and every block reads as an
+    /// accepted candidate with garbage values.
+    pub(crate) fn poison_for_test(&mut self) {
+        let client = self.client.clone();
+        let immerkaer_queries = immerkaer_queries(self.shape.temporal);
+        self.immerkaer_batch = poisoned_batch(&client, &self.immerkaer_batch, &immerkaer_queries);
+
+        if let Some(sample) = self.sample.as_mut() {
+            let blocks = block_count(self.shape) as usize;
+            let values = vec![7.5f32; blocks * BLOCK_FIELDS as usize];
+            let flags = vec![BLOCK_CANDIDATE | BLOCK_ACCEPTED; blocks];
+            let value_bytes = f32::as_bytes(&values);
+            let flag_bytes = u32::as_bytes(&flags);
+
+            sample.block_values = client.create_from_slice(value_bytes);
+            sample.block_flags = client.create_from_slice(flag_bytes);
+            let sample_queries = sample_queries();
+            sample.batch = poisoned_batch(&client, &sample.batch, &sample_queries);
+        }
+    }
+
+    /// Reads the reading of `slot` back.
+    pub(crate) fn read_reading(&self, slot: u32) -> ReadingRecord {
+        let row_bytes = u64::from(READING_WORDS) * size_of::<f32>() as u64;
+        let total_bytes = u64::from(self.shape.frames) * row_bytes;
+        let start = u64::from(slot) * row_bytes;
+        let end_trim = total_bytes - start - row_bytes;
+        let view = self.readings.clone().offset_start(start).offset_end(end_trim);
+        let bytes = self.client.read_one(view).expect("the reading reads back");
+        let words = f32::from_bytes(&bytes);
+
+        ReadingRecord::from_words(words)
+    }
+
+    /// Reads every block's flags back, empty without temporal stats.
+    pub(crate) fn read_block_flags(&self) -> Vec<u32> {
+        let Some(sample) = self.sample.as_ref() else {
+            return Vec::new();
+        };
+
+        let handle = sample.block_flags.clone();
+        let bytes = self.client.read_one(handle).expect("the block flags read back");
+        let flags = u32::from_bytes(&bytes);
+
+        flags.to_vec()
+    }
+}
+
+#[cfg(test)]
+fn upload_ring<R: Runtime>(client: &ComputeClient<R>, ring: &[f32]) -> Handle {
+    let bytes = f32::as_bytes(ring);
+    client.create_from_slice(bytes)
+}
+
+/// A batch shaped like `batch` whose every element is tagged 1 or 2 with the key of 1.0.
+#[cfg(test)]
+fn poisoned_batch<R: Runtime>(
+    client: &ComputeClient<R>,
+    batch: &SelectBatch,
+    queries: &[SelectQuery],
+) -> SelectBatch {
+    let len = batch.len() as usize;
+    let key = order_key_host(1.0);
+    let keys = vec![key; len];
+    let tags: Vec<u32> = (0..len).map(|index| 1 + (index % 2) as u32).collect();
+    let min_counts = vec![0u32; batch.tag_count() as usize];
+
+    SelectBatch::from_elements(client, &keys, &tags, &min_counts, queries)
 }

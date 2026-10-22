@@ -60,6 +60,26 @@ pub(crate) const RHO_SIGMA_GATE: f32 = 0.3 / 255.0;
 /// Below it, motion, a scene change or too little measurable noise dominates the frame, and the
 /// Immerkær estimate is the only usable reading.
 pub(crate) const STATIC_FRACTION_MIN: f32 = 0.05;
+
+/// The fewest accepted blocks out of `total_blocks` whose static fraction reaches
+/// [STATIC_FRACTION_MIN], computed with the same `f32` division the sample's gate uses.
+pub(crate) fn min_static_blocks(total_blocks: u32) -> u32 {
+    let total = total_blocks as f32;
+    let reaches = |accepted: u32| accepted as f32 / total >= STATIC_FRACTION_MIN;
+    let estimate = (STATIC_FRACTION_MIN * total) as u32;
+    let mut accepted = estimate.min(total_blocks);
+
+    while accepted > 0 && reaches(accepted - 1) {
+        accepted -= 1;
+    }
+
+    while accepted < total_blocks && !reaches(accepted) {
+        accepted += 1;
+    }
+
+    accepted
+}
+
 /// How far above the surviving blocks' lower quartile a block's sigma may sit before it counts as
 /// moving texture.
 ///

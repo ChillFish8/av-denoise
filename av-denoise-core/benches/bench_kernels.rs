@@ -1,6 +1,7 @@
 mod kernels;
 
 use av_denoise_core::bench_api::Device;
+use av_denoise_core::bench_api::noise_reading::ReadingStage;
 use av_denoise_core::bench_api::tune_sites::{
     AccumulateCandidate,
     CollabVariant,
@@ -38,7 +39,7 @@ use kernels::mc_confidence::McConfidenceBench;
 use kernels::mc_downscale::DownscaleBench;
 use kernels::mc_warp::WarpBench;
 use kernels::mv_regularise::MvRegulariseBench;
-use kernels::noise_gpu::{SelectBench, SelectShape, SelectStage};
+use kernels::noise_gpu::{ReadingBench, SelectBench, SelectShape, SelectStage};
 use kernels::noise_partial::NoisePartialBench;
 use kernels::temporal_noise_stats::TemporalNoiseStatsBench;
 use kernels::vertical_weight::VWeightBench;
@@ -248,6 +249,22 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
             stage,
             shape,
         });
+    }
+
+    // Each launch of a slot's reading, on the luma plane with the quarter fields and on chroma.
+    let reading_stages = [
+        ReadingStage::BlockDerive,
+        ReadingStage::BlockAccept,
+        ReadingStage::SampleFinish,
+    ];
+    for stage in reading_stages {
+        for chroma in [false, true] {
+            run(ReadingBench {
+                client: client.clone(),
+                stage,
+                chroma,
+            });
+        }
     }
 
     // Pyramid build and block matching are luma-only since motion estimation ignores chroma. Warp

@@ -2,6 +2,8 @@ mod correlation;
 mod estimator;
 mod host;
 mod line_ring;
+mod records;
+mod sample;
 mod select;
 mod spatial;
 mod state;

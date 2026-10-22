@@ -29,10 +29,6 @@ const MASK_2: u32 = (1 << SELECT_DIGIT_BITS[2]) - 1;
 /// A positive float gets its sign bit set, which lifts it above every negative one. A negative float
 /// has every bit flipped, which reverses its order.
 #[cube]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "no production kernel writes select keys")
-)]
 pub(crate) fn order_key(value: f32) -> u32 {
     let bits = u32::reinterpret(value);
     let negative = bits >= 0x8000_0000u32;

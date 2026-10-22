@@ -98,10 +98,6 @@ pub struct SelectQuery {
 }
 
 /// Order statistics over one tagged key array, answered by three radix passes.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "no production kernel queues a select batch")
-)]
 pub(crate) struct SelectBatch {
     keys: Handle,
     tags: Handle,
@@ -114,10 +110,6 @@ pub(crate) struct SelectBatch {
     state: Handle,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "no production kernel queues a select batch")
-)]
 impl SelectBatch {
     /// Allocates the arrays for `len` elements, with every tag `UNTAGGED`, a zeroed histogram and
     /// an empty state.

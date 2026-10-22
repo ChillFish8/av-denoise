@@ -117,12 +117,17 @@ pub(crate) fn run_noise_estimate<R: Runtime>(
     Ok(())
 }
 
+/// The `sqrt(pi / 2)` factor of the Immerkær sigma.
+pub(crate) fn immerkaer_sigma_scale() -> f32 {
+    std::f32::consts::FRAC_PI_2.sqrt()
+}
+
 /// Turns the summed absolute mask responses into an Immerkær sigma.
 ///
 /// The interior area leaves out the one-pixel border the mask cannot reach.
 pub(crate) fn sigma_from_abs_sum(abs_sum: f32, width: u32, height: u32) -> f32 {
     let interior = ((width - 2) as f32) * ((height - 2) as f32);
-    (std::f32::consts::FRAC_PI_2).sqrt() * abs_sum / (6.0 * interior)
+    immerkaer_sigma_scale() * abs_sum / (6.0 * interior)
 }
 
 /// The per-channel lower quartile of the per-block Immerkær sigmas in one slot's partials.
@@ -140,6 +145,7 @@ pub(crate) fn sigma_block_p25_from_partials(
     let cubes_x = width.div_ceil(IMMERKAER_BLOCK_X);
     let cubes_y = height.div_ceil(IMMERKAER_BLOCK_Y);
     let channels = channels as usize;
+    let scale = immerkaer_sigma_scale();
 
     let mut cube_sigmas: Vec<Vec<f32>> = vec![Vec::new(); channels];
 
@@ -165,7 +171,7 @@ pub(crate) fn sigma_block_p25_from_partials(
 
             for (channel, sigmas) in cube_sigmas.iter_mut().enumerate() {
                 let sum = partials[base + channel];
-                let cube_sigma = std::f32::consts::FRAC_PI_2.sqrt() * sum / (6.0 * area);
+                let cube_sigma = scale * sum / (6.0 * area);
                 sigmas.push(cube_sigma);
             }
         }

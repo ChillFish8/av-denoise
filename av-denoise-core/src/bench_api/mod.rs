@@ -1,5 +1,7 @@
 //! Internal items and host helpers shared by the benches and tests. Not a stable interface.
 
+pub mod noise_reading;
+
 pub mod collab {
     pub use crate::collab::*;
 }

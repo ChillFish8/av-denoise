@@ -1,7 +1,9 @@
 use std::ops::Range;
+use std::sync::Arc;
 
 use av_denoise_core::bench_api::MAX_GRID_1D;
 use av_denoise_core::bench_api::noise_kernels::{noise_select_histogram, noise_select_resolve};
+use av_denoise_core::bench_api::noise_reading::{NoiseReading, ReadingStage};
 use av_denoise_core::bench_api::noise_select::{
     RankRule,
     SELECT_CUBE_THREADS,
@@ -22,7 +24,7 @@ use cubecl::benchmark::{Benchmark, ProfileDuration};
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::{HEIGHT, WIDTH, block_sync};
+use super::{HEIGHT, WIDTH, block_sync, make_padded_frame, stored_channels};
 
 /// The 16x16 noise blocks of a 1080p plane.
 const BLOCKS: u32 = (WIDTH / 16) * (HEIGHT / 16);
@@ -422,5 +424,151 @@ impl<R: Runtime> Benchmark for SelectBench<R> {
         let query_count = data.queries.len();
 
         vec![vec![len, tag_count, query_count]]
+    }
+}
+
+/// One launch of a slot's noise reading on a 1080p luma or chroma plane.
+///
+/// The stats come from the real stats kernels over a synthetic frame and a copy with hashed noise
+/// added, so most blocks are static noise. The launches before the timed one run in `prepare`. The
+/// finish clears the select batches, so they are refilled from a copy outside the timed span.
+pub struct ReadingBench<R: Runtime> {
+    pub client: ComputeClient<R>,
+    pub stage: ReadingStage,
+    pub chroma: bool,
+}
+
+/// A prepared reading and the copies of its batch buffers.
+#[derive(Clone)]
+pub struct ReadingInput<R: Runtime> {
+    pub reading: Arc<NoiseReading<R>>,
+    /// Each batch buffer, its copy and its length in words.
+    pub buffers: Vec<(Handle, Handle, u32)>,
+}
+
+impl<R: Runtime> ReadingBench<R> {
+    /// The width, height, channels and stored channels of the plane.
+    fn plane(&self) -> (u32, u32, u32, u32) {
+        if self.chroma {
+            (WIDTH / 2, HEIGHT / 2, 2, stored_channels(2))
+        } else {
+            (WIDTH, HEIGHT, 1, stored_channels(1))
+        }
+    }
+
+    /// Two frames, the second with up to 0.02 of hashed noise added to every sample.
+    fn ring(&self) -> Handle {
+        let (width, height, channels, _) = self.plane();
+        let frame = make_padded_frame(width, height, channels);
+        let mut ring = frame.clone();
+
+        for (index, &sample) in frame.iter().enumerate() {
+            let unit = hashed_unit(index as u32);
+            let noisy = sample + 0.04 * (unit - 0.5);
+            ring.push(noisy);
+        }
+
+        let bytes = f32::as_bytes(&ring);
+        self.client.create_from_slice(bytes)
+    }
+
+    fn refill_buffers(&self, buffers: &[(Handle, Handle, u32)], restore: bool) {
+        for (buffer, copy, length) in buffers {
+            if restore {
+                self.refill(copy, buffer, *length);
+            } else {
+                self.refill(buffer, copy, *length);
+            }
+        }
+    }
+
+    fn refill(&self, source: &Handle, target: &Handle, length: u32) {
+        let dim = 256u32;
+        let grid = length.div_ceil(dim).min(MAX_GRID_1D);
+        let source_arg = unsafe { ArrayArg::from_raw_parts(source.clone(), length as usize) };
+        let target_arg = unsafe { ArrayArg::from_raw_parts(target.clone(), length as usize) };
+
+        unsafe {
+            refill_words::launch_unchecked::<R>(
+                &self.client,
+                CubeCount::new_1d(grid),
+                CubeDim::new_1d(dim),
+                source_arg,
+                target_arg,
+                length,
+                grid * dim,
+            );
+        }
+    }
+}
+
+impl<R: Runtime> Benchmark for ReadingBench<R> {
+    type Input = ReadingInput<R>;
+    type Output = ();
+
+    fn prepare(&self) -> Self::Input {
+        let (width, height, channels, stored_ch) = self.plane();
+        let ring = self.ring();
+        let reading = NoiseReading::new(&self.client, width, height, channels, stored_ch, &ring)
+            .expect("the stats queue");
+        reading.queue_before(self.stage);
+
+        let mut buffers = Vec::new();
+        if self.stage == ReadingStage::SampleFinish {
+            for (buffer, length) in reading.batch_buffers() {
+                let bytes = length as usize * size_of::<u32>();
+                let copy = self.client.empty(bytes);
+                buffers.push((buffer, copy, length));
+            }
+        }
+
+        self.refill_buffers(&buffers, false);
+        self.sync();
+
+        ReadingInput {
+            reading: Arc::new(reading),
+            buffers,
+        }
+    }
+
+    /// Refills the batch buffers, then times the stage on the device with the refill outside the
+    /// span.
+    fn profile_full(&self, args: Self::Input) -> Result<ProfileDuration, String> {
+        self.refill_buffers(&args.buffers, true);
+        self.sync();
+
+        let profiled = self
+            .client
+            .profile(|| args.reading.queue_stage(self.stage), "noise_reading");
+        let (_, duration) = profiled.map_err(|error| format!("profile failed: {error:?}"))?;
+
+        Ok(duration)
+    }
+
+    fn execute(&self, args: Self::Input) -> Result<(), String> {
+        args.reading.queue_stage(self.stage);
+
+        Ok(())
+    }
+
+    fn name(&self) -> String {
+        let stage = match self.stage {
+            ReadingStage::BlockDerive => "block_derive",
+            ReadingStage::BlockAccept => "block_accept",
+            ReadingStage::SampleFinish => "sample_finish",
+        };
+        let plane = if self.chroma { "chroma" } else { "luma" };
+
+        format!("noise_reading/{stage}/1080p_{plane}")
+    }
+
+    fn sync(&self) {
+        block_sync(&self.client);
+    }
+
+    fn shapes(&self) -> Vec<Vec<usize>> {
+        let (width, height, channels, _) = self.plane();
+
+        vec![vec![width as usize, height as usize, channels as usize]]
     }
 }
