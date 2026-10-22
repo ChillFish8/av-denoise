@@ -149,6 +149,13 @@ pub(crate) const SAMPLE_TAGS: u32 = 5;
 pub(crate) const SAMPLE_QUERIES: u32 = 16;
 /// The query of the correlation's lower median, followed by its upper median.
 pub(crate) const SAMPLE_QUERY_RHO: u32 = 12;
+/// The query of the static quarters' lower median, followed by its upper median.
+pub(crate) const SAMPLE_QUERY_QUARTER: u32 = 14;
+
+/// The curve batch's tags, one per luma bin.
+pub(crate) const CURVE_TAGS: u32 = NOISE_CURVE_BINS as u32;
+/// The curve batch's queries, a median pair per bin.
+pub(crate) const CURVE_QUERIES: u32 = 2 * CURVE_TAGS;
 
 /// The immerkaer batch's queries, a quartile pair per channel and, with temporal stats, the
 /// reference set's quartile pair, first and last element, then the excluded set's first.
@@ -213,6 +220,24 @@ pub(crate) fn sample_queries() -> Vec<SelectQuery> {
         for rule in median_rules {
             queries.push(SelectQuery { tag, rule });
         }
+    }
+
+    queries
+}
+
+/// The curve batch's queries, the lower then the upper median of each bin in turn.
+pub(crate) fn curve_queries() -> Vec<SelectQuery> {
+    let mut queries = Vec::with_capacity(CURVE_QUERIES as usize);
+
+    for tag in 0..CURVE_TAGS {
+        queries.push(SelectQuery {
+            tag,
+            rule: RankRule::MedianLow,
+        });
+        queries.push(SelectQuery {
+            tag,
+            rule: RankRule::MedianHigh,
+        });
     }
 
     queries

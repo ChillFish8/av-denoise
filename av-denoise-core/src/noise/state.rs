@@ -1,13 +1,16 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
+use super::curve::MIN_QUARTERS_PER_BIN;
 #[cfg(test)]
 use super::reading::ReadingRecord;
 use super::reading::{
+    CURVE_TAGS,
     IMMERKAER_SPATIAL_TAGS,
     IMMERKAER_TAGS,
     READING_WORDS,
     SAMPLE_TAGS,
+    curve_queries,
     immerkaer_queries,
     sample_queries,
 };
@@ -104,6 +107,9 @@ pub(crate) struct NoiseState<R: Runtime> {
     pub(super) immerkaer_batch: SelectBatch,
     /// The per-block scratch and the sample batch, when temporal stats are measured.
     pub(super) sample: Option<SampleScratch>,
+    /// Each flat, unclipped static quarter's sigma tagged with its luma bin, when temporal stats
+    /// and the luma quarter fields are measured.
+    pub(super) curve: Option<SelectBatch>,
     /// The fewest accepted blocks a sample needs to reach the static fraction.
     pub(super) min_accepted: u32,
 }
@@ -149,6 +155,7 @@ impl<R: Runtime> NoiseState<R> {
 
         let immerkaer_batch = immerkaer_batch(client, shape);
         let sample = shape.temporal.then(|| sample_scratch(client, shape));
+        let curve = curve_batch(client, shape, settings);
         let blocks = block_count(shape);
         let min_accepted = min_static_blocks(blocks);
 
@@ -162,6 +169,7 @@ impl<R: Runtime> NoiseState<R> {
             readings,
             immerkaer_batch,
             sample,
+            curve,
             min_accepted,
         }
     }
@@ -174,8 +182,20 @@ impl<R: Runtime> NoiseState<R> {
         self.settings
     }
 
-    /// Replaces the settings before the first queued slot.
+    /// Replaces the settings before the first queued slot, allocating or dropping the curve batch
+    /// to match.
     pub(crate) fn set_settings(&mut self, settings: ReadingSettings) {
+        let has_curve = self.curve.is_some();
+        let wants_curve = self.shape.temporal && settings.luma_fields;
+
+        if wants_curve && !has_curve {
+            self.curve = curve_batch(&self.client, self.shape, settings);
+        }
+
+        if !wants_curve {
+            self.curve = None;
+        }
+
         self.settings = settings;
     }
 
@@ -277,6 +297,25 @@ fn sample_scratch<R: Runtime>(client: &ComputeClient<R>, shape: NoiseShape) -> S
     }
 }
 
+/// The curve batch of four quarter lanes per block, with temporal stats and the luma quarter fields.
+fn curve_batch<R: Runtime>(
+    client: &ComputeClient<R>,
+    shape: NoiseShape,
+    settings: ReadingSettings,
+) -> Option<SelectBatch> {
+    if !shape.temporal || !settings.luma_fields {
+        return None;
+    }
+
+    let blocks = block_count(shape);
+    let min_count = MIN_QUARTERS_PER_BIN as u32;
+    let min_counts = vec![min_count; CURVE_TAGS as usize];
+    let queries = curve_queries();
+    let batch = SelectBatch::new(client, 4 * blocks, &min_counts, &queries);
+
+    Some(batch)
+}
+
 /// One slot's stats a test state starts with.
 #[cfg(test)]
 pub(crate) struct SlotStats<'a> {
@@ -375,7 +414,7 @@ impl<R: Runtime> NoiseState<R> {
     pub(crate) fn poison_for_test(&mut self) {
         let client = self.client.clone();
         let immerkaer_queries = immerkaer_queries(self.shape.temporal);
-        self.immerkaer_batch = poisoned_batch(&client, &self.immerkaer_batch, &immerkaer_queries);
+        self.immerkaer_batch = poisoned_batch(&client, &self.immerkaer_batch, 0, &immerkaer_queries);
 
         if let Some(sample) = self.sample.as_mut() {
             let blocks = block_count(self.shape) as usize;
@@ -387,8 +426,32 @@ impl<R: Runtime> NoiseState<R> {
             sample.block_values = client.create_from_slice(value_bytes);
             sample.block_flags = client.create_from_slice(flag_bytes);
             let sample_queries = sample_queries();
-            sample.batch = poisoned_batch(&client, &sample.batch, &sample_queries);
+            sample.batch = poisoned_batch(&client, &sample.batch, 0, &sample_queries);
         }
+
+        if let Some(curve) = self.curve.as_ref() {
+            let curve_queries = curve_queries();
+            let min_count = MIN_QUARTERS_PER_BIN as u32;
+            let poisoned = poisoned_batch(&client, curve, min_count, &curve_queries);
+            self.curve = Some(poisoned);
+        }
+    }
+
+    pub(crate) fn has_curve_batch(&self) -> bool {
+        self.curve.is_some()
+    }
+
+    /// Reads every lane's tag of the curve batch back, empty without one.
+    pub(crate) fn read_curve_tags(&self) -> Vec<u32> {
+        let Some(curve) = self.curve.as_ref() else {
+            return Vec::new();
+        };
+
+        let handle = curve.tags().clone();
+        let bytes = self.client.read_one(handle).expect("the curve tags read back");
+        let tags = u32::from_bytes(&bytes);
+
+        tags.to_vec()
     }
 
     /// Reads the reading of `slot` back.
@@ -425,17 +488,20 @@ fn upload_ring<R: Runtime>(client: &ComputeClient<R>, ring: &[f32]) -> Handle {
 }
 
 /// A batch shaped like `batch` whose every element is tagged 1 or 2 with the key of 1.0.
+///
+/// Every tag keeps `min_count`.
 #[cfg(test)]
 fn poisoned_batch<R: Runtime>(
     client: &ComputeClient<R>,
     batch: &SelectBatch,
+    min_count: u32,
     queries: &[SelectQuery],
 ) -> SelectBatch {
     let len = batch.len() as usize;
     let key = order_key_host(1.0);
     let keys = vec![key; len];
     let tags: Vec<u32> = (0..len).map(|index| 1 + (index % 2) as u32).collect();
-    let min_counts = vec![0u32; batch.tag_count() as usize];
+    let min_counts = vec![min_count; batch.tag_count() as usize];
 
     SelectBatch::from_elements(client, &keys, &tags, &min_counts, queries)
 }

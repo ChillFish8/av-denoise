@@ -429,13 +429,18 @@ impl<R: Runtime> Benchmark for SelectBench<R> {
 
 /// One launch of a slot's noise reading on a 1080p luma or chroma plane.
 ///
-/// The stats come from the real stats kernels over a synthetic frame and a copy with hashed noise
-/// added, so most blocks are static noise. The launches before the timed one run in `prepare`. The
-/// finish clears the select batches, so they are refilled from a copy outside the timed span.
+/// The stats come from the real stats kernels over a frame and a copy with hashed noise added, so
+/// most blocks are static noise. The launches before the timed one run in `prepare`. The luma rows
+/// measure the quarter fields, as nl4d does, except the plain finish row, which leaves the curve
+/// out. The curve batch's passes add to its histogram, so it is refilled from a copy outside the
+/// timed span.
 pub struct ReadingBench<R: Runtime> {
     pub client: ComputeClient<R>,
     pub stage: ReadingStage,
     pub chroma: bool,
+    /// Whether a luma row reads a smooth luma gradient, whose quarters fill every curve bin, and
+    /// builds the curve.
+    pub curve: bool,
 }
 
 /// A prepared reading and the copies of its batch buffers.
@@ -456,10 +461,40 @@ impl<R: Runtime> ReadingBench<R> {
         }
     }
 
+    /// Whether the stats carry the luma quarter fields.
+    fn luma_fields(&self) -> bool {
+        let finish = self.stage == ReadingStage::SampleFinish;
+        let plain_finish = finish && !self.curve;
+
+        !self.chroma && !plain_finish
+    }
+
+    /// A horizontal luma gradient between 0.05 and 0.95, gently bent along each column.
+    fn gradient_frame(&self) -> Vec<f32> {
+        let mut frame = Vec::with_capacity((WIDTH * HEIGHT) as usize);
+        let span = (WIDTH - 1) as f32;
+
+        for y in 0..HEIGHT {
+            let bend = 0.02 * (y as f32 * 0.01).sin();
+
+            for x in 0..WIDTH {
+                let ramp = 0.05 + 0.9 * x as f32 / span;
+                let sample = (ramp + bend).clamp(0.05, 0.95);
+                frame.push(sample);
+            }
+        }
+
+        frame
+    }
+
     /// Two frames, the second with up to 0.02 of hashed noise added to every sample.
     fn ring(&self) -> Handle {
         let (width, height, channels, _) = self.plane();
-        let frame = make_padded_frame(width, height, channels);
+        let frame = if self.curve {
+            self.gradient_frame()
+        } else {
+            make_padded_frame(width, height, channels)
+        };
         let mut ring = frame.clone();
 
         for (index, &sample) in frame.iter().enumerate() {
@@ -509,13 +544,22 @@ impl<R: Runtime> Benchmark for ReadingBench<R> {
     fn prepare(&self) -> Self::Input {
         let (width, height, channels, stored_ch) = self.plane();
         let ring = self.ring();
-        let reading = NoiseReading::new(&self.client, width, height, channels, stored_ch, &ring)
-            .expect("the stats queue");
+        let luma_fields = self.luma_fields();
+        let reading = NoiseReading::new(
+            &self.client,
+            width,
+            height,
+            channels,
+            stored_ch,
+            &ring,
+            luma_fields,
+        )
+        .expect("the stats queue");
         reading.queue_before(self.stage);
 
         let mut buffers = Vec::new();
-        if self.stage == ReadingStage::SampleFinish {
-            for (buffer, length) in reading.batch_buffers() {
+        if self.stage == ReadingStage::CurveBatch {
+            for (buffer, length) in reading.curve_batch_buffers() {
                 let bytes = length as usize * size_of::<u32>();
                 let copy = self.client.empty(bytes);
                 buffers.push((buffer, copy, length));
@@ -531,8 +575,8 @@ impl<R: Runtime> Benchmark for ReadingBench<R> {
         }
     }
 
-    /// Refills the batch buffers, then times the stage on the device with the refill outside the
-    /// span.
+    /// Refills the curve batch's buffers, then times the stage on the device with the refill
+    /// outside the span.
     fn profile_full(&self, args: Self::Input) -> Result<ProfileDuration, String> {
         self.refill_buffers(&args.buffers, true);
         self.sync();
@@ -552,10 +596,13 @@ impl<R: Runtime> Benchmark for ReadingBench<R> {
     }
 
     fn name(&self) -> String {
-        let stage = match self.stage {
-            ReadingStage::BlockDerive => "block_derive",
-            ReadingStage::BlockAccept => "block_accept",
-            ReadingStage::SampleFinish => "sample_finish",
+        let stage = match (self.stage, self.curve) {
+            (ReadingStage::BlockDerive, _) => "block_derive",
+            (ReadingStage::BlockAccept, _) => "block_accept",
+            (ReadingStage::CurveBins, _) => "curve_bins",
+            (ReadingStage::CurveBatch, _) => "curve_batch",
+            (ReadingStage::SampleFinish, false) => "sample_finish",
+            (ReadingStage::SampleFinish, true) => "sample_finish_curve",
         };
         let plane = if self.chroma { "chroma" } else { "luma" };
 

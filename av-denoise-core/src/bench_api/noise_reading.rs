@@ -9,6 +9,9 @@ use crate::noise::{NoiseShape, NoiseState, ReadingSettings};
 pub enum ReadingStage {
     BlockDerive,
     BlockAccept,
+    CurveBins,
+    /// The curve batch's three histogram passes.
+    CurveBatch,
     SampleFinish,
 }
 
@@ -20,7 +23,8 @@ pub struct NoiseReading<R: Runtime> {
 impl<R: Runtime> NoiseReading<R> {
     /// Measures the stats of a two-frame `ring` of `width` by `height` frames.
     ///
-    /// A single-channel plane measures the luma quarter fields, as nl4d's luma plane does.
+    /// With `luma_fields` the stats carry the luma quarter fields and the reading builds a curve, as
+    /// nl4d's luma plane does.
     pub fn new(
         client: &ComputeClient<R>,
         width: u32,
@@ -28,6 +32,7 @@ impl<R: Runtime> NoiseReading<R> {
         channels: u32,
         stored_ch: u32,
         ring: &Handle,
+        luma_fields: bool,
     ) -> Result<Self, anyhow::Error> {
         let shape = NoiseShape {
             width,
@@ -39,7 +44,7 @@ impl<R: Runtime> NoiseReading<R> {
             align: StorageAlign::from_client(client),
         };
         let settings = ReadingSettings {
-            luma_fields: channels == 1,
+            luma_fields,
             ..ReadingSettings::default()
         };
         let state = NoiseState::new(client, shape, settings);
@@ -63,6 +68,18 @@ impl<R: Runtime> NoiseReading<R> {
 
         self.state.queue_block_accept(1);
         self.state.queue_sample_batch();
+
+        if stage == ReadingStage::CurveBins {
+            return;
+        }
+
+        self.state.queue_curve_bins(1);
+
+        if stage == ReadingStage::CurveBatch {
+            return;
+        }
+
+        self.state.queue_curve_batch();
     }
 
     /// Queues the launch of `stage`.
@@ -70,13 +87,14 @@ impl<R: Runtime> NoiseReading<R> {
         match stage {
             ReadingStage::BlockDerive => self.state.queue_block_derive(1),
             ReadingStage::BlockAccept => self.state.queue_block_accept(1),
+            ReadingStage::CurveBins => self.state.queue_curve_bins(1),
+            ReadingStage::CurveBatch => self.state.queue_curve_batch(),
             ReadingStage::SampleFinish => self.state.queue_sample_finish(1),
-        }
+        };
     }
 
-    /// The histogram and state of each select batch with their lengths in words, which the finish
-    /// clears.
-    pub fn batch_buffers(&self) -> Vec<(Handle, u32)> {
-        self.state.reading_batch_buffers()
+    /// The curve batch's histogram and state with their lengths in words, which its passes add to.
+    pub fn curve_batch_buffers(&self) -> Vec<(Handle, u32)> {
+        self.state.curve_batch_buffers()
     }
 }

@@ -1,4 +1,5 @@
 mod correlation;
+mod curve;
 mod estimator;
 mod host;
 mod line_ring;

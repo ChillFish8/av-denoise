@@ -1,6 +1,6 @@
 use cubecl::prelude::*;
 
-use super::records::{BlockSpec, QuarterSpec, frame_records, hashed_partials, hashed_unit};
+use super::records::{BlockSpec, QuarterSpec, frame_records, hashed_partials, static_block, ulp_gap};
 use crate::engine::align::StorageAlign;
 use crate::noise::curve::{NOISE_CURVE_BINS, NoiseCurve};
 use crate::noise::reading::{READING_CURVE_VALID, READING_SAMPLE_VALID, ReadingRecord};
@@ -172,21 +172,6 @@ fn accepted_indices(flags: &[u32]) -> Vec<usize> {
         .collect()
 }
 
-fn ulp_gap(left: f32, right: f32) -> u32 {
-    if left == right {
-        return 0;
-    }
-
-    let left_bits = left.to_bits();
-    let right_bits = right.to_bits();
-    let left_wide = i64::from(left_bits);
-    let right_wide = i64::from(right_bits);
-    let gap = (left_wide - right_wide).unsigned_abs();
-    let limit = u64::from(u32::MAX);
-
-    gap.min(limit) as u32
-}
-
 fn assert_close(gpu: f32, host: f32, max_ulps: u32, what: &str) {
     let gap = ulp_gap(gpu, host);
     assert!(gap <= max_ulps, "{what}: gpu {gpu} host {host}, {gap} ulp apart");
@@ -261,28 +246,6 @@ fn check_plane(plane: Plane, partials: &[f32], records: &[f32]) -> (ReadingRecor
     assert_reading_matches(&gpu, &gpu_accepted, &host);
 
     (gpu, host)
-}
-
-/// A static block with hashed spread, a mean within half the static gate and sigmas between 2 and
-/// 4 codes.
-fn static_block(seed: u32, index: u32) -> BlockSpec {
-    let mean_unit = hashed_unit(seed, 4 * index);
-    let rho_unit = hashed_unit(seed, 4 * index + 1);
-    let mean = (mean_unit - 0.5) * STATIC_GATE;
-    let rho = 0.1 + 0.4 * rho_unit;
-
-    let mut sigma = [0.0f32; 3];
-    for (channel, channel_sigma) in sigma.iter_mut().enumerate() {
-        let unit = hashed_unit(seed + channel as u32, 4 * index + 2);
-        *channel_sigma = (2.0 + 2.0 * unit) / 255.0;
-    }
-
-    BlockSpec {
-        mean,
-        sigma,
-        rho,
-        ..BlockSpec::default()
-    }
 }
 
 /// A block whose mean residual is far past the static gate.

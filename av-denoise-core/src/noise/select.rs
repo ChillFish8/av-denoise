@@ -223,15 +223,16 @@ impl SelectBatch {
         state_len(self.query_count)
     }
 
-    /// Queues the three histogram passes.
-    pub(crate) fn queue<R: Runtime>(&self, client: &ComputeClient<R>) {
+    /// Queues the three histogram passes, returning how many launches that took.
+    pub(crate) fn queue<R: Runtime>(&self, client: &ComputeClient<R>) -> u32 {
         let cubes = self.len.div_ceil(SELECT_CUBE_THREADS);
         let len = self.len as usize;
         let query_words = (self.query_count * SELECT_QUERY_WORDS) as usize;
         let tag_words = (self.tag_count * SELECT_TAG_WORDS) as usize;
         let state_len = self.state_len() as usize;
 
-        for pass in 0..3u32 {
+        let passes = SELECT_DIGIT_BITS.len() as u32;
+        for pass in 0..passes {
             let reads = read_pass(pass);
             let (rows_in, rows_in_len) = self.pass_rows(reads);
             let (rows_out, rows_out_len) = self.pass_rows(pass);
@@ -255,6 +256,8 @@ impl SelectBatch {
                 );
             }
         }
+
+        passes
     }
 
     fn pass_rows(&self, pass: u32) -> (Handle, usize) {

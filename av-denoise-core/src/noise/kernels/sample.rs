@@ -3,12 +3,18 @@ use std::f32::consts::SQRT_2;
 use cubecl::prelude::*;
 
 use super::select::{clear_batch, order_key, resolve_queries, select_result};
-use crate::noise::curve::QUARTER_STATIC_GATE;
+use crate::noise::curve::{MIN_POPULATED_BINS, MIN_QUARTERS_PER_BIN, QUARTER_STATIC_GATE};
 use crate::noise::reading::{
+    CURVE_QUERIES,
+    CURVE_TAGS,
     IMMERKAER_QUERY_EXCLUDED,
     IMMERKAER_QUERY_REFERENCE,
     READING_ACCEPTED,
+    READING_CURVE_VALID,
     READING_IMMERKAER_LOW,
+    READING_POPULATED_BINS,
+    READING_QUARTER_MEDIAN,
+    READING_RATIOS,
     READING_RHO,
     READING_SAMPLE_VALID,
     READING_SIGMA,
@@ -16,6 +22,7 @@ use crate::noise::reading::{
     READING_STATIC_FRACTION,
     READING_WORDS,
     SAMPLE_QUERIES,
+    SAMPLE_QUERY_QUARTER,
     SAMPLE_QUERY_RHO,
     SAMPLE_TAGS,
     TAG_EXCLUDED,
@@ -48,6 +55,10 @@ use crate::noise::temporal::{
     temporal_stats_record_len,
 };
 use crate::noise::{IMMERKAER_BLOCK_X, IMMERKAER_BLOCK_Y};
+
+const MIN_BIN_QUARTERS: u32 = MIN_QUARTERS_PER_BIN as u32;
+const MIN_CURVE_BINS: u32 = MIN_POPULATED_BINS as u32;
+const LAST_CURVE_BIN: u32 = CURVE_TAGS - 1;
 
 /// The mean residual, its variance and the sigma of `pixels` residuals from their two sums.
 ///
@@ -90,7 +101,7 @@ fn quartile_from_pair(low: f32, high: f32, count: u32) -> f32 {
 
 /// The median from its two middle elements.
 #[cube]
-fn median_from_pair(low: f32, high: f32) -> f32 {
+pub(crate) fn median_from_pair(low: f32, high: f32) -> f32 {
     (low + high) * 0.5f32
 }
 
@@ -103,6 +114,10 @@ fn median_from_pair(low: f32, high: f32) -> f32 {
 /// `3 * cubes + i`. A candidate above the measurable-noise gate joins the reference set and one at
 /// or below it the excluded set. Without `temporal`, `records`, `block_values` and `block_flags`
 /// are never touched.
+///
+/// The grid then clears the histogram and state of the immerkaer batch and, with `temporal` and
+/// `curve`, of the sample and curve batches, so each reading's passes start from zero. Bindings of a
+/// batch the comptime flags leave out are never touched.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
@@ -115,12 +130,21 @@ pub fn noise_block_derive(
     block_flags: &mut Array<u32>,
     keys: &mut Array<u32>,
     tags: &mut Array<u32>,
+    immerkaer_histogram: &mut Array<i32>,
+    immerkaer_state: &mut Array<u32>,
+    sample_histogram: &mut Array<i32>,
+    sample_state: &mut Array<u32>,
+    curve_histogram: &mut Array<i32>,
+    curve_state: &mut Array<u32>,
     immerkaer_scale: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
     #[comptime] stored_ch: u32,
     #[comptime] temporal: bool,
+    #[comptime] curve: bool,
+    #[comptime] immerkaer_tag_count: u32,
+    #[comptime] immerkaer_query_count: u32,
 ) {
     let cubes_x = comptime!(width.div_ceil(IMMERKAER_BLOCK_X));
     let cubes = comptime!(cubes_x * height.div_ceil(IMMERKAER_BLOCK_Y));
@@ -212,6 +236,39 @@ pub fn noise_block_derive(
         block_flags[index as usize] = select(candidate, BLOCK_CANDIDATE, 0u32);
         keys[lane as usize] = order_key(sigma0);
         tags[lane as usize] = select(candidate, set_tag, UNTAGGED);
+    }
+
+    let stride = CUBE_COUNT_X * CUBE_DIM_X;
+
+    clear_batch(
+        immerkaer_histogram,
+        immerkaer_state,
+        index,
+        stride,
+        immerkaer_tag_count,
+        immerkaer_query_count,
+    );
+
+    if comptime!(temporal) {
+        clear_batch(
+            sample_histogram,
+            sample_state,
+            index,
+            stride,
+            SAMPLE_TAGS,
+            SAMPLE_QUERIES,
+        );
+    }
+
+    if comptime!(curve) {
+        clear_batch(
+            curve_histogram,
+            curve_state,
+            index,
+            stride,
+            CURVE_TAGS,
+            CURVE_QUERIES,
+        );
     }
 }
 
@@ -361,17 +418,24 @@ pub fn noise_block_accept(
     }
 }
 
-/// Resolves every query of both batches into one slot's reading, then clears both batches.
+/// Resolves every query of a slot's batches into the slot's reading.
 ///
 /// The Immerkær words take each channel's lower quartile of its cube sigmas. With `temporal`, the
 /// sample is valid when the accepted blocks make up at least
 /// [STATIC_FRACTION_MIN](crate::noise::temporal::STATIC_FRACTION_MIN) of the frame and at least
 /// one of them has a correlation. It then holds each channel's median and lower quartile, the
-/// correlation median and the static fraction. Every word of a missing sample and every curve word
-/// is written as 0.
+/// correlation median and the static fraction.
+///
+/// With `curve`, each bin holding at least
+/// [MIN_QUARTERS_PER_BIN](crate::noise::curve::MIN_QUARTERS_PER_BIN) quarters takes their median.
+/// The curve is valid with a sample, a positive static quarter median and at least
+/// [MIN_POPULATED_BINS](crate::noise::curve::MIN_POPULATED_BINS) such bins. Each ratio is then the
+/// bin's sigma, interpolated between populated bins and held flat past the outer ones, over the
+/// quarter median. The populated bin count is always written. Every other word of a missing sample
+/// or curve is written as 0.
 ///
 /// `blocks` is the frame's block count and `min_accepted` the fewest accepted blocks that reach the
-/// static fraction, both from the host. Without `temporal`, the sample batch's bindings are never
+/// static fraction, both from the host. Bindings of a batch the comptime flags leave out are never
 /// touched.
 #[cube(launch_unchecked)]
 #[expect(
@@ -379,14 +443,18 @@ pub fn noise_block_accept(
     reason = "every argument is a binding or a comptime shape"
 )]
 pub fn noise_sample_finish(
-    immerkaer_histogram: &mut Array<i32>,
-    immerkaer_state: &mut Array<u32>,
+    immerkaer_histogram: &Array<i32>,
+    immerkaer_state: &Array<u32>,
     immerkaer_queries: &Array<u32>,
     immerkaer_tag_ranges: &Array<u32>,
-    sample_histogram: &mut Array<i32>,
-    sample_state: &mut Array<u32>,
+    sample_histogram: &Array<i32>,
+    sample_state: &Array<u32>,
     sample_queries: &Array<u32>,
     sample_tag_ranges: &Array<u32>,
+    curve_histogram: &Array<i32>,
+    curve_state: &Array<u32>,
+    curve_queries: &Array<u32>,
+    curve_tag_ranges: &Array<u32>,
     readings: &mut Array<f32>,
     slot: u32,
     blocks: f32,
@@ -394,14 +462,17 @@ pub fn noise_sample_finish(
     #[comptime] immerkaer_tag_count: u32,
     #[comptime] immerkaer_query_count: u32,
     #[comptime] temporal: bool,
+    #[comptime] curve: bool,
     #[comptime] cube_threads: u32,
 ) {
     let thread = UNIT_POS_X;
-    let wanted_len = comptime!(u32::max(immerkaer_query_count, SAMPLE_QUERIES));
+    let sample_wanted = comptime!(u32::max(immerkaer_query_count, SAMPLE_QUERIES));
+    let wanted_len = comptime!(u32::max(sample_wanted, CURVE_QUERIES));
     let mut wanted = SharedMemory::<u32>::new(wanted_len as usize);
     let mut immerkaer_out =
         SharedMemory::<u32>::new(comptime!(immerkaer_query_count * SELECT_SLOT_WORDS) as usize);
     let mut sample_out = SharedMemory::<u32>::new(comptime!(SAMPLE_QUERIES * SELECT_SLOT_WORDS) as usize);
+    let mut curve_out = SharedMemory::<u32>::new(comptime!(CURVE_QUERIES * SELECT_SLOT_WORDS) as usize);
 
     if thread < wanted_len {
         wanted[thread as usize] = thread;
@@ -441,9 +512,38 @@ pub fn noise_sample_finish(
         );
     }
 
-    if thread == 0 {
-        let base = slot * READING_WORDS;
+    if comptime!(curve) {
+        resolve_queries(
+            curve_histogram,
+            0u32,
+            curve_state,
+            curve_queries,
+            curve_tag_ranges,
+            &wanted,
+            CURVE_QUERIES,
+            2u32,
+            &mut curve_out,
+            CURVE_TAGS,
+            CURVE_QUERIES,
+            cube_threads,
+        );
+    }
 
+    let base = slot * READING_WORDS;
+    let mut accepted = 0u32;
+    let mut correlated = 0u32;
+
+    if comptime!(temporal) {
+        let (_, accepted_count) = select_result(&sample_out, 0u32);
+        let (_, rho_count) = select_result(&sample_out, SAMPLE_QUERY_RHO);
+
+        accepted = accepted_count;
+        correlated = rho_count;
+    }
+
+    let valid = accepted >= min_accepted && correlated > 0u32;
+
+    if thread == 0 {
         #[unroll]
         for channel in 0..3u32 {
             let (low, count) = select_result(&immerkaer_out, comptime!(2 * channel));
@@ -453,19 +553,7 @@ pub fn noise_sample_finish(
             readings[(base + READING_IMMERKAER_LOW + channel) as usize] = quartile;
         }
 
-        let mut accepted = 0u32;
-        let mut correlated = 0u32;
-
-        if comptime!(temporal) {
-            let (_, accepted_count) = select_result(&sample_out, 0u32);
-            let (_, rho_count) = select_result(&sample_out, SAMPLE_QUERY_RHO);
-
-            accepted = accepted_count;
-            correlated = rho_count;
-        }
-
         let static_fraction = f32::cast_from(accepted) / blocks;
-        let valid = accepted >= min_accepted && correlated > 0u32;
         let kept = select(valid, 1.0f32, 0.0f32);
 
         #[unroll]
@@ -490,27 +578,92 @@ pub fn noise_sample_finish(
         readings[(base + READING_RHO) as usize] = select(valid, rho, 0.0f32);
         readings[(base + READING_STATIC_FRACTION) as usize] = select(valid, static_fraction, 0.0f32);
         readings[(base + READING_ACCEPTED) as usize] = f32::cast_from(accepted);
+    }
 
+    if comptime!(curve) {
+        let (quarter_low, quarter_count) = select_result(&sample_out, SAMPLE_QUERY_QUARTER);
+        let (quarter_high, _) = select_result(&sample_out, comptime!(SAMPLE_QUERY_QUARTER + 1));
+        let quarter_median = median_from_pair(quarter_low, quarter_high);
+
+        let bin = u32::min(thread, LAST_CURVE_BIN);
+        let (sigma, populated) = curve_bin_sigma(&curve_out, bin);
+
+        let has_quarters = quarter_count > 0u32 && quarter_median > 0.0f32;
+        let enough_bins = populated >= MIN_CURVE_BINS;
+        let curve_valid = valid && has_quarters && enough_bins;
+        let divisor = select(curve_valid, quarter_median, 1.0f32);
+        let ratio = sigma / divisor;
+
+        if thread < CURVE_TAGS {
+            readings[(base + READING_RATIOS + thread) as usize] = select(curve_valid, ratio, 0.0f32);
+        }
+
+        if thread == 0 {
+            readings[(base + READING_CURVE_VALID) as usize] = select(curve_valid, 1.0f32, 0.0f32);
+            readings[(base + READING_QUARTER_MEDIAN) as usize] = select(curve_valid, quarter_median, 0.0f32);
+            readings[(base + READING_POPULATED_BINS) as usize] = f32::cast_from(populated);
+        }
+    } else if thread == 0 {
         for word in READING_ACCEPTED + 1..READING_WORDS {
             readings[(base + word) as usize] = 0.0f32;
         }
     }
+}
 
-    clear_batch(
-        immerkaer_histogram,
-        immerkaer_state,
-        immerkaer_tag_count,
-        immerkaer_query_count,
-        cube_threads,
-    );
+/// The curve's sigma at `bin` and how many bins are populated, from the resolved curve batch.
+///
+/// A bin is populated when it holds at least
+/// [MIN_QUARTERS_PER_BIN](crate::noise::curve::MIN_QUARTERS_PER_BIN) quarters, and its sigma is
+/// their median. Below the first populated bin the first one's sigma holds, and past the last the
+/// last one's. Between them the sigma is linear between the nearest populated bin below `bin` and
+/// the nearest at or above it, as the host's curve interpolates. The bins are walked in a runtime
+/// loop, so every pick goes through `select`.
+#[cube]
+fn curve_bin_sigma(curve_out: &SharedMemory<u32>, bin: u32) -> (f32, u32) {
+    let mut populated = 0u32;
+    let mut first_index = 0u32;
+    let mut first_sigma = 0.0f32;
+    let mut last_index = 0u32;
+    let mut last_sigma = 0.0f32;
+    let mut low_index = 0u32;
+    let mut low_sigma = 0.0f32;
+    let mut high_index = 0u32;
+    let mut high_sigma = 0.0f32;
+    let mut has_high = false;
 
-    if comptime!(temporal) {
-        clear_batch(
-            sample_histogram,
-            sample_state,
-            SAMPLE_TAGS,
-            SAMPLE_QUERIES,
-            cube_threads,
-        );
+    for index in 0..CURVE_TAGS {
+        let (median_low, count) = select_result(curve_out, 2 * index);
+        let (median_high, _) = select_result(curve_out, 2 * index + 1);
+        let median = median_from_pair(median_low, median_high);
+        let filled = count >= MIN_BIN_QUARTERS;
+
+        let is_first = filled && populated == 0u32;
+        first_index = select(is_first, index, first_index);
+        first_sigma = select(is_first, median, first_sigma);
+        last_index = select(filled, index, last_index);
+        last_sigma = select(filled, median, last_sigma);
+
+        let below = filled && index < bin;
+        low_index = select(below, index, low_index);
+        low_sigma = select(below, median, low_sigma);
+
+        let is_high = filled && index >= bin && !has_high;
+        high_index = select(is_high, index, high_index);
+        high_sigma = select(is_high, median, high_sigma);
+        has_high = has_high || is_high;
+
+        populated += select(filled, 1u32, 0u32);
     }
+
+    let spread = high_index > low_index;
+    let span_bins = select(spread, high_index - low_index, 1u32);
+    let offset_bins = bin - u32::min(low_index, bin);
+    let span = f32::cast_from(span_bins);
+    let fraction = f32::cast_from(offset_bins) / span;
+    let between = low_sigma + (high_sigma - low_sigma) * fraction;
+
+    let past_last = select(bin >= last_index, last_sigma, between);
+    let sigma = select(bin <= first_index, first_sigma, past_last);
+
+    (sigma, populated)
 }

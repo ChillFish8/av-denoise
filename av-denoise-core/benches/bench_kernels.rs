@@ -263,8 +263,24 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
                 client: client.clone(),
                 stage,
                 chroma,
+                curve: false,
             });
         }
+    }
+
+    // The luma curve's launches on a smooth gradient whose quarters fill every bin.
+    let curve_stages = [
+        ReadingStage::CurveBins,
+        ReadingStage::CurveBatch,
+        ReadingStage::SampleFinish,
+    ];
+    for stage in curve_stages {
+        run(ReadingBench {
+            client: client.clone(),
+            stage,
+            chroma: false,
+            curve: true,
+        });
     }
 
     // Pyramid build and block matching are luma-only since motion estimation ignores chroma. Warp

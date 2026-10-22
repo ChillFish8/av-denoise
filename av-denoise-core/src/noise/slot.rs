@@ -3,7 +3,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::NOISE_BLOCK_1D;
-use super::kernels::{noise_block_accept, noise_block_derive, noise_sample_finish};
+use super::kernels::{noise_block_accept, noise_block_derive, noise_curve_bins, noise_sample_finish};
 use super::reading::READING_WORDS;
 use super::select::{
     SELECT_CUBE_THREADS,
@@ -99,27 +99,34 @@ impl<R: Runtime> NoiseState<R> {
 }
 
 impl<R: Runtime> NoiseState<R> {
-    /// Queues the reading of the stats in `slot` into the slot's reading words.
+    /// Queues the reading of the stats in `slot` into the slot's reading words, returning how many
+    /// launches that took.
     ///
     /// With temporal stats that is block derive, the immerkaer batch, block accept, the sample batch
-    /// and the finish, 9 launches. Without them it is block derive, the immerkaer batch and the
-    /// finish, 5 launches.
+    /// and the finish, 9 launches. The luma quarter fields add curve bins and the curve batch before
+    /// the finish, 13 launches. Without temporal stats it is block derive, the immerkaer batch and
+    /// the finish, 5 launches.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "no production code queues a slot reading")
     )]
-    pub(crate) fn queue_reading(&self, slot: u32) -> Result<(), anyhow::Error> {
-        self.queue_block_derive(slot);
-        self.queue_immerkaer_batch();
-        self.queue_block_accept(slot);
-        self.queue_sample_batch();
-        self.queue_sample_finish(slot);
+    pub(crate) fn queue_reading(&self, slot: u32) -> Result<u32, anyhow::Error> {
+        let stages = [
+            self.queue_block_derive(slot),
+            self.queue_immerkaer_batch(),
+            self.queue_block_accept(slot),
+            self.queue_sample_batch(),
+            self.queue_curve_bins(slot),
+            self.queue_curve_batch(),
+            self.queue_sample_finish(slot),
+        ];
 
-        Ok(())
+        Ok(stages.iter().sum())
     }
 
-    /// Queues the Immerkær cube lanes and, with temporal stats, every block's derived values.
-    pub(crate) fn queue_block_derive(&self, slot: u32) {
+    /// Queues the Immerkær cube lanes, with temporal stats every block's derived values, and the
+    /// clear of every batch.
+    pub(crate) fn queue_block_derive(&self, slot: u32) -> u32 {
         let shape = self.shape;
         let cubes = cube_count(shape);
         let blocks = if shape.temporal { block_count(shape) } else { 0 };
@@ -129,8 +136,14 @@ impl<R: Runtime> NoiseState<R> {
         let batch_len = batch.len() as usize;
         let (partials, partials_words) = self.partials_view(slot);
         let block_args = self.block_args(slot, &partials, partials_words);
+        let immerkaer_clear = clear_args::<R>(batch);
+        let sample = self.sample_batch().unwrap_or(batch);
+        let sample_clear = clear_args::<R>(sample);
+        let curve = self.curve.as_ref().unwrap_or(batch);
+        let curve_clear = clear_args::<R>(curve);
         let scale = immerkaer_sigma_scale();
 
+        // A batch the reading leaves out is never touched, so the immerkaer batch stands in for it.
         unsafe {
             noise_block_derive::launch_unchecked::<R>(
                 &self.client,
@@ -142,25 +155,36 @@ impl<R: Runtime> NoiseState<R> {
                 block_args.flags,
                 bind(batch.keys(), batch_len),
                 bind(batch.tags(), batch_len),
+                immerkaer_clear.histogram,
+                immerkaer_clear.state,
+                sample_clear.histogram,
+                sample_clear.state,
+                curve_clear.histogram,
+                curve_clear.state,
                 scale,
                 shape.width,
                 shape.height,
                 shape.channels,
                 shape.stored_ch,
                 shape.temporal,
+                self.curve.is_some(),
+                batch.tag_count(),
+                batch.query_count(),
             );
         }
+
+        1
     }
 
     /// Queues the immerkaer batch's three histogram passes.
-    pub(crate) fn queue_immerkaer_batch(&self) {
-        self.immerkaer_batch.queue(&self.client);
+    pub(crate) fn queue_immerkaer_batch(&self) -> u32 {
+        self.immerkaer_batch.queue(&self.client)
     }
 
     /// Queues the outlier ceiling and the sample batch's lanes, with temporal stats.
-    pub(crate) fn queue_block_accept(&self, slot: u32) {
+    pub(crate) fn queue_block_accept(&self, slot: u32) -> u32 {
         let Some(sample) = self.sample.as_ref() else {
-            return;
+            return 0;
         };
 
         let shape = self.shape;
@@ -196,28 +220,78 @@ impl<R: Runtime> NoiseState<R> {
                 reference.query_count(),
             );
         }
+
+        1
     }
 
     /// Queues the sample batch's three histogram passes, with temporal stats.
-    pub(crate) fn queue_sample_batch(&self) {
-        if let Some(sample) = self.sample.as_ref() {
-            sample.batch.queue(&self.client);
-        }
+    pub(crate) fn queue_sample_batch(&self) -> u32 {
+        let Some(sample) = self.sample.as_ref() else {
+            return 0;
+        };
+
+        sample.batch.queue(&self.client)
     }
 
-    /// Queues the finish, which writes the reading of `slot` and clears both batches.
-    pub(crate) fn queue_sample_finish(&self, slot: u32) {
+    /// Queues the curve batch's quarter lanes, with a curve batch.
+    pub(crate) fn queue_curve_bins(&self, slot: u32) -> u32 {
+        let (Some(sample), Some(curve)) = (self.sample.as_ref(), self.curve.as_ref()) else {
+            return 0;
+        };
+
+        let shape = self.shape;
+        let blocks = block_count(shape);
+        let quarters = curve.len();
+        let grid = quarters.div_ceil(SELECT_CUBE_THREADS);
+        let sample_args = batch_args::<R>(&sample.batch);
+        let (records, records_len) = self.records_view(slot).expect("a curve implies temporal stats");
+        let curve_len = quarters as usize;
+
+        unsafe {
+            noise_curve_bins::launch_unchecked::<R>(
+                &self.client,
+                CubeCount::new_1d(grid),
+                CubeDim::new_1d(SELECT_CUBE_THREADS),
+                ArrayArg::from_raw_parts(records, records_len),
+                bind(&sample.block_flags, blocks as usize),
+                sample_args.histogram,
+                sample_args.state,
+                sample_args.queries,
+                sample_args.tag_ranges,
+                bind(curve.keys(), curve_len),
+                bind(curve.tags(), curve_len),
+                shape.width,
+                shape.height,
+                shape.stored_ch,
+            );
+        }
+
+        1
+    }
+
+    /// Queues the curve batch's three histogram passes, with a curve batch.
+    pub(crate) fn queue_curve_batch(&self) -> u32 {
+        let Some(curve) = self.curve.as_ref() else {
+            return 0;
+        };
+
+        curve.queue(&self.client)
+    }
+
+    /// Queues the finish, which writes the reading of `slot`.
+    pub(crate) fn queue_sample_finish(&self, slot: u32) -> u32 {
         let shape = self.shape;
         let threads = resolve_cube_threads(&self.client);
         let immerkaer = &self.immerkaer_batch;
         let sample = self.sample_batch().unwrap_or(immerkaer);
+        let curve = self.curve.as_ref().unwrap_or(immerkaer);
         let immerkaer_args = batch_args::<R>(immerkaer);
         let sample_args = batch_args::<R>(sample);
+        let curve_args = batch_args::<R>(curve);
         let blocks = block_count(shape) as f32;
         let readings_len = (shape.frames * READING_WORDS) as usize;
 
-        // Without temporal stats the finish never touches the sample bindings, so the immerkaer
-        // batch stands in for them.
+        // A batch the reading leaves out is never touched, so the immerkaer batch stands in for it.
         unsafe {
             noise_sample_finish::launch_unchecked::<R>(
                 &self.client,
@@ -231,6 +305,10 @@ impl<R: Runtime> NoiseState<R> {
                 sample_args.state,
                 sample_args.queries,
                 sample_args.tag_ranges,
+                curve_args.histogram,
+                curve_args.state,
+                curve_args.queries,
+                curve_args.tag_ranges,
                 bind(&self.readings, readings_len),
                 slot,
                 blocks,
@@ -238,22 +316,24 @@ impl<R: Runtime> NoiseState<R> {
                 immerkaer.tag_count(),
                 immerkaer.query_count(),
                 shape.temporal,
+                self.curve.is_some(),
                 threads,
             );
         }
+
+        1
     }
 
-    /// The histogram and the state of every batch a reading uses, with their lengths in words.
-    pub(crate) fn reading_batch_buffers(&self) -> Vec<(Handle, u32)> {
-        let mut buffers = Vec::new();
-        let batches = [Some(&self.immerkaer_batch), self.sample_batch()];
+    /// The curve batch's histogram and state with their lengths in words, empty without a curve.
+    pub(crate) fn curve_batch_buffers(&self) -> Vec<(Handle, u32)> {
+        let Some(curve) = self.curve.as_ref() else {
+            return Vec::new();
+        };
 
-        for batch in batches.into_iter().flatten() {
-            buffers.push((batch.histogram().clone(), batch.histogram_len()));
-            buffers.push((batch.state().clone(), batch.state_len()));
-        }
-
-        buffers
+        vec![
+            (curve.histogram().clone(), curve.histogram_len()),
+            (curve.state().clone(), curve.state_len()),
+        ]
     }
 
     fn sample_batch(&self) -> Option<&SelectBatch> {
@@ -331,6 +411,22 @@ struct BatchArgs<R: Runtime> {
     state: ArrayArg<R>,
     queries: ArrayArg<R>,
     tag_ranges: ArrayArg<R>,
+}
+
+/// The bindings block derive clears a select batch through.
+struct ClearArgs<R: Runtime> {
+    histogram: ArrayArg<R>,
+    state: ArrayArg<R>,
+}
+
+fn clear_args<R: Runtime>(batch: &SelectBatch) -> ClearArgs<R> {
+    let histogram_len = batch.histogram_len() as usize;
+    let state_len = batch.state_len() as usize;
+
+    ClearArgs {
+        histogram: bind(batch.histogram(), histogram_len),
+        state: bind(batch.state(), state_len),
+    }
 }
 
 fn batch_args<R: Runtime>(batch: &SelectBatch) -> BatchArgs<R> {

@@ -6,6 +6,7 @@ use crate::noise::temporal::{
     QUARTER_LUMA_SUM,
     QUARTER_SUM_D,
     QUARTER_SUM_D2,
+    STATIC_GATE,
     TEMPORAL_NOISE_BLOCK,
     TEMPORAL_QUARTER_BASE,
     TEMPORAL_QUARTER_FIELDS,
@@ -137,4 +138,42 @@ pub(crate) fn hashed_partials(width: u32, height: u32, seed: u32) -> Vec<f32> {
     }
 
     partials
+}
+
+/// A static block with hashed spread, a mean within half the static gate and sigmas between 2 and
+/// 4 codes.
+pub(crate) fn static_block(seed: u32, index: u32) -> BlockSpec {
+    let mean_unit = hashed_unit(seed, 4 * index);
+    let rho_unit = hashed_unit(seed, 4 * index + 1);
+    let mean = (mean_unit - 0.5) * STATIC_GATE;
+    let rho = 0.1 + 0.4 * rho_unit;
+
+    let mut sigma = [0.0f32; 3];
+    for (channel, channel_sigma) in sigma.iter_mut().enumerate() {
+        let unit = hashed_unit(seed + channel as u32, 4 * index + 2);
+        *channel_sigma = (2.0 + 2.0 * unit) / 255.0;
+    }
+
+    BlockSpec {
+        mean,
+        sigma,
+        rho,
+        ..BlockSpec::default()
+    }
+}
+
+/// How many representable `f32` values lie between `left` and `right`.
+pub(crate) fn ulp_gap(left: f32, right: f32) -> u32 {
+    if left == right {
+        return 0;
+    }
+
+    let left_bits = left.to_bits();
+    let right_bits = right.to_bits();
+    let left_wide = i64::from(left_bits);
+    let right_wide = i64::from(right_bits);
+    let gap = (left_wide - right_wide).unsigned_abs();
+    let limit = u64::from(u32::MAX);
+
+    gap.min(limit) as u32
 }

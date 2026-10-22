@@ -220,28 +220,32 @@ pub(crate) fn select_result(out: &SharedMemory<u32>, query: u32) -> (f32, u32) {
     (select(resolved, value, 0.0f32), count)
 }
 
-/// Zeroes a batch's histogram and empties its state, strided over the calling cube.
+/// Zeroes a batch's histogram and empties its state.
+///
+/// Each calling thread clears every `stride`-th word from `first` on, so the callers' `first`
+/// values must cover `0..stride` once each.
 #[cube]
 pub(crate) fn clear_batch(
     histogram: &mut Array<i32>,
     state: &mut Array<u32>,
+    first: u32,
+    stride: u32,
     #[comptime] tag_count: u32,
     #[comptime] query_count: u32,
-    #[comptime] cube_threads: u32,
 ) {
     let histogram_words = comptime!((tag_count + 2 * query_count) * SELECT_BINS);
     let state_words = comptime!(query_count * SELECT_SLOTS * SELECT_SLOT_WORDS);
 
-    let mut word = UNIT_POS_X;
+    let mut word = first;
     while word < histogram_words {
         histogram[word as usize] = 0i32;
-        word += cube_threads;
+        word += stride;
     }
 
-    let mut word = UNIT_POS_X;
+    let mut word = first;
     while word < state_words {
         state[word as usize] = SLOT_EMPTY;
-        word += cube_threads;
+        word += stride;
     }
 }
 
@@ -432,5 +436,5 @@ pub fn noise_select_resolve(
         counts[thread as usize] = count;
     }
 
-    clear_batch(histogram, state, tag_count, query_count, cube_threads);
+    clear_batch(histogram, state, thread, cube_threads, tag_count, query_count);
 }
