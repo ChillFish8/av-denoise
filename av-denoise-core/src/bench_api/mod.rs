@@ -30,6 +30,25 @@ pub mod noise_kernels {
     pub use crate::noise::kernels::*;
 }
 
+pub mod noise_select {
+    pub use crate::noise::select::{
+        RankRule,
+        SELECT_CUBE_THREADS,
+        SELECT_QUERY_WORDS,
+        SELECT_TAG_WORDS,
+        SelectQuery,
+        UNTAGGED,
+        histogram_len,
+        order_key_host,
+        pass_rows,
+        query_table,
+        read_pass,
+        resolve_cube_threads,
+        state_len,
+        tag_table,
+    };
+}
+
 pub mod prefilter {
     pub use crate::nlmeans::prefilter::*;
 }

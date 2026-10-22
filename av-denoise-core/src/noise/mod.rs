@@ -4,6 +4,7 @@ mod estimator;
 mod host;
 pub(crate) mod kernels;
 mod line_ring;
+pub(crate) mod select;
 mod slot;
 mod spatial;
 mod state;

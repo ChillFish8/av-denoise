@@ -38,6 +38,7 @@ use kernels::mc_confidence::McConfidenceBench;
 use kernels::mc_downscale::DownscaleBench;
 use kernels::mc_warp::WarpBench;
 use kernels::mv_regularise::MvRegulariseBench;
+use kernels::noise_gpu::{SelectBench, SelectShape, SelectStage};
 use kernels::noise_partial::NoisePartialBench;
 use kernels::temporal_noise_stats::TemporalNoiseStatsBench;
 use kernels::vertical_weight::VWeightBench;
@@ -233,6 +234,21 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         client: client.clone(),
         luma_fields: true,
     });
+
+    // The radix select on the luma sample batch, and its last pass on the curve batch.
+    let select_rows = [
+        (SelectStage::Pass(0), SelectShape::LumaSample),
+        (SelectStage::Pass(1), SelectShape::LumaSample),
+        (SelectStage::Resolve, SelectShape::LumaSample),
+        (SelectStage::Pass(2), SelectShape::Curve),
+    ];
+    for (stage, shape) in select_rows {
+        run(SelectBench {
+            client: client.clone(),
+            stage,
+            shape,
+        });
+    }
 
     // Pyramid build and block matching are luma-only since motion estimation ignores chroma. Warp
     // runs per channel mode because its memory traffic scales with `stored_ch`.
