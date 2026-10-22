@@ -11,6 +11,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 pub(crate) use self::machinery::RingView;
+use self::noise::measured_noise_shape;
 use self::readings::NoiseReadings;
 pub(crate) use self::sizes::{BufferSize, check_u32_indexable, front_buffer_sizes};
 use super::mirror::MirroredBuffer;
@@ -23,12 +24,10 @@ use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
 use crate::noise::{
     NoiseCurve,
     NoiseEstimator,
+    NoiseState,
     QuarterClasses,
-    QuarterSettings,
-    RESULTS_PER_SLOT,
+    ReadingSettings,
     build_spatial_offset_lut,
-    noise_partials_slot_stride_bytes,
-    temporal_stats_buf_bytes,
 };
 use crate::tune::KernelSelector;
 
@@ -49,8 +48,6 @@ pub struct NlmDenoiser<R: Runtime> {
     pub(super) params: NlmParams,
     pub(super) width: u32,
     pub(super) height: u32,
-    /// The byte alignment every per-slot buffer view starts on.
-    pub(super) align: StorageAlign,
 
     /// Frames pushed including duplicates, which modulo the window size picks the next slot.
     pub(super) ring_head: usize,
@@ -122,15 +119,11 @@ pub struct NlmDenoiser<R: Runtime> {
     /// Empty unless `Chained` motion estimation is active.
     pub(super) ring_slot_tables: Vec<Handle>,
 
-    /// Per-ring-slot scratch for the first stage of the noise estimate.
+    /// The noise measurement buffers, present when the noise is estimated automatically.
     ///
-    /// Each slot keeps a frame's partials intact until that frame reaches the centre and is
+    /// Each slot keeps a frame's measurements intact until that frame reaches the centre and is
     /// folded.
-    pub(super) noise_partials: Option<Handle>,
-    /// The per-channel Immerkær totals for each ring slot.
-    pub(super) noise_results: Option<Handle>,
-    /// Per-ring-slot temporal residual statistics, one record per spatial block.
-    pub(super) temporal_stats_buf: Option<Handle>,
+    pub(super) noise: Option<NoiseState<R>>,
     /// Smooths the median chain's estimate, which feeds `h2_inv_norm` and `sigma_y`.
     pub(super) noise_estimator: NoiseEstimator,
     /// Smooths the low chain's estimate, which feeds the noise offsets.
@@ -185,16 +178,6 @@ pub struct NlmDenoiser<R: Runtime> {
     pub(super) confidence_dummy: Handle,
     /// The smoothed luma sigma, which feeds the confidence noise floor.
     pub(super) sigma_y: f32,
-
-    /// Whether the temporal stats kernel runs its four luma-only lanes.
-    ///
-    /// Leaving them off roughly halves the kernel's cost at 1080p.
-    pub(super) luma_noise_fields: bool,
-
-    /// What the luma flat map does after classing quarters.
-    ///
-    /// It holds the texture cut and the line ring.
-    pub(super) quarter_settings: QuarterSettings,
 
     /// Each ring slot's noise reading, started when the slot is written.
     pub(super) noise_readings: NoiseReadings,
@@ -291,26 +274,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             None
         };
 
-        let auto_noise = params.hq.is_some_and(|hq| hq.sigma_override.is_none());
-        let (noise_partials, noise_results) = if auto_noise {
-            let partials_ring_bytes =
-                noise_partials_slot_stride_bytes(width, height, align) * total_frames as u64;
-            let n_results = total_frames as usize * RESULTS_PER_SLOT;
-            let partials = client.empty(partials_ring_bytes as usize);
-            let results = client.empty(n_results * size_of::<f32>());
-            (Some(partials), Some(results))
-        } else {
-            (None, None)
-        };
-
-        // The temporal estimator needs a neighbour frame to take a difference against.
-        let temporal_stats_buf = if auto_noise && params.temporal_radius >= 1 {
-            let stats_bytes = temporal_stats_buf_bytes(width, height, stored_ch, total_frames, align);
-            let stats = client.empty(stats_bytes);
-            Some(stats)
-        } else {
-            None
-        };
+        let noise_shape = measured_noise_shape(&params, width, height, align);
+        let noise = noise_shape.map(|shape| NoiseState::new(client, shape, ReadingSettings::default()));
 
         let mc_ctx = if params.motion_compensation.is_active() && params.temporal_radius > 0 {
             MotionCtx::new(params.motion_compensation, width, height, align)
@@ -431,7 +396,6 @@ impl<R: Runtime> NlmDenoiser<R> {
             params,
             width,
             height,
-            align,
             ring_head: 0,
             frames_loaded: 0,
             real_pushes: 0,
@@ -461,9 +425,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             pilot_offset_lut,
             neighbour_slots,
             ring_slot_tables,
-            noise_partials,
-            noise_results,
-            temporal_stats_buf,
+            noise,
             noise_estimator: NoiseEstimator::default(),
             noise_estimator_low: NoiseEstimator::default(),
             noise_estimator_low_unboosted: NoiseEstimator::default(),
@@ -483,8 +445,6 @@ impl<R: Runtime> NlmDenoiser<R> {
             confidence_mv_scratch,
             confidence_dummy,
             sigma_y,
-            luma_noise_fields: false,
-            quarter_settings: QuarterSettings::default(),
             noise_readings: NoiseReadings::new(total_frames as usize),
             device_timer,
             shifted_edges: false,
@@ -535,7 +495,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             return Ok(None);
         }
 
-        if self.noise_results.is_some() {
+        if self.noise.is_some() {
             self.update_noise_estimate(self.params.temporal_radius)?;
         }
 

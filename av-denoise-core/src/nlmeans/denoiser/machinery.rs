@@ -60,7 +60,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             return Ok(None);
         }
 
-        if self.noise_results.is_some() {
+        if self.noise.is_some() {
             self.update_noise_estimate(center_t)?;
         }
 

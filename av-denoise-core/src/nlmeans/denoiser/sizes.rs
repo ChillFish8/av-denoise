@@ -1,10 +1,10 @@
 use cubecl::prelude::*;
 
+use super::noise::measured_noise_shape;
 use crate::engine::align::StorageAlign;
 use crate::nlmeans::motion::{self, MotionCtx, MotionEstimation};
 use crate::nlmeans::params::NlmParams;
-use crate::nlmeans::{BLOCK_X, BLOCK_Y};
-use crate::noise::{temporal_stats_blocks, temporal_stats_record_len};
+use crate::noise::{IMMERKAER_BLOCK_X, IMMERKAER_BLOCK_Y, temporal_stats_blocks, temporal_stats_record_len};
 
 /// Bytes in one element of every buffer sized here, which all hold `f32`, `i32` or `u32`.
 const ELEMENT_BYTES: u64 = 4;
@@ -67,17 +67,17 @@ pub(crate) fn front_buffer_sizes<R: Runtime>(
     let neighbours = 2 * u64::from(params.temporal_radius);
     let mut buffers = Vec::new();
 
-    let auto_noise = params.hq.is_some_and(|hq| hq.sigma_override.is_none());
-    if auto_noise {
-        let cubes_x = u64::from(width.div_ceil(BLOCK_X));
-        let cubes_y = u64::from(height.div_ceil(BLOCK_Y));
+    let noise_shape = measured_noise_shape(params, width, height, align);
+    if noise_shape.is_some() {
+        let cubes_x = u64::from(width.div_ceil(IMMERKAER_BLOCK_X));
+        let cubes_y = u64::from(height.div_ceil(IMMERKAER_BLOCK_Y));
         let partials = times(cubes_x.checked_mul(cubes_y), 4);
         let slot_bytes = padded_slot_bytes(partials, align);
         let ring = slot_ring(slot_bytes, total_frames);
         buffers.push(("noise partials ring", ring));
     }
 
-    if auto_noise && params.temporal_radius >= 1 {
+    if noise_shape.is_some_and(|shape| shape.temporal) {
         let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
         let blocks = u64::from(blocks_x).checked_mul(u64::from(blocks_y));
         let record_len = u64::from(temporal_stats_record_len(stored_ch));

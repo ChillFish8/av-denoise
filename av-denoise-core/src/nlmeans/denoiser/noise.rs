@@ -7,31 +7,52 @@ use cubecl::server::Handle;
 use super::NlmDenoiser;
 use super::readings::{ReadingShape, SlotNoiseReading};
 use crate::engine::EngineTiming;
+use crate::engine::align::StorageAlign;
 use crate::engine::timing::{DeviceTimed, DeviceTimer};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 use crate::nlmeans::mirror::MirroredBuffer;
-use crate::nlmeans::params::sigma_eff;
+use crate::nlmeans::params::{NlmParams, sigma_eff};
 use crate::nlmeans::prefilter::PrefilterMode;
 use crate::noise::{
     EMA_ALPHA,
-    NoiseCtx,
     NoiseCurve,
+    NoiseShape,
     QuarterClasses,
     RESULTS_PER_SLOT,
+    ReadingSettings,
     TEMPORAL_QUARTER_SIZE,
     TemporalNoiseSample,
-    TemporalStatsCtx,
     build_spatial_offset_lut,
     correlation_factor,
-    noise_partials_slot_stride_bytes,
-    noise_partials_slot_view,
-    noise_results_slot_view,
-    run_noise_estimate,
-    run_temporal_noise_stats,
     sigma_from_abs_sum,
-    temporal_stats_slot_view,
-    zero_temporal_stats_slot,
 };
+
+/// The geometry the front's noise state measures.
+///
+/// `None` unless the noise is estimated automatically.
+pub(super) fn measured_noise_shape(
+    params: &NlmParams,
+    width: u32,
+    height: u32,
+    align: StorageAlign,
+) -> Option<NoiseShape> {
+    let auto_noise = params.hq.is_some_and(|hq| hq.sigma_override.is_none());
+    if !auto_noise {
+        return None;
+    }
+
+    let shape = NoiseShape {
+        width,
+        height,
+        channels: params.channels.count(),
+        stored_ch: params.channels.storage_count(),
+        frames: params.total_frames(),
+        // The temporal estimator needs a neighbour frame to take a difference against.
+        temporal: params.temporal_radius >= 1,
+        align,
+    };
+    Some(shape)
+}
 
 impl<R: Runtime> DeviceTimed for NlmDenoiser<R> {
     fn device_timer(&mut self) -> &mut DeviceTimer {
@@ -59,71 +80,47 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.device_timer.set_every(every);
     }
 
-    /// Queues the Immerkær noise estimate for `slot` when automatic estimation is active.
-    pub(super) fn run_noise_estimate_for_slot(&self, slot: u32) -> Result<(), anyhow::Error> {
-        let (Some(partials_buf), Some(results_buf)) =
-            (self.noise_partials.as_ref(), self.noise_results.as_ref())
-        else {
-            return Ok(());
-        };
-
-        let stride = noise_partials_slot_stride_bytes(self.width, self.height, self.align);
-        let partials_slot = partials_buf.clone().offset_start((slot as u64) * stride);
-
-        let noise_ctx = NoiseCtx {
-            width: self.width,
-            height: self.height,
-            channels: self.params.channels.count(),
-            stored_ch: self.params.channels.storage_count(),
-            frame_count: self.params.total_frames(),
-            frame: slot,
-            slot,
-            input_buf: &self.input_buf,
-            partials_buf: &partials_slot,
-            results_buf,
-        };
-
-        run_noise_estimate::<R>(&self.client, &noise_ctx).context("noise estimate dispatch failed")
-    }
-
-    /// Queues the temporal residual statistics between `slot` and the slot before it.
+    /// Queues the noise statistics for the frame just written to `slot`.
     ///
-    /// A stream's first frame has no predecessor, so its record is zeroed instead.
-    pub(super) fn run_temporal_stats_for_slot(&self, slot: u32) -> Result<(), anyhow::Error> {
-        let Some(stats_buf) = self.temporal_stats_buf.as_ref() else {
+    /// A stream's first frame has no predecessor, so its temporal record is zeroed instead.
+    pub(super) fn queue_noise_stats(&self, slot: u32) -> Result<(), anyhow::Error> {
+        let Some(noise) = self.noise.as_ref() else {
             return Ok(());
         };
-
-        if self.ring_head == 0 {
-            self.zero_temporal_stats_for_slot(slot);
-            return Ok(());
-        }
 
         let total_frames = self.params.total_frames();
         let slot_prev = (slot + total_frames - 1) % total_frames;
+        let previous = (self.ring_head != 0).then_some(slot_prev);
 
-        let stats_ctx = TemporalStatsCtx {
-            width: self.width,
-            height: self.height,
-            stored_ch: self.params.channels.storage_count(),
-            frame_count: total_frames,
-            slot_new: slot,
-            slot_prev,
-            input_buf: &self.input_buf,
-            stats_buf,
-            align: self.align,
+        noise.queue_stats(&self.input_buf, slot, previous)
+    }
+
+    /// Queues the noise statistics for a duplicated `slot`, whose temporal record is zeroed.
+    pub(super) fn queue_duplicate_noise_stats(&self, slot: u32) -> Result<(), anyhow::Error> {
+        let Some(noise) = self.noise.as_ref() else {
+            return Ok(());
         };
 
-        run_temporal_noise_stats::<R>(&self.client, &stats_ctx, self.luma_noise_fields)
-            .context("temporal noise stats dispatch failed")
+        noise.queue_stats(&self.input_buf, slot, None)
+    }
+
+    /// Applies `change` to the reading settings when the noise is estimated automatically.
+    fn change_reading_settings(&mut self, change: impl FnOnce(&mut ReadingSettings)) {
+        let Some(noise) = self.noise.as_mut() else {
+            return;
+        };
+
+        let mut settings = noise.settings();
+        change(&mut settings);
+        noise.set_settings(settings);
     }
 
     pub(crate) fn set_luma_noise_fields(&mut self, on: bool) {
-        self.luma_noise_fields = on;
+        self.change_reading_settings(|settings| settings.luma_fields = on);
     }
 
     pub(crate) fn set_flat_texture_cut(&mut self, cut: Option<f32>) {
-        self.quarter_settings.texture_cut = cut;
+        self.change_reading_settings(|settings| settings.quarter.texture_cut = cut);
     }
 
     /// Sets the line ring's radius in pixels.
@@ -133,7 +130,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     pub(crate) fn set_line_ring(&mut self, radius_px: Option<u32>) {
         let active_radius = radius_px.filter(|&radius| radius > 0);
         let quarters = active_radius.map(|radius| radius.div_ceil(TEMPORAL_QUARTER_SIZE) as usize);
-        self.quarter_settings.line_ring = quarters;
+        self.change_reading_settings(|settings| settings.quarter.line_ring = quarters);
     }
 
     pub(crate) fn current_noise_curve(&self) -> Option<NoiseCurve> {
@@ -146,81 +143,43 @@ impl<R: Runtime> NlmDenoiser<R> {
 
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn flat_texture_cut(&self) -> Option<f32> {
-        self.quarter_settings.texture_cut
+        let settings = self.noise.as_ref().map(|noise| noise.settings());
+        settings.and_then(|settings| settings.quarter.texture_cut)
     }
 
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn line_ring(&self) -> Option<usize> {
-        self.quarter_settings.line_ring
-    }
-
-    /// Zeroes a duplicated slot's temporal stats record.
-    ///
-    /// A duplicate matches the slot before it, so zeroes are the measured answer at less cost.
-    pub(super) fn zero_temporal_stats_for_slot(&self, slot: u32) {
-        let Some(stats_buf) = self.temporal_stats_buf.as_ref() else {
-            return;
-        };
-
-        zero_temporal_stats_slot::<R>(
-            &self.client,
-            stats_buf,
-            self.width,
-            self.height,
-            self.params.channels.storage_count(),
-            slot,
-            self.align,
-        );
+        let settings = self.noise.as_ref().map(|noise| noise.settings());
+        settings.and_then(|settings| settings.quarter.line_ring)
     }
 
     /// The handles one slot's noise reading reads, in [SlotNoiseReading::from_bytes] order.
     ///
     /// `None` when automatic noise estimation is off.
     pub(in crate::nlmeans) fn noise_reading_handles(&self, slot: u32) -> Option<Vec<Handle>> {
-        let (Some(partials_buf), Some(results_buf)) =
-            (self.noise_partials.as_ref(), self.noise_results.as_ref())
-        else {
-            return None;
-        };
-
-        let frame_count = self.params.total_frames();
-        let row = noise_results_slot_view(results_buf, frame_count, slot);
-        let partials = noise_partials_slot_view(
-            partials_buf,
-            self.width,
-            self.height,
-            frame_count,
-            slot,
-            self.align,
-        );
-        let mut handles = vec![row, partials];
-
-        if let Some(stats_buf) = self.temporal_stats_buf.as_ref() {
-            let stored_ch = self.params.channels.storage_count();
-            let stats = temporal_stats_slot_view(
-                stats_buf,
-                self.width,
-                self.height,
-                stored_ch,
-                frame_count,
-                slot,
-                self.align,
-            );
-            handles.push(stats);
-        }
+        let noise = self.noise.as_ref()?;
+        let handles = noise.reading_handles(slot);
 
         Some(handles)
     }
 
-    pub(in crate::nlmeans) fn reading_shape(&self) -> ReadingShape {
-        ReadingShape {
-            width: self.width,
-            height: self.height,
-            channels: self.params.channels.count(),
-            stored_ch: self.params.channels.storage_count(),
-            with_curve: self.luma_noise_fields,
-            settings: self.quarter_settings,
-        }
+    /// The shape one slot's noise reading is read with.
+    ///
+    /// `None` when automatic noise estimation is off.
+    pub(in crate::nlmeans) fn reading_shape(&self) -> Option<ReadingShape> {
+        let noise = self.noise.as_ref()?;
+        let shape = noise.shape();
+        let settings = noise.settings();
+
+        let reading_shape = ReadingShape {
+            width: shape.width,
+            height: shape.height,
+            channels: shape.channels,
+            stored_ch: shape.stored_ch,
+            with_curve: settings.luma_fields,
+            settings: settings.quarter,
+        };
+        Some(reading_shape)
     }
 
     /// Starts reading back the noise that push `push_index` measured into `slot`.
@@ -232,7 +191,10 @@ impl<R: Runtime> NlmDenoiser<R> {
             return;
         };
 
-        let shape = self.reading_shape();
+        let Some(shape) = self.reading_shape() else {
+            return;
+        };
+
         self.noise_readings
             .start(&self.client, slot, push_index, handles, shape);
     }
@@ -298,7 +260,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// `frames_loaded`, which the first-frame check reads. The first submit folds the same frame
     /// again, which is harmless because it reproduces these values to within rounding.
     pub(super) fn seed_noise_estimate_if_first_frame(&mut self, slot: u32) -> Result<(), anyhow::Error> {
-        if self.frames_loaded != 0 || self.noise_results.is_none() {
+        if self.frames_loaded != 0 || self.noise.is_none() {
             return Ok(());
         }
 

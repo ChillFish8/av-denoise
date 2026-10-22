@@ -3,7 +3,9 @@ mod curve;
 mod estimator;
 pub(crate) mod kernels;
 mod line_ring;
+mod slot;
 mod spatial;
+mod state;
 mod stats;
 mod strength_map;
 mod temporal;
@@ -21,18 +23,17 @@ pub(crate) use self::curve::NoiseCurve;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::curve::build_noise_curve;
 pub(crate) use self::estimator::{EMA_ALPHA, NoiseEstimator};
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+pub(crate) use self::spatial::{NoiseCtx, run_noise_estimate};
+pub(crate) use self::spatial::{RESULTS_PER_SLOT, sigma_block_p25_from_partials, sigma_from_abs_sum};
 #[cfg(test)]
-pub(crate) use self::spatial::partials_len;
 pub(crate) use self::spatial::{
-    NoiseCtx,
-    RESULTS_PER_SLOT,
     noise_partials_slot_stride_bytes,
     noise_partials_slot_view,
     noise_results_slot_view,
-    run_noise_estimate,
-    sigma_block_p25_from_partials,
-    sigma_from_abs_sum,
+    partials_len,
 };
+pub(crate) use self::state::{NoiseShape, NoiseState, ReadingSettings};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::strength_map::classify_quarters;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
@@ -54,22 +55,25 @@ pub(crate) use self::temporal::{
     TEMPORAL_QUARTERS,
     TemporalNoiseReading,
     TemporalNoiseSample,
-    TemporalStatsCtx,
     UNMEASURED_FLATNESS,
-    run_temporal_noise_stats,
     temporal_noise_reading,
     temporal_stats_blocks,
-    temporal_stats_buf_bytes,
     temporal_stats_record_len,
-    temporal_stats_slot_view,
-    zero_temporal_stats_slot,
 };
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::temporal::{
     TEMPORAL_NOISE_BLOCK,
+    TemporalStatsCtx,
     accepted_static_blocks,
     aggregate_temporal_noise_stats,
     read_temporal_stats_slot,
+    run_temporal_noise_stats,
+};
+#[cfg(test)]
+pub(crate) use self::temporal::{
+    temporal_stats_buf_bytes,
+    temporal_stats_slot_view,
+    zero_temporal_stats_slot,
 };
 
 /// Cube X dimension for the Immerkær noise partials kernel.

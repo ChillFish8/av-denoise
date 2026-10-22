@@ -15,7 +15,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let client = self.client.clone();
         let frame_slot = slot as u32;
 
-        timed(&client, self, move |front| front.run_noise_stages(frame_slot))?;
+        timed(&client, self, move |front| front.queue_noise_stats(frame_slot))?;
 
         self.start_noise_reading(frame_slot, self.ring_head);
         self.seed_noise_estimate_if_first_frame(frame_slot)?;
@@ -24,12 +24,6 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         self.advance_ring();
         self.prime_leading_edge_if_first()
-    }
-
-    /// Queues the noise estimate and the temporal noise statistics for `slot`.
-    fn run_noise_stages(&self, slot: u32) -> Result<(), anyhow::Error> {
-        self.run_noise_estimate_for_slot(slot)?;
-        self.run_temporal_stats_for_slot(slot)
     }
 
     /// Queues the prefilter, the motion pyramids and the pair analyse for `slot`.

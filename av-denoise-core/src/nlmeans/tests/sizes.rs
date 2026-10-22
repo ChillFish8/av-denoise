@@ -26,9 +26,13 @@ fn assert_sizes_match_allocations(params: NlmParams) {
     let sizes = front_buffer_sizes(&client, &params, WIDTH, HEIGHT);
     let denoiser = NlmDenoiser::<R>::new(&client, params, WIDTH, HEIGHT);
 
+    let noise = denoiser.noise.as_ref();
+    let partials = noise.map(|noise| noise.partials());
+    let stats = noise.and_then(|noise| noise.stats());
+
     let pairs = [
-        ("noise partials ring", denoiser.noise_partials.as_ref()),
-        ("temporal stats ring", denoiser.temporal_stats_buf.as_ref()),
+        ("noise partials ring", partials),
+        ("temporal stats ring", stats),
         ("motion field", denoiser.mv_field_buf.as_ref()),
         ("motion pyramid ring", denoiser.pyramid_input.as_ref()),
         ("motion pair ring", denoiser.pair_ring_buf.as_ref()),

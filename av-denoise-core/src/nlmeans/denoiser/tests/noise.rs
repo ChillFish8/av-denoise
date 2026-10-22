@@ -68,7 +68,7 @@ fn blocking_reading(
     let handles = denoiser.noise_reading_handles(slot).expect("auto noise is on");
     let bytes = client.read(handles);
     let slices: Vec<&[u8]> = bytes.iter().map(|buffer| &buffer[..]).collect();
-    let shape = denoiser.reading_shape();
+    let shape = denoiser.reading_shape().expect("auto noise is on");
 
     SlotNoiseReading::from_bytes(&slices, &shape)
 }

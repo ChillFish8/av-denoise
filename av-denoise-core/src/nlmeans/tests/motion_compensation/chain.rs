@@ -3,6 +3,7 @@ use cubecl::server::Handle;
 
 use super::frame_shifted_by;
 use crate::bench_api::HostIo;
+use crate::engine::align::StorageAlign;
 use crate::nlmeans::motion::{
     CHAINED_RADIUS_THRESHOLD,
     MotionCtx,
@@ -89,11 +90,12 @@ fn composed_centre_mv(denoiser: &NlmDenoiser<R>, center_t: u32, k: i32, neighbou
         .run_chain_compose(center_t, k, neighbour_idx)
         .expect("chain compose dispatch failed");
 
+    let align = StorageAlign::from_client(&denoiser.client);
     let motion_ctx = MotionCtx::new(
         denoiser.params.motion_compensation,
         denoiser.width,
         denoiser.height,
-        denoiser.align,
+        align,
     )
     .unwrap();
     let mv_field = denoiser
@@ -116,11 +118,12 @@ fn composed_centre_mv(denoiser: &NlmDenoiser<R>, center_t: u32, k: i32, neighbou
 /// `ring_head_before` is the head the first write saw, before it advanced. Duplicated slots hold
 /// zero motion by definition.
 fn assert_pair_ring_zero_from(denoiser: &NlmDenoiser<R>, ring_head_before: i32, radius: u32) {
+    let align = StorageAlign::from_client(&denoiser.client);
     let motion_ctx = MotionCtx::new(
         denoiser.params.motion_compensation,
         denoiser.width,
         denoiser.height,
-        denoiser.align,
+        align,
     )
     .unwrap();
     let pair_ring = denoiser

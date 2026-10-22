@@ -243,12 +243,8 @@ fn hq_override_skips_estimation() {
     let denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
 
     assert!(
-        denoiser.noise_partials.is_none(),
-        "sigma_override must skip allocating the partials scratch buffer"
-    );
-    assert!(
-        denoiser.noise_results.is_none(),
-        "sigma_override must skip allocating the results buffer"
+        denoiser.noise.is_none(),
+        "sigma_override must skip allocating the noise buffers"
     );
 }
 
