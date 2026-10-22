@@ -1,12 +1,15 @@
 mod correlation;
 mod curve;
+mod derived;
 mod estimator;
+mod fold;
 mod host;
 pub(crate) mod kernels;
 mod line_ring;
 mod reading;
 pub(crate) mod select;
 mod slot;
+mod snapshot;
 mod spatial;
 mod state;
 mod stats;
@@ -22,7 +25,10 @@ pub use self::curve::NOISE_CURVE_BINS;
 pub(crate) use self::curve::NoiseCurve;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::curve::build_noise_curve;
+pub use self::derived::DerivedValues;
+pub(crate) use self::fold::{Fold, NoiseSettings};
 pub(crate) use self::host::HostNoise;
+pub use self::snapshot::NoiseSnapshot;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::spatial::{NoiseCtx, run_noise_estimate};
 pub(crate) use self::spatial::{RESULTS_PER_SLOT, sigma_block_p25_from_partials, sigma_from_abs_sum};

@@ -109,7 +109,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         };
 
         let mut settings = noise.settings();
-        change(&mut settings);
+        change(&mut settings.reading);
         noise.set_settings(settings);
     }
 
@@ -141,13 +141,13 @@ impl<R: Runtime> NlmDenoiser<R> {
 
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn flat_texture_cut(&self) -> Option<f32> {
-        let settings = self.noise.as_ref().map(|noise| noise.settings());
+        let settings = self.noise.as_ref().map(|noise| noise.settings().reading);
         settings.and_then(|settings| settings.quarter.texture_cut)
     }
 
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn line_ring(&self) -> Option<usize> {
-        let settings = self.noise.as_ref().map(|noise| noise.settings());
+        let settings = self.noise.as_ref().map(|noise| noise.settings().reading);
         settings.and_then(|settings| settings.quarter.line_ring)
     }
 
@@ -167,7 +167,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     pub(in crate::nlmeans) fn reading_shape(&self) -> Option<ReadingShape> {
         let noise = self.noise.as_ref()?;
         let shape = noise.shape();
-        let settings = noise.settings();
+        let settings = noise.settings().reading;
 
         let reading_shape = ReadingShape {
             width: shape.width,

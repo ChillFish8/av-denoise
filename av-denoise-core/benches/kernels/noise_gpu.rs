@@ -637,3 +637,87 @@ impl<R: Runtime> Benchmark for ReadingBench<R> {
         vec![vec![width as usize, height as usize, channels as usize]]
     }
 }
+
+/// Which launch of the stream state a fold row times.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FoldStage {
+    /// A fold that takes a sample and a curve, with no map.
+    Fold,
+    /// A fold that also copies a 1080p luma map.
+    FoldWithMap,
+    Reset,
+}
+
+/// Times one launch of the stream state on a 1080p luma plane.
+///
+/// `prepare` measures a reading of the smooth gradient into slot 1, which has a sample and a
+/// curve, and folds it once, so every timed fold adopts that reading.
+pub struct FoldBench<R: Runtime> {
+    pub client: ComputeClient<R>,
+    pub stage: FoldStage,
+}
+
+impl<R: Runtime> FoldBench<R> {
+    fn queue_stage(&self, reading: &NoiseReading<R>) {
+        match self.stage {
+            FoldStage::Fold | FoldStage::FoldWithMap => reading.queue_fold().expect("the fold queues"),
+            FoldStage::Reset => reading.queue_reset(),
+        }
+    }
+}
+
+impl<R: Runtime> Benchmark for FoldBench<R> {
+    type Input = Arc<NoiseReading<R>>;
+    type Output = ();
+
+    fn prepare(&self) -> Self::Input {
+        let gradient = ReadingBench {
+            client: self.client.clone(),
+            stage: ReadingStage::StrengthMap,
+            chroma: false,
+            curve: true,
+        };
+        let ring = gradient.ring();
+        let map = (self.stage == FoldStage::FoldWithMap).then_some(READING_MAP);
+        let stored_ch = stored_channels(1);
+        let reading = NoiseReading::new(&self.client, WIDTH, HEIGHT, 1, stored_ch, &ring, true, map)
+            .expect("the stats queue");
+
+        reading.queue_reading();
+        reading.queue_fold().expect("the fold queues");
+        self.sync();
+
+        Arc::new(reading)
+    }
+
+    fn profile_full(&self, args: Self::Input) -> Result<ProfileDuration, String> {
+        let profiled = self.client.profile(|| self.queue_stage(&args), "noise_fold");
+        let (_, duration) = profiled.map_err(|error| format!("profile failed: {error:?}"))?;
+
+        Ok(duration)
+    }
+
+    fn execute(&self, args: Self::Input) -> Result<(), String> {
+        self.queue_stage(&args);
+
+        Ok(())
+    }
+
+    fn name(&self) -> String {
+        let stage = match self.stage {
+            FoldStage::Fold => "fold",
+            FoldStage::FoldWithMap => "fold_with_map",
+            FoldStage::Reset => "reset",
+        };
+
+        format!("noise_fold/{stage}/1080p_luma")
+    }
+
+    fn sync(&self) {
+        block_sync(&self.client);
+    }
+
+    fn shapes(&self) -> Vec<Vec<usize>> {
+        vec![vec![WIDTH as usize, HEIGHT as usize, 1]]
+    }
+}

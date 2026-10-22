@@ -2,7 +2,9 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::NOISE_BLOCK_1D;
-use super::curve::MIN_QUARTERS_PER_BIN;
+use super::curve::{MIN_QUARTERS_PER_BIN, NOISE_CURVE_BINS};
+use super::derived::DerivedValues;
+use super::fold::{NoiseSettings, STATE_WORDS, fold_words};
 #[cfg(test)]
 use super::reading::ReadingRecord;
 use super::reading::{
@@ -104,7 +106,7 @@ pub(crate) struct ReadingSettings {
 pub(crate) struct NoiseState<R: Runtime> {
     pub(super) client: ComputeClient<R>,
     pub(super) shape: NoiseShape,
-    pub(super) settings: ReadingSettings,
+    pub(super) settings: NoiseSettings,
     /// The first stage of each slot's Immerkær estimate, one padded region per slot.
     pub(super) partials: Handle,
     /// The per-channel Immerkær totals, one row per slot.
@@ -124,6 +126,17 @@ pub(crate) struct NoiseState<R: Runtime> {
     pub(super) classes: Option<ClassScratch>,
     /// The fewest accepted blocks a sample needs to reach the static fraction.
     pub(super) min_accepted: u32,
+    /// The [FOLD_WORDS](crate::noise::fold::FOLD_WORDS) settings the fold reads.
+    pub(super) fold_settings: Handle,
+    /// The [STATE_WORDS](crate::noise::fold::STATE_WORDS) chains, rho, curve and classes flag of
+    /// the stream.
+    pub(super) fold_state: Handle,
+    /// The [DERIVED_WORDS](crate::noise::derived::DERIVED_WORDS) values every consumer reads.
+    pub(super) derived: Handle,
+    /// The current curve's ratios when the consumer applies it, else zeros.
+    pub(super) curve_ratios: Handle,
+    /// The current threshold multiplier per map quarter, created as ones.
+    pub(super) current_map: Handle,
 }
 
 /// The buffers one slot's temporal sample is built in.
@@ -149,7 +162,13 @@ pub(super) struct ClassScratch {
 }
 
 impl<R: Runtime> NoiseState<R> {
-    pub(crate) fn new(client: &ComputeClient<R>, shape: NoiseShape, settings: ReadingSettings) -> Self {
+    /// A state for `shape` whose derived buffer holds `initial` until the first fold.
+    pub(crate) fn new(
+        client: &ComputeClient<R>,
+        shape: NoiseShape,
+        settings: NoiseSettings,
+        initial: DerivedValues,
+    ) -> Self {
         let frames = u64::from(shape.frames);
         let partials_stride = noise_partials_slot_stride_bytes(shape.width, shape.height, shape.align);
         let partials_bytes = partials_stride * frames;
@@ -177,12 +196,31 @@ impl<R: Runtime> NoiseState<R> {
         let reading_bytes = f32::as_bytes(&reading_zeros);
         let readings = client.create_from_slice(reading_bytes);
 
+        let reading = settings.reading;
         let immerkaer_batch = immerkaer_batch(client, shape);
         let sample = shape.temporal.then(|| sample_scratch(client, shape));
-        let curve = curve_batch(client, shape, settings);
-        let classes = class_scratch(client, shape, settings);
+        let curve = curve_batch(client, shape, reading);
+        let classes = class_scratch(client, shape, reading);
         let blocks = block_count(shape);
         let min_accepted = min_static_blocks(blocks);
+
+        let fold_settings = fold_settings_buffer(client, shape, settings);
+
+        let state_zeros = [0.0f32; STATE_WORDS as usize];
+        let state_bytes = f32::as_bytes(&state_zeros);
+        let fold_state = client.create_from_slice(state_bytes);
+
+        let initial_words = initial.to_words();
+        let derived_bytes = f32::as_bytes(&initial_words);
+        let derived = client.create_from_slice(derived_bytes);
+
+        let curve_zeros = [0.0f32; NOISE_CURVE_BINS];
+        let curve_bytes = f32::as_bytes(&curve_zeros);
+        let curve_ratios = client.create_from_slice(curve_bytes);
+
+        let map_ones = vec![1.0f32; quarter_count(shape) as usize];
+        let map_bytes = f32::as_bytes(&map_ones);
+        let current_map = client.create_from_slice(map_bytes);
 
         Self {
             client: client.clone(),
@@ -197,6 +235,11 @@ impl<R: Runtime> NoiseState<R> {
             curve,
             classes,
             min_accepted,
+            fold_settings,
+            fold_state,
+            derived,
+            curve_ratios,
+            current_map,
         }
     }
 
@@ -204,18 +247,19 @@ impl<R: Runtime> NoiseState<R> {
         self.shape
     }
 
-    pub(crate) fn settings(&self) -> ReadingSettings {
+    pub(crate) fn settings(&self) -> NoiseSettings {
         self.settings
     }
 
     /// Replaces the settings before the first queued slot, allocating or dropping the curve batch
-    /// and the class scratch to match.
-    pub(crate) fn set_settings(&mut self, settings: ReadingSettings) {
+    /// and the class scratch to match, and rewriting the fold settings.
+    pub(crate) fn set_settings(&mut self, settings: NoiseSettings) {
+        let reading = settings.reading;
         let has_curve = self.curve.is_some();
-        let wants_curve = self.shape.temporal && settings.luma_fields;
+        let wants_curve = self.shape.temporal && reading.luma_fields;
 
         if wants_curve && !has_curve {
-            self.curve = curve_batch(&self.client, self.shape, settings);
+            self.curve = curve_batch(&self.client, self.shape, reading);
         }
 
         if !wants_curve {
@@ -223,17 +267,47 @@ impl<R: Runtime> NoiseState<R> {
         }
 
         let has_classes = self.classes.is_some();
-        let wants_classes = settings.map != StrengthMapKind::Off;
+        let wants_classes = reading.map != StrengthMapKind::Off;
 
         if wants_classes && !has_classes {
-            self.classes = class_scratch(&self.client, self.shape, settings);
+            self.classes = class_scratch(&self.client, self.shape, reading);
         }
 
         if !wants_classes {
             self.classes = None;
         }
 
+        self.fold_settings = fold_settings_buffer(&self.client, self.shape, settings);
         self.settings = settings;
+    }
+
+    /// The derived values every consumer reads.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no consumer binds the GPU derived values")
+    )]
+    pub(crate) fn derived(&self) -> &Handle {
+        &self.derived
+    }
+
+    /// The current curve's ratios when the consumer applies it, else zeros.
+    #[cfg_attr(not(test), expect(dead_code, reason = "no consumer binds the GPU curve"))]
+    pub(crate) fn curve(&self) -> &Handle {
+        &self.curve_ratios
+    }
+
+    /// The current threshold multiplier per map quarter.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no consumer binds the GPU strength map")
+    )]
+    pub(crate) fn strength_map(&self) -> &Handle {
+        &self.current_map
+    }
+
+    /// Every slot's strength map, `None` without a strength map.
+    pub(super) fn slot_maps(&self) -> Option<&Handle> {
+        self.classes.as_ref().map(|scratch| &scratch.slot_maps)
     }
 
     /// The results row, the partials and, with temporal stats, the records of `slot`.
@@ -288,6 +362,16 @@ impl<R: Runtime> NoiseState<R> {
     pub(crate) fn stats(&self) -> Option<&Handle> {
         self.stats.as_ref()
     }
+}
+
+fn fold_settings_buffer<R: Runtime>(
+    client: &ComputeClient<R>,
+    shape: NoiseShape,
+    settings: NoiseSettings,
+) -> Handle {
+    let words = fold_words(shape, settings);
+    let bytes = f32::as_bytes(&words);
+    client.create_from_slice(bytes)
 }
 
 /// Immerkær cubes in one frame of `shape`.
@@ -428,7 +512,12 @@ impl<R: Runtime> NoiseState<R> {
         settings: ReadingSettings,
         slots: &[SlotStats<'_>],
     ) -> Self {
-        let mut state = Self::new(client, shape, settings);
+        let noise_settings = NoiseSettings {
+            reading: settings,
+            ..NoiseSettings::default()
+        };
+        let initial = DerivedValues::default();
+        let mut state = Self::new(client, shape, noise_settings, initial);
         let frames = shape.frames as usize;
         let word = size_of::<f32>();
         let partials_words = partials_len(shape.width, shape.height);
@@ -480,6 +569,74 @@ impl<R: Runtime> NoiseState<R> {
         }
 
         state
+    }
+
+    /// A state whose slots hold `readings`, the Immerkær abs sums `immerkaer_sums` and, with a
+    /// strength map, the slot maps `slot_maps`, one entry per slot.
+    pub(crate) fn with_readings_for_test(
+        client: &ComputeClient<R>,
+        shape: NoiseShape,
+        settings: NoiseSettings,
+        readings: &[ReadingRecord],
+        immerkaer_sums: &[[f32; 4]],
+        slot_maps: &[Vec<f32>],
+    ) -> Self {
+        let mut state = Self::new(client, shape, settings, DerivedValues::default());
+        state.set_readings_for_test(readings, immerkaer_sums, slot_maps);
+
+        state
+    }
+
+    /// Replaces every slot's reading, Immerkær abs sums and, with a strength map, slot map.
+    ///
+    /// The stream state, the derived values, the curve and the current map are kept.
+    pub(crate) fn set_readings_for_test(
+        &mut self,
+        readings: &[ReadingRecord],
+        immerkaer_sums: &[[f32; 4]],
+        slot_maps: &[Vec<f32>],
+    ) {
+        let frames = self.shape.frames as usize;
+        let reading_count = readings.len();
+        let sums_count = immerkaer_sums.len();
+        assert_eq!(reading_count, frames, "one reading per slot");
+        assert_eq!(sums_count, frames, "one row of sums per slot");
+
+        let words: Vec<f32> = readings.iter().flat_map(ReadingRecord::to_words).collect();
+        let sums: Vec<f32> = immerkaer_sums.iter().flatten().copied().collect();
+        self.readings = upload_ring(&self.client, &words);
+        self.results = upload_ring(&self.client, &sums);
+
+        let quarters = quarter_count(self.shape) as usize;
+        let client = self.client.clone();
+        if let Some(scratch) = self.classes.as_mut() {
+            let map_count = slot_maps.len();
+            assert_eq!(map_count, frames, "one map per slot");
+
+            let maps: Vec<f32> = slot_maps.iter().flatten().copied().collect();
+            let map_words = maps.len();
+            assert_eq!(map_words, quarters * frames, "one multiplier per quarter");
+
+            scratch.slot_maps = upload_ring(&client, &maps);
+        }
+    }
+
+    /// Reads the current strength map back.
+    pub(crate) fn read_current_map(&self) -> Vec<f32> {
+        let handle = self.strength_map().clone();
+        let bytes = self.client.read_one(handle).expect("the current map reads back");
+        let map = f32::from_bytes(&bytes);
+
+        map.to_vec()
+    }
+
+    /// Reads the current curve buffer back.
+    pub(crate) fn read_curve(&self) -> Vec<f32> {
+        let handle = self.curve().clone();
+        let bytes = self.client.read_one(handle).expect("the curve reads back");
+        let ratios = f32::from_bytes(&bytes);
+
+        ratios.to_vec()
     }
 
     /// Fills every batch's keys and tags and the block scratch with values no reading may keep.

@@ -15,6 +15,13 @@ pub(crate) struct NoiseEstimator {
 }
 
 impl NoiseEstimator {
+    /// An estimator whose smoothed values are `current`, `None` for one before its first update.
+    #[cfg(test)]
+    pub(crate) fn from_current(current: Option<&[f32]>) -> Self {
+        let ema = current.map(<[f32]>::to_vec);
+        Self { ema }
+    }
+
     /// Folds per-channel sigmas into the running estimate and returns the smoothed result.
     ///
     /// The first call takes the sample outright. Every element is floored at [SIGMA_FLOOR].

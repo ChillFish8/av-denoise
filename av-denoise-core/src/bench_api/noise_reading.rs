@@ -3,6 +3,9 @@ use cubecl::server::Handle;
 
 use crate::engine::align::StorageAlign;
 use crate::noise::{
+    DerivedValues,
+    Fold,
+    NoiseSettings,
     NoiseShape,
     NoiseState,
     QuarterSettings,
@@ -75,7 +78,11 @@ impl<R: Runtime> NoiseReading<R> {
                 ..ReadingSettings::default()
             },
         };
-        let state = NoiseState::new(client, shape, settings);
+        let noise_settings = NoiseSettings {
+            reading: settings,
+            ..NoiseSettings::default()
+        };
+        let state = NoiseState::new(client, shape, noise_settings, DerivedValues::default());
         state.queue_stats(ring, 1, Some(0))?;
 
         Ok(Self { state })
@@ -133,6 +140,28 @@ impl<R: Runtime> NoiseReading<R> {
             ReadingStage::Classify => self.state.queue_classify(1),
             ReadingStage::StrengthMap => self.state.queue_strength_map(1),
         };
+    }
+
+    /// Queues every launch of the reading.
+    pub fn queue_reading(&self) {
+        self.queue_before(ReadingStage::StrengthMap);
+        self.queue_stage(ReadingStage::StrengthMap);
+    }
+
+    /// Queues the fold of the reading in slot 1, which takes its sample, its curve and, with a
+    /// map, its map.
+    pub fn queue_fold(&self) -> Result<(), anyhow::Error> {
+        let fold = Fold::Centre {
+            ring_start: 1,
+            centre: 0,
+        };
+
+        self.state.queue_fold(fold)
+    }
+
+    /// Queues the reset of the stream state.
+    pub fn queue_reset(&self) {
+        self.state.queue_reset();
     }
 
     /// The curve batch's histogram and state with their lengths in words, which its passes add to.

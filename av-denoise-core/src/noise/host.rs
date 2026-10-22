@@ -1,6 +1,8 @@
 use super::correlation::correlation_factor;
 use super::curve::NoiseCurve;
+use super::derived::DerivedValues;
 use super::estimator::{EMA_ALPHA, NoiseEstimator};
+use super::snapshot::NoiseSnapshot;
 use super::strength_map::QuarterClasses;
 use super::temporal::{TemporalNoiseReading, TemporalNoiseSample};
 
@@ -146,6 +148,38 @@ impl HostNoise {
 
         chain_sigmas(&self.temporal_only, channels)
     }
+
+    /// The state as a GPU snapshot holds it, with `derived` as its derived values.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only tests compare the host state with the GPU's")
+    )]
+    pub(crate) fn snapshot(&self, channels: usize, derived: DerivedValues) -> NoiseSnapshot {
+        let curve = self.curve.map(|curve| (curve.ratios, curve.sigma_quarter_median));
+
+        NoiseSnapshot {
+            median: chain_snapshot(&self.median, channels),
+            low: chain_snapshot(&self.low, channels),
+            low_unboosted: chain_snapshot(&self.low_unboosted, channels),
+            temporal_only: chain_snapshot(&self.temporal_only, channels),
+            rho: self.rho,
+            curve,
+            classes_present: self.classes.is_some(),
+            derived,
+        }
+    }
+}
+
+/// The chain's sigmas with channels past `channels` at 0, `None` before its first update.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "only tests compare the host state with the GPU's")
+)]
+fn chain_snapshot(chain: &NoiseEstimator, channels: usize) -> Option<[f32; 3]> {
+    chain.current()?;
+
+    let sigmas = chain_sigmas(chain, channels);
+    Some(sigmas)
 }
 
 fn chain_sigmas(chain: &NoiseEstimator, channels: usize) -> [f32; 3] {

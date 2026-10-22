@@ -11,6 +11,7 @@ use super::records::{
 };
 use crate::engine::align::StorageAlign;
 use crate::noise::curve::{CLIP_HIGH, CLIP_LOW, FLAT_FACTOR, NOISE_CURVE_BINS, NoiseCurve};
+use crate::noise::fold::NoiseSettings;
 use crate::noise::reading::ReadingRecord;
 use crate::noise::select::UNTAGGED;
 use crate::noise::state::{NoiseShape, NoiseState, ReadingSettings, SlotStats};
@@ -499,13 +500,21 @@ fn luma_fields_off_never_builds_a_curve() {
     assert_eq!(gpu.populated_bins, 0);
 
     let mut state = curve_state(&client, &frame, &records, true);
-    state.set_settings(curve_settings(false));
+    let without_curve = NoiseSettings {
+        reading: curve_settings(false),
+        ..NoiseSettings::default()
+    };
+    state.set_settings(without_curve);
     let has_batch = state.has_curve_batch();
     let launches = state.queue_reading(0).expect("the reading queues");
     assert!(!has_batch);
     assert_eq!(launches, SAMPLE_LAUNCHES);
 
-    state.set_settings(curve_settings(true));
+    let with_curve = NoiseSettings {
+        reading: curve_settings(true),
+        ..NoiseSettings::default()
+    };
+    state.set_settings(with_curve);
     let has_batch = state.has_curve_batch();
     let launches = state.queue_reading(1).expect("the reading queues");
     assert!(has_batch);

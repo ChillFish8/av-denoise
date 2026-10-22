@@ -163,7 +163,13 @@ pub(crate) fn static_block(seed: u32, index: u32) -> BlockSpec {
 }
 
 /// How many representable `f32` values lie between `left` and `right`.
+///
+/// A NaN on either side is as far apart as the gap can be.
 pub(crate) fn ulp_gap(left: f32, right: f32) -> u32 {
+    if left.is_nan() || right.is_nan() {
+        return u32::MAX;
+    }
+
     if left == right {
         return 0;
     }

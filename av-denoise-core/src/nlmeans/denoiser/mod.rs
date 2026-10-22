@@ -21,7 +21,7 @@ use super::prefilter::PrefilterMode;
 use crate::engine::align::StorageAlign;
 use crate::engine::timing::DeviceTimer;
 use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
-use crate::noise::{HostNoise, NoiseState, ReadingSettings, build_spatial_offset_lut};
+use crate::noise::{DerivedValues, HostNoise, NoiseSettings, NoiseState, build_spatial_offset_lut};
 use crate::tune::KernelSelector;
 
 /// A denoised frame still resident on the GPU.
@@ -244,7 +244,11 @@ impl<R: Runtime> NlmDenoiser<R> {
         };
 
         let noise_shape = measured_noise_shape(&params, width, height, align);
-        let noise = noise_shape.map(|shape| NoiseState::new(client, shape, ReadingSettings::default()));
+        let noise = noise_shape.map(|shape| {
+            let settings = NoiseSettings::default();
+            let initial = DerivedValues::default();
+            NoiseState::new(client, shape, settings, initial)
+        });
 
         let mc_ctx = if params.motion_compensation.is_active() && params.temporal_radius > 0 {
             MotionCtx::new(params.motion_compensation, width, height, align)

@@ -88,7 +88,7 @@ impl<R: Runtime> NoiseState<R> {
             stats_buf,
             align: shape.align,
         };
-        let luma_fields = self.settings.luma_fields;
+        let luma_fields = self.settings.reading.luma_fields;
 
         run_temporal_noise_stats(&self.client, &stats_ctx, luma_fields)
             .context("temporal noise stats dispatch failed")
@@ -215,7 +215,7 @@ impl<R: Runtime> NoiseState<R> {
         let (records, records_len) = self.records_view(slot).expect("a sample implies temporal stats");
         let values_len = (blocks * BLOCK_FIELDS) as usize;
         let batch_len = sample.batch.len() as usize;
-        let luma_fields = self.settings.luma_fields;
+        let luma_fields = self.settings.reading.luma_fields;
 
         unsafe {
             noise_block_accept::launch_unchecked::<R>(
@@ -384,14 +384,14 @@ impl<R: Runtime> NoiseState<R> {
             return 0;
         };
 
-        let (luma_map, flat_boost, shadow_soften) = match self.settings.map {
+        let (luma_map, flat_boost, shadow_soften) = match self.settings.reading.map {
             StrengthMapKind::Luma(params) => (true, params.flat_boost, params.shadow_soften),
             StrengthMapKind::Chroma { flat_boost } => (false, flat_boost, 1.0),
             StrengthMapKind::Off => return 0,
         };
 
         let shape = self.shape;
-        let quarter = self.settings.quarter;
+        let quarter = self.settings.reading.quarter;
         let (cols, rows) = strength_map_dims(shape.width, shape.height);
         let grid = quarter_grid(shape);
         let quarters = quarter_count(shape) as usize;

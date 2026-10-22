@@ -75,6 +75,7 @@ pub use crate::nl4d::snapshot::MotionSnapshot;
 use crate::nlmeans::ChannelMode;
 pub use crate::nlmeans::denoiser::{GpuOutput, NlmDenoiser};
 pub use crate::nlmeans::params::NlmParams;
+pub use crate::noise::{DerivedValues, NoiseSnapshot};
 
 pub const BLOCK_X: u32 = crate::nlmeans::BLOCK_X;
 pub const BLOCK_Y: u32 = crate::nlmeans::BLOCK_Y;

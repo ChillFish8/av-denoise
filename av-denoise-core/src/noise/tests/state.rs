@@ -2,6 +2,8 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use crate::engine::align::StorageAlign;
+use crate::noise::derived::DerivedValues;
+use crate::noise::fold::{FoldSettings, NoiseSettings};
 use crate::noise::spatial::{NoiseCtx, noise_partials_slot_stride_bytes, run_noise_estimate};
 use crate::noise::state::{NoiseShape, NoiseState, ReadingSettings, StrengthMapKind};
 use crate::noise::strength_map::{QuarterSettings, StrengthMapParams};
@@ -37,7 +39,12 @@ fn luma_state(client: &ComputeClient<TestRuntime>, luma_fields: bool) -> NoiseSt
     let shape = luma_shape(client, true);
     let settings = luma_settings(luma_fields);
 
-    NoiseState::new(client, shape, settings)
+    let noise_settings = NoiseSettings {
+        reading: settings,
+        ..NoiseSettings::default()
+    };
+
+    NoiseState::new(client, shape, noise_settings, DerivedValues::default())
 }
 
 fn luma_ring(client: &ComputeClient<TestRuntime>) -> Handle {
@@ -153,7 +160,11 @@ fn a_state_without_temporal_stats_hands_out_no_records() {
     let client = test_client();
     let ring = luma_ring(&client);
     let shape = luma_shape(&client, false);
-    let state = NoiseState::new(&client, shape, luma_settings(true));
+    let settings = NoiseSettings {
+        reading: luma_settings(true),
+        ..NoiseSettings::default()
+    };
+    let state = NoiseState::new(&client, shape, settings, DerivedValues::default());
 
     state.queue_stats(&ring, 1, Some(0)).expect("the estimate queues");
 
@@ -177,17 +188,30 @@ fn set_settings_replaces_every_setting() {
         line_ring: Some(2),
     };
 
-    let luma = ReadingSettings {
+    let luma_reading = ReadingSettings {
         luma_fields: false,
         quarter,
         map: StrengthMapKind::Luma(map),
     };
+    let fold = FoldSettings {
+        sigma_scale: 1.25,
+        borrow_ahead: true,
+        ..FoldSettings::default()
+    };
+    let luma = NoiseSettings {
+        reading: luma_reading,
+        fold,
+    };
     state.set_settings(luma);
     assert_eq!(state.settings(), luma);
 
-    let chroma = ReadingSettings {
+    let chroma_reading = ReadingSettings {
         map: StrengthMapKind::Chroma { flat_boost: 1.2 },
         ..ReadingSettings::default()
+    };
+    let chroma = NoiseSettings {
+        reading: chroma_reading,
+        ..NoiseSettings::default()
     };
     state.set_settings(chroma);
     assert_eq!(state.settings(), chroma);

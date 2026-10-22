@@ -1,17 +1,15 @@
-use std::cell::Cell;
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{BufReader, Read};
-use std::rc::Rc;
 
-use anyhow::{Context, bail};
 use cubecl::prelude::*;
 
 use super::records::{hashed_unit, ulp_gap};
+use super::y4m::read_y4m;
 use crate::collab::geometry::strength_map_dims;
 use crate::engine::align::StorageAlign;
 use crate::nl4d::PsyParams;
 use crate::noise::curve::{MIN_QUARTERS_PER_BIN, NOISE_CURVE_BINS, curve_bin_counts};
+use crate::noise::derived::DerivedValues;
+use crate::noise::fold::NoiseSettings;
 use crate::noise::reading::{CURVE_TAGS, ReadingRecord};
 use crate::noise::spatial::sigma_block_p25_from_partials;
 use crate::noise::state::{BLOCK_ACCEPTED, NoiseShape, NoiseState, ReadingSettings, StrengthMapKind};
@@ -30,10 +28,10 @@ use crate::tune::tests::runtime::{TestRuntime, test_client};
 /// The lowest share of blocks, bins or quarters whose decisions must match on any frame.
 const MIN_AGREEMENT: f64 = 0.999;
 /// The largest relative gap any value may show on a frame whose decisions all match.
-const MAX_RELATIVE: f32 = 1.0e-5;
-const RADIUS: u32 = 2;
+pub(super) const MAX_RELATIVE: f32 = 1.0e-5;
+pub(super) const RADIUS: u32 = 2;
 const SYNTHETIC_FRAMES: u32 = 12;
-const BRICK: &str = concat!(
+pub(super) const BRICK: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../data/host_stalls_2026_10/brick48.y4m"
 );
@@ -44,15 +42,15 @@ const EDGES: &str = concat!(
 
 /// The geometry of one plane a stream runs on.
 #[derive(Debug, Clone, Copy)]
-struct Plane {
-    width: u32,
-    height: u32,
-    channels: u32,
-    stored_ch: u32,
+pub(super) struct Plane {
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) channels: u32,
+    pub(super) stored_ch: u32,
 }
 
 impl Plane {
-    fn luma(width: u32, height: u32) -> Self {
+    pub(super) fn luma(width: u32, height: u32) -> Self {
         Self {
             width,
             height,
@@ -61,7 +59,7 @@ impl Plane {
         }
     }
 
-    fn chroma(width: u32, height: u32) -> Self {
+    pub(super) fn chroma(width: u32, height: u32) -> Self {
         Self {
             width,
             height,
@@ -80,120 +78,6 @@ impl Plane {
     }
 }
 
-/// An 8-bit 4:2:0 y4m clip with planes in 0..=1.
-struct Y4mClip {
-    width: u32,
-    height: u32,
-    frames: Vec<Y4mFrame>,
-}
-
-impl Y4mClip {
-    /// The chroma planes' width and height, half the luma's rounded up.
-    fn chroma_dims(&self) -> (u32, u32) {
-        let chroma_width = self.width.div_ceil(2);
-        let chroma_height = self.height.div_ceil(2);
-
-        (chroma_width, chroma_height)
-    }
-}
-
-/// One frame's luma plane and its chroma planes interleaved as `u, v` per chroma pixel.
-struct Y4mFrame {
-    luma: Vec<f32>,
-    chroma: Vec<f32>,
-}
-
-/// Reads the y4m file at `path`, failing on anything but 8-bit 4:2:0.
-fn read_y4m(path: &str) -> Result<Y4mClip, anyhow::Error> {
-    let file = File::open(path).with_context(|| format!("failed to open {path}"))?;
-    let reader = BufReader::new(file);
-
-    decode_y4m(reader)
-}
-
-/// A reader that counts every byte it hands out.
-struct CountingReader<R: Read> {
-    inner: R,
-    consumed: Rc<Cell<u64>>,
-}
-
-impl<R: Read> Read for CountingReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let read = self.inner.read(buf)?;
-        let consumed = self.consumed.get() + read as u64;
-        self.consumed.set(consumed);
-
-        Ok(read)
-    }
-}
-
-/// Decodes a y4m stream, failing on anything but 8-bit 4:2:0 or on a stream that ends mid-frame.
-fn decode_y4m(reader: impl Read) -> Result<Y4mClip, anyhow::Error> {
-    let consumed = Rc::new(Cell::new(0u64));
-    let counting = CountingReader {
-        inner: reader,
-        consumed: consumed.clone(),
-    };
-    let mut decoder = y4m::decode(counting).context("the y4m header decodes")?;
-    let colour_space = decoder.get_colorspace();
-    let bit_depth = decoder.get_bit_depth();
-    let is_420 = matches!(
-        colour_space,
-        y4m::Colorspace::C420
-            | y4m::Colorspace::C420jpeg
-            | y4m::Colorspace::C420paldv
-            | y4m::Colorspace::C420mpeg2
-    );
-
-    if !is_420 || bit_depth != 8 {
-        bail!("unsupported y4m colour space {colour_space:?} at {bit_depth} bits, need 8-bit 4:2:0");
-    }
-
-    let width = decoder.get_width() as u32;
-    let height = decoder.get_height() as u32;
-    let mut frames = Vec::new();
-
-    loop {
-        let before = consumed.get();
-        let frame = match decoder.read_frame() {
-            Ok(frame) => frame,
-            Err(y4m::Error::EOF) => {
-                // The crate reports a cut-off frame as the end of the stream, so any byte read
-                // since the last whole frame means the stream ended mid-frame.
-                let partial = consumed.get() != before;
-                if partial {
-                    let frame_index = frames.len();
-                    bail!("the y4m stream ends partway through frame {frame_index}");
-                }
-
-                break;
-            },
-            Err(other) => return Err(other.into()),
-        };
-
-        let luma = frame.get_y_plane().iter().map(|&code| unit(code)).collect();
-        let u_plane = frame.get_u_plane();
-        let v_plane = frame.get_v_plane();
-        let mut chroma = Vec::with_capacity(2 * u_plane.len());
-        for (&u_code, &v_code) in u_plane.iter().zip(v_plane) {
-            chroma.push(unit(u_code));
-            chroma.push(unit(v_code));
-        }
-
-        frames.push(Y4mFrame { luma, chroma });
-    }
-
-    Ok(Y4mClip {
-        width,
-        height,
-        frames,
-    })
-}
-
-fn unit(code: u8) -> f32 {
-    f32::from(code) / 255.0
-}
-
 /// The luma plane's settings with the curve and no map, as nl4d reads luma without psy.
 fn luma_off() -> ReadingSettings {
     ReadingSettings {
@@ -203,7 +87,7 @@ fn luma_off() -> ReadingSettings {
 }
 
 /// The luma plane's settings with the map, the texture cut and the line ring at the psy defaults.
-fn luma_map() -> ReadingSettings {
+pub(super) fn luma_map() -> ReadingSettings {
     let psy = PsyParams::default();
     let params = StrengthMapParams {
         flat_boost: psy.flat_boost,
@@ -228,7 +112,7 @@ fn chroma_off() -> ReadingSettings {
 }
 
 /// The chroma plane's settings with the chroma map at the psy default boost.
-fn chroma_map() -> ReadingSettings {
+pub(super) fn chroma_map() -> ReadingSettings {
     let psy = PsyParams::default();
     let map = StrengthMapKind::Chroma {
         flat_boost: psy.chroma_flat_boost,
@@ -242,7 +126,7 @@ fn chroma_map() -> ReadingSettings {
 }
 
 /// The multiplier a flat quarter gets under `map`, `None` without a map.
-fn flat_boost(map: StrengthMapKind) -> Option<f32> {
+pub(super) fn flat_boost(map: StrengthMapKind) -> Option<f32> {
     match map {
         StrengthMapKind::Off => None,
         StrengthMapKind::Luma(params) => Some(params.flat_boost),
@@ -251,8 +135,8 @@ fn flat_boost(map: StrengthMapKind) -> Option<f32> {
 }
 
 /// What the GPU wrote for one slot.
-struct GpuSlot {
-    reading: ReadingRecord,
+pub(super) struct GpuSlot {
+    pub(super) reading: ReadingRecord,
     block_flags: Vec<u32>,
     bin_counts: [usize; NOISE_CURVE_BINS],
     /// Empty without a map.
@@ -260,9 +144,11 @@ struct GpuSlot {
 }
 
 /// What the host reference reads from the same slot's stats.
-struct HostSlot {
-    immerkaer_low: [f32; 3],
-    reading: TemporalNoiseReading,
+pub(super) struct HostSlot {
+    /// The Immerkær abs sums both sides fold.
+    pub(super) sums: [f32; 4],
+    pub(super) immerkaer_low: [f32; 3],
+    pub(super) reading: TemporalNoiseReading,
     accepted: Vec<bool>,
     /// The bin counts, present when the curve is built and the slot has a sample.
     bin_counts: Option<[usize; NOISE_CURVE_BINS]>,
@@ -271,18 +157,27 @@ struct HostSlot {
 }
 
 /// A noise state over a ring of `2 * radius + 1` slots that reads every pushed frame.
-struct ReadingHarness {
-    client: ComputeClient<TestRuntime>,
-    plane: Plane,
+pub(super) struct ReadingHarness {
+    pub(super) client: ComputeClient<TestRuntime>,
+    pub(super) plane: Plane,
     settings: ReadingSettings,
-    state: NoiseState<TestRuntime>,
+    pub(super) state: NoiseState<TestRuntime>,
     /// The host copy of the input ring, uploaded whole on every push.
     ring: Vec<f32>,
-    pushed: u32,
+    pub(super) pushed: u32,
 }
 
 impl ReadingHarness {
     fn new(plane: Plane, settings: ReadingSettings) -> Self {
+        let noise_settings = NoiseSettings {
+            reading: settings,
+            ..NoiseSettings::default()
+        };
+
+        Self::with_settings(plane, noise_settings)
+    }
+
+    pub(super) fn with_settings(plane: Plane, noise_settings: NoiseSettings) -> Self {
         let client = test_client();
         let frames = 2 * RADIUS + 1;
         let shape = NoiseShape {
@@ -294,13 +189,13 @@ impl ReadingHarness {
             temporal: true,
             align: StorageAlign::from_client(&client),
         };
-        let state = NoiseState::new(&client, shape, settings);
+        let state = NoiseState::new(&client, shape, noise_settings, DerivedValues::default());
         let ring = vec![0.0f32; plane.frame_len() * frames as usize];
 
         Self {
             client,
             plane,
-            settings,
+            settings: noise_settings.reading,
             state,
             ring,
             pushed: 0,
@@ -335,7 +230,7 @@ impl ReadingHarness {
         self.read_gpu(slot)
     }
 
-    fn push(&mut self, frame: &[f32]) -> (GpuSlot, HostSlot) {
+    pub(super) fn push(&mut self, frame: &[f32]) -> (GpuSlot, HostSlot) {
         let slot = self.queue_frame(frame);
         let gpu = self.read_gpu(slot);
         let host = self.read_host(slot);
@@ -367,7 +262,7 @@ impl ReadingHarness {
     fn read_host(&self, slot: u32) -> HostSlot {
         let plane = self.plane;
         let settings = self.settings;
-        let (partials, _, records) = self.state.read_slot_stats(slot);
+        let (partials, sums, records) = self.state.read_slot_stats(slot);
         let immerkaer_low =
             sigma_block_p25_from_partials(&partials, plane.channels, plane.width, plane.height);
         let reading = temporal_noise_reading(
@@ -403,6 +298,7 @@ impl ReadingHarness {
         let map = host_map(&reading, settings.map, plane);
 
         HostSlot {
+            sums,
             immerkaer_low,
             reading,
             accepted,
@@ -428,7 +324,7 @@ fn host_map(reading: &TemporalNoiseReading, map: StrengthMapKind, plane: Plane) 
 
 /// How many decisions of one frame the GPU and the host make alike.
 #[derive(Debug, Clone, Copy)]
-struct Agreement {
+pub(super) struct Agreement {
     blocks: usize,
     block_flips: usize,
     bins: usize,
@@ -439,7 +335,7 @@ struct Agreement {
 }
 
 impl Agreement {
-    fn measure(gpu: &GpuSlot, host: &HostSlot, boost: Option<f32>) -> Self {
+    pub(super) fn measure(gpu: &GpuSlot, host: &HostSlot, boost: Option<f32>) -> Self {
         let blocks = host.accepted.len();
         let gpu_blocks = gpu.block_flags.len();
         assert_eq!(gpu_blocks, blocks, "block flag count");
@@ -484,7 +380,7 @@ impl Agreement {
         }
     }
 
-    fn decisions_match(&self) -> bool {
+    pub(super) fn decisions_match(&self) -> bool {
         let no_flips = self.block_flips == 0 && self.bin_flips == 0 && self.quarter_flips == 0;
         no_flips && self.none_paths_agree
     }
@@ -788,7 +684,7 @@ fn synthetic_frame(plane: Plane, seed: u32, frame: u32) -> Vec<f32> {
     interleaved
 }
 
-fn synthetic_stream(plane: Plane, seed: u32) -> Vec<Vec<f32>> {
+pub(super) fn synthetic_stream(plane: Plane, seed: u32) -> Vec<Vec<f32>> {
     (0..SYNTHETIC_FRAMES)
         .map(|frame| synthetic_frame(plane, seed, frame))
         .collect()
@@ -893,61 +789,6 @@ fn the_per_slot_path_is_byte_identical_across_runs() {
     }
 
     sync(&first.client).expect("the device syncs");
-}
-
-/// A one-frame 4x2 8-bit 4:2:0 stream whose header names `colour_space`, with none for `None`.
-fn tiny_stream(colour_space: Option<&str>) -> Vec<u8> {
-    let tag = colour_space.map(|name| format!(" C{name}")).unwrap_or_default();
-    let header = format!("YUV4MPEG2 W4 H2 F25:1 Ip A1:1{tag}\nFRAME\n");
-    let mut bytes = header.into_bytes();
-    let samples: Vec<u8> = (0..12u8).map(|index| index * 5).collect();
-    bytes.extend_from_slice(&samples);
-
-    bytes
-}
-
-#[test]
-fn a_y4m_header_with_another_colour_space_is_refused() {
-    for colour_space in ["444", "420p10"] {
-        let bytes = tiny_stream(Some(colour_space));
-        let decoded = decode_y4m(bytes.as_slice());
-        let error = decoded.err().expect("the colour space is refused");
-        let message = error.to_string();
-        let tag = format!("C{colour_space}");
-        let names_tag = message.contains(&tag);
-        assert!(names_tag, "the refusal of {tag} names it, got {message:?}");
-    }
-
-    for colour_space in [None, Some("420"), Some("420mpeg2")] {
-        let bytes = tiny_stream(colour_space);
-        let clip = decode_y4m(bytes.as_slice()).expect("an 8-bit 4:2:0 stream decodes");
-        let frame_count = clip.frames.len();
-        let frame = &clip.frames[0];
-        let expected_luma: Vec<f32> = (0..8u8).map(|index| unit(index * 5)).collect();
-        let expected_chroma: Vec<f32> = [40u8, 50, 45, 55].map(unit).to_vec();
-
-        assert_eq!(frame_count, 1);
-        assert_eq!((clip.width, clip.height), (4, 2));
-        assert_eq!(frame.luma, expected_luma);
-        assert_eq!(frame.chroma, expected_chroma);
-    }
-}
-
-#[test]
-fn a_y4m_stream_cut_off_mid_frame_is_refused() {
-    let mut cut = tiny_stream(Some("420"));
-    cut.pop();
-
-    let mut trailing = tiny_stream(Some("420"));
-    trailing.extend_from_slice(b"FRAME\n");
-
-    for bytes in [cut, trailing] {
-        let decoded = decode_y4m(bytes.as_slice());
-        let error = decoded.err().expect("a cut-off stream is refused");
-        let message = error.to_string();
-        let names_cut = message.contains("ends partway through frame");
-        assert!(names_cut, "the refusal names the cut, got {message:?}");
-    }
 }
 
 #[test]

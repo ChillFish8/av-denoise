@@ -1,11 +1,13 @@
 mod classes;
 mod curve;
+mod fold;
 mod sample;
 mod select;
 mod stats;
 
 pub use self::classes::{noise_classify, noise_strength_map};
 pub use self::curve::noise_curve_bins;
+pub use self::fold::{noise_fold, noise_reset};
 pub use self::sample::{noise_block_accept, noise_block_derive, noise_sample_finish};
 #[cfg(test)]
 pub(crate) use self::select::{key_value, order_key};
