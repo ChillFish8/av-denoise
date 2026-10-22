@@ -1,6 +1,7 @@
 use cubecl::prelude::*;
 
-use super::helpers::{read_clamped_line, read_line};
+use super::helpers::read_clamped_line;
+use crate::engine::kernels::read_line;
 
 /// The distance tile element that halo slot `halo` writes.
 ///

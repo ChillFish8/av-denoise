@@ -25,16 +25,16 @@ use crate::collab::geometry::strength_map_dims;
 /// variance.
 ///
 /// Grain alone reads about 0.35 to 0.45 of it, so faint lines under heavy grain land above the cut.
-const QUARTER_FLAT_FACTOR: f32 = 0.55;
+pub(crate) const QUARTER_FLAT_FACTOR: f32 = 0.55;
 
 /// A quarter noisier than this many times the curve at its luma is treated as motion, not grain.
-const MOTION_FACTOR: f32 = 2.5;
+pub(crate) const MOTION_FACTOR: f32 = 2.5;
 
 /// The luma at and below which [StrengthMapParams::shadow_soften] applies in full.
-const SHADOW_LOW: f32 = 128.0 / 255.0;
+pub(crate) const SHADOW_LOW: f32 = 128.0 / 255.0;
 
 /// The luma at which the soften has faded back to 1.0.
-const SHADOW_HIGH: f32 = 160.0 / 255.0;
+pub(crate) const SHADOW_HIGH: f32 = 160.0 / 255.0;
 
 /// The luma threshold multipliers a [QuarterClasses] turns into.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -264,7 +264,7 @@ fn shadow_multiplier(luma: f32, shadow_soften: f32) -> f32 {
 /// With a texture cut below 1.0 in `settings`, flat quarters then go through
 /// [QuarterClasses::veto_textured] at that cut. With a line ring, quarters within that many quarters
 /// of a strong line skip the shadow soften and the veto.
-pub(in crate::nlmeans) fn classify_quarters(
+pub(crate) fn classify_quarters(
     records: &[f32],
     stored_ch: u32,
     width: u32,

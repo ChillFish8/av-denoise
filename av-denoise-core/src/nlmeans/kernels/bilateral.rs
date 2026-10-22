@@ -1,7 +1,8 @@
 use cubecl::prelude::*;
 use cubecl::terminate;
 
-use super::helpers::{read_clamped_line, read_line};
+use super::helpers::read_clamped_line;
+use crate::engine::kernels::read_line;
 
 /// A bilateral prefilter that blurs a frame without crossing edges.
 ///

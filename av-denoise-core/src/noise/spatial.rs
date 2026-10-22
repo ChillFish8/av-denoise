@@ -1,13 +1,13 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
+use super::kernels::{nlm_noise_partial, nlm_noise_reduce};
 use super::stats::{lower_quartile, sort_ascending};
-use crate::nlmeans::align::StorageAlign;
-use crate::nlmeans::kernels::{nlm_noise_partial, nlm_noise_reduce};
-use crate::nlmeans::{BLOCK_1D, BLOCK_X, BLOCK_Y};
+use super::{IMMERKAER_BLOCK_X, IMMERKAER_BLOCK_Y, NOISE_BLOCK_1D};
+use crate::engine::align::StorageAlign;
 
 /// The inputs one Immerkær noise estimate needs.
-pub(in crate::nlmeans) struct NoiseCtx<'a> {
+pub(crate) struct NoiseCtx<'a> {
     pub width: u32,
     pub height: u32,
     pub channels: u32,
@@ -21,33 +21,25 @@ pub(in crate::nlmeans) struct NoiseCtx<'a> {
 }
 
 /// The `f32` length of one frame's first-stage partials, four lanes per block.
-pub(in crate::nlmeans) fn partials_len(width: u32, height: u32) -> usize {
-    (width.div_ceil(BLOCK_X) * height.div_ceil(BLOCK_Y) * 4) as usize
+pub(crate) fn partials_len(width: u32, height: u32) -> usize {
+    (width.div_ceil(IMMERKAER_BLOCK_X) * height.div_ceil(IMMERKAER_BLOCK_Y) * 4) as usize
 }
 
 /// The byte stride between partials ring slots, padded to the buffer-binding alignment.
 ///
 /// wgpu rejects a bind-group offset that is not a multiple of its
 /// `min_storage_buffer_offset_alignment`, and a small frame can leave [partials_len] short of one.
-pub(in crate::nlmeans) fn noise_partials_slot_stride_bytes(
-    width: u32,
-    height: u32,
-    align: StorageAlign,
-) -> u64 {
+pub(crate) fn noise_partials_slot_stride_bytes(width: u32, height: u32, align: StorageAlign) -> u64 {
     let partials_bytes = partials_len(width, height) as u64 * size_of::<f32>() as u64;
     align.pad_bytes(partials_bytes)
 }
 
 /// The Immerkær totals each ring slot keeps in the results buffer, one per stored channel lane.
-pub(in crate::nlmeans) const RESULTS_PER_SLOT: usize = 4;
+pub(crate) const RESULTS_PER_SLOT: usize = 4;
 
-/// The [RESULTS_PER_SLOT](crate::nlmeans::noise::spatial::RESULTS_PER_SLOT) Immerkær totals `slot`
+/// The [RESULTS_PER_SLOT](crate::noise::spatial::RESULTS_PER_SLOT) Immerkær totals `slot`
 /// holds in the results buffer.
-pub(in crate::nlmeans) fn noise_results_slot_view(
-    results_buf: &Handle,
-    frame_count: u32,
-    slot: u32,
-) -> Handle {
+pub(crate) fn noise_results_slot_view(results_buf: &Handle, frame_count: u32, slot: u32) -> Handle {
     let row_bytes = (RESULTS_PER_SLOT * size_of::<f32>()) as u64;
     let total_bytes = frame_count as u64 * row_bytes;
     let start = slot as u64 * row_bytes;
@@ -57,7 +49,7 @@ pub(in crate::nlmeans) fn noise_results_slot_view(
 }
 
 /// One slot's first-stage partials within the partials ring.
-pub(in crate::nlmeans) fn noise_partials_slot_view(
+pub(crate) fn noise_partials_slot_view(
     partials_buf: &Handle,
     width: u32,
     height: u32,
@@ -79,7 +71,7 @@ pub(in crate::nlmeans) fn noise_partials_slot_view(
 /// The mask is cheap and needs only one frame, but it reads correlated grain low because the grain
 /// looks partly like content to it. The per-channel totals land in this frame's slot of the results
 /// buffer, which holds four values per slot of the input ring's frame capacity.
-pub(in crate::nlmeans) fn run_noise_estimate<R: Runtime>(
+pub(crate) fn run_noise_estimate<R: Runtime>(
     client: &ComputeClient<R>,
     ctx: &NoiseCtx<'_>,
 ) -> Result<(), anyhow::Error> {
@@ -87,14 +79,14 @@ pub(in crate::nlmeans) fn run_noise_estimate<R: Runtime>(
     let partials_count = partials_len(ctx.width, ctx.height);
     let total_results = ctx.frame_count as usize * RESULTS_PER_SLOT;
     let stored_ch = ctx.stored_ch as usize;
-    let cubes_x = ctx.width.div_ceil(BLOCK_X);
-    let cubes_y = ctx.height.div_ceil(BLOCK_Y);
+    let cubes_x = ctx.width.div_ceil(IMMERKAER_BLOCK_X);
+    let cubes_y = ctx.height.div_ceil(IMMERKAER_BLOCK_Y);
 
     unsafe {
         nlm_noise_partial::launch_unchecked::<R>(
             client,
             CubeCount::new_2d(cubes_x, cubes_y),
-            CubeDim::new_2d(BLOCK_X, BLOCK_Y),
+            CubeDim::new_2d(IMMERKAER_BLOCK_X, IMMERKAER_BLOCK_Y),
             stored_ch,
             ArrayArg::from_raw_parts(ctx.input_buf.clone(), total_input),
             ArrayArg::from_raw_parts(ctx.partials_buf.clone(), partials_count),
@@ -102,8 +94,8 @@ pub(in crate::nlmeans) fn run_noise_estimate<R: Runtime>(
             ctx.width,
             ctx.height,
             ctx.channels,
-            BLOCK_X,
-            BLOCK_Y,
+            IMMERKAER_BLOCK_X,
+            IMMERKAER_BLOCK_Y,
         );
     }
 
@@ -113,12 +105,12 @@ pub(in crate::nlmeans) fn run_noise_estimate<R: Runtime>(
         nlm_noise_reduce::launch_unchecked::<R>(
             client,
             CubeCount::new_1d(1),
-            CubeDim::new_1d(BLOCK_1D),
+            CubeDim::new_1d(NOISE_BLOCK_1D),
             ArrayArg::from_raw_parts(ctx.partials_buf.clone(), partials_count),
             ArrayArg::from_raw_parts(ctx.results_buf.clone(), total_results),
             ctx.slot,
             block_count,
-            BLOCK_1D,
+            NOISE_BLOCK_1D,
         );
     }
 
@@ -128,7 +120,7 @@ pub(in crate::nlmeans) fn run_noise_estimate<R: Runtime>(
 /// Turns the summed absolute mask responses into an Immerkær sigma.
 ///
 /// The interior area leaves out the one-pixel border the mask cannot reach.
-pub(in crate::nlmeans) fn sigma_from_abs_sum(abs_sum: f32, width: u32, height: u32) -> f32 {
+pub(crate) fn sigma_from_abs_sum(abs_sum: f32, width: u32, height: u32) -> f32 {
     let interior = ((width - 2) as f32) * ((height - 2) as f32);
     (std::f32::consts::FRAC_PI_2).sqrt() * abs_sum / (6.0 * interior)
 }
@@ -139,27 +131,27 @@ pub(in crate::nlmeans) fn sigma_from_abs_sum(abs_sum: f32, width: u32, height: u
 /// interior. A block with no overlap is skipped so a spurious zero cannot dilute the quartile.
 /// Where noise is uneven across a frame this reads lower than the frame-wide mean, which makes it
 /// the cautious estimate. Channels past the active count stay 0.
-pub(in crate::nlmeans) fn sigma_block_p25_from_partials(
+pub(crate) fn sigma_block_p25_from_partials(
     partials: &[f32],
     channels: u32,
     width: u32,
     height: u32,
 ) -> [f32; 3] {
-    let cubes_x = width.div_ceil(BLOCK_X);
-    let cubes_y = height.div_ceil(BLOCK_Y);
+    let cubes_x = width.div_ceil(IMMERKAER_BLOCK_X);
+    let cubes_y = height.div_ceil(IMMERKAER_BLOCK_Y);
     let channels = channels as usize;
 
     let mut cube_sigmas: Vec<Vec<f32>> = vec![Vec::new(); channels];
 
     for cube_y in 0..cubes_y {
-        let tile_y0 = cube_y * BLOCK_Y;
-        let tile_y1 = ((cube_y + 1) * BLOCK_Y).min(height);
+        let tile_y0 = cube_y * IMMERKAER_BLOCK_Y;
+        let tile_y1 = ((cube_y + 1) * IMMERKAER_BLOCK_Y).min(height);
         let overlap_y0 = tile_y0.max(1);
         let overlap_y1 = tile_y1.min(height - 1);
 
         for cube_x in 0..cubes_x {
-            let tile_x0 = cube_x * BLOCK_X;
-            let tile_x1 = ((cube_x + 1) * BLOCK_X).min(width);
+            let tile_x0 = cube_x * IMMERKAER_BLOCK_X;
+            let tile_x1 = ((cube_x + 1) * IMMERKAER_BLOCK_X).min(width);
             let overlap_x0 = tile_x0.max(1);
             let overlap_x1 = tile_x1.min(width - 1);
 

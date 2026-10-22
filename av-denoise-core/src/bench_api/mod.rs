@@ -16,7 +16,7 @@ pub mod kernels {
     pub use crate::nlmeans::kernels::*;
 }
 
-pub const MAX_GRID_1D: u32 = crate::nlmeans::MAX_GRID_1D;
+pub const MAX_GRID_1D: u32 = crate::engine::MAX_GRID_1D;
 
 pub mod motion {
     pub use crate::nlmeans::motion::*;
@@ -24,6 +24,10 @@ pub mod motion {
 
 pub mod nl4d_kernels {
     pub use crate::nl4d::kernels::*;
+}
+
+pub mod noise_kernels {
+    pub use crate::noise::kernels::*;
 }
 
 pub mod prefilter {
@@ -53,7 +57,10 @@ pub use crate::nlmeans::params::NlmParams;
 
 pub const BLOCK_X: u32 = crate::nlmeans::BLOCK_X;
 pub const BLOCK_Y: u32 = crate::nlmeans::BLOCK_Y;
-pub const NOISE_CURVE_BINS: usize = crate::nlmeans::NOISE_CURVE_BINS;
+pub const NOISE_CURVE_BINS: usize = crate::noise::NOISE_CURVE_BINS;
+pub const STRENGTH_MAP_OFF: u32 = crate::noise::STRENGTH_MAP_OFF;
+pub const STRENGTH_MAP_LUMA: u32 = crate::noise::STRENGTH_MAP_LUMA;
+pub const STRENGTH_MAP_ALL: u32 = crate::noise::STRENGTH_MAP_ALL;
 
 /// A readback in flight, resolving to one buffer per handle read.
 pub type ReadFuture = Pin<Box<dyn Future<Output = Result<Vec<Bytes>, ServerError>> + Send>>;

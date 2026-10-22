@@ -2,8 +2,8 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 use cubecl::wgpu::WgpuRuntime;
 
+pub(super) use crate::engine::align::StorageAlign;
 use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
-pub(super) use crate::nlmeans::align::StorageAlign;
 use crate::nlmeans::{
     ChannelMode,
     DenoisingMode,

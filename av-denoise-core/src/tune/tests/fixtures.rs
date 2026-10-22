@@ -6,12 +6,13 @@ use cubecl::server::Handle;
 use super::runtime::TestRuntime;
 use crate::collab::geometry::{ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
-use crate::collab::kernels::fused::STRENGTH_MAP_OFF;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, grid_frames, needs_warp_uniform_search};
+use crate::engine::align::StorageAlign;
 use crate::nl4d::nl4d_pool_ratio;
+use crate::nlmeans::ChannelMode;
 use crate::nlmeans::motion::THSAD_PIXEL;
-use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS, StorageAlign};
+use crate::noise::{NOISE_CURVE_BINS, STRENGTH_MAP_OFF};
 use crate::tune::SiteCandidate;
 use crate::tune::gpu::zero_words;
 use crate::tune::sites::{

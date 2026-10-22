@@ -6,7 +6,7 @@ use super::params::Nl4dParams;
 use super::snapshot::{LastFields, MotionSnapshot, read_snapshot};
 use crate::collab::geometry::{ref_count, strength_map_dims};
 use crate::collab::kernels::aggregate::{collab_normalise, cross_frame_accum_scale, kaiser_window};
-use crate::collab::kernels::fused::{MEMBER_WORDS, STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA};
+use crate::collab::kernels::fused::MEMBER_WORDS;
 use crate::collab::kernels::packed::collab_normalise_packed;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, PATCH_SIZE, needs_warp_uniform_search, supports_f16_search};
@@ -14,14 +14,12 @@ use crate::engine::timing::{DeviceTimed, DeviceTimer, timed};
 use crate::engine::{DevicePlane, EngineTiming, SampleFormat};
 use crate::nlmeans::denoiser::{BufferSize, front_buffer_sizes};
 use crate::nlmeans::mirror::MirroredBuffer;
-use crate::nlmeans::{
-    BLOCK_X,
-    BLOCK_Y,
-    ChannelMode,
+use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, RingView};
+use crate::noise::{
     NOISE_CURVE_BINS,
-    NlmDenoiser,
     QuarterClasses,
-    RingView,
+    STRENGTH_MAP_ALL,
+    STRENGTH_MAP_LUMA,
     StrengthMapParams,
 };
 use crate::tune::{KernelSelector, PipelineProfile, check_plane_size};

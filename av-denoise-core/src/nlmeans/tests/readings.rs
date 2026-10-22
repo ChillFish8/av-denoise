@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 
 use super::noise_curve::{frame_dims, quarters_at, synthetic_records};
 use crate::nlmeans::denoiser::readings::{ReadingShape, SlotNoiseReading};
-use crate::nlmeans::noise::{QuarterSettings, partials_len, temporal_noise_reading};
+use crate::noise::{QuarterSettings, partials_len, temporal_noise_reading};
 
 #[test]
 fn a_reading_with_temporal_stats_matches_the_temporal_reading() {

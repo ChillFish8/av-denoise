@@ -1,64 +1,65 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
+use super::NOISE_BLOCK_1D;
 use super::curve::{NoiseCurve, build_noise_curve};
+use super::kernels::{nlm_temporal_noise_stats, nlm_temporal_stats_zero};
 use super::stats::{lower_quartile, median, sort_ascending};
 use super::strength_map::{QuarterClasses, QuarterSettings, classify_quarters};
-use crate::nlmeans::align::StorageAlign;
-use crate::nlmeans::kernels::{nlm_temporal_noise_stats, nlm_temporal_stats_zero};
-use crate::nlmeans::{BLOCK_1D, MAX_GRID_1D};
+use crate::engine::MAX_GRID_1D;
+use crate::engine::align::StorageAlign;
 
 /// The side of one temporal-stats block in pixels, with one GPU block per square.
-pub(in crate::nlmeans) const TEMPORAL_NOISE_BLOCK: u32 = 16;
+pub(crate) const TEMPORAL_NOISE_BLOCK: u32 = 16;
 /// How many 8x8 quarters one block record holds.
-pub(in crate::nlmeans) const TEMPORAL_QUARTERS: u32 = 4;
-pub(in crate::nlmeans) const TEMPORAL_QUARTER_SIZE: u32 = TEMPORAL_NOISE_BLOCK / 2;
+pub(crate) const TEMPORAL_QUARTERS: u32 = 4;
+pub(crate) const TEMPORAL_QUARTER_SIZE: u32 = TEMPORAL_NOISE_BLOCK / 2;
 /// The offset of the first quarter record past `2 * stored_ch`.
 ///
 /// Quarter `q` starts at `2 * stored_ch + 1 + 9 * q`, in top-left, top-right, bottom-left,
 /// bottom-right order.
-pub(in crate::nlmeans) const TEMPORAL_QUARTER_BASE: u32 = 1;
+pub(crate) const TEMPORAL_QUARTER_BASE: u32 = 1;
 /// How many `f32`s one quarter record holds.
-pub(in crate::nlmeans) const TEMPORAL_QUARTER_FIELDS: u32 = 9;
+pub(crate) const TEMPORAL_QUARTER_FIELDS: u32 = 9;
 /// The quarter-record offset of channel 0's summed residual.
-pub(in crate::nlmeans) const QUARTER_SUM_D: u32 = 0;
+pub(crate) const QUARTER_SUM_D: u32 = 0;
 /// The quarter-record offset of channel 0's summed squared residual.
-pub(in crate::nlmeans) const QUARTER_SUM_D2: u32 = 1;
+pub(crate) const QUARTER_SUM_D2: u32 = 1;
 /// The quarter-record offset of the new frame's summed luma.
-pub(in crate::nlmeans) const QUARTER_LUMA_SUM: u32 = 2;
+pub(crate) const QUARTER_LUMA_SUM: u32 = 2;
 /// The quarter-record offset of the smoothed temporal mean's gradient energy.
 ///
-/// A quarter smaller than 8x8 reads [UNMEASURED_FLATNESS](crate::nlmeans::noise::UNMEASURED_FLATNESS).
-pub(in crate::nlmeans) const QUARTER_FLATNESS: u32 = 3;
+/// A quarter smaller than 8x8 reads [UNMEASURED_FLATNESS](crate::noise::UNMEASURED_FLATNESS).
+pub(crate) const QUARTER_FLATNESS: u32 = 3;
 /// The quarter-record offset of the new frame's minimum luma.
-pub(in crate::nlmeans) const QUARTER_LUMA_MIN: u32 = 4;
+pub(crate) const QUARTER_LUMA_MIN: u32 = 4;
 /// The quarter-record offset of the new frame's maximum luma.
-pub(in crate::nlmeans) const QUARTER_LUMA_MAX: u32 = 5;
+pub(crate) const QUARTER_LUMA_MAX: u32 = 5;
 /// The quarter-record offset of the temporal mean's summed squared horizontal gradient.
-pub(in crate::nlmeans) const QUARTER_TENSOR_XX: u32 = 6;
+pub(crate) const QUARTER_TENSOR_XX: u32 = 6;
 /// The quarter-record offset of the temporal mean's summed squared vertical gradient.
-pub(in crate::nlmeans) const QUARTER_TENSOR_YY: u32 = 7;
+pub(crate) const QUARTER_TENSOR_YY: u32 = 7;
 /// The quarter-record offset of the temporal mean's summed horizontal times vertical gradient.
-pub(in crate::nlmeans) const QUARTER_TENSOR_XY: u32 = 8;
+pub(crate) const QUARTER_TENSOR_XY: u32 = 8;
 /// The flatness a quarter smaller than 8x8 holds.
 ///
 /// It sits far above any measured flatness, so a flat gate always rejects the quarter.
-pub(in crate::nlmeans) const UNMEASURED_FLATNESS: f32 = 3.0e38;
+pub(crate) const UNMEASURED_FLATNESS: f32 = 3.0e38;
 
 /// The largest mean block residual, in normalised units, that still counts as static.
 ///
 /// A block above this is moving content rather than noise.
-pub(super) const STATIC_GATE: f32 = 1.5 / 255.0;
+pub(crate) const STATIC_GATE: f32 = 1.5 / 255.0;
 /// The smallest block sigma that counts as measurable noise.
 ///
 /// Below it a block carries too little signal for its correlation reading to mean anything. It
 /// gates the correlation median, the outlier ceiling's reference set and the sigma population.
-pub(super) const RHO_SIGMA_GATE: f32 = 0.3 / 255.0;
+pub(crate) const RHO_SIGMA_GATE: f32 = 0.3 / 255.0;
 /// The smallest fraction of static blocks a sample needs to be trusted.
 ///
 /// Below it, motion, a scene change or too little measurable noise dominates the frame, and the
 /// Immerkær estimate is the only usable reading.
-const STATIC_FRACTION_MIN: f32 = 0.05;
+pub(crate) const STATIC_FRACTION_MIN: f32 = 0.05;
 /// How far above the surviving blocks' lower quartile a block's sigma may sit before it counts as
 /// moving texture.
 ///
@@ -72,25 +73,25 @@ const STATIC_FRACTION_MIN: f32 = 0.05;
 /// it. The quartile only counts blocks above [RHO_SIGMA_GATE], because letterbox bars and other
 /// perfectly static regions read a sigma of exactly 0 and would drag it to 0, rejecting every
 /// block with real noise.
-const SIGMA_OUTLIER_FACTOR: f32 = 5.0;
+pub(crate) const SIGMA_OUTLIER_FACTOR: f32 = 5.0;
 
 /// How many `f32`s one block's stats record holds.
 ///
 /// That is a sum and a sum of squares per stored channel, one lag-1 total, and the four quarter
 /// records.
-pub(in crate::nlmeans) fn temporal_stats_record_len(stored_ch: u32) -> u32 {
+pub(crate) fn temporal_stats_record_len(stored_ch: u32) -> u32 {
     2 * stored_ch + TEMPORAL_QUARTER_BASE + TEMPORAL_QUARTERS * TEMPORAL_QUARTER_FIELDS
 }
 
 /// The row-major block grid covering a frame, with ragged edges truncated rather than padded.
-pub(in crate::nlmeans) fn temporal_stats_blocks(width: u32, height: u32) -> (u32, u32) {
+pub(crate) fn temporal_stats_blocks(width: u32, height: u32) -> (u32, u32) {
     (
         width.div_ceil(TEMPORAL_NOISE_BLOCK),
         height.div_ceil(TEMPORAL_NOISE_BLOCK),
     )
 }
 
-pub(super) fn temporal_stats_slot_len(width: u32, height: u32, stored_ch: u32) -> usize {
+pub(crate) fn temporal_stats_slot_len(width: u32, height: u32, stored_ch: u32) -> usize {
     let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
     (blocks_x * blocks_y * temporal_stats_record_len(stored_ch)) as usize
 }
@@ -105,7 +106,7 @@ fn temporal_stats_slot_stride_bytes(width: u32, height: u32, stored_ch: u32, ali
     align.pad_bytes(slot_bytes)
 }
 
-pub(in crate::nlmeans) fn temporal_stats_buf_bytes(
+pub(crate) fn temporal_stats_buf_bytes(
     width: u32,
     height: u32,
     stored_ch: u32,
@@ -117,7 +118,7 @@ pub(in crate::nlmeans) fn temporal_stats_buf_bytes(
 
 /// The inputs one temporal residual statistics dispatch needs, comparing `slot_new` against
 /// `slot_prev`.
-pub(in crate::nlmeans) struct TemporalStatsCtx<'a> {
+pub(crate) struct TemporalStatsCtx<'a> {
     pub width: u32,
     pub height: u32,
     pub stored_ch: u32,
@@ -135,7 +136,7 @@ pub(in crate::nlmeans) struct TemporalStatsCtx<'a> {
 /// scene changes make the reading unreliable. The kernel addresses only its own slot's slice, so
 /// it needs nothing about the ring's other slots or the padding between them. With `luma_fields`
 /// off, the kernel's four luma-only lanes read 0 at no extra cost.
-pub(in crate::nlmeans) fn run_temporal_noise_stats<R: Runtime>(
+pub(crate) fn run_temporal_noise_stats<R: Runtime>(
     client: &ComputeClient<R>,
     ctx: &TemporalStatsCtx<'_>,
     luma_fields: bool,
@@ -171,7 +172,7 @@ pub(in crate::nlmeans) fn run_temporal_noise_stats<R: Runtime>(
 ///
 /// It runs on a slot copied from the one before it. The zeroes read as no static blocks with
 /// measurable noise rather than as a reading of zero noise.
-pub(in crate::nlmeans) fn zero_temporal_stats_slot<R: Runtime>(
+pub(crate) fn zero_temporal_stats_slot<R: Runtime>(
     client: &ComputeClient<R>,
     stats_buf: &Handle,
     width: u32,
@@ -184,14 +185,14 @@ pub(in crate::nlmeans) fn zero_temporal_stats_slot<R: Runtime>(
     let stride = temporal_stats_slot_stride_bytes(width, height, stored_ch, align);
     let slot_region = stats_buf.clone().offset_start((slot as u64) * stride);
 
-    let grid = slot_len.div_ceil(BLOCK_1D).min(MAX_GRID_1D);
-    let total_threads = grid * BLOCK_1D;
+    let grid = slot_len.div_ceil(NOISE_BLOCK_1D).min(MAX_GRID_1D);
+    let total_threads = grid * NOISE_BLOCK_1D;
 
     unsafe {
         nlm_temporal_stats_zero::launch_unchecked::<R>(
             client,
             CubeCount::new_1d(grid),
-            CubeDim::new_1d(BLOCK_1D),
+            CubeDim::new_1d(NOISE_BLOCK_1D),
             ArrayArg::from_raw_parts(slot_region, slot_len as usize),
             slot_len,
             total_threads,
@@ -200,7 +201,7 @@ pub(in crate::nlmeans) fn zero_temporal_stats_slot<R: Runtime>(
 }
 
 /// One ring slot's temporal-stats region.
-pub(in crate::nlmeans) fn temporal_stats_slot_view(
+pub(crate) fn temporal_stats_slot_view(
     stats_buf: &Handle,
     width: u32,
     height: u32,
@@ -226,7 +227,7 @@ pub(in crate::nlmeans) fn temporal_stats_slot_view(
     clippy::too_many_arguments,
     reason = "the readback needs the ring handle plus every shape value that locates one slot in it"
 )]
-pub(in crate::nlmeans) fn read_temporal_stats_slot<R: Runtime>(
+pub(crate) fn read_temporal_stats_slot<R: Runtime>(
     client: &ComputeClient<R>,
     stats_buf: &Handle,
     width: u32,
@@ -247,7 +248,7 @@ pub(in crate::nlmeans) fn read_temporal_stats_slot<R: Runtime>(
 
 /// One centre slot's aggregated temporal-residual noise measurement.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(in crate::nlmeans) struct TemporalNoiseSample {
+pub(crate) struct TemporalNoiseSample {
     /// The per-channel median sigma over the static blocks with measurable noise, in normalised
     /// units.
     ///
@@ -279,23 +280,23 @@ struct StaticGateCandidate {
 }
 
 /// One block [accepted_static_blocks] counted as static noise.
-pub(in crate::nlmeans) struct AcceptedBlock {
+pub(crate) struct AcceptedBlock {
     /// The block's position in `records`, in units of one record.
-    pub(super) index: usize,
+    pub(crate) index: usize,
     /// The in-frame width, which a ragged edge truncates.
-    pub(super) width: u32,
+    pub(crate) width: u32,
     /// The in-frame height, which a ragged edge truncates.
-    pub(super) height: u32,
+    pub(crate) height: u32,
     /// The per-channel sigma, with entries past the active channel count at 0.
-    pub(super) sigmas: [f32; 3],
+    pub(crate) sigmas: [f32; 3],
     /// Channel 0's mean residual.
-    pub(super) mean0: f32,
+    pub(crate) mean0: f32,
     /// Channel 0's mean lag-1 product over adjacent pixel pairs.
-    pub(super) mean_lag: f32,
+    pub(crate) mean_lag: f32,
     /// Channel 0's residual variance.
-    pub(super) var_ch0: f32,
+    pub(crate) var_ch0: f32,
     /// How many adjacent pixel pairs the block holds.
-    pub(super) n_pairs: f32,
+    pub(crate) n_pairs: f32,
 }
 
 /// Picks out the blocks in one slot's records that count as static noise.
@@ -311,7 +312,7 @@ pub(in crate::nlmeans) struct AcceptedBlock {
 /// of itself. Real per-block sigma always varies a little over a finite sample, so a remainder with
 /// no spread beside excluded blocks is reported as `None` rather than as a sigma texture may have
 /// inflated.
-pub(in crate::nlmeans) fn accepted_static_blocks(
+pub(crate) fn accepted_static_blocks(
     records: &[f32],
     channels: u32,
     stored_ch: u32,
@@ -437,7 +438,7 @@ pub(in crate::nlmeans) fn accepted_static_blocks(
 
 /// The scalar sample [temporal_noise_reading] builds, without a curve.
 #[cfg(test)]
-pub(in crate::nlmeans) fn aggregate_temporal_noise_stats(
+pub(crate) fn aggregate_temporal_noise_stats(
     records: &[f32],
     channels: u32,
     stored_ch: u32,
@@ -458,17 +459,17 @@ pub(in crate::nlmeans) fn aggregate_temporal_noise_stats(
 
 /// One centre slot's temporal-noise reading.
 #[derive(Debug, Clone)]
-pub(in crate::nlmeans) struct TemporalNoiseReading {
-    pub(in crate::nlmeans) sample: Option<TemporalNoiseSample>,
+pub(crate) struct TemporalNoiseReading {
+    pub(crate) sample: Option<TemporalNoiseSample>,
     /// The per-frame luma noise curve, present only when requested and a sample exists.
-    pub(in crate::nlmeans) curve: Option<NoiseCurve>,
+    pub(crate) curve: Option<NoiseCurve>,
     /// The frame's quarter classes, present exactly when `curve` is.
-    pub(in crate::nlmeans) classes: Option<QuarterClasses>,
+    pub(crate) classes: Option<QuarterClasses>,
 }
 
 impl TemporalNoiseReading {
     /// A reading with no sample, curve or classes.
-    pub(in crate::nlmeans) fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         Self {
             sample: None,
             curve: None,
@@ -487,7 +488,7 @@ impl TemporalNoiseReading {
 /// The curve needs `with_curve` and a sample, since a frame too unreliable for a scalar sample is
 /// too unreliable for a curve. `settings` control what [classify_quarters] does after classing the
 /// quarters.
-pub(in crate::nlmeans) fn temporal_noise_reading(
+pub(crate) fn temporal_noise_reading(
     records: &[f32],
     channels: u32,
     stored_ch: u32,

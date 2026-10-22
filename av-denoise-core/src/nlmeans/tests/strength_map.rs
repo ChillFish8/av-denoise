@@ -10,7 +10,8 @@ use super::noise_curve::{
 };
 use crate::bench_api::HostIo;
 use crate::collab::geometry::strength_map_dims;
-use crate::nlmeans::noise::{
+use crate::nlmeans::{ChannelMode, HqParams, MotionCompensationMode, NlmDenoiser, NlmParams, PrefilterMode};
+use crate::noise::{
     NOISE_CURVE_BINS,
     NoiseCurve,
     QuarterClass,
@@ -23,7 +24,6 @@ use crate::nlmeans::noise::{
     temporal_noise_reading,
     temporal_stats_record_len,
 };
-use crate::nlmeans::{ChannelMode, HqParams, MotionCompensationMode, NlmDenoiser, NlmParams, PrefilterMode};
 
 const SIGMA: f32 = 0.02;
 

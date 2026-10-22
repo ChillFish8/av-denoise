@@ -1,13 +1,13 @@
 use super::curve::NoiseCurve;
 
 /// How many times the noise curve's sigma a line quarter's RMS gradient must reach.
-const LINE_SIGMA_FACTOR: f32 = 3.0;
+pub(crate) const LINE_SIGMA_FACTOR: f32 = 3.0;
 
 /// The luma range a line quarter must span, in 8-bit code values.
-const LINE_CONTRAST_FLOOR: f32 = 32.0;
+pub(crate) const LINE_CONTRAST_FLOOR: f32 = 32.0;
 
 /// How many 2x2 gradient windows a full 8x8 quarter's structure tensor sums over.
-const FULL_QUARTER_WINDOWS: f32 = 49.0;
+pub(crate) const FULL_QUARTER_WINDOWS: f32 = 49.0;
 
 /// What the line detector reads from one full 8x8 quarter.
 #[derive(Debug, Clone, Copy, PartialEq)]

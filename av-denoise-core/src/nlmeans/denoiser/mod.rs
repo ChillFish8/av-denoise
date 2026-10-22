@@ -13,10 +13,14 @@ use cubecl::server::Handle;
 pub(crate) use self::machinery::RingView;
 use self::readings::NoiseReadings;
 pub(crate) use self::sizes::{BufferSize, check_u32_indexable, front_buffer_sizes};
-use super::align::StorageAlign;
 use super::mirror::MirroredBuffer;
 use super::motion::{self, MotionCtx, MotionEstimation};
-use super::noise::{
+use super::params::{NlmParams, SEPARABLE_THRESHOLD, validate_dimensions};
+use super::prefilter::PrefilterMode;
+use crate::engine::align::StorageAlign;
+use crate::engine::timing::DeviceTimer;
+use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
+use crate::noise::{
     NoiseCurve,
     NoiseEstimator,
     QuarterClasses,
@@ -26,10 +30,6 @@ use super::noise::{
     noise_partials_slot_stride_bytes,
     temporal_stats_buf_bytes,
 };
-use super::params::{NlmParams, SEPARABLE_THRESHOLD, validate_dimensions};
-use super::prefilter::PrefilterMode;
-use crate::engine::timing::DeviceTimer;
-use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
 use crate::tune::KernelSelector;
 
 /// A denoised frame still resident on the GPU.

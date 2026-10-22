@@ -2,7 +2,8 @@ use super::helpers::{R, RAMP_HEIGHT, RAMP_WIDTH, make_client, ramp_clip, ramp_pa
 use crate::bench_api::HostIo;
 use crate::nl4d::denoiser::noise_curve_upload;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
-use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS};
+use crate::nlmeans::ChannelMode;
+use crate::noise::NOISE_CURVE_BINS;
 
 /// A clip's denoised frames, and whether the front end built a noise curve during any pass.
 struct ClipRun {

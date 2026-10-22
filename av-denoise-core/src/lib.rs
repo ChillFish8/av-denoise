@@ -9,6 +9,7 @@ mod engine;
 mod error;
 pub mod nl4d;
 pub mod nlmeans;
+mod noise;
 mod options;
 pub mod tune;
 #[cfg(test)]

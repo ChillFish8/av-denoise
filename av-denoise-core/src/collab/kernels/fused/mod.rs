@@ -19,7 +19,6 @@ use self::pooled::pooled_threshold;
 use self::shape::{SearchCursor, SearchShape};
 pub use self::split::{MEMBER_WORDS, collab_filter, collab_search};
 use self::strength_map::strength_map_scale;
-pub use self::strength_map::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
 use self::tile::load_centre_tile;
 use self::trajectory::trajectory_search;
 pub use self::variant::{
@@ -45,8 +44,9 @@ use super::transforms::{
     variance_reg_level,
 };
 use crate::collab::{MAX_K, MAX_TEMPORAL_RADIUS, PATCH_AREA, PATCH_SIZE, STEP};
-use crate::nlmeans::NOISE_CURVE_BINS;
-use crate::nlmeans::kernels::helpers::{channel_scale, read_line};
+use crate::engine::kernels::read_line;
+use crate::nlmeans::kernels::helpers::channel_scale;
+use crate::noise::{NOISE_CURVE_BINS, STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA};
 
 /// The smallest factor the noise curve may scale the luma threshold by.
 const NOISE_CURVE_SCALE_MIN: f32 = 0.33;

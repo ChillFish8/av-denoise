@@ -283,7 +283,7 @@ impl<R: Runtime> NlmDenoiser<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nlmeans::align::StorageAlign;
+    use crate::engine::align::StorageAlign;
     use crate::nlmeans::motion::{MotionCompensationMode, MotionEstimation};
 
     /// A 4-pixel-high frame cut into 4x4 blocks with no overlap.

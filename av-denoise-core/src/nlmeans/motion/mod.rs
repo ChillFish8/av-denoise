@@ -21,7 +21,7 @@ pub(crate) use self::pyramid::{
     pyramid_slot_pixels,
     run_pyramid_build,
 };
-use super::align::StorageAlign;
+use crate::engine::align::StorageAlign;
 
 /// The motion search's tuning, for a denoiser that always tracks motion.
 ///

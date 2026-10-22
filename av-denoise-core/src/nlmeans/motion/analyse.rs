@@ -4,7 +4,7 @@ use cubecl::server::Handle;
 use super::MotionCtx;
 use super::pyramid::{level_dims, pyramid_level_offset, pyramid_pixels_per_frame, pyramid_slot_pixels};
 #[cfg(test)]
-use crate::nlmeans::align::StorageAlign;
+use crate::engine::align::StorageAlign;
 use crate::nlmeans::kernels::motion::{
     BLOCK_MATCH_THREADS,
     nlm_mc_block_match_coarse,

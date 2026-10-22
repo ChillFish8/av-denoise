@@ -1,18 +1,10 @@
 use super::helpers::{R, make_client};
 use crate::bench_api::HostIo;
-use crate::collab::kernels::fused::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA};
 use crate::nl4d::denoiser::strength_map_upload;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams, PsyParams};
 use crate::nlmeans::tests::helpers::seeded_unit_gaussian;
-use crate::nlmeans::{
-    ChannelMode,
-    HqParams,
-    NlmParams,
-    PrefilterMode,
-    QuarterClass,
-    QuarterClasses,
-    StrengthMapParams,
-};
+use crate::nlmeans::{ChannelMode, HqParams, NlmParams, PrefilterMode};
+use crate::noise::{QuarterClass, QuarterClasses, STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, StrengthMapParams};
 
 const LUMA_MAP: StrengthMapParams = StrengthMapParams {
     flat_boost: 1.5,

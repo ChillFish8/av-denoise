@@ -1,6 +1,8 @@
 use super::helpers::*;
 use crate::bench_api::HostIo;
-use crate::nlmeans::noise::{
+use crate::nlmeans::*;
+use crate::noise::{
+    NOISE_CURVE_BINS,
     NoiseCurve,
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
@@ -21,7 +23,6 @@ use crate::nlmeans::noise::{
     temporal_noise_reading,
     temporal_stats_record_len,
 };
-use crate::nlmeans::*;
 
 /// One synthetic 8x8 quarter, as the stats kernel would record it.
 #[derive(Clone, Copy)]

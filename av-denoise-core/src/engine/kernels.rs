@@ -201,3 +201,19 @@ pub fn egress_f32(
         pixel += total_threads;
     }
 }
+
+/// Reads one pixel line without clamping its coordinates.
+///
+/// `x` must be within `0..width` and `y` within `0..height`.
+#[cube]
+pub(crate) fn read_line<F: Float, N: Size>(
+    buf: &Array<Vector<F, N>>,
+    x: u32,
+    y: u32,
+    frame: u32,
+    #[comptime] width: u32,
+    #[comptime] height: u32,
+) -> Vector<F, N> {
+    let idx = (frame * height + y) * width + x;
+    buf[idx as usize]
+}

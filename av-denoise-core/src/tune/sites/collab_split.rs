@@ -27,7 +27,7 @@ use crate::collab::kernels::fused::{
     collab_filter,
     collab_search,
 };
-use crate::nlmeans::NOISE_CURVE_BINS;
+use crate::noise::NOISE_CURVE_BINS;
 use crate::tune::fidelity::{CompareResult, Fidelity, diff_integers};
 use crate::tune::gpu::{bind, read_i32, zero_words, zeroed_words};
 use crate::tune::key::SiteKey;

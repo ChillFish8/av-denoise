@@ -1,4 +1,4 @@
-use av_denoise_core::bench_api::kernels::nlm_temporal_noise_stats;
+use av_denoise_core::bench_api::noise_kernels::nlm_temporal_noise_stats;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -9,7 +9,7 @@ use super::{HEIGHT, WIDTH, block_sync, make_padded_frame, shapes_with_channels};
 const TEMPORAL_CHANNELS: u32 = 3;
 /// Padded storage width for YUV, padded up to a vec4 lane.
 const TEMPORAL_STORED_CH: u32 = 4;
-/// Matches `nlmeans::noise::TEMPORAL_NOISE_BLOCK`.
+/// Matches `noise::TEMPORAL_NOISE_BLOCK`.
 const TEMPORAL_BLOCK: u32 = 16;
 
 /// The temporal-residual noise-stats kernel over two 1080p YUV ring slots.
@@ -31,7 +31,7 @@ fn blocks() -> (u32, u32) {
     (WIDTH.div_ceil(TEMPORAL_BLOCK), HEIGHT.div_ceil(TEMPORAL_BLOCK))
 }
 
-/// The stats buffer length, one `nlmeans::noise::temporal_stats_record_len` record per block.
+/// The stats buffer length, one `noise::temporal_stats_record_len` record per block.
 ///
 /// A record is a sum and a sum of squares per stored channel, one lag-1 total, and four quarter
 /// records of nine fields each.

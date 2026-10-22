@@ -1,4 +1,4 @@
-use crate::nlmeans::noise::correlation::{
+use crate::noise::correlation::{
     build_spatial_offset_lut,
     correlation_factor,
     interpolate_table,

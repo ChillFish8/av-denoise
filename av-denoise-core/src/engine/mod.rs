@@ -1,3 +1,4 @@
+pub(crate) mod align;
 mod io;
 pub(crate) mod kernels;
 mod plane;
@@ -11,6 +12,9 @@ pub use self::plane::{DevicePlane, Geometry, SampleFormat};
 pub use self::timing::EngineTiming;
 use crate::error::Error;
 use crate::nl4d::grain::GrainChunk;
+
+/// Largest 1D grid a dispatch may ask for, set by the WebGPU and Vulkan limits.
+pub(crate) const MAX_GRID_1D: u32 = 65535;
 
 /// How many frames before and after a target frame are needed to denoise it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

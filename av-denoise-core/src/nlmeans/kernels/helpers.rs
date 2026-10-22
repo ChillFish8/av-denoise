@@ -1,5 +1,7 @@
 use cubecl::prelude::*;
 
+use crate::engine::kernels::read_line;
+
 #[cube]
 pub(super) fn clamp_coord(value: i32, #[comptime] limit: u32) -> u32 {
     let mut result = value as u32;
@@ -26,22 +28,6 @@ pub(crate) fn read_clamped_line<N: Size>(
     let clamped_x = clamp_coord(x, width);
     let clamped_y = clamp_coord(y, height);
     let idx = (frame * height + clamped_y) * width + clamped_x;
-    buf[idx as usize]
-}
-
-/// The unchecked version of `read_clamped_line`.
-///
-/// `x` must be within `0..width` and `y` within `0..height`.
-#[cube]
-pub(crate) fn read_line<F: Float, N: Size>(
-    buf: &Array<Vector<F, N>>,
-    x: u32,
-    y: u32,
-    frame: u32,
-    #[comptime] width: u32,
-    #[comptime] height: u32,
-) -> Vector<F, N> {
-    let idx = (frame * height + y) * width + x;
     buf[idx as usize]
 }
 

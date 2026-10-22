@@ -7,8 +7,9 @@ use cubecl::prelude::*;
 use cubecl::profile::ProfileDuration;
 use cubecl::server::{Handle, ProfileError};
 
+use crate::engine::MAX_GRID_1D;
+use crate::nlmeans::BLOCK_1D;
 use crate::nlmeans::kernels::gpu_zero_buffers;
-use crate::nlmeans::{BLOCK_1D, MAX_GRID_1D};
 use crate::tune::decide::{SampleTiming, Sampler};
 use crate::tune::site::{SiteCandidate, VariantSite};
 

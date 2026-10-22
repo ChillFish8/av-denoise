@@ -13,7 +13,7 @@ use crate::collab::kernels::plane_ops::{
     shift_insert8_ordered,
     shift_insert8_ordered_cached,
 };
-use crate::nlmeans::kernels::helpers::read_line;
+use crate::engine::kernels::read_line;
 
 /// One row of a lane's candidate column, in the search ring's precision.
 ///

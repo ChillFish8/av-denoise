@@ -10,11 +10,12 @@ use crate::collab::kernels::aggregate::{
     kaiser_window,
     weight_scale,
 };
-use crate::collab::kernels::fused::{CollabVariant, STRENGTH_MAP_OFF, collab_fused};
+use crate::collab::kernels::fused::{CollabVariant, collab_fused};
 use crate::collab::kernels::packed::collab_zero_packed;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, grid_frames};
-use crate::nlmeans::{BLOCK_X, BLOCK_Y, NOISE_CURVE_BINS};
+use crate::nlmeans::{BLOCK_X, BLOCK_Y};
+use crate::noise::{NOISE_CURVE_BINS, STRENGTH_MAP_OFF};
 use crate::tune::tests::runtime::packed_supported;
 
 /// Runs [collab_normalise] over hand-built accumulators.

@@ -10,7 +10,9 @@ use crate::engine::EngineTiming;
 use crate::engine::timing::{DeviceTimed, DeviceTimer};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 use crate::nlmeans::mirror::MirroredBuffer;
-use crate::nlmeans::noise::{
+use crate::nlmeans::params::sigma_eff;
+use crate::nlmeans::prefilter::PrefilterMode;
+use crate::noise::{
     EMA_ALPHA,
     NoiseCtx,
     NoiseCurve,
@@ -30,8 +32,6 @@ use crate::nlmeans::noise::{
     temporal_stats_slot_view,
     zero_temporal_stats_slot,
 };
-use crate::nlmeans::params::sigma_eff;
-use crate::nlmeans::prefilter::PrefilterMode;
 
 impl<R: Runtime> DeviceTimed for NlmDenoiser<R> {
     fn device_timer(&mut self) -> &mut DeviceTimer {

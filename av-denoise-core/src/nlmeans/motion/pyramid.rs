@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::MotionCtx;
-use crate::nlmeans::align::StorageAlign;
+use crate::engine::align::StorageAlign;
 use crate::nlmeans::kernels::motion::{nlm_mc_downscale, nlm_mc_extract_luma};
 
 /// One frame's luma pixel count at `level`, padded to whole alignment boundaries.

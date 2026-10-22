@@ -1,6 +1,7 @@
 mod correlation;
 mod curve;
 mod estimator;
+pub(crate) mod kernels;
 mod line_ring;
 mod spatial;
 mod stats;
@@ -9,7 +10,7 @@ mod temporal;
 #[cfg(test)]
 mod tests;
 
-pub(super) use self::correlation::{
+pub(crate) use self::correlation::{
     build_spatial_offset_lut,
     correlation_factor,
     spatial_offset_factor,
@@ -18,11 +19,11 @@ pub(super) use self::correlation::{
 pub use self::curve::NOISE_CURVE_BINS;
 pub(crate) use self::curve::NoiseCurve;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-pub(super) use self::curve::build_noise_curve;
-pub(super) use self::estimator::{EMA_ALPHA, NoiseEstimator};
+pub(crate) use self::curve::build_noise_curve;
+pub(crate) use self::estimator::{EMA_ALPHA, NoiseEstimator};
 #[cfg(test)]
-pub(super) use self::spatial::partials_len;
-pub(super) use self::spatial::{
+pub(crate) use self::spatial::partials_len;
+pub(crate) use self::spatial::{
     NoiseCtx,
     RESULTS_PER_SLOT,
     noise_partials_slot_stride_bytes,
@@ -33,11 +34,11 @@ pub(super) use self::spatial::{
     sigma_from_abs_sum,
 };
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-pub(super) use self::strength_map::classify_quarters;
+pub(crate) use self::strength_map::classify_quarters;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::strength_map::{QuarterClass, QuarterTensor};
 pub(crate) use self::strength_map::{QuarterClasses, QuarterSettings, StrengthMapParams};
-pub(super) use self::temporal::{
+pub(crate) use self::temporal::{
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
     QUARTER_LUMA_MIN,
@@ -64,9 +65,24 @@ pub(super) use self::temporal::{
     zero_temporal_stats_slot,
 };
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-pub(super) use self::temporal::{
+pub(crate) use self::temporal::{
     TEMPORAL_NOISE_BLOCK,
     accepted_static_blocks,
     aggregate_temporal_noise_stats,
     read_temporal_stats_slot,
 };
+
+/// Cube X dimension for the Immerkær noise partials kernel.
+pub(crate) const IMMERKAER_BLOCK_X: u32 = 32;
+/// Cube Y dimension for the Immerkær noise partials kernel.
+pub(crate) const IMMERKAER_BLOCK_Y: u32 = 8;
+
+/// Block size for the 1D noise reduce and zero kernels.
+pub(crate) const NOISE_BLOCK_1D: u32 = 256;
+
+/// Every threshold is left as it is.
+pub(crate) const STRENGTH_MAP_OFF: u32 = 0;
+/// The map scales channel 0's noise-curve ratio.
+pub(crate) const STRENGTH_MAP_LUMA: u32 = 1;
+/// The map scales every channel's threshold, for a denoiser with no curve.
+pub(crate) const STRENGTH_MAP_ALL: u32 = 2;

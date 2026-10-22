@@ -3,11 +3,11 @@ use std::time::{Duration, Instant};
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
+use crate::engine::align::StorageAlign;
 use crate::nlmeans::BLOCK_1D;
-use crate::nlmeans::align::StorageAlign;
 use crate::nlmeans::denoiser::readings::{InFlightRead, NoiseReadings, ReadingShape, SlotNoiseReading};
 use crate::nlmeans::kernels::gpu_copy;
-use crate::nlmeans::noise::{
+use crate::noise::{
     QuarterSettings,
     RESULTS_PER_SLOT,
     noise_partials_slot_stride_bytes,

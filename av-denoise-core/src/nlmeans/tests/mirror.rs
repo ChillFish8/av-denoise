@@ -3,8 +3,8 @@ use cubecl::prelude::*;
 use super::helpers::{R, make_client, make_noisy_gaussian_frame};
 use crate::bench_api::HostIo;
 use crate::nlmeans::mirror::MirroredBuffer;
-use crate::nlmeans::noise::build_spatial_offset_lut;
 use crate::nlmeans::*;
+use crate::noise::build_spatial_offset_lut;
 
 const SIZE: u32 = 64;
 

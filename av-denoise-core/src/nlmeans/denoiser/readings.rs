@@ -8,7 +8,7 @@ use cubecl::prelude::*;
 use cubecl::server::{Handle, ServerError};
 
 use crate::engine::timing::StallClock;
-use crate::nlmeans::noise::{
+use crate::noise::{
     QuarterSettings,
     RESULTS_PER_SLOT,
     TemporalNoiseReading,

@@ -7,9 +7,9 @@ use super::helpers::{
     clamp_coord,
     line_sum_sq,
     read_clamped_line,
-    read_line,
     welsch_weight,
 };
+use crate::engine::kernels::read_line;
 
 /// Writes the per-pixel squared distances to the forward and backward neighbours in one pass.
 ///

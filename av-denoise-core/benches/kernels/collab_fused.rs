@@ -1,13 +1,11 @@
 use std::marker::PhantomData;
 
-use av_denoise_core::bench_api::NOISE_CURVE_BINS;
 use av_denoise_core::bench_api::collab::geometry::{ref_count, refs_along, strength_map_dims};
 use av_denoise_core::bench_api::collab::kernels::aggregate::{
     cross_frame_accum_scale,
     kaiser_window,
     weight_scale,
 };
-use av_denoise_core::bench_api::collab::kernels::fused::{STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
 use av_denoise_core::bench_api::collab::kernels::transforms::dct_noise_profile;
 use av_denoise_core::bench_api::collab::{grid_frames, needs_warp_uniform_search};
 use av_denoise_core::bench_api::tune_sites::{
@@ -18,6 +16,7 @@ use av_denoise_core::bench_api::tune_sites::{
     CollabValues,
     CollabVariant,
 };
+use av_denoise_core::bench_api::{NOISE_CURVE_BINS, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
 use av_denoise_core::tune::{DeviceLimits, SiteCandidate, VariantSite, fit_candidates};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;

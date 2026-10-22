@@ -1,5 +1,5 @@
-use crate::nlmeans::noise::line_ring::{LineInput, dilate, line_quarters};
-use crate::nlmeans::noise::{NOISE_CURVE_BINS, NoiseCurve};
+use crate::noise::line_ring::{LineInput, dilate, line_quarters};
+use crate::noise::{NOISE_CURVE_BINS, NoiseCurve};
 
 const SIGMA: f32 = 0.02;
 

@@ -12,10 +12,10 @@ use av_denoise_core::bench_api::collab::kernels::aggregate::{
     kaiser_window,
     weight_scale,
 };
-use av_denoise_core::bench_api::collab::kernels::fused::{CollabVariant, STRENGTH_MAP_OFF, collab_fused};
+use av_denoise_core::bench_api::collab::kernels::fused::{CollabVariant, collab_fused};
 use av_denoise_core::bench_api::collab::kernels::transforms::dct_noise_profile;
 use av_denoise_core::bench_api::collab::{PATCH_SIZE, grid_frames, supports_f16_search};
-use av_denoise_core::bench_api::{BLOCK_X, BLOCK_Y, Device, NOISE_CURVE_BINS};
+use av_denoise_core::bench_api::{BLOCK_X, BLOCK_Y, Device, NOISE_CURVE_BINS, STRENGTH_MAP_OFF};
 use clap::Parser;
 use cubecl::benchmark::{Benchmark, BenchmarkComputations, TimingMethod};
 use cubecl::prelude::*;

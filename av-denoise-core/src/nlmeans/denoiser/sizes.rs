@@ -1,10 +1,10 @@
 use cubecl::prelude::*;
 
-use crate::nlmeans::align::StorageAlign;
+use crate::engine::align::StorageAlign;
 use crate::nlmeans::motion::{self, MotionCtx, MotionEstimation};
-use crate::nlmeans::noise::{temporal_stats_blocks, temporal_stats_record_len};
 use crate::nlmeans::params::NlmParams;
 use crate::nlmeans::{BLOCK_X, BLOCK_Y};
+use crate::noise::{temporal_stats_blocks, temporal_stats_record_len};
 
 /// Bytes in one element of every buffer sized here, which all hold `f32`, `i32` or `u32`.
 const ELEMENT_BYTES: u64 = 4;

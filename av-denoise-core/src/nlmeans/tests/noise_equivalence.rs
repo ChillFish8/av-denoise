@@ -6,9 +6,9 @@ use super::noise_reference::{
     reference_noise_reduce,
     reference_temporal_noise_stats,
 };
-use crate::nlmeans::kernels::{nlm_noise_partial, nlm_noise_reduce, nlm_temporal_noise_stats};
-use crate::nlmeans::noise::{TEMPORAL_NOISE_BLOCK, temporal_stats_record_len};
 use crate::nlmeans::{BLOCK_1D, BLOCK_X, BLOCK_Y};
+use crate::noise::kernels::{nlm_noise_partial, nlm_noise_reduce, nlm_temporal_noise_stats};
+use crate::noise::{TEMPORAL_NOISE_BLOCK, temporal_stats_record_len};
 
 #[derive(Clone, Copy)]
 enum Kernel {

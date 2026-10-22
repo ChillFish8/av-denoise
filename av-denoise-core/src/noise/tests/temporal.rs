@@ -1,4 +1,4 @@
-use crate::nlmeans::noise::temporal::{
+use crate::noise::temporal::{
     RHO_SIGMA_GATE,
     STATIC_GATE,
     TEMPORAL_NOISE_BLOCK,

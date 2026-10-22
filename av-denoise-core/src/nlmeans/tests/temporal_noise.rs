@@ -2,7 +2,8 @@ use cubecl::prelude::*;
 
 use super::helpers::*;
 use crate::bench_api::HostIo;
-use crate::nlmeans::noise::{
+use crate::nlmeans::*;
+use crate::noise::{
     NoiseCtx,
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
@@ -31,7 +32,6 @@ use crate::nlmeans::noise::{
     temporal_stats_buf_bytes,
     temporal_stats_record_len,
 };
-use crate::nlmeans::*;
 
 /// Runs the temporal-residual stats kernel on `previous` and `new` as ring slots 0 and 1.
 ///

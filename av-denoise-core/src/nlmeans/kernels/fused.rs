@@ -2,7 +2,8 @@ use cubecl::prelude::*;
 use cubecl::terminate;
 
 use super::fill::{expanded_interior, fill_center_tile, halo_slot_index};
-use super::helpers::{channel_scale, line_sum_sq, read_clamped_line, read_line, welsch_weight};
+use super::helpers::{channel_scale, line_sum_sq, read_clamped_line, welsch_weight};
+use crate::engine::kernels::read_line;
 
 /// Writes the Welsch weight of the patch distance between each pixel and its neighbour at `q`.
 ///

@@ -1,6 +1,6 @@
 use super::{Aggregated, Setup, cross_frame_setup, run_fused};
 use crate::collab::tests::helpers::noisy_flat_field;
-use crate::nlmeans::NOISE_CURVE_BINS;
+use crate::noise::NOISE_CURVE_BINS;
 
 /// The side of the square frame the stepped-curve test filters.
 const STEP_FRAME_SIDE: u32 = 64;

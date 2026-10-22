@@ -1,12 +1,5 @@
 use cubecl::prelude::*;
 
-/// Every threshold is left as it is.
-pub const STRENGTH_MAP_OFF: u32 = 0;
-/// The map scales channel 0's noise-curve ratio.
-pub const STRENGTH_MAP_LUMA: u32 = 1;
-/// The map scales every channel's threshold, for a denoiser with no curve.
-pub const STRENGTH_MAP_ALL: u32 = 2;
-
 /// The side of one map quarter, in pixels.
 const MAP_QUARTER: u32 = 8;
 

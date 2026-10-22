@@ -1,4 +1,4 @@
-use crate::nlmeans::noise::stats::lower_quartile;
+use crate::noise::stats::lower_quartile;
 
 #[test]
 fn lower_quartile_odd_count_exact_index() {

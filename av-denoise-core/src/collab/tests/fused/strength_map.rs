@@ -4,9 +4,10 @@ use super::noise_curve::{assert_columns_identical, assert_identical, columns_dif
 use super::{Aggregated, Setup, cross_frame_setup, run_fused, run_fused_variant};
 use crate::collab::geometry::{ref_pos, refs_along, strength_map_dims};
 use crate::collab::kernels::fused::strength_map::strength_map_scale;
-use crate::collab::kernels::fused::{CollabVariant, STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, Walk};
+use crate::collab::kernels::fused::{CollabVariant, Walk};
 use crate::collab::tests::helpers::{R, make_client, noisy_flat_field};
-use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS};
+use crate::nlmeans::ChannelMode;
+use crate::noise::{NOISE_CURVE_BINS, STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA};
 
 const FRAME_SIDE: u32 = 64;
 const LAMBDA: f32 = 1.0;

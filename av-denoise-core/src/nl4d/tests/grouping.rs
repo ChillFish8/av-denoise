@@ -11,11 +11,11 @@ use super::helpers::{
 };
 use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
-use crate::collab::kernels::fused::{CollabVariant, STRENGTH_MAP_OFF, Walk, collab_fused};
+use crate::collab::kernels::fused::{CollabVariant, Walk, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, STEP, grid_frames};
-use crate::nlmeans::NOISE_CURVE_BINS;
 use crate::nlmeans::motion::neighbour_idx_for_k;
+use crate::noise::{NOISE_CURVE_BINS, STRENGTH_MAP_OFF};
 
 /// The motion block side length these fixtures score confidence against.
 ///

@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 
-use crate::nlmeans::kernels::helpers::read_line;
-use crate::nlmeans::noise::{
+use crate::engine::kernels::read_line;
+use crate::noise::{
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
     QUARTER_LUMA_MIN,

@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 
-use super::helpers::read_line;
-use crate::nlmeans::noise::{
+use crate::engine::kernels::read_line;
+use crate::noise::{
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
     QUARTER_LUMA_MIN,
@@ -153,7 +153,7 @@ pub fn nlm_noise_reduce(
 /// - `luma_sum`, `luma_min` and `luma_max` of the new frame.
 /// - `flatness`, the mean squared neighbour difference of a 4x4 grid of 2x2 cells over the mean of
 ///   both frames. A quarter smaller than 8x8 writes
-///   [UNMEASURED_FLATNESS](crate::nlmeans::noise::UNMEASURED_FLATNESS).
+///   [UNMEASURED_FLATNESS](crate::noise::UNMEASURED_FLATNESS).
 /// - `tensor_xx`, `tensor_yy` and `tensor_xy`, the structure tensor sums of the temporal mean's
 ///   2x2 gradients, from the 2x2 windows inside both the quarter and the frame, 49 on a full
 ///   quarter.
@@ -165,7 +165,7 @@ pub fn nlm_noise_reduce(
 ///
 /// Records sit at `stats[block_index * (2 * stored_ch + 37)..]` as every `sum_d`, every `sum_d2`,
 /// then `sum_lag`. Quarter `q` follows at `2 * stored_ch + 1 + 9 * q`, with its fields at the
-/// `QUARTER_*` offsets in `nlmeans::noise`. The stride never depends on `luma_fields`. `stats` must
+/// `QUARTER_*` offsets in `noise`. The stride never depends on `luma_fields`. `stats` must
 /// be bound to the new slot's own region of the ring. Thread `l` sums record lane `l` over every
 /// thread in order.
 #[cube(launch_unchecked)]

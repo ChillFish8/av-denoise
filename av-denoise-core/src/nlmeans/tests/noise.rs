@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 
 use super::helpers::*;
-use crate::nlmeans::noise::{NoiseCtx, partials_len, run_noise_estimate, sigma_from_abs_sum};
+use crate::noise::{NoiseCtx, partials_len, run_noise_estimate, sigma_from_abs_sum};
 
 /// Runs both noise-estimate stages over one frame in a one-slot ring.
 ///

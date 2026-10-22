@@ -1,5 +1,5 @@
-use crate::nlmeans::align::StorageAlign;
-use crate::nlmeans::noise::spatial::{
+use crate::engine::align::StorageAlign;
+use crate::noise::spatial::{
     noise_partials_slot_stride_bytes,
     partials_len,
     sigma_block_p25_from_partials,

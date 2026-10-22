@@ -3,7 +3,7 @@ use cubecl::prelude::*;
 use super::distance::{pair_squared_difference, pair_sum_total};
 use super::shape::SearchShape;
 use crate::collab::PATCH_SIZE;
-use crate::nlmeans::kernels::helpers::read_line;
+use crate::engine::kernels::read_line;
 
 /// Loads the cube's centre tile, `tile_width` by `tile_height` pixels from `(origin_x, origin_y)`.
 ///

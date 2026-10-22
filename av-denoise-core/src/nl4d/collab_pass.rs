@@ -11,10 +11,10 @@ use super::snapshot::LastFields;
 use crate::collab::geometry::{ref_count, refs_along};
 use crate::collab::grid_frames;
 use crate::collab::kernels::aggregate::{collab_zero_accum, weight_scale};
-use crate::collab::kernels::fused::STRENGTH_MAP_OFF;
 use crate::collab::kernels::packed::collab_zero_packed;
 use crate::engine::timing::timed;
 use crate::nlmeans::{MAX_GRID_1D, RingView};
+use crate::noise::STRENGTH_MAP_OFF;
 use crate::tune::sites::{
     CollabFilterSite,
     CollabInputs,

@@ -1,4 +1,4 @@
-use crate::nlmeans::noise::estimator::{NoiseEstimator, SIGMA_FLOOR};
+use crate::noise::estimator::{NoiseEstimator, SIGMA_FLOOR};
 
 #[test]
 fn first_sample_initializes_state() {

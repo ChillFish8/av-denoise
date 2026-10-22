@@ -13,10 +13,11 @@ use cubecl::server::Handle;
 use super::helpers::{R, make_client, make_unique_frame, noisy_flat_field};
 use crate::collab::geometry::{fused_cubes_x, ref_count, ref_pos, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{WEIGHT_GAIN, cross_frame_accum_scale, kaiser_window, weight_scale};
-use crate::collab::kernels::fused::{CollabVariant, STRENGTH_MAP_OFF, collab_fused};
+use crate::collab::kernels::fused::{CollabVariant, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, grid_frames};
-use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS};
+use crate::nlmeans::ChannelMode;
+use crate::noise::{NOISE_CURVE_BINS, STRENGTH_MAP_OFF};
 use crate::tune::SiteCandidate;
 
 /// The spatial search radius most runs use.

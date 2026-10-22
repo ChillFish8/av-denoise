@@ -3,7 +3,7 @@ use cubecl::prelude::*;
 use super::shape::SearchShape;
 use crate::collab::PATCH_SIZE;
 use crate::collab::kernels::plane_ops::plane_ssd_reduce8;
-use crate::nlmeans::kernels::helpers::read_line;
+use crate::engine::kernels::read_line;
 
 /// Packs the reference column into `S` pairs for [packed_partial].
 ///

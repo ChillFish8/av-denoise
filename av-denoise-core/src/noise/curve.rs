@@ -20,29 +20,29 @@ use super::temporal::{
 pub const NOISE_CURVE_BINS: usize = 16;
 
 /// The fewest quarters a bin needs before its median is trusted.
-const MIN_QUARTERS_PER_BIN: usize = 32;
+pub(crate) const MIN_QUARTERS_PER_BIN: usize = 32;
 
 /// The fewest populated bins a frame needs before it gets a curve.
-const MIN_POPULATED_BINS: usize = 3;
+pub(crate) const MIN_POPULATED_BINS: usize = 3;
 
 /// A quarter with a pixel at or below this luma may be clipped, so its noise reads low.
-pub(super) const CLIP_LOW: f32 = 4.0 / 255.0;
+pub(crate) const CLIP_LOW: f32 = 4.0 / 255.0;
 
 /// A quarter with a pixel at or above this luma may be clipped, so its noise reads low.
-pub(super) const CLIP_HIGH: f32 = 251.0 / 255.0;
+pub(crate) const CLIP_HIGH: f32 = 251.0 / 255.0;
 
 /// How much texture a quarter may carry, as a fraction of the frame's noise variance.
-const FLAT_FACTOR: f32 = 0.5;
+pub(crate) const FLAT_FACTOR: f32 = 0.5;
 
 /// The flat gate never tightens below one code of squared gradient.
-const FLAT_FLOOR: f32 = (1.0 / 255.0) * (1.0 / 255.0);
+pub(crate) const FLAT_FLOOR: f32 = (1.0 / 255.0) * (1.0 / 255.0);
 
 /// How large a quarter's mean residual can be and still count as static.
 ///
 /// A quarter averages 64 pixels rather than a block's 256, so the noise in its mean is twice as
 /// large. The gate is widened by the same factor of 2 so static quarters pass as often as
 /// static blocks.
-pub(super) const QUARTER_STATIC_GATE: f32 = 2.0 * STATIC_GATE;
+pub(crate) const QUARTER_STATIC_GATE: f32 = 2.0 * STATIC_GATE;
 
 /// How much noisier each brightness level is than the frame's median quarter.
 ///
@@ -88,7 +88,7 @@ struct CurveQuarter {
 /// median sigma of its quarters, and empty bins are filled by linear interpolation between
 /// their populated neighbours. Values past the first and last populated bins are held flat.
 /// Every entry is then divided by the median sigma of all passing quarters.
-pub(in crate::nlmeans) fn build_noise_curve(
+pub(crate) fn build_noise_curve(
     records: &[f32],
     stored_ch: u32,
     accepted: &[AcceptedBlock],

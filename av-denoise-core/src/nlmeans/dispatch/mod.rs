@@ -20,9 +20,9 @@ use super::kernels::{
     nlm_vweight_pair_accumulate,
 };
 use super::motion::{confidence_byte_offset, neighbour_idx_for_k};
-use super::noise::{build_spatial_offset_lut, spatial_offset_factor, spatial_offset_lut_len};
 use super::{BLOCK_1D, BLOCK_X, BLOCK_Y, MAX_GRID_1D};
 use crate::engine::timing::{timed, units_per_span};
+use crate::noise::{build_spatial_offset_lut, spatial_offset_factor, spatial_offset_lut_len};
 use crate::tune::gpu::bind;
 use crate::tune::sites::{AccumOutputs, AccumulateSite, ConfidenceBinding, WindowPass, WindowSite};
 

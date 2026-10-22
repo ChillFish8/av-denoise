@@ -8,7 +8,7 @@ use super::COLLAB_FUSED;
 use crate::collab::PATCH_SIZE;
 use crate::collab::geometry::{BASELINE_GROUPS, fused_cubes_x};
 use crate::collab::kernels::fused::{Centre, CollabVariant, GROUP_LANES, NeighbourWalk, Walk, collab_fused};
-use crate::nlmeans::NOISE_CURVE_BINS;
+use crate::noise::NOISE_CURVE_BINS;
 use crate::tune::fidelity::{CompareResult, Fidelity, diff_integers, diff_plane};
 use crate::tune::gpu::{bind, read_f32, read_i32, zero_words, zeroed_words};
 use crate::tune::key::{SiteKey, SiteKeyBuilder};
