@@ -30,6 +30,8 @@ pub struct CommonArgs {
     ///
     /// Each worker uses its own GPU memory for the frame ring
     /// buffer, so higher values trade GPU memory for throughput.
+    /// On Vulkan with two or more workers, each worker also opens
+    /// its own device on the selected GPU (see `--shared-device`).
     ///
     /// `1` is valid and useful for debugging. Defaults to 2 when unset.
     #[arg(short = 'W', long)]
@@ -89,7 +91,11 @@ pub struct CommonArgs {
     #[arg(long)]
     pub timing_report: bool,
 
-    /// Runs every worker on one shared GPU device instead of a Vulkan device each.
+    /// Runs every worker on one shared wgpu device instead of one each.
+    ///
+    /// Only matters on Vulkan with two or more workers, where separate
+    /// devices stop the workers waiting on each other's queued work.
+    /// Sharing saves about 30 MiB of GPU memory per extra worker.
     #[arg(long)]
     pub shared_device: bool,
 }

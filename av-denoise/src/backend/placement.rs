@@ -28,7 +28,7 @@ pub(crate) struct DevicePlacement {
 
 /// A wgpu device opened for one denoiser, and the adapter it was opened on.
 #[cfg(feature = "vulkan")]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct OwnDevice {
     pub device: WgpuDevice,
     pub adapter: wgpu::AdapterInfo,
