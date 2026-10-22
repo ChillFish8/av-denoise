@@ -2,6 +2,7 @@ mod classes;
 mod correlation;
 mod curve;
 mod estimator;
+mod frames;
 mod host;
 mod line_ring;
 mod records;

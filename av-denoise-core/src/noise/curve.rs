@@ -106,21 +106,7 @@ pub(crate) fn build_noise_curve(
         return None;
     }
 
-    let flat_variance = FLAT_FACTOR * sigma_block_median * sigma_block_median;
-    let flat_limit = flat_variance.max(FLAT_FLOOR);
-
-    let mut bins: [Vec<f32>; NOISE_CURVE_BINS] = Default::default();
-    for quarter in &quarters {
-        let textured = quarter.flatness > flat_limit;
-        let clipped = quarter.luma_min < CLIP_LOW || quarter.luma_max > CLIP_HIGH;
-        if textured || clipped {
-            continue;
-        }
-
-        let scaled = quarter.mean_luma * NOISE_CURVE_BINS as f32;
-        let bin = (scaled.max(0.0) as usize).min(NOISE_CURVE_BINS - 1);
-        bins[bin].push(quarter.sigma);
-    }
+    let mut bins = binned_sigmas(&quarters, sigma_block_median);
 
     let mut populated: Vec<(usize, f32)> = Vec::new();
     for (index, sigmas) in bins.iter_mut().enumerate() {
@@ -146,6 +132,43 @@ pub(crate) fn build_noise_curve(
         ratios,
         sigma_quarter_median,
     })
+}
+
+/// How many flat, unclipped static quarters of `accepted` fall in each luma bin.
+#[cfg(test)]
+pub(crate) fn curve_bin_counts(
+    records: &[f32],
+    stored_ch: u32,
+    accepted: &[AcceptedBlock],
+    sigma_block_median: f32,
+) -> [usize; NOISE_CURVE_BINS] {
+    let quarters = static_quarters(records, stored_ch, accepted);
+    let bins = binned_sigmas(&quarters, sigma_block_median);
+
+    bins.map(|sigmas| sigmas.len())
+}
+
+/// The sigmas of the flat, unclipped `quarters` in each luma bin.
+///
+/// The flat gate scales with `sigma_block_median`, the frame's median block sigma.
+fn binned_sigmas(quarters: &[CurveQuarter], sigma_block_median: f32) -> [Vec<f32>; NOISE_CURVE_BINS] {
+    let flat_variance = FLAT_FACTOR * sigma_block_median * sigma_block_median;
+    let flat_limit = flat_variance.max(FLAT_FLOOR);
+
+    let mut bins: [Vec<f32>; NOISE_CURVE_BINS] = Default::default();
+    for quarter in quarters {
+        let textured = quarter.flatness > flat_limit;
+        let clipped = quarter.luma_min < CLIP_LOW || quarter.luma_max > CLIP_HIGH;
+        if textured || clipped {
+            continue;
+        }
+
+        let scaled = quarter.mean_luma * NOISE_CURVE_BINS as f32;
+        let bin = (scaled.max(0.0) as usize).min(NOISE_CURVE_BINS - 1);
+        bins[bin].push(quarter.sigma);
+    }
+
+    bins
 }
 
 /// The quarters of `accepted` whose own mean residual and sigma pass the static gates.

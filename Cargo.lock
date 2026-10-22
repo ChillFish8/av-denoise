@@ -228,6 +228,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "wgpu",
+ "y4m",
 ]
 
 [[package]]

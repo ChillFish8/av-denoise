@@ -36,6 +36,7 @@ wgpu = { version = "29", optional = true }
 [dev-dependencies]
 futures = "0.3"
 clap = { version = "4", features = ["derive"] }
+y4m = "0.8"
 
 [features]
 vulkan = ["cubecl/vulkan", "dep:wgpu"]

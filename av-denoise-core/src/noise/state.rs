@@ -601,6 +601,25 @@ impl<R: Runtime> NoiseState<R> {
         ReadingRecord::from_words(words)
     }
 
+    /// Reads the partials, the results row and the records of `slot` back.
+    ///
+    /// The records are empty without temporal stats.
+    pub(crate) fn read_slot_stats(&self, slot: u32) -> (Vec<f32>, [f32; 4], Vec<f32>) {
+        let handles = self.reading_handles(slot);
+        let buffers = self.client.read(handles);
+        let row = f32::from_bytes(&buffers[0]);
+        let partials = f32::from_bytes(&buffers[1]).to_vec();
+        let records = buffers
+            .get(2)
+            .map(|bytes| f32::from_bytes(bytes).to_vec())
+            .unwrap_or_default();
+
+        let mut results_row = [0.0f32; RESULTS_PER_SLOT];
+        results_row.copy_from_slice(row);
+
+        (partials, results_row, records)
+    }
+
     /// Reads every block's flags back, empty without temporal stats.
     pub(crate) fn read_block_flags(&self) -> Vec<u32> {
         let Some(sample) = self.sample.as_ref() else {
