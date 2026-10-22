@@ -8,6 +8,7 @@ use super::reading::READING_WORDS;
 use super::spatial::{RESULTS_PER_SLOT, immerkaer_sigma_scale};
 use super::state::{NoiseShape, NoiseState, ReadingSettings, StrengthMapKind, quarter_count};
 use super::{NOISE_BLOCK_1D, NOISE_CURVE_BINS, STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
+use crate::engine::MAX_GRID_1D;
 use crate::tune::gpu::bind;
 
 /// The factor applied after combining and before smoothing.
@@ -146,6 +147,9 @@ fn flag(on: bool) -> f32 {
 impl<R: Runtime> NoiseState<R> {
     /// Queues one fold of the readings `fold` names into the stream state, the derived values,
     /// the current curve and the current map, in one launch.
+    ///
+    /// With a map the launch spans one cube per 256 map quarters, so the copy runs across the
+    /// grid.
     pub(crate) fn queue_fold(&self, fold: Fold) -> Result<(), anyhow::Error> {
         let shape = self.shape;
         let frames = shape.frames;
@@ -164,11 +168,13 @@ impl<R: Runtime> NoiseState<R> {
         let results_len = frames as usize * RESULTS_PER_SLOT;
         let map_len = self.current_map_len();
         let map_args = self.map_args(map_len);
+        let map_cubes = map_len.div_ceil(NOISE_BLOCK_1D);
+        let grid = map_cubes.clamp(1, MAX_GRID_1D);
 
         unsafe {
             noise_fold::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::new_1d(1),
+                CubeCount::new_1d(grid),
                 CubeDim::new_1d(NOISE_BLOCK_1D),
                 bind(&self.readings, readings_len),
                 bind(&self.results, results_len),

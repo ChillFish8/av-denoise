@@ -29,7 +29,7 @@ use crate::noise::spatial::{immerkaer_sigma_scale, sigma_from_abs_sum};
 use crate::noise::state::{NoiseShape, NoiseState, ReadingSettings, StrengthMapKind};
 use crate::noise::strength_map::StrengthMapParams;
 use crate::noise::temporal::TemporalNoiseSample;
-use crate::noise::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
+use crate::noise::{NOISE_BLOCK_1D, STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
 use crate::tune::gpu::sync;
 use crate::tune::tests::runtime::{TestRuntime, test_client};
 
@@ -158,7 +158,12 @@ fn hashed_reading(seed: u32, channels: u32, sampled: bool, curved: bool) -> Read
 
 /// A slot map whose every multiplier names the seed and the quarter.
 fn hashed_map(seed: u32) -> Vec<f32> {
-    (0..quarters())
+    hashed_map_of(seed, quarters())
+}
+
+/// A slot map of `quarters` multipliers that name the seed and the quarter.
+fn hashed_map_of(seed: u32, quarters: usize) -> Vec<f32> {
+    (0..quarters)
         .map(|quarter| 1.0 + 0.01 * seed as f32 + 1.0e-4 * quarter as f32)
         .collect()
 }
@@ -1106,4 +1111,52 @@ fn set_settings_rebuilds_the_fold_settings() {
     assert_eq!(unmapped.derived.map_mode, STRENGTH_MAP_OFF);
     assert_eq!(mapped.derived.map_mode, STRENGTH_MAP_LUMA);
     assert_eq!(temporal[0], scaled);
+}
+
+#[test]
+fn a_4k_luma_map_copies_across_the_grid() {
+    const WIDTH_4K: u32 = 3840;
+    const HEIGHT_4K: u32 = 2160;
+    let client = test_client();
+    let shape = NoiseShape {
+        width: WIDTH_4K,
+        height: HEIGHT_4K,
+        channels: 1,
+        stored_ch: 1,
+        frames: FRAMES,
+        temporal: true,
+        align: StorageAlign::from_client(&client),
+    };
+    let (cols, rows) = strength_map_dims(WIDTH_4K, HEIGHT_4K);
+    let quarters = (cols * rows) as usize;
+
+    // Slot 0 lends a curve and its map, slot 1 has a sample without a curve, slot 2 no sample.
+    let mut readings = vec![empty_reading(); FRAMES as usize];
+    readings[0] = hashed_reading(91, 1, true, true);
+    readings[1] = hashed_reading(92, 1, true, false);
+    readings[2] = hashed_reading(93, 1, false, false);
+    let sums = vec![[0.0f32; 4]; FRAMES as usize];
+    let maps: Vec<Vec<f32>> = (0..FRAMES).map(|slot| hashed_map_of(slot, quarters)).collect();
+
+    let map_settings = settings(luma_map(), false);
+    let state = NoiseState::with_readings_for_test(&client, shape, map_settings, &readings, &sums, &maps);
+    let map_cubes = (quarters as u32).div_ceil(NOISE_BLOCK_1D);
+    assert!(map_cubes > 1, "the map spans {map_cubes} cubes");
+
+    let mut copied_maps = Vec::new();
+    for ring_start in 0..3 {
+        let fold = Fold::Centre {
+            ring_start,
+            centre: 0,
+        };
+        state.queue_fold(fold).expect("the fold queues");
+        let map = state.read_current_map();
+        copied_maps.push(map);
+    }
+
+    let expected: Vec<u32> = maps[0].iter().map(|value| value.to_bits()).collect();
+    for (index, map) in copied_maps.iter().enumerate() {
+        let bits: Vec<u32> = map.iter().map(|value| value.to_bits()).collect();
+        assert_eq!(bits, expected, "the map after fold {index}");
+    }
 }

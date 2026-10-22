@@ -192,6 +192,39 @@ fn fold_channel(
     }
 }
 
+/// The logical position whose sample a fold of `centre` takes.
+///
+/// Unless `seeding`, a centre with no sample borrows, with borrowing on, the first later position
+/// whose reading has one. It reads only the readings and the settings.
+#[cube]
+fn lender_position(
+    readings: &Array<f32>,
+    fold_settings: &Array<f32>,
+    ring_start: u32,
+    centre: u32,
+    seeding: bool,
+    #[comptime] frames: u32,
+) -> u32 {
+    let centre_slot = (ring_start + centre) % frames;
+    let centre_base = centre_slot * READING_WORDS;
+    let centre_has_sample = readings[(centre_base + READING_SAMPLE_VALID) as usize] != 0.0f32;
+    let borrow_ahead = fold_settings[FOLD_BORROW_AHEAD as usize] != 0.0f32;
+    let borrows = borrow_ahead && !seeding && !centre_has_sample;
+
+    let mut lender = centre;
+    let mut found = false;
+    for logical in centre + 1..frames {
+        let slot = (ring_start + logical) % frames;
+        let has_sample = readings[(slot * READING_WORDS + READING_SAMPLE_VALID) as usize] != 0.0f32;
+        let takes = borrows && has_sample && !found;
+
+        lender = select(takes, logical, lender);
+        found = found || takes;
+    }
+
+    lender
+}
+
 /// Folds one reading into the stream state and writes the derived values, the current curve and
 /// the current map.
 ///
@@ -203,8 +236,10 @@ fn fold_channel(
 /// copied when it has classes. A seed folds the centre's Immerkær reading alone and keeps the
 /// curve, the classes and the map.
 ///
-/// Thread 0 does the fold. With a map, every thread then copies its strided share of the
-/// lender's slot map. `map_len` 0 leaves both map bindings untouched.
+/// Every thread picks the lender from the readings and the settings, which no cube writes, so the
+/// cubes need no ordering between them. Thread 0 of cube 0 does the fold. With a map, every
+/// thread of the grid copies its grid-stride share of the lender's slot map. `map_len` 0 leaves
+/// both map bindings untouched.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
@@ -226,32 +261,17 @@ pub fn noise_fold(
     #[comptime] channels: u32,
     #[comptime] map_len: u32,
 ) {
-    let mut shared = SharedMemory::<u32>::new(2usize);
-    let thread = UNIT_POS_X;
+    let seeding = seed != 0u32;
+    let lender = lender_position(readings, fold_settings, ring_start, centre, seeding, frames);
+    let lender_slot = (ring_start + lender) % frames;
+    let lender_base = lender_slot * READING_WORDS;
+    let lender_has_sample = readings[(lender_base + READING_SAMPLE_VALID) as usize] != 0.0f32;
+    let has_sample = lender_has_sample && !seeding;
+    let lender_curve = readings[(lender_base + READING_CURVE_VALID) as usize];
 
-    if thread == 0 {
-        let seeding = seed != 0u32;
+    if CUBE_POS_X == 0 && UNIT_POS_X == 0 {
         let centre_slot = (ring_start + centre) % frames;
         let centre_base = centre_slot * READING_WORDS;
-        let centre_has_sample = readings[(centre_base + READING_SAMPLE_VALID) as usize] != 0.0f32;
-        let borrow_ahead = fold_settings[FOLD_BORROW_AHEAD as usize] != 0.0f32;
-        let borrows = borrow_ahead && !seeding && !centre_has_sample;
-
-        let mut lender = centre;
-        let mut found = false;
-        for logical in centre + 1..frames {
-            let slot = (ring_start + logical) % frames;
-            let has_sample = readings[(slot * READING_WORDS + READING_SAMPLE_VALID) as usize] != 0.0f32;
-            let takes = borrows && has_sample && !found;
-
-            lender = select(takes, logical, lender);
-            found = found || takes;
-        }
-
-        let lender_slot = (ring_start + lender) % frames;
-        let lender_base = lender_slot * READING_WORDS;
-        let lender_has_sample = readings[(lender_base + READING_SAMPLE_VALID) as usize] != 0.0f32;
-        let has_sample = lender_has_sample && !seeding;
         let sample_rho = readings[(lender_base + READING_RHO) as usize];
         let factor = correlation_factor(sample_rho, fold_settings);
 
@@ -285,7 +305,6 @@ pub fn noise_fold(
         state[STATE_RHO as usize] = rho;
         state[STATE_RHO_VALID as usize] = select(rho_after, 1.0f32, 0.0f32);
 
-        let lender_curve = readings[(lender_base + READING_CURVE_VALID) as usize];
         let lender_quarter_median = readings[(lender_base + READING_QUARTER_MEDIAN) as usize];
         let curve_flag = select(has_sample, lender_curve, state[STATE_CURVE_VALID as usize]);
         let quarter_median = select(
@@ -357,27 +376,22 @@ pub fn noise_fold(
         for word in DERIVED_SPARE..DERIVED_WORDS {
             derived[word as usize] = 0.0f32;
         }
-
-        let copies = has_sample && lender_curve != 0.0f32;
-        shared[0] = lender_slot;
-        shared[1] = select(copies, 1u32, 0u32);
     }
 
     if comptime!(map_len > 0) {
-        sync_cube();
-
-        let source = shared[0] * map_len;
-        let copies = shared[1] != 0u32;
+        let copies = has_sample && lender_curve != 0.0f32;
+        let source = lender_slot * map_len;
+        let stride = CUBE_COUNT_X * CUBE_DIM_X;
+        let mut index = CUBE_POS_X * CUBE_DIM_X + UNIT_POS_X;
 
         if copies {
-            let mut index = thread;
             loop {
                 if index >= map_len {
                     break;
                 }
 
                 current_map[index as usize] = slot_maps[(source + index) as usize];
-                index += CUBE_DIM_X;
+                index += stride;
             }
         }
     }
