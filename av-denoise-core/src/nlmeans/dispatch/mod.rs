@@ -458,7 +458,7 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         // The same correlation-adjusted offset the spatial table holds for this candidate, computed
         // directly because the candidate is already known here.
-        let rho = self.rho_smoothed.unwrap_or(0.0);
+        let rho = self.host_noise.rho.unwrap_or(0.0);
         let offset_factor = spatial_offset_factor(q_x, q_y, rho);
         let offset = self.noise_offset * offset_factor;
         unsafe {

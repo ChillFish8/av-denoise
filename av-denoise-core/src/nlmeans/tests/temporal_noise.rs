@@ -751,7 +751,8 @@ fn hq_temporal_folds_correlated_grain_above_immerkaer_alone() {
     }
 
     let folded = denoiser
-        .noise_estimator
+        .host_noise
+        .median
         .current()
         .expect("estimator should hold a value after several full-window submits")[0];
 
@@ -801,7 +802,7 @@ fn rho_smoothed_seeds_from_first_sample_not_from_zero() {
         let frame = correlated_noisy_frame(width, height, base, sigma_pre, 200 + i);
         denoiser.push_frame(&frame);
         let _ = denoiser.denoise().unwrap();
-        if let Some(rho) = denoiser.rho_smoothed {
+        if let Some(rho) = denoiser.host_noise.rho {
             first_seeded_rho = Some(rho);
             break;
         }

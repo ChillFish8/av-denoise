@@ -21,14 +21,7 @@ use super::prefilter::PrefilterMode;
 use crate::engine::align::StorageAlign;
 use crate::engine::timing::DeviceTimer;
 use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
-use crate::noise::{
-    NoiseCurve,
-    NoiseEstimator,
-    NoiseState,
-    QuarterClasses,
-    ReadingSettings,
-    build_spatial_offset_lut,
-};
+use crate::noise::{HostNoise, NoiseState, ReadingSettings, build_spatial_offset_lut};
 use crate::tune::KernelSelector;
 
 /// A denoised frame still resident on the GPU.
@@ -100,11 +93,6 @@ pub struct NlmDenoiser<R: Runtime> {
     /// Picks the candidate each tunable launch runs.
     pub(super) kernels: KernelSelector<R>,
 
-    /// The smoothed grain correlation between neighbouring pixels.
-    ///
-    /// The first temporal sample sets it directly so the opening frames are not under-corrected.
-    /// `None` reads as white noise.
-    pub(super) rho_smoothed: Option<f32>,
     /// One noise-floor offset per search candidate, row-major, for the self-comparison kernels.
     pub(super) spatial_offset_lut: MirroredBuffer,
     /// The pilot's flat offset table, which follows `input_noise_offset`.
@@ -124,26 +112,8 @@ pub struct NlmDenoiser<R: Runtime> {
     /// Each slot keeps a frame's measurements intact until that frame reaches the centre and is
     /// folded.
     pub(super) noise: Option<NoiseState<R>>,
-    /// Smooths the median chain's estimate, which feeds `h2_inv_norm` and `sigma_y`.
-    pub(super) noise_estimator: NoiseEstimator,
-    /// Smooths the low chain's estimate, which feeds the noise offsets.
-    ///
-    /// The low chain reads lower-quartile statistics, because reading the noise too high there
-    /// destroys detail.
-    pub(super) noise_estimator_low: NoiseEstimator,
-    /// Smooths the low chain's estimate without the correlation boost.
-    ///
-    /// A consumer that squares sigma into a shrinkage threshold pays for an over-read twice, so
-    /// it reads this instead.
-    pub(super) noise_estimator_low_unboosted: NoiseEstimator,
-    /// Smooths the temporal median alone, with no spatial maximum and no correlation boost.
-    ///
-    /// It only updates on a fold with a trustworthy temporal sample.
-    pub(super) noise_estimator_temporal_only: NoiseEstimator,
-    /// The latest centre frame's luma noise curve, if one could be built.
-    pub(super) noise_curve: Option<NoiseCurve>,
-    /// The latest centre frame's quarter classes, present exactly when `noise_curve` is.
-    pub(super) quarter_classes: Option<QuarterClasses>,
+    /// The host noise estimate, which feeds `h2_inv_norm`, the noise offsets and `sigma_y`.
+    pub(super) host_noise: HostNoise,
 
     pub(super) mc_ctx: Option<MotionCtx>,
     /// The motion-shifted input ring the temporal kernels read neighbours from.
@@ -257,7 +227,6 @@ impl<R: Runtime> NlmDenoiser<R> {
         let use_separable = params.patch_radius > SEPARABLE_THRESHOLD;
         let use_reference = params.prefilter.needs_reference_buf();
 
-        let rho_smoothed: Option<f32> = None;
         let initial_offsets = build_spatial_offset_lut(params.search_radius, 0.0, noise_offset);
         let initial_offset_bytes = f32::as_bytes(&initial_offsets);
         let spatial_offset_lut = MirroredBuffer::new(client, initial_offset_bytes);
@@ -420,18 +389,12 @@ impl<R: Runtime> NlmDenoiser<R> {
             use_separable,
             use_reference,
             kernels,
-            rho_smoothed,
             spatial_offset_lut,
             pilot_offset_lut,
             neighbour_slots,
             ring_slot_tables,
             noise,
-            noise_estimator: NoiseEstimator::default(),
-            noise_estimator_low: NoiseEstimator::default(),
-            noise_estimator_low_unboosted: NoiseEstimator::default(),
-            noise_estimator_temporal_only: NoiseEstimator::default(),
-            noise_curve: None,
-            quarter_classes: None,
+            host_noise: HostNoise::default(),
             mc_ctx,
             compensated_input_buf,
             compensated_reference_buf,
@@ -556,13 +519,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.next_output_slot = 0;
         self.real_pushes = 0;
         self.call_start_push = 0;
-        self.noise_estimator.reset();
-        self.noise_estimator_low.reset();
-        self.noise_estimator_low_unboosted.reset();
-        self.noise_estimator_temporal_only.reset();
-        self.noise_curve = None;
-        self.quarter_classes = None;
-        self.rho_smoothed = None;
+        self.host_noise.reset();
         self.noise_readings.clear();
     }
 }

@@ -14,7 +14,6 @@ use crate::nlmeans::mirror::MirroredBuffer;
 use crate::nlmeans::params::{NlmParams, sigma_eff};
 use crate::nlmeans::prefilter::PrefilterMode;
 use crate::noise::{
-    EMA_ALPHA,
     NoiseCurve,
     NoiseShape,
     QuarterClasses,
@@ -23,7 +22,6 @@ use crate::noise::{
     TEMPORAL_QUARTER_SIZE,
     TemporalNoiseSample,
     build_spatial_offset_lut,
-    correlation_factor,
     sigma_from_abs_sum,
 };
 
@@ -134,11 +132,11 @@ impl<R: Runtime> NlmDenoiser<R> {
     }
 
     pub(crate) fn current_noise_curve(&self) -> Option<NoiseCurve> {
-        self.noise_curve
+        self.host_noise.curve
     }
 
     pub(crate) fn current_quarter_classes(&self) -> Option<&QuarterClasses> {
-        self.quarter_classes.as_ref()
+        self.host_noise.classes.as_ref()
     }
 
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
@@ -274,16 +272,10 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
-    /// Folds one slot's noise readings into every estimator chain and refreshes the derived values.
+    /// Folds one slot's noise readings into the host estimate and refreshes the derived values.
     ///
-    /// Each chain takes the larger of an Immerkær reading and a temporal reading, so the temporal
-    /// side can raise an estimate but an unreliable shot cannot lower it. The median chain drives
-    /// the strength. The low chain reads lower quartiles and drives the noise offsets, where
-    /// reading too high scrubs fine texture.
-    ///
-    /// The unboosted chain skips the correlation boost for consumers that square sigma into a
-    /// threshold. The temporal-only chain also skips the spatial maximum, because a spatial mask
-    /// reads repeating texture as noise.
+    /// The median chain drives the strength. The low chain reads lower quartiles and drives the
+    /// noise offsets, where reading too high scrubs fine texture.
     fn fold_noise_estimate(
         &mut self,
         immerkaer_sums: [f32; RESULTS_PER_SLOT],
@@ -292,73 +284,26 @@ impl<R: Runtime> NlmDenoiser<R> {
     ) {
         let channels = self.params.channels.count() as usize;
 
-        let mut raw = [0.0f32; 3];
-        for (c, sigma) in raw.iter_mut().enumerate().take(channels) {
+        let mut immerkaer = [0.0f32; 3];
+        for (c, sigma) in immerkaer.iter_mut().enumerate().take(channels) {
             *sigma = sigma_from_abs_sum(immerkaer_sums[c], self.width, self.height);
         }
 
-        let mut raw_low = immerkaer_low;
-        let mut raw_low_unboosted = immerkaer_low;
-        let mut raw_temporal_only: Option<[f32; 3]> = None;
-
-        if let Some(sample) = temporal {
-            let factor = correlation_factor(sample.rho);
-            for c in 0..channels {
-                raw[c] = raw[c].max(sample.sigma[c] * factor);
-                raw_low[c] = raw_low[c].max(sample.sigma_low[c] * factor);
-                raw_low_unboosted[c] = raw_low_unboosted[c].max(sample.sigma_low[c]);
-            }
-
-            raw_temporal_only = Some(sample.sigma);
-
-            let rho = match self.rho_smoothed {
-                None => sample.rho,
-                Some(previous) => EMA_ALPHA * sample.rho + (1.0 - EMA_ALPHA) * previous,
-            };
-            self.rho_smoothed = Some(rho);
-        }
-
-        // The user's scale applies after combining and before smoothing, so everything derived
-        // follows it.
         let sigma_scale = self.params.hq.map_or(1.0, |hq| hq.sigma_scale);
-        for c in 0..channels {
-            raw[c] *= sigma_scale;
-            raw_low[c] *= sigma_scale;
-            raw_low_unboosted[c] *= sigma_scale;
-        }
+        let fold = self
+            .host_noise
+            .fold(immerkaer, temporal, immerkaer_low, channels, sigma_scale);
 
-        if let Some(raw_temporal) = raw_temporal_only.as_mut() {
-            for sigma in raw_temporal.iter_mut().take(channels) {
-                *sigma *= sigma_scale;
-            }
-        }
-
-        let updated = self.noise_estimator.update(&raw[..channels]);
-        let mut smoothed = [0.0f32; 3];
-        smoothed[..channels].copy_from_slice(updated);
-
-        let updated_low = self.noise_estimator_low.update(&raw_low[..channels]);
-        let mut smoothed_low = [0.0f32; 3];
-        smoothed_low[..channels].copy_from_slice(updated_low);
-
-        self.noise_estimator_low_unboosted
-            .update(&raw_low_unboosted[..channels]);
-
-        if let Some(raw_temporal) = raw_temporal_only {
-            self.noise_estimator_temporal_only
-                .update(&raw_temporal[..channels]);
-        }
-
-        let effective_sigma = sigma_eff(&smoothed[..channels], self.params.channels);
+        let effective_sigma = sigma_eff(&fold.median[..channels], self.params.channels);
         self.h2_inv_norm = self.params.h2_inv_norm_with(Some(effective_sigma));
-        self.input_noise_offset = self.params.noise_offset_with(Some(&smoothed_low[..channels]));
+        self.input_noise_offset = self.params.noise_offset_with(Some(&fold.low[..channels]));
         self.noise_offset = match self.params.prefilter {
             PrefilterMode::NlmSpatial { .. } => 0.0,
             _ => self.input_noise_offset,
         };
 
         // Motion estimation treats channel 0 as luma.
-        self.sigma_y = smoothed[0];
+        self.sigma_y = fold.median[0];
     }
 
     /// Refreshes the derived filter values from the window centre's noise reading.
@@ -374,10 +319,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let lender = self.borrow_reading_ahead(center_t, &centre)?;
 
         // The curve only changes alongside a trustworthy sample.
-        if lender.temporal.sample.is_some() {
-            self.noise_curve = lender.temporal.curve;
-            self.quarter_classes = lender.temporal.classes.clone();
-        }
+        self.host_noise.adopt(&lender.temporal);
 
         self.fold_noise_estimate(
             centre.immerkaer_sums,
@@ -393,11 +335,11 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.noise_readings.fallbacks()
     }
 
-    /// Points `spatial_offset_lut` at the table `noise_offset` and `rho_smoothed` imply.
+    /// Points `spatial_offset_lut` at the table `noise_offset` and the smoothed rho imply.
     ///
     /// The table uploads only when it changed.
     pub(super) fn rebuild_spatial_offset_lut(&mut self) {
-        let rho = self.rho_smoothed.unwrap_or(0.0);
+        let rho = self.host_noise.rho.unwrap_or(0.0);
         let offsets = build_spatial_offset_lut(self.params.search_radius, rho, self.noise_offset);
         let offset_bytes = f32::as_bytes(&offsets);
 
@@ -406,7 +348,7 @@ impl<R: Runtime> NlmDenoiser<R> {
 
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn spatial_offset_lut_for_test(&self) -> (&MirroredBuffer, Vec<f32>) {
-        let rho = self.rho_smoothed.unwrap_or(0.0);
+        let rho = self.host_noise.rho.unwrap_or(0.0);
         let expected = build_spatial_offset_lut(self.params.search_radius, rho, self.noise_offset);
 
         (&self.spatial_offset_lut, expected)
@@ -427,12 +369,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
 
         let channels = self.params.channels.count() as usize;
-        let mut sigmas = [0.0f32; 3];
-        if let Some(smoothed) = self.noise_estimator.current() {
-            sigmas[..channels].copy_from_slice(&smoothed[..channels]);
-        }
-
-        sigmas
+        self.host_noise.sigmas(channels)
     }
 
     /// The low chain's smoothed per-channel sigma without the correlation boost.
@@ -445,12 +382,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
 
         let channels = self.params.channels.count() as usize;
-        let mut sigmas = [0.0f32; 3];
-        if let Some(smoothed) = self.noise_estimator_low_unboosted.current() {
-            sigmas[..channels].copy_from_slice(&smoothed[..channels]);
-        }
-
-        sigmas
+        self.host_noise.sigmas_low_unboosted(channels)
     }
 
     /// The temporal median's smoothed per-channel sigma.
@@ -464,12 +396,6 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
 
         let channels = self.params.channels.count() as usize;
-        if let Some(smoothed) = self.noise_estimator_temporal_only.current() {
-            let mut sigmas = [0.0f32; 3];
-            sigmas[..channels].copy_from_slice(&smoothed[..channels]);
-            return sigmas;
-        }
-
-        self.current_sigmas_low_unboosted()
+        self.host_noise.sigmas_temporal_only(channels)
     }
 }

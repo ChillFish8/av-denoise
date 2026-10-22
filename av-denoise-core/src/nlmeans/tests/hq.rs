@@ -523,7 +523,8 @@ fn hq_sigma_scale_multiplies_the_folded_estimate() {
         denoiser.denoise().unwrap();
 
         let folded = denoiser
-            .noise_estimator
+            .host_noise
+            .median
             .current()
             .expect("estimator should hold a value after one push")[0];
         (folded, denoiser.noise_offset)

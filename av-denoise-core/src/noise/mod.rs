@@ -1,6 +1,7 @@
 mod correlation;
 mod curve;
 mod estimator;
+mod host;
 pub(crate) mod kernels;
 mod line_ring;
 mod slot;
@@ -12,17 +13,14 @@ mod temporal;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use self::correlation::{
-    build_spatial_offset_lut,
-    correlation_factor,
-    spatial_offset_factor,
-    spatial_offset_lut_len,
-};
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+pub(crate) use self::correlation::correlation_factor;
+pub(crate) use self::correlation::{build_spatial_offset_lut, spatial_offset_factor, spatial_offset_lut_len};
 pub use self::curve::NOISE_CURVE_BINS;
 pub(crate) use self::curve::NoiseCurve;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::curve::build_noise_curve;
-pub(crate) use self::estimator::{EMA_ALPHA, NoiseEstimator};
+pub(crate) use self::host::HostNoise;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::spatial::{NoiseCtx, run_noise_estimate};
 pub(crate) use self::spatial::{RESULTS_PER_SLOT, sigma_block_p25_from_partials, sigma_from_abs_sum};

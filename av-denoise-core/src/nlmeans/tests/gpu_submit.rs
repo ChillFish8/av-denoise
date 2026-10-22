@@ -324,6 +324,10 @@ fn current_sigmas_matches_the_median_estimator_once_it_folds() {
     denoiser.push_frame(&frame);
     let _ = denoiser.denoise().expect("denoise failed");
 
-    let expected = denoiser.noise_estimator.current().expect("seeded on first push")[0];
+    let expected = denoiser
+        .host_noise
+        .median
+        .current()
+        .expect("seeded on first push")[0];
     assert_eq!(denoiser.current_sigmas()[0], expected);
 }

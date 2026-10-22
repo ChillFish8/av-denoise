@@ -58,11 +58,12 @@ fn uniform_noise_low_chain_matches_median_chain() {
     denoiser.push_frame(&frame);
     denoiser.denoise().unwrap();
 
-    let median = denoiser.noise_estimator.current().expect("seeded on first push")[0];
-    let low = denoiser
-        .noise_estimator_low
+    let median = denoiser
+        .host_noise
+        .median
         .current()
         .expect("seeded on first push")[0];
+    let low = denoiser.host_noise.low.current().expect("seeded on first push")[0];
 
     let relative_error = (low - median).abs() / median;
     assert!(
@@ -96,11 +97,12 @@ fn split_noise_offset_tracks_low_chain_strength_tracks_median() {
     denoiser.push_frame(&frame);
     denoiser.denoise().unwrap();
 
-    let median = denoiser.noise_estimator.current().expect("seeded on first push")[0];
-    let low = denoiser
-        .noise_estimator_low
+    let median = denoiser
+        .host_noise
+        .median
         .current()
         .expect("seeded on first push")[0];
+    let low = denoiser.host_noise.low.current().expect("seeded on first push")[0];
 
     assert!(
         low < median,
@@ -156,7 +158,7 @@ fn partials_ring_isolates_slots_between_push_and_fold() {
         "window should be full after the third push"
     );
 
-    let low1 = denoiser.noise_estimator_low.current().expect("folded by now")[0];
+    let low1 = denoiser.host_noise.low.current().expect("folded by now")[0];
     assert!(
         low1 < sigma_high * 0.15,
         "the first centred slot duplicates the low-sigma frame and its own partials \
@@ -166,7 +168,7 @@ fn partials_ring_isolates_slots_between_push_and_fold() {
     denoiser.push_frame(&frame_high_3);
     assert!(denoiser.denoise().unwrap().is_some());
 
-    let low2 = denoiser.noise_estimator_low.current().expect("folded by now")[0];
+    let low2 = denoiser.host_noise.low.current().expect("folded by now")[0];
     assert!(
         low2 > low1 * 1.5,
         "the centre should now be the first high-sigma push, so the low chain must rise \
@@ -217,7 +219,8 @@ fn temporal_only_chain_reads_the_median_block_sigma() {
     }
 
     let temporal_only = denoiser
-        .noise_estimator_temporal_only
+        .host_noise
+        .temporal_only
         .current()
         .expect("a temporal sample should have folded by now")[0];
 
