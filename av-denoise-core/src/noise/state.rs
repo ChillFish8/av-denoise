@@ -1,6 +1,7 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
+use super::NOISE_BLOCK_1D;
 use super::curve::MIN_QUARTERS_PER_BIN;
 #[cfg(test)]
 use super::reading::ReadingRecord;
@@ -33,6 +34,7 @@ use super::temporal::{
     temporal_stats_buf_bytes,
     temporal_stats_slot_view,
 };
+use crate::collab::geometry::strength_map_dims;
 use crate::engine::align::StorageAlign;
 
 /// The plane geometry one noise state measures.
@@ -53,7 +55,7 @@ pub(crate) struct NoiseShape {
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "no production caller builds a strength map")
+    expect(dead_code, reason = "no production caller builds a chroma strength map")
 )]
 pub(crate) enum StrengthMapKind {
     #[default]
@@ -80,6 +82,14 @@ pub(crate) const BLOCK_VALUE_SPARE: u32 = 7;
 pub(crate) const BLOCK_CANDIDATE: u32 = 1;
 /// The block flag of a block accepted as static noise.
 pub(crate) const BLOCK_ACCEPTED: u32 = 2;
+/// The class flag of a map quarter that holds pixels.
+pub(crate) const CLASS_PRESENT: u32 = 1;
+/// The class flag of a flat map quarter, before the texture veto.
+pub(crate) const CLASS_FLAT: u32 = 2;
+/// The class flag of a full map quarter that holds a strong line.
+pub(crate) const CLASS_LINE: u32 = 4;
+/// The `f32` words of one map quarter's structure tensor, `xx`, `yy` then `xy`.
+pub(crate) const QUARTER_TENSOR_WORDS: u32 = 3;
 
 /// What one slot's reading measures.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -110,6 +120,8 @@ pub(crate) struct NoiseState<R: Runtime> {
     /// Each flat, unclipped static quarter's sigma tagged with its luma bin, when temporal stats
     /// and the luma quarter fields are measured.
     pub(super) curve: Option<SelectBatch>,
+    /// The quarter classes and the per-slot strength maps, when a strength map is built.
+    pub(super) classes: Option<ClassScratch>,
     /// The fewest accepted blocks a sample needs to reach the static fraction.
     pub(super) min_accepted: u32,
 }
@@ -122,6 +134,18 @@ pub(super) struct SampleScratch {
     pub(super) block_flags: Handle,
     /// Each accepted block's sigmas, correlation and static quarter sigmas.
     pub(super) batch: SelectBatch,
+}
+
+/// The buffers one slot's strength map is built in, one entry per map quarter.
+pub(super) struct ClassScratch {
+    /// One word of `CLASS_*` flags per quarter.
+    pub(super) classes: Handle,
+    /// Each quarter's mean luma.
+    pub(super) lumas: Handle,
+    /// [QUARTER_TENSOR_WORDS](crate::noise::state::QUARTER_TENSOR_WORDS) values per quarter.
+    pub(super) tensors: Handle,
+    /// One threshold multiplier per quarter for every slot, created as ones.
+    pub(super) slot_maps: Handle,
 }
 
 impl<R: Runtime> NoiseState<R> {
@@ -156,6 +180,7 @@ impl<R: Runtime> NoiseState<R> {
         let immerkaer_batch = immerkaer_batch(client, shape);
         let sample = shape.temporal.then(|| sample_scratch(client, shape));
         let curve = curve_batch(client, shape, settings);
+        let classes = class_scratch(client, shape, settings);
         let blocks = block_count(shape);
         let min_accepted = min_static_blocks(blocks);
 
@@ -170,6 +195,7 @@ impl<R: Runtime> NoiseState<R> {
             immerkaer_batch,
             sample,
             curve,
+            classes,
             min_accepted,
         }
     }
@@ -183,7 +209,7 @@ impl<R: Runtime> NoiseState<R> {
     }
 
     /// Replaces the settings before the first queued slot, allocating or dropping the curve batch
-    /// to match.
+    /// and the class scratch to match.
     pub(crate) fn set_settings(&mut self, settings: ReadingSettings) {
         let has_curve = self.curve.is_some();
         let wants_curve = self.shape.temporal && settings.luma_fields;
@@ -194,6 +220,17 @@ impl<R: Runtime> NoiseState<R> {
 
         if !wants_curve {
             self.curve = None;
+        }
+
+        let has_classes = self.classes.is_some();
+        let wants_classes = settings.map != StrengthMapKind::Off;
+
+        if wants_classes && !has_classes {
+            self.classes = class_scratch(&self.client, self.shape, settings);
+        }
+
+        if !wants_classes {
+            self.classes = None;
         }
 
         self.settings = settings;
@@ -265,6 +302,18 @@ pub(super) fn block_count(shape: NoiseShape) -> u32 {
     blocks_x * blocks_y
 }
 
+/// Map quarters in one frame of `shape`.
+pub(super) fn quarter_count(shape: NoiseShape) -> u32 {
+    let (cols, rows) = strength_map_dims(shape.width, shape.height);
+    cols * rows
+}
+
+/// The cubes of a launch with one thread per map quarter.
+pub(super) fn quarter_grid(shape: NoiseShape) -> u32 {
+    let quarters = quarter_count(shape);
+    quarters.div_ceil(NOISE_BLOCK_1D)
+}
+
 /// The immerkaer batch, `3 * cubes` lanes plus, with temporal stats, one lane per block.
 fn immerkaer_batch<R: Runtime>(client: &ComputeClient<R>, shape: NoiseShape) -> SelectBatch {
     let cubes = cube_count(shape);
@@ -314,6 +363,32 @@ fn curve_batch<R: Runtime>(
     let batch = SelectBatch::new(client, 4 * blocks, &min_counts, &queries);
 
     Some(batch)
+}
+
+/// The class scratch and the slot maps of ones, when `settings` builds a strength map.
+fn class_scratch<R: Runtime>(
+    client: &ComputeClient<R>,
+    shape: NoiseShape,
+    settings: ReadingSettings,
+) -> Option<ClassScratch> {
+    if settings.map == StrengthMapKind::Off {
+        return None;
+    }
+
+    let quarters = quarter_count(shape) as usize;
+    let word = size_of::<f32>();
+    let tensor_words = quarters * QUARTER_TENSOR_WORDS as usize;
+    let map_ones = vec![1.0f32; quarters * shape.frames as usize];
+    let map_bytes = f32::as_bytes(&map_ones);
+
+    let scratch = ClassScratch {
+        classes: client.empty(quarters * word),
+        lumas: client.empty(quarters * word),
+        tensors: client.empty(tensor_words * word),
+        slot_maps: client.create_from_slice(map_bytes),
+    };
+
+    Some(scratch)
 }
 
 /// One slot's stats a test state starts with.
@@ -435,6 +510,22 @@ impl<R: Runtime> NoiseState<R> {
             let poisoned = poisoned_batch(&client, curve, min_count, &curve_queries);
             self.curve = Some(poisoned);
         }
+
+        if let Some(scratch) = self.classes.as_mut() {
+            let quarters = quarter_count(self.shape) as usize;
+            let tensor_words = quarters * QUARTER_TENSOR_WORDS as usize;
+            let map_words = quarters * self.shape.frames as usize;
+            let flags = vec![CLASS_PRESENT | CLASS_FLAT | CLASS_LINE; quarters];
+            let lumas = vec![7.5f32; quarters];
+            let tensors = vec![7.5f32; tensor_words];
+            let maps = vec![7.5f32; map_words];
+
+            let flag_bytes = u32::as_bytes(&flags);
+            scratch.classes = client.create_from_slice(flag_bytes);
+            scratch.lumas = upload_ring(&client, &lumas);
+            scratch.tensors = upload_ring(&client, &tensors);
+            scratch.slot_maps = upload_ring(&client, &maps);
+        }
     }
 
     pub(crate) fn has_curve_batch(&self) -> bool {
@@ -452,6 +543,49 @@ impl<R: Runtime> NoiseState<R> {
         let tags = u32::from_bytes(&bytes);
 
         tags.to_vec()
+    }
+
+    /// Reads the strength map of `slot` back, empty without a strength map.
+    pub(crate) fn read_slot_map(&self, slot: u32) -> Vec<f32> {
+        let Some(scratch) = self.classes.as_ref() else {
+            return Vec::new();
+        };
+
+        let row_bytes = u64::from(quarter_count(self.shape)) * size_of::<f32>() as u64;
+        let total_bytes = u64::from(self.shape.frames) * row_bytes;
+        let start = u64::from(slot) * row_bytes;
+        let end_trim = total_bytes - start - row_bytes;
+        let view = scratch.slot_maps.clone().offset_start(start).offset_end(end_trim);
+        let bytes = self.client.read_one(view).expect("the slot map reads back");
+        let map = f32::from_bytes(&bytes);
+
+        map.to_vec()
+    }
+
+    /// Reads every map quarter's class flags back, empty without a strength map.
+    pub(crate) fn read_quarter_flags(&self) -> Vec<u32> {
+        let Some(scratch) = self.classes.as_ref() else {
+            return Vec::new();
+        };
+
+        let handle = scratch.classes.clone();
+        let bytes = self.client.read_one(handle).expect("the quarter flags read back");
+        let flags = u32::from_bytes(&bytes);
+
+        flags.to_vec()
+    }
+
+    /// Reads every map quarter's mean luma back, empty without a strength map.
+    pub(crate) fn read_quarter_lumas(&self) -> Vec<f32> {
+        let Some(scratch) = self.classes.as_ref() else {
+            return Vec::new();
+        };
+
+        let handle = scratch.lumas.clone();
+        let bytes = self.client.read_one(handle).expect("the quarter lumas read back");
+        let lumas = f32::from_bytes(&bytes);
+
+        lumas.to_vec()
     }
 
     /// Reads the reading of `slot` back.

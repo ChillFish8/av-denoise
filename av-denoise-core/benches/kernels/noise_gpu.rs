@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use av_denoise_core::bench_api::MAX_GRID_1D;
 use av_denoise_core::bench_api::noise_kernels::{noise_select_histogram, noise_select_resolve};
-use av_denoise_core::bench_api::noise_reading::{NoiseReading, ReadingStage};
+use av_denoise_core::bench_api::noise_reading::{NoiseReading, ReadingMap, ReadingStage};
 use av_denoise_core::bench_api::noise_select::{
     RankRule,
     SELECT_CUBE_THREADS,
@@ -41,6 +41,14 @@ const PERCENTILE_RULES: [RankRule; 4] = [
 ];
 
 const MEDIAN_RULES: [RankRule; 2] = [RankRule::MedianLow, RankRule::MedianHigh];
+
+/// The luma strength map the class and map rows build, with the line ring and the texture veto on.
+const READING_MAP: ReadingMap = ReadingMap {
+    flat_boost: 1.5,
+    shadow_soften: 0.65,
+    texture_cut: 0.21,
+    line_ring: 2,
+};
 
 /// Copies `length` words of `source` over `target`.
 #[cube(launch_unchecked)]
@@ -432,8 +440,8 @@ impl<R: Runtime> Benchmark for SelectBench<R> {
 /// The stats come from the real stats kernels over a frame and a copy with hashed noise added, so
 /// most blocks are static noise. The launches before the timed one run in `prepare`. The luma rows
 /// measure the quarter fields, as nl4d does, except the plain finish row, which leaves the curve
-/// out. The curve batch's passes add to its histogram, so it is refilled from a copy outside the
-/// timed span.
+/// out. The class and map rows also build a luma strength map. The curve batch's passes add to its
+/// histogram, so it is refilled from a copy outside the timed span.
 pub struct ReadingBench<R: Runtime> {
     pub client: ComputeClient<R>,
     pub stage: ReadingStage,
@@ -459,6 +467,12 @@ impl<R: Runtime> ReadingBench<R> {
         } else {
             (WIDTH, HEIGHT, 1, stored_channels(1))
         }
+    }
+
+    /// The strength map the reading builds, for the class and map rows only.
+    fn map(&self) -> Option<ReadingMap> {
+        let builds_map = matches!(self.stage, ReadingStage::Classify | ReadingStage::StrengthMap);
+        builds_map.then_some(READING_MAP)
     }
 
     /// Whether the stats carry the luma quarter fields.
@@ -545,6 +559,7 @@ impl<R: Runtime> Benchmark for ReadingBench<R> {
         let (width, height, channels, stored_ch) = self.plane();
         let ring = self.ring();
         let luma_fields = self.luma_fields();
+        let map = self.map();
         let reading = NoiseReading::new(
             &self.client,
             width,
@@ -553,6 +568,7 @@ impl<R: Runtime> Benchmark for ReadingBench<R> {
             stored_ch,
             &ring,
             luma_fields,
+            map,
         )
         .expect("the stats queue");
         reading.queue_before(self.stage);
@@ -603,6 +619,8 @@ impl<R: Runtime> Benchmark for ReadingBench<R> {
             (ReadingStage::CurveBatch, _) => "curve_batch",
             (ReadingStage::SampleFinish, false) => "sample_finish",
             (ReadingStage::SampleFinish, true) => "sample_finish_curve",
+            (ReadingStage::Classify, _) => "classify",
+            (ReadingStage::StrengthMap, _) => "strength_map",
         };
         let plane = if self.chroma { "chroma" } else { "luma" };
 

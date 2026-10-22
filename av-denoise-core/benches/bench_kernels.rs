@@ -268,11 +268,14 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         }
     }
 
-    // The luma curve's launches on a smooth gradient whose quarters fill every bin.
+    // The luma curve's launches on a smooth gradient whose quarters fill every bin, then the
+    // classes and the strength map with the line ring and the texture veto on.
     let curve_stages = [
         ReadingStage::CurveBins,
         ReadingStage::CurveBatch,
         ReadingStage::SampleFinish,
+        ReadingStage::Classify,
+        ReadingStage::StrengthMap,
     ];
     for stage in curve_stages {
         run(ReadingBench {

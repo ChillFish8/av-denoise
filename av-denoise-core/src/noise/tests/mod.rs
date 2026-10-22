@@ -1,3 +1,4 @@
+mod classes;
 mod correlation;
 mod curve;
 mod estimator;

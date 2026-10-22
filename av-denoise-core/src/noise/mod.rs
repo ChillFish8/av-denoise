@@ -33,7 +33,7 @@ pub(crate) use self::spatial::{
     noise_results_slot_view,
     partials_len,
 };
-pub(crate) use self::state::{NoiseShape, NoiseState, ReadingSettings};
+pub(crate) use self::state::{NoiseShape, NoiseState, ReadingSettings, StrengthMapKind};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::strength_map::classify_quarters;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
