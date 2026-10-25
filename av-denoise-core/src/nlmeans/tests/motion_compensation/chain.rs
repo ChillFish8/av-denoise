@@ -1,9 +1,9 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::frame_shifted_by;
 use crate::bench_api::HostIo;
 use crate::engine::align::StorageAlign;
+use crate::motion::tests::frame_shifted_by;
 use crate::motion::{
     CHAINED_RADIUS_THRESHOLD,
     MotionCtx,

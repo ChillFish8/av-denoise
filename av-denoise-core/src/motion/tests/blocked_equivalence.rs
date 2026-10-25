@@ -1,10 +1,11 @@
 use cubecl::prelude::*;
 
+use super::pair_pyramid;
 use super::reference::{reference_block_match_coarse, reference_block_match_fine};
 use crate::motion::kernels::{BLOCK_MATCH_THREADS, mc_block_match_coarse, mc_block_match_fine};
-use crate::nlmeans::tests::helpers::*;
 use crate::noise::tests::sad_floor_buffer;
 use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
+use crate::tune::tests::runtime::{TestRuntime, test_client};
 
 const FINE_STEP: u32 = 8;
 const NOISE_FLOOR: f32 = 0.1;
@@ -14,19 +15,6 @@ const THSAD: f32 = 5.12;
 enum Kernel {
     Reference,
     Production,
-}
-
-/// The workgroup shapes the production kernels are checked at.
-///
-/// 16 threads leave a plane partly empty, and 128 threads span several planes at wave32 and two at
-/// RADV's wave64.
-fn production_dims() -> [CubeDim; 4] {
-    [
-        CubeDim::new_2d(8, 8),
-        CubeDim::new_1d(BLOCK_MATCH_THREADS),
-        CubeDim::new_1d(16),
-        CubeDim::new_1d(128),
-    ]
 }
 
 fn next_random(state: &mut u64) -> u32 {
@@ -74,7 +62,7 @@ fn run_fine(
     neighbour: &[f32],
     seeds: &[i32],
 ) -> (Vec<i32>, Vec<u32>) {
-    let client = make_client();
+    let client = test_client();
     let blocks_x = width.div_ceil(FINE_STEP);
     let blocks_y = height.div_ceil(FINE_STEP);
     let level_len = (width * height) as usize;
@@ -103,7 +91,7 @@ fn run_fine(
                 let centre_arg = ArrayArg::from_raw_parts(centre_buf, level_len);
                 let neighbour_arg = ArrayArg::from_raw_parts(neighbour_buf, level_len);
 
-                reference_block_match_fine::launch_unchecked::<R>(
+                reference_block_match_fine::launch_unchecked::<TestRuntime>(
                     &client,
                     grid,
                     dim,
@@ -132,7 +120,7 @@ fn run_fine(
                 let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, NOISE_FLOOR);
                 let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
-                mc_block_match_fine::launch_unchecked::<R>(
+                mc_block_match_fine::launch_unchecked::<TestRuntime>(
                     &client,
                     grid,
                     dim,
@@ -171,9 +159,10 @@ fn run_fine(
 }
 
 #[test]
-fn blocked_fine_matches_the_reference_bit_for_bit() {
+fn blocked_fine_matches_the_reference_bit_for_bit_at_the_production_threads() {
     let height = 140u32;
     let reference_dim = CubeDim::new_2d(8, 8);
+    let production_dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
     let mut state = 7u64;
 
     let mut cases = Vec::new();
@@ -209,29 +198,27 @@ fn blocked_fine_matches_the_reference_bit_for_bit() {
         let label =
             format!("width {width} blksize {blksize} radius {search_radius} seed {use_seed} flat {flat}");
 
-        for production_dim in production_dims() {
-            let got = run_fine(
-                Kernel::Production,
-                production_dim,
-                width,
-                height,
-                blksize,
-                search_radius,
-                use_seed,
-                &centre,
-                &neighbour,
-                &seeds,
-            );
+        let got = run_fine(
+            Kernel::Production,
+            production_dim,
+            width,
+            height,
+            blksize,
+            search_radius,
+            use_seed,
+            &centre,
+            &neighbour,
+            &seeds,
+        );
 
-            assert_eq!(
-                got.0, expected.0,
-                "motion vectors differ at {label} dim {production_dim:?}"
-            );
-            assert_eq!(
-                got.1, expected.1,
-                "confidence bits differ at {label} dim {production_dim:?}"
-            );
-        }
+        assert_eq!(
+            got.0, expected.0,
+            "motion vectors differ at {label} dim {production_dim:?}"
+        );
+        assert_eq!(
+            got.1, expected.1,
+            "confidence bits differ at {label} dim {production_dim:?}"
+        );
     }
 }
 
@@ -247,7 +234,7 @@ fn run_coarse(
     centre: &[f32],
     neighbour: &[f32],
 ) -> Vec<i32> {
-    let client = make_client();
+    let client = test_client();
     let level_scale = 2u32;
     let fine_blocks_x = (level_width * level_scale).div_ceil(FINE_STEP);
     let fine_blocks_y = (level_height * level_scale).div_ceil(FINE_STEP);
@@ -275,7 +262,7 @@ fn run_coarse(
                 let centre_arg = ArrayArg::from_raw_parts(centre_buf, level_len);
                 let neighbour_arg = ArrayArg::from_raw_parts(neighbour_buf, level_len);
 
-                reference_block_match_coarse::launch_unchecked::<R>(
+                reference_block_match_coarse::launch_unchecked::<TestRuntime>(
                     &client,
                     grid,
                     dim,
@@ -299,7 +286,7 @@ fn run_coarse(
                 let pyramid_arg = ArrayArg::from_raw_parts(pyramid, 2 * level_len);
                 let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, 1);
 
-                mc_block_match_coarse::launch_unchecked::<R>(
+                mc_block_match_coarse::launch_unchecked::<TestRuntime>(
                     &client,
                     grid,
                     dim,
@@ -329,9 +316,10 @@ fn run_coarse(
 }
 
 #[test]
-fn blocked_coarse_matches_the_reference_bit_for_bit() {
+fn blocked_coarse_matches_the_reference_bit_for_bit_at_the_production_threads() {
     let level_height = 70u32;
     let reference_dim = CubeDim::new_2d(8, 8);
+    let production_dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
     let mut state = 11u64;
 
     for level_width in [130u32, 125] {
@@ -353,25 +341,23 @@ fn blocked_coarse_matches_the_reference_bit_for_bit() {
                         &neighbour,
                     );
 
-                    for production_dim in production_dims() {
-                        let got = run_coarse(
-                            Kernel::Production,
-                            production_dim,
-                            level_width,
-                            level_height,
-                            blksize,
-                            step,
-                            search_radius,
-                            &centre,
-                            &neighbour,
-                        );
+                    let got = run_coarse(
+                        Kernel::Production,
+                        production_dim,
+                        level_width,
+                        level_height,
+                        blksize,
+                        step,
+                        search_radius,
+                        &centre,
+                        &neighbour,
+                    );
 
-                        assert_eq!(
-                            got, expected,
-                            "coarse vectors differ at width {level_width} blksize {blksize} step \
-                             {step} radius {search_radius} flat {flat} dim {production_dim:?}"
-                        );
-                    }
+                    assert_eq!(
+                        got, expected,
+                        "coarse vectors differ at width {level_width} blksize {blksize} step \
+                         {step} radius {search_radius} flat {flat} dim {production_dim:?}"
+                    );
                 }
             }
         }

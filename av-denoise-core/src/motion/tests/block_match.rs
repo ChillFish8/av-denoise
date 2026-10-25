@@ -1,11 +1,12 @@
 use cubecl::prelude::*;
 
-use super::frame_shifted_by;
+use super::{frame_shifted_by, pair_pyramid};
 use crate::motion::kernels::{BLOCK_MATCH_THREADS, mc_block_match_coarse, mc_block_match_fine};
 use crate::motion::{DEFAULT_BLKSIZE, DEFAULT_SEARCH_RADIUS};
-use crate::nlmeans::tests::helpers::*;
 use crate::noise::tests::sad_floor_buffer;
 use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
+use crate::tune::tests::fixtures::noisy_copy;
+use crate::tune::tests::runtime::{TestRuntime, test_client};
 
 /// Runs the fine block-match kernel over one block covering the whole buffer.
 ///
@@ -18,7 +19,7 @@ fn run_fine_block_match_single_block(
     sad_noise_floor: f32,
     thsad: f32,
 ) -> (i32, i32, f32) {
-    let client = make_client();
+    let client = test_client();
     let level_len = (blksize * blksize) as usize;
     assert_eq!(centre.len(), level_len);
     assert_eq!(neighbour.len(), level_len);
@@ -41,7 +42,7 @@ fn run_fine_block_match_single_block(
         let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, sad_noise_floor);
         let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
-        mc_block_match_fine::launch_unchecked::<R>(
+        mc_block_match_fine::launch_unchecked::<TestRuntime>(
             &client,
             grid,
             dim,
@@ -123,7 +124,7 @@ fn block_match_fine_argmin_finds_clean_shift() {
     let centre = noisy_copy(width, 0.5, 0.2, 123);
     let neighbour = frame_shifted_by(&centre, width, height, 2, 1);
 
-    let client = make_client();
+    let client = test_client();
     let level_len = (width * height) as usize;
     let (pyramid, neighbour_slots) = pair_pyramid(&client, &centre, &neighbour);
     let mv_len = (blocks_x * blocks_y * 2) as usize;
@@ -144,7 +145,7 @@ fn block_match_fine_argmin_finds_clean_shift() {
         let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, 0.0);
         let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
-        mc_block_match_fine::launch_unchecked::<R>(
+        mc_block_match_fine::launch_unchecked::<TestRuntime>(
             &client,
             grid,
             dim,
@@ -198,7 +199,7 @@ fn run_coarse_block_match_single_block(
     centre: &[f32],
     neighbour: &[f32],
 ) -> (i32, i32) {
-    let client = make_client();
+    let client = test_client();
     let level_len = (blksize * blksize) as usize;
     assert_eq!(centre.len(), level_len);
     assert_eq!(neighbour.len(), level_len);
@@ -215,7 +216,7 @@ fn run_coarse_block_match_single_block(
         let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, 1);
         let mv_field_arg = ArrayArg::from_raw_parts(mv_field_handle, 2);
 
-        mc_block_match_coarse::launch_unchecked::<R>(
+        mc_block_match_coarse::launch_unchecked::<TestRuntime>(
             &client,
             grid,
             dim,

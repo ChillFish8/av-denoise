@@ -8,7 +8,7 @@ mod pyramid;
 mod search;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub(crate) use self::analyse::{
     MatchTargets,

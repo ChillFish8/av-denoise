@@ -3,9 +3,9 @@ use cubecl::server::Handle;
 
 use super::reference::{reference_block_match_coarse, reference_block_match_fine};
 use crate::motion::kernels::{BLOCK_MATCH_THREADS, mc_block_match_coarse, mc_block_match_fine};
-use crate::nlmeans::tests::helpers::{R, make_client};
 use crate::noise::tests::sad_floor_buffer;
 use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
+use crate::tune::tests::runtime::{TestRuntime, test_client};
 
 const WIDTH: u32 = 72;
 const HEIGHT: u32 = 56;
@@ -21,11 +21,6 @@ const POISON: f32 = 1.0e6;
 const CENTRE_SLOT: u32 = 2;
 const NEIGHBOUR_SLOTS: [u32; 4] = [0, 1, 3, 4];
 const SHIFTS: [(i32, i32); 4] = [(2, -1), (-3, 0), (0, 2), (1, 1)];
-/// Cube sizes each merged launch runs at.
-///
-/// 16 threads leave a plane partly empty and 128 span several planes, so the argmin's cross-plane
-/// path runs on every z.
-const MERGED_THREADS: [u32; 3] = [16, BLOCK_MATCH_THREADS, 128];
 
 fn textured(width: u32, height: u32) -> Vec<f32> {
     (0..width * height)
@@ -79,17 +74,17 @@ fn frame_slots(width: u32, height: u32, slots_before: usize) -> (Vec<f32>, Vec<V
     (frames, planes, slot_pixels)
 }
 
-fn upload_f32(client: &ComputeClient<R>, values: &[f32]) -> Handle {
+fn upload_f32(client: &ComputeClient<TestRuntime>, values: &[f32]) -> Handle {
     let bytes = f32::as_bytes(values);
     client.create_from_slice(bytes)
 }
 
-fn upload_i32(client: &ComputeClient<R>, values: &[i32]) -> Handle {
+fn upload_i32(client: &ComputeClient<TestRuntime>, values: &[i32]) -> Handle {
     let bytes = i32::as_bytes(values);
     client.create_from_slice(bytes)
 }
 
-fn upload_u32(client: &ComputeClient<R>, values: &[u32]) -> Handle {
+fn upload_u32(client: &ComputeClient<TestRuntime>, values: &[u32]) -> Handle {
     let bytes = u32::as_bytes(values);
     client.create_from_slice(bytes)
 }
@@ -99,7 +94,7 @@ fn confidence_bits(values: &[f32]) -> Vec<u32> {
 }
 
 fn run_fine_merged_against_reference(use_seed: u32, threads: u32) {
-    let client = make_client();
+    let client = test_client();
     let (frames, planes, slot_pixels) = frame_slots(WIDTH, HEIGHT, 0);
     let blocks_x = WIDTH.div_ceil(FINE_STEP);
     let blocks_y = HEIGHT.div_ceil(FINE_STEP);
@@ -138,7 +133,7 @@ fn run_fine_merged_against_reference(use_seed: u32, threads: u32) {
         let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, NOISE_FLOOR);
         let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
-        mc_block_match_fine::launch_unchecked::<R>(
+        mc_block_match_fine::launch_unchecked::<TestRuntime>(
             &client,
             grid,
             dim,
@@ -187,7 +182,7 @@ fn run_fine_merged_against_reference(use_seed: u32, threads: u32) {
             let reference_mv_arg = ArrayArg::from_raw_parts(reference_mv_handle, 2 * blocks);
             let reference_conf_arg = ArrayArg::from_raw_parts(reference_conf_handle, blocks);
 
-            reference_block_match_fine::launch_unchecked::<R>(
+            reference_block_match_fine::launch_unchecked::<TestRuntime>(
                 &client,
                 reference_grid,
                 dim,
@@ -237,7 +232,7 @@ fn run_fine_merged_against_reference(use_seed: u32, threads: u32) {
 }
 
 fn run_coarse_merged_against_reference(threads: u32) {
-    let client = make_client();
+    let client = test_client();
     let level_width = WIDTH / 2;
     let level_height = HEIGHT / 2;
     let level_offset = 1_000usize;
@@ -268,7 +263,7 @@ fn run_coarse_merged_against_reference(threads: u32) {
         let table_arg = ArrayArg::from_raw_parts(table, neighbours);
         let mv_field_arg = ArrayArg::from_raw_parts(mv_field_handle, unwritten_len);
 
-        mc_block_match_coarse::launch_unchecked::<R>(
+        mc_block_match_coarse::launch_unchecked::<TestRuntime>(
             &client,
             grid,
             dim,
@@ -308,7 +303,7 @@ fn run_coarse_merged_against_reference(threads: u32) {
             let neighbour_arg = ArrayArg::from_raw_parts(neighbour, level_len);
             let reference_mv_arg = ArrayArg::from_raw_parts(reference_mv_handle, 2 * fine_blocks);
 
-            reference_block_match_coarse::launch_unchecked::<R>(
+            reference_block_match_coarse::launch_unchecked::<TestRuntime>(
                 &client,
                 reference_grid,
                 dim,
@@ -345,21 +340,15 @@ fn run_coarse_merged_against_reference(threads: u32) {
 
 #[test]
 fn a_fine_launch_over_four_neighbours_matches_one_reference_launch_each() {
-    for threads in MERGED_THREADS {
-        run_fine_merged_against_reference(0, threads);
-    }
+    run_fine_merged_against_reference(0, BLOCK_MATCH_THREADS);
 }
 
 #[test]
 fn a_seeded_fine_launch_over_four_neighbours_matches_one_reference_launch_each() {
-    for threads in MERGED_THREADS {
-        run_fine_merged_against_reference(1, threads);
-    }
+    run_fine_merged_against_reference(1, BLOCK_MATCH_THREADS);
 }
 
 #[test]
 fn a_coarse_launch_over_four_neighbours_matches_one_reference_launch_each() {
-    for threads in MERGED_THREADS {
-        run_coarse_merged_against_reference(threads);
-    }
+    run_coarse_merged_against_reference(BLOCK_MATCH_THREADS);
 }

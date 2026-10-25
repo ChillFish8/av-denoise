@@ -12,6 +12,7 @@ use crate::nlmeans::{
     NlmeansOptions,
     resolve_params,
 };
+pub(crate) use crate::tune::tests::fixtures::{noisy_copy, noisy_field_over, seeded_unit_gaussian};
 
 pub(crate) type R = WgpuRuntime;
 
@@ -25,22 +26,6 @@ pub(crate) fn make_client() -> ComputeClient<R> {
 pub(super) fn test_align() -> StorageAlign {
     let client = make_client();
     StorageAlign::from_client(&client)
-}
-
-/// Uploads `centre` and `neighbour` as frame slots 0 and 1 of one buffer, with a table naming slot 1.
-///
-/// The block-match kernels read every frame from one buffer, so this is how a test matches two planes.
-pub(crate) fn pair_pyramid(client: &ComputeClient<R>, centre: &[f32], neighbour: &[f32]) -> (Handle, Handle) {
-    let mut frames = centre.to_vec();
-    frames.extend_from_slice(neighbour);
-    let frame_bytes = f32::as_bytes(&frames);
-    let pyramid = client.create_from_slice(frame_bytes);
-
-    let table = [1u32];
-    let table_bytes = u32::as_bytes(&table);
-    let neighbour_slots = client.create_from_slice(table_bytes);
-
-    (pyramid, neighbour_slots)
 }
 
 pub(super) fn make_uniform_frame(width: u32, height: u32, channels: u32, value: f32) -> Vec<f32> {
@@ -112,46 +97,6 @@ pub(super) fn make_noisy_gaussian_frame(
     }
 
     frame
-}
-
-/// A unit-variance pseudo-Gaussian sample at `idx`, decorrelated across `seed` values.
-///
-/// It sums four hash-derived uniforms between -0.5 and 0.5 (Irwin-Hall), whose variance is 1/3.
-pub(crate) fn seeded_unit_gaussian(idx: u32, seed: u32) -> f32 {
-    let unit_std = (1.0f32 / 3.0f32).sqrt();
-
-    let mut sum = 0.0f32;
-    for k in 0..4u32 {
-        let mut hash = (idx * 4 + k)
-            .wrapping_mul(2654435761)
-            .wrapping_add(seed.wrapping_mul(0x9E37_79B9).wrapping_add(k));
-        hash ^= hash >> 15;
-        hash = hash.wrapping_mul(0x85EB_CA6B);
-        hash ^= hash >> 13;
-        sum += (hash as f32 / u32::MAX as f32) - 0.5;
-    }
-
-    sum / unit_std
-}
-
-/// Adds independent pseudo-Gaussian noise to a `width * height` clean field, clamping once after.
-///
-/// Two calls with different `seed`s over the same `clean` field produce two independently noisy
-/// copies of it.
-pub(crate) fn noisy_field_over(clean: &[f32], width: u32, height: u32, sigma: f32, seed: u32) -> Vec<f32> {
-    let mut frame = vec![0.0f32; (width * height) as usize];
-    for idx in 0..(width * height) {
-        let sample = seeded_unit_gaussian(idx, seed);
-        frame[idx as usize] = (clean[idx as usize] + sample * sigma).clamp(0.0, 1.0);
-    }
-
-    frame
-}
-
-/// A `size * size` flat `base` field with [noisy_field_over] noise added.
-pub(super) fn noisy_copy(size: u32, base: f32, sigma: f32, seed: u32) -> Vec<f32> {
-    let clean = vec![base; (size * size) as usize];
-    noisy_field_over(&clean, size, size, sigma, seed)
 }
 
 /// Builds a frame of grain correlated between horizontal neighbours by a `[0.25, 0.5, 0.25]` blur.

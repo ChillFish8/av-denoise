@@ -3,6 +3,7 @@ use cubecl::prelude::*;
 use super::helpers::*;
 use crate::bench_api::HostIo;
 use crate::motion::kernels::{BLOCK_MATCH_THREADS, mc_block_match_fine};
+use crate::motion::tests::pair_pyramid;
 use crate::motion::{
     MatchTargets,
     MotionCompensationMode,
