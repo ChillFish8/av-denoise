@@ -1,4 +1,4 @@
-use av_denoise_core::bench_api::kernels::motion::nlm_mc_chain_compose;
+use av_denoise_core::bench_api::kernels::motion::mc_chain_compose;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -68,7 +68,7 @@ impl<R: Runtime> Benchmark for ChainComposeBench<R> {
         let dim = CubeDim::new_2d(1, 1);
 
         unsafe {
-            nlm_mc_chain_compose::launch_unchecked::<R>(
+            mc_chain_compose::launch_unchecked::<R>(
                 &self.client,
                 grid,
                 dim,

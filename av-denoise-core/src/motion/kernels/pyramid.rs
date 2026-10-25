@@ -6,7 +6,7 @@ use cubecl::terminate;
 /// `src_frame` and `dst_frame` are slots in the per-level frame rings. An odd last row or column
 /// repeats its edge pixel.
 #[cube(launch_unchecked)]
-pub fn nlm_mc_downscale(
+pub fn mc_downscale(
     src: &Array<f32>,
     dst: &mut Array<f32>,
     src_frame: u32,
@@ -40,7 +40,7 @@ pub fn nlm_mc_downscale(
 
 /// Copies lane 0 of a packed frame into a flat luma array, which becomes level 0 of the pyramid.
 #[cube(launch_unchecked)]
-pub fn nlm_mc_extract_luma<N: Size>(
+pub fn mc_extract_luma<N: Size>(
     src: &Array<Vector<f32, N>>,
     dst: &mut Array<f32>,
     src_frame: u32,

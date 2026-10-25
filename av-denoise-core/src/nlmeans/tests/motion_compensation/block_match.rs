@@ -1,11 +1,7 @@
 use cubecl::prelude::*;
 
 use super::frame_shifted_by;
-use crate::nlmeans::kernels::motion::{
-    BLOCK_MATCH_THREADS,
-    nlm_mc_block_match_coarse,
-    nlm_mc_block_match_fine,
-};
+use crate::motion::kernels::{BLOCK_MATCH_THREADS, mc_block_match_coarse, mc_block_match_fine};
 use crate::nlmeans::motion::{DEFAULT_BLKSIZE, DEFAULT_SEARCH_RADIUS};
 use crate::nlmeans::tests::helpers::*;
 use crate::noise::tests::sad_floor_buffer;
@@ -45,7 +41,7 @@ fn run_fine_block_match_single_block(
         let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, sad_noise_floor);
         let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
-        nlm_mc_block_match_fine::launch_unchecked::<R>(
+        mc_block_match_fine::launch_unchecked::<R>(
             &client,
             grid,
             dim,
@@ -148,7 +144,7 @@ fn block_match_fine_argmin_finds_clean_shift() {
         let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, 0.0);
         let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
-        nlm_mc_block_match_fine::launch_unchecked::<R>(
+        mc_block_match_fine::launch_unchecked::<R>(
             &client,
             grid,
             dim,
@@ -219,7 +215,7 @@ fn run_coarse_block_match_single_block(
         let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, 1);
         let mv_field_arg = ArrayArg::from_raw_parts(mv_field_handle, 2);
 
-        nlm_mc_block_match_coarse::launch_unchecked::<R>(
+        mc_block_match_coarse::launch_unchecked::<R>(
             &client,
             grid,
             dim,

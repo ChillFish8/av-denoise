@@ -4,7 +4,6 @@ pub(crate) mod fill;
 mod fused;
 pub(crate) mod helpers;
 mod memory;
-pub mod motion;
 mod separable;
 #[cfg(test)]
 mod tests;

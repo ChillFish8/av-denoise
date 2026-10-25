@@ -2,8 +2,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::kernels::{egress_f32, egress_words, ingest_f32, ingest_words};
-use super::{DevicePlane, MAX_GRID_1D, SampleFormat};
-use crate::nlmeans::BLOCK_1D;
+use super::{BLOCK_1D, DevicePlane, MAX_GRID_1D, SampleFormat};
 
 /// Where an ingest writes, as a slot of an interleaved ring.
 pub(crate) struct IngestTarget<'a> {

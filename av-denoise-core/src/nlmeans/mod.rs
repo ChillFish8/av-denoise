@@ -52,6 +52,3 @@ pub(crate) use crate::engine::MAX_GRID_1D;
 pub(crate) const BLOCK_X: u32 = 32;
 /// Cube Y dimension for tile-heavy fused/separable kernels.
 pub(crate) const BLOCK_Y: u32 = 8;
-
-/// Block size for the 1D copy and zero kernels.
-pub(crate) const BLOCK_1D: u32 = 256;

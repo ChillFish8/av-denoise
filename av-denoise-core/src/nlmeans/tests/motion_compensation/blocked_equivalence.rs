@@ -1,11 +1,7 @@
 use cubecl::prelude::*;
 
 use super::reference::{reference_block_match_coarse, reference_block_match_fine};
-use crate::nlmeans::kernels::motion::{
-    BLOCK_MATCH_THREADS,
-    nlm_mc_block_match_coarse,
-    nlm_mc_block_match_fine,
-};
+use crate::motion::kernels::{BLOCK_MATCH_THREADS, mc_block_match_coarse, mc_block_match_fine};
 use crate::nlmeans::tests::helpers::*;
 use crate::noise::tests::sad_floor_buffer;
 use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
@@ -136,7 +132,7 @@ fn run_fine(
                 let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, NOISE_FLOOR);
                 let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
-                nlm_mc_block_match_fine::launch_unchecked::<R>(
+                mc_block_match_fine::launch_unchecked::<R>(
                     &client,
                     grid,
                     dim,
@@ -303,7 +299,7 @@ fn run_coarse(
                 let pyramid_arg = ArrayArg::from_raw_parts(pyramid, 2 * level_len);
                 let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, 1);
 
-                nlm_mc_block_match_coarse::launch_unchecked::<R>(
+                mc_block_match_coarse::launch_unchecked::<R>(
                     &client,
                     grid,
                     dim,

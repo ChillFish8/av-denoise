@@ -2,10 +2,9 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::MotionCtx;
-use super::analyse::{MatchTargets, mv_field_byte_offset, run_analyse};
-use crate::nlmeans::denoiser::NlmDenoiser;
-use crate::nlmeans::kernels::motion::{nlm_mc_chain_compose, nlm_mc_pair_zero};
-use crate::nlmeans::{BLOCK_1D, MAX_GRID_1D};
+use super::analyse::{MatchTargets, run_analyse};
+use crate::engine::{BLOCK_1D, MAX_GRID_1D};
+use crate::motion::kernels::mc_pair_zero;
 use crate::noise::DERIVED_SAD_FLOOR;
 
 /// Where one slot and direction of the pair ring starts.
@@ -14,7 +13,7 @@ use crate::noise::DERIVED_SAD_FLOOR;
 /// older frame to the newer one. Each direction is padded as [MotionCtx::pair_direction_bytes]
 /// describes. A slot is keyed by the newer frame's push index modulo the ring size, which
 /// [pair_ring_slot_count](crate::nlmeans::motion::pair_ring_slot_count) makes safe.
-/// `nlm_mc_chain_compose` steps through the ring with the same padded strides, so the two must
+/// `mc_chain_compose` steps through the ring with the same padded strides, so the two must
 /// change together.
 pub(crate) fn pair_byte_offset(motion_ctx: &MotionCtx, pair_slot: u32, direction: u32) -> u64 {
     (pair_slot as u64) * motion_ctx.pair_slot_bytes() + (direction as u64) * motion_ctx.pair_direction_bytes()
@@ -124,7 +123,7 @@ pub(crate) fn zero_pair_slot<R: Runtime>(
         unsafe {
             let direction_arg = ArrayArg::from_raw_parts(direction_slice, length as usize);
 
-            nlm_mc_pair_zero::launch_unchecked::<R>(
+            mc_pair_zero::launch_unchecked::<R>(
                 client,
                 cube_count,
                 cube_dim,
@@ -134,66 +133,6 @@ pub(crate) fn zero_pair_slot<R: Runtime>(
             );
         }
     }
-}
-
-/// Launches `nlm_mc_chain_compose` into this neighbour's `mv_field` slot.
-///
-/// The padded strides are passed explicitly, because the kernel reads the whole pair ring as one
-/// array and must step through it as [pair_byte_offset] does.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the dispatch threads through every buffer and shape the kernel binds"
-)]
-fn dispatch_chain_compose<R: Runtime>(
-    client: &ComputeClient<R>,
-    motion_ctx: &MotionCtx,
-    width: u32,
-    height: u32,
-    pair_ring_slots: u32,
-    pair_ring_len: usize,
-    start_pair_slot: u32,
-    forward: bool,
-    steps: u32,
-    pair_ring: &Handle,
-    mv_field: &Handle,
-    neighbour_idx: u32,
-) -> Result<(), anyhow::Error> {
-    let mv_offset = mv_field_byte_offset(motion_ctx, neighbour_idx);
-    let mv_slot = mv_field.clone().offset_start(mv_offset);
-    let mv_slot_len = (motion_ctx.blocks_x as usize) * (motion_ctx.blocks_y as usize) * 2;
-
-    // One single-thread cube per block, since there is no per-candidate work to share.
-    let grid = CubeCount::new_2d(motion_ctx.blocks_x, motion_ctx.blocks_y);
-    let dim = CubeDim::new_2d(1, 1);
-    let pair_direction_stride = motion_ctx.pair_direction_stride();
-    let pair_slot_stride = motion_ctx.pair_slot_stride();
-    let pair_ring_handle = pair_ring.clone();
-
-    unsafe {
-        let pair_ring_arg = ArrayArg::from_raw_parts(pair_ring_handle, pair_ring_len);
-        let mv_slot_arg = ArrayArg::from_raw_parts(mv_slot, mv_slot_len);
-
-        nlm_mc_chain_compose::launch_unchecked::<R>(
-            client,
-            grid,
-            dim,
-            pair_ring_arg,
-            mv_slot_arg,
-            start_pair_slot,
-            forward,
-            steps,
-            pair_ring_slots,
-            pair_direction_stride,
-            pair_slot_stride,
-            motion_ctx.step,
-            width,
-            height,
-            motion_ctx.blocks_x,
-            motion_ctx.blocks_y,
-        );
-    }
-
-    Ok(())
 }
 
 /// Maps a nonzero temporal offset onto its motion-field neighbour index.
@@ -211,77 +150,6 @@ pub(crate) fn neighbour_idx_for_k(radius: u32, k: i32) -> u32 {
         (k + radius as i32) as u32
     } else {
         (radius as i32 - 1 + k) as u32
-    }
-}
-
-impl<R: Runtime> NlmDenoiser<R> {
-    /// Joins the adjacent-frame fields into one motion field for the neighbour at offset `k`.
-    ///
-    /// `k` must be nonzero and land inside the
-    /// ring, at most twice the temporal radius either way. The walk takes one hop per step out from
-    /// the centre `center_t`, following the older-to-newer field for a positive `k` and the
-    /// newer-to-older field for a negative one. It does nothing unless `Chained` estimation is
-    /// active.
-    pub(crate) fn run_chain_compose(
-        &self,
-        center_t: u32,
-        k: i32,
-        neighbour_idx: u32,
-    ) -> Result<(), anyhow::Error> {
-        let Some(motion_ctx) = self.mc_ctx.as_ref() else {
-            return Ok(());
-        };
-
-        if !self.is_chained() || k == 0 {
-            return Ok(());
-        }
-
-        let radius = self.params.temporal_radius;
-        let far_edge = 2 * radius as i32;
-        debug_assert!(
-            (0..=far_edge).contains(&(center_t as i32 + k)),
-            "center_t={center_t} k={k} lands outside the ring 0..={far_edge}"
-        );
-        debug_assert!(
-            neighbour_idx < 2 * radius,
-            "neighbour_idx={neighbour_idx} outside the field, which holds {} neighbours",
-            2 * radius,
-        );
-
-        let pair_ring = self
-            .pair_ring_buf
-            .as_ref()
-            .expect("pair_ring allocated when Chained is active");
-        let mv_field = self
-            .mv_field_buf
-            .as_ref()
-            .expect("mv_field allocated when mc_ctx is Some");
-
-        let forward = k > 0;
-        let steps = k.unsigned_abs();
-        let start_gap = if forward {
-            center_t as i32
-        } else {
-            center_t as i32 - 1
-        };
-        let start_pair_slot = self.pair_slot(start_gap);
-        let pair_ring_slots = super::pair_ring_slot_count(radius);
-        let pair_ring_len = pair_ring_slots as usize * motion_ctx.pair_slot_stride() as usize;
-
-        dispatch_chain_compose::<R>(
-            &self.client,
-            motion_ctx,
-            self.width,
-            self.height,
-            pair_ring_slots,
-            pair_ring_len,
-            start_pair_slot,
-            forward,
-            steps,
-            pair_ring,
-            mv_field,
-            neighbour_idx,
-        )
     }
 }
 

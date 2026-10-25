@@ -16,6 +16,10 @@ pub mod harness {
 
 pub mod kernels {
     pub use crate::nlmeans::kernels::*;
+
+    pub mod motion {
+        pub use crate::motion::kernels::*;
+    }
 }
 
 pub const MAX_GRID_1D: u32 = crate::engine::MAX_GRID_1D;

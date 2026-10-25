@@ -295,7 +295,7 @@ pub fn nlm_horizontal_sum_pair(
 ///
 /// When `use_confidence` is set, each weight is scaled by its block's confidence from `conf_fwd`
 /// and `conf_bwd`. `step`, `blocks_x` and `blocks_y` describe the motion block grid, which pixels
-/// map onto the same way as in `nlm_mc_warp`. When it is unset the confidence buffers are never read.
+/// map onto the same way as in `mc_warp`. When it is unset the confidence buffers are never read.
 ///
 /// The strength and the noise offset are the derived buffer's `DERIVED_H2_INV_NORM` and
 /// `DERIVED_NOISE_OFFSET` words.

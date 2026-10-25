@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 
 use super::helpers::*;
 use crate::bench_api::HostIo;
-use crate::nlmeans::kernels::motion::{BLOCK_MATCH_THREADS, nlm_mc_block_match_fine};
+use crate::motion::kernels::{BLOCK_MATCH_THREADS, mc_block_match_fine};
 use crate::nlmeans::motion::{
     MatchTargets,
     MotionCompensationMode,
@@ -64,7 +64,7 @@ fn run_fine_confidence(
         let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, sad_noise_floor);
         let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
-        nlm_mc_block_match_fine::launch_unchecked::<R>(
+        mc_block_match_fine::launch_unchecked::<R>(
             &client,
             grid,
             dim,

@@ -1,4 +1,4 @@
-use av_denoise_core::bench_api::kernels::motion::nlm_mc_warp;
+use av_denoise_core::bench_api::kernels::motion::mc_warp;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -61,7 +61,7 @@ impl<R: Runtime> Benchmark for WarpBench<R> {
         let blocks_y = HEIGHT.div_ceil(FINE_STEP);
 
         unsafe {
-            nlm_mc_warp::launch_unchecked::<R>(
+            mc_warp::launch_unchecked::<R>(
                 &self.client,
                 grid,
                 dim,

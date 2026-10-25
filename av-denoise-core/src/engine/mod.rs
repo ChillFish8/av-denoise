@@ -16,6 +16,9 @@ use crate::nl4d::grain::GrainChunk;
 /// Largest 1D grid a dispatch may ask for, set by the WebGPU and Vulkan limits.
 pub(crate) const MAX_GRID_1D: u32 = 65535;
 
+/// Block size for the 1D copy and zero kernels.
+pub(crate) const BLOCK_1D: u32 = 256;
+
 /// A buffer's name and its element count, `None` when the count overflows `u64`.
 pub(crate) type BufferSize = (&'static str, Option<u64>);
 

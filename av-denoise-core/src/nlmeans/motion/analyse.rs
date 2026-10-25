@@ -5,11 +5,7 @@ use super::MotionCtx;
 use super::pyramid::{level_dims, pyramid_level_offset, pyramid_pixels_per_frame, pyramid_slot_pixels};
 #[cfg(test)]
 use crate::engine::align::StorageAlign;
-use crate::nlmeans::kernels::motion::{
-    BLOCK_MATCH_THREADS,
-    nlm_mc_block_match_coarse,
-    nlm_mc_block_match_fine,
-};
+use crate::motion::kernels::{BLOCK_MATCH_THREADS, mc_block_match_coarse, mc_block_match_fine};
 use crate::noise::DERIVED_WORDS;
 
 /// Where a neighbour's motion-field slice starts.
@@ -100,7 +96,7 @@ pub(crate) fn run_analyse<R: Runtime>(
             let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, slots_len);
             let mv_field_arg = ArrayArg::from_raw_parts(mv_field, targets.mv_len);
 
-            nlm_mc_block_match_coarse::launch_unchecked::<R>(
+            mc_block_match_coarse::launch_unchecked::<R>(
                 client,
                 grid,
                 dim,
@@ -218,7 +214,7 @@ pub(super) fn launch_fine<R: Runtime>(
         let confidence_arg = ArrayArg::from_raw_parts(confidence, targets.conf_len);
         let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
-        nlm_mc_block_match_fine::launch_unchecked::<R>(
+        mc_block_match_fine::launch_unchecked::<R>(
             client,
             grid,
             dim,

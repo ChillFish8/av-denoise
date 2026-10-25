@@ -1,4 +1,4 @@
-use av_denoise_core::bench_api::kernels::motion::{BLOCK_MATCH_THREADS, nlm_mc_block_match_coarse};
+use av_denoise_core::bench_api::kernels::motion::{BLOCK_MATCH_THREADS, mc_block_match_coarse};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -87,7 +87,7 @@ impl<R: Runtime> Benchmark for BlockMatchCoarseBench<R> {
             let neighbour_slots_arg = ArrayArg::from_raw_parts(args.neighbour_slots, slots_len);
             let mv_field_arg = ArrayArg::from_raw_parts(args.mv_field, mv_len);
 
-            nlm_mc_block_match_coarse::launch_unchecked::<R>(
+            mc_block_match_coarse::launch_unchecked::<R>(
                 &self.client,
                 grid,
                 dim,

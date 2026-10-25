@@ -20,8 +20,9 @@ use super::kernels::{
     nlm_vweight_pair_accumulate,
 };
 use super::motion::{confidence_byte_offset, neighbour_idx_for_k};
-use super::{BLOCK_1D, BLOCK_X, BLOCK_Y, MAX_GRID_1D};
+use super::{BLOCK_X, BLOCK_Y};
 use crate::engine::timing::{timed, units_per_span};
+use crate::engine::{BLOCK_1D, MAX_GRID_1D};
 use crate::noise::{
     DERIVED_H2_INV_NORM,
     DERIVED_PILOT_H2_INV_NORM,

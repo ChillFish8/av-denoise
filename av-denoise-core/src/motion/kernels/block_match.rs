@@ -1,6 +1,8 @@
 use cubecl::prelude::*;
 use cubecl::terminate;
 
+use super::helpers::clamp_i32;
+
 /// The threads in one block-match workgroup.
 pub const BLOCK_MATCH_THREADS: u32 = 32;
 
@@ -35,9 +37,8 @@ fn window_stride(blksize: u32, search_radius: u32) -> u32 {
 /// `(2 * search_radius + 1)^2` candidates, and the lowest SAD is picked. A tie picks the first in
 /// row-major order, and the zero offset wins a tie with that pick.
 ///
-/// `blksize` is capped at [MAX_BLKSIZE](crate::nlmeans::motion::MAX_BLKSIZE) so the shared centre
-/// tile stays within 1024 values. The neighbour pixels the search reaches are staged into shared
-/// memory once, clamped to the level.
+/// `blksize` must be at most 32, so the shared centre tile stays within 1024 values. The neighbour
+/// pixels the search reaches are staged into shared memory once, clamped to the level.
 ///
 /// This level of every frame is a slot of `pyramid`, the first `level_offset` values in and
 /// `slot_pixels` values apart. The launch runs one cube per block per neighbour, with the neighbour
@@ -47,7 +48,7 @@ fn window_stride(blksize: u32, search_radius: u32) -> u32 {
 /// The winner is scaled by `level_scale`, 2 raised to the coarse level, and written to every fine
 /// block inside this block's region. `step` and `fine_step` are the coarse and fine block spacings.
 #[cube(launch_unchecked)]
-pub fn nlm_mc_block_match_coarse(
+pub fn mc_block_match_coarse(
     pyramid: &Array<f32>,
     neighbour_slots: &Array<u32>,
     mv_field: &mut Array<i32>,
@@ -249,15 +250,15 @@ pub fn nlm_mc_block_match_coarse(
 /// `n * conf_stride` values in.
 ///
 /// When `write_confidence` is set, each block also writes a confidence between 0 and 1 so a poor
-/// match can suppress its frame. Word `sad_field` of the derived noise values `noise` is the SAD
-/// two noisy copies of the same content show, and `thsad` is how far past it the confidence
-/// reaches zero. `thsad` must be positive, or a perfect match divides zero by zero.
+/// match can suppress its frame. The derived word of `noise` at index `sad_field` is the SAD two
+/// noisy copies of the same content show, and `thsad` is how far past it the confidence reaches
+/// zero. `thsad` must be positive, or a perfect match divides zero by zero.
 ///
 /// When `write_confidence` is unset, `confidence` is never touched and can be a placeholder.
 ///
 /// The neighbour pixels the search reaches are staged into shared memory once, clamped to the frame.
 #[cube(launch_unchecked)]
-pub fn nlm_mc_block_match_fine(
+pub fn mc_block_match_fine(
     pyramid: &Array<f32>,
     neighbour_slots: &Array<u32>,
     mv_field: &mut Array<i32>,
@@ -621,15 +622,4 @@ fn parallel_argmin(
     }
 
     best_index
-}
-
-#[cube]
-fn clamp_i32(value: i32, limit: i32) -> i32 {
-    let mut result = value;
-    if value < 0 {
-        result = 0;
-    } else if value >= limit {
-        result = limit - 1;
-    }
-    result
 }

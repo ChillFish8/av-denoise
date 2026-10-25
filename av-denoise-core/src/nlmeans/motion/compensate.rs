@@ -3,7 +3,7 @@ use cubecl::server::Handle;
 
 use super::MotionCtx;
 use super::analyse::mv_field_byte_offset;
-use crate::nlmeans::kernels::motion::nlm_mc_warp;
+use crate::motion::kernels::mc_warp;
 
 /// Shifts one neighbour frame into line with the centre frame, into its slot of `dst`.
 #[expect(
@@ -36,7 +36,7 @@ pub(crate) fn run_compensate<R: Runtime>(
     let mv_slice = mv_field.clone().offset_start(mv_offset);
 
     unsafe {
-        nlm_mc_warp::launch_unchecked::<R>(
+        mc_warp::launch_unchecked::<R>(
             client,
             grid,
             dim,

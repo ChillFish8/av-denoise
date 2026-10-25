@@ -7,6 +7,7 @@ pub mod bench_api;
 mod collab;
 mod engine;
 mod error;
+mod motion;
 pub mod nl4d;
 pub mod nlmeans;
 mod noise;

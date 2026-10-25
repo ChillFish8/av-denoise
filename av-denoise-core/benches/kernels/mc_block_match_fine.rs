@@ -1,4 +1,4 @@
-use av_denoise_core::bench_api::kernels::motion::{BLOCK_MATCH_THREADS, nlm_mc_block_match_fine};
+use av_denoise_core::bench_api::kernels::motion::{BLOCK_MATCH_THREADS, mc_block_match_fine};
 use av_denoise_core::bench_api::{DERIVED_SAD_FLOOR, DERIVED_WORDS, DerivedValues};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
@@ -98,7 +98,7 @@ impl<R: Runtime> Benchmark for BlockMatchFineBench<R> {
             let confidence_arg = ArrayArg::from_raw_parts(args.confidence, conf_len);
             let noise_arg = ArrayArg::from_raw_parts(args.noise, DERIVED_WORDS as usize);
 
-            nlm_mc_block_match_fine::launch_unchecked::<R>(
+            mc_block_match_fine::launch_unchecked::<R>(
                 &self.client,
                 grid,
                 dim,

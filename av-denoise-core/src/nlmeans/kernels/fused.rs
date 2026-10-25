@@ -344,7 +344,7 @@ fn patch_sum(
 ///
 /// When `use_confidence` is set, each weight is scaled by its block's confidence from `conf_fwd`
 /// and `conf_bwd`. `step`, `blocks_x` and `blocks_y` describe the motion block grid, which pixels
-/// map onto the same way as in `nlm_mc_warp`. When it is unset the confidence buffers are never read.
+/// map onto the same way as in `mc_warp`. When it is unset the confidence buffers are never read.
 ///
 /// With `separable` set, each distance tile is first summed along its rows into a row-sum buffer,
 /// and each pixel then sums `2 * patch_radius + 1` of those down its column. That reads shared

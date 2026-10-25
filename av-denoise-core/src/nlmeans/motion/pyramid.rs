@@ -3,7 +3,7 @@ use cubecl::server::Handle;
 
 use super::MotionCtx;
 use crate::engine::align::StorageAlign;
-use crate::nlmeans::kernels::motion::{nlm_mc_downscale, nlm_mc_extract_luma};
+use crate::motion::kernels::{mc_downscale, mc_extract_luma};
 
 /// One frame's luma pixel count at `level`, padded to whole alignment boundaries.
 ///
@@ -152,7 +152,7 @@ fn extract_luma<R: Runtime>(
         let full_res_arg = ArrayArg::from_raw_parts(full_res_handle, full_len);
         let level0_arg = ArrayArg::from_raw_parts(level0_dst, level0_len);
 
-        nlm_mc_extract_luma::launch_unchecked::<R>(
+        mc_extract_luma::launch_unchecked::<R>(
             client,
             grid,
             dim,
@@ -201,7 +201,7 @@ fn downscale_level<R: Runtime>(
         let src_arg = ArrayArg::from_raw_parts(src, src_len);
         let dst_arg = ArrayArg::from_raw_parts(dst, dst_len);
 
-        nlm_mc_downscale::launch_unchecked::<R>(
+        mc_downscale::launch_unchecked::<R>(
             client, grid, dim, src_arg, dst_arg, 0u32, 0u32, src_w, src_h, dst_w, dst_h,
         );
     }

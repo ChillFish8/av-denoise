@@ -4,9 +4,9 @@ use cubecl::server::Handle;
 
 use super::NlmDenoiser;
 use crate::engine::timing::timed;
+use crate::engine::{BLOCK_1D, MAX_GRID_1D};
 use crate::nlmeans::kernels::{gpu_cast_f16, gpu_copy};
 use crate::nlmeans::prefilter::PrefilterMode;
-use crate::nlmeans::{BLOCK_1D, MAX_GRID_1D};
 
 impl<R: Runtime> NlmDenoiser<R> {
     pub(super) fn advance_ring(&mut self) {

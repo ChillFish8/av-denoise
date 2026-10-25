@@ -1,4 +1,4 @@
-use av_denoise_core::bench_api::kernels::motion::nlm_mc_downscale;
+use av_denoise_core::bench_api::kernels::motion::mc_downscale;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -46,7 +46,7 @@ impl<R: Runtime> Benchmark for DownscaleBench<R> {
         let dim = CubeDim::new_2d(block_x, block_y);
 
         unsafe {
-            nlm_mc_downscale::launch_unchecked::<R>(
+            mc_downscale::launch_unchecked::<R>(
                 &self.client,
                 grid,
                 dim,

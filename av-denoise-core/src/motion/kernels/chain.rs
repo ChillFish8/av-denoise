@@ -1,6 +1,8 @@
 use cubecl::prelude::*;
 use cubecl::terminate;
 
+use super::helpers::clamp_i32;
+
 /// Chains adjacent-frame motion fields into one vector per block, from the centre frame to a
 /// distant neighbour.
 ///
@@ -15,7 +17,7 @@ use cubecl::terminate;
 /// older frame to the newer one. `dir_len` and `slot_len` are the padded strides in elements, since
 /// each direction is padded to a 32-byte boundary.
 #[cube(launch_unchecked)]
-pub fn nlm_mc_chain_compose(
+pub fn mc_chain_compose(
     pair_ring: &Array<i32>,
     mv_field: &mut Array<i32>,
     start_pair_slot: u32,
@@ -71,25 +73,14 @@ pub fn nlm_mc_chain_compose(
     mv_field[out_idx + 1] = acc_y;
 }
 
-/// Fills both directions of one pair-ring slot with zeroes.
+/// Fills the first `length` values of `dst` with zeroes.
 ///
-/// A duplicated ring slot holds the same frame twice, so its motion is exactly zero.
+/// Each thread clears every `total_threads`-th value from its own position.
 #[cube(launch_unchecked)]
-pub fn nlm_mc_pair_zero(dst: &mut Array<i32>, #[comptime] length: u32, #[comptime] total_threads: u32) {
+pub fn mc_pair_zero(dst: &mut Array<i32>, #[comptime] length: u32, #[comptime] total_threads: u32) {
     let mut idx = ABSOLUTE_POS_X;
     while idx < length {
         dst[idx as usize] = 0i32;
         idx += total_threads;
     }
-}
-
-#[cube]
-fn clamp_i32(value: i32, limit: i32) -> i32 {
-    let mut result = value;
-    if value < 0 {
-        result = 0;
-    } else if value >= limit {
-        result = limit - 1;
-    }
-    result
 }
