@@ -14,7 +14,7 @@ use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, 
 use crate::collab::kernels::fused::{CollabVariant, Walk, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, STEP, grid_frames};
-use crate::nlmeans::motion::neighbour_idx_for_k;
+use crate::motion::neighbour_idx_for_k;
 use crate::noise::tests::{CollabNoise, collab_noise_buffer};
 use crate::noise::{DERIVED_WORDS, NOISE_CURVE_BINS, STRENGTH_MAP_OFF};
 

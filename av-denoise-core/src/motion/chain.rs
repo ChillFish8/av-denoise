@@ -3,8 +3,8 @@ use cubecl::server::Handle;
 
 use super::MotionCtx;
 use super::analyse::{MatchTargets, run_analyse};
+use super::kernels::mc_pair_zero;
 use crate::engine::{BLOCK_1D, MAX_GRID_1D};
-use crate::motion::kernels::mc_pair_zero;
 use crate::noise::DERIVED_SAD_FLOOR;
 
 /// Where one slot and direction of the pair ring starts.
@@ -12,9 +12,9 @@ use crate::noise::DERIVED_SAD_FLOOR;
 /// The ring is indexed by slot, direction, block and then component, and direction 0 runs from the
 /// older frame to the newer one. Each direction is padded as [MotionCtx::pair_direction_bytes]
 /// describes. A slot is keyed by the newer frame's push index modulo the ring size, which
-/// [pair_ring_slot_count](crate::nlmeans::motion::pair_ring_slot_count) makes safe.
-/// `mc_chain_compose` steps through the ring with the same padded strides, so the two must
-/// change together.
+/// [pair_ring_slot_count](crate::motion::pair_ring_slot_count) makes safe.
+/// [mc_chain_compose](crate::motion::kernels::mc_chain_compose()) steps through the ring with the
+/// same padded strides, so the two must change together.
 pub(crate) fn pair_byte_offset(motion_ctx: &MotionCtx, pair_slot: u32, direction: u32) -> u64 {
     (pair_slot as u64) * motion_ctx.pair_slot_bytes() + (direction as u64) * motion_ctx.pair_direction_bytes()
 }
@@ -157,7 +157,7 @@ pub(crate) fn neighbour_idx_for_k(radius: u32, k: i32) -> u32 {
 mod tests {
     use super::*;
     use crate::engine::align::StorageAlign;
-    use crate::nlmeans::motion::{MotionCompensationMode, MotionEstimation};
+    use crate::motion::{MotionCompensationMode, MotionEstimation};
 
     /// A 4-pixel-high frame cut into 4x4 blocks with no overlap.
     fn small_block_ctx(width: u32) -> MotionCtx {

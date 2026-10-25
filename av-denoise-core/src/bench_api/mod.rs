@@ -25,7 +25,7 @@ pub mod kernels {
 pub const MAX_GRID_1D: u32 = crate::engine::MAX_GRID_1D;
 
 pub mod motion {
-    pub use crate::nlmeans::motion::*;
+    pub use crate::motion::*;
 }
 
 pub mod nl4d_kernels {

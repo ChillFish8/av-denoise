@@ -4,9 +4,7 @@ use cubecl::server::Handle;
 use crate::engine::timing::{timed, units_per_span};
 use crate::engine::{BLOCK_1D, MAX_GRID_1D};
 use crate::motion::kernels::mc_chain_compose;
-use crate::nlmeans::denoiser::NlmDenoiser;
-use crate::nlmeans::kernels::gpu_copy;
-use crate::nlmeans::motion::{
+use crate::motion::{
     self,
     MatchTargets,
     MotionCtx,
@@ -17,6 +15,8 @@ use crate::nlmeans::motion::{
     run_confidence,
     run_seeded_refine,
 };
+use crate::nlmeans::denoiser::NlmDenoiser;
+use crate::nlmeans::kernels::gpu_copy;
 use crate::nlmeans::prefilter::PrefilterMode;
 use crate::noise::{DERIVED_CONFIDENCE_SAD_FLOOR, DERIVED_SAD_FLOOR};
 

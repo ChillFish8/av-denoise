@@ -3,7 +3,7 @@ use cubecl::prelude::*;
 use super::noise::measured_noise_shape;
 pub(crate) use crate::engine::BufferSize;
 use crate::engine::align::StorageAlign;
-use crate::nlmeans::motion::{self, MotionCtx, MotionEstimation};
+use crate::motion::{self, MotionCtx, MotionEstimation};
 use crate::nlmeans::params::NlmParams;
 use crate::noise::{
     IMMERKAER_BLOCK_X,

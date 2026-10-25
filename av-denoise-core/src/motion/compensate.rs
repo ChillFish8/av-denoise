@@ -3,7 +3,7 @@ use cubecl::server::Handle;
 
 use super::MotionCtx;
 use super::analyse::mv_field_byte_offset;
-use crate::motion::kernels::mc_warp;
+use super::kernels::mc_warp;
 
 /// Shifts one neighbour frame into line with the centre frame, into its slot of `dst`.
 #[expect(

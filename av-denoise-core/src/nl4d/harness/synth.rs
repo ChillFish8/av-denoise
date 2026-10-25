@@ -1,4 +1,4 @@
-use crate::nlmeans::motion::neighbour_idx_for_k;
+use crate::motion::neighbour_idx_for_k;
 
 /// A clean luma plane with values between 0 and 1.
 #[derive(Debug, Clone)]

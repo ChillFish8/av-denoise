@@ -3,7 +3,7 @@ use cubecl::prelude::*;
 
 use super::NlmDenoiser;
 use crate::engine::timing::timed;
-use crate::nlmeans::motion::{self, MotionEstimation, build_pyramid_for_slot, run_pyramid_build};
+use crate::motion::{self, MotionEstimation, run_pyramid_build};
 use crate::nlmeans::prefilter::{PrefilterCtx, PrefilterMode, run_prefilter};
 
 impl<R: Runtime> NlmDenoiser<R> {
@@ -69,7 +69,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let frame_count = self.params.total_frames();
 
         if let Some(input_pyramid) = self.pyramid_input.as_ref() {
-            build_pyramid_for_slot::<R>(
+            run_pyramid_build::<R>(
                 &self.client,
                 motion_ctx,
                 self.width,
@@ -86,7 +86,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         if let (Some(reference_pyramid), Some(reference_buf)) =
             (self.pyramid_reference.as_ref(), self.reference_buf.as_ref())
         {
-            build_pyramid_for_slot::<R>(
+            run_pyramid_build::<R>(
                 &self.client,
                 motion_ctx,
                 self.width,

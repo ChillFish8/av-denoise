@@ -12,7 +12,7 @@ const OFFSETS_PER_THREAD: u32 = 3;
 /// Planes one block-match cube may span, which fits a cube of up to 256 threads at a plane width of 8.
 const ARGMIN_MAX_PLANES: u32 = 32;
 
-/// The index [parallel_argmin] returns when no SAD is below its `1.0e30` start.
+/// The index [parallel_argmin](parallel_argmin()) returns when no SAD is below its `1.0e30` start.
 const NO_CANDIDATE: u32 = u32::MAX;
 
 const _: () = assert!(
@@ -37,8 +37,9 @@ fn window_stride(blksize: u32, search_radius: u32) -> u32 {
 /// `(2 * search_radius + 1)^2` candidates, and the lowest SAD is picked. A tie picks the first in
 /// row-major order, and the zero offset wins a tie with that pick.
 ///
-/// `blksize` must be at most 32, so the shared centre tile stays within 1024 values. The neighbour
-/// pixels the search reaches are staged into shared memory once, clamped to the level.
+/// `blksize` must be at most [MAX_BLKSIZE](crate::motion::MAX_BLKSIZE), so the shared centre tile
+/// stays within 1024 values. The neighbour pixels the search reaches are staged into shared memory
+/// once, clamped to the level.
 ///
 /// This level of every frame is a slot of `pyramid`, the first `level_offset` values in and
 /// `slot_pixels` values apart. The launch runs one cube per block per neighbour, with the neighbour

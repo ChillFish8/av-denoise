@@ -2,10 +2,10 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::MotionCtx;
+use super::kernels::{BLOCK_MATCH_THREADS, mc_block_match_coarse, mc_block_match_fine};
 use super::pyramid::{level_dims, pyramid_level_offset, pyramid_pixels_per_frame, pyramid_slot_pixels};
 #[cfg(test)]
 use crate::engine::align::StorageAlign;
-use crate::motion::kernels::{BLOCK_MATCH_THREADS, mc_block_match_coarse, mc_block_match_fine};
 use crate::noise::DERIVED_WORDS;
 
 /// Where a neighbour's motion-field slice starts.
@@ -50,7 +50,7 @@ pub(crate) struct MatchTargets<'a> {
 ///
 /// A coarse pass on the smallest pyramid level seeds a fine pass at full resolution, which writes
 /// each neighbour's `mv_field` slice. With `write_confidence` set, a per-block score also lands in
-/// its `confidence` slice, scored against word `sad_field` of the derived noise values `noise`.
+/// its `confidence` slice, scored against the derived word of `noise` at index `sad_field`.
 /// Otherwise `confidence` is never indexed, so a placeholder buffer works and `thsad` may stay at
 /// 0.0.
 #[expect(
@@ -244,7 +244,7 @@ pub(super) fn launch_fine<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nlmeans::motion::{MotionCompensationMode, MotionEstimation};
+    use crate::motion::{MotionCompensationMode, MotionEstimation};
 
     /// The alignment the Vulkan adapters these tests run on report.
     fn align() -> StorageAlign {

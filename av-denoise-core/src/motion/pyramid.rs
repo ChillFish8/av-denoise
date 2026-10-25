@@ -2,8 +2,8 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::MotionCtx;
+use super::kernels::{mc_downscale, mc_extract_luma};
 use crate::engine::align::StorageAlign;
-use crate::motion::kernels::{mc_downscale, mc_extract_luma};
 
 /// One frame's luma pixel count at `level`, padded to whole alignment boundaries.
 ///
@@ -210,7 +210,7 @@ fn downscale_level<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nlmeans::motion::MAX_PYRAMID_LEVELS;
+    use crate::motion::MAX_PYRAMID_LEVELS;
 
     /// The alignment the Vulkan adapters these tests run on report.
     fn align() -> StorageAlign {

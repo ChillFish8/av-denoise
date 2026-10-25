@@ -6,8 +6,8 @@ use crate::collab::kernels::aggregate::weight_scale_with_g_max;
 use crate::engine::EngineTiming;
 use crate::engine::align::StorageAlign;
 use crate::engine::timing::{DeviceTimed, DeviceTimer};
+use crate::motion::sad_noise_floor;
 use crate::nlmeans::dispatch::{mc_sad_noise_floor_sigma, pilot_h2_inv_norm};
-use crate::nlmeans::motion::sad_noise_floor;
 use crate::nlmeans::params::NlmParams;
 use crate::nlmeans::prefilter::PrefilterMode;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]

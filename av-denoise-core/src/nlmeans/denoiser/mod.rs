@@ -11,11 +11,11 @@ pub(crate) use self::machinery::RingView;
 use self::noise::{measures_noise, noise_shape};
 pub(crate) use self::sizes::{BufferSize, check_u32_indexable, front_buffer_sizes};
 use super::mirror::MirroredBuffer;
-use super::motion::{self, MotionCtx, MotionEstimation};
 use super::params::{NlmParams, SEPARABLE_THRESHOLD, validate_dimensions};
 use crate::engine::align::StorageAlign;
 use crate::engine::timing::DeviceTimer;
 use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
+use crate::motion::{self, MotionCtx, MotionEstimation};
 use crate::noise::{DerivedValues, NoiseState};
 use crate::tune::KernelSelector;
 

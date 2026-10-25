@@ -2,9 +2,9 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::NlmDenoiser;
+use crate::motion::{self, MotionCtx};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 use crate::nlmeans::mirror::MirroredBuffer;
-use crate::nlmeans::motion::{self, MotionCtx};
 use crate::nlmeans::params::ChannelMode;
 
 /// Handles and geometry a collaborative stage needs to read the ring.

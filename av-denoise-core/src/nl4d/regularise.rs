@@ -1,14 +1,8 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
+use crate::motion::{MotionCtx, THSAD_PIXEL, level_dims, pyramid_pixels_per_frame, pyramid_slot_pixels};
 use crate::nlmeans::RingView;
-use crate::nlmeans::motion::{
-    MotionCtx,
-    THSAD_PIXEL,
-    level_dims,
-    pyramid_pixels_per_frame,
-    pyramid_slot_pixels,
-};
 use crate::tune::KernelSelector;
 use crate::tune::sites::{RegulariseOutputs, RegulariseSite};
 

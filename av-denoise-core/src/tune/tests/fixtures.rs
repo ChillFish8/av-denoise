@@ -9,9 +9,9 @@ use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, 
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, grid_frames, needs_warp_uniform_search};
 use crate::engine::align::StorageAlign;
+use crate::motion::THSAD_PIXEL;
 use crate::nl4d::nl4d_pool_ratio;
 use crate::nlmeans::ChannelMode;
-use crate::nlmeans::motion::THSAD_PIXEL;
 use crate::noise::tests::{CollabNoise, collab_noise_buffer, nlm_noise_buffer};
 use crate::noise::{
     DERIVED_H2_INV_NORM,

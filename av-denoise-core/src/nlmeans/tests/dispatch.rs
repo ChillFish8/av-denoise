@@ -1,9 +1,9 @@
+use crate::motion::neighbour_idx_for_k;
 use crate::nlmeans::dispatch::{
     BILATERAL_RESIDUAL_FRACTION,
     NLM_SPATIAL_RESIDUAL_FRACTION,
     mc_sad_noise_floor_sigma,
 };
-use crate::nlmeans::motion::neighbour_idx_for_k;
 use crate::nlmeans::prefilter::PrefilterMode;
 
 #[test]

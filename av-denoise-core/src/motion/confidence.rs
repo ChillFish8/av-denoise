@@ -21,8 +21,8 @@ pub(crate) fn sad_noise_floor(blksize: u32, sigma_y: f32) -> f32 {
 
 /// How far past the noise floor a block can score before its confidence reaches zero.
 ///
-/// It scales with block area so it stays comparable across block sizes. `thsad_scale` is
-/// [HqParams::thsad_scale](crate::nlmeans::HqParams::thsad_scale).
+/// It scales with block area so it stays comparable across block sizes, and `thsad_scale`
+/// multiplies it.
 pub(crate) fn thsad(blksize: u32, thsad_scale: f32) -> f32 {
     let block_area = (blksize * blksize) as f32;
     thsad_scale * block_area * THSAD_PIXEL
@@ -31,8 +31,8 @@ pub(crate) fn thsad(blksize: u32, thsad_scale: f32) -> f32 {
 /// Scores how well each neighbour matches the centre frame without a motion search.
 ///
 /// Each block is scored where it stands at pyramid level 0, into its neighbour's `confidence`
-/// slice, against word `sad_field` of the derived noise values `noise`. The motion vectors the
-/// kernel also writes go to `mv_field` and are discarded.
+/// slice. The score is taken against the derived word of `noise` at index `sad_field`. The motion
+/// vectors the kernel also writes go to `mv_field` and are discarded.
 #[expect(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"

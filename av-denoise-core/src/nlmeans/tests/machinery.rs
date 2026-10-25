@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 
 use super::helpers::*;
 use crate::bench_api::HostIo;
-use crate::nlmeans::motion::{neighbour_idx_for_k, sad_noise_floor};
+use crate::motion::{neighbour_idx_for_k, sad_noise_floor};
 use crate::nlmeans::*;
 
 const RADIUS: u32 = 2;

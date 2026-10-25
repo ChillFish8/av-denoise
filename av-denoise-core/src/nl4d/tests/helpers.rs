@@ -1,8 +1,8 @@
 use cubecl::prelude::*;
 use cubecl::wgpu::WgpuRuntime;
 
+use crate::motion::neighbour_idx_for_k;
 use crate::nl4d::{Nl4dParams, PsyParams};
-use crate::nlmeans::motion::neighbour_idx_for_k;
 use crate::nlmeans::tests::helpers::{noisy_field_over, seeded_unit_gaussian};
 use crate::nlmeans::{
     ChannelMode,

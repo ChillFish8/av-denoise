@@ -1,5 +1,5 @@
 use crate::bench_api::HostIo;
-use crate::nlmeans::motion::{
+use crate::motion::{
     DEFAULT_BLKSIZE,
     DEFAULT_OVERLAP,
     DEFAULT_PYRAMID_LEVELS,
@@ -189,7 +189,7 @@ fn motion_compensation_translating_square_preserves_centre() {
 ///
 /// wgpu rejects a binding offset that is not a multiple of `min_storage_buffer_offset_alignment`,
 /// so the second neighbour's dispatch fails unless
-/// [mv_field_byte_offset](crate::nlmeans::motion::mv_field_byte_offset) pads the stride. 1920x1080
+/// [mv_field_byte_offset](crate::motion::mv_field_byte_offset) pads the stride. 1920x1080
 /// gives an even block count and never reaches this bug, which is why the test needs its own size.
 #[test]
 fn motion_compensation_1080_square_odd_block_count_dispatch_succeeds() {

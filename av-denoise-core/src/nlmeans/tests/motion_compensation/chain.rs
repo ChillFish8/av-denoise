@@ -4,7 +4,7 @@ use cubecl::server::Handle;
 use super::frame_shifted_by;
 use crate::bench_api::HostIo;
 use crate::engine::align::StorageAlign;
-use crate::nlmeans::motion::{
+use crate::motion::{
     CHAINED_RADIUS_THRESHOLD,
     MotionCtx,
     mv_field_byte_offset,
@@ -65,7 +65,7 @@ fn frame_shifted_wrapped(world: &[f32], width: u32, height: u32, shift_x: i32, s
 /// Pushes a sequence moving `velocity` pixels per frame on both axes through a `Chained` denoiser.
 ///
 /// A pair-ring slot lives for `2 * radius` pushes (see
-/// [pair_ring_slot_count](crate::nlmeans::motion::pair_ring_slot_count)), so `1 + 3 * radius`
+/// [pair_ring_slot_count](crate::motion::pair_ring_slot_count)), so `1 + 3 * radius`
 /// pushes replace every priming duplicate with a real analyse. Two more frames give margin.
 fn push_constant_velocity(client: &ComputeClient<R>, radius: u32, velocity: i32) -> NlmDenoiser<R> {
     let width = CHAIN_TEST_SIZE;

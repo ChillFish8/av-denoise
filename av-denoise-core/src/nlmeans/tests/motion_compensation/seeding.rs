@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 
 use super::{frame_shifted_by, shift_clamped};
 use crate::bench_api::HostIo;
-use crate::nlmeans::motion::{
+use crate::motion::{
     DEFAULT_BLKSIZE,
     DEFAULT_OVERLAP,
     DEFAULT_SEARCH_RADIUS,

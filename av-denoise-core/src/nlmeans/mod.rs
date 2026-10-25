@@ -10,7 +10,6 @@
 pub(crate) mod denoiser;
 pub(crate) mod kernels;
 pub(crate) mod mirror;
-pub(crate) mod motion;
 pub(crate) mod params;
 pub(crate) mod prefilter;
 
@@ -27,7 +26,6 @@ pub(crate) use self::denoiser::{NlmDenoiser, RingView};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::dispatch::mc_sad_noise_floor_sigma;
 pub use self::engine::Nlmeans;
-pub use self::motion::{MotionCompensationMode, MotionEstimation, MotionSearch};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::options::resolve_params;
 pub use self::options::{
@@ -47,6 +45,7 @@ pub(crate) use self::params::{MAX_PATCH_RADIUS, MAX_SEARCH_RADIUS, MAX_TEMPORAL_
 pub(crate) use self::params::{NlmParams, hq_default_strength};
 pub use self::prefilter::{DEFAULT_PILOT_STRENGTH_SCALE, PrefilterMode, parse_prefilter};
 pub(crate) use crate::engine::MAX_GRID_1D;
+pub use crate::motion::{MotionCompensationMode, MotionEstimation, MotionSearch};
 
 /// Cube X dimension for tile-heavy fused/separable kernels.
 pub(crate) const BLOCK_X: u32 = 32;
