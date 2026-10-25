@@ -17,6 +17,7 @@ mod legality;
 mod packed;
 mod plan;
 mod precompile;
+mod priority;
 pub(crate) mod probe;
 mod profiles;
 mod regularise;

@@ -12,6 +12,7 @@
 //! - [TuneLedger] is the shared state a tuning pass uses to drive engines in place
 //! - [Legality] says what a device may run beyond the fit check
 //! - [Families] groups a site's candidates, each group with a representative member
+//! - [PriorityTable] orders each site's families and the pipeline profiles for one device class
 
 mod budget;
 mod consts;
@@ -26,6 +27,7 @@ mod ledger;
 pub(crate) mod legality;
 mod plan;
 pub(crate) mod precompile;
+mod priority;
 mod result;
 mod selector;
 mod session;
@@ -104,6 +106,7 @@ pub use self::legality::{
 };
 pub use self::plan::{KernelPlan, PipelineProfile};
 pub use self::precompile::Precompiled;
+pub use self::priority::{Basis, PriorityTable, SitePriority, family_order, priority_for, skipped};
 pub use self::result::{
     CandidateRecord,
     CompileProgress,
