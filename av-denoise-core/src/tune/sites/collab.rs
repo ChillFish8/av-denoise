@@ -9,6 +9,7 @@ use crate::collab::PATCH_SIZE;
 use crate::collab::geometry::{BASELINE_GROUPS, fused_cubes_x};
 use crate::collab::kernels::fused::{Centre, CollabVariant, GROUP_LANES, NeighbourWalk, Walk, collab_fused};
 use crate::noise::{DERIVED_WORDS, NOISE_CURVE_BINS};
+use crate::tune::family::{Dimension, DimensionFamilies, DimensionValue, Families, FamilyId};
 use crate::tune::fidelity::{CompareResult, Fidelity, diff_integers, diff_plane};
 use crate::tune::gpu::{bind, read_f32, read_i32, zero_words, zeroed_words};
 use crate::tune::key::{SiteKey, SiteKeyBuilder};
@@ -77,6 +78,134 @@ const _: () = assert!(
         && VARIANTS[0].neighbour as u8 == CollabVariant::BASELINE.neighbour as u8,
     "the first listed collab variant must be CollabVariant::BASELINE"
 );
+
+/// One centre source family per entry of [CENTRE_OPTIONS].
+pub(super) const CENTRE_DIMENSION: Dimension = Dimension {
+    name: "centre",
+    values: &[
+        DimensionValue {
+            id: FamilyId("centre_global"),
+        },
+        DimensionValue {
+            id: FamilyId("centre_tiled"),
+        },
+        DimensionValue {
+            id: FamilyId("centre_sliding"),
+        },
+    ],
+};
+
+/// One batched centre sums family per entry of [BATCHED_OPTIONS].
+pub(super) const BATCHED_DIMENSION: Dimension = Dimension {
+    name: "batched",
+    values: &[
+        DimensionValue {
+            id: FamilyId("batched_off"),
+        },
+        DimensionValue {
+            id: FamilyId("batched_on"),
+        },
+    ],
+};
+
+/// One group count family per entry of [GROUP_OPTIONS].
+const GROUPS_DIMENSION: Dimension = Dimension {
+    name: "groups",
+    values: &[
+        DimensionValue {
+            id: FamilyId("groups8"),
+        },
+        DimensionValue {
+            id: FamilyId("groups4"),
+        },
+        DimensionValue {
+            id: FamilyId("groups16"),
+        },
+    ],
+};
+
+/// One walk family per entry of [WALK_OPTIONS].
+pub(super) const WALK_DIMENSION: Dimension = Dimension {
+    name: "walk",
+    values: &[
+        DimensionValue {
+            id: FamilyId("walk_clipped"),
+        },
+        DimensionValue {
+            id: FamilyId("walk_uniform"),
+        },
+    ],
+};
+
+/// One neighbour walk family per entry of [NEIGHBOUR_OPTIONS].
+pub(super) const NEIGHBOUR_DIMENSION: Dimension = Dimension {
+    name: "neighbour",
+    values: &[
+        DimensionValue {
+            id: FamilyId("neighbour_rows"),
+        },
+        DimensionValue {
+            id: FamilyId("neighbour_sliding"),
+        },
+    ],
+};
+
+const COLLAB_DIMENSIONS: &[Dimension] = &[
+    CENTRE_DIMENSION,
+    BATCHED_DIMENSION,
+    GROUPS_DIMENSION,
+    WALK_DIMENSION,
+    NEIGHBOUR_DIMENSION,
+];
+
+// Keeps each dimension's families in step with its options.
+const _: () = assert!(
+    CENTRE_DIMENSION.values.len() == CENTRE_OPTIONS.len()
+        && BATCHED_DIMENSION.values.len() == BATCHED_OPTIONS.len()
+        && GROUPS_DIMENSION.values.len() == GROUP_OPTIONS.len()
+        && WALK_DIMENSION.values.len() == WALK_OPTIONS.len()
+        && NEIGHBOUR_DIMENSION.values.len() == NEIGHBOUR_OPTIONS.len(),
+    "every collab dimension must have one family per option"
+);
+
+/// The index of `option` in `options`.
+fn option_index<T: PartialEq>(options: &[T], option: &T) -> usize {
+    let position = options.iter().position(|candidate| candidate == option);
+    position.expect("every collab variant takes listed options")
+}
+
+pub(super) fn collab_value_of(variant: CollabVariant, dimension: usize) -> usize {
+    match dimension {
+        0 => option_index(&CENTRE_OPTIONS, &variant.centre),
+        1 => option_index(&BATCHED_OPTIONS, &variant.batched),
+        2 => option_index(&GROUP_OPTIONS, &variant.groups),
+        3 => option_index(&WALK_OPTIONS, &variant.walk),
+        4 => option_index(&NEIGHBOUR_OPTIONS, &variant.neighbour),
+        _ => panic!("collab has five dimensions"),
+    }
+}
+
+/// The variant with the given centre, batched, group, walk and neighbour option indices, or `None` if
+/// the kernel does not build it.
+pub(super) fn collab_compose(values: &[usize]) -> Option<CollabVariant> {
+    let &[centre, batched, groups, walk, neighbour] = values else {
+        panic!("a collab variant takes five option indices");
+    };
+
+    let centre = CENTRE_OPTIONS[centre];
+    let batched = BATCHED_OPTIONS[batched];
+    if !builds(centre, batched) {
+        return None;
+    }
+
+    Some(CollabVariant {
+        groups: GROUP_OPTIONS[groups],
+        walk: WALK_OPTIONS[walk],
+        centre,
+        batched,
+        neighbour: NEIGHBOUR_OPTIONS[neighbour],
+    })
+}
 
 /// Every listed variant's stored name, in [VARIANTS] order.
 static NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
@@ -161,6 +290,14 @@ impl SiteCandidate for CollabVariant {
 
     fn fidelity(self) -> Fidelity {
         Fidelity::Exact
+    }
+
+    fn families() -> Families<Self> {
+        Families::Dimensions(DimensionFamilies {
+            dimensions: COLLAB_DIMENSIONS,
+            value_of: collab_value_of,
+            compose: collab_compose,
+        })
     }
 }
 

@@ -3,6 +3,7 @@ use cubecl::server::Handle;
 
 use super::{AccumOutputs, NLM_ACCUMULATE, allocate_accum, clear_accum, compare_accum};
 use crate::nlmeans::kernels::nlm_accumulate;
+use crate::tune::family::{Families, FamilyId, FlatFamily};
 use crate::tune::fidelity::{CompareResult, Fidelity};
 use crate::tune::gpu::bind;
 use crate::tune::key::SiteKey;
@@ -30,6 +31,20 @@ impl AccumulateCandidate {
     }
 }
 
+/// One family per block shape.
+const ACCUMULATE_FAMILIES: &[FlatFamily<AccumulateCandidate>] = &[
+    FlatFamily {
+        id: FamilyId("thin32x16"),
+        representative: AccumulateCandidate::Thin32x16,
+        members: &[AccumulateCandidate::Thin32x16],
+    },
+    FlatFamily {
+        id: FamilyId("thin32x8"),
+        representative: AccumulateCandidate::Thin32x8,
+        members: &[AccumulateCandidate::Thin32x8],
+    },
+];
+
 impl SiteCandidate for AccumulateCandidate {
     const SITE: &'static str = NLM_ACCUMULATE;
     const ALL: &'static [Self] = &[AccumulateCandidate::Thin32x16, AccumulateCandidate::Thin32x8];
@@ -43,6 +58,10 @@ impl SiteCandidate for AccumulateCandidate {
 
     fn fidelity(self) -> Fidelity {
         Fidelity::Exact
+    }
+
+    fn families() -> Families<Self> {
+        Families::Flat(ACCUMULATE_FAMILIES)
     }
 }
 

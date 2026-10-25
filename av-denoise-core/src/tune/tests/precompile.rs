@@ -16,7 +16,10 @@ use crate::tune::sites::{CollabOutputs, CollabSite, CollabVariant};
 use crate::tune::{
     CompareResult,
     DeviceLimits,
+    Families,
+    FamilyId,
     Fidelity,
+    FlatFamily,
     LaunchShape,
     SiteCandidate,
     SiteKey,
@@ -350,6 +353,14 @@ impl SiteCandidate for SharedProbe {
 
     fn fidelity(self) -> Fidelity {
         Fidelity::Exact
+    }
+
+    fn families() -> Families<Self> {
+        Families::Flat(&[FlatFamily {
+            id: FamilyId("all"),
+            representative: SharedProbe::Fits,
+            members: Self::ALL,
+        }])
     }
 }
 

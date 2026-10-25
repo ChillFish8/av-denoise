@@ -10,6 +10,7 @@ use crate::nlmeans::kernels::{
     nlm_fused_single_window_ref,
 };
 use crate::noise::DERIVED_WORDS;
+use crate::tune::family::{Families, FamilyId, FlatFamily};
 use crate::tune::fidelity::{CompareResult, Fidelity, PlaneDiff, diff_plane};
 use crate::tune::gpu::{bind, read_f32};
 use crate::tune::key::SiteKey;
@@ -56,6 +57,28 @@ impl WindowCandidate {
     }
 }
 
+/// The direct block shapes and the separable shapes, each led by its 32x8 shape.
+const WINDOW_FAMILIES: &[FlatFamily<WindowCandidate>] = &[
+    FlatFamily {
+        id: FamilyId("direct"),
+        representative: WindowCandidate::Block32x8,
+        members: &[
+            WindowCandidate::Block32x8,
+            WindowCandidate::Block32x16,
+            WindowCandidate::Block16x16,
+        ],
+    },
+    FlatFamily {
+        id: FamilyId("separable"),
+        representative: WindowCandidate::Separable32x8,
+        members: &[
+            WindowCandidate::Separable32x8,
+            WindowCandidate::Separable32x16,
+            WindowCandidate::Separable16x16,
+        ],
+    },
+];
+
 impl SiteCandidate for WindowCandidate {
     const SITE: &'static str = NLM_WINDOW;
     const ALL: &'static [Self] = &[
@@ -87,6 +110,10 @@ impl SiteCandidate for WindowCandidate {
         }
 
         Fidelity::Exact
+    }
+
+    fn families() -> Families<Self> {
+        Families::Flat(WINDOW_FAMILIES)
     }
 }
 

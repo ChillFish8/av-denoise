@@ -3,6 +3,7 @@ use std::fmt::Debug;
 use cubecl::prelude::*;
 
 use super::device::DeviceLimits;
+use super::family::Families;
 use super::fidelity::{CompareResult, Fidelity, FidelityClass};
 use super::key::SiteKey;
 use super::legality::Legality;
@@ -17,6 +18,9 @@ pub trait SiteCandidate: Copy + Eq + Debug + Send + Sync + 'static {
     fn name(self) -> &'static str;
 
     fn fidelity(self) -> Fidelity;
+
+    /// How the candidates group into families.
+    fn families() -> Families<Self>;
 
     /// The first listed candidate, which is a site's baseline unless the site names another.
     fn baseline() -> Self {

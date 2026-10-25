@@ -7,6 +7,7 @@ mod decide;
 mod device;
 mod engine;
 pub(crate) mod equivalence;
+mod family;
 mod fidelity;
 pub(crate) mod fixtures;
 mod helpers;

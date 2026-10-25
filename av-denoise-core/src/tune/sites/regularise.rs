@@ -4,6 +4,7 @@ use cubecl::server::Handle;
 use super::NL4D_MV_REGULARISE;
 use crate::nl4d::kernels::{REGULARISE_CANDIDATES, nl4d_mv_regularise, nl4d_mv_regularise_coop};
 use crate::noise::DERIVED_WORDS;
+use crate::tune::family::{Families, FamilyId, FlatFamily};
 use crate::tune::fidelity::{CompareResult, Fidelity, PlaneDiff, diff_integers, diff_plane};
 use crate::tune::gpu::{bind, read_f32, read_i32, zero_words};
 use crate::tune::key::SiteKey;
@@ -112,6 +113,24 @@ impl RegulariseCandidate {
     }
 }
 
+/// The serial layouts, led by 8x8, and the cooperative layouts, led by 32 threads.
+const REGULARISE_FAMILIES: &[FlatFamily<RegulariseCandidate>] = &[
+    FlatFamily {
+        id: FamilyId("serial"),
+        representative: RegulariseCandidate::Serial8x8,
+        members: &[
+            RegulariseCandidate::Serial8x8,
+            RegulariseCandidate::Serial8x4,
+            RegulariseCandidate::Serial4x4,
+        ],
+    },
+    FlatFamily {
+        id: FamilyId("coop"),
+        representative: RegulariseCandidate::Coop32,
+        members: &[RegulariseCandidate::Coop32, RegulariseCandidate::Coop64],
+    },
+];
+
 impl SiteCandidate for RegulariseCandidate {
     const SITE: &'static str = NL4D_MV_REGULARISE;
     const ALL: &'static [Self] = &[
@@ -137,6 +156,10 @@ impl SiteCandidate for RegulariseCandidate {
             RegulariseLayout::Serial { .. } => Fidelity::Exact,
             RegulariseLayout::Cooperative { .. } => COOP_FIDELITY,
         }
+    }
+
+    fn families() -> Families<Self> {
+        Families::Flat(REGULARISE_FAMILIES)
     }
 }
 

@@ -24,8 +24,11 @@ use crate::tune::{
     CompareResult,
     DeviceLimits,
     EngineKernels,
+    Families,
+    FamilyId,
     Fidelity,
     FidelityClass,
+    FlatFamily,
     KernelSelector,
     LaunchShape,
     SiteCandidate,
@@ -320,6 +323,14 @@ impl SiteCandidate for FaultCandidate {
     fn fidelity(self) -> Fidelity {
         Fidelity::Exact
     }
+
+    fn families() -> Families<Self> {
+        Families::Flat(&[FlatFamily {
+            id: FamilyId("all"),
+            representative: FaultCandidate::Baseline,
+            members: Self::ALL,
+        }])
+    }
 }
 
 /// The accumulate site with an extra candidate that launches nothing and so always looks fastest.
@@ -527,6 +538,14 @@ impl SiteCandidate for GridCandidate {
 
     fn fidelity(self) -> Fidelity {
         Fidelity::Exact
+    }
+
+    fn families() -> Families<Self> {
+        Families::Flat(&[FlatFamily {
+            id: FamilyId("all"),
+            representative: GridCandidate(0),
+            members: Self::ALL,
+        }])
     }
 }
 

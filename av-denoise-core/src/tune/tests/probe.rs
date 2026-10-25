@@ -7,7 +7,10 @@ use super::runtime::TestRuntime;
 use crate::tune::{
     CompareResult,
     DeviceLimits,
+    Families,
+    FamilyId,
     Fidelity,
+    FlatFamily,
     LaunchShape,
     Legality,
     SiteCandidate,
@@ -58,6 +61,14 @@ impl SiteCandidate for ProbeCandidate {
 
     fn fidelity(self) -> Fidelity {
         Fidelity::Exact
+    }
+
+    fn families() -> Families<Self> {
+        Families::Flat(&[FlatFamily {
+            id: FamilyId("all"),
+            representative: ProbeCandidate::Small,
+            members: Self::ALL,
+        }])
     }
 }
 

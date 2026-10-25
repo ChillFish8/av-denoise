@@ -11,11 +11,13 @@
 //! - [DeviceProfile] says which device a result belongs to and what launches fit on it
 //! - [TuneLedger] is the shared state a tuning pass uses to drive engines in place
 //! - [Legality] says what a device may run beyond the fit check
+//! - [Families] groups a site's candidates, each group with a representative member
 
 mod budget;
 mod consts;
 mod decide;
 mod device;
+mod family;
 mod fidelity;
 pub(crate) mod gpu;
 mod helpers;
@@ -64,6 +66,17 @@ pub use self::decide::{
     sample_until_settled,
 };
 pub use self::device::{DeviceIdentity, DeviceLimits, DeviceProfile};
+pub use self::family::{
+    BASELINE_FAMILY,
+    Dimension,
+    DimensionFamilies,
+    DimensionValue,
+    Families,
+    FamilyId,
+    FlatFamily,
+    opened_members,
+    representatives,
+};
 pub use self::fidelity::{
     CompareResult,
     ErrorBound,

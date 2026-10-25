@@ -4,16 +4,22 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::collab::{
+    BATCHED_DIMENSION,
+    CENTRE_DIMENSION,
     CollabInputs,
     CollabOutputs,
     CollabShape,
     CollabValues,
+    NEIGHBOUR_DIMENSION,
     VARIANT_COUNT,
     VARIANTS,
+    WALK_DIMENSION,
     blank_collab_inputs,
     blank_collab_outputs,
     clear_collab_outputs,
+    collab_compose,
     collab_key_builder,
+    collab_value_of,
     compare_collab_outputs,
     scratch_collab_outputs,
 };
@@ -28,6 +34,7 @@ use crate::collab::kernels::fused::{
     collab_search,
 };
 use crate::noise::{DERIVED_WORDS, NOISE_CURVE_BINS};
+use crate::tune::family::{Dimension, DimensionFamilies, Families, FamilyId, FlatFamily};
 use crate::tune::fidelity::{CompareResult, Fidelity, diff_integers};
 use crate::tune::gpu::{bind, read_i32, zero_words, zeroed_words};
 use crate::tune::key::SiteKey;
@@ -80,6 +87,38 @@ const _: () = assert!(
 /// Every search variant, baseline first.
 pub const SEARCH_VARIANTS: [SearchVariant; SEARCH_VARIANT_COUNT] = search_variants();
 
+/// The collab dimensions the search varies, which leave out the group count.
+const SEARCH_DIMENSIONS: &[Dimension] = &[
+    CENTRE_DIMENSION,
+    BATCHED_DIMENSION,
+    WALK_DIMENSION,
+    NEIGHBOUR_DIMENSION,
+];
+
+/// The collab dimension index of each search dimension.
+const COLLAB_DIMENSION_OF: [usize; 4] = [0, 1, 3, 4];
+
+/// The collab group option index the search runs, its baseline's.
+const SEARCH_GROUP_INDEX: usize = 0;
+
+fn search_value_of(variant: SearchVariant, dimension: usize) -> usize {
+    let collab_dimension = COLLAB_DIMENSION_OF[dimension];
+    collab_value_of(variant.0, collab_dimension)
+}
+
+/// The search variant with the given centre, batched, walk and neighbour option indices, or `None` if
+/// the kernel does not build it.
+fn search_compose(values: &[usize]) -> Option<SearchVariant> {
+    let &[centre, batched, walk, neighbour] = values else {
+        panic!("a search variant takes four option indices");
+    };
+
+    let collab_values = [centre, batched, SEARCH_GROUP_INDEX, walk, neighbour];
+    let variant = collab_compose(&collab_values)?;
+
+    Some(SearchVariant(variant))
+}
+
 /// One way to run the search kernel, a collab variant at 8 groups per cube.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SearchVariant(pub CollabVariant);
@@ -94,6 +133,14 @@ impl SiteCandidate for SearchVariant {
 
     fn fidelity(self) -> Fidelity {
         self.0.fidelity()
+    }
+
+    fn families() -> Families<Self> {
+        Families::Dimensions(DimensionFamilies {
+            dimensions: SEARCH_DIMENSIONS,
+            value_of: search_value_of,
+            compose: search_compose,
+        })
     }
 }
 
@@ -121,6 +168,25 @@ const FILTER_CANDIDATES: [FilterCandidate; 3] = [
     FilterCandidate::Groups16,
 ];
 
+/// One family per group count.
+const FILTER_FAMILIES: &[FlatFamily<FilterCandidate>] = &[
+    FlatFamily {
+        id: FamilyId("groups8"),
+        representative: FilterCandidate::Groups8,
+        members: &[FilterCandidate::Groups8],
+    },
+    FlatFamily {
+        id: FamilyId("groups4"),
+        representative: FilterCandidate::Groups4,
+        members: &[FilterCandidate::Groups4],
+    },
+    FlatFamily {
+        id: FamilyId("groups16"),
+        representative: FilterCandidate::Groups16,
+        members: &[FilterCandidate::Groups16],
+    },
+];
+
 impl SiteCandidate for FilterCandidate {
     const SITE: &'static str = COLLAB_FILTER;
     const ALL: &'static [Self] = &FILTER_CANDIDATES;
@@ -135,6 +201,10 @@ impl SiteCandidate for FilterCandidate {
 
     fn fidelity(self) -> Fidelity {
         Fidelity::Exact
+    }
+
+    fn families() -> Families<Self> {
+        Families::Flat(FILTER_FAMILIES)
     }
 }
 
