@@ -81,6 +81,7 @@ fn a_stored_result_drops_keys_with_unknown_names() {
         partial: false,
         progress: CompileProgress::default(),
         identity: String::new(),
+        search: None,
     };
     result.sites.insert(key, ranking);
 
@@ -230,16 +231,20 @@ fn only_one_caller_claims_the_target() {
 }
 
 #[test]
-fn deterministic_ledgers_count_only_exact_candidates() {
+fn deterministic_ledgers_count_only_exact_representatives() {
     let client = test_client();
     let specs = regularise_specs();
     let site = regularise_site(&client, &specs[0]);
-    let ledger = TuneLedger::new(true);
-    let selector = selector_for(&ledger);
+    let deterministic = TuneLedger::new(true);
+    let rounding = TuneLedger::new(false);
+    let deterministic_selector = selector_for(&deterministic);
+    let rounding_selector = selector_for(&rounding);
 
-    selector.run(&site).expect("the run succeeds");
+    deterministic_selector.run(&site).expect("the run succeeds");
+    rounding_selector.run(&site).expect("the run succeeds");
 
-    assert_eq!(ledger.seen().get(&site.key()), Some(&3));
+    assert_eq!(deterministic.seen().get(&site.key()), Some(&1));
+    assert_eq!(rounding.seen().get(&site.key()), Some(&2));
 }
 
 #[test]
@@ -304,7 +309,7 @@ fn the_compile_ceiling_shrinks_with_compile_time_and_restarts_each_pass() {
 }
 
 #[test]
-fn the_compile_estimate_is_the_slowest_stage_mean_of_the_pass() {
+fn the_compile_estimate_is_the_slowest_batch_mean_of_the_pass() {
     let ledger = TuneLedger::new(false);
     let key = SiteKey::builder("probe", 64, 64).build();
     let ceiling = Duration::from_secs(120);
@@ -322,7 +327,7 @@ fn the_compile_estimate_is_the_slowest_stage_mean_of_the_pass() {
 }
 
 #[test]
-fn cheap_stages_never_lower_the_compile_estimate_below_the_first_estimate() {
+fn cheap_batches_never_lower_the_compile_estimate_below_the_first_estimate() {
     let ledger = TuneLedger::new(false);
     let key = SiteKey::builder("probe", 64, 64).build();
 
@@ -333,7 +338,7 @@ fn cheap_stages_never_lower_the_compile_estimate_below_the_first_estimate() {
 }
 
 #[test]
-fn a_stage_that_compiled_nothing_leaves_the_compile_estimate_alone() {
+fn a_batch_that_compiled_nothing_leaves_the_compile_estimate_alone() {
     let ledger = TuneLedger::new(false);
     let key = SiteKey::builder("probe", 64, 64).build();
 
@@ -343,7 +348,7 @@ fn a_stage_that_compiled_nothing_leaves_the_compile_estimate_alone() {
 }
 
 #[test]
-fn a_stage_knows_which_of_its_candidates_a_stored_ranking_names() {
+fn a_batch_knows_which_of_its_candidates_a_stored_ranking_names() {
     install_test_compilation_cache();
     let ledger = TuneLedger::new(false);
     let key = SiteKey::builder(ProbeCandidate::SITE, 64, 64).build();
@@ -363,6 +368,7 @@ fn a_stage_knows_which_of_its_candidates_a_stored_ranking_names() {
         partial: true,
         progress: CompileProgress::default(),
         identity: "probe 64x64".to_string(),
+        search: None,
     };
     let mut stored = TuneResult::default();
     stored.sites.insert(key.clone(), ranking);
@@ -373,11 +379,11 @@ fn a_stage_knows_which_of_its_candidates_a_stored_ranking_names() {
         key: &key,
     };
     let limits = account.limits("probe 64x64", ProbeCandidate::ALL, &[0, 1, 2, 3]);
-    let later_stage = account.limits("probe 64x64", ProbeCandidate::ALL, &[1, 2]);
+    let later_batch = account.limits("probe 64x64", ProbeCandidate::ALL, &[1, 2]);
     let other_size = account.limits("probe 62x64", ProbeCandidate::ALL, &[0, 1, 2, 3]);
 
     assert_eq!(limits.compiled_before, vec![0, 2]);
-    assert_eq!(later_stage.compiled_before, vec![2]);
+    assert_eq!(later_batch.compiled_before, vec![2]);
     assert!(other_size.compiled_before.is_empty());
 }
 
@@ -398,6 +404,7 @@ fn a_ranking_stored_without_a_compile_identity_seeds_nothing() {
         partial: true,
         progress: CompileProgress::default(),
         identity: String::new(),
+        search: None,
     };
     let mut stored = TuneResult::default();
     stored.sites.insert(key.clone(), ranking);

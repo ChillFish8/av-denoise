@@ -269,6 +269,7 @@ fn baseline_ranking(partial: bool) -> SiteRanking {
         partial,
         progress: CompileProgress::default(),
         identity: String::new(),
+        search: None,
     }
 }
 

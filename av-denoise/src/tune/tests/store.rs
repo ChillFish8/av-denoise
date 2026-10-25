@@ -46,6 +46,7 @@ fn sample_result() -> TuneResult {
         partial: false,
         progress: CompileProgress::default(),
         identity: "nlm_window|exact 1920x1080".to_string(),
+        search: None,
     };
     let profile_sites = vec![key.clone()];
     result.sites.insert(key, ranking);

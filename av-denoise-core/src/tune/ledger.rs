@@ -9,6 +9,7 @@ use super::helpers::{HelperFactory, HelperSource, compilation_cache_enabled};
 use super::key::SiteKey;
 use super::plan::KernelPlan;
 use super::result::{SiteRanking, TuneResult, choose};
+use super::search::SearchMode;
 
 /// What the selector does at each launch while a ledger is attached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -28,7 +29,8 @@ pub struct CensusEntry {
     /// Total time of every launch at this key during the census.
     pub total: Duration,
     pub launches: u32,
-    /// Candidates tuning this key times, from those that fit the device and pass the deterministic filter.
+    /// Candidates tuning this key times before it opens anything, from those that fit the device and
+    /// pass the deterministic filter.
     pub candidates: usize,
 }
 
@@ -44,6 +46,7 @@ struct Target {
 #[derive(Debug, Default)]
 struct LedgerState {
     phase: TunePhase,
+    search_mode: SearchMode,
     plan: KernelPlan,
     result: TuneResult,
     census: BTreeMap<SiteKey, CensusEntry>,
@@ -68,7 +71,7 @@ struct CompileState {
     by_key: BTreeMap<SiteKey, Duration>,
     /// No ceiling means compiling never runs out.
     ceiling: Option<Duration>,
-    /// The highest mean time per cold compile of any stage this pass.
+    /// The highest mean time per cold compile of any batch this pass.
     slowest_mean: Option<Duration>,
 }
 
@@ -118,9 +121,18 @@ impl TuneLedger {
         self.deterministic
     }
 
+    /// How widely each key's candidates are searched, [SearchMode::Families] until set.
+    pub fn search_mode(&self) -> SearchMode {
+        self.lock().search_mode
+    }
+
+    pub fn set_search_mode(&self, mode: SearchMode) {
+        self.lock().search_mode = mode;
+    }
+
     /// Hands the ledger a way to make clients that compile candidates in parallel.
     ///
-    /// The factory runs when the first stage compiles. Only the first factory is kept.
+    /// The factory runs when the first batch compiles. Only the first factory is kept.
     pub fn set_compile_helpers(&self, factory: HelperFactory) {
         self.helpers.set_factory(factory);
     }
@@ -222,7 +234,7 @@ impl TuneLedger {
         std::mem::take(&mut state.census)
     }
 
-    /// Every key reached since the ledger was built, with how many candidates tuning it times.
+    /// Every key reached since the ledger was built, with how many candidates tuning it times first.
     pub fn seen(&self) -> BTreeMap<SiteKey, usize> {
         self.lock().seen.clone()
     }
@@ -288,9 +300,9 @@ impl TuneLedger {
         self.lock().compile = compile;
     }
 
-    /// Adds `spent`, the time one stage took, to the time spent compiling the candidates of `key`.
+    /// Adds `spent`, the time one batch took, to the time spent compiling the candidates of `key`.
     ///
-    /// `cold` counts the stage's candidates that were compiled rather than loaded from an earlier
+    /// `cold` counts the batch's candidates that were compiled rather than loaded from an earlier
     /// run, and `cold_spent` is the part of `spent` they took. Only those set the compile estimate.
     pub(crate) fn add_compile(&self, key: &SiteKey, spent: Duration, cold_spent: Duration, cold: usize) {
         let mut state = self.lock();
@@ -323,7 +335,7 @@ impl TuneLedger {
 
     /// The compile time one more cold candidate is expected to take.
     ///
-    /// It is the highest mean per cold compile of any stage this pass, and never less than
+    /// It is the highest mean per cold compile of any batch this pass, and never less than
     /// [FIRST_COMPILE_ESTIMATE](crate::tune::FIRST_COMPILE_ESTIMATE).
     pub fn compile_estimate(&self) -> Duration {
         let state = self.lock();

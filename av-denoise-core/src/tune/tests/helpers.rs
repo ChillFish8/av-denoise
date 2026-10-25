@@ -275,9 +275,9 @@ super::runtime::wgpu_only! {
         made.expect("the helpers' devices open")
     }
 
-    /// Compiles one stage of a luma site `width` wide on the helpers, then checks that the site
+    /// Compiles one batch of a luma site `width` wide on the helpers, then checks that the site
     /// client loaded every candidate instead of compiling it, and that each matches the baseline.
-    fn assert_helpers_compile_a_stage_the_site_client_loads(
+    fn assert_helpers_compile_a_batch_the_site_client_loads(
         client: &ComputeClient<TestRuntime>,
         helpers: &CompileHelpers,
         width: u32,
@@ -293,7 +293,7 @@ super::runtime::wgpu_only! {
         let cold = 4;
         let outputs = site.scratch_outputs();
 
-        // The census compiles the baseline before any stage, so the site client stores nothing new.
+        // The census compiles the baseline before any batch, so the site client stores nothing new.
         site.launch(allowed[0], &outputs);
         sync(client).expect("the baseline compiles");
 
@@ -330,7 +330,7 @@ super::runtime::wgpu_only! {
         let (client, cache_dir) = private_cache_client();
         let helpers = two_helpers();
 
-        assert_helpers_compile_a_stage_the_site_client_loads(&client, &helpers, 61);
+        assert_helpers_compile_a_batch_the_site_client_loads(&client, &helpers, 61);
 
         let _ = std::fs::remove_dir_all(cache_dir);
     }
@@ -340,8 +340,8 @@ super::runtime::wgpu_only! {
         let (client, cache_dir) = private_cache_client();
         let helpers = two_helpers();
 
-        assert_helpers_compile_a_stage_the_site_client_loads(&client, &helpers, 61);
-        assert_helpers_compile_a_stage_the_site_client_loads(&client, &helpers, 62);
+        assert_helpers_compile_a_batch_the_site_client_loads(&client, &helpers, 61);
+        assert_helpers_compile_a_batch_the_site_client_loads(&client, &helpers, 62);
 
         let _ = std::fs::remove_dir_all(cache_dir);
     }

@@ -409,7 +409,6 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
     type Outputs = CollabOutputs;
 
     const PRESCREEN: bool = true;
-    const STAGES: usize = 2;
     const COPIES: bool = true;
 
     fn client(&self) -> &ComputeClient<R> {
@@ -449,21 +448,6 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
 
     fn min_plane_size(&self, _candidate: CollabVariant) -> u32 {
         GROUP_LANES
-    }
-
-    /// The first stage varies every search dimension at the seed's group count, and the second
-    /// varies only the group count.
-    fn in_stage(&self, stage: usize, seed: CollabVariant, candidate: CollabVariant) -> bool {
-        if stage == 0 {
-            return candidate.groups == seed.groups;
-        }
-
-        let regrouped = CollabVariant {
-            groups: seed.groups,
-            ..candidate
-        };
-
-        regrouped == seed
     }
 
     fn launch(&self, candidate: CollabVariant, outputs: &CollabOutputs) {

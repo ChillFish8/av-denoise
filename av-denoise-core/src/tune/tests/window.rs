@@ -465,6 +465,7 @@ fn a_deterministic_plan_never_picks_a_separable_window() {
         partial: false,
         progress: CompileProgress::default(),
         identity: String::new(),
+        search: None,
     };
     let mut result = TuneResult::default();
     result.sites.insert(key.clone(), ranking);

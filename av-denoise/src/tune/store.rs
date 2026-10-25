@@ -396,6 +396,7 @@ fn decode(text: &str, identity: &DeviceIdentity) -> Result<(TuneResult, usize), 
             partial: is_partial,
             progress,
             identity,
+            search: None,
         };
         result.sites.insert(key, ranking);
     }

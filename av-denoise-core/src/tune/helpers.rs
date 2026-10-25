@@ -10,7 +10,7 @@ use cubecl::prelude::*;
 pub use self::vulkan_helpers::vulkan_compile_helpers;
 use super::gpu::{bind, sync};
 
-/// Makes, or finds, the compile helpers the first time a stage asks for them.
+/// Makes, or finds, the compile helpers the first time a batch asks for them.
 pub type HelperFactory = Box<dyn FnOnce() -> Option<Arc<CompileHelpers>> + Send>;
 
 /// Extra clients on the tuned device's adapter that compile candidates while the tuned client waits.
@@ -68,7 +68,7 @@ impl fmt::Debug for CompileHelpers {
 
 /// Where a ledger gets its compile helpers.
 ///
-/// The factory runs once, when the first stage asks, so a run that compiles nothing never makes a
+/// The factory runs once, when the first batch asks, so a run that compiles nothing never makes a
 /// helper device.
 #[derive(Default)]
 pub(crate) struct HelperSource {

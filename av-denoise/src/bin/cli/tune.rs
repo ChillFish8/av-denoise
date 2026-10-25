@@ -355,6 +355,7 @@ mod tests {
             partial: false,
             progress: CompileProgress::default(),
             identity: String::new(),
+            search: None,
         };
         result.sites.insert(key, ranking);
 
@@ -389,6 +390,7 @@ mod tests {
             partial: true,
             progress: CompileProgress::default(),
             identity: String::new(),
+            search: None,
         };
         let key = SiteKey::builder("nlm_window", 1920, 1080).build();
         let mut result = TuneResult::default();
@@ -423,6 +425,7 @@ mod tests {
             partial: true,
             progress,
             identity: String::new(),
+            search: None,
         };
         let key = SiteKey::builder("nlm_window", 1920, 1080).build();
         let mut result = TuneResult::default();

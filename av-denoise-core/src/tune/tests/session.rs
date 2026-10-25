@@ -18,7 +18,7 @@ use super::runtime::{TestRuntime, test_client, wgpu_only};
 use crate::nlmeans::ChannelMode;
 use crate::tune::gpu::read_f32;
 use crate::tune::precompile::CompileAccount;
-use crate::tune::session::{compile_members, timed_count};
+use crate::tune::session::compile_members;
 use crate::tune::sites::{AccumOutputs, AccumulateCandidate, AccumulateSite, WindowCandidate};
 use crate::tune::{
     CompareResult,
@@ -325,11 +325,18 @@ impl SiteCandidate for FaultCandidate {
     }
 
     fn families() -> Families<Self> {
-        Families::Flat(&[FlatFamily {
-            id: FamilyId("all"),
-            representative: FaultCandidate::Baseline,
-            members: Self::ALL,
-        }])
+        Families::Flat(&[
+            FlatFamily {
+                id: FamilyId("baseline"),
+                representative: FaultCandidate::Baseline,
+                members: &[FaultCandidate::Baseline],
+            },
+            FlatFamily {
+                id: FamilyId("broken"),
+                representative: FaultCandidate::Broken,
+                members: &[FaultCandidate::Broken],
+            },
+        ])
     }
 }
 
@@ -509,116 +516,4 @@ wgpu_only! {
         // lower on fast cards and when parallel tests share the device.
         assert!(ratio > 2.5, "256 launches took {long:?}, 32 took {short:?}");
     }
-}
-
-/// One cell of a 3 by 4 grid, `index = row * 4 + column`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct GridCandidate(usize);
-
-impl SiteCandidate for GridCandidate {
-    const SITE: &'static str = "grid";
-    const ALL: &'static [Self] = &[
-        GridCandidate(0),
-        GridCandidate(1),
-        GridCandidate(2),
-        GridCandidate(3),
-        GridCandidate(4),
-        GridCandidate(5),
-        GridCandidate(6),
-        GridCandidate(7),
-        GridCandidate(8),
-        GridCandidate(9),
-        GridCandidate(10),
-        GridCandidate(11),
-    ];
-
-    fn name(self) -> &'static str {
-        "cell"
-    }
-
-    fn fidelity(self) -> Fidelity {
-        Fidelity::Exact
-    }
-
-    fn families() -> Families<Self> {
-        Families::Flat(&[FlatFamily {
-            id: FamilyId("all"),
-            representative: GridCandidate(0),
-            members: Self::ALL,
-        }])
-    }
-}
-
-/// A site that varies the column in stage 0 and the row in stage 1.
-#[derive(Clone)]
-struct GridSite {
-    client: ComputeClient<TestRuntime>,
-}
-
-impl VariantSite<TestRuntime> for GridSite {
-    type Candidate = GridCandidate;
-    type Outputs = ();
-
-    const STAGES: usize = 2;
-
-    fn client(&self) -> &ComputeClient<TestRuntime> {
-        &self.client
-    }
-
-    fn key(&self) -> SiteKey {
-        SiteKey::builder(GridCandidate::SITE, 64, 64).build()
-    }
-
-    fn shape(&self, _candidate: GridCandidate) -> LaunchShape {
-        LaunchShape { x: 8, y: 8 }
-    }
-
-    fn shared_bytes(&self, _candidate: GridCandidate) -> usize {
-        0
-    }
-
-    fn in_stage(&self, stage: usize, seed: GridCandidate, candidate: GridCandidate) -> bool {
-        let same_row = seed.0 / 4 == candidate.0 / 4;
-        let same_column = seed.0 % 4 == candidate.0 % 4;
-        if stage == 0 { same_row } else { same_column }
-    }
-
-    fn launch(&self, _candidate: GridCandidate, _outputs: &()) {}
-
-    fn real_outputs(&self) {}
-
-    fn scratch_outputs(&self) {}
-
-    fn clear_outputs(&self, _outputs: &()) {}
-
-    fn compare(
-        &self,
-        _baseline: &(),
-        _candidate: &(),
-        _fidelity: Fidelity,
-    ) -> Result<CompareResult, anyhow::Error> {
-        Ok(CompareResult::Pass)
-    }
-}
-
-#[test]
-fn a_staged_site_is_counted_by_what_it_times() {
-    let client = test_client();
-    let site = GridSite { client };
-    let allowed = GridCandidate::ALL;
-
-    let count = timed_count(&site, allowed);
-
-    assert_eq!(count, 10);
-}
-
-#[test]
-fn an_unstaged_site_is_counted_whole() {
-    let client = test_client();
-    let site = ProbeSite::new(&client);
-    let allowed = ProbeCandidate::ALL;
-
-    let count = timed_count(&site, allowed);
-
-    assert_eq!(count, allowed.len());
 }

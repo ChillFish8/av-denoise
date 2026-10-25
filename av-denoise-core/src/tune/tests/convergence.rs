@@ -86,6 +86,7 @@ fn ranking_of(kept: &[usize], progress: CompileProgress, identity: String) -> Si
         partial: progress.left > 0,
         progress,
         identity,
+        search: None,
     }
 }
 

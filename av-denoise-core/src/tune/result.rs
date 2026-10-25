@@ -4,6 +4,7 @@ use super::consts::{HYSTERESIS, PROFILE_MARGIN};
 use super::fidelity::FidelityClass;
 use super::key::SiteKey;
 use super::plan::{KernelPlan, PipelineProfile};
+use super::search::SiteSearch;
 use super::sites::candidate_known;
 
 /// Every ranking a tuning pass produced, per site key and per profile key.
@@ -31,6 +32,9 @@ pub struct SiteRanking {
     ///
     /// It is empty for a ranking stored before identities were kept.
     pub identity: String,
+    /// How the candidates were searched, `None` for a ranking loaded from the store or a key with only
+    /// its baseline.
+    pub search: Option<SiteSearch>,
 }
 
 /// How many of a key's candidates the compile ceiling skipped, out of how many tuning tried.

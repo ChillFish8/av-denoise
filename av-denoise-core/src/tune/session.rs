@@ -4,20 +4,14 @@ use std::time::{Duration, Instant};
 
 use cubecl::prelude::*;
 
-use super::consts::{BASELINE_INDEX, MAX_LAUNCHES_PER_SAMPLE, REWARM, SAMPLE_TARGET, STAGE_KEEP};
-use super::decide::{
-    DecideLimits,
-    SiteTiming,
-    Staging,
-    median,
-    prescreen,
-    sample_in_stages_with,
-    sample_until_settled,
-};
+use super::consts::{BASELINE_INDEX, MAX_LAUNCHES_PER_SAMPLE, REWARM, SAMPLE_TARGET};
+use super::decide::{DecideLimits, median};
 use super::fidelity::CompareResult;
 use super::gpu::{GpuSampler, profile_launches, sync};
 use super::precompile::{CompileAccount, Precompiled, precompile};
+use super::priority::PriorityTable;
 use super::result::{CandidateRecord, CompileProgress, SiteRanking};
+use super::search::{SearchMode, SearchOutcome, SearchSpace, search_candidates};
 use super::site::{SiteCandidate, VariantSite};
 
 /// Launches queued between syncs while the baseline re-warms.
@@ -30,19 +24,19 @@ const CALIBRATION_SAMPLES: usize = 3;
 ///
 /// `allowed` lists the candidates that fit the device, baseline first. A key with only its baseline
 /// is ranked without timing. Candidates run only into two scratch output sets, so the pipeline's own
-/// buffers stay untouched. The baseline re-warms first and the batch size is calibrated from it. A
-/// site that asks for one gets a pre-screen. Every survivor's output is checked against the
-/// baseline's, and the rest are timed round-robin until the stop rule ends the site or `deadline`
-/// caps it. A staged site runs these steps once per stage, as
-/// [sample_in_stages_with](crate::tune::sample_in_stages_with) describes. Before timing, each stage's
-/// candidates are compiled once, and the compile time goes to `compile` instead of counting towards
-/// the caps. When the compile ceiling skips any candidate, the ranking is partial, and it counts how
-/// many it skipped.
+/// buffers stay untouched. The baseline re-warms first and the batch size is calibrated from it.
+/// The candidates are then searched in batches, as
+/// [search_candidates](crate::tune::search_candidates) describes for `mode`, with `priority`
+/// setting the order families are timed in and those left out. Each batch is compiled once before
+/// timing, and the compile time goes to `compile` instead of counting towards the caps. When the
+/// compile ceiling skips any candidate, the ranking is partial, and it counts how many it skipped.
 pub(crate) fn tune_site<R: Runtime, S: VariantSite<R>>(
     site: &S,
     allowed: &[S::Candidate],
     deadline: Instant,
     compile: CompileAccount<'_>,
+    priority: &PriorityTable,
+    mode: SearchMode,
 ) -> Result<SiteRanking, anyhow::Error> {
     let identity = site.compile_identity();
 
@@ -57,12 +51,15 @@ pub(crate) fn tune_site<R: Runtime, S: VariantSite<R>>(
     rewarm(site, &candidate_outputs)?;
     let launches = calibrate(site, &candidate_outputs)?;
 
-    let mut limits = DecideLimits::default();
+    let mut limits = match mode {
+        SearchMode::Families => DecideLimits::default(),
+        SearchMode::Exhaustive => DecideLimits::exhaustive(),
+    };
     let remaining = deadline.saturating_duration_since(Instant::now());
     limits.site_cap = limits.site_cap.min(remaining);
 
-    let tried = RefCell::new(StageCounts::default());
-    let compile_stage = |indices: &[usize]| {
+    let tried = RefCell::new(BatchCounts::default());
+    let compile_batch = |indices: &[usize]| {
         let precompiled = compile_members(site, allowed, indices, &candidate_outputs, compile)?;
 
         {
@@ -73,60 +70,31 @@ pub(crate) fn tune_site<R: Runtime, S: VariantSite<R>>(
 
         Ok(precompiled)
     };
+    let check =
+        |indices: &[usize]| check_outputs(site, allowed, indices, &baseline_outputs, &candidate_outputs);
 
-    if S::STAGES > 1 {
-        let members = |stage: usize, seed: usize| stage_members(site, allowed, stage, seed);
-        let staging = Staging {
-            stages: S::STAGES,
-            keep: STAGE_KEEP,
-            prescreen: S::PRESCREEN,
-            members: &members,
-        };
-        let check =
-            |indices: &[usize]| check_outputs(site, allowed, indices, &baseline_outputs, &candidate_outputs);
-        let mut sampler = GpuSampler::new(site, allowed, &candidate_outputs, launches);
-        let timing = sample_in_stages_with(
-            &mut sampler,
-            &staging,
-            BASELINE_INDEX,
-            &limits,
-            compile_stage,
-            check,
-        )?;
-
-        let progress = tried.borrow().progress();
-        let ranking = ranking_from(allowed, &timing, progress, identity);
-        return Ok(ranking);
-    }
-
-    let indices: Vec<usize> = (0..allowed.len()).collect();
-    let precompiled = compile_stage(&indices)?;
-    let compiled = precompiled.kept;
-
-    let screened = if S::PRESCREEN {
-        let mut sampler = GpuSampler::new(site, allowed, &candidate_outputs, launches);
-        prescreen(&mut sampler, &compiled, BASELINE_INDEX, &limits)?
-    } else {
-        compiled
+    let space = SearchSpace {
+        allowed,
+        priority,
+        mode,
+        prescreen: S::PRESCREEN,
     };
-
-    let checked = check_outputs(site, allowed, &screened, &baseline_outputs, &candidate_outputs);
     let mut sampler = GpuSampler::new(site, allowed, &candidate_outputs, launches);
-    let timing = sample_until_settled(&mut sampler, &checked, BASELINE_INDEX, &limits)?;
+    let outcome = search_candidates(&mut sampler, space, &limits, compile_batch, check)?;
 
     let progress = tried.borrow().progress();
-    let ranking = ranking_from(allowed, &timing, progress, identity);
+    let ranking = ranking_from(allowed, outcome, progress, identity);
     Ok(ranking)
 }
 
-/// The candidates a key's stages asked to compile, and those the compile ceiling skipped.
+/// The candidates a key's batches asked to compile, and those the compile ceiling skipped.
 #[derive(Default)]
-struct StageCounts {
+struct BatchCounts {
     asked: BTreeSet<usize>,
     skipped: BTreeSet<usize>,
 }
 
-impl StageCounts {
+impl BatchCounts {
     fn progress(&self) -> CompileProgress {
         CompileProgress {
             left: self.skipped.len(),
@@ -158,7 +126,7 @@ pub(crate) fn compile_members<R: Runtime, S: VariantSite<R>>(
         tracing::warn!(
             site = S::Candidate::SITE,
             key = %compile.key,
-            "the compile helpers failed candidates the tuned client compiled, so later stages compile on \
+            "the compile helpers failed candidates the tuned client compiled, so later batches compile on \
              the tuned client"
         );
         compile.fail_helpers();
@@ -175,7 +143,7 @@ pub(crate) fn compile_members<R: Runtime, S: VariantSite<R>>(
         helpers = precompiled.helpers,
         load = ?precompiled.load,
         spent = ?precompiled.spent,
-        "compiled a stage's candidates"
+        "compiled a batch of candidates"
     );
 
     if !precompiled.skipped.is_empty() {
@@ -202,41 +170,6 @@ pub(crate) fn compile_members<R: Runtime, S: VariantSite<R>>(
 
 fn candidate_names<C: SiteCandidate>(allowed: &[C], indices: &[usize]) -> Vec<&'static str> {
     indices.iter().map(|&index| allowed[index].name()).collect()
-}
-
-/// The indices into `allowed` that stage `stage` times around `allowed[seed]`.
-fn stage_members<R: Runtime, S: VariantSite<R>>(
-    site: &S,
-    allowed: &[S::Candidate],
-    stage: usize,
-    seed: usize,
-) -> Vec<usize> {
-    let seed_candidate = allowed[seed];
-
-    (0..allowed.len())
-        .filter(|&index| site.in_stage(stage, seed_candidate, allowed[index]))
-        .collect()
-}
-
-/// About how many of `allowed` tuning times.
-///
-/// An unstaged site times all of them. A staged site times the first stage around the baseline, and
-/// each later stage times [STAGE_KEEP](crate::tune::STAGE_KEEP) seeds' members, each seed already timed.
-pub(crate) fn timed_count<R: Runtime, S: VariantSite<R>>(site: &S, allowed: &[S::Candidate]) -> usize {
-    if S::STAGES <= 1 {
-        return allowed.len();
-    }
-
-    let first = stage_members(site, allowed, 0, 0);
-    let mut count = first.len();
-
-    for stage in 1..S::STAGES {
-        let around = stage_members(site, allowed, stage, 0);
-        let fresh_per_seed = around.len().saturating_sub(1);
-        count += STAGE_KEEP * fresh_per_seed;
-    }
-
-    count.min(allowed.len())
 }
 
 /// Runs the baseline into `outputs` for [REWARM](crate::tune::REWARM), so an idle gap before the
@@ -351,19 +284,21 @@ fn untimed_baseline<C: SiteCandidate>(baseline: C, identity: String) -> SiteRank
         partial: false,
         progress: CompileProgress::default(),
         identity,
+        search: None,
     }
 }
 
-/// The timed candidates as records, fastest first.
+/// The timed candidates as records, fastest first, with how they were searched.
 ///
 /// The ranking is partial when `progress` says the compile ceiling left any candidate.
 fn ranking_from<C: SiteCandidate>(
     allowed: &[C],
-    timing: &SiteTiming,
+    outcome: SearchOutcome,
     progress: CompileProgress,
     identity: String,
 ) -> SiteRanking {
-    let mut candidates: Vec<CandidateRecord> = timing
+    let mut candidates: Vec<CandidateRecord> = outcome
+        .timing
         .timed
         .iter()
         .map(|stats| {
@@ -387,5 +322,6 @@ fn ranking_from<C: SiteCandidate>(
         partial: progress.left > 0,
         progress,
         identity,
+        search: Some(outcome.search),
     }
 }

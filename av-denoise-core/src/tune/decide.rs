@@ -10,7 +10,6 @@ use super::consts::{
     PRESCREEN_SAMPLES,
     SITE_CAP,
 };
-use super::precompile::Precompiled;
 
 /// One timing sample, `launches` back-to-back launches that took `total` together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +133,17 @@ impl Default for DecideLimits {
             hard_cap: HARD_SITE_CAP,
             prescreen_samples: PRESCREEN_SAMPLES,
             prescreen_margin: PRESCREEN_MARGIN,
+        }
+    }
+}
+
+impl DecideLimits {
+    /// The limits of an exhaustive search, with the usual minimums and no site or hard cap.
+    pub fn exhaustive() -> Self {
+        Self {
+            site_cap: Duration::MAX,
+            hard_cap: Duration::MAX,
+            ..Self::default()
         }
     }
 }
@@ -314,139 +324,4 @@ fn leader_separated(active: &[CandidateStats]) -> bool {
     let runner_up_lower_quartile = by_median[1].samples.quantile(0.25);
 
     leader_median < runner_up_lower_quartile
-}
-
-/// How a site's candidates are timed in stages.
-pub struct Staging<'a> {
-    /// Stages to run, 1 or more.
-    pub stages: usize,
-    /// The fastest candidates each later stage starts from.
-    pub keep: usize,
-    /// Whether each stage pre-screens its own candidates.
-    pub prescreen: bool,
-    /// The candidates stage `stage` times around candidate `seed`, as indices.
-    pub members: &'a dyn Fn(usize, usize) -> Vec<usize>,
-}
-
-/// [sample_in_stages_with] with every member kept and nothing compiled.
-pub fn sample_in_stages<S: Sampler>(
-    sampler: &mut S,
-    staging: &Staging<'_>,
-    baseline: usize,
-    limits: &DecideLimits,
-    check: impl FnMut(&[usize]) -> Vec<usize>,
-) -> Result<SiteTiming, anyhow::Error> {
-    let keep_all = |indices: &[usize]| -> Result<Precompiled, anyhow::Error> {
-        let kept = Precompiled::keeping(indices);
-        Ok(kept)
-    };
-
-    sample_in_stages_with(sampler, staging, baseline, limits, keep_all, check)
-}
-
-/// Times candidates stage by stage and returns every candidate timed.
-///
-/// The first stage times the members around `baseline`. Each later stage times the members around
-/// each of the `keep` fastest candidates so far, leaving out any an earlier stage already took. A
-/// stage pre-screens its members when asked, `check` drops those whose output differs, and the rest
-/// are sampled until settled. The baseline is always a member of the first stage. A later stage
-/// where no member passes the pre-screen times nothing and the site keeps what it has. The site cap
-/// counts the whole site. The hard cap restarts with each stage, so a later stage always reaches its
-/// minimums. Each stage's members go through `precompile` first, which drops those that do not
-/// compile, and the time it took is left out of the sampler's elapsed time.
-pub fn sample_in_stages_with<S: Sampler>(
-    sampler: &mut S,
-    staging: &Staging<'_>,
-    baseline: usize,
-    limits: &DecideLimits,
-    mut precompile: impl FnMut(&[usize]) -> Result<Precompiled, anyhow::Error>,
-    mut check: impl FnMut(&[usize]) -> Vec<usize>,
-) -> Result<SiteTiming, anyhow::Error> {
-    let mut timed: Vec<CandidateStats> = Vec::new();
-    let mut failed = Vec::new();
-    let mut capped = false;
-    let mut tried: Vec<usize> = Vec::new();
-    let mut seeds = vec![baseline];
-
-    for stage in 0..staging.stages {
-        let mut members = fresh_members(staging, stage, &seeds, &tried);
-
-        if stage == 0 && !members.contains(&baseline) {
-            members.insert(0, baseline);
-        }
-
-        tried.extend(&members);
-
-        if members.is_empty() {
-            continue;
-        }
-
-        let precompiled = precompile(&members)?;
-        sampler.exclude(precompiled.spent);
-        let members = precompiled.kept;
-
-        if members.is_empty() {
-            continue;
-        }
-
-        let screened = if !staging.prescreen {
-            members
-        } else if stage == 0 {
-            prescreen(sampler, &members, baseline, limits)?
-        } else {
-            let survivors = prescreen(sampler, &members, baseline, limits);
-
-            match survivors {
-                Ok(survivors) => survivors,
-                Err(error) => {
-                    tracing::warn!(stage, %error, "skipping a stage with no pre-screen survivor");
-                    continue;
-                },
-            }
-        };
-
-        let checked = check(&screened);
-        let stage_limits = DecideLimits {
-            hard_cap: sampler.elapsed() + limits.hard_cap,
-            ..*limits
-        };
-        let stage_timing = sample_until_settled(sampler, &checked, baseline, &stage_limits)?;
-
-        timed.extend(stage_timing.timed);
-        failed.extend(stage_timing.failed);
-        capped |= stage_timing.capped;
-        seeds = fastest(&timed, staging.keep);
-    }
-
-    Ok(SiteTiming {
-        timed,
-        failed,
-        capped,
-    })
-}
-
-/// Stage `stage`'s members around every seed, in seed order, with no repeats and nothing in `tried`.
-fn fresh_members(staging: &Staging<'_>, stage: usize, seeds: &[usize], tried: &[usize]) -> Vec<usize> {
-    let mut members = Vec::new();
-
-    for &seed in seeds {
-        let around = (staging.members)(stage, seed);
-
-        for index in around {
-            let fresh = !tried.contains(&index) && !members.contains(&index);
-            if fresh {
-                members.push(index);
-            }
-        }
-    }
-
-    members
-}
-
-/// The indices of the `keep` timed candidates with the lowest medians.
-fn fastest(timed: &[CandidateStats], keep: usize) -> Vec<usize> {
-    let mut by_median: Vec<&CandidateStats> = timed.iter().collect();
-    by_median.sort_by_key(|stats| stats.samples.median());
-
-    by_median.iter().take(keep).map(|stats| stats.index).collect()
 }

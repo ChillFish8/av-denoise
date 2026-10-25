@@ -64,13 +64,33 @@ impl SiteCandidate for ProbeCandidate {
     }
 
     fn families() -> Families<Self> {
-        Families::Flat(&[FlatFamily {
-            id: FamilyId("all"),
-            representative: ProbeCandidate::Small,
-            members: Self::ALL,
-        }])
+        Families::Flat(PROBE_FAMILIES)
     }
 }
+
+/// One family per probe candidate, so every candidate is timed with the first batch.
+const PROBE_FAMILIES: &[FlatFamily<ProbeCandidate>] = &[
+    FlatFamily {
+        id: FamilyId("small"),
+        representative: ProbeCandidate::Small,
+        members: &[ProbeCandidate::Small],
+    },
+    FlatFamily {
+        id: FamilyId("medium"),
+        representative: ProbeCandidate::Medium,
+        members: &[ProbeCandidate::Medium],
+    },
+    FlatFamily {
+        id: FamilyId("wide"),
+        representative: ProbeCandidate::Wide,
+        members: &[ProbeCandidate::Wide],
+    },
+    FlatFamily {
+        id: FamilyId("huge"),
+        representative: ProbeCandidate::Huge,
+        members: &[ProbeCandidate::Huge],
+    },
+];
 
 /// A site that records which candidate each launch ran instead of touching the GPU.
 #[derive(Clone)]

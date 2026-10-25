@@ -12,12 +12,14 @@ use super::ledger::{LedgerChoice, Observed, TuneLedger};
 use super::legality::Legality;
 use super::plan::{KernelPlan, PipelineProfile};
 use super::precompile::CompileAccount;
+use super::priority::PriorityTable;
 use super::result::SiteRanking;
-use super::session::{timed_count, tune_site};
+use super::search::{SearchMode, first_timed};
+use super::session::tune_site;
 use super::site::{SiteCandidate, VariantSite, legal_candidates};
 
 /// What an engine needs to pick a candidate at each of its launch sites.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct EngineKernels {
     pub plan: KernelPlan,
     pub profile: PipelineProfile,
@@ -25,6 +27,20 @@ pub struct EngineKernels {
     pub ledger: Option<Arc<TuneLedger>>,
     /// What this device may run beyond the fit check.
     pub legality: Legality,
+    /// The order tuning times this device's families in, and those it leaves out.
+    pub priority: &'static PriorityTable,
+}
+
+impl Default for EngineKernels {
+    fn default() -> Self {
+        Self {
+            plan: KernelPlan::default(),
+            profile: PipelineProfile::default(),
+            ledger: None,
+            legality: Legality::default(),
+            priority: PriorityTable::neutral(),
+        }
+    }
 }
 
 /// Picks and launches the planned candidate at each site.
@@ -36,6 +52,7 @@ pub struct KernelSelector<R: Runtime> {
     profile: PipelineProfile,
     ledger: Option<Arc<TuneLedger>>,
     legality: Legality,
+    priority: &'static PriorityTable,
 }
 
 impl<R: Runtime> KernelSelector<R> {
@@ -59,6 +76,7 @@ impl<R: Runtime> KernelSelector<R> {
             profile: kernels.profile,
             ledger: kernels.ledger,
             legality: kernels.legality,
+            priority: kernels.priority,
         }
     }
 
@@ -108,7 +126,8 @@ impl<R: Runtime> KernelSelector<R> {
         };
 
         let allowed = allowed_candidates::<R, S>(&fitted, ledger.deterministic());
-        let timed = timed_count(site, &allowed);
+        let mode = ledger.search_mode();
+        let timed = first_timed(&allowed, self.priority, mode);
         let observed = ledger.observe(&key, timed);
 
         match observed {
@@ -121,7 +140,7 @@ impl<R: Runtime> KernelSelector<R> {
                 self.census_launch(site, &outputs, &key, candidate, timed, ledger);
             },
             Observed::Tune { deadline } => {
-                self.tune_key(site, &key, &allowed, deadline, ledger);
+                self.tune_key(site, &key, &allowed, deadline, ledger, mode);
                 let candidate = self.ledger_planned(site, &key, &allowed, ledger);
                 site.launch(candidate, &outputs);
             },
@@ -167,10 +186,12 @@ impl<R: Runtime> KernelSelector<R> {
         allowed: &[S::Candidate],
         deadline: Instant,
         ledger: &TuneLedger,
+        mode: SearchMode,
     ) {
         let guard = TargetGuard::new(ledger, key);
         let compile = CompileAccount { ledger, key };
-        let attempt = AssertUnwindSafe(|| tune_site(site, allowed, deadline, compile));
+        let priority = self.priority;
+        let attempt = AssertUnwindSafe(|| tune_site(site, allowed, deadline, compile, priority, mode));
         let outcome = catch_unwind(attempt);
 
         match outcome {

@@ -481,6 +481,13 @@ const INTEL: PriorityTable = PriorityTable {
     ],
 };
 
+impl PriorityTable {
+    /// The table that keeps declaration order and skips nothing.
+    pub fn neutral() -> &'static PriorityTable {
+        &NEUTRAL
+    }
+}
+
 /// The table for a device of `class` on `backend`.
 pub fn priority_for(class: DeviceClass, backend: &str) -> &'static PriorityTable {
     match (class, backend) {

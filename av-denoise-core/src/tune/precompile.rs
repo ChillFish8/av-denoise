@@ -12,7 +12,7 @@ use super::key::SiteKey;
 use super::ledger::TuneLedger;
 use super::site::{SiteCandidate, VariantSite};
 
-/// How long one stage may compile, and which of its candidates an earlier run compiled.
+/// How long one batch may compile, and which of its candidates an earlier run compiled.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CompileLimits {
     /// The compile time the pass has left.
@@ -23,7 +23,7 @@ pub(crate) struct CompileLimits {
     pub(crate) compiled_before: Vec<usize>,
 }
 
-/// What compiling one stage's candidates did.
+/// What compiling one batch of candidates did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Precompiled {
     /// Indices whose candidate compiled, in the order given.
@@ -36,7 +36,7 @@ pub struct Precompiled {
     pub spent: Duration,
     /// Whether each candidate no earlier run compiled was compiled with a sync of its own.
     pub one_by_one: bool,
-    /// How many helper clients compiled the stage, zero when the site's own client did.
+    /// How many helper clients compiled the batch, zero when the site's own client did.
     pub helpers: usize,
     /// The part of `spent` the site's own client took to load what the helpers compiled.
     pub load: Duration,
@@ -111,7 +111,7 @@ impl CompileAccount<'_> {
         self.ledger.fail_compile_helpers();
     }
 
-    /// Adds one stage's compile time to the key.
+    /// Adds one batch's compile time to the key.
     pub(crate) fn record(&self, precompiled: &Precompiled) {
         let compiled = precompiled.kept.len() + precompiled.dropped.len();
         let cold = compiled.saturating_sub(precompiled.reused);
@@ -201,12 +201,12 @@ fn serial<R: Runtime, S: VariantSite<R>>(
     precompiled.dropped.extend(rest.dropped);
     precompiled.skipped.extend(rest.skipped);
     precompiled.one_by_one = rest.one_by_one;
-    in_stage_order(&mut precompiled, indices);
+    in_given_order(&mut precompiled, indices);
     precompiled
 }
 
 /// Sorts what `precompiled` kept, dropped and skipped into the order of `indices`.
-fn in_stage_order(precompiled: &mut Precompiled, indices: &[usize]) {
+fn in_given_order(precompiled: &mut Precompiled, indices: &[usize]) {
     let position = |index: &usize| indices.iter().position(|member| member == index);
 
     precompiled.kept.sort_by_key(position);
@@ -284,7 +284,7 @@ impl<'a> HelperQueue<'a> {
     }
 }
 
-/// What the helpers did with a stage, by index.
+/// What the helpers did with a batch, by index.
 #[derive(Default)]
 struct HelperResults {
     compiled: Vec<usize>,

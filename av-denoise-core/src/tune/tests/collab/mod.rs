@@ -9,9 +9,16 @@ use crate::collab::geometry::refs_along;
 use crate::collab::{PATCH_SIZE, STEP, needs_warp_uniform_search};
 use crate::nlmeans::ChannelMode;
 use crate::tune::gpu::{read_f32, sync};
-use crate::tune::session::timed_count;
 use crate::tune::sites::{Centre, CollabVariant, NeighbourWalk, Walk, tile_height, tile_width};
-use crate::tune::{DeviceLimits, SiteCandidate, VariantSite, fit_candidates};
+use crate::tune::{
+    DeviceLimits,
+    PriorityTable,
+    SearchMode,
+    SiteCandidate,
+    VariantSite,
+    first_timed,
+    fit_candidates,
+};
 
 pub(super) fn luma_spec() -> CollabSpec {
     CollabSpec::new(64, 48, ChannelMode::Luma, 2)
@@ -91,39 +98,37 @@ fn a_uniform_only_runtime_is_offered_half_the_variants() {
     assert_eq!(uniform_only_count, 30);
 }
 
-/// Asserts the staged site over `spec` times every fitted variant at 8 groups, then 2 more group
-/// counts for each of the 3 fastest. That is 20 and then 6, 26 in all, or 10 and then 6 where only
-/// the uniform walk runs.
-fn assert_staged_counts(spec: CollabSpec) {
+/// Asserts the site over `spec` first times the baseline and each other dimension value on top of
+/// it, 8 in all, or 7 where only the uniform walk runs and so the clipped walk is not allowed.
+fn assert_first_timed(spec: CollabSpec) {
     let client = test_client();
     let site = collab_site(&client, &spec);
     let limits = DeviceLimits::from_client(&client);
     let uniform_only = needs_warp_uniform_search(&client);
 
     let fitted = fit_candidates(&site, &limits).expect("the baseline fits");
-    let at_eight_groups = fitted.iter().filter(|variant| variant.groups == 8).count();
-    let timed = timed_count(&site, &fitted);
-    let expected_first = if uniform_only { 10 } else { 20 };
+    let neutral = PriorityTable::neutral();
+    let timed = first_timed(&fitted, neutral, SearchMode::Families);
+    let expected = if uniform_only { 7 } else { 8 };
 
-    assert_eq!(at_eight_groups, expected_first);
-    assert_eq!(timed, at_eight_groups + 3 * 2);
+    assert_eq!(timed, expected);
 
     // The HIP runtime crashes at process exit while an upload is still queued.
     sync(&client).expect("the uploads finish");
 }
 
 #[test]
-fn the_staged_collab_site_times_the_first_stage_and_three_regroupings() {
-    assert_staged_counts(luma_spec());
+fn the_collab_site_first_times_one_representative_per_family() {
+    assert_first_timed(luma_spec());
 }
 
 #[test]
-fn the_staged_chroma_and_yuv_sites_time_as_many_variants_as_luma() {
+fn the_chroma_and_yuv_sites_first_time_as_many_representatives_as_luma() {
     let chroma = CollabSpec::new(64, 48, ChannelMode::Chroma, 2);
     let yuv = CollabSpec::new(64, 48, ChannelMode::Yuv, 1);
 
-    assert_staged_counts(chroma);
-    assert_staged_counts(yuv);
+    assert_first_timed(chroma);
+    assert_first_timed(yuv);
 }
 
 #[test]
@@ -389,39 +394,6 @@ fn radius_16_drops_the_widest_tile_on_a_64kb_device() {
     assert_eq!(tiled16_bytes, 68_160);
     assert!(fitted.contains(&tiled8));
     assert!(!fitted.contains(&tiled16));
-}
-
-/// Stage 0 holds only 8-group variants, and stage 1 around a seed changes only its group count.
-#[test]
-fn collab_stages_vary_the_search_first_and_the_group_count_second() {
-    let client = test_client();
-    let spec = luma_spec();
-    let site = collab_site(&client, &spec);
-    let seed = CollabVariant::from_name("groups8_uniform").expect("a listed variant");
-
-    let first_stage: Vec<&str> = CollabVariant::ALL
-        .iter()
-        .copied()
-        .filter(|&variant| site.in_stage(0, CollabVariant::BASELINE, variant))
-        .map(|variant| variant.name())
-        .collect();
-    let mut regrouped: Vec<&str> = CollabVariant::ALL
-        .iter()
-        .copied()
-        .filter(|&variant| site.in_stage(1, seed, variant))
-        .map(|variant| variant.name())
-        .collect();
-    regrouped.sort_unstable();
-
-    assert!(
-        first_stage.iter().all(|name| name.starts_with("groups8_")),
-        "{first_stage:?}"
-    );
-    assert_eq!(first_stage.len(), CollabVariant::ALL.len() / 3);
-    assert_eq!(
-        regrouped,
-        vec!["groups16_uniform", "groups4_uniform", "groups8_uniform"]
-    );
 }
 
 /// Launches the chroma collab baseline once, so a compilation log holds its generated source.

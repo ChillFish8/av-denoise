@@ -13,6 +13,7 @@
 //! - [Legality] says what a device may run beyond the fit check
 //! - [Families] groups a site's candidates, each group with a representative member
 //! - [PriorityTable] orders each site's families and the pipeline profiles for one device class
+//! - [SearchMode] says how widely tuning searches a key, and [SiteSearch] records how it did
 
 mod budget;
 mod consts;
@@ -29,6 +30,7 @@ mod plan;
 pub(crate) mod precompile;
 mod priority;
 mod result;
+mod search;
 mod selector;
 mod session;
 mod site;
@@ -60,11 +62,8 @@ pub use self::decide::{
     Sampler,
     Samples,
     SiteTiming,
-    Staging,
     median,
     prescreen,
-    sample_in_stages,
-    sample_in_stages_with,
     sample_until_settled,
 };
 pub use self::device::{DeviceIdentity, DeviceLimits, DeviceProfile};
@@ -117,6 +116,18 @@ pub use self::result::{
     beats_baseline_profile,
     choose,
     choose_profile,
+};
+pub use self::search::{
+    SearchMode,
+    SearchOutcome,
+    SearchSpace,
+    SearchStep,
+    SearchedCandidate,
+    SiteSearch,
+    builds_up,
+    first_timed,
+    opens_family,
+    search_candidates,
 };
 pub use self::selector::{EngineKernels, KernelSelector};
 pub(crate) use self::session::{calibrate, rewarm};

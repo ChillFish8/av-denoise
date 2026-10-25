@@ -356,11 +356,18 @@ impl SiteCandidate for SharedProbe {
     }
 
     fn families() -> Families<Self> {
-        Families::Flat(&[FlatFamily {
-            id: FamilyId("all"),
-            representative: SharedProbe::Fits,
-            members: Self::ALL,
-        }])
+        Families::Flat(&[
+            FlatFamily {
+                id: FamilyId("fits"),
+                representative: SharedProbe::Fits,
+                members: &[SharedProbe::Fits],
+            },
+            FlatFamily {
+                id: FamilyId("oversized"),
+                representative: SharedProbe::Oversized,
+                members: &[SharedProbe::Oversized],
+            },
+        ])
     }
 }
 

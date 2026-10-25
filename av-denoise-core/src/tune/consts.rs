@@ -20,7 +20,7 @@ pub const BASELINE_INDEX: usize = 0;
 /// It is close to what a cold chroma collab variant takes, the slowest candidate to compile.
 pub const FIRST_COMPILE_ESTIMATE: Duration = Duration::from_secs(10);
 
-/// The most helper clients that compile a stage's candidates at once.
+/// The most helper clients that compile a batch of candidates at once.
 pub const PRECOMPILE_THREADS: usize = 8;
 
 /// How long the baseline runs just before a site is tuned, so clocks stay up.
@@ -56,8 +56,11 @@ pub const PRESCREEN_SAMPLES: usize = 3;
 /// How much slower than the fastest a candidate may be and survive the pre-screen.
 pub const PRESCREEN_MARGIN: f64 = 0.25;
 
-/// How many of the fastest candidates a staged site keeps between stages.
-pub const STAGE_KEEP: usize = 3;
+/// How much slower than the best representative a family's representative may be for its family to open.
+pub const FAMILY_MARGIN: f64 = 0.05;
+
+/// How much faster a build-up round's best has to be than the best so far for the search to move to it.
+pub const BUILD_UP_GAIN: f64 = 0.01;
 
 /// Frames in one interleaved block of the profile comparison.
 pub const PROFILE_BLOCK_FRAMES: usize = 8;
