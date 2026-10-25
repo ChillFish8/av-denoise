@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 
 use super::engine::{nlmeans_outputs, noisy_frames, temporal_fast};
 use super::equivalence::assert_candidates_match_baseline;
-use super::fixtures::{WindowSpec, upload, window_site};
+use super::fixtures::{H2_INV_NORM, NOISE_OFFSET, WindowSpec, upload, window_site};
 use super::probe::small_device_limits;
 use super::runtime::{TestRuntime, test_client};
 use crate::nlmeans::{
@@ -14,6 +14,8 @@ use crate::nlmeans::{
     NlmeansOptions,
     PrefilterMode,
 };
+use crate::noise::DERIVED_H2_INV_NORM;
+use crate::noise::tests::nlm_noise_buffer;
 use crate::tune::gpu::read_f32;
 use crate::tune::sites::{
     AccumOutputs,
@@ -503,4 +505,84 @@ fn a_nan_weight_sum_fails_the_separable_bound() {
     let verdict = bound.judge(&diffs);
 
     assert!(!verdict.passed(), "{verdict:?}");
+}
+
+fn baseline_max_weights(client: &ComputeClient<TestRuntime>, spec: &WindowSpec) -> Vec<f32> {
+    let site = window_site(client, spec);
+    let outputs = site.scratch_outputs();
+    site.launch(WindowCandidate::Block32x8, &outputs);
+
+    read_f32(client, &outputs.max_weight, outputs.pixels).expect("maxima read back")
+}
+
+/// A wrong strength word gives infinite weights, and a wrong offset word zero weights.
+#[test]
+fn window_kernels_read_their_strength_and_offset_from_the_derived_words() {
+    let client = test_client();
+
+    for pair in [false, true] {
+        for reference in [false, true] {
+            let mut spec = WindowSpec::single(70, 45, ChannelMode::Luma);
+            spec.pair = pair;
+            spec.reference = reference;
+            let max_weights = baseline_max_weights(&client, &spec);
+
+            let all_in_range = max_weights
+                .iter()
+                .all(|weight| weight.is_finite() && (0.0..=1.0).contains(weight));
+            let has_signal = max_weights.iter().any(|&weight| weight > 0.0);
+            assert!(all_in_range, "{spec:?}: a weight left 0..=1");
+            assert!(has_signal, "{spec:?}: every weight is zero");
+        }
+    }
+}
+
+#[test]
+fn the_pilot_strength_word_gives_the_main_pass_weights() {
+    let client = test_client();
+
+    for reference in [false, true] {
+        let mut main = WindowSpec::single(70, 45, ChannelMode::Yuv);
+        main.reference = reference;
+        let mut pilot = main;
+        pilot.pilot = true;
+
+        let main_site = window_site(&client, &main);
+        let pilot_site = window_site(&client, &pilot);
+        let main_outputs = main_site.scratch_outputs();
+        let pilot_outputs = pilot_site.scratch_outputs();
+        main_site.launch(WindowCandidate::Block32x8, &main_outputs);
+        pilot_site.launch(WindowCandidate::Block32x8, &pilot_outputs);
+
+        let verdict = compare_accum(&client, &main_outputs, &pilot_outputs, Fidelity::Exact)
+            .expect("the outputs read back");
+        assert!(verdict.passed(), "{main:?}: {verdict:?}");
+    }
+}
+
+/// A larger offset raises every weight, while a kernel reading the offset word as its strength
+/// would see the weights fall.
+#[test]
+fn a_larger_pair_offset_raises_the_weights() {
+    let client = test_client();
+    let spec = WindowSpec::pair(70, 45, ChannelMode::Luma);
+    let mut weight_totals = Vec::new();
+
+    for noise_offset in [0.0f32, NOISE_OFFSET] {
+        let mut site = window_site(&client, &spec);
+        site.noise = nlm_noise_buffer(&client, DERIVED_H2_INV_NORM, H2_INV_NORM, noise_offset);
+        let outputs = site.scratch_outputs();
+        site.launch(WindowCandidate::Block32x8, &outputs);
+
+        let weights = read_f32(&client, &outputs.weight_sum, outputs.pixels).expect("weights read back");
+        let total: f32 = weights.iter().sum();
+        weight_totals.push(total);
+    }
+
+    let unshifted = weight_totals[0];
+    let shifted = weight_totals[1];
+    assert!(
+        shifted > unshifted,
+        "offset {NOISE_OFFSET}: {shifted} against {unshifted}"
+    );
 }

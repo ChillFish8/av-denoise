@@ -9,15 +9,13 @@ use crate::nlmeans::prefilter::{PrefilterCtx, PrefilterMode, run_prefilter};
 impl<R: Runtime> NlmDenoiser<R> {
     /// Runs every per-frame stage on a freshly pushed `slot`, through to the ring advance.
     ///
-    /// The GPU stages run in device spans when the frame is sampled. The noise readback starts and
-    /// the first frame's noise seed waits between two spans, since a readback ends a span early.
+    /// The GPU stages run in device spans when the frame is sampled. The first frame's noise seed
+    /// is queued between two spans.
     pub(super) fn run_post_upload_stages(&mut self, slot: usize) -> Result<(), anyhow::Error> {
         let client = self.client.clone();
         let frame_slot = slot as u32;
 
         timed(&client, self, move |front| front.queue_noise_stats(frame_slot))?;
-
-        self.start_noise_reading(frame_slot, self.ring_head);
         self.seed_noise_estimate_if_first_frame(frame_slot)?;
 
         timed(&client, self, move |front| front.run_reference_stages(slot))?;
@@ -28,8 +26,8 @@ impl<R: Runtime> NlmDenoiser<R> {
 
     /// Queues the prefilter, the motion pyramids and the pair analyse for `slot`.
     fn run_reference_stages(&mut self, slot: usize) -> Result<(), anyhow::Error> {
-        if let PrefilterMode::NlmSpatial { strength_scale } = self.params.prefilter {
-            self.run_nlm_spatial_pilot(slot as u32, strength_scale)
+        if let PrefilterMode::NlmSpatial { .. } = self.params.prefilter {
+            self.run_nlm_spatial_pilot(slot as u32)
                 .context("nlm spatial pilot dispatch failed")?;
         } else if self.params.prefilter.is_gpu_internal() {
             self.run_prefilter_for_slot(slot)?;
@@ -173,6 +171,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let total_frames = self.params.total_frames();
         let older_slot = (newer_slot + total_frames - 1) % total_frames;
         let pair_slot = self.pair_slot(0);
+        let noise = self.derived_handle();
 
         motion::run_pair_analyse::<R>(
             &self.client,
@@ -187,6 +186,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             &self.ring_slot_tables,
             pair_ring,
             &self.confidence_dummy,
+            &noise,
         )
         .context("pair analyse dispatch failed")
     }

@@ -2,6 +2,8 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use crate::nlmeans::kernels::motion::{nlm_mc_block_match_coarse, nlm_mc_block_match_fine};
+use crate::noise::tests::sad_floor_buffer;
+use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
 use crate::tune::gpu::{read_i32, zero_words};
 use crate::tune::tests::fixtures::{hashed_unit, upload};
 use crate::tune::tests::runtime::{TestRuntime, test_client};
@@ -256,6 +258,9 @@ fn run_fine(content: Content, search_radius: u32, threads: u32) -> Vec<Vec<i32>>
     let confidence_arg = unsafe { ArrayArg::from_raw_parts(confidence, 1) };
 
     unsafe {
+        let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, 0.0);
+        let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
+
         nlm_mc_block_match_fine::launch_unchecked::<TestRuntime>(
             &client,
             cube_count,
@@ -266,7 +271,8 @@ fn run_fine(content: Content, search_radius: u32, threads: u32) -> Vec<Vec<i32>>
             confidence_arg,
             CENTRE_SLOT,
             false,
-            0.0,
+            noise_arg,
+            DERIVED_SAD_FLOOR,
             1.0,
             WIDTH,
             HEIGHT,

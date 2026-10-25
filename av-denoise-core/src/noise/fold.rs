@@ -1,8 +1,9 @@
 use anyhow::ensure;
 use cubecl::prelude::*;
+use cubecl::server::Handle;
 
-use super::correlation::CORRELATION_FACTOR_TABLE;
-use super::derived::{DERIVED_WORDS, DerivedCoefficients, NoiseConsumer};
+use super::correlation::{CORRELATION_FACTOR_TABLE, build_spatial_offset_lut, spatial_offset_lut_len};
+use super::derived::{DERIVED_WORDS, DerivedCoefficients, DerivedValues, NoiseConsumer};
 use super::kernels::{noise_fold, noise_reset};
 use super::reading::READING_WORDS;
 use super::spatial::{RESULTS_PER_SLOT, immerkaer_sigma_scale};
@@ -61,7 +62,7 @@ pub(crate) const STATE_WORDS: u32 = STATE_RATIOS + NOISE_CURVE_BINS as u32;
 
 /// How a stream folds its readings.
 ///
-/// The default folds with `sigma_scale` 1.0, no borrowing, and zero coefficients.
+/// The default folds with `sigma_scale` 1.0, no borrowing, zero coefficients and no offset tables.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct FoldSettings {
     pub sigma_scale: f32,
@@ -69,6 +70,8 @@ pub(crate) struct FoldSettings {
     pub borrow_ahead: bool,
     pub consumer: NoiseConsumer,
     pub coefficients: DerivedCoefficients,
+    /// The search radius of the NLM offset tables the fold writes, `None` for no tables.
+    pub offset_tables: Option<u32>,
 }
 
 impl Default for FoldSettings {
@@ -78,6 +81,36 @@ impl Default for FoldSettings {
             borrow_ahead: false,
             consumer: NoiseConsumer::default(),
             coefficients: DerivedCoefficients::default(),
+            offset_tables: None,
+        }
+    }
+}
+
+/// The NLM noise-floor tables of one search window, one entry per candidate.
+pub(super) struct OffsetTables {
+    pub(super) radius: u32,
+    /// The main pass's noise offset scaled by the spatial offset factor at the smoothed rho.
+    pub(super) spatial: Handle,
+    /// The input noise offset with a zero centre, which the NLM pilot reads.
+    pub(super) pilot: Handle,
+}
+
+impl OffsetTables {
+    /// The tables of a `radius` window built on the host from `derived` at a rho of 0.
+    pub(super) fn from_host<R: Runtime>(
+        client: &ComputeClient<R>,
+        radius: u32,
+        derived: DerivedValues,
+    ) -> Self {
+        let spatial_entries = build_spatial_offset_lut(radius, 0.0, derived.noise_offset);
+        let spatial_bytes = f32::as_bytes(&spatial_entries);
+        let pilot_entries = build_spatial_offset_lut(radius, 0.0, derived.input_noise_offset);
+        let pilot_bytes = f32::as_bytes(&pilot_entries);
+
+        Self {
+            radius,
+            spatial: client.create_from_slice(spatial_bytes),
+            pilot: client.create_from_slice(pilot_bytes),
         }
     }
 }
@@ -86,10 +119,6 @@ impl Default for FoldSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Fold {
     /// A stream's first frame, folded from its Immerkær reading alone, the curve untouched.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no production code seeds a GPU stream")
-    )]
     Seed { slot: u32 },
     /// The reading at logical position `centre` of a ring whose oldest frame sits in `ring_start`.
     Centre { ring_start: u32, centre: u32 },
@@ -146,11 +175,15 @@ fn flag(on: bool) -> f32 {
 
 impl<R: Runtime> NoiseState<R> {
     /// Queues one fold of the readings `fold` names into the stream state, the derived values,
-    /// the current curve and the current map, in one launch.
+    /// the current curve, the current map and the offset tables, in one launch.
     ///
     /// With a map the launch spans one cube per 256 map quarters, so the copy runs across the
-    /// grid.
+    /// grid. A state that holds fixed values queues nothing.
     pub(crate) fn queue_fold(&self, fold: Fold) -> Result<(), anyhow::Error> {
+        let Some(measurement) = self.measurement.as_ref() else {
+            return Ok(());
+        };
+
         let shape = self.shape;
         let frames = shape.frames;
         let (ring_start, centre, seed) = match fold {
@@ -170,26 +203,30 @@ impl<R: Runtime> NoiseState<R> {
         let map_args = self.map_args(map_len);
         let map_cubes = map_len.div_ceil(NOISE_BLOCK_1D);
         let grid = map_cubes.clamp(1, MAX_GRID_1D);
+        let table_args = self.table_args();
 
         unsafe {
             noise_fold::launch_unchecked::<R>(
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(NOISE_BLOCK_1D),
-                bind(&self.readings, readings_len),
-                bind(&self.results, results_len),
-                bind(&self.fold_settings, FOLD_WORDS as usize),
-                bind(&self.fold_state, STATE_WORDS as usize),
+                bind(&measurement.readings, readings_len),
+                bind(&measurement.results, results_len),
+                bind(&measurement.fold_settings, FOLD_WORDS as usize),
+                bind(&measurement.fold_state, STATE_WORDS as usize),
                 bind(&self.derived, DERIVED_WORDS as usize),
                 bind(&self.curve_ratios, NOISE_CURVE_BINS),
                 map_args.slot_maps,
                 map_args.current_map,
+                table_args.spatial,
+                table_args.pilot,
                 ring_start,
                 centre,
                 u32::from(seed),
                 frames,
                 shape.channels,
                 map_len,
+                table_args.radius,
             );
         }
 
@@ -197,20 +234,26 @@ impl<R: Runtime> NoiseState<R> {
     }
 
     /// Queues the clear of every validity flag of the stream state, in one launch.
+    ///
+    /// A state that holds fixed values queues nothing.
     pub(crate) fn queue_reset(&self) {
+        let Some(measurement) = self.measurement.as_ref() else {
+            return;
+        };
+
         unsafe {
             noise_reset::launch_unchecked::<R>(
                 &self.client,
                 CubeCount::new_1d(1),
                 CubeDim::new_1d(1),
-                bind(&self.fold_state, STATE_WORDS as usize),
+                bind(&measurement.fold_state, STATE_WORDS as usize),
             );
         }
     }
 
     /// The map quarters the fold copies, 0 without a strength map.
     fn current_map_len(&self) -> u32 {
-        match self.classes.as_ref() {
+        match self.measurement().classes.as_ref() {
             Some(_) => quarter_count(self.shape),
             None => 0,
         }
@@ -234,10 +277,38 @@ impl<R: Runtime> NoiseState<R> {
             current_map: bind(&self.current_map, map_len as usize),
         }
     }
+
+    /// The offset tables and their search radius.
+    ///
+    /// Without tables the kernel never touches them, so the derived buffer stands in.
+    fn table_args(&self) -> TableArgs<R> {
+        let Some(tables) = self.offset_tables.as_ref() else {
+            return TableArgs {
+                spatial: bind(&self.derived, DERIVED_WORDS as usize),
+                pilot: bind(&self.derived, DERIVED_WORDS as usize),
+                radius: 0,
+            };
+        };
+
+        let table_len = spatial_offset_lut_len(tables.radius);
+
+        TableArgs {
+            spatial: bind(&tables.spatial, table_len),
+            pilot: bind(&tables.pilot, table_len),
+            radius: tables.radius,
+        }
+    }
 }
 
 /// The fold's map bindings.
 struct MapArgs<R: Runtime> {
     slot_maps: ArrayArg<R>,
     current_map: ArrayArg<R>,
+}
+
+/// The fold's offset table bindings and their search radius, 0 without tables.
+struct TableArgs<R: Runtime> {
+    spatial: ArrayArg<R>,
+    pilot: ArrayArg<R>,
+    radius: u32,
 }

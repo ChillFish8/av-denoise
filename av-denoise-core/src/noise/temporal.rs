@@ -2,9 +2,12 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::NOISE_BLOCK_1D;
+#[cfg(test)]
 use super::curve::{NoiseCurve, build_noise_curve};
 use super::kernels::{nlm_temporal_noise_stats, nlm_temporal_stats_zero};
+#[cfg(test)]
 use super::stats::{lower_quartile, median, sort_ascending};
+#[cfg(test)]
 use super::strength_map::{QuarterClasses, QuarterSettings, classify_quarters};
 use crate::engine::MAX_GRID_1D;
 use crate::engine::align::StorageAlign;
@@ -239,34 +242,8 @@ pub(crate) fn temporal_stats_slot_view(
     stats_buf.clone().offset_start(start).offset_end(end_trim)
 }
 
-/// Reads one ring slot's temporal-stats region back.
-///
-/// The ring handle is sliced to the slot, so the transfer skips the rest of the ring.
-#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the readback needs the ring handle plus every shape value that locates one slot in it"
-)]
-pub(crate) fn read_temporal_stats_slot<R: Runtime>(
-    client: &ComputeClient<R>,
-    stats_buf: &Handle,
-    width: u32,
-    height: u32,
-    stored_ch: u32,
-    frame_count: u32,
-    slot: u32,
-    align: StorageAlign,
-) -> Result<Vec<f32>, anyhow::Error> {
-    let sliced = temporal_stats_slot_view(stats_buf, width, height, stored_ch, frame_count, slot, align);
-    let bytes = client
-        .read_one(sliced)
-        .map_err(|error| anyhow::anyhow!("temporal noise stats readback failed: {error}"))?;
-    let records = f32::from_bytes(&bytes).to_vec();
-
-    Ok(records)
-}
-
 /// One centre slot's aggregated temporal-residual noise measurement.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct TemporalNoiseSample {
     /// The per-channel median sigma over the static blocks with measurable noise, in normalised
@@ -287,6 +264,7 @@ pub(crate) struct TemporalNoiseSample {
 }
 
 /// A block that passed [STATIC_GATE], held until the outlier ceiling is known.
+#[cfg(test)]
 struct StaticGateCandidate {
     index: usize,
     width: u32,
@@ -300,6 +278,7 @@ struct StaticGateCandidate {
 }
 
 /// One block [accepted_static_blocks] counted as static noise.
+#[cfg(test)]
 pub(crate) struct AcceptedBlock {
     /// The block's position in `records`, in units of one record.
     pub(crate) index: usize,
@@ -332,6 +311,7 @@ pub(crate) struct AcceptedBlock {
 /// of itself. Real per-block sigma always varies a little over a finite sample, so a remainder with
 /// no spread beside excluded blocks is reported as `None` rather than as a sigma texture may have
 /// inflated.
+#[cfg(test)]
 pub(crate) fn accepted_static_blocks(
     records: &[f32],
     channels: u32,
@@ -478,6 +458,7 @@ pub(crate) fn aggregate_temporal_noise_stats(
 }
 
 /// One centre slot's temporal-noise reading.
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct TemporalNoiseReading {
     pub(crate) sample: Option<TemporalNoiseSample>,
@@ -487,6 +468,7 @@ pub(crate) struct TemporalNoiseReading {
     pub(crate) classes: Option<QuarterClasses>,
 }
 
+#[cfg(test)]
 impl TemporalNoiseReading {
     /// A reading with no sample, curve or classes.
     pub(crate) fn empty() -> Self {
@@ -508,6 +490,7 @@ impl TemporalNoiseReading {
 /// The curve needs `with_curve` and a sample, since a frame too unreliable for a scalar sample is
 /// too unreliable for a curve. `settings` control what [classify_quarters] does after classing the
 /// quarters.
+#[cfg(test)]
 pub(crate) fn temporal_noise_reading(
     records: &[f32],
     channels: u32,

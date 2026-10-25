@@ -1,16 +1,20 @@
 use cubecl::prelude::*;
 
 use super::noise::measured_noise_shape;
+pub(crate) use crate::engine::BufferSize;
 use crate::engine::align::StorageAlign;
 use crate::nlmeans::motion::{self, MotionCtx, MotionEstimation};
 use crate::nlmeans::params::NlmParams;
-use crate::noise::{IMMERKAER_BLOCK_X, IMMERKAER_BLOCK_Y, temporal_stats_blocks, temporal_stats_record_len};
+use crate::noise::{
+    IMMERKAER_BLOCK_X,
+    IMMERKAER_BLOCK_Y,
+    reading_buffer_sizes,
+    temporal_stats_blocks,
+    temporal_stats_record_len,
+};
 
 /// Bytes in one element of every buffer sized here, which all hold `f32`, `i32` or `u32`.
 const ELEMENT_BYTES: u64 = 4;
-
-/// A buffer's name and its element count, `None` when the count overflows `u64`.
-pub(crate) type BufferSize = (&'static str, Option<u64>);
 
 /// The geometry-sized buffers of an [NlmDenoiser](super::NlmDenoiser) beyond its frame rings.
 pub(crate) struct FrontSizes {
@@ -52,6 +56,9 @@ fn pyramid_ring(width: u32, height: u32, levels: u32, align: StorageAlign, slots
 /// The element count of every buffer [NlmDenoiser::new](super::NlmDenoiser::new) sizes from the frame,
 /// other than the frame rings.
 ///
+/// It also counts the noise buffers only the reading setters allocate, which are far smaller than
+/// the frame ring.
+///
 /// Each count repeats its allocation's formula in checked `u64`. The geometry must have passed
 /// [Geometry::check_ring_fits](crate::engine::Geometry::check_ring_fits) for the frame ring, which
 /// keeps the pixel count within `u32` so the shared size helpers called here cannot overflow.
@@ -85,6 +92,11 @@ pub(crate) fn front_buffer_sizes<R: Runtime>(
         let slot_bytes = padded_slot_bytes(slot_len, align);
         let ring = slot_ring(slot_bytes, total_frames);
         buffers.push(("temporal stats ring", ring));
+    }
+
+    if let Some(shape) = noise_shape {
+        let reading_buffers = reading_buffer_sizes(shape);
+        buffers.extend(reading_buffers);
     }
 
     let motion_active = params.motion_compensation.is_active() && params.temporal_radius > 0;

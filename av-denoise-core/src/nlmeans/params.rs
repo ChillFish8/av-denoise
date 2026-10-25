@@ -449,6 +449,7 @@ pub(super) fn channel_scale(channels: ChannelMode) -> f32 {
 ///
 /// The scale is the same for every channel in a mode, so this is a plain RMS. Entries past the
 /// mode's channel count are ignored.
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(super) fn sigma_eff(sigmas: &[f32], channels: ChannelMode) -> f32 {
     let count = channels.count() as usize;
     let sum_sq: f32 = sigmas.iter().take(count).map(|&sigma| sigma * sigma).sum();

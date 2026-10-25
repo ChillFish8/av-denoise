@@ -1,6 +1,7 @@
 use cubecl::prelude::*;
 
 use crate::nl4d::kernels::REGULARISE_CANDIDATES;
+use crate::noise::DERIVED_SAD_FLOOR;
 
 /// The most neighbours a block has in its 3x3 neighbourhood.
 const NEIGHBOURHOOD: u32 = 8;
@@ -59,7 +60,7 @@ pub fn nl4d_mv_regularise_reference(
     mv_out: &mut Array<i32>,
     confidence_out: &mut Array<f32>,
     lambda_pixel: f32,
-    sad_noise_floor: f32,
+    noise: &Array<f32>,
     thsad: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -229,6 +230,7 @@ pub fn nl4d_mv_regularise_reference(
         mv_out[(block * 2u32) as usize] = candidates[(best * 2u32) as usize];
         mv_out[(block * 2u32 + 1u32) as usize] = candidates[(best * 2u32 + 1u32) as usize];
 
+        let sad_noise_floor = noise[DERIVED_SAD_FLOOR as usize];
         let mut excess = sad_scratch[best as usize] - sad_noise_floor;
         if excess < 0.0f32 {
             excess = 0.0f32;

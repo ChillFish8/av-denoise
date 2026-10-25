@@ -28,7 +28,7 @@ use crate::tune::tests::runtime::{TestRuntime, test_client};
 /// The lowest share of blocks, bins or quarters whose decisions must match on any frame.
 const MIN_AGREEMENT: f64 = 0.999;
 /// The largest relative gap any value may show on a frame whose decisions all match.
-pub(super) const MAX_RELATIVE: f32 = 1.0e-5;
+pub(crate) const MAX_RELATIVE: f32 = 1.0e-5;
 pub(super) const RADIUS: u32 = 2;
 const SYNTHETIC_FRAMES: u32 = 12;
 pub(super) const BRICK: &str = concat!(

@@ -7,6 +7,8 @@ use crate::nlmeans::kernels::motion::{
     nlm_mc_block_match_fine,
 };
 use crate::nlmeans::tests::helpers::*;
+use crate::noise::tests::sad_floor_buffer;
+use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
 
 const FINE_STEP: u32 = 8;
 const NOISE_FLOOR: f32 = 0.1;
@@ -131,6 +133,9 @@ fn run_fine(
                 let pyramid_arg = ArrayArg::from_raw_parts(pyramid, 2 * level_len);
                 let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, 1);
 
+                let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, NOISE_FLOOR);
+                let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
+
                 nlm_mc_block_match_fine::launch_unchecked::<R>(
                     &client,
                     grid,
@@ -141,7 +146,8 @@ fn run_fine(
                     conf_arg,
                     0u32,
                     true,
-                    NOISE_FLOOR,
+                    noise_arg,
+                    DERIVED_SAD_FLOOR,
                     THSAD,
                     width,
                     height,

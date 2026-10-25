@@ -6,6 +6,8 @@ pub(crate) mod helpers;
 mod memory;
 pub mod motion;
 mod separable;
+#[cfg(test)]
+mod tests;
 
 pub use self::accumulate::{nlm_accumulate, nlm_finish};
 pub use self::bilateral::nlm_bilateral;

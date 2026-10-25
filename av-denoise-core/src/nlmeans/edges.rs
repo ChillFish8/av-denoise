@@ -1,9 +1,6 @@
-use std::sync::Arc;
-
 use cubecl::prelude::*;
 
 use super::NlmDenoiser;
-use super::denoiser::readings::SlotNoiseReading;
 
 impl<R: Runtime> NlmDenoiser<R> {
     /// Whether every ring slot holds a frame, so a pass can run at any centre.
@@ -16,9 +13,10 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.phys_frame(logical as i32)
     }
 
-    /// Turns the shifted-edge stream layout on or off.
+    /// Turns the shifted-edge stream layout on or off, and with it borrowing a sample ahead.
     pub(crate) fn set_shifted_edges(&mut self, on: bool) {
         self.shifted_edges = on;
+        self.set_borrow_ahead(on);
     }
 
     /// Copies the last pushed frame forward until every ring slot holds a frame.
@@ -31,34 +29,6 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
 
         Ok(())
-    }
-
-    /// The reading whose temporal side a pass centred on `center_t` folds.
-    ///
-    /// It is the centre's own reading, unless shifted edges are on and the centre has no usable
-    /// sample. Then it is the first reading with a usable sample at a later ring position, or the
-    /// centre's own when there is none.
-    pub(super) fn borrow_reading_ahead(
-        &mut self,
-        center_t: u32,
-        centre: &Arc<SlotNoiseReading>,
-    ) -> Result<Arc<SlotNoiseReading>, anyhow::Error> {
-        let has_sample = centre.temporal.sample.is_some();
-        if has_sample || !self.shifted_edges {
-            let reading = Arc::clone(centre);
-            return Ok(reading);
-        }
-
-        let total_frames = self.params.total_frames();
-        for logical in center_t + 1..total_frames {
-            let candidate = self.noise_reading_at(logical)?;
-            if candidate.temporal.sample.is_some() {
-                return Ok(candidate);
-            }
-        }
-
-        let reading = Arc::clone(centre);
-        Ok(reading)
     }
 
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]

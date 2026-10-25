@@ -4,6 +4,7 @@ use cubecl::terminate;
 use super::fill::{expanded_interior, fill_center_tile, halo_slot_index};
 use super::helpers::{channel_scale, line_sum_sq, read_clamped_line, welsch_weight};
 use crate::engine::kernels::read_line;
+use crate::noise::DERIVED_NOISE_OFFSET;
 
 /// Writes the Welsch weight of the patch distance between each pixel and its neighbour at `q`.
 ///
@@ -338,6 +339,9 @@ fn patch_sum(
 /// once at the end. The centre frame is cached once in a
 /// `(block + 2 * patch_radius + 2 * search_radius)^2` shared tile that both directions share.
 ///
+/// The strength is word `h2_field` of the derived buffer `noise`, and the noise offset its
+/// `DERIVED_NOISE_OFFSET` word.
+///
 /// When `use_confidence` is set, each weight is scaled by its block's confidence from `conf_fwd`
 /// and `conf_bwd`. `step`, `blocks_x` and `blocks_y` describe the motion block grid, which pixels
 /// map onto the same way as in `nlm_mc_warp`. When it is unset the confidence buffers are never read.
@@ -358,8 +362,8 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
     frame_t: u32,
     frame_fwd: u32,
     frame_bwd: u32,
-    h2_inv_norm: f32,
-    noise_offset: f32,
+    noise: &Array<f32>,
+    h2_field: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
@@ -386,6 +390,9 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
     let hsum_len = comptime!(hsum_elements(separable, block_x, block_y, patch_radius));
     let mut hsum_fwd = SharedMemory::<f32>::new(hsum_len as usize);
     let mut hsum_bwd = SharedMemory::<f32>::new(hsum_len as usize);
+
+    let h2_inv_norm = noise[h2_field as usize];
+    let noise_offset = noise[DERIVED_NOISE_OFFSET as usize];
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -561,8 +568,9 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
 /// paired half-window, with one distance tile and one neighbour read per offset. The zero offset is
 /// skipped because `nlm_finish` adds it back through `wref * max_weight`.
 ///
-/// `spatial_offset_lut` holds one noise-floor offset per candidate, row-major over the window.
-/// Nearby candidates share more of the grain's spatial correlation, so their offsets are smaller.
+/// The strength is word `h2_field` of the derived buffer `noise`. `spatial_offset_lut` holds one
+/// noise-floor offset per candidate, row-major over the window. Nearby candidates share more of
+/// the grain's spatial correlation, so their offsets are smaller.
 ///
 /// With `separable` set, each distance tile is first summed along its rows into a row-sum buffer,
 /// and each pixel then sums `2 * patch_radius + 1` of those down its column. That reads shared
@@ -575,7 +583,8 @@ pub fn nlm_fused_single_window<N: Size>(
     weight_sum: &mut Array<f32>,
     max_weight: &mut Array<f32>,
     frame_t: u32,
-    h2_inv_norm: f32,
+    noise: &Array<f32>,
+    h2_field: u32,
     spatial_offset_lut: &Array<f32>,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -598,6 +607,8 @@ pub fn nlm_fused_single_window<N: Size>(
     let mut smem_dist = SharedMemory::<f32>::new(tile_elems as usize);
     let hsum_len = comptime!(hsum_elements(separable, block_x, block_y, patch_radius));
     let mut hsum = SharedMemory::<f32>::new(hsum_len as usize);
+
+    let h2_inv_norm = noise[h2_field as usize];
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -751,8 +762,8 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
     frame_t: u32,
     frame_fwd: u32,
     frame_bwd: u32,
-    h2_inv_norm: f32,
-    noise_offset: f32,
+    noise: &Array<f32>,
+    h2_field: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
@@ -777,6 +788,9 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
     let hsum_len = comptime!(hsum_elements(separable, block_x, block_y, patch_radius));
     let mut hsum_fwd = SharedMemory::<f32>::new(hsum_len as usize);
     let mut hsum_bwd = SharedMemory::<f32>::new(hsum_len as usize);
+
+    let h2_inv_norm = noise[h2_field as usize];
+    let noise_offset = noise[DERIVED_NOISE_OFFSET as usize];
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -944,7 +958,8 @@ pub fn nlm_fused_single_window_ref<N: Size>(
     weight_sum: &mut Array<f32>,
     max_weight: &mut Array<f32>,
     frame_t: u32,
-    h2_inv_norm: f32,
+    noise: &Array<f32>,
+    h2_field: u32,
     spatial_offset_lut: &Array<f32>,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -965,6 +980,8 @@ pub fn nlm_fused_single_window_ref<N: Size>(
     let mut smem_dist = SharedMemory::<f32>::new(tile_elems as usize);
     let hsum_len = comptime!(hsum_elements(separable, block_x, block_y, patch_radius));
     let mut hsum = SharedMemory::<f32>::new(hsum_len as usize);
+
+    let h2_inv_norm = noise[h2_field as usize];
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;

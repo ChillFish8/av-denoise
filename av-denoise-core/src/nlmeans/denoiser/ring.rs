@@ -124,8 +124,7 @@ impl<R: Runtime> NlmDenoiser<R> {
 
     /// Copies the last pushed frame into the next ring slot and refreshes that slot's state.
     ///
-    /// The copy and the refresh run in separate device spans, because the pilot's upload would
-    /// end the copy's span early. The slot's noise readback starts after both.
+    /// The copy and the refresh run in separate device spans.
     pub(in crate::nlmeans) fn duplicate_last_frame(&mut self) -> Result<(), anyhow::Error> {
         let total_frames = self.params.total_frames() as usize;
         let last_slot = (self.ring_head - 1) % total_frames;
@@ -140,7 +139,6 @@ impl<R: Runtime> NlmDenoiser<R> {
             front.refresh_duplicated_slot(next_slot)
         })?;
 
-        self.start_noise_reading(next_slot as u32, self.ring_head);
         self.ring_head += 1;
 
         Ok(())
@@ -167,8 +165,8 @@ impl<R: Runtime> NlmDenoiser<R> {
     ///
     /// A later pass then never reads an older frame's state there.
     fn refresh_duplicated_slot(&mut self, slot: usize) -> Result<(), anyhow::Error> {
-        if let PrefilterMode::NlmSpatial { strength_scale } = self.params.prefilter {
-            self.run_nlm_spatial_pilot(slot as u32, strength_scale)
+        if let PrefilterMode::NlmSpatial { .. } = self.params.prefilter {
+            self.run_nlm_spatial_pilot(slot as u32)
                 .context("nlm spatial pilot dispatch failed")?;
         }
 
@@ -182,7 +180,7 @@ impl<R: Runtime> NlmDenoiser<R> {
     }
 
     /// The physical slot holding the oldest frame in the window.
-    fn ring_start(&self) -> u32 {
+    pub(super) fn ring_start(&self) -> u32 {
         let total_frames = self.params.total_frames() as usize;
         (self.ring_head % total_frames) as u32
     }

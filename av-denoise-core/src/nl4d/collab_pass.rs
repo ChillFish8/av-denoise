@@ -4,17 +4,16 @@ use std::ops::Range;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::denoiser::{AccumClear, Nl4dDenoiser, accumulator_lens, noise_curve_upload, strength_map_upload};
+use super::denoiser::{AccumClear, Nl4dDenoiser, accumulator_lens};
 use super::nl4d_pool_ratio;
 use super::regularise::run_regularise;
 use super::snapshot::LastFields;
 use crate::collab::geometry::{ref_count, refs_along};
 use crate::collab::grid_frames;
-use crate::collab::kernels::aggregate::{collab_zero_accum, weight_scale};
+use crate::collab::kernels::aggregate::collab_zero_accum;
 use crate::collab::kernels::packed::collab_zero_packed;
 use crate::engine::timing::timed;
 use crate::nlmeans::{MAX_GRID_1D, RingView};
-use crate::noise::STRENGTH_MAP_OFF;
 use crate::tune::sites::{
     CollabFilterSite,
     CollabInputs,
@@ -33,9 +32,6 @@ struct FusedPass {
     neighbour_slots: Handle,
     noise_curve: Handle,
     strength_map: Handle,
-    curve_valid: u32,
-    map_mode: u32,
-    weight_norm: f32,
     stored_ch: u32,
     /// Values in the frame ring, which the f16 search ring matches.
     ring_len: usize,
@@ -56,7 +52,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let client = self.front.compute_client().clone();
 
         let stored_ch = self.channels.storage_count();
-        let channels_count = self.channels.count();
         let pixels = (self.width * self.height) as usize;
         let frame_len = pixels * stored_ch as usize;
         let total_frames = 1 + 2 * self.temporal_radius;
@@ -65,41 +60,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let neighbours = 2 * self.temporal_radius;
 
         let neighbour_slots_buf = view.neighbour_slots_buf.clone();
-
-        let sigmas = self.front.current_sigmas_temporal_only();
-        let mut sigma_host = vec![0.0f32; stored_ch as usize];
-        sigma_host[..channels_count as usize].copy_from_slice(&sigmas[..channels_count as usize]);
-        let sigma_bytes = f32::as_bytes(&sigma_host);
-        self.sigma_buf.update(&client, sigma_bytes);
-        let weight_norm = weight_scale(sigma_host[0], &self.dct_profile);
-
-        let curve_ratios = self.front.current_noise_curve().map(|curve| curve.ratios);
-        let (ratios, curve_valid) = noise_curve_upload(curve_ratios, self.apply_noise_map);
-        let ratio_bytes = f32::as_bytes(&ratios);
-        self.noise_curve_buf.update(&client, ratio_bytes);
-        let noise_curve_buf = self.noise_curve_buf.handle().clone();
-
-        let classes = self.front.current_quarter_classes();
-        if let Some(classes) = classes {
-            let class_dims = (classes.cols(), classes.rows());
-            let map_dims = (self.map_cols as usize, self.map_rows as usize);
-            assert_eq!(
-                class_dims, map_dims,
-                "quarter classes must cover the strength map"
-            );
-        }
-
-        let map_upload = strength_map_upload(classes, curve_valid, self.luma_map, self.chroma_map_boost);
-        let (strength_map_buf, map_mode) = match map_upload {
-            Some((multipliers, mode)) => {
-                let multiplier_bytes = f32::as_bytes(&multipliers);
-                self.strength_map_buf.update(&client, multiplier_bytes);
-                let strength_map = self.strength_map_buf.handle().clone();
-
-                (strength_map, mode)
-            },
-            None => (self.unit_map.clone(), STRENGTH_MAP_OFF),
-        };
+        let noise_curve_buf = self.front.noise_curve_handle();
+        let strength_map_buf = self.front.strength_map_handle();
 
         let cleared_slots = match clear {
             AccumClear::WholeRing => 0..total_frames,
@@ -145,9 +107,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             neighbour_slots: neighbour_slots_buf,
             noise_curve: noise_curve_buf,
             strength_map: strength_map_buf,
-            curve_valid,
-            map_mode,
-            weight_norm,
             stored_ch,
             ring_len,
             accum_ring_len,
@@ -170,7 +129,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         };
 
         let motion_ctx = self.front.motion_ctx();
-        let sad_noise_floor = self.front.sad_noise_floor_value();
+        let noise = self.front.derived_handle();
         let thsad = self.front.thsad_value();
         run_regularise::<R>(
             &self.kernels,
@@ -179,7 +138,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             self.width,
             self.height,
             self.field_lambda,
-            sad_noise_floor,
+            &noise,
             thsad,
             reg_mv,
             reg_conf,
@@ -299,7 +258,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             conf_len: conf_len.max(1),
             neighbour_slots: pass.neighbour_slots,
             neighbour_slots_len: neighbour_slots_len.max(1),
-            sigma: self.sigma_buf.handle().clone(),
+            noise: self.front.derived_handle(),
             noise_curve: pass.noise_curve,
             strength_map: pass.strength_map,
             map_len,
@@ -313,9 +272,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             centre_slot: view.centre_slot,
             c_min: self.c_min,
             lambda_ht: self.lambda_ht,
-            curve_valid: pass.curve_valid,
-            map_mode: pass.map_mode,
-            weight_scale: pass.weight_norm,
             accum_scale: self.accum_scale,
             pool_ratio,
         };

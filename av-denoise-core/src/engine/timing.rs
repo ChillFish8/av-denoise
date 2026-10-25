@@ -1,8 +1,7 @@
-use std::cell::Cell;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use cubecl::future::DynFut;
 use cubecl::prelude::*;
@@ -11,49 +10,13 @@ use cubecl::profile::{ProfileDuration, ProfileTicks, TimingMethod};
 use crate::tune::gpu::profile_chunk_limit;
 use crate::tune::{TuneLedger, TunePhase};
 
-/// Host and device time one engine has spent since it was built.
+/// Device time one engine has spent since it was built.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct EngineTiming {
-    /// Host time spent blocked until noise readbacks landed.
-    pub readback_wait: Duration,
-    /// How many noise readbacks the host waited for.
-    pub readback_waits: u64,
     /// Device time summed over the sampled frames.
     pub device_time: Duration,
     /// How many frames had their device time sampled.
     pub device_samples: u64,
-}
-
-/// Adds up the host time spent blocked on readbacks.
-#[derive(Debug, Default)]
-pub(crate) struct StallClock {
-    wait: Cell<Duration>,
-    waits: Cell<u64>,
-}
-
-impl StallClock {
-    /// Runs `wait` and adds the time it took to the total.
-    pub(crate) fn time<T>(&self, wait: impl FnOnce() -> T) -> T {
-        let started = Instant::now();
-        let result = wait();
-        let elapsed = started.elapsed();
-
-        let total = self.wait.get() + elapsed;
-        self.wait.set(total);
-
-        let count = self.waits.get() + 1;
-        self.waits.set(count);
-
-        result
-    }
-
-    pub(crate) fn wait(&self) -> Duration {
-        self.wait.get()
-    }
-
-    pub(crate) fn waits(&self) -> u64 {
-        self.waits.get()
-    }
 }
 
 /// Samples the device time of one frame in every few.

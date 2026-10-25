@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 
 use super::helpers::*;
 use crate::bench_api::HostIo;
-use crate::nlmeans::motion::neighbour_idx_for_k;
+use crate::nlmeans::motion::{neighbour_idx_for_k, sad_noise_floor};
 use crate::nlmeans::*;
 
 const RADIUS: u32 = 2;
@@ -222,7 +222,13 @@ fn ring_view_exposes_the_analysed_pyramid_and_the_noise_floor() {
     let bytes = client.read_one(pyramid).expect("pyramid readback failed");
     let plane = bytes.len() / (frames as usize * size_of::<f32>());
     assert!(plane > 0, "the pyramid must hold at least one plane per slot");
-    assert!(denoiser.sad_noise_floor_value() >= 0.0);
+
+    let snapshot = denoiser.noise_snapshot().expect("the noise state reads back");
+    let floor_sigma = mc_sad_noise_floor_sigma(PrefilterMode::None, 4.0 / 255.0);
+    let expected_floor = sad_noise_floor(DEFAULT_BLKSIZE_FOR_TEST, floor_sigma);
+    let floor_bits = snapshot.derived.sad_noise_floor.to_bits();
+    let expected_bits = expected_floor.to_bits();
+    assert_eq!(floor_bits, expected_bits, "the pinned sigma's SAD floor");
 }
 
 #[test]

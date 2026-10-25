@@ -1,3 +1,4 @@
+use av_denoise_core::bench_api::DERIVED_WORDS;
 use av_denoise_core::bench_api::kernels::nlm_vweight_pair_accumulate;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
@@ -14,10 +15,10 @@ use super::{
     block_sync,
     cube_count_2d,
     cube_dim_2d,
-    h2_inv_norm,
     make_padded_frame,
     shapes_with_channels,
     stored_channels,
+    window_noise,
 };
 
 #[derive(Clone)]
@@ -29,6 +30,7 @@ pub struct VWeightPairAccInput {
     weight_sum: Handle,
     max_weight: Handle,
     confidence_dummy: Handle,
+    noise: Handle,
     frame_len: usize,
 }
 
@@ -56,6 +58,7 @@ impl<R: Runtime> Benchmark for VWeightPairAccBench<R> {
         let weight_sum = self.client.empty(pixels * size_of::<f32>());
         let max_weight = self.client.empty(pixels * size_of::<f32>());
         let confidence_dummy = self.client.empty(size_of::<f32>());
+        let noise = window_noise(&self.client);
 
         VWeightPairAccInput {
             hsum_fwd,
@@ -65,6 +68,7 @@ impl<R: Runtime> Benchmark for VWeightPairAccBench<R> {
             weight_sum,
             max_weight,
             confidence_dummy,
+            noise,
             frame_len: frame.len(),
         }
     }
@@ -74,7 +78,6 @@ impl<R: Runtime> Benchmark for VWeightPairAccBench<R> {
         let stored_ch = stored_channels(self.channels) as usize;
         let cube_count = cube_count_2d();
         let cube_dim = cube_dim_2d();
-        let inv_norm = h2_inv_norm();
 
         unsafe {
             nlm_vweight_pair_accumulate::launch_unchecked::<R>(
@@ -95,8 +98,7 @@ impl<R: Runtime> Benchmark for VWeightPairAccBench<R> {
                 0u32,
                 Q_X,
                 Q_Y,
-                inv_norm,
-                0.0f32,
+                ArrayArg::from_raw_parts(args.noise.clone(), DERIVED_WORDS as usize),
                 WIDTH,
                 HEIGHT,
                 PATCH_RADIUS,

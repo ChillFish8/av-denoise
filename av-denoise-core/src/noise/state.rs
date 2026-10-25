@@ -1,12 +1,15 @@
+#[cfg(test)]
+mod tests;
+
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
+#[cfg(test)]
+pub(crate) use self::tests::SlotStats;
 use super::NOISE_BLOCK_1D;
 use super::curve::{MIN_QUARTERS_PER_BIN, NOISE_CURVE_BINS};
 use super::derived::DerivedValues;
-use super::fold::{NoiseSettings, STATE_WORDS, fold_words};
-#[cfg(test)]
-use super::reading::ReadingRecord;
+use super::fold::{FoldSettings, NoiseSettings, OffsetTables, STATE_WORDS, fold_words};
 use super::reading::{
     CURVE_TAGS,
     IMMERKAER_SPATIAL_TAGS,
@@ -17,26 +20,12 @@ use super::reading::{
     immerkaer_queries,
     sample_queries,
 };
-use super::select::SelectBatch;
-#[cfg(test)]
-use super::select::{SelectQuery, order_key_host};
-use super::spatial::{
-    RESULTS_PER_SLOT,
-    noise_partials_slot_stride_bytes,
-    noise_partials_slot_view,
-    noise_results_slot_view,
-    partials_len,
-};
+use super::select::{SelectBatch, histogram_len};
+use super::spatial::{RESULTS_PER_SLOT, noise_partials_slot_stride_bytes, partials_len};
 use super::strength_map::{QuarterSettings, StrengthMapParams};
-#[cfg(test)]
-use super::temporal::temporal_stats_slot_len;
-use super::temporal::{
-    min_static_blocks,
-    temporal_stats_blocks,
-    temporal_stats_buf_bytes,
-    temporal_stats_slot_view,
-};
+use super::temporal::{min_static_blocks, temporal_stats_blocks, temporal_stats_buf_bytes};
 use crate::collab::geometry::strength_map_dims;
+use crate::engine::BufferSize;
 use crate::engine::align::StorageAlign;
 
 /// The plane geometry one noise state measures.
@@ -55,10 +44,6 @@ pub(crate) struct NoiseShape {
 
 /// Which strength map a reading builds.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "no production caller builds a chroma strength map")
-)]
 pub(crate) enum StrengthMapKind {
     #[default]
     Off,
@@ -70,6 +55,11 @@ pub(crate) enum StrengthMapKind {
 
 /// The `f32` values block derive keeps per block, starting with the three channel sigmas.
 pub(crate) const BLOCK_FIELDS: u32 = 8;
+/// The sample batch's lanes per block, three channel sigmas, the correlation and four quarter
+/// sigmas.
+pub(crate) const SAMPLE_LANES_PER_BLOCK: u32 = 8;
+/// The curve batch's lanes per block, one per static quarter.
+pub(crate) const CURVE_LANES_PER_BLOCK: u32 = 4;
 /// The block value of channel 0's mean residual.
 pub(crate) const BLOCK_VALUE_MEAN0: u32 = 3;
 /// The block value of channel 0's mean lag-1 product.
@@ -102,11 +92,28 @@ pub(crate) struct ReadingSettings {
     pub map: StrengthMapKind,
 }
 
-/// The noise measurement buffers of one ring of frames.
+/// The noise values every consumer reads and, when the noise is measured, the buffers one ring of
+/// frames is measured in.
 pub(crate) struct NoiseState<R: Runtime> {
     pub(super) client: ComputeClient<R>,
     pub(super) shape: NoiseShape,
     pub(super) settings: NoiseSettings,
+    /// The [DERIVED_WORDS](crate::noise::derived::DERIVED_WORDS) values every consumer reads.
+    pub(super) derived: Handle,
+    /// The current curve's ratios when the consumer applies it, else zeros.
+    pub(super) curve_ratios: Handle,
+    /// The current threshold multiplier per map quarter, created as ones.
+    pub(super) current_map: Handle,
+    /// The NLM offset tables, when the fold settings ask for them.
+    pub(super) offset_tables: Option<OffsetTables>,
+    /// The fixed derived values last uploaded, which host-built offset tables follow.
+    pub(super) fixed_values: DerivedValues,
+    /// The measurement buffers, `None` for a state that holds fixed values.
+    pub(super) measurement: Option<Measurement>,
+}
+
+/// The buffers one ring of frames is measured and folded in.
+pub(super) struct Measurement {
     /// The first stage of each slot's Immerkær estimate, one padded region per slot.
     pub(super) partials: Handle,
     /// The per-channel Immerkær totals, one row per slot.
@@ -131,12 +138,6 @@ pub(crate) struct NoiseState<R: Runtime> {
     /// The [STATE_WORDS](crate::noise::fold::STATE_WORDS) chains, rho, curve and classes flag of
     /// the stream.
     pub(super) fold_state: Handle,
-    /// The [DERIVED_WORDS](crate::noise::derived::DERIVED_WORDS) values every consumer reads.
-    pub(super) derived: Handle,
-    /// The current curve's ratios when the consumer applies it, else zeros.
-    pub(super) curve_ratios: Handle,
-    /// The current threshold multiplier per map quarter, created as ones.
-    pub(super) current_map: Handle,
 }
 
 /// The buffers one slot's temporal sample is built in.
@@ -169,49 +170,38 @@ impl<R: Runtime> NoiseState<R> {
         settings: NoiseSettings,
         initial: DerivedValues,
     ) -> Self {
-        let frames = u64::from(shape.frames);
-        let partials_stride = noise_partials_slot_stride_bytes(shape.width, shape.height, shape.align);
-        let partials_bytes = partials_stride * frames;
-        let partials = client.empty(partials_bytes as usize);
+        let offset_tables = settings.fold.offset_tables;
+        let mut state = Self::fixed(client, shape, initial, offset_tables);
+        state.settings = settings;
+        state.start_measuring();
 
-        let results_len = shape.frames as usize * RESULTS_PER_SLOT;
-        let results = client.empty(results_len * size_of::<f32>());
+        state
+    }
 
-        let stats = if shape.temporal {
-            let stats_bytes = temporal_stats_buf_bytes(
-                shape.width,
-                shape.height,
-                shape.stored_ch,
-                shape.frames,
-                shape.align,
-            );
-            let stats = client.empty(stats_bytes);
-            Some(stats)
-        } else {
-            None
+    /// A state that measures nothing and holds `derived`, a curve of zeros and a map of ones.
+    ///
+    /// With `offset_tables` it also holds the offset tables of that search radius, built from
+    /// `derived` at a rho of 0. Every queue is a no-op, and a snapshot holds `derived` with no
+    /// chains.
+    pub(crate) fn fixed(
+        client: &ComputeClient<R>,
+        shape: NoiseShape,
+        derived: DerivedValues,
+        offset_tables: Option<u32>,
+    ) -> Self {
+        let fixed_values = derived;
+        let tables = offset_tables.map(|radius| OffsetTables::from_host(client, radius, fixed_values));
+        let fold = FoldSettings {
+            offset_tables,
+            ..FoldSettings::default()
+        };
+        let settings = NoiseSettings {
+            fold,
+            ..NoiseSettings::default()
         };
 
-        let readings_len = (shape.frames * READING_WORDS) as usize;
-        let reading_zeros = vec![0.0f32; readings_len];
-        let reading_bytes = f32::as_bytes(&reading_zeros);
-        let readings = client.create_from_slice(reading_bytes);
-
-        let reading = settings.reading;
-        let immerkaer_batch = immerkaer_batch(client, shape);
-        let sample = shape.temporal.then(|| sample_scratch(client, shape));
-        let curve = curve_batch(client, shape, reading);
-        let classes = class_scratch(client, shape, reading);
-        let blocks = block_count(shape);
-        let min_accepted = min_static_blocks(blocks);
-
-        let fold_settings = fold_settings_buffer(client, shape, settings);
-
-        let state_zeros = [0.0f32; STATE_WORDS as usize];
-        let state_bytes = f32::as_bytes(&state_zeros);
-        let fold_state = client.create_from_slice(state_bytes);
-
-        let initial_words = initial.to_words();
-        let derived_bytes = f32::as_bytes(&initial_words);
+        let derived_words = derived.to_words();
+        let derived_bytes = f32::as_bytes(&derived_words);
         let derived = client.create_from_slice(derived_bytes);
 
         let curve_zeros = [0.0f32; NOISE_CURVE_BINS];
@@ -226,118 +216,143 @@ impl<R: Runtime> NoiseState<R> {
             client: client.clone(),
             shape,
             settings,
-            partials,
-            results,
-            stats,
-            readings,
-            immerkaer_batch,
-            sample,
-            curve,
-            classes,
-            min_accepted,
-            fold_settings,
-            fold_state,
             derived,
             curve_ratios,
             current_map,
+            offset_tables: tables,
+            fixed_values,
+            measurement: None,
         }
     }
 
-    pub(crate) fn shape(&self) -> NoiseShape {
-        self.shape
+    /// Whether the state measures the noise rather than holding fixed values.
+    pub(crate) fn is_measured(&self) -> bool {
+        self.measurement.is_some()
+    }
+
+    /// Allocates the measurement buffers for the current settings, so the state measures the noise
+    /// from its next queued slot.
+    ///
+    /// The derived buffer keeps its values until the first fold.
+    pub(crate) fn start_measuring(&mut self) {
+        let measurement = measurement_buffers(&self.client, self.shape, self.settings);
+        self.measurement = Some(measurement);
+    }
+
+    /// The measurement buffers.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a state that holds fixed values.
+    pub(super) fn measurement(&self) -> &Measurement {
+        self.measurement
+            .as_ref()
+            .expect("a fixed noise state has no measurement buffers")
+    }
+
+    /// Replaces the derived values of a state that holds fixed values, and rebuilds its offset
+    /// tables from them.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a state that measures the noise.
+    pub(crate) fn set_fixed(&mut self, derived: DerivedValues) {
+        let measured = self.is_measured();
+        assert!(!measured, "a measured noise state writes its own derived values");
+
+        let derived_words = derived.to_words();
+        let derived_bytes = f32::as_bytes(&derived_words);
+        self.derived = self.client.create_from_slice(derived_bytes);
+        self.fixed_values = derived;
+
+        let radius = self.settings.fold.offset_tables;
+        self.offset_tables = radius.map(|radius| OffsetTables::from_host(&self.client, radius, derived));
     }
 
     pub(crate) fn settings(&self) -> NoiseSettings {
         self.settings
     }
 
-    /// Replaces the settings before the first queued slot, allocating or dropping the curve batch
-    /// and the class scratch to match, and rewriting the fold settings.
+    /// Replaces the settings before the first queued slot.
+    ///
+    /// A new offset table radius rebuilds the tables from the last fixed derived values. A measured
+    /// state allocates or drops the curve batch and the class scratch to match, and rewrites the
+    /// fold settings.
     pub(crate) fn set_settings(&mut self, settings: NoiseSettings) {
+        let radius = settings.fold.offset_tables;
+        let table_radius = self.offset_tables.as_ref().map(|tables| tables.radius);
+
+        if radius != table_radius {
+            let fixed_values = self.fixed_values;
+            self.offset_tables =
+                radius.map(|radius| OffsetTables::from_host(&self.client, radius, fixed_values));
+        }
+
+        self.settings = settings;
+
+        let client = self.client.clone();
+        let shape = self.shape;
+        let Some(measurement) = self.measurement.as_mut() else {
+            return;
+        };
+
         let reading = settings.reading;
-        let has_curve = self.curve.is_some();
-        let wants_curve = self.shape.temporal && reading.luma_fields;
+        let has_curve = measurement.curve.is_some();
+        let wants_curve = shape.temporal && reading.luma_fields;
 
         if wants_curve && !has_curve {
-            self.curve = curve_batch(&self.client, self.shape, reading);
+            measurement.curve = curve_batch(&client, shape, reading);
         }
 
         if !wants_curve {
-            self.curve = None;
+            measurement.curve = None;
         }
 
-        let has_classes = self.classes.is_some();
+        let has_classes = measurement.classes.is_some();
         let wants_classes = reading.map != StrengthMapKind::Off;
 
         if wants_classes && !has_classes {
-            self.classes = class_scratch(&self.client, self.shape, reading);
+            measurement.classes = class_scratch(&client, shape, reading);
         }
 
         if !wants_classes {
-            self.classes = None;
+            measurement.classes = None;
         }
 
-        self.fold_settings = fold_settings_buffer(&self.client, self.shape, settings);
-        self.settings = settings;
+        measurement.fold_settings = fold_settings_buffer(&client, shape, settings);
     }
 
     /// The derived values every consumer reads.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no consumer binds the GPU derived values")
-    )]
     pub(crate) fn derived(&self) -> &Handle {
         &self.derived
     }
 
     /// The current curve's ratios when the consumer applies it, else zeros.
-    #[cfg_attr(not(test), expect(dead_code, reason = "no consumer binds the GPU curve"))]
     pub(crate) fn curve(&self) -> &Handle {
         &self.curve_ratios
     }
 
     /// The current threshold multiplier per map quarter.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no consumer binds the GPU strength map")
-    )]
     pub(crate) fn strength_map(&self) -> &Handle {
         &self.current_map
     }
 
-    /// Every slot's strength map, `None` without a strength map.
-    pub(super) fn slot_maps(&self) -> Option<&Handle> {
-        self.classes.as_ref().map(|scratch| &scratch.slot_maps)
+    /// The main pass's noise-floor table, one entry per search candidate, `None` without tables.
+    pub(crate) fn spatial_offsets(&self) -> Option<&Handle> {
+        self.offset_tables.as_ref().map(|tables| &tables.spatial)
     }
 
-    /// The results row, the partials and, with temporal stats, the records of `slot`.
-    pub(crate) fn reading_handles(&self, slot: u32) -> Vec<Handle> {
-        let shape = self.shape;
-        let row = noise_results_slot_view(&self.results, shape.frames, slot);
-        let partials = noise_partials_slot_view(
-            &self.partials,
-            shape.width,
-            shape.height,
-            shape.frames,
-            slot,
-            shape.align,
-        );
-        let mut handles = vec![row, partials];
+    /// The NLM pilot's noise-floor table, one entry per search candidate, `None` without tables.
+    pub(crate) fn pilot_offsets(&self) -> Option<&Handle> {
+        self.offset_tables.as_ref().map(|tables| &tables.pilot)
+    }
 
-        if let Some(stats_buf) = self.stats.as_ref() {
-            let stats = temporal_stats_slot_view(
-                stats_buf,
-                shape.width,
-                shape.height,
-                shape.stored_ch,
-                shape.frames,
-                slot,
-                shape.align,
-            );
-            handles.push(stats);
-        }
-
-        handles
+    /// Every slot's strength map, `None` without a strength map.
+    pub(super) fn slot_maps(&self) -> Option<&Handle> {
+        self.measurement()
+            .classes
+            .as_ref()
+            .map(|scratch| &scratch.slot_maps)
     }
 
     /// The partials ring, offset to the start of `slot`.
@@ -345,22 +360,69 @@ impl<R: Runtime> NoiseState<R> {
         let stride = noise_partials_slot_stride_bytes(self.shape.width, self.shape.height, self.shape.align);
         let start = u64::from(slot) * stride;
 
-        self.partials.clone().offset_start(start)
+        self.measurement().partials.clone().offset_start(start)
     }
+}
 
-    #[cfg(test)]
-    pub(crate) fn partials(&self) -> &Handle {
-        &self.partials
-    }
+/// The measurement buffers of a state for `shape` built with `settings`.
+fn measurement_buffers<R: Runtime>(
+    client: &ComputeClient<R>,
+    shape: NoiseShape,
+    settings: NoiseSettings,
+) -> Measurement {
+    let frames = u64::from(shape.frames);
+    let partials_stride = noise_partials_slot_stride_bytes(shape.width, shape.height, shape.align);
+    let partials_bytes = partials_stride * frames;
+    let partials = client.empty(partials_bytes as usize);
 
-    #[cfg(test)]
-    pub(crate) fn results(&self) -> &Handle {
-        &self.results
-    }
+    let results_len = shape.frames as usize * RESULTS_PER_SLOT;
+    let results = client.empty(results_len * size_of::<f32>());
 
-    #[cfg(test)]
-    pub(crate) fn stats(&self) -> Option<&Handle> {
-        self.stats.as_ref()
+    let stats = if shape.temporal {
+        let stats_bytes = temporal_stats_buf_bytes(
+            shape.width,
+            shape.height,
+            shape.stored_ch,
+            shape.frames,
+            shape.align,
+        );
+        let stats = client.empty(stats_bytes);
+        Some(stats)
+    } else {
+        None
+    };
+
+    let readings_len = (shape.frames * READING_WORDS) as usize;
+    let reading_zeros = vec![0.0f32; readings_len];
+    let reading_bytes = f32::as_bytes(&reading_zeros);
+    let readings = client.create_from_slice(reading_bytes);
+
+    let reading = settings.reading;
+    let immerkaer_batch = immerkaer_batch(client, shape);
+    let sample = shape.temporal.then(|| sample_scratch(client, shape));
+    let curve = curve_batch(client, shape, reading);
+    let classes = class_scratch(client, shape, reading);
+    let blocks = block_count(shape);
+    let min_accepted = min_static_blocks(blocks);
+
+    let fold_settings = fold_settings_buffer(client, shape, settings);
+
+    let state_zeros = [0.0f32; STATE_WORDS as usize];
+    let state_bytes = f32::as_bytes(&state_zeros);
+    let fold_state = client.create_from_slice(state_bytes);
+
+    Measurement {
+        partials,
+        results,
+        stats,
+        readings,
+        immerkaer_batch,
+        sample,
+        curve,
+        classes,
+        min_accepted,
+        fold_settings,
+        fold_state,
     }
 }
 
@@ -398,30 +460,150 @@ pub(super) fn quarter_grid(shape: NoiseShape) -> u32 {
     quarters.div_ceil(NOISE_BLOCK_1D)
 }
 
-/// The immerkaer batch, `3 * cubes` lanes plus, with temporal stats, one lane per block.
-fn immerkaer_batch<R: Runtime>(client: &ComputeClient<R>, shape: NoiseShape) -> SelectBatch {
+/// The immerkaer batch's lanes, `3 * cubes` plus, with temporal stats, one per block.
+fn immerkaer_lanes(shape: NoiseShape) -> u32 {
     let cubes = cube_count(shape);
     let block_lanes = if shape.temporal { block_count(shape) } else { 0 };
-    let len = 3 * cubes + block_lanes;
-    let tag_count = if shape.temporal {
+
+    3 * cubes + block_lanes
+}
+
+fn immerkaer_tag_count(shape: NoiseShape) -> u32 {
+    if shape.temporal {
         IMMERKAER_TAGS
     } else {
         IMMERKAER_SPATIAL_TAGS
-    };
+    }
+}
+
+fn immerkaer_batch<R: Runtime>(client: &ComputeClient<R>, shape: NoiseShape) -> SelectBatch {
+    let len = immerkaer_lanes(shape);
+    let tag_count = immerkaer_tag_count(shape);
     let min_counts = vec![0u32; tag_count as usize];
     let queries = immerkaer_queries(shape.temporal);
 
     SelectBatch::new(client, len, &min_counts, &queries)
 }
 
-/// The block scratch and the sample batch of eight lanes per block.
+/// The names one select batch's buffers are sized under.
+struct BatchNames {
+    keys: &'static str,
+    tags: &'static str,
+    histogram: &'static str,
+}
+
+const IMMERKAER_BATCH: BatchNames = BatchNames {
+    keys: "noise immerkaer keys",
+    tags: "noise immerkaer tags",
+    histogram: "noise immerkaer histogram",
+};
+
+const SAMPLE_BATCH: BatchNames = BatchNames {
+    keys: "noise sample keys",
+    tags: "noise sample tags",
+    histogram: "noise sample histogram",
+};
+
+const CURVE_BATCH: BatchNames = BatchNames {
+    keys: "noise curve keys",
+    tags: "noise curve tags",
+    histogram: "noise curve histogram",
+};
+
+const READINGS: &str = "noise readings";
+const BLOCK_VALUES: &str = "noise block values";
+const BLOCK_FLAGS: &str = "noise block flags";
+const QUARTER_CLASSES: &str = "noise quarter classes";
+const QUARTER_LUMAS: &str = "noise quarter lumas";
+const QUARTER_TENSORS: &str = "noise quarter tensors";
+const SLOT_MAPS: &str = "noise slot maps";
+const CURRENT_MAP: &str = "noise current map";
+const STREAM_STATE: &str = "noise stream state";
+
+/// The element count of every reading, map and stream buffer a noise state for `shape` holds.
+///
+/// The curve batch is counted whenever temporal stats are measured and the class scratch always,
+/// which is the most any settings allocate.
+pub(crate) fn reading_buffer_sizes(shape: NoiseShape) -> Vec<BufferSize> {
+    let frames = u64::from(shape.frames);
+    let block_total = block_count(shape);
+    let blocks = u64::from(block_total);
+    let quarter_total = quarter_count(shape);
+    let quarters = u64::from(quarter_total);
+    let mut buffers = Vec::new();
+
+    let readings = frames.checked_mul(u64::from(READING_WORDS));
+    buffers.push((READINGS, readings));
+
+    let immerkaer_lane_count = immerkaer_lanes(shape);
+    let immerkaer_len = u64::from(immerkaer_lane_count);
+    let immerkaer_tags = immerkaer_tag_count(shape);
+    let immerkaer_queries = immerkaer_queries(shape.temporal).len() as u32;
+    push_batch_sizes(
+        &mut buffers,
+        &IMMERKAER_BATCH,
+        Some(immerkaer_len),
+        immerkaer_tags,
+        immerkaer_queries,
+    );
+
+    if shape.temporal {
+        let values = blocks.checked_mul(u64::from(BLOCK_FIELDS));
+        buffers.push((BLOCK_VALUES, values));
+        buffers.push((BLOCK_FLAGS, Some(blocks)));
+
+        let sample_len = blocks.checked_mul(u64::from(SAMPLE_LANES_PER_BLOCK));
+        let sample_queries = sample_queries().len() as u32;
+        push_batch_sizes(
+            &mut buffers,
+            &SAMPLE_BATCH,
+            sample_len,
+            SAMPLE_TAGS,
+            sample_queries,
+        );
+
+        let curve_len = blocks.checked_mul(u64::from(CURVE_LANES_PER_BLOCK));
+        let curve_queries = curve_queries().len() as u32;
+        push_batch_sizes(&mut buffers, &CURVE_BATCH, curve_len, CURVE_TAGS, curve_queries);
+    }
+
+    let tensors = quarters.checked_mul(u64::from(QUARTER_TENSOR_WORDS));
+    let slot_maps = quarters.checked_mul(frames);
+    buffers.push((QUARTER_CLASSES, Some(quarters)));
+    buffers.push((QUARTER_LUMAS, Some(quarters)));
+    buffers.push((QUARTER_TENSORS, tensors));
+    buffers.push((SLOT_MAPS, slot_maps));
+    buffers.push((CURRENT_MAP, Some(quarters)));
+    let state_words = u64::from(STATE_WORDS);
+    buffers.push((STREAM_STATE, Some(state_words)));
+
+    buffers
+}
+
+fn push_batch_sizes(
+    buffers: &mut Vec<BufferSize>,
+    names: &BatchNames,
+    len: Option<u64>,
+    tag_count: u32,
+    query_count: u32,
+) {
+    let histogram = histogram_len(tag_count, query_count);
+    let histogram_words = u64::from(histogram);
+
+    buffers.push((names.keys, len));
+    buffers.push((names.tags, len));
+    buffers.push((names.histogram, Some(histogram_words)));
+}
+
+/// The block scratch and the sample batch of [SAMPLE_LANES_PER_BLOCK] lanes per block.
 fn sample_scratch<R: Runtime>(client: &ComputeClient<R>, shape: NoiseShape) -> SampleScratch {
     let blocks = block_count(shape);
     let values_bytes = (blocks * BLOCK_FIELDS) as usize * size_of::<f32>();
     let flags_bytes = blocks as usize * size_of::<u32>();
     let min_counts = vec![0u32; SAMPLE_TAGS as usize];
     let queries = sample_queries();
-    let batch = SelectBatch::new(client, 8 * blocks, &min_counts, &queries);
+    let len = SAMPLE_LANES_PER_BLOCK * blocks;
+    let batch = SelectBatch::new(client, len, &min_counts, &queries);
 
     SampleScratch {
         block_values: client.empty(values_bytes),
@@ -430,7 +612,8 @@ fn sample_scratch<R: Runtime>(client: &ComputeClient<R>, shape: NoiseShape) -> S
     }
 }
 
-/// The curve batch of four quarter lanes per block, with temporal stats and the luma quarter fields.
+/// The curve batch of [CURVE_LANES_PER_BLOCK] quarter lanes per block, with temporal stats and the
+/// luma quarter fields.
 fn curve_batch<R: Runtime>(
     client: &ComputeClient<R>,
     shape: NoiseShape,
@@ -444,7 +627,8 @@ fn curve_batch<R: Runtime>(
     let min_count = MIN_QUARTERS_PER_BIN as u32;
     let min_counts = vec![min_count; CURVE_TAGS as usize];
     let queries = curve_queries();
-    let batch = SelectBatch::new(client, 4 * blocks, &min_counts, &queries);
+    let len = CURVE_LANES_PER_BLOCK * blocks;
+    let batch = SelectBatch::new(client, len, &min_counts, &queries);
 
     Some(batch)
 }
@@ -473,345 +657,4 @@ fn class_scratch<R: Runtime>(
     };
 
     Some(scratch)
-}
-
-/// One slot's stats a test state starts with.
-#[cfg(test)]
-pub(crate) struct SlotStats<'a> {
-    pub partials: &'a [f32],
-    pub results_row: [f32; 4],
-    pub records: &'a [f32],
-}
-
-#[cfg(test)]
-impl<R: Runtime> NoiseState<R> {
-    /// A state whose slot 0 holds `partials`, `results_row` and, with temporal stats, `records`.
-    ///
-    /// Every other slot and the padding between slots read 0.
-    pub(crate) fn from_stats_for_test(
-        client: &ComputeClient<R>,
-        shape: NoiseShape,
-        settings: ReadingSettings,
-        partials: &[f32],
-        results_row: [f32; 4],
-        records: &[f32],
-    ) -> Self {
-        let slot = SlotStats {
-            partials,
-            results_row,
-            records,
-        };
-
-        Self::from_slots_for_test(client, shape, settings, &[slot])
-    }
-
-    /// A state whose first slots hold `slots` in order, with every other slot and the padding at 0.
-    pub(crate) fn from_slots_for_test(
-        client: &ComputeClient<R>,
-        shape: NoiseShape,
-        settings: ReadingSettings,
-        slots: &[SlotStats<'_>],
-    ) -> Self {
-        let noise_settings = NoiseSettings {
-            reading: settings,
-            ..NoiseSettings::default()
-        };
-        let initial = DerivedValues::default();
-        let mut state = Self::new(client, shape, noise_settings, initial);
-        let frames = shape.frames as usize;
-        let word = size_of::<f32>();
-        let partials_words = partials_len(shape.width, shape.height);
-        let records_words = temporal_stats_slot_len(shape.width, shape.height, shape.stored_ch);
-
-        let partials_stride = noise_partials_slot_stride_bytes(shape.width, shape.height, shape.align);
-        let partials_stride_words = partials_stride as usize / word;
-        let mut partials_ring = vec![0.0f32; partials_stride_words * frames];
-        let mut results_ring = vec![0.0f32; RESULTS_PER_SLOT * frames];
-
-        let stats_bytes = temporal_stats_buf_bytes(
-            shape.width,
-            shape.height,
-            shape.stored_ch,
-            shape.frames,
-            shape.align,
-        );
-        let stats_stride_words = stats_bytes / word / frames;
-        let mut stats_ring = vec![0.0f32; stats_bytes / word];
-
-        for (index, slot) in slots.iter().enumerate() {
-            let slot_partials = slot.partials.len();
-            assert_eq!(slot_partials, partials_words, "one slot's partials");
-
-            let partials_start = index * partials_stride_words;
-            let partials_end = partials_start + partials_words;
-            partials_ring[partials_start..partials_end].copy_from_slice(slot.partials);
-
-            let results_start = index * RESULTS_PER_SLOT;
-            let results_end = results_start + RESULTS_PER_SLOT;
-            results_ring[results_start..results_end].copy_from_slice(&slot.results_row);
-
-            if shape.temporal {
-                let slot_records = slot.records.len();
-                assert_eq!(slot_records, records_words, "one slot's records");
-
-                let records_start = index * stats_stride_words;
-                let records_end = records_start + records_words;
-                stats_ring[records_start..records_end].copy_from_slice(slot.records);
-            }
-        }
-
-        state.partials = upload_ring(client, &partials_ring);
-        state.results = upload_ring(client, &results_ring);
-
-        if shape.temporal {
-            let stats = upload_ring(client, &stats_ring);
-            state.stats = Some(stats);
-        }
-
-        state
-    }
-
-    /// A state whose slots hold `readings`, the Immerkær abs sums `immerkaer_sums` and, with a
-    /// strength map, the slot maps `slot_maps`, one entry per slot.
-    pub(crate) fn with_readings_for_test(
-        client: &ComputeClient<R>,
-        shape: NoiseShape,
-        settings: NoiseSettings,
-        readings: &[ReadingRecord],
-        immerkaer_sums: &[[f32; 4]],
-        slot_maps: &[Vec<f32>],
-    ) -> Self {
-        let mut state = Self::new(client, shape, settings, DerivedValues::default());
-        state.set_readings_for_test(readings, immerkaer_sums, slot_maps);
-
-        state
-    }
-
-    /// Replaces every slot's reading, Immerkær abs sums and, with a strength map, slot map.
-    ///
-    /// The stream state, the derived values, the curve and the current map are kept.
-    pub(crate) fn set_readings_for_test(
-        &mut self,
-        readings: &[ReadingRecord],
-        immerkaer_sums: &[[f32; 4]],
-        slot_maps: &[Vec<f32>],
-    ) {
-        let frames = self.shape.frames as usize;
-        let reading_count = readings.len();
-        let sums_count = immerkaer_sums.len();
-        assert_eq!(reading_count, frames, "one reading per slot");
-        assert_eq!(sums_count, frames, "one row of sums per slot");
-
-        let words: Vec<f32> = readings.iter().flat_map(ReadingRecord::to_words).collect();
-        let sums: Vec<f32> = immerkaer_sums.iter().flatten().copied().collect();
-        self.readings = upload_ring(&self.client, &words);
-        self.results = upload_ring(&self.client, &sums);
-
-        let quarters = quarter_count(self.shape) as usize;
-        let client = self.client.clone();
-        if let Some(scratch) = self.classes.as_mut() {
-            let map_count = slot_maps.len();
-            assert_eq!(map_count, frames, "one map per slot");
-
-            let maps: Vec<f32> = slot_maps.iter().flatten().copied().collect();
-            let map_words = maps.len();
-            assert_eq!(map_words, quarters * frames, "one multiplier per quarter");
-
-            scratch.slot_maps = upload_ring(&client, &maps);
-        }
-    }
-
-    /// Reads the current strength map back.
-    pub(crate) fn read_current_map(&self) -> Vec<f32> {
-        let handle = self.strength_map().clone();
-        let bytes = self.client.read_one(handle).expect("the current map reads back");
-        let map = f32::from_bytes(&bytes);
-
-        map.to_vec()
-    }
-
-    /// Reads the current curve buffer back.
-    pub(crate) fn read_curve(&self) -> Vec<f32> {
-        let handle = self.curve().clone();
-        let bytes = self.client.read_one(handle).expect("the curve reads back");
-        let ratios = f32::from_bytes(&bytes);
-
-        ratios.to_vec()
-    }
-
-    /// Fills every batch's keys and tags and the block scratch with values no reading may keep.
-    ///
-    /// Every tag joins channel 1 or 2 with a key far above any sigma, and every block reads as an
-    /// accepted candidate with garbage values.
-    pub(crate) fn poison_for_test(&mut self) {
-        let client = self.client.clone();
-        let immerkaer_queries = immerkaer_queries(self.shape.temporal);
-        self.immerkaer_batch = poisoned_batch(&client, &self.immerkaer_batch, 0, &immerkaer_queries);
-
-        if let Some(sample) = self.sample.as_mut() {
-            let blocks = block_count(self.shape) as usize;
-            let values = vec![7.5f32; blocks * BLOCK_FIELDS as usize];
-            let flags = vec![BLOCK_CANDIDATE | BLOCK_ACCEPTED; blocks];
-            let value_bytes = f32::as_bytes(&values);
-            let flag_bytes = u32::as_bytes(&flags);
-
-            sample.block_values = client.create_from_slice(value_bytes);
-            sample.block_flags = client.create_from_slice(flag_bytes);
-            let sample_queries = sample_queries();
-            sample.batch = poisoned_batch(&client, &sample.batch, 0, &sample_queries);
-        }
-
-        if let Some(curve) = self.curve.as_ref() {
-            let curve_queries = curve_queries();
-            let min_count = MIN_QUARTERS_PER_BIN as u32;
-            let poisoned = poisoned_batch(&client, curve, min_count, &curve_queries);
-            self.curve = Some(poisoned);
-        }
-
-        if let Some(scratch) = self.classes.as_mut() {
-            let quarters = quarter_count(self.shape) as usize;
-            let tensor_words = quarters * QUARTER_TENSOR_WORDS as usize;
-            let map_words = quarters * self.shape.frames as usize;
-            let flags = vec![CLASS_PRESENT | CLASS_FLAT | CLASS_LINE; quarters];
-            let lumas = vec![7.5f32; quarters];
-            let tensors = vec![7.5f32; tensor_words];
-            let maps = vec![7.5f32; map_words];
-
-            let flag_bytes = u32::as_bytes(&flags);
-            scratch.classes = client.create_from_slice(flag_bytes);
-            scratch.lumas = upload_ring(&client, &lumas);
-            scratch.tensors = upload_ring(&client, &tensors);
-            scratch.slot_maps = upload_ring(&client, &maps);
-        }
-    }
-
-    pub(crate) fn has_curve_batch(&self) -> bool {
-        self.curve.is_some()
-    }
-
-    /// Reads every lane's tag of the curve batch back, empty without one.
-    pub(crate) fn read_curve_tags(&self) -> Vec<u32> {
-        let Some(curve) = self.curve.as_ref() else {
-            return Vec::new();
-        };
-
-        let handle = curve.tags().clone();
-        let bytes = self.client.read_one(handle).expect("the curve tags read back");
-        let tags = u32::from_bytes(&bytes);
-
-        tags.to_vec()
-    }
-
-    /// Reads the strength map of `slot` back, empty without a strength map.
-    pub(crate) fn read_slot_map(&self, slot: u32) -> Vec<f32> {
-        let Some(scratch) = self.classes.as_ref() else {
-            return Vec::new();
-        };
-
-        let row_bytes = u64::from(quarter_count(self.shape)) * size_of::<f32>() as u64;
-        let total_bytes = u64::from(self.shape.frames) * row_bytes;
-        let start = u64::from(slot) * row_bytes;
-        let end_trim = total_bytes - start - row_bytes;
-        let view = scratch.slot_maps.clone().offset_start(start).offset_end(end_trim);
-        let bytes = self.client.read_one(view).expect("the slot map reads back");
-        let map = f32::from_bytes(&bytes);
-
-        map.to_vec()
-    }
-
-    /// Reads every map quarter's class flags back, empty without a strength map.
-    pub(crate) fn read_quarter_flags(&self) -> Vec<u32> {
-        let Some(scratch) = self.classes.as_ref() else {
-            return Vec::new();
-        };
-
-        let handle = scratch.classes.clone();
-        let bytes = self.client.read_one(handle).expect("the quarter flags read back");
-        let flags = u32::from_bytes(&bytes);
-
-        flags.to_vec()
-    }
-
-    /// Reads every map quarter's mean luma back, empty without a strength map.
-    pub(crate) fn read_quarter_lumas(&self) -> Vec<f32> {
-        let Some(scratch) = self.classes.as_ref() else {
-            return Vec::new();
-        };
-
-        let handle = scratch.lumas.clone();
-        let bytes = self.client.read_one(handle).expect("the quarter lumas read back");
-        let lumas = f32::from_bytes(&bytes);
-
-        lumas.to_vec()
-    }
-
-    /// Reads the reading of `slot` back.
-    pub(crate) fn read_reading(&self, slot: u32) -> ReadingRecord {
-        let row_bytes = u64::from(READING_WORDS) * size_of::<f32>() as u64;
-        let total_bytes = u64::from(self.shape.frames) * row_bytes;
-        let start = u64::from(slot) * row_bytes;
-        let end_trim = total_bytes - start - row_bytes;
-        let view = self.readings.clone().offset_start(start).offset_end(end_trim);
-        let bytes = self.client.read_one(view).expect("the reading reads back");
-        let words = f32::from_bytes(&bytes);
-
-        ReadingRecord::from_words(words)
-    }
-
-    /// Reads the partials, the results row and the records of `slot` back.
-    ///
-    /// The records are empty without temporal stats.
-    pub(crate) fn read_slot_stats(&self, slot: u32) -> (Vec<f32>, [f32; 4], Vec<f32>) {
-        let handles = self.reading_handles(slot);
-        let buffers = self.client.read(handles);
-        let row = f32::from_bytes(&buffers[0]);
-        let partials = f32::from_bytes(&buffers[1]).to_vec();
-        let records = buffers
-            .get(2)
-            .map(|bytes| f32::from_bytes(bytes).to_vec())
-            .unwrap_or_default();
-
-        let mut results_row = [0.0f32; RESULTS_PER_SLOT];
-        results_row.copy_from_slice(row);
-
-        (partials, results_row, records)
-    }
-
-    /// Reads every block's flags back, empty without temporal stats.
-    pub(crate) fn read_block_flags(&self) -> Vec<u32> {
-        let Some(sample) = self.sample.as_ref() else {
-            return Vec::new();
-        };
-
-        let handle = sample.block_flags.clone();
-        let bytes = self.client.read_one(handle).expect("the block flags read back");
-        let flags = u32::from_bytes(&bytes);
-
-        flags.to_vec()
-    }
-}
-
-#[cfg(test)]
-fn upload_ring<R: Runtime>(client: &ComputeClient<R>, ring: &[f32]) -> Handle {
-    let bytes = f32::as_bytes(ring);
-    client.create_from_slice(bytes)
-}
-
-/// A batch shaped like `batch` whose every element is tagged 1 or 2 with the key of 1.0.
-///
-/// Every tag keeps `min_count`.
-#[cfg(test)]
-fn poisoned_batch<R: Runtime>(
-    client: &ComputeClient<R>,
-    batch: &SelectBatch,
-    min_count: u32,
-    queries: &[SelectQuery],
-) -> SelectBatch {
-    let len = batch.len() as usize;
-    let key = order_key_host(1.0);
-    let keys = vec![key; len];
-    let tags: Vec<u32> = (0..len).map(|index| 1 + (index % 2) as u32).collect();
-    let min_counts = vec![min_count; batch.tag_count() as usize];
-
-    SelectBatch::from_elements(client, &keys, &tags, &min_counts, queries)
 }

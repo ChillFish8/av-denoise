@@ -3,6 +3,7 @@ use cubecl::server::Handle;
 
 use super::NL4D_MV_REGULARISE;
 use crate::nl4d::kernels::{REGULARISE_CANDIDATES, nl4d_mv_regularise, nl4d_mv_regularise_coop};
+use crate::noise::DERIVED_WORDS;
 use crate::tune::fidelity::{CompareResult, Fidelity, PlaneDiff, diff_integers, diff_plane};
 use crate::tune::gpu::{bind, read_f32, read_i32, zero_words};
 use crate::tune::key::SiteKey;
@@ -181,7 +182,8 @@ pub struct RegulariseSite<R: Runtime> {
     pub mv_in: Handle,
     pub outputs: RegulariseOutputs,
     pub lambda_pixel: f32,
-    pub sad_noise_floor: f32,
+    /// The derived noise values, whose SAD floor the confidence is scored against.
+    pub noise: Handle,
     pub thsad: f32,
     pub width: u32,
     pub height: u32,
@@ -203,6 +205,7 @@ impl<R: Runtime> RegulariseSite<R> {
         let mv_in = bind::<R>(&self.mv_in, vectors_len);
         let vectors = bind::<R>(&outputs.vectors, vectors_len);
         let confidence = bind::<R>(&outputs.confidence, confidence_len);
+        let noise = bind::<R>(&self.noise, DERIVED_WORDS as usize);
 
         unsafe {
             nl4d_mv_regularise::launch_unchecked::<R>(
@@ -216,7 +219,7 @@ impl<R: Runtime> RegulariseSite<R> {
                 confidence,
                 self.centre_slot,
                 self.lambda_pixel,
-                self.sad_noise_floor,
+                noise,
                 self.thsad,
                 self.width,
                 self.height,
@@ -242,6 +245,7 @@ impl<R: Runtime> RegulariseSite<R> {
         let mv_in = bind::<R>(&self.mv_in, vectors_len);
         let vectors = bind::<R>(&outputs.vectors, vectors_len);
         let confidence = bind::<R>(&outputs.confidence, confidence_len);
+        let noise = bind::<R>(&self.noise, DERIVED_WORDS as usize);
 
         unsafe {
             nl4d_mv_regularise_coop::launch_unchecked::<R>(
@@ -255,7 +259,7 @@ impl<R: Runtime> RegulariseSite<R> {
                 confidence,
                 self.centre_slot,
                 self.lambda_pixel,
-                self.sad_noise_floor,
+                noise,
                 self.thsad,
                 self.width,
                 self.height,

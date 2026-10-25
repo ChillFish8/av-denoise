@@ -5,6 +5,7 @@ use crate::engine::align::StorageAlign;
 use crate::noise::{
     DerivedValues,
     Fold,
+    FoldSettings,
     NoiseSettings,
     NoiseShape,
     NoiseState,
@@ -38,20 +39,26 @@ pub struct ReadingMap {
     pub line_ring: usize,
 }
 
+/// What a reading builds and what its folds write.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ReadingOptions {
+    /// Whether the stats carry the luma quarter fields and the reading builds a curve, as nl4d's
+    /// luma plane does.
+    pub luma_fields: bool,
+    /// The luma strength map the reading builds after its curve.
+    pub map: Option<ReadingMap>,
+    /// The search radius of the NLM offset tables every fold writes.
+    pub offset_tables: Option<u32>,
+}
+
 /// A two-slot noise state whose slot 1 holds the stats of `ring`'s second frame against its first.
 pub struct NoiseReading<R: Runtime> {
     state: NoiseState<R>,
 }
 
 impl<R: Runtime> NoiseReading<R> {
-    /// Measures the stats of a two-frame `ring` of `width` by `height` frames.
-    ///
-    /// With `luma_fields` the stats carry the luma quarter fields and the reading builds a curve, as
-    /// nl4d's luma plane does. With `map` it then builds a luma strength map.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the plane's geometry, its frames and what the reading builds"
-    )]
+    /// Measures the stats of a two-frame `ring` of `width` by `height` frames, building what
+    /// `options` asks for.
     pub fn new(
         client: &ComputeClient<R>,
         width: u32,
@@ -59,9 +66,9 @@ impl<R: Runtime> NoiseReading<R> {
         channels: u32,
         stored_ch: u32,
         ring: &Handle,
-        luma_fields: bool,
-        map: Option<ReadingMap>,
+        options: ReadingOptions,
     ) -> Result<Self, anyhow::Error> {
+        let luma_fields = options.luma_fields;
         let shape = NoiseShape {
             width,
             height,
@@ -71,16 +78,20 @@ impl<R: Runtime> NoiseReading<R> {
             temporal: true,
             align: StorageAlign::from_client(client),
         };
-        let settings = match map {
+        let settings = match options.map {
             Some(map) => map_settings(luma_fields, map),
             None => ReadingSettings {
                 luma_fields,
                 ..ReadingSettings::default()
             },
         };
+        let fold = FoldSettings {
+            offset_tables: options.offset_tables,
+            ..FoldSettings::default()
+        };
         let noise_settings = NoiseSettings {
             reading: settings,
-            ..NoiseSettings::default()
+            fold,
         };
         let state = NoiseState::new(client, shape, noise_settings, DerivedValues::default());
         state.queue_stats(ring, 1, Some(0))?;

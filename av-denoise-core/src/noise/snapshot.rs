@@ -17,11 +17,9 @@ use super::fold::{
 };
 use super::state::NoiseState;
 
-/// A readback of one noise state's chains, curve and derived values, for tests and measurement
-/// tools.
-#[doc(hidden)]
+/// A readback of one noise state's chains, curve and derived values.
 #[derive(Debug, Clone, PartialEq)]
-pub struct NoiseSnapshot {
+pub(crate) struct NoiseSnapshot {
     pub median: Option<[f32; 3]>,
     pub low: Option<[f32; 3]>,
     pub low_unboosted: Option<[f32; 3]>,
@@ -35,24 +33,37 @@ pub struct NoiseSnapshot {
 
 impl<R: Runtime> NoiseState<R> {
     /// Reads the stream state and the derived values back, waiting for every queued fold.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "only tests read the GPU noise state back")
-    )]
+    ///
+    /// A state that holds fixed values has no chains, curve or classes.
     pub(crate) fn snapshot(&self) -> Result<NoiseSnapshot, anyhow::Error> {
-        let state_handle = self.fold_state.clone();
         let derived_handle = self.derived().clone();
-        let state_bytes = self
-            .client
-            .read_one(state_handle)
-            .map_err(|error| anyhow!("the noise state read back failed: {error:?}"))?;
         let derived_bytes = self
             .client
             .read_one(derived_handle)
             .map_err(|error| anyhow!("the derived values read back failed: {error:?}"))?;
-        let state = f32::from_bytes(&state_bytes);
         let derived_words = f32::from_bytes(&derived_bytes);
         let derived = DerivedValues::from_words(derived_words);
+
+        let Some(measurement) = self.measurement.as_ref() else {
+            let snapshot = NoiseSnapshot {
+                median: None,
+                low: None,
+                low_unboosted: None,
+                temporal_only: None,
+                rho: None,
+                curve: None,
+                classes_present: false,
+                derived,
+            };
+            return Ok(snapshot);
+        };
+
+        let state_handle = measurement.fold_state.clone();
+        let state_bytes = self
+            .client
+            .read_one(state_handle)
+            .map_err(|error| anyhow!("the noise state read back failed: {error:?}"))?;
+        let state = f32::from_bytes(&state_bytes);
 
         let curve_valid = state[STATE_CURVE_VALID as usize] != 0.0;
         let ratios_start = STATE_RATIOS as usize;

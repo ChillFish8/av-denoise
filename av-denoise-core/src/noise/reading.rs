@@ -1,5 +1,8 @@
-use super::curve::{NOISE_CURVE_BINS, NoiseCurve};
+use super::curve::NOISE_CURVE_BINS;
+#[cfg(test)]
+use super::curve::NoiseCurve;
 use super::select::{RankRule, SelectQuery};
+#[cfg(test)]
 use super::temporal::TemporalNoiseSample;
 
 /// The per-channel lower quartile of the Immerkær cube sigmas, 3 words.
@@ -30,11 +33,8 @@ pub(crate) const READING_WORDS: u32 = READING_RATIOS + NOISE_CURVE_BINS as u32;
 /// One slot's reading as a readback sees it.
 ///
 /// Flags read as 0.0 or 1.0 and counts as exact `f32` values.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "no production code reads a reading back")
-)]
 pub(crate) struct ReadingRecord {
     pub immerkaer_low: [f32; 3],
     pub sample: Option<TemporalNoiseSample>,
@@ -43,10 +43,7 @@ pub(crate) struct ReadingRecord {
     pub populated_bins: u32,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "no production code reads a reading back")
-)]
+#[cfg(test)]
 impl ReadingRecord {
     pub(crate) fn from_words(words: &[f32]) -> Self {
         let word_count = words.len();
@@ -113,11 +110,13 @@ impl ReadingRecord {
     }
 }
 
+#[cfg(test)]
 fn triple(words: &[f32], start: u32) -> [f32; 3] {
     let start = start as usize;
     [words[start], words[start + 1], words[start + 2]]
 }
 
+#[cfg(test)]
 fn set_triple(words: &mut [f32], start: u32, values: [f32; 3]) {
     let start = start as usize;
     words[start..start + 3].copy_from_slice(&values);

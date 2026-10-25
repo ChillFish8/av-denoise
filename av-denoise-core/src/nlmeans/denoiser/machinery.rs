@@ -2,7 +2,6 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::NlmDenoiser;
-use crate::nlmeans::dispatch::mc_sad_noise_floor_sigma;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 use crate::nlmeans::mirror::MirroredBuffer;
 use crate::nlmeans::motion::{self, MotionCtx};
@@ -60,7 +59,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             return Ok(None);
         }
 
-        if self.noise.is_some() {
+        if self.noise.is_measured() {
             self.update_noise_estimate(center_t)?;
         }
 
@@ -151,17 +150,6 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.mc_ctx
             .as_ref()
             .expect("motion_ctx called without motion compensation active")
-    }
-
-    /// The SAD two noisy copies of one block show by chance, which confidence is scored against.
-    ///
-    /// # Panics
-    ///
-    /// Panics unless motion compensation is active.
-    pub(crate) fn sad_noise_floor_value(&self) -> f32 {
-        let blksize = self.motion_ctx().blksize;
-        let sigma = mc_sad_noise_floor_sigma(self.params.prefilter, self.sigma_y);
-        motion::sad_noise_floor(blksize, sigma)
     }
 
     /// The SAD threshold that confidence is scored against.

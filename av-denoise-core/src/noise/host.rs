@@ -150,10 +150,6 @@ impl HostNoise {
     }
 
     /// The state as a GPU snapshot holds it, with `derived` as its derived values.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "only tests compare the host state with the GPU's")
-    )]
     pub(crate) fn snapshot(&self, channels: usize, derived: DerivedValues) -> NoiseSnapshot {
         let curve = self.curve.map(|curve| (curve.ratios, curve.sigma_quarter_median));
 
@@ -171,10 +167,6 @@ impl HostNoise {
 }
 
 /// The chain's sigmas with channels past `channels` at 0, `None` before its first update.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "only tests compare the host state with the GPU's")
-)]
 fn chain_snapshot(chain: &NoiseEstimator, channels: usize) -> Option<[f32; 3]> {
     chain.current()?;
 

@@ -1,3 +1,4 @@
+use av_denoise_core::bench_api::DerivedValues;
 use av_denoise_core::bench_api::tune_sites::{RegulariseCandidate, RegulariseOutputs, RegulariseSite};
 use av_denoise_core::tune::{SiteCandidate, VariantSite};
 use cubecl::benchmark::Benchmark;
@@ -69,6 +70,9 @@ impl<R: Runtime> Benchmark for MvRegulariseBench<R> {
         let block_area = (BLKSIZE * BLKSIZE) as f32;
         let lambda_pixel = FIELD_LAMBDA * block_area * THSAD_PIXEL;
         let thsad = block_area * THSAD_PIXEL;
+        let noise_words = DerivedValues::default().to_words();
+        let noise_bytes = f32::as_bytes(&noise_words);
+        let noise = self.client.create_from_slice(noise_bytes);
 
         let site = RegulariseSite {
             client: self.client.clone(),
@@ -80,7 +84,7 @@ impl<R: Runtime> Benchmark for MvRegulariseBench<R> {
             mv_in,
             outputs: outputs.clone(),
             lambda_pixel,
-            sad_noise_floor: 0.0,
+            noise,
             thsad,
             width: WIDTH,
             height: HEIGHT,

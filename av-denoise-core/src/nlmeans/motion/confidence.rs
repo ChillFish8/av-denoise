@@ -1,4 +1,5 @@
 use cubecl::prelude::*;
+use cubecl::server::Handle;
 
 use super::MotionCtx;
 use super::analyse::{MatchTargets, launch_fine};
@@ -30,14 +31,20 @@ pub(crate) fn thsad(blksize: u32, thsad_scale: f32) -> f32 {
 /// Scores how well each neighbour matches the centre frame without a motion search.
 ///
 /// Each block is scored where it stands at pyramid level 0, into its neighbour's `confidence`
-/// slice. The motion vectors the kernel also writes go to `mv_field` and are discarded.
+/// slice, against word `sad_field` of the derived noise values `noise`. The motion vectors the
+/// kernel also writes go to `mv_field` and are discarded.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the dispatch threads through every buffer and shape the kernel binds"
+)]
 pub(crate) fn run_confidence<R: Runtime>(
     client: &ComputeClient<R>,
     ctx: &MotionCtx,
     width: u32,
     height: u32,
     targets: &MatchTargets<'_>,
-    sad_noise_floor: f32,
+    noise: &Handle,
+    sad_field: u32,
     thsad: f32,
 ) -> Result<(), anyhow::Error> {
     debug_assert!(
@@ -53,7 +60,8 @@ pub(crate) fn run_confidence<R: Runtime>(
         targets,
         ctx.search_radius,
         0u32,
-        sad_noise_floor,
+        noise,
+        sad_field,
         thsad,
     );
 

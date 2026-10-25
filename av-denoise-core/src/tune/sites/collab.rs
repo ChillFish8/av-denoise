@@ -8,7 +8,7 @@ use super::COLLAB_FUSED;
 use crate::collab::PATCH_SIZE;
 use crate::collab::geometry::{BASELINE_GROUPS, fused_cubes_x};
 use crate::collab::kernels::fused::{Centre, CollabVariant, GROUP_LANES, NeighbourWalk, Walk, collab_fused};
-use crate::noise::NOISE_CURVE_BINS;
+use crate::noise::{DERIVED_WORDS, NOISE_CURVE_BINS};
 use crate::tune::fidelity::{CompareResult, Fidelity, diff_integers, diff_plane};
 use crate::tune::gpu::{bind, read_f32, read_i32, zero_words, zeroed_words};
 use crate::tune::key::{SiteKey, SiteKeyBuilder};
@@ -178,8 +178,8 @@ pub struct CollabInputs {
     pub conf_len: usize,
     pub neighbour_slots: Handle,
     pub neighbour_slots_len: usize,
-    /// One value per stored channel.
-    pub sigma: Handle,
+    /// The derived noise buffer.
+    pub noise: Handle,
     /// [NOISE_CURVE_BINS](crate::nlmeans::NOISE_CURVE_BINS) ratios.
     pub noise_curve: Handle,
     pub strength_map: Handle,
@@ -196,9 +196,6 @@ pub struct CollabValues {
     pub centre_slot: u32,
     pub c_min: f32,
     pub lambda_ht: f32,
-    pub curve_valid: u32,
-    pub map_mode: u32,
-    pub weight_scale: f32,
     pub accum_scale: f32,
     pub pool_ratio: f32,
 }
@@ -363,7 +360,7 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
     /// The copy's frame-sized buffers hold one word each, which [VariantSite::compile_only] never
     /// reads. The small fixed-size tables keep their sizes.
     fn on_client(&self, client: &ComputeClient<R>) -> Option<Self> {
-        let blank_inputs = blank_collab_inputs(client, self.shape.stored_ch);
+        let blank_inputs = blank_collab_inputs(client);
         let blank_outputs = blank_collab_outputs(client, self.outputs.packed);
 
         Some(Self {
@@ -422,7 +419,7 @@ impl<R: Runtime, S: Float> CollabSite<R, S> {
         let mv_field = bind::<R>(&inputs.mv_field, inputs.mv_len);
         let confidence = bind::<R>(&inputs.confidence, inputs.conf_len);
         let neighbour_slots = bind::<R>(&inputs.neighbour_slots, inputs.neighbour_slots_len);
-        let sigma = bind::<R>(&inputs.sigma, shape.stored_ch as usize);
+        let noise = bind::<R>(&inputs.noise, DERIVED_WORDS as usize);
         let noise_curve = bind::<R>(&inputs.noise_curve, NOISE_CURVE_BINS);
         let strength_map = bind::<R>(&inputs.strength_map, inputs.map_len);
         let dct_profile = bind::<R>(&inputs.dct_profile, 8);
@@ -443,7 +440,7 @@ impl<R: Runtime, S: Float> CollabSite<R, S> {
                 mv_field,
                 confidence,
                 neighbour_slots,
-                sigma,
+                noise,
                 noise_curve,
                 strength_map,
                 dct_profile,
@@ -454,9 +451,6 @@ impl<R: Runtime, S: Float> CollabSite<R, S> {
                 values.centre_slot,
                 values.c_min,
                 values.lambda_ht,
-                values.curve_valid,
-                values.map_mode,
-                values.weight_scale,
                 values.accum_scale,
                 shape.f16_search,
                 shape.radius,
@@ -530,7 +524,7 @@ pub(crate) fn clear_collab_outputs<R: Runtime>(client: &ComputeClient<R>, output
 /// Inputs for a copy that only compiles, with one word in each frame-sized buffer.
 ///
 /// The small fixed-size tables keep their sizes.
-pub(crate) fn blank_collab_inputs<R: Runtime>(client: &ComputeClient<R>, stored_ch: u32) -> CollabInputs {
+pub(crate) fn blank_collab_inputs<R: Runtime>(client: &ComputeClient<R>) -> CollabInputs {
     CollabInputs {
         ring: zeroed_words(client, 1),
         ring_len: 1,
@@ -542,7 +536,7 @@ pub(crate) fn blank_collab_inputs<R: Runtime>(client: &ComputeClient<R>, stored_
         conf_len: 1,
         neighbour_slots: zeroed_words(client, 1),
         neighbour_slots_len: 1,
-        sigma: zeroed_words(client, stored_ch as usize),
+        noise: zeroed_words(client, DERIVED_WORDS as usize),
         noise_curve: zeroed_words(client, NOISE_CURVE_BINS),
         strength_map: zeroed_words(client, 1),
         map_len: 1,

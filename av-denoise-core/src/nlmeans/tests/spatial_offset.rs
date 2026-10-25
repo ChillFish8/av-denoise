@@ -26,7 +26,7 @@ fn attenuation_params(sigma: f32) -> NlmParams {
     }
 }
 
-/// Sets the correlation state directly, as the estimator would after folding a temporal sample.
+/// Sets the spatial table's rho directly, as a fold would after a temporal sample.
 #[test]
 fn rho_attenuation_changes_spatial_weighting_on_correlated_content() {
     let client = make_client();
@@ -43,7 +43,7 @@ fn rho_attenuation_changes_spatial_weighting_on_correlated_content() {
     let rho_zero_out = rho_zero.denoise().unwrap().unwrap();
 
     let mut rho_high = NlmDenoiser::<R>::new(&client, params, width, height);
-    rho_high.host_noise.rho = Some(0.65);
+    rho_high.noise.set_fixed_rho_for_test(0.65);
     rho_high.push_frame(&frame);
     let rho_high_out = rho_high.denoise().unwrap().unwrap();
 
@@ -71,8 +71,7 @@ fn rho_attenuation_changes_spatial_weighting_on_correlated_content() {
     );
 }
 
-/// The windowed kernel reads each candidate's offset from the table, while the separable path
-/// computes it on the host.
+/// The windowed and separable kernels both read each candidate's offset from the spatial table.
 ///
 /// Only interior pixels are compared, clear of every clamped read. The two paths already differ on
 /// clamped borders, so rho 0 is checked too. That separates the border difference from anything
@@ -91,13 +90,13 @@ fn windowed_and_separable_agree_under_rho_attenuation() {
 
     for rho in [0.0f32, 0.65] {
         let mut windowed = NlmDenoiser::<R>::new(&client, params.clone(), width, height);
-        windowed.host_noise.rho = Some(rho);
+        windowed.noise.set_fixed_rho_for_test(rho);
         windowed.push_frame(&frame);
         let windowed_out = windowed.denoise().unwrap().unwrap();
 
         let mut separable = NlmDenoiser::<R>::new(&client, params.clone(), width, height);
         separable.use_separable = true;
-        separable.host_noise.rho = Some(rho);
+        separable.noise.set_fixed_rho_for_test(rho);
         separable.push_frame(&frame);
         let separable_out = separable.denoise().unwrap().unwrap();
 

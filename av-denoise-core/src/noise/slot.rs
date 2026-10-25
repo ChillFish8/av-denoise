@@ -50,16 +50,20 @@ impl<R: Runtime> NoiseState<R> {
     /// Queues the Immerkær estimate and the temporal statistics for the frame in `slot` of `input`.
     ///
     /// `previous` is the slot the residual is taken against. `None`, for a stream's first frame
-    /// or a duplicated slot, zeroes the record.
+    /// or a duplicated slot, zeroes the record. A state that holds fixed values queues nothing.
     pub(crate) fn queue_stats(
         &self,
         input: &Handle,
         slot: u32,
         previous: Option<u32>,
     ) -> Result<(), anyhow::Error> {
+        let Some(measurement) = self.measurement.as_ref() else {
+            return Ok(());
+        };
+
         self.queue_immerkaer(input, slot)?;
 
-        let Some(stats_buf) = self.stats.as_ref() else {
+        let Some(stats_buf) = measurement.stats.as_ref() else {
             return Ok(());
         };
 
@@ -95,6 +99,7 @@ impl<R: Runtime> NoiseState<R> {
     }
 
     fn queue_immerkaer(&self, input: &Handle, slot: u32) -> Result<(), anyhow::Error> {
+        let measurement = self.measurement();
         let shape = self.shape;
         let partials_slot = self.partials_slot(slot);
 
@@ -108,7 +113,7 @@ impl<R: Runtime> NoiseState<R> {
             slot,
             input_buf: input,
             partials_buf: &partials_slot,
-            results_buf: &self.results,
+            results_buf: &measurement.results,
         };
 
         run_noise_estimate(&self.client, &noise_ctx).context("noise estimate dispatch failed")
@@ -123,11 +128,7 @@ impl<R: Runtime> NoiseState<R> {
     /// and the finish, 9 launches. The luma quarter fields add curve bins and the curve batch before
     /// the finish, 13 launches, and a strength map adds the classes and the map after it, 15
     /// launches. Without temporal stats it is block derive, the immerkaer batch and the finish, 5
-    /// launches.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no production code queues a slot reading")
-    )]
+    /// launches. A state that holds fixed values queues nothing.
     pub(crate) fn queue_reading(&self, slot: u32) -> Result<u32, anyhow::Error> {
         let stages = [
             self.queue_block_derive(slot),
@@ -146,20 +147,26 @@ impl<R: Runtime> NoiseState<R> {
 
     /// Queues the Immerkær cube lanes, with temporal stats every block's derived values, and the
     /// clear of every batch.
+    ///
+    /// A state that holds fixed values queues nothing.
     pub(crate) fn queue_block_derive(&self, slot: u32) -> u32 {
+        let Some(measurement) = self.measurement.as_ref() else {
+            return 0;
+        };
+
         let shape = self.shape;
         let cubes = cube_count(shape);
         let blocks = if shape.temporal { block_count(shape) } else { 0 };
         let threads = cubes.max(blocks);
         let grid = threads.div_ceil(NOISE_BLOCK_1D);
-        let batch = &self.immerkaer_batch;
+        let batch = &measurement.immerkaer_batch;
         let batch_len = batch.len() as usize;
         let (partials, partials_words) = self.partials_view(slot);
         let block_args = self.block_args(slot, &partials, partials_words);
         let immerkaer_clear = clear_args::<R>(batch);
         let sample = self.sample_batch().unwrap_or(batch);
         let sample_clear = clear_args::<R>(sample);
-        let curve = self.curve.as_ref().unwrap_or(batch);
+        let curve = measurement.curve.as_ref().unwrap_or(batch);
         let curve_clear = clear_args::<R>(curve);
         let scale = immerkaer_sigma_scale();
 
@@ -187,7 +194,7 @@ impl<R: Runtime> NoiseState<R> {
                 shape.channels,
                 shape.stored_ch,
                 shape.temporal,
-                self.curve.is_some(),
+                measurement.curve.is_some(),
                 batch.tag_count(),
                 batch.query_count(),
             );
@@ -197,20 +204,32 @@ impl<R: Runtime> NoiseState<R> {
     }
 
     /// Queues the immerkaer batch's three histogram passes.
+    ///
+    /// A state that holds fixed values queues nothing.
     pub(crate) fn queue_immerkaer_batch(&self) -> u32 {
-        self.immerkaer_batch.queue(&self.client)
+        let Some(measurement) = self.measurement.as_ref() else {
+            return 0;
+        };
+
+        measurement.immerkaer_batch.queue(&self.client)
     }
 
     /// Queues the outlier ceiling and the sample batch's lanes, with temporal stats.
+    ///
+    /// A state that holds fixed values queues nothing.
     pub(crate) fn queue_block_accept(&self, slot: u32) -> u32 {
-        let Some(sample) = self.sample.as_ref() else {
+        let Some(measurement) = self.measurement.as_ref() else {
+            return 0;
+        };
+
+        let Some(sample) = measurement.sample.as_ref() else {
             return 0;
         };
 
         let shape = self.shape;
         let blocks = block_count(shape);
         let grid = blocks.div_ceil(SELECT_CUBE_THREADS);
-        let reference = &self.immerkaer_batch;
+        let reference = &measurement.immerkaer_batch;
         let reference_args = batch_args::<R>(reference);
         let (records, records_len) = self.records_view(slot).expect("a sample implies temporal stats");
         let values_len = (blocks * BLOCK_FIELDS) as usize;
@@ -245,8 +264,14 @@ impl<R: Runtime> NoiseState<R> {
     }
 
     /// Queues the sample batch's three histogram passes, with temporal stats.
+    ///
+    /// A state that holds fixed values queues nothing.
     pub(crate) fn queue_sample_batch(&self) -> u32 {
-        let Some(sample) = self.sample.as_ref() else {
+        let Some(measurement) = self.measurement.as_ref() else {
+            return 0;
+        };
+
+        let Some(sample) = measurement.sample.as_ref() else {
             return 0;
         };
 
@@ -254,8 +279,14 @@ impl<R: Runtime> NoiseState<R> {
     }
 
     /// Queues the curve batch's quarter lanes, with a curve batch.
+    ///
+    /// A state that holds fixed values queues nothing.
     pub(crate) fn queue_curve_bins(&self, slot: u32) -> u32 {
-        let (Some(sample), Some(curve)) = (self.sample.as_ref(), self.curve.as_ref()) else {
+        let Some(measurement) = self.measurement.as_ref() else {
+            return 0;
+        };
+
+        let (Some(sample), Some(curve)) = (measurement.sample.as_ref(), measurement.curve.as_ref()) else {
             return 0;
         };
 
@@ -290,8 +321,14 @@ impl<R: Runtime> NoiseState<R> {
     }
 
     /// Queues the curve batch's three histogram passes, with a curve batch.
+    ///
+    /// A state that holds fixed values queues nothing.
     pub(crate) fn queue_curve_batch(&self) -> u32 {
-        let Some(curve) = self.curve.as_ref() else {
+        let Some(measurement) = self.measurement.as_ref() else {
+            return 0;
+        };
+
+        let Some(curve) = measurement.curve.as_ref() else {
             return 0;
         };
 
@@ -299,12 +336,18 @@ impl<R: Runtime> NoiseState<R> {
     }
 
     /// Queues the finish, which writes the reading of `slot`.
+    ///
+    /// A state that holds fixed values queues nothing.
     pub(crate) fn queue_sample_finish(&self, slot: u32) -> u32 {
+        let Some(measurement) = self.measurement.as_ref() else {
+            return 0;
+        };
+
         let shape = self.shape;
         let threads = resolve_cube_threads(&self.client);
-        let immerkaer = &self.immerkaer_batch;
+        let immerkaer = &measurement.immerkaer_batch;
         let sample = self.sample_batch().unwrap_or(immerkaer);
-        let curve = self.curve.as_ref().unwrap_or(immerkaer);
+        let curve = measurement.curve.as_ref().unwrap_or(immerkaer);
         let immerkaer_args = batch_args::<R>(immerkaer);
         let sample_args = batch_args::<R>(sample);
         let curve_args = batch_args::<R>(curve);
@@ -329,14 +372,14 @@ impl<R: Runtime> NoiseState<R> {
                 curve_args.state,
                 curve_args.queries,
                 curve_args.tag_ranges,
-                bind(&self.readings, readings_len),
+                bind(&measurement.readings, readings_len),
                 slot,
                 blocks,
-                self.min_accepted,
+                measurement.min_accepted,
                 immerkaer.tag_count(),
                 immerkaer.query_count(),
                 shape.temporal,
-                self.curve.is_some(),
+                measurement.curve.is_some(),
                 threads,
             );
         }
@@ -345,8 +388,14 @@ impl<R: Runtime> NoiseState<R> {
     }
 
     /// Queues the class of every map quarter of `slot`, with a curve batch and a strength map.
+    ///
+    /// A state that holds fixed values queues nothing.
     pub(crate) fn queue_classify(&self, slot: u32) -> u32 {
-        let (Some(scratch), Some(_)) = (self.classes.as_ref(), self.curve.as_ref()) else {
+        let Some(measurement) = self.measurement.as_ref() else {
+            return 0;
+        };
+
+        let (Some(scratch), Some(_)) = (measurement.classes.as_ref(), measurement.curve.as_ref()) else {
             return 0;
         };
 
@@ -363,7 +412,7 @@ impl<R: Runtime> NoiseState<R> {
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(NOISE_BLOCK_1D),
                 ArrayArg::from_raw_parts(records, records_len),
-                bind(&self.readings, readings_len),
+                bind(&measurement.readings, readings_len),
                 bind(&scratch.classes, quarters),
                 bind(&scratch.lumas, quarters),
                 bind(&scratch.tensors, tensor_words),
@@ -379,8 +428,14 @@ impl<R: Runtime> NoiseState<R> {
 
     /// Queues the strength map of `slot` from its quarter classes, with a curve batch and a
     /// strength map.
+    ///
+    /// A state that holds fixed values queues nothing.
     pub(crate) fn queue_strength_map(&self, slot: u32) -> u32 {
-        let (Some(scratch), Some(_)) = (self.classes.as_ref(), self.curve.as_ref()) else {
+        let Some(measurement) = self.measurement.as_ref() else {
+            return 0;
+        };
+
+        let (Some(scratch), Some(_)) = (measurement.classes.as_ref(), measurement.curve.as_ref()) else {
             return 0;
         };
 
@@ -406,7 +461,7 @@ impl<R: Runtime> NoiseState<R> {
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(NOISE_BLOCK_1D),
-                bind(&self.readings, readings_len),
+                bind(&measurement.readings, readings_len),
                 bind(&scratch.classes, quarters),
                 bind(&scratch.lumas, quarters),
                 bind(&scratch.tensors, tensor_words),
@@ -427,7 +482,8 @@ impl<R: Runtime> NoiseState<R> {
 
     /// The curve batch's histogram and state with their lengths in words, empty without a curve.
     pub(crate) fn curve_batch_buffers(&self) -> Vec<(Handle, u32)> {
-        let Some(curve) = self.curve.as_ref() else {
+        let measurement = self.measurement();
+        let Some(curve) = measurement.curve.as_ref() else {
             return Vec::new();
         };
 
@@ -438,13 +494,15 @@ impl<R: Runtime> NoiseState<R> {
     }
 
     fn sample_batch(&self) -> Option<&SelectBatch> {
-        self.sample.as_ref().map(|sample| &sample.batch)
+        let sample = self.measurement().sample.as_ref();
+        sample.map(|sample| &sample.batch)
     }
 
     /// The records of `slot` with their length in words.
     fn records_view(&self, slot: u32) -> Option<(Handle, usize)> {
+        let measurement = self.measurement();
         let shape = self.shape;
-        let stats_buf = self.stats.as_ref()?;
+        let stats_buf = measurement.stats.as_ref()?;
         let records = temporal_stats_slot_view(
             stats_buf,
             shape.width,
@@ -461,9 +519,10 @@ impl<R: Runtime> NoiseState<R> {
 
     /// The partials of `slot` with their length in words.
     fn partials_view(&self, slot: u32) -> (Handle, usize) {
+        let measurement = self.measurement();
         let shape = self.shape;
         let partials = noise_partials_slot_view(
-            &self.partials,
+            &measurement.partials,
             shape.width,
             shape.height,
             shape.frames,
@@ -479,8 +538,9 @@ impl<R: Runtime> NoiseState<R> {
     ///
     /// Without temporal stats the kernel never touches them, so the partials of `slot` stand in.
     fn block_args(&self, slot: u32, partials: &Handle, partials_words: usize) -> BlockArgs<R> {
+        let measurement = self.measurement();
         let records = self.records_view(slot);
-        let (Some((records, records_len)), Some(sample)) = (records, self.sample.as_ref()) else {
+        let (Some((records, records_len)), Some(sample)) = (records, measurement.sample.as_ref()) else {
             return BlockArgs {
                 records: bind(partials, partials_words),
                 values: bind(partials, partials_words),

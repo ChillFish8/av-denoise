@@ -1,5 +1,6 @@
 use av_denoise_core::bench_api::kernels::motion::{BLOCK_MATCH_THREADS, nlm_mc_block_match_fine};
 use av_denoise_core::bench_api::motion::{DEFAULT_BLKSIZE, DEFAULT_OVERLAP};
+use av_denoise_core::bench_api::{DERIVED_CONFIDENCE_SAD_FLOOR, DERIVED_WORDS, DerivedValues};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -32,6 +33,8 @@ pub struct ConfidenceInput {
     pub neighbour_slots: Handle,
     pub mv_scratch: Handle,
     pub confidence: Handle,
+    /// The derived noise values, with SAD floors of 0.
+    pub noise: Handle,
 }
 
 impl<R: Runtime> Benchmark for McConfidenceBench<R> {
@@ -59,11 +62,16 @@ impl<R: Runtime> Benchmark for McConfidenceBench<R> {
         let mv_scratch = self.client.empty(neighbours * blocks * 2 * size_of::<i32>());
         let confidence = self.client.empty(neighbours * blocks * size_of::<f32>());
 
+        let noise_words = DerivedValues::default().to_words();
+        let noise_bytes = f32::as_bytes(&noise_words);
+        let noise = self.client.create_from_slice(noise_bytes);
+
         ConfidenceInput {
             pyramid,
             neighbour_slots,
             mv_scratch,
             confidence,
+            noise,
         }
     }
 
@@ -87,6 +95,7 @@ impl<R: Runtime> Benchmark for McConfidenceBench<R> {
             let neighbour_slots_arg = ArrayArg::from_raw_parts(args.neighbour_slots, neighbours);
             let mv_scratch_arg = ArrayArg::from_raw_parts(args.mv_scratch, mv_len);
             let confidence_arg = ArrayArg::from_raw_parts(args.confidence, conf_len);
+            let noise_arg = ArrayArg::from_raw_parts(args.noise, DERIVED_WORDS as usize);
 
             nlm_mc_block_match_fine::launch_unchecked::<R>(
                 &self.client,
@@ -98,7 +107,8 @@ impl<R: Runtime> Benchmark for McConfidenceBench<R> {
                 confidence_arg,
                 0u32,
                 true, // The confidence write is what this bench measures.
-                0.0,
+                noise_arg,
+                DERIVED_CONFIDENCE_SAD_FLOOR,
                 thsad,
                 WIDTH,
                 HEIGHT,

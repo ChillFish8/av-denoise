@@ -7,6 +7,7 @@ use super::regularise::{
     load_centre_tile,
     write_winner,
 };
+use crate::noise::DERIVED_SAD_FLOOR;
 
 /// Clamps a coordinate into `0..limit` without a branch.
 #[cube]
@@ -22,7 +23,8 @@ fn clamp_index(value: i32, limit: i32) -> i32 {
 /// `threads` is a power of two of at least 8. Each thread sums the absolute differences of every
 /// `threads`-th pixel of the block for all seven candidates, so neighbouring threads read
 /// neighbouring pixels. The partial sums meet in shared memory through a tree with one barrier per
-/// level. Thread 0 then costs the candidates and writes the winner and its confidence.
+/// level. Thread 0 then costs the candidates and writes the winner and its confidence, scored
+/// against the SAD floor of the derived noise values `noise`.
 ///
 /// Every frame is a full-resolution luma slot of `pyramid`, `slot_pixels` values apart. The
 /// neighbour runs on z. Neighbour `n` re-scores the field `n * mv_stride` values into `mv_in`
@@ -40,7 +42,7 @@ pub fn nl4d_mv_regularise_coop(
     confidence_out: &mut Array<f32>,
     centre_slot: u32,
     lambda_pixel: f32,
-    sad_noise_floor: f32,
+    noise: &Array<f32>,
     thsad: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -170,7 +172,7 @@ pub fn nl4d_mv_regularise_coop(
             mv_base,
             conf_base,
             block,
-            sad_noise_floor,
+            noise[DERIVED_SAD_FLOOR as usize],
             thsad,
         );
     }

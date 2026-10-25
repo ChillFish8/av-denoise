@@ -8,11 +8,13 @@ pub(crate) const CORRELATION_FACTOR_TABLE: [(f32, f32); 4] =
     [(0.0, 1.0), (0.3, 1.05), (0.5, 1.25), (0.65, 1.45)];
 
 /// The factor that scales a measured temporal sigma up to allow for grain correlation.
+#[cfg(test)]
 pub(crate) fn correlation_factor(rho: f32) -> f32 {
     interpolate_table(&CORRELATION_FACTOR_TABLE, rho)
 }
 
 /// Linearly interpolates a table of points sorted by `x`, clamping `x` to the table's range.
+#[cfg(test)]
 pub(crate) fn interpolate_table(table: &[(f32, f32)], x: f32) -> f32 {
     let x = x.clamp(table[0].0, table[table.len() - 1].0);
 
@@ -57,6 +59,15 @@ pub(crate) fn spatial_offset_lut_len(search_radius: u32) -> usize {
     side * side
 }
 
+/// The row-major position of the candidate at `dx`, `dy` in a search window's table.
+pub(crate) fn spatial_offset_index(search_radius: u32, dx: i32, dy: i32) -> u32 {
+    let radius = search_radius as i32;
+    let side = 2 * radius + 1;
+    let index = (dy + radius) * side + (dx + radius);
+
+    index as u32
+}
+
 /// Builds the row-major noise-floor table for a search window.
 ///
 /// Each entry is the flat noise offset scaled by [spatial_offset_factor] at that candidate. It is
@@ -68,7 +79,7 @@ pub(crate) fn build_spatial_offset_lut(search_radius: u32, rho: f32, noise_offse
 
     for dy in -radius..=radius {
         for dx in -radius..=radius {
-            let index = ((dy + radius) as usize) * side + (dx + radius) as usize;
+            let index = spatial_offset_index(search_radius, dx, dy) as usize;
             lut[index] = noise_offset * spatial_offset_factor(dx, dy, rho);
         }
     }

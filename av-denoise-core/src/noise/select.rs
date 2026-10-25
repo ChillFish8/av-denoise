@@ -70,10 +70,7 @@ pub enum RankRule {
     QuartileHigh = 5,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "no production kernel queues a select batch")
-)]
+#[cfg(test)]
 impl RankRule {
     /// The 0-based rank the rule picks from `count` elements. `count` must be above 0.
     pub(crate) fn rank(self, count: u32) -> u32 {

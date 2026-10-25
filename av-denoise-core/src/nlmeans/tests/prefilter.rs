@@ -218,13 +218,15 @@ fn nlm_spatial_zeros_main_offset_but_keeps_input_offset() {
     );
 
     let denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let snapshot = denoiser.noise_snapshot().expect("the noise state reads back");
+    let derived = snapshot.derived;
 
     assert_eq!(
-        denoiser.noise_offset, 0.0,
+        derived.noise_offset, 0.0,
         "main-pass offset must be zeroed for NlmSpatial"
     );
     assert_eq!(
-        denoiser.input_noise_offset, expected_input_offset,
+        derived.input_noise_offset, expected_input_offset,
         "pilot-facing offset must keep the full noise floor"
     );
 }

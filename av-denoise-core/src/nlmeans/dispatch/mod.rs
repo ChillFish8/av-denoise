@@ -3,7 +3,7 @@ mod motion;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-pub(super) use self::motion::mc_sad_noise_floor_sigma;
+pub(crate) use self::motion::mc_sad_noise_floor_sigma;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(super) use self::motion::{BILATERAL_RESIDUAL_FRACTION, NLM_SPATIAL_RESIDUAL_FRACTION};
 use super::denoiser::NlmDenoiser;
@@ -22,12 +22,23 @@ use super::kernels::{
 use super::motion::{confidence_byte_offset, neighbour_idx_for_k};
 use super::{BLOCK_1D, BLOCK_X, BLOCK_Y, MAX_GRID_1D};
 use crate::engine::timing::{timed, units_per_span};
-use crate::noise::{build_spatial_offset_lut, spatial_offset_factor, spatial_offset_lut_len};
+use crate::noise::{
+    DERIVED_H2_INV_NORM,
+    DERIVED_PILOT_H2_INV_NORM,
+    DERIVED_WORDS,
+    spatial_offset_index,
+    spatial_offset_lut_len,
+};
 use crate::tune::gpu::bind;
 use crate::tune::sites::{AccumOutputs, AccumulateSite, ConfidenceBinding, WindowPass, WindowSite};
 
 /// The most dispatches one separable search offset queues.
 const SEPARABLE_DISPATCHES_PER_OFFSET: u32 = 4;
+
+/// The NLM pilot's `h2_inv_norm`, the main pass's strength scaled by `strength_scale`.
+pub(super) fn pilot_h2_inv_norm(h2_inv_norm: f32, strength_scale: f32) -> f32 {
+    h2_inv_norm / (strength_scale * strength_scale)
+}
 
 /// The sizes and tile launch shape one frame's dispatches share.
 ///
@@ -201,6 +212,8 @@ impl<R: Runtime> NlmDenoiser<R> {
     }
 
     /// A windowed launch over `input` that adds into the frame accumulators.
+    ///
+    /// Its strength is the derived buffer word `h2_field`.
     fn window_site(
         &self,
         ctx: &LaunchCtx,
@@ -208,9 +221,10 @@ impl<R: Runtime> NlmDenoiser<R> {
         input: Handle,
         reference: Option<Handle>,
         frame_t: u32,
-        h2_inv_norm: f32,
+        h2_field: u32,
     ) -> WindowSite<R> {
         let outputs = self.accum_outputs(ctx);
+        let noise = self.derived_handle();
 
         WindowSite {
             client: self.client.clone(),
@@ -220,7 +234,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             ring_len: ctx.total_frame_data,
             outputs,
             frame_t,
-            h2_inv_norm,
+            noise,
+            h2_field,
             width: self.width,
             height: self.height,
             channels: self.params.channels.count(),
@@ -247,12 +262,11 @@ impl<R: Runtime> NlmDenoiser<R> {
         let pass = WindowPass::Pair {
             frame_fwd,
             frame_bwd,
-            noise_offset: self.noise_offset,
             confidence,
         };
         let input = self.temporal_input();
         let reference = self.temporal_reference();
-        let site = self.window_site(ctx, pass, input, reference, frame_t, self.h2_inv_norm);
+        let site = self.window_site(ctx, pass, input, reference, frame_t, DERIVED_H2_INV_NORM);
 
         self.kernels.run(&site)
     }
@@ -265,12 +279,12 @@ impl<R: Runtime> NlmDenoiser<R> {
         let frame_t = self.phys_frame(center_t as i32);
         let offsets_len = spatial_offset_lut_len(self.params.search_radius);
         let pass = WindowPass::Single {
-            offsets: self.spatial_offset_lut.handle().clone(),
+            offsets: self.spatial_offsets_handle(),
             offsets_len,
         };
         let input = self.input_buf.clone();
         let reference = self.plain_reference();
-        let site = self.window_site(ctx, pass, input, reference, frame_t, self.h2_inv_norm);
+        let site = self.window_site(ctx, pass, input, reference, frame_t, DERIVED_H2_INV_NORM);
 
         self.kernels.run(&site)
     }
@@ -354,6 +368,8 @@ impl<R: Runtime> NlmDenoiser<R> {
         let confidence = self.confidence_binding(q_k);
         let conf_fwd = bind::<R>(&confidence.forward, confidence.len);
         let conf_bwd = bind::<R>(&confidence.backward, confidence.len);
+        let derived = self.derived_handle();
+        let noise = bind::<R>(&derived, DERIVED_WORDS as usize);
 
         unsafe {
             nlm_vweight_pair_accumulate::launch_unchecked::<R>(
@@ -374,8 +390,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                 frame_bwd,
                 q_x,
                 q_y,
-                self.h2_inv_norm,
-                self.noise_offset,
+                noise,
                 self.width,
                 self.height,
                 self.params.patch_radius,
@@ -456,11 +471,14 @@ impl<R: Runtime> NlmDenoiser<R> {
             );
         }
 
-        // The same correlation-adjusted offset the spatial table holds for this candidate, computed
-        // directly because the candidate is already known here.
-        let rho = self.host_noise.rho.unwrap_or(0.0);
-        let offset_factor = spatial_offset_factor(q_x, q_y, rho);
-        let offset = self.noise_offset * offset_factor;
+        // The candidate's entry in the spatial table, which holds its correlation-adjusted offset.
+        let derived = self.derived_handle();
+        let noise = bind::<R>(&derived, DERIVED_WORDS as usize);
+        let offsets_len = spatial_offset_lut_len(self.params.search_radius);
+        let offsets_handle = self.spatial_offsets_handle();
+        let offsets = bind::<R>(&offsets_handle, offsets_len);
+        let offset_index = spatial_offset_index(self.params.search_radius, q_x, q_y);
+
         unsafe {
             nlm_vertical_weight::launch_unchecked::<R>(
                 &self.client,
@@ -468,8 +486,9 @@ impl<R: Runtime> NlmDenoiser<R> {
                 ctx.cube_dim,
                 self.tmp_hsum_arg(ctx),
                 self.weight_buf_arg(ctx),
-                self.h2_inv_norm,
-                offset,
+                noise,
+                offsets,
+                offset_index,
                 self.width,
                 self.height,
                 self.params.patch_radius,
@@ -578,33 +597,23 @@ impl<R: Runtime> NlmDenoiser<R> {
     /// Denoises a pushed frame with the windowed spatial kernel into its reference-ring slot.
     ///
     /// It shares the frame accumulators with the main pass. That is safe because the GPU queue runs
-    /// in order and the main pass zeroes them before use.
-    pub(super) fn run_nlm_spatial_pilot(
-        &mut self,
-        slot: u32,
-        strength_scale: f32,
-    ) -> Result<(), anyhow::Error> {
-        // A flat table with no correlation adjustment, because the pilot compares noisy input
-        // patches. Any upload happens before the first dispatch, because an upload ends a device
-        // span's timed pass.
-        let pilot_lut = build_spatial_offset_lut(self.params.search_radius, 0.0, self.input_noise_offset);
-        let pilot_lut_bytes = f32::as_bytes(&pilot_lut);
-        self.pilot_offset_lut.update(&self.client, pilot_lut_bytes);
-        let pilot_lut_handle = self.pilot_offset_lut.handle().clone();
-
+    /// in order and the main pass zeroes them before use. Its strength is the derived buffer's
+    /// pilot word, and its offsets are the noise state's flat pilot table, since the pilot compares
+    /// noisy input patches.
+    pub(super) fn run_nlm_spatial_pilot(&self, slot: u32) -> Result<(), anyhow::Error> {
         let ctx = self.launch_ctx();
         self.zero_accumulators(&ctx)?;
 
-        let pilot_h2 = self.h2_inv_norm / (strength_scale * strength_scale);
+        let offsets_len = spatial_offset_lut_len(self.params.search_radius);
         let pass = WindowPass::Single {
-            offsets: pilot_lut_handle,
-            offsets_len: pilot_lut.len(),
+            offsets: self.pilot_offsets_handle(),
+            offsets_len,
         };
         let input = self.input_buf.clone();
 
         // Always the noisy input. For `NlmSpatial` the reference ring is this pass's output, even
         // though `use_reference` is set so the main pass picks the `_ref` kernels.
-        let site = self.window_site(&ctx, pass, input, None, slot, pilot_h2);
+        let site = self.window_site(&ctx, pass, input, None, slot, DERIVED_PILOT_H2_INV_NORM);
         self.kernels.run(&site)?;
 
         let reference_ring = self.reference_ring_arg(&ctx);

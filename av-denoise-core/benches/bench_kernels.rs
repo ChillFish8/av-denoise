@@ -286,8 +286,15 @@ fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
         });
     }
 
-    // The stream state's launches, a fold with and without the map copy, and the reset.
-    for stage in [FoldStage::Fold, FoldStage::FoldWithMap, FoldStage::Reset] {
+    // The stream state's launches, a fold alone, with the map copy and with the offset tables, and
+    // the reset.
+    let fold_stages = [
+        FoldStage::Fold,
+        FoldStage::FoldWithMap,
+        FoldStage::FoldWithTables,
+        FoldStage::Reset,
+    ];
+    for stage in fold_stages {
         run(FoldBench {
             client: client.clone(),
             stage,

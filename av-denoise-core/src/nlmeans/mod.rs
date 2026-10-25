@@ -24,6 +24,8 @@ mod options;
 pub(crate) mod tests;
 
 pub(crate) use self::denoiser::{NlmDenoiser, RingView};
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+pub(crate) use self::dispatch::mc_sad_noise_floor_sigma;
 pub use self::engine::Nlmeans;
 pub use self::motion::{MotionCompensationMode, MotionEstimation, MotionSearch};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]

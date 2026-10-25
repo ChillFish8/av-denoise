@@ -9,14 +9,15 @@ pub(crate) const SIGMA_FLOOR: f32 = 0.1 / 255.0;
 ///
 /// Smoothing stops a single busy frame from spiking the strength, and the floor keeps near-clean
 /// content on a usable normalisation factor.
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct NoiseEstimator {
     ema: Option<Vec<f32>>,
 }
 
+#[cfg(test)]
 impl NoiseEstimator {
     /// An estimator whose smoothed values are `current`, `None` for one before its first update.
-    #[cfg(test)]
     pub(crate) fn from_current(current: Option<&[f32]>) -> Self {
         let ema = current.map(<[f32]>::to_vec);
         Self { ema }

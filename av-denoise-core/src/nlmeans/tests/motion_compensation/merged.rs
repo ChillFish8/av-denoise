@@ -8,6 +8,8 @@ use crate::nlmeans::kernels::motion::{
     nlm_mc_block_match_fine,
 };
 use crate::nlmeans::tests::helpers::{R, make_client};
+use crate::noise::tests::sad_floor_buffer;
+use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
 
 const WIDTH: u32 = 72;
 const HEIGHT: u32 = 56;
@@ -137,6 +139,9 @@ fn run_fine_merged_against_reference(use_seed: u32, threads: u32) {
         let mv_field_arg = ArrayArg::from_raw_parts(mv_field_handle, seeds_len);
         let confidence_arg = ArrayArg::from_raw_parts(confidence_handle, unwritten_len);
 
+        let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, NOISE_FLOOR);
+        let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
+
         nlm_mc_block_match_fine::launch_unchecked::<R>(
             &client,
             grid,
@@ -147,7 +152,8 @@ fn run_fine_merged_against_reference(use_seed: u32, threads: u32) {
             confidence_arg,
             CENTRE_SLOT,
             true,
-            NOISE_FLOOR,
+            noise_arg,
+            DERIVED_SAD_FLOOR,
             THSAD,
             WIDTH,
             HEIGHT,

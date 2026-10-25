@@ -46,7 +46,15 @@ use super::transforms::{
 use crate::collab::{MAX_K, MAX_TEMPORAL_RADIUS, PATCH_AREA, PATCH_SIZE, STEP};
 use crate::engine::kernels::read_line;
 use crate::nlmeans::kernels::helpers::channel_scale;
-use crate::noise::{NOISE_CURVE_BINS, STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA};
+use crate::noise::{
+    DERIVED_CURVE_VALID,
+    DERIVED_MAP_MODE,
+    DERIVED_SIGMA,
+    DERIVED_WEIGHT_SCALE,
+    NOISE_CURVE_BINS,
+    STRENGTH_MAP_ALL,
+    STRENGTH_MAP_LUMA,
+};
 
 /// The smallest factor the noise curve may scale the luma threshold by.
 const NOISE_CURVE_SCALE_MIN: f32 = 0.33;
@@ -123,15 +131,16 @@ const _: () = assert!(
 ///
 /// `group_weight` gets `1 / sum(v_j)` over the kept coefficients, the inverse-variance weight, so
 /// a group that keeps more coefficients is trusted more. It comes from channel 0 only, because
-/// luma dominates and one weight per group keeps aggregation simple. `weight_scale` maps it into
-/// the fixed-point band before the scatter.
+/// luma dominates and one weight per group keeps aggregation simple. The derived weight scale maps
+/// it into the fixed-point band before the scatter.
 ///
 /// `ring` holds frames in ring-slot order. `ring_scalar` is the same buffer bound as single floats.
 /// `centre_slot` is the slot the pass is centred on. `neighbour_slots` maps a packed neighbour
 /// index to its slot. `accum` and `wsum` hold one region per slot, so a neighbour-frame member
 /// scatters into its own frame's region. `accum_scale` is the fixed-point scale of that scatter.
-/// `sigma` holds one value per stored channel.
-/// `noise_curve` holds `NOISE_CURVE_BINS` ratios and is read only when `curve_valid` is not 0.
+/// `noise` is the derived noise buffer, which gives the sigma of each channel, the weight scale,
+/// the curve flag and the strength map mode. `noise_curve` holds `NOISE_CURVE_BINS` ratios and is
+/// read only when the curve flag is set.
 /// `strength_map` holds `map_cols * map_rows` row-major multipliers laid out by
 /// [strength_map_dims](crate::collab::geometry::strength_map_dims). `kaiser` holds
 /// [kaiser_window](crate::collab::kernels::aggregate::kaiser_window)'s taps. `dct_profile` holds
@@ -172,7 +181,7 @@ pub fn collab_fused<S: Float, N: Size, W: Int>(
     mv_field: &Array<i32>,
     confidence: &Array<f32>,
     neighbour_slots: &Array<u32>,
-    sigma: &Array<f32>,
+    noise: &Array<f32>,
     noise_curve: &Array<f32>,
     strength_map: &Array<f32>,
     dct_profile: &Array<f32>,
@@ -183,9 +192,6 @@ pub fn collab_fused<S: Float, N: Size, W: Int>(
     centre_slot: u32,
     c_min: f32,
     lambda_ht: f32,
-    curve_valid: u32,
-    map_mode: u32,
-    weight_scale: f32,
     accum_scale: f32,
     #[comptime] f16_search: bool,
     #[comptime] radius: u32,
@@ -318,7 +324,7 @@ pub fn collab_fused<S: Float, N: Size, W: Int>(
     filter_group::<W>(
         ring_scalar,
         neighbour_slots,
-        sigma,
+        noise,
         noise_curve,
         strength_map,
         dct_profile,
@@ -339,9 +345,6 @@ pub fn collab_fused<S: Float, N: Size, W: Int>(
         sub,
         group,
         lambda_ht,
-        curve_valid,
-        map_mode,
-        weight_scale,
         accum_scale,
         pool_ratio,
         grid_frames,
@@ -574,7 +577,7 @@ pub(crate) fn search_group<S: Float, N: Size>(
 pub(crate) fn filter_group<W: Int>(
     ring_scalar: &Array<f32>,
     neighbour_slots: &Array<u32>,
-    sigma: &Array<f32>,
+    noise: &Array<f32>,
     noise_curve: &Array<f32>,
     strength_map: &Array<f32>,
     dct_profile: &Array<f32>,
@@ -595,9 +598,6 @@ pub(crate) fn filter_group<W: Int>(
     sub: u32,
     group: u32,
     lambda_ht: f32,
-    curve_valid: u32,
-    map_mode: u32,
-    weight_scale: f32,
     accum_scale: f32,
     pool_ratio: f32,
     #[comptime] grid_frames: u32,
@@ -642,11 +642,16 @@ pub(crate) fn filter_group<W: Int>(
     let lower_ratio = noise_curve[lower_bin as usize];
     let upper_ratio = noise_curve[(lower_bin + 1u32) as usize];
     let ratio = lower_ratio + (upper_ratio - lower_ratio) * fraction;
+
+    let curve_valid = noise[DERIVED_CURVE_VALID as usize] != 0.0f32;
+    let map_mode = u32::cast_from(noise[DERIVED_MAP_MODE as usize]);
+    let weight_scale = noise[DERIVED_WEIGHT_SCALE as usize];
+
     let map_scale = strength_map_scale(strength_map, ref_x, ref_y, map_cols, map_rows);
     let mapped_ratio = select(map_mode == STRENGTH_MAP_LUMA, ratio * map_scale, ratio);
     let curve_scale = f32::clamp(mapped_ratio, NOISE_CURVE_SCALE_MIN, NOISE_CURVE_SCALE_MAX);
     let other_lambda = select(map_mode == STRENGTH_MAP_ALL, lambda_ht * map_scale, lambda_ht);
-    let luma_lambda = select(curve_valid != 0u32, lambda_ht * curve_scale, other_lambda);
+    let luma_lambda = select(curve_valid, lambda_ht * curve_scale, other_lambda);
 
     // Computed from channel 0 and reused by every later channel's scatter.
     let mut scaled_weight = 0.0f32;
@@ -654,7 +659,8 @@ pub(crate) fn filter_group<W: Int>(
     // The channel loop runs at runtime, which keeps one copy of the filter in the kernel. Every
     // loop inside it unrolls, and its comptime trip count keeps every lane on every barrier.
     for c in 0..channels {
-        let sigma_c = sigma[c as usize];
+        let sigma_index = DERIVED_SIGMA + c;
+        let sigma_c = noise[sigma_index as usize];
         let base_sig2 = sigma_c * sigma_c;
 
         // Lane `sub` holds `stack[m * 8 + r]` for member `m`, row `r`, read from the member's own

@@ -72,6 +72,7 @@ fn settings(map: StrengthMapKind, borrow_ahead: bool) -> NoiseSettings {
         borrow_ahead,
         consumer: CONSUMER,
         coefficients: COEFFICIENTS,
+        offset_tables: None,
     };
 
     NoiseSettings { reading, fold }

@@ -14,6 +14,8 @@ use crate::nlmeans::motion::{
     thsad,
 };
 use crate::nlmeans::*;
+use crate::noise::tests::sad_floor_buffer;
+use crate::noise::{DERIVED_CONFIDENCE_SAD_FLOOR, DERIVED_SAD_FLOOR, DERIVED_WORDS};
 
 /// Lays `frames` out as a single-level pyramid at the slot stride `run_pyramid_build` writes.
 ///
@@ -59,6 +61,9 @@ fn run_fine_confidence(
         let mv_field_arg = ArrayArg::from_raw_parts(mv_field, 2);
         let confidence_arg = ArrayArg::from_raw_parts(confidence_handle, 1);
 
+        let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, sad_noise_floor);
+        let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
+
         nlm_mc_block_match_fine::launch_unchecked::<R>(
             &client,
             grid,
@@ -69,7 +74,8 @@ fn run_fine_confidence(
             confidence_arg,
             0u32,
             true,
-            sad_noise_floor,
+            noise_arg,
+            DERIVED_SAD_FLOOR,
             thsad,
             blksize,
             blksize,
@@ -307,6 +313,7 @@ fn run_analyse_fills_confidence_buffer() {
     let neighbour_slots = client.create_from_slice(slot_table_bytes);
 
     let floor = sad_noise_floor(mc.blksize, 4.0 / 255.0);
+    let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, floor);
     let threshold = thsad(mc.blksize, 1.0);
 
     let targets = MatchTargets {
@@ -321,8 +328,17 @@ fn run_analyse_fills_confidence_buffer() {
         conf_len: blocks,
         write_confidence: true,
     };
-    run_analyse::<R>(&client, &mc, width, height, &targets, floor, threshold)
-        .expect("run_analyse dispatch failed");
+    run_analyse::<R>(
+        &client,
+        &mc,
+        width,
+        height,
+        &targets,
+        &noise,
+        DERIVED_SAD_FLOOR,
+        threshold,
+    )
+    .expect("run_analyse dispatch failed");
 
     let bytes = client.read_one(confidence).expect("confidence readback failed");
     let data = f32::from_bytes(&bytes);
@@ -338,6 +354,10 @@ fn run_analyse_fills_confidence_buffer() {
             "block {i}: confidence left at the sentinel, kernel didn't write it"
         );
     }
+
+    let total: f32 = data.iter().sum();
+    let mean = total / data.len() as f32;
+    assert!(mean > 0.5, "matched noisy copies score {mean} on average");
 }
 
 #[test]
@@ -367,6 +387,7 @@ fn run_confidence_fills_confidence_buffer() {
     let neighbour_slots = client.create_from_slice(slot_table_bytes);
 
     let floor = sad_noise_floor(ctx.blksize, 4.0 / 255.0);
+    let noise = sad_floor_buffer(&client, DERIVED_CONFIDENCE_SAD_FLOOR, floor);
     let threshold = thsad(ctx.blksize, 1.0);
 
     let targets = MatchTargets {
@@ -381,8 +402,17 @@ fn run_confidence_fills_confidence_buffer() {
         conf_len: blocks,
         write_confidence: true,
     };
-    run_confidence::<R>(&client, &ctx, width, height, &targets, floor, threshold)
-        .expect("run_confidence dispatch failed");
+    run_confidence::<R>(
+        &client,
+        &ctx,
+        width,
+        height,
+        &targets,
+        &noise,
+        DERIVED_CONFIDENCE_SAD_FLOOR,
+        threshold,
+    )
+    .expect("run_confidence dispatch failed");
 
     let bytes = client.read_one(confidence).expect("confidence readback failed");
     let data = f32::from_bytes(&bytes);
@@ -398,6 +428,10 @@ fn run_confidence_fills_confidence_buffer() {
             "block {i}: confidence left at the sentinel, kernel didn't write it"
         );
     }
+
+    let total: f32 = data.iter().sum();
+    let mean = total / data.len() as f32;
+    assert!(mean > 0.5, "matched noisy copies score {mean} on average");
 }
 
 #[test]

@@ -1,10 +1,13 @@
 use cubecl::prelude::*;
+use cubecl::server::Handle;
 
-use super::helpers::{R, make_client, make_noisy_gaussian_frame};
+use super::helpers::{R, correlated_noisy_frame, make_client, make_noisy_gaussian_frame};
 use crate::bench_api::HostIo;
 use crate::nlmeans::mirror::MirroredBuffer;
 use crate::nlmeans::*;
-use crate::noise::build_spatial_offset_lut;
+use crate::noise::tests::fold_reference::relative_gap;
+use crate::noise::tests::frames::MAX_RELATIVE;
+use crate::noise::{DerivedValues, build_spatial_offset_lut};
 
 const SIZE: u32 = 64;
 
@@ -92,56 +95,169 @@ fn run_frames(denoiser: &mut NlmDenoiser<R>, count: usize) {
     for index in 0..count {
         push_frame_at(denoiser, index);
 
-        let denoised = denoiser.denoise();
-        denoised.expect("denoise");
+        denoiser.denoise().expect("denoise");
     }
 }
 
-#[test]
-fn a_pinned_sigma_uploads_the_spatial_offset_table_once() {
-    let mut denoiser = hq_denoiser(PrefilterMode::None, Some(0.02));
-    run_frames(&mut denoiser, 6);
+fn read_table(denoiser: &NlmDenoiser<R>, handle: Handle) -> Vec<f32> {
+    let bytes = denoiser.client.read_one(handle).expect("the table reads back");
+    f32::from_bytes(&bytes).to_vec()
+}
 
-    let (spatial, _) = denoiser.spatial_offset_lut_for_test();
-    assert_eq!(spatial.uploads(), 1);
+fn spatial_table(denoiser: &NlmDenoiser<R>) -> Vec<f32> {
+    let handle = denoiser.spatial_offsets_handle();
+    read_table(denoiser, handle)
+}
+
+fn pilot_table(denoiser: &NlmDenoiser<R>) -> Vec<f32> {
+    let handle = denoiser.pilot_offsets_handle();
+    read_table(denoiser, handle)
+}
+
+fn derived_values(denoiser: &NlmDenoiser<R>) -> DerivedValues {
+    let snapshot = denoiser.noise_snapshot().expect("the noise state reads back");
+    snapshot.derived
+}
+
+/// Checks every entry of `actual` within [MAX_RELATIVE] of `expected`, with the centre exactly 0.
+fn assert_table_close(actual: &[f32], expected: &[f32], what: &str) {
+    assert_eq!(actual.len(), expected.len(), "{what}: the table length");
+
+    let centre = actual.len() / 2;
+    let centre_bits = actual[centre].to_bits();
+    assert_eq!(centre_bits, 0, "{what}: the centre entry");
+
+    let pairs = actual.iter().zip(expected).enumerate();
+    for (index, (&gpu, &host)) in pairs {
+        let gap = relative_gap(gpu, host);
+        assert!(
+            gap <= MAX_RELATIVE,
+            "{what}: entry {index} is {gap:e} apart, {gpu:e} against {host:e}"
+        );
+    }
+}
+
+fn table_bits(table: &[f32]) -> Vec<u32> {
+    table.iter().map(|entry| entry.to_bits()).collect()
 }
 
 #[test]
-fn a_pinned_sigma_uploads_the_pilot_offset_table_once() {
-    let prefilter = pilot_prefilter();
-    let mut denoiser = hq_denoiser(prefilter, Some(0.02));
+fn a_pinned_sigma_keeps_the_host_spatial_offset_table() {
+    let mut denoiser = hq_denoiser(PrefilterMode::None, Some(0.02));
+    let before = spatial_table(&denoiser);
     run_frames(&mut denoiser, 6);
 
-    let pilot = denoiser.pilot_offset_lut_for_test();
-    assert_eq!(pilot.uploads(), 1);
+    let after = spatial_table(&denoiser);
+    let derived = derived_values(&denoiser);
+    let search_radius = denoiser.params.search_radius;
+    let expected = build_spatial_offset_lut(search_radius, 0.0, derived.noise_offset);
+    let before_bits = table_bits(&before);
+    let after_bits = table_bits(&after);
+    let expected_bits = table_bits(&expected);
+
+    assert!(derived.noise_offset > 0.0, "the pinned sigma sets a noise floor");
+    assert_eq!(after_bits, before_bits, "the frames leave the table alone");
+    assert_eq!(after_bits, expected_bits);
+}
+
+#[test]
+fn a_pinned_sigma_keeps_the_host_pilot_offset_table() {
+    let prefilter = pilot_prefilter();
+    let mut denoiser = hq_denoiser(prefilter, Some(0.02));
+    let before = pilot_table(&denoiser);
+    run_frames(&mut denoiser, 6);
+
+    let after = pilot_table(&denoiser);
+    let derived = derived_values(&denoiser);
+    let search_radius = denoiser.params.search_radius;
+    let expected = build_spatial_offset_lut(search_radius, 0.0, derived.input_noise_offset);
+    let before_bits = table_bits(&before);
+    let after_bits = table_bits(&after);
+    let expected_bits = table_bits(&expected);
+
+    assert!(
+        derived.input_noise_offset > 0.0,
+        "the pinned sigma sets a noise floor"
+    );
+    assert_eq!(after_bits, before_bits, "the frames leave the table alone");
+    assert_eq!(after_bits, expected_bits);
 }
 
 #[test]
 fn an_estimated_sigma_keeps_the_spatial_offset_table_current() {
     let mut denoiser = hq_denoiser(PrefilterMode::None, None);
+    let before = spatial_table(&denoiser);
     run_frames(&mut denoiser, 6);
 
-    let (spatial, expected) = denoiser.spatial_offset_lut_for_test();
-    let actual = read_floats(&denoiser.client, spatial);
-    assert!(spatial.uploads() > 1);
-    assert_eq!(actual, expected);
+    let actual = spatial_table(&denoiser);
+    let derived = derived_values(&denoiser);
+    let search_radius = denoiser.params.search_radius;
+    let expected = build_spatial_offset_lut(search_radius, derived.rho, derived.noise_offset);
+
+    assert_ne!(actual, before, "the folds rewrite the table");
+    assert_table_close(&actual, &expected, "spatial table");
+}
+
+#[test]
+fn a_measured_separable_front_binds_a_spatial_table_that_follows_rho() {
+    let params = NlmParams {
+        temporal_radius: 1,
+        search_radius: 2,
+        patch_radius: 9,
+        strength: 1.2,
+        self_weight: 1.0,
+        channels: ChannelMode::Luma,
+        prefilter: PrefilterMode::None,
+        motion_compensation: MotionCompensationMode::None,
+        hq: Some(HqParams::default()),
+    };
+    let client = make_client();
+    let mut denoiser = NlmDenoiser::<R>::new(&client, params, SIZE, SIZE);
+    let before = spatial_table(&denoiser);
+
+    // A `[0.25, 0.5, 0.25]` blur scales the variance by 0.375 and correlates neighbours.
+    let sigma_pre = (8.0 / 255.0) / 0.375f32.sqrt();
+    for index in 0..6 {
+        let seed = 300 + index;
+        let frame = correlated_noisy_frame(SIZE, SIZE, 0.4, sigma_pre, seed);
+        denoiser.push_frame(&frame);
+
+        denoiser.denoise().expect("denoise");
+    }
+
+    let actual = spatial_table(&denoiser);
+    let derived = derived_values(&denoiser);
+    let search_radius = denoiser.params.search_radius;
+    let expected = build_spatial_offset_lut(search_radius, derived.rho, derived.noise_offset);
+
+    assert!(
+        denoiser.use_separable,
+        "a patch radius of 9 takes the separable path"
+    );
+    assert!(
+        derived.rho > 0.1,
+        "the correlated grain sets rho, got {}",
+        derived.rho
+    );
+    assert!(derived.noise_offset > 0.0, "the noise floor is measured");
+    assert_ne!(actual, before, "the folds rewrite the table");
+    assert_table_close(&actual, &expected, "separable spatial table");
 }
 
 #[test]
 fn an_estimated_sigma_keeps_the_pilot_offset_table_current() {
     let prefilter = pilot_prefilter();
     let mut denoiser = hq_denoiser(prefilter, None);
+    let before = pilot_table(&denoiser);
     run_frames(&mut denoiser, 6);
 
-    // The pilot runs on push, so one more push uploads the table for the latest estimate.
-    push_frame_at(&mut denoiser, 6);
-
+    let actual = pilot_table(&denoiser);
+    let derived = derived_values(&denoiser);
     let search_radius = denoiser.params.search_radius;
-    let expected = build_spatial_offset_lut(search_radius, 0.0, denoiser.input_noise_offset);
-    let pilot = denoiser.pilot_offset_lut_for_test();
-    let actual = read_floats(&denoiser.client, pilot);
-    assert!(pilot.uploads() > 1);
-    assert_eq!(actual, expected);
+    let expected = build_spatial_offset_lut(search_radius, 0.0, derived.input_noise_offset);
+
+    assert_ne!(actual, before, "the folds rewrite the table");
+    assert_table_close(&actual, &expected, "pilot table");
 }
 
 #[test]

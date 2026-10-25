@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use av_denoise_core::bench_api::MAX_GRID_1D;
 use av_denoise_core::bench_api::noise_kernels::{noise_select_histogram, noise_select_resolve};
-use av_denoise_core::bench_api::noise_reading::{NoiseReading, ReadingMap, ReadingStage};
+use av_denoise_core::bench_api::noise_reading::{NoiseReading, ReadingMap, ReadingOptions, ReadingStage};
 use av_denoise_core::bench_api::noise_select::{
     RankRule,
     SELECT_CUBE_THREADS,
@@ -558,19 +558,13 @@ impl<R: Runtime> Benchmark for ReadingBench<R> {
     fn prepare(&self) -> Self::Input {
         let (width, height, channels, stored_ch) = self.plane();
         let ring = self.ring();
-        let luma_fields = self.luma_fields();
-        let map = self.map();
-        let reading = NoiseReading::new(
-            &self.client,
-            width,
-            height,
-            channels,
-            stored_ch,
-            &ring,
-            luma_fields,
-            map,
-        )
-        .expect("the stats queue");
+        let options = ReadingOptions {
+            luma_fields: self.luma_fields(),
+            map: self.map(),
+            offset_tables: None,
+        };
+        let reading = NoiseReading::new(&self.client, width, height, channels, stored_ch, &ring, options)
+            .expect("the stats queue");
         reading.queue_before(self.stage);
 
         let mut buffers = Vec::new();
@@ -645,8 +639,13 @@ pub enum FoldStage {
     Fold,
     /// A fold that also copies a 1080p luma map.
     FoldWithMap,
+    /// A fold that also writes the offset tables of a radius 2 search window, with no map.
+    FoldWithTables,
     Reset,
 }
+
+/// The search radius the offset table fold row writes tables for.
+const FOLD_TABLE_RADIUS: u32 = 2;
 
 /// Times one launch of the stream state on a 1080p luma plane.
 ///
@@ -660,7 +659,9 @@ pub struct FoldBench<R: Runtime> {
 impl<R: Runtime> FoldBench<R> {
     fn queue_stage(&self, reading: &NoiseReading<R>) {
         match self.stage {
-            FoldStage::Fold | FoldStage::FoldWithMap => reading.queue_fold().expect("the fold queues"),
+            FoldStage::Fold | FoldStage::FoldWithMap | FoldStage::FoldWithTables => {
+                reading.queue_fold().expect("the fold queues")
+            },
             FoldStage::Reset => reading.queue_reset(),
         }
     }
@@ -679,8 +680,14 @@ impl<R: Runtime> Benchmark for FoldBench<R> {
         };
         let ring = gradient.ring();
         let map = (self.stage == FoldStage::FoldWithMap).then_some(READING_MAP);
+        let offset_tables = (self.stage == FoldStage::FoldWithTables).then_some(FOLD_TABLE_RADIUS);
+        let options = ReadingOptions {
+            luma_fields: true,
+            map,
+            offset_tables,
+        };
         let stored_ch = stored_channels(1);
-        let reading = NoiseReading::new(&self.client, WIDTH, HEIGHT, 1, stored_ch, &ring, true, map)
+        let reading = NoiseReading::new(&self.client, WIDTH, HEIGHT, 1, stored_ch, &ring, options)
             .expect("the stats queue");
 
         reading.queue_reading();
@@ -707,6 +714,7 @@ impl<R: Runtime> Benchmark for FoldBench<R> {
         let stage = match self.stage {
             FoldStage::Fold => "fold",
             FoldStage::FoldWithMap => "fold_with_map",
+            FoldStage::FoldWithTables => "fold_with_tables",
             FoldStage::Reset => "reset",
         };
 

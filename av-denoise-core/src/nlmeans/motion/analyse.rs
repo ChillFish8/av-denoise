@@ -10,6 +10,7 @@ use crate::nlmeans::kernels::motion::{
     nlm_mc_block_match_coarse,
     nlm_mc_block_match_fine,
 };
+use crate::noise::DERIVED_WORDS;
 
 /// Where a neighbour's motion-field slice starts.
 ///
@@ -53,15 +54,21 @@ pub(crate) struct MatchTargets<'a> {
 ///
 /// A coarse pass on the smallest pyramid level seeds a fine pass at full resolution, which writes
 /// each neighbour's `mv_field` slice. With `write_confidence` set, a per-block score also lands in
-/// its `confidence` slice. Otherwise `confidence` is never indexed, so a placeholder buffer works
-/// and `sad_noise_floor` and `thsad` may stay at 0.0.
+/// its `confidence` slice, scored against word `sad_field` of the derived noise values `noise`.
+/// Otherwise `confidence` is never indexed, so a placeholder buffer works and `thsad` may stay at
+/// 0.0.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the dispatch threads through every buffer and shape the kernel binds"
+)]
 pub(crate) fn run_analyse<R: Runtime>(
     client: &ComputeClient<R>,
     motion_ctx: &MotionCtx,
     width: u32,
     height: u32,
     targets: &MatchTargets<'_>,
-    sad_noise_floor: f32,
+    noise: &Handle,
+    sad_field: u32,
     thsad: f32,
 ) -> Result<(), anyhow::Error> {
     let pyramid_pixels = pyramid_pixels_per_frame(width, height, motion_ctx.pyramid_levels, motion_ctx.align);
@@ -128,7 +135,8 @@ pub(crate) fn run_analyse<R: Runtime>(
         targets,
         motion_ctx.search_radius,
         seeded,
-        sad_noise_floor,
+        noise,
+        sad_field,
         thsad,
     );
 
@@ -151,7 +159,8 @@ pub(crate) fn run_seeded_refine<R: Runtime>(
     height: u32,
     targets: &MatchTargets<'_>,
     refine_radius: u32,
-    sad_noise_floor: f32,
+    noise: &Handle,
+    sad_field: u32,
     thsad: f32,
 ) -> Result<(), anyhow::Error> {
     launch_fine::<R>(
@@ -162,7 +171,8 @@ pub(crate) fn run_seeded_refine<R: Runtime>(
         targets,
         refine_radius,
         1u32,
-        sad_noise_floor,
+        noise,
+        sad_field,
         thsad,
     );
 
@@ -182,7 +192,8 @@ pub(super) fn launch_fine<R: Runtime>(
     targets: &MatchTargets<'_>,
     search_radius: u32,
     use_seed: u32,
-    sad_noise_floor: f32,
+    noise: &Handle,
+    sad_field: u32,
     thsad: f32,
 ) {
     let pyramid_pixels = pyramid_pixels_per_frame(width, height, motion_ctx.pyramid_levels, motion_ctx.align);
@@ -198,12 +209,14 @@ pub(super) fn launch_fine<R: Runtime>(
     let neighbour_slots = targets.neighbour_slots.clone();
     let mv_field = targets.mv_field.clone();
     let confidence = targets.confidence.clone();
+    let noise = noise.clone();
 
     unsafe {
         let pyramid_arg = ArrayArg::from_raw_parts(pyramid, pyramid_len);
         let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, slots_len);
         let mv_field_arg = ArrayArg::from_raw_parts(mv_field, targets.mv_len);
         let confidence_arg = ArrayArg::from_raw_parts(confidence, targets.conf_len);
+        let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
         nlm_mc_block_match_fine::launch_unchecked::<R>(
             client,
@@ -215,7 +228,8 @@ pub(super) fn launch_fine<R: Runtime>(
             confidence_arg,
             targets.centre_slot,
             targets.write_confidence,
-            sad_noise_floor,
+            noise_arg,
+            sad_field,
             thsad,
             fine_width,
             fine_height,

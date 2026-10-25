@@ -3,6 +3,7 @@ use crate::noise::correlation::{
     correlation_factor,
     interpolate_table,
     spatial_offset_factor,
+    spatial_offset_index,
     spatial_offset_lut_len,
 };
 
@@ -157,4 +158,11 @@ fn build_spatial_offset_lut_indexes_row_major_by_dy_then_dx() {
 
     // The centre is always zero.
     assert_eq!(lut[2 * side + 2], 0.0);
+}
+
+/// Row 5 of the radius-3 window, column 0, so 5 * 7 + 0.
+#[test]
+fn spatial_offset_index_is_row_major_from_the_window_corner() {
+    let index = spatial_offset_index(3, -3, 2);
+    assert_eq!(index, 35);
 }

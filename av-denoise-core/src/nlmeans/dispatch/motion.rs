@@ -16,6 +16,7 @@ use crate::nlmeans::motion::{
 };
 use crate::nlmeans::prefilter::PrefilterMode;
 use crate::nlmeans::{BLOCK_1D, MAX_GRID_1D};
+use crate::noise::{DERIVED_CONFIDENCE_SAD_FLOOR, DERIVED_SAD_FLOOR};
 
 /// The share of the raw noise the `NlmSpatial` pilot's reference image still carries.
 ///
@@ -44,7 +45,7 @@ const DISPATCHES_PER_WARPED_NEIGHBOUR: u32 = 2;
 /// size and a sigma of 0.02, the raw floor is about 5.78 against a threshold of 5.12, which pins
 /// confidence at 1.0 even on occluded blocks. The raw sigma is therefore scaled by each
 /// prefilter's measured residual fraction, and `PrefilterMode::None` keeps it whole.
-pub(in crate::nlmeans) fn mc_sad_noise_floor_sigma(prefilter: PrefilterMode, sigma_y: f32) -> f32 {
+pub(crate) fn mc_sad_noise_floor_sigma(prefilter: PrefilterMode, sigma_y: f32) -> f32 {
     match prefilter {
         PrefilterMode::NlmSpatial { .. } => sigma_y * NLM_SPATIAL_RESIDUAL_FRACTION,
         PrefilterMode::Bilateral { .. } => sigma_y * BILATERAL_RESIDUAL_FRACTION,
@@ -160,8 +161,6 @@ impl<R: Runtime> NlmDenoiser<R> {
             None => (&self.confidence_dummy, false),
         };
         let thsad_scale = self.params.hq.map_or(1.0, |hq| hq.thsad_scale);
-        let mc_sigma_y = mc_sad_noise_floor_sigma(self.params.prefilter, self.sigma_y);
-        let sad_noise_floor = motion::sad_noise_floor(motion_ctx.blksize, mc_sigma_y);
         let thsad = motion::thsad(motion_ctx.blksize, thsad_scale);
 
         // Match against the reference pyramid when one exists, because it is cleaner.
@@ -188,19 +187,20 @@ impl<R: Runtime> NlmDenoiser<R> {
             write_confidence,
         };
 
-        self.run_match(motion_ctx, &targets, sad_noise_floor, thsad)
+        self.run_match(motion_ctx, &targets, thsad)
     }
 
     /// Runs the block match for every neighbour in `targets` in one launch per level.
     ///
     /// `Chained` estimation refines the composed seeds. Otherwise a direct coarse-to-fine match runs.
+    /// The block match scores confidence against the derived noise values' SAD floor.
     fn run_match(
         &self,
         motion_ctx: &MotionCtx,
         targets: &MatchTargets<'_>,
-        sad_noise_floor: f32,
         thsad: f32,
     ) -> Result<(), anyhow::Error> {
+        let noise = self.derived_handle();
         let estimation = self
             .params
             .motion_compensation
@@ -214,7 +214,8 @@ impl<R: Runtime> NlmDenoiser<R> {
                 self.height,
                 targets,
                 refine_radius,
-                sad_noise_floor,
+                &noise,
+                DERIVED_SAD_FLOOR,
                 thsad,
             );
         }
@@ -225,7 +226,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             self.width,
             self.height,
             targets,
-            sad_noise_floor,
+            &noise,
+            DERIVED_SAD_FLOOR,
             thsad,
         )
     }
@@ -389,8 +391,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             .expect("confidence_buf allocated when confidence_ctx is Some");
 
         let thsad_scale = self.params.hq.map_or(1.0, |hq| hq.thsad_scale);
-        let sad_noise_floor = motion::sad_noise_floor(ctx.blksize, self.sigma_y);
         let thsad = motion::thsad(ctx.blksize, thsad_scale);
+        let noise = self.derived_handle();
 
         let mv_len = neighbours as usize * ctx.mv_stride() as usize;
         let conf_len = neighbours as usize * ctx.conf_stride() as usize;
@@ -414,7 +416,8 @@ impl<R: Runtime> NlmDenoiser<R> {
             self.width,
             self.height,
             &targets,
-            sad_noise_floor,
+            &noise,
+            DERIVED_CONFIDENCE_SAD_FLOOR,
             thsad,
         )
     }

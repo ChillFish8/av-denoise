@@ -6,6 +6,7 @@ use super::analyse::{MatchTargets, mv_field_byte_offset, run_analyse};
 use crate::nlmeans::denoiser::NlmDenoiser;
 use crate::nlmeans::kernels::motion::{nlm_mc_chain_compose, nlm_mc_pair_zero};
 use crate::nlmeans::{BLOCK_1D, MAX_GRID_1D};
+use crate::noise::DERIVED_SAD_FLOOR;
 
 /// Where one slot and direction of the pair ring starts.
 ///
@@ -23,7 +24,8 @@ pub(crate) fn pair_byte_offset(motion_ctx: &MotionCtx, pair_slot: u32, direction
 ///
 /// `older_slot` and `newer_slot` are physical input-ring slots, and `slot_tables` holds one
 /// single-slot table per ring slot. Nothing reads confidence at the pair level, so both directions
-/// turn it off and target `confidence_dummy`.
+/// turn it off and target `confidence_dummy`, and `noise` is bound only to fill the kernel's
+/// derived noise values.
 #[expect(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
@@ -41,6 +43,7 @@ pub(crate) fn run_pair_analyse<R: Runtime>(
     slot_tables: &[Handle],
     pair_ring: &Handle,
     confidence_dummy: &Handle,
+    noise: &Handle,
 ) -> Result<(), anyhow::Error> {
     let direction_len = motion_ctx.pair_direction_len() as usize;
 
@@ -64,7 +67,8 @@ pub(crate) fn run_pair_analyse<R: Runtime>(
         width,
         height,
         &older_to_newer_targets,
-        0.0,
+        noise,
+        DERIVED_SAD_FLOOR,
         1.0,
     )?;
 
@@ -88,7 +92,8 @@ pub(crate) fn run_pair_analyse<R: Runtime>(
         width,
         height,
         &newer_to_older_targets,
-        0.0,
+        noise,
+        DERIVED_SAD_FLOOR,
         1.0,
     )?;
 

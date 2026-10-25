@@ -4,11 +4,15 @@ use super::helpers::{
     C_MIN,
     LAMBDA_HT,
     R,
+    RAMP_HEIGHT,
+    RAMP_WIDTH,
     REFINE,
     SIGMA,
     SPATIAL_RADIUS,
     make_client,
     psnr,
+    ramp_clip,
+    ramp_params,
     static_clip_params,
     textured_base,
 };
@@ -28,7 +32,8 @@ use crate::collab::{MAX_K, MAX_TEMPORAL_RADIUS, PATCH_SIZE, grid_frames};
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::tests::helpers::noisy_field_over;
 use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, NlmParams};
-use crate::noise::{NOISE_CURVE_BINS, STRENGTH_MAP_OFF};
+use crate::noise::tests::{CollabNoise, collab_noise_buffer};
+use crate::noise::{DERIVED_WORDS, NOISE_CURVE_BINS, STRENGTH_MAP_OFF};
 
 #[test]
 fn denoises_a_static_noisy_clip() {
@@ -314,6 +319,46 @@ fn flush_emits_exactly_the_pushed_frame_count() {
     );
 }
 
+/// Every output of a fresh luma denoiser with the noise map and psy over `frames`.
+fn ramp_outputs(frames: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    let client = make_client();
+    let params = ramp_params(ChannelMode::Luma, true, 1.0);
+    let mut denoiser =
+        Nl4dDenoiser::<R>::new(&client, params, RAMP_WIDTH, RAMP_HEIGHT).expect("construction failed");
+    let mut outputs = Vec::new();
+
+    for frame in frames {
+        denoiser.push_frame(frame);
+        if let Some(output) = denoiser.denoise().expect("denoise failed") {
+            outputs.push(output);
+        }
+    }
+
+    denoiser
+        .flush(|frame| {
+            let output = frame.to_vec();
+            outputs.push(output);
+        })
+        .expect("flush failed");
+
+    outputs
+}
+
+#[test]
+fn nl4d_output_is_byte_identical_across_runs() {
+    let frames = ramp_clip(1);
+    let first = ramp_outputs(&frames);
+    let second = ramp_outputs(&frames);
+
+    let frame_count = first.len();
+    let expected_count = frames.len();
+    assert_eq!(frame_count, expected_count, "one output per input frame");
+
+    let first_bits: Vec<u32> = first.iter().flatten().map(|value| value.to_bits()).collect();
+    let second_bits: Vec<u32> = second.iter().flatten().map(|value| value.to_bits()).collect();
+    assert_eq!(first_bits, second_bits);
+}
+
 /// Runs the denoiser's collaborative and aggregation kernels standalone on a single-frame ring at
 /// `radius = 0`.
 ///
@@ -353,10 +398,17 @@ fn run_spatial_only(
 
     let sigma_values = [sigma];
     let dct_profile = dct_noise_profile(0.0);
+    let weight_norm = weight_scale(sigma, &dct_profile);
+    let noise_values = CollabNoise {
+        sigma: &sigma_values,
+        weight_scale: weight_norm,
+        curve_valid: false,
+        map_mode: STRENGTH_MAP_OFF,
+    };
+    let noise_buf = collab_noise_buffer(client, noise_values);
+
     let kaiser = kaiser_window(0.0);
     let zeroed_curve = [0.0f32; NOISE_CURVE_BINS];
-    let sigma_bytes = f32::as_bytes(&sigma_values);
-    let sigma_buf = client.create_from_slice(sigma_bytes);
     let dct_profile_bytes = f32::as_bytes(&dct_profile);
     let dct_profile_buf = client.create_from_slice(dct_profile_bytes);
     let kaiser_bytes = f32::as_bytes(&kaiser);
@@ -385,7 +437,6 @@ fn run_spatial_only(
     let fused_x = fused_cubes_x(width, variant.groups);
     let fused_grid = CubeCount::new_2d(fused_x, refs_y);
     let fused_dim = CubeDim::new_1d(variant.lanes());
-    let weight_norm = weight_scale(sigma, &dct_profile);
     let grid_frame_count = grid_frames(0);
     let centre_slot = 0u32;
 
@@ -414,7 +465,7 @@ fn run_spatial_only(
             ArrayArg::from_raw_parts(mv_dummy, 1),
             ArrayArg::from_raw_parts(conf_dummy, 1),
             ArrayArg::from_raw_parts(neighbour_slots_dummy, 1),
-            ArrayArg::from_raw_parts(sigma_buf, stored_ch as usize),
+            ArrayArg::from_raw_parts(noise_buf, DERIVED_WORDS as usize),
             ArrayArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
             ArrayArg::from_raw_parts(unit_map_buf, map_len),
             ArrayArg::from_raw_parts(dct_profile_buf, 8),
@@ -425,9 +476,6 @@ fn run_spatial_only(
             centre_slot,
             c_min,
             lambda_ht,
-            0u32,
-            STRENGTH_MAP_OFF,
-            weight_norm,
             ACCUM_SCALE,
             false,
             0u32,
@@ -609,10 +657,17 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
         let sigmas = front.current_sigmas_temporal_only();
         let sigma = [sigmas[0]];
         let profile = dct_noise_profile(0.0);
+        let weight_norm = weight_scale(sigmas[0], &profile);
+        let noise_values = CollabNoise {
+            sigma: &sigma,
+            weight_scale: weight_norm,
+            curve_valid: false,
+            map_mode: STRENGTH_MAP_OFF,
+        };
+        let noise_buf = collab_noise_buffer(&client, noise_values);
+
         let kaiser = kaiser_window(0.0);
         let zeroed_curve = [0.0f32; NOISE_CURVE_BINS];
-        let sigma_bytes = f32::as_bytes(&sigma);
-        let sigma_buf = client.create_from_slice(sigma_bytes);
         let profile_bytes = f32::as_bytes(&profile);
         let profile_buf = client.create_from_slice(profile_bytes);
         let kaiser_bytes = f32::as_bytes(&kaiser);
@@ -625,7 +680,6 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
         let unit_map = vec![1.0f32; map_len];
         let unit_map_bytes = f32::as_bytes(&unit_map);
         let unit_map_buf = client.create_from_slice(unit_map_bytes);
-        let weight_norm = weight_scale(sigmas[0], &profile);
         let accum_scale = cross_frame_accum_scale(SPATIAL_RADIUS, radius);
 
         let group_weight = client.empty(refs * size_of::<f32>());
@@ -667,7 +721,7 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 ArrayArg::from_raw_parts(view.mv_field.clone(), mv_len.max(1)),
                 ArrayArg::from_raw_parts(view.confidence.clone(), conf_len.max(1)),
                 ArrayArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
-                ArrayArg::from_raw_parts(sigma_buf, 1),
+                ArrayArg::from_raw_parts(noise_buf, DERIVED_WORDS as usize),
                 ArrayArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
                 ArrayArg::from_raw_parts(unit_map_buf, map_len),
                 ArrayArg::from_raw_parts(profile_buf, 8),
@@ -678,9 +732,6 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 centre_slot,
                 C_MIN,
                 LAMBDA_HT,
-                0u32,
-                STRENGTH_MAP_OFF,
-                weight_norm,
                 accum_scale,
                 false,
                 radius,

@@ -27,7 +27,7 @@ use crate::collab::kernels::fused::{
     collab_filter,
     collab_search,
 };
-use crate::noise::NOISE_CURVE_BINS;
+use crate::noise::{DERIVED_WORDS, NOISE_CURVE_BINS};
 use crate::tune::fidelity::{CompareResult, Fidelity, diff_integers};
 use crate::tune::gpu::{bind, read_i32, zero_words, zeroed_words};
 use crate::tune::key::SiteKey;
@@ -251,7 +251,7 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSearchSite<R, S> {
     /// The copy's frame-sized buffers hold one word each, which [VariantSite::compile_only] never
     /// reads.
     fn on_client(&self, client: &ComputeClient<R>) -> Option<Self> {
-        let inputs = blank_collab_inputs(client, self.shape.stored_ch);
+        let inputs = blank_collab_inputs(client);
         let members = zeroed_words(client, 1);
         let outputs = SearchOutputs { members, refs: 0 };
 
@@ -420,7 +420,7 @@ impl<R: Runtime> VariantSite<R> for CollabFilterSite<R> {
     /// The copy's frame-sized buffers hold one word each, which [VariantSite::compile_only] never
     /// reads. The small fixed-size tables keep their sizes.
     fn on_client(&self, client: &ComputeClient<R>) -> Option<Self> {
-        let inputs = blank_collab_inputs(client, self.shape.stored_ch);
+        let inputs = blank_collab_inputs(client);
         let members = zeroed_words(client, MEMBER_WORDS as usize);
         let outputs = blank_collab_outputs(client, false);
 
@@ -458,7 +458,7 @@ impl<R: Runtime> CollabFilterSite<R> {
         let ring_scalar = bind::<R>(&inputs.ring, inputs.ring_len);
         let members = bind::<R>(&self.members, member_words);
         let neighbour_slots = bind::<R>(&inputs.neighbour_slots, inputs.neighbour_slots_len);
-        let sigma = bind::<R>(&inputs.sigma, shape.stored_ch as usize);
+        let noise = bind::<R>(&inputs.noise, DERIVED_WORDS as usize);
         let noise_curve = bind::<R>(&inputs.noise_curve, NOISE_CURVE_BINS);
         let strength_map = bind::<R>(&inputs.strength_map, inputs.map_len);
         let dct_profile = bind::<R>(&inputs.dct_profile, 8);
@@ -477,7 +477,7 @@ impl<R: Runtime> CollabFilterSite<R> {
                 ring_scalar,
                 members,
                 neighbour_slots,
-                sigma,
+                noise,
                 noise_curve,
                 strength_map,
                 dct_profile,
@@ -487,9 +487,6 @@ impl<R: Runtime> CollabFilterSite<R> {
                 group_weight,
                 values.centre_slot,
                 values.lambda_ht,
-                values.curve_valid,
-                values.map_mode,
-                values.weight_scale,
                 values.accum_scale,
                 values.pool_ratio,
                 shape.grid_frames,

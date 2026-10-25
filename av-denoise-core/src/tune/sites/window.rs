@@ -9,6 +9,7 @@ use crate::nlmeans::kernels::{
     nlm_fused_single_window,
     nlm_fused_single_window_ref,
 };
+use crate::noise::DERIVED_WORDS;
 use crate::tune::fidelity::{CompareResult, Fidelity, PlaneDiff, diff_plane};
 use crate::tune::gpu::{bind, read_f32};
 use crate::tune::key::SiteKey;
@@ -98,7 +99,6 @@ pub enum WindowPass {
     Pair {
         frame_fwd: u32,
         frame_bwd: u32,
-        noise_offset: f32,
         confidence: ConfidenceBinding,
     },
 }
@@ -130,7 +130,10 @@ pub struct WindowSite<R: Runtime> {
     pub ring_len: usize,
     pub outputs: AccumOutputs,
     pub frame_t: u32,
-    pub h2_inv_norm: f32,
+    /// The derived buffer, which holds the noise offset and the strength.
+    pub noise: Handle,
+    /// The derived buffer word the strength is read from.
+    pub h2_field: u32,
     pub width: u32,
     pub height: u32,
     pub channels: u32,
@@ -170,6 +173,7 @@ impl<R: Runtime> WindowSite<R> {
         let weight_sum = bind::<R>(&outputs.weight_sum, outputs.pixels);
         let max_weight = bind::<R>(&outputs.max_weight, outputs.pixels);
         let offsets = bind::<R>(offsets, offsets_len);
+        let noise = bind::<R>(&self.noise, DERIVED_WORDS as usize);
 
         match &self.reference {
             Some(reference) => {
@@ -187,7 +191,8 @@ impl<R: Runtime> WindowSite<R> {
                         weight_sum,
                         max_weight,
                         self.frame_t,
-                        self.h2_inv_norm,
+                        noise,
+                        self.h2_field,
                         offsets,
                         self.width,
                         self.height,
@@ -211,7 +216,8 @@ impl<R: Runtime> WindowSite<R> {
                     weight_sum,
                     max_weight,
                     self.frame_t,
-                    self.h2_inv_norm,
+                    noise,
+                    self.h2_field,
                     offsets,
                     self.width,
                     self.height,
@@ -230,7 +236,6 @@ impl<R: Runtime> WindowSite<R> {
         &self,
         grid: WindowGrid,
         frames: (u32, u32),
-        noise_offset: f32,
         confidence: &ConfidenceBinding,
         outputs: &AccumOutputs,
     ) {
@@ -242,6 +247,7 @@ impl<R: Runtime> WindowSite<R> {
         let max_weight = bind::<R>(&outputs.max_weight, outputs.pixels);
         let conf_fwd = bind::<R>(&confidence.forward, confidence.len);
         let conf_bwd = bind::<R>(&confidence.backward, confidence.len);
+        let noise = bind::<R>(&self.noise, DERIVED_WORDS as usize);
 
         match &self.reference {
             Some(reference) => {
@@ -264,8 +270,8 @@ impl<R: Runtime> WindowSite<R> {
                         self.frame_t,
                         frame_fwd,
                         frame_bwd,
-                        self.h2_inv_norm,
-                        noise_offset,
+                        noise,
+                        self.h2_field,
                         self.width,
                         self.height,
                         self.channels,
@@ -296,8 +302,8 @@ impl<R: Runtime> WindowSite<R> {
                     self.frame_t,
                     frame_fwd,
                     frame_bwd,
-                    self.h2_inv_norm,
-                    noise_offset,
+                    noise,
+                    self.h2_field,
                     self.width,
                     self.height,
                     self.channels,
@@ -376,11 +382,10 @@ impl<R: Runtime> VariantSite<R> for WindowSite<R> {
             WindowPass::Pair {
                 frame_fwd,
                 frame_bwd,
-                noise_offset,
                 confidence,
             } => {
                 let frames = (*frame_fwd, *frame_bwd);
-                self.launch_pair(grid, frames, *noise_offset, confidence, outputs);
+                self.launch_pair(grid, frames, confidence, outputs);
             },
         }
     }

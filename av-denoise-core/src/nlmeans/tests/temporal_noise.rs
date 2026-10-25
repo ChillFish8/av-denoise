@@ -3,6 +3,7 @@ use cubecl::prelude::*;
 use super::helpers::*;
 use crate::bench_api::HostIo;
 use crate::nlmeans::*;
+use crate::noise::tests::read_temporal_stats_slot;
 use crate::noise::{
     NoiseCtx,
     QUARTER_FLATNESS,
@@ -24,7 +25,6 @@ use crate::noise::{
     aggregate_temporal_noise_stats,
     correlation_factor,
     partials_len,
-    read_temporal_stats_slot,
     run_noise_estimate,
     run_temporal_noise_stats,
     sigma_from_abs_sum,
@@ -750,11 +750,11 @@ fn hq_temporal_folds_correlated_grain_above_immerkaer_alone() {
         let _ = denoiser.denoise().unwrap();
     }
 
-    let folded = denoiser
-        .host_noise
+    let snapshot = denoiser.noise_snapshot().expect("the noise state reads back");
+    let median = snapshot
         .median
-        .current()
-        .expect("estimator should hold a value after several full-window submits")[0];
+        .expect("estimator should hold a value after several full-window submits");
+    let folded = median[0];
 
     let expected = sigma_marginal * correlation_factor(2.0 / 3.0);
     let rel_err = (folded - expected).abs() / expected;
@@ -802,7 +802,9 @@ fn rho_smoothed_seeds_from_first_sample_not_from_zero() {
         let frame = correlated_noisy_frame(width, height, base, sigma_pre, 200 + i);
         denoiser.push_frame(&frame);
         let _ = denoiser.denoise().unwrap();
-        if let Some(rho) = denoiser.host_noise.rho {
+
+        let snapshot = denoiser.noise_snapshot().expect("the noise state reads back");
+        if let Some(rho) = snapshot.rho {
             first_seeded_rho = Some(rho);
             break;
         }

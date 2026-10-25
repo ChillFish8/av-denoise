@@ -249,10 +249,11 @@ pub fn nlm_mc_block_match_coarse(
 /// `n * conf_stride` values in.
 ///
 /// When `write_confidence` is set, each block also writes a confidence between 0 and 1 so a poor
-/// match can suppress its frame. `sad_noise_floor` is the SAD two noisy copies of the same content
-/// show, and `thsad` is how far past it the confidence reaches zero. `thsad` must be positive, or
-/// a perfect match divides zero by zero. When it is unset `confidence` is never touched and can be
-/// a placeholder.
+/// match can suppress its frame. Word `sad_field` of the derived noise values `noise` is the SAD
+/// two noisy copies of the same content show, and `thsad` is how far past it the confidence
+/// reaches zero. `thsad` must be positive, or a perfect match divides zero by zero.
+///
+/// When `write_confidence` is unset, `confidence` is never touched and can be a placeholder.
 ///
 /// The neighbour pixels the search reaches are staged into shared memory once, clamped to the frame.
 #[cube(launch_unchecked)]
@@ -263,7 +264,8 @@ pub fn nlm_mc_block_match_fine(
     confidence: &mut Array<f32>,
     centre_slot: u32,
     #[comptime] write_confidence: bool,
-    sad_noise_floor: f32,
+    noise: &Array<f32>,
+    sad_field: u32,
     thsad: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -429,6 +431,7 @@ pub fn nlm_mc_block_match_fine(
     mv_field[mv_slot + 1] = best_dy;
 
     if write_confidence {
+        let sad_noise_floor = noise[sad_field as usize];
         let mut excess = best_sad - sad_noise_floor;
         if excess < 0.0f32 {
             excess = 0.0f32;

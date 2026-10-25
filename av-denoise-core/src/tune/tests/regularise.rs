@@ -7,6 +7,7 @@ use super::runtime::{TestRuntime, test_client};
 use crate::Nl4dOptions;
 use crate::nl4d::kernels::tests::reference::nl4d_mv_regularise_reference;
 use crate::nlmeans::ChannelMode;
+use crate::noise::DERIVED_WORDS;
 use crate::tune::gpu::{bind, read_f32, read_i32};
 use crate::tune::sites::{
     COOP_MAX_ABS,
@@ -185,6 +186,7 @@ fn reference_outputs(site: &RegulariseSite<TestRuntime>) -> (Vec<i32>, Vec<f32>)
         let mv_in = bind::<TestRuntime>(&mv_slice, 2 * blocks);
         let vectors = bind::<TestRuntime>(&vectors_slice, 2 * blocks);
         let confidence = bind::<TestRuntime>(&confidence_slice, blocks);
+        let noise = bind::<TestRuntime>(&site.noise, DERIVED_WORDS as usize);
 
         unsafe {
             nl4d_mv_regularise_reference::launch_unchecked::<TestRuntime>(
@@ -197,7 +199,7 @@ fn reference_outputs(site: &RegulariseSite<TestRuntime>) -> (Vec<i32>, Vec<f32>)
                 vectors,
                 confidence,
                 site.lambda_pixel,
-                site.sad_noise_floor,
+                noise,
                 site.thsad,
                 site.width,
                 site.height,

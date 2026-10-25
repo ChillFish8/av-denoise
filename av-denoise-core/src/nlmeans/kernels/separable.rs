@@ -10,6 +10,7 @@ use super::helpers::{
     welsch_weight,
 };
 use crate::engine::kernels::read_line;
+use crate::noise::{DERIVED_H2_INV_NORM, DERIVED_NOISE_OFFSET};
 
 /// Writes the per-pixel squared distances to the forward and backward neighbours in one pass.
 ///
@@ -171,12 +172,16 @@ pub fn nlm_horizontal_sum(
 }
 
 /// The vertical half of the separable box filter, writing the Welsch weight of each patch total.
+///
+/// The strength is the derived buffer's `DERIVED_H2_INV_NORM` word, and the noise offset entry
+/// `offset_index` of the candidate's spatial table `offsets`.
 #[cube(launch_unchecked)]
 pub fn nlm_vertical_weight(
     input: &Array<f32>,
     output: &mut Array<f32>,
-    h2_inv_norm: f32,
-    noise_offset: f32,
+    noise: &Array<f32>,
+    offsets: &Array<f32>,
+    offset_index: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] patch_radius: u32,
@@ -218,6 +223,8 @@ pub fn nlm_vertical_weight(
         sum += smem[((local_y + offset_y) * block_x + local_x) as usize];
     }
 
+    let h2_inv_norm = noise[DERIVED_H2_INV_NORM as usize];
+    let noise_offset = offsets[offset_index as usize];
     output[(global_y * width + global_x) as usize] = welsch_weight(sum, h2_inv_norm, noise_offset);
 }
 
@@ -289,6 +296,9 @@ pub fn nlm_horizontal_sum_pair(
 /// When `use_confidence` is set, each weight is scaled by its block's confidence from `conf_fwd`
 /// and `conf_bwd`. `step`, `blocks_x` and `blocks_y` describe the motion block grid, which pixels
 /// map onto the same way as in `nlm_mc_warp`. When it is unset the confidence buffers are never read.
+///
+/// The strength and the noise offset are the derived buffer's `DERIVED_H2_INV_NORM` and
+/// `DERIVED_NOISE_OFFSET` words.
 #[cube(launch_unchecked)]
 pub fn nlm_vweight_pair_accumulate<N: Size>(
     hsum_fwd: &Array<f32>,
@@ -304,8 +314,7 @@ pub fn nlm_vweight_pair_accumulate<N: Size>(
     frame_bwd: u32,
     q_x: i32,
     q_y: i32,
-    h2_inv_norm: f32,
-    noise_offset: f32,
+    noise: &Array<f32>,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] patch_radius: u32,
@@ -365,6 +374,8 @@ pub fn nlm_vweight_pair_accumulate<N: Size>(
         sum_bwd += smem_bwd[smem_idx];
     }
 
+    let h2_inv_norm = noise[DERIVED_H2_INV_NORM as usize];
+    let noise_offset = noise[DERIVED_NOISE_OFFSET as usize];
     let mut weight_fwd = welsch_weight(sum_fwd, h2_inv_norm, noise_offset);
     let mut weight_bwd = welsch_weight(sum_bwd, h2_inv_norm, noise_offset);
 

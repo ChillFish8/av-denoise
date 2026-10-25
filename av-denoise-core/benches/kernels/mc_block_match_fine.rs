@@ -1,4 +1,5 @@
 use av_denoise_core::bench_api::kernels::motion::{BLOCK_MATCH_THREADS, nlm_mc_block_match_fine};
+use av_denoise_core::bench_api::{DERIVED_SAD_FLOOR, DERIVED_WORDS, DerivedValues};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -17,7 +18,7 @@ const THSAD_PIXEL: f32 = 0.02;
 /// The fine refinement pass at full resolution.
 ///
 /// It reads no seed, so the cost is bounded by the `(2·r + 1)²` search window per block and stays
-/// fair even if the coarse bench's tuning changes. `sad_noise_floor` is 0.0 because no noise
+/// fair even if the coarse bench's tuning changes. The derived SAD floor is 0.0 because no noise
 /// estimate is available at this level, and `thsad` uses the library's default `thsad_scale` of 1.0.
 pub struct BlockMatchFineBench<R: Runtime> {
     pub client: ComputeClient<R>,
@@ -33,6 +34,8 @@ pub struct FineInput {
     pub neighbour_slots: Handle,
     pub mv_field: Handle,
     pub confidence: Handle,
+    /// The derived noise values, with SAD floors of 0.
+    pub noise: Handle,
 }
 
 impl<R: Runtime> Benchmark for BlockMatchFineBench<R> {
@@ -60,11 +63,16 @@ impl<R: Runtime> Benchmark for BlockMatchFineBench<R> {
         let mv_field = self.client.empty(neighbours * blocks * 2 * size_of::<i32>());
         let confidence = self.client.empty(neighbours * blocks * size_of::<f32>());
 
+        let noise_words = DerivedValues::default().to_words();
+        let noise_bytes = f32::as_bytes(&noise_words);
+        let noise = self.client.create_from_slice(noise_bytes);
+
         FineInput {
             pyramid,
             neighbour_slots,
             mv_field,
             confidence,
+            noise,
         }
     }
 
@@ -88,6 +96,7 @@ impl<R: Runtime> Benchmark for BlockMatchFineBench<R> {
             let neighbour_slots_arg = ArrayArg::from_raw_parts(args.neighbour_slots, neighbours);
             let mv_field_arg = ArrayArg::from_raw_parts(args.mv_field, mv_len);
             let confidence_arg = ArrayArg::from_raw_parts(args.confidence, conf_len);
+            let noise_arg = ArrayArg::from_raw_parts(args.noise, DERIVED_WORDS as usize);
 
             nlm_mc_block_match_fine::launch_unchecked::<R>(
                 &self.client,
@@ -99,7 +108,8 @@ impl<R: Runtime> Benchmark for BlockMatchFineBench<R> {
                 confidence_arg,
                 0u32,
                 true, // Includes the confidence write, the full production cost.
-                0.0,
+                noise_arg,
+                DERIVED_SAD_FLOOR,
                 thsad,
                 WIDTH,
                 HEIGHT,

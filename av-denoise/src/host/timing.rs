@@ -5,7 +5,7 @@ use av_denoise_core::EngineTiming;
 /// Where one plane's host time went since its denoiser was built.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PlaneTiming {
-    /// Host time blocked until readbacks landed, denoised frames and noise readings together.
+    /// Host time blocked until denoised frames' readbacks landed.
     pub blocked: Duration,
     /// Host time spent building and queuing GPU work, with the blocked time taken out.
     pub submit: Duration,
@@ -20,12 +20,11 @@ pub struct PlaneTiming {
 impl PlaneTiming {
     /// Combines the host's call and output-wait clocks with the engine's counters.
     pub(crate) fn new(calls: Duration, output_wait: Duration, frames: u64, engine: EngineTiming) -> Self {
-        let blocked = output_wait + engine.readback_wait;
-        let submit = calls.saturating_sub(blocked);
+        let submit = calls.saturating_sub(output_wait);
         let device_busy = estimate_device_busy(engine, frames);
 
         Self {
-            blocked,
+            blocked: output_wait,
             submit,
             device_busy,
             frames,

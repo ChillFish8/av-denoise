@@ -1,9 +1,7 @@
 use super::helpers::{R, RAMP_HEIGHT, RAMP_WIDTH, make_client, ramp_clip, ramp_params};
 use crate::bench_api::HostIo;
-use crate::nl4d::denoiser::noise_curve_upload;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::ChannelMode;
-use crate::noise::NOISE_CURVE_BINS;
 
 /// A clip's denoised frames, and whether the front end built a noise curve during any pass.
 struct ClipRun {
@@ -75,24 +73,6 @@ fn the_noise_map_changes_the_output_on_brightness_dependent_noise() {
     );
 
     assert_ne!(map_on.outputs, map_off.outputs);
-}
-
-#[test]
-fn the_noise_map_off_matches_a_curveless_run() {
-    let ratios = [1.5f32; NOISE_CURVE_BINS];
-    let curveless = noise_curve_upload(None, true);
-    let map_off = noise_curve_upload(Some(ratios), false);
-
-    assert_eq!(curveless, ([0.0f32; NOISE_CURVE_BINS], 0));
-    assert_eq!(map_off, curveless);
-}
-
-#[test]
-fn the_noise_map_on_uploads_the_curve() {
-    let ratios = [1.5f32; NOISE_CURVE_BINS];
-    let upload = noise_curve_upload(Some(ratios), true);
-
-    assert_eq!(upload, (ratios, 1));
 }
 
 #[test]

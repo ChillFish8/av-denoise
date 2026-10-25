@@ -1,3 +1,4 @@
+use av_denoise_core::bench_api::DERIVED_H2_INV_NORM;
 use av_denoise_core::bench_api::tune_sites::{
     AccumOutputs,
     ConfidenceBinding,
@@ -16,10 +17,10 @@ use super::{
     SEARCH_RADIUS,
     WIDTH,
     block_sync,
-    h2_inv_norm,
     make_padded_frame,
     shapes_with_channels,
     stored_channels,
+    window_noise,
 };
 
 /// Which windowed kernel a row runs.
@@ -81,6 +82,7 @@ impl<R: Runtime> Benchmark for WindowBench<R> {
             .has_reference()
             .then(|| self.client.create_from_slice(frame_bytes));
         let outputs = allocate_accum(&self.client, pixels * stored_ch as usize, pixels);
+        let noise = window_noise(&self.client);
 
         let pass = if self.kernel.is_pair() {
             let placeholder = self.client.empty(size_of::<f32>());
@@ -97,7 +99,6 @@ impl<R: Runtime> Benchmark for WindowBench<R> {
             WindowPass::Pair {
                 frame_fwd: 0,
                 frame_bwd: 0,
-                noise_offset: 0.0,
                 confidence,
             }
         } else {
@@ -120,7 +121,8 @@ impl<R: Runtime> Benchmark for WindowBench<R> {
             ring_len: frame.len(),
             outputs: outputs.clone(),
             frame_t: 0,
-            h2_inv_norm: h2_inv_norm(),
+            noise,
+            h2_field: DERIVED_H2_INV_NORM,
             width: WIDTH,
             height: HEIGHT,
             channels: self.channels,

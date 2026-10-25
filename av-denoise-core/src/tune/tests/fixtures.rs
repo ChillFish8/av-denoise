@@ -12,7 +12,14 @@ use crate::engine::align::StorageAlign;
 use crate::nl4d::nl4d_pool_ratio;
 use crate::nlmeans::ChannelMode;
 use crate::nlmeans::motion::THSAD_PIXEL;
-use crate::noise::{NOISE_CURVE_BINS, STRENGTH_MAP_OFF};
+use crate::noise::tests::{CollabNoise, collab_noise_buffer, nlm_noise_buffer};
+use crate::noise::{
+    DERIVED_H2_INV_NORM,
+    DERIVED_PILOT_H2_INV_NORM,
+    DerivedValues,
+    NOISE_CURVE_BINS,
+    STRENGTH_MAP_OFF,
+};
 use crate::tune::SiteCandidate;
 use crate::tune::gpu::zero_words;
 use crate::tune::sites::{
@@ -39,6 +46,9 @@ pub(crate) const RING_FRAMES: u32 = 3;
 
 /// Gives hashed content weights spread over most of 0..1 at the fixture patch sizes.
 pub(crate) const H2_INV_NORM: f32 = 0.5;
+
+/// The noise offset every fixture pair subtracts.
+pub(crate) const NOISE_OFFSET: f32 = 1.0;
 
 /// A value between 0.2 and 0.8, distinct for every index and seed.
 pub(crate) fn hashed_unit(index: u32, seed: u32) -> f32 {
@@ -73,6 +83,8 @@ pub(crate) struct WindowSpec {
     pub(crate) pair: bool,
     pub(crate) reference: bool,
     pub(crate) confidence: bool,
+    /// Whether the strength is read from the pilot's derived word.
+    pub(crate) pilot: bool,
 }
 
 impl WindowSpec {
@@ -86,6 +98,7 @@ impl WindowSpec {
             pair: false,
             reference: false,
             confidence: false,
+            pilot: false,
         }
     }
 
@@ -129,13 +142,18 @@ pub(crate) fn window_site(client: &ComputeClient<TestRuntime>, spec: &WindowSpec
         upload(client, &reference_ring)
     });
     let outputs = allocate_accum(client, pixels * stored_ch as usize, pixels);
+    let h2_field = if spec.pilot {
+        DERIVED_PILOT_H2_INV_NORM
+    } else {
+        DERIVED_H2_INV_NORM
+    };
+    let noise = nlm_noise_buffer(client, h2_field, H2_INV_NORM, NOISE_OFFSET);
 
     let pass = if spec.pair {
         let confidence = confidence_binding(client, spec);
         WindowPass::Pair {
             frame_fwd: 2,
             frame_bwd: 0,
-            noise_offset: 1.0,
             confidence,
         }
     } else {
@@ -154,7 +172,8 @@ pub(crate) fn window_site(client: &ComputeClient<TestRuntime>, spec: &WindowSpec
         ring_len: ring.len(),
         outputs,
         frame_t: 1,
-        h2_inv_norm: H2_INV_NORM,
+        noise,
+        h2_field,
         width: spec.width,
         height: spec.height,
         channels: spec.channels.count(),
@@ -296,10 +315,18 @@ pub(crate) fn collab_site(
     let slot_bytes = u32::as_bytes(&slot_values);
     let neighbour_slots = client.create_from_slice(slot_bytes);
 
+    let profile = dct_noise_profile(0.0);
     let sigma_value = 6.0 / 255.0;
-    let mut sigma_values = vec![0.0f32; stored_ch as usize];
-    sigma_values[..spec.channels.count() as usize].fill(sigma_value);
-    let sigma = upload(client, &sigma_values);
+    let live_channels = spec.channels.count() as usize;
+    let sigma_values = vec![sigma_value; live_channels];
+    let weight_norm = weight_scale(sigma_value, &profile);
+    let noise_values = CollabNoise {
+        sigma: &sigma_values,
+        weight_scale: weight_norm,
+        curve_valid: false,
+        map_mode: STRENGTH_MAP_OFF,
+    };
+    let noise = collab_noise_buffer(client, noise_values);
 
     let curve_values = [0.0f32; NOISE_CURVE_BINS];
     let noise_curve = upload(client, &curve_values);
@@ -307,7 +334,6 @@ pub(crate) fn collab_site(
     let map_len = (map_cols * map_rows) as usize;
     let map_values = vec![1.0f32; map_len];
     let strength_map = upload(client, &map_values);
-    let profile = dct_noise_profile(0.0);
     let dct_profile = upload(client, &profile);
     let kaiser_taps = kaiser_window(0.0);
     let kaiser = upload(client, &kaiser_taps);
@@ -334,14 +360,13 @@ pub(crate) fn collab_site(
         conf_len: confidence_values.len(),
         neighbour_slots,
         neighbour_slots_len: slot_values.len(),
-        sigma,
+        noise,
         noise_curve,
         strength_map,
         map_len,
         dct_profile,
         kaiser,
     };
-    let weight_norm = weight_scale(sigma_value, &profile);
     let accum_scale = cross_frame_accum_scale(spatial_radius, spec.radius);
     let pool_ratio = if spec.pooled {
         nl4d_pool_ratio(spec.channels)
@@ -352,9 +377,6 @@ pub(crate) fn collab_site(
         centre_slot,
         c_min: 0.05,
         lambda_ht: 2.7,
-        curve_valid: 0,
-        map_mode: STRENGTH_MAP_OFF,
-        weight_scale: weight_norm,
         accum_scale,
         pool_ratio,
     };
@@ -633,6 +655,8 @@ pub(crate) fn regularise_site(
 
     let block_area = (BLKSIZE * BLKSIZE) as f32;
     let thsad = block_area * THSAD_PIXEL;
+    let noise_words = DerivedValues::default().to_words();
+    let noise = upload(client, &noise_words);
 
     RegulariseSite {
         client: client.clone(),
@@ -644,7 +668,7 @@ pub(crate) fn regularise_site(
         mv_in,
         outputs,
         lambda_pixel: spec.field_lambda * thsad,
-        sad_noise_floor: 0.0,
+        noise,
         thsad,
         width: spec.width,
         height: spec.height,

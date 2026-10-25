@@ -365,7 +365,7 @@ fn the_front_end_keeps_classes_beside_the_curve_and_resets_both() {
         let _ = denoiser.denoise().unwrap();
 
         let curve_present = denoiser.current_noise_curve().is_some();
-        let classes_present = denoiser.current_quarter_classes().is_some();
+        let classes_present = denoiser.current_classes_present();
         assert_eq!(curve_present, classes_present, "push {i}");
         classes_seen |= classes_present;
     }
@@ -373,7 +373,8 @@ fn the_front_end_keeps_classes_beside_the_curve_and_resets_both() {
     assert!(classes_seen, "expected classes to form over the brightness ramp");
 
     denoiser.reset_stream_state();
-    assert!(denoiser.current_quarter_classes().is_none());
+    let classes_after_reset = denoiser.current_classes_present();
+    assert!(!classes_after_reset);
 }
 
 #[test]

@@ -1,65 +1,14 @@
 use super::helpers::{R, make_client};
 use crate::bench_api::HostIo;
-use crate::nl4d::denoiser::strength_map_upload;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams, PsyParams};
 use crate::nlmeans::tests::helpers::seeded_unit_gaussian;
 use crate::nlmeans::{ChannelMode, HqParams, NlmParams, PrefilterMode};
-use crate::noise::{QuarterClass, QuarterClasses, STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, StrengthMapParams};
 
-const LUMA_MAP: StrengthMapParams = StrengthMapParams {
-    flat_boost: 1.5,
-    shadow_soften: 0.65,
-};
 const WIDTH: u32 = 640;
 const HEIGHT: u32 = 360;
 const FRAMES: u32 = 12;
 /// Columns either side of the texture seam left out of each half's measurement.
 const SEAM_MARGIN: u32 = 48;
-
-fn two_quarters() -> QuarterClasses {
-    let flat = QuarterClass {
-        flat: true,
-        luma: 0.1,
-    };
-    let textured = QuarterClass {
-        flat: false,
-        luma: 0.1,
-    };
-    let classes = vec![Some(flat), Some(textured)];
-
-    QuarterClasses::from_classes(2, 1, classes)
-}
-
-#[test]
-fn the_luma_map_uploads_only_with_a_valid_curve() {
-    let classes = two_quarters();
-
-    let with_curve = strength_map_upload(Some(&classes), 1, Some(LUMA_MAP), None);
-    let without_curve = strength_map_upload(Some(&classes), 0, Some(LUMA_MAP), None);
-
-    assert_eq!(with_curve, Some((vec![1.5, 0.65], STRENGTH_MAP_LUMA)));
-    assert_eq!(without_curve, None);
-}
-
-#[test]
-fn the_chroma_map_uploads_without_a_curve() {
-    let classes = two_quarters();
-
-    let upload = strength_map_upload(Some(&classes), 0, None, Some(1.5));
-
-    assert_eq!(upload, Some((vec![1.5, 1.0], STRENGTH_MAP_ALL)));
-}
-
-#[test]
-fn nothing_uploads_without_classes_or_a_map() {
-    let classes = two_quarters();
-
-    let without_classes = strength_map_upload(None, 1, Some(LUMA_MAP), None);
-    let without_map = strength_map_upload(Some(&classes), 1, None, None);
-
-    assert_eq!(without_classes, None);
-    assert_eq!(without_map, None);
-}
 
 fn ramp_luma(y: u32) -> f32 {
     let fraction = y as f32 / (HEIGHT - 1) as f32;
@@ -162,7 +111,7 @@ fn denoise_clip(params: Nl4dParams, frames: &[Vec<f32>]) -> ClipRun {
     for frame in frames {
         denoiser.push_frame(frame);
         let output = denoiser.denoise().expect("denoise failed");
-        classes_seen |= denoiser.front_for_test().current_quarter_classes().is_some();
+        classes_seen |= denoiser.front_for_test().current_classes_present();
 
         if let Some(output_frame) = output {
             outputs.push(output_frame);

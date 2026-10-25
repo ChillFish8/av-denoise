@@ -36,8 +36,8 @@ pub mod zero;
 
 use std::sync::OnceLock;
 
-use av_denoise_core::bench_api::NlmParams;
 pub use av_denoise_core::bench_api::{BLOCK_X, BLOCK_Y};
+use av_denoise_core::bench_api::{DerivedValues, NlmParams};
 use cubecl::benchmark::{Benchmark, BenchmarkComputations, TimingMethod};
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -115,6 +115,18 @@ pub fn h2_inv_norm() -> f32 {
     };
 
     params.h2_inv_norm()
+}
+
+/// A derived buffer holding the bench strength and a noise offset of 0.
+pub fn window_noise<R: Runtime>(client: &ComputeClient<R>) -> Handle {
+    let values = DerivedValues {
+        h2_inv_norm: h2_inv_norm(),
+        ..DerivedValues::default()
+    };
+    let words = values.to_words();
+    let bytes = f32::as_bytes(&words);
+
+    client.create_from_slice(bytes)
 }
 
 pub fn cube_count_2d() -> CubeCount {

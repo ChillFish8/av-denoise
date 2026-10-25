@@ -1,27 +1,22 @@
 mod machinery;
 mod noise;
-pub(in crate::nlmeans) mod readings;
 mod ring;
 mod sizes;
 mod stages;
-#[cfg(test)]
-mod tests;
 
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 pub(crate) use self::machinery::RingView;
-use self::noise::measured_noise_shape;
-use self::readings::NoiseReadings;
+use self::noise::{measures_noise, noise_shape};
 pub(crate) use self::sizes::{BufferSize, check_u32_indexable, front_buffer_sizes};
 use super::mirror::MirroredBuffer;
 use super::motion::{self, MotionCtx, MotionEstimation};
 use super::params::{NlmParams, SEPARABLE_THRESHOLD, validate_dimensions};
-use super::prefilter::PrefilterMode;
 use crate::engine::align::StorageAlign;
 use crate::engine::timing::DeviceTimer;
 use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
-use crate::noise::{DerivedValues, HostNoise, NoiseSettings, NoiseState, build_spatial_offset_lut};
+use crate::noise::{DerivedValues, NoiseState};
 use crate::tune::KernelSelector;
 
 /// A denoised frame still resident on the GPU.
@@ -48,10 +43,6 @@ pub struct NlmDenoiser<R: Runtime> {
     pub(super) frames_loaded: usize,
     /// Real pushes in the current stream, not counting the duplicates added at either end.
     pub(super) real_pushes: usize,
-    /// The value of `ring_head` when the current engine call began.
-    ///
-    /// Readings from this push on were started by the current call and are not polled during it.
-    pub(super) call_start_push: usize,
 
     /// The frame ring, one slot per frame in the window.
     pub(super) input_buf: Handle,
@@ -79,24 +70,11 @@ pub struct NlmDenoiser<R: Runtime> {
     pub(super) outputs: [Handle; 2],
     pub(super) next_output_slot: usize,
 
-    /// Scales patch distances into weights, one over the squared strength times the patch area.
-    pub(super) h2_inv_norm: f32,
-    /// The distance floor the main pass subtracts before weighting.
-    ///
-    /// It is zero under `NlmSpatial`, because two pilot outputs carry no noise floor and
-    /// subtracting one would overweight patches that do not really match.
-    pub(super) noise_offset: f32,
-    /// The distance floor for comparisons against noisy input pixels, which the pilot always uses.
-    pub(super) input_noise_offset: f32,
     pub use_separable: bool,
     pub(super) use_reference: bool,
     /// Picks the candidate each tunable launch runs.
     pub(super) kernels: KernelSelector<R>,
 
-    /// One noise-floor offset per search candidate, row-major, for the self-comparison kernels.
-    pub(super) spatial_offset_lut: MirroredBuffer,
-    /// The pilot's flat offset table, which follows `input_noise_offset`.
-    pub(super) pilot_offset_lut: MirroredBuffer,
     /// The physical ring slot of each neighbour of the last pass, in motion-field order.
     ///
     /// Present when the temporal radius is above 0.
@@ -107,13 +85,12 @@ pub struct NlmDenoiser<R: Runtime> {
     /// Empty unless `Chained` motion estimation is active.
     pub(super) ring_slot_tables: Vec<Handle>,
 
-    /// The noise measurement buffers, present when the noise is estimated automatically.
+    /// The noise state, which measures the noise when it is estimated automatically and holds
+    /// fixed values otherwise.
     ///
     /// Each slot keeps a frame's measurements intact until that frame reaches the centre and is
     /// folded.
-    pub(super) noise: Option<NoiseState<R>>,
-    /// The host noise estimate, which feeds `h2_inv_norm`, the noise offsets and `sigma_y`.
-    pub(super) host_noise: HostNoise,
+    pub(super) noise: NoiseState<R>,
 
     pub(super) mc_ctx: Option<MotionCtx>,
     /// The motion-shifted input ring the temporal kernels read neighbours from.
@@ -146,11 +123,7 @@ pub struct NlmDenoiser<R: Runtime> {
     /// The kernel drops the confidence write at compile time in that case, so this buffer is
     /// never indexed.
     pub(super) confidence_dummy: Handle,
-    /// The smoothed luma sigma, which feeds the confidence noise floor.
-    pub(super) sigma_y: f32,
 
-    /// Each ring slot's noise reading, started when the slot is written.
-    pub(super) noise_readings: NoiseReadings,
     /// Samples the device time of this denoiser's frames.
     pub(crate) device_timer: DeviceTimer,
 
@@ -217,22 +190,8 @@ impl<R: Runtime> NlmDenoiser<R> {
         let tmp_hsum_bwd = client.empty(scalar_bytes);
         let outputs = [client.empty(frame_bytes), client.empty(frame_bytes)];
 
-        let h2_inv_norm = params.h2_inv_norm();
-        let input_noise_offset = params.noise_offset();
-        // Under `NlmSpatial` the main pass compares pilot outputs, which carry no noise floor.
-        let noise_offset = match params.prefilter {
-            PrefilterMode::NlmSpatial { .. } => 0.0,
-            _ => input_noise_offset,
-        };
         let use_separable = params.patch_radius > SEPARABLE_THRESHOLD;
         let use_reference = params.prefilter.needs_reference_buf();
-
-        let initial_offsets = build_spatial_offset_lut(params.search_radius, 0.0, noise_offset);
-        let initial_offset_bytes = f32::as_bytes(&initial_offsets);
-        let spatial_offset_lut = MirroredBuffer::new(client, initial_offset_bytes);
-        let pilot_offsets = build_spatial_offset_lut(params.search_radius, 0.0, input_noise_offset);
-        let pilot_offset_bytes = f32::as_bytes(&pilot_offsets);
-        let pilot_offset_lut = MirroredBuffer::new(client, pilot_offset_bytes);
 
         let neighbour_slots = if params.temporal_radius > 0 {
             let initial_slots = vec![0u32; 2 * params.temporal_radius as usize];
@@ -243,12 +202,11 @@ impl<R: Runtime> NlmDenoiser<R> {
             None
         };
 
-        let noise_shape = measured_noise_shape(&params, width, height, align);
-        let noise = noise_shape.map(|shape| {
-            let settings = NoiseSettings::default();
-            let initial = DerivedValues::default();
-            NoiseState::new(client, shape, settings, initial)
-        });
+        let auto_noise = measures_noise(&params);
+        let shape = noise_shape(&params, width, height, align);
+        let unset_derived = DerivedValues::default();
+        let offset_tables = Some(params.search_radius);
+        let fixed_noise = NoiseState::fixed(client, shape, unset_derived, offset_tables);
 
         let mc_ctx = if params.motion_compensation.is_active() && params.temporal_radius > 0 {
             MotionCtx::new(params.motion_compensation, width, height, align)
@@ -358,13 +316,11 @@ impl<R: Runtime> NlmDenoiser<R> {
             (None, None)
         };
 
-        let sigma_y = params.hq.and_then(|hq| hq.sigma_override).unwrap_or(0.0);
-
         let mut device_timer = DeviceTimer::default();
         let ledger = kernels.ledger().cloned();
         device_timer.set_ledger(ledger);
 
-        Self {
+        let mut front = Self {
             client: client.clone(),
             params,
             width,
@@ -372,7 +328,6 @@ impl<R: Runtime> NlmDenoiser<R> {
             ring_head: 0,
             frames_loaded: 0,
             real_pushes: 0,
-            call_start_push: 0,
             input_buf,
             search_buf: None,
             reference_buf,
@@ -387,18 +342,12 @@ impl<R: Runtime> NlmDenoiser<R> {
             tmp_hsum_bwd,
             outputs,
             next_output_slot: 0,
-            h2_inv_norm,
-            noise_offset,
-            input_noise_offset,
             use_separable,
             use_reference,
             kernels,
-            spatial_offset_lut,
-            pilot_offset_lut,
             neighbour_slots,
             ring_slot_tables,
-            noise,
-            host_noise: HostNoise::default(),
+            noise: fixed_noise,
             mc_ctx,
             compensated_input_buf,
             compensated_reference_buf,
@@ -411,11 +360,14 @@ impl<R: Runtime> NlmDenoiser<R> {
             confidence_pyramid,
             confidence_mv_scratch,
             confidence_dummy,
-            sigma_y,
-            noise_readings: NoiseReadings::new(total_frames as usize),
             device_timer,
             shifted_edges: false,
-        }
+        };
+
+        // The settings and the starting derived values read the front's own parameters.
+        front.init_noise(auto_noise);
+
+        front
     }
 
     pub(crate) fn placeholder(&self) -> &Handle {
@@ -428,8 +380,6 @@ impl<R: Runtime> NlmDenoiser<R> {
         planes: &[DevicePlane<'_>],
         format: SampleFormat,
     ) -> Result<(), anyhow::Error> {
-        self.begin_call();
-
         let total_frames = self.params.total_frames() as usize;
         let slot = self.ring_head % total_frames;
         let pixels = self.width * self.height;
@@ -448,9 +398,7 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         ingest(&self.client, planes, format, &self.placeholder, target);
         self.mirror_search_slot(slot);
-        self.run_post_upload_stages(slot)?;
-
-        self.process_landed_readings()
+        self.run_post_upload_stages(slot)
     }
 
     /// Queues the denoise kernels for the current window without reading the result back.
@@ -462,17 +410,14 @@ impl<R: Runtime> NlmDenoiser<R> {
             return Ok(None);
         }
 
-        if self.noise.is_some() {
+        if self.noise.is_measured() {
             self.update_noise_estimate(self.params.temporal_radius)?;
         }
-
-        self.rebuild_spatial_offset_lut();
 
         let slot = self.next_output_slot;
         self.next_output_slot = (slot + 1) % self.outputs.len();
 
         self.run_denoise_kernels(slot)?;
-        self.process_landed_readings()?;
 
         let output = GpuOutput {
             handle: self.outputs[slot].clone(),
@@ -516,14 +461,13 @@ impl<R: Runtime> NlmDenoiser<R> {
 
     /// Resets the stream state so the next push starts a fresh temporal stream.
     ///
-    /// The GPU buffers are left alone, because a fresh stream writes every slot before reading it.
+    /// The GPU noise state queues a reset. Every other GPU buffer is left alone, because a fresh
+    /// stream writes every slot before reading it.
     pub fn reset_stream_state(&mut self) {
         self.ring_head = 0;
         self.frames_loaded = 0;
         self.next_output_slot = 0;
         self.real_pushes = 0;
-        self.call_start_push = 0;
-        self.host_noise.reset();
-        self.noise_readings.clear();
+        self.queue_noise_reset();
     }
 }

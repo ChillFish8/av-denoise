@@ -3,13 +3,13 @@ use cubecl::prelude::*;
 use super::helpers::{R, make_client};
 use crate::nl4d::kernels::nl4d_mv_regularise;
 use crate::nlmeans::motion::THSAD_PIXEL;
+use crate::noise::tests::sad_floor_buffer;
+use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
 
 const BLKSIZE: u32 = 16;
 const STEP: u32 = 8;
 
-/// One launch over a `blocks_x x blocks_y` grid, returning the output field and confidence.
-///
-/// The centre sits in slot 0 of a two-slot frame buffer and the neighbour in slot 1.
+/// [run_with_floor] with a SAD floor of 0.
 fn run(
     width: u32,
     height: u32,
@@ -17,6 +17,22 @@ fn run(
     neighbour: &[f32],
     mv_in: &[i32],
     lambda: f32,
+) -> (Vec<i32>, Vec<f32>) {
+    run_with_floor(width, height, centre, neighbour, mv_in, lambda, 0.0)
+}
+
+/// One launch over a `blocks_x x blocks_y` grid, returning the output field and confidence.
+///
+/// The centre sits in slot 0 of a two-slot frame buffer and the neighbour in slot 1. The derived
+/// buffer holds `sad_floor` in its SAD floor word and other values in every other word.
+fn run_with_floor(
+    width: u32,
+    height: u32,
+    centre: &[f32],
+    neighbour: &[f32],
+    mv_in: &[i32],
+    lambda: f32,
+    sad_floor: f32,
 ) -> (Vec<i32>, Vec<f32>) {
     let client = make_client();
     let blocks_x = width.div_ceil(STEP);
@@ -57,6 +73,9 @@ fn run(
         let mv_out_arg = ArrayArg::from_raw_parts(mv_out_handle, 2 * blocks);
         let conf_out_arg = ArrayArg::from_raw_parts(conf_out_handle, blocks);
 
+        let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, sad_floor);
+        let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
+
         nl4d_mv_regularise::launch_unchecked::<R>(
             &client,
             grid,
@@ -68,7 +87,7 @@ fn run(
             conf_out_arg,
             0u32,
             lambda_pixel,
-            0.0,
+            noise_arg,
             thsad,
             width,
             height,
@@ -293,4 +312,32 @@ fn confidence_follows_the_winning_vector() {
         "right wins its neighbour's exact match (candidate 2), so confidence must be high, got {}",
         confidence[right]
     );
+}
+
+/// Every block of a uniform mismatch scores the same SAD, which a derived floor above it absorbs.
+#[test]
+fn a_mismatch_within_the_derived_sad_floor_scores_full_confidence() {
+    let (width, height) = (64u32, 64u32);
+    let blocks_x = width.div_ceil(STEP);
+    let blocks_y = height.div_ceil(STEP);
+    let blocks = (blocks_x * blocks_y) as usize;
+    let centre = vec![0.5f32; (width * height) as usize];
+    let neighbour = vec![0.51f32; (width * height) as usize];
+    let field = uniform_field(blocks, [0, 0]);
+    let block_sad = (BLKSIZE * BLKSIZE) as f32 * 0.01;
+    let floor = 1.25 * block_sad;
+
+    let (_, unfloored) = run(width, height, &centre, &neighbour, &field, 0.0);
+    let (_, floored) = run_with_floor(width, height, &centre, &neighbour, &field, 0.0, floor);
+
+    let interior = (3 * blocks_x + 3) as usize;
+    let unfloored_confidence = unfloored[interior];
+    assert!(
+        unfloored_confidence < 0.9,
+        "without a floor the mismatch scores {unfloored_confidence}"
+    );
+
+    for (block, &confidence) in floored.iter().enumerate() {
+        assert_eq!(confidence, 1.0, "block {block} under the floor");
+    }
 }

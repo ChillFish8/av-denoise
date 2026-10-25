@@ -8,20 +8,15 @@ use crate::collab::geometry::{ref_count, strength_map_dims};
 use crate::collab::kernels::aggregate::{collab_normalise, cross_frame_accum_scale, kaiser_window};
 use crate::collab::kernels::fused::MEMBER_WORDS;
 use crate::collab::kernels::packed::collab_normalise_packed;
-use crate::collab::kernels::transforms::dct_noise_profile;
+use crate::collab::kernels::transforms::{RECIPROCAL_FLOOR, dct_noise_profile};
 use crate::collab::{MAX_K, PATCH_SIZE, needs_warp_uniform_search, supports_f16_search};
 use crate::engine::timing::{DeviceTimed, DeviceTimer, timed};
 use crate::engine::{DevicePlane, EngineTiming, SampleFormat};
 use crate::nlmeans::denoiser::{BufferSize, front_buffer_sizes};
-use crate::nlmeans::mirror::MirroredBuffer;
-use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, RingView};
-use crate::noise::{
-    NOISE_CURVE_BINS,
-    QuarterClasses,
-    STRENGTH_MAP_ALL,
-    STRENGTH_MAP_LUMA,
-    StrengthMapParams,
-};
+use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, PrefilterMode, RingView};
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+use crate::noise::NoiseSnapshot;
+use crate::noise::{NoiseConsumer, StrengthMapKind, StrengthMapParams};
 use crate::tune::{KernelSelector, PipelineProfile, check_plane_size};
 
 /// Which accumulator regions a pass zeroes before scattering.
@@ -87,12 +82,9 @@ pub struct Nl4dDenoiser<R: Runtime> {
     pub(super) members: Option<Handle>,
 
     pub(super) group_weight: Handle,
-    pub(super) sigma_buf: MirroredBuffer,
     pub(super) dct_profile_buf: Handle,
     /// The aggregation window's 8 taps, all ones when `kaiser_beta` is 0.
     pub(super) kaiser_buf: Handle,
-    /// The correlation profile kept on the host, so the weight normalisation needs no readback.
-    pub(super) dct_profile: [f32; 8],
     /// Fixed-point accumulators the filter scatters into, one region per slot of the frame ring.
     ///
     /// A pass contributes to every frame in the ring, so a frame's region stays live for as long
@@ -124,19 +116,6 @@ pub struct Nl4dDenoiser<R: Runtime> {
     /// The regularised motion field, allocated only when `field_lambda > 0.0`.
     pub(super) reg_mv: Option<Handle>,
     pub(super) reg_conf: Option<Handle>,
-    /// Whether passes apply the luma noise curve, set when the noise map is on and the denoiser
-    /// filters luma.
-    pub(super) apply_noise_map: bool,
-    /// Set when the noise map applies and its multipliers are not all 1.0.
-    pub(super) luma_map: Option<StrengthMapParams>,
-    /// The chroma flat boost, set when the noise map is on and the boost is not 1.0.
-    pub(super) chroma_map_boost: Option<f32>,
-    /// The luma noise curve the last pass applied, zeros when none applies.
-    pub(super) noise_curve_buf: MirroredBuffer,
-    /// The strength map the last pass applied with a map mode other than off.
-    pub(super) strength_map_buf: MirroredBuffer,
-    /// A strength map of all 1.0, bound by every pass with no map to apply.
-    pub(super) unit_map: Handle,
     pub(super) map_cols: u32,
     pub(super) map_rows: u32,
     /// Present only when grain export is on.
@@ -251,7 +230,18 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let line_ring = luma_psy.map(|psy| psy.line_ring);
         front.set_line_ring(line_ring);
 
+        let strength_map = match (luma_map, chroma_map_boost) {
+            (Some(map), _) => StrengthMapKind::Luma(map),
+            (None, Some(flat_boost)) => StrengthMapKind::Chroma { flat_boost },
+            (None, None) => StrengthMapKind::Off,
+        };
+        front.set_strength_map(strength_map);
+
         front.set_shifted_edges(true);
+
+        // Only the NLM pilot reads an offset table on this front.
+        let pilot_prefilter = matches!(params.nlm.prefilter, PrefilterMode::NlmSpatial { .. });
+        front.set_offset_tables(pilot_prefilter);
 
         let profile_allows_f16 = kernels.profile() != PipelineProfile::F32Search;
         let legality = *kernels.legality();
@@ -280,28 +270,25 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             client.empty(member_bytes)
         });
 
-        let sigma_host = vec![0.0f32; stored_ch as usize];
-        let sigma_bytes = f32::as_bytes(&sigma_host);
-        let sigma_buf = MirroredBuffer::new(client, sigma_bytes);
-
         // The correlation profile is purely spatial and has no `rho` knob, so it is built once from
         // the white-noise default.
         let dct_profile = dct_noise_profile(0.0);
         let dct_profile_bytes = f32::as_bytes(&dct_profile);
         let dct_profile_buf = client.create_from_slice(dct_profile_bytes);
+
+        let weight_g_max = dct_profile.iter().copied().fold(0.0f32, f32::max);
+        let consumer = NoiseConsumer {
+            curve_applies: apply_noise_map,
+            weight_g_max,
+            weight_floor: RECIPROCAL_FLOOR,
+        };
+        front.set_noise_consumer(consumer);
+
         let kaiser_taps = kaiser_window(params.kaiser_beta);
         let kaiser_bytes = f32::as_bytes(&kaiser_taps);
         let kaiser_buf = client.create_from_slice(kaiser_bytes);
 
         let (map_cols, map_rows) = strength_map_dims(width, height);
-        let unit_map_host = vec![1.0f32; (map_cols * map_rows) as usize];
-        let unit_map_bytes = f32::as_bytes(&unit_map_host);
-        let unit_map = client.create_from_slice(unit_map_bytes);
-        let strength_map_buf = MirroredBuffer::new(client, unit_map_bytes);
-
-        let zero_curve = [0.0f32; NOISE_CURVE_BINS];
-        let zero_curve_bytes = f32::as_bytes(&zero_curve);
-        let noise_curve_buf = MirroredBuffer::new(client, zero_curve_bytes);
 
         let packed_profile = kernels.profile() == PipelineProfile::PackedAtomics;
         let packed = packed_profile && legality.packed_atomics && limits.int64_atomic_add;
@@ -373,9 +360,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             accum_scale,
             members,
             group_weight,
-            sigma_buf,
             dct_profile_buf,
-            dct_profile,
             kaiser_buf,
             accum,
             wsum,
@@ -391,12 +376,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             field_lambda: params.field_lambda,
             reg_mv,
             reg_conf,
-            apply_noise_map,
-            luma_map,
-            chroma_map_boost,
-            noise_curve_buf,
-            strength_map_buf,
-            unit_map,
             map_cols,
             map_rows,
             grain,
@@ -437,8 +416,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let view = self.machinery_at(radius)?;
         self.run_pass(&view, clear)?;
         self.save_grain_vectors(view.centre_slot, radius, 2 * radius);
-
-        self.front.process_landed_readings()?;
 
         if self.passes_run <= radius {
             return Ok(None);
@@ -484,7 +461,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         (self.width, self.height, self.channels)
     }
 
-    /// Host and device time this denoiser has spent.
+    /// Device time this denoiser has spent.
     pub(crate) fn timing(&mut self) -> EngineTiming {
         self.front.timing()
     }
@@ -517,7 +494,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// ring with copies of its last frame, runs every real frame as a centre and reads out every
     /// real frame.
     pub(crate) fn finish_passes(&mut self) -> Result<Vec<CompletedRegion>, anyhow::Error> {
-        self.front.begin_call();
         self.front.device_timer.stop_sampling();
 
         let emit = self.flush_target() as u32;
@@ -551,8 +527,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             self.save_grain_vectors(view.centre_slot, centre, last_real);
             clear = AccumClear::Nothing;
         }
-
-        self.front.process_landed_readings()?;
 
         let first_region = last_real + 1 - emit;
         let mut regions = Vec::with_capacity(emit as usize);
@@ -603,6 +577,16 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         Some(snapshot)
     }
 
+    /// The front end's GPU noise state and derived values, with no chains for a pinned sigma.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the readback fails.
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+    pub(crate) fn noise_snapshot(&self) -> Option<NoiseSnapshot> {
+        self.front.noise_snapshot()
+    }
+
     /// Reads back the grain chunks measured since the last call. Empty when export is off.
     ///
     /// Measured chunks stay on the GPU until drained, so callers drain after each flush.
@@ -630,21 +614,6 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn front_for_test(&self) -> &NlmDenoiser<R> {
         &self.front
-    }
-
-    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-    pub(crate) fn sigma_buffer_for_test(&self) -> &MirroredBuffer {
-        &self.sigma_buf
-    }
-
-    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-    pub(crate) fn noise_curve_buffer_for_test(&self) -> &MirroredBuffer {
-        &self.noise_curve_buf
-    }
-
-    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-    pub(crate) fn strength_map_buffer_for_test(&self) -> &MirroredBuffer {
-        &self.strength_map_buf
     }
 
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
@@ -795,41 +764,4 @@ pub(super) fn accumulator_lens(
 
     let accum_len = pixels * stored_ch as usize * frames;
     (accum_len, wsum_len)
-}
-
-/// The noise curve a pass uploads, and the flag that tells the kernel to apply it.
-///
-/// A missing curve, or one that does not apply, uploads zeroes with the flag at 0.
-pub(super) fn noise_curve_upload(
-    ratios: Option<[f32; NOISE_CURVE_BINS]>,
-    applies: bool,
-) -> ([f32; NOISE_CURVE_BINS], u32) {
-    match ratios {
-        Some(ratios) if applies => (ratios, 1),
-        _ => ([0.0f32; NOISE_CURVE_BINS], 0),
-    }
-}
-
-/// The strength map a pass uploads, and the mode the kernel applies it in.
-///
-/// `None` binds the unit map with the map off. The luma map needs a curve the pass applies, and
-/// the chroma map needs only the quarter classes.
-pub(super) fn strength_map_upload(
-    classes: Option<&QuarterClasses>,
-    curve_valid: u32,
-    luma_map: Option<StrengthMapParams>,
-    chroma_map_boost: Option<f32>,
-) -> Option<(Vec<f32>, u32)> {
-    let classes = classes?;
-
-    if let Some(params) = luma_map
-        && curve_valid == 1
-    {
-        let multipliers = classes.luma_multipliers(params);
-        return Some((multipliers, STRENGTH_MAP_LUMA));
-    }
-
-    let boost = chroma_map_boost?;
-    let multipliers = classes.chroma_multipliers(boost);
-    Some((multipliers, STRENGTH_MAP_ALL))
 }

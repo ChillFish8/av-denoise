@@ -1,4 +1,4 @@
-use super::fold_reference::{COEFFICIENTS, CONSUMER, host_snapshot, relative_gap};
+use super::fold_reference::{COEFFICIENTS, CONSUMER, SnapshotGap, curve_gap, host_snapshot, largest_gap};
 use super::frames::{
     Agreement,
     BRICK,
@@ -13,7 +13,6 @@ use super::frames::{
 };
 use super::y4m::read_y4m;
 use crate::noise::correlation::correlation_factor;
-use crate::noise::derived::DerivedValues;
 use crate::noise::fold::{Fold, FoldSettings, NoiseSettings};
 use crate::noise::host::HostNoise;
 use crate::noise::reading::ReadingRecord;
@@ -237,109 +236,6 @@ fn raw_inputs(
     values
 }
 
-fn largest_gap(gpu: &[f32], host: &[f32]) -> f32 {
-    gpu.iter()
-        .zip(host)
-        .map(|(&gpu_value, &host_value)| relative_gap(gpu_value, host_value))
-        .fold(0.0f32, f32::max)
-}
-
-/// The largest relative gap of the values two snapshots both hold, and whether they hold the
-/// same chains, rho, flags and map mode.
-#[derive(Debug, Clone, Copy)]
-struct SnapshotGap {
-    state: f32,
-    derived: f32,
-    structure_matches: bool,
-}
-
-impl SnapshotGap {
-    fn measure(gpu: &NoiseSnapshot, host: &NoiseSnapshot, channels: usize) -> Self {
-        let chains = [
-            (gpu.median, host.median),
-            (gpu.low, host.low),
-            (gpu.low_unboosted, host.low_unboosted),
-            (gpu.temporal_only, host.temporal_only),
-        ];
-        let mut state = 0.0f32;
-        let mut structure_matches = true;
-
-        for (gpu_chain, host_chain) in chains {
-            structure_matches &= gpu_chain.is_some() == host_chain.is_some();
-
-            if let (Some(gpu_values), Some(host_values)) = (gpu_chain, host_chain) {
-                let chain_gap = largest_gap(&gpu_values[..channels], &host_values[..channels]);
-                state = state.max(chain_gap);
-            }
-        }
-
-        structure_matches &= gpu.rho.is_some() == host.rho.is_some();
-        if let (Some(gpu_rho), Some(host_rho)) = (gpu.rho, host.rho) {
-            let rho_gap = relative_gap(gpu_rho, host_rho);
-            state = state.max(rho_gap);
-        }
-
-        let gpu_derived = gpu.derived;
-        let host_derived = host.derived;
-        structure_matches &= gpu_derived.curve_valid == host_derived.curve_valid;
-        structure_matches &= gpu_derived.map_mode == host_derived.map_mode;
-
-        let derived_gap = derived_value_gaps(&gpu_derived, &host_derived);
-
-        Self {
-            state,
-            derived: derived_gap,
-            structure_matches,
-        }
-    }
-}
-
-/// The largest relative gap of two sets of derived values, leaving out the curve flag and the map
-/// mode.
-fn derived_value_gaps(gpu: &DerivedValues, host: &DerivedValues) -> f32 {
-    let gpu_values = [
-        gpu.sigma[0],
-        gpu.sigma[1],
-        gpu.sigma[2],
-        gpu.weight_scale,
-        gpu.sad_noise_floor,
-        gpu.confidence_sad_noise_floor,
-        gpu.h2_inv_norm,
-        gpu.pilot_h2_inv_norm,
-        gpu.noise_offset,
-        gpu.input_noise_offset,
-        gpu.rho,
-    ];
-    let host_values = [
-        host.sigma[0],
-        host.sigma[1],
-        host.sigma[2],
-        host.weight_scale,
-        host.sad_noise_floor,
-        host.confidence_sad_noise_floor,
-        host.h2_inv_norm,
-        host.pilot_h2_inv_norm,
-        host.noise_offset,
-        host.input_noise_offset,
-        host.rho,
-    ];
-
-    largest_gap(&gpu_values, &host_values)
-}
-
-/// The relative gap of two curves, or infinite where only one side holds one.
-fn curve_gap(gpu: &NoiseSnapshot, host: &NoiseSnapshot) -> f32 {
-    match (gpu.curve, host.curve) {
-        (Some((gpu_ratios, gpu_median)), Some((host_ratios, host_median))) => {
-            let ratio_gap = largest_gap(&gpu_ratios, &host_ratios);
-            let median_gap = relative_gap(gpu_median, host_median);
-            ratio_gap.max(median_gap)
-        },
-        (None, None) => 0.0,
-        _ => f32::INFINITY,
-    }
-}
-
 /// How many folds of a stream each rule judged.
 #[derive(Debug, Default)]
 struct FoldSummary {
@@ -464,6 +360,7 @@ fn fold_settings(reading: ReadingSettings) -> NoiseSettings {
         borrow_ahead: true,
         consumer: CONSUMER,
         coefficients: COEFFICIENTS,
+        offset_tables: None,
     };
 
     NoiseSettings { reading, fold }

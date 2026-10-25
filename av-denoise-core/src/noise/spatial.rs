@@ -2,6 +2,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::kernels::{nlm_noise_partial, nlm_noise_reduce};
+#[cfg(test)]
 use super::stats::{lower_quartile, sort_ascending};
 use super::{IMMERKAER_BLOCK_X, IMMERKAER_BLOCK_Y, NOISE_BLOCK_1D};
 use crate::engine::align::StorageAlign;
@@ -39,6 +40,7 @@ pub(crate) const RESULTS_PER_SLOT: usize = 4;
 
 /// The [RESULTS_PER_SLOT](crate::noise::spatial::RESULTS_PER_SLOT) Immerkær totals `slot`
 /// holds in the results buffer.
+#[cfg(test)]
 pub(crate) fn noise_results_slot_view(results_buf: &Handle, frame_count: u32, slot: u32) -> Handle {
     let row_bytes = (RESULTS_PER_SLOT * size_of::<f32>()) as u64;
     let total_bytes = frame_count as u64 * row_bytes;
@@ -125,6 +127,7 @@ pub(crate) fn immerkaer_sigma_scale() -> f32 {
 /// Turns the summed absolute mask responses into an Immerkær sigma.
 ///
 /// The interior area leaves out the one-pixel border the mask cannot reach.
+#[cfg(test)]
 pub(crate) fn sigma_from_abs_sum(abs_sum: f32, width: u32, height: u32) -> f32 {
     let interior = ((width - 2) as f32) * ((height - 2) as f32);
     immerkaer_sigma_scale() * abs_sum / (6.0 * interior)
@@ -136,6 +139,7 @@ pub(crate) fn sigma_from_abs_sum(abs_sum: f32, width: u32, height: u32) -> f32 {
 /// interior. A block with no overlap is skipped so a spurious zero cannot dilute the quartile.
 /// Where noise is uneven across a frame this reads lower than the frame-wide mean, which makes it
 /// the cautious estimate. Channels past the active count stay 0.
+#[cfg(test)]
 pub(crate) fn sigma_block_p25_from_partials(
     partials: &[f32],
     channels: u32,

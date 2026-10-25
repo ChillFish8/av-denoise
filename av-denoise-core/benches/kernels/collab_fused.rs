@@ -16,7 +16,7 @@ use av_denoise_core::bench_api::tune_sites::{
     CollabValues,
     CollabVariant,
 };
-use av_denoise_core::bench_api::{NOISE_CURVE_BINS, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
+use av_denoise_core::bench_api::{DerivedValues, NOISE_CURVE_BINS, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
 use av_denoise_core::tune::{DeviceLimits, SiteCandidate, VariantSite, fit_candidates};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
@@ -61,7 +61,7 @@ pub struct CollabFusedBench<R: Runtime> {
     pub channels: u32,
     pub channel_name: &'static str,
     pub split_mv: bool,
-    /// Launches with a stepped noise curve and `curve_valid = 1`.
+    /// Launches with a stepped noise curve and the curve flag set.
     pub noise_curve: bool,
     /// Launches with a varied strength map in [STRENGTH_MAP_LUMA] mode.
     pub strength_map: bool,
@@ -136,7 +136,8 @@ pub struct CollabFusedInput {
     pub mv_field: Handle,
     pub confidence: Handle,
     pub neighbour_slots: Handle,
-    pub sigma: Handle,
+    /// The derived noise values, with every live channel at `SIGMA`.
+    pub noise: Handle,
     pub dct_profile: Handle,
     /// The uniform aggregation window.
     ///
@@ -168,15 +169,6 @@ impl<R: Runtime> CollabFusedBench<R> {
         let neighbour_conf_stride = conf_stride(blocks_x, blocks_y, align);
 
         let (map_cols, map_rows) = strength_map_dims(WIDTH, HEIGHT);
-        let map_mode = if self.strength_map {
-            STRENGTH_MAP_LUMA
-        } else {
-            STRENGTH_MAP_OFF
-        };
-
-        let curve_valid = u32::from(self.noise_curve);
-        let dct_profile = dct_noise_profile(0.0);
-        let group_weight_scale = weight_scale(SIGMA, &dct_profile);
         let accum_scale = cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS);
         let frames_per_volume = grid_frames(RADIUS);
 
@@ -191,7 +183,7 @@ impl<R: Runtime> CollabFusedBench<R> {
             conf_len: (2 * RADIUS * neighbour_conf_stride) as usize,
             neighbour_slots: args.neighbour_slots.clone(),
             neighbour_slots_len: NEIGHBOUR_SLOTS.len(),
-            sigma: args.sigma.clone(),
+            noise: args.noise.clone(),
             noise_curve: args.noise_curve.clone(),
             strength_map: args.strength_map.clone(),
             map_len: args.map_len,
@@ -202,9 +194,6 @@ impl<R: Runtime> CollabFusedBench<R> {
             centre_slot: CENTRE_SLOT,
             c_min: 0.0,
             lambda_ht: LAMBDA_HT,
-            curve_valid,
-            map_mode,
-            weight_scale: group_weight_scale,
             accum_scale,
             pool_ratio: POOL_RATIO,
         };
@@ -297,13 +286,27 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
         let slots_bytes = u32::as_bytes(&NEIGHBOUR_SLOTS);
         let neighbour_slots = self.client.create_from_slice(slots_bytes);
 
-        // Sized for the stored lane count and filled for the logical ones, matching what
-        // `Nl4dDenoiser` uploads each pass.
-        let mut sigma_host = vec![0.0f32; stored_ch as usize];
-        sigma_host[..self.channels as usize].fill(SIGMA);
-        let sigma_bytes = f32::as_bytes(&sigma_host);
-        let sigma = self.client.create_from_slice(sigma_bytes);
         let profile_host = dct_noise_profile(0.0);
+        let map_mode = if self.strength_map {
+            STRENGTH_MAP_LUMA
+        } else {
+            STRENGTH_MAP_OFF
+        };
+
+        let mut sigma = [0.0f32; 3];
+        sigma[..self.channels as usize].fill(SIGMA);
+        let group_weight_scale = weight_scale(SIGMA, &profile_host);
+        let derived = DerivedValues {
+            sigma,
+            weight_scale: group_weight_scale,
+            curve_valid: self.noise_curve,
+            map_mode,
+            ..DerivedValues::default()
+        };
+        let noise_words = derived.to_words();
+        let noise_bytes = f32::as_bytes(&noise_words);
+        let noise = self.client.create_from_slice(noise_bytes);
+
         let profile_bytes = f32::as_bytes(&profile_host);
         let dct_profile = self.client.create_from_slice(profile_bytes);
         let kaiser_host = kaiser_window(0.0);
@@ -347,7 +350,7 @@ impl<R: Runtime> Benchmark for CollabFusedBench<R> {
             mv_field,
             confidence,
             neighbour_slots,
-            sigma,
+            noise,
             dct_profile,
             kaiser,
             accum,

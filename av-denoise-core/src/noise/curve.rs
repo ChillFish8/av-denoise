@@ -1,4 +1,7 @@
+#[cfg(test)]
 use super::stats::{median, sort_ascending};
+use super::temporal::STATIC_GATE;
+#[cfg(test)]
 use super::temporal::{
     AcceptedBlock,
     QUARTER_FLATNESS,
@@ -8,7 +11,6 @@ use super::temporal::{
     QUARTER_SUM_D,
     QUARTER_SUM_D2,
     RHO_SIGMA_GATE,
-    STATIC_GATE,
     TEMPORAL_QUARTER_BASE,
     TEMPORAL_QUARTER_FIELDS,
     TEMPORAL_QUARTER_SIZE,
@@ -47,6 +49,7 @@ pub(crate) const QUARTER_STATIC_GATE: f32 = 2.0 * STATIC_GATE;
 /// How much noisier each brightness level is than the frame's median quarter.
 ///
 /// Bin `i` is centred at luma `(i + 0.5) / 16`, between 0 and 1.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct NoiseCurve {
     pub(crate) ratios: [f32; NOISE_CURVE_BINS],
@@ -54,6 +57,7 @@ pub(crate) struct NoiseCurve {
     pub(crate) sigma_quarter_median: f32,
 }
 
+#[cfg(test)]
 impl NoiseCurve {
     /// The ratio at `luma`, interpolated between bin centres the same way the fused kernel reads it.
     pub(crate) fn ratio_at(&self, luma: f32) -> f32 {
@@ -73,6 +77,7 @@ impl NoiseCurve {
 }
 
 /// One 8x8 quarter that passed its own static gates.
+#[cfg(test)]
 struct CurveQuarter {
     sigma: f32,
     mean_luma: f32,
@@ -88,6 +93,7 @@ struct CurveQuarter {
 /// median sigma of its quarters, and empty bins are filled by linear interpolation between
 /// their populated neighbours. Values past the first and last populated bins are held flat.
 /// Every entry is then divided by the median sigma of all passing quarters.
+#[cfg(test)]
 pub(crate) fn build_noise_curve(
     records: &[f32],
     stored_ch: u32,
@@ -151,6 +157,7 @@ pub(crate) fn curve_bin_counts(
 /// The sigmas of the flat, unclipped `quarters` in each luma bin.
 ///
 /// The flat gate scales with `sigma_block_median`, the frame's median block sigma.
+#[cfg(test)]
 fn binned_sigmas(quarters: &[CurveQuarter], sigma_block_median: f32) -> [Vec<f32>; NOISE_CURVE_BINS] {
     let flat_variance = FLAT_FACTOR * sigma_block_median * sigma_block_median;
     let flat_limit = flat_variance.max(FLAT_FLOOR);
@@ -176,6 +183,7 @@ fn binned_sigmas(quarters: &[CurveQuarter], sigma_block_median: f32) -> [Vec<f32
 /// A quarter's mean residual is checked against [QUARTER_STATIC_GATE], and its sigma uses the
 /// same formula as its block's. A quarter lying wholly outside the frame holds no pixels and is
 /// skipped.
+#[cfg(test)]
 fn static_quarters(records: &[f32], stored_ch: u32, accepted: &[AcceptedBlock]) -> Vec<CurveQuarter> {
     let record_len = temporal_stats_record_len(stored_ch) as usize;
     let quarters_base = (2 * stored_ch + TEMPORAL_QUARTER_BASE) as usize;
@@ -223,6 +231,7 @@ fn static_quarters(records: &[f32], stored_ch: u32, accepted: &[AcceptedBlock]) 
 }
 
 /// The curve's sigma at bin `index`, linear between populated bins and flat beyond them.
+#[cfg(test)]
 fn interpolate(populated: &[(usize, f32)], index: usize) -> f32 {
     let (first_index, first_sigma) = populated[0];
     let (last_index, last_sigma) = populated[populated.len() - 1];

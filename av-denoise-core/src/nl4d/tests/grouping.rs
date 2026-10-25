@@ -15,7 +15,8 @@ use crate::collab::kernels::fused::{CollabVariant, Walk, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, STEP, grid_frames};
 use crate::nlmeans::motion::neighbour_idx_for_k;
-use crate::noise::{NOISE_CURVE_BINS, STRENGTH_MAP_OFF};
+use crate::noise::tests::{CollabNoise, collab_noise_buffer};
+use crate::noise::{DERIVED_WORDS, NOISE_CURVE_BINS, STRENGTH_MAP_OFF};
 
 /// The motion block side length these fixtures score confidence against.
 ///
@@ -108,8 +109,6 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
     let mv_bytes = i32::as_bytes(&fixture.mv_field);
     let conf_bytes = f32::as_bytes(&fixture.confidence);
     let slots_bytes = u32::as_bytes(&fixture.neighbour_slots);
-    let sigma = [knobs.sigma];
-    let sigma_bytes = f32::as_bytes(&sigma);
     let profile_bytes = f32::as_bytes(&profile);
     let kaiser_bytes = f32::as_bytes(&kaiser);
     let curve_bytes = f32::as_bytes(&zeroed_curve);
@@ -117,10 +116,19 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
     let mv_buf = client.create_from_slice(mv_bytes);
     let conf_buf = client.create_from_slice(conf_bytes);
     let slots_buf = client.create_from_slice(slots_bytes);
-    let sigma_buf = client.create_from_slice(sigma_bytes);
     let profile_buf = client.create_from_slice(profile_bytes);
     let kaiser_buf = client.create_from_slice(kaiser_bytes);
     let zero_curve = client.create_from_slice(curve_bytes);
+
+    let sigma = [knobs.sigma];
+    let scale = weight_scale(knobs.sigma, &profile);
+    let noise_values = CollabNoise {
+        sigma: &sigma,
+        weight_scale: scale,
+        curve_valid: false,
+        map_mode: STRENGTH_MAP_OFF,
+    };
+    let noise_buf = collab_noise_buffer(&client, noise_values);
 
     let (map_cols, map_rows) = strength_map_dims(width, height);
     let map_len = (map_cols * map_rows) as usize;
@@ -141,7 +149,6 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
     let refs_y = refs_along(height);
     let grid = CubeCount::new_2d(cubes_x, refs_y);
     let dim = CubeDim::new_1d(variant.lanes());
-    let scale = weight_scale(knobs.sigma, &profile);
     let accum_scale = cross_frame_accum_scale(knobs.spatial_radius, fixture.radius);
     let grid_frame_count = grid_frames(fixture.radius);
 
@@ -160,7 +167,7 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
             ArrayArg::from_raw_parts(mv_buf, fixture.mv_field.len()),
             ArrayArg::from_raw_parts(conf_buf, fixture.confidence.len()),
             ArrayArg::from_raw_parts(slots_buf, fixture.neighbour_slots.len()),
-            ArrayArg::from_raw_parts(sigma_buf, 1),
+            ArrayArg::from_raw_parts(noise_buf, DERIVED_WORDS as usize),
             ArrayArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
             ArrayArg::from_raw_parts(unit_map_buf, map_len),
             ArrayArg::from_raw_parts(profile_buf, 8),
@@ -171,9 +178,6 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
             fixture.centre_slot,
             knobs.c_min,
             knobs.lambda_ht,
-            0u32,
-            STRENGTH_MAP_OFF,
-            scale,
             accum_scale,
             false,
             fixture.radius,

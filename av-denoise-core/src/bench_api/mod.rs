@@ -75,11 +75,15 @@ pub use crate::nl4d::snapshot::MotionSnapshot;
 use crate::nlmeans::ChannelMode;
 pub use crate::nlmeans::denoiser::{GpuOutput, NlmDenoiser};
 pub use crate::nlmeans::params::NlmParams;
-pub use crate::noise::{DerivedValues, NoiseSnapshot};
+pub use crate::noise::DerivedValues;
 
 pub const BLOCK_X: u32 = crate::nlmeans::BLOCK_X;
 pub const BLOCK_Y: u32 = crate::nlmeans::BLOCK_Y;
 pub const NOISE_CURVE_BINS: usize = crate::noise::NOISE_CURVE_BINS;
+pub const DERIVED_WORDS: u32 = crate::noise::DERIVED_WORDS;
+pub const DERIVED_SAD_FLOOR: u32 = crate::noise::DERIVED_SAD_FLOOR;
+pub const DERIVED_CONFIDENCE_SAD_FLOOR: u32 = crate::noise::DERIVED_CONFIDENCE_SAD_FLOOR;
+pub const DERIVED_H2_INV_NORM: u32 = crate::noise::DERIVED_H2_INV_NORM;
 pub const STRENGTH_MAP_OFF: u32 = crate::noise::STRENGTH_MAP_OFF;
 pub const STRENGTH_MAP_LUMA: u32 = crate::noise::STRENGTH_MAP_LUMA;
 pub const STRENGTH_MAP_ALL: u32 = crate::noise::STRENGTH_MAP_ALL;
@@ -138,8 +142,6 @@ impl<R: Runtime> HostIo for NlmDenoiser<R> {
         let target = self.flush_target();
 
         for _ in 0..target {
-            self.begin_call();
-
             let output = loop {
                 let step = self.flush_step_gpu()?;
                 if let Some(output) = step {

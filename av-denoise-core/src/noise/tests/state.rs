@@ -3,7 +3,7 @@ use cubecl::server::Handle;
 
 use crate::engine::align::StorageAlign;
 use crate::noise::derived::DerivedValues;
-use crate::noise::fold::{FoldSettings, NoiseSettings};
+use crate::noise::fold::{Fold, FoldSettings, NoiseSettings};
 use crate::noise::spatial::{NoiseCtx, noise_partials_slot_stride_bytes, run_noise_estimate};
 use crate::noise::state::{NoiseShape, NoiseState, ReadingSettings, StrengthMapKind};
 use crate::noise::strength_map::{QuarterSettings, StrengthMapParams};
@@ -215,6 +215,60 @@ fn set_settings_replaces_every_setting() {
     };
     state.set_settings(chroma);
     assert_eq!(state.settings(), chroma);
+
+    sync(&client).expect("the device syncs");
+}
+
+#[test]
+fn a_fixed_state_queues_nothing_and_snapshots_its_values() {
+    let client = test_client();
+    let ring = luma_ring(&client);
+    let shape = luma_shape(&client, true);
+    let fixed = DerivedValues {
+        sigma: [0.02, 0.0, 0.0],
+        sad_noise_floor: 5.75,
+        h2_inv_norm: 12.5,
+        ..DerivedValues::default()
+    };
+    let state = NoiseState::fixed(&client, shape, fixed, None);
+
+    state.queue_stats(&ring, 1, Some(0)).expect("the stats queue");
+    let launches = state.queue_reading(1).expect("the reading queues");
+    let fold = Fold::Seed { slot: 1 };
+    state.queue_fold(fold).expect("the fold queues");
+    state.queue_reset();
+
+    assert!(!state.is_measured());
+    assert_eq!(launches, 0);
+
+    let snapshot = state.snapshot().expect("the snapshot reads back");
+    assert_eq!(snapshot.derived, fixed);
+    assert_eq!(snapshot.median, None);
+    assert_eq!(snapshot.curve, None);
+
+    let curve = state.read_curve();
+    let map = state.read_current_map();
+    assert!(curve.iter().all(|&ratio| ratio == 0.0));
+    assert!(map.iter().all(|&multiplier| multiplier == 1.0));
+
+    sync(&client).expect("the device syncs");
+}
+
+#[test]
+fn a_fixed_state_snapshots_the_values_it_was_last_given() {
+    let client = test_client();
+    let shape = luma_shape(&client, false);
+    let unset = DerivedValues::default();
+    let mut state = NoiseState::fixed(&client, shape, unset, None);
+    let replaced = DerivedValues {
+        confidence_sad_noise_floor: 3.5,
+        ..DerivedValues::default()
+    };
+
+    state.set_fixed(replaced);
+
+    let snapshot = state.snapshot().expect("the snapshot reads back");
+    assert_eq!(snapshot.derived, replaced);
 
     sync(&client).expect("the device syncs");
 }

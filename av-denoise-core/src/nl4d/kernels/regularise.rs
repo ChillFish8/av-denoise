@@ -1,5 +1,7 @@
 use cubecl::prelude::*;
 
+use crate::noise::DERIVED_SAD_FLOOR;
+
 /// How many vectors each block scores, its own, the neighbourhood median, its four adjacent
 /// blocks' and zero.
 pub const REGULARISE_CANDIDATES: u32 = 7;
@@ -270,7 +272,7 @@ pub(crate) fn write_winner(
 /// `n * conf_stride` values into `confidence_out`.
 ///
 /// The winner goes to `mv_out` and a confidence from its SAD to `confidence_out`. The confidence
-/// is 1 up to `sad_noise_floor` and falls to 0 at `thsad` past it.
+/// is 1 up to the SAD floor of the derived noise values `noise` and falls to 0 at `thsad` past it.
 ///
 /// `mv_in` and `mv_out` must be separate buffers, so the result does not depend on block order.
 #[cube(launch_unchecked)]
@@ -286,7 +288,7 @@ pub fn nl4d_mv_regularise(
     confidence_out: &mut Array<f32>,
     centre_slot: u32,
     lambda_pixel: f32,
-    sad_noise_floor: f32,
+    noise: &Array<f32>,
     thsad: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -380,7 +382,7 @@ pub fn nl4d_mv_regularise(
             mv_base,
             conf_base,
             block,
-            sad_noise_floor,
+            noise[DERIVED_SAD_FLOOR as usize],
             thsad,
         );
     }

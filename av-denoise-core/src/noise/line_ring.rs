@@ -1,3 +1,4 @@
+#[cfg(test)]
 use super::curve::NoiseCurve;
 
 /// How many times the noise curve's sigma a line quarter's RMS gradient must reach.
@@ -10,6 +11,7 @@ pub(crate) const LINE_CONTRAST_FLOOR: f32 = 32.0;
 pub(crate) const FULL_QUARTER_WINDOWS: f32 = 49.0;
 
 /// What the line detector reads from one full 8x8 quarter.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct LineInput {
     /// The quarter's mean luma, between 0 and 1.
@@ -25,6 +27,7 @@ pub(crate) struct LineInput {
 /// A quarter is a line when its RMS gradient reaches [LINE_SIGMA_FACTOR] times the noise `curve`'s
 /// sigma at its luma, and its luma range reaches [LINE_CONTRAST_FLOOR] codes. A `None` input is a
 /// partial quarter at the frame edge and is never a line.
+#[cfg(test)]
 pub(crate) fn line_quarters(inputs: &[Option<LineInput>], curve: &NoiseCurve) -> Vec<bool> {
     inputs
         .iter()
@@ -35,6 +38,7 @@ pub(crate) fn line_quarters(inputs: &[Option<LineInput>], curve: &NoiseCurve) ->
         .collect()
 }
 
+#[cfg(test)]
 fn is_line(input: &LineInput, curve: &NoiseCurve) -> bool {
     let mean_square_gradient = (input.tensor_trace / FULL_QUARTER_WINDOWS).max(0.0);
     let rms_gradient = mean_square_gradient.sqrt();
@@ -47,6 +51,7 @@ fn is_line(input: &LineInput, curve: &NoiseCurve) -> bool {
 /// Grows every marked quarter into a square reaching `radius` quarters on each side.
 ///
 /// The square is clamped at the grid's edges. `marked` is row-major over `cols` by `rows`.
+#[cfg(test)]
 pub(crate) fn dilate(marked: &[bool], cols: usize, rows: usize, radius: usize) -> Vec<bool> {
     assert_eq!(marked.len(), cols * rows);
 

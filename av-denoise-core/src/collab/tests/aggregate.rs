@@ -15,7 +15,8 @@ use crate::collab::kernels::packed::collab_zero_packed;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, grid_frames};
 use crate::nlmeans::{BLOCK_X, BLOCK_Y};
-use crate::noise::{NOISE_CURVE_BINS, STRENGTH_MAP_OFF};
+use crate::noise::tests::{CollabNoise, collab_noise_buffer};
+use crate::noise::{DERIVED_WORDS, NOISE_CURVE_BINS, STRENGTH_MAP_OFF};
 use crate::tune::tests::runtime::packed_supported;
 
 /// Runs [collab_normalise] over hand-built accumulators.
@@ -315,10 +316,16 @@ fn run_scatter_stage_windowed(
     let wsum = client.empty(pixels * size_of::<i32>());
     let group_weight = client.empty(refs * size_of::<f32>());
 
-    let sigma_values = [sigma];
-    let sigma_bytes = f32::as_bytes(&sigma_values);
-    let sigma_buf = client.create_from_slice(sigma_bytes);
     let profile = dct_noise_profile(0.0);
+    let sigma_values = [sigma];
+    let scale = weight_scale(sigma, &profile);
+    let noise_values = CollabNoise {
+        sigma: &sigma_values,
+        weight_scale: scale,
+        curve_valid: false,
+        map_mode: STRENGTH_MAP_OFF,
+    };
+    let noise_buf = collab_noise_buffer(&client, noise_values);
     let profile_bytes = f32::as_bytes(&profile);
     let profile_buf = client.create_from_slice(profile_bytes);
     let kaiser = kaiser_window(kaiser_beta);
@@ -341,7 +348,6 @@ fn run_scatter_stage_windowed(
     let cubes_x = fused_cubes_x(width, variant.groups);
     let fused_grid = CubeCount::new_2d(cubes_x, refs_y);
     let fused_dim = CubeDim::new_1d(variant.lanes());
-    let scale = weight_scale(sigma, &profile);
     let grid_frame_count = grid_frames(0);
     let refs_x = refs_along(width);
     let blocks_x = width.div_ceil(BLOCK_X);
@@ -376,7 +382,7 @@ fn run_scatter_stage_windowed(
             ArrayArg::from_raw_parts(mv_dummy, 2),
             ArrayArg::from_raw_parts(conf_dummy, 1),
             ArrayArg::from_raw_parts(slots_dummy, 1),
-            ArrayArg::from_raw_parts(sigma_buf, 1),
+            ArrayArg::from_raw_parts(noise_buf, DERIVED_WORDS as usize),
             ArrayArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
             ArrayArg::from_raw_parts(unit_map_buf, map_len),
             ArrayArg::from_raw_parts(profile_buf, 8),
@@ -387,9 +393,6 @@ fn run_scatter_stage_windowed(
             0u32,
             0.0f32,
             2.7f32,
-            0u32,
-            STRENGTH_MAP_OFF,
-            scale,
             ACCUM_SCALE,
             false,
             0u32,

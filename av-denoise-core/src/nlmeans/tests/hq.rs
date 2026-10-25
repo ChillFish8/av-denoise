@@ -243,7 +243,7 @@ fn hq_override_skips_estimation() {
     let denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
 
     assert!(
-        denoiser.noise.is_none(),
+        !denoiser.noise.is_measured(),
         "sigma_override must skip allocating the noise buffers"
     );
 }
@@ -280,12 +280,15 @@ fn hq_reset_clears_noise_state() {
     fresh.push_frame(&low);
     fresh.denoise().unwrap();
 
+    let reset = denoiser.noise_snapshot().expect("the noise state reads back");
+    let started = fresh.noise_snapshot().expect("the noise state reads back");
+
     assert_eq!(
-        denoiser.h2_inv_norm, fresh.h2_inv_norm,
+        reset.derived.h2_inv_norm, started.derived.h2_inv_norm,
         "reset should clear the EMA so the next estimate starts fresh, not blended with stale state"
     );
     assert_eq!(
-        denoiser.noise_offset, fresh.noise_offset,
+        reset.derived.noise_offset, started.derived.noise_offset,
         "reset should clear the EMA so the next estimate starts fresh, not blended with stale state"
     );
 }
@@ -522,12 +525,11 @@ fn hq_sigma_scale_multiplies_the_folded_estimate() {
         denoiser.push_frame(&frame);
         denoiser.denoise().unwrap();
 
-        let folded = denoiser
-            .host_noise
+        let snapshot = denoiser.noise_snapshot().expect("the noise state reads back");
+        let median = snapshot
             .median
-            .current()
-            .expect("estimator should hold a value after one push")[0];
-        (folded, denoiser.noise_offset)
+            .expect("estimator should hold a value after one push");
+        (median[0], snapshot.derived.noise_offset)
     };
 
     let (folded_1x, offset_1x) = run(1.0);

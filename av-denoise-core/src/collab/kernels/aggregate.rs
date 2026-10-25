@@ -73,6 +73,11 @@ pub const ACCUM_CLAMP: f32 = 5.0;
 /// `1 / RECIPROCAL_FLOOR`, so taking the larger of the two keeps the bound of 1.
 pub fn weight_scale(sigma: f32, dct_profile: &[f32; 8]) -> f32 {
     let g_max = dct_profile.iter().copied().fold(0.0f32, f32::max);
+    weight_scale_with_g_max(sigma, g_max)
+}
+
+/// [weight_scale] for a profile whose largest gain is `g_max`.
+pub fn weight_scale_with_g_max(sigma: f32, g_max: f32) -> f32 {
     let norm = sigma * sigma * g_max * g_max;
     if norm.is_finite() && norm > RECIPROCAL_FLOOR {
         norm

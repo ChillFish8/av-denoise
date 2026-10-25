@@ -1,10 +1,14 @@
+use cubecl::prelude::*;
+
 use crate::engine::align::StorageAlign;
 use crate::noise::spatial::{
     noise_partials_slot_stride_bytes,
+    noise_partials_slot_view,
     partials_len,
     sigma_block_p25_from_partials,
     sigma_from_abs_sum,
 };
+use crate::tune::tests::runtime::test_client;
 
 /// Hand-computed interior areas of a 70x20 frame's ragged 3x3 block grid, summing to 1224.
 const RAGGED_CUBE_AREAS: [[f32; 3]; 3] = [[217.0, 224.0, 35.0], [248.0, 256.0, 40.0], [93.0, 96.0, 15.0]];
@@ -97,4 +101,27 @@ fn sigma_block_p25_from_partials_distinct_sums_pick_expected_cube() {
         "expected the lower quartile to land on the third-smallest cube sigma {expected}, got {}",
         sigma_low[0]
     );
+}
+
+#[test]
+fn a_partials_slot_view_reads_only_its_slot() {
+    let client = test_client();
+    let align = StorageAlign::from_client(&client);
+    let (width, height) = (70u32, 20u32);
+    let frame_count = 3u32;
+    let slot = 2u32;
+    let stride_bytes = noise_partials_slot_stride_bytes(width, height, align);
+    let stride_floats = stride_bytes as usize / size_of::<f32>();
+    let ring_len = frame_count as usize * stride_floats;
+    let partials: Vec<f32> = (0..ring_len).map(|index| 0.5 * index as f32).collect();
+    let partials_bytes = f32::as_bytes(&partials);
+    let partials_buf = client.create_from_slice(partials_bytes);
+
+    let view = noise_partials_slot_view(&partials_buf, width, height, frame_count, slot, align);
+    let bytes = client.read_one(view).expect("the view reads back");
+    let values = f32::from_bytes(&bytes);
+
+    let start = slot as usize * stride_floats;
+    let end = start + partials_len(width, height);
+    assert_eq!(values, &partials[start..end]);
 }

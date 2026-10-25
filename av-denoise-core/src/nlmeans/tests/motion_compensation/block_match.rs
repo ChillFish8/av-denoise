@@ -8,6 +8,8 @@ use crate::nlmeans::kernels::motion::{
 };
 use crate::nlmeans::motion::{DEFAULT_BLKSIZE, DEFAULT_SEARCH_RADIUS};
 use crate::nlmeans::tests::helpers::*;
+use crate::noise::tests::sad_floor_buffer;
+use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
 
 /// Runs the fine block-match kernel over one block covering the whole buffer.
 ///
@@ -40,6 +42,9 @@ fn run_fine_block_match_single_block(
         let mv_field_arg = ArrayArg::from_raw_parts(mv_field_handle, 2);
         let confidence_arg = ArrayArg::from_raw_parts(confidence_handle, 1);
 
+        let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, sad_noise_floor);
+        let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
+
         nlm_mc_block_match_fine::launch_unchecked::<R>(
             &client,
             grid,
@@ -50,7 +55,8 @@ fn run_fine_block_match_single_block(
             confidence_arg,
             0u32,
             true,
-            sad_noise_floor,
+            noise_arg,
+            DERIVED_SAD_FLOOR,
             thsad,
             blksize,
             blksize,
@@ -139,6 +145,9 @@ fn block_match_fine_argmin_finds_clean_shift() {
         let mv_field_arg = ArrayArg::from_raw_parts(mv_field_handle, mv_len);
         let confidence_arg = ArrayArg::from_raw_parts(confidence, 1);
 
+        let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, 0.0);
+        let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
+
         nlm_mc_block_match_fine::launch_unchecked::<R>(
             &client,
             grid,
@@ -149,7 +158,8 @@ fn block_match_fine_argmin_finds_clean_shift() {
             confidence_arg,
             0u32,
             false,
-            0.0,
+            noise_arg,
+            DERIVED_SAD_FLOOR,
             1.0,
             width,
             height,

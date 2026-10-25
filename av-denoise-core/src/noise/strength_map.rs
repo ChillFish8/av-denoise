@@ -1,5 +1,8 @@
+#[cfg(test)]
 use super::curve::{CLIP_HIGH, CLIP_LOW, NoiseCurve, QUARTER_STATIC_GATE};
+#[cfg(test)]
 use super::line_ring::{LineInput, dilate, line_quarters};
+#[cfg(test)]
 use super::temporal::{
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
@@ -19,6 +22,7 @@ use super::temporal::{
     temporal_stats_blocks,
     temporal_stats_record_len,
 };
+#[cfg(test)]
 use crate::collab::geometry::strength_map_dims;
 
 /// How much texture a quarter may carry and still count as flat, as a fraction of its own noise
@@ -53,6 +57,7 @@ impl StrengthMapParams {
 }
 
 /// One 8x8 quarter's class.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct QuarterClass {
     pub(crate) flat: bool,
@@ -63,6 +68,7 @@ pub(crate) struct QuarterClass {
 /// Every 8x8 quarter of a frame, row-major.
 ///
 /// A quarter lying wholly past the frame edge holds no pixels and has no class.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct QuarterClasses {
     cols: usize,
@@ -81,8 +87,8 @@ pub(crate) struct QuarterSettings {
     pub(crate) line_ring: Option<usize>,
 }
 
+#[cfg(test)]
 impl QuarterClasses {
-    #[cfg(test)]
     pub(crate) fn from_classes(cols: usize, rows: usize, classes: Vec<Option<QuarterClass>>) -> Self {
         assert_eq!(classes.len(), cols * rows);
         Self {
@@ -104,10 +110,12 @@ impl QuarterClasses {
         self.ring.get(index).copied().unwrap_or(false)
     }
 
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn cols(&self) -> usize {
         self.cols
     }
 
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn rows(&self) -> usize {
         self.rows
     }
@@ -145,6 +153,7 @@ impl QuarterClasses {
 }
 
 /// One quarter's structure tensor sums, from its temporal mean's pixel gradients.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct QuarterTensor {
     pub(crate) xx: f32,
@@ -152,6 +161,7 @@ pub(crate) struct QuarterTensor {
     pub(crate) xy: f32,
 }
 
+#[cfg(test)]
 impl QuarterTensor {
     fn add(&mut self, other: QuarterTensor) {
         self.xx += other.xx;
@@ -175,12 +185,14 @@ impl QuarterTensor {
 }
 
 /// How many quarters the veto saw as flat and how many it turned not flat.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct VetoCounts {
     pub(crate) flat: usize,
     pub(crate) vetoed: usize,
 }
 
+#[cfg(test)]
 impl QuarterClasses {
     /// Turns flat quarters not flat where their 3x3 neighbourhood's pooled tensor reads a coherence
     /// at or above `cut`.
@@ -249,6 +261,7 @@ impl QuarterClasses {
     }
 }
 
+#[cfg(test)]
 fn shadow_multiplier(luma: f32, shadow_soften: f32) -> f32 {
     let span = SHADOW_HIGH - SHADOW_LOW;
     let progress = ((luma - SHADOW_LOW) / span).clamp(0.0, 1.0);
@@ -264,6 +277,7 @@ fn shadow_multiplier(luma: f32, shadow_soften: f32) -> f32 {
 /// With a texture cut below 1.0 in `settings`, flat quarters then go through
 /// [QuarterClasses::veto_textured] at that cut. With a line ring, quarters within that many quarters
 /// of a strong line skip the shadow soften and the veto.
+#[cfg(test)]
 pub(crate) fn classify_quarters(
     records: &[f32],
     stored_ch: u32,
@@ -349,6 +363,7 @@ pub(crate) fn classify_quarters(
     quarter_classes
 }
 
+#[cfg(test)]
 fn classify_quarter(fields: &[f32], pixels: f32, curve: &NoiseCurve) -> QuarterClass {
     let luma = fields[QUARTER_LUMA_SUM as usize] / pixels;
     let mean = fields[QUARTER_SUM_D as usize] / pixels;

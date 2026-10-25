@@ -15,7 +15,7 @@ use av_denoise_core::bench_api::collab::kernels::aggregate::{
 use av_denoise_core::bench_api::collab::kernels::fused::{CollabVariant, collab_fused};
 use av_denoise_core::bench_api::collab::kernels::transforms::dct_noise_profile;
 use av_denoise_core::bench_api::collab::{PATCH_SIZE, grid_frames, supports_f16_search};
-use av_denoise_core::bench_api::{BLOCK_X, BLOCK_Y, Device, NOISE_CURVE_BINS, STRENGTH_MAP_OFF};
+use av_denoise_core::bench_api::{BLOCK_X, BLOCK_Y, DERIVED_WORDS, DerivedValues, Device, NOISE_CURVE_BINS};
 use clap::Parser;
 use cubecl::benchmark::{Benchmark, BenchmarkComputations, TimingMethod};
 use cubecl::prelude::*;
@@ -105,9 +105,10 @@ struct Rig<R: Runtime> {
     wsum: Handle,
     output: Handle,
     group_weight: Handle,
-    sigma: Handle,
+    /// The derived noise values, with the curve and the strength map off.
+    noise: Handle,
     dct_profile: Handle,
-    /// An all-zero noise curve, passed with `curve_valid = 0` where the kernel never applies it.
+    /// An all-zero noise curve, bound with the curve flag unset so the kernel never applies it.
     zero_curve: Handle,
     /// A strength map of ones, passed with the map off.
     unit_map: Handle,
@@ -165,9 +166,6 @@ impl<R: Runtime> Rig<R> {
         let pixels = (geometry.width * geometry.height) as usize;
         let frame_len = pixels * geometry.stored_channels as usize;
 
-        let mut sigma_host = vec![0.0f32; geometry.stored_channels as usize];
-        sigma_host[..geometry.channels as usize].fill(SIGMA);
-
         let (map_cols, map_rows) = strength_map_dims(geometry.width, geometry.height);
         let map_len = (map_cols * map_rows) as usize;
         let unit_map_host = vec![1.0f32; map_len];
@@ -184,9 +182,18 @@ impl<R: Runtime> Rig<R> {
         let wsum = client.empty(pixels * N_FRAMES as usize * size_of::<i32>());
         let output = client.empty(frame_len * size_of::<f32>());
         let group_weight = client.empty(refs * size_of::<f32>());
-        let sigma_bytes = f32::as_bytes(&sigma_host);
-        let sigma = client.create_from_slice(sigma_bytes);
         let profile_host = dct_noise_profile(0.0);
+        let mut sigma = [0.0f32; 3];
+        sigma[..geometry.channels as usize].fill(SIGMA);
+        let group_weight_scale = weight_scale(SIGMA, &profile_host);
+        let derived = DerivedValues {
+            sigma,
+            weight_scale: group_weight_scale,
+            ..DerivedValues::default()
+        };
+        let noise_words = derived.to_words();
+        let noise_bytes = f32::as_bytes(&noise_words);
+        let noise = client.create_from_slice(noise_bytes);
         let profile_bytes = f32::as_bytes(&profile_host);
         let dct_profile = client.create_from_slice(profile_bytes);
         let zero_curve_host = [0.0f32; NOISE_CURVE_BINS];
@@ -209,7 +216,7 @@ impl<R: Runtime> Rig<R> {
             wsum,
             output,
             group_weight,
-            sigma,
+            noise,
             dct_profile,
             zero_curve,
             unit_map,
@@ -278,8 +285,6 @@ impl<R: Runtime> Rig<R> {
         let cubes_x = fused_cubes_x(geometry.width, variant.groups);
         let cube_dim = CubeDim::new_1d(variant.lanes());
         let refs_y = refs_along(geometry.height);
-        let dct_profile = dct_noise_profile(0.0);
-        let group_weight_scale = weight_scale(SIGMA, &dct_profile);
         let accum_scale = cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS);
         let frames_per_volume = grid_frames(RADIUS);
 
@@ -296,7 +301,7 @@ impl<R: Runtime> Rig<R> {
                 ArrayArg::from_raw_parts(self.mv_field.clone(), self.mv_len),
                 ArrayArg::from_raw_parts(self.confidence.clone(), self.conf_len),
                 ArrayArg::from_raw_parts(self.neighbour_slots.clone(), NEIGHBOUR_SLOTS.len()),
-                ArrayArg::from_raw_parts(self.sigma.clone(), geometry.stored_channels as usize),
+                ArrayArg::from_raw_parts(self.noise.clone(), DERIVED_WORDS as usize),
                 ArrayArg::from_raw_parts(self.zero_curve.clone(), NOISE_CURVE_BINS),
                 ArrayArg::from_raw_parts(self.unit_map.clone(), self.map_len),
                 ArrayArg::from_raw_parts(self.dct_profile.clone(), 8),
@@ -307,9 +312,6 @@ impl<R: Runtime> Rig<R> {
                 CENTRE_SLOT,
                 0.0f32,
                 LAMBDA_HT,
-                0u32,
-                STRENGTH_MAP_OFF,
-                group_weight_scale,
                 accum_scale,
                 f16_search,
                 RADIUS,

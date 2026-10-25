@@ -14,8 +14,9 @@ use crate::tune::sites::{RegulariseOutputs, RegulariseSite};
 
 /// Runs the field regularisation pass over every neighbour of `view` in one launch, through `kernels`.
 ///
-/// Each block's vector is re-scored against the median of its neighbourhood. The results land in
-/// `mv_out` and `conf_out`, which share the front end's per-neighbour layout.
+/// Each block's vector is re-scored against the median of its neighbourhood, with confidence
+/// scored against the SAD floor of the derived noise values `noise`. The results land in `mv_out`
+/// and `conf_out`, which share the front end's per-neighbour layout.
 #[expect(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
@@ -27,7 +28,7 @@ pub(super) fn run_regularise<R: Runtime>(
     width: u32,
     height: u32,
     field_lambda: f32,
-    sad_noise_floor: f32,
+    noise: &Handle,
     thsad: f32,
     mv_out: &Handle,
     conf_out: &Handle,
@@ -59,7 +60,7 @@ pub(super) fn run_regularise<R: Runtime>(
         mv_in: view.mv_field.clone(),
         outputs,
         lambda_pixel,
-        sad_noise_floor,
+        noise: noise.clone(),
         thsad,
         width: level_width,
         height: level_height,
