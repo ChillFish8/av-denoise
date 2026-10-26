@@ -3,6 +3,7 @@
 use av_denoise::accelerate::Accelerator;
 use av_denoise::tune::{
     BudgetRequest,
+    SearchMode,
     TuneOutcome,
     TuneRequest,
     TuneResult,
@@ -142,6 +143,7 @@ fn short_tunes_store_results_until_a_later_run_loads_them() {
     let request = TuneRequest {
         budget: BudgetRequest::Seconds(90.0),
         force: false,
+        mode: SearchMode::Families,
     };
 
     let first = tune_planes(&plane_options, frame_layout, &clip, &request);
@@ -205,6 +207,7 @@ fn deterministic_output_equals_baseline_output() {
     let request = TuneRequest {
         budget: BudgetRequest::Full,
         force: false,
+        mode: SearchMode::Families,
     };
     let report = tune_planes(&tuned_options, frame_layout, &clip, &request);
     assert_eq!(report.outcome, TuneOutcome::Tuned, "{report:?}");
@@ -229,6 +232,7 @@ fn tuning_off_output_is_unchanged_by_a_stored_result() {
     let request = TuneRequest {
         budget: BudgetRequest::Full,
         force: false,
+        mode: SearchMode::Families,
     };
     tune_planes(&tuned_options, frame_layout, &clip, &request);
     assert!(is_tuned(&tuned_options, frame_layout));

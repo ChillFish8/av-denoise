@@ -2,7 +2,7 @@ use std::ops::Range;
 use std::sync::Mutex;
 
 use anyhow::{Error, Result, anyhow, bail};
-use av_denoise::tune::{BudgetRequest, TuneOutcome, TuneRequest, is_tuned};
+use av_denoise::tune::{BudgetRequest, SearchMode, TuneOutcome, TuneRequest, is_tuned};
 use av_denoise::{
     EdgePadding,
     FrameLayout,
@@ -252,6 +252,7 @@ impl<'core> Denoise<'core> {
                 frames: Some(clip_frames),
             },
             force: false,
+            mode: SearchMode::Families,
         };
         let report = state.denoiser.tune(&window, &request);
 

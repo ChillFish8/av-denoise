@@ -14,6 +14,7 @@ use crate::tune::{
     Dimension,
     DimensionFamilies,
     DimensionValue,
+    EXHAUSTIVE_SITE_CAP,
     EngineKernels,
     Families,
     FamilyId,
@@ -498,7 +499,7 @@ fn exhaustive_mode_compiles_and_times_every_allowed_candidate() {
 
     assert_eq!(searched.compiled, vec![every.clone()]);
     assert_eq!(searched.timed(), every);
-    assert!(search.skipped.is_empty());
+    assert_eq!(search.skipped, vec![FamilyId("b")]);
     assert_eq!(search.opened, vec![FamilyId("a"), FamilyId("b"), FamilyId("c")]);
 
     // C0 is more than a quarter slower than C1, so only a pre-screen would drop it.
@@ -513,11 +514,12 @@ fn exhaustive_mode_compiles_and_times_every_allowed_candidate() {
 }
 
 #[test]
-fn exhaustive_limits_lift_both_caps_and_keep_the_minimums() {
+fn exhaustive_limits_widen_the_site_cap_lift_the_hard_cap_and_keep_the_minimums() {
     let limits = DecideLimits::exhaustive();
     let usual = DecideLimits::default();
 
-    assert_eq!(limits.site_cap, Duration::MAX);
+    assert_eq!(limits.site_cap, EXHAUSTIVE_SITE_CAP);
+    assert!(limits.site_cap > usual.site_cap);
     assert_eq!(limits.hard_cap, Duration::MAX);
     assert_eq!(limits.min_samples, usual.min_samples);
     assert_eq!(limits.min_time, usual.min_time);

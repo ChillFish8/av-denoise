@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::Context;
 
 use super::consts::{
+    EXHAUSTIVE_SITE_CAP,
     HARD_SITE_CAP,
     MIN_CANDIDATE_TIME,
     MIN_SAMPLES,
@@ -138,10 +139,10 @@ impl Default for DecideLimits {
 }
 
 impl DecideLimits {
-    /// The limits of an exhaustive search, with the usual minimums and no site or hard cap.
+    /// The limits of an exhaustive search, with the usual minimums, a wider site cap and no hard cap.
     pub fn exhaustive() -> Self {
         Self {
-            site_cap: Duration::MAX,
+            site_cap: EXHAUSTIVE_SITE_CAP,
             hard_cap: Duration::MAX,
             ..Self::default()
         }

@@ -3,6 +3,7 @@ use std::fmt::Write;
 use av_denoise::tune::{
     BudgetRequest,
     DeviceIdentity,
+    SearchMode,
     TuneOutcome,
     TuneRequest,
     TuneResult,
@@ -10,6 +11,8 @@ use av_denoise::tune::{
     selected_device,
 };
 use av_denoise_core::tune::{SiteRanking, choose};
+use clap::CommandFactory;
+use clap::error::ErrorKind;
 
 use super::{Args, Nl4dArgs, NlmeansArgs};
 use crate::pipeline::{budget_request, tune_input};
@@ -20,6 +23,12 @@ pub struct TuneArgs {
     /// Tunes again even when results are already stored.
     #[arg(long, conflicts_with_all = ["show", "clear"])]
     pub force: bool,
+
+    /// Times every candidate and profile with wide limits, a 30 s cap per site and a one hour budget,
+    /// then prints how the family search and the device table compare. It stores the result,
+    /// implies `--force` and cannot be combined with `--tune-budget`.
+    #[arg(long, conflicts_with_all = ["show", "clear"])]
+    pub report: bool,
 
     /// Prints the stored results for the selected device and exits.
     #[arg(long, conflicts_with = "clear")]
@@ -32,6 +41,29 @@ pub struct TuneArgs {
     /// The algorithm to tune, with the same options and input a denoising run takes.
     #[command(subcommand)]
     pub algorithm: Option<TuneAlgorithm>,
+}
+
+impl TuneArgs {
+    /// Rejects `--report` together with the algorithm's `--tune-budget`, as a clap usage error.
+    ///
+    /// Clap only checks conflicts within one command, and the budget belongs to the algorithm's
+    /// subcommand.
+    pub fn check_conflicts(&self) -> Result<(), clap::Error> {
+        let budget = match &self.algorithm {
+            Some(TuneAlgorithm::Nlmeans(nlmeans)) => nlmeans.common.tune_budget,
+            Some(TuneAlgorithm::Nl4d(nl4d)) => nl4d.common.tune_budget,
+            None => None,
+        };
+
+        if !self.report || budget.is_none() {
+            return Ok(());
+        }
+
+        let mut command = Args::command();
+        let message = "the argument '--report' cannot be used with '--tune-budget <SECONDS>'";
+        let error = command.error(ErrorKind::ArgumentConflict, message);
+        Err(error)
+    }
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -57,12 +89,12 @@ pub fn run_tune(tune: &TuneArgs, globals: &Args) -> Result<(), anyhow::Error> {
         TuneAlgorithm::Nl4d(nl4d) => (nl4d.build_options(globals)?, &nl4d.common.input),
     };
 
-    let budget = budget_request(opts.tune_budget, BudgetRequest::Full);
-    let request = TuneRequest {
-        budget,
-        force: tune.force,
-    };
+    let request = tune_request(tune, opts.tune_budget);
     let report = tune_input(&opts.planes, input, &request)?;
+
+    if let Some(summary) = &report.summary {
+        print!("{summary}");
+    }
 
     match report.outcome {
         TuneOutcome::Tuned => tracing::info!(
@@ -80,6 +112,25 @@ pub fn run_tune(tune: &TuneArgs, globals: &Args) -> Result<(), anyhow::Error> {
     }
 
     Ok(())
+}
+
+/// The request `tune` makes, where `--report` forces an exhaustive search on the full budget.
+fn tune_request(tune: &TuneArgs, tune_budget: Option<f64>) -> TuneRequest {
+    if tune.report {
+        return TuneRequest {
+            budget: BudgetRequest::Full,
+            force: true,
+            mode: SearchMode::Exhaustive,
+        };
+    }
+
+    let budget = budget_request(tune_budget, BudgetRequest::Full);
+
+    TuneRequest {
+        budget,
+        force: tune.force,
+        mode: SearchMode::Families,
+    }
 }
 
 fn show_or_clear(tune: &TuneArgs, globals: &Args) -> Result<(), anyhow::Error> {
@@ -320,6 +371,70 @@ mod tests {
         let result = Args::try_parse_from(["av-denoise", "tune", "--force", "--show"]);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn the_report_flag_conflicts_with_show_and_clear() {
+        let with_show = Args::try_parse_from(["av-denoise", "tune", "--report", "--show"]);
+        let with_clear = Args::try_parse_from(["av-denoise", "tune", "--report", "--clear"]);
+
+        assert!(with_show.is_err());
+        assert!(with_clear.is_err());
+    }
+
+    #[test]
+    fn a_report_forces_an_exhaustive_search_on_the_full_budget() {
+        let args = Args::try_parse_from(["av-denoise", "tune", "--report", "nl4d", "-i", "clip.mkv"])
+            .expect("the report flag parses");
+        let Command::Tune(tune) = args.command else {
+            panic!("expected tune");
+        };
+
+        let request = tune_request(&tune, None);
+
+        assert!(tune.report);
+        assert!(tune.check_conflicts().is_ok());
+        assert!(request.force);
+        assert_eq!(request.mode, SearchMode::Exhaustive);
+        assert_eq!(request.budget, BudgetRequest::Full);
+    }
+
+    #[test]
+    fn the_report_flag_conflicts_with_tune_budget() {
+        let flags = ["nl4d", "-i", "clip.mkv", "--tune-budget", "30"];
+        let mut report_args = vec!["av-denoise", "tune", "--report"];
+        report_args.extend(flags);
+        let mut plain_args = vec!["av-denoise", "tune"];
+        plain_args.extend(flags);
+
+        let report = Args::try_parse_from(report_args).expect("the flags parse");
+        let plain = Args::try_parse_from(plain_args).expect("the flags parse");
+        let Command::Tune(report_tune) = report.command else {
+            panic!("expected tune");
+        };
+        let Command::Tune(plain_tune) = plain.command else {
+            panic!("expected tune");
+        };
+
+        let conflict = report_tune.check_conflicts();
+        let error = conflict.expect_err("--report with --tune-budget is rejected");
+
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+        assert!(plain_tune.check_conflicts().is_ok());
+    }
+
+    #[test]
+    fn a_plain_tune_searches_by_family() {
+        let args =
+            Args::try_parse_from(["av-denoise", "tune", "nl4d", "-i", "clip.mkv"]).expect("tune parses");
+        let Command::Tune(tune) = args.command else {
+            panic!("expected tune");
+        };
+
+        let request = tune_request(&tune, None);
+
+        assert!(!request.force);
+        assert_eq!(request.mode, SearchMode::Families);
     }
 
     #[test]

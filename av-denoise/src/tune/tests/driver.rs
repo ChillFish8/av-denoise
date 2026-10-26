@@ -6,8 +6,10 @@ use av_denoise_core::tune::{
     Budget,
     BudgetRequest,
     KeyValue,
+    MIN_SAMPLES,
     PROFILE_MIN_BLOCKS,
     PipelineProfile,
+    SearchMode,
     SiteKey,
     TuneLedger,
     choose_profile,
@@ -93,6 +95,7 @@ fn full_request() -> TuneRequest {
     TuneRequest {
         budget: BudgetRequest::Full,
         force: false,
+        mode: SearchMode::Families,
     }
 }
 
@@ -101,6 +104,7 @@ fn cold_nl4d_request() -> TuneRequest {
     TuneRequest {
         budget: BudgetRequest::Seconds(1200.0),
         force: false,
+        mode: SearchMode::Families,
     }
 }
 
@@ -181,6 +185,7 @@ fn a_clip_too_short_to_earn_back_tuning_is_skipped() {
     let request = TuneRequest {
         budget: BudgetRequest::Automatic { frames: Some(12) },
         force: false,
+        mode: SearchMode::Families,
     };
 
     let report = tune_planes(&plane_options, frame_layout, &clip, &request);
@@ -203,6 +208,7 @@ fn a_tiny_budget_ends_the_warm_up_early() {
     let request = TuneRequest {
         budget: BudgetRequest::Seconds(budget_seconds),
         force: false,
+        mode: SearchMode::Families,
     };
 
     tune_planes(&plane_options, frame_layout, &clip, &request);
@@ -408,4 +414,56 @@ fn an_nl4d_pass_records_a_ranking_for_every_plane() {
 
         assert_eq!(chosen, kept, "{profile_key}: {records:?}");
     }
+}
+
+#[test]
+fn a_report_run_overwrites_a_stored_key() {
+    let cache = tempfile::tempdir().unwrap();
+    install_cache(cache.path());
+    let algorithm = Algorithm::default();
+    let plane_options = options(algorithm, TuningMode::Auto);
+    let frame_layout = layout();
+    let clip = frames(12);
+    let request = full_request();
+
+    let first = tune_planes(&plane_options, frame_layout, &clip, &request);
+    assert_eq!(first.outcome, TuneOutcome::Tuned, "{first:?}");
+    assert!(first.summary.is_none(), "{first:?}");
+
+    let device = selected_device(&plane_options.accelerators, &plane_options.device).expect("a device");
+    let store = TuneStore::open_default().expect("the cache is installed");
+    let mut stored = store.load(&device.identity);
+    let (key, ranking) = stored
+        .sites
+        .iter_mut()
+        .find(|(_, ranking)| ranking.candidates.len() > 1)
+        .expect("a key timed more than its baseline");
+    let key = key.clone();
+    for record in &mut ranking.candidates {
+        record.median_ns = 1;
+        record.samples = 1;
+    }
+
+    store
+        .save(&device.identity, &stored)
+        .expect("the planted result saves");
+
+    let report_request = TuneRequest {
+        force: true,
+        mode: SearchMode::Exhaustive,
+        ..request
+    };
+    let report = tune_planes(&plane_options, frame_layout, &clip, &report_request);
+    assert_eq!(report.outcome, TuneOutcome::Tuned, "{report:?}");
+
+    let reloaded = store.load(&device.identity);
+    let overwritten = reloaded.sites.get(&key).expect("the key is still stored");
+    let fully_sampled = overwritten
+        .candidates
+        .iter()
+        .all(|record| record.samples as usize >= MIN_SAMPLES);
+    assert!(fully_sampled, "{overwritten:?}");
+
+    let summary = report.summary.expect("an exhaustive pass sums up its search");
+    assert!(summary.contains(key.as_str()), "{summary}");
 }

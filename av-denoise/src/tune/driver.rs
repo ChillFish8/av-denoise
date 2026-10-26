@@ -20,6 +20,7 @@ use av_denoise_core::tune::{
     SITE_CAP,
     SearchMode,
     SiteKey,
+    TUNE_EXHAUSTIVE,
     TuneLedger,
     TunePhase,
     TuneResult,
@@ -38,6 +39,7 @@ use av_denoise_core::tune::{
 };
 
 use super::mode::TuningMode;
+use super::report::format_report;
 use super::setup::{KernelSetup, device_priority};
 use super::store::TuneStore;
 use super::{reload, remember, resolve};
@@ -68,6 +70,12 @@ pub struct TuneRequest {
     pub budget: BudgetRequest,
     /// Tunes every key again, including those the store already holds.
     pub force: bool,
+    /// How widely each key is searched.
+    ///
+    /// [SearchMode::Exhaustive] times every candidate and every profile with no compile ceiling,
+    /// under the [TUNE_EXHAUSTIVE](av_denoise_core::tune::TUNE_EXHAUSTIVE) budget. Its report then
+    /// sums up how the families search compares.
+    pub mode: SearchMode,
 }
 
 /// How a tuning pass ended.
@@ -95,6 +103,9 @@ pub struct TuneReport {
     pub elapsed: Duration,
     /// Whether the result reached the store on disk.
     pub saved: bool,
+    /// How the families search and the device table compare with the timings, after an exhaustive
+    /// pass.
+    pub summary: Option<String>,
 }
 
 impl TuneReport {
@@ -106,6 +117,7 @@ impl TuneReport {
             compile: Duration::ZERO,
             elapsed: started.elapsed(),
             saved: false,
+            summary: None,
         }
     }
 
@@ -247,6 +259,7 @@ pub(crate) fn tune_planar(
     let budget_started = Instant::now();
     let hosts = planar.hosts();
     let identity = hosts[0].device_profile().identity.clone();
+    let table = device_priority(hosts[0].device_profile());
     let profile_keys: Vec<String> = hosts.iter().map(|host| host.profile_key().to_string()).collect();
     let stored = reload(&identity);
     let deterministic = ledger.deterministic();
@@ -264,6 +277,8 @@ pub(crate) fn tune_planar(
 
     tracing::info!("tuning kernels for this device, this takes a while once per device and configuration");
 
+    ledger.set_search_mode(request.mode);
+
     let inputs = PassInputs {
         ledger: &ledger,
         frames,
@@ -275,10 +290,23 @@ pub(crate) fn tune_planar(
     planar.reset_streams();
     ledger.clear_target();
     ledger.set_phase(TunePhase::Idle);
+    ledger.set_search_mode(SearchMode::Families);
     discard_grain_chunks(planar);
 
     let report = match pass {
-        Ok(summary) => keep_result(&identity, &profile_keys, &stored, &ledger, summary, started),
+        Ok(summary) => {
+            let replayed = match request.mode {
+                SearchMode::Exhaustive => {
+                    let text = summarise(&ledger, &summary, table);
+                    Some(text)
+                },
+                SearchMode::Families => None,
+            };
+
+            let mut report = keep_result(&identity, &profile_keys, &stored, &ledger, summary, started);
+            report.summary = replayed;
+            report
+        },
         Err(error) => {
             let reason = format!("{error:#}");
             TuneReport::skipped(reason, started)
@@ -287,6 +315,17 @@ pub(crate) fn tune_planar(
 
     drop(lock);
     report
+}
+
+/// The printed summary of an exhaustive pass, from the rankings it recorded and its profile timings.
+fn summarise(ledger: &TuneLedger, summary: &PassSummary, table: &PriorityTable) -> String {
+    let ranked = ledger.result();
+    let profiles = match &summary.profiles {
+        ProfilePhase::Compared { records, .. } => records.as_slice(),
+        _ => &[],
+    };
+
+    format_report(&ranked, profiles, table)
 }
 
 /// Drops the grain chunks measured on the tuning frames, so a later drain holds only real frames.
@@ -306,7 +345,7 @@ fn run_pass(planar: &mut PlanarDenoiser, inputs: &PassInputs<'_>) -> Result<Pass
 
     let frame_time = reading.frame_time;
 
-    let budget = tuning_budget(inputs.request.budget, frame_time);
+    let budget = pass_budget(inputs.request, frame_time);
     let Some(budget) = budget else {
         anyhow::bail!("the clip is too short to earn back tuning");
     };
@@ -317,7 +356,11 @@ fn run_pass(planar: &mut PlanarDenoiser, inputs: &PassInputs<'_>) -> Result<Pass
         anyhow::bail!("the tuning budget does not cover the warm-up and one site");
     }
 
-    inputs.ledger.begin_compile_pass(budget.total);
+    let compile_ceiling = match inputs.request.mode {
+        SearchMode::Families => budget.total,
+        SearchMode::Exhaustive => Duration::MAX,
+    };
+    inputs.ledger.begin_compile_pass(compile_ceiling);
 
     let census = take_census(planar, inputs.ledger, &mut cycle)?;
     let census_measured = check_census(&census);
@@ -341,6 +384,19 @@ fn run_pass(planar: &mut PlanarDenoiser, inputs: &PassInputs<'_>) -> Result<Pass
         census_measured,
         profiles,
     })
+}
+
+/// The budget `request` gets once the warm-up reads `frame_time`.
+///
+/// An exhaustive pass always gets [TUNE_EXHAUSTIVE](av_denoise_core::tune::TUNE_EXHAUSTIVE).
+fn pass_budget(request: &TuneRequest, frame_time: Duration) -> Option<Budget> {
+    match request.mode {
+        SearchMode::Families => tuning_budget(request.budget, frame_time),
+        SearchMode::Exhaustive => Some(Budget {
+            total: TUNE_EXHAUSTIVE,
+            full: true,
+        }),
+    }
 }
 
 /// Pushes one frame and waits for the frame it readies, returning the time both took.
@@ -1015,6 +1071,7 @@ fn keep_result(
         compile,
         elapsed: started.elapsed(),
         saved,
+        summary: None,
     }
 }
 

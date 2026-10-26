@@ -1,5 +1,6 @@
 use av_denoise::tune::{
     BudgetRequest,
+    SearchMode,
     TuneOutcome,
     TuneReport,
     TuneRequest,
@@ -136,7 +137,11 @@ pub fn tune_before_workers(
     }
 
     let budget = run_budget(tune_budget, info);
-    let request = TuneRequest { budget, force: false };
+    let request = TuneRequest {
+        budget,
+        force: false,
+        mode: SearchMode::Families,
+    };
     let report = tune_planes(planes, info.layout, &decoded, &request);
     log_report(&report);
 

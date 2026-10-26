@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use av_denoise::tune::{BudgetRequest, TuneOutcome, TuneRequest, is_tuned};
+use av_denoise::tune::{BudgetRequest, SearchMode, TuneOutcome, TuneRequest, is_tuned};
 use av_denoise::{PlaneOptions, TuningMode, install_compilation_cache_at};
 use av_denoise_core::tune::{TUNE_UNKNOWN, tuning_budget};
 
@@ -192,6 +192,7 @@ fn tuning_an_input_with_tuning_off_decodes_it_and_skips() {
     let request = TuneRequest {
         budget: BudgetRequest::Full,
         force: false,
+        mode: SearchMode::Families,
     };
 
     let report = tune_input(&options, &input, &request).expect("the input decodes");
@@ -208,6 +209,7 @@ fn tuning_an_input_without_frames_is_an_error() {
     let request = TuneRequest {
         budget: BudgetRequest::Full,
         force: false,
+        mode: SearchMode::Families,
     };
 
     let result = tune_input(&options, &input, &request);

@@ -14,7 +14,7 @@ pub enum SearchMode {
     /// Times each family's representative, then only what looks worth it.
     #[default]
     Families,
-    /// Times every allowed candidate, with no pre-screen and no site caps.
+    /// Times every allowed candidate, with no pre-screen, a wider site cap and no hard cap.
     Exhaustive,
 }
 
@@ -56,7 +56,10 @@ pub struct SiteSearch {
     /// A flat site opens the families within the margin. A dimension site counts the values of the
     /// build-up's pick. An exhaustive search opens every family.
     pub opened: Vec<FamilyId>,
-    /// The families left out by the table or because their representative is not allowed.
+    /// The families a family-level search leaves out, by the table or because their representative is
+    /// not allowed.
+    ///
+    /// An exhaustive search still times them.
     pub skipped: Vec<FamilyId>,
 }
 
@@ -148,10 +151,6 @@ pub fn search_candidates<C: SiteCandidate, S: Sampler>(
         },
     };
 
-    let skipped = match space.mode {
-        SearchMode::Exhaustive => Vec::new(),
-        SearchMode::Families => first.skipped.clone(),
-    };
     let searched = searched_candidates(allowed, &families, &first, &search.steps);
     let dimensions = dimension_names(&families);
 
@@ -160,7 +159,7 @@ pub fn search_candidates<C: SiteCandidate, S: Sampler>(
         dimensions,
         candidates: searched,
         opened,
-        skipped,
+        skipped: first.skipped,
     };
     let timing = SiteTiming {
         timed: search.timed,

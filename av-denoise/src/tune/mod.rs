@@ -10,13 +10,21 @@
 
 mod driver;
 mod mode;
+mod report;
 mod setup;
 mod store;
 
 #[cfg(test)]
 mod tests;
 
-pub use av_denoise_core::tune::{BudgetRequest, DeviceIdentity, DeviceProfile, PipelineProfile, TuneResult};
+pub use av_denoise_core::tune::{
+    BudgetRequest,
+    DeviceIdentity,
+    DeviceProfile,
+    PipelineProfile,
+    SearchMode,
+    TuneResult,
+};
 
 pub use crate::backend::selected_device;
 

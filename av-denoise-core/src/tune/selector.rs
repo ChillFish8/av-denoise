@@ -1,6 +1,6 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cubecl::prelude::*;
 
@@ -14,7 +14,7 @@ use super::plan::{KernelPlan, PipelineProfile};
 use super::precompile::CompileAccount;
 use super::priority::PriorityTable;
 use super::result::SiteRanking;
-use super::search::{SearchMode, first_timed};
+use super::search::{SearchMode, SiteSearch, first_timed};
 use super::session::tune_site;
 use super::site::{SiteCandidate, VariantSite, legal_candidates};
 
@@ -197,6 +197,11 @@ impl<R: Runtime> KernelSelector<R> {
         match outcome {
             Ok(Ok(ranking)) => {
                 tracing::info!(%key, ranked = ranking.candidates.len(), "tuned a launch site");
+
+                if mode == SearchMode::Exhaustive {
+                    log_timings(key, &ranking);
+                }
+
                 guard.record_ranking(ranking);
             },
             Ok(Err(error)) => {
@@ -261,6 +266,38 @@ impl Drop for TargetGuard<'_> {
             self.ledger.record_failure(key);
         }
     }
+}
+
+/// Logs each timed candidate of `ranking` with its family and median.
+///
+/// A dimension site's candidate lists its value in every dimension, joined by `+`.
+fn log_timings(key: &SiteKey, ranking: &SiteRanking) {
+    let site = key.site();
+
+    for record in &ranking.candidates {
+        let family = family_label(ranking.search.as_ref(), &record.name);
+        let median = Duration::from_nanos(record.median_ns);
+
+        tracing::info!(
+            site,
+            %key,
+            candidate = %record.name,
+            %family,
+            ?median,
+            "timed a candidate"
+        );
+    }
+}
+
+fn family_label(search: Option<&SiteSearch>, name: &str) -> String {
+    let searched =
+        search.and_then(|search| search.candidates.iter().find(|candidate| candidate.name == name));
+    let Some(searched) = searched else {
+        return String::new();
+    };
+
+    let ids: Vec<&str> = searched.families.iter().map(|family| family.0).collect();
+    ids.join("+")
 }
 
 /// The candidate `named` names, or the site's baseline when the name is missing, unknown or not in

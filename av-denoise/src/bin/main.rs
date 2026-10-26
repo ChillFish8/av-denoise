@@ -42,6 +42,12 @@ fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
+    if let Command::Tune(tune) = &args.command
+        && let Err(error) = tune.check_conflicts()
+    {
+        error.exit();
+    }
+
     if std::env::var("RUST_LOG").is_err() {
         // `list-devices` prints only a table, and the backends log at info level while they
         // start, so it runs quieter than a denoising run.

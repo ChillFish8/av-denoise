@@ -47,6 +47,9 @@ pub const SITE_CAP: Duration = Duration::from_secs(3);
 /// The time after which a site that still lacks its minimum samples gives up and runs its baseline.
 pub const HARD_SITE_CAP: Duration = Duration::from_secs(12);
 
+/// The time after which an exhaustive search stops sampling a site once every minimum is met.
+pub const EXHAUSTIVE_SITE_CAP: Duration = Duration::from_secs(30);
+
 /// How close to the fastest median a more faithful candidate must be to win instead.
 pub const HYSTERESIS: f64 = 0.02;
 
@@ -82,6 +85,9 @@ pub const TUNE_FLOOR: Duration = Duration::from_secs(10);
 
 /// The budget for explicit tuning.
 pub const TUNE_FULL: Duration = Duration::from_secs(600);
+
+/// The budget for an exhaustive tune, compile time left out.
+pub const TUNE_EXHAUSTIVE: Duration = Duration::from_secs(3600);
 
 /// The budget when the clip's length is unknown.
 pub const TUNE_UNKNOWN: Duration = Duration::from_secs(30);
