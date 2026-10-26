@@ -10,6 +10,8 @@ use cubecl::wgpu::{RuntimeOptions, WgpuDevice, WgpuSetup, init_device, vulkan};
 
 #[cfg(feature = "vulkan")]
 use super::describe::find_adapter;
+#[cfg(feature = "vulkan")]
+use super::resolve::vulkan_device;
 
 /// Whether a denoiser's engines share the process's client or open a device of their own.
 #[derive(Debug)]
@@ -59,11 +61,22 @@ impl DevicePlacement {
     }
 
     /// The device the engines open their client on, given the device the user selected.
+    pub(crate) fn place(&self, selected: &cubecl::Device) -> cubecl::Device {
+        #[cfg(feature = "vulkan")]
+        if let Some(wgpu_device) = vulkan_device(selected) {
+            let placed = self.vulkan_device(wgpu_device);
+            return cubecl::Device::from(placed);
+        }
+
+        selected.clone()
+    }
+
+    /// The Vulkan device the engines open their client on.
     ///
     /// The own device is opened on the first call and reused by every later one. When it cannot be
     /// opened, the engines fall back to `selected`.
     #[cfg(feature = "vulkan")]
-    pub(crate) fn vulkan_device(&self, selected: &WgpuDevice) -> WgpuDevice {
+    fn vulkan_device(&self, selected: &WgpuDevice) -> WgpuDevice {
         if !self.own {
             return selected.clone();
         }
@@ -145,7 +158,16 @@ mod tests {
 
     use super::*;
     use crate::backend::accelerate::Accelerator;
+    use crate::backend::resolve::resolve;
     use crate::backend::{DescribeDevice, run_on_best};
+
+    /// The test device, named for Vulkan.
+    fn test_vulkan_device() -> WgpuDevice {
+        let selector = crate::testing::test_device();
+        let selected = resolve(Accelerator::Vulkan, selector).expect("vulkan names every device kind");
+        let wgpu_device = vulkan_device(&selected).expect("a vulkan device");
+        wgpu_device.clone()
+    }
 
     /// The adapter fields that tell two GPUs apart.
     fn adapter_fields(info: &wgpu::AdapterInfo) -> (String, String, u32, u32) {
@@ -159,7 +181,7 @@ mod tests {
     fn two_own_placements_open_two_devices_on_the_shared_clients_adapter() {
         let accelerators = [Accelerator::Vulkan];
         let selected = crate::testing::test_device();
-        let wgpu_device = selected.to_wgpu().expect("a wgpu device");
+        let wgpu_device = test_vulkan_device();
 
         // CubeCL picks the shared client's adapter itself here, so the check below can fail.
         let options = RuntimeOptions::default();
@@ -193,8 +215,7 @@ mod tests {
 
     #[test]
     fn an_own_placement_reuses_its_device() {
-        let test_device = crate::testing::test_device();
-        let selected = test_device.to_wgpu().expect("a wgpu device");
+        let selected = test_vulkan_device();
         let placement = DevicePlacement::own();
 
         let first = placement.vulkan_device(&selected);

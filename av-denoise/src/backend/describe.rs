@@ -6,12 +6,35 @@ use av_denoise_core::tune::AMD_VENDOR_ID;
 use av_denoise_core::tune::DeviceIdentity;
 #[cfg(feature = "cuda")]
 use av_denoise_core::tune::NVIDIA_VENDOR_ID;
+#[cfg(feature = "vulkan")]
+use cubecl::device::WgpuBackend;
 use cubecl::hash::StableHasher;
 use cubecl::prelude::*;
 
 /// Identities already worked out in this process, keyed by backend and device selector.
 static IDENTITIES: LazyLock<Mutex<HashMap<String, DeviceIdentity>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The identity of the device `selected` names, with `client` open on it.
+pub(crate) fn describe(selected: &cubecl::Device, client: &Client) -> DeviceIdentity {
+    match selected {
+        #[cfg(feature = "cuda")]
+        cubecl::Device::Cuda(cuda_device) => describe_cuda(cuda_device.index, client),
+        #[cfg(feature = "rocm")]
+        cubecl::Device::Hip(amd_device) => describe_rocm(amd_device.index, client),
+        #[cfg(feature = "vulkan")]
+        cubecl::Device::Wgpu(wgpu_device) if wgpu_device.backend == WgpuBackend::Vulkan => {
+            describe_wgpu(wgpu_device, wgpu::Backend::Vulkan, client)
+        },
+        #[cfg(feature = "metal")]
+        cubecl::Device::Wgpu(wgpu_device) => describe_wgpu(wgpu_device, wgpu::Backend::Metal, client),
+        other => {
+            let runtime = format!("{:?}", other.runtime());
+            let backend = runtime.to_ascii_lowercase();
+            fallback_identity(&backend, client)
+        },
+    }
+}
 
 /// Returns the identity cached under `memo_key`, working it out with `describe` the first time.
 fn remembered_identity(memo_key: String, describe: impl FnOnce() -> DeviceIdentity) -> DeviceIdentity {
@@ -32,7 +55,7 @@ fn remembered_identity(memo_key: String, describe: impl FnOnce() -> DeviceIdenti
 ///
 /// The adapter field carries a stable hash of the properties, so two different devices on one
 /// backend still get different store files.
-pub(crate) fn fallback_identity(backend: &str, client: &Client) -> DeviceIdentity {
+fn fallback_identity(backend: &str, client: &Client) -> DeviceIdentity {
     let hardware = &client.properties().hardware;
     let rendered = format!("{hardware:?}");
     let hash = StableHasher::hash_one(&rendered);
@@ -220,13 +243,13 @@ mod wgpu_identity {
 }
 
 #[cfg(any(feature = "vulkan", feature = "metal"))]
-pub(crate) use self::wgpu_identity::describe_wgpu;
+use self::wgpu_identity::describe_wgpu;
 #[cfg(feature = "vulkan")]
 pub(crate) use self::wgpu_identity::find_adapter;
 
 /// The identity of CUDA device `index`, from the driver.
 #[cfg(feature = "cuda")]
-pub(crate) fn describe_cuda(index: usize, client: &Client) -> DeviceIdentity {
+fn describe_cuda(index: usize, client: &Client) -> DeviceIdentity {
     let memo_key = format!("cuda|{index}");
 
     remembered_identity(memo_key, || {
@@ -286,7 +309,7 @@ fn cuda_details(index: usize) -> Result<DeviceIdentity, anyhow::Error> {
 
 /// The identity of ROCm device `index`, from HIP.
 #[cfg(feature = "rocm")]
-pub(crate) fn describe_rocm(index: usize, client: &Client) -> DeviceIdentity {
+fn describe_rocm(index: usize, client: &Client) -> DeviceIdentity {
     let memo_key = format!("rocm|{index}");
 
     remembered_identity(memo_key, || {
@@ -341,24 +364,23 @@ fn rocm_details(index: usize) -> Result<DeviceIdentity, anyhow::Error> {
 
 #[cfg(all(test, feature = "vulkan"))]
 mod tests {
-    use cubecl::wgpu::WgpuDevice;
-
     use super::*;
+    use crate::backend::accelerate::Accelerator;
+    use crate::backend::resolve::resolve;
 
     /// The test device on Vulkan, with a client on it.
-    fn test_vulkan_client() -> (WgpuDevice, Client) {
+    fn test_vulkan_client() -> (cubecl::Device, Client) {
         let selector = crate::testing::test_device();
-        let device = selector.to_wgpu().expect("the test device is a wgpu device");
-        let cubecl_device = cubecl::Device::from(device.clone());
-        let client = cubecl_device.client();
-        (device, client)
+        let selected = resolve(Accelerator::Vulkan, selector).expect("vulkan names every device kind");
+        let client = selected.client();
+        (selected, client)
     }
 
     #[test]
     fn the_default_vulkan_adapter_has_a_name_and_a_vendor() {
-        let (device, client) = test_vulkan_client();
+        let (selected, client) = test_vulkan_client();
 
-        let identity = describe_wgpu(&device, wgpu::Backend::Vulkan, &client);
+        let identity = describe(&selected, &client);
 
         assert_eq!(identity.backend, "vulkan");
         assert!(!identity.adapter.is_empty());
@@ -368,10 +390,10 @@ mod tests {
 
     #[test]
     fn describing_twice_gives_the_same_identity() {
-        let (device, client) = test_vulkan_client();
+        let (selected, client) = test_vulkan_client();
 
-        let first = describe_wgpu(&device, wgpu::Backend::Vulkan, &client);
-        let second = describe_wgpu(&device, wgpu::Backend::Vulkan, &client);
+        let first = describe(&selected, &client);
+        let second = describe(&selected, &client);
 
         assert_eq!(first.identity_hash(), second.identity_hash());
     }

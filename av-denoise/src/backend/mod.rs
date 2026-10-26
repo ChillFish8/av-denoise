@@ -6,7 +6,10 @@ pub mod enumerate;
 mod helpers;
 mod placement;
 mod probe;
+mod resolve;
 pub mod sniff;
+#[cfg(test)]
+mod tests;
 
 use av_denoise_core::tune::{DeviceIdentity, DeviceLimits, DeviceProfile};
 use av_denoise_core::{Engine, Geometry, Nl4d, Nl4dOptions, Nlmeans, NlmeansAlgorithm};
@@ -15,6 +18,9 @@ use cubecl::prelude::Client;
 use self::accelerate::Accelerator;
 pub use self::device::Device;
 pub(crate) use self::placement::DevicePlacement;
+use self::resolve::resolve;
+#[cfg(feature = "vulkan")]
+use self::resolve::vulkan_device;
 use self::sniff::sniff_best_accelerator;
 use crate::host::DenoiserError;
 use crate::host::io::{ClientIo, PlaneIo};
@@ -131,10 +137,6 @@ impl OnClient for DescribeDevice {
 ///
 /// The identity always describes `device`, so a client on an own device from `placement` loads the
 /// same stored tuning results as the shared one.
-#[cfg_attr(
-    not(feature = "vulkan"),
-    expect(unused_variables, reason = "only the Vulkan runtime reads the placement")
-)]
 fn run_on_best<T: OnClient>(
     accelerators: &[Accelerator],
     device: &Device,
@@ -143,53 +145,19 @@ fn run_on_best<T: OnClient>(
 ) -> Result<T::Output, DenoiserError> {
     let accelerator = sniff_best_accelerator(accelerators, device);
     let accelerator = accelerator.ok_or(DenoiserError::NoAcceleratorAvailable)?;
+    let requested = device.clone();
+    let selected = resolve(accelerator, requested).map_err(anyhow::Error::from)?;
 
-    match accelerator {
-        #[cfg(feature = "cuda")]
-        Accelerator::Cuda => {
-            let cuda_device = device.to_cuda()?;
-            let index = cuda_device.index;
-            let client_device = cubecl::Device::from(cuda_device);
-            let client = client_device.client();
-            let identity = describe::describe_cuda(index, &client);
-            task.run(client, accelerator, identity)
-        },
-        #[cfg(feature = "rocm")]
-        Accelerator::Rocm => {
-            let amd_device = device.to_amd()?;
-            let index = amd_device.index;
-            let client_device = cubecl::Device::from(amd_device);
-            let client = client_device.client();
-            let identity = describe::describe_rocm(index, &client);
-            task.run(client, accelerator, identity)
-        },
-        #[cfg(feature = "vulkan")]
-        Accelerator::Vulkan => {
-            let wgpu_device = device.to_wgpu()?;
-            let placed_device = placement.vulkan_device(&wgpu_device);
-            let client_device = cubecl::Device::from(placed_device);
-            let client = client_device.client();
-            let identity = describe::describe_wgpu(&wgpu_device, wgpu::Backend::Vulkan, &client);
-            task.on_vulkan(&wgpu_device);
-            task.run(client, accelerator, identity)
-        },
-        #[cfg(feature = "metal")]
-        Accelerator::Metal => {
-            let wgpu_device = device.to_wgpu()?;
-            let client_device = cubecl::Device::from(wgpu_device.clone());
-            let client = client_device.client();
-            let identity = describe::describe_wgpu(&wgpu_device, wgpu::Backend::Metal, &client);
-            task.run(client, accelerator, identity)
-        },
-        // Keeps the match exhaustive on docs.rs, where `cfg(docsrs)` widens the `Accelerator` enum to
-        // include variants whose backend feature is not enabled. Never reached at runtime.
-        #[cfg(docsrs)]
-        #[expect(
-            unreachable_patterns,
-            reason = "the arm only keeps the match exhaustive on docs.rs"
-        )]
-        _ => unreachable!(),
+    let placed = placement.place(&selected);
+    let client = placed.client();
+    let identity = describe::describe(&selected, &client);
+
+    #[cfg(feature = "vulkan")]
+    if let Some(wgpu_device) = vulkan_device(&selected) {
+        task.on_vulkan(wgpu_device);
     }
+
+    task.run(client, accelerator, identity)
 }
 
 /// Builds `spec` on the first accelerator in `accelerators` that works.

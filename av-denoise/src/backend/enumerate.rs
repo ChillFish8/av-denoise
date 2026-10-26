@@ -5,6 +5,7 @@ use cubecl::device::{DeviceId, RuntimeId};
 use super::accelerate::Accelerator;
 use super::device::Device;
 use super::probe::open_client;
+use super::resolve::resolve;
 
 /// What one backend reports about this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,35 +30,9 @@ pub struct BackendDevices {
 pub fn enumerate_devices(enable: &[Accelerator]) -> Vec<BackendDevices> {
     enable
         .iter()
-        .map(|accelerator| match accelerator {
-            #[cfg(feature = "cuda")]
-            Accelerator::Cuda => match Device::Default.to_cuda() {
-                Ok(cuda_device) => query_runtime(*accelerator, cuda_device.into()),
-                Err(_) => unavailable(*accelerator),
-            },
-            #[cfg(feature = "rocm")]
-            Accelerator::Rocm => match Device::Default.to_amd() {
-                Ok(amd_device) => query_runtime(*accelerator, amd_device.into()),
-                Err(_) => unavailable(*accelerator),
-            },
-            #[cfg(feature = "vulkan")]
-            Accelerator::Vulkan => match Device::Default.to_wgpu() {
-                Ok(wgpu_device) => query_runtime(*accelerator, wgpu_device.into()),
-                Err(_) => unavailable(*accelerator),
-            },
-            #[cfg(feature = "metal")]
-            Accelerator::Metal => match Device::Default.to_wgpu() {
-                Ok(wgpu_device) => query_runtime(*accelerator, wgpu_device.into()),
-                Err(_) => unavailable(*accelerator),
-            },
-            // Keeps the match exhaustive on docs.rs, where `cfg(docsrs)` widens the `Accelerator` enum to
-            // include variants whose backend feature is not enabled. Never reached at runtime.
-            #[cfg(docsrs)]
-            #[expect(
-                unreachable_patterns,
-                reason = "the arm only keeps the match exhaustive on docs.rs"
-            )]
-            _ => unreachable!(),
+        .map(|accelerator| match resolve(*accelerator, Device::Default) {
+            Ok(selected) => query_runtime(*accelerator, selected),
+            Err(_) => unavailable(*accelerator),
         })
         .collect()
 }

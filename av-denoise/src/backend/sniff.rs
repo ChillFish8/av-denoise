@@ -3,6 +3,7 @@
 use super::accelerate::Accelerator;
 use super::device::Device;
 use super::probe::open_client;
+use super::resolve::resolve;
 
 /// Returns the first accelerator, in order of preference, whose client can be built and synchronised
 /// on `device`.
@@ -29,45 +30,15 @@ use super::probe::open_client;
 /// ```
 pub fn sniff_best_accelerator(enable: &[Accelerator], device: &Device) -> Option<Accelerator> {
     for accelerator in enable {
-        let is_enabled = match accelerator {
-            #[cfg(feature = "cuda")]
-            Accelerator::Cuda => match device.to_cuda() {
-                Ok(cuda_device) => probe_runtime(*accelerator, cuda_device.into()),
-                Err(_) => false,
-            },
-            #[cfg(feature = "rocm")]
-            Accelerator::Rocm => match device.to_amd() {
-                Ok(amd_device) => probe_runtime(*accelerator, amd_device.into()),
-                Err(_) => false,
-            },
-            #[cfg(feature = "vulkan")]
-            Accelerator::Vulkan => match device.to_wgpu() {
-                Ok(wgpu_device) => probe_runtime(*accelerator, wgpu_device.into()),
-                Err(_) => false,
-            },
-            #[cfg(feature = "metal")]
-            Accelerator::Metal => match device.to_wgpu() {
-                Ok(wgpu_device) => probe_runtime(*accelerator, wgpu_device.into()),
-                Err(_) => false,
-            },
-            // Keeps the match exhaustive on docs.rs, where `cfg(docsrs)` widens the `Accelerator` enum to
-            // include variants whose backend feature is not enabled. Never reached at runtime.
-            #[cfg(docsrs)]
-            #[expect(
-                unreachable_patterns,
-                reason = "the arm only keeps the match exhaustive on docs.rs"
-            )]
-            _ => unreachable!(),
+        let requested = device.clone();
+        let Ok(selected) = resolve(*accelerator, requested) else {
+            continue;
         };
 
-        if is_enabled {
+        if open_client(*accelerator, &selected).is_some() {
             return Some(*accelerator);
         }
     }
 
     None
-}
-
-fn probe_runtime(accelerator: Accelerator, device: cubecl::Device) -> bool {
-    open_client(accelerator, &device).is_some()
 }

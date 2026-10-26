@@ -9,8 +9,8 @@ use std::str::FromStr;
 /// because most backends expose more than one device. Each variant maps onto the concrete `Device`
 /// type of whichever cubecl runtime was selected.
 ///
-/// `Integrated`, `Virtual` and `Cpu` are wgpu-only. Asking for a variant a runtime cannot honour
-/// returns an error from the matching `to_*` conversion.
+/// `Integrated`, `Virtual` and `Cpu` are wgpu-only. A runtime that cannot honour the variant is
+/// treated as unavailable.
 ///
 /// ```
 /// use av_denoise::Device;
@@ -106,55 +106,6 @@ impl fmt::Display for Device {
             Device::Virtual { index } => write!(formatter, "virtual:{index}"),
             Device::Cpu => formatter.write_str("cpu"),
         }
-    }
-}
-
-#[cfg(feature = "cuda")]
-impl Device {
-    pub fn to_cuda(&self) -> Result<cubecl::cuda::CudaDevice, anyhow::Error> {
-        match self {
-            Device::Default => Ok(cubecl::cuda::CudaDevice { index: 0 }),
-            Device::Discrete { index } => Ok(cubecl::cuda::CudaDevice { index: *index }),
-            other => {
-                let error = anyhow::anyhow!(
-                    "device {other:?} is not supported on the CUDA runtime, use `default` or `discrete[:N]`"
-                );
-                Err(error)
-            },
-        }
-    }
-}
-
-#[cfg(feature = "rocm")]
-impl Device {
-    pub fn to_amd(&self) -> Result<cubecl::hip::AmdDevice, anyhow::Error> {
-        match self {
-            Device::Default => Ok(cubecl::hip::AmdDevice { index: 0 }),
-            Device::Discrete { index } => Ok(cubecl::hip::AmdDevice { index: *index }),
-            other => {
-                let error = anyhow::anyhow!(
-                    "device {other:?} is not supported on the ROCm runtime, use `default` or `discrete[:N]`"
-                );
-                Err(error)
-            },
-        }
-    }
-}
-
-#[cfg(any(feature = "vulkan", feature = "metal"))]
-impl Device {
-    pub fn to_wgpu(&self) -> Result<cubecl::wgpu::WgpuDevice, anyhow::Error> {
-        use cubecl::wgpu::{WgpuDevice, WgpuDeviceKind};
-
-        let kind = match self {
-            Device::Default => WgpuDeviceKind::DefaultDevice,
-            Device::Discrete { index } => WgpuDeviceKind::DiscreteGpu(*index),
-            Device::Integrated { index } => WgpuDeviceKind::IntegratedGpu(*index),
-            Device::Virtual { index } => WgpuDeviceKind::VirtualGpu(*index),
-            Device::Cpu => WgpuDeviceKind::Cpu,
-        };
-
-        Ok(WgpuDevice::new(kind))
     }
 }
 
