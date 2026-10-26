@@ -10,12 +10,13 @@ next push. At the end of a stream, `Engine::finish` returns the tail count.
 
 ```rust,no_run
 use av_denoise_core::{ChannelMode, DevicePlane, Engine, Geometry, Nl4d, Nl4dOptions, SampleFormat};
-use cubecl::Runtime;
-use cubecl::wgpu::WgpuRuntime;
+use cubecl::wgpu::{WgpuBackend, WgpuDevice, WgpuDeviceKind};
 
 # fn main() -> Result<(), av_denoise_core::Error> {
-let device = <WgpuRuntime as Runtime>::Device::default();
-let client = WgpuRuntime::client(&device);
+let any_backend = WgpuDevice::new(WgpuDeviceKind::DefaultDevice);
+let wgpu_device = any_backend.on(WgpuBackend::Vulkan);
+let device = cubecl::Device::from(wgpu_device);
+let client = device.client();
 let geometry = Geometry {
     width: 1920,
     height: 1080,
