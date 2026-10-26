@@ -2,9 +2,8 @@ mod parameters;
 mod regions;
 mod search_radius;
 
-use cubecl::prelude::ComputeClient;
+use cubecl::prelude::Client;
 
-use super::helpers::*;
 use crate::bench_api::HostIo;
 use crate::nlmeans::*;
 
@@ -137,7 +136,7 @@ fn subtract(minuend: &[f32], subtrahend: &[f32]) -> Vec<f32> {
     reason = "the test helper takes the full set of parameters its cases vary"
 )]
 fn run_front_end(
-    client: &ComputeClient<R>,
+    client: &Client,
     width: u32,
     height: u32,
     clean: &[f32],
@@ -159,7 +158,7 @@ fn run_front_end(
         motion_compensation: MotionCompensationMode::None,
         hq: Some(HqParams::with_sigma(sigma)),
     };
-    let mut denoiser = NlmDenoiser::<R>::new(client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(client, params, width, height);
 
     let push_count = 2 * temporal_radius + 1;
     let mut center_noisy: Option<Vec<f32>> = None;
@@ -191,7 +190,7 @@ fn run_front_end(
     reason = "the test helper takes the full set of parameters its cases vary"
 )]
 fn measure_flat(
-    client: &ComputeClient<R>,
+    client: &Client,
     width: u32,
     height: u32,
     clean: &[f32],
@@ -235,7 +234,7 @@ fn measure_flat(
     reason = "the test helper takes the full set of parameters its cases vary"
 )]
 fn denoised_difference(
-    client: &ComputeClient<R>,
+    client: &Client,
     width: u32,
     height: u32,
     clean: &[f32],
@@ -281,7 +280,7 @@ fn denoised_difference(
     reason = "the test helper takes the full set of parameters its cases vary"
 )]
 fn measure_diff(
-    client: &ComputeClient<R>,
+    client: &Client,
     width: u32,
     height: u32,
     clean: &[f32],

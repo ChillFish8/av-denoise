@@ -1,4 +1,4 @@
-use super::helpers::{R, SIGMA, make_client, static_clip_params, textured_base};
+use super::helpers::{SIGMA, make_client, static_clip_params, textured_base};
 use crate::bench_api::HostIo;
 use crate::nl4d::Nl4dDenoiser;
 use crate::nlmeans::tests::helpers::noisy_field_over;
@@ -10,7 +10,7 @@ const SIZE: u32 = 64;
 fn run_stream(radius: u32, count: u32) -> (Vec<Vec<f32>>, Option<u32>) {
     let client = make_client();
     let params = static_clip_params(radius);
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, SIZE, SIZE).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::new(&client, params, SIZE, SIZE).expect("construction failed");
     let base = textured_base(SIZE, SIZE);
     let mut outputs = Vec::new();
     let mut first_output_at = None;
@@ -56,7 +56,7 @@ fn residual_std(output: &[f32], clean: &[f32]) -> f32 {
 
 /// Pushes `count` frames seeded from `first_seed` and returns the push
 /// count at which the first output arrived.
-fn first_output_push(denoiser: &mut Nl4dDenoiser<R>, count: u32, first_seed: u32) -> Option<u32> {
+fn first_output_push(denoiser: &mut Nl4dDenoiser, count: u32, first_seed: u32) -> Option<u32> {
     let base = textured_base(SIZE, SIZE);
     let mut first_output_at = None;
 
@@ -155,7 +155,7 @@ fn a_full_ring_primed_without_any_submit_flushes_without_black_output() {
     let radius = 2;
     let client = make_client();
     let params = static_clip_params(radius);
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, SIZE, SIZE).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::new(&client, params, SIZE, SIZE).expect("construction failed");
     let base = textured_base(SIZE, SIZE);
     let clean = base.clone();
 
@@ -197,7 +197,7 @@ fn a_second_scene_after_a_continuation_stream_runs_head_passes() {
     let count = 2 * radius + 3;
     let client = make_client();
     let params = static_clip_params(radius);
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, SIZE, SIZE).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::new(&client, params, SIZE, SIZE).expect("construction failed");
 
     denoiser.mark_continuation();
     first_output_push(&mut denoiser, count, 0);
@@ -213,7 +213,7 @@ fn a_continuation_stream_first_emits_after_the_radius_more_passes() {
     let radius = 2;
     let client = make_client();
     let params = static_clip_params(radius);
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, SIZE, SIZE).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::new(&client, params, SIZE, SIZE).expect("construction failed");
 
     denoiser.mark_continuation();
     let first_output_at = first_output_push(&mut denoiser, 4 * radius + 1, 0);

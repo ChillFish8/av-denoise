@@ -94,8 +94,8 @@ pub(crate) struct ReadingSettings {
 
 /// The noise values every consumer reads and, when the noise is measured, the buffers one ring of
 /// frames is measured in.
-pub(crate) struct NoiseState<R: Runtime> {
-    pub(super) client: ComputeClient<R>,
+pub(crate) struct NoiseState {
+    pub(super) client: Client,
     pub(super) shape: NoiseShape,
     pub(super) settings: NoiseSettings,
     /// The [DERIVED_WORDS](crate::noise::derived::DERIVED_WORDS) values every consumer reads.
@@ -162,10 +162,10 @@ pub(super) struct ClassScratch {
     pub(super) slot_maps: Handle,
 }
 
-impl<R: Runtime> NoiseState<R> {
+impl NoiseState {
     /// A state for `shape` whose derived buffer holds `initial` until the first fold.
     pub(crate) fn new(
-        client: &ComputeClient<R>,
+        client: &Client,
         shape: NoiseShape,
         settings: NoiseSettings,
         initial: DerivedValues,
@@ -184,7 +184,7 @@ impl<R: Runtime> NoiseState<R> {
     /// `derived` at a rho of 0. Every queue is a no-op, and a snapshot holds `derived` with no
     /// chains.
     pub(crate) fn fixed(
-        client: &ComputeClient<R>,
+        client: &Client,
         shape: NoiseShape,
         derived: DerivedValues,
         offset_tables: Option<u32>,
@@ -365,11 +365,7 @@ impl<R: Runtime> NoiseState<R> {
 }
 
 /// The measurement buffers of a state for `shape` built with `settings`.
-fn measurement_buffers<R: Runtime>(
-    client: &ComputeClient<R>,
-    shape: NoiseShape,
-    settings: NoiseSettings,
-) -> Measurement {
+fn measurement_buffers(client: &Client, shape: NoiseShape, settings: NoiseSettings) -> Measurement {
     let frames = u64::from(shape.frames);
     let partials_stride = noise_partials_slot_stride_bytes(shape.width, shape.height, shape.align);
     let partials_bytes = partials_stride * frames;
@@ -426,11 +422,7 @@ fn measurement_buffers<R: Runtime>(
     }
 }
 
-fn fold_settings_buffer<R: Runtime>(
-    client: &ComputeClient<R>,
-    shape: NoiseShape,
-    settings: NoiseSettings,
-) -> Handle {
+fn fold_settings_buffer(client: &Client, shape: NoiseShape, settings: NoiseSettings) -> Handle {
     let words = fold_words(shape, settings);
     let bytes = f32::as_bytes(&words);
     client.create_from_slice(bytes)
@@ -476,7 +468,7 @@ fn immerkaer_tag_count(shape: NoiseShape) -> u32 {
     }
 }
 
-fn immerkaer_batch<R: Runtime>(client: &ComputeClient<R>, shape: NoiseShape) -> SelectBatch {
+fn immerkaer_batch(client: &Client, shape: NoiseShape) -> SelectBatch {
     let len = immerkaer_lanes(shape);
     let tag_count = immerkaer_tag_count(shape);
     let min_counts = vec![0u32; tag_count as usize];
@@ -596,7 +588,7 @@ fn push_batch_sizes(
 }
 
 /// The block scratch and the sample batch of [SAMPLE_LANES_PER_BLOCK] lanes per block.
-fn sample_scratch<R: Runtime>(client: &ComputeClient<R>, shape: NoiseShape) -> SampleScratch {
+fn sample_scratch(client: &Client, shape: NoiseShape) -> SampleScratch {
     let blocks = block_count(shape);
     let values_bytes = (blocks * BLOCK_FIELDS) as usize * size_of::<f32>();
     let flags_bytes = blocks as usize * size_of::<u32>();
@@ -614,11 +606,7 @@ fn sample_scratch<R: Runtime>(client: &ComputeClient<R>, shape: NoiseShape) -> S
 
 /// The curve batch of [CURVE_LANES_PER_BLOCK] quarter lanes per block, with temporal stats and the
 /// luma quarter fields.
-fn curve_batch<R: Runtime>(
-    client: &ComputeClient<R>,
-    shape: NoiseShape,
-    settings: ReadingSettings,
-) -> Option<SelectBatch> {
+fn curve_batch(client: &Client, shape: NoiseShape, settings: ReadingSettings) -> Option<SelectBatch> {
     if !shape.temporal || !settings.luma_fields {
         return None;
     }
@@ -634,11 +622,7 @@ fn curve_batch<R: Runtime>(
 }
 
 /// The class scratch and the slot maps of ones, when `settings` builds a strength map.
-fn class_scratch<R: Runtime>(
-    client: &ComputeClient<R>,
-    shape: NoiseShape,
-    settings: ReadingSettings,
-) -> Option<ClassScratch> {
+fn class_scratch(client: &Client, shape: NoiseShape, settings: ReadingSettings) -> Option<ClassScratch> {
     if settings.map == StrengthMapKind::Off {
         return None;
     }

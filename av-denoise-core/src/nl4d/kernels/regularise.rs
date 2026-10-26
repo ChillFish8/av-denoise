@@ -33,8 +33,8 @@ pub(crate) fn abs_i32(value: i32) -> i32 {
 
 /// Sorts the first `count` entries of `vals` in place and returns the lower median.
 #[cube]
-fn median_of(vals: &mut Array<i32>, count: u32) -> i32 {
-    let mut i: u32 = 1;
+fn median_of(vals: &mut [i32], count: u32) -> i32 {
+    let mut i = 1u32;
     while i < count {
         let key = vals[i as usize];
         let mut j = i;
@@ -59,8 +59,8 @@ fn median_of(vals: &mut Array<i32>, count: u32) -> i32 {
     reason = "every argument is a buffer, position or comptime shape the tile load reads"
 )]
 pub(crate) fn load_centre_tile(
-    pyramid: &Array<f32>,
-    centre_smem: &mut SharedMemory<f32>,
+    pyramid: &[f32],
+    centre_smem: &mut Shared<[f32]>,
     centre_base: u32,
     block_origin_x: i32,
     block_origin_y: i32,
@@ -97,10 +97,10 @@ pub(crate) fn load_centre_tile(
     reason = "every argument is a buffer, position or comptime shape the gather reads"
 )]
 pub(crate) fn gather_candidates(
-    mv_in: &Array<i32>,
+    mv_in: &[i32],
     mv_base: u32,
-    candidates: &mut SharedMemory<i32>,
-    median: &mut SharedMemory<i32>,
+    candidates: &mut Shared<[i32]>,
+    median: &mut Shared<[i32]>,
     block_col: u32,
     block_row: u32,
     #[comptime] blocks_x: u32,
@@ -109,10 +109,10 @@ pub(crate) fn gather_candidates(
     let block = block_row * blocks_x + block_col;
     let mut neighbour_xs = Array::<i32>::new(NEIGHBOURHOOD as usize);
     let mut neighbour_ys = Array::<i32>::new(NEIGHBOURHOOD as usize);
-    let mut neighbour_count: u32 = 0;
-    let mut dy: u32 = 0;
+    let mut neighbour_count = 0u32;
+    let mut dy = 0u32;
     while dy < 3u32 {
-        let mut dx: u32 = 0;
+        let mut dx = 0u32;
         while dx < 3u32 {
             if dx != 1u32 || dy != 1u32 {
                 let neighbour_x = block_col as i32 + dx as i32 - 1i32;
@@ -143,8 +143,8 @@ pub(crate) fn gather_candidates(
     let mut median_x = own_x;
     let mut median_y = own_y;
     if neighbour_count > 0u32 {
-        median_x = median_of(&mut neighbour_xs, neighbour_count);
-        median_y = median_of(&mut neighbour_ys, neighbour_count);
+        median_x = median_of(neighbour_xs.as_mut_slice(), neighbour_count);
+        median_y = median_of(neighbour_ys.as_mut_slice(), neighbour_count);
     }
 
     median[0] = median_x;
@@ -157,8 +157,8 @@ pub(crate) fn gather_candidates(
 
     // Left, right, up, down. Off-grid neighbours repeat the block's own vector, which the tie
     // rule then discards.
-    let mut candidate: u32 = 2;
-    let mut side: u32 = 0;
+    let mut candidate = 2u32;
+    let mut side = 0u32;
     while side < 4u32 {
         let mut neighbour_x = block_col as i32;
         let mut neighbour_y = block_row as i32;
@@ -196,13 +196,7 @@ pub(crate) fn gather_candidates(
 
 /// A candidate's cost, its SAD plus `lambda_pixel` times its distance from the median.
 #[cube]
-pub(crate) fn candidate_cost(
-    sad: f32,
-    mvx: i32,
-    mvy: i32,
-    median: &SharedMemory<i32>,
-    lambda_pixel: f32,
-) -> f32 {
+pub(crate) fn candidate_cost(sad: f32, mvx: i32, mvy: i32, median: &Shared<[i32]>, lambda_pixel: f32) -> f32 {
     let deviation = abs_i32(mvx - median[0]) + abs_i32(mvy - median[1]);
     sad + lambda_pixel * deviation as f32
 }
@@ -218,20 +212,20 @@ pub(crate) fn candidate_cost(
     reason = "the winner write needs every scratch array, output and base the kernel holds"
 )]
 pub(crate) fn write_winner(
-    candidates: &SharedMemory<i32>,
-    sad_scratch: &SharedMemory<f32>,
-    cost: &SharedMemory<f32>,
-    mv_out: &mut Array<i32>,
-    confidence_out: &mut Array<f32>,
+    candidates: &Shared<[i32]>,
+    sad_scratch: &Shared<[f32]>,
+    cost: &Shared<[f32]>,
+    mv_out: &mut [i32],
+    confidence_out: &mut [f32],
     mv_base: u32,
     conf_base: u32,
     block: u32,
     sad_noise_floor: f32,
     thsad: f32,
 ) {
-    let mut best: u32 = 0;
+    let mut best = 0u32;
     let mut best_cost = cost[0];
-    let mut candidate: u32 = 1;
+    let mut candidate = 1u32;
     while candidate < REGULARISE_CANDIDATES {
         if cost[candidate as usize] < best_cost {
             best_cost = cost[candidate as usize];
@@ -281,14 +275,14 @@ pub(crate) fn write_winner(
     reason = "every argument is a buffer or comptime shape the kernel binds"
 )]
 pub fn nl4d_mv_regularise(
-    pyramid: &Array<f32>,
-    neighbour_slots: &Array<u32>,
-    mv_in: &Array<i32>,
-    mv_out: &mut Array<i32>,
-    confidence_out: &mut Array<f32>,
+    pyramid: &[f32],
+    neighbour_slots: &[u32],
+    mv_in: &[i32],
+    mv_out: &mut [i32],
+    confidence_out: &mut [f32],
     centre_slot: u32,
     lambda_pixel: f32,
-    noise: &Array<f32>,
+    noise: &[f32],
     thsad: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -313,11 +307,11 @@ pub fn nl4d_mv_regularise(
     let conf_base = neighbour_index * conf_stride;
 
     let block_pixels = comptime!(blksize * blksize);
-    let mut centre_smem = SharedMemory::<f32>::new(block_pixels as usize);
-    let mut candidates = SharedMemory::<i32>::new(comptime!(2 * REGULARISE_CANDIDATES) as usize);
-    let mut median = SharedMemory::<i32>::new(2usize);
-    let mut sad_scratch = SharedMemory::<f32>::new(REGULARISE_CANDIDATES as usize);
-    let mut cost = SharedMemory::<f32>::new(REGULARISE_CANDIDATES as usize);
+    let mut centre_smem = Shared::<[f32]>::new_slice(block_pixels as usize);
+    let mut candidates = Shared::<[i32]>::new_slice(comptime!(2 * REGULARISE_CANDIDATES) as usize);
+    let mut median = Shared::<[i32]>::new_slice(2usize);
+    let mut sad_scratch = Shared::<[f32]>::new_slice(REGULARISE_CANDIDATES as usize);
+    let mut cost = Shared::<[f32]>::new_slice(REGULARISE_CANDIDATES as usize);
 
     let block_origin_x = block_col as i32 * step as i32;
     let block_origin_y = block_row as i32 * step as i32;
@@ -351,7 +345,7 @@ pub fn nl4d_mv_regularise(
     if thread_id < REGULARISE_CANDIDATES {
         let mvx = candidates[(thread_id * 2u32) as usize];
         let mvy = candidates[(thread_id * 2u32 + 1u32) as usize];
-        let mut sad: f32 = 0.0;
+        let mut sad = 0.0f32;
         for iy in 0..blksize {
             for ix in 0..blksize {
                 let centre_x = block_origin_x + ix as i32;

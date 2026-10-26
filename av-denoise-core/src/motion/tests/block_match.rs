@@ -6,7 +6,7 @@ use crate::motion::{DEFAULT_BLKSIZE, DEFAULT_SEARCH_RADIUS};
 use crate::noise::tests::sad_floor_buffer;
 use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
 use crate::tune::tests::fixtures::noisy_copy;
-use crate::tune::tests::runtime::{TestRuntime, test_client};
+use crate::tune::tests::runtime::test_client;
 
 /// Runs the fine block-match kernel over one block covering the whole buffer.
 ///
@@ -34,15 +34,15 @@ fn run_fine_block_match_single_block(
     unsafe {
         let mv_field_handle = mv_field.clone();
         let confidence_handle = confidence.clone();
-        let pyramid_arg = ArrayArg::from_raw_parts(pyramid, 2 * level_len);
-        let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, 1);
-        let mv_field_arg = ArrayArg::from_raw_parts(mv_field_handle, 2);
-        let confidence_arg = ArrayArg::from_raw_parts(confidence_handle, 1);
+        let pyramid_arg = BufferArg::from_raw_parts(pyramid, 2 * level_len);
+        let neighbour_slots_arg = BufferArg::from_raw_parts(neighbour_slots, 1);
+        let mv_field_arg = BufferArg::from_raw_parts(mv_field_handle, 2);
+        let confidence_arg = BufferArg::from_raw_parts(confidence_handle, 1);
 
         let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, sad_noise_floor);
-        let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
+        let noise_arg = BufferArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
-        mc_block_match_fine::launch_unchecked::<TestRuntime>(
+        mc_block_match_fine::launch_unchecked(
             &client,
             grid,
             dim,
@@ -137,15 +137,15 @@ fn block_match_fine_argmin_finds_clean_shift() {
 
     unsafe {
         let mv_field_handle = mv_field.clone();
-        let pyramid_arg = ArrayArg::from_raw_parts(pyramid, 2 * level_len);
-        let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, 1);
-        let mv_field_arg = ArrayArg::from_raw_parts(mv_field_handle, mv_len);
-        let confidence_arg = ArrayArg::from_raw_parts(confidence, 1);
+        let pyramid_arg = BufferArg::from_raw_parts(pyramid, 2 * level_len);
+        let neighbour_slots_arg = BufferArg::from_raw_parts(neighbour_slots, 1);
+        let mv_field_arg = BufferArg::from_raw_parts(mv_field_handle, mv_len);
+        let confidence_arg = BufferArg::from_raw_parts(confidence, 1);
 
         let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, 0.0);
-        let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
+        let noise_arg = BufferArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
-        mc_block_match_fine::launch_unchecked::<TestRuntime>(
+        mc_block_match_fine::launch_unchecked(
             &client,
             grid,
             dim,
@@ -212,11 +212,11 @@ fn run_coarse_block_match_single_block(
 
     unsafe {
         let mv_field_handle = mv_field.clone();
-        let pyramid_arg = ArrayArg::from_raw_parts(pyramid, 2 * level_len);
-        let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, 1);
-        let mv_field_arg = ArrayArg::from_raw_parts(mv_field_handle, 2);
+        let pyramid_arg = BufferArg::from_raw_parts(pyramid, 2 * level_len);
+        let neighbour_slots_arg = BufferArg::from_raw_parts(neighbour_slots, 1);
+        let mv_field_arg = BufferArg::from_raw_parts(mv_field_handle, 2);
 
-        mc_block_match_coarse::launch_unchecked::<TestRuntime>(
+        mc_block_match_coarse::launch_unchecked(
             &client,
             grid,
             dim,

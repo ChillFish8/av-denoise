@@ -21,8 +21,8 @@ use crate::engine::kernels::read_line;
 /// nothing.
 #[cube]
 pub(crate) fn search_line<S: Float, N: Size>(
-    ring: &Array<Vector<f32, N>>,
-    search_ring: &Array<Vector<S, N>>,
+    ring: &[Vector<f32, N>],
+    search_ring: &[Vector<S, N>],
     x: u32,
     y: u32,
     slot: u32,
@@ -44,8 +44,8 @@ pub(crate) fn search_line<S: Float, N: Size>(
 /// neighbouring channels within a row otherwise.
 #[cube]
 fn window_packed_partial<S: Float, N: Size>(
-    window: &Array<Vector<S, N>>,
-    reference: &Array<Vector<S, Const<2>>>,
+    window: &[Vector<S, N>],
+    reference: &[Vector<S, Const<2>>],
     #[comptime] shape: SearchShape,
 ) -> f32 {
     let stored_ch = comptime!(shape.stored_ch);
@@ -57,7 +57,9 @@ fn window_packed_partial<S: Float, N: Size>(
         for r in 0..comptime!(PATCH_SIZE / 2) {
             let top = window[r as usize];
             let bottom = window[comptime!(r + PATCH_SIZE / 2) as usize];
-            let squared = pair_squared_difference(reference, top[0], bottom[0], r);
+            let top_lane = top.extract(0usize);
+            let bottom_lane = bottom.extract(0usize);
+            let squared = pair_squared_difference(reference, top_lane, bottom_lane, r);
             sum += squared;
         }
     } else {
@@ -69,8 +71,8 @@ fn window_packed_partial<S: Float, N: Size>(
 
             #[unroll]
             for p in 0..pairs_per_row {
-                let first = line[comptime!(2 * p) as usize];
-                let second = line[comptime!(2 * p + 1) as usize];
+                let first = line.extract(comptime!(2 * p) as usize);
+                let second = line.extract(comptime!(2 * p + 1) as usize);
                 let pair = comptime!(r * pairs_per_row + p);
                 let squared = pair_squared_difference(reference, first, second, pair);
                 sum += squared;
@@ -86,9 +88,9 @@ fn window_packed_partial<S: Float, N: Size>(
 /// Rows sum in order 0..7, each lane over its own column. Every lane of the group must call it.
 #[cube]
 pub(crate) fn window_distance<S: Float, N: Size>(
-    window: &Array<Vector<S, N>>,
-    current: &Array<f32>,
-    reference: &Array<Vector<S, Const<2>>>,
+    window: &[Vector<S, N>],
+    current: &[f32],
+    reference: &[Vector<S, Const<2>>],
     scale: f32,
     #[comptime] shape: SearchShape,
 ) -> f32 {
@@ -105,7 +107,8 @@ pub(crate) fn window_distance<S: Float, N: Size>(
 
             #[unroll]
             for c in 0..channels {
-                let pixel = f32::cast_from(line[c as usize]);
+                let lane = line.extract(c as usize);
+                let pixel = f32::cast_from(lane);
                 let diff = current[(r * channels + c) as usize] - pixel;
                 partial += diff * diff;
             }
@@ -119,7 +122,7 @@ pub(crate) fn window_distance<S: Float, N: Size>(
 
 /// Moves the window down one row, dropping row 0 and appending `next`.
 #[cube]
-pub(crate) fn slide_window<S: Float, N: Size>(window: &mut Array<Vector<S, N>>, next: Vector<S, N>) {
+pub(crate) fn slide_window<S: Float, N: Size>(window: &mut [Vector<S, N>], next: Vector<S, N>) {
     #[unroll]
     for r in 0..comptime!(PATCH_SIZE - 1) {
         window[r as usize] = window[comptime!(r + 1) as usize];
@@ -131,9 +134,9 @@ pub(crate) fn slide_window<S: Float, N: Size>(window: &mut Array<Vector<S, N>>, 
 /// Fills the window with the eight rows of the candidate column starting at row `top`.
 #[cube]
 fn fill_window<S: Float, N: Size>(
-    window: &mut Array<Vector<S, N>>,
-    ring: &Array<Vector<f32, N>>,
-    search_ring: &Array<Vector<S, N>>,
+    window: &mut [Vector<S, N>],
+    ring: &[Vector<f32, N>],
+    search_ring: &[Vector<S, N>],
     column: u32,
     top: u32,
     slot: u32,
@@ -159,10 +162,10 @@ fn fill_window<S: Float, N: Size>(
     reason = "every argument is a buffer, position or comptime shape the walk needs"
 )]
 pub(crate) fn sliding_centre_walk<S: Float, N: Size>(
-    ring: &Array<Vector<f32, N>>,
-    search_ring: &Array<Vector<S, N>>,
-    current: &Array<f32>,
-    reference: &Array<Vector<S, Const<2>>>,
+    ring: &[Vector<f32, N>],
+    search_ring: &[Vector<S, N>],
+    current: &[f32],
+    reference: &[Vector<S, Const<2>>],
     rect: &SearchRect,
     cursor: &SearchCursor,
     best_d: &mut f32,
@@ -204,10 +207,10 @@ pub(crate) fn sliding_centre_walk<S: Float, N: Size>(
     reason = "every argument is a buffer, position or comptime shape the walk needs"
 )]
 fn clipped_sliding_walk<S: Float, N: Size>(
-    ring: &Array<Vector<f32, N>>,
-    search_ring: &Array<Vector<S, N>>,
-    current: &Array<f32>,
-    reference: &Array<Vector<S, Const<2>>>,
+    ring: &[Vector<f32, N>],
+    search_ring: &[Vector<S, N>],
+    current: &[f32],
+    reference: &[Vector<S, Const<2>>],
     rect: &SearchRect,
     cursor: &SearchCursor,
     best_d: &mut f32,
@@ -223,7 +226,7 @@ fn clipped_sliding_walk<S: Float, N: Size>(
     while candidate_x <= rect.right {
         let column = candidate_x + cursor.sub;
         fill_window(
-            &mut window,
+            window.as_mut_slice(),
             ring,
             search_ring,
             column,
@@ -235,7 +238,7 @@ fn clipped_sliding_walk<S: Float, N: Size>(
         let mut candidate_y = rect.top;
 
         while candidate_y <= rect.bottom {
-            let scored = window_distance(&window, current, reference, cursor.scale, shape);
+            let scored = window_distance(window.as_slice(), current, reference, cursor.scale, shape);
             let dist = pin_self_match(scored, true, candidate_x, candidate_y, cursor.rx, cursor.ry);
 
             let packed = pack_pos_t(candidate_x, candidate_y, 0u32);
@@ -254,7 +257,7 @@ fn clipped_sliding_walk<S: Float, N: Size>(
             let wanted_row = candidate_y + PATCH_SIZE;
             let next_row = u32::min(wanted_row, last_row);
             let next = search_line(ring, search_ring, column, next_row, cursor.centre_slot, shape);
-            slide_window(&mut window, next);
+            slide_window(window.as_mut_slice(), next);
             candidate_y += 1u32;
         }
 
@@ -274,10 +277,10 @@ fn clipped_sliding_walk<S: Float, N: Size>(
     reason = "every argument is a buffer, position or comptime shape the walk needs"
 )]
 fn uniform_sliding_walk<S: Float, N: Size>(
-    ring: &Array<Vector<f32, N>>,
-    search_ring: &Array<Vector<S, N>>,
-    current: &Array<f32>,
-    reference: &Array<Vector<S, Const<2>>>,
+    ring: &[Vector<f32, N>],
+    search_ring: &[Vector<S, N>],
+    current: &[f32],
+    reference: &[Vector<S, Const<2>>],
     rect: &SearchRect,
     cursor: &SearchCursor,
     best_d: &mut f32,
@@ -298,7 +301,7 @@ fn uniform_sliding_walk<S: Float, N: Size>(
             let candidate_x = u32::min(wanted_x, rect.right);
             let column = candidate_x + cursor.sub;
             fill_window(
-                &mut window,
+                window.as_mut_slice(),
                 ring,
                 search_ring,
                 column,
@@ -314,7 +317,7 @@ fn uniform_sliding_walk<S: Float, N: Size>(
 
                 if plane_any(live_pos) {
                     let candidate_y = u32::min(wanted_y, rect.bottom);
-                    let scored = window_distance(&window, current, reference, cursor.scale, shape);
+                    let scored = window_distance(window.as_slice(), current, reference, cursor.scale, shape);
                     let masked = select(live_pos, scored, UNFILLED_DISTANCE);
                     let dist =
                         pin_self_match(masked, live_pos, candidate_x, candidate_y, cursor.rx, cursor.ry);
@@ -334,7 +337,7 @@ fn uniform_sliding_walk<S: Float, N: Size>(
                     let wanted_row = wanted_y + PATCH_SIZE;
                     let next_row = u32::min(wanted_row, last_row);
                     let next = search_line(ring, search_ring, column, next_row, cursor.centre_slot, shape);
-                    slide_window(&mut window, next);
+                    slide_window(window.as_mut_slice(), next);
                 }
             }
         }
@@ -346,13 +349,13 @@ fn uniform_sliding_walk<S: Float, N: Size>(
 /// A rectangle the column crosses excludes its y span, and one it misses gets the empty span `1..=0`.
 #[cube]
 fn column_spans(
-    seen_left: &Array<u32>,
-    seen_right: &Array<u32>,
-    seen_top: &Array<u32>,
-    seen_bot: &Array<u32>,
+    seen_left: &[u32],
+    seen_right: &[u32],
+    seen_top: &[u32],
+    seen_bot: &[u32],
     column_x: u32,
-    skip_top: &mut Array<u32>,
-    skip_bot: &mut Array<u32>,
+    skip_top: &mut [u32],
+    skip_bot: &mut [u32],
     #[comptime] max_rects: u32,
 ) {
     #[unroll]
@@ -371,10 +374,10 @@ fn column_spans(
 /// [NO_COORDINATE](crate::collab::kernels::fused::trajectory::NO_COORDINATE).
 #[cube]
 fn column_held_rows(
-    member_pos: &Array<u32>,
+    member_pos: &[u32],
     column_x: u32,
     packed_t: u32,
-    held_y: &mut Array<u32>,
+    held_y: &mut [u32],
     #[comptime] first: u32,
 ) {
     let column_key = pack_pos_t(column_x, 0u32, packed_t);
@@ -442,15 +445,15 @@ fn keep_frame_match(
     reason = "every argument is a buffer, per-group array or comptime shape the walk needs"
 )]
 pub(crate) fn sliding_rect_walk<S: Float, N: Size>(
-    ring: &Array<Vector<f32, N>>,
-    search_ring: &Array<Vector<S, N>>,
-    anchor: &Array<f32>,
-    reference: &Array<Vector<S, Const<2>>>,
-    seen_left: &Array<u32>,
-    seen_right: &Array<u32>,
-    seen_top: &Array<u32>,
-    seen_bot: &Array<u32>,
-    member_pos: &Array<u32>,
+    ring: &[Vector<f32, N>],
+    search_ring: &[Vector<S, N>],
+    anchor: &[f32],
+    reference: &[Vector<S, Const<2>>],
+    seen_left: &[u32],
+    seen_right: &[u32],
+    seen_top: &[u32],
+    seen_bot: &[u32],
+    member_pos: &[u32],
     bounds: &SearchRect,
     slot: u32,
     sub: u32,
@@ -487,25 +490,34 @@ pub(crate) fn sliding_rect_walk<S: Float, N: Size>(
                     seen_top,
                     seen_bot,
                     candidate_x,
-                    &mut skip_top,
-                    &mut skip_bot,
+                    skip_top.as_mut_slice(),
+                    skip_bot.as_mut_slice(),
                     max_rects,
                 );
-                column_held_rows(member_pos, candidate_x, packed_t, &mut held_y, first);
+                column_held_rows(member_pos, candidate_x, packed_t, held_y.as_mut_slice(), first);
 
                 let column = candidate_x + sub;
-                fill_window(&mut window, ring, search_ring, column, bounds.top, slot, shape);
+                fill_window(
+                    window.as_mut_slice(),
+                    ring,
+                    search_ring,
+                    column,
+                    bounds.top,
+                    slot,
+                    shape,
+                );
 
                 for dy in 0..span {
                     let wanted_y = bounds.top + dy;
                     let candidate_y = u32::min(wanted_y, bounds.bottom);
-                    let in_span = in_searched_span(candidate_y, &skip_top, &skip_bot, max_rects);
-                    let held = is_held_coordinate(candidate_y, &held_y, first);
+                    let in_span =
+                        in_searched_span(candidate_y, skip_top.as_slice(), skip_bot.as_slice(), max_rects);
+                    let held = is_held_coordinate(candidate_y, held_y.as_slice(), first);
                     let in_rect = column_live && wanted_y <= bounds.bottom;
                     let live_pos = in_rect && !in_span && !held;
 
                     if plane_any(live_pos) {
-                        let scored = window_distance(&window, anchor, reference, scale, shape);
+                        let scored = window_distance(window.as_slice(), anchor, reference, scale, shape);
                         let dist = select(live_pos, scored, UNFILLED_DISTANCE);
                         let packed = pack_pos_t(candidate_x, candidate_y, packed_t);
                         keep_frame_match(dist, rect_index, packed, frame_d, frame_rect, frame_pos);
@@ -516,7 +528,7 @@ pub(crate) fn sliding_rect_walk<S: Float, N: Size>(
                         let wanted_row = wanted_y + PATCH_SIZE;
                         let next_row = u32::min(wanted_row, last_row);
                         let next = search_line(ring, search_ring, column, next_row, slot, shape);
-                        slide_window(&mut window, next);
+                        slide_window(window.as_mut_slice(), next);
                     }
                 }
             }
@@ -531,23 +543,32 @@ pub(crate) fn sliding_rect_walk<S: Float, N: Size>(
                 seen_top,
                 seen_bot,
                 candidate_x,
-                &mut skip_top,
-                &mut skip_bot,
+                skip_top.as_mut_slice(),
+                skip_bot.as_mut_slice(),
                 max_rects,
             );
-            column_held_rows(member_pos, candidate_x, packed_t, &mut held_y, first);
+            column_held_rows(member_pos, candidate_x, packed_t, held_y.as_mut_slice(), first);
 
             let column = candidate_x + sub;
-            fill_window(&mut window, ring, search_ring, column, bounds.top, slot, shape);
+            fill_window(
+                window.as_mut_slice(),
+                ring,
+                search_ring,
+                column,
+                bounds.top,
+                slot,
+                shape,
+            );
 
             let mut candidate_y = bounds.top;
 
             while candidate_y <= bounds.bottom {
-                let in_span = in_searched_span(candidate_y, &skip_top, &skip_bot, max_rects);
-                let held = is_held_coordinate(candidate_y, &held_y, first);
+                let in_span =
+                    in_searched_span(candidate_y, skip_top.as_slice(), skip_bot.as_slice(), max_rects);
+                let held = is_held_coordinate(candidate_y, held_y.as_slice(), first);
 
                 if !in_span && !held {
-                    let dist = window_distance(&window, anchor, reference, scale, shape);
+                    let dist = window_distance(window.as_slice(), anchor, reference, scale, shape);
                     let packed = pack_pos_t(candidate_x, candidate_y, packed_t);
                     keep_frame_match(dist, rect_index, packed, frame_d, frame_rect, frame_pos);
                 }
@@ -556,7 +577,7 @@ pub(crate) fn sliding_rect_walk<S: Float, N: Size>(
                 let wanted_row = candidate_y + PATCH_SIZE;
                 let next_row = u32::min(wanted_row, last_row);
                 let next = search_line(ring, search_ring, column, next_row, slot, shape);
-                slide_window(&mut window, next);
+                slide_window(window.as_mut_slice(), next);
                 candidate_y += 1u32;
             }
 

@@ -25,8 +25,8 @@ fn padded_pair_direction_stride(blocks_x: u32, blocks_y: u32) -> u32 {
 /// The pair ring holds synthetic data that was never analysed. The cost is dominated by the
 /// per-block hop walk rather than the values it reads, so the content does not need to be
 /// meaningful.
-pub struct ChainComposeBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct ChainComposeBench {
+    pub client: Client,
 }
 
 #[derive(Clone)]
@@ -35,7 +35,7 @@ pub struct ChainComposeInput {
     pub mv_field: Handle,
 }
 
-impl<R: Runtime> Benchmark for ChainComposeBench<R> {
+impl Benchmark for ChainComposeBench {
     type Input = ChainComposeInput;
     type Output = ();
 
@@ -68,12 +68,12 @@ impl<R: Runtime> Benchmark for ChainComposeBench<R> {
         let dim = CubeDim::new_2d(1, 1);
 
         unsafe {
-            mc_chain_compose::launch_unchecked::<R>(
+            mc_chain_compose::launch_unchecked(
                 &self.client,
                 grid,
                 dim,
-                ArrayArg::from_raw_parts(args.pair_ring.clone(), pair_ring_len),
-                ArrayArg::from_raw_parts(args.mv_field.clone(), (blocks_x * blocks_y * 2) as usize),
+                BufferArg::from_raw_parts(args.pair_ring.clone(), pair_ring_len),
+                BufferArg::from_raw_parts(args.mv_field.clone(), (blocks_x * blocks_y * 2) as usize),
                 0u32,
                 true,
                 CHAIN_RADIUS,

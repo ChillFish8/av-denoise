@@ -11,10 +11,10 @@ use cubecl::prelude::*;
     reason = "every argument is a binding or a comptime shape"
 )]
 pub fn ingest_words(
-    plane_0: &Array<u32>,
-    plane_1: &Array<u32>,
-    plane_2: &Array<u32>,
-    ring: &mut Array<f32>,
+    plane_0: &[u32],
+    plane_1: &[u32],
+    plane_2: &[u32],
+    ring: &mut [f32],
     max: f32,
     offset: u32,
     #[comptime] pixels: u32,
@@ -63,10 +63,10 @@ pub fn ingest_words(
     reason = "every argument is a binding or a comptime shape"
 )]
 pub fn ingest_f32(
-    plane_0: &Array<f32>,
-    plane_1: &Array<f32>,
-    plane_2: &Array<f32>,
-    ring: &mut Array<f32>,
+    plane_0: &[f32],
+    plane_1: &[f32],
+    plane_2: &[f32],
+    ring: &mut [f32],
     offset: u32,
     #[comptime] pixels: u32,
     #[comptime] channels: u32,
@@ -99,19 +99,19 @@ pub fn ingest_f32(
 ///
 /// Values are clamped to `0.0..=1.0` and rounded to the nearest code up to `max`. Each thread
 /// packs and writes whole words, so no two threads share a word. Lanes past the last pixel read a
-/// clamped index and are masked to zero, because a branch-derived index inside an unrolled loop
-/// makes cubecl's GVN pass panic and the launch then silently writes nothing. A plane is only
-/// written when `channels` covers it, so an unused plane can be a placeholder.
+/// clamped index and are masked to zero, because cubecl's optimiser has mishandled a
+/// branch-derived index inside an unrolled loop. A plane is only written when `channels` covers
+/// it, so an unused plane can be a placeholder.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
     reason = "every argument is a binding or a comptime shape"
 )]
 pub fn egress_words(
-    frame: &Array<f32>,
-    plane_0: &mut Array<u32>,
-    plane_1: &mut Array<u32>,
-    plane_2: &mut Array<u32>,
+    frame: &[f32],
+    plane_0: &mut [u32],
+    plane_1: &mut [u32],
+    plane_2: &mut [u32],
     max: f32,
     #[comptime] pixels: u32,
     #[comptime] channels: u32,
@@ -176,10 +176,10 @@ pub fn egress_words(
     reason = "every argument is a binding or a comptime shape"
 )]
 pub fn egress_f32(
-    frame: &Array<f32>,
-    plane_0: &mut Array<f32>,
-    plane_1: &mut Array<f32>,
-    plane_2: &mut Array<f32>,
+    frame: &[f32],
+    plane_0: &mut [f32],
+    plane_1: &mut [f32],
+    plane_2: &mut [f32],
     #[comptime] pixels: u32,
     #[comptime] channels: u32,
     #[comptime] stored_ch: u32,
@@ -207,7 +207,7 @@ pub fn egress_f32(
 /// `x` must be within `0..width` and `y` within `0..height`.
 #[cube]
 pub(crate) fn read_line<F: Float, N: Size>(
-    buf: &Array<Vector<F, N>>,
+    buf: &[Vector<F, N>],
     x: u32,
     y: u32,
     frame: u32,

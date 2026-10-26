@@ -18,7 +18,7 @@ tracing = "0.1"
 strum = "0.28"
 strum_macros = "0.28"
 bon = "3"
-cubecl = { version = "0.10", features = ["std"] }
+cubecl = { version = "0.11.3", features = ["std"] }
 av-denoise-core = { path = "av-denoise-core", version = "0.5.0", default-features = false }
 av-denoise = { path = "av-denoise", version = "0.5.0", default-features = false }
 

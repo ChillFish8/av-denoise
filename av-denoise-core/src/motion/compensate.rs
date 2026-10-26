@@ -10,8 +10,8 @@ use super::kernels::mc_warp;
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
 )]
-pub(crate) fn run_compensate<R: Runtime>(
-    client: &ComputeClient<R>,
+pub(crate) fn run_compensate(
+    client: &Client,
     motion_ctx: &MotionCtx,
     stored_ch: u32,
     width: u32,
@@ -36,14 +36,14 @@ pub(crate) fn run_compensate<R: Runtime>(
     let mv_slice = mv_field.clone().offset_start(mv_offset);
 
     unsafe {
-        mc_warp::launch_unchecked::<R>(
+        mc_warp::launch_unchecked(
             client,
             grid,
             dim,
             stored_ch as usize,
-            ArrayArg::from_raw_parts(src.clone(), total_pixels),
-            ArrayArg::from_raw_parts(dst.clone(), total_pixels),
-            ArrayArg::from_raw_parts(mv_slice, mv_slice_len),
+            BufferArg::from_raw_parts(src.clone(), total_pixels),
+            BufferArg::from_raw_parts(dst.clone(), total_pixels),
+            BufferArg::from_raw_parts(mv_slice, mv_slice_len),
             neighbour_slot,
             neighbour_slot,
             motion_ctx.step,

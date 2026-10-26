@@ -1,4 +1,4 @@
-use super::helpers::{R, make_client};
+use super::helpers::make_client;
 use super::noise_curve::{
     SyntheticQuarter,
     banded_noisy_frame,
@@ -355,7 +355,7 @@ fn the_front_end_keeps_classes_beside_the_curve_and_resets_both() {
         }),
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.set_luma_noise_fields(true);
 
     let mut classes_seen = false;
@@ -634,7 +634,7 @@ fn the_front_end_rounds_the_line_ring_up_to_whole_quarters() {
             sigma_scale: 1.0,
         }),
     };
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, 64, 64);
+    let mut denoiser = NlmDenoiser::new(&client, params, 64, 64);
     let cases = [
         (None, None),
         (Some(0), None),

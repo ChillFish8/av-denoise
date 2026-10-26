@@ -90,7 +90,7 @@ const TABLE_INPUTS: u32 = 3;
 /// It interpolates the correlation table linearly, with `rho` clamped to the table's range. Each
 /// segment's fraction multiplies by the host's reciprocal of the segment width.
 #[cube]
-fn correlation_factor(rho: f32, fold_settings: &Array<f32>) -> f32 {
+fn correlation_factor(rho: f32, fold_settings: &[f32]) -> f32 {
     let x = f32::clamp(rho, RHO_0, RHO_3);
     let first_reciprocal = fold_settings[FOLD_SEGMENT_RECIPROCALS as usize];
     let second_reciprocal = fold_settings[(FOLD_SEGMENT_RECIPROCALS + 1) as usize];
@@ -134,9 +134,9 @@ fn spatial_offset_factor(dx: i32, dy: i32, rho: f32) -> f32 {
 /// the input noise offset by the factor at a rho of 0.
 #[cube]
 fn write_offset_tables(
-    table_inputs: &SharedMemory<f32>,
-    spatial_table: &mut Array<f32>,
-    pilot_table: &mut Array<f32>,
+    table_inputs: &Shared<[f32]>,
+    spatial_table: &mut [f32],
+    pilot_table: &mut [f32],
     #[comptime] radius: u32,
 ) {
     if CUBE_POS_X == 0 {
@@ -202,10 +202,10 @@ struct FoldInputs {
 /// A channel past the active count writes 0 to every chain and to its derived sigma.
 #[cube]
 fn fold_channel(
-    readings: &Array<f32>,
-    results: &Array<f32>,
-    state: &mut Array<f32>,
-    derived: &mut Array<f32>,
+    readings: &[f32],
+    results: &[f32],
+    state: &mut [f32],
+    derived: &mut [f32],
     inputs: &FoldInputs,
     #[comptime] channel: u32,
     #[comptime] channels: u32,
@@ -263,8 +263,8 @@ fn fold_channel(
 /// whose reading has one. It reads only the readings and the settings.
 #[cube]
 fn lender_position(
-    readings: &Array<f32>,
-    fold_settings: &Array<f32>,
+    readings: &[f32],
+    fold_settings: &[f32],
     ring_start: u32,
     centre: u32,
     seeding: bool,
@@ -315,16 +315,16 @@ fn lender_position(
     reason = "every argument is a binding, a fold scalar or a comptime shape"
 )]
 pub fn noise_fold(
-    readings: &Array<f32>,
-    results: &Array<f32>,
-    fold_settings: &Array<f32>,
-    state: &mut Array<f32>,
-    derived: &mut Array<f32>,
-    curve: &mut Array<f32>,
-    slot_maps: &Array<f32>,
-    current_map: &mut Array<f32>,
-    spatial_table: &mut Array<f32>,
-    pilot_table: &mut Array<f32>,
+    readings: &[f32],
+    results: &[f32],
+    fold_settings: &[f32],
+    state: &mut [f32],
+    derived: &mut [f32],
+    curve: &mut [f32],
+    slot_maps: &[f32],
+    current_map: &mut [f32],
+    spatial_table: &mut [f32],
+    pilot_table: &mut [f32],
     ring_start: u32,
     centre: u32,
     seed: u32,
@@ -333,7 +333,7 @@ pub fn noise_fold(
     #[comptime] map_len: u32,
     #[comptime] table_radius: u32,
 ) {
-    let mut table_inputs = SharedMemory::<f32>::new(TABLE_INPUTS as usize);
+    let mut table_inputs = Shared::<[f32]>::new_slice(TABLE_INPUTS as usize);
     let seeding = seed != 0u32;
     let lender = lender_position(readings, fold_settings, ring_start, centre, seeding, frames);
     let lender_slot = (ring_start + lender) % frames;
@@ -486,7 +486,7 @@ pub fn noise_fold(
 ///
 /// The values behind the flags are left in place.
 #[cube(launch_unchecked)]
-pub fn noise_reset(state: &mut Array<f32>) {
+pub fn noise_reset(state: &mut [f32]) {
     if UNIT_POS_X == 0 {
         state[STATE_MEDIAN as usize] = 0.0f32;
         state[STATE_LOW as usize] = 0.0f32;

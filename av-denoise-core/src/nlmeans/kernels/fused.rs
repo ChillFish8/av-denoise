@@ -13,8 +13,8 @@ use crate::noise::DERIVED_NOISE_OFFSET;
 /// diverges because the whole block takes the same side.
 #[cube(launch_unchecked)]
 pub fn nlm_dist_2d_weight<N: Size>(
-    input: &Array<Vector<f32, N>>,
-    output: &mut Array<f32>,
+    input: &[Vector<f32, N>],
+    output: &mut [f32],
     frame_t: u32,
     frame_q: u32,
     q_x: i32,
@@ -31,7 +31,7 @@ pub fn nlm_dist_2d_weight<N: Size>(
     let tile_width = comptime!(block_x + 2 * patch_radius);
     let tile_height = comptime!(block_y + 2 * patch_radius);
     let tile_elems = comptime!((block_x + 2 * patch_radius) * (block_y + 2 * patch_radius));
-    let mut smem = SharedMemory::<f32>::new(comptime!(
+    let mut smem = Shared::<[f32]>::new_slice(comptime!(
         (block_x + 2 * patch_radius) * (block_y + 2 * patch_radius)
     ) as usize);
 
@@ -119,8 +119,8 @@ pub fn nlm_dist_2d_weight<N: Size>(
 /// Distances are read from `reference`, a cleaner image with the same layout as the input.
 #[cube(launch_unchecked)]
 pub fn nlm_dist_2d_weight_ref<N: Size>(
-    reference: &Array<Vector<f32, N>>,
-    output: &mut Array<f32>,
+    reference: &[Vector<f32, N>],
+    output: &mut [f32],
     frame_t: u32,
     frame_q: u32,
     q_x: i32,
@@ -137,7 +137,7 @@ pub fn nlm_dist_2d_weight_ref<N: Size>(
     let tile_width = comptime!(block_x + 2 * patch_radius);
     let tile_height = comptime!(block_y + 2 * patch_radius);
     let tile_elems = comptime!((block_x + 2 * patch_radius) * (block_y + 2 * patch_radius));
-    let mut smem = SharedMemory::<f32>::new(comptime!(
+    let mut smem = Shared::<[f32]>::new_slice(comptime!(
         (block_x + 2 * patch_radius) * (block_y + 2 * patch_radius)
     ) as usize);
 
@@ -235,7 +235,7 @@ pub(crate) fn hsum_elements(separable: bool, block_x: u32, block_y: u32, patch_r
 /// Sums one pixel's `(2 * patch_radius + 1)^2` patch of distances straight from `tile`, row by row.
 #[cube]
 fn direct_patch_sum(
-    tile: &SharedMemory<f32>,
+    tile: &Shared<[f32]>,
     local_x: u32,
     local_y: u32,
     #[comptime] tile_width: u32,
@@ -264,8 +264,8 @@ fn direct_patch_sum(
 /// cube. Every thread of the cube must call it, and the cube syncs before any thread reads `hsum`.
 #[cube]
 fn row_sums(
-    tile: &SharedMemory<f32>,
-    hsum: &mut SharedMemory<f32>,
+    tile: &Shared<[f32]>,
+    hsum: &mut Shared<[f32]>,
     thread_id: u32,
     threads: u32,
     #[comptime] block_x: u32,
@@ -296,7 +296,7 @@ fn row_sums(
 /// Sums `2 * patch_radius + 1` row sums down the pixel's column, which completes its patch sum.
 #[cube]
 fn column_sum(
-    hsum: &SharedMemory<f32>,
+    hsum: &Shared<[f32]>,
     local_x: u32,
     local_y: u32,
     #[comptime] block_x: u32,
@@ -316,8 +316,8 @@ fn column_sum(
 /// One pixel's patch sum, from the row sums in `hsum` when `separable` is set, otherwise from `tile`.
 #[cube]
 fn patch_sum(
-    tile: &SharedMemory<f32>,
-    hsum: &SharedMemory<f32>,
+    tile: &Shared<[f32]>,
+    hsum: &Shared<[f32]>,
     local_x: u32,
     local_y: u32,
     #[comptime] tile_width: u32,
@@ -352,17 +352,17 @@ fn patch_sum(
 /// order of the additions.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_pair_accumulate_window<N: Size>(
-    input: &Array<Vector<f32, N>>,
-    accum: &mut Array<Vector<f32, N>>,
-    weight_sum: &mut Array<f32>,
-    max_weight: &mut Array<f32>,
-    conf_fwd: &Array<f32>,
-    conf_bwd: &Array<f32>,
+    input: &[Vector<f32, N>],
+    accum: &mut [Vector<f32, N>],
+    weight_sum: &mut [f32],
+    max_weight: &mut [f32],
+    conf_fwd: &[f32],
+    conf_bwd: &[f32],
     #[comptime] use_confidence: bool,
     frame_t: u32,
     frame_fwd: u32,
     frame_bwd: u32,
-    noise: &Array<f32>,
+    noise: &[f32],
     h2_field: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -384,12 +384,12 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
     let expanded_elems = comptime!(
         (block_x + 2 * patch_radius + 2 * search_radius) * (block_y + 2 * patch_radius + 2 * search_radius)
     );
-    let mut smem_center = SharedMemory::<Vector<f32, N>>::new(expanded_elems as usize);
-    let mut smem_fwd = SharedMemory::<f32>::new(tile_elems as usize);
-    let mut smem_bwd = SharedMemory::<f32>::new(tile_elems as usize);
+    let mut smem_center = Shared::<[Vector<f32, N>]>::new_slice(expanded_elems as usize);
+    let mut smem_fwd = Shared::<[f32]>::new_slice(tile_elems as usize);
+    let mut smem_bwd = Shared::<[f32]>::new_slice(tile_elems as usize);
     let hsum_len = comptime!(hsum_elements(separable, block_x, block_y, patch_radius));
-    let mut hsum_fwd = SharedMemory::<f32>::new(hsum_len as usize);
-    let mut hsum_bwd = SharedMemory::<f32>::new(hsum_len as usize);
+    let mut hsum_fwd = Shared::<[f32]>::new_slice(hsum_len as usize);
+    let mut hsum_bwd = Shared::<[f32]>::new_slice(hsum_len as usize);
 
     let h2_inv_norm = noise[h2_field as usize];
     let noise_offset = noise[DERIVED_NOISE_OFFSET as usize];
@@ -578,14 +578,14 @@ pub fn nlm_fused_pair_accumulate_window<N: Size>(
 /// order of the additions.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_single_window<N: Size>(
-    input: &Array<Vector<f32, N>>,
-    accum: &mut Array<Vector<f32, N>>,
-    weight_sum: &mut Array<f32>,
-    max_weight: &mut Array<f32>,
+    input: &[Vector<f32, N>],
+    accum: &mut [Vector<f32, N>],
+    weight_sum: &mut [f32],
+    max_weight: &mut [f32],
     frame_t: u32,
-    noise: &Array<f32>,
+    noise: &[f32],
     h2_field: u32,
-    spatial_offset_lut: &Array<f32>,
+    spatial_offset_lut: &[f32],
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
@@ -603,10 +603,10 @@ pub fn nlm_fused_single_window<N: Size>(
     let expanded_elems = comptime!(
         (block_x + 2 * patch_radius + 2 * search_radius) * (block_y + 2 * patch_radius + 2 * search_radius)
     );
-    let mut smem_center = SharedMemory::<Vector<f32, N>>::new(expanded_elems as usize);
-    let mut smem_dist = SharedMemory::<f32>::new(tile_elems as usize);
+    let mut smem_center = Shared::<[Vector<f32, N>]>::new_slice(expanded_elems as usize);
+    let mut smem_dist = Shared::<[f32]>::new_slice(tile_elems as usize);
     let hsum_len = comptime!(hsum_elements(separable, block_x, block_y, patch_radius));
-    let mut hsum = SharedMemory::<f32>::new(hsum_len as usize);
+    let mut hsum = Shared::<[f32]>::new_slice(hsum_len as usize);
 
     let h2_inv_norm = noise[h2_field as usize];
 
@@ -751,18 +751,18 @@ pub fn nlm_fused_single_window<N: Size>(
 /// `separable` works as there.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
-    input: &Array<Vector<f32, N>>,
-    reference: &Array<Vector<f32, N>>,
-    accum: &mut Array<Vector<f32, N>>,
-    weight_sum: &mut Array<f32>,
-    max_weight: &mut Array<f32>,
-    conf_fwd: &Array<f32>,
-    conf_bwd: &Array<f32>,
+    input: &[Vector<f32, N>],
+    reference: &[Vector<f32, N>],
+    accum: &mut [Vector<f32, N>],
+    weight_sum: &mut [f32],
+    max_weight: &mut [f32],
+    conf_fwd: &[f32],
+    conf_bwd: &[f32],
     #[comptime] use_confidence: bool,
     frame_t: u32,
     frame_fwd: u32,
     frame_bwd: u32,
-    noise: &Array<f32>,
+    noise: &[f32],
     h2_field: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -782,12 +782,12 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
     let expanded_elems = comptime!(
         (block_x + 2 * patch_radius + 2 * search_radius) * (block_y + 2 * patch_radius + 2 * search_radius)
     );
-    let mut smem_center = SharedMemory::<Vector<f32, N>>::new(expanded_elems as usize);
-    let mut smem_fwd = SharedMemory::<f32>::new(tile_elems as usize);
-    let mut smem_bwd = SharedMemory::<f32>::new(tile_elems as usize);
+    let mut smem_center = Shared::<[Vector<f32, N>]>::new_slice(expanded_elems as usize);
+    let mut smem_fwd = Shared::<[f32]>::new_slice(tile_elems as usize);
+    let mut smem_bwd = Shared::<[f32]>::new_slice(tile_elems as usize);
     let hsum_len = comptime!(hsum_elements(separable, block_x, block_y, patch_radius));
-    let mut hsum_fwd = SharedMemory::<f32>::new(hsum_len as usize);
-    let mut hsum_bwd = SharedMemory::<f32>::new(hsum_len as usize);
+    let mut hsum_fwd = Shared::<[f32]>::new_slice(hsum_len as usize);
+    let mut hsum_bwd = Shared::<[f32]>::new_slice(hsum_len as usize);
 
     let h2_inv_norm = noise[h2_field as usize];
     let noise_offset = noise[DERIVED_NOISE_OFFSET as usize];
@@ -952,15 +952,15 @@ pub fn nlm_fused_pair_accumulate_window_ref<N: Size>(
 /// `separable` works as there.
 #[cube(launch_unchecked)]
 pub fn nlm_fused_single_window_ref<N: Size>(
-    input: &Array<Vector<f32, N>>,
-    reference: &Array<Vector<f32, N>>,
-    accum: &mut Array<Vector<f32, N>>,
-    weight_sum: &mut Array<f32>,
-    max_weight: &mut Array<f32>,
+    input: &[Vector<f32, N>],
+    reference: &[Vector<f32, N>],
+    accum: &mut [Vector<f32, N>],
+    weight_sum: &mut [f32],
+    max_weight: &mut [f32],
     frame_t: u32,
-    noise: &Array<f32>,
+    noise: &[f32],
     h2_field: u32,
-    spatial_offset_lut: &Array<f32>,
+    spatial_offset_lut: &[f32],
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
@@ -976,10 +976,10 @@ pub fn nlm_fused_single_window_ref<N: Size>(
     let expanded_elems = comptime!(
         (block_x + 2 * patch_radius + 2 * search_radius) * (block_y + 2 * patch_radius + 2 * search_radius)
     );
-    let mut smem_center = SharedMemory::<Vector<f32, N>>::new(expanded_elems as usize);
-    let mut smem_dist = SharedMemory::<f32>::new(tile_elems as usize);
+    let mut smem_center = Shared::<[Vector<f32, N>]>::new_slice(expanded_elems as usize);
+    let mut smem_dist = Shared::<[f32]>::new_slice(tile_elems as usize);
     let hsum_len = comptime!(hsum_elements(separable, block_x, block_y, patch_radius));
-    let mut hsum = SharedMemory::<f32>::new(hsum_len as usize);
+    let mut hsum = Shared::<[f32]>::new_slice(hsum_len as usize);
 
     let h2_inv_norm = noise[h2_field as usize];
 

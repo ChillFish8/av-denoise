@@ -97,11 +97,7 @@ pub(super) struct OffsetTables {
 
 impl OffsetTables {
     /// The tables of a `radius` window built on the host from `derived` at a rho of 0.
-    pub(super) fn from_host<R: Runtime>(
-        client: &ComputeClient<R>,
-        radius: u32,
-        derived: DerivedValues,
-    ) -> Self {
+    pub(super) fn from_host(client: &Client, radius: u32, derived: DerivedValues) -> Self {
         let spatial_entries = build_spatial_offset_lut(radius, 0.0, derived.noise_offset);
         let spatial_bytes = f32::as_bytes(&spatial_entries);
         let pilot_entries = build_spatial_offset_lut(radius, 0.0, derived.input_noise_offset);
@@ -173,7 +169,7 @@ fn flag(on: bool) -> f32 {
     if on { 1.0 } else { 0.0 }
 }
 
-impl<R: Runtime> NoiseState<R> {
+impl NoiseState {
     /// Queues one fold of the readings `fold` names into the stream state, the derived values,
     /// the current curve, the current map and the offset tables, in one launch.
     ///
@@ -206,7 +202,7 @@ impl<R: Runtime> NoiseState<R> {
         let table_args = self.table_args();
 
         unsafe {
-            noise_fold::launch_unchecked::<R>(
+            noise_fold::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(NOISE_BLOCK_1D),
@@ -242,7 +238,7 @@ impl<R: Runtime> NoiseState<R> {
         };
 
         unsafe {
-            noise_reset::launch_unchecked::<R>(
+            noise_reset::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(1),
                 CubeDim::new_1d(1),
@@ -262,7 +258,7 @@ impl<R: Runtime> NoiseState<R> {
     /// The slot maps and the current map, bound over `map_len` quarters per map.
     ///
     /// Without a map the kernel never touches them, so the derived buffer stands in.
-    fn map_args(&self, map_len: u32) -> MapArgs<R> {
+    fn map_args(&self, map_len: u32) -> MapArgs {
         let Some(slot_maps) = self.slot_maps() else {
             return MapArgs {
                 slot_maps: bind(&self.derived, DERIVED_WORDS as usize),
@@ -281,7 +277,7 @@ impl<R: Runtime> NoiseState<R> {
     /// The offset tables and their search radius.
     ///
     /// Without tables the kernel never touches them, so the derived buffer stands in.
-    fn table_args(&self) -> TableArgs<R> {
+    fn table_args(&self) -> TableArgs {
         let Some(tables) = self.offset_tables.as_ref() else {
             return TableArgs {
                 spatial: bind(&self.derived, DERIVED_WORDS as usize),
@@ -301,14 +297,14 @@ impl<R: Runtime> NoiseState<R> {
 }
 
 /// The fold's map bindings.
-struct MapArgs<R: Runtime> {
-    slot_maps: ArrayArg<R>,
-    current_map: ArrayArg<R>,
+struct MapArgs {
+    slot_maps: BufferArg,
+    current_map: BufferArg,
 }
 
 /// The fold's offset table bindings and their search radius, 0 without tables.
-struct TableArgs<R: Runtime> {
-    spatial: ArrayArg<R>,
-    pilot: ArrayArg<R>,
+struct TableArgs {
+    spatial: BufferArg,
+    pilot: BufferArg,
     radius: u32,
 }

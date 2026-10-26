@@ -1,14 +1,6 @@
 use cubecl::prelude::*;
 
-use super::helpers::{
-    BLK_STEP,
-    R,
-    RingFixture,
-    deterministic_texture,
-    make_client,
-    noisy_ring,
-    planted_ring,
-};
+use super::helpers::{BLK_STEP, RingFixture, deterministic_texture, make_client, noisy_ring, planted_ring};
 use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
 use crate::collab::kernels::fused::{CollabVariant, Walk, collab_fused};
@@ -155,26 +147,26 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
     let stored_ch = 1usize;
 
     unsafe {
-        let ring_scalar = ArrayArg::from_raw_parts(ring_buf.clone(), fixture.ring.len());
-        collab_fused::launch_unchecked::<f32, i32, R>(
+        let ring_scalar = BufferArg::from_raw_parts(ring_buf.clone(), fixture.ring.len());
+        collab_fused::launch_unchecked::<f32, i32>(
             &client,
             grid,
             dim,
             stored_ch,
-            ArrayArg::from_raw_parts(ring_buf.clone(), fixture.ring.len()),
+            BufferArg::from_raw_parts(ring_buf.clone(), fixture.ring.len()),
             ring_scalar,
-            ArrayArg::from_raw_parts(ring_buf, stored_ch),
-            ArrayArg::from_raw_parts(mv_buf, fixture.mv_field.len()),
-            ArrayArg::from_raw_parts(conf_buf, fixture.confidence.len()),
-            ArrayArg::from_raw_parts(slots_buf, fixture.neighbour_slots.len()),
-            ArrayArg::from_raw_parts(noise_buf, DERIVED_WORDS as usize),
-            ArrayArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
-            ArrayArg::from_raw_parts(unit_map_buf, map_len),
-            ArrayArg::from_raw_parts(profile_buf, 8),
-            ArrayArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
-            ArrayArg::from_raw_parts(accum, pixels * frames),
-            ArrayArg::from_raw_parts(wsum.clone(), pixels * frames),
-            ArrayArg::from_raw_parts(group_weight.clone(), refs),
+            BufferArg::from_raw_parts(ring_buf, stored_ch),
+            BufferArg::from_raw_parts(mv_buf, fixture.mv_field.len()),
+            BufferArg::from_raw_parts(conf_buf, fixture.confidence.len()),
+            BufferArg::from_raw_parts(slots_buf, fixture.neighbour_slots.len()),
+            BufferArg::from_raw_parts(noise_buf, DERIVED_WORDS as usize),
+            BufferArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
+            BufferArg::from_raw_parts(unit_map_buf, map_len),
+            BufferArg::from_raw_parts(profile_buf, 8),
+            BufferArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
+            BufferArg::from_raw_parts(accum, pixels * frames),
+            BufferArg::from_raw_parts(wsum.clone(), pixels * frames),
+            BufferArg::from_raw_parts(group_weight.clone(), refs),
             fixture.centre_slot,
             knobs.c_min,
             knobs.lambda_ht,

@@ -17,8 +17,8 @@ fn nl4d_options() -> PlaneOptions {
     let nl4d = Nl4dOptions::default();
 
     PlaneOptions {
-        accelerators: vec![Accelerator::Vulkan],
-        device: Device::Default,
+        accelerators: vec![crate::testing::test_accelerator()],
+        device: crate::testing::test_device(),
         intent: ChannelIntent::LumaChroma,
         mode: DenoisingMode::Temporal { radius: 1 },
         algorithm: Algorithm::Nl4d(nl4d),

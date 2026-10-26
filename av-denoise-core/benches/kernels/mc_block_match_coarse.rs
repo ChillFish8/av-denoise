@@ -15,8 +15,8 @@ const SEARCH_RADIUS: u32 = 4;
 ///
 /// One cube per coarse block runs a SAD search over a `(2·r + 1)²` window, and each block's
 /// vector is scaled up to seed the fine pass.
-pub struct BlockMatchCoarseBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct BlockMatchCoarseBench {
+    pub client: Client,
     /// Neighbours matched in one launch, each against the centre frame.
     pub neighbours: u32,
 }
@@ -30,7 +30,7 @@ pub struct CoarseInput {
     pub mv_field: Handle,
 }
 
-impl<R: Runtime> Benchmark for BlockMatchCoarseBench<R> {
+impl Benchmark for BlockMatchCoarseBench {
     type Input = CoarseInput;
     type Output = ();
 
@@ -83,11 +83,11 @@ impl<R: Runtime> Benchmark for BlockMatchCoarseBench<R> {
         let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
         unsafe {
-            let pyramid_arg = ArrayArg::from_raw_parts(args.pyramid, pyramid_len);
-            let neighbour_slots_arg = ArrayArg::from_raw_parts(args.neighbour_slots, slots_len);
-            let mv_field_arg = ArrayArg::from_raw_parts(args.mv_field, mv_len);
+            let pyramid_arg = BufferArg::from_raw_parts(args.pyramid, pyramid_len);
+            let neighbour_slots_arg = BufferArg::from_raw_parts(args.neighbour_slots, slots_len);
+            let mv_field_arg = BufferArg::from_raw_parts(args.mv_field, mv_len);
 
-            mc_block_match_coarse::launch_unchecked::<R>(
+            mc_block_match_coarse::launch_unchecked(
                 &self.client,
                 grid,
                 dim,

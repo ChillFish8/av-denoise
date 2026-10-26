@@ -65,8 +65,8 @@ pub(crate) fn expanded_interior(
     reason = "every argument is a buffer, a block coordinate or a comptime shape the kernel binds"
 )]
 pub(crate) fn fill_center_tile<N: Size>(
-    frame_data: &Array<Vector<f32, N>>,
-    tile: &mut SharedMemory<Vector<f32, N>>,
+    frame_data: &[Vector<f32, N>],
+    tile: &mut Shared<[Vector<f32, N>]>,
     expanded_x0: i32,
     expanded_y0: i32,
     interior: bool,

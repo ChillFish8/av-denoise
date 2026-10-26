@@ -2,8 +2,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cubecl::prelude::*;
+use cubecl::server::Handle;
 
-use super::runtime::TestRuntime;
 use crate::tune::{
     CompareResult,
     DeviceLimits,
@@ -95,7 +95,7 @@ const PROBE_FAMILIES: &[FlatFamily<ProbeCandidate>] = &[
 /// A site that records which candidate each launch ran instead of touching the GPU.
 #[derive(Clone)]
 pub(crate) struct ProbeSite {
-    pub(crate) client: ComputeClient<TestRuntime>,
+    pub(crate) client: Client,
     pub(crate) width: u32,
     pub(crate) baseline_shared: usize,
     /// The narrowest plane the site's baseline works on.
@@ -127,7 +127,7 @@ pub(crate) struct ProbeSite {
 }
 
 impl ProbeSite {
-    pub(crate) fn new(client: &ComputeClient<TestRuntime>) -> Self {
+    pub(crate) fn new(client: &Client) -> Self {
         Self {
             client: client.clone(),
             width: 64,
@@ -175,13 +175,13 @@ impl ProbeSite {
     }
 }
 
-impl VariantSite<TestRuntime> for ProbeSite {
+impl VariantSite for ProbeSite {
     type Candidate = ProbeCandidate;
     type Outputs = ();
 
     const COPIES: bool = true;
 
-    fn client(&self) -> &ComputeClient<TestRuntime> {
+    fn client(&self) -> &Client {
         &self.client
     }
 
@@ -225,6 +225,10 @@ impl VariantSite<TestRuntime> for ProbeSite {
         self.site_baseline.unwrap_or_else(ProbeCandidate::baseline)
     }
 
+    fn output_handles(&self, _outputs: &()) -> Vec<Handle> {
+        Vec::new()
+    }
+
     fn launch(&self, candidate: ProbeCandidate, _outputs: &()) {
         let delay = self.delay_for(candidate);
         std::thread::sleep(delay);
@@ -246,7 +250,7 @@ impl VariantSite<TestRuntime> for ProbeSite {
 
     fn clear_outputs(&self, _outputs: &()) {}
 
-    fn on_client(&self, client: &ComputeClient<TestRuntime>) -> Option<Self> {
+    fn on_client(&self, client: &Client) -> Option<Self> {
         Some(Self {
             client: client.clone(),
             copy: true,

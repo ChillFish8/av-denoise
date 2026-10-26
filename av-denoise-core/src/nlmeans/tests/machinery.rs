@@ -54,9 +54,9 @@ fn machinery_params() -> NlmParams {
 
 /// Pushes `2 * RADIUS + 1` frames of a world translating one pixel per frame, exactly filling the
 /// window.
-fn push_translating_sequence(client: &ComputeClient<R>) -> NlmDenoiser<R> {
+fn push_translating_sequence(client: &Client) -> NlmDenoiser {
     let params = machinery_params();
-    let mut denoiser = NlmDenoiser::<R>::new(client, params, SIZE, SIZE);
+    let mut denoiser = NlmDenoiser::new(client, params, SIZE, SIZE);
     let total_frames = 2 * RADIUS + 1;
     for frame_index in 0..total_frames {
         let frame = translating_frame(SIZE, frame_index as i32);
@@ -235,7 +235,7 @@ fn ring_view_exposes_the_analysed_pyramid_and_the_noise_floor() {
 fn submit_machinery_none_while_window_is_filling() {
     let client = make_client();
     let params = machinery_params();
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, SIZE, SIZE);
+    let mut denoiser = NlmDenoiser::new(&client, params, SIZE, SIZE);
 
     // Fewer than `2 * RADIUS + 1` pushes, so the window never fills.
     for frame_index in 0..RADIUS {

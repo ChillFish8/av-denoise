@@ -3,15 +3,14 @@ use std::sync::Arc;
 use av_denoise_core::DenoisingMode;
 use av_denoise_core::tune::{PipelineProfile, TuneLedger};
 
-use crate::accelerate::Accelerator;
 use crate::planar::{ChannelIntent, FrameLayout, PlanarDenoiser, PlaneOptions, Subsampling};
 use crate::tune::driver::build_alternative;
-use crate::{Algorithm, Depth, Device, TuningMode};
+use crate::{Algorithm, Depth, TuningMode};
 
 fn options() -> PlaneOptions {
     PlaneOptions {
-        accelerators: vec![Accelerator::Vulkan],
-        device: Device::Default,
+        accelerators: vec![crate::testing::test_accelerator()],
+        device: crate::testing::test_device(),
         intent: ChannelIntent::LumaChroma,
         mode: DenoisingMode::Temporal { radius: 1 },
         algorithm: Algorithm::default(),

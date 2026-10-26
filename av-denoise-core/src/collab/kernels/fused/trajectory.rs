@@ -35,13 +35,13 @@ pub(crate) const NO_COORDINATE: u32 = 0xFFFF_FFFF;
 /// A rectangle the row crosses excludes its x span, and one it misses gets the empty span `1..=0`.
 #[cube]
 fn row_spans(
-    seen_left: &Array<u32>,
-    seen_right: &Array<u32>,
-    seen_top: &Array<u32>,
-    seen_bot: &Array<u32>,
+    seen_left: &[u32],
+    seen_right: &[u32],
+    seen_top: &[u32],
+    seen_bot: &[u32],
     row_y: u32,
-    skip_left: &mut Array<u32>,
-    skip_right: &mut Array<u32>,
+    skip_left: &mut [u32],
+    skip_right: &mut [u32],
     #[comptime] max_rects: u32,
 ) {
     #[unroll]
@@ -59,10 +59,10 @@ fn row_spans(
 /// A member on another row or frame gets [NO_COORDINATE].
 #[cube]
 fn row_held_columns(
-    member_pos: &Array<u32>,
+    member_pos: &[u32],
     row_y: u32,
     packed_t: u32,
-    held_x: &mut Array<u32>,
+    held_x: &mut [u32],
     #[comptime] first: u32,
 ) {
     let row_key = pack_pos_t(0u32, row_y, packed_t);
@@ -81,8 +81,8 @@ fn row_held_columns(
 #[cube]
 pub(crate) fn in_searched_span(
     coordinate: u32,
-    skip_start: &Array<u32>,
-    skip_end: &Array<u32>,
+    skip_start: &[u32],
+    skip_end: &[u32],
     #[comptime] max_rects: u32,
 ) -> bool {
     let mut inside_any = false;
@@ -100,7 +100,7 @@ pub(crate) fn in_searched_span(
 
 /// Whether `coordinate` is one of the held members' coordinates in `held`.
 #[cube]
-pub(crate) fn is_held_coordinate(coordinate: u32, held: &Array<u32>, #[comptime] first: u32) -> bool {
+pub(crate) fn is_held_coordinate(coordinate: u32, held: &[u32], #[comptime] first: u32) -> bool {
     let mut held_any = false;
 
     #[unroll]
@@ -140,19 +140,19 @@ pub(crate) fn is_held_coordinate(coordinate: u32, held: &Array<u32>, #[comptime]
     reason = "every argument is a buffer or comptime shape the kernel binds"
 )]
 pub(crate) fn trajectory_search<S: Float, N: Size>(
-    ring: &Array<Vector<f32, N>>,
-    search_ring: &Array<Vector<S, N>>,
-    mv_field: &Array<i32>,
-    confidence: &Array<f32>,
-    neighbour_slots: &Array<u32>,
-    anchor: &Array<f32>,
+    ring: &[Vector<f32, N>],
+    search_ring: &[Vector<S, N>],
+    mv_field: &[i32],
+    confidence: &[f32],
+    neighbour_slots: &[u32],
+    anchor: &[f32],
     anchor_x: u32,
     anchor_y: u32,
     sub: u32,
     scale: f32,
     c_min: f32,
-    member_d: &mut Array<f32>,
-    member_pos: &mut Array<u32>,
+    member_d: &mut [f32],
+    member_pos: &mut [u32],
     #[comptime] first: u32,
     #[comptime] tail: u32,
     #[comptime] walk: Walk,
@@ -239,12 +239,12 @@ pub(crate) fn trajectory_search<S: Float, N: Size>(
                             ring,
                             search_ring,
                             anchor,
-                            &reference,
-                            &seen_left,
-                            &seen_right,
-                            &seen_top,
-                            &seen_bot,
-                            member_pos,
+                            reference.as_slice(),
+                            seen_left.as_slice(),
+                            seen_right.as_slice(),
+                            seen_top.as_slice(),
+                            seen_bot.as_slice(),
+                            &*member_pos,
                             &bounds,
                             slot,
                             sub,
@@ -301,7 +301,7 @@ pub(crate) fn trajectory_search<S: Float, N: Size>(
                                         ring,
                                         search_ring,
                                         anchor,
-                                        &reference,
+                                        reference.as_slice(),
                                         candidate_x,
                                         candidate_y,
                                         slot,
@@ -361,12 +361,12 @@ pub(crate) fn trajectory_search<S: Float, N: Size>(
                                     ring,
                                     search_ring,
                                     anchor,
-                                    &reference,
-                                    &seen_left,
-                                    &seen_right,
-                                    &seen_top,
-                                    &seen_bot,
-                                    member_pos,
+                                    reference.as_slice(),
+                                    seen_left.as_slice(),
+                                    seen_right.as_slice(),
+                                    seen_top.as_slice(),
+                                    seen_bot.as_slice(),
+                                    &*member_pos,
                                     &bounds,
                                     slot,
                                     sub,
@@ -391,29 +391,39 @@ pub(crate) fn trajectory_search<S: Float, N: Size>(
                                 let mut candidate_y = t_top;
                                 while candidate_y <= t_bot {
                                     row_spans(
-                                        &seen_left,
-                                        &seen_right,
-                                        &seen_top,
-                                        &seen_bot,
+                                        seen_left.as_slice(),
+                                        seen_right.as_slice(),
+                                        seen_top.as_slice(),
+                                        seen_bot.as_slice(),
                                         candidate_y,
-                                        &mut skip_left,
-                                        &mut skip_right,
+                                        skip_left.as_mut_slice(),
+                                        skip_right.as_mut_slice(),
                                         max_rects,
                                     );
-                                    row_held_columns(member_pos, candidate_y, packed_t, &mut held_x, first);
+                                    row_held_columns(
+                                        &*member_pos,
+                                        candidate_y,
+                                        packed_t,
+                                        held_x.as_mut_slice(),
+                                        first,
+                                    );
 
                                     let mut candidate_x = t_left;
                                     while candidate_x <= t_right {
-                                        let in_span =
-                                            in_searched_span(candidate_x, &skip_left, &skip_right, max_rects);
-                                        let held = is_held_coordinate(candidate_x, &held_x, first);
+                                        let in_span = in_searched_span(
+                                            candidate_x,
+                                            skip_left.as_slice(),
+                                            skip_right.as_slice(),
+                                            max_rects,
+                                        );
+                                        let held = is_held_coordinate(candidate_x, held_x.as_slice(), first);
                                         if !in_span && !held {
                                             let packed = pack_pos_t(candidate_x, candidate_y, packed_t);
                                             let dist = candidate_distance(
                                                 ring,
                                                 search_ring,
                                                 anchor,
-                                                &reference,
+                                                reference.as_slice(),
                                                 candidate_x,
                                                 candidate_y,
                                                 slot,

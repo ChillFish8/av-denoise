@@ -1,6 +1,5 @@
 #![cfg(feature = "vulkan")]
 
-use av_denoise::accelerate::Accelerator;
 use av_denoise::tune::{
     BudgetRequest,
     SearchMode,
@@ -17,7 +16,6 @@ use av_denoise::{
     ChannelIntent,
     DenoisingMode,
     Depth,
-    Device,
     FrameLayout,
     Nl4dOptions,
     PlanarDenoiser,
@@ -78,8 +76,8 @@ fn frames(count: usize) -> Vec<Planes> {
 
 fn options(algorithm: Algorithm, tuning: TuningMode, deterministic: bool) -> PlaneOptions {
     PlaneOptions {
-        accelerators: vec![Accelerator::Vulkan],
-        device: Device::Default,
+        accelerators: vec![av_denoise::testing::test_accelerator()],
+        device: av_denoise::testing::test_device(),
         intent: ChannelIntent::LumaChroma,
         mode: DenoisingMode::Temporal { radius: 1 },
         algorithm,

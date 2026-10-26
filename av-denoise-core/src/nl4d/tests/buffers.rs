@@ -2,7 +2,6 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::helpers::{
-    R,
     RAMP_HEIGHT,
     RAMP_WIDTH,
     make_client,
@@ -32,7 +31,7 @@ use crate::noise::{
 
 const SIZE: u32 = 64;
 
-fn run_frames(params: Nl4dParams, width: u32, height: u32, frames: &[Vec<f32>]) -> Nl4dDenoiser<R> {
+fn run_frames(params: Nl4dParams, width: u32, height: u32, frames: &[Vec<f32>]) -> Nl4dDenoiser {
     let client = make_client();
     let mut denoiser = Nl4dDenoiser::new(&client, params, width, height).expect("valid params");
 
@@ -44,7 +43,7 @@ fn run_frames(params: Nl4dParams, width: u32, height: u32, frames: &[Vec<f32>]) 
     denoiser
 }
 
-fn run_stream(params: Nl4dParams, count: usize) -> Nl4dDenoiser<R> {
+fn run_stream(params: Nl4dParams, count: usize) -> Nl4dDenoiser {
     let frames = noisy_frames(SIZE, SIZE, 1, count);
     run_frames(params, SIZE, SIZE, &frames)
 }
@@ -56,7 +55,7 @@ fn read_handle<T: CubeElement>(handle: Handle) -> Vec<T> {
     T::from_bytes(&bytes).to_vec()
 }
 
-fn read_derived(denoiser: &Nl4dDenoiser<R>) -> DerivedValues {
+fn read_derived(denoiser: &Nl4dDenoiser) -> DerivedValues {
     let front = denoiser.front_for_test();
     let handle = front.derived_handle();
     let words: Vec<f32> = read_handle(handle);
@@ -64,14 +63,14 @@ fn read_derived(denoiser: &Nl4dDenoiser<R>) -> DerivedValues {
     DerivedValues::from_words(&words)
 }
 
-fn gpu_snapshot(denoiser: &Nl4dDenoiser<R>) -> NoiseSnapshot {
+fn gpu_snapshot(denoiser: &Nl4dDenoiser) -> NoiseSnapshot {
     denoiser
         .noise_snapshot()
         .expect("every front has a noise snapshot")
 }
 
 /// The derived values the fold's formulas give for the chains, curve and classes of `snapshot`.
-fn derived_from_chains(front: &NlmDenoiser<R>, snapshot: &NoiseSnapshot) -> DerivedValues {
+fn derived_from_chains(front: &NlmDenoiser, snapshot: &NoiseSnapshot) -> DerivedValues {
     let (_, _, channel_mode) = front.frame_shape();
     let channels = channel_mode.count() as usize;
     let settings = front.noise_settings_for_test();
@@ -155,8 +154,7 @@ fn the_derived_buffer_follows_the_gpu_chains() {
         let mut sampled = 0;
         let params = ramp_params(channels, true, 1.0);
         let client = make_client();
-        let mut denoiser =
-            Nl4dDenoiser::<R>::new(&client, params, RAMP_WIDTH, RAMP_HEIGHT).expect("valid params");
+        let mut denoiser = Nl4dDenoiser::new(&client, params, RAMP_WIDTH, RAMP_HEIGHT).expect("valid params");
 
         for (submit, frame) in frames.iter().enumerate() {
             denoiser.push_frame(frame);
@@ -203,8 +201,7 @@ fn the_curve_buffer_holds_the_gpu_curve() {
     let frames = ramp_clip(1);
     let params = ramp_params(ChannelMode::Luma, true, 1.0);
     let client = make_client();
-    let mut denoiser =
-        Nl4dDenoiser::<R>::new(&client, params, RAMP_WIDTH, RAMP_HEIGHT).expect("valid params");
+    let mut denoiser = Nl4dDenoiser::new(&client, params, RAMP_WIDTH, RAMP_HEIGHT).expect("valid params");
     let mut curve_submits = 0;
 
     for frame in &frames {

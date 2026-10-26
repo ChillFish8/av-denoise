@@ -3,7 +3,6 @@ use cubecl::prelude::*;
 use super::helpers::{
     C_MIN,
     LAMBDA_HT,
-    R,
     RAMP_HEIGHT,
     RAMP_WIDTH,
     REFINE,
@@ -48,7 +47,7 @@ fn denoises_a_static_noisy_clip() {
         .collect();
 
     let params = static_clip_params(radius);
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, width, height).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::new(&client, params, width, height).expect("construction failed");
 
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     for frame in &noisy_frames {
@@ -101,7 +100,7 @@ fn denoises_at_the_widest_spatial_and_temporal_radius() {
         spatial_radius: 16,
         ..clip_params
     };
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, width, height).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::new(&client, params, width, height).expect("construction failed");
 
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     for frame in &noisy_frames {
@@ -170,7 +169,7 @@ fn survives_a_ring_size_that_would_overflow_a_single_zero_dispatch() {
         refine: 1,
         ..clip_params
     };
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, width, height).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::new(&client, params, width, height).expect("construction failed");
 
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     for frame in &noisy_frames {
@@ -256,7 +255,7 @@ fn output_carries_its_own_frames_marker_no_other_frame_has() {
         .collect();
 
     let params = static_clip_params(radius);
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, width, height).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::new(&client, params, width, height).expect("construction failed");
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     for frame in &frames {
         denoiser.push_frame(frame);
@@ -300,7 +299,7 @@ fn flush_emits_exactly_the_pushed_frame_count() {
     let frame_count = 7u32;
 
     let params = static_clip_params(radius);
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, width, height).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::new(&client, params, width, height).expect("construction failed");
 
     let mut emitted = 0usize;
     for seed in 0..frame_count {
@@ -324,7 +323,7 @@ fn ramp_outputs(frames: &[Vec<f32>]) -> Vec<Vec<f32>> {
     let client = make_client();
     let params = ramp_params(ChannelMode::Luma, true, 1.0);
     let mut denoiser =
-        Nl4dDenoiser::<R>::new(&client, params, RAMP_WIDTH, RAMP_HEIGHT).expect("construction failed");
+        Nl4dDenoiser::new(&client, params, RAMP_WIDTH, RAMP_HEIGHT).expect("construction failed");
     let mut outputs = Vec::new();
 
     for frame in frames {
@@ -369,7 +368,7 @@ fn nl4d_output_is_byte_identical_across_runs() {
     reason = "the test helper takes the full set of parameters its cases vary"
 )]
 fn run_spatial_only(
-    client: &ComputeClient<R>,
+    client: &Client,
     noisy_centre: &[f32],
     width: u32,
     height: u32,
@@ -441,38 +440,38 @@ fn run_spatial_only(
     let centre_slot = 0u32;
 
     unsafe {
-        collab_zero_accum::launch_unchecked::<R>(
+        collab_zero_accum::launch_unchecked(
             client,
             zero_grid,
             zero_cube_dim,
-            ArrayArg::from_raw_parts(accum.clone(), frame_len),
-            ArrayArg::from_raw_parts(wsum.clone(), pixels),
+            BufferArg::from_raw_parts(accum.clone(), frame_len),
+            BufferArg::from_raw_parts(wsum.clone(), pixels),
             0u32,
             pixels as u32,
             stored_ch,
             zero_workgroups * zero_dim,
         );
 
-        let ring_scalar = ArrayArg::from_raw_parts(ring_buf.clone(), noisy_centre.len());
-        collab_fused::launch_unchecked::<f32, i32, R>(
+        let ring_scalar = BufferArg::from_raw_parts(ring_buf.clone(), noisy_centre.len());
+        collab_fused::launch_unchecked::<f32, i32>(
             client,
             fused_grid,
             fused_dim,
             stored_ch as usize,
-            ArrayArg::from_raw_parts(ring_buf.clone(), noisy_centre.len()),
+            BufferArg::from_raw_parts(ring_buf.clone(), noisy_centre.len()),
             ring_scalar,
-            ArrayArg::from_raw_parts(ring_buf, stored_ch as usize),
-            ArrayArg::from_raw_parts(mv_dummy, 1),
-            ArrayArg::from_raw_parts(conf_dummy, 1),
-            ArrayArg::from_raw_parts(neighbour_slots_dummy, 1),
-            ArrayArg::from_raw_parts(noise_buf, DERIVED_WORDS as usize),
-            ArrayArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
-            ArrayArg::from_raw_parts(unit_map_buf, map_len),
-            ArrayArg::from_raw_parts(dct_profile_buf, 8),
-            ArrayArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
-            ArrayArg::from_raw_parts(accum.clone(), frame_len),
-            ArrayArg::from_raw_parts(wsum.clone(), pixels),
-            ArrayArg::from_raw_parts(group_weight, refs),
+            BufferArg::from_raw_parts(ring_buf, stored_ch as usize),
+            BufferArg::from_raw_parts(mv_dummy, 1),
+            BufferArg::from_raw_parts(conf_dummy, 1),
+            BufferArg::from_raw_parts(neighbour_slots_dummy, 1),
+            BufferArg::from_raw_parts(noise_buf, DERIVED_WORDS as usize),
+            BufferArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
+            BufferArg::from_raw_parts(unit_map_buf, map_len),
+            BufferArg::from_raw_parts(dct_profile_buf, 8),
+            BufferArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
+            BufferArg::from_raw_parts(accum.clone(), frame_len),
+            BufferArg::from_raw_parts(wsum.clone(), pixels),
+            BufferArg::from_raw_parts(group_weight, refs),
             centre_slot,
             c_min,
             lambda_ht,
@@ -502,14 +501,14 @@ fn run_spatial_only(
             false,
         );
 
-        collab_normalise::launch_unchecked::<R>(
+        collab_normalise::launch_unchecked(
             client,
             agg_grid,
             agg_dim,
             stored_ch as usize,
-            ArrayArg::from_raw_parts(accum, frame_len),
-            ArrayArg::from_raw_parts(wsum, pixels),
-            ArrayArg::from_raw_parts(output.clone(), frame_len),
+            BufferArg::from_raw_parts(accum, frame_len),
+            BufferArg::from_raw_parts(wsum, pixels),
+            BufferArg::from_raw_parts(output.clone(), frame_len),
             0u32,
             width,
             height,
@@ -541,7 +540,7 @@ fn temporal_grouping_beats_spatial_only_on_a_static_clip() {
     let centre_index = radius as usize;
 
     let params = static_clip_params(radius);
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, width, height).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::new(&client, params, width, height).expect("construction failed");
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     for frame in &noisy_frames {
         denoiser.push_frame(frame);
@@ -607,7 +606,7 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
     let judged_frame = radius as usize;
 
     let params = static_clip_params(radius);
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, width, height).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::new(&client, params, width, height).expect("construction failed");
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     for frame in &frames {
         denoiser.push_frame(frame);
@@ -624,7 +623,7 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
     let clip_params = static_clip_params(radius);
     let mut nlm_params = clip_params.nlm;
     nlm_params.temporal_radius = radius;
-    let mut front = NlmDenoiser::<R>::new(&client, nlm_params, width, height);
+    let mut front = NlmDenoiser::new(&client, nlm_params, width, height);
 
     let pixels = (width * height) as usize;
     let refs_x = refs_along(width);
@@ -709,26 +708,26 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
         let stored_ch = 1usize;
 
         unsafe {
-            let ring_scalar = ArrayArg::from_raw_parts(view.input.clone(), ring_len);
-            collab_fused::launch_unchecked::<f32, i32, R>(
+            let ring_scalar = BufferArg::from_raw_parts(view.input.clone(), ring_len);
+            collab_fused::launch_unchecked::<f32, i32>(
                 &client,
                 fused_grid,
                 fused_dim,
                 stored_ch,
-                ArrayArg::from_raw_parts(view.input.clone(), ring_len),
+                BufferArg::from_raw_parts(view.input.clone(), ring_len),
                 ring_scalar,
-                ArrayArg::from_raw_parts(view.input.clone(), stored_ch),
-                ArrayArg::from_raw_parts(view.mv_field.clone(), mv_len.max(1)),
-                ArrayArg::from_raw_parts(view.confidence.clone(), conf_len.max(1)),
-                ArrayArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
-                ArrayArg::from_raw_parts(noise_buf, DERIVED_WORDS as usize),
-                ArrayArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
-                ArrayArg::from_raw_parts(unit_map_buf, map_len),
-                ArrayArg::from_raw_parts(profile_buf, 8),
-                ArrayArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
-                ArrayArg::from_raw_parts(accum.clone(), pixels * total_frames as usize),
-                ArrayArg::from_raw_parts(wsum.clone(), pixels * total_frames as usize),
-                ArrayArg::from_raw_parts(group_weight, refs),
+                BufferArg::from_raw_parts(view.input.clone(), stored_ch),
+                BufferArg::from_raw_parts(view.mv_field.clone(), mv_len.max(1)),
+                BufferArg::from_raw_parts(view.confidence.clone(), conf_len.max(1)),
+                BufferArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
+                BufferArg::from_raw_parts(noise_buf, DERIVED_WORDS as usize),
+                BufferArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
+                BufferArg::from_raw_parts(unit_map_buf, map_len),
+                BufferArg::from_raw_parts(profile_buf, 8),
+                BufferArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
+                BufferArg::from_raw_parts(accum.clone(), pixels * total_frames as usize),
+                BufferArg::from_raw_parts(wsum.clone(), pixels * total_frames as usize),
+                BufferArg::from_raw_parts(group_weight, refs),
                 centre_slot,
                 C_MIN,
                 LAMBDA_HT,
@@ -758,14 +757,14 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 false,
             );
 
-            collab_normalise::launch_unchecked::<R>(
+            collab_normalise::launch_unchecked(
                 &client,
                 agg_grid,
                 agg_dim,
                 1usize,
-                ArrayArg::from_raw_parts(accum, pixels * total_frames as usize),
-                ArrayArg::from_raw_parts(wsum, pixels * total_frames as usize),
-                ArrayArg::from_raw_parts(output.clone(), pixels),
+                BufferArg::from_raw_parts(accum, pixels * total_frames as usize),
+                BufferArg::from_raw_parts(wsum, pixels * total_frames as usize),
+                BufferArg::from_raw_parts(output.clone(), pixels),
                 centre_slot * pixels as u32,
                 width,
                 height,
@@ -826,7 +825,7 @@ fn motion_snapshot_reports_the_field_the_pass_used() {
         .collect();
 
     let params = static_clip_params(radius);
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, width, height).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::new(&client, params, width, height).expect("construction failed");
     assert!(denoiser.motion_snapshot().is_none(), "no pass has run yet");
 
     for frame in &frames {
@@ -894,8 +893,7 @@ fn field_regularisation_reaches_the_snapshot() {
             field_lambda: lambda,
             ..clip_params
         };
-        let mut denoiser =
-            Nl4dDenoiser::<R>::new(&client, params, width, height).expect("construction failed");
+        let mut denoiser = Nl4dDenoiser::new(&client, params, width, height).expect("construction failed");
         for frame in &frames {
             denoiser.push_frame(frame);
             let _ = denoiser.denoise().expect("denoise failed");
@@ -960,7 +958,7 @@ fn shipped_defaults_denoise_a_static_clip_and_regularise_its_field_to_zero() {
     let frame_count = (3 * radius + 1) as usize;
 
     let clean_params = shipped_default_params();
-    let mut clean_denoiser = Nl4dDenoiser::<R>::new(&client, clean_params, width, height)
+    let mut clean_denoiser = Nl4dDenoiser::new(&client, clean_params, width, height)
         .expect("construction failed for the clean phase");
     for _ in 0..frame_count {
         clean_denoiser.push_frame(&base);
@@ -985,7 +983,7 @@ fn shipped_defaults_denoise_a_static_clip_and_regularise_its_field_to_zero() {
         .map(|seed| noisy_field_over(&base, width, height, SIGMA, seed))
         .collect();
     let noisy_params = shipped_default_params();
-    let mut noisy_denoiser = Nl4dDenoiser::<R>::new(&client, noisy_params, width, height)
+    let mut noisy_denoiser = Nl4dDenoiser::new(&client, noisy_params, width, height)
         .expect("construction failed for the noisy phase");
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     for frame in &frames {

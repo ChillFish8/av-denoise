@@ -15,7 +15,7 @@ use crate::noise::state::{NoiseShape, NoiseState, ReadingSettings, StrengthMapKi
 use crate::noise::strength_map::StrengthMapParams;
 use crate::noise::temporal::TemporalNoiseSample;
 use crate::tune::gpu::sync;
-use crate::tune::tests::runtime::{TestRuntime, test_client};
+use crate::tune::tests::runtime::test_client;
 
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 48;
@@ -53,7 +53,7 @@ const STARTING_VALUES: DerivedValues = DerivedValues {
     rho: 0.0,
 };
 
-fn shape(client: &ComputeClient<TestRuntime>, width: u32, height: u32) -> NoiseShape {
+fn shape(client: &Client, width: u32, height: u32) -> NoiseShape {
     NoiseShape {
         width,
         height,
@@ -107,12 +107,12 @@ fn sampled_reading(rho: f32, curved: bool) -> ReadingRecord {
 /// A state started from [STARTING_VALUES] whose slots hold samples of the correlations `rhos`,
 /// before any fold.
 fn ring_state(
-    client: &ComputeClient<TestRuntime>,
+    client: &Client,
     shape: NoiseShape,
     settings: NoiseSettings,
     rhos: [f32; FRAMES as usize],
     slot_maps: &[Vec<f32>],
-) -> NoiseState<TestRuntime> {
+) -> NoiseState {
     let curved = !slot_maps.is_empty();
     let readings: Vec<ReadingRecord> = rhos.iter().map(|&rho| sampled_reading(rho, curved)).collect();
     let sums = vec![[0.0f32; 4]; FRAMES as usize];
@@ -124,12 +124,12 @@ fn ring_state(
 
 /// A state whose every slot holds a sample of correlation `rho`, after one fold of slot 0.
 fn folded_state(
-    client: &ComputeClient<TestRuntime>,
+    client: &Client,
     shape: NoiseShape,
     settings: NoiseSettings,
     rho: f32,
     slot_maps: &[Vec<f32>],
-) -> NoiseState<TestRuntime> {
+) -> NoiseState {
     let rhos = [rho; FRAMES as usize];
     let state = ring_state(client, shape, settings, rhos, slot_maps);
 
@@ -148,7 +148,7 @@ fn nonzero_off_centre(table: &[f32], radius: u32) -> bool {
 
 /// Checks that both tables of `state` start nonzero off the centre, so a later zero table can
 /// only come from a fold.
-fn check_nonzero_start(client: &ComputeClient<TestRuntime>, state: &NoiseState<TestRuntime>, radius: u32) {
+fn check_nonzero_start(client: &Client, state: &NoiseState, radius: u32) {
     let spatial = read_table(client, state.spatial_offsets());
     let pilot = read_table(client, state.pilot_offsets());
     let spatial_nonzero = nonzero_off_centre(&spatial, radius);
@@ -161,7 +161,7 @@ fn check_nonzero_start(client: &ComputeClient<TestRuntime>, state: &NoiseState<T
     assert!(pilot_nonzero, "the pilot table starts nonzero at radius {radius}");
 }
 
-fn read_table(client: &ComputeClient<TestRuntime>, table: Option<&Handle>) -> Vec<f32> {
+fn read_table(client: &Client, table: Option<&Handle>) -> Vec<f32> {
     let handle = table.expect("the state holds offset tables").clone();
     let bytes = client.read_one(handle).expect("the table reads back");
     let entries = f32::from_bytes(&bytes);
@@ -175,12 +175,7 @@ fn bits(values: &[f32]) -> Vec<u32> {
 
 /// Checks the spatial table against the host table at the derived rho and noise offset,
 /// returning the largest relative gap.
-fn check_spatial_table(
-    client: &ComputeClient<TestRuntime>,
-    state: &NoiseState<TestRuntime>,
-    radius: u32,
-    derived: DerivedValues,
-) -> f32 {
+fn check_spatial_table(client: &Client, state: &NoiseState, radius: u32, derived: DerivedValues) -> f32 {
     let table = read_table(client, state.spatial_offsets());
     let expected = build_spatial_offset_lut(radius, derived.rho, derived.noise_offset);
     let table_len = table.len();
@@ -358,12 +353,7 @@ fn fixed_values(noise_offset: f32, input_noise_offset: f32) -> DerivedValues {
 }
 
 /// Checks both tables of `state` bit for bit against the host tables of `derived` at a rho of 0.
-fn check_host_tables(
-    client: &ComputeClient<TestRuntime>,
-    state: &NoiseState<TestRuntime>,
-    radius: u32,
-    derived: DerivedValues,
-) {
+fn check_host_tables(client: &Client, state: &NoiseState, radius: u32, derived: DerivedValues) {
     let spatial = read_table(client, state.spatial_offsets());
     let pilot = read_table(client, state.pilot_offsets());
     let expected_spatial = build_spatial_offset_lut(radius, 0.0, derived.noise_offset);

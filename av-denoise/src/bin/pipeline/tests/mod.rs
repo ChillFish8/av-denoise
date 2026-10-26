@@ -16,9 +16,7 @@ use std::io::{Cursor, Read};
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "vulkan")]
-use av_denoise::accelerate::Accelerator;
-#[cfg(feature = "vulkan")]
-use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Device, PlaneOptions, TuningMode};
+use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, PlaneOptions, TuningMode};
 use av_denoise::{Depth, FrameLayout, Planes, Subsampling, fill_plane};
 
 /// A writer the test can read back after the coordinator thread drops it.
@@ -47,8 +45,8 @@ pub(super) fn y4m_reader(bytes: Vec<u8>) -> Box<dyn Read> {
 #[cfg(feature = "vulkan")]
 pub(super) fn temporal_opts() -> PlaneOptions {
     PlaneOptions {
-        accelerators: vec![Accelerator::Vulkan],
-        device: Device::Default,
+        accelerators: vec![av_denoise::testing::test_accelerator()],
+        device: av_denoise::testing::test_device(),
         intent: ChannelIntent::LumaChroma,
         mode: DenoisingMode::Temporal { radius: 1 },
         algorithm: Algorithm::default(),

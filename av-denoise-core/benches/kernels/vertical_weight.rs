@@ -27,11 +27,11 @@ pub struct VWeightInput {
     offsets_len: usize,
 }
 
-pub struct VWeightBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct VWeightBench {
+    pub client: Client,
 }
 
-impl<R: Runtime> Benchmark for VWeightBench<R> {
+impl Benchmark for VWeightBench {
     type Input = VWeightInput;
     type Output = ();
 
@@ -63,14 +63,14 @@ impl<R: Runtime> Benchmark for VWeightBench<R> {
         let cube_dim = cube_dim_2d();
 
         unsafe {
-            nlm_vertical_weight::launch_unchecked::<R>(
+            nlm_vertical_weight::launch_unchecked(
                 &self.client,
                 cube_count,
                 cube_dim,
-                ArrayArg::from_raw_parts(args.sums.input.clone(), pixels),
-                ArrayArg::from_raw_parts(args.sums.output.clone(), pixels),
-                ArrayArg::from_raw_parts(args.noise.clone(), DERIVED_WORDS as usize),
-                ArrayArg::from_raw_parts(args.offsets.clone(), args.offsets_len),
+                BufferArg::from_raw_parts(args.sums.input.clone(), pixels),
+                BufferArg::from_raw_parts(args.sums.output.clone(), pixels),
+                BufferArg::from_raw_parts(args.noise.clone(), DERIVED_WORDS as usize),
+                BufferArg::from_raw_parts(args.offsets.clone(), args.offsets_len),
                 0u32,
                 WIDTH,
                 HEIGHT,

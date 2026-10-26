@@ -56,8 +56,8 @@ use super::{HEIGHT, WIDTH, block_sync, make_padded_frame, shapes_with_channels, 
 /// its own grid parity, eight pixels apart, which is further than the refine window is wide. The
 /// four rectangles are then disjoint, nothing deduplicates and the neighbour search scores four
 /// times the positions. That arm is the worst case, and a real motion field lands between the two.
-pub struct CollabFusedBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct CollabFusedBench {
+    pub client: Client,
     pub channels: u32,
     pub channel_name: &'static str,
     pub split_mv: bool,
@@ -89,11 +89,7 @@ fn accumulator_lens(stored_ch: u32, packed: bool) -> (usize, usize) {
 }
 
 /// The variants this device runs for a bench of `channels`, baseline first.
-pub fn fitted_variants<R: Runtime>(
-    client: &ComputeClient<R>,
-    channels: u32,
-    channel_name: &'static str,
-) -> Vec<CollabVariant> {
+pub fn fitted_variants(client: &Client, channels: u32, channel_name: &'static str) -> Vec<CollabVariant> {
     let bench = CollabFusedBench {
         client: client.clone(),
         channels,
@@ -153,9 +149,9 @@ pub struct CollabFusedInput {
     pub map_len: usize,
 }
 
-impl<R: Runtime> CollabFusedBench<R> {
+impl CollabFusedBench {
     /// The tunable site over `args`, with the library's default search geometry.
-    pub fn site(&self, args: &CollabFusedInput) -> CollabSite<R, f32> {
+    pub fn site(&self, args: &CollabFusedInput) -> CollabSite<f32> {
         let stored_ch = stored_channels(self.channels);
         let (accum_len, wsum_len) = accumulator_lens(stored_ch, self.packed);
         let refs = ref_count(WIDTH, HEIGHT);
@@ -232,7 +228,7 @@ impl<R: Runtime> CollabFusedBench<R> {
             refs,
             packed: self.packed,
         };
-        CollabSite::<R, f32> {
+        CollabSite::<f32> {
             client: self.client.clone(),
             inputs,
             values,
@@ -243,7 +239,7 @@ impl<R: Runtime> CollabFusedBench<R> {
     }
 }
 
-impl<R: Runtime> Benchmark for CollabFusedBench<R> {
+impl Benchmark for CollabFusedBench {
     type Input = CollabFusedInput;
     type Output = ();
 

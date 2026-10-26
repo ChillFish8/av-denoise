@@ -156,7 +156,7 @@ pub(crate) fn shift_insert8_ordered_cached(
 /// collide on a bank. It contains two `sync_cube()` barriers, so every lane of the cube must call
 /// it.
 #[cube]
-pub(crate) fn transpose8(buf: &mut SharedMemory<f32>, v: &mut Array<f32>, sub: u32, slot: u32) {
+pub(crate) fn transpose8(buf: &mut Shared<[f32]>, v: &mut [f32], sub: u32, slot: u32) {
     let region_start = slot * 65u32;
     #[unroll]
     for i in 0..8u32 {
@@ -178,7 +178,7 @@ pub(crate) fn transpose8(buf: &mut SharedMemory<f32>, v: &mut Array<f32>, sub: u
 /// other half with its partner at XOR 1, 2 and then 4. That is 7 shuffles for 8 totals. The partners
 /// pair up as in [plane_ssd_reduce8], so every total has the same bits.
 #[cube]
-pub(crate) fn scatter_sums8(partials: &Array<f32>, sub: u32) -> f32 {
+pub(crate) fn scatter_sums8(partials: &[f32], sub: u32) -> f32 {
     let odd_lane = (sub & 1u32) == 1u32;
     let mut pairs = Array::<f32>::new(4usize);
 

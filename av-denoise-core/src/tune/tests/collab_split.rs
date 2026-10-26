@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 
 use super::equivalence::{assert_candidates_match_baseline, assert_listed_candidates_match_baseline};
 use super::fixtures::{CollabSpec, collab_site, collab_site_f16, split_sites};
-use super::runtime::{TestRuntime, test_client};
+use super::runtime::test_client;
 use crate::collab::kernels::fused::{GROUP_SIZE_MASK, MEMBER_WORDS};
 use crate::collab::supports_f16_search;
 use crate::nlmeans::ChannelMode;
@@ -18,11 +18,7 @@ use crate::tune::sites::{
 };
 use crate::tune::{Fidelity, SiteCandidate, VariantSite};
 
-fn assert_split_matches_fused<S: Float>(
-    client: &ComputeClient<TestRuntime>,
-    fused: &CollabSite<TestRuntime, S>,
-    label: &str,
-) {
+fn assert_split_matches_fused<S: Float>(client: &Client, fused: &CollabSite<S>, label: &str) {
     let (search, filter) = split_sites(fused);
 
     let want = fused.scratch_outputs();

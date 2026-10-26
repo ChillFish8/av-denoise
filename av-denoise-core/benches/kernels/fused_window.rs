@@ -59,16 +59,16 @@ impl WindowKernel {
 }
 
 /// One windowed kernel at one candidate's cube shape over a 1080p frame.
-pub struct WindowBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct WindowBench {
+    pub client: Client,
     pub channels: u32,
     pub channel_name: &'static str,
     pub kernel: WindowKernel,
     pub candidate: WindowCandidate,
 }
 
-impl<R: Runtime> Benchmark for WindowBench<R> {
-    type Input = (WindowSite<R>, AccumOutputs);
+impl Benchmark for WindowBench {
+    type Input = (WindowSite, AccumOutputs);
     type Output = ();
 
     fn prepare(&self) -> Self::Input {

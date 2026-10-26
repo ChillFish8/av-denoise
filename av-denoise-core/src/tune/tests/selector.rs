@@ -2,7 +2,7 @@ use super::probe::{ProbeCandidate, ProbeSite, small_device_limits};
 use super::runtime::test_client;
 use crate::tune::{EngineKernels, KernelPlan, KernelSelector, SiteCandidate, VariantSite, fit_candidates};
 
-fn selector_with(plan: KernelPlan) -> KernelSelector<super::runtime::TestRuntime> {
+fn selector_with(plan: KernelPlan) -> KernelSelector {
     let client = test_client();
     let kernels = EngineKernels {
         plan,

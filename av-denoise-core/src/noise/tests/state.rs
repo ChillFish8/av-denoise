@@ -10,13 +10,13 @@ use crate::noise::strength_map::{QuarterSettings, StrengthMapParams};
 use crate::noise::temporal::{TemporalStatsCtx, run_temporal_noise_stats};
 use crate::tune::gpu::sync;
 use crate::tune::tests::fixtures::{hashed_ring, upload};
-use crate::tune::tests::runtime::{TestRuntime, test_client};
+use crate::tune::tests::runtime::test_client;
 
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 48;
 const FRAMES: u32 = 3;
 
-fn luma_shape(client: &ComputeClient<TestRuntime>, temporal: bool) -> NoiseShape {
+fn luma_shape(client: &Client, temporal: bool) -> NoiseShape {
     NoiseShape {
         width: WIDTH,
         height: HEIGHT,
@@ -35,7 +35,7 @@ fn luma_settings(luma_fields: bool) -> ReadingSettings {
     }
 }
 
-fn luma_state(client: &ComputeClient<TestRuntime>, luma_fields: bool) -> NoiseState<TestRuntime> {
+fn luma_state(client: &Client, luma_fields: bool) -> NoiseState {
     let shape = luma_shape(client, true);
     let settings = luma_settings(luma_fields);
 
@@ -47,15 +47,15 @@ fn luma_state(client: &ComputeClient<TestRuntime>, luma_fields: bool) -> NoiseSt
     NoiseState::new(client, shape, noise_settings, DerivedValues::default())
 }
 
-fn luma_ring(client: &ComputeClient<TestRuntime>) -> Handle {
+fn luma_ring(client: &Client) -> Handle {
     let frames = hashed_ring(WIDTH, HEIGHT, 1, FRAMES, 7);
     upload(client, &frames)
 }
 
 /// Reads every handle back as raw `f32` bits.
-fn read_bits(client: &ComputeClient<TestRuntime>, handles: &[Handle]) -> Vec<Vec<u32>> {
+fn read_bits(client: &Client, handles: &[Handle]) -> Vec<Vec<u32>> {
     let handles = handles.to_vec();
-    let bytes = client.read(handles);
+    let bytes = client.read(handles).expect("the handles read back");
 
     bytes
         .iter()
@@ -65,8 +65,8 @@ fn read_bits(client: &ComputeClient<TestRuntime>, handles: &[Handle]) -> Vec<Vec
 
 /// Runs the Immerkær estimate and the temporal stats for `slot` against `previous` on `state`'s buffers.
 fn launch_directly(
-    client: &ComputeClient<TestRuntime>,
-    state: &NoiseState<TestRuntime>,
+    client: &Client,
+    state: &NoiseState,
     ring: &Handle,
     slot: u32,
     previous: u32,

@@ -145,7 +145,7 @@ mod tests {
 
     use super::*;
     use crate::backend::accelerate::Accelerator;
-    use crate::backend::{DescribeDevice, Device, run_on_best};
+    use crate::backend::{DescribeDevice, run_on_best};
 
     /// The adapter fields that tell two GPUs apart.
     fn adapter_fields(info: &wgpu::AdapterInfo) -> (String, String, u32, u32) {
@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn two_own_placements_open_two_devices_on_the_shared_clients_adapter() {
         let accelerators = [Accelerator::Vulkan];
-        let selected = Device::Default;
+        let selected = crate::testing::test_device();
         let wgpu_device = selected.to_wgpu().expect("a wgpu device");
 
         // CubeCL picks the shared client's adapter itself here, so the check below can fail.
@@ -193,7 +193,8 @@ mod tests {
 
     #[test]
     fn an_own_placement_reuses_its_device() {
-        let selected = WgpuDevice::DefaultDevice;
+        let test_device = crate::testing::test_device();
+        let selected = test_device.to_wgpu().expect("a wgpu device");
         let placement = DevicePlacement::own();
 
         let first = placement.vulkan_device(&selected);

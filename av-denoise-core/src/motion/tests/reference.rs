@@ -4,9 +4,9 @@ use cubecl::terminate;
 /// The per-candidate block match the production kernel must reproduce.
 #[cube(launch_unchecked)]
 pub(super) fn reference_block_match_coarse(
-    centre: &Array<f32>,
-    neighbour: &Array<f32>,
-    mv_field: &mut Array<i32>,
+    centre: &[f32],
+    neighbour: &[f32],
+    mv_field: &mut [i32],
     #[comptime] level_width: u32,
     #[comptime] level_height: u32,
     #[comptime] blksize: u32,
@@ -31,8 +31,8 @@ pub(super) fn reference_block_match_coarse(
     let window_side = comptime!(2 * search_radius + 1);
     let candidates = comptime!(window_side * window_side);
     let block_pixels = comptime!(blksize * blksize);
-    let mut sad_scratch = SharedMemory::<f32>::new(candidates as usize);
-    let mut centre_smem = SharedMemory::<f32>::new(block_pixels as usize);
+    let mut sad_scratch = Shared::<[f32]>::new_slice(candidates as usize);
+    let mut centre_smem = Shared::<[f32]>::new_slice(block_pixels as usize);
 
     let mut pixel_y = local_y;
     while pixel_y < blksize {
@@ -114,24 +114,14 @@ pub(super) fn reference_block_match_coarse(
     let mvy_fine = best_dy * level_scale as i32;
 
     let fine_col_start = (block_col * step * level_scale / fine_step).min(fine_blocks_x);
-    #[expect(
-        clippy::useless_conversion,
-        reason = "both branches have to expand to the same cubecl native type, which the \
-                  conversion supplies"
-    )]
     let fine_col_end = if block_col == CUBE_COUNT_X - 1 {
-        fine_blocks_x.into()
+        fine_blocks_x
     } else {
         ((block_col + 1) * step * level_scale / fine_step).min(fine_blocks_x)
     };
     let fine_row_start = (block_row * step * level_scale / fine_step).min(fine_blocks_y);
-    #[expect(
-        clippy::useless_conversion,
-        reason = "both branches have to expand to the same cubecl native type, which the \
-                  conversion supplies"
-    )]
     let fine_row_end = if block_row == CUBE_COUNT_Y - 1 {
-        fine_blocks_y.into()
+        fine_blocks_y
     } else {
         ((block_row + 1) * step * level_scale / fine_step).min(fine_blocks_y)
     };
@@ -153,10 +143,10 @@ pub(super) fn reference_block_match_coarse(
 /// The per-candidate block match the production kernel must reproduce.
 #[cube(launch_unchecked)]
 pub(super) fn reference_block_match_fine(
-    centre: &Array<f32>,
-    neighbour: &Array<f32>,
-    mv_field: &mut Array<i32>,
-    confidence: &mut Array<f32>,
+    centre: &[f32],
+    neighbour: &[f32],
+    mv_field: &mut [i32],
+    confidence: &mut [f32],
     #[comptime] write_confidence: bool,
     sad_noise_floor: f32,
     thsad: f32,
@@ -173,25 +163,11 @@ pub(super) fn reference_block_match_fine(
 
     let mv_slot = ((block_row * blocks_x + block_col) * 2) as usize;
 
-    #[expect(
-        clippy::useless_conversion,
-        reason = "both branches have to expand to the same cubecl native type, which the \
-                  conversion supplies"
-    )]
-    let seed_dx = if use_seed == 1u32 {
-        mv_field[mv_slot]
-    } else {
-        0i32.into()
-    };
-    #[expect(
-        clippy::useless_conversion,
-        reason = "both branches have to expand to the same cubecl native type, which the \
-                  conversion supplies"
-    )]
+    let seed_dx = if use_seed == 1u32 { mv_field[mv_slot] } else { 0i32 };
     let seed_dy = if use_seed == 1u32 {
         mv_field[mv_slot + 1]
     } else {
-        0i32.into()
+        0i32
     };
 
     let block_origin_x = block_col as i32 * step as i32;
@@ -205,8 +181,8 @@ pub(super) fn reference_block_match_fine(
     let window_side = comptime!(2 * search_radius + 1);
     let candidates = comptime!(window_side * window_side);
     let block_pixels = comptime!(blksize * blksize);
-    let mut sad_scratch = SharedMemory::<f32>::new(candidates as usize);
-    let mut centre_smem = SharedMemory::<f32>::new(block_pixels as usize);
+    let mut sad_scratch = Shared::<[f32]>::new_slice(candidates as usize);
+    let mut centre_smem = Shared::<[f32]>::new_slice(block_pixels as usize);
 
     let mut pixel_y = local_y;
     while pixel_y < blksize {

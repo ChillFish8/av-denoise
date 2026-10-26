@@ -20,13 +20,13 @@ pub struct CopyInput {
     dst: Handle,
 }
 
-pub struct CopyBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct CopyBench {
+    pub client: Client,
     pub channels: u32,
     pub channel_name: &'static str,
 }
 
-impl<R: Runtime> Benchmark for CopyBench<R> {
+impl Benchmark for CopyBench {
     type Input = CopyInput;
     type Output = ();
 
@@ -45,12 +45,12 @@ impl<R: Runtime> Benchmark for CopyBench<R> {
         let total_threads = COPY_GRID_1D * BLOCK_1D;
 
         unsafe {
-            gpu_copy::launch_unchecked::<R>(
+            gpu_copy::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(COPY_GRID_1D),
                 CubeDim::new_1d(BLOCK_1D),
-                ArrayArg::from_raw_parts(args.src.clone(), len),
-                ArrayArg::from_raw_parts(args.dst.clone(), len),
+                BufferArg::from_raw_parts(args.src.clone(), len),
+                BufferArg::from_raw_parts(args.dst.clone(), len),
                 0u32,
                 0u32,
                 len as u32,

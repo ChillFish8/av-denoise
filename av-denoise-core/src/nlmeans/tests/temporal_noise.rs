@@ -87,9 +87,9 @@ fn run_temporal_stats_prefilled(
         stats_buf: &stats_buf,
         align,
     };
-    run_temporal_noise_stats::<R>(&client, &ctx, luma_fields).expect("temporal noise stats dispatch failed");
+    run_temporal_noise_stats(&client, &ctx, luma_fields).expect("temporal noise stats dispatch failed");
 
-    read_temporal_stats_slot::<R>(
+    read_temporal_stats_slot(
         &client,
         &stats_buf,
         width,
@@ -712,7 +712,7 @@ fn hq_temporal_folds_correlated_grain_above_immerkaer_alone() {
             partials_buf: &partials_buf,
             results_buf: &results_buf,
         };
-        run_noise_estimate::<R>(&client, &ctx).expect("immerkaer dispatch failed");
+        run_noise_estimate(&client, &ctx).expect("immerkaer dispatch failed");
 
         let bytes = client.read_one(results_buf).expect("immerkaer readback failed");
         let data = f32::from_bytes(&bytes);
@@ -744,7 +744,7 @@ fn hq_temporal_folds_correlated_grain_above_immerkaer_alone() {
         }),
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     for frame in &frames {
         denoiser.push_frame(frame);
         let _ = denoiser.denoise().unwrap();
@@ -796,7 +796,7 @@ fn rho_smoothed_seeds_from_first_sample_not_from_zero() {
         }),
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     let mut first_seeded_rho = None;
     for i in 0..(width.min(height)) {
         let frame = correlated_noisy_frame(width, height, base, sigma_pre, 200 + i);

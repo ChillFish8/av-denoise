@@ -159,8 +159,8 @@ pub(crate) struct TemporalStatsCtx<'a> {
 /// scene changes make the reading unreliable. The kernel addresses only its own slot's slice, so
 /// it needs nothing about the ring's other slots or the padding between them. With `luma_fields`
 /// off, the kernel's four luma-only lanes read 0 at no extra cost.
-pub(crate) fn run_temporal_noise_stats<R: Runtime>(
-    client: &ComputeClient<R>,
+pub(crate) fn run_temporal_noise_stats(
+    client: &Client,
     ctx: &TemporalStatsCtx<'_>,
     luma_fields: bool,
 ) -> Result<(), anyhow::Error> {
@@ -171,13 +171,13 @@ pub(crate) fn run_temporal_noise_stats<R: Runtime>(
     let stats_slot = ctx.stats_buf.clone().offset_start((ctx.slot_new as u64) * stride);
 
     unsafe {
-        nlm_temporal_noise_stats::launch_unchecked::<R>(
+        nlm_temporal_noise_stats::launch_unchecked(
             client,
             CubeCount::new_2d(blocks_x, blocks_y),
             CubeDim::new_2d(TEMPORAL_NOISE_BLOCK, TEMPORAL_NOISE_BLOCK),
             ctx.stored_ch as usize,
-            ArrayArg::from_raw_parts(ctx.input_buf.clone(), total_input),
-            ArrayArg::from_raw_parts(stats_slot, slot_len),
+            BufferArg::from_raw_parts(ctx.input_buf.clone(), total_input),
+            BufferArg::from_raw_parts(stats_slot, slot_len),
             ctx.slot_new,
             ctx.slot_prev,
             ctx.width,
@@ -195,8 +195,8 @@ pub(crate) fn run_temporal_noise_stats<R: Runtime>(
 ///
 /// It runs on a slot copied from the one before it. The zeroes read as no static blocks with
 /// measurable noise rather than as a reading of zero noise.
-pub(crate) fn zero_temporal_stats_slot<R: Runtime>(
-    client: &ComputeClient<R>,
+pub(crate) fn zero_temporal_stats_slot(
+    client: &Client,
     stats_buf: &Handle,
     width: u32,
     height: u32,
@@ -212,11 +212,11 @@ pub(crate) fn zero_temporal_stats_slot<R: Runtime>(
     let total_threads = grid * NOISE_BLOCK_1D;
 
     unsafe {
-        nlm_temporal_stats_zero::launch_unchecked::<R>(
+        nlm_temporal_stats_zero::launch_unchecked(
             client,
             CubeCount::new_1d(grid),
             CubeDim::new_1d(NOISE_BLOCK_1D),
-            ArrayArg::from_raw_parts(slot_region, slot_len as usize),
+            BufferArg::from_raw_parts(slot_region, slot_len as usize),
             slot_len,
             total_threads,
         );

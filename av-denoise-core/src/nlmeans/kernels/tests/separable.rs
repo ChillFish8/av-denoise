@@ -6,7 +6,7 @@ use crate::noise::tests::nlm_noise_buffer;
 use crate::noise::{DERIVED_H2_INV_NORM, DERIVED_WORDS, spatial_offset_index, spatial_offset_lut_len};
 use crate::tune::gpu::{bind, read_f32};
 use crate::tune::tests::fixtures::{hashed_unit, upload};
-use crate::tune::tests::runtime::{TestRuntime, test_client};
+use crate::tune::tests::runtime::test_client;
 
 const WIDTH: u32 = 40;
 const HEIGHT: u32 = 20;
@@ -76,7 +76,7 @@ fn the_vertical_weight_reads_the_strength_word_and_its_table_entry() {
     let offset_index = spatial_offset_index(SEARCH_RADIUS, 1, -2);
 
     unsafe {
-        nlm_vertical_weight::launch_unchecked::<TestRuntime>(
+        nlm_vertical_weight::launch_unchecked(
             &client,
             cube_count(),
             CubeDim::new_2d(BLOCK_X, BLOCK_Y),
@@ -127,7 +127,7 @@ fn the_paired_vertical_weight_reads_the_strength_and_offset_words() {
     let noise = nlm_noise_buffer(&client, DERIVED_H2_INV_NORM, H2_INV_NORM, NOISE_OFFSET);
 
     unsafe {
-        nlm_vweight_pair_accumulate::launch_unchecked::<TestRuntime>(
+        nlm_vweight_pair_accumulate::launch_unchecked(
             &client,
             cube_count(),
             CubeDim::new_2d(BLOCK_X, BLOCK_Y),

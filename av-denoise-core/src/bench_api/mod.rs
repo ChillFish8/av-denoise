@@ -96,7 +96,7 @@ pub const STRENGTH_MAP_ALL: u32 = crate::noise::STRENGTH_MAP_ALL;
 pub type ReadFuture = Pin<Box<dyn Future<Output = Result<Vec<Bytes>, ServerError>> + Send>>;
 
 /// Starts reading `handle` back. Nothing is read until the future is first polled.
-pub fn start_read<R: Runtime>(client: &ComputeClient<R>, handle: Handle) -> ReadFuture {
+pub fn start_read(client: &Client, handle: Handle) -> ReadFuture {
     let client = client.clone();
     let future = async move { client.read_async(vec![handle]).await };
 
@@ -123,7 +123,7 @@ pub trait HostIo {
     fn flush(&mut self, sink: impl FnMut(&[f32])) -> Result<(), anyhow::Error>;
 }
 
-impl<R: Runtime> HostIo for NlmDenoiser<R> {
+impl HostIo for NlmDenoiser {
     fn push_frame(&mut self, frame: &[f32]) {
         let (width, height, channels) = self.frame_shape();
         let handles = upload_frame(self.compute_client(), frame, width, height, channels);
@@ -163,14 +163,14 @@ impl<R: Runtime> HostIo for NlmDenoiser<R> {
     }
 }
 
-impl<R: Runtime> NlmDenoiser<R> {
+impl NlmDenoiser {
     fn read_back(&self, frame: &Handle) -> Result<Vec<f32>, anyhow::Error> {
         let shape = self.frame_shape();
         read_frame(self.compute_client(), self.placeholder(), frame, shape)
     }
 }
 
-impl<R: Runtime> HostIo for Nl4dDenoiser<R> {
+impl HostIo for Nl4dDenoiser {
     fn push_frame(&mut self, frame: &[f32]) {
         let (width, height, channels) = self.frame_shape();
         let handles = upload_frame(self.compute_client(), frame, width, height, channels);
@@ -205,7 +205,7 @@ impl<R: Runtime> HostIo for Nl4dDenoiser<R> {
     }
 }
 
-impl<R: Runtime> Nl4dDenoiser<R> {
+impl Nl4dDenoiser {
     fn read_back(&self, frame: &Handle) -> Result<Vec<f32>, anyhow::Error> {
         let shape = self.frame_shape();
         read_frame(self.compute_client(), self.placeholder(), frame, shape)
@@ -213,8 +213,8 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 }
 
 /// Splits an interleaved frame into one uploaded f32 plane per channel.
-fn upload_frame<R: Runtime>(
-    client: &ComputeClient<R>,
+fn upload_frame(
+    client: &Client,
     frame: &[f32],
     width: u32,
     height: u32,
@@ -255,8 +255,8 @@ fn device_planes(handles: &[Handle], width: u32, height: u32) -> Vec<DevicePlane
 }
 
 /// Egresses an internal interleaved frame into f32 planes and reads them back interleaved.
-fn read_frame<R: Runtime>(
-    client: &ComputeClient<R>,
+fn read_frame(
+    client: &Client,
     placeholder: &Handle,
     frame: &Handle,
     shape: (u32, u32, ChannelMode),
@@ -340,23 +340,6 @@ impl FromStr for Device {
     }
 }
 
-#[cfg(any(feature = "vulkan", feature = "metal"))]
-impl Device {
-    pub fn to_wgpu(self) -> Result<cubecl::wgpu::WgpuDevice, anyhow::Error> {
-        use cubecl::wgpu::WgpuDevice;
-
-        let device = match self {
-            Device::Default => WgpuDevice::DefaultDevice,
-            Device::Discrete(index) => WgpuDevice::DiscreteGpu(index),
-            Device::Integrated(index) => WgpuDevice::IntegratedGpu(index),
-            Device::Virtual(index) => WgpuDevice::VirtualGpu(index),
-            Device::Cpu => WgpuDevice::Cpu,
-        };
-
-        Ok(device)
-    }
-}
-
 /// The tuner's own timing path, for checking its rankings against other methods.
 pub mod tune_timing {
     use cubecl::prelude::*;
@@ -365,7 +348,7 @@ pub mod tune_timing {
     use crate::tune::{self, Sampler, VariantSite};
 
     /// The tuner's sampler over `candidates`, `launches` launches per sample.
-    pub fn gpu_sampler<'a, R: Runtime, S: VariantSite<R>>(
+    pub fn gpu_sampler<'a, S: VariantSite>(
         site: &'a S,
         candidates: &'a [S::Candidate],
         outputs: &'a S::Outputs,
@@ -375,23 +358,17 @@ pub mod tune_timing {
     }
 
     /// Waits for every launch queued on `client`.
-    pub fn sync<R: Runtime>(client: &ComputeClient<R>) -> Result<(), anyhow::Error> {
+    pub fn sync(client: &Client) -> Result<(), anyhow::Error> {
         gpu::sync(client)
     }
 
     /// Runs the baseline for the tuner's re-warm time.
-    pub fn rewarm<R: Runtime, S: VariantSite<R>>(
-        site: &S,
-        outputs: &S::Outputs,
-    ) -> Result<(), anyhow::Error> {
+    pub fn rewarm<S: VariantSite>(site: &S, outputs: &S::Outputs) -> Result<(), anyhow::Error> {
         tune::rewarm(site, outputs)
     }
 
     /// The launches per sample the tuner would pick for `site`.
-    pub fn calibrate<R: Runtime, S: VariantSite<R>>(
-        site: &S,
-        outputs: &S::Outputs,
-    ) -> Result<u32, anyhow::Error> {
+    pub fn calibrate<S: VariantSite>(site: &S, outputs: &S::Outputs) -> Result<u32, anyhow::Error> {
         tune::calibrate(site, outputs)
     }
 }

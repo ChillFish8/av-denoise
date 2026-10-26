@@ -29,8 +29,8 @@ pub(crate) fn pair_byte_offset(motion_ctx: &MotionCtx, pair_slot: u32, direction
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
 )]
-pub(crate) fn run_pair_analyse<R: Runtime>(
-    client: &ComputeClient<R>,
+pub(crate) fn run_pair_analyse(
+    client: &Client,
     motion_ctx: &MotionCtx,
     width: u32,
     height: u32,
@@ -60,7 +60,7 @@ pub(crate) fn run_pair_analyse<R: Runtime>(
         conf_len: 1,
         write_confidence: false,
     };
-    run_analyse::<R>(
+    run_analyse(
         client,
         motion_ctx,
         width,
@@ -85,7 +85,7 @@ pub(crate) fn run_pair_analyse<R: Runtime>(
         conf_len: 1,
         write_confidence: false,
     };
-    run_analyse::<R>(
+    run_analyse(
         client,
         motion_ctx,
         width,
@@ -104,12 +104,7 @@ pub(crate) fn run_pair_analyse<R: Runtime>(
 /// Duplicated ring slots, which appear while priming and during the end-of-stream flush, hold the
 /// same frame twice, so their motion is zero. Each direction gets its own dispatch because padding
 /// separates the two.
-pub(crate) fn zero_pair_slot<R: Runtime>(
-    client: &ComputeClient<R>,
-    motion_ctx: &MotionCtx,
-    pair_ring: &Handle,
-    pair_slot: u32,
-) {
+pub(crate) fn zero_pair_slot(client: &Client, motion_ctx: &MotionCtx, pair_ring: &Handle, pair_slot: u32) {
     let length = motion_ctx.pair_direction_len();
     let grid = length.div_ceil(BLOCK_1D).min(MAX_GRID_1D);
     let total_threads = grid * BLOCK_1D;
@@ -121,9 +116,9 @@ pub(crate) fn zero_pair_slot<R: Runtime>(
         let cube_dim = CubeDim::new_1d(BLOCK_1D);
 
         unsafe {
-            let direction_arg = ArrayArg::from_raw_parts(direction_slice, length as usize);
+            let direction_arg = BufferArg::from_raw_parts(direction_slice, length as usize);
 
-            mc_pair_zero::launch_unchecked::<R>(
+            mc_pair_zero::launch_unchecked(
                 client,
                 cube_count,
                 cube_dim,

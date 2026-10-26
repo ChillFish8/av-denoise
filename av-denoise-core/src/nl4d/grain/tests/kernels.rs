@@ -1,7 +1,6 @@
 #![cfg(any(feature = "vulkan", feature = "metal"))]
 
 use cubecl::prelude::*;
-use cubecl::wgpu::WgpuRuntime;
 
 use super::mirror::{MirrorFrame, mirror_measure};
 use super::synthetic::gaussian_field;
@@ -16,8 +15,6 @@ use crate::nl4d::grain::consts::{
 };
 use crate::nl4d::grain::fit::{bucket_edges, hist_median};
 use crate::nl4d::kernels::{grain_measure, grain_reduce_partials, grain_save_vectors};
-
-type R = WgpuRuntime;
 
 const THREADS: u32 = 16;
 const PLAIN: Shape = Shape {
@@ -37,10 +34,9 @@ const FLICKER: f32 = 2.0 / 255.0;
 /// The lane of lag `(0, 3)` in a record.
 const LAG_RIGHT_3: usize = 3;
 
-fn make_client() -> ComputeClient<R> {
+fn make_client() -> Client {
     crate::tests::compilation_cache::install_test_compilation_cache();
-    let device = <R as Runtime>::Device::default();
-    R::client(&device)
+    crate::testing::test_client()
 }
 
 #[test]
@@ -71,14 +67,14 @@ fn save_vectors_copies_one_neighbour_into_its_entry() {
     let dim = CubeDim::new_1d(THREADS);
 
     unsafe {
-        grain_save_vectors::launch_unchecked::<R>(
+        grain_save_vectors::launch_unchecked(
             &client,
             grid,
             dim,
-            ArrayArg::from_raw_parts(mv, mv_host.len()),
-            ArrayArg::from_raw_parts(conf, conf_host.len()),
-            ArrayArg::from_raw_parts(saved_mv.clone(), saved_mv_len),
-            ArrayArg::from_raw_parts(saved_conf.clone(), saved_conf_len),
+            BufferArg::from_raw_parts(mv, mv_host.len()),
+            BufferArg::from_raw_parts(conf, conf_host.len()),
+            BufferArg::from_raw_parts(saved_mv.clone(), saved_mv_len),
+            BufferArg::from_raw_parts(saved_conf.clone(), saved_conf_len),
             neighbour * blocks * 2,
             neighbour * blocks,
             entry,
@@ -311,19 +307,19 @@ fn run_measure(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Ve
     let blocks_y = shape.blocks_y();
 
     unsafe {
-        grain_measure::launch_unchecked::<R>(
+        grain_measure::launch_unchecked(
             &client,
             grid,
             dim,
             1usize,
-            ArrayArg::from_raw_parts(input, 2 * pixels),
-            ArrayArg::from_raw_parts(out_t, pixels),
-            ArrayArg::from_raw_parts(out_prev, pixels),
-            ArrayArg::from_raw_parts(saved_mv, 4 * blocks),
-            ArrayArg::from_raw_parts(saved_conf, 2 * blocks),
-            ArrayArg::from_raw_parts(edges_buf, edges.len()),
-            ArrayArg::from_raw_parts(hist.clone(), 2 * HIST_LEN),
-            ArrayArg::from_raw_parts(partials.clone(), cells * PARTIAL_LEN),
+            BufferArg::from_raw_parts(input, 2 * pixels),
+            BufferArg::from_raw_parts(out_t, pixels),
+            BufferArg::from_raw_parts(out_prev, pixels),
+            BufferArg::from_raw_parts(saved_mv, 4 * blocks),
+            BufferArg::from_raw_parts(saved_conf, 2 * blocks),
+            BufferArg::from_raw_parts(edges_buf, edges.len()),
+            BufferArg::from_raw_parts(hist.clone(), 2 * HIST_LEN),
+            BufferArg::from_raw_parts(partials.clone(), cells * PARTIAL_LEN),
             0u32,
             1u32,
             0u32,
@@ -762,12 +758,12 @@ fn reduce_adds_every_cell_into_its_group() {
     let dim = CubeDim::new_1d(REDUCE_THREADS);
 
     unsafe {
-        grain_reduce_partials::launch_unchecked::<R>(
+        grain_reduce_partials::launch_unchecked(
             &client,
             grid,
             dim,
-            ArrayArg::from_raw_parts(partials, partials_host.len()),
-            ArrayArg::from_raw_parts(chunk.clone(), GROUPED_AUTOCOV_LEN),
+            BufferArg::from_raw_parts(partials, partials_host.len()),
+            BufferArg::from_raw_parts(chunk.clone(), GROUPED_AUTOCOV_LEN),
             cells as u32,
         );
     }

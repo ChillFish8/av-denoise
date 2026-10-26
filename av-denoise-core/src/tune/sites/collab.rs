@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::COLLAB_FUSED;
+use super::{COLLAB_FUSED, no_cubes};
 use crate::collab::PATCH_SIZE;
 use crate::collab::geometry::{BASELINE_GROUPS, fused_cubes_x};
 use crate::collab::kernels::fused::{Centre, CollabVariant, GROUP_LANES, NeighbourWalk, Walk, collab_fused};
@@ -391,12 +391,17 @@ impl CollabOutputs {
             self.wsum_len
         }
     }
+
+    /// Every buffer a filter pass writes.
+    pub(crate) fn handles(&self) -> Vec<Handle> {
+        vec![self.accum.clone(), self.wsum.clone(), self.group_weight.clone()]
+    }
 }
 
 /// One `collab_fused` pass, with its candidate distances read as `S`.
 #[derive(Clone)]
-pub struct CollabSite<R: Runtime, S: Float> {
-    pub client: ComputeClient<R>,
+pub struct CollabSite<S: Float> {
+    pub client: Client,
     pub inputs: CollabInputs,
     pub values: CollabValues,
     pub shape: CollabShape,
@@ -404,14 +409,14 @@ pub struct CollabSite<R: Runtime, S: Float> {
     pub search: PhantomData<S>,
 }
 
-impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
+impl<S: Float> VariantSite for CollabSite<S> {
     type Candidate = CollabVariant;
     type Outputs = CollabOutputs;
 
     const PRESCREEN: bool = true;
     const COPIES: bool = true;
 
-    fn client(&self) -> &ComputeClient<R> {
+    fn client(&self) -> &Client {
         &self.client
     }
 
@@ -450,6 +455,10 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
         GROUP_LANES
     }
 
+    fn output_handles(&self, outputs: &CollabOutputs) -> Vec<Handle> {
+        outputs.handles()
+    }
+
     fn launch(&self, candidate: CollabVariant, outputs: &CollabOutputs) {
         let cubes_x = fused_cubes_x(self.shape.width, candidate.groups);
         let cube_count = CubeCount::new_2d(cubes_x, self.shape.refs_y);
@@ -459,10 +468,9 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
 
     /// A launch with no cubes.
     ///
-    /// On wgpu this compiles and caches the kernel without running it, because the wgpu runtime
-    /// skips a dispatch with no cubes after building its pipeline.
+    /// This compiles and caches the kernel without running it, since the dispatch counts no cubes.
     fn compile_only(&self, candidate: CollabVariant, outputs: &CollabOutputs) {
-        let no_cubes = CubeCount::Static(0, 0, 1);
+        let no_cubes = no_cubes(&self.client);
         self.dispatch(candidate, outputs, no_cubes);
     }
 
@@ -480,7 +488,7 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
 
     /// The copy's frame-sized buffers hold one word each, which [VariantSite::compile_only] never
     /// reads. The small fixed-size tables keep their sizes.
-    fn on_client(&self, client: &ComputeClient<R>) -> Option<Self> {
+    fn on_client(&self, client: &Client) -> Option<Self> {
         let blank_inputs = blank_collab_inputs(client);
         let blank_outputs = blank_collab_outputs(client, self.outputs.packed);
 
@@ -511,7 +519,7 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSite<R, S> {
     }
 }
 
-impl<R: Runtime, S: Float> CollabSite<R, S> {
+impl<S: Float> CollabSite<S> {
     /// Launches `candidate` over `cube_count` cubes, with `wsum` as `i64` words when the shape is packed.
     fn dispatch(&self, candidate: CollabVariant, outputs: &CollabOutputs, cube_count: CubeCount) {
         if self.shape.packed {
@@ -534,23 +542,23 @@ impl<R: Runtime, S: Float> CollabSite<R, S> {
             "a packed shape needs 64-bit weight words"
         );
 
-        let ring = bind::<R>(&inputs.ring, inputs.ring_len);
-        let ring_scalar = bind::<R>(&inputs.ring, inputs.ring_len);
-        let search_ring = bind::<R>(&inputs.search_ring, inputs.search_len);
-        let mv_field = bind::<R>(&inputs.mv_field, inputs.mv_len);
-        let confidence = bind::<R>(&inputs.confidence, inputs.conf_len);
-        let neighbour_slots = bind::<R>(&inputs.neighbour_slots, inputs.neighbour_slots_len);
-        let noise = bind::<R>(&inputs.noise, DERIVED_WORDS as usize);
-        let noise_curve = bind::<R>(&inputs.noise_curve, NOISE_CURVE_BINS);
-        let strength_map = bind::<R>(&inputs.strength_map, inputs.map_len);
-        let dct_profile = bind::<R>(&inputs.dct_profile, 8);
-        let kaiser = bind::<R>(&inputs.kaiser, PATCH_SIZE as usize);
-        let accum = bind::<R>(&outputs.accum, outputs.accum_len);
-        let wsum = bind::<R>(&outputs.wsum, outputs.wsum_len);
-        let group_weight = bind::<R>(&outputs.group_weight, outputs.refs);
+        let ring = bind(&inputs.ring, inputs.ring_len);
+        let ring_scalar = bind(&inputs.ring, inputs.ring_len);
+        let search_ring = bind(&inputs.search_ring, inputs.search_len);
+        let mv_field = bind(&inputs.mv_field, inputs.mv_len);
+        let confidence = bind(&inputs.confidence, inputs.conf_len);
+        let neighbour_slots = bind(&inputs.neighbour_slots, inputs.neighbour_slots_len);
+        let noise = bind(&inputs.noise, DERIVED_WORDS as usize);
+        let noise_curve = bind(&inputs.noise_curve, NOISE_CURVE_BINS);
+        let strength_map = bind(&inputs.strength_map, inputs.map_len);
+        let dct_profile = bind(&inputs.dct_profile, 8);
+        let kaiser = bind(&inputs.kaiser, PATCH_SIZE as usize);
+        let accum = bind(&outputs.accum, outputs.accum_len);
+        let wsum = bind(&outputs.wsum, outputs.wsum_len);
+        let group_weight = bind(&outputs.group_weight, outputs.refs);
 
         unsafe {
-            collab_fused::launch_unchecked::<S, W, R>(
+            collab_fused::launch_unchecked::<S, W>(
                 &self.client,
                 cube_count,
                 cube_dim,
@@ -616,10 +624,7 @@ pub(crate) fn collab_key_builder(site: &'static str, shape: &CollabShape) -> Sit
 }
 
 /// Freshly allocated outputs shaped like `outputs`, zeroed on the GPU.
-pub(crate) fn scratch_collab_outputs<R: Runtime>(
-    client: &ComputeClient<R>,
-    outputs: &CollabOutputs,
-) -> CollabOutputs {
+pub(crate) fn scratch_collab_outputs(client: &Client, outputs: &CollabOutputs) -> CollabOutputs {
     let accum = client.empty(outputs.accum_len * size_of::<i32>());
     let wsum_words = outputs.wsum_words();
     let wsum = client.empty(wsum_words * size_of::<i32>());
@@ -635,7 +640,7 @@ pub(crate) fn scratch_collab_outputs<R: Runtime>(
     scratch
 }
 
-pub(crate) fn clear_collab_outputs<R: Runtime>(client: &ComputeClient<R>, outputs: &CollabOutputs) {
+pub(crate) fn clear_collab_outputs(client: &Client, outputs: &CollabOutputs) {
     let wsum_words = outputs.wsum_words();
     zero_words(client, &outputs.accum, outputs.accum_len);
     zero_words(client, &outputs.wsum, wsum_words);
@@ -645,7 +650,7 @@ pub(crate) fn clear_collab_outputs<R: Runtime>(client: &ComputeClient<R>, output
 /// Inputs for a copy that only compiles, with one word in each frame-sized buffer.
 ///
 /// The small fixed-size tables keep their sizes.
-pub(crate) fn blank_collab_inputs<R: Runtime>(client: &ComputeClient<R>) -> CollabInputs {
+pub(crate) fn blank_collab_inputs(client: &Client) -> CollabInputs {
     CollabInputs {
         ring: zeroed_words(client, 1),
         ring_len: 1,
@@ -667,7 +672,7 @@ pub(crate) fn blank_collab_inputs<R: Runtime>(client: &ComputeClient<R>) -> Coll
 }
 
 /// Outputs for a copy that only compiles, one element each.
-pub(crate) fn blank_collab_outputs<R: Runtime>(client: &ComputeClient<R>, packed: bool) -> CollabOutputs {
+pub(crate) fn blank_collab_outputs(client: &Client, packed: bool) -> CollabOutputs {
     let wsum_words = if packed { 2 } else { 1 };
 
     CollabOutputs {
@@ -685,8 +690,8 @@ pub(crate) fn blank_collab_outputs<R: Runtime>(client: &ComputeClient<R>, packed
 /// `fidelity`.
 ///
 /// A packed `wsum` reads as its 32-bit halves, which compares the packed words exactly.
-pub fn compare_collab_outputs<R: Runtime>(
-    client: &ComputeClient<R>,
+pub fn compare_collab_outputs(
+    client: &Client,
     baseline: &CollabOutputs,
     candidate: &CollabOutputs,
     fidelity: Fidelity,

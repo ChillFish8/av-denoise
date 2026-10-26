@@ -3,7 +3,6 @@ use std::marker::PhantomData;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::runtime::TestRuntime;
 use crate::collab::geometry::{ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
 use crate::collab::kernels::transforms::dct_noise_profile;
@@ -107,7 +106,7 @@ pub(crate) fn noisy_copy(size: u32, base: f32, sigma: f32, seed: u32) -> Vec<f32
     noisy_field_over(&clean, size, size, sigma, seed)
 }
 
-pub(crate) fn upload(client: &ComputeClient<TestRuntime>, values: &[f32]) -> Handle {
+pub(crate) fn upload(client: &Client, values: &[f32]) -> Handle {
     let bytes = f32::as_bytes(values);
     client.create_from_slice(bytes)
 }
@@ -151,7 +150,7 @@ impl WindowSpec {
 }
 
 /// Confidences that vary by block, on an 8-pixel block grid.
-fn confidence_binding(client: &ComputeClient<TestRuntime>, spec: &WindowSpec) -> ConfidenceBinding {
+fn confidence_binding(client: &Client, spec: &WindowSpec) -> ConfidenceBinding {
     let step = 8;
     let blocks_x = spec.width.div_ceil(step);
     let blocks_y = spec.height.div_ceil(step);
@@ -172,7 +171,7 @@ fn confidence_binding(client: &ComputeClient<TestRuntime>, spec: &WindowSpec) ->
     }
 }
 
-pub(crate) fn window_site(client: &ComputeClient<TestRuntime>, spec: &WindowSpec) -> WindowSite<TestRuntime> {
+pub(crate) fn window_site(client: &Client, spec: &WindowSpec) -> WindowSite {
     let stored_ch = spec.channels.storage_count();
     let pixels = (spec.width * spec.height) as usize;
     let ring = hashed_ring(spec.width, spec.height, stored_ch, RING_FRAMES, 1);
@@ -233,10 +232,7 @@ pub(crate) struct AccumulateSpec {
     pub(crate) q_y: i32,
 }
 
-pub(crate) fn accumulate_site(
-    client: &ComputeClient<TestRuntime>,
-    spec: &AccumulateSpec,
-) -> AccumulateSite<TestRuntime> {
+pub(crate) fn accumulate_site(client: &Client, spec: &AccumulateSpec) -> AccumulateSite {
     let stored_ch = spec.channels.storage_count();
     let pixels = (spec.width * spec.height) as usize;
     let ring = hashed_ring(spec.width, spec.height, stored_ch, RING_FRAMES, 3);
@@ -312,10 +308,7 @@ fn collab_ring(spec: &CollabSpec) -> Vec<f32> {
 /// The confidences run from below `c_min` to 1, so some blocks skip their window and the rest are
 /// searched. The centre is the middle slot, and the neighbour slots list the frames behind it and
 /// then the frames ahead of it, nearest first.
-pub(crate) fn collab_site(
-    client: &ComputeClient<TestRuntime>,
-    spec: &CollabSpec,
-) -> CollabSite<TestRuntime, f32> {
+pub(crate) fn collab_site(client: &Client, spec: &CollabSpec) -> CollabSite<f32> {
     let stored_ch = spec.channels.storage_count();
     let frames = 2 * spec.radius + 1;
     let pixels = (spec.width * spec.height) as usize;
@@ -470,10 +463,7 @@ pub(crate) fn collab_site(
 }
 
 /// [collab_site] scoring its candidates from an f16 copy of the ring.
-pub(crate) fn collab_site_f16(
-    client: &ComputeClient<TestRuntime>,
-    spec: &CollabSpec,
-) -> CollabSite<TestRuntime, half::f16> {
+pub(crate) fn collab_site_f16(client: &Client, spec: &CollabSpec) -> CollabSite<half::f16> {
     let site = collab_site(client, spec);
     let ring_values = collab_ring(spec);
     let search_values: Vec<half::f16> = ring_values
@@ -504,7 +494,7 @@ pub(crate) fn collab_site_f16(
 }
 
 /// `site` with the packed accumulator layout and zeroed outputs of that layout.
-pub(crate) fn packed_twin(site: &CollabSite<TestRuntime, f32>) -> CollabSite<TestRuntime, f32> {
+pub(crate) fn packed_twin(site: &CollabSite<f32>) -> CollabSite<f32> {
     let client = &site.client;
     let pixels = site.outputs.wsum_len;
     let stored = site.shape.stored_ch as usize;
@@ -528,9 +518,7 @@ pub(crate) fn packed_twin(site: &CollabSite<TestRuntime, f32>) -> CollabSite<Tes
 }
 
 /// The search and filter sites for the same pass as `site`, sharing a zeroed member buffer.
-pub(crate) fn split_sites<S: Float>(
-    site: &CollabSite<TestRuntime, S>,
-) -> (CollabSearchSite<TestRuntime, S>, CollabFilterSite<TestRuntime>) {
+pub(crate) fn split_sites<S: Float>(site: &CollabSite<S>) -> (CollabSearchSite<S>, CollabFilterSite) {
     let client = &site.client;
     let search_outputs = SearchOutputs::zeroed(client, site.outputs.refs);
     let members = search_outputs.members.clone();
@@ -635,10 +623,7 @@ pub(crate) fn regularise_neighbour_slot(neighbours: u32, neighbour: u32) -> u32 
 }
 
 /// A regularise site over `spec.neighbours` neighbours laid out with the production padding.
-pub(crate) fn regularise_site(
-    client: &ComputeClient<TestRuntime>,
-    spec: &RegulariseSpec,
-) -> RegulariseSite<TestRuntime> {
+pub(crate) fn regularise_site(client: &Client, spec: &RegulariseSpec) -> RegulariseSite {
     let align = StorageAlign::from_client(client);
     let pixels = (spec.width * spec.height) as usize;
     let slot_pixels = align.pad_elems::<f32>(pixels);

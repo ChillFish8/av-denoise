@@ -1,5 +1,4 @@
 use super::*;
-use crate::accelerate::Accelerator;
 use crate::{Algorithm, DenoisingMode};
 
 /// Runs `luma` and `chroma` as two real `HostDenoiser`s in spatial mode.
@@ -8,8 +7,8 @@ use crate::{Algorithm, DenoisingMode};
 /// marker value and the two halves drifting apart shows up.
 fn luma_chroma_options() -> PlaneOptions {
     PlaneOptions {
-        accelerators: vec![Accelerator::Vulkan],
-        device: Device::Default,
+        accelerators: vec![crate::testing::test_accelerator()],
+        device: crate::testing::test_device(),
         intent: ChannelIntent::LumaChroma,
         mode: DenoisingMode::Spacial,
         algorithm: Algorithm::default(),

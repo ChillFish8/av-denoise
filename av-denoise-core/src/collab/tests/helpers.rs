@@ -1,12 +1,8 @@
 use cubecl::prelude::*;
-use cubecl::wgpu::WgpuRuntime;
 
-pub(super) type R = WgpuRuntime;
-
-pub(super) fn make_client() -> ComputeClient<R> {
+pub(super) fn make_client() -> Client {
     crate::tests::compilation_cache::install_test_compilation_cache();
-    let device = <R as Runtime>::Device::default();
-    R::client(&device)
+    crate::testing::test_client()
 }
 
 /// Adds independent pseudo-Gaussian noise to a flat `base` field.

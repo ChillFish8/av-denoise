@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use super::decide::ScriptedSampler;
 use super::probe::{ProbeCandidate, ProbeSite};
-use super::runtime::{TestRuntime, test_client};
+use super::runtime::test_client;
 use crate::tune::sites::{Centre, CollabVariant, NeighbourWalk, Walk};
 use crate::tune::{
     Basis,
@@ -913,7 +913,7 @@ fn a_later_batch_where_every_member_fails_the_prescreen_keeps_the_earlier_rankin
     assert_eq!(searched.timed(), representatives);
 }
 
-fn tuning_selector(ledger: &Arc<TuneLedger>) -> KernelSelector<TestRuntime> {
+fn tuning_selector(ledger: &Arc<TuneLedger>) -> KernelSelector {
     let client = test_client();
     let limits = DeviceLimits::from_client(&client);
     let kernels = EngineKernels {

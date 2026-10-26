@@ -75,12 +75,12 @@ fn run_spatial_pair(
     let results = client.create_from_slice(result_fill_bytes);
 
     unsafe {
-        let input_arg = ArrayArg::from_raw_parts(input.clone(), ring.len());
-        let partials_arg = ArrayArg::from_raw_parts(partials.clone(), partials_len);
+        let input_arg = BufferArg::from_raw_parts(input.clone(), ring.len());
+        let partials_arg = BufferArg::from_raw_parts(partials.clone(), partials_len);
         let partial_grid = CubeCount::new_2d(cubes_x, cubes_y);
         let partial_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
         match kernel {
-            Kernel::Reference => reference_noise_partial::launch_unchecked::<R>(
+            Kernel::Reference => reference_noise_partial::launch_unchecked(
                 &client,
                 partial_grid,
                 partial_dim,
@@ -94,7 +94,7 @@ fn run_spatial_pair(
                 BLOCK_X,
                 BLOCK_Y,
             ),
-            Kernel::Production => nlm_noise_partial::launch_unchecked::<R>(
+            Kernel::Production => nlm_noise_partial::launch_unchecked(
                 &client,
                 partial_grid,
                 partial_dim,
@@ -110,12 +110,12 @@ fn run_spatial_pair(
             ),
         }
 
-        let reduce_in = ArrayArg::from_raw_parts(partials.clone(), partials_len);
-        let reduce_out = ArrayArg::from_raw_parts(results.clone(), 4);
+        let reduce_in = BufferArg::from_raw_parts(partials.clone(), partials_len);
+        let reduce_out = BufferArg::from_raw_parts(results.clone(), 4);
         let reduce_grid = CubeCount::new_1d(1);
         let reduce_dim = CubeDim::new_1d(BLOCK_1D);
         match kernel {
-            Kernel::Reference => reference_noise_reduce::launch_unchecked::<R>(
+            Kernel::Reference => reference_noise_reduce::launch_unchecked(
                 &client,
                 reduce_grid,
                 reduce_dim,
@@ -125,7 +125,7 @@ fn run_spatial_pair(
                 block_count,
                 BLOCK_1D,
             ),
-            Kernel::Production => nlm_noise_reduce::launch_unchecked::<R>(
+            Kernel::Production => nlm_noise_reduce::launch_unchecked(
                 &client,
                 reduce_grid,
                 reduce_dim,
@@ -192,12 +192,12 @@ fn run_temporal(
     let stats = client.create_from_slice(stats_fill_bytes);
 
     unsafe {
-        let input_arg = ArrayArg::from_raw_parts(input.clone(), ring.len());
-        let stats_arg = ArrayArg::from_raw_parts(stats.clone(), stats_len);
+        let input_arg = BufferArg::from_raw_parts(input.clone(), ring.len());
+        let stats_arg = BufferArg::from_raw_parts(stats.clone(), stats_len);
         let grid = CubeCount::new_2d(blocks_x, blocks_y);
         let dim = CubeDim::new_2d(block, block);
         match kernel {
-            Kernel::Reference => reference_temporal_noise_stats::launch_unchecked::<R>(
+            Kernel::Reference => reference_temporal_noise_stats::launch_unchecked(
                 &client,
                 grid,
                 dim,
@@ -212,7 +212,7 @@ fn run_temporal(
                 block,
                 luma_fields,
             ),
-            Kernel::Production => nlm_temporal_noise_stats::launch_unchecked::<R>(
+            Kernel::Production => nlm_temporal_noise_stats::launch_unchecked(
                 &client,
                 grid,
                 dim,

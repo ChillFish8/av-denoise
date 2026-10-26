@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use super::fixtures::{AccumulateSpec, accumulate_site, regularise_site};
 use super::probe::{ProbeCandidate, ProbeSite, small_device_limits};
 use super::regularise::regularise_specs;
-use super::runtime::{TestRuntime, test_client};
+use super::runtime::test_client;
 use crate::nlmeans::ChannelMode;
 use crate::tests::compilation_cache::install_test_compilation_cache;
 use crate::tune::ledger::Observed;
@@ -33,7 +33,7 @@ use crate::tune::{
     VariantSite,
 };
 
-fn selector_for(ledger: &Arc<TuneLedger>) -> KernelSelector<TestRuntime> {
+fn selector_for(ledger: &Arc<TuneLedger>) -> KernelSelector {
     let client = test_client();
     let kernels = EngineKernels {
         ledger: Some(ledger.clone()),

@@ -16,7 +16,6 @@ use av_denoise_core::tune::{
     profile_wins,
 };
 
-use crate::accelerate::Accelerator;
 use crate::planar::{
     ChannelIntent,
     FrameLayout,
@@ -29,7 +28,7 @@ use crate::planar::{
 use crate::tune::driver::{FrameCycle, alternative_profiles_for, tune_keys};
 use crate::tune::setup::device_priority;
 use crate::tune::{TuneOutcome, TuneRequest, TuneStore, TuningMode, is_tuned, selected_device, tune_planes};
-use crate::{Algorithm, Depth, Device, Nl4dOptions, install_compilation_cache_at};
+use crate::{Algorithm, Depth, Nl4dOptions, install_compilation_cache_at};
 
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 48;
@@ -77,8 +76,8 @@ fn frames(count: usize) -> Vec<Planes> {
 
 fn options(algorithm: Algorithm, tuning: TuningMode) -> PlaneOptions {
     PlaneOptions {
-        accelerators: vec![Accelerator::Vulkan],
-        device: Device::Default,
+        accelerators: vec![crate::testing::test_accelerator()],
+        device: crate::testing::test_device(),
         intent: ChannelIntent::LumaChroma,
         mode: DenoisingMode::Temporal { radius: 1 },
         algorithm,

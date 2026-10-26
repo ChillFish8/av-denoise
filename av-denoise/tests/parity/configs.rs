@@ -1,10 +1,8 @@
-use av_denoise::accelerate::Accelerator;
 use av_denoise::{
     Algorithm,
     ChannelIntent,
     DenoisingMode,
     Depth,
-    Device,
     FrameLayout,
     MotionCompensationMode,
     MotionSearch,
@@ -42,8 +40,8 @@ fn layout(subsampling: Subsampling, depth: Depth) -> FrameLayout {
 
 fn options(intent: ChannelIntent, mode: DenoisingMode, algorithm: Algorithm) -> PlaneOptions {
     PlaneOptions {
-        accelerators: vec![Accelerator::Vulkan],
-        device: Device::Default,
+        accelerators: vec![av_denoise::testing::test_accelerator()],
+        device: av_denoise::testing::test_device(),
         intent,
         mode,
         algorithm,

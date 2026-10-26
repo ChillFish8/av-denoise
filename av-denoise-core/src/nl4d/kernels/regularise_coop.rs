@@ -35,14 +35,14 @@ fn clamp_index(value: i32, limit: i32) -> i32 {
 /// through the same tree.
 #[cube(launch_unchecked)]
 pub fn nl4d_mv_regularise_coop(
-    pyramid: &Array<f32>,
-    neighbour_slots: &Array<u32>,
-    mv_in: &Array<i32>,
-    mv_out: &mut Array<i32>,
-    confidence_out: &mut Array<f32>,
+    pyramid: &[f32],
+    neighbour_slots: &[u32],
+    mv_in: &[i32],
+    mv_out: &mut [i32],
+    confidence_out: &mut [f32],
     centre_slot: u32,
     lambda_pixel: f32,
-    noise: &Array<f32>,
+    noise: &[f32],
     thsad: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -68,12 +68,12 @@ pub fn nl4d_mv_regularise_coop(
     let conf_base = neighbour_index * conf_stride;
 
     let block_pixels = comptime!(blksize * blksize);
-    let mut centre_smem = SharedMemory::<f32>::new(block_pixels as usize);
-    let mut candidates = SharedMemory::<i32>::new(comptime!(2 * REGULARISE_CANDIDATES) as usize);
-    let mut median = SharedMemory::<i32>::new(2usize);
-    let mut sad_scratch = SharedMemory::<f32>::new(REGULARISE_CANDIDATES as usize);
-    let mut cost = SharedMemory::<f32>::new(REGULARISE_CANDIDATES as usize);
-    let mut partials = SharedMemory::<f32>::new(comptime!(REGULARISE_CANDIDATES * threads) as usize);
+    let mut centre_smem = Shared::<[f32]>::new_slice(block_pixels as usize);
+    let mut candidates = Shared::<[i32]>::new_slice(comptime!(2 * REGULARISE_CANDIDATES) as usize);
+    let mut median = Shared::<[i32]>::new_slice(2usize);
+    let mut sad_scratch = Shared::<[f32]>::new_slice(REGULARISE_CANDIDATES as usize);
+    let mut cost = Shared::<[f32]>::new_slice(REGULARISE_CANDIDATES as usize);
+    let mut partials = Shared::<[f32]>::new_slice(comptime!(REGULARISE_CANDIDATES * threads) as usize);
 
     let block_origin_x = block_col as i32 * step as i32;
     let block_origin_y = block_row as i32 * step as i32;

@@ -62,12 +62,7 @@ fn pyramid_ring(width: u32, height: u32, levels: u32, align: StorageAlign, slots
 /// Each count repeats its allocation's formula in checked `u64`. The geometry must have passed
 /// [Geometry::check_ring_fits](crate::engine::Geometry::check_ring_fits) for the frame ring, which
 /// keeps the pixel count within `u32` so the shared size helpers called here cannot overflow.
-pub(crate) fn front_buffer_sizes<R: Runtime>(
-    client: &ComputeClient<R>,
-    params: &NlmParams,
-    width: u32,
-    height: u32,
-) -> FrontSizes {
+pub(crate) fn front_buffer_sizes(client: &Client, params: &NlmParams, width: u32, height: u32) -> FrontSizes {
     let align = StorageAlign::from_client(client);
     let stored_ch = params.channels.storage_count();
     let total_frames = u64::from(params.total_frames());

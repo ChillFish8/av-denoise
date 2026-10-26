@@ -76,9 +76,9 @@ fn normalised(accum_fixed: i32, weight_total: i32) -> f32 {
     reason = "every argument is a buffer or comptime shape the kernel binds"
 )]
 pub fn collab_normalise_packed<N: Size>(
-    packed: &mut Array<i64>,
-    rest: &mut Array<i32>,
-    output: &mut Array<Vector<f32, N>>,
+    packed: &mut [i64],
+    rest: &mut [i32],
+    output: &mut [Vector<f32, N>],
     frame_offset: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -99,13 +99,15 @@ pub fn collab_normalise_packed<N: Size>(
     let first_accum = unpack_accum(word);
 
     let mut pixel_out = Vector::<f32, N>::empty();
-    pixel_out[0usize] = normalised(first_accum, weight_total);
+    let first_value = normalised(first_accum, weight_total);
+    pixel_out.insert(0usize, first_value);
 
     #[unroll]
     for channel in 1..channels {
         let rest_index = pixel * rest_channels + channel - 1u32;
         let accumulated = rest[rest_index as usize];
-        pixel_out[channel as usize] = normalised(accumulated, weight_total);
+        let value = normalised(accumulated, weight_total);
+        pixel_out.insert(channel as usize, value);
     }
 
     output[local_pixel as usize] = pixel_out;
@@ -124,13 +126,9 @@ pub fn collab_normalise_packed<N: Size>(
 /// [collab_zero_accum](super::aggregate::collab_zero_accum) for the packed layout. The loop strides
 /// so the grid stays under the workgroup limit.
 #[cube(launch_unchecked)]
-#[expect(
-    clippy::collapsible_if,
-    reason = "the outer condition is comptime, so luma compiles no access to the other channels"
-)]
 pub fn collab_zero_packed(
-    packed: &mut Array<Atomic<i64>>,
-    rest: &mut Array<Atomic<i32>>,
+    packed: &mut [Atomic<i64>],
+    rest: &mut [Atomic<i32>],
     frame_offset: u32,
     #[comptime] pixels: u32,
     #[comptime] rest_channels: u32,
@@ -145,6 +143,10 @@ pub fn collab_zero_packed(
             Atomic::store(&packed[(frame_offset + idx) as usize], 0i64);
         }
 
+        #[expect(
+            clippy::collapsible_if,
+            reason = "the outer condition is comptime, so luma compiles no access to the other channels"
+        )]
         if comptime!(rest_channels > 0) {
             if idx < rest_span {
                 Atomic::store(&rest[(frame_offset * rest_channels + idx) as usize], 0i32);

@@ -35,11 +35,7 @@ pub(crate) fn frame_shifted_by(
 /// Uploads `centre` and `neighbour` as frame slots 0 and 1 of one buffer, with a table naming slot 1.
 ///
 /// The block-match kernels read every frame from one buffer, so this is how a test matches two planes.
-pub(crate) fn pair_pyramid<R: Runtime>(
-    client: &ComputeClient<R>,
-    centre: &[f32],
-    neighbour: &[f32],
-) -> (Handle, Handle) {
+pub(crate) fn pair_pyramid(client: &Client, centre: &[f32], neighbour: &[f32]) -> (Handle, Handle) {
     let mut frames = centre.to_vec();
     frames.extend_from_slice(neighbour);
     let frame_bytes = f32::as_bytes(&frames);

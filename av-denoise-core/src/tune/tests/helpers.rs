@@ -6,7 +6,7 @@ use cubecl::prelude::*;
 use super::fixtures::{CollabSpec, collab_site};
 use super::precompile::{SharedProbe, SharedSite, compile_limits, uncached_client};
 use super::probe::{ProbeCandidate, ProbeSite};
-use super::runtime::{TestRuntime, test_client};
+use super::runtime::test_client;
 use crate::nlmeans::ChannelMode;
 use crate::tune::gpu::sync;
 use crate::tune::helpers::reload_marker;
@@ -17,7 +17,7 @@ use crate::tune::{CompileHelpers, HelperFactory, SiteCandidate, TuneLedger, Vari
 const NO_CEILING: Duration = Duration::MAX;
 
 /// Two helpers that are the test client itself, which is enough to drive the parallel path.
-fn cloned_helpers(client: &ComputeClient<TestRuntime>) -> Vec<ComputeClient<TestRuntime>> {
+fn cloned_helpers(client: &Client) -> Vec<Client> {
     vec![client.clone(), client.clone()]
 }
 
@@ -164,9 +164,9 @@ fn a_ledger_stops_handing_out_helpers_once_they_failed() {
     });
     ledger.set_compile_helpers(factory);
 
-    let before = ledger.compile_helpers::<TestRuntime>().len();
+    let before = ledger.compile_helpers().len();
     ledger.fail_compile_helpers();
-    let after = ledger.compile_helpers::<TestRuntime>().len();
+    let after = ledger.compile_helpers().len();
 
     assert_eq!(before, 1);
     assert_eq!(after, 0);
@@ -256,13 +256,14 @@ super::runtime::wgpu_only! {
     /// Builds the test client on a fresh compilation cache of its own, so every kernel compiles.
     ///
     /// The directory is named by the process and the time, so no earlier run can have warmed it.
-    fn private_cache_client() -> (ComputeClient<TestRuntime>, PathBuf) {
+    fn private_cache_client() -> (Client, PathBuf) {
         let now = SystemTime::now().duration_since(UNIX_EPOCH);
         let nanos = now.expect("time runs forward").as_nanos();
         let name = format!("av-denoise-helper-test-{}-{nanos}", std::process::id());
         let dir = std::env::temp_dir().join(name);
         let mut config = CubeClRuntimeConfig::from_current_dir().override_from_env();
-        config.compilation.cache = Some(CacheConfig::File(dir.clone()));
+        config.compilation.cache = true;
+        config.environment.path = CacheConfig::Directory(dir.clone());
         CubeClRuntimeConfig::set(config);
 
         let client = test_client();
@@ -278,11 +279,11 @@ super::runtime::wgpu_only! {
     /// Compiles one batch of a luma site `width` wide on the helpers, then checks that the site
     /// client loaded every candidate instead of compiling it, and that each matches the baseline.
     fn assert_helpers_compile_a_batch_the_site_client_loads(
-        client: &ComputeClient<TestRuntime>,
+        client: &Client,
         helpers: &CompileHelpers,
         width: u32,
     ) {
-        let helper_clients = helpers.clients::<TestRuntime>();
+        let helper_clients = helpers.clients();
         let spec = CollabSpec::new(width, 37, ChannelMode::Luma, 1);
         let site = collab_site(client, &spec);
         let limits = DeviceLimits::from_client(client);

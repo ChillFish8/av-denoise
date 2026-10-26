@@ -50,9 +50,9 @@ fn window_stride(blksize: u32, search_radius: u32) -> u32 {
 /// block inside this block's region. `step` and `fine_step` are the coarse and fine block spacings.
 #[cube(launch_unchecked)]
 pub fn mc_block_match_coarse(
-    pyramid: &Array<f32>,
-    neighbour_slots: &Array<u32>,
-    mv_field: &mut Array<i32>,
+    pyramid: &[f32],
+    neighbour_slots: &[u32],
+    mv_field: &mut [i32],
     centre_slot: u32,
     #[comptime] level_width: u32,
     #[comptime] level_height: u32,
@@ -87,14 +87,14 @@ pub fn mc_block_match_coarse(
     let window_side = comptime!(2 * search_radius + 1);
     let candidates = comptime!(window_side * window_side);
     let block_pixels = comptime!(blksize * blksize);
-    let mut sad_scratch = SharedMemory::<f32>::new(candidates as usize);
-    let mut centre_smem = SharedMemory::<f32>::new(block_pixels as usize);
+    let mut sad_scratch = Shared::<[f32]>::new_slice(candidates as usize);
+    let mut centre_smem = Shared::<[f32]>::new_slice(block_pixels as usize);
     let window_stride_len = comptime!(window_stride(blksize, search_radius));
     let window_rows = comptime!(blksize + 2 * search_radius);
     let window_area = comptime!(window_stride_len * window_rows);
-    let mut window = SharedMemory::<f32>::new(window_area as usize);
-    let mut plane_sads = SharedMemory::<f32>::new(ARGMIN_MAX_PLANES as usize);
-    let mut plane_indices = SharedMemory::<u32>::new(ARGMIN_MAX_PLANES as usize);
+    let mut window = Shared::<[f32]>::new_slice(window_area as usize);
+    let mut plane_sads = Shared::<[f32]>::new_slice(ARGMIN_MAX_PLANES as usize);
+    let mut plane_indices = Shared::<[u32]>::new_slice(ARGMIN_MAX_PLANES as usize);
 
     let mut pixel_y = local_y;
     while pixel_y < blksize {
@@ -200,24 +200,14 @@ pub fn mc_block_match_coarse(
     let mvy_fine = best_dy * level_scale as i32;
 
     let fine_col_start = (block_col * step * level_scale / fine_step).min(fine_blocks_x);
-    #[expect(
-        clippy::useless_conversion,
-        reason = "both branches have to expand to the same cubecl native type, which the \
-                  conversion supplies"
-    )]
     let fine_col_end = if block_col == CUBE_COUNT_X - 1 {
-        fine_blocks_x.into()
+        fine_blocks_x
     } else {
         ((block_col + 1) * step * level_scale / fine_step).min(fine_blocks_x)
     };
     let fine_row_start = (block_row * step * level_scale / fine_step).min(fine_blocks_y);
-    #[expect(
-        clippy::useless_conversion,
-        reason = "both branches have to expand to the same cubecl native type, which the \
-                  conversion supplies"
-    )]
     let fine_row_end = if block_row == CUBE_COUNT_Y - 1 {
-        fine_blocks_y.into()
+        fine_blocks_y
     } else {
         ((block_row + 1) * step * level_scale / fine_step).min(fine_blocks_y)
     };
@@ -260,13 +250,13 @@ pub fn mc_block_match_coarse(
 /// The neighbour pixels the search reaches are staged into shared memory once, clamped to the frame.
 #[cube(launch_unchecked)]
 pub fn mc_block_match_fine(
-    pyramid: &Array<f32>,
-    neighbour_slots: &Array<u32>,
-    mv_field: &mut Array<i32>,
-    confidence: &mut Array<f32>,
+    pyramid: &[f32],
+    neighbour_slots: &[u32],
+    mv_field: &mut [i32],
+    confidence: &mut [f32],
     centre_slot: u32,
     #[comptime] write_confidence: bool,
-    noise: &Array<f32>,
+    noise: &[f32],
     sad_field: u32,
     thsad: f32,
     #[comptime] width: u32,
@@ -292,25 +282,11 @@ pub fn mc_block_match_fine(
 
     let mv_slot = (mv_base + (block_row * blocks_x + block_col) * 2) as usize;
 
-    #[expect(
-        clippy::useless_conversion,
-        reason = "both branches have to expand to the same cubecl native type, which the \
-                  conversion supplies"
-    )]
-    let seed_dx = if use_seed == 1u32 {
-        mv_field[mv_slot]
-    } else {
-        0i32.into()
-    };
-    #[expect(
-        clippy::useless_conversion,
-        reason = "both branches have to expand to the same cubecl native type, which the \
-                  conversion supplies"
-    )]
+    let seed_dx = if use_seed == 1u32 { mv_field[mv_slot] } else { 0i32 };
     let seed_dy = if use_seed == 1u32 {
         mv_field[mv_slot + 1]
     } else {
-        0i32.into()
+        0i32
     };
 
     let block_origin_x = block_col as i32 * step as i32;
@@ -324,14 +300,14 @@ pub fn mc_block_match_fine(
     let window_side = comptime!(2 * search_radius + 1);
     let candidates = comptime!(window_side * window_side);
     let block_pixels = comptime!(blksize * blksize);
-    let mut sad_scratch = SharedMemory::<f32>::new(candidates as usize);
-    let mut centre_smem = SharedMemory::<f32>::new(block_pixels as usize);
+    let mut sad_scratch = Shared::<[f32]>::new_slice(candidates as usize);
+    let mut centre_smem = Shared::<[f32]>::new_slice(block_pixels as usize);
     let window_stride_len = comptime!(window_stride(blksize, search_radius));
     let window_rows = comptime!(blksize + 2 * search_radius);
     let window_area = comptime!(window_stride_len * window_rows);
-    let mut window = SharedMemory::<f32>::new(window_area as usize);
-    let mut plane_sads = SharedMemory::<f32>::new(ARGMIN_MAX_PLANES as usize);
-    let mut plane_indices = SharedMemory::<u32>::new(ARGMIN_MAX_PLANES as usize);
+    let mut window = Shared::<[f32]>::new_slice(window_area as usize);
+    let mut plane_sads = Shared::<[f32]>::new_slice(ARGMIN_MAX_PLANES as usize);
+    let mut plane_indices = Shared::<[u32]>::new_slice(ARGMIN_MAX_PLANES as usize);
 
     let mut pixel_y = local_y;
     while pixel_y < blksize {
@@ -461,8 +437,8 @@ pub fn mc_block_match_fine(
     reason = "every argument is a buffer, position or comptime shape the staging reads"
 )]
 fn stage_window(
-    pyramid: &Array<f32>,
-    window: &mut SharedMemory<f32>,
+    pyramid: &[f32],
+    window: &mut Shared<[f32]>,
     neighbour_base: u32,
     window_x0: i32,
     window_y0: i32,
@@ -497,9 +473,9 @@ fn stage_window(
 /// how candidates are grouped.
 #[cube]
 fn blocked_window_sads(
-    centre_smem: &SharedMemory<f32>,
-    window: &SharedMemory<f32>,
-    sad_scratch: &mut SharedMemory<f32>,
+    centre_smem: &Shared<[f32]>,
+    window: &Shared<[f32]>,
+    sad_scratch: &mut Shared<[f32]>,
     thread_id: u32,
     threads: u32,
     #[comptime] blksize: u32,
@@ -564,9 +540,9 @@ fn blocked_window_sads(
 /// `fills_planes`.
 #[cube]
 fn parallel_argmin(
-    sad_scratch: &SharedMemory<f32>,
-    plane_sads: &mut SharedMemory<f32>,
-    plane_indices: &mut SharedMemory<u32>,
+    sad_scratch: &Shared<[f32]>,
+    plane_sads: &mut Shared<[f32]>,
+    plane_indices: &mut Shared<[u32]>,
     thread_id: u32,
     threads: u32,
     fills_planes: bool,

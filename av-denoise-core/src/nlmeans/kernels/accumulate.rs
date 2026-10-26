@@ -10,12 +10,12 @@ use super::helpers::{accumulate_pair, clamp_coord};
 /// valid weight.
 #[cube(launch_unchecked)]
 pub fn nlm_accumulate<N: Size>(
-    input: &Array<Vector<f32, N>>,
-    accum: &mut Array<Vector<f32, N>>,
-    weight_sum: &mut Array<f32>,
-    weights_fwd: &Array<f32>,
-    weights_bwd: &Array<f32>,
-    max_weight: &mut Array<f32>,
+    input: &[Vector<f32, N>],
+    accum: &mut [Vector<f32, N>],
+    weight_sum: &mut [f32],
+    weights_fwd: &[f32],
+    weights_bwd: &[f32],
+    max_weight: &mut [f32],
     frame_fwd: u32,
     frame_bwd: u32,
     q_x: i32,
@@ -52,11 +52,11 @@ pub fn nlm_accumulate<N: Size>(
 /// be bound at the GPU's offset alignment and a ring slot rarely lands on it.
 #[cube(launch_unchecked)]
 pub fn nlm_finish<N: Size>(
-    input: &Array<Vector<f32, N>>,
-    output: &mut Array<Vector<f32, N>>,
-    accum: &Array<Vector<f32, N>>,
-    weight_sum: &Array<f32>,
-    max_weight: &Array<f32>,
+    input: &[Vector<f32, N>],
+    output: &mut [Vector<f32, N>],
+    accum: &[Vector<f32, N>],
+    weight_sum: &[f32],
+    max_weight: &[f32],
     center_frame: u32,
     output_frame: u32,
     wref: f32,
@@ -88,13 +88,16 @@ pub fn nlm_finish<N: Size>(
 
         #[unroll]
         for channel in 0..channels {
-            out[channel as usize] =
-                (original[channel as usize] * self_weight + accumulated[channel as usize]) * inv_denominator;
+            let original_lane = original.extract(channel as usize);
+            let accumulated_lane = accumulated.extract(channel as usize);
+            let value = (original_lane * self_weight + accumulated_lane) * inv_denominator;
+            out.insert(channel as usize, value);
         }
     } else {
         #[unroll]
         for channel in 0..channels {
-            out[channel as usize] = original[channel as usize];
+            let original_lane = original.extract(channel as usize);
+            out.insert(channel as usize, original_lane);
         }
     }
 

@@ -25,8 +25,8 @@ const NOISE_STORED_CH: u32 = 4;
 ///
 /// `nlm_noise_partial` reduces every `BLOCK_X × BLOCK_Y` cube to one partial per channel lane,
 /// then `nlm_noise_reduce` folds every partial into the frame-level total.
-pub struct NoisePartialBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct NoisePartialBench {
+    pub client: Client,
 }
 
 #[derive(Clone)]
@@ -40,7 +40,7 @@ fn partials_len() -> usize {
     (WIDTH.div_ceil(BLOCK_X) * HEIGHT.div_ceil(BLOCK_Y) * 4) as usize
 }
 
-impl<R: Runtime> Benchmark for NoisePartialBench<R> {
+impl Benchmark for NoisePartialBench {
     type Input = NoiseInput;
     type Output = ();
 
@@ -67,13 +67,13 @@ impl<R: Runtime> Benchmark for NoisePartialBench<R> {
         let cube_dim = cube_dim_2d();
 
         unsafe {
-            nlm_noise_partial::launch_unchecked::<R>(
+            nlm_noise_partial::launch_unchecked(
                 &self.client,
                 cube_count,
                 cube_dim,
                 NOISE_STORED_CH as usize,
-                ArrayArg::from_raw_parts(args.input.clone(), total_input),
-                ArrayArg::from_raw_parts(args.partials.clone(), partial_lanes),
+                BufferArg::from_raw_parts(args.input.clone(), total_input),
+                BufferArg::from_raw_parts(args.partials.clone(), partial_lanes),
                 0u32,
                 WIDTH,
                 HEIGHT,
@@ -84,12 +84,12 @@ impl<R: Runtime> Benchmark for NoisePartialBench<R> {
         }
 
         unsafe {
-            nlm_noise_reduce::launch_unchecked::<R>(
+            nlm_noise_reduce::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(1),
                 CubeDim::new_1d(BLOCK_1D),
-                ArrayArg::from_raw_parts(args.partials.clone(), partial_lanes),
-                ArrayArg::from_raw_parts(args.results.clone(), 4),
+                BufferArg::from_raw_parts(args.partials.clone(), partial_lanes),
+                BufferArg::from_raw_parts(args.results.clone(), 4),
                 0u32,
                 partial_count,
                 BLOCK_1D,

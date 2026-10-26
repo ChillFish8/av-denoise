@@ -7,14 +7,18 @@ pub mod bench_api;
 mod collab;
 mod engine;
 mod error;
+#[cfg(test)]
+mod kernel_hash;
 mod motion;
 pub mod nl4d;
 pub mod nlmeans;
 mod noise;
 mod options;
-pub mod tune;
+#[doc(hidden)]
+pub mod testing;
 #[cfg(test)]
 mod tests;
+pub mod tune;
 
 pub use self::engine::{DevicePlane, EdgePadding, Engine, EngineTiming, Geometry, SampleFormat, WindowSpan};
 pub use self::error::Error;

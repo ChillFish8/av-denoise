@@ -31,7 +31,7 @@ const SHADOW_SPAN: f32 = SHADOW_HIGH - SHADOW_LOW;
 ///
 /// The ratio is linear between bin centres and is scaled by the curve's quarter median. `base` is the slot's first reading word.
 #[cube]
-fn curve_sigma_at(readings: &Array<f32>, base: u32, luma: f32) -> f32 {
+fn curve_sigma_at(readings: &[f32], base: u32, luma: f32) -> f32 {
     let position = f32::clamp(luma * CURVE_BINS - 0.5f32, 0.0f32, LAST_BIN);
     let truncated = u32::cast_from(position);
     let lower = u32::min(truncated, LAST_LOWER_BIN);
@@ -75,11 +75,11 @@ fn is_line(luma_range: f32, tensor_trace: f32, sigma: f32) -> bool {
     reason = "every argument is a binding, the slot or a comptime shape"
 )]
 pub fn noise_classify(
-    records: &Array<f32>,
-    readings: &Array<f32>,
-    classes: &mut Array<u32>,
-    lumas: &mut Array<f32>,
-    tensors: &mut Array<f32>,
+    records: &[f32],
+    readings: &[f32],
+    classes: &mut [u32],
+    lumas: &mut [f32],
+    tensors: &mut [f32],
     slot: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -154,7 +154,7 @@ pub fn noise_classify(
 /// Whether any line quarter lies within `radius` quarters of `col`, `row`, clamped at the grid.
 #[cube]
 fn in_line_ring(
-    classes: &Array<u32>,
+    classes: &[u32],
     col: u32,
     row: u32,
     #[comptime] radius: u32,
@@ -187,8 +187,8 @@ fn in_line_ring(
 /// gradient energy reads 0.
 #[cube]
 fn pooled_coherence(
-    classes: &Array<u32>,
-    tensors: &Array<f32>,
+    classes: &[u32],
+    tensors: &[f32],
     col: u32,
     row: u32,
     #[comptime] cols: u32,
@@ -250,11 +250,11 @@ fn shadow_multiplier(luma: f32, shadow_soften: f32) -> f32 {
     reason = "every argument is a binding, a per-slot scalar or a comptime shape"
 )]
 pub fn noise_strength_map(
-    readings: &Array<f32>,
-    classes: &Array<u32>,
-    lumas: &Array<f32>,
-    tensors: &Array<f32>,
-    slot_maps: &mut Array<f32>,
+    readings: &[f32],
+    classes: &[u32],
+    lumas: &[f32],
+    tensors: &[f32],
+    slot_maps: &mut [f32],
     slot: u32,
     flat_boost: f32,
     shadow_soften: f32,

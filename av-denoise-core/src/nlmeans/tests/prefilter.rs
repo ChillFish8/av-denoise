@@ -7,7 +7,7 @@ use crate::nlmeans::*;
 /// Reads back the reference ring, which holds exactly one frame at `temporal_radius: 0`.
 ///
 /// The single slot is the whole buffer, so the handle needs no byte-offset slicing.
-fn read_single_slot_reference(denoiser: &NlmDenoiser<R>) -> Vec<f32> {
+fn read_single_slot_reference(denoiser: &NlmDenoiser) -> Vec<f32> {
     let handle = denoiser
         .reference_buf
         .as_ref()
@@ -68,7 +68,7 @@ fn bilateral_uniform_image_passthrough() {
         hq: None,
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
     let result = denoiser.denoise().unwrap().unwrap();
 
@@ -99,7 +99,7 @@ fn bilateral_noisy_image_finite() {
         hq: None,
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
     let result = denoiser.denoise().unwrap().unwrap();
 
@@ -134,7 +134,7 @@ fn nlm_spatial_pilot_fills_reference() {
     let frame = make_noisy_gaussian_frame(width, height, 1, 0.5, &[6.0 / 255.0]);
 
     let params = nlm_spatial_params();
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
     let reference = read_single_slot_reference(&denoiser);
@@ -165,7 +165,7 @@ fn nlm_spatial_pilot_smooths() {
     let frame = make_noisy_gaussian_frame(width, height, 1, 0.5, &[10.0 / 255.0]);
 
     let params = nlm_spatial_params();
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
     let reference = read_single_slot_reference(&denoiser);
@@ -187,7 +187,7 @@ fn nlm_spatial_pilot_uniform_passthrough() {
     let frame = make_uniform_frame(width, height, 1, 0.5);
 
     let params = nlm_spatial_params();
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
     let reference = read_single_slot_reference(&denoiser);
@@ -217,7 +217,7 @@ fn nlm_spatial_zeros_main_offset_but_keeps_input_offset() {
         "test setup: expected a nonzero noise floor"
     );
 
-    let denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let denoiser = NlmDenoiser::new(&client, params, width, height);
     let snapshot = denoiser.noise_snapshot().expect("the noise state reads back");
     let derived = snapshot.derived;
 

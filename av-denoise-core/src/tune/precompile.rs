@@ -102,8 +102,8 @@ impl CompileAccount<'_> {
     }
 
     /// The clients that compile candidates in parallel, empty when there are none.
-    pub(crate) fn helpers<R: Runtime>(&self) -> &[ComputeClient<R>] {
-        self.ledger.compile_helpers::<R>()
+    pub(crate) fn helpers(&self) -> &[Client] {
+        self.ledger.compile_helpers()
     }
 
     /// Stops using the helpers after they failed candidates the tuned client then compiled.
@@ -139,13 +139,13 @@ impl CompileAccount<'_> {
 /// one of them takes [SLOW_LOAD] or longer and so was not in the cache. Queued launches compile on
 /// the device thread, so a batch checks the allowance mostly before it starts. One candidate at a
 /// time, each helper, and each load after the helpers check it before each candidate.
-pub(crate) fn precompile<R: Runtime, S: VariantSite<R>>(
+pub(crate) fn precompile<S: VariantSite>(
     site: &S,
     allowed: &[S::Candidate],
     indices: &[usize],
     outputs: &S::Outputs,
     limits: &CompileLimits,
-    helpers: &[ComputeClient<R>],
+    helpers: &[Client],
 ) -> Precompiled {
     let started = Instant::now();
     let ceiling = Ceiling {
@@ -177,7 +177,7 @@ pub(crate) fn precompile<R: Runtime, S: VariantSite<R>>(
 /// The candidates an earlier run compiled load first, each with a sync of its own, so a slow one
 /// shows the cache missed it. The rest compile in one batch when the allowance left covers the
 /// estimate for each of them.
-fn serial<R: Runtime, S: VariantSite<R>>(
+fn serial<S: VariantSite>(
     site: &S,
     allowed: &[S::Candidate],
     indices: &[usize],
@@ -216,7 +216,7 @@ fn in_given_order(precompiled: &mut Precompiled, indices: &[usize]) {
 
 /// A copy of `site` on each helper, or none when there are no helpers, the site cannot copy itself
 /// or the on-disk compilation cache is off.
-fn replicas<R: Runtime, S: VariantSite<R>>(site: &S, helpers: &[ComputeClient<R>]) -> Option<Vec<S>> {
+fn replicas<S: VariantSite>(site: &S, helpers: &[Client]) -> Option<Vec<S>> {
     if helpers.is_empty() || !compilation_cache_enabled() {
         return None;
     }
@@ -309,7 +309,7 @@ struct HelperResults {
 /// the compiled candidates and every candidate a helper failed or never finished, one at a time (see
 /// [load_one_by_one] for how the ceiling applies). A load that has to compile is slow but still
 /// correct, and is logged.
-fn parallel<R: Runtime, S: VariantSite<R>>(
+fn parallel<S: VariantSite>(
     site: &S,
     replicas: Vec<S>,
     allowed: &[S::Candidate],
@@ -362,13 +362,13 @@ fn helpers_failed(results: &HelperResults, loaded: &Precompiled) -> bool {
 }
 
 /// Runs one compile loop per helper and waits for every one of them.
-fn run_helpers<R: Runtime, S: VariantSite<R>>(
+fn run_helpers<S: VariantSite>(
     replicas: Vec<S>,
     allowed: &[S::Candidate],
     queue: &HelperQueue<'_>,
     ceiling: &Ceiling<'_>,
 ) {
-    let clients: Vec<ComputeClient<R>> = replicas.iter().map(|replica| replica.client().clone()).collect();
+    let clients: Vec<Client> = replicas.iter().map(|replica| replica.client().clone()).collect();
 
     std::thread::scope(|scope| {
         let workers: Vec<_> = replicas
@@ -386,13 +386,16 @@ fn run_helpers<R: Runtime, S: VariantSite<R>>(
 
     // Each copy's buffers are gone by now, so the cleanup can release its pool pages.
     for client in clients {
-        client.memory_cleanup();
+        let cleaned = client.memory_cleanup();
+        if let Err(error) = cleaned {
+            tracing::warn!(?error, "a compile helper's memory cleanup failed");
+        }
     }
 }
 
 /// Compiles candidates from `queue` on one helper until the queue is empty or
 /// [HELPER_FAILURE_LIMIT] compiles in a row fail.
-fn compile_on_helper<R: Runtime, S: VariantSite<R>>(
+fn compile_on_helper<S: VariantSite>(
     replica: &S,
     allowed: &[S::Candidate],
     queue: &HelperQueue<'_>,
@@ -476,7 +479,7 @@ fn sort_outcomes<C: SiteCandidate>(
 
 /// Makes the site's client reread the on-disk cache, with a marker named after the site's exact
 /// compile identity and the candidates the helpers compiled.
-fn reload_for<R: Runtime, S: VariantSite<R>>(site: &S, allowed: &[S::Candidate], compiled: &[usize]) {
+fn reload_for<S: VariantSite>(site: &S, allowed: &[S::Candidate], compiled: &[usize]) {
     let names: Vec<&str> = compiled.iter().map(|&index| allowed[index].name()).collect();
     let identity = site.compile_identity();
     let marker = reload_marker(&identity, &names);
@@ -493,7 +496,7 @@ fn reload_for<R: Runtime, S: VariantSite<R>>(site: &S, allowed: &[S::Candidate],
 /// about a tenth of a second. A slow such load means the cache missed, and a miss repeats, so after
 /// one the helper candidates past the ceiling are skipped too. Every other candidate checks the
 /// ceiling with [Ceiling::skips] before it loads.
-fn load_one_by_one<R: Runtime, S: VariantSite<R>>(
+fn load_one_by_one<S: VariantSite>(
     site: &S,
     allowed: &[S::Candidate],
     indices: &[usize],
@@ -547,7 +550,7 @@ pub(crate) fn fits_in_one_batch(allowance: Duration, estimate: Duration, candida
 }
 
 /// Queues every launch and syncs once, falling back to one candidate at a time when that fails.
-fn batch<R: Runtime, S: VariantSite<R>>(
+fn batch<S: VariantSite>(
     site: &S,
     allowed: &[S::Candidate],
     indices: &[usize],
@@ -620,7 +623,7 @@ impl Ceiling<'_> {
 }
 
 /// Launches every candidate once without waiting, stopping at the first launch that panics.
-fn launch_all<R: Runtime, S: VariantSite<R>>(
+fn launch_all<S: VariantSite>(
     site: &S,
     allowed: &[S::Candidate],
     indices: &[usize],
@@ -645,7 +648,7 @@ fn launch_all<R: Runtime, S: VariantSite<R>>(
 }
 
 /// Launches `candidate` once, turning a panic into a reason.
-fn launch_caught<R: Runtime, S: VariantSite<R>>(
+fn launch_caught<S: VariantSite>(
     site: &S,
     candidate: S::Candidate,
     outputs: &S::Outputs,
@@ -653,12 +656,29 @@ fn launch_caught<R: Runtime, S: VariantSite<R>>(
     let name = candidate.name();
     let attempt = AssertUnwindSafe(|| site.launch(candidate, outputs));
     let launched = catch_unwind(attempt);
+    launched.map_err(|_| format!("launching {name} panicked"))?;
 
-    launched.map_err(|_| format!("launching {name} panicked"))
+    check_outputs(site, name, outputs)
+}
+
+/// Fails when the launch that wrote `outputs` failed to compile, and clears `outputs` when it did.
+///
+/// CubeCL reports a failed launch on the buffers it left unwritten, not on the next sync. A later
+/// launch that reads such a buffer is skipped with the same failure, so the buffers are rewritten
+/// before any other candidate uses them.
+fn check_outputs<S: VariantSite>(site: &S, name: &str, outputs: &S::Outputs) -> Result<(), String> {
+    let handles = site.output_handles(outputs);
+    let checked = site.client().check(&handles);
+    let Err(error) = checked else {
+        return Ok(());
+    };
+
+    site.clear_outputs(outputs);
+    Err(format!("launching {name} failed: {error}"))
 }
 
 /// Compiles each candidate with a sync of its own and drops those that fail.
-fn one_by_one<R: Runtime, S: VariantSite<R>>(
+fn one_by_one<S: VariantSite>(
     site: &S,
     allowed: &[S::Candidate],
     indices: &[usize],
@@ -712,7 +732,7 @@ fn drop_candidate<C: SiteCandidate>(
 
 /// Compiles `candidate` with [VariantSite::compile_only] and syncs, returning the reason when either
 /// fails.
-fn compile_only_one<R: Runtime, S: VariantSite<R>>(
+fn compile_only_one<S: VariantSite>(
     site: &S,
     candidate: S::Candidate,
     outputs: &S::Outputs,
@@ -724,12 +744,14 @@ fn compile_only_one<R: Runtime, S: VariantSite<R>>(
         return Err(format!("compiling {name} panicked"));
     }
 
+    check_outputs(site, name, outputs)?;
+
     let synced = sync(site.client());
     synced.map_err(|error| format!("{error:#}"))
 }
 
 /// Launches `candidate` once and syncs, returning the reason when either fails.
-fn compile_one<R: Runtime, S: VariantSite<R>>(
+fn compile_one<S: VariantSite>(
     site: &S,
     candidate: S::Candidate,
     outputs: &S::Outputs,

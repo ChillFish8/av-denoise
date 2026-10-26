@@ -38,8 +38,8 @@ pub struct EgressInput {
     placeholder: Handle,
 }
 
-pub struct EgressBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct EgressBench {
+    pub client: Client,
     pub width: u32,
     pub height: u32,
     pub channels: u32,
@@ -47,7 +47,7 @@ pub struct EgressBench<R: Runtime> {
     pub format: EgressFormat,
 }
 
-impl<R: Runtime> EgressBench<R> {
+impl EgressBench {
     fn pixels(&self) -> u32 {
         self.width * self.height
     }
@@ -63,7 +63,7 @@ impl<R: Runtime> EgressBench<R> {
     }
 }
 
-impl<R: Runtime> Benchmark for EgressBench<R> {
+impl Benchmark for EgressBench {
     type Input = EgressInput;
     type Output = ();
 
@@ -109,27 +109,27 @@ impl<R: Runtime> Benchmark for EgressBench<R> {
 
         unsafe {
             match self.format {
-                EgressFormat::F32 => egress_f32::launch_unchecked::<R>(
+                EgressFormat::F32 => egress_f32::launch_unchecked(
                     &self.client,
                     CubeCount::new_1d(groups),
                     CubeDim::new_1d(BLOCK_1D),
-                    ArrayArg::from_raw_parts(args.frame.clone(), frame_len),
-                    ArrayArg::from_raw_parts(plane_0, plane_len),
-                    ArrayArg::from_raw_parts(plane_1, plane_len),
-                    ArrayArg::from_raw_parts(plane_2, plane_len),
+                    BufferArg::from_raw_parts(args.frame.clone(), frame_len),
+                    BufferArg::from_raw_parts(plane_0, plane_len),
+                    BufferArg::from_raw_parts(plane_1, plane_len),
+                    BufferArg::from_raw_parts(plane_2, plane_len),
                     pixels,
                     self.channels,
                     stored_ch,
                     total_threads,
                 ),
-                EgressFormat::U8 | EgressFormat::U16Ten => egress_words::launch_unchecked::<R>(
+                EgressFormat::U8 | EgressFormat::U16Ten => egress_words::launch_unchecked(
                     &self.client,
                     CubeCount::new_1d(groups),
                     CubeDim::new_1d(BLOCK_1D),
-                    ArrayArg::from_raw_parts(args.frame.clone(), frame_len),
-                    ArrayArg::from_raw_parts(plane_0, plane_len),
-                    ArrayArg::from_raw_parts(plane_1, plane_len),
-                    ArrayArg::from_raw_parts(plane_2, plane_len),
+                    BufferArg::from_raw_parts(args.frame.clone(), frame_len),
+                    BufferArg::from_raw_parts(plane_0, plane_len),
+                    BufferArg::from_raw_parts(plane_1, plane_len),
+                    BufferArg::from_raw_parts(plane_2, plane_len),
                     max,
                     pixels,
                     self.channels,

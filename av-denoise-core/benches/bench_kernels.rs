@@ -8,6 +8,7 @@ use av_denoise_core::bench_api::tune_sites::{
     RegulariseCandidate,
     WindowCandidate,
 };
+use av_denoise_core::testing;
 use av_denoise_core::tune::{DeviceLimits, SiteCandidate};
 use clap::Parser;
 use cubecl::prelude::*;
@@ -47,9 +48,7 @@ use kernels::vweight_pair_accumulate::VWeightPairAccBench;
 use kernels::zero::ZeroBench;
 use kernels::{BENCH_NEIGHBOURS, CHANNELS, print_header, run};
 
-fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
-    let client = R::client(device);
-
+fn run_all(backend: &str, client: Client) {
     println!();
     println!("--- {backend} ---");
     print_header();
@@ -511,17 +510,10 @@ fn main() {
 
     install_bench_compilation_cache();
 
-    #[cfg(feature = "vulkan")]
-    {
-        let device = cli.device.to_wgpu().expect("wgpu device conversion failed");
-        println!("  device:   {device:?}");
-        run_all::<cubecl::wgpu::WgpuRuntime>("vulkan", &device);
-    }
+    let accelerator = testing::test_accelerator();
+    let device = testing::device_on(accelerator, cli.device);
+    println!("  device:   {device:?}");
 
-    #[cfg(not(feature = "vulkan"))]
-    {
-        let _ = cli;
-        eprintln!("No GPU backend enabled. Run with --features vulkan");
-        std::process::exit(1);
-    }
+    let client = device.client();
+    run_all(accelerator, client);
 }

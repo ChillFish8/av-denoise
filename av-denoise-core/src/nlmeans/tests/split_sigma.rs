@@ -5,7 +5,7 @@ use crate::noise::NoiseSnapshot;
 use crate::noise::tests::fold_reference::relative_gap;
 use crate::noise::tests::frames::MAX_RELATIVE;
 
-fn snapshot(denoiser: &NlmDenoiser<R>) -> NoiseSnapshot {
+fn snapshot(denoiser: &NlmDenoiser) -> NoiseSnapshot {
     denoiser.noise_snapshot().expect("the noise state reads back")
 }
 
@@ -66,7 +66,7 @@ fn uniform_noise_low_chain_matches_median_chain() {
     let frame = make_noisy_gaussian_frame(width, height, 1, 0.5, &[sigma]);
 
     let params = auto_params_k0();
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
     denoiser.denoise().unwrap();
 
@@ -102,7 +102,7 @@ fn split_noise_offset_tracks_low_chain_strength_tracks_median() {
     let frame = block_heterogeneous_frame(width, height, 0.5, sigma_a, sigma_b);
 
     let params = auto_params_k0();
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
     denoiser.denoise().unwrap();
 
@@ -151,7 +151,7 @@ fn partials_ring_isolates_slots_between_push_and_fold() {
         temporal_radius: 2,
         ..auto_params_k0()
     };
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
 
     let frame_low = make_noisy_gaussian_frame(width, height, 1, 0.5, &[sigma_low]);
     let frame_high_1 = make_noisy_gaussian_frame(width, height, 1, 0.5, &[sigma_high]);
@@ -222,7 +222,7 @@ fn temporal_only_chain_reads_the_median_block_sigma() {
         temporal_radius: 2,
         ..auto_params_k0()
     };
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
 
     for seed in 0..8 {
         let frame = row_split_noisy_frame(width, height, 48, sigma_low, sigma_high, 300 + seed);

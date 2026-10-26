@@ -7,8 +7,8 @@ use cubecl::terminate;
 /// repeats its edge pixel.
 #[cube(launch_unchecked)]
 pub fn mc_downscale(
-    src: &Array<f32>,
-    dst: &mut Array<f32>,
+    src: &[f32],
+    dst: &mut [f32],
     src_frame: u32,
     dst_frame: u32,
     #[comptime] src_width: u32,
@@ -41,8 +41,8 @@ pub fn mc_downscale(
 /// Copies lane 0 of a packed frame into a flat luma array, which becomes level 0 of the pyramid.
 #[cube(launch_unchecked)]
 pub fn mc_extract_luma<N: Size>(
-    src: &Array<Vector<f32, N>>,
-    dst: &mut Array<f32>,
+    src: &[Vector<f32, N>],
+    dst: &mut [f32],
     src_frame: u32,
     dst_frame: u32,
     #[comptime] width: u32,
@@ -59,5 +59,5 @@ pub fn mc_extract_luma<N: Size>(
     let pixel = src[src_idx as usize];
 
     let dst_idx = (dst_frame * height + y) * width + x;
-    dst[dst_idx as usize] = pixel[0usize];
+    dst[dst_idx as usize] = pixel.extract(0usize);
 }

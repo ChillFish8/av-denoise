@@ -112,12 +112,7 @@ impl SelectBatch {
     /// an empty state.
     ///
     /// `min_counts` holds one entry per tag. `queries` must be grouped by tag.
-    pub(crate) fn new<R: Runtime>(
-        client: &ComputeClient<R>,
-        len: u32,
-        min_counts: &[u32],
-        queries: &[SelectQuery],
-    ) -> Self {
+    pub(crate) fn new(client: &Client, len: u32, min_counts: &[u32], queries: &[SelectQuery]) -> Self {
         let keys = vec![0u32; len as usize];
         let tags = vec![UNTAGGED; len as usize];
 
@@ -125,8 +120,8 @@ impl SelectBatch {
     }
 
     /// A batch whose keys and tags start as `keys` and `tags`.
-    pub(crate) fn from_elements<R: Runtime>(
-        client: &ComputeClient<R>,
+    pub(crate) fn from_elements(
+        client: &Client,
         keys: &[u32],
         tags: &[u32],
         min_counts: &[u32],
@@ -221,7 +216,7 @@ impl SelectBatch {
     }
 
     /// Queues the three histogram passes, returning how many launches that took.
-    pub(crate) fn queue<R: Runtime>(&self, client: &ComputeClient<R>) -> u32 {
+    pub(crate) fn queue(&self, client: &Client) -> u32 {
         let cubes = self.len.div_ceil(SELECT_CUBE_THREADS);
         let len = self.len as usize;
         let query_words = (self.query_count * SELECT_QUERY_WORDS) as usize;
@@ -235,17 +230,17 @@ impl SelectBatch {
             let (rows_out, rows_out_len) = self.pass_rows(pass);
 
             unsafe {
-                noise_select_histogram::launch_unchecked::<R>(
+                noise_select_histogram::launch_unchecked(
                     client,
                     CubeCount::new_1d(cubes),
                     CubeDim::new_1d(SELECT_CUBE_THREADS),
-                    ArrayArg::from_raw_parts(self.keys.clone(), len),
-                    ArrayArg::from_raw_parts(self.tags.clone(), len),
-                    ArrayArg::from_raw_parts(self.query_table.clone(), query_words),
-                    ArrayArg::from_raw_parts(self.tag_table.clone(), tag_words),
-                    ArrayArg::from_raw_parts(rows_in, rows_in_len),
-                    ArrayArg::from_raw_parts(rows_out, rows_out_len),
-                    ArrayArg::from_raw_parts(self.state.clone(), state_len),
+                    BufferArg::from_raw_parts(self.keys.clone(), len),
+                    BufferArg::from_raw_parts(self.tags.clone(), len),
+                    BufferArg::from_raw_parts(self.query_table.clone(), query_words),
+                    BufferArg::from_raw_parts(self.tag_table.clone(), tag_words),
+                    BufferArg::from_raw_parts(rows_in, rows_in_len),
+                    BufferArg::from_raw_parts(rows_out, rows_out_len),
+                    BufferArg::from_raw_parts(self.state.clone(), state_len),
                     pass,
                     self.len,
                     self.tag_count,
@@ -289,13 +284,13 @@ pub fn pass_rows(histogram: &Handle, tag_count: u32, query_count: u32, pass: u32
 /// Threads in a cube that resolves a whole batch, capped at 1024.
 ///
 /// A device offering fewer than 1024 threads per cube gets 256, which resolves 8 queries per round.
-pub fn resolve_cube_threads<R: Runtime>(client: &ComputeClient<R>) -> u32 {
+pub fn resolve_cube_threads(client: &Client) -> u32 {
     let units = client.properties().hardware.max_units_per_cube;
 
     if units >= 1024 { 1024 } else { SELECT_CUBE_THREADS }
 }
 
-fn upload_words<R: Runtime>(client: &ComputeClient<R>, words: &[u32]) -> Handle {
+fn upload_words(client: &Client, words: &[u32]) -> Handle {
     let bytes = u32::as_bytes(words);
     client.create_from_slice(bytes)
 }

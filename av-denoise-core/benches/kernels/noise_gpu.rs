@@ -52,12 +52,7 @@ const READING_MAP: ReadingMap = ReadingMap {
 
 /// Copies `length` words of `source` over `target`.
 #[cube(launch_unchecked)]
-fn refill_words(
-    source: &Array<u32>,
-    target: &mut Array<u32>,
-    #[comptime] length: u32,
-    #[comptime] total_threads: u32,
-) {
+fn refill_words(source: &[u32], target: &mut [u32], #[comptime] length: u32, #[comptime] total_threads: u32) {
     let mut index = ABSOLUTE_POS_X;
     while index < length {
         target[index as usize] = source[index as usize];
@@ -90,8 +85,8 @@ pub enum SelectShape {
 /// Values are sigma-like, between 2 and 12 out of 255, with rho between 0 and 0.6, so most keys share
 /// a few pass-0 bins and same-address contention shows. The histogram and state are refilled from
 /// the batch as it stood before the timed launch, outside the timed span.
-pub struct SelectBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct SelectBench {
+    pub client: Client,
     pub stage: SelectStage,
     pub shape: SelectShape,
 }
@@ -247,7 +242,7 @@ fn curve() -> BatchData {
     }
 }
 
-impl<R: Runtime> SelectBench<R> {
+impl SelectBench {
     fn data(&self) -> BatchData {
         match self.shape {
             SelectShape::LumaSample => luma_sample(),
@@ -271,17 +266,17 @@ impl<R: Runtime> SelectBench<R> {
         let (rows_out, rows_out_len) = pass_rows(&input.histogram, data.tag_count, query_count, pass);
 
         unsafe {
-            noise_select_histogram::launch_unchecked::<R>(
+            noise_select_histogram::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(cubes),
                 CubeDim::new_1d(SELECT_CUBE_THREADS),
-                ArrayArg::from_raw_parts(input.keys.clone(), len as usize),
-                ArrayArg::from_raw_parts(input.tags.clone(), len as usize),
-                ArrayArg::from_raw_parts(input.queries.clone(), query_words),
-                ArrayArg::from_raw_parts(input.tag_ranges.clone(), tag_words),
-                ArrayArg::from_raw_parts(rows_in, rows_in_len),
-                ArrayArg::from_raw_parts(rows_out, rows_out_len),
-                ArrayArg::from_raw_parts(input.state.clone(), data.state_len() as usize),
+                BufferArg::from_raw_parts(input.keys.clone(), len as usize),
+                BufferArg::from_raw_parts(input.tags.clone(), len as usize),
+                BufferArg::from_raw_parts(input.queries.clone(), query_words),
+                BufferArg::from_raw_parts(input.tag_ranges.clone(), tag_words),
+                BufferArg::from_raw_parts(rows_in, rows_in_len),
+                BufferArg::from_raw_parts(rows_out, rows_out_len),
+                BufferArg::from_raw_parts(input.state.clone(), data.state_len() as usize),
                 pass,
                 len,
                 data.tag_count,
@@ -297,16 +292,16 @@ impl<R: Runtime> SelectBench<R> {
         let tag_words = (data.tag_count * SELECT_TAG_WORDS) as usize;
 
         unsafe {
-            noise_select_resolve::launch_unchecked::<R>(
+            noise_select_resolve::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(1),
                 CubeDim::new_1d(threads),
-                ArrayArg::from_raw_parts(input.histogram.clone(), data.histogram_len() as usize),
-                ArrayArg::from_raw_parts(input.state.clone(), data.state_len() as usize),
-                ArrayArg::from_raw_parts(input.queries.clone(), query_words),
-                ArrayArg::from_raw_parts(input.tag_ranges.clone(), tag_words),
-                ArrayArg::from_raw_parts(input.values.clone(), query_count as usize),
-                ArrayArg::from_raw_parts(input.counts.clone(), query_count as usize),
+                BufferArg::from_raw_parts(input.histogram.clone(), data.histogram_len() as usize),
+                BufferArg::from_raw_parts(input.state.clone(), data.state_len() as usize),
+                BufferArg::from_raw_parts(input.queries.clone(), query_words),
+                BufferArg::from_raw_parts(input.tag_ranges.clone(), tag_words),
+                BufferArg::from_raw_parts(input.values.clone(), query_count as usize),
+                BufferArg::from_raw_parts(input.counts.clone(), query_count as usize),
                 data.tag_count,
                 query_count,
                 threads,
@@ -317,11 +312,11 @@ impl<R: Runtime> SelectBench<R> {
     fn refill(&self, source: &Handle, target: &Handle, length: u32) {
         let dim = 256u32;
         let grid = length.div_ceil(dim).min(MAX_GRID_1D);
-        let source_arg = unsafe { ArrayArg::from_raw_parts(source.clone(), length as usize) };
-        let target_arg = unsafe { ArrayArg::from_raw_parts(target.clone(), length as usize) };
+        let source_arg = unsafe { BufferArg::from_raw_parts(source.clone(), length as usize) };
+        let target_arg = unsafe { BufferArg::from_raw_parts(target.clone(), length as usize) };
 
         unsafe {
-            refill_words::launch_unchecked::<R>(
+            refill_words::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(dim),
@@ -349,7 +344,7 @@ impl<R: Runtime> SelectBench<R> {
     }
 }
 
-impl<R: Runtime> Benchmark for SelectBench<R> {
+impl Benchmark for SelectBench {
     type Input = SelectInput;
     type Output = ();
 
@@ -442,8 +437,8 @@ impl<R: Runtime> Benchmark for SelectBench<R> {
 /// measure the quarter fields, as nl4d does, except the plain finish row, which leaves the curve
 /// out. The class and map rows also build a luma strength map. The curve batch's passes add to its
 /// histogram, so it is refilled from a copy outside the timed span.
-pub struct ReadingBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct ReadingBench {
+    pub client: Client,
     pub stage: ReadingStage,
     pub chroma: bool,
     /// Whether a luma row reads a smooth luma gradient, whose quarters fill every curve bin, and
@@ -453,13 +448,13 @@ pub struct ReadingBench<R: Runtime> {
 
 /// A prepared reading and the copies of its batch buffers.
 #[derive(Clone)]
-pub struct ReadingInput<R: Runtime> {
-    pub reading: Arc<NoiseReading<R>>,
+pub struct ReadingInput {
+    pub reading: Arc<NoiseReading>,
     /// Each batch buffer, its copy and its length in words.
     pub buffers: Vec<(Handle, Handle, u32)>,
 }
 
-impl<R: Runtime> ReadingBench<R> {
+impl ReadingBench {
     /// The width, height, channels and stored channels of the plane.
     fn plane(&self) -> (u32, u32, u32, u32) {
         if self.chroma {
@@ -534,11 +529,11 @@ impl<R: Runtime> ReadingBench<R> {
     fn refill(&self, source: &Handle, target: &Handle, length: u32) {
         let dim = 256u32;
         let grid = length.div_ceil(dim).min(MAX_GRID_1D);
-        let source_arg = unsafe { ArrayArg::from_raw_parts(source.clone(), length as usize) };
-        let target_arg = unsafe { ArrayArg::from_raw_parts(target.clone(), length as usize) };
+        let source_arg = unsafe { BufferArg::from_raw_parts(source.clone(), length as usize) };
+        let target_arg = unsafe { BufferArg::from_raw_parts(target.clone(), length as usize) };
 
         unsafe {
-            refill_words::launch_unchecked::<R>(
+            refill_words::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(dim),
@@ -551,8 +546,8 @@ impl<R: Runtime> ReadingBench<R> {
     }
 }
 
-impl<R: Runtime> Benchmark for ReadingBench<R> {
-    type Input = ReadingInput<R>;
+impl Benchmark for ReadingBench {
+    type Input = ReadingInput;
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
@@ -651,13 +646,13 @@ const FOLD_TABLE_RADIUS: u32 = 2;
 ///
 /// `prepare` measures a reading of the smooth gradient into slot 1, which has a sample and a
 /// curve, and folds it once, so every timed fold adopts that reading.
-pub struct FoldBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct FoldBench {
+    pub client: Client,
     pub stage: FoldStage,
 }
 
-impl<R: Runtime> FoldBench<R> {
-    fn queue_stage(&self, reading: &NoiseReading<R>) {
+impl FoldBench {
+    fn queue_stage(&self, reading: &NoiseReading) {
         match self.stage {
             FoldStage::Fold | FoldStage::FoldWithMap | FoldStage::FoldWithTables => {
                 reading.queue_fold().expect("the fold queues")
@@ -667,8 +662,8 @@ impl<R: Runtime> FoldBench<R> {
     }
 }
 
-impl<R: Runtime> Benchmark for FoldBench<R> {
-    type Input = Arc<NoiseReading<R>>;
+impl Benchmark for FoldBench {
+    type Input = Arc<NoiseReading>;
     type Output = ();
 
     fn prepare(&self) -> Self::Input {

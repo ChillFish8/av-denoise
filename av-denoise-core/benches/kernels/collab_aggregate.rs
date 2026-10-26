@@ -14,12 +14,7 @@ const MAX_GRID_1D: u32 = 65_535;
 ///
 /// The loop is strided, so a grid clamped to [MAX_GRID_1D] still reaches every slot.
 #[cube(launch_unchecked)]
-fn refill(
-    source: &Array<i32>,
-    target: &mut Array<i32>,
-    #[comptime] length: u32,
-    #[comptime] total_threads: u32,
-) {
+fn refill(source: &[i32], target: &mut [i32], #[comptime] length: u32, #[comptime] total_threads: u32) {
     let mut idx = ABSOLUTE_POS_X;
     while idx < length {
         target[idx as usize] = source[idx as usize];
@@ -32,8 +27,8 @@ fn refill(
 /// Cost scales with `stored_ch`, since one accumulator slot per channel is read for every pixel.
 /// The kernel zeroes what it reads, so the accumulators are refilled before every sample, outside
 /// the timed span, and each sample times the divide.
-pub struct CollabNormaliseBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct CollabNormaliseBench {
+    pub client: Client,
     pub channels: u32,
     pub channel_name: &'static str,
 }
@@ -53,7 +48,7 @@ pub struct CollabNormaliseSample {
     pub wsum_source: Handle,
 }
 
-impl<R: Runtime> CollabNormaliseBench<R> {
+impl CollabNormaliseBench {
     /// Copies `length` values of `source` over `target` on the device.
     fn refill_from(&self, source: &Handle, target: &Handle, length: usize) {
         let dim = 256u32;
@@ -64,10 +59,10 @@ impl<R: Runtime> CollabNormaliseBench<R> {
         let target_handle = target.clone();
 
         unsafe {
-            let source_arg = ArrayArg::from_raw_parts(source_handle, length);
-            let target_arg = ArrayArg::from_raw_parts(target_handle, length);
+            let source_arg = BufferArg::from_raw_parts(source_handle, length);
+            let target_arg = BufferArg::from_raw_parts(target_handle, length);
 
-            refill::launch_unchecked::<R>(
+            refill::launch_unchecked(
                 &self.client,
                 cube_count,
                 cube_dim,
@@ -80,7 +75,7 @@ impl<R: Runtime> CollabNormaliseBench<R> {
     }
 }
 
-impl<R: Runtime> Benchmark for CollabNormaliseBench<R> {
+impl Benchmark for CollabNormaliseBench {
     type Input = CollabNormaliseSample;
     type Output = ();
 
@@ -141,11 +136,11 @@ impl<R: Runtime> Benchmark for CollabNormaliseBench<R> {
         let cube_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
 
         unsafe {
-            let accum_arg = ArrayArg::from_raw_parts(buffers.accum, pixels * stored_ch);
-            let wsum_arg = ArrayArg::from_raw_parts(buffers.wsum, pixels);
-            let output_arg = ArrayArg::from_raw_parts(buffers.output, pixels * stored_ch);
+            let accum_arg = BufferArg::from_raw_parts(buffers.accum, pixels * stored_ch);
+            let wsum_arg = BufferArg::from_raw_parts(buffers.wsum, pixels);
+            let output_arg = BufferArg::from_raw_parts(buffers.output, pixels * stored_ch);
 
-            collab_normalise::launch_unchecked::<R>(
+            collab_normalise::launch_unchecked(
                 &self.client,
                 cube_count,
                 cube_dim,
@@ -179,13 +174,13 @@ impl<R: Runtime> Benchmark for CollabNormaliseBench<R> {
 }
 
 /// Clears both accumulators for one region, which a stream's first pass runs over the whole ring.
-pub struct CollabZeroAccumBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct CollabZeroAccumBench {
+    pub client: Client,
     pub channels: u32,
     pub channel_name: &'static str,
 }
 
-impl<R: Runtime> Benchmark for CollabZeroAccumBench<R> {
+impl Benchmark for CollabZeroAccumBench {
     type Input = CollabNormaliseInput;
     type Output = ();
 
@@ -208,12 +203,12 @@ impl<R: Runtime> Benchmark for CollabZeroAccumBench<R> {
         let grid = ((pixels * stored_ch) as u32).div_ceil(dim).min(MAX_GRID_1D);
 
         unsafe {
-            collab_zero_accum::launch_unchecked::<R>(
+            collab_zero_accum::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(dim),
-                ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored_ch),
-                ArrayArg::from_raw_parts(args.wsum.clone(), pixels),
+                BufferArg::from_raw_parts(args.accum.clone(), pixels * stored_ch),
+                BufferArg::from_raw_parts(args.wsum.clone(), pixels),
                 // A single-frame region, as a single-frame caller passes.
                 0u32,
                 pixels as u32,

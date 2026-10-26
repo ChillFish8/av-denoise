@@ -118,7 +118,7 @@ pub fn h2_inv_norm() -> f32 {
 }
 
 /// A derived buffer holding the bench strength and a noise offset of 0.
-pub fn window_noise<R: Runtime>(client: &ComputeClient<R>) -> Handle {
+pub fn window_noise(client: &Client) -> Handle {
     let values = DerivedValues {
         h2_inv_norm: h2_inv_norm(),
         ..DerivedValues::default()
@@ -140,7 +140,7 @@ pub fn cube_dim_2d() -> CubeDim {
     CubeDim::new_2d(BLOCK_X, BLOCK_Y)
 }
 
-pub fn block_sync<R: Runtime>(client: &ComputeClient<R>) {
+pub fn block_sync(client: &Client) {
     let sync = client.sync();
     cubecl::future::block_on(sync).unwrap();
 }

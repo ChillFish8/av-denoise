@@ -1,6 +1,6 @@
 use cubecl::hash::StableHasher;
 use cubecl::ir::features::{AtomicUsage, TypeUsage};
-use cubecl::ir::{ElemType, FloatKind, IntKind, StorageType, Type};
+use cubecl::ir::{ElemType, FloatKind, IntKind, Type};
 use cubecl::prelude::*;
 
 /// Which physical device and driver a tuning result was measured on.
@@ -55,19 +55,16 @@ pub struct DeviceLimits {
 }
 
 impl DeviceLimits {
-    pub fn from_client<R: Runtime>(client: &ComputeClient<R>) -> Self {
+    pub fn from_client(client: &Client) -> Self {
         let properties = client.properties();
         let hardware = &properties.hardware;
 
         let f16_elem = ElemType::Float(FloatKind::F16);
-        let f16_type = StorageType::Scalar(f16_elem);
-        let f16_usage = properties.type_usage(f16_type);
+        let f16_usage = properties.type_usage(f16_elem);
 
         let i64_elem = ElemType::Int(IntKind::I64);
-        let i64_scalar = StorageType::Scalar(i64_elem);
-        let i64_usage = properties.type_usage(i64_scalar);
-        let i64_atomic = StorageType::Atomic(i64_elem);
-        let i64_atomic_type = Type::new(i64_atomic);
+        let i64_usage = properties.type_usage(i64_elem);
+        let i64_atomic_type = Type::atomic(i64_elem);
         let i64_atomic_usage = properties.atomic_type_usage(i64_atomic_type);
         let i64_arithmetic = i64_usage.contains(TypeUsage::Arithmetic);
         let i64_atomic_add = i64_atomic_usage.contains(AtomicUsage::Add);

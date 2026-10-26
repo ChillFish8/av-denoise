@@ -70,8 +70,8 @@ impl SiteCandidate for AccumulateCandidate {
 /// The weight map is symmetric there, so `weights` serves both the forward and backward lookups and
 /// both neighbours come from `frame`.
 #[derive(Clone)]
-pub struct AccumulateSite<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct AccumulateSite {
+    pub client: Client,
     pub input: Handle,
     /// Elements in `input`.
     pub ring_len: usize,
@@ -85,11 +85,11 @@ pub struct AccumulateSite<R: Runtime> {
     pub stored_ch: u32,
 }
 
-impl<R: Runtime> VariantSite<R> for AccumulateSite<R> {
+impl VariantSite for AccumulateSite {
     type Candidate = AccumulateCandidate;
     type Outputs = AccumOutputs;
 
-    fn client(&self) -> &ComputeClient<R> {
+    fn client(&self) -> &Client {
         &self.client
     }
 
@@ -108,6 +108,10 @@ impl<R: Runtime> VariantSite<R> for AccumulateSite<R> {
         0
     }
 
+    fn output_handles(&self, outputs: &AccumOutputs) -> Vec<Handle> {
+        outputs.handles()
+    }
+
     fn launch(&self, candidate: AccumulateCandidate, outputs: &AccumOutputs) {
         let (block_x, block_y) = candidate.block();
         let cubes_x = self.width.div_ceil(block_x);
@@ -116,15 +120,15 @@ impl<R: Runtime> VariantSite<R> for AccumulateSite<R> {
         let cube_dim = CubeDim::new_2d(block_x, block_y);
         let vector_size = self.stored_ch as usize;
 
-        let input = bind::<R>(&self.input, self.ring_len);
-        let accum = bind::<R>(&outputs.accum, outputs.accum_len);
-        let weight_sum = bind::<R>(&outputs.weight_sum, outputs.pixels);
-        let weights_fwd = bind::<R>(&self.weights, outputs.pixels);
-        let weights_bwd = bind::<R>(&self.weights, outputs.pixels);
-        let max_weight = bind::<R>(&outputs.max_weight, outputs.pixels);
+        let input = bind(&self.input, self.ring_len);
+        let accum = bind(&outputs.accum, outputs.accum_len);
+        let weight_sum = bind(&outputs.weight_sum, outputs.pixels);
+        let weights_fwd = bind(&self.weights, outputs.pixels);
+        let weights_bwd = bind(&self.weights, outputs.pixels);
+        let max_weight = bind(&outputs.max_weight, outputs.pixels);
 
         unsafe {
-            nlm_accumulate::launch_unchecked::<R>(
+            nlm_accumulate::launch_unchecked(
                 &self.client,
                 cube_count,
                 cube_dim,

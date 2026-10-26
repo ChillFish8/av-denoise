@@ -1,4 +1,4 @@
-use super::helpers::{R, make_client};
+use super::helpers::make_client;
 use crate::bench_api::HostIo;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams, PsyParams};
 use crate::nlmeans::tests::helpers::seeded_unit_gaussian;
@@ -81,7 +81,7 @@ fn clip_params(
     }
 }
 
-fn build_nl4d(channels: ChannelMode, mut params: Nl4dParams) -> Nl4dDenoiser<R> {
+fn build_nl4d(channels: ChannelMode, mut params: Nl4dParams) -> Nl4dDenoiser {
     let client = make_client();
     params.nlm.channels = channels;
     Nl4dDenoiser::new(&client, params, 64, 64).expect("construction failed")
@@ -104,7 +104,7 @@ struct ClipRun {
 
 fn denoise_clip(params: Nl4dParams, frames: &[Vec<f32>]) -> ClipRun {
     let client = make_client();
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, WIDTH, HEIGHT).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::new(&client, params, WIDTH, HEIGHT).expect("construction failed");
 
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     let mut classes_seen = false;

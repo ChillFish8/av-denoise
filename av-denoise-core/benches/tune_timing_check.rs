@@ -15,6 +15,7 @@ use av_denoise_core::bench_api::tune_sites::{
     WindowCandidate,
 };
 use av_denoise_core::bench_api::tune_timing::{calibrate, gpu_sampler, rewarm, sync};
+use av_denoise_core::testing;
 use av_denoise_core::tune::{
     DeviceLimits,
     HYSTERESIS,
@@ -74,28 +75,29 @@ struct Row {
 fn main() {
     let cli = Cli::parse();
 
-    let device = cli.device.to_wgpu().expect("wgpu device conversion failed");
+    let accelerator = testing::test_accelerator();
+    let device = testing::device_on(accelerator, cli.device);
     println!("device: {device:?}");
 
-    run_repeats::<cubecl::wgpu::WgpuRuntime>(&device, cli.repeats);
+    let client = device.client();
+    run_repeats(&client, cli.repeats);
 }
 
-fn run_repeats<R: Runtime>(device: &R::Device, repeats: usize) {
-    let client = R::client(device);
-    let limits = DeviceLimits::from_client(&client);
+fn run_repeats(client: &Client, repeats: usize) {
+    let limits = DeviceLimits::from_client(client);
     let mut disagreements = 0;
 
     for repeat in 1..=repeats {
         println!();
         println!("=== repeat {repeat} ===");
 
-        let window = window_site(&client);
+        let window = window_site(client);
         disagreements += compare_site(&window, &limits, "nlm_window pair luma 1080p");
 
-        let collab = collab_site(&client);
+        let collab = collab_site(client);
         disagreements += compare_site(&collab, &limits, "collab_fused luma 1080p");
 
-        let regularise = regularise_site(&client);
+        let regularise = regularise_site(client);
         disagreements += compare_site(&regularise, &limits, "nl4d_mv_regularise 1080p");
     }
 
@@ -103,7 +105,7 @@ fn run_repeats<R: Runtime>(device: &R::Device, repeats: usize) {
     println!("site comparisons that disagree: {disagreements}");
 }
 
-fn window_site<R: Runtime>(client: &ComputeClient<R>) -> impl VariantSite<R, Candidate = WindowCandidate> {
+fn window_site(client: &Client) -> impl VariantSite<Candidate = WindowCandidate> {
     let bench = WindowBench {
         client: client.clone(),
         channels: 1,
@@ -116,9 +118,7 @@ fn window_site<R: Runtime>(client: &ComputeClient<R>) -> impl VariantSite<R, Can
     site
 }
 
-fn regularise_site<R: Runtime>(
-    client: &ComputeClient<R>,
-) -> impl VariantSite<R, Candidate = RegulariseCandidate> {
+fn regularise_site(client: &Client) -> impl VariantSite<Candidate = RegulariseCandidate> {
     let bench = MvRegulariseBench {
         client: client.clone(),
         candidate: RegulariseCandidate::baseline(),
@@ -131,7 +131,7 @@ fn regularise_site<R: Runtime>(
 }
 
 /// The collab site over a 1080p luma ring, built from the kernel bench's buffers.
-fn collab_site<R: Runtime>(client: &ComputeClient<R>) -> CollabSite<R, f32> {
+fn collab_site(client: &Client) -> CollabSite<f32> {
     let bench = CollabFusedBench {
         client: client.clone(),
         channels: 1,
@@ -149,7 +149,7 @@ fn collab_site<R: Runtime>(client: &ComputeClient<R>) -> CollabSite<R, f32> {
 }
 
 /// Ranks every fitting candidate of `site` both ways, prints the table and returns 1 on disagreement.
-fn compare_site<R: Runtime, S: VariantSite<R>>(site: &S, limits: &DeviceLimits, label: &str) -> usize {
+fn compare_site<S: VariantSite>(site: &S, limits: &DeviceLimits, label: &str) -> usize {
     let allowed = fit_candidates(site, limits).expect("the baseline must fit");
     let outputs = site.scratch_outputs();
 
@@ -170,11 +170,7 @@ fn compare_site<R: Runtime, S: VariantSite<R>>(site: &S, limits: &DeviceLimits, 
 }
 
 /// Median ns per launch of each candidate, sampled the way the tuner does.
-fn rank_with_tuner<R: Runtime, S: VariantSite<R>>(
-    site: &S,
-    allowed: &[S::Candidate],
-    outputs: &S::Outputs,
-) -> Vec<f64> {
+fn rank_with_tuner<S: VariantSite>(site: &S, allowed: &[S::Candidate], outputs: &S::Outputs) -> Vec<f64> {
     rewarm(site, outputs).expect("re-warm failed");
     let launches = calibrate(site, outputs).expect("calibration failed");
     println!("  tuner sample: {launches} launches");
@@ -203,7 +199,7 @@ fn rank_with_tuner<R: Runtime, S: VariantSite<R>>(
 }
 
 /// Median ns per launch of each candidate, from interleaved wall-clock batches after heating.
-fn rank_with_wall_clock<R: Runtime, S: VariantSite<R>>(
+fn rank_with_wall_clock<S: VariantSite>(
     site: &S,
     allowed: &[S::Candidate],
     outputs: &S::Outputs,
@@ -255,11 +251,7 @@ fn rank_with_wall_clock<R: Runtime, S: VariantSite<R>>(
 /// The launches that make one wall-clock batch of `candidate` last about [BATCH_TARGET].
 ///
 /// The size comes from the median of [PROBE_RUNS] probes of [PROBE_LAUNCHES] launches.
-fn calibrate_batch_launches<R: Runtime, S: VariantSite<R>>(
-    site: &S,
-    candidate: S::Candidate,
-    outputs: &S::Outputs,
-) -> u32 {
+fn calibrate_batch_launches<S: VariantSite>(site: &S, candidate: S::Candidate, outputs: &S::Outputs) -> u32 {
     let client = site.client();
     let mut probes = Vec::with_capacity(PROBE_RUNS);
 

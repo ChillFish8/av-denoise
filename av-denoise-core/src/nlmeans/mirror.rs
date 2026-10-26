@@ -14,7 +14,7 @@ pub(crate) struct MirroredBuffer {
 }
 
 impl MirroredBuffer {
-    pub(crate) fn new<R: Runtime>(client: &ComputeClient<R>, bytes: &[u8]) -> Self {
+    pub(crate) fn new(client: &Client, bytes: &[u8]) -> Self {
         let handle = client.create_from_slice(bytes);
         let contents = bytes.to_vec();
 
@@ -31,7 +31,7 @@ impl MirroredBuffer {
     /// # Panics
     ///
     /// Panics if `bytes` is not the size the buffer was built with.
-    pub(crate) fn update<R: Runtime>(&mut self, client: &ComputeClient<R>, bytes: &[u8]) {
+    pub(crate) fn update(&mut self, client: &Client, bytes: &[u8]) {
         assert_eq!(
             bytes.len(),
             self.contents.len(),

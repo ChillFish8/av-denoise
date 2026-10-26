@@ -12,8 +12,8 @@ const THSAD_PIXEL: f32 = 0.02;
 const FIELD_LAMBDA: f32 = 1.0;
 
 /// The nl4d field regularisation pass over every neighbour at 1080p in one launch.
-pub struct MvRegulariseBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct MvRegulariseBench {
+    pub client: Client,
     pub candidate: RegulariseCandidate,
     /// Neighbours regularised in one launch, each against the centre frame.
     pub neighbours: u32,
@@ -21,8 +21,8 @@ pub struct MvRegulariseBench<R: Runtime> {
     pub static_field: bool,
 }
 
-impl<R: Runtime> Benchmark for MvRegulariseBench<R> {
-    type Input = (RegulariseSite<R>, RegulariseOutputs);
+impl Benchmark for MvRegulariseBench {
+    type Input = (RegulariseSite, RegulariseOutputs);
     type Output = ();
 
     fn prepare(&self) -> Self::Input {

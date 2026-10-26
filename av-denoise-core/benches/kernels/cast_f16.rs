@@ -15,22 +15,22 @@ pub struct CastInput {
     dst: Handle,
 }
 
-pub struct CastF16Bench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct CastF16Bench {
+    pub client: Client,
     pub width: u32,
     pub height: u32,
     pub channels: u32,
     pub channel_name: &'static str,
 }
 
-impl<R: Runtime> CastF16Bench<R> {
+impl CastF16Bench {
     fn frame_len(&self) -> usize {
         let stored_ch = stored_channels(self.channels) as usize;
         (self.width * self.height) as usize * stored_ch
     }
 }
 
-impl<R: Runtime> Benchmark for CastF16Bench<R> {
+impl Benchmark for CastF16Bench {
     type Input = CastInput;
     type Output = ();
 
@@ -54,12 +54,12 @@ impl<R: Runtime> Benchmark for CastF16Bench<R> {
         let offset = TARGET_SLOT * frame_len as u32;
 
         unsafe {
-            gpu_cast_f16::launch_unchecked::<R>(
+            gpu_cast_f16::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(BLOCK_1D),
-                ArrayArg::from_raw_parts(args.src.clone(), ring_len),
-                ArrayArg::from_raw_parts(args.dst.clone(), ring_len),
+                BufferArg::from_raw_parts(args.src.clone(), ring_len),
+                BufferArg::from_raw_parts(args.dst.clone(), ring_len),
                 offset,
                 frame_len as u32,
                 total_threads,

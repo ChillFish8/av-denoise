@@ -39,7 +39,7 @@ use crate::noise::temporal::{
     temporal_stats_blocks,
     temporal_stats_record_len,
 };
-use crate::tune::tests::runtime::{TestRuntime, test_client};
+use crate::tune::tests::runtime::test_client;
 
 const MAX_ULPS: u32 = 2;
 const RESULTS_ROW: [f32; 4] = [0.0; 4];
@@ -263,7 +263,7 @@ impl MapFrame {
         records
     }
 
-    fn shape(&self, client: &ComputeClient<TestRuntime>) -> NoiseShape {
+    fn shape(&self, client: &Client) -> NoiseShape {
         NoiseShape {
             width: self.plane.width,
             height: self.plane.height,
@@ -298,7 +298,7 @@ struct GpuMap {
 }
 
 /// Runs `frame` through a poisoned state's slot 0 reading.
-fn gpu_map(client: &ComputeClient<TestRuntime>, frame: &MapFrame, settings: ReadingSettings) -> GpuMap {
+fn gpu_map(client: &Client, frame: &MapFrame, settings: ReadingSettings) -> GpuMap {
     let shape = frame.shape(client);
     let records = frame.records();
     let partials = hashed_partials(frame.plane.width, frame.plane.height, 7);

@@ -31,7 +31,7 @@ pub(crate) struct NoiseSnapshot {
     pub derived: DerivedValues,
 }
 
-impl<R: Runtime> NoiseState<R> {
+impl NoiseState {
     /// Reads the stream state and the derived values back, waiting for every queued fold.
     ///
     /// A state that holds fixed values has no chains, curve or classes.

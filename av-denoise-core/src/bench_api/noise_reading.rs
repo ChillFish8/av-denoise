@@ -52,15 +52,15 @@ pub struct ReadingOptions {
 }
 
 /// A two-slot noise state whose slot 1 holds the stats of `ring`'s second frame against its first.
-pub struct NoiseReading<R: Runtime> {
-    state: NoiseState<R>,
+pub struct NoiseReading {
+    state: NoiseState,
 }
 
-impl<R: Runtime> NoiseReading<R> {
+impl NoiseReading {
     /// Measures the stats of a two-frame `ring` of `width` by `height` frames, building what
     /// `options` asks for.
     pub fn new(
-        client: &ComputeClient<R>,
+        client: &Client,
         width: u32,
         height: u32,
         channels: u32,

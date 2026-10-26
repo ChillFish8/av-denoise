@@ -37,8 +37,8 @@ pub(crate) fn thsad(blksize: u32, thsad_scale: f32) -> f32 {
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
 )]
-pub(crate) fn run_confidence<R: Runtime>(
-    client: &ComputeClient<R>,
+pub(crate) fn run_confidence(
+    client: &Client,
     ctx: &MotionCtx,
     width: u32,
     height: u32,
@@ -52,7 +52,7 @@ pub(crate) fn run_confidence<R: Runtime>(
         "the confidence pass always writes confidence"
     );
 
-    launch_fine::<R>(
+    launch_fine(
         client,
         ctx,
         width,

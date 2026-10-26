@@ -4,7 +4,7 @@ use super::engine::{nlmeans_outputs, noisy_frames, temporal_fast};
 use super::equivalence::assert_candidates_match_baseline;
 use super::fixtures::{H2_INV_NORM, NOISE_OFFSET, WindowSpec, upload, window_site};
 use super::probe::small_device_limits;
-use super::runtime::{TestRuntime, test_client};
+use super::runtime::test_client;
 use crate::nlmeans::{
     ChannelMode,
     DEFAULT_PILOT_STRENGTH_SCALE,
@@ -249,12 +249,12 @@ fn separable_candidates_carry_the_rounding_bound() {
     assert_eq!(SEPARABLE_MIN_PSNR, 80.0);
     assert_eq!(SEPARABLE_MAX_ABS, 1.0e-3);
     assert_eq!(WindowCandidate::Separable32x8.name(), "32x8_separable");
-    const { assert!(<WindowSite<TestRuntime> as VariantSite<TestRuntime>>::PRESCREEN) };
+    const { assert!(<WindowSite as VariantSite>::PRESCREEN) };
 }
 
 /// Reads `outputs` back, lets `change` edit all three buffers, and uploads the result.
 fn edited_accum(
-    client: &ComputeClient<TestRuntime>,
+    client: &Client,
     outputs: &AccumOutputs,
     change: impl Fn(&mut [f32], &mut [f32], &mut [f32]),
 ) -> AccumOutputs {
@@ -276,7 +276,7 @@ fn edited_accum(
     }
 }
 
-fn baseline_window_outputs(client: &ComputeClient<TestRuntime>) -> (WindowSite<TestRuntime>, AccumOutputs) {
+fn baseline_window_outputs(client: &Client) -> (WindowSite, AccumOutputs) {
     let spec = WindowSpec::pair(70, 45, ChannelMode::Yuv);
     let site = window_site(client, &spec);
     let outputs = site.scratch_outputs();
@@ -508,7 +508,7 @@ fn a_nan_weight_sum_fails_the_separable_bound() {
     assert!(!verdict.passed(), "{verdict:?}");
 }
 
-fn baseline_max_weights(client: &ComputeClient<TestRuntime>, spec: &WindowSpec) -> Vec<f32> {
+fn baseline_max_weights(client: &Client, spec: &WindowSpec) -> Vec<f32> {
     let site = window_site(client, spec);
     let outputs = site.scratch_outputs();
     site.launch(WindowCandidate::Block32x8, &outputs);

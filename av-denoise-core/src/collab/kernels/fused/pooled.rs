@@ -22,9 +22,9 @@ const VARIANCE_FLOOR: f32 = 1.0e-20;
     reason = "each argument is a per-lane value the threshold loop already holds"
 )]
 pub(crate) fn pooled_threshold(
-    stack: &mut Array<f32>,
-    v: &Array<f32>,
-    dct_profile: &Array<f32>,
+    stack: &mut [f32],
+    v: &[f32],
+    dct_profile: &[f32],
     prof_sub: f32,
     sub: u32,
     k_use: u32,

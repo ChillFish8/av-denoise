@@ -24,13 +24,13 @@ pub struct FinishInput {
     frame_len: usize,
 }
 
-pub struct FinishBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct FinishBench {
+    pub client: Client,
     pub channels: u32,
     pub channel_name: &'static str,
 }
 
-impl<R: Runtime> Benchmark for FinishBench<R> {
+impl Benchmark for FinishBench {
     type Input = FinishInput;
     type Output = ();
 
@@ -72,16 +72,16 @@ impl<R: Runtime> Benchmark for FinishBench<R> {
         let cube_dim = cube_dim_2d();
 
         unsafe {
-            nlm_finish::launch_unchecked::<R>(
+            nlm_finish::launch_unchecked(
                 &self.client,
                 cube_count,
                 cube_dim,
                 stored_ch,
-                ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
-                ArrayArg::from_raw_parts(args.output.clone(), pixels * stored_ch),
-                ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored_ch),
-                ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels),
-                ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
+                BufferArg::from_raw_parts(args.input.clone(), args.frame_len),
+                BufferArg::from_raw_parts(args.output.clone(), pixels * stored_ch),
+                BufferArg::from_raw_parts(args.accum.clone(), pixels * stored_ch),
+                BufferArg::from_raw_parts(args.weight_sum.clone(), pixels),
+                BufferArg::from_raw_parts(args.max_weight.clone(), pixels),
                 0u32,
                 0u32,
                 1.0f32,

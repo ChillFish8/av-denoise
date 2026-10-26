@@ -39,14 +39,14 @@ const SIGMA_MEDIAN_QUERIES: u32 = 2;
     reason = "every argument is a binding or a comptime shape"
 )]
 pub fn noise_curve_bins(
-    records: &Array<f32>,
-    block_flags: &Array<u32>,
-    histogram: &Array<i32>,
-    state: &Array<u32>,
-    queries: &Array<u32>,
-    tag_ranges: &Array<u32>,
-    keys: &mut Array<u32>,
-    tags: &mut Array<u32>,
+    records: &[f32],
+    block_flags: &[u32],
+    histogram: &[i32],
+    state: &[u32],
+    queries: &[u32],
+    tag_ranges: &[u32],
+    keys: &mut [u32],
+    tags: &mut [u32],
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] stored_ch: u32,
@@ -58,8 +58,8 @@ pub fn noise_curve_bins(
     let quarters_base = comptime!(2 * stored_ch + TEMPORAL_QUARTER_BASE);
 
     let thread = UNIT_POS_X;
-    let mut wanted = SharedMemory::<u32>::new(SIGMA_MEDIAN_QUERIES as usize);
-    let mut out = SharedMemory::<u32>::new(comptime!(SAMPLE_QUERIES * SELECT_SLOT_WORDS) as usize);
+    let mut wanted = Shared::<[u32]>::new_slice(SIGMA_MEDIAN_QUERIES as usize);
+    let mut out = Shared::<[u32]>::new_slice(comptime!(SAMPLE_QUERIES * SELECT_SLOT_WORDS) as usize);
 
     if thread < SIGMA_MEDIAN_QUERIES {
         wanted[thread as usize] = thread;

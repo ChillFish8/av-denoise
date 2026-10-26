@@ -57,7 +57,7 @@ fn motion_compensation_uniform_passthrough() {
         hq: None,
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
     denoiser.push_frame(&frame);
     denoiser.push_frame(&frame);
@@ -101,7 +101,7 @@ fn motion_compensation_with_bilateral_finite() {
         hq: None,
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
     denoiser.push_frame(&frame);
     denoiser.push_frame(&frame);
@@ -150,7 +150,7 @@ fn motion_compensation_translating_square_preserves_centre() {
         hq: None,
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&previous_frame);
     denoiser.push_frame(&centre_frame);
     denoiser.push_frame(&next_frame);
@@ -217,7 +217,7 @@ fn motion_compensation_1080_square_odd_block_count_dispatch_succeeds() {
         "test premise: this geometry gives an odd block count"
     );
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
     denoiser.push_frame(&frame);
     denoiser.push_frame(&frame);
@@ -272,7 +272,7 @@ fn motion_compensation_1080_square_odd_block_count_chained_dispatch_succeeds() {
         "test premise: this geometry gives an odd block count"
     );
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     assert!(
         denoiser.pair_ring_buf.is_some(),
         "test premise: Chained estimation must allocate the pair ring"
@@ -342,7 +342,7 @@ fn chained_end_to_end_finite(radius: u32) {
     let height = 32u32;
 
     let params = chained_hq_params(radius, 2);
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
 
     let frames: Vec<Vec<f32>> = (0..8)
         .map(|i| make_frame_with_noisy_region(width, height, 1, 0.5, 6 + i, 8, 2, 0.8))
@@ -406,7 +406,7 @@ fn direct_estimation_default_and_explicit_construction_match_bit_for_bit() {
             motion_compensation,
             hq: None,
         };
-        let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+        let mut denoiser = NlmDenoiser::new(&client, params, width, height);
         denoiser.push_frame(&frame);
         denoiser.push_frame(&frame);
         denoiser.push_frame(&frame);

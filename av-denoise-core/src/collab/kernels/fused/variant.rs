@@ -120,7 +120,7 @@ impl CollabVariant {
     }
 
     /// The untuned variant on `client`'s runtime.
-    pub fn for_client<R: Runtime>(client: &ComputeClient<R>) -> CollabVariant {
+    pub fn for_client(client: &Client) -> CollabVariant {
         let uniform_only = needs_warp_uniform_search(client);
         CollabVariant::baseline_for(uniform_only)
     }

@@ -1,6 +1,6 @@
 use cubecl::prelude::*;
 
-use super::helpers::{R, make_client, seeded_unit_gaussian};
+use super::helpers::{make_client, seeded_unit_gaussian};
 use crate::bench_api::HostIo;
 use crate::collab::kernels::aggregate::weight_scale_with_g_max;
 use crate::motion::sad_noise_floor;
@@ -97,7 +97,7 @@ fn nl4d_params(channels: ChannelMode) -> Nl4dParams {
 }
 
 /// The host formulas' derived values for `median` and `low` on `front`.
-fn host_formulas(front: &NlmDenoiser<R>, median: [f32; 3], low: [f32; 3]) -> DerivedValues {
+fn host_formulas(front: &NlmDenoiser, median: [f32; 3], low: [f32; 3]) -> DerivedValues {
     let params = &front.params;
     let count = params.channels.count() as usize;
     let effective_sigma = sigma_eff(&median[..count], params.channels);
@@ -183,7 +183,7 @@ fn the_coefficients_reproduce_the_host_formulas() {
 
     for params in coefficient_cases() {
         let front_params = params.clone();
-        let front = NlmDenoiser::<R>::new(&client, front_params, 64, 64);
+        let front = NlmDenoiser::new(&client, front_params, 64, 64);
         let noise = front.measured_noise().expect("the front measures its noise");
         let coefficients = noise.settings().fold.coefficients;
         let count = params.channels.count() as usize;
@@ -236,7 +236,7 @@ fn the_coefficients_reproduce_the_host_formulas() {
 }
 
 /// Reads back the derived values the front's kernels bind.
-fn bound_derived(front: &NlmDenoiser<R>) -> DerivedValues {
+fn bound_derived(front: &NlmDenoiser) -> DerivedValues {
     let handle = front.derived_handle();
     let bytes = front
         .client
@@ -288,7 +288,7 @@ fn an_nl4d_pilot_strength_follows_the_gpu_state() {
     };
     let params = Nl4dParams { nlm, ..defaults };
     let client = make_client();
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, WIDTH, HEIGHT).expect("the denoiser builds");
+    let mut denoiser = Nl4dDenoiser::new(&client, params, WIDTH, HEIGHT).expect("the denoiser builds");
     let initial_front = denoiser.front_for_test();
     let initial = bound_derived(initial_front);
 
@@ -326,7 +326,7 @@ fn gpu_noise_cases() -> [NlmParams; 2] {
 }
 
 /// Pushes `frames` through `denoiser` and returns every output frame, the flush included.
-fn nlmeans_outputs(denoiser: &mut NlmDenoiser<R>, frames: &[Vec<f32>]) -> Vec<Vec<f32>> {
+fn nlmeans_outputs(denoiser: &mut NlmDenoiser, frames: &[Vec<f32>]) -> Vec<Vec<f32>> {
     let mut outputs = Vec::new();
 
     for frame in frames {
@@ -361,11 +361,11 @@ fn nlmeans_hq_output_is_byte_identical_across_runs() {
 
     for params in gpu_noise_cases() {
         let first_params = params.clone();
-        let mut first = NlmDenoiser::<R>::new(&client, first_params, WIDTH, HEIGHT);
+        let mut first = NlmDenoiser::new(&client, first_params, WIDTH, HEIGHT);
         let first_outputs = nlmeans_outputs(&mut first, &frames);
 
         let second_params = params.clone();
-        let mut second = NlmDenoiser::<R>::new(&client, second_params, WIDTH, HEIGHT);
+        let mut second = NlmDenoiser::new(&client, second_params, WIDTH, HEIGHT);
         let second_outputs = nlmeans_outputs(&mut second, &frames);
 
         let first_bits = output_bits(&first_outputs);
@@ -385,7 +385,7 @@ fn nlmeans_hq_output_is_byte_identical_across_runs() {
 const PINNED_SIGMA: f32 = 3.0 / 255.0;
 
 /// The derived values the host formulas give `front` at the pinned `sigma`.
-fn pinned_formulas(front: &NlmDenoiser<R>, sigma: f32) -> DerivedValues {
+fn pinned_formulas(front: &NlmDenoiser, sigma: f32) -> DerivedValues {
     let params = &front.params;
     let consumer = front.noise_settings_for_test().fold.consumer;
     let weight = weight_scale_with_g_max(sigma, consumer.weight_g_max);
@@ -427,7 +427,7 @@ fn pinned_formulas(front: &NlmDenoiser<R>, sigma: f32) -> DerivedValues {
 }
 
 /// Checks every word `front` binds against [pinned_formulas], bit for bit.
-fn assert_binds_pinned_formulas(front: &NlmDenoiser<R>, what: &str) -> DerivedValues {
+fn assert_binds_pinned_formulas(front: &NlmDenoiser, what: &str) -> DerivedValues {
     let bound = bound_derived(front);
     let expected = pinned_formulas(front, PINNED_SIGMA);
     let bound_words = bound.to_words();
@@ -466,8 +466,7 @@ fn a_pinned_front_binds_the_host_formula_values() {
         nlm: nl4d_nlm,
         ..defaults
     };
-    let mut nl4d_denoiser =
-        Nl4dDenoiser::<R>::new(&client, nl4d, WIDTH, HEIGHT).expect("the denoiser builds");
+    let mut nl4d_denoiser = Nl4dDenoiser::new(&client, nl4d, WIDTH, HEIGHT).expect("the denoiser builds");
     for frame in &frames {
         nl4d_denoiser.push_frame(frame);
         nl4d_denoiser.denoise().expect("the submit runs");
@@ -499,7 +498,7 @@ fn a_pinned_front_binds_the_host_formula_values() {
         (compensated, "pinned nlmeans with MC and the pilot"),
         (confidence_only, "pinned nlmeans with confidence only"),
     ] {
-        let mut denoiser = NlmDenoiser::<R>::new(&client, params, WIDTH, HEIGHT);
+        let mut denoiser = NlmDenoiser::new(&client, params, WIDTH, HEIGHT);
         for frame in &frames {
             denoiser.push_frame(frame);
             denoiser.denoise().expect("the submit runs");

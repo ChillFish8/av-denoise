@@ -38,7 +38,7 @@ pub(crate) struct DeviceTimer {
     sampling: bool,
     /// Whether the current frame has recorded a device span yet.
     frame_recorded: bool,
-    pending: VecDeque<DynFut<ProfileTicks>>,
+    pending: VecDeque<DynFut<Option<ProfileTicks>>>,
     total: Duration,
     sampled_frames: u64,
 }
@@ -106,7 +106,9 @@ impl DeviceTimer {
     pub(crate) fn settle(&mut self) -> (Duration, u64) {
         while let Some(future) = self.pending.pop_front() {
             let ticks = cubecl::future::block_on(future);
-            self.total += ticks.duration();
+            if let Some(ticks) = ticks {
+                self.total += ticks.duration();
+            }
         }
 
         (self.total, self.sampled_frames)
@@ -123,7 +125,10 @@ impl DeviceTimer {
                 break;
             };
 
-            self.total += ticks.duration();
+            if let Some(ticks) = ticks {
+                self.total += ticks.duration();
+            }
+
             self.pending.pop_front();
         }
     }
@@ -150,13 +155,8 @@ pub(crate) trait DeviceTimed {
 /// A span only times its first compute pass, so `work` must queue no more dispatches than one
 /// pass holds and no upload or readback after its first dispatch.
 /// [units_per_span](crate::engine::timing::units_per_span) sizes the chunks of a longer segment.
-pub(crate) fn timed<R, T, O>(
-    client: &ComputeClient<R>,
-    target: &mut T,
-    work: impl FnOnce(&mut T) -> O + Send,
-) -> O
+pub(crate) fn timed<T, O>(client: &Client, target: &mut T, work: impl FnOnce(&mut T) -> O + Send) -> O
 where
-    R: Runtime,
     T: DeviceTimed + Send,
     O: Send,
 {

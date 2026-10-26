@@ -7,8 +7,8 @@ use cubecl::prelude::*;
 /// `min_storage_buffer_offset_alignment`, and a ring slot's stride rarely lands on one.
 #[cube(launch_unchecked)]
 pub fn gpu_copy(
-    src: &Array<f32>,
-    dst: &mut Array<f32>,
+    src: &[f32],
+    dst: &mut [f32],
     src_offset: u32,
     dst_offset: u32,
     #[comptime] length: u32,
@@ -26,8 +26,8 @@ pub fn gpu_copy(
 /// The loop is strided by `total_threads`, so a grid capped below the value count still covers it.
 #[cube(launch_unchecked)]
 pub fn gpu_cast_f16(
-    src: &Array<f32>,
-    dst: &mut Array<half::f16>,
+    src: &[f32],
+    dst: &mut [half::f16],
     offset: u32,
     #[comptime] length: u32,
     #[comptime] total_threads: u32,
@@ -46,9 +46,9 @@ pub fn gpu_cast_f16(
 /// remainder of `accum`.
 #[cube(launch_unchecked)]
 pub fn gpu_zero_buffers(
-    accum: &mut Array<f32>,
-    weight_sum: &mut Array<f32>,
-    max_weight: &mut Array<f32>,
+    accum: &mut [f32],
+    weight_sum: &mut [f32],
+    max_weight: &mut [f32],
     #[comptime] accum_len: u32,
     #[comptime] weight_len: u32,
     #[comptime] total_threads: u32,

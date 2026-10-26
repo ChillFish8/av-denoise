@@ -41,7 +41,7 @@ const UNREAD_WORD_STEP: f32 = -1.0e4;
 ///
 /// Every other word holds its own large negative value, so a kernel that reads the wrong word
 /// scores every block with zero confidence.
-pub(crate) fn sad_floor_buffer<R: Runtime>(client: &ComputeClient<R>, field: u32, sad_floor: f32) -> Handle {
+pub(crate) fn sad_floor_buffer(client: &Client, field: u32, sad_floor: f32) -> Handle {
     let mut words = unread_words();
     words[field as usize] = sad_floor;
     let bytes = f32::as_bytes(&words);
@@ -54,8 +54,8 @@ pub(crate) fn sad_floor_buffer<R: Runtime>(client: &ComputeClient<R>, field: u32
 ///
 /// Every other word holds its own large negative value, so an NLM kernel that reads the wrong word
 /// gives infinite or zero weights.
-pub(crate) fn nlm_noise_buffer<R: Runtime>(
-    client: &ComputeClient<R>,
+pub(crate) fn nlm_noise_buffer(
+    client: &Client,
     h2_field: u32,
     h2_inv_norm: f32,
     noise_offset: f32,
@@ -84,7 +84,7 @@ pub(crate) struct CollabNoise<'a> {
 /// Every other word, the sigma of each channel past the live ones included, holds its own large
 /// negative value. A kernel that reads the wrong word then thresholds with a nonsense sigma or
 /// scatters a negative weight.
-pub(crate) fn collab_noise_buffer<R: Runtime>(client: &ComputeClient<R>, noise: CollabNoise) -> Handle {
+pub(crate) fn collab_noise_buffer(client: &Client, noise: CollabNoise) -> Handle {
     let mut words = unread_words();
 
     let sigma_start = DERIVED_SIGMA as usize;
@@ -114,8 +114,8 @@ fn unread_words() -> Vec<f32> {
     clippy::too_many_arguments,
     reason = "the readback needs the ring handle plus every shape value that locates one slot in it"
 )]
-pub(crate) fn read_temporal_stats_slot<R: Runtime>(
-    client: &ComputeClient<R>,
+pub(crate) fn read_temporal_stats_slot(
+    client: &Client,
     stats_buf: &Handle,
     width: u32,
     height: u32,

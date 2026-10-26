@@ -1,4 +1,3 @@
-use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::NlmDenoiser;
@@ -66,13 +65,13 @@ pub(super) fn noise_shape(params: &NlmParams, width: u32, height: u32, align: St
     }
 }
 
-impl<R: Runtime> DeviceTimed for NlmDenoiser<R> {
+impl DeviceTimed for NlmDenoiser {
     fn device_timer(&mut self) -> &mut DeviceTimer {
         &mut self.device_timer
     }
 }
 
-impl<R: Runtime> NlmDenoiser<R> {
+impl NlmDenoiser {
     /// Device time this denoiser has spent.
     pub(crate) fn timing(&mut self) -> EngineTiming {
         let (device_time, device_samples) = self.device_timer.settle();
@@ -216,7 +215,7 @@ impl<R: Runtime> NlmDenoiser<R> {
 
     /// The noise state, `None` unless it measures the noise.
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-    pub(in crate::nlmeans) fn measured_noise(&self) -> Option<&NoiseState<R>> {
+    pub(in crate::nlmeans) fn measured_noise(&self) -> Option<&NoiseState> {
         let measured = self.noise.is_measured();
         measured.then_some(&self.noise)
     }

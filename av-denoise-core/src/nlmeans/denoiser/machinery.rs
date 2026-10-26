@@ -38,7 +38,7 @@ pub(crate) struct RingView {
     pub frame_count: u32,
 }
 
-impl<R: Runtime> NlmDenoiser<R> {
+impl NlmDenoiser {
     /// Runs the per-submit noise and motion estimates without launching any NLM kernel.
     ///
     /// The view is centred on logical ring position `center_t` and reads the unshifted input
@@ -163,7 +163,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         motion::thsad(blksize, thsad_scale)
     }
 
-    pub(crate) fn compute_client(&self) -> &ComputeClient<R> {
+    pub(crate) fn compute_client(&self) -> &Client {
         &self.client
     }
 

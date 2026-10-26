@@ -25,7 +25,7 @@ pub struct CompileHelpers {
 }
 
 impl CompileHelpers {
-    pub fn new<R: Runtime>(clients: Vec<ComputeClient<R>>) -> Self {
+    pub fn new(clients: Vec<Client>) -> Self {
         let count = clients.len();
 
         Self {
@@ -46,8 +46,8 @@ impl CompileHelpers {
     }
 
     /// The helpers, when they run on `R`.
-    pub(crate) fn clients<R: Runtime>(&self) -> &[ComputeClient<R>] {
-        let clients = self.clients.downcast_ref::<Vec<ComputeClient<R>>>();
+    pub(crate) fn clients(&self) -> &[Client] {
+        let clients = self.clients.downcast_ref::<Vec<Client>>();
 
         match clients {
             Some(clients) => clients,
@@ -92,11 +92,11 @@ impl HelperSource {
 
     /// The helpers that run on `R`, made on the first call, and empty when there are none or they
     /// have failed.
-    pub(crate) fn clients<R: Runtime>(&self) -> &[ComputeClient<R>] {
+    pub(crate) fn clients(&self) -> &[Client] {
         let helpers = self.helpers.get_or_init(|| self.make());
 
         match helpers {
-            Some(helpers) if !helpers.has_failed() => helpers.clients::<R>(),
+            Some(helpers) if !helpers.has_failed() => helpers.clients(),
             _ => &[],
         }
     }
@@ -126,11 +126,11 @@ impl fmt::Debug for HelperSource {
 /// Whether CubeCL keeps compiled kernels on disk, which compiling on helpers needs.
 pub fn compilation_cache_enabled() -> bool {
     let config = CubeClRuntimeConfig::get();
-    config.compilation.cache.is_some()
+    config.compilation.cache
 }
 
 #[cube(launch)]
-fn cache_reload_marker(output: &mut Array<u32>, #[comptime] high: u32, #[comptime] low: u32) {
+fn cache_reload_marker(output: &mut [u32], #[comptime] high: u32, #[comptime] low: u32) {
     if ABSOLUTE_POS == 0 {
         output[0] = high ^ low;
     }
@@ -166,26 +166,22 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 /// A client rereads the table only when it stores a kernel of its own, so this compiles a tiny
 /// kernel named by `marker`. A marker the cache already holds stores nothing, and then every
 /// kernel stored before that marker is visible anyway.
-pub(crate) fn reload_compilation_cache<R: Runtime>(
-    client: &ComputeClient<R>,
-    marker: u64,
-) -> Result<(), anyhow::Error> {
+pub(crate) fn reload_compilation_cache(client: &Client, marker: u64) -> Result<(), anyhow::Error> {
     let high = (marker >> 32) as u32;
     let low = marker as u32;
     let output = client.empty(size_of::<u32>());
-    let output_arg = bind::<R>(&output, 1);
+    let output_arg = bind(&output, 1);
     let cube_count = CubeCount::Static(1, 1, 1);
     let cube_dim = CubeDim::new_1d(1);
 
-    cache_reload_marker::launch::<R>(client, cube_count, cube_dim, output_arg, high, low);
+    cache_reload_marker::launch(client, cube_count, cube_dim, output_arg, high, low);
     sync(client)
 }
 
 #[cfg(feature = "vulkan")]
 mod vulkan_helpers {
-    use cubecl::Runtime;
     use cubecl::future::block_on;
-    use cubecl::wgpu::{RuntimeOptions, WgpuDevice, WgpuRuntime, WgpuSetup, init_device, vulkan};
+    use cubecl::wgpu::{RuntimeOptions, WgpuDevice, WgpuSetup, init_device, vulkan};
 
     use super::CompileHelpers;
 
@@ -218,7 +214,8 @@ mod vulkan_helpers {
                 };
                 let options = RuntimeOptions::default();
                 let helper: WgpuDevice = init_device(setup, options);
-                WgpuRuntime::client(&helper)
+                let device = cubecl::Device::from(helper);
+                device.client()
             })
             .collect();
 

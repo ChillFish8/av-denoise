@@ -31,7 +31,7 @@ pub enum Device {
     Default,
     /// Discrete GPU at ordinal `index`.
     ///
-    /// Maps to `CudaDevice { index }`, `AmdDevice { index }`, or `WgpuDevice::DiscreteGpu(index)`.
+    /// Maps to `CudaDevice { index }`, `AmdDevice { index }`, or `WgpuDeviceKind::DiscreteGpu(index)`.
     Discrete { index: usize },
     /// Integrated GPU at ordinal `index`. wgpu-only.
     Integrated { index: usize },
@@ -144,15 +144,17 @@ impl Device {
 #[cfg(any(feature = "vulkan", feature = "metal"))]
 impl Device {
     pub fn to_wgpu(&self) -> Result<cubecl::wgpu::WgpuDevice, anyhow::Error> {
-        use cubecl::wgpu::WgpuDevice;
+        use cubecl::wgpu::{WgpuDevice, WgpuDeviceKind};
 
-        Ok(match self {
-            Device::Default => WgpuDevice::DefaultDevice,
-            Device::Discrete { index } => WgpuDevice::DiscreteGpu(*index),
-            Device::Integrated { index } => WgpuDevice::IntegratedGpu(*index),
-            Device::Virtual { index } => WgpuDevice::VirtualGpu(*index),
-            Device::Cpu => WgpuDevice::Cpu,
-        })
+        let kind = match self {
+            Device::Default => WgpuDeviceKind::DefaultDevice,
+            Device::Discrete { index } => WgpuDeviceKind::DiscreteGpu(*index),
+            Device::Integrated { index } => WgpuDeviceKind::IntegratedGpu(*index),
+            Device::Virtual { index } => WgpuDeviceKind::VirtualGpu(*index),
+            Device::Cpu => WgpuDeviceKind::Cpu,
+        };
+
+        Ok(WgpuDevice::new(kind))
     }
 }
 

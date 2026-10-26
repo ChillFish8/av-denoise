@@ -21,7 +21,7 @@ fn uniform_image_passthrough() {
     let height = 16;
     let frame = make_uniform_frame(width, height, 1, 0.5);
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
     let result = denoiser.denoise().unwrap().unwrap();
@@ -50,7 +50,7 @@ fn uniform_yuv_passthrough() {
     let height = 16;
     let frame = make_uniform_frame(width, height, 3, 0.5);
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
     let result = denoiser.denoise().unwrap().unwrap();
@@ -80,7 +80,7 @@ fn uniform_chroma_passthrough() {
     let height = 16;
     let frame = make_uniform_frame(width, height, 2, 0.5);
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
     let result = denoiser.denoise().unwrap().unwrap();
@@ -114,7 +114,7 @@ fn noisy_region_suppressed() {
     let mut frame = vec![0.5f32; (width * height) as usize];
     frame[(16 * width + 16) as usize] = 0.8;
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
     let result = denoiser.denoise().unwrap().unwrap();
@@ -154,7 +154,7 @@ fn high_strength_smooths_heavily() {
         }
     }
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
     let result = denoiser.denoise().unwrap().unwrap();
@@ -187,7 +187,7 @@ fn low_strength_preserves_original() {
     let mut frame = vec![0.5f32; (width * height) as usize];
     frame[(8 * width + 8) as usize] = 0.8;
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
     let result = denoiser.denoise().unwrap().unwrap();
@@ -219,7 +219,7 @@ fn self_weight_zero_uniform() {
 
     let frame = make_uniform_frame(width, height, 1, 0.5);
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
     let result = denoiser.denoise().unwrap().unwrap();
@@ -244,7 +244,7 @@ fn spatial_only_no_delay() {
     let height = 8;
     let frame = make_uniform_frame(width, height, 3, 0.5);
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
     let result = denoiser.denoise().unwrap();
@@ -278,7 +278,7 @@ fn symmetry_preserved() {
         }
     }
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
     let result = denoiser.denoise().unwrap().unwrap();
@@ -315,7 +315,7 @@ fn clamp_to_edge_no_darkening() {
     let height = 8;
     let frame = make_uniform_frame(width, height, 1, 0.7);
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
     let result = denoiser.denoise().unwrap().unwrap();

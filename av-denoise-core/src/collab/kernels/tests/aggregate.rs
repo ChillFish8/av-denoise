@@ -4,7 +4,7 @@ use crate::collab::kernels::aggregate::collab_normalise;
 use crate::collab::kernels::packed::{collab_normalise_packed, pack_accum_host};
 use crate::nlmeans::{BLOCK_X, BLOCK_Y};
 use crate::tune::gpu::read_i32;
-use crate::tune::tests::runtime::{TestRuntime, packed_supported, test_client};
+use crate::tune::tests::runtime::{packed_supported, test_client};
 
 #[test]
 fn normalise_leaves_the_region_it_read_zeroed() {
@@ -32,11 +32,11 @@ fn normalise_leaves_the_region_it_read_zeroed() {
     let wsum_launched = wsum.clone();
 
     unsafe {
-        let accum_arg = ArrayArg::from_raw_parts(accum_launched, 2 * region_len);
-        let wsum_arg = ArrayArg::from_raw_parts(wsum_launched, 2 * pixels);
-        let output_arg = ArrayArg::from_raw_parts(output, region_len);
+        let accum_arg = BufferArg::from_raw_parts(accum_launched, 2 * region_len);
+        let wsum_arg = BufferArg::from_raw_parts(wsum_launched, 2 * pixels);
+        let output_arg = BufferArg::from_raw_parts(output, region_len);
 
-        collab_normalise::launch_unchecked::<TestRuntime>(
+        collab_normalise::launch_unchecked(
             &client,
             grid,
             dim,
@@ -113,11 +113,11 @@ fn packed_normalise_leaves_the_region_it_read_zeroed() {
         let rest_len = rest_host.len();
 
         unsafe {
-            let packed_arg = ArrayArg::from_raw_parts(packed_launched, packed_len);
-            let rest_arg = ArrayArg::from_raw_parts(rest_launched, rest_len);
-            let output_arg = ArrayArg::from_raw_parts(output, output_len);
+            let packed_arg = BufferArg::from_raw_parts(packed_launched, packed_len);
+            let rest_arg = BufferArg::from_raw_parts(rest_launched, rest_len);
+            let output_arg = BufferArg::from_raw_parts(output, output_len);
 
-            collab_normalise_packed::launch_unchecked::<TestRuntime>(
+            collab_normalise_packed::launch_unchecked(
                 &client,
                 grid,
                 dim,

@@ -1,4 +1,4 @@
-use super::helpers::{R, RAMP_HEIGHT, RAMP_WIDTH, make_client, ramp_clip, ramp_params};
+use super::helpers::{RAMP_HEIGHT, RAMP_WIDTH, make_client, ramp_clip, ramp_params};
 use crate::bench_api::HostIo;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::ChannelMode;
@@ -12,7 +12,7 @@ struct ClipRun {
 fn denoise_clip(params: Nl4dParams, frames: &[Vec<f32>]) -> ClipRun {
     let client = make_client();
     let mut denoiser =
-        Nl4dDenoiser::<R>::new(&client, params, RAMP_WIDTH, RAMP_HEIGHT).expect("construction failed");
+        Nl4dDenoiser::new(&client, params, RAMP_WIDTH, RAMP_HEIGHT).expect("construction failed");
 
     let mut outputs: Vec<Vec<f32>> = Vec::new();
     let mut curve_seen = false;

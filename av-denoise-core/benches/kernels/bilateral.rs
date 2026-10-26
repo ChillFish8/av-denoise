@@ -19,13 +19,13 @@ use super::{
     stored_channels,
 };
 
-pub struct BilateralBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct BilateralBench {
+    pub client: Client,
     pub channels: u32,
     pub channel_name: &'static str,
 }
 
-impl<R: Runtime> Benchmark for BilateralBench<R> {
+impl Benchmark for BilateralBench {
     type Input = InputOutput;
     type Output = ();
 
@@ -52,13 +52,13 @@ impl<R: Runtime> Benchmark for BilateralBench<R> {
         let cube_dim = cube_dim_2d();
 
         unsafe {
-            nlm_bilateral::launch_unchecked::<R>(
+            nlm_bilateral::launch_unchecked(
                 &self.client,
                 cube_count,
                 cube_dim,
                 stored_ch,
-                ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
-                ArrayArg::from_raw_parts(args.output.clone(), pixels * stored_ch),
+                BufferArg::from_raw_parts(args.input.clone(), args.frame_len),
+                BufferArg::from_raw_parts(args.output.clone(), pixels * stored_ch),
                 0u32,
                 1.0 / (2.0 * BILATERAL_SIGMA_S * BILATERAL_SIGMA_S),
                 1.0 / (2.0 * BILATERAL_SIGMA_R * BILATERAL_SIGMA_R),

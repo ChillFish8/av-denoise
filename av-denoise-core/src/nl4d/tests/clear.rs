@@ -1,17 +1,17 @@
-use super::helpers::{R, make_client, noisy_frames, static_clip_params};
+use super::helpers::{make_client, noisy_frames, static_clip_params};
 use crate::bench_api::HostIo;
 use crate::nl4d::Nl4dDenoiser;
 
 const SIZE: u32 = 64;
 
-fn denoiser() -> Nl4dDenoiser<R> {
+fn denoiser() -> Nl4dDenoiser {
     let client = make_client();
     let params = static_clip_params(1);
 
     Nl4dDenoiser::new(&client, params, SIZE, SIZE).expect("valid params")
 }
 
-fn run(denoiser: &mut Nl4dDenoiser<R>, count: usize) {
+fn run(denoiser: &mut Nl4dDenoiser, count: usize) {
     let frames = noisy_frames(SIZE, SIZE, 1, count);
 
     for frame in &frames {

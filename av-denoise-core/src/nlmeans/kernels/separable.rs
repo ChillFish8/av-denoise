@@ -18,9 +18,9 @@ use crate::noise::{DERIVED_H2_INV_NORM, DERIVED_NOISE_OFFSET};
 /// the pixel against `frame_t` at the pixel plus `q`.
 #[cube(launch_unchecked)]
 pub fn nlm_distance_pair<N: Size>(
-    input: &Array<Vector<f32, N>>,
-    dist_fwd: &mut Array<f32>,
-    dist_bwd: &mut Array<f32>,
+    input: &[Vector<f32, N>],
+    dist_fwd: &mut [f32],
+    dist_bwd: &mut [f32],
     frame_t: u32,
     frame_fwd: u32,
     frame_bwd: u32,
@@ -79,8 +79,8 @@ pub fn nlm_distance_pair<N: Size>(
 /// Writes the channel-scaled squared distance between each pixel and its neighbour at `q`.
 #[cube(launch_unchecked)]
 pub fn nlm_distance<N: Size>(
-    input: &Array<Vector<f32, N>>,
-    dist: &mut Array<f32>,
+    input: &[Vector<f32, N>],
+    dist: &mut [f32],
     frame_t: u32,
     frame_q: u32,
     q_x: i32,
@@ -123,8 +123,8 @@ pub fn nlm_distance<N: Size>(
 /// The block caches a `(block_x + 2 * patch_radius) x block_y` tile in shared memory.
 #[cube(launch_unchecked)]
 pub fn nlm_horizontal_sum(
-    input: &Array<f32>,
-    output: &mut Array<f32>,
+    input: &[f32],
+    output: &mut [f32],
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] patch_radius: u32,
@@ -133,7 +133,7 @@ pub fn nlm_horizontal_sum(
 ) {
     let tile_width = comptime!(block_x + 2 * patch_radius);
     let tile_elems = comptime!((block_x + 2 * patch_radius) * block_y);
-    let mut smem = SharedMemory::<f32>::new(comptime!((block_x + 2 * patch_radius) * block_y) as usize);
+    let mut smem = Shared::<[f32]>::new_slice(comptime!((block_x + 2 * patch_radius) * block_y) as usize);
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -177,10 +177,10 @@ pub fn nlm_horizontal_sum(
 /// `offset_index` of the candidate's spatial table `offsets`.
 #[cube(launch_unchecked)]
 pub fn nlm_vertical_weight(
-    input: &Array<f32>,
-    output: &mut Array<f32>,
-    noise: &Array<f32>,
-    offsets: &Array<f32>,
+    input: &[f32],
+    output: &mut [f32],
+    noise: &[f32],
+    offsets: &[f32],
     offset_index: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -189,7 +189,7 @@ pub fn nlm_vertical_weight(
     #[comptime] block_y: u32,
 ) {
     let tile_elems = comptime!(block_x * (block_y + 2 * patch_radius));
-    let mut smem = SharedMemory::<f32>::new(comptime!(block_x * (block_y + 2 * patch_radius)) as usize);
+    let mut smem = Shared::<[f32]>::new_slice(comptime!(block_x * (block_y + 2 * patch_radius)) as usize);
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -231,10 +231,10 @@ pub fn nlm_vertical_weight(
 /// The paired version of `nlm_horizontal_sum`, sharing one tile pass and barrier for both buffers.
 #[cube(launch_unchecked)]
 pub fn nlm_horizontal_sum_pair(
-    input_fwd: &Array<f32>,
-    input_bwd: &Array<f32>,
-    output_fwd: &mut Array<f32>,
-    output_bwd: &mut Array<f32>,
+    input_fwd: &[f32],
+    input_bwd: &[f32],
+    output_fwd: &mut [f32],
+    output_bwd: &mut [f32],
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] patch_radius: u32,
@@ -243,8 +243,8 @@ pub fn nlm_horizontal_sum_pair(
 ) {
     let tile_width = comptime!(block_x + 2 * patch_radius);
     let tile_elems = comptime!((block_x + 2 * patch_radius) * block_y);
-    let mut smem_fwd = SharedMemory::<f32>::new(comptime!((block_x + 2 * patch_radius) * block_y) as usize);
-    let mut smem_bwd = SharedMemory::<f32>::new(comptime!((block_x + 2 * patch_radius) * block_y) as usize);
+    let mut smem_fwd = Shared::<[f32]>::new_slice(comptime!((block_x + 2 * patch_radius) * block_y) as usize);
+    let mut smem_bwd = Shared::<[f32]>::new_slice(comptime!((block_x + 2 * patch_radius) * block_y) as usize);
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -301,20 +301,20 @@ pub fn nlm_horizontal_sum_pair(
 /// `DERIVED_NOISE_OFFSET` words.
 #[cube(launch_unchecked)]
 pub fn nlm_vweight_pair_accumulate<N: Size>(
-    hsum_fwd: &Array<f32>,
-    hsum_bwd: &Array<f32>,
-    input: &Array<Vector<f32, N>>,
-    accum: &mut Array<Vector<f32, N>>,
-    weight_sum: &mut Array<f32>,
-    max_weight: &mut Array<f32>,
-    conf_fwd: &Array<f32>,
-    conf_bwd: &Array<f32>,
+    hsum_fwd: &[f32],
+    hsum_bwd: &[f32],
+    input: &[Vector<f32, N>],
+    accum: &mut [Vector<f32, N>],
+    weight_sum: &mut [f32],
+    max_weight: &mut [f32],
+    conf_fwd: &[f32],
+    conf_bwd: &[f32],
     #[comptime] use_confidence: bool,
     frame_fwd: u32,
     frame_bwd: u32,
     q_x: i32,
     q_y: i32,
-    noise: &Array<f32>,
+    noise: &[f32],
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] patch_radius: u32,
@@ -325,8 +325,8 @@ pub fn nlm_vweight_pair_accumulate<N: Size>(
     #[comptime] blocks_y: u32,
 ) {
     let tile_elems = comptime!(block_x * (block_y + 2 * patch_radius));
-    let mut smem_fwd = SharedMemory::<f32>::new(comptime!(block_x * (block_y + 2 * patch_radius)) as usize);
-    let mut smem_bwd = SharedMemory::<f32>::new(comptime!(block_x * (block_y + 2 * patch_radius)) as usize);
+    let mut smem_fwd = Shared::<[f32]>::new_slice(comptime!(block_x * (block_y + 2 * patch_radius)) as usize);
+    let mut smem_bwd = Shared::<[f32]>::new_slice(comptime!(block_x * (block_y + 2 * patch_radius)) as usize);
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -396,8 +396,8 @@ pub fn nlm_vweight_pair_accumulate<N: Size>(
 /// The reference-image version of `nlm_distance`, reading both pixels from `reference`.
 #[cube(launch_unchecked)]
 pub fn nlm_distance_ref<N: Size>(
-    reference: &Array<Vector<f32, N>>,
-    dist: &mut Array<f32>,
+    reference: &[Vector<f32, N>],
+    dist: &mut [f32],
     frame_t: u32,
     frame_q: u32,
     q_x: i32,
@@ -438,9 +438,9 @@ pub fn nlm_distance_ref<N: Size>(
 /// The reference-image version of `nlm_distance_pair`, reading every pixel from `reference`.
 #[cube(launch_unchecked)]
 pub fn nlm_distance_pair_ref<N: Size>(
-    reference: &Array<Vector<f32, N>>,
-    dist_fwd: &mut Array<f32>,
-    dist_bwd: &mut Array<f32>,
+    reference: &[Vector<f32, N>],
+    dist_fwd: &mut [f32],
+    dist_bwd: &mut [f32],
     frame_t: u32,
     frame_fwd: u32,
     frame_bwd: u32,

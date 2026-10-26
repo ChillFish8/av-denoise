@@ -8,8 +8,8 @@ use super::{HEIGHT, WIDTH, block_sync, make_synthetic_frame, shapes_with_channel
 /// A 2x2 box downsample of a full-resolution luma frame into a half-resolution slot.
 ///
 /// It builds the coarse pyramid level for motion estimation.
-pub struct DownscaleBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct DownscaleBench {
+    pub client: Client,
 }
 
 #[derive(Clone)]
@@ -18,7 +18,7 @@ pub struct DownscaleInput {
     pub dst: Handle,
 }
 
-impl<R: Runtime> Benchmark for DownscaleBench<R> {
+impl Benchmark for DownscaleBench {
     type Input = DownscaleInput;
     type Output = ();
 
@@ -46,12 +46,12 @@ impl<R: Runtime> Benchmark for DownscaleBench<R> {
         let dim = CubeDim::new_2d(block_x, block_y);
 
         unsafe {
-            mc_downscale::launch_unchecked::<R>(
+            mc_downscale::launch_unchecked(
                 &self.client,
                 grid,
                 dim,
-                ArrayArg::from_raw_parts(args.src.clone(), (WIDTH * HEIGHT) as usize),
-                ArrayArg::from_raw_parts(args.dst.clone(), (dst_width * dst_height) as usize),
+                BufferArg::from_raw_parts(args.src.clone(), (WIDTH * HEIGHT) as usize),
+                BufferArg::from_raw_parts(args.dst.clone(), (dst_width * dst_height) as usize),
                 0u32,
                 0u32,
                 WIDTH,

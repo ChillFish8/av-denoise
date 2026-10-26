@@ -175,20 +175,20 @@ const _: () = assert!(
     reason = "every argument is a buffer or comptime shape the kernel binds"
 )]
 pub fn collab_fused<S: Float, N: Size, W: Int>(
-    ring: &Array<Vector<f32, N>>,
-    ring_scalar: &Array<f32>,
-    search_ring: &Array<Vector<S, N>>,
-    mv_field: &Array<i32>,
-    confidence: &Array<f32>,
-    neighbour_slots: &Array<u32>,
-    noise: &Array<f32>,
-    noise_curve: &Array<f32>,
-    strength_map: &Array<f32>,
-    dct_profile: &Array<f32>,
-    kaiser: &Array<f32>,
-    accum: &mut Array<Atomic<i32>>,
-    wsum: &mut Array<Atomic<W>>,
-    group_weight: &mut Array<f32>,
+    ring: &[Vector<f32, N>],
+    ring_scalar: &[f32],
+    search_ring: &[Vector<S, N>],
+    mv_field: &[i32],
+    confidence: &[f32],
+    neighbour_slots: &[u32],
+    noise: &[f32],
+    noise_curve: &[f32],
+    strength_map: &[f32],
+    dct_profile: &[f32],
+    kaiser: &[f32],
+    accum: &mut [Atomic<i32>],
+    wsum: &mut [Atomic<W>],
+    group_weight: &mut [f32],
     centre_slot: u32,
     c_min: f32,
     lambda_ht: f32,
@@ -235,12 +235,12 @@ pub fn collab_fused<S: Float, N: Size, W: Int>(
     });
 
     let transpose_floats = comptime!(groups * TRANSPOSE_REGION_FLOATS);
-    let mut transpose_buf = SharedMemory::<f32>::new(transpose_floats as usize);
+    let mut transpose_buf = Shared::<[f32]>::new_slice(transpose_floats as usize);
 
     let centre = comptime!(variant.centre);
     let lanes = comptime!(variant.lanes());
     let tile_len = comptime!(variant.tile_elements(spatial_radius, stored_ch));
-    let mut tile = SharedMemory::<S>::new(tile_len as usize);
+    let mut tile = Shared::<[S]>::new_slice(tile_len as usize);
 
     // A dead group works on the last real reference of the row, so every read stays inside the
     // frame and every lane reaches every barrier. `live` stops it writing.
@@ -298,10 +298,10 @@ pub fn collab_fused<S: Float, N: Size, W: Int>(
         mv_field,
         confidence,
         neighbour_slots,
-        &current,
+        current.as_slice(),
         &cursor,
         c_min,
-        &mut member_pos,
+        member_pos.as_mut_slice(),
         variant,
         radius,
         grid_frames,
@@ -319,7 +319,7 @@ pub fn collab_fused<S: Float, N: Size, W: Int>(
     let ref_idx = CUBE_POS_Y * refs_x + ref_x_clamped;
     let k_use = group_word & GROUP_SIZE_MASK;
     let use_grid = (group_word & GROUP_USES_GRID) != 0u32;
-    let column_luma = column_luma_of(&current, channels);
+    let column_luma = column_luma_of(current.as_slice(), channels);
 
     filter_group::<W>(
         ring_scalar,
@@ -333,7 +333,7 @@ pub fn collab_fused<S: Float, N: Size, W: Int>(
         wsum,
         group_weight,
         &mut transpose_buf,
-        &member_pos,
+        member_pos.as_slice(),
         k_use,
         use_grid,
         column_luma,
@@ -366,7 +366,7 @@ pub fn collab_fused<S: Float, N: Size, W: Int>(
     reason = "every argument is a buffer or comptime shape the load reads"
 )]
 pub(crate) fn load_reference_column<N: Size>(
-    ring: &Array<Vector<f32, N>>,
+    ring: &[Vector<f32, N>],
     x: u32,
     y: u32,
     slot: u32,
@@ -382,7 +382,7 @@ pub(crate) fn load_reference_column<N: Size>(
         let pixel = read_line(ring, x + sub, y + r, slot, width, height);
         #[unroll]
         for c in 0..channels {
-            column[(r * channels + c) as usize] = pixel[c as usize];
+            column[(r * channels + c) as usize] = pixel.extract(c as usize);
         }
     }
 
@@ -391,7 +391,7 @@ pub(crate) fn load_reference_column<N: Size>(
 
 /// The sum of channel 0 down a column loaded by [load_reference_column].
 #[cube]
-pub(crate) fn column_luma_of(column: &Array<f32>, #[comptime] channels: u32) -> f32 {
+pub(crate) fn column_luma_of(column: &[f32], #[comptime] channels: u32) -> f32 {
     let mut column_luma = 0.0f32;
 
     #[unroll]
@@ -412,16 +412,16 @@ pub(crate) fn column_luma_of(column: &Array<f32>, #[comptime] channels: u32) -> 
     reason = "every argument is a buffer or comptime shape the search reads"
 )]
 pub(crate) fn search_group<S: Float, N: Size>(
-    ring: &Array<Vector<f32, N>>,
-    search_ring: &Array<Vector<S, N>>,
-    tile: &SharedMemory<S>,
-    mv_field: &Array<i32>,
-    confidence: &Array<f32>,
-    neighbour_slots: &Array<u32>,
-    current: &Array<f32>,
+    ring: &[Vector<f32, N>],
+    search_ring: &[Vector<S, N>],
+    tile: &Shared<[S]>,
+    mv_field: &[i32],
+    confidence: &[f32],
+    neighbour_slots: &[u32],
+    current: &[f32],
     cursor: &SearchCursor,
     c_min: f32,
-    member_pos: &mut Array<u32>,
+    member_pos: &mut [u32],
     #[comptime] variant: CollabVariant,
     #[comptime] radius: u32,
     #[comptime] grid_frames: u32,
@@ -506,7 +506,7 @@ pub(crate) fn search_group<S: Float, N: Size>(
                 );
                 #[unroll]
                 for c in 0..channels {
-                    anchor[(r * channels + c) as usize] = pixel[c as usize];
+                    anchor[(r * channels + c) as usize] = pixel.extract(c as usize);
                 }
             }
 
@@ -516,14 +516,14 @@ pub(crate) fn search_group<S: Float, N: Size>(
                 mv_field,
                 confidence,
                 neighbour_slots,
-                &anchor,
+                anchor.as_slice(),
                 anchor_x,
                 anchor_y,
                 sub,
                 cursor.scale,
                 c_min,
-                &mut grid_d,
-                &mut grid_pos,
+                grid_d.as_mut_slice(),
+                grid_pos.as_mut_slice(),
                 comptime!(first + 1),
                 tail,
                 walk,
@@ -568,25 +568,19 @@ pub(crate) fn search_group<S: Float, N: Size>(
     clippy::too_many_arguments,
     reason = "every argument is a buffer or comptime shape the filter binds"
 )]
-#[expect(
-    clippy::collapsible_if,
-    reason = "the outer condition of the group-DC exception is comptime, so nesting elides the \
-              inner test in 63 of the 64 unrolled positions rather than emitting it and ANDing \
-              a constant false into it"
-)]
 pub(crate) fn filter_group<W: Int>(
-    ring_scalar: &Array<f32>,
-    neighbour_slots: &Array<u32>,
-    noise: &Array<f32>,
-    noise_curve: &Array<f32>,
-    strength_map: &Array<f32>,
-    dct_profile: &Array<f32>,
-    kaiser: &Array<f32>,
-    accum: &mut Array<Atomic<i32>>,
-    wsum: &mut Array<Atomic<W>>,
-    group_weight: &mut Array<f32>,
-    transpose_buf: &mut SharedMemory<f32>,
-    member_pos: &Array<u32>,
+    ring_scalar: &[f32],
+    neighbour_slots: &[u32],
+    noise: &[f32],
+    noise_curve: &[f32],
+    strength_map: &[f32],
+    dct_profile: &[f32],
+    kaiser: &[f32],
+    accum: &mut [Atomic<i32>],
+    wsum: &mut [Atomic<W>],
+    group_weight: &mut [f32],
+    transpose_buf: &mut Shared<[f32]>,
+    member_pos: &[u32],
     k_use: u32,
     use_grid: bool,
     column_luma: f32,
@@ -611,8 +605,7 @@ pub(crate) fn filter_group<W: Int>(
     #[comptime] packed: bool,
 ) {
     // The frame is picked with `select` rather than a branch, because a frame index that reaches
-    // a ring read through a branch panics cubecl 0.10's GVN pass and the launch silently does
-    // nothing.
+    // a ring read through a branch has been mishandled by cubecl's optimiser.
     let mut member_slot = Array::<u32>::new(MAX_K as usize);
     #[unroll]
     for m in 0..MAX_K {
@@ -688,12 +681,12 @@ pub(crate) fn filter_group<W: Int>(
         // the profile multiplies in at the threshold instead.
         if comptime!(grid_frames > 1) {
             if use_grid {
-                grid_variance(&mut member_variance, grid_frames);
+                grid_variance(member_variance.as_mut_slice(), grid_frames);
             } else {
-                stack_variance_ladder(&mut member_variance, k_use);
+                stack_variance_ladder(member_variance.as_mut_slice(), k_use);
             }
         } else {
-            stack_variance_ladder(&mut member_variance, k_use);
+            stack_variance_ladder(member_variance.as_mut_slice(), k_use);
         }
 
         // Lane `sub` comes out holding coefficient `(u = i, v = sub)` at slot `i`.
@@ -704,9 +697,9 @@ pub(crate) fn filter_group<W: Int>(
             for i in 0..PATCH_SIZE {
                 line[i as usize] = stack[(m * PATCH_SIZE + i) as usize];
             }
-            dct8_reg_fwd(&mut line);
-            transpose8(transpose_buf, &mut line, sub, group);
-            dct8_reg_fwd(&mut line);
+            dct8_reg_fwd(line.as_mut_slice());
+            transpose8(transpose_buf, line.as_mut_slice(), sub, group);
+            dct8_reg_fwd(line.as_mut_slice());
             #[unroll]
             for i in 0..PATCH_SIZE {
                 stack[(m * PATCH_SIZE + i) as usize] = line[i as usize];
@@ -716,12 +709,12 @@ pub(crate) fn filter_group<W: Int>(
         // A lane owns every member at each of its positions, so nothing crosses lanes here.
         if comptime!(grid_frames > 1) {
             if use_grid {
-                grid_fwd(&mut stack, grid_frames);
+                grid_fwd(stack.as_mut_slice(), grid_frames);
             } else {
-                stack_haar_fwd(&mut stack, k_use);
+                stack_haar_fwd(stack.as_mut_slice(), k_use);
             }
         } else {
-            stack_haar_fwd(&mut stack, k_use);
+            stack_haar_fwd(stack.as_mut_slice(), k_use);
         }
 
         let channel_lambda = select(c == 0u32, luma_lambda, other_lambda);
@@ -729,8 +722,8 @@ pub(crate) fn filter_group<W: Int>(
         if comptime!(pooled) {
             let threshold = channel_lambda * pool_ratio;
             retained_v = pooled_threshold(
-                &mut stack,
-                &member_variance,
+                stack.as_mut_slice(),
+                member_variance.as_slice(),
                 dct_profile,
                 prof_sub,
                 sub,
@@ -748,6 +741,13 @@ pub(crate) fn filter_group<W: Int>(
                         let coeff_variance = member_variance[j as usize] * factor;
                         let slot = (j * PATCH_SIZE + i) as usize;
                         let mut keep = f32::abs(stack[slot]) >= channel_lambda * f32::sqrt(coeff_variance);
+                        #[expect(
+                            clippy::collapsible_if,
+                            reason = "the outer condition of the group-DC exception is comptime, so \
+                                      nesting elides the inner test in 63 of the 64 unrolled \
+                                      positions rather than emitting it and ANDing a constant \
+                                      false into it"
+                        )]
                         if comptime!(j == 0u32 && i == 0u32) {
                             if sub == 0u32 {
                                 keep = true;
@@ -778,12 +778,12 @@ pub(crate) fn filter_group<W: Int>(
         // the scatter is coalesced.
         if comptime!(grid_frames > 1) {
             if use_grid {
-                grid_inv(&mut stack, grid_frames);
+                grid_inv(stack.as_mut_slice(), grid_frames);
             } else {
-                stack_haar_inv(&mut stack, k_use);
+                stack_haar_inv(stack.as_mut_slice(), k_use);
             }
         } else {
-            stack_haar_inv(&mut stack, k_use);
+            stack_haar_inv(stack.as_mut_slice(), k_use);
         }
 
         #[unroll]
@@ -793,9 +793,9 @@ pub(crate) fn filter_group<W: Int>(
             for i in 0..PATCH_SIZE {
                 line[i as usize] = stack[(m * PATCH_SIZE + i) as usize];
             }
-            dct8_reg_inv(&mut line);
-            transpose8(transpose_buf, &mut line, sub, group);
-            dct8_reg_inv(&mut line);
+            dct8_reg_inv(line.as_mut_slice());
+            transpose8(transpose_buf, line.as_mut_slice(), sub, group);
+            dct8_reg_inv(line.as_mut_slice());
             #[unroll]
             for i in 0..PATCH_SIZE {
                 stack[(m * PATCH_SIZE + i) as usize] = line[i as usize];
@@ -839,7 +839,7 @@ pub(crate) fn filter_group<W: Int>(
 
 /// The stack variance ladder for a single-frame group of `k_use` members.
 #[cube]
-fn stack_variance_ladder(v: &mut Array<f32>, k_use: u32) {
+fn stack_variance_ladder(v: &mut [f32], k_use: u32) {
     if k_use >= 8u32 {
         variance_reg_level(v, 8u32);
     }
@@ -853,7 +853,7 @@ fn stack_variance_ladder(v: &mut Array<f32>, k_use: u32) {
 
 /// The stack Haar for a single-frame group of `k_use` members.
 #[cube]
-fn stack_haar_fwd(stack: &mut Array<f32>, k_use: u32) {
+fn stack_haar_fwd(stack: &mut [f32], k_use: u32) {
     if k_use >= 8u32 {
         haar_reg_fwd_level(stack, 8u32);
     }
@@ -867,7 +867,7 @@ fn stack_haar_fwd(stack: &mut Array<f32>, k_use: u32) {
 
 /// The inverse of `stack_haar_fwd`.
 #[cube]
-fn stack_haar_inv(stack: &mut Array<f32>, k_use: u32) {
+fn stack_haar_inv(stack: &mut [f32], k_use: u32) {
     if k_use >= 2u32 {
         haar_reg_inv_level(stack, 2u32);
     }

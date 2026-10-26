@@ -1,12 +1,11 @@
 use anyhow::Context;
-use cubecl::prelude::*;
 
 use super::NlmDenoiser;
 use crate::engine::timing::timed;
 use crate::motion::{self, MotionEstimation, run_pyramid_build};
 use crate::nlmeans::prefilter::{PrefilterCtx, PrefilterMode, run_prefilter};
 
-impl<R: Runtime> NlmDenoiser<R> {
+impl NlmDenoiser {
     /// Runs every per-frame stage on a freshly pushed `slot`, through to the ring advance.
     ///
     /// The GPU stages run in device spans when the frame is sampled. The first frame's noise seed
@@ -55,7 +54,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             reference_buf,
         };
 
-        run_prefilter::<R>(self.params.prefilter, &self.client, &prefilter_ctx)
+        run_prefilter(self.params.prefilter, &self.client, &prefilter_ctx)
             .context("prefilter dispatch failed")
     }
 
@@ -69,7 +68,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let frame_count = self.params.total_frames();
 
         if let Some(input_pyramid) = self.pyramid_input.as_ref() {
-            run_pyramid_build::<R>(
+            run_pyramid_build(
                 &self.client,
                 motion_ctx,
                 self.width,
@@ -86,7 +85,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         if let (Some(reference_pyramid), Some(reference_buf)) =
             (self.pyramid_reference.as_ref(), self.reference_buf.as_ref())
         {
-            run_pyramid_build::<R>(
+            run_pyramid_build(
                 &self.client,
                 motion_ctx,
                 self.width,
@@ -113,7 +112,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             return Ok(());
         };
 
-        run_pyramid_build::<R>(
+        run_pyramid_build(
             &self.client,
             confidence_ctx,
             self.width,
@@ -173,7 +172,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let pair_slot = self.pair_slot(0);
         let noise = self.derived_handle();
 
-        motion::run_pair_analyse::<R>(
+        motion::run_pair_analyse(
             &self.client,
             motion_ctx,
             self.width,
@@ -206,6 +205,6 @@ impl<R: Runtime> NlmDenoiser<R> {
             .as_ref()
             .expect("pair_ring allocated when Chained is active");
         let pair_slot = self.pair_slot(0);
-        motion::zero_pair_slot::<R>(&self.client, motion_ctx, pair_ring, pair_slot);
+        motion::zero_pair_slot(&self.client, motion_ctx, pair_ring, pair_slot);
     }
 }

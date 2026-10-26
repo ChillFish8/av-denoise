@@ -8,7 +8,7 @@ use cubecl::server::Handle;
 
 use super::fixtures::{CollabSpec, collab_site};
 use super::probe::{ProbeCandidate, ProbeSite};
-use super::runtime::{TestRuntime, test_client, test_legality};
+use super::runtime::{test_client, test_legality};
 use crate::nlmeans::ChannelMode;
 use crate::tune::gpu::{bind, profile_launches, sync, zero_words};
 use crate::tune::precompile::{CompileLimits, SLOW_LOAD, fits_in_one_batch, precompile};
@@ -185,11 +185,7 @@ fn a_short_compile_ceiling_compiles_one_candidate_at_a_time_and_stops_within_one
 }
 
 /// A probe whose candidates compile in `cold_delay` the first time `cache` sees them.
-fn cached_probe(
-    client: &ComputeClient<TestRuntime>,
-    cache: &Arc<Mutex<Vec<ProbeCandidate>>>,
-    cold_delay: Duration,
-) -> ProbeSite {
+fn cached_probe(client: &Client, cache: &Arc<Mutex<Vec<ProbeCandidate>>>, cold_delay: Duration) -> ProbeSite {
     let mut site = ProbeSite::new(client);
     site.cache = Some(cache.clone());
     site.cold_delay = cold_delay;
@@ -324,30 +320,33 @@ fn a_stage_batches_only_while_the_ceiling_outlasts_every_estimated_compile() {
     assert!(!fits_in_one_batch(Duration::ZERO, Duration::ZERO, 4));
 }
 
-/// Asks for a shared-memory buffer of this many floats.
+/// Asks for a shared-memory buffer of this many floats, and adds into its output.
 #[cube(launch_unchecked)]
-fn shared_probe(output: &mut Array<f32>, #[comptime] floats: u32) {
-    let mut scratch = SharedMemory::<f32>::new(floats as usize);
+fn shared_probe(output: &mut [f32], #[comptime] floats: u32) {
+    let mut scratch = Shared::<[f32]>::new_slice(floats as usize);
     let lane = UNIT_POS as usize;
     scratch[lane] = 1.0;
     sync_cube();
-    output[lane] = scratch[lane];
+    output[lane] += scratch[lane];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SharedProbe {
     Fits,
     Oversized,
+    /// Fits like [SharedProbe::Fits], with a buffer one float larger.
+    AlsoFits,
 }
 
 impl SiteCandidate for SharedProbe {
     const SITE: &'static str = "shared_probe";
-    const ALL: &'static [Self] = &[SharedProbe::Fits, SharedProbe::Oversized];
+    const ALL: &'static [Self] = &[SharedProbe::Fits, SharedProbe::Oversized, SharedProbe::AlsoFits];
 
     fn name(self) -> &'static str {
         match self {
             SharedProbe::Fits => "fits",
             SharedProbe::Oversized => "oversized",
+            SharedProbe::AlsoFits => "also_fits",
         }
     }
 
@@ -367,6 +366,11 @@ impl SiteCandidate for SharedProbe {
                 representative: SharedProbe::Oversized,
                 members: &[SharedProbe::Oversized],
             },
+            FlatFamily {
+                id: FamilyId("also_fits"),
+                representative: SharedProbe::AlsoFits,
+                members: &[SharedProbe::AlsoFits],
+            },
         ])
     }
 }
@@ -379,12 +383,12 @@ const SHARED_PROBE_LANES: u32 = 64;
 /// It reports no shared memory, so the fit check lets the oversized candidate through to the compiler.
 #[derive(Clone)]
 pub(super) struct SharedSite {
-    client: ComputeClient<TestRuntime>,
+    client: Client,
     oversized_floats: u32,
 }
 
 impl SharedSite {
-    pub(super) fn new(client: &ComputeClient<TestRuntime>) -> Self {
+    pub(super) fn new(client: &Client) -> Self {
         let limits = DeviceLimits::from_client(client);
         let device_floats = limits.max_shared_bytes / size_of::<f32>();
         let oversized_floats = (device_floats + 1024) as u32;
@@ -396,11 +400,11 @@ impl SharedSite {
     }
 }
 
-impl VariantSite<TestRuntime> for SharedSite {
+impl VariantSite for SharedSite {
     type Candidate = SharedProbe;
     type Outputs = Handle;
 
-    fn client(&self) -> &ComputeClient<TestRuntime> {
+    fn client(&self) -> &Client {
         &self.client
     }
 
@@ -419,18 +423,23 @@ impl VariantSite<TestRuntime> for SharedSite {
         0
     }
 
+    fn output_handles(&self, outputs: &Handle) -> Vec<Handle> {
+        vec![outputs.clone()]
+    }
+
     fn launch(&self, candidate: SharedProbe, outputs: &Handle) {
         let floats = match candidate {
             SharedProbe::Fits => SHARED_PROBE_LANES,
             SharedProbe::Oversized => self.oversized_floats,
+            SharedProbe::AlsoFits => SHARED_PROBE_LANES + 1,
         };
-        let output = bind::<TestRuntime>(outputs, SHARED_PROBE_LANES as usize);
+        let output = bind(outputs, SHARED_PROBE_LANES as usize);
         let cube_count = CubeCount::new_single();
         let cube_dim = CubeDim::new_1d(SHARED_PROBE_LANES);
 
         // SAFETY: the output holds one float per lane, and each lane writes only its own.
         unsafe {
-            shared_probe::launch_unchecked::<TestRuntime>(&self.client, cube_count, cube_dim, output, floats);
+            shared_probe::launch_unchecked(&self.client, cube_count, cube_dim, output, floats);
         }
     }
 
@@ -477,10 +486,24 @@ fn a_candidate_that_cannot_compile_is_dropped_with_a_reason() {
     sync(&client).expect("the device syncs after the failed compile");
 }
 
+#[test]
+fn a_failed_compile_in_a_batch_leaves_the_outputs_usable_for_the_rest() {
+    let client = test_client();
+    let site = SharedSite::new(&client);
+    let outputs = site.scratch_outputs();
+
+    let limits = compile_limits(NO_CEILING, Duration::ZERO);
+    let precompiled = precompile(&site, SharedProbe::ALL, &[0, 1, 2], &outputs, &limits, &[]);
+    let checked = client.check([&outputs]);
+
+    assert_eq!(precompiled.kept, vec![0, 2]);
+    assert!(checked.is_ok(), "{checked:?}");
+}
+
 /// Builds the client with the compilation cache off, so every first launch in this process compiles.
-pub(super) fn uncached_client() -> ComputeClient<TestRuntime> {
+pub(super) fn uncached_client() -> Client {
     let mut config = CubeClRuntimeConfig::from_current_dir().override_from_env();
-    config.compilation.cache = None;
+    config.compilation.cache = false;
 
     let set = AssertUnwindSafe(|| CubeClRuntimeConfig::set(config));
     let installed = catch_unwind(set);
@@ -494,7 +517,7 @@ pub(super) fn uncached_client() -> ComputeClient<TestRuntime> {
 
 /// The wall time of `candidate`'s first timed launch, compile included.
 pub(super) fn first_timed_launch(
-    site: &CollabSite<TestRuntime, f32>,
+    site: &CollabSite<f32>,
     candidate: CollabVariant,
     outputs: &CollabOutputs,
 ) -> Duration {

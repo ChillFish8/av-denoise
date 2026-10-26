@@ -18,7 +18,7 @@ use crate::noise::temporal::{
     temporal_stats_blocks,
 };
 use crate::tune::gpu::sync;
-use crate::tune::tests::runtime::{TestRuntime, test_client};
+use crate::tune::tests::runtime::test_client;
 
 const MAX_ULPS: u32 = 2;
 const RESULTS_ROW: [f32; 4] = [0.0; 4];
@@ -113,7 +113,7 @@ fn host_reading(plane: Plane, partials: &[f32], records: &[f32]) -> HostReading 
     }
 }
 
-fn shape_for(client: &ComputeClient<TestRuntime>, plane: Plane, temporal: bool) -> NoiseShape {
+fn shape_for(client: &Client, plane: Plane, temporal: bool) -> NoiseShape {
     NoiseShape {
         width: plane.width,
         height: plane.height,
@@ -126,13 +126,13 @@ fn shape_for(client: &ComputeClient<TestRuntime>, plane: Plane, temporal: bool) 
 }
 
 fn state_for(
-    client: &ComputeClient<TestRuntime>,
+    client: &Client,
     plane: Plane,
     temporal: bool,
     settings: ReadingSettings,
     partials: &[f32],
     records: &[f32],
-) -> NoiseState<TestRuntime> {
+) -> NoiseState {
     let shape = shape_for(client, plane, temporal);
 
     NoiseState::from_stats_for_test(client, shape, settings, partials, RESULTS_ROW, records)
@@ -140,7 +140,7 @@ fn state_for(
 
 /// The reading of `slot` and, with temporal stats, the indices of the blocks the last reading
 /// accepted.
-fn read_back(state: &NoiseState<TestRuntime>, slot: u32) -> (ReadingRecord, Vec<usize>) {
+fn read_back(state: &NoiseState, slot: u32) -> (ReadingRecord, Vec<usize>) {
     let reading = state.read_reading(slot);
     let flags = state.read_block_flags();
     let accepted = accepted_indices(&flags);
@@ -150,7 +150,7 @@ fn read_back(state: &NoiseState<TestRuntime>, slot: u32) -> (ReadingRecord, Vec<
 
 /// The GPU reading of slot 0 and the indices of the blocks it accepted.
 fn gpu_reading(
-    client: &ComputeClient<TestRuntime>,
+    client: &Client,
     plane: Plane,
     temporal: bool,
     partials: &[f32],

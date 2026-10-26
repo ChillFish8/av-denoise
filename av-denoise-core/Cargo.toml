@@ -30,8 +30,8 @@ strum = "0.28"
 bon = "3"
 half = "2.7.1"
 
-cubecl = { version = "0.10", features = ["std"] }
-wgpu = { version = "29", optional = true }
+cubecl = { version = "0.11.3", features = ["std"] }
+wgpu = { version = "30", optional = true }
 
 [dev-dependencies]
 futures = "0.3"

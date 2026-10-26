@@ -94,12 +94,30 @@ pub struct AccumOutputs {
     pub pixels: usize,
 }
 
+/// A cube count of zero that still compiles the kernel it launches.
+///
+/// CubeCL drops a static launch of zero cubes before compiling it, so the count is read from a
+/// buffer of zeros instead.
+pub(crate) fn no_cubes(client: &Client) -> CubeCount {
+    let counts = [0u32; 3];
+    let bytes = u32::as_bytes(&counts);
+    let handle = client.create_from_slice(bytes);
+    CubeCount::Dynamic(handle.binding())
+}
+
+impl AccumOutputs {
+    /// Every accumulator a launch adds into.
+    pub(crate) fn handles(&self) -> Vec<Handle> {
+        vec![
+            self.accum.clone(),
+            self.weight_sum.clone(),
+            self.max_weight.clone(),
+        ]
+    }
+}
+
 /// Allocates zeroed accumulators for `pixels` pixels and `accum_len` accumulator lanes.
-pub fn allocate_accum<R: Runtime>(
-    client: &ComputeClient<R>,
-    accum_len: usize,
-    pixels: usize,
-) -> AccumOutputs {
+pub fn allocate_accum(client: &Client, accum_len: usize, pixels: usize) -> AccumOutputs {
     let accum = client.empty(accum_len * size_of::<f32>());
     let weight_sum = client.empty(pixels * size_of::<f32>());
     let max_weight = client.empty(pixels * size_of::<f32>());
@@ -116,7 +134,7 @@ pub fn allocate_accum<R: Runtime>(
     outputs
 }
 
-pub fn clear_accum<R: Runtime>(client: &ComputeClient<R>, outputs: &AccumOutputs) {
+pub fn clear_accum(client: &Client, outputs: &AccumOutputs) {
     zero_accumulators(
         client,
         &outputs.accum,
@@ -128,8 +146,8 @@ pub fn clear_accum<R: Runtime>(client: &ComputeClient<R>, outputs: &AccumOutputs
 }
 
 /// Compares two sets of accumulators plane by plane under `fidelity`.
-pub fn compare_accum<R: Runtime>(
-    client: &ComputeClient<R>,
+pub fn compare_accum(
+    client: &Client,
     baseline: &AccumOutputs,
     candidate: &AccumOutputs,
     fidelity: Fidelity,

@@ -31,7 +31,7 @@ use crate::noise::strength_map::StrengthMapParams;
 use crate::noise::temporal::TemporalNoiseSample;
 use crate::noise::{NOISE_BLOCK_1D, STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
 use crate::tune::gpu::sync;
-use crate::tune::tests::runtime::{TestRuntime, test_client};
+use crate::tune::tests::runtime::test_client;
 
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 48;
@@ -44,7 +44,7 @@ const LUMA_PARAMS: StrengthMapParams = StrengthMapParams {
     shadow_soften: 0.65,
 };
 
-fn shape(client: &ComputeClient<TestRuntime>, channels: u32) -> NoiseShape {
+fn shape(client: &Client, channels: u32) -> NoiseShape {
     NoiseShape {
         width: WIDTH,
         height: HEIGHT,
@@ -298,10 +298,10 @@ struct StreamGaps {
 
 /// A GPU noise state and the host reference beside it, over one ring.
 struct Stream {
-    client: ComputeClient<TestRuntime>,
+    client: Client,
     channels: u32,
     settings: NoiseSettings,
-    state: NoiseState<TestRuntime>,
+    state: NoiseState,
     slots: Slots,
     host: HostNoise,
     /// The map the host expects the GPU to hold, ones until a lender with classes.

@@ -45,8 +45,8 @@ impl Default for EngineKernels {
 
 /// Picks and launches the planned candidate at each site.
 #[derive(Clone)]
-pub struct KernelSelector<R: Runtime> {
-    client: ComputeClient<R>,
+pub struct KernelSelector {
+    client: Client,
     limits: DeviceLimits,
     plan: KernelPlan,
     profile: PipelineProfile,
@@ -55,20 +55,20 @@ pub struct KernelSelector<R: Runtime> {
     priority: &'static PriorityTable,
 }
 
-impl<R: Runtime> KernelSelector<R> {
+impl KernelSelector {
     /// A selector that runs every site's baseline.
-    pub fn baseline(client: &ComputeClient<R>) -> Self {
+    pub fn baseline(client: &Client) -> Self {
         let kernels = EngineKernels::default();
         Self::new(client, kernels)
     }
 
-    pub fn new(client: &ComputeClient<R>, kernels: EngineKernels) -> Self {
+    pub fn new(client: &Client, kernels: EngineKernels) -> Self {
         let limits = DeviceLimits::from_client(client);
         Self::with_limits(client, kernels, limits)
     }
 
     /// A selector that checks candidates against `limits` instead of the client's own.
-    pub fn with_limits(client: &ComputeClient<R>, kernels: EngineKernels, limits: DeviceLimits) -> Self {
+    pub fn with_limits(client: &Client, kernels: EngineKernels, limits: DeviceLimits) -> Self {
         Self {
             client: client.clone(),
             limits,
@@ -80,7 +80,7 @@ impl<R: Runtime> KernelSelector<R> {
         }
     }
 
-    pub fn client(&self) -> &ComputeClient<R> {
+    pub fn client(&self) -> &Client {
         &self.client
     }
 
@@ -106,7 +106,7 @@ impl<R: Runtime> KernelSelector<R> {
     /// legality or does not fit runs the site's baseline.
     /// With a ledger attached, a census phase times the launch and a tune phase tunes the target key
     /// in place before its real launch.
-    pub fn run<S: VariantSite<R>>(&self, site: &S) -> Result<(), anyhow::Error> {
+    pub fn run<S: VariantSite>(&self, site: &S) -> Result<(), anyhow::Error> {
         let fitted = legal_candidates(site, &self.limits, &self.legality)?;
         let outputs = site.real_outputs();
 
@@ -125,7 +125,7 @@ impl<R: Runtime> KernelSelector<R> {
             return Ok(());
         };
 
-        let allowed = allowed_candidates::<R, S>(&fitted, ledger.deterministic());
+        let allowed = allowed_candidates::<S>(&fitted, ledger.deterministic());
         let mode = ledger.search_mode();
         let timed = first_timed(&allowed, self.priority, mode);
         let observed = ledger.observe(&key, timed);
@@ -153,7 +153,7 @@ impl<R: Runtime> KernelSelector<R> {
     ///
     /// When timing fails before the work ran, the launch runs untimed. When it fails after, the
     /// launch already happened and only a warning is logged.
-    fn census_launch<S: VariantSite<R>>(
+    fn census_launch<S: VariantSite>(
         &self,
         site: &S,
         outputs: &S::Outputs,
@@ -179,7 +179,7 @@ impl<R: Runtime> KernelSelector<R> {
     /// Tunes `key` in place and records its ranking, or records a failure so its baseline runs.
     ///
     /// Tuning never fails the launch. An error or a panic inside it settles the target as failed.
-    fn tune_key<S: VariantSite<R>>(
+    fn tune_key<S: VariantSite>(
         &self,
         site: &S,
         key: &SiteKey,
@@ -216,7 +216,7 @@ impl<R: Runtime> KernelSelector<R> {
     /// The candidate the ledger names for `key`, falling back to the selector's own plan.
     ///
     /// A key whose tuning failed runs the site's baseline.
-    fn ledger_planned<S: VariantSite<R>>(
+    fn ledger_planned<S: VariantSite>(
         &self,
         site: &S,
         key: &SiteKey,
@@ -302,11 +302,7 @@ fn family_label(search: Option<&SiteSearch>, name: &str) -> String {
 
 /// The candidate `named` names, or the site's baseline when the name is missing, unknown or not in
 /// `allowed`.
-fn planned<R: Runtime, S: VariantSite<R>>(
-    site: &S,
-    allowed: &[S::Candidate],
-    named: Option<&str>,
-) -> S::Candidate {
+fn planned<S: VariantSite>(site: &S, allowed: &[S::Candidate], named: Option<&str>) -> S::Candidate {
     let parsed = named.and_then(S::Candidate::from_name);
 
     match parsed {
@@ -316,10 +312,7 @@ fn planned<R: Runtime, S: VariantSite<R>>(
 }
 
 /// The fitted candidates a run may use, only exact ones when `deterministic` is set.
-fn allowed_candidates<R: Runtime, S: VariantSite<R>>(
-    fitted: &[S::Candidate],
-    deterministic: bool,
-) -> Vec<S::Candidate> {
+fn allowed_candidates<S: VariantSite>(fitted: &[S::Candidate], deterministic: bool) -> Vec<S::Candidate> {
     fitted
         .iter()
         .copied()

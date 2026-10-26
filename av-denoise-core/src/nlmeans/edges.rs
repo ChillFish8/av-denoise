@@ -1,8 +1,6 @@
-use cubecl::prelude::*;
-
 use super::NlmDenoiser;
 
-impl<R: Runtime> NlmDenoiser<R> {
+impl NlmDenoiser {
     /// Whether every ring slot holds a frame, so a pass can run at any centre.
     pub(crate) fn window_ready(&self) -> bool {
         self.frames_loaded >= self.params.total_frames() as usize

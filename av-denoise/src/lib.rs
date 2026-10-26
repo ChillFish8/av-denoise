@@ -7,6 +7,8 @@ pub mod cache;
 mod host;
 mod planar;
 pub mod stack;
+#[doc(hidden)]
+pub mod testing;
 pub mod tune;
 pub mod warmup;
 

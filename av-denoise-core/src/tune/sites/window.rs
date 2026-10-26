@@ -147,8 +147,8 @@ pub struct ConfidenceBinding {
 
 /// One windowed NLM launch over the whole search window.
 #[derive(Clone)]
-pub struct WindowSite<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct WindowSite {
+    pub client: Client,
     pub pass: WindowPass,
     pub input: Handle,
     /// The prefiltered ring the distances read, when the pipeline has one.
@@ -178,7 +178,7 @@ struct WindowGrid {
     separable: bool,
 }
 
-impl<R: Runtime> WindowSite<R> {
+impl WindowSite {
     fn grid(&self, candidate: WindowCandidate) -> WindowGrid {
         let (block_x, block_y) = candidate.block();
         let cubes_x = self.width.div_ceil(block_x);
@@ -195,19 +195,19 @@ impl<R: Runtime> WindowSite<R> {
 
     fn launch_single(&self, grid: WindowGrid, offsets: &Handle, offsets_len: usize, outputs: &AccumOutputs) {
         let vector_size = self.stored_ch as usize;
-        let input = bind::<R>(&self.input, self.ring_len);
-        let accum = bind::<R>(&outputs.accum, outputs.accum_len);
-        let weight_sum = bind::<R>(&outputs.weight_sum, outputs.pixels);
-        let max_weight = bind::<R>(&outputs.max_weight, outputs.pixels);
-        let offsets = bind::<R>(offsets, offsets_len);
-        let noise = bind::<R>(&self.noise, DERIVED_WORDS as usize);
+        let input = bind(&self.input, self.ring_len);
+        let accum = bind(&outputs.accum, outputs.accum_len);
+        let weight_sum = bind(&outputs.weight_sum, outputs.pixels);
+        let max_weight = bind(&outputs.max_weight, outputs.pixels);
+        let offsets = bind(offsets, offsets_len);
+        let noise = bind(&self.noise, DERIVED_WORDS as usize);
 
         match &self.reference {
             Some(reference) => {
-                let reference = bind::<R>(reference, self.ring_len);
+                let reference = bind(reference, self.ring_len);
 
                 unsafe {
-                    nlm_fused_single_window_ref::launch_unchecked::<R>(
+                    nlm_fused_single_window_ref::launch_unchecked(
                         &self.client,
                         grid.cube_count,
                         grid.cube_dim,
@@ -233,7 +233,7 @@ impl<R: Runtime> WindowSite<R> {
                 }
             },
             None => unsafe {
-                nlm_fused_single_window::launch_unchecked::<R>(
+                nlm_fused_single_window::launch_unchecked(
                     &self.client,
                     grid.cube_count,
                     grid.cube_dim,
@@ -268,20 +268,20 @@ impl<R: Runtime> WindowSite<R> {
     ) {
         let (frame_fwd, frame_bwd) = frames;
         let vector_size = self.stored_ch as usize;
-        let input = bind::<R>(&self.input, self.ring_len);
-        let accum = bind::<R>(&outputs.accum, outputs.accum_len);
-        let weight_sum = bind::<R>(&outputs.weight_sum, outputs.pixels);
-        let max_weight = bind::<R>(&outputs.max_weight, outputs.pixels);
-        let conf_fwd = bind::<R>(&confidence.forward, confidence.len);
-        let conf_bwd = bind::<R>(&confidence.backward, confidence.len);
-        let noise = bind::<R>(&self.noise, DERIVED_WORDS as usize);
+        let input = bind(&self.input, self.ring_len);
+        let accum = bind(&outputs.accum, outputs.accum_len);
+        let weight_sum = bind(&outputs.weight_sum, outputs.pixels);
+        let max_weight = bind(&outputs.max_weight, outputs.pixels);
+        let conf_fwd = bind(&confidence.forward, confidence.len);
+        let conf_bwd = bind(&confidence.backward, confidence.len);
+        let noise = bind(&self.noise, DERIVED_WORDS as usize);
 
         match &self.reference {
             Some(reference) => {
-                let reference = bind::<R>(reference, self.ring_len);
+                let reference = bind(reference, self.ring_len);
 
                 unsafe {
-                    nlm_fused_pair_accumulate_window_ref::launch_unchecked::<R>(
+                    nlm_fused_pair_accumulate_window_ref::launch_unchecked(
                         &self.client,
                         grid.cube_count,
                         grid.cube_dim,
@@ -314,7 +314,7 @@ impl<R: Runtime> WindowSite<R> {
                 }
             },
             None => unsafe {
-                nlm_fused_pair_accumulate_window::launch_unchecked::<R>(
+                nlm_fused_pair_accumulate_window::launch_unchecked(
                     &self.client,
                     grid.cube_count,
                     grid.cube_dim,
@@ -348,13 +348,13 @@ impl<R: Runtime> WindowSite<R> {
     }
 }
 
-impl<R: Runtime> VariantSite<R> for WindowSite<R> {
+impl VariantSite for WindowSite {
     type Candidate = WindowCandidate;
     type Outputs = AccumOutputs;
 
     const PRESCREEN: bool = true;
 
-    fn client(&self) -> &ComputeClient<R> {
+    fn client(&self) -> &Client {
         &self.client
     }
 
@@ -397,6 +397,10 @@ impl<R: Runtime> VariantSite<R> for WindowSite<R> {
         };
 
         expanded * vector_bytes + distance_tiles * (tile + hsum) * size_of::<f32>()
+    }
+
+    fn output_handles(&self, outputs: &AccumOutputs) -> Vec<Handle> {
+        outputs.handles()
     }
 
     fn launch(&self, candidate: WindowCandidate, outputs: &AccumOutputs) {
@@ -446,8 +450,8 @@ impl<R: Runtime> VariantSite<R> for WindowSite<R> {
 ///
 /// Raw sums grow with the number of weights a pixel gathers, so a bound on the output's 0..1 range
 /// is checked on each sum divided by its pixel's weight sum instead.
-fn compare_estimates<R: Runtime>(
-    client: &ComputeClient<R>,
+fn compare_estimates(
+    client: &Client,
     baseline: &AccumOutputs,
     candidate: &AccumOutputs,
     stored_ch: u32,
@@ -466,8 +470,8 @@ fn compare_estimates<R: Runtime>(
 }
 
 /// Reads `outputs` back and splits them into normalised estimate planes.
-fn normalised_planes<R: Runtime>(
-    client: &ComputeClient<R>,
+fn normalised_planes(
+    client: &Client,
     outputs: &AccumOutputs,
     stored_ch: u32,
 ) -> Result<Vec<Vec<f32>>, anyhow::Error> {

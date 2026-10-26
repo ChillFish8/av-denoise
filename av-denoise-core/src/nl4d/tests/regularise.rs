@@ -1,6 +1,6 @@
 use cubecl::prelude::*;
 
-use super::helpers::{R, make_client};
+use super::helpers::make_client;
 use crate::motion::THSAD_PIXEL;
 use crate::nl4d::kernels::nl4d_mv_regularise;
 use crate::noise::tests::sad_floor_buffer;
@@ -67,16 +67,16 @@ fn run_with_floor(
         let neighbour_table_len = neighbour_table.len();
         let mv_out_handle = mv_out.clone();
         let conf_out_handle = conf_out.clone();
-        let frame_arg = ArrayArg::from_raw_parts(frame_buf, frames_len);
-        let table_arg = ArrayArg::from_raw_parts(table_buf, neighbour_table_len);
-        let mv_in_arg = ArrayArg::from_raw_parts(mv_in_buf, 2 * blocks);
-        let mv_out_arg = ArrayArg::from_raw_parts(mv_out_handle, 2 * blocks);
-        let conf_out_arg = ArrayArg::from_raw_parts(conf_out_handle, blocks);
+        let frame_arg = BufferArg::from_raw_parts(frame_buf, frames_len);
+        let table_arg = BufferArg::from_raw_parts(table_buf, neighbour_table_len);
+        let mv_in_arg = BufferArg::from_raw_parts(mv_in_buf, 2 * blocks);
+        let mv_out_arg = BufferArg::from_raw_parts(mv_out_handle, 2 * blocks);
+        let conf_out_arg = BufferArg::from_raw_parts(conf_out_handle, blocks);
 
         let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, sad_floor);
-        let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
+        let noise_arg = BufferArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
-        nl4d_mv_regularise::launch_unchecked::<R>(
+        nl4d_mv_regularise::launch_unchecked(
             &client,
             grid,
             dim,

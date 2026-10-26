@@ -10,15 +10,15 @@ use cubecl::prelude::*;
 
 use super::{HEIGHT, Q_X, Q_Y, WIDTH, block_sync, make_padded_frame, shapes_with_channels, stored_channels};
 
-pub struct AccumulateBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct AccumulateBench {
+    pub client: Client,
     pub channels: u32,
     pub channel_name: &'static str,
     pub candidate: AccumulateCandidate,
 }
 
-impl<R: Runtime> Benchmark for AccumulateBench<R> {
-    type Input = (AccumulateSite<R>, AccumOutputs);
+impl Benchmark for AccumulateBench {
+    type Input = (AccumulateSite, AccumOutputs);
     type Output = ();
 
     fn prepare(&self) -> Self::Input {

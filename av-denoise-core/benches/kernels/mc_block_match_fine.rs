@@ -20,8 +20,8 @@ const THSAD_PIXEL: f32 = 0.02;
 /// It reads no seed, so the cost is bounded by the `(2·r + 1)²` search window per block and stays
 /// fair even if the coarse bench's tuning changes. The derived SAD floor is 0.0 because no noise
 /// estimate is available at this level, and `thsad` uses the library's default `thsad_scale` of 1.0.
-pub struct BlockMatchFineBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct BlockMatchFineBench {
+    pub client: Client,
     /// Neighbours matched in one launch, each against the centre frame.
     pub neighbours: u32,
 }
@@ -38,7 +38,7 @@ pub struct FineInput {
     pub noise: Handle,
 }
 
-impl<R: Runtime> Benchmark for BlockMatchFineBench<R> {
+impl Benchmark for BlockMatchFineBench {
     type Input = FineInput;
     type Output = ();
 
@@ -92,13 +92,13 @@ impl<R: Runtime> Benchmark for BlockMatchFineBench<R> {
         let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
         unsafe {
-            let pyramid_arg = ArrayArg::from_raw_parts(args.pyramid, pyramid_len);
-            let neighbour_slots_arg = ArrayArg::from_raw_parts(args.neighbour_slots, neighbours);
-            let mv_field_arg = ArrayArg::from_raw_parts(args.mv_field, mv_len);
-            let confidence_arg = ArrayArg::from_raw_parts(args.confidence, conf_len);
-            let noise_arg = ArrayArg::from_raw_parts(args.noise, DERIVED_WORDS as usize);
+            let pyramid_arg = BufferArg::from_raw_parts(args.pyramid, pyramid_len);
+            let neighbour_slots_arg = BufferArg::from_raw_parts(args.neighbour_slots, neighbours);
+            let mv_field_arg = BufferArg::from_raw_parts(args.mv_field, mv_len);
+            let confidence_arg = BufferArg::from_raw_parts(args.confidence, conf_len);
+            let noise_arg = BufferArg::from_raw_parts(args.noise, DERIVED_WORDS as usize);
 
-            mc_block_match_fine::launch_unchecked::<R>(
+            mc_block_match_fine::launch_unchecked(
                 &self.client,
                 grid,
                 dim,

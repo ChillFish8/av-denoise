@@ -21,7 +21,7 @@ fn separable_uniform_passthrough() {
     let height = 32;
     let frame = make_uniform_frame(width, height, 1, 0.5);
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     assert!(denoiser.use_separable, "should use separable for patch_radius=9");
     denoiser.push_frame(&frame);
 
@@ -54,7 +54,7 @@ fn separable_yuv_passthrough() {
     let height = 32;
     let frame = make_uniform_frame(width, height, 3, 0.5);
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     assert!(denoiser.use_separable);
     denoiser.push_frame(&frame);
 
@@ -96,7 +96,7 @@ fn separable_symmetry_preserved() {
         }
     }
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
 
     let result = denoiser.denoise().unwrap().unwrap();

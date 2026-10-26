@@ -31,12 +31,12 @@ pub const MEMBER_WORDS: u32 = MAX_K + 1;
     reason = "every argument is a buffer or comptime shape the kernel binds"
 )]
 pub fn collab_search<S: Float, N: Size>(
-    ring: &Array<Vector<f32, N>>,
-    search_ring: &Array<Vector<S, N>>,
-    mv_field: &Array<i32>,
-    confidence: &Array<f32>,
-    neighbour_slots: &Array<u32>,
-    members: &mut Array<u32>,
+    ring: &[Vector<f32, N>],
+    search_ring: &[Vector<S, N>],
+    mv_field: &[i32],
+    confidence: &[f32],
+    neighbour_slots: &[u32],
+    members: &mut [u32],
     centre_slot: u32,
     c_min: f32,
     #[comptime] f16_search: bool,
@@ -78,7 +78,7 @@ pub fn collab_search<S: Float, N: Size>(
     let centre = comptime!(variant.centre);
     let lanes = comptime!(variant.lanes());
     let tile_len = comptime!(variant.tile_elements(spatial_radius, stored_ch));
-    let mut tile = SharedMemory::<S>::new(tile_len as usize);
+    let mut tile = Shared::<[S]>::new_slice(tile_len as usize);
 
     let ref_x_index = CUBE_POS_X * groups + group;
     let live = ref_x_index < refs_x;
@@ -132,10 +132,10 @@ pub fn collab_search<S: Float, N: Size>(
         mv_field,
         confidence,
         neighbour_slots,
-        &current,
+        current.as_slice(),
         &cursor,
         c_min,
-        &mut member_pos,
+        member_pos.as_mut_slice(),
         variant,
         radius,
         grid_frames,
@@ -180,18 +180,18 @@ pub fn collab_search<S: Float, N: Size>(
     reason = "every argument is a buffer or comptime shape the kernel binds"
 )]
 pub fn collab_filter<N: Size, W: Int>(
-    ring: &Array<Vector<f32, N>>,
-    ring_scalar: &Array<f32>,
-    members: &Array<u32>,
-    neighbour_slots: &Array<u32>,
-    noise: &Array<f32>,
-    noise_curve: &Array<f32>,
-    strength_map: &Array<f32>,
-    dct_profile: &Array<f32>,
-    kaiser: &Array<f32>,
-    accum: &mut Array<Atomic<i32>>,
-    wsum: &mut Array<Atomic<W>>,
-    group_weight: &mut Array<f32>,
+    ring: &[Vector<f32, N>],
+    ring_scalar: &[f32],
+    members: &[u32],
+    neighbour_slots: &[u32],
+    noise: &[f32],
+    noise_curve: &[f32],
+    strength_map: &[f32],
+    dct_profile: &[f32],
+    kaiser: &[f32],
+    accum: &mut [Atomic<i32>],
+    wsum: &mut [Atomic<W>],
+    group_weight: &mut [f32],
     centre_slot: u32,
     lambda_ht: f32,
     accum_scale: f32,
@@ -217,7 +217,7 @@ pub fn collab_filter<N: Size, W: Int>(
     let max_y = comptime!(height - PATCH_SIZE);
 
     let transpose_floats = comptime!(groups * TRANSPOSE_REGION_FLOATS);
-    let mut transpose_buf = SharedMemory::<f32>::new(transpose_floats as usize);
+    let mut transpose_buf = Shared::<[f32]>::new_slice(transpose_floats as usize);
 
     let ref_x_index = CUBE_POS_X * groups + group;
     let live = ref_x_index < refs_x;
@@ -243,7 +243,7 @@ pub fn collab_filter<N: Size, W: Int>(
     let use_grid = (group_word & GROUP_USES_GRID) != 0u32;
 
     let current = load_reference_column(ring, ref_x, ref_y, centre_slot, sub, width, height, channels);
-    let column_luma = column_luma_of(&current, channels);
+    let column_luma = column_luma_of(current.as_slice(), channels);
 
     filter_group::<W>(
         ring_scalar,
@@ -257,7 +257,7 @@ pub fn collab_filter<N: Size, W: Int>(
         wsum,
         group_weight,
         &mut transpose_buf,
-        &member_pos,
+        member_pos.as_slice(),
         k_use,
         use_grid,
         column_luma,

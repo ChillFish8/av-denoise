@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::helpers::{R, correlated_noisy_frame, make_client, make_noisy_gaussian_frame};
+use super::helpers::{correlated_noisy_frame, make_client, make_noisy_gaussian_frame};
 use crate::bench_api::HostIo;
 use crate::nlmeans::mirror::MirroredBuffer;
 use crate::nlmeans::*;
@@ -11,7 +11,7 @@ use crate::noise::{DerivedValues, build_spatial_offset_lut};
 
 const SIZE: u32 = 64;
 
-fn read_floats(client: &ComputeClient<R>, mirror: &MirroredBuffer) -> Vec<f32> {
+fn read_floats(client: &Client, mirror: &MirroredBuffer) -> Vec<f32> {
     let handle = mirror.handle().clone();
     let bytes = client.read_one(handle).expect("the mirror reads back");
     f32::from_bytes(&bytes).to_vec()
@@ -60,7 +60,7 @@ fn a_resized_update_is_refused() {
     mirror.update(&client, four_bytes);
 }
 
-fn hq_denoiser(prefilter: PrefilterMode, sigma_override: Option<f32>) -> NlmDenoiser<R> {
+fn hq_denoiser(prefilter: PrefilterMode, sigma_override: Option<f32>) -> NlmDenoiser {
     let hq = HqParams {
         sigma_override,
         ..HqParams::default()
@@ -85,13 +85,13 @@ fn pilot_prefilter() -> PrefilterMode {
     PrefilterMode::NlmSpatial { strength_scale: 1.0 }
 }
 
-fn push_frame_at(denoiser: &mut NlmDenoiser<R>, index: usize) {
+fn push_frame_at(denoiser: &mut NlmDenoiser, index: usize) {
     let base = 0.3 + index as f32 * 0.01;
     let frame = make_noisy_gaussian_frame(SIZE, SIZE, 1, base, &[0.03]);
     denoiser.push_frame(&frame);
 }
 
-fn run_frames(denoiser: &mut NlmDenoiser<R>, count: usize) {
+fn run_frames(denoiser: &mut NlmDenoiser, count: usize) {
     for index in 0..count {
         push_frame_at(denoiser, index);
 
@@ -99,22 +99,22 @@ fn run_frames(denoiser: &mut NlmDenoiser<R>, count: usize) {
     }
 }
 
-fn read_table(denoiser: &NlmDenoiser<R>, handle: Handle) -> Vec<f32> {
+fn read_table(denoiser: &NlmDenoiser, handle: Handle) -> Vec<f32> {
     let bytes = denoiser.client.read_one(handle).expect("the table reads back");
     f32::from_bytes(&bytes).to_vec()
 }
 
-fn spatial_table(denoiser: &NlmDenoiser<R>) -> Vec<f32> {
+fn spatial_table(denoiser: &NlmDenoiser) -> Vec<f32> {
     let handle = denoiser.spatial_offsets_handle();
     read_table(denoiser, handle)
 }
 
-fn pilot_table(denoiser: &NlmDenoiser<R>) -> Vec<f32> {
+fn pilot_table(denoiser: &NlmDenoiser) -> Vec<f32> {
     let handle = denoiser.pilot_offsets_handle();
     read_table(denoiser, handle)
 }
 
-fn derived_values(denoiser: &NlmDenoiser<R>) -> DerivedValues {
+fn derived_values(denoiser: &NlmDenoiser) -> DerivedValues {
     let snapshot = denoiser.noise_snapshot().expect("the noise state reads back");
     snapshot.derived
 }
@@ -212,7 +212,7 @@ fn a_measured_separable_front_binds_a_spatial_table_that_follows_rho() {
         hq: Some(HqParams::default()),
     };
     let client = make_client();
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, SIZE, SIZE);
+    let mut denoiser = NlmDenoiser::new(&client, params, SIZE, SIZE);
     let before = spatial_table(&denoiser);
 
     // A `[0.25, 0.5, 0.25]` blur scales the variance by 0.375 and correlates neighbours.
@@ -272,7 +272,7 @@ fn fast_temporal_nlm_never_reuploads_the_neighbour_table() {
         ..NlmParams::default()
     };
     let client = make_client();
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, SIZE, SIZE);
+    let mut denoiser = NlmDenoiser::new(&client, params, SIZE, SIZE);
     run_frames(&mut denoiser, 6);
 
     let table = denoiser

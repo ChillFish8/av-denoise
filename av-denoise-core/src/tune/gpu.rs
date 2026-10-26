@@ -1,4 +1,3 @@
-use std::marker::PhantomData;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -13,15 +12,15 @@ use crate::tune::decide::{SampleTiming, Sampler};
 use crate::tune::site::{SiteCandidate, VariantSite};
 
 /// Binds the first `len` elements of `handle` as a kernel array argument.
-pub(crate) fn bind<R: Runtime>(handle: &Handle, len: usize) -> ArrayArg<R> {
+pub(crate) fn bind(handle: &Handle, len: usize) -> BufferArg {
     let owned = handle.clone();
 
     // SAFETY: every caller passes at most the element count the handle was allocated for.
-    unsafe { ArrayArg::from_raw_parts(owned, len) }
+    unsafe { BufferArg::from_raw_parts(owned, len) }
 }
 
 /// A new buffer of `len` 32-bit words on `client`, zeroed on the GPU.
-pub(crate) fn zeroed_words<R: Runtime>(client: &ComputeClient<R>, len: usize) -> Handle {
+pub(crate) fn zeroed_words(client: &Client, len: usize) -> Handle {
     let words = len.max(1);
     let handle = client.empty(words * size_of::<u32>());
     zero_words(client, &handle, words);
@@ -32,7 +31,7 @@ pub(crate) fn zeroed_words<R: Runtime>(client: &ComputeClient<R>, len: usize) ->
 /// Zeroes the first `len` 32-bit words of `handle` with the zero kernel.
 ///
 /// A zero bit pattern is zero for both `f32` and `i32`, so this clears either kind of buffer.
-pub(crate) fn zero_words<R: Runtime>(client: &ComputeClient<R>, handle: &Handle, len: usize) {
+pub(crate) fn zero_words(client: &Client, handle: &Handle, len: usize) {
     // The kernel also clears two per-pixel buffers, and a zero length leaves these untouched.
     let unused_sum = client.empty(size_of::<f32>());
     let unused_max = client.empty(size_of::<f32>());
@@ -43,8 +42,8 @@ pub(crate) fn zero_words<R: Runtime>(client: &ComputeClient<R>, handle: &Handle,
 /// Zeroes `accum_len` words of `accum` and `pixels` words of each per-pixel buffer in one launch.
 ///
 /// `accum_len` must be at least `pixels`.
-pub(crate) fn zero_accumulators<R: Runtime>(
-    client: &ComputeClient<R>,
+pub(crate) fn zero_accumulators(
+    client: &Client,
     accum: &Handle,
     weight_sum: &Handle,
     max_weight: &Handle,
@@ -57,14 +56,14 @@ pub(crate) fn zero_accumulators<R: Runtime>(
     let cube_count = CubeCount::new_1d(grid);
     let cube_dim = CubeDim::new_1d(BLOCK_1D);
 
-    let accum_arg = bind::<R>(accum, accum_len);
-    let weight_sum_arg = bind::<R>(weight_sum, pixels.max(1));
-    let max_weight_arg = bind::<R>(max_weight, pixels.max(1));
+    let accum_arg = bind(accum, accum_len);
+    let weight_sum_arg = bind(weight_sum, pixels.max(1));
+    let max_weight_arg = bind(max_weight, pixels.max(1));
 
     // SAFETY: each handle holds at least the element count bound above, and the kernel only
     // writes below `accum_len` and `pixels`.
     unsafe {
-        gpu_zero_buffers::launch_unchecked::<R>(
+        gpu_zero_buffers::launch_unchecked(
             client,
             cube_count,
             cube_dim,
@@ -79,8 +78,8 @@ pub(crate) fn zero_accumulators<R: Runtime>(
 }
 
 /// Reads the first `len` values of `handle` back to the host.
-fn read_values<R: Runtime, T: CubePrimitive + CubeElement>(
-    client: &ComputeClient<R>,
+fn read_values<T: CubePrimitive + CubeElement>(
+    client: &Client,
     handle: &Handle,
     len: usize,
 ) -> Result<Vec<T>, anyhow::Error> {
@@ -97,20 +96,12 @@ fn read_values<R: Runtime, T: CubePrimitive + CubeElement>(
 }
 
 /// Reads the first `len` `f32` values of `handle` back to the host.
-pub(crate) fn read_f32<R: Runtime>(
-    client: &ComputeClient<R>,
-    handle: &Handle,
-    len: usize,
-) -> Result<Vec<f32>, anyhow::Error> {
+pub(crate) fn read_f32(client: &Client, handle: &Handle, len: usize) -> Result<Vec<f32>, anyhow::Error> {
     read_values(client, handle, len)
 }
 
 /// Reads the first `len` `i32` values of `handle` back to the host.
-pub(crate) fn read_i32<R: Runtime>(
-    client: &ComputeClient<R>,
-    handle: &Handle,
-    len: usize,
-) -> Result<Vec<i32>, anyhow::Error> {
+pub(crate) fn read_i32(client: &Client, handle: &Handle, len: usize) -> Result<Vec<i32>, anyhow::Error> {
     read_values(client, handle, len)
 }
 
@@ -152,7 +143,7 @@ pub(crate) fn profile_chunk_limit() -> u32 {
 /// launch must be a single dispatch, since a launch of several dispatches is under-timed. Each
 /// profile holds the device for its launches. Timing can fail before any work is submitted or after
 /// it, and the failure says which.
-pub(crate) fn profile_launches<R: Runtime, S: VariantSite<R>>(
+pub(crate) fn profile_launches<S: VariantSite>(
     site: &S,
     candidate: S::Candidate,
     outputs: &S::Outputs,
@@ -180,7 +171,15 @@ pub(crate) fn profile_launches<R: Runtime, S: VariantSite<R>>(
 
     for duration in pending {
         let resolving = duration.resolve();
-        let ticks = cubecl::future::block_on(resolving);
+        let resolved = cubecl::future::block_on(resolving);
+        let Some(ticks) = resolved else {
+            return Err(ProfileFailure {
+                site: S::Candidate::SITE,
+                reason: "the device timer returned no measurement".to_string(),
+                work_ran: true,
+            });
+        };
+
         elapsed += ticks.duration();
     }
 
@@ -188,7 +187,7 @@ pub(crate) fn profile_launches<R: Runtime, S: VariantSite<R>>(
 }
 
 /// Submits `launches` launches inside one profile, setting `work_ran` before the first.
-fn profile_chunk<R: Runtime, S: VariantSite<R>>(
+fn profile_chunk<S: VariantSite>(
     site: &S,
     candidate: S::Candidate,
     outputs: &S::Outputs,
@@ -213,7 +212,7 @@ fn profile_chunk<R: Runtime, S: VariantSite<R>>(
 }
 
 /// Waits for every launch queued on `client`.
-pub(crate) fn sync<R: Runtime>(client: &ComputeClient<R>) -> Result<(), anyhow::Error> {
+pub(crate) fn sync(client: &Client) -> Result<(), anyhow::Error> {
     let pending = client.sync();
     let synced = cubecl::future::block_on(pending);
 
@@ -224,17 +223,16 @@ pub(crate) fn sync<R: Runtime>(client: &ComputeClient<R>) -> Result<(), anyhow::
 ///
 /// A sample the device timer reports as taking no time is an error, since a calibrated sample
 /// always takes some. Time spent compiling is left out of its elapsed time.
-pub(crate) struct GpuSampler<'a, R: Runtime, S: VariantSite<R>> {
+pub(crate) struct GpuSampler<'a, S: VariantSite> {
     site: &'a S,
     candidates: &'a [S::Candidate],
     outputs: &'a S::Outputs,
     launches: u32,
     started: Instant,
     excluded: Duration,
-    runtime: PhantomData<R>,
 }
 
-impl<'a, R: Runtime, S: VariantSite<R>> GpuSampler<'a, R, S> {
+impl<'a, S: VariantSite> GpuSampler<'a, S> {
     pub(crate) fn new(
         site: &'a S,
         candidates: &'a [S::Candidate],
@@ -248,12 +246,11 @@ impl<'a, R: Runtime, S: VariantSite<R>> GpuSampler<'a, R, S> {
             launches,
             started: Instant::now(),
             excluded: Duration::ZERO,
-            runtime: PhantomData,
         }
     }
 }
 
-impl<R: Runtime, S: VariantSite<R>> Sampler for GpuSampler<'_, R, S> {
+impl<S: VariantSite> Sampler for GpuSampler<'_, S> {
     fn sample(&mut self, index: usize) -> Result<SampleTiming, anyhow::Error> {
         let candidate = self.candidates[index];
         let total = profile_launches(self.site, candidate, self.outputs, self.launches)?;

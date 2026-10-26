@@ -55,7 +55,7 @@ pub(crate) struct SlotStats<'a> {
     pub records: &'a [f32],
 }
 
-impl<R: Runtime> NoiseState<R> {
+impl NoiseState {
     /// The measurement buffers, mutably.
     ///
     /// # Panics
@@ -118,7 +118,7 @@ impl<R: Runtime> NoiseState<R> {
     ///
     /// Every other slot and the padding between slots read 0.
     pub(crate) fn from_stats_for_test(
-        client: &ComputeClient<R>,
+        client: &Client,
         shape: NoiseShape,
         settings: ReadingSettings,
         partials: &[f32],
@@ -136,7 +136,7 @@ impl<R: Runtime> NoiseState<R> {
 
     /// A state whose first slots hold `slots` in order, with every other slot and the padding at 0.
     pub(crate) fn from_slots_for_test(
-        client: &ComputeClient<R>,
+        client: &Client,
         shape: NoiseShape,
         settings: ReadingSettings,
         slots: &[SlotStats<'_>],
@@ -204,7 +204,7 @@ impl<R: Runtime> NoiseState<R> {
     /// A state whose slots hold `readings`, the Immerkær abs sums `immerkaer_sums` and, with a
     /// strength map, the slot maps `slot_maps`, one entry per slot.
     pub(crate) fn with_readings_for_test(
-        client: &ComputeClient<R>,
+        client: &Client,
         shape: NoiseShape,
         settings: NoiseSettings,
         readings: &[ReadingRecord],
@@ -455,7 +455,7 @@ impl<R: Runtime> NoiseState<R> {
     /// The records are empty without temporal stats.
     pub(crate) fn read_slot_stats(&self, slot: u32) -> (Vec<f32>, [f32; 4], Vec<f32>) {
         let handles = self.reading_handles(slot);
-        let buffers = self.client.read(handles);
+        let buffers = self.client.read(handles).expect("the slot stats read back");
         let row = f32::from_bytes(&buffers[0]);
         let partials = f32::from_bytes(&buffers[1]).to_vec();
         let records = buffers
@@ -498,7 +498,7 @@ fn push_batch_handles<'a>(
     buffers.push((names.histogram, histogram));
 }
 
-fn upload_ring<R: Runtime>(client: &ComputeClient<R>, ring: &[f32]) -> Handle {
+fn upload_ring(client: &Client, ring: &[f32]) -> Handle {
     let bytes = f32::as_bytes(ring);
     client.create_from_slice(bytes)
 }
@@ -506,8 +506,8 @@ fn upload_ring<R: Runtime>(client: &ComputeClient<R>, ring: &[f32]) -> Handle {
 /// A batch shaped like `batch` whose every element is tagged 1 or 2 with the key of 1.0.
 ///
 /// Every tag keeps `min_count`.
-fn poisoned_batch<R: Runtime>(
-    client: &ComputeClient<R>,
+fn poisoned_batch(
+    client: &Client,
     batch: &SelectBatch,
     min_count: u32,
     queries: &[SelectQuery],

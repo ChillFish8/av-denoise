@@ -22,9 +22,9 @@ use crate::nlmeans::denoiser::check_u32_indexable;
 use crate::tune::{EngineKernels, KernelSelector};
 
 /// Four-dimensional collaborative denoising over GPU planes.
-pub struct Nl4d<R: Runtime> {
-    inner: Nl4dDenoiser<R>,
-    client: ComputeClient<R>,
+pub struct Nl4d {
+    inner: Nl4dDenoiser,
+    client: Client,
     geometry: Geometry,
     temporal_radius: u32,
     /// Regions finished but not yet emitted, oldest first.
@@ -38,16 +38,16 @@ pub struct Nl4d<R: Runtime> {
     poisoned: bool,
 }
 
-impl<R: Runtime> Nl4d<R> {
+impl Nl4d {
     /// Builds the engine, returning [Error::InvalidGeometry] or [Error::InvalidOptions] for unusable input.
-    pub fn new(client: &ComputeClient<R>, options: Nl4dOptions, geometry: Geometry) -> Result<Self, Error> {
+    pub fn new(client: &Client, options: Nl4dOptions, geometry: Geometry) -> Result<Self, Error> {
         let kernels = EngineKernels::default();
         Self::with_kernels(client, options, geometry, kernels)
     }
 
     /// [Nl4d::new] with each launch site's candidate picked from `kernels`.
     pub fn with_kernels(
-        client: &ComputeClient<R>,
+        client: &Client,
         options: Nl4dOptions,
         geometry: Geometry,
         kernels: EngineKernels,
@@ -160,7 +160,7 @@ impl<R: Runtime> Nl4d<R> {
     }
 }
 
-impl<R: Runtime> Engine for Nl4d<R> {
+impl Engine for Nl4d {
     fn push(&mut self, planes: &[DevicePlane<'_>]) -> Result<usize, Error> {
         self.check_usable()?;
         self.check_nothing_pending()?;

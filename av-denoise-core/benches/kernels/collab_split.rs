@@ -28,8 +28,8 @@ pub enum SplitKernel {
 ///
 /// Each bench fills its own member buffer once with the baseline search, so the filter reads real
 /// groups.
-pub struct CollabSplitBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct CollabSplitBench {
+    pub client: Client,
     pub channels: u32,
     pub channel_name: &'static str,
     pub kernel: SplitKernel,
@@ -43,11 +43,7 @@ pub struct CollabSplitInput {
 
 /// The search variants and filter candidates this device runs for a bench of `channels`, baseline
 /// first.
-pub fn fitted_split_kernels<R: Runtime>(
-    client: &ComputeClient<R>,
-    channels: u32,
-    channel_name: &'static str,
-) -> Vec<SplitKernel> {
+pub fn fitted_split_kernels(client: &Client, channels: u32, channel_name: &'static str) -> Vec<SplitKernel> {
     let first = SearchVariant(CollabVariant::BASELINE);
     let probe = CollabSplitBench {
         client: client.clone(),
@@ -67,7 +63,7 @@ pub fn fitted_split_kernels<R: Runtime>(
     search_kernels.chain(filter_kernels).collect()
 }
 
-impl<R: Runtime> CollabSplitBench<R> {
+impl CollabSplitBench {
     /// The fused bench's buffers and a zeroed member buffer.
     fn input(&self) -> CollabSplitInput {
         let fused_bench = self.fused();
@@ -81,7 +77,7 @@ impl<R: Runtime> CollabSplitBench<R> {
         }
     }
 
-    fn fused(&self) -> CollabFusedBench<R> {
+    fn fused(&self) -> CollabFusedBench {
         CollabFusedBench {
             client: self.client.clone(),
             channels: self.channels,
@@ -96,7 +92,7 @@ impl<R: Runtime> CollabSplitBench<R> {
     }
 
     /// The search and filter sites over `input`, sharing its member buffer.
-    fn sites(&self, input: &CollabSplitInput) -> (CollabSearchSite<R, f32>, CollabFilterSite<R>) {
+    fn sites(&self, input: &CollabSplitInput) -> (CollabSearchSite<f32>, CollabFilterSite) {
         let fused_bench = self.fused();
         let fused = fused_bench.site(&input.fused);
         let refs = ref_count(WIDTH, HEIGHT);
@@ -126,7 +122,7 @@ impl<R: Runtime> CollabSplitBench<R> {
     }
 }
 
-impl<R: Runtime> Benchmark for CollabSplitBench<R> {
+impl Benchmark for CollabSplitBench {
     type Input = CollabSplitInput;
     type Output = ();
 

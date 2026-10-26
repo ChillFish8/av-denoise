@@ -1,6 +1,6 @@
 use cubecl::prelude::*;
 
-use super::helpers::{R, make_client, noisy_flat_field};
+use super::helpers::{make_client, noisy_flat_field};
 use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{
     ACCUM_SCALE,
@@ -38,14 +38,14 @@ fn run_normalise(accum_host: &[i32], wsum_host: &[i32], width: u32, height: u32)
     let dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
 
     unsafe {
-        collab_normalise::launch_unchecked::<R>(
+        collab_normalise::launch_unchecked(
             &client,
             grid,
             dim,
             1usize,
-            ArrayArg::from_raw_parts(accum, pixels),
-            ArrayArg::from_raw_parts(wsum, pixels),
-            ArrayArg::from_raw_parts(output.clone(), pixels),
+            BufferArg::from_raw_parts(accum, pixels),
+            BufferArg::from_raw_parts(wsum, pixels),
+            BufferArg::from_raw_parts(output.clone(), pixels),
             0u32,
             width,
             height,
@@ -136,12 +136,12 @@ fn zero_accum_clears_both_buffers() {
     let grid = (pixels as u32).div_ceil(dim);
 
     unsafe {
-        collab_zero_accum::launch_unchecked::<R>(
+        collab_zero_accum::launch_unchecked(
             &client,
             CubeCount::new_1d(grid),
             CubeDim::new_1d(dim),
-            ArrayArg::from_raw_parts(accum.clone(), pixels),
-            ArrayArg::from_raw_parts(wsum.clone(), pixels),
+            BufferArg::from_raw_parts(accum.clone(), pixels),
+            BufferArg::from_raw_parts(wsum.clone(), pixels),
             0u32,
             pixels as u32,
             1u32,
@@ -192,12 +192,12 @@ fn zero_accum_clears_every_slot_of_a_buffer_past_the_grid_clamp() {
     let grid = (pixels as u32).div_ceil(dim).min(MAX_GRID_1D);
 
     unsafe {
-        collab_zero_accum::launch_unchecked::<R>(
+        collab_zero_accum::launch_unchecked(
             &client,
             CubeCount::new_1d(grid),
             CubeDim::new_1d(dim),
-            ArrayArg::from_raw_parts(accum.clone(), pixels),
-            ArrayArg::from_raw_parts(wsum.clone(), pixels),
+            BufferArg::from_raw_parts(accum.clone(), pixels),
+            BufferArg::from_raw_parts(wsum.clone(), pixels),
             0u32,
             pixels as u32,
             1u32,
@@ -244,11 +244,11 @@ fn zero_packed_clears_only_its_slot_in_both_buffers() {
         let rest_launched = rest.clone();
         let packed_len = packed_host.len();
         let rest_len = rest_host.len();
-        let packed_arg = unsafe { ArrayArg::from_raw_parts(packed_launched, packed_len) };
-        let rest_arg = unsafe { ArrayArg::from_raw_parts(rest_launched, rest_len) };
+        let packed_arg = unsafe { BufferArg::from_raw_parts(packed_launched, packed_len) };
+        let rest_arg = unsafe { BufferArg::from_raw_parts(rest_launched, rest_len) };
 
         unsafe {
-            collab_zero_packed::launch_unchecked::<R>(
+            collab_zero_packed::launch_unchecked(
                 &client,
                 CubeCount::new_1d(1),
                 CubeDim::new_1d(dim),
@@ -358,38 +358,38 @@ fn run_scatter_stage_windowed(
     let stored_ch = 1usize;
 
     unsafe {
-        collab_zero_accum::launch_unchecked::<R>(
+        collab_zero_accum::launch_unchecked(
             &client,
             CubeCount::new_1d(zero_grid),
             CubeDim::new_1d(zero_dim),
-            ArrayArg::from_raw_parts(accum.clone(), pixels),
-            ArrayArg::from_raw_parts(wsum.clone(), pixels),
+            BufferArg::from_raw_parts(accum.clone(), pixels),
+            BufferArg::from_raw_parts(wsum.clone(), pixels),
             0u32,
             pixels as u32,
             1u32,
             zero_grid * zero_dim,
         );
 
-        let ring_scalar = ArrayArg::from_raw_parts(input.clone(), pixels);
-        collab_fused::launch_unchecked::<f32, i32, R>(
+        let ring_scalar = BufferArg::from_raw_parts(input.clone(), pixels);
+        collab_fused::launch_unchecked::<f32, i32>(
             &client,
             fused_grid,
             fused_dim,
             stored_ch,
-            ArrayArg::from_raw_parts(input.clone(), pixels),
+            BufferArg::from_raw_parts(input.clone(), pixels),
             ring_scalar,
-            ArrayArg::from_raw_parts(input.clone(), stored_ch),
-            ArrayArg::from_raw_parts(mv_dummy, 2),
-            ArrayArg::from_raw_parts(conf_dummy, 1),
-            ArrayArg::from_raw_parts(slots_dummy, 1),
-            ArrayArg::from_raw_parts(noise_buf, DERIVED_WORDS as usize),
-            ArrayArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
-            ArrayArg::from_raw_parts(unit_map_buf, map_len),
-            ArrayArg::from_raw_parts(profile_buf, 8),
-            ArrayArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
-            ArrayArg::from_raw_parts(accum.clone(), pixels),
-            ArrayArg::from_raw_parts(wsum.clone(), pixels),
-            ArrayArg::from_raw_parts(group_weight, refs),
+            BufferArg::from_raw_parts(input.clone(), stored_ch),
+            BufferArg::from_raw_parts(mv_dummy, 2),
+            BufferArg::from_raw_parts(conf_dummy, 1),
+            BufferArg::from_raw_parts(slots_dummy, 1),
+            BufferArg::from_raw_parts(noise_buf, DERIVED_WORDS as usize),
+            BufferArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
+            BufferArg::from_raw_parts(unit_map_buf, map_len),
+            BufferArg::from_raw_parts(profile_buf, 8),
+            BufferArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
+            BufferArg::from_raw_parts(accum.clone(), pixels),
+            BufferArg::from_raw_parts(wsum.clone(), pixels),
+            BufferArg::from_raw_parts(group_weight, refs),
             0u32,
             0.0f32,
             2.7f32,
@@ -427,11 +427,11 @@ fn run_scatter_stage_windowed(
     let output_launched = output.clone();
 
     unsafe {
-        let accum_arg = ArrayArg::from_raw_parts(accum, pixels);
-        let wsum_arg = ArrayArg::from_raw_parts(wsum, pixels);
-        let output_arg = ArrayArg::from_raw_parts(output_launched, pixels);
+        let accum_arg = BufferArg::from_raw_parts(accum, pixels);
+        let wsum_arg = BufferArg::from_raw_parts(wsum, pixels);
+        let output_arg = BufferArg::from_raw_parts(output_launched, pixels);
 
-        collab_normalise::launch_unchecked::<R>(
+        collab_normalise::launch_unchecked(
             &client,
             normalise_grid,
             normalise_dim,

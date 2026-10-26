@@ -9,10 +9,10 @@ use crate::tune::sites::{COLLAB_FUSED, CollabOutputs, CollabVariant};
 use crate::tune::tests::engine::{nl4d_outputs, noisy_frames};
 use crate::tune::tests::equivalence::assert_listed_candidates_match_baseline;
 use crate::tune::tests::fixtures::{CollabSpec, collab_site, collab_site_f16, variant_chunk_tests};
-use crate::tune::tests::runtime::{TestRuntime, test_client};
+use crate::tune::tests::runtime::test_client;
 use crate::tune::{KernelPlan, SiteCandidate};
 
-fn assert_groups_retired(client: &ComputeClient<TestRuntime>, outputs: &CollabOutputs, label: &str) {
+fn assert_groups_retired(client: &Client, outputs: &CollabOutputs, label: &str) {
     let weights = read_f32(client, &outputs.group_weight, outputs.refs).expect("weights read back");
     let retired = weights.iter().any(|&weight| weight > 0.0);
 

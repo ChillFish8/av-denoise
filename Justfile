@@ -13,11 +13,23 @@ hello:
 format:
     cargo +nightly fmt --all
 
-# Lints all three crates, matching the feature sets `test-rust` uses. Pass `-- -D warnings` to fail on any lint.
-clippy *ARGS:
-    cargo clippy -p av-denoise-core --features vulkan --all-targets {{ARGS}}
-    cargo clippy -p av-denoise --features vulkan,binary --all-targets {{ARGS}}
-    cargo clippy -p av-denoise-vs --features vulkan --all-targets {{ARGS}}
+# The backend comes first and defaults to vulkan, so `just clippy -- -D warnings` lints Vulkan and
+# `just clippy rocm -- -D warnings` lints ROCm.
+#
+# Lints all three crates on one backend, matching the feature sets `test-rust` uses.
+clippy backend="vulkan" *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    backend="{{backend}}"
+    args=({{ARGS}})
+    case "$backend" in
+        -*) args=("$backend" "${args[@]}"); backend=vulkan ;;
+    esac
+    features=(--no-default-features --features "$backend")
+    host_features=(--no-default-features --features "$backend,binary")
+    cargo clippy -p av-denoise-core "${features[@]}" --all-targets "${args[@]}"
+    cargo clippy -p av-denoise "${host_features[@]}" --all-targets "${args[@]}"
+    cargo clippy -p av-denoise-vs "${features[@]}" --all-targets "${args[@]}"
 
 # Formats the shipped Python, matching the `python` job in the PR checks workflow. scripts/ is excluded.
 format-py *ARGS:
@@ -63,8 +75,20 @@ build-static features=static_features:
     export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
     cargo build --release -p av-denoise --features {{features}},static-ffms2
 
-bench *ARGS:
-    cargo bench -p av-denoise-core {{ARGS}}
+# The backend comes first and defaults to vulkan, so `just bench -- --device discrete:1` and
+# `just bench rocm --bench bench_kernels` both work.
+#
+# Runs the core benches on one backend.
+bench backend="vulkan" *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    backend="{{backend}}"
+    args=({{ARGS}})
+    case "$backend" in
+        -*) args=("$backend" "${args[@]}"); backend=vulkan ;;
+    esac
+    export AVD_TEST_ACCELERATOR="$backend"
+    cargo bench -p av-denoise-core --no-default-features --features "$backend" "${args[@]}"
 
 # Benchmarks the host layer, end to end through `HostDenoiser` and `PlanarDenoiser`.
 bench-host *ARGS:
@@ -82,12 +106,15 @@ build-wheel *ARGS:
 # Runs every Rust and Python test. Needs an accelerator, both sides render.
 test: test-rust test-py
 
+# Tests run on `AVD_TEST_DEVICE`, in the `--device` syntax, or on the backend's default device.
+#
 # Every Rust test across the three crates. Another backend, for example `just test-rust rocm`, runs
 # the core crate's backend-generic tests on it instead. ROCm runs at most 8 test processes, because
 # each HIP process takes copy queues from a small fixed pool.
 test-rust backend="vulkan":
     #!/usr/bin/env bash
     set -euo pipefail
+    export AVD_TEST_ACCELERATOR={{backend}}
     if [ "{{backend}}" != vulkan ]; then
         threads=()
         if [ "{{backend}}" = rocm ]; then threads=(--test-threads 8); fi

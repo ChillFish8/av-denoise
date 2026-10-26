@@ -22,11 +22,11 @@ const BATCH: u32 = 8;
     reason = "every argument is a buffer, position or comptime shape the walk needs"
 )]
 pub(crate) fn batched_centre_walk<S: Float, N: Size>(
-    ring: &Array<Vector<f32, N>>,
-    search_ring: &Array<Vector<S, N>>,
-    tile: &SharedMemory<S>,
-    current: &Array<f32>,
-    reference: &Array<Vector<S, Const<2>>>,
+    ring: &[Vector<f32, N>],
+    search_ring: &[Vector<S, N>],
+    tile: &Shared<[S]>,
+    current: &[f32],
+    reference: &[Vector<S, Const<2>>],
     rect: &SearchRect,
     cursor: &SearchCursor,
     best_d: &mut f32,
@@ -107,11 +107,11 @@ pub(crate) fn batched_centre_walk<S: Float, N: Size>(
     reason = "every argument is a buffer, position or comptime shape the batch needs"
 )]
 fn score_batch<S: Float, N: Size>(
-    ring: &Array<Vector<f32, N>>,
-    search_ring: &Array<Vector<S, N>>,
-    tile: &SharedMemory<S>,
-    current: &Array<f32>,
-    reference: &Array<Vector<S, Const<2>>>,
+    ring: &[Vector<f32, N>],
+    search_ring: &[Vector<S, N>],
+    tile: &Shared<[S]>,
+    current: &[f32],
+    reference: &[Vector<S, Const<2>>],
     rect: &SearchRect,
     cursor: &SearchCursor,
     best_d: &mut f32,
@@ -149,7 +149,7 @@ fn score_batch<S: Float, N: Size>(
         );
     }
 
-    let total = scatter_sums8(&partials, cursor.sub);
+    let total = scatter_sums8(partials.as_slice(), cursor.sub);
     let candidate_x = u32::min(own_x, rect.right);
     let candidate_y = u32::min(own_y, rect.bottom);
     let scored = total * cursor.scale;

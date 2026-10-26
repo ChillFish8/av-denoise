@@ -101,9 +101,9 @@ pub(crate) struct PrefilterCtx<'a> {
 }
 
 /// Runs the GPU prefilter for the frame uploaded last.
-pub(crate) fn run_prefilter<R: Runtime>(
+pub(crate) fn run_prefilter(
     mode: PrefilterMode,
-    client: &ComputeClient<R>,
+    client: &Client,
     ctx: &PrefilterCtx<'_>,
 ) -> Result<(), anyhow::Error> {
     match mode {
@@ -112,7 +112,7 @@ pub(crate) fn run_prefilter<R: Runtime>(
         // denoiser dispatches it directly.
         PrefilterMode::NlmSpatial { .. } => Ok(()),
         PrefilterMode::Bilateral { sigma_s, sigma_r } => {
-            bilateral::run_bilateral::<R>(client, ctx, sigma_s, sigma_r)
+            bilateral::run_bilateral(client, ctx, sigma_s, sigma_r)
         },
     }
 }

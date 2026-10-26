@@ -1,11 +1,11 @@
 use cubecl::prelude::*;
 
-use super::helpers::{R, make_client};
+use super::helpers::make_client;
 use crate::collab::MAX_K;
 use crate::collab::kernels::transforms::*;
 
 #[cube(launch_unchecked)]
-fn safe_reciprocal_probe(denom: &Array<f32>, floor: &Array<f32>, out: &mut Array<f32>, count: u32) {
+fn safe_reciprocal_probe(denom: &[f32], floor: &[f32], out: &mut [f32], count: u32) {
     let tid = ABSOLUTE_POS_X;
     if tid < count {
         out[tid as usize] = safe_reciprocal(denom[tid as usize], floor[tid as usize]);
@@ -36,13 +36,13 @@ fn safe_reciprocal_is_zero_for_a_non_finite_denominator_and_ordinary_otherwise()
     let out_buf = client.empty(count * size_of::<f32>());
 
     unsafe {
-        safe_reciprocal_probe::launch_unchecked::<R>(
+        safe_reciprocal_probe::launch_unchecked(
             &client,
             CubeCount::new_1d(1),
             CubeDim::new_1d(count as u32),
-            ArrayArg::from_raw_parts(denom_buf, count),
-            ArrayArg::from_raw_parts(floor_buf, count),
-            ArrayArg::from_raw_parts(out_buf.clone(), count),
+            BufferArg::from_raw_parts(denom_buf, count),
+            BufferArg::from_raw_parts(floor_buf, count),
+            BufferArg::from_raw_parts(out_buf.clone(), count),
             count as u32,
         );
     }
@@ -87,20 +87,20 @@ fn safe_reciprocal_is_zero_for_a_non_finite_denominator_and_ordinary_otherwise()
 /// Runs the same three-level variance ladder as
 /// [collab_fused](crate::collab::kernels::fused::collab_fused), in the same pairing order.
 #[cube(launch_unchecked)]
-fn variance_ladder_kernel(input: &Array<f32>, k_use: u32, output: &mut Array<f32>) {
+fn variance_ladder_kernel(input: &[f32], k_use: u32, output: &mut [f32]) {
     let mut variances = Array::<f32>::new(MAX_K as usize);
     #[unroll]
     for k in 0..MAX_K {
         variances[k as usize] = input[k as usize];
     }
     if k_use >= 8u32 {
-        variance_reg_level(&mut variances, 8u32);
+        variance_reg_level(variances.as_mut_slice(), 8u32);
     }
     if k_use >= 4u32 {
-        variance_reg_level(&mut variances, 4u32);
+        variance_reg_level(variances.as_mut_slice(), 4u32);
     }
     if k_use >= 2u32 {
-        variance_reg_level(&mut variances, 2u32);
+        variance_reg_level(variances.as_mut_slice(), 2u32);
     }
     #[unroll]
     for k in 0..MAX_K {
@@ -115,13 +115,13 @@ fn run_variance_ladder(sig2: &[f32; 8], k_use: u32) -> Vec<f32> {
     let output_buf = client.empty(8 * size_of::<f32>());
 
     unsafe {
-        variance_ladder_kernel::launch_unchecked::<R>(
+        variance_ladder_kernel::launch_unchecked(
             &client,
             CubeCount::new_single(),
             CubeDim::new_2d(1, 1),
-            ArrayArg::from_raw_parts(input_buf, 8),
+            BufferArg::from_raw_parts(input_buf, 8),
             k_use,
-            ArrayArg::from_raw_parts(output_buf.clone(), 8),
+            BufferArg::from_raw_parts(output_buf.clone(), 8),
         );
     }
 
@@ -154,7 +154,7 @@ fn gpu_variance_ladder_matches_the_host_mirror() {
 }
 
 #[cube(launch_unchecked)]
-fn dct8_probe(input: &Array<f32>, output: &mut Array<f32>, #[comptime] round_trip: bool) {
+fn dct8_probe(input: &[f32], output: &mut [f32], #[comptime] round_trip: bool) {
     let line_start = UNIT_POS_X * 8u32;
     let mut line = Array::<f32>::new(8usize);
     #[unroll]
@@ -162,9 +162,9 @@ fn dct8_probe(input: &Array<f32>, output: &mut Array<f32>, #[comptime] round_tri
         line[i as usize] = input[(line_start + i) as usize];
     }
 
-    dct8_reg_fwd(&mut line);
+    dct8_reg_fwd(line.as_mut_slice());
     if comptime!(round_trip) {
-        dct8_reg_inv(&mut line);
+        dct8_reg_inv(line.as_mut_slice());
     }
 
     #[unroll]
@@ -197,12 +197,12 @@ fn run_dct8_probe(lines: &[[f32; 8]], round_trip: bool) -> Vec<[f32; 8]> {
     let output_buf = client.empty(flat.len() * size_of::<f32>());
 
     unsafe {
-        dct8_probe::launch_unchecked::<R>(
+        dct8_probe::launch_unchecked(
             &client,
             CubeCount::new_single(),
             CubeDim::new_1d(lines.len() as u32),
-            ArrayArg::from_raw_parts(input_buf, flat.len()),
-            ArrayArg::from_raw_parts(output_buf.clone(), flat.len()),
+            BufferArg::from_raw_parts(input_buf, flat.len()),
+            BufferArg::from_raw_parts(output_buf.clone(), flat.len()),
             round_trip,
         );
     }

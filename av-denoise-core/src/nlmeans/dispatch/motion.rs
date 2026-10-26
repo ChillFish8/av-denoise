@@ -55,7 +55,7 @@ pub(crate) fn mc_sad_noise_floor_sigma(prefilter: PrefilterMode, sigma_y: f32) -
     }
 }
 
-impl<R: Runtime> NlmDenoiser<R> {
+impl NlmDenoiser {
     /// Each neighbour's physical slot for a pass centred on `center_t`, in logical order skipping
     /// the centre.
     pub(in crate::nlmeans) fn window_neighbour_slots(&self, center_t: u32) -> Vec<u32> {
@@ -209,7 +209,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             .resolved_estimation(self.params.temporal_radius);
 
         if let Some(MotionEstimation::Chained { refine_radius }) = estimation {
-            return run_seeded_refine::<R>(
+            return run_seeded_refine(
                 &self.client,
                 motion_ctx,
                 self.width,
@@ -222,7 +222,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             );
         }
 
-        run_analyse::<R>(
+        run_analyse(
             &self.client,
             motion_ctx,
             self.width,
@@ -276,7 +276,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let centre_slot = self.phys_frame(center_t as i32);
         let stored_ch = self.params.channels.storage_count();
 
-        copy_frame_into_slot_handle::<R>(
+        copy_frame_into_slot_handle(
             &self.client,
             &self.input_buf,
             compensated_input,
@@ -290,7 +290,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             self.reference_buf.as_ref(),
             self.compensated_reference_buf.as_ref(),
         ) {
-            copy_frame_into_slot_handle::<R>(
+            copy_frame_into_slot_handle(
                 &self.client,
                 ref_src,
                 ref_dst,
@@ -327,7 +327,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         for (neighbour_idx, &k) in indexed {
             let neighbour_slot = self.phys_frame(center_t as i32 + k);
 
-            run_compensate::<R>(
+            run_compensate(
                 &self.client,
                 motion_ctx,
                 stored_ch,
@@ -345,7 +345,7 @@ impl<R: Runtime> NlmDenoiser<R> {
                 self.reference_buf.as_ref(),
                 self.compensated_reference_buf.as_ref(),
             ) {
-                run_compensate::<R>(
+                run_compensate(
                     &self.client,
                     motion_ctx,
                     stored_ch,
@@ -412,7 +412,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             write_confidence: true,
         };
 
-        run_confidence::<R>(
+        run_confidence(
             &self.client,
             ctx,
             self.width,
@@ -476,7 +476,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let pair_ring_slots = motion::pair_ring_slot_count(radius);
         let pair_ring_len = pair_ring_slots as usize * motion_ctx.pair_slot_stride() as usize;
 
-        dispatch_chain_compose::<R>(
+        dispatch_chain_compose(
             &self.client,
             motion_ctx,
             self.width,
@@ -502,8 +502,8 @@ impl<R: Runtime> NlmDenoiser<R> {
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
 )]
-fn copy_frame_into_slot_handle<R: Runtime>(
-    client: &ComputeClient<R>,
+fn copy_frame_into_slot_handle(
+    client: &Client,
     src: &Handle,
     dst: &Handle,
     slot: usize,
@@ -524,10 +524,10 @@ fn copy_frame_into_slot_handle<R: Runtime>(
     let dst_handle = dst.clone();
 
     unsafe {
-        let src_arg = ArrayArg::from_raw_parts(src_handle, ring_len);
-        let dst_arg = ArrayArg::from_raw_parts(dst_handle, ring_len);
+        let src_arg = BufferArg::from_raw_parts(src_handle, ring_len);
+        let dst_arg = BufferArg::from_raw_parts(dst_handle, ring_len);
 
-        gpu_copy::launch_unchecked::<R>(
+        gpu_copy::launch_unchecked(
             client,
             cube_count,
             cube_dim,
@@ -549,8 +549,8 @@ fn copy_frame_into_slot_handle<R: Runtime>(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
 )]
-fn dispatch_chain_compose<R: Runtime>(
-    client: &ComputeClient<R>,
+fn dispatch_chain_compose(
+    client: &Client,
     motion_ctx: &MotionCtx,
     width: u32,
     height: u32,
@@ -575,10 +575,10 @@ fn dispatch_chain_compose<R: Runtime>(
     let pair_ring_handle = pair_ring.clone();
 
     unsafe {
-        let pair_ring_arg = ArrayArg::from_raw_parts(pair_ring_handle, pair_ring_len);
-        let mv_slot_arg = ArrayArg::from_raw_parts(mv_slot, mv_slot_len);
+        let pair_ring_arg = BufferArg::from_raw_parts(pair_ring_handle, pair_ring_len);
+        let mv_slot_arg = BufferArg::from_raw_parts(mv_slot, mv_slot_len);
 
-        mc_chain_compose::launch_unchecked::<R>(
+        mc_chain_compose::launch_unchecked(
             client,
             grid,
             dim,

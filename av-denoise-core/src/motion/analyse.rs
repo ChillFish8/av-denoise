@@ -57,8 +57,8 @@ pub(crate) struct MatchTargets<'a> {
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
 )]
-pub(crate) fn run_analyse<R: Runtime>(
-    client: &ComputeClient<R>,
+pub(crate) fn run_analyse(
+    client: &Client,
     motion_ctx: &MotionCtx,
     width: u32,
     height: u32,
@@ -92,11 +92,11 @@ pub(crate) fn run_analyse<R: Runtime>(
         let mv_field = targets.mv_field.clone();
 
         unsafe {
-            let pyramid_arg = ArrayArg::from_raw_parts(pyramid, pyramid_len);
-            let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, slots_len);
-            let mv_field_arg = ArrayArg::from_raw_parts(mv_field, targets.mv_len);
+            let pyramid_arg = BufferArg::from_raw_parts(pyramid, pyramid_len);
+            let neighbour_slots_arg = BufferArg::from_raw_parts(neighbour_slots, slots_len);
+            let mv_field_arg = BufferArg::from_raw_parts(mv_field, targets.mv_len);
 
-            mc_block_match_coarse::launch_unchecked::<R>(
+            mc_block_match_coarse::launch_unchecked(
                 client,
                 grid,
                 dim,
@@ -123,7 +123,7 @@ pub(crate) fn run_analyse<R: Runtime>(
     }
 
     let seeded = if motion_ctx.pyramid_levels > 1 { 1u32 } else { 0u32 };
-    launch_fine::<R>(
+    launch_fine(
         client,
         motion_ctx,
         width,
@@ -148,8 +148,8 @@ pub(crate) fn run_analyse<R: Runtime>(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
 )]
-pub(crate) fn run_seeded_refine<R: Runtime>(
-    client: &ComputeClient<R>,
+pub(crate) fn run_seeded_refine(
+    client: &Client,
     motion_ctx: &MotionCtx,
     width: u32,
     height: u32,
@@ -159,7 +159,7 @@ pub(crate) fn run_seeded_refine<R: Runtime>(
     sad_field: u32,
     thsad: f32,
 ) -> Result<(), anyhow::Error> {
-    launch_fine::<R>(
+    launch_fine(
         client,
         motion_ctx,
         width,
@@ -180,8 +180,8 @@ pub(crate) fn run_seeded_refine<R: Runtime>(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
 )]
-pub(super) fn launch_fine<R: Runtime>(
-    client: &ComputeClient<R>,
+pub(super) fn launch_fine(
+    client: &Client,
     motion_ctx: &MotionCtx,
     width: u32,
     height: u32,
@@ -208,13 +208,13 @@ pub(super) fn launch_fine<R: Runtime>(
     let noise = noise.clone();
 
     unsafe {
-        let pyramid_arg = ArrayArg::from_raw_parts(pyramid, pyramid_len);
-        let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, slots_len);
-        let mv_field_arg = ArrayArg::from_raw_parts(mv_field, targets.mv_len);
-        let confidence_arg = ArrayArg::from_raw_parts(confidence, targets.conf_len);
-        let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
+        let pyramid_arg = BufferArg::from_raw_parts(pyramid, pyramid_len);
+        let neighbour_slots_arg = BufferArg::from_raw_parts(neighbour_slots, slots_len);
+        let mv_field_arg = BufferArg::from_raw_parts(mv_field, targets.mv_len);
+        let confidence_arg = BufferArg::from_raw_parts(confidence, targets.conf_len);
+        let noise_arg = BufferArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
-        mc_block_match_fine::launch_unchecked::<R>(
+        mc_block_match_fine::launch_unchecked(
             client,
             grid,
             dim,

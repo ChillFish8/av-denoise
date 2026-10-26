@@ -82,8 +82,8 @@ pub fn level_dims(width: u32, height: u32, level: u32) -> (u32, u32) {
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
 )]
-pub(crate) fn run_pyramid_build<R: Runtime>(
-    client: &ComputeClient<R>,
+pub(crate) fn run_pyramid_build(
+    client: &Client,
     motion_ctx: &MotionCtx,
     width: u32,
     height: u32,
@@ -93,7 +93,7 @@ pub(crate) fn run_pyramid_build<R: Runtime>(
     pyramid: &Handle,
     stored_ch: u32,
 ) -> Result<(), anyhow::Error> {
-    extract_luma::<R>(
+    extract_luma(
         client,
         full_res,
         pyramid,
@@ -106,7 +106,7 @@ pub(crate) fn run_pyramid_build<R: Runtime>(
     );
 
     for level in 1..motion_ctx.pyramid_levels {
-        downscale_level::<R>(
+        downscale_level(
             client,
             pyramid,
             slot,
@@ -125,8 +125,8 @@ pub(crate) fn run_pyramid_build<R: Runtime>(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
 )]
-fn extract_luma<R: Runtime>(
-    client: &ComputeClient<R>,
+fn extract_luma(
+    client: &Client,
     full_res: &Handle,
     pyramid: &Handle,
     slot: u32,
@@ -149,10 +149,10 @@ fn extract_luma<R: Runtime>(
     let full_res_handle = full_res.clone();
 
     unsafe {
-        let full_res_arg = ArrayArg::from_raw_parts(full_res_handle, full_len);
-        let level0_arg = ArrayArg::from_raw_parts(level0_dst, level0_len);
+        let full_res_arg = BufferArg::from_raw_parts(full_res_handle, full_len);
+        let level0_arg = BufferArg::from_raw_parts(level0_dst, level0_len);
 
-        mc_extract_luma::launch_unchecked::<R>(
+        mc_extract_luma::launch_unchecked(
             client,
             grid,
             dim,
@@ -171,8 +171,8 @@ fn extract_luma<R: Runtime>(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
 )]
-fn downscale_level<R: Runtime>(
-    client: &ComputeClient<R>,
+fn downscale_level(
+    client: &Client,
     pyramid: &Handle,
     slot: u32,
     width: u32,
@@ -198,10 +198,10 @@ fn downscale_level<R: Runtime>(
     let dst_len = (dst_w * dst_h) as usize;
 
     unsafe {
-        let src_arg = ArrayArg::from_raw_parts(src, src_len);
-        let dst_arg = ArrayArg::from_raw_parts(dst, dst_len);
+        let src_arg = BufferArg::from_raw_parts(src, src_len);
+        let dst_arg = BufferArg::from_raw_parts(dst, dst_len);
 
-        mc_downscale::launch_unchecked::<R>(
+        mc_downscale::launch_unchecked(
             client, grid, dim, src_arg, dst_arg, 0u32, 0u32, src_w, src_h, dst_w, dst_h,
         );
     }

@@ -3,7 +3,7 @@ use cubecl::prelude::*;
 use super::engine::{nl4d_outputs, noisy_frames};
 use super::equivalence::assert_candidates_match_baseline;
 use super::fixtures::{RegulariseContent, RegulariseSpec, regularise_neighbour_slot, regularise_site};
-use super::runtime::{TestRuntime, test_client};
+use super::runtime::test_client;
 use crate::Nl4dOptions;
 use crate::nl4d::kernels::tests::reference::nl4d_mv_regularise_reference;
 use crate::nlmeans::ChannelMode;
@@ -161,7 +161,7 @@ fn the_narrow_serial_shapes_are_candidates() {
 }
 
 /// Runs the verbatim per-neighbour kernel once per neighbour and returns the field and confidence.
-fn reference_outputs(site: &RegulariseSite<TestRuntime>) -> (Vec<i32>, Vec<f32>) {
+fn reference_outputs(site: &RegulariseSite) -> (Vec<i32>, Vec<f32>) {
     let client = &site.client;
     let outputs = site.scratch_outputs();
     let blocks = outputs.blocks;
@@ -181,15 +181,15 @@ fn reference_outputs(site: &RegulariseSite<TestRuntime>) -> (Vec<i32>, Vec<f32>)
         let confidence_slice = outputs.confidence.clone().offset_start(neighbour * conf_bytes);
         let cube_count = CubeCount::new_2d(site.blocks_x, site.blocks_y);
         let cube_dim = CubeDim::new_2d(8, 8);
-        let centre = bind::<TestRuntime>(&centre_frame, level_len);
-        let neighbour_plane = bind::<TestRuntime>(&neighbour_frame, level_len);
-        let mv_in = bind::<TestRuntime>(&mv_slice, 2 * blocks);
-        let vectors = bind::<TestRuntime>(&vectors_slice, 2 * blocks);
-        let confidence = bind::<TestRuntime>(&confidence_slice, blocks);
-        let noise = bind::<TestRuntime>(&site.noise, DERIVED_WORDS as usize);
+        let centre = bind(&centre_frame, level_len);
+        let neighbour_plane = bind(&neighbour_frame, level_len);
+        let mv_in = bind(&mv_slice, 2 * blocks);
+        let vectors = bind(&vectors_slice, 2 * blocks);
+        let confidence = bind(&confidence_slice, blocks);
+        let noise = bind(&site.noise, DERIVED_WORDS as usize);
 
         unsafe {
-            nl4d_mv_regularise_reference::launch_unchecked::<TestRuntime>(
+            nl4d_mv_regularise_reference::launch_unchecked(
                 client,
                 cube_count,
                 cube_dim,
@@ -284,7 +284,7 @@ fn cooperative_candidates_are_rounding_and_prescreened() {
 
     assert_eq!(coop.class(), FidelityClass::Rounding);
     assert!(matches!(coop, Fidelity::Rounding { .. }));
-    const { assert!(<RegulariseSite<TestRuntime> as VariantSite<TestRuntime>>::PRESCREEN) };
+    const { assert!(<RegulariseSite as VariantSite>::PRESCREEN) };
 }
 
 #[test]
@@ -453,11 +453,7 @@ fn forcing_the_cooperative_kernel_keeps_nl4d_output_within_rounding() {
     }
 }
 
-fn upload_field(
-    site: &RegulariseSite<TestRuntime>,
-    vectors: &[i32],
-    confidence: &[f32],
-) -> RegulariseOutputs {
+fn upload_field(site: &RegulariseSite, vectors: &[i32], confidence: &[f32]) -> RegulariseOutputs {
     let vector_bytes = i32::as_bytes(vectors);
     let confidence_bytes = f32::as_bytes(confidence);
     let vectors = site.client.create_from_slice(vector_bytes);
@@ -512,10 +508,7 @@ fn rounding_compare_allows_flipped_vectors_up_to_the_share() {
 }
 
 /// A regularise site whose motion field holds one vector over each 3x3 patch of blocks.
-fn patched_field_site(
-    client: &ComputeClient<TestRuntime>,
-    spec: &RegulariseSpec,
-) -> RegulariseSite<TestRuntime> {
+fn patched_field_site(client: &Client, spec: &RegulariseSpec) -> RegulariseSite {
     let mut site = regularise_site(client, spec);
     let mv_stride = site.outputs.mv_stride as usize;
     let neighbours = site.outputs.neighbours as usize;

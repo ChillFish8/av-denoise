@@ -191,8 +191,8 @@ impl RegulariseOutputs {
 
 /// The regularisation pass over every neighbour in one launch.
 #[derive(Clone)]
-pub struct RegulariseSite<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct RegulariseSite {
+    pub client: Client,
     /// The whole luma pyramid. Level 0 of slot `s` starts `s * slot_pixels` values in.
     pub pyramid: Handle,
     /// `f32` values `pyramid` holds.
@@ -216,22 +216,22 @@ pub struct RegulariseSite<R: Runtime> {
     pub blocks_y: u32,
 }
 
-impl<R: Runtime> RegulariseSite<R> {
+impl RegulariseSite {
     fn launch_serial(&self, x: u32, y: u32, outputs: &RegulariseOutputs) {
         let cube_count = CubeCount::new_3d(self.blocks_x, self.blocks_y, outputs.neighbours);
         let cube_dim = CubeDim::new_2d(x, y);
         let slots_len = outputs.neighbours as usize;
-        let pyramid = bind::<R>(&self.pyramid, self.pyramid_len);
-        let neighbour_slots = bind::<R>(&self.neighbour_slots, slots_len);
+        let pyramid = bind(&self.pyramid, self.pyramid_len);
+        let neighbour_slots = bind(&self.neighbour_slots, slots_len);
         let vectors_len = outputs.vectors_len();
         let confidence_len = outputs.confidence_len();
-        let mv_in = bind::<R>(&self.mv_in, vectors_len);
-        let vectors = bind::<R>(&outputs.vectors, vectors_len);
-        let confidence = bind::<R>(&outputs.confidence, confidence_len);
-        let noise = bind::<R>(&self.noise, DERIVED_WORDS as usize);
+        let mv_in = bind(&self.mv_in, vectors_len);
+        let vectors = bind(&outputs.vectors, vectors_len);
+        let confidence = bind(&outputs.confidence, confidence_len);
+        let noise = bind(&self.noise, DERIVED_WORDS as usize);
 
         unsafe {
-            nl4d_mv_regularise::launch_unchecked::<R>(
+            nl4d_mv_regularise::launch_unchecked(
                 &self.client,
                 cube_count,
                 cube_dim,
@@ -261,17 +261,17 @@ impl<R: Runtime> RegulariseSite<R> {
         let cube_count = CubeCount::new_3d(self.blocks_x, self.blocks_y, outputs.neighbours);
         let cube_dim = CubeDim::new_1d(threads);
         let slots_len = outputs.neighbours as usize;
-        let pyramid = bind::<R>(&self.pyramid, self.pyramid_len);
-        let neighbour_slots = bind::<R>(&self.neighbour_slots, slots_len);
+        let pyramid = bind(&self.pyramid, self.pyramid_len);
+        let neighbour_slots = bind(&self.neighbour_slots, slots_len);
         let vectors_len = outputs.vectors_len();
         let confidence_len = outputs.confidence_len();
-        let mv_in = bind::<R>(&self.mv_in, vectors_len);
-        let vectors = bind::<R>(&outputs.vectors, vectors_len);
-        let confidence = bind::<R>(&outputs.confidence, confidence_len);
-        let noise = bind::<R>(&self.noise, DERIVED_WORDS as usize);
+        let mv_in = bind(&self.mv_in, vectors_len);
+        let vectors = bind(&outputs.vectors, vectors_len);
+        let confidence = bind(&outputs.confidence, confidence_len);
+        let noise = bind(&self.noise, DERIVED_WORDS as usize);
 
         unsafe {
-            nl4d_mv_regularise_coop::launch_unchecked::<R>(
+            nl4d_mv_regularise_coop::launch_unchecked(
                 &self.client,
                 cube_count,
                 cube_dim,
@@ -299,13 +299,13 @@ impl<R: Runtime> RegulariseSite<R> {
     }
 }
 
-impl<R: Runtime> VariantSite<R> for RegulariseSite<R> {
+impl VariantSite for RegulariseSite {
     type Candidate = RegulariseCandidate;
     type Outputs = RegulariseOutputs;
 
     const PRESCREEN: bool = true;
 
-    fn client(&self) -> &ComputeClient<R> {
+    fn client(&self) -> &Client {
         &self.client
     }
 
@@ -333,6 +333,10 @@ impl<R: Runtime> VariantSite<R> for RegulariseSite<R> {
         let words = centre_floats + SCRATCH_WORDS + partial_floats;
 
         words as usize * size_of::<f32>()
+    }
+
+    fn output_handles(&self, outputs: &RegulariseOutputs) -> Vec<Handle> {
+        vec![outputs.vectors.clone(), outputs.confidence.clone()]
     }
 
     fn launch(&self, candidate: RegulariseCandidate, outputs: &RegulariseOutputs) {

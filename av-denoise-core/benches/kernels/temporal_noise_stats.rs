@@ -16,8 +16,8 @@ const TEMPORAL_BLOCK: u32 = 16;
 ///
 /// It diffs the slots and reduces every `16 × 16` block into its stats record. `luma_fields`
 /// picks which of the kernel's two compiled variants this row times.
-pub struct TemporalNoiseStatsBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct TemporalNoiseStatsBench {
+    pub client: Client,
     pub luma_fields: bool,
 }
 
@@ -40,7 +40,7 @@ fn stats_len() -> usize {
     (blocks_x * blocks_y * (2 * TEMPORAL_STORED_CH + 37)) as usize
 }
 
-impl<R: Runtime> Benchmark for TemporalNoiseStatsBench<R> {
+impl Benchmark for TemporalNoiseStatsBench {
     type Input = TemporalNoiseStatsInput;
     type Output = ();
 
@@ -66,13 +66,13 @@ impl<R: Runtime> Benchmark for TemporalNoiseStatsBench<R> {
         let total_stats = stats_len();
 
         unsafe {
-            nlm_temporal_noise_stats::launch_unchecked::<R>(
+            nlm_temporal_noise_stats::launch_unchecked(
                 &self.client,
                 CubeCount::new_2d(blocks_x, blocks_y),
                 CubeDim::new_2d(TEMPORAL_BLOCK, TEMPORAL_BLOCK),
                 TEMPORAL_STORED_CH as usize,
-                ArrayArg::from_raw_parts(args.input.clone(), total_input),
-                ArrayArg::from_raw_parts(args.stats.clone(), total_stats),
+                BufferArg::from_raw_parts(args.input.clone(), total_input),
+                BufferArg::from_raw_parts(args.stats.clone(), total_stats),
                 1u32,
                 0u32,
                 WIDTH,

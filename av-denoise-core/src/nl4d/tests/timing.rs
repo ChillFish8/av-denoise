@@ -1,4 +1,4 @@
-use super::helpers::{R, make_client, noisy_frames, static_clip_params};
+use super::helpers::{make_client, noisy_frames, static_clip_params};
 use crate::bench_api::HostIo;
 use crate::nl4d::Nl4dDenoiser;
 use crate::nlmeans::HqParams;
@@ -6,7 +6,7 @@ use crate::nlmeans::HqParams;
 const SIZE: u32 = 64;
 
 /// Runs an auto-sigma nl4d stream and returns every output frame.
-fn outputs(sample_every: u32) -> (Vec<Vec<f32>>, Nl4dDenoiser<R>) {
+fn outputs(sample_every: u32) -> (Vec<Vec<f32>>, Nl4dDenoiser) {
     let client = make_client();
     let mut params = static_clip_params(1);
     params.nlm.hq = Some(HqParams::default());

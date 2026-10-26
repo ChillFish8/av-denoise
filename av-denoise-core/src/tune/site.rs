@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 
 use cubecl::prelude::*;
+use cubecl::server::Handle;
 
 use super::device::DeviceLimits;
 use super::family::Families;
@@ -52,7 +53,7 @@ impl LaunchShape {
 /// One tunable launch point, holding the buffers and values its kernels read.
 ///
 /// `launch` writes only to the outputs it is handed.
-pub trait VariantSite<R: Runtime>: Clone + Send {
+pub trait VariantSite: Clone + Send {
     type Candidate: SiteCandidate;
     type Outputs: Clone + Send;
 
@@ -62,7 +63,7 @@ pub trait VariantSite<R: Runtime>: Clone + Send {
     /// Whether [VariantSite::on_client] makes copies, so compile helpers can be used.
     const COPIES: bool = false;
 
-    fn client(&self) -> &ComputeClient<R>;
+    fn client(&self) -> &Client;
 
     fn key(&self) -> SiteKey;
 
@@ -77,6 +78,12 @@ pub trait VariantSite<R: Runtime>: Clone + Send {
     }
 
     fn launch(&self, candidate: Self::Candidate, outputs: &Self::Outputs);
+
+    /// The buffers a launch into `outputs` writes.
+    ///
+    /// A launch that fails to compile leaves these unwritten, and CubeCL reports the failure on them
+    /// rather than on the next sync.
+    fn output_handles(&self, outputs: &Self::Outputs) -> Vec<Handle>;
 
     /// The pipeline's own output buffers.
     fn real_outputs(&self) -> Self::Outputs;
@@ -99,7 +106,7 @@ pub trait VariantSite<R: Runtime>: Clone + Send {
     ///
     /// Its buffers can be as small as a launch with no cubes allows. Sites without one compile their
     /// candidates on their own client.
-    fn on_client(&self, _client: &ComputeClient<R>) -> Option<Self> {
+    fn on_client(&self, _client: &Client) -> Option<Self> {
         None
     }
 
@@ -165,7 +172,7 @@ pub struct FitError {
 /// first.
 ///
 /// A baseline that is illegal or does not fit is an error, as a launch that cannot run is.
-pub fn legal_candidates<R: Runtime, S: VariantSite<R>>(
+pub fn legal_candidates<S: VariantSite>(
     site: &S,
     limits: &DeviceLimits,
     legality: &Legality,
@@ -201,7 +208,7 @@ pub fn legal_candidates<R: Runtime, S: VariantSite<R>>(
 }
 
 /// [legal_candidates] under the rules of a device the legality rules cannot identify.
-pub fn fit_candidates<R: Runtime, S: VariantSite<R>>(
+pub fn fit_candidates<S: VariantSite>(
     site: &S,
     limits: &DeviceLimits,
 ) -> Result<Vec<S::Candidate>, FitError> {

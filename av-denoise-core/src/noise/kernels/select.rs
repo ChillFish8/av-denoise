@@ -76,15 +76,15 @@ fn rule_rank(rule: u32, count: u32) -> u32 {
     reason = "every argument is a binding or a comptime shape"
 )]
 pub(crate) fn resolve_queries(
-    rows: &Array<i32>,
+    rows: &[i32],
     first_row: u32,
-    state: &Array<u32>,
-    queries: &Array<u32>,
-    tag_ranges: &Array<u32>,
-    wanted: &SharedMemory<u32>,
+    state: &[u32],
+    queries: &[u32],
+    tag_ranges: &[u32],
+    wanted: &Shared<[u32]>,
     wanted_count: u32,
     row_pass: u32,
-    out: &mut SharedMemory<u32>,
+    out: &mut Shared<[u32]>,
     #[comptime] tag_count: u32,
     #[comptime] query_count: u32,
     #[comptime] cube_threads: u32,
@@ -97,7 +97,7 @@ pub(crate) fn resolve_queries(
     }
 
     let groups = comptime!(cube_threads / SELECT_GROUP_THREADS);
-    let mut sums = SharedMemory::<u32>::new(cube_threads as usize);
+    let mut sums = Shared::<[u32]>::new_slice(cube_threads as usize);
 
     let thread = UNIT_POS_X;
     let group = thread / SELECT_GROUP_THREADS;
@@ -209,7 +209,7 @@ pub(crate) fn resolve_queries(
 ///
 /// An empty set gives 0.0 and 0. A tag below its minimum count gives 0.0 and its count.
 #[cube]
-pub(crate) fn select_result(out: &SharedMemory<u32>, query: u32) -> (f32, u32) {
+pub(crate) fn select_result(out: &Shared<[u32]>, query: u32) -> (f32, u32) {
     let base = query * SELECT_SLOT_WORDS;
     let key = out[base as usize];
     let count = out[(base + 2) as usize];
@@ -226,8 +226,8 @@ pub(crate) fn select_result(out: &SharedMemory<u32>, query: u32) -> (f32, u32) {
 /// values must cover `0..stride` once each.
 #[cube]
 pub(crate) fn clear_batch(
-    histogram: &mut Array<i32>,
-    state: &mut Array<u32>,
+    histogram: &mut [i32],
+    state: &mut [u32],
     first: u32,
     stride: u32,
     #[comptime] tag_count: u32,
@@ -264,13 +264,13 @@ pub(crate) fn clear_batch(
     reason = "every argument is a binding or a comptime shape"
 )]
 pub fn noise_select_histogram(
-    keys: &Array<u32>,
-    tags: &Array<u32>,
-    queries: &Array<u32>,
-    tag_ranges: &Array<u32>,
-    rows_in: &Array<i32>,
-    rows_out: &mut Array<Atomic<i32>>,
-    state: &mut Array<u32>,
+    keys: &[u32],
+    tags: &[u32],
+    queries: &[u32],
+    tag_ranges: &[u32],
+    rows_in: &[i32],
+    rows_out: &mut [Atomic<i32>],
+    state: &mut [u32],
     pass: u32,
     #[comptime] len: u32,
     #[comptime] tag_count: u32,
@@ -297,9 +297,9 @@ pub fn noise_select_histogram(
             Atomic::fetch_add(&rows_out[slot as usize], 1i32);
         }
     } else {
-        let mut present = SharedMemory::<u32>::new(tag_count as usize);
-        let mut wanted = SharedMemory::<u32>::new(comptime!(query_count + 1) as usize);
-        let mut out = SharedMemory::<u32>::new(comptime!(query_count * SELECT_SLOT_WORDS) as usize);
+        let mut present = Shared::<[u32]>::new_slice(tag_count as usize);
+        let mut wanted = Shared::<[u32]>::new_slice(comptime!(query_count + 1) as usize);
+        let mut out = Shared::<[u32]>::new_slice(comptime!(query_count * SELECT_SLOT_WORDS) as usize);
 
         if thread < tag_count {
             present[thread as usize] = 0u32;
@@ -336,7 +336,7 @@ pub fn noise_select_histogram(
         resolve_queries(
             rows_in,
             first_row,
-            state,
+            &*state,
             queries,
             tag_ranges,
             &wanted,
@@ -391,12 +391,12 @@ pub fn noise_select_histogram(
     reason = "every argument is a binding or a comptime shape"
 )]
 pub fn noise_select_resolve(
-    histogram: &mut Array<i32>,
-    state: &mut Array<u32>,
-    queries: &Array<u32>,
-    tag_ranges: &Array<u32>,
-    values: &mut Array<f32>,
-    counts: &mut Array<u32>,
+    histogram: &mut [i32],
+    state: &mut [u32],
+    queries: &[u32],
+    tag_ranges: &[u32],
+    values: &mut [f32],
+    counts: &mut [u32],
     #[comptime] tag_count: u32,
     #[comptime] query_count: u32,
     #[comptime] cube_threads: u32,
@@ -406,8 +406,8 @@ pub fn noise_select_resolve(
     }
 
     let thread = UNIT_POS_X;
-    let mut wanted = SharedMemory::<u32>::new(query_count as usize);
-    let mut out = SharedMemory::<u32>::new(comptime!(query_count * SELECT_SLOT_WORDS) as usize);
+    let mut wanted = Shared::<[u32]>::new_slice(query_count as usize);
+    let mut out = Shared::<[u32]>::new_slice(comptime!(query_count * SELECT_SLOT_WORDS) as usize);
 
     if thread < query_count {
         wanted[thread as usize] = thread;
@@ -416,9 +416,9 @@ pub fn noise_select_resolve(
     sync_cube();
 
     resolve_queries(
-        histogram,
+        &*histogram,
         0u32,
-        state,
+        &*state,
         queries,
         tag_ranges,
         &wanted,

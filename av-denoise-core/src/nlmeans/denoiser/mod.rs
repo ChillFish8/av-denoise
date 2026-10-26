@@ -31,8 +31,8 @@ pub struct GpuOutput {
 ///
 /// Each push ingests one frame into a ring of frames, and each submit cleans the centre frame
 /// using the neighbours around it.
-pub struct NlmDenoiser<R: Runtime> {
-    pub(super) client: ComputeClient<R>,
+pub struct NlmDenoiser {
+    pub(super) client: Client,
     pub(super) params: NlmParams,
     pub(super) width: u32,
     pub(super) height: u32,
@@ -73,7 +73,7 @@ pub struct NlmDenoiser<R: Runtime> {
     pub use_separable: bool,
     pub(super) use_reference: bool,
     /// Picks the candidate each tunable launch runs.
-    pub(super) kernels: KernelSelector<R>,
+    pub(super) kernels: KernelSelector,
 
     /// The physical ring slot of each neighbour of the last pass, in motion-field order.
     ///
@@ -90,7 +90,7 @@ pub struct NlmDenoiser<R: Runtime> {
     ///
     /// Each slot keeps a frame's measurements intact until that frame reaches the centre and is
     /// folded.
-    pub(super) noise: NoiseState<R>,
+    pub(super) noise: NoiseState,
 
     pub(super) mc_ctx: Option<MotionCtx>,
     /// The motion-shifted input ring the temporal kernels read neighbours from.
@@ -134,14 +134,14 @@ pub struct NlmDenoiser<R: Runtime> {
     pub(super) shifted_edges: bool,
 }
 
-impl<R: Runtime> NlmDenoiser<R> {
+impl NlmDenoiser {
     /// Builds a new denoiser that runs every launch site's baseline.
     ///
     /// # Panics
     ///
     /// Panics if the parameters or the frame dimensions are invalid. [Nlmeans](crate::Nlmeans)
     /// checks both and returns a `Result` instead.
-    pub fn new(client: &ComputeClient<R>, params: NlmParams, width: u32, height: u32) -> Self {
+    pub fn new(client: &Client, params: NlmParams, width: u32, height: u32) -> Self {
         let kernels = KernelSelector::baseline(client);
         Self::with_kernels(client, params, width, height, kernels)
     }
@@ -152,11 +152,11 @@ impl<R: Runtime> NlmDenoiser<R> {
     ///
     /// Panics if the parameters or the frame dimensions are invalid.
     pub fn with_kernels(
-        client: &ComputeClient<R>,
+        client: &Client,
         params: NlmParams,
         width: u32,
         height: u32,
-        kernels: KernelSelector<R>,
+        kernels: KernelSelector,
     ) -> Self {
         params
             .validate()

@@ -10,8 +10,7 @@ pub mod sniff;
 
 use av_denoise_core::tune::{DeviceIdentity, DeviceLimits, DeviceProfile};
 use av_denoise_core::{Engine, Geometry, Nl4d, Nl4dOptions, Nlmeans, NlmeansAlgorithm};
-use cubecl::Runtime;
-use cubecl::prelude::ComputeClient;
+use cubecl::prelude::Client;
 
 use self::accelerate::Accelerator;
 pub use self::device::Device;
@@ -42,7 +41,7 @@ pub(crate) struct BuiltEngine {
     pub device: DeviceProfile,
 }
 
-fn profile_of<R: Runtime>(client: &ComputeClient<R>, identity: DeviceIdentity) -> DeviceProfile {
+fn profile_of(client: &Client, identity: DeviceIdentity) -> DeviceProfile {
     let limits = DeviceLimits::from_client(client);
     DeviceProfile { identity, limits }
 }
@@ -51,9 +50,9 @@ fn profile_of<R: Runtime>(client: &ComputeClient<R>, identity: DeviceIdentity) -
 trait OnClient {
     type Output;
 
-    fn run<R: Runtime>(
+    fn run(
         self,
-        client: ComputeClient<R>,
+        client: Client,
         accelerator: Accelerator,
         identity: DeviceIdentity,
     ) -> Result<Self::Output, DenoiserError>;
@@ -79,9 +78,9 @@ impl OnClient for BuildEngine<'_> {
         }
     }
 
-    fn run<R: Runtime>(
+    fn run(
         self,
-        client: ComputeClient<R>,
+        client: Client,
         accelerator: Accelerator,
         identity: DeviceIdentity,
     ) -> Result<BuiltEngine, DenoiserError> {
@@ -116,9 +115,9 @@ struct DescribeDevice;
 impl OnClient for DescribeDevice {
     type Output = DeviceProfile;
 
-    fn run<R: Runtime>(
+    fn run(
         self,
-        client: ComputeClient<R>,
+        client: Client,
         _accelerator: Accelerator,
         identity: DeviceIdentity,
     ) -> Result<DeviceProfile, DenoiserError> {
@@ -149,33 +148,37 @@ fn run_on_best<T: OnClient>(
         #[cfg(feature = "cuda")]
         Accelerator::Cuda => {
             let cuda_device = device.to_cuda()?;
-            let client = <cubecl::cuda::CudaRuntime as Runtime>::client(&cuda_device);
-            let identity = describe::describe_cuda(cuda_device.index, &client);
+            let index = cuda_device.index;
+            let client_device = cubecl::Device::from(cuda_device);
+            let client = client_device.client();
+            let identity = describe::describe_cuda(index, &client);
             task.run(client, accelerator, identity)
         },
         #[cfg(feature = "rocm")]
         Accelerator::Rocm => {
             let amd_device = device.to_amd()?;
-            let client = <cubecl::hip::HipRuntime as Runtime>::client(&amd_device);
-            let identity = describe::describe_rocm(amd_device.index, &client);
+            let index = amd_device.index;
+            let client_device = cubecl::Device::from(amd_device);
+            let client = client_device.client();
+            let identity = describe::describe_rocm(index, &client);
             task.run(client, accelerator, identity)
         },
         #[cfg(feature = "vulkan")]
         Accelerator::Vulkan => {
             let wgpu_device = device.to_wgpu()?;
-            let client_device = placement.vulkan_device(&wgpu_device);
-            let client = <cubecl::wgpu::WgpuRuntime as Runtime>::client(&client_device);
-            let backend = *client.info();
-            let identity = describe::describe_wgpu(&wgpu_device, backend, &client);
+            let placed_device = placement.vulkan_device(&wgpu_device);
+            let client_device = cubecl::Device::from(placed_device);
+            let client = client_device.client();
+            let identity = describe::describe_wgpu(&wgpu_device, wgpu::Backend::Vulkan, &client);
             task.on_vulkan(&wgpu_device);
             task.run(client, accelerator, identity)
         },
         #[cfg(feature = "metal")]
         Accelerator::Metal => {
             let wgpu_device = device.to_wgpu()?;
-            let client = <cubecl::wgpu::WgpuRuntime as Runtime>::client(&wgpu_device);
-            let backend = *client.info();
-            let identity = describe::describe_wgpu(&wgpu_device, backend, &client);
+            let client_device = cubecl::Device::from(wgpu_device.clone());
+            let client = client_device.client();
+            let identity = describe::describe_wgpu(&wgpu_device, wgpu::Backend::Metal, &client);
             task.run(client, accelerator, identity)
         },
         // Keeps the match exhaustive on docs.rs, where `cfg(docsrs)` widens the `Accelerator` enum to

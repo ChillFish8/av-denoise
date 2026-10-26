@@ -1,4 +1,4 @@
-use cubecl::prelude::ComputeClient;
+use cubecl::prelude::Client;
 
 use super::{Sample, denoised_difference, lag1_horizontal_rect, lag1_vertical_rect, std_dev_rect};
 use crate::nlmeans::tests::helpers::*;
@@ -38,7 +38,7 @@ fn make_flat_and_textured_frame(width: u32, height: u32, split_x: u32) -> Vec<f3
     reason = "the test helper takes the full set of parameters its cases vary"
 )]
 fn measure_diff_two_regions(
-    client: &ComputeClient<R>,
+    client: &Client,
     width: u32,
     height: u32,
     clean: &[f32],

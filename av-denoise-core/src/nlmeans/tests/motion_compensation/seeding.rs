@@ -65,7 +65,7 @@ fn direct_mv_field_for_forward_neighbour(
     };
 
     let client = make_client();
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(base);
     denoiser.push_frame(base);
     denoiser.push_frame(neighbour);

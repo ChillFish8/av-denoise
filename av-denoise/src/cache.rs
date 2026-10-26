@@ -47,8 +47,8 @@ const CACHE_DIR_NAME: &str = "av-denoise";
 
 /// A hash of the kernel sources that names this build's subdirectory of the cache root.
 ///
-/// CubeCL keys cached kernels by their signature rather than their body, so each build of the
-/// kernels needs a directory of its own.
+/// Each build of the kernels gets a directory of its own, so an install can remove the kernels of
+/// builds that have gone unused.
 pub(crate) const KERNEL_HASH: &str = av_denoise_core::KERNEL_HASH;
 
 /// How long another build's subdirectory can go unused before an install removes it.
@@ -216,16 +216,15 @@ pub fn compilation_cache_dir() -> Option<&'static Path> {
 fn set_runtime_config(path: &Path) -> Result<(), CacheError> {
     let cache_dir = path.to_path_buf();
     let mut config = CubeClRuntimeConfig::from_current_dir().override_from_env();
-    let compilation_dir = cache_dir.clone();
-    config.compilation.cache = Some(CacheConfig::File(compilation_dir));
-    config.autotune.cache = CacheConfig::File(cache_dir);
+    config.compilation.cache = true;
+    config.environment.path = CacheConfig::Directory(cache_dir);
 
-    // `RuntimeConfig::set` panics if the singleton is already set up, and CubeCL has no fallible
-    // version, so the panic is caught and turned into a typed error.
-    let install = std::panic::AssertUnwindSafe(|| {
-        CubeClRuntimeConfig::set(config);
-    });
-    std::panic::catch_unwind(install).map_err(|_| CacheError::AlreadyInitialised)
+    let installed = CubeClRuntimeConfig::try_set(config);
+    if !installed {
+        return Err(CacheError::AlreadyInitialised);
+    }
+
+    Ok(())
 }
 
 fn build_cache_dir(root: &Path) -> PathBuf {

@@ -35,10 +35,10 @@ pub(crate) struct SearchRect {
     reason = "every argument is a buffer, position or comptime shape the search needs"
 )]
 pub(crate) fn centre_search<S: Float, N: Size>(
-    ring: &Array<Vector<f32, N>>,
-    search_ring: &Array<Vector<S, N>>,
-    tile: &SharedMemory<S>,
-    current: &Array<f32>,
+    ring: &[Vector<f32, N>],
+    search_ring: &[Vector<S, N>],
+    tile: &Shared<[S]>,
+    current: &[f32],
     cursor: &SearchCursor,
     best_d: &mut f32,
     best_pos: &mut u32,
@@ -71,7 +71,7 @@ pub(crate) fn centre_search<S: Float, N: Size>(
             ring,
             search_ring,
             current,
-            &reference,
+            reference.as_slice(),
             &rect,
             cursor,
             best_d,
@@ -85,7 +85,7 @@ pub(crate) fn centre_search<S: Float, N: Size>(
             search_ring,
             tile,
             current,
-            &reference,
+            reference.as_slice(),
             &rect,
             cursor,
             best_d,
@@ -99,7 +99,7 @@ pub(crate) fn centre_search<S: Float, N: Size>(
             search_ring,
             tile,
             current,
-            &reference,
+            reference.as_slice(),
             &rect,
             cursor,
             best_d,
@@ -113,7 +113,7 @@ pub(crate) fn centre_search<S: Float, N: Size>(
             search_ring,
             tile,
             current,
-            &reference,
+            reference.as_slice(),
             &rect,
             cursor,
             best_d,
@@ -140,11 +140,11 @@ pub(crate) fn centre_search<S: Float, N: Size>(
     reason = "every argument is a buffer, position or comptime shape the walk needs"
 )]
 pub(crate) fn uniform_centre_walk<S: Float, N: Size>(
-    ring: &Array<Vector<f32, N>>,
-    search_ring: &Array<Vector<S, N>>,
-    tile: &SharedMemory<S>,
-    current: &Array<f32>,
-    reference: &Array<Vector<S, Const<2>>>,
+    ring: &[Vector<f32, N>],
+    search_ring: &[Vector<S, N>],
+    tile: &Shared<[S]>,
+    current: &[f32],
+    reference: &[Vector<S, Const<2>>],
     rect: &SearchRect,
     cursor: &SearchCursor,
     best_d: &mut f32,
@@ -202,11 +202,11 @@ pub(crate) fn uniform_centre_walk<S: Float, N: Size>(
     reason = "every argument is a buffer, position or comptime shape the walk needs"
 )]
 pub(crate) fn clipped_centre_walk<S: Float, N: Size>(
-    ring: &Array<Vector<f32, N>>,
-    search_ring: &Array<Vector<S, N>>,
-    tile: &SharedMemory<S>,
-    current: &Array<f32>,
-    reference: &Array<Vector<S, Const<2>>>,
+    ring: &[Vector<f32, N>],
+    search_ring: &[Vector<S, N>],
+    tile: &Shared<[S]>,
+    current: &[f32],
+    reference: &[Vector<S, Const<2>>],
     rect: &SearchRect,
     cursor: &SearchCursor,
     best_d: &mut f32,
@@ -282,11 +282,11 @@ pub(crate) fn pin_self_match(
     reason = "every argument is a buffer, position or comptime shape the read needs"
 )]
 pub(crate) fn centre_partial<S: Float, N: Size>(
-    ring: &Array<Vector<f32, N>>,
-    search_ring: &Array<Vector<S, N>>,
-    tile: &SharedMemory<S>,
-    current: &Array<f32>,
-    reference: &Array<Vector<S, Const<2>>>,
+    ring: &[Vector<f32, N>],
+    search_ring: &[Vector<S, N>],
+    tile: &Shared<[S]>,
+    current: &[f32],
+    reference: &[Vector<S, Const<2>>],
     x: u32,
     y: u32,
     cursor: &SearchCursor,
@@ -324,11 +324,11 @@ pub(crate) fn centre_partial<S: Float, N: Size>(
     reason = "every argument is a buffer, position or comptime shape the read needs"
 )]
 pub(crate) fn centre_distance<S: Float, N: Size>(
-    ring: &Array<Vector<f32, N>>,
-    search_ring: &Array<Vector<S, N>>,
-    tile: &SharedMemory<S>,
-    current: &Array<f32>,
-    reference: &Array<Vector<S, Const<2>>>,
+    ring: &[Vector<f32, N>],
+    search_ring: &[Vector<S, N>],
+    tile: &Shared<[S]>,
+    current: &[f32],
+    reference: &[Vector<S, Const<2>>],
     x: u32,
     y: u32,
     cursor: &SearchCursor,

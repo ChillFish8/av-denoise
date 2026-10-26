@@ -77,7 +77,7 @@ fn residual_sigma(sum_d: f32, sum_d2: f32, pixels: f32) -> (f32, f32, f32) {
 ///
 /// `start` is the first of the quarter's fields in `records`. A quarter with no pixels never passes.
 #[cube]
-pub(crate) fn static_quarter_sigma(records: &Array<f32>, start: u32, pixels: f32) -> (bool, f32) {
+pub(crate) fn static_quarter_sigma(records: &[f32], start: u32, pixels: f32) -> (bool, f32) {
     let sum_d = records[(start + QUARTER_SUM_D) as usize];
     let sum_d2 = records[(start + QUARTER_SUM_D2) as usize];
     let has_pixels = pixels > 0.0f32;
@@ -124,18 +124,18 @@ pub(crate) fn median_from_pair(low: f32, high: f32) -> f32 {
     reason = "every argument is a binding or a comptime shape"
 )]
 pub fn noise_block_derive(
-    partials: &Array<f32>,
-    records: &Array<f32>,
-    block_values: &mut Array<f32>,
-    block_flags: &mut Array<u32>,
-    keys: &mut Array<u32>,
-    tags: &mut Array<u32>,
-    immerkaer_histogram: &mut Array<i32>,
-    immerkaer_state: &mut Array<u32>,
-    sample_histogram: &mut Array<i32>,
-    sample_state: &mut Array<u32>,
-    curve_histogram: &mut Array<i32>,
-    curve_state: &mut Array<u32>,
+    partials: &[f32],
+    records: &[f32],
+    block_values: &mut [f32],
+    block_flags: &mut [u32],
+    keys: &mut [u32],
+    tags: &mut [u32],
+    immerkaer_histogram: &mut [i32],
+    immerkaer_state: &mut [u32],
+    sample_histogram: &mut [i32],
+    sample_state: &mut [u32],
+    curve_histogram: &mut [i32],
+    curve_state: &mut [u32],
     immerkaer_scale: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -290,15 +290,15 @@ pub fn noise_block_derive(
     reason = "every argument is a binding or a comptime shape"
 )]
 pub fn noise_block_accept(
-    records: &Array<f32>,
-    block_values: &Array<f32>,
-    block_flags: &mut Array<u32>,
-    histogram: &Array<i32>,
-    state: &Array<u32>,
-    queries: &Array<u32>,
-    tag_ranges: &Array<u32>,
-    keys: &mut Array<u32>,
-    tags: &mut Array<u32>,
+    records: &[f32],
+    block_values: &[f32],
+    block_flags: &mut [u32],
+    histogram: &[i32],
+    state: &[u32],
+    queries: &[u32],
+    tag_ranges: &[u32],
+    keys: &mut [u32],
+    tags: &mut [u32],
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
@@ -314,8 +314,8 @@ pub fn noise_block_accept(
     let resolved = comptime!(IMMERKAER_QUERY_EXCLUDED + 1 - IMMERKAER_QUERY_REFERENCE);
 
     let thread = UNIT_POS_X;
-    let mut wanted = SharedMemory::<u32>::new(resolved as usize);
-    let mut out = SharedMemory::<u32>::new(comptime!(query_count * SELECT_SLOT_WORDS) as usize);
+    let mut wanted = Shared::<[u32]>::new_slice(resolved as usize);
+    let mut out = Shared::<[u32]>::new_slice(comptime!(query_count * SELECT_SLOT_WORDS) as usize);
 
     if thread < resolved {
         wanted[thread as usize] = IMMERKAER_QUERY_REFERENCE + thread;
@@ -443,19 +443,19 @@ pub fn noise_block_accept(
     reason = "every argument is a binding or a comptime shape"
 )]
 pub fn noise_sample_finish(
-    immerkaer_histogram: &Array<i32>,
-    immerkaer_state: &Array<u32>,
-    immerkaer_queries: &Array<u32>,
-    immerkaer_tag_ranges: &Array<u32>,
-    sample_histogram: &Array<i32>,
-    sample_state: &Array<u32>,
-    sample_queries: &Array<u32>,
-    sample_tag_ranges: &Array<u32>,
-    curve_histogram: &Array<i32>,
-    curve_state: &Array<u32>,
-    curve_queries: &Array<u32>,
-    curve_tag_ranges: &Array<u32>,
-    readings: &mut Array<f32>,
+    immerkaer_histogram: &[i32],
+    immerkaer_state: &[u32],
+    immerkaer_queries: &[u32],
+    immerkaer_tag_ranges: &[u32],
+    sample_histogram: &[i32],
+    sample_state: &[u32],
+    sample_queries: &[u32],
+    sample_tag_ranges: &[u32],
+    curve_histogram: &[i32],
+    curve_state: &[u32],
+    curve_queries: &[u32],
+    curve_tag_ranges: &[u32],
+    readings: &mut [f32],
     slot: u32,
     blocks: f32,
     min_accepted: u32,
@@ -468,11 +468,11 @@ pub fn noise_sample_finish(
     let thread = UNIT_POS_X;
     let sample_wanted = comptime!(u32::max(immerkaer_query_count, SAMPLE_QUERIES));
     let wanted_len = comptime!(u32::max(sample_wanted, CURVE_QUERIES));
-    let mut wanted = SharedMemory::<u32>::new(wanted_len as usize);
+    let mut wanted = Shared::<[u32]>::new_slice(wanted_len as usize);
     let mut immerkaer_out =
-        SharedMemory::<u32>::new(comptime!(immerkaer_query_count * SELECT_SLOT_WORDS) as usize);
-    let mut sample_out = SharedMemory::<u32>::new(comptime!(SAMPLE_QUERIES * SELECT_SLOT_WORDS) as usize);
-    let mut curve_out = SharedMemory::<u32>::new(comptime!(CURVE_QUERIES * SELECT_SLOT_WORDS) as usize);
+        Shared::<[u32]>::new_slice(comptime!(immerkaer_query_count * SELECT_SLOT_WORDS) as usize);
+    let mut sample_out = Shared::<[u32]>::new_slice(comptime!(SAMPLE_QUERIES * SELECT_SLOT_WORDS) as usize);
+    let mut curve_out = Shared::<[u32]>::new_slice(comptime!(CURVE_QUERIES * SELECT_SLOT_WORDS) as usize);
 
     if thread < wanted_len {
         wanted[thread as usize] = thread;
@@ -619,7 +619,7 @@ pub fn noise_sample_finish(
 /// the nearest at or above it, as the host's curve interpolates. The bins are walked in a runtime
 /// loop, so every pick goes through `select`.
 #[cube]
-fn curve_bin_sigma(curve_out: &SharedMemory<u32>, bin: u32) -> (f32, u32) {
+fn curve_bin_sigma(curve_out: &Shared<[u32]>, bin: u32) -> (f32, u32) {
     let mut populated = 0u32;
     let mut first_index = 0u32;
     let mut first_sigma = 0.0f32;

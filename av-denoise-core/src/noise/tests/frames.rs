@@ -23,7 +23,7 @@ use crate::noise::temporal::{
 };
 use crate::tune::gpu::sync;
 use crate::tune::tests::fixtures::upload;
-use crate::tune::tests::runtime::{TestRuntime, test_client};
+use crate::tune::tests::runtime::test_client;
 
 /// The lowest share of blocks, bins or quarters whose decisions must match on any frame.
 const MIN_AGREEMENT: f64 = 0.999;
@@ -158,10 +158,10 @@ pub(super) struct HostSlot {
 
 /// A noise state over a ring of `2 * radius + 1` slots that reads every pushed frame.
 pub(super) struct ReadingHarness {
-    pub(super) client: ComputeClient<TestRuntime>,
+    pub(super) client: Client,
     pub(super) plane: Plane,
     settings: ReadingSettings,
-    pub(super) state: NoiseState<TestRuntime>,
+    pub(super) state: NoiseState,
     /// The host copy of the input ring, uploaded whole on every push.
     ring: Vec<f32>,
     pub(super) pushed: u32,

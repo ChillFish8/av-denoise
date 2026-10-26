@@ -11,7 +11,7 @@ mod walks;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::helpers::{R, make_client, make_unique_frame, noisy_flat_field};
+use super::helpers::{make_client, make_unique_frame, noisy_flat_field};
 use crate::collab::geometry::{fused_cubes_x, ref_count, ref_pos, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{WEIGHT_GAIN, cross_frame_accum_scale, kaiser_window, weight_scale};
 use crate::collab::kernels::fused::{CollabVariant, collab_fused};
@@ -321,7 +321,7 @@ pub(super) fn assert_matches_recorded(label: &str, got: &Aggregated, want: &Dige
 
 /// The device-side buffers one launch needs.
 pub(super) struct Buffers {
-    client: ComputeClient<R>,
+    client: Client,
     ring: Handle,
     search_ring: Handle,
     mv_field: Handle,
@@ -513,26 +513,26 @@ fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle,
     let pooled_ratio = setup.pooled.unwrap_or(0.0);
 
     unsafe {
-        let ring_scalar = ArrayArg::from_raw_parts(handles.ring.clone(), setup.ring.len());
-        collab_fused::launch_unchecked::<S, i32, R>(
+        let ring_scalar = BufferArg::from_raw_parts(handles.ring.clone(), setup.ring.len());
+        collab_fused::launch_unchecked::<S, i32>(
             &handles.client,
             grid,
             dim,
             stored_channels as usize,
-            ArrayArg::from_raw_parts(handles.ring.clone(), setup.ring.len()),
+            BufferArg::from_raw_parts(handles.ring.clone(), setup.ring.len()),
             ring_scalar,
-            ArrayArg::from_raw_parts(search_ring, setup.ring.len()),
-            ArrayArg::from_raw_parts(handles.mv_field.clone(), setup.mv_field.len()),
-            ArrayArg::from_raw_parts(handles.confidence.clone(), setup.confidence.len()),
-            ArrayArg::from_raw_parts(handles.neighbour_slots.clone(), setup.neighbour_slots.len()),
-            ArrayArg::from_raw_parts(handles.noise.clone(), DERIVED_WORDS as usize),
-            ArrayArg::from_raw_parts(handles.curve.clone(), NOISE_CURVE_BINS),
-            ArrayArg::from_raw_parts(handles.strength_map.clone(), handles.map_len),
-            ArrayArg::from_raw_parts(handles.dct_profile.clone(), 8),
-            ArrayArg::from_raw_parts(handles.kaiser.clone(), PATCH_SIZE as usize),
-            ArrayArg::from_raw_parts(handles.accum.clone(), handles.accum_len),
-            ArrayArg::from_raw_parts(handles.wsum.clone(), handles.wsum_len),
-            ArrayArg::from_raw_parts(handles.group_weight.clone(), handles.refs),
+            BufferArg::from_raw_parts(search_ring, setup.ring.len()),
+            BufferArg::from_raw_parts(handles.mv_field.clone(), setup.mv_field.len()),
+            BufferArg::from_raw_parts(handles.confidence.clone(), setup.confidence.len()),
+            BufferArg::from_raw_parts(handles.neighbour_slots.clone(), setup.neighbour_slots.len()),
+            BufferArg::from_raw_parts(handles.noise.clone(), DERIVED_WORDS as usize),
+            BufferArg::from_raw_parts(handles.curve.clone(), NOISE_CURVE_BINS),
+            BufferArg::from_raw_parts(handles.strength_map.clone(), handles.map_len),
+            BufferArg::from_raw_parts(handles.dct_profile.clone(), 8),
+            BufferArg::from_raw_parts(handles.kaiser.clone(), PATCH_SIZE as usize),
+            BufferArg::from_raw_parts(handles.accum.clone(), handles.accum_len),
+            BufferArg::from_raw_parts(handles.wsum.clone(), handles.wsum_len),
+            BufferArg::from_raw_parts(handles.group_weight.clone(), handles.refs),
             setup.centre_slot,
             setup.c_min,
             setup.lambda_ht,

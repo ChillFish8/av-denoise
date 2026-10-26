@@ -1,13 +1,12 @@
 use super::*;
-use crate::accelerate::Accelerator;
 use crate::{Algorithm, DenoisingMode};
 
 /// Chroma-only intent, so `luma` is the disabled passthrough half and `chroma` is the one that can
 /// report `QueueFull`.
 fn chroma_only_options() -> PlaneOptions {
     PlaneOptions {
-        accelerators: vec![Accelerator::Vulkan],
-        device: Device::Default,
+        accelerators: vec![crate::testing::test_accelerator()],
+        device: crate::testing::test_device(),
         intent: ChannelIntent::Chroma,
         mode: DenoisingMode::Spacial,
         algorithm: Algorithm::default(),

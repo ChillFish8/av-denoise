@@ -18,8 +18,8 @@ use crate::error::Error;
 use crate::tune::{EngineKernels, KernelSelector};
 
 /// Non-local means over GPU planes.
-pub struct Nlmeans<R: Runtime> {
-    front: NlmDenoiser<R>,
+pub struct Nlmeans {
+    front: NlmDenoiser,
     geometry: Geometry,
     /// The finished frame waiting for `emit_into`, if any.
     ready: Option<Handle>,
@@ -30,20 +30,16 @@ pub struct Nlmeans<R: Runtime> {
     poisoned: bool,
 }
 
-impl<R: Runtime> Nlmeans<R> {
+impl Nlmeans {
     /// Builds the engine, returning [Error::InvalidGeometry] or [Error::InvalidOptions] for unusable input.
-    pub fn new(
-        client: &ComputeClient<R>,
-        algorithm: NlmeansAlgorithm,
-        geometry: Geometry,
-    ) -> Result<Self, Error> {
+    pub fn new(client: &Client, algorithm: NlmeansAlgorithm, geometry: Geometry) -> Result<Self, Error> {
         let kernels = EngineKernels::default();
         Self::with_kernels(client, algorithm, geometry, kernels)
     }
 
     /// [Nlmeans::new] with each launch site's candidate picked from `kernels`.
     pub fn with_kernels(
-        client: &ComputeClient<R>,
+        client: &Client,
         algorithm: NlmeansAlgorithm,
         geometry: Geometry,
         kernels: EngineKernels,
@@ -155,7 +151,7 @@ impl<R: Runtime> Nlmeans<R> {
     }
 }
 
-impl<R: Runtime> Engine for Nlmeans<R> {
+impl Engine for Nlmeans {
     fn push(&mut self, planes: &[DevicePlane<'_>]) -> Result<usize, Error> {
         self.check_usable()?;
         self.check_nothing_pending()?;

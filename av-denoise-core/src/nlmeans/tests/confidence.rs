@@ -57,15 +57,15 @@ fn run_fine_confidence(
 
     unsafe {
         let confidence_handle = confidence.clone();
-        let pyramid_arg = ArrayArg::from_raw_parts(pyramid, 2 * level_len);
-        let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, 1);
-        let mv_field_arg = ArrayArg::from_raw_parts(mv_field, 2);
-        let confidence_arg = ArrayArg::from_raw_parts(confidence_handle, 1);
+        let pyramid_arg = BufferArg::from_raw_parts(pyramid, 2 * level_len);
+        let neighbour_slots_arg = BufferArg::from_raw_parts(neighbour_slots, 1);
+        let mv_field_arg = BufferArg::from_raw_parts(mv_field, 2);
+        let confidence_arg = BufferArg::from_raw_parts(confidence_handle, 1);
 
         let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, sad_noise_floor);
-        let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
+        let noise_arg = BufferArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
-        mc_block_match_fine::launch_unchecked::<R>(
+        mc_block_match_fine::launch_unchecked(
             &client,
             grid,
             dim,
@@ -329,7 +329,7 @@ fn run_analyse_fills_confidence_buffer() {
         conf_len: blocks,
         write_confidence: true,
     };
-    run_analyse::<R>(
+    run_analyse(
         &client,
         &mc,
         width,
@@ -403,7 +403,7 @@ fn run_confidence_fills_confidence_buffer() {
         conf_len: blocks,
         write_confidence: true,
     };
-    run_confidence::<R>(
+    run_confidence(
         &client,
         &ctx,
         width,
@@ -461,7 +461,7 @@ fn confidence_buf_filled_without_motion_compensation() {
         }),
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
     denoiser.push_frame(&frame);
     denoiser.push_frame(&frame);
@@ -528,7 +528,7 @@ fn confidence_buf_filled_with_motion_compensation() {
         }),
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
     denoiser.push_frame(&frame);
     denoiser.push_frame(&frame);
@@ -590,7 +590,7 @@ fn confidence_buf_absent_with_motion_compensation_and_no_hq() {
         hq: None,
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
     denoiser.push_frame(&frame);
     denoiser.push_frame(&frame);
@@ -635,7 +635,7 @@ fn confidence_buf_absent_with_motion_compensation_when_temporal_confidence_disab
         }),
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
     denoiser.push_frame(&frame);
     denoiser.push_frame(&frame);
@@ -659,7 +659,7 @@ fn confidence_buf_absent_with_motion_compensation_when_temporal_confidence_disab
 fn confidence_buf_absent_without_mc_or_hq() {
     let client = make_client();
     let params = NlmParams::default();
-    let denoiser = NlmDenoiser::<R>::new(&client, params, 16, 16);
+    let denoiser = NlmDenoiser::new(&client, params, 16, 16);
 
     assert!(denoiser.confidence_ctx.is_none());
     assert!(denoiser.confidence_buf.is_none());
@@ -678,7 +678,7 @@ fn confidence_buf_absent_when_temporal_confidence_disabled() {
         }),
         ..NlmParams::default()
     };
-    let denoiser = NlmDenoiser::<R>::new(&client, params, 16, 16);
+    let denoiser = NlmDenoiser::new(&client, params, 16, 16);
 
     assert!(denoiser.confidence_ctx.is_none());
     assert!(denoiser.confidence_buf.is_none());

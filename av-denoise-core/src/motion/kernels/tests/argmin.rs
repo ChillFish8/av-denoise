@@ -6,7 +6,7 @@ use crate::noise::tests::sad_floor_buffer;
 use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
 use crate::tune::gpu::{read_i32, zero_words};
 use crate::tune::tests::fixtures::{hashed_unit, upload};
-use crate::tune::tests::runtime::{TestRuntime, test_client};
+use crate::tune::tests::runtime::test_client;
 
 /// Cube sizes the argmin runs at. 16 threads leave a 32-wide plane partly empty, 32 is the shipped
 /// size, and 128 spans two to eight planes depending on the device.
@@ -207,11 +207,7 @@ fn expected_vector(sads: &[f32], seed: (i32, i32), search_radius: u32) -> (i32, 
 
 /// Lays out `centre` at [CENTRE_SLOT] and each neighbour at its [NEIGHBOUR_SLOTS] entry, with that
 /// table uploaded beside the frames.
-fn slot_frames(
-    client: &ComputeClient<TestRuntime>,
-    centre: &[f32],
-    neighbours: &[Vec<f32>],
-) -> (Handle, Handle) {
+fn slot_frames(client: &Client, centre: &[f32], neighbours: &[Vec<f32>]) -> (Handle, Handle) {
     let pixels = centre.len();
     let mut frames = vec![0.0f32; pixels * SLOT_COUNT];
     let centre_start = CENTRE_SLOT as usize * pixels;
@@ -252,16 +248,16 @@ fn run_fine(content: Content, search_radius: u32, threads: u32) -> Vec<Vec<i32>>
     let mv_field_handle = mv_field.clone();
 
     // SAFETY: every argument covers the element count it was allocated for.
-    let pyramid_arg = unsafe { ArrayArg::from_raw_parts(pyramid, pyramid_len) };
-    let slots_arg = unsafe { ArrayArg::from_raw_parts(neighbour_slots, NEIGHBOURS) };
-    let field_arg = unsafe { ArrayArg::from_raw_parts(mv_field_handle, field_len) };
-    let confidence_arg = unsafe { ArrayArg::from_raw_parts(confidence, 1) };
+    let pyramid_arg = unsafe { BufferArg::from_raw_parts(pyramid, pyramid_len) };
+    let slots_arg = unsafe { BufferArg::from_raw_parts(neighbour_slots, NEIGHBOURS) };
+    let field_arg = unsafe { BufferArg::from_raw_parts(mv_field_handle, field_len) };
+    let confidence_arg = unsafe { BufferArg::from_raw_parts(confidence, 1) };
 
     unsafe {
         let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, 0.0);
-        let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
+        let noise_arg = BufferArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
-        mc_block_match_fine::launch_unchecked::<TestRuntime>(
+        mc_block_match_fine::launch_unchecked(
             &client,
             cube_count,
             cube_dim,
@@ -347,12 +343,12 @@ fn run_coarse(content: Content, search_radius: u32, threads: u32) -> Vec<Vec<i32
     let mv_field_handle = mv_field.clone();
 
     // SAFETY: every argument covers the element count it was allocated for.
-    let pyramid_arg = unsafe { ArrayArg::from_raw_parts(pyramid, pyramid_len) };
-    let slots_arg = unsafe { ArrayArg::from_raw_parts(neighbour_slots, NEIGHBOURS) };
-    let field_arg = unsafe { ArrayArg::from_raw_parts(mv_field_handle, field_len) };
+    let pyramid_arg = unsafe { BufferArg::from_raw_parts(pyramid, pyramid_len) };
+    let slots_arg = unsafe { BufferArg::from_raw_parts(neighbour_slots, NEIGHBOURS) };
+    let field_arg = unsafe { BufferArg::from_raw_parts(mv_field_handle, field_len) };
 
     unsafe {
-        mc_block_match_coarse::launch_unchecked::<TestRuntime>(
+        mc_block_match_coarse::launch_unchecked(
             &client,
             cube_count,
             cube_dim,

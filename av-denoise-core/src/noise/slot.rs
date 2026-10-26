@@ -46,7 +46,7 @@ use super::temporal::{
 use crate::collab::geometry::strength_map_dims;
 use crate::tune::gpu::bind;
 
-impl<R: Runtime> NoiseState<R> {
+impl NoiseState {
     /// Queues the Immerkær estimate and the temporal statistics for the frame in `slot` of `input`.
     ///
     /// `previous` is the slot the residual is taken against. `None`, for a stream's first frame
@@ -120,7 +120,7 @@ impl<R: Runtime> NoiseState<R> {
     }
 }
 
-impl<R: Runtime> NoiseState<R> {
+impl NoiseState {
     /// Queues the reading of the stats in `slot` into the slot's reading words, returning how many
     /// launches that took.
     ///
@@ -163,20 +163,20 @@ impl<R: Runtime> NoiseState<R> {
         let batch_len = batch.len() as usize;
         let (partials, partials_words) = self.partials_view(slot);
         let block_args = self.block_args(slot, &partials, partials_words);
-        let immerkaer_clear = clear_args::<R>(batch);
+        let immerkaer_clear = clear_args(batch);
         let sample = self.sample_batch().unwrap_or(batch);
-        let sample_clear = clear_args::<R>(sample);
+        let sample_clear = clear_args(sample);
         let curve = measurement.curve.as_ref().unwrap_or(batch);
-        let curve_clear = clear_args::<R>(curve);
+        let curve_clear = clear_args(curve);
         let scale = immerkaer_sigma_scale();
 
         // A batch the reading leaves out is never touched, so the immerkaer batch stands in for it.
         unsafe {
-            noise_block_derive::launch_unchecked::<R>(
+            noise_block_derive::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(NOISE_BLOCK_1D),
-                ArrayArg::from_raw_parts(partials, partials_words),
+                BufferArg::from_raw_parts(partials, partials_words),
                 block_args.records,
                 block_args.values,
                 block_args.flags,
@@ -230,18 +230,18 @@ impl<R: Runtime> NoiseState<R> {
         let blocks = block_count(shape);
         let grid = blocks.div_ceil(SELECT_CUBE_THREADS);
         let reference = &measurement.immerkaer_batch;
-        let reference_args = batch_args::<R>(reference);
+        let reference_args = batch_args(reference);
         let (records, records_len) = self.records_view(slot).expect("a sample implies temporal stats");
         let values_len = (blocks * BLOCK_FIELDS) as usize;
         let batch_len = sample.batch.len() as usize;
         let luma_fields = self.settings.reading.luma_fields;
 
         unsafe {
-            noise_block_accept::launch_unchecked::<R>(
+            noise_block_accept::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(SELECT_CUBE_THREADS),
-                ArrayArg::from_raw_parts(records, records_len),
+                BufferArg::from_raw_parts(records, records_len),
                 bind(&sample.block_values, values_len),
                 bind(&sample.block_flags, blocks as usize),
                 reference_args.histogram,
@@ -294,16 +294,16 @@ impl<R: Runtime> NoiseState<R> {
         let blocks = block_count(shape);
         let quarters = curve.len();
         let grid = quarters.div_ceil(SELECT_CUBE_THREADS);
-        let sample_args = batch_args::<R>(&sample.batch);
+        let sample_args = batch_args(&sample.batch);
         let (records, records_len) = self.records_view(slot).expect("a curve implies temporal stats");
         let curve_len = quarters as usize;
 
         unsafe {
-            noise_curve_bins::launch_unchecked::<R>(
+            noise_curve_bins::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(SELECT_CUBE_THREADS),
-                ArrayArg::from_raw_parts(records, records_len),
+                BufferArg::from_raw_parts(records, records_len),
                 bind(&sample.block_flags, blocks as usize),
                 sample_args.histogram,
                 sample_args.state,
@@ -348,15 +348,15 @@ impl<R: Runtime> NoiseState<R> {
         let immerkaer = &measurement.immerkaer_batch;
         let sample = self.sample_batch().unwrap_or(immerkaer);
         let curve = measurement.curve.as_ref().unwrap_or(immerkaer);
-        let immerkaer_args = batch_args::<R>(immerkaer);
-        let sample_args = batch_args::<R>(sample);
-        let curve_args = batch_args::<R>(curve);
+        let immerkaer_args = batch_args(immerkaer);
+        let sample_args = batch_args(sample);
+        let curve_args = batch_args(curve);
         let blocks = block_count(shape) as f32;
         let readings_len = (shape.frames * READING_WORDS) as usize;
 
         // A batch the reading leaves out is never touched, so the immerkaer batch stands in for it.
         unsafe {
-            noise_sample_finish::launch_unchecked::<R>(
+            noise_sample_finish::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(1),
                 CubeDim::new_1d(threads),
@@ -407,11 +407,11 @@ impl<R: Runtime> NoiseState<R> {
         let readings_len = (shape.frames * READING_WORDS) as usize;
 
         unsafe {
-            noise_classify::launch_unchecked::<R>(
+            noise_classify::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(NOISE_BLOCK_1D),
-                ArrayArg::from_raw_parts(records, records_len),
+                BufferArg::from_raw_parts(records, records_len),
                 bind(&measurement.readings, readings_len),
                 bind(&scratch.classes, quarters),
                 bind(&scratch.lumas, quarters),
@@ -457,7 +457,7 @@ impl<R: Runtime> NoiseState<R> {
         let ring_radius = quarter.line_ring.unwrap_or(0) as u32;
 
         unsafe {
-            noise_strength_map::launch_unchecked::<R>(
+            noise_strength_map::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(NOISE_BLOCK_1D),
@@ -537,7 +537,7 @@ impl<R: Runtime> NoiseState<R> {
     /// Block derive's record, value and flag bindings.
     ///
     /// Without temporal stats the kernel never touches them, so the partials of `slot` stand in.
-    fn block_args(&self, slot: u32, partials: &Handle, partials_words: usize) -> BlockArgs<R> {
+    fn block_args(&self, slot: u32, partials: &Handle, partials_words: usize) -> BlockArgs {
         let measurement = self.measurement();
         let records = self.records_view(slot);
         let (Some((records, records_len)), Some(sample)) = (records, measurement.sample.as_ref()) else {
@@ -560,27 +560,27 @@ impl<R: Runtime> NoiseState<R> {
 }
 
 /// The per-block bindings of block derive.
-struct BlockArgs<R: Runtime> {
-    records: ArrayArg<R>,
-    values: ArrayArg<R>,
-    flags: ArrayArg<R>,
+struct BlockArgs {
+    records: BufferArg,
+    values: BufferArg,
+    flags: BufferArg,
 }
 
 /// The bindings a consumer resolves a select batch through.
-struct BatchArgs<R: Runtime> {
-    histogram: ArrayArg<R>,
-    state: ArrayArg<R>,
-    queries: ArrayArg<R>,
-    tag_ranges: ArrayArg<R>,
+struct BatchArgs {
+    histogram: BufferArg,
+    state: BufferArg,
+    queries: BufferArg,
+    tag_ranges: BufferArg,
 }
 
 /// The bindings block derive clears a select batch through.
-struct ClearArgs<R: Runtime> {
-    histogram: ArrayArg<R>,
-    state: ArrayArg<R>,
+struct ClearArgs {
+    histogram: BufferArg,
+    state: BufferArg,
 }
 
-fn clear_args<R: Runtime>(batch: &SelectBatch) -> ClearArgs<R> {
+fn clear_args(batch: &SelectBatch) -> ClearArgs {
     let histogram_len = batch.histogram_len() as usize;
     let state_len = batch.state_len() as usize;
 
@@ -590,7 +590,7 @@ fn clear_args<R: Runtime>(batch: &SelectBatch) -> ClearArgs<R> {
     }
 }
 
-fn batch_args<R: Runtime>(batch: &SelectBatch) -> BatchArgs<R> {
+fn batch_args(batch: &SelectBatch) -> BatchArgs {
     let histogram_len = batch.histogram_len() as usize;
     let state_len = batch.state_len() as usize;
     let query_words = (batch.query_count() * SELECT_QUERY_WORDS) as usize;

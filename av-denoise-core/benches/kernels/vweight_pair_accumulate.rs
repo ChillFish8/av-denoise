@@ -34,13 +34,13 @@ pub struct VWeightPairAccInput {
     frame_len: usize,
 }
 
-pub struct VWeightPairAccBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct VWeightPairAccBench {
+    pub client: Client,
     pub channels: u32,
     pub channel_name: &'static str,
 }
 
-impl<R: Runtime> Benchmark for VWeightPairAccBench<R> {
+impl Benchmark for VWeightPairAccBench {
     type Input = VWeightPairAccInput;
     type Output = ();
 
@@ -80,25 +80,25 @@ impl<R: Runtime> Benchmark for VWeightPairAccBench<R> {
         let cube_dim = cube_dim_2d();
 
         unsafe {
-            nlm_vweight_pair_accumulate::launch_unchecked::<R>(
+            nlm_vweight_pair_accumulate::launch_unchecked(
                 &self.client,
                 cube_count,
                 cube_dim,
                 stored_ch,
-                ArrayArg::from_raw_parts(args.hsum_fwd.clone(), pixels),
-                ArrayArg::from_raw_parts(args.hsum_bwd.clone(), pixels),
-                ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
-                ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored_ch),
-                ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels),
-                ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
-                ArrayArg::from_raw_parts(args.confidence_dummy.clone(), 1),
-                ArrayArg::from_raw_parts(args.confidence_dummy.clone(), 1),
+                BufferArg::from_raw_parts(args.hsum_fwd.clone(), pixels),
+                BufferArg::from_raw_parts(args.hsum_bwd.clone(), pixels),
+                BufferArg::from_raw_parts(args.input.clone(), args.frame_len),
+                BufferArg::from_raw_parts(args.accum.clone(), pixels * stored_ch),
+                BufferArg::from_raw_parts(args.weight_sum.clone(), pixels),
+                BufferArg::from_raw_parts(args.max_weight.clone(), pixels),
+                BufferArg::from_raw_parts(args.confidence_dummy.clone(), 1),
+                BufferArg::from_raw_parts(args.confidence_dummy.clone(), 1),
                 false,
                 0u32,
                 0u32,
                 Q_X,
                 Q_Y,
-                ArrayArg::from_raw_parts(args.noise.clone(), DERIVED_WORDS as usize),
+                BufferArg::from_raw_parts(args.noise.clone(), DERIVED_WORDS as usize),
                 WIDTH,
                 HEIGHT,
                 PATCH_RADIUS,

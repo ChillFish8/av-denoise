@@ -11,9 +11,8 @@ const CACHE_DIR_NAME: &str = "test-kernel-cache";
 /// Points CubeCL's compilation cache at a directory every test process of this build shares.
 ///
 /// Each test runs in its own process, so without it every process recompiles every kernel it
-/// launches. CubeCL keys cached kernels by their signature rather than their body, so the
-/// directory is named by [KERNEL_HASH](crate::KERNEL_HASH). It runs once per process, before the
-/// first client is made.
+/// launches. The directory is named by [KERNEL_HASH](crate::KERNEL_HASH), so older builds' kernels
+/// stay out of it. It runs once per process, before the first client is made.
 pub(crate) fn install_test_compilation_cache() {
     static INSTALL: Once = Once::new();
     INSTALL.call_once(install);
@@ -24,7 +23,8 @@ fn install() {
     let _ = std::fs::create_dir_all(&cache_dir);
 
     let mut config = CubeClRuntimeConfig::from_current_dir().override_from_env();
-    config.compilation.cache = Some(CacheConfig::File(cache_dir));
+    config.compilation.cache = true;
+    config.environment.path = CacheConfig::Directory(cache_dir);
 
     // `RuntimeConfig::set` panics once the config has been read. A test that reaches CubeCL
     // another way first keeps compiling without the cache, which is slower but still correct.

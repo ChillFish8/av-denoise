@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 
 use super::fixtures::{CollabSpec, collab_site, packed_twin};
-use super::runtime::{TestRuntime, packed_supported, test_client};
+use super::runtime::{packed_supported, test_client};
 use crate::collab::kernels::aggregate::{
     ACCUM_CLAMP,
     cross_frame_accum_scale,
@@ -15,12 +15,7 @@ use crate::tune::VariantSite;
 use crate::tune::gpu::{bind, read_f32, read_i32, zero_words};
 
 #[cube(launch_unchecked)]
-fn packed_add_stress(
-    words: &mut Array<Atomic<i64>>,
-    accum_fixed: i32,
-    weight_fixed: i32,
-    #[comptime] count: u32,
-) {
+fn packed_add_stress(words: &mut [Atomic<i64>], accum_fixed: i32, weight_fixed: i32, #[comptime] count: u32) {
     if ABSOLUTE_POS_X < count {
         let word = pack_accum::<i64>(accum_fixed, weight_fixed);
         Atomic::fetch_add(&words[0usize], word);
@@ -66,10 +61,10 @@ fn packed_words_do_not_overflow_at_the_largest_radii() {
         let cubes = count.div_ceil(threads);
         let cube_count = CubeCount::new_1d(cubes);
         let cube_dim = CubeDim::new_1d(threads);
-        let words_arg = bind::<TestRuntime>(&words, 1);
+        let words_arg = bind(&words, 1);
 
         unsafe {
-            packed_add_stress::launch_unchecked::<TestRuntime>(
+            packed_add_stress::launch_unchecked(
                 &client,
                 cube_count,
                 cube_dim,

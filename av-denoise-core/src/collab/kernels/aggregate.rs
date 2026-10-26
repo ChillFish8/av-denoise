@@ -191,14 +191,10 @@ pub(crate) fn to_fixed_weight_host(weight: f32, scale: f32) -> i32 {
     clippy::too_many_arguments,
     reason = "every argument is a buffer or comptime shape the kernel binds"
 )]
-#[expect(
-    clippy::collapsible_if,
-    reason = "the outer condition is comptime, so luma compiles no access to the other channels"
-)]
 pub fn scatter_patch<W: Int>(
-    accum: &mut Array<Atomic<i32>>,
-    wsum: &mut Array<Atomic<W>>,
-    kaiser: &Array<f32>,
+    accum: &mut [Atomic<i32>],
+    wsum: &mut [Atomic<W>],
+    kaiser: &[f32],
     value: f32,
     weight: f32,
     patch_x: u32,
@@ -225,8 +221,8 @@ pub fn scatter_patch<W: Int>(
     let accum_fixed = to_fixed(value * weight, accum_scale);
 
     if comptime!(packed) {
-        // The index is built without a branch, because a branch-derived index panics cubecl 0.10's
-        // GVN pass and the launch silently does nothing.
+        // The index is built without a branch, because cubecl's optimiser has mishandled a
+        // branch-derived index here.
         let rest_channels = comptime!(stored_ch - 1);
         let rest_channel = u32::max(channel, 1u32) - 1u32;
         let rest_index = pixel * rest_channels + rest_channel;
@@ -238,6 +234,10 @@ pub fn scatter_patch<W: Int>(
             Atomic::fetch_add(&wsum[pixel as usize], word);
         }
 
+        #[expect(
+            clippy::collapsible_if,
+            reason = "the outer condition is comptime, so luma compiles no access to the other channels"
+        )]
         if comptime!(stored_ch > 1) {
             if !first_channel {
                 Atomic::fetch_add(&accum[rest_index as usize], accum_fixed);
@@ -266,8 +266,8 @@ pub fn scatter_patch<W: Int>(
 /// which a 4K or 8K frame exceeds at 256 threads per block.
 #[cube(launch_unchecked)]
 pub fn collab_zero_accum(
-    accum: &mut Array<Atomic<i32>>,
-    wsum: &mut Array<Atomic<i32>>,
+    accum: &mut [Atomic<i32>],
+    wsum: &mut [Atomic<i32>],
     frame_offset: u32,
     #[comptime] pixels: u32,
     #[comptime] stored_ch: u32,
@@ -299,9 +299,9 @@ pub fn collab_zero_accum(
     reason = "every argument is a buffer or comptime shape the kernel binds"
 )]
 pub fn collab_normalise<N: Size>(
-    accum: &mut Array<i32>,
-    wsum: &mut Array<i32>,
-    output: &mut Array<Vector<f32, N>>,
+    accum: &mut [i32],
+    wsum: &mut [i32],
+    output: &mut [Vector<f32, N>],
     frame_offset: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -326,7 +326,7 @@ pub fn collab_normalise<N: Size>(
         if weight_total != 0i32 {
             value = accumulated * WEIGHT_GAIN / (weight_total as f32);
         }
-        pixel_out[channel as usize] = value;
+        pixel_out.insert(channel as usize, value);
     }
     output[local_pixel as usize] = pixel_out;
 

@@ -8,7 +8,7 @@ use crate::engine::{BLOCK_1D, MAX_GRID_1D};
 use crate::nlmeans::kernels::{gpu_cast_f16, gpu_copy};
 use crate::nlmeans::prefilter::PrefilterMode;
 
-impl<R: Runtime> NlmDenoiser<R> {
+impl NlmDenoiser {
     pub(super) fn advance_ring(&mut self) {
         let total_frames = self.params.total_frames() as usize;
         self.ring_head += 1;
@@ -40,12 +40,12 @@ impl<R: Runtime> NlmDenoiser<R> {
         let total_threads = grid * BLOCK_1D;
 
         unsafe {
-            gpu_copy::launch_unchecked::<R>(
+            gpu_copy::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(BLOCK_1D),
-                ArrayArg::from_raw_parts(src.clone(), src_slots * frame_size as usize),
-                ArrayArg::from_raw_parts(dst.clone(), dst_slots * frame_size as usize),
+                BufferArg::from_raw_parts(src.clone(), src_slots * frame_size as usize),
+                BufferArg::from_raw_parts(dst.clone(), dst_slots * frame_size as usize),
                 src_slot as u32 * frame_size,
                 slot as u32 * frame_size,
                 frame_size,
@@ -87,12 +87,12 @@ impl<R: Runtime> NlmDenoiser<R> {
         let offset = slot as u32 * frame_len;
 
         unsafe {
-            gpu_cast_f16::launch_unchecked::<R>(
+            gpu_cast_f16::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(BLOCK_1D),
-                ArrayArg::from_raw_parts(self.input_buf.clone(), ring_len),
-                ArrayArg::from_raw_parts(search_buf.clone(), ring_len),
+                BufferArg::from_raw_parts(self.input_buf.clone(), ring_len),
+                BufferArg::from_raw_parts(search_buf.clone(), ring_len),
                 offset,
                 frame_len,
                 total_threads,

@@ -1,6 +1,6 @@
 use cubecl::server::Handle;
 
-use super::helpers::{R, make_client};
+use super::helpers::make_client;
 use crate::nlmeans::denoiser::{BufferSize, front_buffer_sizes};
 use crate::nlmeans::*;
 use crate::noise::{StrengthMapKind, StrengthMapParams};
@@ -25,7 +25,7 @@ fn computed(buffers: &[BufferSize], name: &str) -> Option<u64> {
 fn assert_sizes_match_allocations(params: NlmParams) {
     let client = make_client();
     let sizes = front_buffer_sizes(&client, &params, WIDTH, HEIGHT);
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, WIDTH, HEIGHT);
+    let mut denoiser = NlmDenoiser::new(&client, params, WIDTH, HEIGHT);
 
     // The sizes count the curve batch and the class scratch, which only these settings allocate.
     let map = StrengthMapParams {

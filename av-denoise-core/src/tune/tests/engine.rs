@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::fixtures::{hashed_unit, upload};
-use super::runtime::{TestRuntime, test_client};
+use super::runtime::test_client;
 use crate::engine::{DevicePlane, Engine, Geometry, SampleFormat};
 use crate::nlmeans::{ChannelMode, DenoisingMode, NlmTuning, NlmeansAlgorithm, NlmeansOptions};
 use crate::tune::gpu::read_f32;
@@ -33,7 +33,7 @@ pub(crate) fn noisy_frames(width: u32, height: u32, planes: usize, count: usize)
 }
 
 fn emit_frame(
-    client: &ComputeClient<TestRuntime>,
+    client: &Client,
     engine: &mut dyn Engine,
     width: u32,
     height: u32,
@@ -60,7 +60,7 @@ fn emit_frame(
 
 /// Pushes `frames` through `engine` as f32 planes and returns every frame it emits, planes flattened.
 pub(crate) fn run_engine(
-    client: &ComputeClient<TestRuntime>,
+    client: &Client,
     engine: &mut dyn Engine,
     width: u32,
     height: u32,

@@ -2,8 +2,6 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use cubecl::prelude::*;
-
 use super::consts::{BASELINE_INDEX, MAX_LAUNCHES_PER_SAMPLE, REWARM, SAMPLE_TARGET};
 use super::decide::{DecideLimits, median};
 use super::fidelity::CompareResult;
@@ -30,7 +28,7 @@ const CALIBRATION_SAMPLES: usize = 3;
 /// setting the order families are timed in and those left out. Each batch is compiled once before
 /// timing, and the compile time goes to `compile` instead of counting towards the caps. When the
 /// compile ceiling skips any candidate, the ranking is partial, and it counts how many it skipped.
-pub(crate) fn tune_site<R: Runtime, S: VariantSite<R>>(
+pub(crate) fn tune_site<S: VariantSite>(
     site: &S,
     allowed: &[S::Candidate],
     deadline: Instant,
@@ -108,7 +106,7 @@ impl BatchCounts {
 /// A compile of [REWARM](crate::tune::REWARM) or longer can let the clocks drop, so the baseline runs
 /// again before timing resumes, and that re-warm counts as timing. A baseline that does not compile
 /// fails the site.
-pub(crate) fn compile_members<R: Runtime, S: VariantSite<R>>(
+pub(crate) fn compile_members<S: VariantSite>(
     site: &S,
     allowed: &[S::Candidate],
     indices: &[usize],
@@ -118,7 +116,7 @@ pub(crate) fn compile_members<R: Runtime, S: VariantSite<R>>(
     let identity = site.compile_identity();
     let limits = compile.limits(&identity, allowed, indices);
     // Sites that cannot copy themselves never ask, so they never make helper devices.
-    let helpers = if S::COPIES { compile.helpers::<R>() } else { &[] };
+    let helpers = if S::COPIES { compile.helpers() } else { &[] };
     let precompiled = precompile(site, allowed, indices, outputs, &limits, helpers);
     compile.record(&precompiled);
 
@@ -174,10 +172,7 @@ fn candidate_names<C: SiteCandidate>(allowed: &[C], indices: &[usize]) -> Vec<&'
 
 /// Runs the baseline into `outputs` for [REWARM](crate::tune::REWARM), so an idle gap before the
 /// site cannot drop the clocks.
-pub(crate) fn rewarm<R: Runtime, S: VariantSite<R>>(
-    site: &S,
-    outputs: &S::Outputs,
-) -> Result<(), anyhow::Error> {
+pub(crate) fn rewarm<S: VariantSite>(site: &S, outputs: &S::Outputs) -> Result<(), anyhow::Error> {
     let client = site.client();
     let baseline = site.baseline();
     let started = Instant::now();
@@ -194,10 +189,7 @@ pub(crate) fn rewarm<R: Runtime, S: VariantSite<R>>(
 }
 
 /// The launches per sample that make one sample last at least [SAMPLE_TARGET](crate::tune::SAMPLE_TARGET).
-pub(crate) fn calibrate<R: Runtime, S: VariantSite<R>>(
-    site: &S,
-    outputs: &S::Outputs,
-) -> Result<u32, anyhow::Error> {
+pub(crate) fn calibrate<S: VariantSite>(site: &S, outputs: &S::Outputs) -> Result<u32, anyhow::Error> {
     let baseline = site.baseline();
     let mut singles = Vec::with_capacity(CALIBRATION_SAMPLES);
 
@@ -219,7 +211,7 @@ pub(crate) fn calibrate<R: Runtime, S: VariantSite<R>>(
 ///
 /// Each candidate runs once into cleared outputs, so the check sees a single launch. A failed check
 /// or a failed readback drops the candidate with a warning.
-fn check_outputs<R: Runtime, S: VariantSite<R>>(
+fn check_outputs<S: VariantSite>(
     site: &S,
     allowed: &[S::Candidate],
     indices: &[usize],

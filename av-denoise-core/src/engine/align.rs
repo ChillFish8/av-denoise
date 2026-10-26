@@ -15,7 +15,7 @@ impl StorageAlign {
     ///
     /// cubecl aligns every allocation to the same value, so a slot offset that is a multiple of it
     /// always lands on a boundary the backend accepts.
-    pub(crate) fn from_client<R: Runtime>(client: &ComputeClient<R>) -> Self {
+    pub(crate) fn from_client(client: &Client) -> Self {
         let alignment = client.properties().memory.alignment;
         Self::new(alignment)
     }

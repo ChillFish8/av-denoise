@@ -18,8 +18,8 @@ use super::helpers::clamp_i32;
 /// each direction is padded to a 32-byte boundary.
 #[cube(launch_unchecked)]
 pub fn mc_chain_compose(
-    pair_ring: &Array<i32>,
-    mv_field: &mut Array<i32>,
+    pair_ring: &[i32],
+    mv_field: &mut [i32],
     start_pair_slot: u32,
     #[comptime] forward: bool,
     #[comptime] steps: u32,
@@ -77,7 +77,7 @@ pub fn mc_chain_compose(
 ///
 /// Each thread clears every `total_threads`-th value from its own position.
 #[cube(launch_unchecked)]
-pub fn mc_pair_zero(dst: &mut Array<i32>, #[comptime] length: u32, #[comptime] total_threads: u32) {
+pub fn mc_pair_zero(dst: &mut [i32], #[comptime] length: u32, #[comptime] total_threads: u32) {
     let mut idx = ABSOLUTE_POS_X;
     while idx < length {
         dst[idx as usize] = 0i32;

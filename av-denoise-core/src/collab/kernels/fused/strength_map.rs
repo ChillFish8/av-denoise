@@ -8,7 +8,7 @@ const MAP_QUARTER: u32 = 8;
 /// A patch on the 8-pixel grid reads one quarter four times.
 #[cube]
 pub(crate) fn strength_map_scale(
-    map: &Array<f32>,
+    map: &[f32],
     rx: u32,
     ry: u32,
     #[comptime] map_cols: u32,

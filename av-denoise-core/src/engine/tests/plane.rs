@@ -75,15 +75,13 @@ fn a_ring_whose_size_overflows_u64_is_invalid_geometry() {
 #[cfg(any(feature = "vulkan", feature = "metal"))]
 mod with_handles {
     use cubecl::prelude::*;
-    use cubecl::wgpu::WgpuRuntime;
 
     use super::*;
     use crate::engine::DevicePlane;
 
-    fn client() -> ComputeClient<WgpuRuntime> {
+    fn client() -> Client {
         crate::tests::compilation_cache::install_test_compilation_cache();
-        let device = <WgpuRuntime as Runtime>::Device::default();
-        WgpuRuntime::client(&device)
+        crate::testing::test_client()
     }
 
     fn geometry(channels: ChannelMode) -> Geometry {

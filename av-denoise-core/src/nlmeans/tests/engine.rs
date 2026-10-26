@@ -2,7 +2,6 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::helpers::{
-    R,
     make_client,
     make_noisy_gaussian_frame,
     normalise_with_ingest,
@@ -62,7 +61,7 @@ fn frames(count: usize, channels: u32) -> Vec<Vec<f32>> {
         .collect()
 }
 
-fn emit(engine: &mut Nlmeans<R>, client: &ComputeClient<R>, channel_count: usize) -> Vec<f32> {
+fn emit(engine: &mut Nlmeans, client: &Client, channel_count: usize) -> Vec<f32> {
     let pixels = (WIDTH * HEIGHT) as usize;
     let outputs: Vec<Handle> = (0..channel_count).map(|_| client.empty(pixels * 4)).collect();
     let planes: Vec<_> = outputs
@@ -76,12 +75,7 @@ fn emit(engine: &mut Nlmeans<R>, client: &ComputeClient<R>, channel_count: usize
 }
 
 /// Pushes one frame and returns how many frames the engine reports ready.
-fn push_frame(
-    engine: &mut Nlmeans<R>,
-    client: &ComputeClient<R>,
-    frame: &[f32],
-    channel_count: usize,
-) -> usize {
+fn push_frame(engine: &mut Nlmeans, client: &Client, frame: &[f32], channel_count: usize) -> usize {
     let handles = upload_planes(client, frame, channel_count);
     let planes: Vec<_> = handles
         .iter()
@@ -91,7 +85,7 @@ fn push_frame(
     engine.push(&planes).expect("push")
 }
 
-fn try_push_context(engine: &mut Nlmeans<R>, client: &ComputeClient<R>, frame: &[f32]) -> Result<(), Error> {
+fn try_push_context(engine: &mut Nlmeans, client: &Client, frame: &[f32]) -> Result<(), Error> {
     let handles = upload_planes(client, frame, 1);
     let planes = [DevicePlane::new(&handles[0], WIDTH, HEIGHT)];
 
@@ -99,8 +93,8 @@ fn try_push_context(engine: &mut Nlmeans<R>, client: &ComputeClient<R>, frame: &
 }
 
 fn push_and_emit(
-    engine: &mut Nlmeans<R>,
-    client: &ComputeClient<R>,
+    engine: &mut Nlmeans,
+    client: &Client,
     frame: &[f32],
     channel_count: usize,
     outputs: &mut Vec<Vec<f32>>,
@@ -112,12 +106,7 @@ fn push_and_emit(
     }
 }
 
-fn finish_and_emit(
-    engine: &mut Nlmeans<R>,
-    client: &ComputeClient<R>,
-    channel_count: usize,
-    outputs: &mut Vec<Vec<f32>>,
-) {
+fn finish_and_emit(engine: &mut Nlmeans, client: &Client, channel_count: usize, outputs: &mut Vec<Vec<f32>>) {
     let tail = engine.finish().expect("finish");
     for _ in 0..tail {
         let output = emit(engine, client, channel_count);
@@ -126,12 +115,7 @@ fn finish_and_emit(
 }
 
 /// Pushes every frame through `engine`, then the tail, returning each emitted frame.
-fn drive(
-    engine: &mut Nlmeans<R>,
-    client: &ComputeClient<R>,
-    frames: &[Vec<f32>],
-    channel_count: usize,
-) -> Vec<Vec<f32>> {
+fn drive(engine: &mut Nlmeans, client: &Client, frames: &[Vec<f32>], channel_count: usize) -> Vec<Vec<f32>> {
     let mut outputs = Vec::new();
 
     for frame in frames {
@@ -143,7 +127,7 @@ fn drive(
     outputs
 }
 
-fn build_engine(client: &ComputeClient<R>, radius: u32, channels: ChannelMode) -> Nlmeans<R> {
+fn build_engine(client: &Client, radius: u32, channels: ChannelMode) -> Nlmeans {
     let algorithm = hq(radius);
     let geometry = geometry(channels);
 
@@ -344,7 +328,7 @@ fn finish_while_a_frame_is_ready_returns_outputs_pending() {
     assert!(matches!(finished, Err(Error::OutputsPending)));
 }
 
-fn engine_owing_a_tail(client: &ComputeClient<R>) -> (Nlmeans<R>, usize) {
+fn engine_owing_a_tail(client: &Client) -> (Nlmeans, usize) {
     let frames = frames(4, 1);
     let mut engine = build_engine(client, 1, ChannelMode::Luma);
     let mut outputs = Vec::new();
@@ -466,7 +450,7 @@ fn reset_mid_stream_with_a_ready_frame_matches_a_fresh_engine() {
 }
 
 /// Pushes each input, then the tail, emitting every frame as `u8` planes.
-fn drive_u8(engine: &mut Nlmeans<R>, client: &ComputeClient<R>, inputs: &[Handle]) -> Vec<Vec<u8>> {
+fn drive_u8(engine: &mut Nlmeans, client: &Client, inputs: &[Handle]) -> Vec<Vec<u8>> {
     let pixels = (WIDTH * HEIGHT) as usize;
     let mut outputs = Vec::new();
 
@@ -483,8 +467,8 @@ fn drive_u8(engine: &mut Nlmeans<R>, client: &ComputeClient<R>, inputs: &[Handle
 }
 
 fn emit_u8(
-    engine: &mut Nlmeans<R>,
-    client: &ComputeClient<R>,
+    engine: &mut Nlmeans,
+    client: &Client,
     frame_count: usize,
     pixels: usize,
     outputs: &mut Vec<Vec<u8>>,

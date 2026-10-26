@@ -36,8 +36,8 @@ fn submit_gpu_matches_submit() {
 
     let readback_params = temporal_params(1);
     let gpu_params = temporal_params(1);
-    let mut via_readback = NlmDenoiser::<R>::new(&client, readback_params, width, height);
-    let mut via_gpu = NlmDenoiser::<R>::new(&client, gpu_params, width, height);
+    let mut via_readback = NlmDenoiser::new(&client, readback_params, width, height);
+    let mut via_gpu = NlmDenoiser::new(&client, gpu_params, width, height);
 
     let frames = distinct_frames(width, height, 5);
     for frame in frames {
@@ -72,7 +72,7 @@ fn submit_gpu_matches_submit() {
     }
 }
 
-fn read_output(client: &ComputeClient<R>, output: GpuOutput) -> Vec<f32> {
+fn read_output(client: &Client, output: GpuOutput) -> Vec<f32> {
     let bytes = client.read_one(output.handle).expect("gpu readback failed");
     f32::from_bytes(&bytes).to_vec()
 }
@@ -110,8 +110,8 @@ fn compare_flush_paths(radius: u32, pushes: usize) {
 
     let flush_params = temporal_params(radius);
     let step_params = temporal_params(radius);
-    let mut via_flush = NlmDenoiser::<R>::new(&client, flush_params, width, height);
-    let mut via_step = NlmDenoiser::<R>::new(&client, step_params, width, height);
+    let mut via_flush = NlmDenoiser::new(&client, flush_params, width, height);
+    let mut via_step = NlmDenoiser::new(&client, step_params, width, height);
 
     let frames = distinct_frames(width, height, pushes);
     for frame in frames {
@@ -178,8 +178,8 @@ fn flush_step_gpu_emits_the_same_count_and_frames_mixed_phase_stream() {
 
     let flush_params = temporal_params(radius);
     let step_params = temporal_params(radius);
-    let mut via_flush = NlmDenoiser::<R>::new(&client, flush_params, width, height);
-    let mut via_step = NlmDenoiser::<R>::new(&client, step_params, width, height);
+    let mut via_flush = NlmDenoiser::new(&client, flush_params, width, height);
+    let mut via_step = NlmDenoiser::new(&client, step_params, width, height);
 
     let frames = distinct_frames(width, height, pushes);
     let mut during_pushes_flush = 0usize;
@@ -262,7 +262,7 @@ fn current_sigmas_reads_zero_on_the_fast_path() {
     let frame = make_frame_with_noisy_region(width, height, 1, 0.5, 8, 8, 3, 0.9);
 
     let params = temporal_params(0);
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     assert_eq!(denoiser.current_sigmas(), [0.0, 0.0, 0.0]);
 
     denoiser.push_frame(&frame);
@@ -292,7 +292,7 @@ fn current_sigmas_broadcasts_a_pinned_sigma_override() {
         }),
         ..temporal_params(0)
     };
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
 
     // A pinned sigma reads back immediately, before any frame is pushed.
     assert_eq!(denoiser.current_sigmas(), [6.0 / 255.0; 3]);
@@ -320,7 +320,7 @@ fn current_sigmas_matches_the_median_estimator_once_it_folds() {
         }),
         ..temporal_params(0)
     };
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
     let _ = denoiser.denoise().expect("denoise failed");
 

@@ -142,8 +142,8 @@ impl TuneLedger {
     }
 
     /// The compile helpers that run on `R`, made on the first call, and empty when there are none.
-    pub(crate) fn compile_helpers<R: Runtime>(&self) -> &[ComputeClient<R>] {
-        self.helpers.clients::<R>()
+    pub(crate) fn compile_helpers(&self) -> &[Client] {
+        self.helpers.clients()
     }
 
     /// Stops using the compile helpers after they failed candidates the tuned client then compiled.

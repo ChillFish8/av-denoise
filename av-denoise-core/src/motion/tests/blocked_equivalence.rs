@@ -5,7 +5,7 @@ use super::reference::{reference_block_match_coarse, reference_block_match_fine}
 use crate::motion::kernels::{BLOCK_MATCH_THREADS, mc_block_match_coarse, mc_block_match_fine};
 use crate::noise::tests::sad_floor_buffer;
 use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
-use crate::tune::tests::runtime::{TestRuntime, test_client};
+use crate::tune::tests::runtime::test_client;
 
 const FINE_STEP: u32 = 8;
 const NOISE_FLOOR: f32 = 0.1;
@@ -78,8 +78,8 @@ fn run_fine(
     let grid = CubeCount::new_2d(blocks_x, blocks_y);
 
     unsafe {
-        let mv_arg = ArrayArg::from_raw_parts(mv_field.clone(), mv_len);
-        let conf_arg = ArrayArg::from_raw_parts(confidence.clone(), conf_len);
+        let mv_arg = BufferArg::from_raw_parts(mv_field.clone(), mv_len);
+        let conf_arg = BufferArg::from_raw_parts(confidence.clone(), conf_len);
 
         match kernel {
             Kernel::Reference => {
@@ -88,10 +88,10 @@ fn run_fine(
                 let centre_buf = client.create_from_slice(centre_bytes);
                 let neighbour_buf = client.create_from_slice(neighbour_bytes);
 
-                let centre_arg = ArrayArg::from_raw_parts(centre_buf, level_len);
-                let neighbour_arg = ArrayArg::from_raw_parts(neighbour_buf, level_len);
+                let centre_arg = BufferArg::from_raw_parts(centre_buf, level_len);
+                let neighbour_arg = BufferArg::from_raw_parts(neighbour_buf, level_len);
 
-                reference_block_match_fine::launch_unchecked::<TestRuntime>(
+                reference_block_match_fine::launch_unchecked(
                     &client,
                     grid,
                     dim,
@@ -114,13 +114,13 @@ fn run_fine(
             Kernel::Production => {
                 let (pyramid, neighbour_slots) = pair_pyramid(&client, centre, neighbour);
 
-                let pyramid_arg = ArrayArg::from_raw_parts(pyramid, 2 * level_len);
-                let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, 1);
+                let pyramid_arg = BufferArg::from_raw_parts(pyramid, 2 * level_len);
+                let neighbour_slots_arg = BufferArg::from_raw_parts(neighbour_slots, 1);
 
                 let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, NOISE_FLOOR);
-                let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
+                let noise_arg = BufferArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
-                mc_block_match_fine::launch_unchecked::<TestRuntime>(
+                mc_block_match_fine::launch_unchecked(
                     &client,
                     grid,
                     dim,
@@ -250,7 +250,7 @@ fn run_coarse(
     let grid = CubeCount::new_2d(coarse_blocks_x, coarse_blocks_y);
 
     unsafe {
-        let mv_arg = ArrayArg::from_raw_parts(mv_field.clone(), mv_len);
+        let mv_arg = BufferArg::from_raw_parts(mv_field.clone(), mv_len);
 
         match kernel {
             Kernel::Reference => {
@@ -259,10 +259,10 @@ fn run_coarse(
                 let centre_buf = client.create_from_slice(centre_bytes);
                 let neighbour_buf = client.create_from_slice(neighbour_bytes);
 
-                let centre_arg = ArrayArg::from_raw_parts(centre_buf, level_len);
-                let neighbour_arg = ArrayArg::from_raw_parts(neighbour_buf, level_len);
+                let centre_arg = BufferArg::from_raw_parts(centre_buf, level_len);
+                let neighbour_arg = BufferArg::from_raw_parts(neighbour_buf, level_len);
 
-                reference_block_match_coarse::launch_unchecked::<TestRuntime>(
+                reference_block_match_coarse::launch_unchecked(
                     &client,
                     grid,
                     dim,
@@ -283,10 +283,10 @@ fn run_coarse(
             Kernel::Production => {
                 let (pyramid, neighbour_slots) = pair_pyramid(&client, centre, neighbour);
 
-                let pyramid_arg = ArrayArg::from_raw_parts(pyramid, 2 * level_len);
-                let neighbour_slots_arg = ArrayArg::from_raw_parts(neighbour_slots, 1);
+                let pyramid_arg = BufferArg::from_raw_parts(pyramid, 2 * level_len);
+                let neighbour_slots_arg = BufferArg::from_raw_parts(neighbour_slots, 1);
 
-                mc_block_match_coarse::launch_unchecked::<TestRuntime>(
+                mc_block_match_coarse::launch_unchecked(
                     &client,
                     grid,
                     dim,

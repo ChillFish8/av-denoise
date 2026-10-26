@@ -56,8 +56,8 @@ enum StreamStart {
 ///
 /// A pass scatters each member into the frame it came from, so a frame finishes only once every
 /// pass that can reach it has run. Latency is `2 * temporal_radius` pushes.
-pub struct Nl4dDenoiser<R: Runtime> {
-    pub(super) front: NlmDenoiser<R>,
+pub struct Nl4dDenoiser {
+    pub(super) front: NlmDenoiser,
     pub(super) width: u32,
     pub(super) height: u32,
     pub(super) channels: ChannelMode,
@@ -74,7 +74,7 @@ pub struct Nl4dDenoiser<R: Runtime> {
     /// Whether the fused kernel may run only its uniform walk.
     pub(super) uniform_walk_only: bool,
     /// Picks the candidate each tunable launch runs.
-    pub(super) kernels: KernelSelector<R>,
+    pub(super) kernels: KernelSelector,
     /// The fixed-point scale the cross-frame accumulator ring counts in.
     pub(super) accum_scale: f32,
     /// The groups the collab search writes and the collab filter reads, allocated only under
@@ -128,12 +128,7 @@ pub struct Nl4dDenoiser<R: Runtime> {
 /// as the frame ring, `wsum`, `outputs` and `group_weight` hold fewer, and `reg_mv` and `reg_conf`
 /// match the front end's motion field and confidence. The grain's saved vectors span one more frame
 /// than the motion field, so they are counted here.
-pub(crate) fn buffer_sizes<R: Runtime>(
-    client: &ComputeClient<R>,
-    params: &Nl4dParams,
-    width: u32,
-    height: u32,
-) -> Vec<BufferSize> {
+pub(crate) fn buffer_sizes(client: &Client, params: &Nl4dParams, width: u32, height: u32) -> Vec<BufferSize> {
     let mut nlm_params = params.nlm.clone();
     nlm_params.temporal_radius = params.temporal_radius;
 
@@ -150,20 +145,15 @@ pub(crate) fn buffer_sizes<R: Runtime>(
     buffers
 }
 
-impl<R: Runtime> DeviceTimed for Nl4dDenoiser<R> {
+impl DeviceTimed for Nl4dDenoiser {
     fn device_timer(&mut self) -> &mut DeviceTimer {
         &mut self.front.device_timer
     }
 }
 
-impl<R: Runtime> Nl4dDenoiser<R> {
+impl Nl4dDenoiser {
     /// Builds the denoiser, rejecting invalid `params` and frames smaller than one patch.
-    pub fn new(
-        client: &ComputeClient<R>,
-        params: Nl4dParams,
-        width: u32,
-        height: u32,
-    ) -> Result<Self, String> {
+    pub fn new(client: &Client, params: Nl4dParams, width: u32, height: u32) -> Result<Self, String> {
         let kernels = KernelSelector::baseline(client);
         Self::with_kernels(client, params, width, height, kernels)
     }
@@ -178,11 +168,11 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// weight into one 64-bit accumulator word where the device and legality allow it. A device with
     /// planes narrower than 8 lanes is an error.
     pub fn with_kernels(
-        client: &ComputeClient<R>,
+        client: &Client,
         mut params: Nl4dParams,
         width: u32,
         height: u32,
-        kernels: KernelSelector<R>,
+        kernels: KernelSelector,
     ) -> Result<Self, String> {
         params.validate()?;
 
@@ -453,7 +443,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         self.front.placeholder()
     }
 
-    pub(crate) fn compute_client(&self) -> &ComputeClient<R> {
+    pub(crate) fn compute_client(&self) -> &Client {
         self.front.compute_client()
     }
 
@@ -612,7 +602,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     }
 
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-    pub(crate) fn front_for_test(&self) -> &NlmDenoiser<R> {
+    pub(crate) fn front_for_test(&self) -> &NlmDenoiser {
         &self.front
     }
 
@@ -700,12 +690,12 @@ impl<R: Runtime> Nl4dDenoiser<R> {
 
         // Both normalise kernels leave the region zeroed.
         unsafe {
-            let accum_arg = ArrayArg::from_raw_parts(accum, accum_ring_len);
-            let wsum_arg = ArrayArg::from_raw_parts(wsum, wsum_ring_len);
-            let output_arg = ArrayArg::from_raw_parts(output, frame_len);
+            let accum_arg = BufferArg::from_raw_parts(accum, accum_ring_len);
+            let wsum_arg = BufferArg::from_raw_parts(wsum, wsum_ring_len);
+            let output_arg = BufferArg::from_raw_parts(output, frame_len);
 
             if self.packed {
-                collab_normalise_packed::launch_unchecked::<R>(
+                collab_normalise_packed::launch_unchecked(
                     &client,
                     agg_grid,
                     agg_dim,
@@ -720,7 +710,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                     stored_ch,
                 );
             } else {
-                collab_normalise::launch_unchecked::<R>(
+                collab_normalise::launch_unchecked(
                     &client,
                     agg_grid,
                     agg_dim,

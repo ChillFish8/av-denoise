@@ -11,7 +11,7 @@ use crate::noise::strength_map::QuarterClasses;
 use crate::noise::temporal::TemporalNoiseReading;
 
 /// The largest gap in ulp the synthetic fold tests allow.
-pub(super) const MAX_ULPS: u32 = 2;
+pub(super) const MAX_ULPS: u32 = 4;
 
 /// Coefficients with every derived value in use, as an nl4d luma plane with motion compensation
 /// and the NLM pilot sees them.

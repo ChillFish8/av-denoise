@@ -12,8 +12,6 @@ use av_denoise_core::{
     WindowSpan,
 };
 
-use crate::backend::Device;
-use crate::backend::accelerate::Accelerator;
 use crate::host::{Algorithm, DenoiserError, DenoiserOptions, HostDenoiser, OUTPUT_SETS};
 
 fn luma_options(mode: DenoisingMode) -> DenoiserOptions {
@@ -24,7 +22,9 @@ fn luma_options(mode: DenoisingMode) -> DenoiserOptions {
 }
 
 fn create(width: u32, height: u32, options: DenoiserOptions) -> Result<HostDenoiser, DenoiserError> {
-    HostDenoiser::create(&[Accelerator::Vulkan], &Device::Default, width, height, options)
+    let accelerator = crate::testing::test_accelerator();
+    let device = crate::testing::test_device();
+    HostDenoiser::create(&[accelerator], &device, width, height, options)
 }
 
 fn luma_denoiser(mode: DenoisingMode) -> HostDenoiser {
@@ -76,7 +76,10 @@ fn push_n_with_drain(denoiser: &mut HostDenoiser, count: usize, value: u8, outpu
 #[test]
 fn spatial_denoise_roundtrip() {
     let mut denoiser = luma_denoiser(DenoisingMode::Spacial);
-    assert_eq!(denoiser.selected_accelerator(), Accelerator::Vulkan);
+    assert_eq!(
+        denoiser.selected_accelerator(),
+        crate::testing::test_accelerator()
+    );
 
     let plane = frame(16, 16);
     denoiser.push(&[&plane]).expect("push failed");
@@ -313,7 +316,10 @@ fn nl4d_algorithm_round_trips_through_the_host() {
         .algorithm(algorithm)
         .build();
     let mut denoiser = create(16, 16, options).expect("nl4d denoiser construction failed");
-    assert_eq!(denoiser.selected_accelerator(), Accelerator::Vulkan);
+    assert_eq!(
+        denoiser.selected_accelerator(),
+        crate::testing::test_accelerator()
+    );
 
     let plane = frame(16, 16);
     denoiser.push(&[&plane]).expect("push failed");

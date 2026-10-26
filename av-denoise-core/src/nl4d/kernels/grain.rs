@@ -42,10 +42,10 @@ const SUM_LANES: u32 = 3;
 /// confidence. Each thread strides by `total_threads`, so a clamped grid still covers every block.
 #[cube(launch_unchecked)]
 pub fn grain_save_vectors(
-    mv_field: &Array<i32>,
-    confidence: &Array<f32>,
-    saved_mv: &mut Array<i32>,
-    saved_conf: &mut Array<f32>,
+    mv_field: &[i32],
+    confidence: &[f32],
+    saved_mv: &mut [i32],
+    saved_conf: &mut [f32],
     mv_offset: u32,
     conf_offset: u32,
     entry: u32,
@@ -77,7 +77,7 @@ const fn lag_lane(dy: u32, dx_index: u32) -> u32 {
 
 #[cube]
 fn luma_at<N: Size>(
-    input: &Array<Vector<f32, N>>,
+    input: &[Vector<f32, N>],
     x: u32,
     y: u32,
     slot: u32,
@@ -86,7 +86,7 @@ fn luma_at<N: Size>(
 ) -> f32 {
     let index = (slot * height + y) * width + x;
     let value = input[index as usize];
-    value[0]
+    value.extract(0usize)
 }
 
 /// Moves `value` by `shift` and clamps it into `0..limit`.
@@ -119,8 +119,8 @@ fn block_for(
     reason = "every argument is a buffer, ring index or comptime shape the grain read needs"
 )]
 fn source_grain_at<N: Size>(
-    input: &Array<Vector<f32, N>>,
-    saved_mv: &Array<i32>,
+    input: &[Vector<f32, N>],
+    saved_mv: &[i32],
     x: u32,
     y: u32,
     slot_t: u32,
@@ -145,7 +145,7 @@ fn source_grain_at<N: Size>(
 
 /// The highest bucket whose lower edge is at or below `grain_std`.
 #[cube]
-fn bucket_for(grain_std: f32, edges: &Array<f32>) -> u32 {
+fn bucket_for(grain_std: f32, edges: &[f32]) -> u32 {
     let mut bucket = 0u32;
 
     for index in 1..STD_BUCKETS as u32 {
@@ -196,14 +196,14 @@ fn std_of(sum: f32, sum_sq: f32) -> f32 {
     reason = "every argument is a buffer, ring index or comptime shape the kernel binds"
 )]
 pub fn grain_measure<N: Size>(
-    input: &Array<Vector<f32, N>>,
-    out_t: &Array<f32>,
-    out_prev: &Array<f32>,
-    saved_mv: &Array<i32>,
-    saved_conf: &Array<f32>,
-    edges: &Array<f32>,
-    hist: &mut Array<Atomic<i32>>,
-    partials: &mut Array<f32>,
+    input: &[Vector<f32, N>],
+    out_t: &[f32],
+    out_prev: &[f32],
+    saved_mv: &[i32],
+    saved_conf: &[f32],
+    edges: &[f32],
+    hist: &mut [Atomic<i32>],
+    partials: &mut [f32],
     slot_t: u32,
     slot_next: u32,
     source_entry: u32,
@@ -217,12 +217,12 @@ pub fn grain_measure<N: Size>(
     #[comptime] blocks_y: u32,
     #[comptime] step: u32,
 ) {
-    let mut tile = SharedMemory::<f32>::new(TILE_LEN as usize);
-    let mut sums = SharedMemory::<f32>::new((SUM_LANES * THREADS) as usize);
-    let mut lows = SharedMemory::<f32>::new((2 * THREADS) as usize);
-    let mut highs = SharedMemory::<f32>::new((2 * THREADS) as usize);
-    let mut lags = SharedMemory::<f32>::new((LAG_LANES * THREADS) as usize);
-    let mut accepted = SharedMemory::<f32>::new(1usize);
+    let mut tile = Shared::<[f32]>::new_slice(TILE_LEN as usize);
+    let mut sums = Shared::<[f32]>::new_slice((SUM_LANES * THREADS) as usize);
+    let mut lows = Shared::<[f32]>::new_slice((2 * THREADS) as usize);
+    let mut highs = Shared::<[f32]>::new_slice((2 * THREADS) as usize);
+    let mut lags = Shared::<[f32]>::new_slice((LAG_LANES * THREADS) as usize);
+    let mut accepted = Shared::<[f32]>::new_slice(1usize);
 
     let cells_x = comptime!(width / CELL);
     let cells_y = comptime!(height / CELL);
@@ -305,7 +305,7 @@ pub fn grain_measure<N: Size>(
             for lane in 0..SUM_LANES {
                 let here = (lane * THREADS + thread_id) as usize;
                 let there = (lane * THREADS + thread_id + stride) as usize;
-                sums[here] = sums[here] + sums[there];
+                sums[here] += sums[there];
             }
 
             #[unroll]
@@ -377,7 +377,7 @@ pub fn grain_measure<N: Size>(
             for index in 0..LAG_LANES {
                 let here = (index * THREADS + thread_id) as usize;
                 let there = (index * THREADS + thread_id + lag_stride) as usize;
-                lags[here] = lags[here] + lags[there];
+                lags[here] += lags[there];
             }
         }
 
@@ -421,7 +421,7 @@ pub fn grain_measure<N: Size>(
             for index in 0..SUM_LANES {
                 let here = (index * THREADS + thread_id) as usize;
                 let there = (index * THREADS + thread_id + kept_stride) as usize;
-                sums[here] = sums[here] + sums[there];
+                sums[here] += sums[there];
             }
 
             let here = thread_id as usize;
@@ -464,8 +464,8 @@ pub fn grain_measure<N: Size>(
 /// own column of a per-group scratch, and the columns then reduce to one value per group. A cell's
 /// group is clamped to the last group, so a bad value never indexes past the scratch.
 #[cube(launch_unchecked)]
-pub fn grain_reduce_partials(partials: &Array<f32>, chunk: &mut Array<f32>, cells: u32) {
-    let mut scratch = SharedMemory::<f32>::new((STRENGTH_GROUPS as u32 * REDUCE_THREADS) as usize);
+pub fn grain_reduce_partials(partials: &[f32], chunk: &mut [f32], cells: u32) {
+    let mut scratch = Shared::<[f32]>::new_slice((STRENGTH_GROUPS as u32 * REDUCE_THREADS) as usize);
     let lane = CUBE_POS_X;
     let thread_id = UNIT_POS_X;
 
@@ -480,7 +480,7 @@ pub fn grain_reduce_partials(partials: &Array<f32>, chunk: &mut Array<f32>, cell
         let raw_group = u32::cast_from(partials[(base + AUTOCOV_LEN as u32) as usize]);
         let group = u32::min(raw_group, comptime!(STRENGTH_GROUPS as u32 - 1));
         let slot = (group * REDUCE_THREADS + thread_id) as usize;
-        scratch[slot] = scratch[slot] + partials[(base + lane) as usize];
+        scratch[slot] += partials[(base + lane) as usize];
         cell += REDUCE_THREADS;
     }
 
@@ -494,7 +494,7 @@ pub fn grain_reduce_partials(partials: &Array<f32>, chunk: &mut Array<f32>, cell
             for group in 0..STRENGTH_GROUPS as u32 {
                 let here = (group * REDUCE_THREADS + thread_id) as usize;
                 let there = (group * REDUCE_THREADS + thread_id + stride) as usize;
-                scratch[here] = scratch[here] + scratch[there];
+                scratch[here] += scratch[there];
             }
         }
 
@@ -503,6 +503,6 @@ pub fn grain_reduce_partials(partials: &Array<f32>, chunk: &mut Array<f32>, cell
 
     if thread_id < STRENGTH_GROUPS as u32 {
         let target = (thread_id * AUTOCOV_LEN as u32 + lane) as usize;
-        chunk[target] = chunk[target] + scratch[(thread_id * REDUCE_THREADS) as usize];
+        chunk[target] += scratch[(thread_id * REDUCE_THREADS) as usize];
     }
 }

@@ -40,7 +40,7 @@ struct FusedPass {
     neighbours: u32,
 }
 
-impl<R: Runtime> Nl4dDenoiser<R> {
+impl Nl4dDenoiser {
     /// Runs the grouping, filtering and aggregation kernels for one pass centred on `view`.
     ///
     /// Each filtered member scatters into the accumulator region of the frame it came from, so one
@@ -131,7 +131,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
         let motion_ctx = self.front.motion_ctx();
         let noise = self.front.derived_handle();
         let thsad = self.front.thsad_value();
-        run_regularise::<R>(
+        run_regularise(
             &self.kernels,
             motion_ctx,
             view,
@@ -175,12 +175,12 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             for slot in cleared_slots {
                 let accum = self.accum.clone();
                 let wsum = self.wsum.clone();
-                let accum_arg = ArrayArg::from_raw_parts(accum, accum_ring_len);
-                let wsum_arg = ArrayArg::from_raw_parts(wsum, pass.wsum_ring_len);
+                let accum_arg = BufferArg::from_raw_parts(accum, accum_ring_len);
+                let wsum_arg = BufferArg::from_raw_parts(wsum, pass.wsum_ring_len);
 
                 // A packed region spans no more threads than a split one, so the same grid covers it.
                 if self.packed {
-                    collab_zero_packed::launch_unchecked::<R>(
+                    collab_zero_packed::launch_unchecked(
                         &client,
                         zero_grid_one_frame.clone(),
                         zero_cube_dim,
@@ -192,7 +192,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                         zero_total_threads_one_frame,
                     );
                 } else {
-                    collab_zero_accum::launch_unchecked::<R>(
+                    collab_zero_accum::launch_unchecked(
                         &client,
                         zero_grid_one_frame.clone(),
                         zero_cube_dim,
@@ -229,7 +229,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
     /// With a member buffer, the pass runs `collab_search` then `collab_filter` in its place.
     fn launch_collab_fused<S: Float>(
         &self,
-        client: &ComputeClient<R>,
+        client: &Client,
         view: &RingView,
         search_ring: Handle,
         search_len: usize,
@@ -315,7 +315,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 members: members.clone(),
                 refs,
             };
-            let search_site = CollabSearchSite::<R, S> {
+            let search_site = CollabSearchSite::<S> {
                 client: client.clone(),
                 inputs: inputs.clone(),
                 values,
@@ -323,7 +323,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
                 outputs: search_outputs,
                 search: PhantomData,
             };
-            let filter_site = CollabFilterSite::<R> {
+            let filter_site = CollabFilterSite {
                 client: client.clone(),
                 inputs,
                 members: members.clone(),
@@ -335,7 +335,7 @@ impl<R: Runtime> Nl4dDenoiser<R> {
             self.kernels.run(&search_site)?;
             self.kernels.run(&filter_site)
         } else {
-            let site = CollabSite::<R, S> {
+            let site = CollabSite::<S> {
                 client: client.clone(),
                 inputs,
                 values,

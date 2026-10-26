@@ -1,4 +1,4 @@
-use super::runtime::{TestRuntime, test_legality};
+use super::runtime::test_legality;
 use crate::tune::{DeviceLimits, SiteCandidate, VariantSite, legal_candidates};
 
 /// Launches every candidate of `site` that this device can run into fresh scratch outputs, and checks
@@ -6,15 +6,12 @@ use crate::tune::{DeviceLimits, SiteCandidate, VariantSite, legal_candidates};
 ///
 /// Returns the baseline's outputs so the caller can check they hold real work, because a kernel that
 /// silently writes nothing compares equal to another that writes nothing.
-pub(crate) fn assert_candidates_match_baseline<S: VariantSite<TestRuntime>>(
-    site: &S,
-    label: &str,
-) -> S::Outputs {
+pub(crate) fn assert_candidates_match_baseline<S: VariantSite>(site: &S, label: &str) -> S::Outputs {
     assert_listed_candidates_match_baseline(site, label, S::Candidate::ALL)
 }
 
 /// [assert_candidates_match_baseline] over only the fitted candidates in `listed`.
-pub(crate) fn assert_listed_candidates_match_baseline<S: VariantSite<TestRuntime>>(
+pub(crate) fn assert_listed_candidates_match_baseline<S: VariantSite>(
     site: &S,
     label: &str,
     listed: &[S::Candidate],

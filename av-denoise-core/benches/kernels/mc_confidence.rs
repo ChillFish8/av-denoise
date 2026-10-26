@@ -19,8 +19,8 @@ const THSAD_PIXEL: f32 = 0.02;
 ///
 /// It scores a single candidate with no seed and `search_radius = 0` at the library's default
 /// block geometry, which is the cost of confidence weighting when motion compensation is off.
-pub struct McConfidenceBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct McConfidenceBench {
+    pub client: Client,
     /// Neighbours scored in one launch, each against the centre frame.
     pub neighbours: u32,
 }
@@ -37,7 +37,7 @@ pub struct ConfidenceInput {
     pub noise: Handle,
 }
 
-impl<R: Runtime> Benchmark for McConfidenceBench<R> {
+impl Benchmark for McConfidenceBench {
     type Input = ConfidenceInput;
     type Output = ();
 
@@ -91,13 +91,13 @@ impl<R: Runtime> Benchmark for McConfidenceBench<R> {
         let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
         unsafe {
-            let pyramid_arg = ArrayArg::from_raw_parts(args.pyramid, pyramid_len);
-            let neighbour_slots_arg = ArrayArg::from_raw_parts(args.neighbour_slots, neighbours);
-            let mv_scratch_arg = ArrayArg::from_raw_parts(args.mv_scratch, mv_len);
-            let confidence_arg = ArrayArg::from_raw_parts(args.confidence, conf_len);
-            let noise_arg = ArrayArg::from_raw_parts(args.noise, DERIVED_WORDS as usize);
+            let pyramid_arg = BufferArg::from_raw_parts(args.pyramid, pyramid_len);
+            let neighbour_slots_arg = BufferArg::from_raw_parts(args.neighbour_slots, neighbours);
+            let mv_scratch_arg = BufferArg::from_raw_parts(args.mv_scratch, mv_len);
+            let confidence_arg = BufferArg::from_raw_parts(args.confidence, conf_len);
+            let noise_arg = BufferArg::from_raw_parts(args.noise, DERIVED_WORDS as usize);
 
-            mc_block_match_fine::launch_unchecked::<R>(
+            mc_block_match_fine::launch_unchecked(
                 &self.client,
                 grid,
                 dim,

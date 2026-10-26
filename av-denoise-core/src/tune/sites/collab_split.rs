@@ -23,6 +23,7 @@ use super::collab::{
     compare_collab_outputs,
     scratch_collab_outputs,
 };
+use super::no_cubes;
 use crate::collab::PATCH_SIZE;
 use crate::collab::geometry::fused_cubes_x;
 use crate::collab::kernels::fused::{
@@ -219,7 +220,7 @@ pub struct SearchOutputs {
 
 impl SearchOutputs {
     /// A member buffer for `refs` references, zeroed on the GPU.
-    pub fn zeroed<R: Runtime>(client: &ComputeClient<R>, refs: usize) -> SearchOutputs {
+    pub fn zeroed(client: &Client, refs: usize) -> SearchOutputs {
         let words = refs * MEMBER_WORDS as usize;
         let members = client.empty(words * size_of::<u32>());
         zero_words(client, &members, words);
@@ -234,8 +235,8 @@ impl SearchOutputs {
 
 /// One `collab_search` pass, with its candidate distances read as `S`.
 #[derive(Clone)]
-pub struct CollabSearchSite<R: Runtime, S: Float> {
-    pub client: ComputeClient<R>,
+pub struct CollabSearchSite<S: Float> {
+    pub client: Client,
     pub inputs: CollabInputs,
     pub values: CollabValues,
     pub shape: CollabShape,
@@ -243,14 +244,14 @@ pub struct CollabSearchSite<R: Runtime, S: Float> {
     pub search: PhantomData<S>,
 }
 
-impl<R: Runtime, S: Float> VariantSite<R> for CollabSearchSite<R, S> {
+impl<S: Float> VariantSite for CollabSearchSite<S> {
     type Candidate = SearchVariant;
     type Outputs = SearchOutputs;
 
     const PRESCREEN: bool = true;
     const COPIES: bool = true;
 
-    fn client(&self) -> &ComputeClient<R> {
+    fn client(&self) -> &Client {
         &self.client
     }
 
@@ -292,6 +293,10 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSearchSite<R, S> {
         GROUP_LANES
     }
 
+    fn output_handles(&self, outputs: &SearchOutputs) -> Vec<Handle> {
+        vec![outputs.members.clone()]
+    }
+
     fn launch(&self, candidate: SearchVariant, outputs: &SearchOutputs) {
         let cubes_x = fused_cubes_x(self.shape.width, SEARCH_GROUPS);
         let cube_count = CubeCount::new_2d(cubes_x, self.shape.refs_y);
@@ -299,9 +304,9 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSearchSite<R, S> {
         self.dispatch(candidate, outputs, cube_count);
     }
 
-    /// A launch with no cubes, which on wgpu compiles the kernel without running it.
+    /// A launch with no cubes, which compiles the kernel without running it.
     fn compile_only(&self, candidate: SearchVariant, outputs: &SearchOutputs) {
-        let no_cubes = CubeCount::Static(0, 0, 1);
+        let no_cubes = no_cubes(&self.client);
         self.dispatch(candidate, outputs, no_cubes);
     }
 
@@ -313,14 +318,15 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSearchSite<R, S> {
         SearchOutputs::zeroed(&self.client, self.outputs.refs)
     }
 
+    /// Zeroes as many words as a launch binds, so a compile-only copy's one word is cleared too.
     fn clear_outputs(&self, outputs: &SearchOutputs) {
-        let words = outputs.words();
+        let words = outputs.words().max(1);
         zero_words(&self.client, &outputs.members, words);
     }
 
     /// The copy's frame-sized buffers hold one word each, which [VariantSite::compile_only] never
     /// reads.
-    fn on_client(&self, client: &ComputeClient<R>) -> Option<Self> {
+    fn on_client(&self, client: &Client) -> Option<Self> {
         let inputs = blank_collab_inputs(client);
         let members = zeroed_words(client, 1);
         let outputs = SearchOutputs { members, refs: 0 };
@@ -359,7 +365,7 @@ impl<R: Runtime, S: Float> VariantSite<R> for CollabSearchSite<R, S> {
     }
 }
 
-impl<R: Runtime, S: Float> CollabSearchSite<R, S> {
+impl<S: Float> CollabSearchSite<S> {
     /// Launches `candidate` over `cube_count` cubes.
     fn dispatch(&self, candidate: SearchVariant, outputs: &SearchOutputs, cube_count: CubeCount) {
         let lanes = candidate.0.lanes();
@@ -369,15 +375,15 @@ impl<R: Runtime, S: Float> CollabSearchSite<R, S> {
         let cube_dim = CubeDim::new_1d(lanes);
         let words = outputs.words().max(1);
 
-        let ring = bind::<R>(&inputs.ring, inputs.ring_len);
-        let search_ring = bind::<R>(&inputs.search_ring, inputs.search_len);
-        let mv_field = bind::<R>(&inputs.mv_field, inputs.mv_len);
-        let confidence = bind::<R>(&inputs.confidence, inputs.conf_len);
-        let neighbour_slots = bind::<R>(&inputs.neighbour_slots, inputs.neighbour_slots_len);
-        let members = bind::<R>(&outputs.members, words);
+        let ring = bind(&inputs.ring, inputs.ring_len);
+        let search_ring = bind(&inputs.search_ring, inputs.search_len);
+        let mv_field = bind(&inputs.mv_field, inputs.mv_len);
+        let confidence = bind(&inputs.confidence, inputs.conf_len);
+        let neighbour_slots = bind(&inputs.neighbour_slots, inputs.neighbour_slots_len);
+        let members = bind(&outputs.members, words);
 
         unsafe {
-            collab_search::launch_unchecked::<S, R>(
+            collab_search::launch_unchecked::<S>(
                 &self.client,
                 cube_count,
                 cube_dim,
@@ -415,8 +421,8 @@ impl<R: Runtime, S: Float> CollabSearchSite<R, S> {
 
 /// One `collab_filter` pass over the groups a `collab_search` pass wrote to `members`.
 #[derive(Clone)]
-pub struct CollabFilterSite<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct CollabFilterSite {
+    pub client: Client,
     pub inputs: CollabInputs,
     /// [MEMBER_WORDS](crate::collab::kernels::fused::MEMBER_WORDS) words per reference.
     pub members: Handle,
@@ -425,13 +431,13 @@ pub struct CollabFilterSite<R: Runtime> {
     pub outputs: CollabOutputs,
 }
 
-impl<R: Runtime> VariantSite<R> for CollabFilterSite<R> {
+impl VariantSite for CollabFilterSite {
     type Candidate = FilterCandidate;
     type Outputs = CollabOutputs;
 
     const COPIES: bool = true;
 
-    fn client(&self) -> &ComputeClient<R> {
+    fn client(&self) -> &Client {
         &self.client
     }
 
@@ -462,6 +468,10 @@ impl<R: Runtime> VariantSite<R> for CollabFilterSite<R> {
         GROUP_LANES
     }
 
+    fn output_handles(&self, outputs: &CollabOutputs) -> Vec<Handle> {
+        outputs.handles()
+    }
+
     fn launch(&self, candidate: FilterCandidate, outputs: &CollabOutputs) {
         let cubes_x = fused_cubes_x(self.shape.width, candidate.groups());
         let cube_count = CubeCount::new_2d(cubes_x, self.shape.refs_y);
@@ -469,9 +479,9 @@ impl<R: Runtime> VariantSite<R> for CollabFilterSite<R> {
         self.dispatch(candidate, outputs, cube_count);
     }
 
-    /// A launch with no cubes, which on wgpu compiles the kernel without running it.
+    /// A launch with no cubes, which compiles the kernel without running it.
     fn compile_only(&self, candidate: FilterCandidate, outputs: &CollabOutputs) {
-        let no_cubes = CubeCount::Static(0, 0, 1);
+        let no_cubes = no_cubes(&self.client);
         self.dispatch(candidate, outputs, no_cubes);
     }
 
@@ -489,7 +499,7 @@ impl<R: Runtime> VariantSite<R> for CollabFilterSite<R> {
 
     /// The copy's frame-sized buffers hold one word each, which [VariantSite::compile_only] never
     /// reads. The small fixed-size tables keep their sizes.
-    fn on_client(&self, client: &ComputeClient<R>) -> Option<Self> {
+    fn on_client(&self, client: &Client) -> Option<Self> {
         let inputs = blank_collab_inputs(client);
         let members = zeroed_words(client, MEMBER_WORDS as usize);
         let outputs = blank_collab_outputs(client, false);
@@ -513,7 +523,7 @@ impl<R: Runtime> VariantSite<R> for CollabFilterSite<R> {
     }
 }
 
-impl<R: Runtime> CollabFilterSite<R> {
+impl CollabFilterSite {
     /// Launches `candidate` over `cube_count` cubes.
     fn dispatch(&self, candidate: FilterCandidate, outputs: &CollabOutputs, cube_count: CubeCount) {
         let groups = candidate.groups();
@@ -524,21 +534,21 @@ impl<R: Runtime> CollabFilterSite<R> {
         let cube_dim = CubeDim::new_1d(lanes);
         let member_words = (outputs.refs * MEMBER_WORDS as usize).max(1);
 
-        let ring = bind::<R>(&inputs.ring, inputs.ring_len);
-        let ring_scalar = bind::<R>(&inputs.ring, inputs.ring_len);
-        let members = bind::<R>(&self.members, member_words);
-        let neighbour_slots = bind::<R>(&inputs.neighbour_slots, inputs.neighbour_slots_len);
-        let noise = bind::<R>(&inputs.noise, DERIVED_WORDS as usize);
-        let noise_curve = bind::<R>(&inputs.noise_curve, NOISE_CURVE_BINS);
-        let strength_map = bind::<R>(&inputs.strength_map, inputs.map_len);
-        let dct_profile = bind::<R>(&inputs.dct_profile, 8);
-        let kaiser = bind::<R>(&inputs.kaiser, PATCH_SIZE as usize);
-        let accum = bind::<R>(&outputs.accum, outputs.accum_len);
-        let wsum = bind::<R>(&outputs.wsum, outputs.wsum_len);
-        let group_weight = bind::<R>(&outputs.group_weight, outputs.refs);
+        let ring = bind(&inputs.ring, inputs.ring_len);
+        let ring_scalar = bind(&inputs.ring, inputs.ring_len);
+        let members = bind(&self.members, member_words);
+        let neighbour_slots = bind(&inputs.neighbour_slots, inputs.neighbour_slots_len);
+        let noise = bind(&inputs.noise, DERIVED_WORDS as usize);
+        let noise_curve = bind(&inputs.noise_curve, NOISE_CURVE_BINS);
+        let strength_map = bind(&inputs.strength_map, inputs.map_len);
+        let dct_profile = bind(&inputs.dct_profile, 8);
+        let kaiser = bind(&inputs.kaiser, PATCH_SIZE as usize);
+        let accum = bind(&outputs.accum, outputs.accum_len);
+        let wsum = bind(&outputs.wsum, outputs.wsum_len);
+        let group_weight = bind(&outputs.group_weight, outputs.refs);
 
         unsafe {
-            collab_filter::launch_unchecked::<i32, R>(
+            collab_filter::launch_unchecked::<i32>(
                 &self.client,
                 cube_count,
                 cube_dim,

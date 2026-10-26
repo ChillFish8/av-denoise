@@ -1,4 +1,3 @@
-use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use crate::motion::{MotionCtx, THSAD_PIXEL, level_dims, pyramid_pixels_per_frame, pyramid_slot_pixels};
@@ -15,8 +14,8 @@ use crate::tune::sites::{RegulariseOutputs, RegulariseSite};
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
 )]
-pub(super) fn run_regularise<R: Runtime>(
-    kernels: &KernelSelector<R>,
+pub(super) fn run_regularise(
+    kernels: &KernelSelector,
     motion_ctx: &MotionCtx,
     view: &RingView,
     width: u32,

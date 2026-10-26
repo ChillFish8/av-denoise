@@ -15,8 +15,8 @@ use crate::engine::kernels::read_line;
 /// `_ref` distance kernels.
 #[cube(launch_unchecked)]
 pub fn nlm_bilateral<N: Size>(
-    input: &Array<Vector<f32, N>>,
-    output: &mut Array<Vector<f32, N>>,
+    input: &[Vector<f32, N>],
+    output: &mut [Vector<f32, N>],
     frame: u32,
     inv_two_sigma_s_sq: f32,
     inv_two_sigma_r_sq: f32,
@@ -29,7 +29,7 @@ pub fn nlm_bilateral<N: Size>(
 ) {
     let tile_width = comptime!(block_x + 2 * radius);
     let tile_elems = comptime!((block_x + 2 * radius) * (block_y + 2 * radius));
-    let mut smem = SharedMemory::<Vector<f32, N>>::new(tile_elems as usize);
+    let mut smem = Shared::<[Vector<f32, N>]>::new_slice(tile_elems as usize);
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -95,7 +95,8 @@ pub fn nlm_bilateral<N: Size>(
 
             #[unroll]
             for channel in 0..channels {
-                range_sq += diff[channel as usize] * diff[channel as usize];
+                let lane = diff.extract(channel as usize);
+                range_sq += lane * lane;
             }
 
             let spatial = (dx * dx + dy * dy) as f32 * inv_two_sigma_s_sq;

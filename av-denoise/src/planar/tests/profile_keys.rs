@@ -1,6 +1,5 @@
 use av_denoise_core::DenoisingMode;
 
-use crate::accelerate::Accelerator;
 use crate::planar::{
     ChannelIntent,
     FrameLayout,
@@ -10,13 +9,13 @@ use crate::planar::{
     plane_profile_keys,
 };
 use crate::tune::TuningMode;
-use crate::{Algorithm, Depth, Device};
+use crate::{Algorithm, Depth};
 
 #[test]
 fn every_planar_host_reports_the_profile_key_its_options_predict() {
     let options = PlaneOptions {
-        accelerators: vec![Accelerator::Vulkan],
-        device: Device::Default,
+        accelerators: vec![crate::testing::test_accelerator()],
+        device: crate::testing::test_device(),
         intent: ChannelIntent::LumaChroma,
         mode: DenoisingMode::Temporal { radius: 1 },
         algorithm: Algorithm::default(),

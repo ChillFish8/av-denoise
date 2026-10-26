@@ -32,7 +32,7 @@ fn remembered_identity(memo_key: String, describe: impl FnOnce() -> DeviceIdenti
 ///
 /// The adapter field carries a stable hash of the properties, so two different devices on one
 /// backend still get different store files.
-pub(crate) fn fallback_identity<R: Runtime>(backend: &str, client: &ComputeClient<R>) -> DeviceIdentity {
+pub(crate) fn fallback_identity(backend: &str, client: &Client) -> DeviceIdentity {
     let hardware = &client.properties().hardware;
     let rendered = format!("{hardware:?}");
     let hash = StableHasher::hash_one(&rendered);
@@ -50,7 +50,7 @@ pub(crate) fn fallback_identity<R: Runtime>(backend: &str, client: &ComputeClien
 
 #[cfg(any(feature = "vulkan", feature = "metal"))]
 mod wgpu_identity {
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::{WgpuDevice, WgpuDeviceKind};
 
     use super::*;
 
@@ -64,7 +64,7 @@ mod wgpu_identity {
     pub(crate) fn describe_wgpu(
         device: &WgpuDevice,
         backend: wgpu::Backend,
-        client: &ComputeClient<WgpuRuntime>,
+        client: &Client,
     ) -> DeviceIdentity {
         let memo_key = format!("wgpu|{backend:?}|{device:?}");
 
@@ -109,21 +109,22 @@ mod wgpu_identity {
         let selected = default_override(device);
 
         let adapter = match selected {
-            WgpuDevice::DiscreteGpu(index) => {
+            WgpuDeviceKind::DiscreteGpu(index) => {
                 pick_adapter(&instance, backend, wgpu::DeviceType::DiscreteGpu, index)
             },
-            WgpuDevice::IntegratedGpu(index) => {
+            WgpuDeviceKind::IntegratedGpu(index) => {
                 pick_adapter(&instance, backend, wgpu::DeviceType::IntegratedGpu, index)
             },
-            WgpuDevice::VirtualGpu(index) => {
+            WgpuDeviceKind::VirtualGpu(index) => {
                 pick_adapter(&instance, backend, wgpu::DeviceType::VirtualGpu, index)
             },
-            WgpuDevice::Cpu => pick_adapter(&instance, backend, wgpu::DeviceType::Cpu, 0),
+            WgpuDeviceKind::Cpu => pick_adapter(&instance, backend, wgpu::DeviceType::Cpu, 0),
             _ => {
                 let options = wgpu::RequestAdapterOptions {
                     power_preference: wgpu::PowerPreference::HighPerformance,
                     force_fallback_adapter: false,
                     compatible_surface: None,
+                    apply_limit_buckets: false,
                 };
                 let request = instance.request_adapter(&options);
                 let requested = cubecl::future::block_on(request);
@@ -167,23 +168,23 @@ mod wgpu_identity {
         other.into_iter().nth(index)
     }
 
-    /// `device`, or the adapter [DEFAULT_DEVICE_ENV] names when `device` is the default.
-    fn default_override(device: &WgpuDevice) -> WgpuDevice {
-        if !matches!(device, WgpuDevice::DefaultDevice) {
-            return device.clone();
+    /// `device`'s kind, or the adapter [DEFAULT_DEVICE_ENV] names when `device` is the default.
+    fn default_override(device: &WgpuDevice) -> WgpuDeviceKind {
+        if !matches!(device.kind, WgpuDeviceKind::DefaultDevice) {
+            return device.kind.clone();
         }
 
         let Ok(text) = std::env::var(DEFAULT_DEVICE_ENV) else {
-            return device.clone();
+            return device.kind.clone();
         };
 
         let parsed = parse_override(&text);
-        parsed.unwrap_or_else(|| device.clone())
+        parsed.unwrap_or_else(|| device.kind.clone())
     }
 
-    fn parse_override(text: &str) -> Option<WgpuDevice> {
+    fn parse_override(text: &str) -> Option<WgpuDeviceKind> {
         if text == "Cpu" {
-            return Some(WgpuDevice::Cpu);
+            return Some(WgpuDeviceKind::Cpu);
         }
 
         let (kind, rest) = text.split_once('(')?;
@@ -191,9 +192,9 @@ mod wgpu_identity {
         let index: usize = index_text.parse().ok()?;
 
         match kind {
-            "DiscreteGpu" => Some(WgpuDevice::DiscreteGpu(index)),
-            "IntegratedGpu" => Some(WgpuDevice::IntegratedGpu(index)),
-            "VirtualGpu" => Some(WgpuDevice::VirtualGpu(index)),
+            "DiscreteGpu" => Some(WgpuDeviceKind::DiscreteGpu(index)),
+            "IntegratedGpu" => Some(WgpuDeviceKind::IntegratedGpu(index)),
+            "VirtualGpu" => Some(WgpuDeviceKind::VirtualGpu(index)),
             _ => None,
         }
     }
@@ -204,12 +205,15 @@ mod wgpu_identity {
 
         #[test]
         fn overrides_parse_the_cubecl_spellings() {
-            assert_eq!(parse_override("DiscreteGpu(1)"), Some(WgpuDevice::DiscreteGpu(1)));
+            assert_eq!(
+                parse_override("DiscreteGpu(1)"),
+                Some(WgpuDeviceKind::DiscreteGpu(1))
+            );
             assert_eq!(
                 parse_override("IntegratedGpu(0)"),
-                Some(WgpuDevice::IntegratedGpu(0))
+                Some(WgpuDeviceKind::IntegratedGpu(0))
             );
-            assert_eq!(parse_override("Cpu"), Some(WgpuDevice::Cpu));
+            assert_eq!(parse_override("Cpu"), Some(WgpuDeviceKind::Cpu));
             assert_eq!(parse_override("Discrete(1)"), None);
         }
     }
@@ -222,10 +226,7 @@ pub(crate) use self::wgpu_identity::find_adapter;
 
 /// The identity of CUDA device `index`, from the driver.
 #[cfg(feature = "cuda")]
-pub(crate) fn describe_cuda(
-    index: usize,
-    client: &ComputeClient<cubecl::cuda::CudaRuntime>,
-) -> DeviceIdentity {
+pub(crate) fn describe_cuda(index: usize, client: &Client) -> DeviceIdentity {
     let memo_key = format!("cuda|{index}");
 
     remembered_identity(memo_key, || {
@@ -285,7 +286,7 @@ fn cuda_details(index: usize) -> Result<DeviceIdentity, anyhow::Error> {
 
 /// The identity of ROCm device `index`, from HIP.
 #[cfg(feature = "rocm")]
-pub(crate) fn describe_rocm(index: usize, client: &ComputeClient<cubecl::hip::HipRuntime>) -> DeviceIdentity {
+pub(crate) fn describe_rocm(index: usize, client: &Client) -> DeviceIdentity {
     let memo_key = format!("rocm|{index}");
 
     remembered_identity(memo_key, || {
@@ -340,17 +341,24 @@ fn rocm_details(index: usize) -> Result<DeviceIdentity, anyhow::Error> {
 
 #[cfg(all(test, feature = "vulkan"))]
 mod tests {
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
 
     use super::*;
 
+    /// The test device on Vulkan, with a client on it.
+    fn test_vulkan_client() -> (WgpuDevice, Client) {
+        let selector = crate::testing::test_device();
+        let device = selector.to_wgpu().expect("the test device is a wgpu device");
+        let cubecl_device = cubecl::Device::from(device.clone());
+        let client = cubecl_device.client();
+        (device, client)
+    }
+
     #[test]
     fn the_default_vulkan_adapter_has_a_name_and_a_vendor() {
-        let device = WgpuDevice::DefaultDevice;
-        let client = <WgpuRuntime as Runtime>::client(&device);
-        let backend = *client.info();
+        let (device, client) = test_vulkan_client();
 
-        let identity = describe_wgpu(&device, backend, &client);
+        let identity = describe_wgpu(&device, wgpu::Backend::Vulkan, &client);
 
         assert_eq!(identity.backend, "vulkan");
         assert!(!identity.adapter.is_empty());
@@ -360,20 +368,17 @@ mod tests {
 
     #[test]
     fn describing_twice_gives_the_same_identity() {
-        let device = WgpuDevice::DefaultDevice;
-        let client = <WgpuRuntime as Runtime>::client(&device);
-        let backend = *client.info();
+        let (device, client) = test_vulkan_client();
 
-        let first = describe_wgpu(&device, backend, &client);
-        let second = describe_wgpu(&device, backend, &client);
+        let first = describe_wgpu(&device, wgpu::Backend::Vulkan, &client);
+        let second = describe_wgpu(&device, wgpu::Backend::Vulkan, &client);
 
         assert_eq!(first.identity_hash(), second.identity_hash());
     }
 
     #[test]
     fn the_fallback_identity_is_stable_for_one_device() {
-        let device = WgpuDevice::DefaultDevice;
-        let client = <WgpuRuntime as Runtime>::client(&device);
+        let (_, client) = test_vulkan_client();
 
         let first = fallback_identity("vulkan", &client);
         let second = fallback_identity("vulkan", &client);

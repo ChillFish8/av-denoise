@@ -1,7 +1,5 @@
 //! Picking a backend that actually works on this machine
 
-use cubecl::prelude::*;
-
 use super::accelerate::Accelerator;
 use super::device::Device;
 use super::probe::open_client;
@@ -34,22 +32,22 @@ pub fn sniff_best_accelerator(enable: &[Accelerator], device: &Device) -> Option
         let is_enabled = match accelerator {
             #[cfg(feature = "cuda")]
             Accelerator::Cuda => match device.to_cuda() {
-                Ok(cuda_device) => probe_runtime::<cubecl::cuda::CudaRuntime>(*accelerator, &cuda_device),
+                Ok(cuda_device) => probe_runtime(*accelerator, cuda_device.into()),
                 Err(_) => false,
             },
             #[cfg(feature = "rocm")]
             Accelerator::Rocm => match device.to_amd() {
-                Ok(amd_device) => probe_runtime::<cubecl::hip::HipRuntime>(*accelerator, &amd_device),
+                Ok(amd_device) => probe_runtime(*accelerator, amd_device.into()),
                 Err(_) => false,
             },
             #[cfg(feature = "vulkan")]
             Accelerator::Vulkan => match device.to_wgpu() {
-                Ok(wgpu_device) => probe_runtime::<cubecl::wgpu::WgpuRuntime>(*accelerator, &wgpu_device),
+                Ok(wgpu_device) => probe_runtime(*accelerator, wgpu_device.into()),
                 Err(_) => false,
             },
             #[cfg(feature = "metal")]
             Accelerator::Metal => match device.to_wgpu() {
-                Ok(wgpu_device) => probe_runtime::<cubecl::wgpu::WgpuRuntime>(*accelerator, &wgpu_device),
+                Ok(wgpu_device) => probe_runtime(*accelerator, wgpu_device.into()),
                 Err(_) => false,
             },
             // Keeps the match exhaustive on docs.rs, where `cfg(docsrs)` widens the `Accelerator` enum to
@@ -70,6 +68,6 @@ pub fn sniff_best_accelerator(enable: &[Accelerator], device: &Device) -> Option
     None
 }
 
-fn probe_runtime<R: Runtime>(accelerator: Accelerator, device: &R::Device) -> bool {
-    open_client::<R>(accelerator, device).is_some()
+fn probe_runtime(accelerator: Accelerator, device: cubecl::Device) -> bool {
+    open_client(accelerator, &device).is_some()
 }

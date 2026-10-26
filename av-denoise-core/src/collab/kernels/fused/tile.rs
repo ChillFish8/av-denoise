@@ -16,9 +16,9 @@ use crate::engine::kernels::read_line;
     reason = "every argument is a buffer, position or comptime shape the load needs"
 )]
 pub(crate) fn load_centre_tile<S: Float, N: Size>(
-    ring: &Array<Vector<f32, N>>,
-    search_ring: &Array<Vector<S, N>>,
-    tile: &mut SharedMemory<S>,
+    ring: &[Vector<f32, N>],
+    search_ring: &[Vector<S, N>],
+    tile: &mut Shared<[S]>,
     origin_x: u32,
     origin_y: u32,
     centre_slot: u32,
@@ -47,13 +47,14 @@ pub(crate) fn load_centre_tile<S: Float, N: Size>(
             let line = read_line(search_ring, source_x, source_y, centre_slot, width, height);
             #[unroll]
             for c in 0..stored_ch {
-                tile[(first_lane + c) as usize] = line[c as usize];
+                tile[(first_lane + c) as usize] = line.extract(c as usize);
             }
         } else {
             let line = read_line(ring, source_x, source_y, centre_slot, width, height);
             #[unroll]
             for c in 0..stored_ch {
-                tile[(first_lane + c) as usize] = S::cast_from(line[c as usize]);
+                let lane = line.extract(c as usize);
+                tile[(first_lane + c) as usize] = S::cast_from(lane);
             }
         }
 
@@ -69,9 +70,9 @@ pub(crate) fn load_centre_tile<S: Float, N: Size>(
 /// bit identical partials.
 #[cube]
 pub(crate) fn tile_partial<S: Float>(
-    tile: &SharedMemory<S>,
-    current: &Array<f32>,
-    reference: &Array<Vector<S, Const<2>>>,
+    tile: &Shared<[S]>,
+    current: &[f32],
+    reference: &[Vector<S, Const<2>>],
     column: u32,
     row: u32,
     #[comptime] tile_width: u32,

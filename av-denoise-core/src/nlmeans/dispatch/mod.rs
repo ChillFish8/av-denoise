@@ -52,80 +52,80 @@ pub(super) struct LaunchCtx {
     pub(super) cube_dim: CubeDim,
 }
 
-impl<R: Runtime> NlmDenoiser<R> {
-    fn input_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
-        bind::<R>(&self.input_buf, ctx.total_frame_data)
+impl NlmDenoiser {
+    fn input_arg(&self, ctx: &LaunchCtx) -> BufferArg {
+        bind(&self.input_buf, ctx.total_frame_data)
     }
 
-    fn reference_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
+    fn reference_arg(&self, ctx: &LaunchCtx) -> BufferArg {
         let reference = self
             .plain_reference()
             .expect("reference ring must exist when this kernel runs");
-        bind::<R>(&reference, ctx.total_frame_data)
+        bind(&reference, ctx.total_frame_data)
     }
 
     /// The input ring the temporal kernels read, which is the compensated one under motion
     /// compensation.
-    fn input_arg_for_temporal(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
+    fn input_arg_for_temporal(&self, ctx: &LaunchCtx) -> BufferArg {
         let input = self.temporal_input();
-        bind::<R>(&input, ctx.total_frame_data)
+        bind(&input, ctx.total_frame_data)
     }
 
     /// The reference ring the temporal `_ref` kernels read, which is the compensated one under
     /// motion compensation.
-    fn reference_arg_for_temporal(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
+    fn reference_arg_for_temporal(&self, ctx: &LaunchCtx) -> BufferArg {
         let reference = self
             .temporal_reference()
             .expect("reference ring must exist when this kernel runs");
-        bind::<R>(&reference, ctx.total_frame_data)
+        bind(&reference, ctx.total_frame_data)
     }
 
-    fn accum_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
-        unsafe { ArrayArg::from_raw_parts(self.accum.clone(), ctx.frame_size) }
+    fn accum_arg(&self, ctx: &LaunchCtx) -> BufferArg {
+        unsafe { BufferArg::from_raw_parts(self.accum.clone(), ctx.frame_size) }
     }
 
-    fn output_arg(&self, ctx: &LaunchCtx, slot: usize) -> ArrayArg<R> {
-        unsafe { ArrayArg::from_raw_parts(self.outputs[slot].clone(), ctx.frame_size) }
+    fn output_arg(&self, ctx: &LaunchCtx, slot: usize) -> BufferArg {
+        unsafe { BufferArg::from_raw_parts(self.outputs[slot].clone(), ctx.frame_size) }
     }
 
     /// The whole reference ring, for a kernel that picks its slot itself.
     ///
     /// Binding one slot would need its byte offset to meet the runtime's alignment, which a
     /// `width * height * stored_ch` frame stride cannot promise.
-    fn reference_ring_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
+    fn reference_ring_arg(&self, ctx: &LaunchCtx) -> BufferArg {
         let buf = self
             .reference_buf
             .as_ref()
             .expect("reference buffer must exist for the nlm spatial pilot");
-        unsafe { ArrayArg::from_raw_parts(buf.clone(), ctx.total_frame_data) }
+        unsafe { BufferArg::from_raw_parts(buf.clone(), ctx.total_frame_data) }
     }
 
-    fn weight_sum_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
-        unsafe { ArrayArg::from_raw_parts(self.weight_sum.clone(), ctx.pixels) }
+    fn weight_sum_arg(&self, ctx: &LaunchCtx) -> BufferArg {
+        unsafe { BufferArg::from_raw_parts(self.weight_sum.clone(), ctx.pixels) }
     }
 
-    fn max_weight_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
-        unsafe { ArrayArg::from_raw_parts(self.max_weight.clone(), ctx.pixels) }
+    fn max_weight_arg(&self, ctx: &LaunchCtx) -> BufferArg {
+        unsafe { BufferArg::from_raw_parts(self.max_weight.clone(), ctx.pixels) }
     }
 
-    fn weight_buf_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
-        unsafe { ArrayArg::from_raw_parts(self.weight_buf.clone(), ctx.pixels) }
+    fn weight_buf_arg(&self, ctx: &LaunchCtx) -> BufferArg {
+        unsafe { BufferArg::from_raw_parts(self.weight_buf.clone(), ctx.pixels) }
     }
 
-    fn raw_fwd_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
-        unsafe { ArrayArg::from_raw_parts(self.raw_fwd.clone(), ctx.pixels) }
+    fn raw_fwd_arg(&self, ctx: &LaunchCtx) -> BufferArg {
+        unsafe { BufferArg::from_raw_parts(self.raw_fwd.clone(), ctx.pixels) }
     }
 
-    fn raw_bwd_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
-        unsafe { ArrayArg::from_raw_parts(self.raw_bwd.clone(), ctx.pixels) }
+    fn raw_bwd_arg(&self, ctx: &LaunchCtx) -> BufferArg {
+        unsafe { BufferArg::from_raw_parts(self.raw_bwd.clone(), ctx.pixels) }
     }
 
-    fn tmp_hsum_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
-        unsafe { ArrayArg::from_raw_parts(self.tmp_hsum.clone(), ctx.pixels) }
+    fn tmp_hsum_arg(&self, ctx: &LaunchCtx) -> BufferArg {
+        unsafe { BufferArg::from_raw_parts(self.tmp_hsum.clone(), ctx.pixels) }
     }
 
-    fn tmp_hsum_bwd_arg(&self, ctx: &LaunchCtx) -> ArrayArg<R> {
-        unsafe { ArrayArg::from_raw_parts(self.tmp_hsum_bwd.clone(), ctx.pixels) }
+    fn tmp_hsum_bwd_arg(&self, ctx: &LaunchCtx) -> BufferArg {
+        unsafe { BufferArg::from_raw_parts(self.tmp_hsum_bwd.clone(), ctx.pixels) }
     }
 
     fn accum_outputs(&self, ctx: &LaunchCtx) -> AccumOutputs {
@@ -223,7 +223,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         reference: Option<Handle>,
         frame_t: u32,
         h2_field: u32,
-    ) -> WindowSite<R> {
+    ) -> WindowSite {
         let outputs = self.accum_outputs(ctx);
         let noise = self.derived_handle();
 
@@ -309,7 +309,7 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         if self.use_reference {
             unsafe {
-                nlm_distance_pair_ref::launch_unchecked::<R>(
+                nlm_distance_pair_ref::launch_unchecked(
                     &self.client,
                     ctx.cube_count.clone(),
                     ctx.cube_dim,
@@ -329,7 +329,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             }
         } else {
             unsafe {
-                nlm_distance_pair::launch_unchecked::<R>(
+                nlm_distance_pair::launch_unchecked(
                     &self.client,
                     ctx.cube_count.clone(),
                     ctx.cube_dim,
@@ -350,7 +350,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
 
         unsafe {
-            nlm_horizontal_sum_pair::launch_unchecked::<R>(
+            nlm_horizontal_sum_pair::launch_unchecked(
                 &self.client,
                 ctx.cube_count.clone(),
                 ctx.cube_dim,
@@ -367,13 +367,13 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
 
         let confidence = self.confidence_binding(q_k);
-        let conf_fwd = bind::<R>(&confidence.forward, confidence.len);
-        let conf_bwd = bind::<R>(&confidence.backward, confidence.len);
+        let conf_fwd = bind(&confidence.forward, confidence.len);
+        let conf_bwd = bind(&confidence.backward, confidence.len);
         let derived = self.derived_handle();
-        let noise = bind::<R>(&derived, DERIVED_WORDS as usize);
+        let noise = bind(&derived, DERIVED_WORDS as usize);
 
         unsafe {
-            nlm_vweight_pair_accumulate::launch_unchecked::<R>(
+            nlm_vweight_pair_accumulate::launch_unchecked(
                 &self.client,
                 ctx.cube_count.clone(),
                 ctx.cube_dim,
@@ -421,7 +421,7 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         if self.use_reference {
             unsafe {
-                nlm_distance_ref::launch_unchecked::<R>(
+                nlm_distance_ref::launch_unchecked(
                     &self.client,
                     ctx.cube_count.clone(),
                     ctx.cube_dim,
@@ -439,7 +439,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             }
         } else {
             unsafe {
-                nlm_distance::launch_unchecked::<R>(
+                nlm_distance::launch_unchecked(
                     &self.client,
                     ctx.cube_count.clone(),
                     ctx.cube_dim,
@@ -458,7 +458,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         }
 
         unsafe {
-            nlm_horizontal_sum::launch_unchecked::<R>(
+            nlm_horizontal_sum::launch_unchecked(
                 &self.client,
                 ctx.cube_count.clone(),
                 ctx.cube_dim,
@@ -474,14 +474,14 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         // The candidate's entry in the spatial table, which holds its correlation-adjusted offset.
         let derived = self.derived_handle();
-        let noise = bind::<R>(&derived, DERIVED_WORDS as usize);
+        let noise = bind(&derived, DERIVED_WORDS as usize);
         let offsets_len = spatial_offset_lut_len(self.params.search_radius);
         let offsets_handle = self.spatial_offsets_handle();
-        let offsets = bind::<R>(&offsets_handle, offsets_len);
+        let offsets = bind(&offsets_handle, offsets_len);
         let offset_index = spatial_offset_index(self.params.search_radius, q_x, q_y);
 
         unsafe {
-            nlm_vertical_weight::launch_unchecked::<R>(
+            nlm_vertical_weight::launch_unchecked(
                 &self.client,
                 ctx.cube_count.clone(),
                 ctx.cube_dim,
@@ -520,11 +520,11 @@ impl<R: Runtime> NlmDenoiser<R> {
         let grid = (ctx.frame_size as u32).div_ceil(BLOCK_1D).min(MAX_GRID_1D);
         let total_threads = grid * BLOCK_1D;
         unsafe {
-            gpu_zero_buffers::launch_unchecked::<R>(
+            gpu_zero_buffers::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(BLOCK_1D),
-                ArrayArg::from_raw_parts(self.accum.clone(), ctx.frame_size),
+                BufferArg::from_raw_parts(self.accum.clone(), ctx.frame_size),
                 self.weight_sum_arg(ctx),
                 self.max_weight_arg(ctx),
                 ctx.frame_size as u32,
@@ -542,18 +542,18 @@ impl<R: Runtime> NlmDenoiser<R> {
         ctx: &LaunchCtx,
         center_frame: u32,
         output_frame: u32,
-        output: ArrayArg<R>,
+        output: BufferArg,
     ) -> Result<(), anyhow::Error> {
         let channels = self.params.channels.count();
         unsafe {
-            nlm_finish::launch_unchecked::<R>(
+            nlm_finish::launch_unchecked(
                 &self.client,
                 ctx.cube_count.clone(),
                 ctx.cube_dim,
                 self.params.channels.storage_count() as usize,
                 self.input_arg(ctx),
                 output,
-                ArrayArg::from_raw_parts(self.accum.clone(), ctx.frame_size),
+                BufferArg::from_raw_parts(self.accum.clone(), ctx.frame_size),
                 self.weight_sum_arg(ctx),
                 self.max_weight_arg(ctx),
                 center_frame,

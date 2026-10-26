@@ -585,7 +585,7 @@ fn reset_stream_state_clears_the_curve() {
         }),
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.set_luma_noise_fields(true);
 
     let mut curve_seen = false;

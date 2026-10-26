@@ -13,11 +13,11 @@ pub struct HSumPairInput {
     output_bwd: Handle,
 }
 
-pub struct HSumPairBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct HSumPairBench {
+    pub client: Client,
 }
 
-impl<R: Runtime> Benchmark for HSumPairBench<R> {
+impl Benchmark for HSumPairBench {
     type Input = HSumPairInput;
     type Output = ();
 
@@ -44,14 +44,14 @@ impl<R: Runtime> Benchmark for HSumPairBench<R> {
         let cube_dim = cube_dim_2d();
 
         unsafe {
-            nlm_horizontal_sum_pair::launch_unchecked::<R>(
+            nlm_horizontal_sum_pair::launch_unchecked(
                 &self.client,
                 cube_count,
                 cube_dim,
-                ArrayArg::from_raw_parts(args.input_fwd.clone(), pixels),
-                ArrayArg::from_raw_parts(args.input_bwd.clone(), pixels),
-                ArrayArg::from_raw_parts(args.output_fwd.clone(), pixels),
-                ArrayArg::from_raw_parts(args.output_bwd.clone(), pixels),
+                BufferArg::from_raw_parts(args.input_fwd.clone(), pixels),
+                BufferArg::from_raw_parts(args.input_bwd.clone(), pixels),
+                BufferArg::from_raw_parts(args.output_fwd.clone(), pixels),
+                BufferArg::from_raw_parts(args.output_bwd.clone(), pixels),
                 WIDTH,
                 HEIGHT,
                 PATCH_RADIUS,

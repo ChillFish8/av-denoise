@@ -5,7 +5,7 @@ use super::reference::{reference_block_match_coarse, reference_block_match_fine}
 use crate::motion::kernels::{BLOCK_MATCH_THREADS, mc_block_match_coarse, mc_block_match_fine};
 use crate::noise::tests::sad_floor_buffer;
 use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
-use crate::tune::tests::runtime::{TestRuntime, test_client};
+use crate::tune::tests::runtime::test_client;
 
 const WIDTH: u32 = 72;
 const HEIGHT: u32 = 56;
@@ -74,17 +74,17 @@ fn frame_slots(width: u32, height: u32, slots_before: usize) -> (Vec<f32>, Vec<V
     (frames, planes, slot_pixels)
 }
 
-fn upload_f32(client: &ComputeClient<TestRuntime>, values: &[f32]) -> Handle {
+fn upload_f32(client: &Client, values: &[f32]) -> Handle {
     let bytes = f32::as_bytes(values);
     client.create_from_slice(bytes)
 }
 
-fn upload_i32(client: &ComputeClient<TestRuntime>, values: &[i32]) -> Handle {
+fn upload_i32(client: &Client, values: &[i32]) -> Handle {
     let bytes = i32::as_bytes(values);
     client.create_from_slice(bytes)
 }
 
-fn upload_u32(client: &ComputeClient<TestRuntime>, values: &[u32]) -> Handle {
+fn upload_u32(client: &Client, values: &[u32]) -> Handle {
     let bytes = u32::as_bytes(values);
     client.create_from_slice(bytes)
 }
@@ -125,15 +125,15 @@ fn run_fine_merged_against_reference(use_seed: u32, threads: u32) {
         let seeds_len = seeds.len();
         let confidence_handle = confidence.clone();
         let unwritten_len = unwritten.len();
-        let pyramid_arg = ArrayArg::from_raw_parts(pyramid, frames_len);
-        let table_arg = ArrayArg::from_raw_parts(table, neighbours);
-        let mv_field_arg = ArrayArg::from_raw_parts(mv_field_handle, seeds_len);
-        let confidence_arg = ArrayArg::from_raw_parts(confidence_handle, unwritten_len);
+        let pyramid_arg = BufferArg::from_raw_parts(pyramid, frames_len);
+        let table_arg = BufferArg::from_raw_parts(table, neighbours);
+        let mv_field_arg = BufferArg::from_raw_parts(mv_field_handle, seeds_len);
+        let confidence_arg = BufferArg::from_raw_parts(confidence_handle, unwritten_len);
 
         let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, NOISE_FLOOR);
-        let noise_arg = ArrayArg::from_raw_parts(noise, DERIVED_WORDS as usize);
+        let noise_arg = BufferArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
-        mc_block_match_fine::launch_unchecked::<TestRuntime>(
+        mc_block_match_fine::launch_unchecked(
             &client,
             grid,
             dim,
@@ -177,12 +177,12 @@ fn run_fine_merged_against_reference(use_seed: u32, threads: u32) {
         unsafe {
             let reference_mv_handle = reference_mv.clone();
             let reference_conf_handle = reference_conf.clone();
-            let centre_arg = ArrayArg::from_raw_parts(centre, level_len);
-            let neighbour_arg = ArrayArg::from_raw_parts(neighbour, level_len);
-            let reference_mv_arg = ArrayArg::from_raw_parts(reference_mv_handle, 2 * blocks);
-            let reference_conf_arg = ArrayArg::from_raw_parts(reference_conf_handle, blocks);
+            let centre_arg = BufferArg::from_raw_parts(centre, level_len);
+            let neighbour_arg = BufferArg::from_raw_parts(neighbour, level_len);
+            let reference_mv_arg = BufferArg::from_raw_parts(reference_mv_handle, 2 * blocks);
+            let reference_conf_arg = BufferArg::from_raw_parts(reference_conf_handle, blocks);
 
-            reference_block_match_fine::launch_unchecked::<TestRuntime>(
+            reference_block_match_fine::launch_unchecked(
                 &client,
                 reference_grid,
                 dim,
@@ -259,11 +259,11 @@ fn run_coarse_merged_against_reference(threads: u32) {
         let frames_len = frames.len();
         let mv_field_handle = mv_field.clone();
         let unwritten_len = unwritten.len();
-        let pyramid_arg = ArrayArg::from_raw_parts(pyramid, frames_len);
-        let table_arg = ArrayArg::from_raw_parts(table, neighbours);
-        let mv_field_arg = ArrayArg::from_raw_parts(mv_field_handle, unwritten_len);
+        let pyramid_arg = BufferArg::from_raw_parts(pyramid, frames_len);
+        let table_arg = BufferArg::from_raw_parts(table, neighbours);
+        let mv_field_arg = BufferArg::from_raw_parts(mv_field_handle, unwritten_len);
 
-        mc_block_match_coarse::launch_unchecked::<TestRuntime>(
+        mc_block_match_coarse::launch_unchecked(
             &client,
             grid,
             dim,
@@ -299,11 +299,11 @@ fn run_coarse_merged_against_reference(threads: u32) {
 
         unsafe {
             let reference_mv_handle = reference_mv.clone();
-            let centre_arg = ArrayArg::from_raw_parts(centre, level_len);
-            let neighbour_arg = ArrayArg::from_raw_parts(neighbour, level_len);
-            let reference_mv_arg = ArrayArg::from_raw_parts(reference_mv_handle, 2 * fine_blocks);
+            let centre_arg = BufferArg::from_raw_parts(centre, level_len);
+            let neighbour_arg = BufferArg::from_raw_parts(neighbour, level_len);
+            let reference_mv_arg = BufferArg::from_raw_parts(reference_mv_handle, 2 * fine_blocks);
 
-            reference_block_match_coarse::launch_unchecked::<TestRuntime>(
+            reference_block_match_coarse::launch_unchecked(
                 &client,
                 reference_grid,
                 dim,

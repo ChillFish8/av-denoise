@@ -12,7 +12,7 @@ use crate::engine::kernels::read_line;
 /// one unfilled pair.
 #[cube]
 pub(crate) fn pack_reference<S: Float>(
-    current: &Array<f32>,
+    current: &[f32],
     #[comptime] shape: SearchShape,
 ) -> Array<Vector<S, Const<2>>> {
     let f16_search = comptime!(shape.f16_search);
@@ -33,8 +33,8 @@ pub(crate) fn pack_reference<S: Float>(
         #[unroll]
         for r in 0..comptime!(PATCH_SIZE / 2) {
             let mut pair = Vector::<f32, Const<2>>::new(0.0f32);
-            pair[0] = current[r as usize];
-            pair[1] = current[comptime!(r + PATCH_SIZE / 2) as usize];
+            pair.insert(0usize, current[r as usize]);
+            pair.insert(1usize, current[comptime!(r + PATCH_SIZE / 2) as usize]);
             packed[r as usize] = Vector::<S, Const<2>>::cast_from(pair);
         }
     } else if comptime!(f16_search) {
@@ -47,10 +47,10 @@ pub(crate) fn pack_reference<S: Float>(
                 let second = comptime!(2 * p + 1);
                 let mut pair = Vector::<f32, Const<2>>::new(0.0f32);
                 if comptime!(first < channels) {
-                    pair[0] = current[comptime!(r * channels + first) as usize];
+                    pair.insert(0usize, current[comptime!(r * channels + first) as usize]);
                 }
                 if comptime!(second < channels) {
-                    pair[1] = current[comptime!(r * channels + second) as usize];
+                    pair.insert(1usize, current[comptime!(r * channels + second) as usize]);
                 }
                 packed[comptime!(r * pairs_per_row + p) as usize] = Vector::<S, Const<2>>::cast_from(pair);
             }
@@ -64,14 +64,14 @@ pub(crate) fn pack_reference<S: Float>(
 /// `second`, in the ring's precision `S`.
 #[cube]
 pub(crate) fn pair_squared_difference<S: Float>(
-    reference: &Array<Vector<S, Const<2>>>,
+    reference: &[Vector<S, Const<2>>],
     first: S,
     second: S,
     #[comptime] pair: u32,
 ) -> Vector<S, Const<2>> {
     let mut pixel = Vector::<S, Const<2>>::empty();
-    pixel[0] = first;
-    pixel[1] = second;
+    pixel.insert(0usize, first);
+    pixel.insert(1usize, second);
     let diff = reference[pair as usize] - pixel;
     diff * diff
 }
@@ -79,8 +79,10 @@ pub(crate) fn pair_squared_difference<S: Float>(
 /// Widens both lanes of a pair sum to f32 and adds them.
 #[cube]
 pub(crate) fn pair_sum_total<S: Float>(sum: Vector<S, Const<2>>) -> f32 {
-    let low = f32::cast_from(sum[0]);
-    let high = f32::cast_from(sum[1]);
+    let low_lane = sum.extract(0usize);
+    let high_lane = sum.extract(1usize);
+    let low = f32::cast_from(low_lane);
+    let high = f32::cast_from(high_lane);
     low + high
 }
 
@@ -90,8 +92,8 @@ pub(crate) fn pair_sum_total<S: Float>(sum: Vector<S, Const<2>>) -> f32 {
 /// values in the ring's precision `S`. The two lanes of the sum widen to f32 before they add.
 #[cube]
 pub(crate) fn packed_partial<S: Float, N: Size>(
-    search_ring: &Array<Vector<S, N>>,
-    reference: &Array<Vector<S, Const<2>>>,
+    search_ring: &[Vector<S, N>],
+    reference: &[Vector<S, Const<2>>],
     x: u32,
     y: u32,
     slot: u32,
@@ -109,7 +111,9 @@ pub(crate) fn packed_partial<S: Float, N: Size>(
             let top = read_line(search_ring, x + sub, y + r, slot, width, height);
             let bottom_row = y + r + comptime!(PATCH_SIZE / 2);
             let bottom = read_line(search_ring, x + sub, bottom_row, slot, width, height);
-            let squared = pair_squared_difference(reference, top[0], bottom[0], r);
+            let top_lane = top.extract(0usize);
+            let bottom_lane = bottom.extract(0usize);
+            let squared = pair_squared_difference(reference, top_lane, bottom_lane, r);
             sum += squared;
         }
     } else {
@@ -119,8 +123,8 @@ pub(crate) fn packed_partial<S: Float, N: Size>(
             let line = read_line(search_ring, x + sub, y + r, slot, width, height);
             #[unroll]
             for p in 0..pairs_per_row {
-                let first = line[comptime!(2 * p) as usize];
-                let second = line[comptime!(2 * p + 1) as usize];
+                let first = line.extract(comptime!(2 * p) as usize);
+                let second = line.extract(comptime!(2 * p + 1) as usize);
                 let pair = comptime!(r * pairs_per_row + p);
                 let squared = pair_squared_difference(reference, first, second, pair);
                 sum += squared;
@@ -142,10 +146,10 @@ pub(crate) fn packed_partial<S: Float, N: Size>(
     reason = "every argument is a buffer, position or comptime shape the read needs"
 )]
 pub(crate) fn candidate_partial<S: Float, N: Size>(
-    ring: &Array<Vector<f32, N>>,
-    search_ring: &Array<Vector<S, N>>,
-    current: &Array<f32>,
-    reference: &Array<Vector<S, Const<2>>>,
+    ring: &[Vector<f32, N>],
+    search_ring: &[Vector<S, N>],
+    current: &[f32],
+    reference: &[Vector<S, Const<2>>],
     x: u32,
     y: u32,
     slot: u32,
@@ -166,7 +170,7 @@ pub(crate) fn candidate_partial<S: Float, N: Size>(
             let pixel = read_line(ring, x + sub, y + r, slot, width, height);
             #[unroll]
             for c in 0..channels {
-                let diff = current[(r * channels + c) as usize] - pixel[c as usize];
+                let diff = current[(r * channels + c) as usize] - pixel.extract(c as usize);
                 partial += diff * diff;
             }
         }
@@ -185,10 +189,10 @@ pub(crate) fn candidate_partial<S: Float, N: Size>(
     reason = "every argument is a buffer, position or comptime shape the read needs"
 )]
 pub(crate) fn candidate_distance<S: Float, N: Size>(
-    ring: &Array<Vector<f32, N>>,
-    search_ring: &Array<Vector<S, N>>,
-    current: &Array<f32>,
-    reference: &Array<Vector<S, Const<2>>>,
+    ring: &[Vector<f32, N>],
+    search_ring: &[Vector<S, N>],
+    current: &[f32],
+    reference: &[Vector<S, Const<2>>],
     x: u32,
     y: u32,
     slot: u32,

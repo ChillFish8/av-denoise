@@ -26,7 +26,7 @@ use crate::noise::select::{
 };
 use crate::noise::stats::{lower_quartile, median};
 use crate::tune::tests::fixtures::upload;
-use crate::tune::tests::runtime::{TestRuntime, test_client};
+use crate::tune::tests::runtime::test_client;
 
 const ALL_RULES: [RankRule; 6] = [
     RankRule::First,
@@ -47,7 +47,7 @@ const PERCENTILE_RULES: [RankRule; 4] = [
 const MEDIAN_RULES: [RankRule; 2] = [RankRule::MedianLow, RankRule::MedianHigh];
 
 #[cube(launch_unchecked)]
-fn order_key_round_trip(values: &Array<f32>, keys: &mut Array<u32>, back: &mut Array<f32>) {
+fn order_key_round_trip(values: &[f32], keys: &mut [u32], back: &mut [f32]) {
     let index = UNIT_POS_X as usize;
     let key = order_key(values[index]);
 
@@ -81,7 +81,7 @@ fn hashed_unit(seed: u32, index: u32) -> f32 {
 }
 
 fn batch_from_values(
-    client: &ComputeClient<TestRuntime>,
+    client: &Client,
     values: &[f32],
     tags: &[u32],
     min_counts: &[u32],
@@ -92,27 +92,23 @@ fn batch_from_values(
     SelectBatch::from_elements(client, &keys, tags, min_counts, queries)
 }
 
-fn read_u32(client: &ComputeClient<TestRuntime>, handle: &Handle) -> Vec<u32> {
+fn read_u32(client: &Client, handle: &Handle) -> Vec<u32> {
     let bytes = client.read_one(handle.clone()).expect("readback failed");
     u32::from_bytes(&bytes).to_vec()
 }
 
-fn read_i32(client: &ComputeClient<TestRuntime>, handle: &Handle) -> Vec<i32> {
+fn read_i32(client: &Client, handle: &Handle) -> Vec<i32> {
     let bytes = client.read_one(handle.clone()).expect("readback failed");
     i32::from_bytes(&bytes).to_vec()
 }
 
-fn read_f32(client: &ComputeClient<TestRuntime>, handle: &Handle) -> Vec<f32> {
+fn read_f32(client: &Client, handle: &Handle) -> Vec<f32> {
     let bytes = client.read_one(handle.clone()).expect("readback failed");
     f32::from_bytes(&bytes).to_vec()
 }
 
 /// Resolves every query of a queued batch with one cube of `cube_threads` threads.
-fn resolve(
-    client: &ComputeClient<TestRuntime>,
-    batch: &SelectBatch,
-    cube_threads: u32,
-) -> (Vec<f32>, Vec<u32>) {
+fn resolve(client: &Client, batch: &SelectBatch, cube_threads: u32) -> (Vec<f32>, Vec<u32>) {
     let query_count = batch.query_count();
     let values = upload(client, &vec![-1.0; query_count as usize]);
     let counts = upload(client, &vec![-1.0; query_count as usize]);
@@ -122,16 +118,16 @@ fn resolve(
     let tag_words = (batch.tag_count() * SELECT_TAG_WORDS) as usize;
 
     unsafe {
-        noise_select_resolve::launch_unchecked::<TestRuntime>(
+        noise_select_resolve::launch_unchecked(
             client,
             CubeCount::new_1d(1),
             CubeDim::new_1d(cube_threads),
-            ArrayArg::from_raw_parts(batch.histogram().clone(), histogram_len),
-            ArrayArg::from_raw_parts(batch.state().clone(), state_len),
-            ArrayArg::from_raw_parts(batch.query_table().clone(), query_words),
-            ArrayArg::from_raw_parts(batch.tag_table().clone(), tag_words),
-            ArrayArg::from_raw_parts(values.clone(), query_count as usize),
-            ArrayArg::from_raw_parts(counts.clone(), query_count as usize),
+            BufferArg::from_raw_parts(batch.histogram().clone(), histogram_len),
+            BufferArg::from_raw_parts(batch.state().clone(), state_len),
+            BufferArg::from_raw_parts(batch.query_table().clone(), query_words),
+            BufferArg::from_raw_parts(batch.tag_table().clone(), tag_words),
+            BufferArg::from_raw_parts(values.clone(), query_count as usize),
+            BufferArg::from_raw_parts(counts.clone(), query_count as usize),
             batch.tag_count(),
             query_count,
             cube_threads,
@@ -176,7 +172,7 @@ fn select_tag(residue: u32) -> u32 {
 
 /// Queues and resolves a batch, and checks every query against the host sort bit for bit.
 fn assert_matches_host(
-    client: &ComputeClient<TestRuntime>,
+    client: &Client,
     values: &[f32],
     tags: &[u32],
     queries: &[SelectQuery],
@@ -251,13 +247,13 @@ fn order_keys_sort_like_the_floats() {
     let back = upload(&client, &vec![0.0; count]);
 
     unsafe {
-        order_key_round_trip::launch_unchecked::<TestRuntime>(
+        order_key_round_trip::launch_unchecked(
             &client,
             CubeCount::new_1d(1),
             CubeDim::new_1d(count as u32),
-            ArrayArg::from_raw_parts(input.clone(), count),
-            ArrayArg::from_raw_parts(keys.clone(), count),
-            ArrayArg::from_raw_parts(back.clone(), count),
+            BufferArg::from_raw_parts(input.clone(), count),
+            BufferArg::from_raw_parts(keys.clone(), count),
+            BufferArg::from_raw_parts(back.clone(), count),
         );
     }
 

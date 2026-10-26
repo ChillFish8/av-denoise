@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cubecl::prelude::*;
+use cubecl::server::Handle;
 
 use super::fixtures::{
     AccumulateSpec,
@@ -14,7 +15,7 @@ use super::fixtures::{
     window_site,
 };
 use super::probe::{ProbeCandidate, ProbeSite, small_device_limits};
-use super::runtime::{TestRuntime, test_client, wgpu_only};
+use super::runtime::{test_client, wgpu_only};
 use crate::nlmeans::ChannelMode;
 use crate::tune::gpu::read_f32;
 use crate::tune::precompile::CompileAccount;
@@ -44,7 +45,7 @@ wgpu_only! {
     use crate::tune::median;
 }
 
-fn tuning_selector(ledger: &Arc<TuneLedger>, limits: DeviceLimits) -> KernelSelector<TestRuntime> {
+fn tuning_selector(ledger: &Arc<TuneLedger>, limits: DeviceLimits) -> KernelSelector {
     let client = test_client();
     let kernels = EngineKernels {
         ledger: Some(ledger.clone()),
@@ -54,20 +55,20 @@ fn tuning_selector(ledger: &Arc<TuneLedger>, limits: DeviceLimits) -> KernelSele
     KernelSelector::with_limits(&client, kernels, limits)
 }
 
-fn tune_once<S: VariantSite<TestRuntime>>(site: &S, deterministic: bool) -> Arc<TuneLedger> {
+fn tune_once<S: VariantSite>(site: &S, deterministic: bool) -> Arc<TuneLedger> {
     let ledger = TuneLedger::new(deterministic);
     tune_on(site, ledger)
 }
 
 /// Tunes `site` once under a pass whose compile ceiling is `ceiling`.
-fn tune_within<S: VariantSite<TestRuntime>>(site: &S, ceiling: Duration) -> Arc<TuneLedger> {
+fn tune_within<S: VariantSite>(site: &S, ceiling: Duration) -> Arc<TuneLedger> {
     let ledger = TuneLedger::new(false);
     ledger.begin_compile_pass(ceiling);
 
     tune_on(site, ledger)
 }
 
-fn tune_on<S: VariantSite<TestRuntime>>(site: &S, ledger: Arc<TuneLedger>) -> Arc<TuneLedger> {
+fn tune_on<S: VariantSite>(site: &S, ledger: Arc<TuneLedger>) -> Arc<TuneLedger> {
     let client = test_client();
     let limits = DeviceLimits::from_client(&client);
     ledger.set_phase(TunePhase::Tune);
@@ -343,16 +344,16 @@ impl SiteCandidate for FaultCandidate {
 /// The accumulate site with an extra candidate that launches nothing and so always looks fastest.
 #[derive(Clone)]
 struct FaultySite {
-    inner: AccumulateSite<TestRuntime>,
+    inner: AccumulateSite,
     /// Whether the extra candidate's launch panics, the way a candidate that fails to compile does.
     broken_panics: bool,
 }
 
-impl VariantSite<TestRuntime> for FaultySite {
+impl VariantSite for FaultySite {
     type Candidate = FaultCandidate;
     type Outputs = AccumOutputs;
 
-    fn client(&self) -> &ComputeClient<TestRuntime> {
+    fn client(&self) -> &Client {
         self.inner.client()
     }
 
@@ -366,6 +367,10 @@ impl VariantSite<TestRuntime> for FaultySite {
 
     fn shared_bytes(&self, _candidate: FaultCandidate) -> usize {
         0
+    }
+
+    fn output_handles(&self, outputs: &AccumOutputs) -> Vec<Handle> {
+        outputs.handles()
     }
 
     fn launch(&self, candidate: FaultCandidate, outputs: &AccumOutputs) {
@@ -483,7 +488,7 @@ wgpu_only! {
         assert_eq!(launches.last(), Some(&ProbeCandidate::Small));
     }
 
-    fn median_profile(site: &AccumulateSite<TestRuntime>, outputs: &AccumOutputs, launches: u32) -> Duration {
+    fn median_profile(site: &AccumulateSite, outputs: &AccumOutputs, launches: u32) -> Duration {
         let baseline = site.baseline();
         let mut timings = Vec::new();
 

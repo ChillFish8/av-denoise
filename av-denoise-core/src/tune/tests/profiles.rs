@@ -1,5 +1,5 @@
 use super::engine::{nl4d_outputs_with, noisy_frames};
-use super::runtime::{TestRuntime, packed_supported, test_client};
+use super::runtime::{packed_supported, test_client};
 use crate::Nl4dOptions;
 use crate::bench_api::HostIo;
 use crate::nl4d::denoiser::Nl4dDenoiser;
@@ -56,8 +56,8 @@ fn two_streams(
         ..EngineKernels::default()
     };
     let selector = KernelSelector::new(&client, kernels);
-    let mut denoiser = Nl4dDenoiser::<TestRuntime>::with_kernels(&client, params, WIDTH, HEIGHT, selector)
-        .expect("the denoiser builds");
+    let mut denoiser =
+        Nl4dDenoiser::with_kernels(&client, params, WIDTH, HEIGHT, selector).expect("the denoiser builds");
     let mut outputs = Vec::new();
 
     for stream in [first, second] {

@@ -16,6 +16,7 @@ use av_denoise_core::bench_api::collab::kernels::fused::{CollabVariant, collab_f
 use av_denoise_core::bench_api::collab::kernels::transforms::dct_noise_profile;
 use av_denoise_core::bench_api::collab::{PATCH_SIZE, grid_frames, supports_f16_search};
 use av_denoise_core::bench_api::{BLOCK_X, BLOCK_Y, DERIVED_WORDS, DerivedValues, Device, NOISE_CURVE_BINS};
+use av_denoise_core::testing;
 use clap::Parser;
 use cubecl::benchmark::{Benchmark, BenchmarkComputations, TimingMethod};
 use cubecl::prelude::*;
@@ -86,13 +87,13 @@ fn frame_data(geometry: PlaneGeometry) -> Vec<f32> {
     data
 }
 
-fn block_sync<R: Runtime>(client: &ComputeClient<R>) {
+fn block_sync(client: &Client) {
     let sync = client.sync();
     cubecl::future::block_on(sync).unwrap();
 }
 
-struct Rig<R: Runtime> {
-    client: ComputeClient<R>,
+struct Rig {
+    client: Client,
     geometry: PlaneGeometry,
     ring: Handle,
     ring_len: usize,
@@ -129,8 +130,8 @@ struct Rig<R: Runtime> {
     conf_stride: u32,
 }
 
-impl<R: Runtime> Rig<R> {
-    fn new(client: ComputeClient<R>, geometry: PlaneGeometry) -> Self {
+impl Rig {
+    fn new(client: Client, geometry: PlaneGeometry) -> Self {
         let mut ring_data = Vec::new();
         for _ in 0..N_FRAMES {
             let frame = frame_data(geometry);
@@ -289,26 +290,26 @@ impl<R: Runtime> Rig<R> {
         let frames_per_volume = grid_frames(RADIUS);
 
         unsafe {
-            let ring_scalar = ArrayArg::from_raw_parts(self.ring.clone(), self.ring_len);
-            collab_fused::launch_unchecked::<S, i32, R>(
+            let ring_scalar = BufferArg::from_raw_parts(self.ring.clone(), self.ring_len);
+            collab_fused::launch_unchecked::<S, i32>(
                 &self.client,
                 CubeCount::new_2d(cubes_x, refs_y),
                 cube_dim,
                 geometry.stored_channels as usize,
-                ArrayArg::from_raw_parts(self.ring.clone(), self.ring_len),
+                BufferArg::from_raw_parts(self.ring.clone(), self.ring_len),
                 ring_scalar,
-                ArrayArg::from_raw_parts(search_ring.clone(), search_len),
-                ArrayArg::from_raw_parts(self.mv_field.clone(), self.mv_len),
-                ArrayArg::from_raw_parts(self.confidence.clone(), self.conf_len),
-                ArrayArg::from_raw_parts(self.neighbour_slots.clone(), NEIGHBOUR_SLOTS.len()),
-                ArrayArg::from_raw_parts(self.noise.clone(), DERIVED_WORDS as usize),
-                ArrayArg::from_raw_parts(self.zero_curve.clone(), NOISE_CURVE_BINS),
-                ArrayArg::from_raw_parts(self.unit_map.clone(), self.map_len),
-                ArrayArg::from_raw_parts(self.dct_profile.clone(), 8),
-                ArrayArg::from_raw_parts(kaiser.clone(), PATCH_SIZE as usize),
-                ArrayArg::from_raw_parts(self.accum.clone(), frame_len * N_FRAMES as usize),
-                ArrayArg::from_raw_parts(self.wsum.clone(), pixels * N_FRAMES as usize),
-                ArrayArg::from_raw_parts(self.group_weight.clone(), refs),
+                BufferArg::from_raw_parts(search_ring.clone(), search_len),
+                BufferArg::from_raw_parts(self.mv_field.clone(), self.mv_len),
+                BufferArg::from_raw_parts(self.confidence.clone(), self.conf_len),
+                BufferArg::from_raw_parts(self.neighbour_slots.clone(), NEIGHBOUR_SLOTS.len()),
+                BufferArg::from_raw_parts(self.noise.clone(), DERIVED_WORDS as usize),
+                BufferArg::from_raw_parts(self.zero_curve.clone(), NOISE_CURVE_BINS),
+                BufferArg::from_raw_parts(self.unit_map.clone(), self.map_len),
+                BufferArg::from_raw_parts(self.dct_profile.clone(), 8),
+                BufferArg::from_raw_parts(kaiser.clone(), PATCH_SIZE as usize),
+                BufferArg::from_raw_parts(self.accum.clone(), frame_len * N_FRAMES as usize),
+                BufferArg::from_raw_parts(self.wsum.clone(), pixels * N_FRAMES as usize),
+                BufferArg::from_raw_parts(self.group_weight.clone(), refs),
                 CENTRE_SLOT,
                 0.0f32,
                 LAMBDA_HT,
@@ -348,14 +349,14 @@ impl<R: Runtime> Rig<R> {
         let cubes_y = geometry.height.div_ceil(BLOCK_Y);
 
         unsafe {
-            collab_normalise::launch_unchecked::<R>(
+            collab_normalise::launch_unchecked(
                 &self.client,
                 CubeCount::new_2d(cubes_x, cubes_y),
                 CubeDim::new_2d(BLOCK_X, BLOCK_Y),
                 geometry.stored_channels as usize,
-                ArrayArg::from_raw_parts(self.accum.clone(), frame_len * N_FRAMES as usize),
-                ArrayArg::from_raw_parts(self.wsum.clone(), pixels * N_FRAMES as usize),
-                ArrayArg::from_raw_parts(self.output.clone(), frame_len),
+                BufferArg::from_raw_parts(self.accum.clone(), frame_len * N_FRAMES as usize),
+                BufferArg::from_raw_parts(self.wsum.clone(), pixels * N_FRAMES as usize),
+                BufferArg::from_raw_parts(self.output.clone(), frame_len),
                 0u32,
                 geometry.width,
                 geometry.height,
@@ -373,12 +374,12 @@ impl<R: Runtime> Rig<R> {
         let grid = (frame_len as u32).div_ceil(dim).min(65_535);
 
         unsafe {
-            collab_zero_accum::launch_unchecked::<R>(
+            collab_zero_accum::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(dim),
-                ArrayArg::from_raw_parts(self.accum.clone(), frame_len * N_FRAMES as usize),
-                ArrayArg::from_raw_parts(self.wsum.clone(), pixels * N_FRAMES as usize),
+                BufferArg::from_raw_parts(self.accum.clone(), frame_len * N_FRAMES as usize),
+                BufferArg::from_raw_parts(self.wsum.clone(), pixels * N_FRAMES as usize),
                 0u32,
                 pixels as u32,
                 geometry.stored_channels,
@@ -388,13 +389,13 @@ impl<R: Runtime> Rig<R> {
     }
 }
 
-struct Arm<'a, R: Runtime> {
-    rig: &'a Rig<R>,
+struct Arm<'a> {
+    rig: &'a Rig,
     kernel: &'static str,
     prime: bool,
 }
 
-impl<R: Runtime> Benchmark for Arm<'_, R> {
+impl Benchmark for Arm<'_> {
     type Input = ();
     type Output = ();
 
@@ -447,71 +448,62 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
 
-    #[cfg(feature = "vulkan")]
-    {
-        let device = cli.device.to_wgpu().expect("wgpu device conversion failed");
-        let client = cubecl::wgpu::WgpuRuntime::client(&device);
-        let alignment = client.properties().memory.alignment;
-        println!("\ncollab kernels at real per-frame geometry, TimingMethod::Device");
-        println!("  device: {device:?}");
-        println!("  buffer alignment: {} bytes\n", alignment);
+    let accelerator = testing::test_accelerator();
+    let device = testing::device_on(accelerator, cli.device);
+    let client = device.client();
+    let alignment = client.properties().memory.alignment;
+    println!("\ncollab kernels at real per-frame geometry, TimingMethod::Device");
+    println!("  device: {device:?}");
+    println!("  buffer alignment: {} bytes\n", alignment);
 
-        // (name, prime). A primed arm runs `fused` once before it is timed, so `normalise` reads
-        // real accumulator contents rather than an empty buffer.
-        let kernels = [
-            ("zero_accum", false),
-            ("fused", false),
-            ("fused_kaiser", false),
-            ("fused_prod", false),
-            ("fused_prod_f16", false),
-            ("normalise", true),
-        ];
-        let mut totals = vec![0.0f64; kernels.len()];
-        let f16_supported = supports_f16_search(&client);
+    // (name, prime). A primed arm runs `fused` once before it is timed, so `normalise` reads
+    // real accumulator contents rather than an empty buffer.
+    let kernels = [
+        ("zero_accum", false),
+        ("fused", false),
+        ("fused_kaiser", false),
+        ("fused_prod", false),
+        ("fused_prod_f16", false),
+        ("normalise", true),
+    ];
+    let mut totals = vec![0.0f64; kernels.len()];
+    let f16_supported = supports_f16_search(&client);
 
-        for plane in PLANES {
-            let rig = Rig::<cubecl::wgpu::WgpuRuntime>::new(client.clone(), *plane);
-            for (index, (kernel, prime)) in kernels.iter().enumerate() {
-                if *kernel == "fused_prod_f16" && !f16_supported {
-                    println!("  {kernel:<15} skipped, the device has no f16 search");
-                    continue;
-                }
-
-                let arm = Arm {
-                    rig: &rig,
-                    kernel,
-                    prime: *prime,
-                };
-                let name = arm.name();
-                match arm.run(TimingMethod::Device) {
-                    Ok(durations) => {
-                        let computations = BenchmarkComputations::new(&durations);
-                        let median_ms = computations.median.as_secs_f64() * 1000.0;
-                        totals[index] += median_ms;
-                        println!("  {name:<40} {median_ms:>8.3} ms");
-                    },
-                    Err(err) => println!("  {name:<40}  error: {err}"),
-                }
+    for plane in PLANES {
+        let rig = Rig::new(client.clone(), *plane);
+        for (index, (kernel, prime)) in kernels.iter().enumerate() {
+            if *kernel == "fused_prod_f16" && !f16_supported {
+                println!("  {kernel:<15} skipped, the device has no f16 search");
+                continue;
             }
 
-            println!();
+            let arm = Arm {
+                rig: &rig,
+                kernel,
+                prime: *prime,
+            };
+            let name = arm.name();
+            match arm.run(TimingMethod::Device) {
+                Ok(durations) => {
+                    let computations = BenchmarkComputations::new(&durations);
+                    let median_ms = computations.median.as_secs_f64() * 1000.0;
+                    totals[index] += median_ms;
+                    println!("  {name:<40} {median_ms:>8.3} ms");
+                },
+                Err(err) => println!("  {name:<40}  error: {err}"),
+            }
         }
 
-        println!("  --- per frame, both planes summed ---");
-        let mut grand_total = 0.0;
-        for (index, (kernel, _)) in kernels.iter().enumerate() {
-            grand_total += totals[index];
-            println!("  {:<40} {:>8.3} ms", *kernel, totals[index]);
-        }
-
-        println!("  {:<40} {:>8.3} ms", "COLLAB TOTAL", grand_total);
         println!();
     }
 
-    #[cfg(not(feature = "vulkan"))]
-    {
-        let _ = cli;
-        eprintln!("No GPU backend enabled. Run with --features vulkan");
-        std::process::exit(1);
+    println!("  --- per frame, both planes summed ---");
+    let mut grand_total = 0.0;
+    for (index, (kernel, _)) in kernels.iter().enumerate() {
+        grand_total += totals[index];
+        println!("  {:<40} {:>8.3} ms", *kernel, totals[index]);
     }
+
+    println!("  {:<40} {:>8.3} ms", "COLLAB TOTAL", grand_total);
+    println!();
 }

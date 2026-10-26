@@ -37,8 +37,8 @@ pub struct IngestInput {
     ring: Handle,
 }
 
-pub struct IngestBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct IngestBench {
+    pub client: Client,
     pub width: u32,
     pub height: u32,
     pub channels: u32,
@@ -46,7 +46,7 @@ pub struct IngestBench<R: Runtime> {
     pub format: IngestFormat,
 }
 
-impl<R: Runtime> IngestBench<R> {
+impl IngestBench {
     fn pixels(&self) -> u32 {
         self.width * self.height
     }
@@ -62,7 +62,7 @@ impl<R: Runtime> IngestBench<R> {
     }
 }
 
-impl<R: Runtime> Benchmark for IngestBench<R> {
+impl Benchmark for IngestBench {
     type Input = IngestInput;
     type Output = ();
 
@@ -95,28 +95,28 @@ impl<R: Runtime> Benchmark for IngestBench<R> {
 
         unsafe {
             match self.format {
-                IngestFormat::F32 => ingest_f32::launch_unchecked::<R>(
+                IngestFormat::F32 => ingest_f32::launch_unchecked(
                     &self.client,
                     CubeCount::new_1d(groups),
                     CubeDim::new_1d(BLOCK_1D),
-                    ArrayArg::from_raw_parts(plane_0, pixels as usize),
-                    ArrayArg::from_raw_parts(plane_1, pixels as usize),
-                    ArrayArg::from_raw_parts(plane_2, pixels as usize),
-                    ArrayArg::from_raw_parts(args.ring.clone(), ring_len),
+                    BufferArg::from_raw_parts(plane_0, pixels as usize),
+                    BufferArg::from_raw_parts(plane_1, pixels as usize),
+                    BufferArg::from_raw_parts(plane_2, pixels as usize),
+                    BufferArg::from_raw_parts(args.ring.clone(), ring_len),
                     0u32,
                     pixels,
                     self.channels,
                     stored_ch,
                     total_threads,
                 ),
-                IngestFormat::U8 | IngestFormat::U16Ten => ingest_words::launch_unchecked::<R>(
+                IngestFormat::U8 | IngestFormat::U16Ten => ingest_words::launch_unchecked(
                     &self.client,
                     CubeCount::new_1d(groups),
                     CubeDim::new_1d(BLOCK_1D),
-                    ArrayArg::from_raw_parts(plane_0, words),
-                    ArrayArg::from_raw_parts(plane_1, words),
-                    ArrayArg::from_raw_parts(plane_2, words),
-                    ArrayArg::from_raw_parts(args.ring.clone(), ring_len),
+                    BufferArg::from_raw_parts(plane_0, words),
+                    BufferArg::from_raw_parts(plane_1, words),
+                    BufferArg::from_raw_parts(plane_2, words),
+                    BufferArg::from_raw_parts(args.ring.clone(), ring_len),
                     max,
                     0u32,
                     pixels,

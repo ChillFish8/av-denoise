@@ -26,7 +26,7 @@ use crate::noise::temporal::{
     temporal_noise_reading,
     temporal_stats_blocks,
 };
-use crate::tune::tests::runtime::{TestRuntime, test_client};
+use crate::tune::tests::runtime::test_client;
 
 const MAX_ULPS: u32 = 2;
 const RESULTS_ROW: [f32; 4] = [0.0; 4];
@@ -117,7 +117,7 @@ fn curve_settings(luma_fields: bool) -> ReadingSettings {
     }
 }
 
-fn luma_shape(client: &ComputeClient<TestRuntime>, width: u32, height: u32) -> NoiseShape {
+fn luma_shape(client: &Client, width: u32, height: u32) -> NoiseShape {
     NoiseShape {
         width,
         height,
@@ -130,12 +130,7 @@ fn luma_shape(client: &ComputeClient<TestRuntime>, width: u32, height: u32) -> N
 }
 
 /// A luma state whose slot 0 holds `records`.
-fn curve_state(
-    client: &ComputeClient<TestRuntime>,
-    frame: &CurveFrame,
-    records: &[f32],
-    luma_fields: bool,
-) -> NoiseState<TestRuntime> {
+fn curve_state(client: &Client, frame: &CurveFrame, records: &[f32], luma_fields: bool) -> NoiseState {
     let shape = luma_shape(client, frame.width, frame.height);
     let settings = curve_settings(luma_fields);
     let partials = hashed_partials(frame.width, frame.height, 7);
@@ -159,11 +154,7 @@ fn host_curve(frame: &CurveFrame, records: &[f32]) -> (Option<TemporalNoiseSampl
 }
 
 /// The GPU reading of `frame` with the curve and how many launches it took.
-fn gpu_curve(
-    client: &ComputeClient<TestRuntime>,
-    frame: &CurveFrame,
-    records: &[f32],
-) -> (ReadingRecord, u32) {
+fn gpu_curve(client: &Client, frame: &CurveFrame, records: &[f32]) -> (ReadingRecord, u32) {
     let state = curve_state(client, frame, records, true);
     let launches = state.queue_reading(0).expect("the reading queues");
     let reading = state.read_reading(0);

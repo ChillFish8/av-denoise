@@ -29,15 +29,15 @@ fn edge_params() -> NlmParams {
     }
 }
 
-fn shifted_denoiser(client: &ComputeClient<R>) -> NlmDenoiser<R> {
+fn shifted_denoiser(client: &Client) -> NlmDenoiser {
     let params = edge_params();
-    let mut denoiser = NlmDenoiser::<R>::new(client, params, SIZE, SIZE);
+    let mut denoiser = NlmDenoiser::new(client, params, SIZE, SIZE);
     denoiser.set_shifted_edges(true);
     denoiser.set_luma_noise_fields(true);
     denoiser
 }
 
-fn push_grain(denoiser: &mut NlmDenoiser<R>, count: u32) {
+fn push_grain(denoiser: &mut NlmDenoiser, count: u32) {
     let base = textured_base(SIZE, SIZE);
     for seed in 0..count {
         let frame = noisy_field_over(&base, SIZE, SIZE, GRAIN, seed);
@@ -134,7 +134,7 @@ fn fill_ring_with_last_frame_makes_a_short_stream_ready() {
 fn nlm_mode_keeps_the_leading_copies() {
     let client = make_client();
     let params = edge_params();
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, SIZE, SIZE);
+    let mut denoiser = NlmDenoiser::new(&client, params, SIZE, SIZE);
 
     push_grain(&mut denoiser, 1);
 
