@@ -6,6 +6,7 @@ use av_denoise_core::tune::{
     EngineKernels,
     Legality,
     PipelineProfile,
+    PriorityTable,
     TuneLedger,
     priority_for,
 };
@@ -38,8 +39,7 @@ pub(crate) struct KernelRequest<'a> {
 /// when one is attached.
 pub(crate) fn engine_kernels(request: &KernelRequest<'_>, device: &DeviceProfile) -> EngineKernels {
     let legality = Legality::for_device(device);
-    let class = DeviceClass::of(&device.identity);
-    let priority = priority_for(class, &device.identity.backend);
+    let priority = device_priority(device);
 
     if request.tuning == TuningMode::Off {
         return EngineKernels {
@@ -66,4 +66,10 @@ pub(crate) fn engine_kernels(request: &KernelRequest<'_>, device: &DeviceProfile
         legality,
         priority,
     }
+}
+
+/// The family and pipeline profile order for `device`.
+pub(crate) fn device_priority(device: &DeviceProfile) -> &'static PriorityTable {
+    let class = DeviceClass::of(&device.identity);
+    priority_for(class, &device.identity.backend)
 }

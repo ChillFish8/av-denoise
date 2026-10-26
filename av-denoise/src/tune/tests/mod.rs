@@ -1,5 +1,6 @@
 mod census;
 mod mode;
+mod profile_order;
 mod setup;
 mod store;
 mod warm_up;

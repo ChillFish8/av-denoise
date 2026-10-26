@@ -25,6 +25,7 @@ use crate::planar::{
     plane_profile_keys,
 };
 use crate::tune::driver::{FrameCycle, alternative_profiles_for, tune_keys};
+use crate::tune::setup::device_priority;
 use crate::tune::{TuneOutcome, TuneRequest, TuneStore, TuningMode, is_tuned, selected_device, tune_planes};
 use crate::{Algorithm, Depth, Device, Nl4dOptions, install_compilation_cache_at};
 
@@ -365,8 +366,8 @@ fn an_nl4d_pass_records_a_ranking_for_every_plane() {
     let device = selected_device(&plane_options.accelerators, &plane_options.device).expect("a device");
     let store = TuneStore::open_default().expect("the cache is installed");
     let stored = store.load(&device.identity);
-    let alternatives = alternative_profiles_for(true, &device);
-    let pooled_blocks = PROFILE_MIN_BLOCKS * alternatives.len();
+    let table = device_priority(&device);
+    let alternatives = alternative_profiles_for(true, &device, table);
     let profile_keys = plane_profile_keys(&plane_options, frame_layout);
 
     for profile_key in &profile_keys {
@@ -377,6 +378,8 @@ fn an_nl4d_pass_records_a_ranking_for_every_plane() {
         let records = &ranking.profiles;
         let baseline = &records[0];
         let compared: Vec<PipelineProfile> = records[1..].iter().map(|record| record.profile).collect();
+        let pooled_blocks = PROFILE_MIN_BLOCKS * compared.len();
+        let reached = &alternatives[..compared.len()];
 
         assert_eq!(
             baseline.profile,
@@ -387,7 +390,8 @@ fn an_nl4d_pass_records_a_ranking_for_every_plane() {
             baseline.blocks as usize, pooled_blocks,
             "{profile_key}: {records:?}"
         );
-        assert_eq!(compared, alternatives, "{profile_key}: {records:?}");
+        assert!(!compared.is_empty(), "{profile_key}: {records:?}");
+        assert_eq!(compared, reached, "{profile_key}: {records:?}");
 
         let fastest = records[1..]
             .iter()
