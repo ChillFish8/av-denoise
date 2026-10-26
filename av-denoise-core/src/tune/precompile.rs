@@ -7,7 +7,7 @@ use cubecl::prelude::*;
 
 use super::consts::BASELINE_INDEX;
 use super::gpu::sync;
-use super::helpers::{compilation_cache_enabled, reload_compilation_cache, reload_marker};
+use super::helpers::compilation_cache_enabled;
 use super::key::SiteKey;
 use super::ledger::TuneLedger;
 use super::site::{SiteCandidate, VariantSite};
@@ -233,9 +233,6 @@ fn replicas<S: VariantSite>(site: &S, helpers: &[Client]) -> Option<Vec<S>> {
     copies
 }
 
-/// A helper compile at least this long built a kernel the on-disk cache did not hold yet.
-const NEW_COMPILE: Duration = Duration::from_millis(500);
-
 /// A load on the site's client at least this long compiled the kernel instead of loading it.
 pub(crate) const SLOW_LOAD: Duration = Duration::from_secs(1);
 
@@ -244,8 +241,7 @@ const HELPER_FAILURE_LIMIT: usize = 2;
 
 /// What a helper did with the candidate at one position.
 enum Outcome {
-    /// It compiled, in this long.
-    Compiled(Duration),
+    Compiled,
     Failed(String),
     Skipped,
 }
@@ -289,8 +285,6 @@ impl<'a> HelperQueue<'a> {
 struct HelperResults {
     compiled: Vec<usize>,
     skipped: Vec<usize>,
-    /// Whether any helper compile built a kernel the cache did not hold.
-    any_new: bool,
     /// Indices the helpers failed or never finished.
     failed: Vec<usize>,
 }
@@ -304,11 +298,10 @@ struct HelperResults {
 /// that panics loses only the candidate it was on. The ceiling can run over by up to one compile on
 /// each helper.
 ///
-/// When a helper built anything new, the site's client rereads the on-disk cache through a marker
-/// named after the site's exact compile identity and the compiled set. Then it loads the baseline,
-/// the compiled candidates and every candidate a helper failed or never finished, one at a time (see
-/// [load_one_by_one] for how the ceiling applies). A load that has to compile is slow but still
-/// correct, and is logged.
+/// The site's client then loads the baseline, the compiled candidates and every candidate a helper
+/// failed or never finished, one at a time (see [load_one_by_one] for how the ceiling applies). A
+/// kernel a helper stored is read from the on-disk cache. A load that has to compile is slow but
+/// still correct, and is logged.
 fn parallel<S: VariantSite>(
     site: &S,
     replicas: Vec<S>,
@@ -328,10 +321,6 @@ fn parallel<S: VariantSite>(
     run_helpers(replicas, allowed, &queue, ceiling);
 
     let results = sort_outcomes(queue, allowed, &helper_indices);
-
-    if results.any_new {
-        reload_for(site, allowed, &results.compiled);
-    }
 
     let on_site: Vec<usize> = indices
         .iter()
@@ -420,7 +409,7 @@ fn compile_on_helper<S: VariantSite>(
         match compiled {
             Ok(()) => {
                 failures_in_a_row = 0;
-                queue.record(position, Outcome::Compiled(took));
+                queue.record(position, Outcome::Compiled);
             },
             Err(reason) => {
                 failures_in_a_row += 1;
@@ -456,10 +445,7 @@ fn sort_outcomes<C: SiteCandidate>(
         let index = helper_indices[position];
 
         match outcome {
-            Outcome::Compiled(took) => {
-                results.compiled.push(index);
-                results.any_new |= took >= NEW_COMPILE;
-            },
+            Outcome::Compiled => results.compiled.push(index),
             Outcome::Failed(reason) => {
                 let candidate = allowed[index];
                 tracing::debug!(
@@ -475,19 +461,6 @@ fn sort_outcomes<C: SiteCandidate>(
     }
 
     results
-}
-
-/// Makes the site's client reread the on-disk cache, with a marker named after the site's exact
-/// compile identity and the candidates the helpers compiled.
-fn reload_for<S: VariantSite>(site: &S, allowed: &[S::Candidate], compiled: &[usize]) {
-    let names: Vec<&str> = compiled.iter().map(|&index| allowed[index].name()).collect();
-    let identity = site.compile_identity();
-    let marker = reload_marker(&identity, &names);
-    let reloaded = reload_compilation_cache(site.client(), marker);
-
-    if let Err(error) = reloaded {
-        tracing::warn!(%error, "cannot reread the compilation cache, so the candidates compile again");
-    }
 }
 
 /// Loads each candidate in `indices` on the site's own client with a sync of its own.

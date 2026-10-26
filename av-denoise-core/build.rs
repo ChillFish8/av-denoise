@@ -11,8 +11,9 @@ const LOCKFILE: &str = "../Cargo.lock";
 /// Stands in for the CubeCL version when the crate builds outside its workspace.
 const UNLOCKED_VERSION: &str = "unlocked";
 
-/// Hashes every source file and the CubeCL version, so the kernel cache is keyed by the exact
-/// kernel sources and compiler a build contains.
+/// Hashes every source file and the CubeCL version.
+///
+/// The hash names the directory a build keeps its compiled kernels and tuning results in.
 ///
 /// The bench hash also covers `benches`, which defines kernels of its own.
 fn main() {

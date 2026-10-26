@@ -98,10 +98,9 @@ pub fn ingest_f32(
 /// Quantises an interleaved f32 frame into word-packed planes.
 ///
 /// Values are clamped to `0.0..=1.0` and rounded to the nearest code up to `max`. Each thread
-/// packs and writes whole words, so no two threads share a word. Lanes past the last pixel read a
-/// clamped index and are masked to zero, because cubecl's optimiser has mishandled a
-/// branch-derived index inside an unrolled loop. A plane is only written when `channels` covers
-/// it, so an unused plane can be a placeholder.
+/// packs and writes whole words, so no two threads share a word. Lanes past the last pixel pack as
+/// zero. A plane is only written when `channels` covers it, so an unused plane can be a
+/// placeholder.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
@@ -131,25 +130,26 @@ pub fn egress_words(
         #[unroll]
         for lane in 0..samples_per_word {
             let pixel = word * samples_per_word + lane;
-            let clamped = u32::min(pixel, pixels - 1);
-            let in_range = pixel < pixels;
-            let base = clamped * stored_ch;
-            let shift = lane * bits;
 
-            let value_0 = f32::clamp(frame[base as usize], 0.0, 1.0);
-            let code_0 = u32::cast_from(value_0 * max + 0.5);
-            packed_0 |= select(in_range, code_0, 0u32) << shift;
+            if pixel < pixels {
+                let base = pixel * stored_ch;
+                let shift = lane * bits;
 
-            if channels > 1 {
-                let value_1 = f32::clamp(frame[(base + 1) as usize], 0.0, 1.0);
-                let code_1 = u32::cast_from(value_1 * max + 0.5);
-                packed_1 |= select(in_range, code_1, 0u32) << shift;
-            }
+                let value_0 = f32::clamp(frame[base as usize], 0.0, 1.0);
+                let code_0 = u32::cast_from(value_0 * max + 0.5);
+                packed_0 |= code_0 << shift;
 
-            if channels > 2 {
-                let value_2 = f32::clamp(frame[(base + 2) as usize], 0.0, 1.0);
-                let code_2 = u32::cast_from(value_2 * max + 0.5);
-                packed_2 |= select(in_range, code_2, 0u32) << shift;
+                if channels > 1 {
+                    let value_1 = f32::clamp(frame[(base + 1) as usize], 0.0, 1.0);
+                    let code_1 = u32::cast_from(value_1 * max + 0.5);
+                    packed_1 |= code_1 << shift;
+                }
+
+                if channels > 2 {
+                    let value_2 = f32::clamp(frame[(base + 2) as usize], 0.0, 1.0);
+                    let code_2 = u32::cast_from(value_2 * max + 0.5);
+                    packed_2 |= code_2 << shift;
+                }
             }
         }
 

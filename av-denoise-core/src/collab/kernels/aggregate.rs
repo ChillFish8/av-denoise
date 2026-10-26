@@ -221,11 +221,6 @@ pub fn scatter_patch<W: Int>(
     let accum_fixed = to_fixed(value * weight, accum_scale);
 
     if comptime!(packed) {
-        // The index is built without a branch, because cubecl's optimiser has mishandled a
-        // branch-derived index here.
-        let rest_channels = comptime!(stored_ch - 1);
-        let rest_channel = u32::max(channel, 1u32) - 1u32;
-        let rest_index = pixel * rest_channels + rest_channel;
         let first_channel = channel == 0u32;
 
         if first_channel {
@@ -240,6 +235,8 @@ pub fn scatter_patch<W: Int>(
         )]
         if comptime!(stored_ch > 1) {
             if !first_channel {
+                let rest_channels = comptime!(stored_ch - 1);
+                let rest_index = pixel * rest_channels + channel - 1u32;
                 Atomic::fetch_add(&accum[rest_index as usize], accum_fixed);
             }
         }

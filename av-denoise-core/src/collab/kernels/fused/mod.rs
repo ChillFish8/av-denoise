@@ -604,21 +604,17 @@ pub(crate) fn filter_group<W: Int>(
     #[comptime] pooled: bool,
     #[comptime] packed: bool,
 ) {
-    // The frame is picked with `select` rather than a branch, because a frame index that reaches
-    // a ring read through a branch has been mishandled by cubecl's optimiser.
     let mut member_slot = Array::<u32>::new(MAX_K as usize);
     #[unroll]
     for m in 0..MAX_K {
         let position = member_pos[m as usize];
         let neighbour_field = unpack_t(position);
-        // Clamped so the read stays in range for a centre-frame member, whose value `select`
-        // discards. This needs `neighbour_slots` to hold at least one entry, even at `radius = 0`.
-        let neighbour = u32::max(neighbour_field, 1u32) - 1u32;
-        member_slot[m as usize] = select(
-            neighbour_field > 0u32,
-            neighbour_slots[neighbour as usize],
-            centre_slot,
-        );
+        let mut slot = centre_slot;
+        if neighbour_field > 0u32 {
+            slot = neighbour_slots[(neighbour_field - 1u32) as usize];
+        }
+
+        member_slot[m as usize] = slot;
     }
 
     // Lane `sub` ends up owning vertical frequency `sub`, so its half of the separable profile is

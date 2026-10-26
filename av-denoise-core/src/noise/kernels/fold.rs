@@ -150,11 +150,7 @@ fn write_offset_tables(
         let centre = comptime!(radius as i32);
         let mut index = UNIT_POS_X;
 
-        loop {
-            if index >= entries {
-                break;
-            }
-
+        while index < entries {
             let column = i32::cast_from(index % side);
             let row = i32::cast_from(index / side);
             let dx = column - centre;
@@ -470,11 +466,7 @@ pub fn noise_fold(
         let mut index = CUBE_POS_X * CUBE_DIM_X + UNIT_POS_X;
 
         if copies {
-            loop {
-                if index >= map_len {
-                    break;
-                }
-
+            while index < map_len {
                 current_map[index as usize] = slot_maps[(source + index) as usize];
                 index += stride;
             }

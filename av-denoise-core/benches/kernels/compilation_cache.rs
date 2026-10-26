@@ -11,8 +11,8 @@ const BENCH_KERNEL_HASH: &str = env!("AV_DENOISE_BENCH_KERNEL_HASH");
 /// Points CubeCL's compilation cache at a directory every run of this build shares.
 ///
 /// A rerun of the same build reuses the kernels an earlier run compiled. The directory is named by a
-/// hash of the crate's sources and benches, so older builds' kernels stay out of it. It panics if
-/// CubeCL has already read its config.
+/// hash of the crate's sources and benches, so each build has its own. It panics if CubeCL has
+/// already read its config.
 pub fn install_bench_compilation_cache() {
     let cache_dir = cache_dir();
     let _ = std::fs::create_dir_all(&cache_dir);

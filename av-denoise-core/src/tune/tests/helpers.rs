@@ -9,7 +9,6 @@ use super::probe::{ProbeCandidate, ProbeSite};
 use super::runtime::test_client;
 use crate::nlmeans::ChannelMode;
 use crate::tune::gpu::sync;
-use crate::tune::helpers::reload_marker;
 use crate::tune::precompile::precompile;
 use crate::tune::{CompileHelpers, HelperFactory, SiteCandidate, TuneLedger, VariantSite};
 
@@ -188,41 +187,17 @@ fn with_the_compilation_cache_off_helpers_are_not_used() {
 }
 
 #[test]
-fn the_reload_marker_depends_on_the_identity_and_the_set_but_not_its_order() {
-    let client = test_client();
-    let site = ProbeSite::new(&client);
-    let mut wider = ProbeSite::new(&client);
-    wider.width = 128;
-    let identity = site.compile_identity();
-    let other_identity = wider.compile_identity();
-
-    let forward = reload_marker(&identity, &["medium", "wide"]);
-    let backward = reload_marker(&identity, &["wide", "medium"]);
-    let fewer = reload_marker(&identity, &["medium"]);
-    let elsewhere = reload_marker(&other_identity, &["medium", "wide"]);
-
-    assert_eq!(forward, backward);
-    assert_ne!(forward, fewer);
-    assert_ne!(forward, elsewhere);
-}
-
-#[test]
 fn collab_sizes_that_share_a_key_bucket_have_different_compile_identities() {
     let client = test_client();
     let narrow_spec = CollabSpec::new(61, 37, ChannelMode::Luma, 1);
     let wide_spec = CollabSpec::new(62, 37, ChannelMode::Luma, 1);
     let narrow = collab_site(&client, &narrow_spec);
     let wide = collab_site(&client, &wide_spec);
-    let names = ["groups8_clipped_nslide"];
     let narrow_identity = narrow.compile_identity();
     let wide_identity = wide.compile_identity();
 
-    let narrow_marker = reload_marker(&narrow_identity, &names);
-    let wide_marker = reload_marker(&wide_identity, &names);
-
     assert_eq!(narrow.key(), wide.key());
     assert_ne!(narrow_identity, wide_identity);
-    assert_ne!(narrow_marker, wide_marker);
 
     // ROCm can crash at exit after uploads that were never launched, and a sync avoids it.
     sync(&client).expect("the uploads finish");
@@ -294,7 +269,8 @@ super::runtime::wgpu_only! {
         let cold = 4;
         let outputs = site.scratch_outputs();
 
-        // The census compiles the baseline before any batch, so the site client stores nothing new.
+        // The census compiles the baseline before any batch, so the batch's load time covers only
+        // cache loads.
         site.launch(allowed[0], &outputs);
         sync(client).expect("the baseline compiles");
 
@@ -337,7 +313,7 @@ super::runtime::wgpu_only! {
     }
 
     #[test]
-    fn two_exact_sizes_in_one_key_bucket_each_reload_the_cache() {
+    fn two_exact_sizes_in_one_key_bucket_each_load_from_the_cache() {
         let (client, cache_dir) = private_cache_client();
         let helpers = two_helpers();
 

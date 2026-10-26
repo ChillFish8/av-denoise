@@ -11,8 +11,8 @@ const CACHE_DIR_NAME: &str = "test-kernel-cache";
 /// Points CubeCL's compilation cache at a directory every test process of this build shares.
 ///
 /// Each test runs in its own process, so without it every process recompiles every kernel it
-/// launches. The directory is named by [KERNEL_HASH](crate::KERNEL_HASH), so older builds' kernels
-/// stay out of it. It runs once per process, before the first client is made.
+/// launches. The directory is named by [KERNEL_HASH](crate::KERNEL_HASH), so each build has its
+/// own. It runs once per process, before the first client is made.
 pub(crate) fn install_test_compilation_cache() {
     static INSTALL: Once = Once::new();
     INSTALL.call_once(install);

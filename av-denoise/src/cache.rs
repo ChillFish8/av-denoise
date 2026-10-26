@@ -45,10 +45,11 @@ static CACHE_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 const CACHE_DIR_NAME: &str = "av-denoise";
 
-/// A hash of the kernel sources that names this build's subdirectory of the cache root.
+/// A hash of the kernel sources and the CubeCL version that names this build's subdirectory of the
+/// cache root.
 ///
-/// Each build of the kernels gets a directory of its own, so an install can remove the kernels of
-/// builds that have gone unused.
+/// Each build gets a directory of its own for its compiled kernels and tuning results, so an install
+/// can remove the directories of builds that have gone unused.
 pub(crate) const KERNEL_HASH: &str = av_denoise_core::KERNEL_HASH;
 
 /// How long another build's subdirectory can go unused before an install removes it.

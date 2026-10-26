@@ -56,5 +56,6 @@ pub use self::options::Preset;
 #[cfg(all(feature = "metal", not(target_vendor = "apple")))]
 compile_error!("the `metal` feature needs an Apple target, such as `aarch64-apple-darwin`");
 
-/// A hash of this crate's sources, which names a build's directory in the compiled kernel cache.
+/// A hash of this crate's sources and the CubeCL version, which names a build's directory for its
+/// compiled kernels and tuning results.
 pub const KERNEL_HASH: &str = env!("AV_DENOISE_KERNEL_HASH");

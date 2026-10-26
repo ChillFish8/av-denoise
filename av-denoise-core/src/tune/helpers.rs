@@ -8,7 +8,6 @@ use cubecl::prelude::*;
 
 #[cfg(feature = "vulkan")]
 pub use self::vulkan_helpers::vulkan_compile_helpers;
-use super::gpu::{bind, sync};
 
 /// Makes, or finds, the compile helpers the first time a batch asks for them.
 pub type HelperFactory = Box<dyn FnOnce() -> Option<Arc<CompileHelpers>> + Send>;
@@ -127,55 +126,6 @@ impl fmt::Debug for HelperSource {
 pub fn compilation_cache_enabled() -> bool {
     let config = CubeClRuntimeConfig::get();
     config.compilation.cache
-}
-
-#[cube(launch)]
-fn cache_reload_marker(output: &mut [u32], #[comptime] high: u32, #[comptime] low: u32) {
-    if ABSOLUTE_POS == 0 {
-        output[0] = high ^ low;
-    }
-}
-
-/// The marker for one set of compiled candidates of one exact compile identity.
-///
-/// The names are sorted, so the same set always gives the same marker.
-pub(crate) fn reload_marker(identity: &str, names: &[&str]) -> u64 {
-    let mut sorted = names.to_vec();
-    sorted.sort_unstable();
-
-    let joined = sorted.join("|");
-    let text = format!("{identity}#{joined}");
-
-    fnv1a(text.as_bytes())
-}
-
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hash = 0xCBF2_9CE4_8422_2325u64;
-
-    for &byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0100_0000_01B3);
-    }
-
-    hash
-}
-
-/// Makes `client` see every kernel other clients have stored in the on-disk cache since it last
-/// read the cache's table of contents.
-///
-/// A client rereads the table only when it stores a kernel of its own, so this compiles a tiny
-/// kernel named by `marker`. A marker the cache already holds stores nothing, and then every
-/// kernel stored before that marker is visible anyway.
-pub(crate) fn reload_compilation_cache(client: &Client, marker: u64) -> Result<(), anyhow::Error> {
-    let high = (marker >> 32) as u32;
-    let low = marker as u32;
-    let output = client.empty(size_of::<u32>());
-    let output_arg = bind(&output, 1);
-    let cube_count = CubeCount::Static(1, 1, 1);
-    let cube_dim = CubeDim::new_1d(1);
-
-    cache_reload_marker::launch(client, cube_count, cube_dim, output_arg, high, low);
-    sync(client)
 }
 
 #[cfg(feature = "vulkan")]

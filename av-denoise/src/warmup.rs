@@ -1,10 +1,9 @@
 //! Lets one process fill a cold kernel cache while the others wait
 //!
 //! CubeCL compiles a kernel the first time it is dispatched and writes it to the cache that
-//! [install_compilation_cache](crate::install_compilation_cache) points it at. The cache's table of
-//! contents is a snapshot taken when the GPU client is built, so a process that starts while another
-//! is still compiling shares nothing with it, pays the full compilation cost again and writes its
-//! own copy of the same kernels.
+//! [install_compilation_cache](crate::install_compilation_cache) points it at. A process that starts
+//! while another is still compiling misses every kernel the other has not stored yet, so it pays
+//! most of the compilation cost again and writes its own copy of the same kernels.
 //!
 //! [WarmUp] holds a lock file next to the cache while the first process compiles, and the rest
 //! block on it, so each waiting process builds its own client after the wait, when the cache
