@@ -1,2 +1,2 @@
-#[cfg(any(feature = "vulkan", feature = "rocm"))]
+#[cfg(any(feature = "vulkan", feature = "rocm", feature = "metal"))]
 mod resolve;

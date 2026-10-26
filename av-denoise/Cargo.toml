@@ -77,7 +77,7 @@ pkg-config = { version = "0.3.34", optional = true }
 
 [features]
 vulkan = ["av-denoise-core/vulkan", "cubecl/vulkan", "dep:wgpu"]
-metal = ["av-denoise-core/metal", "cubecl/metal", "dep:wgpu"]
+metal = ["av-denoise-core/metal", "cubecl/metal-native"]
 cuda = ["av-denoise-core/cuda", "cubecl/cuda", "dep:cudarc"]
 rocm = ["av-denoise-core/rocm", "cubecl/hip", "dep:cubecl-hip-sys"]
 binary = [

@@ -9,8 +9,7 @@ use std::str::FromStr;
 /// because most backends expose more than one device. Each variant maps onto the concrete `Device`
 /// type of whichever cubecl runtime was selected.
 ///
-/// `Integrated`, `Virtual` and `Cpu` are wgpu-only. A runtime that cannot honour the variant is
-/// treated as unavailable.
+/// `Integrated`, `Virtual` and `Cpu` are Vulkan-only.
 ///
 /// ```
 /// use av_denoise::Device;
@@ -32,10 +31,11 @@ pub enum Device {
     /// Discrete GPU at ordinal `index`.
     ///
     /// Maps to `CudaDevice { index }`, `AmdDevice { index }`, or `WgpuDeviceKind::DiscreteGpu(index)`.
+    /// On Metal the index counts the discrete GPUs first and the integrated ones after.
     Discrete { index: usize },
-    /// Integrated GPU at ordinal `index`. wgpu-only.
+    /// Integrated GPU at ordinal `index`. Vulkan-only.
     Integrated { index: usize },
-    /// Virtual GPU at ordinal `index`. wgpu-only.
+    /// Virtual GPU at ordinal `index`. Vulkan-only.
     Virtual { index: usize },
     /// The software device, which picks the lavapipe or software adapter on wgpu.
     Cpu,

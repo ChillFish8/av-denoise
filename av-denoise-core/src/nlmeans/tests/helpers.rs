@@ -3,6 +3,7 @@ use cubecl::server::Handle;
 
 pub(super) use crate::engine::align::StorageAlign;
 use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
+#[cfg(feature = "vulkan")]
 use crate::nlmeans::{
     ChannelMode,
     DenoisingMode,
@@ -182,6 +183,7 @@ pub(super) fn make_gradient_frame(width: u32, height: u32, low: f32, high: f32) 
 }
 
 /// Builds a Luma [NlmDenoiser] at the given temporal radius with default options.
+#[cfg(feature = "vulkan")]
 pub(super) fn test_denoiser(radius: u32, width: u32, height: u32) -> NlmDenoiser {
     let options = NlmeansOptions {
         mode: DenoisingMode::Temporal { radius },
@@ -197,6 +199,7 @@ pub(super) fn test_denoiser(radius: u32, width: u32, height: u32) -> NlmDenoiser
 /// A frame that ramps from `0.2` to `0.8` and shifts a little with `frame_index`.
 ///
 /// Each `frame_index` gives distinct content.
+#[cfg(feature = "vulkan")]
 pub(super) fn ramp_frame(width: u32, height: u32, frame_index: usize) -> Vec<f32> {
     let mut frame = vec![0.0f32; (width * height) as usize];
     for y in 0..height {

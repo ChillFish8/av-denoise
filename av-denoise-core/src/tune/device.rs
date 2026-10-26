@@ -13,7 +13,7 @@ pub struct DeviceIdentity {
     pub adapter: String,
     pub vendor_id: u32,
     pub device_id: u32,
-    /// The driver name and version, as the backend reports them.
+    /// The driver name and version, as the backend reports them, or the macOS version on Metal.
     pub driver: String,
     pub os: String,
     /// The CUDA compute capability as `major * 10 + minor`, when the backend reports one.

@@ -143,8 +143,11 @@ fn run_on_best<T: OnClient>(
     placement: &DevicePlacement,
     task: T,
 ) -> Result<T::Output, DenoiserError> {
-    let accelerator = sniff_best_accelerator(accelerators, device);
-    let accelerator = accelerator.ok_or(DenoiserError::NoAcceleratorAvailable)?;
+    let Some(accelerator) = sniff_best_accelerator(accelerators, device) else {
+        let error = unavailable_error(accelerators, device);
+        return Err(error);
+    };
+
     let requested = device.clone();
     let selected = resolve(accelerator, requested).map_err(anyhow::Error::from)?;
 
@@ -158,6 +161,27 @@ fn run_on_best<T: OnClient>(
     }
 
     task.run(client, accelerator, identity)
+}
+
+/// Why no accelerator in `accelerators` runs on `device`.
+///
+/// When every one of them rejects the device itself, the first rejection names the forms it takes.
+fn unavailable_error(accelerators: &[Accelerator], device: &Device) -> DenoiserError {
+    let mut rejection = None;
+    for accelerator in accelerators {
+        let requested = device.clone();
+        match resolve(*accelerator, requested) {
+            Ok(_) => return DenoiserError::NoAcceleratorAvailable,
+            Err(error) => {
+                rejection.get_or_insert(error);
+            },
+        }
+    }
+
+    match rejection {
+        Some(error) => DenoiserError::Other(error.into()),
+        None => DenoiserError::NoAcceleratorAvailable,
+    }
 }
 
 /// Builds `spec` on the first accelerator in `accelerators` that works.

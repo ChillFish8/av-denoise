@@ -1,4 +1,6 @@
+#[cfg(any(feature = "vulkan", feature = "cuda", feature = "rocm"))]
 use std::collections::HashMap;
+#[cfg(any(feature = "vulkan", feature = "cuda", feature = "rocm"))]
 use std::sync::{LazyLock, Mutex, PoisonError};
 
 #[cfg(feature = "rocm")]
@@ -12,6 +14,7 @@ use cubecl::hash::StableHasher;
 use cubecl::prelude::*;
 
 /// Identities already worked out in this process, keyed by backend and device selector.
+#[cfg(any(feature = "vulkan", feature = "cuda", feature = "rocm"))]
 static IDENTITIES: LazyLock<Mutex<HashMap<String, DeviceIdentity>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -27,7 +30,7 @@ pub(crate) fn describe(selected: &cubecl::Device, client: &Client) -> DeviceIden
             describe_wgpu(wgpu_device, wgpu::Backend::Vulkan, client)
         },
         #[cfg(feature = "metal")]
-        cubecl::Device::Wgpu(wgpu_device) => describe_wgpu(wgpu_device, wgpu::Backend::Metal, client),
+        cubecl::Device::Metal(_) => describe_metal(client),
         other => {
             let runtime = format!("{:?}", other.runtime());
             let backend = runtime.to_ascii_lowercase();
@@ -37,6 +40,7 @@ pub(crate) fn describe(selected: &cubecl::Device, client: &Client) -> DeviceIden
 }
 
 /// Returns the identity cached under `memo_key`, working it out with `describe` the first time.
+#[cfg(any(feature = "vulkan", feature = "cuda", feature = "rocm"))]
 fn remembered_identity(memo_key: String, describe: impl FnOnce() -> DeviceIdentity) -> DeviceIdentity {
     {
         let identities = IDENTITIES.lock().unwrap_or_else(PoisonError::into_inner);
@@ -71,7 +75,7 @@ fn fallback_identity(backend: &str, client: &Client) -> DeviceIdentity {
     }
 }
 
-#[cfg(any(feature = "vulkan", feature = "metal"))]
+#[cfg(feature = "vulkan")]
 mod wgpu_identity {
     use cubecl::wgpu::{WgpuDevice, WgpuDeviceKind};
 
@@ -242,10 +246,49 @@ mod wgpu_identity {
     }
 }
 
-#[cfg(any(feature = "vulkan", feature = "metal"))]
+#[cfg(feature = "vulkan")]
 use self::wgpu_identity::describe_wgpu;
 #[cfg(feature = "vulkan")]
 pub(crate) use self::wgpu_identity::find_adapter;
+
+/// The file macOS keeps its own version in.
+#[cfg(feature = "metal")]
+const SYSTEM_VERSION_PLIST: &str = "/System/Library/CoreServices/SystemVersion.plist";
+
+/// The identity of the Metal GPU `client` runs on.
+#[cfg(feature = "metal")]
+fn describe_metal(client: &Client) -> DeviceIdentity {
+    let properties = client.properties();
+    let name = &properties.identity.name;
+    let plist = std::fs::read_to_string(SYSTEM_VERSION_PLIST).unwrap_or_default();
+    let os_version = product_version(&plist).unwrap_or_default();
+    metal_identity(name, &os_version)
+}
+
+/// The identity of a Metal GPU from its name and the macOS version.
+///
+/// The Metal shader compiler ships with macOS, so the OS version takes the driver's place.
+#[cfg(feature = "metal")]
+fn metal_identity(name: &str, os_version: &str) -> DeviceIdentity {
+    DeviceIdentity {
+        backend: "metal".to_string(),
+        adapter: name.to_string(),
+        vendor_id: 0,
+        device_id: 0,
+        driver: os_version.to_string(),
+        os: std::env::consts::OS.to_string(),
+        compute_capability: None,
+    }
+}
+
+/// The `ProductVersion` string in the text of a `SystemVersion.plist`, such as `15.1`.
+#[cfg(feature = "metal")]
+fn product_version(plist: &str) -> Option<String> {
+    let (_, after_key) = plist.split_once("<key>ProductVersion</key>")?;
+    let (_, after_open) = after_key.split_once("<string>")?;
+    let (version, _) = after_open.split_once("</string>")?;
+    Some(version.trim().to_string())
+}
 
 /// The identity of CUDA device `index`, from the driver.
 #[cfg(feature = "cuda")]
@@ -407,5 +450,34 @@ mod tests {
 
         assert_eq!(first, second);
         assert!(first.adapter.starts_with("unknown-"));
+    }
+}
+
+#[cfg(all(test, feature = "metal"))]
+mod metal_tests {
+    use super::*;
+
+    #[test]
+    fn metal_identity_keys_on_the_name_and_os_version() {
+        let first = metal_identity("Apple M2 Max", "15.1");
+        let same = metal_identity("Apple M2 Max", "15.1");
+        let upgraded = metal_identity("Apple M2 Max", "15.2");
+
+        assert_eq!(first.backend, "metal");
+        assert_eq!(first.adapter, "Apple M2 Max");
+        assert_eq!(first.identity_hash(), same.identity_hash());
+        assert_ne!(first.identity_hash(), upgraded.identity_hash());
+    }
+
+    #[test]
+    fn product_version_reads_the_system_version_plist() {
+        let plist = "<dict>\n\t<key>ProductName</key>\n\t<string>macOS</string>\n\t\
+                     <key>ProductVersion</key>\n\t<string>15.1</string>\n</dict>";
+
+        let version = product_version(plist);
+        let missing = product_version("<dict></dict>");
+
+        assert_eq!(version.as_deref(), Some("15.1"));
+        assert_eq!(missing, None);
     }
 }

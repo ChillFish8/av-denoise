@@ -40,7 +40,7 @@ y4m = "0.8"
 
 [features]
 vulkan = ["cubecl/vulkan", "dep:wgpu"]
-metal = ["cubecl/metal"]
+metal = ["cubecl/metal-native"]
 cuda = ["cubecl/cuda"]
 rocm = ["cubecl/hip"]
 default = ["vulkan"]

@@ -5,6 +5,8 @@ use cubecl::device::{DeviceId, RuntimeId};
 use super::accelerate::Accelerator;
 use super::device::Device;
 use super::probe::open_client;
+#[cfg(feature = "metal")]
+use super::resolve::MetalGpus;
 use super::resolve::resolve;
 
 /// What one backend reports about this machine.
@@ -54,6 +56,23 @@ fn query_runtime(accelerator: Accelerator, device: cubecl::Device) -> BackendDev
         return unavailable(accelerator);
     }
 
+    let devices = listed_devices(&device);
+
+    BackendDevices {
+        accelerator,
+        available: true,
+        devices,
+    }
+}
+
+/// The selector of every device on the runtime of `device`.
+fn listed_devices(device: &cubecl::Device) -> Vec<Device> {
+    #[cfg(feature = "metal")]
+    if let cubecl::Device::Metal(_) = device {
+        let gpus = MetalGpus::count();
+        return gpus.selectors();
+    }
+
     // Type ids 0 to 3 are the device kinds `Device` can name, and anything else is hardware this tool
     // cannot select. ROCm and CUDA report their whole device list for every type id, so a device that
     // comes back on several passes is kept only once.
@@ -74,11 +93,7 @@ fn query_runtime(accelerator: Accelerator, device: cubecl::Device) -> BackendDev
         }
     }
 
-    BackendDevices {
-        accelerator,
-        available: true,
-        devices,
-    }
+    devices
 }
 
 /// Maps a cubecl device id onto the selector that names it.

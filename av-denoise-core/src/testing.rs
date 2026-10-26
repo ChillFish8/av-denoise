@@ -60,9 +60,9 @@ pub fn test_accelerator() -> &'static str {
 pub fn device_on(accelerator: &str, selector: Device) -> cubecl::Device {
     match accelerator {
         #[cfg(feature = "vulkan")]
-        "vulkan" => wgpu_device(selector, cubecl::wgpu::WgpuBackend::Vulkan),
+        "vulkan" => vulkan_device(selector),
         #[cfg(feature = "metal")]
-        "metal" => wgpu_device(selector, cubecl::wgpu::WgpuBackend::Metal),
+        "metal" => metal_device(selector),
         #[cfg(feature = "cuda")]
         "cuda" => {
             let index = gpu_index(selector, accelerator);
@@ -89,9 +89,9 @@ fn gpu_index(selector: Device, accelerator: &str) -> usize {
     }
 }
 
-#[cfg(any(feature = "vulkan", feature = "metal"))]
-fn wgpu_device(selector: Device, backend: cubecl::wgpu::WgpuBackend) -> cubecl::Device {
-    use cubecl::wgpu::{WgpuDevice, WgpuDeviceKind};
+#[cfg(feature = "vulkan")]
+fn vulkan_device(selector: Device) -> cubecl::Device {
+    use cubecl::wgpu::{WgpuBackend, WgpuDevice, WgpuDeviceKind};
 
     let kind = match selector {
         Device::Default => WgpuDeviceKind::DefaultDevice,
@@ -101,8 +101,48 @@ fn wgpu_device(selector: Device, backend: cubecl::wgpu::WgpuBackend) -> cubecl::
         Device::Cpu => WgpuDeviceKind::Cpu,
     };
     let any_backend = WgpuDevice::new(kind);
-    let wgpu_device = any_backend.on(backend);
+    let wgpu_device = any_backend.on(WgpuBackend::Vulkan);
     cubecl::Device::from(wgpu_device)
+}
+
+/// The native Metal device a selector names.
+///
+/// An index counts the discrete GPUs first and the integrated ones after, so `discrete:0` is the
+/// first GPU on every Mac.
+#[cfg(feature = "metal")]
+fn metal_device(selector: Device) -> cubecl::Device {
+    use cubecl::device::MetalDevice;
+
+    let kind = match selector {
+        Device::Default => MetalDevice::DefaultDevice,
+        Device::Discrete(index) => {
+            let discrete_count = metal_gpu_count(MetalDevice::DiscreteGpu(0));
+            let integrated_count = metal_gpu_count(MetalDevice::IntegratedGpu(0));
+            let gpu_count = discrete_count + integrated_count;
+            assert!(
+                index < gpu_count,
+                "discrete:{index} is past the last Metal GPU, this machine has {gpu_count}"
+            );
+
+            if index < discrete_count {
+                MetalDevice::DiscreteGpu(index)
+            } else {
+                MetalDevice::IntegratedGpu(index - discrete_count)
+            }
+        },
+        other => panic!("{other:?} is not supported on metal, expected `default` or `discrete[:N]`"),
+    };
+
+    cubecl::Device::from(kind)
+}
+
+/// How many Metal GPUs share the kind of `first`.
+#[cfg(feature = "metal")]
+fn metal_gpu_count(first: cubecl::device::MetalDevice) -> usize {
+    let device = cubecl::Device::from(first);
+    let device_id = device.to_id();
+    let listed = cubecl::Device::enumerate(device_id);
+    listed.len()
 }
 
 fn compiled_accelerators() -> Vec<&'static str> {

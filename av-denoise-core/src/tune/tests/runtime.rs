@@ -7,10 +7,7 @@ use crate::tune::{DeviceLimits, Legality};
 macro_rules! wgpu_only {
     ($($item:item)*) => {
         $(
-            #[cfg(all(
-                any(feature = "vulkan", feature = "metal"),
-                not(any(feature = "cuda", feature = "rocm"))
-            ))]
+            #[cfg(all(feature = "vulkan", not(any(feature = "cuda", feature = "rocm"))))]
             $item
         )*
     };
