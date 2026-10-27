@@ -112,6 +112,16 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
+      # turso's build script compiles a Windows version resource with `rc.exe`.
+      # `llvm-rc` takes the same arguments, so it stands in on the Linux host.
+      - name: Provide rc.exe
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm
+          mkdir -p "$RUNNER_TEMP/rc-bin"
+          ln -s "$(command -v llvm-rc)" "$RUNNER_TEMP/rc-bin/rc.exe"
+          echo "$RUNNER_TEMP/rc-bin" >> "$GITHUB_PATH"
+
       # The VS plugin has a `#[cfg(windows)]` block that the Linux clippy job
       # never compiles. `cargo check` needs no linker, so this catches a broken
       # signature or flag before a release build does.
