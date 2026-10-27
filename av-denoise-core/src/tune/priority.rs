@@ -402,44 +402,47 @@ const NVIDIA_PRE_VOLTA: PriorityTable = PriorityTable {
     ],
 };
 
-/// Apple GPUs.
+/// Apple GPUs, from Apple M6 timings on Metal.
 const APPLE: PriorityTable = PriorityTable {
     sites: &[
-        // No timings, expected order
+        // Representatives against the fastest candidate on luma: centre_tiled +2.9%,
+        // neighbour_sliding +8.1%, groups4 +10.8%, groups16 +11.4%, batched_on +25.8%,
+        // centre_sliding +27.0%, walk_uniform +84.3%
         SitePriority {
             site: COLLAB_FUSED,
-            basis: Basis::Expected,
+            basis: Basis::Measured,
             order: &[
                 BASELINE_FAMILY,
-                FamilyId("groups4"),
                 FamilyId("centre_tiled"),
-                FamilyId("batched_on"),
-                FamilyId("walk_uniform"),
-                FamilyId("groups16"),
-                FamilyId("centre_sliding"),
                 FamilyId("neighbour_sliding"),
+                FamilyId("groups4"),
+                FamilyId("groups16"),
+                FamilyId("batched_on"),
+                FamilyId("centre_sliding"),
+                FamilyId("walk_uniform"),
             ],
             skip: &[],
         },
-        // No timings, expected order
+        // Representatives against the fastest candidate on luma: centre_tiled +1.4%,
+        // neighbour_sliding +8.9%, centre_sliding +31.5%, batched_on +31.8%, walk_uniform +95.6%
         SitePriority {
             site: COLLAB_SEARCH,
-            basis: Basis::Expected,
+            basis: Basis::Measured,
             order: &[
                 BASELINE_FAMILY,
                 FamilyId("centre_tiled"),
+                FamilyId("neighbour_sliding"),
+                FamilyId("centre_sliding"),
                 FamilyId("batched_on"),
                 FamilyId("walk_uniform"),
-                FamilyId("centre_sliding"),
-                FamilyId("neighbour_sliding"),
             ],
             skip: &[],
         },
-        // No timings, expected order
+        // groups8 0%, groups16 +0.5%, groups4 +4.0% on luma
         SitePriority {
             site: COLLAB_FILTER,
-            basis: Basis::Expected,
-            order: &[FamilyId("groups4"), FamilyId("groups8"), FamilyId("groups16")],
+            basis: Basis::Measured,
+            order: &[FamilyId("groups8"), FamilyId("groups16"), FamilyId("groups4")],
             skip: &[],
         },
         // No timings, expected order
@@ -456,10 +459,10 @@ const APPLE: PriorityTable = PriorityTable {
             order: &[FamilyId("thin32x8"), FamilyId("thin32x16")],
             skip: &[],
         },
-        // No timings, expected order
+        // coop -43..-34%, serial 0%
         SitePriority {
             site: NL4D_MV_REGULARISE,
-            basis: Basis::Expected,
+            basis: Basis::Measured,
             order: &[FamilyId("coop"), FamilyId("serial")],
             skip: &[],
         },
